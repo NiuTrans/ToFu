@@ -342,6 +342,104 @@ def test_native_ask_human_not_reshaped():
 
 
 # ═════════════════════════════════════════════════════
+#  Schema-guided object-array salvage (last-resort rung)
+# ═════════════════════════════════════════════════════
+#
+# Fires ONLY after repair_json (trailing-comma/balance/delimiter/bracket-match)
+# has failed to parse a stringified array. Anchors on the schema's declared
+# item keys+types instead of the broken punctuation. Gated OFF for the
+# free-text destructive editors (apply_diffs / insert_contents).
+
+
+def test_salvage_recovers_when_repair_json_gives_up():
+    """Unescaped inner quote makes repair_json bail; keys are quoted so the
+    schema-guided salvage reconstructs both records by anchoring on
+    path/start_line."""
+    from lib.utils import repair_json
+    payload = '[{"path": "a"b.py", "start_line": 10}, {"path": "c.py", "start_line": 99}]'
+    # Precondition: repair_json genuinely cannot parse it.
+    try:
+        repair_json(payload)
+        raise AssertionError('repair_json unexpectedly parsed the ambiguous payload')
+    except Exception:
+        pass
+    out, log = validate_then_repair('read_files', {'reads': payload})
+    assert log == [('reads', 'schema_array_salvage')], log
+    assert out['reads'][-1] == {'path': 'c.py', 'start_line': 99}
+    assert out['reads'][0]['start_line'] == 10
+
+
+def test_salvage_embedded_delimiter_in_value_not_missplit():
+    """A value containing ':' / ',' must not be mis-split into a new record.
+    Force the salvage path by making repair_json fail (stray inner quote)."""
+    from lib.tool_input_repair import _salvage_object_array, _array_item_schema
+    types, req = _array_item_schema('fetch_url', 'urls')
+    got = _salvage_object_array('"url": "https://x.com/a?b=1,c=2:d"', types, req)
+    assert got == [{'url': 'https://x.com/a?b=1,c=2:d'}]
+
+
+def test_salvage_gated_off_for_apply_diffs():
+    """Destructive free-text editor: salvage must REFUSE (search/replace can
+    contain arbitrary quotes/braces → mis-split would corrupt a code edit).
+    The malformed string is left untouched for an honest model retry."""
+    from lib.tool_input_repair import _try_schema_array_salvage
+    from lib.utils import repair_json
+    # Unescaped inner quote → repair_json genuinely CANNOT parse it, so the
+    # only thing that could recover it is salvage — which must refuse here.
+    bad = '[{"path": "a"x.py", "search": "foo", "replace": "bar"}]'
+    try:
+        repair_json(bad)
+        raise AssertionError('repair_json unexpectedly parsed the payload')
+    except AssertionError:
+        raise
+    except Exception:
+        pass
+    assert _try_schema_array_salvage('apply_diffs', 'edits', bad) is None
+    out, log = validate_then_repair('apply_diffs', {'edits': bad})
+    assert out == {'edits': bad}
+    assert log == []
+
+
+def test_salvage_gated_off_for_insert_contents():
+    from lib.tool_input_repair import _try_schema_array_salvage
+    bad = '[{"path": "a.py", "anchor": "x", "content": "line1\\nline2", "description": "d"'
+    assert _try_schema_array_salvage('insert_contents', 'edits', bad) is None
+
+
+def test_salvage_requires_all_required_item_keys():
+    """A record missing a required item key (path) is dropped — an untrusted
+    split must not manufacture a pathless read."""
+    from lib.tool_input_repair import _salvage_object_array, _array_item_schema
+    types, req = _array_item_schema('read_files', 'reads')
+    # Only start_line present, no path → dropped → whole salvage returns None.
+    assert _salvage_object_array('"start_line": 5', types, req) is None
+
+
+def test_salvage_not_triggered_when_repair_json_succeeds():
+    """The rung is last-resort: a recoverable stringified array is handled by
+    stringified_json, NOT schema_array_salvage."""
+    out, log = validate_then_repair(
+        'read_files',
+        {'reads': '[{"path": "a.py", "start_line": 1, "end_line": 10}, {"path": "b.py"}'},
+    )
+    assert log == [('reads', 'stringified_json')]
+
+
+def test_salvage_no_keys_leaves_string_untouched():
+    """No quoted key tokens at all → salvage returns None (nothing to anchor)."""
+    from lib.tool_input_repair import _try_schema_array_salvage
+    assert _try_schema_array_salvage('read_files', 'reads', 'garbage no keys here') is None
+
+
+def test_salvage_valid_input_never_reaches_rung():
+    """A well-formed list is a no-op — salvage only runs on a leftover string."""
+    args = {'reads': [{'path': 'a.py', 'start_line': 1}]}
+    out, log = validate_then_repair('read_files', args)
+    assert log == []
+    assert out == args
+
+
+# ═════════════════════════════════════════════════════
 #  Tool-NAME repair (resolve_tool_name)
 # ═════════════════════════════════════════════════════
 

@@ -23,6 +23,7 @@ import os
 from flask import Blueprint, jsonify, request
 from quart import websocket
 
+from lib.api_response import api_error
 from lib.log import get_logger
 from lib.push import PushClient, hub
 
@@ -50,13 +51,13 @@ def debug_presence():
     departs everything.
     """
     if os.environ.get('TOFU_PRESENCE_DEBUG') not in ('1', 'true', 'yes'):
-        return jsonify({'ok': False, 'error': 'presence debug disabled '
-                        '(set TOFU_PRESENCE_DEBUG=1 to enable)'}), 403
+        return api_error('presence debug disabled '
+                        '(set TOFU_PRESENCE_DEBUG=1 to enable)', status=403)
     body = request.get_json(silent=True) or {}
     root = (body.get('root') or '').strip()
     action = (body.get('action') or 'scenario').strip()
     if not root:
-        return jsonify({'ok': False, 'error': 'root is required'}), 400
+        return api_error('root is required', status=400)
     from lib import presence
     if action == 'clear':
         presence.depart(root, 'dbg-peer-1')

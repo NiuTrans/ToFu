@@ -159,6 +159,10 @@ def test_build_bundle_minifies_and_parses(tmp_path, monkeypatch):
     _reset_state(monkeypatch, js_dir, files)
     monkeypatch.setattr(js_bundler, '_CRITICAL_FILES',
                         frozenset({'i18n.js', 'core.js', 'api.js', 'push.js', 'main.js'}))
+    # This test pins the dependency-free _minify_js output (boundary headers,
+    # per-file separators). Force the optional esbuild enhancer off so the
+    # assertions below hold regardless of whether esbuild is on PATH.
+    monkeypatch.setattr(js_bundler, '_resolve_esbuild', lambda: None)
 
     name = js_bundler.build_bundle()
     assert name and name.startswith('bundle-')
@@ -203,6 +207,9 @@ def test_build_bundle_fails_open_when_minifier_raises(tmp_path, monkeypatch):
         return real_min(src)
 
     monkeypatch.setattr(js_bundler, '_minify_js', _boom)
+    # Isolate the _minify_js fail-open path — esbuild would otherwise strip the
+    # comment this test asserts is kept via the raw fallback.
+    monkeypatch.setattr(js_bundler, '_resolve_esbuild', lambda: None)
 
     name = js_bundler.build_bundle()
     assert name and name.startswith('bundle-'), 'bundle must still build (fail-open)'
@@ -241,6 +248,8 @@ def test_minified_real_style_bundle_parses(tmp_path, monkeypatch):
     _reset_state(monkeypatch, js_dir, files)
     monkeypatch.setattr(js_bundler, '_CRITICAL_FILES',
                         frozenset({'i18n.js', 'core.js', 'api.js', 'push.js', 'main.js'}))
+    # Pins _minify_js output shape (esbuild would rewrite the template quoting).
+    monkeypatch.setattr(js_bundler, '_resolve_esbuild', lambda: None)
 
     name = js_bundler.build_bundle()
     assert name is not None, 'node --check must accept the minified bundle'
@@ -312,3 +321,86 @@ def test_real_bundle_is_materially_minified():
         f'is {ratio:.1%} of raw source {raw_sum:,} B (cap {_MINIFY_RATCHET_MAX_RATIO:.0%}). '
         f'The minify pass was likely reverted or is failing-open on every file.'
     )
+
+
+
+# ── Optional esbuild enhancer — fail-open + global-survival safety ────────
+
+def test_esbuild_minify_fails_open_when_absent(monkeypatch):
+    """When esbuild cannot be resolved, ``_esbuild_minify`` returns None so the
+    caller keeps the dependency-free ``_minify_js`` output. This is the property
+    that keeps a bare ``python server.py`` (no node) byte-identical to before."""
+    from lib import js_bundler
+    monkeypatch.setattr(js_bundler, '_resolve_esbuild', lambda: None)
+    assert js_bundler._esbuild_minify('var a=1;\n') is None
+
+
+def test_build_bundle_ignores_esbuild_when_absent(tmp_path, monkeypatch):
+    """The whole build path is unchanged when esbuild is absent: the enhancer
+    is skipped and the _minify_js bundle ships (fail-open, no exception)."""
+    from lib import js_bundler
+    files = {
+        'i18n.js': 'window.t = function (k) { return k; };\n',
+        'core.js': 'window.conversations = [];\n',
+        'api.js': 'window.Api = {};\n',
+        'push.js': 'window.pushSubscribe = function(){};\n',
+        'main.js': 'window.__boot = true;\n',
+    }
+    js_dir = _make_js_tree(tmp_path, files)
+    _reset_state(monkeypatch, js_dir, files)
+    monkeypatch.setattr(js_bundler, '_CRITICAL_FILES',
+                        frozenset({'i18n.js', 'core.js', 'api.js', 'push.js', 'main.js'}))
+    monkeypatch.setattr(js_bundler, '_resolve_esbuild', lambda: None)
+
+    name = js_bundler.build_bundle()
+    assert name and name.startswith('bundle-')
+    text = (tmp_path / 'js' / name).read_text(encoding='utf-8')
+    # _minify_js path keeps the per-file boundary header; esbuild would drop it.
+    assert '// ═══ i18n.js ═══' in text
+    assert 'window.__boot = true;' in text
+
+
+@pytest.mark.skipif(shutil.which('esbuild') is None and shutil.which('node') is None,
+                    reason='esbuild/node not installed')
+def test_esbuild_enhancer_preserves_globals_and_shrinks(tmp_path, monkeypatch):
+    """★ The load-bearing safety property: with esbuild present, the enhanced
+    bundle (a) is strictly SMALLER than the _minify_js bundle, and (b) STILL
+    DEFINES every top-level global (script-mode esbuild must not rename them —
+    index.html's inline onclick= handlers depend on those exact names)."""
+    from lib import js_bundler
+    if js_bundler._resolve_esbuild() is None:
+        pytest.skip('esbuild binary not resolvable')
+
+    files = {
+        'i18n.js': 'window.t = function (k) { return k; };\n',
+        'core.js': (
+            '// a comment that both minifiers drop\n'
+            'function loadConversation(idParam) { return idParam; }\n'
+            'var closeSettings = function () { var localTmp = 1; return localTmp; };\n'
+        ),
+        'api.js': 'window.Api = {};\n',
+        'push.js': 'window.pushSubscribe = function(){};\n',
+        'main.js': 'function renderChat(){ return 1; } window.__boot = true;\n',
+    }
+    js_dir = _make_js_tree(tmp_path, files)
+    _reset_state(monkeypatch, js_dir, files)
+    monkeypatch.setattr(js_bundler, '_CRITICAL_FILES',
+                        frozenset({'i18n.js', 'core.js', 'api.js', 'push.js', 'main.js'}))
+
+    # Build WITH esbuild (real resolver).
+    name_esb = js_bundler.build_bundle()
+    assert name_esb
+    text_esb = (tmp_path / 'js' / name_esb).read_text(encoding='utf-8')
+
+    # Build WITHOUT esbuild (forced absent) for a size baseline.
+    js_bundler._bundle_filename = None
+    js_bundler._bundle_mtime = 0
+    monkeypatch.setattr(js_bundler, '_resolve_esbuild', lambda: None)
+    name_plain = js_bundler.build_bundle()
+    text_plain = (tmp_path / 'js' / name_plain).read_text(encoding='utf-8')
+
+    # (a) esbuild output is strictly smaller than the _minify_js output.
+    assert len(text_esb) < len(text_plain), 'esbuild enhancer must shrink further'
+    # (b) every top-level global still DEFINED (not renamed / tree-shaken away).
+    for g in ('loadConversation', 'closeSettings', 'renderChat', 'pushSubscribe'):
+        assert g in text_esb, f'top-level global {g} must survive esbuild --minify'

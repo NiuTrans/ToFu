@@ -30,10 +30,11 @@ def _empty_summary() -> dict:
         'epicsOpen': 0, 'epicsClaimed': 0, 'epicsDone': 0,
         'pendingDecisions': 0, 'activePeers': 0, 'peerEpics': {},
         'charterExists': False, 'conflicts': 0, 'conflictMessages': [],
+        'statusLine': '',
     }
 
 
-def build_brain_summary(project_path: str) -> dict:
+def build_brain_summary(project_path: str, conv_id: str = '') -> dict:
     """Aggregate the collaboration-bar summary for ``project_path``.
 
     Returns ``{epicsOpen, epicsClaimed, epicsDone, pendingDecisions,
@@ -42,9 +43,19 @@ def build_brain_summary(project_path: str) -> dict:
     UNEXPIRED claim), so the bar can show what each peer is *advancing*.
     Peers with no claim are simply absent from the map (the bar falls back to
     the activity word for them). Never raises — every field degrades safely.
+
+    ``conv_id`` (optional): the DISPLAYED conversation, EXCLUDED from
+    ``activePeers``/``peerEpics`` so the count means "OTHER conversations
+    online" — the SAME self-exclusion ``build_peer_status`` applies, and the
+    SAME rule the frontend's local push mirror uses (it drops self). This
+    makes the backend count and the local mirror agree so the collab bar can
+    render its peer segment from the backend-authoritative ``activePeers``
+    (surviving a client whose presence push stream is degraded) without
+    off-by-one against a live push frame.
     """
     if not project_path:
         return _empty_summary()
+    conv_id = (conv_id or '').strip()
     out = _empty_summary()
 
     # ── Board counts + the claim→epic join source ──
@@ -93,9 +104,12 @@ def build_brain_summary(project_path: str) -> dict:
         from lib.presence.registry import snapshot
         peers = snapshot(project_path).get('peers', []) or []
         # Conversation-level peers only (a sub-agent carries agentId); a claim
-        # is owned by a conversation, so we join on the conversation peer.
+        # is owned by a conversation, so we join on the conversation peer. The
+        # displayed conv itself is excluded (see docstring) so the count is
+        # "other conversations online".
         conv_ids = {p.get('convId') for p in peers
-                    if p.get('convId') and not p.get('agentId')}
+                    if p.get('convId') and not p.get('agentId')
+                    and p.get('convId') != conv_id}
         out['activePeers'] = len(conv_ids)
         peer_epics = {}
         for cid in conv_ids:
@@ -121,6 +135,16 @@ def build_brain_summary(project_path: str) -> dict:
                                        if a.get('message')]
     except Exception as e:
         logger.debug('[BrainSummary] conflict detect failed proj=%.40r: %s',
+                     project_path, e)
+
+    # ── Pillar #7: the ambient one-line project-status headline. Read-only
+    #    (no synthesis on this hot always-visible-bar path) — the LATEST stored
+    #    snapshot's first sentence, or '' when none exists yet. ──
+    try:
+        from lib.conversations.project_status import status_line
+        out['statusLine'] = status_line(project_path)
+    except Exception as e:
+        logger.debug('[BrainSummary] status line read failed proj=%.40r: %s',
                      project_path, e)
 
     return out

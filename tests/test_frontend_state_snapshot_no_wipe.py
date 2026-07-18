@@ -1,45 +1,33 @@
-"""Regression: an SSE ``state`` snapshot must NEVER wipe durable checkpointed
-content/thinking with an empty (or shorter) snapshot.
+"""Regression: the SSE ``state`` handler applies a snapshot's content/thinking
+VERBATIM, and reset events still clear the bubble.
 
-WHY
----
-`state` is a FULL RESYNC snapshot, NOT a reset. Resets ride their own dedicated
-events — `retry_reset` / `delta_reset` — each of which clears BOTH the message
-AND the streaming buffer together (see `sse_pipeline.js`). So an empty or
-shorter `ev.content` in a `state` snapshot is a LAGGING / reconnect-before-
-accumulation snapshot (the server observed its content-lock between append
-cycles, or the socket connected before content accumulated), never an
-instruction to blank the bubble.
-
-The plain-assistant branch of the `state` handler used to do
-`assistantMsg.content = ev.content || ""` unconditionally — the SAME bug class
-as the `_twFlush` raw-buffer wipe: an empty snapshot clobbered already-
-checkpointed content back to blank ("等待中…" / lost text). The fix routes the
-overwrite through `_snapshotLonger(msg, ev, field)`, which keeps whichever side
-is longer — mirroring `_pollFallback`'s regression-safe merge for `data.content`
-and the reconnect branch's `|| assistantMsg.content` idiom.
-
-RESET-SAFETY (why keep-longer can't resurrect intentionally-cleared text):
-`state`, `retry_reset`, `delta_reset` are mutually-exclusive `else if` arms on
-`ev.type`. After a reset the message content is `""`; a `state` snapshot that
-lands next also carries `""` (server reset its accumulator on the same task) →
-both empty → stays empty. Client-longer only happens when the client is AHEAD
-via un-flushed deltas — keeping the longer side is correct there. And stale
-snapshots from an aborted/superseded task are discarded by the SyncFix guard
-before reaching this branch. So there is NO legitimate empty-reset path through
-the `state` handler.
+WHY THIS CHANGED (2026-07-11)
+-----------------------------
+`state` is a FULL RESYNC snapshot. It USED to be applied through a
+`_snapshotLonger` keep-longer belt because a cold reconnect could replay a
+5s-stale ``task_results`` checkpoint SHORTER than the client's live buffer.
+That shrink source is now GONE — a ``state`` snapshot can no longer be shorter
+than the client buffer from ANY backend path:
+  * warm resume / fresh: content = ``task['content']`` accumulated UNDER
+    ``content_lock`` BEFORE the delta is emitted (manager.py `_on_content`),
+    so it is always >= what the client received;
+  * cold paths (SSE gen_persisted/gen_done, poll DB-fallback): content is
+    ``fold_cold_state_text`` = ``max(folded task_events log, checkpoint)``,
+    and each delta is persisted BEFORE it is pushed (durable-before-visible),
+    so the fold is never behind the client.
+So the plain-assistant / worker / planner / critic state sites now assign
+content/thinking VERBATIM (`msg.content = ev.content || ""`); the text
+keep-longer belt was retired. See tests/test_event_fold_cold_replay.py +
+tests/test_event_persist_before_push.py + test_frontend_reconnect_keeplonger_invariant.py.
+(toolRounds is NOT foldable yet, so it keeps `_snapshotLongerRounds` — covered
+by the invariant test, not here.)
 
 This drives the REAL shipped `state` handler via the
 ``window.__sse_test__.dispatchSSEEvent`` seam under jsdom, and asserts:
-  (1) empty `state` over a populated message → content/thinking PRESERVED.
-  (2) shorter `state` over longer accumulated content → PRESERVED (lock-cycle lag).
-  (3) a genuinely LONGER `state` snapshot → APPLIED (real resync grows the bubble).
-  (4) the legitimate reset path (`retry_reset`) STILL clears content to "".
-
-DOUBLE-NEUTER (run below): revert `_snapshotLonger` to the raw
-`incoming` (== `ev.content || ""`) in a COPY of sse_pipeline.js → check (1)
-FAILS (the wipe returns), while the reset check (4) stays green. Real file
-untouched.
+  (1) a LONGER/equal `state` snapshot → APPLIED verbatim (real resync).
+  (2) the legitimate reset path (`retry_reset`) STILL clears content to "".
+  (3) SOURCE GUARD: the plain-assistant state site assigns content verbatim,
+      NOT through a `_snapshotLonger` belt (the belt is removed).
 
 Runs the REAL shipped JS under jsdom; skips cleanly when node + jsdom aren't
 installed.
@@ -165,33 +153,25 @@ function line(obj) { return 'data: ' + JSON.stringify(obj); }
 
 const LONG = 'The quick brown fox jumps over the lazy dog. '.repeat(4);  // ~180 chars
 
-// ── (1) EMPTY state snapshot over a populated message → PRESERVED. ──
-{
-  const { am, buf, ctx } = setup(LONG, 'reasoning so far');
-  T.dispatchSSEEvent(line({ type: 'state', endpointMode: false,
-    content: '', thinking: '' }), ctx);
-  check('empty_state_preserves_content', am.content === LONG);
-  check('empty_state_preserves_thinking', am.thinking === 'reasoning so far');
-  check('empty_state_preserves_buf', buf.content === LONG);
-}
-
-// ── (2) SHORTER state snapshot over longer accumulated content → PRESERVED
-//    (poll/lock-cycle lag: server snapshot briefly trails client deltas). ──
-{
-  const { am, ctx } = setup(LONG, '');
-  T.dispatchSSEEvent(line({ type: 'state', endpointMode: false,
-    content: LONG.slice(0, 20) }), ctx);   // shorter than accumulated
-  check('shorter_state_preserves_content', am.content === LONG);
-}
-
-// ── (3) GENUINELY LONGER state snapshot → APPLIED (real resync grows bubble). ──
+// ── (1) A state snapshot is applied VERBATIM (real backend-authoritative
+//    resync). The backend guarantees it is never shorter than the client
+//    buffer (fold = max(log, checkpoint); persist-before-push), so verbatim
+//    is correct — no keep-longer needed. ──
 {
   const { am, ctx } = setup('Hello', 'a');
-  const longer = 'Hello, this is the fuller resynced answer.';
+  const full = 'Hello, this is the fuller resynced answer.';
   T.dispatchSSEEvent(line({ type: 'state', endpointMode: false,
-    content: longer, thinking: 'abc' }), ctx);
-  check('longer_state_applies_content', am.content === longer);
-  check('longer_state_applies_thinking', am.thinking === 'abc');
+    content: full, thinking: 'abc' }), ctx);
+  check('state_applies_content_verbatim', am.content === full);
+  check('state_applies_thinking_verbatim', am.thinking === 'abc');
+}
+
+// ── (1b) An equal-length resync applies verbatim (idempotent). ──
+{
+  const { am, ctx } = setup(LONG, 'r');
+  T.dispatchSSEEvent(line({ type: 'state', endpointMode: false,
+    content: LONG, thinking: 'r2' }), ctx);
+  check('state_equal_applies_verbatim', am.content === LONG && am.thinking === 'r2');
 }
 
 // ── (4) LEGITIMATE RESET path (retry_reset) STILL clears content to "". ──
@@ -246,32 +226,36 @@ def test_state_snapshot_no_wipe():
     output = proc.stdout.strip()
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
     fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
-    assert not fails, 'state-snapshot no-wipe failures:\n' + output
-    assert output.count('PASS') >= 9, f'expected >=9 PASS lines, got:\n{output}'
+    assert not fails, 'state-snapshot verbatim failures:\n' + output
+    assert output.count('PASS') >= 6, f'expected >=6 PASS lines, got:\n{output}'
 
-    # Source guard: the plain-assistant state branch must go through the
-    # keep-longer helper, not a raw `ev.content || ""` wipe.
+    # Source guard: the plain-assistant state branch now assigns content
+    # VERBATIM (backend-authoritative), NOT through the retired _snapshotLonger
+    # text belt.
     with open(pipeline, encoding='utf-8') as f:
         src = f.read()
-    assert '_snapshotLonger(assistantMsg, ev,' in src, (
-        'regression: the plain-assistant `state` handler no longer routes '
-        "through _snapshotLonger — an empty snapshot can wipe checkpointed content.")
+    assert 'assistantMsg.content = ev.content || ""' in src, (
+        'regression: the plain-assistant `state` handler no longer assigns '
+        'content verbatim — the verbatim projection was changed.')
+    assert '_snapshotLonger(' not in src, (
+        'the retired _snapshotLonger text belt reappeared — state text must be '
+        'a verbatim projection of the backend-authoritative snapshot.')
 
 
 @pytest.mark.skipif(not _node_deps_available(),
                     reason='node + jsdom dev-deps not installed (run npm install)')
-def test_state_snapshot_no_wipe_double_neuter(tmp_path):
-    """DOUBLE-NEUTER: revert `_snapshotLonger` to the raw incoming value (==
-    the old `ev.content || ""` wipe) in a COPY of sse_pipeline.js and prove the
-    empty-state check FAILS (the wipe returns), while the reset check stays
-    green. Proves the test genuinely discriminates the fix. Real file
-    untouched."""
+def test_state_snapshot_verbatim_neuter(tmp_path):
+    """NEUTER: break the verbatim projection in a COPY of sse_pipeline.js by
+    forcing the plain-assistant state assignment to a constant, and prove the
+    verbatim-apply check FAILS while the reset check stays green. Proves the
+    test genuinely discriminates the verbatim contract. Real file untouched."""
     pipeline = os.path.join(JS_DIR, 'ui', 'sse_pipeline.js')
     with open(pipeline, encoding='utf-8') as f:
         src = f.read()
-    fixed = 'return incoming.length >= current.length ? incoming : current;'
-    assert fixed in src, 'keep-longer helper body not found — update the neuter target'
-    neutered_src = src.replace(fixed, 'return incoming;  // NEUTERED: raw overwrite (bug)', 1)
+    fixed = 'assistantMsg.content = ev.content || "";'
+    assert fixed in src, 'verbatim assignment not found — update the neuter target'
+    neutered_src = src.replace(
+        fixed, 'assistantMsg.content = "__NEUTERED__";', 1)
     assert neutered_src != src, 'neuter did not change the source'
     nfile = tmp_path / 'sse_pipeline_neutered.js'
     nfile.write_text(neutered_src, encoding='utf-8')
@@ -281,11 +265,11 @@ def test_state_snapshot_no_wipe_double_neuter(tmp_path):
     assert proc.returncode == 0, f'node failed on neutered copy: {proc.stderr}\n{output}'
     lines = {ln.split(' ', 1)[1]: ln.startswith('PASS')
              for ln in output.splitlines() if ln.startswith(('PASS', 'FAIL'))}
-    # The neuter MUST break the empty-state preservation (the wipe returns)…
-    assert lines.get('empty_state_preserves_content') is False, (
-        'DOUBLE-NEUTER did not bite: with the raw-overwrite helper an empty '
-        'state snapshot still preserved content — the test does not '
-        'discriminate the fix.\n' + output)
+    # The neuter MUST break the verbatim apply…
+    assert lines.get('state_applies_content_verbatim') is False, (
+        'NEUTER did not bite: the state handler did not apply content verbatim '
+        'even after the assignment was corrupted — the test does not '
+        'discriminate the contract.\n' + output)
     # …while the legitimate reset path is unaffected (rides a different event).
     assert lines.get('retry_reset_clears_content') is True, (
         'neuter unexpectedly changed the retry_reset path:\n' + output)

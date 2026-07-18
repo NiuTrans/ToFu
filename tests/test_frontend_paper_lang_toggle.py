@@ -6,9 +6,13 @@ toggle logic:
   REPORT (generation language, per-paper, persisted):
     • _activeReportLang defaults to the UI language on first open;
     • _setReportLang('zh') persists per paper id, resets local state, drops the
-      in-memory cache, and (on the report tab) kicks a load/generate in the new
-      language — so a language switch really re-generates against the
-      (paper_hash, lang) cache key;
+      in-memory cache, and (on the report tab) routes through
+      _loadOrGenerateReport for the new (paper_hash, lang) cache key;
+    • switching to a NEVER-SHOWN language does NOT auto-generate — it renders the
+      manual-start prompt (Generate button) so the user can still tune the model
+      before the run begins, per the no-autostart user preference (2026-07-02,
+      guarded by test_frontend_paper_no_autostart.py). Zero /report/start fires
+      on the switch itself; the button click is what starts generation;
     • the choice survives a "reload" (persisted in localStorage, re-derived);
     • REGRESSION: toggling BACK to a language already shown this session
       repaints from the in-memory snapshot and does NOT regenerate, even when
@@ -23,9 +27,10 @@ toggle logic:
       (the old bug: the translate button was hidden unless UI=zh).
 
 Negative controls (in-harness, source-toggle proven separately):
-    • report: after _setReportLang('zh'), the persisted map MUST read 'zh' and a
-      generate MUST have been issued with lang 'zh' — flipping _persistReportLang
-      to a no-op makes the reload-persistence check FAIL;
+    • report: after _setReportLang('zh'), the persisted map MUST read 'zh' and
+      the switch to a never-shown language MUST render the manual Generate prompt
+      with ZERO auto-issued /report/start — flipping _persistReportLang to a
+      no-op makes the reload-persistence check FAIL;
     • review: _setReviewLang('zh') MUST call translateStart and NOT reportStart
       (never regenerates the English review).
 
@@ -103,7 +108,8 @@ global.Api = win.Api = { paper: {
 localStorage.setItem('paper_active_id', 'paper-1');
 localStorage.setItem('paper_library_migrated_v1', '1');
 
-eval(fs.readFileSync(process.argv[2], 'utf8'));  // paper-reader.js (real, shipped)
+eval(fs.readFileSync(process.argv[2], 'utf8'));  // paper/report.js (report/review fns)
+if (process.argv[4]) eval(fs.readFileSync(process.argv[4], 'utf8'));  // paper-reader.js core
 
 const out = [];
 function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
@@ -137,26 +143,35 @@ _i18nLang = 'en';   // deliberately English UI — the review toggle must STILL 
 
   // ── REPORT: switch to zh from the report tab → persist + generate in zh ──
   _paperActiveTab = 'report';
+  const startsBeforeZh = calls.report.length;
   _setReportLang('zh', 'report');
   for (let i = 0; i < 20; i++) { await new Promise(r => setTimeout(r, 0)); }
   check('report_now_zh', _activeReportLang() === 'zh');
   check('report_persisted_zh',
         (JSON.parse(localStorage.getItem('paper_report_lang_by_id')) || {})['paper-1'] === 'zh');
-  check('report_generated_in_zh',
-        calls.report.length >= 1 && calls.report[calls.report.length - 1].lang === 'zh');
+  // Switching to a NEVER-SHOWN language must NOT auto-generate (no-autostart
+  // preference); it renders the manual Generate prompt and fires zero
+  // /report/start. Generation is user-initiated by the button.
+  check('report_switch_zh_no_autostart', calls.report.length === startsBeforeZh);
+  check('report_switch_zh_shows_generate_btn',
+        document.getElementById('paperReportContent')
+          .querySelector('.paper-report-generate-btn') !== null);
 
   // ── REPORT: persistence survives a "reload" (re-derive from localStorage) ──
   // Simulate reload: wipe the in-memory derivation path by clearing caches;
   // _activeReportLang reads localStorage fresh every call.
   check('report_reload_reads_zh', _activeReportLang() === 'zh');
 
-  // ── REPORT: switching back to en re-generates in en ──
+  // ── REPORT: switching back to en (also never shown this session) again
+  //    shows the manual Generate prompt, not an auto-generate. ──
   const beforeEn = calls.report.length;
   _setReportLang('en', 'report');
   for (let i = 0; i < 20; i++) { await new Promise(r => setTimeout(r, 0)); }
   check('report_back_en', _activeReportLang() === 'en');
-  check('report_generated_in_en',
-        calls.report.length > beforeEn && calls.report[calls.report.length - 1].lang === 'en');
+  check('report_switch_en_no_autostart', calls.report.length === beforeEn);
+  check('report_switch_en_shows_generate_btn',
+        document.getElementById('paperReportContent')
+          .querySelector('.paper-report-generate-btn') !== null);
 
   // ── REGRESSION (the reported bug): toggling BACK to a language already
   //    shown this session must repaint from the in-memory snapshot and NOT
@@ -216,7 +231,9 @@ def _run():
         f.write(_HARNESS)
     try:
         proc = subprocess.run(
-            ['node', harness, os.path.join(JS_DIR, 'paper-reader.js'), ROOT],
+            ['node', harness,
+             os.path.join(JS_DIR, 'paper', 'report.js'), ROOT,
+             os.path.join(JS_DIR, 'paper-reader.js')],
             capture_output=True, text=True, timeout=60,
         )
     finally:

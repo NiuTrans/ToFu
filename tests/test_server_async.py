@@ -189,6 +189,32 @@ class TestCompression:
             # Just verify the request doesn't crash
         _run_async(go())
 
+    def test_range_response_not_gzipped(self, client):
+        """A 206 Partial Content (Range) response MUST NOT be gzipped.
+
+        Gzipping a 206 while keeping Content-Range and rewriting
+        Content-Length to the compressed slice length hands the client a
+        corrupt byte range — the confirmed cause of vendor .js "failed to
+        load" on tablet/mobile browsers that request scripts via Range, which
+        aborts JS boot and deterministically blanks the sidebar folder rail.
+        The _compress_response guard must suppress compression for any
+        non-200 / Content-Range response.
+        """
+        async def go():
+            resp = await client.get(
+                '/static/vendor/highlight.min.js',
+                headers={'Range': 'bytes=0-1023',
+                         'Accept-Encoding': 'gzip'},
+            )
+            # A range-capable static handler answers 206; a handler that
+            # ignores Range answers a whole 200. Either way, a partial /
+            # ranged body must never carry gzip.
+            if resp.status_code == 206 or 'Content-Range' in resp.headers:
+                assert resp.content_encoding != 'gzip', (
+                    'partial (206/Content-Range) response was gzipped — '
+                    'corrupts the byte range on Range-requesting clients')
+        _run_async(go())
+
 
 @pytest.mark.auth_mode("open")
 class TestSSEStreaming:
@@ -201,6 +227,39 @@ class TestSSEStreaming:
             # Should be 404 (task not found) or SSE with error
             assert resp.status_code in (200, 404)
         _run_async(go())
+
+
+@pytest.mark.unit
+class TestGracefulShutdownSignals:
+    """SIGHUP must join the graceful-drain path, not kill the server.
+
+    Root cause of a recurring 'server suddenly died' incident: launching
+    ``python server.py`` in a code-server terminal ties the process to that
+    terminal's session, so closing the terminal delivers SIGHUP (default
+    disposition: terminate). Including SIGHUP in the graceful set makes that a
+    clean drain instead of an abrupt death.
+    """
+
+    def test_sighup_is_a_graceful_signal(self, quart_available):
+        import signal as _signal
+        import server
+        sigs = server.graceful_shutdown_signals()
+        # The whole point of the fix: SIGHUP funnels into graceful drain.
+        assert _signal.SIGHUP in sigs, (
+            'SIGHUP must be handled gracefully so closing the launching '
+            'terminal drains instead of killing the server'
+        )
+        # And it does not drop the deliberate stop signals.
+        assert _signal.SIGTERM in sigs
+        assert _signal.SIGINT in sigs
+
+    def test_only_existing_signals_returned(self, quart_available):
+        """Every returned entry is a real signal on this platform."""
+        import signal as _signal
+        import server
+        valid = {getattr(_signal, n) for n in ('SIGTERM', 'SIGINT', 'SIGHUP')
+                 if hasattr(_signal, n)}
+        assert set(server.graceful_shutdown_signals()) <= valid
 
 
 # ═══════════════════════════════════════════════════════════════════════

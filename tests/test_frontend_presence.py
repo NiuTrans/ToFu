@@ -1,21 +1,37 @@
-"""jsdom end-to-end test for the cross-conversation presence strip.
+"""jsdom end-to-end test for the Project **Collaboration Bar** (presence.js).
 
-Loads the REAL shipped static/js/presence.js under jsdom, drives it with
-`presence` push frames exactly as the backend broadcasts them, and asserts the
-rendered DOM. The decisive checks prove the PURE-RENDER contract:
+The old multi-row "who's working" presence strip was REPLACED (see the
+presence.js header) by a single slim project-coordination bar docked under the
+top bar. It no longer echoes per-peer activity you already see in the sidebar;
+it surfaces the Project Brain's coordination state, action-ordered:
 
-  • The "who's working" strip paints title + the backend-formed `statusLabel`
-    VERBATIM and a relative time the frontend formats from `lastBeatTs`.
-  • A `conflict` frame's `message` is rendered VERBATIM (backend-formed).
-  • The strip filters to the project root of the DISPLAYED conversation, and
-    EXCLUDES the conversation you're viewing (no cursor for yourself).
-  • A `depart` frame removes the peer; an empty strip hides itself.
-  • The frontend computes NOTHING but the timestamp: a peer whose statusLabel
-    is a fabricated/unknown string is rendered as-is (the frontend never
-    re-derives or overrides the backend status word).
+    🧠 Project · N conflicts · N decisions awaiting you · M in progress ·
+       K open · P online          + per-peer "advancing «epic»" join lines
 
-A fake pushSubscribe captures the registered handler so the test can feed
-frames synchronously. Skips cleanly when node + jsdom aren't installed.
+Contract this pins (loads the REAL shipped presence.js under jsdom):
+
+  • The bar is PROJECT-scoped: no displayed project root → hidden.
+  • Counts come from the backend one-shot summary (Api.project.brainSummary),
+    rendered VERBATIM into `.collab-seg-decisions / -progress / -open / -peers /
+    -conflict` — the frontend re-derives none of them. Peer count is
+    backend-authoritative (summary.activePeers), falling back to / max-ed with
+    the local push mirror so a degraded push stream never under-reports.
+  • Each online peer that owns a live epic is joined to it: `.collab-peer-epic`
+    → `.collab-epic-title` shows the epic title VERBATIM (the deep-collab join);
+    the displayed conversation itself (selfId) is excluded.
+  • A conflict's backend-formed message renders VERBATIM in `.collab-conflict-line`.
+  • Nothing collaborative to surface (solo, empty board) → the whole bar hides.
+  • HTML-injection safety: a malicious epic title is escaped, not interpreted.
+  • The 'presence' push subscription maintains the live-peer mirror (used for
+    hide/show + the epic join), self excluded.
+
+Sub-agent rows are DELIBERATELY not surfaced by this bar (the presence handler
+ignores frames carrying `peer.agentId`), so the old nested sub-agent assertions
+were retired — that contract no longer exists.
+
+Drives the module via its shipped jsdom hooks (`window.CollabBar._setSummary /
+._setPeers / ._render`) plus the real 'presence' push handler. Skips cleanly
+when node + jsdom aren't installed.
 """
 
 from __future__ import annotations
@@ -46,35 +62,43 @@ const ROOT = process.argv[3];
 const { JSDOM } = require(path.join(ROOT, 'node_modules', 'jsdom'));
 const dom = new JSDOM(
   '<!DOCTYPE html><body><div class="chat-wrapper">' +
-  '<div class="presence-strip" id="presenceStrip" hidden></div></body>',
+  '<div class="presence-strip" id="presenceStrip" hidden></div></div></body>',
   { url: 'http://localhost/' });
 const win = dom.window;
 global.window = win;
 global.document = win.document;
 global.console = console;
-// setInterval must NOT actually fire in the harness (we render via the handler).
+// Neuter the periodic tick + the debounced refetch — we drive render by hand.
 global.setInterval = win.setInterval = () => 0;
+global.clearInterval = win.clearInterval = () => {};
+global.setTimeout = win.setTimeout = () => 0;
+global.clearTimeout = win.clearTimeout = () => {};
 
 win.escapeHtml = global.escapeHtml = (s) =>
   String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-// t(): echo the en value with simple {n} interpolation so labels are readable.
+// t(): the module's internal _t calls t(key, params) WITHOUT the fallback, so
+// this stub must own the templates (with {n} interpolation) itself — mirroring
+// the real i18n keys the bar renders.
 const _I18N = {
-  'presence.title': 'Others working here',
-  'presence.untitled': '(untitled)',
-  'presence.justNow': 'just now',
-  'presence.secsAgo': '{n}s ago',
-  'presence.minsAgo': '{n}m ago',
+  'collab.project': 'Project',
+  'collab.conflicts': '{n} conflict',
+  'collab.decisionsAwaiting': '{n} decisions awaiting you',
+  'collab.epicsInProgress': '{n} in progress',
+  'collab.epicsOpen': '{n} open',
+  'collab.peersOnline': '{n} online',
+  'collab.peerAdvancing': 'advancing',
+  'collab.openBrain': 'Open Project Brain',
 };
 win.t = global.t = (k, p) => {
-  let s = _I18N[k] || k;
+  let s = (k in _I18N) ? _I18N[k] : k;
   if (p) for (const kk in p) s = s.replace(new RegExp('\\{' + kk + '\\}', 'g'), p[kk]);
   return s;
 };
 
-// Capture the presence push handler.
-let _handler = null;
+// Capture the presence push handler (the module subscribes to 'presence' + 'project').
+let _presenceHandler = null;
 win.pushSubscribe = global.pushSubscribe = (channel, taskId, fn) => {
-  if (channel === 'presence') _handler = fn;
+  if (channel === 'presence') _presenceHandler = fn;
 };
 
 // Displayed conversation = conv-self, project root /proj/A.
@@ -86,137 +110,118 @@ win.getActiveConv = global.getActiveConv = () =>
   win.conversations.find(c => c.id === win.activeConvId) || null;
 win._getConvProjectPath = global._getConvProjectPath = (conv) =>
   (conv && conv.projectPath) || '';
+// Defensive Api stub (the debounced refetch is neutered, but _refetchSummary
+// guards on Api.project.brainSummary existing anyway).
+win.Api = global.Api = { project: { brainSummary: () => Promise.resolve(null) } };
+win.openProjectBrain = global.openProjectBrain = () => {};
 
 eval(fs.readFileSync(process.argv[2], 'utf8'));  // presence.js
 
 const out = [];
 function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
 
-if (typeof _handler !== 'function') {
-  console.log('FAIL handler_registered presence handler not registered');
+if (!win.CollabBar || typeof win.CollabBar._render !== 'function') {
+  console.log('FAIL hooks_exposed CollabBar test hooks missing');
   console.log(out.join('\n'));
   process.exit(0);
 }
-check('handler_registered', true);
+check('hooks_exposed', true);
+check('handler_registered', typeof _presenceHandler === 'function');
 
 const strip = document.getElementById('presenceStrip');
-const now = Date.now();
+const setS = win.CollabBar._setSummary;
+const render = win.CollabBar._render;
 
-// ── Update: a peer on the displayed root (other conversation) ──
-_handler({ channel: 'presence', taskId: '*', type: 'presence', kind: 'update',
-  root: '/proj/A',
-  peer: { convId: 'conv-b', title: 'Refactor parser',
-          objective: 'make the parser ship',
-          status: 'active', statusLabel: 'editing lib/llm/stream.py',
-          currentFile: 'lib/llm/stream.py', files: ['lib/llm/stream.py'],
-          lastBeatTs: now, startedTs: now } });
+// ── Solo / empty board (no segments) → the bar is hidden ──
+setS('/proj/A', { epicsOpen: 0, epicsClaimed: 0, epicsDone: 0,
+                  pendingDecisions: 0, activePeers: 0, peerEpics: {}, charterExists: true });
+render();
+check('empty_board_hidden', strip.hidden === true);
 
-check('strip_visible', strip.hidden === false);
-check('peer_title_rendered', strip.innerHTML.indexOf('Refactor parser') !== -1);
-// Backend statusLabel rendered VERBATIM (frontend did not re-derive it).
-check('statuslabel_verbatim', strip.innerHTML.indexOf('editing lib/llm/stream.py') !== -1);
-check('objective_rendered', strip.innerHTML.indexOf('make the parser ship') !== -1);
-check('count_is_1', (strip.querySelector('.presence-count') || {}).textContent === '1');
-// Relative time the FRONTEND formatted from lastBeatTs (the only computation).
-check('reltime_just_now', strip.innerHTML.indexOf('just now') !== -1);
+// ── A summary with counts → the bar shows, segments rendered VERBATIM ──
+setS('/proj/A', {
+  epicsOpen: 3, epicsClaimed: 1, epicsDone: 5,
+  pendingDecisions: 2, activePeers: 2,
+  peerEpics: { 'conv-b': 'Refactor the parser', 'conv-self': 'MY OWN EPIC' },
+  conflicts: 0, conflictMessages: [], charterExists: true,
+});
+render();
+check('bar_visible', strip.hidden === false);
+check('bar_testid', !!strip.querySelector('[data-testid="collab-bar"]'));
+check('lead_project_label', !!strip.querySelector('.collab-label'));
+// Counts (backend numbers rendered verbatim inside their action-ordered segs).
+const segDec = strip.querySelector('.collab-seg-decisions');
+check('seg_decisions', !!segDec && segDec.textContent.indexOf('2') !== -1);
+const segProg = strip.querySelector('.collab-seg-progress');
+check('seg_progress', !!segProg && segProg.textContent.indexOf('1') !== -1);
+const segOpen = strip.querySelector('.collab-seg-open');
+check('seg_open', !!segOpen && segOpen.textContent.indexOf('3') !== -1);
+const segPeers = strip.querySelector('.collab-seg-peers');
+check('seg_peers', !!segPeers && segPeers.textContent.indexOf('2') !== -1);
+// decisions-present emphasis class on the bar inner.
+check('has_decisions_class', !!strip.querySelector('.collab-bar-inner.collab-has-decisions'));
 
-// ── Self-exclusion: an update for the DISPLAYED conversation is not shown ──
-_handler({ channel: 'presence', taskId: '*', type: 'presence', kind: 'update',
-  root: '/proj/A',
-  peer: { convId: 'conv-self', title: 'MY OWN CONV',
-          status: 'active', statusLabel: 'working', lastBeatTs: now } });
-check('self_excluded', strip.innerHTML.indexOf('MY OWN CONV') === -1);
-check('count_still_1', (strip.querySelector('.presence-count') || {}).textContent === '1');
+// ── The deep-collab join: a peer's live epic title is shown VERBATIM ──
+const epicTitle = strip.querySelector('.collab-epic-title');
+check('peer_epic_title_verbatim', !!epicTitle && epicTitle.textContent.indexOf('Refactor the parser') !== -1);
+// ── Self is excluded from the epic join (never a line for the displayed conv) ──
+check('self_epic_excluded', strip.innerHTML.indexOf('MY OWN EPIC') === -1);
 
-// ── Root filtering: a peer on a DIFFERENT root must not appear ──
-_handler({ channel: 'presence', taskId: '*', type: 'presence', kind: 'update',
-  root: '/proj/OTHER',
-  peer: { convId: 'conv-x', title: 'OTHER PROJECT WORK',
-          status: 'active', statusLabel: 'working', lastBeatTs: now } });
-check('other_root_filtered', strip.innerHTML.indexOf('OTHER PROJECT WORK') === -1);
-
-// ── Pure-render proof: an UNKNOWN/fabricated statusLabel is rendered as-is.
-//    The frontend has no status vocabulary of its own; whatever the backend
-//    sends is what shows. ──
-_handler({ channel: 'presence', taskId: '*', type: 'presence', kind: 'update',
-  root: '/proj/A',
-  peer: { convId: 'conv-c', title: 'Peer C',
-          status: 'active', statusLabel: 'BACKEND-ONLY-PHRASE-XYZ',
-          lastBeatTs: now } });
-check('arbitrary_label_verbatim', strip.innerHTML.indexOf('BACKEND-ONLY-PHRASE-XYZ') !== -1);
-check('count_is_2', (strip.querySelector('.presence-count') || {}).textContent === '2');
-
-// ── Conflict: the advisory message is rendered VERBATIM ──
-_handler({ channel: 'presence', taskId: '*', type: 'presence', kind: 'conflict',
-  root: '/proj/A',
-  conflict: { path: 'lib/llm/stream.py', peers: ['conv-b', 'conv-c'],
-              message: 'Refactor parser and Peer C are concurrently editing lib/llm/stream.py' } });
-check('conflict_rendered', !!strip.querySelector('.presence-conflict'));
+// ── Conflicts: highest-urgency segment + the backend-formed message verbatim ──
+setS('/proj/A', {
+  epicsOpen: 0, epicsClaimed: 0, epicsDone: 0, pendingDecisions: 0, activePeers: 2,
+  peerEpics: {}, conflicts: 1,
+  conflictMessages: ['Refactor parser and Peer C are concurrently editing lib/llm/stream.py'],
+  charterExists: true,
+});
+render();
+check('seg_conflict', !!strip.querySelector('.collab-seg-conflict'));
+check('has_conflicts_class', !!strip.querySelector('.collab-bar-inner.collab-has-conflicts'));
+const cline = strip.querySelector('.collab-conflict-line');
 check('conflict_message_verbatim',
-  strip.innerHTML.indexOf('Refactor parser and Peer C are concurrently editing lib/llm/stream.py') !== -1);
+  !!cline && cline.textContent.indexOf('Refactor parser and Peer C are concurrently editing lib/llm/stream.py') !== -1);
 
-// ── Depart: removing the two peers + (conflict still within TTL) ──
-_handler({ channel: 'presence', taskId: '*', type: 'presence', kind: 'depart',
-  root: '/proj/A', peer: { convId: 'conv-b' } });
-_handler({ channel: 'presence', taskId: '*', type: 'presence', kind: 'depart',
-  root: '/proj/A', peer: { convId: 'conv-c' } });
-// No peer ROWS now, but the conflict advisory is still fresh → strip stays
-// visible showing just the conflict. (Check the .presence-peer rows are gone,
-// NOT the names — the conflict message legitimately still contains them.)
-check('peer_rows_gone', strip.querySelectorAll('.presence-peer').length === 0);
-check('conflict_persists_in_ttl', !!strip.querySelector('.presence-conflict'));
-
-// ── HTML-injection safety: a malicious title is escaped, not interpreted ──
-_handler({ channel: 'presence', taskId: '*', type: 'presence', kind: 'update',
-  root: '/proj/A',
-  peer: { convId: 'conv-evil', title: '<img src=x onerror=alert(1)>',
-          status: 'active', statusLabel: 'working', lastBeatTs: now } });
+// ── HTML-injection safety: a malicious epic title is escaped, not interpreted ──
+setS('/proj/A', {
+  epicsOpen: 1, epicsClaimed: 0, epicsDone: 0, pendingDecisions: 0, activePeers: 1,
+  peerEpics: { 'conv-evil': '<img src=x onerror=alert(1)>' },
+  conflicts: 0, conflictMessages: [], charterExists: true,
+});
+render();
 check('title_escaped', strip.innerHTML.indexOf('<img src=x') === -1
                        && strip.innerHTML.indexOf('&lt;img src=x') !== -1);
 
-// ════════════════════════════════════════════════════════════════════
-// SUB-AGENT NESTING — two sub-agents of another conversation render as
-// nested rows UNDER that conversation's peer; status/label verbatim.
-// ════════════════════════════════════════════════════════════════════
-// Fresh start: clear the mirror by departing everyone we added, then add a
-// conversation peer with two sub-agents.
-for (const cid of ['conv-b', 'conv-c', 'conv-evil']) {
-  _handler({ channel: 'presence', taskId: '*', type: 'presence', kind: 'depart',
-    root: '/proj/A', peer: { convId: cid } });
-}
-_handler({ channel: 'presence', taskId: '*', type: 'presence', kind: 'update',
-  root: '/proj/A',
-  peer: { convId: 'conv-swarm', title: 'Swarm session', agentId: '',
-          status: 'active', statusLabel: 'working', lastBeatTs: now } });
-_handler({ channel: 'presence', taskId: '*', type: 'presence', kind: 'update',
-  root: '/proj/A',
-  peer: { convId: 'conv-swarm', agentId: 'agent-coder-1', title: 'coder',
-          parentTitle: 'Swarm session', status: 'active',
-          statusLabel: 'editing lib/a.py', currentFile: 'lib/a.py', lastBeatTs: now } });
-_handler({ channel: 'presence', taskId: '*', type: 'presence', kind: 'update',
-  root: '/proj/A',
-  peer: { convId: 'conv-swarm', agentId: 'agent-coder-2', title: 'coder',
-          parentTitle: 'Swarm session', status: 'active',
-          statusLabel: 'editing lib/a.py', currentFile: 'lib/a.py', lastBeatTs: now } });
+// ── The 'presence' push subscription maintains the live-peer mirror (self
+//    excluded). With NO backend activePeers, the peer count falls back to the
+//    local push mirror → a pushed peer surfaces the "N online" segment. ──
+_presenceHandler({ channel: 'presence', taskId: '*', type: 'presence', kind: 'update',
+  root: '/proj/A', peer: { convId: 'conv-push', title: 'Pushed peer',
+                           status: 'active', statusLabel: 'working', lastBeatTs: Date.now() } });
+setS('/proj/A', {   // summary with NO activePeers field → mirror is the source
+  epicsOpen: 0, epicsClaimed: 0, epicsDone: 0, pendingDecisions: 1,
+  peerEpics: {}, conflicts: 0, conflictMessages: [], charterExists: true,
+});
+render();
+const segPeers2 = strip.querySelector('.collab-seg-peers');
+check('push_peer_counted', !!segPeers2 && segPeers2.textContent.indexOf('1') !== -1);
+// A depart frame removes it from the mirror → the peers segment drops.
+_presenceHandler({ channel: 'presence', taskId: '*', type: 'presence', kind: 'depart',
+  root: '/proj/A', peer: { convId: 'conv-push' } });
+render();
+check('push_peer_departed', !strip.querySelector('.collab-seg-peers'));
 
-// The conversation peer renders as a group containing a .presence-subagents block.
-check('sub_group_rendered', !!strip.querySelector('.presence-group'));
-check('sub_block_rendered', !!strip.querySelector('.presence-subagents'));
-// TWO distinct sub-agent rows (not collapsed into one).
-check('two_subagent_rows', strip.querySelectorAll('.presence-subagent').length === 2);
-// The parent conversation title still shows as the group header.
-check('parent_title_shown', strip.innerHTML.indexOf('Swarm session') !== -1);
-// Sub-agent backend statusLabel rendered verbatim inside the nested block.
-check('subagent_label_verbatim',
-  strip.querySelector('.presence-subagents').innerHTML.indexOf('editing lib/a.py') !== -1);
-// Group count badge counts the CONVERSATION (1 group), not 3 peers.
-check('group_count_is_1', (strip.querySelector('.presence-count') || {}).textContent === '1');
+// ── A sub-agent frame (peer.agentId set) is IGNORED by the mirror (sub-agents
+//    are deliberately not surfaced by this bar) ──
+_presenceHandler({ channel: 'presence', taskId: '*', type: 'presence', kind: 'update',
+  root: '/proj/A', peer: { convId: 'conv-swarm', agentId: 'agent-coder-1', title: 'coder',
+                           status: 'active', statusLabel: 'editing lib/a.py', lastBeatTs: Date.now() } });
+render();
+check('subagent_frame_ignored', !strip.querySelector('.collab-seg-peers'));
 
-// Departing one sub-agent leaves the other nested row + the parent.
-_handler({ channel: 'presence', taskId: '*', type: 'presence', kind: 'depart',
-  root: '/proj/A', peer: { convId: 'conv-swarm', agentId: 'agent-coder-1' } });
-check('one_subagent_left', strip.querySelectorAll('.presence-subagent').length === 1);
-check('parent_survives_subagent_depart', strip.innerHTML.indexOf('Swarm session') !== -1);
+// ── Not in project mode (displayed conv has no root) → the bar hides ──
+win.conversations = global.conversations = [{ id: 'conv-self' }];  // no projectPath
+render();
+check('no_root_hidden', strip.hidden === true);
 
 console.log(out.join('\n'));
 """
@@ -242,8 +247,8 @@ def _run():
     output = proc.stdout.strip()
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
     fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
-    assert not fails, 'presence render failures:\n' + output
-    assert output.count('PASS') >= 23, f'expected >=23 PASS lines, got:\n{output}'
+    assert not fails, 'collab-bar render failures:\n' + output
+    assert output.count('PASS') >= 20, f'expected >=20 PASS lines, got:\n{output}'
 
 
 @pytest.mark.skipif(not _node_deps_available(),

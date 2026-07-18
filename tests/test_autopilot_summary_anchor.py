@@ -1,0 +1,203 @@
+"""tests/test_autopilot_summary_anchor.py — the autopilot close-out run record
+carries a BACKEND-RESOLVED ``anchorMsgId``: the stable ``_msgId`` of the run's
+boundary turn (the last turn the run produced).
+
+WHY (the root cause this fixes)
+-------------------------------
+Historically the run record (``settings.autopilotSummaries[runId]``) carried NO
+anchor, so the FRONTEND had to re-derive each report's placement by scanning
+``_autopilotRunId`` stamps (``_apSummaryPlacements`` / ``_runBoundaryIdx`` in
+``static/js/ui/chat_render.js``). When a run's stamped turn wasn't in the loaded
+window (compaction / lazy window), the frontend fell back to "dock at the
+transcript tail" — and EVERY such run tail-docked, so reports from DIFFERENT
+runs piled up together. That is a frontend INFERENCE of a fact the backend
+owns.
+
+THE FIX (backend authority)
+---------------------------
+At conclude time the backend resolves the run's boundary turn server-side —
+where the run's turns are known — and stamps its stable ``_msgId`` as
+``record['anchorMsgId']``. The boundary is the last turn belonging to the run:
+the run's VU turn, EXTENDED forward over the trailing unstamped agent
+follow-up(s) it prompted, stopping at the next run's VU turn / a real human
+turn / end-of-list (the same rule the frontend heuristic used, now computed
+once, server-side, on a stable id — never an array index).
+
+Covered here:
+  • ``_resolve_run_anchor_msgid`` — VU-only run, follow-up extension, boundary
+    stops at the next run / a human turn, unresolvable → '', a boundary turn
+    lacking ``_msgId`` → '' (can't anchor without a stable id).
+  • ``_store_run_record`` / ``conclude_run`` stamp ``anchorMsgId`` on BOTH
+    close-out paths (the single chokepoint), and never when unresolvable.
+"""
+
+import json
+
+import pytest
+
+pytestmark = pytest.mark.unit
+
+
+def _msgs_db(monkeypatch, messages_json: str):
+    """Wire a fake DB whose ``SELECT messages`` returns the given blob."""
+    class _FakeDB:
+        def execute(self, sql, params=None):
+            class _R:
+                def fetchone(_self):
+                    return (messages_json,)
+            return _R()
+
+    import lib.database as _db
+    monkeypatch.setattr(_db, 'get_thread_db', lambda domain: _FakeDB())
+
+
+def _vu(run_id, msg_id):
+    return {'role': 'user', '_isVirtualUser': True,
+            '_autopilotRunId': run_id, '_msgId': msg_id, 'content': 'go on'}
+
+
+def _agent(msg_id, txt='reply'):
+    return {'role': 'assistant', '_msgId': msg_id, 'content': txt}
+
+
+def _human(msg_id, txt='q'):
+    return {'role': 'user', '_msgId': msg_id, 'content': txt}
+
+
+# ── _resolve_run_anchor_msgid ──────────────────────────────────────────
+
+def test_resolve_run_anchor_vu_only(monkeypatch):
+    import lib.tasks_pkg.autopilot as ap
+    msgs = [_human('m-h0', 'obj'), _vu('R1', 'm-vu1')]
+    _msgs_db(monkeypatch, json.dumps(msgs))
+    assert ap._resolve_run_anchor_msgid('conv-a', 'R1') == 'm-vu1'
+
+
+def test_resolve_run_anchor_extends_over_followup(monkeypatch):
+    """The boundary extends past the VU turn over the unstamped agent
+    follow-up it prompted — the anchor is the follow-up's _msgId."""
+    import lib.tasks_pkg.autopilot as ap
+    msgs = [_human('m-h0', 'obj'), _agent('m-a0', 'a1'),
+            _vu('R1', 'm-vu1'), _agent('m-a1', 'follow-up')]
+    _msgs_db(monkeypatch, json.dumps(msgs))
+    assert ap._resolve_run_anchor_msgid('conv-a', 'R1') == 'm-a1'
+
+
+def test_resolve_run_anchor_stops_at_next_run(monkeypatch):
+    """Two back-to-back runs: each anchor is its OWN boundary — they can never
+    collapse onto one turn."""
+    import lib.tasks_pkg.autopilot as ap
+    msgs = [_human('m-h0', 'obj'),
+            _vu('R1', 'm-vu1'), _agent('m-a1'),
+            _vu('R2', 'm-vu2'), _agent('m-a2')]
+    _msgs_db(monkeypatch, json.dumps(msgs))
+    assert ap._resolve_run_anchor_msgid('conv-a', 'R1') == 'm-a1'
+    assert ap._resolve_run_anchor_msgid('conv-a', 'R2') == 'm-a2'
+
+
+def test_resolve_run_anchor_stops_at_human(monkeypatch):
+    """A real (non-VU) human turn begins a new exchange — the run's boundary
+    stops before it, not at end-of-list."""
+    import lib.tasks_pkg.autopilot as ap
+    msgs = [_vu('R1', 'm-vu1'), _agent('m-a1'),
+            _human('m-h1', 'new q'), _agent('m-a2')]
+    _msgs_db(monkeypatch, json.dumps(msgs))
+    assert ap._resolve_run_anchor_msgid('conv-a', 'R1') == 'm-a1'
+
+
+def test_resolve_run_anchor_unresolvable_returns_empty(monkeypatch):
+    import lib.tasks_pkg.autopilot as ap
+    msgs = [_human('m-h0', 'obj'), _vu('R1', 'm-vu1')]
+    _msgs_db(monkeypatch, json.dumps(msgs))
+    assert ap._resolve_run_anchor_msgid('conv-a', 'R-absent') == ''
+
+
+def test_resolve_run_anchor_boundary_without_msgid_returns_empty(monkeypatch):
+    """A boundary turn lacking a stable _msgId cannot be anchored — return ''
+    (obeys the stream-target-resolution-by-msgid convention: never fabricate an
+    index anchor)."""
+    import lib.tasks_pkg.autopilot as ap
+    msgs = [{'role': 'user', '_isVirtualUser': True, '_autopilotRunId': 'R1',
+             'content': 'go on'}]  # no _msgId
+    _msgs_db(monkeypatch, json.dumps(msgs))
+    assert ap._resolve_run_anchor_msgid('conv-a', 'R1') == ''
+
+
+# ── _store_run_record / conclude_run stamp the anchor (both paths) ─────
+
+def _anchor_store_db(monkeypatch, state):
+    """Fake DB: ``SELECT messages`` → state['messages']; settings read/write via
+    both lib.database and settings_store namespaces."""
+    class _FakeDB:
+        def execute(self, sql, params=None):
+            class _R:
+                def __init__(self, row):
+                    self._row = row
+                def fetchone(self):
+                    return self._row
+            if 'SELECT messages' in sql:
+                return _R((state['messages'],))
+            if 'SELECT settings' in sql:
+                return _R((state['settings'],))
+            return _R(None)
+
+    def _fake_retry(db, sql, params):
+        if 'SET settings' in sql or 'settings=' in sql:
+            state['settings'] = params[0]
+
+    import lib.conversations.settings_store as _ss
+    import lib.database as _db
+    monkeypatch.setattr(_db, 'get_thread_db', lambda domain: _FakeDB())
+    monkeypatch.setattr(_db, 'db_execute_with_retry', _fake_retry)
+    monkeypatch.setattr(_ss, 'get_thread_db', lambda domain: _FakeDB())
+    monkeypatch.setattr(_ss, 'db_execute_with_retry', _fake_retry)
+
+
+def test_store_run_record_stamps_anchor_msgid(monkeypatch):
+    """_store_run_record resolves the run's boundary turn server-side and stamps
+    its _msgId as anchorMsgId on the persisted record."""
+    import lib.tasks_pkg.autopilot as ap
+    msgs = [_human('m-h0', 'obj'),
+            _vu('R1', 'm-vu1'), _agent('m-a1', 'follow-up')]
+    state = {'settings': '{}', 'messages': json.dumps(msgs)}
+    _anchor_store_db(monkeypatch, state)
+
+    rec = ap._store_run_record('conv-a', 'R1', reason='task_done',
+                               text='Outcome: shipped.')
+    assert rec is not None
+    assert rec['anchorMsgId'] == 'm-a1', 'anchor = the follow-up boundary turn'
+
+    stored = json.loads(state['settings'])['autopilotSummaries']['R1']
+    assert stored['anchorMsgId'] == 'm-a1'
+
+
+def test_conclude_run_stamps_anchor_msgid(monkeypatch):
+    """The manual-stop path (conclude_run → _store_run_record) also stamps the
+    anchor — both close-out paths carry the backend fact."""
+    import lib.tasks_pkg.autopilot as ap
+    msgs = [_human('m-h0', 'obj'), _vu('R1', 'm-vu1')]
+    state = {'settings': json.dumps({'autopilotRunId': 'R1'}),
+             'messages': json.dumps(msgs)}
+    _anchor_store_db(monkeypatch, state)
+
+    rec = ap.conclude_run('conv-a', reason='stopped')
+    assert rec is not None
+    assert rec['runId'] == 'R1'
+    assert rec['anchorMsgId'] == 'm-vu1', 'VU-only run anchors on the VU turn'
+
+
+def test_store_run_record_no_anchor_when_unresolvable(monkeypatch):
+    """When the run's turns aren't on disk (nothing to anchor to), the record
+    carries NO anchorMsgId — the frontend then uses the ts-tail last resort."""
+    import lib.tasks_pkg.autopilot as ap
+    state = {'settings': '{}', 'messages': json.dumps([_human('m-h0', 'obj')])}
+    _anchor_store_db(monkeypatch, state)
+
+    rec = ap._store_run_record('conv-a', 'R-absent', reason='task_done',
+                               text='report')
+    assert rec is not None
+    assert 'anchorMsgId' not in rec
+
+
+if __name__ == '__main__':
+    print('run via pytest')

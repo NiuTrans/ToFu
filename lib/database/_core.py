@@ -97,6 +97,94 @@ def _sql_errors_suppressed() -> bool:
     return getattr(_sql_log_local, 'suppress', False)
 
 
+# ── Process-level "PG is stopping" awareness ──
+# During a clean server shutdown the local postmaster is stopped (see
+# stop_local_pg_if_owned). Any DB write still in flight on a background daemon
+# (commit-round / profile-consolidation / a just-finished run_task's finalize
+# chain) then fails with "the database system is shutting down" /
+# "server closed the connection unexpectedly". Those are EXPECTED shutdown-race
+# errors, not bugs — but every call site would otherwise log a full ERROR
+# traceback, producing the scary multi-traceback restart log. When this flag is
+# set, the DB layer degrades those specific connection errors to a single
+# concise INFO line (no stack). Genuine errors while NOT stopping are untouched.
+_PG_STOPPING = False
+
+# Connection errors that are EXPECTED once the postmaster is stopping.
+_PG_SHUTDOWN_SIGNATURES = (
+    'the database system is shutting down',
+    'server closed the connection unexpectedly',
+    'terminating connection due to administrator command',
+    'the database system is in recovery mode',
+)
+
+
+def mark_pg_stopping():
+    """Flag that a local-PG stop is in progress, so the DB layer treats
+    connection failures as expected shutdown races (single INFO line, no
+    traceback) rather than genuine ERRORs. Idempotent."""
+    global _PG_STOPPING
+    _PG_STOPPING = True
+
+
+def pg_is_stopping() -> bool:
+    return _PG_STOPPING
+
+
+def _pg_error_is_shutdown(err_txt) -> bool:
+    """True if err_txt is an expected PG-shutting-down / connection-dropped
+    signature (matched only while a stop is in progress)."""
+    if not err_txt:
+        return False
+    return any(sig in err_txt for sig in _PG_SHUTDOWN_SIGNATURES)
+
+
+def _sql_error_is_expected_shutdown(err_txt) -> bool:
+    """True when a stop is in progress AND the error is a shutdown signature —
+    the condition under which a SQL/connection failure should log as a single
+    concise INFO line instead of a full ERROR traceback."""
+    return _PG_STOPPING and _pg_error_is_shutdown(err_txt)
+
+
+def is_expected_shutdown_error(exc) -> bool:
+    """Public predicate for UPPER-layer catch sites.
+
+    A background finalize write (checkpoint / result-sync / commit-round /
+    profile-consolidation / killed-recovery re-stamp) that races the postmaster
+    stop fails with a connection error that ORIGINATES at ``psycopg2.connect``
+    and propagates all the way up — so the DB layer cannot reformat the
+    caller's own ``exc_info=True`` log line. Those catch sites call THIS single
+    shared predicate: when it returns True they log a concise one-liner instead
+    of a full traceback. Centralises the "is this an expected shutdown race?"
+    decision in one place (never re-implemented per site). Returns True only
+    while a stop is in progress AND the error text is a shutdown signature."""
+    try:
+        return _sql_error_is_expected_shutdown(str(exc))
+    except Exception as e:
+        logger.debug('[DB] is_expected_shutdown_error probe failed: %s', e)
+        return False
+
+
+def log_db_finalize_error(log, level, exc, label):
+    """Log a background/finalize DB-write failure with shutdown awareness.
+
+    Background finalize writes (checkpoint / result-sync / commit-round /
+    profile-consolidation / killed-recovery re-stamp / queue auto-dispatch)
+    each catch their own DB exception and log it with ``exc_info=True``. During
+    a clean shutdown those are EXPECTED races, not bugs — this helper degrades
+    them to a single concise INFO line (no traceback) so the restart log stays
+    readable. When it is NOT an expected shutdown race, it logs at ``level``
+    (``'error'``/``'warning'``) WITH the traceback, exactly as before.
+
+    ``label`` is the pre-formatted context prefix (the caller interpolates its
+    own ids). Runs only on an exception path, so eager formatting is fine.
+    """
+    if is_expected_shutdown_error(exc):
+        log.info('%s — DB write aborted during shutdown (expected: %s)',
+                 label, type(exc).__name__)
+        return
+    getattr(log, level, log.warning)('%s: %s', label, exc, exc_info=True)
+
+
 class suppress_sql_error_log:
     """Context manager: demote SQL-execution-failure logs to DEBUG on this
     thread for queries that are expected to fail as normal control flow.
@@ -134,6 +222,58 @@ def _require_pg() -> bool:
     """
     from lib.env_compat import getenv_compat as _ge
     return (_ge('TOFU_REQUIRE_PG', default='') or '').strip().lower() in ('1', 'true', 'yes')
+
+
+def _pg_require_wait_s() -> float:
+    """Bounded seconds to wait for PG to come up before fail-closing.
+
+    Returns 0.0 unless ``TOFU_REQUIRE_PG`` is set — a single-box / PG-optional
+    boot must add ZERO latency and stay byte-identical to today. When PG is
+    mandatory, default to 60s (tunable via ``TOFU_PG_REQUIRE_WAIT_S``), because
+    on a self-triggered re-exec the app-owned postmaster is torn down with the
+    old process and returns within seconds; a single 5s probe that then aborts
+    turns that transient race into a hard boot failure."""
+    if not _require_pg():
+        return 0.0
+    from lib.env_compat import getenv_compat as _ge
+    raw = (_ge('TOFU_PG_REQUIRE_WAIT_S', default='') or '').strip()
+    if not raw:
+        return 60.0
+    try:
+        return max(0.0, float(raw))
+    except (ValueError, TypeError):
+        logger.warning('[DB] TOFU_PG_REQUIRE_WAIT_S=%r is not a number — '
+                       'defaulting to 60s', raw)
+        return 60.0
+
+
+def _retry_until(attempt, deadline_s: float, *, sleep=None, monotonic=None,
+                 base_backoff_s: float = 1.0, max_backoff_s: float = 8.0):
+    """Call ``attempt()`` until it returns a truthy result or the deadline.
+
+    Generic bounded-retry-with-exponential-backoff primitive. ``sleep`` and
+    ``monotonic`` are injectable for deterministic tests. When ``deadline_s``
+    is <= 0 this is exactly ONE attempt with no sleep (the byte-identical
+    single-box path). Total sleeping is clamped so it never overshoots the
+    deadline. Returns the first truthy result, else None."""
+    import time as _time
+    sleep = sleep or _time.sleep
+    monotonic = monotonic or _time.monotonic
+    start = monotonic()
+    backoff = base_backoff_s
+    while True:
+        result = attempt()
+        if result:
+            return result
+        elapsed = monotonic() - start
+        remaining = deadline_s - elapsed
+        if remaining <= 0:
+            return None
+        wait = min(backoff, max_backoff_s, remaining)
+        if wait <= 0:
+            return None
+        sleep(wait)
+        backoff *= 2
 
 
 def _assert_pg_available_or_raise(pg_ok: bool, pgdata: str = '') -> None:
@@ -208,6 +348,73 @@ DOMAIN_SYSTEM = 'system'
 _CONNECT_TIMEOUT_S = 5
 _STATEMENT_TIMEOUT_MS = 120_000
 _IDLE_IN_TRANSACTION_S = 300
+
+
+def _pg_via_pooler():
+    """True when the runtime PG connection goes through a transaction-pooling
+    tier (PgBouncer). Env-gated OFF by default → single-box/desktop behaviour
+    is byte-identical. See docs/EPIC_D §5a (managed PgBouncer HA, transaction
+    pooling) and the D2 session-state audit.
+    """
+    return os.environ.get('TOFU_PG_VIA_POOLER', '').strip().lower() in (
+        '1', 'true', 'yes', 'on')
+
+
+def _pg_session_setup_plan(via_pooler):
+    """Decide HOW to apply the two connection-scoped timeout GUCs.
+
+    Under transaction pooling a server backend is returned to the pool at every
+    COMMIT, so a connect-time ``SET SESSION`` (a) silently no-ops for the setter
+    (a later transaction may land on a different backend) and (b) LEAKS the GUC
+    to the next unrelated pool borrower. The pooler-safe form ships the SAME two
+    timeout values as libpq *startup* options (``-c statement_timeout=…``) so
+    they ride the server backend for its whole pooled lifetime and are part of
+    the pool key — never leaking, never no-op'ing — and skips the SET SESSION.
+
+    Returns ``{'emit_set_session': bool, 'options': str|None}``. With
+    ``via_pooler`` False the plan is byte-identical to the legacy path
+    (SET SESSION emitted, no libpq ``options``).
+    """
+    if not via_pooler:
+        return {'emit_set_session': True, 'options': None}
+    # Carry the SAME units as the legacy SET SESSION so the enforced timeouts
+    # are identical — only the delivery mechanism changes. libpq's default unit
+    # for these GUCs is ms, so idle_in_transaction MUST keep its 's' suffix
+    # (a bare 300 would mean 300ms, not 300s).
+    options = (f'-c statement_timeout={_STATEMENT_TIMEOUT_MS}ms '
+               f'-c idle_in_transaction_session_timeout={_IDLE_IN_TRANSACTION_S}s')
+    return {'emit_set_session': False, 'options': options}
+
+
+def _pg_admin_dsn():
+    """DSN for the DIRECT (pooler-bypassing) admin lane.
+
+    Multi-statement DDL migrations and ``VACUUM (FULL)`` / ``REINDEX`` cannot
+    run through a transaction pooler (VACUUM FULL is illegal inside a pooled
+    transaction block; a DDL ``SET SESSION`` + restore straddles a connection
+    recycle), so those paths must reach a genuinely-direct PG endpoint. Set
+    ``TOFU_PG_DIRECT_DSN`` to the real backend when the runtime DSN points at a
+    pooler (PgBouncer). Defaults to the normal ``PG_DSN`` when unset — so a
+    non-pooler deployment (the single-box default) is unaffected.
+    """
+    return os.environ.get('TOFU_PG_DIRECT_DSN', '').strip() or PG_DSN
+
+
+def _pg_connect_target(admin=False):
+    """Resolve (dsn, session_plan) for a new PG connection.
+
+    Normal connections follow the pooler decision (``_pg_via_pooler`` →
+    startup-options vs SET SESSION). An ``admin`` connection ALWAYS uses a
+    real session (SET SESSION, never the pooler startup-options form) and,
+    when pooling is on, connects to the direct DSN so it bypasses the pooler.
+
+    With pooling OFF this returns exactly the legacy target for BOTH modes
+    (normal DSN + SET SESSION), so single-box behaviour is byte-identical and
+    ``admin`` is a no-op.
+    """
+    if admin:
+        return _pg_admin_dsn(), {'emit_set_session': True, 'options': None}
+    return PG_DSN, _pg_session_setup_plan(_pg_via_pooler())
 _TCP_KEEPALIVES_IDLE_S = 30
 _TCP_KEEPALIVES_INTERVAL_S = 10
 _TCP_KEEPALIVES_COUNT = 3
@@ -230,11 +437,83 @@ _IDLE_RELEASE_S = int(getenv_compat('TOFU_DB_IDLE_RELEASE_S', default='120'))
 # semaphore — not PG's hard limit — is always the binding constraint, and an
 # overload surfaces as a clean queue/timeout instead of a PG "too many
 # clients" FATAL. Tunable via env for smaller / larger deployments.
-_MAX_TOTAL_CONNS = int(getenv_compat('TOFU_DB_MAX_CONNS', default='1000'))
-_CONN_ACQUIRE_TIMEOUT_S = int(getenv_compat('TOFU_DB_ACQUIRE_TIMEOUT', default='30'))
+
+
+def _pool_knob(name, default):
+    """Read a POOL-CRITICAL env knob with the .env FILE as authoritative.
+
+    Why not plain getenv_compat: both launchers (server.py / bootstrap.py)
+    load .env with ``if key not in os.environ`` — a *fill-if-absent* policy.
+    That means a value inherited from the container / IDE launch environment
+    SHADOWS the operator's .env file. For most knobs that's fine, but for the
+    pool ceiling / acquire timeout it is a silent-revert footgun: a stale
+    exported ``TOFU_DB_MAX_CONNS=400`` keeps overriding an intended .env=800
+    on EVERY restart (self-update, crash-reboot, container respawn), so the
+    storm-hardening never actually arms. (Observed 2026-07-16.)
+
+    Policy for these specific knobs: the .env file wins. If a live shell/env
+    export DISAGREES with the file, log a loud WARNING with BOTH values so the
+    drift is never silent, then use the file value. If there is no .env entry,
+    fall back to the environment (getenv_compat) exactly as before.
+
+    Deliberately narrow: only the pool knobs opt in, so intentional exports of
+    other TOFU_* vars keep their normal fill-if-absent precedence.
+    """
+    env_val = getenv_compat(name, default=None)
+    file_val = None
+    try:
+        env_path = os.path.join(BASE_DIR, '.env')
+        if os.path.exists(env_path):
+            with open(env_path) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith('#') or '=' not in line:
+                        continue
+                    k, _, v = line.partition('=')
+                    if k.strip() == name:
+                        file_val = v.strip()
+                        # keep last non-comment assignment (mirrors shell semantics)
+    except Exception as e:
+        logger.debug('[DB] could not read .env for %s: %s', name, e)
+
+    if file_val is not None:
+        if env_val is not None and str(env_val).strip() != file_val:
+            logger.warning(
+                '[DB] pool knob %s: shell/env export (%s) DISAGREES with .env '
+                'file (%s) — using .env value %s (file is authoritative for '
+                'pool knobs; unset the stale export at its source to silence)',
+                name, env_val, file_val, file_val)
+        return file_val
+    return env_val if env_val is not None else default
+
+
+_MAX_TOTAL_CONNS = int(_pool_knob('TOFU_DB_MAX_CONNS', default='1000'))
+_CONN_ACQUIRE_TIMEOUT_S = int(_pool_knob('TOFU_DB_ACQUIRE_TIMEOUT', default='30'))
 _conn_semaphore = threading.BoundedSemaphore(_MAX_TOTAL_CONNS)
 _conn_count = 0
 _conn_count_lock = threading.Lock()
+
+
+class PoolExhaustedError(RuntimeError):
+    """Raised when the connection semaphore times out (pool saturated).
+
+    A DISTINCT type (not a bare RuntimeError) so request handlers can catch
+    it specifically and shed load with an HTTP 503 + Retry-After — a
+    *transient overload* signal — instead of letting it surface as a generic
+    uncaught 500. A 500 makes the frontend poll loop treat the response as a
+    hard failure and retry harder, turning a momentary reconnection burst
+    (e.g. after a restart, when hundreds of tabs re-poll at once) into a
+    self-amplifying thundering-herd storm. 503 tells the client to back off.
+
+    Carries the pool snapshot at failure time for diagnosability.
+    """
+
+    def __init__(self, message, *, active=0, max_conns=0, pooled=0, tracked=0):
+        super().__init__(message)
+        self.active = active
+        self.max_conns = max_conns
+        self.pooled = pooled
+        self.tracked = tracked
 
 # ── PG self-heal / auto-rebootstrap state ──
 # When the locally-owned PG crashes silently (symptoms below), try to
@@ -770,11 +1049,15 @@ def _new_sqlite_connection():
 #  PostgreSQL Connection Factory
 # ═══════════════════════════════════════════════════════════════════════
 
-def _new_pg_connection():
+def _new_pg_connection(admin=False):
     """Create a new psycopg2 connection with full resilience parameters.
 
     Guarded by a bounded semaphore to prevent overwhelming PG with too
     many simultaneous connections (the root cause of 'too many clients').
+
+    ``admin=True`` requests the direct (pooler-bypassing) lane with a real
+    session — for multi-statement DDL and VACUUM/REINDEX, which cannot run
+    through a transaction pooler. See ``_pg_connect_target``.
     """
     global _conn_count
     if PG_PORT == 0:
@@ -816,11 +1099,12 @@ def _new_pg_connection():
                      'Tune via TOFU_DB_MAX_CONNS env var (current=%d).',
                      _CONN_ACQUIRE_TIMEOUT_S, current, _MAX_TOTAL_CONNS,
                      pooled, tracked, _MAX_TOTAL_CONNS)
-        raise RuntimeError(
+        raise PoolExhaustedError(
             f'Database connection pool exhausted ({current}/{_MAX_TOTAL_CONNS} '
             f'connections in use, {pooled} pooled, {tracked} thread-tracked). '
             f'Increase TOFU_DB_MAX_CONNS (current={_MAX_TOTAL_CONNS}) or '
-            f'check for unclosed thread-local connections.'
+            f'check for unclosed thread-local connections.',
+            active=current, max_conns=_MAX_TOTAL_CONNS, pooled=pooled, tracked=tracked,
         )
 
     import psycopg2
@@ -840,6 +1124,7 @@ def _new_pg_connection():
     json_type = psycopg2.extensions.new_type((JSON_OID,), 'JSON_AS_STR', _jsonb_as_string)
     jsonb_type = psycopg2.extensions.new_type((JSONB_OID,), 'JSONB_AS_STR', _jsonb_as_string)
 
+    _dsn, _session_plan = _pg_connect_target(admin)
     _connect_kwargs = dict(
         connect_timeout=_CONNECT_TIMEOUT_S,
         keepalives=1,
@@ -849,11 +1134,21 @@ def _new_pg_connection():
         application_name='tofu',
         gssencmode='disable',
     )
+    if _session_plan['options']:
+        _connect_kwargs['options'] = _session_plan['options']
     try:
         try:
-            conn = psycopg2.connect(PG_DSN, **_connect_kwargs)
+            conn = psycopg2.connect(_dsn, **_connect_kwargs)
         except psycopg2.OperationalError as e:
             err_txt = str(e)
+            # Expected shutdown race: the postmaster is stopping while a
+            # background finalize/daemon connection is being opened. Do NOT
+            # attempt a self-heal reboot (we are on the way down) — re-raise so
+            # the caller's finalize aborts; it logs one concise line via
+            # is_expected_shutdown_error. Checked BEFORE the dead-signature
+            # self-heal because "server closed the connection" overlaps both.
+            if _sql_error_is_expected_shutdown(err_txt):
+                raise
             # Self-heal on recognised "PG is dead" signatures. Anything
             # else (auth failure, bad host, etc.) re-raises immediately.
             if not _pg_error_is_dead(err_txt):
@@ -868,7 +1163,7 @@ def _new_pg_connection():
                 raise
             # One-shot retry after re-bootstrap
             logger.info('[DB] Retrying psycopg2.connect after PG re-bootstrap')
-            conn = psycopg2.connect(PG_DSN, **_connect_kwargs)
+            conn = psycopg2.connect(_dsn, **_connect_kwargs)
     except Exception:
         _conn_semaphore.release()
         raise
@@ -876,20 +1171,26 @@ def _new_pg_connection():
     psycopg2.extensions.register_type(jsonb_type, conn)
     conn.autocommit = False
 
-    try:
-        cur = conn.cursor()
-        cur.execute('SET SESSION statement_timeout = %s',
-                    (f'{_STATEMENT_TIMEOUT_MS}ms',))
-        cur.execute('SET SESSION idle_in_transaction_session_timeout = %s',
-                    (f'{_IDLE_IN_TRANSACTION_S}s',))
-        conn.commit()
-        cur.close()
-    except Exception as e:
-        logger.debug('[DB] Could not set session parameters (non-fatal): %s', e)
+    # Connect-time SET SESSION is applied ONLY on the non-pooler path. Under
+    # transaction pooling these are delivered as libpq startup options above
+    # (_session_plan['options']) — a SET SESSION on a pooled connection no-ops
+    # for the setter and leaks the GUC to the next pool borrower. See
+    # _pg_session_setup_plan.
+    if _session_plan['emit_set_session']:
         try:
-            conn.rollback()
-        except Exception as _rb_err:
-            logger.debug('[DB] Rollback after set-session-params also failed: %s', _rb_err)
+            cur = conn.cursor()
+            cur.execute('SET SESSION statement_timeout = %s',
+                        (f'{_STATEMENT_TIMEOUT_MS}ms',))
+            cur.execute('SET SESSION idle_in_transaction_session_timeout = %s',
+                        (f'{_IDLE_IN_TRANSACTION_S}s',))
+            conn.commit()
+            cur.close()
+        except Exception as e:
+            logger.debug('[DB] Could not set session parameters (non-fatal): %s', e)
+            try:
+                conn.rollback()
+            except Exception as _rb_err:
+                logger.debug('[DB] Rollback after set-session-params also failed: %s', _rb_err)
 
     with _conn_count_lock:
         _conn_count += 1
@@ -917,7 +1218,18 @@ def _test_pg_connection(pg_conn):
             return False
 
         idle = now - pg_conn._last_used
-        if idle < _IDLE_CHECK_S:
+        # ★ Suspend guard: time.monotonic() FREEZES while the OS is suspended
+        #   (laptop lid close / VM pause / FUSE stall), so a connection whose
+        #   backend PG killed overnight still looks "used a few seconds ago" by
+        #   the monotonic clock and the SELECT 1 probe below would be skipped —
+        #   handing a DEAD connection to the request (the recurring "server
+        #   closed the connection unexpectedly" on the first Send after
+        #   reconnecting the next day). Cross-check the WALL clock: if either
+        #   clock shows a gap >= _IDLE_CHECK_S, probe. The wall clock advances
+        #   across a suspend even when monotonic did not, so a resumed process
+        #   always probes and discards the stale connection.
+        wall_idle = time.time() - getattr(pg_conn, '_last_used_wall', 0)
+        if idle < _IDLE_CHECK_S and wall_idle < _IDLE_CHECK_S:
             return True
 
         raw.rollback()
@@ -926,6 +1238,7 @@ def _test_pg_connection(pg_conn):
         cur.fetchone()
         cur.close()
         pg_conn._last_used = now
+        pg_conn._last_used_wall = time.time()
         return True
     except Exception as e:
         logger.debug('[DB] Health check failed: %s', e)
@@ -940,6 +1253,20 @@ def _new_connection():
     """Create a new connection using the active backend."""
     if _BACKEND == 'pg':
         return _new_pg_connection()
+    return _new_sqlite_connection()
+
+
+def _new_pg_admin_connection():
+    """PG connection for the direct (pooler-bypassing) admin lane — DDL /
+    VACUUM / REINDEX. See ``_pg_connect_target``. PG-only."""
+    return _new_pg_connection(admin=True)
+
+
+def _new_admin_connection():
+    """Backend-aware admin connection. On PG this bypasses the pooler with a
+    real session; on SQLite it is an ordinary connection (no pooler concept)."""
+    if _BACKEND == 'pg':
+        return _new_pg_admin_connection()
     return _new_sqlite_connection()
 
 
@@ -1388,6 +1715,49 @@ def close_thread_db(domain=None):
 #  Write-Retry Helper
 # ═══════════════════════════════════════════════════════════════════════
 
+def _reconnect_pg_inplace(db):
+    """Swap a dead PgConnection's underlying raw connection for a fresh one.
+
+    Adopts a brand-new psycopg2 connection (and its semaphore slot) into the
+    existing ``db`` wrapper so callers holding the wrapper (request-scoped /
+    thread-local / pooled) transparently continue on a live connection. The
+    OLD raw connection is closed and its semaphore slot + global ``_conn_count``
+    released here — otherwise every reconnect permanently leaks one pool slot
+    and one PG backend (the fresh connection kept its own slot/count).
+
+    Only meaningful on the PG backend. Returns True on success, False on
+    failure (caller then re-raises the original error).
+    """
+    if _BACKEND != 'pg' or not hasattr(db, '_conn'):
+        return False
+    try:
+        old_raw = db._conn
+        fresh = _new_pg_connection()
+        try:
+            old_raw.close()
+        except Exception as _c_err:
+            logger.debug('[DB] Closing dead raw conn during reconnect failed: %s', _c_err)
+        old_sem = getattr(db, '_semaphore', None)
+        if old_sem is not None:
+            try:
+                old_sem.release()
+            except ValueError:
+                logger.debug('[DB] Old semaphore already released during reconnect')
+            with _conn_count_lock:
+                globals()['_conn_count'] = max(0, _conn_count - 1)
+        db._conn = fresh._conn
+        db._semaphore = fresh._semaphore
+        db._created_at = fresh._created_at
+        db._last_used = time.monotonic()
+        db._last_used_wall = time.time()
+        db._closed = False
+        db._dirty = False
+        return True
+    except Exception as re_err:
+        logger.warning('[DB] In-place PG reconnect failed: %s', re_err)
+        return False
+
+
 def db_execute_with_retry(db, sql, params=(), *, commit=True, max_retries=3):
     """Execute a single SQL write with retry on contention or connection loss."""
     last_err = None
@@ -1402,7 +1772,13 @@ def db_execute_with_retry(db, sql, params=(), *, commit=True, max_retries=3):
             # Determine if retryable
             is_retryable = False
             if _BACKEND == 'sqlite':
-                is_retryable = ('database is locked' in err_msg or 'busy' in err_msg)
+                # 'disk i/o error' (SQLITE_IOERR) is transient on a FUSE/NFS
+                # mount (backend hiccup → pread/pwrite EIO); a bounded retry
+                # rides out the blip instead of failing the whole task. A
+                # genuinely broken mount still exhausts max_retries and raises.
+                is_retryable = ('database is locked' in err_msg
+                                or 'busy' in err_msg
+                                or 'disk i/o error' in err_msg)
             else:
                 # PG: OperationalError, InterfaceError, SerializationFailure
                 etype = type(e).__name__
@@ -1414,34 +1790,8 @@ def db_execute_with_retry(db, sql, params=(), *, commit=True, max_retries=3):
                         logger.debug('[DB-Retry] Rollback failed: %s', _rb_err)
                     # Try to reconnect for PG connection errors
                     if etype in ('OperationalError', 'InterfaceError') and hasattr(db, '_conn'):
-                        try:
-                            old_raw = db._conn
-                            fresh = _new_pg_connection()
-                            # Adopt fresh's raw connection AND its semaphore slot.
-                            # The slot + global _conn_count tied to the dead raw
-                            # connection must be released here, otherwise every
-                            # reconnect permanently leaks one pool slot and one
-                            # PG backend (fresh kept its own slot/count).
-                            try:
-                                old_raw.close()
-                            except Exception as _c_err:
-                                logger.debug('[DB-Retry] Closing dead raw conn failed: %s', _c_err)
-                            old_sem = getattr(db, '_semaphore', None)
-                            if old_sem is not None:
-                                try:
-                                    old_sem.release()
-                                except ValueError:
-                                    logger.debug('[DB-Retry] Old semaphore already released')
-                                import lib.database._core as _core_mod
-                                with _conn_count_lock:
-                                    _core_mod._conn_count = max(0, _core_mod._conn_count - 1)
-                            db._conn = fresh._conn
-                            db._semaphore = fresh._semaphore
-                            db._created_at = fresh._created_at
-                            db._last_used = time.monotonic()
+                        if _reconnect_pg_inplace(db):
                             logger.info('[DB-Retry] Reconnected underlying PG connection (was: %s)', etype)
-                        except Exception as re_err:
-                            logger.warning('[DB-Retry] Reconnect failed: %s', re_err)
 
             if is_retryable and attempt < max_retries:
                 delay = 0.5 * (2 ** attempt)
@@ -1541,7 +1891,9 @@ def heal_toast_corruption():
 
     conn = None
     try:
-        conn = _new_connection()
+        # Admin lane: VACUUM (FULL) / REINDEX below cannot run through a
+        # transaction pooler, so bypass it (direct DSN + real session).
+        conn = _new_admin_connection()
         cur = conn.cursor()
         # Step 1 — fast health probe. If this succeeds, we're done.
         try:
@@ -1742,19 +2094,31 @@ def stop_local_pg_if_owned():
     ``lib.database`` (e.g. agent-invoked ``python3 -c ...`` commands) never
     accidentally stop the PG server used by the long-running Flask app.
 
-    Controlled by env var ``TOFU_STOP_PG_ON_EXIT`` (legacy:
-    ``TOFU_STOP_PG_ON_EXIT``; default ``1``):
-      - ``1`` / unset: stop local PG when server.py exits
-      - ``0``: leave PG running (faster dev-restart cycles, but requires
-        manual ``pg_ctl stop`` before switching hosts on shared FUSE pgdata)
+    Controlled by env var ``TOFU_STOP_PG_ON_EXIT`` (default ``0``):
+      - ``0`` / unset: leave local PG running across a server.py restart. This
+        is the default because PG is a SHARED resource: on a box with multiple
+        sibling sessions (and mid-flight/quiesced tasks) all bound to the same
+        local PG, stopping it on every code-reload restart tears every sibling's
+        DB connections out — a blast radius far larger than the one stateless
+        web process being reloaded. Leaving it up also makes restarts FASTER:
+        the next boot's ``_ensure_pg_running`` sees ``pg_isready`` OK and
+        ATTACHES instead of cold-starting a fresh postmaster. The heartbeat is
+        still cleared on exit (below) so cross-host takeover on shared FUSE
+        pgdata remains safe.
+      - ``1``: stop local PG when server.py exits (e.g. a true host shutdown, or
+        before switching hosts on shared FUSE pgdata).
 
     Never stops a REMOTE PG — that belongs to another machine.
     """
     if _BACKEND != 'pg':
         return
+    # Flag the stop BEFORE we begin, so any DB write racing on a background
+    # daemon during the teardown window is logged as an expected shutdown race
+    # (single INFO line) rather than a full ERROR traceback.
+    mark_pg_stopping()
     _stop_on_exit = getenv_compat('TOFU_STOP_PG_ON_EXIT',
-                                  default='1').lower() \
-        not in ('0', 'false', 'no', 'off')
+                                  default='0').lower() \
+        in ('1', 'true', 'yes', 'on')
     try:
         from lib.database._bootstrap import (
             _stop_pg as _boot_stop_pg,
@@ -1779,8 +2143,8 @@ def stop_local_pg_if_owned():
     try:
         if is_pg_owned_locally():
             logger.info('[DB] Stopping local PostgreSQL (we own it) — '
-                        'set TOFU_STOP_PG_ON_EXIT=0 to keep it running '
-                        'across server.py restarts')
+                        'TOFU_STOP_PG_ON_EXIT=1 was set (default is 0 = keep '
+                        'PG running across server.py restarts)')
             _boot_stop_pg(_PGDATA)
         else:
             logger.debug('[DB] Not stopping PG on exit (remote or attached, not owned by us)')
@@ -1813,7 +2177,9 @@ def init_db():
     _register_optional_domains()
     if _BACKEND == 'pg':
         from lib.database._schema_pg import init_db as _pg_schema_init
-        _pg_schema_init(_new_pg_connection, _STATEMENT_TIMEOUT_MS)
+        # Admin lane: multi-statement DDL + SET SESSION/restore below cannot run
+        # through a transaction pooler, so it connects direct (bypasses it).
+        _pg_schema_init(_new_pg_admin_connection, _STATEMENT_TIMEOUT_MS)
     else:
         from lib.database._schema_sqlite import init_db as _sqlite_schema_init
         _sqlite_schema_init(_new_sqlite_connection)
@@ -1964,18 +2330,38 @@ if _FORCE_SQLITE:
 else:
     # Try PostgreSQL
     _pg_ok = False
-    try:
-        from lib.database._bootstrap import _ensure_pg_running as _boot_ensure
-        _pg_result = _boot_ensure(_PGDATA, BASE_DIR, PG_HOST, PG_PORT, PG_USER, PG_PASSWORD, PG_DBNAME)
-        if _pg_result:
-            PG_HOST = _pg_result['PG_HOST']
-            PG_PORT = _pg_result['PG_PORT']
-            PG_DSN = _pg_result['PG_DSN']
-            _pg_ok = True
-    except ImportError as e:
-        logger.info('[DB] PG bootstrap unavailable (missing dependency: %s) — will try SQLite', e)
-    except Exception as e:
-        logger.warning('[DB] PG bootstrap failed: %s — will try SQLite', e)
+
+    def _attempt_pg_bootstrap():
+        """One full PG bootstrap attempt (probe + auto-start). Returns the
+        result dict on success, else None. Retried by _retry_until below when
+        PG is mandatory, so a transient re-exec race doesn't fail-close boot."""
+        try:
+            from lib.database._bootstrap import _ensure_pg_running as _boot_ensure
+            return _boot_ensure(_PGDATA, BASE_DIR, PG_HOST, PG_PORT, PG_USER,
+                                PG_PASSWORD, PG_DBNAME)
+        except ImportError as e:
+            logger.info('[DB] PG bootstrap unavailable (missing dependency: %s) '
+                        '— will try SQLite', e)
+            return None
+        except Exception as e:
+            logger.warning('[DB] PG bootstrap attempt failed: %s', e)
+            return None
+
+    # On a self-triggered re-exec the app-owned postmaster is coming back within
+    # seconds. When PG is MANDATORY (TOFU_REQUIRE_PG), wait for it with backoff
+    # up to a real deadline before refusing — a single-shot probe that aborts on
+    # the race is the bug. wait=0 when PG is optional → byte-identical single-box.
+    _pg_wait_s = _pg_require_wait_s()
+    if _pg_wait_s > 0:
+        logger.info('[DB] TOFU_REQUIRE_PG set — waiting up to %.0fs for '
+                    'PostgreSQL (tolerates a self-restart re-exec race) '
+                    'before fail-closing.', _pg_wait_s)
+    _pg_result = _retry_until(_attempt_pg_bootstrap, deadline_s=_pg_wait_s)
+    if _pg_result:
+        PG_HOST = _pg_result['PG_HOST']
+        PG_PORT = _pg_result['PG_PORT']
+        PG_DSN = _pg_result['PG_DSN']
+        _pg_ok = True
 
     if _pg_ok:
         # Verify psycopg2 is importable

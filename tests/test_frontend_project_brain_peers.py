@@ -61,6 +61,7 @@ const { JSDOM } = require(path.join(ROOT, 'node_modules', 'jsdom'));
 const dom = new JSDOM(
   '<!DOCTYPE html><body>' +
   '<div id="projectBrainPeersBody"><div class="pb-peers-empty">none</div></div>' +
+  '<span id="pbTabCountPeers" hidden></span>' +
   '</body>',
   { url: 'http://localhost/' });
 const win = dom.window;
@@ -83,7 +84,9 @@ const status = { peers: [
   { convId: 'convBBBB2222', title: 'Docs pass', taskStatus: '', round: 0 },
   { convId: 'convAAAA1111', agentId: 'a2', title: 'Refactor parser',
     statusLabel: 'searching' },
-]};
+// Backend-authoritative conversation count: 2 convs present (the sub-agent is
+// NOT counted). The frontend renders THIS, not a recompute from the 3 peers.
+]}; status.convCount = 2;
 
 // ── Feed: two peer notes (fromConv/toConv) + one NON-peer note (a plain
 //    'started' event) that MUST NOT leak into the thread. ──
@@ -108,11 +111,23 @@ out.dotStates = Array.from(body.querySelectorAll('.pb-peer-dot'))
 out.agentCards = body.querySelectorAll('.pb-peer-agent').length;
 out.doingText = Array.from(body.querySelectorAll('.pb-peer-doing')).map(e => e.textContent);
 out.rosterHead = (body.querySelector('.pb-peers-roster-head') || {}).textContent || '';
+// Team tab badge = backend convCount (2), NOT the 3-peer card count.
+out.badgeText = (win.document.getElementById('pbTabCountPeers') || {}).textContent || '';
+// Render-not-recompute proof: a sentinel convCount (42) matches neither
+// peers.length (3) nor a client-side agentId filter (2) — if the badge shows
+// 42, the frontend is a pure reducer over the backend field.
+P.renderPeers({ peers: status.peers, convCount: 42 }, []);
+out.badgeSentinel = (win.document.getElementById('pbTabCountPeers') || {}).textContent || '';
+// Restore the realistic render for later assertions.
+P.renderPeers(status, thread);
 // Thread
 out.threadLen = thread.length;
 out.threadKinds = thread.map(m => m.kind);
 out.msgRows = body.querySelectorAll('.pb-peer-msg').length;
 out.interveneRows = body.querySelectorAll('.pb-peer-msg-intervene').length;
+// The from/to ids in the thread carry [data-conv-id] so the panel's hover
+// preview reaches them.
+out.threadCidCount = body.querySelectorAll('.pb-peer-msg-cid[data-conv-id]').length;
 // _peerState pure check
 out.stateActive = P._peerState({ taskStatus: 'running' });
 out.stateIdle = P._peerState({ taskStatus: '' });
@@ -147,11 +162,21 @@ def test_peers_roster_and_thread_render():
     joined = ' '.join(out['doingText'])
     assert 'peerAdvancing' in joined, out          # i18n key echoed
     assert out['rosterHead'] == 'projectBrain.peersHere', out
+    # Count口径: 3 cards render (2 convs + 1 sub-agent) but the badge shows the
+    # backend convCount = 2 — a running conv's sub-agent must not inflate it
+    # above the sidebar's conversation count.
+    assert out['badgeText'] == '2', out
+    # Render-not-recompute: a sentinel convCount=42 (neither 3 nor 2) is shown
+    # verbatim, proving the frontend renders the backend field.
+    assert out['badgeSentinel'] == '42', out
     # Thread: exactly the TWO peer notes (the plain 'started' event excluded).
     assert out['threadLen'] == 2, out
     assert out['threadKinds'] == ['note', 'intervention'], out
     assert out['msgRows'] == 2, out
     assert out['interveneRows'] == 1, out
+    # Two peer notes × 2 ids each → 4 [data-conv-id] spans for hover-preview.
+    assert out['threadCidCount'] == 4, \
+        f'thread from/to ids must carry [data-conv-id] for hover preview: {out}'
     # Pure state mapping.
     assert out['stateActive'] == 'active' and out['stateIdle'] == 'idle', out
 

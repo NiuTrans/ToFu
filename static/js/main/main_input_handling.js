@@ -103,11 +103,6 @@ function _wrapSelectionNoTranslate(textarea) {
 //  Theme System
 // ══════════════════════════════════════════════════════
 const _THEMES = ["dark", "light", "tofu"];
-const _THEME_ICONS = {
-  dark: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.985 12.486a9 9 0 1 1-9.473-9.472c.405-.022.617.46.402.803a6 6 0 0 0 8.268 8.268c.344-.215.825-.004.803.401"/></svg>',
-  light: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></svg>',
-  tofu: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 11c0-3 3-5 7-5s7 2 7 5"/><path d="M5 11l1.3 6.6a2 2 0 0 0 2 1.4h7.4a2 2 0 0 0 2-1.4L19 11Z"/><path d="M3 20h18"/></svg>',
-};
 
 function _getCurrentTheme() {
   return localStorage.getItem("claude_ui_theme") || "tofu";
@@ -117,12 +112,6 @@ function applyTheme(theme) {
   /* Always set data-theme attribute — no special "no-attribute" default */
   document.documentElement.setAttribute("data-theme", theme);
   localStorage.setItem("claude_ui_theme", theme);
-  // Update cycle button icon
-  const btn = document.getElementById("themeCycleBtn");
-  if (btn) {
-    const sp = btn.querySelector("span");
-    if (sp) sp.innerHTML = _THEME_ICONS[theme] || _THEME_ICONS.dark;
-  }
   // Update picker in settings modal
   document.querySelectorAll(".theme-option").forEach((el) => {
     el.classList.toggle("active", el.dataset.theme === theme);

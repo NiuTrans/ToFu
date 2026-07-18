@@ -12,14 +12,31 @@ license = {text = "MIT"}
 dynamic = ["dependencies"]
 
 [project.optional-dependencies]
-dev = [
+# `test` is the extra CI installs (`pip install -e ".[test]"`). It carries the
+# test runner + its plugins ONLY — no linters — so a test job pulls exactly
+# what it needs. pytest itself lives HERE (it is NOT in requirements.txt), so
+# this extra must exist for CI to have a runner at all.
+test = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
-    "ruff",
+    # Parallel test execution across worker processes. The suite is ~5400
+    # tests; running it serially is the dominant CI wall-time cost. Each xdist
+    # worker is its own process → its own session fixtures → its own throwaway
+    # SQLite DB (conftest mkdtemps per session), so parallelism is isolation-safe.
+    "pytest-xdist>=3.0",
+    # Per-test hang guard so one wedged test can't stall the whole job to the
+    # CI ceiling. Use the `signal` method (default on POSIX) — the `thread`
+    # method mis-fires on the endpoint-loop tests.
+    "pytest-timeout>=2.1",
     # In-memory Redis for exercising the redis-backed runtime-state store +
     # push bus (Epics B/C/D) against a REAL redis-py client without a live
     # server. Test-only; the runtime `redis` dep it pulls is NOT core.
     "fakeredis>=2.20",
+]
+dev = [
+    # Superset of `test` plus the linter — the local contributor extra.
+    "tofu[test]",
+    "ruff",
 ]
 # Optional horizontal-scale extra: the cross-replica runtime-state backend
 # (TOFU_RUNTIME_STATE_BACKEND=redis) + push fan-out. Redis is NOT a core

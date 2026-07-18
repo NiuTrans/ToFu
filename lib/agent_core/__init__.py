@@ -61,6 +61,11 @@ CORE_MEMBERS: dict[str, str] = {
     'run_task':                'lib.tasks_pkg.orchestrator',
     '_assemble_tool_list':     'lib.tasks_pkg.model_config',
     'run_compaction_pipeline': 'lib.tasks_pkg.compaction',
+    # Persistence + activity-feed seams (host-overridable accessors)
+    'get_conversation_store':  'lib.agent_core.store',
+    'set_conversation_store':  'lib.agent_core.store',
+    'emit_activity_event':     'lib.agent_core.activity',
+    'set_activity_sink':       'lib.agent_core.activity',
     # Model communication + routing / load balancing
     'build_body':              'lib.llm',
     'chat':                    'lib.llm',

@@ -8,6 +8,51 @@
    scope — no imports / exports needed.
    ═══════════════════════════════════════════════════════════════════ */
 
+/**
+ * Ask the human how to deliver a message SENT WHILE a turn is generating.
+ * Shown ONLY when a task is already running for `convId` (caller-gated). The
+ * dialog auto-closes to the safe default ('queue') if that running turn ends
+ * while it's open (liveCheck), so a moot choice never lingers on screen.
+ *
+ * @param {string} convId
+ * @returns {Promise<'steer'|'queue'>}
+ */
+async function _promptInjectMode(convId) {
+  if (typeof showChoice !== 'function') return 'queue';  // dialog base not loaded
+  const _tt = (k, d) => (typeof t === 'function' ? (t(k) !== k ? t(k) : d) : d);
+  // Inline SVGs (§3.4 — no emoji). steer = pen-to-line (interject into the
+  // live reply); queue = stacked lines (a fresh turn in line).
+  const steerIcon =
+    '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>';
+  const queueIcon =
+    '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>';
+  const choice = await showChoice({
+    title: _tt('inject.promptTitle', '正在生成中 — 这条消息怎么发送？'),
+    options: [
+      {
+        value: 'steer',
+        label: _tt('inject.labelSteer', '插入当前回复'),
+        subtitle: _tt('inject.subSteer', '在下一个工具调用边界注入,让模型立刻看到'),
+        icon: steerIcon,
+        accent: true,
+      },
+      {
+        value: 'queue',
+        label: _tt('inject.labelQueue', '排到下一轮'),
+        subtitle: _tt('inject.subQueue', '当前回复结束后作为新一轮自动发送'),
+        icon: queueIcon,
+      },
+    ],
+    dismissValue: 'queue',
+    liveCheck: () => {
+      const c = conversations.find((x) => x.id === convId);
+      return !!(c && (c.activeTaskId || activeStreams.has(convId)));
+    },
+  });
+  return choice === 'steer' ? 'steer' : 'queue';
+}
+if (typeof window !== 'undefined') window._promptInjectMode = _promptInjectMode;
+
 async function startAssistantResponse(convId) {
   const conv = conversations.find((c) => c.id === convId);
   if (!conv || activeStreams.has(convId) || conv.activeTaskId) return;
@@ -54,7 +99,16 @@ async function startAssistantResponse(convId) {
       const _isEndpoint = (convId === activeConvId) ? endpointEnabled : (!!conv.endpointEnabled);
       if (_isEndpoint) assistantMsg._isEndpointPlanner = true;
       const role = _isEndpoint ? 'planner' : 'worker';
-      inner.insertAdjacentHTML('beforeend', _streamingBubbleHTML(role, null, null, _saMsgId));
+      /* ★ Route through ConvView.startStreaming so the insert is deduped at the
+       *   boundary (_evictByMsgId removes any node already bound to this _msgId
+       *   + any stale #streaming-msg). A raw insertAdjacentHTML here could
+       *   coexist with a drifted static bubble / leftover streaming-msg →
+       *   multiple empty "Agent" bubbles. Fallback keeps dev-mode parity. */
+      if (window.ConvView && typeof window.ConvView.startStreaming === 'function') {
+        window.ConvView.startStreaming(convId, { role, msgId: _saMsgId });
+      } else {
+        inner.insertAdjacentHTML('beforeend', _streamingBubbleHTML(role, null, null, _saMsgId));
+      }
       const el = document.getElementById('streaming-msg');
       if (el) {
         el.classList.add('message-new');
@@ -91,21 +145,16 @@ async function startAssistantResponse(convId) {
   const _ep = !!baseConfig.endpointMode;
   const _pp = baseConfig.projectPath;
   /* Decide API route: endpoint mode uses /api/v1/endpoint/start */
-  const startUrl = _ep
-    ? apiUrl("/api/v1/endpoint/start")
-    : apiUrl("/api/v1/chat/start");
   try {
-    const resp = await fetch(startUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        convId,
-        config: baseConfig,
-      }),
+    const _startBody = { convId, config: baseConfig };
+    const _startOpts = {
       signal: typeof AbortSignal.timeout === 'function'
         ? AbortSignal.timeout(30000)    // 30s timeout to prevent infinite hang
         : undefined,
-    });
+    };
+    const resp = _ep
+      ? await Api.endpoint.start(_startBody, _startOpts)
+      : await Api.chat.start(_startBody, _startOpts);
     if (!resp.ok) {
       const err = await resp
         .json()
@@ -130,12 +179,22 @@ async function startAssistantResponse(convId) {
     const _kind = e.name === 'TimeoutError' ? 'timeout'
       : e.name === 'AbortError' ? 'aborted'
       : 'network';
+    /* Fix the empty-hint hole at the source: a client-side chat-start failure
+     * MUST carry actionable guidance so it doesn't depend on which path
+     * stamped the error. This is NOT the recoverable server_offline case — the
+     * POST that starts the turn failed, so no task ran server-side and there is
+     * nothing to recover. The honest advice is check the connection and Retry
+     * (renderErrorEnvelope shows NO Recover button for kind=network). */
+    const _hint = _kind === 'network'
+      ? ((typeof t === 'function') ? t('err.net.hint')
+          : "Couldn't reach the server — check your network or proxy, then Retry.")
+      : '';
     assistantMsg.error = normalizeErrorEnvelope({
       kind: _kind,
       severity: _kind === 'aborted' ? 'warning' : 'error',
       retryable: _kind !== 'aborted',
       message: errMsg,
-      hint: '', detail: e.message || '',
+      hint: _hint, detail: e.message || '',
       model: baseConfig.model || '', context: 'chat-start', source: 'frontend-fetch', raw: e.message || '',
     });
     /* Funnel the streaming-finalize through the unified controller so
@@ -178,8 +237,9 @@ async function sendMessage() {
       const input = document.getElementById("userInput");
       const text = (input?.value || "").trim();
       if (!text && pendingImages.length === 0) return;
-      // Collect images and clear, then delegate to branch sender
-      const imgs = [...pendingImages];
+      // Wait for any still-processing images, then collect and clear.
+      await _waitForImageProcessing();
+      const imgs = [...pendingImages].filter(im => im && (im.base64 || im.url));
       pendingImages = [];
       renderImagePreviews();
       input.value = "";
@@ -208,8 +268,8 @@ async function sendMessage() {
     const r = _pendingLogClean;
     const opsDesc = r.ops.map((o) => o.desc).join("、");
     const doClean = await showConfirm(
-      `检测到日志噪音，可节省 ${r.savedChars.toLocaleString()} 字符（${r.savedPct}%）\n\n清理项: ${opsDesc}\n\n点击「确定」清理后发送，「取消」保持原文发送。`,
-      { okText: '清理并发送', cancelText: '保持原文' },
+      t('send.logNoiseConfirm', { chars: r.savedChars.toLocaleString(), pct: r.savedPct, ops: opsDesc }),
+      { okText: t('send.logNoiseClean'), cancelText: t('send.logNoiseKeep') },
     );
     if (doClean) {
       input.value = input.value.replace(r.originalText, r.cleanedText);
@@ -277,12 +337,34 @@ async function sendMessage() {
   }
   const convId = conv.id;
 
+  // ── Wait for any still-processing images (mobile: a large 2nd/3rd photo may
+  //    still be compressing/uploading when the user taps send). Without this
+  //    the [...pendingImages] snapshot below would capture an entry whose
+  //    base64 isn't ready yet — dropping the image silently. ──
+  await _waitForImageProcessing();
+
   // ── Build message payload for backend ──
+  // Snapshot images: keep only entries with usable data (base64 or an
+  // uploaded url) and strip transient processing fields (_status/_objectUrl)
+  // so a still-unready entry never reaches the backend or gets persisted.
+  const _imgSnapshot = pendingImages
+    .filter(im => im && (im.base64 || im.url))
+    .map(({ _status, _objectUrl, ...rest }) => rest);
   const msgPayload = {
     text: finalText,
-    images: [...pendingImages],
+    images: _imgSnapshot,
     pdfTexts: [...pendingPdfTexts],
     timestamp: Date.now(),
+    // ★ Mint the turn's stable _msgId HERE and ship it to the server, so the
+    //   persisted server row and the optimistic client row share ONE identity.
+    //   Without this the server mints its own UUID (build_user_msg_from_payload
+    //   → _assign_message_ids), and on a lost-ACK poor-network send the
+    //   rescue-PUT rebase (keyed on _msgId) fails to match the server's copy
+    //   and appends a DUPLICATE user bubble. Uses the same _newClientMsgId()
+    //   generator _ensureMsgId uses, so the id format is consistent and the
+    //   server (which only fills MISSING _msgId in _assign_message_ids) keeps it.
+    _msgId: (typeof _newClientMsgId === 'function') ? _newClientMsgId()
+            : ('tmp_' + Date.now() + '_' + Math.random().toString(36).slice(2, 10)),
   };
   // ── Per-turn context snapshot: freeze the workspace/tools/model that
   //    are active right now so each turn carries a note of what it ran
@@ -322,11 +404,12 @@ async function sendMessage() {
     images: msgPayload.images,
     pdfTexts: msgPayload.pdfTexts,
     timestamp: msgPayload.timestamp,
+    _msgId: msgPayload._msgId,
   };
   if (msgPayload.replyQuotes) userMsg.replyQuotes = msgPayload.replyQuotes;
   if (msgPayload.convRefs) userMsg.convRefs = msgPayload.convRefs;
   if (_turnCtx) userMsg._ctx = _turnCtx;
-  _ensureMsgId(userMsg);
+  _ensureMsgId(userMsg);  // no-op — _msgId already set from msgPayload
 
   conv._needsLoad = false;
   conv.messages.push(userMsg);
@@ -374,7 +457,18 @@ async function sendMessage() {
       newEl.classList.add("message-new");
       newEl.addEventListener('animationend', () => newEl.classList.remove('message-new'), { once: true });
     }
-    scrollToBottom(true);
+    /* ★ SCROLL FIX (send-at-bottom lands mid-history): use the real-height
+     *   path, NOT plain scrollToBottom. `.message` carries
+     *   content-visibility:auto + contain-intrinsic-size:auto 120px, so a
+     *   single-rAF `scrollTop = scrollHeight` reads an UNDER-estimated height
+     *   whenever a rendered bubble's real size isn't cached — lazy-loaded
+     *   older bubbles (_loadOlderMessages never runs a cv-off pass) or a
+     *   far-off-screen bubble whose cached size the browser evicted. It then
+     *   clamps short and the reader is parked in the middle. _forceScrollToBottom
+     *   flips cv-off (content-visibility:visible → real heights), forces a
+     *   reflow, and re-asserts across double-rAF + a 150ms timer — the exact
+     *   dance conversation-open uses. */
+    _forceScrollToBottom(null, true);
   }
 
   // ── Wait for VLM parsing before sending (after user bubble is visible) ──
@@ -402,6 +496,27 @@ async function sendMessage() {
   //   (_TRANSLATE_SEND_TIMEOUT in routes/chat.py — 45 s) so the request gets
   //   a chance to fail cleanly with a concrete reason instead of being
   //   killed locally by an opaque AbortError.
+  // ★ Inject-mode decision — the optimistic user bubble is ALREADY in the
+  //   timeline (inserted above). If a turn is CURRENTLY generating for this
+  //   conversation, ask the human HOW to deliver this message: steer it into
+  //   the running reply (injected at the next tool-call boundary) or queue it
+  //   as a fresh turn. When nothing is running this is a normal send — no
+  //   prompt, no extra UI — and injectMode stays 'queue' (a server-side no-op
+  //   with no running task). See routes/chat.py's has_running_task branch.
+  const _turnRunning = () => !!(conv.activeTaskId || activeStreams.has(convId));
+  let _injectMode = 'queue';
+  if (_turnRunning()) {
+    _injectMode = await _promptInjectMode(convId);
+    // Race: the running turn may have ENDED while the prompt was open. If so,
+    // this is now a plain send (the backend's drainable check would fall a
+    // 'steer' back to the queue anyway) — _promptInjectMode already auto-closed
+    // via liveCheck and resolved to the safe default, so nothing to fix here.
+    if (_sendGeneration !== sendGen) {
+      console.log('[sendMessage] aborted — conv switched during inject-mode prompt');
+      return;
+    }
+  }
+
   const _sendAbortCtrl = new AbortController();
   let _sendAbortReason = '';  // '' | 'timeout' | 'user-stop' | 'unmount'
   const _sendTimeout = setTimeout(() => {
@@ -416,6 +531,14 @@ async function sendMessage() {
     updateSendButton();
     renderConversationList();
     if (activeConvId === convId) _renderTranslatingBubble();
+  } else if (activeConvId === convId) {
+    /* ★ No translation → the assistant side would otherwise be BLANK for the
+     *   whole synchronous /api/chat/send POST (load → task-start). Render a
+     *   deterministic '连接中…' placeholder on the SAME #translating-msg node so
+     *   every exit path's existing _removeTranslatingBubble() tears it down,
+     *   then upgrade it in place to the streaming bubble once the POST returns
+     *   the taskId. This closes the send-side "dead-zone" (fix ①). */
+    _renderTranslatingBubble(t('sidebar.connecting'));
   }
 
   try {
@@ -429,6 +552,12 @@ async function sendMessage() {
         message: msgPayload,
         config: _sendConfig,
         settings: _sendSettings,
+        /* Composer inject lane — only meaningful server-side when a task is
+         * already running for this conversation. Decided by a post-send prompt
+         * (_promptInjectMode) shown ONLY in that case; a normal (idle) send
+         * never prompts and leaves this 'queue' (a harmless no-op server-side
+         * when nothing is running). */
+        injectMode: _injectMode,
     };
     if (conv._lastAbortedTaskId) {
       _sendBody.abortTaskId = conv._lastAbortedTaskId;
@@ -470,6 +599,38 @@ async function sendMessage() {
     }
     conv._serverMsgCount = result.msgCount || conv.messages.length;
 
+    // ★ Backend injected this as a STEER into the currently-running turn
+    //   (composer inject-mode = steer). The steer is NOT persisted as a
+    //   standalone user message — the backend represents it as a display-only
+    //   chip on the RUNNING assistant turn (USER_STEER_INJECT → the
+    //   _userSteerInjects sidecar, rehydrated by _rehydrateInjectRows). So we
+    //   MUST splice the optimistic user bubble here, exactly like the queue
+    //   lane: leaving it would show a phantom user bubble live that vanishes
+    //   into a chip on reload (the two states must match).
+    if (result.steered) {
+      console.log(
+        `%c[Steer] ➡ Server injected message into running turn for conv=${convId.slice(0,8)}`,
+        'color:#34d399;font-weight:bold'
+      );
+      if (conv.messages[userMsgIdx] === userMsg) {
+        conv.messages.splice(userMsgIdx, 1);
+        if (activeConvId === convId) {
+          const msgEl = document.getElementById('msg-' + userMsgIdx);
+          if (msgEl) msgEl.remove();
+        }
+      }
+      saveConversations(convId);
+      if (activeConvId === convId) {
+        _removeTranslatingBubble();
+      }
+      buildTurnNav(conv);
+      renderConversationList();
+      updateSendButton();
+      debugLog(t('steer.injected'), 'info');
+      if (typeof showToast === 'function') showToast(t('steer.injected'), 'success');
+      return;  // ← exit try block, falls through to finally
+    }
+
     // ★ Backend decided to queue (active task running for this conversation)
     if (result.queued) {
       console.log(
@@ -496,6 +657,8 @@ async function sendMessage() {
       renderConversationList();
       updateSendButton();
       debugLog(`消息已排队 (#${result.position})，将在当前回复结束后自动发送`, 'info');
+      if (typeof showToast === 'function')
+        showToast(t('queue.queuedToast', { n: result.position }), 'info');
       return;  // ← exit try block, falls through to finally
     }
 
@@ -550,7 +713,21 @@ async function sendMessage() {
         if (msgEl) msgEl.outerHTML = renderMessage(userMsg, userMsgIdx);
       }
       saveConversations(convId);
-      syncConversationToServer(conv);
+      /* ★ The send fetch failed/aborted, so the backend's _chat_send did NOT
+       *   persist this turn — clear the in-flight marker BEFORE the rescue
+       *   sync so it is not silently skipped by syncConversationToServer's
+       *   `_sendInFlight` guard.  Without this the PUT is a no-op and the
+       *   user's message survives only in the in-memory array → it vanishes
+       *   on the next page refresh (the poor-network data-loss bug).  The
+       *   duplicate the guard protects against cannot happen here: chat_send
+       *   threw, so there is no concurrent backend persist. */
+      conv._sendInFlight = false;
+      /* ★ Durability: if the rescue PUT fails (the same poor network that
+       *   failed the send), mark the turn _pendingSync + persist to
+       *   IndexedDB and start the retry poller so the message survives a
+       *   reload and is re-synced on reconnect. */
+      const _synced = await syncConversationToServer(conv);
+      if (!_synced) markConvPendingSync(conv);
       buildTurnNav(conv);
       Api.chat.abortConv(convId);
     } else if (e.name === 'AbortError' && _sendAbortReason === 'timeout'
@@ -587,7 +764,19 @@ async function sendMessage() {
           chatInnerEl.insertAdjacentHTML("beforeend", renderMessage(errAssistant, conv.messages.length - 1));
       }
       saveConversations(convId);
-      syncConversationToServer(conv);
+      /* ★ Same as the user-stop branch above: the send failed, so the backend
+       *   is NOT persisting this turn.  Clear `_sendInFlight` before the rescue
+       *   sync — otherwise syncConversationToServer's guard skips the PUT and
+       *   the user message + error bubble disappear on the next refresh
+       *   (poor-network data-loss). await so the PUT has a chance to land
+       *   before the user can reload. */
+      conv._sendInFlight = false;
+      /* ★ Durability: if the rescue PUT also fails (poor network), mark the
+       *   turn _pendingSync + persist to IndexedDB and start the retry poller
+       *   so the user message + error bubble survive a reload and are
+       *   re-synced automatically once connectivity returns. */
+      const _synced = await syncConversationToServer(conv);
+      if (!_synced) markConvPendingSync(conv);
       buildTurnNav(conv);
     }
   } finally {
@@ -597,9 +786,15 @@ async function sendMessage() {
     //   bubble locally (catch path, error fallback already syncs).  Either
     //   way the rescue PUT path is now safe to run again.
     conv._sendInFlight = false;
+    // ★ Unconditional teardown: the pre-POST placeholder (#translating-msg)
+    //   is now rendered whether or not we translated (fix ①), so the '连接中…'
+    //   variant must be removed here too — otherwise a generic-error exit
+    //   (which does not remove it inline) leaves an orphaned placeholder.
+    //   Idempotent no-op once the success path already swapped it for the
+    //   streaming bubble.
+    _removeTranslatingBubble();
     // ★ Always clean up translating state
     if (_willTranslate) {
-      _removeTranslatingBubble();
       conv._translating = false;
       conv._translateAborted = false;
       conv._translateAbortCtrl = null;
@@ -673,6 +868,9 @@ function _attachAutopilotFollowup(convId, payload) {
     console.warn('[Autopilot] _attachAutopilotFollowup: missing nextTaskId or vuMessage', payload);
     return;
   }
+  /* Baton consumed \u2014 clear the authoritative conv-level copy so a later
+   * finishStream / poll doesn't re-dispatch the same follow-up. */
+  delete conv._apPendingBaton;
   console.info(
     `%c[Autopilot] ▶ Attaching to follow-up task=${nextTaskId.slice(0,8)} for conv=${convId.slice(0,8)} ` +
     `vu="${(vuMessage.content||'').slice(0,80)}${(vuMessage.content||'').length>80?'…':''}"`,
@@ -787,6 +985,27 @@ function _attachAutopilotFollowup(convId, payload) {
 // ══════════════════════════════════════════════════════
 
 /**
+ * Wait for any pending images that are still compressing/uploading
+ * (`_status === 'processing'`) to finish before the send snapshot is taken.
+ * On mobile, decoding + compressing a large photo takes long enough that a
+ * user can tap send while the 2nd/3rd image is still in flight — this gate
+ * ensures every selected image's base64 is ready and none is silently dropped.
+ */
+async function _waitForImageProcessing() {
+  if (typeof pendingImages === 'undefined' || !pendingImages.length) return;
+  const MAX_IMG_WAIT = 120; // 120 × 500ms = 60s safety cap
+  for (let i = 0; i < MAX_IMG_WAIT; i++) {
+    const inFlight = pendingImages.filter(im => im && im._status === 'processing');
+    if (inFlight.length === 0) return;
+    if (i === 0) {
+      console.log(`%c[Image-Wait] Waiting for ${inFlight.length} image(s) to finish processing…`, 'color:#f59e0b;font-weight:bold');
+    }
+    await new Promise(r => setTimeout(r, 500));
+  }
+  console.warn('[Image-Wait] Timed out waiting for image processing — sending what is ready');
+}
+
+/**
  * Wait for all VLM-parsing PDFs in a user message to complete.
  * Shows a waiting indicator in the chat area while blocking.
  * This ensures the LLM always sees VLM-quality text, never rule-based.
@@ -895,19 +1114,39 @@ function renderPendingQueueUI(convId) {
     const i = _realCount++;
     const preview = item.text
       ? item.text
-      : (item.images?.length ? `${item.images.length} 张图片` : "附件");
+      : (item.images?.length ? t('queue.imagesCount', { n: item.images.length }) : t('queue.attachment'));
     // Attachment badges
     const badges = [];
     if (item.images?.length) badges.push(`<span>${item.images.length} img</span>`);
     if (item.pdfTexts?.length) badges.push(`<span>${item.pdfTexts.length} pdf</span>`);
     if (item.convRefs?.length) badges.push(`<span>${item.convRefs.length} ref</span>`);
     if (item.replyQuotes?.length) badges.push(`<span>↩ ${item.replyQuotes.length}</span>`);
+    // ── Peer/operator source line ──
+    // A queued turn from a sibling conversation (project_message / operator
+    // nudge) should name the SOURCE conversation by its TITLE (a raw id is
+    // meaningless), and let the user jump to it. Inline-styled because
+    // static/styles.css is under a sibling edit-hold.
+    let srcLine = '';
+    if (item.isPeerMessage && item.fromConv) {
+      const _title = (typeof convTitleById === 'function')
+        ? convTitleById(item.fromConv) : item.fromConv;
+      const _lbl = (typeof t === 'function')
+        ? t(item.isPeerHuman ? 'queue.fromOperator' : 'queue.fromConv')
+        : (item.isPeerHuman ? 'from operator' : 'from');
+      const _bubbleSvg = `<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>`;
+      srcLine = `<div class="queue-item-src" onclick="loadConversation('${escapeHtml(item.fromConv)}')" `
+        + `style="display:flex;align-items:center;gap:4px;font-size:11px;color:var(--text-tertiary);margin-bottom:3px;cursor:pointer;" `
+        + `title="${escapeHtml(_title)}">${_bubbleSvg}<span>${escapeHtml(_lbl)} «${escapeHtml(_title)}»</span></div>`;
+    }
     return `<div class="pending-queue-item">
       <span class="queue-item-number">${i + 1}</span>
-      <span class="queue-item-text">${escapeHtml(preview)}</span>
+      <div class="queue-item-body" style="flex:1;min-width:0;display:flex;flex-direction:column;">
+        ${srcLine}
+        <span class="queue-item-text">${escapeHtml(preview)}</span>
+      </div>
       ${badges.length ? `<span class="queue-item-attachments">${badges.join('')}</span>` : ''}
-      <button class="queue-item-cancel" onclick="removePendingQueueItem('${convId}', ${i})" title="取消此消息">✕</button>
-      ${item.queueId ? '<span class="queue-item-synced" title="已同步到服务器">☁</span>' : ''}
+      <button class="queue-item-cancel" onclick="removePendingQueueItem('${convId}', ${i})" title="${escapeHtml(t('queue.cancelMsg'))}">✕</button>
+      ${item.queueId ? `<span class="queue-item-synced" title="${escapeHtml(t('queue.syncedToServer'))}">☁</span>` : ''}
     </div>`;
   }).join("");
   const headerSvg = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v4m0 12v4M4.93 4.93l2.83 2.83m8.48 8.48l2.83 2.83M2 12h4m12 0h4M4.93 19.07l2.83-2.83m8.48-8.48l2.83-2.83"/></svg>`;
@@ -1217,8 +1456,24 @@ async function _refreshServerQueue(convId) {
       return;
     }
     if (serverQueue.length > 0) {
+      // ── Peer/operator rows are NOT input-box queue items ──
+      // A KIND_PEER_MSG row is an INBOUND delivery-in-flight signal (being
+      // consumed by the round-boundary inbox twin or the idle-drain), not an
+      // OUTBOUND message the human typed and is waiting to send. It renders in
+      // its own place — a `_renderPeerInjectRow` tool-round card when a live
+      // task drains it, or a `.peer-msg-banner` fresh turn when idle-drained —
+      // so surfacing it here would wrongly impersonate a "queued message" and
+      // pad the "N messages queued" count. Backend get_queue stays the full
+      // truth source; the queue BAR shows only real human + autopilot rows.
+      const outboundQueue = serverQueue.filter(item => item.kind !== 'peer_msg');
+      if (outboundQueue.length === 0) {
+        pendingMessageQueue.delete(convId);
+        renderPendingQueueUI(convId);
+        updateSendButton();
+        return;
+      }
       // Convert server format to local format
-      const localQueue = serverQueue.map(item => ({
+      const localQueue = outboundQueue.map(item => ({
         queueId: item.queueId,
         kind: item.kind || 'real',
         text: item.text || '',
@@ -1227,6 +1482,11 @@ async function _refreshServerQueue(convId) {
         convRefs: item.hasRefs ? ['(server)'] : [],
         replyQuotes: item.hasQuotes ? ['(server)'] : [],
         timestamp: item.timestamp,
+        // Peer/operator turn attribution (from a sibling conversation) so the
+        // queue bar can name the SOURCE conversation by title, not a raw id.
+        isPeerMessage: !!item.isPeerMessage,
+        fromConv: item.fromConv || '',
+        isPeerHuman: !!item.isPeerHuman,
       }));
       pendingMessageQueue.set(convId, localQueue);
     } else {

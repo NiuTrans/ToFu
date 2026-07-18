@@ -58,6 +58,22 @@ async function _pollFallback(convId, taskId, stream, assistantMsg) {
     try {
       const resp = await Api.chat.poll(taskId);
       if (!resp || !resp.ok) {
+        /* ★ 503 Service Unavailable = transient server overload (DB pool
+         *   saturated during a reconnection burst). This is NOT a network
+         *   failure and NOT a dead task — the server is up and the task is
+         *   still running. Feeding it to the circuit breaker would trip the
+         *   "server offline" recovery path and make every tab retry harder,
+         *   amplifying the very storm that caused the 503. Instead: honor the
+         *   Retry-After header (default 2s), do NOT increment the error
+         *   counter, and keep polling. */
+        if (resp && resp.status === 503) {
+          const _ra = parseInt(resp.headers && resp.headers.get('Retry-After'), 10);
+          const _wait = (Number.isFinite(_ra) && _ra > 0 ? _ra : 2) * 1000;
+          console.warn(`[_pollFallback] 503 server busy (pool saturated) — backing off ${_wait}ms, task still running — conv=${convId.slice(0,8)}`);
+          _consecutiveErrors = 0;
+          await new Promise((r) => setTimeout(r, _wait));
+          continue;
+        }
         if (resp && resp.status === 404) {
           console.error(`[_pollFallback] 404 NOT FOUND — taskId=${taskId.slice(0,8)} conv=${convId.slice(0,8)} ` +
             `existingContent=${assistantMsg.content?.length||0}chars existingThinking=${assistantMsg.thinking?.length||0}chars — ` +
@@ -95,6 +111,14 @@ async function _pollFallback(convId, taskId, stream, assistantMsg) {
             return;
           }
         }
+      }
+
+      /* ★ Seed the elapsed timer from the SERVER-AUTHORITATIVE task start
+       *   (createdAt, ms) so a reconnect that lands on the POLL path — the
+       *   common case on a flaky tunnel — continues from the real elapsed
+       *   instead of restarting from 0. min-guarded (only moves earlier). */
+      if (data.createdAt && typeof _seedStreamTimerStart === 'function') {
+        _seedStreamTimerStart(convId, data.createdAt);
       }
 
       /* ★ Epic C sharded-backend affinity hint. Under TOFU_RUNTIME_STATE_BACKEND
@@ -191,7 +215,18 @@ async function _pollFallback(convId, taskId, stream, assistantMsg) {
         if (data.content != null) {
           const oldLen = assistantMsg.content?.length || 0;
           const newLen = data.content.length;
-          if (newLen >= oldLen) {
+          /* ★ P1b flicker guard: once the tail is SETTLED (has finishReason —
+           *   e.g. interrupted by a crash), suppress any poll snapshot that
+           *   doesn't strictly grow the content, or that belongs to a different
+           *   task. Otherwise the competing SSE-cold vs poll folds (similar
+           *   length) swap the displayed text back and forth. A live tail
+           *   (no finishReason) is untouched — normal streaming flows through. */
+          if (typeof pollWriteWouldClobberSettledTail === 'function'
+              && pollWriteWouldClobberSettledTail(assistantMsg, taskId, data)) {
+            console.info(`[_pollFallback] settled-tail write suppressed (flicker guard) — ` +
+              `conv=${convId.slice(0,8)} finishReason=${assistantMsg.finishReason} ` +
+              `oldLen=${oldLen} newLen=${newLen} msgTask=${assistantMsg._taskId?.slice(0,8)||'none'} polled=${taskId.slice(0,8)}`);
+          } else if (newLen >= oldLen) {
             assistantMsg.content = data.content;
             if (buf) buf.content = assistantMsg.content;
           } else if (oldLen > 0 && newLen < oldLen * 0.5) {
@@ -261,6 +296,12 @@ async function _pollFallback(convId, taskId, stream, assistantMsg) {
       if (data.preferencesApplied) assistantMsg._preferencesApplied = data.preferencesApplied;
       /* ★ preferences-learned: recover "Noted: you prefer X" moment(s) */
       if (data.preferencesLearned) assistantMsg._preferencesLearned = data.preferencesLearned;
+      /* ★ inbox-inject sidecars (swarm/peer/user-steer): recover so the
+       *   in-timeline inject chips survive the poll-fallback path. Display
+       *   only — getToolRoundsFromMsg rebuilds the synthetic rows. */
+      if (data.inboxInjects) assistantMsg._inboxInjects = data.inboxInjects;
+      if (data.peerInjects) assistantMsg._peerInjects = data.peerInjects;
+      if (data.userSteerInjects) assistantMsg._userSteerInjects = data.userSteerInjects;
       /* ★ git-shim: round commit sha for redo/diff references */
       if (data.gitSha) assistantMsg._gitSha = data.gitSha;
       /* ★ Persisted cost snapshot (server-side stamp). */
@@ -275,8 +316,18 @@ async function _pollFallback(convId, taskId, stream, assistantMsg) {
         delete assistantMsg._continueApiRounds;
       }
       if (data.toolRounds) {
+        /* ★ RENDER_CONTRACT Phase 3: route the POLL toolRounds assembly through
+         *   the ONE pure reducer (projectColdSnapshot) — same projection the
+         *   live fold + cold state block use, so a poll-fallback turn's rounds
+         *   render identically to the SSE path (no jitter). Content/thinking
+         *   keep their existing keep-longer + settled-tail flicker guard above
+         *   (a routing concern, not reducer-owned). */
         const existingRounds = assistantMsg._continueToolRounds || [];
-        assistantMsg.toolRounds = existingRounds.concat(data.toolRounds);
+        const _pproj = projectColdSnapshot({
+          content: assistantMsg.content, thinking: assistantMsg.thinking,
+          toolRounds: existingRounds.concat(data.toolRounds),
+        });
+        assistantMsg.toolRounds = _pproj.toolRounds;
         if (buf) buf.toolRounds = assistantMsg.toolRounds;
       }
       if (buf) buf.phase = data.phase || null;
@@ -323,6 +374,9 @@ async function _pollFallback(convId, taskId, stream, assistantMsg) {
             _apTarget = _apConv.messages[_apConv.messages.length - 1];
           }
           _apTarget._autopilotPending = _apPayload;
+          /* ★ AUTHORITATIVE baton on the conv object (see sse_pipeline.js) —
+           *   survives a message splice that could strip the positional stamp. */
+          if (_apConv) _apConv._apPendingBaton = _apPayload;
           console.info(
             `[_pollFallback] 🤖 Autopilot follow-up attached via poll — ` +
             `next task=${data.autopilotNextTaskId.slice(0,8)} detachedCarrier=${!!_apDetached} ` +

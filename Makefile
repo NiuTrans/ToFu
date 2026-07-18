@@ -50,31 +50,51 @@ typecheck: ## Type-check the vanilla-JS frontend (tsc --checkJs, no build step)
 	npx tsc --noEmit
 
 # ── Tests ──────────────────────────────────────────────────────
+#
+# JOBS controls test parallelism (pytest-xdist). Default `auto` = one worker
+# per core — full capacity. Each worker re-imports the full `server` module,
+# which used to `mlockall()` its ~340 MB C-extension working set as
+# UNRECLAIMABLE pinned memory; under `auto` on a many-core box that was a burst
+# of tens of GB of un-reclaimable pages that OOM-reaped the pod (and any
+# co-resident live server). That root cause is fixed in tests/conftest.py
+# (TOFU_MLOCK=0 in test workers → transient, reclaimable RSS), so `auto` is now
+# safe: worker RSS is ordinary reclaimable memory the kernel can page under
+# pressure. Override with `JOBS=N` on a tight box; `JOBS=0` runs serially.
+JOBS ?= auto
+PYTEST_PARALLEL = $(if $(filter 0,$(JOBS)),,-n $(JOBS) --dist worksteal)
 
-test-unit: ## Run unit tests (no server, no browser, no network)
-	python -m pytest -m unit --tb=short -q
+# PYTEST_BASE — flags every Python test target needs in THIS env. `-p no:napari`
+# disables the stray napari pytest plugin whose import chain
+# (napari→vispy→OpenGL) crashes collection at pytest_cmdline_parse with
+# `OSError: GL ES 2.0 library not found` on a headless box. Surgical (kills only
+# the one broken plugin) rather than PYTEST_DISABLE_PLUGIN_AUTOLOAD=1, which
+# would also drop xdist/timeout/anyio and force us to re-add each by hand.
+PYTEST_BASE = -p no:napari
+
+test-unit: ## Run unit tests (parallel; override JOBS=N, JOBS=0 for serial)
+	python -m pytest $(PYTEST_BASE) -m unit $(PYTEST_PARALLEL) --timeout=300 --tb=short -q
 
 test-api: ## Run API integration tests (Flask test client + mock LLM)
-	python -m pytest -m api --tb=short -q
+	python -m pytest $(PYTEST_BASE) -m api $(PYTEST_PARALLEL) --timeout=300 --tb=short -q
 
 test-visual: ## Run Playwright visual E2E tests (needs chromium)
-	python -m pytest -m visual --tb=short -q
+	python -m pytest $(PYTEST_BASE) -m visual --tb=short -q
 
 test-e2e: ## Run the hermetic E2E smoke test (real app + real browser + stub LLM, no API key)
-	python -m pytest tests/test_e2e_smoke.py -m visual -ra --tb=short -q
+	python -m pytest $(PYTEST_BASE) tests/test_e2e_smoke.py -m visual -ra --tb=short -q
 
 test-frontend: ## Run frontend tests (jsdom harnesses + tsc ratchet — needs `npm install`)
 	@if [ ! -d node_modules/jsdom ]; then echo '⚠️  Run `npm install` first (installs jsdom + typescript dev-deps)'; exit 1; fi
-	python -m pytest tests/test_frontend_*.py -ra --tb=short -q
+	python -m pytest $(PYTEST_BASE) tests/test_frontend_*.py $(PYTEST_PARALLEL) --timeout=180 -ra --tb=short -q
 
 test-all: ## Run all tests (unit + api + visual)
-	python -m pytest --tb=short -q
+	python -m pytest $(PYTEST_BASE) --tb=short -q
 
 test-coverage: ## Run unit + api tests with coverage report
-	python -m pytest -m "unit or api" --cov=lib --cov=routes --cov-report=term-missing --tb=short -q
+	python -m pytest $(PYTEST_BASE) -m "unit or api" --cov=lib --cov=routes --cov-report=term-missing --tb=short -q
 
 smoke: ## Run smoke tests only (import validation, cross-platform, syntax)
-	python -m pytest tests/test_smoke.py -m unit --tb=short -v
+	python -m pytest $(PYTEST_BASE) tests/test_smoke.py -m unit --tb=short -v
 
 # ── Diagnostics ────────────────────────────────────────────────
 

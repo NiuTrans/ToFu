@@ -110,6 +110,16 @@ const _SW_STATUS_SVG = {
    sooner when the server is reachable; this is the offline fallback so an
    open tab still self-corrects visually without a manual refresh. */
 const _SW_STALE_MS = 30 * 60 * 1000;
+/* How long a backend `active===true` confirmation (stamped on the round by
+   _reconcileStuckSwarmPanels as `_swActiveConfirmedAt`) suppresses the
+   wall-clock staleness guess. The reconciler sweeps every 20s and skips a
+   conv that is actively streaming (its own SSE/poll is authoritative there),
+   so a live long swarm gets re-confirmed each sweep; 90s (>4 sweeps) tolerates
+   a couple of missed/slow sweeps before the age fallback is allowed to speak
+   again. This is what makes `isStale` a genuine OFFLINE residual: it can only
+   fire when the backend fact is ABSENT or STALE (server unreachable), never
+   against a fresh known-active verdict. */
+const _SW_ACTIVE_CONFIRM_TTL_MS = 90 * 1000;
 function _swStatusIcon(status) {
   if (status === 'done' || status === 'completed') return _SW_STATUS_SVG.done;
   if (status === 'failed' || status === 'error') return _SW_STATUS_SVG.failed;
@@ -156,17 +166,24 @@ function _swarmResultsByAgent(allRounds) {
         });
       }
     }
-    if (payload.agent_id && (payload.final_answer || payload.found)) {
-      // get_agent_result: `status:'ok'` is the wrapper status, not the agent
-      // status — derive the agent status from error/final_answer presence.
-      const agentStatus = payload.error
+    // get_agent_result: single mode carries the agent fields at top level;
+    // batch mode (agent_ids[]) carries a `results` array of the same shape.
+    // Normalise both to a flat list of per-agent entries.
+    const gaEntries = Array.isArray(payload.results)
+      ? payload.results
+      : (payload.agent_id ? [payload] : []);
+    for (const ent of gaEntries) {
+      if (!ent || !ent.agent_id || !(ent.final_answer || ent.found)) continue;
+      // `status:'ok'` is the wrapper status, not the agent status — derive the
+      // agent status from error/final_answer presence.
+      const agentStatus = ent.error
         ? "failed"
-        : (payload.final_answer ? "completed" : payload.status);
-      _merge(payload.agent_id, {
-        role: payload.role, objective: payload.objective, status: agentStatus,
-        elapsed: payload.elapsed, tokens: payload.tokens,
-        preview: payload.final_answer || "", error: payload.error,
-        toolCallCount: payload.tool_calls,
+        : (ent.final_answer ? "completed" : ent.status);
+      _merge(ent.agent_id, {
+        role: ent.role, objective: ent.objective, status: agentStatus,
+        elapsed: ent.elapsed, tokens: ent.tokens,
+        preview: ent.final_answer || "", error: ent.error,
+        toolCallCount: ent.tool_calls,
       });
     }
   }
@@ -303,17 +320,31 @@ function _buildSwarmPanelHTML(round, allRounds) {
       round._swarmEndTime = round._swarmStartTime || Date.now();
     }
   }
-  /* ── Staleness guard (Option 1) ──
-     A panel still flagged active/async with no frozen end time, whose
-     start is older than _SW_STALE_MS, is a zombie: the terminal
+  /* ── Staleness guard (age fallback, OFFLINE residual only) ──
+     A panel still flagged active/async with no frozen end time, whose start is
+     older than _SW_STALE_MS, MIGHT be a zombie: the terminal
      swarm_phase:complete event never reached this tab (server restart /
-     dropped SSE). Render it as settled-but-unconfirmed rather than ticking
-     "Running" forever. Cheap, local, needs no backend round-trip. */
+     dropped SSE).
+
+     Root-cause guard (FE-inference-debt #1): the wall-clock age is a GUESS and
+     must NEVER override a known backend fact. _reconcileStuckSwarmPanels probes
+     Api.swarm.status(taskId) and, when the backend reports `active===true`,
+     stamps `_swActiveConfirmedAt` on the round. While that confirmation is
+     fresh, the swarm is AUTHORITATIVELY still alive (a big multi-agent wave can
+     legitimately run well past 30 min) — so we suppress the age guess entirely.
+     The age fallback is thus reachable ONLY when NO fresh backend fact exists
+     (server unreachable → the reconciler's probe returned null / never ran), so
+     an open offline tab still self-corrects a genuine zombie without a manual
+     refresh, exactly as before — but a genuinely long, backend-confirmed-alive
+     swarm is never mislabeled "Stale". */
   const _swStartedAt = round._swarmStartTime || 0;
+  const _backendConfirmedActive = !!round._swActiveConfirmedAt
+    && (Date.now() - round._swActiveConfirmedAt) < _SW_ACTIVE_CONFIRM_TTL_MS;
   const isStale = !round._swarmEndTime
     && (round._swarmActive || round._asyncRunning)
     && _swStartedAt > 0
-    && (Date.now() - _swStartedAt) > _SW_STALE_MS;
+    && (Date.now() - _swStartedAt) > _SW_STALE_MS
+    && !_backendConfirmedActive;
   const isActive = !isStale && (round.status === "searching" || round._swarmActive);
   const total = agents.length;
   const running = agents.filter(a => a.status === "running" || a.status === "thinking").length;
@@ -648,6 +679,112 @@ function _buildSwarmDoneHTML(round, showNums, allRounds) {
   `</div>`;
 }
 
+/* ── In-place panel morph (flicker fix) ──
+ * Every swarm_* SSE event (per-agent phase, each streamed preview char, each
+ * tool-call tick) previously did `slot.innerHTML = _buildSwarmPanelHTML(...)`,
+ * tearing down and recreating the ENTIRE `.sw-panel` subtree many times a
+ * second. Two visible consequences: (1) `.sw-panel.sw-active` carries
+ * `animation:swarmBorderPulse 2.5s infinite`, and a brand-new node RESTARTS
+ * that animation from 0% on every rebuild → the border/box-shadow flashes;
+ * (2) any agent card / tool-call row the user manually expanded collapses.
+ *
+ * `_morphSwarmSlot` patches the existing panel IN PLACE instead: it reuses
+ * the live `.sw-panel` DOM node (animation clock keeps running uninterrupted),
+ * recurses the tree syncing only changed attributes + text, and treats the
+ * user-toggle classes below as OLD-node-authoritative so an expanded card
+ * survives a re-render — the same surgical-diff principle the 1 Hz timer
+ * ticker already uses for `[data-sw-start]`, and that `renderChat`'s
+ * `data-mfp` diff uses for message bubbles. Node identity is preserved by
+ * index (agents/tool-calls are append-only and never reordered), so an
+ * agent's ID-remap just updates `data-agent-id` on the same node. */
+const _SW_PRESERVE_CLASSES = ["sw-collapsed", "sw-a-open", "sw-tl-open"];
+
+function _swSyncAttrs(oldEl, newEl) {
+  /* Remove attributes gone from the new render. */
+  for (const attr of Array.from(oldEl.attributes)) {
+    if (attr.name !== "class" && !newEl.hasAttribute(attr.name)) {
+      oldEl.removeAttribute(attr.name);
+    }
+  }
+  /* Add / update changed attributes (class handled separately). */
+  for (const attr of Array.from(newEl.attributes)) {
+    if (attr.name === "class") continue;
+    if (oldEl.getAttribute(attr.name) !== attr.value) {
+      oldEl.setAttribute(attr.name, attr.value);
+    }
+  }
+  /* Class: take the new class set, but let the OLD node's user-toggle
+     classes win — a card the user expanded (added `sw-a-open`) or a panel
+     they collapsed (`sw-collapsed`) must not be reset by the fresh render. */
+  const newSet = new Set((newEl.getAttribute("class") || "").split(/\s+/).filter(Boolean));
+  for (const c of _SW_PRESERVE_CLASSES) {
+    if (oldEl.classList.contains(c)) newSet.add(c);
+    else newSet.delete(c);
+  }
+  const finalCls = Array.from(newSet).join(" ");
+  if ((oldEl.getAttribute("class") || "") !== finalCls) {
+    oldEl.setAttribute("class", finalCls);
+  }
+}
+
+function _swMorphNode(oldNode, newNode) {
+  /* Text node → update value only when it actually changed (no-op = no
+     flicker while a preview streams char-by-char). */
+  if (oldNode.nodeType === 3 && newNode.nodeType === 3) {
+    if (oldNode.nodeValue !== newNode.nodeValue) oldNode.nodeValue = newNode.nodeValue;
+    return;
+  }
+  /* Different node type, or different element tag → replace outright. */
+  if (oldNode.nodeType !== newNode.nodeType
+      || (oldNode.nodeType === 1 && oldNode.tagName !== newNode.tagName)) {
+    if (oldNode.parentNode) oldNode.parentNode.replaceChild(newNode.cloneNode(true), oldNode);
+    return;
+  }
+  if (oldNode.nodeType === 1) {
+    _swSyncAttrs(oldNode, newNode);
+    _swMorphChildren(oldNode, newNode);
+  }
+  /* comments / other node types: leave untouched */
+}
+
+function _swMorphChildren(oldParent, newParent) {
+  const oldNodes = Array.from(oldParent.childNodes);
+  const newNodes = Array.from(newParent.childNodes);
+  for (let i = 0; i < newNodes.length; i++) {
+    const on = oldNodes[i];
+    if (!on) {
+      /* New trailing node (e.g. a freshly-spawned agent card, an appended
+         tool-call row) — clone it in; only this new node touches the DOM. */
+      oldParent.appendChild(newNodes[i].cloneNode(true));
+      continue;
+    }
+    _swMorphNode(on, newNodes[i]);
+  }
+  /* Remove surplus old children (from the tail, so indices stay valid). */
+  for (let i = oldNodes.length - 1; i >= newNodes.length; i--) {
+    oldParent.removeChild(oldNodes[i]);
+  }
+}
+
+/* Patch `slot`'s existing swarm panel toward `html` in place. Falls back to a
+   full `innerHTML` set on first render or if the panel root is absent /
+   structurally different (a genuine replace, not a per-event churn). */
+function _morphSwarmSlot(slot, html) {
+  const existing = slot.firstElementChild;
+  if (!existing || !(existing.classList && existing.classList.contains("sw-panel"))) {
+    slot.innerHTML = html;
+    return;
+  }
+  const tpl = document.createElement("template");
+  tpl.innerHTML = html;
+  const fresh = tpl.content.firstElementChild;
+  if (!fresh || fresh.tagName !== existing.tagName) {
+    slot.innerHTML = html;
+    return;
+  }
+  _swMorphNode(existing, fresh);
+}
+
 /* ── Stuck swarm-panel reconciler (Option 2) ──
  * The live `_swarmActive` / `_asyncRunning` flags are cleared ONLY by a
  * terminal `swarm_phase:complete` SSE event (sse_handlers_swarm.js) or an
@@ -769,9 +906,32 @@ async function _reconcileStuckSwarmPanels() {
         }
       }
     }
-    /* status.active === true → genuinely still running; leave the panel and
-       its guard untouched so a later sweep re-confirms (cheap, the active
-       pill is correct meanwhile). */
+    /* status.active === true → genuinely still running. Stamp a
+       backend-authoritative liveness fact on every panel of this task so the
+       wall-clock staleness guess (_SW_STALE_MS) is SUPPRESSED while this
+       confirmation is fresh — a long, backend-confirmed-alive swarm must never
+       render "Stale". The stamp is refreshed each sweep; when the backend
+       later reports inactive (or becomes unreachable) the confirmation ages
+       out and the normal settle / offline-fallback paths take over. */
+    if (status.active === true) {
+      const now = Date.now();
+      const convsToRender = new Set();
+      for (const { conv, round } of entries) {
+        round._swActiveConfirmedAt = now;
+        convsToRender.add(conv);
+      }
+      for (const conv of convsToRender) {
+        try {
+          if (typeof activeConvId !== "undefined" && conv.id === activeConvId
+              && typeof renderChat === "function") {
+            renderChat(conv);
+          }
+          if (typeof saveConversations === "function") saveConversations(conv.id);
+        } catch (e) {
+          console.warn("[Swarm] reconcile active-confirm re-render failed: " + (e && e.message));
+        }
+      }
+    }
   }
 }
 if (typeof window !== 'undefined' && !window._swReconcileTicker) {

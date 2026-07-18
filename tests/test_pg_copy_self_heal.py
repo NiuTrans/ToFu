@@ -36,7 +36,7 @@ def _markers(pgdata, owner_ip='10.0.0.9'):
 # ── Instance stamp ────────────────────────────────────────────────────
 
 def test_stamp_written_and_read(tmp_path):
-    from lib.database import _bootstrap as b
+    from lib.database import _pg_ownership as b
     pgdata = str(tmp_path)
     b._write_instance_stamp(pgdata)
     stamp = b._read_instance_stamp(pgdata)
@@ -47,7 +47,7 @@ def test_stamp_written_and_read(tmp_path):
 
 def test_stamp_stable_id_on_restamp_same_path(tmp_path):
     """Re-stamping the same path keeps the original id (idempotent)."""
-    from lib.database import _bootstrap as b
+    from lib.database import _pg_ownership as b
     pgdata = str(tmp_path)
     b._write_instance_stamp(pgdata)
     first = b._read_instance_stamp(pgdata)['id']
@@ -57,7 +57,7 @@ def test_stamp_stable_id_on_restamp_same_path(tmp_path):
 
 def test_missing_stamp_is_not_a_copy(tmp_path):
     """Legacy pgdata with no stamp must NOT be flagged as copied."""
-    from lib.database import _bootstrap as b
+    from lib.database import _pg_ownership as b
     was_copied, stamped = b._pgdata_was_copied(str(tmp_path))
     assert was_copied is False
 
@@ -65,7 +65,7 @@ def test_missing_stamp_is_not_a_copy(tmp_path):
 # ── Copy detection ──────────────────────────────────────────────────────
 
 def test_copy_detected_when_path_differs(tmp_path):
-    from lib.database import _bootstrap as b
+    from lib.database import _pg_ownership as b
     pgdata = str(tmp_path)
     # Stamp claims the directory was created at a DIFFERENT path.
     with open(os.path.join(pgdata, '.pg_instance_id'), 'w') as f:
@@ -77,7 +77,7 @@ def test_copy_detected_when_path_differs(tmp_path):
 
 
 def test_no_copy_when_path_matches(tmp_path):
-    from lib.database import _bootstrap as b
+    from lib.database import _pg_ownership as b
     pgdata = str(tmp_path)
     b._write_instance_stamp(pgdata)  # stamps the real current path
     was_copied, _ = b._pgdata_was_copied(pgdata)
@@ -87,7 +87,7 @@ def test_no_copy_when_path_matches(tmp_path):
 # ── Heal + Step-3 integration ───────────────────────────────────────────
 
 def test_heal_clears_markers_on_copy(tmp_path):
-    from lib.database import _bootstrap as b
+    from lib.database import _pg_ownership as b
     pgdata = str(tmp_path)
     _markers(pgdata)
     with open(os.path.join(pgdata, '.pg_instance_id'), 'w') as f:
@@ -100,7 +100,7 @@ def test_heal_clears_markers_on_copy(tmp_path):
 
 
 def test_heal_noop_when_not_copied(tmp_path):
-    from lib.database import _bootstrap as b
+    from lib.database import _pg_ownership as b
     pgdata = str(tmp_path)
     _markers(pgdata)
     b._write_instance_stamp(pgdata)  # same path → not copied
@@ -110,7 +110,7 @@ def test_heal_noop_when_not_copied(tmp_path):
 
 def test_step3_reports_no_remote_when_copied(tmp_path, monkeypatch):
     """The key regression: a copied pgdata must NOT defer to the source PG."""
-    from lib.database import _bootstrap as b
+    from lib.database import _pg_ownership as b
     pgdata = str(tmp_path)
     _markers(pgdata, owner_ip='10.0.0.9')
     with open(os.path.join(pgdata, '.pg_instance_id'), 'w') as f:
@@ -124,7 +124,7 @@ def test_step3_reports_no_remote_when_copied(tmp_path, monkeypatch):
 
 def test_step3_still_defers_for_same_path_remote(tmp_path, monkeypatch):
     """Same-path multi-host failover must be preserved (no false heal)."""
-    from lib.database import _bootstrap as b
+    from lib.database import _pg_ownership as b
     pgdata = str(tmp_path)
     _markers(pgdata, owner_ip='10.0.0.9')
     b._write_instance_stamp(pgdata)  # stamp matches current path → not a copy
@@ -145,13 +145,13 @@ def test_step3_still_defers_for_same_path_remote(tmp_path, monkeypatch):
 # explicit TOFU_PG_STANDALONE flag clears an inherited REMOTE owner instead.
 
 def test_standalone_mode_off_by_default(tmp_path, monkeypatch):
-    from lib.database import _bootstrap as b
+    from lib.database import _pg_ownership as b
     monkeypatch.delenv('TOFU_PG_STANDALONE', raising=False)
     assert b._standalone_mode() is False
 
 
 def test_standalone_heal_clears_remote_owner(tmp_path, monkeypatch):
-    from lib.database import _bootstrap as b
+    from lib.database import _pg_ownership as b
     pgdata = str(tmp_path)
     _markers(pgdata, owner_ip='10.0.0.9')
     b._write_instance_stamp(pgdata)  # same path → copy-detect WON'T fire
@@ -165,7 +165,7 @@ def test_standalone_heal_clears_remote_owner(tmp_path, monkeypatch):
 
 
 def test_standalone_noop_when_flag_unset(tmp_path, monkeypatch):
-    from lib.database import _bootstrap as b
+    from lib.database import _pg_ownership as b
     pgdata = str(tmp_path)
     _markers(pgdata, owner_ip='10.0.0.9')
     monkeypatch.delenv('TOFU_PG_STANDALONE', raising=False)
@@ -177,7 +177,7 @@ def test_standalone_noop_when_flag_unset(tmp_path, monkeypatch):
 
 def test_standalone_noop_when_owner_is_local(tmp_path, monkeypatch):
     """Owner marker pointing at THIS host is not 'inherited' — leave it."""
-    from lib.database import _bootstrap as b
+    from lib.database import _pg_ownership as b
     pgdata = str(tmp_path)
     _markers(pgdata, owner_ip='10.0.0.50')
     monkeypatch.setenv('TOFU_PG_STANDALONE', '1')
@@ -189,7 +189,7 @@ def test_standalone_noop_when_owner_is_local(tmp_path, monkeypatch):
 
 def test_standalone_noop_when_pidfile_is_live_local_pg(tmp_path, monkeypatch):
     """IP flap guard: our own live postmaster must never be clobbered."""
-    from lib.database import _bootstrap as b
+    from lib.database import _pg_ownership as b
     pgdata = str(tmp_path)
     _markers(pgdata, owner_ip='10.0.0.9')
     monkeypatch.setenv('TOFU_PG_STANDALONE', '1')
@@ -202,7 +202,7 @@ def test_standalone_noop_when_pidfile_is_live_local_pg(tmp_path, monkeypatch):
 
 def test_step3_no_defer_in_standalone_with_remote_owner(tmp_path, monkeypatch):
     """End-to-end: standalone + same-path remote owner → take over locally."""
-    from lib.database import _bootstrap as b
+    from lib.database import _pg_ownership as b
     pgdata = str(tmp_path)
     _markers(pgdata, owner_ip='10.0.0.9')
     b._write_instance_stamp(pgdata)  # not a copy
@@ -217,7 +217,7 @@ def test_step3_no_defer_in_standalone_with_remote_owner(tmp_path, monkeypatch):
 
 def test_step3_still_defers_same_path_remote_when_not_standalone(tmp_path, monkeypatch):
     """Regression guard: failover preserved when TOFU_PG_STANDALONE is unset."""
-    from lib.database import _bootstrap as b
+    from lib.database import _pg_ownership as b
     pgdata = str(tmp_path)
     _markers(pgdata, owner_ip='10.0.0.9')
     b._write_instance_stamp(pgdata)
@@ -235,7 +235,7 @@ def test_step3_still_defers_same_path_remote_when_not_standalone(tmp_path, monke
 # ── Marker clearing helper ──────────────────────────────────────────────
 
 def test_clear_ownership_markers_keeps_data(tmp_path):
-    from lib.database import _bootstrap as b
+    from lib.database import _pg_ownership as b
     pgdata = str(tmp_path)
     _markers(pgdata)
     os.makedirs(os.path.join(pgdata, 'base'))  # stand-in for data
@@ -265,7 +265,7 @@ def test_cli_status_runs_on_copied(tmp_path, capsys):
 
 def test_cli_reset_ownership_clears(tmp_path, capsys, monkeypatch):
     from lib.database import pg_admin
-    from lib.database import _bootstrap as b
+    from lib.database import _pg_ownership as b
     pgdata = str(tmp_path)
     _markers(pgdata)
     # Pidfile is not a live local postgres → reset is allowed.
@@ -279,7 +279,7 @@ def test_cli_reset_ownership_clears(tmp_path, capsys, monkeypatch):
 
 def test_cli_reset_refuses_live_local_pg(tmp_path, monkeypatch):
     from lib.database import pg_admin
-    from lib.database import _bootstrap as b
+    from lib.database import _pg_ownership as b
     pgdata = str(tmp_path)
     _markers(pgdata)
     monkeypatch.setattr(b, '_pidfile_pid_is_live_local_postgres', lambda pg: True)

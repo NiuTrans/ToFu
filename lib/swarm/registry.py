@@ -14,6 +14,7 @@ model names without any hardcoded defaults.
 import threading
 from typing import Any
 
+from lib.agent_verdict import VU_ROLE_PROMPT as _VU_ROLE_PROMPT_SHARED
 from lib.log import get_logger
 
 logger = get_logger(__name__)
@@ -390,14 +391,15 @@ AGENT_ROLES: dict[str, dict[str, Any]] = {
             'natural stop to keep a task progressing without a real human, '
             'until the assistant has clearly finished.'
         ),
-        'system_prompt_suffix': (
-            'You are a VIRTUAL USER standing in for the human. Reply in 1-3 '
-            'sentences, in the same language as the assistant, to keep the '
-            'task moving forward. For engineering tasks prefer the most '
-            'robust long-term solution. Output ONLY the reply text. Emit '
-            'exactly [VU: TASK_DONE] when the assistant has clearly '
-            'completed the task.'
-        ),
+        # SINGLE SOURCE: the VU persona is defined once in
+        # lib.agent_verdict.VU_ROLE_PROMPT and shared with the live standalone
+        # autopilot loop (lib/tasks_pkg/autopilot._VU_ROLE_PROMPT). This used
+        # to be a hand-copied 3-sentence paraphrase that had drifted from the
+        # ~2000-char original (verification discipline + the mandatory
+        # [PROGRESS: resolved=X remaining=Y] hard-signal line were lost);
+        # importing the shared constant kills that drift permanently.
+        # tests/test_vu_prompt_single_source.py pins the identity.
+        'system_prompt_suffix': _VU_ROLE_PROMPT_SHARED,
         'tools_hint': [],
         'model_hint': 'standard',
     },
@@ -418,6 +420,17 @@ def get_role_config(role: str) -> dict[str, Any]:
     return AGENT_ROLES.get(role, AGENT_ROLES['general'])
 
 
+# Roles that exist for the endpoint/autopilot FlowExecutor paths but are NOT
+# meant to be spawned manually via ``spawn_agents``. They carry prompts that
+# only make sense inside their host loop (a lone ``virtual_user`` or ``critic``
+# sub-agent has nothing to drive). ``get_role_config`` still resolves them for
+# endpoint mode; they are excluded ONLY from the manual-spawn catalogue so the
+# ``role`` param and the catalogue advertise the same 7 spawnable roles.
+_CATALOGUE_EXCLUDED_ROLES = frozenset({
+    'planner', 'worker', 'critic', 'virtual_user',
+})
+
+
 def format_role_catalogue() -> str:
     """Return a multi-line "role: when_to_use" listing for prompt injection.
 
@@ -427,9 +440,15 @@ def format_role_catalogue() -> str:
     without an explicit role catalogue the model has no idea which
     role to pick and either falls back to ``general`` or doesn't spawn
     at all.
+
+    Only MANUALLY-SPAWNABLE roles are listed; endpoint/autopilot-internal
+    roles (see :data:`_CATALOGUE_EXCLUDED_ROLES`) are omitted so the catalogue
+    matches the ``role`` param's advertised set.
     """
     lines = []
     for role, cfg in AGENT_ROLES.items():
+        if role in _CATALOGUE_EXCLUDED_ROLES:
+            continue
         when = cfg.get('when_to_use', '').strip().replace('\n', ' ')
         lines.append(f'  - {role}: {when}')
     return '\n'.join(lines)

@@ -30,9 +30,41 @@
 
 /* Find a conversation object by id (best-effort; returns null if unknown). */
 function _toolsetConv(convId) {
-  if (!convId || typeof conversations === 'undefined') return null;
-  return conversations.find((c) => c.id === convId) || null;
+  return getConvById(convId);
 }
+
+/* Collapse a flat list of tool function-names into display entries.
+
+   MCP tools (`mcp__{server}__{tool}`) are the reason this list explodes — a
+   single MCP server can contribute dozens of tools (github ×28, hope ×40, …),
+   which used to render one chip each and overflow the composer. We aggregate
+   them into ONE entry per server carrying a count (`MCP github ×28`), and
+   leave the handful of built-in composer-toggle tools as individual entries.
+   Returns an ordered array of `{label, count}` (MCP groups first, in
+   first-seen order, then plain tools). */
+function _collapseToolNames(names) {
+  const mcpCount = new Map();      // server → count
+  const mcpOrder = [];             // first-seen server order
+  const plain = [];                // non-MCP tools, individually
+  for (const raw of (names || [])) {
+    const name = String(raw);
+    if (name.indexOf('mcp__') === 0) {
+      // mcp__{server}__{tool} — server is the segment before the 2nd `__`
+      // (server names may contain single dashes, e.g. `github-batch`).
+      const server = name.slice(5).split('__')[0] || name.slice(5);
+      if (!mcpCount.has(server)) { mcpCount.set(server, 0); mcpOrder.push(server); }
+      mcpCount.set(server, mcpCount.get(server) + 1);
+    } else {
+      plain.push({ label: name, count: 1 });
+    }
+  }
+  const grouped = mcpOrder.map((s) => ({ label: 'MCP ' + s, count: mcpCount.get(s) }));
+  return grouped.concat(plain);
+}
+
+// Never render more than this many chips inline — anything beyond collapses
+// into a single "…and N more" chip so the banner can't overflow the composer.
+const _MAX_TOOL_CHIPS = 24;
 
 /* Render the added/removed tool chips into the banner text line. When no
    diff is available we fall back to the static i18n "pending" message. */
@@ -48,16 +80,26 @@ function _renderToolsetDiff(diff) {
       : '工具改动将在新会话生效（保持缓存命中）';
     return;
   }
-  const esc = (s) => String(s).replace(/[&<>"]/g, (c) => (
-    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-  const chip = (name, kind) =>
-    `<span class="toolset-diff-chip ${kind}">${kind === 'added' ? '+' : '−'} ${esc(name)}</span>`;
+  const esc = (s) => escapeHtml(String(s));
+  const chip = (entry, kind) => {
+    const count = (entry.count && entry.count > 1)
+      ? `<span class="toolset-diff-count">×${entry.count}</span>` : '';
+    return `<span class="toolset-diff-chip ${kind}">${kind === 'added' ? '+' : '−'} `
+      + `${esc(entry.label)}${count}</span>`;
+  };
   const lead = (typeof t === 'function') ? t('toolset.pendingDiff')
     : '以下工具改动将在新会话生效（保持缓存命中）：';
-  const chips = [
-    ...added.map((n) => chip(n, 'added')),
-    ...removed.map((n) => chip(n, 'removed')),
-  ].join('');
+  const entries = [
+    ..._collapseToolNames(added).map((e) => ({ e, kind: 'added' })),
+    ..._collapseToolNames(removed).map((e) => ({ e, kind: 'removed' })),
+  ];
+  const shown = entries.slice(0, _MAX_TOOL_CHIPS);
+  const hidden = entries.length - shown.length;
+  let chips = shown.map(({ e, kind }) => chip(e, kind)).join('');
+  if (hidden > 0) {
+    const more = (typeof t === 'function') ? t('toolset.moreChips') : '…还有 %n 项';
+    chips += `<span class="toolset-diff-chip more">${esc(more.replace('%n', hidden))}</span>`;
+  }
   textEl.innerHTML =
     `<span class="toolset-diff-lead">${esc(lead)}</span>` +
     `<span class="toolset-diff-chips">${chips}</span>`;
@@ -225,4 +267,5 @@ if (typeof window !== 'undefined') {
   window.syncToolsetBanner = syncToolsetBanner;
   window.applyToolsetNow = applyToolsetNow;
   window.onToolsetDiverged = onToolsetDiverged;
+  window._collapseToolNames = _collapseToolNames;
 }

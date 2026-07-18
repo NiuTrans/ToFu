@@ -310,6 +310,70 @@ function _getFileExt(name) {
   return i >= 0 ? name.slice(i).toLowerCase() : '';
 }
 
+// Document MIME types (mirrors the `application/*` half of #fileInput's accept).
+// Needed because Android content:// URIs handed to <input type=file> often
+// carry a display name with NO extension (or a placeholder like "document"),
+// so extension-only routing silently drops the file. The ContentResolver
+// almost always supplies a MIME type though, so we classify on that too.
+var _DOC_MIMES = new Set([
+  'application/json', 'application/xml', 'application/x-yaml', 'application/yaml',
+  'application/rtf', 'application/msword',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'application/vnd.ms-excel',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  'application/vnd.ms-powerpoint',
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+]);
+/**
+ * True when a picked file should go through the server-side document parser.
+ * Extension first (fast, precise), then MIME fallback for extensionless
+ * content:// files. `text/*` covers .txt/.md/.csv/.html/source code whose
+ * name may lack a suffix on some Android pickers.
+ */
+function _looksLikeDoc(f) {
+  if (_DOC_EXTS.has(_getFileExt(f.name))) return true;
+  const mt = (f.type || '').toLowerCase();
+  if (!mt) return false;
+  if (mt.startsWith('text/')) return true;
+  return _DOC_MIMES.has(mt);
+}
+
+// MIME → canonical extension. The SERVER's doc parser (lib/doc_parser: both
+// is_supported_document and extract_document_text) dispatches PURELY on the
+// filename extension — it has NO magic-byte fallback like the PDF route does.
+// So an extensionless content:// file (common on Android pickers) would sail
+// past the client _looksLikeDoc reroute only to be 400'd server-side. We fix
+// that here rather than in the server: synthesize a supported extension on the
+// upload filename from the MIME type. `text/*` subtypes we can't map default
+// to .txt (the plaintext extractor handles any UTF-8 payload).
+var _MIME_TO_EXT = {
+  'application/json': '.json', 'application/xml': '.xml',
+  'application/x-yaml': '.yaml', 'application/yaml': '.yaml',
+  'application/rtf': '.txt', 'application/msword': '.doc',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document': '.docx',
+  'application/vnd.ms-excel': '.xls',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': '.xlsx',
+  'application/vnd.ms-powerpoint': '.ppt',
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation': '.pptx',
+  'text/html': '.html', 'text/csv': '.csv', 'text/markdown': '.md',
+  'text/xml': '.xml', 'text/plain': '.txt',
+};
+/**
+ * Filename to send to the server so its extension-based dispatch works.
+ * If the picked file already has a supported extension, keep the name as-is;
+ * otherwise append an extension derived from the MIME type.
+ * @returns {string} a filename ending in a server-supported extension.
+ */
+function _uploadDocFilename(f) {
+  const name = f.name || 'document';
+  if (_DOC_EXTS.has(_getFileExt(name))) return name;
+  const mt = (f.type || '').toLowerCase();
+  let ext = _MIME_TO_EXT[mt];
+  if (!ext && mt.startsWith('text/')) ext = '.txt';
+  if (!ext) ext = '.txt';  // reached only when _looksLikeDoc already matched
+  return name + ext;
+}
+
 async function handleFileUpload(e) {
   const files = Array.from(e.target.files);
   // 2026-05-06 (Option C): launch ALL uploads in parallel. Previously we
@@ -320,7 +384,7 @@ async function handleFileUpload(e) {
       return handlePDFUpload(f);
     if (f.type.startsWith("image/"))
       return _handleImageDrop(f);
-    if (_DOC_EXTS.has(_getFileExt(f.name)))
+    if (_looksLikeDoc(f))
       return handleDocUpload(f);
     return Promise.resolve();
   });
@@ -430,12 +494,52 @@ async function handlePDFUpload(file) {
 
 
 
-// ── Shared helper: process an image from drag-drop or file picker ──
+// ── Shared helper: process an image from drag-drop, paste or file picker ──
+// Optimistic: push a preview chip IMMEDIATELY (via an object URL) so the image
+// appears the instant it is selected, then compress + upload in the background
+// and reconcile the entry in place. The entry carries `_status:'processing'`
+// until both stages finish — sendMessage's _waitForImageProcessing() gate
+// blocks on this flag so a still-decoding 2nd/3rd image is never dropped.
 async function _handleImageDrop(f) {
-  const d = await processImageFile(f);
-  pendingImages.push(d);
+  const imgObj = {
+    base64: '', mediaType: f.type || 'image/png',
+    preview: '', sizeKB: 0, _status: 'processing',
+  };
+  try {
+    imgObj._objectUrl = URL.createObjectURL(f);
+    imgObj.preview = imgObj._objectUrl;
+  } catch (e) {
+    debugLog('createObjectURL failed: ' + e.message, 'warn');
+  }
+  pendingImages.push(imgObj);
   renderImagePreviews();
   if (typeof _igUpdateGenButton === 'function') _igUpdateGenButton();
+  await _processPendingImage(f, imgObj);
+}
+
+// Compress + upload an already-previewed image entry, mutating it in place.
+async function _processPendingImage(f, imgObj) {
+  try {
+    const d = await compressImage(f, config.imageMaxWidth || 0);
+    if (!pendingImages.includes(imgObj)) return;  // chip removed mid-flight
+    imgObj.base64 = d.base64;
+    imgObj.mediaType = d.mediaType;
+    imgObj.sizeKB = d.sizeKB;
+    if (imgObj._objectUrl) {
+      try { URL.revokeObjectURL(imgObj._objectUrl); } catch (e) { /* ignore */ }
+    }
+    imgObj.preview = d.preview;   // canonical data URL (survives reload)
+    renderImagePreviews();
+    await uploadImageToServer(imgObj);   // sets imgObj.url on success
+  } catch (e) {
+    debugLog('Image processing failed: ' + e.message, 'warn');
+  } finally {
+    if (pendingImages.includes(imgObj)) {
+      delete imgObj._status;
+      delete imgObj._objectUrl;
+      renderImagePreviews();
+    }
+  }
 }
 
 // ── Document upload (Word, Excel, PPT, plain text) → server-side parse ──
@@ -447,8 +551,11 @@ async function handleDocUpload(file) {
   pText.textContent = `Parsing "${file.name}"…`;
   pFill.style.width = "10%";
 
-  // Determine icon by extension
-  const ext = _getFileExt(file.name);
+  // The server dispatches on the filename extension only, so ensure the
+  // uploaded part carries a supported one (Android content:// names may lack
+  // an extension entirely). Icons follow the effective extension too.
+  const uploadName = _uploadDocFilename(file);
+  const ext = _getFileExt(uploadName);
   const iconMap = {'.docx':Icon('file',22), '.pptx':Icon('slides',22), '.xlsx':Icon('fileSheet',22), '.txt':Icon('file',22), '.md':Icon('file',22),
                    '.csv':Icon('fileSheet',22), '.json':Icon('fileCode',22), '.xml':Icon('fileCode',22), '.py':Icon('fileCode',22), '.js':Icon('fileCode',22),
                    '.html':Icon('fileCode',22), '.yaml':Icon('cog',22), '.yml':Icon('cog',22)};
@@ -456,7 +563,7 @@ async function handleDocUpload(file) {
 
   try {
     const formData = new FormData();
-    formData.append("file", file);
+    formData.append("file", file, uploadName);
     formData.append("maxTextChars", "0");
     const data = await Api.doc.parse(formData);
     if (!data || !data.success) throw new Error((data && data.error) || "Parse failed");
@@ -535,7 +642,12 @@ function renderImagePreviews() {
         : isPdf
           ? `PDF page ${img.pdfPage}`
           : "";
-      return `<div class="img-preview${isPdf ? " pdf-page" : ""}" draggable="true" data-img-idx="${i}" ${tip ? `title="${tip}"` : ""}  onclick="previewPendingImage(${i})"><img src="${img.preview}" alt="preview" draggable="false">${srcLabel ? `<div class="pdf-badge">${srcLabel}</div>` : ""}<button class="remove-img" onclick="event.stopPropagation();removeImage(${i})">✕</button><div class="img-size">${label}</div></div>`;
+      const processing = img._status === 'processing';
+      const overlay = processing
+        ? `<div class="img-processing-overlay"><div class="img-processing-spinner"></div></div>`
+        : "";
+      const dragAttr = processing ? "" : ' draggable="true"';
+      return `<div class="img-preview${isPdf ? " pdf-page" : ""}${processing ? " img-processing" : ""}"${dragAttr} data-img-idx="${i}" ${tip ? `title="${tip}"` : ""}  onclick="previewPendingImage(${i})"><img src="${img.preview}" alt="preview" draggable="false">${overlay}${srcLabel ? `<div class="pdf-badge">${srcLabel}</div>` : ""}<button class="remove-img" onclick="event.stopPropagation();removeImage(${i})">✕</button><div class="img-size">${processing ? t('upload.processing') || '…' : label}</div></div>`;
     })
     .join("");
   // ★ Target-aware: render into edit area when editing, main input otherwise
@@ -549,7 +661,10 @@ function renderImagePreviews() {
   if (otherEl) otherEl.innerHTML = "";
 }
 function removeImage(i) {
-  pendingImages.splice(i, 1);
+  const gone = pendingImages.splice(i, 1)[0];
+  if (gone && gone._objectUrl) {
+    try { URL.revokeObjectURL(gone._objectUrl); } catch (e) { /* ignore */ }
+  }
   renderImagePreviews();
   if (typeof _igUpdateGenButton === 'function') _igUpdateGenButton();
 }
@@ -587,26 +702,39 @@ document.addEventListener('dragend', (e) => {
 });
 document.addEventListener('dragover', (e) => {
   if (_imgDragFromIdx === null) return;
-  const hit = _imgChipFrom(e.target);
-  if (!hit) return;
-  e.preventDefault();  // allow drop
+  // A reorder drag is in flight → accept it EVERYWHERE, not only when the
+  // pointer is over a sibling chip. dropEffect='move' is what makes the OS
+  // show the reposition ("move") cursor; if dragover goes unhandled over the
+  // gaps between chips or the surrounding input area, the browser falls back
+  // to the no-drop/copy cursor and the gesture feels like a file upload
+  // instead of a reposition. Highlight still tracks only the chip under it.
+  e.preventDefault();  // allow drop → keeps the move cursor across the whole drag
   if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+  const hit = _imgChipFrom(e.target);
   document.querySelectorAll('.img-preview.img-drop-target')
-    .forEach((el) => { if (el !== hit.chip) el.classList.remove('img-drop-target'); });
-  if (hit.idx !== _imgDragFromIdx) hit.chip.classList.add('img-drop-target');
+    .forEach((el) => { if (!hit || el !== hit.chip) el.classList.remove('img-drop-target'); });
+  if (hit && hit.idx !== _imgDragFromIdx) hit.chip.classList.add('img-drop-target');
 });
 document.addEventListener('drop', (e) => {
   if (_imgDragFromIdx === null) return;
-  const hit = _imgChipFrom(e.target);
-  if (!hit) return;
+  // A reorder drag is in flight. Because dragover now accepts the drop
+  // EVERYWHERE (to keep the move cursor), we MUST also swallow the drop
+  // everywhere — otherwise releasing over the #userInput textarea (or any
+  // gap) runs the browser's native text-drop default and inserts our
+  // text/plain index payload straight into the input box. Reordering must
+  // NEVER mutate anything but the chip order.
   e.preventDefault();
   e.stopPropagation();
   const from = _imgDragFromIdx;
-  const to = hit.idx;
   _imgDragFromIdx = null;
-  if (from === to || from < 0 || from >= pendingImages.length) { renderImagePreviews(); return; }
+  const hit = _imgChipFrom(e.target);
+  // Off-chip release → no move, just repaint (drop already swallowed above).
+  if (!hit || from < 0 || from >= pendingImages.length || hit.idx === from) {
+    renderImagePreviews();
+    return;
+  }
   const moved = pendingImages.splice(from, 1)[0];
-  pendingImages.splice(to, 0, moved);
+  pendingImages.splice(hit.idx, 0, moved);
   renderImagePreviews();
 }, true);  // capture: run before the full-page file-drop handler
 function removePdfText(i) {
@@ -726,141 +854,3 @@ window._vlmParseEntry = async function(file, entry, isAlive, onUpdate) {
     }
   }
 };
-
-// ══════════════════════════════════════════════════════
-//  ★ Preview functions
-// ══════════════════════════════════════════════════════
-function previewPendingImage(i) {
-  const img = pendingImages[i];
-  if (!img || !img.preview) return;
-  openImagePreview(img.preview);
-}
-function previewPendingPdfText(i) {
-  const pdf = pendingPdfTexts[i];
-  if (!pdf) return;
-  const sizeStr =
-    pdf.textLength >= 1024
-      ? `${(pdf.textLength / 1024).toFixed(1)}KB`
-      : `${pdf.textLength} chars`;
-  openTextPreview(
-    `📄 ${pdf.name}`,
-    `${pdf.pages} pages · ${sizeStr}`,
-    pdf.text || "",
-  );
-}
-function previewMsgPdfText(msgIdx, pdfIdx) {
-  const conv = getActiveConv();
-  if (!conv) return;
-  const msg = conv.messages[msgIdx];
-  if (!msg || !msg.pdfTexts || !msg.pdfTexts[pdfIdx]) return;
-  const pdf = msg.pdfTexts[pdfIdx];
-  const text =
-    pdf.text || "(Text not available — content was truncated for storage)";
-  const sizeStr =
-    (pdf.textLength || 0) >= 1024
-      ? `${((pdf.textLength || 0) / 1024).toFixed(1)}KB`
-      : `${pdf.textLength || 0} chars`;
-  openTextPreview(
-    `📄 ${pdf.name}`,
-    `${pdf.pages || "?"} pages · ${sizeStr}`,
-    text,
-  );
-}
-function openImagePreview(src) {
-  if (!src) return;
-  document.getElementById("previewBody").innerHTML =
-    `<button class="preview-close-btn" onclick="closePreview()" aria-label="Close">✕</button><img src="${src}" alt="Preview" class="preview-image">`;
-  document.getElementById("previewModal").classList.add("open");
-}
-function openTextPreview(title, meta, text) {
-  document.getElementById("previewBody").innerHTML =
-    `<button class="preview-close-btn" onclick="closePreview()" aria-label="Close">✕</button><div class="preview-text-panel"><div class="preview-text-header"><span class="preview-text-title">${escapeHtml(title)}</span><span class="preview-text-meta">${escapeHtml(meta)}</span></div><pre class="preview-text-body">${escapeHtml(text)}</pre></div>`;
-  document.getElementById("previewModal").classList.add("open");
-}
-function closePreview() {
-  document.getElementById("previewModal").classList.remove("open");
-  setTimeout(() => {
-    document.getElementById("previewBody").innerHTML = "";
-  }, 300);
-}
-
-// ── Tool Content Preview (search / fetch / project tools) ──
-function previewToolContent(roundNum, toolCallId) {
-  const conv = getActiveConv();
-  if (!conv) return;
-  // Search all assistant messages (not just last) to find the round
-  for (let i = conv.messages.length - 1; i >= 0; i--) {
-    const msg = conv.messages[i];
-    if (msg.role !== 'assistant' && msg.role !== 'optimizer') continue;
-    const rounds = msg.toolRounds || [];
-    const round = rounds.find(r => r.roundNum === roundNum && (toolCallId ? r.toolCallId === toolCallId : true));
-    if (round && round.toolContent) {
-      const td = typeof _getToolDisplay === 'function' ? _getToolDisplay(round) : { icon: '📄', label: 'Tool' };
-      // ★ openTextPreview escapes the title as TEXT, so the icon must be a
-      //   plain glyph — never a raw <svg> string. _getToolDisplay returns an
-      //   SVG markup string for most tools (MCP, project, timer, …); only a
-      //   few use emoji. Including the SVG here leaked literal "<svg …>" into
-      //   the preview header. Drop the icon from the escaped title entirely.
-      //   For MCP tools round.query already reads "server/tool — resource",
-      //   so use it alone instead of the redundant title-cased label.
-      const q = (round.query || '').slice(0, 120);
-      const isMcp = (round.toolName || '').startsWith('mcp__');
-      const title = isMcp ? (q || td.label) : `${td.label}: ${q}`;
-      const chars = round.toolContent.length;
-      const meta = chars >= 1024 ? `${(chars / 1024).toFixed(1)}KB` : `${chars} chars`;
-      openTextPreview(title, meta, round.toolContent);
-      return;
-    }
-  }
-}
-
-// Event delegation for tool content preview buttons
-document.addEventListener('click', function(e) {
-  const btn = e.target.closest('[data-tc-preview]');
-  if (!btn) return;
-  e.stopPropagation();
-  e.preventDefault();
-  const rn = parseInt(btn.dataset.tcRn, 10);
-  const tcid = btn.dataset.tcTcid || null;
-  previewToolContent(rn, tcid);
-});
-
-// Event delegation for ptool-truncated "show all" bars (static render path)
-document.addEventListener('click', function(e) {
-  const trunc = e.target.closest('.ptool-truncated');
-  if (!trunc) return;
-  const body = trunc.closest('.ptool-panel-body');
-  if (!body) { trunc.remove(); return; }
-  // Find the message element and its conversation + message data to re-render all rounds
-  const msgEl = trunc.closest('.message');
-  if (msgEl) {
-    const msgIdx = parseInt((msgEl.id || '').replace('msg-', ''), 10);
-    const conv = conversations.find(c => c.id === activeConvId);
-    if (conv && conv.messages && conv.messages[msgIdx]) {
-      const msg = conv.messages[msgIdx];
-      const allRounds = getToolRoundsFromMsg(msg);
-      if (allRounds.length > 0) {
-        trunc.remove();
-        /* Render the full grouped structure (parallel-batch .ptool-turn
-         * containers) in one shot via the shared helper so the expanded
-         * view matches the streaming/static layout exactly. */
-        if (typeof _renderToolGroupsHTML === 'function') {
-          body.innerHTML = _renderToolGroupsHTML(allRounds, allRounds);
-        } else {
-          body.innerHTML = '';
-          for (const round of allRounds) {
-            const slot = document.createElement('div');
-            slot.setAttribute('data-prn', round.roundNum);
-            slot.innerHTML = typeof _renderUnifiedToolLine === 'function'
-              ? _renderUnifiedToolLine(round, false)
-              : `<div class="ptool-line"><span class="ptool-text">${escapeHtml(round.toolName || round.query || '')}</span></div>`;
-            body.appendChild(slot);
-          }
-        }
-        return;
-      }
-    }
-  }
-  // Fallback: just remove the truncation bar
-  trunc.remove();
-});

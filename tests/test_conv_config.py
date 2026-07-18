@@ -14,7 +14,7 @@ class ResolveConvConfigTest(unittest.TestCase):
 
     def test_active_conv_uses_overrides(self):
         out = resolve_conv_config(
-            conv_settings={'model': 'inactive-m', 'searchMode': 'single'},
+            conv_settings={'model': 'inactive-m', 'searchMode': 'off'},
             overrides={'model': 'override-m', 'searchMode': 'multi',
                         'fetchEnabled': True},
             server_defaults={'serverModel': 'default-m'},
@@ -27,14 +27,14 @@ class ResolveConvConfigTest(unittest.TestCase):
 
     def test_inactive_conv_uses_stored(self):
         out = resolve_conv_config(
-            conv_settings={'model': 'inactive-m', 'searchMode': 'single',
+            conv_settings={'model': 'inactive-m', 'searchMode': 'off',
                             'fetchEnabled': True},
             overrides={'model': 'override-m', 'searchMode': 'multi'},
             server_defaults={'serverModel': 'default-m'},
             is_active=False,
         )
         self.assertEqual(out['model'], 'inactive-m')
-        self.assertEqual(out['searchMode'], 'single')
+        self.assertEqual(out['searchMode'], 'off')
         self.assertTrue(out['fetchEnabled'])
 
     def test_falls_back_to_server_default(self):
@@ -183,7 +183,8 @@ class ResolveConvConfigTest(unittest.TestCase):
             'projectPaths', 'readOnlyPaths', 'autoApply', 'browserEnabled',
             'desktopEnabled', 'imageGenEnabled', 'humanGuidanceEnabled',
             'endpointMode', 'autopilot',
-            'autoTranslate', 'browserClientId', 'keepToolHistory',
+            'autoTranslate', 'langCorrectionEnabled', 'uiLang',
+            'browserClientId', 'keepToolHistory',
             'activeFlow', 'flowBuiltin', 'flowId',
         }
         self.assertEqual(set(out.keys()), expected)
@@ -294,7 +295,7 @@ class ResolveConvSettingsTest(unittest.TestCase):
             'swarmEnabled', 'endpointEnabled', 'autopilotEnabled',
             'imageGenEnabled', 'humanGuidanceEnabled', 'projectPath',
             'projectPaths', 'readOnlyPaths', 'autoTranslate', 'folderId',
-            'activeFlow',
+            'activeFlow', 'uiLang',
         }
         self.assertEqual(set(out.keys()), expected)
 
@@ -307,7 +308,7 @@ class CanonicaliseModelIdTest(unittest.TestCase):
         self.assertEqual(canonicalise_model_id('qwen'),
                           'qwen3.6-plus')
         self.assertEqual(canonicalise_model_id('gemini'),
-                          'gemini-3.1-flash-lite-preview')
+                          'gemini-3-flash-preview')
         self.assertEqual(canonicalise_model_id('low'), 'qwen3.6-plus')
 
     def test_compound_preset_rewritten_to_opus(self):

@@ -95,6 +95,38 @@ class TestBuildSearchText:
         assert "answer is 42" in result
         assert "step by step" in result
 
+    def test_original_content_indexed(self):
+        """Pre-auto-translation user text (originalContent) is indexed.
+
+        Regression pin: when auto-translate-user is ON, a user's message is
+        translated and `content` holds the English translation while the words
+        the user actually typed live in `originalContent`. Both must be
+        searchable, or the user can't find their own message by what they wrote.
+        """
+        msgs = [
+            {
+                "role": "user",
+                "content": "when I dragged and dropped a compressed package to submit it",
+                "originalContent": "我刚刚拖拽了一个压缩包提交到目录里",
+            },
+        ]
+        result = build_search_text(msgs)
+        assert "拖拽了一个压缩包提交" in result   # the original a user searches by
+        assert "compressed package" in result   # translation stays searchable too
+
+    def test_translated_content_indexed(self):
+        """Assistant translatedContent stays indexed (sibling of the above)."""
+        msgs = [
+            {
+                "role": "assistant",
+                "content": "Here is the fix",
+                "translatedContent": "这是修复方案",
+            },
+        ]
+        result = build_search_text(msgs)
+        assert "这是修复方案" in result
+        assert "Here is the fix" in result
+
     def test_empty_messages(self):
         result = build_search_text([])
         assert result == ""

@@ -93,6 +93,32 @@ let r2 = rowsAndOlder();
 check('mixed_older_stays_collapsed', r2.hasOlder && r2.olderCollapsed === true);
 check('mixed_only_recent_clickable', r2.rows === 1);
 
+// ── Scenario 3: the reported bug — a group holding the ACTIVE conv ("today")
+//    must still collapse when the user EXPLICITLY clicks it. The active-conv
+//    force-expand guard must not override an explicit user toggle. ──
+global.activeConvId = window.activeConvId = 'today1';
+global.conversations = window.conversations = [
+  { id: 'today1', title: 'Today 1', messages: [{ role: 'user' }], updatedAt: now - 1000 },
+  { id: 'today2', title: 'Today 2', messages: [{ role: 'user' }], updatedAt: now - 2000 },
+  { id: 'old3', title: 'Old 3', messages: [{ role: 'user' }], updatedAt: now - 70 * DAY },
+];
+window._lastConvListHash = '';
+renderConversationList();
+function todayState() {
+  const list = document.getElementById('convList');
+  const hdr = list.querySelector('.conv-date-group[data-group="today"]');
+  const rows = list.querySelectorAll('.conv-item[data-conv-id]');
+  const todayRows = [...rows].filter(r => r.dataset.convId === 'today1' || r.dataset.convId === 'today2').length;
+  return { collapsed: !!(hdr && hdr.classList.contains('collapsed')), todayRows };
+}
+// Before the click: today is expanded (default) and its rows show.
+let t0 = todayState();
+check('today_expanded_before_toggle', t0.collapsed === false && t0.todayRows === 2);
+// User clicks the "today" header → it must collapse despite holding the active conv.
+_toggleConvGroup('today');
+let t1 = todayState();
+check('today_collapses_on_user_toggle', t1.collapsed === true && t1.todayRows === 0);
+
 report();
 """
 
@@ -101,6 +127,6 @@ def test_conv_list_collapse_never_hides_all_rows():
     run_harness(
         target_js=os.path.join(JS_DIR, 'ui', 'conversation_list.js'),
         body_js=_BODY,
-        min_pass=4,
+        min_pass=6,
         label='conv-list collapse',
     )

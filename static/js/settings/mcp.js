@@ -170,13 +170,22 @@ function _renderMcpCatalog() {
     // A breaker is "active" only when the server is installed but not
     // currently connected and its automatic reconnect is failing.
     var breaker = (!connected && installed) ? e.breaker : null;
-    var stateClass = connected ? ' connected'
+    // Credential health is a SECOND axis: a server can be connected (live
+    // subprocess) yet its stored session cookie/token has expired, so every
+    // real tool call fails. Only surface it while connected — a disconnected
+    // card already tells its own story via breaker / idle state.
+    var credExpired = connected && e.cred_health && e.cred_health.status === 'expired';
+    var stateClass = connected ? (credExpired ? ' connected cred-expired' : ' connected')
       : breaker ? ' installed reconnecting'
       : installed ? ' installed' : '';
     html += '<div class="mcp-app-card' + stateClass + '">';
     html += '<div class="mcp-app-icon">' + (e.icon || Icon('plug', 26)) + '</div>';
     html += '<div class="mcp-app-name"><span class="mcp-app-name-text">' + escapeHtml(e.name) + '</span>';
-    if (connected) {
+    if (credExpired) {
+      html += '<span class="mcp-app-status cred-expired" title="' +
+        escapeHtml(t('mcp.credExpiredTitle')) + '">' +
+        Icon('alertTriangle', 12) + ' ' + escapeHtml(t('mcp.credExpired')) + '</span>';
+    } else if (connected) {
       html += '<span class="mcp-app-status on"><span class="dot"></span>' + escapeHtml(t('mcp.statusOn')) + '</span>';
     } else if (breaker) {
       html += '<span class="mcp-app-status reconnecting" title="' +
@@ -196,6 +205,13 @@ function _renderMcpCatalog() {
     }
     html += '<div class="mcp-app-action">';
     if (connected) {
+      if (credExpired) {
+        // The subprocess is live but the stored cookie/token no longer
+        // authenticates. Offer a one-click path to re-enter credentials —
+        // the same reinstall modal used for editing an installed server
+        // (existing env prefills, blank leaves it unchanged).
+        html += '<button class="btn btn-primary btn-xs" onclick="_mcpOpenInstallModal(\'' + escapeHtml(e.id) + '\', true)" title="' + escapeHtml(t('mcp.credExpiredTitle')) + '">' + escapeHtml(t('mcp.updateCreds')) + '</button>';
+      }
       if (e.server_version) {
         html += '<span class="mcp-app-version" title="' + escapeHtml((e.server_impl_name || e.id) + ' v' + e.server_version) + '">v' + escapeHtml(e.server_version) + '</span>';
       }

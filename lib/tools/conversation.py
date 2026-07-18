@@ -40,11 +40,19 @@ CONV_REF_GET_TOOL = {
     "function": {
         "name": "get_conversation",
         "description": (
-            "Retrieve the full content of another conversation by its ID. "
-            "Returns all messages including user prompts, assistant responses, tool calls, and tool results. "
+            "Retrieve the content of another conversation by its ID. "
             "Use this when the user asks you to reference specific information, decisions, code changes, "
             "debugging context, or tool outputs from a previous conversation. "
             "First use list_conversations to find the right conversation ID.\n\n"
+            "TWO output modes:\n"
+            "• Default (raw=false) — a READABLE prose transcript of user prompts + assistant "
+            "responses + a condensed view of tool calls/results. Best for understanding what was "
+            "discussed, but it SUMMARIZES tool rounds and drops per-message metadata.\n"
+            "• raw=true — for DEBUGGING / inspecting exact state. Returns the COMPLETE, un-summarized "
+            "DB record as structured JSON: every row column (created_at, updated_at, msg_count, rev, "
+            "settings) plus every field of every message preserved (finishReason, usage, model, "
+            "timestamp, _msgId, modifiedFileList, the full toolRounds), nothing summarized or "
+            "truncated away. Use this when you need the original metadata, not just the readable gist.\n\n"
             "IMPORTANT: Only use this when the user EXPLICITLY requests information from a past conversation. "
             "Never call this proactively or speculatively."
         ),
@@ -57,7 +65,11 @@ CONV_REF_GET_TOOL = {
                 },
                 "include_tool_details": {
                     "type": "boolean",
-                    "description": "Whether to include full tool call arguments and results (default: true). Set to false for a shorter summary."
+                    "description": "Whether to include full tool call arguments and results (default: true). Set to false for a shorter summary. Ignored when raw=true."
+                },
+                "raw": {
+                    "type": "boolean",
+                    "description": "When true, return the full raw DB record (all columns + settings + every message field preserved) as structured JSON for debugging, instead of the readable prose transcript. Default: false."
                 }
             },
             "required": ["conversation_id"]
@@ -71,10 +83,13 @@ CONV_REF_TOOL_NAMES = {'list_conversations', 'get_conversation'}
 
 # ── Project Charter tools (Pillar #2 of the project brain) ──
 # The Charter is the shared "north star" of a project — read by every
-# conversation, so they coordinate around one intent. An agent may READ it and
-# PROPOSE amendments; it can NEVER commit a charter change directly (commit is
-# human-gated). Both tools are project-scoped and registered only in project
-# mode (registry._build_conv_ref).
+# conversation, so they coordinate around one intent. An agent may READ it,
+# PROPOSE amendments, and (2026-07-12, owner-directed) self-COMMIT a DECISION
+# (append implementation-level consensus) so shared intent advances without a
+# human in the loop. The agent path can ONLY append a decision — it can never
+# edit the north-star `content` (goal/direction stays human-owned), and a human
+# retains the corrective levers (edit/remove a decision, delete the charter).
+# Project-scoped, registered only in project mode (registry._build_conv_ref).
 
 CHARTER_READ_TOOL = {
     "type": "function",
@@ -120,8 +135,51 @@ CHARTER_PROPOSE_TOOL = {
     },
 }
 
-CHARTER_TOOLS = [CHARTER_READ_TOOL, CHARTER_PROPOSE_TOOL]
-CHARTER_TOOL_NAMES = {'project_charter_read', 'project_charter_propose'}
+CHARTER_COMMIT_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "project_charter_commit",
+        "description": (
+            "COMMIT a new key DECISION to the project charter — this makes it "
+            "project-wide shared intent that every sibling conversation reads. "
+            "Unlike project_charter_propose (which only records a suggestion for "
+            "later), this WRITES the decision immediately and bumps the charter "
+            "version. Use it when you and/or siblings have reached an "
+            "implementation-level consensus other conversations must align to "
+            "(an architecture invariant, a build-order rule, a resolved design "
+            "question). Be specific and actionable; anchor to concrete evidence.\n"
+            "SCOPE: this tool can ONLY append a decision — it can NOT edit the "
+            "project's north-star goal/direction text (that stays human-owned). "
+            "A human retains the ability to edit or remove a committed decision "
+            "afterwards, so this is self-service progress, not an irreversible "
+            "act. If this decision resolves a proposal you (or a sibling) raised "
+            "earlier with project_charter_propose, pass its proposalId as "
+            "`resolves_proposal` so it drops out of the pending-review list."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "decision": {
+                    "type": "string",
+                    "description": "The decision text to commit. Specific and actionable — it becomes injected shared intent for all conversations."
+                },
+                "resolves_proposal": {
+                    "type": "string",
+                    "description": "Optional. The proposalId of a pending project_charter_propose this decision resolves, so it no longer shows as awaiting review."
+                },
+                "expected_version": {
+                    "type": "integer",
+                    "description": "Optional concurrency guard: the charter version you last read. If the charter has since changed, the commit is rejected and you should re-read and retry."
+                },
+            },
+            "required": ["decision"],
+        },
+    },
+}
+
+CHARTER_TOOLS = [CHARTER_READ_TOOL, CHARTER_PROPOSE_TOOL, CHARTER_COMMIT_TOOL]
+CHARTER_TOOL_NAMES = {'project_charter_read', 'project_charter_propose',
+                      'project_charter_commit'}
 
 
 # ── Project Board tools (Pillar #3 — the coordination board) ──
@@ -160,6 +218,10 @@ BOARD_POST_TOOL = {
                 "depends_on": {
                     "type": "array", "items": {"type": "string"},
                     "description": "Optional list of board task ids this epic depends on."
+                },
+                "write_set": {
+                    "type": "array", "items": {"type": "string"},
+                    "description": "Optional list of file paths / globs / subsystem tags this epic intends to WRITE. Declaring it lets the dispatcher avoid handing two conversations epics that will fight over the same files (it prefers epics whose write-set is disjoint from currently-claimed ones). Optional and advisory — an omitted write-set is treated as 'unknown footprint' and never blocks dispatch."
                 },
             },
             "required": ["title"],
@@ -211,53 +273,47 @@ BOARD_BLOCK_TOOL = {
     "function": {
         "name": "project_board_block",
         "description": (
-            "Report that a board epic is BLOCKED (you can't proceed — a dependency, a "
-            "missing decision, an external wait). Surfaces the block in the project "
-            "activity feed so a human or sibling conversation can unblock it."
+            "Note that a board epic is WAITING on an external gate (a dependency, a "
+            "missing decision, an external wait). This puts the epic on a "
+            "SELF-EXPIRING, escalating cooldown so the autonomous heartbeat stops "
+            "re-dispatching it (and burning a billed turn) while its gate is unmet — "
+            "the cooldown grows on repeated blocks and auto-clears with NO human "
+            "action, and a human reopen resets it for an immediate retry. In the "
+            "reason, PREFIX the block CLASS so it's visible on the board: "
+            "'[human-gated] …' when only a human action can satisfy it (e.g. infra "
+            "sign-off — this escalates to a long sleep fast), or '[sibling] …' when it "
+            "will auto-resolve once another conversation commits (retry-after-cooldown "
+            "is expected). When the sibling blocker is specific file(s) that must be "
+            "committed first, name them in a structured token "
+            "'[sibling] path=lib/x.py,static/js/y.js …' — the epic is then HELD "
+            "precisely while a sibling holds a lease on those paths (auto-released when "
+            "they finish), the precise complement to the cooldown. Then state the "
+            "concrete blocker."
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "task_id": {"type": "string", "description": "The board epic id."},
-                "reason": {"type": "string", "description": "Why it's blocked."},
+                "reason": {"type": "string", "description": "Why it's blocked. PREFIX with the block class: '[human-gated] …' or '[sibling] …'. For a sibling-commit blocker, name the files as '[sibling] path=a.py,b.py …' to auto-hold on them."},
             },
             "required": ["task_id"],
         },
     },
 }
 
-BOARD_DEFER_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "project_board_defer",
-        "description": (
-            "PARK a board epic that cannot progress autonomously right now — set "
-            "its status to DEFERRED. Use this when an epic is gated on a decision "
-            "only a human can make (e.g. a design-first / infra-choice epic you "
-            "can't complete on your own): parking it STOPS the autonomous "
-            "heartbeat from repeatedly re-dispatching it, so it no longer "
-            "oscillates open↔claimed and wastes turns. The epic stays VISIBLE on "
-            "the board (distinct from done) and a human reopens it when the "
-            "blocking decision lands. This differs from project_board_block, which "
-            "only flags a signal in the feed WITHOUT changing dispatchability — use "
-            "defer to actually stop the sweep, block to merely flag."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "task_id": {"type": "string", "description": "The board epic id (from project_board_read)."},
-                "reason": {"type": "string", "description": "Why it's parked (recorded in the project activity feed) — e.g. which human decision it awaits."},
-            },
-            "required": ["task_id"],
-        },
-    },
-}
+# ── (Removed 2026-07-13) The path-lease (project_claim_path/project_release_path)
+# and project_commit agent tools were deleted along with the multi-worktree /
+# auto-land machinery. The project now uses a single shared checkout: agent
+# edits write straight to the served tree and take effect on the next restart —
+# no lease, no commit, no land step. A minor same-file overlap between siblings
+# is hand-fixable interference, never a block. The board/charter/feed/peer
+# blackboard (advisory, never blocking) remains the coordination surface.
 
 BOARD_TOOLS = [BOARD_READ_TOOL, BOARD_POST_TOOL, BOARD_CLAIM_TOOL,
-               BOARD_COMPLETE_TOOL, BOARD_BLOCK_TOOL, BOARD_DEFER_TOOL]
+               BOARD_COMPLETE_TOOL, BOARD_BLOCK_TOOL]
 BOARD_TOOL_NAMES = {'project_board_read', 'project_board_post',
                     'project_board_claim', 'project_board_complete',
-                    'project_board_block', 'project_board_defer'}
+                    'project_board_block'}
 
 
 # ── Project Peer tools (Pillar #6 — cross-conversation communication) ──
@@ -291,17 +347,52 @@ PEER_STATUS_TOOL = {
     },
 }
 
+PEER_FEED_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "project_feed_read",
+        "description": (
+            "Read the recent cross-conversation ACTIVITY FEED of this project — "
+            "a chronological pulse (newest first) of what sibling conversations "
+            "have been DOING: task starts/completions, board claims, committed "
+            "or proposed decisions, blocks, and peer notes. This is the "
+            "narrative complement to project_peer_status (who is live NOW) and "
+            "project_board_read (the epic lanes): use it to catch up on what "
+            "already happened across the team before you start or hand off "
+            "work. Read-only."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "limit": {
+                    "type": "integer",
+                    "description": "Max events to return, newest first (default 25, max 60)."
+                },
+            },
+            "required": [],
+        },
+    },
+}
+
 PEER_MESSAGE_TOOL = {
     "type": "function",
     "function": {
         "name": "project_message",
         "description": (
-            "Send an ADVISORY message to a sibling conversation of this project "
-            "(find its id with project_peer_status). The message lands in the "
-            "target's queue and is seen on its NEXT turn — it NEVER interrupts a "
-            "live turn mid-stream. Use it to coordinate: share a finding, warn of "
-            "an overlap, hand off context. It is advisory — the peer decides "
-            "whether to act. Rate-limited per target to prevent message storms."
+            "Coordinate DIRECTLY with a sibling conversation (another AGENT) of "
+            "this project — find its id with project_peer_status. You are "
+            "writing TO A PEER AGENT, not reporting to a human: use the "
+            "imperative coordination register — CLAIM work ('I'm taking the "
+            "parser refactor, stand down on lib/parser/'), CONFIRM a boundary "
+            "('are you touching styles.css? I'm about to rewrite it'), HAND OFF "
+            "context ('the schema bump you need is on branch X, done'), or WARN "
+            "of an overlap ('your epic Y duplicates the one I already own'). Do "
+            "NOT narrate your progress or write a status update as if to a "
+            "human. The message lands in the peer's queue and is seen on its "
+            "NEXT turn — it NEVER interrupts a live turn mid-stream. The peer "
+            "acts autonomously on what you send. Rate-limited per target to "
+            "prevent message storms — spend it on coordination that changes what "
+            "the peer does, not FYI chatter."
         ),
         "parameters": {
             "type": "object",
@@ -312,7 +403,7 @@ PEER_MESSAGE_TOOL = {
                 },
                 "text": {
                     "type": "string",
-                    "description": "The message body. Be specific and actionable."
+                    "description": "The coordination message, addressed to the peer AGENT. A concrete coordination act — a claim, a boundary question, a hand-off, or an overlap warning — NOT a status report. State what you want the peer to do or confirm."
                 },
             },
             "required": ["to_conv_id", "text"],
@@ -325,14 +416,21 @@ PEER_INTERVENE_TOOL = {
     "function": {
         "name": "project_intervene",
         "description": (
-            "Intervene in a sibling conversation you believe is going wrong "
-            "(e.g. duplicating an epic you own, heading down a path a committed "
-            "decision rules out). By DEFAULT this is ADVISORY: it sends a "
+            "Flag to a sibling conversation (another AGENT) that its work may "
+            "overlap or conflict — e.g. it is duplicating an epic you "
+            "already own, or heading down a path a committed decision rules out. "
+            "Write it as a direct coordination directive TO THE PEER AGENT "
+            "('stop — I own the parser epic, drop it and re-check the board'), "
+            "not as a status report to a human. By DEFAULT this is ADVISORY: a "
             "high-priority notice the peer sees on its next turn asking it to "
-            "pause and re-check the board — it does NOT stop the peer. A genuine "
-            "hard abort of the peer's running task requires explicit HUMAN "
-            "approval and cannot be done unilaterally by an agent; if you set "
-            "hard_abort without that approval it is refused with guidance."
+            "pause and re-check the board — it does NOT stop the peer, the peer "
+            "decides how to respond. A genuine hard abort of the peer's running "
+            "task requires explicit HUMAN approval and cannot be done "
+            "unilaterally by an agent; if you set hard_abort without that "
+            "approval it is refused with guidance.\n"
+            "Note: an advisory intervention shares the SAME per-target rate-limit "
+            "budget as project_message (a few per target per window), so it can be "
+            "refused if you have recently messaged the same conversation."
         ),
         "parameters": {
             "type": "object",
@@ -343,7 +441,7 @@ PEER_INTERVENE_TOOL = {
                 },
                 "message": {
                     "type": "string",
-                    "description": "The advisory notice explaining WHY (e.g. which epic overlaps). Optional; a sensible default is used if omitted."
+                    "description": "The directive to the peer AGENT explaining WHAT to stop/change and WHY (e.g. which epic overlaps and that you own it). Optional; a sensible default is used if omitted."
                 },
                 "hard_abort": {
                     "type": "boolean",
@@ -355,17 +453,19 @@ PEER_INTERVENE_TOOL = {
     },
 }
 
-PEER_TOOLS = [PEER_STATUS_TOOL, PEER_MESSAGE_TOOL, PEER_INTERVENE_TOOL]
-PEER_TOOL_NAMES = {'project_peer_status', 'project_message', 'project_intervene'}
+PEER_TOOLS = [PEER_STATUS_TOOL, PEER_FEED_TOOL, PEER_MESSAGE_TOOL,
+              PEER_INTERVENE_TOOL]
+PEER_TOOL_NAMES = {'project_peer_status', 'project_feed_read',
+                   'project_message', 'project_intervene'}
 
 __all__ = [
     'CONV_REF_LIST_TOOL', 'CONV_REF_GET_TOOL',
     'CONV_REF_TOOLS', 'CONV_REF_TOOL_NAMES',
-    'CHARTER_READ_TOOL', 'CHARTER_PROPOSE_TOOL',
+    'CHARTER_READ_TOOL', 'CHARTER_PROPOSE_TOOL', 'CHARTER_COMMIT_TOOL',
     'CHARTER_TOOLS', 'CHARTER_TOOL_NAMES',
     'BOARD_READ_TOOL', 'BOARD_POST_TOOL', 'BOARD_CLAIM_TOOL',
-    'BOARD_COMPLETE_TOOL', 'BOARD_BLOCK_TOOL', 'BOARD_DEFER_TOOL',
+    'BOARD_COMPLETE_TOOL', 'BOARD_BLOCK_TOOL',
     'BOARD_TOOLS', 'BOARD_TOOL_NAMES',
-    'PEER_STATUS_TOOL', 'PEER_MESSAGE_TOOL', 'PEER_INTERVENE_TOOL',
-    'PEER_TOOLS', 'PEER_TOOL_NAMES',
+    'PEER_STATUS_TOOL', 'PEER_FEED_TOOL', 'PEER_MESSAGE_TOOL',
+    'PEER_INTERVENE_TOOL', 'PEER_TOOLS', 'PEER_TOOL_NAMES',
 ]

@@ -14,7 +14,7 @@ import os
 
 import pytest
 
-import lib.database._bootstrap as boot
+import lib.database._pg_seed as boot  # seed fns relocated (Decoupling D sub-cut 2); patch canonical module
 import lib.database.db_paths as db_paths
 
 

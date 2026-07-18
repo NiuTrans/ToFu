@@ -120,14 +120,17 @@ def _run_sync(lines, model='gpt-4', status=200):
     def fake_post(url, **kw):
         return _FakeRequestsResp(lines, status=status)
 
-    orig = smod.requests.post
-    smod.requests.post = fake_post
+    class _FakeSession:
+        post = staticmethod(fake_post)
+
+    orig = smod.get_sync_session
+    smod.get_sync_session = lambda: _FakeSession()
     try:
         body = {'model': model, 'messages': [{'role': 'user', 'content': 'hi'}],
                 'max_tokens': 100}
         return smod._stream_chat_once(body, log_prefix='[test]')
     finally:
-        smod.requests.post = orig
+        smod.get_sync_session = orig
 
 
 # ── Fake async transport (httpx.AsyncClient.stream) ──
@@ -176,15 +179,15 @@ def _run_async(lines, model='gpt-4', status=200):
     def fake_client_factory(*a, **kw):
         return _FakeAsyncClient(lines, status=status)
 
-    orig = amod.httpx.AsyncClient
-    amod.httpx.AsyncClient = fake_client_factory
+    orig = amod.get_async_client
+    amod.get_async_client = fake_client_factory
     try:
         body = {'model': model, 'messages': [{'role': 'user', 'content': 'hi'}],
                 'max_tokens': 100}
         return asyncio.run(
             amod._async_stream_chat_once(body, log_prefix='[test]'))
     finally:
-        amod.httpx.AsyncClient = orig
+        amod.get_async_client = orig
 
 
 # ── Normalize: drop the always-varying fields before comparing ──

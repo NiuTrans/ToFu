@@ -13,9 +13,10 @@ conversation whose running task died with the process. So after a restart the
 message is shown in the queue bar, never processed, with no transcript trace =
 total loss.
 
-Fix: ``lib.message_queue.redispatch_orphaned_queue_on_startup()`` (wired into
-``recover_stale_tasks_on_startup`` after the autopilot resume) scans every conv
-with a dispatchable queue row and dispatches ONE task via the SAME
+Fix: ``lib.message_queue.redispatch_orphaned_queue_on_startup()`` — called from
+``recover_stale_tasks_on_startup`` (``lib/tasks_pkg/manager.py``) immediately
+after the autopilot resume block — scans every conv with a dispatchable queue
+row and dispatches ONE task via the SAME
 ``dispatch_next_queued`` seam — which appends the queued user message to
 ``conversations.messages`` (durable transcript home at last) and spawns the
 task. Mirrors ``resume_armed_autopilot_after_crash``.
@@ -162,6 +163,158 @@ def test_autopilot_only_conv_not_dispatched(monkeypatch):
     _ok('autopilot-only conv is NOT dispatched by the orphaned-queue scan')
 
 
+def test_reaped_stuck_task_finalizes_conversation(monkeypatch):
+    """A wedged task force-failed by the reaper must run the FULL terminal path:
+    an assistant error bubble is synced onto the conversation EVEN when the
+    trailing turn is an unanswered user message, activeTaskId is cleared, and a
+    turn queued behind the wedged one is drained. This is the fix for the
+    "agent stuck on a perpetual waiting bubble + queued msg stranded" incident
+    (a peer/brain message dispatched into a conv whose task then wedged)."""
+    import lib.tasks_pkg as tp
+    from lib.database import DOMAIN_CHAT, get_thread_db, json_dumps_pg
+    from lib.database._core_schema import CONVERSATIONS, upsert
+    from lib.tasks_pkg import manager
+    from lib import message_queue as mq
+
+    conv_id = 'cv-reap-finalize'
+    db = get_thread_db(DOMAIN_CHAT)
+    now_ms = int(time.time() * 1000)
+    # Conversation whose trailing turn is an UNANSWERED user message (the
+    # dispatched-then-wedged shape) + activeTaskId pointing at the dead task.
+    upsert(db, CONVERSATIONS, {
+        'id': conv_id, 'user_id': 1, 'title': 'reap-finalize',
+        'messages': json_dumps_pg([
+            {'role': 'user', 'content': 'earlier q', 'timestamp': 1},
+            {'role': 'assistant', 'content': 'earlier a', 'timestamp': 2,
+             'finishReason': 'stop'},
+            {'role': 'user', 'content': 'the peer message with no reply',
+             'timestamp': now_ms, '_peerMessage': True, '_fromConv': 'cSENDER'},
+        ]),
+        'msg_count': 3, 'created_at': now_ms, 'updated_at': now_ms,
+        'settings': _json.dumps({'activeTaskId': 'task-wedged-1'}),
+    }, insert_cols=['id', 'user_id', 'title', 'messages', 'msg_count',
+                    'created_at', 'updated_at', 'settings'], retry=True)
+    db.commit()
+
+    # A SECOND turn queued behind the wedged one (the stranded-in-input-box msg).
+    mq.enqueue_message(conv_id, {'_user_msg': {
+        'role': 'user', 'content': 'the queued follow-up', 'timestamp': now_ms},
+        'text': 'the queued follow-up'}, {'model': 'gpt-4o'}, kind=mq.KIND_REAL)
+
+    spawned_tasks = []
+    monkeypatch.setattr(tp, 'spawn_task', lambda task: spawned_tasks.append(task['id']))
+    # Register the wedged task as the conv's latest so the freshness guard in
+    # _sync_result_to_conversation passes (the wedged task owns the turn).
+    manager._record_latest_task(conv_id, 'task-wedged-1')
+
+    from lib.error_envelope import make_envelope
+    wedged = {
+        'id': 'task-wedged-1', 'convId': conv_id, 'status': 'error',
+        'aborted': True, '_abort_reason': 'stuck_no_progress',
+        'content': '', 'thinking': '', 'finishReason': 'error',
+        'config': {'model': 'aws.claude-opus-4.8'},
+        'created_at': time.time(), 'finished_at': time.time(),
+        'events': [], 'error': make_envelope(
+            'internal', detail='Task made no progress for 1804 seconds and was '
+            'terminated as wedged.', model='aws.claude-opus-4.8',
+            context='stuck-task-reaper', source='lib.tasks_pkg.manager'),
+    }
+    import threading
+    wedged['events_lock'] = threading.Lock()
+
+    try:
+        manager._finalize_reaped_stuck_task(wedged)
+
+        # (1) An assistant error bubble was appended for the unanswered peer
+        #     turn. (It is NOT the tail — the queue-drain step below then
+        #     appends the follow-up user turn after it — so assert it EXISTS,
+        #     directly after the peer message it answers.)
+        row = db.execute('SELECT messages, settings FROM conversations WHERE id=? AND user_id=1',
+                         (conv_id,)).fetchone()
+        msgs = _json.loads(row[0]) if isinstance(row[0], str) else row[0]
+        err_bubbles = [m for m in msgs if m.get('role') == 'assistant' and m.get('error')]
+        assert err_bubbles, (
+            'reaper must append an assistant error bubble for the unanswered turn')
+        peer_idx = next(i for i, m in enumerate(msgs) if m.get('_peerMessage'))
+        assert msgs[peer_idx + 1].get('role') == 'assistant' and msgs[peer_idx + 1].get('error'), (
+            'the error bubble must directly answer the unanswered peer turn')
+
+        # (2) The DEAD task's activeTaskId is no longer pinned. (Here a
+        #     follow-up was queued, so the drain spawns a NEW task that
+        #     legitimately becomes activeTaskId — the point is the WEDGED task
+        #     is gone, so the conv is no longer stuck attached to a dead stream.)
+        st = _json.loads(row[1]) if isinstance(row[1], str) else (row[1] or {})
+        assert st.get('activeTaskId') != 'task-wedged-1', (
+            f'the dead wedged task must be unpinned, still {st.get("activeTaskId")}')
+
+        # (3) The queued follow-up was drained (appended + a task spawned).
+        contents = [m.get('content') for m in msgs]
+        assert 'the queued follow-up' in contents, (
+            f'the stranded queued msg must be drained into the conv, got {contents}')
+        assert spawned_tasks, 'the queued follow-up must spawn a task'
+        assert mq.get_queue_depth(conv_id) == 0, 'queue must be drained'
+    finally:
+        _cleanup(db, conv_id)
+        try:
+            from lib.tasks_pkg.manager import _conv_latest_task, _conv_latest_task_lock
+            with _conv_latest_task_lock:
+                _conv_latest_task.pop(conv_id, None)
+        except Exception:
+            pass
+    _ok('reaped wedged task finalizes conv: error bubble + activeTaskId cleared + queue drained')
+
+
+def test_NC_reaped_task_guard_still_blocks_regenerate_truncation(monkeypatch):
+    """NEUTER of the guard-relaxation's SCOPE: a task aborted for a REASON OTHER
+    than stuck_no_progress (e.g. a Stop→Regenerate supersede) whose trailing
+    turn is role=user must STILL be dropped (no resurrected assistant slot).
+    Proves the relaxation is narrowly keyed on 'stuck_no_progress', not a blanket
+    'append on any aborted task' that would reintroduce the truncated-turn bug."""
+    import json as _j
+    from lib.database import DOMAIN_CHAT, get_thread_db, json_dumps_pg
+    from lib.database._core_schema import CONVERSATIONS, upsert
+    from lib.tasks_pkg import manager
+
+    conv_id = 'cv-reap-guard-nc'
+    db = get_thread_db(DOMAIN_CHAT)
+    now_ms = int(time.time() * 1000)
+    upsert(db, CONVERSATIONS, {
+        'id': conv_id, 'user_id': 1, 'title': 'guard-nc',
+        'messages': json_dumps_pg([
+            {'role': 'user', 'content': 'regenerated question', 'timestamp': now_ms},
+        ]),
+        'msg_count': 1, 'created_at': now_ms, 'updated_at': now_ms,
+    }, insert_cols=['id', 'user_id', 'title', 'messages', 'msg_count',
+                    'created_at', 'updated_at'], retry=True)
+    db.commit()
+    manager._record_latest_task(conv_id, 'task-superseded-1')
+
+    import threading
+    superseded = {
+        'id': 'task-superseded-1', 'convId': conv_id, 'status': 'aborted',
+        'aborted': True, '_abort_reason': 'superseded',
+        'content': 'stale content from the old turn', 'thinking': '',
+        'finishReason': 'stop', 'config': {'model': 'x'},
+        'created_at': time.time(), 'events': [], 'events_lock': threading.Lock(),
+    }
+    try:
+        manager._sync_result_to_conversation(superseded, manager.build_result_meta(superseded))
+        row = db.execute('SELECT messages FROM conversations WHERE id=? AND user_id=1',
+                         (conv_id,)).fetchone()
+        msgs = _j.loads(row[0]) if isinstance(row[0], str) else row[0]
+        assert len(msgs) == 1 and msgs[-1].get('role') == 'user', (
+            f'a superseded (non-stuck) task must NOT append an assistant slot, got {msgs}')
+    finally:
+        _cleanup(db, conv_id)
+        try:
+            from lib.tasks_pkg.manager import _conv_latest_task, _conv_latest_task_lock
+            with _conv_latest_task_lock:
+                _conv_latest_task.pop(conv_id, None)
+        except Exception:
+            pass
+    _ok('non-stuck aborted task still blocked from resurrecting a truncated turn (guard scope)')
+
+
 def test_list_orphaned_excludes_autopilot(monkeypatch):
     """list_orphaned_dispatchable_convs lists convs with real/workflow/peer rows
     but excludes autopilot-only convs."""
@@ -186,10 +339,105 @@ def test_list_orphaned_excludes_autopilot(monkeypatch):
     _ok('list_orphaned_dispatchable_convs excludes autopilot-only convs')
 
 
+def test_live_task_conv_not_double_dispatched(monkeypatch):
+    """A conv that ALREADY has a live running task must NOT be re-dispatched by
+    the orphaned-queue scan — its queue is left for the post-completion hook.
+
+    This guards the exact timing the boot wiring depends on: recovery clears
+    dead activeTaskId first, but a task spawned earlier in the SAME boot (or a
+    racing send) is live in ``tasks`` — draining it here would double-dispatch.
+    """
+    import lib.tasks_pkg as tp
+    from lib.tasks_pkg import manager
+    from lib.database import DOMAIN_CHAT, get_thread_db
+    from lib import message_queue as mq
+
+    conv_id = 'cv-requeue-livetask'
+    db = get_thread_db(DOMAIN_CHAT)
+    _seed_conv(db, conv_id, [
+        {'role': 'user', 'content': 'q', 'timestamp': 1},
+        {'role': 'assistant', 'content': 'a', 'timestamp': 2, 'finishReason': 'stop'},
+    ])
+
+    spawned_tasks = []
+    monkeypatch.setattr(tp, 'spawn_task', lambda task: spawned_tasks.append(task['id']))
+
+    # A dispatchable queued turn exists…
+    mq.enqueue_message(conv_id, {'_user_msg': {
+        'role': 'user', 'content': 'queued behind a live task', 'timestamp': 3},
+        'text': 'queued behind a live task'}, {'model': 'gpt-4o'}, kind=mq.KIND_REAL)
+
+    # …but a live running task already owns the conv (the double-dispatch trap).
+    import threading
+    fake_task = {'id': 'live-task-1', 'convId': conv_id, 'status': 'running',
+                 'aborted': False, 'events': [], 'events_lock': threading.Lock()}
+    with manager.tasks_lock:
+        manager.tasks['live-task-1'] = fake_task
+
+    try:
+        mq.redispatch_orphaned_queue_on_startup()
+        # No task was spawned for this conv (the live-task guard held).
+        assert not spawned_tasks, (
+            f'live-task conv was double-dispatched: {spawned_tasks}')
+        # The queued row is UNTOUCHED — left for the completion hook.
+        assert mq.get_queue_depth(conv_id) == 1, (
+            'queued row must survive: the live task drains it on completion')
+        # The transcript is unchanged (queued msg NOT appended).
+        row = db.execute('SELECT messages FROM conversations WHERE id=? AND user_id=1',
+                         (conv_id,)).fetchone()
+        msgs = _json.loads(row[0]) if isinstance(row[0], str) else row[0]
+        assert len(msgs) == 2, f'transcript must be untouched, got {len(msgs)} msgs'
+    finally:
+        with manager.tasks_lock:
+            manager.tasks.pop('live-task-1', None)
+        _cleanup(db, conv_id)
+    _ok('conv with a live task is NOT double-dispatched by the orphaned-queue scan')
+
+
+def test_server_wires_orphan_redispatch_on_serving_loop(monkeypatch):
+    """WIRING regression: server.py::_serve must schedule the orphaned-queue
+    re-dispatch on the SERVING loop, gated on _shutdown_requested — NOT leave
+    ``redispatch_orphaned_queue_on_startup`` as dead code (the confirmed gap).
+
+    We assert against the server.py SOURCE (not a live boot): the function is
+    referenced, scheduled via loop.create_task on an asyncio.to_thread call,
+    and guarded by the shutdown flag. A source assertion is the right grain
+    here — it fails loudly if a refactor drops the call site again.
+    """
+    import os as _os
+    server_path = _os.path.join(
+        _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), 'server.py')
+    with open(server_path, 'r', encoding='utf-8') as f:
+        src = f.read()
+    assert 'redispatch_orphaned_queue_on_startup' in src, (
+        'server.py never references redispatch_orphaned_queue_on_startup — '
+        'the orphaned-queue drain is dead code again')
+    # It must be scheduled on the loop (not awaited inline in startup) …
+    assert 'loop.create_task(_run_orphan_queue_redispatch())' in src, (
+        'orphaned-queue redispatch is not scheduled on the serving loop')
+    # … via to_thread (it does blocking DB + spawn work) …
+    assert 'asyncio.to_thread(redispatch_orphaned_queue_on_startup)' in src, (
+        'orphaned-queue redispatch must run in a thread (blocking DB/spawn work)')
+    # … and gated on the shutdown flag so a ^C during boot skips it.
+    _fn_start = src.index('async def _run_orphan_queue_redispatch')
+    _fn_body = src[_fn_start:_fn_start + 800]
+    assert '_shutdown_requested.is_set()' in _fn_body, (
+        'orphaned-queue redispatch is not gated on _shutdown_requested')
+    _ok('server.py wires redispatch_orphaned_queue_on_startup on the serving loop, shutdown-gated')
+
+
 def main():
     print()
     print(_color('═══ queue re-dispatch after restart tests ═══', '36'))
     print()
+
+    # ⚠️ DATA-LOSS GUARD: standalone mode skips conftest (no force-sqlite, no
+    # pytest_configure gate), so a bare `python tests/x.py` would seed a
+    # `requeue-test` conversation into the ambient TOFU_DB_BACKEND (production
+    # PG when .env sets postgres). The shared helper forces sqlite + a throwaway
+    # DB, asserts the resolved DB is a test DB, and bootstraps the schema.
+    from tests._standalone_guard import guard_standalone_db
+    guard_standalone_db('test_queue_redispatch_after_restart.__main__')
 
     # Minimal monkeypatch shim (these tests run standalone too, not just pytest).
     class _MP:
@@ -205,6 +453,8 @@ def main():
     tests = [
         test_redispatch_persists_and_dispatches,
         test_autopilot_only_conv_not_dispatched,
+        test_reaped_stuck_task_finalizes_conversation,
+        test_NC_reaped_task_guard_still_blocks_regenerate_truncation,
         test_list_orphaned_excludes_autopilot,
     ]
     for fn in tests:

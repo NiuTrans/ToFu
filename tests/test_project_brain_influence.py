@@ -171,19 +171,7 @@ def test_route_brain_influence_requires_path_and_conv(flask_client):
 
 # ── Source-level NEGATIVE CONTROL ──
 
-def _patch_restore(path, old, new, run):
-    with open(path, encoding='utf-8') as f:
-        original = f.read()
-    assert old in original, f'anchor not found in {path}'
-    try:
-        with open(path, 'w', encoding='utf-8') as f:
-            f.write(original.replace(old, new, 1))
-        run()
-    finally:
-        with open(path, 'w', encoding='utf-8') as f:
-            f.write(original)
-    with open(path, encoding='utf-8') as f:
-        assert f.read() == original, 'source not restored byte-identical'
+from tests._nc_harness import patch_restore as _patch_restore  # noqa: E402
 
 
 def test_NC_ownership_split_is_load_bearing(flask_app):
@@ -191,11 +179,8 @@ def test_NC_ownership_split_is_load_bearing(flask_app):
     'mine' (owner==conv_id never matches) → convA's own "Refactor parser" no
     longer appears under `mine` → the split assertion FAILS. Byte-identical
     restore."""
-    import importlib
-
     def run():
         import lib.conversations.project_brain_influence as infl
-        importlib.reload(infl)
         p = os.path.abspath('/tmp/infl-nc')
         with flask_app.app_context():
             from lib.database import DOMAIN_CHAT, get_thread_db
@@ -214,5 +199,3 @@ def test_NC_ownership_split_is_load_bearing(flask_app):
         "if status == 'claimed' and owner and conv_id and owner == '__never__':",
         run,
     )
-    import lib.conversations.project_brain_influence as infl
-    importlib.reload(infl)

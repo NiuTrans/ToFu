@@ -243,7 +243,13 @@ def micro_compact(messages: list, conv_id: str = '', task: dict | None = None,
     if conv_id:
         try:
             from lib.tasks_pkg.cache_tracking import get_cache_prefix_count
-            _cache_prefix_count = get_cache_prefix_count(conv_id)
+            # Pass the LIVE message count so the (monotonic) boundary is
+            # clamped to the messages that actually exist this round — a
+            # history shrink (L2/L3 macro-compact, edit-and-resend) must let
+            # the boundary fall, or micro_compact would be permanently
+            # disabled for this conv → unbounded context growth.
+            _cache_prefix_count = get_cache_prefix_count(
+                conv_id, current_msg_count=len(messages))
         except Exception as e:
             logger.debug('[Compaction] cache_tracking not available: %s', e)
 
@@ -306,6 +312,17 @@ def micro_compact(messages: list, conv_id: str = '', task: dict | None = None,
                                 if isinstance(m, dict)
                                 for r in (m.get('toolRounds') or [])
                                 if r.get('compactionLayer') == 'L1'))
+                # Event-driven cross-device sync: the persisted placeholders
+                # rewrote the conversation body (and bumped rev), so push the
+                # post-write rev → a sibling tab with this conv open refetches
+                # the compacted tool rounds without a manual refresh. Only on a
+                # landed CAS write (_affected > 0), never on a skipped one.
+                try:
+                    from lib.agent_core.store import get_conversation_store
+                    get_conversation_store().notify_conversation_changed(conv_id)
+                except Exception as _ne:
+                    logger.debug('[L1-persist] conv=%s conv-changed notify skipped: %s',
+                                 conv_id[:8] if conv_id else '?', _ne)
         except Exception as _e:
             logger.warning('[L1-persist] conv=%s persist failed: %s',
                            conv_id[:8] if conv_id else '?', _e, exc_info=True)

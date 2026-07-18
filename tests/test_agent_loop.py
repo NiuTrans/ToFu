@@ -195,6 +195,96 @@ def test_between_tools_check_skips_remaining_tools():
     _ok('(3) between-tools abort skips remaining queued tools + no fresh round')
 
 
+def test_exit_reason_completed_and_exhausted():
+    """LoopOutcome.exit_reason reports WHY the loop stopped (orchestrator diag parity)."""
+    from lib.agent_loop import AbortSignal, run_agent_loop
+    # natural completion
+    out = run_agent_loop(abort=AbortSignal.never(), max_tool_rounds=2, round_tools=['T'],
+                         dispatch=lambda rnd, tools: _mk_msg(None),
+                         execute_tool=lambda rnd, tc: None)
+    assert out.completed and out.exit_reason == 'completed', out.exit_reason
+    # forced to the cap (always asks for a tool) → max_rounds_exhausted
+    out2 = run_agent_loop(abort=AbortSignal.never(), max_tool_rounds=1, round_tools=['T'],
+                          dispatch=lambda rnd, tools: _mk_msg([{'id': 'x', 'function': {'name': 'web_search', 'arguments': '{}'}}]),
+                          execute_tool=lambda rnd, tc: None)
+    assert not out2.completed and out2.exit_reason == 'max_rounds_exhausted', out2.exit_reason
+    _ok('exit_reason reports completed vs max_rounds_exhausted')
+
+
+def test_exit_reason_abort_phases():
+    """exit_reason distinguishes the three abort placements."""
+    from lib.agent_loop import AbortSignal, run_agent_loop
+    # before-round
+    o1 = run_agent_loop(abort=AbortSignal(lambda: True), max_tool_rounds=2, round_tools=['T'],
+                        dispatch=lambda rnd, tools: _mk_msg(None), execute_tool=lambda rnd, tc: None)
+    assert o1.exit_reason == 'aborted_before_round', o1.exit_reason
+    # post-stream
+    f = {'v': False}
+    def disp_ps(rnd, tools):
+        f['v'] = True
+        return _mk_msg([{'id': 't', 'function': {'name': 'web_search', 'arguments': '{}'}}])
+    o2 = run_agent_loop(abort=AbortSignal(lambda: f['v']), max_tool_rounds=2, round_tools=['T'],
+                        dispatch=disp_ps, execute_tool=lambda rnd, tc: None)
+    assert o2.exit_reason == 'aborted_post_stream', o2.exit_reason
+    _ok('exit_reason distinguishes before-round vs post-stream aborts')
+
+
+def test_retry_bonus_grants_extra_round_dynamically():
+    """A premature-close retry_bonus hook expands the ceiling mid-loop (orchestrator parity).
+
+    With max_tool_rounds=0 (no tools) a plain for-range would run exactly ONE
+    round. The retry_bonus hook, returning True once, must grant ONE extra
+    round — matching orchestrator's `_premature_retry_count` growing the while
+    ceiling so even a no-tools turn gets its premature-close retry.
+    """
+    from lib.agent_loop import AbortSignal, run_agent_loop
+    disp = {'n': 0}
+    def dispatch(rnd, tools):
+        disp['n'] += 1
+        return _mk_msg(None)
+    # retry_bonus fires True on the first round only → one bonus round.
+    bonus = {'granted': 0}
+    def retry_bonus(rnd, msg, finish, usage):
+        if rnd == 0:
+            bonus['granted'] += 1
+            return True   # premature close → grant a retry round
+        return False
+    out = run_agent_loop(abort=AbortSignal.never(), max_tool_rounds=0, round_tools=None,
+                         dispatch=dispatch, execute_tool=lambda rnd, tc: None,
+                         retry_bonus=retry_bonus)
+    assert disp['n'] == 2, f'expected 2 dispatches (1 base + 1 bonus), got {disp["n"]}'
+    assert out.rounds == 2 and bonus['granted'] == 1
+    _ok('retry_bonus grants an extra round dynamically (premature-close parity)')
+
+
+def test_retry_bonus_is_capped():
+    """retry_bonus honours max_retry_bonus so a stuck premature-close can't loop forever."""
+    from lib.agent_loop import AbortSignal, run_agent_loop
+    disp = {'n': 0}
+    def dispatch(rnd, tools):
+        disp['n'] += 1
+        return _mk_msg(None)
+    out = run_agent_loop(abort=AbortSignal.never(), max_tool_rounds=0, round_tools=None,
+                         dispatch=dispatch, execute_tool=lambda rnd, tc: None,
+                         retry_bonus=lambda *a: True,  # always wants a retry
+                         max_retry_bonus=2)
+    # base round (1) + 2 capped bonus rounds = 3 dispatches, no more.
+    assert disp['n'] == 3, f'expected 3 (1 base + 2 capped bonus), got {disp["n"]}'
+    assert out.rounds == 3
+    _ok('retry_bonus is capped by max_retry_bonus (no infinite premature-close loop)')
+
+
+def test_retry_bonus_default_off_preserves_for_range():
+    """With no retry_bonus hook the loop is byte-equivalent to the old for-range."""
+    from lib.agent_loop import AbortSignal, run_agent_loop
+    disp = {'n': 0}
+    out = run_agent_loop(abort=AbortSignal.never(), max_tool_rounds=0, round_tools=None,
+                         dispatch=lambda rnd, tools: (disp.__setitem__('n', disp['n'] + 1) or _mk_msg(None)),
+                         execute_tool=lambda rnd, tc: None)
+    assert disp['n'] == 1 and out.rounds == 1  # exactly one round, as before
+    _ok('no retry_bonus hook → identical to the original for-range (1 round)')
+
+
 def test_loop_does_not_swallow_dispatch_exception():
     """A dispatcher exception (e.g. AbortedError) must propagate to the caller."""
     from lib.agent_loop import AbortSignal, run_agent_loop
@@ -225,6 +315,11 @@ def main():
         test_before_round_check_blocks_dispatch,
         test_post_stream_check_stops_before_tools,
         test_between_tools_check_skips_remaining_tools,
+        test_exit_reason_completed_and_exhausted,
+        test_exit_reason_abort_phases,
+        test_retry_bonus_grants_extra_round_dynamically,
+        test_retry_bonus_is_capped,
+        test_retry_bonus_default_off_preserves_for_range,
         test_loop_does_not_swallow_dispatch_exception,
     ]
     for fn in tests:

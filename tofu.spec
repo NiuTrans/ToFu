@@ -174,6 +174,11 @@ exe = EXE(
     console=False,          # No terminal window on Windows/macOS
     disable_windowed_traceback=False,
     argv_emulation=False,
+    # Native host arch (None). The CI macOS matrix builds arm64 on macos-14 and
+    # x86_64 on macos-13 separately, each with arch-matching wheels. Do NOT set
+    # 'universal2' here: the runners' interpreter + several bundled C extensions
+    # (psycopg2, pymupdf, lxml) ship single-arch wheels, so a universal2 COLLECT
+    # aborts with "not a fat binary!" (see .github/workflows/build-desktop.yml).
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,

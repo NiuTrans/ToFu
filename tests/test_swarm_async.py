@@ -609,6 +609,87 @@ class TestGetAgentResult(unittest.TestCase):
         self.assertEqual(payload['agent_id'], 'a1')
         self.assertEqual(len(payload['final_answer']), 1000)
 
+    def test_get_result_batch_returns_all(self):
+        """Batch mode: ``agent_ids`` fetches several agents' full bodies in a
+        single call, returned together under ``results`` (mirrors the
+        read_files/web_search/fetch_url batch contract)."""
+        with _patch_factory({
+            'a1': {'final_answer': 'X' * 100},
+            'a2': {'final_answer': 'Y' * 200},
+            'a3': {'final_answer': 'Z' * 300},
+        }):
+            execute_swarm_tool(
+                'spawn_agents',
+                {'agents': [
+                    {'id': 'a1', 'objective': 'O1'},
+                    {'id': 'a2', 'objective': 'O2'},
+                    {'id': 'a3', 'objective': 'O3'},
+                ]},
+                task={'id': self.task_id},
+            )
+            self.assertTrue(_wait_until(
+                lambda: agent_inbox.peek(self.task_id) >= 3,
+            ))
+            raw = execute_swarm_tool(
+                'get_agent_result',
+                {'agent_ids': ['a1', 'a2', 'a3']},
+                task={'id': self.task_id},
+            )
+        payload = json.loads(raw)
+        self.assertEqual(payload['status'], 'ok')
+        results = payload['results']
+        self.assertEqual(len(results), 3)
+        by_id = {r['agent_id']: r for r in results}
+        self.assertEqual(len(by_id['a1']['final_answer']), 100)
+        self.assertEqual(len(by_id['a2']['final_answer']), 200)
+        self.assertEqual(len(by_id['a3']['final_answer']), 300)
+        self.assertTrue(all(r['found'] for r in results))
+
+    def test_get_result_batch_mixed_known_unknown(self):
+        """A batch with an unknown id still returns the known agent's body —
+        the bad id gets its own per-entry error and never aborts the batch."""
+        with _patch_factory({'a1': {'final_answer': 'GOOD'}}):
+            execute_swarm_tool(
+                'spawn_agents',
+                {'agents': [{'id': 'a1', 'objective': 'O'}]},
+                task={'id': self.task_id},
+            )
+            self.assertTrue(_wait_until(
+                lambda: agent_inbox.peek(self.task_id) >= 1))
+            raw = execute_swarm_tool(
+                'get_agent_result',
+                {'agent_ids': ['a1', 'nope']},
+                task={'id': self.task_id},
+            )
+        payload = json.loads(raw)
+        self.assertEqual(payload['status'], 'ok')
+        results = payload['results']
+        self.assertEqual(len(results), 2)
+        by_id = {r['agent_id']: r for r in results}
+        self.assertTrue(by_id['a1']['found'])
+        self.assertIn('GOOD', by_id['a1']['final_answer'])
+        self.assertFalse(by_id['nope']['found'])
+
+    def test_get_result_single_still_works(self):
+        """Single-mode ``agent_id`` remains supported (no `results` wrapper)."""
+        with _patch_factory({'a1': {'final_answer': 'SOLO'}}):
+            execute_swarm_tool(
+                'spawn_agents',
+                {'agents': [{'id': 'a1', 'objective': 'O'}]},
+                task={'id': self.task_id},
+            )
+            self.assertTrue(_wait_until(
+                lambda: agent_inbox.peek(self.task_id) >= 1))
+            raw = execute_swarm_tool(
+                'get_agent_result', {'agent_id': 'a1'},
+                task={'id': self.task_id},
+            )
+        payload = json.loads(raw)
+        self.assertEqual(payload['status'], 'ok')
+        self.assertNotIn('results', payload)
+        self.assertEqual(payload['agent_id'], 'a1')
+        self.assertIn('SOLO', payload['final_answer'])
+
     def test_get_result_unknown_id(self):
         with _patch_factory():
             execute_swarm_tool(
@@ -1309,7 +1390,7 @@ class TestRehydration(unittest.TestCase):
             [s for s in self.p.load_resumable_sessions() if s['swarm_key'] == self.key],
             [])
         # flip to undelivered → resumable (notification owed)
-        self.p.mark_delivered  # noqa: just reference
+        self.p.mark_delivered  # noqa  (bare attribute reference, intentional)
         self.p.save_agent(self.key, 'a1', role='researcher', objective='X',
                           status='completed', messages=[], result={'status': 'completed'},
                           rounds_used=1, delivered=False)

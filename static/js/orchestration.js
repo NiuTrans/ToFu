@@ -21,111 +21,6 @@
    share window scope like every other static/js/*.js (no imports).
    ═══════════════════════════════════════════════════════════════════ */
 
-// ── Catalogue: role agents (tofu mascots) ──────────────────────────
-// `icon` is a file under static/icons/.  `tier` is the default model
-// tier hint (mirrors lib/swarm/registry.py AGENT_ROLES.model_hint).
-var _ORCH_ROLES = [
-  { role: 'planner',     label: 'Planner',     icon: 'tofu-planner.svg',     tier: 'heavy',
-    blurb: 'Rewrites the ask into a structured brief + checklist.' },
-  { role: 'worker',      label: 'Worker',      icon: 'tofu-worker.svg',      tier: 'heavy',
-    blurb: 'Executes the plan with full tools. Stateful across loops.' },
-  { role: 'critic',      label: 'Critic',      icon: 'tofu-critic.svg',      tier: 'heavy',
-    blurb: 'Reviews work against the checklist. Emits a verdict.' },
-  { role: 'researcher',  label: 'Researcher',  icon: 'tofu-researcher',  tier: 'standard',
-    blurb: 'Gathers + verifies info from web sources.' },
-  { role: 'coder',       label: 'Coder',       icon: 'tofu-coder',       tier: 'heavy',
-    blurb: 'Reads / writes / edits code across files.' },
-  { role: 'analyst',     label: 'Analyst',     icon: 'tofu-analyst',     tier: 'standard',
-    blurb: 'Quantitative analysis of on-disk data.' },
-  { role: 'reviewer',    label: 'Reviewer',    icon: 'tofu-critic.svg',      tier: 'heavy',
-    blurb: 'Fresh second-opinion read. Outputs a punch list.' },
-  { role: 'writer',      label: 'Writer',      icon: 'tofu-writer',      tier: 'light',
-    blurb: 'Long-form prose from raw inputs.' },
-  { role: 'browser',     label: 'Browser',     icon: 'tofu-browser',     tier: 'standard',
-    blurb: 'Interacts with live browser tabs.' },
-  { role: 'synthesizer', label: 'Synthesizer', icon: 'tofu-synthesizer', tier: 'standard',
-    blurb: 'Merges many agent outputs into one converged result.' },
-  { role: 'virtual_user', label: 'Virtual User', icon: 'tofu-general', tier: 'standard',
-    blurb: 'Stands in for the human: auto-replies to keep a task going until done. Speaks as User.' },
-  { role: 'router',      label: 'Router',      icon: 'tofu-router',      tier: 'light',
-    blurb: 'Classifies each item and routes it to a branch.' },
-  { role: 'general',     label: 'General',     icon: 'tofu-general',     tier: 'standard',
-    blurb: 'Versatile fallback when no specialist fits.' },
-];
-
-// ── Catalogue: control / structure nodes ───────────────────────────
-// These carry the topology semantics. `kind` is the node type the
-// backend engine will switch on. `single` = at most one per canvas.
-var _ORCH_CONTROLS = [
-  { kind: 'start',    label: 'Start',     glyph: 'play',    single: true,
-    accent: '#10b981', blurb: 'Entry point. The user request flows in here.' },
-  { kind: 'loop',     label: 'Loop',      glyph: 'loop',    single: false,
-    accent: '#6e56cf', blurb: 'Repeat the wrapped step until a stop condition holds.' },
-  { kind: 'parallel', label: 'Fan-out',   glyph: 'fanout',  single: false,
-    accent: '#3b82f6', blurb: 'Run downstream agents in parallel, one per item.' },
-  { kind: 'barrier',  label: 'Join',      glyph: 'join',    single: false,
-    accent: '#14b8a6', blurb: 'Wait for all parallel branches, then continue.' },
-  { kind: 'branch',   label: 'Route',     glyph: 'branch',  single: false,
-    accent: '#f59e0b', blurb: 'Send the flow down a path chosen by a classifier.' },
-  { kind: 'artifact', label: 'Deliverable', glyph: 'artifact', single: false,
-    accent: '#ec4899', blurb: 'An expected intermediate output (file / report). '
-      + 'Wire it between agents to make a deliverable the contract between them.' },
-  { kind: 'human',    label: 'Human',     glyph: 'human',   single: false,
-    accent: '#0ea5e9', blurb: 'A human-in-the-loop gate: pause for approval, '
-      + 'collect an answer, or notify the user mid-flow.' },
-  { kind: 'stop',     label: 'Stop',      glyph: 'stop',    single: true,
-    accent: '#ef4444', blurb: 'Terminal. The converged result returns to chat.' },
-];
-
-// Inline SVG glyphs for control nodes (abstract, theme-colored).
-var _ORCH_GLYPHS = {
-  play:   '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>',
-  loop:   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 2l4 4-4 4"/><path d="M3 11v-1a4 4 0 0 1 4-4h14"/><path d="M7 22l-4-4 4-4"/><path d="M21 13v1a4 4 0 0 1-4 4H3"/></svg>',
-  fanout: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="12" r="2"/><circle cx="18" cy="5" r="2"/><circle cx="18" cy="12" r="2"/><circle cx="18" cy="19" r="2"/><path d="M8 12h2M11 11l5-5M11 13l5 5"/></svg>',
-  join:   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="5" r="2"/><circle cx="6" cy="12" r="2"/><circle cx="6" cy="19" r="2"/><circle cx="18" cy="12" r="2"/><path d="M8 5l5 6M8 12h2M8 19l5-6"/></svg>',
-  branch: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="12" r="2"/><circle cx="18" cy="6" r="2"/><circle cx="18" cy="18" r="2"/><path d="M8 12h3M11 11l5-4M11 13l5 4"/></svg>',
-  stop:   '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>',
-  artifact: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/><path d="M9 13h6M9 17h6"/></svg>',
-  human:  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="7" r="4"/><path d="M5.5 21a6.5 6.5 0 0 1 13 0"/></svg>',
-  group:  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="3" stroke-dasharray="4 3"/><rect x="7" y="7" width="4" height="4" rx="1"/><rect x="13" y="13" width="4" height="4" rx="1"/><path d="M11 9h2a2 2 0 0 1 2 2v2"/></svg>',
-};
-
-// ── Inline UI icons (SVG-only; NO emoji) ────────────────────────────
-// House rule for the orchestration surface: every icon is an inline SVG
-// glyph, never an emoji — even for abstract concepts. Each entry is a
-// self-sized <svg class="orch-ico"> (1em, currentColor) safe to splice
-// into button labels and run-log lines (which use innerHTML).
-var _orchSvg = function (inner, big) {
-  return '<svg class="orch-ico' + (big ? ' orch-ico-lg' : '') + '" viewBox="0 0 24 24" '
-    + 'fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" '
-    + 'stroke-linejoin="round" aria-hidden="true">' + inner + '</svg>';
-};
-var _ORCH_ICONS = {
-  plus:    _orchSvg('<path d="M12 5v14M5 12h14"/>'),
-  gear:    _orchSvg('<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>'),
-  layout:  _orchSvg('<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/>'),
-  star:    '<svg class="orch-ico" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2l2.9 6.3 6.9.7-5.1 4.6 1.4 6.8L12 17.8 5.9 20.4l1.4-6.8L2.2 9l6.9-.7z"/></svg>',
-  loop:    _orchSvg('<path d="M17 2l4 4-4 4"/><path d="M3 11v-1a4 4 0 0 1 4-4h14"/><path d="M7 22l-4-4 4-4"/><path d="M21 13v1a4 4 0 0 1-4 4H3"/>'),
-  auto:    _orchSvg('<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="2.5"/><path d="M12 3v4M12 17v4M3 12h4M17 12h4"/>'),
-  fanout:  _orchSvg('<circle cx="6" cy="12" r="2"/><circle cx="18" cy="5" r="2"/><circle cx="18" cy="12" r="2"/><circle cx="18" cy="19" r="2"/><path d="M8 12h2M11 11l5-5M11 13l5 5"/>'),
-  shield:  _orchSvg('<path d="M12 3l7 3v5c0 4.5-3 8.5-7 10-4-1.5-7-5.5-7-10V6z"/><path d="M9 12l2 2 4-4"/>'),
-  folder:  _orchSvg('<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>'),
-  wand:    _orchSvg('<path d="M15 4V2M15 10V8M11 6H9M21 6h-2M18.5 3.5l-1 1M11.5 3.5l1 1M5 21l11-11"/>'),
-  save:    _orchSvg('<path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><path d="M17 21v-8H7v8M7 3v5h8"/>'),
-  puzzle:  _orchSvg('<path d="M15.39 4.39a1 1 0 0 0 1.68-.474 2.5 2.5 0 1 1 3.014 3.015 1 1 0 0 0-.474 1.68l1.683 1.682a2.414 2.414 0 0 1 0 3.414L19.61 15.39a1 1 0 0 1-1.68-.474 2.5 2.5 0 1 0-3.014 3.015 1 1 0 0 1 .474 1.68l-1.683 1.682a2.414 2.414 0 0 1-3.414 0L8.61 19.61a1 1 0 0 0-1.68.474 2.5 2.5 0 1 1-3.014-3.015 1 1 0 0 0 .474-1.68l-1.683-1.682a2.414 2.414 0 0 1 0-3.414L4.39 8.61a1 1 0 0 1 1.68.474 2.5 2.5 0 1 0 3.014-3.015 1 1 0 0 1-.474-1.68l1.683-1.682a2.414 2.414 0 0 1 3.414 0z"/>', true),
-  speak:   _orchSvg('<path d="M21 11.5a8.38 8.38 0 0 1-9 8.3 8.5 8.5 0 0 1-3.8-.9L3 20l1.1-3.3A8.38 8.38 0 0 1 12 3.5a8.5 8.5 0 0 1 9 8z"/>'),
-  eye:     _orchSvg('<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/>'),
-  rocket:  _orchSvg('<path d="M5 15c-1 1-1.5 4-1.5 4s3-.5 4-1.5"/><path d="M9 11a12 12 0 0 1 8-8c2 0 3 1 3 3a12 12 0 0 1-8 8z"/><path d="M9 11l-3 1 3 5 1-3"/><circle cx="14.5" cy="9.5" r="1.5"/>'),
-  bot:     _orchSvg('<rect x="4" y="8" width="16" height="12" rx="2"/><path d="M12 8V5M9 4h6"/><circle cx="9" cy="14" r="1"/><circle cx="15" cy="14" r="1"/>'),
-  check:   '<svg class="orch-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6L9 17l-5-5"/></svg>',
-  reject:  _orchSvg('<circle cx="12" cy="12" r="9"/><path d="M15 9l-6 6M9 9l6 6"/>'),
-  warn:    _orchSvg('<path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/>'),
-  compass: _orchSvg('<circle cx="12" cy="12" r="9"/><path d="M16 8l-2 6-6 2 2-6z"/>'),
-  package: _orchSvg('<path d="M21 8l-9-5-9 5v8l9 5 9-5z"/><path d="M3 8l9 5 9-5M12 13v8"/>'),
-  person:  _orchSvg('<circle cx="12" cy="8" r="4"/><path d="M5 21a7 7 0 0 1 14 0"/>'),
-  flag:    _orchSvg('<path d="M5 21V4M5 4h11l-2 4 2 4H5"/>'),
-  stop:    '<svg class="orch-ico" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>',
-};
 
 // ── Canvas state ────────────────────────────────────────────────────
 var _orchNodes = [];          // [{id, type:'role'|'control', role?, kind?, x, y, name, params}]
@@ -150,22 +45,6 @@ var _ORCH_CARD_W = 188;       // must match .orch-node width in CSS
 
 function _orchNextId(prefix) { _orchSeq++; return (prefix || 'n') + _orchSeq; }
 
-function _orchIconBase() {
-  return (typeof BASE_PATH !== 'undefined' ? BASE_PATH : '') + '/static/icons';
-}
-
-// Resolve a role icon to a full URL. An `icon` carrying an explicit
-// extension (e.g. 'tofu-worker.svg') is used as-is; otherwise '.png' is
-// appended. Lets crisp SVGs and cleaned PNGs coexist in _ORCH_ROLES.
-// Cache-bust token for role icons. Bump when icon art is regenerated so
-// browsers re-fetch instead of serving the stale (max-age=86400) bytes.
-var _ORCH_ICON_VER = '20260622a';
-
-function _orchIconSrc(icon) {
-  var name = icon || 'tofu-general';
-  var file = /\.\w+$/.test(name) ? name : name + '.png';
-  return _orchIconBase() + '/' + file + '?v=' + _ORCH_ICON_VER;
-}
 
 // ════════════════════════════════════════════════════════════════════
 //  Open / close + one-time modal & style injection
@@ -258,16 +137,17 @@ function _orchEnsureModal() {
     +   '</div>'
     +   '<div class="orch-run-drawer" id="orchRunDrawer">'
     +     '<div class="orch-run-head">'
-    +       '<span>▶ Run Flow</span>'
-    +       '<button class="orch-ai-clear" onclick="_orchCloseRun()" title="Close">✕</button>'
+    +       '<span>' + _ORCH_ICONS.rocket + ' ' + t('orch.run.title') + '</span>'
+    +       '<button class="orch-ai-clear" onclick="_orchCloseRun()" title="Close">' + _ORCH_ICONS.reject + '</button>'
     +     '</div>'
     +     '<div class="orch-run-input">'
     +       '<textarea id="orchRunInput" rows="2" placeholder="Initial request / input for the flow (optional)…"></textarea>'
+    +       '<div class="orch-run-hint">' + _ORCH_ICONS.eye + ' ' + t('orch.run.hint') + '</div>'
     +       '<div class="orch-run-actions">'
-    +         '<button class="orch-btn orch-btn-ghost" onclick="_orchPlan()">' + _ORCH_ICONS.eye + ' Preview plan</button>'
-    +         '<button class="orch-btn orch-btn-run" id="orchRunBtn" onclick="_orchRun()">▶ Run</button>'
-    +         '<button class="orch-btn orch-btn-primary" id="orchRunTaskBtn" onclick="_orchRunAsTask()" title="Launch a durable, reopenable run and open it in Task Mode">' + _ORCH_ICONS.rocket + ' Run as Task</button>'
-    +         '<button class="orch-btn orch-btn-danger" id="orchRunAbort" onclick="_orchRunAbort()" style="display:none">Stop</button>'
+    +         '<button class="orch-btn orch-btn-ghost" onclick="_orchPlan()">' + _ORCH_ICONS.eye + ' ' + t('orch.run.previewPlan') + '</button>'
+    +         '<button class="orch-btn orch-btn-run" id="orchRunBtn" onclick="_orchRun()" title="' + t('orch.run.testRun') + '">' + _ORCH_ICONS.auto + ' ' + t('orch.run.testRun') + '</button>'
+    +         '<button class="orch-btn orch-btn-primary" id="orchRunTaskBtn" onclick="_orchRunAsTask()" title="' + t('orch.run.asTask') + '">' + _ORCH_ICONS.rocket + ' ' + t('orch.run.asTask') + '</button>'
+    +         '<button class="orch-btn orch-btn-danger" id="orchRunAbort" onclick="_orchRunAbort()" style="display:none">' + _ORCH_ICONS.stop + ' ' + t('orch.run.stop') + '</button>'
     +       '</div>'
     +     '</div>'
     +     '<div class="orch-run-log" id="orchRunLog"></div>'
@@ -376,7 +256,9 @@ function _orchRenderPalette() {
 // On phones the side rails become slide-up sheets and HTML5 drag is
 // replaced by tap-to-add; these helpers gate that behaviour on viewport.
 function _orchIsMobile() {
-  return window.matchMedia && window.matchMedia('(max-width:768px)').matches;
+  var q = (typeof window.mobileMediaQuery === 'function')
+    ? window.mobileMediaQuery() : '(max-width:768px)';
+  return window.matchMedia && window.matchMedia(q).matches;
 }
 
 function _orchAddNodeAtCenter(payload) {
@@ -2398,8 +2280,11 @@ function _orchInjectStyles() {
 .orch-run-input{padding:11px;border-bottom:var(--orch-rail);display:flex;flex-direction:column;gap:9px}
 .orch-run-input textarea{width:100%;resize:none;background:var(--bg-primary);border:1px solid var(--border);border-radius:var(--orch-r-md);color:var(--text-primary);font-family:inherit;font-size:12.5px;padding:9px 11px;outline:none;line-height:1.5;transition:border-color var(--transition),box-shadow var(--transition)}
 .orch-run-input textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-subtle)}
-.orch-run-actions{display:flex;gap:8px}
-.orch-run-actions .orch-btn{flex:1}
+.orch-run-hint{font-size:11.5px;line-height:1.55;color:var(--text-tertiary);background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--orch-r-sm,7px);padding:8px 10px;display:flex;gap:7px;align-items:flex-start}
+.orch-run-hint svg{width:14px;height:14px;flex-shrink:0;margin-top:1px;opacity:.7}
+.orch-run-hint b{color:var(--text-secondary);font-weight:700}
+.orch-run-actions{display:flex;gap:8px;flex-wrap:wrap}
+.orch-run-actions .orch-btn{flex:1;min-width:104px;justify-content:center}
 .orch-run-log{flex:1;overflow-y:auto;padding:12px;font-size:12px;line-height:1.6;font-family:var(--mono-font,monospace)}
 .orch-ico{width:1em;height:1em;vertical-align:-0.15em;flex-shrink:0}
 .orch-ico-lg{width:1.4em;height:1.4em}

@@ -163,6 +163,12 @@ class TestPythonSyntax:
         # (e.g. swebench_glm_ab_workdir) are skipped without editing this list.
         if name in TestPythonSyntax._SKIP_DIRS:
             return True
+        # Agent-written artifacts live under the reserved `.tofu` prefix
+        # (`.tofu`, `.tofu_trash`, `.tofu_worktrees`, …) — see CLAUDE.md §3.6.
+        # `.tofu_trash` alone holds ~26k recovered .py files on a FUSE mount and
+        # timed this test out; skip the whole prefix, not one literal name.
+        if name.startswith(".tofu"):
+            return True
         return (
             name.startswith("swebench")
             or name.endswith("_workdir")

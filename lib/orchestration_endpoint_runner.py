@@ -129,6 +129,28 @@ def resolve_chat_flow_entry(config: dict):
     endpoint path or a normal task).
     """
     config = config or {}
+    # ── builtin:autopilot → LIVE standalone autopilot (Option C) ──
+    # The "编排流程 → 自动驾驶" dropdown sends flowBuiltin='autopilot', which would
+    # otherwise match the selection branch below and force the FlowExecutor
+    # engine path (worker⇄VU as SubAgents in one task) — the explicitly
+    # NOT-yet-authoritative path per this module's docstring. Rewrite that
+    # selection to the live loop instead, so the dropdown runs the IDENTICAL
+    # code as the standalone autopilot toggle (parity by construction): set
+    # config['autopilot'], CLEAR the flow selection so the selection branch
+    # can't re-grab it, and return None → routes/chat.py falls through to a
+    # normal spawn_task whose done-hook fires maybe_run_autopilot (gated by
+    # is_autopilot_enabled on cfg['autopilot']). The engine path stays
+    # reachable via the TOFU_AUTOPILOT_VIA_FLOW=1 dev/validation escape hatch
+    # (and via a virtual_user node embedded in a real custom flow).
+    if config.get('flowBuiltin') == 'autopilot' and not autopilot_via_flow_enabled():
+        config['autopilot'] = True
+        config['flowBuiltin'] = None
+        audit_log('autopilot_builtin_to_live',
+                  reason='builtin:autopilot rewritten to live standalone path '
+                         '(TOFU_AUTOPILOT_VIA_FLOW off)')
+        logger.info('[FlowChat] flowBuiltin=autopilot → live standalone '
+                    'autopilot (engine path gated behind TOFU_AUTOPILOT_VIA_FLOW)')
+        return None
     if (config.get('flowDefinition') or config.get('flowBuiltin')
             or config.get('flowId')):
         return run_flow_via_chat
@@ -350,8 +372,18 @@ def _run_flow_as_endpoint_task(task: dict, defn: dict, *, label: str,
         )
         result = executor.run(initial_context=user_request)
         iterations = result.get('agents_run', 0)
+        # Terminal honesty: surface the engine's REAL stop reason. A loop that
+        # burned its budget without a verifier STOP comes back ok=False with a
+        # concrete reason ('max_iterations' / 'stuck' / 'replan_exhausted' /
+        # 'no_progress') and NO error — report that reason, NOT a bare
+        # 'completed' (the old bug) and NOT 'failed' (which is for a crash /
+        # structural error). ok=True keeps reason='completed'.
         if not result.get('ok'):
-            stop_reason = result.get('error') or 'failed'
+            stop_reason = (result.get('error')
+                           or result.get('stop_reason')
+                           or 'failed')
+        else:
+            stop_reason = result.get('stop_reason') or 'completed'
         # Final assistant content = the flow's converged result.
         with task.get('content_lock', _NullLock()):
             task['content'] = result.get('final', '')

@@ -61,6 +61,14 @@ class CatalogEntry(TypedDict, total=False):
     featured: bool              # show at the top of the catalog
     internal_only: bool         # YourProvider-internal server — hidden from
                                 # opensource builds (see _OPENSOURCE_BUILD).
+    health_probe: dict          # optional {tool, args, fail_patterns}: a cheap
+                                # read-only tool call the bridge runs in the
+                                # background to verify stored CREDENTIALS are
+                                # still valid (transport health != credential
+                                # health). The STANDARD contract (schema,
+                                # defaults, validation, classifier) lives in
+                                # lib/mcp/health_probe.py; custom servers can
+                                # declare the same key in mcp_servers.json.
 
 
 # ── Categories ────────────────────────────────────────────
@@ -839,6 +847,19 @@ CATALOG: list[CatalogEntry] = [
         'url': 'https://github.com/rangehow/overleaf-mcp',
         'tags': ['latex', 'overleaf', 'paper', 'academic', 'pdf', 'compile', 'research'],
         'featured': True,
+        # list_projects only needs the session cookie and is a cheap read.
+        # Overleaf returns auth failures as a SUCCESSFUL result whose text is an
+        # error string (not an exception), so we pin the server-specific phrases
+        # here; the generic auth phrases ("not authenticated", "session
+        # expired", …) come free from DEFAULT_CRED_FAIL_PATTERNS. See the
+        # standard contract in lib/mcp/health_probe.py.
+        'health_probe': {
+            'tool': 'list_projects',
+            'fail_patterns': [
+                'overleaf_session',
+                'error fetching projects',
+            ],
+        },
     },
 
     # ── AI & Reasoning ─────────────────────────────────────
@@ -898,14 +919,16 @@ def _reload_catalog_if_changed() -> None:
     path = _registry_path()
     try:
         mtime = os.path.getmtime(path)
-    except OSError:
+    except OSError as e:
+        logger.debug('[MCP:Registry] catalog stat failed (%s) — keeping last-good', e)
         return
     if mtime <= _catalog_mtime:
         return
     with _catalog_reload_lock:
         try:
             mtime = os.path.getmtime(path)
-        except OSError:
+        except OSError as e:
+            logger.debug('[MCP:Registry] catalog re-stat under lock failed (%s)', e)
             return
         if mtime <= _catalog_mtime:
             return
@@ -942,7 +965,8 @@ def _reload_catalog_if_changed() -> None:
 # first catalog read is still detected (mtime then strictly advances).
 try:
     _catalog_mtime = os.path.getmtime(_registry_path())
-except OSError:
+except OSError as e:
+    logger.debug('[MCP:Registry] catalog baseline stat failed (%s)', e)
     _catalog_mtime = 0.0
 
 

@@ -264,5 +264,11 @@ class TestEndpointFlowParityLive:
 
 
 if __name__ == '__main__':
+    # Seeds real conversation rows via get_thread_db (no test-DB isolation), so
+    # a bare `python tests/x.py` under ambient TOFU_DB_BACKEND=postgres would
+    # write to prod. Force sqlite + assert a test DB. A deliberate live-parity
+    # run against a dedicated test PG can still opt in via TOFU_ALLOW_PG_TESTS=1.
+    from tests._standalone_guard import guard_standalone_db
+    guard_standalone_db('test_endpoint_flow_parity_live.__main__')
     import unittest
     unittest.main()

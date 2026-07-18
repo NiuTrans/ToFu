@@ -25,9 +25,19 @@
 
 ## Tofu 是什么？
 
-Tofu 是一个**完全自托管的 AI 助手**，一条命令即可启动。它可以连接任何 OpenAI 兼容的大模型 API，为你提供一个完整的 AI 工作空间 —— 从简单的问答，到能自主搜索网页、编辑代码、操控浏览器、多智能体协作的全能智能体。
+Tofu 是一个**完全自托管的 AI 助手**，一条命令即可启动。它可以连接任何 OpenAI 兼容的大模型 API，为你提供一个完整的 AI 工作空间 —— 从简单的问答，到能自主搜索网页、编辑代码、读论文、操控浏览器、多智能体协作的全能智能体。
 
-一切都运行在你自己的机器上，数据不会离开你的基础设施。`python server.py`，开箱即用。
+一切都运行在你自己的机器上，数据不会离开你的基础设施。一条命令，开箱即用。
+
+**Tofu 有何不同：**
+
+- **一条命令，全部搞定** —— 安装器会为你装好运行时、依赖、数据库和浏览器引擎。不强制 Docker（但支持），不用手动建库，不用手改配置文件。
+- **想用什么模型都行** —— OpenAI、Anthropic、Gemini、DeepSeek、Qwen、GLM，Ollama/vLLM 本地模型，甚至直接登录你已有的 **Claude Pro/Max / ChatGPT 订阅**。加多个密钥，Tofu 会自动轮换与负载均衡。
+- **是真正的智能体，不只是聊天框** —— 它能自主跑多步任务：搜索、阅读、写代码、跑命令、生成图片，并用 Planner → Worker → Critic 循环自我检查。
+- **完全属于你** —— 自托管、MIT 许可、无遥测。你的对话、密钥和文件都留在你自己的基础设施上。
+- **一切皆 API** —— UI 里的每个功能都是有文档的 HTTP 接口，可以脚本化或接入其它工具（见 [无头 API](#无头-apiheadless-api)）。
+
+> **想从 AI 智能体或编码助手驱动 Tofu？** 本文档是写给*人*看的。另有一套面向机器的材料 —— 见底部的 [面向 AI 智能体与开发者](#面向-ai-智能体与开发者)。
 
 ---
 
@@ -41,7 +51,10 @@ Tofu 是一个**完全自托管的 AI 助手**，一条命令即可启动。它�
 | **Linux / macOS** | `curl -fsSL https://raw.githubusercontent.com/rangehow/ToFu/main/install.sh \| bash` |
 | **Docker** | `git clone https://github.com/rangehow/ToFu.git && cd ToFu && docker compose up -d` |
 
-就这一步。每个方式都会自动处理运行时、依赖、数据库、浏览器引擎，并启动服务器 —— 无需任何参数，无需后续操作。
+> **macOS —— 想要点开即用的桌面应用？** 不走上面的 `install.sh`，可到[最新 Release](https://github.com/rangehow/ToFu/releases/latest)下载 `.dmg`，并按你的芯片选择：
+> Apple 芯片（M1/M2/M3…）选 **`Tofu-*-macos-arm64.dmg`**，Intel Mac 选 **`Tofu-*-macos-x86_64.dmg`**。
+
+就这一步。每个方式都会自动处理运行时、依赖、数据库、浏览器引擎，并启动服务器 —— 无需任何参数，无需后续操作。Linux/macOS 上安装器默认走 [uv](https://github.com/astral-sh/uv) 快速路径（预编译 wheel，约 1–2 分钟），在较旧系统（glibc < 2.28）上自动回退到 conda；可用 `--use-conda` 强制走 conda。数据库默认使用 **SQLite**（零配置）；仅当你需要 PostgreSQL 的更高并发（100+ 用户）时，才在命令后加 `--with-postgres`。
 
 > 想预设 API 密钥、改端口、或安装失败需要恢复？所有可选参数和故障排查方案都在 **[docs/INSTALL.md](docs/INSTALL.md)**。
 
@@ -93,12 +106,12 @@ UI 里能做的事情同样以有文档的 HTTP API 形式暴露，你可以从�
 
 ```bash
 # Python —— 同步的 `Tofu` 类 + `tofu` 命令行
-pip install -e clients/python
+cd clients/python && pip install -e ".[cli]"
 export TOFU_API_KEY=tofu_admin_xxx TOFU_BASE_URL=http://localhost:15000
 tofu chat "你好"
 
 # TypeScript —— Node 18+、浏览器、Cloudflare Workers、Vercel Edge、Deno、Bun
-npm install ./clients/typescript
+cd clients/typescript && npm install
 ```
 
 也可直接用任意 OpenAI / Anthropic SDK，只需将 Base URL 指向你的 Tofu 服务、API Key 填 `tofu_admin_*` 即可。
@@ -117,7 +130,7 @@ npm install ./clients/typescript
 - **支付** —— Stripe Webhook 与支付宝异步通知，按 `(provider, provider_id)` 幂等。凭证在 `data/config/payments.json` 中配置。
 - **兑换码** —— 批量生成，发给用户，换入钱包。
 - **价格表** —— 每模型的单价（输入 / 输出 / 缓存）从 `data/config/pricing.json` 热加载，支持按模型族前缀回退与管理员可调的加价率。
-- **管理员设置面板** —— Users、Pricing、Redeem Codes、Payments 选项卡 —— 仅在 multi-user 模式下、且密钥具备 `admin` 作用域时可见。
+- **管理控制台** —— 一个独立的 **`/admin`** 面板（Users、Pricing、Redeem Codes、Payments），仅在 multi-user 模式下、以 `admin` 作用域密钥才能访问。
 
 上述能力的实现全部位于 `lib/billing/` 与 `routes/api_v1/billing.py`；切回 `open` / `private` 后表便为空、面向用户的页面不再提供，闸道行为与上一节描述一致。
 
@@ -143,6 +156,28 @@ npm install ./clients/typescript
 3. **LLM 摘要**（强制触发）：当上下文压力过高时，一个廉价模型评估每轮对话的相关性并据此压缩
 
 **想整理你的对话？** 在侧边栏创建文件夹来分组相关对话。可以在文件夹之间拖拽，也可以不归类。
+
+**想按顺序读懂它的思路？** 已完成的多工具回复会以*交错时间线*渲染：每个工具调用就近显示在引出它的思考与说明文字旁边，让你按操作实际发生的顺序阅读，而不是"所有思考 / 所有工具 / 所有正文"三大块。默认开启，可在 **设置 → 通用 → "按工具内联时间线"** 中切换。
+
+**当对话变长时** —— 一个**上下文健康条**显示你已用掉多少模型窗口，Tofu 会自动**压缩**较早的轮次，让对话不撞上限继续进行。你可以打开**压缩查看器**，看清究竟压缩了哪些内容，不会有"丢东西"的感觉。
+
+---
+
+### 🎙️ 语音输入（语音转文字）
+
+当打字比说话慢 —— 直接对着输入框口述。
+
+**使用方法：** 点击输入框旁的**麦克风按钮**，允许麦克风权限，说话，再点一次停止。你的语音会被转写并插入到光标处 —— **不会自动发送**，你可以先审阅、编辑再发。这是听写，不是语音对话。
+
+**只有**当浏览器支持录音*且*配置了语音转文字模型时，麦克风按钮才会出现，否则保持隐藏。启用方式：在 **设置 → 服务商** 添加一个模型带 `transcription`（或 `audio_chat`）能力的服务商：
+
+| 服务商 | 模型 |
+|---|---|
+| **OpenAI** | `gpt-4o-transcribe`、`gpt-4o-mini-transcribe`、`whisper-1` |
+| **Groq** | `whisper-large-v3-turbo`、`whisper-large-v3`（快、便宜） |
+| **全模态对话模型** | Gemini / LongCat 等，走 `audio_chat` |
+
+可选环境变量：`TOFU_AUDIO_MAX_BYTES`（默认 25 MB）、`TOFU_AUDIO_MAX_DURATION_S`（默认 600 秒）。没有单独的语音设置页 —— 是否可用完全取决于所配置的模型。
 
 ---
 
@@ -222,6 +257,24 @@ npm install ./clients/typescript
 
 ---
 
+### 🧩 项目大脑（Project Brain）—— 让同一项目的多个对话协同起来
+
+当你在同一个项目上开了多个对话，**项目大脑**让它们像一个协同的团队一样工作，而不是各自为战、彼此健忘的聊天。每个对话都能看到其它对话在做什么、共享同样的目标和决策、避免互相踩踏 —— 项目甚至能自主认领并推进待办工作，而这一切始终对你完全可见、可控。
+
+**如何使用：** **只要对话处于项目模式**（挂到某个项目目录）就**自动生效** —— 没有开关。你通过项目栏打开的**项目大脑面板**（实时活动、章程、看板、状态几个页签）来观察和引导它，协作栏里还有一行状态标题。唯一需要*你*的地方：智能体只能*提议*修改共享章程 —— 由你点击 **提交** 或 **拒绝**。
+
+| 能力 | 它给你什么 |
+|---|---|
+| **章程（Charter）** | 一份共享的北极星文档 + 每个对话都遵循的既定决策。改动需人工批准。 |
+| **看板与 Epic** | 一块可认领的工作流看板，让各对话分工、不重复劳动。 |
+| **活动流** | 每个对话此刻在做什么的实时脉搏。 |
+| **对话间消息** | 一个对话可以给另一个发出建议式提醒 —— 有限速、绝不打断进行中的工作。 |
+| **路径租约** | 一个对话可以预定它正在编辑的文件，让其它对话先让开，避免编辑冲突。 |
+| **状态通道** | 向项目询问"我们进展如何？有没有跑偏？"并得到综合回答，外加一份大脑会持续复查的关注清单。 |
+| **自主调度** | 空闲项目会自动认领并启动就绪、未被阻塞的工作，无需交接。 |
+
+---
+
 ### 🤖 多智能体集群（Swarm）
 
 有些任务大到单个智能体难以胜任。Swarm 系统让一个主编排器规划子任务，并将它们分派给并行运行的专家智能体。
@@ -263,33 +316,16 @@ npm install ./clients/typescript
 
 ---
 
-### 🔀 CLI 后端切换
+### 🔀 订阅登录（Claude Pro/Max · ChatGPT）
 
-已经在用 **Claude Code** 或 **OpenAI Codex**？Tofu 可以作为它们的纯 Web 前端 —— 你获得 Tofu 的 UI、对话管理和持久化，而外部 CLI 用自己的认证处理所有 LLM 调用和工具执行。
+已经在为 **Claude Pro/Max** 或 **ChatGPT** 付费订阅？直接用它登录，Tofu 就把该订阅当作一个模型服务商使用 —— 无需单独的 API 密钥，计费走你已有的订阅套餐。
 
-**安装：**
-```bash
-# 安装 Claude Code
-npm install -g @anthropic-ai/claude-code && claude auth login
+**使用方法：** 打开 **设置 → 服务商**，点击 **登录 Claude** / **登录 ChatGPT**。Tofu 会走一遍 PKCE OAuth 流程（`lib/oauth/`），保存 token，并由 `lib/oauth/outbound.py` 把已登录的订阅桥接进一个受管理的服务商 slot —— 每次请求时解析成实时 token 加上所需的客户端身份请求头。此后该订阅就与调度器里的其它服务商一样（slot 轮换、回退、延迟评分都适用）。
 
-# 或安装 Codex
-npm install -g @openai/codex && codex auth login
-```
+- **Claude** 请求走 Anthropic Messages API，并带上 Claude-Code 身份请求头。
+- **ChatGPT（Codex）** 请求会自动转换为 Responses API 格式。
 
-点击顶栏的**后端选择器**（🤖）即可切换。UI 会自动适配 —— 使用外部后端时，模型选择器和 Tofu 专属功能自动隐藏。
-
-| 功能 | 内置 (Tofu) | Claude Code | Codex |
-|------|:-:|:-:|:-:|
-| 对话与流式输出 | ✅ | ✅ | ✅ |
-| 网页搜索 | ✅ | ✅ (CC 自带) | ✅ (Codex 自带) |
-| 文件操作 | ✅ | ✅ (CC 自带) | ✅ (Codex 自带) |
-| 代码执行 | ✅ | ✅ (Bash) | ✅ (exec) |
-| 模型选择 | ✅ | — | — |
-| 图片生成 | ✅ | ❌ | ❌ |
-| 浏览器插件 | ✅ | ❌ | ❌ |
-| 多智能体集群 | ✅ | ❌ | ❌ |
-
-> CLI 必须安装在与 Tofu 服务器同一台机器上。每个对话会记住它使用的后端。
+> 这是一个正常的调度内服务商，**不是** CLI 子进程。（早期的 CLI 子进程式"后端切换"机制 —— `lib/agent_backends/` —— 已于 2026-06 移除，改为这个更简单的"订阅即服务商"路径。）
 
 ---
 
@@ -381,6 +417,14 @@ pip install docling --extra-index-url https://download.pytorch.org/whl/cpu
 
 ---
 
+### 🎨 Artifacts（实时画布）
+
+当助手产出你更想*看*而不是滚动略过的东西 —— 一个完整的 HTML 页面、一张 SVG 图、一段类 React 代码，或一篇长文档 —— 它会变成一个 **Artifact（工件）**。
+
+**工作原理：** 消息旁会出现一个可点击的小标签；点开后 Tofu 会在侧边面板里实时渲染 —— HTML/SVG 在沙箱 iframe 中呈现，Markdown 经过安全净化。每个工件都有版本，可在多个修订间切换、**收藏（pin）**、在按对话的**库（library）**里浏览全部、并**导出为 PDF**。非常适合搭一个小网页、一张图表或一份排版文档，并就地迭代。
+
+---
+
 ### 🔗 MCP（模型上下文协议）
 
 当你想连接外部工具服务器 —— GitHub、数据库、自定义 API —— MCP 可以把它们桥接到 Tofu 的工具系统中。
@@ -430,6 +474,14 @@ pip install docling --extra-index-url https://download.pytorch.org/whl/cpu
 
 ---
 
+### 🔧 自我调优（每日优化器）
+
+Tofu 会默默观察自己的表现，并提议一些小改进 —— 每一处改动都由你掌控。
+
+**工作原理：** 一个每晚运行的循环会分析近期运行并起草提案（如"屏蔽一个刷屏的搜索域名""调整某个默认值"）。点击顶栏的 **OPTIMIZER** 徽标，逐条查看其理由、严重程度和置信度，然后**批准、拒绝、回滚**，或点击 **立即运行**。未经你同意不会应用任何改动（一小撮安全的微调可自动应用，且一切可回滚）。可在设置里完全关闭。
+
+---
+
 ### 🐦 飞书（Lark）机器人
 
 当你的团队在飞书中沟通，希望直接在群聊里使用 AI 助手 —— Tofu 通过 WebSocket 连接为飞书机器人。
@@ -447,11 +499,19 @@ pip install docling --extra-index-url https://download.pytorch.org/whl/cpu
 
 当助手发现了有用的东西 —— 一个 Bug 模式、一个项目规范、你偏好的编码风格 —— 它可以把这些知识保存为**记忆**，供未来的会话使用。
 
-**工作原理：** 记忆以 Markdown 文件形式存储在 `.chatui/skills/`（项目级）或 `.chatui/skills/global/`（全局）。助手会主动创建记忆，你也可以要求它创建。在之后的对话中，相关的记忆会自动加载到上下文中。
+**工作原理：** 项目级记忆以 Markdown 文件形式存储在项目内的 `.tofu/skills/`；全局记忆（跨项目共享）存放在服务端存储 `data/memories/global/`。助手会主动创建记忆，你也可以要求它创建。在之后的对话中，相关的记忆会自动加载到上下文中。
 
 **工具：** `create_memory`、`update_memory`、`delete_memory`、`merge_memories` —— 助手跨会话管理自己的知识库。
 
 **使用场景：** "记住我们的 API 总是返回 snake_case。" —— 助手保存这个规范，并在以后为这个项目生成代码时自动应用。
+
+---
+
+### 📚 技能商店（Skills Store）
+
+当你想给助手一套可复用的、打包好的专项本领 —— 针对某类任务的说明加辅助脚本 —— 安装一个**技能（Skill）**。
+
+**工作原理：** 技能遵循开放的 Claude / OpenClaw / AgentSkills 格式（一个 `SKILL.md` 加可选的参考文件与脚本）。打开 **设置 → Skills**，浏览推荐技能的**目录（Catalog）**（如 Anthropic 的 docx / xlsx / pdf / skill-creator）并**一键安装**，或**拖拽本地 `.zip`** 进来。已安装的技能出现在**已安装（Installed）**页签，可查看或卸载。附带的 `install.sh` 脚本只作为提示展示 —— 绝不会自动执行。
 
 ---
 
@@ -468,20 +528,33 @@ pip install docling --extra-index-url https://download.pytorch.org/whl/cpu
 
 ---
 
+### 🐾 豆腐宠物（纯为好玩）
+
+切换到 **豆腐（Tofu）** 主题，会有一只小小的 Q 版豆腐吉祥物入驻项目栏。它在一片装饰场景里走来走去，有真实的行走动画和情绪 —— 任务加载时思考、成功时庆祝 —— 还会留下互动的脚步特效（草丛、水波、天空光点）。用项目栏里的 **场景** 按钮（草地 / 水池 / 天空 / 关闭）和 **宠物** 按钮（Tofu / Oneko）来自定义。它会尊重系统的"减少动态效果"设置。纯装饰，随时可关。
+
+---
+
 ## 设置参考
 
 所有配置通过 **⚙️ 设置** 面板完成（右上角齿轮图标）。更改即时保存，无需重启。
 
 | 选项卡 | 配置内容 |
 |---|---|
-| **⚙️ 通用** | 主题（暗色/亮色/豆腐）、温度、最大 Token 数、思维深度、系统提示词 |
-| **🔗 服务商** | API 密钥、端点、模型列表、多密钥轮换、自动发现 |
+| **⚙️ 通用** | 主题（暗色/亮色/豆腐）、温度、最大 Token 数、思维深度、系统提示词、按工具内联时间线 |
+| **🔗 服务商** | API 密钥、端点、模型列表（含转写/音频模型）、多密钥轮换、自动发现 |
 | **📦 显示** | 下拉列表中显示哪些模型、默认模型、备选模型 |
 | **🔍 搜索与抓取** | 结果数量、超时、字符限制、屏蔽域名、内容过滤 |
 | **🌐 翻译** | 机器翻译服务商（小牛翻译 / 自定义）、API 密钥、端点 |
 | **🌐 网络** | HTTP/HTTPS 代理、代理绕过域名 |
+| **🔀 订阅登录** | 登录 Claude Pro/Max 或 ChatGPT，当作服务商使用 |
 | **🐦 飞书** | 应用凭证、默认项目路径、允许的用户 |
+| **🔗 MCP** | 模型上下文协议服务器（App-Store 目录 + 自定义） |
+| **📚 Skills** | 浏览、安装、管理可复用的技能包 |
+| **🧠 记忆与偏好** | 已存记忆和你的长期偏好档案 |
+| **🔑 API Keys** | 创建/划分作用域/吊销无头 API 密钥、每密钥限额、认证模式 |
 | **`</>` 高级** | 价格覆盖、缓存管理、服务器信息 |
+
+> 多租户中继站的管理面板（Users、Pricing、Redeem Codes、Payments）现在位于独立的 **`/admin`** 控制台，而非设置页签。
 
 ### 环境变量（备用）
 
@@ -521,7 +594,7 @@ vim .env   # 填入你的值
 ├── index.html                 主聊天 UI（单页应用）
 │
 ├── lib/                       核心库
-│   ├── agent_backends/        CLI 后端切换（内置/Claude Code/Codex）
+│   ├── agent_core/            可复用智能体基座（运行循环、调度、TaskRuntime、push、profiles）
 │   ├── llm/                   LLM API 客户端包（build_body / stream / cache / diagnostics）
 │   ├── llm_dispatch/          多密钥多模型智能调度器
 │   ├── database/              双后端—— SQLite 默认，PostgreSQL 自动初始化
@@ -529,7 +602,7 @@ vim .env   # 填入你的值
 │   │   ├── orchestrator.py    LLM ↔ 工具主循环
 │   │   ├── executor.py        工具执行引擎
 │   │   ├── endpoint.py        Planner → Worker → Critic 循环
-│   │   └── compaction.py      3 层上下文压缩
+│   │   └── compaction/        3 层上下文压缩（包）
 │   ├── tools/                 工具定义与 Schema
 │   ├── swarm/                 多智能体编排
 │   ├── fetch/                 内容抓取与提取
@@ -545,7 +618,8 @@ vim .env   # 填入你的值
 │   ├── desktop_agent.py       桌面自动化代理
 │   └── ...
 │
-├── routes/                    Flask 蓝图（28+ 个模块）+ routes/api_v1/（无头 API）
+├── lib/conversations/         项目大脑 —— 章程、看板、活动流、对话间消息、路径租约、状态通道
+├── routes/                    Quart 蓝图 + routes/api_v1/（无头 API）
 ├── lib/billing/               多租户中继计费（钱包、账本、价格、支付）
 ├── lib/oauth/                 OAuth 流程（Claude、Codex、PKCE、Token 存储）
 ├── lib/optimizer/             夜间自调优循环（分析器 → 提议器 → 应用器）
@@ -556,6 +630,9 @@ vim .env   # 填入你的值
 └── data/                      运行时数据（已加入 .gitignore）
 ```
 
+> Tofu 运行在 **Quart**（异步 Flask）之上，由 **Hypercorn** 承载；已有的同步路由
+> 处理器在线程池中原样运行。
+
 ---
 
 ## 平台支持
@@ -564,7 +641,7 @@ vim .env   # 填入你的值
 |---|:---:|:---:|:---:|
 | 核心对话与工具 | ✅ | ✅ | ✅ |
 | SQLite（默认，零配置） | ✅ | ✅ | ✅ |
-| PostgreSQL 自动初始化（可选） | ✅ | ✅ | ✅ |
+| PostgreSQL（通过 `--with-postgres` 开启） | ✅ | ✅ | ✅ |
 | 项目协作 | ✅ | ✅ | ✅ |
 | Shell 命令 | ✅ | ✅ | ✅ (`cmd.exe`) |
 | 桌面代理 | ✅ | ✅ | ✅ |
@@ -584,6 +661,12 @@ python tests/run_all.py
 python -m pytest tests/test_backend_unit.py
 python -m pytest tests/test_api_integration.py
 python -m pytest tests/test_visual_e2e.py
+
+# 或用 Makefile（并行；用 JOBS=N 调节）
+make test-unit        # 快速单元层
+make test-api         # API 集成层
+make test-frontend    # jsdom 前端套件
+make test-all         # 全部
 ```
 
 ---
@@ -611,6 +694,22 @@ Tofu 采用三态认证模型，持久化在 `data/config/auth.json`，可在 **
 - 工具执行——助手可以运行 Shell 命令和编辑文件；危险模式会被拦截，但请谨慎使用。
 - 桌面代理——需要显式启用 `--allow-write` / `--allow-exec` 标志。
 - `TUNNEL_TOKEN` 已废弃，仅作为向后兼容垫，启动时会警告——请迁移到 API Keys 体系。
+
+---
+
+## 面向 AI 智能体与开发者
+
+本文档是写给人看的。如果你要从编码助手驱动 Tofu、在它之上二次开发，或贡献代码，面向机器的材料在这里：
+
+| 文档 | 内容 |
+|---|---|
+| [`CLAUDE.md`](CLAUDE.md) | AI 辅助改代码的项目情报与强制规则（日志纪律、代码风格、改动审批闸门、前后端边界）。 |
+| [`JOURNAL.md`](JOURNAL.md) | 项目演进日志 —— 试过什么、为何变更、当前状态。 |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | 完整目录地图 + Mermaid 架构图（可视化版见 `docs/architecture.html`）。 |
+| [`docs/HEADLESS_API.md`](docs/HEADLESS_API.md) | 完整的无头 API 参考（`/api/v1/*`、OpenAI、Anthropic 三个接口面）。 |
+| [`docs/CUSTOM_TOOLS.md`](docs/CUSTOM_TOOLS.md) · [`docs/TOOL_PLUGINS.md`](docs/TOOL_PLUGINS.md) | 添加自定义工具与插件蓝图。 |
+| [`docs/PROJECT_BRAIN.md`](docs/PROJECT_BRAIN.md) | 对话间协同机制深入讲解。 |
+| `/api/openapi.json` · `/api/docs` | 运行实例提供的实时 OpenAPI 3.1 规范 + Swagger UI。 |
 
 ---
 

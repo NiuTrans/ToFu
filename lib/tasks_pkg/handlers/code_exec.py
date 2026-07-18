@@ -127,12 +127,11 @@ def _make_stdin_callback(task, rn, round_entry, command):
     2. Blocks until the user submits input via ``/api/chat/stdin_response``
     3. Returns the user's input string (or None if aborted)
     """
-    import uuid as _uuid
-
+    from lib.ids import short_id
     from lib.tasks_pkg.stdin_handler import request_stdin
 
     def _stdin_cb(prompt_hint):
-        stdin_id = f'stdin_{_uuid.uuid4().hex[:12]}'
+        stdin_id = short_id('stdin_', 12)
         logger.info('[Executor] stdin wait detected for command=%s, '
                     'stdin_id=%s, prompt_hint=%.200s',
                     command[:80], stdin_id, prompt_hint)

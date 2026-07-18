@@ -1,0 +1,115 @@
+"""Tool-schema index and type introspection helpers for tool-arg repair.
+
+Walks ``lib.tools`` once at first use to build ``{tool_name: parameters}``
+and exposes the small pure accessors the repair passes anchor on
+(``_expected_types``, ``_required_keys``, ``_array_item_schema``). The
+``RepairLog`` public type alias also lives here so every submodule can import
+it without a cycle.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from lib.log import get_logger
+
+logger = get_logger(__name__)
+
+
+# ── Public type alias ──
+RepairLog = list[tuple[str, str]]  # [(json_path, pattern_name), ...]
+
+
+def _build_schema_index() -> dict[str, dict[str, Any]]:
+    """Walk ``lib.tools`` and return ``{tool_name: parameters_schema}``.
+
+    The map is built once at import time. New tools added later won't be
+    seen until the process restarts; that matches how every other tool
+    registry in this codebase works (PROJECT_TOOL_NAMES, etc.).
+
+    Returns an empty dict on any failure — repair becomes a no-op rather
+    than blocking startup.
+    """
+    index: dict[str, dict[str, Any]] = {}
+    try:
+        import lib.tools as tools_mod
+        candidates: list[Any] = []
+        for attr in dir(tools_mod):
+            obj = getattr(tools_mod, attr, None)
+            if isinstance(obj, list):
+                candidates.extend(obj)
+            elif isinstance(obj, dict) and obj.get('type') == 'function':
+                candidates.append(obj)
+        for entry in candidates:
+            if not isinstance(entry, dict):
+                continue
+            fn = entry.get('function') or {}
+            name = fn.get('name')
+            params = fn.get('parameters')
+            if name and isinstance(params, dict):
+                index[name] = params
+    except Exception as e:
+        logger.warning('[ToolRepair] Schema index build failed — repair disabled: %s', e)
+    logger.info('[ToolRepair] Indexed %d tool schemas', len(index))
+    return index
+
+
+_SCHEMA_INDEX: dict[str, dict[str, Any]] | None = None
+
+
+def _schemas() -> dict[str, dict[str, Any]]:
+    global _SCHEMA_INDEX
+    if _SCHEMA_INDEX is None:
+        _SCHEMA_INDEX = _build_schema_index()
+    return _SCHEMA_INDEX
+
+
+def _expected_types(tool_name: str) -> dict[str, str]:
+    """Return ``{property_name: json_schema_type}`` for one tool.
+
+    Only top-level properties are returned — nested-object repair is
+    intentionally out of scope (the value is mostly in the four
+    deterministic top-level patterns; deep walks risk over-repair of
+    legitimate user data like the ``content`` of a ``write_file`` call).
+    """
+    params = _schemas().get(tool_name)
+    if not params:
+        return {}
+    props = params.get('properties') or {}
+    out: dict[str, str] = {}
+    for key, spec in props.items():
+        if not isinstance(spec, dict):
+            continue
+        t = spec.get('type')
+        if isinstance(t, str):
+            out[key] = t
+    return out
+
+
+def _required_keys(tool_name: str) -> set[str]:
+    params = _schemas().get(tool_name) or {}
+    req = params.get('required') or []
+    return set(req) if isinstance(req, list) else set()
+
+
+def _array_item_schema(tool_name: str, key: str) -> tuple[dict[str, str], set[str]] | None:
+    """Return ``({item_key: json_type}, required_item_keys)`` for an
+    array-typed parameter whose items are objects with a declared schema, or
+    ``None`` when the parameter isn't an array-of-objects we can anchor on.
+    """
+    params = _schemas().get(tool_name) or {}
+    spec = (params.get('properties') or {}).get(key)
+    if not isinstance(spec, dict) or spec.get('type') != 'array':
+        return None
+    items = spec.get('items')
+    if not isinstance(items, dict):
+        return None
+    props = items.get('properties')
+    if not isinstance(props, dict) or not props:
+        return None
+    types = {k: v.get('type') for k, v in props.items()
+             if isinstance(v, dict) and isinstance(v.get('type'), str)}
+    if not types:
+        return None
+    req = items.get('required') or []
+    return types, (set(req) if isinstance(req, list) else set())

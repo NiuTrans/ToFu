@@ -31,11 +31,11 @@ import json
 import os
 import re
 import time
-import uuid
 from dataclasses import dataclass
 from typing import List, Optional
 
 from lib.database import DOMAIN_SYSTEM, get_thread_db as get_db
+from lib.ids import short_id
 from lib.log import audit_log, get_logger
 
 logger = get_logger(__name__)
@@ -101,7 +101,8 @@ def _hash_password(plaintext: str) -> str:
         h = bcrypt.hashpw(plaintext.encode('utf-8'),
                           bcrypt.gensalt(rounds=12))
         return 'bcrypt$' + h.decode('utf-8')
-    except ImportError:
+    except ImportError as e:
+        logger.debug('[Users] bcrypt unavailable, using pbkdf2 fallback: %s', e)
         salt = os.urandom(16)
         dk = hashlib.pbkdf2_hmac('sha256',
                                  plaintext.encode('utf-8'),
@@ -142,7 +143,7 @@ def _verify_password(plaintext: str, stored: str) -> bool:
 # ── CRUD ─────────────────────────────────────────────────────────────
 
 def _new_user_id() -> str:
-    return f'usr_{uuid.uuid4().hex[:24]}'
+    return short_id('usr_')
 
 
 def create_user(

@@ -145,6 +145,35 @@ check('fn_exposed', true);
   check('c4_summary_present', html.indexOf('never get clipped') !== -1);
 }
 
+// ════════════════════════════════════════════════════════════════════
+// Case 5 — AUTO-APPLIED learned preferences fold into the quiet strip
+//          (a segment), NOT the prominent box; the box renders ONLY the
+//          actionable `pending` rows.
+// ════════════════════════════════════════════════════════════════════
+{
+  const learned = [
+    { kind: 'added', summary: 'Reply in **Chinese** by default', pending: false },
+    { kind: 'reinforced', summary: 'Use `pytest` for tests', pending: false },
+  ];
+  const stripHtml = renderTurnProvenanceHtml({ _preferencesLearned: learned });
+  // Informational learned prefs appear as a folded segment in the strip.
+  check('c5_strip_has_learned_seg', stripHtml.indexOf('tp-seg-prefs-learned') !== -1);
+  check('c5_strip_bold_rendered', stripHtml.indexOf('<strong>Chinese</strong>') !== -1);
+  check('c5_strip_no_literal_stars', stripHtml.indexOf('**Chinese**') === -1);
+
+  // The prominent box renders NOTHING for purely informational learned prefs.
+  const boxHtml = renderPreferenceLearnedHtml(learned);
+  check('c5_box_empty_for_informational', boxHtml === '');
+
+  // A pending (actionable) row DOES render in the box, with Confirm/Dismiss.
+  const withPending = learned.concat([{ kind: 'pending', summary: 'X', pending: true, id: 'p1' }]);
+  const boxHtml2 = renderPreferenceLearnedHtml(withPending);
+  check('c5_box_renders_pending', boxHtml2.indexOf('pl-pending') !== -1
+        && boxHtml2.indexOf('pl-confirm') !== -1);
+  // The informational rows are NOT duplicated into the box.
+  check('c5_box_no_informational', boxHtml2.indexOf('pl-reinforced') === -1);
+}
+
 console.log(out.join('\n'));
 """
 

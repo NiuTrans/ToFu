@@ -61,7 +61,7 @@ function newChat() {
     ? `<div class="welcome-folder-badge"><span class="welcome-folder-dot" style="color:${_newChatFolder.color || '#888'}">●</span> ${escapeHtml(_newChatFolder.name)}</div>`
     : '';
   document.getElementById("chatInner").innerHTML =
-    `<div class="welcome" id="welcome"><div class="welcome-icon"><img src="${BASE_PATH}/static/icons/tofu-welcome.svg" alt="Tofu" width="64" height="64"></div><h2 class="tofu-brand"><span class="tofu-brand-t">T</span><span class="tofu-brand-o1">o</span><span class="tofu-brand-f">f</span><span class="tofu-brand-u">u</span><small>豆腐</small></h2>${_folderBadgeHtml}<p>${t('welcome.subtitle')}</p><div class="feature-pills"><span class="feature-pill">Extended Thinking</span><span class="feature-pill">Search</span><span class="feature-pill">URL Fetch</span><span class="feature-pill">Image Input</span><span class="feature-pill">Co-Pilot</span><span class="feature-pill">Browser</span></div></div>`;
+    `<div class="welcome" id="welcome"><div class="welcome-icon"><img src="${BASE_PATH}/static/icons/tofu-welcome.svg" alt="Tofu" width="64" height="64"></div><h2 class="tofu-brand"><span class="tofu-brand-t">T</span><span class="tofu-brand-o1">o</span><span class="tofu-brand-f">f</span><span class="tofu-brand-u">u</span><small>豆腐</small></h2>${_folderBadgeHtml}<div class="feature-pills">${_welcomePillsHtml()}</div></div>`;
   buildTurnNav(null);
   renderPendingQueueUI(null);
   // ★ A brand-new conversation has no latch — hide any lingering banner.
@@ -72,6 +72,95 @@ function newChat() {
     _resetToolsToDefaults();
   }
   if (typeof updateContextBar === 'function') updateContextBar();
+}
+/* ★ Reconnect-on-open — the root-cause fix for "click into a conversation →
+ *   stuck / stalled bubble that only a full page refresh clears".
+ *
+ *   loadConversation historically re-attached ONLY a stream already live in
+ *   THIS tab (activeStreams). It never reconnected to a task still RUNNING on
+ *   the SERVER when this tab holds no stream entry — the task was started in
+ *   another tab, or the SSE dropped and finishStream cleared activeStreams while
+ *   the backend kept generating. The conversation then rendered STATICALLY with
+ *   no SSE, no poll and no twStart, so the trailing assistant placeholder sat
+ *   frozen ("等待中…") until a full refresh ran initActiveTasks' reconnect.
+ *
+ *   The reconnect decision keys off the SERVER-AUTHORITATIVE conv.activeTaskId
+ *   (persisted settings.activeTaskId) — never an inferred client guess — and
+ *   delegates to the existing connectToTask, the single reconnect mechanism used
+ *   by boot init / send / regen / edit / cross-tab. connectToTask resolves its
+ *   accumulation slot by identity (_taskId / _msgId), so it re-targets the
+ *   running task's already-persisted placeholder instead of appending a second
+ *   assistant bubble, and it self-heals a stale activeTaskId for an
+ *   already-finished task via its poll → 404 → finishStream path (no permanent
+ *   placeholder, no hang).
+ *
+ *   Idempotent: a no-op when a stream is already live in this tab (the caller's
+ *   activeStreams.has branch handles that) and connectToTask itself re-guards on
+ *   !activeStreams.has(convId). Returns true when it kicked off a reconnect so
+ *   the caller skips the static-render fall-through.
+ */
+function _reconnectServerTaskIfIdle(id) {
+  if (typeof activeStreams === 'undefined' || activeStreams.has(id)) return false;
+  const conv = conversations.find((x) => x.id === id);
+  if (!conv || !conv.activeTaskId) return false;
+  if (typeof connectToTask !== 'function') return false;
+  console.info(
+    `[loadConversation] 🔗 Reconnect-on-open — conv=${id.slice(0,8)} ` +
+    `activeTaskId=${conv.activeTaskId.slice(0,8)} (no live stream in this tab, ` +
+    `task running server-side)`
+  );
+  connectToTask(id, conv.activeTaskId);
+  /* connectToTask synchronously sets the activeStreams entry + arms twStart
+   * (before its first await), then inserts the streaming bubble. Repaint the
+   * statics + the single streaming bubble exactly like boot's _ensureNewest so
+   * the click-open paint matches a fresh reconnect (showStreamingUIForConv
+   * slices the streaming bubble off the static list — no duplicate). */
+  if (activeStreams.has(id) && typeof showStreamingUIForConv === 'function') {
+    showStreamingUIForConv(id);
+  }
+  return true;
+}
+/* ★ "Click an old conversation → float it to the top" (durable).
+ *
+ * The sidebar sorts recency-first on `updatedAt` (_convSorter), and opening a
+ * conversation historically did NOT touch `updatedAt` — so an old conv stayed
+ * buried after you opened it. This bumps `updatedAt = now` on open and persists
+ * it via a lightweight settings PATCH (touchUpdatedAt flag → server bumps the
+ * `updated_at` column), so the float-to-top SURVIVES a page reload.
+ *
+ * GUARD (mirrors saveConversations): NEVER bump while the conversation has a
+ * live/active task (`activeStreams.has(id) || conv.activeTaskId`). During
+ * streaming, saveConversations already deliberately withholds the `updatedAt`
+ * bump to stop sidebar flicker under the throttled refresh — an open-bump here
+ * would fight that and reintroduce the flicker. Opening a streaming conv still
+ * floats via _convSorter's active-first tier anyway.
+ *
+ * Called ONLY from the genuine user sidebar-click path (main.js), NOT from
+ * programmatic opens (boot restore, undo, duplicate) which pass through
+ * loadConversation directly — merely restoring/creating a conv must not
+ * rewrite its recency.
+ */
+function _bumpConvOnOpen(id) {
+  const conv = conversations.find((c) => c.id === id);
+  if (!conv) return;
+  // Active-task guard — see saveConversations' streaming carve-out.
+  if (activeStreams.has(id) || conv.activeTaskId) return;
+  conv.updatedAt = Date.now();
+  // Re-sort + repaint the sidebar so the row floats up immediately.
+  conversations.sort(_convSorter);
+  if (typeof renderConversationList === 'function') renderConversationList();
+  // Write-through to the IDB cache so a reload replays the new recency before
+  // the server list arrives (keeps the float-to-top from flashing back).
+  if (typeof ConvCache !== 'undefined') {
+    try { ConvCache.put(conv); } catch (_e) { /* best-effort */ }
+  }
+  // Persist to the server so the new order is durable across reloads. The
+  // settings PATCH carries ONLY the touchUpdatedAt control flag (no settings
+  // keys) → the endpoint bumps `updated_at` without writing the settings blob.
+  if (typeof Api !== 'undefined' && Api.conversations && Api.conversations.patchSettings) {
+    Api.conversations.patchSettings(id, { touchUpdatedAt: true })
+      .catch((e) => console.warn('[bumpConvOnOpen] PATCH failed:', e && e.message));
+  }
 }
 function loadConversation(id) {
   _sendGeneration++;           // ★ invalidate any in-flight sendMessage
@@ -132,6 +221,13 @@ function loadConversation(id) {
   }
   activeConvId = id;
   sessionStorage.setItem('tofu_activeConvId', id);
+  /* ★ Reset the open-scroll latch for THIS open. Opening a conversation does
+   *   NOT auto-scroll (owner directive): the first full render leaves the view
+   *   at its natural post-render position and latches _openScrollConvId; later
+   *   same-open renders (Phase-2 reconcile, the .then fallback) then take the
+   *   anchor-preserve branch and HOLD that position instead of re-snapping —
+   *   see renderChat. */
+  if (typeof _openScrollConvId !== 'undefined') _openScrollConvId = null;
   /* ★ If loading a conv that doesn't belong to the active folder view, exit it */
   if (typeof getActiveFolderId === 'function' && getActiveFolderId()) {
     const _loadedConv = conversations.find(c => c.id === id);
@@ -154,41 +250,57 @@ function loadConversation(id) {
   /* ── On-demand message loading for server-only conversations ── */
   if (c._needsLoad) {
     c._initialSwitchLoad = true;   // ★ flag for renderChat: use full-render, not surgical
-    /* ★ FIX: Don't render the loading skeleton immediately — it shows a small
-     * centered div at the top of the viewport, and when messages arrive
-     * milliseconds later, _forceScrollToBottom jumps to the bottom → visible
-     * top→bottom flash.
+    /* ★ Epic ②: first-open skeleton. Paint title + N shimmer bubbles IMMEDIATELY
+     *   from the mirror's msgCount (_serverMsgCount) so opening an unopened conv
+     *   never blanks / freezes the previous conv under the reader during the
+     *   up-to-15s server round-trip on a flaky tunnel. The skeleton's DOM mirrors
+     *   the real message structure (zero-CLS swap), and its bubbles are keyed
+     *   `skeleton-msg-*` (not `msg-*`) so renderChat's surgical probe treats the
+     *   first real render as a full wipe.
      *
-     * Instead, keep the previous conversation's content visible during the
-     * async IndexedDB/server fetch (typically <50ms for cache hits).  When
-     * messages arrive, renderChat does a full render + _forceScrollToBottom
-     * atomically, so the user sees a direct transition to the new conversation
-     * already scrolled to the bottom — no intermediate state.
-     *
-     * For the rare case where both cache AND server are slow (>400ms), show
-     * the skeleton as a fallback so the user knows something is loading. */
-    let _skeletonTimer = setTimeout(() => {
-      if (activeConvId === id && c._needsLoad) renderChat(c);
-    }, 400);
+     *   Only when we KNOW there's content to load (_serverMsgCount>0). An empty
+     *   conv (count 0) shows nothing here — its render is the welcome/empty
+     *   state. A cache HIT inside loadConversationMessages repaints in a few ms
+     *   (over the skeleton); a slow server path leaves the skeleton up until the
+     *   body arrives (or the failure UI replaces it with a Retry — see
+     *   loadConversationMessages' timeout/404 branches). */
+    const _skMsgCount = c._serverMsgCount || 0;
+    if (_skMsgCount > 0 && activeConvId === id
+        && typeof renderSkeletonChat === 'function') {
+      renderSkeletonChat(c, _skMsgCount);
+    }
     loadConversationMessages(id).then(() => {
-      clearTimeout(_skeletonTimer);
       const stillExists = conversations.find(x => x.id === id);
       if (!stillExists) return;
       if (activeConvId === id) {
         if (activeStreams.has(id)) {
           showStreamingUIForConv(id);
+        } else if (_reconnectServerTaskIfIdle(id)) {
+          /* ★ Task still running server-side (persisted activeTaskId) but no
+           *   live stream in this tab → reconnect instead of static-rendering a
+           *   frozen placeholder. connectToTask + showStreamingUIForConv already
+           *   painted; nothing more to do here. */
         } else if (c._needsLoad || c.messages.length === 0) {
           renderChat(c);
           if (typeof _restoreConvToolState === "function") _restoreConvToolState(c);
-        } else {
-          _forceScrollToBottom(null, true);
         }
+        /* ★ No-auto-scroll-on-OPEN (owner directive): the former trailing
+         *   `_forceScrollToBottom` fallback here (for an already-loaded cached
+         *   conv) is removed. The Phase-1/Phase-2 renders inside
+         *   loadConversationMessages already painted the conversation; per the
+         *   directive we leave the view at its natural position instead of
+         *   snapping it to the bottom on open. */
       }
       delete c._initialSwitchLoad;   // ★ clear flag after initial load completes
       if (!activeStreams.has(id)) _resumePendingTranslations(id);
     });
   } else if (activeStreams.has(id)) {
     showStreamingUIForConv(id);
+  } else if (_reconnectServerTaskIfIdle(id)) {
+    /* ★ Reconnect-on-open (already-loaded conv): persisted activeTaskId points
+     *   at a task still running server-side, but this tab holds no stream →
+     *   connectToTask re-attaches (self-healing to poll/finishStream if the task
+     *   already finished) instead of leaving a static, frozen placeholder. */
   } else {
     renderChat(c);
     _resumePendingTranslations(id);
@@ -237,15 +349,30 @@ async function deleteConversation(id, e) {
   let conv = conversations.find((c) => c.id === id);
   if (!conv) return;
 
-  /* ★ CRITICAL: a conversation loaded this session as a sidebar shell has
-   *   _needsLoad=true / messages:[] in memory — its history lives only on the
-   *   server.  Snapshotting it as-is would capture ZERO messages, and undo
-   *   would then skip the re-create (syncConversationToServer requires
-   *   messages.length > 0) → the conversation is permanently lost despite the
-   *   "restored" toast.  So for an unloaded conv we MUST fetch the full body
-   *   from the server BEFORE deleting, exactly like duplicateConversation. */
-  const _needsHydrate = !!conv._needsLoad ||
-    (conv.messages.length === 0 && (conv._serverMsgCount || 0) > 0);
+  /* ★ CRITICAL: undo re-creates the server row from a client-side snapshot, so
+   *   that snapshot MUST hold the conversation's COMPLETE message history. Two
+   *   ways it can be incomplete in memory:
+   *     • a sidebar SHELL (`_needsLoad:true` / `messages:[]`) — history lives
+   *       only on the server;
+   *     • a WINDOWED open (`recordWindowState` loaded only the tail N and set
+   *       `_serverMsgCount = totalCount`), so `messages.length < _serverMsgCount`
+   *       — the oldest messages are absent locally.
+   *   In BOTH cases snapshotting as-is and later restoring would re-create a
+   *   conv missing its head — silent data loss. The single yardstick is
+   *   "do we hold every message the server has?": `messages.length >=
+   *   _serverMsgCount`. When we don't, materialise the full body BEFORE
+   *   snapshotting, exactly like duplicateConversation. */
+  const _serverTotal = () => (conv._serverMsgCount || 0);
+  /* Local snapshot is missing history iff the server has messages we don't
+   *   hold locally (covers both the empty-shell and windowed-tail cases). */
+  const _snapshotIncomplete = () => _serverTotal() > 0 && conv.messages.length < _serverTotal();
+  const _needsHydrate = !!conv._needsLoad || _snapshotIncomplete();
+  /* When true, we could NOT capture a COMPLETE local snapshot (hydration failed
+   *   on a flaky link, or a windowed body couldn't be completed), so the undo
+   *   affordance can't faithfully restore history — the delete still proceeds
+   *   (the server row is authoritative), but WITHOUT an undo toast, after
+   *   explicit user consent below. */
+  let _undoUnavailable = false;
   if (_needsHydrate) {
     try {
       await loadConversationMessages(id);
@@ -255,20 +382,63 @@ async function deleteConversation(id, e) {
     /* Re-read: the conv may have been removed/replaced during the await. */
     conv = conversations.find((c) => c.id === id);
     if (!conv) return;
-    /* ★ ABORT-ON-HYDRATION-FAILURE: if we STILL can't obtain the full body
-     *   (server unreachable / load failed → messages stayed empty while the
-     *   server has history), REFUSE to delete.  Deleting now would leave the
-     *   undo snapshot hollow and lose the conversation permanently — the worst
-     *   outcome precisely when the network is flaky.  Leave the conv intact and
-     *   tell the user to retry once reconnected.  Refuse to delete what we
-     *   cannot safely snapshot. */
-    if (conv.messages.length === 0 && (conv._serverMsgCount || 0) > 0) {
-      debugLog(`[deleteConv] ABORT — could not hydrate conv ${id.slice(0,8)} ` +
-        `(${conv._serverMsgCount} server msgs, 0 local); delete refused to avoid data loss`, 'warn');
-      if (typeof showToast === "function") {
-        showToast(t('sidebar.deleteFailed'), 'error');
+    /* ★ WINDOWED-TAIL COMPLETION: loadConversationMessages honours the default
+     *   window (60), so on a long conv it leaves only the tail — `messages.length
+     *   < _serverMsgCount`. Snapshotting that would let undo re-create a conv
+     *   missing its oldest messages. Force a FULL (window=0) fetch to complete
+     *   the body before we snapshot. (No-op when the standard load already
+     *   returned everything, e.g. a short conv or a genuine empty-shell where
+     *   the windowed fetch also came back empty.) */
+    if (conv.messages.length > 0 && _snapshotIncomplete()) {
+      try {
+        const _full = await Api.conversations.get(id, { query: { window: '0' } });
+        conv = conversations.find((c) => c.id === id);
+        if (!conv) return;
+        if (_full && Array.isArray(_full.messages) &&
+            _full.messages.length >= conv.messages.length) {
+          conv.messages = _full.messages;
+          conv._serverMsgCount = _full.messages.length;
+          /* The full array supersedes the windowed view — clear pagination
+           *   state so the snapshot (and any subsequent render) treats it as
+           *   the complete history, not a tail with more-above. */
+          conv._windowed = false;
+          conv._hasMoreEarlier = false;
+          conv._trimmed = false;
+          debugLog(`[deleteConv] completed windowed body for conv ${id.slice(0,8)} ` +
+            `→ ${conv.messages.length} msgs before snapshot`, 'info');
+        }
+      } catch (err) {
+        debugLog(`[deleteConv] full-body fetch before snapshot failed: ${err && err.message}`, 'warn');
       }
-      return;
+    }
+    /* ★ SNAPSHOT STILL INCOMPLETE (server unreachable / load timed out → 0 msgs,
+     *   OR a windowed tail we couldn't complete → messages.length < total). The
+     *   DELETE itself is always safe — the server row is authoritative and needs
+     *   no local body. What we'd lose is only a FAITHFUL undo snapshot.
+     *   Historically we hard-refused the delete here, but that PERMANENTLY
+     *   BLOCKS deleting a shell/long conv whenever the tunnel is slow (the
+     *   reported "delete always fails" bug: windowed reads on + hundreds of
+     *   shell convs → hydration frequently times out). Instead, ask for explicit
+     *   consent, then delete WITHOUT the undo toast — fail-open-with-consent,
+     *   not fail-closed. */
+    if (_snapshotIncomplete()) {
+      debugLog(`[deleteConv] incomplete snapshot for conv ${id.slice(0,8)} ` +
+        `(${conv._serverMsgCount} server msgs, ${conv.messages.length} local); ` +
+        `confirming delete-without-undo`, 'warn');
+      const _confirmed = (typeof showConfirm === 'function')
+        ? await showConfirm(t('sidebar.deleteNoUndoBody'), {
+            title: t('sidebar.deleteNoUndoTitle'),
+            okText: t('sidebar.deleteAnyway'),
+            cancelText: t('folder.cancel'),
+            danger: true,
+          })
+        : true;  /* no dialog available (headless/legacy) → proceed */
+      if (!_confirmed) return;
+      /* Re-read again: the user may have deliberated for a while and the conv
+       *   could have been removed/replaced during the confirm await. */
+      conv = conversations.find((c) => c.id === id);
+      if (!conv) return;
+      _undoUnavailable = true;
     }
   }
 
@@ -300,7 +470,15 @@ async function deleteConversation(id, e) {
     else newChat();
   } else renderConversationList();
 
-  _showUndoDeleteToast(snapshot, origIndex, wasActive);
+  /* Only offer undo when we captured a restorable snapshot. When hydration
+   *   failed (shell conv on a flaky link, user consented to delete-without-undo
+   *   above), the snapshot is hollow — restoring it would re-create an EMPTY
+   *   server row, so surface a plain "deleted" toast instead of a false undo. */
+  if (_undoUnavailable) {
+    if (typeof showToast === "function") showToast(t('sidebar.convDeleted'), 'success');
+  } else {
+    _showUndoDeleteToast(snapshot, origIndex, wasActive);
+  }
 }
 
 /* ★ Restore a conversation deleted via deleteConversation. Re-inserts the
@@ -406,7 +584,7 @@ async function duplicateConversation(id, e) {
       await loadConversationMessages(srcConv.id);
     } catch (err) {
       console.warn(`[duplicateConv] Failed to load source conv: ${err.message}`);
-      if (typeof showToast === "function") showToast("", "复制失败", "无法加载原始对话内容", 4000);
+      if (typeof showToast === "function") showToast("", t('convLifecycle.copyFailed'), t('convLifecycle.copyFailedBody'), 4000);
       return;
     }
   }
@@ -416,7 +594,7 @@ async function duplicateConversation(id, e) {
 
   // ★ PERF: Show toast immediately for instant feedback
   if (typeof showToast === "function") {
-    showToast("", "对话复制中…", `正在复制 "${srcConv.title}"`, 2000);
+    showToast("", t('convLifecycle.copying'), t('convLifecycle.copyingBody', { title: srcConv.title }), 2000);
   }
 
   // ★ PERF: Defer heavy work (deep clone + serialize) to next frame
@@ -435,7 +613,7 @@ async function duplicateConversation(id, e) {
 
     const newConv = {
       id: newId,
-      title: (srcConv.title || "Untitled") + " (副本)",
+      title: (srcConv.title || "Untitled") + t('convLifecycle.copySuffix'),
       messages: clonedMessages,
       createdAt: now,
       updatedAt: now,
@@ -466,7 +644,7 @@ async function duplicateConversation(id, e) {
     loadConversation(newId);
 
     if (typeof showToast === "function") {
-      showToast("", "对话已复制 ✓", `"${srcConv.title}" → 独立副本已创建`, 3000);
+      showToast("", t('convLifecycle.copied'), t('convLifecycle.copiedBody', { title: srcConv.title }), 3000);
     }
     console.log(`[duplicateConv] Duplicated conv ${id.slice(0,8)} → ${newId.slice(0,8)} (${clonedMessages.length} msgs)`);
   });
@@ -642,6 +820,10 @@ function _buildToolbarOverrides() {
     autopilot: autopilotEnabled,
     activeFlow: activeFlow || '',
     autoTranslate: !!autoTranslate,
+    // OUTPUT-side translate target: the UI language the reply is rendered into
+    // (model → human). The backend maps this code to a language name and
+    // translates the assistant reply to it instead of the old Chinese hard-pin.
+    uiLang: (typeof _i18nLang !== 'undefined' ? _i18nLang : 'zh'),
     autoApply: autoApplyWrites,
     browserClientId: window._browserClientId || null,
     keepToolHistory: config.keepToolHistory,
@@ -675,6 +857,7 @@ function _buildConvSnapshot(conv, isActive) {
     projectPaths: conv.projectPaths || [],
     readOnlyPaths: conv.readOnlyPaths || [],
     autoTranslate: conv.autoTranslate,
+    uiLang: conv.uiLang || (typeof _i18nLang !== 'undefined' ? _i18nLang : undefined),
     folderId: conv.folderId,
   };
 }
@@ -690,37 +873,19 @@ function _stripEnvelope(body) {
 
 async function _buildConvConfig(conv) {
   const isActive = (conv.id === activeConvId);
-  const url = (typeof apiUrl === 'function')
-    ? apiUrl('/api/v1/conversations/config/resolve')
-    : '/api/v1/conversations/config/resolve';
-  const r = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      conv_settings: _buildConvSnapshot(conv, isActive),
-      overrides: _buildToolbarOverrides(),
-      server_defaults: { serverModel },
-      is_active: isActive,
-    }),
-    credentials: 'same-origin',
+  const body = await Api.conversations.resolveConfig({
+    conv_settings: _buildConvSnapshot(conv, isActive),
+    overrides: _buildToolbarOverrides(),
+    server_defaults: { serverModel },
+    is_active: isActive,
   });
-  if (!r.ok) throw new Error(`config/resolve failed: HTTP ${r.status}`);
-  return _stripEnvelope(await r.json());
+  return _stripEnvelope(body);
 }
 
 async function _buildConvSettings(conv) {
-  const url = (typeof apiUrl === 'function')
-    ? apiUrl('/api/v1/conversations/settings/resolve')
-    : '/api/v1/conversations/settings/resolve';
-  const r = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      conv_settings: _buildConvSnapshot(conv, false),
-      overrides: _buildToolbarOverrides(),
-    }),
-    credentials: 'same-origin',
+  const body = await Api.conversations.resolveSettings({
+    conv_settings: _buildConvSnapshot(conv, false),
+    overrides: _buildToolbarOverrides(),
   });
-  if (!r.ok) throw new Error(`settings/resolve failed: HTTP ${r.status}`);
-  return _stripEnvelope(await r.json());
+  return _stripEnvelope(body);
 }

@@ -126,10 +126,17 @@ def translate_text_v1():
         content = content.strip()
 
         _model = 'unknown'
+        _truncated = False
         if isinstance(_usage, dict):
             _disp = _usage.get('_dispatch', {})
             _model = _disp.get('model', _usage.get('model', 'unknown'))
-        return jsonify({'translated': content, 'model': _model})
+            # Surface the engine's completeness verdict so a display overlay
+            # (e.g. the Project Brain content translation) can refuse to
+            # replace a COMPLETE original with a known-incomplete translation.
+            _truncated = ((_usage.get('_translate_trace') or {}).get('verdict')
+                          == 'truncated')
+        return jsonify({'translated': content, 'model': _model,
+                        'truncated': _truncated})
     except Exception as e:
         logger.error('[Translate.v1] sync error (%d chars, %s): %s',
                      input_len, target, e, exc_info=True)
@@ -227,7 +234,7 @@ def mt_test_v1():
     target = data.get('target', 'zh')
 
     if not mt_config.get('api_key'):
-        return jsonify({'ok': False, 'error': 'API Key 未填写'})
+        return api_error('API Key 未填写', status=200)
 
     api_key = mt_config.get('api_key', '')
     app_id = mt_config.get('app_id', '')
@@ -248,7 +255,7 @@ def mt_test_v1():
         return api_ok({'translated': result})
     except Exception as e:
         logger.warning('[MT-Test.v1] Failed: %s', e)
-        return jsonify({'ok': False, 'error': str(e)})
+        return api_error(str(e), status=200)
 
 
 __all__ = ['api_v1_translate_bp']

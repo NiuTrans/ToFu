@@ -95,10 +95,33 @@ def _install_shim_for_collection():
     # exact hole that caused the incident.
     if _os.environ.get('TOFU_ALLOW_PG_TESTS') != '1':
         _os.environ['TOFU_DB_BACKEND'] = 'sqlite'
-        if not _os.environ.get('TOFU_DB_PATH'):
+        # ⚠️ XDIST ISOLATION: each ``-n`` worker is its OWN process that
+        # re-imports this conftest, but inherits the controller's environment —
+        # including whatever ``TOFU_DB_PATH`` the controller's shim already set.
+        # ``lib.database._core`` freezes ``DB_PATH`` from this env var at import
+        # (which happens right below via ``import server``), and the naive
+        # ``if not TOFU_DB_PATH`` guard let every worker REUSE the inherited
+        # controller path → all workers froze ``_core.DB_PATH`` to ONE shared
+        # SQLite file and hammered it concurrently → "database is locked" /
+        # "no such table". Key the path on ``PYTEST_XDIST_WORKER`` so each
+        # worker gets its own file (and the controller/serial run gets one too).
+        _worker = _os.environ.get('PYTEST_XDIST_WORKER', '')
+        _existing = _os.environ.get('TOFU_DB_PATH', '')
+        if (not _existing) or (_worker and _worker not in _existing):
             import tempfile as _tf
+            _suffix = f'-{_worker}' if _worker else ''
             _os.environ['TOFU_DB_PATH'] = _os.path.join(
-                _tf.mkdtemp(prefix='tofu-test-shim-'), 'tofu-test.db')
+                _tf.mkdtemp(prefix=f'tofu-test-shim{_suffix}-'), 'tofu-test.db')
+    # Never mlockall() in the test process. server.py pins its whole C-extension
+    # working set (~340 MB) as UNRECLAIMABLE memory when the checkout sits on a
+    # FUSE mount with a generous cgroup limit (the common dev/CI layout here).
+    # Harmless for one long-lived server, but under `pytest -n auto` every xdist
+    # worker re-imports server and pins its own copy → on a many-core box that's
+    # a burst of tens of GB of pinned pages the kernel cannot reclaim, which
+    # OOM-reaps the pod (taking any co-resident live server with it). Test
+    # workers never serve FUSE-mmap'd requests under load, so pinning buys them
+    # nothing. Force it off (overridable) BEFORE `import server` reads it.
+    _os.environ.setdefault('TOFU_MLOCK', '0')
     _os.environ.setdefault('TRADING_ENABLED', '0')
     _os.environ.setdefault('PPTX_TRANSLATE_ENABLED', '0')
     # Shrink the bridge long-poll window so poll-route tests don't each block
@@ -245,21 +268,134 @@ def _reset_global_config():
         _config._global_config = saved
 
 
+
+# ─── Safety net: restore NC-patched source files a crashed test left dirty ──
+#
+# A family of "negative-control" tests physically PATCH a shipped source file
+# on disk (``_patch_restore``: write a neutered variant → run → restore
+# byte-identical in a ``finally``). If that test is KILLED mid-patch — a
+# per-test timeout, an xdist worker crash, a KeyboardInterrupt — its ``finally``
+# never runs and the shipped source is left in its NEUTERED state, which then
+# fails EVERY later test that imports it (the corruption cascade that stuck
+# ``_effective_status`` / ``pending_proposals`` in their NC forms). This
+# autouse fixture is the belt: it snapshots each known NC-target source once,
+# and after every test RESTORES any that differ from the snapshot — so a
+# crashed patch can poison at most the one test that crashed, never the rest of
+# the session (and never the working tree after the run). Cheap: a handful of
+# small files, str-compared, only rewritten on a mismatch.
+# Every shipped source that ANY negative-control test still byte-patches on
+# disk (via a legacy ``_patch_restore`` or an inline ``open(..,'w')``). Keep
+# this in sync with an audit of on-disk NC writers — a target NOT listed here
+# is UNPROTECTED: a crashed patch leaves it poisoned for the rest of the
+# session (this is exactly how ``_persist.py``'s vertical-relocation line was
+# left neutered, cascading into every later importer). The durable fix is to
+# migrate the NC to ``tests/_nc_harness.py`` (in-memory, never writes disk);
+# this belt is the backstop for any not-yet-migrated on-disk NC.
+_NC_GUARDED_SOURCES = (
+    'lib/conversations/project_board.py',
+    'lib/conversations/project_dispatch.py',
+    'lib/conversations/project_charter.py',
+    'lib/conversations/project_feed.py',
+    'lib/conversations/project_brain_summary.py',
+    'lib/conversations/project_brain_influence.py',
+    'lib/conversations/project_peer.py',
+    'lib/message_queue.py',
+    'lib/tasks_pkg/compaction/_persist/_splitters.py',
+    'lib/tools/conversation.py',
+    'lib/scheduler/manager.py',
+    'lib/project_mod/config.py',
+    'routes/conversations.py',
+)
+_ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_nc_source_snapshots: dict = {}
+
+
+def _snapshot_nc_sources():
+    for rel in _NC_GUARDED_SOURCES:
+        p = os.path.join(_ROOT_DIR, rel)
+        try:
+            with open(p, encoding='utf-8') as f:
+                _nc_source_snapshots[p] = f.read()
+        except OSError as e:
+            _conftest_logger.debug('[nc-guard] snapshot skip %s: %s', rel, e)
+
+
+def restore_drifted_nc_sources() -> list:
+    """Rewrite any guarded source that drifted from the session snapshot back to
+    byte-identical. Returns the list of relpaths it healed (empty when clean).
+
+    Plain callable (not the fixture) so it can be driven directly by the belt's
+    own regression test — the fixture body just delegates here in its finally.
+    """
+    healed = []
+    for p, original in _nc_source_snapshots.items():
+        try:
+            with open(p, encoding='utf-8') as f:
+                if f.read() == original:
+                    continue
+            with open(p, 'w', encoding='utf-8') as f:
+                f.write(original)
+            rel = os.path.relpath(p, _ROOT_DIR)
+            healed.append(rel)
+            _conftest_logger.warning(
+                '[nc-guard] restored NC-patched source left dirty by a '
+                'test: %s', rel)
+        except OSError as e:
+            _conftest_logger.debug('[nc-guard] restore skip %s: %s', p, e)
+    return healed
+
+
+@pytest.fixture(autouse=True)
+def _restore_nc_patched_sources():
+    """Restore any NC-target source file a test (or a crashed ``_patch_restore``)
+    left byte-different from the session snapshot. Runs after every test."""
+    if not _nc_source_snapshots:
+        _snapshot_nc_sources()
+    try:
+        yield
+    finally:
+        restore_drifted_nc_sources()
+
+
 # ─── Session-level: one SQLite DB per pytest run ──────────────────────
 @pytest.fixture(scope="session", autouse=True)
 def _configure_test_env():
     """Set env vars BEFORE importing the Flask app so the DB layer picks
     SQLite and isolates data to a temp file.
     """
-    tmpdir = tempfile.mkdtemp(prefix="tofu-test-")
-    db_path = os.path.join(tmpdir, "tofu-test.db")
+    tmpdir = None
 
     # FORCE sqlite (not setdefault) unless the operator opted into a dedicated
     # test PG — see the data-loss guard at the top of this file. An ambient
     # TOFU_DB_BACKEND=postgres must never reach the DB layer in tests.
     if os.environ.get('TOFU_ALLOW_PG_TESTS') != '1':
         os.environ["TOFU_DB_BACKEND"] = "sqlite"
+        # ``lib.database._core`` froze ``DB_PATH`` at conftest-import time from
+        # the (worker-unique) ``TOFU_DB_PATH`` the shim block set — setting a
+        # DIFFERENT path here would be a dead no-op (the frozen global wins),
+        # so REUSE the resolved path and keep the env var consistent with it.
+        try:
+            import lib.database._core as _dbc
+            db_path = getattr(_dbc, 'DB_PATH', '') or ''
+        except Exception:
+            db_path = ''
+        if not db_path:
+            tmpdir = tempfile.mkdtemp(prefix="tofu-test-")
+            db_path = os.path.join(tmpdir, "tofu-test.db")
         os.environ["TOFU_DB_PATH"] = db_path
+        # Create the schema in THIS worker's isolated SQLite file up front, so
+        # direct-DB tests (which never build the app via ``flask_app``) don't
+        # hit "no such table". Under ``-n`` each xdist worker is its own
+        # process with its own DB file; without this, a worker that happens to
+        # run only direct-DB tests never initialises its schema. ``init_db`` is
+        # idempotent (schema-version cache) so the later ``flask_app`` call is
+        # a no-op. Best-effort: never block the session on it.
+        try:
+            from lib.database import init_db as _init_db
+            _init_db()
+        except Exception as _e:
+            _conftest_logger.warning('[conftest] session init_db failed: %s', _e)
+    os.environ.setdefault("TOFU_MLOCK", "0")  # see _install_shim_for_collection
     os.environ.setdefault("TRADING_ENABLED", "0")
     os.environ.setdefault("PPTX_TRANSLATE_ENABLED", "0")
     os.environ.setdefault("TOFU_BROWSER_POLL_WAIT", "0.2")
@@ -295,6 +431,15 @@ def flask_app(_configure_test_env):
     import server  # noqa: F401 — import side-effect installs shim + builds app
     from server import app
 
+    # Create the DB schema. On the real serving path this runs inside
+    # ``server._startup()`` (a Hypercorn before-serving hook); ``test_client()``
+    # NEVER fires that hook, so without this the session's fresh SQLite file has
+    # no tables and every route that touches the DB 500s with
+    # "no such table: conversations". ``init_db`` is idempotent (schema-version
+    # cache) and needs no app context, so calling it once here is safe.
+    from lib.database import init_db as _init_db
+    _init_db()
+
     app.config.update(TESTING=True)
     return app
 
@@ -319,6 +464,14 @@ def pytest_configure(config):
         'auth_mode(mode): override TOFU_AUTH_MODE for this test '
         '(open / private / multi-user). Restored after the test.',
     )
+    # xdist_group is provided by pytest-xdist, but register it so a run WITHOUT
+    # xdist (or with --strict-markers) doesn't warn/error on the marks the
+    # collection hook stamps for worker-affinity grouping.
+    config.addinivalue_line(
+        'markers',
+        'xdist_group(name): pytest-xdist worker-affinity group — tests sharing '
+        'a name run on the same worker under --dist loadgroup.',
+    )
 
 
 # ─── Tier-marker safety net ───────────────────────────────────────────
@@ -338,10 +491,22 @@ def pytest_configure(config):
 # from CI.
 _TIER_MARKERS = frozenset({'unit', 'api', 'visual', 'slow', 'live_llm'})
 
-
 def pytest_collection_modifyitems(config, items):
     auto_marked_files = set()
     for item in items:
+        # ── xdist per-file affinity (honoured under ``--dist loadgroup``) ──
+        # Stamp every test with an xdist_group == its file basename so ALL of a
+        # file's tests run on ONE worker, sequentially — never split per-test
+        # across workers. This is load-bearing for the on-disk source-mutating
+        # NC tests (``_patch_restore`` byte-patches) + the frontend fixed-name
+        # ``.nc_copy.js`` tests: splitting a file's tests across workers lets a
+        # neutered source / temp copy be live while a sibling reads it. Under
+        # ``--dist load``/``worksteal`` (per-test) the marker is inert and this
+        # is a no-op; it only bites under ``--dist loadgroup``. The nc-guard
+        # fixture above is the belt that heals a crashed patch regardless.
+        _fname = os.path.basename(item.nodeid.split('::', 1)[0]) if item.nodeid else ''
+        if _fname:
+            item.add_marker(pytest.mark.xdist_group(_fname))
         own = {m.name for m in item.iter_markers()}
         if own & _TIER_MARKERS:
             continue

@@ -62,8 +62,8 @@ declare var _browserClientId: any;       // static/js/main/main_toolbar_ui.js �
 declare var __sse_test__: any;           // static/js/ui/sse_pipeline.js — window.*
 declare var __swarmPushWired: any;       // static/js/ui/swarm_push.js — window.*
 declare var presenceRefresh: any;        // static/js/presence.js — window.presenceRefresh
-declare var convInfluenceRefresh: any;   // static/js/project-brain.js — window.convInfluenceRefresh (per-conv influence bar)
 declare var projectBrainRefresh: any;    // static/js/project-brain.js — window.projectBrainRefresh
+declare var convInfluenceRefresh: any;   // static/js/project-brain.js — window.convInfluenceRefresh (conv influence bar)
 declare var openProjectBrain: any;       // static/js/project-brain.js — window.openProjectBrain (called bare in presence.js)
 declare var closeProjectBrain: any;      // static/js/project-brain.js — window.closeProjectBrain
 declare var toggleProjectBrain: any;     // static/js/project-brain.js — window.toggleProjectBrain
@@ -73,6 +73,15 @@ declare var buildTurnCtxSnapshot: any;   // static/js/info-rail.js — window.* 
 declare var renderTurnCtxNote: any;      // static/js/info-rail.js — window.* (used by chat_render)
 declare var reconcileTurnCtxCapsule: any; // static/js/info-rail.js — window.* (used by sse_pipeline)
 declare var refreshMcpRailState: any;    // static/js/info-rail.js — window.* (used by settings/mcp)
+
+// ── Newer-module app globals (2026-07). Attached to window inside IIFEs /
+//    exposed as `global.X` (voice.js), so tsc doesn't see them as bare
+//    script-scope names — declare them here so cross-file bare references
+//    aren't false "Cannot find name" (TS2304). Loose `any`, same as above. ──
+declare var initVoiceInput: any;      // static/js/voice.js — global.initVoiceInput (bare in main.js boot)
+declare var toggleVoiceInput: any;    // static/js/voice.js — global.toggleVoiceInput (mic onclick)
+declare var _welcomePillsHtml: any;   // static/js/core/icons.js — window._welcomePillsHtml (bare in chat_render / main_conv_lifecycle)
+declare var toast: any;               // legacy toast() helper, behind `typeof toast === 'function'` (feature-loader.js)
 
 // ── DOM access widening (declaration-merged with lib.dom) ──
 //
@@ -100,6 +109,18 @@ interface Element {
   // _wired: one-time event-wiring latch (main_toolbar_ui.js); _qaCls/_qaSig:
   // paper-reader QA-node className/innerHTML diff cache (paper-reader.js)
   _wired: any; _qaCls: any; _qaSig: any;
+  // __bgHtml: chat_render.js background-repaint compare-before-swap cache;
+  // selectionStart/End: textarea caret in voice.js _injectText.
+  __bgHtml: any; selectionStart: any; selectionEnd: any;
+}
+// app-specific expando props tsc flags on the concrete HTMLElement subtype
+// (getElementById() returns HTMLElement, not Element). Mirror the Element
+// expandos it reads there, plus the project-brain one-time wire latches.
+interface HTMLElement {
+  __bgHtml: any;                            // ui/chat_render.js background-repaint cache
+  selectionStart: any; selectionEnd: any;   // voice.js caret insert on #userInput
+  _pbTrWired: any;                          // project-brain-i18n.js head toggle wire latch
+  _pbPreviewWired: any;                     // project-brain.js hover-preview wire latch
 }
 interface EventTarget {
   value: any; checked: any; disabled: any; dataset: any;
@@ -115,7 +136,8 @@ interface GlobalEventHandlers {
   value: any; dataset: any; src: any; width: any; height: any;
 }
 // Drag events read e.dataTransfer off the base Event type in delegated handlers.
-interface Event { dataTransfer: any; }
+// tofu-pet.js / tofu-scene.js read e.detail off CustomEvents typed as base Event.
+interface Event { dataTransfer: any; detail: any; }
 // ResizeObserver entry: app reads contentBoxSize[0].inlineSize off the union.
 interface ResizeObserverSize { inlineSize: any; blockSize: any; }
 // app-specific expando stashed on toast <div>s + finish-info anchor ref + paper-reader tracking
@@ -133,6 +155,7 @@ interface Window {
   relayAdminSwitch: any; relayAdminSaveMargin: any; relayAdminViewPayments: any;
   _cvOnLanguageChange: any;
   _swReconcileTicker: any;
+  _timerCountdownTicker: any;  // ui/tool_rounds.js — 1Hz "Next check in Ns" countdown ticker
   buildTurnCtxSnapshot: any; renderTurnCtxNote: any;
   reconcileTurnCtxCapsule: any; refreshMcpRailState: any;
   // mobile_panels.js portaling + flow picker, and the open-flag setters it
@@ -145,9 +168,34 @@ interface Window {
   __presenceWired: any; presenceRefresh: any; CollabBar: any;
   // project-brain.js — the panel controls + conversation-switch refresh hooks
   //  (all assigned via window.* inside the project-brain IIFE).
-  convInfluenceRefresh: any; projectBrainRefresh: any;
+  projectBrainRefresh: any;
   toggleProjectBrain: any; openProjectBrain: any; closeProjectBrain: any;
   ProjectBrain: any;
+  // project-brain-{peers,status}.js columns + the influence deep-link opener,
+  // all assigned via window.* and probed with `typeof window.X !== 'undefined'`.
+  ProjectBrainPeers: any; ProjectBrainStatus: any; openProjectBrainInfluence: any;
+  // core.js boot/reconnect latches shared across cross_tab_sync.js + main.js,
+  // the responsive-breakpoint table, the multi-user id, and the project-modal
+  // open flag (main.js / project.js).
+  _bootLoadInFlight: any; _bootReconnectStarted: any; _currentUserId: any;
+  TOFU_BP: any; _tofuProjectModalOpen: any;
+  // cross_tab_sync.js exposes the boot-load-held probe on window; context-bar.js
+  // exposes the manual-compaction trigger — both assigned via window.* in IIFEs.
+  _isBootLoadHeld: any; runManualCompaction: any;
+  isMobileViewport: any; mobileMediaQuery: any; tabletDrawerMediaQuery: any;
+  isTabletDrawerViewport: any; isDrawerViewport: any; prefersReducedMotion: any;
+  // icons.js welcome-pills html builder (also read via window._welcomePillsHtml).
+  _welcomePillsHtml: any;
+  // tofu-pet.js / tofu-scene.js — the pet + its scene engine (each window.*-
+  // assigns itself and reads the other for the handoff).
+  TofuPet: any; TofuScene: any;
+  // net-latency.js topbar signal widget init (window.initNetLatency).
+  initNetLatency: any;
+  // paper-reader.js responsive fold-crossing handler (window.*).
+  _paperResponsiveOnCrossing: any;
+  // feature-loader.js — deferred-bundle plumbing (all window.* assigned).
+  __FEATURE_BUNDLE_SRC__: any; _DEFERRED_ENTRY_POINTS: any;
+  _onReady: any; _loadFeatureBundle: any;
 }
 // (FileReader.result stays string|ArrayBuffer — call sites coerce via String()
 //  since merging can't override an existing property's declared type.)

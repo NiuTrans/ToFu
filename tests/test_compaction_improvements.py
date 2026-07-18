@@ -269,6 +269,65 @@ class TestReactiveCompact:
         assert messages[0]['content'] == 'Important system prompt'
 
 
+    def test_head_truncate_running_total_matches_full_walk(self):
+        """The O(n) running-total rewrite of _head_truncate must drop EXACTLY
+        the same messages a naive O(n^2) re-sum-every-pop loop would.
+
+        _estimate_total_tokens == sum(_estimate_msg_tokens), so subtracting
+        each popped message keeps the running total bit-identical to a fresh
+        full walk. This guards that equivalence for BOTH trim modes so a
+        future refactor can't silently drift the drop boundary.
+        """
+        from lib.tasks_pkg.compaction import _head_truncate
+        from lib.tasks_pkg.compaction._tokens import _estimate_total_tokens
+
+        def _mk():
+            msgs = [{'role': 'system', 'content': 'sys ' * 100}]
+            # First real user turn is the objective anchor — must survive.
+            msgs.append({'role': 'user', 'content': 'ANCHOR goal ' * 200})
+            for i in range(40):
+                msgs.append({'role': 'assistant', 'content': f'A{i} ' * 400})
+                msgs.append({'role': 'user', 'content': f'U{i} ' * 400})
+            return msgs
+
+        # Reference: naive full-walk drop against the SAME target the impl uses
+        # (token mode: 0.60 * context_limit for gpt-4 = 128000).
+        def _ref_token_drop(msgs, target):
+            from lib.tasks_pkg.compaction._layer2 import _objective_anchor_index
+            system_end = 0
+            for i, m in enumerate(msgs):
+                if m.get('role') == 'system':
+                    system_end = i + 1
+                else:
+                    break
+
+            def _pos():
+                anchor = _objective_anchor_index(msgs)
+                if anchor == system_end and len(msgs) > system_end + 1:
+                    return system_end + 1
+                return system_end
+            dropped = 0
+            while _estimate_total_tokens(msgs) > target and len(msgs) > system_end + 4:
+                msgs.pop(_pos())
+                dropped += 1
+            return dropped
+
+        task = {'config': {'model': 'gpt-4'}}  # 128k window → token target 76800
+
+        impl_msgs = _mk()
+        ref_msgs = _mk()
+        target = int(128_000 * 0.60)
+
+        n_impl = _head_truncate(impl_msgs, task=task)
+        n_ref = _ref_token_drop(ref_msgs, target)
+
+        assert n_impl == n_ref, (n_impl, n_ref)
+        assert len(impl_msgs) == len(ref_msgs)
+        assert _estimate_total_tokens(impl_msgs) == _estimate_total_tokens(ref_msgs)
+        # Objective anchor (first real user msg) survived.
+        assert any('ANCHOR goal' in (m.get('content') or '') for m in impl_msgs)
+
+
 # ═══════════════════════════════════════════════════════════
 #  5. PromptTooLongError
 # ═══════════════════════════════════════════════════════════
@@ -755,6 +814,75 @@ class TestDiskPersistence:
         from lib.tasks_pkg.tool_display import _persisted_read_labels
         clear()
         assert _persisted_read_labels({'reads': [{'path': 'lib/server.py'}]}) == ''
+
+    def test_get_conversation_label_skips_decorative_first_line(self):
+        """A spilled get_conversation result opens with a ``═══`` rule; the
+        persisted-result label must show the meaningful title line, not the
+        wall of box-drawing characters (the reported UI ugliness)."""
+        import os
+        from lib.tasks_pkg.compaction import _persist_to_disk
+        from lib.tasks_pkg.persist_registry import clear, lookup
+        from lib.tasks_pkg.tool_display import _persisted_read_labels
+
+        clear()
+        content = (
+            '═' * 60 + '\n'
+            'Referenced Conversation: "Why does it show fail to fetch?"\n'
+            '   ID: mr4e8pnxbv440z\n'
+            '   Messages: 12\n'
+            + '═' * 60 + '\n\n'
+            + ('some long body text ' * 6000)
+        )
+        out = _persist_to_disk(content, 'get_conversation', 'toolu_conv', 'conv_gc')
+        # Single-file persist path.
+        assert out.startswith('[Persisted to:')
+        fp = out.split('[Persisted to: ', 1)[1].split(']', 1)[0]
+
+        tool, desc = lookup(fp)
+        assert tool == 'get_conversation'
+        # Description is the meaningful header, NOT the ═══ rule.
+        assert 'Referenced Conversation' in desc
+        assert '═' not in desc
+
+        display = _persisted_read_labels({'reads': [{'path': fp}]})
+        assert 'past conversation' in display  # friendly verb
+        assert 'Referenced Conversation' in display
+        assert '═' not in display
+        assert 'get_conversation output' not in display
+
+        os.unlink(fp)
+
+    def test_get_conversation_label_survives_registry_loss(self):
+        """After a server restart the process-local registry is empty, so the
+        row must fall back to describe_filename(). A default-spill
+        get_conversation_<id>.txt must still render the ``past conversation``
+        verb — never the raw opaque filename."""
+        from lib.tasks_pkg.persist_registry import (
+            clear, describe_filename, friendly_label,
+        )
+        from lib.tasks_pkg.tool_display import _persisted_read_labels
+
+        clear()  # simulate a fresh process (no in-memory labels)
+        fname = 'get_conversation_9Yqehab12cd.txt'
+
+        # Stateless filename parse recovers the tool (no description).
+        parsed = describe_filename(fname)
+        assert parsed == ('get_conversation', '')
+        assert friendly_label(*parsed) == 'past conversation'
+
+        display = _persisted_read_labels({'reads': [{'path': fname}]})
+        assert 'past conversation' in display
+        assert 'get_conversation_9Yqehab12cd' not in display  # not the raw name
+        assert '.txt' not in display
+
+    def test_default_spill_recognition_is_allowlisted(self):
+        """describe_filename must NOT mistake an ordinary project file that
+        merely has a name_underscore.txt shape for a persisted spill —
+        recognition is restricted to _DEFAULT_SPILL_TOOLS."""
+        from lib.tasks_pkg.persist_registry import clear, describe_filename
+        clear()
+        assert describe_filename('requirements_dev.txt') is None
+        assert describe_filename('notes_2026.txt') is None
 
     def test_find_files_batch_split_persist(self):
         """Batch find_files persist should produce per-search files + index listing ALL patterns."""

@@ -29,7 +29,7 @@ def _detect_image_format(head: bytes) -> str | None:
 
 from lib.env_compat import getenv_compat
 from lib.log import get_logger
-from lib.api_response import api_bad_request, api_internal_error, api_not_found
+from lib.api_response import api_bad_request, api_error, api_internal_error, api_not_found
 from lib.request_parser import parse_body
 
 logger = get_logger(__name__)
@@ -39,7 +39,12 @@ upload_bp = Blueprint('upload', __name__)
 from routes.api_v1.uploads import api_v1_uploads_bp  # noqa: E402
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-UPLOAD_DIR = os.path.join(BASE_DIR, 'uploads', 'images')
+# User-uploaded images are USER STATE and must live under the resolved
+# runtime base (co-located with the DB that references them by /api/images/
+# URL), NOT the code tree — see lib/runtime_paths.uploads_root(). In the
+# default in-tree layout this is byte-identical to <repo>/uploads/images.
+from lib.runtime_paths import uploads_root  # noqa: E402
+UPLOAD_DIR = os.path.join(uploads_root(), 'images')
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 
@@ -237,7 +242,8 @@ def _shrink_upload_image(img_bytes: bytes, detected_fmt: str) -> tuple[bytes, st
 
     try:
         from PIL import Image
-    except ImportError:
+    except ImportError as e:
+        logger.debug('[Upload] PIL unavailable, using fallback: %s', e)
         info['reason'] = 'pillow_missing'
         ext = '.' + ('jpg' if detected_fmt == 'jpeg' else detected_fmt)
         return img_bytes, ext, info
@@ -362,8 +368,8 @@ def upload_image():
         }
         if media_type not in ext_map:
             logger.warning('[upload_image] Rejected media_type=%s (SVG/other not allowed)', media_type)
-            return jsonify({'error': 'Unsupported image type — SVG uploads are disabled for security. '
-                                     'Allowed: png, jpeg, gif, webp, bmp.'}), 400
+            return api_error('Unsupported image type — SVG uploads are disabled for security. '
+                             'Allowed: png, jpeg, gif, webp, bmp.', status=400)
         ext = ext_map.get(media_type, '.png')
         try:
             img_bytes = base64.b64decode(b64_data)
@@ -385,7 +391,11 @@ def upload_image():
                            e, exc_info=True)
             shrink_info = {'shrunk': False, 'reason': f'exc:{e}'}
 
-        filename = f"{int(time.time()*1000)}{ext}"
+        # Append a short random suffix so two images uploaded in the SAME
+        # millisecond (the frontend now fires parallel uploads) can't collide
+        # on one filename — a collision would overwrite the first file and
+        # leave BOTH message rows pointing at the same image.
+        filename = f"{int(time.time()*1000)}_{os.urandom(4).hex()}{ext}"
         filepath = os.path.join(UPLOAD_DIR, filename)
         try:
             with open(filepath, 'wb') as f:
@@ -415,8 +425,8 @@ def upload_image():
     # and enable stored XSS when served inline. See §10.4.
     if ext not in ('.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'):
         logger.warning('[upload_image] Rejected extension=%s (SVG/other not allowed)', ext)
-        return jsonify({'error': 'Unsupported image type — SVG uploads are disabled for security. '
-                                 'Allowed: .png, .jpg, .jpeg, .gif, .webp, .bmp.'}), 400
+        return api_error('Unsupported image type — SVG uploads are disabled for security. '
+                         'Allowed: .png, .jpg, .jpeg, .gif, .webp, .bmp.', status=400)
     # ── Magic-bytes sanity check ──
     head = file.stream.read(32)
     file.stream.seek(0)
@@ -442,7 +452,7 @@ def upload_image():
 
     # Preserve user-supplied filename stem but use the (possibly new) extension
     stem = os.path.splitext(file.filename)[0]
-    filename = f"{int(time.time()*1000)}_{stem}{new_ext}"
+    filename = f"{int(time.time()*1000)}_{os.urandom(4).hex()}_{stem}{new_ext}"
     filepath = os.path.join(UPLOAD_DIR, filename)
     try:
         with open(filepath, 'wb') as f:

@@ -39,9 +39,9 @@ Design rules
 from __future__ import annotations
 
 import json
-import time
 
 from lib.log import get_logger
+from lib.timeutil import now_ms
 
 logger = get_logger(__name__)
 
@@ -50,8 +50,7 @@ logger = get_logger(__name__)
 _NONTERMINAL = frozenset({'pending', 'running', 'retrying'})
 
 
-def _now_ms() -> int:
-    return int(time.time() * 1000)
+_now_ms = now_ms
 
 
 def _db():

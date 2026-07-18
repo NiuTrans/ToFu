@@ -24,17 +24,43 @@ from .prompts import (
     date_anchor_clause,
 )
 
+# OpenReview single-page auto-fill (killer feature) — pure classifier +
+# submit-free fill-plan + orchestration entry.
+from .openreview_autofill import (
+    autofill_openreview_review,
+    build_fill_plan,
+    classify_review_form,
+    extract_forum_id,
+    extract_pdf_url,
+    extract_review_values,
+    is_openreview_url,
+    is_submit_control,
+    plan_has_submit_action,
+)
+
 # Review Mode — venue registry + compound-key parser + review prompts
 from .review import (
     DEFAULT_VENUE,
+    REBUTTAL_DECISION_MARKER,
     REVIEW_VENUES,
+    build_rebuttal_prompt,
+    build_rebuttal_tool_instruction,
     build_review_prompt,
     build_review_tool_instruction,
+    is_rebuttal_lang,
+    is_review_family,
     is_review_lang,
     list_venues,
+    make_rebuttal_lang,
     make_review_lang,
     parse_report_lang,
+    parse_rebuttal_decision,
+    rebuttal_decision_marker,
+    finalize_rebuttal_body,
+    finalize_review_body,
+    scorecard_separator,
     smarten_quotes,
+    strip_slop_dashes,
 )
 
 # Prompt-injection hardening for untrusted paper text
@@ -61,6 +87,22 @@ from .images import (
 
 # arXiv + library
 from .arxiv import _extract_arxiv_id, fetch_arxiv_title, search_arxiv
+from .recommend_engine import iter_recommend_events, recommend_papers
+from .recommend_runtime import (
+    _RECOMMEND_TASK_TTL,
+    _append_recommend_event,
+    _cleanup_stale_recommend_tasks,
+    _new_recommend_task,
+    _recommend_index_lock,
+    _recommend_key,
+    _recommend_latest_for,
+    _recommend_latest_index,
+    _recommend_register_latest,
+    _recommend_runtime,
+    _recommend_tasks,
+    _recommend_tasks_lock,
+)
+from .recommend_task import _run_recommend_task
 from .library import (
     _LIB_IMAGES_CAP,
     _LIB_PARSED_TEXT_CAP,
@@ -129,7 +171,17 @@ __all__ = [
     # review mode
     'REVIEW_VENUES', 'DEFAULT_VENUE', 'parse_report_lang', 'is_review_lang',
     'make_review_lang', 'list_venues', 'build_review_prompt',
-    'build_review_tool_instruction', 'smarten_quotes',
+    'build_review_tool_instruction', 'smarten_quotes', 'strip_slop_dashes',
+    'finalize_review_body', 'scorecard_separator',
+    # rebuttal (author-response follow-up)
+    'is_rebuttal_lang', 'is_review_family', 'make_rebuttal_lang',
+    'build_rebuttal_prompt', 'build_rebuttal_tool_instruction',
+    'parse_rebuttal_decision', 'rebuttal_decision_marker',
+    'finalize_rebuttal_body', 'REBUTTAL_DECISION_MARKER',
+    # openreview auto-fill (killer feature)
+    'autofill_openreview_review', 'build_fill_plan', 'classify_review_form',
+    'extract_forum_id', 'extract_pdf_url', 'extract_review_values',
+    'is_openreview_url', 'is_submit_control', 'plan_has_submit_action',
     # injection guard
     'sanitize_paper_text', 'wrap_untrusted', 'injection_notice',
     # llm + tools
@@ -141,7 +193,13 @@ __all__ = [
     '_extract_title_from_report', '_backfill_library_title',
     '_is_placeholder_title',
     # arxiv + library
-    '_extract_arxiv_id', 'fetch_arxiv_title', 'search_arxiv',
+    '_extract_arxiv_id', 'fetch_arxiv_title', 'search_arxiv', 'recommend_papers',
+    'iter_recommend_events',
+    '_recommend_runtime', '_recommend_tasks', '_recommend_tasks_lock',
+    '_RECOMMEND_TASK_TTL', '_recommend_key', '_recommend_index_lock',
+    '_recommend_latest_index', '_recommend_latest_for', '_recommend_register_latest',
+    '_new_recommend_task', '_append_recommend_event',
+    '_cleanup_stale_recommend_tasks', '_run_recommend_task',
     '_PAPER_LIB_COLUMNS', '_LIB_PARSED_TEXT_CAP', '_LIB_QA_HISTORY_CAP',
     '_LIB_IMAGES_CAP', '_LIB_TITLE_CAP', '_lib_row_to_dict',
     # report

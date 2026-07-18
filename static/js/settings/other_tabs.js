@@ -47,7 +47,7 @@ function _populateNetworkTab(cfg) {
   var envBannerText = document.getElementById('proxyEnvBannerText');
   if (envBanner && envBannerText && envParts.length > 0) {
     envBanner.style.display = '';
-    envBannerText.textContent = '系统环境变量: ' + envParts.join(' · ');
+    envBannerText.textContent = t('settings.proxyEnvBanner', { vars: envParts.join(' · ') });
   } else if (envBanner) {
     envBanner.style.display = 'none';
   }
@@ -60,7 +60,7 @@ function _populateNetworkTab(cfg) {
   var hintText = document.getElementById('proxyEnvHintText');
   if (hint && hintText && n.env_proxy_bypass) {
     hint.style.display = '';
-    hintText.textContent = '环境变量基线 (PROXY_BYPASS_DOMAINS): ' + n.env_proxy_bypass;
+    hintText.textContent = t('settings.proxyEnvHint', { val: n.env_proxy_bypass });
   } else if (hint) {
     hint.style.display = 'none';
   }
@@ -165,14 +165,14 @@ function _populateFeishuTab(cfg) {
   var desc = document.getElementById('feishuStatusDesc');
   if (dot && label && desc) {
     if (f.connected) {
-      dot.innerHTML = IconDot('green'); dot.title = '已连接';
-      desc.textContent = 'WebSocket 已连接 · 应用：' + (f.app_id_masked || '—');
+      dot.innerHTML = IconDot('green'); dot.title = t('settings.feishuConnected');
+      desc.textContent = t('settings.feishuConnectedDesc', { app: (f.app_id_masked || '—') });
     } else if (f.enabled) {
-      dot.innerHTML = IconDot('yellow'); dot.title = '已启用但未连接';
-      desc.textContent = '凭证已设置但未连接';
+      dot.innerHTML = IconDot('yellow'); dot.title = t('settings.feishuEnabledNotConnected');
+      desc.textContent = t('settings.feishuCredsNotConnected');
     } else {
-      dot.innerHTML = IconDot('grey'); dot.title = '未启用';
-      desc.textContent = '请设置 App ID 和 App Secret 以启用';
+      dot.innerHTML = IconDot('grey'); dot.title = t('settings.feishuDisabled');
+      desc.textContent = t('settings.feishuDisabledDesc');
     }
   }
 
@@ -182,7 +182,7 @@ function _populateFeishuTab(cfg) {
   var secretInput = document.getElementById('settingFeishuAppSecret');
   if (secretInput) {
     secretInput.value = '';
-    secretInput.placeholder = f.has_secret ? '••••••••（已保存 — 留空则保持不变）' : '输入应用密钥';
+    secretInput.placeholder = f.has_secret ? t('settings.feishuSecretSaved') : t('settings.feishuSecretPlaceholder');
   }
   _setVal('settingFeishuDefaultProject', f.default_project || '');
   _setVal('settingFeishuWorkspaceRoot', f.workspace_root || '');
@@ -256,11 +256,11 @@ function _refreshCacheStatsUI() {
   var el = document.getElementById('settingsCacheStats');
   if (!el) return;
   if (typeof ConvCache === 'undefined' || !ConvCache.isAvailable()) {
-    el.textContent = 'IndexedDB 不可用';
+    el.textContent = t('settings.cacheUnavailable');
     return;
   }
   ConvCache.stats().then(function(s) {
-    el.textContent = '已缓存 ' + s.count + ' 个对话';
+    el.textContent = t('settings.cacheCached', { n: s.count });
   });
 }
 
@@ -268,15 +268,15 @@ function _refreshCacheStatsUI() {
 function _clearConvCacheFromSettings() {
   if (typeof ConvCache === 'undefined') return;
   var btn = document.getElementById('settingsClearCacheBtn');
-  if (btn) { btn.disabled = true; btn.textContent = '清除中…'; }
+  if (btn) { btn.disabled = true; btn.textContent = t('settings.cacheClearing'); }
   ConvCache.clear().then(function() {
     _refreshCacheStatsUI();
-    if (btn) { btn.disabled = false; btn.innerHTML = Icon('trash', 12) + ' 清除缓存'; }
+    if (btn) { btn.disabled = false; btn.innerHTML = Icon('trash', 12) + ' ' + t('settings.cacheClearBtn'); }
     // Force all in-memory conversations to _needsLoad so next click refetches
     conversations.forEach(function(c) {
       if (c.id !== activeConvId) c._needsLoad = true;
     });
-    if (typeof showToast === 'function') showToast('缓存已清除 — 下次点击对话时将重新从服务器加载');
+    if (typeof showToast === 'function') showToast(t('settings.cacheCleared'));
   });
 }
 

@@ -19,7 +19,6 @@ Design rules (CLAUDE.md):
 from __future__ import annotations
 
 import json
-import re
 
 from lib.log import get_logger
 from lib.orchestration import (
@@ -135,29 +134,11 @@ Return JSON with EXACTLY this shape:
 '''
 
 
-def _strip_fences(text: str) -> str:
-    s = (text or '').strip()
-    if s.startswith('```'):
-        s = s.split('\n', 1)[-1] if '\n' in s else s[3:]
-        if s.endswith('```'):
-            s = s[:-3]
-    return s.strip()
-
-
 def _extract_json(text: str) -> dict | None:
-    """Best-effort parse: try whole string, else first {...} block."""
-    s = _strip_fences(text)
-    try:
-        return json.loads(s)
-    except (json.JSONDecodeError, TypeError):
-        pass
-    m = re.search(r'\{.*\}', s, re.DOTALL)
-    if m:
-        try:
-            return json.loads(m.group(0))
-        except (json.JSONDecodeError, TypeError) as e:
-            logger.debug('[Composer] inner-brace parse failed: %s', e)
-    return None
+    """Best-effort parse: try whole string, else first balanced {...} block."""
+    from lib.llm_json import extract_json
+    result = extract_json(text)
+    return result if isinstance(result, dict) else None
 
 
 def _build_messages(requirement: str, current: dict | None,

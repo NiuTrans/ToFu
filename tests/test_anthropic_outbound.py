@@ -163,6 +163,48 @@ class SSETranslationTest(unittest.TestCase):
                                       'error': {'message': 'boom'}}))
         self.assertEqual(out[0]['error']['message'], 'boom')
 
+    def _last_usage(self, events):
+        """Return the final usage dict an accumulator would settle on
+        (last chunk to carry a `usage` key wins — mirrors SSEAccumulator)."""
+        t = AnthropicSSETranslator(model='x')
+        usage = None
+        for ev in events:
+            for chunk in t.translate(json.dumps(ev)):
+                if chunk == '[DONE]':
+                    continue
+                if chunk.get('usage'):
+                    usage = chunk['usage']
+        return usage
+
+    def test_cache_read_survives_message_delta(self):
+        # ★ Regression: Anthropic reports cache tokens on message_start and
+        #   only output_tokens on message_delta. The downstream accumulator
+        #   overwrites usage per chunk, so a message_delta usage carrying only
+        #   output must NOT clobber the cache_read captured at message_start.
+        events = [
+            {'type': 'message_start', 'message': {'usage': {
+                'input_tokens': 120,
+                'cache_creation_input_tokens': 8000,
+                'cache_read_input_tokens': 40000,
+                'output_tokens': 1}}},
+            {'type': 'content_block_start', 'index': 0,
+             'content_block': {'type': 'text', 'text': ''}},
+            {'type': 'content_block_delta', 'index': 0,
+             'delta': {'type': 'text_delta', 'text': 'hi'}},
+            {'type': 'message_delta', 'delta': {'stop_reason': 'end_turn'},
+             'usage': {'output_tokens': 250}},
+            {'type': 'message_stop'},
+        ]
+        u = self._last_usage(events)
+        self.assertIsNotNone(u)
+        self.assertEqual(u['cache_read_input_tokens'], 40000)
+        self.assertEqual(u['cache_creation_input_tokens'], 8000)
+        self.assertEqual(u['input_tokens'], 120)
+        # output_tokens takes the delta's cumulative value (250, not 1)
+        self.assertEqual(u['output_tokens'], 250)
+        # prompt_tokens = input + cache_read + cache_write (OpenAI-shape total)
+        self.assertEqual(u['prompt_tokens'], 120 + 40000 + 8000)
+
 
 if __name__ == '__main__':
     unittest.main()

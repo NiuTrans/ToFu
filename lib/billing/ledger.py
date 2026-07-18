@@ -25,11 +25,11 @@ storage layer plus the kind enum.
 from __future__ import annotations
 
 import time
-import uuid
 from dataclasses import dataclass
 from typing import List, Optional
 
 from lib.database import DOMAIN_SYSTEM, get_thread_db as get_db
+from lib.ids import short_id
 from lib.log import get_logger
 
 logger = get_logger(__name__)
@@ -86,7 +86,7 @@ class LedgerEntry:
 
 
 def _new_id() -> str:
-    return f'led_{uuid.uuid4().hex[:24]}'
+    return short_id('led_')
 
 
 def find_existing(user_id: str, kind: str, ref_type: str,

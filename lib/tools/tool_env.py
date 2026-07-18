@@ -310,6 +310,7 @@ class ToolEnvironment:
         try:
             validate_egress_url(url)   # use-time check defeats DNS rebind
         except EgressDenied as e:
+            logger.debug('[CustomTool] webhook egress blocked for %s: %s', tool.name, e)
             return (f'Webhook blocked: {e}', True)
         headers = dict(tool.execution.get('headers') or {})
         auth = tool.execution.get('auth')
@@ -321,6 +322,8 @@ class ToolEnvironment:
             resp = http_post(url, json={'tool': tool.name, 'arguments': fn_args},
                              headers=headers, timeout=timeout)
         except Exception as e:
+            logger.debug('[CustomTool] webhook request failed for %s: %s: %s',
+                         tool.name, type(e).__name__, e)
             return (f'Webhook request failed: {type(e).__name__}: {e}', True)
         if resp.status_code >= 400:
             return (f'Webhook returned HTTP {resp.status_code}: '
@@ -339,6 +342,8 @@ class ToolEnvironment:
                 'run_command', {'command': command,
                                 'timeout': tool.execution.get('timeout_s')})
         except Exception as e:
+            logger.warning('[CustomTool] sandbox command failed for %s: %s: %s',
+                           tool.name, type(e).__name__, e)
             return (f'Sandbox command failed: {type(e).__name__}: {e}', True)
         finally:
             if prev is None:

@@ -10,16 +10,24 @@ from __future__ import annotations
 import ast
 import os
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
 
-# These checks walk + AST-parse the ENTIRE lib/ + routes/ tree (thousands of
-# files); each takes minutes on a FUSE mount. They are convention guards, not
-# fast unit tests — mark the whole module ``slow`` so it runs in a dedicated
-# lint/quality CI step, not in the fast ``make test-unit`` / ``ci`` tier. (Run
-# with ``pytest -m slow tests/test_code_quality.py``.)
-pytestmark = pytest.mark.slow
+# ── Tier: this is a BLOCKING unit-tier guard, NOT slow/opt-in. ──
+# It AST-parses the lib/ + routes/ tree, but discovery is git-index-backed
+# (``git ls-files`` ~15ms, see _git_tracked_py) and the parse is pure-Python
+# with NO server / NO DB — the whole module runs in ~6s. It was FORMERLY marked
+# ``slow`` ONLY because its old ``os.walk`` discovery timed out on the FUSE
+# mount; ``slow`` quarantined it behind ``pytest -m slow``, which ``make ci``
+# does not run and CI runs ``continue-on-error`` (non-blocking) — so this
+# logging-discipline guard NEVER failed a build even when it should have (the
+# very "green because nobody runs it" rot it exists to prevent). Now that
+# discovery is fast, it belongs in the default ``unit`` tier: ``make test-unit``
+# / ``make ci`` / the blocking CI ``test-unit`` job all run ``-m unit``, so a
+# new silent catch fails the build on the PR that introduces it.
+pytestmark = pytest.mark.unit
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 LIB_DIR = PROJECT_ROOT / 'lib'
@@ -47,16 +55,45 @@ RAW_LOGGING_ALLOWLIST = {
 import functools
 
 
-def _py_files(*dirs: Path):
-    """Yield all .py files under the given directories."""
-    for d in dirs:
-        if not d.exists():
+@functools.lru_cache(maxsize=None)
+def _git_tracked_py(reldir: str) -> tuple[str, ...]:
+    """Return every ``.py`` file under ``reldir`` (project-root-relative) known
+    to git — both committed and untracked-but-not-ignored.
+
+    CRITICAL: discovery MUST NOT use ``os.walk``. On a FUSE/NFS-mounted checkout
+    (the deployment target — see lib/log._writable_base_dir) a recursive
+    ``os.walk('lib')`` cannot even *count* the tree within 10s, so the whole
+    convention guard silently times out and STOPS ENFORCING the CLAUDE.md §2
+    logging discipline it exists to protect. ``git ls-files`` answers the same
+    question in ~15ms because it reads the index instead of stat-ing every
+    inode. ``--others --exclude-standard`` also picks up a brand-new file before
+    its first commit, so a fresh silent catch is caught on the turn it lands,
+    not one commit later. Returns posix relpaths.
+    """
+    root = str(PROJECT_ROOT)
+    names: set[str] = set()
+    for extra in ((), ('--others', '--exclude-standard')):
+        try:
+            out = subprocess.check_output(
+                ['git', 'ls-files', '-z', *extra, '--', reldir],
+                cwd=root, text=True)
+        except (OSError, subprocess.SubprocessError):
             continue
-        for root, subdirs, files in os.walk(d):
-            subdirs[:] = [s for s in subdirs if s != '__pycache__']
-            for f in files:
-                if f.endswith('.py'):
-                    yield Path(root) / f
+        for rel in out.split('\0'):
+            if rel.endswith('.py'):
+                names.add(rel)
+    return tuple(sorted(names))
+
+
+def _py_files(*dirs: Path):
+    """Yield all git-tracked .py files under the given directories as Paths."""
+    for d in dirs:
+        try:
+            reldir = str(d.relative_to(PROJECT_ROOT))
+        except ValueError:
+            reldir = d.name
+        for rel in _git_tracked_py(reldir):
+            yield PROJECT_ROOT / rel
 
 
 @functools.lru_cache(maxsize=None)
@@ -246,6 +283,21 @@ def _all_exc_exempt(exc_str: str) -> bool:
     return all(p in _EXEMPT_EXC_TYPES for p in parts)
 
 
+def _finding_sig(rel: str, f: dict) -> tuple[str, str, str]:
+    """Stable identity of a silent-catch finding: ``(relpath, qualname, exc)``.
+
+    Deliberately EXCLUDES the line number. The previous allowlist keyed on
+    ``(relpath, lineno)`` and silently rotted the moment a file was edited or
+    split into a package — e.g. the ``system_context.py:454`` instrumentation
+    swallow moved to ``system_context/_inject.py:134`` and the two
+    ``api_response.py`` safe_route entries slid from 340/348 to 357/365, so the
+    guard (had it run) would have re-flagged already-triaged code. Keying on the
+    enclosing function name + caught-type tuple survives edits, line shifts, and
+    the module→package renames this project does routinely.
+    """
+    return (rel, f['func'], f['exc'])
+
+
 class _AssignSilentCatchFinder(_ContextMixin):
     """Find except blocks whose body only assigns a fallback value (or
     pass/return/continue/break) with NO logging — the ``body = ''`` class of
@@ -298,57 +350,62 @@ class _FStringLoggerFinder(ast.NodeVisitor):
 class TestSilentCatches:
     """No except blocks should silently swallow exceptions without logging."""
 
-    # Known acceptable silent catches (file:line pairs) — these are truly
-    # harmless expected exceptions where logging would be pure noise.
-    # Each entry must have a comment explaining why it's acceptable.
-    ACCEPTABLE = {
-        # Platform detection — expected to fail on non-Linux
-        ('lib/compat.py', 83), ('lib/compat.py', 112), ('lib/compat.py', 139),
-        ('lib/compat.py', 145), ('lib/compat.py', 147), ('lib/compat.py', 172),
-        ('lib/compat.py', 182), ('lib/compat.py', 239),
-        # Encoding fallback loops — continue to try next encoding
-        ('lib/doc_parser.py', 724), ('lib/file_reader.py', 305),
-        # /proc comm read — process may exit between checks, harmless
-        ('lib/project_mod/tools.py', 1056),
-        # /proc walking — processes exit between checks, completely harmless
-        ('lib/project_mod/tools.py', 1059), ('lib/project_mod/tools.py', 1086),
-        # stdin pipe inode fstat — may fail if pipe not ready
-        ('lib/project_mod/tools.py', 1137),
-        # select on fds — fd may already be closed
-        ('lib/project_mod/tools.py', 1166),
-        # Pipe I/O in non-blocking mode — BlockingIOError is expected
-        ('lib/project_mod/tools.py', 1179), ('lib/project_mod/tools.py', 1188),
-        ('lib/project_mod/tools.py', 1194),
-        # proc.stdin.close() — expected OSError during cleanup
-        ('lib/project_mod/tools.py', 1220),
-        # proc.kill() — process may have already exited
-        ('lib/project_mod/tools.py', 1241),
-        # fd.close() in finally — harmless cleanup
-        ('lib/project_mod/tools.py', 1251),
-        # proc.wait TimeoutExpired — kill and wait in cleanup
-        ('lib/project_mod/tools.py', 1255),
-        # os.stat in snapshot loop — files may vanish during walk
-        ('lib/project_mod/tools.py', 810),
-        # bytes decode fallback — keep as raw bytes if not valid text
-        ('lib/project_mod/tools.py', 1598),
-        # grep count parsing — non-numeric lines in grep -c output
-        ('lib/project_mod/read_tools.py', 486),
-        # Cross-DC probe — FileNotFoundError is the EXPECTED outcome (measuring latency)
-        ('lib/cross_dc.py', 238),
-        # Cross-DC probe — OSError when mount point is inaccessible
-        ('lib/cross_dc.py', 241),
-        # Temp file cleanup on failure — file may already be gone
-        ('lib/project_mod/modifications.py', 36),
-        # project_error_tracker — standalone module, parse-or-skip in log/JSON parsing
-        ('lib/project_error_tracker.py', 257), ('lib/project_error_tracker.py', 292),
-        # doc_parser — date format fallback for xls cells
-        ('lib/doc_parser.py', 509),
-        # tool_display — URL parse fallback
-        ('lib/tasks_pkg/tool_display.py', 56),
+    # Known acceptable silent catches, keyed by the STABLE signature
+    # (relpath, enclosing-function qualname, caught-type-tuple) — NOT line
+    # number (see _finding_sig for why line-keyed allowlists rot). Each entry
+    # must have a comment explaining why it's acceptable.
+    ACCEPTABLE_SIGS = {
         # safe_route.wrapper: `except Exception: return _handle(e)` — _handle
         # routes to api_internal_error (auto-logs ERROR+traceback per §4.6.2)
         # or api_bad_request. Not visible through the local _handle indirection.
-        ('lib/api_response.py', 296), ('lib/api_response.py', 304),
+        ('lib/api_response.py', 'safe_route.wrapper', 'Exception'),
+        # _db_safe.wrapper: `except _db_errors: return _handle(e)` — _handle
+        # logs (warning for 'database is locked' 503, else error+traceback then
+        # re-raise). Not visible through the local _handle indirection.
+        ('routes/common.py', '_db_safe.wrapper', '_db_errors'),
+        ('routes/common.py', '_db_safe.async_wrapper', '_db_errors'),
+        # system_context._trace_fallback: the LAST-RESORT trace-helper swallow —
+        # deliberately silent so a failing logging backend can never propagate
+        # out of pure instrumentation and break the turn it only observes.
+        ('lib/tasks_pkg/system_context/_inject.py',
+         '_inject_system_contexts._trace_fallback', 'Exception'),
+        # terminal_state_log_summary: builds a diagnostic string that is ITSELF
+        # only ever passed to logger.error on a persist-failure branch; its own
+        # fallback returns a marker string rather than logging (logging here
+        # would recurse into the very failure it describes).
+        ('lib/tasks_pkg/manager/_persist.py',
+         'terminal_state_log_summary', 'Exception'),
+        # ── Single-statement (pass/return-only) narrow fallbacks that ALSO
+        #    trip this finder (a lone pass/return body qualifies as both a
+        #    "silent catch" and an "assignment-only" one). Full rationale on
+        #    the matching entries in TestAssignmentSilentCatches.ACCEPTABLE_SIGS:
+        #    each catches a DATA-shaped error over persisted JSON / a DB rev /
+        #    an optional stat and degrades to a safe default, with the real
+        #    outcome logged (or the row skipped) at the caller's boundary.
+        ('routes/chat.py', '_log_poll_task_id_mismatch', 'JSONDecodeError,TypeError'),
+        ('routes/conversations.py', '_row_rev', 'TypeError,ValueError'),
+        # RuntimeError = "no running event loop" in a sync context → skip spawn.
+        ('routes/conversations.py', '_maybe_backfill_narration_on_open', 'RuntimeError'),
+        # os.getsize transient stat error → treat row as present (never hide a
+        # real paper).
+        ('routes/paper.py', '_is_ghost_library_row', 'OSError'),
+        # lib/ single-statement (pass/return/continue) narrow fallbacks that
+        # also trip this finder — same DATA-shaped-except-with-safe-default
+        # rationale documented on the matching TestAssignmentSilentCatches sigs.
+        ('lib/database/_pg_backup/__init__.py', '<module>', 'AttributeError,TypeError'),
+        ('lib/database/messages_rows.py',
+         'load_message_window._seq', 'KeyError,IndexError,TypeError,ValueError'),
+        ('lib/llm_dispatch/big_prefix_gate.py',
+         'estimate_prefix_tokens', 'TypeError,ValueError'),
+        ('lib/self_update/_apply.py', '_apply_via_tarball._req_digest', 'Exception'),
+        ('lib/shutdown_marker.py', 'record_boot', 'TypeError,ValueError'),
+        ('lib/shutdown_marker.py', '_is_num', 'TypeError,ValueError'),
+        ('lib/tasks_pkg/killed_recovery.py',
+         'list_killed_turn_convs', 'JSONDecodeError,TypeError'),
+        ('lib/tasks_pkg/killed_recovery.py',
+         '_context_weight', 'TypeError,ValueError'),
+        ('lib/tasks_pkg/manager/_sync.py',
+         '_stamp_aborted_fragment_finish_reason', 'JSONDecodeError,TypeError'),
     }
 
     def test_no_silent_catches_in_lib(self):
@@ -369,7 +426,7 @@ class TestSilentCatches:
             finder = _SilentCatchFinder()
             finder.visit(tree)
             for f in finder.issues:
-                if (rel, f['lineno']) not in self.ACCEPTABLE:
+                if _finding_sig(rel, f) not in self.ACCEPTABLE_SIGS:
                     violations.append((rel, f))
         return violations
 
@@ -383,15 +440,93 @@ class TestAssignmentSilentCatches:
     exempt (see _ASSIGN_EXEMPT_EXC_TYPES).
     """
 
-    # Genuinely-legit assignment-only catches (file:line). Each needs a reason.
-    ACCEPTABLE = {
-        # safe_route._handle(e) routes to api_internal_error (auto-logs ERROR
-        # + traceback per CLAUDE.md §4.6.2) or api_bad_request — not silent.
-        ('lib/api_response.py', 296), ('lib/api_response.py', 304),
-        # entry_points().get(...) fallback selects the Python <3.10 API shape
-        # — control-flow, not an error swallow.
-        ('lib/llm_dispatch/provider_registry.py', 171),
-        ('lib/tools/registry.py', 594),
+    # Genuinely-legit assignment-only catches, keyed by the STABLE signature
+    # (relpath, enclosing-function qualname, caught-type-tuple) — NOT line
+    # number (see _finding_sig). Each entry has a reason. The bulk are narrow
+    # parse-fallbacks over PERSISTED/OPTIONAL JSON or env values: catching a
+    # data-shaped error (JSONDecodeError / TypeError / ValueError / KeyError /
+    # IndexError) and assigning a safe default ({} / [] / 0) is the documented
+    # degrade path, and the caller ALWAYS logs the real outcome at its own
+    # boundary (a warning on the outer handler, or the row simply skipped). A
+    # logger.debug on every one of these would be pure per-row noise (CLAUDE.md
+    # §2.2 "expected/harmless fallback → debug, optional").
+    ACCEPTABLE_SIGS = {
+        # ── Blessed broad catches shared with TestSilentCatches (see there). ──
+        ('lib/api_response.py', 'safe_route.wrapper', 'Exception'),
+        ('routes/common.py', '_db_safe.wrapper', '_db_errors'),
+        ('routes/common.py', '_db_safe.async_wrapper', '_db_errors'),
+        ('lib/tasks_pkg/system_context/_inject.py',
+         '_inject_system_contexts._trace_fallback', 'Exception'),
+        ('lib/memory/prefetch/_rerank.py',
+         '_run_with_deadline._worker', 'BaseException'),
+        ('lib/tasks_pkg/manager/_persist.py',
+         'terminal_state_log_summary', 'Exception'),
+        # ── entry_points().get(...) TypeError fallback → Python <3.10 API shape.
+        #    Control-flow (version branch), not an error swallow. Same idiom
+        #    across every plugin-discovery seam (tools / providers / schema /
+        #    flags / blueprints / task-runtimes).
+        ('lib/llm_dispatch/provider_registry.py',
+         'discover_provider_plugins', 'TypeError'),
+        ('lib/database/schema_registry.py', 'discover_schema_plugins', 'TypeError'),
+        ('lib/feature_registry.py', 'discover_flag_plugins', 'TypeError'),
+        ('routes/plugin_registry.py', 'discover_blueprint_plugins', 'TypeError'),
+        ('routes/plugin_registry.py', 'run_startup_hooks', 'TypeError'),
+        ('routes/plugin_registry.py', 'discover_task_runtime_plugins', 'TypeError'),
+        # ── Narrow parse-fallbacks over PERSISTED JSON — assign safe default,
+        #    outer caller logs / skips the row. Data-shaped except only. ──
+        ('lib/database/messages_rows.py',
+         'load_message_window._seq', 'KeyError,IndexError,TypeError,ValueError'),
+        ('lib/tasks_pkg/autopilot.py',
+         '_resolve_run_anchor_msgid', 'JSONDecodeError,TypeError'),
+        ('lib/tasks_pkg/cache_tracking/_persist.py',
+         'read_persisted_boundary', 'TypeError,KeyError,IndexError'),
+        ('lib/tasks_pkg/killed_recovery.py',
+         'list_killed_turn_convs', 'JSONDecodeError,TypeError'),
+        ('lib/tasks_pkg/killed_recovery.py',
+         '_context_weight', 'TypeError,ValueError'),
+        ('lib/tasks_pkg/killed_recovery.py',
+         '_redispatch_conv', 'JSONDecodeError,TypeError'),
+        ('lib/tasks_pkg/killed_recovery.py',
+         'restamp_killed_after_internal_fatal', 'JSONDecodeError,TypeError'),
+        ('lib/tasks_pkg/killed_recovery.py',
+         '_dispatch_one', 'JSONDecodeError,TypeError'),
+        ('lib/tasks_pkg/killed_recovery.py',
+         'run_killed_recovery', 'JSONDecodeError,TypeError'),
+        ('lib/tasks_pkg/manager/_recovery.py',
+         'recover_stale_tasks_on_startup', 'JSONDecodeError,TypeError'),
+        ('lib/tasks_pkg/manager/_sync.py',
+         '_reconcile_orphan_placeholder_on_settle', 'JSONDecodeError,TypeError'),
+        ('lib/tasks_pkg/manager/_sync.py',
+         '_stamp_aborted_fragment_finish_reason', 'JSONDecodeError,TypeError'),
+        ('routes/api_v1/conversations.py',
+         'create_branch', 'KeyError,TypeError,IndexError'),
+        ('routes/chat.py', '_log_poll_task_id_mismatch', 'JSONDecodeError,TypeError'),
+        ('routes/conversations.py', '_save_conv_blocking', 'JSONDecodeError,TypeError'),
+        ('routes/conversations.py', '_persist_reconcile',
+         'TypeError,ValueError,KeyError,IndexError'),
+        # ── Narrow parse of a DB `rev` int / window arg → 0 fallback. ──
+        ('routes/conversations.py', '_row_rev', 'TypeError,ValueError'),
+        ('routes/conversations.py', 'list_convs', 'TypeError,ValueError'),
+        ('routes/conversations.py', '_parse_window_args', 'TypeError,ValueError'),
+        # ── __module__-normalise / env-parse ValueError branches — assign a
+        #    default, no error to report. ──
+        ('lib/database/_pg_backup/__init__.py', '<module>', 'AttributeError,TypeError'),
+        ('lib/translate/segment_backfill.py', '<module>', 'ValueError,TypeError'),
+        ('lib/self_update/_apply.py', '_apply_via_tarball', 'TypeError,ValueError'),
+        ('lib/self_update/_apply.py', '_apply_via_tarball._req_digest', 'Exception'),
+        ('lib/shutdown_marker.py', 'record_boot', 'TypeError,ValueError'),
+        ('lib/shutdown_marker.py', '_is_num', 'TypeError,ValueError'),
+        ('lib/llm_dispatch/big_prefix_gate.py',
+         'estimate_prefix_tokens', 'TypeError,ValueError'),
+        ('lib/llm/anthropic_outbound/_sse.py', 'translate', 'TypeError,ValueError'),
+        ('lib/tasks_pkg/wire_fingerprint.py', 'system_fingerprint', 'TypeError,ValueError'),
+        # ── RuntimeError = "no running event loop" in a sync context → skip
+        #    the async spawn. Control-flow, not an error. ──
+        ('routes/conversations.py', '_maybe_backfill_narration_on_open', 'RuntimeError'),
+        ('routes/conversations.py', '_schedule_reconcile_persist', 'RuntimeError'),
+        # ── os.getsize on a listing row: transient stat error → treat as
+        #    present (never hide a real paper). Best-effort, caller logs. ──
+        ('routes/paper.py', '_is_ghost_library_row', 'OSError'),
     }
 
     def test_no_assignment_silent_catches_in_lib(self):
@@ -414,7 +549,7 @@ class TestAssignmentSilentCatches:
             finder = _AssignSilentCatchFinder()
             finder.visit(tree)
             for f in finder.issues:
-                if (rel, f['lineno']) not in self.ACCEPTABLE:
+                if _finding_sig(rel, f) not in self.ACCEPTABLE_SIGS:
                     violations.append((rel, f))
         return violations
 
@@ -460,7 +595,10 @@ class TestLoggerStandardization:
                 continue
             try:
                 source = path.read_text(encoding='utf-8')
-            except UnicodeDecodeError:
+            except (UnicodeDecodeError, OSError):
+                # OSError/FileNotFound: git ls-files can list a path a sibling
+                # has already deleted on disk (mid-refactor package split) —
+                # skip it rather than crash the whole guard.
                 continue
             if pattern.search(source):
                 violations.append(rel)
@@ -469,3 +607,86 @@ class TestLoggerStandardization:
             msg = f'{len(violations)} file(s) use raw logging.getLogger instead of lib.log.get_logger:\n'
             msg += '\n'.join(f'  {f}' for f in sorted(violations))
             pytest.fail(msg)
+
+
+class TestGuardStaysRunnable:
+    """Meta-guards on the guard itself.
+
+    The whole convention suite was silently INERT for a long time: its
+    discovery walked the tree with ``os.walk``, which cannot finish within the
+    test timeout on the FUSE/NFS deployment mount, so every check timed out and
+    enforced NOTHING (letting an allowlist of moved line numbers rot + a
+    backlog of untriaged findings accumulate). These meta-tests keep the guard
+    both FAST (git-index discovery) and SHARP (the finders still bite a genuine
+    new silent catch, and the allowlists carry no dead entries)."""
+
+    def test_discovery_is_git_indexed_not_oswalk(self):
+        """``_py_files`` MUST resolve via the git index, never ``os.walk``.
+
+        Regression pin for the timeout-to-inert bug: a recursive ``os.walk`` of
+        lib/ does not complete in time on FUSE. We assert (a) discovery returns
+        the lib tree essentially instantly, and (b) it returns a plausible file
+        count — so a future refactor that reintroduces ``os.walk`` (which would
+        hang here) fails loudly instead of silently disabling the guard."""
+        import time
+        t0 = time.monotonic()
+        files = _git_tracked_py('lib')
+        elapsed = time.monotonic() - t0
+        assert len(files) > 100, (
+            f'git-tracked lib/ discovery returned only {len(files)} files — '
+            'discovery is broken (is git available? is CWD the repo root?)')
+        assert elapsed < 5.0, (
+            f'lib/ discovery took {elapsed:.1f}s — it must be git-index-backed '
+            '(~ms), never os.walk (which times out on the FUSE mount and left '
+            'the whole guard silently inert). See _git_tracked_py.')
+
+    def test_finder_bites_a_fresh_silent_catch(self):
+        """The finders must still FLAG a genuine broad silent swallow.
+
+        Proves the stable-signature allowlist migration did not accidentally
+        neuter the check (e.g. by exempting a too-broad type). A synthetic
+        ``except Exception: pass`` over a data operation is caught by BOTH
+        finders and is NOT in either allowlist."""
+        src = (
+            'def risky():\n'
+            '    try:\n'
+            '        do_thing()\n'
+            '    except Exception:\n'
+            '        pass\n'
+        )
+        tree = ast.parse(src, 'synthetic_silent.py')
+        f1 = _SilentCatchFinder(); f1.visit(tree)
+        f2 = _AssignSilentCatchFinder(); f2.visit(tree)
+        assert f1.issues, 'the single-statement finder stopped biting a bare Exception:pass'
+        assert f2.issues, 'the assignment finder stopped biting a bare Exception:pass'
+        # And it would NOT be silently exempted by either allowlist.
+        sig = _finding_sig('synthetic_silent.py', f1.issues[0])
+        assert sig not in TestSilentCatches.ACCEPTABLE_SIGS
+        assert sig not in TestAssignmentSilentCatches.ACCEPTABLE_SIGS
+
+    def test_allowlists_have_no_dead_entries(self):
+        """Every ACCEPTABLE_SIGS entry must still correspond to a real finding.
+
+        A stale allowlist entry (its function renamed / its catch narrowed away)
+        is dead weight that masks nothing and misleads the next reader. This
+        recomputes the live finding signatures and asserts each allowlisted sig
+        is still present — turning a rotted entry into a visible failure instead
+        of silent cruft (the exact failure mode of the OLD line-keyed list)."""
+        live_single: set = set()
+        live_assign: set = set()
+        for directory in (LIB_DIR, ROUTES_DIR):
+            for rel, tree in _parsed_trees(directory):
+                f1 = _SilentCatchFinder(); f1.visit(tree)
+                for f in f1.issues:
+                    live_single.add(_finding_sig(rel, f))
+                f2 = _AssignSilentCatchFinder(); f2.visit(tree)
+                for f in f2.issues:
+                    live_assign.add(_finding_sig(rel, f))
+        dead_single = TestSilentCatches.ACCEPTABLE_SIGS - live_single
+        dead_assign = TestAssignmentSilentCatches.ACCEPTABLE_SIGS - live_assign
+        assert not dead_single, (
+            'TestSilentCatches.ACCEPTABLE_SIGS has dead entries (no matching '
+            f'live finding — remove or fix them): {sorted(dead_single)}')
+        assert not dead_assign, (
+            'TestAssignmentSilentCatches.ACCEPTABLE_SIGS has dead entries '
+            f'(no matching live finding — remove or fix them): {sorted(dead_assign)}')

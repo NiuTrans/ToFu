@@ -55,7 +55,134 @@
     unsub: null,          // push unsubscribe handle (Activity feed)
     panelUnsub: null,     // push unsubscribe handle (Charter/Board live refresh)
     cbTimer: null,        // debounce timer for Charter/Board refetch
+    tab: 'charter',       // active tab (charter|board|activity|peers)
+    tabsWired: false,     // one-shot tab click delegation guard
   };
+
+  // ── Tabs: show one surface at a time (full width) ──────────────
+  /** Switch the visible tab-panel. `name` ∈ charter|board|activity|peers|status. */
+  function _selectTab(name) {
+    var prev = _state.tab;
+    _state.tab = name;
+    var tabs = document.querySelectorAll('.project-brain-tabs .pb-tab');
+    for (var i = 0; i < tabs.length; i++) {
+      var on = tabs[i].getAttribute('data-pb-tab') === name;
+      tabs[i].classList.toggle('pb-tab-active', on);
+      tabs[i].setAttribute('aria-selected', on ? 'true' : 'false');
+    }
+    var panels = document.querySelectorAll('.project-brain-columns .pb-tab-panel');
+    for (var j = 0; j < panels.length; j++) {
+      panels[j].classList.toggle('pb-tab-panel-active',
+        panels[j].getAttribute('data-pb-panel') === name);
+    }
+    // The newly-active panel's content was rendered but not yet translated
+    // (only VISIBLE items are processed). Re-apply so its free-text content
+    // gets the overlay now that it's on screen (no-op when the toggle is off).
+    if (typeof ProjectBrainI18n !== 'undefined' && ProjectBrainI18n &&
+        typeof ProjectBrainI18n.applyAll === 'function') {
+      try { ProjectBrainI18n.applyAll(); } catch (_e) { /* best-effort */ }
+    }
+    _onTabSelected(name, prev);
+  }
+
+  /**
+   * Per-tab on-select hook. Decision #4 (fresh-on-tab-open): selecting INTO the
+   * Status tab must re-fetch, because switching tabs only toggles CSS
+   * visibility — the panel-open refresh could be minutes stale while siblings
+   * finished epics on another tab. Gated on switching INTO status (prev!==name)
+   * so an unrelated tab click never triggers it. Cheap: the backend staleness
+   * gate returns the cached snapshot with no LLM call on a quiescent project.
+   */
+  function _onTabSelected(name, prev) {
+    if (name === 'status' && prev !== 'status') {
+      _refreshStatus(_state.path || _displayedProjectPath());
+    }
+  }
+
+  /** Wire the tab bar once (click delegation). Idempotent. */
+  function _initTabs() {
+    if (_state.tabsWired) return;
+    var bar = document.getElementById('projectBrainTabs');
+    if (!bar) return;
+    bar.addEventListener('click', function (ev) {
+      var btn = ev.target && ev.target.closest ? ev.target.closest('.pb-tab') : null;
+      if (!btn) return;
+      var name = btn.getAttribute('data-pb-tab');
+      if (name) _selectTab(name);
+    });
+    _state.tabsWired = true;
+  }
+
+  /** Set a tab's count badge (hidden when 0 / falsy). */
+  function _setTabCount(id, n) {
+    var el = document.getElementById(id);
+    if (!el) return;
+    if (n && n > 0) { el.textContent = n > 99 ? '99+' : String(n); el.hidden = false; }
+    else { el.textContent = ''; el.hidden = true; }
+  }
+
+  // ── Long-text clamp-with-expand ─────────────────────────────────
+  // A committed decision / north-star / proposal can be 2000+ chars; showing
+  // it in full makes the surface an unreadable wall (the reported bug). Wrap
+  // long text in a collapsed .pb-clamp with a Show more/less toggle. Short
+  // text (< threshold) is returned as-is so we don't add chrome needlessly.
+  var _CLAMP_THRESHOLD = 240;
+
+  /** HTML for a clamp block. `innerHtml` is already-escaped/safe markup.
+   *  The content element carries `data-pb-src="<rawText>"` — the ORIGINAL,
+   *  authoritative text. The content-translation overlay (project-brain-i18n)
+   *  lays a translation OVER this element's innerHTML while the source stays
+   *  retrievable from the attribute; it never mutates rawText, and the
+   *  commit/reject controls read their own data-text (never this). */
+  function _clampBlock(innerHtml, rawText) {
+    var srcAttr = rawText ? (' data-pb-src="' + _esc(rawText) + '"') : '';
+    if ((rawText || '').length <= _CLAMP_THRESHOLD) {
+      return '<div class="pb-clamp-inner"' + srcAttr + '>' + innerHtml + '</div>';
+    }
+    var more = _esc(_t('projectBrain.showMore', 'Show more'));
+    return '<div class="pb-clamp-wrap">' +
+      '<div class="pb-clamp"' + srcAttr + '>' + innerHtml + '</div>' +
+      '<button type="button" class="pb-clamp-toggle" data-more="' + more +
+      '" data-less="' + _esc(_t('projectBrain.showLess', 'Show less')) + '">' +
+      ((typeof Icon === 'function') ? Icon('chevronDown', 12) : '') +
+      '<span>' + more + '</span></button>' +
+      '</div>';
+  }
+
+  /** Lay the content-translation overlay over a freshly-rendered subtree.
+   *  No-op when the overlay module is absent or the toggle is off — the
+   *  originals painted by the render fns stay on screen (source of truth). */
+  function _applyContentI18n(el) {
+    if (!el || typeof ProjectBrainI18n === 'undefined' || !ProjectBrainI18n ||
+        typeof ProjectBrainI18n.apply !== 'function') return;
+    try { ProjectBrainI18n.apply(el); }
+    catch (_e) { /* overlay is best-effort; never break a render */ }
+  }
+
+  /** Delegate clamp-toggle clicks within a rendered container. */
+  function _wireClampToggles(el) {
+    if (!el) return;
+    var btns = el.querySelectorAll('.pb-clamp-toggle');
+    for (var i = 0; i < btns.length; i++) {
+      btns[i].addEventListener('click', function (ev) {
+        var btn = ev.currentTarget;
+        var clamp = btn.parentNode.querySelector('.pb-clamp');
+        if (!clamp) return;
+        var open = clamp.classList.toggle('pb-clamp-open');
+        btn.classList.toggle('pb-clamp-toggle-open', open);
+        var lbl = btn.querySelector('span');
+        if (lbl) lbl.textContent = open
+          ? (btn.getAttribute('data-less') || 'Show less')
+          : (btn.getAttribute('data-more') || 'Show more');
+        // Lazy-on-expand: translate the now-visible long text (no-op when the
+        // content-translation overlay is off / already-target / cached).
+        if (open && typeof ProjectBrainI18n !== 'undefined' &&
+            ProjectBrainI18n && typeof ProjectBrainI18n.apply === 'function') {
+          ProjectBrainI18n.apply(clamp);
+        }
+      });
+    }
+  }
 
   /**
    * sha1(path)[:16] — MUST match the backend project_channel_key. We use
@@ -112,6 +239,153 @@
   }
 
   function _activityListEl() { return document.getElementById('projectBrainActivityList'); }
+
+  // ── Hover preview for opaque conversation IDs ────────────────────
+  // Every conv reference in the panel (activity chip, board owner chip,
+  // influence row, peer roster card, peer-message thread) carries a
+  // [data-conv-id]. On hover we resolve it to {title, firstUserMessage} via a
+  // tiny backend preview endpoint and float a card next to the cursor, so the
+  // opaque short id reads as "the first thing that conversation asked". The
+  // fetch is cached (a conv's opening turn doesn't change) and shared behind a
+  // single delegated listener on the overlay so it also covers chips that were
+  // re-rendered after the listener was bound.
+  var _convPreviewCache = {};     // convId → {title, firstUserMessage,...} | Promise
+  var _previewEl = null;          // the single floating card, reused
+  var _previewHoverId = '';       // convId currently hovered (guards stale async)
+  var _previewTimer = null;       // hover-intent debounce
+
+  /** Fetch (and cache) a conversation preview. Returns a Promise<preview|null>. */
+  function _fetchConvPreview(convId) {
+    if (!convId) return Promise.resolve(null);
+    var cached = _convPreviewCache[convId];
+    if (cached && typeof cached.then !== 'function') return Promise.resolve(cached);
+    if (cached && typeof cached.then === 'function') return cached;
+    var api = (typeof Api !== 'undefined' && Api.conversations) ? Api.conversations : null;
+    if (!api || typeof api.preview !== 'function') return Promise.resolve(null);
+    var p = Promise.resolve(api.preview(convId)).then(function (res) {
+      // api_ok wraps the payload at top level; keep only the fields we render.
+      var rec = res ? {
+        id: res.id || convId,
+        title: res.title || '',
+        firstUserMessage: res.firstUserMessage || '',
+        msgCount: res.msgCount || 0,
+      } : null;
+      _convPreviewCache[convId] = rec;   // cache even null (avoid refetch storms)
+      return rec;
+    }).catch(function (e) {
+      if (typeof console !== 'undefined') console.warn('[ProjectBrain] conv preview failed', e);
+      _convPreviewCache[convId] = null;
+      return null;
+    });
+    _convPreviewCache[convId] = p;
+    return p;
+  }
+
+  /**
+   * Build the inner HTML of a hover-preview card from a preview record. Pure +
+   * testable. Shows the conversation title (or the short id when untitled) and
+   * the opening question; an explicit "no messages yet" line for empty convs.
+   */
+  function buildConvPreviewCard(preview, convId) {
+    var short = String(convId || (preview && preview.id) || '').slice(0, 8);
+    var title = (preview && preview.title) ||
+      _t('projectBrain.previewUntitled', 'Untitled') ;
+    var first = preview && preview.firstUserMessage;
+    var head = '<div class="pb-preview-title">' + _esc(title) + '</div>';
+    var idLine = '<div class="pb-preview-id">' + _esc(short) + '</div>';
+    var bodyHtml;
+    if (first) {
+      bodyHtml = '<div class="pb-preview-label">' +
+        _esc(_t('projectBrain.previewFirstQuestion', 'First question')) + '</div>' +
+        '<div class="pb-preview-body">' + _esc(first) + '</div>';
+    } else {
+      bodyHtml = '<div class="pb-preview-empty">' +
+        _esc(_t('projectBrain.previewEmpty', 'No messages yet')) + '</div>';
+    }
+    return head + idLine + bodyHtml;
+  }
+
+  function _ensurePreviewEl() {
+    if (_previewEl) return _previewEl;
+    var el = document.createElement('div');
+    el.className = 'pb-conv-preview';
+    el.setAttribute('role', 'tooltip');
+    el.hidden = true;
+    document.body.appendChild(el);
+    _previewEl = el;
+    return el;
+  }
+
+  /** Position the (already-populated) preview card near an anchor element. */
+  function _positionPreview(anchor) {
+    var el = _previewEl;
+    if (!el || !anchor) return;
+    el.hidden = false;
+    var M = 8, GAP = 8;
+    var r = anchor.getBoundingClientRect();
+    var pw = el.offsetWidth || 300;
+    var ph = el.offsetHeight || 120;
+    var left = Math.round(r.left);
+    var maxLeft = window.innerWidth - pw - M;
+    if (left > maxLeft) left = Math.max(M, maxLeft);
+    if (left < M) left = M;
+    // Prefer above; fall back below when there's no room.
+    var top;
+    if (r.top - GAP - ph >= M) top = Math.round(r.top - ph - GAP);
+    else top = Math.round(r.bottom + GAP);
+    el.style.left = left + 'px';
+    el.style.top = top + 'px';
+  }
+
+  function _hideConvPreview() {
+    if (_previewTimer) { clearTimeout(_previewTimer); _previewTimer = null; }
+    _previewHoverId = '';
+    if (_previewEl) { _previewEl.hidden = true; _previewEl.innerHTML = ''; }
+  }
+
+  /** Show the preview for `anchor`'s conv id (fetch + render + position). */
+  function _showConvPreview(anchor) {
+    var convId = anchor && anchor.getAttribute ? anchor.getAttribute('data-conv-id') : '';
+    if (!convId) return;
+    _previewHoverId = convId;
+    var el = _ensurePreviewEl();
+    // Loading state so the card appears instantly on a cold fetch.
+    el.innerHTML = '<div class="pb-preview-loading">' +
+      _esc(_t('projectBrain.previewLoading', 'Loading…')) + '</div>';
+    _positionPreview(anchor);
+    _fetchConvPreview(convId).then(function (rec) {
+      // A different chip may be hovered by the time the fetch resolves.
+      if (_previewHoverId !== convId) return;
+      el.innerHTML = buildConvPreviewCard(rec, convId);
+      _positionPreview(anchor);
+    });
+  }
+
+  /** Delegated hover handler: find the nearest [data-conv-id] under the cursor. */
+  function _onOverlayHover(ev) {
+    var t2 = ev.target;
+    var anchor = (t2 && t2.closest) ? t2.closest('[data-conv-id]') : null;
+    if (!anchor || !anchor.getAttribute('data-conv-id')) { _hideConvPreview(); return; }
+    var convId = anchor.getAttribute('data-conv-id');
+    if (convId === _previewHoverId && _previewEl && !_previewEl.hidden) return;
+    if (_previewTimer) clearTimeout(_previewTimer);
+    _previewTimer = setTimeout(function () { _showConvPreview(anchor); }, 140);
+  }
+
+  /** Wire the delegated hover-preview on the overlay once. Idempotent. */
+  function _initConvPreview() {
+    var overlay = document.getElementById('projectBrainOverlay');
+    if (!overlay || overlay._pbPreviewWired) return;
+    overlay.addEventListener('mouseover', _onOverlayHover);
+    overlay.addEventListener('mouseout', function (ev) {
+      // Only hide when leaving the anchor entirely (not moving within it).
+      var to = ev.relatedTarget;
+      var anchor = (ev.target && ev.target.closest) ? ev.target.closest('[data-conv-id]') : null;
+      if (anchor && to && anchor.contains && anchor.contains(to)) return;
+      _hideConvPreview();
+    });
+    overlay._pbPreviewWired = true;
+  }
 
   /** Compact relative time from an epoch-ms `ts` (localized). '' when absent. */
   function _relTime(ts) {
@@ -195,7 +469,12 @@
 
     var summary = document.createElement('div');
     summary.className = 'pb-activity-summary';
-    summary.textContent = ev.summary || kindLabel;
+    // Prefer the UNtruncated text (payload.summary_full, present only when the
+    // display summary was capped at write time) so a long summary expands to
+    // its full self instead of a dead mid-word fragment. Short summaries have
+    // no summary_full → render as-is with no clamp chrome.
+    var fullText = (ev.payload && ev.payload.summary_full) || ev.summary || kindLabel;
+    summary.innerHTML = _clampBlock(_esc(fullText), fullText);
     body.appendChild(summary);
 
     // Timestamp row — a legend without WHEN is only half a fix. Relative text
@@ -251,6 +530,10 @@
       // newest on top
       if (list.firstChild) list.insertBefore(row, list.firstChild);
       else list.appendChild(row);
+      // Wire the summary's Show more/less toggle (present only for a clamped,
+      // over-threshold summary — short rows have no toggle to bind).
+      _wireClampToggles(row);
+      if (!fromBackfill) _applyContentI18n(row);
       var empty = list.querySelector('.pb-activity-empty');
       if (empty) empty.remove();
     }
@@ -290,6 +573,8 @@
       // closeFeed() wiped the list innerHTML; if the backfill produced no rows
       // the column would otherwise be a blank void — restore the placeholder.
       _ensureActivityEmptyState();
+      var _al = _activityListEl();
+      if (_al) _applyContentI18n(_al);
     }).catch(function (e) {
       if (typeof console !== 'undefined') console.warn('[ProjectBrain] backfill failed', e);
       _ensureActivityEmptyState();
@@ -350,16 +635,28 @@
   }
 
   function _esc(s) {
-    if (typeof escapeHtml === 'function') return escapeHtml(String(s == null ? '' : s));
-    return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) {
-      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
-    });
+    return escapeHtml(String(s == null ? '' : s));
   }
 
   // ── Charter column ──────────────────────────────────────────────
   // Renders the north-star content + committed decisions, plus PENDING
   // proposed_decision events (pulled from the live feed state) each with a
   // human commit/reject control — the human gate for commit_charter.
+  //
+  // The committed north-star + each decision carry HUMAN edit/delete controls
+  // (backend-authoritative: every mutation hits the optimistic-locked
+  // Api.project.charter* route with the current `version`, then refreshCharter
+  // re-renders from the server — never a local DOM mutation). The editor reads
+  // the ORIGINAL text from `data-pb-src` (never the translation overlay), so an
+  // active content-translation view can never leak into a saved decision.
+
+  /** Small icon+label action button for a charter edit/delete affordance. */
+  function _charterActBtn(cls, glyph, labelKey, fallback, extraAttrs) {
+    return '<button type="button" class="pb-charter-act ' + cls + '" title="' +
+      _esc(_t(labelKey, fallback)) + '"' + (extraAttrs || '') + '>' +
+      ((typeof Icon === 'function') ? Icon(glyph, 12) : '') + '</button>';
+  }
+
   function renderCharter(rec, pendingProposals) {
     var el = document.getElementById('projectBrainCharterBody');
     if (!el) return;
@@ -368,13 +665,22 @@
     var parts = [];
     var content = (rec && rec.content) || '';
     var decisions = (rec && rec.decisions) || [];
+    var charterExists = !!(rec && rec.exists) || !!content || !!decisions.length;
     if (!content && !decisions.length && !(pendingProposals || []).length) {
       el.innerHTML = '<div class="pb-charter-empty">' +
         _esc(_t('projectBrain.charterEmpty', 'No charter yet')) + '</div>';
+      _setTabCount('pbTabCountCharter', 0);
       return;
     }
     if (content) {
-      parts.push('<div class="pb-charter-northstar">' + _esc(content) + '</div>');
+      parts.push('<div class="pb-charter-northstar-row">' +
+        '<div class="pb-charter-northstar" data-charter-northstar="1">' +
+        _clampBlock(_esc(content), content) + '</div>' +
+        '<div class="pb-charter-row-actions">' +
+        _charterActBtn('pb-charter-edit-northstar', 'edit',
+          'projectBrain.editNorthStar', 'Edit north star',
+          ' data-ver="' + version + '"') +
+        '</div></div>');
     }
     if (decisions.length) {
       parts.push('<div class="pb-charter-section">' +
@@ -383,7 +689,16 @@
       for (var i = 0; i < decisions.length; i++) {
         var d = decisions[i];
         var txt = (d && typeof d === 'object') ? (d.text || '') : String(d);
-        parts.push('<li>' + _esc(txt) + '</li>');
+        parts.push('<li data-decision-idx="' + i + '">' +
+          '<div class="pb-decision-text">' + _clampBlock(_esc(txt), txt) + '</div>' +
+          '<div class="pb-charter-row-actions">' +
+          _charterActBtn('pb-decision-edit', 'edit',
+            'projectBrain.editDecision', 'Edit',
+            ' data-idx="' + i + '" data-ver="' + version + '"') +
+          _charterActBtn('pb-decision-delete', 'trash',
+            'projectBrain.deleteDecision', 'Delete',
+            ' data-idx="' + i + '" data-ver="' + version + '"') +
+          '</div></li>');
       }
       parts.push('</ul>');
     }
@@ -402,7 +717,7 @@
         parts.push(
           '<div class="pb-proposal" data-event-id="' + _esc(p.event_id) +
           '" data-proposal-id="' + _esc(pid) + '">' +
-          '<div class="pb-proposal-text">' + _esc(ptext) + '</div>' +
+          '<div class="pb-proposal-text">' + _clampBlock(_esc(ptext), ptext) + '</div>' +
           '<div class="pb-proposal-actions">' +
           '<button type="button" class="pb-proposal-commit" data-text="' + _esc(ptext) +
           '" data-ver="' + version + '" data-proposal-id="' + _esc(pid) + '">' +
@@ -412,7 +727,21 @@
           '</div></div>');
       }
     }
+    // Footer: delete the WHOLE charter (only when one exists). Two-step
+    // confirm inline (no window.confirm) so an accidental click is recoverable.
+    if (charterExists) {
+      parts.push('<div class="pb-charter-footer">' +
+        '<button type="button" class="pb-charter-delete-all" data-ver="' + version + '">' +
+        ((typeof Icon === 'function') ? Icon('trash', 12) : '') +
+        '<span>' + _esc(_t('projectBrain.deleteCharter', 'Delete charter')) + '</span>' +
+        '</button></div>');
+    }
     el.innerHTML = parts.join('');
+    _wireClampToggles(el);
+    _applyContentI18n(el);
+    // Charter tab badge = pending proposals awaiting the human (the actionable
+    // count), not the committed-decision total.
+    _setTabCount('pbTabCountCharter', props.length);
     // Wire commit/reject — commit calls the human-gated commit route, then
     // re-renders so the decision moves from "proposed" to "committed".
     var commitBtns = el.querySelectorAll('.pb-proposal-commit');
@@ -433,6 +762,163 @@
         _dismissProposal(path, pid, btn);
       });
     }
+    _wireCharterEditControls(el, path);
+  }
+
+  /** The ORIGINAL (authoritative) text of a rendered charter block — always
+   *  data-pb-src (the source of truth), never the translation overlay that may
+   *  be laid over innerHTML. Falls back to textContent when unstamped. */
+  function _charterSrcText(rowEl, srcSelector) {
+    var node = rowEl.querySelector(srcSelector + ' [data-pb-src]') ||
+               rowEl.querySelector(srcSelector);
+    if (!node) return '';
+    return node.getAttribute('data-pb-src') != null
+      ? node.getAttribute('data-pb-src')
+      : (node.textContent || '');
+  }
+
+  /** Replace a charter row's body with an inline textarea editor (Save /
+   *  Cancel). `onSave(newText)` performs the backend mutation. */
+  function _openInlineEditor(rowEl, bodySelector, originalText, onSave) {
+    if (!rowEl || rowEl.querySelector('.pb-inline-editor')) return;
+    var body = rowEl.querySelector(bodySelector);
+    var actions = rowEl.querySelector('.pb-charter-row-actions');
+    if (body) body.style.display = 'none';
+    if (actions) actions.style.display = 'none';
+    var ed = document.createElement('div');
+    ed.className = 'pb-inline-editor';
+    var ta = document.createElement('textarea');
+    ta.className = 'pb-inline-editor-input';
+    ta.value = originalText;
+    var btnRow = document.createElement('div');
+    btnRow.className = 'pb-inline-editor-actions';
+    var save = document.createElement('button');
+    save.type = 'button'; save.className = 'pb-inline-save';
+    save.textContent = _t('projectBrain.save', 'Save');
+    var cancel = document.createElement('button');
+    cancel.type = 'button'; cancel.className = 'pb-inline-cancel';
+    cancel.textContent = _t('projectBrain.cancel', 'Cancel');
+    btnRow.appendChild(save); btnRow.appendChild(cancel);
+    ed.appendChild(ta); ed.appendChild(btnRow);
+    rowEl.appendChild(ed);
+    try { ta.focus(); } catch (_e) { /* jsdom */ }
+    function close() {
+      if (ed.parentNode) ed.parentNode.removeChild(ed);
+      if (body) body.style.display = '';
+      if (actions) actions.style.display = '';
+    }
+    cancel.addEventListener('click', close);
+    save.addEventListener('click', function () {
+      var next = (ta.value || '').trim();
+      if (!next) { close(); return; }
+      save.disabled = true; cancel.disabled = true;
+      save.textContent = _t('projectBrain.saving', 'Saving…');
+      Promise.resolve(onSave(next)).then(function () {
+        // refreshCharter re-renders the whole panel from the server, which
+        // removes this editor implicitly; nothing more to do here.
+      }).catch(function (e) {
+        if (typeof console !== 'undefined') console.warn('[ProjectBrain] charter save failed', e);
+        save.disabled = false; cancel.disabled = false;
+        save.textContent = _t('projectBrain.save', 'Save');
+      });
+    });
+  }
+
+  /** Wire the north-star edit, per-decision edit/delete, and delete-charter
+   *  controls. All mutations go through the optimistic-locked routes carrying
+   *  the rendered `version`, then refreshCharter. */
+  function _wireCharterEditControls(el, path) {
+    var api = (typeof Api !== 'undefined' && Api.project) ? Api.project : null;
+    // North-star edit → commitCharter(content=...).
+    var nsBtn = el.querySelector('.pb-charter-edit-northstar');
+    if (nsBtn) {
+      nsBtn.addEventListener('click', function (ev) {
+        var ver = parseInt(ev.currentTarget.getAttribute('data-ver') || '0', 10);
+        var row = ev.currentTarget.closest('.pb-charter-northstar-row');
+        if (!row || !api) return;
+        var original = _charterSrcText(row, '.pb-charter-northstar');
+        _openInlineEditor(row, '.pb-charter-northstar', original, function (next) {
+          return Promise.resolve(api.commitCharter(path, {
+            content: next, expected_version: ver,
+          })).then(function () { refreshCharter(path); });
+        });
+      });
+    }
+    // Per-decision edit.
+    var editBtns = el.querySelectorAll('.pb-decision-edit');
+    for (var e = 0; e < editBtns.length; e++) {
+      editBtns[e].addEventListener('click', function (ev) {
+        var btn = ev.currentTarget;
+        var idx = parseInt(btn.getAttribute('data-idx') || '-1', 10);
+        var ver = parseInt(btn.getAttribute('data-ver') || '0', 10);
+        var row = btn.closest('li[data-decision-idx]');
+        if (!row || !api || typeof api.updateDecision !== 'function') return;
+        var original = _charterSrcText(row, '.pb-decision-text');
+        _openInlineEditor(row, '.pb-decision-text', original, function (next) {
+          return Promise.resolve(api.updateDecision(path, idx, next, {
+            expected_version: ver,
+          })).then(function () { refreshCharter(path); });
+        });
+      });
+    }
+    // Per-decision delete (two-step inline confirm).
+    var delBtns = el.querySelectorAll('.pb-decision-delete');
+    for (var dbi = 0; dbi < delBtns.length; dbi++) {
+      delBtns[dbi].addEventListener('click', function (ev) {
+        var btn = ev.currentTarget;
+        var idx = parseInt(btn.getAttribute('data-idx') || '-1', 10);
+        var ver = parseInt(btn.getAttribute('data-ver') || '0', 10);
+        _confirmInline(btn, function () {
+          if (!api || typeof api.deleteDecision !== 'function') return;
+          Promise.resolve(api.deleteDecision(path, idx, { expected_version: ver }))
+            .then(function () { refreshCharter(path); })
+            .catch(function (er) {
+              if (typeof console !== 'undefined') console.warn('[ProjectBrain] decision delete failed', er);
+            });
+        });
+      });
+    }
+    // Delete the whole charter (two-step inline confirm).
+    var delAll = el.querySelector('.pb-charter-delete-all');
+    if (delAll) {
+      delAll.addEventListener('click', function (ev) {
+        var btn = ev.currentTarget;
+        var ver = parseInt(btn.getAttribute('data-ver') || '0', 10);
+        _confirmInline(btn, function () {
+          if (!api || typeof api.deleteCharter !== 'function') return;
+          Promise.resolve(api.deleteCharter(path, { expected_version: ver }))
+            .then(function () { refreshCharter(path); })
+            .catch(function (er) {
+              if (typeof console !== 'undefined') console.warn('[ProjectBrain] charter delete failed', er);
+            });
+        });
+      });
+    }
+  }
+
+  /** Two-step inline confirm: first click swaps the button label to a
+   *  "Confirm?" affordance; a second click within 4s runs `onConfirm`. Avoids
+   *  window.confirm (blocked/ugly in the overlay) while keeping a destructive
+   *  action recoverable. */
+  function _confirmInline(btn, onConfirm) {
+    if (btn._pbConfirmArmed) {
+      btn._pbConfirmArmed = false;
+      if (btn._pbConfirmTimer) { clearTimeout(btn._pbConfirmTimer); btn._pbConfirmTimer = null; }
+      onConfirm();
+      return;
+    }
+    btn._pbConfirmArmed = true;
+    btn.classList.add('pb-confirm-armed');
+    var label = btn.querySelector('span');
+    var prev = label ? label.textContent : null;
+    if (label) label.textContent = _t('projectBrain.confirmDelete', 'Confirm?');
+    else { btn._pbPrevTitle = btn.title; btn.title = _t('projectBrain.confirmDelete', 'Confirm?'); }
+    btn._pbConfirmTimer = setTimeout(function () {
+      btn._pbConfirmArmed = false;
+      btn.classList.remove('pb-confirm-armed');
+      if (label && prev != null) label.textContent = prev;
+      else if (btn._pbPrevTitle != null) { btn.title = btn._pbPrevTitle; btn._pbPrevTitle = null; }
+    }, 4000);
   }
 
   function _commitCharterDecision(path, text, expectedVersion, proposalId, btn) {
@@ -534,9 +1020,24 @@
         + '">' + ((typeof Icon === 'function') ? Icon('rocket', 11) : '')
         + '<span>' + _esc(_t('projectBrain.dispatched', 'auto')) + '</span></span>'
       : '';
+    // "auto-starts" hint — the epic is genuinely pickable RIGHT NOW (deps done,
+    // not on a cooldown, not live-claimed, has a routing target). The backend
+    // stamps `dispatchable` (never inferred client-side); the frontend just
+    // renders that the ~30s heartbeat sweep will pick it up, and to which
+    // conversation. This answers "why is nothing happening — will it ever fire".
+    var pending = (t.status === 'open' && t.dispatchable)
+      ? '<span class="pb-board-badge pb-board-badge-pending" title="'
+        + _esc(_t('projectBrain.autoStartTitle',
+                  'The project brain heartbeat (~30s) will pick this up automatically'))
+        + (t.dispatch_target ? ' → ' + _esc(t.dispatch_target) : '')
+        + '">' + ((typeof Icon === 'function') ? Icon('clock', 11) : '')
+        + '<span>' + _esc(_t('projectBrain.autoStart', 'auto-starts ~30s')) + '</span></span>'
+      : '';
     // Human lifecycle controls, gated by status:
-    //   • complete + block on open|claimed (lifecycle of live work)
+    //   • complete + block on open|claimed (live-work lifecycle)
     //   • reopen on claimed (break a stuck live claim) AND done (revive)
+    // (There is no park/shelve control — the project pushes every open epic
+    //  forward at full speed rather than holding work pending a human decision.)
     var acts = [];
     if (t.status === 'open' || t.status === 'claimed') {
       acts.push(_boardActionBtn('complete', 'check', 'projectBrain.actComplete', 'Done'));
@@ -547,11 +1048,65 @@
     }
     var actionsRow = acts.length
       ? '<div class="pb-board-card-actions">' + acts.join('') + '</div>' : '';
+    // A board epic title can be a multi-sentence design description (stored
+    // full, up to 2000 chars). Render it through the clamp so a long title
+    // collapses with a Show more/less toggle instead of a wall of text — the
+    // full text is always the expandable source (never a clipped fragment).
+    var titleHtml = _clampBlock(_esc(t.title), t.title || '');
     return '<div class="pb-board-card pb-board-' + _esc(t.status) + '" data-task-id="' +
       _esc(t.id) + '">' +
-      '<div class="pb-board-title">' + _esc(t.title) + '</div>' +
-      '<div class="pb-board-card-meta">' + ownerChip + badge + '</div>' +
+      '<div class="pb-board-title">' + titleHtml + '</div>' +
+      '<div class="pb-board-card-meta">' + ownerChip + badge + pending + '</div>' +
       actionsRow + '</div>';
+  }
+
+  /** Render one path-LEASE row for the Held lane. A lease reserves a
+   *  path/subsystem ("hold off editing"); it is NOT an epic, so it shows the
+   *  held path + the holder conversation, and offers NO epic lifecycle
+   *  actions (complete/block/park). The reservation auto-expires or is
+   *  released by its holder — the operator does not manage it here. */
+  function _heldCard(t) {
+    var owner = t.owner_conv_id || '';
+    var ownerChip = owner
+      ? '<button type="button" class="pb-conv-chip" data-conv-id="' + _esc(owner) + '">' +
+        _esc(owner) + '</button>'
+      : '';
+    var titleHtml = _clampBlock(_esc(t.title), t.title || '');
+    return '<div class="pb-board-card pb-board-held" data-task-id="' +
+      _esc(t.id) + '">' +
+      '<div class="pb-board-title">' + titleHtml + '</div>' +
+      '<div class="pb-board-card-meta">' +
+      '<span class="pb-board-held-by">' +
+      _esc(_t('projectBrain.heldBy', 'held by')) + '</span> ' + ownerChip +
+      '</div></div>';
+  }
+
+  /** Render one BLOCKED epic card. The epic hit a genuine external gate and is
+   *  on a self-expiring cooldown; the card shows WHY (block reason, which
+   *  carries the [human-gated]/[sibling] class tag) and the approximate
+   *  retry-in minutes — the answer to "why is nothing happening" that was
+   *  invisible before. It still offers reopen (human forces an immediate retry,
+   *  resetting the cooldown) and complete. */
+  function _blockedCard(t) {
+    var mins = Math.max(0, Math.round((Number(t.blocked_until || 0) - Date.now()) / 60000));
+    var reason = (t.block_reason || '').trim();
+    var cnt = Number(t.block_count || 0);
+    var meta = _esc(_t('projectBrain.blockedRetry', 'auto-retry in') + ' ~' + mins + 'm')
+      + (cnt ? ' · ' + _esc('' + cnt + '×') : '');
+    var reasonHtml = reason
+      ? '<div class="pb-board-block-reason">' + _clampBlock(_esc(reason), reason) + '</div>'
+      : '';
+    var acts = [
+      _boardActionBtn('reopen', 'refresh', 'projectBrain.actReopen', 'Reopen'),
+      _boardActionBtn('complete', 'check', 'projectBrain.actComplete', 'Done'),
+    ];
+    var titleHtml = _clampBlock(_esc(t.title), t.title || '');
+    return '<div class="pb-board-card pb-board-blocked" data-task-id="' +
+      _esc(t.id) + '">' +
+      '<div class="pb-board-title">' + titleHtml + '</div>' +
+      reasonHtml +
+      '<div class="pb-board-card-meta pb-board-block-meta">' + meta + '</div>' +
+      '<div class="pb-board-card-actions">' + acts.join('') + '</div></div>';
   }
 
   /** Dispatch a per-card human mutation → backend → refreshBoard (no local
@@ -578,7 +1133,6 @@
     Promise.resolve(call).then(function () {
       refreshBoard(path);
       refreshInfluence(path);
-      refreshConvInfluenceBar();
     }).catch(function (e) {
       if (typeof console !== 'undefined') console.warn('[ProjectBrain] board ' + act + ' failed', e);
       if (btn) btn.disabled = false;
@@ -610,13 +1164,36 @@
     if (!tasks.length) {
       el.innerHTML = '<div class="pb-board-empty">' +
         _esc(_t('projectBrain.boardEmpty', 'Board is empty')) + '</div>';
+      _setTabCount('pbTabCountBoard', 0);
       return;
     }
-    var cols = { open: [], claimed: [], done: [] };
+    var cols = { open: [], claimed: [], done: [], blocked: [] };
+    var held = [];
+    var _nowMs = Date.now();
     for (var i = 0; i < tasks.length; i++) {
       var t = tasks[i];
+      // A path-LEASE (kind='lease') is a durational resource reservation, not
+      // an epic. A LIVE lease carries status='claimed' and goes to a dedicated
+      // Held lane — never the Claimed
+      // epic lane (it isn't work being advanced) nor the attention badge. An
+      // EXPIRED lease is downgraded by read_board to status:'open'/blank-owner;
+      // it holds nothing, so it is DROPPED (not rendered as an ownerless ghost)
+      // — matching render_board_block's Held filter (kind=='lease' AND
+      // status=='claimed').
+      if (t.kind === 'lease') { if (t.status === 'claimed') held.push(t); continue; }
+      // An epic on a LIVE block cooldown (stored status='open' but
+      // blocked_until in the future) goes to its own Blocked lane — NOT the
+      // Open lane (where it would read as "claim me"), mirroring the backend
+      // render_board_block partition. Once the cooldown lapses (blocked_until
+      // <= now) it falls back to Open automatically.
+      if (t.status === 'open' && Number(t.blocked_until || 0) > _nowMs) {
+        cols.blocked.push(t); continue;
+      }
       (cols[t.status] || cols.open).push(t);
     }
+    // Board badge = live epics needing attention (open + claimed), not done,
+    // blocked (waiting on a gate), or path leases.
+    _setTabCount('pbTabCountBoard', cols.open.length + cols.claimed.length);
     function lane(key, labelKey) {
       var cards = cols[key].map(_boardCard).join('') ||
         '<div class="pb-board-lane-empty">—</div>';
@@ -636,10 +1213,37 @@
                         'Open a conversation to post an epic')) + '">' +
       ((typeof Icon === 'function') ? Icon('plus', 13) : '') +
       '<span>' + _esc(_t('projectBrain.newEpic', 'New epic')) + '</span></button>';
+    // Held lane (path leases) — rendered only when non-empty, its own lane so
+    // the operator never mistakes a reservation for a claimed epic.
+    var heldLane = '';
+    if (held.length) {
+      var heldCards = held.map(_heldCard).join('');
+      heldLane = '<div class="pb-board-lane pb-board-lane-held">' +
+        '<div class="pb-board-lane-head">' +
+        ((typeof Icon === 'function') ? Icon('lock', 12) : '') +
+        ' ' + _esc(_t('projectBrain.laneHeld', 'Held (do not edit)')) +
+        ' <span class="pb-board-count">' + held.length + '</span></div>' +
+        heldCards + '</div>';
+    }
+    // Blocked lane (epics on a live cooldown) — rendered only when non-empty,
+    // its own lane with the block reason + retry-in so the human can see WHY
+    // an epic is stalled (the answer to "why is nothing happening").
+    var blockedLane = '';
+    if (cols.blocked.length) {
+      var blockedCards = cols.blocked.map(_blockedCard).join('');
+      blockedLane = '<div class="pb-board-lane pb-board-lane-blocked">' +
+        '<div class="pb-board-lane-head">' +
+        ((typeof Icon === 'function') ? Icon('ban', 12) : '') +
+        ' ' + _esc(_t('projectBrain.laneBlocked', 'Blocked (waiting on a gate)')) +
+        ' <span class="pb-board-count">' + cols.blocked.length + '</span></div>' +
+        blockedCards + '</div>';
+    }
     el.innerHTML =
       '<div class="pb-board-toolbar">' + newBtn + '</div>' +
       lane('open', 'projectBrain.laneOpen') +
       lane('claimed', 'projectBrain.laneClaimed') +
+      blockedLane +
+      heldLane +
       lane('done', 'projectBrain.laneDone');
     // conv-chip click → open that conversation
     var chips = el.querySelectorAll('.pb-conv-chip');
@@ -649,6 +1253,10 @@
         if (cid && typeof loadConversation === 'function') loadConversation(cid);
       });
     }
+    // Board titles render through _clampBlock (long epics collapse with a
+    // Show more/less toggle) — bind those toggles for the whole board.
+    _wireClampToggles(el);
+    _applyContentI18n(el);
     // "＋ New epic"
     var nb = el.querySelector('#pbBoardNewBtn');
     if (nb && !nb.disabled) nb.addEventListener('click', _boardPostNew);
@@ -768,13 +1376,14 @@
       cparts.push('<div class="pb-inf-group-head">' +
         _esc(_t('projectBrain.infCharterHead', 'Bound by the charter')) + '</div>');
       if (charter.content) {
-        cparts.push('<div class="pb-inf-northstar">' + _esc(charter.content) + '</div>');
+        cparts.push('<div class="pb-inf-northstar">' +
+          _clampBlock(_esc(charter.content), charter.content) + '</div>');
       }
       var decs = charter.decisions || [];
       if (decs.length) {
         cparts.push('<ul class="pb-inf-decisions">');
         for (var i = 0; i < Math.min(decs.length, 6); i++) {
-          cparts.push('<li>' + _esc(decs[i]) + '</li>');
+          cparts.push('<li>' + _clampBlock(_esc(decs[i]), String(decs[i])) + '</li>');
         }
         cparts.push('</ul>');
       }
@@ -808,6 +1417,8 @@
         '</div>');
     }
     body.innerHTML = parts.join('');
+    _wireClampToggles(body);
+    _applyContentI18n(body);
 
     // conv chips (peer owners) → open that conversation.
     var chipsEls = body.querySelectorAll('.pb-conv-chip');
@@ -841,91 +1452,6 @@
     });
   }
 
-  // ── Always-visible per-conversation Influence BAR (docked on chat view) ──
-  // The full Influence lens (renderInfluence) lives inside the Project Brain
-  // overlay, which is closed by default. This bar is the ALWAYS-ON entry point
-  // docked on the conversation view itself: a slim chip strip summarising how
-  // THIS conversation is affected (bound by charter · N owned · M to avoid ·
-  // K awaiting), updated on every conversation switch, hidden when there's no
-  // influence. Same backend-authoritative source (Api.project.brainInfluence);
-  // clicking opens the full lens. NO second client-side computation.
-
-  /** Compute the same influence shape from a verdict → {charterActive, mine, avoid, pending}. */
-  function _influenceShape(inf) {
-    inf = inf || {};
-    var charter = inf.charter || {};
-    var board = inf.board || {};
-    return {
-      charterActive: !!charter.injected &&
-        (!!charter.content || (charter.decisions || []).length),
-      mine: (board.mine || []).length,
-      avoid: (board.avoid || []).length,
-      pending: (inf.pendingDecisions || []).length,
-    };
-  }
-
-  /**
-   * Render the inline conversation-influence bar from a backend verdict.
-   * Hides the bar entirely when nothing influences this conversation (a solo/
-   * empty project adds no chrome). Pure renderer of the structured verdict.
-   */
-  function renderConvInfluenceBar(inf) {
-    var bar = document.getElementById('convInfluenceBar');
-    if (!bar) return;
-    var s = _influenceShape(inf);
-    if (!s.charterActive && !s.mine && !s.avoid && !s.pending) {
-      bar.hidden = true;
-      bar.innerHTML = '';
-      return;
-    }
-    var chips = '';
-    // Lead glyph is a map-pin ("you are here in the project"), deliberately
-    // NOT the brain glyph the collab bar above uses — two identical brains
-    // stacked read as a duplicate. This bar is the conv-scoped sub-lens.
-    chips += '<span class="conv-inf-lead">' +
-      ((typeof Icon === 'function') ? Icon('mapPin', 13) : '') +
-      '<span>' + _esc(_t('projectBrain.barLead', 'This chat')) + '</span></span>';
-    if (s.charterActive) {
-      chips += _influenceChip('lightbulb', 1, 'infCharterBound',
-        'bound by charter', 'pb-inf-chip-charter');
-    }
-    chips += _influenceChip('package', s.mine, 'infOwns',
-      '{n} owned by you', 'pb-inf-chip-mine');
-    chips += _influenceChip('alertTriangle', s.avoid, 'infAvoid',
-      '{n} to avoid', 'pb-inf-chip-avoid');
-    chips += _influenceChip('messageSquare', s.pending, 'infPending',
-      '{n} awaiting you', 'pb-inf-chip-pending');
-    bar.innerHTML = chips;
-    bar.hidden = false;
-    bar.title = _t('projectBrain.barOpenHint', 'How THIS conversation is influenced — click to jump to its lens');
-  }
-
-  /**
-   * Resolve (path, active conv) and refetch the inline influence bar. Called
-   * by main.js on every conversation switch (window.convInfluenceRefresh) and
-   * by the live push refresh. Backend-authoritative — never recomputed here.
-   */
-  function refreshConvInfluenceBar() {
-    var bar = document.getElementById('convInfluenceBar');
-    var api = (typeof Api !== 'undefined' && Api.project) ? Api.project : null;
-    var path = _displayedProjectPath();
-    var convId = (typeof activeConvId !== 'undefined' && activeConvId)
-      ? activeConvId : '';
-    if (!api || typeof api.brainInfluence !== 'function' || !path || !convId) {
-      if (bar) { bar.hidden = true; bar.innerHTML = ''; }
-      return;
-    }
-    Promise.resolve(api.brainInfluence(path, convId)).then(function (inf) {
-      // A conversation switch may have landed mid-flight — drop a stale reply.
-      if (typeof activeConvId !== 'undefined' && inf && inf.convId &&
-          inf.convId !== activeConvId) return;
-      renderConvInfluenceBar(inf || {});
-    }).catch(function (e) {
-      if (typeof console !== 'undefined') console.warn('[ProjectBrain] conv-influence bar load failed', e);
-      if (bar) { bar.hidden = true; bar.innerHTML = ''; }
-    });
-  }
-
   // ── Live Charter/Board refresh ──────────────────────────────────
   // While the panel is open, ANY project-channel frame (board claim/complete,
   // charter propose/commit) debounce-refetches the Charter + Board columns so
@@ -943,8 +1469,8 @@
         refreshCharter(path);
         refreshBoard(path);
         refreshInfluence(path);
-        refreshConvInfluenceBar();
         _refreshPeers(path);
+        _refreshStatus(path);
       }, 300);
     };
     pushSubscribe('project', '*', handler);
@@ -971,6 +1497,13 @@
     }
     overlay.hidden = false;
     overlay.classList.add('pb-open');
+    _initTabs();
+    _initConvPreview();
+    if (typeof ProjectBrainI18n !== 'undefined' && ProjectBrainI18n &&
+        typeof ProjectBrainI18n.initToggle === 'function') {
+      try { ProjectBrainI18n.initToggle(); } catch (_e) { /* best-effort */ }
+    }
+    _selectTab(_state.tab || 'charter');
     var path = _displayedProjectPath();
     if (path) {
       openFeed(path);
@@ -978,6 +1511,7 @@
       refreshBoard(path);
       refreshInfluence(path);
       _refreshPeers(path);
+      _refreshStatus(path);
       _subscribePanelLive(path);
     }
   }
@@ -988,6 +1522,15 @@
         window.ProjectBrainPeers &&
         typeof window.ProjectBrainPeers.refreshPeers === 'function') {
       window.ProjectBrainPeers.refreshPeers(path);
+    }
+  }
+
+  /** Drive the Status tab (project-brain-status.js) if it's loaded. */
+  function _refreshStatus(path) {
+    if (typeof window.ProjectBrainStatus !== 'undefined' &&
+        window.ProjectBrainStatus &&
+        typeof window.ProjectBrainStatus.refreshStatus === 'function') {
+      window.ProjectBrainStatus.refreshStatus(path);
     }
   }
 
@@ -1021,6 +1564,7 @@
   function closeProjectBrain() {
     var overlay = document.getElementById('projectBrainOverlay');
     if (overlay) { overlay.hidden = true; overlay.classList.remove('pb-open'); }
+    _hideConvPreview();
     closeFeed();
     _unsubscribePanelLive();
     var banner = document.getElementById('projectBrainInfluence');
@@ -1045,6 +1589,7 @@
       refreshCharter(path);
       refreshBoard(path);
       refreshInfluence(path);
+      _refreshStatus(path);
       _refreshPeers(path);
       _subscribePanelLive(path);
     } else if (path) {
@@ -1078,15 +1623,18 @@
     refreshBoard: refreshBoard,
     renderInfluence: renderInfluence,
     refreshInfluence: refreshInfluence,
-    renderConvInfluenceBar: renderConvInfluenceBar,
-    refreshConvInfluenceBar: refreshConvInfluenceBar,
+    buildConvPreviewCard: buildConvPreviewCard,
+    _fetchConvPreview: _fetchConvPreview,
+    _showConvPreview: _showConvPreview,
+    _hideConvPreview: _hideConvPreview,
+    _initConvPreview: _initConvPreview,
     _onPush: _onPush,
     _state: _state,
+    _boardConvId: _boardConvId,
   };
   window.toggleProjectBrain = toggleProjectBrain;
   window.openProjectBrain = openProjectBrain;
   window.openProjectBrainInfluence = openProjectBrainInfluence;
   window.closeProjectBrain = closeProjectBrain;
   window.projectBrainRefresh = projectBrainRefresh;
-  window.convInfluenceRefresh = refreshConvInfluenceBar;
 })();

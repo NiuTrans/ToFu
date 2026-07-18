@@ -1,0 +1,55 @@
+Tofu project-bar pet — provenance & license
+============================================
+
+These PNG frames (oneko-*.png) are the art for the chibi CAT that roams the
+project bar (see static/js/tofu-pet.js). The 18 poses are:
+idle / happy / sleepy / sleeping / thinking / surprised / sad / celebrating /
+alert / walk1-4 / groom1-3 / scratch1-2.
+
+Current art: AI-GENERATED original character (2026-07, refined pixel-art)
+-------------------------------------------------------------------------
+The frames shipped here are an ORIGINAL "refined chibi pixel-art kitten"
+character (a cream/sage-green/caramel calico with a green leaf-flower bandana
+and a gold bell), produced by AI image generation and post-processed in this
+repo. They are NOT the oneko/Neko sprite art. The directory name `oneko/` and
+the `oneko-` filename prefix are retained only as the stable path the pet FSM
+resolves (`_frameUrl`); they no longer denote oneko provenance.
+
+This is the 2026-07-10 art refresh: the earlier soft-vector calico was replaced
+in place (owner: "pet designs too simple; want a more refined, better-looking
+set") by a richer pixel-art rendering. The approved base idle is
+_candidates/cand-pixel-idle.png; the 18 poses (px-*.png) are edit-chained off
+it and normalized by debug/pet_frame_pipeline.py.
+
+How these frames were produced
+------------------------------
+1. One approved idle pose was generated, then every other pose was generated as
+   an EDIT of that single idle (image-to-image, source_image=idle) so the
+   character — fur markings, leaf bandana, proportions, palette — stays locked
+   across all 18 frames. Side/walk poses were chained off a known-good side
+   frame; groom2/3 off groom1; scratch2 off scratch1.
+2. The raw generations came back as opaque RGB (baked checker/white bg). A
+   border-connected, low-chroma flood fill (debug/pet_frame_pipeline.py) cut a
+   true alpha channel — the cat's continuous chromatic outline stops the fill,
+   so the cream interior is preserved — with a 1px edge feather.
+3. Frames were size-normalized on BODY PIXEL AREA (not raw height, so curled
+   nap/groom poses don't balloon) and anchored on the body centroid-x + bottom
+   baseline (so the pet doesn't jitter or slide between poses), then downscaled
+   to 128x128 RGBA.
+
+License
+-------
+AI-generated imagery of this kind is treated by this project as original
+project art, redistributable in every export mode (personal / internal /
+opensource). These are normal committed source assets — NOT `.tofu*` agent
+artifacts. There is no third-party copyright or attribution requirement carried
+by these files.
+
+Historical note
+---------------
+Earlier revisions of this directory shipped per-pose slices of the classic
+public-domain "Neko" sprite sheet (oneko.gif, from https://github.com/adryd325/
+oneko.js — code MIT (c) 2022 adryd; the 1989 Neko art is public domain). Those
+slices have been REPLACED by the generated character above and are no longer
+present. The originals are retained out-of-tree (repo-root .icon-backups/,
+gitignored) for reference only.

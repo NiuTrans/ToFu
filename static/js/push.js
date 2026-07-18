@@ -28,6 +28,8 @@ const _push = (() => {
   let _connected = false;
   let _connectedAt = 0;            // set on onopen, cleared on onclose; gate for attempt-counter reset
   let _reconnectAttempt = 0;
+  let _everConnected = false;      // true once the FIRST onopen fired — distinguishes a genuine RECONNECT from the initial connect
+  let _reconnectListeners = new Set();  // fn() called after a genuine reconnect (not the first connect)
   let _pendingSubscriptions = [];  // queued before connection established
   // Connection must hold this long before we trust it as "healthy" and
   // reset the reconnect attempt counter. See onclose.
@@ -40,14 +42,22 @@ const _push = (() => {
   const PING_INTERVAL_MS = 4000;   // how often to probe while connected
   const PING_TIMEOUT_MS = 8000;    // no pong within this ⇒ treat as timed out
   let _pingTimer = null;
+  let _pingTimeoutTimer = null;    // per-ping watchdog: fires PING_TIMEOUT_MS after a probe so the
+                                   // timeout state is EMITTED promptly (~timeout window), not only on
+                                   // the next 4s interval tick (which delayed the badge ~12s).
   let _lastPingSentAt = 0;         // client timestamp of the outstanding ping
   let _latencyMs = null;           // last measured RTT; null = unknown
   let _latencyState = 'unknown';   // unknown | good | ok | poor | timeout | offline
   let _latencyListeners = new Set();
 
   function _emitLatency() {
+    // Stamp each reading so a consumer (net-latency.js watchdog) can tell a
+    // FRESH reading from a frozen one — if the socket wedges in CONNECTING or
+    // a reconnect is scheduled but never opens, no further emit occurs and the
+    // last reading would otherwise display forever as if still live.
+    const reading = { ms: _latencyMs, state: _latencyState, connected: _connected, at: Date.now() };
     for (const fn of _latencyListeners) {
-      try { fn({ ms: _latencyMs, state: _latencyState, connected: _connected }); }
+      try { fn(reading); }
       catch (e) { console.error('[Push] latency listener error:', e); }
     }
   }
@@ -62,15 +72,51 @@ const _push = (() => {
   function _sendPing() {
     if (!_connected || !_ws) return;
     // A still-outstanding ping older than the timeout means the pong never
-    // came back — surface that as a timeout before firing the next probe.
+    // came back: the socket is HALF-OPEN — TCP-dead but readyState still OPEN,
+    // so _ws.send() won't throw and no onclose fires on its own. Push frames
+    // would silently stop forever with no reconnect. Surface the timeout AND
+    // force-close so onclose → _scheduleReconnect re-establishes the socket.
     if (_lastPingSentAt && Date.now() - _lastPingSentAt > PING_TIMEOUT_MS) {
       _latencyMs = null;
       _latencyState = 'timeout';
       _emitLatency();
+      console.warn('[Push] ping timeout (%dms) — closing half-open socket to force reconnect',
+        Date.now() - _lastPingSentAt);
+      try { _ws.close(); }
+      catch (e) { console.debug('[Push] force-close after ping timeout failed:', e); }
+      return;   // do NOT probe again on a socket we've just declared dead
     }
+    // Keep only ONE outstanding ping at a time. Re-sending (and overwriting
+    // _lastPingSentAt) on every interval reset the outstanding ping's age
+    // before the PING_TIMEOUT_MS window could ever elapse — so a half-open
+    // socket on a foregrounded tab was NEVER detected. Wait for _onPong to
+    // clear _lastPingSentAt before starting a fresh probe.
+    if (_lastPingSentAt) return;
     _lastPingSentAt = Date.now();
     try { _ws.send(JSON.stringify({ action: 'ping', t: _lastPingSentAt })); }
     catch (e) { console.debug('[Push] ping send failed:', e); }
+    // Arm a dedicated watchdog so the timeout is surfaced right at the window
+    // edge instead of waiting for a later interval tick to notice the age.
+    if (_pingTimeoutTimer) clearTimeout(_pingTimeoutTimer);
+    _pingTimeoutTimer = setTimeout(_firePingTimeout, PING_TIMEOUT_MS);
+  }
+
+  // Fired by the per-ping watchdog when a pong has not returned within
+  // PING_TIMEOUT_MS. Emits the timeout state IMMEDIATELY (so the signal badge
+  // stops showing a stale green reading) and force-closes the half-open socket
+  // so onclose → _scheduleReconnect re-establishes it. Mirrors the interval
+  // backstop branch in _sendPing but fires seconds sooner.
+  function _firePingTimeout() {
+    _pingTimeoutTimer = null;
+    if (!_lastPingSentAt) return;   // a pong already cleared the outstanding ping
+    _latencyMs = null;
+    _latencyState = 'timeout';
+    _emitLatency();
+    console.warn('[Push] ping timeout (watchdog) — closing half-open socket to force reconnect');
+    if (_ws) {
+      try { _ws.close(); }
+      catch (e) { console.debug('[Push] force-close after ping-timeout watchdog failed:', e); }
+    }
   }
 
   function _startPinging() {
@@ -81,6 +127,7 @@ const _push = (() => {
 
   function _stopPinging() {
     if (_pingTimer) { clearInterval(_pingTimer); _pingTimer = null; }
+    if (_pingTimeoutTimer) { clearTimeout(_pingTimeoutTimer); _pingTimeoutTimer = null; }
     _lastPingSentAt = 0;
   }
 
@@ -89,6 +136,7 @@ const _push = (() => {
     _latencyMs = Date.now() - t;
     _latencyState = _classify(_latencyMs);
     _lastPingSentAt = 0;
+    if (_pingTimeoutTimer) { clearTimeout(_pingTimeoutTimer); _pingTimeoutTimer = null; }
     _emitLatency();
   }
 
@@ -138,11 +186,25 @@ const _push = (() => {
       }
 
       _startPinging();
+
+      /* ★ Reconnect catch-up: fire reconnect listeners ONLY on a genuine
+       *   re-open (a prior connection existed), never on the first connect —
+       *   boot already loads the list, so firing here would double-load. While
+       *   the socket was DOWN we may have MISSED `notify` frames (a sibling
+       *   device's change), so a reconnect must trigger an immediate
+       *   reconciliation — this is the third "回来即新" resume trigger. */
+      if (_everConnected) {
+        for (const fn of _reconnectListeners) {
+          try { fn(); } catch (e) { console.error('[Push] reconnect listener error:', e); }
+        }
+      }
+      _everConnected = true;
     };
 
     _ws.onmessage = (event) => {
       let frame;
-      try { frame = JSON.parse(event.data); } catch { return; }
+      try { frame = JSON.parse(event.data); }
+      catch (e) { console.debug('[Push] dropped malformed frame:', e && e.message); return; }
 
       const channel = frame.channel;
       const taskId = frame.taskId;
@@ -256,7 +318,7 @@ const _push = (() => {
   function isConnected() { return _connected; }
 
   function getLatency() {
-    return { ms: _latencyMs, state: _latencyState, connected: _connected };
+    return { ms: _latencyMs, state: _latencyState, connected: _connected, at: Date.now() };
   }
 
   function onLatency(fn) {
@@ -268,7 +330,16 @@ const _push = (() => {
     return () => _latencyListeners.delete(fn);
   }
 
-  return { connect, subscribe, unsubscribe, send, isConnected, getLatency, onLatency };
+  /* Register a callback fired AFTER a genuine socket RECONNECT (not the first
+   *   connect). Used by cross-device sync to reconcile missed `notify` frames
+   *   the instant the push channel recovers. Returns an unsubscribe fn. */
+  function onReconnect(fn) {
+    if (typeof fn !== 'function') return () => {};
+    _reconnectListeners.add(fn);
+    return () => _reconnectListeners.delete(fn);
+  }
+
+  return { connect, subscribe, unsubscribe, send, isConnected, getLatency, onLatency, onReconnect };
 })();
 
 // Public API
@@ -279,3 +350,4 @@ function pushConnect() { _push.connect(); }
 function pushIsConnected() { return _push.isConnected(); }
 function pushGetLatency() { return _push.getLatency(); }
 function pushOnLatency(fn) { return _push.onLatency(fn); }
+function pushOnReconnect(fn) { return _push.onReconnect(fn); }

@@ -20,9 +20,9 @@ from lib.llm._sse_core import (
     prepare_request,
 )
 from lib.llm._transport import (
-    CONNECT_TIMEOUT,
     MAX_STREAM_RETRIES,
     async_abortable_sleep,
+    get_async_client,
     retry_wait,
 )
 from lib.llm_errors import (
@@ -134,62 +134,72 @@ async def _async_stream_chat_once(body, *, on_thinking=None, on_content=None,
 
     proxy_url = _httpx_proxy_url(plan.url)
 
-    async with httpx.AsyncClient(
-        proxy=proxy_url,
-        timeout=httpx.Timeout(connect=CONNECT_TIMEOUT, read=300, write=60, pool=60),
-        follow_redirects=True,
-    ) as client:
-        try:
-            async with client.stream(
-                'POST', plan.url, headers=plan.hdrs, json=plan.body,
-            ) as resp:
-                resp_trace = resp.headers.get('M-TraceId', '')
-                if resp_trace and resp_trace != plan.trace_id:
-                    logger.debug('%s resp M-TraceId=%s', log_prefix, resp_trace)
+    # Borrow a pooled, keep-alive client (one per event-loop+proxy) so the
+    # TCP/TLS handshake is reused across turns instead of paid per call. The
+    # client is NOT closed here — only ``client.stream`` releases its
+    # connection back to the pool on exit.
+    client = get_async_client(proxy_url)
+    try:
+        async with client.stream(
+            'POST', plan.url, headers=plan.hdrs, json=plan.body,
+        ) as resp:
+            resp_trace = resp.headers.get('M-TraceId', '')
+            if resp_trace and resp_trace != plan.trace_id:
+                logger.debug('%s resp M-TraceId=%s', log_prefix, resp_trace)
 
-                if resp.status_code != 200:
-                    err_body = (await resp.aread()).decode('utf-8', errors='replace')
-                    classify_status_error(resp.status_code, err_body, body=plan.body,
-                                          log_prefix=log_prefix, raw_dumper=plan.raw_dumper)
+            if resp.status_code != 200:
+                err_body = (await resp.aread()).decode('utf-8', errors='replace')
+                classify_status_error(resp.status_code, err_body, body=plan.body,
+                                      log_prefix=log_prefix, raw_dumper=plan.raw_dumper)
 
-                acc = SSEAccumulator(
-                    plan.body, plan.trace_id, plan.raw_dumper, plan.codex_translator,
-                    plan.t0, url=plan.url, log_prefix=log_prefix,
-                    on_thinking=on_thinking, on_content=on_content,
-                    on_tool_call_ready=on_tool_call_ready,
-                    anthropic_translator=plan.anthropic_translator)
+            acc = SSEAccumulator(
+                plan.body, plan.trace_id, plan.raw_dumper, plan.codex_translator,
+                plan.t0, url=plan.url, log_prefix=log_prefix,
+                on_thinking=on_thinking, on_content=on_content,
+                on_tool_call_ready=on_tool_call_ready,
+                anthropic_translator=plan.anthropic_translator)
 
-                async for raw_line in resp.aiter_lines():
-                    if abort_check and abort_check():
-                        acc.mark_aborted()
-                        break
+            stopped = False
+            async for raw_line in resp.aiter_lines():
+                if abort_check and abort_check():
+                    # Abort mid-stream: break immediately. The response is
+                    # left partially read, so httpx drops the connection —
+                    # which is correct, an aborted stream must not be reused.
+                    acc.mark_aborted()
+                    break
+                if not stopped:
                     if acc.feed_line(raw_line):
-                        break
+                        # Accumulator is done, but do NOT break: keep pulling
+                        # the (now trivial) trailing lines to natural EOF so
+                        # httpx returns the keep-alive connection to the pool.
+                        # A partially-read response is discarded by httpx, which
+                        # would defeat connection reuse across turns.
+                        stopped = True
 
-                acc.fire_final_tool_callback()
-                return acc.finalize(resp_trace=resp_trace)
+            acc.fire_final_tool_callback()
+            return acc.finalize(resp_trace=resp_trace)
 
-        except httpx.ConnectTimeout as e:
-            # Connect-phase timeout = endpoint down → fail over (dispatch).
-            logger.warning('%s ✖ Endpoint unreachable (connect timeout) %s: %s',
-                           log_prefix, plan.url, e)
-            raise EndpointUnreachableError(
-                'endpoint unreachable: %s' % e, base_url=plan.url) from e
-        except httpx.ConnectError as e:
-            # Connection refused / SYN dropped = endpoint down → fail over.
-            logger.warning('%s ✖ Endpoint unreachable (connect error) %s: %s',
-                           log_prefix, plan.url, e)
-            raise EndpointUnreachableError(
-                'endpoint unreachable: %s' % e, base_url=plan.url) from e
-        except httpx.TimeoutException as e:
-            # Read/write/pool timeout — server accepted but is slow.
-            # Retryable on the same slot (transient), unlike connect-phase.
-            raise RetryableAPIError(f'httpx timeout: {e}') from e
-        except httpx.RemoteProtocolError as e:
-            raise RetryableAPIError(f'httpx protocol error: {e}') from e
-        finally:
-            try:
-                if plan.raw_dumper.enabled and plan.raw_dumper._fh is not None:
-                    plan.raw_dumper.finish(error=True)
-            except Exception as e:
-                logger.debug('%s RawSSEDumper.finish(error=True) failed: %s', log_prefix, e)
+    except httpx.ConnectTimeout as e:
+        # Connect-phase timeout = endpoint down → fail over (dispatch).
+        logger.warning('%s ✖ Endpoint unreachable (connect timeout) %s: %s',
+                       log_prefix, plan.url, e)
+        raise EndpointUnreachableError(
+            'endpoint unreachable: %s' % e, base_url=plan.url) from e
+    except httpx.ConnectError as e:
+        # Connection refused / SYN dropped = endpoint down → fail over.
+        logger.warning('%s ✖ Endpoint unreachable (connect error) %s: %s',
+                       log_prefix, plan.url, e)
+        raise EndpointUnreachableError(
+            'endpoint unreachable: %s' % e, base_url=plan.url) from e
+    except httpx.TimeoutException as e:
+        # Read/write/pool timeout — server accepted but is slow.
+        # Retryable on the same slot (transient), unlike connect-phase.
+        raise RetryableAPIError(f'httpx timeout: {e}') from e
+    except httpx.RemoteProtocolError as e:
+        raise RetryableAPIError(f'httpx protocol error: {e}') from e
+    finally:
+        try:
+            if plan.raw_dumper.enabled and plan.raw_dumper._fh is not None:
+                plan.raw_dumper.finish(error=True)
+        except Exception as e:
+            logger.debug('%s RawSSEDumper.finish(error=True) failed: %s', log_prefix, e)

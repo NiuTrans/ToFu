@@ -299,6 +299,51 @@ class TestClearAllToolListLatches(unittest.TestCase):
         from lib.tools import clear_all_tool_list_latches
         self.assertEqual(clear_all_tool_list_latches(), 0)
 
+    def test_boot_latch_before_mcp_relatches_without_banner(self):
+        # Reproduce the spurious-banner defect: MCP auto-connect runs on a
+        # background thread AFTER boot, so a conversation opened first latches
+        # the tool schema WITHOUT the not-yet-connected MCP tools.
+        from lib.tools import clear_all_tool_list_latches, latch_tool_list
+        base = [self._tool('web_search'), self._tool('read_files')]
+        # Round 1 (boot, MCP not yet connected): freeze the MCP-less snapshot.
+        _eff, diverged = latch_tool_list('convBoot', base)
+        self.assertFalse(diverged)
+        # MCP finishes connecting on the background thread → auto-connect now
+        # clears every latch (the fix). Without the clear, round 2 below would
+        # diverge and raise the "tools changed" banner.
+        cleared = clear_all_tool_list_latches()
+        self.assertGreaterEqual(cleared, 1)
+        # Round 2: the freshly-assembled list now includes the MCP tools. Since
+        # the latch was cleared, this round RE-ESTABLISHES the snapshot rather
+        # than diverging → no spurious banner.
+        with_mcp = base + [self._tool('mcp__github__search_code'),
+                           self._tool('mcp__hope__submit_job')]
+        eff2, diverged2 = latch_tool_list('convBoot', with_mcp)
+        self.assertFalse(diverged2, 'boot-time latch cleared by MCP '
+                         'auto-connect must re-establish WITH the MCP tools, '
+                         'not report a spurious divergence/banner')
+        names = [t['function']['name'] for t in eff2]
+        self.assertIn('mcp__github__search_code', names)
+        self.assertIn('mcp__hope__submit_job', names)
+
+    def test_without_clear_boot_latch_diverges(self):
+        # NEUTER / negative control: proving the clear is load-bearing. If MCP
+        # auto-connect did NOT clear the boot-time latch, the incomplete frozen
+        # snapshot is served and the MCP-augmented round diverges → banner.
+        from lib.tools import clear_all_tool_list_latches, latch_tool_list
+        clear_all_tool_list_latches()
+        base = [self._tool('web_search')]
+        latch_tool_list('convNoClear', base)
+        # NO clear_all here — mimic the pre-fix boot path.
+        with_mcp = base + [self._tool('mcp__hope__submit_job')]
+        eff, diverged = latch_tool_list('convNoClear', with_mcp)
+        self.assertTrue(diverged, 'without the auto-connect clear, the '
+                        'incomplete boot latch MUST diverge (the defect)')
+        # And the frozen (MCP-less) snapshot is what gets served.
+        self.assertNotIn('mcp__hope__submit_job',
+                         [t['function']['name'] for t in eff])
+        clear_all_tool_list_latches()
+
 
 class TestAssembleToolListByteStability(unittest.TestCase):
     """Integration: the orchestrator's actual entry point (_assemble_tool_list)

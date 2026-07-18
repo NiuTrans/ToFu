@@ -36,8 +36,14 @@ function updateSendButton() {
     }
   }
 
-  const mainStreaming =
-    activeStreams.has(activeConvId) || (conv && conv.activeTaskId);
+  // ★ SINGLE SOURCE OF TRUTH: the same busy-predicate the sidebar uses
+  //   (convIsBusy in ui/conversation_list.js). Previously this recomputed
+  //   `activeStreams.has(id) || activeTaskId` inline and LACKED the
+  //   activeStreams key-prefix scan the sidebar had — so the composer and the
+  //   sidebar dot could disagree about the SAME conv. Routing both through
+  //   convIsBusy makes that divergence impossible by construction. (Branch
+  //   stop-cascade below still keys off _branchStreams for the abort priorities.)
+  const mainStreaming = convIsBusy(conv);
   const translating = conv && conv._translating;
   const streaming = branchStreaming || mainStreaming || anyBranchStreaming || translating;
 
@@ -119,6 +125,14 @@ function updateSendButton() {
       const s = activeStreams.get(activeConvId);
       if (s) {
         console.log(`[stopBtn] Aborting main stream — conv=${activeConvId.slice(0,8)} task=${s.taskId?.slice(0,8)}`);
+        // ★ Autopilot VU streaming: abort() below tears down the SSE reader
+        //   BEFORE the backend's autopilot_vu_cancel frame can be read, so the
+        //   event-driven splice never runs and a dangling _streamingVu ghost
+        //   bubble is left rendering the frozen "Autopilot…" pulse. Remove it
+        //   LOCALLY here (preserves conv._apPendingBaton — see the helper).
+        if (conv && typeof _removeStreamingVuBubbleIfTail === 'function') {
+          _removeStreamingVuBubbleIfTail(conv, activeConvId);
+        }
         // ★ Pre-set finishReason before abort kills the SSE reader
         if (conv) {
           const _stopMsg = conv.messages[conv.messages.length - 1];
@@ -157,7 +171,7 @@ function updateSendButton() {
     };
   } else {
     btn.className = "send-btn";
-    btn.innerHTML = `<span style="font-size:13px;font-weight:600;letter-spacing:.5px">⏎</span>`;
+    btn.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 12L20 12"/><path d="M13 5l7 7-7 7"/></svg>`;
     btn.onclick = sendMessage;
   }
 }

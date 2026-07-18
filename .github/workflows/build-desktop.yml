@@ -170,6 +170,23 @@ jobs:
         with:
           path: installer.iss
 
+      # ── Code signing (INERT until secrets are provided) ──
+      # Without an Authenticode signature, Windows SmartScreen warns
+      # ("Windows protected your PC") on first launch. To sign the installer,
+      # add these repo secrets and uncomment the step below:
+      #   WIN_CERT_PFX        base64 of your code-signing .pfx
+      #   WIN_CERT_PASSWORD   the .pfx password
+      # - name: Sign installer
+      #   shell: pwsh
+      #   env:
+      #     WIN_CERT_PFX: ${{ secrets.WIN_CERT_PFX }}
+      #     WIN_CERT_PASSWORD: ${{ secrets.WIN_CERT_PASSWORD }}
+      #   run: |
+      #     # [IO.File]::WriteAllBytes('cert.pfx', [Convert]::FromBase64String($env:WIN_CERT_PFX))
+      #     # & signtool sign /f cert.pfx /p $env:WIN_CERT_PASSWORD /fd SHA256 `
+      #     #   /tr http://timestamp.digicert.com /td SHA256 installer_output\*.exe
+      #     Write-Host "signing configured"
+
       - name: Verify installer output
         shell: bash
         run: |
@@ -187,11 +204,30 @@ jobs:
           retention-days: 30
 
   # ── macOS ────────────────────────────────────────────────────
+  # Build a NATIVE single-arch DMG per macOS architecture via a runner matrix:
+  #   - macos-14  → Apple Silicon (arm64)
+  #   - macos-13  → Intel (x86_64)
+  # We deliberately do NOT use PyInstaller target_arch='universal2': the
+  # setup-python interpreter on the runners is single-arch, and several C
+  # extensions we bundle (psycopg2-binary, pymupdf, lxml, cryptography) do not
+  # publish universal2 wheels — so a universal2 build aborts at COLLECT with
+  # "<lib>.so is not a fat binary!" (pyinstaller#7354). Two native DMGs, each
+  # built with arch-matching wheels, is the reliable path. Previously only the
+  # arm64 DMG shipped (runs-on: macos-latest), so Intel Macs could not install
+  # Tofu at all.
   build-macos:
-    name: macOS DMG
-    runs-on: macos-latest
+    name: macOS DMG (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
     needs: version
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            arch: arm64
+          - runner: macos-13
+            arch: x86_64
     steps:
       - uses: actions/checkout@v4
 
@@ -211,9 +247,34 @@ jobs:
       - name: Build with PyInstaller
         run: pyinstaller tofu.spec
 
+      # ── Code signing / notarization (INERT until secrets are provided) ──
+      # macOS Gatekeeper blocks unsigned apps ("Tofu is damaged / cannot be
+      # opened"). To sign + notarize, add these repo secrets and uncomment the
+      # step below (it runs on the app in dist/Tofu.app BEFORE the DMG is made):
+      #   MACOS_CERT_P12        base64 of a "Developer ID Application" .p12
+      #   MACOS_CERT_PASSWORD   the .p12 export password
+      #   MACOS_NOTARY_APPLE_ID / MACOS_NOTARY_TEAM_ID / MACOS_NOTARY_PASSWORD
+      # - name: Sign & notarize app
+      #   env:
+      #     MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+      #     MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+      #     MACOS_NOTARY_APPLE_ID: ${{ secrets.MACOS_NOTARY_APPLE_ID }}
+      #     MACOS_NOTARY_TEAM_ID: ${{ secrets.MACOS_NOTARY_TEAM_ID }}
+      #     MACOS_NOTARY_PASSWORD: ${{ secrets.MACOS_NOTARY_PASSWORD }}
+      #   run: |
+      #     # security create-keychain + import the .p12, then:
+      #     #   codesign --deep --force --options runtime \
+      #     #     --sign "Developer ID Application: <NAME> (<TEAM_ID>)" dist/Tofu.app
+      #     #   xcrun notarytool submit dist/Tofu.app --wait \
+      #     #     --apple-id "$MACOS_NOTARY_APPLE_ID" --team-id "$MACOS_NOTARY_TEAM_ID" \
+      #     #     --password "$MACOS_NOTARY_PASSWORD"
+      #     #   xcrun stapler staple dist/Tofu.app
+      #     echo "signing configured"
+
       - name: Create DMG
         env:
           APP_VERSION: ${{ needs.version.outputs.version }}
+          ARCH: ${{ matrix.arch }}
         run: |
           brew install create-dmg || true
           create-dmg \
@@ -225,17 +286,17 @@ jobs:
             --icon "Tofu.app" 150 190 \
             --app-drop-link 450 190 \
             --hide-extension "Tofu.app" \
-            "Tofu-${APP_VERSION}-macos.dmg" \
+            "Tofu-${APP_VERSION}-macos-${ARCH}.dmg" \
             "dist/Tofu.app/" \
           || {
             # Fallback: plain zip if create-dmg fails
-            cd dist && zip -r "../Tofu-${APP_VERSION}-macos.zip" Tofu.app/
+            cd dist && zip -r "../Tofu-${APP_VERSION}-macos-${ARCH}.zip" Tofu.app/
           }
 
       - name: Upload macOS DMG
         uses: actions/upload-artifact@v4
         with:
-          name: macos-dmg
+          name: macos-dmg-${{ matrix.arch }}
           path: Tofu-*.dmg
           if-no-files-found: warn
           retention-days: 30
@@ -244,7 +305,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: macos-zip
+          name: macos-zip-${{ matrix.arch }}
           path: Tofu-*.zip
           if-no-files-found: ignore
           retention-days: 30
@@ -306,14 +367,77 @@ jobs:
       - name: List artifacts
         run: find release-assets -type f | head -20
 
+      - name: Assert all platform assets present
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Completeness gate: refuse to publish a partial release. Because the
+          # macOS matrix is fail-fast:false and DMG upload is
+          # if-no-files-found:warn (and create-dmg falls back to a .zip on
+          # failure), a broken Intel leg could otherwise let a release ship with
+          # ONLY the arm64 DMG — and make_latest would pin that half-built set as
+          # Latest, silently reintroducing the "Intel Macs can't install" bug.
+          # So we assert every required per-platform / per-arch asset exists;
+          # missing any one fails the whole release ("all four platforms, or a
+          # loud failure — never a silent partial Latest").
+          cd release-assets
+          shopt -s nullglob
+          missing=0
+          require() {
+            local label="$1"; shift
+            local hits=( $@ )
+            if [ ${#hits[@]} -eq 0 ]; then
+              echo "::error::Missing required release asset: ${label}"
+              missing=1
+            else
+              echo "OK  ${label} -> ${hits[*]}"
+            fi
+          }
+          require "macOS arm64 DMG (Tofu-*-macos-arm64.dmg)" Tofu-*-macos-arm64.dmg
+          require "macOS x86_64 DMG (Tofu-*-macos-x86_64.dmg)" Tofu-*-macos-x86_64.dmg
+          require "Windows installer (Tofu-Setup-*-win64.exe)" Tofu-Setup-*-win64.exe
+          require "Linux archive (Tofu-*-linux*.tar.gz)" Tofu-*-linux*.tar.gz
+          if [ "$missing" -ne 0 ]; then
+            echo "::error::Refusing to publish an incomplete release. See missing assets above."
+            exit 1
+          fi
+          echo "All required platform/arch assets present."
+
+      - name: Generate SHA256SUMS
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release-assets
+          shopt -s nullglob
+          files=( *.exe *.dmg *.zip *.tar.gz )
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "::error::No release assets found to checksum — build jobs produced nothing."
+            exit 1
+          fi
+          # Basenames only (not ./path) so end users can verify with
+          # `shasum -a 256 -c SHA256SUMS` from their download folder.
+          shasum -a 256 "${files[@]}" > SHA256SUMS
+          echo "── SHA256SUMS ──"
+          cat SHA256SUMS
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           name: Tofu v${{ needs.version.outputs.version }}
-          draft: true
+          # Publish immediately. This was draft:true, which required a manual
+          # "Publish release" click in the GitHub UI that never happened —
+          # v0.12/v0.13/v0.14 all sat as invisible drafts while users at the
+          # Releases page only ever saw v0.11.0.
+          draft: false
+          # Promote this tag to the repo's "Latest" release so the README's
+          # /releases/latest links (and any /releases/latest/download/<asset>
+          # deep links) resolve to it. "true" forces latest even for a
+          # pre-1.0 version string.
+          make_latest: "true"
           generate_release_notes: true
           files: |
             release-assets/**/*.exe
             release-assets/**/*.dmg
             release-assets/**/*.zip
             release-assets/**/*.tar.gz
+            release-assets/SHA256SUMS

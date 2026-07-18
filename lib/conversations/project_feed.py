@@ -73,8 +73,16 @@ VALID_KINDS = frozenset({
 _PROJECT_EVENTS_KEEP = 500
 
 # A short, one-line summary cap so a single event row stays cheap to ship and
-# render (mirrors SUMMARY_MAX_CHARS' intent for the digest).
+# render (mirrors SUMMARY_MAX_CHARS' intent for the digest). This is the DISPLAY
+# summary only — the UNtruncated text is preserved in payload['summary_full']
+# (see emit_project_event) so the panel can expand a clamped row rather than
+# losing the second half of a sentence mid-word (a data-loss bug).
 _SUMMARY_MAX_CHARS = 280
+
+# Ceiling for the preserved full summary. Generous (well above a 2000-char board
+# title + a "Completed: …" prefix + a reason) so realistic feed summaries are
+# kept verbatim, while a pathological multi-KB summary can't bloat every row.
+_SUMMARY_FULL_MAX_CHARS = 4000
 
 # Serializes the read-max-then-insert of the per-project monotonic seq so two
 # concurrent emitters for the SAME project can't mint the same (path, seq) PK.
@@ -157,15 +165,25 @@ def emit_project_event(project_path: str, conv_id: str, kind: str,
         return None
     project_path = normalize_project_path(project_path)
     kind = _coerce_kind(kind or 'note')
-    summary = (summary or '').strip()[:_SUMMARY_MAX_CHARS]
+    # DISPLAY summary is capped for a cheap row; but preserve the FULL text so
+    # the panel can expand a clamped row instead of dropping the second half of
+    # a sentence mid-word. The full text rides in payload['summary_full'] ONLY
+    # when it actually exceeds the display cap (no redundant copy for the common
+    # short summary). Never overwrites a caller-supplied payload['summary_full'].
+    summary_full = (summary or '').strip()
+    summary = summary_full[:_SUMMARY_MAX_CHARS]
+    payload = dict(payload or {})
+    if len(summary_full) > _SUMMARY_MAX_CHARS and 'summary_full' not in payload:
+        payload['summary_full'] = summary_full[:_SUMMARY_FULL_MAX_CHARS]
     title = (title or '').strip()
     event_id = uuid.uuid4().hex
     ts = int(time.time() * 1000)
     try:
-        payload_json = json.dumps(payload or {}, ensure_ascii=False)
+        payload_json = json.dumps(payload, ensure_ascii=False)
     except (TypeError, ValueError) as e:
         logger.debug('[ProjFeed] payload not serializable (using {}): %s', e)
         payload_json = '{}'
+        payload = {}
 
     try:
         with _project_events_lock:
@@ -198,7 +216,7 @@ def emit_project_event(project_path: str, conv_id: str, kind: str,
     event = {
         'seq': seq, 'event_id': event_id, 'conv_id': conv_id or '',
         'task_id': task_id or '', 'kind': kind, 'title': title,
-        'summary': summary, 'payload': payload or {}, 'ts': ts,
+        'summary': summary, 'payload': payload, 'ts': ts,
     }
     # Mirror over the PushHub project channel, routed by the path-hash key so
     # the raw path never reaches a client. Best-effort: a push failure must
@@ -243,7 +261,8 @@ def read_project_feed(project_path: str, since_seq: int = 0,
     for r in rows:
         try:
             payload = json.loads(r['payload']) if r['payload'] else {}
-        except (TypeError, ValueError):
+        except (TypeError, ValueError) as e:
+            logger.debug('[ProjFeed] row payload parse failed (using {}): %s', e)
             payload = {}
         seq = int(r['seq'])
         max_seq = max(max_seq, seq)

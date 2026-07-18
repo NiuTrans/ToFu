@@ -79,7 +79,8 @@ def dispatcher_two_keys():
             if s in d.slots:
                 d.slots.remove(s)
     for k in ('TOFU_EPHEMERAL_PREFLIGHT', 'TOFU_CONV_STICKY_ROUTING',
-              'TOFU_CONV_STICKY_HOLD', 'TOFU_CONV_STICKY_HOLD_MS'):
+              'TOFU_CONV_STICKY_HOLD', 'TOFU_CONV_STICKY_HOLD_MS',
+              'TOFU_CONV_STICKY_HOLD_MAX_MS'):
         os.environ.pop(k, None)
 
 
@@ -284,6 +285,102 @@ class TestWarmKeyHold:
             'expected both rounds on the warm key sk-0, got %r' % keys_called)
         # And the affinity map still points at key_0 after the turn.
         assert conv_affinity.get_preferred_key('conv-multi') == 'key_0'
+
+
+    def test_escalated_hold_covers_contention_beyond_budget(
+            self, dispatcher_two_keys, monkeypatch, caplog):
+        """A concurrent sibling cools the conv's SOLE warm key for LONGER than
+        the flat 1.5s budget but WITHIN the escalated ceiling → the hold must
+        still wait it out and land BACK on the warm key (not cold-rebind).
+
+        This is the mrne3bqe R4 >budget-contention gap: pre-fix the loop gave
+        up at 1.5s and destroyed the prefix on a byte-identical round.
+        """
+        import logging
+
+        from lib.llm_dispatch import conv_affinity
+        d, slot0, slot1 = dispatcher_two_keys
+
+        # Escalated ceiling well above the contention cooldown we set.
+        os.environ['TOFU_CONV_STICKY_HOLD_MS'] = '1500'      # flat budget
+        os.environ['TOFU_CONV_STICKY_HOLD_MAX_MS'] = '8000'  # escalated ceiling
+
+        conv_affinity.record_conv_key('conv-esc', 'key_0')
+        # 4s cooldown — ABOVE the 1.5s flat budget, BELOW the 8s ceiling.
+        slot0.cooldown_until = time.time() + 4.0
+
+        keys_called: list = []
+        sleeps: list = []
+        with caplog.at_level(logging.INFO, logger='lib.llm_dispatch.api'):
+            msg, finish, _usage = _drive(
+                monkeypatch, d, 'conv-esc', keys_called, sleeps,
+                clear_cooldown_on_sleep=slot0)
+
+        assert msg == 'ok'
+        # Held for ~4s (between budget and ceiling) — the escalated window.
+        assert any(1.5 < s <= 8.0 for s in sleeps), (
+            'expected an ESCALATED warm-key hold (>budget, <=ceiling), '
+            'got sleeps=%r' % sleeps)
+        # Landed back on the WARM key, not the cold one.
+        assert keys_called == ['sk-0'], (
+            'escalated hold must land on warm sk-0, got %r' % keys_called)
+        assert any('escalated hold' in r.message and 'warm key key_0' in r.message
+                   for r in caplog.records), (
+            'expected the escalated-hold INFO line, got: %r'
+            % [r.message for r in caplog.records])
+
+    def test_neuter_ceiling_equals_budget_rebinds_cold(
+            self, dispatcher_two_keys, monkeypatch):
+        """NEUTER negative control: set the escalated ceiling == flat budget so
+        escalation is disabled. The same >budget (4s) contention cooldown must
+        now FAIL to hold and cold-rebind — proving the escalated ceiling (not
+        some other path) is what closes the gap in the test above."""
+        from lib.llm_dispatch import conv_affinity
+        d, slot0, slot1 = dispatcher_two_keys
+
+        os.environ['TOFU_CONV_STICKY_HOLD_MS'] = '1500'
+        os.environ['TOFU_CONV_STICKY_HOLD_MAX_MS'] = '1500'  # == budget → no escalation
+
+        conv_affinity.record_conv_key('conv-neuter', 'key_0')
+        slot0.cooldown_until = time.time() + 4.0  # > 1.5s budget/ceiling
+
+        keys_called: list = []
+        sleeps: list = []
+        msg, finish, _usage = _drive(
+            monkeypatch, d, 'conv-neuter', keys_called, sleeps,
+            clear_cooldown_on_sleep=slot0)
+
+        assert msg == 'ok'
+        # No hold (4s > 1.5s ceiling) → cold rebind, exactly the pre-fix bug.
+        assert not any(0 < s <= 8.0 for s in sleeps), (
+            'neuter (ceiling==budget) must NOT hold a 4s cooldown, got %r' % sleeps)
+        assert keys_called == ['sk-1'], (
+            'neuter must cold-rebind to sk-1, got %r' % keys_called)
+
+    def test_escalated_hold_still_fails_over_on_long_backoff(
+            self, dispatcher_two_keys, monkeypatch):
+        """Even with escalation on, a genuinely LONG backoff (300s >> 8s
+        ceiling) must NOT hold — the task fails over to the cold key. The
+        escalated hold widens the window; it is NOT a hard pin."""
+        from lib.llm_dispatch import conv_affinity
+        d, slot0, slot1 = dispatcher_two_keys
+
+        os.environ['TOFU_CONV_STICKY_HOLD_MS'] = '1500'
+        os.environ['TOFU_CONV_STICKY_HOLD_MAX_MS'] = '8000'
+
+        conv_affinity.record_conv_key('conv-long-esc', 'key_0')
+        slot0.cooldown_until = time.time() + 300.0  # genuine failure backoff
+
+        keys_called: list = []
+        sleeps: list = []
+        msg, finish, _usage = _drive(
+            monkeypatch, d, 'conv-long-esc', keys_called, sleeps)
+
+        assert msg == 'ok'
+        assert not any(0 < s <= 8.0 for s in sleeps), (
+            'must NOT hold a 300s backoff even with escalation, got %r' % sleeps)
+        assert keys_called == ['sk-1'], (
+            'long backoff must fail over to cold sk-1, got %r' % keys_called)
 
 
 @pytest.mark.unit

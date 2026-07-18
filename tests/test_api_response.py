@@ -376,6 +376,54 @@ def test_api_method_not_allowed():
     _ok('api_method_not_allowed → 405')
 
 
+def test_api_service_unavailable_default():
+    """api_service_unavailable() → 503 with a Retry-After header."""
+    from lib.api_response import api_service_unavailable
+    app = _make_app_ctx()
+
+    async def _t():
+        async with app.test_request_context('/test'):
+            resp = api_service_unavailable()
+            status, body = await _resolve(resp)
+            assert status == 503
+            assert body['ok'] is False
+            response = resp[0]
+            assert response.headers.get('Retry-After') == '2'
+
+    import asyncio
+    asyncio.run(_t())
+    _ok('api_service_unavailable() → 503 + Retry-After: 2')
+
+
+def test_api_service_unavailable_custom_retry():
+    """Retry-After honors the retry_after argument; extras flow through."""
+    from lib.api_response import api_service_unavailable
+    app = _make_app_ctx()
+
+    async def _t():
+        async with app.test_request_context('/test'):
+            resp = api_service_unavailable('busy', retry_after=5, kind='overloaded')
+            status, body = await _resolve(resp)
+            assert status == 503
+            assert body['error'] == 'busy'
+            assert resp[0].headers.get('Retry-After') == '5'
+
+    import asyncio
+    asyncio.run(_t())
+    _ok('api_service_unavailable(retry_after=5) → Retry-After: 5')
+
+
+def test_pool_exhausted_error_is_typed():
+    """PoolExhaustedError is a distinct type carrying the pool snapshot so the
+    server errorhandler can map it to 503 (not a generic 500)."""
+    from lib.database import PoolExhaustedError
+    e = PoolExhaustedError('pool full', active=800, max_conns=800,
+                           pooled=0, tracked=136)
+    assert isinstance(e, RuntimeError)
+    assert e.active == 800 and e.max_conns == 800 and e.tracked == 136
+    _ok('PoolExhaustedError is a typed RuntimeError with pool snapshot')
+
+
 def test_api_internal_error_with_exception():
     """api_internal_error(exc) auto-logs and returns envelope."""
     from lib.api_response import api_internal_error
@@ -539,6 +587,96 @@ def test_normalize_error_exception_to_envelope():
     _ok('_normalize_error(Exception) → typed envelope')
 
 
+def test_sse_response_headers():
+    """sse_response() emits the canonical text/event-stream header set."""
+    from lib.api_response import sse_response
+    app = _make_app_ctx()
+
+    async def _t():
+        async with app.test_request_context('/test'):
+            def _gen():
+                yield 'data: hi\n\n'
+            resp = sse_response(_gen())
+            assert resp.mimetype == 'text/event-stream'
+            h = resp.headers
+            assert h.get('Cache-Control') == 'no-cache, no-transform'
+            assert h.get('X-Accel-Buffering') == 'no'
+            assert h.get('Connection') == 'keep-alive'
+            assert 'text/event-stream' in (h.get('Content-Type') or '')
+
+    import asyncio
+    asyncio.run(_t())
+    _ok('sse_response() → canonical 4-key SSE headers')
+
+
+def test_sse_response_extra_headers():
+    """extra_headers merge on top of the canonical set (X-Tofu-Task-Id case)."""
+    from lib.api_response import sse_response
+    app = _make_app_ctx()
+
+    async def _t():
+        async with app.test_request_context('/test'):
+            def _gen():
+                yield 'data: hi\n\n'
+            resp = sse_response(_gen(),
+                                extra_headers={'X-Tofu-Task-Id': 'task-abc'})
+            h = resp.headers
+            assert h.get('X-Tofu-Task-Id') == 'task-abc'
+            # Canonical keys still present after the merge.
+            assert h.get('X-Accel-Buffering') == 'no'
+            assert h.get('Connection') == 'keep-alive'
+
+    import asyncio
+    asyncio.run(_t())
+    _ok('sse_response(extra_headers=…) merges without dropping canonical keys')
+
+
+def test_sse_response_matches_legacy_literal():
+    """Double-neuter guard: the helper's headers must equal the exact literal
+    dict the routes used before centralisation. If someone edits _SSE_HEADERS
+    away from the shipped values, this catches the drift."""
+    from lib.api_response import sse_response
+    app = _make_app_ctx()
+    # The verbatim dict that lived at every streaming Response(...) site.
+    legacy = {
+        'Content-Type': 'text/event-stream; charset=utf-8',
+        'Cache-Control': 'no-cache, no-transform',
+        'X-Accel-Buffering': 'no',
+        'Connection': 'keep-alive',
+    }
+
+    async def _t():
+        async with app.test_request_context('/test'):
+            def _gen():
+                yield 'data: x\n\n'
+            resp = sse_response(_gen())
+            for k, v in legacy.items():
+                assert resp.headers.get(k) == v, (
+                    f'header {k!r}: helper={resp.headers.get(k)!r} '
+                    f'legacy={v!r}')
+
+    import asyncio
+    asyncio.run(_t())
+    _ok('sse_response() headers are byte-equal to the legacy literal dict')
+
+
+def test_sse_response_timeout_none():
+    """timeout_none=True disables the response timeout for long streams."""
+    from lib.api_response import sse_response
+    app = _make_app_ctx()
+
+    async def _t():
+        async with app.test_request_context('/test'):
+            def _gen():
+                yield 'data: x\n\n'
+            resp = sse_response(_gen(), timeout_none=True)
+            assert resp.timeout is None
+
+    import asyncio
+    asyncio.run(_t())
+    _ok('sse_response(timeout_none=True) sets resp.timeout = None')
+
+
 def main():
     print()
     print(_color('═══ api_response.py Unit Tests ═══', '36'))
@@ -564,6 +702,9 @@ def main():
         test_api_conflict,
         test_api_payload_too_large,
         test_api_method_not_allowed,
+        test_api_service_unavailable_default,
+        test_api_service_unavailable_custom_retry,
+        test_pool_exhausted_error_is_typed,
         test_api_internal_error_with_exception,
         test_api_internal_error_default,
         test_safe_route_decorator,
@@ -574,6 +715,10 @@ def main():
         test_normalize_error_string_passthrough,
         test_normalize_error_none,
         test_normalize_error_exception_to_envelope,
+        test_sse_response_headers,
+        test_sse_response_extra_headers,
+        test_sse_response_matches_legacy_literal,
+        test_sse_response_timeout_none,
     ]
     for fn in tests:
         try:

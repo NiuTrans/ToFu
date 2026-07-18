@@ -86,7 +86,8 @@ def test_adaptive_hot_tail_compacts_outside_budget():
 def test_adaptive_hot_tail_respects_cache_prefix(monkeypatch):
     from lib.tasks_pkg.compaction import micro_compact
     import lib.tasks_pkg.cache_tracking as ct
-    monkeypatch.setattr(ct, 'get_cache_prefix_count', lambda _cid: 100)
+    monkeypatch.setattr(ct, 'get_cache_prefix_count',
+                        lambda _cid, current_msg_count=None: 100)
     msgs = _mk_tools(12, 12_000)
     # Large cache prefix → most are protected; aggressive lifts it.
     micro_compact(msgs, conv_id='c1', steps=['adaptive_hot_tail'],

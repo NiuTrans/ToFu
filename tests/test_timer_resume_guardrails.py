@@ -45,7 +45,7 @@ def _cleanup():
 
 
 def _new_timer(tools_config=None, check_command='', poll_interval=10,
-               max_polls=120):
+               max_polls=120, origin='inline'):
     t = timer_mod.create_timer(
         conv_id=_CONV,
         check_instruction='Is the run finished?',
@@ -55,6 +55,7 @@ def _new_timer(tools_config=None, check_command='', poll_interval=10,
         check_command=check_command,
         tools_config=tools_config if tools_config is not None else {},
         source_task_id='task-guardrail',
+        origin=origin,
     )
     return t['id']
 
@@ -112,7 +113,11 @@ def test_resume_expires_overage_timer(monkeypatch):
 
 
 def test_resume_keeps_fresh_timer(monkeypatch):
-    fresh = _new_timer(poll_interval=10, max_polls=120)
+    # origin='background' — the respawn path applies only to background timers;
+    # an inline timer is now retired as an orphan on resume (see
+    # test_timer_orphan_retire.py). The age-sweep + cap guardrails under test
+    # here are unchanged and govern the background respawn path.
+    fresh = _new_timer(poll_interval=10, max_polls=120, origin='background')
     _set_created_at(fresh, datetime.now())
 
     spawned: list[str] = []
@@ -128,7 +133,9 @@ def test_resume_keeps_fresh_timer(monkeypatch):
 # ── Fix 3: resume concurrency cap ───────────────────────────────────────────
 
 def test_resume_cap_limits_respawns(monkeypatch):
-    ids = [_new_timer() for _ in range(5)]
+    # origin='background' — the resume cap bounds the background respawn path;
+    # inline timers retire as orphans before the cap loop is reached.
+    ids = [_new_timer(origin='background') for _ in range(5)]
     for tid in ids:
         _set_created_at(tid, datetime.now())
 

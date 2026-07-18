@@ -128,58 +128,8 @@ def test_discard_task_preserves_other_convs_latest():
     discard_task(keep['id'], 'conv-keep-1')
 
 
-# ── Fix A: summarize_run leaves no phantom for the conv ────────────────
-
-@pytest.mark.api
-def test_summarize_leaves_no_phantom(flask_client, monkeypatch):
-    """After summarize_run, NO task for the conv lingers in /api/chat/active and
-    the conv has no _conv_latest_task entry.
-
-    NEGATIVE CONTROL for fix A: revert the carrier to create_task(conv_id, ...)
-    and remove discard_task → the conv-latest index keeps the carrier and the
-    registry holds a phantom running task → this test FAILS.
-
-    The reporter sub-turn is stubbed (offline, deterministic).
-    """
-    import lib.tasks_pkg.autopilot as ap
-    from lib.tasks_pkg import tasks, tasks_lock
-    from lib.tasks_pkg.manager import _conv_latest_task, _conv_latest_task_lock
-
-    conv_id = 'conv-summarize-phantom-1'
-
-    # Stub the heavy/IO bits: messages, reporter turn, sidecar persist, objective.
-    monkeypatch.setattr(
-        'lib.tasks_pkg.conv_message_builder.build_api_messages_from_db',
-        lambda cid, cfg, **kw: [{'role': 'user', 'content': 'do X'},
-                                {'role': 'assistant', 'content': 'did X'}])
-    monkeypatch.setattr(ap, 'run_summary_reporter',
-                        lambda carrier: {'text': 'Outcome: met. Done: X.'})
-    monkeypatch.setattr(ap, '_store_run_summary',
-                        lambda c, r, text, translated: {
-                            'runId': r, 'content': text, 'ts': 0,
-                            '_summaryId': 'sum-1'})
-
-    # Snapshot tasks belonging to this conv before.
-    def _conv_tasks():
-        with tasks_lock:
-            return [tid for tid, t in tasks.items() if t.get('convId') == conv_id]
-
-    assert _conv_tasks() == [], 'precondition: no task for this conv yet'
-
-    result = ap.summarize_run(conv_id, run_id='ar-test-1', config={'model': 'm'})
-    assert result.get('ok') is True, result
-
-    # The carrier must be GONE from the registry (no phantom for this conv).
-    assert _conv_tasks() == [], \
-        'summarize_run left a phantom task in the registry for the conv'
-    # And the conv-latest index must not point at any summarize carrier.
-    with _conv_latest_task_lock:
-        assert conv_id not in _conv_latest_task, \
-            'summarize_run left a _conv_latest_task entry for the conv'
-
-    # Belt-and-braces: /api/chat/active reports nothing for this conv.
-    resp = flask_client.get('/api/v1/chat/active')
-    assert resp.status_code == 200
-    conv_active = [t for t in resp.get_json() if t.get('convId') == conv_id]
-    assert conv_active == [], \
-        f'/api/chat/active still reports a task for the conv: {conv_active}'
+# NOTE: the summarize-carrier phantom test was removed with the autopilot
+# summary REPORT layer (the on-demand summarize_run path is gone). The generic
+# carrier hygiene it also exercised — /api/chat/active hides _inline_messages /
+# _vu_subtask carriers, and discard_task pops the registry + conv-latest index —
+# stays covered by the tests above (still used by the VU reporter-less paths).

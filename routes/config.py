@@ -347,6 +347,15 @@ def get_server_config():
         logger.warning('[ServerConfig] translation policy unavailable: %s', e)
         translation_policy = {}
 
+    # Language-detection cascade policy — single source of truth for the
+    # Tier-1→Tier-2 escalation thresholds. See lib/text_lang.detect_language_policy().
+    try:
+        from lib.text_lang import detect_language_policy
+        lang_detect_policy = detect_language_policy()
+    except Exception as e:
+        logger.warning('[ServerConfig] lang-detect policy unavailable: %s', e)
+        lang_detect_policy = {}
+
     return jsonify({
         'providers': providers, 'presets': presets,
         'models': models, 'search': search_info,
@@ -365,6 +374,7 @@ def get_server_config():
         'upload': upload_policy,
         'context': context_policy,
         'translation': translation_policy,
+        'langDetect': lang_detect_policy,
     })
 
 
@@ -427,7 +437,7 @@ def check_provider_balance():
         return api_error('Request timed out (15s)', status=504)
     except _requests.RequestException as e:
         logger.warning('[Balance] Request failed for %s: %s', balance_url, e)
-        return jsonify({'ok': False, 'error': 'Request failed: %s' % e}), 502
+        return api_error('Request failed: %s' % e, status=502)
     except (ValueError, TypeError) as e:
         logger.warning('[Balance] Invalid JSON from %s: %s', balance_url, e)
         return api_error('Invalid JSON response', status=502)
@@ -455,7 +465,7 @@ def discover_models_endpoint():
         from lib.llm_dispatch.discovery import discover_models, enrich_models_with_pricing
         models = discover_models(base_url, api_key, models_path=models_path)
         if not models:
-            return jsonify({'ok': False, 'error': 'No models found at %s' % base_url}), 404
+            return api_error('No models found at %s' % base_url, status=404)
 
         models = enrich_models_with_pricing(models)
         logger.info('[Discovery] Endpoint returned %d models for %s', len(models), base_url)
@@ -654,7 +664,7 @@ def probe_provider_endpoint():
         return jsonify(result)
     except Exception as e:
         logger.error('[Probe] Endpoint failed: %s', e, exc_info=True)
-        return jsonify({'ok': False, 'error': '探测出错: %s' % e}), 500
+        return api_error('探测出错: %s' % e, status=500)
 
 
 @config_bp.route('/api/v1/providers/probe-bulk', methods=['POST'])

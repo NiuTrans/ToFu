@@ -64,12 +64,25 @@ def _tofu_maybe_reexec_into_env():
         return
     target_py = cfg.get('python') or ''
     env_prefix = cfg.get('env_prefix') or ''
+    backend = cfg.get('backend') or ''
     if not target_py or not os.access(target_py, os.X_OK):
         return
-    try:
-        same = os.path.realpath(target_py) == os.path.realpath(sys.executable)
-    except OSError:
-        same = (target_py == sys.executable)
+    # Prefer a prefix check over a bare interpreter-path compare: a uv venv's
+    # bin/python symlinks to a base CPython, so realpath(target_py) can equal
+    # realpath(sys.executable) while the venv's site-packages are NOT active.
+    # Comparing sys.prefix to env_prefix catches that (falls back to the
+    # interpreter-path compare when env_prefix is absent, e.g. conda markers).
+    same = False
+    if env_prefix:
+        try:
+            same = (os.path.realpath(sys.prefix) == os.path.realpath(env_prefix))
+        except OSError:
+            same = (sys.prefix == env_prefix)
+    else:
+        try:
+            same = os.path.realpath(target_py) == os.path.realpath(sys.executable)
+        except OSError:
+            same = (target_py == sys.executable)
     if same:
         return
     if os.environ.get('_TOFU_ENV_REEXEC') == '1':
@@ -90,8 +103,12 @@ def _tofu_maybe_reexec_into_env():
         env_bin = os.path.join(env_prefix, 'bin')
         if os.path.isdir(env_bin):
             os.environ['PATH'] = env_bin + os.pathsep + os.environ.get('PATH', '')
-        os.environ.setdefault('CONDA_PREFIX', env_prefix)
-    if cfg.get('env_name'):
+        # A uv venv (backend='uv') is not a conda env — don't set CONDA_PREFIX,
+        # or _running_in_conda_env() below misfires and routes the pip fallback
+        # down the conda-forge branch.
+        if backend != 'uv':
+            os.environ.setdefault('CONDA_PREFIX', env_prefix)
+    if backend != 'uv' and cfg.get('env_name'):
         os.environ.setdefault('CONDA_DEFAULT_ENV', cfg['env_name'])
     os.environ['_TOFU_ENV_REEXEC'] = '1'
     sys.stderr.write(f'[bootstrap.py] Re-exec into Tofu env python: {target_py}\n')

@@ -121,13 +121,15 @@ def row_to_message(row) -> dict:
         # — callers should pass dict-like rows. Defensive fallthrough.
         try:
             meta = row[8]
-        except (IndexError, TypeError):
+        except (IndexError, TypeError) as e:
+            logger.debug('[messages_rows] positional meta extract failed: %s', e)
             meta = '{}'
     if isinstance(meta, (bytes, bytearray)):
         meta = meta.decode('utf-8', 'replace')
     try:
         obj = json.loads(meta) if isinstance(meta, str) else (meta or {})
-    except (json.JSONDecodeError, TypeError):
+    except (json.JSONDecodeError, TypeError) as e:
+        logger.debug('[messages_rows] meta JSON parse failed: %s', e)
         obj = {}
     return obj if isinstance(obj, dict) else {}
 
@@ -147,7 +149,8 @@ def _parse_messages(messages):
     if isinstance(messages, str):
         try:
             messages = json.loads(messages)
-        except (json.JSONDecodeError, TypeError):
+        except (json.JSONDecodeError, TypeError) as e:
+            logger.debug('[messages_rows] messages JSON parse failed: %s', e)
             return []
     return messages if isinstance(messages, list) else []
 
@@ -185,6 +188,88 @@ def dual_write_conv(db, conv_id: str, messages, *, now_ms: int = 0) -> None:
     except Exception as e:  # pragma: no cover - defensive
         logger.warning('[messages_rows] dual-write mirror failed conv=%s (non-fatal): %s',
                        (conv_id or '')[:12], e)
+
+
+# ── Windowed read (tail window + page-up) ─────────────────────────────────
+
+def load_message_window(db, conv_id: str, limit: int, before_seq=None) -> dict:
+    """Load a WINDOW of a conversation's messages from the row store.
+
+    The root-cause fix for slow first-open of long conversations: instead of
+    detoasting + parsing the whole ``conversations.messages`` blob (cost linear
+    in history length), read only ``limit`` rows via the ``idx_conv_msgs_conv``
+    ``(conv_id, seq)`` index (cost constant in the window).
+
+    Args:
+        db: DB wrapper.
+        conv_id: conversation id.
+        limit: max messages to return (the window size N). ``<=0`` disables the
+            window and returns the whole conversation.
+        before_seq: when set, page UPWARD — return the window of messages with
+            ``seq < before_seq`` (the ``limit`` messages ending just before it).
+            When ``None``, return the TAIL window (the newest ``limit``).
+
+    Returns a dict::
+
+        {
+          'messages':      [msg, ...],   # ascending seq order
+          'totalCount':    int,          # total rows for this conv
+          'firstLoadedSeq': int|None,    # seq of the first (oldest) returned msg
+          'lastLoadedSeq':  int|None,    # seq of the last (newest) returned msg
+          'hasMore':       bool,         # True iff older messages exist above the window
+        }
+
+    Pure read: no writes, never mutates. Callers gate on ``rows_read_enabled()``
+    and fail open to the single-blob path on any error.
+    """
+    # total count is authoritative from the row store (COUNT on the covering
+    # index); callers that already know msg_count may skip this, but keeping it
+    # here makes the function self-contained.
+    try:
+        cnt_row = db.execute(
+            'SELECT COUNT(*) AS n FROM conversation_messages WHERE conv_id=?',
+            (conv_id,)).fetchone()
+        total = int(cnt_row['n'] if hasattr(cnt_row, 'keys') else cnt_row[0]) if cnt_row else 0
+    except Exception as e:
+        logger.debug('[messages_rows] window count failed conv=%s: %s',
+                     (conv_id or '')[:12], e)
+        total = 0
+
+    if limit is None or limit <= 0:
+        rows = db.execute(
+            'SELECT meta, seq FROM conversation_messages WHERE conv_id=? ORDER BY seq',
+            (conv_id,)).fetchall()
+    elif before_seq is not None:
+        # page upward: the `limit` messages with seq < before_seq (newest of the
+        # older block first, then reversed to ascending).
+        rows = db.execute(
+            'SELECT meta, seq FROM conversation_messages WHERE conv_id=? AND seq<? '
+            'ORDER BY seq DESC LIMIT ?', (conv_id, int(before_seq), int(limit))).fetchall()
+        rows = list(reversed(rows))
+    else:
+        # tail window: the newest `limit` messages, reversed to ascending.
+        rows = db.execute(
+            'SELECT meta, seq FROM conversation_messages WHERE conv_id=? '
+            'ORDER BY seq DESC LIMIT ?', (conv_id, int(limit))).fetchall()
+        rows = list(reversed(rows))
+
+    def _seq(r):
+        try:
+            return int(r['seq'] if hasattr(r, 'keys') else r[1])
+        except (KeyError, IndexError, TypeError, ValueError):
+            return None
+
+    msgs = rows_to_messages(rows)
+    first_seq = _seq(rows[0]) if rows else None
+    last_seq = _seq(rows[-1]) if rows else None
+    has_more = bool(first_seq is not None and first_seq > 0)
+    return {
+        'messages': msgs,
+        'totalCount': total,
+        'firstLoadedSeq': first_seq,
+        'lastLoadedSeq': last_seq,
+        'hasMore': has_more,
+    }
 
 
 # ── Verification gate ─────────────────────────────────────────────────────
@@ -241,6 +326,6 @@ def verify_conv_parity(db, conv_id: str) -> dict:
 __all__ = [
     'rows_write_enabled', 'rows_read_enabled',
     'message_to_row', 'row_to_message', 'rows_to_messages',
-    'backfill_conv', 'dual_write_conv',
+    'backfill_conv', 'dual_write_conv', 'load_message_window',
     'verify_search_text_parity', 'verify_conv_parity',
 ]

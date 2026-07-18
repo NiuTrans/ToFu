@@ -37,6 +37,17 @@ _IRRELEVANT_STOP = '§§IRRELEVANT§§'
 _installed = False
 
 
+def _env_bool(key: str, default: bool) -> bool:
+    """Parse a boolean env var, falling back to ``default`` when unset.
+
+    Truthy tokens: 1/true/yes/on (case-insensitive); everything else is False.
+    """
+    raw = os.environ.get(key)
+    if raw is None:
+        return default
+    return raw.strip().lower() in ('1', 'true', 'yes', 'on')
+
+
 # ═══════════════════════════════════════════════════════
 #  LLM seam — chatui dispatch_chat
 # ═══════════════════════════════════════════════════════
@@ -239,10 +250,35 @@ def sync_search_config():
     """Push chatui's live FETCH_* settings into tofu-search's global config."""
     filter_enabled = getattr(_lib, 'LLM_CONTENT_FILTER_ENABLED', True)
     proxy_url = _resolve_proxy_url()
+
+    # ── Pre-fetch relevance gate (tofu-search >=0.3.2) ──
+    # These three knobs have NO env-var fallback inside tofu_search.configure(),
+    # so unless the bridge passes them explicitly they are un-tunable from
+    # chatui and silently run the library defaults. Wire them through here.
+    prefetch_gate_enabled = _env_bool('PREFETCH_GATE_ENABLED',
+                                      getattr(_lib, 'PREFETCH_GATE_ENABLED', True))
+    prefetch_gate_min_query_terms = int(os.environ.get('PREFETCH_GATE_MIN_QUERY_TERMS', '2'))
+    prefetch_gate_min_fetch = int(os.environ.get('PREFETCH_GATE_MIN_FETCH', '3'))
+    # ── Adaptive dual-path proxy (tofu-search >=0.4.1) ──
+    # configure() DOES auto-read TOFU_SEARCH_PROXY_DUAL_ATTEMPT from env, but we
+    # pass it explicitly so the effective value is visible in the log line below
+    # and stays parity with the other knobs (default on = try proxied↔direct).
+    proxy_dual_attempt = _env_bool('TOFU_SEARCH_PROXY_DUAL_ATTEMPT', True)
+
+    # ── Wall-clock deadlines (tofu-search >=0.5) ──
+    # configure() auto-reads these from env too, but pass them explicitly so the
+    # effective values are visible in the log line below and stay tunable from
+    # chatui. Safe defaults match the library (45s whole-call / 25s per-URL);
+    # 0 restores the legacy unbounded behaviour.
+    search_deadline_secs = int(os.environ.get('TOFU_SEARCH_DEADLINE_SECS', '45'))
+    fetch_url_deadline_secs = int(os.environ.get('TOFU_SEARCH_FETCH_URL_DEADLINE_SECS', '25'))
+
     tofu_search.configure(
         llm_function=_chatui_llm,
         fetch_top_n=_lib.FETCH_TOP_N,
         fetch_timeout=_lib.FETCH_TIMEOUT,
+        search_deadline_secs=search_deadline_secs,
+        fetch_url_deadline_secs=fetch_url_deadline_secs,
         fetch_max_chars_search=_lib.FETCH_MAX_CHARS_SEARCH,
         fetch_max_chars_direct=_lib.FETCH_MAX_CHARS_DIRECT,
         fetch_max_chars_pdf=_lib.FETCH_MAX_CHARS_PDF,
@@ -252,15 +288,25 @@ def sync_search_config():
         filter_min_chars=int(os.environ.get('FETCH_FILTER_MIN_CHARS', '3000')),
         filter_timeout=int(os.environ.get('FETCH_FILTER_TIMEOUT', '300')),
         proxy_url=proxy_url,
+        proxy_dual_attempt=proxy_dual_attempt,
+        prefetch_gate_enabled=prefetch_gate_enabled,
+        prefetch_gate_min_query_terms=prefetch_gate_min_query_terms,
+        prefetch_gate_min_fetch=prefetch_gate_min_fetch,
     )
     logger.info('[Bridge] tofu-search config synced: top_n=%d timeout=%ds '
-                'max_chars(search=%d direct=%d pdf=%d) filter=%s model=%r proxy=%s',
+                'deadline(call=%ds url=%ds) '
+                'max_chars(search=%d direct=%d pdf=%d) filter=%s model=%r proxy=%s '
+                'dual_attempt=%s prefetch_gate=%s(terms>=%d,floor=%d)',
                 _lib.FETCH_TOP_N, _lib.FETCH_TIMEOUT,
+                search_deadline_secs, fetch_url_deadline_secs,
                 _lib.FETCH_MAX_CHARS_SEARCH, _lib.FETCH_MAX_CHARS_DIRECT,
                 _lib.FETCH_MAX_CHARS_PDF,
                 'on' if filter_enabled else 'off',
                 _FILTER_MODEL or 'dispatch-default',
-                'set' if proxy_url else 'env/none')
+                'set' if proxy_url else 'env/none',
+                'on' if proxy_dual_attempt else 'off',
+                'on' if prefetch_gate_enabled else 'off',
+                prefetch_gate_min_query_terms, prefetch_gate_min_fetch)
 
 
 def install_search_bridge():

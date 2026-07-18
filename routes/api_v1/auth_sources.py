@@ -22,9 +22,9 @@ cookie-paste path (POST with ``cookie_header``) is the universal fallback.
 
 from __future__ import annotations
 
-from flask import Blueprint, jsonify
+from flask import Blueprint
 
-from lib.api_response import api_bad_request, api_internal_error, api_ok
+from lib.api_response import api_bad_request, api_error, api_internal_error, api_ok
 from lib.log import get_logger
 from lib.openapi import api_meta
 from lib.request_parser import parse_body
@@ -99,7 +99,7 @@ def toggle_auth_source(domain):
     data = parse_body()
     enabled = bool(data.get('enabled', True))
     if not set_enabled(domain, enabled):
-        return jsonify({'ok': False, 'error': f'Unknown source: {domain}'}), 404
+        return api_error(f'Unknown source: {domain}', status=404)
     return api_ok({'domain': domain, 'enabled': enabled})
 
 
@@ -113,7 +113,7 @@ def toggle_auth_source(domain):
 def delete_auth_source(domain):
     from lib.auth_sources import delete_source
     if not delete_source(domain):
-        return jsonify({'ok': False, 'error': f'Unknown source: {domain}'}), 404
+        return api_error(f'Unknown source: {domain}', status=404)
     return api_ok({'domain': domain})
 
 
@@ -158,8 +158,8 @@ def interactive_login(domain):
         # Unavailable (no display / headless-only) → 503 so the UI can
         # cleanly fall back to the manual paste path.
         code = 503 if result.get('reason') == 'unavailable' else 400
-        return jsonify({'ok': False, 'error': result.get('error', 'login failed'),
-                        'reason': result.get('reason', '')}), code
+        return api_error(result.get('error', 'login failed'), status=code,
+                         reason=result.get('reason', ''))
 
     # tofu-search's capture_login_cookies RETURNS the cookies (it has no
     # knowledge of chatui's auth-source store); persist them here.

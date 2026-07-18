@@ -287,6 +287,55 @@ def test_spawn_inside_event_loop():
     _ok('spawn() works inside event loop (asyncio.to_thread)')
 
 
+def test_spawn_holds_strong_ref_under_gc():
+    """The asyncio branch must keep a STRONG reference to the worker Task.
+
+    The event loop holds only a weak reference to a bare ensure_future()
+    result, so under GC pressure an untracked Task can be collected mid-flight
+    and the worker silently never runs. spawn() must register the Task in
+    self._bg_tasks so it survives gc.collect(), and evict it on completion.
+    """
+    import gc
+
+    rt = TaskRuntime('test')
+
+    async def _runner():
+        N = 25
+        completed = [threading.Event() for _ in range(N)]
+        ids = []
+        for i in range(N):
+            task = rt.create()
+            ids.append(task['id'])
+
+            def worker(idx, tid):
+                time.sleep(0.01)
+                rt.finish(tid, result='ok')
+                completed[idx].set()
+
+            rt.spawn(task['id'], worker, i, task['id'])
+            # Hammer GC in the scheduling window — a weakly-referenced Task
+            # would be collectible here.
+            gc.collect()
+
+        # While workers are in flight, the strong-ref set must be non-empty.
+        assert rt._bg_tasks, 'spawn() kept no strong ref — Task is GC-droppable'
+
+        for _ in range(200):
+            if all(c.is_set() for c in completed):
+                break
+            gc.collect()
+            await asyncio.sleep(0.01)
+        return ids
+
+    ids = asyncio.run(_runner())
+    for tid in ids:
+        t = rt.get(tid)
+        assert t['status'] == 'done', f'task {tid[:8]} dropped: {t["status"]}'
+    # The done-callback must have self-evicted every finished Task.
+    assert rt._bg_tasks == set(), 'bg-task set did not self-evict on completion'
+    _ok('spawn() holds a strong ref (GC-safe) and self-evicts on done')
+
+
 def test_spawn_worker_crash_caught():
     """If the worker raises uncaught, finish(error=) is auto-called."""
     rt = TaskRuntime('test')
@@ -507,6 +556,7 @@ def main():
         test_poll_unknown_task,
         test_spawn_outside_event_loop,
         test_spawn_inside_event_loop,
+        test_spawn_holds_strong_ref_under_gc,
         test_spawn_worker_crash_caught,
         test_abort_event_signal,
         test_cleanup_stale,

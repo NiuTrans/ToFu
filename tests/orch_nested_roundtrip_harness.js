@@ -29,6 +29,11 @@ const path = require('path');
 const { JSDOM } = require('jsdom');
 
 const ROOT = path.join(__dirname, '..');
+// The role/control/glyph catalog was extracted out of orchestration.js into
+// orchestration-catalog.js (2026-07) and is read at runtime by the module
+// under test (_ORCH_CONTROLS / _ORCH_ROLES). The production bundle concatenates
+// it BEFORE orchestration.js, so the harness must eval it first too.
+const CATALOG = fs.readFileSync(path.join(ROOT, 'static', 'js', 'orchestration-catalog.js'), 'utf8');
 const SRC = fs.readFileSync(path.join(ROOT, 'static', 'js', 'orchestration.js'), 'utf8');
 
 const dom = new JSDOM('<!DOCTYPE html><html><body></body></html>', {
@@ -52,7 +57,10 @@ W.eval(`
   var BASE_PATH = '';
 `);
 
-// Load the module under test into window scope.
+// Load the extracted catalog first (defines _ORCH_CONTROLS / _ORCH_ROLES /
+// _ORCH_ICONS that orchestration.js reads at runtime), then the module under
+// test — mirroring the production bundle's file order.
+W.eval(CATALOG);
 W.eval(SRC);
 
 // ── Tiny assert harness ──

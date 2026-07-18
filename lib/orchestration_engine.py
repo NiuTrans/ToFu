@@ -46,9 +46,13 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from lib.agent_verdict import (
+    AUTOPILOT_STUCK_WINDOW as _AUTOPILOT_STUCK_WINDOW,
     STATE_CHANGING_TOOLS_WITH_CODE_EXEC as _STATE_CHANGING_TOOLS,
+    autopilot_progress_window as _autopilot_progress_window,
     classify_verdict as _classify_verdict_core,
+    detect_diminishing_returns as _detect_diminishing_returns_core,
     detect_stuck as _detect_stuck_core,
+    parse_progress as _parse_progress,
 )
 from lib.log import get_logger
 from lib.orchestration import (
@@ -372,6 +376,23 @@ class FlowExecutor:
         self._last_producer_snapshot: dict = {}
         # Verifier feedback history (per active loop) for stuck-detection.
         self._feedback_history: list[str] = []
+        # ── VU progress ledger (per active loop, the diminishing-returns axis) ──
+        # Per VU turn: {'resolved_delta': int|None, 'targets': list[str]} —
+        # ``resolved_delta`` from the VU's mandatory [PROGRESS: resolved=X
+        # remaining=Y] line (None when absent → the guard fails open),
+        # ``targets`` = the producer's state-changing tool names that turn (the
+        # churn signal). ONLY populated when the loop's verifier is a
+        # virtual_user; critic/reviewer loops leave it empty (guard never
+        # fires). Reset per loop entry, mirroring _feedback_history.
+        self._vu_progress: list[dict] = []
+        # ── Loop-exit ledger (the terminal-honesty axis) ──
+        # One record per loop the walk runs: {node_id, reason, iterations}.
+        # ``reason`` ∈ {'stop','stuck','no_progress','replan_exhausted',
+        # 'max_iterations'} — the REAL reason the loop left, so run() can
+        # surface a non-converged exit (a burned budget with no STOP verdict)
+        # as an INCOMPLETE stop instead of silently reporting 'completed'.
+        # A loop that exits on a clean verifier STOP records 'stop'.
+        self._loop_exits: list[dict] = []
         # Declared deliverables (artifact nodes) encountered during the walk.
         self._artifacts: list[dict] = []
 
@@ -422,17 +443,47 @@ class FlowExecutor:
             status, error = 'failed', f'{type(e).__name__}: {e}'
             logger.error('[FlowEngine] run crashed: %s', e, exc_info=True)
 
+        # ── Terminal honesty ──
+        # A flow whose walk finished without a structural failure is
+        # status='completed' — but if a LOOP inside it burned its budget
+        # without a verifier STOP (max_iterations / stuck / replan_exhausted /
+        # no_progress), the objective is NOT verified-complete. Surface the
+        # first such incomplete exit as ``stop_reason`` so the caller reports
+        # it honestly instead of a clean 'completed' (parity with the live
+        # endpoint / autopilot loops' incomplete-stop contract). A loop that
+        # exited on a clean 'stop' is completed and does not set stop_reason.
+        from lib.agent_verdict import is_incomplete_stop
+        stop_reason = 'completed'
+        incomplete = None
+        if status == 'completed':
+            for ex in self._loop_exits:
+                if is_incomplete_stop(ex.get('reason') or ''):
+                    incomplete = ex
+                    break
+            if incomplete is not None:
+                stop_reason = incomplete['reason']
+        elif status == 'aborted':
+            stop_reason = 'aborted'
+        elif status == 'failed':
+            stop_reason = error or 'failed'
+
         elapsed = time.monotonic() - t0
         self._emit({'type': 'flow_complete', 'status': status,
-                    'agents_run': self._agents_run, 'elapsed': round(elapsed, 1)})
-        logger.info('[FlowEngine] run DONE status=%s agents=%d elapsed=%.1fs',
-                    status, self._agents_run, elapsed)
+                    'agents_run': self._agents_run, 'elapsed': round(elapsed, 1),
+                    'stop_reason': stop_reason})
+        logger.info('[FlowEngine] run DONE status=%s reason=%s agents=%d '
+                    'elapsed=%.1fs', status, stop_reason, self._agents_run, elapsed)
         return {
-            'ok': status == 'completed',
+            # ``ok`` now means BOTH "no structural failure" AND "no loop left
+            # non-converged" — a burned-budget run is ok=False so callers stop
+            # reporting it as a clean success.
+            'ok': status == 'completed' and incomplete is None,
             'status': status,
+            'stop_reason': stop_reason,
             'final': final,
             'transcript': self._transcript,
             'trace': list(self._trace),
+            'loop_exits': list(self._loop_exits),
             'agents_run': self._agents_run,
             'artifacts': list(self._artifacts),
             'error': error,
@@ -1028,12 +1079,21 @@ class FlowExecutor:
             self._pending_feedback = ''
             self._pending_directive = ''
             self._feedback_history = []
+            self._vu_progress = []
         zero_streak = 0
         replans = 0
+        # Terminal-honesty: the REAL reason this loop left. Defaults to
+        # 'max_iterations' — the ``for/else`` (budget exhausted with no STOP)
+        # falls through without reassigning it, so a burned-out loop is never
+        # mislabelled 'completed'. Any convergent/early exit reassigns it.
+        exit_reason = 'max_iterations'
+        completed_iterations = 0
+        replan_exhausted = False
         for i in range(cap):
             if self._abort_check():
                 raise _AbortSignal()
             self._cur_iteration = i + 1
+            completed_iterations = i + 1
             self._emit({'type': 'loop_iteration', 'node_id': lid,
                         'iteration': i + 1, 'max': cap})
             # Run the body chain, stopping when it loops back to the loop node.
@@ -1058,21 +1118,74 @@ class FlowExecutor:
                 continue   # force another iteration, skip the verdict check
 
             verifier_out = self._last_verifier_output()
+            verifier_role = self._last_verifier_role()
             self._feedback_history.append(verifier_out)
             phase, defect = self._classify_verdict(
-                verifier_out, verifier_role=self._last_verifier_role())
+                verifier_out, verifier_role=verifier_role)
+
+            # ── VU progress ledger (virtual_user path only) ──
+            # Record this turn's hard progress signal + churn target set so the
+            # diminishing-returns guard can catch early churn (worker edits the
+            # same spot every turn without resolving new objective items). Only
+            # the VU is instructed to emit [PROGRESS]; a critic/reviewer never
+            # is, so this stays empty for those loops and the guard fails open.
+            if verifier_role == 'virtual_user':
+                resolved, _remaining = _parse_progress(verifier_out)
+                prev_cum = None
+                for _e in reversed(self._vu_progress):
+                    if _e.get('cum_resolved') is not None:
+                        prev_cum = _e['cum_resolved']
+                        break
+                if resolved is None:
+                    _delta, _cum = None, prev_cum
+                else:
+                    _delta = resolved - prev_cum if prev_cum is not None else resolved
+                    if _delta < 0:
+                        _delta = 0
+                    _cum = resolved
+                snap = self._last_producer_snapshot or {}
+                _targets = sorted({str(n) for n in (snap.get('names') or []) if n})
+                self._vu_progress.append({'resolved_delta': _delta,
+                                          'cum_resolved': _cum,
+                                          'targets': _targets})
 
             if phase == 'stop':
                 logger.info('[FlowEngine] loop %s STOP after iteration %d', lid, i + 1)
+                exit_reason = 'stop'
                 break
 
-            # ── Stuck detection: a repeating critic means no convergence ──
-            if self._detect_stuck() and i + 1 < cap:
+            # ── Stuck detection: a repeating verifier means no convergence.
+            #    The VU path uses AUTOPILOT_STUCK_WINDOW (3) — two near-identical
+            #    VU nudges can be a legitimate "you didn't do it, try again";
+            #    three in a row is a genuine non-converging loop. A critic keeps
+            #    the default window (2) so critic-loop semantics are unchanged. ──
+            if self._detect_stuck(verifier_role=verifier_role) and i + 1 < cap:
                 self._emit({'type': 'stuck_detected', 'node_id': lid,
                             'iteration': i + 1})
                 logger.info('[FlowEngine] loop %s STUCK (repeating feedback) — '
                             'breaking after iteration %d', lid, i + 1)
+                exit_reason = 'stuck'
                 break
+
+            # ── Diminishing-returns guard (virtual_user path only, fail-open) ──
+            # Repetition (stuck) is necessary but not sufficient: a VU that
+            # flags a genuine-but-tiny item emits NON-similar feedback each turn
+            # (stuck never fires) while the worker ships a real edit each turn
+            # (zero-deliverable never fires) — yet no NET progress. The hard
+            # [PROGRESS] signal catches exactly that. FAIL-OPEN: absent/
+            # unparseable PROGRESS ⇒ resolved_delta=None ⇒ guard can't prove
+            # no-progress ⇒ never fires (so critic/reviewer loops are untouched).
+            if verifier_role == 'virtual_user' and i + 1 < cap:
+                _pw = _autopilot_progress_window()
+                if _pw and _detect_diminishing_returns_core(
+                        self._vu_progress, window=_pw):
+                    self._emit({'type': 'no_progress', 'node_id': lid,
+                                'iteration': i + 1, 'window': _pw})
+                    logger.info('[FlowEngine] loop %s NO-PROGRESS (churn without '
+                                'net resolved items over %d turns) — breaking '
+                                'after iteration %d', lid, _pw, i + 1)
+                    exit_reason = 'no_progress'
+                    break
 
             if (phase == 'planner' and planner_id and replans < _MAX_REPLANS
                     and i + 1 < cap):
@@ -1085,10 +1198,26 @@ class FlowExecutor:
                 context = self._run_replan(planner_id, context, defect, replans)
                 continue
 
+            # A CONTINUE_PLANNER we can no longer honour (replan budget spent):
+            # the loop keeps iterating as a worker (UNCHANGED control flow) but
+            # remember it, so a subsequent cap-hit is labelled the more precise
+            # 'replan_exhausted' rather than a bare 'max_iterations'.
+            if phase == 'planner' and replans >= _MAX_REPLANS:
+                replan_exhausted = True
+
             # phase == 'worker' (or planner exhausted/downgraded) → iterate.
         else:
-            logger.info('[FlowEngine] loop %s hit cap %d', lid, cap)
+            # Budget exhausted with no STOP verdict. Distinguish a flapping
+            # critic that ran out of replans from a plain runaway worker.
+            if replan_exhausted:
+                exit_reason = 'replan_exhausted'
+            logger.info('[FlowEngine] loop %s hit cap %d (no STOP verdict, '
+                        'reason=%s)', lid, cap, exit_reason)
 
+        # Record the loop's terminal reason so run() can surface a
+        # non-converged exit honestly (see is_incomplete_stop).
+        self._loop_exits.append({'node_id': lid, 'reason': exit_reason,
+                                 'iterations': completed_iterations})
         self._cur_iteration = 0   # left the loop — subsequent nodes are post-loop
         return context, exit_node
 
@@ -1267,7 +1396,8 @@ class FlowExecutor:
         timeout = params.get('timeout_sec')
         try:
             timeout = int(timeout) if timeout not in (None, '') else 300
-        except (ValueError, TypeError):
+        except (ValueError, TypeError) as e:
+            logger.debug('[FlowEngine] bad timeout_sec param (defaulting 300): %s', e)
             timeout = 300
         approved = request_write_approval(req_id, timeout=timeout)
         self._emit({'type': 'human_resolved', 'node_id': nid, 'mode': mode,
@@ -1322,14 +1452,23 @@ class FlowExecutor:
             text, verifier_role=verifier_role, loose_fallback=True)
         return res['phase'], res['plan_defect']
 
-    def _detect_stuck(self) -> bool:
-        """True if the last two verifier feedbacks are >_STUCK_JACCARD similar.
+    def _detect_stuck(self, *, verifier_role: str = '') -> bool:
+        """True if consecutive verifier feedbacks are >_STUCK_JACCARD similar.
 
         Delegates to the shared :func:`lib.agent_verdict.detect_stuck` — a
-        repeating critic means the loop is not converging; the loop breaks
+        repeating verifier means the loop is not converging; the loop breaks
         out rather than burning iterations.
+
+        The window depends on the verifier: a ``virtual_user`` uses
+        :data:`AUTOPILOT_STUCK_WINDOW` (3) — parity with the standalone
+        autopilot loop, where two near-identical VU nudges can be a legitimate
+        "you didn't do it, try again" and only three-in-a-row is genuinely
+        stuck. Any other verifier (critic / reviewer) keeps the default
+        window (2) so existing Studio-flow semantics are byte-unchanged.
         """
-        return _detect_stuck_core(self._feedback_history, threshold=_STUCK_JACCARD)
+        window = _AUTOPILOT_STUCK_WINDOW if verifier_role == 'virtual_user' else 2
+        return _detect_stuck_core(self._feedback_history, threshold=_STUCK_JACCARD,
+                                  window=window)
 
     def _append_context(self, context: str, role: str, out: str) -> str:
         block = f'[{role}]\n{out}'.strip()
@@ -1515,7 +1654,8 @@ class _AbortAwareShim:
         if key == 'aborted':
             try:
                 return bool(self._abort_check())
-            except Exception:
+            except Exception as e:
+                logger.debug('[FlowEngine] abort_check raised (treating as not-aborted): %s', e)
                 return False
         if key == 'id':
             return self._id
@@ -1537,6 +1677,7 @@ def compile_plan(definition: dict) -> dict:
     try:
         definition = expand_subflows(definition)
     except ValueError as e:
+        logger.debug('[FlowEngine] compile_plan subflow expansion failed: %s', e)
         return {'ok': False, 'steps': [], 'error': f'subflow: {e}'}
 
     nodes = {n['id']: n for n in definition.get('nodes', [])}

@@ -191,7 +191,8 @@ function scrollToTurn(idx) {
   }
 }
 /* ★ Perf: (1) cache one getBoundingClientRect for container, (2) only touch classList
- * when active dot actually changes, (3) break early once past threshold */
+ * when active dot actually changes, (3) walk incrementally from the previous
+ * active dot instead of rescanning from 0. */
 let _lastActiveDotIdx = -1;
 function updateActiveTurn() {
   const nav = document.getElementById("turnNav");
@@ -201,16 +202,54 @@ function updateActiveTurn() {
   const ctRect = ct.getBoundingClientRect();
   const thr = ctRect.top + ctRect.height * 0.3;
   const dots = nav.querySelectorAll(".turn-dot");
-  if (!dots.length) return;
-  let ai = 0;
-  for (let i = 0; i < dots.length; i++) {
+  const n = dots.length;
+  if (!n) return;
+  /* Top of a dot's message element, or null when it's lazy-unrendered (an
+   * older message scrolled out of the rendered window — skip, don't break). */
+  const topOf = (i) => {
     const el = document.getElementById("msg-" + dots[i].getAttribute("data-msg-idx"));
-    if (!el) continue;  // lazy-unrendered (older) message — skip, don't break
-    /* Dots are in vertical order: once one starts below the threshold, all
-     * later ones do too, so stop measuring — avoids a full getBoundingClientRect
-     * pass over every dot on every scroll frame. */
-    if (el.getBoundingClientRect().top <= thr) ai = i;
-    else break;
+    return el ? el.getBoundingClientRect().top : null;
+  };
+  /* The active dot is the highest-index RENDERED dot whose top is at/above the
+   * threshold line. Dot tops increase monotonically with index, so a linear
+   * scan from 0 costs O(activeIdx) getBoundingClientRect reads per frame —
+   * O(N) when reading near the bottom of a long conversation, which is the
+   * dominant scroll-jank cost. Scrolling moves the boundary by ~1 dot per
+   * frame, so seed from the previous active index and walk only the needed
+   * direction (O(delta)). The result is identical to the full scan. */
+  const prev = (_lastActiveDotIdx >= 0 && _lastActiveDotIdx < n) ? _lastActiveDotIdx : -1;
+  const tp = prev >= 0 ? topOf(prev) : null;
+  let ai;
+  if (prev < 0 || tp === null) {
+    /* No usable anchor (first run, nav rebuilt, or the anchored dot was
+     * lazy-unrendered) — full forward scan with early break. Rare; not the
+     * hot scroll path. */
+    ai = 0;
+    for (let i = 0; i < n; i++) {
+      const t = topOf(i);
+      if (t === null) continue;
+      if (t <= thr) ai = i;
+      else break;
+    }
+  } else if (tp <= thr) {
+    /* Anchor is at/above the line — every earlier dot is too, so climb forward
+     * while later rendered dots stay at/above the line. */
+    ai = prev;
+    for (let i = prev + 1; i < n; i++) {
+      const t = topOf(i);
+      if (t === null) continue;
+      if (t <= thr) ai = i;
+      else break;
+    }
+  } else {
+    /* Anchor is below the line — every later dot is too, so descend to the
+     * highest rendered dot at/above the line (0 if none qualifies). */
+    ai = 0;
+    for (let i = prev - 1; i >= 0; i--) {
+      const t = topOf(i);
+      if (t === null) continue;
+      if (t <= thr) { ai = i; break; }
+    }
   }
   if (ai !== _lastActiveDotIdx) {
     if (_lastActiveDotIdx >= 0 && _lastActiveDotIdx < dots.length)

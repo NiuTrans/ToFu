@@ -270,7 +270,41 @@ Still to confirm operationally (does NOT block the design or step 1–2 code,
 only the scale rollout): **managed Redis vs self-run** in the target
 (Meituan/internal) environment — its availability/failover story tunes the
 fail-open posture (§4), but the fail-open behaviour itself is already
-specified and is correct regardless.
+specified and is correct regardless. **→ RESOLVED in §7a below.**
+
+## 7a. Managed-vs-self-run Redis — RESOLVED by owner 2026-07-04 ("most robust / long-term; ignore migration cost")
+
+**Decision: MANAGED Redis with HA / automatic failover — NOT a self-run single
+instance.** The owner delegated this with an explicit rule: pick the most
+long-term, robust option and do not weigh migration cost.
+
+Rationale (robust-first):
+- Redis is the SINGLE substrate for BOTH B (pub/sub fan-out) and C
+  (counters + lease-TTL, §4/§5). At the 100k-concurrent target it sits on the
+  critical path of every replica's ambient event delivery AND every
+  admission/SSE capacity decision. A self-run single Redis is therefore a
+  fleet-wide SPOF whose failure silently collapses cross-replica push and
+  wedges capacity accounting — precisely the failure class this epic exists to
+  remove. A managed HA tier (primary + replica + automatic failover) removes
+  that SPOF.
+- The fail-open seam (§4) is retained UNCHANGED and is now a *degradation
+  backstop during a failover blip*, not the steady-state posture: if the
+  managed endpoint is briefly unreachable a replica degrades to local-only
+  delivery + loud logs, then rejoins the bus when failover completes. This is
+  strictly safer than leaning on fail-open to paper over a self-run instance
+  that has no failover at all.
+- Persistence posture: the bus itself needs no durability (§3.2 — `/api/push`
+  is best-effort, Last-Event-ID durability is SSE-only). The lease/counter
+  keys (§5) are reconstructible from live heartbeats within one `lease_ttl`
+  window, so a failover that loses volatile keys self-heals — an AOF/RDB
+  durability requirement is NOT imposed on the managed tier (keeps the managed
+  offering cheap and the design tolerant of a cold failover).
+
+If a managed Redis is genuinely unavailable in a specific deployment, the
+ordered fallback is: (1) a self-run Redis Sentinel/Cluster HA pair (still HA,
+just self-operated), and only then (2) the §5.5 Postgres-lease +
+`LISTEN/NOTIFY` path — which remains a documented last resort, never the
+target. The design target is managed HA.
 
 ## 8. Scope boundary
 

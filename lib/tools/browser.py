@@ -105,7 +105,7 @@ BROWSER_TOOL_SCREENSHOT = {
             "Use this to: 1) Understand page layout; 2) See Canvas-rendered content (charts, graphs, DAG diagrams); "
             "3) Verify click/navigation results; 4) Read text from images when DOM extraction fails.\n"
             "Prefer the default full-page capture so you don't miss content below the fold. "
-            "Only set fullPage=false when you specifically need just the current viewport. "
+            "Only set full_page=false when you specifically need just the current viewport. "
             "Large images are auto-compressed to JPEG."
         ),
         "parameters": {
@@ -184,7 +184,13 @@ BROWSER_TOOL_CREATE_TAB = {
     "type": "function",
     "function": {
         "name": "browser_create_tab",
-        "description": "Open a new browser tab with the given URL. Tab opens in the background by default without interrupting the user.",
+        "description": (
+            "Open a new browser tab with the given URL. Tab opens in the background by default "
+            "without interrupting the user.\n"
+            "If you are NOT certain of the exact URL, FIRST call web_search to obtain the real "
+            "link — never guess or reconstruct a domain from memory (guessed URLs 404 or land on "
+            "the wrong site)."
+        ),
         "parameters": {
             "type": "object",
             "properties": {
@@ -230,7 +236,9 @@ BROWSER_TOOL_NAVIGATE = {
         "name": "browser_navigate",
         "description": (
             "Navigate an existing browser tab to a new URL. "
-            "Optionally wait for the page to finish loading."
+            "Optionally wait for the page to finish loading.\n"
+            "If you are NOT certain of the exact URL, FIRST call web_search to obtain the real "
+            "link — do not guess or reconstruct a domain from memory."
         ),
         "parameters": {
             "type": "object",
@@ -295,6 +303,8 @@ BROWSER_TOOL_CLICK = {
             "Supports both left-click and right-click. The element is automatically scrolled into view.\n"
             "Use browser_get_interactive_elements first to discover available selectors. "
             "After clicking, use browser_screenshot or browser_read_tab to verify the result.\n"
+            "For filling/changing MULTIPLE form fields, do NOT loop click+keyboard per field — "
+            "use browser_fill_form once with all fields (it also clears each field before typing).\n"
             "For Canvas-rendered UIs where DOM elements don't exist, fall back to browser_execute_js "
             "with synthetic MouseEvent dispatching on the canvas element."
         ),
@@ -331,7 +341,7 @@ BROWSER_TOOL_HOVER = {
             "Hover over an element to trigger dropdown menus, tooltips, or hover states. "
             "This simulates mouse movement over the element, triggering mouseenter/mouseover events.\n"
             "Use this before clicking items in dropdown menus that require hover to reveal.\n"
-            "After hovering, use browser_wait or time.sleep() to allow menu animation to complete, "
+            "After hovering, use browser_wait (with the `time` parameter) to allow menu animation to complete, "
             "then use browser_get_interactive_elements to find newly revealed menu items."
         ),
         "parameters": {
@@ -361,7 +371,9 @@ BROWSER_TOOL_KEYBOARD = {
             "Supported modifiers: Ctrl, Alt, Shift, Meta (Command on Mac)\n"
             "Special keys: Enter, Escape, Tab, Backspace, Delete, ArrowUp/Down/Left/Right, "
             "Home, End, PageUp, PageDown, F1-F12\n"
-            "If no selector is specified, sends to the currently focused element."
+            "If no selector is specified, sends to the currently focused element.\n"
+            "NOTE: keyboard_input APPENDS keystrokes. To fill/replace text fields (especially 2+ fields), "
+            "prefer browser_fill_form, which clears each field first and sets the value cleanly."
         ),
         "parameters": {
             "type": "object",

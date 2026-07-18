@@ -88,13 +88,17 @@ def _canon_args(raw: Any) -> str:
     if isinstance(raw, (dict, list)):
         try:
             return json.dumps(raw, sort_keys=True, ensure_ascii=False)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError) as e:
+            logger.debug('[WireFP] _canon_args dict/list dump failed (%s) — '
+                         'using str() form', e)
             return str(raw)
     s = '' if raw is None else str(raw)
     try:
         obj = json.loads(s or '{}')
         return json.dumps(obj, sort_keys=True, ensure_ascii=False)
-    except (json.JSONDecodeError, TypeError, ValueError):
+    except (json.JSONDecodeError, TypeError, ValueError) as e:
+        logger.debug('[WireFP] _canon_args JSON re-canon failed (%s) — '
+                     'using stripped raw', e)
         return s.strip()
 
 
@@ -340,6 +344,441 @@ def diff_canonical(old: list, new: list, max_report: int = 8) -> list[str]:
                     return changes
     if len(old) != len(new):
         changes.append(f'len {len(old)}\u2192{len(new)}')
+    return changes
+
+
+def first_changed_index(old: list, new: list) -> int:
+    """Return the FIRST position where two canonical fingerprint lists differ.
+
+    Position-aware companion to ``diff_canonical`` (which reports stable keys,
+    not indices). Used by ``detect_cache_break`` to log WHERE in the wire
+    message list a prefix mutation lands, so a break can be classified by
+    whether the earliest changed index falls inside the PRIOR round's cached
+    prefix (an already-cached message rewritten in place) vs only in the fresh
+    tail. Compares the overlapping prefix by position; ``-1`` if no shared
+    position differs. A pure length change (no shared-position diff) also
+    returns ``-1`` — the caller inspects the length separately.
+    """
+    n = min(len(old), len(new))
+    for i in range(n):
+        o = old[i] or {}
+        nw = new[i] or {}
+        if (o.get('fields') or {}) != (nw.get('fields') or {}):
+            return i
+    return -1
+
+
+def first_changed_byte_index(old: list, new: list) -> int:
+    """FIRST position where two ``wire_byte_prefix`` lists differ by RAW bytes.
+
+    The TRUE-byte counterpart of ``first_changed_index`` (which walks the LOSSY
+    ``canonical_messages`` fingerprints). ``detect_cache_break`` needs the
+    changed POSITION to log whether a mutation landed inside the prior round's
+    cached-prefix boundary (an already-cached message rewritten in place → real
+    miss) or only in the freshly-appended tail (benign). But when the only
+    culprit is a ``<bytes>`` divergence (``canonical`` says "identical", raw
+    bytes differ — a ``reasoning_details`` rebuild, same-role merge, or
+    protocol switch), ``first_changed_index`` returns ``-1`` and the position
+    evidence collapses to a meaningless ``inside_prior_cached_prefix=False`` —
+    exactly the class where the position matters most. This walks the
+    ``[{'key','h'}]`` byte-hash lists so the byte-only case gets an honest
+    index. Compares the overlapping prefix by position; ``-1`` if no shared
+    position differs (a pure length change is inspected separately).
+    """
+    n = min(len(old), len(new))
+    for i in range(n):
+        o = old[i] or {}
+        nw = new[i] or {}
+        if o.get('h') != nw.get('h'):
+            return i
+    return -1
+
+
+def system_fingerprint(system: Any, tools: Any) -> dict[str, str]:
+    """Fingerprint the top-level ``system`` field + tool schemas.
+
+    THE INSTRUMENT-BLINDSPOT FIX. ``canonical_messages`` only sees
+    ``body['messages']`` — but on the Anthropic path ``openai_body_to_anthropic``
+    HOISTS the system prompt out of ``messages`` into the top-level ``system``
+    field (a ``str`` or a list of ``{type:text,text}`` blocks). So a per-turn
+    change to anything assembled INTO the system prompt (the cross-conversation
+    digest, the charter, the board — the 29298-pin bug) was invisible to the
+    detector, which then mislabeled the miss ``server-side — PROVEN``. This
+    hashes exactly that hoisted region (and the tool schemas, the other cached
+    prefix segment) so ``detect_cache_break`` can see a system-block mutation
+    and STOP laundering it into "server-side".
+
+    ``cache_control`` markers are stripped (cache metadata the server ignores);
+    the str↔block wrapping is collapsed via ``_text_of`` so a marker flip alone
+    is not a false positive — mirroring the message canonicalisation rules.
+
+    Returns ``{'system': md5, 'tools': md5}`` (fields absent → hash of '').
+    """
+    # System: collapse str | block-list to the canonical text stream.
+    if system is None:
+        _sys_text = ''
+    elif isinstance(system, str):
+        _sys_text = system
+    elif isinstance(system, list):
+        _sys_text = _text_of(system)
+    else:
+        _sys_text = str(system)
+
+    # Tools: hash the ordered (name, description, canonical-params) triples,
+    # ignoring cache_control. A tool add/remove/reorder or a schema edit shows;
+    # a marker move does not.
+    _tool_specs: list[str] = []
+    for t in tools or ():
+        if not isinstance(t, dict):
+            continue
+        fn = t.get('function') if isinstance(t.get('function'), dict) else t
+        name = fn.get('name') or ''
+        desc = fn.get('description') or ''
+        params = fn.get('parameters')
+        try:
+            _pj = json.dumps(params, sort_keys=True, ensure_ascii=False)
+        except (TypeError, ValueError):
+            _pj = str(params)
+        _tool_specs.append(name + '\x03' + desc + '\x03' + _pj)
+
+    return {'system': _md5(_sys_text),
+            'tools': _md5('\x01'.join(_tool_specs))}
+
+
+def marker_signature(body: dict) -> dict[str, Any]:
+    """Fingerprint WHERE the ``cache_control`` breakpoints sit in the final
+    wire body — the ONE thing ``canonical_messages`` deliberately erases.
+
+    ``canonical_messages`` strips ``cache_control`` (it proves whether the
+    tokenized CONTENT bytes changed). But a cache miss can be caused purely by
+    the breakpoints moving / disappearing while the content is byte-identical —
+    exactly the "tail breakpoint lost in the anthropic translation on a
+    tool-ending round" bug. When that happens the content fingerprint says
+    "identical" and the detector would wrongly assert "server-side PROVEN".
+
+    This captures the marker LAYOUT so ``detect_cache_break`` can tell a
+    genuine byte-identical-AND-same-markers round (→ provably server-side) from
+    a same-content-but-markers-moved round (→ client-caused). Returns::
+
+        {'count': N,                       # total cache_control markers
+         'msg': [(align_key, block_ord), …],  # per-message-block marker slots
+         'sys': K, 'tools': K}             # markers on hoisted system / tools
+
+    The per-message slot uses the stable ``canonical_key`` (not the list index)
+    so a benign reindex does not register as a move.
+    """
+    sig: dict[str, Any] = {'count': 0, 'msg': [], 'sys': 0, 'tools': 0}
+    if not isinstance(body, dict):
+        return sig
+
+    def _count_cc(blocks) -> int:
+        n = 0
+        if isinstance(blocks, list):
+            for b in blocks:
+                if isinstance(b, dict) and b.get('cache_control'):
+                    n += 1
+        return n
+
+    # Messages (both envelopes: OpenAI shape + translated Anthropic shape).
+    for msg in body.get('messages') or ():
+        if not isinstance(msg, dict):
+            continue
+        content = msg.get('content')
+        if not isinstance(content, list):
+            continue
+        marked = [bi for bi, b in enumerate(content)
+                  if isinstance(b, dict) and b.get('cache_control')]
+        if marked:
+            entry = {'role': msg.get('role', ''),
+                     'fields': _fields_of(msg), 'brief': _brief(msg)}
+            key = canonical_key(entry)
+            for bi in marked:
+                sig['msg'].append((key, bi))
+                sig['count'] += 1
+
+    # Hoisted system (Anthropic path: list of blocks) + tools.
+    system = body.get('system')
+    if isinstance(system, list):
+        _s = _count_cc(system)
+        sig['sys'] = _s
+        sig['count'] += _s
+    for t in body.get('tools') or ():
+        if isinstance(t, dict):
+            fn = t.get('function') if isinstance(t.get('function'), dict) else t
+            if isinstance(fn, dict) and fn.get('cache_control'):
+                sig['tools'] += 1
+                sig['count'] += 1
+    return sig
+
+
+def markers_regressed(prev: dict | None, cur: dict | None) -> bool:
+    """True if breakpoints were LOST between rounds — the precise, false-
+    positive-free signal that a cache miss is client-caused, not server-side.
+
+    Why NOT a full position set-diff: the rolling TAIL breakpoint (and the
+    quantized MID stepping-stone on its jump rounds) legitimately MOVE forward
+    every round. A naive "any marker moved" test would fire on every single
+    round and permanently disable the honest "server-side PROVEN" verdict. That
+    move does not cause a miss — the new tail reads back through the prior
+    entry — so it must NOT count.
+
+    What DOES count is a breakpoint DISAPPEARING: the total marker count
+    dropping, or the system/tools marker count changing, between rounds. That
+    is exactly the "tail breakpoint silently lost in the anthropic translation
+    on a tool-ending round" bug — the code intended to place N markers but the
+    final wire body carries fewer. In steady state the count is constant
+    (system + tool + mid + tail = 4), so a decrease is unambiguous.
+    """
+    if prev is None or cur is None:
+        return False
+    if cur.get('count', 0) < prev.get('count', 0):
+        return True
+    if prev.get('sys', 0) != cur.get('sys', 0):
+        return True
+    if prev.get('tools', 0) != cur.get('tools', 0):
+        return True
+    return False
+
+
+def _strip_cache_control(obj: Any) -> Any:
+    """Recursively drop ``cache_control`` keys for raw-byte hashing.
+
+    ``cache_control`` is the ONE legitimately-mobile element in the wire body
+    (the rolling tail marker moves every round, tracked separately by
+    ``marker_signature``). Stripping it keeps ``wire_byte_prefix`` from crying
+    wolf on the normal marker advance while still hashing EVERYTHING else byte
+    for byte.
+    """
+    if isinstance(obj, dict):
+        return {k: _strip_cache_control(v) for k, v in obj.items()
+                if k != 'cache_control'}
+    if isinstance(obj, list):
+        return [_strip_cache_control(v) for v in obj]
+    return obj
+
+
+def wire_byte_prefix(messages: list) -> list[dict]:
+    """Per-message hash of the ACTUAL serialized wire bytes — the TRUE-byte
+    instrument that closes the "canonical says identical but the bytes weren't"
+    laundering path.
+
+    ``canonical_messages`` is deliberately LOSSY: it strips ``cache_control``,
+    collapses ``str`` ↔ ``[{type:text}]``, canonicalises tool-arg key order,
+    and DOES NOT hash ``reasoning_details`` (``build_body`` synthesises that
+    field from ``reasoning_content`` + ``thinking_signature``, so canonical
+    uses those instead). Therefore "canonical identical" does NOT imply "the
+    bytes on the wire were identical". A round can rebuild ``reasoning_details``,
+    merge consecutive same-role turns, or reorder fields while canonical reports
+    "identical" — and a verdict that then asserts *"bytes were byte-identical"*
+    would be literally false, laundering a real content/serialization change
+    into an "upstream eviction".
+
+    This hashes ``json.dumps(msg)`` of each message EXACTLY as the transport
+    serialises it (insertion order preserved via ``sort_keys=False``), stripping
+    ONLY ``cache_control``. Every other byte — ``reasoning_details``,
+    ``extra_content``, field order, the full base64 of an image — is included,
+    so any canonical-invisible mutation shows up. Aligned by the SAME
+    ``canonical_key`` as ``diff_canonical`` so a benign reindex does not
+    explode.
+
+    IMPORTANT — this fingerprint is ENVELOPE-SENSITIVE (unlike
+    ``canonical_messages``). A cross-round protocol/endpoint switch (OpenAI ↔
+    Anthropic body shape) legitimately changes these bytes without changing the
+    conversation. So a byte divergence with an IDENTICAL canonical fingerprint
+    means "the real bytes differ" — which could be a content mutation OR a
+    routing/protocol switch. The detector must therefore only use this to
+    REFUSE the false "byte-identical eviction" claim and name the honest set of
+    causes, never to fabricate a specific client-side history edit.
+
+    Returns ``[{'key', 'h'}]`` per message.
+    """
+    out: list[dict] = []
+    for msg in messages or ():
+        if not isinstance(msg, dict):
+            continue
+        entry = {'role': msg.get('role', ''),
+                 'fields': _fields_of(msg), 'brief': _brief(msg)}
+        key = canonical_key(entry)
+        try:
+            raw = json.dumps(_strip_cache_control(msg),
+                             ensure_ascii=False, sort_keys=False)
+        except (TypeError, ValueError) as e:
+            logger.debug('[WireFP] wire_byte_prefix dump failed (%s) — '
+                         'using str() form', e)
+            raw = str(msg)
+        out.append({'key': key, 'h': _md5(raw)})
+    return out
+
+
+def diff_byte_prefix(old: list, new: list, max_report: int = 8) -> list[str]:
+    """Name the messages whose RAW serialized bytes differ, stable-key aligned.
+
+    The true-byte counterpart of ``diff_canonical``. Compares the overlapping
+    prefix by position (this round appends new tail messages we do not diff),
+    reporting the stable ``key`` of each byte-divergent message prefixed with
+    ``<bytes>`` so a downstream verdict can tell it apart from a canonical
+    (semantic) culprit. A message present in one list but not the other is a
+    length change. Capped at ``max_report`` (``…`` marks truncation).
+    """
+    changes: list[str] = []
+    n = min(len(old), len(new))
+    for i in range(n):
+        o = old[i] or {}
+        nw = new[i] or {}
+        if o.get('h') != nw.get('h'):
+            changes.append('<bytes>' + (nw.get('key') or o.get('key')
+                                        or f'[{i}]'))
+            if len(changes) >= max_report:
+                changes.append('…')
+                return changes
+    if len(old) != len(new):
+        changes.append(f'byte-len {len(old)}\u2192{len(new)}')
+    return changes
+
+
+def wire_byte_field_prefix(messages: list) -> list[dict]:
+    """Per-message, PER-TOP-LEVEL-FIELD hash of the actual serialized wire
+    bytes — the field-granular companion to ``wire_byte_prefix``.
+
+    ``wire_byte_prefix`` proves THAT an already-cached message's raw bytes
+    changed round-over-round, but its diff (``diff_byte_prefix``) names only
+    the MESSAGE (``<bytes>assistant/tool_call(read_files)``). For the dominant
+    remaining prefix-cache miss — a canonical-INVISIBLE ``<bytes>`` flip on a
+    replayed ``assistant/tool_call`` turn — that leaves the culprit a CATEGORY
+    ("reasoning_details rebuild / same-role merge / field reorder / protocol
+    switch"), never a proven field.
+
+    This hashes EACH top-level key of the message separately (``json.dumps``,
+    insertion order preserved, ONLY ``cache_control`` stripped) so
+    ``diff_byte_field_prefix`` can name the EXACT ``key.field`` that flipped:
+    ``{reasoning_details}`` (the build_body rebuild), ``{tool_calls}`` (arg
+    re-serialization), ``{content}``, etc. A separate ``__order__`` pseudo-
+    field captures the field INSERTION ORDER (a pure reorder changes the wire
+    bytes but no single field's value), so an order-only flip is named rather
+    than laundered into "eviction".
+
+    Aligned by the SAME ``canonical_key`` as ``diff_canonical`` /
+    ``wire_byte_prefix`` so a benign reindex does not explode. Returns
+    ``[{'key', 'fields': {field: md5}}]`` per message.
+    """
+    out: list[dict] = []
+    for msg in messages or ():
+        if not isinstance(msg, dict):
+            continue
+        entry = {'role': msg.get('role', ''),
+                 'fields': _fields_of(msg), 'brief': _brief(msg)}
+        key = canonical_key(entry)
+        clean = _strip_cache_control(msg)
+        field_hashes: dict[str, str] = {}
+        for fld, val in clean.items():
+            try:
+                raw = json.dumps(val, ensure_ascii=False, sort_keys=False)
+            except (TypeError, ValueError) as e:
+                logger.debug('[WireFP] wire_byte_field_prefix dump failed for '
+                             'field=%s (%s) — using str() form', fld, e)
+                raw = str(val)
+            field_hashes[fld] = _md5(raw)
+        # __order__ pseudo-field: the field INSERTION ORDER. A pure reorder
+        # (same keys+values, different order) changes the serialized bytes
+        # without changing any single field's value — it must still be named.
+        field_hashes['__order__'] = _md5('\x01'.join(clean.keys()))
+        out.append({'key': key, 'fields': field_hashes})
+    return out
+
+
+def diff_byte_field_prefix(old: list, new: list, max_report: int = 8) -> list[str]:
+    """Name the exact ``<bytes>key{field}`` entries that byte-diverged.
+
+    The field-granular counterpart of ``diff_byte_prefix``. Compares the
+    overlapping prefix by position; for each message whose per-field hash map
+    differs, reports one ``<bytes>{stable-key}{field}`` token per changed
+    field (so a downstream verdict can name the ACTIONABLE field —
+    ``reasoning_details`` / ``tool_calls`` / ``content`` / ``__order__``).
+    Capped at ``max_report`` culprits (``…`` marks truncation). A length change
+    of the compared prefix is reported as ``byte-field-len A→B``.
+    """
+    changes: list[str] = []
+    n = min(len(old), len(new))
+    for i in range(n):
+        o = old[i] or {}
+        nw = new[i] or {}
+        of = o.get('fields') or {}
+        nf = nw.get('fields') or {}
+        if of == nf:
+            continue
+        key = nw.get('key') or o.get('key') or f'[{i}]'
+        for field in sorted(set(of) | set(nf)):
+            if of.get(field) != nf.get(field):
+                changes.append(f'<bytes>{key}{{{field}}}')
+                if len(changes) >= max_report:
+                    changes.append('…')
+                    return changes
+    if len(old) != len(new):
+        changes.append(f'byte-field-len {len(old)}\u2192{len(new)}')
+    return changes
+
+
+def wire_byte_region(system: Any, tools: Any) -> dict[str, str]:
+    """TRUE-byte hash of the HOISTED ``system`` + ``tools`` cached-prefix region.
+
+    The true-byte counterpart of ``system_fingerprint`` — and the reason it is
+    needed: ``system_fingerprint`` is ITSELF LOSSY. It runs ``_text_of`` over
+    the system block list (collapsing ``str`` ↔ ``[{type:text}]`` and folding
+    block ordering into a text stream) and canonicalises each tool's
+    ``parameters`` with ``sort_keys=True``. So a canonical-invisible byte change
+    in the hoisted region — a system BLOCK REORDERING, a whitespace/wrapping
+    flip, a per-turn re-serialization, or a tool-param KEY REORDER — leaves
+    ``system_fingerprint`` reporting "unchanged" even though the exact bytes the
+    gateway caches on DID change.
+
+    On the Anthropic path this is the HIGHEST-probability suspect region: the
+    hoisted system prompt is where the per-turn context is injected fresh every
+    round (charter, board, peer-status, activity-feed, ``relevant_memories``).
+    A byte change there that ``system_fingerprint`` cannot see would let a real
+    context-mechanism corruption be laundered into "upstream eviction".
+
+    So this hashes the ACTUAL serialized bytes: ``json.dumps`` with insertion
+    order preserved (``sort_keys=False``), stripping ONLY ``cache_control``. NO
+    ``_text_of`` collapsing, NO param key sorting — a block reorder or a key
+    reorder DOES change the hash here, which is the whole point.
+
+    Returns ``{'system': md5, 'tools': md5}``.
+    """
+    def _dump(obj: Any) -> str:
+        try:
+            return json.dumps(_strip_cache_control(obj),
+                              ensure_ascii=False, sort_keys=False)
+        except (TypeError, ValueError) as e:
+            logger.debug('[WireFP] wire_byte_region dump failed (%s) — '
+                         'using str() form', e)
+            return str(obj)
+
+    if system is None:
+        _sys_raw = ''
+    elif isinstance(system, str):
+        _sys_raw = system            # a bare string IS its own wire bytes
+    else:
+        _sys_raw = _dump(system)     # block list — order-sensitive by design
+    _tools_raw = _dump(tools or [])
+    return {'system': _md5(_sys_raw), 'tools': _md5(_tools_raw)}
+
+
+def diff_byte_region(old: dict | None, new: dict | None) -> list[str]:
+    """Name which hoisted region(s) diverged at the RAW-byte level.
+
+    Compares ``wire_byte_region`` outputs. Returns ``<bytes>system`` /
+    ``<bytes>tools`` for each field whose true bytes changed, so a downstream
+    verdict tells a hoisted-region byte divergence apart from a lossy
+    ``system_fingerprint`` ``<hoisted>`` culprit and from a per-message
+    ``<bytes>`` culprit. ``.get(...)`` defaults keep pre-change (missing) state
+    inert — a mid-deploy round with no stored region never cries wolf.
+    """
+    if not old or not new:
+        return []
+    changes: list[str] = []
+    for fld in ('system', 'tools'):
+        if old.get(fld) != new.get(fld):
+            changes.append('<bytes>' + fld)
     return changes
 
 

@@ -218,6 +218,46 @@ check('settled_renders_complete_not_stale',
   setHtml.includes('Complete') && !setHtml.includes('Stale'));
 check('settled_no_live_ticker', !setHtml.includes('data-sw-start'));
 
+// ── 6. BATCH get_agent_result: a single round whose payload carries a
+//      `results` array (agent_ids batch mode) must enrich EVERY agent, same
+//      as N separate single-agent get_agent_result rounds would. ──
+const batchSpawnRound = {
+  roundNum: 1, toolName: 'spawn_agents', _swarm: true, status: 'done',
+  toolContent: JSON.stringify({
+    status: 'async_launched', swarm_id: 'sw-batch',
+    agents: [
+      { id: 'ext', role: 'coder', objective: 'audit ext', output_file: '/x/ext.log' },
+      { id: 'route', role: 'coder', objective: 'audit route', output_file: '/x/route.log' },
+      { id: 'fe', role: 'coder', objective: 'audit fe', output_file: '/x/fe.log' },
+    ],
+  }),
+};
+const batchGarRound = {
+  roundNum: 2, toolName: 'get_agent_result', status: 'done',
+  toolContent: JSON.stringify({
+    status: 'ok',
+    results: [
+      { found: true, agent_id: 'ext', role: 'coder', objective: 'audit ext',
+        status: 'ok', final_answer: 'EXT REPORT', error: '', elapsed: '10', tokens: '100' },
+      { found: true, agent_id: 'route', role: 'coder', objective: 'audit route',
+        status: 'ok', final_answer: 'ROUTE REPORT', error: '', elapsed: '20', tokens: '200' },
+      { found: true, agent_id: 'fe', role: 'coder', objective: 'audit fe',
+        status: 'ok', final_answer: 'FE REPORT', error: '', elapsed: '30', tokens: '300' },
+    ],
+  }),
+};
+const batchRounds = [batchSpawnRound, batchGarRound];
+const batchAgents = _recoverSwarmAgents(batchSpawnRound, batchRounds);
+const batchById = {}; for (const a of batchAgents) batchById[a.id] = a;
+check('batch_recovers_all_three', batchAgents.length === 3);
+check('batch_ext_body', batchById['ext'] && batchById['ext'].preview === 'EXT REPORT'
+  && batchById['ext'].status === 'completed');
+check('batch_route_body', batchById['route'] && batchById['route'].preview === 'ROUTE REPORT');
+check('batch_fe_body', batchById['fe'] && batchById['fe'].preview === 'FE REPORT');
+const batchHtml = _buildSwarmPanelHTML(batchSpawnRound, batchRounds);
+check('batch_panel_renders_all_bodies',
+  batchHtml.includes('EXT REPORT') && batchHtml.includes('ROUTE REPORT') && batchHtml.includes('FE REPORT'));
+
 console.log(out.join('\n'));
 """
 

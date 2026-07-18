@@ -169,6 +169,116 @@ def test_tool_round_no_draft_then_final():
     _ok('well-behaved tool round (no prose) then final report is clean')
 
 
+REVIEW_BODY = (
+    '# Review\n\n## Summary\nThe paper proposes X.\n\n'
+    '## Strengths\n- A clean idea.\n\n## Weaknesses\n- §4 lacks an ablation.\n\n'
+    '## Quantitative Scores\n- Overall Rating: 5.\n'
+)
+
+
+def _patch_dispatch_restreaming(body):
+    """Mock a TERMINAL round whose stream is emitted TWICE via on_content but
+    whose RETURNED msg['content'] is the single clean copy.
+
+    This is exactly what lib/llm/stream.py::stream_chat produces on a mid-stream
+    transient retry: the first attempt pushes deltas through on_content and then
+    fails; the retry re-streams the WHOLE body through on_content again; but the
+    returned assistant msg carries only the LAST attempt's accumulator (one
+    clean copy). The engine must treat the deltas as display-only and persist
+    the returned msg['content'], so a retry can never double the written doc.
+    """
+    import lib.paper.report_engine as re_mod
+
+    def _fake_dispatch(messages, on_content=None, on_thinking=None, **kw):
+        if on_content:
+            on_content(body)   # attempt 1 streamed these deltas, then "failed"
+            on_content(body)   # retry re-streamed the WHOLE body again
+        # ...but the returned message is the single clean copy (one attempt's acc).
+        msg = {'role': 'assistant', 'content': body, 'tool_calls': []}
+        usage = {'prompt_tokens': 10, 'completion_tokens': 20, '_dispatch': {}}
+        return msg, 'stop', usage
+
+    re_mod.dispatch_stream = _fake_dispatch
+
+
+def test_midstream_retry_restream_does_not_double_persisted_body():
+    """BITING TEST (#1): a mid-stream retry that re-streams the whole review
+    must yield ONE copy in the persisted/enriched body.
+
+    The persisted body is authoritative from the terminal round's returned
+    msg['content'] — NOT the accumulated deltas — so however many times the
+    stream re-emitted, count('# Review')==1 and count('## Summary')==1.
+    """
+    import lib.paper.report_engine as re_mod
+    from lib.paper import _new_report_task, make_review_lang
+    orig = re_mod.dispatch_stream
+    _patch_dispatch_restreaming(REVIEW_BODY)
+    try:
+        task = _new_report_task('rvw_retry_1', 'phashretry000000000000000000retry',
+                                make_review_lang('neurips', 'en'), None,
+                                client_title='Paper', ui_lang='en')
+        re_mod._run_report_task(task, [
+            {'role': 'system', 'content': 'sys'},
+            {'role': 'user', 'content': 'paper'},
+        ], [])
+        body = task.get('enriched_text') or task.get('full_text') or ''
+        assert task['status'] == 'done', task.get('error')
+        assert body.count('# Review') == 1, \
+            f"'# Review' appears {body.count('# Review')}× — review DOUBLED by re-stream!"
+        assert body.count('## Summary') == 1, \
+            f"'## Summary' appears {body.count('## Summary')}× — review DOUBLED by re-stream!"
+    finally:
+        _restore_dispatch(orig)
+    _ok('mid-stream retry re-streaming the whole review does not double the persisted body')
+
+
+def test_source_level_negative_control_authoritative_body_load_bearing():
+    """Prove the terminal-content override is load-bearing: neutralize it (revert
+    to delta-accumulation) in a source COPY exec'd in-process, and the re-stream
+    doubling must reappear. The shipped file is never modified."""
+    import types
+    import lib.paper.report_engine as rm
+    from lib.paper import _new_report_task, make_review_lang
+
+    src = open(rm.__file__, encoding='utf-8').read()
+    marker = ("        _clean = _terminal['content']\n"
+              "        if _clean is not None and _clean != full_content:")
+    assert marker in src, 'neuter marker not found — test is stale, update the marker'
+    broken = src.replace(
+        marker,
+        "        _clean = _terminal['content']\n"
+        "        if False and _clean is not None and _clean != full_content:",
+        1)
+    assert broken != src, 'negative-control patch was a no-op'
+
+    mod = types.ModuleType('lib.paper.report_engine_nc')
+    mod.__file__ = rm.__file__
+    mod.__package__ = 'lib.paper'
+    exec(compile(broken, rm.__file__, 'exec'), mod.__dict__)
+
+    def _fake(messages, on_content=None, on_thinking=None, **kw):
+        if on_content:
+            on_content(REVIEW_BODY)
+            on_content(REVIEW_BODY)
+        return {'role': 'assistant', 'content': REVIEW_BODY, 'tool_calls': []}, 'stop', \
+               {'prompt_tokens': 1, 'completion_tokens': 1, '_dispatch': {}}
+    mod.dispatch_stream = _fake
+
+    task = _new_report_task('rvw_nc_1', 'phashncbody0000000000000000000nc',
+                            make_review_lang('neurips', 'en'), None, ui_lang='en')
+    mod._run_report_task(task, [
+        {'role': 'system', 'content': 'sys'},
+        {'role': 'user', 'content': 'paper'},
+    ], [])
+    body = task.get('enriched_text') or task.get('full_text') or ''
+    assert body.count('# Review') == 2, \
+        'neutering the authoritative-body override did NOT resurface the double — ' \
+        'fix is non-load-bearing'
+    # Shipped file untouched (we only exec'd an in-memory copy).
+    assert open(rm.__file__, encoding='utf-8').read() == src, 'shipped file was modified!'
+    _ok('source-level NC: reverting to delta-accumulation resurfaces the double (fix load-bearing)')
+
+
 def main():
     print()
     print(_color('═══ Paper Report De-dup Regression Tests ═══', '36'))
@@ -178,6 +288,8 @@ def main():
         test_delta_reset_event_emitted,
         test_no_tool_call_single_pass_unaffected,
         test_tool_round_no_draft_then_final,
+        test_midstream_retry_restream_does_not_double_persisted_body,
+        test_source_level_negative_control_authoritative_body_load_bearing,
     ]
     for fn in tests:
         try:

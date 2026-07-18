@@ -71,7 +71,8 @@ def _ip_verdict(ip_str: str) -> str | None:
     """
     try:
         ip = ipaddress.ip_address(ip_str)
-    except ValueError:
+    except ValueError as e:
+        logger.debug('[BYOEgress] unparseable IP %r: %s', ip_str, e)
         return 'unparseable address'
     # IPv4-mapped IPv6 (::ffff:a.b.c.d) — judge by the embedded v4 addr.
     mapped = getattr(ip, 'ipv4_mapped', None)
@@ -113,6 +114,7 @@ def is_egress_allowed(url: str) -> tuple[bool, str]:
         infos = socket.getaddrinfo(host, parsed.port or None,
                                    proto=socket.IPPROTO_TCP)
     except socket.gaierror as e:
+        logger.debug('[BYOEgress] DNS resolution failed for %r: %s', host, e)
         return False, f'DNS resolution failed: {e}'
     if not infos:
         return False, 'DNS returned no addresses'

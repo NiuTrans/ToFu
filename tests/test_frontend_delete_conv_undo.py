@@ -17,6 +17,15 @@ The fix makes ``deleteConversation`` async: it hydrates a shell conv via
 the full body and undo re-creates the row with messages intact. Restore must
 also preserve the original ``updatedAt`` (no sidebar re-stamp to load-time).
 
+FOLLOW-UP (root fix for "delete always fails now")
+--------------------------------------------------
+Hydration failing on a slow tunnel used to HARD-REFUSE the delete, which — with
+windowed reads on + hundreds of sidebar-shell convs — permanently blocked
+deleting those convs (0 DELETE requests ever reached the server). The delete
+itself is always safe (server row authoritative; no local body needed); only
+the UNDO snapshot is lost. The contract is now fail-OPEN-with-consent: on
+hydration failure, ask the user, then delete WITHOUT a (hollow) undo toast.
+
 This drives the REAL shipped ``deleteConversation`` /
 ``_restoreDeletedConversation`` under node, stubbing the network seam
 (``Api.conversations.put/remove``) + ``loadConversationMessages`` (which
@@ -225,13 +234,28 @@ def test_delete_conv_undo_restores_unloaded_shell():
     assert output.count('PASS') >= 12, f'expected >=12 PASS lines, got:\n{output}'
 
 
-# ── Abort-on-hydration-failure: when the server can't be reached at delete
-#    time, loadConversationMessages leaves messages:[] (the shell could not be
-#    materialised). Deleting now would leave the undo snapshot hollow → permanent
-#    loss precisely when the network is flaky. The delete MUST be refused. ──
+# ── Hydration-failure = fail-OPEN-with-consent (root fix for "delete always
+#    fails now"). When the server can't be reached at delete time,
+#    loadConversationMessages leaves messages:[] (the shell could not be
+#    materialised). Historically the delete was HARD-REFUSED here — but with
+#    windowed reads on + hundreds of sidebar-shell convs, hydration frequently
+#    times out over a slow tunnel, so that permanently BLOCKED deleting those
+#    convs (0 DELETE requests ever reached the server). The DELETE itself is
+#    always safe (the server row is authoritative and needs no local body); only
+#    the UNDO snapshot is lost. New contract: ask the user for explicit consent,
+#    then delete WITHOUT offering a (hollow) undo. Parameterised over the user's
+#    confirm choice + a NEUTER that strips the consent gate. ──
 _HARNESS_ABORT = r"""
 const fs = require('fs');
 global.window = global;
+
+// argv[3]: 'confirm' (user says delete anyway) | 'cancel' (user backs out)
+// argv[4]: 'neuter' → force showConfirm undefined AND simulate the OLD hard
+//          refuse by... no — the neuter proves the CONSENT GATE is load-bearing:
+//          when confirm is forced to CANCEL, NO delete must happen; if the gate
+//          were removed the delete would fire regardless. We express that as the
+//          'cancel' scenario asserting no-delete, and 'confirm' asserting delete.
+const scenario = process.argv[3] || 'confirm';
 
 let shell = {
   id: 'conv-shell-1',
@@ -246,7 +270,7 @@ let otherConv = { id: 'conv-other', title: 'Other', messages: [{role:'user',cont
 global.conversations = [shell, otherConv];
 global.activeConvId = 'conv-other';
 
-const calls = { loadMsgs: [], put: [], remove: [], abortTask: [] };
+const calls = { loadMsgs: [], put: [], remove: [], abortTask: [], confirm: 0 };
 
 // loadConversationMessages FAILS to materialise the body — simulates the
 // server being unreachable: messages STAYS empty, _needsLoad stays true.
@@ -274,8 +298,14 @@ global.escapeHtml = (s) => String(s == null ? '' : s);
 global.t = (k) => k;
 const toasts = [];
 global.showToast = (...a) => toasts.push(a);
+// Themed confirm dialog — records the ask and resolves per scenario.
+global.showConfirm = async function(msg, opts) {
+  calls.confirm++;
+  return scenario === 'confirm';   // 'cancel' → false (user backs out)
+};
 
-// DOM stub: capture whether an undo button was registered (it must NOT be).
+// DOM stub: capture whether an undo button was registered (it must NOT be
+// for the delete-without-undo path).
 let _undoHandler = null;
 const _container = { appendChild() {} };
 global.document = {
@@ -306,34 +336,43 @@ function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
 
   await deleteConversation('conv-shell-1');
 
-  // It attempted to hydrate…
+  // It attempted to hydrate, failed, then ASKED the user for consent.
   check('hydrate_attempted', calls.loadMsgs.length === 1);
-  // (a) …but the server DELETE was NOT issued.
-  check('no_server_delete', calls.remove.length === 0);
-  // (b) …the conv is STILL in the list.
-  check('conv_still_present', conversations.some(c => c.id === 'conv-shell-1'));
-  // (c) …no undo toast/handler was registered.
-  check('no_undo_handler', _undoHandler === null);
-  // It did NOT broadcast a deletion, nor evict the cache.
-  check('no_deleted_broadcast', calls._broadcast !== 'conv_deleted');
-  check('cache_not_evicted', !calls._cacheRemoved);
-  // It surfaced an error toast telling the user.
-  check('error_toast_shown', toasts.some(a => a[0] === 'sidebar.deleteFailed'));
+  check('consent_requested', calls.confirm === 1);
+
+  if (scenario === 'confirm') {
+    // ── User confirmed delete-without-undo → the DELETE proceeds. ──
+    check('server_delete_fired', calls.remove.length === 1 && calls.remove[0] === 'conv-shell-1');
+    check('conv_removed', !conversations.some(c => c.id === 'conv-shell-1'));
+    check('cache_evicted', !!calls._cacheRemoved);
+    check('deleted_broadcast', calls._broadcast === 'conv_deleted');
+    // No FALSE undo: the snapshot is hollow, so NO undo button is registered…
+    check('no_undo_handler', _undoHandler === null);
+    // …and the user sees a plain "deleted" toast (not a restorable one).
+    check('plain_deleted_toast', toasts.some(a => a[0] === 'sidebar.convDeleted'));
+  } else {
+    // ── User cancelled → nothing destructive happened (consent gate holds). ──
+    check('no_server_delete', calls.remove.length === 0);
+    check('conv_still_present', conversations.some(c => c.id === 'conv-shell-1'));
+    check('no_undo_handler', _undoHandler === null);
+    check('no_deleted_broadcast', calls._broadcast !== 'conv_deleted');
+    check('cache_not_evicted', !calls._cacheRemoved);
+  }
 
   console.log(out.join('\n'));
 })();
 """
 
 
-@pytest.mark.skipif(not _node_available(), reason='node not installed')
-def test_delete_conv_aborts_when_hydration_fails():
-    harness = os.path.join(HERE, '_delete_conv_abort_harness.js')
+def _run_abort_harness(scenario: str) -> str:
+    harness = os.path.join(HERE, f'_delete_conv_abort_harness_{scenario}.js')
     with open(harness, 'w') as f:
         f.write(_HARNESS_ABORT)
     try:
         proc = subprocess.run(
             ['node', harness,
              os.path.join(JS_DIR, 'main', 'main_conv_lifecycle.js'),  # argv[2]
+             scenario,                                                 # argv[3]
              ],
             capture_output=True, text=True, timeout=60,
         )
@@ -345,5 +384,208 @@ def test_delete_conv_aborts_when_hydration_fails():
     output = proc.stdout.strip()
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
     fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
-    assert not fails, 'abort-on-hydration-failure failures:\n' + output
+    assert not fails, f'delete hydration-fail ({scenario}) failures:\n' + output
+    return output
+
+
+@pytest.mark.skipif(not _node_available(), reason='node not installed')
+def test_delete_conv_hydration_fail_confirm_deletes_without_undo():
+    """User confirms → delete proceeds (the "delete always fails" root fix),
+    but WITHOUT a false undo toast (the snapshot is hollow)."""
+    output = _run_abort_harness('confirm')
+    assert output.count('PASS') >= 8, f'expected >=8 PASS lines, got:\n{output}'
+
+
+@pytest.mark.skipif(not _node_available(), reason='node not installed')
+def test_delete_conv_hydration_fail_cancel_keeps_conv():
+    """User cancels the delete-without-undo prompt → the consent gate holds:
+    no server DELETE, conv stays, nothing evicted (NEUTER of the confirm path)."""
+    output = _run_abort_harness('cancel')
     assert output.count('PASS') >= 7, f'expected >=7 PASS lines, got:\n{output}'
+
+
+# ── HAPPY PATH regression guard (the MOST COMMON delete): an already-loaded,
+#    NON-shell conv (messages populated, _needsLoad falsy, messages.length >=
+#    _serverMsgCount). It must fire the DELETE with ZERO showConfirm and a
+#    NORMAL undo toast — i.e. the _needsHydrate gate must NOT engage. Guards a
+#    future refactor of that gate from silently re-blocking the plain path.
+#
+# ── WINDOWED-TAIL completeness (data-loss fix, point #2): a conv opened with a
+#    windowed read holds only the tail (messages.length < _serverMsgCount) with
+#    _windowed=true. Snapshotting that would let undo re-create a conv missing
+#    its oldest messages. deleteConversation must FORCE a full (window=0) fetch
+#    to complete the body BEFORE snapshotting, then offer a REAL undo carrying
+#    every message. ──
+_HARNESS_COMPLETE = r"""
+const fs = require('fs');
+global.window = global;
+
+// argv[3]: 'loaded'   — non-shell, fully-loaded conv (happy path, point #1)
+//          'windowed' — windowed tail (60 of 74) that MUST complete via window=0
+const scenario = process.argv[3] || 'loaded';
+
+// Full server history the FULL (window=0) fetch returns (74 msgs).
+const FULL_MSGS = Array.from({ length: 74 }, (_, i) => ({
+  role: i % 2 === 0 ? 'user' : 'assistant', content: 'm' + i, timestamp: 1000 + i,
+}));
+const TAIL = FULL_MSGS.slice(14);   // the windowed open loaded only the tail 60
+
+let conv;
+if (scenario === 'loaded') {
+  // Already fully loaded in memory — NOT a shell, holds every server message.
+  conv = {
+    id: 'conv-1', title: 'Loaded chat',
+    messages: JSON.parse(JSON.stringify(FULL_MSGS)),
+    _needsLoad: false, _serverMsgCount: 74,
+    createdAt: 1, updatedAt: 1700000000000,
+  };
+} else {
+  // Windowed open: only the tail is in memory, but _serverMsgCount is the TOTAL.
+  conv = {
+    id: 'conv-1', title: 'Windowed chat',
+    messages: JSON.parse(JSON.stringify(TAIL)),   // 60 of 74
+    _needsLoad: false, _serverMsgCount: 74,
+    _windowed: true, _hasMoreEarlier: true, _trimmed: true,
+    createdAt: 1, updatedAt: 1700000000000,
+  };
+}
+let otherConv = { id: 'conv-other', title: 'Other', messages: [{role:'user',content:'x',timestamp:1}], updatedAt: 1 };
+global.conversations = [conv, otherConv];
+global.activeConvId = 'conv-other';   // non-active delete (see shell harness note)
+
+const calls = { loadMsgs: [], fullGet: [], put: [], remove: [], confirm: 0 };
+
+// loadConversationMessages: for the windowed scenario, the standard load also
+// returns the tail (windowed by default) — so it does NOT complete the body.
+// For 'loaded' it should never be called (no _needsHydrate).
+global.loadConversationMessages = async function(id) {
+  calls.loadMsgs.push(id);
+  return conversations.find(x => x.id === id) || null;
+};
+// Api.conversations.get with {query:{window:'0'}} → the FULL untrimmed array.
+global.Api = {
+  conversations: {
+    get: async (id, opts) => {
+      calls.fullGet.push({ id, window: opts && opts.query && opts.query.window });
+      return { id, title: 'Windowed chat', messages: JSON.parse(JSON.stringify(FULL_MSGS)), rev: 5 };
+    },
+    remove: async (id) => { calls.remove.push(id); return { ok: true }; },
+  },
+  chat: { abortTask: async () => ({ ok: true }) },
+};
+global.syncConversationToServer = async function(c) {
+  if (!c.messages || c.messages.length === 0) return;
+  calls.put.push({ id: c.id, msgCount: c.messages.length, first: c.messages[0] && c.messages[0].content });
+};
+global.ConvCache = { remove() {}, put() {} };
+global.activeStreams = new Map();
+global._broadcastToTabs = function() {};
+global.renderConversationList = function() {};
+global.newChat = function() {};
+global.loadConversation = function() {};
+global.debugLog = function() {};
+global.escapeHtml = (s) => String(s == null ? '' : s);
+global.t = (k) => k;
+global.showToast = () => {};
+global.showConfirm = async function() { calls.confirm++; return true; };  // must NOT be called
+
+let _undoHandler = null;
+const _container = { appendChild() {} };
+global.document = {
+  getElementById(id) { return id === 'toastContainer' ? _container : null; },
+  createElement() {
+    return {
+      className: '', set innerHTML(v) {}, get innerHTML() { return ''; },
+      classList: { add() {} }, remove() {},
+      querySelector(sel) {
+        if (sel === '.toast-undo-btn') return { addEventListener(ev, fn) { if (ev === 'click') _undoHandler = fn; } };
+        return { style: {} };
+      },
+      addEventListener() {},
+    };
+  },
+};
+global.setTimeout = (fn) => 0;
+global.clearTimeout = () => {};
+
+eval(fs.readFileSync(process.argv[2], 'utf8'));  // main_conv_lifecycle.js
+
+const out = [];
+function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
+
+(async () => {
+  if (typeof deleteConversation !== 'function') { console.log('FAIL fn_exposed'); return; }
+  check('fn_exposed', true);
+
+  await deleteConversation('conv-1');
+
+  // In BOTH scenarios the delete must go through with a REAL undo and no consent.
+  check('no_consent_prompt', calls.confirm === 0);
+  check('server_delete_fired', calls.remove.length === 1 && calls.remove[0] === 'conv-1');
+  check('conv_removed', !conversations.some(c => c.id === 'conv-1'));
+  check('undo_registered', typeof _undoHandler === 'function');
+
+  if (scenario === 'loaded') {
+    // Happy path: no hydrate, no full-get — the body was already complete.
+    check('no_hydrate', calls.loadMsgs.length === 0);
+    check('no_full_get', calls.fullGet.length === 0);
+  } else {
+    // Windowed: it must have FORCED a full (window='0') fetch to complete.
+    check('full_get_forced', calls.fullGet.length === 1 && calls.fullGet[0].window === '0');
+  }
+
+  // ── UNDO: the snapshot must carry the COMPLETE 74-msg history (incl. head). ──
+  _undoHandler();
+  const back = conversations.find(c => c.id === 'conv-1');
+  check('restored_in_memory', !!back);
+  check('restored_full_74', !!back && back.messages.length === 74);
+  check('restored_head_present', !!back && back.messages[0] && back.messages[0].content === 'm0');
+  const lastPut = calls.put[calls.put.length - 1];
+  check('recreate_put_full_74', !!lastPut && lastPut.msgCount === 74);
+  check('recreate_put_head', !!lastPut && lastPut.first === 'm0');
+
+  console.log(out.join('\n'));
+})();
+"""
+
+
+def _run_complete_harness(scenario: str) -> str:
+    harness = os.path.join(HERE, f'_delete_conv_complete_harness_{scenario}.js')
+    with open(harness, 'w') as f:
+        f.write(_HARNESS_COMPLETE)
+    try:
+        proc = subprocess.run(
+            ['node', harness,
+             os.path.join(JS_DIR, 'main', 'main_conv_lifecycle.js'),  # argv[2]
+             scenario,                                                 # argv[3]
+             ],
+            capture_output=True, text=True, timeout=60,
+        )
+    finally:
+        try:
+            os.remove(harness)
+        except OSError:
+            pass
+    output = proc.stdout.strip()
+    assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
+    fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
+    assert not fails, f'delete completeness ({scenario}) failures:\n' + output
+    return output
+
+
+@pytest.mark.skipif(not _node_available(), reason='node not installed')
+def test_delete_conv_loaded_nonshell_fires_delete_with_undo():
+    """HAPPY PATH regression guard (the reported bug's most common case): an
+    already-loaded non-shell conv deletes with NO hydrate, NO showConfirm, and a
+    normal undo toast — the _needsHydrate gate must not engage."""
+    output = _run_complete_harness('loaded')
+    assert output.count('PASS') >= 10, f'expected >=10 PASS lines, got:\n{output}'
+
+
+@pytest.mark.skipif(not _node_available(), reason='node not installed')
+def test_delete_conv_windowed_tail_completes_body_before_snapshot():
+    """DATA-LOSS FIX (point #2): a windowed-tail conv (60 of 74 in memory,
+    _serverMsgCount=74) must FORCE a full window=0 fetch before snapshotting so
+    undo restores the COMPLETE 74-msg history — not a head-truncated conv."""
+    output = _run_complete_harness('windowed')
+    assert output.count('PASS') >= 9, f'expected >=9 PASS lines, got:\n{output}'

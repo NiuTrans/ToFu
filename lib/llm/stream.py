@@ -22,6 +22,7 @@ from lib.llm._transport import (
     CONNECT_TIMEOUT,
     MAX_STREAM_RETRIES,
     abortable_sleep,
+    get_sync_session,
     retry_wait,
 )
 from lib.llm_errors import (
@@ -114,22 +115,28 @@ def _stream_chat_once(body, *, on_thinking=None, on_content=None,
         api_key=api_key, base_url=base_url, extra_headers=extra_headers,
         api_protocol=api_protocol, oauth=oauth)
 
+    # ``prepare_request`` already opened the RawSSEDumper fd (when enabled), so
+    # a single outer try/finally must guard EVERY exit path — including the
+    # connect-phase re-raise below, which used to escape before the dumper was
+    # closed and leaked the fd once per retry against a down endpoint.
+    resp = None
     try:
-        resp = requests.post(plan.url, headers=plan.hdrs, json=plan.body,
-                             stream=True, timeout=(CONNECT_TIMEOUT, 300),
-                             proxies=proxies_for(plan.url))
-    except requests.exceptions.ConnectionError as e:
-        # Connect-phase failure (ConnectTimeout / connection refused /
-        # SYN dropped) = the endpoint is down. Convert to
-        # EndpointUnreachableError so it escapes the same-key retry loop
-        # and the dispatch layer fails over to a healthy slot instead of
-        # burning CONNECT_TIMEOUT × MAX_STREAM_RETRIES on a dead host.
-        logger.warning('%s ✖ Endpoint unreachable (connect phase) %s: %s',
-                       log_prefix, plan.url, e)
-        raise EndpointUnreachableError(
-            'endpoint unreachable: %s' % e, base_url=plan.url) from e
+        try:
+            resp = get_sync_session().post(
+                plan.url, headers=plan.hdrs, json=plan.body,
+                stream=True, timeout=(CONNECT_TIMEOUT, 300),
+                proxies=proxies_for(plan.url))
+        except requests.exceptions.ConnectionError as e:
+            # Connect-phase failure (ConnectTimeout / connection refused /
+            # SYN dropped) = the endpoint is down. Convert to
+            # EndpointUnreachableError so it escapes the same-key retry loop
+            # and the dispatch layer fails over to a healthy slot instead of
+            # burning CONNECT_TIMEOUT × MAX_STREAM_RETRIES on a dead host.
+            logger.warning('%s ✖ Endpoint unreachable (connect phase) %s: %s',
+                           log_prefix, plan.url, e)
+            raise EndpointUnreachableError(
+                'endpoint unreachable: %s' % e, base_url=plan.url) from e
 
-    try:
         resp_trace = resp.headers.get('M-TraceId', '')
         if resp_trace and resp_trace != plan.trace_id:
             logger.debug('%s resp M-TraceId=%s', log_prefix, resp_trace)
@@ -162,4 +169,5 @@ def _stream_chat_once(body, *, on_thinking=None, on_content=None,
                 plan.raw_dumper.finish(error=True)
         except Exception as e:
             logger.debug('%s RawSSEDumper.finish(error=True) failed: %s', log_prefix, e)
-        resp.close()
+        if resp is not None:
+            resp.close()

@@ -40,7 +40,7 @@ function _renderIgVisibility() {
   });
 
   if (igModels.length === 0) {
-    container.innerHTML = '<p class="stg-empty">未找到图片生成模型。请在服务商中添加具有 <code>image_gen</code> 能力的模型。</p>';
+    container.innerHTML = '<p class="stg-empty">' + t('settings.vdNoIgModels') + '</p>';
     return;
   }
 
@@ -149,7 +149,7 @@ function _renderDropdownVisibility() {
   });
 
   if (allModels.length === 0) {
-    container.innerHTML = '<p class="stg-empty">未配置聊天模型。请先添加服务商。</p>';
+    container.innerHTML = '<p class="stg-empty">' + escapeHtml(t('settings.vdNoChatModels')) + '</p>';
     return;
   }
 
@@ -264,8 +264,8 @@ function _populateModelDefaults(cfg) {
 
   // Populate each select element
   var selectors = [
-    { id: 'settingFallbackModel',  key: 'fallback_model',  emptyLabel: '（禁用自动回退）' },
-    { id: 'settingDefaultModel',   key: 'default_model',   emptyLabel: '（使用环境变量）' },
+    { id: 'settingFallbackModel',  key: 'fallback_model',  emptyLabel: t('settings.vdFallbackEmpty') },
+    { id: 'settingDefaultModel',   key: 'default_model',   emptyLabel: t('settings.vdDefaultEmpty') },
 
   ];
 
@@ -292,7 +292,7 @@ function _populateModelDefaults(cfg) {
     if (savedVal && !seen[savedVal]) {
       var customOpt = document.createElement('option');
       customOpt.value = savedVal;
-      customOpt.textContent = savedVal + ' (未注册)';
+      customOpt.textContent = t('settings.vdUnregistered', { model: savedVal });
       customOpt.selected = true;
       sel.appendChild(customOpt);
     }

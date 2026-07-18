@@ -372,6 +372,123 @@ streamBufs.set('conv-live-404', { content: '', thinking: '', toolRounds: [] });
 """
 
 
+# ── Level 3: the WAKE sweep. A backgrounded/locked tablet FREEZES the per-second
+#    timer, so silence detection never fires during the freeze and the SSE socket
+#    dies while the task keeps running server-side. On wake, _probeAllStuckStreamsOnWake
+#    must walk _streamTimers and, for a still-running task, either abort this tab's
+#    stale SSE reader with _probeAbort (→ connectToTask resumes via Last-Event-ID)
+#    or reconnect fresh via connectToTask when no live stream exists in this tab.
+_WAKE_HARNESS = r"""
+const fs = require('fs');
+global.window = global;
+const out = [];
+function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
+
+const conversations = [];
+const activeStreams = new Map();
+const streamBufs = new Map();
+global.conversations = conversations;
+global.activeStreams = activeStreams;
+global.streamBufs = streamBufs;
+global.escapeHtml = (s) => String(s == null ? '' : s);
+global.normalizeErrorEnvelope = (e) => e;
+global.showToast = () => {};
+global.saveConversations = () => {};
+global.renderChat = () => {};
+global.renderConversationList = () => {};
+global.ConvCache = { put: () => {} };
+global._startOfflineRecoveryPolling = () => {};
+global.AbortSignal = global.AbortSignal || { timeout: () => undefined };
+global.activeConvId = null;
+
+// Health OK; poll → still running (the case the wake sweep must reconnect).
+global.Api = {
+  health: { check: async () => ({ ok: true }) },
+  chat: { poll: async () => ({ ok: true, json: async () => ({ status: 'running' }) }) },
+};
+// Spy connectToTask (fresh-reconnect branch).
+let connectCalls = [];
+global.connectToTask = (cid, tid) => { connectCalls.push([cid, tid]); };
+// Neuter real timers so twStart's setInterval doesn't actually run.
+global.setInterval = () => 0;
+global.clearInterval = () => {};
+
+eval(fs.readFileSync(process.argv[2], 'utf8'));  // core/health_stream_timer.js (real)
+
+check('wake_fn_exposed', typeof _probeAllStuckStreamsOnWake === 'function'
+      && typeof _probeStuckStream === 'function');
+
+// ── Scenario A: still-running task WITH a live SSE stream in this tab →
+//    wake sweep aborts the stale reader with _probeAbort (resume-via-cursor). ──
+async function _scenarioA() {
+  const conv = { id: 'wake-live', activeTaskId: 'task-wake-live',
+    messages: [{ role: 'user', content: 'go' },
+               { role: 'assistant', content: 'partial…', thinking: '', toolRounds: [] }] };
+  conversations.push(conv);
+  let aborted = 0;
+  const stream = { controller: { signal: {}, abort: () => { aborted++; } } };
+  activeStreams.set('wake-live', stream);
+  twStart('wake-live');   // seeds _streamTimers entry (lastDataTime = now)
+
+  const _realNow = Date.now;
+  Date.now = () => _realNow() + 60000;  // 60s of silence → past threshold
+  try { _probeAllStuckStreamsOnWake('test'); } finally { Date.now = _realNow; }
+
+  // Drain the async probe (health.then → poll → running branch).
+  for (let i = 0; i < 40; i++) await Promise.resolve();
+  check('wakeA_probeAbort_set', stream._probeAbort === true);
+  check('wakeA_sse_aborted', aborted === 1);
+  check('wakeA_no_fresh_connect', connectCalls.length === 0);
+}
+
+// ── Scenario B: still-running task with NO live stream in this tab →
+//    wake sweep reconnects fresh via connectToTask. ──
+async function _scenarioB() {
+  const conv = { id: 'wake-nostream', activeTaskId: 'task-wake-nostream',
+    messages: [{ role: 'user', content: 'go' },
+               { role: 'assistant', content: '', thinking: '', toolRounds: [] }] };
+  conversations.push(conv);
+  twStart('wake-nostream');
+  activeStreams.delete('wake-nostream');   // no live stream in this tab
+
+  const _realNow = Date.now;
+  Date.now = () => _realNow() + 60000;
+  try { _probeAllStuckStreamsOnWake('test'); } finally { Date.now = _realNow; }
+  for (let i = 0; i < 40; i++) await Promise.resolve();
+  check('wakeB_fresh_connect', connectCalls.some(c => c[0] === 'wake-nostream'
+        && c[1] === 'task-wake-nostream'));
+}
+
+(async () => {
+  await _scenarioA();
+  await _scenarioB();
+  console.log(out.join('\n'));
+})();
+"""
+
+
+@pytest.mark.skipif(not _node_available(), reason='node not installed')
+def test_wake_probe_reconnects_stuck_stream():
+    harness = os.path.join(HERE, '_wake_probe_harness.js')
+    with open(harness, 'w') as f:
+        f.write(_WAKE_HARNESS)
+    try:
+        proc = subprocess.run(
+            ['node', harness, os.path.join(JS_DIR, 'core', 'health_stream_timer.js')],
+            capture_output=True, text=True, timeout=60,
+        )
+    finally:
+        try:
+            os.remove(harness)
+        except OSError:
+            pass
+    output = proc.stdout.strip()
+    assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
+    fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
+    assert not fails, 'wake-probe reconnect failures:\n' + output
+    assert output.count('PASS') >= 5, f'expected >=5 PASS lines, got:\n{output}'
+
+
 @pytest.mark.skipif(not _node_deps_available(),
                     reason='node + jsdom dev-deps not installed (run npm install)')
 def test_probe_404_triggers_heal():

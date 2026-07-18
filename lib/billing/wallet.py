@@ -31,10 +31,10 @@ from __future__ import annotations
 
 import threading
 import time
-import uuid
 from dataclasses import dataclass
 
 from lib.database import DOMAIN_SYSTEM, _BACKEND, get_thread_db as get_db
+from lib.ids import short_id
 from lib.log import audit_log, get_logger
 
 from . import ledger as _ledger
@@ -353,7 +353,7 @@ def _apply_signed(
 
 def new_ref_id(prefix: str = 'ref') -> str:
     """Generate an id suitable for ref_id (caller-side helper)."""
-    return f'{prefix}_{uuid.uuid4().hex[:24]}'
+    return short_id(f'{prefix}_')
 
 
 __all__ = [

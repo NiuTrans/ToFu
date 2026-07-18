@@ -188,7 +188,8 @@ def _read(path: str) -> str:
     try:
         with open(path) as f:
             return f.read()
-    except OSError:
+    except OSError as e:
+        logger.debug('[portable_sandbox] shim read failed for %s: %s', path, e)
         return ''
 
 
@@ -214,8 +215,9 @@ def prepare_env(env: dict, workspace: str) -> dict:
         env['TMPDIR'] = tmp
         env['TMP'] = tmp
         env['TEMP'] = tmp
-    except OSError:
-        pass
+    except OSError as e:
+        logger.debug('[portable_sandbox] workspace TMPDIR setup failed (%s) — '
+                     'leaving temp env unchanged', e)
     shim_dir = _ensure_shim_dir(ws)
     if shim_dir:
         env['PATH'] = shim_dir + os.pathsep + env.get('PATH', '')

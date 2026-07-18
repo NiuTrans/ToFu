@@ -27,7 +27,7 @@ function _handleRoundUsage(ev, c) {
        * falls back to `msg.usage / n` for older conversations. */
       if (assistantMsg) {
         assistantMsg._liveLastRoundUsage = {
-          round: ev.round,
+          round: ev.roundNum,
           model: ev.model,
           tag: ev.tag,
           tokensIn: ev.tokensIn,
@@ -284,21 +284,51 @@ async function resolvePreference(btn, pendingId, accept) {
 }
 window.resolvePreference = resolvePreference;
 
+/* Resolve a conversation's display title from its id, with a graceful fallback.
+   Used by background-event toasts to name the SOURCE conversation — critical
+   when the event fires from a conv that is NOT the one on screen. */
+function _toastConvTitle(convId) {
+  const _t = (typeof t === 'function') ? t : (k => k);
+  if (!convId) return '';
+  try {
+    const conv = (typeof conversations !== 'undefined')
+      ? conversations.find(x => x.id === convId) : null;
+    if (conv && conv.title) return conv.title;
+  } catch (e) { console.debug('[toast] conv title lookup failed', e); }
+  return _t('toast.untitledConv');
+}
+
 function _handleProjectExternalEdit(ev, c) {
   const convId = c.convId, taskId = c.taskId;
   const assistantMsg = c.assistantMsg, buf = c.buf;
   const _epCriticPhase = c.epCriticPhase, _epCriticMsg = c.epCriticMsg, _epCriticBuf = c.epCriticBuf;
-      // ★ Git-shim: external edits captured outside Tofu round boundary.
-      //   Show a brief toast so the user knows we auto-committed their changes.
+      // ★ Git-shim: external edits (an IDE / another tool changed tracked
+      //   files outside a Tofu round). Tofu has AUTO-SNAPSHOTTED them into
+      //   file-history so the next round's diff stays clean and the edits are
+      //   revertible. The old toast was English-only, emoji-prefixed, named no
+      //   conversation, and gave no next step. Make it conversation-aware and
+      //   actionable: say WHERE it came from and WHAT the user can do.
       const files = ev.files || [];
       const sha = (ev.sha || '').slice(0, 7);
       try {
         if (typeof showToast === 'function') {
-          const preview = files.slice(0, 3).join(', ') + (files.length > 3 ? ` +${files.length - 3} more` : '');
-          showToast(`📝 Captured ${files.length} external edit(s) — ${preview}${sha ? ' · ' + sha : ''}`, 'info');
+          const _t = (typeof t === 'function') ? t : (k => k);
+          const n = files.length;
+          const preview = files.slice(0, 3).join(', ')
+            + (n > 3 ? ' ' + _t('externalEdit.moreN', { n: n - 3 }) : '');
+          const title = _t('externalEdit.title', { n, s: n > 1 ? 's' : '' });
+          const detail = sha ? _t('externalEdit.detail', { preview, sha })
+                             : preview;
+          // Full form (icon, title, detail, dur, opts). Icon is empty — the
+          // typed 'info' circle is inferred from the neutral title text.
+          showToast('', title, detail, 7000, {
+            convId,
+            convTitle: _toastConvTitle(convId),
+            hint: _t('externalEdit.hint'),
+          });
         }
       } catch (e) { console.warn('[project_external_edit] toast failed', e); }
-      console.log('[project_external_edit]', { sha, files });
+      console.log('[project_external_edit]', { convId, sha, files });
 
 }
 
@@ -314,17 +344,61 @@ function _handleWorkspaceRootAdded(ev, c) {
        * toast naming the added root(s). Payload: {roots: [{rootName, path}]}. */
       const roots = Array.isArray(ev.roots) ? ev.roots : [];
       if (!roots.length) return;
+      const convId = c && c.convId;
       try {
         if (typeof showToast === 'function') {
+          const _t = (typeof t === 'function') ? t : (k => k);
           const names = roots.map(r => r.rootName || r.path || '?');
-          const preview = names.slice(0, 3).join(', ') + (names.length > 3 ? ` +${names.length - 3} more` : '');
-          const _t = (typeof t === 'function') ? t : null;
-          const msg = _t ? _t('workspaceRoot.added', { roots: preview })
-                         : `Added workspace root: ${preview}`;
-          showToast(msg, 'info');
+          const preview = names.slice(0, 3).join(', ')
+            + (names.length > 3 ? ' ' + _t('externalEdit.moreN', { n: names.length - 3 }) : '');
+          const msg = _t('workspaceRoot.added', { roots: preview });
+          // Full form so we can attach the source-conversation badge + a hint
+          // explaining that the assistant's write auto-expanded the workspace.
+          showToast('', msg, '', 7000, {
+            convId,
+            convTitle: _toastConvTitle(convId),
+            hint: _t('workspaceRoot.hint'),
+          });
         }
       } catch (e) { console.warn('[workspace_root_added] toast failed', e); }
-      console.log('[workspace_root_added]', roots);
+      console.log('[workspace_root_added]', { convId, roots });
+
+      /* ── EPHEMERAL bar paint ONLY — provenance split ──────────────────
+       * An absolute-path write auto-registered a NEW extra root. This is an
+       * INCIDENTAL expansion of the workspace (a side effect of a write to a
+       * path outside all roots), NOT an explicit workspace choice the user
+       * made. So it may light up the bar for the CURRENT page load, but it
+       * must NEVER be written into the DURABLE conv.projectPaths / synced to
+       * the server. Persisting it was the "comes back after I delete it" bug:
+       * the durable record got the root, so the next reload's
+       * _restoreConvProject faithfully repainted exactly the root the user
+       * had just removed.
+       *
+       * Only EXPLICIT additions (create_project, the project modal, picking a
+       * folder) persist to conv.projectPaths — they go through their own
+       * paths and thus survive a reload. Incidental auto-registers evaporate
+       * on reload, as they should.
+       *
+       * GATE on the emitting conv being the ACTIVE one: the global project
+       * _state a background task's write mutated may reflect a DIFFERENT
+       * conversation's project, so refreshing projectState from an inactive
+       * conv would apply the wrong workspace to the visible bar. */
+      try {
+        const _active = (typeof activeConvId !== 'undefined') ? activeConvId : null;
+        if (convId && _active && convId === _active
+            && typeof Api !== 'undefined' && Api.project
+            && typeof Api.project.status === 'function') {
+          Api.project.status(convId)
+            .then(data => {
+              if (!data) return;
+              // Ephemeral: paint the bar so the new root is visible THIS
+              // session. Deliberately do NOT touch conv.projectPath /
+              // conv.projectPaths and do NOT persist/sync — see above.
+              if (typeof _applyProjectData === 'function') _applyProjectData(data);
+            })
+            .catch(e => { console.warn('[workspace_root_added] status refresh failed', e); });
+        }
+      } catch (e) { console.warn('[workspace_root_added] ephemeral paint failed', e); }
 
 }
 
@@ -348,6 +422,11 @@ function _handleTimerPollCheck(ev, c) {
           r._timerTimerId = ev.timerId;
           // Capture the next-poll timestamp so the UI can render a countdown.
           if (ev.nextPollTs) r._timerNextPollTs = ev.nextPollTs;
+          // A hybrid timer can AUTO-PROMOTE to pure `code` mid-run; the backend
+          // now stamps the CURRENT kind on every poll (not just 'started'), so
+          // refresh it here — otherwise the badge shows the stale creation-time
+          // 'hybrid' forever after the predicate took over.
+          if (ev.conditionKind) r._timerConditionKind = ev.conditionKind;
           // Remember the model the poll LLM resolved to (shown in the header).
           if (ev.model) r._timerModel = ev.model;
           // The 'started' event carries the verification metadata (what is
@@ -356,6 +435,8 @@ function _handleTimerPollCheck(ev, c) {
           if (ev.decision === "started") {
             if (ev.checkInstruction) r._timerCheckInstruction = ev.checkInstruction;
             if (ev.checkCommand) r._timerCheckCommand = ev.checkCommand;
+            if (ev.conditionKind) r._timerConditionKind = ev.conditionKind;
+            if (ev.conditionCommand) r._timerConditionCommand = ev.conditionCommand;
             if (ev.pollInterval) r._timerPollInterval = ev.pollInterval;
             if (ev.maxPolls) r._timerMaxPolls = ev.maxPolls;
           }

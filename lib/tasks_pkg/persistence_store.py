@@ -105,6 +105,45 @@ class DefaultConversationStore:
         affected = getattr(cur, 'rowcount', None)
         return affected if affected is not None else 0
 
+    def cas_sync_conversation_with_search(self, conv_id, messages, expected_updated_at):
+        """CAS overwrite that ALSO refreshes msg_count + search_text + FTS.
+
+        The CAS-guarded sibling of :meth:`sync_conversation_with_search`: writes
+        only if the row's ``updated_at`` still equals ``expected_updated_at``
+        (0 rows affected → a concurrent writer won → caller treats as a skip),
+        and updates the full-text-search index ONLY on a landed write so a
+        losing race never repoints FTS at content it didn't commit.
+
+        Use this (not the plain ``cas_update_conversation_messages``) whenever a
+        write CHANGES THE MESSAGE SET — e.g. manual /compact removes whole
+        messages, so msg_count and the searchable text genuinely change; a plain
+        CAS would leave the sidebar count stale and let search still match
+        compacted-away text.  Returns affected-row count (0 = skipped).
+        """
+        import time
+        from lib.conversations import build_search_text, update_conversation_fts
+        from lib.database import DOMAIN_CHAT, get_thread_db, json_dumps_pg
+        db = get_thread_db(DOMAIN_CHAT)
+        messages_json = json_dumps_pg(messages)
+        search_text = build_search_text(messages)
+        now_ms = int(time.time() * 1000)
+        cur = db.execute(
+            'UPDATE conversations SET messages=?, updated_at=?, msg_count=?, '
+            'search_text=? WHERE id=? AND user_id=1 AND updated_at=?',
+            (messages_json, now_ms, len(messages), search_text, conv_id,
+             expected_updated_at),
+        )
+        db.commit()
+        affected = getattr(cur, 'rowcount', None)
+        affected = affected if affected is not None else 0
+        if affected:
+            try:
+                update_conversation_fts(db, conv_id, search_text)
+            except Exception as e:
+                logger.debug('[Store] cas_sync FTS update skipped conv=%s: %s',
+                             conv_id[:8] if conv_id else '?', e)
+        return affected
+
     def ensure_compaction_schema(self):
         """Create transcript_archive table + index if absent (safety net)."""
         from lib.database import DOMAIN_CHAT, get_thread_db
@@ -182,6 +221,49 @@ class DefaultConversationStore:
         db_execute_with_retry(db, 'DELETE FROM transcript_archive WHERE conv_id=?',
                               (conv_id,))
 
+    def prune_archives(self, conv_id, keep):
+        """Ring-buffer retention: keep only the ``keep`` most-recent archive
+        rows for ``conv_id`` (highest ``id`` = newest), delete the rest.
+
+        Every compaction (force + reactive) inserts a full ``messages_json``
+        row, so without retention the table grows unbounded on a long-lived
+        conversation.  Called as a GC-on-insert from ``_archive_transcript``.
+        ``keep <= 0`` is a no-op (unlimited).  Returns the number of rows
+        deleted (0 when under the cap).  Cross-backend: a correlated subselect
+        of the newest ``keep`` ids, deleting anything not in it.
+        """
+        if not conv_id or keep <= 0:
+            return 0
+        from lib.database import (DOMAIN_CHAT, db_execute_with_retry,
+                                  get_thread_db)
+        db = get_thread_db(DOMAIN_CHAT)
+        try:
+            cur = db.execute(
+                'SELECT COUNT(*) FROM transcript_archive WHERE conv_id=?',
+                (conv_id,),
+            )
+            row = cur.fetchone()
+            total = int(row[0] if not isinstance(row, dict) else row.get('count', 0)) if row else 0
+            if total <= keep:
+                return 0
+            # Delete every row for this conv whose id is NOT among the newest
+            # ``keep`` ids.  Subselect avoids OFFSET dialect differences.
+            db_execute_with_retry(db,
+                'DELETE FROM transcript_archive WHERE conv_id=? AND id NOT IN '
+                '(SELECT id FROM transcript_archive WHERE conv_id=? '
+                ' ORDER BY id DESC LIMIT ?)',
+                (conv_id, conv_id, int(keep)),
+            )
+            deleted = total - keep
+            logger.info('[Store] pruned transcript_archive conv=%s: deleted %d '
+                        'oldest row(s), kept %d',
+                        conv_id[:8] if conv_id else '?', deleted, keep)
+            return deleted
+        except Exception as e:
+            logger.warning('[Store] prune_archives failed conv=%s: %s',
+                           conv_id[:8] if conv_id else '?', e)
+            return 0
+
     def sync_conversation_with_search(self, conv_id, messages):
         """Overwrite messages + msg_count + search_text and refresh FTS.
 
@@ -209,3 +291,19 @@ class DefaultConversationStore:
             (messages_json, now_ms, len(messages), search_text, conv_id))
         update_conversation_fts(db, conv_id, search_text)
         return now_ms
+
+    def notify_conversation_changed(self, conv_id):
+        """Look up the conversation's current rev and fire the conv-changed push.
+
+        The rev (bumped by the messages-change trigger on the preceding write)
+        rides the notification so the client's rev-gate refetches this conv's
+        body exactly once.  Best-effort: a failure here must never break the
+        caller's write path.
+        """
+        from lib.conversations import notify_conv_changed
+        from lib.database import DOMAIN_CHAT, get_thread_db
+        db = get_thread_db(DOMAIN_CHAT)
+        rev_row = db.execute(
+            'SELECT rev FROM conversations WHERE id=? AND user_id=1',
+            (conv_id,)).fetchone()
+        notify_conv_changed(conv_id, rev=(rev_row[0] if rev_row else None))

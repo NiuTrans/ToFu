@@ -16,17 +16,32 @@
 #    --api-key <key>       Pre-configure LLM API key
 #    --no-launch           Install only, don't start
 #    --skip-playwright     Skip Playwright browser install
+#    --skip-node           Skip the OPTIONAL Node.js + esbuild step entirely
+#                          (conda-nodejs solve + npm). The JS bundle then uses
+#                          the dependency-free Python minifier — byte-identical
+#                          output, just a slightly larger gzip. Fastest install.
 #    --no-update-conda     Skip conda self-update (only relevant when we
 #                          install our OWN sibling Miniforge — we never
 #                          touch a pre-existing conda the user owns)
 #    --reset-env           Delete the existing conda env and recreate from scratch
 #                          (⚠️  DESTRUCTIVE: removes ANY extra packages the user
 #                           installed into this env. Only use for your own env.)
-#    --force-sqlite        Skip PostgreSQL install + bootstrap entirely and pin
-#                          TOFU_DB_BACKEND=sqlite in .env. Use this when the
-#                          host's conda-forge snapshot can't satisfy PG deps
-#                          (e.g. icu/libxml2 pin conflicts) — SQLite is fine for
-#                          single-user / <100 concurrent use.
+#    --use-conda           Force the legacy conda install path, skipping the
+#                          default uv fast path. Use on very old systems
+#                          (glibc < 2.28) if auto-detection misfires, or when
+#                          you specifically want the conda-forge toolchain.
+#    --with-postgres       Install + bootstrap PostgreSQL (opt-in). WITHOUT this
+#                          flag the installer uses SQLite by default — zero
+#                          config, no dependencies, fine for single-user /
+#                          <100 concurrent. Pass --with-postgres only when you
+#                          need PG's higher concurrency (100+ users). PG install
+#                          is the slowest, most failure-prone install step
+#                          (icu/libxml2/PG-major solve + initdb), so it is no
+#                          longer done by default.
+#    --force-sqlite        Force SQLite even if --with-postgres was also passed
+#                          (SQLite wins). Also leaves any existing pgdata in
+#                          place, unused. Historically used when the host's
+#                          conda-forge snapshot couldn't satisfy PG deps.
 #    --pg-major <N>        Force a specific PG major version (e.g. 17). Default
 #                          tries 18 → 17 → 16 in order, picking the first one
 #                          whose solve succeeds on this host.
@@ -106,9 +121,12 @@ PORT="15000"
 API_KEY=""
 NO_LAUNCH=0
 SKIP_PLAYWRIGHT=0
+SKIP_NODE=0
 NO_UPDATE_CONDA=0
 RESET_ENV=0
 FORCE_SQLITE=0
+WITH_POSTGRES=0     # 0 = SQLite default (PG opt-in); 1 = install+bootstrap PG
+USE_CONDA=0        # 1 = force the legacy conda path, skip the uv fast path
 PG_MAJOR=""         # empty = auto-pick from PG_MAJOR_CANDIDATES
 REINIT_PGDATA=0
 PG_MAJOR_CANDIDATES=(18 17 16)
@@ -127,9 +145,12 @@ while [[ $# -gt 0 ]]; do
         --api-key)          API_KEY="$2"; FORWARD_ARGS+=("--api-key" "$2"); shift 2 ;;
         --no-launch)        NO_LAUNCH=1; shift ;;
         --skip-playwright)  SKIP_PLAYWRIGHT=1; shift ;;
+        --skip-node)        SKIP_NODE=1; shift ;;
         --no-update-conda)  NO_UPDATE_CONDA=1; shift ;;
         --reset-env)        RESET_ENV=1; shift ;;
         --force-sqlite)     FORCE_SQLITE=1; shift ;;
+        --with-postgres)    WITH_POSTGRES=1; shift ;;
+        --use-conda)        USE_CONDA=1; shift ;;
         --pg-major)         PG_MAJOR="$2"; shift 2 ;;
         --reinit-pgdata)    REINIT_PGDATA=1; shift ;;
         --min-conda)        MIN_CONDA_MAJOR="$2"; shift 2 ;;
@@ -224,6 +245,195 @@ case "$OS" in
     *)       fail "Unsupported OS: $OS (Windows: download Tofu-Setup-*.exe from the release page)" ;;
 esac
 info "Platform: $OS $ARCH"
+
+# ═══════════════════════════════════════════════════════════════
+#  Step 0.5: Ensure source is present (backend-agnostic)
+#
+#  Both the uv fast path and the conda path need requirements.txt in hand
+#  BEFORE choosing a backend, so resolve INSTALL_DIR / clone here using the
+#  system git. If a clone is required but git is missing, we force the conda
+#  path (which can install git from conda-forge).
+# ═══════════════════════════════════════════════════════════════
+step "Getting Tofu source code"
+if [[ -f "${INSTALL_DIR}/server.py" ]]; then
+    ok "Existing installation found at ${INSTALL_DIR}"
+    if [[ -d "${INSTALL_DIR}/.git" ]] && command -v git &>/dev/null; then
+        info "Updating via git pull..."
+        (cd "$INSTALL_DIR" && git pull --ff-only) || warn "git pull failed — continuing with existing code"
+    fi
+elif [[ -f "server.py" ]]; then
+    INSTALL_DIR="$(pwd)"
+    ok "Running from project directory: $INSTALL_DIR"
+elif command -v git &>/dev/null; then
+    info "Cloning https://github.com/rangehow/ToFu.git → ${INSTALL_DIR}"
+    git clone https://github.com/rangehow/ToFu.git "$INSTALL_DIR"
+    ok "Repository cloned"
+else
+    warn "git not found and a clone is required — forcing the conda path (it installs git)"
+    USE_CONDA=1
+fi
+REQ_FILE="${INSTALL_DIR}/requirements.txt"
+
+# ═══════════════════════════════════════════════════════════════
+#  Step 0.6: Choose install backend — uv fast path vs legacy conda
+#
+#  Default is the uv fast path: `uv venv` + `uv pip install -r requirements`,
+#  which resolves+installs prebuilt manylinux wheels in ~1-2 min with zero
+#  from-source builds — an order of magnitude faster than the conda-forge
+#  solve. We fall back to conda (unchanged) when any of these hold:
+#    • --use-conda was passed (explicit opt-out)
+#    • --with-postgres was passed (PG binaries live in conda; SQLite runs
+#      anywhere, so we don't make the user also remember --use-conda)
+#    • the host glibc is < 2.28 (PyMuPDF/Pillow ship no manylinux2014 wheel,
+#      so uv would fail resolution / hit GLIBC_x-not-found on CentOS7-era hosts)
+#    • the uv install or its import smoke-test fails (belt-and-braces: even if
+#      the glibc probe passes, a missing/broken wheel triggers the fallback)
+#  A clean fallback to conda is the compatibility floor and must never break.
+# ═══════════════════════════════════════════════════════════════
+_FAST_PATH_DONE=0
+
+# Return 0 iff this host's glibc is >= 2.28 (or non-Linux, e.g. macOS where
+# wheels are arch-tagged and the old GLIBC trap doesn't apply). Conservative:
+# if the version can't be determined, return non-zero (→ prefer conda).
+_glibc_ge_228() {
+    [[ "$OS" != "Linux" ]] && return 0
+    local v
+    v="$(ldd --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+' | head -1)"
+    [[ -z "$v" ]] && v="$(getconf GNU_LIBC_VERSION 2>/dev/null | grep -oE '[0-9]+\.[0-9]+' | head -1)"
+    [[ -z "$v" ]] && return 1
+    awk -v x="$v" 'BEGIN{n=split(x,a,".");exit !(a[1]>2||(a[1]==2&&a[2]>=28))}'
+}
+
+# Best-effort: ensure a `uv` binary is available. Returns 0 if usable.
+_ensure_uv() {
+    command -v uv &>/dev/null && return 0
+    info "uv not found — installing it (astral.sh, bounded)..."
+    local _t=""
+    command -v timeout &>/dev/null && _t="timeout -k 5 120"
+    if command -v curl &>/dev/null; then
+        $_t sh -c 'curl -LsSf https://astral.sh/uv/install.sh | sh' >/dev/null 2>&1 || true
+    fi
+    # uv installs to ~/.local/bin or ~/.cargo/bin — put both on PATH for this run.
+    export PATH="${HOME}/.local/bin:${HOME}/.cargo/bin:${PATH}"
+    command -v uv &>/dev/null
+}
+
+# The uv fast path. Sets ENV_PYTHON / ENV_PREFIX and writes .tofu_env.json on
+# success and returns 0; returns non-zero on ANY failure so the caller falls
+# back to conda. Never calls fail() — a failure here is recoverable.
+_try_uv_install() {
+    _ensure_uv || { warn "Could not obtain uv — falling back to conda"; return 1; }
+
+    local _venv="${INSTALL_DIR}/.venv"
+    info "Creating uv virtualenv at ${_venv} (Python ${PY_VER})..."
+    # --python-preference only-managed: seed the venv from uv's OWN standalone
+    # CPython, never a system/conda interpreter. Two reasons: (1) hermetic +
+    # reproducible (no dependence on whatever python the host ships); (2) it
+    # guarantees .venv/bin/python resolves (realpath) to a DISTINCT base binary,
+    # so server.py's re-exec guard is never short-circuited by a symlink
+    # collision with the interpreter the user later launches from.
+    uv venv "$_venv" --python "${PY_VER}" --python-preference only-managed 2>&1 || {
+        warn "uv venv failed — falling back to conda"; return 1; }
+
+    local _uvpy="${_venv}/bin/python"
+    [[ -x "$_uvpy" ]] || { warn "uv venv produced no python — falling back to conda"; return 1; }
+
+    local _t=""
+    command -v timeout &>/dev/null && _t="timeout -k 15 900"
+    info "Installing Python dependencies with uv (prebuilt wheels)..."
+    $_t uv pip install --python "$_uvpy" -r "$REQ_FILE" 2>&1 || {
+        warn "uv pip install failed — falling back to conda"; return 1; }
+
+    # ── Import smoke-test: THE compatibility gate ──
+    # PyMuPDF (fitz) + Pillow (PIL) are the packages with the highest manylinux
+    # glibc floor, so an old-glibc host that slipped past _glibc_ge_228 (or a
+    # broken wheel) surfaces HERE as an ImportError / GLIBC_x-not-found, and we
+    # fall back to conda cleanly. This is the belt-and-braces the owner required.
+    info "Verifying the wheel stack imports (fitz/PIL are the glibc-floor canaries)..."
+    if ! "$_uvpy" -c 'import lxml.etree, fitz, PIL, cryptography, quart, hypercorn, orjson, sqlalchemy, playwright' 2>&1; then
+        warn "uv-installed wheels failed the import smoke-test (likely glibc too old) — falling back to conda"
+        return 1
+    fi
+
+    # rg / fd are performance optimizations, NOT hard deps (grep_search degrades
+    # rg → grep → pure-Python). Detect system copies; never build from source.
+    if ! command -v rg &>/dev/null; then
+        warn "ripgrep (rg) not found — search falls back to grep/Python (slower, still works)."
+        warn "  For best speed install it from your OS: apt install ripgrep  /  yum install ripgrep"
+    fi
+    if ! command -v fd &>/dev/null && ! command -v fdfind &>/dev/null; then
+        warn "fd not found — file search falls back to a Python walker (slower, still works)."
+        warn "  Optional: apt install fd-find  /  yum install fd-find"
+    fi
+
+    # Playwright Chromium — best-effort, never blocks (browser tools degrade).
+    if [[ "$SKIP_PLAYWRIGHT" -eq 0 ]]; then
+        info "Installing Playwright Chromium (best-effort)..."
+        "$_uvpy" -m playwright install chromium >/dev/null 2>&1 \
+            && ok "Playwright Chromium installed" \
+            || warn "Playwright Chromium install skipped/failed — JS-rendered fetch disabled until you run it manually"
+    fi
+
+    # Publish the env for the shared downstream steps (.env, launch, pgdata probe).
+    ENV_PREFIX="$_venv"
+    ENV_PYTHON="$_uvpy"
+    # Write the .tofu_env.json marker with backend='uv'. server.py keys off this
+    # to skip the conda-only CONDA_PREFIX shim (a venv is not a conda env).
+    "$_uvpy" - "$INSTALL_DIR" "$_venv" "$_uvpy" <<'PYEOF'
+import json, os, sys, time
+install_dir, env_prefix, env_python = sys.argv[1:4]
+marker = {
+    'schema': 1,
+    'created_at': int(time.time()),
+    'backend': 'uv',
+    'env_prefix': env_prefix,
+    'python': env_python,
+    'owned_by_tofu_install': True,
+    'note': ('Written by install.sh (uv fast path). Read by server.py / '
+             'bootstrap.py to re-exec into the venv interpreter. Safe to '
+             'delete to disable auto-activation. NOT exported (gitignored).'),
+}
+with open(os.path.join(install_dir, '.tofu_env.json'), 'w', encoding='utf-8') as f:
+    json.dump(marker, f, indent=2)
+print(f"  ✓ Wrote {os.path.join(install_dir, '.tofu_env.json')}")
+PYEOF
+    ok "uv fast path complete (venv at ${_venv})"
+    return 0
+}
+
+if [[ "$USE_CONDA" -eq 1 ]]; then
+    info "Using the conda install path (--use-conda)."
+elif [[ "$WITH_POSTGRES" -eq 1 ]]; then
+    info "PostgreSQL requested (--with-postgres) — PG binaries live in the conda"
+    info "environment, so switching to the conda install path automatically."
+    USE_CONDA=1
+elif ! _glibc_ge_228; then
+    info "Host glibc < 2.28 (or undetectable) — using the conda path for maximum"
+    info "compatibility (PyMuPDF/Pillow ship no manylinux2014 wheel for old glibc)."
+    USE_CONDA=1
+else
+    step "Installing via uv (fast path; falls back to conda on any failure)"
+    if _try_uv_install; then
+        _FAST_PATH_DONE=1
+    else
+        warn "uv fast path did not complete — continuing with the conda install path"
+    fi
+fi
+
+# ═══════════════════════════════════════════════════════════════
+#  Steps 1–8 below are the LEGACY CONDA PATH. They run only when the uv
+#  fast path did not complete ($_FAST_PATH_DONE != 1). The whole block is
+#  guarded by a single `if` so the conda logic stays byte-for-byte intact
+#  (no reindent) — we just skip it wholesale on the fast path. Both paths
+#  converge below at Step 8.5 with ENV_PYTHON / ENV_PREFIX already set.
+#
+#  Pre-seed the conda-only globals that the SHARED launch tail references so
+#  `set -u` never trips on the uv path (where the conda block is skipped).
+#  On the uv path there is no conda base and the env is Tofu-owned.
+# ═══════════════════════════════════════════════════════════════
+CONDA_BASE="${CONDA_BASE:-}"
+CONDA_OWNED_BY_US="${CONDA_OWNED_BY_US:-0}"
+if [[ "$_FAST_PATH_DONE" -ne 1 ]]; then
 
 # ═══════════════════════════════════════════════════════════════
 #  Step 1: Locate, version-check, or install conda (Miniforge)
@@ -1207,8 +1417,21 @@ fi
 # icu<76). Trying older majors often succeeds because their icu pins are
 # looser. The first major whose solve succeeds wins.
 PG_INSTALLED_MAJOR=""   # set to the major we successfully installed, empty if we gave up
-if [[ "$FORCE_SQLITE" -eq 1 ]]; then
-    info "--force-sqlite: skipping PostgreSQL install entirely"
+if [[ "$WITH_POSTGRES" -ne 1 ]]; then
+    # ── SQLite is the default (2026-07). PostgreSQL is opt-in via
+    #    --with-postgres because its install (icu/libxml2/PG-major solve +
+    #    initdb + smoke-test) is the slowest, most failure-prone step and
+    #    single-user setups don't need it. Leaving PG_INSTALLED_MAJOR empty
+    #    makes the pgdata-validation + smoke-test steps below no-op cleanly
+    #    and pins TOFU_DB_BACKEND=sqlite in .env.
+    if [[ "$FORCE_SQLITE" -eq 1 ]]; then
+        info "--force-sqlite: using SQLite (PostgreSQL not installed)"
+    else
+        info "Using SQLite (default, zero-config). Pass --with-postgres to install"
+        info "PostgreSQL instead (recommended only for 100+ concurrent users)."
+    fi
+elif [[ "$FORCE_SQLITE" -eq 1 ]]; then
+    info "--force-sqlite overrides --with-postgres: skipping PostgreSQL install entirely"
 else
     # If user pinned a specific major, only try that one.
     if [[ -n "$PG_MAJOR" ]]; then
@@ -1381,6 +1604,106 @@ else
     warn "ripgrep/fd-find/tmux install failed — code search will fall back to grep / os.walk"
 fi
 
+
+# ═══════════════════════════════════════════════════════════════
+#  Node.js (OPTIONAL) — powers two best-effort, fail-open features:
+#    1. `node --check` syntax gate on the built JS bundle (lib/js_bundler.py)
+#    2. the optional esbuild stronger-minify pass (~12% smaller gzip bundle)
+#  Neither is required: without node the bundler uses its dependency-free
+#  Python minifier and the app is byte-identical. So this step NEVER fails
+#  the install — it only enhances.
+# ═══════════════════════════════════════════════════════════════
+if [[ "$SKIP_NODE" -eq 1 ]]; then
+    step "Skipping Node.js + esbuild (--skip-node)"
+    info "JS bundle will use the dependency-free Python minifier (byte-identical output)."
+elif conda install -n "$ENV_NAME" -c conda-forge --override-channels -y nodejs; then
+    step "Installing Node.js + esbuild (optional — stronger JS bundle minify)"
+    ok "Node.js installed"
+    # ── npm must FAIL-FAST, never hang ────────────────────────────────
+    # npm has no corp-mirror redirect and its defaults are fetch-timeout
+    # 300s × fetch-retries 2, so on a network that blocks
+    # registry.npmjs.org it STALLS for many minutes per package instead
+    # of erroring — the `|| warn` fallback below then never fires and the
+    # whole install appears frozen.  Since this step is OPTIONAL and
+    # fail-open (the Python minifier is byte-identical), we bound npm hard:
+    #   1. a ~5s PREFLIGHT reachability probe against the effective
+    #      registry — if it's unreachable we SKIP npm outright (turns the
+    #      worst case from 5 min into ~5s, generically, on ANY blocked net).
+    #   2. npm_config_* env vars cap per-request timeout + retries so a
+    #      registry that resolves-but-stalls errors in ~1 min, not ~15.
+    #   3. an outer `timeout` wrapper is an absolute ceiling regardless.
+    #   4. TOFU_NPM_REGISTRY (baked by export for corp hosts) redirects
+    #      the registry to a reachable mirror, same story as conda/pip.
+    export npm_config_fetch_timeout=60000
+    export npm_config_fetch_retries=1
+    export npm_config_fetch_retry_maxtimeout=20000
+    export npm_config_fetch_retry_mintimeout=5000
+    if [[ -n "${TOFU_NPM_REGISTRY:-}" ]]; then
+        info "npm registry override: ${TOFU_NPM_REGISTRY}"
+        export npm_config_registry="${TOFU_NPM_REGISTRY}"
+    fi
+    # Portable hard-timeout wrapper: GNU `timeout`, macOS `gtimeout`, else none.
+    _NPM_TIMEOUT=""
+    if command -v timeout >/dev/null 2>&1; then
+        _NPM_TIMEOUT="timeout 300"
+    elif command -v gtimeout >/dev/null 2>&1; then
+        _NPM_TIMEOUT="gtimeout 300"
+    fi
+    # ── Preflight: is the effective registry reachable in ~5s? ──────────
+    # This is the real speedup: on a network that can't reach the registry
+    # (the corp-proxy case), skip npm in ~5s instead of burning the full
+    # 5-min timeout cap. The probe MUST itself be hard-bounded so it can
+    # never become the new hang. `curl --max-time 5` is the ceiling; a
+    # `timeout 6` wrapper is a belt-and-braces backstop for a curl that
+    # ignores its own timeout (e.g. stuck in DNS).
+    #
+    # CRITICAL — probe a real PACKAGE endpoint, not the registry ROOT.
+    # A transparent corp proxy can 200/redirect the registry root while
+    # still 403-ing actual package traffic; a HEAD to the root would then
+    # FALSE-POSITIVE "reachable" and npm would stall on the first package
+    # fetch anyway. So we GET the metadata of a package we actually need
+    # (`esbuild`) — exactly the traffic npm will do — and rely on curl's
+    # `-f` (fail on HTTP >= 400) so a 403/404 on package traffic is
+    # correctly classified UNREACHABLE. Same for wget's `--server-response`
+    # gate via exit code on 4xx/5xx.
+    _NPM_REGISTRY_URL="${npm_config_registry:-https://registry.npmjs.org/}"
+    _NPM_PROBE_URL="${_NPM_REGISTRY_URL%/}/esbuild"
+    _NPM_REACHABLE=1
+    info "Checking npm registry reachability (5s preflight): ${_NPM_PROBE_URL}"
+    if command -v curl >/dev/null 2>&1; then
+        # -f → non-zero exit on 4xx/5xx (a proxy 403 on package traffic).
+        ${_NPM_TIMEOUT:+timeout 6} curl -fsS --max-time 5 -o /dev/null "$_NPM_PROBE_URL" \
+            2>/dev/null || _NPM_REACHABLE=0
+    elif command -v wget >/dev/null 2>&1; then
+        # wget exits non-zero on 4xx/5xx unless --content-on-error; a GET to
+        # /dev/null exercises real package traffic (not a HEAD --spider).
+        ${_NPM_TIMEOUT:+timeout 6} wget -q --timeout=5 --tries=1 -O /dev/null "$_NPM_PROBE_URL" \
+            2>/dev/null || _NPM_REACHABLE=0
+    else
+        # No probe tool — fall through to the timeout-bounded npm run.
+        _NPM_REACHABLE=1
+    fi
+    if [[ "$_NPM_REACHABLE" -eq 0 ]]; then
+        warn "npm registry unreachable (${_NPM_REGISTRY_URL}) — skipping npm; bundler falls back to the Python minifier (no impact on the app)"
+        warn "To enable esbuild later: set a reachable registry (export TOFU_NPM_REGISTRY=<mirror>) and re-run, or 'cd ${INSTALL_DIR} && npm ci'"
+    # One-time `npm ci` populates node_modules/ (esbuild + the typecheck
+    # harness). Persists across restarts — server.py never re-runs it.
+    elif [[ -f "${INSTALL_DIR}/package-lock.json" ]]; then
+        info "Installing JS devDependencies (npm ci — one-time, 5-min cap)..."
+        (cd "$INSTALL_DIR" && $_NPM_TIMEOUT npm ci --no-audit --no-fund) \
+            && ok "JS devDependencies installed (esbuild available to the bundler)" \
+            || warn "npm ci failed/timed out — bundler falls back to the Python minifier (no impact on the app)"
+    else
+        info "Installing esbuild (npm install — one-time, 5-min cap)..."
+        (cd "$INSTALL_DIR" && $_NPM_TIMEOUT npm install --no-audit --no-fund) \
+            && ok "esbuild installed" \
+            || warn "npm install failed/timed out — bundler falls back to the Python minifier (no impact on the app)"
+    fi
+else
+    step "Installing Node.js + esbuild (optional — stronger JS bundle minify)"
+    warn "Node.js install skipped/failed — JS bundle uses the dependency-free Python minifier (fine; the app is unaffected)"
+fi
+
 # ═══════════════════════════════════════════════════════════════
 #  Step 8: Playwright — Chromium browser + shared libs (rootless)
 # ═══════════════════════════════════════════════════════════════
@@ -1442,6 +1765,8 @@ else
     info "Skipping Playwright (--skip-playwright)"
 fi
 
+fi  # ── end legacy conda path ($_FAST_PATH_DONE != 1) ──
+
 # ═══════════════════════════════════════════════════════════════
 #  Step 8.5: Validate data/pgdata/ matches installed PG major
 #
@@ -1456,9 +1781,55 @@ fi
 #    - mismatch without --reinit-pgdata → pin TOFU_DB_BACKEND=sqlite (data preserved).
 #    - pgdata exists but no PG installed locally → pin TOFU_DB_BACKEND=sqlite.
 # ═══════════════════════════════════════════════════════════════
-step "Validating data/pgdata/ (version compatibility)"
+step "Validating PostgreSQL data directory (version compatibility)"
 
-PGDATA_DIR="${INSTALL_DIR}/data/pgdata"
+# Resolve the pgdata path the SAME way the runtime does (lib/database/db_paths.py):
+# on a network/FUSE mount the LIVE cluster is redirected to local disk
+# ($TOFU_DB_LOCAL_ROOT/pgdata, default /tmp/tofu/pgdata); on a vanilla local box
+# it stays at <data>/pgdata (byte-identical). Querying the resolver — instead of
+# hardcoding data/pgdata — is what keeps install.sh and server.py from EVER
+# disagreeing on where the cluster lives (the exact bug that made PG silently
+# fall back to SQLite). Run under TOFU_DB_BACKEND=sqlite so merely importing the
+# DB layer to ASK the question can never auto-start PG as a side-effect.
+PGDATA_SPLIT="0"
+PGDATA_LEGACY="${INSTALL_DIR}/data/pgdata"
+_PGDATA_INFO="$(cd "$INSTALL_DIR" && TOFU_DB_BACKEND=sqlite "$ENV_PYTHON" - <<'PYEOF' 2>/dev/null
+import sys
+try:
+    from lib.runtime_paths import data_root
+    from lib.database.db_paths import (
+        resolve_pgdata_dir, legacy_pgdata_dir, local_data_split_enabled)
+    dr = data_root()
+    print(resolve_pgdata_dir(dr))
+    print(legacy_pgdata_dir(dr))
+    print('1' if local_data_split_enabled(dr) else '0')
+except Exception:
+    sys.exit(1)
+PYEOF
+)"
+if [[ -n "$_PGDATA_INFO" ]]; then
+    PGDATA_DIR="$(sed -n '1p' <<<"$_PGDATA_INFO")"
+    PGDATA_LEGACY="$(sed -n '2p' <<<"$_PGDATA_INFO")"
+    PGDATA_SPLIT="$(sed -n '3p' <<<"$_PGDATA_INFO")"
+else
+    # Resolver query failed (unexpected post-install) — degrade to the historical
+    # in-tree path so the rest of the step still runs.
+    warn "Could not query the runtime pgdata resolver \u2014 falling back to data/pgdata"
+    PGDATA_DIR="${INSTALL_DIR}/data/pgdata"
+fi
+
+if [[ "$PGDATA_DIR" != "$PGDATA_LEGACY" ]]; then
+    info "Runtime pgdata resolves to ${PGDATA_DIR}"
+    info "(local-disk split engaged; the legacy in-tree path would be ${PGDATA_LEGACY})"
+fi
+# /tmp is a common but VOLATILE default for the local-disk split — warn so the
+# user doesn't assume the cluster lives on persistent storage.
+if [[ "$PGDATA_DIR" == /tmp/* ]]; then
+    warn "Resolved pgdata is under /tmp (${PGDATA_DIR})."
+    warn "If this /tmp is cleared on reboot, the live PostgreSQL cluster will NOT persist."
+    warn "Set TOFU_DB_LOCAL_ROOT to a persistent local volume to keep DB data across reboots."
+fi
+
 PGDATA_MAJOR=""
 if [[ -f "${PGDATA_DIR}/PG_VERSION" ]]; then
     PGDATA_MAJOR="$(tr -d '[:space:]' < "${PGDATA_DIR}/PG_VERSION" | cut -d. -f1)"
@@ -1478,6 +1849,8 @@ elif [[ -z "$PG_INSTALLED_MAJOR" ]]; then
     if [[ -n "$PGDATA_MAJOR" ]]; then
         warn "pgdata exists (PG ${PGDATA_MAJOR}) but no PG binaries installed in env"
         warn "Would cause scheduler/db retry storms \u2014 pinning TOFU_DB_BACKEND=sqlite"
+        warn "Your existing PostgreSQL data is NOT lost, just unused. To re-enable it,"
+        warn "re-run the installer with --with-postgres (installs PG ${PGDATA_MAJOR} and reuses this pgdata)."
     else
         info "No PG installed \u2014 tofu will use SQLite"
     fi
@@ -1509,23 +1882,149 @@ fi
 #  If we chose to use PG, try `pg_ctl start` once under a timeout so
 #  config-file errors surface NOW instead of during first /api call.
 # ═══════════════════════════════════════════════════════════════
-if [[ -z "$DB_BACKEND_CHOICE" && -n "$PG_INSTALLED_MAJOR" && -d "$PGDATA_DIR" ]]; then
-    step "Smoke-testing PostgreSQL startup"
-    _PG_CTL="${CONDA_BASE}/envs/${ENV_NAME}/bin/pg_ctl"
-    _PG_LOG_DIR="${INSTALL_DIR}/logs"
-    mkdir -p "$_PG_LOG_DIR"
-    # Stop any stale process first (best-effort), then try to start.
-    "$_PG_CTL" -D "$PGDATA_DIR" stop -m fast >/dev/null 2>&1 || true
-    # Remove stale pidfile left by killed/crashed prior runs
+# ── PG recovery helpers (borrowed/user-owned env with a broken PostgreSQL) ──
+# Step 7 already (re)installs postgresql into the env, but a corrupt shared dep
+# (icu / libpq) can survive a plain remove+install because conda deems it
+# "satisfied" and never re-fetches it — so initdb/pg_ctl can still hang or fail
+# on a borrowed env (owned_by_tofu_install=false). When the bootstrap/smoke-test
+# below fails on such an env we try ONE --force-reinstall of the PG stack (which
+# re-fetches even satisfied builds) and retry; if it STILL fails the reliable
+# remedy is a clean Tofu-owned env, which _pg_broken_env_advice prints. We only
+# touch PG packages here (never the base conda), consistent with Step 7 which
+# already installs postgresql into the same env.
+_pg_force_reinstall() {
+    warn "Recovery: force-reinstalling PostgreSQL stack in env '${ENV_NAME}' (postgresql=${PG_INSTALLED_MAJOR} + libpq + icu)"
+    conda install -n "$ENV_NAME" -c conda-forge --override-channels -y \
+        --force-reinstall "postgresql=${PG_INSTALLED_MAJOR}" libpq icu 'psycopg2>=2.9'
+}
+
+_pg_broken_env_advice() {
+    warn ""
+    if [[ "$CONDA_OWNED_BY_US" -eq 0 ]]; then
+        warn "The conda env '${ENV_NAME}' is a pre-existing / borrowed conda"
+        warn "(owned_by_tofu_install=false) and its PostgreSQL build appears broken"
+        warn "(initdb/pg_ctl failed even after a force-reinstall)."
+        warn "For a reliable PG cluster, re-run with a clean Tofu-owned env:"
+        warn "    bash install.sh --force-sibling-conda --reset-env"
+        warn "or repair PG in the current env yourself:"
+        warn "    conda install -n ${ENV_NAME} -c conda-forge --force-reinstall postgresql=${PG_INSTALLED_MAJOR} libpq icu"
+    fi
+    warn ""
+}
+
+# Delegated runtime bootstrap (initdb + start-verify) — factored into a function
+# so the borrowed-env recovery path can retry it after a force-reinstall. Reads
+# the global $_PG_BOOTSTRAP_TIMEOUT wrapper set by the caller. Returns the
+# delegate's rc (124/137 = outer hard-timeout fired).
+_run_pg_bootstrap_delegate() {
+    local _rc=0
+    (cd "$INSTALL_DIR" && $_PG_BOOTSTRAP_TIMEOUT "$ENV_PYTHON" - <<'PYEOF'
+import sys
+from lib.runtime_paths import data_root
+from lib.database.db_paths import resolve_pgdata_dir
+from lib.database._core import (
+    BASE_DIR, PG_HOST, PG_PORT, PG_USER, PG_PASSWORD, PG_DBNAME)
+from lib.database._bootstrap import _ensure_pg_running, _stop_local_pg_quietly
+pgdata = resolve_pgdata_dir(data_root())
+res = _ensure_pg_running(pgdata, BASE_DIR, PG_HOST, PG_PORT,
+                         PG_USER, PG_PASSWORD, PG_DBNAME)
+if not res:
+    print('ensure_pg_running returned no result', file=sys.stderr)
+    sys.exit(1)
+# Leave the cluster the way the server expects to find it on first boot.
+try:
+    _stop_local_pg_quietly(pgdata)
+except Exception as e:
+    print(f'(non-fatal) stop after bootstrap failed: {e}', file=sys.stderr)
+print(f"OK pgdata={pgdata} port={res.get('PG_PORT')}")
+PYEOF
+    ) || _rc=$?
+    return $_rc
+}
+
+# pg_ctl smoke-test of an EXISTING cluster — factored so the recovery path can
+# retry it after a force-reinstall. Returns 0 if PG started (then stopped) OK.
+_run_pg_ctl_smoke() {
+    local _pgctl="${CONDA_BASE}/envs/${ENV_NAME}/bin/pg_ctl"
+    local _logdir="${INSTALL_DIR}/logs"
+    mkdir -p "$_logdir"
+    "$_pgctl" -D "$PGDATA_DIR" stop -m fast >/dev/null 2>&1 || true
     rm -f "${PGDATA_DIR}/postmaster.pid" 2>/dev/null || true
-    if "$_PG_CTL" -D "$PGDATA_DIR" -l "${_PG_LOG_DIR}/postgresql.log" -w -t 15 start >/dev/null 2>&1; then
-        ok "PostgreSQL started successfully (smoke test)"
-        "$_PG_CTL" -D "$PGDATA_DIR" stop -m fast >/dev/null 2>&1 || true
+    if "$_pgctl" -D "$PGDATA_DIR" -l "${_logdir}/postgresql.log" -w -t 15 start >/dev/null 2>&1; then
+        "$_pgctl" -D "$PGDATA_DIR" stop -m fast >/dev/null 2>&1 || true
+        return 0
+    fi
+    return 1
+}
+
+if [[ -z "$DB_BACKEND_CHOICE" && -n "$PG_INSTALLED_MAJOR" && "$PGDATA_SPLIT" == "1" && ! -d "$PGDATA_DIR" ]]; then
+    # ── Split engaged + resolved cluster not yet created ──
+    # The bash pg_ctl smoke-test below can only START an EXISTING cluster; it
+    # cannot fulfil the "bootstrap will initdb on first server.py run" promise
+    # for the local-disk path. So DELEGATE the real initdb + start-verify to the
+    # runtime's own bootstrap (_ensure_pg_running) against the RESOLVED path —
+    # install.sh and server.py then run the identical code, so a config-file
+    # error surfaces NOW instead of at the first API call. This is exactly what
+    # the runtime does on first boot; doing it here just moves it earlier.
+    step "Bootstrapping PostgreSQL at ${PGDATA_DIR} (initdb via runtime)"
+    # Portable hard-timeout wrapper for the delegated bootstrap: GNU `timeout`,
+    # macOS `gtimeout`, else none. Mirrors the npm-install wrapper above (~L1428).
+    # The runtime bootstrap it delegates to is ALREADY internally bounded
+    # (initdb 60s / pg_ctl 30s / createdb 15s ≈ 2min worst case), so this outer
+    # ceiling is pure defense-in-depth: subprocess's SIGKILL cannot reap a
+    # D-state (uninterruptible-sleep) process wedged on a hung FUSE mount, and
+    # without an outer wrapper such a process would hang the whole installer.
+    # `-k` escalates TERM→KILL; 300s is well above the internal budget so a
+    # slow-but-progressing initdb is never killed prematurely.
+    _PG_BOOTSTRAP_TIMEOUT=""
+    if command -v timeout >/dev/null 2>&1; then
+        _PG_BOOTSTRAP_TIMEOUT="timeout -k 10 300"
+    elif command -v gtimeout >/dev/null 2>&1; then
+        _PG_BOOTSTRAP_TIMEOUT="gtimeout -k 10 300"
+    fi
+    _pg_boot_rc=0
+    _run_pg_bootstrap_delegate || _pg_boot_rc=$?
+    # If a borrowed env's corrupt PG stack made the delegate fail (but NOT a
+    # FUSE-wedge hard-timeout — force-reinstall can't fix a hung mount), try one
+    # force-reinstall of the PG stack and retry the delegate once.
+    if [[ "$_pg_boot_rc" -ne 0 && "$_pg_boot_rc" -ne 124 && "$_pg_boot_rc" -ne 137 ]]; then
+        warn "Runtime PG bootstrap failed (rc=${_pg_boot_rc}) \u2014 attempting PG stack recovery"
+        if _pg_force_reinstall; then
+            _pg_boot_rc=0
+            _run_pg_bootstrap_delegate || _pg_boot_rc=$?
+        else
+            warn "PG force-reinstall itself failed"
+        fi
+    fi
+    if [[ "$_pg_boot_rc" -eq 0 ]]; then
+        ok "PostgreSQL cluster initialized + start-verified at ${PGDATA_DIR}"
     else
-        warn "PG failed to start during smoke test \u2014 see ${_PG_LOG_DIR}/postgresql.log"
+        if [[ "$_pg_boot_rc" -eq 124 || "$_pg_boot_rc" -eq 137 ]]; then
+            warn "Runtime PG bootstrap exceeded the 300s hard timeout (possible wedged FUSE mount) \u2014 aborted"
+        else
+            warn "Runtime PG bootstrap failed even after force-reinstall \u2014 see ${INSTALL_DIR}/logs/postgresql.log"
+            _pg_broken_env_advice
+        fi
         warn "Pinning TOFU_DB_BACKEND=sqlite to avoid scheduler retry storms"
-        warn "Re-run with --reinit-pgdata after moving ${PGDATA_DIR} aside if you want fresh PG"
         DB_BACKEND_CHOICE="sqlite"
+    fi
+elif [[ -z "$DB_BACKEND_CHOICE" && -n "$PG_INSTALLED_MAJOR" && -d "$PGDATA_DIR" ]]; then
+    step "Smoke-testing PostgreSQL startup"
+    if _run_pg_ctl_smoke; then
+        ok "PostgreSQL started successfully (smoke test)"
+    else
+        # A borrowed env's corrupt PG binary can fail to start an otherwise-valid
+        # cluster. Try one force-reinstall of the PG stack and re-smoke-test.
+        warn "PG failed to start during smoke test \u2014 attempting PG stack recovery"
+        if _pg_force_reinstall && _run_pg_ctl_smoke; then
+            ok "PostgreSQL started successfully after force-reinstall"
+        else
+            warn "PG still fails to start after force-reinstall \u2014 see ${INSTALL_DIR}/logs/postgresql.log"
+            _pg_broken_env_advice
+            warn "Pinning TOFU_DB_BACKEND=sqlite to avoid scheduler retry storms"
+            warn "Re-run with --reinit-pgdata after moving ${PGDATA_DIR} aside if you want fresh PG"
+            DB_BACKEND_CHOICE="sqlite"
+        fi
     fi
 fi
 
@@ -1591,7 +2090,11 @@ ok "Installation complete!"
 echo ""
 echo "  To start Tofu later, any of these work (.tofu_env.json auto-activates):"
 echo "    cd ${INSTALL_DIR} && python server.py"
-if [[ "$CONDA_OWNED_BY_US" -eq 1 ]]; then
+if [[ "$_FAST_PATH_DONE" -eq 1 ]]; then
+    echo ""
+    echo "  (Optional, to explicitly activate the uv venv — not required thanks to .tofu_env.json:)"
+    echo "    source \"${ENV_PREFIX}/bin/activate\""
+elif [[ "$CONDA_OWNED_BY_US" -eq 1 ]]; then
     echo ""
     echo "  (Optional, if you want the env on your PATH for other tools too:)"
     echo "    source \"${CONDA_BASE}/etc/profile.d/conda.sh\" && conda activate ${ENV_NAME}"

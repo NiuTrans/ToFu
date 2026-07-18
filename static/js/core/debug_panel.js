@@ -9,6 +9,16 @@
 
 function debugLog(msg, type = "") {
   console.log(`[${type || "info"}]`, msg);
+  /* Bounded in-memory ring of recent log lines so the one-click diagnostics
+   * collector (diag_collect.js → window.__tofuCollectDiagnostics) can attach
+   * the last N events even when the SPA is otherwise wedged. Kept here (not in
+   * diag_collect) because debugLog is the single choke point every log passes
+   * through. Never throws. */
+  try {
+    const ring = (window.__tofuDiagRing = window.__tofuDiagRing || []);
+    ring.push(Date.now() + " [" + (type || "info") + "] " + String(msg).slice(0, 300));
+    if (ring.length > 80) ring.splice(0, ring.length - 80);
+  } catch (_) { /* ring is best-effort */ }
   /* Auto-report error/warn level messages to server logs */
   if (type === "error" || type === "warn") {
     _reportClientError(`[debugLog][${type}] ${msg}`);
@@ -167,6 +177,30 @@ function _debugBrainInfo(msg) {
   if (!charter && !board) return null;
   return { charter, board };
 }
+/* Stable per-message identity for open-state preservation across a re-render.
+ * A positional index is NOT stable: a `messages_snapshot` reflecting a
+ * compaction/reconcile can DROP or REORDER an earlier message, so index N
+ * after the render is a different message than the one the user expanded —
+ * the same drift class the mutation paths (regenerate/patch/delete) were
+ * hardened against by resolving on a stable id. Prefer an explicit id
+ * (`tool_call_id` / assistant `tool_calls[].id` / `_msgId` if present), else
+ * fall back to role + a cheap content signature (djb2-ish, base36) which is
+ * stable as long as the message's OWN content is unchanged. Two byte-identical
+ * messages share a key — a benign over-restore (identical content). */
+function _debugMsgIdentity(msg) {
+  if (!msg) return "";
+  if (msg._msgId) return "m:" + msg._msgId;
+  if (msg.tool_call_id) return "tc:" + msg.tool_call_id;
+  if (Array.isArray(msg.tool_calls) && msg.tool_calls.length) {
+    const id = msg.tool_calls[0] && msg.tool_calls[0].id;
+    if (id) return "tcall:" + id;
+  }
+  const role = msg.role || "unknown";
+  const text = _debugMsgText(msg);
+  let h = 0;
+  for (let k = 0; k < text.length; k++) h = (Math.imul(h, 31) + text.charCodeAt(k)) | 0;
+  return "r:" + role + ":" + text.length + ":" + (h >>> 0).toString(36);
+}
 function toggleDebug() {
   debugVisible = !debugVisible;
   document
@@ -277,6 +311,26 @@ function showMessagesInDebug(messages, label, isUpdate, forConvId, tools, approx
     return;
   const p = document.getElementById("debugContent");
   if (!p) return;
+  /* ── Preserve the user's expanded state + scroll across a re-render ──
+   * The incremental update path keeps `.open` blocks, but the structural
+   * fall-through to a FULL render (`p.innerHTML = ""` below) would otherwise
+   * collapse every message the user expanded to inspect and jump the scroll to
+   * the top — the reported "debug panel closes itself when new content streams
+   * in" bug (a snapshot update whose message count/roles diverge enough trips
+   * the fall-through, which happens routinely as a new generation's live wire
+   * snapshot grows past the initial server-reconstructed one). Capture the
+   * open block IDENTITIES + tools-open + scroll now, re-apply after the full
+   * render. Identity (not index) is the handle so restoration survives a
+   * snapshot that drops/reorders an earlier message. */
+  const _openMids = new Set();
+  p.querySelectorAll(".debug-msg-block.open").forEach((b) => {
+    // Tools block shares `.debug-msg-block` but has no data-mid — handled
+    // separately via _toolsWasOpen, so the mid guard cleanly excludes it.
+    if (b.dataset.mid) _openMids.add(b.dataset.mid);
+  });
+  const _toolsWasOpen = !!p.querySelector(".debug-tools-block.open");
+  const _hadExisting = p.querySelectorAll(".debug-msg-block").length > 0;
+  const _prevScroll = p.scrollTop;
   /* ── Aggregate stats for the header summary ── */
   let _totalTokens = 0;
   let _compactedCount = 0;
@@ -404,6 +458,7 @@ function showMessagesInDebug(messages, label, isUpdate, forConvId, tools, approx
     const block = document.createElement("div");
     block.className = "debug-msg-block";
     block.dataset.idx = i;
+    block.dataset.mid = _debugMsgIdentity(msg);
     const compInfo = _debugCompactionInfo(msg);
     if (compInfo) block.classList.add("debug-msg-compacted");
     // Header
@@ -579,6 +634,8 @@ function showMessagesInDebug(messages, label, isUpdate, forConvId, tools, approx
         }
         // Update stored msg ref for lazy render
         existing[i]._msgRef = messages[i];
+        // Refresh identity so capture/restore keys track the new content.
+        existing[i].dataset.mid = _debugMsgIdentity(messages[i]);
         // Update tool calls quick view
         const oldTc = existing[i].querySelector(".debug-tool-calls");
         if (messages[i].tool_calls && messages[i].tool_calls.length > 0) {
@@ -651,7 +708,30 @@ function showMessagesInDebug(messages, label, isUpdate, forConvId, tools, approx
       })(block, i);
       p.appendChild(block);
     });
-    p.scrollTop = 0;
+    // Re-apply the expanded state captured before the wipe so a snapshot
+    // update that fell through to this full render doesn't collapse what the
+    // user expanded to inspect. Match by stable IDENTITY (data-mid), iterating
+    // freshly-rendered blocks — so if the snapshot dropped/reordered a message,
+    // the block the user opened re-opens wherever it now sits, and a different
+    // message that happens to land at the old index does NOT.
+    if (_openMids.size) {
+      p.querySelectorAll(".debug-msg-block").forEach((b) => {
+        if (!b.dataset.mid || !_openMids.has(b.dataset.mid)) return;
+        if (b.classList.contains("open")) return;
+        b.classList.add("open");
+        const arrow = b.querySelector(".debug-msg-header span:last-child");
+        if (arrow) arrow.style.transform = "rotate(90deg)";
+        const body = b.querySelector(".debug-msg-body");
+        if (body && !body.dataset.rendered) {
+          body.dataset.rendered = "1";
+          const pre = body.querySelector("pre");
+          if (pre) pre.innerHTML = colorJson(b._msgRef, 0);
+        }
+      });
+    }
+    // Only snap to top on a genuine first render — preserve the user's scroll
+    // position when this was a re-render over existing content.
+    p.scrollTop = _hadExisting ? _prevScroll : 0;
   }
   // ★ Render tools section (collapsible, before messages)
   if (tools && tools.length > 0) {
@@ -701,6 +781,22 @@ function showMessagesInDebug(messages, label, isUpdate, forConvId, tools, approx
       if (tPre) tPre.innerHTML = colorJson(tools, 0);
     } else if (tBody) {
       tBody.dataset.rendered = '';
+    }
+  }
+  // Re-apply the TOOLS block's expanded state — a full render wipes it too
+  // (it re-creates collapsed), so restore it alongside the message blocks.
+  if (_toolsWasOpen) {
+    const _tb = p.querySelector(".debug-tools-block");
+    if (_tb && !_tb.classList.contains("open")) {
+      _tb.classList.add("open");
+      const _ta = _tb.querySelector(".debug-msg-header span:last-child");
+      if (_ta) _ta.style.transform = "rotate(90deg)";
+      const _tbody = _tb.querySelector(".debug-msg-body");
+      if (_tbody && !_tbody.dataset.rendered && _tb._toolsRef) {
+        _tbody.dataset.rendered = "1";
+        const _tpre = _tbody.querySelector("pre");
+        if (_tpre) _tpre.innerHTML = colorJson(_tb._toolsRef, 0);
+      }
     }
   }
   // Store for copy

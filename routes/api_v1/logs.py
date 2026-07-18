@@ -25,7 +25,8 @@ from lib.log_clean import detect_log_noise
 from lib.openapi import api_meta
 from lib.request_parser import BadRequest, optional_dict, optional_str, parse_body, require_list, require_str
 from lib.text_lang import (
-    cjk_ratio, guess_language, is_predominantly_chinese, latin_ratio,
+    cjk_ratio, detect_language, guess_language, is_predominantly_chinese,
+    latin_ratio,
 )
 from lib.tool_changes import extract_file_changes_dicts
 
@@ -196,13 +197,16 @@ def extract_file_changes_batch_route():
 @api_meta(
     summary='Detect predominant language of a text blob',
     description=(
-        'Heuristic-only language detection (CJK / Latin character '
-        'ratios). Returns ``{language, cjk_ratio, latin_ratio, '
-        'is_chinese}`` so callers can decide whether to skip a '
-        'translation pass (the same rule the UI applies before '
-        'firing an EN→ZH translation that would otherwise hallucinate '
-        'an English rewrite of an already-Chinese message).\n\n'
-        '``language`` is one of ``zh / en / mixed / unknown``.'),
+        'Cascade language detection: Tier-0 script fast-path → Tier-1 '
+        'fastText lid.176 (guarded-optional, ``TOFU_LANGDETECT_BACKEND='
+        'fasttext``) → heuristic fallback. Returns the legacy coarse '
+        '``{language, cjk_ratio, latin_ratio, is_chinese}`` (unchanged '
+        'contract) PLUS a richer ``detected: {code, confidence, source}`` '
+        'from the cascade.\n\n'
+        '``language`` is one of ``zh / en / mixed / unknown``; '
+        '``detected.code`` is a full BCP-47-ish code (``en / de / es / '
+        'ja / …``). The LLM-correction tier is never fired from this '
+        'endpoint (it is gated per-request via personal_scope elsewhere).'),
     tags=['logs'], scope='chat',
     request_body={'required': True, 'content': {'application/json': {
         'schema': {
@@ -219,11 +223,26 @@ def detect_text_language():
                             allow_empty=True)
     except BadRequest as e:
         return api_bad_request(str(e), field=e.field or 'text')
+    # ``forceFasttext`` forces Tier-1 fastText on regardless of the env backend
+    # — for the frontend auto-translate skip gate, which (like the server-side
+    # safety net) MUST tell kanji-heavy Japanese apart from Chinese; the
+    # script+heuristic tier cannot, so without this a JP reply is wrongly
+    # skipped as "already Chinese". ``detected.source`` lets the caller/test
+    # verify the statistical model actually ran.
+    force_ft = bool(body.get('forceFasttext') or body.get('force_fasttext'))
+    # Cascade detection (Tier-0/1 only — never the billed LLM tier from an
+    # unauthenticated detection endpoint).
+    det = detect_language(text, force_fasttext=force_ft)
     return api_ok({
         'language': guess_language(text),
         'cjk_ratio': round(cjk_ratio(text), 4),
         'latin_ratio': round(latin_ratio(text), 4),
         'is_chinese': is_predominantly_chinese(text),
+        'detected': {
+            'code': det.code,
+            'confidence': round(det.confidence, 4),
+            'source': det.source,
+        },
     })
 
 

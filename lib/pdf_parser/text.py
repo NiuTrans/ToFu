@@ -19,7 +19,52 @@ from lib.pdf_parser.postprocess import cleanup_markdown, strip_manuscript_line_n
 
 logger = get_logger(__name__)
 
-__all__ = ['extract_pdf_text']
+__all__ = ['extract_pdf_text', 'validate_pdf_bytes']
+
+
+def validate_pdf_bytes(pdf_bytes):
+    """Check that ``pdf_bytes`` is a genuinely openable PDF with >= 1 page.
+
+    This is the ingest-time gate that stops a truncated / aborted / empty upload
+    (e.g. a 15-byte ``%PDF-1.4`` header-only stub) from being committed to disk
+    and seeded into the bookshelf as a permanent non-viewable ghost. A file is
+    "real" only when pymupdf can OPEN it AND it reports at least one page —
+    exactly the precondition text/image extraction needs, so gating on validity
+    is equivalent to gating on recoverability.
+
+    Args:
+        pdf_bytes: the raw bytes to validate.
+
+    Returns:
+        (ok, page_count, error): ``ok`` True only for an openable, non-empty
+        PDF; ``page_count`` the page count (0 when invalid); ``error`` a short
+        human-readable reason when invalid, else ''. Never raises.
+    """
+    if not pdf_bytes or len(pdf_bytes) < 32:
+        return False, 0, 'empty or truncated file (%d bytes)' % (len(pdf_bytes or b''),)
+    if pymupdf is None:
+        # Parser unavailable — cannot validate. Fail OPEN (treat as valid) so a
+        # deployment without pymupdf is not blocked from ingesting; the reader's
+        # own recovery path still surfaces any downstream parse failure.
+        logger.debug('[PDF] validate_pdf_bytes: pymupdf unavailable, skipping validation')
+        return True, 0, ''
+    doc = None
+    try:
+        with PYMUPDF_LOCK:
+            doc = pymupdf.open(stream=pdf_bytes, filetype='pdf')
+            pages = doc.page_count
+        if pages < 1:
+            return False, 0, 'PDF has no pages'
+        return True, pages, ''
+    except Exception as e:
+        logger.debug('[PDF] validate_pdf_bytes: open/validate failed: %s', e)
+        return False, 0, '%s: %s' % (type(e).__name__, e)
+    finally:
+        if doc is not None:
+            try:
+                doc.close()
+            except Exception as e:
+                logger.debug('[PDF] validate_pdf_bytes: doc.close failed: %s', e)
 
 
 def _safe_progress(cb, page: int, total: int) -> None:

@@ -101,6 +101,15 @@ win._isRoundSwarm = global._isRoundSwarm = (r) => !!(r && r._swarm);
 win.convAutoTranslate = global.convAutoTranslate = (c) =>
   (c && c.autoTranslate !== undefined) ? !!c.autoTranslate
     : (typeof autoTranslate !== 'undefined' && autoTranslate !== undefined ? !!autoTranslate : false);
+// finishStream now also consults the EFFECTIVE resolver (unification fix —
+// live global toggle wins when ON). Stub it mirroring core/conversations.js.
+win.convAutoTranslateEffective = global.convAutoTranslateEffective = (c) =>
+  (typeof autoTranslate !== 'undefined' && autoTranslate) ? true
+    : global.convAutoTranslate(c);
+// _startAutoTranslateForMsg is defined in stream_lifecycle.js; the effective-ON
+// branch calls it. This test keeps autoTranslate OFF so it never fires, but
+// stub it defensively so a future ON case can't hit an undefined ref.
+win._startAutoTranslateForMsg = global._startAutoTranslateForMsg = () => {};
 win._renderUnifiedToolLine = global._renderUnifiedToolLine = () => '<div class="ptool-line"></div>';
 win._buildSwarmPanelHTML = global._buildSwarmPanelHTML = () => '<div class="sw-panel"></div>';
 win._renderTurnHead = global._renderTurnHead = () => '';
@@ -168,6 +177,30 @@ body2host.appendChild(body2);
 updateStreamingUI({ content: '', thinking: '', toolRounds: [], phase: null });
 check('waiting_phase', body2.querySelector('[data-zone="status"]').innerHTML.includes('Waiting'));
 
+// ── 1b. Blank-bubble regression (tablet): a selection-active FIRST frame with
+//    an empty buffer must NOT leave a fully-blank body. _ensureStreamZones
+//    wipes the seeded pulse; updateStreamingUI then early-returns on the
+//    _hasSelectionInStreaming() guard BEFORE writing the status zone. The fix
+//    seeds the waiting pulse inside _ensureStreamZones so the wipe can never
+//    produce empty zones with no pulse (the "blank Agent bubble" bug).
+body2.remove();
+const body3 = document.createElement('div'); body3.id = 'streaming-body';
+body2host.appendChild(body3);
+// Report an active selection anchored on #streaming-body ITSELF. A child text
+// node would be detached by _ensureStreamZones' innerHTML wipe (so the guard
+// would not fire under jsdom); a select-all / triple-click in a real browser
+// anchors on the container element, which survives the wipe — that is the
+// scenario that reproduces the blank bubble.
+global.getSelection = win.getSelection = () => ({
+  isCollapsed: false, rangeCount: 1,
+  getRangeAt: () => ({ startContainer: body3, endContainer: body3 }),
+});
+updateStreamingUI({ content: '', thinking: '', toolRounds: [], phase: null });
+// Restore the collapsed-selection stub for later checks.
+global.getSelection = win.getSelection = () => ({ isCollapsed: true, rangeCount: 0 });
+check('blank_bubble_guard', body3.querySelector('.stream-status') !== null
+  && body3.querySelector('.pulse') !== null);
+
 // ── 2. finishStream clears orphaned awaiting_human / submitted rounds to done ──
 const conv = {
   id: 'c1', title: 'T', activeTaskId: 't1',
@@ -221,7 +254,7 @@ def _run(extra_argv):
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
     fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
     assert not fails, 'streaming-UI failures:\n' + output
-    assert output.count('PASS') >= 11, f'expected >=11 PASS lines, got:\n{output}'
+    assert output.count('PASS') >= 12, f'expected >=12 PASS lines, got:\n{output}'
 
 
 @pytest.mark.skipif(not _node_deps_available(),

@@ -101,6 +101,45 @@ def test_summary_active_peers_and_peer_epic_join(flask_app):
     assert s['peerEpics'].get('conv-worker') == 'Refactor the parser'
 
 
+def test_summary_excludes_requesting_conv_from_active_peers(flask_app):
+    """When conv_id is given, the DISPLAYED conversation is excluded from
+    activePeers/peerEpics so the count means "OTHER conversations online" —
+    matching the frontend local-mirror semantics (which drops self). This is
+    what lets the collab bar render its peer segment from the backend count
+    without off-by-one against a live push frame."""
+    from lib.conversations.project_board import claim_task, post_task
+    from lib.conversations.project_brain_summary import build_brain_summary
+    p = os.path.abspath('/tmp/bs-selfexcl')
+    with flask_app.app_context():
+        e1 = post_task(p, 'cA', 'Self epic')['id']
+        e2 = post_task(p, 'cA', 'Peer epic')['id']
+        reg.announce(p, 'conv-self', task_id='ts', title='Self')
+        reg.announce(p, 'conv-peer', task_id='tp', title='Peer')
+        claim_task(p, 'conv-self', e1)
+        claim_task(p, 'conv-peer', e2)
+        # No conv_id → both peers counted (project-wide view).
+        s_all = build_brain_summary(p)
+        # conv_id=conv-self → self excluded, only the peer remains.
+        s_self = build_brain_summary(p, 'conv-self')
+    assert s_all['activePeers'] == 2
+    assert 'conv-self' in s_all['peerEpics'] and 'conv-peer' in s_all['peerEpics']
+    assert s_self['activePeers'] == 1, 'requesting conv must be excluded'
+    assert 'conv-self' not in s_self['peerEpics'], 'self must not join its own epic'
+    assert s_self['peerEpics'].get('conv-peer') == 'Peer epic'
+
+
+def test_summary_self_only_reports_zero_peers(flask_app):
+    """A project where the ONLY active peer is the displayed conv reports
+    activePeers=0 with conv_id given — the collab bar correctly shows no
+    "N online" segment for a solo session (no phantom self-count)."""
+    from lib.conversations.project_brain_summary import build_brain_summary
+    p = os.path.abspath('/tmp/bs-selfonly')
+    with flask_app.app_context():
+        reg.announce(p, 'conv-self', task_id='ts', title='Self')
+        s = build_brain_summary(p, 'conv-self')
+    assert s['activePeers'] == 0 and s['peerEpics'] == {}
+
+
 def test_summary_peer_without_claim_absent_from_peerEpics(flask_app):
     """An active peer that hasn't claimed anything is counted but NOT in the
     peerEpics map (the bar falls back to its activity word for such peers)."""
@@ -141,7 +180,8 @@ def test_summary_empty_project(flask_app):
     assert build_brain_summary('') == {
         'epicsOpen': 0, 'epicsClaimed': 0, 'epicsDone': 0,
         'pendingDecisions': 0, 'activePeers': 0, 'peerEpics': {},
-        'charterExists': False, 'conflicts': 0, 'conflictMessages': []}
+        'charterExists': False, 'conflicts': 0, 'conflictMessages': [],
+        'statusLine': ''}
 
 
 def test_summary_conflicts_from_file_overlap(flask_app):
@@ -196,29 +236,14 @@ def test_route_brain_summary_requires_path(flask_client):
 
 # ── Source-level NEGATIVE CONTROL ──
 
-def _patch_restore(path, old, new, run):
-    with open(path, encoding='utf-8') as f:
-        original = f.read()
-    assert old in original, f'anchor not found in {path}'
-    try:
-        with open(path, 'w', encoding='utf-8') as f:
-            f.write(original.replace(old, new, 1))
-        run()
-    finally:
-        with open(path, 'w', encoding='utf-8') as f:
-            f.write(original)
-    with open(path, encoding='utf-8') as f:
-        assert f.read() == original, 'source not restored byte-identical'
+from tests._nc_harness import patch_restore as _patch_restore  # noqa: E402
 
 
 def test_NC_peer_epic_join_is_load_bearing(flask_app):
     """NC: no-op the peer→epic join loop → an active peer that DID claim an
     epic no longer appears in peerEpics → the join assertion FAILS."""
-    import importlib
-
     def run():
         import lib.conversations.project_brain_summary as bs
-        importlib.reload(bs)
         from lib.conversations.project_board import claim_task, post_task
         p = os.path.abspath('/tmp/bs-nc')
         with flask_app.app_context():
@@ -243,5 +268,3 @@ def test_NC_peer_epic_join_is_load_bearing(flask_app):
         "        pass  # NC (join disabled)",
         run,
     )
-    import lib.conversations.project_brain_summary as bs
-    importlib.reload(bs)

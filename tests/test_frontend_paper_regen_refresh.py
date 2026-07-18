@@ -105,7 +105,8 @@ global.Api = win.Api = { paper: {
 localStorage.setItem('paper_active_id', 'paper-1');
 localStorage.setItem('paper_library_migrated_v1', '1');
 
-eval(fs.readFileSync(process.argv[2], 'utf8'));  // paper-reader.js (real, shipped)
+eval(fs.readFileSync(process.argv[2], 'utf8'));  // paper/report.js (report/review fns)
+if (process.argv[4]) eval(fs.readFileSync(process.argv[4], 'utf8'));  // paper-reader.js core
 
 const out = [];
 function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
@@ -114,6 +115,10 @@ function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
 // _getActivePaperEntry → null so _saveActivePaperState early-returns (no
 // server PUT); _generatePaperReport then falls back to _paperFileName.
 _getActivePaperEntry = () => null;
+// _saveActivePaperState moved to paper/library.js (not eval'd here); before the
+// Epic E split it lived in paper-reader.js, so this harness relied on the real
+// one. Stub it (as the sibling paper harnesses already do).
+_saveActivePaperState = () => {};
 _renderReportSkeleton = (container) => { if (container) container.innerHTML = '<div class="skeleton"></div>'; };
 _syncReportToolbar = () => {};
 _populatePaperReportModelDropdown = () => {};
@@ -218,8 +223,9 @@ def _run():
     try:
         proc = subprocess.run(
             ['node', harness,
-             os.path.join(JS_DIR, 'paper-reader.js'),   # argv[2]
-             ROOT,                                       # argv[3]
+             os.path.join(JS_DIR, 'paper', 'report.js'),  # argv[2]
+             ROOT,                                        # argv[3]
+             os.path.join(JS_DIR, 'paper-reader.js'),     # argv[4] (core helpers)
              ],
             capture_output=True, text=True, timeout=60,
         )

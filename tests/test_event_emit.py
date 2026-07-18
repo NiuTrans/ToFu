@@ -29,22 +29,22 @@ class TestBuildEventByteIdentity(unittest.TestCase):
     def test_phase_event(self):
         self._assert_identical(
             build_event(EventType.PHASE, phase='llm_thinking',
-                        detail='Generating response…', round=1),
+                        detail='Generating response…', roundNum=1),
             {'type': 'phase', 'phase': 'llm_thinking',
-             'detail': 'Generating response…', 'round': 1})
+             'detail': 'Generating response…', 'roundNum': 1})
 
     def test_phase_with_tool_context(self):
         self._assert_identical(
             build_event(EventType.PHASE, phase='llm_thinking',
-                        detail='Analyzing…', toolContext='web_search', round=3),
+                        detail='Analyzing…', toolContext='web_search', roundNum=3),
             {'type': 'phase', 'phase': 'llm_thinking', 'detail': 'Analyzing…',
-             'toolContext': 'web_search', 'round': 3})
+             'toolContext': 'web_search', 'roundNum': 3})
 
     def test_messages_snapshot(self):
         self._assert_identical(
-            build_event(EventType.MESSAGES_SNAPSHOT, round='fallback',
+            build_event(EventType.MESSAGES_SNAPSHOT, roundNum='fallback',
                         label='Fallback · 3条', messages=[{'role': 'user'}]),
-            {'type': 'messages_snapshot', 'round': 'fallback',
+            {'type': 'messages_snapshot', 'roundNum': 'fallback',
              'label': 'Fallback · 3条', 'messages': [{'role': 'user'}]})
 
     def test_project_external_edit(self):
@@ -55,9 +55,9 @@ class TestBuildEventByteIdentity(unittest.TestCase):
 
     def test_swarm_inbox_inject(self):
         self._assert_identical(
-            build_event(EventType.SWARM_INBOX_INJECT, round=2, count=1,
+            build_event(EventType.SWARM_INBOX_INJECT, roundNum=2, count=1,
                         agentIds=['a1']),
-            {'type': 'swarm_inbox_inject', 'round': 2, 'count': 1,
+            {'type': 'swarm_inbox_inject', 'roundNum': 2, 'count': 1,
              'agentIds': ['a1']})
 
     def test_done_built_incrementally(self):
@@ -88,9 +88,9 @@ class TestEmitDelivery(unittest.TestCase):
         """
         from lib.tasks_pkg.manager import _chat_runtime
         task = _chat_runtime.create()
-        emit(task, EventType.PHASE, phase='working', detail='go', round=1)
+        emit(task, EventType.PHASE, phase='working', detail='go', roundNum=1)
         last = task['events'][-1]
-        expected = {'type': 'phase', 'phase': 'working', 'detail': 'go', 'round': 1}
+        expected = {'type': 'phase', 'phase': 'working', 'detail': 'go', 'roundNum': 1}
         for k, v in expected.items():
             self.assertEqual(last[k], v)
         self.assertEqual(last['type'], 'phase')
@@ -116,7 +116,7 @@ class TestConvertedOrchestratorSites(unittest.TestCase):
         orch._emit_tool_round_phase(task, {'tool_calls': []}, 0)
         got = {k: v for k, v in task['events'][-1].items() if k != 'seq'}
         expected = {'type': 'phase', 'phase': 'llm_thinking',
-                    'detail': 'Generating response…', 'round': 1}
+                    'detail': 'Generating response…', 'roundNum': 1}
         self.assertEqual(json.dumps(got, ensure_ascii=False),
                          json.dumps(expected, ensure_ascii=False))
 
@@ -128,9 +128,9 @@ class TestConvertedOrchestratorSites(unittest.TestCase):
         orch._emit_tool_round_phase(task, am, 2)
         got = {k: v for k, v in task['events'][-1].items() if k != 'seq'}
         self.assertEqual(list(got.keys()),
-                         ['type', 'phase', 'detail', 'toolContext', 'round'])
+                         ['type', 'phase', 'detail', 'toolContext', 'roundNum'])
         self.assertEqual(got['type'], 'phase')
-        self.assertEqual(got['round'], 3)
+        self.assertEqual(got['roundNum'], 3)
 
 
 class TestUnregisteredTypeAllowed(unittest.TestCase):

@@ -6,12 +6,12 @@ import time
 
 import orjson
 
-from flask import Blueprint, Response, jsonify, request
+from flask import Blueprint, jsonify, request
 
 from lib.agent_core.events import EventType, build_event
 from lib.database import DOMAIN_CHAT, get_db
 from lib.log import audit_log, get_logger
-from lib.api_response import api_bad_request, api_internal_error, api_not_found, api_ok
+from lib.api_response import api_bad_request, api_internal_error, api_not_found, api_ok, sse_response
 from lib.request_parser import parse_body
 from routes.api_v1.auth import current_auth, require_scope
 
@@ -27,6 +27,7 @@ from lib.chat import (  # noqa: F401
     append_user_msg_idempotent as _append_user_msg_idempotent,
     auto_translate_user as _auto_translate_user,
     build_tool_history_round as _build_tool_history_round,
+    append_pending_user_msg as _append_pending_user_msg,
     build_user_msg_from_payload as _build_user_msg_from_payload,
     extract_db_meta as _extract_db_meta,
     extract_task_meta as _extract_task_meta,
@@ -37,7 +38,7 @@ from lib.chat import (  # noqa: F401
     scan_continue_checkpoint as _scan_continue_checkpoint,
 )
 from lib.idempotency import idempotent_post
-from routes.common import DEFAULT_USER_ID, _invalidate_meta_cache
+from routes.common import DEFAULT_USER_ID, _notify_conv_changed
 
 logger = get_logger(__name__)
 
@@ -91,6 +92,57 @@ def _running_checkpoint_verdict(sharded: bool):
     if sharded:
         return ('running', True)
     return ('interrupted', False)
+
+
+def _log_poll_task_id_mismatch(db, conv_id, polled_task_id, db_meta):
+    """P0 observability: log the activeTaskId ↔ message _taskId inconsistency
+    behind an empty-metadata interrupted poll.
+
+    When a poll serves an ``interrupted`` result whose metadata is EMPTY (no
+    finishReason/usage/apiRounds — the finish-bar shows only the model name),
+    the underlying cause is almost always an ID desync: the conversation's
+    ``settings.activeTaskId`` no longer matches the task the client polled OR
+    the trailing assistant message's ``_taskId``. Surfacing that mismatch here
+    means the empty finish-bar is diagnosable from ``app.log`` alone, without a
+    post-hoc DB query. Best-effort — never raises into the poll response.
+    """
+    try:
+        has_meta = any(db_meta.get(k) for k in ('finishReason', 'usage', 'apiRounds'))
+        if has_meta or not conv_id:
+            return
+        row = db.execute(
+            'SELECT settings, messages FROM conversations WHERE id=? AND user_id=1',
+            (conv_id,)
+        ).fetchone()
+        if not row:
+            return
+        try:
+            settings = json.loads(row['settings'] or '{}') or {}
+        except (json.JSONDecodeError, TypeError):
+            settings = {}
+        active_task_id = settings.get('activeTaskId')
+        reconciled_at = settings.get('_reconciledAt')
+        msg_task_id = None
+        try:
+            messages = json.loads(row['messages'] or '[]')
+            for m in reversed(messages):
+                if m.get('role') == 'assistant':
+                    msg_task_id = m.get('_taskId')
+                    break
+        except (json.JSONDecodeError, TypeError):
+            pass
+        logger.warning(
+            '[Chat] Poll %s — EMPTY-metadata interrupted result; ID inconsistency: '
+            'polled=%s activeTaskId=%s msg_taskId=%s _reconciledAt=%s. '
+            'Finish-bar will show only the model name (finishReason/usage/apiRounds never persisted). '
+            'This is the interrupted-turn ID desync (empty finish-bar + flicker) class.',
+            polled_task_id[:8], polled_task_id[:8],
+            (active_task_id[:8] if active_task_id else 'none'),
+            (msg_task_id[:8] if msg_task_id else 'none'),
+            reconciled_at or 'none')
+    except Exception as _e:
+        logger.debug('[Chat] poll ID-mismatch probe failed conv=%s: %s',
+                     conv_id[:8] if conv_id else '?', _e)
 
 
 def _loads_yielding(raw):
@@ -306,6 +358,52 @@ def chat_send_translate_status(conv_id):
     translate is currently in flight (or hasn't yet hit its first retry).
     """
     return jsonify(get_send_translate_status(conv_id) or {})
+
+
+def _truncate_conv_history(conv_id):
+    """Discharge every server-side obligation that follows truncating a conv.
+
+    Any route that rewrites a conversation's history to a shorter prefix
+    (regenerate, edit-and-resend) MUST clear the two in-memory side-channels
+    that outlive the DB write, or the next task replays stale state:
+
+      * the message QUEUE — a previous /api/chat/send aborted mid-translate
+        may have left an enqueued message; without clearing it the queue
+        auto-dispatches a phantom turn after this run completes;
+      * the server-side tool-history STORE
+        (lib/tasks_pkg/server_message_store) — a full-fidelity in-memory copy
+        of the prior turns' tool_use/tool_result rounds, keyed by conv_id and
+        driven by keepToolHistory (default ON). On the next task the
+        orchestrator's rebuild_messages_with_history REPLACES the DB-built
+        (now-truncated) messages with that stored copy, which still holds the
+        rounds we just truncated away — so every regen/edit would replay an
+        ever-growing stale context instead of the truncated one. Clearing it
+        forces a clean rebuild from the truncated DB state; the preserved
+        turns' tool history is reconstructed from their stored toolRounds by
+        conv_message_builder, so no real context is lost.
+
+    Folding both into one helper makes the invariant impossible to
+    half-apply: a future truncating route calls this once instead of
+    re-deriving (and forgetting one of) the two clears. Best-effort — each
+    failure is logged, never raised.
+
+    Args:
+        conv_id: The conversation whose history was just truncated.
+    """
+    try:
+        from lib.message_queue import clear_queue
+        _cleared = clear_queue(conv_id)
+        if _cleared:
+            logger.info('[Regen] conv=%s cleared %d stale queued message(s) before regen',
+                        conv_id[:8], _cleared)
+    except Exception as e:
+        logger.warning('[Regen] Failed to clear queue for conv=%s: %s', conv_id[:8], e)
+
+    try:
+        from lib.tasks_pkg.server_message_store import clear as _clear_msg_store
+        _clear_msg_store(conv_id)
+    except Exception as e:
+        logger.warning('[Regen] Failed to clear message store for conv=%s: %s', conv_id[:8], e)
 
 
 def _start_task_for_conv(conv_id, config, data=None):
@@ -561,23 +659,115 @@ def chat_send():
         #   and immediately sends a new message, the old task may still
         #   have status='running' (abort is cooperative) but should NOT
         #   cause the new message to be enqueued.
-        has_running_task = False
+        #   ★ Classify the running tasks: a genuine (normal) worker turn must
+        #   still make the human wait, but an INVISIBLE autopilot follow-up
+        #   turn (a VU-spawned background turn carrying ``_autopilotParent`` /
+        #   ``_vu_subtask``) must NOT — the human once sat "QUEUED" for minutes
+        #   behind a background autopilot reply. So: if the ONLY running tasks
+        #   are autopilot follow-ups (and autopilot is armed), supersede them.
+        #   Keyed on the background MARKER, not the bare ``config.autopilot``
+        #   flag — the armed PRIMARY turn the user is watching carries the flag
+        #   but no marker, and must be queued behind, never aborted.
+        running_tasks = []
         with tasks_lock:
             for t in tasks.values():
                 if (t.get('convId') == conv_id
                         and t.get('status') == 'running'
                         and not t.get('aborted')):
-                    has_running_task = True
-                    break
+                    running_tasks.append(t)
+
+        from lib.message_queue import has_autopilot_marker
+
+        def _is_autopilot_followup(t):
+            return bool(t.get('_autopilotParent') or t.get('_vu_subtask')
+                        or t.get('_autopilot_kick'))
+
+        has_running_task = bool(running_tasks)
+        only_autopilot_followups = (
+            has_running_task
+            and all(_is_autopilot_followup(t) for t in running_tasks))
+
+        if (has_running_task and only_autopilot_followups
+                and has_autopilot_marker(conv_id)):
+            # Supersede: abort the invisible autopilot follow-up(s) for real
+            # (backend stop, so the zombie is reclaimed), disarm autopilot, and
+            # fall through to start the human message immediately.
+            for t in running_tasks:
+                t['aborted'] = True
+                t['_abort_timestamp'] = time.time()
+                t['_abort_reason'] = 'superseded_by_user_send'
+            logger.info('[Send] conv=%s ⚡ superseding %d in-flight autopilot '
+                        'follow-up turn(s) for a real user send',
+                        conv_id[:8], len(running_tasks))
+            try:
+                from lib.tasks_pkg.autopilot import disarm_autopilot
+                disarm_autopilot(conv_id)
+            except Exception as e:
+                logger.warning('[Send] conv=%s disarm_autopilot on supersede '
+                               'failed (non-fatal): %s', conv_id[:8], e)
+            has_running_task = False
+
+        # ★ Inject-mode: the composer's per-conversation toggle. Two lanes when
+        #   a task is already running for this conversation:
+        #     • 'queue' (default) — enqueue for dispatch as a FRESH turn after
+        #       the current reply ends (persistent, survives reload).
+        #     • 'steer' — inject into the CURRENTLY-RUNNING turn at its next
+        #       clean round boundary (after any open tool_result closes), so the
+        #       human can course-correct mid-generation. Delivered via the
+        #       model-facing agent_inbox under mode='user-steer'.
+        #   Steer has an exactly-once fallback: if the running task is NOT
+        #   drainable (its inbox slot is tombstoned — it is finalizing and will
+        #   run no further round-boundary drain), we DO NOT enqueue into the
+        #   inbox (it would be silently dropped) — we fall back to the durable
+        #   message_queue so the steer becomes the next turn instead. Never zero.
+        # injectMode is a PER-SEND decision from the post-send dialog
+        # (_promptInjectMode), carried at the top level of the request body — it
+        # is NOT a persisted conversation setting. Read `data` FIRST: reading
+        # `config` first would be shadowed by resolve_conv_config's 'queue'
+        # default (truthy), so a 'steer' choice could never win.
+        _inject_mode = (data.get('injectMode') or '').strip().lower()
+        if has_running_task and _inject_mode == 'steer':
+            from lib.agent_inbox import has_pending as _inbox_has_pending  # noqa: F401
+            from lib.agent_inbox import _tombstones as _inbox_tombstones
+            from lib.agent_inbox import _lock as _inbox_lock
+            from lib.agent_inbox import enqueue as _inbox_enqueue
+            # The inbox key is conversation-scoped (swarm_key_for → convId).
+            _steer_key = conv_id
+            with _inbox_lock:
+                _drainable = _steer_key not in _inbox_tombstones
+            if _drainable:
+                # value = the wire text the model sees; _user_msg carries the
+                # pre-built/translated dict so the finalize salvage can re-queue
+                # it verbatim on an abort (exactly-once, never re-translated).
+                _steer_text = user_msg.get('content', '') or text
+                _inbox_enqueue(
+                    _steer_key, _steer_text,
+                    priority='next', mode='user-steer',
+                    extra={'_user_msg': user_msg, 'config': config})
+                logger.info('[Send] conv=%s ➡ STEER (injected into running turn) '
+                            'text=%d chars', conv_id[:8], len(_steer_text))
+                if is_new:
+                    _persist_conv_messages(db, conv_id, messages, title, settings_patch)
+                _notify_conv_changed(conv_id, rev=None)
+                return jsonify({
+                    'steered': True,
+                    'convId': conv_id,
+                    'title': title,
+                    'userMessage': user_msg,
+                    'isNew': is_new,
+                    'msgCount': len(messages),  # excludes the steer msg
+                })
+            # Not drainable → fall through to the durable-queue path below so
+            # the steer is delivered as a fresh turn instead of being dropped.
+            logger.info('[Send] conv=%s steer requested but inbox slot not '
+                        'drainable (task finalizing) — falling back to queue',
+                        conv_id[:8])
 
         if has_running_task:
-            from lib.message_queue import enqueue_message
-            # ★ Enqueue for later dispatch.  The user message is NOT
-            # persisted to the conversation DB — it only lives in the
-            # queue.  This prevents it from appearing in chatInner
-            # during streaming or disappearing on refresh.
-            # Store the pre-built user_msg so dispatch_next_queued
-            # can append it without re-translating.
+            from lib.message_queue import enqueue_message, get_queue_depth
+            # ★ Enqueue for later dispatch. The durable queue is the source of
+            #   truth for WHEN this turn runs. Store the pre-built user_msg so
+            #   dispatch_next_queued can append it without re-translating.
             queue_payload = dict(payload)
             queue_payload['_user_msg'] = user_msg
             queue_result = enqueue_message(conv_id, queue_payload, config)
@@ -588,7 +778,35 @@ def chat_send():
             if is_new:
                 _persist_conv_messages(db, conv_id, messages, title, settings_patch)
 
-            _invalidate_meta_cache()
+            # ★ Cross-device visibility (Fix 2a): land the queued user message
+            #   in the conversation body NOW as a display-only _pendingQueued
+            #   row + push the REAL rev, so another device sees it immediately
+            #   instead of only after the current turn replies. Two guards keep
+            #   this safe: (1) ONLY the FIRST queued turn (depth==1 after this
+            #   enqueue) may pre-persist — a 2nd pending row would misorder
+            #   against the eventual replies; (2) the helper itself declines
+            #   unless the DB tail is the running turn's assistant slot (so the
+            #   row lands correctly ordered). On decline we fall back to the
+            #   original queue-only behaviour (rev=None sidebar nudge). The
+            #   later dispatch_next_queued reconciles this row in place by
+            #   timestamp (never a duplicate).
+            _pending_rev = None
+            try:
+                _running_amids = {t.get('_assistantMsgId') for t in running_tasks
+                                  if t.get('_assistantMsgId')}
+                if get_queue_depth(conv_id) == 1:
+                    _appended, _pending_rev = _append_pending_user_msg(
+                        db, conv_id, user_msg, valid_assistant_ids=_running_amids)
+                    if _appended:
+                        logger.info('[Send] conv=%s queued user msg mirrored as '
+                                    'pending row (rev=%s) — cross-device visible',
+                                    conv_id[:8], _pending_rev)
+            except Exception as e:
+                logger.warning('[Send] conv=%s pending-row mirror failed (non-fatal, '
+                               'queue-only fallback): %s', conv_id[:8], e)
+                _pending_rev = None
+
+            _notify_conv_changed(conv_id, rev=_pending_rev)
 
             return jsonify({
                 'queued': True,
@@ -607,7 +825,7 @@ def chat_send():
         #    appending a duplicate. This is the root-cause guard — the
         #    frontend _sendInFlight flag merely avoids triggering the race.
         _append_user_msg_idempotent(messages, user_msg)
-        _persist_conv_messages(db, conv_id, messages, title, settings_patch)
+        _send_rev = _persist_conv_messages(db, conv_id, messages, title, settings_patch)
 
         # 5. Start task (no active task — send immediately)
         task_id, err_resp = _start_task_for_conv(conv_id, config, data)
@@ -616,14 +834,32 @@ def chat_send():
                 return err_resp
             return err_resp
 
-        # 6. Update activeTaskId in settings
+        # 6. Update activeTaskId in settings.
+        #    ★ Settings-ONLY write (not a full-row _persist_conv_messages):
+        #    the only new information here is activeTaskId. Rewriting the whole
+        #    `messages` array with this route's stale user-only tail (and
+        #    bumping updated_at) races the task thread, which may have ALREADY
+        #    checkpointed the assistant slot via _sync_partial_to_conversation —
+        #    clobbering the streamed content back to the pre-start snapshot
+        #    ("Waiting…" on reload). set_conversation_settings does a per-conv
+        #    serialized merge of just this key and never touches messages.
         try:
-            _persist_conv_messages(db, conv_id, messages, title,
-                                   {'activeTaskId': task_id})
+            from lib.conversations import set_conversation_settings
+            # notify=False: each of these paths emits its own
+            # _notify_conv_changed below, so the gate must invalidate the local
+            # cache (structural guarantee) WITHOUT a second cross-device push.
+            set_conversation_settings(conv_id, {'activeTaskId': task_id},
+                                      db=db, notify=False)
         except Exception as e:
             logger.warning('[Send] Failed to update activeTaskId: %s', e)
 
-        _invalidate_meta_cache()
+        # ★ Carry the REAL post-write rev (not None): the user message was just
+        #   persisted (step 4) and the rev trigger bumped it. A rev-bearing
+        #   frame makes a sibling device's rev-gate refetch the body — so the
+        #   just-sent user message appears on the other device immediately,
+        #   instead of a rev=None frame that only nudges the sidebar and leaves
+        #   the message invisible until the assistant reply lands.
+        _notify_conv_changed(conv_id, rev=_send_rev)
 
         return jsonify({
             'taskId': task_id,
@@ -908,38 +1144,11 @@ def chat_regenerate():
         # 5. Persist truncated messages to DB
         _persist_conv_messages(db, conv_id, messages, title, settings_patch)
 
-        # 5a. Defensive: clear any messages still sitting in the server-side
-        #     queue for this conv. If a previous /api/chat/send was aborted
-        #     mid-translate but its enqueue still landed (or a different race
-        #     left the queue non-empty), regenerating should start clean —
-        #     otherwise the queue would auto-dispatch a phantom turn after
-        #     this regen completes.
-        try:
-            from lib.message_queue import clear_queue
-            _cleared = clear_queue(conv_id)
-            if _cleared:
-                logger.info('[Regen] conv=%s cleared %d stale queued message(s) before regen',
-                            conv_id[:8], _cleared)
-        except Exception as e:
-            logger.warning('[Regen] Failed to clear queue for conv=%s: %s', conv_id[:8], e)
-
-        # 5b. Clear the server-side tool-history store for this conv. That
-        #     store (lib/tasks_pkg/server_message_store) keeps a full-fidelity
-        #     in-memory copy of the prior turns' tool_use/tool_result history,
-        #     keyed by conv_id and driven by keepToolHistory (default ON).
-        #     On the next task the orchestrator's rebuild_messages_with_history
-        #     REPLACES the DB-built (now-truncated) messages with that stored
-        #     copy — which still contains the rounds we just truncated away.
-        #     Without clearing it, every regen/edit replays an ever-growing
-        #     stale context instead of the truncated one. Clearing forces a
-        #     clean rebuild from the truncated DB state; the preserved turns'
-        #     tool history is reconstructed from their stored toolRounds by
-        #     conv_message_builder, so no real context is lost.
-        try:
-            from lib.tasks_pkg.server_message_store import clear as _clear_msg_store
-            _clear_msg_store(conv_id)
-        except Exception as e:
-            logger.warning('[Regen] Failed to clear message store for conv=%s: %s', conv_id[:8], e)
+        # 5a+5b. Discharge the post-truncation obligations (clear the message
+        #        queue + the in-memory server_message_store) via the single
+        #        helper so the invariant can't be half-applied. See
+        #        _truncate_conv_history for the full rationale.
+        _truncate_conv_history(conv_id)
 
         logger.info('[Regen] conv=%s truncated to idx=%d msgs=%d edited=%s title=%.50s',
                     conv_id[:8], truncate_to, len(messages),
@@ -952,14 +1161,19 @@ def chat_regenerate():
                 return err_resp
             return err_resp
 
-        # 7. Update activeTaskId
+        # 7. Update activeTaskId (settings-only — see the note in chat_send:
+        #    a full-row rewrite here would clobber a task-thread checkpoint).
         try:
-            _persist_conv_messages(db, conv_id, messages, title,
-                                   {'activeTaskId': task_id})
+            from lib.conversations import set_conversation_settings
+            # notify=False: each of these paths emits its own
+            # _notify_conv_changed below, so the gate must invalidate the local
+            # cache (structural guarantee) WITHOUT a second cross-device push.
+            set_conversation_settings(conv_id, {'activeTaskId': task_id},
+                                      db=db, notify=False)
         except Exception as e:
             logger.warning('[Regen] Failed to update activeTaskId: %s', e)
 
-        _invalidate_meta_cache()
+        _notify_conv_changed(conv_id, rev=None)
 
         return jsonify({
             'taskId': task_id,
@@ -985,6 +1199,88 @@ def chat_regenerate():
 #  (_build_tool_history_round + _scan_continue_checkpoint moved to
 #   lib/chat/turn_builder.py; re-exported at the top of this module)
 # ══════════════════════════════════════════════════════════
+
+
+def _continue_via_prefill_only(db, conv_id, messages, assistant_msg, title,
+                               config, settings_patch, resume_prefill,
+                               orig_full_content, data):
+    """Case 3 — resume a NO-TOOL mid-answer turn via assistant prefill.
+
+    There is no tool-call checkpoint (``scan is None``), so the classic
+    Continue path would fall back to regenerate-from-scratch. But the provider
+    tolerates a trailing assistant prefill and the turn ended mid-answer, so we
+    feed the model its own half-written string and let it continue the SAME
+    tokens instead of restarting.
+
+    Unlike the tool-checkpoint rollback (which DISCARDS the mid-prose tail and
+    regenerates), prefill mode CONTINUES the same string — nothing is discarded.
+    So the message content stays as the full prior answer (the base the
+    continuation extends); there is NO ``priorContent`` block. The streaming
+    checkpoint grows ``content`` as continuation tokens arrive, so a mid-stream
+    reload shows [full prior answer] + [partial continuation]. Persist BEFORE
+    starting so a streaming checkpoint can't race the rollback.
+    """
+    # Keep the full prior answer as the continuation base (content is already
+    # orig_full_content; assert it explicitly for clarity). Clear the live
+    # thinking tail (prefill carries content only — the reasoning trace can't
+    # be replayed on the wire) but stash it display-only, mirroring case 2.
+    assistant_msg['content'] = orig_full_content
+    _prior_think = assistant_msg.get('thinking') or ''
+    assistant_msg['thinking'] = ''
+    if _prior_think:
+        assistant_msg['priorThinking'] = _prior_think
+    for stale_key in ('finishReason', 'toolSummary', 'error'):
+        assistant_msg.pop(stale_key, None)
+
+    _persist_conv_messages(db, conv_id, messages, title, settings_patch)
+
+    cfg_payload = dict(config)
+    cfg_payload['excludeLast'] = True
+    cfg_payload['resumePrefill'] = resume_prefill
+    # Seed task['content'] with the full pre-rollback answer so the resumed
+    # turn displays everything the user already saw plus the continuation.
+    cfg_payload['contentPrefix'] = orig_full_content
+
+    task_id, err_resp = _start_task_for_conv(conv_id, cfg_payload, data)
+    if err_resp is not None:
+        return err_resp if not isinstance(err_resp, tuple) else err_resp
+
+    try:
+        from lib.conversations import set_conversation_settings
+        # notify=False: _notify_conv_changed is emitted below (no double push).
+        set_conversation_settings(conv_id, {'activeTaskId': task_id},
+                                  db=db, notify=False)
+    except Exception as e:
+        logger.warning('[Continue] Failed to update activeTaskId (prefill-only): %s', e)
+
+    _notify_conv_changed(conv_id, rev=None)
+    try:
+        from lib.log import audit_log as _audit_log
+        _audit_log('continue_prefill_only', conv_id=conv_id,
+                   prefillChars=len(resume_prefill),
+                   origContentChars=len(orig_full_content))
+    except Exception as e:
+        logger.debug('[Continue] audit_log (prefill-only) failed (non-fatal): %s', e)
+
+    return jsonify({
+        'taskId': task_id,
+        'convId': conv_id,
+        'checkpoint': {
+            'keptRounds': 0,
+            'discardedRounds': 0,
+            'preservedContentLen': len(orig_full_content),
+            'discardedContentLen': 0,
+            'preservedThinkingChars': 0,
+            'discardedThinking': 0,
+            'resumeMode': 'prefill',
+            # Prefill CONTINUES the same string — nothing discarded, so the
+            # full prior answer is the continuation base and there is NO
+            # priorContent block. The reasoning tail is display-only.
+            'contentPrefix': orig_full_content,
+            'priorContent': '',
+            'priorThinking': assistant_msg.get('priorThinking') or '',
+        },
+    })
 
 
 @api_v1_chat_bp.route('/api/v1/chat/continue', methods=['POST'], endpoint='ui_chat_continue')
@@ -1051,8 +1347,37 @@ def chat_continue():
                         conv_id[:8])
             return jsonify({'fallback': 'regenerate', 'reason': 'empty_assistant'})
 
+        # ★ Resume-prefill extraction (epic pt_cb8f98b0cb9b47fb) — MUST happen
+        #   BEFORE any rollback mutates assistant_msg. The segment list is the
+        #   SoT: resume_prefill_from_segments reads the terminal deliverable
+        #   (the tail the model was mid-writing) from assistant_msg['segments'],
+        #   gated on model prefill capability + a resumable finish reason. This
+        #   is the segments-first replacement for tail-diffing. Claude → None
+        #   (fail closed). The full pre-rollback content is captured too, to
+        #   seed task['content'] so nothing the user saw vanishes on resume.
+        _model = (config.get('model') or '').strip()
+        _finish_reason = assistant_msg.get('finishReason') or ''
+        _orig_full_content = assistant_msg.get('content') or ''
+        _resume_prefill = None
+        try:
+            from lib.tasks_pkg.segments import resume_prefill_from_segments
+            _resume_prefill = resume_prefill_from_segments(
+                assistant_msg.get('segments'), _model, finish_reason=_finish_reason)
+        except Exception as _rp_e:
+            logger.debug('[Continue] resume-prefill extraction failed (non-fatal): %s', _rp_e)
+
         scan = _scan_continue_checkpoint(assistant_msg)
         if scan is None:
+            # No tool-call checkpoint. If we DO have a resumable prefill (a
+            # no-tool mid-answer turn — case 3), resume via prefill alone rather
+            # than regenerating from scratch. Otherwise fall back to regenerate.
+            if _resume_prefill:
+                logger.info('[Continue] conv=%s no tool checkpoint but resumable '
+                            'prefill (%d chars) — resuming via assistant prefill (case 3)',
+                            conv_id[:8], len(_resume_prefill))
+                return _continue_via_prefill_only(
+                    db, conv_id, messages, assistant_msg, title, config,
+                    settings_patch, _resume_prefill, _orig_full_content, data)
             logger.info('[Continue] conv=%s no tool-call checkpoint available — fallback to regenerate',
                         conv_id[:8])
             return jsonify({'fallback': 'regenerate', 'reason': 'no_checkpoint'})
@@ -1114,6 +1439,19 @@ def chat_continue():
             cfg_payload['toolHistory'] = scan['tool_history']
         if preserved_content:
             cfg_payload['contentPrefix'] = preserved_content
+        # ★ Resume-prefill (case 2 — mid-prose AFTER a completed tool batch).
+        #   When the provider tolerates prefill AND the tail is resumable, ship
+        #   the terminal deliverable tail so the model continues the SAME tokens
+        #   (inject_tool_history replays the tool batch; the prefill is appended
+        #   as the trailing assistant turn by the orchestrator). Seed
+        #   task['content'] with the FULL pre-rollback content so the resumed
+        #   turn displays [everything the user saw] + [continuation] with no
+        #   duplication — the continuation the model returns is ONLY the new
+        #   tokens after the prefill. Claude / clean stop → _resume_prefill is
+        #   None → contentPrefix (preserved_content) drives the universal path.
+        if _resume_prefill:
+            cfg_payload['resumePrefill'] = _resume_prefill
+            cfg_payload['contentPrefix'] = _orig_full_content
         if scan['kept_rounds']:
             cfg_payload['checkpointToolRounds'] = scan['kept_rounds']
         if kept_usage:
@@ -1130,14 +1468,19 @@ def chat_continue():
         if err_resp is not None:
             return err_resp if not isinstance(err_resp, tuple) else err_resp
 
-        # Persist activeTaskId (same as chat_regenerate).
+        # Persist activeTaskId (settings-only — same rationale as chat_send:
+        #    a full-row rewrite would clobber a task-thread checkpoint).
         try:
-            _persist_conv_messages(db, conv_id, messages, title,
-                                   {'activeTaskId': task_id})
+            from lib.conversations import set_conversation_settings
+            # notify=False: each of these paths emits its own
+            # _notify_conv_changed below, so the gate must invalidate the local
+            # cache (structural guarantee) WITHOUT a second cross-device push.
+            set_conversation_settings(conv_id, {'activeTaskId': task_id},
+                                      db=db, notify=False)
         except Exception as e:
             logger.warning('[Continue] Failed to update activeTaskId: %s', e)
 
-        _invalidate_meta_cache()
+        _notify_conv_changed(conv_id, rev=None)
         try:
             from lib.log import audit_log as _audit_log
             _audit_log(
@@ -1164,6 +1507,16 @@ def chat_continue():
                 'discardedContentLen': scan['discarded_content'],
                 'preservedThinkingChars': scan['preserved_thinking_chars'],
                 'discardedThinking': scan['discarded_thinking'],
+                # ── Authoritative anchor DATA (typed fact) ──────────────
+                # The rollback the server ALREADY computed + persisted. The
+                # frontend is a pure reducer over these: it slices its local
+                # rounds to `keptRounds` and adopts these strings verbatim,
+                # rather than re-deriving the checkpoint by scanning
+                # status==='done' (which duplicated this exact logic).
+                'resumeMode': 'checkpoint',
+                'contentPrefix': preserved_content,
+                'priorContent': scan.get('discarded_content_text') or '',
+                'priorThinking': scan.get('discarded_thinking_text') or '',
             },
         })
 
@@ -1278,10 +1631,20 @@ async def chat_stream(task_id):
                                 (task_id,)
                             ).fetchone()
                             if row_local:
+                                # ★ Close the 5s cold-replay window: fold the
+                                #   lossless per-delta task_events log instead of
+                                #   trusting the (up to 5s stale) task_results
+                                #   checkpoint. The fold reconstructs the EXACT
+                                #   text the client saw; on an empty/failed log
+                                #   it returns the checkpoint pair unchanged.
+                                from lib.tasks_pkg.event_fold import fold_cold_state_text
+                                _fold_c, _fold_t = fold_cold_state_text(
+                                    task_id, row_local['content'] or '',
+                                    row_local['thinking'] or '')
                                 state_local = build_event(
                                     EventType.STATE,
-                                    content=row_local['content'] or '',
-                                    thinking=row_local['thinking'] or '',
+                                    content=_fold_c,
+                                    thinking=_fold_t,
                                     status=row_local['status'],
                                 )
                                 if row_local['tool_rounds']:
@@ -1323,12 +1686,7 @@ async def chat_stream(task_id):
                         except Exception as _e:
                             logger.debug('[Chat] cold-replay synthetic done failed: %s', _e)
 
-                    return Response(gen_persisted(), mimetype='text/event-stream', headers={
-                        'Content-Type': 'text/event-stream; charset=utf-8',
-                        'Cache-Control': 'no-cache, no-transform',
-                        'X-Accel-Buffering': 'no',
-                        'Connection': 'keep-alive',
-                    })
+                    return sse_response(gen_persisted())
 
         db = get_db(DOMAIN_CHAT)
         row = await asyncio.to_thread(
@@ -1337,9 +1695,15 @@ async def chat_stream(task_id):
                 (task_id,)
             ).fetchone())
         if row:
+            # ★ Close the 5s cold-replay window (see gen_persisted above):
+            #   fold the lossless per-delta task_events log; falls back to the
+            #   checkpoint pair on an empty/failed log.
+            from lib.tasks_pkg.event_fold import fold_cold_state_text
+            _fold_c, _fold_t = fold_cold_state_text(
+                task_id, row['content'] or '', row['thinking'] or '')
             state = build_event(
-                EventType.STATE, content=row['content'],
-                thinking=row['thinking'], status=row['status'],
+                EventType.STATE, content=_fold_c,
+                thinking=_fold_t, status=row['status'],
             )
             if row['error']:
                 from lib.error_envelope import from_json as _err_from_json
@@ -1391,12 +1755,7 @@ async def chat_stream(task_id):
                 yield f'data: {_dumps_yielding(state)}\n\n'
                 yield f'data: {_dumps_yielding(done_evt)}\n\n'
 
-            return Response(gen_done(), mimetype='text/event-stream', headers={
-                'Content-Type': 'text/event-stream; charset=utf-8',
-                'Cache-Control': 'no-cache, no-transform',
-                'X-Accel-Buffering': 'no',
-                'Connection': 'keep-alive',
-            })
+            return sse_response(gen_done())
         logger.warning('[Chat] Task %s not found (stream)', task_id)
         return api_not_found('Task not found')
 
@@ -1483,6 +1842,35 @@ async def chat_stream(task_id):
 
         if resume_from is not None:
             cursor = resume_from
+            # ★ Reassert a leading full-state snapshot BEFORE replaying the
+            #   post-cursor deltas. A warm resume that landed on a fresh empty
+            #   assistant placeholder (initActiveTasks Case-A stale-tail /
+            #   connectToTask stale-turn guard → toolRounds:[]) has NO cached
+            #   rounds, so a delta-only replay would render starting at whatever
+            #   round the first missed tool_start carried (the round-10 strand,
+            #   conv mrbf9px2g5mct3). Emit the COMPLETE task['toolRounds']
+            #   (+ content/thinking) read under the lock; the frontend's
+            #   _snapshotLongerRounds keep-longer guard ADOPTS it when the client
+            #   cache is short and harmlessly IGNORES it when equal/longer — so a
+            #   shorter buffer can never collapse a longer one. Like the fresh
+            #   path it carries NO id: (synthetic; avoids a cursor collision with
+            #   the first replayed event).
+            with task['events_lock']:
+                resume_state = build_event(
+                    EventType.STATE, content=task['content'],
+                    thinking=task['thinking'], status=task['status'],
+                )
+                # ★ Server-authoritative task start (ms) — seed the elapsed timer
+                #   from the real start on a Last-Event-ID resume too.
+                _created = task.get('created_at')
+                if _created:
+                    resume_state['createdAt'] = int(_created * 1000)
+                if task['error']:
+                    resume_state['error'] = task['error']
+                resume_state['toolRounds'] = task['toolRounds']
+            _resume_state_payload = json.dumps(resume_state, ensure_ascii=False)
+            yield f'data: {_resume_state_payload}\n\n'
+            _events_sent += 1
             # Resume path: replay missed events since Last-Event-ID
             for idx, ev in enumerate(missed_evts):
                 eid = resume_from + idx
@@ -1508,6 +1896,11 @@ async def chat_stream(task_id):
                     EventType.STATE, content=task['content'],
                     thinking=task['thinking'], status=task['status'],
                 )
+                # ★ Server-authoritative task start (ms) so a reconnecting client
+                #   seeds its elapsed timer from the REAL start, not from 0.
+                _created = task.get('created_at')
+                if _created:
+                    state['createdAt'] = int(_created * 1000)
                 if task['error']:
                     state['error'] = task['error']
                 if task['toolRounds']:
@@ -1526,6 +1919,14 @@ async def chat_stream(task_id):
                     state['relatedConversations'] = task['_relatedConversations']
                 if task.get('_preferencesLearned'):
                     state['preferencesLearned'] = task['_preferencesLearned']
+                # inbox-inject sidecars (swarm/peer/user-steer) — survive an
+                # SSE-broken resume so the in-timeline inject chips repaint.
+                if task.get('_inboxInjects'):
+                    state['inboxInjects'] = task['_inboxInjects']
+                if task.get('_peerInjects'):
+                    state['peerInjects'] = task['_peerInjects']
+                if task.get('_userSteerInjects'):
+                    state['userSteerInjects'] = task['_userSteerInjects']
                 # ★ Endpoint mode: include phase and completed turns for reconnection
                 if task.get('endpoint_mode'):
                     state['endpointMode'] = True
@@ -1722,14 +2123,7 @@ async def chat_stream(task_id):
         resp.headers['Retry-After'] = '5'
         return resp, 429
 
-    resp = Response(generate_with_disconnect_log(), mimetype='text/event-stream', headers={
-        'Content-Type': 'text/event-stream; charset=utf-8',
-        'Cache-Control': 'no-cache, no-transform',
-        'X-Accel-Buffering': 'no',
-        'Connection': 'keep-alive',
-    })
-    resp.timeout = None
-    return resp
+    return sse_response(generate_with_disconnect_log(), timeout_none=True)
 
 
 @api_v1_chat_bp.route('/api/v1/chat/abort-conv/<conv_id>', methods=['POST'], endpoint='ui_chat_abort_conv')
@@ -1848,6 +2242,12 @@ def chat_poll(task_id):
             'id': task['id'], 'status': _reported_status,
             'content': task['content'], 'thinking': task['thinking'],
         }
+        # ★ Server-authoritative task start (ms). Lets the frontend seed its
+        #   elapsed timer from the REAL start on a reconnect/refresh instead of
+        #   restarting from 0 — see health_stream_timer.js::_seedStreamTimerStart.
+        _created = task.get('created_at')
+        if _created:
+            r['createdAt'] = int(_created * 1000)
         # Field list MUST mirror chat_poll's DB-path loop and
         # _extract_task_meta. See _extract_task_meta docstring.
         for key in ('error', 'toolRounds', 'finishReason', 'usage', 'preset',
@@ -1878,6 +2278,14 @@ def chat_poll(task_id):
         # ★ Preferences-learned moment(s) (persist through poll + reload)
         if task.get('_preferencesLearned'):
             r['preferencesLearned'] = task['_preferencesLearned']
+        # ★ Inbox-inject sidecars (swarm/peer/user-steer) — persist through poll
+        #   fallback + reload so the in-timeline inject chips repaint.
+        if task.get('_inboxInjects'):
+            r['inboxInjects'] = task['_inboxInjects']
+        if task.get('_peerInjects'):
+            r['peerInjects'] = task['_peerInjects']
+        if task.get('_userSteerInjects'):
+            r['userSteerInjects'] = task['_userSteerInjects']
         # ★ Autopilot follow-up baton — mirror the SSE done event so a client
         #   on the poll fallback path attaches to the spawned follow-up task
         #   instead of stranding it (see lib/tasks_pkg/orchestrator.py).
@@ -1957,14 +2365,27 @@ def chat_poll(task_id):
                     db.commit()
                 except Exception as e:
                     logger.warning('[Chat] Failed to update stale task %s to interrupted: %s', task_id[:8], e)
+                # ★ P0 observability: surface the activeTaskId ↔ msg _taskId
+                #   desync behind an empty finish-bar (no persisted metadata).
+                _log_poll_task_id_mismatch(db, row['conv_id'], task_id, _db_meta)
         else:
             logger.debug('[Chat] Poll %s from DB — status=%s content=%dchars thinking=%dchars '
                          'finishReason=%s model=%s error=%s',
                          task_id[:8], row['status'], _db_content_len, _db_thinking_len,
                          _db_finish, _db_model, bool(row['error']))
+        # ★ Close the 5s cold-replay window on the POLL fallback too (the
+        #   sse_poll_fallback.js path): the task is not in memory, so row
+        #   content/thinking is the (up to 5s stale) task_results checkpoint.
+        #   Fold the lossless per-delta task_events log — identical to the two
+        #   SSE cold emits above — so a poll-fallback reconnect mid-stream sees
+        #   the full buffer, not a short checkpoint. Falls back to the row pair
+        #   on an empty/failed log.
+        from lib.tasks_pkg.event_fold import fold_cold_state_text
+        _poll_c, _poll_t = fold_cold_state_text(
+            task_id, row['content'] or '', row['thinking'] or '')
         r = {
             'id': row['task_id'], 'status': effective_status,
-            'content': row['content'], 'thinking': row['thinking'],
+            'content': _poll_c, 'thinking': _poll_t,
         }
         if _reconnect_hint:
             # Tell the client to re-open the stream (it will land on the

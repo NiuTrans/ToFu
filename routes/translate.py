@@ -20,7 +20,7 @@ import uuid
 
 from flask import Blueprint, jsonify, request, send_file
 
-from lib.api_response import api_bad_request, api_internal_error, api_not_found
+from lib.api_response import api_bad_request, api_error, api_internal_error, api_not_found
 from lib.log import get_logger
 from lib.translate import (  # noqa: F401  — back-compat re-exports
     DEFAULT_USER_ID,
@@ -83,8 +83,8 @@ def translate_pptx_upload():
     """
     import lib as _lib_rt
     if not getattr(_lib_rt, 'PPTX_TRANSLATE_ENABLED', False):
-        return jsonify({'error': 'PPTX translation is not enabled. '
-                        'Enable it in Settings → Feature Modules.'}), 403
+        return api_error('PPTX translation is not enabled. '
+                        'Enable it in Settings → Feature Modules.', status=403)
     _cleanup_translate_tasks()
     _ensure_pptx_upload_dir()
 
@@ -105,8 +105,8 @@ def translate_pptx_upload():
     if not file_bytes:
         return api_bad_request('Empty file')
     if len(file_bytes) > _MAX_PPTX_BYTES:
-        return jsonify({'error': f'File too large ({len(file_bytes) // 1048576}MB, '
-                        f'max {_MAX_PPTX_BYTES // 1048576}MB)'}), 400
+        return api_error(f'File too large ({len(file_bytes) // 1048576}MB, '
+                        f'max {_MAX_PPTX_BYTES // 1048576}MB)', status=400)
 
     target = request.form.get('targetLang', 'English')
     source = request.form.get('sourceLang', '')

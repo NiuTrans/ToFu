@@ -66,7 +66,7 @@ UPDATE_MEMORY_TOOL = {
                 },
                 "memory_id": {
                     "type": "string",
-                    "description": "The ID of the memory to update (from list_all_memories or the memory's filename without .md)"
+                    "description": "The ID of the memory to update (the memory's filename without .md, as shown in a search_memories result or the injected <relevant_memories> block)"
                 },
                 "name": {
                     "type": "string",

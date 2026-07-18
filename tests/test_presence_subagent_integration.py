@@ -125,7 +125,18 @@ def _build_agent(agent_id_suffix, conv_id, task_id, project_path, llm):
         spec,
         parent_task={'id': task_id, 'convId': conv_id,
                      'config': {'convTitle': 'Swarm session'}},
-        all_tools=[],
+        # write_file MUST be a KNOWN tool: SubAgent.run() now routes every tool
+        # call through ingest_tool_call(known_tools=...) which REJECTS a name
+        # absent from the agent's tool set as a hallucination — with all_tools=[]
+        # the write_file edit was rejected, so record_files never fired and no
+        # conflict was detected. Advertise it so the real edit path runs.
+        all_tools=[{'type': 'function', 'function': {
+            'name': 'write_file',
+            'description': 'write a file',
+            'parameters': {'type': 'object', 'properties': {
+                'path': {'type': 'string'}, 'content': {'type': 'string'},
+                'description': {'type': 'string'}},
+                'required': ['path', 'content']}}}],
         model='mock-model',
         thinking_enabled=False,
         project_path=project_path,

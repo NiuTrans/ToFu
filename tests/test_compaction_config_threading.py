@@ -89,7 +89,11 @@ def test_ignore_cache_prefix(monkeypatch):
     # Force a large cache prefix so the default (skip) arm protects most
     # cold tool results and compacts few; the aggressive arm compacts more.
     import lib.tasks_pkg.cache_tracking as ct
-    monkeypatch.setattr(ct, 'get_cache_prefix_count', lambda _cid: 100)
+    # Stub mirrors the real signature: get_cache_prefix_count now takes an
+    # optional current_msg_count (the history-shrink clamp). Return a fixed
+    # large prefix regardless so the skip-arm protects most cold results.
+    monkeypatch.setattr(ct, 'get_cache_prefix_count',
+                        lambda _cid, current_msg_count=None: 100)
 
     skip_msgs = _mk_conv()
     aggr_msgs = _mk_conv()

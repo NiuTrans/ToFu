@@ -54,7 +54,8 @@ def _default_max_inflight() -> int:
     """
     try:
         n = int(os.environ.get('TOFU_MAX_INFLIGHT_TASKS', '') or '64')
-    except (ValueError, TypeError):
+    except (ValueError, TypeError) as e:
+        logger.debug('[Admission] TOFU_MAX_INFLIGHT_TASKS parse failed, using default: %s', e)
         n = 64
     return max(0, n)
 
@@ -69,7 +70,8 @@ def _admit_slot_ttl() -> float:
     """
     try:
         n = float(os.environ.get('TOFU_ADMIT_SLOT_TTL', '') or '3600')
-    except (ValueError, TypeError):
+    except (ValueError, TypeError) as e:
+        logger.debug('[Admission] TOFU_ADMIT_SLOT_TTL parse failed, using default: %s', e)
         n = 3600.0
     return max(1.0, n)
 

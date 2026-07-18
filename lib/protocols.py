@@ -330,6 +330,22 @@ class ConversationStore(Protocol):
         """
         ...
 
+    def cas_sync_conversation_with_search(self, conv_id: str, messages: list,
+                                          expected_updated_at: int) -> int:
+        """CAS overwrite that ALSO refreshes ``msg_count`` + ``search_text`` +
+        the FTS index (the CAS-guarded sibling of
+        :meth:`sync_conversation_with_search`).
+
+        Writes only if the row's ``updated_at`` still equals
+        ``expected_updated_at`` (0 rows affected → a concurrent writer won → the
+        caller treats it as a skip), and updates FTS ONLY on a landed write.
+        Use it — not :meth:`cas_update_conversation_messages` — whenever a write
+        CHANGES THE MESSAGE SET (e.g. manual compaction removes whole messages),
+        so the sidebar count and full-text search stay consistent with the
+        rewritten body.  Returns affected-row count.
+        """
+        ...
+
     def ensure_compaction_schema(self) -> None:
         """Create the ``transcript_archive`` table/index if absent (idempotent).
 
@@ -360,6 +376,14 @@ class ConversationStore(Protocol):
         """Delete all transcript-archive rows for a conversation."""
         ...
 
+    def prune_archives(self, conv_id: str, keep: int) -> int:
+        """Ring-buffer retention: keep the ``keep`` newest archive rows, drop
+        the rest.  ``keep <= 0`` is a no-op.  Returns rows deleted.  Called as
+        a GC-on-insert so ``transcript_archive`` can't grow unbounded on a
+        long-lived conversation.
+        """
+        ...
+
     def sync_conversation_with_search(self, conv_id: str, messages: list) -> int:
         """Overwrite a conversation's messages AND refresh its search index.
 
@@ -368,6 +392,16 @@ class ConversationStore(Protocol):
         index — the persistence path endpoint mode uses so multi-turn
         Planner/Worker/Critic output survives an SSE disconnect and stays
         searchable.  Returns the new ``updated_at`` (epoch-ms).
+        """
+        ...
+
+    def notify_conversation_changed(self, conv_id: str) -> None:
+        """Emit a cross-device "conversation changed" notification.
+
+        Looks up the conversation's current ``rev`` and fires the host's
+        conv-changed push so a sibling tab with this conversation open
+        refetches its body without a manual refresh.  Best-effort — the store
+        swallows/logs its own failures; callers invoke it after a landed write.
         """
         ...
 

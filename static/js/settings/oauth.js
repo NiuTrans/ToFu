@@ -155,7 +155,7 @@ function _completeLogin(provider, code, state) {
   }
   function _onError(msg) {
     _updateOAuthCard(provider, { status: 'error' });
-    showAlert('Token 交换失败: ' + msg);
+    showAlert(t('settings.oauthTokenExchangeFailed', { msg: msg }));
   }
 
   // Step 1: browser-side exchange → store via server.
@@ -220,7 +220,7 @@ function _showCurlHelper(provider, code, state, reason) {
   var curl = _buildCurlCommand(provider, code, state);
   if (!curl) {
     _updateOAuthCard(provider, { status: 'error' });
-    showAlert('Token 交换失败: ' + (reason || '') + '（且无法生成手动命令，请重新点击登录）');
+    showAlert(t('settings.oauthTokenExchangeNoCmd', { reason: (reason || '') }));
     return;
   }
   // Keep the card in a 'pending' state — the user has a clear next action.
@@ -238,11 +238,10 @@ function _showCurlHelper(provider, code, state, reason) {
   }
   helper.innerHTML =
     '<p class="oauth-manual-hint" style="color:#e0a030">' +
-    '服务器网络无法连接 Anthropic（已被区域封锁）。请在<strong>本机终端（已开代理）</strong>运行下面的命令，' +
-    '再把返回的 JSON（含 <code>access_token</code>）粘贴到上方输入框后点「提交」：</p>' +
+    t('settings.oauthCurlHelp') + '</p>' +
     '<textarea readonly class="oauth-manual-input" id="oauth' + capP + 'Curl" ' +
     'style="width:100%;height:104px;font-family:monospace;font-size:11px;white-space:pre"></textarea>' +
-    '<button class="btn-small" id="oauth' + capP + 'CurlCopy" style="margin-top:6px">复制命令</button>';
+    '<button class="btn-small" id="oauth' + capP + 'CurlCopy" style="margin-top:6px">' + escapeHtml(t('settings.oauthCopyCmd')) + '</button>';
   var ta = document.getElementById('oauth' + capP + 'Curl');
   if (ta) ta.value = curl;
   var copyBtn = document.getElementById('oauth' + capP + 'CurlCopy');
@@ -250,14 +249,14 @@ function _showCurlHelper(provider, code, state, reason) {
     copyBtn.onclick = function() {
       var b = this;
       _safeClipboardWrite(ta.value).then(function() {
-        b.textContent = '已复制';
-        setTimeout(function() { b.textContent = '复制命令'; }, 1500);
+        b.textContent = t('settings.oauthCopied');
+        setTimeout(function() { b.textContent = t('settings.oauthCopyCmd'); }, 1500);
       }).catch(function(e) { debugLog('[OAuth] copy failed: ' + e.message, 'warn'); });
     };
   }
   // Repurpose the paste input for the JSON result.
   var input = document.getElementById('oauth' + capP + 'ManualUrl');
-  if (input) { input.value = ''; input.placeholder = '粘贴 curl 返回的 JSON（含 access_token）'; }
+  if (input) { input.value = ''; input.placeholder = t('settings.oauthPasteJsonPlaceholder'); }
 }
 
 // ── Handle received OAuth code (from postMessage / relay) ──
@@ -290,34 +289,34 @@ function _updateOAuthCard(provider, status) {
   if (!badge) return;
 
   if (status.authenticated) {
-    badge.textContent = '已登录';
+    badge.textContent = t('settings.oauthLoggedIn');
     badge.className = 'oauth-status-badge authenticated';
     if (info) { info.style.display = ''; }
     if (email) { email.textContent = status.email || '(unknown)'; }
     if (loginBtn) { loginBtn.style.display = 'none'; }
     if (logoutBtn) { logoutBtn.style.display = ''; }
   } else if (status.status === 'started' || status.status === 'waiting_callback' || status.status === 'exchanging') {
-    badge.textContent = status.status === 'exchanging' ? '正在获取 Token…' : '等待授权…';
+    badge.textContent = status.status === 'exchanging' ? t('settings.oauthGettingToken') : t('settings.oauthWaitingAuth');
     badge.className = 'oauth-status-badge pending';
     if (info) { info.style.display = 'none'; }
     // Show a cancel/retry button so users aren't stuck forever
     if (loginBtn) {
       loginBtn.disabled = false;
-      loginBtn.textContent = '取消 / 重试';
+      loginBtn.textContent = t('settings.oauthCancelRetry');
       loginBtn.onclick = function() { _oauthCancelAndRetry(provider); };
     }
     if (logoutBtn) { logoutBtn.style.display = 'none'; }
   } else if (status.status === 'error') {
-    badge.textContent = '错误';
+    badge.textContent = t('settings.oauthError');
     badge.className = 'oauth-status-badge error';
     if (info) { info.style.display = 'none'; }
-    if (loginBtn) { loginBtn.disabled = false; loginBtn.textContent = provider === 'codex' ? '登录 ChatGPT' : '登录 Claude'; loginBtn.onclick = function() { _oauthLogin(provider); }; }
+    if (loginBtn) { loginBtn.disabled = false; loginBtn.textContent = provider === 'codex' ? t('settings.oauthLoginChatGPT') : t('settings.oauthLoginClaude'); loginBtn.onclick = function() { _oauthLogin(provider); }; }
     if (logoutBtn) { logoutBtn.style.display = 'none'; }
   } else {
-    badge.textContent = '未登录';
+    badge.textContent = t('settings.oauthNotLoggedIn');
     badge.className = 'oauth-status-badge';
     if (info) { info.style.display = 'none'; }
-    if (loginBtn) { loginBtn.disabled = false; loginBtn.textContent = provider === 'codex' ? '登录 ChatGPT' : '登录 Claude'; loginBtn.style.display = ''; loginBtn.onclick = function() { _oauthLogin(provider); }; }
+    if (loginBtn) { loginBtn.disabled = false; loginBtn.textContent = provider === 'codex' ? t('settings.oauthLoginChatGPT') : t('settings.oauthLoginClaude'); loginBtn.style.display = ''; loginBtn.onclick = function() { _oauthLogin(provider); }; }
     if (logoutBtn) { logoutBtn.style.display = 'none'; }
   }
 }
@@ -341,7 +340,7 @@ function _oauthCancelAndRetry(provider) {
 function _oauthLogin(provider) {
   var capProvider = provider === 'codex' ? 'Codex' : 'Claude';
   var loginBtn = document.getElementById('oauth' + capProvider + 'LoginBtn');
-  if (loginBtn) { loginBtn.disabled = true; loginBtn.textContent = '正在准备…'; }
+  if (loginBtn) { loginBtn.disabled = true; loginBtn.textContent = t('settings.oauthPreparing'); }
 
   // Step 1: Ask server to generate PKCE + auth URL + start relay server
   // Try POST first; if proxy returns 404/405, fall back to GET with query params
@@ -366,8 +365,8 @@ function _oauthLogin(provider) {
     })
     .then(function(data) {
       if (data.error) {
-        showAlert('OAuth 登录失败: ' + data.error);
-        if (loginBtn) { loginBtn.disabled = false; loginBtn.textContent = provider === 'codex' ? '登录 ChatGPT' : '登录 Claude'; }
+        showAlert(t('settings.oauthLoginFailed', { error: data.error }));
+        if (loginBtn) { loginBtn.disabled = false; loginBtn.textContent = provider === 'codex' ? t('settings.oauthLoginChatGPT') : t('settings.oauthLoginClaude'); }
         return;
       }
 
@@ -417,12 +416,12 @@ function _oauthLogin(provider) {
             if (manualInput && manualInput.value.trim()) return;  // user is typing
             // Only reset if still in waiting state (not already succeeded)
             var badge = document.getElementById('oauth' + capProvider + 'Status');
-            if (badge && (badge.textContent.indexOf('等待') >= 0 || badge.textContent.indexOf('授权') >= 0)) {
+            if (badge && badge.classList.contains('pending')) {
               // Don't reset — just update button to allow retry
               var loginBtn2 = document.getElementById('oauth' + capProvider + 'LoginBtn');
               if (loginBtn2) {
                 loginBtn2.disabled = false;
-                loginBtn2.textContent = '重新打开弹窗';
+                loginBtn2.textContent = t('settings.oauthReopenPopup');
                 loginBtn2.onclick = function() {
                   // Re-open popup with same auth URL, don't create new flow
                   var w2 = 600, h2 = 700;
@@ -439,13 +438,13 @@ function _oauthLogin(provider) {
     })
     .catch(function(e) {
       console.error('[OAuth] Login error:', e);
-      showAlert('OAuth 登录请求失败: ' + e.message);
-      if (loginBtn) { loginBtn.disabled = false; loginBtn.textContent = provider === 'codex' ? '登录 ChatGPT' : '登录 Claude'; }
+      showAlert(t('settings.oauthLoginReqFailed', { error: e.message }));
+      if (loginBtn) { loginBtn.disabled = false; loginBtn.textContent = provider === 'codex' ? t('settings.oauthLoginChatGPT') : t('settings.oauthLoginClaude'); }
     });
 }
 
 async function _oauthLogout(provider) {
-  if (!await showConfirm('确定要退出 ' + (provider === 'codex' ? 'ChatGPT' : 'Claude') + ' 订阅登录吗？')) return;
+  if (!await showConfirm(t('settings.oauthLogoutConfirm', { provider: (provider === 'codex' ? 'ChatGPT' : 'Claude') }))) return;
 
   // Try POST first; if proxy returns 405, fall back to GET with query params
   function _doLogoutRequest(useGet) {
@@ -465,7 +464,7 @@ async function _oauthLogout(provider) {
       _updateOAuthCard(provider, { status: 'not_started', authenticated: false });
     })
     .catch(function(e) {
-      showAlert('退出失败: ' + e.message);
+      showAlert(t('settings.oauthLogoutFailed', { error: e.message }));
     });
 }
 
@@ -473,7 +472,7 @@ function _oauthManualSubmit(provider) {
   var capP = provider === 'codex' ? 'Codex' : 'Claude';
   var input = document.getElementById('oauth' + capP + 'ManualUrl');
   if (!input || !input.value.trim()) {
-    showAlert('请粘贴授权码或回调 URL');
+    showAlert(t('settings.oauthPasteCodePrompt'));
     return;
   }
   var val = input.value.trim();
@@ -490,7 +489,7 @@ function _oauthManualSubmit(provider) {
         .then(function(data) {
           if (!data || data.error) {
             _updateOAuthCard(provider, { status: 'error' });
-            showAlert('\u4fdd\u5b58\u5931\u8d25: ' + ((data && data.error) || 'unknown'));
+            showAlert(t('settings.oauthSaveFailed', { error: ((data && data.error) || 'unknown') }));
             return;
           }
           _updateOAuthCard(provider, { status: 'success', authenticated: true, email: data.email || '' });
@@ -501,11 +500,11 @@ function _oauthManualSubmit(provider) {
         })
         .catch(function(e) {
           _updateOAuthCard(provider, { status: 'error' });
-          showAlert('\u4fdd\u5b58\u5931\u8d25: ' + e.message);
+          showAlert(t('settings.oauthSaveFailed', { error: e.message }));
         });
       return;
     }
-    showAlert('\u7c98\u8d34\u7684 JSON \u4e2d\u672a\u627e\u5230 access_token');
+    showAlert(t('settings.oauthNoAccessToken'));
     return;
   }
 
@@ -520,7 +519,7 @@ function _oauthManualSubmit(provider) {
       code = u.searchParams.get('code') || '';
       state = u.searchParams.get('state') || '';
     } catch (e) { code = ''; }
-    if (!code) { showAlert('回调 URL 中未找到授权码'); return; }
+    if (!code) { showAlert(t('settings.oauthNoCodeInUrl')); return; }
   } else if (val.indexOf('#') > 0) {
     // code#state format from Anthropic console
     var parts = val.split('#');
@@ -538,7 +537,7 @@ function _autoConfigureOAuthProvider(provider, status) {
   var name = provider === 'codex' ? 'ChatGPT Plus' : 'Claude Pro';
   var el = document.getElementById('settingsStatusHint');
   if (el) {
-    el.textContent = '✅ ' + name + ' 登录成功！已自动注册为模型服务商，可直接在模型选择器中使用其订阅额度。';
+    el.textContent = t('settings.oauthAutoConfigured', { name: name });
     el.style.color = '#28a745';
   }
   // The backend auto-provisions a managed provider on login; refresh the

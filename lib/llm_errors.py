@@ -58,9 +58,16 @@ class RateLimitError(Exception):
             again after a brief cooldown.
         reason: Short human-readable reason (first ~200 chars of the error body).
     """
-    def __init__(self, msg='', *, is_quota=False, reason=''):
+    def __init__(self, msg='', *, is_quota=False, is_gateway=False, reason=''):
         super().__init__(msg)
         self.is_quota = bool(is_quota)
+        # True when this is NOT a real per-key 429 but a gateway 5xx
+        # (502/503/504) mapped onto the slot-rotation path. Real 429s reflect
+        # per-key contention and rotate forever (a sibling key will free up);
+        # a gateway 5xx storm means the WHOLE upstream is down, so the caller's
+        # retry loop uses this to bound the outage instead of spinning forever
+        # (see lib/llm_dispatch/api.py::_StreamRetryState gateway-outage cap).
+        self.is_gateway = bool(is_gateway)
         self.reason = (reason or (str(msg) if msg else ''))[:200]
 
 
@@ -374,7 +381,8 @@ def _classify_http_error(status_code: int, err_msg: str, model: str,
         logger.warning('%s Gateway throttle (HTTP %d) — escalating to dispatch '
                        'layer for slot rotation: %.200s',
                        log_prefix, status_code, err_msg)
-        raise RateLimitError(err_msg, reason=f'HTTP {status_code}: {err_msg[:180]}')
+        raise RateLimitError(err_msg, is_gateway=True,
+                             reason=f'HTTP {status_code}: {err_msg[:180]}')
     if status_code in _RETRYABLE_STATUS_CODES:
         # ★ Detect wrapped overload / rate-limit inside a generic 500.
         #   Some gateways receive 429 or 529 from the model server but

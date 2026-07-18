@@ -4,16 +4,26 @@
    A single slim line docked under the top bar (project mode only, shown only
    when there is something collaborative to surface). It REPLACES the old
    multi-row "who's working" presence strip — which merely echoed activity you
-   already see in the sidebar — with the Project Brain's coordination state,
-   ordered by ACTION VALUE:
+   already see in the sidebar — with the Project Brain's coordination state:
+   a plain "Project" label leads, followed by the action-ordered counts:
 
        🧠 Project · N decisions awaiting you · M epics in progress ·
           K open · P conversations online
 
-   "decisions awaiting you" comes first because it is the only thing that needs
+   The bar deliberately does NOT surface the Pillar #7 ambient status headline
+   (summary.statusLine — the first sentence of the latest synthesized
+   project-status snapshot): a one-line narrative truncated to fit the bar
+   carries no useful signal and pushes the counts around. The full snapshot
+   lives in the Project Brain Status tab, one click away. "decisions awaiting
+   you" comes first among the counts because it is the only thing that needs
    the human to act (the Charter human-gate). Each online peer is joined to the
    epic it is *advancing* (summary.peerEpics: convId → epic title) so the bar
    shows "conversation X · «Refactor the parser»", not "(untitled) · generating".
+
+   This bar is PROJECT-scoped only. The per-conversation influence lens ("how
+   is THIS chat affected — bound by charter / owns / must avoid") lives in full
+   inside the Project Brain panel, one click away; it is deliberately NOT
+   duplicated onto this always-visible line.
 
    Clicking the whole bar opens the full three-column Project Brain panel.
 
@@ -63,8 +73,7 @@
   }
 
   function _esc(s) {
-    return (typeof escapeHtml === "function") ? escapeHtml(String(s == null ? "" : s))
-      : String(s == null ? "" : s);
+    return escapeHtml(String(s == null ? "" : s));
   }
 
   function _t(key, params, fallback) {
@@ -78,11 +87,15 @@
     + '4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 '
     + '2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/></svg>';
 
-  /* Fetch the one-shot summary for a root (debounced), then re-render. */
+  /* Fetch the one-shot summary for a root (debounced), then re-render. The
+     displayed conv is passed so the backend excludes it from activePeers —
+     the count then means "OTHER conversations online", matching the local
+     push mirror (which drops self). */
   function _refetchSummary(root) {
     const api = (typeof Api !== "undefined" && Api.project) ? Api.project : null;
     if (!api || typeof api.brainSummary !== "function" || !root) return;
-    Promise.resolve(api.brainSummary(root)).then((s) => {
+    const selfId = (typeof activeConvId !== "undefined") ? activeConvId : "";
+    Promise.resolve(api.brainSummary(root, selfId || "")).then((s) => {
       _summary.set(root, s || null);
       _render();
     }).catch((e) => {
@@ -136,8 +149,17 @@
   function _peerEpicLines(summary, convSet, selfId) {
     if (!summary || !summary.peerEpics) return [];
     const lines = [];
-    for (const cid of convSet) {
-      if (selfId && cid === selfId) continue;
+    // Iterate the UNION of the backend peer→epic map and the local push
+    // mirror. The backend map is authoritative and present even when the push
+    // stream is degraded (so the "advancing «epic»" lines survive); the local
+    // mirror is unioned in only so a just-arrived push peer isn't missed.
+    const seen = new Set();
+    const ids = [];
+    for (const cid of Object.keys(summary.peerEpics)) ids.push(cid);
+    for (const cid of convSet) ids.push(cid);
+    for (const cid of ids) {
+      if (!cid || (selfId && cid === selfId) || seen.has(cid)) continue;
+      seen.add(cid);
       const epic = summary.peerEpics[cid];
       if (!epic) continue;
       lines.push(
@@ -164,20 +186,41 @@
     const convSet = new Set();
     const pm = _peerConvs.get(root);
     if (pm) { for (const cid of pm) { if (cid && cid !== selfId) convSet.add(cid); } }
-    const peerCount = convSet.size;
     const summary = _summary.get(root) || null;
+    // Peer count is BACKEND-AUTHORITATIVE (summary.activePeers), not the local
+    // push mirror. The mirror is filled only by live 'presence' push frames,
+    // so on a client whose push stream is degraded (exactly this tablet's
+    // case) it stays 0 and the bar would hide even though peers ARE online.
+    // Fall back to the local mirror when the summary hasn't loaded yet, and
+    // take the max so a just-arrived push peer the last snapshot missed is
+    // still counted (never under-report).
+    const backendCount = (summary && typeof summary.activePeers === "number")
+      ? summary.activePeers : null;
+    const peerCount = (backendCount != null)
+      ? Math.max(backendCount, convSet.size) : convSet.size;
 
+    // The bar leads with the plain "Project" label. The Pillar #7 ambient
+    // status headline is intentionally NOT surfaced here: a one-line narrative
+    // truncated to fit the bar carries no useful signal. The full synthesized
+    // snapshot lives in the Project Brain Status tab, one click away.
+    const leadHTML = `<span class="collab-label">${_esc(_t("collab.project", null, "Project"))}</span>`;
+
+    // ── Coordination counts (brainSummary — decisions/epics/peers) ──
     const segs = _segments(summary, peerCount);
-    // Nothing collaborative to surface (solo, empty board, no pending) → hide.
-    if (segs.length === 0) {
+    const hasDecisions = !!(summary && (summary.pendingDecisions || 0) > 0);
+    const hasConflicts = !!(summary && (summary.conflicts || 0) > 0);
+
+    // Nothing to surface at all (solo, empty board) → hide the whole bar. The
+    // bar shows only when there is at least one coordination count.
+    if (!segs.length) {
       if (_lastFingerprint !== "") { el.hidden = true; el.innerHTML = ""; _lastFingerprint = ""; }
       return;
     }
 
-    const hasDecisions = summary && (summary.pendingDecisions || 0) > 0;
-    const hasConflicts = summary && (summary.conflicts || 0) > 0;
     const segHTML = segs.map(s => `<span class="collab-seg ${s.cls}">${s.html}</span>`)
       .join('<span class="collab-sep">·</span>');
+    // A separator between the lead and the counts only when counts exist.
+    const leadSep = segs.length ? `<span class="collab-sep">·</span>` : "";
     const epicLines = _peerEpicLines(summary, convSet, selfId);
     const epicHTML = epicLines.length
       ? `<span class="collab-peer-epics">${epicLines.join("")}</span>` : "";
@@ -188,6 +231,15 @@
       ? `<span class="collab-conflicts">` + conflictMsgs.map(m =>
           `<span class="collab-conflict-line">${_esc(m)}</span>`).join("") + `</span>`
       : "";
+    const projectHTML =
+      `<span class="collab-cluster collab-cluster-project">`
+      + `<span class="collab-brain">${_BRAIN_SVG}</span>`
+      + leadHTML
+      + leadSep
+      + segHTML
+      + epicHTML
+      + conflictHTML
+      + `</span>`;
 
     const cls = "collab-bar-inner"
       + (hasConflicts ? " collab-has-conflicts" : "")
@@ -195,12 +247,7 @@
     const html =
       `<button type="button" class="${cls}" `
       + `data-testid="collab-bar" title="${_esc(_t("collab.openBrain", null, "Open Project Brain"))}">`
-      + `<span class="collab-brain">${_BRAIN_SVG}</span>`
-      + `<span class="collab-label">${_esc(_t("collab.project", null, "Project"))}</span>`
-      + `<span class="collab-sep">·</span>`
-      + segHTML
-      + epicHTML
-      + conflictHTML
+      + projectHTML
       + `</button>`;
 
     const fp = root + "|" + html;

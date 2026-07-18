@@ -138,7 +138,8 @@ global._INITIAL_RENDER = win._INITIAL_RENDER = 20;
 eval(fs.readFileSync(process.argv[3], 'utf8'));  // ui/streaming_ui.js (zones + updateStreamingUI)
 eval(fs.readFileSync(process.argv[4], 'utf8'));  // ui/streaming_render.js (_streamingBubbleHTML + _INITIAL_RENDER + renderMessage helpers)
 eval(fs.readFileSync(process.argv[5], 'utf8'));  // ui/stream_lifecycle.js (showStreamingUIForConv)
-eval(fs.readFileSync(process.argv[6], 'utf8'));  // translation.js (_renderStreamingTranslatePreview)
+eval(fs.readFileSync(process.argv[6], 'utf8'));  // translation.js (engine)
+eval(fs.readFileSync(process.argv[7], 'utf8'));  // ui/translation_render.js (_renderStreamingTranslatePreview — relocated)
 
 // renderMessage is defined in chat_render.js (not loaded). showStreamingUIForConv
 // calls it for prior messages — stub a minimal version AFTER the evals.
@@ -275,6 +276,7 @@ def _run():
              os.path.join(JS_DIR, 'ui', 'streaming_render.js'),    # argv[4]
              os.path.join(JS_DIR, 'ui', 'stream_lifecycle.js'),    # argv[5]
              os.path.join(JS_DIR, 'translation.js'),               # argv[6]
+             os.path.join(JS_DIR, 'ui', 'translation_render.js'),   # argv[7]
              ],
             capture_output=True, text=True, timeout=60,
         )

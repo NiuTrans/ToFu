@@ -19,7 +19,8 @@ import time
 from datetime import datetime
 from typing import Any
 
-from lib.log import get_logger, log_context
+from lib.log import audit_log, get_logger, log_context
+from lib.scheduler._shared import evaluate_predicate, reconcile_and_decide
 
 logger = get_logger(__name__)
 
@@ -177,21 +178,120 @@ def poll_decision(task: dict[str, Any]) -> tuple[bool, str, int]:
 
 def record_poll(task_id: str, decision: str, reason: str, model: str,
                 tokens_used: int, status_snapshot: str,
-                execution_task_id: str = '') -> None:
-    """Write a poll decision to the proactive_poll_log table."""
+                execution_task_id: str = '', tier: str = 'llm',
+                predicate_matched: int = -1, llm_agreed: int = -1) -> None:
+    """Write a poll decision to the proactive_poll_log table.
+
+    ``tier`` / ``predicate_matched`` / ``llm_agreed`` are the machine-queryable
+    predicate-reconciliation audit columns (defaults preserve the legacy
+    pure-LLM meaning). The promotion streak is reconstructable from the ledger
+    by counting trailing ``llm_agreed=1`` rows.
+    """
     try:
         from lib.database import DOMAIN_SYSTEM, get_thread_db
         db = get_thread_db(DOMAIN_SYSTEM)
         now = datetime.now().isoformat()
         db.execute(
             '''INSERT INTO proactive_poll_log
-               (task_id, poll_time, decision, reason, status_snapshot, model, tokens_used, execution_task_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
-            [task_id, now, decision, reason[:500], status_snapshot[:5000], model, tokens_used, execution_task_id]
+               (task_id, poll_time, decision, reason, status_snapshot, model, tokens_used,
+                execution_task_id, tier, predicate_matched, llm_agreed)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+            [task_id, now, decision, reason[:500], status_snapshot[:5000], model, tokens_used,
+             execution_task_id, tier, predicate_matched, llm_agreed]
         )
         db.commit()
     except Exception as e:
         logger.warning('[Proactive] Failed to record poll for task %s: %s', task_id, e, exc_info=True)
+
+
+# ── Predicate condition (code/hybrid tiers) ─────────────────────────────────
+
+def _count_trailing_ambiguous_code_polls(task_id: str, lookback: int = 20) -> int:
+    """Consecutive most-recent `code`-tier polls whose predicate was ambiguous
+    (predicate_matched=-1), reconstructed from proactive_poll_log. This is the
+    demotion counter (code→hybrid) — derived from the ledger so it survives a
+    restart with no dedicated column.
+    """
+    try:
+        from lib.database import DOMAIN_SYSTEM, get_thread_db
+        db = get_thread_db(DOMAIN_SYSTEM)
+        rows = db.execute(
+            'SELECT tier, predicate_matched FROM proactive_poll_log '
+            'WHERE task_id=? ORDER BY id DESC LIMIT ?', [task_id, lookback]
+        ).fetchall()
+    except Exception as e:
+        logger.warning('[Proactive:%s] Failed to reconstruct ambiguity streak: %s',
+                       task_id[:8], e, exc_info=True)
+        return 0
+    streak = 0
+    for r in rows:
+        rd = dict(r)
+        if rd.get('tier') == 'code' and rd.get('predicate_matched', -1) == -1:
+            streak += 1
+        else:
+            break
+    return streak
+
+
+def evaluate_condition_predicate(task: dict[str, Any]):
+    """Run this task's shell predicate (code/hybrid tiers). Returns a
+    :class:`lib.scheduler._shared.PredicateResult`."""
+    return evaluate_predicate(task.get('condition_command', '') or '',
+                              task.get('condition_regex', '') or '',
+                              log_id=task['id'][:8])
+
+
+def apply_reconcile_poll(task: dict[str, Any], predicate_result, llm_ready,
+                         llm_available: bool):
+    """Reconcile predicate vs LLM for a code/hybrid proactive task, persist the
+    promotion/demotion transition to scheduled_tasks, and return the
+    :class:`lib.scheduler._shared.ReconcileOutcome`.
+    """
+    task_id = task['id']
+    kind = task.get('condition_kind', 'llm')
+    current_streak = int(task.get('promotion_streak', 0) or 0)
+    fallback_streak = (_count_trailing_ambiguous_code_polls(task_id)
+                       if kind == 'code' else 0)
+
+    outcome = reconcile_and_decide(
+        kind=kind, predicate=predicate_result, llm_ready=llm_ready,
+        llm_available=llm_available, current_streak=current_streak,
+        fallback_streak=fallback_streak)
+
+    try:
+        from lib.database import DOMAIN_SYSTEM, get_thread_db
+        db = get_thread_db(DOMAIN_SYSTEM)
+        now = datetime.now().isoformat()
+        if outcome.promoted:
+            db.execute(
+                "UPDATE scheduled_tasks SET condition_kind='code', "
+                'promotion_streak=?, promoted_at=?, updated_at=? WHERE id=?',
+                [outcome.new_streak, now, now, task_id])
+            audit_log('proactive_predicate_promoted', task_id=task_id,
+                      predicate=task.get('condition_command', '')[:200],
+                      streak=outcome.new_streak)
+            logger.info('[Proactive:%s] ✅ Predicate PROMOTED to code (streak=%d) — '
+                        'LLM drops out of future polls', task_id[:8], outcome.new_streak)
+        elif outcome.demoted:
+            db.execute(
+                "UPDATE scheduled_tasks SET condition_kind='hybrid', "
+                "promotion_streak=0, promoted_at='', updated_at=? WHERE id=?",
+                [now, task_id])
+            audit_log('proactive_predicate_demoted', task_id=task_id,
+                      predicate=task.get('condition_command', '')[:200],
+                      reason=outcome.note[:200])
+            logger.warning('[Proactive:%s] ⚠️ Predicate DEMOTED to hybrid — %s',
+                           task_id[:8], outcome.note)
+        elif outcome.new_streak != current_streak or outcome.new_kind != kind:
+            db.execute(
+                'UPDATE scheduled_tasks SET condition_kind=?, promotion_streak=?, '
+                'updated_at=? WHERE id=?',
+                [outcome.new_kind, outcome.new_streak, now, task_id])
+        db.commit()
+    except Exception as e:
+        logger.error('[Proactive:%s] Failed to persist reconcile transition: %s',
+                     task_id[:8], e, exc_info=True)
+    return outcome
 
 
 def get_poll_log(task_id: str, limit: int = 30) -> list[dict]:
@@ -309,4 +409,5 @@ def should_auto_disable(task: dict[str, Any]) -> bool:
 __all__ = [
     'gather_system_status', 'poll_decision', 'record_poll', 'get_poll_log',
     'execute_proactive_task', 'is_task_executing', 'should_auto_disable',
+    'evaluate_condition_predicate', 'apply_reconcile_poll',
 ]

@@ -371,4 +371,7 @@ class TestAbortDanglingToolRound(unittest.TestCase):
 
 
 if __name__ == '__main__':
+    from tests._standalone_guard import guard_standalone_db
+    # setUp() calls init_db() itself, so only force sqlite + assert here.
+    guard_standalone_db('test_abort_dangling_tool_round.__main__', init_schema=False)
     unittest.main(verbosity=2)

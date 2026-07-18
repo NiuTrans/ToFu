@@ -609,7 +609,8 @@ def _explain_exchange_failure(status: int, body: str, provider: str) -> str:
             upstream = err.get('message') or err.get('error_description') or err.get('type') or ''
         elif isinstance(err, str):
             upstream = err
-    except Exception:
+    except Exception as e:
+        logger.debug('[Codex OAuth] error-body parse failed, using raw prefix: %s', e)
         upstream = (body or '')[:200]
 
     if status == 403:

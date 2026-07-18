@@ -129,6 +129,15 @@ class AgentRunRouteTest(unittest.TestCase):
             pass
         _id_cache.clear()
 
+        # The production `controller` counts in-flight slots in the SHARED
+        # runtime_state_store (Build Order step 2). Reset it before AND after
+        # each test so these route tests are insulated from any prior suite's
+        # leaked count (e.g. test_admission's unbounded 1000) regardless of
+        # run order — otherwise the cap-64 controller reads a polluted
+        # in_flight and 503s every request.
+        import lib.runtime_state_store as rss
+        rss.reset_for_test()
+
         # Stub spawn_task so the orchestrator doesn't try to call out.
         import lib.tasks_pkg as pkg
 
@@ -149,6 +158,10 @@ class AgentRunRouteTest(unittest.TestCase):
     def tearDown(self):
         import lib.tasks_pkg as pkg
         pkg.spawn_task = self._orig_spawn
+        # Leave the shared runtime_state_store clean so this suite never
+        # leaks an in-flight count forward to whatever runs next.
+        import lib.runtime_state_store as rss
+        rss.reset_for_test()
 
     # ── Providers CRUD ──────────────────────────────────────────────
 

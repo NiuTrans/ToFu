@@ -47,52 +47,53 @@ async function _isAlreadyChinese(text) {
   return !!(body && body.is_chinese);
 }
 
-/**
- * Surgical single-message re-render with scroll preservation.
- * Replaces the duplicated outerHTML+scrollTop pattern that lived in
- * three different places across translation flows.
- *
- * `.message` has `content-visibility:auto;contain-intrinsic-size:auto 120px`,
- * so a raw `outerHTML` swap drops the new element's intrinsic-size cache to
- * the 120px estimate. If the real height was, say, 2000px, the page above
- * the swapped node suddenly reports ~1880px shorter and the saved scrollTop
- * resolves to a position near the top — the chat appears to "jump up" when
- * a translation pipeline transitions a message from idle → translating →
- * done. Wrapping the swap in `cv-off` (same trick `_forceScrollToBottom`
- * uses) forces real height computation before scrollTop restoration.
- */
-function _renderMsgInPlace(convId, idx, msg) {
-  if (typeof activeConvId === 'undefined' || activeConvId !== convId) return;
-  if (typeof renderMessage !== 'function') return;
-  const el = document.getElementById(`msg-${idx}`);
-  // No surgical target: the bubble isn't laid out yet (conversation still
-  // loading), the index drifted, or this msg is currently the live
-  // #streaming-msg (no #msg-N node yet). Don't silently swallow it — that's a
-  // deterministic missed-render (a state change applied to memory/DB that the
-  // screen never reflects). Fall through to a scroll-preserving full re-render
-  // of the active conv so the spinner/terminal state is actually painted.
-  if (!el) {
-    console.warn(`[Translate] _renderMsgInPlace: no #msg-${idx} node ` +
-      `(conv=${convId.slice(0,8)}) — falling back to renderChat(scroll-preserving)`);
-    const _conv = (typeof conversations !== 'undefined')
-      ? conversations.find(c => c.id === convId) : null;
-    if (_conv && typeof renderChat === 'function') renderChat(_conv, false);
-    return;
-  }
-  const ct = document.getElementById('chatContainer');
-  const inner = document.getElementById('chatInner');
-  const sv = ct ? ct.scrollTop : -1;
-  if (inner) {
-    inner.classList.add('cv-off');
-    void inner.scrollHeight;
-  }
-  el.outerHTML = renderMessage(msg, idx);
-  if (inner) {
-    void inner.scrollHeight;
-    inner.classList.remove('cv-off');
-  }
-  if (sv >= 0 && ct) ct.scrollTop = sv;
+/* ── OUTPUT-side (model reply → human) translate target ──
+ * The assistant reply is rendered into the UI language, not a hard-pinned
+ * Chinese. Maps _i18nLang to the language NAME the translate engine expects
+ * (mirrors lib/conv_config._UILANG_TO_TARGET). Falls back to Chinese so an
+ * unknown/absent UI language is byte-identical to the former hard-pin. */
+const _UILANG_TO_TARGET = {
+  zh: 'Chinese', 'zh-cn': 'Chinese', 'zh-tw': 'Chinese',
+  en: 'English', ja: 'Japanese', ko: 'Korean',
+  fr: 'French', de: 'German', es: 'Spanish', ru: 'Russian',
+};
+function _uiTranslateTarget() {
+  const code = (typeof _i18nLang !== 'undefined' && _i18nLang)
+    ? String(_i18nLang).toLowerCase() : 'zh';
+  return _UILANG_TO_TARGET[code] || 'Chinese';
 }
+/* Target-language NAME → detector code (detected.code from the backend),
+ * so the skip gate compares like with like. */
+const _TARGET_TO_CODE = {
+  Chinese: 'zh', English: 'en', Japanese: 'ja', Korean: 'ko',
+  French: 'fr', German: 'de', Spanish: 'es', Russian: 'ru',
+};
+
+/* Generic "already in the target language?" skip gate. Uses the cascade
+ * detector's `detected.code` (fastText-backed server-side) instead of the
+ * coarse is_chinese flag, so a Japanese reply into a Japanese UI is not
+ * mistaken for its target and a genuinely-target reply is still short-
+ * circuited. Fail-open (translate) on any error. */
+async function _isAlreadyInTarget(text, targetLang) {
+  if (!text || typeof text !== 'string' || text.replace(/\s+/g, '').length < 8) {
+    return false;
+  }
+  const wantCode = _TARGET_TO_CODE[targetLang];
+  if (!wantCode) return false;
+  // force_fasttext: this gate decides whether to translate; the script+
+  // heuristic tier cannot separate kanji-heavy Japanese from Chinese, so
+  // without the statistical model a JP reply would be wrongly skipped as
+  // already-in-target (the same bug the server-side safety net force-fixes).
+  const body = await Api.text.detectLanguage(text, { forceFasttext: true });
+  const code = body && body.detected && body.detected.code;
+  return !!(code && code === wantCode);
+}
+
+/* _renderMsgInPlace, _patchTranslateLoadingDom, _renderStreamingTranslatePreview
+ * and _applyPartialByRoundToSettled were RELOCATED to ui/translation_render.js
+ * (decoupling step 4). This engine module no longer touches the DOM — it
+ * mutates msg state, persists, and calls emitMessageChanged(convId, idx, msg,
+ * detail) (+ the window-exposed live-preview painters) to request a repaint. */
 
 /**
  * Stale-partial detector: a translation produced from mid-stream
@@ -101,12 +102,9 @@ function _renderMsgInPlace(convId, idx, msg) {
  * served via window._translationPolicy; fall back to constants pre-load.
  */
 function _isStalePartialTranslation(msg) {
-  if (!msg || !msg.translatedContent || !msg.content) return false;
-  const p = (typeof window !== 'undefined' && window._translationPolicy) || null;
-  const frac = (p && p.stale_frac > 0) ? p.stale_frac : _TRANSLATE_STALE_FRAC_FALLBACK;
-  const minSrc = (p && p.min_source_chars > 0) ? p.min_source_chars : _TRANSLATE_STALE_MIN_SOURCE_FALLBACK;
-  return msg.content.length > minSrc &&
-         msg.translatedContent.length < msg.content.length * frac;
+  // Single source of truth: the pure predicate in core/translation_model.js.
+  // (Kept as a thin local alias so existing call sites read naturally.)
+  return isStalePartialTranslation(msg);
 }
 
 function _resetTranslationState(msg) {
@@ -118,6 +116,96 @@ function _resetTranslationState(msg) {
   delete msg._translateStatus;
   delete msg._translateStatusKind;
   delete msg._translatePartial;
+}
+
+/**
+ * Stamp per-round translated Chinese onto msg.segments[].translatedText,
+ * keyed by llmRound. `byRound` is {String(round): 中文} from the translate
+ * `done` frame. Mirrors the backend _stamp_segment_translations so the LIVE
+ * settled timeline keeps its narration in Chinese at finalize WITHOUT a reload
+ * (a reconnect reads the same already-stamped segments from the DB). No-op
+ * when the message has no segments (pre-v36) or the map is empty.
+ */
+function _stampSegTranslations(msg, byRound) {
+  if (!byRound || !Object.keys(byRound).length) return;
+  /* ★ Order-independent: the translate `done` push and the chat `done`
+   *   (which projects msg.segments) are near-concurrent, and the deliverable
+   *   reuses a CACHED segment translation so the translate frame often wins the
+   *   race — landing BEFORE segments exist. Stash the map so whichever event
+   *   arrives second applies it (the sse_pipeline chat-`done` handler replays
+   *   _pendingSegTranslations right after projecting committedMessage.segments). */
+  if (!Array.isArray(msg.segments) || !msg.segments.length) {
+    msg._pendingSegTranslations = byRound;
+    return;
+  }
+  for (const seg of msg.segments) {
+    if (!seg || seg.type !== 'text' || seg.deliverable) continue;
+    if (seg.llmRound == null) continue;
+    const zh = byRound[String(seg.llmRound)];
+    if (zh && zh.trim()) seg.translatedText = zh;
+  }
+  delete msg._pendingSegTranslations;
+}
+
+/**
+ * ORDER-INDEPENDENT finalize gate — should the translate `done` DEFER its
+ * whole-bubble repaint?
+ *
+ * The auto-translate `done` push and the chat `done` SSE event are two
+ * INDEPENDENT async completions with no ordering guarantee. The chat `done`
+ * handler is the SOLE writer of the backend-committed settled fields
+ * (toolRounds/segments/finishReason/usage/cost — the `committedMessage`
+ * verbatim projection in ui/sse_pipeline.js); the translate `done` handler only
+ * stamps translatedContent/_showingTranslation.
+ *
+ * When the translate frame WINS the race (arrives while the turn is still
+ * finalizing, before the chat-`done` projection), an unconditional
+ * emitMessageChanged({kind:'full'}) re-runs renderMessage against a message
+ * whose settled fields have NOT landed — so the tool panel vanishes and
+ * renderFinishInfo (gated on finishReason||usage) degrades to a bare model tag,
+ * self-healing a beat later when chat-`done` + finishStream render the complete
+ * bubble. That transient flash is the reported "giant purple box, tools gone,
+ * stripped finish bar, then normal again".
+ *
+ * Root fix (NOT a timing tweak): DEFER the whole-bubble repaint iff the turn is
+ * NOT yet settled AND a live stream / active task is still finalizing this conv
+ * — because the imminent chat-`done` committedMessage projection + finishStream
+ * will render the COMPLETE bilingual bubble in one pass (that render reads the
+ * already-stamped translatedContent, so the translation is never lost). Repaint
+ * IMMEDIATELY when the turn is already settled (finishReason||usage present — the
+ * common / manual / historical retranslation case) or when nothing is finalizing
+ * (no other render is coming, so the translation must paint itself). The
+ * decision is order-independent: whichever `done` arrives second renders once,
+ * complete.
+ *
+ * @param {string} convId
+ * @param {object} msg
+ * @returns {boolean} true → skip the whole-bubble repaint (a settled render is imminent)
+ */
+function _translateFinalizeShouldDefer(convId, msg) {
+  if (!msg) return false;
+  // Settled: chat-`done` already projected the terminal fields, so renderMessage
+  // + renderFinishInfo have everything → repaint now.
+  if (msg.finishReason || msg.usage) return false;
+  // Not settled → only defer while the turn is genuinely finalizing (a live
+  // stream or an active task owns this conv). Otherwise nothing else will
+  // repaint, so paint now rather than strand the translation.
+  try {
+    if (typeof activeStreams !== 'undefined' && activeStreams
+        && typeof activeStreams.has === 'function' && activeStreams.has(convId)) {
+      return true;
+    }
+    if (typeof conversations !== 'undefined' && Array.isArray(conversations)) {
+      const _c = conversations.find((c) => c && c.id === convId);
+      if (_c && _c.activeTaskId) return true;
+    }
+  } catch (e) {
+    return false;  // fail open — repaint rather than swallow the translation
+  }
+  return false;
+}
+if (typeof window !== 'undefined') {
+  window._translateFinalizeShouldDefer = _translateFinalizeShouldDefer;
 }
 
 /**
@@ -159,7 +247,13 @@ function _applyTranslationDone(convId, idx, msg, result, field) {
     _patchMessageOnServer(convId, idx, patch);
   }
 
-  _renderMsgInPlace(convId, idx, msg);
+  /* ★ Order-independent finalize: skip the whole-bubble repaint when a settled
+   *   render is imminent (chat-`done` projection + finishStream), so the tool
+   *   panel / finish bar are never dropped by a translate frame that won the
+   *   race. translatedContent is already stamped above; that render reads it. */
+  if (!_translateFinalizeShouldDefer(convId, msg)) {
+    emitMessageChanged(convId, idx, msg, { kind: 'full' });
+  }
 }
 
 /**
@@ -201,143 +295,15 @@ function _applyTranslationStatus(convId, idx, msg, result) {
   if (!changed) return false;
 
   if (typeof activeConvId !== 'undefined' && activeConvId === convId) {
-    const loadingEl = document.getElementById(`translate-loading-${idx}`);
-    if (loadingEl && _patchTranslateLoadingDom(loadingEl, msg)) {
-      return true;
-    }
-    _renderMsgInPlace(convId, idx, msg);
+    emitMessageChanged(convId, idx, msg, { kind: 'status' });
   }
   return true;
 }
 
-/**
- * Patch the inner status-sub / preview-sub children of an existing
- * #translate-loading-N element in place. Returns true if the patch was
- * applied (and the caller should NOT fall back to full re-render).
- */
-function _patchTranslateLoadingDom(loadingEl, msg) {
-  if (!loadingEl) return false;
-  // Bail when the indicator already transitioned to the failed state — the
-  // caller's full-render path handles that.
-  if (msg._translateError) return false;
-
-  // ── status sub-line ──
-  let statusEl = loadingEl.querySelector('.translate-status-sub');
-  if (msg._translateStatus) {
-    const kind = msg._translateStatusKind || '';
-    const i18nKey = kind ? `translate.retry.${kind}` : '';
-    const localized = (i18nKey && typeof t === 'function') ? t(i18nKey) : '';
-    const display = (localized && localized !== i18nKey) ? localized : msg._translateStatus;
-    if (!statusEl) {
-      statusEl = document.createElement('div');
-      statusEl.className = 'translate-status-sub';
-      // The head sub-line stays directly under the spinner row; the preview
-      // (when present) renders below it.
-      const headEl = loadingEl.querySelector('.translate-loading-head');
-      if (headEl && headEl.parentNode === loadingEl) headEl.after(statusEl);
-      else loadingEl.appendChild(statusEl);
-    }
-    statusEl.title = msg._translateStatus;
-    statusEl.textContent = '⚠ ' + display;
-  } else if (statusEl) {
-    statusEl.remove();
-  }
-
-  // ── partial-preview body (rendered markdown, morphs into the final 译文) ──
-  let previewEl = loadingEl.querySelector('.translate-preview');
-  if (msg._translatePartial) {
-    if (!previewEl) {
-      previewEl = document.createElement('div');
-      previewEl.className = 'translate-preview';
-      previewEl.innerHTML = '<div class="md-content"></div><span class="translate-caret"></span>';
-      loadingEl.appendChild(previewEl);
-      loadingEl.classList.add('has-preview');
-    }
-    const mdEl = previewEl.querySelector('.md-content');
-    if (mdEl && previewEl._lastPartial !== msg._translatePartial) {
-      previewEl._lastPartial = msg._translatePartial;
-      // Sticky auto-scroll: keep the latest streamed line in view, but stop
-      // following the instant the user scrolls up to read earlier text.
-      const nearBottom = (previewEl.scrollHeight - previewEl.scrollTop
-                          - previewEl.clientHeight) < 32;
-      let html;
-      try {
-        const fn = (typeof renderMarkdown === 'function') ? renderMarkdown : null;
-        const strip = (typeof stripNoTranslateTags === 'function')
-          ? stripNoTranslateTags : (s) => s;
-        html = fn ? fn(strip(msg._translatePartial)) : null;
-      } catch (e) { html = null; }
-      if (html != null) mdEl.innerHTML = html;
-      else mdEl.textContent = msg._translatePartial;
-      if (nearBottom) previewEl.scrollTop = previewEl.scrollHeight;
-    }
-  } else if (previewEl) {
-    previewEl.remove();
-    loadingEl.classList.remove('has-preview');
-  }
-  return true;
-}
-
-/**
- * Paint a live translation preview into the STILL-STREAMING assistant bubble.
- *
- * During an agent task the assistant reply renders in `#streaming-msg` (it has
- * no `msg-${idx}` DOM node yet), so the per-message indicator paths can't reach
- * it. The incremental translator pushes a `running`/`partial` frame after each
- * tool round's segment is translated; this renders that translated-so-far text
- * into a dedicated zone inside the streaming bubble so the Chinese fills in
- * round-by-round AS THE TASK RUNS.
- *
- * Routes by the bubble's `data-msg-id` (stamped at send time from the same id
- * the backend used for the partial frame). Returns true when it painted (the
- * caller then skips the settled-message fallback), false when the target isn't
- * the live streaming bubble (e.g. a background conv, or the turn already
- * finalized) so the caller falls through to the normal indicator path.
- */
-function _renderStreamingTranslatePreview(convId, msgId, partial) {
-  if (typeof activeConvId === 'undefined' || activeConvId !== convId) return false;
-  if (!msgId || !partial) return false;
-  const bubble = document.getElementById('streaming-msg');
-  if (!bubble || bubble.getAttribute('data-msg-id') !== msgId) return false;
-  const body = bubble.querySelector('#streaming-body') || bubble.querySelector('.message-body');
-  if (!body) return false;
-
-  let zone = body.querySelector('[data-zone="translatePreview"]');
-  if (!zone) {
-    /* Legacy path: no fixed zone present (e.g. a body that predates the
-     * _ensureStreamZones translatePreview slot). Create + append it. */
-    zone = document.createElement('div');
-    zone.setAttribute('data-zone', 'translatePreview');
-    body.appendChild(zone);
-  }
-  /* Build the inner structure once. The zone may arrive EMPTY — either freshly
-   * appended above, or pre-created as a fixed _ensureStreamZones slot that
-   * survived a body rebuild — so key off the inner .md-content, not the zone
-   * element, to decide whether to populate it. */
-  if (!zone.querySelector('.md-content')) {
-    zone.className = 'translate-preview translate-stream-preview has-preview';
-    zone.innerHTML = '<div class="translate-loading-head"><span class="translate-spinner"></span>'
-      + `<span class="translate-loading-label">${(typeof t === 'function' ? t('translate.translatingToCN') : '翻译中…')}</span></div>`
-      + '<div class="md-content"></div><span class="translate-caret"></span>';
-  }
-  const mdEl = zone.querySelector('.md-content');
-  if (mdEl && zone._lastPartial !== partial) {
-    zone._lastPartial = partial;
-    const nearBottom = (zone.scrollHeight - zone.scrollTop - zone.clientHeight) < 32;
-    let html = null;
-    try {
-      const fn = (typeof renderMarkdown === 'function') ? renderMarkdown : null;
-      const strip = (typeof stripNoTranslateTags === 'function') ? stripNoTranslateTags : (s) => s;
-      html = fn ? fn(strip(partial)) : null;
-    } catch (e) { html = null; }
-    if (html != null) mdEl.innerHTML = html;
-    else mdEl.textContent = partial;
-    if (nearBottom) zone.scrollTop = zone.scrollHeight;
-  }
-  if (typeof isNearBottom === 'function' && isNearBottom(80)
-      && typeof scrollToBottom === 'function') scrollToBottom();
-  return true;
-}
+/* _patchTranslateLoadingDom / _renderStreamingTranslatePreview /
+ * _applyPartialByRoundToSettled relocated to ui/translation_render.js
+ * (decoupling step 4). Called via emitMessageChanged + the window-exposed
+ * live-preview painters. */
 
 /**
  * Apply terminal-error state (no retry path was taken).
@@ -357,7 +323,7 @@ function _applyTranslationError(convId, idx, msg, errMsg) {
       _translateTaskId: null,
     });
   }
-  _renderMsgInPlace(convId, idx, msg);
+  emitMessageChanged(convId, idx, msg, { kind: 'full' });
 }
 
 /**
@@ -471,7 +437,7 @@ function _armAutoTranslateWatchdog(convId, idx, msg) {
       delete m._translateStatus;
       delete m._translateStatusKind;
       delete m._translatePartial;
-      _renderMsgInPlace(convId, mIdx, m);
+      emitMessageChanged(convId, mIdx, m, { kind: 'full' });
       _clear();
       return;
     }
@@ -581,9 +547,11 @@ async function _runTranslationPipeline(conv, idx, msg, opts) {
   // "translation" of an already-Chinese message (the bug the user reported:
   // “原文中文 · 译文却是英文”). Marks the message as done so the
   // spinner clears and the bilingual block is not shown.
-  // _isAlreadyChinese is async — policy lives in lib/text_lang.py.
-  if (opts.targetLang === 'Chinese' && (await _isAlreadyChinese(text))) {
-    console.info(`[Translate] skip msg ${idx}: source is already predominantly Chinese (mode=${mode})`);
+  // Generic already-in-target skip (fastText-backed detected.code) — replaces
+  // the Chinese-only is_chinese gate so a Japanese reply into a Japanese UI is
+  // not mistaken for its own target and a genuinely-target reply still skips.
+  if (await _isAlreadyInTarget(text, opts.targetLang)) {
+    console.info(`[Translate] skip msg ${idx}: source is already in target ${opts.targetLang} (mode=${mode})`);
     msg._translateDone = true;
     msg._translateSkippedReason = 'already_target_language';
     delete msg._translateTaskId;
@@ -598,7 +566,7 @@ async function _runTranslationPipeline(conv, idx, msg, opts) {
         _translateTaskId: null,
       });
     }
-    _renderMsgInPlace(convId, idx, msg);
+    emitMessageChanged(convId, idx, msg, { kind: 'full' });
     return;
   }
 
@@ -649,7 +617,7 @@ async function _runTranslationPipeline(conv, idx, msg, opts) {
     msg._translateDone   = false;
     delete msg._translateError;
     if (typeof saveConversations === 'function') saveConversations(convId);
-    _renderMsgInPlace(convId, idx, msg);
+    emitMessageChanged(convId, idx, msg, { kind: 'full' });
 
     // Poll until terminal (success / recovered / final-error).
     await _pollTranslationLoop({
@@ -800,54 +768,46 @@ async function _resumePendingTranslations(convId) {
     delete m._translatePartial;
     delete m._translateStatus;
     delete m._translateStatusKind;
-    _renderMsgInPlace(convId, i, m);
+    emitMessageChanged(convId, i, m, { kind: 'full' });
     _zombieHealed = true;
   }
   if (_zombieHealed && typeof saveConversations === 'function') saveConversations(convId);
 
-  // ── Phase 0b: detect the LAST assistant msg that should have been translated but wasn't ──
+  // ── Phase 0b: retro-translate EVERY untranslated display-translated message ──
   // (e.g. page closed before finishStream could start the task, OR the conv was
-  //  frozen autoTranslate=OFF at send-time but the global toggle is ON now)
-  // Only check the last assistant message — don't retroactively translate old history.
-  // ★ Uses the EFFECTIVE resolver (live global toggle wins) — NOT the frozen
-  //   per-conv convAutoTranslate — so turning auto-translate ON makes an old
-  //   untranslated message translate the next time its conversation is opened,
-  //   instead of demanding a manual click. The streaming early-return above
-  //   guarantees this only acts on a finished, persisted message; the unified
-  //   pipeline's translateClaim + the server-side claim_inflight guard prevent
-  //   double-firing against the safety net or a manual click.
-  const _convAutoTranslate = convAutoTranslateEffective(conv);
-  if (_convAutoTranslate && conv.messages.length > 0) {
-    // Find the last assistant message (skip empty ghost messages)
-    for (let i = conv.messages.length - 1; i >= 0; i--) {
+  //  frozen autoTranslate=OFF at send-time but the global toggle is ON now.)
+  // The "should this translate?" decision is the SINGLE pure predicate
+  // needsTranslation(msg, conv, {autoTranslateOn}) in core/translation_model.js —
+  // the same one-authority discipline as displayContent/readTranslation. It
+  // folds in the effective-toggle, role, has-content, image-gen skip, already-
+  // done/in-flight, and stale-partial rules, so this loop is a thin driver.
+  //
+  // Sweep the WHOLE loaded window (not last-only): turning auto-translate ON
+  // must translate ALL still-untranslated history the next time the conv opens,
+  // not just the last reply (the reported coverage gap). Every dispatch is
+  // idempotent — the pipeline's translateClaim + the server-side claim_inflight
+  // guard prevent double-firing against the safety net or a manual click, and
+  // needsTranslation returns false for anything already owned/done. The
+  // streaming early-return above guarantees this only acts on finished,
+  // persisted messages. The async already-Chinese short-circuit stays inside
+  // _runTranslationPipeline (it needs a network round-trip, so it can't live in
+  // the pure predicate).
+  const _autoOn = convAutoTranslateEffective(conv);
+  if (_autoOn && conv.messages.length > 0) {
+    for (let i = 0; i < conv.messages.length; i++) {
       const msg = conv.messages[i];
-      if (msg.role !== 'assistant') continue;
-      if (!msg.content) continue;  // ★ skip ghost empty assistant msgs, don't break
-      // ★ FIX: detect stale partial translations before skipping —
-      // if translatedContent exists but is < 15% of content length, it was translated
-      // from partial content (mid-stream) and needs re-translation.
-      if (_isStalePartialTranslation(msg)) {
+      if (!needsTranslation(msg, conv, { autoTranslateOn: true })) continue;
+      if (isStalePartialTranslation(msg)) {
         console.warn(`[TranslateTask] 🔄 Stale partial translation in resume — ` +
-          `translated=${msg.translatedContent.length} vs content=${msg.content.length} ` +
-          `(${(msg.translatedContent.length/msg.content.length*100).toFixed(1)}%) — re-translating msg ${i}`);
+          `re-translating msg ${i} (conv=${convId.slice(0,8)})`);
         _resetTranslationState(msg);
-        _runTranslationPipeline(conv, i, msg, {
-          sourceLang: 'English', targetLang: 'Chinese',
-          field: 'translatedContent', mode: 'auto',
-        });
-        break;
+      } else {
+        console.log(`%c[TranslateTask] 🔄 Auto-starting missed translation for msg ${i} in conv=${convId.slice(0,8)}`, 'color:#8b5cf6');
       }
-      if (msg.translatedContent || msg._translateTaskId || msg._translateDone !== undefined) break;
-      // ★ Skip image gen results — nothing meaningful to translate
-      if (msg._igResult || msg._isImageGen || msg._igResults) break;
-      // ★ FIX: When autoTranslate is ON, always translate — don't rely on the
-      // language heuristic which fails for bilingual/mixed-language responses.
-      console.log(`%c[TranslateTask] 🔄 Auto-starting missed translation for msg ${i} in conv=${convId.slice(0,8)}`, 'color:#8b5cf6');
       _runTranslationPipeline(conv, i, msg, {
-        sourceLang: 'English', targetLang: 'Chinese',
+        sourceLang: 'English', targetLang: _uiTranslateTarget(),
         field: 'translatedContent', mode: 'auto',
       });
-      break; // only check the last assistant msg
     }
   }
 
@@ -874,7 +834,7 @@ async function _resumePendingTranslations(convId) {
   // ── Phase 2: immediately re-render to show "翻译中…" indicators ──
   // ★ Use forceScroll=false to preserve scroll position (prevents jump-to-top flash)
   if (activeConvId === convId) {
-    renderChat(conv, false);
+    emitMessageChanged(convId, -1, null, { kind: 'conv', conv });
   }
 
   // ── Phase 3: one-shot batch poll, then hand off to the unified pipeline ──
@@ -909,11 +869,11 @@ async function _resumePendingTranslations(convId) {
       const recovered = await _tryRecoverFromServer(convId, p.idx, p.msg, field);
       if (recovered) continue;
       // No DB recovery available — auto-mode pipeline will retry, manual will surface error.
-      if (_convAutoTranslate && field === 'translatedContent' && p.msg.content) {
+      if (convAutoTranslate(conv) && field === 'translatedContent' && p.msg.content) {
         p.msg._translateTaskId = null;
         delete p.msg._translateError;
         _runTranslationPipeline(conv, p.idx, p.msg, {
-          sourceLang: 'English', targetLang: 'Chinese',
+          sourceLang: 'English', targetLang: _uiTranslateTarget(),
           field: 'translatedContent', mode: 'auto',
         });
       } else {
@@ -951,7 +911,13 @@ async function _resumePendingTranslations(convId) {
     try {
       if (!frame) return;
       const _isRunning = frame.status === 'running' || frame.type === 'running';
-      if (!_isRunning && (frame.status !== 'done' || !frame.translated)) return;
+      const _isError = frame.status === 'error' || frame.type === 'error';
+      // Accept running, done-with-translation, AND error frames. The
+      // server-driven auto-translate has no client poll loop, so its terminal
+      // 'error' frame (worker _do_translate pushes it when retries are
+      // exhausted) is the ONLY signal the live view gets — dropping it left a
+      // failed translation completely invisible (bare English, no annotation).
+      if (!_isRunning && !_isError && (frame.status !== 'done' || !frame.translated)) return;
       const convId = frame.convId;
       if (!convId) return;
       const conv = (typeof conversations !== 'undefined')
@@ -989,9 +955,22 @@ async function _resumePendingTranslations(convId) {
       if (_isRunning) {
         if (field !== 'translatedContent') return;
         if (msg.translatedContent || msg._translateDone) return;
+        /* ★ Finalize 'started' frame (statusKind='started', no partial): the
+         * incremental worker is about to assemble + commit the final Chinese.
+         * Hide the English live-tail in the content zone NOW so the final
+         * round's English doesn't briefly double with its just-arriving
+         * Chinese (the only overlap case — a no-tool-call final round streams
+         * into content AND its segment lands in the partial). Pure class
+         * toggle on the streaming body; a no-op if this isn't the live
+         * bubble. */
+        if ((frame.statusKind === 'started') && frame.msgId) {
+          _markStreamXlateFinal(frame.msgId);
+        }
         // Stash the partial on the message so a later full re-render (conv
-        // switch / finalize) still has it.
+        // switch / finalize) still has it. Stash the per-round map too so a
+        // repaint after a body rebuild keeps the interleaved layout.
         if (frame.partial) msg._translatePartial = frame.partial;
+        if (frame.partialByRound) msg._translatePartialByRound = frame.partialByRound;
         if (frame.statusMessage) {
           msg._translateStatus = frame.statusMessage;
           msg._translateStatusKind = frame.statusKind || '';
@@ -1002,14 +981,29 @@ async function _resumePendingTranslations(convId) {
         //    target it. When this frame's message is the one streaming, paint
         //    the translated-so-far into the streaming bubble directly. This is
         //    what makes the Chinese fill in round-by-round DURING the task. ──
-        if (frame.partial && _renderStreamingTranslatePreview(convId, frame.msgId, frame.partial)) {
+        if (frame.partial && _renderStreamingTranslatePreview(convId, frame.msgId, frame.partial, frame.partialByRound)) {
+          return;
+        }
+        /* ★ UNIFICATION (settled per-round stream): the message is SETTLED
+         * (#msg-N, not the live #streaming-msg) — the retro / on-open /
+         * frozen-OFF whole-message path is streaming its narration
+         * round-by-round via partialByRound. Paint each round's Chinese
+         * surgically into its existing .seg-narration[data-seg-round] slot so
+         * the settled bubble fills in progressively, exactly like the live
+         * path — no whole-bubble swap, no hang-then-flash. When it paints at
+         * least one round we're done for this frame; otherwise fall through to
+         * the spinner indicator below (e.g. the narration slots aren't in the
+         * DOM yet, or this is a pre-segment 'started' frame). */
+        if (frame.partialByRound
+            && _applyPartialByRoundToSettled(convId, idx, frame.partialByRound)) {
+          if (msg._translateDone !== false) msg._translateDone = false;
           return;
         }
         // Fallback (settled message, e.g. end-of-task finalize spinner):
         // flip into the pending state so renderMessage shows the indicator.
         if (msg._translateDone !== false) {
           msg._translateDone = false;
-          _renderMsgInPlace(convId, idx, msg);
+          emitMessageChanged(convId, idx, msg, { kind: 'full' });
         }
         _applyTranslationStatus(convId, idx, msg, {
           statusMessage: frame.statusMessage || '',
@@ -1020,6 +1014,19 @@ async function _resumePendingTranslations(convId) {
         // dropped (socket reconnect / queue overflow). Arm a DB-polling
         // watchdog so the live view recovers without a conversation switch.
         _armAutoTranslateWatchdog(convId, idx, msg);
+        return;
+      }
+
+      // ── Terminal error frame (server-driven auto-translate exhausted its
+      //    retries). No client poll loop owns this task, so this push frame is
+      //    the authoritative failure signal. Surface the subtle click-to-retry
+      //    annotation instead of leaving the bare English with no hint. ──
+      if (_isError) {
+        if (field !== 'translatedContent') return;
+        if (msg.translatedContent) return;   // a translation landed anyway
+        const _errMsg = (typeof frame.error === 'string' && frame.error)
+          ? frame.error : 'Translation failed';
+        _applyTranslationError(convId, idx, msg, _errMsg);
         return;
       }
 
@@ -1038,6 +1045,11 @@ async function _resumePendingTranslations(convId) {
         msg.translatedContent = frame.translated;
         msg._translatedCache = frame.translated;
         msg._showingTranslation = true;
+        /* Carry the per-round narration Chinese onto the segment timeline so
+         * the settled view stays interleaved (Chinese narration in place),
+         * matching the streaming preview — no de-interleaved snap-back at
+         * finalize, and no dependency on a reload re-reading the DB. */
+        _stampSegTranslations(msg, frame.segmentsByRound);
       } else if (field === 'content') {
         if (!msg.originalContent) msg.originalContent = msg.content;
         msg.content = frame.translated;
@@ -1048,9 +1060,18 @@ async function _resumePendingTranslations(convId) {
       delete msg._translateStatus;
       delete msg._translateStatusKind;
       delete msg._translatePartial;
+      delete msg._translatePartialByRound;
       delete msg._translateError;
       if (typeof saveConversations === 'function') saveConversations(convId);
-      _renderMsgInPlace(convId, idx, msg);
+      /* ★ Order-independent finalize (see _translateFinalizeShouldDefer): when
+       *   the translate `done` beat the chat `done`, DEFER the whole-bubble
+       *   repaint — the imminent committedMessage projection + finishStream
+       *   render the COMPLETE bilingual bubble in one pass (reading the
+       *   translatedContent already stamped above), so tools / finish bar are
+       *   never transiently dropped. Settled / no-stream → repaint now. */
+      if (!_translateFinalizeShouldDefer(convId, msg)) {
+        emitMessageChanged(convId, idx, msg, { kind: 'full' });
+      }
     } catch (e) {
       console.debug('[Translate] push handler error:', e?.message);
     }

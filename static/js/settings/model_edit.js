@@ -29,7 +29,7 @@ async function _deleteModel(provIdx, modelIdx) {
   var p = _stgProviders[provIdx];
   if (!p || !p.models || !p.models[modelIdx]) return;
   var mid = p.models[modelIdx].model_id;
-  if (!await showConfirm('确定删除模型“' + (mid || '未命名') + '”吗？', { danger: true })) return;
+  if (!await showConfirm(t('settings.meDeleteConfirm', { name: (mid || t('settings.meUnnamed')) }), { danger: true })) return;
   p.models.splice(modelIdx, 1);
   // Clear presets pointing to this model
   for (var k in _stgPresets) {
@@ -95,18 +95,18 @@ function _editModel(provIdx, modelIdx) {
   var existing = card.parentElement.querySelector('.stg-edit-form');
   if (existing) existing.remove();
 
-  var allCaps = ['text', 'vision', 'thinking', 'cheap', 'image_gen', 'embedding'];
+  var allCaps = ['text', 'vision', 'thinking', 'cheap', 'image_gen', 'embedding', 'transcription', 'audio_chat'];
   var html = '<div class="stg-edit-form">';
   html += '<div class="stg-edit-grid">' +
-    '<div class="stg-field"><label>模型 ID</label>' +
-      '<input type="text" class="stg-edit-mid" value="' + escapeHtml(m.model_id || '') + '" placeholder="如 gpt-4o, claude-opus-4"></div>' +
-    '<div class="stg-field"><label>每分钟请求数 (RPM)</label>' +
+    '<div class="stg-field"><label>' + escapeHtml(t('settings.meModelId')) + '</label>' +
+      '<input type="text" class="stg-edit-mid" value="' + escapeHtml(m.model_id || '') + '" placeholder="' + escapeHtml(t('settings.meModelIdPlaceholder')) + '"></div>' +
+    '<div class="stg-field"><label>' + escapeHtml(t('settings.meRpm')) + '</label>' +
       '<input type="number" class="stg-edit-rpm" value="' + (m.rpm || 30) + '" min="1"></div>' +
-    '<div class="stg-field"><label>路由成本 <span class="stg-hint">（综合 $/1K，用于调度优先级）</span></label>' +
+    '<div class="stg-field"><label>' + escapeHtml(t('settings.meCost')) + ' <span class="stg-hint">' + escapeHtml(t('settings.meCostHint')) + '</span></label>' +
       '<input type="number" class="stg-edit-cost" value="' + (m.cost || 0.01) + '" step="0.001" min="0"></div>' +
   '</div>';
 
-  html += '<div class="stg-field"><label>模型能力</label><div class="stg-cap-toggles">';
+  html += '<div class="stg-field"><label>' + escapeHtml(t('settings.meCapabilities')) + '</label><div class="stg-cap-toggles">';
   for (var ci = 0; ci < allCaps.length; ci++) {
     var cap = allCaps[ci];
     var active = (m.capabilities || []).indexOf(cap) >= 0;
@@ -114,16 +114,16 @@ function _editModel(provIdx, modelIdx) {
   }
   html += '</div></div>';
 
-  html += '<div class="stg-field"><label>别名 <span class="stg-hint">（逗号分隔的替代模型 ID）</span></label>' +
-    '<input type="text" class="stg-edit-aliases" value="' + escapeHtml((m.aliases || []).join(', ')) + '" placeholder="如 model-v2-b, vertex/model-v2"></div>';
+  html += '<div class="stg-field"><label>' + escapeHtml(t('settings.meAliases')) + ' <span class="stg-hint">' + escapeHtml(t('settings.meAliasesHint')) + '</span></label>' +
+    '<input type="text" class="stg-edit-aliases" value="' + escapeHtml((m.aliases || []).join(', ')) + '" placeholder="' + escapeHtml(t('settings.meAliasesPlaceholder')) + '"></div>';
 
-  html += '<div class="stg-toggle-row"><span>默认开启思考模式</span>' +
+  html += '<div class="stg-toggle-row"><span>' + escapeHtml(t('settings.meThinkingDefault')) + '</span>' +
     '<label class="stg-toggle"><input type="checkbox" class="stg-edit-think"' + (m.thinking_default ? ' checked' : '') + '>' +
     '<span class="stg-toggle-track"><span class="stg-toggle-thumb"></span></span></label></div>';
 
   html += '<div class="stg-edit-actions">' +
-    '<button class="stg-btn-secondary" onclick="this.closest(\'.stg-edit-form\').remove()">取消</button>' +
-    '<button class="stg-btn-primary" onclick="_saveModelEdit(' + provIdx + ',' + modelIdx + ')">应用</button>' +
+    '<button class="stg-btn-secondary" onclick="this.closest(\'.stg-edit-form\').remove()">' + escapeHtml(t('settings.cancel')) + '</button>' +
+    '<button class="stg-btn-primary" onclick="_saveModelEdit(' + provIdx + ',' + modelIdx + ')">' + escapeHtml(t('settings.apply')) + '</button>' +
   '</div>';
   html += '</div>';
 
@@ -180,7 +180,7 @@ async function _addAlias(provIdx, modelIdx) {
   if (!p || !p.models) return;
   var m = p.models[modelIdx];
   if (!m) return;
-  var alias = String(await showPrompt('输入别名（同一模型的替代 ID）:') || '');
+  var alias = String(await showPrompt(t('settings.meAliasPrompt')) || '');
   if (!alias || !alias.trim()) return;
   if (!m.aliases) m.aliases = [];
   alias = alias.trim();

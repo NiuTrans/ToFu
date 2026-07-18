@@ -12,9 +12,7 @@ SDK compatibility.
 
 from __future__ import annotations
 
-import uuid
-
-from flask import Blueprint, Response
+from flask import Blueprint
 
 from lib.agent_core.admission import (
     await_terminal, controller, on_terminal, register_waiter,
@@ -22,6 +20,7 @@ from lib.agent_core.admission import (
 )
 from lib.api_response import (
     api_bad_request, api_error, api_internal_error, api_not_found,
+    sse_response,
 )
 from lib.byo_resolve import resolve_model_and_provider
 from lib.compat.anthropic import (
@@ -29,6 +28,7 @@ from lib.compat.anthropic import (
     translate_anthropic_request,
 )
 from lib.idempotency import idempotent_post
+from lib.ids import short_id
 from lib.llm_dispatch.ephemeral import dispose_ephemeral_slot
 from lib.log import audit_log, get_logger
 from lib.openapi import api_meta
@@ -97,7 +97,7 @@ async def messages():
               n_messages=len(msgs), stream=options['stream'])
 
     from lib.tasks_pkg import create_task, spawn_task
-    conv_id = f'compat-anthropic-{uuid.uuid4().hex[:12]}'
+    conv_id = short_id('compat-anthropic-', 12)
     task = create_task(conv_id, msgs, cfg)
     task['_inline_messages'] = True
     task['_compat_anthropic'] = True
@@ -149,16 +149,9 @@ async def messages():
     model = cfg.get('model', '?')
 
     if options['stream']:
-        return Response(
+        return sse_response(
             stream_anthropic_chunks(task, model=model),
-            mimetype='text/event-stream',
-            headers={
-                'Content-Type': 'text/event-stream; charset=utf-8',
-                'Cache-Control': 'no-cache, no-transform',
-                'X-Accel-Buffering': 'no',
-                'Connection': 'keep-alive',
-                'X-Tofu-Task-Id': task['id'],
-            })
+            extra_headers={'X-Tofu-Task-Id': task['id']})
 
     try:
         await _wait_terminal(task, options['timeout_s'])

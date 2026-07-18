@@ -3,8 +3,9 @@
 Lets a headless client discover what THIS deployment supports without
 hardcoding. Inferred at request time from runtime state:
 
-  * **models**   — discovered models from the dispatcher; capability flags
-                   (text/vision/thinking/embedding/image_gen/cheap)
+  * **models**   — configured models (from persisted server config);
+                   capability flags (vision/thinking/embedding/image_gen/
+                   transcription/audio_chat/cheap)
   * **tools**    — currently-registered tool definitions
   * **agents**   — list of agent endpoints (paper, translate, swarm, …)
   * **presets**  — supported preset/effort values
@@ -20,14 +21,45 @@ from flask import Blueprint
 from lib.api_response import api_ok
 from lib.log import get_logger
 from lib.openapi import api_meta
+from lib.ttl_cache import TTLCache
 
 logger = get_logger(__name__)
 
 api_v1_capabilities_bp = Blueprint('api_v1_capabilities', __name__)
 
+# The capabilities payload is a pure function of the persisted server config
+# plus static registries (tools/events/scopes). It's a public, poll-friendly
+# endpoint, so cache the assembled dict for a short window. The cache key is
+# ``id(lib._SAVED_CONFIG)``: ``lib.reload_config()`` rebinds that attribute to
+# a freshly-allocated dict (built while the old one is still referenced, so the
+# new id differs), which invalidates the entry immediately on a settings change.
+# The 30s TTL is a backstop for any config path that doesn't route through
+# reload_config().
+_CAPS_CACHE = TTLCache(ttl=30.0, max_size=8, name='capabilities')
+
+# The built-in system prompt is a pure function of (project, tools) — cwd,
+# model, and the date line are fixed/omitted — so it's safe to cache on that
+# 2-bool key. It never depends on server config, so a longer TTL is fine.
+_PROMPT_CACHE = TTLCache(ttl=300.0, max_size=8, name='capabilities_prompt')
+
+
+def _caps_cache_key() -> int:
+    try:
+        import lib as _lib  # type: ignore
+        return id(_lib._SAVED_CONFIG)
+    except Exception as e:
+        logger.debug('[capabilities] cache-key resolve failed: %s', e)
+        return 0
+
 
 def _models_summary() -> list[dict]:
-    """Describe each chat-capable model the dispatcher can route to."""
+    """Describe each configured model.
+
+    Reads the persisted server config (``lib._SAVED_CONFIG['providers']``) —
+    i.e. the providers/models saved via the Settings UI or auto-discovered
+    and persisted. Runtime-only dispatcher slots that were never written back
+    to config do not appear here.
+    """
     out: list[dict] = []
     seen: set[str] = set()
     try:
@@ -61,6 +93,8 @@ def _models_summary() -> list[dict]:
                 'vision': 'vision' in caps,
                 'embedding': 'embedding' in caps,
                 'image_gen': 'image_gen' in caps,
+                'transcription': 'transcription' in caps,
+                'audio_chat': 'audio_chat' in caps,
                 'cheap': 'cheap' in caps,
                 'aliases': list(m.get('aliases') or []),
                 'rpm': m.get('rpm'),
@@ -111,8 +145,6 @@ def _agents_summary() -> list[dict]:
          'scope': 'agents:paper'},
         {'id': 'translate', 'path': '/api/v1/agents/translate',
          'scope': 'agents:translate'},
-        {'id': 'swarm.run', 'path': '/api/v1/agents/swarm/run',
-         'scope': 'agents:swarm'},
         {'id': 'memory.search', 'path': '/api/v1/agents/memory/search',
          'scope': 'agents:memory'},
         {'id': 'browser.fetch', 'path': '/api/v1/agents/browser/fetch',
@@ -123,7 +155,95 @@ def _agents_summary() -> list[dict]:
          'scope': 'agents:search'},
         {'id': 'search.async', 'path': '/api/v1/agents/search/async',
          'scope': 'agents:search'},
+        # NOTE: swarm has NO /agents/swarm/run route — a swarm is launched
+        # in-band via `config.swarmEnabled=true` on /chat/completions; only
+        # status/abort are exposed (see routes/api_v1/agents.py swarm block).
+        {'id': 'agent.run', 'path': '/api/v1/agent/run',
+         'scope': 'agents:run'},
+        {'id': 'audio.transcribe', 'path': '/api/v1/audio/transcribe',
+         'scope': 'chat'},
+        {'id': 'audio.capabilities', 'path': '/api/v1/audio/capabilities',
+         'scope': 'chat'},
+        {'id': 'scheduler', 'path': '/api/v1/scheduler/tasks',
+         'scope': 'agents:scheduler'},
+        {'id': 'mcp', 'path': '/api/v1/mcp/servers',
+         'scope': 'agents:mcp'},
     ]
+
+
+def _extensibility_summary() -> dict:
+    """Advertise how a caller can REGISTER its own tools on this deployment.
+
+    Two mechanisms (see docs/CUSTOM_TOOLS.md + docs/TOOL_PLUGINS.md), both
+    reflected from their canonical sources so this can't drift:
+
+    * **custom_tools** — per-request ``tools=[…]`` on ``/api/v1/agent/run``.
+      The ``custom__`` name contract, the ``client``/``webhook``/``sandbox``
+      execution modes (with each mode's enabled flag — ``sandbox`` reflects
+      ``TOFU_CUSTOM_TOOLS_ALLOW_SANDBOX``), the per-request limits, and the
+      ``POST /api/v1/tasks/{id}/tool_result`` client-handoff callback.
+    * **plugins** — operator-installed ``tofu.tools`` entry-point plugins,
+      listed via ``available_plugins()``, opted into per request via
+      ``config.plugins``.
+    """
+    out: dict = {'custom_tools': {}, 'plugins': {}}
+    try:
+        from lib.tools.tool_env import (
+            CUSTOM_TOOL_PREFIX, _NAME_RE, ToolLimits, _sandbox_allowed,
+        )
+        lim = ToolLimits()
+        sandbox_on = _sandbox_allowed()
+        out['custom_tools'] = {
+            'description': 'Per-request tools the caller brings in the request '
+                           'body; scoped to one task then disposed. Never '
+                           'pollutes the process-global registry.',
+            'submit_via': '/api/v1/agent/run',
+            'request_field': 'tools',
+            'scope': 'agents:run',
+            'name_prefix': CUSTOM_TOOL_PREFIX,
+            'name_pattern': _NAME_RE.pattern,
+            'result_callback': '/api/v1/tasks/{id}/tool_result',
+            'modes': {
+                'client': {
+                    'enabled': True,
+                    'description': 'Zero-trust handoff: server emits a '
+                                   'custom_tool_call event and blocks until '
+                                   'the client POSTs the result back. No '
+                                   'caller code runs on the server.'},
+                'webhook': {
+                    'enabled': True,
+                    'description': 'Server POSTs args to the caller-supplied '
+                                   'URL (SSRF-guarded at mint + call time).'},
+                'sandbox': {
+                    'enabled': bool(sandbox_on),
+                    'requires_env': 'TOFU_CUSTOM_TOOLS_ALLOW_SANDBOX',
+                    'description': 'Server runs a shell command (RCE) — '
+                                   'operator opt-in only; disabled by '
+                                   'default.'},
+            },
+            'limits': {
+                'max_tools': lim.max_tools,
+                'max_total_schema_bytes': lim.max_total_schema_bytes,
+                'per_call_timeout_s': lim.per_call_timeout_s,
+                'max_result_chars': lim.max_result_chars,
+            },
+        }
+    except Exception as e:
+        logger.debug('[capabilities] custom_tools summary failed: %s', e)
+
+    try:
+        from lib.tools.registry import available_plugins
+        out['plugins'] = {
+            'description': 'Operator-installed tofu.tools entry-point plugins. '
+                           'Hidden by default on a shared server; opt in per '
+                           'request.',
+            'available': available_plugins(),
+            'opt_in_field': 'config.plugins',
+            'env_default': 'TOFU_DEFAULT_TOOL_PLUGINS',
+        }
+    except Exception as e:
+        logger.debug('[capabilities] plugins summary failed: %s', e)
+    return out
 
 
 def _config_schema() -> dict:
@@ -148,7 +268,7 @@ def _config_schema() -> dict:
             'maxTokens': {'type': 'integer', 'minimum': 1},
             'temperature': {'type': 'number'},
             'searchMode': {'type': 'string',
-                            'enum': ['off', 'single', 'multi']},
+                            'enum': ['off', 'multi']},
             'fetchEnabled': {'type': 'boolean', 'default': True},
             'projectPath': {'type': 'string'},
             'codeExecEnabled': {'type': 'boolean'},
@@ -233,6 +353,15 @@ def _features() -> dict:
                 feats[f.json_key] = bool(getattr(_lib, f.env_key, f.default))
         except Exception as _pe:
             logger.debug('[capabilities] plugin flags unavailable: %s', _pe)
+        # Voice input (speech-to-text) — advertised as OFF when no
+        # transcription-capable slot is configured, so a foreign frontend
+        # hides the mic affordance rather than offering a feature that 503s.
+        try:
+            from lib.transcription import transcription_available
+            feats['voice_input'] = bool(transcription_available())
+        except Exception as _ve:
+            logger.debug('[capabilities] voice_input probe failed: %s', _ve)
+            feats['voice_input'] = False
         return feats
     except Exception as e:
         logger.debug('[capabilities] features lookup failed: %s', e)
@@ -264,24 +393,22 @@ def _relay_summary() -> dict:
     return out
 
 
-@api_v1_capabilities_bp.route('/api/v1/capabilities', methods=['GET'])
-@api_meta(summary='Capabilities — runtime model/tool/agent registry',
-          description='Public endpoint. Use for client auto-config.',
-          tags=['capabilities'], public=True)
-async def capabilities():
+def _build_capabilities() -> dict:
+    """Assemble the full capabilities payload (uncached)."""
     from lib.api_keys import ALL_SCOPES
     try:
         from lib.version import __version__ as ver
     except ImportError as e:
         logger.debug('[capabilities] lib.version unavailable: %s', e)
         ver = 'unknown'
-    return api_ok({
+    return {
         'tofu_version': ver,
         'api_version': 'v1',
         'relay': _relay_summary(),
         'features': _features(),
         'models': _models_summary(),
         'tools': _tools_summary(),
+        'extensibility': _extensibility_summary(),
         'agents': _agents_summary(),
         'presets': _presets(),
         'backends': _backends(),
@@ -294,7 +421,16 @@ async def capabilities():
             'anthropic_messages': '/v1/messages',
         },
         'push_channel': {'ws': '/api/push'},
-    })
+    }
+
+
+@api_v1_capabilities_bp.route('/api/v1/capabilities', methods=['GET'])
+@api_meta(summary='Capabilities — runtime model/tool/agent registry',
+          description='Public endpoint. Use for client auto-config.',
+          tags=['capabilities'], public=True)
+async def capabilities():
+    payload = _CAPS_CACHE.get_or_compute(_caps_cache_key(), _build_capabilities)
+    return api_ok(payload)
 
 
 @api_v1_capabilities_bp.route('/api/v1/system-prompt/default', methods=['GET'])
@@ -328,9 +464,9 @@ async def system_prompt_default():
                 'write_file', 'apply_diff', 'insert_content',
                 'find_files', 'grep_search', 'run_command',
             }
-    try:
+    def _build():
         from lib.tasks_pkg import system_prompt_cc
-        text = system_prompt_cc.build_static_prompt(
+        return system_prompt_cc.build_static_prompt(
             cwd='', is_git=False, model='',
             has_real_tools=tools,
             is_code_context=project,
@@ -340,6 +476,8 @@ async def system_prompt_default():
             # would freeze a stale date if the user saves it in replace mode.
             include_date=False,
         )
+    try:
+        text = _PROMPT_CACHE.get_or_compute(('default', project, tools), _build)
     except Exception as e:
         logger.error('[capabilities] build default system prompt failed: %s',
                      e, exc_info=True)
@@ -376,15 +514,17 @@ async def system_prompt_blocks():
                 'write_file', 'apply_diff', 'insert_content',
                 'find_files', 'grep_search', 'run_command',
             }
-    try:
+    def _build():
         from lib.tasks_pkg import system_prompt_cc
-        blocks = system_prompt_cc.build_static_blocks(
+        return system_prompt_cc.build_static_blocks(
             cwd='', is_git=False, model='',
             has_real_tools=tools,
             is_code_context=project,
             tool_names=_preview_tool_names,
             include_date=False,  # date is dynamic; don't expose in editor
         )
+    try:
+        blocks = _PROMPT_CACHE.get_or_compute(('blocks', project, tools), _build)
     except Exception as e:
         logger.error('[capabilities] build system prompt blocks failed: %s',
                      e, exc_info=True)

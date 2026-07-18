@@ -56,14 +56,29 @@ def test_no_unanchored_exclude_collides_with_nested_pkg():
 
     If it does, that nested package would be silently stripped on export
     (this is exactly how lib/paper was lost). The fix is to add the name
-    to _TOP_LEVEL_ONLY_EXCLUDE_DIRS.
+    to _TOP_LEVEL_ONLY_EXCLUDE_DIRS — or, if the strip is deliberate, to
+    _INTENTIONAL_NESTED_STRIP with a documented reason.
     """
     from export import (PERSONAL_EXCLUDE_DIRS, ALWAYS_EXCLUDE_DIRS,
                         OPENSOURCE_EXTRA_EXCLUDE_DIRS,
                         _TOP_LEVEL_ONLY_EXCLUDE_DIRS)
 
-    unanchored = (PERSONAL_EXCLUDE_DIRS | ALWAYS_EXCLUDE_DIRS
-                  | OPENSOURCE_EXTRA_EXCLUDE_DIRS) - _TOP_LEVEL_ONLY_EXCLUDE_DIRS
+    # Unanchored exclude names whose collision with a nested tracked dir is
+    # INTENTIONAL — the nested dir IS the strip target and dropping it on
+    # export is correct, so anchoring it top-level-only would defeat its
+    # purpose. Each entry MUST document the nested dir it strips + why. The
+    # guard still fires for any OTHER (accidental) collision.
+    _INTENTIONAL_NESTED_STRIP = {
+        # static/icons/pet/_candidates/ — raw AI-gen asset candidates + proof
+        # strips (multi-MB, review-only). No top-level `_candidates` package
+        # exists to protect; unlike lib/paper this nested dir is NOT a runtime
+        # package, so the unanchored strip is the intended behavior.
+        '_candidates',
+    }
+    unanchored = ((PERSONAL_EXCLUDE_DIRS | ALWAYS_EXCLUDE_DIRS
+                   | OPENSOURCE_EXTRA_EXCLUDE_DIRS)
+                  - _TOP_LEVEL_ONLY_EXCLUDE_DIRS
+                  - _INTENTIONAL_NESTED_STRIP)
     collide = sorted(unanchored & _nested_tracked_dirs())
     assert not collide, (
         'Unanchored export-exclude dir name(s) collide with a nested '

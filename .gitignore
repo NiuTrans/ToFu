@@ -48,6 +48,38 @@ data/
 # ── Personal scratch copy script (not part of the app) ──
 /copy_to_chenxin.sh
 
+# ── Export-stripped / not-part-of-the-public-product (DRIFT-GUARDED) ──
+# These are excluded by export.py (ALWAYS_EXCLUDE_* / OPENSOURCE_EXTRA_EXCLUDE_*)
+# but were committed BEFORE a matching ignore existed. .gitignore is the SECOND
+# defense line (export is the publication gate / first line); the drift-guard
+# tests/test_gitignore_covers_export_excludes.py asserts the two lists stay in
+# sync so this gap cannot silently reopen. Documented keepers stay tracked:
+#   scripts/gen_desktop_icons.py (CI icon gen), export.py, CLAUDE.md,
+#   static/provider_templates/yourprovider.json (functional internal template).
+/benchmarks/
+/promo/
+/propaganda/
+/scripts/*
+!/scripts/gen_desktop_icons.py
+# debug/ = standalone scratch/benchmark scripts (never imported by the app);
+# tracked *.log already ignored above, this covers the .py/.json/.png/.md/.html too.
+/debug/
+# Raw AI-gen asset candidates + proof strips (review-only, multi-MB) under the
+# pet-icon dir. Anchored to that subtree, not a bare _candidates glob.
+static/icons/pet/_candidates/
+# setuptools egg metadata (regenerable build artifact)
+/tofu.egg-info/
+# Per-host helper scripts (hardcoded internal proxy IP / mount paths)
+/setup_bashrc.sh
+/copy_to_dst.sh
+# Internal dev summaries / extension docs (kept in docs/, stripped from opensource)
+docs/BROWSER_ENHANCEMENTS_SUMMARY.md
+docs/README_BROWSER_ENHANCEMENTS.md
+docs/README_EXTENSION.md
+# Personal scratch answer PDFs (export ALWAYS_EXCLUDE_FILES; never source)
+docs/解答260505.pdf
+docs/解答260505_v2.pdf
+
 # ── Eval / bench workdirs (large, causes FUSE timeouts) ──
 # Glob covers every eval/bench harness output dir (swebench_workdir/,
 # swebench_glm_ab_workdir/, swebench_pilot_workdir/, abtest_workdir/, …).
@@ -68,6 +100,11 @@ data/
 /outputs/
 /similar_fix.py/
 /pylint-*/
+# Root-level .project_sessions/ — a CWD-pollution variant of the per-project
+# undo store (the real one is lib/.project_sessions/, registry-derived below).
+# A harness wrote it relative to repo root; never track. Root-anchored so it
+# does NOT shadow the registry-managed lib/.project_sessions/ entry.
+/.project_sessions/
 
 # ── Test coverage ──
 .coverage
@@ -80,9 +117,23 @@ debug/ask.txt
 
 # ── Logs ──
 logs/
+# Stray root-level run logs (e.g. server_15000.log written by restart_<port>.sh
+# into CWD instead of logs/). Runtime-only, never source.
+*.log
+server_*.log
 
 # ── JS bundle (auto-generated at startup) ──
 static/js/bundle-*.js
+# Deferred feature bundle — also a content-hashed runtime artifact. Anchor to
+# the 8-hex-hash pattern, NEVER a bare `feature-*` glob: that would also match
+# the tracked SOURCE `feature-loader.js` (the lazy loader), the exact class of
+# bug _clean_old_bundles hit (see bundle-cleaner-must-not-delete-source).
+static/js/feature-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].js
+# Bundle build-lock + private temp files (leading dot; written by
+# lib/js_bundler during the atomic temp→rename publish). Runtime-only.
+static/js/.bundle-build.lock
+static/js/.bundle-*.js
+static/js/.feature-*.js
 
 # ── Minified stylesheet (auto-generated at startup by lib/css_bundler) ──
 static/styles-*.css
@@ -111,17 +162,22 @@ node_modules/
 Thumbs.db
 
 # ── Sessions & caches (auto-generated, may contain sensitive context) ──
-**/.project_sessions/
+# lib/.project_sessions/ is the per-project undo/redo store (modifications.json
+# pre-image blobs). It is REGISTRY-DERIVED — see lib/runtime_layout.INSTALL_STATE
+# / gitignore_lines(); do not hand-maintain a parallel entry. The drift-guard
+# test_gitignore_covers_registry enforces this line matches the registry.
+lib/.project_sessions/
 **/.project_indexes/
 .chatui/
 
 # ── File-history store (per-project copy-backup undo data, auto-created
 #    by lib/file_history; round-by-round GC churns it, so it must never be
-#    version-tracked — see the 2026-06 "satus full of D" incident). Scope the
-#    ignore to file-history/ ONLY: .tofu/skills/ is real project content and
-#    stays tracked (the negation below is defensive against a broad re-add). ──
+#    version-tracked — see the 2026-06 "satus full of D" incident). This
+#    file-history/ line is kept for documentation, but the trailing .tofu* glob
+#    (bottom of file) is what actually ignores the ENTIRE .tofu/ tree — INCLUDING
+#    .tofu/skills/, which is the per-project memory/skill DATA dir (export strips
+#    all of .tofu, like data/). It is NOT source and must not be tracked. ──
 .tofu/file-history/
-!.tofu/skills/
 
 # ── Safe-delete trash (files moved aside by the delete mechanism instead of
 #    being unlinked; purge manually to reclaim disk). Never track. ──
@@ -131,10 +187,15 @@ Thumbs.db
 docs/SECURITY_AUDIT_REPORT.md
 docs/RATE_LIMITING_DOS_AUDIT_REPORT.md
 
-# ── Uploads ──
+# ── Uploads (runtime data, not source — export strips the whole dir like data/) ──
+# Ignore everything under uploads/ EXCEPT the .gitkeep placeholder that keeps the
+# dir present in a fresh checkout. A broad uploads/* + negation closes the
+# stray-at-root gap (e.g. uploads/cat_dog_manor.png) that the old per-subdir
+# rules (uploads/images/* , uploads/pptx/ , uploads/papers/) let through.
+uploads/*
+!uploads/images/
 uploads/images/*
 !uploads/images/.gitkeep
-uploads/pptx/
 
 # ── Model-generated posters (output of generate_image into project) ──
 static/posters/

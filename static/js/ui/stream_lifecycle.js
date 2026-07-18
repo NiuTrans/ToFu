@@ -19,10 +19,34 @@
 function showStreamingUIForConv(convId) {
   const conv = conversations.find((c) => c.id === convId);
   if (!conv || conv.messages.length === 0) return;
+  const inner = document.getElementById("chatInner");
+  const container = document.getElementById("chatContainer");
+  /* ★ SCROLL FIX (parked-reader yank + flash): this function does a full
+   *   `inner.innerHTML` wipe + rebuild of the whole message list and used to
+   *   ALWAYS end in `_forceScrollToBottom`. During a live turn ANY renderChat()
+   *   funnels here via Guard 1c (chat_render.js) — e.g. a cold-round
+   *   `tool_compacted` fires `renderChat(conv,false)` once per tool round —
+   *   so a reader scrolled UP to read history was repeatedly yanked to the
+   *   bottom while the whole list flashed (the reported "keeps forcing me back
+   *   to the bottom + the bottom block re-renders several times"). Mirror the
+   *   fix already in renderChat's full-render path and `_bgRefreshChat`:
+   *   capture the reader's viewport anchor from the OLD DOM when they are parked
+   *   UP on the SAME conversation, then re-pin it after the rebuild instead of
+   *   force-scrolling. A genuine conversation SWITCH (DOM still shows a
+   *   different conv → `_sameConvDom` false), a first load, or a near-bottom
+   *   reader still lands at the bottom via `_forceScrollToBottom`. The check
+   *   MUST read `_lazyConvId` BEFORE the reassignment below. */
+  const _sameConvDom = _lazyConvId === convId
+    && inner && !!inner.querySelector('[id^="msg-"]');
+  const _readerNearBottom = (typeof isNearBottom === 'function')
+    ? isNearBottom(120) : true;
+  const _preSwapAnchor = (_sameConvDom && !_readerNearBottom
+      && typeof _captureScrollAnchor === 'function')
+    ? _captureScrollAnchor(container, inner)
+    : null;
   _destroyLazyObserver();
   _lazyConvId = convId;
   _lastRenderedFingerprint = "";
-  const inner = document.getElementById("chatInner");
 
   /* ★ FIX (Root Cause 3): Only drop the trailing message when it actually
    * owns the streaming bubble (in-progress assistant, or in-progress critic).
@@ -33,7 +57,17 @@ function showStreamingUIForConv(convId) {
   const _lastIsStreamingBubble =
     !!_last && (
       (_last.role === "assistant" && !_last.done) ||
-      (_last._isEndpointReview && !_last.done)
+      (_last._isEndpointReview && !_last.done) ||
+      /* ★ Autopilot VU tail: the streaming bubble is owned by a role=user
+       *   VU placeholder (`_isVirtualUser` + `_streamingVu`), NOT an assistant.
+       *   Without this arm a mid-stream renderChat (funneled here by Guard 1c
+       *   once `#streaming-msg` exists) rebuilds the list STATICALLY, painting
+       *   the frozen `vu-composing` "Autopilot starting…" pulse and never
+       *   recreating the live `#streaming-msg` — so every later
+       *   `autopilot_vu_event` frame hits `_twFlush` with no `#streaming-body`
+       *   and is dropped. The bubble then sits frozen on the warm-up label
+       *   while the elapsed timer keeps ticking. */
+      (_last._isVirtualUser && _last._streamingVu)
     );
   const renderMsgs = _lastIsStreamingBubble
     ? conv.messages.slice(0, -1)
@@ -41,6 +75,9 @@ function showStreamingUIForConv(convId) {
   const total = renderMsgs.length;
   const startIdx = Math.max(0, total - _INITIAL_RENDER);
   _lazyRenderedFrom = startIdx;
+  /* Tail is uncapped after this full rebuild (streaming bubble owns the very
+   * bottom); reset the upper window bound. */
+  _lazyRenderedTo = total;
 
   let html = "";
   if (startIdx > 0) {
@@ -62,8 +99,16 @@ function showStreamingUIForConv(convId) {
     const _smMsgId = lastMsg._msgId || null;
     if (lastMsg.role === "assistant" && lastMsg._isEndpointPlanner) {
       html += _streamingBubbleHTML('planner', 'Planning…', _smTime, _smMsgId);
+    } else if (lastMsg.role === "assistant" && lastMsg._swarmAutoContinue) {
+      html += _streamingBubbleHTML('swarm', 'Continuing…', _smTime, _smMsgId);
     } else if (lastMsg.role === "assistant") {
       html += _streamingBubbleHTML('worker', 'Streaming…', _smTime, _smMsgId);
+    } else if (lastMsg._isVirtualUser) {
+      /* Autopilot VU (role=user, machine-authored) — stream in the USER lane
+       * through the SAME substrate as the worker so its reply + tool rounds
+       * render identically. `null` status → the `autopilot.warming` default,
+       * which the first forwarded phase / delta immediately replaces. */
+      html += _streamingBubbleHTML('autopilot', null, _smTime, _smMsgId);
     } else if (lastMsg._isEndpointReview) {
       html += _streamingBubbleHTML('critic', 'Reviewing…', _smTime, _smMsgId);
     }
@@ -74,7 +119,20 @@ function showStreamingUIForConv(convId) {
     if (sentinel) _lazyObserver.observe(sentinel);
   }
   requestAnimationFrame(() => buildTurnNav(conv));
-  _forceScrollToBottom(null, true);
+  /* ★ SCROLL FIX (see the _preSwapAnchor capture at the top): when the reader
+   *   was parked UP on this same conversation, re-pin their viewport instead of
+   *   yanking to the bottom. The innerHTML wipe above reset scrollTop→0, so
+   *   under the cv-off guard (real heights, not the content-visibility:auto
+   *   estimate) re-pin the anchor element to its prior offset. Otherwise
+   *   (switch / first load / near-bottom reader) land at the bottom as before. */
+  if (_preSwapAnchor && container && typeof _restoreScrollAnchor === 'function') {
+    inner.classList.add('cv-off');
+    void inner.scrollHeight;  // force real heights before re-pinning
+    _restoreScrollAnchor(container, _preSwapAnchor);
+    inner.classList.remove('cv-off');
+  } else {
+    _forceScrollToBottom(null, true);
+  }
   updateSendButton();
   if (_lastIsStreamingBubble) {
     const buf = streamBufs.get(convId);
@@ -99,7 +157,7 @@ function showStreamingUIForConv(convId) {
      *   translated yet or this isn't the streaming bubble. */
     if (lastMsg._translatePartial && lastMsg._msgId
         && typeof _renderStreamingTranslatePreview === 'function') {
-      _renderStreamingTranslatePreview(convId, lastMsg._msgId, lastMsg._translatePartial);
+      _renderStreamingTranslatePreview(convId, lastMsg._msgId, lastMsg._translatePartial, lastMsg._translatePartialByRound);
     }
     /* ★ FIX: After page refresh, SSE data may arrive AFTER this initial render.
      *   Schedule a deferred re-render (300ms) so that any SSE state event that
@@ -165,6 +223,43 @@ function finishStream(convId) {
         convTitle: conv.title,
         messageCount: conv.messages.length,
       });
+    }
+    /* ★ Empty-bubble root fix ③: IN-SESSION ghost-tail self-heal. Apply the
+     *   SAME verdict the backend GET/startup reconcile applies
+     *   (lib/conversations/reconcile.py::classify_ghost_tail) to the trailing
+     *   assistant at turn end, so an empty/thinking-only husk is settled NOW —
+     *   not left for the next warm reopen. This closes the residual window
+     *   where a bare empty tail escaped fix ② (e.g. a swallowed done → poll
+     *   fallback → finishStream with no `done` event to splice on). The verdict
+     *   is byte-equivalent to the backend (pinned by the equivalence test):
+     *     • 'delete'    → a bare empty husk (no content/thinking/finishReason/
+     *                     usage/error/real-tool-round, not a special turn) →
+     *                     splice it out so the in-memory list matches the
+     *                     backend-reconciled DB (which drops it too);
+     *     • 'interrupt' → a thinking-only husk → stamp finishReason='interrupted'
+     *                     in place (preserve the reasoning), NOT delete;
+     *     • null        → settled / special / keep — untouched. */
+    if (lastMsg && lastMsg.role === 'assistant'
+        && typeof _classifyGhostTailJS === 'function'
+        && !_streamBoundToMsg(lastMsg)) {
+      const _verdict = _classifyGhostTailJS(lastMsg);
+      if (_verdict === 'delete') {
+        conv.messages.pop();
+        if (activeConvId === convId && window.ConvView
+            && typeof window.ConvView.removeMessage === 'function') {
+          window.ConvView.removeMessage(convId, lastMsg._msgId || conv.messages.length);
+        }
+        if (activeConvId === convId) {
+          const _sm = document.getElementById('streaming-msg');
+          if (_sm) { try { _sm.remove(); } catch (e) { /* detached */ } }
+        }
+        console.info(`[finishStream] 🧹 Ghost-tail self-heal (delete) — conv=${convId.slice(0,8)} ` +
+          `removed bare empty trailing assistant (matches backend reconcile).`);
+      } else if (_verdict === 'interrupt') {
+        lastMsg.finishReason = 'interrupted';
+        console.info(`[finishStream] 🩹 Ghost-tail self-heal (interrupt) — conv=${convId.slice(0,8)} ` +
+          `stamped finishReason=interrupted on thinking-only trailing assistant.`);
+      }
     }
     /* ★ FIX: Clean up any lingering awaiting_human / submitted rounds.
      *   When the task finishes (normally or via abort/timeout), any HG round
@@ -275,6 +370,19 @@ function finishStream(convId) {
         console.info(`[finishStream] 🤖 Autopilot tail detected — finalizing parent assistant ` +
           `(idx=${conv.messages.indexOf(_fsAutopilotAssistant)}, lastRole=${_fsLast.role}, ` +
           `lastIsVU=${!!_fsLast._isVirtualUser}) for conv=${convId.slice(0,8)}`);
+        /* ★ Stop-during-VU cleanup: if the tail is a STILL-STREAMING VU
+         *   placeholder (user clicked Stop mid-VU, so autopilot_vu_cancel was
+         *   never read off the aborted stream), splice it out LOCALLY before
+         *   finalizing the parent. Without this the ghost _streamingVu bubble
+         *   survives to the next render. The helper preserves
+         *   conv._apPendingBaton (a conv field, not a message). No-op when the
+         *   VU already settled (autopilot_vu_done cleared _streamingVu). */
+        if (_fsLast && _fsLast._isVirtualUser && _fsLast._streamingVu
+            && typeof _removeStreamingVuBubbleIfTail === 'function') {
+          _removeStreamingVuBubbleIfTail(conv, convId);
+          const _smNow = document.getElementById("streaming-msg");
+          if (_smNow) { try { _smNow.remove(); } catch (e) { /* detached */ } }
+        }
         window.ConvView.finalizeStreaming(convId, _fsAutopilotAssistant);
       } else if (sm && conv) {
         /* Normal streaming finish — funnel through ConvView so scroll
@@ -308,72 +416,178 @@ function finishStream(convId) {
     console.error('[finishStream] UI update error (non-fatal, translate will still run):', uiErr.message);
   }
   // ── Auto-translate assistant response ──
-  // ★ Use per-conversation setting, NOT the global (which reflects current viewed conv)
-  const _convAutoTranslate = convAutoTranslate(conv);
-  if (!_convAutoTranslate) {
-    console.info(`[finishStream] autoTranslate is OFF — skipping all ` +
+  // ★ UNIFICATION (2026-07-10): decide with TWO resolvers, not one.
+  //   • _frozen   = convAutoTranslate(conv)          — the send-time value the
+  //                 BACKEND safety net resolves off (settings.autoTranslate).
+  //   • _effective = convAutoTranslateEffective(conv) — the live intent (global
+  //                 toggle wins when ON), the SAME resolver the on-open retro
+  //                 path uses.
+  //   Old behaviour gated ONLY on _frozen, so a conv sent with autoTranslate
+  //   frozen-OFF that the user then toggles ON globally got NOTHING at
+  //   finalize — the translation only appeared when the user switched AWAY and
+  //   the retro (_resumePendingTranslations, effective-gated) path fired. That
+  //   is exactly the reported "nothing happens while focused, a big bar appears
+  //   the moment I switch conversations" bug. Fix: converge the finalize
+  //   decision on the effective resolver too.
+  const _frozen = convAutoTranslate(conv);
+  const _effective = convAutoTranslateEffective(conv);
+  if (!_effective) {
+    console.info(`[finishStream] autoTranslate is OFF (effective) — skipping all ` +
       `translation scheduling for conv=${convId.slice(0,8)} ` +
       `(conv.autoTranslate=${conv?.autoTranslate}, global=${autoTranslate})`);
   }
-  if (_convAutoTranslate && conv) {
-    /* ★ Auto-translate is now driven by the server-side safety net in
-     *   lib/tasks_pkg/manager.py::_maybe_auto_translate_assistant (and the
-     *   endpoint-mode equivalent _trigger_endpoint_auto_translate).  The
-     *   backend fires translation right after persisting assistant content
-     *   to the DB, so kicking off a parallel client-driven task here just
-     *   races the server task — and since /api/translate/start has no
-     *   conv+msgIdx-level dedup, both writes can land and the slower one
-     *   silently clobbers the faster (real) translation.  Skip in normal
-     *   stream-completion; manual click (translateMessage) and page-load
-     *   resume (_resumePendingTranslations) still go through their own
-     *   call sites and are unaffected. */
-    console.info(`[finishStream] Auto-translate handled by backend safety net — ` +
-      `skipping client-side scheduling for conv=${convId.slice(0,8)}`);
-    /* ★ Reliability: the backend delivers the translation to the live view
-     *   via a single fire-and-forget push frame, which the hub drops when no
-     *   client is subscribed at emit time. If BOTH the 'running' and 'done'
-     *   frames are lost, the active view shows the bare original until a
-     *   conversation switch re-reads the DB. Arm the DB-polling watchdog on
-     *   the trailing assistant so the translation surfaces live regardless of
-     *   push delivery. The watchdog short-circuits cheaply once
-     *   translatedContent / a client task is present, so it's a no-op when
-     *   the push path works. */
-    if (activeConvId === convId && typeof _armAutoTranslateWatchdog === 'function') {
-      for (let i = conv.messages.length - 1; i >= 0; i--) {
-        const m = conv.messages[i];
-        if (m.role !== 'assistant' || m._isVirtualUser) continue;
-        if (!m.content) break;
-        if (m.translatedContent || m._translateDone === true) break;
-        if (m._igResult || m._isImageGen || m._igResults) break;
-        _armAutoTranslateWatchdog(convId, i, m);
-        break;
+  if (_effective && conv) {
+    /* Resolve the trailing translatable assistant message once (shared by both
+     * branches below). Walk back past a trailing VU / image-gen row. */
+    let _atIdx = -1, _atMsg = null;
+    for (let i = conv.messages.length - 1; i >= 0; i--) {
+      const m = conv.messages[i];
+      if (m.role !== 'assistant' || m._isVirtualUser) continue;
+      if (!m.content) break;
+      if (m.translatedContent || m._translateDone === true) break;
+      if (m._igResult || m._isImageGen || m._igResults) break;
+      _atIdx = i; _atMsg = m;
+      break;
+    }
+
+    if (_frozen) {
+      /* ★ Backend-owned path (frozen-ON): translation is driven by the
+       *   server-side safety net in
+       *   lib/tasks_pkg/manager.py::_maybe_auto_translate_assistant (which
+       *   resolves off the SAME frozen settings.autoTranslate). Kicking off a
+       *   parallel client task here would race it (the slower clobbering the
+       *   faster). So we only ARM the DB-polling watchdog so a dropped push
+       *   frame still surfaces live without a conversation switch — it
+       *   short-circuits cheaply once translatedContent / a client task is
+       *   present, so it's a no-op when the push path works. */
+      console.info(`[finishStream] Auto-translate handled by backend safety net — ` +
+        `skipping client-side scheduling for conv=${convId.slice(0,8)}`);
+      if (activeConvId === convId && _atMsg
+          && typeof _armAutoTranslateWatchdog === 'function') {
+        _armAutoTranslateWatchdog(convId, _atIdx, _atMsg);
       }
+    } else if (_atMsg && typeof _startAutoTranslateForMsg === 'function') {
+      /* ★ Effective-ON but frozen-OFF (the reported gap): the BACKEND will NOT
+       *   translate (it resolves off the frozen-OFF settings.autoTranslate), so
+       *   nothing happens unless the user switches away and the retro path
+       *   fires. Schedule the client-side unified pipeline NOW so it translates
+       *   at finalize, in place, exactly like a frozen-ON conv. The pipeline's
+       *   translateClaim + server-side claim_inflight guards prevent any
+       *   double-fire against a manual click or a later retro pass. */
+      console.info(`[finishStream] Auto-translate effective-ON but frozen-OFF — ` +
+        `scheduling client-side pipeline for conv=${convId.slice(0,8)} msg=${_atIdx}`);
+      _startAutoTranslateForMsg(conv, convId, _atIdx, _atMsg);
     }
   }
-  // ── ★ Autopilot in-band follow-up: when the done event carried
-  //    autopilotNextTaskId + autopilotVuMessage, the backend already
-  //    appended the synthetic user message to conv DB and spawned the
-  //    next task before closing this SSE stream.  Attach to it directly
-  //    instead of going through the queue-poll path.  This eliminates
-  //    the race where the VU LLM call took longer than the polling
-  //    retry budget (~15s) and the synthetic user msg + follow-up task
-  //    stayed invisible until manual page refresh.
+  // ── ★ Terminal continuation (autopilot baton + server-queue drain) ──
+  //   Extracted into _runTerminalContinuation so EVERY terminal path — the
+  //   normal finishStream, AND the self-heal reclaim in
+  //   _healStuckPlaceholder — routes the follow-up/queue dispatch through
+  //   ONE server-authoritative funnel. Before this, a self-heal that cleared
+  //   the running predicate (activeTaskId/activeStreams) but skipped
+  //   finishStream would leave a server-spawned autopilot follow-up or queued
+  //   message invisible until a manual refresh (the "autonomous flow must
+  //   self-heal" invariant, violated). See _runTerminalContinuation.
+  _runTerminalContinuation(convId);
+}
+
+/**
+ * The terminal continuation funnel: after a conversation's running predicate
+ * has been cleared (task done / aborted / reclaimed), resolve and attach any
+ * follow-up work the backend may already have spawned — an autopilot next
+ * turn or an auto-dispatched queued message.
+ *
+ * SERVER-AUTHORITATIVE by design (the root-cause requirement): the inline
+ * `_apPendingBaton` is only a FAST-PATH optimisation available when a `done`
+ * event actually arrived and stamped it. On a swallowed-done self-heal the
+ * baton was NEVER stamped, so we MUST fall through to `_checkForQueuedTask`,
+ * which probes `/api/chat/active` — the authority — and discovers the
+ * follow-up/queued task the backend spawned regardless of whether any inline
+ * baton survived. This is the ONLY way the empty-ghost / phantom-carrier case
+ * (the task produced nothing, but a queued message or autopilot follow-up is
+ * waiting behind it) self-heals without a manual refresh.
+ *
+ * MUST be called by every terminal path (finishStream, self-heal reclaim) so
+ * the baton + queue-drain can never be dropped by one path diverging.
+ *
+ * @param {string} convId
+ */
+function _runTerminalContinuation(convId) {
+  const conv = conversations.find((c) => c.id === convId);
+  // ── ★ Supersede-index reducer (epic pt_8dc030176bad450b, build-order step 2)
+  //    THE FUTURE PRIMARY PATH — a no-op TODAY (guarded so it cannot regress).
+  //
+  //    Target mechanism (design §4): an autopilot chain is a plain sequence of
+  //    independent tasks (parent → VU → follow-up), each registered under the
+  //    REAL convId. After ANY turn's done, if the conv's server-authoritative
+  //    latest live task is a DIFFERENT pending/running task, attach to it — the
+  //    SAME signal on SSE, poll, and cold reload, so no hand-carried baton is
+  //    needed. This single rule (attach-to-newer-live-task) replaces the whole
+  //    baton on cutover.
+  //
+  //    WHY IT IS A NO-OP TODAY: the field `conv._latestLiveTaskId` is only
+  //    populated by the cutover backend (which stops the VU's `convId=''`
+  //    opt-out and advances `_record_latest_task` to the VU BEFORE emitting the
+  //    parent done — the HB-1 happens-before, design §4.1). Until then the VU
+  //    is invisible to the conv→latest-task index, this field is absent, and
+  //    the block short-circuits, leaving the existing baton fast-path below
+  //    fully in charge. Shipping it now is safe and lets the cutover be a pure
+  //    backend change.
+  //
+  //    IDEMPOTENT: we only attach when the target differs from the task we are
+  //    already on (activeTaskId / an active stream), so a done observed on BOTH
+  //    sse and a poll-fallback cannot double-attach (design §5, hazard 2).
+  const _liveTaskId = conv && conv._latestLiveTaskId;
+  if (_liveTaskId && conv
+      && _liveTaskId !== conv.activeTaskId
+      && !activeStreams.has(convId)
+      && typeof connectToTask === 'function') {
+    console.info(
+      `%c[Autopilot] ▶ Supersede-index attach: conv=${convId.slice(0,8)} ` +
+      `latestLiveTask=${_liveTaskId.slice(0,8)} (index-driven, no baton)`,
+      'color:#a78bfa;font-weight:bold'
+    );
+    connectToTask(convId, _liveTaskId);
+    return;
+  }
+  // ── ★ Autopilot in-band follow-up (FAST PATH): when the done/poll event
+  //    carried autopilotNextTaskId + autopilotVuMessage, the backend already
+  //    appended the synthetic user message to conv DB and spawned the next
+  //    task.  Attach to it directly instead of going through the queue-poll
+  //    path.  This eliminates the race where the VU LLM call took longer than
+  //    the polling retry budget (~15s) and the synthetic user msg + follow-up
+  //    task stayed invisible until manual page refresh.
   /* Locate the autopilot carrier by flag, not by tail position — the
    * carrier is whichever message the SSE done handler stamped, which
    * may have been moved off the tail by Phase-2 reconciliation. */
   const _apCarrier = conv ? _findAutopilotPendingCarrier(conv) : null;
-  if (_apCarrier && typeof _attachAutopilotFollowup === 'function') {
+  if (_apCarrier) {
     const _autopilotPending = _apCarrier.msg._autopilotPending;
-    delete _apCarrier.msg._autopilotPending;
-    _attachAutopilotFollowup(convId, _autopilotPending);
-    return;
+    /* Consume BOTH the conv-level baton and any positional stamp so a
+     * later finishStream doesn't re-dispatch the same follow-up. */
+    if (conv) delete conv._apPendingBaton;
+    if (!_apCarrier._convLevel) delete _apCarrier.msg._autopilotPending;
+    if (typeof _attachAutopilotFollowup === 'function') {
+      _attachAutopilotFollowup(convId, _autopilotPending);
+      return;
+    }
+    /* \u2605 Self-heal: the attach fn isn't loaded (bundle-timing miss).
+     *   Do NOT silently drop the baton \u2014 the backend already spawned the
+     *   follow-up task, so fall through to the queue-poll path below
+     *   (/api/chat/active) which will discover and attach to it. */
+    console.warn(
+      `[Autopilot] _attachAutopilotFollowup unavailable \u2014 falling back to ` +
+      `queue-poll for follow-up task=${(_autopilotPending && _autopilotPending.nextTaskId || '').slice(0,8)}`
+    );
   }
 
-  // ── ★ Server-side queue: always check for auto-dispatched next task ──
-  // The backend's persist_task_result → _dispatch_queued_message checks the
-  // message_queue table and auto-dispatches the next message. We poll for
-  // the new task to connect to its SSE stream. No frontend gate — the
-  // backend is the single source of truth for queue state.
+  // ── ★ Server-side queue (AUTHORITY): always check for an auto-dispatched
+  // next task.  The backend's persist_task_result → _dispatch_queued_message
+  // checks the message_queue table and auto-dispatches the next message; it
+  // also spawns the autopilot follow-up task even when no inline baton
+  // reached us (swallowed done).  _checkForQueuedTask probes /api/chat/active
+  // and attaches to whatever is running — no frontend gate, the backend is the
+  // single source of truth for queue/follow-up state.
   //
   // ★ Optimistic UI (when queue has items): insert a placeholder streaming
   //   bubble immediately so the user has visual feedback that their queued
@@ -396,12 +610,13 @@ function finishStream(convId) {
         if (isNearBottom(80)) scrollToBottom();
       }
     } catch (e) {
-      console.warn('[finishStream] queued-dispatch placeholder insert failed:', e);
+      console.warn('[_runTerminalContinuation] queued-dispatch placeholder insert failed:', e);
     }
   }
   const _queuedCheckDelay = _hasQueued ? 0 : 500;
   setTimeout(() => _checkForQueuedTask(convId), _queuedCheckDelay);
 }
+if (typeof window !== 'undefined') window._runTerminalContinuation = _runTerminalContinuation;
 
 /**
  * Re-trigger EN→CN translation for any awaiting_human rounds that haven't
@@ -543,7 +758,7 @@ async function _autoTranslateHumanGuidance(convId, roundNum, question, responseT
 async function _startAutoTranslateForMsg(conv, convId, idx, msg) {
   return _runTranslationPipeline(conv, idx, msg, {
     sourceLang: 'English',
-    targetLang: 'Chinese',
+    targetLang: (typeof _uiTranslateTarget === 'function') ? _uiTranslateTarget() : 'Chinese',
     field: 'translatedContent',
     mode: 'auto',
   });

@@ -80,12 +80,17 @@ from lib.paper import (  # noqa: F401  — back-compat re-exports
     _REPORT_PROMPT_ZH,
     _REPORT_TASK_TTL,
     _REPORT_TOOLS,
+    build_rebuttal_prompt,
+    build_rebuttal_tool_instruction,
     build_review_prompt,
     build_review_tool_instruction,
     date_anchor_clause,
     injection_notice,
+    is_rebuttal_lang,
+    is_review_family,
     is_review_lang,
     list_venues,
+    make_review_lang,
     parse_report_lang,
     sanitize_paper_text,
     wrap_untrusted,
@@ -120,6 +125,14 @@ from lib.paper import (  # noqa: F401  — back-compat re-exports
     _report_dedup_index,
     fetch_arxiv_title,
     search_arxiv,
+    recommend_papers,
+    _new_recommend_task,
+    _append_recommend_event,
+    _cleanup_stale_recommend_tasks,
+    _recommend_key,
+    _recommend_latest_for,
+    _recommend_runtime,
+    _run_recommend_task,
     _report_dedup_lock,
     _report_index_get,
     _report_index_register,
@@ -165,6 +178,91 @@ def _parse_report_meta(row):
         return None
 
 
+
+async def _append_cached_insight(body, phash, lang):
+    """Merge the sibling persisted ``insight:<ui>`` row into a cached report body.
+
+    Read-path only — NEVER triggers a new insight generation. When a plain
+    report is served from the DB cache, look up the separately-persisted insight
+    section (key ``insight:<ui_lang>``) and append its markdown so a reopened
+    paper shows the insight the reader generated earlier, instead of it silently
+    vanishing until a forced regenerate.
+
+    Guards (so this is byte-identical to today for papers without an insight):
+      * skips Review Mode entirely (insight is only produced for plain reports);
+      * no-op when no insight row exists / it is empty;
+      * never double-appends if ``body`` already contains the section (a cache
+        row that was persisted with the insight baked in, or a re-entry).
+    """
+    if is_review_lang(lang):
+        return body
+    parsed = parse_report_lang(lang)
+    ui_lang = parsed['ui_lang']
+    try:
+        from lib.paper.insight_engine import insight_lang_key
+        ins_row = await async_fetchone(
+            "SELECT report FROM paper_reports WHERE paper_hash = ? AND lang = ?",
+            (phash, insight_lang_key(ui_lang)), domain=DOMAIN_CHAT,
+        )
+    except Exception as e:
+        logger.warning('[Paper:Report] Cached-insight lookup failed hash=%s: %s', phash, e)
+        return body
+    if not ins_row or not ins_row['report']:
+        return body
+    section = ins_row['report'].strip()
+    if not section:
+        return body
+    # Idempotency: the insight section header is a stable marker. If the body
+    # already carries it (baked-in cache row / prior append), do not duplicate.
+    marker = '## 💡'
+    header_line = section.splitlines()[0].strip() if section else ''
+    if (header_line and header_line in body) or (marker in body and marker in section):
+        return body
+    logger.info('[Paper:Report] Merged cached insight into reopened report — '
+                'hash=%s key=%s (+%d chars)', phash, insight_lang_key(ui_lang), len(section))
+    return body.rstrip() + '\n\n' + section + '\n'
+
+
+async def _merge_cached_termfill(body, meta, phash, lang):
+    """Merge the sibling persisted ``termfill:<ui>`` addendum into a reopened
+    report, and — since the addendum was only persisted after a re-audit proved
+    it closes the gaps — downgrade the meta's terminology warning card.
+
+    Read-path only; never regenerates. Returns ``(body, meta)``. Byte-identical
+    to today for papers without a backfill row: skips Review Mode, no-ops when no
+    row exists, and never double-appends (idempotent on the addendum header).
+    """
+    if is_review_lang(lang):
+        return body, meta
+    parsed = parse_report_lang(lang)
+    ui_lang = parsed['ui_lang']
+    try:
+        from lib.paper.terminology_backfill import termfill_lang_key
+        tf_row = await async_fetchone(
+            "SELECT report FROM paper_reports WHERE paper_hash = ? AND lang = ?",
+            (phash, termfill_lang_key(ui_lang)), domain=DOMAIN_CHAT,
+        )
+    except Exception as e:
+        logger.warning('[Paper:Report] Cached-termfill lookup failed hash=%s: %s', phash, e)
+        return body, meta
+    if not tf_row or not tf_row['report']:
+        return body, meta
+    addendum = tf_row['report'].strip()
+    if not addendum:
+        return body, meta
+    # The addendum's persistence is proof the glossary is now complete — drop the
+    # stale warning card so a reopened report doesn't contradict its own glossary.
+    if isinstance(meta, dict) and meta.get('terminologyAudit'):
+        meta = dict(meta)
+        meta['terminologyAudit'] = None
+    header_line = addendum.splitlines()[0].strip() if addendum else ''
+    if header_line and header_line in body:
+        return body, meta  # already merged / baked in
+    logger.info('[Paper:Report] Merged cached termfill addendum into reopened report — '
+                'hash=%s key=%s (+%d chars)', phash, termfill_lang_key(ui_lang), len(addendum))
+    return body.rstrip() + '\n\n' + addendum + '\n', meta
+
+
 # ══════════════════════════════════════════════════════
 #  API Endpoints
 # ══════════════════════════════════════════════════════
@@ -198,6 +296,97 @@ async def paper_chat():
 
     return Response(generate(), mimetype='text/event-stream',
                     headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+
+
+
+@api_v1_paper_bp.route('/api/v1/paper/openreview/autofill', methods=['POST'])
+async def openreview_autofill():
+    """Auto-fill the review form on the reviewer's active OpenReview tab.
+
+    The killer feature: one Tofu button → the browser bridge reads the review
+    form on the CURRENT OpenReview page, and the reviewer's already-generated
+    Review-Mode output (review prose + OA + confidence) is typed into the
+    matching fields. It STOPS there — it NEVER clicks any Submit/Post/Confirm
+    control; the human reviews the filled form and submits it themselves.
+
+    Body JSON:
+        paper_hash: str — the paper whose review to fill from.
+        venue: str (optional) — review venue key (default resolved to generic).
+        ui_lang: 'en'|'zh' (optional, default 'en') — which stored review row.
+        client_id: str (optional) — target extension client.
+
+    Returns:
+        JSON report: which fields were filled/skipped, how many submit controls
+        were detected-and-avoided, and an actionable message. 4xx (never a
+        silent success) when the bridge is not connected, the tab is not an
+        OpenReview page, or no review exists yet.
+    """
+    from lib.browser import is_extension_connected, send_browser_command as _send_cmd
+    from lib.browser.queue import _get_active_client
+    from lib.paper import (autofill_openreview_review, extract_review_values,
+                           make_review_lang)
+
+    data = await async_parse_body()
+    phash = (data.get('paper_hash') or '').strip()
+    venue = (data.get('venue') or 'generic').strip().lower()
+    ui_lang = (data.get('ui_lang') or 'en').strip().lower()
+    client_id = (data.get('client_id') or '').strip() or None
+    if not phash:
+        return api_bad_request('No paper_hash provided')
+
+    # Require a connected extension up front — a clear failure, not a hang.
+    if not is_extension_connected(client_id or _get_active_client()):
+        logger.info('[OpenReview] Autofill requested but no extension connected (hash=%s)', phash)
+        return api_error('Browser extension is not connected. Install/enable the Tofu '
+                         'Browser Bridge extension, open the OpenReview page, and retry.',
+                         status=409)
+
+    # Fetch the finished review for this paper+venue+lang.
+    review_key = make_review_lang(venue, ui_lang)
+    review_body = ''
+    try:
+        row = await async_fetchone(
+            "SELECT report FROM paper_reports WHERE paper_hash = ? AND lang = ?",
+            (phash, review_key), domain=DOMAIN_CHAT,
+        )
+        if row and row['report']:
+            review_body = row['report']
+    except Exception as e:
+        logger.warning('[OpenReview] Review lookup failed hash=%s: %s', phash, e)
+    if not review_body.strip():
+        return api_error('No review found for this paper yet. Generate the review first, '
+                         'then auto-fill.', status=409)
+
+    # Try to carry the paper title into the review-title field.
+    title = ''
+    try:
+        title = _lookup_paper_title(phash) or ''
+    except Exception as e:
+        logger.debug('[OpenReview] title lookup failed (non-fatal): %s', e)
+    values = extract_review_values(review_body, title=title)
+
+    logger.info('[OpenReview] Autofill start hash=%s venue=%s ui=%s oa=%s conf=%s client=%s',
+                phash, venue, ui_lang, values.get('overall'), values.get('confidence'),
+                (client_id or 'active')[:12])
+
+    # send_browser_command is synchronous (blocks on the extension round-trip);
+    # run the whole orchestration off the event loop so Hypercorn isn't blocked.
+    import lib.browser as _bridge
+
+    def _run():
+        return autofill_openreview_review(_bridge, values, client_id=client_id, timeout=20)
+
+    try:
+        report = await asyncio.to_thread(_run)
+    except Exception as e:
+        logger.error('[OpenReview] Autofill orchestration failed hash=%s: %s', phash, e, exc_info=True)
+        return api_internal_error('Auto-fill failed unexpectedly — the form was not submitted.')
+
+    logger.info('[OpenReview] Autofill done hash=%s ok=%s stage=%s filled=%d avoided_submit=%d',
+                phash, report.get('ok'), report.get('stage'),
+                len(report.get('filled', [])), report.get('submit_controls_detected', 0))
+    status = 200 if report.get('ok') else 409
+    return jsonify(report), status
 
 
 @api_v1_paper_bp.route('/api/v1/paper/extract-images', methods=['POST'])
@@ -266,7 +455,7 @@ def serve_paper_image(phash, filename):
     if not os.path.isfile(filepath):
         return api_not_found('Image not found')
     mt = 'image/jpeg' if filename.lower().endswith(('.jpg', '.jpeg')) else 'image/png'
-    return send_file(filepath, mimetype=mt)
+    return send_file(filepath, mimetype=mt, conditional=True)
 
 
 @api_v1_paper_bp.route('/api/v1/paper/report/start', methods=['POST'])
@@ -331,8 +520,17 @@ async def start_report_task():
                             phash, lang, len(row['report']))
                 enriched = _inject_images_into_report(
                     row['report'], images, lang=parse_report_lang(lang)['ui_lang'],
-                    appendix=not is_review_lang(lang))
+                    appendix=not is_review_family(lang),
+                    allow_images=not is_review_family(lang))
                 enriched = _ensure_title_heading(enriched, phash)
+                # Merge the sibling persisted insight section so a reopened
+                # paper shows it (read-only; never regenerates).
+                enriched = await _append_cached_insight(enriched, phash, lang)
+                # Merge the gap-closing backfill addendum + downgrade the stale
+                # terminology warning card (read-only; never regenerates).
+                _cached_meta = _parse_report_meta(row)
+                enriched, _cached_meta = await _merge_cached_termfill(
+                    enriched, _cached_meta, phash, lang)
                 # Self-heal a sidebar title still stuck at the bare arXiv:<id>
                 # from the cached report's Paper Card (cached reports never go
                 # through the engine's backfill). Only placeholder rows change.
@@ -348,7 +546,7 @@ async def start_report_task():
                 return jsonify({
                     'ok': True, 'cached': True,
                     'report': enriched, 'paper_hash': phash,
-                    'meta': _parse_report_meta(row),
+                    'meta': _cached_meta,
                     'resolvedTitle': resolved_title,
                 })
         except Exception as e:
@@ -379,6 +577,28 @@ async def start_report_task():
     parsed = parse_report_lang(lang)
     ui_lang = parsed['ui_lang']
     is_review = parsed['kind'] == 'review'
+    is_rebuttal = parsed['kind'] == 'rebuttal'
+    # Both a review and its rebuttal follow-up are text-only decision documents.
+    is_review_kin = is_review or is_rebuttal
+
+    # ── Resolve the insight second-pass personal-context scope ──
+    # The insight pass injects the operator's paper library + memory store as
+    # "reader context" — app-personal state (CLAUDE.md §3.7). This handler is
+    # shared by the interactive route AND the headless /api/v1/agents/paper/report
+    # façade; the façade sets g.paper_report_headless so we stamp the registry's
+    # fail-closed default here (apply_headless_personal_defaults), while the
+    # interactive owner (no flag) keeps personal context on. An explicit body
+    # ``config`` opt-in always wins (setdefault semantics).
+    _report_cfg = dict(data.get('config') if isinstance(data.get('config'), dict) else {})
+    try:
+        from quart import g as _g
+        _is_headless = bool(getattr(_g, 'paper_report_headless', False))
+    except Exception as e:
+        logger.debug('[Paper:Report] headless flag read failed: %s', e)
+        _is_headless = False
+    if _is_headless:
+        from lib.agent_core.personal_scope import apply_headless_personal_defaults
+        apply_headless_personal_defaults(_report_cfg)
 
     max_text = 120000
     truncated_text = paper_text[:max_text]
@@ -397,10 +617,72 @@ async def start_report_task():
         from lib.log import audit_log
         audit_log('paper_injection_detected', hash=phash, is_review=is_review,
                   findings=_inj_findings)
-    manifest = _build_image_manifest(images, lang=ui_lang)
+    # Review Mode + rebuttal are text-only — a peer review / author-response
+    # reply carries no figures, so the image manifest is NOT offered (nothing
+    # to embed).
+    manifest = '' if is_review_kin else _build_image_manifest(images, lang=ui_lang)
     if manifest:
         truncated_text = truncated_text + '\n\n---\n\n' + manifest
         logger.info('[Paper:Report] Injected image manifest — %d images, hash=%s', len(images), phash)
+
+    if is_rebuttal:
+        # Rebuttal follow-up: fetch the reviewer's ORIGINAL review for this
+        # paper+venue (the sibling ``review:<venue>:<uilang>`` row) and the
+        # author's rebuttal text (posted by the user), then run the SAME engine
+        # to produce a follow-up reply + structured score-adjustment decision.
+        author_rebuttal = (data.get('author_rebuttal') or data.get('rebuttal') or '').strip()
+        if not author_rebuttal:
+            logger.warning('[Paper:Rebuttal] Start with no author_rebuttal — hash=%s', phash)
+            return api_bad_request('No author_rebuttal provided')
+        review_key = make_review_lang(parsed['venue'], ui_lang)
+        original_review = ''
+        try:
+            rrow = await async_fetchone(
+                "SELECT report FROM paper_reports WHERE paper_hash = ? AND lang = ?",
+                (phash, review_key), domain=DOMAIN_CHAT,
+            )
+            if rrow and rrow['report']:
+                original_review = rrow['report']
+        except Exception as e:
+            logger.warning('[Paper:Rebuttal] Original-review lookup failed hash=%s: %s', phash, e)
+        if not original_review.strip():
+            logger.warning('[Paper:Rebuttal] No original review for hash=%s venue=%s ui=%s',
+                           phash, parsed['venue'], ui_lang)
+            return api_bad_request('No original review found — generate the review first')
+        # The author rebuttal is UNTRUSTED (in the OpenReview flow it is written
+        # by the paper authors), so sanitize + fence it exactly like the paper
+        # text before splicing. The original review is OUR content (trusted).
+        safe_rebuttal, _reb_inj = sanitize_paper_text(author_rebuttal[:40000])
+        safe_rebuttal = wrap_untrusted(safe_rebuttal)
+        if _reb_inj:
+            from lib.log import audit_log
+            audit_log('paper_injection_detected', hash=phash, is_rebuttal=True,
+                      findings=_reb_inj)
+        # Fill slots. paper_text (already truncated+fenced above) goes LAST so a
+        # brace inside the review/rebuttal is never mistaken for a later slot.
+        prompt = (build_rebuttal_prompt(parsed['venue'], ui_lang)
+                  .replace('{original_review}', original_review)
+                  .replace('{author_rebuttal}', safe_rebuttal)
+                  .replace('{paper_text}', truncated_text))
+        tool_instruction = (date_anchor_clause(ui_lang)
+                            + injection_notice(ui_lang, _inj_findings or _reb_inj)
+                            + build_rebuttal_tool_instruction(ui_lang))
+        messages = [
+            {'role': 'system', 'content': tool_instruction},
+            {'role': 'user', 'content': prompt},
+        ]
+        task_id = f'reb_{int(time.time() * 1000)}_{phash[:8]}_{parsed["venue"]}_{ui_lang}'
+        task = _new_report_task(task_id, phash, lang, model,
+                                client_title=client_title, ui_lang=ui_lang,
+                                config=_report_cfg)
+        logger.info('[Paper:Rebuttal] Starting task %s — venue=%s model=%s ui_lang=%s '
+                    'rebuttal_len=%d hash=%s', task_id, parsed['venue'], model, ui_lang,
+                    len(author_rebuttal), phash)
+        _report_runtime.spawn(task_id, _run_report_task, task, messages, images)
+        return jsonify({
+            'ok': True, 'task_id': task_id, 'paper_hash': phash,
+            'running': True, 'existed': False,
+        })
 
     if is_review:
         # Review Mode: venue-aware peer-review prompt (different output
@@ -418,7 +700,8 @@ async def start_report_task():
         ]
         task_id = f'rvw_{int(time.time() * 1000)}_{phash[:8]}_{parsed["venue"]}_{ui_lang}'
         task = _new_report_task(task_id, phash, lang, model,
-                                client_title=client_title, ui_lang=ui_lang)
+                                client_title=client_title, ui_lang=ui_lang,
+                                config=_report_cfg)
         logger.info('[Paper:Review] Starting task %s — venue=%s model=%s ui_lang=%s '
                     'text_len=%d hash=%s', task_id, parsed['venue'], model, ui_lang,
                     len(paper_text), phash)
@@ -477,7 +760,8 @@ async def start_report_task():
 
     task_id = f'rpt_{int(time.time() * 1000)}_{phash[:8]}_{lang}'
     task = _new_report_task(task_id, phash, lang, model,
-                            client_title=client_title, ui_lang=ui_lang)
+                            client_title=client_title, ui_lang=ui_lang,
+                            config=_report_cfg)
 
     logger.info('[Paper:Report] Starting task %s — model=%s lang=%s text_len=%d hash=%s',
                 task_id, model, lang, len(paper_text), phash)
@@ -652,7 +936,8 @@ async def export_report():
     # headings need the REAL UI language, not the raw cache key.
     _inj_lang = parse_report_lang(lang)['ui_lang']
     body_md = _inject_images_into_report(row['report'], images, lang=_inj_lang,
-                                         appendix=not is_review_lang(lang))
+                                         appendix=not is_review_family(lang),
+                                         allow_images=not is_review_family(lang))
     body_md = _ensure_title_heading(body_md, phash)
 
     # Get the paper title for the export filename / page title
@@ -880,10 +1165,15 @@ async def get_report_cache():
             images = _load_image_manifest(phash)
             _inj_lang = parse_report_lang(lang)['ui_lang']
             enriched = _inject_images_into_report(row['report'], images, lang=_inj_lang,
-                                                  appendix=not is_review_lang(lang))
+                                                  appendix=not is_review_family(lang),
+                                                  allow_images=not is_review_family(lang))
             enriched = _ensure_title_heading(enriched, phash)
+            enriched = await _append_cached_insight(enriched, phash, lang)
+            _cache_meta = _parse_report_meta(row)
+            enriched, _cache_meta = await _merge_cached_termfill(
+                enriched, _cache_meta, phash, lang)
             return api_ok({'report': enriched, 'paper_hash': phash,
-                           'meta': _parse_report_meta(row)})
+                           'meta': _cache_meta})
     except Exception as e:
         logger.warning('[Paper:Report:Cache] Lookup failed: %s', e)
 
@@ -1169,11 +1459,141 @@ async def search_arxiv_route():
 
     try:
         max_results = int(data.get('max_results') or 10)
-    except (ValueError, TypeError):
+    except (ValueError, TypeError) as e:
+        logger.debug('[Paper:arXiv:Search] non-int max_results (%s) — defaulting to 10', e)
         max_results = 10
 
     results = await asyncio.to_thread(search_arxiv, query, max_results)
     return api_ok({'query': query, 'results': results})
+
+
+@api_v1_paper_bp.route('/api/v1/paper/recommend', methods=['POST'])
+async def recommend_papers_route():
+    """Recommend real arXiv papers from a fuzzy free-text description.
+
+    An LLM interprets the description; every surfaced card is verified against
+    real arXiv (see ``lib.paper.recommend_engine``) so a hallucinated title is
+    never returned. When the description encodes a false premise, a grounded
+    ``correction`` block is included.
+
+    Body JSON:
+        description: str — free-text description of the paper(s) recalled
+        max_results: int (optional, default 6, capped at 12)
+    Returns:
+        { ok: true, query: str, llmError: bool,
+          correction: { note: str, paper: <card>|null } | null,
+          results: [ { arxiv_id, title, authors, summary, published,
+                       primary_category, pdf_url, abs_url, why, venue } ] }
+    """
+    data = await async_parse_body()
+    description = (data.get('description') or '').strip()
+    if not description:
+        logger.warning('[Paper:Recommend] Empty description')
+        return api_bad_request('No description provided')
+
+    try:
+        max_results = int(data.get('max_results') or 6)
+    except (ValueError, TypeError) as e:
+        logger.debug('[Paper:Recommend] non-int max_results (%s) — defaulting to 6', e)
+        max_results = 6
+
+    out = await asyncio.to_thread(recommend_papers, description, max_results)
+    return api_ok(out)
+
+
+@api_v1_paper_bp.route('/api/v1/paper/recommend/start', methods=['POST'])
+async def start_recommend_task():
+    """Start a background STREAMING describe-to-recommend task.
+
+    Same grounded-only contract as the blocking ``/recommend`` route, but the
+    two-phase pipeline (LLM interpretation → per-candidate arXiv grounding) is
+    run as a server-owned TaskRuntime task so the frontend can reveal each
+    grounded card the instant it resolves. Poll ``/api/v1/paper/recommend/poll``
+    (mirrors the Q&A transport — no SSE). Grounding is metadata-only
+    (``search_arxiv`` / ``fetch_arxiv_title``): it never triggers a PDF fetch.
+
+    Body JSON:
+        description: str — free-text description of the paper(s) recalled
+        max_results: int (optional, default 6, capped at 12)
+    Returns: { ok: true, task_id, running: true }
+    """
+    data = await async_parse_body()
+    description = (data.get('description') or '').strip()
+    if not description:
+        logger.warning('[Paper:Recommend] Empty description (stream)')
+        return api_bad_request('No description provided')
+
+    try:
+        max_results = int(data.get('max_results') or 6)
+    except (ValueError, TypeError) as e:
+        logger.debug('[Paper:Recommend] non-int max_results (stream) (%s) — defaulting to 6', e)
+        max_results = 6
+
+    task_id = f'rec_{int(time.time() * 1000)}_{_recommend_key(description)}'
+    task = _new_recommend_task(task_id, description, max_results)
+    logger.info('[Paper:Recommend] Starting stream task %s — max=%d desc=%.80s',
+                task_id, max_results, description)
+    _recommend_runtime.spawn(task_id, _run_recommend_task, task)
+
+    return jsonify({'ok': True, 'task_id': task_id, 'running': True})
+
+
+@api_v1_paper_bp.route('/api/v1/paper/recommend/poll', methods=['GET'])
+async def poll_recommend_task():
+    """Poll a streaming recommend task for new events (same shape as QA poll).
+
+    Query params: task_id, cursor (default 0).
+    Returns: {ok, status, events, next_cursor, results? / correction? (if done)}.
+    """
+    task_id = request.args.get('task_id', '').strip()
+    try:
+        cursor = int(request.args.get('cursor', 0))
+    except (ValueError, TypeError) as e:
+        logger.debug('[Paper:Recommend:Poll] bad cursor: %s', e)
+        cursor = 0
+    if not task_id:
+        return api_bad_request('task_id required')
+
+    task = _recommend_runtime.get(task_id)
+    if not task:
+        logger.debug('[Paper:Recommend:Poll] Unknown task_id=%s', task_id)
+        return api_not_found('task not found (may have expired)')
+
+    with task['events_lock']:
+        total = len(task['events'])
+        cursor = max(0, min(cursor, total))
+        new_events = list(task['events'][cursor:])
+
+    resp = {
+        'ok': True,
+        'status': task['status'],
+        'events': new_events,
+        'next_cursor': total,
+    }
+    if task['status'] == 'done':
+        resp['results'] = task.get('results', [])
+        resp['correction'] = task.get('correction')
+        resp['llmError'] = bool(task.get('llmError'))
+    if task['status'] == 'error':
+        resp['error'] = task.get('error', '')
+        resp['llmError'] = bool(task.get('llmError'))
+    return jsonify(resp)
+
+
+@api_v1_paper_bp.route('/api/v1/paper/recommend/abort', methods=['POST'])
+async def abort_recommend_task():
+    """Abort a running streaming recommend task (best-effort cooperative stop)."""
+    data = await async_parse_body()
+    task_id = (data.get('task_id') or '').strip()
+    if not task_id:
+        return api_bad_request('task_id required')
+    task = _recommend_runtime.get(task_id)
+    if not task:
+        return api_not_found('task not found')
+    task['abort_event'].set()
+    logger.info('[Paper:Recommend] Abort requested for task %s', task_id)
+    _cleanup_stale_recommend_tasks()
+    return api_ok({'aborted': True})
 
 
 @api_v1_paper_bp.route('/api/v1/paper/fetch-arxiv', methods=['POST'])
@@ -1222,9 +1642,23 @@ async def fetch_arxiv():
             logger.warning('[Paper:arXiv] Unexpected content type: %s for %s', content_type, pdf_url)
 
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
+        chunks = []
         with open(filepath, 'wb') as f:
             for chunk in resp.iter_content(chunk_size=8192):
+                if not chunk:
+                    continue
                 f.write(chunk)
+                chunks.append(chunk)
+
+        # Validity gate: reject a truncated/aborted download that left a stub.
+        from lib.pdf_parser import validate_pdf_bytes as _validate_pdf_bytes
+        _ok, _np, _verr = _validate_pdf_bytes(b''.join(chunks))
+        if not _ok:
+            try:
+                os.remove(filepath)
+            except OSError as e:
+                logger.debug('[Paper:arXiv] cleanup of rejected %s failed: %s', filepath, e)
+            raise ValueError('Downloaded file is not a readable PDF: ' + _verr)
 
         size = os.path.getsize(filepath)
         elapsed = time.time() - t0
@@ -1240,6 +1674,9 @@ async def fetch_arxiv():
             'file_size': file_size,
         })
 
+    except ValueError as e:
+        logger.warning('[Paper:arXiv] Rejected invalid PDF for %s: %s', arxiv_id, e)
+        return api_bad_request(str(e))
     except _requests.Timeout:
         logger.warning('[Paper:arXiv] Download timeout (60s): %s', pdf_url)
         return api_error('Download timed out (60s)', status=504)
@@ -1376,6 +1813,23 @@ async def fetch_arxiv_stream():
         if not pdf_bytes:
             logger.warning('[Paper:arXiv:Stream] No PDF bytes after download for %s', arxiv_id)
             yield _sse({'stage': 'error', 'error': 'PDF body was empty after download'})
+            return
+
+        # Validity gate: an aborted/blocked download can leave a truncated stub
+        # that exists on disk yet is not an openable PDF. Reject it (delete the
+        # file, emit error) so it never gets parsed or seeded as a ghost row.
+        from lib.pdf_parser import validate_pdf_bytes as _validate_pdf_bytes
+        _ok, _np, _verr = _validate_pdf_bytes(pdf_bytes)
+        if not _ok:
+            logger.warning('[Paper:arXiv:Stream] Rejected invalid PDF for %s (%d bytes): %s',
+                           arxiv_id, file_size, _verr)
+            try:
+                os.remove(filepath)
+            except OSError as e:
+                logger.debug('[Paper:arXiv:Stream] cleanup of rejected %s failed: %s', filepath, e)
+            yield _sse({'stage': 'error',
+                        'error': 'Downloaded file is not a readable PDF (truncated or '
+                                 'corrupted): ' + _verr})
             return
 
         yield _sse({'stage': 'parse_start'})
@@ -1516,6 +1970,65 @@ async def fetch_arxiv_stream():
                              'Content-Encoding': 'identity'})
 
 
+def _stream_file_response(filepath, mimetype, chunk_size=262144):
+    """Stream a file from disk in fixed chunks, honouring Range ourselves.
+
+    FALLBACK for when a buffering cloud-IDE proxy defeats ``send_file``'s ranged
+    serving (i.e. the transport log shows one ``range=False -> 200`` full GET
+    instead of many ``range=True -> 206``). Instead of handing the proxy a
+    single tens-of-MB body it can buffer into a timeout, we yield the bytes in
+    ``chunk_size`` pieces through a ``Response`` generator (the same proven
+    sync-generator pattern the SSE endpoints use) and set the anti-buffering
+    headers from the proxy-buffering lesson: ``no-transform`` +
+    ``Content-Encoding: identity`` + ``X-Accel-Buffering: no``. We also parse
+    ``Range`` manually so this path stays range-capable (206 with the exact
+    slice) when the proxy DOES forward Range.
+
+    Dormant by default — wired in only when ``TOFU_PAPER_PDF_STREAM=1`` so a
+    single-box install stays byte-identical to the ``send_file`` path.
+    """
+    file_size = os.path.getsize(filepath)
+    start, end = 0, file_size - 1
+    status = 200
+    m = re.match(r'bytes=(\d*)-(\d*)$', request.headers.get('Range', '') or '')
+    if m and (m.group(1) or m.group(2)):
+        if m.group(1):
+            start = int(m.group(1))
+            end = int(m.group(2)) if m.group(2) else file_size - 1
+        else:  # suffix range: bytes=-N → last N bytes
+            start = max(0, file_size - int(m.group(2)))
+            end = file_size - 1
+        start = max(0, start)
+        end = min(end, file_size - 1)
+        if start > end:
+            resp = Response(status=416)
+            resp.headers['Content-Range'] = 'bytes */%d' % file_size
+            return resp
+        status = 206
+    length = end - start + 1
+
+    def generate():
+        remaining = length
+        with open(filepath, 'rb') as f:
+            f.seek(start)
+            while remaining > 0:
+                chunk = f.read(min(chunk_size, remaining))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+                yield chunk
+
+    resp = Response(generate(), status=status, mimetype=mimetype)
+    resp.headers['Accept-Ranges'] = 'bytes'
+    resp.headers['Content-Length'] = str(length)
+    resp.headers['Cache-Control'] = 'public, max-age=43200, no-transform'
+    resp.headers['Content-Encoding'] = 'identity'
+    resp.headers['X-Accel-Buffering'] = 'no'
+    if status == 206:
+        resp.headers['Content-Range'] = 'bytes %d-%d/%d' % (start, end, file_size)
+    return resp
+
+
 @paper_bp.route('/api/paper/pdf/<filename>')
 def serve_paper_pdf(filename):
     """Serve a downloaded paper PDF.
@@ -1530,7 +2043,35 @@ def serve_paper_pdf(filename):
     if not os.path.exists(filepath):
         logger.debug('[Paper] PDF not found: %s', filename)
         return api_not_found('PDF not found')
-    return send_file(filepath, mimetype='application/pdf')
+    # FALLBACK (opt-in): if the transport log proves the proxy buffers the
+    # whole-file 200 (single ``range=False -> 200``), flip TOFU_PAPER_PDF_STREAM=1
+    # to serve the PDF as a chunked generator the proxy can't buffer into a
+    # timeout. Default off → byte-identical to the send_file path below.
+    if os.environ.get('TOFU_PAPER_PDF_STREAM') == '1':
+        resp = _stream_file_response(filepath, 'application/pdf')
+        logger.info('[Paper] serve pdf=%s range=%s -> %s (stream)',
+                    filename, bool(request.headers.get('Range')), resp.status_code)
+        return resp
+    # conditional=True → make_conditional(accept_ranges=True): honour HTTP
+    # Range so pdf.js can range-load a large PDF in small chunks. Without it
+    # send_file always returns 200 + the whole file (tens of MB); a buffering
+    # cloud-IDE proxy can truncate/time-out that single response, which pdf.js
+    # surfaces as "Missing PDF" or per-page "failed to render".
+    resp = send_file(filepath, mimetype='application/pdf', conditional=True)
+    # Advertise ranged capability on the INITIAL (non-Range) 200 too. pdf.js's
+    # validateRangeRequestCapabilities only switches to ranged loading when the
+    # FIRST response carries ``Accept-Ranges: bytes`` — Quart's make_conditional
+    # sets it only on the 206 (Range-present) path, so without this the viewer
+    # does one giant full GET and conditional=True is inert for it.
+    resp.headers.setdefault('Accept-Ranges', 'bytes')
+    # Transport diagnostic (acceptance gate): after a restart+refresh, opening a
+    # large PDF through the proxy should log many ``range=True -> 206`` lines
+    # (pdf.js is range-loading and the proxy passes it through). A single
+    # ``range=False -> 200`` means the proxy did one buffered full GET → ranged
+    # loading is moot and we fall back to chunked streaming (see _stream_pdf).
+    logger.info('[Paper] serve pdf=%s range=%s -> %s',
+                filename, bool(request.headers.get('Range')), resp.status_code)
+    return resp
 
 
 @api_v1_paper_bp.route('/api/v1/paper/reparse', methods=['POST'])
@@ -1586,20 +2127,87 @@ async def reparse_paper():
         return api_internal_error(f'Reparse failed: {e}')
 
 
+# A PDF at or above this size is assumed real and never re-opened during a
+# listing (validating every large PDF on every list would be wasteful). Only
+# small files — plausible truncation stubs like the 15-byte ``%PDF-1.4`` header
+# — are validity-checked. Generous vs the ~15-byte stubs actually seen.
+_GHOST_PDF_MAX_STUB_BYTES = 2048
+
+
 def _is_ghost_library_row(paper):
     """A bookshelf row is a GHOST (non-viewable) when it has no usable PDF:
     an empty ``pdfFilename``, or a filename whose file is missing from
     PAPER_DIR. Left by the OLD fire-and-forget persistence (a client PUT that
     raced/replaced a failed upload). A transient stat error (FUSE hiccup) is
     treated as NOT-ghost so a real paper is never hidden by a flaky mount.
+
+    EXCEPTION — a saved *recommendation* is a legitimate empty-PDF row: it has
+    no ``pdfFilename`` yet (never ingested) but carries an ``arxivId``, which
+    makes it re-openable via lazy ingest. Keep it, otherwise the auto-persisted
+    describe-to-recommend cards would silently vanish on reload.
     """
     fn = (paper.get('pdfFilename') or '').strip()
     if not fn:
+        if (paper.get('arxivId') or '').strip():
+            return False
         return True
     try:
-        return not os.path.exists(os.path.join(PAPER_DIR, os.path.basename(fn)))
+        path = os.path.join(PAPER_DIR, os.path.basename(fn))
+        if not os.path.exists(path):
+            return True
+        # File is present — but a truncated / aborted upload leaves a stub
+        # (e.g. a 15-byte ``%PDF-1.4`` header) that EXISTS yet is not an
+        # openable PDF. Such a row dead-ends the reader on "load a PDF first",
+        # so treat a present-but-unopenable PDF as a ghost too. Only stubs small
+        # enough to be a plausible truncation are validated (a large real PDF is
+        # never re-opened on every listing — that would be needless work and a
+        # transient FUSE read error must not hide a real paper).
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            return False  # transient stat error — never hide a real paper
+        if size < _GHOST_PDF_MAX_STUB_BYTES:
+            from lib.pdf_parser import validate_pdf_bytes
+            with open(path, 'rb') as f:
+                ok, _pages, _err = validate_pdf_bytes(f.read())
+            if not ok:
+                logger.debug('[Paper:Library] row %s has a present-but-invalid PDF '
+                             '(%d bytes) — treating as ghost',
+                             (paper.get('id') or '')[:16], size)
+                return True
+        return False
     except OSError as e:
         logger.debug('[Paper:Library] pdf existence check failed for %s: %s',
+                     (paper.get('id') or '')[:16], e)
+        return False
+
+
+def _is_broken_stub_row(paper):
+    """A row that is DEFINITIVELY broken and safe to hard-delete: its
+    ``pdfFilename`` points at a file that is PRESENT on disk, small, and fails
+    ``validate_pdf_bytes`` (a truncated / aborted-upload stub — e.g. the 15-byte
+    ``%PDF-1.4`` header). Deliberately NARROWER than ``_is_ghost_library_row``:
+    it does NOT include a MISSING file (which can be a transient FUSE hiccup) nor
+    an empty-pdfFilename recommendation row — only a proven-unopenable file. Used
+    by the opt-in prune endpoint so a destructive cleanup can never remove a row
+    that might still be a real (transiently-unreachable) paper.
+    """
+    fn = (paper.get('pdfFilename') or '').strip()
+    if not fn:
+        return False
+    try:
+        path = os.path.join(PAPER_DIR, os.path.basename(fn))
+        if not os.path.exists(path):
+            return False  # missing != broken (could be a flaky mount)
+        size = os.path.getsize(path)
+        if size >= _GHOST_PDF_MAX_STUB_BYTES:
+            return False  # a large file is not a truncation stub
+        from lib.pdf_parser import validate_pdf_bytes
+        with open(path, 'rb') as f:
+            ok, _pages, _err = validate_pdf_bytes(f.read())
+        return not ok
+    except OSError as e:
+        logger.debug('[Paper:Library] stub check failed for %s: %s',
                      (paper.get('id') or '')[:16], e)
         return False
 
@@ -1738,6 +2346,24 @@ def upload_paper():
     except Exception as e:
         logger.error('[Paper:Upload] Failed to save %s: %s', filename, e, exc_info=True)
         return api_internal_error(f'Upload failed: {str(e)}')
+
+    # Validity gate: a truncated / aborted / empty upload can land a file that
+    # exists (getsize > 0) but is not an openable PDF — e.g. a 15-byte
+    # ``%PDF-1.4`` header-only stub. Committing it seeds a permanent non-viewable
+    # ghost row the reader dead-ends on. Reject it HERE: delete the stub and
+    # return a real error instead of ok:true, so a ghost is never created.
+    from lib.pdf_parser import validate_pdf_bytes
+    _valid, _npages, _verr = validate_pdf_bytes(pdf_bytes)
+    if not _valid:
+        logger.warning('[Paper:Upload] Rejected invalid PDF %s (%d bytes): %s',
+                       filename, file_size, _verr)
+        try:
+            os.remove(filepath)
+        except OSError as e:
+            logger.debug('[Paper:Upload] cleanup of rejected %s failed: %s', filename, e)
+        return api_bad_request(
+            'The uploaded file is not a readable PDF (it may be truncated or '
+            'corrupted). Please re-upload. [' + _verr + ']')
 
     parsed_text = ''
     total_pages = 0
@@ -2000,6 +2626,60 @@ async def delete_library_entry(paper_id):
         return api_ok()
     except Exception as e:
         logger.error('[Paper:Library] Delete failed for %s: %s', paper_id[:16], e, exc_info=True)
+        return api_internal_error(e)
+
+
+@api_v1_paper_bp.route('/api/v1/paper/library/prune-broken', methods=['POST'])
+async def prune_broken_library_rows():
+    """One-time cleanup of DEFINITIVELY-broken stub rows (opt-in, destructive).
+
+    A truncated / aborted upload used to leave a 15-byte ``%PDF-1.4`` stub +
+    seed a bookshelf row. The listing now HIDES such rows (non-destructively),
+    but that leaves them permanent + unselectable in the DB. This endpoint hard-
+    deletes ONLY rows that ``_is_broken_stub_row`` proves broken (file present,
+    small, unopenable) and removes the orphaned stub file. It never touches a
+    row whose file is merely missing (possible FUSE hiccup) or a recommendation
+    row. Must be invoked explicitly (POST) — never runs on a plain listing.
+
+    Returns: { ok, pruned: int, ids: [str] }
+    """
+    def _prune():
+        from lib.database._core import _pool_get, _pool_put
+        db = _pool_get()
+        pruned_ids = []
+        try:
+            rows = db.execute(
+                'SELECT ' + ', '.join(_PAPER_LIB_COLUMNS) +
+                ' FROM paper_library WHERE user_id=?', (DEFAULT_USER_ID,),
+            ).fetchall()
+            for r in rows:
+                paper = _lib_row_to_dict(r)
+                if not _is_broken_stub_row(paper):
+                    continue
+                pid = paper['id']
+                fn = os.path.basename((paper.get('pdfFilename') or '').strip())
+                db_execute_with_retry(
+                    db, 'DELETE FROM paper_library WHERE id=? AND user_id=?',
+                    (pid, DEFAULT_USER_ID))
+                pruned_ids.append(pid)
+                # Remove the orphaned stub file (best-effort — it is proven a
+                # non-PDF, so nothing else can legitimately reference it).
+                if fn:
+                    try:
+                        os.remove(os.path.join(PAPER_DIR, fn))
+                    except OSError as e:
+                        logger.debug('[Paper:Prune] stub file remove failed %s: %s', fn, e)
+            if pruned_ids:
+                logger.info('[Paper:Prune] Hard-deleted %d broken stub row(s)', len(pruned_ids))
+        finally:
+            _pool_put(db)
+        return pruned_ids
+
+    try:
+        ids = await asyncio.to_thread(_prune)
+        return api_ok({'pruned': len(ids), 'ids': ids})
+    except Exception as e:
+        logger.error('[Paper:Library] Prune failed: %s', e, exc_info=True)
         return api_internal_error(e)
 
 

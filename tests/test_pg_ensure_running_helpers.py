@@ -176,5 +176,118 @@ def test_explicit_local_ours_down_falls_through(tmp_path, monkeypatch):
     assert handled is False and result is None
 
 
+# ══════════════════════════════════════════════════════════
+#  initdb gate — must key on POPULATED, not mere dir existence
+#  (regression: the flock probe + startup lock pre-create an EMPTY
+#   pgdata, which used to defeat `if not os.path.isdir(pgdata)` and
+#   silently fall back to SQLite on a fresh local-split path)
+# ══════════════════════════════════════════════════════════
+
+def _stub_prestart_helpers(b, monkeypatch):
+    """Make _ensure_pg_running reach the initdb gate offline + deterministically.
+
+    Stubs every step BEFORE the gate so no real PG / network / port scan runs,
+    and reproduces the real-world side effect that caused the bug: the flock
+    probe / startup lock creating the pgdata directory before the gate.
+    """
+    monkeypatch.delenv('TOFU_PG_HOST', raising=False)
+    monkeypatch.delenv('TOFU_PG_PORT', raising=False)
+    monkeypatch.setattr(b, '_pg_binaries_present', lambda: True)
+    monkeypatch.setattr(b, '_try_explicit_pg_target', lambda *a, **k: (False, None))
+    monkeypatch.setattr(b, '_read_our_pg_port', lambda pgdata: None)
+    monkeypatch.setattr(b, '_scan_for_our_pg', lambda *a, **k: None)
+    monkeypatch.setattr(b, '_pg_already_running_on_another_machine',
+                        lambda *a, **k: (False, None))
+    monkeypatch.setattr(b, '_pgdata_major_compatible', lambda pgdata: True)
+
+    # The real _verify_flock_support_or_warn → _probe_flock_enforced does
+    # os.makedirs(pgdata); reproduce that side effect (create the dir) and
+    # return True so the flow proceeds to the gate.
+    def _flock_creates_dir(pgdata):
+        os.makedirs(pgdata, exist_ok=True)
+        return True
+    monkeypatch.setattr(b, '_verify_flock_support_or_warn', _flock_creates_dir)
+
+
+def test_empty_pgdata_dir_still_triggers_bootstrap(tmp_path, monkeypatch):
+    """An existing but EMPTY pgdata (pre-created by the flock probe) must route
+    to _bootstrap_pg — not fall through to pg_ctl start on a non-cluster dir."""
+    from lib.database import _bootstrap as b
+    pgdata = str(tmp_path / 'pgdata')
+    _stub_prestart_helpers(b, monkeypatch)
+
+    from lib.database._bootstrap import _orchestrate as orch
+    called = {}
+
+    def _fake_bootstrap(pg, base, host, port, user, pw, db):
+        called['pgdata'] = pg
+        return {'PG_HOST': '127.0.0.1', 'PG_PORT': 15432, 'PG_DSN': 'x'}
+    monkeypatch.setattr(orch, '_bootstrap_pg', _fake_bootstrap)
+
+    result = b._ensure_pg_running(pgdata, str(tmp_path), '127.0.0.1', 15432,
+                                  '', '', 'tofu')
+    # The gate saw an unpopulated dir → bootstrap ran (the fix).
+    assert called.get('pgdata') == pgdata
+    assert result and result['PG_PORT'] == 15432
+
+
+def test_populated_pgdata_does_not_rerun_bootstrap(tmp_path, monkeypatch):
+    """A populated cluster (PG_VERSION present) must NOT be re-initdb'd — the
+    gate skips _bootstrap_pg and proceeds to the reuse/start path."""
+    from lib.database import _bootstrap as b
+    pgdata = str(tmp_path / 'pgdata')
+    _write_pg_version(pgdata, '18')  # populated
+    _stub_prestart_helpers(b, monkeypatch)
+
+    from lib.database._bootstrap import _orchestrate as orch
+
+    def _boom_bootstrap(*a, **k):
+        raise AssertionError('_bootstrap_pg must NOT run on a populated cluster')
+    monkeypatch.setattr(orch, '_bootstrap_pg', _boom_bootstrap)
+    # Stop the flow right after the gate so we don't try a real pg_ctl start;
+    # a populated dir means the gate is passed and we enter the pidfile/start
+    # path — force that to short-circuit cleanly.
+    monkeypatch.setattr(b, '_fix_unix_socket_conf', lambda pgdata: None)
+    import subprocess
+    monkeypatch.setattr(subprocess, 'run',
+                        lambda *a, **k: type('R', (), {'returncode': 1, 'stdout': '', 'stderr': 'stub'})())
+    monkeypatch.setattr(b, '_try_acquire_startup_lock', lambda pgdata: False)
+
+    # Should not raise (bootstrap not called); returns None via the
+    # startup-lock-contended path — the point is _bootstrap_pg was skipped.
+    b._ensure_pg_running(pgdata, str(tmp_path), '127.0.0.1', 15432, '', '', 'tofu')
+
+
+def test_bootstrap_strips_tofu_artifacts_before_initdb(tmp_path, monkeypatch):
+    """_bootstrap_pg must remove leftover .tofu* lock/probe files (left by the
+    flock probe / startup lock) so initdb's empty-dir requirement is met, and
+    must NOT touch any non-.tofu content."""
+    from lib.database import _bootstrap as b
+    pgdata = str(tmp_path / 'pgdata')
+    os.makedirs(pgdata, exist_ok=True)
+    # Artifacts the pre-start helpers leave behind:
+    open(os.path.join(pgdata, '.tofu_pg_start.lock'), 'w').close()
+    open(os.path.join(pgdata, '.tofu_flock_probe'), 'w').close()
+
+    seen = {}
+
+    def _fake_initdb_run(cmd, *a, **k):
+        # At the moment initdb is invoked, our .tofu artifacts must be gone.
+        seen['leftover_tofu'] = [n for n in os.listdir(pgdata)
+                                 if n.startswith('.tofu')]
+        # Fail fast right after so we don't proceed into real start/createdb.
+        return type('R', (), {'returncode': 1, 'stdout': '', 'stderr': 'stub-stop'})()
+
+    from lib.database._bootstrap import _orchestrate as orch
+    monkeypatch.setattr(orch, '_find_pg_binary', lambda name: '/usr/bin/' + name)
+    monkeypatch.setattr(orch, '_get_username', lambda: 'tofu')
+    import subprocess
+    monkeypatch.setattr(subprocess, 'run', _fake_initdb_run)
+
+    orch._bootstrap_pg(pgdata, str(tmp_path), '127.0.0.1', 15432, '', '', 'tofu')
+    assert seen.get('leftover_tofu') == [], (
+        'initdb was invoked with leftover .tofu artifacts still present')
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])

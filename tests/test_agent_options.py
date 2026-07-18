@@ -34,7 +34,7 @@ class TestFromCfg(unittest.TestCase):
             'temperature': 0.5,
             'thinkingEnabled': True,
             'thinkingDepth': 'high',
-            'searchMode': 'single',
+            'searchMode': 'multi',
             'fetchEnabled': False,
             'projectPath': '/tmp/proj',
             'swarmEnabled': True,
@@ -46,7 +46,7 @@ class TestFromCfg(unittest.TestCase):
         self.assertEqual(opts.temperature, 0.5)
         self.assertTrue(opts.thinking_enabled)
         self.assertEqual(opts.thinking_depth, 'high')
-        self.assertEqual(opts.search_mode, 'single')
+        self.assertEqual(opts.search_mode, 'multi')
         self.assertFalse(opts.fetch_enabled)
         self.assertEqual(opts.project_path, '/tmp/proj')
         self.assertTrue(opts.swarm_enabled)
@@ -115,7 +115,7 @@ class TestToCfg(unittest.TestCase):
         self.assertEqual(out.get('model'), 'm')
 
     def test_camelcase_emission(self):
-        opts = TofuOptions(thinking_depth='high', search_mode='single',
+        opts = TofuOptions(thinking_depth='high', search_mode='multi',
                            project_path='/x')
         out = opts.to_cfg()
         self.assertIn('thinkingDepth', out)

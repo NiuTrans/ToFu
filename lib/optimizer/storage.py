@@ -7,11 +7,11 @@ All writes use ``db_execute_with_retry`` to survive transient PG contention.
 from __future__ import annotations
 
 import json
-import uuid
 from datetime import datetime, timedelta
 from typing import Any
 
 from lib.database import DOMAIN_SYSTEM, db_execute_with_retry, get_thread_db
+from lib.ids import short_id
 from lib.log import get_logger
 
 logger = get_logger(__name__)
@@ -48,7 +48,7 @@ def create_proposal(
     status_reason: str = '',
 ) -> str:
     """Insert a new proposal row and return its id."""
-    prop_id = 'opt_' + uuid.uuid4().hex[:12]
+    prop_id = short_id('opt_', 12)
     now = datetime.now().isoformat()
     db = _db()
     db_execute_with_retry(db, """
@@ -106,7 +106,7 @@ def record_applied(
     pre_metric: dict | None = None,
 ) -> str:
     """Record that an action was applied — returns action_log id."""
-    log_id = 'act_' + uuid.uuid4().hex[:12]
+    log_id = short_id('act_', 12)
     now_dt = datetime.now()
     expires_dt = now_dt + timedelta(days=max(1, int(ttl_days)))
     db = _db()

@@ -57,12 +57,15 @@ __all__ = [
     'sticky_routing_enabled',
     'sticky_hold_enabled',
     'sticky_hold_budget_ms',
+    'sticky_hold_max_ms',
     'get_conv_affinity',
     'set_conv_affinity',
     'clear_conv_affinity',
     'conv_affinity',
     'get_preferred_key',
     'record_conv_key',
+    'record_pick_decision',
+    'get_pick_decision',
 ]
 
 
@@ -98,8 +101,35 @@ def sticky_hold_budget_ms() -> float:
     try:
         ms = float(os.environ.get('TOFU_CONV_STICKY_HOLD_MS', '1500'))
         return ms if ms > 0 else 1500.0
-    except (ValueError, TypeError):
+    except (ValueError, TypeError) as e:
+        logger.debug('[ConvAffinity] TOFU_CONV_STICKY_HOLD_MS parse failed, using default: %s', e)
         return 1500.0
+
+
+def sticky_hold_max_ms() -> float:
+    """Escalated ceiling (ms) to wait for a conv's SOLE warm key under contention.
+
+    ``sticky_hold_budget_ms`` (default 1500) covers a transient sub-second 429
+    rate-limit nudge. But on a shared server a *concurrent sibling* can cool the
+    conversation's ONLY warm key for longer than that budget — and the old code
+    then silently cold-rebound, destroying the prompt-cache prefix on a byte-
+    identical round (the mrne3bqe R4 clean-round namespace-flip vector). This
+    LARGER bounded ceiling lets the hold wait out that contention window instead
+    of instantly landing cold, WHILE still failing over on a genuinely long
+    error/quota backoff (e.g. 300s >> ceiling → no hold). It is NOT a hard pin:
+    ``sticky_cooldown_remaining_s`` already returns None for an excluded /
+    disabled / incompatible key, so a truly-down key never reaches the hold.
+    Default 8000ms. Tune with ``TOFU_CONV_STICKY_HOLD_MAX_MS``; set at or below
+    the budget to disable escalation (hold reverts to the flat budget window).
+    """
+    try:
+        ms = float(os.environ.get('TOFU_CONV_STICKY_HOLD_MAX_MS', '8000'))
+        base = sticky_hold_budget_ms()
+        # Never below the base budget — escalation only ever widens the window.
+        return ms if ms >= base else base
+    except (ValueError, TypeError) as e:
+        logger.debug('[ConvAffinity] TOFU_CONV_STICKY_HOLD_MAX_MS parse failed, using default: %s', e)
+        return max(8000.0, sticky_hold_budget_ms())
 
 
 def _ttl_seconds() -> float:
@@ -107,7 +137,8 @@ def _ttl_seconds() -> float:
     try:
         ttl = float(os.environ.get('TOFU_CONV_STICKY_TTL', '1800'))
         return ttl if ttl > 0 else 1800.0
-    except (ValueError, TypeError):
+    except (ValueError, TypeError) as e:
+        logger.debug('[ConvAffinity] TOFU_CONV_STICKY_TTL parse failed, using default: %s', e)
         return 1800.0
 
 
@@ -142,6 +173,38 @@ def clear_conv_affinity() -> None:
     would bleed into the NEXT unrelated task that lands on this thread.
     """
     _state.conv_id = None
+
+
+def record_pick_decision(*, preferred_key, chosen_key, fell_back, cooldown_remaining_s=None):
+    """Record the LAST sticky-routing pick decision on this thread (diagnostic).
+
+    Read back by the cache byte-probe so a routing-flip capture can say WHY the
+    key differed — soft-fallback under cooldown/contention vs affinity never
+    engaging. Thread-local so a concurrent sibling's pick can't clobber it, and
+    cheap enough to always record (a plain dict assignment). Never affects
+    routing behaviour.
+    """
+    _state.pick_decision = {
+        'preferred_key_hash': _hash_key(preferred_key),
+        'chosen_key_hash': _hash_key(chosen_key),
+        'affinity_fell_back': bool(fell_back),
+        'cooldown_remaining_s': cooldown_remaining_s,
+    }
+
+
+def get_pick_decision() -> dict | None:
+    """Return the last sticky pick decision recorded on this thread, or None."""
+    return getattr(_state, 'pick_decision', None)
+
+
+def _hash_key(key_name):
+    """Salted, truncated hash of a key NAME for the probe (key names are not
+    secrets, but hashing keeps the dump uniform with the api-key hash and avoids
+    leaking internal key labels into an artifact). Empty/None → ''."""
+    if not key_name:
+        return ''
+    import hashlib
+    return hashlib.sha256(('tofu-cache-probe:' + str(key_name)).encode('utf-8')).hexdigest()[:12]
 
 
 @contextlib.contextmanager

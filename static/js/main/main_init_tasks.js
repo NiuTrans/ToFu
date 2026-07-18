@@ -8,102 +8,19 @@
    scope — no imports / exports needed.
    ═══════════════════════════════════════════════════════════════════ */
 
-/**
- * Classify a TRAILING assistant message left behind by an interrupted turn.
- *
- * A "ghost tail" is an assistant turn that carries NO settled output: empty
- * content, no finishReason, no usage, no error, and no REAL tool round (an
- * empty / still-`searching` round does not count). Such a turn started but
- * never finalized.
- *
- * Returns:
- *   'delete'      — truly empty (not even a thinking fragment): remove it.
- *   'interrupted' — has a stray `thinking` fragment (and maybe _memoryPrefetch)
- *                   but no content/finishReason: stamp finishReason='interrupted'
- *                   so it renders honestly instead of as a blank, tag-less bubble
- *                   (and recovered thinking + provenance are preserved).
- *   null          — not a ghost tail; leave it alone.
- *
- * Pure function (no DOM / network) so it is unit-testable in isolation and
- * shared by the Case-D reconcile path in initActiveTasks().
- */
-function _classifyGhostTail(lastMsg) {
-  if (!lastMsg || lastMsg.role !== 'assistant') return null;
-  if (lastMsg.content || lastMsg.finishReason || lastMsg.usage || lastMsg.error) return null;
-  const hasRealRound = Array.isArray(lastMsg.toolRounds)
-    && lastMsg.toolRounds.some(r =>
-      r && (r.status === 'done' || r.toolContent
-        || (Array.isArray(r.results) && r.results.length)));
-  if (hasRealRound) return null;
-  return lastMsg.thinking ? 'interrupted' : 'delete';
-}
-
-/**
- * True for a BURIED (non-tail) assistant placeholder that carries NO
- * user-visible payload at all — the blank bubbles left mid-list by aborted /
- * failed / empty-stop turns that the user then retried on top of.
- *
- * WHY this exists separately from _classifyGhostTail:
- *   _classifyGhostTail only ever inspected conv.messages[length-1]. Once a
- *   NEWER turn is appended on top of an empty placeholder, that placeholder is
- *   no longer the tail, so nothing ever removed it — repeated failed attempts
- *   STACKED empty "Agent" bubbles in the middle of the transcript (the "chat
- *   became cluttered, can't tell what happened, can't continue" symptom, conv
- *   mr3jfcw10pianj had 4 such buried empties at idx 79/80/81/84).
- *
- * The buried predicate is intentionally MORE aggressive than the tail one on a
- * single axis: a buried empty turn is removed EVEN when it carries a settled
- * finishReason (aborted / interrupted) or usage, because mid-list it renders as
- * a body-less badge-only bubble — pure clutter — whereas the TAIL keeps its
- * badge (that's what _classifyGhostTail preserves). It is NOT more aggressive
- * about content: anything user-visible (content, a thinking fragment, a real
- * tool round, an error envelope, an image-gen result) keeps the turn. A
- * thinking-only interrupted turn is preserved (its recovered reasoning renders
- * a thinking block — not a blank bubble).
- *
- * Special turns (endpoint planner/critic/worker, autopilot VU, image-gen) are
- * never treated as empty clutter even with empty content.
- *
- * Pure function (no DOM / network) — unit-testable in isolation.
- */
-function _isBuriedEmptyGhost(msg) {
-  if (!msg || msg.role !== 'assistant') return false;
-  if (msg._epIteration || msg._isEndpointReview || msg._isEndpointPlanner
-      || msg._isVirtualUser || msg._autopilotRunId
-      || msg._igResult || msg._igResults || msg._igError) return false;
-  if ((msg.content || '').trim()) return false;
-  if ((msg.thinking || '').trim()) return false;   // interrupted-with-reasoning → keep
-  if (msg.error) return false;                       // a rendered error block is meaningful
-  const hasRealRound = Array.isArray(msg.toolRounds)
-    && msg.toolRounds.some(r =>
-      r && (r.status === 'done' || r.toolContent
-        || (Array.isArray(r.results) && r.results.length)));
-  if (hasRealRound) return false;
-  return true;
-}
-
-/**
- * Remove every BURIED empty-ghost assistant placeholder from conv.messages,
- * leaving the tail (index -1) alone for _classifyGhostTail to reconcile.
- *
- * Splices in reverse so indices stay valid. Returns the number removed (0 →
- * caller does nothing, so no needless save/sync). Idempotent: a second call on
- * already-swept messages removes nothing.
- *
- * @param {Object} conv
- * @returns {number} count of buried ghosts removed
- */
-function _sweepBuriedGhostAssistants(conv) {
-  if (!conv || !Array.isArray(conv.messages) || conv.messages.length < 2) return 0;
-  const msgs = conv.messages;
-  const lastIdx = msgs.length - 1;
-  const removeIdx = [];
-  for (let i = 0; i < lastIdx; i++) {
-    if (_isBuriedEmptyGhost(msgs[i])) removeIdx.push(i);
-  }
-  for (let k = removeIdx.length - 1; k >= 0; k--) msgs.splice(removeIdx[k], 1);
-  return removeIdx.length;
-}
+/* NOTE: the ENTIRE frontend ghost-lifecycle classifier family is now RETIRED.
+ * `_isBuriedEmptyGhost` / `_sweepBuriedGhostAssistants` went first (2026-07-07),
+ * then `_classifyGhostTail` (2026-07-11) once the backend reconcile reached
+ * every render path. All INFERRED settled lifecycle state in JS — the
+ * separation-of-concerns violation. The verdict (buried-ghost sweep +
+ * superseded-error-husk collapse + trailing delete/interrupt) now lives ONLY on
+ * the backend (lib/conversations/reconcile.py), applied + persisted +
+ * _reconciledAt-stamped in one commit on the GET path
+ * (routes/conversations.py::_reconcile_conv_on_get_blocking), the prefetch path
+ * (_prefetch_reconciled_dict), and startup recovery. Proven byte-equivalent by
+ * tests/test_reconcile_js_backend_equivalence.py. The frontend keeps ONLY
+ * network/DOM orchestration (reconnect a live SSE, poll a finished task); it no
+ * longer infers settled lifecycle at all. */
 
 // ── Init ──
 async function initActiveTasks() {
@@ -113,13 +30,34 @@ async function initActiveTasks() {
        its messages in the same request, eliminating the second round-trip
        that shows "loading..." */
     const prefetchTarget = activeConvId || sessionStorage.getItem('tofu_activeConvId') || null;
-    const [, , activeResp] = await Promise.all([
+
+    /* ★ Folder loading is DECOUPLED from the conversation/active-task fetch.
+     *   It used to be a third leg of the Promise.all below — but Promise.all
+     *   short-circuits on the FIRST sibling rejection and discards the other
+     *   legs, so a transient failure in loadConversationsFromServer /
+     *   activeResponse would skip folder loading entirely AND jump past the
+     *   catch, leaving _folders empty with no recovery (the folder rail
+     *   vanishes and only the "+ New folder" quick-add shows even though 19
+     *   folders exist server-side). loadFolders owns its own bounded-backoff
+     *   self-heal, but that only fires from loadFolders' OWN catch — which
+     *   never ran when a sibling sank the shared Promise.all first. Kick it off
+     *   in parallel (no perf loss) but isolate its fate: its own .catch fires
+     *   the retry, and _migratePinnedToFolder is chained AFTER folders resolve
+     *   so it doesn't race an unloaded folder list. */
+    const _foldersDone = (typeof loadFolders === 'function'
+      ? Promise.resolve(loadFolders())
+      : Promise.resolve()
+    ).then(() => {
+      if (typeof _migratePinnedToFolder === 'function') _migratePinnedToFolder();
+    }).catch((e) => {
+      console.warn('[initActiveTasks] folder load failed (isolated):', e && e.message);
+      if (typeof _scheduleFolderLoadRetry === 'function') _scheduleFolderLoadRetry();
+    });
+
+    const [, activeResp] = await Promise.all([
       loadConversationsFromServer(prefetchTarget),
-      typeof loadFolders === 'function' ? loadFolders() : Promise.resolve(),
       Api.chat.activeResponse(),
     ]);
-    /* ★ Migrate pinned conversations to a "⭐ 置顶" folder (one-time) */
-    if (typeof _migratePinnedToFolder === 'function') _migratePinnedToFolder();
     if (!activeResp || !activeResp.ok) {
       _ensureNewest();
       return;
@@ -162,7 +100,6 @@ async function initActiveTasks() {
 
     /* ── Parallel poll for all finished tasks (Case B) ── */
     const caseBConvs = [];
-    const caseEConvs = []; // Orphaned user messages (Case E)
     for (const conv of conversations) {
       /* Case A: conv has activeTaskId and that task is still running → reconnect */
       if (conv.activeTaskId && runIds.has(conv.activeTaskId)) {
@@ -175,9 +112,9 @@ async function initActiveTasks() {
          *   visual bug.  Mirrors the Case C placeholder logic but gated on
          *   "last assistant belongs to a different / finished task". */
         const _amA = conv.messages[conv.messages.length - 1];
-        const _staleTail = _amA && _amA.role === 'assistant'
+        const _staleTail = _amA
           && !_amA._epIteration && !_amA._isEndpointReview && !_amA._isEndpointPlanner
-          && ((_amA._taskId && _amA._taskId !== conv.activeTaskId) || !!_amA.finishReason);
+          && assistantTailIsPriorTurn(_amA, conv.activeTaskId);
         if (_staleTail) {
           console.info(
             `[initActiveTasks CaseA] Pushing fresh assistant placeholder for conv=${conv.id.slice(0,8)} ` +
@@ -243,129 +180,35 @@ async function initActiveTasks() {
        *   frontend just loaded is already clean. This is what makes the
        *   resurrect + auto-fire regressions structurally impossible on the
        *   crash-recovery path: no frontend pop / allowTruncate PUT happens. */
-      if (!conv._needsLoad && !activeStreams.has(conv.id) && !conv._reconciledAt) {
-        /* ★ Buried-ghost sweep — remove empty placeholder bubbles left
-         *   MID-LIST by aborted / failed / empty-stop turns the user then
-         *   retried on top of.  _classifyGhostTail below only inspects the
-         *   tail, so without this sweep those buried empties stack up as
-         *   blank "Agent" bubbles and clutter the transcript (conv
-         *   mr3jfcw10pianj: 4 buried empties). Runs BEFORE the tail reconcile
-         *   so the tail's own classification is unaffected.
-         *   NOTE: this frontend path remains as the FALLBACK for convs the
-         *   backend recovery loop did NOT touch (no stale task) until a later
-         *   increment moves reconcile onto the conversation GET path. */
-        const _sweptGhosts = _sweepBuriedGhostAssistants(conv);
-        if (_sweptGhosts > 0) {
-          console.warn(
-            `[initActiveTasks CaseD] 🧹 Swept ${_sweptGhosts} buried empty-ghost ` +
-            `assistant placeholder(s) from conv ${conv.id.slice(0, 8)} ` +
-            `(mid-list blanks from aborted/failed retries). Remaining msgs=${conv.messages.length}`
-          );
-          saveConversations(null);  // cleanup, not new activity — don't bump updatedAt
-          syncConversationToServer(conv, { allowTruncate: true });
-        }
-        const lastMsg = conv.messages[conv.messages.length - 1];
-        const _ghost = _classifyGhostTail(lastMsg);
-        if (_ghost === 'delete') {
-          /* Truly empty (not even a thinking fragment) — nothing to show, so
-             remove it. A stream started but never produced ANY token. */
-          console.warn(
-            `[initActiveTasks CaseD] Removing ghost empty assistant message from conv ${conv.id.slice(0, 8)} ` +
-            `(msgs=${conv.messages.length}, lastTimestamp=${lastMsg.timestamp ? new Date(lastMsg.timestamp).toISOString() : 'none'}). ` +
-            `This could indicate a stream that started but never received any content.`,
-          );
-          conv.messages.pop();
-          saveConversations(null);  // recovery cleanup, not new activity — don't bump updatedAt
-          syncConversationToServer(conv, { allowTruncate: true });
-          /* ★ FIX: after popping the empty ghost the NEW tail may be the
-           *   preceding `user` message. Without this `continue`, execution
-           *   falls straight into the Case-E block below, which sees a recent
-           *   trailing user msg and queues an UNREQUESTED startAssistantResponse
-           *   — re-running (and re-billing) a turn the user never asked to
-           *   re-run, potentially duplicating a completed answer. A ghost
-           *   reconcile must never auto-fire an LLM turn. Cases A/B/C all
-           *   `continue`; Case D's delete branch was the sole leak. */
-          continue;
-        } else if (_ghost === 'interrupted') {
-          /* Has a stray `thinking` fragment (and possibly _memoryPrefetch) but
-             no content/finishReason — an interrupted turn whose task is gone.
-             DON'T delete (that discards recovered reasoning + provenance);
-             STAMP finishReason='interrupted' so it renders honestly with the
-             "Interrupted" finish badge instead of a blank, tag-less bubble.
-             Without this the trailing husk slips past the delete branch (its
-             `thinking` defeats the `!thinking` guard) and is orphaned forever. */
-          console.warn(
-            `[initActiveTasks CaseD] Stamping interrupted on ghost thinking-only assistant message in conv ${conv.id.slice(0, 8)} ` +
-            `(thinking=${(lastMsg.thinking || '').length}chars, msgs=${conv.messages.length}). ` +
-            `Interrupted turn whose task is gone — preserving recovered thinking.`,
-          );
-          lastMsg.finishReason = 'interrupted';
-          saveConversations(null);  // recovery reconcile, not new activity — don't bump updatedAt
-          syncConversationToServer(conv);
-        }
-      }
+      /* Case D: RETIRED (2026-07-11). The trailing-assistant ghost verdict —
+       *   'delete' an empty husk, 'interrupt'-stamp a thinking-only husk — is
+       *   now applied ENTIRELY server-side by
+       *   lib/conversations/reconcile.py::reconcile_conversation_messages, which
+       *   both persists the cleaned list AND stamps settings._reconciledAt in
+       *   the SAME commit. That reconcile runs on EVERY render path the client
+       *   can take: the single-conv GET (_reconcile_conv_on_get_blocking), the
+       *   ?meta=1&prefetch= path (_prefetch_reconciled_dict — the last bypass,
+       *   closed 2026-07-11), and startup recovery. So any idle conv the
+       *   frontend renders has already had the identical verdict applied +
+       *   _reconciledAt set — the JS `_classifyGhostTail` belt (and its
+       *   non-destructive interrupt stamp) is now dead code and is removed.
+       *   Backend/frontend equivalence proven by
+       *   tests/test_reconcile_js_backend_equivalence.py; the prefetch bypass
+       *   closure by tests/test_prefetch_path_reconcile.py. */
 
-      /* Case E: ★ Orphaned user message — last msg is user, no activeTaskId,
-         no running server task. This happens when:
-         (a) sendMessage() was interrupted by page refresh during blocking translation wait
-         (b) startAssistantResponse() failed silently and wasn't persisted
-         (c) Network error prevented the POST /api/chat/start from completing
-         Recovery: auto-start the assistant response so the user doesn't have to
-         re-send. Only trigger for recent messages (< 5 min old) to avoid
-         accidentally re-sending ancient stale messages.
-         ★ SKIP image gen messages (🎨 prefix / _isImageGen) — those are handled
-         by generateImageDirect(), NOT the orchestrator. Re-sending them to
-         startAssistantResponse() would send them to the LLM, causing a freeze.
+      /* Case E: orphaned trailing user message.
+         The old frontend logic INFERRED an orphan from an age<5min heuristic
+         (on messages OR a stale _needsLoad shell's settings.lastMsgRole) and
+         then AUTO-STARTED a billed LLM turn behind a 3s setTimeout. That was a
+         frontend lifecycle inference driving a costly, hard-to-reverse action
+         — and on a stale shell it could DOUBLE-ANSWER (fire a second turn on
+         top of an answer that already existed but whose metadata still said
+         trailing-user).
 
-         ★ FIX: Also detect orphans in _needsLoad shell convs using metadata.
-         Before this fix, shell convs (messages not loaded) silently skipped Case E
-         because the guard `!conv._needsLoad && conv.messages.length > 0` excluded them.
-         Now we check settings.lastMsgRole/lastMsgTimestamp from metadata. */
-      {
-        let _caseELastRole = null;
-        let _caseELastTimestamp = null;
-        let _caseESource = null;  // 'messages' or 'metadata'
-        if (!conv._needsLoad && conv.messages.length > 0) {
-          const lastMsg = conv.messages[conv.messages.length - 1];
-          _caseELastRole = lastMsg?.role;
-          _caseELastTimestamp = lastMsg?.timestamp;
-          _caseESource = 'messages';
-        } else if (conv._needsLoad && conv.lastMsgRole) {
-          /* ★ Shell conv: use metadata persisted by syncConversationToServer.
-           *   _applySettingsToConv maps settings.lastMsgRole → conv.lastMsgRole
-           *   and settings.lastMsgTimestamp → conv.lastMsgTimestamp. */
-          _caseELastRole = conv.lastMsgRole;
-          _caseELastTimestamp = conv.lastMsgTimestamp;
-          _caseESource = 'metadata';
-        }
-        if (_caseELastRole === 'user' && _caseELastTimestamp) {
-          // ★ Skip image gen orphans — they belong to the creative mode pipeline
-          // (can only check content for loaded convs; metadata orphans are assumed non-image-gen)
-          let isImageGenOrphan = false;
-          if (_caseESource === 'messages') {
-            const lastMsg = conv.messages[conv.messages.length - 1];
-            isImageGenOrphan = lastMsg._isImageGen || (lastMsg.content || '').startsWith('🎨 ');  // backward compat
-          }
-          if (isImageGenOrphan) {
-            console.warn(
-              `[initActiveTasks CaseE] ⏭ Skipping image gen orphan in conv ${conv.id.slice(0, 8)}`
-            );
-          } else {
-            const ageMs = Date.now() - _caseELastTimestamp;
-            const MAX_ORPHAN_AGE_MS = 5 * 60 * 1000; // 5 minutes
-            if (ageMs < MAX_ORPHAN_AGE_MS) {
-              console.warn(
-                `[initActiveTasks CaseE] ★ Orphaned user message detected in conv ${conv.id.slice(0, 8)} ` +
-                `(source=${_caseESource}, age=${(ageMs/1000).toFixed(0)}s). ` +
-                `Auto-starting assistant response…`
-              );
-              // Defer to after the main recovery loop completes
-              // so that all message loading and reconnections finish first
-              caseEConvs.push(conv);
-            }
-          }
-        }
-      }
+         That auto-fire is GONE and NOT replaced: an orphaned user turn is
+         simply left unanswered until the user re-sends. There is NO
+         auto-dispatch and NO age heuristic here anymore — the race class is
+         eliminated, not managed. Nothing to do in this loop. */
     }
 
     /* ── Case A: Reconnect to running tasks immediately ── */
@@ -444,19 +287,43 @@ async function initActiveTasks() {
                   `base=${baseMsgs.length} epTurns=${td.endpointTurns.length} total=${conv.messages.length}`);
               }
 
-              /* ★ BUG FIX: If local already has more content than server, KEEP local content
-                 This prevents data loss when SSE accumulated content but task result was incomplete */
+              /* ★ Server-authoritative merge (separation-of-concerns): the
+                 local-vs-server winner is decided by the SERVER-ISSUED task
+                 STATUS, never by a frontend content-length compare. A `done`
+                 poll is a settled TERMINAL verdict — the persisted tail IS the
+                 single source of truth, so adopt it VERBATIM even when a stale
+                 local buffer happens to be longer. The old
+                 `localContentLen > serverContentLen` referee let a stale-longer
+                 local win and then re-PUT over fresh server truth (the same
+                 "looks-longer wins" data-conflict class as the retired
+                 wall-clock tiebreaker). Keep-longer-local survives ONLY as an
+                 OFFLINE RESCUE when the task did NOT cleanly settle
+                 (interrupted / server crash): the local SSE buffer may hold
+                 un-acked stream content the checkpoint never captured. */
               if (am && am.role === "assistant") {
+                const _serverSettled = td.status === 'done';
+                /* ★ P1b flicker guard: if the tail is ALREADY settled (carries a
+                 *   finishReason from a prior recovery pass or a different task),
+                 *   a Case-B poll snapshot may only be adopted when it strictly
+                 *   grows the content — otherwise the competing SSE-cold vs poll
+                 *   folds swap the displayed text back and forth on every reload.
+                 *   Also blocks a snapshot from a foreign task rewriting a
+                 *   settled tail. A live tail (no finishReason) is untouched. */
+                const _clobberSettled = (typeof pollWriteWouldClobberSettledTail === 'function')
+                  && pollWriteWouldClobberSettledTail(am, conv.activeTaskId, td);
                 if (td.content) {
-                  if (localContentLen > serverContentLen) {
-                    console.warn(`[initActiveTasks CaseB] ⚠️ KEEPING LOCAL content (${localContentLen} > server ${serverContentLen}) — would lose data!`);
+                  if (_clobberSettled) {
+                    console.info(`[initActiveTasks CaseB] settled-tail write suppressed (flicker guard) — ` +
+                      `conv=${conv.id.slice(0,8)} finishReason=${am.finishReason} localLen=${localContentLen} serverLen=${serverContentLen}`);
+                  } else if (!_serverSettled && localContentLen > serverContentLen) {
+                    console.warn(`[initActiveTasks CaseB] ⚠️ KEEPING LOCAL content (${localContentLen} > server ${serverContentLen}, status=${td.status||'?'}) — task not cleanly settled, local SSE buffer may hold un-acked content`);
                   } else {
                     am.content = td.content;
                   }
                 }
                 if (td.thinking) {
-                  if (localThinkingLen > serverThinkingLen) {
-                    console.warn(`[initActiveTasks CaseB] ⚠️ KEEPING LOCAL thinking (${localThinkingLen} > server ${serverThinkingLen}) — would lose data!`);
+                  if (!_serverSettled && localThinkingLen > serverThinkingLen) {
+                    console.warn(`[initActiveTasks CaseB] ⚠️ KEEPING LOCAL thinking (${localThinkingLen} > server ${serverThinkingLen}, status=${td.status||'?'}) — task not cleanly settled`);
                   } else {
                     am.thinking = td.thinking;
                   }
@@ -582,6 +449,7 @@ async function initActiveTasks() {
         await Promise.all(offlineConvs.map(async (conv) => {
           const am = conv.messages[conv.messages.length - 1];
           const localContentLen = am.content?.length || 0;
+          let _cleared = false;
           try {
             // Try to get server's version — it may have the completed result
             const data = await Api.conversations.get(conv.id);
@@ -600,13 +468,22 @@ async function initActiveTasks() {
                     am.content = serverLast.content;
                     if (serverLast.thinking) am.thinking = serverLast.thinking;
                     if (serverLast.toolRounds) am.toolRounds = serverLast.toolRounds;
-                    if (serverLast.finishReason && serverLast.finishReason !== 'server_offline') {
-                      am.finishReason = serverLast.finishReason;
-                    }
                     if (serverLast.usage) am.usage = serverLast.usage;
                     if (serverLast.model) am.model = serverLast.model;
                     if (serverLast.modifiedFiles) am.modifiedFiles = serverLast.modifiedFiles;
                     if (serverLast.modifiedFileList) am.modifiedFileList = serverLast.modifiedFileList;
+                    _cleared = true;
+                  }
+                  /* ★ AC3: adopt the server's REAL terminal reason regardless of
+                   *   content length. The badge on the bubble is the visible
+                   *   residue — if the server settled the turn (e.g. 'stop'),
+                   *   the stale 'server_offline' badge must be REPLACED by it,
+                   *   not merely have its error text wiped. */
+                  if (serverLast.finishReason && serverLast.finishReason !== 'server_offline'
+                      && am.finishReason === 'server_offline') {
+                    am.finishReason = serverLast.finishReason;
+                    if (serverLast.usage) am.usage = serverLast.usage;
+                    _cleared = true;
                   }
                 }
               }
@@ -614,49 +491,36 @@ async function initActiveTasks() {
           } catch (e) {
             console.debug(`[initActiveTasks CaseF] Server fetch failed for conv=${conv.id.slice(0,8)}: ${e.message}`);
           }
-          // Always clear the misleading error text — server is online now
+          // Clear the misleading error text — server is online now.
           if (am.error && errorEnvelopeKind(am.error) === 'server_offline') {
-            console.info(
-              `[initActiveTasks CaseF] conv=${conv.id.slice(0,8)}: clearing stale error text ` +
-              `(content=${(am.content?.length||0)}chars, finishReason=${am.finishReason})`
-            );
             delete am.error;
-            saveConversations(null);  // clearing a stale offline error — not new activity, don't bump updatedAt
+            _cleared = true;
+          }
+          /* ★ AC3: if the server had no fresher finishReason to adopt but the
+           *   bubble is STILL stuck on the frontend-only 'server_offline' badge
+           *   (server is provably back — we just fetched /api/chat/active), drop
+           *   the badge so no "connection lost / server offline" residue lingers
+           *   on a bubble whose answer is already complete. */
+          if (am.finishReason === 'server_offline') {
+            console.info(
+              `[initActiveTasks CaseF] conv=${conv.id.slice(0,8)}: dropping stale server_offline badge ` +
+              `(server back online, content=${(am.content?.length||0)}chars)`
+            );
+            delete am.finishReason;
+            _cleared = true;
+          }
+          if (_cleared) {
+            saveConversations(null);  // clearing stale offline residue — not new activity, don't bump updatedAt
             syncConversationToServer(conv);
           }
         }));
       }
     }
 
-    /* ── Case E dispatch: auto-start responses for orphaned user messages ── */
-    if (caseEConvs.length > 0) {
-      console.warn(`[initActiveTasks CaseE] ★ Auto-starting ${caseEConvs.length} orphaned conversations`);
-      /* ★ FIX: Delay Case E dispatch by 3s to give the user time to interact.
-       *   Without delay, Case E fires startAssistantResponse immediately after
-       *   page load, racing with the user's own sendMessage() if they quickly
-       *   click a conversation and hit Send.  Both paths push assistant messages
-       *   and POST /api/chat/start concurrently → broken SSE.
-       *   The 3s delay lets the user's action take priority.  The re-check
-       *   guard (activeTaskId / activeStreams) catches any user-initiated task. */
-      setTimeout(() => {
-        for (const conv of caseEConvs) {
-          // Re-check: user may have already started a response for this conv
-          if (conv.activeTaskId || activeStreams.has(conv.id)) {
-            console.log(
-              `[initActiveTasks CaseE] ⏭ Skipping conv ${conv.id.slice(0,8)} — ` +
-              `task already started (activeTaskId=${conv.activeTaskId?.slice(0,8) || 'none'}, ` +
-              `streaming=${activeStreams.has(conv.id)})`
-            );
-            continue;
-          }
-          debugLog(
-            `Recovering orphaned message in "${conv.title?.slice(0,30)}…" — auto-starting assistant response`,
-            "warn",
-          );
-          startAssistantResponse(conv.id);
-        }
-      }, 3000);
-    }
+    /* ── Case E: no auto-dispatch. Deleting the old 3s setTimeout +
+     *   startAssistantResponse auto-fire is the fundamental fix — a billed turn
+     *   is never minted from a client-side inference. An orphaned user turn is
+     *   left unanswered until the user re-sends. ── */
     }; /* end _bgRecovery */
 
     /* Fire background recovery — don't await it */

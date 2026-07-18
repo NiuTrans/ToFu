@@ -593,5 +593,211 @@ class TestAnthropicOutboundReplay:
         assert types == ['tool_use']
 
 
+# ═══════════════════════════════════════════════════════════
+#  STEP 4 — segment-driven reconstruction parity (epic pt_cb8f98b0cb9b47fb)
+# ═══════════════════════════════════════════════════════════
+#
+# Proves the SEGMENT model can drive the exact wire messages the toolRounds
+# path produces today — the strangler-fig reader migration. Every case builds
+# segments via assemble_segments, then compares
+# reconstruct_tool_messages_from_segments(...) BYTE-IDENTICAL to
+# _reconstruct_tool_call_messages(rounds). Invariants #2/#3/#4/#6 pinned +
+# neutered.
+
+from lib.tasks_pkg.segments import (  # noqa: E402
+    assemble_segments,
+    reconstruct_tool_messages_from_segments,
+    rehydrate_segments,
+    segments_to_json,
+    tool_history_from_segments,
+)
+
+
+def _task_with_rounds(rounds, content='', thinking=''):
+    return {'id': 'seg' + '0' * 29, 'convId': 'c' * 32,
+            'content': content, 'thinking': thinking, 'toolRounds': rounds}
+
+
+class TestSegmentReconstructionParity:
+    """reconstruct_tool_messages_from_segments == _reconstruct_tool_call_messages."""
+
+    def _round(self, rn, lr, tc_id, name, args, content, *,
+               ac='', think='', sig='', extra=None):
+        r = {'roundNum': rn, 'llmRound': lr, 'toolCallId': tc_id,
+             'toolName': name, 'toolArgs': args, 'toolContent': content,
+             'status': 'done'}
+        if ac:
+            r['assistantContent'] = ac
+        if think:
+            r['thinking'] = think
+        if sig:
+            r['thinkingSignature'] = sig
+        if extra:
+            r['extraContent'] = extra
+        return r
+
+    def test_single_round_parity(self):
+        rounds = [self._round(1, 0, 'tc_1', 'web_search', '{"q":"x"}', 'hit',
+                              ac='Let me search.')]
+        task = _task_with_rounds(rounds, content='Answer.')
+        segs = assemble_segments(task)
+        from_seg = reconstruct_tool_messages_from_segments(segs)
+        from_rounds = _reconstruct_tool_call_messages(rounds)
+        assert from_seg == from_rounds
+        assert from_seg is not None
+
+    def test_multi_call_batch_parity(self):
+        rounds = [
+            self._round(1, 0, 'tc_1', 'grep_search', '{"p":"a"}', 'hitA',
+                        ac='Searching.', think='reason', sig='sig-0'),
+            self._round(2, 0, 'tc_2', 'read_files', '{"path":"b"}', 'bodyB'),
+            self._round(3, 1, 'tc_3', 'apply_diff', '{"path":"b"}', 'ok',
+                        ac='Applying fix.'),
+        ]
+        task = _task_with_rounds(rounds, content='Done.', thinking='final')
+        segs = assemble_segments(task)
+        assert reconstruct_tool_messages_from_segments(segs) == \
+            _reconstruct_tool_call_messages(rounds)
+
+    def test_gemini_extra_content_parity_after_rehydrate(self):
+        """Invariant: Gemini extraContent (thin-stripped) is recovered via
+        rehydrate before reconstruction → parity holds."""
+        rounds = [self._round(1, 0, 'tc_1', 'web_search', '{}', 'ok',
+                              extra={'google': {'thought_signature': 'gem'}})]
+        task = _task_with_rounds(rounds, content='A.')
+        segs = assemble_segments(task)
+        # Simulate the persist→read boundary: thin then rehydrate against rounds.
+        thin = segments_to_json(segs)
+        rehydrated = rehydrate_segments(thin, rounds)
+        from_seg = reconstruct_tool_messages_from_segments(rehydrated)
+        from_rounds = _reconstruct_tool_call_messages(rounds)
+        assert from_seg == from_rounds
+        assert from_seg[0]['tool_calls'][0]['extra_content'] == \
+            {'google': {'thought_signature': 'gem'}}
+
+    def test_thin_without_rehydrate_drops_extra_content(self):
+        """NC-ish: reconstructing from the THIN segments (no rehydrate) loses
+        extraContent — proving rehydrate is load-bearing for Gemini replay."""
+        rounds = [self._round(1, 0, 'tc_1', 'web_search', '{}', 'ok',
+                              extra={'google': {'thought_signature': 'gem'}})]
+        task = _task_with_rounds(rounds, content='A.')
+        thin = segments_to_json(assemble_segments(task))
+        from_thin = reconstruct_tool_messages_from_segments(thin)
+        assert 'extra_content' not in from_thin[0]['tool_calls'][0]
+
+
+class TestSegmentContinueGroundTruth:
+    """Continue = checkpoint rounds + current rounds. The segment path merges
+    them via _merge_tool_rounds (checkpoint+current, no double-count, inv #6)
+    and drives byte-identical wire messages vs the toolRounds path."""
+
+    def _mk_continue_task(self):
+        ckpt = [{
+            'roundNum': 1, 'llmRound': 0, 'toolCallId': 'tc_a',
+            'toolName': 'web_search', 'toolArgs': '{"q":"x"}',
+            'toolContent': 'result a', 'status': 'done',
+            'assistantContent': 'Searching (pre-checkpoint).',
+            'thinking': 'ckpt reason', 'thinkingSignature': 'ckpt-sig',
+        }]
+        cur = [{
+            'roundNum': 2, 'llmRound': 1, 'toolCallId': 'tc_b',
+            'toolName': 'fetch_url', 'toolArgs': '{"url":"https://x"}',
+            'toolContent': 'page body', 'status': 'done',
+            'assistantContent': 'Fetching the top hit.',
+        }]
+        return {'id': 'cont' + '0' * 28, 'convId': 'c' * 32,
+                'content': 'Final synthesis.', 'thinking': '',
+                '_checkpointToolRounds': ckpt, 'toolRounds': cur}
+
+    def test_continue_segment_rebuild_matches_toolrounds(self):
+        from lib.tasks_pkg.manager import _merge_tool_rounds
+        task = self._mk_continue_task()
+        merged = _merge_tool_rounds(task)
+        # Segment path: assemble over the merged rounds → reconstruct.
+        segs = assemble_segments(task, merged=merged)
+        from_seg = reconstruct_tool_messages_from_segments(segs)
+        from_rounds = _reconstruct_tool_call_messages(merged)
+        assert from_seg == from_rounds
+        assert from_seg is not None
+
+    def test_continue_no_double_count_invariant_6(self):
+        """Segment merge uses checkpoint+current ordering exactly ONCE — the
+        merged list has 2 rounds, and the segment path yields exactly 2
+        tool_use → 2 assistant(tool_calls) messages (not 3-4 from double-count)."""
+        from lib.tasks_pkg.manager import _merge_tool_rounds
+        task = self._mk_continue_task()
+        merged = _merge_tool_rounds(task)
+        assert len(merged) == 2  # checkpoint(1) + current(1), no double-count
+        segs = assemble_segments(task, merged=merged)
+        msgs = reconstruct_tool_messages_from_segments(segs)
+        asst_tc = [m for m in msgs if m.get('tool_calls')]
+        assert len(asst_tc) == 2
+        # Ordering preserved: checkpoint tool first, current tool second.
+        assert asst_tc[0]['tool_calls'][0]['function']['name'] == 'web_search'
+        assert asst_tc[1]['tool_calls'][0]['function']['name'] == 'fetch_url'
+
+    def test_continue_thinking_signature_carried_invariant_4(self):
+        """The checkpoint round's thinking+signature survives the segment
+        rebuild (inv #4: Claude needs both to replay a signed thinking block)."""
+        task = self._mk_continue_task()
+        segs = assemble_segments(task)
+        msgs = reconstruct_tool_messages_from_segments(segs)
+        asst0 = [m for m in msgs if m.get('tool_calls')][0]
+        assert asst0['reasoning_content'] == 'ckpt reason'
+        assert asst0['thinking_signature'] == 'ckpt-sig'
+
+    def test_NC_segment_drops_signature_fails_inv_4(self):
+        """NEUTER inv #4: strip the signature off the checkpoint thinking
+        segment → the rebuilt assistant loses the signed thinking block
+        (Claude would reject) → the parity assertion against the signed
+        toolRounds path FAILS. Proves the signature carry is load-bearing."""
+        from lib.tasks_pkg.segments import SEG_THINKING
+        from lib.tasks_pkg.manager import _merge_tool_rounds
+        task = self._mk_continue_task()
+        merged = _merge_tool_rounds(task)
+        segs = assemble_segments(task, merged=merged)
+        # Poison: drop the signature off the (non-terminal) thinking segment.
+        for s in segs:
+            if s.get('type') == SEG_THINKING and not s.get('terminal'):
+                s.pop('signature', None)
+        from_seg = reconstruct_tool_messages_from_segments(segs)
+        from_rounds = _reconstruct_tool_call_messages(merged)
+        # Signed rounds path keeps the signature; neutered segment path drops
+        # it → the reconstructions DIVERGE.
+        assert from_seg != from_rounds
+        asst0 = [m for m in from_seg if m.get('tool_calls')][0]
+        assert 'thinking_signature' not in asst0
+
+
+class TestToolHistoryFromSegmentsParity:
+    """A Continue rebuild driven from persisted segments (tool_history_from_
+    segments → inject_tool_history) is byte-identical to the frontend-supplied
+    toolHistory path — proving segments CAN drive inject_tool_history."""
+
+    def test_inject_tool_history_parity_claude(self):
+        # Frontend-supplied toolHistory (the live Continue path today).
+        cfg_fe = {'toolHistory': [
+            _th_round('tc_1', 'fetch_url', '{"url":"https://x"}', 'page body',
+                      assistant_content='Fetching…',
+                      thinking='reasoned', thinking_signature='sig-123')]}
+        msgs_fe = _base_messages()
+        inject_tool_history(msgs_fe, cfg_fe, _make_task(), 'claude-opus-4-7')
+
+        # Segment-derived toolHistory (the step-4 capability).
+        rounds = [{
+            'roundNum': 1, 'llmRound': 0, 'toolCallId': 'tc_1',
+            'toolName': 'fetch_url', 'toolArgs': '{"url":"https://x"}',
+            'toolContent': 'page body', 'status': 'done',
+            'assistantContent': 'Fetching…', 'thinking': 'reasoned',
+            'thinkingSignature': 'sig-123'}]
+        task = _task_with_rounds(rounds, content='A.')
+        segs = assemble_segments(task)
+        cfg_seg = {'toolHistory': tool_history_from_segments(segs)}
+        msgs_seg = _base_messages()
+        inject_tool_history(msgs_seg, cfg_seg, _make_task(), 'claude-opus-4-7')
+
+        assert msgs_seg == msgs_fe
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v', '-s'])

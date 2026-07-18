@@ -102,11 +102,17 @@ git push origin v0.10.0
 ```
 
 This runs `.github/workflows/build-desktop.yml` which produces:
-- `Tofu-Setup-0.10.0-win64.exe` — Windows installer (Inno Setup)
-- `Tofu-0.10.0-macos.dmg` — macOS disk image
-- `Tofu-0.10.0-linux-x86_64.tar.gz` — Linux portable archive
+- `Tofu-Setup-<ver>-win64.exe` — Windows installer (Inno Setup)
+- `Tofu-<ver>-macos-arm64.dmg` — macOS disk image, Apple Silicon (built on `macos-14`)
+- `Tofu-<ver>-macos-x86_64.dmg` — macOS disk image, Intel (built on `macos-13`)
+- `Tofu-<ver>-linux-x86_64.tar.gz` — Linux portable archive
+- `SHA256SUMS` — checksums covering all of the above
 
-Artifacts are attached to a draft GitHub Release.
+The release is **published immediately and promoted to Latest** (`draft: false` +
+`make_latest`), so `…/releases/latest` resolves to it. Two native macOS DMGs are
+built (not a universal2 fat binary — the runner interpreter and some C-extension
+wheels are single-arch). A completeness gate refuses to publish unless all four
+platform/arch assets are present, so a partial build never ships as Latest.
 
 ## Manual workflow dispatch
 
@@ -116,9 +122,11 @@ Go to Actions → "Build Desktop" → "Run workflow" to build without tagging.
 
 For distribution without OS warnings:
 - **Windows**: Get an EV code signing certificate, add to GitHub Secrets as `WIN_CERT_PFX` + `WIN_CERT_PASSWORD`
-- **macOS**: Enroll in Apple Developer Program ($99/yr), add signing identity to the workflow
+- **macOS**: Enroll in Apple Developer Program ($99/yr), add `MACOS_CERT_P12` + `MACOS_CERT_PASSWORD` + `MACOS_NOTARY_APPLE_ID` / `MACOS_NOTARY_TEAM_ID` / `MACOS_NOTARY_PASSWORD`
 
-Without signing, users will see SmartScreen (Windows) or Gatekeeper (macOS) warnings on first launch.
+The signing steps are already wired into `build-desktop.yml` but **commented out**
+(inert) until those secrets exist — uncomment them to enable. Without signing,
+users will see SmartScreen (Windows) or Gatekeeper (macOS) warnings on first launch.
 
 ## Adding New Optional Components
 
@@ -129,6 +137,12 @@ Without signing, users will see SmartScreen (Windows) or Gatekeeper (macOS) warn
 
 ## Updating
 
-The desktop build currently has no auto-update mechanism. Users download a new installer from the Releases page.
+The desktop build does not self-install updates, but on startup it does a
+best-effort check of the latest published release: when a newer version exists it
+shows a **Download update (&lt;tag&gt;)** item in the system-tray menu that opens the
+Releases page. The check runs on a daemon thread, is non-blocking, and fails
+silently when offline or rate-limited (see `_check_for_update` in
+`desktop/launcher.py`). Users then download and run the new installer — on macOS,
+pick the `.dmg` matching their chip (`-arm64` = Apple Silicon, `-x86_64` = Intel).
 
-Future: integrate [Sparkle](https://sparkle-project.org/) (macOS) or [winsparkle](https://winsparkle.org/) (Windows) for delta updates.
+Future: integrate [Sparkle](https://sparkle-project.org/) (macOS) or [winsparkle](https://winsparkle.org/) (Windows) for in-place delta updates.

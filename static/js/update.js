@@ -242,7 +242,12 @@ function _renderUpdateStepper() {
   });
 }
 
-/** Apply a {stage,status,detail} frame to the stepper. */
+/** Apply a {stage,status,detail,pct,loaded,total,speed} frame to the stepper.
+ *  A stage may report determinate progress (fetch download with a
+ *  Content-Length → pct 0-100) or indeterminate activity (pip install lines,
+ *  git object counting with no total). We render a thin per-step bar so a
+ *  long-running stage NEVER looks frozen: determinate fills to pct, otherwise
+ *  it shows an animated indeterminate sweep. */
 function _applyStageFrame(frame) {
   if (!_updateStageEls) return;
   const el = _updateStageEls[frame.stage];
@@ -252,15 +257,54 @@ function _applyStageFrame(frame) {
     el.classList.add('is-active');
   } else if (frame.status === 'done') {
     el.classList.add('is-done');
+    _setStepBar(el, null, false);  // clear the bar on completion
   } else if (frame.status === 'skip') {
     el.classList.add('is-done');
+    _setStepBar(el, null, false);
     const lbl = el.querySelector('.upd-step-label');
     if (lbl) lbl.textContent = t('update.step.depsSkip');
   } else if (frame.status === 'error') {
     el.classList.add('is-error');
+    _setStepBar(el, null, false);
   }
   const det = el.querySelector('.upd-step-detail');
   if (det && frame.detail && frame.status !== 'error') det.textContent = frame.detail;
+
+  // Live progress bar while a stage is active.
+  if (frame.status === 'active') {
+    if (typeof frame.pct === 'number' && frame.pct >= 0) {
+      _setStepBar(el, Math.max(0, Math.min(100, frame.pct)), false);
+    } else {
+      // No total → indeterminate sweep (still visibly "working").
+      _setStepBar(el, null, true);
+    }
+  }
+}
+
+/** Ensure a stage row carries a <div class="upd-step-bar"> and drive it.
+ *  pct=number → determinate width; indeterminate=true → animated sweep;
+ *  pct=null & indeterminate=false → remove the bar entirely. */
+function _setStepBar(el, pct, indeterminate) {
+  let wrap = el.querySelector('.upd-step-bar');
+  if (pct === null && !indeterminate) {
+    if (wrap) wrap.remove();
+    return;
+  }
+  if (!wrap) {
+    wrap = document.createElement('div');
+    wrap.className = 'upd-step-bar';
+    wrap.innerHTML = '<div class="upd-step-bar-fill"></div>';
+    el.appendChild(wrap);
+  }
+  const fill = wrap.querySelector('.upd-step-bar-fill');
+  if (!fill) return;
+  if (indeterminate) {
+    wrap.classList.add('is-indeterminate');
+    fill.style.width = '';
+  } else {
+    wrap.classList.remove('is-indeterminate');
+    fill.style.width = pct.toFixed(1) + '%';
+  }
 }
 
 /** Kick off the update. The backend runs it in a background thread and
@@ -433,6 +477,12 @@ var _restartT0 = 0;
 var _restartRaf = null;
 var _restartPoll = null;
 var _restartDone = false;
+// The server's bootId captured BEFORE we trigger the restart. The re-exec
+// mints a fresh bootId (os.execv keeps the PID + start-time, so bootId is the
+// only reliable 'a NEW process answered' signal). _restartCheckHealth only
+// declares success when health returns a DIFFERENT bootId — so the OLD process
+// still answering during the drain window is never mistaken for a done restart.
+var _restartPreBootId = null;
 // True from the moment a restart is kicked off until it succeeds or times
 // out. Single source of truth that the dialog-render paths consult so they
 // never clobber the live restart progress card (e.g. re-opening the dialog
@@ -545,21 +595,73 @@ async function restartServer(opts) {
   // post-pull button could be double-clicked) so we never spawn a second
   // poll loop or reset the progress timeline.
   if (_restartActive) return;
-  // The footer button is available with no pending update — confirm first so
-  // a stray click never interrupts running tasks.
-  if (opts && opts.confirm && !await showConfirm(t('update.restartConfirm'), { danger: true })) return;
   _restartActive = true;
   const btn = document.getElementById('updateRestartBtn')
     || document.getElementById('updateRestartNowBtn');
+  const _restoreBtn = function () {
+    if (btn) { btn.disabled = false; btn.textContent = t('update.restartBtn'); }
+  };
   if (btn) { btn.disabled = true; btn.textContent = t('update.restarting'); }
 
-  _renderRestartProgress();
+  // Capture the CURRENT process's bootId first, so we can require the
+  // post-restart health to report a DIFFERENT one (proof a new process
+  // answered). Best-effort: if this probe fails we fall back to null, and the
+  // success rule then accepts any bootId-bearing health (still better than the
+  // old 'any ok' rule) — see _restartCheckHealth.
+  _restartPreBootId = null;
   try {
-    await Api.update.restart();
-  } catch (e) {
-    if (typeof debugLog === 'function') debugLog('[Update] restart request failed: ' + (e && e.message), 'warning');
-  }
+    const pre = await Api.health.info();
+    if (pre && pre.bootId) _restartPreBootId = pre.bootId;
+  } catch (e) { _restartPreBootId = null; }
 
+  // Our own conversation id — the backend excludes it when counting in-flight
+  // tasks, so the running-task count reflects only OTHER conversations a
+  // restart would interrupt (never counts our own idle conv against us).
+  var _ownConv = '';
+  try { _ownConv = activeConvId || ''; } catch (_e) { _ownConv = ''; }
+
+  // Two-stage informed restart. Stage 1: request WITHOUT force. The backend
+  // 409s with {needsForce, runningTasks} only when OTHER conversations have
+  // in-flight tasks a restart would kill; an idle server accepts the
+  // force-less call immediately (no confirm). Only on that 409 do we surface a
+  // themed confirm NAMING the running-task count and, on explicit consent,
+  // retry WITH force. This replaces the old blind generic pre-flight confirm
+  // (so there is no double-confirm) and never silently kills sibling tasks.
+  var _triggered = false;
+  try {
+    await Api.update.restart({ convId: _ownConv });
+    _triggered = true;
+  } catch (e) {
+    if (e && e.status === 409 && e.body && e.body.needsForce) {
+      const count = (e.body.runningTasks || []).length;
+      const ok = await showConfirm(
+        t('update.restartForceConfirm').replace('%s', String(count)),
+        { danger: true });
+      if (!ok) {
+        // Declined — abort cleanly; leave the dialog on its current card.
+        _restartActive = false;
+        _restoreBtn();
+        return;
+      }
+      try {
+        await Api.update.restart({ force: true, convId: _ownConv });
+      } catch (e2) {
+        if (typeof debugLog === 'function') debugLog('[Update] forced restart request failed: ' + (e2 && e2.message), 'warning');
+      }
+      // The re-exec is scheduled server-side (daemon thread) before the
+      // response, so even a read error on the response means it is underway.
+      _triggered = true;
+    } else {
+      // Non-guard error (e.g. a network blip while the backend already
+      // scheduled the fire-and-forget re-exec). Proceed to the health-poll
+      // rather than abort — the poll is the source of truth for "came back".
+      if (typeof debugLog === 'function') debugLog('[Update] restart request failed: ' + (e && e.message), 'warning');
+      _triggered = true;
+    }
+  }
+  if (!_triggered) { _restartActive = false; _restoreBtn(); return; }
+
+  _renderRestartProgress();
   _restartDone = false;
   _restartT0 = Date.now();
   _restartRaf = requestAnimationFrame(_restartAnimate);
@@ -568,15 +670,56 @@ async function restartServer(opts) {
   setTimeout(function () { _restartPoll = setInterval(_restartCheckHealth, 1500); }, 2500);
 }
 
-/** One health probe; on success finish, on overall timeout bail. */
+/** Manual graceful shutdown — writes the manual-shutdown marker so the next
+ *  boot won't mistake this for an OS kill, then stops the server (no re-exec,
+ *  so it does NOT come back on its own). Admin-only; always confirms. */
+async function shutdownServer() {
+  if (_restartActive) return;   // a restart already owns the modal body
+  if (!await showConfirm(t('update.shutdownConfirm'), { danger: true })) return;
+  const rBtn = document.getElementById('updateRestartNowBtn');
+  const sBtn = document.getElementById('updateShutdownBtn');
+  if (rBtn) rBtn.disabled = true;
+  if (sBtn) { sBtn.disabled = true; }
+  try {
+    await Api.update.shutdown();
+  } catch (e) {
+    if (typeof debugLog === 'function') debugLog('[Shutdown] request failed: ' + (e && e.message), 'warning');
+  }
+  const body = document.getElementById('updateModalBody');
+  if (body) {
+    body.innerHTML =
+      '<div class="upd-checking-wrap"><span>' +
+      escapeHtml(t('update.shuttingDown')) + '</span></div>';
+  }
+  showToast('◐', t('update.shuttingDown'), t('update.shutdownHint'), 8000);
+}
+
+/** One health probe; on success finish, on overall timeout bail.
+ *  Success requires a genuinely NEW process answered — health.ok AND a bootId
+ *  that DIFFERS from the one captured before the restart. os.execv keeps the
+ *  PID + start-time, so bootId is the only reliable 'different process' signal;
+ *  keying on it stops the old process (still draining) from being mistaken for
+ *  a completed restart. If we could not capture a pre-restart bootId, or the
+ *  server is an old build that doesn't report bootId, we degrade gracefully:
+ *  accept the first ok health that carries ANY bootId, else (no bootId field at
+ *  all) accept ok — never worse than the old rule, and still bounded by the
+ *  overall timeout. */
 async function _restartCheckHealth() {
   if (_restartDone) return;
   if ((Date.now() - _restartT0) / 1000 > 80) { _restartTimeout(); return; }
   let info = null;
   try {
-    info = await Api.health.info();  // parsed JSON → carries version
+    info = await Api.health.info();  // parsed JSON → carries version + bootId
   } catch (e) { info = null; }
-  if (info && info.ok) _restartSucceed(info.version || '');
+  if (!info || !info.ok) return;
+  // Preferred, robust path: we know the old bootId AND the server reports one.
+  if (_restartPreBootId && info.bootId) {
+    if (info.bootId === _restartPreBootId) return;  // still the OLD process — keep waiting
+    _restartSucceed(info.version || '');
+    return;
+  }
+  // Degraded path (no pre-id captured, or old build without bootId): accept ok.
+  _restartSucceed(info.version || '');
 }
 
 function closeUpdateModal() {

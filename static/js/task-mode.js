@@ -33,6 +33,8 @@ var _tmModalReady = false;
 var _tmRunId = null;        // currently-open run; guards stale poll callbacks
 var _tmPolling = false;
 var _tmRuns = [];
+var _tmLoadError = false;   // true when the last taskList() failed (vs empty)
+var _tmPollErrs = 0;        // consecutive event-poll failures (drives backoff)
 var _tmDef = null;          // pinned definition of the open run (for the DAG)
 var _tmActiveNode = null;   // node_id of the currently-running step (highlight)
 var _tmDoneNodes = {};      // node_id → true, steps that have completed
@@ -50,6 +52,13 @@ function _tmIco(name) {
   // _ORCH_ICONS lives in orchestration.js (same bundle). Fall back to an
   // empty string if it somehow isn't present so the line still renders.
   return (typeof _ORCH_ICONS !== 'undefined' && _ORCH_ICONS[name]) || '';
+}
+
+// Localized string lookup. Delegates to the global i18n `t()` (core bundle,
+// loaded before this deferred file). Falls back to the raw key if i18n isn't
+// present so a string never renders blank.
+function _tmT(key, params) {
+  return (typeof t === 'function') ? t(key, params) : key;
 }
 
 // ── Node identity helpers (share the Studio catalogues so a graph node
@@ -116,15 +125,15 @@ function _tmNodeSub(n) {
     var p = n.params || {};
     return (p.tier || 'standard') + ' · ' + (p.isolation || 'fresh');
   }
-  if (n.type === 'subflow') return 'subflow';
+  if (n.type === 'subflow') return _tmT('tm.sub.subflow');
   var k = n.kind, pp = n.params || {};
-  if (k === 'loop') return 'max ' + (pp.max_iterations || 10);
-  if (k === 'parallel') return 'fan-out';
-  if (k === 'branch') return (pp.branches || 2) + ' routes';
+  if (k === 'loop') return _tmT('tm.sub.max') + ' ' + (pp.max_iterations || 10);
+  if (k === 'parallel') return _tmT('tm.sub.fanout');
+  if (k === 'branch') return (pp.branches || 2) + ' ' + _tmT('tm.sub.routes');
   if (k === 'artifact') return pp.path || 'deliverable';
-  if (k === 'human') return ({ approve: 'approval gate', input: 'collect input', notify: 'notify' })[pp.mode] || 'gate';
-  if (k === 'start') return 'input';
-  if (k === 'stop') return 'result';
+  if (k === 'human') return ({ approve: _tmT('tm.sub.approvalGate'), input: _tmT('tm.sub.collectInput'), notify: _tmT('tm.sub.notify') })[pp.mode] || _tmT('tm.sub.gate');
+  if (k === 'start') return _tmT('tm.sub.startInput');
+  if (k === 'stop') return _tmT('tm.sub.stopResult');
   return k || '';
 }
 
@@ -178,29 +187,30 @@ function _tmEnsureModal() {
     +   '<div class="tm-top">'
     +     '<div class="tm-top-left">'
     +       '<span class="tm-top-glyph">' + _tmIco('rocket') + '</span>'
-    +       '<span class="tm-top-name">Task Mode</span>'
-    +       '<span class="tm-top-sub">durable orchestration runs</span>'
+    +       '<span class="tm-top-name">' + _tmT('tm.top.name') + '</span>'
+    +       '<span class="tm-top-sub">' + _tmT('tm.top.sub') + '</span>'
     +     '</div>'
     +     '<div class="tm-top-actions">'
-    +       '<button class="tm-btn" onclick="_tmRefreshRuns()" title="Refresh runs">' + _tmIco('loop') + ' Refresh</button>'
-    +       '<button class="tm-btn tm-btn-close" onclick="closeTaskMode()" title="Close">' + _tmIco('reject') + '</button>'
+    +       '<button class="tm-btn" onclick="_tmOpenStudio()" title="' + _tmT('tm.btn.studio') + '">' + _tmIco('layout') + ' ' + _tmT('tm.btn.studio') + '</button>'
+    +       '<button class="tm-btn" onclick="_tmRefreshRuns()" title="' + _tmT('tm.btn.refresh') + '">' + _tmIco('loop') + ' ' + _tmT('tm.btn.refresh') + '</button>'
+    +       '<button class="tm-btn tm-btn-close" onclick="closeTaskMode()" title="' + _tmT('tm.tip.close') + '">' + _tmIco('reject') + '</button>'
     +     '</div>'
     +   '</div>'
     +   '<div class="tm-body">'
-    +     '<div class="tm-rail"><div class="tm-rail-head">Runs</div>'
+    +     '<div class="tm-rail"><div class="tm-rail-head">' + _tmT('tm.rail.runs') + '</div>'
     +       '<div class="tm-rail-list" id="tmRunList"></div></div>'
     +     '<div class="tm-main">'
     +       '<div class="tm-main-head" id="tmRunTitle">'
-    +         '<div class="tm-empty">' + _tmIco('rocket') + ' Select a run to view its timeline.</div></div>'
+    +         '<div class="tm-empty">' + _tmIco('rocket') + ' ' + _tmT('tm.select') + '</div></div>'
     +       '<div class="tm-graph" id="tmGraph"></div>'
-    +       '<div class="tm-stream"><div class="tm-stream-head">Timeline</div>'
+    +       '<div class="tm-stream"><div class="tm-stream-head">' + _tmT('tm.stream.timeline') + '</div>'
     +         '<div class="tm-timeline" id="tmTimeline"></div></div>'
     +       '<div class="tm-final" id="tmFinal" style="display:none"></div>'
     +     '</div>'
     +     '<div class="tm-inspector" id="tmInspector">'
-    +       '<div class="tm-insp-head">Inspector</div>'
+    +       '<div class="tm-insp-head">' + _tmT('tm.inspector') + '</div>'
     +       '<div class="tm-insp-body" id="tmInspBody">'
-    +         '<div class="tm-insp-empty">' + _tmIco('eye') + '<div>Active node & human gates appear here.</div></div></div>'
+    +         '<div class="tm-insp-empty">' + _tmIco('eye') + '<div>' + _tmT('tm.insp.empty') + '</div></div></div>'
     +     '</div>'
     +   '</div>'
     + '</div>';
@@ -213,32 +223,89 @@ function _tmEnsureModal() {
 
 async function _tmRefreshRuns() {
   var list = document.getElementById('tmRunList');
-  if (list) list.innerHTML = '<div class="tm-empty">Loading…</div>';
+  if (list && !_tmRuns.length) {
+    list.innerHTML = '<div class="tm-loading"><span class="tm-spin"></span>' + _tmT('tm.loading') + '</div>';
+  }
   var res = await Api.orchestrations.taskList();
+  // taskList() resolves null on a network/5xx failure (onError:'null') but a
+  // real, genuinely-empty account returns {ok:true, runs:[]}. Distinguish the
+  // two so a transient failure doesn't masquerade as "No runs yet".
+  if (res === null) { _tmLoadError = true; _tmRenderRunList(); return; }
+  _tmLoadError = false;
   _tmRuns = (res && res.ok && res.runs) || [];
   _tmRenderRunList();
+}
+
+// Elapsed / duration label for a run: live runs show "running Xs", terminal
+// runs show their total wall time. Keeps the list scannable at a glance.
+function _tmDuration(r) {
+  var start = r.created_at || 0;
+  if (!start) return '';
+  var end = _tmIsTerminal(r.status) ? (r.finished_at || r.updated_at || 0) : Date.now();
+  if (!end || end < start) return '';
+  var s = Math.round((end - start) / 1000);
+  var label = s < 60 ? (s + 's')
+            : s < 3600 ? (Math.floor(s / 60) + 'm ' + (s % 60) + 's')
+            : (Math.floor(s / 3600) + 'h ' + Math.floor((s % 3600) / 60) + 'm');
+  return (_tmIsTerminal(r.status) ? '' : (_tmT('tm.dur.running') + ' · ')) + label;
 }
 
 function _tmRenderRunList() {
   var list = document.getElementById('tmRunList');
   if (!list) return;
+  if (_tmLoadError) {
+    list.innerHTML = '<div class="tm-state tm-state-err">'
+      + _tmIco('warn')
+      + '<div class="tm-state-title">' + _tmT('tm.err.title') + '</div>'
+      + '<div class="tm-state-sub">' + _tmT('tm.err.sub') + '</div>'
+      + '<button class="tm-btn tm-state-btn" onclick="_tmRefreshRuns()">' + _tmIco('loop') + ' ' + _tmT('tm.btn.retry') + '</button>'
+      + '</div>';
+    return;
+  }
   if (!_tmRuns.length) {
-    list.innerHTML = '<div class="tm-empty">No runs yet. Run a flow as a Task from the Studio.</div>';
+    list.innerHTML = '<div class="tm-state">'
+      + _tmIco('rocket')
+      + '<div class="tm-state-title">' + _tmT('tm.empty.title') + '</div>'
+      + '<div class="tm-state-sub">' + _tmT('tm.empty.sub') + '</div>'
+      + '<button class="tm-btn tm-btn-primary tm-state-btn" onclick="_tmOpenStudio()">' + _tmIco('layout') + ' ' + _tmT('tm.btn.openStudio') + '</button>'
+      + '</div>';
     return;
   }
   list.innerHTML = _tmRuns.map(function (r) {
     var active = (r.id === _tmRunId) ? ' is-active' : '';
-    return '<button class="tm-run' + active + '" onclick="_tmOpenRun(\'' + _tmEsc(r.id) + '\')">'
+    var live = _tmIsTerminal(r.status) ? '' : ' tm-run-live';
+    var dur = _tmDuration(r);
+    return '<button class="tm-run' + active + live + '" onclick="_tmOpenRun(\'' + _tmEsc(r.id) + '\')">'
       + '<div class="tm-run-top"><span class="tm-run-name">' + _tmEsc(r.name || '(unnamed flow)') + '</span>'
       + _tmStatusChip(r.status) + '</div>'
-      + '<div class="tm-run-meta">' + _tmEsc(_tmAgo(r.created_at)) + '</div>'
+      + '<div class="tm-run-meta">' + _tmEsc(_tmAgo(r.created_at))
+      +   (dur ? '<span class="tm-run-dur">' + _tmEsc(dur) + '</span>' : '')
+      + '</div>'
       + '</button>';
   }).join('');
 }
 
+// Bridge to the authoring surface. Task Mode is the OPERATING room; the Studio
+// is where flows are designed/edited. Leaving Task Mode open under the Studio
+// modal would stack two overlays, so we close this one first.
+function _tmOpenStudio(orchId) {
+  if (typeof openOrchestration !== 'function') {
+    if (typeof _orchToast === 'function') _orchToast(_tmT('tm.studioUnavailable'), true);
+    return;
+  }
+  closeTaskMode();
+  openOrchestration();
+  // If a specific template id was passed (Edit-in-Studio from a run), load it.
+  if (orchId && typeof _orchLoadFromStore === 'function') {
+    _orchLoadFromStore(orchId);
+  }
+}
+
 function _tmStatusChip(status) {
   var s = status || 'pending';
-  return '<span class="tm-chip tm-chip-' + _tmEsc(s) + '">' + _tmEsc(s) + '</span>';
+  var lbl = _tmT('tm.status.' + s);
+  if (lbl === 'tm.status.' + s) lbl = s;   // unknown status → show raw
+  return '<span class="tm-chip tm-chip-' + _tmEsc(s) + '" title="' + _tmEsc(s) + '">' + _tmEsc(lbl) + '</span>';
 }
 
 // ── Center: open + poll one run ─────────────────────────────────────
@@ -247,6 +314,7 @@ async function _tmOpenRun(runId) {
   if (!runId) return;
   _tmRunId = runId;
   _tmPolling = false;
+  _tmPollErrs = 0;
   _tmDef = null;
   _tmActiveNode = null;
   _tmDoneNodes = {};
@@ -279,15 +347,19 @@ async function _tmOpenRun(runId) {
 function _tmRenderTitle(run) {
   var head = document.getElementById('tmRunTitle');
   if (!head) return;
-  if (!run) { head.innerHTML = '<div class="tm-empty">Run not found.</div>'; return; }
+  if (!run) { head.innerHTML = '<div class="tm-empty">' + _tmT('tm.runNotFound') + '</div>'; return; }
+  var editBtn = run.orch_id
+    ? '<button class="tm-btn tm-btn-ghost" onclick="_tmOpenStudio(\'' + _tmEsc(run.orch_id) + '\')" title="' + _tmT('tm.btn.editStudio') + '">' + _tmIco('layout') + ' ' + _tmT('tm.btn.editStudio') + '</button>'
+    : '';
   head.innerHTML = ''
     + '<div class="tm-title-row">'
     +   '<span class="tm-title-name">' + _tmEsc(run.name || '(unnamed flow)') + '</span>'
     +   _tmStatusChip(run.status)
     +   '<span class="tm-title-spacer"></span>'
+    +   editBtn
     +   (_tmIsTerminal(run.status)
-          ? '<button class="tm-btn tm-btn-ghost" onclick="_tmDeleteRun(\'' + _tmEsc(run.id) + '\')" title="Delete run">Delete</button>'
-          : '<button class="tm-btn tm-btn-ghost" onclick="_tmAbortRun(\'' + _tmEsc(run.id) + '\')" title="Abort run">' + _tmIco('stop') + ' Abort</button>')
+          ? '<button class="tm-btn tm-btn-ghost tm-btn-danger" onclick="_tmDeleteRun(\'' + _tmEsc(run.id) + '\')" title="' + _tmT('tm.delete.confirmTitle') + '">' + _tmIco('reject') + ' ' + _tmT('tm.btn.delete') + '</button>'
+          : '<button class="tm-btn tm-btn-ghost" onclick="_tmAbortRun(\'' + _tmEsc(run.id) + '\')" title="' + _tmT('tm.abort.confirmTitle') + '">' + _tmIco('stop') + ' ' + _tmT('tm.btn.abort') + '</button>')
     + '</div>'
     + (run.input ? '<div class="tm-title-input">' + _tmEsc(run.input.slice(0, 300)) + '</div>' : '');
 }
@@ -298,13 +370,30 @@ function _tmIsTerminal(status) {
 
 async function _tmPoll(runId, cursor) {
   if (_tmRunId !== runId || !_tmPolling) return;   // stale / closed
+  // Pause polling while the tab is hidden — no point streaming into a
+  // backgrounded view. Resume on the next visibility tick (a cheap re-check
+  // loop rather than a visibilitychange listener that must be torn down).
+  if (typeof document !== 'undefined' && document.hidden) {
+    setTimeout(function () { _tmPoll(runId, cursor); }, 1500);
+    return;
+  }
   var res = await Api.orchestrations.taskEvents(runId, cursor);
   if (_tmRunId !== runId || !_tmPolling) return;
   if (!res || !res.ok) {
-    _tmLine(_tmIco('warn') + ' failed to load events', 'is-err');
-    _tmPolling = false;
+    // A transient failure must NOT kill the live view — back off and retry,
+    // surfacing a reconnecting notice only once so the timeline isn't spammed.
+    _tmPollErrs++;
+    if (_tmPollErrs === 1) _tmLine(_tmIco('loop') + ' ' + _tmT('tm.line.reconnecting'), 'is-err');
+    if (_tmPollErrs > 12) {   // ~give up after sustained failure (~1 min)
+      _tmLine(_tmIco('warn') + ' ' + _tmT('tm.line.offline'), 'is-err');
+      _tmPolling = false;
+      return;
+    }
+    var backoff = Math.min(800 * _tmPollErrs, 6000);
+    setTimeout(function () { _tmPoll(runId, cursor); }, backoff);
     return;
   }
+  if (_tmPollErrs) { _tmLine(_tmIco('check') + ' ' + _tmT('tm.line.reconnected'), 'is-done'); _tmPollErrs = 0; }
   (res.events || []).forEach(_tmRenderEvent);
   _tmSyncChip(res.status);
 
@@ -325,9 +414,14 @@ function _tmSyncChip(status) {
   if (run && run.status !== status) { run.status = status; _tmRenderRunList(); }
   var head = document.getElementById('tmRunTitle');
   var chip = head && head.querySelector('.tm-chip');
-  if (chip && chip.textContent !== status) {
-    chip.className = 'tm-chip tm-chip-' + status;
-    chip.textContent = status;
+  if (chip) {
+    var lbl = _tmT('tm.status.' + status);
+    if (lbl === 'tm.status.' + status) lbl = status;
+    if (chip.textContent !== lbl) {
+      chip.className = 'tm-chip tm-chip-' + status;
+      chip.title = status;
+      chip.textContent = lbl;
+    }
   }
 }
 
@@ -339,7 +433,7 @@ async function _tmShowFinal(runId) {
   var fin = document.getElementById('tmFinal');
   if (fin && run.final) {
     fin.style.display = '';
-    fin.innerHTML = '<div class="tm-final-label">Result</div>'
+    fin.innerHTML = '<div class="tm-final-label">' + _tmT('tm.final.result') + '</div>'
       + '<pre class="tm-final-pre">' + _tmEsc(run.final.slice(0, 8000)) + '</pre>';
   }
 }
@@ -418,12 +512,12 @@ function _tmRenderGraph() {
     var typeCls = (n.type === 'role') ? ' tm-gnode-role'
                 : (n.type === 'subflow') ? ' tm-gnode-sub' : ' tm-gnode-ctrl';
     var accent = _tmNodeAccent(n);
-    var ribbon = (n.kind === 'start') ? '<span class="tm-gnode-ribbon">INPUT</span>'
-               : (n.kind === 'stop') ? '<span class="tm-gnode-ribbon tm-gnode-ribbon-out">RESULT</span>' : '';
+    var ribbon = (n.kind === 'start') ? '<span class="tm-gnode-ribbon">' + _tmT('tm.ribbon.input') + '</span>'
+               : (n.kind === 'stop') ? '<span class="tm-gnode-ribbon tm-gnode-ribbon-out">' + _tmT('tm.ribbon.result') + '</span>' : '';
     var nidArg = "'" + String(n.id).replace(/'/g, "\\'") + "'";
     parts += '<foreignObject x="' + x + '" y="' + y + '" width="' + _TM_NODE_W + '" height="' + _TM_NODE_H + '">'
       + '<div xmlns="http://www.w3.org/1999/xhtml" class="tm-gnode' + typeCls + act + done + sel + hasTrace + '" style="--tm-accent:' + accent + '"'
-      +   ' onclick="_tmSelectNode(' + nidArg + ')" title="Click to inspect this node\'s run trace">'
+      +   ' onclick="_tmSelectNode(' + nidArg + ')" title="' + _tmT('tm.tip.inspectNode') + '">'
       +   ribbon
       +   '<span class="tm-gnode-ico">' + _tmNodeIconHtml(n) + '</span>'
       +   '<span class="tm-gnode-text"><span class="tm-gnode-label">' + _tmEsc(_tmNodeLabel(n)) + '</span>'
@@ -445,11 +539,14 @@ function _tmRenderGraph() {
 function _tmLine(html, cls) {
   var tl = document.getElementById('tmTimeline');
   if (!tl) return;
+  // Respect a user who has scrolled up to read earlier events — only pin to
+  // the bottom when they were already there (within a small threshold).
+  var atBottom = (tl.scrollHeight - tl.scrollTop - tl.clientHeight) < 40;
   var row = document.createElement('div');
   row.className = 'tm-line' + (cls ? ' ' + cls : '');
   row.innerHTML = html;
   tl.appendChild(row);
-  tl.scrollTop = tl.scrollHeight;
+  if (atBottom) tl.scrollTop = tl.scrollHeight;
 }
 
 // Maps the engine event vocabulary (lib/orchestration_engine.py) to
@@ -460,10 +557,10 @@ function _tmRenderEvent(ev) {
   var dim = function (s, n) { return s ? ' <span class="tm-dim">' + _tmEsc((s || '').slice(0, n || 120)) + '</span>' : ''; };
   switch (ev.type) {
     case 'flow_start':
-      _tmLine(_tmIco('flag') + ' <b>' + _tmEsc(ev.name || 'flow') + '</b> — ' + (ev.nodes || 0) + ' nodes'); break;
+      _tmLine(_tmIco('flag') + ' <b>' + _tmEsc(ev.name || _tmT('tm.ev.flowFallback')) + '</b> — ' + _tmT('tm.ev.flowNodes', { n: (ev.nodes || 0) })); break;
     case 'step_start':
       _tmActiveNode = ev.node_id || null; _tmRenderGraph(); _tmRenderInspector(ev);
-      _tmLine(_tmIco('bot') + ' <b>' + _tmEsc(ev.name || ev.role) + '</b> running…', 'is-active'); break;
+      _tmLine(_tmIco('bot') + ' ' + _tmT('tm.line.stepRunning', { name: _tmEsc(ev.name || ev.role) }), 'is-active'); break;
     case 'step_complete':
       if (ev.node_id) { _tmDoneNodes[ev.node_id] = true; if (_tmActiveNode === ev.node_id) _tmActiveNode = null; _tmRenderGraph(); }
       _tmLine(_tmIco('check') + ' ' + _tmEsc(ev.role) + dim(ev.preview)); break;
@@ -480,25 +577,25 @@ function _tmRenderEvent(ev) {
       break;
     case 'loop_iteration':
       _tmActiveNode = ev.node_id || _tmActiveNode; _tmRenderGraph();
-      _tmLine(_tmIco('loop') + ' loop iteration ' + ev.iteration + '/' + ev.max); break;
+      _tmLine(_tmIco('loop') + ' ' + _tmT('tm.ev.loopIter', { i: ev.iteration, max: ev.max })); break;
     case 'zero_deliverable_guard':
-      _tmLine(_tmIco('warn') + ' zero-deliverable guard', 'is-err'); break;
+      _tmLine(_tmIco('warn') + ' ' + _tmT('tm.ev.zeroGuard'), 'is-err'); break;
     case 'replan':
-      _tmLine(_tmIco('compass') + ' re-plan #' + ev.replan + dim(ev.defect, 100)); break;
+      _tmLine(_tmIco('compass') + ' ' + _tmT('tm.ev.replan', { n: ev.replan }) + dim(ev.defect, 100)); break;
     case 'stuck_detected':
-      _tmLine(_tmIco('loop') + ' stuck — breaking the loop', 'is-err'); break;
+      _tmLine(_tmIco('loop') + ' ' + _tmT('tm.ev.stuck'), 'is-err'); break;
     case 'parallel_start':
-      _tmLine(_tmIco('fanout') + ' fan-out → ' + ev.branches + ' branches'); break;
+      _tmLine(_tmIco('fanout') + ' ' + _tmT('tm.ev.fanout', { n: ev.branches })); break;
     case 'branch_pick':
-      _tmLine(_tmIco('branch') + ' route → ' + _tmEsc(ev.chosen || '(none)')); break;
+      _tmLine(_tmIco('branch') + ' ' + _tmT('tm.ev.route', { name: _tmEsc(ev.chosen || _tmT('tm.ev.none')) })); break;
     case 'artifact_declared':
-      _tmLine(_tmIco('package') + ' deliverable: <b>' + _tmEsc(ev.path || ev.name || '(unnamed)') + '</b>' + dim(ev.description)); break;
+      _tmLine(_tmIco('package') + ' ' + _tmT('tm.ev.deliverable') + '<b>' + _tmEsc(ev.path || ev.name || _tmT('tm.ev.unnamed')) + '</b>' + dim(ev.description)); break;
     case 'human_notify':
-      _tmLine(_tmIco('person') + ' <b>' + _tmEsc(ev.name || 'Human') + '</b>' + dim(ev.prompt, 200)); break;
+      _tmLine(_tmIco('person') + ' <b>' + _tmEsc(ev.name || _tmT('tm.gate.who')) + '</b>' + dim(ev.prompt, 200)); break;
     case 'human_request':
       _tmActiveNode = ev.node_id || _tmActiveNode; _tmRenderGraph();
       if (ev.request_id) { _tmGates[ev.request_id] = ev; _tmRenderInspector(); }
-      _tmLine(_tmIco('person') + ' <b>' + _tmEsc(ev.name || 'Human') + '</b> — gate awaiting response' + dim(ev.prompt, 160), 'is-gate'); break;
+      _tmLine(_tmIco('person') + ' <b>' + _tmEsc(ev.name || _tmT('tm.gate.who')) + '</b>' + _tmT('tm.ev.gateAwaiting') + dim(ev.prompt, 160), 'is-gate'); break;
     case 'human_resolved':
       if (ev.request_id) { delete _tmGates[ev.request_id]; _tmRenderInspector(); }
       _tmLine(_tmIco('person') + ' ' + (ev.mode === 'approve'
@@ -546,7 +643,7 @@ function _tmRenderInspector(stepEv) {
   if (node) {
     var tr = _tmTrace[node.id];
     var pinned = (_tmSelNode === node.id);
-    var kindLbl = pinned ? (tr ? 'Run trace' : 'Node') : 'Active node';
+    var kindLbl = pinned ? (tr ? _tmT('tm.insp.runTrace') : _tmT('tm.insp.node')) : _tmT('tm.insp.activeNode');
     var count = _tmTraceCount[node.id] || 0;
     html += '<div class="tm-insp-card">'
       + '<div class="tm-insp-kind">' + _tmEsc(kindLbl)
@@ -557,7 +654,7 @@ function _tmRenderInspector(stepEv) {
       + '</div>';
   }
 
-  if (!html) html = '<div class="tm-insp-empty">' + _tmIco('eye') + '<div>Active node & human gates appear here.<br>Click any node to inspect its run trace.</div></div>';
+  if (!html) html = '<div class="tm-insp-empty">' + _tmIco('eye') + '<div>' + _tmT('tm.insp.empty') + '<br>' + _tmT('tm.insp.emptyHint') + '</div></div>';
   body.innerHTML = html;
 
   // Wire input gates to Enter-submit after injection.
@@ -578,32 +675,32 @@ function _tmTraceDetail(tr, stepEv) {
     // No trace yet (node still running / pre-trace). Show isolation if the
     // live step_start carried it.
     return (stepEv && stepEv.isolation)
-      ? '<div class="tm-insp-meta">isolation: ' + _tmEsc(stepEv.isolation) + '</div>'
+      ? '<div class="tm-insp-meta">' + _tmT('tm.trace.isolation') + ': ' + _tmEsc(stepEv.isolation) + '</div>'
       : '';
   }
   var h = '';
   var statusCls = (tr.status === 'failed' || tr.status === 'error') ? 'tm-trace-err'
                 : (tr.status === 'completed' || tr.status === 'done') ? 'tm-trace-ok' : '';
   var bits = [];
-  if (tr.emits) bits.push('emits ' + tr.emits);
+  if (tr.emits) bits.push(_tmT('tm.trace.emits') + ' ' + tr.emits);
   if (tr.isolation) bits.push(tr.isolation);
-  if (typeof tr.iteration === 'number' && tr.iteration > 0) bits.push('iter ' + tr.iteration);
-  if (typeof tr.state_changing === 'number') bits.push(tr.state_changing + ' state-changing');
+  if (typeof tr.iteration === 'number' && tr.iteration > 0) bits.push(_tmT('tm.trace.iter') + ' ' + tr.iteration);
+  if (typeof tr.state_changing === 'number') bits.push(tr.state_changing + ' ' + _tmT('tm.trace.stateChanging'));
   h += '<div class="tm-trace-tags"><span class="tm-trace-status ' + statusCls + '">' + _tmEsc(tr.status || '') + '</span>'
     + (bits.length ? '<span class="tm-trace-bits">' + _tmEsc(bits.join(' · ')) + '</span>' : '') + '</div>';
   if (tr.error) {
-    h += '<div class="tm-trace-lbl">Error</div><pre class="tm-trace-pre tm-trace-err">' + _tmEsc(tr.error.slice(0, 2000)) + '</pre>';
+    h += '<div class="tm-trace-lbl">' + _tmT('tm.trace.error') + '</div><pre class="tm-trace-pre tm-trace-err">' + _tmEsc(tr.error.slice(0, 2000)) + '</pre>';
   }
   if (tr.brief) {
-    h += '<div class="tm-trace-lbl">Resolved brief (prompt)</div>'
+    h += '<div class="tm-trace-lbl">' + _tmT('tm.trace.brief') + '</div>'
       + '<pre class="tm-trace-pre">' + _tmEsc(tr.brief.slice(0, 4000)) + '</pre>';
   }
   if (tr.input) {
-    h += '<div class="tm-trace-lbl">Input' + (tr.input_truncated ? ' <span class="tm-trace-trunc">(truncated)</span>' : '') + '</div>'
+    h += '<div class="tm-trace-lbl">' + _tmT('tm.trace.input') + (tr.input_truncated ? ' <span class="tm-trace-trunc">' + _tmT('tm.trace.truncated') + '</span>' : '') + '</div>'
       + '<pre class="tm-trace-pre">' + _tmEsc(tr.input.slice(0, 4000)) + '</pre>';
   }
   if (tr.output) {
-    h += '<div class="tm-trace-lbl">Output' + (tr.output_truncated ? ' <span class="tm-trace-trunc">(truncated)</span>' : '') + '</div>'
+    h += '<div class="tm-trace-lbl">' + _tmT('tm.trace.output') + (tr.output_truncated ? ' <span class="tm-trace-trunc">' + _tmT('tm.trace.truncated') + '</span>' : '') + '</div>'
       + '<pre class="tm-trace-pre">' + _tmEsc(tr.output.slice(0, 6000)) + '</pre>';
   }
   return h;
@@ -612,19 +709,19 @@ function _tmTraceDetail(tr, stepEv) {
 function _tmGateCard(ev) {
   var rid = ev.request_id || '';
   var ridArg = "'" + rid.replace(/'/g, "\\'") + "'";
-  var head = '<div class="tm-gate-tag">Human gate</div>'
-    + '<div class="tm-gate-head">' + _tmIco('person') + ' ' + _tmEsc(ev.name || 'Human') + '</div>'
-    + '<div class="tm-gate-prompt">' + _tmEsc(ev.prompt || (ev.mode === 'approve' ? 'Approve to continue?' : 'Your input?')) + '</div>';
+  var head = '<div class="tm-gate-tag">' + _tmT('tm.gate.tag') + '</div>'
+    + '<div class="tm-gate-head">' + _tmIco('person') + ' ' + _tmEsc(ev.name || _tmT('tm.gate.who')) + '</div>'
+    + '<div class="tm-gate-prompt">' + _tmEsc(ev.prompt || (ev.mode === 'approve' ? _tmT('tm.gate.approvePrompt') : _tmT('tm.gate.inputPrompt'))) + '</div>';
   var actions;
   if (ev.mode === 'approve') {
     actions = '<div class="tm-gate-actions">'
-      + '<button class="tm-btn tm-btn-ok" onclick="_tmHumanApprove(' + ridArg + ', true)">' + _tmIco('check') + ' Approve</button>'
-      + '<button class="tm-btn tm-btn-danger" onclick="_tmHumanApprove(' + ridArg + ', false)">' + _tmIco('reject') + ' Reject</button>'
+      + '<button class="tm-btn tm-btn-ok" onclick="_tmHumanApprove(' + ridArg + ', true)">' + _tmIco('check') + ' ' + _tmT('tm.gate.approve') + '</button>'
+      + '<button class="tm-btn tm-btn-danger" onclick="_tmHumanApprove(' + ridArg + ', false)">' + _tmIco('reject') + ' ' + _tmT('tm.gate.reject') + '</button>'
       + '</div>';
   } else {
     actions = '<div class="tm-gate-actions tm-gate-input">'
-      + '<input class="tm-gate-field" id="tmGateInput-' + _tmEsc(rid) + '" placeholder="Type your answer…">'
-      + '<button class="tm-btn tm-btn-primary" onclick="_tmHumanInput(' + ridArg + ')">Send</button>'
+      + '<input class="tm-gate-field" id="tmGateInput-' + _tmEsc(rid) + '" placeholder="' + _tmT('tm.gate.inputPlaceholder') + '">'
+      + '<button class="tm-btn tm-btn-primary" onclick="_tmHumanInput(' + ridArg + ')">' + _tmT('tm.gate.send') + '</button>'
       + '</div>';
   }
   return '<div class="tm-gate-card" id="tmGate-' + _tmEsc(rid) + '">' + head + actions + '</div>';
@@ -635,14 +732,14 @@ async function _tmHumanApprove(rid, approved) {
   delete _tmGates[rid];
   _tmRenderInspector();
   await Api.orchestrations.humanApprove(rid, approved);
-  if (typeof _orchToast === 'function') _orchToast(approved ? 'Approved' : 'Rejected');
+  if (typeof _orchToast === 'function') _orchToast(approved ? _tmT('tm.gate.approved') : _tmT('tm.gate.rejected'));
 }
 
 async function _tmHumanInput(rid) {
   if (!rid) return;
   var inp = document.getElementById('tmGateInput-' + rid);
   var val = inp ? inp.value : '';
-  if (!val.trim()) { if (typeof _orchToast === 'function') _orchToast('Enter a response', true); return; }
+  if (!val.trim()) { if (typeof _orchToast === 'function') _orchToast(_tmT('tm.gate.enterResponse'), true); return; }
   delete _tmGates[rid];
   _tmRenderInspector();
   await Api.orchestrations.humanInput(rid, val);
@@ -651,13 +748,23 @@ async function _tmHumanInput(rid) {
 // ── Run actions ─────────────────────────────────────────────────────
 
 async function _tmAbortRun(runId) {
+  if (typeof showConfirm === 'function'
+      && !await showConfirm(_tmT('tm.abort.confirm'),
+                            { title: _tmT('tm.abort.confirmTitle'), okText: _tmT('tm.btn.abort'), danger: true })) {
+    return;
+  }
   await Api.orchestrations.taskAbort(runId);
-  if (typeof _orchToast === 'function') _orchToast('Abort requested');
+  if (typeof _orchToast === 'function') _orchToast(_tmT('tm.toast.abort'));
 }
 
 async function _tmDeleteRun(runId) {
+  if (typeof showConfirm === 'function'
+      && !await showConfirm(_tmT('tm.delete.confirm'),
+                            { title: _tmT('tm.delete.confirmTitle'), okText: _tmT('tm.btn.delete'), danger: true })) {
+    return;
+  }
   var ok = await Api.orchestrations.taskRemove(runId);
-  if (!ok) { if (typeof _orchToast === 'function') _orchToast('Delete failed', true); return; }
+  if (!ok) { if (typeof _orchToast === 'function') _orchToast(_tmT('tm.toast.deleteFailed'), true); return; }
   if (_tmRunId === runId) {
     _tmRunId = null;
     _tmPolling = false;
@@ -697,17 +804,31 @@ function _tmInjectStyles() {
 .tm-top-name{font-size:16px;font-weight:700;color:var(--text-primary)}
 .tm-top-sub{font-size:12px;color:var(--text-tertiary)}
 .tm-top-actions{display:flex;align-items:center;gap:7px}
-.tm-btn{font-family:inherit;font-size:12.5px;font-weight:600;border-radius:var(--tm-r-sm);padding:8px 12px;border:1px solid var(--border);background:var(--bg-tertiary);color:var(--text-secondary);cursor:pointer;transition:background .15s,color .15s,border-color .15s,transform .08s ease;white-space:nowrap;display:inline-flex;align-items:center;gap:5px}
-.tm-btn:hover{background:var(--bg-hover);color:var(--text-primary);border-color:var(--border-light)}
-.tm-btn:active{transform:translateY(1px)}
+/* ── Buttons: layered, theme-token only, shares the Studio's button language.
+   Default = quiet secondary surface with a soft hover lift; ghost = fully
+   transparent tertiary action; semantic fills get a colored lift on hover.
+   All colors resolve from live theme tokens (works across light/dark/tofu). */
+.tm-btn{font-family:inherit;font-size:12.5px;font-weight:600;letter-spacing:.01em;line-height:1.2;border-radius:var(--tm-r-sm);padding:8px 13px;border:1px solid var(--border);background:var(--bg-tertiary);color:var(--text-secondary);cursor:pointer;transition:background .15s,color .15s,border-color .15s,box-shadow .15s,transform .1s ease;white-space:nowrap;display:inline-flex;align-items:center;justify-content:center;gap:6px}
+.tm-btn:hover{background:var(--bg-hover);color:var(--text-primary);border-color:var(--border-light);box-shadow:var(--tm-elev-card);transform:translateY(-1px)}
+.tm-btn:active{transform:translateY(0);box-shadow:none}
+.tm-btn:focus-visible{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-subtle)}
+.tm-btn:disabled{opacity:.5;cursor:default;transform:none;box-shadow:none;filter:none}
 .tm-btn svg{width:1em;height:1em}
-.tm-btn-close{padding:8px 11px}
-.tm-btn-ok{background:var(--tm-ok);border-color:var(--tm-ok);color:#fff}
-.tm-btn-ok:hover{background:var(--tm-ok);border-color:var(--tm-ok);color:#fff;filter:brightness(1.05)}
-.tm-btn-danger{background:var(--error-bg);border-color:var(--error-border);color:var(--error-text)}
-.tm-btn-danger:hover{background:var(--error-bg);filter:brightness(1.06);color:var(--error-text)}
+/* close: quiet icon button that reddens on hover */
+.tm-btn-close{padding:8px 10px;color:var(--text-tertiary)}
+.tm-btn-close:hover{background:var(--error-bg);border-color:var(--error-border);color:var(--error-text);box-shadow:none;transform:none}
+/* ghost: transparent tertiary action (edit / abort / delete rows) */
+.tm-btn-ghost{background:transparent;border-color:transparent;color:var(--text-tertiary)}
+.tm-btn-ghost:hover{background:var(--bg-hover);border-color:var(--border);color:var(--text-primary);box-shadow:none;transform:none}
+.tm-btn-ghost.tm-btn-danger,.tm-btn-ghost.tm-btn-danger:hover{background:transparent;border-color:transparent;color:var(--text-tertiary);filter:none}
+.tm-btn-ghost.tm-btn-danger:hover{background:var(--error-bg);border-color:var(--error-border);color:var(--error-text)}
+/* semantic fills: colored lift + glow on hover */
 .tm-btn-primary{background:var(--accent);border-color:var(--accent);color:#fff}
-.tm-btn-primary:hover{background:var(--accent-hover);border-color:var(--accent-hover);color:#fff}
+.tm-btn-primary:hover{background:var(--accent-hover);border-color:var(--accent-hover);color:#fff;box-shadow:0 4px 14px var(--accent-subtle);transform:translateY(-1px)}
+.tm-btn-ok{background:var(--tm-ok);border-color:var(--tm-ok);color:#fff}
+.tm-btn-ok:hover{background:var(--tm-ok);border-color:var(--tm-ok);color:#fff;filter:brightness(1.06);box-shadow:0 4px 14px color-mix(in srgb,var(--tm-ok) 30%,transparent);transform:translateY(-1px)}
+.tm-btn-danger{background:var(--error-bg);border-color:var(--error-border);color:var(--error-text)}
+.tm-btn-danger:hover{background:var(--error-bg);border-color:var(--error-border);color:var(--error-text);filter:brightness(1.06);box-shadow:0 4px 14px color-mix(in srgb,var(--error-text) 26%,transparent);transform:translateY(-1px)}
 .tm-body{flex:1;display:flex;min-height:0}
 /* Safety net: any inline glyph from _ORCH_ICONS/_ORCH_GLYPHS used inside the
    shell is capped to a sane size, so Task Mode never depends on the Studio's
@@ -806,13 +927,41 @@ function _tmInjectStyles() {
 .tm-gate-field:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-subtle)}
 /* status chips — tinted from theme semantic colors */
 .tm-chip{font-size:10.5px;font-weight:700;padding:3px 9px;border-radius:999px;text-transform:capitalize;flex-shrink:0;border:1px solid transparent}
-.tm-chip-pending{background:var(--accent-subtle);color:var(--accent);border-color:color-mix(in srgb,var(--accent) 30%,transparent)}
+.tm-chip-pending{background:var(--bg-hover);color:var(--text-secondary);border-color:var(--border)}
 .tm-chip-running{background:var(--thinking-bg);color:var(--thinking-text);border-color:var(--thinking-border)}
-.tm-chip-paused{background:var(--accent-subtle);color:var(--accent);border-color:color-mix(in srgb,var(--accent) 35%,transparent)}
+.tm-chip-paused{background:color-mix(in srgb,var(--warning-text,#d97706) 14%,transparent);color:var(--warning-text,#d97706);border-color:color-mix(in srgb,var(--warning-text,#d97706) 40%,transparent)}
 .tm-chip-done{background:color-mix(in srgb,var(--tm-ok) 14%,transparent);color:var(--tm-ok);border-color:color-mix(in srgb,var(--tm-ok) 40%,transparent)}
 .tm-chip-error{background:var(--error-bg);color:var(--error-text);border-color:var(--error-border)}
 .tm-chip-aborted{background:var(--bg-hover);color:var(--text-tertiary);border-color:var(--border)}
-@media(max-width:900px){.tm-rail{width:200px}.tm-inspector{width:250px}}
+/* run-list meta: relative time + duration on one line */
+.tm-run-meta{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.tm-run-dur{color:var(--text-tertiary);font-size:10.5px;font-weight:600}
+.tm-run-live .tm-run-dur{color:var(--thinking-text)}
+.tm-run-live .tm-run-name::before{content:"";display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--thinking-text);margin-right:6px;vertical-align:middle;animation:tmLiveDot 1.4s ease-in-out infinite}
+@keyframes tmLiveDot{0%,100%{opacity:1}50%{opacity:.3}}
+/* loading + empty + error states in the rail */
+.tm-loading{display:flex;align-items:center;gap:9px;color:var(--text-tertiary);font-size:12.5px;padding:14px}
+.tm-spin{width:14px;height:14px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:tmSpin .7s linear infinite;flex-shrink:0}
+@keyframes tmSpin{to{transform:rotate(360deg)}}
+.tm-state{text-align:center;padding:30px 18px;color:var(--text-tertiary)}
+.tm-state svg{width:30px;height:30px;opacity:.55;margin-bottom:11px}
+.tm-state-err svg{color:var(--error-text);opacity:.8}
+.tm-state-title{font-size:14px;font-weight:800;color:var(--text-secondary);margin-bottom:6px}
+.tm-state-sub{font-size:12px;line-height:1.6;margin-bottom:14px}
+.tm-state-btn{margin:0 auto}
+/* ── Responsive: stack the three panes on narrow / touch viewports ── */
+@media(max-width:1000px){.tm-rail{width:220px}.tm-inspector{width:264px}}
+@media(max-width:768px){
+  .tm-shell{width:100vw;height:100vh;max-width:none;border-radius:0;border:none}
+  .tm-body{flex-direction:column;overflow-y:auto}
+  .tm-rail{width:auto;max-height:38vh;border-right:none;border-bottom:var(--tm-rail)}
+  .tm-main{min-height:0}
+  .tm-graph{flex:0 0 auto;max-height:44vh}
+  .tm-inspector{width:auto;border-left:none;border-top:var(--tm-rail);max-height:52vh}
+  .tm-top-sub{display:none}
+  .tm-btn{padding:9px 12px}
+  .tm-top-actions .tm-btn span,.tm-top-actions .tm-btn{gap:0}
+}
 `;
   document.head.appendChild(st);
 }

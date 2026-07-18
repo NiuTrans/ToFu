@@ -343,6 +343,125 @@ def redispatch_orphaned_queue_on_startup() -> list[str]:
     return spawned
 
 
+def list_convs_with_pending_peer_msg() -> list[str]:
+    """Return every conv_id that currently holds a pending ``KIND_PEER_MSG`` row.
+
+    The durable source of truth for "which conversations have a peer message
+    that no running task will ever drain". A peer message (``project_message`` /
+    ``project_intervene``) is written as a ``KIND_PEER_MSG`` row and drained by
+    ``dispatch_next_queued`` — which fires ONLY on task-completion, a human
+    send, startup orphan-redispatch, or the brain KIND_WORKFLOW idle-drain. The
+    workflow idle-drain (``project_dispatch._reconcile_stranded_kickoffs`` /
+    ``_has_queued_kickoff``) filters STRICTLY on ``KIND_WORKFLOW``, so a peer
+    row landing in an IDLE, non-board conversation is drained by nothing — it
+    sits in the queue widget forever until a restart or a human types. This scan
+    is what the steady-state peer idle-drain consumes to close that gap.
+
+    Best-effort — returns [] on any failure.
+    """
+    try:
+        _maybe_ensure_table()
+        db = get_thread_db(DOMAIN_CHAT)
+        rows = db.execute(
+            'SELECT DISTINCT conv_id FROM message_queue WHERE kind=?',
+            (KIND_PEER_MSG,)
+        ).fetchall()
+        return [r['conv_id'] for r in rows if r['conv_id']]
+    except Exception as e:
+        logger.warning('[Queue] list_convs_with_pending_peer_msg failed: %s', e)
+        return []
+
+
+def drain_idle_peer_messages() -> list[str]:
+    """Steady-state idle-drain for peer messages — the brain heartbeat's peer
+    analogue of :func:`redispatch_orphaned_queue_on_startup`.
+
+    THE Symptom-A root fix. A ``KIND_PEER_MSG`` row that lands in an IDLE
+    conversation (no live task, and not the owner of a board epic the workflow
+    idle-drain would reconcile) is drained by nothing in steady state — so an
+    advisory peer note to an idle sibling is shown ONLY as a pending item in the
+    queue widget and never rendered as a turn. This pass, run on the existing
+    brain 30s heartbeat (NO new thread/global), drains ONE such row per idle
+    conv via the SAME ``dispatch_next_queued`` seam every other caller uses —
+    which appends the peer turn to ``conversations.messages`` (giving it the
+    ``.peer-msg-banner`` fresh-turn rendering) and spawns a task to answer it.
+
+    This is a deliberate, backend-owned dispatch of a DURABLE, RATE-CAPPED,
+    explicitly-sent signal — NOT the frontend age-heuristic auto-fire
+    anti-pattern (Case-E). The per-(sender,target) send-time rate cap bounds how
+    many peer rows can ever exist; the busy-guard + one-drain-per-conv-per-tick
+    bound the work this pass starts.
+
+    Safety (mirrors ``redispatch_orphaned_queue_on_startup``):
+      • Skip a conv that has a live non-aborted task — a live drain-eligible
+        turn already receives the fast-path inbox twin (delivered at its next
+        round boundary), and its completion hook drains the durable row anyway;
+        force-draining would double-dispatch. A conv with a live endpoint/VU
+        task is likewise "busy" so it keeps queue-lane (cycle-end) delivery.
+      • Skip a conv whose row is absent (a concurrent drain already popped it).
+      • ``dispatch_next_queued`` takes the non-reentrant ``_dispatch_lock``
+        itself, so we must NOT hold it here.
+      • Best-effort per conv: one failure never aborts the batch.
+
+    Returns the list of task_ids spawned (one per idle conv drained).
+    """
+    spawned: list[str] = []
+    try:
+        convs = list_convs_with_pending_peer_msg()
+    except Exception as e:
+        logger.warning('[Queue] peer idle-drain: scan failed: %s', e)
+        return spawned
+    if not convs:
+        return spawned
+
+    for conv_id in convs:
+        if not conv_id:
+            continue
+        # Busy guard: never force-drain a conv that has a FAST-PATH-ELIGIBLE
+        # live task — its inbox twin / round-boundary drain (or the completion
+        # hook) owns delivery there, so force-draining would double-dispatch.
+        # The predicate MUST mirror project_peer._live_drain_eligible_task
+        # (running + not aborted, matched on convId OR _peer_drain_key): a VU
+        # sub-task runs with convId='' and carries the parent conv in
+        # _peer_drain_key, so a bare convId==conv_id check would MISS it and let
+        # idle-drain wrongly pre-empt the VU loop's in-turn delivery. A conv
+        # whose only live task is NOT eligible (aborted / non-running) falls
+        # through and IS drained here — the intended strand-closing behaviour.
+        try:
+            from lib.tasks_pkg.manager import tasks, tasks_lock
+            with tasks_lock:
+                _live = any(
+                    (t.get('convId') == conv_id
+                     or t.get('_peer_drain_key') == conv_id)
+                    and t.get('status') == 'running'
+                    and not t.get('aborted')
+                    for t in tasks.values()
+                )
+            if _live:
+                continue
+        except Exception as e:
+            logger.debug('[Queue] peer idle-drain live-task probe failed '
+                         'conv=%s (skipping): %s', conv_id[:8], e)
+            continue
+        try:
+            tid = dispatch_next_queued(conv_id)
+        except Exception as e:
+            logger.warning('[Queue] peer idle-drain: dispatch failed for '
+                           'conv=%s: %s', conv_id[:8], e, exc_info=True)
+            continue
+        if tid:
+            spawned.append(tid)
+            from lib.log import audit_log
+            audit_log('peer_message_idle_drain', conv_id=conv_id, task_id=tid)
+            logger.info('[Queue] peer idle-drain: woke idle conv=%s → task %s '
+                        '(pending peer message delivered as a fresh turn)',
+                        conv_id[:8], tid[:8])
+    if spawned:
+        logger.info('[Queue] peer idle-drain: woke %d idle conv(s) holding a '
+                    'pending peer message', len(spawned))
+    return spawned
+
+
 def has_autopilot_marker(conv_id: str) -> bool:
     """True iff a persistent autopilot armed-marker exists for the conv."""
     if not conv_id:
@@ -393,18 +512,33 @@ def get_queue(conv_id: str) -> list[dict]:
             logger.warning('[Queue] Failed to parse payload for queue_id=%s: %s', row['id'][:8], e)
             data = {}
 
-        result.append({
+        # A peer/operator turn (KIND_PEER_MSG) stores the model-facing framed
+        # `text` (embeds "[Peer message … (conv X)]" + the sender's short id).
+        # Prefer the clean, unframed `_peerText` the sender carried so the queue
+        # bar shows the ORIGINAL message, and surface the sender + operator flag
+        # so the frontend can render "from «title»" instead of the raw id.
+        is_peer = bool(data.get('_peerMessage'))
+        preview = (data.get('_peerText') if is_peer else None) or data.get('text', '') or ''
+        entry = {
             'queueId': row['id'],
             'position': row['position'],
             'kind': row['kind'] or KIND_REAL,
             'priority': row['priority'],
-            'text': (data.get('text', '') or '')[:100],
+            # No mid-word truncation (the user flagged cut-off previews). Cap at
+            # a generous 2000 chars purely so a pathological payload can't bloat
+            # the poll response; the frontend already wraps + scrolls the text.
+            'text': preview[:2000],
             'hasImages': bool(data.get('images')),
             'hasPdfs': bool(data.get('pdfTexts')),
             'hasRefs': bool(data.get('convRefs')),
             'hasQuotes': bool(data.get('replyQuotes')),
             'timestamp': row['created_at'],
-        })
+        }
+        if is_peer:
+            entry['isPeerMessage'] = True
+            entry['fromConv'] = data.get('_fromConv', '')
+            entry['isPeerHuman'] = bool(data.get('_peerHuman'))
+        result.append(entry)
 
     return result
 
@@ -428,6 +562,40 @@ def remove_from_queue(conv_id: str, queue_id: str) -> bool:
 
     logger.info('[Queue] Removed message %s from conv=%s', queue_id[:8], conv_id[:8])
     return True
+
+
+def dedup_peer_durable_rows(conv_id: str, queue_ids) -> int:
+    """Delete peer-message durable rows by ``queueId`` (the FORWARD-race de-dup).
+
+    The Pillar #6 peer-message FORWARD-race twin of
+    :func:`lib.agent_inbox.consume_peer`. A live-target peer message is written
+    to BOTH a durable ``message_queue`` row AND a fast-path agent_inbox item
+    tagged with that row's ``queueId``. When the orchestrator's round-boundary
+    drain hook injects the inbox item (delivery), it calls THIS to delete the
+    matching durable row(s) so ``dispatch_next_queued`` can never later pop them
+    as a redundant fresh turn = zero double-delivery. The REVERSE race (durable
+    row dispatched first) is closed symmetrically by ``consume_peer``.
+
+    Best-effort — a delete failure logs and is skipped (the reverse-race guard
+    still protects against a double delivery). Returns the number removed.
+    """
+    ids = [q for q in (queue_ids or []) if q]
+    if not conv_id or not ids:
+        return 0
+    removed = 0
+    for qid in ids:
+        try:
+            if remove_from_queue(conv_id, qid):
+                removed += 1
+        except Exception as e:
+            logger.warning('[Queue] peer durable-row de-dup failed conv=%s '
+                           'queueId=%s: %s — the row may re-dispatch as a '
+                           'duplicate', conv_id[:8], str(qid)[:8], e)
+    if removed:
+        logger.info('[Queue] forward de-dup removed %d peer durable row(s) for '
+                    'conv=%s (delivered via the fast-path inbox)',
+                    removed, conv_id[:8])
+    return removed
 
 
 def clear_queue(conv_id: str) -> int:
@@ -512,6 +680,82 @@ def dequeue_next(conv_id: str) -> dict | None:
     }
 
 
+def _append_user_msg_with_cas(db, conv_id: str, user_msg: dict) -> bool:
+    """Append ``user_msg`` to a conversation's messages under an optimistic
+    lock, retrying on a CAS miss.
+
+    The old code did a bare read-modify-write of the whole ``messages`` blob
+    (``SELECT messages`` → append → unconditional ``UPDATE``). ``_dispatch_lock``
+    serializes dispatches WITHIN one process, but it does NOT guard against a
+    concurrent frontend / other-writer UPDATE landing between our SELECT and
+    our UPDATE — a last-writer-wins clobber that silently drops the other
+    write (e.g. a settings PATCH or a partial-stream checkpoint). We now re-read
+    the row and CAS on ``updated_at`` (mirroring
+    ``manager._sync_partial_to_conversation``), so a racing write forces a
+    retry against the fresh tail rather than being overwritten.
+
+    Returns True on success, False if the conversation row is missing.
+    """
+    from lib.chat import append_user_msg_idempotent
+    from lib.database import json_dumps_pg
+
+    _MAX_CAS = 4
+    for attempt in range(_MAX_CAS):
+        row = db.execute(
+            'SELECT messages, updated_at, rev FROM conversations WHERE id=? AND user_id=1',
+            (conv_id,)
+        ).fetchone()
+        if not row:
+            logger.warning('[Queue] Conversation %s not found for dispatch', conv_id[:8])
+            return False
+        try:
+            messages = json.loads(row['messages'] or '[]')
+        except (json.JSONDecodeError, TypeError) as e:
+            logger.warning('[Queue] Failed to parse messages for conv=%s: %s', conv_id[:8], e)
+            messages = []
+        row['updated_at']
+        cur_rev = row['rev']  # Phase 4 W3: CAS on rev (loop re-reads each attempt)
+
+        # Idempotent append (dedupes if a prior attempt already wrote it).
+        append_user_msg_idempotent(messages, user_msg)
+
+        now_ms = int(time.time() * 1000)
+        cur = db.execute(
+            'UPDATE conversations SET messages=?, updated_at=?, msg_count=? '
+            'WHERE id=? AND user_id=1 AND rev=?',
+            (json_dumps_pg(messages), now_ms, len(messages), conv_id, cur_rev)
+        )
+        db.commit()
+        if getattr(cur, 'rowcount', None) != 0:
+            return True
+        # CAS miss — a concurrent writer bumped updated_at. Re-read + retry.
+        logger.debug('[Queue] append CAS miss conv=%s attempt %d/%d — re-reading',
+                     conv_id[:8], attempt + 1, _MAX_CAS)
+        time.sleep(0.02 * (attempt + 1))
+
+    # Exhausted retries: fall back to an unconditional write so the queued
+    # turn is NEVER dropped (correctness > the rare lost-concurrent-write). The
+    # idempotent append means we won't duplicate the message.
+    logger.warning('[Queue] append CAS exhausted for conv=%s — forcing unconditional write', conv_id[:8])
+    row = db.execute(
+        'SELECT messages FROM conversations WHERE id=? AND user_id=1',
+        (conv_id,)
+    ).fetchone()
+    if not row:
+        return False
+    try:
+        messages = json.loads(row['messages'] or '[]')
+    except (json.JSONDecodeError, TypeError) as e:
+        logger.debug('[Queue] messages JSON parse failed, using fallback: %s', e)
+        messages = []
+    append_user_msg_idempotent(messages, user_msg)
+    now_ms = int(time.time() * 1000)
+    db_execute_with_retry(db, 'UPDATE conversations SET messages=?, updated_at=?, msg_count=? '
+                          'WHERE id=? AND user_id=1',
+                          (json_dumps_pg(messages), now_ms, len(messages), conv_id))
+    return True
+
+
 def dispatch_next_queued(conv_id: str) -> str | None:
     """Dispatch the next queued message for a conversation as a new task.
 
@@ -530,6 +774,23 @@ def dispatch_next_queued(conv_id: str) -> str | None:
         payload = item['payload']
         config = item['config']
         text = payload.get('text', '')
+
+        # ── Pillar #6 REVERSE-race de-dup ──
+        # A live-target peer message is written to BOTH this durable row AND a
+        # fast-path agent_inbox twin tagged with this row's queueId. If the
+        # target's live turn ended BEFORE its next round-boundary drain, we pop
+        # the durable row HERE and dispatch it as a fresh turn — so the still-
+        # pending inbox twin must be dropped, or it would be re-injected on that
+        # fresh turn = double delivery. (The forward race — inbox drains first —
+        # is closed symmetrically in the orchestrator drain hook, which deletes
+        # this row by queueId.) The inbox is conv-keyed (swarm_key_for=convId).
+        if payload.get('_peerMessage') and item.get('queueId'):
+            try:
+                from lib.agent_inbox import consume_peer
+                consume_peer(conv_id, [item['queueId']])
+            except Exception as e:
+                logger.debug('[Queue] peer inbox-twin de-dup skipped conv=%s: %s',
+                             conv_id[:8], e)
         # ★ _user_msg: pre-built (and already translated) user message dict
         #   from /api/chat/send.  If present, skip translation and use directly.
         pre_built_user_msg = payload.get('_user_msg')
@@ -541,34 +802,12 @@ def dispatch_next_queued(conv_id: str) -> str | None:
 
         if pre_built_user_msg:
             # ★ New path: /api/chat/send already built + translated the user message.
-            #   Just append it to the conversation DB.
-            row = db.execute(
-                'SELECT messages FROM conversations WHERE id=? AND user_id=1',
-                (conv_id,)
-            ).fetchone()
-            if not row:
-                logger.warning('[Queue] Conversation %s not found for dispatch', conv_id[:8])
+            #   Append it to the conversation DB under an optimistic lock so a
+            #   concurrent writer can't clobber the append (see helper).
+            if not _append_user_msg_with_cas(db, conv_id, pre_built_user_msg):
                 return None
-
-            try:
-                messages = json.loads(row['messages'] or '[]')
-            except (json.JSONDecodeError, TypeError) as e:
-                logger.warning('[Queue] Failed to parse messages for conv=%s: %s', conv_id[:8], e)
-                messages = []
-
-            from lib.chat import append_user_msg_idempotent
-            append_user_msg_idempotent(messages, pre_built_user_msg)
-
-            from lib.database import json_dumps_pg
-            now_ms = int(time.time() * 1000)
-            db_execute_with_retry(db, '''
-                UPDATE conversations SET messages=?, updated_at=?, msg_count=?
-                WHERE id=? AND user_id=1
-            ''', (json_dumps_pg(messages), now_ms, len(messages), conv_id))
-
             remaining = _get_queue_depth(db, conv_id)
-            logger.info('[Queue] Appended pre-built user msg to conv=%s (now %d msgs)',
-                        conv_id[:8], len(messages))
+            logger.info('[Queue] Appended pre-built user msg to conv=%s (CAS)', conv_id[:8])
 
         else:
             # Legacy path: message was enqueued via /api/chat/queue (old API).
@@ -606,6 +845,18 @@ def dispatch_next_queued(conv_id: str) -> str | None:
                 'content': translated_text if auto_translate and has_chinese else text,
                 'timestamp': payload.get('timestamp', int(time.time() * 1000)),
             }
+            # ★ Carry the client-generated stable _msgId through verbatim
+            #   (mirrors lib/chat/turn_builder.build_user_msg_from_payload).
+            #   The QUEUED lane is the send-while-a-task-is-running path: the
+            #   user sends on a slow network, it hangs, they send again → the
+            #   turn is enqueued and later persisted HERE, not by the immediate
+            #   /api/chat/send persist. Without preserving _msgId, a queued-then-
+            #   rescued message duplicates exactly like the immediate path did
+            #   before the fix — the client's rescue-PUT rebase (keyed on _msgId)
+            #   wouldn't recognise this server copy. Preserve it so server and
+            #   client agree on one turn identity.
+            if payload.get('_msgId'):
+                user_msg['_msgId'] = payload['_msgId']
             if auto_translate and has_chinese and translated_text != text:
                 user_msg['originalContent'] = text
                 user_msg['_translateDone'] = True
@@ -626,9 +877,26 @@ def dispatch_next_queued(conv_id: str) -> str | None:
             #    could not visually distinguish/attribute it. Propagate the
             #    markers onto the message so the arrival is observable + the
             #    sender is attributable (renderer keys on `_peerMessage`). ──
+            # ── Authoritative initiator stamp: a KIND_PEER_MSG / KIND_WORKFLOW
+            #    turn is injected without a human typing, so the persisted turn
+            #    must carry the ONE _initiator field every reader resolves
+            #    through — not just the legacy per-path booleans (which we keep
+            #    as read-aliases). Stamped here at the single dispatch seam. ──
+            from lib.conversations.turn_initiation import (INITIATOR_BRAIN,
+                                                           INITIATOR_OPERATOR,
+                                                           INITIATOR_PEER,
+                                                           stamp_initiator)
             if payload.get('_peerMessage'):
                 user_msg['_peerMessage'] = True
                 user_msg['_fromConv'] = payload.get('_fromConv', '')
+            # Authoritative initiator stamp — kept as its OWN sibling guard (NOT
+            # nested in the marker block above) so that block stays byte-identical
+            # to the peer-marker negative-control anchor and can be neutered
+            # independently without orphaning this call.
+            if payload.get('_peerMessage'):
+                stamp_initiator(
+                    user_msg,
+                    INITIATOR_OPERATOR if payload.get('_peerHuman') else INITIATOR_PEER)
             # A human operator nudge (sent from the Team panel) is stamped so the
             # receiving banner attributes it to the operator, not to an agent
             # peer. Distinct provenance, same KIND_PEER_MSG lane. Kept as its own
@@ -644,6 +912,7 @@ def dispatch_next_queued(conv_id: str) -> str | None:
             #    persisted user turn (mirrors the _peerMessage block). ──
             if payload.get('_brainDispatch'):
                 user_msg['_brainDispatch'] = True
+                stamp_initiator(user_msg, INITIATOR_BRAIN)
                 if payload.get('boardTaskId'):
                     user_msg['_boardTaskId'] = payload.get('boardTaskId')
             conv_ref_texts = payload.get('convRefTexts')
@@ -657,36 +926,11 @@ def dispatch_next_queued(conv_id: str) -> str | None:
             if conv_ref_texts:
                 user_msg['convRefTexts'] = conv_ref_texts
 
-            # Append user message to conversation in DB
-            row = db.execute(
-                'SELECT messages, updated_at FROM conversations WHERE id=? AND user_id=1',
-                (conv_id,)
-            ).fetchone()
-
-            if not row:
-                logger.warning('[Queue] Conversation %s not found for dispatch', conv_id[:8])
+            # Append user message to the conversation under an optimistic lock
+            # (see _append_user_msg_with_cas — re-reads + CAS internally).
+            if not _append_user_msg_with_cas(db, conv_id, user_msg):
                 return None
-
-            try:
-                messages = json.loads(row['messages'] or '[]')
-            except (json.JSONDecodeError, TypeError) as e:
-                logger.warning('[Queue] Failed to parse messages for conv=%s: %s', conv_id[:8], e)
-                messages = []
-
-            from lib.chat import append_user_msg_idempotent
-            append_user_msg_idempotent(messages, user_msg)
-
-            from lib.database import json_dumps_pg
-            now_ms = int(time.time() * 1000)
-            messages_json = json_dumps_pg(messages)
-
             remaining = _get_queue_depth(db, conv_id)
-
-            db_execute_with_retry(db, '''
-                UPDATE conversations
-                SET messages=?, updated_at=?, msg_count=?
-                WHERE id=? AND user_id=1
-            ''', (messages_json, now_ms, len(messages), conv_id))
         # (Legacy _msg_persisted path removed — no longer used)
 
         # 3. Build API messages and create task
@@ -701,17 +945,15 @@ def dispatch_next_queued(conv_id: str) -> str | None:
         task = create_task(conv_id, api_messages, config)
         task_id = task['id']
 
-        # Update conversation settings with the new activeTaskId
+        # Update conversation settings with the new activeTaskId. Serialized
+        # read-merge-write (settings_store) so it doesn't clobber a concurrent
+        # tool-state / autopilot settings write on the same row (reuses `db`).
         try:
-            settings_row = db.execute(
-                'SELECT settings FROM conversations WHERE id=? AND user_id=1',
-                (conv_id,)
-            ).fetchone()
-            settings = json.loads(settings_row[0] or '{}') if settings_row else {}
-            settings['activeTaskId'] = task_id
-            db_execute_with_retry(db, '''
-                UPDATE conversations SET settings=? WHERE id=? AND user_id=1
-            ''', (json.dumps(settings, ensure_ascii=False), conv_id))
+            from lib.conversations import set_conversation_settings
+            # notify=False: this path emits its own notify_conv_changed after
+            # spawn (no double push); the gate still invalidates the cache.
+            set_conversation_settings(conv_id, {'activeTaskId': task_id}, db=db,
+                                      notify=False)
         except Exception as e:
             logger.warning('[Queue] Failed to update activeTaskId for conv=%s: %s',
                            conv_id[:8], e, exc_info=True)
@@ -738,12 +980,13 @@ def dispatch_next_queued(conv_id: str) -> str | None:
             )
             return None
 
-        # Invalidate meta cache so frontend sees the new task
+        # Notify clients so the sidebar reflects the newly-dispatched task
+        # without a manual refresh (metadata-scope: rev unchanged by dispatch).
         try:
-            from lib.conversations import invalidate_meta_cache
-            invalidate_meta_cache()
+            from lib.conversations import notify_conv_changed
+            notify_conv_changed(conv_id, rev=None)
         except Exception as e:
-            logger.debug('[Queue] meta cache invalidation failed: %s', e)
+            logger.debug('[Queue] conv-changed notify failed: %s', e)
 
         return task_id
 

@@ -66,11 +66,14 @@ STAT_WARN_THRESHOLD_S = 5.0
 # If stat() doesn't return within this time, consider the mount stale.
 STAT_TIMEOUT_S = 30.0
 
-# Paths to stat — we touch the project data dir and logs dir.
-_PROBE_PATHS = [
-    os.path.join(_BASE_DIR, 'data'),
-    os.path.join(_BASE_DIR, 'logs'),
-]
+# Paths to stat — resolved lazily at start_fs_keepalive() time from the
+# ACTUAL writable data/logs roots (lib.runtime_paths), NOT the code tree. A
+# source checkout can now place its data root on a DIFFERENT mount than the
+# repo (fresh-clone XDG default, or an explicit TOFU_DATA_DIR), so probing the
+# code tree would keep the wrong mount warm and let the live-DB mount stale —
+# the exact freeze this daemon exists to prevent. Populated by
+# ``_resolve_probe_paths()``.
+_PROBE_PATHS = []
 
 _running = False
 _thread = None
@@ -197,6 +200,35 @@ def _keepalive_loop():
 #  Public API
 # ═══════════════════════════════════════════════════════════════════════
 
+def _resolve_data_root() -> str:
+    """Return the ACTUAL writable data root (where the live DB lives).
+
+    Delegates to ``lib.runtime_paths.data_root()`` — the single source of truth
+    that honours ``$TOFU_DATA_DIR`` / ``TOFU_DATA_LAYOUT`` / frozen builds — so
+    the keepalive follows the DB wherever it actually resides, not the code
+    tree. The resolver is memoized, so calling it here is cheap. Falls back to
+    the in-tree ``data/`` only if the import fails (should never happen).
+    """
+    try:
+        from lib.runtime_paths import data_root
+        return data_root()
+    except Exception as e:  # pragma: no cover — defensive
+        logger.warning('[FS-Keepalive] runtime_paths.data_root() unavailable, '
+                       'falling back to in-tree data/: %s', e)
+        return os.path.join(_BASE_DIR, 'data')
+
+
+def _resolve_probe_paths() -> list:
+    """The paths to stat — the resolved data + logs roots (where state lives)."""
+    try:
+        from lib.runtime_paths import data_root, logs_root
+        return [data_root(), logs_root()]
+    except Exception as e:  # pragma: no cover — defensive
+        logger.warning('[FS-Keepalive] runtime_paths unavailable, probing '
+                       'in-tree data/+logs/: %s', e)
+        return [os.path.join(_BASE_DIR, 'data'), os.path.join(_BASE_DIR, 'logs')]
+
+
 def _is_network_mount(path):
     """Detect if *path* is on a network/FUSE mount that may need keepalive.
 
@@ -236,11 +268,18 @@ def start_fs_keepalive():
                      sys.platform)
         return
 
-    # Only activate on network/FUSE mounts — no point on local disk
-    if not _is_network_mount(_BASE_DIR):
-        logger.info('[FS-Keepalive] Project not on a network mount — skipping '
-                     '(local disk does not need keepalive)')
+    # Resolve where state ACTUALLY lives (may differ from the code tree) and
+    # gate on THAT mount — the daemon exists to keep the live-DB mount warm.
+    data_root = _resolve_data_root()
+    if not _is_network_mount(data_root):
+        logger.info('[FS-Keepalive] Data root %s not on a network mount — '
+                    'skipping (local disk does not need keepalive)', data_root)
         return
+
+    global _PROBE_PATHS
+    _PROBE_PATHS = _resolve_probe_paths()
+    logger.info('[FS-Keepalive] Activating on network-mounted data root %s '
+                '(probing: %s)', data_root, ', '.join(_PROBE_PATHS))
 
     _running = True
     _thread = threading.Thread(

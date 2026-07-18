@@ -23,30 +23,17 @@ function _handleToolStart(ev, c) {
         }
         twUpdate(convId);
       } else {
-        const r = {
-          roundNum: ev.roundNum,
-          query: ev.query,
-          results: null,
-          status: "searching",
-          toolName: ev.toolName || null,
-          toolCallId: ev.toolCallId || null,
-          toolArgs: ev.toolArgs || null,
-          llmRound: ev.llmRound ?? null,
-          _swarm: ev._swarm || false,
-        };
-        // ★ Preserve per-round assistantContent for Continue replay
-        if (ev.assistantContent) r.assistantContent = ev.assistantContent;
-        // ★ Harness self-repair descriptor — the backend auto-corrected this
-        //   call's malformed arguments; surfaced as an "auto-fixed" badge.
-        if (ev._repaired) r._repaired = ev._repaired;
-        // ★ Hallucinated-tool rejection — the backend classified this name as
-        //   a non-existent tool and rejected it (never executed). Carry the
-        //   distinct status + descriptor so the round renders as rejected
-        //   from the very first event.
-        if (ev.status === "rejected") r.status = "rejected";
-        if (ev._rejected) r._rejected = ev._rejected;
-        if (!assistantMsg.toolRounds) assistantMsg.toolRounds = [];
-        assistantMsg.toolRounds.push(r);
+        /* ★ RENDER_CONTRACT Phase 3: build + push the tool round through the ONE
+         *   pure reducer (reduceStreamState 'tool_start' action) instead of an
+         *   inline object literal, so the LIVE round shape is byte-identical to
+         *   the cold/poll snapshot projection (golden parity F1–F3). The reducer
+         *   pushes onto assistantMsg.toolRounds — which IS the projection state —
+         *   and we read the pushed round back for the render-side concerns below
+         *   (login-hint banner, swarm round tracking, buf mirror, twUpdate).
+         *   Those stay inline because they are DOM / side-effect concerns the
+         *   pure reducer must never own (purity guard). */
+        reduceStreamState(assistantMsg, ev);
+        const r = assistantMsg.toolRounds[assistantMsg.toolRounds.length - 1];
         /* ★ MCP login-hint: surface a prominent "Check your phone for the
          *   approval push" banner whenever a login-style MCP call starts.
          *   Meituan's `hope login` blocks the subprocess for up to ~5 min
@@ -77,8 +64,12 @@ function _handleToolStart(ev, c) {
             if (buf) buf._mcpLoginHint = assistantMsg._mcpLoginHint;
           }
         } catch (_e) { /* best-effort */ }
-        /* Track swarm round number so swarm_phase events can find it */
-        if (r._swarm) assistantMsg._swarmRoundNum = r.roundNum;
+        /* Track swarm round number so swarm_phase events can find it. Guard on
+         * `r` defensively: the reducer contract is that a tool_start always
+         * pushes a round, but reading the tail defensively costs nothing and
+         * keeps the handler crash-safe (the routing NEUTER guard relies on
+         * this to report a clean failure rather than a TypeError). */
+        if (r && r._swarm) assistantMsg._swarmRoundNum = r.roundNum;
         if (buf)
           buf.toolRounds = assistantMsg.toolRounds;
         twUpdate(convId);
@@ -101,38 +92,15 @@ function _handleToolResult(ev, c) {
         if (_epCriticBuf) _epCriticBuf.toolRounds = _epCriticMsg.toolRounds || [];
         twUpdate(convId);
       } else if (assistantMsg.toolRounds) {
-        const r = (ev.toolCallId
-          ? assistantMsg.toolRounds.find(r => r.toolCallId === ev.toolCallId)
-          : null
-        ) || assistantMsg.toolRounds.find(
-          (r) => r.roundNum === ev.roundNum,
-        );
-        if (r) {
-          r.results = ev.results;
-          // A rejected hallucinated tool stays 'rejected' (it never ran) —
-          // don't flip it to 'done'. Everything else completes normally.
-          if (ev.status === "rejected" || ev._rejected) {
-            r.status = "rejected";
-            if (ev._rejected) r._rejected = ev._rejected;
-          } else {
-            r.status = "done";
-          }
-          r.approvalId = null;
-          r.approvalMeta = null;
-          r.guidanceId = null;
-          if (ev.searchDiag) r.searchDiag = ev.searchDiag;
-          if (ev.engineBreakdown) r.engineBreakdown = ev.engineBreakdown;
-          if (ev.vertical) r.vertical = ev.vertical;
-          if (ev.verticals) r.verticals = ev.verticals;
-          /* ★ Harness self-repair: when the backend auto-corrected this
-           *   call's args AFTER the (garbled) tool_start was already shown,
-           *   the tool_result carries the corrected display + descriptor.
-           *   Apply them so the live view stops showing the garbled line. */
-          if (ev._repaired) {
-            r._repaired = ev._repaired;
-            if (ev.query) r.query = ev.query;
-          }
-        }
+        /* ★ RENDER_CONTRACT Phase 3: settle the round through the ONE pure
+         *   reducer (reduceStreamState 'tool_result' action) — it locates the
+         *   round (toolCallId first, roundNum fallback via locateRound, the ONE
+         *   index normalizer) and applies results/status/approval-clear/diag/
+         *   repair exactly as this handler did inline, so the settled LIVE
+         *   shape is byte-identical to the cold/poll projection (golden F1–F3).
+         *   The MCP login-hint banner below is a DOM/side-effect concern keyed
+         *   off assistantMsg._mcpLoginHint (not the round), so it stays inline. */
+        reduceStreamState(assistantMsg, ev);
         /* ★ Clear the MCP login-hint banner once the login call returns.
          *   Classification priority (each test uses STRUCTURED fields
          *   first, text matching second, and always with word-boundaries
@@ -281,9 +249,15 @@ function _handleToolComplete(ev, c) {
         if (_epCriticBuf)
           _epCriticBuf.toolRounds = _epCriticMsg.toolRounds || [];
       } else if (assistantMsg.toolRounds) {
-        _applyToolComplete(assistantMsg.toolRounds.find(
-          (r) => r.roundNum === ev.roundNum && r.toolCallId === ev.toolCallId,
-        ));
+        /* ★ RENDER_CONTRACT Phase 3: settle tool content/tokens/compaction on
+         *   the in-flight round through the ONE pure reducer (tool_complete
+         *   case) instead of the inline _applyToolComplete, so the LIVE settle
+         *   is byte-identical to the cold/poll projection (golden F1–F3 exercise
+         *   the tool_done/tool_complete case). locateRound is the ONE index
+         *   normalizer (toolCallId-first). The critic branch keeps
+         *   _applyToolComplete inline — it targets _epCriticMsg, not the
+         *   projection state. */
+        reduceStreamState(assistantMsg, ev);
       }
       // ★ Sync to buf and let the reactive pipeline (twUpdate → _syncToolRoundsDOM)
       //   handle preview button rendering — no fragile direct DOM injection needed.
@@ -321,6 +295,7 @@ function _handleToolCompacted(ev, c) {
         return true;
       };
       let _stampedMsg = null;
+      let _stampedIdx = -1;
       // 1. Try the active critic bubble first (endpoint mode).
       if (_epCriticPhase && _epCriticMsg && _epCriticMsg.toolRounds
           && _applyCompacted(_epCriticMsg.toolRounds.find(r => r.toolCallId === ev.toolCallId))) {
@@ -339,26 +314,55 @@ function _handleToolCompacted(ev, c) {
             const m = _conv.messages[i];
             if (!m || m.role !== 'assistant' || !Array.isArray(m.toolRounds)) continue;
             const r = m.toolRounds.find(rr => rr.toolCallId === ev.toolCallId);
-            if (_applyCompacted(r)) { _stampedMsg = m; break; }
+            if (_applyCompacted(r)) { _stampedMsg = m; _stampedIdx = i; break; }
           }
         }
       }
       if (buf && assistantMsg && Array.isArray(assistantMsg.toolRounds))
         buf.toolRounds = assistantMsg.toolRounds;
-      twUpdate(convId);
-      /* If we stamped a round in an OLDER message (not the in-flight
-       * bubble), twUpdate alone won't re-render that message — it
-       * only refreshes the streaming bubble.  Trigger a full conv
-       * re-render so the COMPACTED pill on the older row materializes
-       * immediately.  Cheap: renderChat is fingerprint-guarded and
-       * the new compactedCount in _msgFingerprint forces re-render
-       * of just the message that changed. */
-      if (_stampedMsg && _stampedMsg !== assistantMsg
-          && convId === activeConvId
-          && typeof renderChat === 'function') {
+      /* Resolve the stamped message's array index if branch 1 (critic) matched
+       * — the surgical repaint below addresses the DOM node by `msg-<idx>`. */
+      if (_stampedMsg && _stampedIdx < 0) {
         const _conv = (typeof conversations !== 'undefined')
           ? conversations.find(c => c && c.id === convId) : null;
-        if (_conv) renderChat(_conv, false);
+        if (_conv && Array.isArray(_conv.messages)) _stampedIdx = _conv.messages.indexOf(_stampedMsg);
+      }
+      twUpdate(convId);
+      /* If we stamped a round in an OLDER message (not the in-flight bubble),
+       * twUpdate alone won't re-render it — twUpdate only refreshes the
+       * streaming bubble. The older row needs its COMPACTED pill materialized.
+       *
+       * ★ FLASH FIX: do NOT route this through renderChat() DURING an active
+       *   stream. A cold-round L1 compaction fires this handler roughly once
+       *   per compaction over a long editing turn, and while a stream is live
+       *   renderChat() is intercepted by Guard 1c (chat_render.js) → the full
+       *   `inner.innerHTML` destroy-and-rebuild in showStreamingUIForConv —
+       *   which flashes/re-renders the ENTIRE list (incl. the bottom file-edit
+       *   block) just to repaint one cold pill. Instead, surgically replace
+       *   ONLY the stamped older message's node, leaving the streaming bubble
+       *   and every other node untouched. When the message is lazy-windowed
+       *   out of the DOM there is nothing on screen to update (its data is
+       *   already stamped in memory, so persistence + a later render are
+       *   unaffected) — so a missing node is a clean no-op, never a wipe.
+       *
+       *   With NO active stream, renderChat(_conv,false) is already surgical
+       *   (its per-message data-mfp diff replaces only the changed node) AND
+       *   runs the post-render grouping / turn-nav passes, so keep it there. */
+      if (_stampedMsg && _stampedMsg !== assistantMsg
+          && convId === activeConvId) {
+        const _streamActive = typeof activeStreams !== 'undefined'
+          && activeStreams.has(convId)
+          && !!document.getElementById('streaming-msg');
+        if (_streamActive) {
+          if (_stampedIdx >= 0 && typeof renderMessage === 'function') {
+            const _el = document.getElementById('msg-' + _stampedIdx);
+            if (_el) _el.outerHTML = renderMessage(_stampedMsg, _stampedIdx);
+          }
+        } else if (typeof renderChat === 'function') {
+          const _conv = (typeof conversations !== 'undefined')
+            ? conversations.find(c => c && c.id === convId) : null;
+          if (_conv) renderChat(_conv, false);
+        }
       }
       /* ── Debug-panel alignment ──
        * The debug panel renders the api-form messages snapshot the model

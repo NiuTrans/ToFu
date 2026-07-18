@@ -12,12 +12,12 @@ from __future__ import annotations
 
 import json
 import time
-import uuid
 from dataclasses import dataclass
 from typing import List, Optional
 
 from lib.config_dir import config_path
 from lib.database import DOMAIN_SYSTEM, get_thread_db
+from lib.ids import short_id
 from lib.json_store import read_json
 from lib.log import audit_log, get_logger
 
@@ -104,7 +104,7 @@ class PaymentRecord:
 
 
 def _new_payment_id() -> str:
-    return f'pay_{uuid.uuid4().hex[:24]}'
+    return short_id('pay_')
 
 
 def find_by_provider_id(provider: str, provider_id: str) -> Optional[PaymentRecord]:

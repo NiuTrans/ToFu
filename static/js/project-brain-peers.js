@@ -90,7 +90,9 @@
     // Row 1: who (title, or sub-agent label).
     var who = document.createElement('div');
     who.className = 'pb-peer-who';
-    var title = (p && (p.title)) || ('conv ' + _shortConv(p && p.convId));
+    var title = (p && (p.title)) ||
+      _t('projectBrain.peerUntitled', 'conversation {id}')
+        .replace('{id}', _shortConv(p && p.convId));
     if (isAgent) {
       who.textContent = _t('projectBrain.peerSubAgent', 'sub-agent {id}')
         .replace('{id}', p.agentId) + ' · ' + title;
@@ -126,7 +128,16 @@
     // Sub-agents have no queue of their own, so they get no composer.
     var cid = (p && p.convId) || '';
     if (cid && !isAgent) {
-      body.appendChild(_buildNudgeAffordance(cid));
+      var ctl = document.createElement('div');
+      ctl.className = 'pb-peer-controls';
+      ctl.appendChild(_buildNudgeAffordance(cid));
+      // A coercive STOP is offered ONLY when the peer has a RUNNING task —
+      // there is nothing to abort otherwise. It is the human counterpart to
+      // project_intervene(hard_abort=True), gated behind a danger-confirm.
+      if (p && p.taskStatus === 'running') {
+        ctl.appendChild(_buildStopAffordance(cid, title));
+      }
+      body.appendChild(ctl);
     }
 
     card.appendChild(body);
@@ -136,8 +147,10 @@
     if (cid) {
       card.classList.add('pb-peer-clickable');
       card.addEventListener('click', function (e) {
-        // A click inside the nudge composer must NOT navigate away.
-        if (e.target && e.target.closest && e.target.closest('.pb-peer-nudge')) return;
+        // A click inside the nudge composer OR the stop affordance must NOT
+        // navigate away (otherwise typing/confirming yanks the operator off).
+        if (e.target && e.target.closest &&
+            (e.target.closest('.pb-peer-nudge') || e.target.closest('.pb-peer-stop'))) return;
         if (typeof loadConversation === 'function') loadConversation(cid);
       });
     }
@@ -257,6 +270,80 @@
   }
 
   /**
+   * Build the per-card STOP affordance: a small danger button that, after a
+   * themed confirm, calls Api.project.brainPeerAbort (operator → toConv) to
+   * hard-abort the sibling's running task(s). This is the operator counterpart
+   * to project_intervene(hard_abort=True): the authenticated operator IS the
+   * approval (the confirm), passed server-side as approved_by and honored by
+   * the same audit gate. Aborts the TASK only, never the host. `toConv` is the
+   * target sibling conversation id; `title` is its display name for the prompt.
+   */
+  function _buildStopAffordance(toConv, title) {
+    var wrap = document.createElement('span');
+    wrap.className = 'pb-peer-stop';
+
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'pb-peer-stop-btn';
+    btn.innerHTML = ((typeof Icon === 'function') ? Icon('ban', 12) : '') +
+      '<span>' + _esc(_t('projectBrain.peerStop', 'Stop')) + '</span>';
+    wrap.appendChild(btn);
+
+    var status = document.createElement('span');
+    status.className = 'pb-peer-stop-status';
+    wrap.appendChild(status);
+
+    function _confirm(msg) {
+      // Prefer the themed danger confirm; fall back to window.confirm so the
+      // gate is NEVER bypassed even if the dialog module is unavailable.
+      if (typeof showConfirm === 'function') {
+        return Promise.resolve(showConfirm(msg, {
+          danger: true,
+          okText: _t('projectBrain.peerStopConfirmOk', 'Stop the task'),
+          title: _t('projectBrain.peerStop', 'Stop'),
+        }));
+      }
+      try { return Promise.resolve(window.confirm(msg)); }
+      catch (_e) { return Promise.resolve(false); }
+    }
+
+    btn.addEventListener('click', function () {
+      var who = title || _t('projectBrain.peerUntitled', 'conversation {id}')
+        .replace('{id}', _shortConv(toConv));
+      var msg = _t('projectBrain.peerStopConfirm',
+        'Hard-abort the running task(s) of "{who}"? This stops its task only — it never touches the host process.')
+        .replace('{who}', who);
+      _confirm(msg).then(function (ok) {
+        if (!ok) return;
+        var api = (typeof Api !== 'undefined' && Api.project) ? Api.project : null;
+        var path = _displayedPeersPath();
+        var fromConv = _actingConvId();
+        if (!api || typeof api.brainPeerAbort !== 'function' || !path || !fromConv) {
+          status.className = 'pb-peer-stop-status pb-peer-stop-status-err';
+          status.textContent = _t('projectBrain.peerStopFailed', 'Stop failed');
+          return;
+        }
+        btn.disabled = true;
+        status.className = 'pb-peer-stop-status';
+        status.textContent = '…';
+        Promise.resolve(api.brainPeerAbort(path, fromConv, toConv))
+          .then(function () {
+            status.className = 'pb-peer-stop-status pb-peer-stop-status-ok';
+            status.textContent = _t('projectBrain.peerStopped', 'Stopped');
+            setTimeout(function () { refreshPeers(path); }, 700);
+          })
+          .catch(function (e) {
+            status.className = 'pb-peer-stop-status pb-peer-stop-status-err';
+            status.textContent = _t('projectBrain.peerStopFailed', 'Stop failed');
+            if (typeof console !== 'undefined') console.warn('[ProjectBrain] peer stop failed', e);
+          })
+          .then(function () { btn.disabled = false; });
+      });
+    });
+    return wrap;
+  }
+
+  /**
    * Extract the peer-message THREAD from a feed events array. A peer exchange
    * is a `note` event whose payload carries fromConv + toConv (emitted by
    * send_peer_message / intervene_peer). Returns chronological (oldest-first)
@@ -292,9 +379,15 @@
     var head = document.createElement('div');
     head.className = 'pb-peer-msg-head';
     var glyph = isIntervene ? 'alertTriangle' : 'messageSquare';
-    var arrow = _shortConv(m.fromConv) + ' → ' + _shortConv(m.toConv);
+    // Wrap the from/to short ids in [data-conv-id] spans so the panel's
+    // delegated hover-preview (project-brain.js) resolves each opaque id to
+    // its conversation's opening question on hover.
+    var route = '<span class="pb-peer-msg-cid" data-conv-id="' + _esc(m.fromConv) + '">' +
+      _esc(_shortConv(m.fromConv)) + '</span> → ' +
+      '<span class="pb-peer-msg-cid" data-conv-id="' + _esc(m.toConv) + '">' +
+      _esc(_shortConv(m.toConv)) + '</span>';
     head.innerHTML = ((typeof Icon === 'function') ? Icon(glyph, 12) : '') +
-      '<span class="pb-peer-msg-route">' + _esc(arrow) + '</span>';
+      '<span class="pb-peer-msg-route">' + route + '</span>';
     var rel = _relTime(m.ts);
     if (rel) {
       var timeEl = document.createElement('span');
@@ -307,6 +400,10 @@
     var bodyEl = document.createElement('div');
     bodyEl.className = 'pb-peer-msg-body';
     bodyEl.textContent = m.summary;
+    // The peer note is agent/human-authored free text — mark it for the
+    // content-translation overlay (project-brain-i18n). The original stays in
+    // the attribute; the overlay lays a translation over it, never mutating it.
+    if (m.summary) bodyEl.setAttribute('data-pb-src', m.summary);
     row.appendChild(bodyEl);
     return row;
   }
@@ -322,6 +419,13 @@
     status = status || {};
     var peers = status.peers || [];
     thread = thread || [];
+    // Backend-authoritative count of CONVERSATIONS present (excludes a running
+    // conv's sub-agents, which are separate presence peers). The frontend is a
+    // pure reducer here — it renders the server's convCount, never recomputes
+    // liveness/attribution from the peer array. Fallback to the peer count only
+    // when the field is absent (e.g. a stale cached bundle hitting a new API).
+    var convCount = (typeof status.convCount === 'number')
+      ? status.convCount : peers.length;
 
     var parts = document.createDocumentFragment();
 
@@ -337,7 +441,7 @@
       var head = document.createElement('div');
       head.className = 'pb-peers-roster-head';
       head.textContent = _t('projectBrain.peersHere', '{n} here now')
-        .replace('{n}', peers.length);
+        .replace('{n}', convCount);
       roster.appendChild(head);
       for (var i = 0; i < peers.length; i++) {
         roster.appendChild(buildPeerCard(peers[i]));
@@ -363,6 +467,23 @@
 
     el.innerHTML = '';
     el.appendChild(parts);
+
+    // Lay the content-translation overlay over the freshly-rendered thread
+    // (no-op when the PB-scoped translate toggle is off / already-target).
+    if (typeof ProjectBrainI18n !== 'undefined' && ProjectBrainI18n &&
+        typeof ProjectBrainI18n.apply === 'function') {
+      try { ProjectBrainI18n.apply(el); } catch (_e) { /* best-effort */ }
+    }
+
+    // Team tab badge = live sibling count (excludes the caller's own conv,
+    // server-side). Set here so it stays in lockstep with the rendered roster.
+    var badge = document.getElementById('pbTabCountPeers');
+    if (badge) {
+      if (convCount > 0) {
+        badge.textContent = convCount > 99 ? '99+' : String(convCount);
+        badge.hidden = false;
+      } else { badge.textContent = ''; badge.hidden = true; }
+    }
   }
 
   /**
@@ -428,5 +549,6 @@
     refreshPeers: refreshPeers,
     _peerState: _peerState,
     _buildNudgeAffordance: _buildNudgeAffordance,
+    _buildStopAffordance: _buildStopAffordance,
   };
 })();

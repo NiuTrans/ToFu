@@ -64,6 +64,20 @@ from threading import local as thread_local
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+def _per_user_base() -> str:
+    """Per-user, guaranteed-writable base dir. Byte-for-byte twin of
+    ``lib/runtime_paths._per_user_root``."""
+    if sys.platform.startswith('win'):
+        base = os.environ.get('LOCALAPPDATA') or os.path.expanduser('~')
+        return os.path.join(base, 'Tofu')
+    if sys.platform == 'darwin':
+        return os.path.join(os.path.expanduser('~'), 'Library',
+                            'Application Support', 'Tofu')
+    xdg = os.environ.get('XDG_DATA_HOME') or os.path.join(
+        os.path.expanduser('~'), '.local', 'share')
+    return os.path.join(xdg, 'Tofu')
+
+
 def _writable_base_dir() -> str:
     """Resolve the writable BASE dir that holds both logs/ and data/.
 
@@ -88,17 +102,39 @@ def _writable_base_dir() -> str:
                 pass
             os.remove(probe)
             return exe_dir
-        except OSError:
-            if sys.platform.startswith('win'):
-                base = os.environ.get('LOCALAPPDATA') or os.path.expanduser('~')
-                return os.path.join(base, 'Tofu')
-            if sys.platform == 'darwin':
-                return os.path.join(os.path.expanduser('~'), 'Library',
-                                    'Application Support', 'Tofu')
-            xdg = os.environ.get('XDG_DATA_HOME') or os.path.join(
-                os.path.expanduser('~'), '.local', 'share')
-            return os.path.join(xdg, 'Tofu')
-    return BASE_DIR
+        except OSError as e:
+            logging.getLogger('lib.log').debug(
+                '[log] exe-dir %s not writable (%s) — using per-user base', exe_dir, e)
+            return _per_user_base()
+    # Source checkout — mirror runtime_paths._source_checkout_base() exactly:
+    # keep user state OUT of the code tree by default (fresh clone → per-user),
+    # but keep an existing populated in-tree data/ where it is (zero migration).
+    layout = (os.environ.get('TOFU_DATA_LAYOUT')
+              or os.environ.get('CHATUI_DATA_LAYOUT') or 'auto').strip().lower()
+    if layout == 'intree':
+        return BASE_DIR
+    if layout == 'xdg':
+        return _per_user_base()
+    if layout == 'auto':
+        data_dir = os.path.join(BASE_DIR, 'data')
+        try:
+            with os.scandir(data_dir) as it:
+                populated = any(True for _ in it)
+        except OSError as e:
+            logging.getLogger('lib.log').debug(
+                '[log] scandir(%s) failed (%s) — treating as unpopulated', data_dir, e)
+            populated = False
+        return BASE_DIR if populated else _per_user_base()
+    # Unknown value → treat as auto's fresh-clone default (per-user).
+    data_dir = os.path.join(BASE_DIR, 'data')
+    try:
+        with os.scandir(data_dir) as it:
+            populated = any(True for _ in it)
+    except OSError as e:
+        logging.getLogger('lib.log').debug(
+            '[log] scandir(%s) failed (%s) — treating as unpopulated', data_dir, e)
+        populated = False
+    return BASE_DIR if populated else _per_user_base()
 
 
 def _writable_logs_dir() -> str:
@@ -461,9 +497,3 @@ def log_suppressed(logger: logging.Logger, context: str, exc: Exception = None,
     exc_msg = str(exc)[:200] if exc else ''
     logger.log(level, '%s[suppressed] %s — %s: %s', prefix, context, exc_type, exc_msg)
 
-# ══════════════════════════════════════════
-#  Log Analysis Utilities
-# ══════════════════════════════════════════
-# NOTE: All log scanning, error fingerprinting, and resolution tracking
-# Error log scanning was previously handled by lib/project_error_tracker.py (removed).
-# No log-analysis utilities live here anymore.

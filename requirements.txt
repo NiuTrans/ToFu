@@ -30,7 +30,30 @@ psutil>=5.9
 # >=0.4.0: carries the `tofu_search.verify` subpackage (zero-LLM citation
 # verifier). Below this floor, paper-mode's citation-integrity card silently
 # never appears (build_citation_audit degrades to None on the missing import).
-tofu-search>=0.4.0
+# >=0.4.1: adaptive per-engine dual-path proxy (proxied↔direct, sticky+TTL'd)
+# — the bridge passes proxy_dual_attempt; below this floor that kwarg is
+# rejected by an older configure(), so keep the floor at the version that
+# defines it.
+# >=0.4.2: docs/packaging hygiene (lxml transitive-dep note); no API change —
+# floor bumped to always resolve the latest published release.
+# >=0.4.3: entity-diversified rerank top-K for multi-entity comparison queries
+# (search/rerank.py::_diversify_by_entity + shared authority.host_brand_labels)
+# — internal reranking improvement, no public-API change.
+# >=0.5.0: hard wall-clock deadlines (search_deadline_secs / fetch_url_deadline_secs).
+# HARD FLOOR — not optional: lib/search_bridge.py::sync_search_config passes both
+# kwargs to tofu_search.configure() UNCONDITIONALLY, and server.py calls
+# install_search_bridge() at boot with no guard. An older configure() rejects the
+# unknown kwargs with `TypeError: SearchConfig.__init__() got an unexpected keyword
+# argument 'search_deadline_secs'`, so the server crashes on startup against any
+# tofu-search < 0.5.0. Do not lower this floor without first making the bridge pass
+# the deadline kwargs defensively.
+# >=0.5.1: per-engine request throttle (min_request_interval_ms, default 400ms) that
+# stops two concurrent search calls from self-inflicting an engine rate-limit (the
+# DDG 202). SOFT floor (unlike the 0.5.0 deadline kwargs): the bridge does NOT pass
+# min_request_interval_ms to configure(), so an older tofu-search does not crash — it
+# just lacks the throttle. Live-tune via the TOFU_SEARCH_MIN_REQUEST_INTERVAL_MS env
+# var (configure() picks it up for any field the bridge leaves unset).
+tofu-search>=0.5.1
 trafilatura>=1.6
 # playwright is optional — powers the JS-rendered fallback in tofu_search.fetch.
 # On Linux, Chromium needs X11/GTK shared libs (libatk, libgbm, libXcomposite, …).

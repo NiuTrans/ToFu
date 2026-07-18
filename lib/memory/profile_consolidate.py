@@ -27,10 +27,7 @@ Returns a list of ``learned`` dicts the orchestrator turns into
 
 from __future__ import annotations
 
-import json
-import re
-from typing import Any
-
+from lib.llm_json import extract_json
 from lib.log import audit_log, get_logger
 
 logger = get_logger(__name__)
@@ -103,22 +100,7 @@ def _recent_surface(messages: list, cap: int = _MAX_SURFACE_CHARS) -> str:
 
 def _parse_actions(content: str) -> list[dict]:
     """Tolerant JSON extraction of the actions list (fences/preamble safe)."""
-    if not content:
-        return []
-    cleaned = re.sub(r'```(?:json)?\s*', '', content)
-    cleaned = re.sub(r'\s*```', '', cleaned).strip()
-    obj: Any = None
-    try:
-        obj = json.loads(cleaned)
-    except json.JSONDecodeError:
-        from lib.memory.prefetch import _extract_first_balanced_object
-        cand = _extract_first_balanced_object(cleaned) or \
-            _extract_first_balanced_object(content)
-        if cand:
-            try:
-                obj = json.loads(cand)
-            except json.JSONDecodeError:
-                obj = None
+    obj = extract_json(content)
     if not isinstance(obj, dict):
         return []
     acts = obj.get('actions')

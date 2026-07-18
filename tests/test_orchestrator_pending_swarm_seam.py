@@ -26,7 +26,13 @@ pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-ORCH = os.path.join(ROOT, 'lib', 'tasks_pkg', 'orchestrator.py')
+# The orchestrator was split into a facade-preserving package
+# (``lib/tasks_pkg/orchestrator/``).  ``run_task`` — and the pending-swarm
+# guard block this test byte-couples to — now lives in ``_run.py``.  Fall
+# back to the legacy monolith path for older checkouts.
+ORCH = os.path.join(ROOT, 'lib', 'tasks_pkg', 'orchestrator', '_run.py')
+if not os.path.exists(ORCH):
+    ORCH = os.path.join(ROOT, 'lib', 'tasks_pkg', 'orchestrator.py')
 
 _SWARM_NAMES = {'spawn_agents', 'await_agents', 'get_agent_result'}
 

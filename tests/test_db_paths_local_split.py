@@ -21,6 +21,7 @@ import lib.database.db_paths as db_paths
 def _clean_env(monkeypatch):
     for var in ('TOFU_DB_LOCAL_SPLIT', 'TOFU_DB_LOCAL_ROOT', 'TOFU_DB_BACKUP_ROOT'):
         monkeypatch.delenv(var, raising=False)
+    db_paths._LOGGED_RESOLUTIONS.clear()  # the log-dedup cache is per-process; reset per test
     yield
 
 
@@ -148,3 +149,27 @@ def test_gate_genuine_first_boot_uses_local(tmp_path, monkeypatch):
     monkeypatch.setenv('TOFU_DB_LOCAL_SPLIT', '1')
     monkeypatch.setenv('TOFU_DB_LOCAL_ROOT', local_root)
     assert db_paths.resolve_pgdata_dir(data_dir) == os.path.join(local_root, 'pgdata')
+
+
+# ── Log-spam de-duplication (the 3143×/day WARNING that buried real errors) ──
+
+def test_split_fallback_warning_logged_at_most_once(tmp_path, monkeypatch, caplog):
+    """resolve_pgdata_dir is called on many hot paths; the split-fallback
+    WARNING (split on + local not yet seeded) must be emitted ONCE per process,
+    not once per call — otherwise it spams thousands of identical lines/day and
+    buries real errors. The RETURN value must still be correct on every call."""
+    data_dir = str(tmp_path / 'data')
+    _make_populated_pgdata(data_dir)             # populated legacy → recoverable
+    monkeypatch.setenv('TOFU_DB_LOCAL_SPLIT', '1')
+    monkeypatch.setenv('TOFU_DB_LOCAL_ROOT', str(tmp_path / 'local'))  # empty local
+
+    legacy = os.path.join(data_dir, 'pgdata')
+    with caplog.at_level('WARNING', logger='lib.database.db_paths'):
+        for _ in range(50):
+            assert db_paths.resolve_pgdata_dir(data_dir) == legacy  # every call correct
+
+    fallback_warnings = [r for r in caplog.records
+                         if 'Split engaged but local pgdata' in r.getMessage()]
+    assert len(fallback_warnings) == 1, (
+        f'expected exactly 1 fallback warning across 50 calls, '
+        f'got {len(fallback_warnings)} — log de-dup regressed')

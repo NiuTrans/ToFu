@@ -43,8 +43,7 @@ isn't a known alias passes through to the orchestrator unchanged.
   | thinking        | thinkingDepth (+   | string -> 'low'…   |
   |                 | thinkingEnabled)   | 'max'; bool also OK|
   | tools           | (per-tool toggles) | list[str] or '*'   |
-  | search          | searchMode         | 'multi'/'single'/  |
-  |                 |                    | 'off'              |
+  | search          | searchMode         | 'multi' / 'off'    |
   | memory          | memoryEnabled      | bool               |
   | preferences     | preferencesEnabled | bool               |
   | swarm           | swarmEnabled       | bool               |
@@ -82,9 +81,8 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-import uuid
 
-from flask import Blueprint, Response
+from flask import Blueprint
 
 from lib.agent_core.admission import (
     await_terminal, controller, on_terminal, register_waiter,
@@ -92,12 +90,14 @@ from lib.agent_core.admission import (
 )
 from lib.api_response import (
     api_bad_request, api_error, api_internal_error, api_not_found, api_ok,
+    sse_response,
 )
 from lib.billing.request_flow import (
     estimate_prompt_tokens, release_reservation, reserve_for_task, settle_task,
 )
 from lib.byo_resolve import resolve_model_and_provider
 from lib.idempotency import idempotent_post
+from lib.ids import short_id
 from lib.llm_dispatch.ephemeral import dispose_ephemeral_slot
 from lib.log import audit_log, get_logger
 from lib.openapi import api_meta
@@ -124,7 +124,6 @@ _THINKING_DEPTHS = {'low', 'medium', 'high', 'xhigh', 'max'}
 # Friendly tool tags → orchestrator cfg toggles.
 _TOOL_TAG_MAP = {
     'search':       ('searchMode', 'multi'),
-    'search:single': ('searchMode', 'single'),
     'search:multi': ('searchMode', 'multi'),
     'fetch':        ('fetchEnabled', True),
     'memory':       ('memoryEnabled', True),
@@ -162,7 +161,7 @@ def _set_thinking(cfg: dict, value):
 
 
 def _set_search(cfg: dict, value):
-    if isinstance(value, str) and value.lower() in ('off', 'single', 'multi'):
+    if isinstance(value, str) and value.lower() in ('off', 'multi'):
         cfg['searchMode'] = value.lower()
     elif value is False:
         cfg['searchMode'] = 'off'
@@ -360,7 +359,7 @@ def _final_response(task: dict, *, model: str, requested_id: str,
     rounds = task.get('toolRounds') or []
     last_round = rounds[-1] if rounds else None
     out: dict = {
-        'id': requested_id or f'run-{uuid.uuid4().hex[:24]}',
+        'id': requested_id or short_id('run-'),
         'object': 'agent.run',
         'created': int(time.time()),
         'model': model,
@@ -528,7 +527,7 @@ async def agent_run():
     conversation_id = optional_str(body, 'conversation_id',
                                     default='', max_len=200)
     if not conversation_id:
-        conversation_id = f'agent-{uuid.uuid4().hex[:12]}'
+        conversation_id = short_id('agent-', 12)
     trajectory_fmt = optional_str(body, 'trajectory',
                                     default='', max_len=40) or None
     if trajectory_fmt and trajectory_fmt not in AVAILABLE_FORMATS:
@@ -628,9 +627,17 @@ async def agent_run():
             'Server at capacity; retry shortly.', status=503,
             error_kind='overloaded', retry_after=5)
 
-    # Release the admission slot + dispose BYO/tool resources exactly
-    # once, the moment the task reaches a terminal state. Event-driven
-    # (fired from manager.append_event) — no per-request polling thread.
+    # Release the admission slot + dispose BYO/tool resources + SETTLE
+    # BILLING exactly once, the moment the task reaches a terminal state.
+    # Event-driven (fired from manager.append_event) — no per-request
+    # polling thread. Binding settlement HERE (not to the HTTP request
+    # lifecycle) is the root-cause fix for the reservation-leak paths: a
+    # blocking-timeout that outran the client, a mid-stream client
+    # disconnect, and an in-process reaper finalize all reach terminal via
+    # this callback, so the reservation is settled against ACTUAL usage
+    # rather than stranded until the 30-min janitor. settle_task is
+    # idempotent on ref_id=task_id, so the happy-path settle below is a
+    # harmless no-op second call.
     _slot_released = {'done': False}
 
     def _on_done(_tid, _handle=handle, _tool_env=tool_env):
@@ -638,6 +645,11 @@ async def agent_run():
             return
         _slot_released['done'] = True
         controller.release()
+        try:
+            settle_task(task, user_id=billing_user_id, model=model_id)
+        except Exception as ex:
+            logger.error('[agent.run] terminal settle failed task=%s: %s',
+                         _tid[:8], ex, exc_info=True)
         if _handle is not None:
             try:
                 dispose_ephemeral_slot(_handle)
@@ -674,18 +686,11 @@ async def agent_run():
 
     # ── 5. Stream or block ────────────────────────────────────────
     if stream:
-        completion_id = requested_id or f'run-{uuid.uuid4().hex[:24]}'
-        return Response(
+        completion_id = requested_id or short_id('run-')
+        return sse_response(
             _stream_generator(task, model_id, completion_id,
                               billing_user_id=billing_user_id),
-            mimetype='text/event-stream',
-            headers={
-                'Content-Type': 'text/event-stream; charset=utf-8',
-                'Cache-Control': 'no-cache, no-transform',
-                'X-Accel-Buffering': 'no',
-                'Connection': 'keep-alive',
-                'X-Tofu-Task-Id': task['id'],
-            })
+            extra_headers={'X-Tofu-Task-Id': task['id']})
 
     try:
         await _wait_for_terminal(task, timeout_s=timeout_s)

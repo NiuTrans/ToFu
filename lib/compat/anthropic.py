@@ -17,9 +17,13 @@ from __future__ import annotations
 
 import asyncio
 import json
-import uuid
 from typing import AsyncGenerator
 
+from lib.compat._common import (
+    apply_common_cfg,
+    apply_tools_and_personal_defaults,
+    short_id,
+)
 from lib.log import get_logger
 
 logger = get_logger(__name__)
@@ -66,21 +70,10 @@ def translate_anthropic_request(body: dict) -> tuple[list[dict], dict, dict]:
         messages.append({'role': role, 'content': content})
 
     cfg: dict = {}
-    if body.get('model'):
-        cfg['model'] = body['model']
-        cfg['preset'] = body['model']
-    if 'temperature' in body:
-        cfg['temperature'] = body['temperature']
-    if 'max_tokens' in body:
-        cfg['maxTokens'] = body['max_tokens']
-    if 'top_p' in body:
-        cfg['topP'] = body['top_p']
+    apply_common_cfg(cfg, body)
+    # Anthropic-specific cfg fields.
     if 'stop_sequences' in body:
         cfg['stop'] = body['stop_sequences']
-    if 'tools' in body:
-        cfg['tools'] = body['tools']
-    if 'tool_choice' in body:
-        cfg['toolChoice'] = body['tool_choice']
     if 'metadata' in body and isinstance(body['metadata'], dict):
         if body['metadata'].get('user_id'):
             cfg['user'] = body['metadata']['user_id']
@@ -96,18 +89,7 @@ def translate_anthropic_request(body: dict) -> tuple[list[dict], dict, dict]:
                     'high' if budget <= 16384 else
                     'xhigh' if budget <= 32768 else 'max')
 
-    if 'tools' in body:
-        cfg.setdefault('searchMode', 'off')
-        cfg.setdefault('fetchEnabled', False)
-        cfg.setdefault('mcpEnabled', False)
-
-    # App-personal capabilities (memory store + preference profile) fail
-    # closed on this headless compat surface regardless of whether tools were
-    # supplied — the operator's personal state must never ride an
-    # Anthropic-compat call. setdefault = an explicit caller cfg still wins.
-    # Single source of truth: lib/agent_core/personal_scope.
-    from lib.agent_core.personal_scope import apply_headless_personal_defaults
-    apply_headless_personal_defaults(cfg)
+    apply_tools_and_personal_defaults(cfg, body)
 
     options = {
         'stream': bool(body.get('stream')),
@@ -118,10 +100,13 @@ def translate_anthropic_request(body: dict) -> tuple[list[dict], dict, dict]:
 
 def _content_blocks_from_task(task: dict) -> list[dict]:
     """Build Anthropic content[] from the assembled task content."""
+    from lib.tasks_pkg.segments import deliverable_text
     blocks: list[dict] = []
     if task.get('thinking'):
         blocks.append({'type': 'thinking', 'thinking': task['thinking']})
-    text = task.get('content') or ''
+    # Deliverable = narration-free answer from the segment model (epic
+    # pt_cb8f98b0cb9b47fb, step 3) — one source of truth with the streaming path.
+    text = deliverable_text(task)
     if text:
         blocks.append({'type': 'text', 'text': text})
     rounds = task.get('toolRounds') or []
@@ -137,7 +122,7 @@ def _content_blocks_from_task(task: dict) -> list[dict]:
                     args = {}
                 blocks.append({
                     'type': 'tool_use',
-                    'id': tc.get('id') or 'toolu_' + uuid.uuid4().hex[:16],
+                    'id': tc.get('id') or short_id('toolu_', 16),
                     'name': fn.get('name', ''),
                     'input': args,
                 })
@@ -157,7 +142,7 @@ def build_anthropic_response(task: dict, model: str) -> dict:
         stop_reason = finish_map.get(finish, 'end_turn')
     usage = task.get('usage') or {}
     return {
-        'id': 'msg_' + (task.get('id') or uuid.uuid4().hex[:16]),
+        'id': 'msg_' + (task.get('id') or short_id(n=16)),
         'type': 'message',
         'role': 'assistant',
         'model': model,
@@ -185,10 +170,11 @@ async def stream_anthropic_chunks(task, model: str
     """
     from lib.agent_core.admission import unregister_waiter, wait_for_event
 
-    msg_id = 'msg_' + uuid.uuid4().hex[:16]
+    msg_id = short_id('msg_', 16)
     cursor = 0
     started = False
     text_block_open = False
+    thinking_block_open = False
     block_index = 0
     task_id = task.get('id') or ''
 
@@ -216,21 +202,21 @@ async def stream_anthropic_chunks(task, model: str
                 })
                 started = True
             if etype == 'delta':
-                content = ev.get('content', '')
-                if content:
-                    if not text_block_open:
+                # ★ Narrator-leak root fix (epic pt_cb8f98b0cb9b47fb, step 3):
+                #   content deltas are unclassifiable mid-stream and a wire
+                #   client can't retract, so we do NOT stream raw content as the
+                #   answer text block. The narration-free deliverable is emitted
+                #   from the segment model at `done`. Thinking DOES stream live
+                #   as a thinking block (real-time reasoning without polluting
+                #   the answer). Retires the compat surface's DELTA_RESET need.
+                if ev.get('thinking'):
+                    if not thinking_block_open:
                         yield _evt('content_block_start', {
                             'type': 'content_block_start',
                             'index': block_index,
-                            'content_block': {'type': 'text', 'text': ''},
+                            'content_block': {'type': 'thinking', 'thinking': ''},
                         })
-                        text_block_open = True
-                    yield _evt('content_block_delta', {
-                        'type': 'content_block_delta',
-                        'index': block_index,
-                        'delta': {'type': 'text_delta', 'text': content},
-                    })
-                if ev.get('thinking'):
+                        thinking_block_open = True
                     yield _evt('content_block_delta', {
                         'type': 'content_block_delta',
                         'index': block_index,
@@ -238,6 +224,30 @@ async def stream_anthropic_chunks(task, model: str
                                   'thinking': ev['thinking']},
                     })
             elif etype == 'done':
+                # Close the live thinking block (if any) before the answer block.
+                if thinking_block_open:
+                    yield _evt('content_block_stop', {
+                        'type': 'content_block_stop', 'index': block_index,
+                    })
+                    thinking_block_open = False
+                    block_index += 1
+                # ★ Emit the narration-free deliverable as one text block NOW.
+                from lib.tasks_pkg.segments import deliverable_text
+                answer = deliverable_text(task)
+                if answer:
+                    yield _evt('content_block_start', {
+                        'type': 'content_block_start',
+                        'index': block_index,
+                        'content_block': {'type': 'text', 'text': ''},
+                    })
+                    yield _evt('content_block_delta', {
+                        'type': 'content_block_delta',
+                        'index': block_index,
+                        'delta': {'type': 'text_delta', 'text': answer},
+                    })
+                    yield _evt('content_block_stop', {
+                        'type': 'content_block_stop', 'index': block_index,
+                    })
                 if text_block_open:
                     yield _evt('content_block_stop', {
                         'type': 'content_block_stop',
@@ -263,6 +273,34 @@ async def stream_anthropic_chunks(task, model: str
                 return
 
         if task.get('status') in ('done', 'error', 'aborted') and not new_events:
+            # Terminal but no `done` event in the stream (late connect after
+            # completion) — still emit the deliverable so the client gets the
+            # answer, with a well-formed message envelope.
+            if not started:
+                yield _evt('message_start', {
+                    'type': 'message_start',
+                    'message': {
+                        'id': msg_id, 'type': 'message', 'role': 'assistant',
+                        'model': model, 'content': [], 'stop_reason': None,
+                        'stop_sequence': None,
+                        'usage': {'input_tokens': 0, 'output_tokens': 0},
+                    },
+                })
+                started = True
+            from lib.tasks_pkg.segments import deliverable_text
+            answer = deliverable_text(task)
+            if answer:
+                yield _evt('content_block_start', {
+                    'type': 'content_block_start', 'index': block_index,
+                    'content_block': {'type': 'text', 'text': ''},
+                })
+                yield _evt('content_block_delta', {
+                    'type': 'content_block_delta', 'index': block_index,
+                    'delta': {'type': 'text_delta', 'text': answer},
+                })
+                yield _evt('content_block_stop', {
+                    'type': 'content_block_stop', 'index': block_index,
+                })
             yield _evt('message_stop', {'type': 'message_stop'})
             return
 

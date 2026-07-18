@@ -8,6 +8,7 @@ Usage:
     from lib.llm_dispatch import dispatch_chat, dispatch_stream, smart_chat
 """
 
+import copy
 import os
 import threading
 import time
@@ -27,8 +28,29 @@ try:
     _UNREACHABLE_COOLDOWN = float(os.environ.get('TOFU_UNREACHABLE_COOLDOWN', '30'))
     if _UNREACHABLE_COOLDOWN <= 0:
         _UNREACHABLE_COOLDOWN = 30.0
-except (ValueError, TypeError):
+except (ValueError, TypeError) as e:
+    logger.debug('[Dispatch] TOFU_UNREACHABLE_COOLDOWN parse failed, using default: %s', e)
     _UNREACHABLE_COOLDOWN = 30.0
+
+# Wall-clock ceiling (seconds) on a GATEWAY-OUTAGE streak in the streaming
+# dispatch loops. A real per-key 429 reflects contention — a sibling key will
+# free up, so those rotate FOREVER (unchanged). But a gateway 5xx
+# (502/503/504) storm on EVERY slot means the whole upstream is down; rotating
+# forever there just pins the worker thread and floods the log — the process
+# stays alive while the frontend can't be served ("backend alive, frontend
+# dead"). When nothing but gateway 5xx has come back for longer than this
+# budget, the loop gives up cleanly and frees the thread. A real 429 or a
+# success clears the streak, so genuine contention is never capped.
+# Set TOFU_GATEWAY_OUTAGE_BUDGET_S=0 to disable (legacy spin-forever behaviour).
+try:
+    _GATEWAY_OUTAGE_BUDGET_S = float(
+        os.environ.get('TOFU_GATEWAY_OUTAGE_BUDGET_S', '') or '120')
+    if _GATEWAY_OUTAGE_BUDGET_S < 0:
+        _GATEWAY_OUTAGE_BUDGET_S = 120.0
+except (ValueError, TypeError) as e:
+    logger.debug('[Dispatch] TOFU_GATEWAY_OUTAGE_BUDGET_S parse failed, '
+                 'using default: %s', e)
+    _GATEWAY_OUTAGE_BUDGET_S = 120.0
 
 
 def _raise_dispatch_exhausted(last_err, *, max_retries, capability,
@@ -56,6 +78,63 @@ def _raise_dispatch_exhausted(last_err, *, max_retries, capability,
     raise last_err or RuntimeError(
         'All %d %s attempts failed for capability=%s'
         % (max_retries, what, capability))
+
+
+
+def _cool_slot_on_premature_close(slot, usage, prev_consecutive_errors=0):
+    """Feed a premature-close stream anomaly into the slot's health scorer.
+
+    ``lib/llm/_sse_core.py::SSEAccumulator.finalize`` sets ``usage['_missing_done']``
+    when the upstream closed the SSE connection before the ``[DONE]`` marker —
+    and ONLY when the close was neither a client abort nor a clean finish
+    (``if not aborted and not saw_done``). That is a genuine soft failure:
+    the HTTP call connected and streamed, but the body is incomplete/unusable.
+    Historically it was only logged, so the offending upstream kept getting
+    re-picked. Route it through the SAME ``record_truncation`` path the
+    translate retry loop uses (bumps ``consecutive_errors`` → after 3 the slot
+    is cooled with the existing exponential backoff / 300s cap — no new
+    hyperparameter).
+
+    ★ Accumulation across dispatches. This runs AFTER ``record_success``, whose
+    latency/throughput/RPM-recovery bookkeeping is legitimately valid (the
+    connection DID stream) — but it ALSO zeroes ``consecutive_errors``. If we
+    let ``record_truncation`` bump the just-zeroed counter, every premature
+    close would reset to 1 and the slot could NEVER reach the ``>=3`` cooldown
+    threshold, no matter how many times the SAME upstream drops. So we restore
+    the pre-``record_success`` error count first, then let ``record_truncation``
+    do its usual ``+= 1`` + threshold-cooldown on top — accumulation survives.
+
+    The over-cooling guard is the ``_missing_done`` predicate itself: a clean
+    close (``saw_done``) or a client abort never sets the flag, so a healthy
+    upstream and a user-cancelled stream are never cooled.
+    """
+    if not isinstance(usage, dict) or not usage.get('_missing_done'):
+        return
+    try:
+        _elapsed = usage.get('stream_elapsed_ms', 0)
+        _chunks = usage.get('_chunks_received', 0)
+        # Undo record_success()'s zeroing so consecutive premature closes on
+        # the same slot accumulate toward the cooldown threshold.
+        with slot._lock:
+            slot.consecutive_errors = max(slot.consecutive_errors,
+                                          prev_consecutive_errors)
+        slot.record_truncation(
+            error='premature stream close (no [DONE]) '
+                  'elapsed_ms=%s chunks=%s' % (_elapsed, _chunks))
+        from lib.log import audit_log
+        audit_log('premature_close_cooldown',
+                  key_name=slot.key_name, model=slot.model,
+                  provider_id=slot.provider_id,
+                  consecutive_errors=slot.consecutive_errors,
+                  cooldown_until=round(slot.cooldown_until, 1),
+                  elapsed_ms=_elapsed, chunks=_chunks,
+                  trace_id=usage.get('trace_id', ''))
+        logger.warning('[Dispatch] Premature stream close on %s:%s — '
+                       'recorded soft failure (consecutive_errors=%d)',
+                       slot.key_name, slot.model, slot.consecutive_errors)
+    except Exception as e:
+        logger.warning('[Dispatch] _cool_slot_on_premature_close failed '
+                       'for %s:%s: %s', slot.key_name, slot.model, e)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -640,6 +719,20 @@ def _adapt_stream_body_for_slot(slot, body_or_messages, is_body, *,
     if is_body:
         body = dict(body_or_messages)
         body['model'] = slot.model
+        # ★ dict() is a SHALLOW copy — body['messages'] would alias the caller's
+        #   task-shared list, so the model-specific IN-PLACE rewrites below
+        #   (_strip_trailing_assistant_for_claude / _downscale_oversized_images /
+        #   _inject_gemini_thought_signatures) would MUTATE that shared list.
+        #   On a 503/429 slot-swap retry the loop re-adapts the SAME shared body
+        #   for a different slot: a Gemini attempt bakes extra_content.google.
+        #   thought_signature into a prefix tool_call, then the recovered Claude
+        #   attempt re-serializes the now-polluted prefix → different wire bytes
+        #   → prompt-cache key shift → full prefix miss (conv mrne3bqe R4/R5,
+        #   which recovered — "rebound" — once a clean round re-formed the prefix).
+        #   Deep-copy the messages so each per-slot adaptation is idempotent and
+        #   never leaks a model-specific rewrite back onto the caller / next slot.
+        if isinstance(body.get('messages'), list):
+            body['messages'] = copy.deepcopy(body['messages'])
         if tools is not None:
             body['tools'] = tools
         if 'max_tokens' in body:
@@ -723,10 +816,25 @@ class _StreamRetryState:
         self.hard_attempts = 0
         self._429_count = 0
         self._last_exclusion_reset = time.monotonic()
+        # Monotonic timestamp when the current UNBROKEN gateway-5xx streak
+        # began (None = no active streak). Set on the first gateway 502/503/504,
+        # cleared by any real per-key 429 or a success. Used to bound a
+        # whole-upstream outage without capping genuine per-key contention.
+        self._gateway_streak_start = None
 
     @property
     def total_attempts(self):
         return self.hard_attempts + self._429_count
+
+    def gateway_outage_exceeded(self, budget_s):
+        """True when nothing but gateway 5xx has come back for > ``budget_s``.
+
+        ``budget_s <= 0`` disables the cap (legacy infinite-rotation behaviour).
+        The streak must be active (a gateway 5xx was seen and no real 429 /
+        success has cleared it since)."""
+        if budget_s <= 0 or self._gateway_streak_start is None:
+            return False
+        return (time.monotonic() - self._gateway_streak_start) > budget_s
 
     def maybe_reset_exclusions(self, log_prefix, label):
         """Periodically clear hard-error exclusions during 429 cycling.
@@ -783,9 +891,24 @@ class _StreamRetryState:
             return True
         return False
 
-    def note_free_429(self):
-        """A routine (non-quota) 429 — free retry, does not count toward the cap."""
+    def note_free_429(self, *, is_gateway=False):
+        """A routine (non-quota) 429 — free retry, does not count toward the cap.
+
+        ``is_gateway`` distinguishes a genuine per-key 429 (contention — rotate
+        forever) from a gateway 5xx mapped onto this path (whole-upstream
+        outage — bounded by ``gateway_outage_exceeded``). A gateway 5xx opens /
+        extends the outage streak; a REAL 429 (or a success) clears it, because
+        it proves the upstream is answering and only this key is throttled."""
         self._429_count += 1
+        if is_gateway:
+            if self._gateway_streak_start is None:
+                self._gateway_streak_start = time.monotonic()
+        else:
+            self._gateway_streak_start = None
+
+    def note_success(self):
+        """A slot answered — clear any active gateway-outage streak."""
+        self._gateway_streak_start = None
 
     def note_cooldown_cycle(self):
         """All slots in transient cooldown (slot is None, 429-equivalent)."""
@@ -923,6 +1046,22 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
             raise state.last_err or RuntimeError(
                 'Rate-limited %d times without success' % state._429_count)
 
+        # ★ Gateway-outage cap — when the WHOLE upstream is down (only
+        #   502/503/504 coming back from every slot for > the outage budget),
+        #   stop spinning and free the worker thread. A real per-key 429 or a
+        #   success clears the streak, so genuine contention is never capped.
+        #   This prevents the "backend alive but frontend can't be served"
+        #   thread-pool starvation during a total gateway outage.
+        if state.gateway_outage_exceeded(_GATEWAY_OUTAGE_BUDGET_S):
+            logger.error(
+                '%s dispatch_stream: gateway 5xx outage exceeded %.0fs budget '
+                '(only gateway errors from every slot) — giving up so the '
+                'worker thread is freed. Last error: %s',
+                log_prefix, _GATEWAY_OUTAGE_BUDGET_S, str(state.last_err)[:200])
+            raise state.last_err or RuntimeError(
+                'Gateway outage: no slot reachable for %.0fs'
+                % _GATEWAY_OUTAGE_BUDGET_S)
+
         # Log available slots at start of each attempt for debugging
         logger.debug(
             '%s dispatch_stream attempt hard=%d/%d 429=%d: '
@@ -949,6 +1088,7 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
                     get_conv_affinity,
                     sticky_hold_budget_ms,
                     sticky_hold_enabled,
+                    sticky_hold_max_ms,
                     sticky_routing_enabled,
                 )
                 if sticky_routing_enabled() and sticky_hold_enabled():
@@ -960,19 +1100,44 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
                             exclude_pairs=state.eff_exclude_pairs() or set())
                         if _hold is not None:
                             _remaining_s, _warm_key = _hold
+                            # Escalating ceiling: the flat budget (default 1.5s)
+                            # only covers a transient sub-second 429 nudge. A
+                            # concurrent sibling can cool the conv's SOLE warm
+                            # key for longer; wait that contention window out
+                            # (up to sticky_hold_max_ms, default 8s) rather than
+                            # cold-rebind and destroy the prefix. A genuinely
+                            # long error/quota backoff (remaining > ceiling, e.g.
+                            # 300s) still falls through to the cold rebind — and
+                            # sticky_cooldown_remaining_s already returns None
+                            # for an excluded/disabled key, so failover is intact
+                            # (this is NOT a hard pin). One hold per dispatch
+                            # call (_warm_held), and we wait the FULL remaining
+                            # so the next pick actually finds the warm key
+                            # eligible.
                             _budget_s = sticky_hold_budget_ms() / 1000.0
-                            if 0 < _remaining_s <= _budget_s:
-                                _wait = min(_remaining_s + 0.05, _budget_s)
+                            _ceiling_s = sticky_hold_max_ms() / 1000.0
+                            if 0 < _remaining_s <= _ceiling_s:
+                                _wait = min(_remaining_s + 0.05, _ceiling_s)
+                                _kind = ('short 429 cooldown'
+                                         if _remaining_s <= _budget_s
+                                         else 'contention on sole warm key '
+                                              '(escalated hold)')
                                 logger.info(
                                     '%s dispatch_stream: holding %.2fs for '
-                                    'conv=%s warm key %s (short 429 cooldown) '
-                                    'to keep prompt cache warm',
-                                    log_prefix, _wait, _conv[:8], _warm_key)
+                                    'conv=%s warm key %s (%s) to keep prompt '
+                                    'cache warm',
+                                    log_prefix, _wait, _conv[:8], _warm_key, _kind)
                                 if abort_check and abort_check():
                                     from lib.llm import AbortedError as _AE
                                     raise _AE('Aborted during warm-key hold')
                                 time.sleep(_wait)
                                 state._warm_held = True
+                            else:
+                                logger.debug(
+                                    '%s dispatch_stream: warm key %s cooldown '
+                                    '%.1fs exceeds hold ceiling %.1fs — genuine '
+                                    'backoff, rebinding cold', log_prefix,
+                                    _warm_key, _remaining_s, _ceiling_s)
             except ImportError as _imp_err:
                 logger.debug('%s warm-key hold unavailable: %s',
                              log_prefix, _imp_err)
@@ -1066,7 +1231,60 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
             if on_content:
                 on_content(text)
 
+        # ── Per-key big-prefix admission control ──
+        # Bound the key's cache WORKING SET so several big conversations don't
+        # LRU-evict each other's prompt cache in the key's shared namespace (the
+        # mutual-eviction / rebound miss). This is a SUB-DOMINANT residual — the
+        # dominant miss cause is client-side prefix re-serialization, caught in
+        # cache_tracking; this gate only bounds the concurrency residual.
+        # Residency-aware: admission counts the
+        # distinct big prefixes RESIDENT on the key within the cache-TTL window
+        # (not just concurrent streams), so a warm same-conv re-run passes free
+        # while a NEW distinct big prefix waits when the working set is full.
+        # Passing conv_id (the residency identity) is what makes it catch the
+        # flow-non-overlap-but-residency-overlap case the old stream-only gate
+        # was blind to. Soft + env-gated (see big_prefix_gate.py).
+        import contextlib as _contextlib
+        _cache_conv_id = ''
+        _est_tok = 0
         try:
+            from lib.llm_dispatch.big_prefix_gate import (
+                big_prefix_slot, estimate_prefix_tokens,
+            )
+            from lib.llm_dispatch.conv_affinity import get_conv_affinity
+            _cache_conv_id = get_conv_affinity() or ''
+            _est_tok = estimate_prefix_tokens(body)
+            # Distinct keys serving THIS model. Gating only helps with ≥2 keys
+            # (a held big prefix can route to another key's cache namespace);
+            # on a single-key model the gate would only serialize one pool and
+            # add latency, so big_prefix_slot no-ops when key_count <= 1.
+            _model_key_count = len({s.key_name for s in dispatcher.slots
+                                    if s.model == slot.model})
+            _big_gate = big_prefix_slot(
+                slot.key_name, _est_tok, conv_id=_cache_conv_id,
+                log_prefix=tag, key_count=_model_key_count)
+        except ImportError as _bpg_err:
+            logger.debug('%s big-prefix gate unavailable: %s', tag, _bpg_err)
+            _big_gate = _contextlib.nullcontext()
+
+        # ── Cache write-visibility settle gate (Anthropic SDK #1451 race) ──
+        # If THIS conversation's prior big round's stream ended less than the
+        # settle window ago, briefly wait so its cache WRITE is visible upstream
+        # before this round tries to read the prefix back — otherwise the read
+        # misses and the whole prefix is re-billed (the dominant floor-miss in
+        # fast tool-loop / autopilot conversations). The wait sits inside the
+        # agent's own tool loop (never delays a turn's FIRST request), is
+        # adaptive (only the remainder of the window), abort-aware, and
+        # env-gated. See cache_settle.py.
+        try:
+            from lib.llm_dispatch.cache_settle import settle_before_send
+            settle_before_send(_cache_conv_id, _est_tok,
+                               abort_check=abort_check, log_prefix=tag)
+        except ImportError as _cs_err:
+            logger.debug('%s cache-settle gate unavailable: %s', tag, _cs_err)
+
+        try:
+          with _big_gate:
             msg, finish, usage = stream_chat(
                 body, api_key=slot.api_key,
                 base_url=slot.base_url or None,
@@ -1089,6 +1307,7 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
                 except (ValueError, TypeError) as _e_audit:
                     logger.debug('[api] dispatch_stream caught %s: %s', type(_e_audit).__name__, _e_audit)
                     _out_tokens = 0
+            _prev_ce = slot.consecutive_errors
             slot.record_success(latency, ttft_ms=ttft_value[0],
                                 output_tokens=_out_tokens)
             # Inject dispatch metadata so callers know which slot served this
@@ -1101,6 +1320,7 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
                     'attempt': state.hard_attempts + 1,
                     '429_retries': state._429_count,
                 }
+            _cool_slot_on_premature_close(slot, usage, _prev_ce)
             if state._429_count > 0:
                 logger.info('%s dispatch_stream OK after %d 429-retries: '
                             'finish_reason=%s model=%s provider=%s latency=%.0fms',
@@ -1112,6 +1332,17 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
                             log_prefix, finish, slot.model,
                             slot.provider_id, latency, state.hard_attempts + 1,
                             max_retries)
+            # ── Cache write-visibility settle: mark this conv's stream END ──
+            # The NEXT big request on this conversation measures its gap from
+            # here and settles if it arrives before the prior write is visible
+            # (see cache_settle.py / settle_before_send above).
+            if _cache_conv_id:
+                try:
+                    from lib.llm_dispatch.cache_settle import record_stream_end
+                    record_stream_end(_cache_conv_id)
+                except ImportError as _cs_err:
+                    logger.debug('%s cache-settle record unavailable: %s',
+                                 tag, _cs_err)
             return msg, finish, usage
 
         except RateLimitError as e:
@@ -1134,7 +1365,7 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
                     on_retry(attempt=state.hard_attempts,
                              reason='Key balance exhausted', status_code=429)
                 continue
-            state.note_free_429()
+            state.note_free_429(is_gateway=bool(getattr(e, 'is_gateway', False)))
             # ★ Don't exclude anything — slot.record_error() sets a 0.5s
             #   cooldown which naturally steers pick_and_reserve to another
             #   slot.  After cooldown expires the slot is eligible again,
@@ -1336,6 +1567,17 @@ async def async_dispatch_stream(body_or_messages, *, on_thinking=None,
         if abort_check and abort_check():
             raise AbortedError('Aborted during dispatch retry')
 
+        # ★ Gateway-outage cap (see sync dispatch_stream) — bound a total
+        #   upstream 5xx storm so the event loop / worker isn't pinned forever.
+        if state.gateway_outage_exceeded(_GATEWAY_OUTAGE_BUDGET_S):
+            logger.error(
+                '%s async_dispatch_stream: gateway 5xx outage exceeded %.0fs '
+                'budget — giving up. Last error: %s',
+                log_prefix, _GATEWAY_OUTAGE_BUDGET_S, str(state.last_err)[:200])
+            raise state.last_err or RuntimeError(
+                'Gateway outage: no slot reachable for %.0fs'
+                % _GATEWAY_OUTAGE_BUDGET_S)
+
         state.maybe_reset_exclusions(log_prefix, 'async_dispatch_stream')
 
         slot = dispatcher.pick_and_reserve(
@@ -1376,6 +1618,22 @@ async def async_dispatch_stream(body_or_messages, *, on_thinking=None,
             if on_content:
                 on_content(text)
 
+        # ── Cache write-visibility settle gate (async path) — see the sync
+        #    dispatch_stream branch + cache_settle.py for the rationale. Waits
+        #    (event-loop-friendly) so this conv's prior big round's cache write
+        #    is visible before this round reads the prefix back.
+        _cache_conv_id = ''
+        try:
+            from lib.llm_dispatch.conv_affinity import get_conv_affinity
+            from lib.llm_dispatch.big_prefix_gate import estimate_prefix_tokens
+            from lib.llm_dispatch.cache_settle import async_settle_before_send
+            _cache_conv_id = get_conv_affinity() or ''
+            await async_settle_before_send(
+                _cache_conv_id, estimate_prefix_tokens(body),
+                abort_check=abort_check, log_prefix=tag)
+        except ImportError as _cs_err:
+            logger.debug('%s cache-settle (async) unavailable: %s', tag, _cs_err)
+
         try:
             msg, finish, usage = await async_stream_chat(
                 body, api_key=slot.api_key,
@@ -1398,6 +1656,7 @@ async def async_dispatch_stream(body_or_messages, *, on_thinking=None,
                     logger.debug('[api] async_dispatch_stream caught %s: %s',
                                  type(_e_audit).__name__, _e_audit)
                     _out_tokens = 0
+            _prev_ce = slot.consecutive_errors
             slot.record_success(latency, ttft_ms=ttft_value[0],
                                 output_tokens=_out_tokens)
             if isinstance(usage, dict):
@@ -1409,8 +1668,16 @@ async def async_dispatch_stream(body_or_messages, *, on_thinking=None,
                     'attempt': state.hard_attempts + 1,
                     '429_retries': state._429_count,
                 }
+            _cool_slot_on_premature_close(slot, usage, _prev_ce)
             logger.debug('%s async_dispatch_stream OK: finish=%s model=%s '
                          'latency=%.0fms', log_prefix, finish, slot.model, latency)
+            if _cache_conv_id:
+                try:
+                    from lib.llm_dispatch.cache_settle import record_stream_end
+                    record_stream_end(_cache_conv_id)
+                except ImportError as _cs_err:
+                    logger.debug('%s cache-settle record (async) unavailable: %s',
+                                 tag, _cs_err)
             return msg, finish, usage
 
         except RateLimitError as e:
@@ -1424,7 +1691,7 @@ async def async_dispatch_stream(body_or_messages, *, on_thinking=None,
                     on_retry(attempt=state.hard_attempts, reason='Key balance exhausted',
                              status_code=429)
                 continue
-            state.note_free_429()
+            state.note_free_429(is_gateway=bool(getattr(e, 'is_gateway', False)))
             if on_retry:
                 on_retry(attempt=state._429_count, reason='Rate limited (429)', status_code=429)
             await async_abortable_sleep(0.3, abort_check)

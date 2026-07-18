@@ -43,15 +43,6 @@ function _apRunRecord(conv, runId) {
   return (rec && typeof rec === 'object') ? rec : null;
 }
 
-/* The run's close-out REPORT — only when the record carries report content
- * (a clean [VU: TASK_DONE]). A manual-stop concluded record has a status but
- * NO content, so this returns null for it (the run still folds, but shows no
- * report panel — the "Summarize this run" affordance appears instead). */
-function _apRunSummary(conv, runId) {
-  const rec = _apRunRecord(conv, runId);
-  return (rec && rec.content) ? rec : null;
-}
-
 /* ★ BACKEND-AUTHORITATIVE "run has concluded" — the frontend NEVER infers
  * run-end from stream / task / pending-carrier state anymore (that inference
  * WAS the inter-turn-gap mis-fold bug: between turns the stream is briefly
@@ -77,228 +68,48 @@ function _apRunConcluded(conv, runId, isLast) {
   return false;
 }
 
+/* ★ FLATTENED (owner directive 2026-07-07): autopilot runs are NO LONGER
+ * collapsed into a `<details>` card. VU turns render as a flat sequence
+ * identical to a normal agent chat, so each turn keeps its own hover action
+ * bar (copy / translate / DELETE) — the run-fold was the sole reason a
+ * concluded VU turn's delete button was unreachable. This function is kept
+ * (3 render call-sites + the run-concluded sidecar plumbing still invoke it)
+ * but now does the OPPOSITE of folding: it defensively UNWRAPS any stale
+ * `.autopilot-run-fold` left in the DOM (e.g. from a surgical re-render that
+ * predates this change), hoisting its turns back to the flat sibling level so
+ * the layout never gets stuck half-folded. */
 function _applyAutopilotRunFolds(inner, conv) {
   if (!inner) return;
-  if (!conv && typeof getActiveConv === 'function') conv = getActiveConv();
   try {
-    /* Legacy: pre-sidecar conversations may still carry a summary as a
-     * `data-ap-summary` MESSAGE element. New runs never do (the summary lives
-     * in the sidecar), so this map is empty for them. */
-    const summaries = {};
-    inner.querySelectorAll('.message[data-ap-summary][data-ap-run]').forEach(el => {
-      summaries[el.getAttribute('data-ap-run')] = el;
+    inner.querySelectorAll('details.autopilot-run-fold').forEach(fold => {
+      const parent = fold.parentNode;
+      if (!parent) return;
+      /* Move every real message turn out of the fold, before the fold node,
+       * preserving order; drop the fold's own <summary> chrome. */
+      fold.querySelectorAll(':scope > .message').forEach(msgEl => {
+        parent.insertBefore(msgEl, fold);
+      });
+      parent.removeChild(fold);
     });
-    /* All run ids present (stamped VU turns + any legacy summary). */
-    const runIds = [];
-    inner.querySelectorAll('.message[data-ap-run]').forEach(el => {
-      const r = el.getAttribute('data-ap-run');
-      if (r && runIds.indexOf(r) === -1) runIds.push(r);
-    });
-    if (!runIds.length) return;
-    const lastRunId = runIds[runIds.length - 1];
-
-    for (const runId of runIds) {
-      const _esc = (window.CSS && CSS.escape) ? CSS.escape(runId) : runId;
-      const summaryEl = summaries[runId] || null;
-      const firstStamped = inner.querySelector(
-        `.message[data-ap-run="${_esc}"]:not([data-ap-summary])`
-      );
-      if (!firstStamped) continue;                 // summary-only run, nothing to fold
-      if (firstStamped.closest('.autopilot-run-fold')) continue;  // already folded
-
-      /* ★ Only fold a run once it has truly CONCLUDED (positive signal) —
-       * never mid-run / in the inter-turn gap (see _apRunConcluded). */
-      if (!_apRunConcluded(conv, runId, runId === lastRunId)) continue;
-
-      /* Collect the contiguous sibling range [firstStamped .. before summary).
-       * When there is no summary element, fold the run of consecutive stamped
-       * turns (stop at the first element that isn't part of THIS run). */
-      const range = [];
-      let node = firstStamped;
-      while (node && node !== summaryEl) {
-        const next = node.nextElementSibling;
-        const isMsg = node.classList && node.classList.contains('message');
-        if (isMsg) range.push(node);
-        if (!summaryEl) {
-          /* No summary anchor — bound the fold at the run's own turns plus
-           * the interleaved worker turns. Stop once we pass a message that is
-           * neither this run's stamped turn nor an (un-stamped) assistant
-           * worker turn — i.e. a new human/user turn outside the run. */
-          const nextIsRun = next && next.getAttribute &&
-            next.getAttribute('data-ap-run') === runId;
-          const nextIsWorker = next && next.classList &&
-            next.classList.contains('message') &&
-            !next.classList.contains('user-msg') &&
-            !next.getAttribute('data-ap-run');
-          if (!nextIsRun && !nextIsWorker) { node = null; break; }
-        }
-        node = next;
-      }
-      if (!range.length) continue;
-
-      const turnCount = range.length;
-      const wasOpen = !!_apFoldOpenState[runId];
-      const details = document.createElement('details');
-      details.className = 'autopilot-run-fold';
-      details.setAttribute('data-ap-run-fold', runId);
-      if (wasOpen) details.open = true;
-      const _label = (typeof t === 'function' && t('autopilot.runFold') !== 'autopilot.runFold')
-        ? t('autopilot.runFold') : 'Autopilot run';
-      const _hint = (typeof t === 'function' && t('autopilot.runFoldHint') !== 'autopilot.runFoldHint')
-        ? t('autopilot.runFoldHint') : 'turns — click to expand';
-      const summary = document.createElement('summary');
-      summary.className = 'autopilot-run-fold-summary';
-      const _sumRec = _apRunSummary(conv, runId);
-      let _summaryInner =
-        `<svg class="apf-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>`
-        + `<span class="apf-label">${escapeHtml(_label)}</span>`
-        + `<span class="apf-count">${turnCount}</span>`
-        + `<span class="apf-hint">${escapeHtml(_hint)}</span>`;
-      /* Report affordances live IN the fold's summary card (not as a separate
-       * panel below it): a run WITH a close-out report gets a "View report"
-       * button that opens the debrief in a sub-window; a manual-stop run with
-       * NO report gets "Summarize this run" instead. */
-      if (_sumRec && _sumRec.content) {
-        const _viewLabel = (typeof t === 'function' && t('autopilot.viewReport') !== 'autopilot.viewReport')
-          ? t('autopilot.viewReport') : 'View report';
-        _summaryInner += `<button class="apf-report-btn" data-ap-run-report="${escapeHtml(runId)}" `
-          + `onclick="event.preventDefault();event.stopPropagation();_openApSummaryModal('${escapeHtml(runId)}')">`
-          + `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M16 13H8"/><path d="M16 17H8"/><path d="M10 9H8"/></svg>`
-          + `${escapeHtml(_viewLabel)}</button>`;
-      } else if (!summaryEl && !_sumRec) {
-        const _sumLabel = (typeof t === 'function' && t('autopilot.summarizeRun') !== 'autopilot.summarizeRun')
-          ? t('autopilot.summarizeRun') : 'Summarize this run';
-        _summaryInner += `<button class="apf-summarize-btn" data-ap-run-summarize="${escapeHtml(runId)}" `
-          + `onclick="event.preventDefault();event.stopPropagation();_summarizeAutopilotRun('${escapeHtml(runId)}',this)">`
-          + `${escapeHtml(_sumLabel)}</button>`;
-      }
-      _summaryInner += `<span class="apf-toggle">▼</span>`;
-      summary.innerHTML = _summaryInner;
-      details.appendChild(summary);
-      /* Track open/closed so subsequent re-renders preserve the user's choice. */
-      details.addEventListener('toggle', () => { _apFoldOpenState[runId] = details.open; });
-
-      /* Insert the <details> where the first turn was, then move the range in. */
-      firstStamped.parentNode.insertBefore(details, firstStamped);
-      for (const el of range) details.appendChild(el);
-
-      /* ★ The run's close-out REPORT is no longer rendered as an
-       * always-visible panel below the fold. It is a human-only debrief
-       * surfaced on demand via the "View report" button in the fold summary
-       * (→ _openApSummaryModal), keeping the transcript spine compact:
-       * human msg → [folded run]. Any stale panel from a previous render of
-       * the old layout is cleaned up here. */
-      const _stalePanel = details.parentNode
-        && details.nextElementSibling
-        && details.nextElementSibling.classList
-        && details.nextElementSibling.classList.contains('autopilot-summary-panel')
-        ? details.nextElementSibling : null;
-      if (_stalePanel) _stalePanel.remove();
-    }
   } catch (e) {
-    console.warn('[Autopilot fold] failed (non-fatal):', e && e.message);
+    console.warn('[Autopilot fold] unwrap failed (non-fatal):', e && e.message);
   }
 }
 
-/* Open the run's close-out REPORT in a read-only sub-window (modal overlay).
- * The report is a human-only debrief (mirrors the vu-private-zone framing) —
- * never sent to the agent, never part of the transcript. Reached from the
- * "View report" button in the autopilot run fold's summary card. Idempotent:
- * a second call replaces any open report modal. Closes on overlay click, the
- * × button, or Escape. */
-function _openApSummaryModal(runId) {
-  try {
-    const conv = (typeof getActiveConv === 'function') ? getActiveConv() : null;
-    const rec = _apRunRecord(conv, runId);
-    if (!rec || !rec.content) {
-      console.warn('[Autopilot report] no report content for run', runId);
-      return;
-    }
-    /* Drop any previously-open report modal. */
-    const prev = document.getElementById('apReportModal');
-    if (prev) prev.remove();
-
-    const _title = (typeof t === 'function' && t('autopilot.summaryLabel') !== 'autopilot.summaryLabel')
-      ? t('autopilot.summaryLabel') : 'Run summary report';
-    const _privNote = (typeof t === 'function' && t('autopilot.summaryHumanOnly') !== 'autopilot.summaryHumanOnly')
-      ? t('autopilot.summaryHumanOnly') : 'For you only · not sent to the agent';
-    /* Prefer the translated text for a Chinese UI when present. */
-    const _useTranslated = !!(rec.translatedContent
-      && typeof convAutoTranslate === 'function' && conv && convAutoTranslate(conv));
-    const _body = _useTranslated ? rec.translatedContent : (rec.content || '');
-    const _bodyHtml = (typeof renderMarkdown === 'function')
-      ? renderMarkdown(_body) : escapeHtml(_body);
-
-    const overlay = document.createElement('div');
-    overlay.id = 'apReportModal';
-    overlay.className = 'ap-report-overlay';
-    overlay.setAttribute('data-ap-report-run', runId);
-    overlay.innerHTML =
-      `<div class="ap-report-modal" role="dialog" aria-modal="true">`
-      + `<div class="ap-report-head">`
-      + `<svg class="aps-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M16 13H8"/><path d="M16 17H8"/><path d="M10 9H8"/></svg>`
-      + `<span class="ap-report-title">${escapeHtml(_title)}</span>`
-      + `<span class="ap-report-private">${escapeHtml(_privNote)}</span>`
-      + `<button class="ap-report-close" aria-label="Close" title="Close">`
-      + `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`
-      + `</button>`
-      + `</div>`
-      + `<div class="ap-report-body md-content">${_bodyHtml}</div>`
-      + `</div>`;
-
-    const close = () => {
-      overlay.remove();
-      document.removeEventListener('keydown', onKey);
-    };
-    const onKey = (e) => { if (e.key === 'Escape') close(); };
-    overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
-    overlay.querySelector('.ap-report-close').addEventListener('click', close);
-    document.addEventListener('keydown', onKey);
-
-    document.body.appendChild(overlay);
-  } catch (e) {
-    console.warn('[Autopilot report modal] open failed (non-fatal):', e && e.message);
+/* ── RENDER_CONTRACT Invariant 3: content HASH, not length ────────────────
+ * A tiny non-cryptographic string hash (FNV-1a, 32-bit, base-36 encoded).
+ * The per-message content version below hashes `content`/`thinking` through
+ * this so an EQUAL-LENGTH edit (same length, different bytes) moves the
+ * version and repaints — the L1 bug the old `String(field).length` compare
+ * silently dropped. Cheap: one pass per string, called ~once per rendered row. */
+function _hashStr(s) {
+  s = s == null ? '' : String(s);
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0;
   }
-}
-if (typeof window !== 'undefined') window._openApSummaryModal = _openApSummaryModal;
-
-/* Click handler for the "Summarize this run" button in a manual-stop fold. */
-async function _summarizeAutopilotRun(runId, btn) {
-  const conv = (typeof getActiveConv === 'function') ? getActiveConv() : null;
-  if (!conv) return;
-  const _restore = () => {
-    if (btn) {
-      btn.disabled = false;
-      btn.textContent = (typeof t === 'function' ? t('autopilot.summarizeRun') : 'Summarize this run');
-    }
-  };
-  if (btn) { btn.disabled = true; btn.textContent = (typeof t === 'function' ? t('common.loading') : 'Loading…'); }
-  let cfg = {};
-  try {
-    if (typeof _buildConvConfig === 'function') cfg = await _buildConvConfig(conv);
-  } catch (e) {
-    console.warn('[Autopilot] summarize: _buildConvConfig failed, using defaults:', e && e.message);
-  }
-  try {
-    const res = await Api.chat.summarizeAutopilotRun(conv.id, runId, cfg);
-    if (res && res.ok && res.summary && res.summary.content) {
-      /* ★ The summary is a human-only SIDECAR record (NOT a chat message).
-       * Store it on conv.autopilotSummaries so the fold renders its report
-       * panel — never push it into conv.messages. */
-      if (!conv.autopilotSummaries || typeof conv.autopilotSummaries !== 'object') {
-        conv.autopilotSummaries = {};
-      }
-      conv.autopilotSummaries[res.runId || runId] = res.summary;
-      if (typeof saveConversations === 'function') saveConversations(conv.id);
-      try { if (typeof ConvCache !== 'undefined') ConvCache.put(conv); } catch (e) { /* non-fatal */ }
-      if (typeof renderChat === 'function') renderChat(conv, true);
-    } else {
-      _restore();
-    }
-  } catch (e) {
-    console.warn('[Autopilot] summarize run failed:', e && e.message);
-    _restore();
-  }
+  return h.toString(36);
 }
 
 function _msgFingerprint(msg) {
@@ -315,10 +126,22 @@ function _msgFingerprint(msg) {
    * swarm-owning message as "unchanged" and the panel never repaints when an
    * agent flips running→done. Piggyback on the existing toolRounds loop. */
   let swarmFp = '';
+  /* Tool-round translation token: async auto-translate (stream_lifecycle.js)
+   * mutates round._translatedToolContent / _translatedQuestion / the in-flight
+   * _toolContentTranslating flag AFTER a message is committed, and the tool
+   * renderer (tool_rounds.js) reads them at render time. Like the swarm state
+   * above, these live INSIDE toolRounds and were invisible to this fingerprint,
+   * so a translation landing on a finalized message was a render no-op (the
+   * surgical diff marked the row unchanged) — the reported "translation arrives
+   * but UI doesn't refresh" bug. Fold them in on the same cheap loop. */
+  let xlFp = '';
   if (Array.isArray(msg.toolRounds)) {
     for (const r of msg.toolRounds) {
       if (r.compactionLayer) compactedCount++;
       compactedToSum += (r.compactedToChars | 0);
+      if (r._translatedToolContent) xlFp += 't' + r._translatedToolContent.length;
+      if (r._translatedQuestion) xlFp += 'q' + r._translatedQuestion.length;
+      if (r._toolContentTranslating) xlFp += 'X';
       if (r._swarm) {
         swarmFp += (r._swarmActive ? 'A' : '') + (r._asyncRunning ? 'R' : '')
                  + (r._swarmEndTime ? 'E' : '') + '|';
@@ -327,6 +150,27 @@ function _msgFingerprint(msg) {
                    + (a.tokens || '') + ',' + ((a.preview || '').length) + ';';
         }
       }
+    }
+  }
+  /* Per-round narration translation token: the interleaved segment timeline
+   * renders each round's Chinese from seg.translatedText (stamped by the
+   * incremental / whole-message translator). That field is NOT covered by any
+   * token above — translatedContent tracks only the DELIVERABLE — so a
+   * narration-only translation landing (segmentsByRound / partialByRound) would
+   * diff as "unchanged" and never repaint through the surgical renderChat path,
+   * leaving the blunt whole-bubble _renderMsgInPlace outerHTML swap (a separate,
+   * flicker-prone tick) as the ONLY way tool narration ever turned Chinese.
+   * Fold a compact per-round signature (round + translated length) so a
+   * narration translation re-renders this row surgically, coalesced with the
+   * deliverable's translatedContent change on the same tick — no separate
+   * flicker. Cheap: segments avg a handful of text entries. */
+  let _segTrFp = '';
+  if (Array.isArray(msg.segments)) {
+    for (const s of msg.segments) {
+      if (!s || s.type !== 'text' || s.deliverable) continue;
+      const zh = s.translatedText || '';
+      if (!zh) continue;
+      _segTrFp += (s.llmRound == null ? '?' : s.llmRound) + '=' + zh.length + ';';
     }
   }
   /* Error envelope: include kind + message length so a re-classification
@@ -339,62 +183,287 @@ function _msgFingerprint(msg) {
       _errFp = String(String(msg.error).length);
     }
   }
+  /* ── Async-provenance fold (RENDER_CONTRACT Invariant 3, L2) ────────────
+   * cost + the server-derived modifiedFileList land AFTER a message is
+   * committed (the batch prefetches in renderChat / the per-message fallback
+   * in finish_info.js). The old fingerprint tracked only `modifiedFiles`
+   * (a bare COUNT) and NOTHING for cost, so those data were invisible to the
+   * surgical trigger — the reason the separate `_bgRefreshChat` output-diff
+   * path exists. Fold them here (cost values + the file-list PATHS, not just
+   * their count) so the one surgical trigger repaints when they arrive. */
+  let _costFp = '';
+  if (msg.cost && typeof msg.cost === 'object') {
+    _costFp = (msg.cost.costCny || 0) + '/' + (msg.cost.costUsd || 0);
+  }
+  let _fcFp = '';
+  if (Array.isArray(msg.modifiedFileList) && msg.modifiedFileList.length) {
+    _fcFp = _hashStr(msg.modifiedFileList.join('\n'));
+  } else if (msg._fcResolvedFp) {
+    /* Lazy file-change path (RENDER_CONTRACT L2): the extracted fallback list
+     * lives in the `_fcResultByMsg` WeakMap (a DIFFERENT shape than the
+     * git-backed modifiedFileList, so it must NOT overwrite that authoritative
+     * field). finish_info stamps `_fcResolvedFp` = the toolRounds fingerprint
+     * it resolved for, so the version MOVES when the extraction lands — the row
+     * repaints through the one surgical trigger instead of `_bgRefreshChat`. */
+    _fcFp = 'r' + msg._fcResolvedFp;
+  }
+  let _artFp = '';
+  if (Array.isArray(msg._artifacts) && msg._artifacts.length) {
+    _artFp = msg._artifacts.length + '@' + _hashStr(
+      msg._artifacts.map(a => (a && (a.id || a.name || '')) || '').join(','));
+  }
+  /* Compaction markers land async (attachCompactionMarkersToConversation on
+   * conv open, + the compaction/compaction_done SSE). renderMessage draws an
+   * inline card from `msg._compactions[]` (buildCompactionCardHtml) — a field
+   * NO other token here covers (the toolRounds compaction fold above tracks a
+   * DIFFERENT thing: per-round L1 tool-output shrink). Fold count + each
+   * marker's archiveId/status/tokensAfter so a marker arriving or a marker
+   * flipping in_progress→done moves the version and the card repaints through
+   * the one surgical trigger — the last field `_bgRefreshChat` covered by
+   * output-diff that the version did not (RENDER_CONTRACT L2). */
+  let _cmFp = '';
+  if (Array.isArray(msg._compactions) && msg._compactions.length) {
+    _cmFp = msg._compactions.length + '@';
+    for (const c of msg._compactions) {
+      _cmFp += (c.archiveId || '') + ',' + (c.status || '') + ','
+             + (c.tokensAfter || 0) + ';';
+    }
+  }
   return (msg.role || "") + ":" +
-    (msg.content || "").length + ":" +
-    (msg.thinking || "").length + ":" +
+    _hashStr(msg.content || "") + ":" +
+    _hashStr(msg.thinking || "") + ":" +
     _errFp + ":" +
     (msg.finishReason || "") + ":" +
-    (msg.translatedContent || "").length + ":" +
-    (msg._showingTranslation ? "T" : "F") + ":" +
-    (msg._translateDone === false ? "P" : "") + ":" +
+    translationFingerprint(msg) + ":" +
     (sr ? sr.length : 0) + ":" +
     (msg._igResult ? "IG" : "") + ":" +
     (msg._igResults ? msg._igResults.length : 0) + ":" +
     (msg._igError ? "IGE" : "") + ":" +
     (msg.modifiedFiles || 0) + ":" +
+    (_costFp ? "$" + _costFp : "") + ":" +
+    (_fcFp ? "fc" + _fcFp : "") + ":" +
+    (_artFp ? "art" + _artFp : "") + ":" +
+    (_cmFp ? "cm" + _cmFp : "") + ":" +
     (msg.images ? msg.images.length : 0) + ":" +
     (msg.pdfTexts ? msg.pdfTexts.length : 0) + ":" +
     (msg._autopilotRunId || "") + ":" +
     (msg._isAutopilotSummary ? "S" : "") + ":" +
+    /* Queued-pending token: a cross-device queued user message lands in the
+     * body with _pendingQueued=true, then dispatch_next_queued reconciles it
+     * in place (clearing the flag). Fold it so the flag flip re-renders THIS
+     * row surgically — the "queued" chip transitions to a normal sent bubble
+     * with no flicker and no whole-conversation repaint. */
+    (msg._pendingQueued ? "PQ" : "") + ":" +
     "c" + compactedCount + "ts" + compactedToSum +
-    (swarmFp ? ":sw" + swarmFp : "");
+    (swarmFp ? ":sw" + swarmFp : "") +
+    (_segTrFp ? ":st" + _segTrFp : "") +
+    (xlFp ? ":xl" + xlFp : "");
+}
+
+/* RENDER_CONTRACT Invariant 3 contract name. `_msgContentVersion(msg)` is the
+ * canonical alias for the per-message content version — a pure token that
+ * changes iff the rendered state of THIS message would differ. It is exactly
+ * `_msgFingerprint` today (during the Phase-2 strangler-fig the two are the
+ * same function); callers/tests should reference the contract name so a later
+ * increment can retire `_msgFingerprint` without touching them. */
+const _msgContentVersion = _msgFingerprint;
+if (typeof window !== "undefined") {
+  window._msgContentVersion = _msgContentVersion;
+  window._msgFingerprint = _msgFingerprint;
+  window._hashStr = _hashStr;
 }
 
 /* ── Tool-round freshness gradient ──
  *
  * The server compaction cliff (lib/tasks_pkg/compaction.py:MICRO_HOT_TAIL=40)
  * is correct for performance (most runs <40 tool calls) but invisible to
- * the user.  A binary hot/cold cutoff also reads as "broken UI" in the
- * common case where everything is hot.
+ * the user.  Age-based fading was REMOVED per UX directive: the thing the
+ * user actually needs to see — compaction state — is now a SOLID, opaque
+ * label per row (see compactionLabel logic in _renderUnifiedToolLine). */
+
+/* ── Shared anchor-relative scroll preservation ──────────────────────────
+ * Capture the topmost message element still intersecting the viewport and its
+ * offset from the container top; after a DOM mutation that may change heights
+ * (including ABOVE the fold), re-pin that element to the same visual offset.
+ * Used as a FIXED STEP of both the surgical background repaint (gated on
+ * `conv._bgRepaint` — async cost/file-change/compaction data grows bubbles
+ * above the fold) and the full-render path (which used to reset scrollTop→0 via
+ * innerHTML wipe). Callers wrap the swap in the `cv-off` guard so
+ * `content-visibility:auto` intrinsic-size caches can't collapse and
+ * mis-resolve the geometry. */
+function _captureScrollAnchor(container, inner) {
+  if (!container || !inner) return null;
+  const cTop = container.getBoundingClientRect().top;
+  const els = inner.querySelectorAll('[id^="msg-"]');
+  for (const el of els) {
+    const r = el.getBoundingClientRect();
+    if (r.bottom > cTop + 1) {  // topmost element still (partly) in view
+      return { id: el.id, offset: r.top - cTop };
+    }
+  }
+  return null;
+}
+function _restoreScrollAnchor(container, anchor) {
+  if (!container || !anchor || !anchor.id) return false;
+  const a = document.getElementById(anchor.id);
+  if (!a) return false;
+  const newOffset = a.getBoundingClientRect().top - container.getBoundingClientRect().top;
+  container.scrollTop += (newOffset - anchor.offset);  // re-pin the anchor
+  return true;
+}
+
+/* ── RENDER_CONTRACT Invariant 3: unified background repaint ──────────────
+ * `_bgRefreshChat` USED to be a SECOND, parallel DOM-owner: it re-rendered
+ * assistant bubbles by comparing rendered OUTPUT (`__bgHtml`), because the
+ * async cost/file-change/compaction data landed in side caches the per-message
+ * version could not see. Now that the version HASHES content and folds those
+ * fields (cost/modifiedFileList/_fcResolvedFp/_artifacts/_compactions — see
+ * _msgFingerprint), the ONE surgical `renderChat(conv,false)` path repaints
+ * them, and the anchor-relative scroll preservation `_bgRefreshChat` did is now
+ * a fixed step of that path (gated on `conv._bgRepaint`). So this is a thin
+ * SHIM onto the single path — there is no longer a separate repaint owner:
+ *   • clear the Guard-2 fingerprint (which samples only the LAST message, L6)
+ *     so a mid-history data land is not skipped;
+ *   • set `_bgRepaint` so the surgical path runs even during _initialSwitchLoad
+ *     (the on-open callbacks) AND wraps its swaps in the scroll anchor;
+ *   • delegate to renderChat(conv,false).
+ * Kept as a named function so its ~7 callers need no edit and the "repaint
+ * after async data lands" intent stays greppable. */
+function _bgRefreshChat(conv) {
+  if (!conv || conv.id !== activeConvId) return;
+  if (activeStreams.has(conv.id) && document.getElementById('streaming-msg')) return;
+  if (typeof _lastRenderedFingerprint !== 'undefined') _lastRenderedFingerprint = '';
+  conv._bgRepaint = true;
+  try {
+    renderChat(conv, false);
+  } finally {
+    delete conv._bgRepaint;
+  }
+}
+
+/* ── RENDER_CONTRACT Invariant 2: id-keyed surgical reconcile ─────────────
+ * Locate the existing DOM node for a message by its STABLE `_msgId` (mirrored
+ * to `data-msg-id` by renderMessage), falling back to the positional
+ * `id="msg-${i}"` only for a legacy message that has no `_msgId` yet.
  *
- * Better signal: a continuous fade of every tool row by its distance
- * from the newest round.  Newest = 100 % opacity, gradually receding
- * toward an older floor.  The user sees AT A GLANCE that recent rounds
- * are bright and older ones recede — the same intuition the model has,
- * surfaced visually.  No magic numbers exposed in the UI; the cliff
- * still exists server-side, but the user sees a smooth gradient.
+ * WHY id-first: the surgical diff addresses a message by ARRAY POSITION, but a
+ * message's position DRIFTS whenever one is inserted/removed mid-history (an
+ * autopilot VU turn, a queued-user row, an edit/branch splice, a lazy-window
+ * offset). Position-only matching then can't find the real node for a shifted
+ * message and destroys+rebuilds it — discarding that node's live DOM state
+ * (an expanded tool `<details>`, the translation-preview zone keyed on
+ * `data-msg-id`) on every unrelated edit — and, at the
+ * streaming boundary, is the documented root of twin bubbles. Keying on the
+ * stable id lets the reconcile REUSE the drifted node (re-stamping its
+ * positional `id`/index in place) instead of tearing it down. */
+function _reconcileFindEl(inner, msg, i) {
+  if (msg && msg._msgId && inner) {
+    /* Has a stable id → match by it ONLY. A miss means this message is NEW to
+     * the DOM (or its node lives elsewhere); we must NOT fall back to the
+     * positional `msg-${i}` handle, because after an index shift that slot
+     * belongs to a DIFFERENT message — grabbing it would reuse the wrong node
+     * (and strand the real one). The caller treats null as "insert". */
+    if (typeof CSS !== 'undefined' && CSS.escape) {
+      return inner.querySelector('[data-msg-id="' + CSS.escape(msg._msgId) + '"]');
+    }
+    return inner.querySelector('[data-msg-id="' + msg._msgId + '"]');
+  }
+  /* Legacy id-less message: the positional handle is the only key available. */
+  return document.getElementById('msg-' + i);
+}
+
+/* ── RENDER_CONTRACT Invariant 3 / L10: resolve a message's LIVE index ────
+ * The per-message action buttons (Delete/Edit/Regen/Translate/Copy/Branch/…)
+ * and the thinking/pdf/ig affordances used to bake the array index straight
+ * into their `onclick` (`deleteTurn(3)`). But the id-keyed reconcile REUSES a
+ * drifted-but-unchanged node without rebuilding its HTML, so after a
+ * mid-history insert/splice a bubble that moved 3→4 still ran `deleteTurn(3)`
+ * — the action hit the WRONG turn. It also made `renderMessage` output
+ * index-DEPENDENT, which blocks a rendered-output content-version.
  *
- * Position-based (NOT length-normalized) so the same round in the same
- * place always renders the same way regardless of how long the conv
- * grows: position 0 from end = 1.00, pos 30 = 0.70, pos 80+ = 0.55 floor.
+ * `_msgElIndex(el)` resolves the CURRENT array index at CLICK time from the
+ * nearest `.message` node's stable `data-msg-id` against the active
+ * conversation (positional `id="msg-N"` legacy fallback for an id-less node).
+ * Every action onclick calls `fn(_msgElIndex(this))`, so the rendered string
+ * no longer encodes a position and stays correct across drift. Unknown → -1,
+ * which every handler already treats as a no-op (`conv.messages[-1]` is
+ * undefined → the `if (!msg) return` guard). */
+function _msgElIndex(el) {
+  if (!el || typeof el.closest !== 'function') return -1;
+  const node = el.closest('.message');
+  if (!node) return -1;
+  const conv = (typeof getActiveConv === 'function') ? getActiveConv() : null;
+  const mid = node.getAttribute && node.getAttribute('data-msg-id');
+  if (mid && conv && Array.isArray(conv.messages)) {
+    for (let i = 0; i < conv.messages.length; i++) {
+      if (conv.messages[i] && conv.messages[i]._msgId === mid) return i;
+    }
+    return -1;  // stable id present but no longer in the list → no-op
+  }
+  /* Legacy id-less node: fall back to the positional `id="msg-N"` handle. */
+  const m = node.id && node.id.match(/^msg-(\d+)$/);
+  return m ? parseInt(m[1], 10) : -1;
+}
+if (typeof window !== "undefined") {
+  window._msgElIndex = _msgElIndex;
+}
+
+/* ── First-open skeleton (epic ②) ──────────────────────────────────────
+ * Paint an INSTANT placeholder into #chatInner for a `_needsLoad` conversation
+ * — before loadConversationMessages' cache/server fetch returns — so opening an
+ * unopened conv shows its title + N shimmer bubbles immediately instead of a
+ * blank screen (or the previous conv frozen under the reader) during the up-to
+ * 15s server round-trip on a flaky tunnel.
  *
- * Compacted rows (`compactionLayer` set) skip the fade — they have
- * their own purple/pink stripe and shouldn't compete with the gradient. */
-/* Age-based fading was REMOVED per UX directive: transparency is too
- * quiet, and the thing the user actually needs to see — compaction
- * state — is now expressed with a SOLID, opaque label per row (see
- * compactionLabel logic in _renderUnifiedToolLine).
+ * DOM ALIGNMENT (zero-CLS swap): the skeleton reuses the EXACT real message
+ * structure renderMessage() emits — `#chatInner` > `.message[.user-msg]` >
+ * `.message-avatar` + `.message-content`(`.message-header`>`.message-role`,
+ * `.message-body`) — so when the real render replaces innerHTML the layout /
+ * scroll anchor don't jump. Bubbles are keyed with `id="skeleton-msg-N"` (never
+ * `msg-*`) so renderChat's surgical `_hasMsgDom` probe never mistakes them for
+ * real messages and the first real render always takes the full-wipe path.
  *
- * Kept callable from existing render entry points so callers don't NPE. */
-function _stampFreshness(_conv) { /* no-op */ }
+ * Count: clamp `msgCount` to a small visual cap (real turns render over it in
+ * milliseconds; the cap just bounds the DOM we throw away). Alternates
+ * user/assistant so it reads like a conversation. Caller guarantees msgCount>0
+ * (an empty conv gets the welcome/empty state, never a skeleton).
+ */
+function renderSkeletonChat(conv, msgCount) {
+  const inner = document.getElementById('chatInner');
+  if (!inner) return false;
+  const n = Math.max(1, Math.min(msgCount || 1, 6));
+  const title = (conv && conv.title) || 'Untitled';
+  const _skT = (k, fb) => (typeof t === 'function' && t(k) !== k) ? t(k) : fb;
+  const _roleLabel = _skT('role.assistant', 'Assistant');
+  let html = '';
+  for (let i = 0; i < n; i++) {
+    /* Newest turn is an assistant reply, so count backwards: even distance from
+     * the end = assistant, odd = user (matches a typical user→assistant tail). */
+    const isUser = ((n - 1 - i) % 2) === 1;
+    const lines = isUser ? 1 : (2 + (i % 3));   // assistant bubbles look longer
+    let body = '';
+    for (let l = 0; l < lines; l++) {
+      const w = isUser ? (55 + (i * 7) % 30) : (72 + (l * 9) % 24);
+      body += `<div class="chat-sk-line" style="width:${w}%"></div>`;
+    }
+    html += `<div class="message chat-skeleton${isUser ? ' user-msg' : ''}" id="skeleton-msg-${i}" aria-hidden="true">`
+      + `<div class="message-avatar"><div class="chat-sk-avatar"></div></div>`
+      + `<div class="message-content"><div class="message-header">`
+      + `<span class="message-role">${isUser ? _skT('role.you', 'You') : _roleLabel}</span></div>`
+      + `<div class="message-body">${body}</div></div></div>`;
+  }
+  /* Bubbles are DIRECT children of #chatInner (mirrors the real full render at
+   * inner.innerHTML=html) so the swap to real messages is zero-CLS. The wrapping
+   * `.messages` box is intentionally NOT used (the real render doesn't emit one).
+   * `title` is captured for a11y intent but not rendered as a layout box. */
+  void title;
+  inner.innerHTML = html;
+  return true;
+}
 
 function renderChat(conv, forceScroll) {
   /* ── Guard 1: skip if user is editing a message in this conversation ── */
   if (_editingMsgIdx !== null && conv.id === activeConvId) return;
-  /* Stamp freshness on every render so the panel chrome always reflects
-   * the current cross-message position of each round.  Cheap pass —
-   * one assignment per round, no DOM work. */
-  _stampFreshness(conv);
   /* Prefetch all per-message costs in ONE batch round-trip so the
    * synchronous calcCostCny() calls inside renderFinishInfo() hit the
    * cache.  Fire-and-forget; if fresh entries landed, force a re-render
@@ -402,16 +471,16 @@ function renderChat(conv, forceScroll) {
    * was already cached, the prefetch returns false and we don't paint. */
   if (typeof _prefetchConvCosts === 'function') {
     _prefetchConvCosts(conv).then((didFetch) => {
-      // ★ Skip the re-render while this conv is actively streaming. A
-      //   forceScroll=true re-render hits Guard 1c → showStreamingUIForConv →
-      //   _forceScrollToBottom, yanking the user back to the bottom. The
+      // ★ Skip the re-render while this conv is actively streaming. The
       //   streaming bubble's cost/finish bar is owned by the live stream UI,
       //   not this static render — see the file-changes loop fix below.
-      if (didFetch && conv.id === activeConvId && typeof renderChat === 'function'
+      // ★ SCROLL FIX: repaint IN PLACE (scroll-preserving) instead of
+      //   renderChat(conv,true). The old force-scroll path reset the lazy
+      //   window and yanked a scrolled-up reader to the bottom the moment the
+      //   cost batch landed (~1s after open) — the "flicker + jump" bug.
+      if (didFetch && conv.id === activeConvId
           && !activeStreams.has(conv.id)) {
-        // Bypass the fingerprint guard — cache changed even though
-        // _convRenderFingerprint didn't.
-        renderChat(conv, true);
+        _bgRefreshChat(conv);
       }
     });
   }
@@ -431,9 +500,12 @@ function renderChat(conv, forceScroll) {
       //   bottom. The streaming bubble's file-changes bar is rendered by the
       //   live `fc` zone (updateStreamingUI), so this static re-render is both
       //   redundant and harmful mid-stream. Defer it until the stream ends.
-      if (didFetch && conv.id === activeConvId && typeof renderChat === 'function'
+      // ★ SCROLL FIX: scroll-preserving in-place repaint (see _bgRefreshChat)
+      //   instead of the force-scroll full re-render — the file-changes batch
+      //   also lands ~1s after open and must not move a scrolled-up reader.
+      if (didFetch && conv.id === activeConvId
           && !activeStreams.has(conv.id)) {
-        renderChat(conv, true);
+        _bgRefreshChat(conv);
       }
     });
   }
@@ -483,7 +555,15 @@ function renderChat(conv, forceScroll) {
    * causing scrollHeight to collapse → visible scroll-jump-to-top before the
    * .then() callback scrolls back down.  Skip surgical mode for initial loads
    * so the full-render path runs with _forceScrollToBottom — no flash. */
-  if (forceScroll === false && conv.id === activeConvId && conv.messages.length > 0 && _hasMsgDom && !conv._initialSwitchLoad) {
+  /* ★ A BACKGROUND REPAINT (`conv._bgRepaint`, set by the _bgRefreshChat shim)
+   *   takes the surgical path EVEN during `_initialSwitchLoad`: the on-open
+   *   compaction/artifact/cost/file-change callbacks land async data while the
+   *   initial switch is still in flight, and they must repaint in place
+   *   (scroll-preserved, see the anchor wrap below), NOT force-scroll. The
+   *   `_initialSwitchLoad` bail below still applies to a NON-background render
+   *   during the open (the first paint), which correctly uses full-render. */
+  const _bgRepaint = !!conv._bgRepaint;
+  if (forceScroll === false && conv.id === activeConvId && conv.messages.length > 0 && _hasMsgDom && (!conv._initialSwitchLoad || _bgRepaint)) {
     const total = conv.messages.length;
     /* ★ FIX: Respect _lazyRenderedFrom so force-loaded messages (from scrollToTurn
      * or manual scroll-up) survive surgical updates.  Previously this always used
@@ -494,6 +574,20 @@ function renderChat(conv, forceScroll) {
       ? _lazyRenderedFrom
       : defaultStart;
     let anyChange = false;
+    /* ★ RENDER_CONTRACT Invariant 3: anchor-relative scroll preservation is now
+     *   a FIXED STEP of the surgical path (owner directive), absorbed from the
+     *   retired `_bgRefreshChat`. Async data (cost/file-change/compaction) lands
+     *   above the fold and GROWS bubbles; without re-pinning, a scrolled-up
+     *   reader drifts. Capture the top in-view anchor before the swaps under the
+     *   `cv-off` guard (so content-visibility:auto caches can't collapse and
+     *   mis-resolve geometry) and re-pin after. */
+    const _bgContainer = document.getElementById('chatContainer');
+    let _bgAnchor = null;
+    if (_bgRepaint && _bgContainer && inner) {
+      inner.classList.add('cv-off');
+      void inner.scrollHeight;
+      _bgAnchor = _captureScrollAnchor(_bgContainer, inner);
+    }
 
     /* 1) Update or add messages
      * ★ Perf: collect all outerHTML replacements first, then apply in one pass.
@@ -506,30 +600,73 @@ function renderChat(conv, forceScroll) {
      *   message, then step 3 would remove the live streaming bubble. */
     const _streamingActive = activeStreams.has(conv.id) && document.getElementById('streaming-msg');
     const _skipIdx = _streamingActive ? (total - 1) : -1;
-    for (let i = startIdx; i < total; i++) {
+    /* ★ BOUNDED WINDOW: when a downward eviction has capped the tail
+     * (_lazyRenderedTo < total, set by _loadOlderMessages while the reader is
+     * up in history), the surgical diff must NOT re-append the evicted tail —
+     * that would silently rebuild the unbounded DOM this optimisation removes.
+     * The bottom sentinel + _loadNewerMessages own re-rendering the tail on
+     * scroll-down. Uncapped (Infinity, the common case incl. all streaming) →
+     * this equals `total`, byte-identical to before. */
+    const _surgTo = (_lazyConvId === conv.id && Number.isFinite(_lazyRenderedTo))
+      ? Math.min(total, _lazyRenderedTo) : total;
+    /* ★ Id-keyed reconcile (RENDER_CONTRACT Invariant 2). `_cursor` tracks the
+     * DOM position the NEXT reconciled node must occupy, so a reused-but-drifted
+     * node is MOVED into array order instead of left stranded. `_reconcileFindEl`
+     * matches by stable `_msgId` first (positional `id` only as a legacy
+     * fallback), so a shifted-unchanged node is REUSED — its live DOM state
+     * (expanded tool <details>, translation preview) survives — and
+     * only its positional `id`/index handle is re-stamped. */
+    let _cursor = _skipIdx >= 0 ? document.getElementById('msg-' + _skipIdx) : null;
+    /* Anchor for insertion: the node the reconciled sequence must sit BEFORE.
+     * We walk forward, placing each node right after the previous one. */
+    let _prevEl = null;
+    for (let i = startIdx; i < _surgTo; i++) {
       if (i === _skipIdx) continue;  // streaming message — leave #streaming-msg alone
       const msg = conv.messages[i];
-      const el = document.getElementById("msg-" + i);
+      const el = _reconcileFindEl(inner, msg, i);
       if (el) {
-        /* Element exists — check if content changed */
+        /* Element exists (matched by _msgId or legacy index) — check if content
+         * changed. A drifted node keeps its live DOM state; we only re-stamp its
+         * positional id and re-order it. */
         const oldFp = el.getAttribute("data-mfp") || "";
         const newFp = _msgFingerprint(msg);
         if (oldFp !== newFp) {
           _pendingUpdates.push({ el, html: renderMessage(msg, i) });
           anyChange = true;
+        } else if (el.id !== ("msg-" + i)) {
+          /* Reused drifted node whose content is unchanged: re-stamp only the
+           * positional handle so index-addressing consumers (edit_message.js,
+           * streaming_render.js) stay correct without a destroy+rebuild. */
+          el.id = "msg-" + i;
+          anyChange = true;
         }
+        /* Re-position into array order if it drifted out of place. */
+        const _want = _prevEl ? _prevEl.nextSibling : (_cursor ? _cursor.nextSibling : inner.firstChild);
+        if (el !== _want && el.parentNode === inner) {
+          inner.insertBefore(el, _want);
+          anyChange = true;
+        } else if (el.parentNode !== inner) {
+          inner.insertBefore(el, _prevEl ? _prevEl.nextSibling : null);
+          anyChange = true;
+        }
+        _prevEl = el;
       } else {
-        /* New message — append */
+        /* New message — insert at the cursor position (array order), not blind append. */
         const wrapper = document.createElement("div");
         wrapper.innerHTML = renderMessage(msg, i);
         const newEl = wrapper.firstElementChild;
-        if (newEl) inner.appendChild(newEl);
+        if (newEl) {
+          inner.insertBefore(newEl, _prevEl ? _prevEl.nextSibling : (_cursor ? _cursor.nextSibling : null));
+          _prevEl = newEl;
+        }
         anyChange = true;
       }
     }
-    /* Apply all outerHTML replacements in a single write batch */
+    /* Apply all outerHTML replacements in a single write batch. Re-resolve each
+     * node's live reference AFTER the reorder pass (outerHTML needs the current
+     * DOM node), matching by the stamped id we just set. */
     for (const upd of _pendingUpdates) {
-      upd.el.outerHTML = upd.html;
+      if (upd.el && upd.el.parentNode) upd.el.outerHTML = upd.html;
     }
 
     /* 2) Remove stale messages beyond the current count
@@ -559,13 +696,51 @@ function renderChat(conv, forceScroll) {
     if (anyChange) {
       buildTurnNav(conv);
     }
-    if (!activeStreams.has(conv.id)) _applyAutopilotRunFolds(inner, conv);
+    if (!activeStreams.has(conv.id)) {
+      _applyAutopilotRunFolds(inner, conv);
+    }
+    /* ★ Re-pin the anchor captured above (background repaint only) so an
+     *   above-fold height change from the freshly-landed data doesn't drift a
+     *   scrolled-up reader, then drop the cv-off guard. */
+    if (_bgRepaint && _bgContainer) {
+      void inner.scrollHeight;
+      if (_bgAnchor) _restoreScrollAnchor(_bgContainer, _bgAnchor);
+      inner.classList.remove('cv-off');
+    }
     _lastRenderedFingerprint = fp;
     _lazyConvId = conv.id;
     return;
   }
 
   /* ═══ Full re-render path (forceScroll !== false) ═══ */
+  /* ★ Jump-to-top fix: the innerHTML wipe below hard-resets scrollTop→0. When
+   *   this is a SAME-conversation re-render and the reader had scrolled UP to
+   *   read history, capture their viewport anchor from the still-present old
+   *   DOM so we can re-pin it after the swap instead of yanking to the bottom
+   *   via _forceScrollToBottom. A genuine conversation SWITCH, a first load, or
+   *   a near-bottom reader still lands at the bottom (the expected behaviour for
+   *   opening a conversation / following a live reply). */
+  const _sameConvDom = _lazyConvId === conv.id
+    && inner && !!inner.querySelector('[id^="msg-"]');
+  const _readerNearBottom = (typeof isNearBottom === 'function')
+    ? isNearBottom(120) : true;
+  /* ★ Open-scroll coalescing. A single conversation OPEN drives SEVERAL full
+   *   renders in sequence — the Phase-1 IndexedDB paint, the Phase-2 server
+   *   reconcile paint, and the loadConversation() .then() fallback — each of
+   *   which used to _forceScrollToBottom. That is why opening a historical
+   *   conversation "jumped several times". We now position the view EXACTLY
+   *   ONCE per open: the first full render during the open (conv._initialSwitchLoad
+   *   set) scrolls to the bottom and latches _openScrollConvId; every LATER
+   *   render of that same open preserves the current viewport via the anchor
+   *   instead of re-snapping. (A genuine SWITCH first-paint has _lazyConvId
+   *   still pointing at the previous conv, so _sameConvDom is false and it
+   *   correctly force-scrolls + latches.) */
+  const _openAlreadyPositioned = !!conv._initialSwitchLoad
+    && _openScrollConvId === conv.id;
+  const _preSwapAnchor = (_sameConvDom && !activeStreams.has(conv.id)
+      && (!_readerNearBottom || _openAlreadyPositioned))
+    ? _captureScrollAnchor(container, inner)
+    : null;
   _destroyLazyObserver();
   _lazyConvId = conv.id;
 
@@ -576,7 +751,7 @@ function renderChat(conv, forceScroll) {
     } else {
       /* BASE_PATH is a trusted app constant (raw); the i18n subtitle is
        * escaped by default. */
-      inner.innerHTML = String(safeHtml`<div class="welcome" id="welcome"><div class="welcome-icon"><img src="${raw(BASE_PATH)}/static/icons/tofu-welcome.svg" alt="Tofu" width="64" height="64"></div><h2 class="tofu-brand"><span class="tofu-brand-t">T</span><span class="tofu-brand-o1">o</span><span class="tofu-brand-f">f</span><span class="tofu-brand-u">u</span><small>豆腐</small></h2><p>${t('welcome.subtitle')}</p><div class="feature-pills"><span class="feature-pill">Extended Thinking</span><span class="feature-pill">Search</span><span class="feature-pill">URL Fetch</span><span class="feature-pill">Image Input</span><span class="feature-pill">Co-Pilot</span><span class="feature-pill">Browser</span></div></div>`);
+      inner.innerHTML = String(safeHtml`<div class="welcome" id="welcome"><div class="welcome-icon"><img src="${raw(BASE_PATH)}/static/icons/tofu-welcome.svg" alt="Tofu" width="64" height="64"></div><h2 class="tofu-brand"><span class="tofu-brand-t">T</span><span class="tofu-brand-o1">o</span><span class="tofu-brand-f">f</span><span class="tofu-brand-u">u</span><small>豆腐</small></h2><div class="feature-pills">${raw(_welcomePillsHtml())}</div></div>`);
     }
     _lastRenderedFingerprint = fp;
     buildTurnNav(conv);
@@ -586,6 +761,10 @@ function renderChat(conv, forceScroll) {
   const total = conv.messages.length;
   const startIdx = Math.max(0, total - _INITIAL_RENDER);
   _lazyRenderedFrom = startIdx;
+  /* Full render paints the TAIL [startIdx, total) — the bottom is uncapped, so
+   * reset the upper window bound. A later upward lazy-load seeds a finite cap
+   * and installs the bottom sentinel. */
+  _lazyRenderedTo = total;
 
   let html = "";
 
@@ -601,7 +780,9 @@ function renderChat(conv, forceScroll) {
   }
 
   inner.innerHTML = html;
-  if (!activeStreams.has(conv.id)) _applyAutopilotRunFolds(inner, conv);
+  if (!activeStreams.has(conv.id)) {
+    _applyAutopilotRunFolds(inner, conv);
+  }
   _lastRenderedFingerprint = fp;
 
   /* Observe the sentinel to trigger loading when scrolled up */
@@ -615,10 +796,38 @@ function renderChat(conv, forceScroll) {
    * conversations.  The turn nav is not critical for the initial render. */
   requestAnimationFrame(() => buildTurnNav(conv));
 
-  /* Always scroll to the very bottom of the conversation.
+  /* Scroll handling: if we captured a pre-swap anchor (same-conv re-render, a
+   * reader parked up in history), re-pin their viewport instead of forcing to
+   * the bottom — this is the direct fix for the "sudden jump to the top/bottom"
+   * on a background full re-render. Otherwise (conversation switch, first load,
+   * near-bottom reader) land at the bottom as before.
    * hideUntilSettled=true: content-visibility:auto heights are estimated on
    * first paint, so hide until the 150ms timer has corrected scrollTop. */
-  _forceScrollToBottom(container, true);
+  if (_preSwapAnchor) {
+    inner.classList.add('cv-off');
+    void inner.scrollHeight;  // force real heights before re-pinning
+    _restoreScrollAnchor(container, _preSwapAnchor);
+    inner.classList.remove('cv-off');
+  } else if (!_sameConvDom || conv._initialSwitchLoad) {
+    /* ★ No-auto-scroll-on-OPEN (owner directive). A conversation OPEN — a
+     *   genuine switch (`!_sameConvDom`: the DOM currently shows a different
+     *   conv / welcome), a first load, or any render during the initial switch
+     *   load (`_initialSwitchLoad`) — must NOT yank the view to the bottom.
+     *   The `inner.innerHTML` wipe above already reset scrollTop→0 (the top of
+     *   the rendered tail window); we simply leave it there so opening a
+     *   conversation keeps a stable position instead of jumping. Still latch
+     *   this open so LATER same-open renders (Phase-2 reconcile, the
+     *   loadConversation .then fallback) take the anchor-preserve branch above
+     *   and HOLD this position rather than re-snapping. (The streaming-follow
+     *   path — showStreamingUIForConv / the send pipeline — is deliberately
+     *   untouched and still lands at the bottom.) */
+    if (conv._initialSwitchLoad) _openScrollConvId = conv.id;
+  } else {
+    /* Same-conv background full re-render with a near-bottom reader (a settle /
+     *   poll following new content — NOT a conversation open): keep them pinned
+     *   to the bottom so the newest content stays in view. */
+    _forceScrollToBottom(container, true);
+  }
 }
 
 /* ★ Format precise date + time for finished messages */
@@ -633,8 +842,157 @@ function _fmtAbsoluteDateTime(ts) {
     minute: '2-digit',
   });
 }
+/* Is a LIVE stream bound to THIS message object? Identity-based (never array
+ * position): an activeStreams entry whose bound `assistantMsg` IS this object,
+ * or whose `taskId` matches this message's stamped `_taskId`. Mirrors how
+ * connectToTask resolves its accumulation slot by identity (_taskId), so a
+ * genuinely-streaming "Preparing…" pre-first-token bubble is recognised. */
+function _streamBoundToMsg(msg) {
+  if (!msg || typeof activeStreams === "undefined" || !activeStreams.size) return false;
+  for (const s of activeStreams.values()) {
+    if (!s) continue;
+    if (s.assistantMsg && s.assistantMsg === msg) return true;
+    if (s.taskId && msg._taskId && s.taskId === msg._taskId) return true;
+  }
+  return false;
+}
+
+/* #3 render-time BELT (last line of defense behind #1 warm-open adoption and
+ * #2 settle-time reconcile): an assistant bubble that is an ORPHAN placeholder
+ * must not render. Orphan = no user-visible payload of ANY kind AND no live
+ * stream bound. Deliberately NOT keyed on merely-empty content, or a legitimate
+ * pre-first-token "Preparing…" bubble (empty but stream-bound) would blank. */
+function _isOrphanEmptyAssistant(msg) {
+  if (!msg || msg.role !== "assistant") return false;
+  if (_streamBoundToMsg(msg)) return false;
+  if (msg.content && String(msg.content).length) return false;
+  if (msg.thinking && String(msg.thinking).length) return false;
+  if (msg.toolRounds && msg.toolRounds.length) return false;
+  if (msg.finishReason) return false;
+  if (msg.error) return false;
+  return true;
+}
+
+/* ── Backend-faithful ghost-tail predicates (empty-bubble root fix ②/③) ──
+ * These are exact JS ports of lib/conversations/reconcile.py so the frontend
+ * can settle an empty turn IN-SESSION (done handler + finishStream) with the
+ * SAME verdict the backend GET/startup reconcile applies — instead of leaving
+ * a finishReason-stamped empty shell that only heals on the next warm reopen.
+ * Byte-equivalence with the Python is pinned by
+ * tests/test_reconcile_js_backend_equivalence.py.
+ *
+ * `_hasRealToolRound` ≡ reconcile._has_real_round: at least one settled /
+ * result-bearing tool round (status==='done', a toolContent blob, or a
+ * non-empty results array). */
+function _hasRealToolRound(msg) {
+  const rounds = msg && msg.toolRounds;
+  if (!Array.isArray(rounds)) return false;
+  for (const r of rounds) {
+    if (!r || typeof r !== "object") continue;
+    if (r.status === "done" || r.toolContent) return true;
+    if (Array.isArray(r.results) && r.results.length) return true;
+  }
+  return false;
+}
+
+/* `_classifyGhostTailJS` ≡ reconcile.classify_ghost_tail (a FAITHFUL 1:1 port —
+ * byte-equivalence pinned by tests/test_frontend_ghost_tail_js_backend_
+ * equivalence.py): verdict for a TRAILING assistant. Returns 'delete' (bare
+ * empty husk), 'interrupt' (thinking-only husk — preserve reasoning) or null
+ * (settled / keep). A ghost tail is an assistant with no settled output: empty
+ * content, no finishReason/usage/error, no real tool round.
+ *
+ * NOTE: like the backend, this does NOT special-case endpoint/VU turns — the
+ * `role !== 'assistant'` gate already excludes VU (role='user') and critic
+ * (role='user'/'optimizer'); an empty endpoint-planner ASSISTANT tail is a
+ * genuine ghost the backend deletes too. Any special-turn protection a CALLER
+ * needs (e.g. the live done-handler's detached-carrier / VU-takeover cases)
+ * lives at that call site, not in this authority-matching predicate. */
+function _classifyGhostTailJS(msg) {
+  if (!msg || msg.role !== "assistant") return null;
+  if ((msg.content && String(msg.content).trim())
+      || msg.finishReason || msg.usage || msg.error) return null;
+  if (_hasRealToolRound(msg)) return null;
+  return (msg.thinking && String(msg.thinking).trim()) ? "interrupt" : "delete";
+}
+if (typeof window !== "undefined") {
+  window._hasRealToolRound = _hasRealToolRound;
+  window._classifyGhostTailJS = _classifyGhostTailJS;
+}
+
+/* Build the manual /compact boundary card (docs/MANUAL_COMPACTION_DESIGN.md
+ * §5.3). A PURE render of the backend-stamped compaction marker fact — no
+ * client-side lifecycle inference. Default COLLAPSED; the head toggles the
+ * body; "查看压缩前快照" opens the existing viewer. All stats come from
+ * `msg._compactions[0]` (the backend stamps tokensBefore/After + msgs +
+ * reductionPct there); the summary text is `msg.content` minus its header
+ * line. Extracted as a standalone fn so it can be unit-tested without driving
+ * the whole renderMessage dependency graph. */
+function buildCompactionCardHtml(msg) {
+  const _cm = (Array.isArray(msg._compactions) && msg._compactions[0]) || {};
+  const _archiveId = (msg._compactionArchiveId != null)
+    ? msg._compactionArchiveId : _cm.archiveId;
+  const _convId = _cm.convId || (typeof activeConvId !== 'undefined' ? activeConvId : '');
+  const _tb = _cm.tokensBefore || 0, _ta = _cm.tokensAfter || 0;
+  const _mb = _cm.msgsBefore || 0, _ma = _cm.msgsAfter || 0;
+  const _rp = (_cm.reductionPct != null) ? _cm.reductionPct
+            : (_tb > 0 ? Math.round((1 - _ta / _tb) * 100) : 0);
+  const _fmtK = (n) => n >= 1000 ? (n / 1000).toFixed(n >= 10000 ? 0 : 1) + 'k' : String(n);
+  const _tokStat = (_tb > 0 && _ta > 0)
+    ? `${_fmtK(_tb)} → ${_fmtK(_ta)} tokens · -${_rp}%` : '';
+  // 档B (intra-turn fold): the card describes "folded N tool rounds" rather
+  // than "N → M msgs" (a single-giant-turn compaction removes tool rounds
+  // inside one message, not whole messages). Backend stamps the count on the
+  // marker (`foldedToolRounds`) / message (`_foldedToolRounds`).
+  const _folded = (_cm.foldedToolRounds || msg._foldedToolRounds || 0);
+  const _msgStat = _folded > 0
+    ? (typeof t === 'function' ? t('compactCard.rounds', { n: _folded })
+                               : `folded ${_folded} tool rounds`)
+    : ((_mb > 0 && _ma > 0)
+        ? (typeof t === 'function' ? t('compactCard.msgs', { before: _mb, after: _ma })
+                                   : `${_mb} → ${_ma} msgs`) : '');
+  // Strip the leading header line ("## 上下文已压缩…") — the card has its own title.
+  const _rawSummary = String(msg.content || '').replace(/^##[^\n]*\n+/, '');
+  const _summaryHtml = renderMarkdown(_rawSummary);
+  const _title = (typeof t === 'function') ? t('compactCard.title') : '上下文已压缩';
+  const _expandLabel = (typeof t === 'function') ? t('compactCard.expand') : '展开摘要';
+  const _viewLabel = (typeof t === 'function') ? t('compactCard.viewSnapshot') : '查看压缩前快照';
+  const _scissorsSvg = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="3"/><path d="M8.12 8.12 12 12"/><path d="M20 4 8.12 15.88"/><circle cx="6" cy="18" r="3"/><path d="M14.8 14.8 20 20"/></svg>';
+  const _viewBtn = (_archiveId != null)
+    ? `<button type="button" class="compact-card-view"
+         data-conv-id="${escapeHtml(_convId)}" data-archive-id="${_archiveId}"
+         onclick="if(window.openCompactionViewer){window.openCompactionViewer(this.dataset.convId, parseInt(this.dataset.archiveId,10))}">${escapeHtml(_viewLabel)}</button>`
+    : '';
+  return `<div class="compact-card" data-collapsed="1">
+    <button type="button" class="compact-card-head" onclick="this.parentElement.dataset.collapsed = this.parentElement.dataset.collapsed==='1'?'0':'1'">
+      <span class="compact-card-icon">${_scissorsSvg}</span>
+      <span class="compact-card-title">${escapeHtml(_title)}</span>
+      ${_tokStat ? `<span class="compact-card-stat">${escapeHtml(_tokStat)}</span>` : ''}
+      ${_msgStat ? `<span class="compact-card-stat compact-card-stat-msgs">${escapeHtml(_msgStat)}</span>` : ''}
+      <span class="compact-card-toggle" aria-hidden="true">${escapeHtml(_expandLabel)}</span>
+    </button>
+    <div class="compact-card-body"><div class="md-content">${_summaryHtml}</div>${_viewBtn}</div>
+  </div>`;
+}
+
 function renderMessage(msg, idx) {
+  /* Belt: drop an orphaned empty-assistant placeholder (see
+   * _isOrphanEmptyAssistant). Returning '' produces no DOM node — the surgical
+   * update path replaces via outerHTML='' (removes it), the append path skips a
+   * null firstElementChild, and the full render contributes nothing. */
+  if (_isOrphanEmptyAssistant(msg)) return "";
   const isUser = msg.role === "user" || msg.role === "optimizer";  // optimizer = endpoint review, render as user
+  /* Translation display state via the canonical model (core/translation_model.js):
+   *   _disp — resolves WHICH content string + how to render it, with NO
+   *           translation logic (this is what erases the old inversion branch).
+   *   _tr   — the translation status/text/model object.
+   *   _showTrans — show the 译文 instead of the content: a display-translated
+   *           message (assistant / critic / VU, i.e. _disp.isMarkdown) that has
+   *           a translation and is not toggled off. Feeds the body-selection
+   *           below AND the assistant/critic bilingual blocks. */
+  const _disp = displayContent(msg);
+  const _tr = readTranslation(msg);
+  const _showTrans = !!_disp.isMarkdown && !!_tr.text && _tr.showing !== false;
   /* ★ Precise date + time for all messages */
   const messageTime = msg.timestamp ? _fmtAbsoluteDateTime(msg.timestamp) : "";
   let body = "";
@@ -681,7 +1039,7 @@ function renderMessage(msg, idx) {
                            '.csv':_DOC_SHEET, '.json':_DOC_CODE, '.xml':_DOC_CODE, '.py':_DOC_CODE, '.js':_DOC_CODE,
                            '.html':_DOC_CODE, '.yaml':_DOC_CODE, '.yml':_DOC_CODE};
       const docIcon = _dsvg(_docIconMap[_ext] || _DOC_FILE);
-      body += `<div class="pdf-attach-badge" title="${escapeHtml(pdf.name)}" onclick="previewMsgPdfText(${idx},${pdfI})" style="cursor:pointer"><span class="pdf-attach-icon">${docIcon}</span><span class="pdf-attach-info"><span class="pdf-attach-name">${escapeHtml(pdf.name.length > 25 ? pdf.name.slice(0, 23) + "…" : pdf.name)}</span><span class="pdf-attach-meta">${pdf.pages} pages · ${sizeStr}${imgStr}${scanBadge}${methodBadge}</span></span></div>`;
+      body += `<div class="pdf-attach-badge" title="${escapeHtml(pdf.name)}" onclick="previewMsgPdfText(_msgElIndex(this),${pdfI})" style="cursor:pointer"><span class="pdf-attach-icon">${docIcon}</span><span class="pdf-attach-info"><span class="pdf-attach-name">${escapeHtml(pdf.name.length > 25 ? pdf.name.slice(0, 23) + "…" : pdf.name)}</span><span class="pdf-attach-meta">${pdf.pages} pages · ${sizeStr}${imgStr}${scanBadge}${methodBadge}</span></span></div>`;
     });
     body += "</div>";
   }
@@ -703,11 +1061,11 @@ function renderMessage(msg, idx) {
     if (msg.convRefs && msg.convRefs.length > 0) {
       for (const cr of msg.convRefs) {
         const crTitle = escapeHtml(cr.title || cr.id);
-        body += `<div class="reply-quote-badge conv-ref-badge" title="引用对话: ${crTitle}">
+        body += `<div class="reply-quote-badge conv-ref-badge" title="${escapeHtml(t('chat.convRefTitle', { title: crTitle }))}">
           <span class="reply-quote-badge-icon">@</span>
           <span class="reply-quote-badge-info">
             <span class="reply-quote-badge-name">${crTitle}</span>
-            <span class="reply-quote-badge-meta">引用对话</span>
+            <span class="reply-quote-badge-meta">${escapeHtml(t('chat.convRefMeta'))}</span>
           </span></div>`;
       }
     }
@@ -776,59 +1134,73 @@ function renderMessage(msg, idx) {
           + `${escapeHtml(typeof t === "function" ? t("autopilot.warming") : "Autopilot…")}</div>`;
   }
   const rounds = getToolRoundsFromMsg(msg);
-  /* ★ Autopilot VU provenance: the VU's tool investigation + private
-   * reasoning are DISPLAY-ONLY — only the reply text reaches the agent
-   * (see conv_message_builder._build_user_message, which reads ONLY
-   * `content` for a user row). Collect both here and emit them inside one
-   * default-collapsed "Private · not sent" container below, so the human
-   * can tell at a glance which part is excluded from the agent's context
-   * vs. the reply that is actually sent. */
-  const _vuPrivate = !!msg._isVirtualUser;
-  let _vuPrivateHtml = '';
-  if (rounds.length > 0) {
-    let _roundsHtml = '';
-    /* ★ Autopilot virtual-user messages carry the VU sub-task's tool
-     * investigation as `toolRounds`. Surface them under a labelled
-     * header so the user can tell "Autopilot probed these things
-     * before replying" from a normal assistant tool panel. */
-    if (msg._isVirtualUser) {
-      _roundsHtml += `<div class="vu-investigation-header" title="Tools the autopilot used to investigate before composing this reply">`
-            + `<span class="vu-investigation-icon"></span>`
-            + `<span class="vu-investigation-label">Autopilot investigation · ${rounds.length} tool ${rounds.length === 1 ? 'call' : 'calls'}</span>`
-            + `</div>`;
+  /* ★ FLATTENED (owner directive 2026-07-07): autopilot VU turns now render
+   * with the IDENTICAL agent bubble layout — the normal grouped tool panel +
+   * thinking block go straight into `body`, exactly like an assistant turn.
+   * The former "Private · not sent" dashed zone, the "Sent to the agent" green
+   * zone, and the "Autopilot investigation" header are gone; only the avatar +
+   * "Autopilot" label distinguish who is speaking. The DATA-layer provenance
+   * is UNCHANGED (conv_message_builder._build_user_message still reads ONLY
+   * `content` for a VU user row — toolRounds/thinking remain display-only and
+   * never reach the next agent); this is a render-layer change only. */
+  /* ★ Interleaved segment timeline (epic pt_8b406df8fbe24ae5, step 5).
+   *   When this finished message carries a `segments` list, render tools with
+   *   their PRECEDING thinking+narration inline (per-tool), instead of the
+   *   three grouped blocks. This is now the ONLY render path; the grouped
+   *   renderer remains only as the automatic fallback for segment-less rows.
+   *   ★ Applies to the assistant path (`!isUser`) AND to autopilot VU turns
+   *     (`_isVirtualUser`, role=user): the owner directive is that a VU turn
+   *     renders with the IDENTICAL agent bubble — so it must take the SAME
+   *     inline timeline, not the grouped panel. The VU row now carries its own
+   *     `segments` (assembled backend-side in run_virtual_user off the finished
+   *     sub-task and persisted on the message; DISPLAY-ONLY — never reaches the
+   *     next agent). This mirrors the existing `_isCritic` body carve-out below.
+   *   renderSegmentTimelineHTML returns "" if it can't apply (no segments /
+   *   unmatchable toolRounds) → we fall through to the legacy render. When it
+   *   DOES render, it already includes the per-batch thinking, so the separate
+   *   msg.thinking block below is suppressed (_segTimelineRendered). */
+  const _segTimelineAllowed = !isUser || msg._isVirtualUser;
+  let _segTimelineRendered = false;
+  if (_segTimelineAllowed
+      && Array.isArray(msg.segments) && msg.segments.length > 0) {
+    const _tl = renderSegmentTimelineHTML(msg.segments, msg, idx);
+    if (_tl) {
+      body += _tl;
+      _segTimelineRendered = true;
     }
+  }
+  if (!_segTimelineRendered && rounds.length > 0) {
     /* Render any persisted async-swarm inbox chips above the tool panel
        so historical messages still tell the user "this turn received
        async sub-agent updates before the model's reply".               */
     if (msg._inboxInjects && msg._inboxInjects.length) {
-      _roundsHtml += _buildSwarmInboxChipsHTML(msg._inboxInjects);
+      body += _buildSwarmInboxChipsHTML(msg._inboxInjects);
     }
-    _roundsHtml += renderToolRoundsHTML(rounds, false);
-    if (_vuPrivate) _vuPrivateHtml += _roundsHtml; else body += _roundsHtml;
+    /* Pass segments so the grouped panel renders per-round narration
+     * (translated-in-place) adjacent to each round's tools — the toggle-OFF /
+     * timeline-fallback analogue of renderSegmentTimelineHTML. When the
+     * timeline DID render (_segTimelineRendered) we never reach here. */
+    body += renderToolRoundsHTML(rounds, false, msg.segments);
   }
-  if (msg.thinking) {
+  /* ★ Windowed/trimmed open: the heavy tool timeline was stripped for transport
+   *   (msg._trimmed) to keep first-open tiny. Show a lightweight affordance so
+   *   the user can pull the full tool activity on demand — a click hydrates the
+   *   FULL conversation (heavy fields refilled by _msgId) and repaints. Only
+   *   when this turn actually had tool rounds and none are currently present. */
+  if (!_segTimelineRendered && rounds.length === 0 && msg && msg._trimmed
+      && msg._trimmedToolRoundCount > 0) {
+    const _n = msg._trimmedToolRoundCount;
+    const _cid = (typeof activeConvId !== 'undefined') ? activeConvId : '';
+    const _label = (typeof t === 'function')
+      ? t('convWindow.loadToolActivity', { n: _n }) : `Load tool activity (${_n})`;
+    const _tlIcon = (typeof Icon === 'function') ? Icon('wrench', 13) : '';
+    body += `<div class="trimmed-tool-activity" onclick="hydrateFullConversation('${escapeHtml(_cid)}')" title="${escapeHtml(_label)}">${_tlIcon}<span>${escapeHtml(_label)}</span></div>`;
+  }
+  if (msg.thinking && !_segTimelineRendered) {
     const thinkLen = msg.thinking.length;
     const thinkMeta = thinkLen >= 1024 ? ` (${Math.round(thinkLen / 1024)}k chars)` : ` (${thinkLen} chars)`;
-    const _thinkHtml = `<div class="thinking-block" onclick="_toggleThinking(this,${idx})"><div class="thinking-header"><span class="thinking-label">Thinking Process${thinkMeta}</span><span class="thinking-toggle">▼</span></div><div class="thinking-content"><div class="thinking-text"></div></div></div>`;
-    if (_vuPrivate) _vuPrivateHtml += _thinkHtml; else body += _thinkHtml;
-  }
-  /* ★ Flush the VU private zone — a single default-collapsed <details>
-   * container that makes the "not sent to the agent" boundary unmistakable
-   * (the reply below stands out). The inner thinking-block's lazy-load via
-   * _toggleThinking still works: the element exists in the DOM even while
-   * the <details> is closed. */
-  if (_vuPrivate && _vuPrivateHtml) {
-    const _privLabel = (typeof t === "function" && t("autopilot.privateNotSent") !== "autopilot.privateNotSent")
-      ? t("autopilot.privateNotSent")
-      : "Private · not sent to the agent";
-    body += `<details class="vu-private-zone">`
-          + `<summary class="vu-private-summary" title="${escapeHtml(_privLabel)}">`
-          + `<svg class="vu-private-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.88 9.88a3 3 0 1 0 4.24 4.24"/><path d="M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68"/><path d="M6.61 6.61A13.526 13.526 0 0 0 2 12s3 7 10 7a9.74 9.74 0 0 0 5.39-1.61"/><line x1="2" x2="22" y1="2" y2="22"/></svg>`
-          + `<span class="vu-private-label">${escapeHtml(_privLabel)}</span>`
-          + `<span class="vu-private-toggle">▼</span>`
-          + `</summary>`
-          + `<div class="vu-private-body">${_vuPrivateHtml}</div>`
-          + `</details>`;
+    const _thinkLbl = (typeof t === 'function') ? t('stream.thinking.done') : 'Thinking Process';
+    body += `<div class="thinking-block" onclick="_toggleThinking(this,_msgElIndex(this))"><div class="thinking-header"><span class="thinking-label">${escapeHtml(_thinkLbl)}${thinkMeta}</span><span class="thinking-toggle">▼</span></div><div class="thinking-content"><div class="thinking-text"></div></div></div>`;
   }
   // ── Prior thinking (display-only) ──
   // Trailing reasoning that was emitted after the last completed tool batch
@@ -840,7 +1212,7 @@ function renderMessage(msg, idx) {
   if (!isUser && msg.priorThinking) {
     const priorLen = msg.priorThinking.length;
     const priorMeta = priorLen >= 1024 ? ` (${Math.round(priorLen / 1024)}k chars)` : ` (${priorLen} chars)`;
-    body += `<div class="thinking-block thinking-prior" onclick="_togglePriorThinking(this,${idx})"><div class="thinking-header"><span class="thinking-label">Earlier Thinking${priorMeta}</span><span class="thinking-toggle">▼</span></div><div class="thinking-content"><div class="thinking-text"></div></div></div>`;
+    body += `<div class="thinking-block thinking-prior" onclick="_togglePriorThinking(this,_msgElIndex(this))"><div class="thinking-header"><span class="thinking-label">Earlier Thinking${priorMeta}</span><span class="thinking-toggle">▼</span></div><div class="thinking-content"><div class="thinking-text"></div></div></div>`;
   }
   // ── Prior response (display-only) ──
   // The free-form prose the model wrote after the last completed tool batch,
@@ -852,7 +1224,7 @@ function renderMessage(msg, idx) {
   if (!isUser && msg.priorContent) {
     const priorCLen = msg.priorContent.length;
     const priorCMeta = priorCLen >= 1024 ? ` (${Math.round(priorCLen / 1024)}k chars)` : ` (${priorCLen} chars)`;
-    body += `<div class="thinking-block thinking-prior content-prior" onclick="_togglePriorContent(this,${idx})"><div class="thinking-header"><span class="thinking-label">Earlier Response${priorCMeta} · rolled back</span><span class="thinking-toggle">▼</span></div><div class="thinking-content"><div class="thinking-text"></div></div></div>`;
+    body += `<div class="thinking-block thinking-prior content-prior" onclick="_togglePriorContent(this,_msgElIndex(this))"><div class="thinking-header"><span class="thinking-label">Earlier Response${priorCMeta} · rolled back</span><span class="thinking-toggle">▼</span></div><div class="thinking-content"><div class="thinking-text"></div></div></div>`;
   }
   // Track which branches have been inlined (rendered right after their anchor text)
   let _inlinedBranches = new Set();
@@ -935,8 +1307,8 @@ function renderMessage(msg, idx) {
       const _fmtSize = typeof _formatFileSize === 'function' ? _formatFileSize : (b => b > 0 ? Math.round(b / 1024) + ' KB' : '');
       const _shortModel = typeof _IG_MODEL_SHORT !== 'undefined' ? _IG_MODEL_SHORT : {};
       const distinctModels = new Set(results.map(r => r.model)).size;
-      const bannerLabel = distinctModels > 1 ? `全模型 ${results.length}连抽` : `${results.length}连抽`;
-      body += `<div class="ig-batch-wrapper"><div class="ig-batch-banner">${bannerLabel} · ${okResults.length}/${results.length} 成功</div><div class="ig-batch-grid ig-cols-${cols}">`;
+      const bannerLabel = distinctModels > 1 ? t('chat.igBatchAll', { n: results.length }) : t('chat.igBatchN', { n: results.length });
+      body += `<div class="ig-batch-wrapper"><div class="ig-batch-banner">${escapeHtml(bannerLabel)} · ${escapeHtml(t('chat.igBatchSuccess', { ok: okResults.length, total: results.length }))}</div><div class="ig-batch-grid ig-cols-${cols}">`;
       for (let ri = 0; ri < results.length; ri++) {
         const r = results[ri];
         if (r.ok && r.image_url) {
@@ -985,36 +1357,29 @@ function renderMessage(msg, idx) {
             <div class="ig-error-icon">${errIcon}</div>
             <div class="ig-error-title">${escapeHtml(errModel)}</div>
             <div class="ig-error-text">${escapeHtml((r.error || 'Failed').slice(0,200))}</div>
-            <button class="ig-slot-retry-btn" onclick="_igRetryBatchSlot(${idx},${ri},${promptEsc},${modelEsc})" title="Retry this slot">↻ Retry</button>
+            <button class="ig-slot-retry-btn" onclick="_igRetryBatchSlot(_msgElIndex(this),${ri},${promptEsc},${modelEsc})" title="Retry this slot">↻ Retry</button>
           </div></div>`;
         }
       }
       body += `</div></div>`;
     }
+  } else if (!isUser && msg._isCompactionSummary) {
+    // Manual /compact boundary card — built by a standalone, testable fn.
+    body += buildCompactionCardHtml(msg);
   } else if (msg.content) {
     try {
       let mdHtml;
-      // Show translated content only when translation is active (not toggled off).
-      // ★ Endpoint-mode critic messages are role=user but produced by the
-      //   Critic LLM — they DO receive server-side auto-translate.  Treat
-      //   them like assistants for the purposes of translation display.
-      // ★ Virtual-user (Autopilot) messages are role=user but produced by the
-      //   VU LLM and auto-translated to the UI language for DISPLAY — treat
-      //   them like critic/assistant for translation display (the VU composes
-      //   in the assistant's language; the user sees it in their UI language).
-      const _isCritic = isUser && (msg._isEndpointReview || msg._isVirtualUser);
-      const showTrans = (!isUser || _isCritic)
-                        && msg.translatedContent
-                        && msg._showingTranslation !== false;
-      if (showTrans) {
-        mdHtml = renderMarkdown(stripNoTranslateTags(msg.translatedContent));
-      } else if (_isCritic) {
-        // Critic / VU messages are user-role but contain rich markdown
-        mdHtml = renderMarkdown(msg.content);
-      } else if (isUser) {
-        mdHtml = escapeHtml(stripNoTranslateTags(msg.originalContent || msg.content));
+      // Content vs translation are now two independent decisions:
+      //   _showTrans → render the 译文; else render the resolved content origin
+      //   (_disp: markdown for assistant/critic/VU, escaped 源文 for a normal
+      //   user). The old _isCritic special-case is gone — displayContent owns
+      //   the content-origin inversion.
+      if (_showTrans) {
+        mdHtml = renderMarkdown(stripNoTranslateTags(_tr.text));
+      } else if (_disp.isMarkdown) {
+        mdHtml = renderMarkdown(_disp.text);
       } else {
-        mdHtml = renderMarkdown(msg.content);
+        mdHtml = escapeHtml(stripNoTranslateTags(_disp.text));
       }
       // ── Inject anchored branch pills inline (assistant only) ──
       if (!isUser && msg.branches?.length) {
@@ -1022,22 +1387,11 @@ function renderMessage(msg, idx) {
         mdHtml = r.html;
         _inlinedBranches = r.inlinedSet;
       }
-      /* ★ Autopilot VU provenance boundary: the VU's tool investigation
-       * and private reasoning above/below are display-only — only THIS
-       * reply text is fed to the assistant as its next user message. Mark
-       * it so the human can tell at a glance which part becomes the
-       * agent's context vs. which part was private process. */
-      const _vuSent = msg._isVirtualUser && !msg._streamingVu && msg.content;
-      if (_vuSent) {
-        const _vuSentLabel = (typeof t === "function" && t("autopilot.sentToAgent") !== "autopilot.sentToAgent")
-          ? t("autopilot.sentToAgent")
-          : "Sent to the agent as the next message";
-        body += `<div class="vu-sent-zone"><div class="vu-handoff-header" title="${escapeHtml(_vuSentLabel)}">`
-              + `<svg class="vu-handoff-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>`
-              + `<span class="vu-handoff-label">${escapeHtml(_vuSentLabel)}</span></div>`;
-      }
+      /* ★ FLATTENED (owner directive 2026-07-07): the VU reply renders as a
+       * plain md-content body, identical to an agent turn — no "Sent to the
+       * agent" green handoff zone. DATA-layer provenance is unchanged (only
+       * `content` reaches the next agent; see conv_message_builder). */
       body += `<div class="md-content${isUser ? " user-content" : ""}">${mdHtml}</div>`;
-      if (_vuSent) body += `</div>`;
     } catch (e) {
   // ── Compaction markers — render inline chips for each archived snapshot ──
   // Each marker becomes a clickable chip that opens the Compaction Viewer
@@ -1051,15 +1405,15 @@ function renderMessage(msg, idx) {
       const _wrenchSvg = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.106-3.105c.32-.322.863-.22.983.218a6 6 0 0 1-8.259 7.057l-7.91 7.91a1 1 0 0 1-2.999-3l7.91-7.91a6 6 0 0 1 7.057-8.259c.438.12.54.662.219.984z"/></svg>';
       const _archiveSvg = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="5" x="2" y="3" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"/><path d="M10 12h4"/></svg>';
       const trigLabel = trig === 'reactive'
-        ? _zapSvg + ' 紧急压缩'
-        : (trig === 'manual' ? _wrenchSvg + ' 手动压缩' : _archiveSvg + ' 自动压缩');
+        ? _zapSvg + ' ' + escapeHtml(t('chat.compactReactive'))
+        : (trig === 'manual' ? _wrenchSvg + ' ' + escapeHtml(t('chat.compactManual')) : _archiveSvg + ' ' + escapeHtml(t('chat.compactAuto')));
       const before = c.tokensBefore || 0;
       const after  = c.tokensAfter  || 0;
       const reductionPct = (c.reductionPct != null) ? c.reductionPct
                           : (before > 0 ? Math.round((1 - after / before) * 100) : 0);
       const sizeFrag = before > 0 && after > 0
         ? `${(before/1000).toFixed(0)}k → ${(after/1000).toFixed(0)}k tokens · -${reductionPct}%`
-        : (before > 0 ? `${(before/1000).toFixed(0)}k tokens 已归档` : '已归档');
+        : (before > 0 ? t('chat.compactArchivedTokens', { k: (before/1000).toFixed(0) }) : t('chat.compactArchived'));
       const reasonFrag = c.reason ? `<span class="compaction-marker-reason">${escapeHtml(c.reason)}</span>` : '';
       const statusCls = (c.status === 'done') ? 'is-done' : 'is-progress';
       const archiveAttr = (c.archiveId == null) ? '' : `data-archive-id="${c.archiveId}"`;
@@ -1067,12 +1421,12 @@ function renderMessage(msg, idx) {
       return `<button type="button" class="compaction-marker ${statusCls}"
         ${archiveAttr} ${convAttr}
         onclick="if(window.openCompactionViewer){window.openCompactionViewer(this.dataset.convId, parseInt(this.dataset.archiveId,10))}else{console.warn('compaction-viewer not loaded')}"
-        title="点击查看压缩前的完整上下文">
+        title="${escapeHtml(t('chat.compactViewSnapshot'))}">
         <span class="compaction-marker-icon"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8v13H3V8"/><path d="M1 3h22v5H1z"/><path d="M10 12h4"/></svg></span>
         <span class="compaction-marker-trigger">${trigLabel}</span>
         <span class="compaction-marker-stat">${escapeHtml(sizeFrag)}</span>
         ${reasonFrag}
-        <span class="compaction-marker-cta">查看历史</span>
+        <span class="compaction-marker-cta">${escapeHtml(t('chat.compactViewHistory'))}</span>
       </button>`;
     }).join('');
     body += `<div class="compaction-marker-row">${_ccDom}</div>`;
@@ -1082,18 +1436,18 @@ function renderMessage(msg, idx) {
   }
   // ── Bilingual display ──
   if (isUser && msg.originalContent && msg.originalContent !== msg.content) {
-    const _tmUser = msg._translateModel ? `<span class="bilingual-model" title="${escapeHtml(msg._translateModel)}">${escapeHtml(msg._translateModel)}</span>` : '';
+    const _tmUser = _tr.model ? `<span class="bilingual-model" title="${escapeHtml(_tr.model)}">${escapeHtml(_tr.model)}</span>` : '';
     // Strip any leaked <notranslate>/<nt> tags from the translation display.
     const _userTrans = stripNoTranslateTags(msg.content || '');
-    body += `<div class="bilingual-block bilingual-translated"><div class="bilingual-header" onclick="if(event.target.closest('.bilingual-copy-btn'))return;this.parentElement.classList.toggle('expanded')"><span class="bilingual-label"><span class="bilingual-type">原文</span><span class="bilingual-sep">/</span><span class="bilingual-type active">译文</span>${_tmUser}</span><button class="bilingual-copy-btn" onclick="event.stopPropagation();copyBilingualOriginal(this,'user',${idx})" title="Copy translation"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button><span class="bilingual-toggle">▼</span></div><div class="bilingual-body"><div class="md-content user-content">${escapeHtml(_userTrans)}</div></div></div>`;
+    body += `<div class="bilingual-block bilingual-translated"><div class="bilingual-header" onclick="if(event.target.closest('.bilingual-copy-btn'))return;this.parentElement.classList.toggle('expanded')"><span class="bilingual-label"><span class="bilingual-type">${escapeHtml(t('chat.bilingualOriginal'))}</span><span class="bilingual-sep">/</span><span class="bilingual-type active">${escapeHtml(t('chat.bilingualTranslated'))}</span>${_tmUser}</span><button class="bilingual-copy-btn" onclick="event.stopPropagation();copyBilingualOriginal(this,'user',_msgElIndex(this))" title="Copy translation"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button><span class="bilingual-toggle">▼</span></div><div class="bilingual-body"><div class="md-content user-content">${escapeHtml(_userTrans)}</div></div></div>`;
   }
   // ── Auto-translate failed notice (user messages) ──
   // The send-path auto-translate was attempted but failed / timed out, so the
   // ORIGINAL (untranslated) text was sent to the model. We surface a quiet,
   // non-blocking notice instead of silently dropping the translation — click
   // to retranslate just this message.
-  if (isUser && !msg._isEndpointReview && !msg.originalContent && msg._translateFailed) {
-    const _failKind = msg._translateFailed === 'timed_out' ? 'timed_out' : 'failed';
+  if (isUser && !msg._isEndpointReview && !msg.originalContent && _tr.sendFailed) {
+    const _failKind = _tr.sendFailed === 'timed_out' ? 'timed_out' : 'failed';
     const _failKey = `translate.sendFailed.${_failKind}`;
     const _failMsg = (typeof t === 'function' && t(_failKey) !== _failKey)
       ? t(_failKey)
@@ -1105,64 +1459,32 @@ function renderMessage(msg, idx) {
     // Retry = re-run the turn: regenerateFromUser re-translates the original
     // text AND regenerates the response (translateMessage rejects plain user
     // messages and wouldn't change what the model already received).
-    body += `<div class="translate-failed-notice" onclick="event.stopPropagation();regenerateFromUser(${idx})" title="${escapeHtml(_failMsg)}">`
+    body += `<div class="translate-failed-notice" onclick="event.stopPropagation();regenerateFromUser(_msgElIndex(this))" title="${escapeHtml(_failMsg)}">`
       + `<svg class="tfn-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>`
       + `<span class="tfn-text">${escapeHtml(_failMsg)}</span>`
       + `<span class="tfn-retry">${escapeHtml(_retryTip)}</span>`
       + `</div>`;
   }
-  if (!isUser && msg.translatedContent && msg._showingTranslation !== false) {
-    const _tmAsst = msg._translateModel ? `<span class="bilingual-model" title="${escapeHtml(msg._translateModel)}">${escapeHtml(msg._translateModel)}</span>` : '';
+  if (!isUser && _showTrans) {
+    const _tmAsst = _tr.model ? `<span class="bilingual-model" title="${escapeHtml(_tr.model)}">${escapeHtml(_tr.model)}</span>` : '';
     // Defense in depth — strip any leaked <notranslate>/<nt> tags.
     const _asstOrig = stripNoTranslateTags(msg.content || '');
-    body += `<div class="bilingual-block bilingual-original"><div class="bilingual-header" onclick="if(event.target.closest('.bilingual-copy-btn'))return;this.parentElement.classList.toggle('expanded')"><span class="bilingual-label"><span class="bilingual-type active">原文</span><span class="bilingual-sep">/</span><span class="bilingual-type">译文</span>${_tmAsst}</span><button class="bilingual-copy-btn" onclick="event.stopPropagation();copyBilingualOriginal(this,'assistant',${idx})" title="Copy original text"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button><span class="bilingual-toggle">▼</span></div><div class="bilingual-body"><div class="md-content">${renderMarkdown(_asstOrig)}</div></div></div>`;
+    body += `<div class="bilingual-block bilingual-original"><div class="bilingual-header" onclick="if(event.target.closest('.bilingual-copy-btn'))return;this.parentElement.classList.toggle('expanded')"><span class="bilingual-label"><span class="bilingual-type active">${escapeHtml(t('chat.bilingualOriginal'))}</span><span class="bilingual-sep">/</span><span class="bilingual-type">${escapeHtml(t('chat.bilingualTranslated'))}</span>${_tmAsst}</span><button class="bilingual-copy-btn" onclick="event.stopPropagation();copyBilingualOriginal(this,'assistant',_msgElIndex(this))" title="Copy original text"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button><span class="bilingual-toggle">▼</span></div><div class="bilingual-body"><div class="md-content">${renderMarkdown(_asstOrig)}</div></div></div>`;
   }
   // ── Critic (endpoint review) / Autopilot VU bilingual block — symmetric with assistant ──
-  if (isUser && (msg._isEndpointReview || msg._isVirtualUser) && msg.translatedContent && msg._showingTranslation !== false) {
-    const _tmCritic = msg._translateModel ? `<span class="bilingual-model" title="${escapeHtml(msg._translateModel)}">${escapeHtml(msg._translateModel)}</span>` : '';
+  // (isUser && _showTrans) is true ONLY for critic/VU users — a normal user has
+  // _disp.isMarkdown=false → _showTrans=false — so this stays exclusive with the
+  // assistant block above while keeping its distinct 'critic' copy lane.
+  if (isUser && _showTrans) {
+    const _tmCritic = _tr.model ? `<span class="bilingual-model" title="${escapeHtml(_tr.model)}">${escapeHtml(_tr.model)}</span>` : '';
     const _critOrig = stripNoTranslateTags(msg.content || '');
-    body += `<div class="bilingual-block bilingual-original"><div class="bilingual-header" onclick="if(event.target.closest('.bilingual-copy-btn'))return;this.parentElement.classList.toggle('expanded')"><span class="bilingual-label"><span class="bilingual-type active">原文</span><span class="bilingual-sep">/</span><span class="bilingual-type">译文</span>${_tmCritic}</span><button class="bilingual-copy-btn" onclick="event.stopPropagation();copyBilingualOriginal(this,'critic',${idx})" title="Copy original text"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button><span class="bilingual-toggle">▼</span></div><div class="bilingual-body"><div class="md-content">${renderMarkdown(_critOrig)}</div></div></div>`;
+    body += `<div class="bilingual-block bilingual-original"><div class="bilingual-header" onclick="if(event.target.closest('.bilingual-copy-btn'))return;this.parentElement.classList.toggle('expanded')"><span class="bilingual-label"><span class="bilingual-type active">${escapeHtml(t('chat.bilingualOriginal'))}</span><span class="bilingual-sep">/</span><span class="bilingual-type">${escapeHtml(t('chat.bilingualTranslated'))}</span>${_tmCritic}</span><button class="bilingual-copy-btn" onclick="event.stopPropagation();copyBilingualOriginal(this,'critic',_msgElIndex(this))" title="Copy original text"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button><span class="bilingual-toggle">▼</span></div><div class="bilingual-body"><div class="md-content">${renderMarkdown(_critOrig)}</div></div></div>`;
   }
   // ── Persistent "translating..." indicator (survives re-render / tab switch) ──
-  // Fires for both assistant messages AND endpoint-critic (role=user,
-  // _isEndpointReview) messages — both are routed through the auto-translate
-  // pipeline.
-  if ((!isUser || (isUser && (msg._isEndpointReview || msg._isVirtualUser)))
-      && !msg.translatedContent && msg._translateDone === false) {
-    const errText = msg._translateError;
-    if (errText) {
-      body += `<div class="translate-loading" id="translate-loading-${idx}" style="color:#f59e0b;cursor:pointer" onclick="translateMessage(${idx})">${t('translate.failed')}</div>`;
-    } else {
-      // ── Show a retry-status sub-line when the backend is retrying
-      //    (e.g. 429 / rate-limit / empty-output). Without this the user
-      //    sees only "Translating…" and has no idea there's a problem. ──
-      let statusSub = '';
-      const _benignKinds = (typeof _TRANSLATE_BENIGN_STATUS_KINDS !== 'undefined')
-        ? _TRANSLATE_BENIGN_STATUS_KINDS : new Set(['started', 'in_progress']);
-      if (msg._translateStatus && !_benignKinds.has(msg._translateStatusKind || '')) {
-        const kind = msg._translateStatusKind || '';
-        // Prefer a localized label keyed by kind, fall back to the raw server message.
-        const i18nKey = kind ? `translate.retry.${kind}` : '';
-        const localized = i18nKey && typeof t === 'function' ? t(i18nKey) : '';
-        const display = (localized && localized !== i18nKey) ? localized : msg._translateStatus;
-        statusSub = `<div class="translate-status-sub" title="${escapeHtml(msg._translateStatus)}">⚠ ${escapeHtml(display)}</div>`;
-      }
-      // ── Streaming preview: render the partial translation as markdown as it
-      //    arrives, in a styled block that morphs smoothly into the final
-      //    bilingual译文 once the stream completes. ──
-      let previewSub = '';
-      if (msg._translatePartial) {
-        let _pv;
-        try { _pv = renderMarkdown(stripNoTranslateTags(msg._translatePartial)); }
-        catch (e) { _pv = escapeHtml(msg._translatePartial); }
-        previewSub = `<div class="translate-preview"><div class="md-content">${_pv}</div><span class="translate-caret"></span></div>`;
-      }
-      const _hasPreview = previewSub ? ' has-preview' : '';
-      body += `<div class="translate-loading${_hasPreview}" id="translate-loading-${idx}">`
-        + `<div class="translate-loading-head"><span class="translate-spinner"></span>`
-        + `<span class="translate-loading-label">${t('translate.translatingToCN')}</span></div>`
-        + `${statusSub}${previewSub}</div>`;
-    }
+  // Owned by ui/translation_indicator.js, which reads translation state via the
+  // canonical model. chat_render no longer touches _translate* fields here.
+  if (typeof renderTranslateIndicator === 'function') {
+    body += renderTranslateIndicator(msg, idx, { segTimelineRendered: _segTimelineRendered });
   }
   if (msg.error)
     body += renderErrorEnvelope(msg.error);
@@ -1175,7 +1497,17 @@ function renderMessage(msg, idx) {
     try { body += window.Artifacts.renderChips(msg._artifacts); }
     catch (e) { console.debug("[Artifacts] renderChips failed:", e); }
   }
-  if (!isUser) body += renderFinishInfo(msg);
+  if (!isUser) {
+    /* Is this the still-running tail? The backend withholds finishReason/
+     * usage mid-stream, so a model-only assistant message that is the last
+     * message of a conv with a live stream / active task is in progress —
+     * suppress its premature finish bar (see renderFinishInfo). */
+    const _lvConv = getActiveConv();
+    const _isLiveTail = !!(_lvConv
+      && idx === _lvConv.messages.length - 1
+      && (activeStreams.has(_lvConv.id) || _lvConv.activeTaskId));
+    body += renderFinishInfo(msg, _isLiveTail);
+  }
   const idAttr = typeof idx === "number" ? ` id="msg-${idx}"` : "";
   /* Stable per-message handle for the unified chatInner controller.
    * Server backfills `_msgId` (UUID) on persist; client-only messages get
@@ -1193,38 +1525,71 @@ function renderMessage(msg, idx) {
   const apSummaryAttr = (msg && msg._isAutopilotSummary) ? ` data-ap-summary="1"` : "";
   let actionBtns = "";
   if (typeof idx === "number") {
-    const copyH = `<button class="msg-action-btn copy-msg-btn" onclick="event.stopPropagation();copyMessage(${idx})" title="Copy"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg> Copy</button>`;
-    const editH = isUser
-      ? `<button class="msg-action-btn" onclick="event.stopPropagation();startEditMessage(${idx})" title="Edit"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg> Edit</button>`
-      : "";
-    const regenH = isUser
-      ? `<button class="msg-action-btn msg-regen-btn" onclick="event.stopPropagation();regenerateFromUser(${idx})" title="Regenerate response from this message"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg> Regen</button>`
+    /* i18n: label/tooltip resolver — defensive against isolated harnesses
+     * where `t` may be undefined (falls back to the English string). */
+    const _mt = (k, fallback) => (typeof t === 'function' && t(k) !== k) ? t(k) : fallback;
+    const copyH = `<button class="msg-action-btn copy-msg-btn" onclick="event.stopPropagation();copyMessage(_msgElIndex(this))" title="${escapeHtml(_mt('msgAction.copyTitle', 'Copy'))}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg> ${escapeHtml(_mt('msgAction.copy', 'Copy'))}</button>`;
+    /* ★ Regen is a USER-LANE action: it truncates after this turn and re-runs
+     *   the agent's response from here. That is meaningful on EVERY user-lane
+     *   bubble — a real human turn, a role=user peer-message turn, AND an
+     *   autopilot VU driver turn (owner directive 2026-07-17: re-running the
+     *   agent's reply to an autopilot step is exactly what you want when that
+     *   reply was bad; on an in-flight run regenerateFromUser hard-cancels the
+     *   racing stream first). So Regen shows on any user-lane turn. */
+    const _showRegen = isUser;
+    /* Edit is available on EVERY bubble now (user, agent, autopilot VU,
+     * critic, planner). For a real human user turn it opens the full editor
+     * (Save / Save & Resend); for every other lane it is EDIT-IN-PLACE only
+     * (Save) — startEditMessage / saveEditOnly branch on the role. Regen
+     * shows on any user-lane turn (see _showRegen below). */
+    const editH = `<button class="msg-action-btn" onclick="event.stopPropagation();startEditMessage(_msgElIndex(this))" title="${escapeHtml(_mt('msgAction.editTitle', 'Edit'))}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg> ${escapeHtml(_mt('msgAction.edit', 'Edit'))}</button>`;
+    const regenH = _showRegen
+      ? `<button class="msg-action-btn msg-regen-btn" onclick="event.stopPropagation();regenerateFromUser(_msgElIndex(this))" title="${escapeHtml(_mt('msgAction.regenTitle', 'Regenerate response from this message'))}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg> ${escapeHtml(_mt('msgAction.regen', 'Regen'))}</button>`
       : "";
     const conv_ = getActiveConv();
+    /* ★ Continue is a RESUME affordance for an INTERRUPTED/TRUNCATED turn —
+     *   it POSTs to /api/chat/continue to pick up from the last tool-call
+     *   checkpoint. On a CLEAN finish (end_turn/stop/stop_sequence — the same
+     *   reasons that earn the green ✓ in finish_info.js) there is nothing to
+     *   resume, so showing it is meaningless and misleading. Gate it as the
+     *   exact complement of that ✓: only offer Continue when the last
+     *   assistant turn did NOT finish normally (length / max_tokens /
+     *   tool_rounds_exhausted / premature_close / aborted / interrupted / …).
+     *   A missing finishReason (legacy / unknown) still shows it, so we never
+     *   silently drop the recovery path for a genuinely-truncated old turn. */
+    const _FINISH_CLEAN = ["stop", "end_turn", "stop_sequence"];
     const isLastAssistant =
       !isUser &&
       conv_ &&
       idx === conv_.messages.length - 1 &&
       !activeStreams.has(conv_.id);
-    const continueH = isLastAssistant
-      ? `<button class="msg-action-btn msg-continue-btn" onclick="event.stopPropagation();continueAssistant()" title="Continue generating from where it left off"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg> Continue</button>`
+    const _turnFinishedClean = _FINISH_CLEAN.includes(msg.finishReason);
+    const continueH = (isLastAssistant && !_turnFinishedClean)
+      ? `<button class="msg-action-btn msg-continue-btn" onclick="event.stopPropagation();continueAssistant()" title="${escapeHtml(_mt('msgAction.continueTitle', 'Continue generating from where it left off'))}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg> ${escapeHtml(_mt('msgAction.continue', 'Continue'))}</button>`
       : "";
-    const isShowingTrans = msg._showingTranslation;
+    const isShowingTrans = _tr.showing;
     // Show the Translate button on: (a) assistant messages, (b) endpoint
     // critic review messages (role=user + _isEndpointReview) — they
     // receive auto-translate too.
     const _translateBtnAllowed = !isUser || (isUser && (msg._isEndpointReview || msg._isVirtualUser));
     const translateH = _translateBtnAllowed
-      ? `<button class="msg-action-btn msg-translate-btn${isShowingTrans ? " translated" : ""}" onclick="event.stopPropagation();translateMessage(${idx})" title="${isShowingTrans ? "Show Original" : "Translate"}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12.87 15.07l-2.54-2.51.03-.03A17.52 17.52 0 0014.07 6H17V4h-7V2H8v2H1v2h11.17C11.5 7.92 10.44 9.75 9 11.35 8.07 10.32 7.3 9.19 6.69 8h-2c.73 1.63 1.73 3.17 2.98 4.56l-5.09 5.02L4 19l5-5 3.11 3.11.76-2.04zM18.5 10h-2L12 22h2l1.12-3h4.75L21 22h2l-4.5-12zm-2.62 7l1.62-4.33L19.12 17h-3.24z"/></svg> ${isShowingTrans ? "Original" : "Translate"}</button>`
+      ? `<button class="msg-action-btn msg-translate-btn${isShowingTrans ? " translated" : ""}" onclick="event.stopPropagation();translateMessage(_msgElIndex(this))" title="${escapeHtml(isShowingTrans ? _mt('msgAction.showOriginalTitle', 'Show Original') : _mt('msgAction.translateTitle', 'Translate'))}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12.87 15.07l-2.54-2.51.03-.03A17.52 17.52 0 0014.07 6H17V4h-7V2H8v2H1v2h11.17C11.5 7.92 10.44 9.75 9 11.35 8.07 10.32 7.3 9.19 6.69 8h-2c.73 1.63 1.73 3.17 2.98 4.56l-5.09 5.02L4 19l5-5 3.11 3.11.76-2.04zM18.5 10h-2L12 22h2l1.12-3h4.75L21 22h2l-4.5-12zm-2.62 7l1.62-4.33L19.12 17h-3.24z"/></svg> ${escapeHtml(isShowingTrans ? _mt('msgAction.original', 'Original') : _mt('msgAction.translate', 'Translate'))}</button>`
       : "";
     const exportImgH = !isUser
-      ? `<button class="msg-action-btn msg-export-img-btn" onclick="event.stopPropagation();ExportImages.exportMessageWithPreview(${idx})" title="Export as phone-screen images"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg> Export</button>`
+      ? `<button class="msg-action-btn msg-export-img-btn" onclick="event.stopPropagation();ExportImages.exportMessageWithPreview(_msgElIndex(this))" title="${escapeHtml(_mt('msgAction.exportTitle', 'Export as phone-screen images'))}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg> ${escapeHtml(_mt('msgAction.export', 'Export'))}</button>`
       : "";
     const canDelete = conv_ && !activeStreams.has(conv_.id) && !conv_.activeTaskId;
     const deleteH = canDelete
-      ? `<button class="msg-action-btn msg-delete-btn" onclick="event.stopPropagation();deleteTurn(${idx})" title="${isUser ? 'Delete this turn' : 'Delete this message'}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>`
+      ? `<button class="msg-action-btn msg-delete-btn" onclick="event.stopPropagation();deleteTurn(_msgElIndex(this))" title="${escapeHtml(isUser ? _mt('msgAction.deleteTurnTitle', 'Delete this turn') : _mt('msgAction.deleteMsgTitle', 'Delete this message'))}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>`
       : "";
-    actionBtns = `<div class="message-actions">${copyH}${editH}${regenH}${continueH}${translateH}${exportImgH}${deleteH}</div>`;
+    /* ★ Branch ("分支") is an assistant-lane action — moved out of the separate
+     *   dashed `.branch-zone` pill into the unified bottom action bar so it
+     *   shares the `.msg-action-btn` styling/hover-reveal with Copy/Edit/…. */
+    const _branchLabel = _mt('branch.add', 'Branch');
+    const branchBtnH = !isUser
+      ? `<button class="msg-action-btn msg-branch-btn" onclick="event.stopPropagation();promptNewBranch(_msgElIndex(this))" title="${escapeHtml(_branchLabel)}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></svg> ${escapeHtml(_branchLabel)}</button>`
+      : "";
+    actionBtns = `<div class="message-actions">${copyH}${editH}${regenH}${continueH}${translateH}${exportImgH}${branchBtnH}${deleteH}</div>`;
   }
   // ★ Tofu mascot avatars: Worker gets worker tofu, Planner gets planner tofu
   let avatarContent = (typeof _TOFU_WORKER_SVG !== 'undefined') ? _TOFU_WORKER_SVG : "✦",
@@ -1233,6 +1598,18 @@ function renderMessage(msg, idx) {
     avatarContent = (typeof _TOFU_PLANNER_SVG !== 'undefined') ? _TOFU_PLANNER_SVG
       : '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>';
     roleName = "Planner";
+  }
+  // ── Assistant-lane auto-initiation (swarm auto-continue): a turn the backend
+  //    started to drain sub-agent updates is NOT a human-initiated agent turn,
+  //    so attribute it via the shared registry instead of the plain "Agent". ──
+  let _initBadge = "";
+  if (!isUser && !msg._isEndpointPlanner && typeof _initiatorPresentation === 'function') {
+    const _ip = _initiatorPresentation(msg);
+    if (_ip && _ip.lane === 'assistant') {
+      avatarContent = _ip.avatar;
+      roleName = _ip.label;
+      _initBadge = `<span class="ep-verdict-badge init-badge ${_ip.cls}">${escapeHtml(_ip.label)}</span>`;
+    }
   }
 
   // ── Branch zone for assistant messages (only un-inlined branches + add button) ──
@@ -1265,12 +1642,32 @@ function renderMessage(msg, idx) {
   // ── Avatar: tofu critic for reviews & autopilot, onigiri mascot for user ──
   const _criticAvatar = (typeof _TOFU_CRITIC_SVG !== 'undefined') ? _TOFU_CRITIC_SVG
     : '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>';
+  // A peer/operator KIND_PEER_MSG turn is role=user but NOT human input — give
+  // it the people-glyph (mirrors the project_peer_status tool icon) + a role
+  // label instead of the onigiri + "You", so the header identity stops lying.
+  // The specific sender (conv id / operator) stays in the in-bubble banner.
+  const _peerAvatar = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>';
+  const _tOr = (k, fb) => (typeof t === "function" && t(k) !== k) ? t(k) : fb;
+  // A user-lane turn auto-initiated by proactive / timer / brain must NOT show
+  // the onigiri "You". Resolve those through the shared registry; the existing
+  // critic/VU/peer arms keep their dedicated (test-pinned) avatars + labels.
+  const _userInit = (isUser && !msg._isEndpointReview && !msg._isVirtualUser
+                     && !msg._peerMessage && typeof _initiatorPresentation === 'function')
+    ? _initiatorPresentation(msg) : null;
   const userAvatar = (msg._isEndpointReview || msg._isVirtualUser)
     ? _criticAvatar
+    : msg._peerMessage
+    ? _peerAvatar
+    : (_userInit && _userInit.lane === 'user')
+    ? _userInit.avatar
     : (typeof _USER_AVATAR_SVG !== 'undefined') ? _USER_AVATAR_SVG
     : '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>';
   const userLabel = msg._isEndpointReview ? "Critic"
     : msg._isVirtualUser ? "Autopilot"
+    : msg._peerMessage
+    ? (msg._peerHuman ? _tOr("peer.operatorLabel", "Operator") : _tOr("peer.senderLabel", "Peer"))
+    : (_userInit && _userInit.lane === 'user')
+    ? _userInit.label
     : "You";
 
   /* messageTime is a formatter output (digits + localized separators) —
@@ -1291,11 +1688,37 @@ function renderMessage(msg, idx) {
     try { turnCtxHtml = renderTurnCtxNote(msg._ctx); }
     catch (e) { console.debug("[turnCtx] renderTurnCtxNote failed:", e); }
   }
-  const badgeHtml = plannerBadge || criticBadge;
+  const badgeHtml = plannerBadge || criticBadge || _initBadge;
+  /* ★ Failed / interrupted turn → REVEAL the bottom action bar without hover.
+   *   The base `.message-actions` is an opacity:0 hover-reveal, so on a
+   *   conversation that errored or was interrupted the user has to scroll to
+   *   the bottom AND hover (impossible on touch) to discover Continue / Retry.
+   *   That's the exact reported pain point. Stamping `turn-failed` here lets
+   *   CSS pin the bar visible (opacity:1) for a non-user turn carrying an
+   *   error envelope or a finishReason=interrupted, so the bottom-anchored
+   *   Continue is always discoverable on precisely the turn that needs it.
+   *   Scoped to assistant-lane turns; a settled/successful turn keeps the
+   *   quiet hover-reveal. */
+  const _turnFailed = !isUser && (!!msg.error || msg.finishReason === 'interrupted');
+  const _failedCls = _turnFailed ? ' turn-failed' : '';
+  /* Queued-pending: a cross-device queued user message that has landed in the
+   *   body but is NOT yet dispatched (its turn runs after the current one
+   *   finishes). Give it a distinct, muted "queued" affordance so the other
+   *   device sees the message AND its real state — not an indistinguishable
+   *   sent bubble. The flag is cleared server-side by dispatch_next_queued's
+   *   idempotent reconcile, and the _msgFingerprint fold above re-renders this
+   *   row into a normal bubble at that point. Scoped to user-lane rows. */
+  const _pendingQueued = isUser && !!msg._pendingQueued;
+  const _pendingQueuedCls = _pendingQueued ? ' pending-queued' : '';
+  /* Small inline "queued" indicator (clock SVG, never emoji — CLAUDE.md §3.4)
+   *   shown in the header beside the label. */
+  const _queuedIndicator = _pendingQueued
+    ? raw(`<span class="queued-indicator icon-box" title="${_tOr('sidebar.queued', 'Queued — sends after the current reply')}" aria-label="${_tOr('sidebar.queued', 'Queued — sends after the current reply')}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span class="queued-indicator-text">${_tOr('sidebar.queued', 'Queued')}</span></span>`)
+    : raw('');
   /* Final assembly via safeHtml. roleName / userLabel / time are
    * escaped by default. Everything pre-built above (avatars = trusted
    * SVG, badgeHtml, body, branchHtml, actionBtns, the class/attr
    * fragments) is already-trusted HTML, marked raw(). */
-  const _classAttr = `${isUser ? ' user-msg' : ''}${msg._isEndpointReview ? ' ep-critic-msg' : ''}${epPlannerCls}${epWorkerCls}${vuCls}`;
-  return String(safeHtml`<div class="message${raw(_classAttr)}"${raw(idAttr)}${raw(msgIdAttr)}${raw(apRunAttr)}${raw(apSummaryAttr)}${raw(mfpAttr)}><div class="message-avatar">${raw(isUser ? userAvatar : avatarContent)}</div><div class="message-content"><div class="message-header"><span class="message-role">${isUser ? userLabel : roleName}</span>${raw(badgeHtml)}${raw(messageTimeHtml)}</div><div class="message-body">${raw(body)}</div>${raw(branchHtml)}${raw(actionBtns)}</div>${raw(turnCtxHtml)}</div>`);
+  const _classAttr = `${isUser ? ' user-msg' : ''}${_pendingQueuedCls}${msg._isEndpointReview ? ' ep-critic-msg' : ''}${epPlannerCls}${epWorkerCls}${vuCls}${_failedCls}`;
+  return String(safeHtml`<div class="message${raw(_classAttr)}"${raw(idAttr)}${raw(msgIdAttr)}${raw(apRunAttr)}${raw(apSummaryAttr)}${raw(mfpAttr)}><div class="message-avatar">${raw(isUser ? userAvatar : avatarContent)}</div><div class="message-content"><div class="message-header"><span class="message-role">${isUser ? userLabel : roleName}</span>${raw(badgeHtml)}${_queuedIndicator}${raw(messageTimeHtml)}</div><div class="message-body">${raw(body)}</div>${raw(branchHtml)}${raw(actionBtns)}</div>${raw(turnCtxHtml)}</div>`);
 }

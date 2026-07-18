@@ -98,7 +98,7 @@ async function submitHumanGuidanceFreeText(guidanceId) {
 
   // ★ Auto-translate CN→EN: if autoTranslate is ON and text contains Chinese,
   //   translate before sending to backend — same as sendMessage() flow.
-  const conv = conversations.find(c => c.id === activeConvId);
+  const conv = getActiveConv();
   const _hgAutoTrans = convAutoTranslate(conv);
   const hasChinese = /[\u4e00-\u9fff\u3400-\u4dbf]/.test(text);
   let finalText = text;
@@ -108,7 +108,7 @@ async function submitHumanGuidanceFreeText(guidanceId) {
     const submitBtn = card?.querySelector('.hg-submit-btn');
     if (submitBtn) {
       submitBtn.disabled = true;
-      submitBtn.innerHTML = '<span class="hg-spinner"></span> 翻译中…';
+      submitBtn.innerHTML = '<span class="hg-spinner"></span> ' + escapeHtml(t('project.hgTranslating'));
     }
     try {
       console.log(`[HG-Submit] Auto-translating user response CN→EN (${text.length} chars)`);
@@ -117,12 +117,12 @@ async function submitHumanGuidanceFreeText(guidanceId) {
     } catch (e) {
       console.warn(`[HG-Submit] Translation failed, sending original: ${e.message}`);
       if (typeof showToast === 'function')
-        showToast('翻译失败，已发送原文', 'warning');
+        showToast(t('project.hgTranslateFailed'), 'warning');
       finalText = text; // fallback to original
     }
     if (submitBtn) {
       submitBtn.disabled = false;
-      submitBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg> 提交';
+      submitBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg> ' + escapeHtml(t('project.hgSubmit'));
     }
   }
 
@@ -161,7 +161,7 @@ async function submitHumanGuidanceChoice(guidanceId, choiceLabel) {
  * When tool_result arrives, it will overwrite status to "done" as normal.
  */
 function _collapseHgRoundAfterSubmit(guidanceId, responseText) {
-  const conv = conversations.find(c => c.id === activeConvId);
+  const conv = getActiveConv();
   if (!conv) return;
   const assistantMsg = [...conv.messages].reverse().find(m => m.role === 'assistant');
   if (!assistantMsg || !assistantMsg.toolRounds) return;
@@ -283,11 +283,15 @@ async function _restoreConvProject(conv) {
   const savedReadOnly = (Array.isArray(conv.readOnlyPaths) ? conv.readOnlyPaths : [])
     .filter(p => allPaths.includes(p));
   try {
-    // ★ Use multi-path API when there are extra roots OR any read-only root
-    //   (read-only is only expressible through the multi-path endpoint).
-    const resp = (hasExtras || savedReadOnly.length)
-      ? await Api.project.setPaths(allPaths, savedReadOnly)
-      : await Api.project.setPath(savedPath);
+    // ★ ALWAYS reconcile via the pruning multi-path endpoint — never the
+    //   single-path setPath. set_project()'s `same_primary` guard PRESERVES
+    //   any stale extra roots left in the process-global _roots registry by a
+    //   PRIOR conversation (or a background task's absolute-path write
+    //   auto-register), so setPath(chatui) would leave e.g. `tofu-search`
+    //   showing on a chatui-only conversation. setPaths([chatui], []) prunes
+    //   every global extra not in THIS conversation's saved set, making the
+    //   conversation the single source of truth for the project bar.
+    const resp = await Api.project.setPaths(allPaths, savedReadOnly);
     const data = resp ? await resp.json().catch(() => ({})) : {};
     if (resp && resp.ok) {
       _applyProjectData(data);
@@ -356,17 +360,25 @@ function openProjectModal() {
   _syncFoldersFromState();
   _mpRenderTags();
   _updateProjectModalStatus();
+  _recentFilter = "";
+  const _recentInput = document.getElementById("recentSearchInput");
+  if (_recentInput) _recentInput.value = "";
   renderRecentProjects();
   document.getElementById("projectModal").classList.add("open");
+  // Tell the full-page chat-drop handler (main.js) to stand down so a file
+  // dropped onto the folder browser is SAVED to disk, not attached to chat.
+  window._tofuProjectModalOpen = true;
   // Default mobile view to Browse on each open (no-op on desktop).
   pmMobileTab("browse");
   // Docked browser: populate it from the primary folder (or home) on open.
   browseDirectory(_mpFolders.length ? _mpFolders[0] : "~");
+  _attachFolderDropZone();
   setTimeout(() => document.getElementById("mpPathInput").focus(), 100);
 }
 
 function closeProjectModal() {
   document.getElementById("projectModal").classList.remove("open");
+  window._tofuProjectModalOpen = false;
 }
 
 /* ── Mobile segmented tab toggle (Browse / Workspace) ──
@@ -465,6 +477,47 @@ function _mpSelectBrowsed() {
   }
 }
 
+/* ★ Auto-enable the project-oriented execution modes when the user turns
+ * Project mode ON. Swarm + Autopilot default OFF for a bare chat (see
+ * core.js / _resetToolsToDefaults), and are switched on here as a
+ * convenience the moment a workspace is attached — the modes most useful for
+ * multi-step work on a real project.
+ *
+ * Guardrails:
+ *  - Only flips a mode that is currently OFF (never fights the user if they
+ *    already turned one on manually).
+ *  - Respects the autopilot ⇄ endpoint/flow mutual exclusion: if Endpoint
+ *    Mode or a custom Flow is already active, we do NOT force Autopilot on top
+ *    (that pairing would double-loop — see toggleAutopilot).
+ *  - Persists the new state via _saveConvToolState so it survives conv switch. */
+function _autoEnableProjectModes() {
+  let changed = false;
+  if (typeof swarmEnabled !== 'undefined' && !swarmEnabled
+      && typeof _applySwarmUI === 'function') {
+    _applySwarmUI(true);
+    changed = true;
+  }
+  const _endpointOn = (typeof endpointEnabled !== 'undefined') && endpointEnabled;
+  const _flowOn = (typeof activeFlow !== 'undefined') && !!activeFlow;
+  if (typeof autopilotEnabled !== 'undefined' && !autopilotEnabled
+      && !_endpointOn && !_flowOn
+      && typeof _applyAutopilotUI === 'function') {
+    _applyAutopilotUI(true);
+    changed = true;
+  }
+  if (changed) {
+    if (typeof _saveConvToolState === 'function') _saveConvToolState();
+    /* ★ Refresh the toolbar submenu count badges (e.g. 模式 "2") so they
+     * reflect the newly-enabled modes — _applySwarmUI/_applyAutopilotUI only
+     * repaint their own toggle+badge, not the aggregate count (mirrors
+     * _resetToolsToDefaults / _restoreConvToolState). */
+    if (typeof updateSubmenuCounts === 'function') updateSubmenuCounts();
+    if (typeof debugLog === 'function') {
+      debugLog('Project mode on — Swarm + Autopilot auto-enabled', 'info');
+    }
+  }
+}
+
 /* ★ mpApplyFolders — the "Set Project" action.
    First path → primary project; remaining → extra roots.
 
@@ -518,6 +571,10 @@ async function mpApplyFolders() {
   const nExtras = extras.length;
   const nRO = readOnly.length;
   debugLog(`Project set: ${primary}` + (nExtras ? ` + ${nExtras} extra folder(s)` : '') + (nRO ? ` (${nRO} read-only)` : ''), "success");
+  /* ★ Turning Project mode ON auto-enables Swarm + Autopilot (project-oriented
+   * execution modes), unless the user already enabled them or has Endpoint/Flow
+   * active. See _autoEnableProjectModes above. */
+  _autoEnableProjectModes();
 
   // ── Reconcile with the server in the background ──
   try {
@@ -574,6 +631,9 @@ function saveRecentProject(path) {
     .catch(e => debugLog(`[saveRecentProject] ${e.message}`, 'warn'));
 }
 
+let _recentProjects = [];
+let _recentFilter = "";
+
 async function renderRecentProjects() {
   const container = document.getElementById("recentProjectPaths");
   const listEl = document.getElementById("recentPathsList");
@@ -585,24 +645,80 @@ async function renderRecentProjects() {
       list = Array.isArray(data) ? data : data.projects || [];
     }
   } catch {}
+  _recentProjects = list;
   if (list.length === 0) {
     container.hidden = true;
     return;
   }
   container.hidden = false;
-  listEl.innerHTML = list
+  _renderRecentList();
+}
+
+// Basename of a path (last non-empty segment).
+function _recentName(path) {
+  const parts = String(path).split("/").filter(Boolean);
+  return parts[parts.length - 1] || path;
+}
+
+// Highlight the matched substring of `text` (case-insensitive), HTML-escaping
+// both the surrounding text and the match so a path can't inject markup.
+function _recentHighlight(text, query) {
+  const safe = escapeHtml(text);
+  if (!query) return safe;
+  const idx = text.toLowerCase().indexOf(query.toLowerCase());
+  if (idx < 0) return safe;
+  const before = escapeHtml(text.slice(0, idx));
+  const match = escapeHtml(text.slice(idx, idx + query.length));
+  const after = escapeHtml(text.slice(idx + query.length));
+  return `${before}<mark class="recent-hl">${match}</mark>${after}`;
+}
+
+function _renderRecentList() {
+  const listEl = document.getElementById("recentPathsList");
+  const countEl = document.getElementById("recentCount");
+  const clearBtn = document.getElementById("recentSearchClear");
+  if (!listEl) return;
+  const q = _recentFilter.trim();
+  const filtered = q
+    ? _recentProjects.filter(
+        (item) => item.path.toLowerCase().includes(q.toLowerCase()),
+      )
+    : _recentProjects;
+  if (countEl) countEl.textContent = q ? `${filtered.length}/${_recentProjects.length}` : String(_recentProjects.length);
+  if (clearBtn) clearBtn.hidden = !q;
+  if (filtered.length === 0) {
+    const _t = (typeof t === "function") ? t : (k) => k;
+    const msg = q ? _t("pm.recentNoMatch") : _t("pm.recentEmpty");
+    listEl.innerHTML = `<div class="recent-paths-empty">${escapeHtml(msg)}</div>`;
+    return;
+  }
+  listEl.innerHTML = filtered
     .map((item) => {
-      const parts = item.path.split("/").filter(Boolean);
-      const name = parts[parts.length - 1] || item.path;
+      const name = _recentName(item.path);
       return `<div class="recent-path-item" onclick="selectRecentProject('${escapeHtml(item.path)}')" title="${escapeHtml(item.path)}">
          <span class="recent-path-text">
-           <span class="recent-path-name">${escapeHtml(name)}</span>
-           <span class="recent-path-full">${escapeHtml(item.path)}</span>
+           <span class="recent-path-name">${_recentHighlight(name, q)}</span>
+           <span class="recent-path-full">${_recentHighlight(item.path, q)}</span>
          </span>
          ${item.count > 1 ? `<span class="recent-path-count">×${item.count}</span>` : ""}
        </div>`;
     })
     .join("");
+}
+
+function _filterRecentProjects(value) {
+  _recentFilter = value || "";
+  _renderRecentList();
+}
+
+function _clearRecentSearch() {
+  _recentFilter = "";
+  const input = document.getElementById("recentSearchInput");
+  if (input) {
+    input.value = "";
+    input.focus();
+  }
+  _renderRecentList();
 }
 
 function selectRecentProject(path) {
@@ -645,7 +761,7 @@ async function undoConvModifications(msgIdx) {
   const count = msg.modifiedFiles;
   if (
     !await showConfirm(
-      `确定要撤销本轮对话的 ${count} 处代码修改吗？\n此操作将恢复这些文件到修改前的状态。`,
+      t('project.undoTurnConfirm', { count: count }),
       { danger: true },
     )
   )
@@ -692,7 +808,7 @@ async function undoAllModifications() {
   if (!projectState.active) return;
   if (
     !await showConfirm(
-      "确定要撤销所有代码修改吗？\n\n此操作将恢复所有被修改的文件到原始状态，包括所有对话中的修改。",
+      t('project.undoAllConfirm'),
       { danger: true },
     )
   )
@@ -942,9 +1058,10 @@ async function loadProjectStatus() {
     _clearProjectStateLocal();
     return;
   }
-  // Try to check server status first
+  // Try to check server status first — CONV-SCOPED so a background task's
+  // global-registry mutation can never paint another conversation's bar.
   try {
-    const data = await Api.project.status();
+    const data = await Api.project.status(conv && conv.id);
     if (!data) return;
     if (data.path && data.path === savedPath) {
       // Server already has this project active — check extras too
@@ -966,7 +1083,7 @@ async function loadProjectStatus() {
       }
       const roMatch = savedReadOnly.length === currentRO.length &&
         savedReadOnly.every(p => currentRO.includes(p));
-      if ((!extrasMatch && savedExtras.length > 0) || !roMatch) {
+      if (!extrasMatch || !roMatch) {
         // Primary matches but extras or read-only policy don't. The server's
         // in-memory RO flag is ephemeral (reset on restart), so the durable
         // per-conv readOnlyPaths is the authority here — paint the bar from it
@@ -1001,9 +1118,9 @@ async function loadProjectStatus() {
         const savedReadOnly = (Array.isArray(conv.readOnlyPaths) ? conv.readOnlyPaths : [])
           .filter(p => allPaths.includes(p));
         const hasExtras = allPaths.length > 1;
-        const setResp = (hasExtras || savedReadOnly.length)
-          ? await Api.project.setPaths(allPaths, savedReadOnly)
-          : await Api.project.setPath(savedPath);
+        // ★ Always use the pruning multi-path endpoint (see _restoreConvProject):
+        //   setPath's `same_primary` guard would preserve stale global extras.
+        const setResp = await Api.project.setPaths(allPaths, savedReadOnly);
         const setData = setResp ? await setResp.json().catch(() => ({})) : {};
         if (setResp && setResp.ok) {
           _applyProjectData(setData);
@@ -1095,7 +1212,8 @@ async function browseDirectory(path) {
         var safeName = d.name.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
         return (
           '<div class="folder-item' + hidden + added +
-          '" onclick="browseDirectory(\'' + safePath + '\')" title="Open ' + escapeHtml(d.name) + '">' +
+          '" data-dir-path="' + escapeHtml(d.path) + '"' +
+          ' onclick="browseDirectory(\'' + safePath + '\')" title="Open ' + escapeHtml(d.name) + '">' +
           '<span class="folder-icon">' + icon + "</span>" +
           '<span class="folder-name">' + escapeHtml(d.name) + "</span>" +
           badge + items +
@@ -1381,4 +1499,195 @@ async function confirmApplyCode() {
     btn.disabled = false;
     btn.textContent = "Write File";
   }
+}
+
+
+/* ═══════════════════════════════════════════════════════
+   Drag-and-drop files INTO a project folder (folder browser)
+   ═══════════════════════════════════════════════════════
+   Distinct from the full-page chat drop (main.js), which attaches files to
+   the next MESSAGE. Dropping onto the folder browser SAVES the raw bytes to
+   disk inside the attached workspace (binary-safe, sandboxed, undoable).
+
+   The full-page chat overlay lives at document level (z-index 200); this
+   handler is bound directly to #folderBrowser and runs in the CAPTURE phase +
+   stopPropagation so a file dropped on the browser is saved to disk and NOT
+   also attached to chat. main.js additionally skips its overlay while the
+   project modal is open (see _tofuProjectModalOpen). */
+var _folderDropAttached = false;
+
+/** Resolve which directory a drop landed on: a specific folder row's path,
+ *  else the directory currently shown in the browser. Returns '' if unknown. */
+function _folderDropTargetDir(target) {
+  var row = target && target.closest ? target.closest('.folder-item[data-dir-path]') : null;
+  if (row && row.dataset.dirPath) return row.dataset.dirPath;
+  return (typeof _browseState !== 'undefined' && _browseState.path) ? _browseState.path : '';
+}
+
+function _clearFolderDropHighlight() {
+  var el = document.getElementById('folderBrowser');
+  if (el) el.classList.remove('fb-drop-active');
+  document.querySelectorAll('.folder-item.fb-drop-row')
+    .forEach(function (r) { r.classList.remove('fb-drop-row'); });
+}
+
+/** Attached workspace roots (single source of truth: projectState). A drop is
+ *  only accepted inside one of these — the backend save_uploaded_file refuses
+ *  anything else, so we mirror that guard client-side for a clear, proactive
+ *  message instead of a generic post-hoc "failed to save". */
+function _attachedRootPaths() {
+  var roots = [];
+  if (typeof projectState !== 'undefined' && projectState) {
+    if (projectState.path) roots.push(projectState.path);
+    (projectState.extraRoots || []).forEach(function (r) {
+      var p = typeof r === 'string' ? r : (r && r.path);
+      if (p) roots.push(p);
+    });
+  }
+  return roots;
+}
+
+/** True if `dir` is (or is under) an attached root. Empty dir → the active
+ *  project root, which the backend resolves, so it's allowed. */
+function _dirInsideAttachedRoot(dir) {
+  if (!dir) return true;
+  var norm = function (p) { return String(p).replace(/\/+$/, ''); };
+  var d = norm(dir);
+  return _attachedRootPaths().some(function (root) {
+    var r = norm(root);
+    return d === r || d.indexOf(r + '/') === 0;
+  });
+}
+
+/** Save one dropped File into `dir` via the binary-safe upload endpoint. */
+async function _uploadDroppedFile(file, dir) {
+  var fd = new FormData();
+  fd.append('file', file, file.name);
+  if (dir) fd.append('dir', dir);
+  var resp = await Api.project.upload(fd);
+  var data = resp ? await resp.json().catch(function () { return {}; }) : {};
+  if (resp && resp.ok && data && data.ok) return { ok: true, data: data };
+  return { ok: false, error: (data && data.error) || ('HTTP ' + (resp ? resp.status : '?')) };
+}
+
+function _attachFolderDropZone() {
+  if (_folderDropAttached) return;
+  var el = document.getElementById('folderBrowser');
+  if (!el) return;
+  _folderDropAttached = true;
+
+  var hasFiles = function (e) {
+    return e.dataTransfer && Array.prototype.indexOf.call(e.dataTransfer.types || [], 'Files') !== -1;
+  };
+
+  el.addEventListener('dragover', function (e) {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+    el.classList.add('fb-drop-active');
+    var row = e.target.closest ? e.target.closest('.folder-item[data-dir-path]') : null;
+    document.querySelectorAll('.folder-item.fb-drop-row')
+      .forEach(function (r) { if (r !== row) r.classList.remove('fb-drop-row'); });
+    if (row) row.classList.add('fb-drop-row');
+  }, true);
+
+  el.addEventListener('dragleave', function (e) {
+    // Only clear when the pointer actually leaves the browser box.
+    if (e.target === el && !el.contains(/** @type {Node} */(e.relatedTarget))) _clearFolderDropHighlight();
+  }, true);
+
+  el.addEventListener('drop', function (e) {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    e.stopPropagation();  // beat the document-level chat-drop handler
+    var dir = _folderDropTargetDir(e.target);
+    _clearFolderDropHighlight();
+    var files = Array.prototype.slice.call((e.dataTransfer && e.dataTransfer.files) || []);
+    if (!files.length) return;
+    _runFolderDrop(files, dir);
+  }, true);
+}
+
+/** Add `dir` to the workspace as an extra root (or primary if none yet),
+ *  reusing the tested setPaths apply path. Preserves existing roots + their
+ *  read-only flags. Throws on server failure. */
+async function _addDropDirAsRoot(dir) {
+  var folders = _attachedRootPaths().slice();
+  if (folders.indexOf(dir) === -1) folders.push(dir);
+  var readOnly = [];
+  if (typeof projectState !== 'undefined' && projectState) {
+    if (projectState.readOnly && projectState.path) readOnly.push(projectState.path);
+    (projectState.extraRoots || []).forEach(function (r) {
+      if (r && typeof r === 'object' && r.readOnly && r.path) readOnly.push(r.path);
+    });
+  }
+  var resp = await Api.project.setPaths(folders, readOnly);
+  var data = resp ? await resp.json().catch(function () { return {}; }) : {};
+  if (!resp || !resp.ok) throw new Error((data && data.error) || 'Failed to add folder');
+  if (typeof _applyProjectData === 'function') _applyProjectData(data);
+  if (typeof _saveConvProjectPath === 'function') {
+    _saveConvProjectPath(data.path,
+      (data.extraRoots || []).map(function (r) { return typeof r === 'string' ? r : r.path; }),
+      readOnly);
+  }
+}
+
+async function _runFolderDrop(files, dir) {
+  var dirLabel = dir ? (dir.split('/').filter(Boolean).slice(-1)[0] || dir) : 'project root';
+  // A drop outside every attached root would be refused by save_uploaded_file
+  // (it never auto-registers a workspace). Rather than dead-ending, OFFER to
+  // add the folder in one click — the upload itself is harmless, but adding a
+  // root has a visible side effect (a scan + a new project-bar folder), so we
+  // ask first instead of doing it silently.
+  if (dir && !_dirInsideAttachedRoot(dir)) {
+    var ok = (typeof showConfirm === 'function')
+      ? await showConfirm(t('folderDrop.addRootConfirm', { dir: dirLabel }),
+          { title: t('folderDrop.notInWorkspace'),
+            okText: t('folderDrop.addAndSave') })
+      : true;
+    if (!ok) return;
+    try {
+      await _addDropDirAsRoot(dir);
+    } catch (e) {
+      if (typeof showToast === 'function') {
+        showToast(t('folderDrop.failed', { n: files.length }), 'error',
+          (e && e.message) || '', 6000);
+      }
+      return;
+    }
+  }
+  var results = await Promise.allSettled(files.map(function (f) {
+    return _uploadDroppedFile(f, dir);
+  }));
+  var saved = 0, renamed = 0;
+  var errors = [];
+  results.forEach(function (r, i) {
+    if (r.status === 'fulfilled' && r.value && r.value.ok) {
+      saved++;
+      if (r.value.data && r.value.data.renamed) renamed++;
+    } else {
+      var msg = (r.status === 'fulfilled' && r.value)
+        ? r.value.error
+        : (r.status === 'rejected' && r.reason && r.reason.message);
+      errors.push(files[i].name + ': ' + (msg || 'failed'));
+    }
+  });
+  if (typeof showToast === 'function') {
+    if (saved > 0) {
+      var detail = t('folderDrop.savedInto', { dir: dirLabel })
+        + (renamed ? ' · ' + t('folderDrop.renamedNote', { n: renamed }) : '');
+      showToast(t('folderDrop.saved', { n: saved }), '', detail, 4200);
+    }
+    if (errors.length) {
+      showToast(t('folderDrop.failed', { n: errors.length }), 'error',
+        errors.slice(0, 3).join('\n'), 6000);
+    }
+  }
+  // Refresh so the newly-saved files reflect in the browser's file count.
+  if (typeof browseDirectory === 'function' && typeof _browseState !== 'undefined' && _browseState.path) {
+    browseDirectory(_browseState.path);
+  }
+  // Surface the write in the project bar's file-changes affordance.
+  if (typeof loadProjectStatus === 'function') { try { loadProjectStatus(); } catch (_e) { /* best-effort */ } }
 }

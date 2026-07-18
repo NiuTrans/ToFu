@@ -50,7 +50,8 @@ def openapi_yaml():
     try:
         import yaml  # type: ignore
         text = yaml.safe_dump(spec, sort_keys=False, allow_unicode=True)
-    except ImportError:
+    except ImportError as e:
+        logger.debug('[ApiDocs] pyyaml unavailable, using fallback: %s', e)
         text = ('# pip install pyyaml to get YAML output\n'
                 + json.dumps(spec, ensure_ascii=False, indent=2))
     return Response(text, mimetype='application/yaml')

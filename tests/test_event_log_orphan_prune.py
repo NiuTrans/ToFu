@@ -110,3 +110,39 @@ def test_terminal_task_events_still_reaped():
         assert _count(db, tid) == 0, 'terminal-task events must still be reaped by Pass 1'
     finally:
         _cleanup(db, tid)
+
+
+def test_prune_batches_beyond_single_batch_size():
+    """A backlog LARGER than _PRUNE_BATCH_TASKS is fully reaped across batches.
+
+    Regression for the permanent-failure loop: the old unbounded single DELETE
+    exceeded PG's 120s statement_timeout on a large backlog and rolled back
+    WHOLE (zero progress). The batched-commit rewrite must reap a backlog that
+    spans multiple batches — proving each batch's progress is durable and the
+    loop drains the whole set (bounded by _PRUNE_MAX_BATCHES * _PRUNE_BATCH_TASKS).
+    """
+    db = get_thread_db(DOMAIN_CHAT)
+    old_ts = int(time.time() * 1000) - ev.EVENT_TTL_MS - 60_000
+    n = ev._PRUNE_BATCH_TASKS + 5  # just over one batch → forces a 2nd batch
+    prefix = 'tmr_batch_' + uuid.uuid4().hex[:6] + '_'
+    tids = [f'{prefix}{i}' for i in range(n)]
+    try:
+        for tid in tids:
+            _insert_event(db, tid, 0, old_ts)
+        remaining = db.execute(
+            "SELECT count(*) FROM task_events WHERE task_id LIKE ?",
+            (prefix + '%',)
+        ).fetchone()[0]
+        assert remaining == n
+
+        ev._opportunistic_prune(db)
+
+        remaining = db.execute(
+            "SELECT count(*) FROM task_events WHERE task_id LIKE ?",
+            (prefix + '%',)
+        ).fetchone()[0]
+        assert remaining == 0, (
+            'a backlog larger than one batch must be fully reaped across '
+            'multiple batched-commit passes')
+    finally:
+        _cleanup(db, *tids)

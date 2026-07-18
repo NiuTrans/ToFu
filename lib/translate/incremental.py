@@ -32,12 +32,16 @@ Lifecycle
    settled.
 3. ``finalize_incremental(task, conv_id, msg_idx, content, msg_id)`` — called
    from the auto-translate decision point AFTER the result is persisted.
-   Signals the worker to drain, assemble ``translatedContent`` from the cached
-   segments (falling back to a single whole-content translation when the
-   cached segments don't faithfully cover the final content), commit it
-   race-safely via :func:`lib.translate.commit._commit_translation_to_db`, and
-   push a ``done`` frame on the ``translate`` channel. Non-blocking: the worker
-   thread does the final assemble / commit / push.
+   Signals the worker to drain and commit the DELIVERABLE-only
+   ``translatedContent`` (reusing the terminal deliverable's already-cached
+   per-round translation; a fresh whole-content translation only when it isn't
+   cached). The inter-round narration is NOT part of ``translatedContent`` — it
+   is carried per-segment via ``segment_translations`` (stamped onto
+   ``msg['segments'][].translatedText``) and rendered inline by the settled
+   timeline. Commits race-safely via
+   :func:`lib.translate.commit._commit_translation_to_db` and pushes a ``done``
+   frame (carrying ``segmentsByRound`` so the live view stamps the narration
+   without a reload). Non-blocking: the worker thread does the commit / push.
 
 Ownership
 ---------
@@ -52,7 +56,6 @@ import queue
 import threading
 
 from lib.log import get_logger
-from lib.text_lang import is_predominantly_chinese
 
 logger = get_logger(__name__)
 
@@ -64,19 +67,62 @@ _KILL_ENV = 'TOFU_INCREMENTAL_TRANSLATE'
 # or was superseded never calls finalize — this prevents accumulator leaks).
 _WORKER_IDLE_TIMEOUT = 300.0
 
-# The joined per-round originals must cover at least this fraction of the final
-# content (whitespace-insensitive) for the assembly to be trusted; otherwise we
-# fall back to a single whole-content translation.
-_ASSEMBLY_COVERAGE_MIN = 0.85
-
 # Assistant replies are authored in English when autoTranslate is on (the user
-# message was translated to English before the turn ran). Mirrors
-# _maybe_auto_translate_assistant's _do_translate(..., 'Chinese', 'English').
-_TARGET = 'Chinese'
+# message was translated to English before the turn ran) — so SOURCE is always
+# English. The TARGET, historically hard-pinned to Chinese, is now the UI
+# language (resolved per-task from task['config'].uiLang via
+# resolve_translate_target); it falls back to Chinese when unresolved so an
+# old-frontend / headless task is byte-identical to the former behaviour.
+_TARGET_DEFAULT = 'Chinese'
 _SOURCE = 'English'
+
+
+def _resolve_target(task) -> str:
+    """Resolve the per-task OUTPUT target language name (falls back to Chinese)."""
+    try:
+        from lib.conv_config import resolve_translate_target
+        return resolve_translate_target((task or {}).get('config') or {})
+    except Exception as e:
+        logger.debug('[IncTranslate] target resolve failed (→Chinese): %s', e)
+        return _TARGET_DEFAULT
 
 _accumulators: dict[str, '_Acc'] = {}
 _acc_lock = threading.Lock()
+
+
+def _task_alive(task_id: str) -> bool:
+    """Is the owning task still running (not yet terminal / aborted)?
+
+    The worker's teardown is tied to the TASK LIFECYCLE: every task that reaches
+    its terminal funnel sends either ``finalize_incremental`` (handoff) or
+    ``cancel_incremental`` (the auto-translate ``finally`` / manager no-content
+    branch). The ``_WORKER_IDLE_TIMEOUT`` is therefore ONLY a leak backstop for a
+    worker whose task vanished without either signal (crash / wedged thread). A
+    long-but-alive task — e.g. a single tool round that runs for minutes on a
+    slow FUSE mount — must NOT trip it, or the already-translated earlier rounds
+    are discarded and the next segment spins up a fresh empty accumulator.
+
+    Reads the manager's live task registry. A task is alive when it is present
+    with ``status=='running'`` and not aborted. Fail-open: any import/lookup
+    error returns True (keep waiting) so a probe failure can never cause the
+    live-task false-positive we are fixing — a genuinely dead task is reclaimed
+    on the NEXT idle window instead.
+    """
+    if not task_id:
+        return False
+    try:
+        from lib.tasks_pkg.manager import tasks, tasks_lock
+        with tasks_lock:
+            t = tasks.get(task_id)
+        if t is None:
+            return False
+        if t.get('aborted'):
+            return False
+        return t.get('status') == 'running'
+    except Exception as e:
+        logger.debug('[IncTranslate] task=%s liveness probe failed (assuming '
+                     'alive): %s', task_id[:8], e)
+        return True
 
 
 def _enabled() -> bool:
@@ -114,9 +160,27 @@ class _Acc:
         # caller didn't supply one (old frontend / non-UI start path): we then
         # simply skip the live preview and still finalize at task end.
         self.msg_id = task.get('_assistantMsgId') or ''
+        # Per-task OUTPUT target language (UI language) + its detector code,
+        # resolved once at accumulator construction. All segment / whole /
+        # already-target checks below use these instead of a Chinese hard-pin.
+        self.target = _resolve_target(task)
+        try:
+            from lib.conv_config import target_lang_code
+            self.target_code = target_lang_code(self.target)
+        except Exception as e:
+            logger.debug('[IncTranslate] target_lang_code resolve failed (→zh): %s', e)
+            self.target_code = 'zh'
         self.q: queue.Queue = queue.Queue()
         self.segments: dict[int, str] = {}   # round_num -> translated text
         self.originals: dict[int, str] = {}  # round_num -> original text
+        # Authoritative THIN segments (segments_to_json(task['segments'])),
+        # captured at finalize time. Handed to the commit so the per-round
+        # stamp can SELF-HEAL: if the finalize commit resolves a DB message
+        # that has no `segments` yet (it raced ahead of / lost the row-write
+        # to _sync_result_to_conversation), the commit splices these on in the
+        # SAME CAS write, then stamps — so the 19 translations can never be
+        # silently dropped onto a segment-less row.
+        self._fallback_segments = None
         self.model = 'unknown'
         self.lock = threading.Lock()
         self.thread = threading.Thread(
@@ -130,17 +194,34 @@ class _Acc:
         from lib.translate.notranslate import (_extract_notranslate_blocks,
                                                 _reattach_notranslate_blocks)
         from lib.translate.prompt import _build_translate_prompt
-        system_prompt = _build_translate_prompt(_TARGET, _SOURCE)
+        system_prompt = _build_translate_prompt(self.target, _SOURCE)
         helpers = (system_prompt, _translate_freetext,
                    _extract_notranslate_blocks, _reattach_notranslate_blocks)
         while True:
             try:
                 item = self.q.get(timeout=_WORKER_IDLE_TIMEOUT)
             except queue.Empty:
+                # ★ The idle timeout is a LEAK BACKSTOP, not a task-death signal.
+                #   A slow-but-alive task (e.g. one tool round running minutes on
+                #   a FUSE mount) produces no queue item for a long stretch yet is
+                #   NOT dead — abandoning here would discard the earlier rounds'
+                #   already-translated Chinese and let the next segment spin up a
+                #   fresh empty accumulator (the reported "narration never gets
+                #   translated" bug). Tie teardown to the task lifecycle: keep the
+                #   segments PARKED and keep waiting while the task is still
+                #   running; only reclaim when it genuinely vanished without a
+                #   finalize/cancel (crash / wedged thread).
+                if _task_alive(self.task_id):
+                    logger.debug('[IncTranslate] task=%s conv=%s idle %.0fs but task '
+                                 'still running — keeping %d translated segment(s) '
+                                 'parked, waiting for finalize/cancel',
+                                 self.task_id[:8], (self.conv_id or '?')[:8],
+                                 _WORKER_IDLE_TIMEOUT, len(self.segments))
+                    continue
                 logger.warning('[IncTranslate] task=%s conv=%s worker idle-timeout '
-                               'after %.0fs — abandoning (%d segments translated; '
-                               'neither finalize nor cancel arrived — task likely '
-                               'errored, aborted, or superseded)',
+                               'after %.0fs AND task is gone — reclaiming (%d segments '
+                               'translated but no finalize/cancel arrived; task likely '
+                               'crashed or was superseded)',
                                self.task_id[:8], (self.conv_id or '?')[:8],
                                _WORKER_IDLE_TIMEOUT, len(self.segments))
                 self._cleanup()
@@ -151,7 +232,8 @@ class _Acc:
                     _, round_num, text = item
                     self._translate_segment(round_num, text, *helpers)
                 elif kind == 'fin':
-                    _, conv_id, msg_idx, content, msg_id = item
+                    _, conv_id, msg_idx, content, msg_id, fallback_segments = item
+                    self._fallback_segments = fallback_segments
                     self._do_finalize(conv_id, msg_idx, content, msg_id, *helpers)
                     self._cleanup()
                     return
@@ -176,7 +258,7 @@ class _Acc:
         if not original.strip():
             return
         try:
-            if is_predominantly_chinese(original):
+            if self._already_target(original):
                 # Already in the target language — keep the segment verbatim.
                 with self.lock:
                     self.originals[round_num] = original
@@ -188,7 +270,7 @@ class _Acc:
                 translated = original
             else:
                 translated, usage = translate_fn(
-                    body, system_prompt, source=_SOURCE, target=_TARGET)
+                    body, system_prompt, source=_SOURCE, target=self.target)
                 translated = (translated or '').strip()
                 if nt_blocks:
                     translated = reattach_nt(translated, nt_blocks)
@@ -209,9 +291,10 @@ class _Acc:
         except Exception as e:
             logger.warning('[IncTranslate] task=%s round=%d segment translate '
                            'failed: %s', self.task_id[:8], round_num, e)
-            # Record the original but NOT a translated segment, so the assembly
-            # coverage check detects the gap and falls back to a whole-content
-            # translation rather than silently dropping this round's prose.
+            # Record the original but NOT a translated segment. For the terminal
+            # deliverable this means _deliverable_translation finds no cached
+            # match and re-translates the whole content; for a narration round
+            # the segment simply carries no translatedText (renders in English).
             with self.lock:
                 self.originals[round_num] = original
 
@@ -242,48 +325,90 @@ class _Acc:
                     'statusKind': 'started', 'statusMessage': ''},
                    conv_id, msg_idx, msg_id)
 
-        translated = self._assemble(content)
+        # ★ translatedContent is the DELIVERABLE answer ONLY — never the joined
+        #   per-round narration. The narration is carried per-segment via
+        #   `segment_translations` (stamped onto msg['segments'][].translatedText)
+        #   and rendered INLINE by the settled segment timeline. Assembling the
+        #   whole reply here painted that narration a SECOND time as one block
+        #   below the turn — the reported "all content clumps at the tail after
+        #   finalize" bug — and made the bilingual 原文/译文 pair asymmetric
+        #   (原文 = msg.content = deliverable-only). The terminal deliverable was
+        #   submitted as its own round segment (orchestrator: submit_round_segment
+        #   with the final content), so reuse that cached translation; translate
+        #   afresh only when it isn't cached (e.g. a Sources-footer /
+        #   content-filter override rewrote task['content'] after capture).
+        translated = self._deliverable_translation(
+            content, system_prompt, translate_fn, extract_nt, reattach_nt,
+            conv_id, msg_idx, msg_id)
         if translated is None:
-            logger.info('[IncTranslate] task=%s assembly unusable — falling back '
-                        'to whole-content translation (%d chars)',
-                        self.task_id[:8], len(content))
-            translated = self._translate_whole(content, system_prompt,
-                                                translate_fn, extract_nt,
-                                                reattach_nt, conv_id, msg_idx,
-                                                msg_id)
-            if translated is None:
-                return  # error already pushed
+            return  # error already pushed by _translate_whole
 
         if not translated or not translated.strip():
             logger.debug('[IncTranslate] task=%s nothing to commit', self.task_id[:8])
             return
 
+        # ★ Per-round carry to the SETTLED render: hand the commit the
+        #   {round_num: 中文} map so it stamps `translatedText` onto each
+        #   matching text segment of msg['segments'] (keyed by llmRound ≡
+        #   round_num). renderSegmentTimelineHTML then shows the translated
+        #   narration in its .seg-narration slot — the settled view stays
+        #   interleaved exactly like the streaming view (no finalize snap-back).
+        with self.lock:
+            seg_trans = {rn: txt for rn, txt in self.segments.items()
+                         if txt and txt.strip()}
         try:
             _commit_translation_to_db(conv_id, msg_idx, 'translatedContent',
                                       translated, original_text=content,
-                                      model=self.model, msg_id=msg_id or None)
+                                      model=self.model, msg_id=msg_id or None,
+                                      segment_translations=seg_trans or None,
+                                      fallback_segments=self._fallback_segments)
         except Exception as e:
             logger.warning('[IncTranslate] task=%s commit failed: %s',
                            self.task_id[:8], e, exc_info=True)
+        # ★ Carry the per-round narration Chinese on the done frame (str keys —
+        #   JSON object) so the LIVE view can stamp msg['segments'][].translatedText
+        #   WITHOUT a reload — the settled timeline then keeps its narration in
+        #   Chinese immediately at finalize (a reconnect reads the same already-
+        #   stamped segments from the DB commit above).
+        segments_by_round = {str(rn): txt for rn, txt in seg_trans.items()}
         self._push({'type': 'done', 'status': 'done',
-                    'translated': translated, 'model': self.model},
+                    'translated': translated, 'model': self.model,
+                    'segmentsByRound': segments_by_round},
                    conv_id, msg_idx, msg_id)
         logger.info('[IncTranslate] task=%s ✓ finalized translatedContent '
                     '(%d chars, %d segments, model=%s)',
                     self.task_id[:8], len(translated), len(self.segments),
                     self.model)
 
+        # ★ PATH-INDEPENDENT narration backfill (Path A fix). The live cache
+        #   (self.segments) only holds rounds this accumulator actually
+        #   translated during the task — a late-started / partially-reclaimed
+        #   accumulator, or a round whose _translate_segment raised, leaves DB
+        #   narration segments with an empty translatedText even though the
+        #   DELIVERABLE just committed. Trust the DB, not only the live cache:
+        #   rebuild + stamp any narration segment still missing translatedText.
+        #   Enrich-only + idempotent — a no-op (0 LLM calls) when the live
+        #   stamp already covered every round.
+        try:
+            from lib.translate.segment_backfill import backfill_message_narration_sync
+            backfill_message_narration_sync(
+                conv_id, msg_idx, msg_id or '', self.target, source=_SOURCE,
+                log_tag=self.task_id[:8])
+        except Exception as be:
+            logger.debug('[IncTranslate] task=%s narration backfill (finalize) '
+                         'failed: %s', self.task_id[:8], be)
+
     def _translate_whole(self, content, system_prompt, translate_fn,
                          extract_nt, reattach_nt, conv_id, msg_idx, msg_id):
         """Single whole-content translation fallback. Returns text or None."""
         try:
-            if is_predominantly_chinese(content):
+            if self._already_target(content):
                 return content
             body, nt_blocks = extract_nt(content)
             if not body.strip():
                 return content
             translated, usage = translate_fn(body, system_prompt,
-                                             source=_SOURCE, target=_TARGET)
+                                             source=_SOURCE, target=self.target)
             translated = (translated or '').strip()
             if nt_blocks:
                 translated = reattach_nt(translated, nt_blocks)
@@ -298,45 +423,43 @@ class _Acc:
                        conv_id, msg_idx, msg_id)
             return None
 
-    def _assemble(self, content):
-        """Join cached translated segments in round order.
+    def _deliverable_translation(self, content, system_prompt, translate_fn,
+                                 extract_nt, reattach_nt, conv_id, msg_idx, msg_id):
+        """Translate ONLY the deliverable answer for the ``translatedContent`` blob.
 
-        Returns the assembled translation, or None when the cached segments
-        don't faithfully cover the final *content* (a gap, or low coverage) so
-        the caller falls back to a single whole-content translation.
+        ``content`` is ``task['content']`` — the terminal-round deliverable
+        (inter-round narration was already zeroed by ``_discard_pretool_prose``).
+        The deliverable was submitted as its OWN round segment, so reuse that
+        cached translation (whitespace-insensitive original match) to avoid a
+        redundant LLM call; fall back to a fresh whole-content translation when
+        there is no cached match (e.g. a Sources-footer / content-filter
+        override rewrote ``task['content']`` after the segment was captured).
+
+        Returns the translation, ``''`` when content is empty, or ``None`` on a
+        translate error (which ``_translate_whole`` has already pushed).
         """
+        content = content or ''
+        if not content.strip():
+            return ''
+        key = ''.join(content.split())
         with self.lock:
-            if not self.segments:
-                return None
-            rounds = sorted(self.originals.keys())
-            # Every round we captured an original for must also have a
-            # translated segment, else there's a gap (a failed segment).
-            for rn in rounds:
-                if rn not in self.segments:
-                    return None
-            joined_orig = '\n\n'.join(self.originals[rn] for rn in rounds
-                                      if self.originals[rn].strip())
-            joined_trans = '\n\n'.join(self.segments[rn] for rn in rounds
-                                       if self.segments[rn].strip())
-        co = ''.join(content.split())
-        if not co:
-            return joined_trans or None
-        jo = ''.join(joined_orig.split())
-        coverage = len(jo) / len(co)
-        if coverage < _ASSEMBLY_COVERAGE_MIN:
-            logger.info('[IncTranslate] task=%s assembly coverage %.2f < %.2f '
-                        '(joined_orig=%d content=%d) — fallback',
-                        self.task_id[:8], coverage, _ASSEMBLY_COVERAGE_MIN,
-                        len(jo), len(co))
-            return None
-        return joined_trans
+            for rn, orig in self.originals.items():
+                if orig and ''.join(orig.split()) == key:
+                    cached = self.segments.get(rn)
+                    if cached and cached.strip():
+                        return cached
+        return self._translate_whole(content, system_prompt, translate_fn,
+                                     extract_nt, reattach_nt, conv_id, msg_idx,
+                                     msg_id)
 
     def _assemble_progressive(self):
         """Join currently-translated segments in round order for a LIVE preview.
 
-        Unlike :meth:`_assemble`, there is NO coverage gate — this is a
-        best-effort partial shown WHILE the task is still streaming (covers only
-        the rounds closed so far), not the committed final translation.
+        This is the best-effort joined blob shown WHILE the task is still
+        streaming (covers the rounds closed so far); the settled render routes
+        each round's Chinese into its tool group via ``partialByRound`` and the
+        committed ``translatedContent`` is the deliverable only (see
+        :meth:`_deliverable_translation`).
         """
         with self.lock:
             if not self.segments:
@@ -358,8 +481,20 @@ class _Acc:
         partial = self._assemble_progressive()
         if not partial:
             return
+        # ★ Per-round interleave: also carry each closed round's translated
+        #   Chinese keyed by round_num (≡ frontend llmRound — tool_dispatch.py
+        #   stamps round_entry['llmRound'] = round_num). The frontend routes
+        #   each round's text into its matching .ptool-turn narration slot so
+        #   the translation interleaves with the tools it describes instead of
+        #   piling up as one blob below the whole panel. `partial` (the joined
+        #   blob) is kept for graceful degrade when a round's .ptool-turn isn't
+        #   in the DOM yet.
+        with self.lock:
+            by_round = {str(rn): txt for rn, txt in self.segments.items()
+                        if txt and txt.strip()}
         self._push({'type': 'running', 'status': 'running',
-                    'statusKind': 'in_progress', 'partial': partial},
+                    'statusKind': 'in_progress', 'partial': partial,
+                    'partialByRound': by_round},
                    self.conv_id, None, self.msg_id)
 
     def _push(self, payload, conv_id, msg_idx, msg_id):
@@ -374,6 +509,22 @@ class _Acc:
         except Exception as e:
             logger.debug('[IncTranslate] task=%s push failed: %s',
                          self.task_id[:8], e)
+
+    def _already_target(self, text: str) -> bool:
+        """Is ``text`` already in this task's target language? (skip gate).
+
+        Uses force_fasttext so kanji-heavy Japanese is not misread as Chinese
+        (both share the CJK-ideograph block) — the same disambiguation the
+        server-side safety net applies. Fail-open (any error → False →
+        translate anyway).
+        """
+        try:
+            from lib.text_lang import detect_language
+            return detect_language(text, force_fasttext=True).code == self.target_code
+        except Exception as e:
+            logger.debug('[IncTranslate] task=%s already-target probe failed: %s',
+                         self.task_id[:8], e)
+            return False
 
     def _cleanup(self):
         with _acc_lock:
@@ -406,12 +557,21 @@ def submit_round_segment(task, round_num, text):
                        (task or {}).get('id', '?')[:8], e)
 
 
-def finalize_incremental(task, conv_id, msg_idx, content, msg_id=None) -> bool:
+def finalize_incremental(task, conv_id, msg_idx, content, msg_id=None,
+                         target=None) -> bool:
     """Signal the per-task worker to assemble + commit the final translation.
 
     Returns True if the incremental path owns this translation (caller must
     skip the whole-message fallback), False if no incremental accumulator was
     active (caller falls back to the whole-message path).
+
+    ``target`` (accepted for call-site symmetry with the safety net, but NOT
+    used to override): every per-round segment was already translated live
+    during the task using the accumulator's own task-config-resolved target,
+    so re-pointing the target at finalize time would be too late (the cached
+    segments are already in the accumulator's target) and would desync the
+    already-built system prompt. The accumulator and the safety net resolve
+    from the SAME task config, so they agree by construction.
     """
     try:
         tid = task.get('id') if task else None
@@ -421,7 +581,25 @@ def finalize_incremental(task, conv_id, msg_idx, content, msg_id=None) -> bool:
             acc = _accumulators.get(tid)
         if acc is None:
             return False
-        acc.q.put(('fin', conv_id, msg_idx, content or '', msg_id))
+        # ★ Capture the AUTHORITATIVE thin segments now (task['segments'] is
+        #   assembled by persist_task_result before this handoff fires) and
+        #   hand them to the finalize commit as a self-heal fallback. This is
+        #   the SSOT ordering guarantee: the stamp no longer depends on the
+        #   conversation row-write having already landed the segments — if the
+        #   DB row lacks them at commit time (finalize/sync race, or a frontend
+        #   PUT won the row-write CAS), the commit writes these in the same CAS
+        #   write. Best-effort: a serialize failure just skips the fallback
+        #   (degrades to the pre-fix behaviour, never breaks finalize).
+        fallback_segments = None
+        try:
+            _segs = task.get('segments')
+            if _segs:
+                from lib.tasks_pkg.segments import segments_to_json
+                fallback_segments = segments_to_json(_segs)
+        except Exception as _fe:
+            logger.debug('[IncTranslate] finalize fallback-segments capture failed '
+                         'task=%s: %s', tid[:8], _fe)
+        acc.q.put(('fin', conv_id, msg_idx, content or '', msg_id, fallback_segments))
         return True
     except Exception as e:
         logger.warning('[IncTranslate] finalize_incremental failed task=%s: %s',

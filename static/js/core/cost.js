@@ -12,7 +12,7 @@
 // New design stores the actual model_id directly in config.model.
 const _LEGACY_PRESET_TO_MODEL = {
   'qwen': 'qwen3.6-plus', 'low': 'qwen3.6-plus',
-  'gemini': 'gemini-3.1-flash-lite-preview', 'gemini_flash': 'gemini-3-flash-preview',
+  'gemini': 'gemini-3-flash-preview', 'gemini_flash': 'gemini-3-flash-preview',
   'minimax': 'MiniMax-M2.7', 'doubao': 'Doubao-Seed-2.0-pro',
   'opus': 'aws.claude-opus-4.7',
   'medium': 'aws.claude-opus-4.7', 'high': 'aws.claude-opus-4.7', 'max': 'aws.claude-opus-4.7',
@@ -161,20 +161,10 @@ function calcCostCny(usage, modelOrPreset, providerId) {
 
   const promise = (async () => {
     try {
-      const url = (typeof apiUrl === 'function')
-        ? apiUrl('/api/v1/messages/cost')
-        : '/api/v1/messages/cost';
-      const r = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ usage, model: modelId, provider_id: providerId || null }),
-        credentials: 'same-origin',
-      });
-      if (!r.ok) {
-        _costCache.set(fp, null);
-        return null;
-      }
-      const body = await r.json();
+      // Api.conversations.cost uses onError:'null' → null on HTTP/network error,
+      // matching the old !r.ok / catch paths.
+      const body = await Api.conversations.cost(usage, modelId, providerId);
+      if (!body) { _costCache.set(fp, null); return null; }
       const result = body.no_charge ? null : body;
       _costCache.set(fp, result);
       _capCostCache();
@@ -235,22 +225,31 @@ async function _prefetchConvCosts(conv) {
   }
   if (!items.length) return false;
   try {
-    const url = (typeof apiUrl === 'function')
-      ? apiUrl('/api/v1/messages/cost/batch')
-      : '/api/v1/messages/cost/batch';
-    const r = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ items }),
-      credentials: 'same-origin',
-    });
-    if (!r.ok) return false;
-    const body = await r.json();
+    const body = await Api.conversations.costBatch(items);
+    if (!body) return false;
     const costs = Array.isArray(body.costs) ? body.costs : [];
     for (let i = 0; i < fps.length; i++) {
       _costCache.set(fps[i], costs[i] || null);
     }
     _capCostCache();
+    /* PHASE2B-COST-WRITEBACK (RENDER_CONTRACT L2): the batch just filled the
+     * side `_costCache`, which the per-message content version (chat_render.js
+     * _msgFingerprint) cannot see — so on the LAZY path (a message the server
+     * did not pre-stamp) the version stayed put and the row only repainted via
+     * the separate `_bgRefreshChat` output-diff. Write the resolved cost back
+     * onto `msg.cost` — the SAME server-authoritative field the backend stamps
+     * at sync time (identical shape, already folded by the version + preferred
+     * by renderFinishInfo/calcConversationCost). Only a real (non-null) cost is
+     * stamped, so a no-charge result never moves the version. This makes the
+     * one surgical trigger repaint the row when cost lands — no background path. */
+    for (const m of conv.messages) {
+      if (!m || m.cost || !m.usage) continue;
+      const mid = _resolveModelId(m.model || m.preset || m.effort || convModel);
+      const pid = m.provider_id || m.providerId || null;
+      const c = _costCache.get(_costFingerprint(m.usage, mid, pid));
+      if (c && c.costCny != null) m.cost = c;
+    }
+    /* END-PHASE2B-COST-WRITEBACK */
     return true;
   } catch (_) {
     return false;

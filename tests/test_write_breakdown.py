@@ -49,9 +49,12 @@ class WriteBreakdownTest(unittest.TestCase):
         self.assertFalse(wb['capped'])
         self.assertEqual(_sum(wb), wb['write'])
 
-    def test_overshoot_components_capped_sum_still_exact(self):
-        # tools 970 + prev 700 = 1670 > write 1000. Must NOT print numbers that
-        # exceed the total: toolResults=970, prevOutput=min(700,30)=30, env=0.
+    def test_overshoot_components_scaled_proportionally_sum_still_exact(self):
+        # tools 970 + prev 700 = 1670 > write 1000. The overshoot is resolved
+        # by scaling BOTH components down by their estimated share — NOT by
+        # letting tool results consume the whole write and zeroing prev output.
+        # tool_results = round(1000 * 970/1670) = 581; prev_output = remainder
+        # = 419. Both stay non-zero and sum exactly to write.
         wb = _compute_write_breakdown(
             {'toolRounds': [
                 {'llmRound': 0, 'toolTokens': 546},
@@ -63,13 +66,19 @@ class WriteBreakdownTest(unittest.TestCase):
             ],
             1,
         )
-        self.assertEqual(wb['toolResults'], 970)
-        self.assertEqual(wb['prevOutput'], 30)
+        self.assertEqual(wb['toolResults'], 581)
+        self.assertEqual(wb['prevOutput'], 419)
         self.assertEqual(wb['envelope'], 0)
         self.assertTrue(wb['capped'])
+        # The whole point of proportional truncation: a real previous-round
+        # output is never annihilated by the tool estimate's overshoot.
+        self.assertGreater(wb['prevOutput'], 0)
         self.assertEqual(_sum(wb), wb['write'])
 
-    def test_tool_results_alone_exceed_write(self):
+    def test_tool_results_dominate_but_prev_output_survives(self):
+        # tools 1500 dwarfs prev 700, sum 2200 > write 1000. Even so, the
+        # previous round DID output 700 tok — its share must survive, not be
+        # zeroed. tool = round(1000 * 1500/2200) = 682; prev = 318.
         wb = _compute_write_breakdown(
             {'toolRounds': [{'llmRound': 0, 'toolTokens': 1500}]},
             [
@@ -78,10 +87,74 @@ class WriteBreakdownTest(unittest.TestCase):
             ],
             1,
         )
-        self.assertEqual(wb['toolResults'], 1000)
-        self.assertEqual(wb['prevOutput'], 0)
+        self.assertEqual(wb['toolResults'], 682)
+        self.assertEqual(wb['prevOutput'], 318)
+        self.assertGreater(wb['prevOutput'], 0)
         self.assertEqual(wb['envelope'], 0)
         self.assertTrue(wb['capped'])
+        self.assertEqual(_sum(wb), wb['write'])
+
+    def test_round2_real_bug_prev_output_not_swallowed(self):
+        # The exact reported round-2 shape: write 1.1k, the local tool
+        # estimate (1.6k) alone exceeds it, and the previous round produced a
+        # real 595-token output. The OLD priority-cap logic zeroed prevOutput
+        # and mislabeled its share as "tool results" (write 1.1k → toolResults
+        # 1.1k, prevOutput 0). Proportional truncation must keep prevOutput's
+        # share alive: est sum = 1595, tool = round(1100 * 1000/1595) = 690,
+        # prev = 410.
+        wb = _compute_write_breakdown(
+            {'toolRounds': [
+                {'llmRound': 0, 'toolTokens': 560},
+                {'llmRound': 0, 'toolTokens': 440},
+            ]},
+            [
+                {'round': 1, 'usage': {'completion_tokens': 595}},
+                {'round': 2, 'usage': {'cache_write_tokens': 1100}},
+            ],
+            1,
+        )
+        self.assertEqual(wb['write'], 1100)
+        # est sum = 1000 (tools) + 595 (prev) = 1595 > 1100 → scaled.
+        self.assertEqual(wb['toolResults'], round(1100 * 1000 / 1595))  # 690
+        self.assertEqual(wb['prevOutput'], 1100 - round(1100 * 1000 / 1595))  # 410
+        # The regression guard: the real 595-tok previous output is NOT
+        # attributed entirely to tool results (the round-2 misattribution bug).
+        self.assertGreater(wb['prevOutput'], 0)
+        self.assertLess(wb['toolResults'], wb['write'])
+        self.assertTrue(wb['capped'])
+        self.assertEqual(_sum(wb), wb['write'])
+
+    def test_NEUTER_priority_cap_would_zero_prev_output(self):
+        # NEGATIVE CONTROL with teeth: re-implement the OLD priority-cap
+        # resolution (tool results first, prev output gets only the remainder)
+        # on the SAME round-2 inputs and prove it produces the very
+        # misattribution the fix eliminates — prevOutput == 0 and toolResults
+        # swallows the whole write. If the production code ever regresses to
+        # priority-cap, test_round2_real_bug_prev_output_not_swallowed fails
+        # while THIS reproduction still shows the broken shape, pinpointing the
+        # regression. (This does NOT call the production function — it models
+        # the discarded algorithm so the guard's intent is self-documenting.)
+        write = 1100
+        tool_est, prev_est = 1000, 595
+        # Old logic:
+        old_tool = min(tool_est, write)              # 1000
+        old_prev = min(prev_est, write - old_tool)   # min(595, 100) = 100
+        # (In the reported case tool_est 1.6k ≥ write → old_prev would be 0.)
+        self.assertEqual(old_tool, 1000)
+        self.assertEqual(old_prev, 100)
+        # And with the reported 1.6k estimate the previous output is fully lost:
+        tool_est_hi = 1600
+        self.assertEqual(min(prev_est, write - min(tool_est_hi, write)), 0)
+        # The production function on the same hi estimate must NOT zero it:
+        wb = _compute_write_breakdown(
+            {'toolRounds': [{'llmRound': 0, 'toolTokens': 1600}]},
+            [
+                {'round': 1, 'usage': {'completion_tokens': 595}},
+                {'round': 2, 'usage': {'cache_write_tokens': 1100}},
+            ],
+            1,
+        )
+        self.assertGreater(wb['prevOutput'], 0)
         self.assertEqual(_sum(wb), wb['write'])
 
     def test_first_round_no_prev_output(self):
@@ -297,6 +370,136 @@ class WriteBreakdownTest(unittest.TestCase):
         self.assertEqual(wb['contextWrite'], 5800 - _ENVELOPE_MAX_TOKENS)
         self.assertEqual(_sum(wb), wb['write'])
 
+    # ── Cross-turn baseline: the turn's round-1 mislabel fix ──
+    # A turn's round-1 has NO within-turn predecessor (api_rounds has ONE
+    # entry), so prev_read used to be 0 → read_drop 0 → the whole write
+    # defaulted to benign contextWrite even when the PREVIOUS turn's cached
+    # prefix was partly evicted and re-billed this round. The
+    # prev_turn_cache_read param carries the prior turn's final cached-prefix
+    # read across the run_task thread boundary so round-1 is honest.
+
+    def test_round1_evicted_tail_recache_body_with_cross_turn_baseline(self):
+        # Turn round-1: single api_round, write=40100, cache_read=79200. The
+        # PREVIOUS turn ended reading 118000 of cached prefix. This round reads
+        # only 79200 → a 38800 cross-turn drop: part of the prior turn's cached
+        # prefix was evicted and re-billed inside this write. The excess must be
+        # recacheBody, NOT the benign "first-cache context" (the exact round-1
+        # mislabel the user caught).
+        from lib.tasks_pkg.orchestrator import _ENVELOPE_MAX_TOKENS
+        wb = _compute_write_breakdown(
+            {'toolRounds': []},
+            [{'round': 1, 'usage': {'cache_write_tokens': 40100,
+                                    'cache_read_tokens': 79200}}],
+            0,
+            prev_turn_cache_read=118000,
+        )
+        self.assertEqual(wb['write'], 40100)
+        self.assertEqual(wb['prevOutput'], 0)
+        self.assertEqual(wb['toolResults'], 0)
+        self.assertEqual(wb['envelope'], _ENVELOPE_MAX_TOKENS)
+        self.assertEqual(wb['readDrop'], 118000 - 79200)  # 38800
+        # excess = 40100 - 800 = 39300; read_drop 38800 < excess →
+        # 38800 recacheBody + 500 genuinely-new contextWrite.
+        self.assertEqual(wb['recacheBody'], 38800)
+        self.assertEqual(wb['contextWrite'], 39300 - 38800)  # 500
+        self.assertIn('no_cache_reuse', wb['recacheCause'])
+        self.assertEqual(_sum(wb), wb['write'])
+
+    def test_round1_baseline_held_stays_context_write(self):
+        # Same round-1 write, but the prior turn's read baseline is BELOW this
+        # round's read (cache grew across the turn boundary — the prefix was
+        # fully read back plus more). No drop → the write is genuine first-time
+        # context, recacheBody must stay 0.
+        from lib.tasks_pkg.orchestrator import _ENVELOPE_MAX_TOKENS
+        wb = _compute_write_breakdown(
+            {'toolRounds': []},
+            [{'round': 1, 'usage': {'cache_write_tokens': 40100,
+                                    'cache_read_tokens': 79200}}],
+            0,
+            prev_turn_cache_read=79200,  # held exactly → no drop
+        )
+        self.assertEqual(wb['readDrop'], 0)
+        self.assertEqual(wb['recacheBody'], 0)
+        self.assertEqual(wb['contextWrite'], 40100 - _ENVELOPE_MAX_TOKENS)
+        self.assertEqual(wb['recacheCause'], {})
+        self.assertEqual(_sum(wb), wb['write'])
+
+    def test_round1_genuine_first_ever_call_no_baseline_is_context(self):
+        # A brand-new conversation's very first turn: no prior turn exists, so
+        # prev_turn_cache_read defaults to 0 → read_drop 0 → the large write is
+        # legitimate first-time context, exactly as before the fix. This is the
+        # honest "first-cache warm-up" case the label was MEANT for.
+        from lib.tasks_pkg.orchestrator import _ENVELOPE_MAX_TOKENS
+        wb = _compute_write_breakdown(
+            {'toolRounds': []},
+            [{'round': 1, 'usage': {'cache_write_tokens': 40100,
+                                    'cache_read_tokens': 0}}],
+            0,
+            prev_turn_cache_read=0,
+        )
+        self.assertEqual(wb['readDrop'], 0)
+        self.assertEqual(wb['recacheBody'], 0)
+        self.assertEqual(wb['contextWrite'], 40100 - _ENVELOPE_MAX_TOKENS)
+        self.assertEqual(_sum(wb), wb['write'])
+
+    def test_round1_default_param_matches_old_behavior(self):
+        # Backward-compat: omitting prev_turn_cache_read (the default 0) yields
+        # the SAME breakdown as passing 0 — no caller that forgets the new arg
+        # gets a surprise. Mirrors the genuine-first-call case.
+        wb = _compute_write_breakdown(
+            {'toolRounds': []},
+            [{'round': 1, 'usage': {'cache_write_tokens': 40100,
+                                    'cache_read_tokens': 79200}}],
+            0,
+        )
+        self.assertEqual(wb['readDrop'], 0)
+        self.assertEqual(wb['recacheBody'], 0)
+        self.assertEqual(wb['contextWrite'], 40100 - 800)
+        self.assertEqual(_sum(wb), wb['write'])
+
+    def test_NEUTER_round1_without_baseline_mislabels_eviction_as_context(self):
+        # NEGATIVE CONTROL with teeth: the SAME evicted-round-1 inputs as
+        # test_round1_evicted_tail_recache_body_with_cross_turn_baseline, but
+        # WITHOUT the cross-turn baseline (prev_turn_cache_read=0, the pre-fix
+        # behavior). The eviction re-bill is then INVISIBLE — read_drop=0 → the
+        # whole 39.3k excess is mislabeled benign contextWrite, recacheBody=0.
+        # If the production path ever stops feeding the baseline, the positive
+        # test flips to this broken shape, pinpointing the regression.
+        wb = _compute_write_breakdown(
+            {'toolRounds': []},
+            [{'round': 1, 'usage': {'cache_write_tokens': 40100,
+                                    'cache_read_tokens': 79200}}],
+            0,
+            prev_turn_cache_read=0,  # the pre-fix blindness
+        )
+        self.assertEqual(wb['readDrop'], 0)
+        self.assertEqual(wb['recacheBody'], 0)              # eviction hidden
+        self.assertEqual(wb['contextWrite'], 40100 - 800)   # mislabeled benign
+        self.assertEqual(wb['recacheCause'], {})
+        self.assertEqual(_sum(wb), wb['write'])
+
+    def test_within_turn_prev_wins_over_cross_turn_baseline(self):
+        # When a within-turn predecessor EXISTS (api_rounds[-2]), its read is
+        # the baseline — the cross-turn arg is ignored (it only rescues round-1).
+        # round 2: prev within-turn read 130000, this read 130000 → no drop,
+        # despite a cross-turn arg that would (wrongly) imply a huge drop.
+        from lib.tasks_pkg.orchestrator import _ENVELOPE_MAX_TOKENS
+        wb = _compute_write_breakdown(
+            {'toolRounds': []},
+            [
+                {'round': 1, 'usage': {'completion_tokens': 0,
+                                       'cache_read_tokens': 130000}},
+                {'round': 2, 'usage': {'cache_write_tokens': 5800,
+                                       'cache_read_tokens': 130000}},
+            ],
+            1,
+            prev_turn_cache_read=999999,  # must be IGNORED (within-turn wins)
+        )
+        self.assertEqual(wb['readDrop'], 0)
+        self.assertEqual(wb['recacheBody'], 0)
+        self.assertEqual(wb['contextWrite'], 5800 - _ENVELOPE_MAX_TOKENS)
+        self.assertEqual(_sum(wb), wb['write'])
+
     def test_no_write_returns_none(self):
         self.assertIsNone(_compute_write_breakdown(
             {'toolRounds': []},
@@ -320,6 +523,78 @@ class WriteBreakdownTest(unittest.TestCase):
             [{'round': 1, 'usage': {'cache_write_tokens': 300}}], 0)
         self.assertEqual(wb['write'], 300)
         self.assertEqual(_sum(wb), 300)
+
+
+class PrevTurnCacheReadTest(unittest.TestCase):
+    """get_prev_turn_cache_read — the cross-turn baseline source.
+
+    It scans the per-(conv,thread) cache-state singleton for the same conv,
+    EXCLUDING the caller's own thread (whose entry detect_cache_break already
+    advanced to THIS round's read), and returns the most-recently-updated
+    sibling's last_cache_read_tokens. That sibling is the previous user turn.
+    """
+
+    def setUp(self):
+        import threading
+        from lib.tasks_pkg.cache_tracking import _cache_states, _cache_lock, CacheState
+        self._threading = threading
+        self._states = _cache_states
+        self._lock = _cache_lock
+        self._CacheState = CacheState
+        self._conv = 'cw_test_conv_' + str(id(self))
+        # Clean any stray entries for this conv id.
+        with _cache_lock:
+            for k in [k for k in _cache_states if k[0] == self._conv]:
+                _cache_states.pop(k, None)
+
+    def tearDown(self):
+        with self._lock:
+            for k in [k for k in self._states if k[0] == self._conv]:
+                self._states.pop(k, None)
+
+    def _put(self, thread_id, *, cache_read, update_time, call_count=1):
+        st = self._CacheState()
+        st.last_cache_read_tokens = cache_read
+        st.last_update_time = update_time
+        st.call_count = call_count
+        with self._lock:
+            self._states[(self._conv, thread_id)] = st
+
+    def test_returns_zero_when_no_state(self):
+        from lib.tasks_pkg.cache_tracking import get_prev_turn_cache_read
+        self.assertEqual(get_prev_turn_cache_read(self._conv), 0)
+        self.assertEqual(get_prev_turn_cache_read(''), 0)
+
+    def test_excludes_callers_own_thread(self):
+        # The caller's own thread entry (this round's already-advanced read)
+        # must NOT be returned — else read_drop collapses to 0 and the fix is a
+        # no-op. Only a DIFFERENT-thread (prior-turn) sibling counts.
+        from lib.tasks_pkg.cache_tracking import get_prev_turn_cache_read
+        self_tid = self._threading.get_ident()
+        # Self thread: this round's read (would be the no-op trap).
+        self._put(self_tid, cache_read=79200, update_time=200.0)
+        # No sibling yet → excluding self leaves nothing.
+        self.assertEqual(get_prev_turn_cache_read(self._conv), 0)
+        # Add a prior-turn sibling on a different thread.
+        self._put(self_tid + 1, cache_read=118000, update_time=100.0)
+        self.assertEqual(get_prev_turn_cache_read(self._conv), 118000)
+
+    def test_picks_most_recent_sibling(self):
+        from lib.tasks_pkg.cache_tracking import get_prev_turn_cache_read
+        self_tid = self._threading.get_ident()
+        self._put(self_tid + 1, cache_read=50000, update_time=100.0)   # older
+        self._put(self_tid + 2, cache_read=118000, update_time=300.0)  # newest
+        self._put(self_tid + 3, cache_read=90000, update_time=200.0)
+        self.assertEqual(get_prev_turn_cache_read(self._conv), 118000)
+
+    def test_ignores_cold_call_count_zero_siblings(self):
+        # A sibling entry that never completed a round (call_count==0) carries
+        # no real baseline — skip it even if it's the most recent.
+        from lib.tasks_pkg.cache_tracking import get_prev_turn_cache_read
+        self_tid = self._threading.get_ident()
+        self._put(self_tid + 1, cache_read=118000, update_time=100.0, call_count=1)
+        self._put(self_tid + 2, cache_read=5, update_time=999.0, call_count=0)
+        self.assertEqual(get_prev_turn_cache_read(self._conv), 118000)
 
 
 if __name__ == '__main__':

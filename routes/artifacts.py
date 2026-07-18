@@ -29,7 +29,7 @@ from __future__ import annotations
 import re
 from urllib.parse import quote as _urlquote
 
-from flask import Blueprint, Response, jsonify, request
+from flask import Blueprint, Response, request
 
 from lib.artifacts import (
     ArtifactNotFoundError,
@@ -269,8 +269,7 @@ def api_get_artifact_view(artifact_id):
     fmt = artifact['format']
     if fmt not in ('html', 'svg'):
         # /view doesn't add value for markdown; redirect callers to /raw
-        return jsonify({'error': 'unsupported_format_for_view',
-                        'format': fmt}), 400
+        return api_error('unsupported_format_for_view', status=400, format=fmt)
 
     body_html = _build_artifact_view_html(artifact)
     resp = Response(body_html, mimetype='text/html; charset=utf-8', status=200)
@@ -332,7 +331,7 @@ def api_export_artifact(artifact_id):
     except PdfRenderError as e:
         logger.info('[Artifacts] PDF export failed for id=%s: %s',
                     artifact_id[:8], e)
-        return jsonify({'error': 'pdf_render_failed', 'detail': str(e)}), 503
+        return api_error('pdf_render_failed', status=503, detail=str(e))
     except Exception as e:
         logger.error('[Artifacts] PDF export crashed for id=%s: %s',
                      artifact_id[:8], e, exc_info=True)

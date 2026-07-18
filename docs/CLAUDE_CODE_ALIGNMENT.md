@@ -3,6 +3,22 @@
 > Comprehensive reference for all Claude Code designs adopted into ChatUI,
 > and those that are architecturally impossible due to system design differences.
 
+> **⚠️ Freshness note (2026-07-06).** This is a point-in-time design record; the
+> *reasoning* still holds, but several file locations named below have since
+> changed or been removed. Corrections, verified against the current tree:
+> - **`lib/tasks_pkg/session_memory.py` was REMOVED** — the "Session Memory
+>   System" (§1) subsystem no longer exists (`session_memory` / `SessionMemory`
+>   have zero matches in `lib/`). Its per-turn attachment (§2) is likewise gone.
+> - **`lib/tasks_pkg/tool_spec.py` no longer exists** — the `ToolSpec` dataclass
+>   (§6) now lives in `lib/tools/registry.py`.
+> - **`lib/tasks_pkg/partial_compact.py` was REMOVED** — `partial_compact()` (§8)
+>   has zero matches in `lib/`.
+> - **`compaction.py` is now the package `lib/tasks_pkg/compaction/`** — the
+>   cache-aware micro-compact (§4) lives in `lib/tasks_pkg/compaction/_layer1.py`.
+> - `tests/test_new_features.py` referenced in "Test Coverage" describes the
+>   original landing and may no longer match the current suites.
+> The "❌ CANNOT ALIGN" architectural analysis below is unaffected.
+
 ## System Architecture Differences (Why Full Alignment Is Impossible)
 
 | Dimension | Claude Code | ChatUI |

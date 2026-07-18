@@ -41,6 +41,7 @@ from lib.billing.users import get_user
 from lib.database import (
     DOMAIN_SYSTEM, async_execute, async_fetchall, async_fetchone,
 )
+from lib.ids import short_id
 from lib.log import audit_log, get_logger
 from lib.openapi import api_meta
 from lib.request_parser import (
@@ -309,7 +310,7 @@ async def deposit_route():
     if get_user(user_id) is None:
         return api_not_found('user not found', field='user_id')
     deposit(user_id, amount_micro, kind=kind,
-            ref_type='admin', ref_id=str(uuid.uuid4().hex[:24]),
+            ref_type='admin', ref_id=short_id(n=24),
             note=note)
     return api_created(_wallet_payload(user_id))
 
@@ -334,7 +335,7 @@ async def debit_route():
         return api_not_found('user not found', field='user_id')
     try:
         debit(user_id, amount_micro, kind='adjust_debit',
-              ref_type='admin', ref_id=str(uuid.uuid4().hex[:24]),
+              ref_type='admin', ref_id=short_id(n=24),
               note=note, allow_negative=allow_negative)
     except InsufficientFunds as e:
         return api_bad_request(

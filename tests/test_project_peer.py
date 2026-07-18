@@ -72,6 +72,11 @@ def _stub_io(monkeypatch):
                         lambda *a, **k: None)
     monkeypatch.setattr('lib.conversations.project_peer.audit_log',
                         lambda *a, **k: None)
+    # Identity target-id resolution so these DB-free tests use synthetic ids
+    # (cA/cB) without a conversations table. The real resolver is covered by
+    # the dedicated seeded-DB tests below (test_resolve_* / test_send_*_target).
+    monkeypatch.setattr('lib.conversations.project_peer._resolve_target_conv_id',
+                        lambda t: ((t or '').strip(), ''))
     return calls
 
 
@@ -157,6 +162,52 @@ def test_join_peers_excludes_self():
     view = _join_peers(_peers(), {}, {}, exclude_conv='cA')
     assert all(v['convId'] != 'cA' for v in view), 'caller must not see itself'
     assert {v['convId'] for v in view} == {'cB'}
+
+
+def test_build_peer_status_convCount_excludes_subagents(monkeypatch):
+    """The Team-panel headline/badge count is CONVERSATIONS, not raw peers: a
+    running conversation's sub-agents are separate presence peers (convId#agentId)
+    and must not inflate the count. build_peer_status returns a backend-computed
+    convCount using the SAME rule build_brain_summary applies for activePeers
+    (dedup on convId, exclude agentId) so the two views can never drift.
+    """
+    import lib.conversations.project_peer as pp
+    # 1 conversation (cA) running 2 sub-agents → presence has 3 peers total.
+    monkeypatch.setattr('lib.presence.registry.snapshot', lambda p: {'peers': [
+        {'convId': 'cA', 'agentId': '', 'title': 'Parser work', 'statusLabel': 'working'},
+        {'convId': 'cA', 'agentId': 'sub1', 'statusLabel': 'working'},
+        {'convId': 'cA', 'agentId': 'sub2', 'statusLabel': 'working'},
+    ]})
+    monkeypatch.setattr('lib.conversations.project_board.read_board',
+                        lambda p: {'tasks': []})
+    monkeypatch.setattr('lib.conversations.project_peer._live_task_by_conv', lambda: {})
+    monkeypatch.setattr('lib.conversations.project_peer._titles_by_conv', lambda ids: {})
+    out = pp.build_peer_status('/proj')
+    # All 3 peers are returned + rendered as cards …
+    assert out['count'] == 3, out
+    assert len(out['peers']) == 3, out
+    # … but the conversation count is 1 (the sub-agents do not inflate it).
+    assert out['convCount'] == 1, out
+
+
+def test_build_peer_status_convCount_counts_distinct_conversations(monkeypatch):
+    """Two distinct conversations (each with a sub-agent) → convCount == 2,
+    even though 4 peers are present. Excludes the caller's own conv."""
+    import lib.conversations.project_peer as pp
+    monkeypatch.setattr('lib.presence.registry.snapshot', lambda p: {'peers': [
+        {'convId': 'cA', 'agentId': '', 'statusLabel': 'working'},
+        {'convId': 'cA', 'agentId': 'sub1', 'statusLabel': 'working'},
+        {'convId': 'cB', 'agentId': '', 'statusLabel': 'generating'},
+        {'convId': 'cB', 'agentId': 'sub1', 'statusLabel': 'working'},
+    ]})
+    monkeypatch.setattr('lib.conversations.project_board.read_board',
+                        lambda p: {'tasks': []})
+    monkeypatch.setattr('lib.conversations.project_peer._live_task_by_conv', lambda: {})
+    monkeypatch.setattr('lib.conversations.project_peer._titles_by_conv', lambda ids: {})
+    # Caller is cA → excluded; only cB (+ its sub-agent) remains.
+    out = pp.build_peer_status('/proj', conv_id='cA')
+    assert out['convCount'] == 1, out
+    assert {p['convId'] for p in out['peers']} == {'cB'}, out
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -251,8 +302,12 @@ def test_intervene_hard_abort_runs_when_approved(_stub_io, monkeypatch):
     assert any(ev == 'intervention' for ev, _ in audits), 'must audit the intervention'
 
 
-def test_intervene_refuses_self():
+def test_intervene_refuses_self(monkeypatch):
     from lib.conversations.project_peer import intervene_peer
+    # Identity target resolution (synthetic ids, no conversations table); the
+    # self-check must still fire on the resolved id.
+    monkeypatch.setattr('lib.conversations.project_peer._resolve_target_conv_id',
+                        lambda t: ((t or '').strip(), ''))
     assert intervene_peer('/p', 'cA', 'cA', 'x')['error'] == 'cannot_intervene_self'
 
 
@@ -324,6 +379,14 @@ def _drive_handler_intervene(monkeypatch, decision, autopilot=False):
                         lambda gid, task=None: decision)
     monkeypatch.setattr('lib.tasks_pkg.autopilot.is_autopilot_enabled',
                         lambda t: autopilot)
+    # Identity target-id resolution: these handler-surface tests use synthetic
+    # ids (cA/cB) with no seeded conversations row. Without this the REAL
+    # resolver returns unknown_target once ANY sibling suite has run init_db()
+    # (which creates the empty conversations table) — a cross-file ordering
+    # fragility, not a product bug. The seeded-DB resolver tests cover the real
+    # path.
+    monkeypatch.setattr('lib.conversations.project_peer._resolve_target_conv_id',
+                        lambda t: ((t or '').strip(), ''))
     task = {'id': 't1', 'convId': 'cA', 'messages': [], 'toolRounds': []}
     round_entry = {'query': 'project_intervene', 'status': 'searching'}
     fn_args = {'to_conv_id': 'cB', 'message': 'stop', 'hard_abort': True}
@@ -499,6 +562,9 @@ def test_NC_storm_guard_noop_breaks_rate_limit(_stub_io):
     def run():
         import lib.conversations.project_peer as pp
         importlib.reload(pp)
+        # Reload re-binds _resolve_target_conv_id to the real (DB-reading) fn;
+        # re-stub to identity so this DB-free NC uses synthetic ids.
+        pp._resolve_target_conv_id = lambda t: ((t or '').strip(), '')
         # Re-stub via module attrs the reloaded code reads at call time.
         for i in range(3):
             pp.send_peer_message('/p', 'cA', 'cB', f'm{i}')
@@ -533,6 +599,7 @@ def test_NC_audit_gate_noop_allows_unapproved_abort(monkeypatch):
     def run():
         import lib.conversations.project_peer as pp
         importlib.reload(pp)
+        pp._resolve_target_conv_id = lambda t: ((t or '').strip(), '')
         monkeypatch.setattr('lib.conversations.project_peer.audit_log',
                             lambda *a, **k: None)
         res = pp.intervene_peer('/p', 'cA', 'cB', 'stop',
@@ -567,6 +634,7 @@ def test_NC_deny_branch_noop_runs_abort_despite_denial(_stub_io, monkeypatch):
     def run():
         import lib.conversations.project_peer as pp
         importlib.reload(pp)
+        pp._resolve_target_conv_id = lambda t: ((t or '').strip(), '')
         monkeypatch.setattr('lib.conversations.project_peer.audit_log',
                             lambda *a, **k: None)
         res = pp.intervene_peer('/p', 'cA', 'cB', 'stop', hard_abort=True,

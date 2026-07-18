@@ -196,15 +196,14 @@ def _replay(blob: dict):
     return resp
 
 
-def idempotent_post(*, ttl: int = _DEFAULT_TTL):
+def idempotent_post():
     """Decorator: cache the response for ``Idempotency-Key`` POSTs.
 
     Works on both sync and ``async def`` route handlers. No-op when the
     header is absent. Must be applied AFTER the route decorator (so the
-    cache check runs inside the request context).
+    cache check runs inside the request context). Entries use the module
+    TTL (``_DEFAULT_TTL``, 24h) — the cache has no per-entry TTL.
     """
-    del ttl  # reserved
-
     def _maybe_cache(rv, ck):
         try:
             blob = _serialise_response(rv)

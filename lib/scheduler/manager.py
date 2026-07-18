@@ -66,7 +66,8 @@ class ScheduledTaskManager:
     def create_task(self, name, schedule, command, task_type='command',
                     description='', notify_on_failure=True, notify_on_success=False,
                     max_runtime=300, target_conv_id='', source_conv_id='',
-                    tools_config=None, max_executions=0, expires_at=''):
+                    tools_config=None, max_executions=0, expires_at='',
+                    condition_command='', condition_regex=''):
         """Create a new scheduled task.
 
         Args:
@@ -138,17 +139,27 @@ class ScheduledTaskManager:
         now = datetime.now().isoformat()
         tools_json = json.dumps(tools_config or {}, ensure_ascii=False)
 
+        # Predicate condition paradigm (shared with timer_watchers): a proactive
+        # agent (task_type='agent') can carry a shell PREDICATE that reconciles
+        # against the poll LLM and auto-promotes to zero-cost `code`. The kind is
+        # derived from the parameter combination, NEVER exposed as an LLM knob.
+        from lib.scheduler._shared import derive_condition_kind
+        condition_kind = (derive_condition_kind(command, condition_command)
+                          if task_type == 'agent' else 'llm')
+
         db = self._get_db()
         db.execute('''
             INSERT INTO scheduled_tasks
             (id, name, schedule, task_type, command, description,
              notify_on_failure, notify_on_success, max_runtime, created_at, updated_at,
-             target_conv_id, source_conv_id, tools_config, max_executions, expires_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             target_conv_id, source_conv_id, tools_config, max_executions, expires_at,
+             condition_kind, condition_command, condition_regex)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', [task_id, name, schedule, task_type, command, description,
               bool(notify_on_failure), bool(notify_on_success), max_runtime, now, now,
               target_conv_id or '', source_conv_id or '', tools_json,
-              max_executions, expires_at or ''])
+              max_executions, expires_at or '',
+              condition_kind, condition_command or '', condition_regex or ''])
         db.commit()
 
         task = dict(db.execute('SELECT * FROM scheduled_tasks WHERE id=?', [task_id]).fetchone())
@@ -491,6 +502,22 @@ class ScheduledTaskManager:
         except Exception as e:
             logger.warning('[Scheduler] project-brain dispatch sweep skipped: %s', e)
 
+        # ── Peer-message idle-drain (Pillar #6 Symptom-A fix) ──
+        #   The workflow sweep above only reconciles KIND_WORKFLOW kickoffs. A
+        #   KIND_PEER_MSG row that landed in an IDLE, non-board conversation is
+        #   drained by nothing in steady state — it would sit in the queue
+        #   widget forever, shown but never rendered as a turn. This drains one
+        #   such row per idle conv via the same dispatch_next_queued seam, so an
+        #   advisory peer note to an idle sibling wakes a fresh turn (rendered
+        #   with the .peer-msg-banner). Global scan (the queue has no project
+        #   column; the per-(sender,target) send-time rate cap already bounds
+        #   how many peer rows can exist). Best-effort.
+        try:
+            from lib.message_queue import drain_idle_peer_messages
+            drain_idle_peer_messages()
+        except Exception as e:
+            logger.warning('[Scheduler] peer-message idle-drain skipped: %s', e)
+
     def _run_and_record(self, task):
         """Run task and record result in DB."""
         task_id = task['id']
@@ -529,6 +556,8 @@ class ScheduledTaskManager:
         Phase C: If poll says act=true, create full agentic task in target conversation.
         """
         from lib.scheduler.proactive import (
+            apply_reconcile_poll,
+            evaluate_condition_predicate,
             execute_proactive_task,
             gather_system_status,
             is_task_executing,
@@ -551,10 +580,41 @@ class ScheduledTaskManager:
                          '(task_id=%s)', pfx, task.get('last_execution_task_id', '?')[:8])
             return
 
-        # ── Phase B: Poll ──
-        logger.info('%s Starting poll #%d', pfx, task.get('poll_count', 0) + 1)
+        # ── Phase B: Poll (tiered — predicate / LLM / hybrid) ──
+        kind = task.get('condition_kind', 'llm')
+        logger.info('%s Starting poll #%d (kind=%s)', pfx, task.get('poll_count', 0) + 1, kind)
         status_snapshot = gather_system_status(task)
-        should_act, reason, tokens_used = poll_decision(task)
+
+        # tier / predicate_matched / llm_agreed audit trio for the ledger.
+        tier, predicate_matched, llm_agreed = 'llm', -1, -1
+        tokens_used = 0
+
+        if kind == 'code':
+            # Pure predicate — ZERO LLM. Ambiguous/errored predicate → NOT act
+            # (never a false-positive trigger); a sustained ambiguity run demotes
+            # back to hybrid so the LLM re-takes the wheel (self-healing).
+            pred = evaluate_condition_predicate(task)
+            outcome = apply_reconcile_poll(task, pred, llm_ready=None, llm_available=False)
+            should_act = outcome.authoritative_ready
+            reason = outcome.note
+            tier, predicate_matched, llm_agreed = (
+                outcome.tier, outcome.predicate_matched, outcome.llm_agreed)
+        else:
+            should_act, reason, tokens_used = poll_decision(task)
+            if kind == 'hybrid':
+                # LLM authoritative; reconcile the predicate alongside so the
+                # condition can auto-promote to `code` after enough agreements.
+                # poll_decision returns should_act=False on a parse/LLM error;
+                # treat that as an unusable verdict → llm_available=False → the
+                # reconcile resets the streak and never promotes on a bad poll.
+                _llm_ok = not str(reason).startswith(('Parse error', 'LLM error'))
+                pred = evaluate_condition_predicate(task)
+                outcome = apply_reconcile_poll(
+                    task, pred, llm_ready=should_act, llm_available=_llm_ok)
+                should_act = outcome.authoritative_ready
+                reason = f'{reason} [{outcome.note}]'
+                tier, predicate_matched, llm_agreed = (
+                    outcome.tier, outcome.predicate_matched, outcome.llm_agreed)
 
         decision = 'act' if should_act else 'skip'
         now = datetime.now().isoformat()
@@ -569,11 +629,12 @@ class ScheduledTaskManager:
         ''', [now, decision, reason[:500], now, now, task_id])
         db.commit()
 
-        logger.info('%s Poll decision: %s — reason: %s (tokens=%d)',
-                    pfx, decision, reason[:100], tokens_used)
+        logger.info('%s Poll decision: %s — reason: %s (tokens=%d, tier=%s)',
+                    pfx, decision, reason[:100], tokens_used, tier)
 
         if not should_act:
-            record_poll(task_id, 'skip', reason, 'cheap', tokens_used, status_snapshot)
+            record_poll(task_id, 'skip', reason, 'cheap', tokens_used, status_snapshot,
+                        tier=tier, predicate_matched=predicate_matched, llm_agreed=llm_agreed)
             return
 
         # ── Phase C: Execute ──
@@ -591,10 +652,12 @@ class ScheduledTaskManager:
             db.commit()
 
             record_poll(task_id, 'act', reason, 'cheap', tokens_used,
-                       status_snapshot, execution_task_id=exec_task_id)
+                       status_snapshot, execution_task_id=exec_task_id,
+                       tier=tier, predicate_matched=predicate_matched, llm_agreed=llm_agreed)
             logger.info('%s 🚀 Execution started: agentic_task=%s', pfx, exec_task_id[:8])
         else:
-            record_poll(task_id, 'act_failed', reason, 'cheap', tokens_used, status_snapshot)
+            record_poll(task_id, 'act_failed', reason, 'cheap', tokens_used, status_snapshot,
+                        tier=tier, predicate_matched=predicate_matched, llm_agreed=llm_agreed)
             logger.error('%s ❌ Execution failed to start', pfx)
             audit_log('proactive_exec_failed', task_id=task_id,
                       task_name=task.get('name', '?'), reason=str(reason)[:200])

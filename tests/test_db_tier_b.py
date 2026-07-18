@@ -13,6 +13,7 @@ import time
 import pytest
 
 import lib.database._bootstrap as boot
+import lib.database._pg_seed as seedmod  # seed pipeline relocated (Decoupling D sub-cut 2)
 import lib.database.wal_archive as wal
 import lib.database.db_paths as db_paths
 
@@ -201,9 +202,9 @@ def _wire_e2e_seed(tmp_path, monkeypatch):
     monkeypatch.setenv('TOFU_DB_TIER_B', '1')
     monkeypatch.setenv('TOFU_DB_SEED_LOCAL', '1')
     monkeypatch.setattr('lib.runtime_paths.data_root', lambda: data_dir)
-    monkeypatch.setattr(boot, '_pg_binaries_present', lambda: True)
-    monkeypatch.setattr(boot, '_ensure_legacy_up_for_seed', lambda *a: 5432)
-    monkeypatch.setattr(boot, '_dump_live_cluster', lambda *a: True)
+    monkeypatch.setattr(seedmod, '_pg_binaries_present', lambda: True)
+    monkeypatch.setattr(seedmod, '_ensure_legacy_up_for_seed', lambda *a: 5432)
+    monkeypatch.setattr(seedmod, '_dump_live_cluster', lambda *a: True)
     calls = {'pitr': 0, 'bootstrap': 0}
 
     def _fake_pitr(lp, *a):
@@ -218,12 +219,15 @@ def _wire_e2e_seed(tmp_path, monkeypatch):
         open(os.path.join(lp, 'PG_VERSION'), 'w').write('16\n')
         return {'PG_HOST': '127.0.0.1', 'PG_PORT': 15501, 'PG_DSN': 'x'}
 
-    monkeypatch.setattr(boot, '_recover_via_pitr', _fake_pitr)
-    monkeypatch.setattr(boot, '_bootstrap_pg', _fake_bootstrap)
-    monkeypatch.setattr(boot, '_count_convs',
+    monkeypatch.setattr(seedmod, '_recover_via_pitr', _fake_pitr)
+    monkeypatch.setattr(seedmod, '_bootstrap_pg', _fake_bootstrap)
+    monkeypatch.setattr(seedmod, '_count_convs',
                         lambda h, p, u, d: {5432: DUMP_ROWS, 15500: TAIL_ROWS,
                                             15501: DUMP_ROWS}.get(p, DUMP_ROWS))
-    monkeypatch.setattr(boot, '_boot_stop_pg_quietly', lambda p: None)
+    monkeypatch.setattr(seedmod, '_boot_stop_pg_quietly', lambda p: None)
+    # _select_restore_channel + _tier_b_enabled are read by the seed via its
+    # own namespace too, but default (real) behaviour is wanted here; the NC
+    # test overrides _select_restore_channel on seedmod explicitly.
     return calls, data_dir
 
 
@@ -232,7 +236,7 @@ def test_seed_uses_pitr_when_tier_b_and_wal_newest(tmp_path, monkeypatch):
     NOT the dump restore. This is the seconds-RPO proof."""
     calls, data_dir = _wire_e2e_seed(tmp_path, monkeypatch)
     local = str(tmp_path / 'local' / 'pgdata')
-    ok = boot._seed_local_pgdata_from_legacy(
+    ok = seedmod._seed_local_pgdata_from_legacy(
         local, os.path.join(data_dir, 'pgdata'), str(tmp_path), 15432, 'u', '', 'tofu')
     assert ok is True
     assert calls['pitr'] == 1        # PITR path taken (tier_b verdict)
@@ -244,9 +248,9 @@ def test_nc_ignore_tier_b_verdict_loses_wal_tail(tmp_path, monkeypatch):
     falls to the dump restore, recovering only the OLDER dump state and LOSING
     the WAL tail (proves the selector wiring is what recovers the tail)."""
     calls, data_dir = _wire_e2e_seed(tmp_path, monkeypatch)
-    monkeypatch.setattr(boot, '_select_restore_channel', lambda base: ('tier_a', 0.0))
+    monkeypatch.setattr(seedmod, '_select_restore_channel', lambda base: ('tier_a', 0.0))
     local = str(tmp_path / 'local' / 'pgdata')
-    boot._seed_local_pgdata_from_legacy(
+    seedmod._seed_local_pgdata_from_legacy(
         local, os.path.join(data_dir, 'pgdata'), str(tmp_path), 15432, 'u', '', 'tofu')
     assert calls['bootstrap'] == 1   # dump path taken
     assert calls['pitr'] == 0        # PITR NOT taken → WAL tail lost

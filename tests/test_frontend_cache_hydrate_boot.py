@@ -49,6 +49,19 @@ function _applySettingsToConv(conv, settings) {
   if (!settings) return;
   if (settings.model) conv.model = settings.model;
 }
+// _serverConvCount: the split conversations.js body now derives the shell
+// visibility count via this helper (messageCount|msgCount|msg_count) rather than
+// reading m.msgCount inline. Mirror the real precedence so msgCount>0 -> shell.
+function _serverConvCount(sc) {
+  if (!sc) return 0;
+  const v = sc.messageCount != null ? sc.messageCount
+    : (sc.msgCount != null ? sc.msgCount : sc.msg_count);
+  return v || 0;
+}
+// Pending-sync poller hooks -- only fire when a cached meta carries
+// _pendingSyncAt (the test metas do not), so stub them to avoid ReferenceError.
+function _startPendingSyncPolling() {}
+function _flushPendingSyncs() {}
 // Fake ConvCache holding two "opened" conversations.
 const ConvCache = {
   isAvailable: () => true,

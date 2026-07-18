@@ -46,6 +46,7 @@ global.window = global;
 // core/translate_guard.js is all top-level declarations — eval defines the
 // guard fns with no side effects.
 eval(fs.readFileSync(process.argv[2], 'utf8'));  // core/translate_guard.js
+eval(fs.readFileSync(process.argv[4], 'utf8'));  // core/translation_model.js (needsTranslation/readTranslation dep)
 
 const out = [];
 function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
@@ -57,8 +58,11 @@ global.pushSubscribe = (channel, taskId, fn) => { if (channel === 'translate') _
 global.conversations = [];
 global.saveConversations = () => {};
 global._renderMsgInPlace = () => {};
+global.emitMessageChanged = () => true;   // render seam (ui/translation_render.js) — stubbed
+global._markStreamXlateFinal = () => {};
 global._armAutoTranslateWatchdog = () => {};
 global._renderStreamingTranslatePreview = () => false;
+global._applyPartialByRoundToSettled = () => false;
 global._applyTranslationStatus = () => {};
 global.errorEnvelopeMessage = () => '';
 // translation.js declares many top-level helpers; eval it so the IIFE at the
@@ -201,6 +205,7 @@ def test_frontend_translate_guard_and_id_anchor():
             ['node', harness,
              os.path.join(JS_DIR, 'core', 'translate_guard.js'),  # argv[2]
              os.path.join(JS_DIR, 'translation.js'),              # argv[3]
+             os.path.join(JS_DIR, 'core', 'translation_model.js'),  # argv[4]
              ],
             capture_output=True, text=True, timeout=60,
         )

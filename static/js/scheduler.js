@@ -3,14 +3,10 @@
    ═══════════════════════════════════════════ */
 // ══════════════════════════════════════════════════════
 // ★ Scheduler (Timed / Cross-conversation tasks)
+//
+// Scheduler is a DEFAULT tool now (always on, like read_files) — there is no
+// composer toggle. This module only owns the proactive-task PANEL + badge.
 // ══════════════════════════════════════════════════════
-function toggleScheduler() {
-  _applySchedulerUI(!schedulerEnabled);
-  _saveConvToolState();
-  debugLog(`Scheduler: ${schedulerEnabled ? "ON — AI can create/manage scheduled & cross-conversation tasks" : "OFF"}`, "success");
-  if (schedulerEnabled) _refreshSchedulerPanel();
-}
-
 let _schedulerPanelOpen = false;
 let _schedulerPollTimer = null;
 
@@ -44,7 +40,7 @@ async function _refreshSchedulerPanel() {
     }
 
     if (!info.tasks || info.tasks.length === 0) {
-      content.innerHTML = '<div class="scheduler-panel-empty">No proactive tasks. Enable Scheduler and ask the AI to create one.</div>';
+      content.innerHTML = '<div class="scheduler-panel-empty">No proactive tasks. Ask the AI to create one.</div>';
       return;
     }
 
@@ -142,7 +138,7 @@ async function _viewPollLog(taskId) {
 function _startSchedulerPolling() {
   if (_schedulerPollTimer) return;
   _schedulerPollTimer = setInterval(() => {
-    if (schedulerEnabled) _refreshSchedulerPanel();
+    if (_schedulerPanelOpen) _refreshSchedulerPanel();
   }, 60000); // every 60s
 }
 _startSchedulerPolling();

@@ -7,9 +7,60 @@
    core.js shell — symbols share `window` scope so no exports needed.
    ═══════════════════════════════════════════════════════════════════ */
 
+/* Bounded backoff retry for a failed FIRST folder load. loadFolders() has no
+ * caller-side retry (it runs once at boot), so without this a transient fetch
+ * failure permanently hides the folder rail until the next full page reload.
+ * The chain is self-cancelling: each attempt is a no-op once _foldersLoaded is
+ * true (a success — from this retry, a create, or a cross-device push refresh —
+ * flips it and the next scheduled tick returns early). */
+let _folderLoadRetryTimer = 0;
+let _folderLoadRetryAttempt = 0;
+const _FOLDER_LOAD_RETRY_DELAYS = [1500, 4000, 10000, 30000];
+function _scheduleFolderLoadRetry() {
+  if (_foldersLoaded) return;                       // already recovered
+  if (_folderLoadRetryTimer) return;                // a retry is already pending
+  const delay = _FOLDER_LOAD_RETRY_DELAYS[
+    Math.min(_folderLoadRetryAttempt, _FOLDER_LOAD_RETRY_DELAYS.length - 1)];
+  _folderLoadRetryTimer = setTimeout(() => {
+    _folderLoadRetryTimer = 0;
+    if (_foldersLoaded) return;
+    _folderLoadRetryAttempt++;
+    Promise.resolve(loadFolders()).catch(e =>
+      console.warn('[loadFolders] retry failed:', e && e.message));
+  }, delay);
+}
+
 async function loadFolders() {
-  const list = await Api.folders.list();
+  /* Api.folders.list() is best-effort ({onError:'null'}): a transient network
+   * failure resolves to [] (empty array), NOT the real folder list. Adopting
+   * that empty result would blank every folder tab on a flaky connection even
+   * though the folders still exist server-side (the "folders missing on
+   * desktop" symptom). Distinguish a genuine empty list (200 → []) from a
+   * fetch failure by re-requesting with onError:'throw' when the first call
+   * came back empty, so a real error is caught instead of masquerading as
+   * "no folders". On error we keep whatever folders were already loaded. */
+  let list = await Api.folders.list();
+  if (Array.isArray(list) && list.length === 0) {
+    try {
+      const verified = await Api.get('/api/v1/folders');
+      if (Array.isArray(verified)) list = verified;
+    } catch (e) {
+      console.warn('[loadFolders] fetch failed — keeping current folders:', e.message);
+      if (_foldersLoaded) return _folders;   // preserve already-loaded tabs
+      list = null;                            // first load ever failed → leave unloaded
+      /* ★ Self-heal: loadFolders() is called ONCE at boot (inside
+       *   initActiveTasks' Promise.all) and the boot-reconnect loop only
+       *   re-runs the CONVERSATION load — nothing re-fetches folders. So a
+       *   failed first load would hide the folder rail for the whole session
+       *   ("sidebar folder gone after refresh, only reappears on create").
+       *   Schedule a bounded backoff retry so folders recover on their own
+       *   once the transient fetch failure clears. Guarded by _foldersLoaded
+       *   so a later success (or a concurrent retry) cancels the chain. */
+      _scheduleFolderLoadRetry();
+    }
+  }
   if (Array.isArray(list)) _folders = list;
+  else return _folders;   // fetch failed before first success — don't mark loaded
   _foldersLoaded = true;
   /* ★ Trigger sidebar re-render so folder tabs appear immediately.
    *   On init, loadFolders() runs in parallel with loadConversationsFromServer().
@@ -51,7 +102,7 @@ async function deleteFolder(folderId) {
 }
 
 function setConversationFolder(convId, folderId) {
-  const c = conversations.find(x => x.id === convId);
+  const c = getConvById(convId);
   if (!c) return;
   c.folderId = folderId || null;
   saveConversations(null);  // null = metadata-only, don't bump updatedAt
@@ -77,10 +128,54 @@ function areFoldersLoaded() { return _foldersLoaded; }
 
 /* ── Folder View Mode: when set, sidebar shows only this folder's conversations ── */
 let _activeFolderId = null;
+/* Tracks the in-flight member fetch per folder so the sidebar can show a
+ * loading affordance (C4) and so a genuine empty folder (totalCount 0) is
+ * distinguished from "members not loaded yet". */
+let _folderMembersLoading = null;   // folderId currently being fetched, or null
+const _folderMembersLoaded = new Set();  // folderIds whose members were merged
 function getActiveFolderId() { return _activeFolderId; }
+function isFolderMembersLoading(id) { return _folderMembersLoading === id; }
+function folderMembersLoaded(id) { return _folderMembersLoaded.has(id); }
+
+/**
+ * Fetch a folder's members from the server (resolved by real folderId,
+ * independent of the top-N sidebar window) and INCREMENTALLY merge them into
+ * the in-memory `conversations` array. Members that sort past the sidebar cap —
+ * and were therefore never in the sidebar's top-N list — become visible here.
+ *
+ * The merge is delegated to mergeServerConvShells (core/conversations.js) so it
+ * reuses the ONE id-keyed merge path: an already-present conv (in the window,
+ * streaming, or fully loaded) keeps its messages / _serverRev / activeTaskId /
+ * _needsLoad; a new member is added as a visibility-gate-passing shell.
+ */
+async function loadFolderMembers(id) {
+  if (!id) return;
+  _folderMembersLoading = id;
+  if (typeof renderConversationList === 'function') renderConversationList();
+  try {
+    const env = typeof Api !== 'undefined' && Api.conversations && Api.conversations.listByFolder
+      ? await Api.conversations.listByFolder(id) : null;
+    const rows = env && Array.isArray(env.conversations) ? env.conversations : [];
+    if (typeof mergeServerConvShells === 'function') mergeServerConvShells(rows);
+    _folderMembersLoaded.add(id);
+  } catch (e) {
+    console.warn('[loadFolderMembers] fetch failed for folder=%s: %s', id, e && e.message);
+  } finally {
+    if (_folderMembersLoading === id) _folderMembersLoading = null;
+    if (typeof renderConversationList === 'function') renderConversationList();
+  }
+}
+
 function setActiveFolderId(id) {
   _activeFolderId = id || null;
   renderConversationList();
+  /* Fetch the folder's real members on first entry so a folder whose members
+   * all sort past the sidebar window still shows them. Fire-and-forget: the
+   * synchronous render above shows whatever is already in memory + a loading
+   * affordance; loadFolderMembers re-renders when the merge lands. */
+  if (_activeFolderId && !_folderMembersLoaded.has(_activeFolderId)) {
+    loadFolderMembers(_activeFolderId);
+  }
 }
 
 function _convSorter(a, b) {

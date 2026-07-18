@@ -1,0 +1,313 @@
+"""LLM streaming — ``stream_llm_response`` wires ``dispatch_stream`` deltas into
+the task's event system, with periodic crash-recovery checkpoints, TTFT timing,
+retry/waiting-model phases, and usage/context-limit auto-learning.
+
+Also ``_display_model_name`` — strips internal gateway/provider prefixes for a
+user-facing label.
+"""
+
+import time
+
+from lib.agent_core.events import EventType, build_event
+from lib.llm_dispatch import dispatch_stream
+from lib.log import get_logger
+
+from lib.tasks_pkg.manager._events import append_event
+from lib.tasks_pkg.manager._sync import checkpoint_task_partial
+
+logger = get_logger(__name__)
+
+
+# Gateway/provider routing prefixes that are an internal dispatch detail, not
+# something the user picked. Mirrors the canonical list in
+# lib/llm_dispatch/discovery.py so the user-facing model name (e.g.
+# "claude-opus-4.8") never leaks "aws.claude-opus-4.8" into the UI.
+_GATEWAY_PREFIXES = ('aws.', 'vertex.', 'gcp.', 'azure.', 'bedrock.')
+
+
+def _display_model_name(model: str) -> str:
+    """Strip internal gateway/provider prefixes for a user-facing label."""
+    name = model or 'the model'
+    for prefix in _GATEWAY_PREFIXES:
+        if name.startswith(prefix):
+            name = name[len(prefix):]
+            break
+    return name
+# ── Streaming checkpoint interval (seconds) ──
+# During LLM token streaming, we periodically persist partial content to
+# the DB so data survives server crashes even when there are no tool rounds.
+_STREAM_CHECKPOINT_INTERVAL = 5
+
+def stream_llm_response(task, body, tag='', on_tool_call_ready=None):
+    """Stream an LLM response, wiring deltas into the task's event system.
+
+    Delegates all key selection, retry, 429/401/403 failover to the
+    central ``dispatch_stream`` — no duplicate logic needed here.
+
+    Args:
+        on_tool_call_ready: callback(tool_call_dict) — fired as each tool
+            call's arguments finish streaming.  The orchestrator uses this
+            to start executing read-only tools while the model is still
+            generating the next tool call (streaming tool execution).
+
+    ★ Crash-recovery: periodically checkpoints to DB every ~5s during
+    streaming so that even pure-LLM responses (no tool calls) survive
+    a server crash with minimal data loss.
+    """
+    pfx = f'[Task {task["id"][:8]}][{tag}]'
+    model = body.get('model', '?')
+    # ★ Init to 0.0 (epoch) so the FIRST content/thinking delta checkpoints
+    #   immediately, then settle into the _STREAM_CHECKPOINT_INTERVAL cadence.
+    #   Starting at time.time() left a pre-first-checkpoint window where a
+    #   server crash after the first tokens but before the 5s tick lost the
+    #   whole turn. checkpoint_task_partial() no-ops while content+thinking are
+    #   still empty, so an early call before any token is harmless. Mirrors the
+    #   orchestrator tool-loop's `_last_checkpoint = 0.0` (orchestrator.py).
+    _last_stream_ckpt = 0.0
+
+    # ★ Timing: measure time-to-first-token (TTFT) for the FIRST LLM round
+    #   of this task only (the "waiting" window the user sees). Anchored to
+    #   '_t_prep_done' (set in run_task once context is assembled) and fired
+    #   once, on the first content/thinking delta. Guarded so tool-round
+    #   re-calls and tasks without the anchor don't re-log.
+    _t_request_start = time.time()
+
+    def _log_ttft_once():
+        if task.get('_ttft_done'):
+            return
+        task['_ttft_done'] = True
+        _prep_done = task.get('_t_prep_done')
+        _now = time.time()
+        if _prep_done:
+            logger.info('%s [Timing] TTFT=%.3fs (context-ready→first-token), '
+                        'request=%.3fs (build_body→first-token) model=%s',
+                        pfx, _now - _prep_done, _now - _t_request_start, model)
+        else:
+            logger.info('%s [Timing] first-token after %.3fs (request) model=%s',
+                        pfx, _now - _t_request_start, model)
+
+    def _maybe_checkpoint_during_stream():
+        """Called on every content/thinking delta — checkpoint if interval elapsed."""
+        nonlocal _last_stream_ckpt
+        now = time.time()
+        if now - _last_stream_ckpt >= _STREAM_CHECKPOINT_INTERVAL:
+            _last_stream_ckpt = now
+            try:
+                checkpoint_task_partial(task)
+            except Exception as e:
+                logger.debug('%s streaming checkpoint failed (non-fatal): %s', pfx, e)
+            # ── Presence heartbeat (throttled, rides the checkpoint cadence).
+            #    Token flow IS work — a long single-LLM turn with no tool rounds
+            #    must keep the peer ACTIVE, not flap to idle. One bump per
+            #    checkpoint interval (~5s), inside the ACTIVE_TTL window, so no
+            #    per-token writes. Best-effort.
+            _cfg = task.get('config') or {}
+            _pp = _cfg.get('projectPath') or ''
+            _cid = task.get('convId') or ''
+            if _pp and _cid:
+                try:
+                    from lib.presence import heartbeat as _presence_heartbeat
+                    _presence_heartbeat(_pp, _cid, phase='generating')
+                except Exception as e:
+                    logger.debug('%s presence heartbeat failed (non-fatal): %s', pfx, e)
+
+    def _on_thinking(td):
+        _log_ttft_once()
+        with task['content_lock']:
+            task['thinking'] += td
+        append_event(task, build_event(EventType.DELTA, thinking=td))
+        _maybe_checkpoint_during_stream()
+
+    def _on_content(cd):
+        _log_ttft_once()
+        with task['content_lock']:
+            task['content'] += cd
+        append_event(task, build_event(EventType.DELTA, content=cd))
+        _maybe_checkpoint_during_stream()
+
+    def _on_retry(attempt, reason='', status_code=0):
+        """Emit SSE phase event so user sees retry status instead of 'Waiting…'.
+
+        We attach the MODEL name and current cycle count so a long wait
+        reveals exactly which key/model is being throttled instead of a
+        generic spinner.  Previously users just saw "Waiting…" for 60-120s
+        during 429 cycling with no indication that the server was alive
+        and actively retrying.
+        """
+        if status_code == 429:
+            # Rate-limit: surface the model clearly and phrase it as a
+            # queue wait rather than an error.
+            detail = (f'⏳ 模型 {model} 限流中，正在排队重试 '
+                      f'(第 {attempt} 次)…')
+        elif reason:
+            detail = f'Retrying… {reason} ({model}, attempt {attempt})'
+        else:
+            detail = f'Retrying {model}… (attempt {attempt})'
+        append_event(task, build_event(
+            EventType.PHASE,
+            phase='retrying',
+            detail=detail,
+            attempt=attempt,
+            statusCode=status_code,
+            model=model,
+        ))
+
+    # ── Consume zero-byte force-rotate signal ──
+    # If the previous round zero-byte'd, ``analyse_stream_result`` set
+    # ``task['_force_rotate_pair']`` to ``(key_name, model)``.  We pass
+    # it as ``avoid_pairs`` to dispatch so the picker steers away from
+    # the poisoned slot for THIS attempt only — clear immediately after
+    # so a third zero-byte on a different slot doesn't keep the avoid
+    # list stuck on the original.
+    _avoid_pairs = None
+    _rotate_signal = task.pop('_force_rotate_pair', None)
+    if _rotate_signal:
+        _avoid_pairs = {_rotate_signal}
+        logger.info('%s zero-byte force-rotate: avoiding %s:%s for this dispatch',
+                    pfx, _rotate_signal[0], _rotate_signal[1])
+
+    # ★ Surface the in-flight request as a live phase BEFORE the first token.
+    #   Between a finished tool and the model's next token there is a silent
+    #   gap (prompt prefill / TTFT) during which no content/thinking delta
+    #   fires — and if the next turn is a tool call with no preamble, nothing
+    #   renders until tool_start.  Without this the spinner stays frozen on
+    #   the previous "Analyzing results…" label and the task looks hung.
+    #   Cleared automatically by the first content/thinking delta, or by
+    #   tool_start (hasActiveSearch) on the frontend.
+    _model_label = _display_model_name(model)
+    append_event(task, build_event(
+        EventType.PHASE, phase='waiting_model',
+        detail=f'Sent to {_model_label}, waiting for it to start replying…',
+        model=model))
+
+    # Resolve dispatch_stream THROUGH the package facade at call time so a test's
+    # ``monkeypatch.setattr(lib.tasks_pkg.manager, 'dispatch_stream', …)`` steers
+    # this stream exactly as it did on the pre-split single module (which imported
+    # dispatch_stream at module top-level, making it patchable on `manager`).
+    import lib.tasks_pkg.manager as _mgr_facade
+    _dispatch_stream = getattr(_mgr_facade, 'dispatch_stream', dispatch_stream)
+    msg, finish_reason, usage = _dispatch_stream(
+        body,
+        on_thinking=_on_thinking,
+        on_content=_on_content,
+        on_tool_call_ready=on_tool_call_ready,
+        abort_check=lambda: task.get('aborted', False),
+        prefer_model=model,
+        log_prefix=pfx,
+        # ★ User-facing request: the user explicitly chose this model in
+        #   the frontend preset selector.  429 retries must stay within
+        #   this model's slots (different keys / alias group) — never
+        #   silently fall back to a cheaper/different model.
+        strict_model=True,
+        on_retry=_on_retry,
+        avoid_pairs=_avoid_pairs,
+    )
+
+    # ★ Timing fallback: if the first round was tool-call-only (no content/
+    #   thinking deltas fired the TTFT hook), log it now using stream return.
+    _log_ttft_once()
+
+    # ★ Propagate provider_id from dispatch metadata into task
+    _dispatch = (usage or {}).get('_dispatch', {})
+    if _dispatch.get('provider_id'):
+        task['provider_id'] = _dispatch['provider_id']
+
+    # ★ Notify user if a model token limit was auto-learned during this request
+    _limit_info = (usage or {}).get('_model_limit_learned')
+    if _limit_info:
+        # Notify via phase event (transient UI status, does NOT pollute
+        # assistantMsg.content).  The limit is persisted automatically.
+        append_event(task, build_event(
+            EventType.PHASE,
+            phase='retrying',
+            detail=(f'⚙️ Auto-detected model limit: {_limit_info["model"]} '
+                    f'max_tokens={_limit_info["new_limit"]:,} '
+                    f'(was {_limit_info["old_limit"]:,})'),
+        ))
+        logger.info('%s ⚙️ Model limit auto-learned and user notified: %s max_tokens=%d',
+                    pfx, _limit_info['model'], _limit_info['new_limit'])
+
+    _content_len = len(msg.get('content', '') or '')
+    _thinking_len = len(msg.get('reasoning_content', '') or '')
+    _tool_calls = len(msg.get('tool_calls', []))
+    _provider = task.get('provider_id', '?')
+    logger.info('%s conv=%s stream_llm_response complete: finish_reason=%s model=%s '
+                'provider=%s content=%dchars thinking=%dchars tool_calls=%d',
+                pfx, task.get('convId', ''), finish_reason, model,
+                _provider, _content_len, _thinking_len, _tool_calls)
+
+    # ★ Feed authoritative prompt_tokens into the usage cache so the NEXT
+    #   round's compaction check returns a bit-exact number instead of
+    #   falling back to the CJK-aware heuristic. Inspired by OpenCode's
+    #   MessageV2.Assistant.tokens — the provider already told us the
+    #   truth, so trust it instead of re-estimating.
+    _total_prompt_tokens = 0
+    try:
+        conv_id = task.get('convId', '') or ''
+        # prompt_tokens is OpenAI-shape; Anthropic returns input_tokens.
+        _prompt_tokens = 0
+        if isinstance(usage, dict):
+            _prompt_tokens = int(
+                usage.get('prompt_tokens')
+                or usage.get('input_tokens')
+                or 0
+            )
+            # Anthropic excludes cache from input_tokens; add it back so
+            # _total_prompt_tokens reflects the FULL prompt the provider
+            # accepted (which is what we use for context-limit expansion).
+            _cw = int(usage.get('cache_creation_input_tokens') or 0)
+            _cr = int(usage.get('cache_read_input_tokens') or 0)
+            if (_cw or _cr) and _prompt_tokens <= (_cw + _cr):
+                _total_prompt_tokens = _prompt_tokens + _cw + _cr
+            else:
+                _total_prompt_tokens = _prompt_tokens
+        if conv_id and _prompt_tokens > 0:
+            from lib.token_counter import record_usage
+            # ``body['messages']`` is the exact list we sent. Recording it
+            # lets the cache detect edit/regenerate (prefix changed →
+            # invalidate) vs append-only (reuse + delta).
+            record_usage(
+                conv_id,
+                prompt_tokens=_prompt_tokens,
+                model=model,
+                message_count=len(body.get('messages') or []),
+                messages=body.get('messages'),
+            )
+    except Exception as e:
+        # Usage-cache is a best-effort optimisation — never let a bug
+        # here break the LLM return path.
+        logger.debug('%s record_usage failed (non-fatal): %s', pfx, e)
+
+    # ★ Auto-learn an EXPANDED context limit when this provider just
+    #   accepted a prompt larger than our presumed ceiling. Mirrors the
+    #   shrink-on-overflow path in llm_fallback.py.
+    if _total_prompt_tokens > 0:
+        try:
+            from lib.context_limits import learn_expand_from_success
+            from lib.tasks_pkg.compaction import _get_context_limit
+            _prior_limit = _get_context_limit(task)
+            _expand_info = learn_expand_from_success(
+                task.get('provider_id') or '',
+                model,
+                _total_prompt_tokens,
+                preset_limit=_prior_limit,
+            )
+            if _expand_info:
+                append_event(task, build_event(
+                    EventType.PHASE,
+                    phase='retrying',
+                    detail=(
+                        f'⚙️ Auto-detected larger context window for '
+                        f'{model}: '
+                        f'{_expand_info["new_limit"]:,} tokens '
+                        f'(was {_expand_info["old_limit"]:,})'
+                    ),
+                ))
+                logger.info('%s ⚙️ Context limit expanded: %s %d → %d '
+                            '(observed prompt=%d)',
+                            pfx, model, _expand_info['old_limit'],
+                            _expand_info['new_limit'], _total_prompt_tokens)
+        except Exception as e:
+            logger.debug('%s context_limits expand-learn failed: %s', pfx, e)
+
+    return msg, finish_reason, usage

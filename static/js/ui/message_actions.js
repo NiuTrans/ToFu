@@ -242,8 +242,21 @@ async function _execDeleteTurn(idx, mode) {
   if (activeStreams.has(conv.id) || conv.activeTaskId) return;
 
   const convId = conv.id;
+  const msg = conv.messages[idx];
+  if (!msg) return;
+  // ★ Capture the exact target objects (and, for a turn, the following
+  //   assistant) BEFORE the request so we can remove them by IDENTITY after —
+  //   the server may resolve a DIFFERENT index (list drift from a server-side
+  //   reconcile), so its returned deletedIndices are SERVER indices that need
+  //   not match this local array. Removing by object reference is drift-proof.
+  const _targets = [conv.messages[idx]];
+  if (mode === 'turn' && msg.role === 'user'
+      && conv.messages[idx + 1] && conv.messages[idx + 1].role === 'assistant') {
+    _targets.push(conv.messages[idx + 1]);
+  }
   try {
-    const resp = await Api.conversations.deleteMessage(convId, idx, mode);
+    // ★ Send the stable _msgId so the server corrects any index drift.
+    const resp = await Api.conversations.deleteMessage(convId, idx, mode, { msgId: msg._msgId });
     if (!resp || !resp.ok) {
       const err = resp ? await resp.json().catch(() => ({ error: `HTTP ${resp.status}` })) : { error: 'no response' };
       console.error('[deleteTurn] Server error:', err);
@@ -253,10 +266,17 @@ async function _execDeleteTurn(idx, mode) {
     const result = await resp.json();
     const deletedIndices = result.deletedIndices || [idx];
 
-    // Update local state: remove messages at deleted indices (reverse order)
-    for (const i of [...deletedIndices].sort((a, b) => b - a)) {
-      if (i >= 0 && i < conv.messages.length) {
-        conv.messages.splice(i, 1);
+    // Update local state: remove the captured target objects by identity.
+    // Fall back to the server's deletedIndices only for any target that
+    // isn't found by reference (defensive — shouldn't happen).
+    let _removed = 0;
+    for (const tgt of _targets) {
+      const li = conv.messages.indexOf(tgt);
+      if (li >= 0) { conv.messages.splice(li, 1); _removed++; }
+    }
+    if (_removed === 0) {
+      for (const i of [...deletedIndices].sort((a, b) => b - a)) {
+        if (i >= 0 && i < conv.messages.length) conv.messages.splice(i, 1);
       }
     }
     conv._serverMsgCount = conv.messages.length;

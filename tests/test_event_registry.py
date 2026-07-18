@@ -39,7 +39,16 @@ REPO = os.path.normpath(os.path.join(HERE, '..'))
 # ── Backend emission scan ──
 # Files that emit SSE events via append_event / emit_event with {'type': ...}.
 _BACKEND_FILES = [
+    # The orchestrator + tool_dispatch are PACKAGES now (split 2026-06); the
+    # old monolith paths silently skipped the scan (os.path.isfile → False),
+    # so events emitted ONLY from the split modules (e.g. round_start/round_end
+    # in orchestrator/_run.py) went unverified in direction A. Scan the real
+    # emit modules.
+    'lib/tasks_pkg/orchestrator/_run.py',
+    'lib/tasks_pkg/orchestrator/_finalize.py',
     'lib/tasks_pkg/orchestrator.py',
+    'lib/tasks_pkg/tool_dispatch/_pipeline.py',
+    'lib/tasks_pkg/tool_dispatch/_labels.py',
     'lib/tasks_pkg/tool_dispatch.py',
     'lib/tasks_pkg/executor.py',
     'lib/tasks_pkg/executor_image.py',
@@ -66,6 +75,10 @@ _BACKEND_FILES = [
 # ``type`` key.  These live in the same files but never reach append_event.
 _NOT_SSE_EVENT_TYPES = frozenset({
     'text', 'image_url', 'function', 'unserializable',
+    # A tool-result CONTENT block passed to _finalize_tool_round as
+    # ``[{'type': 'error', 'content': …}]`` (executor.py:714, search.py:449/610)
+    # — nested inside a tool round's results, NOT a top-level SSE frame.
+    'error',
 })
 
 # Match ``'type': 'value'`` or ``'type':'value'`` (single or double quotes).
@@ -154,20 +167,43 @@ def test_every_frontend_handled_type_is_registered():
         'lib/agent_core/events.py:\n  ' + '\n  '.join(missing))
 
 
+# Registered types that are a DELIBERATE part of the versioned contract
+# (declared in events.py + discoverable via /api/v1/capabilities) but which
+# this repo neither currently emits nor renders. NOT dead vocabulary — each is
+# a reserved/inbound contract a foreign consumer relies on; each carries a WHY.
+_INBOUND_CONTRACT_TYPES = frozenset({
+    # External CLI backend runs its own tool-approval flow and emits this; this
+    # repo's real write-gate is write_approval_request, so we never emit it and
+    # the built-in UI has no `.type ===` branch (branch.js manages CLI approvals
+    # via subprocess stdin). Kept requires_response=True as the inbound contract.
+    'approval_required',
+    # Declared-reserved lifecycle type: its EventSpec documents the inline-error
+    # envelope, but the runtime currently routes ALL fatal errors through a
+    # `done` frame carrying an `error` field, so `error` has no live top-level
+    # emitter/handler today. Kept in the versioned contract for a foreign
+    # consumer / future inline-error path. (Distinct from the tool-result
+    # content block, separately excluded via _NOT_SSE_EVENT_TYPES.)
+    'error',
+})
+
+
 def test_registry_has_no_orphans_vs_known_surfaces():
     """Sanity: each registered type is either emitted by the backend, handled
-    by the frontend, or an explicitly-exempt transport signal.
+    by the frontend, an exempt transport signal, or a declared inbound-contract
+    type for a foreign backend.
 
     Guards against the registry accumulating dead vocabulary that no code path
     actually produces or consumes.
     """
     registered = event_types()
-    live = _backend_emitted_types() | _frontend_handled_types() | set(TRANSPORT_TYPES)
+    live = (_backend_emitted_types() | _frontend_handled_types()
+            | set(TRANSPORT_TYPES) | _INBOUND_CONTRACT_TYPES)
     orphans = sorted(registered - live)
     assert not orphans, (
         'Registered event type(s) neither emitted by the backend nor handled '
         'by the frontend (dead vocabulary?):\n  ' + '\n  '.join(orphans)
-        + '\n\nEither wire them up or remove the EventSpec.')
+        + '\n\nEither wire them up, remove the EventSpec, or (if a deliberate '
+        'inbound contract) add it to _INBOUND_CONTRACT_TYPES with a reason.')
 
 
 def test_terminal_and_interaction_specs_consistent():

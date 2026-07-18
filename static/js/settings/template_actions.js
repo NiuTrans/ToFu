@@ -11,7 +11,7 @@
 async function _deleteProvider(provIdx) {
   var p = _stgProviders[provIdx];
   if (!p) return;
-  if (!await showConfirm('确定删除服务商“' + (p.name || p.id) + '”及其 ' + (p.models || []).length + ' 个模型吗？', { danger: true })) return;
+  if (!await showConfirm(t('settings.tplDeleteConfirm', { name: (p.name || p.id), n: (p.models || []).length }), { danger: true })) return;
   _stgProviders.splice(provIdx, 1);
   _renderProvidersTab();
   _renderPresetsTab(_serverConfig);
@@ -20,7 +20,7 @@ async function _deleteProvider(provIdx) {
 function addProvider() {
   var id = 'prov_' + Date.now().toString(36);
   _stgProviders.unshift({
-    id: id, name: '新服务商', base_url: '', api_keys: [], enabled: true, models: []
+    id: id, name: t('settings.tplNewProvider'), base_url: '', api_keys: [], enabled: true, models: []
   });
   _renderProvidersTab();
   // Expand the new provider (now first card)
@@ -52,9 +52,9 @@ async function _showTemplateMenu(btn) {
   // ── Group templates by category ──
   var _SVG = function(inner) { return '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' + inner + '</svg>'; };
   var _CATEGORY_META = {
-    official: { label: '官方 API',  icon: _SVG('<path d="M10 12h4"/><path d="M10 8h4"/><path d="M14 21v-3a2 2 0 0 0-4 0v3"/><path d="M6 10H4a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-2"/><path d="M6 21V5a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v16"/>'), desc: '直连模型厂商' },
-    relay:    { label: '中转 API',  icon: _SVG('<path d="m18 14 4 4-4 4"/><path d="m18 2 4 4-4 4"/><path d="M2 18h1.973a4 4 0 0 0 3.3-1.7l5.454-8.6a4 4 0 0 1 3.3-1.7H22"/><path d="M2 6h1.972a4 4 0 0 1 3.6 2.2"/><path d="M22 18h-6.041a4 4 0 0 1-3.3-1.8l-.359-.45"/>'), desc: '聚合多家模型' },
-    _other:   { label: '其他',      icon: _SVG('<path d="M11 21.73a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73z"/><path d="M12 22V12"/><polyline points="3.29 7 12 12 20.71 7"/><path d="m7.5 4.27 9 5.15"/>'), desc: '' },
+    official: { label: t('settings.tplCatOfficial'),  icon: _SVG('<path d="M10 12h4"/><path d="M10 8h4"/><path d="M14 21v-3a2 2 0 0 0-4 0v3"/><path d="M6 10H4a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-2"/><path d="M6 21V5a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v16"/>'), desc: t('settings.tplCatOfficialDesc') },
+    relay:    { label: t('settings.tplCatRelay'),  icon: _SVG('<path d="m18 14 4 4-4 4"/><path d="m18 2 4 4-4 4"/><path d="M2 18h1.973a4 4 0 0 0 3.3-1.7l5.454-8.6a4 4 0 0 1 3.3-1.7H22"/><path d="M2 6h1.972a4 4 0 0 1 3.6 2.2"/><path d="M22 18h-6.041a4 4 0 0 1-3.3-1.8l-.359-.45"/>'), desc: t('settings.tplCatRelayDesc') },
+    _other:   { label: t('settings.tplCatOther'),      icon: _SVG('<path d="M11 21.73a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73z"/><path d="M12 22V12"/><polyline points="3.29 7 12 12 20.71 7"/><path d="m7.5 4.27 9 5.15"/>'), desc: '' },
   };
   var _CAT_ORDER = ['official', 'relay', '_other'];
   var grouped = {};
@@ -90,7 +90,7 @@ async function _showTemplateMenu(btn) {
       item.innerHTML = _brandSvg(tpl.brand, 20) +
         '<div class="stg-template-info">' +
           '<span class="stg-template-name">' + escapeHtml(tpl.name) + '</span>' +
-          '<span class="stg-template-models">' + tpl.models.length + ' 个模型</span>' +
+          '<span class="stg-template-models">' + t('settings.tplModelsCount', { n: tpl.models.length }) + '</span>' +
         '</div>';
       item.onclick = (function(key) {
         return function() {
@@ -209,7 +209,7 @@ async function addProviderFromTemplate(templateKey) {
   // Check if this provider is already added
   for (var j = 0; j < _stgProviders.length; j++) {
     if (_stgProviders[j].base_url === tpl.base_url) {
-      if (!await showConfirm(tpl.name + '（相同 API 地址）似乎已添加。要再添加一个吗？')) return;
+      if (!await showConfirm(t('settings.tplAlreadyAdded', { name: tpl.name }))) return;
       break;
     }
   }
@@ -259,7 +259,7 @@ async function addProviderFromTemplate(templateKey) {
     var textarea = first.querySelector('textarea');
     if (textarea) {
       textarea.focus();
-      textarea.placeholder = '在此粘贴你的 ' + tpl.name + ' API 密钥';
+      textarea.placeholder = t('settings.tplKeyPlaceholder', { name: tpl.name });
     }
   }
 }
@@ -302,7 +302,7 @@ async function _syncFromTemplate(provIdx) {
   await _loadExternalProviderTemplates();
   var tpl = _findMatchingTemplate(p);
   if (!tpl) {
-    showAlert('找不到匹配的内置模板。');
+    showAlert(t('settings.tplNoMatch'));
     return;
   }
   var existingIds = new Set((p.models || []).map(function(m) { return m.model_id; }));
@@ -376,17 +376,16 @@ async function _syncFromTemplate(provIdx) {
   _normalizeModelsPricingTags(p.models);
   _renderProvidersTab();
   _renderPresetsTab(_serverConfig);
-  var msg = '模板同步完成：';
+  var msg = t('settings.tplSyncDone');
   var parts = [];
-  if (added > 0) parts.push('新增 ' + added + ' 个模型');
-  if (updated > 0) parts.push('更新 ' + updated + ' 个模型');
-  if (aliasesAdded > 0) parts.push('补全 ' + aliasesAdded + ' 个别名');
-  msg += parts.length ? parts.join('，') : '所有模型已是最新，无需更新。';
+  if (added > 0) parts.push(t('settings.tplSyncAdded', { n: added }));
+  if (updated > 0) parts.push(t('settings.tplSyncUpdated', { n: updated }));
+  if (aliasesAdded > 0) parts.push(t('settings.tplSyncAliases', { n: aliasesAdded }));
+  msg += parts.length ? parts.join(t('settings.tplSyncJoin')) : t('settings.tplSyncNoChange');
   if (userOnlyAliases.length > 0) {
-    msg += '\n\n⚠ 以下别名是你手动添加的（模板中没有），请确认它们在网关上确实存在；不存在的会一直返回 HTTP 400：\n  • ' +
-      userOnlyAliases.join('\n  • ');
+    msg += t('settings.tplSyncUserAliases', { list: userOnlyAliases.join('\n  • ') });
   }
-  msg += '\n\n记得点击「保存」按钮来保存更改。';
+  msg += t('settings.tplSyncSaveHint');
   showAlert(msg);
 }
 
@@ -400,11 +399,11 @@ async function _discoverModels(provIdx) {
   var apiKey = (p.api_keys && p.api_keys[0]) || '';
 
   if (!baseUrl) {
-    showAlert('请先设置 API 地址 (Base URL) 再进行模型发现。');
+    showAlert(t('settings.tplFillUrlFirst'));
     return;
   }
   if (!apiKey) {
-    showAlert('请先添加至少一个 API 密钥再进行模型发现。');
+    showAlert(t('settings.tplFillKeyFirst'));
     return;
   }
 
@@ -417,24 +416,24 @@ async function _discoverModels(provIdx) {
   var oldText = btn ? btn.textContent : '';
   if (btn) {
     btn.disabled = true;
-    btn.textContent = '发现中…';
+    btn.textContent = t('settings.tplDiscovering');
   }
 
   try {
     var data = await Api.providers.discoverModels(baseUrl, apiKey, modelsPath || '');
     if (!data) {
-      showAlert('发现失败 (网络/超时)');
+      showAlert(t('settings.tplDiscoverNetFail'));
       return;
     }
 
     if (!data.ok) {
-      showAlert('发现失败: ' + (data.error || '未知错误'));
+      showAlert(t('settings.tplDiscoverFail', { error: (data.error || t('settings.tplUnknownError')) }));
       return;
     }
 
     var discovered = data.models || [];
     if (discovered.length === 0) {
-      showAlert('在 ' + baseUrl + ' 未找到模型');
+      showAlert(t('settings.tplNoModelsFound', { url: baseUrl }));
       return;
     }
 
@@ -457,8 +456,10 @@ async function _discoverModels(provIdx) {
     if (newCards[provIdx]) newCards[provIdx].classList.add('expanded');
 
     var nCheap = discovered.filter(function(m) { return (m.capabilities || []).indexOf('cheap') >= 0; }).length;
-    var msg = '✅ 发现 ' + discovered.length + ' 个模型（' + nCheap + ' 个标记为低价）。\n' +
-              '新增 ' + added + ' 个模型' + (added < discovered.length ? '，' + (discovered.length - added) + ' 个已存在。' : '。');
+    var _rest = (added < discovered.length)
+      ? t('settings.tplDiscoverRest', { n: (discovered.length - added) })
+      : t('settings.tplDiscoverRestEnd');
+    var msg = t('settings.tplDiscoverResult', { total: discovered.length, cheap: nCheap, added: added, rest: _rest });
     showAlert(msg);
 
     // Offer to persist discovered models into the hardcoded template
@@ -468,7 +469,7 @@ async function _discoverModels(provIdx) {
     }
 
   } catch (e) {
-    showAlert('发现出错: ' + e.message);
+    showAlert(t('settings.tplDiscoverError', { error: e.message }));
   } finally {
     if (btn) {
       btn.disabled = false;
@@ -484,21 +485,18 @@ async function _discoverModels(provIdx) {
  * Called after discovery finds new models for a template-matched provider.
  */
 async function _offerTemplateUpdate(templateKey, models) {
-  var ok = await showConfirm(
-    '是否将当前模型列表（' + models.length + ' 个）写入源码模板？\n\n' +
-    '这样新部署时就自带最新模型，无需再次发现。'
-  );
+  var ok = await showConfirm(t('settings.tplUpdateConfirm', { n: models.length }));
   if (!ok) return;
 
   try {
     var data = await Api.providers.updateTemplate(templateKey, models);
     if (data && data.ok) {
-      showAlert('✅ 模板已更新：' + data.model_count + ' 个模型写入 ' + (data.updated_files || []).join(', ') + '。');
+      showAlert(t('settings.tplUpdateDone', { n: data.model_count, files: (data.updated_files || []).join(', ') }));
     } else {
-      showAlert('模板更新失败: ' + (data.error || '未知错误'));
+      showAlert(t('settings.tplUpdateFail', { error: (data.error || t('settings.tplUnknownError')) }));
     }
   } catch (e) {
-    showAlert('模板更新出错: ' + e.message);
+    showAlert(t('settings.tplUpdateError', { error: e.message }));
   }
 }
 

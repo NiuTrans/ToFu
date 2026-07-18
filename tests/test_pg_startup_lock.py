@@ -55,8 +55,12 @@ def test_second_process_cannot_acquire_held_lock(tmp_path):
     This is what makes two hosts physically unable to both start a postmaster
     on the same FUSE pgdata. We simulate the second host with a forked child
     that runs its own fresh interpreter state for the lock module-global.
+
+    The flock primitives + their module-global fd live in _pg_ownership
+    (relocated 2026-07-11); _bootstrap only re-exports them, so patching the
+    alias is a no-op — target the defining module.
     """
-    from lib.database import _bootstrap as b
+    from lib.database import _pg_ownership as b
 
     pgdata = str(tmp_path)
     assert b._try_acquire_startup_lock(pgdata) is True
@@ -84,7 +88,7 @@ def test_second_process_cannot_acquire_held_lock(tmp_path):
 
 def test_lock_released_lets_next_acquirer_in(tmp_path):
     """After release, a fresh acquire (simulating a later process) succeeds."""
-    from lib.database import _bootstrap as b
+    from lib.database import _pg_ownership as b
 
     pgdata = str(tmp_path)
     assert b._try_acquire_startup_lock(pgdata) is True
@@ -124,7 +128,7 @@ def test_probe_detects_real_flock_enforcement(tmp_path):
 
 def test_probe_cached_result_is_reused(tmp_path, monkeypatch):
     """Once probed, the cached verdict is returned without re-running."""
-    from lib.database import _bootstrap as b
+    from lib.database import _pg_ownership as b
 
     _reset_probe_cache(b)
     b._flock_enforced = False  # pretend a prior probe found a no-op FS
@@ -165,7 +169,7 @@ def test_unenforced_flock_warns_but_proceeds_by_default(tmp_path, monkeypatch):
 
 def test_unenforced_flock_refuses_when_required(tmp_path, monkeypatch):
     """Silent-no-op FS + TOFU_PG_REQUIRE_FLOCK=1 → refuse PG (return False)."""
-    from lib.database import _bootstrap as b
+    from lib.database import _pg_ownership as b
 
     _reset_probe_cache(b)
     monkeypatch.setattr(b, '_probe_flock_enforced', lambda pgdata: False)
@@ -175,7 +179,7 @@ def test_unenforced_flock_refuses_when_required(tmp_path, monkeypatch):
 
 def test_unverifiable_flock_refuses_when_required(tmp_path, monkeypatch):
     """Probe-inconclusive (None) + required policy → refuse (conservative)."""
-    from lib.database import _bootstrap as b
+    from lib.database import _pg_ownership as b
 
     _reset_probe_cache(b)
     monkeypatch.setattr(b, '_probe_flock_enforced', lambda pgdata: None)

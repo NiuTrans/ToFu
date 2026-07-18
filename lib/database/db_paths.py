@@ -48,6 +48,16 @@ __all__ = [
 # overlay root — see the JOURNAL §1c mount probe. Overridable via env.
 _DEFAULT_LOCAL_ROOT = '/tmp/tofu'
 
+# resolve_pgdata_dir() is a PURE, deterministic resolver called on many hot
+# paths (the _core import, the Tier-B archiving probe, bootstrap gates …), so
+# its decision log line would otherwise repeat identically thousands of times a
+# day and bury real errors. The decision is a function of the resolved
+# (pgdata, legacy) pair, which is stable for a given deployment — so log each
+# distinct decision at most ONCE per process. Set, not memoized return value:
+# the resolution itself stays live (a mid-life seed flips it), only the LOG is
+# de-duplicated.
+_LOGGED_RESOLUTIONS: set = set()
+
 
 def is_network_mount(path: str) -> bool:
     """True when *path* looks like it lives on a network / FUSE mount.
@@ -124,15 +134,23 @@ def resolve_pgdata_dir(data_dir: str) -> str:
     # while recoverable data exists. (If local is empty AND there is nothing to
     # recover — a genuine first-ever boot — we DO use local: nothing to lose.)
     if not pgdata_is_populated(pgdata) and has_recoverable_source(data_dir):
-        logger.warning('[db_paths] Split engaged but local pgdata=%s not yet '
-                       'populated while recoverable history exists (legacy=%s, '
-                       'backups=%s) — staying on legacy FUSE pgdata until the '
-                       'seed migration populates local.', pgdata, legacy,
-                       resolve_backup_root(data_dir))
+        _key = ('fallback', pgdata, legacy)
+        if _key not in _LOGGED_RESOLUTIONS:
+            _LOGGED_RESOLUTIONS.add(_key)
+            logger.warning('[db_paths] Split engaged but local pgdata=%s not yet '
+                           'populated while recoverable history exists (legacy=%s, '
+                           'backups=%s) — staying on legacy FUSE pgdata until the '
+                           'seed migration populates local. Opt into the one-time '
+                           'migration with TOFU_DB_SEED_LOCAL=1. (Logged once per '
+                           'process.)', pgdata, legacy, resolve_backup_root(data_dir))
         return legacy
 
-    logger.info('[db_paths] Local-primary split ENGAGED: live pgdata=%s '
-                '(legacy would have been %s on the network mount)', pgdata, legacy)
+    _key = ('engaged', pgdata, legacy)
+    if _key not in _LOGGED_RESOLUTIONS:
+        _LOGGED_RESOLUTIONS.add(_key)
+        logger.info('[db_paths] Local-primary split ENGAGED: live pgdata=%s '
+                    '(legacy would have been %s on the network mount). '
+                    '(Logged once per process.)', pgdata, legacy)
     return pgdata
 
 
@@ -169,7 +187,8 @@ def has_recoverable_source(data_dir: str) -> bool:
                 try:
                     if os.path.getsize(fp) > 0:
                         return True
-                except OSError:
+                except OSError as e:
+                    logger.debug('[db_paths] getsize(%r) probe failed: %s', fp, e)
                     continue
     except OSError as e:
         logger.debug('[db_paths] has_recoverable_source scan of %r failed: %s',

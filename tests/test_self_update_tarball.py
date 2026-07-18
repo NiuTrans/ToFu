@@ -46,9 +46,12 @@ def _build_install(tmp):
     return inst
 
 
-def _build_tarball(tmp, version='9.9.9', valid=True):
+def _build_tarball(tmp, version='9.9.9', valid=True, same_requirements=None):
     """Build a GitHub-style tarball (single wrapper dir). When valid, it
-    carries the sentinels; otherwise it's a non-Tofu tree."""
+    carries the sentinels; otherwise it's a non-Tofu tree.
+
+    ``same_requirements`` (str) writes a requirements.txt into the archive so
+    the requirements-diff / pip-skip logic can be exercised."""
     stage = tempfile.mkdtemp(prefix='tofu-stage-', dir=tmp)
     wrap = os.path.join(stage, 'rangehow-ToFu-deadbeef')
     if valid:
@@ -60,6 +63,8 @@ def _build_tarball(tmp, version='9.9.9', valid=True):
         open(os.path.join(wrap, 'lib', 'bar.py'), 'w').write('NEW bar' + _incompressible())
         # Upstream ships a .tofu file — must be SKIPPED, never overwrite the user's.
         open(os.path.join(wrap, '.tofu', 'skills', 'upstream.md'), 'w').write('UPSTREAM' + _incompressible())
+        if same_requirements is not None:
+            open(os.path.join(wrap, 'requirements.txt'), 'w').write(same_requirements)
     else:
         os.makedirs(wrap)
         open(os.path.join(wrap, 'README.md'), 'w').write('not tofu' + _incompressible())
@@ -69,15 +74,23 @@ def _build_tarball(tmp, version='9.9.9', valid=True):
     return tar_path
 
 
-def _patch_stream(su, tar_path):
-    """Point su.http_stream at a local tarball file."""
+def _patch_stream(su, tar_path, with_length=False):
+    """Point su.http_stream at a local tarball file.
+
+    When ``with_length`` is True the fake response carries a Content-Length
+    header (so the updater can compute a determinate percentage) and yields
+    the body in small chunks so multiple progress frames fire."""
+    size = os.path.getsize(tar_path)
+
     class _Resp:
         status_code = 200
+        headers = {'Content-Length': str(size)} if with_length else {}
         def __init__(self, p): self._p = p
         def iter_content(self, n):
+            step = 4096 if with_length else n
             with open(self._p, 'rb') as fh:
                 while True:
-                    c = fh.read(n)
+                    c = fh.read(step)
                     if not c:
                         break
                     yield c
@@ -85,6 +98,233 @@ def _patch_stream(su, tar_path):
     def _fake(method, url, **kw):
         yield _Resp(tar_path)
     su.http_stream = _fake
+
+
+def test_tarball_download_emits_progress():
+    """A tarball download must emit determinate progress frames (pct + bytes
+    + speed) so the UI shows a live bar instead of a frozen spinner."""
+    import lib.self_update as su
+    tmp = tempfile.mkdtemp(prefix='tofu-test-')
+    try:
+        inst = _build_install(tmp)
+        # Big body so >1 chunk streams and Content-Length is meaningful.
+        tar_path = _build_tarball(tmp)
+        for _ in range(40):
+            with open(tar_path, 'ab') as fh:
+                fh.write(os.urandom(2048))
+        frames = []
+        _orig = (su.http_stream, su._ROOT, su._install_requirements)
+        try:
+            _patch_stream(su, tar_path, with_length=True)
+            su._ROOT = inst
+            su._install_requirements = lambda on_line=None: {'ok': True, 'detail': 'stubbed'}
+            su._apply_via_tarball(
+                'v9.9.9',
+                progress=lambda st, status, detail='', meta=None: frames.append(
+                    (st, status, detail, meta)))
+        finally:
+            su.http_stream, su._ROOT, su._install_requirements = _orig
+
+        fetch_active = [f for f in frames if f[0] == 'fetch' and f[1] == 'active']
+        # At least one fetch-active frame must carry structured telemetry.
+        with_meta = [f for f in fetch_active if isinstance(f[3], dict) and f[3].get('loaded')]
+        assert with_meta, f'no fetch progress frames with byte telemetry: {frames}'
+        # pct is an int 0..100 when Content-Length is known.
+        pcts = [f[3]['pct'] for f in with_meta if f[3].get('pct') is not None]
+        assert pcts and all(0 <= p <= 100 for p in pcts), f'bad pct values: {pcts}'
+        # detail string carries a human size + speed readout.
+        assert any('/s' in (f[2] or '') for f in with_meta), 'no speed in detail'
+        _ok('_apply_via_tarball: download emits pct + bytes + speed frames')
+    finally:
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_tarball_skips_pip_when_requirements_unchanged():
+    """When requirements.txt is byte-identical between the install and the
+    archive, the slow pip install must be SKIPPED (deps 'skip', not 'active')."""
+    import lib.self_update as su
+    tmp = tempfile.mkdtemp(prefix='tofu-test-')
+    try:
+        inst = _build_install(tmp)
+        # Same requirements.txt content on both sides.
+        open(os.path.join(inst, 'requirements.txt'), 'w').write('httpx==1.0\nflask\n')
+        tar_path = _build_tarball(tmp, same_requirements='httpx==1.0\nflask\n')
+        install_called = {'n': 0}
+        frames = []
+        _orig = (su.http_stream, su._ROOT, su._install_requirements)
+        try:
+            _patch_stream(su, tar_path)
+            su._ROOT = inst
+            def _spy(on_line=None):
+                install_called['n'] += 1
+                return {'ok': True, 'detail': 'stubbed'}
+            su._install_requirements = _spy
+            res = su._apply_via_tarball(
+                'v9.9.9',
+                progress=lambda st, status, detail='', meta=None: frames.append((st, status)))
+        finally:
+            su.http_stream, su._ROOT, su._install_requirements = _orig
+
+        assert res['ok'] is True, res.get('error')
+        assert install_called['n'] == 0, 'pip install ran despite unchanged requirements'
+        assert res['deps_changed'] is False
+        assert ('deps', 'skip') in frames, f'deps stage was not skipped: {frames}'
+        _ok('_apply_via_tarball: pip install skipped when requirements unchanged')
+    finally:
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_tarball_installs_pip_when_requirements_changed():
+    """When requirements.txt differs, pip install MUST run (deps 'active')."""
+    import lib.self_update as su
+    tmp = tempfile.mkdtemp(prefix='tofu-test-')
+    try:
+        inst = _build_install(tmp)
+        open(os.path.join(inst, 'requirements.txt'), 'w').write('httpx==1.0\n')
+        tar_path = _build_tarball(tmp, same_requirements='httpx==2.0\nnumpy\n')
+        install_called = {'n': 0}
+        _orig = (su.http_stream, su._ROOT, su._install_requirements)
+        try:
+            _patch_stream(su, tar_path)
+            su._ROOT = inst
+            def _spy(on_line=None):
+                install_called['n'] += 1
+                return {'ok': True, 'detail': 'stubbed'}
+            su._install_requirements = _spy
+            res = su._apply_via_tarball('v9.9.9')
+        finally:
+            su.http_stream, su._ROOT, su._install_requirements = _orig
+
+        assert res['ok'] is True, res.get('error')
+        assert install_called['n'] == 1, 'pip install did NOT run on changed requirements'
+        assert res['deps_changed'] is True
+        _ok('_apply_via_tarball: pip install runs when requirements changed')
+    finally:
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_git_checkout_flips_to_indeterminate_pull():
+    """The git path must NOT leave the fetch bar frozen at 100% during the
+    silent local checkout/merge. The moment a transfer phase hits 100%,
+    _apply_via_git must emit fetch→done then pull→active (indeterminate, i.e.
+    NO pct meta), so the bar keeps moving through the checkout. Also asserts
+    the deps stage goes active (indeterminate) before any pip line."""
+    import lib.self_update as su
+    import lib.self_update._apply as ap
+
+    # A realistic git --progress phase sequence for one pull: two transfer
+    # phases each ramping to 100, THEN the silent checkout (no frames).
+    seq = [
+        ('Receiving objects', 25), ('Receiving objects', 75),
+        ('Receiving objects', 100),
+        ('Resolving deltas', 40), ('Resolving deltas', 100),
+    ]
+
+    class _CP:
+        returncode = 0
+        stdout = 'Updating aaaa..bbbb\nFast-forward\n requirements.txt | 2 +-\n'
+        stderr = ''
+
+    def _fake_stream(args, timeout=30, on_progress=None):
+        for phase, pct in seq:
+            if on_progress:
+                on_progress(phase, pct, f'{phase}: {pct}%')
+        return _CP()
+
+    frames = []
+    _orig = (ap._run_git_streaming, ap.working_tree_status, ap._head_sha,
+             ap._requirements_changed, ap._install_requirements,
+             ap.current_version)
+    try:
+        ap._run_git_streaming = _fake_stream
+        ap.working_tree_status = lambda: {'clean': True, 'blocking': [], 'runtime': 0}
+        _shas = iter(['aaaa', 'bbbb'])
+        ap._head_sha = lambda: next(_shas, 'bbbb')
+        ap._requirements_changed = lambda a, b: True   # force deps stage
+        pip_lines = ['Collecting httpx', 'Installing collected packages: httpx']
+
+        def _fake_pip(on_line=None):
+            # Deps stage must already be 'active' (indeterminate) BEFORE the
+            # first pip line — assert nothing here, just feed lines.
+            if on_line:
+                for ln in pip_lines:
+                    on_line(ln)
+            return {'ok': True, 'detail': 'done'}
+        ap._install_requirements = _fake_pip
+        ap.current_version = lambda: '0.12.0'
+
+        res = ap._apply_via_git(
+            progress=lambda st, status, detail='', meta=None: frames.append(
+                (st, status, detail, meta)))
+    finally:
+        (ap._run_git_streaming, ap.working_tree_status, ap._head_sha,
+         ap._requirements_changed, ap._install_requirements,
+         ap.current_version) = _orig
+
+    assert res['ok'] is True, res.get('error')
+
+    # Reconstruct the bar state the frontend would render, frame by frame,
+    # applying the SAME rule as _applyStageFrame:
+    #   active + numeric pct  → determinate(pct)
+    #   active + no pct       → indeterminate
+    #   done/skip/error       → bar cleared
+    bar = {'fetch': None, 'pull': None, 'deps': None}
+    timeline = []
+    for st, status, detail, meta in frames:
+        if status == 'active':
+            pct = meta.get('pct') if isinstance(meta, dict) else None
+            bar[st] = ('determinate', pct) if isinstance(pct, (int, float)) else ('indeterminate', None)
+        elif status in ('done', 'skip', 'error'):
+            bar[st] = None
+        timeline.append((st, status, dict(bar)))
+
+    # 1. fetch reached a determinate 100 at some point.
+    assert any(st == 'fetch' and status == 'active'
+               and isinstance(meta, dict) and meta.get('pct') == 100
+               for st, status, _, meta in frames), 'no fetch pct=100 frame'
+    # 2. after fetch hit 100 it flipped: fetch done + pull active INDETERMINATE.
+    order = [(st, status) for st, status, _, _ in frames]
+    assert ('fetch', 'done') in order, 'fetch never marked done'
+    # Find the pull-active frame; it must carry NO pct (indeterminate sweep).
+    pull_active = [(detail, meta) for st, status, detail, meta in frames
+                   if st == 'pull' and status == 'active']
+    assert pull_active, 'pull never went active'
+    assert all(not (isinstance(m, dict) and m.get('pct') is not None)
+               for _, m in pull_active), 'pull active carried a pct (would be a static bar)'
+    # 3. CRITICAL: the fetch→done + pull→active flip happens BEFORE the pull
+    #    subprocess returns (i.e. within the progress callback, mid-call), not
+    #    only after. Assert fetch 'done' precedes the LAST transfer frame's
+    #    tail — concretely, a pull 'active' appears before pull 'done'.
+    idx_pull_active = order.index(('pull', 'active'))
+    idx_pull_done = order.index(('pull', 'done'))
+    assert idx_pull_active < idx_pull_done, 'pull active must precede pull done'
+    # 4. deps went active with NO pct (indeterminate) before pip lines/done —
+    #    no dead gap between "deps active" and first Collecting… line.
+    deps_active = [(detail, meta) for st, status, detail, meta in frames
+                   if st == 'deps' and status == 'active']
+    assert deps_active, 'deps never went active'
+    first_deps = deps_active[0]
+    assert not (isinstance(first_deps[1], dict) and first_deps[1].get('pct') is not None), \
+        'first deps-active frame carried a pct (should be indeterminate)'
+
+    # 5. Never, at any point in the timeline, is any stage a determinate FULL
+    #    bar (pct==100) that then SITS there while the next stage is silent —
+    #    i.e. once fetch shows 100 the very next fetch state must be cleared
+    #    (flipped away), not lingering determinate-100.
+    saw_fetch_100 = False
+    for st, status, snap in timeline:
+        if snap['fetch'] == ('determinate', 100):
+            saw_fetch_100 = True
+        elif saw_fetch_100:
+            # After the 100 frame, fetch must be cleared (None), never still
+            # a determinate 100 with no motion.
+            assert snap['fetch'] != ('determinate', 100), \
+                'fetch bar lingered frozen at determinate 100'
+            break
+    _ok('_apply_via_git: fetch flips to indeterminate pull at 100% (no frozen full bar)')
 
 
 def test_overlay_skip_classification():
@@ -113,7 +353,7 @@ def test_tarball_overlay_preserves_user_data():
         try:
             _patch_stream(su, tar_path)
             su._ROOT = inst
-            su._install_requirements = lambda: {'ok': True, 'detail': 'stubbed'}
+            su._install_requirements = lambda on_line=None: {'ok': True, 'detail': 'stubbed'}
             res = su._apply_via_tarball('v9.9.9')
         finally:
             su.http_stream, su._ROOT, su._install_requirements = _orig_stream, _orig_root, _orig_deps
@@ -148,7 +388,7 @@ def test_tarball_overlay_backs_up_replaced_files():
         try:
             _patch_stream(su, tar_path)
             su._ROOT = inst
-            su._install_requirements = lambda: {'ok': True, 'detail': 'stubbed'}
+            su._install_requirements = lambda on_line=None: {'ok': True, 'detail': 'stubbed'}
             su._apply_via_tarball('v9.9.9')
         finally:
             su.http_stream, su._ROOT, su._install_requirements = _orig
@@ -230,6 +470,10 @@ def main():
         test_tarball_overlay_backs_up_replaced_files,
         test_tarball_invalid_archive_aborts_untouched,
         test_check_payload_reports_update_method,
+        test_tarball_download_emits_progress,
+        test_tarball_skips_pip_when_requirements_unchanged,
+        test_tarball_installs_pip_when_requirements_changed,
+        test_git_checkout_flips_to_indeterminate_pull,
     ]
     for fn in tests:
         try:

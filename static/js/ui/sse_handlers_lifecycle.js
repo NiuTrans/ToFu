@@ -16,7 +16,7 @@ function _handleSwarmInboxInject(ev, c) {
        *    this round" — same instant as the model itself sees them.    */
       if (!assistantMsg._inboxInjects) assistantMsg._inboxInjects = [];
       assistantMsg._inboxInjects.push({
-        round:    ev.round,
+        round:    ev.roundNum,
         count:    ev.count || 0,
         agentIds: Array.isArray(ev.agentIds) ? ev.agentIds.filter(Boolean) : [],
         ts:       Date.now(),
@@ -30,20 +30,25 @@ function _handleSwarmInboxInject(ev, c) {
        *   `_inboxInject`; _renderUnifiedToolLine renders it specially.
        *   Dedup by round so SSE replay / poll fallback doesn't double it. */
       if (!assistantMsg.toolRounds) assistantMsg.toolRounds = [];
-      const _injKey = "inbox:" + (ev.round || 0);
+      const _injRound = ev.roundNum || 0;
+      const _injKey = "inbox:" + _injRound;
       if (!assistantMsg.toolRounds.some(r => r._inboxInject && r._inboxKey === _injKey)) {
-        assistantMsg.toolRounds.push({
+        /* Anchor the synthetic row ABOVE the round that consumed the inject
+           (llmRound === injectRound-1), not at the tail. See core.js
+           _spliceInjectRow. Live-append DOM placement is corrected by
+           _repositionInjectGroups after the tool-sync loop. */
+        _spliceInjectRow(assistantMsg.toolRounds, {
           /* Collision-proof synthetic roundNum for the data-prn slot —
              real tool rounds use small sequential numbers; 9e6+ never clashes. */
           roundNum:   9000000 + assistantMsg.toolRounds.length,
           status:     "done",
           _inboxInject:  true,
           _inboxKey:     _injKey,
-          inboxRound:    ev.round || 0,
+          inboxRound:    _injRound,
           inboxCount:    ev.count || 0,
           inboxAgentIds: Array.isArray(ev.agentIds) ? ev.agentIds.filter(Boolean) : [],
           inboxPreviews: Array.isArray(ev.previews) ? ev.previews : [],
-        });
+        }, _injRound - 1);
         if (buf) buf.toolRounds = assistantMsg.toolRounds;
       }
       /* Reconcile the most recent swarm panel's async-running badge.
@@ -119,6 +124,80 @@ function _handleSwarmInboxInject(ev, c) {
 
 }
 
+function _handlePeerInboxInject(ev, c) {
+  const convId = c.convId;
+  const assistantMsg = c.assistantMsg, buf = c.buf;
+      /* ── Pillar #6 fast-path: a peer message from a sibling conversation was
+       *    drained from the inbox and injected as a user message before this
+       *    round. Unlike the queue-lane case (a persisted _peerMessage user
+       *    bubble rendered with .peer-msg-banner), this one is injected INTO
+       *    the running turn, so it needs an in-timeline chip mirroring
+       *    swarm_inbox_inject — a synthetic toolRound flagged `_peerInject`,
+       *    rendered by _renderPeerInjectRow. Dedup by round so SSE replay /
+       *    poll fallback doesn't double it. */
+      if (!assistantMsg.toolRounds) assistantMsg.toolRounds = [];
+      const _pRound = ev.roundNum || 0;
+      const _pKey = "peer:" + _pRound;
+      if (!assistantMsg.toolRounds.some(r => r._peerInject && r._peerKey === _pKey)) {
+        _spliceInjectRow(assistantMsg.toolRounds, {
+          roundNum:      9000000 + assistantMsg.toolRounds.length,
+          status:        "done",
+          _peerInject:   true,
+          _peerKey:      _pKey,
+          peerRound:     _pRound,
+          peerCount:     ev.count || 0,
+          peerPreviews:  Array.isArray(ev.previews) ? ev.previews : [],
+        }, _pRound - 1);
+        if (buf) buf.toolRounds = assistantMsg.toolRounds;
+      }
+      twUpdate(convId);
+}
+
+function _handleUserSteerInject(ev, c) {
+  const convId = c.convId;
+  const assistantMsg = c.assistantMsg, buf = c.buf;
+      /* ── Mid-turn human steer: the operator sent a message WHILE this turn
+       *    was generating (composer inject-mode = steer). The orchestrator
+       *    drained it from the model-facing inbox and injected it as a user
+       *    message before this round. Mirrors _handleSwarmInboxInject /
+       *    _handlePeerInboxInject: write the DISPLAY-ONLY underscore sidecar
+       *    array (assistantMsg._userSteerInjects) that the sync layer persists
+       *    and core.js::_rehydrateInjectRows rebuilds from on reload, AND push
+       *    a live synthetic toolRound (`_userSteerInject`, rendered by
+       *    _renderUserSteerInjectRow) so the chip appears in-order this turn.
+       *    The synthetic row is NEVER persisted into DB toolRounds (the
+       *    wire-replay source) — the wire-purity guard (segments/_types
+       *    is_synthetic_inbox_round) + _rehydrateInjectRows-on-a-copy keep it
+       *    display-only. Dedup by round / _steerKey so SSE replay / poll
+       *    fallback / rehydrate don't double it. */
+      if (!assistantMsg._userSteerInjects) assistantMsg._userSteerInjects = [];
+      const _steerRound = ev.roundNum || 0;
+      if (!assistantMsg._userSteerInjects.some(s => s.round === _steerRound)) {
+        assistantMsg._userSteerInjects.push({
+          round:    _steerRound,
+          count:    ev.count || 0,
+          previews: Array.isArray(ev.previews) ? ev.previews : [],
+          ts:       Date.now(),
+        });
+        if (buf) buf._userSteerInjects = assistantMsg._userSteerInjects;
+      }
+      if (!assistantMsg.toolRounds) assistantMsg.toolRounds = [];
+      const _sKey = "steer:" + _steerRound;
+      if (!assistantMsg.toolRounds.some(r => r._userSteerInject && r._steerKey === _sKey)) {
+        _spliceInjectRow(assistantMsg.toolRounds, {
+          roundNum:      9000000 + assistantMsg.toolRounds.length,
+          status:        "done",
+          _userSteerInject: true,
+          _steerKey:     _sKey,
+          steerRound:    _steerRound,
+          steerCount:    ev.count || 0,
+          steerPreviews: Array.isArray(ev.previews) ? ev.previews : [],
+        }, _steerRound - 1);
+        if (buf) buf.toolRounds = assistantMsg.toolRounds;
+      }
+      twUpdate(convId);
+}
+
 function _handleMessagesSnapshot(ev, c) {
   const convId = c.convId, taskId = c.taskId;
   const assistantMsg = c.assistantMsg, buf = c.buf;
@@ -126,7 +205,7 @@ function _handleMessagesSnapshot(ev, c) {
       if (typeof showMessagesInDebug === "function")
         showMessagesInDebug(
           ev.messages,
-          ev.label || `Round ${ev.round} · ${ev.messageCount}条`,
+          ev.label || t('stream.roundMessages', { round: ev.roundNum, n: ev.messageCount }),
           true,
           convId,
           ev.tools || undefined,

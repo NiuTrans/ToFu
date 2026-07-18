@@ -130,7 +130,8 @@ def _pymupdf4llm_installed() -> bool:
     import importlib.util as _ilu
     try:
         return _ilu.find_spec('pymupdf4llm') is not None
-    except (ImportError, ValueError):
+    except (ImportError, ValueError) as e:
+        logger.debug('[_common] find_spec(pymupdf4llm) failed: %s', e)
         return False
 
 

@@ -22,9 +22,8 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-import uuid
 
-from flask import Blueprint, Response
+from flask import Blueprint
 
 from lib.agent_core.admission import (
     await_terminal, controller, on_terminal, register_waiter,
@@ -32,11 +31,13 @@ from lib.agent_core.admission import (
 )
 from lib.api_response import (
     api_bad_request, api_error, api_internal_error, api_not_found, api_ok,
+    sse_response,
 )
 from lib.billing.request_flow import (
     estimate_prompt_tokens, release_reservation, reserve_for_task, settle_task,
 )
 from lib.idempotency import idempotent_post
+from lib.ids import short_id
 from lib.log import audit_log, get_logger
 from lib.openapi import api_meta
 from lib.rate_limit_api import record_tokens
@@ -122,17 +123,19 @@ def _completion_response(task, *, model: str, requested_id: str = '') -> dict:
     elif task.get('status') == 'aborted':
         # Closest OpenAI mapping: caller cancelled = no completion.
         finish = 'stop'
-    usage = task.get('usage') or {}
-    _agent_in = int(usage.get('input_tokens') or usage.get('prompt_tokens') or 0)
-    _agent_out = int(usage.get('output_tokens') or usage.get('completion_tokens') or 0)
+    from lib.cost import normalize_usage
+    _un = normalize_usage(task.get('usage') or {})
+    _agent_in = _un['input']
+    _agent_out = _un['output']
     # Fold the input-translation round's tokens into the request totals so the
     # translate cost is reported (and billed) rather than hidden. Surface the
     # breakdown separately under ``translation_usage`` for transparency.
     _tu = task.get('_translate_usage') or {}
-    _tr_in = int(_tu.get('input_tokens') or _tu.get('prompt_tokens') or 0)
-    _tr_out = int(_tu.get('output_tokens') or _tu.get('completion_tokens') or 0)
+    _tun = normalize_usage(_tu)
+    _tr_in = _tun['input']
+    _tr_out = _tun['output']
     body = {
-        'id': requested_id or f'chatcmpl-{uuid.uuid4().hex[:24]}',
+        'id': requested_id or short_id('chatcmpl-'),
         'object': 'chat.completion',
         'created': int(time.time()),
         'model': model,
@@ -197,7 +200,7 @@ async def _stream_generator(task, model: str, requested_id: str,
     terminal ``[DONE]`` line so the customer is debited even when the
     HTTP response is in stream mode.
     """
-    completion_id = requested_id or f'chatcmpl-{uuid.uuid4().hex[:24]}'
+    completion_id = requested_id or short_id('chatcmpl-')
     emitted_role = False
     cursor = 0
     _billed = False
@@ -396,7 +399,7 @@ async def chat_completions():
     conversation_id = optional_str(body, 'conversation_id',
                                     default='', max_len=200)
     if not conversation_id:
-        conversation_id = f'api-{uuid.uuid4().hex[:12]}'
+        conversation_id = short_id('api-', 12)
 
     auth = current_auth()
     audit_log('api_chat_start',
@@ -496,16 +499,31 @@ async def chat_completions():
         return api_error('Server at capacity; retry shortly.', status=503,
                          error_kind='overloaded', retry_after=5)
 
-    # Release the admission slot + dispose the BYO ephemeral slot exactly
-    # once, the moment the task reaches a terminal state. Event-driven
-    # (fired from manager.append_event) — no per-request polling thread.
+    # Release the admission slot + dispose the BYO ephemeral slot + SETTLE
+    # BILLING exactly once, the moment the task reaches a terminal state.
+    # Event-driven (fired from manager.append_event) — no per-request
+    # polling thread. Binding settlement HERE (not to the HTTP request
+    # lifecycle) is the root-cause fix for the reservation-leak paths: a
+    # blocking-timeout that outran the client, a mid-stream client
+    # disconnect, and an in-process reaper finalize all reach terminal via
+    # this callback, so the reservation is settled against ACTUAL usage
+    # rather than stranded until the 30-min janitor. settle_task is
+    # idempotent on ref_id=task_id, so the happy-path settle below (and the
+    # stream generator's own _settle_streaming_billing) is a harmless no-op
+    # second call.
     _released = {'done': False}
+    _model_for_settle = cfg.get('model', '') or ''
 
     def _on_done(_tid, _handle=_byo_handle):
         if _released['done']:
             return
         _released['done'] = True
         controller.release()
+        try:
+            settle_task(task, user_id=billing_user_id, model=_model_for_settle)
+        except Exception as ex:
+            logger.error('[api_v1.chat] terminal settle failed task=%s: %s',
+                         _tid[:8], ex, exc_info=True)
         if _handle is not None:
             from lib.llm_dispatch.ephemeral import dispose_ephemeral_slot
             try:
@@ -537,14 +555,8 @@ async def chat_completions():
         gen = _stream_generator(task, cfg.get('model', model or '?'),
                                  requested_id,
                                  billing_user_id=billing_user_id)
-        return Response(gen, mimetype='text/event-stream',
-                         headers={
-                             'Content-Type': 'text/event-stream; charset=utf-8',
-                             'Cache-Control': 'no-cache, no-transform',
-                             'X-Accel-Buffering': 'no',
-                             'Connection': 'keep-alive',
-                             'X-Tofu-Task-Id': task['id'],
-                         })
+        return sse_response(
+            gen, extra_headers={'X-Tofu-Task-Id': task['id']})
 
     try:
         await _wait_for_terminal(task, timeout_s=timeout_s)

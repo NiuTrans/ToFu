@@ -79,7 +79,15 @@ def _resolve_model_config(cfg, task_id):
     """
     tid = task_id[:8]
     model = cfg.get('model', _lib.LLM_MODEL)
-    max_tokens = cfg.get('maxTokens', 128000)
+    # ``.get(k, default)`` only substitutes when the key is ABSENT — a config
+    # that carries maxTokens=None (e.g. resolve_conv_config with no
+    # server_defaults, the killed-turn recovery path) would pass None straight
+    # through to build_body → _clamp_max_tokens → ``min(None, int)`` raises
+    # "'<' not supported between instances of 'int' and 'NoneType'" and the
+    # whole turn FATALs. Coerce a missing/None/invalid value to the default.
+    max_tokens = cfg.get('maxTokens')
+    if not isinstance(max_tokens, int) or max_tokens <= 0:
+        max_tokens = 128000
     temperature = cfg.get('temperature', 1.0)
     thinking_enabled = cfg.get('thinkingEnabled', False)
     search_mode = cfg.get('searchMode', 'multi')

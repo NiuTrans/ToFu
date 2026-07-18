@@ -12,7 +12,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import time
 import uuid
 from typing import Any
 
@@ -23,6 +22,7 @@ from lib.database import (
     json_dumps_pg,
 )
 from lib.log import audit_log, get_logger
+from lib.timeutil import now_ms
 
 logger = get_logger(__name__)
 
@@ -87,8 +87,7 @@ def _sha256_hex(content: str) -> str:
     return hashlib.sha256(content.encode('utf-8', errors='replace')).hexdigest()
 
 
-def _now_ms() -> int:
-    return int(time.time() * 1000)
+_now_ms = now_ms
 
 
 def _row_to_meta(row, with_content: bool = False) -> dict:

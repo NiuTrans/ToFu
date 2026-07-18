@@ -35,17 +35,44 @@ const _CACHE_CAUSE_PHRASES = [
   // leaves the remainder untranslated (e.g. the bare 'stochastic server-side
   // cache miss' alias would eat the prefix of the full sentence). Each block
   // below is sorted full-sentence → clause → short alias.
-  // ── Wire-fingerprint verdicts (2026-07: PROVEN vs UNPROVEN — see
-  //    lib/tasks_pkg/wire_fingerprint.py + _resolve_break_cause). The miss is
-  //    only called server-side as FACT when the post-translation wire bytes
-  //    were confirmed byte-identical to the previous round; otherwise it is
-  //    honestly hedged UNPROVEN. FULL sentences precede their clauses. ──
+  // ── Byte-identical upstream-miss verdict (2026-07: byte-identical prefix NOT
+  //    read back — see lib/tasks_pkg/cache_tracking/_detect.py). Byte-identity
+  //    proves the miss is NOT a client prefix change THIS round; it does NOT
+  //    assert a confident cause (an ordinary gateway miss, a TTL boundary, or
+  //    shared-pool contention are all possible). Most misses in this system
+  //    are instead CLIENT-side (bytes re-serialized across turns) and are
+  //    named per-field elsewhere. FULL sentences precede clauses. ──
+  ['prefix not read back though the wire bytes were byte-identical to the previous round — so this round is NOT a client-side prefix change. The cached prefix was not reused upstream: most likely an upstream cache miss (a per-request gateway miss, a TTL boundary, or contention in this key\'s shared cache pool when several large prefixes are active at once). Only the body past the static prefix was not read back. (Most misses in this system are instead client-side and are named per-field above; this is not that class.)',
+   '前缀未被读回，尽管本轮发出的字节与上一轮逐字节相同——因此本轮不是客户端的前缀改动。缓存前缀未在上游被复用：很可能是一次上游缓存未命中（网关偶发的单次未命中、TTL 边界，或该 key 的共享缓存池在多个大前缀同时活跃时的争抢）。仅静态前缀之后的正文未被读回。（本系统里大多数未命中其实是客户端引起的，并已在上方逐字段点名；本条不属于那一类。）'],
+  ['prefix not read back though the wire bytes were byte-identical to the previous round — so this round is NOT a client-side prefix change. The whole cached prefix was not reused upstream: most likely an upstream cache miss (a per-request gateway miss, a TTL boundary, or contention in this key\'s shared cache pool when several large prefixes are active at once). (Most misses in this system are instead client-side and are named per-field above; this is not that class.)',
+   '前缀未被读回，尽管本轮发出的字节与上一轮逐字节相同——因此本轮不是客户端的前缀改动。整段缓存前缀未在上游被复用：很可能是一次上游缓存未命中（网关偶发的单次未命中、TTL 边界，或该 key 的共享缓存池在多个大前缀同时活跃时的争抢）。（本系统里大多数未命中其实是客户端引起的，并已在上方逐字段点名；本条不属于那一类。）'],
+  ['prefix not read back though the wire bytes were byte-identical to the previous round', '前缀未被读回，尽管本轮发出的字节与上一轮逐字节相同'],
+  ['most likely an upstream cache miss (a per-request gateway miss, a TTL boundary, or contention in this key\'s shared cache pool when several large prefixes are active at once)', '很可能是一次上游缓存未命中（网关偶发的单次未命中、TTL 边界，或该 key 的共享缓存池在多个大前缀同时活跃时的争抢）'],
+  ['Most misses in this system are instead client-side and are named per-field above; this is not that class.', '本系统里大多数未命中其实是客户端引起的，并已在上方逐字段点名；本条不属于那一类。'],
+  ['so this round is NOT a client-side prefix change', '因此本轮不是客户端的前缀改动'],
+  // ── Legacy byte-identical eviction verdicts (older persisted rounds said
+  //    "upstream cache eviction …"; kept so historical messages still translate). ──
+  ['upstream cache eviction — bytes were byte-identical to the previous round, so this is NOT a client change and NOT a random server failure: the cached prefix was evicted from the shared cache pool on this key before read (concurrent large prefixes on the same key LRU-evict one another; a prefix below the admission-gate threshold is not held resident). Only the body past the static prefix was not read back',
+   '上游缓存被驱逐——本轮字节与上一轮逐字节相同，因此这既不是客户端改动、也不是服务端随机失败：缓存前缀在被读回前，就被同一 key 上的共享缓存池挤出了（同一 key 上多个大前缀并发时会互相 LRU 驱逐；低于准入门槛的前缀不会被驻留保护）。仅静态前缀之后的正文未被读回'],
+  ['upstream cache eviction — bytes were byte-identical to the previous round, so this is NOT a client change and NOT a random server failure: the whole cached prefix was evicted from the shared cache pool on this key before read (concurrent large prefixes on the same key LRU-evict one another; a prefix below the admission-gate threshold is not held resident)',
+   '上游缓存被驱逐——本轮字节与上一轮逐字节相同，因此这既不是客户端改动、也不是服务端随机失败：整段缓存前缀在被读回前，就被同一 key 上的共享缓存池挤出了（同一 key 上多个大前缀并发时会互相 LRU 驱逐；低于准入门槛的前缀不会被驻留保护）'],
+  ['upstream cache eviction — bytes were byte-identical to the previous round', '上游缓存被驱逐——本轮字节与上一轮逐字节相同'],
+  ['concurrent large prefixes on the same key LRU-evict one another; a prefix below the admission-gate threshold is not held resident', '同一 key 上多个大前缀并发时会互相 LRU 驱逐；低于准入门槛的前缀不会被驻留保护'],
+  ['the cached prefix was evicted from the shared cache pool on this key before read', '缓存前缀在被读回前，就被同一 key 上的共享缓存池挤出了'],
+  // ── Legacy wire-fingerprint verdicts (older persisted rounds said
+  //    "server-side — PROVEN"; kept so historical messages still translate). ──
   ['server-side cache miss — PROVEN: the wire bytes were byte-identical to the previous round (only the body past the static prefix was not read back)',
    '服务端缓存未命中——已实证：本轮发出的字节与上一轮逐字节相同（仅静态前缀之后的正文未被读回）'],
   ['server-side cache miss — PROVEN: the wire bytes were byte-identical to the previous round (whole prefix not reused)',
    '服务端缓存未命中——已实证：本轮发出的字节与上一轮逐字节相同（整段前缀未被复用）'],
   ['likely server-side cache miss (UNPROVEN — no wire fingerprint; body re-billed, static prefix still cached)',
    '疑似服务端缓存未命中（未证实——无线上指纹；正文重新计费，静态前缀仍命中）'],
+  // ── TTL-latch-bypass verdict (2026-07): the stable system/tools
+  //    cache_control ttl flipped ("1h" ↔ default) between rounds — a
+  //    body rebuild lost the per-task TTL latch → different cache key →
+  //    full prefix miss. CLIENT-caused, not server-side. ──
+  ['cache TTL marker flipped between turns (the stable system/tools cache_control ttl changed, e.g. "1h" ↔ default — a body rebuild lost the per-task TTL latch and read the live global) — the whole prefix was re-billed under a new cache key',
+   '缓存 TTL 标记在轮次间翻转（稳定的 system/tools 段 cache_control 的 ttl 发生变化，如 "1h" ↔ 默认——某次请求体重建丢失了 per-task 的 TTL 锁存、改读了实时全局值）——整段前缀在新的缓存键下被重新计费'],
   ['prefix not reused — likely server-side miss or TTL expiry (UNPROVEN — no wire fingerprint)',
    '前缀未被复用——疑似服务端未命中或 TTL 过期（未证实——无线上指纹）'],
   ['prefix not reused — likely server-side miss, TTL expiry, or a silent prefix byte change (UNPROVEN — no wire fingerprint)',
@@ -167,9 +194,15 @@ function _cacheBreakReason(cb) {
  *   'culprit' — WE mutated the cached prefix; the cause names the exact
  *               msg.field. Actionable, our fault. (prefix_mutation key, OR any
  *               client-side change: system_prompt/tools/model/message_count.)
- *   'proven'  — the wire bytes were PROVEN byte-identical → genuinely
- *               server-side, NOT our fault, nothing to fix.
- *   'unproven'— server-side is only a guess (no wire fingerprint captured).
+ *   'eviction'— LEGACY persisted rows only: an older byte-identical verdict
+ *               that asserted an upstream eviction. (Also matches legacy
+ *               'PROVEN' rows.)
+ *   'upstream'— CURRENT dominant real-traffic verdict: the wire bytes were
+ *               PROVEN byte-identical to the previous round, so the miss is
+ *               NOT our client-side change — an upstream non-reuse we have
+ *               cleared ourselves of. NOT an unproven guess; do not apologise.
+ *   'unproven'— genuine guess: no wire fingerprint was captured (non-Claude /
+ *               capture failure), so server-side is only a possibility.
  *   ''        — no break.
  * Keyed off the backend cause text so it can never drift from what
  * _cacheBreakReason renders. */
@@ -183,7 +216,23 @@ function _cacheBreakState(cb) {
                   || k === 'model' || k === 'message_count')) return 'culprit';
   // Otherwise inspect the server_side / no_cache_reuse cause text.
   const txt = String(cb.server_side || cb.no_cache_reuse || '');
-  if (txt.includes('PROVEN') && !txt.includes('UNPROVEN')) return 'proven';
+  // LEGACY persisted rows: the old 'upstream cache eviction' verdict + the
+  // older 'server-side … PROVEN' wording fold into 'eviction' so history
+  // renders consistently (never the reassuring teal).
+  if (txt.includes('upstream cache eviction')
+      || (txt.includes('PROVEN') && !txt.includes('UNPROVEN'))) return 'eviction';
+  // ★ CURRENT wire-fingerprint verdict (the DOMINANT real-traffic case): the
+  //   post-translation wire bytes were byte-identical to the previous round,
+  //   so we PROVED this miss is NOT a client-side prefix change. That is a
+  //   POSITIVE proof about our own side — it must NOT be laundered into the
+  //   apologetic 'unproven' badge (that read as a cache-miss "excuse"). Give
+  //   it its own state: an upstream non-reuse we have cleared ourselves of.
+  //   Keep this AFTER the legacy 'upstream cache eviction' check, whose text
+  //   ALSO contains "byte-identical to the previous round".
+  if (txt.includes('byte-identical to the previous round')
+      && txt.includes('NOT a client-side prefix change')) return 'upstream';
+  // Only a genuine no-wire-fingerprint fallback (non-Claude / capture failure)
+  // remains a true guess.
   if (txt.includes('UNPROVEN')) return 'unproven';
   // A cause we can't classify (legacy string) → treat as unproven guess.
   return txt ? 'unproven' : '';
@@ -337,7 +386,18 @@ function _buildCostPopover(ctx) {
       if (_wb && _wb.write > 0) {
         const _terms = [];
         if (_wb.prevOutput > 0)   _terms.push(t('finishInfo.wbPrevOutput', { v: fmt(_wb.prevOutput) }));
-        if (_wb.toolResults > 0)  _terms.push(t('finishInfo.wbToolResults', { v: fmt(_wb.toolResults) }));
+        if (_wb.toolResults > 0) {
+          // Make the offset-by-one explicit ON THE ROW (not buried in the
+          // tooltip): the tool RESULTS in round (i+1)'s write came from the
+          // PREVIOUS round's tool batch, which the tool panel labels 第i轮.
+          // Round display index i maps to llmRound i; its inflow is llmRound
+          // i-1 = tool batch label i. Annotating the batch number lets a
+          // reader cross-check the two panels directly instead of inferring
+          // the offset (the "第3轮 vs 批次3 never matches" confusion).
+          let _tr = t('finishInfo.wbToolResults', { v: fmt(_wb.toolResults) });
+          if (i > 0) _tr += t('finishInfo.wbBatchRef', { n: i });
+          _terms.push(_tr);
+        }
         if (_wb.contextWrite > 0) _terms.push(t('finishInfo.wbContextWrite', { v: fmt(_wb.contextWrite) }));
         if (_wb.recacheBody > 0)  _terms.push(t('finishInfo.wbRecacheBody', { v: fmt(_wb.recacheBody) }));
         if (_wb.envelope > 0)     _terms.push(t('finishInfo.wbEnvelope', { v: fmt(_wb.envelope) }));
@@ -364,6 +424,20 @@ function _buildCostPopover(ctx) {
             : t('finishInfo.wbSum', { v: fmt(_wb.write), terms: escapeHtml(_terms.join(' + ')) });
           html += `<div class="cp-round-act cp-round-inflow" title="${escapeHtml(_tip)}">${_sumLabel}</div>`;
           _wbShown = true;
+        }
+        // ★ Re-cache WASTE line. When the backend attributed part of this
+        //   round's write to `recacheBody` (already-cached body re-billed) but
+        //   the banner-level detector stayed SILENT (no rd.cacheBreak — the
+        //   sub-threshold / cross-turn round-1 read drop the Stage-1 fix now
+        //   catches), the "重新缓存正文" term would otherwise sit bare in the
+        //   equation with no explanation. Surface it from the breakdown's own
+        //   data (recacheBody + readDrop) so the user SEES why the round cost
+        //   money. Suppressed when a banner cbReason IS present — the
+        //   cp-round-break line below explains it and two lines would duplicate.
+        if (_wb.recacheBody > 0 && !cbReason) {
+          const _wasteTip = t('finishInfo.wbWasteTip', {
+            v: fmt(_wb.recacheBody), drop: fmt(_wb.readDrop || 0) });
+          html += `<div class="cp-round-waste" title="${escapeHtml(_wasteTip)}">${escapeHtml(t('finishInfo.wbWasteLabel', { v: fmt(_wb.recacheBody), drop: fmt(_wb.readDrop || 0) }))}</div>`;
         }
       }
       if (!_wbShown && _inflowMeta.length) {
@@ -396,9 +470,14 @@ function _buildCostPopover(ctx) {
       const _prev = i > 0 ? rounds[i - 1] : null;
       const _prevTcs = i > 0 ? (_roundToolNames[i - 1] || []).length : 0;
       // Suppress the "healthy warming write" note when this round is flagged
-      // as a real cache miss — the cbReason line below explains it instead,
-      // and showing both would be contradictory.
-      if (!cbReason && !_inflowMeta.length && rcw > 2000 && rcw > ro * 2 && (_prev || _prevTcs)) {
+      // as a real cache miss (cbReason) OR the authoritative writeBreakdown
+      // equation was already shown (_wbShown). The legacy heuristic note used
+      // to fire redundantly ON TOP of the exact breakdown — worse, on a turn's
+      // round-1 it claimed "上一轮产出 + 工具结果" for a round that has no
+      // previous output, directly contradicting the equation above it. The
+      // breakdown row is authoritative; only fall back to the heuristic note
+      // when NO breakdown was rendered (legacy rounds persisted before it).
+      if (!cbReason && !_wbShown && !_inflowMeta.length && rcw > 2000 && rcw > ro * 2 && (_prev || _prevTcs)) {
         const _why = _prevTcs
           ? t('finishInfo.writeNoteTipTools', { v: fmt(rcw), n: _prevTcs })
           : t('finishInfo.writeNoteTipPlain', { v: fmt(rcw) });
@@ -559,8 +638,23 @@ function _toggleCostPopover(ev, tagEl) {
 }
 
 // ── Scroll branch panel to bottom ──
-function renderFinishInfo(msg) {
-  if (!msg.finishReason && !msg.usage && !msg.model && !msg.preset && !msg.effort) return "";
+function renderFinishInfo(msg, isLiveTail) {
+  // A LEGITIMATELY-finished turn always carries a terminal signal
+  // (finishReason or usage), stamped by the backend terminal sync
+  // (build_result_meta → _sync_result_to_conversation). The mid-stream
+  // checkpoint (_sync_partial_to_conversation) deliberately writes `model`
+  // but WITHHOLDS finishReason/usage until completion.
+  const _terminal = msg.finishReason || msg.usage;
+  if (!_terminal && !msg.model && !msg.preset && !msg.effort) return "";
+  // ★ Premature-finish-bar guard. `model`/`preset`/`effort` alone are set
+  //   mid-stream (SSE state/placeholder), so a model-only message rendered
+  //   STATICALLY (not the live #streaming-msg bubble) would show a bogus
+  //   "finished" bar carrying only the model tag — the symptom seen on a
+  //   cross-device / poor-signal reload before SSE reconnects. Suppress it
+  //   ONLY for the active running tail (isLiveTail). A finished-but-model-
+  //   only message (legacy pre-usage-persistence, or a degenerate empty
+  //   completion) is NOT the live tail, so it keeps its bar — no regression.
+  if (!_terminal && isLiveTail) return "";
   const parts = [];
   const _mid = msg.model || msg.preset || msg.effort || "";
   const _pid = msg.provider_id || msg.providerId || "";
@@ -643,7 +737,27 @@ function renderFinishInfo(msg) {
     } else if (msg.finishReason === "aborted") {
       parts.push(`<span class="finish-tag warn">${escapeHtml(t('finishInfo.reasonStopped'))}</span>`);
     } else if (msg.finishReason === "interrupted") {
-      parts.push(`<span class="finish-tag warn"><span title="${escapeHtml(t('finishInfo.reasonInterruptedTip'))}">${escapeHtml(t('finishInfo.reasonInterrupted'))}</span></span>`);
+      // The backend stamps WHY a turn was interrupted (recover_stale_tasks_on_startup):
+      //   interruptedReason='killed' → previous exit was UNCLEAN (OS SIGKILL/OOM/crash)
+      //   interruptedReason='manual' → previous exit was CLEAN (controlled restart)
+      //   absent                    → old data / first_boot / unknown verdict
+      // Map each to its own honest label instead of always claiming a crash.
+      const _ir = msg.interruptedReason;
+      let _lblKey = 'finishInfo.reasonInterruptedUnknown';
+      let _tipKey = 'finishInfo.reasonInterruptedUnknownTip';
+      if (_ir === 'killed') {
+        _lblKey = 'finishInfo.reasonInterruptedKilled';
+        _tipKey = 'finishInfo.reasonInterruptedKilledTip';
+      } else if (_ir === 'manual') {
+        _lblKey = 'finishInfo.reasonInterruptedRestart';
+        _tipKey = 'finishInfo.reasonInterruptedRestartTip';
+      }
+      parts.push(`<span class="finish-tag warn"><span title="${escapeHtml(t(_tipKey))}">${escapeHtml(t(_lblKey))}</span></span>`);
+    } else if (msg.finishReason === "incomplete") {
+      // An autonomous loop (endpoint / autopilot) was cut off by a safety cap
+      // (max iterations / replans / stuck / budget) — the objective is
+      // UNVERIFIED. Flag it for review instead of a silent clean ✓.
+      parts.push(`<span class="finish-tag warn"><span title="${escapeHtml(t('finishInfo.reasonIncompleteTip'))}">${Icon('alertTriangle', 12)} ${escapeHtml(t('finishInfo.reasonIncomplete'))}</span></span>`);
     } else if (msg.finishReason === "server_offline") {
       parts.push(
         `<span class="finish-tag err"><span title="${escapeHtml(t('finishInfo.reasonServerOfflineTip'))}">${escapeHtml(t('finishInfo.reasonServerOffline'))}</span></span>` +
@@ -877,6 +991,11 @@ async function _extractFileChangesFromRoundsAsync(toolRounds, msg) {
     // cross-conversation aliasing is possible.
     if (msg && _fcFingerprint(msg.toolRounds) === fp) {
       _fcResultByMsg.set(msg, { fp, files });
+      /* RENDER_CONTRACT L2: move the per-message content version so renderChat's
+       * surgical trigger repaints THIS row when the lazy extraction lands
+       * (the WeakMap is invisible to _msgFingerprint). Display-only stamp;
+       * modifiedFileList stays the authoritative git-backed field. */
+      msg._fcResolvedFp = fp;
     }
     return files;
   };
@@ -953,6 +1072,7 @@ async function _prefetchConvFileChanges(conv) {
       for (const m of owners[i]) {
         if (_fcFingerprint(m.toolRounds) === fp) {
           _fcResultByMsg.set(m, { fp, files });
+          m._fcResolvedFp = fp;  // RENDER_CONTRACT L2: version signal (see async store)
         }
       }
     }
@@ -1005,9 +1125,16 @@ function renderFileChangesBar(msg, msgIdx) {
   // when it lands. Returning empty for THIS render tick is fine; the bar
   // appears on the next tick.
   _extractFileChangesFromRoundsAsync(msg.toolRounds, msg).then(() => {
-    // Re-render the message list once the cache is fresh.
+    // Repaint once the file-change cache is fresh. ★ SCROLL FIX: use the
+    // scroll-preserving in-place repaint (chat_render.js:_bgRefreshChat), NOT a
+    // bare renderChat(conv) — the default (forceScroll=undefined) full render
+    // force-scrolls to the bottom, yanking a scrolled-up reader down when a
+    // late per-message file-change fetch lands. Fall back to renderChat only
+    // where the helper isn't present (defensive; both live in the bundle).
     const conv = (typeof getActiveConv === 'function') ? getActiveConv() : null;
-    if (conv && typeof renderChat === 'function') renderChat(conv);
+    if (!conv) return;
+    if (typeof _bgRefreshChat === 'function') _bgRefreshChat(conv);
+    else if (typeof renderChat === 'function') renderChat(conv, false);
   });
   return '';
 }
@@ -1080,7 +1207,7 @@ function _renderFileChangesHtml(files, isStreaming, msgIdx) {
 
   // ★ Undo button — only for finalized (non-streaming) messages with a valid msgIdx
   const undoBtn = (!isStreaming && typeof msgIdx === 'number')
-    ? `<button class="fc-undo-btn" onclick="event.stopPropagation();undoConvModifications(${msgIdx})" title="${escapeHtml(t('fileChanges.undoTip'))}">` +
+    ? `<button class="fc-undo-btn" onclick="event.stopPropagation();undoConvModifications(_msgElIndex(this))" title="${escapeHtml(t('fileChanges.undoTip'))}">` +
       `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7v6h6"/><path d="M21 17a9 9 0 0 0-15-6.7L3 13"/></svg>` +
       `<span>${escapeHtml(t('fileChanges.undo'))}</span></button>`
     : '';

@@ -13,7 +13,7 @@ Browser-centric flow:
 from flask import Blueprint, jsonify, request
 
 from lib.log import get_logger
-from lib.api_response import api_bad_request, api_internal_error
+from lib.api_response import api_bad_request, api_error, api_internal_error
 from lib.request_parser import parse_body
 
 logger = get_logger(__name__)
@@ -47,7 +47,7 @@ def oauth_login():
             provider = data.get('provider', '')
 
         if provider not in ('claude', 'codex'):
-            return jsonify({'error': 'Invalid provider. Use "claude" or "codex".'}), 400
+            return api_error('Invalid provider. Use "claude" or "codex".', status=400)
 
         result = start_oauth_flow(provider)
 

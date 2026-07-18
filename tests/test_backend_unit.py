@@ -244,6 +244,25 @@ class TestBuildBody:
         assert "thinking" not in body
         assert "enable_thinking" not in body
 
+    def test_none_max_tokens_does_not_fatal_the_turn(self):
+        """build_body must survive max_tokens=None (defense-in-depth).
+
+        The killed-turn recovery crash was root-caused to resolve_conv_config
+        emitting maxTokens=None with no server_defaults, which propagated to
+        _clamp_max_tokens and FATALed the turn (``TypeError: '<' not supported
+        between 'int' and 'NoneType'``). That None is now fixed AT SOURCE
+        (resolve_conv_config coerces to 128000), but build_body/_clamp_max_tokens
+        must still tolerate a None from any OTHER caller — this guards that
+        backstop so the crash can never resurface via a different path."""
+        from lib.llm import build_body
+        from lib.model_info import _DEFAULT_UNKNOWN_MAX_OUTPUT
+
+        body = build_body('claude-sonnet-4-20250514', self.DUMMY_MSGS,
+                          max_tokens=None, stream=False)
+        # Claude has an explicit 128000 ceiling; None degrades to the
+        # conservative default first, which is <= that ceiling.
+        assert body["max_tokens"] == _DEFAULT_UNKNOWN_MAX_OUTPUT
+
 
 # ═══════════════════════════════════════════════════════════
 #  2. Protocols

@@ -37,9 +37,9 @@ Standard task dict shape:
 import asyncio
 import threading
 import time
-import uuid
 from typing import Any, Callable, Optional
 
+from lib.ids import short_id
 from lib.log import get_logger
 
 logger = get_logger(__name__)
@@ -94,13 +94,18 @@ class TaskRuntime:
         self.error_source = error_source or f'task_runtime.{kind}'
         self._tasks: dict[str, dict] = {}
         self._lock = threading.Lock()
+        # Strong references to in-flight asyncio worker tasks. The event loop
+        # keeps only a WEAK reference to a bare ensure_future()/create_task()
+        # result, so without this a worker Task could be GC'd mid-flight and
+        # silently never run. Each entry self-evicts via add_done_callback.
+        self._bg_tasks: set = set()
 
     # ── Task lifecycle ─────────────────────────────────────────
 
     def create(self, *, task_id: str = '', meta: Optional[dict] = None) -> dict:
         """Create and register a new task. Returns the task dict."""
         if not task_id:
-            task_id = uuid.uuid4().hex[:12]
+            task_id = short_id(n=12)
         task = {
             'id': task_id,
             'kind': self.kind,
@@ -130,11 +135,21 @@ class TaskRuntime:
             return [t for t in self._tasks.values()
                     if t['status'] in ('pending', 'running')]
 
-    def append_event(self, task_id: str, event: dict) -> Optional[int]:
+    def append_event(self, task_id: str, event: dict,
+                     *, before_push: Optional[Callable[[int], None]] = None) -> Optional[int]:
         """Append an event to the task. Auto-assigns 'seq'.
 
         Also pushes to the WebSocket channel (non-blocking, thread-safe).
         Returns the seq number, or None if task not found.
+
+        ``before_push``: optional callback ``fn(seq)`` invoked AFTER the event
+        is appended to ``task['events']`` (and its seq assigned) but BEFORE the
+        frame is pushed to the client. This enforces **durable-before-visible**
+        ordering: a caller that persists the event to a durable log (chat's
+        ``append_persistent_event``) passes it here so the log is never behind
+        what the client has already received — a cold reconnect can then
+        reconstruct the COMPLETE stream. Best-effort: a callback exception is
+        logged but never blocks the push (a DB blip must not stall the stream).
 
         Tolerant of legacy task dicts inserted directly into ``_tasks``
         (e.g. older test code) that may not have all the standard fields.
@@ -152,6 +167,14 @@ class TaskRuntime:
             with self._lock:
                 if task.get('status') == 'pending':
                     task['status'] = 'running'
+        # ★ Durable-before-visible: commit the persistent row BEFORE the push,
+        #   so task_events is never behind the bytes the client holds.
+        if before_push is not None:
+            try:
+                before_push(seq)
+            except Exception as e:
+                logger.debug('[TaskRuntime:%s] before_push failed task=%s: %s',
+                             self.kind, task_id[:8], e)
         if self.push_channel:
             try:
                 from lib.agent_core.push import push_event
@@ -305,7 +328,9 @@ class TaskRuntime:
         if loop and loop.is_running():
             async def _async_wrapper():
                 await asyncio.to_thread(_wrapper)
-            asyncio.ensure_future(_async_wrapper())
+            bg = asyncio.ensure_future(_async_wrapper())
+            self._bg_tasks.add(bg)
+            bg.add_done_callback(self._bg_tasks.discard)
         else:
             threading.Thread(
                 target=_wrapper,
@@ -315,15 +340,22 @@ class TaskRuntime:
 
     # ── TTL cleanup ────────────────────────────────────────────
 
-    def cleanup_stale(self) -> int:
-        """Remove finished tasks older than TTL. Returns count removed."""
+    def cleanup_stale(self, max_age: Optional[float] = None) -> int:
+        """Remove finished tasks older than TTL. Returns count removed.
+
+        ``max_age`` overrides ``self.ttl`` for this sweep only — pass a small
+        value (e.g. 0) under memory pressure to evict every terminal task
+        immediately, instead of waiting out the retention window. The steady
+        cleanup tick passes nothing and keeps the normal TTL.
+        """
+        ttl = self.ttl if max_age is None else max_age
         now = time.time()
         expired = []
         with self._lock:
             for tid, task in list(self._tasks.items()):
                 if task['status'] in ('done', 'error', 'aborted'):
                     finished = task.get('finished_at') or task.get('created_at', 0)
-                    if now - finished > self.ttl:
+                    if now - finished > ttl:
                         expired.append(tid)
                         del self._tasks[tid]
         if expired:

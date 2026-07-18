@@ -635,9 +635,76 @@ async function cmdScreenshotTab(params) {
   }
 }
 
+// A desktop-class viewport width forced via CDP so full-page capture is
+// DECOUPLED from the user's real window size. If the user shrinks the window,
+// a responsive page reflows to a narrow/mobile layout (or skips rendering
+// off-viewport content); overriding device metrics to a stable large viewport
+// makes it re-render the full desktop layout before we capture. Height floor
+// gives lazy-loaded content a tall "viewport" so it triggers on reflow.
+const FULL_PAGE_OVERRIDE_MIN_WIDTH_PX  = 1280;
+const FULL_PAGE_OVERRIDE_MIN_HEIGHT_PX = 800;
+
+// Layout-stability convergence params: after forcing the viewport we must wait
+// for the page to finish reflowing AND for async result lists (flights, tickets)
+// to render — a fixed sleep would either truncate a slow list or waste time on a
+// fast one. We poll getLayoutMetrics until the content size stops changing for
+// STABLE_READS consecutive polls (and readyState is 'complete'), capped so a
+// perpetually-animating page can't hang the capture.
+const STABILITY_MAX_WAIT_MS   = 4000;
+const STABILITY_POLL_MS       = 200;
+const STABILITY_STABLE_READS  = 2;   // consecutive unchanged reads to declare stable
+
+// Poll until the CDP-reported content size is stable across STABLE_READS polls
+// and document.readyState is 'complete', or the budget elapses. Returns the
+// reason so the caller can log convergence vs timeout.
+async function _waitForContentStable(target) {
+  const deadline = Date.now() + STABILITY_MAX_WAIT_MS;
+  let prevW = -1, prevH = -1;
+  let stableCount = 0;
+  while (Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, STABILITY_POLL_MS));
+
+    let cs;
+    try {
+      const m = await chrome.debugger.sendCommand(target, 'Page.getLayoutMetrics');
+      cs = m.cssContentSize || m.contentSize || { width: 0, height: 0 };
+    } catch (e) {
+      // A transient metrics error shouldn't abort — keep trying until deadline.
+      continue;
+    }
+
+    let ready = true;
+    try {
+      const r = await chrome.debugger.sendCommand(target, 'Runtime.evaluate', {
+        expression: "document.readyState === 'complete'",
+        returnByValue: true,
+      });
+      ready = !!(r && r.result && r.result.value);
+    } catch (e) {
+      // If readyState can't be read, fall back to size-stability alone.
+      ready = true;
+    }
+
+    const w = Math.ceil(cs.width);
+    const h = Math.ceil(cs.height);
+    if (ready && w === prevW && h === prevH) {
+      stableCount += 1;
+      if (stableCount >= STABILITY_STABLE_READS) {
+        return { stable: true, width: w, height: h, waitedMs: STABILITY_MAX_WAIT_MS - (deadline - Date.now()) };
+      }
+    } else {
+      stableCount = 0;
+    }
+    prevW = w;
+    prevH = h;
+  }
+  return { stable: false, width: prevW, height: prevH, waitedMs: STABILITY_MAX_WAIT_MS };
+}
+
 async function _screenshotFullPageCDP(tabId, format, quality) {
   const target = { tabId };
   let attached = false;
+  let overridden = false;
   try {
     await chrome.debugger.attach(target, '1.3');
     attached = true;
@@ -645,6 +712,46 @@ async function _screenshotFullPageCDP(tabId, format, quality) {
     // Page domain must be enabled before layout/screenshot commands
     await chrome.debugger.sendCommand(target, 'Page.enable');
 
+    // Read the content size FIRST so we can size the forced viewport to it.
+    const pre = await chrome.debugger.sendCommand(target, 'Page.getLayoutMetrics');
+    const preCs = pre.cssContentSize || pre.contentSize || { width: 0, height: 0 };
+
+    // Force a stable desktop viewport that is never smaller than the content —
+    // independent of how small the user shrank the real window. deviceScaleFactor:1
+    // and mobile:false keep it a plain desktop render at native resolution.
+    const overrideWidth = Math.min(
+      Math.max(Math.ceil(preCs.width), FULL_PAGE_OVERRIDE_MIN_WIDTH_PX),
+      FULL_PAGE_MAX_HEIGHT_PX,
+    );
+    const overrideHeight = Math.min(
+      Math.max(Math.ceil(preCs.height), FULL_PAGE_OVERRIDE_MIN_HEIGHT_PX),
+      FULL_PAGE_MAX_HEIGHT_PX,
+    );
+    try {
+      await chrome.debugger.sendCommand(target, 'Emulation.setDeviceMetricsOverride', {
+        width: overrideWidth,
+        height: overrideHeight,
+        deviceScaleFactor: 1,
+        mobile: false,
+        screenWidth: overrideWidth,
+        screenHeight: overrideHeight,
+      });
+      overridden = true;
+      // Wait for the page to converge to the forced viewport instead of a
+      // fixed sleep: reflow + async result lists (flights/tickets) may render
+      // well after 350ms, and a fixed delay would capture a half-loaded page.
+      const stab = await _waitForContentStable(target);
+      if (!stab.stable) {
+        console.warn('[Screenshot] content did not stabilize within budget; capturing best-effort at', stab.width + 'x' + stab.height);
+      }
+    } catch (errOverride) {
+      // Non-fatal: if the override is rejected we still capture, just without
+      // the window-size decoupling (better a viewport-derived shot than none).
+      console.warn('[Screenshot] setDeviceMetricsOverride failed, capturing without override:', errOverride && errOverride.message);
+      overridden = false;
+    }
+
+    // Re-measure AFTER the reflow so the clip matches the forced layout.
     const metrics = await chrome.debugger.sendCommand(target, 'Page.getLayoutMetrics');
     // Prefer CSS content size (Chromium 90+); fall back to legacy contentSize.
     const cs = metrics.cssContentSize || metrics.contentSize || { width: 0, height: 0 };
@@ -674,6 +781,17 @@ async function _screenshotFullPageCDP(tabId, format, quality) {
       truncatedHeight: height > FULL_PAGE_MAX_HEIGHT_PX,
     };
   } finally {
+    // ALWAYS clear the override before detaching, on every path (success,
+    // capture error, or empty-shot throw) — leaving it set would corrupt the
+    // user's real page layout. clearDeviceMetricsOverride needs the debugger
+    // session, so it must run before detach.
+    if (overridden) {
+      try {
+        await chrome.debugger.sendCommand(target, 'Emulation.clearDeviceMetricsOverride');
+      } catch (errClear) {
+        console.warn('[Screenshot] clearDeviceMetricsOverride failed:', errClear && errClear.message);
+      }
+    }
     if (attached) {
       try { await chrome.debugger.detach(target); } catch (_) {}
     }

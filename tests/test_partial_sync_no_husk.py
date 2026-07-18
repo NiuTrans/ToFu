@@ -183,12 +183,10 @@ def main():
     print()
     print(_color('═══ partial-sync no-husk tests ═══', '36'))
     print()
-    # Standalone runs (python tests/x.py) skip conftest, so bootstrap the DB.
-    try:
-        from lib.database import init_db
-        init_db()
-    except Exception as e:
-        print('  (init_db skipped:', e, ')')
+    # Standalone runs (python tests/x.py) skip conftest → force sqlite + guard
+    # the prod DB + bootstrap the schema, all via the shared helper.
+    from tests._standalone_guard import guard_standalone_db
+    guard_standalone_db('test_partial_sync_no_husk.__main__')
     tests = [
         test_thinking_only_checkpoint_defers_new_assistant_row,
         test_content_checkpoint_materializes_row_with_thinking,

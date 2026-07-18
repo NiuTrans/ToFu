@@ -75,6 +75,128 @@ logger = get_logger(__name__)
 _INTERNAL_TOOL_PREFIXES = ('antml:', 'anthropic.', '__')
 _MAX_CONSECUTIVE_PARSE_ERRORS = 10
 
+# ── Cache byte-probe (diagnostic, default OFF, zero production impact) ──
+# When TOFU_CACHE_BYTE_PROBE is set to a conv-id prefix, prepare_request dumps
+# the FINAL post-translation body (the exact messages+system+tools bytes handed
+# to the transport, AFTER add_cache_breakpoints AND openai_body_to_anthropic)
+# for the matching conversation, on each round, to
+# ``.tofu_cache_probe/<conv>/round_NNNN_<trace>.json``. A standalone analyzer
+# (debug/cache_byte_probe_diff.py) then diffs two consecutive rounds at the RAW
+# byte level — deliberately NOT through canonical_messages — to settle whether
+# a "PROVEN server-side" cache miss is actually a client-caused prefix mutation
+# the canonical fingerprint erased. Unset ⇒ the whole block is skipped.
+_CACHE_PROBE_ROUND: dict = {}
+
+
+def _cache_probe_stable_ttls(body):
+    """Collect every ``cache_control`` marker's ttl + a coarse location, so the
+    analyzer can tell a stable-block ttl flip (1h↔absent) from a body change.
+
+    Returns a list of ``{loc, ttl}`` in wire order. ``ttl`` is ``''`` for a
+    bare ``{'type':'ephemeral'}`` marker (5-minute default). Best-effort.
+    """
+    out = []
+
+    def _scan(container, loc):
+        if isinstance(container, dict):
+            cc = container.get('cache_control')
+            if isinstance(cc, dict):
+                out.append({'loc': loc, 'ttl': cc.get('ttl', '')})
+            content = container.get('content')
+            if isinstance(content, list):
+                for j, blk in enumerate(content):
+                    _scan(blk, f'{loc}.content[{j}]')
+        # else: str content carries no marker
+
+    # Anthropic path: system + tools live at the top level; messages below.
+    sysblk = body.get('system')
+    if isinstance(sysblk, list):
+        for i, blk in enumerate(sysblk):
+            _scan(blk, f'system[{i}]')
+    tools = body.get('tools')
+    if isinstance(tools, list):
+        for i, t in enumerate(tools):
+            _scan(t, f'tools[{i}]')
+    for i, m in enumerate(body.get('messages') or []):
+        _scan(m, f'messages[{i}]')
+    return out
+
+
+def _maybe_dump_cache_probe(body, task_id, log_prefix='', routing=None):
+    """Dump the final post-translation body for a targeted conv (diagnostic).
+
+    Gated on ``TOFU_CACHE_BYTE_PROBE`` (a conv-id prefix). Resolves the conv id
+    from ``task_id`` via the chat runtime, and only dumps when it matches the
+    target. Best-effort: any failure is logged at debug and never blocks a
+    request. This does NOT canonicalize — it writes the literal body dict so
+    the analyzer sees the exact wire bytes.
+
+    ``routing`` (optional) carries the per-request routing fingerprint — key
+    discriminator, endpoint, final ``anthropic-beta`` header — so a raw-byte
+    round-over-round diff can distinguish a BODY-byte flip from a cache-NAMESPACE
+    change (same bytes routed to a different key/endpoint → different gateway
+    cache pool → floor miss on an otherwise byte-identical prefix). This is the
+    dimension the mrne3bqe R4 clean-round miss (byte-identical, no retry) needs.
+    """
+    import os
+    target = os.environ.get('TOFU_CACHE_BYTE_PROBE', '').strip()
+    if not target:
+        return
+    try:
+        conv_id = ''
+        if task_id:
+            try:
+                from lib.tasks_pkg.manager._state import _chat_runtime
+                _t = _chat_runtime.get(task_id)
+                if _t:
+                    conv_id = _t.get('convId') or ''
+            except Exception as _re:
+                logger.debug('%s cache-probe conv resolve failed: %s', log_prefix, _re)
+        # Match on conv-id prefix; if the conv is unknown, fall back to task id
+        # so a probe can still target a task that isn't in the conv index.
+        key = conv_id or task_id
+        if not key or not key.startswith(target):
+            return
+
+        import json as _json
+        import time as _time
+        from lib.agent_artifacts import ARTIFACT_PREFIX
+        base = os.path.join(os.getcwd(), f'{ARTIFACT_PREFIX}_cache_probe', key)
+        os.makedirs(base, exist_ok=True)
+        rnd = _CACHE_PROBE_ROUND.get(key, 0)
+        _CACHE_PROBE_ROUND[key] = rnd + 1
+        # Dump the exact system/messages/tools that go on the wire. Use the
+        # SAME serialization the transport uses (ensure_ascii=False) so byte
+        # lengths match what is actually sent.
+        snapshot = {
+            'round': rnd,
+            'ts': _time.time(),
+            'conv_id': conv_id,
+            'task_id': task_id,
+            'model': body.get('model', ''),
+            # ── Routing fingerprint (cache-NAMESPACE dimension) ──
+            # Same body bytes routed to a different key/endpoint land in a
+            # different gateway cache pool → floor miss on a byte-identical
+            # prefix (the mrne3bqe R4 clean-round hypothesis). The API key is
+            # NEVER dumped raw — only a short salted hash as a stable "which
+            # key" discriminator (CLAUDE.md §2.6: never log secrets).
+            'routing': routing or {},
+            # Stable-block cache_control ttl values, in wire order. A 1h↔absent
+            # flip here shifts the Anthropic cache key even when body bytes and
+            # marker COUNT are unchanged (the detector's historical blind spot).
+            'stable_ttls': _cache_probe_stable_ttls(body),
+            'system': body.get('system'),
+            'tools': body.get('tools'),
+            'messages': body.get('messages') or [],
+        }
+        path = os.path.join(base, f'round_{rnd:04d}.json')
+        with open(path, 'w', encoding='utf-8') as fh:
+            _json.dump(snapshot, fh, ensure_ascii=False)
+        logger.warning('%s [CacheProbe] dumped round=%d conv=%s → %s',
+                       log_prefix, rnd, key[:12], path)
+    except Exception as e:
+        logger.debug('%s cache byte-probe dump failed: %s', log_prefix, e)
+
 
 @dataclass
 class RequestPlan:
@@ -97,9 +219,17 @@ def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
     Mutates ``body`` in place (cache breakpoints, ``_task_id`` pop, Codex
     translation) exactly as the inline code did, then returns the plan.
     """
+    # Read the latch key NON-destructively and keep it on the body for the
+    # WHOLE task life. The streaming retry loop re-feeds the SAME body dict to
+    # this function on every 429/503 attempt (see lib/llm/stream.py:62); popping
+    # _task_id on attempt 1 made attempt 2+ fall back to the live global
+    # CACHE_EXTENDED_TTL, flipping the cache_control ttl AND the beta header
+    # below → a different Anthropic cache key → full prefix miss. _task_id must
+    # NOT reach the gateway on the OpenAI path (raw body is serialized), so it
+    # is stripped at that serialization boundary instead (see below). The
+    # Anthropic path rebuilds the body from an allowlist, so it never leaks.
     _task_id_for_latch = body.get('_task_id', '')
     add_cache_breakpoints(body, log_prefix)
-    body.pop('_task_id', None)
 
     # Auto-inject extended cache TTL beta header for Claude
     if is_claude(body.get('model', '')):
@@ -149,6 +279,12 @@ def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
             url = claude_oauth_url(url)
         logger.debug('%s [Anthropic] Translated request for Messages API', log_prefix)
     else:
+        # OpenAI path serialises `body` verbatim (session.post(json=body)), so
+        # the internal latch key must be removed HERE — the single serialization
+        # boundary — rather than popped early (which broke the retry-stable
+        # latch, see above). The Anthropic/Codex branches rebuilt `body` from an
+        # allowlist that never included _task_id, so this only matters here.
+        body.pop('_task_id', None)
         url = f'{base_url.rstrip("/")}/chat/completions' if base_url else chat_url()
 
     attempt_tag = f' (attempt {attempt+1})' if attempt > 0 else ''
@@ -191,14 +327,97 @@ def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
     # names a client-caused culprit. Best-effort: never block a request.
     raw_dumper.wire_fp = None
     raw_dumper.wire_static = ''
+    raw_dumper.wire_system = None
+    raw_dumper.wire_markers = None
+    raw_dumper.wire_bytes = None
+    raw_dumper.wire_field_bytes = None
+    raw_dumper.wire_region = None
     try:
         from lib.tasks_pkg.wire_fingerprint import (
-            canonical_messages, static_prefix_hash,
+            canonical_messages, marker_signature, static_prefix_hash,
+            system_fingerprint, wire_byte_field_prefix, wire_byte_prefix,
+            wire_byte_region,
         )
         raw_dumper.wire_fp = canonical_messages(body.get('messages') or [])
         raw_dumper.wire_static = static_prefix_hash(body.get('messages') or [])
+        # TRUE-byte prefix: hash the ACTUAL serialized bytes per message (only
+        # cache_control stripped). canonical_messages is lossy (drops
+        # reasoning_details, collapses str↔block, canonicalises arg order), so
+        # "canonical identical" does NOT prove "wire bytes identical". This lets
+        # detect_cache_break REFUSE a false "byte-identical eviction" claim when
+        # the real bytes diverged (reasoning_details rebuild / same-role merge /
+        # protocol switch) — see wire_byte_prefix's docstring.
+        raw_dumper.wire_bytes = wire_byte_prefix(body.get('messages') or [])
+        # FIELD-GRANULAR true bytes: names the EXACT top-level field that
+        # flipped on a canonical-invisible <bytes> divergence (reasoning_details
+        # rebuild / tool_calls arg re-serialization / content / field-order),
+        # so detect_cache_break can log the proven field instead of only the
+        # message. See wire_byte_field_prefix.
+        raw_dumper.wire_field_bytes = wire_byte_field_prefix(
+            body.get('messages') or [])
+        # TRUE-byte hash of the HOISTED system + tools region. system_fingerprint
+        # is ITSELF lossy (runs _text_of + sort_keys on params), so a system
+        # BLOCK REORDER / wrapping flip / per-turn re-serialization — the
+        # highest-probability suspect on the Anthropic path, where charter /
+        # board / peer-status / relevant_memories are injected fresh each turn —
+        # is invisible to it. This hashes the real serialized bytes so that
+        # divergence can't be laundered into "eviction". See wire_byte_region.
+        raw_dumper.wire_region = wire_byte_region(
+            body.get('system'), body.get('tools'))
+        # Capture WHERE the cache_control breakpoints sit — canonical_messages
+        # deliberately strips them, so a miss caused purely by a breakpoint
+        # being LOST in translation (byte-identical content) would otherwise be
+        # mislabeled "server-side PROVEN". detect_cache_break folds this in.
+        raw_dumper.wire_markers = marker_signature(body)
+        # Also fingerprint the HOISTED system block + tools. On the Anthropic
+        # path these live OUTSIDE body['messages'] (openai_body_to_anthropic
+        # lifts system to the top-level field), so canonical_messages is blind
+        # to them — a per-turn system change (digest/charter/board) was
+        # laundered into a false "server-side PROVEN" verdict. This closes that
+        # blind spot.
+        raw_dumper.wire_system = system_fingerprint(
+            body.get('system'), body.get('tools'))
     except Exception as _wfe:
         logger.debug('%s wire fingerprint capture failed: %s', log_prefix, _wfe)
+
+    # Diagnostic byte-probe (default OFF): dump the exact post-translation body
+    # for a targeted conv so a raw-byte round-over-round diff can settle whether
+    # a "server-side PROVEN" miss is actually a client-caused prefix mutation.
+    # Also capture the ROUTING fingerprint — key discriminator / endpoint /
+    # final anthropic-beta — so the diff can tell a body-byte flip from a
+    # cache-namespace (key/endpoint) change on a byte-identical prefix.
+    _routing = None
+    try:
+        import hashlib as _hashlib
+        _key_hash = ''
+        if api_key:
+            _key_hash = _hashlib.sha256(
+                ('tofu-cache-probe:' + str(api_key)).encode('utf-8')
+            ).hexdigest()[:12]
+        _sticky = {}
+        try:
+            from lib.llm_dispatch.conv_affinity import get_pick_decision
+            _sticky = get_pick_decision() or {}
+        except Exception as _se:
+            logger.debug('%s cache-probe sticky capture failed: %s', log_prefix, _se)
+        _routing = {
+            'url': url,
+            'base_url': base_url or '',
+            'key_hash': _key_hash,           # salted, truncated — NOT the secret
+            'anthropic_beta': (hdrs.get('anthropic-beta', '')
+                               if isinstance(hdrs, dict) else ''),
+            'trace_id': trace_id,
+            'attempt': attempt,
+            'api_protocol': api_protocol,
+            # Sticky-routing decision (WHY the key is what it is): distinguishes
+            # a soft-fallback-under-cooldown flip (affinity_fell_back=True) from
+            # affinity never engaging. {preferred_key_hash, chosen_key_hash,
+            # affinity_fell_back, cooldown_remaining_s}.
+            'sticky': _sticky,
+        }
+    except Exception as _rfe:
+        logger.debug('%s cache-probe routing capture failed: %s', log_prefix, _rfe)
+    _maybe_dump_cache_probe(body, _task_id_for_latch, log_prefix, routing=_routing)
 
     return RequestPlan(url=url, hdrs=hdrs, body=body, trace_id=trace_id,
                        raw_dumper=raw_dumper, codex_translator=codex_translator,
@@ -359,55 +578,31 @@ class SSEAccumulator:
     def _feed_codex(self, data_str) -> bool:
         """Translate a Codex Responses-API SSE payload and accumulate.
 
+        The Codex translator emits OpenAI-shaped ``chat.completion.chunk``
+        JSON strings, so route them through the SAME ``_process_openai_chunk``
+        path the main OpenAI and Anthropic (``_feed_anthropic``) paths use.
+        Sharing that one accumulator keeps content / thinking / tool-call-delta
+        accumulation, ``on_tool_call_ready`` firing, and ``usage`` handling
+        byte-identical across every provider — the Codex path previously
+        re-implemented the accumulation and, in doing so, (1) never fired
+        ``on_tool_call_ready`` (no incremental multi-tool prefetch) and
+        (2) gated content/thinking *accumulation* on the callback being present
+        (``if _c and self.on_content``), silently dropping the whole response
+        for a caller with no streaming callback.
+
         Returns True when ``[DONE]`` was seen inside the translation.
         """
-        translated = self.codex_translator.translate(data_str)
-        for t_str in translated:
+        for t_str in self.codex_translator.translate(data_str):
             if t_str == '[DONE]':
                 self.saw_done = True
-                break
+                return True
             try:
                 t_chunk = json.loads(t_str)
             except Exception as e:
                 logger.debug('[LLM] Codex SSE chunk parse failed: %s', e)
                 continue
-            choices = t_chunk.get('choices', [])
-            if choices:
-                delta = choices[0].get('delta', {})
-                fr = choices[0].get('finish_reason')
-                if fr:
-                    self.finish_reason = fr
-                    self.saw_finish_reason = True
-                _c = delta.get('content', '')
-                if _c and self.on_content:
-                    self.content += _c
-                    self.on_content(_c)
-                _t = delta.get('reasoning_content', '')
-                if _t and self.on_thinking:
-                    self.thinking_text += _t
-                    self.on_thinking(_t)
-                for tc in (delta.get('tool_calls') or []):
-                    idx = tc.get('index', 0)
-                    if idx not in self.tool_calls_acc:
-                        self.tool_calls_acc[idx] = {
-                            'id': tc.get('id', ''),
-                            'type': 'function',
-                            'function': {'name': '', 'arguments': ''},
-                        }
-                    if tc.get('id'):
-                        self.tool_calls_acc[idx]['id'] = tc['id']
-                    fn = tc.get('function', {})
-                    if fn.get('name'):
-                        # Append (not overwrite) to match the main OpenAI path
-                        # in _handle_delta — a function name may stream across
-                        # multiple deltas; overwriting would keep only the last
-                        # fragment and produce a wrong tool name.
-                        self.tool_calls_acc[idx]['function']['name'] += fn['name']
-                    if fn.get('arguments'):
-                        self.tool_calls_acc[idx]['function']['arguments'] += fn['arguments']
-            if t_chunk.get('usage'):
-                self.usage = t_chunk['usage']
-        return self.saw_done
+            self._process_openai_chunk(t_chunk)
+        return False
 
     def _handle_sse_error(self, eo):
         """Classify an SSE-embedded error object; always raises."""
@@ -481,7 +676,7 @@ class SSEAccumulator:
                                'dispatch layer: %s', self.log_prefix, _sse_status,
                                err_text[:300])
                 raise RateLimitError(
-                    f'SSE error: {err_text}',
+                    f'SSE error: {err_text}', is_gateway=True,
                     reason=f'HTTP {_sse_status}: {err_text[:180]}')
             logger.warning('%s SSE server error (retryable): %s',
                            self.log_prefix, err_text[:300])
@@ -800,6 +995,21 @@ class SSEAccumulator:
         if _wfp is not None:
             usage['_wire_fp'] = _wfp
             usage['_wire_static'] = getattr(self.raw_dumper, 'wire_static', '')
+            _wsys = getattr(self.raw_dumper, 'wire_system', None)
+            if _wsys is not None:
+                usage['_wire_system'] = _wsys
+            _wmk = getattr(self.raw_dumper, 'wire_markers', None)
+            if _wmk is not None:
+                usage['_wire_markers'] = _wmk
+            _wbytes = getattr(self.raw_dumper, 'wire_bytes', None)
+            if _wbytes is not None:
+                usage['_wire_bytes'] = _wbytes
+            _wfbytes = getattr(self.raw_dumper, 'wire_field_bytes', None)
+            if _wfbytes is not None:
+                usage['_wire_field_bytes'] = _wfbytes
+            _wregion = getattr(self.raw_dumper, 'wire_region', None)
+            if _wregion is not None:
+                usage['_wire_region'] = _wregion
 
         # Stream anomaly flags
         _has_anomaly = False

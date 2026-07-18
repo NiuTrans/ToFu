@@ -1206,3 +1206,372 @@ class TestMixedTTLStrategy:
             for j in range(i + 1, len(cc_dicts)):
                 assert cc_dicts[i] is not cc_dicts[j], \
                     f'cache_control dicts at {i} and {j} are the same object!'
+
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 11. Tail breakpoint SURVIVES the Anthropic translation (the cache-collapse bug)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _anthropic_marker_slots(ab_body):
+    """Return the list of (msg_index, role, block_type) carrying cache_control
+    in a translated Anthropic body's messages."""
+    slots = []
+    for i, m in enumerate(ab_body.get('messages', [])):
+        c = m.get('content')
+        if isinstance(c, list):
+            for blk in c:
+                if isinstance(blk, dict) and blk.get('cache_control'):
+                    slots.append((i, m.get('role'), blk.get('type')))
+    return slots
+
+
+@pytest.mark.unit
+class TestTailBreakpointSurvivesTranslation:
+    """The root cause of the prefix-cache collapse: add_cache_breakpoints places
+    the tail marker on the OpenAI-shape message, but openai_body_to_anthropic
+    dropped it when the tail was a tool/assistant message (the marker only
+    survived on user tails). Anthropic reads cache_control on the tool_result /
+    tool_use block ITSELF — a marker nested in the block's inner content is
+    ineffective. These tests lock the marker onto the emitted block."""
+
+    def test_tool_result_tail_marker_on_block_itself(self):
+        """A round ending with a tool result: the tail cache_control must land
+        on the tool_result BLOCK, not buried in its inner content list."""
+        from lib.llm.anthropic_outbound import openai_body_to_anthropic
+        body = _make_tool_conv(2, empty_assistant_content=True)
+        body['model'] = 'claude-sonnet-4-20250514'
+        add_cache_breakpoints(body)
+        ab = openai_body_to_anthropic(body)
+        # The last message is the tool result → a user turn holding tool_result.
+        last = ab['messages'][-1]
+        assert last['role'] == 'user'
+        tr = last['content'][-1]
+        assert tr['type'] == 'tool_result'
+        assert tr.get('cache_control'), \
+            'REGRESSION: tail breakpoint LOST — tool_result block carries no ' \
+            'cache_control after translation (the cache-collapse bug)'
+
+    def test_tool_result_tail_marker_not_only_nested(self):
+        """The marker must be on the tool_result block, not ONLY on a text
+        block nested inside its content (which Anthropic ignores)."""
+        from lib.llm.anthropic_outbound import openai_body_to_anthropic
+        body = _make_tool_conv(3, empty_assistant_content=True)
+        body['model'] = 'claude-sonnet-4-20250514'
+        add_cache_breakpoints(body)
+        ab = openai_body_to_anthropic(body)
+        slots = _anthropic_marker_slots(ab)
+        # At least one marker must sit on a tool_result block (the tail).
+        assert any(t == 'tool_result' for (_i, _r, t) in slots), \
+            f'No cache_control on any tool_result block; slots={slots}'
+
+    def test_assistant_tail_marker_on_block(self):
+        """A round ending with an assistant turn (e.g. prefill resume): the
+        tail marker must ride the last emitted assistant block."""
+        from lib.llm.anthropic_outbound import openai_body_to_anthropic
+        body = {
+            'model': 'claude-sonnet-4-20250514',
+            'messages': [
+                {'role': 'system', 'content': 'sys'},
+                {'role': 'user', 'content': 'q'},
+                {'role': 'assistant', 'content': 'partial answer so far'},
+            ],
+        }
+        add_cache_breakpoints(body)
+        ab = openai_body_to_anthropic(body)
+        last = ab['messages'][-1]
+        assert last['role'] == 'assistant'
+        assert any(isinstance(b, dict) and b.get('cache_control')
+                   for b in last['content']), \
+            'Assistant-tail breakpoint LOST after translation'
+
+    def test_translation_never_exceeds_four_markers(self):
+        """Hoisting the marker onto the tool_result/assistant block must STRIP
+        the inner one — else a message carries 2 markers and the request blows
+        past Anthropic's hard 4-marker ceiling (HTTP 400)."""
+        from lib.llm.anthropic_outbound import openai_body_to_anthropic
+        body = {
+            'model': 'claude-sonnet-4-20250514',
+            'messages': [
+                {'role': 'system', 'content': [{'type': 'text', 'text': f'S{k}'}
+                                                for k in range(3)]},
+                {'role': 'user', 'content': 'go'},
+            ],
+            'tools': [{'type': 'function', 'function': {
+                'name': 'read_files', 'description': 'r',
+                'parameters': {'type': 'object'}}}],
+        }
+        for rnd in range(18):
+            body['messages'].append({
+                'role': 'assistant', 'content': '',
+                'tool_calls': [{'id': f'c{rnd}', 'type': 'function',
+                                'function': {'name': 'read_files', 'arguments': '{}'}}]})
+            body['messages'].append({
+                'role': 'tool', 'tool_call_id': f'c{rnd}', 'content': f'r{rnd}'})
+            add_cache_breakpoints(body)
+            ab = openai_body_to_anthropic(body)
+            n = len(_anthropic_marker_slots(ab))
+            n += len([b for b in (ab.get('system') or [])
+                      if isinstance(b, dict) and b.get('cache_control')]) \
+                if isinstance(ab.get('system'), list) else 0
+            n += len([t for t in (ab.get('tools') or []) if t.get('cache_control')])
+            assert n <= 4, f'Round {rnd}: {n} markers after translation (> 4)'
+            # And no single message may carry two markers.
+            for m in ab['messages']:
+                c = m.get('content')
+                if isinstance(c, list):
+                    cc = sum(1 for b in c if isinstance(b, dict) and b.get('cache_control'))
+                    assert cc <= 1, f'Round {rnd}: a message carries {cc} markers'
+
+    def test_tail_marker_present_every_tool_round(self):
+        """Across a growing tool loop, EVERY round's translated body must carry
+        a surviving tail marker (this is what keeps cache_read growing past the
+        system floor instead of pinning)."""
+        from lib.llm.anthropic_outbound import openai_body_to_anthropic
+        body = {
+            'model': 'claude-sonnet-4-20250514',
+            'messages': [
+                {'role': 'system', 'content': 'system prompt ' * 50},
+                {'role': 'user', 'content': 'go'},
+            ],
+            'tools': [{'type': 'function', 'function': {
+                'name': 'read_files', 'description': 'r',
+                'parameters': {'type': 'object'}}}],
+        }
+        for rnd in range(12):
+            body['messages'].append({
+                'role': 'assistant', 'content': '',
+                'tool_calls': [{'id': f'c{rnd}', 'type': 'function',
+                                'function': {'name': 'read_files', 'arguments': '{}'}}]})
+            body['messages'].append({
+                'role': 'tool', 'tool_call_id': f'c{rnd}',
+                'content': f'result {rnd} ' + 'x' * 60})
+            add_cache_breakpoints(body)
+            ab = openai_body_to_anthropic(body)
+            slots = _anthropic_marker_slots(ab)
+            # A marker must sit on the LAST message (the just-added tool result).
+            last_idx = len(ab['messages']) - 1
+            assert any(i == last_idx for (i, _r, _t) in slots), \
+                f'Round {rnd}: no surviving tail marker on last msg; slots={slots}'
+
+
+
+@pytest.mark.unit
+class TestCrossRoundWireByteInvariance:
+    """END-TO-END regression for the early-round cache pin (conv mrm9xhun /
+    mrmb6tfo): the *decisive* proof was never a single-round assertion — it was
+    a FULL-CHAIN, CROSS-ROUND wire-byte diff. The bug only becomes a real
+    cache-pin because the str↔block flip SURVIVES ``openai_body_to_anthropic``
+    for the ``tool`` role, so the emitted Anthropic prefix bytes genuinely
+    change between two consecutive rounds whose mid-anchor sits on different
+    messages. The server then can't extend the prior [0:bp] entry and
+    ``cache_read`` collapses back to the static system floor (the 80315 pin).
+
+    Every other cache test stops at ``add_cache_breakpoints`` (OpenAI shape) or
+    at a single translated round. This class reproduces the owner-verified
+    ``/tmp/cache_wire_diff2.py`` judgment as a self-contained synthetic:
+    build round A and round B (B = A + a few more tool pairs) so the quantized
+    mid-anchor JUMPS forward off a mid-history tool_result, run the real chain
+    ``add_cache_breakpoints`` → ``openai_body_to_anthropic`` for both, then
+    assert the shared-prefix Anthropic messages are BYTE-IDENTICAL (marker key
+    excluded — the server prefix-matches on content, not on cache_control).
+
+    The round-counts 16/20 are chosen because the mid-anchor arms at 16 rounds
+    and lands on a tool_result, then quantum-advances by 20 rounds — exactly the
+    anchor shift that flipped msg[212]/msg[230] in production.
+    """
+
+    @staticmethod
+    def _strip_cc(obj):
+        """Anthropic message with every ``cache_control`` removed — the bytes
+        the server actually prefix-matches on (the marker itself is not part of
+        the cached content)."""
+        if isinstance(obj, dict):
+            return {k: TestCrossRoundWireByteInvariance._strip_cc(v)
+                    for k, v in obj.items() if k != 'cache_control'}
+        if isinstance(obj, list):
+            return [TestCrossRoundWireByteInvariance._strip_cc(x) for x in obj]
+        return obj
+
+    def _wire_prefix_bytes(self, num_rounds, add_fn):
+        """Real chain for one round: build → add_cache_breakpoints → translate.
+        Returns per-message canonical (cache_control-stripped) JSON bytes of the
+        emitted Anthropic messages."""
+        from lib.llm.anthropic_outbound import openai_body_to_anthropic
+        body = _make_tool_conv(num_rounds, empty_assistant_content=True)
+        body['model'] = 'claude-sonnet-4-20250514'
+        add_fn(body)
+        ab = openai_body_to_anthropic(body)
+        return [json.dumps(self._strip_cc(m), ensure_ascii=False, sort_keys=True)
+                for m in ab.get('messages', [])]
+
+    def _diverging_indices(self, ra, rb, add_fn):
+        wa = self._wire_prefix_bytes(ra, add_fn)
+        wb = self._wire_prefix_bytes(rb, add_fn)
+        n = min(len(wa), len(wb))
+        return [i for i in range(n) if wa[i] != wb[i]]
+
+    def test_shared_prefix_is_byte_identical_across_anchor_shift(self):
+        """THE regression guard: across a mid-anchor jump (16→20 rounds), every
+        shared-prefix Anthropic message must be byte-identical. A str↔block flip
+        on a mid-history tool_result would surface here as a DIVERGE."""
+        for ra, rb in [(16, 20), (20, 24), (18, 22)]:
+            div = self._diverging_indices(ra, rb, add_cache_breakpoints)
+            assert div == [], (
+                f'{ra}->{rb} rounds: shared-prefix Anthropic bytes diverge at '
+                f'message indices {div} — the str<->block flip has regressed '
+                f'and cache_read will pin at the system floor')
+
+    def test_negative_control_flip_survives_translation(self):
+        """Belt-and-braces: prove the guard has TEETH by reconstructing the
+        pre-fix behaviour (Phase 0.5 normalization removed) and showing the SAME
+        synthetic then DOES diverge across the anchor shift. This anchors the
+        positive test to a demonstrated failure mode rather than a vacuous pass.
+
+        The neuter is built from the live source with the Phase 0.5 loop blanked
+        to ``pass`` — the exact code that shipped before commit 6d36e97 — so it
+        stays faithful even if the surrounding function is refactored."""
+        import inspect
+        import textwrap
+        import lib.llm.cache as cache_mod
+
+        src = inspect.getsource(cache_mod.add_cache_breakpoints).split('\n')
+        start = end = None
+        for idx, ln in enumerate(src):
+            if 'for i, msg in enumerate(messages):' in ln and start is None:
+                start = idx
+            if start is not None and ln.strip() == 'bp = 0':
+                end = idx
+                break
+        assert start is not None and end is not None, (
+            'could not locate the Phase 0.5 block to neuter — the fix may have '
+            'been restructured; update this negative control')
+        indent = len(src[start]) - len(src[start].lstrip())
+        neutered_src = textwrap.dedent(
+            '\n'.join(src[:start] + [' ' * indent + 'pass'] + src[end:]))
+        ns = dict(cache_mod.__dict__)
+        exec(compile(neutered_src, '<neutered_cache>', 'exec'), ns)
+        old_add = ns['add_cache_breakpoints']
+
+        any_diverge = False
+        for ra, rb in [(16, 20), (20, 24), (18, 22)]:
+            if self._diverging_indices(ra, rb, old_add):
+                any_diverge = True
+                break
+        assert any_diverge, (
+            'negative control did not reproduce the flip — the guard would pass '
+            'vacuously; the synthetic no longer straddles the mid-anchor jump')
+
+
+@pytest.mark.unit
+class TestMidHistoryAnchor:
+    """The 20-block-lookback fix: a mid-history stepping-stone breakpoint arms
+    only on genuinely long conversations, trails the tail within the lookback
+    window, and advances in quantized jumps (not every round)."""
+
+    def _grow(self, rounds):
+        msgs = [{'role': 'system', 'content': [{'type': 'text', 'text': f'S{k}'} for k in range(3)]},
+                {'role': 'user', 'content': 'go'}]
+        for i in range(rounds):
+            msgs.append({'role': 'assistant', 'content': '',
+                         'tool_calls': [{'id': f'c{i}', 'type': 'function',
+                                         'function': {'name': 'read_files', 'arguments': '{}'}}]})
+            msgs.append({'role': 'tool', 'tool_call_id': f'c{i}', 'content': f'r{i}'})
+        return {'model': 'claude-sonnet-4-20250514', 'messages': msgs,
+                'tools': [{'type': 'function', 'function': {
+                    'name': 'read_files', 'description': 'r',
+                    'parameters': {'type': 'object'}}}]}
+
+    def _msg_marker_indices(self, body):
+        return [i for i, m in enumerate(body['messages'])
+                if i > 0 and isinstance(m.get('content'), list)
+                and any(isinstance(x, dict) and 'cache_control' in x for x in m['content'])]
+
+    def test_no_mid_anchor_on_short_conv(self):
+        """A short conversation gets ONLY the rolling tail (no mid anchor) — the
+        head is still directly reachable, so the mid slot is not spent."""
+        body = self._grow(3)
+        add_cache_breakpoints(body)
+        assert len(self._msg_marker_indices(body)) == 1, \
+            'Short conv should have exactly one message marker (the tail)'
+
+    def test_mid_anchor_arms_on_long_conv(self):
+        """A long conversation gets a mid anchor + the tail (two message
+        markers), so the tail's lookback always reaches a prior entry."""
+        body = self._grow(20)
+        add_cache_breakpoints(body)
+        marks = self._msg_marker_indices(body)
+        assert len(marks) == 2, f'Long conv should have mid+tail markers, got {marks}'
+        mid, tail = marks[0], marks[-1]
+        assert tail - mid < 20, \
+            f'Mid anchor must stay within the 20-block lookback of the tail (gap={tail-mid})'
+
+    def test_mid_anchor_never_on_early_user(self):
+        """The mid anchor must never collapse onto the first user turn (the
+        anti-oscillation invariant)."""
+        for r in range(4, 30):
+            body = self._grow(r)
+            add_cache_breakpoints(body)
+            marks = self._msg_marker_indices(body)
+            assert 1 not in marks, \
+                f'r={r}: mid/tail marker landed on the early user turn (msg[1])'
+
+    def test_mid_anchor_quantized_stable(self):
+        """The mid anchor stays put for a run of rounds then jumps — it must NOT
+        move every round (else it is always a fresh write, never a read)."""
+        seen = []
+        for r in range(16, 28):
+            body = self._grow(r)
+            add_cache_breakpoints(body)
+            marks = self._msg_marker_indices(body)
+            if len(marks) == 2:
+                seen.append(marks[0])
+        # Across 12 growing rounds the mid should occupy only a FEW distinct
+        # positions (jumps), not a new position every round.
+        assert len(set(seen)) < len(seen), \
+            f'Mid anchor moved every round (not quantized): {seen}'
+
+    def test_total_never_exceeds_four(self):
+        """Even with the mid anchor, total markers never exceed Anthropic's 4."""
+        for r in (2, 8, 16, 30):
+            body = self._grow(r)
+            add_cache_breakpoints(body)
+            assert _count_breakpoints(body) <= 4, f'r={r}: exceeded 4 breakpoints'
+
+
+@pytest.mark.unit
+class TestDetectorMarkerHonesty:
+    """The detector must not certify a miss as 'server-side PROVEN' when a
+    breakpoint was LOST between rounds (byte-identical content), but must NOT
+    fire on the rolling tail's normal forward move."""
+
+    def test_markers_regressed_on_count_drop(self):
+        from lib.tasks_pkg.wire_fingerprint import markers_regressed
+        prev = {'count': 4, 'msg': [('k1', 0), ('k2', 0)], 'sys': 1, 'tools': 1}
+        cur = {'count': 3, 'msg': [('k1', 0)], 'sys': 1, 'tools': 1}
+        assert markers_regressed(prev, cur) is True
+
+    def test_markers_not_regressed_on_rolling_move(self):
+        """Same count, tail moved to a new message key — NOT a regression."""
+        from lib.tasks_pkg.wire_fingerprint import markers_regressed
+        prev = {'count': 4, 'msg': [('mid', 0), ('tailA', 0)], 'sys': 1, 'tools': 1}
+        cur = {'count': 4, 'msg': [('mid', 0), ('tailB', 0)], 'sys': 1, 'tools': 1}
+        assert markers_regressed(prev, cur) is False
+
+    def test_markers_regressed_on_sys_change(self):
+        from lib.tasks_pkg.wire_fingerprint import markers_regressed
+        prev = {'count': 4, 'msg': [], 'sys': 2, 'tools': 1}
+        cur = {'count': 4, 'msg': [], 'sys': 1, 'tools': 1}
+        assert markers_regressed(prev, cur) is True
+
+    def test_marker_signature_counts_tool_result_block(self):
+        """marker_signature must count a cache_control on a translated
+        tool_result block (the fix's whole point)."""
+        from lib.llm.anthropic_outbound import openai_body_to_anthropic
+        from lib.tasks_pkg.wire_fingerprint import marker_signature
+        body = _make_tool_conv(2, empty_assistant_content=True)
+        body['model'] = 'claude-sonnet-4-20250514'
+        add_cache_breakpoints(body)
+        ab = openai_body_to_anthropic(body)
+        sig = marker_signature(ab)
+        assert sig['count'] >= 1, 'marker_signature found no markers'

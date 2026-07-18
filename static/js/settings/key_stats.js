@@ -93,8 +93,7 @@ function _keyStatsHelpText(isLocal) {
   if (!day) return base;
   var max429 = _keyStatsCache.max_consecutive_429 || 100;
   var minSrPct = Math.round((_keyStatsCache.min_success_rate || 0.5) * 100);
-  return base + '\n\n' + day + ': 连续 ' + max429 + ' 次 429 或成功率 < ' +
-    minSrPct + '% 时自动停用；次日自动重置。';
+  return base + '\n\n' + t('settings.keyStatAutoDisablePolicy', { day: day, n: max429, pct: minSrPct });
 }
 
 /** Render the stats sub-row HTML for one key card.
@@ -120,42 +119,42 @@ function _renderKeyCardStatsHTML(provIdx, keyIdx) {
   var lastResort = !!(row && row.last_resort);
 
   var badge = '';
-  if (row && row.override === false) badge = '<span class="stg-keystat-badge off">手动关闭</span>';
-  else if (row && row.override === true) badge = '<span class="stg-keystat-badge on">手动开启</span>';
-  else if (lastResort) badge = '<span class="stg-keystat-badge warn" title="本应自动停用，但这是该服务商今天唯一可用的密钥 — 保留为最后备选">保留为最后备选</span>';
-  else if (exhausted) badge = '<span class="stg-keystat-badge warn" title="已连续返回 ' + max429 + ' 次 429 — 可能已欠费/额度耗尽，今日停用">自动停用 (连续 429)</span>';
-  else if (autoOff) badge = '<span class="stg-keystat-badge warn">自动停用</span>';
+  if (row && row.override === false) badge = '<span class="stg-keystat-badge off">' + t('settings.keyStatOverrideOff') + '</span>';
+  else if (row && row.override === true) badge = '<span class="stg-keystat-badge on">' + t('settings.keyStatOverrideOn') + '</span>';
+  else if (lastResort) badge = '<span class="stg-keystat-badge warn" title="' + escapeHtml(t('settings.keyStatLastResortTip')) + '">' + t('settings.keyStatLastResort') + '</span>';
+  else if (exhausted) badge = '<span class="stg-keystat-badge warn" title="' + escapeHtml(t('settings.keyStatExhaustedTip', { n: max429 })) + '">' + t('settings.keyStatExhausted') + '</span>';
+  else if (autoOff) badge = '<span class="stg-keystat-badge warn">' + t('settings.keyStatAutoOff') + '</span>';
 
   var streakBadge = '';
   if (!exhausted && cons429 >= Math.max(10, max429 / 2)) {
-    streakBadge = '<span class="stg-keystat-badge warn" title="连续 429 次数接近阈值 (' + max429 + ')，一旦达到将自动停用">连续 429 × ' + cons429 + '</span>';
+    streakBadge = '<span class="stg-keystat-badge warn" title="' + escapeHtml(t('settings.keyStat429StreakTip', { max: max429 })) + '">' + t('settings.keyStat429Streak', { n: cons429 }) + '</span>';
   }
 
   var showErr = row && row.last_error && (fail > 0 || exhausted);
-  var lastErr = showErr ? ('<span class="stg-keystat-err" title="' + escapeHtml(row.last_error) + '">最近错误</span>') : '';
+  var lastErr = showErr ? ('<span class="stg-keystat-err" title="' + escapeHtml(row.last_error) + '">' + t('settings.keyStatLastError') + '</span>') : '';
 
   var rateTitle = total > 0
-    ? '今日成功率 = 成功 ' + succ + ' / 调用 ' + total + '（429 限流不计入）'
-    : '今日尚无调用';
+    ? t('settings.keyStatRateTip', { succ: succ, total: total })
+    : t('settings.keyStatNoCallsTip');
   var countChip = total > 0
-    ? '<span class="stg-keystat-count" title="今日总调用次数（不含 429 限流）">调用 ' + total + '</span>'
-    : '<span class="stg-keystat-count" title="今日尚无调用">—</span>';
+    ? '<span class="stg-keystat-count" title="' + escapeHtml(t('settings.keyStatCountTip')) + '">' + t('settings.keyStatCount', { n: total }) + '</span>'
+    : '<span class="stg-keystat-count" title="' + escapeHtml(t('settings.keyStatNoCallsTip')) + '">—</span>';
 
   return '<span class="stg-keystat-metrics">' +
       '<span class="stg-keystat-rate" title="' + rateTitle + '">' + srTxt + '</span>' +
       countChip +
-      (fail > 0 ? '<span class="stg-keystat-fail" title="真正的调用失败次数（网络/5xx/解析错误等，不含 429）">失败 ' + fail + '</span>' : '') +
-      (rl429 > 0 ? '<span class="stg-keystat-429" title="今日收到的 429 限流次数（不计入成功率）；连续 ' + max429 + ' 次会自动停用">限流 ' + rl429 + '</span>' : '') +
+      (fail > 0 ? '<span class="stg-keystat-fail" title="' + escapeHtml(t('settings.keyStatFailTip')) + '">' + t('settings.keyStatFail', { n: fail }) + '</span>' : '') +
+      (rl429 > 0 ? '<span class="stg-keystat-429" title="' + escapeHtml(t('settings.keyStat429Tip', { max: max429 })) + '">' + t('settings.keyStat429', { n: rl429 }) + '</span>' : '') +
     '</span>' +
     streakBadge + badge + lastErr +
     '<span class="stg-keystat-actions">' +
-      '<label class="stg-toggle stg-key-toggle" title="今日启用/禁用此密钥（明日自动重置）">' +
+      '<label class="stg-toggle stg-key-toggle" title="' + escapeHtml(t('settings.keyStatToggleTip')) + '">' +
         '<input type="checkbox"' + (enabled ? ' checked' : '') +
             ' onchange="_onKeyToggle(' + provIdx + ',' + keyIdx + ',this.checked)">' +
         '<span class="stg-toggle-track"><span class="stg-toggle-thumb"></span></span>' +
       '</label>' +
       (row && row.override != null
-        ? '<button class="stg-btn-link" title="清除手动设置，恢复自动判定" onclick="_onKeyClearOverride(' + provIdx + ',' + keyIdx + ')">重置</button>'
+        ? '<button class="stg-btn-link" title="' + escapeHtml(t('settings.keyStatClearOverrideTip')) + '" onclick="_onKeyClearOverride(' + provIdx + ',' + keyIdx + ')">' + t('settings.keyStatReset') + '</button>'
         : '') +
     '</span>';
 }

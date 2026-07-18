@@ -140,33 +140,16 @@ function _applyModelUI(modelId) {
   });
   _updateDepthButtons(depth);
 
-  // ★ Show/hide thinking-depth bar
+  /* ★ Show/hide the thinking-depth section. It now lives INSIDE the model
+   * dropdown (folded out of the toolbar row), so its visibility no longer
+   * changes the toolbar's intrinsic width — no reflow is needed for it, and
+   * the row-fade transition machinery is gone. Just show it for
+   * thinking-capable models, hide it otherwise. */
   const depthBar = document.getElementById("thinkingDepthSection");
-  const modelGroup = document.getElementById("modelGroup");
-  if (depthBar) {
-    /* ★ PERF FIX: Suppress the depth bar's CSS opacity transition during
-     * programmatic show/hide (conv switches, model changes).  The .2s fade
-     * causes the bar to animate sluggishly ("stuck with glue") instead of
-     * snapping instantly.
-     * Fix: disable transition → apply state → flush layout → restore. */
-    depthBar.style.transition = 'none';
-    if (isThinking) {
-      depthBar.style.display = 'flex';
-      depthBar.style.opacity = '1';
-      depthBar.style.pointerEvents = 'auto';
-      modelGroup?.classList.remove('depth-hidden');
-    } else {
-      depthBar.style.opacity = '0';
-      depthBar.style.pointerEvents = 'none';
-      modelGroup?.classList.add('depth-hidden');
-      depthBar.style.display = 'none';  /* instant hide — no setTimeout delay */
-    }
-    depthBar.offsetWidth; /* flush layout with transition:none */
-    depthBar.style.transition = ''; /* restore CSS transition for hover effects etc. */
-  }
+  if (depthBar) depthBar.style.display = isThinking ? '' : 'none';
   document.getElementById("presetWrapper")?.classList.remove("open");
-  /* ★ Resize .input-inner to fit toolbar content — must run after DOM updates above.
-   * Only needed when the model ACTUALLY changed (thinking bar visibility may differ). */
+  /* ★ Resize .input-inner to fit toolbar content — the model label width may
+   * have changed. (Depth visibility no longer affects width — see above.) */
   _scheduleReflow();
   /* ★ Refresh the context health bar — the model's context window changed,
    * so the same token count maps to a different fill % and zone. */
@@ -263,7 +246,22 @@ function _reflowToolbar() {
   w = Math.ceil(w) + 1;
   const vw = document.documentElement.clientWidth;
   const maxW = vw - 48; /* 24px padding each side */
-  w = Math.max(480, Math.min(w, maxW));
+  /* ★ Floor the composer to the chat reading column so the input box lines up
+   * with the messages above it, instead of collapsing to the (now much
+   * narrower) decluttered-toolbar content width — on a wide landscape display
+   * a ~540px toolbar under an 820px message column reads as "input too narrow".
+   * Read the measure from .chat-inner so the responsive reading width (820
+   * desktop / 920 portrait-tablet) stays SINGLE-SOURCE in CSS and adapts per
+   * resolution; the measured toolbar width can still EXPAND beyond it when the
+   * content genuinely needs more room. The min(…,maxW) cap still wins on a
+   * narrow window so we never overflow the viewport. */
+  let readingFloor = 820;
+  const chatInner = document.querySelector('.chat-inner');
+  if (chatInner) {
+    const mw = parseFloat(getComputedStyle(chatInner).maxWidth);
+    if (mw && isFinite(mw)) readingFloor = mw;
+  }
+  w = Math.min(Math.max(w, readingFloor), maxW);
   /* Add border width of .input-box (varies by theme: 1.5px default, 2.5px tofu) */
   const boxBorder = inputBox
     ? (parseFloat(getComputedStyle(inputBox).borderLeftWidth) || 0)
@@ -284,7 +282,20 @@ function _reflowToolbar() {
  * Once the real font loads, glyph widths change and the preset label
  * may need more space. */
 if (document.fonts && document.fonts.ready) {
-  document.fonts.ready.then(() => _scheduleReflow());
+  document.fonts.ready.then(() => {
+    /* ★ Suppress the .input-inner max-width .4s transition for THIS re-snap.
+     * With preload the metrics usually already match (no-op), but on a cold
+     * cache the glyph widths still change here — without this guard the width
+     * delta animates as a visible 0.4s "settle". Restore the transition on the
+     * next frame so genuine user-driven width changes still animate. */
+    const inner = document.querySelector('.input-inner');
+    const prev = inner ? inner.style.transition : null;
+    if (inner) inner.style.transition = 'none';
+    _reflowToolbar();
+    if (inner) {
+      requestAnimationFrame(() => { inner.style.transition = prev || ''; });
+    }
+  });
 }
 /* --chat-w is NOT synced — chat area uses its own fixed max-width (820px default)
  * independent of toolbar width, per §4.2 decoupled layout. */
@@ -603,7 +614,7 @@ function _restoreConvToolState(conv) {
     document.querySelectorAll('#igCountBar .ig-pill').forEach(b =>
       b.classList.toggle('active', parseInt(b.dataset.count) === _igSelectedCount));
     const genText = document.querySelector('.ig-gen-text');
-    if (genText) genText.textContent = _igSelectedCount > 1 ? `${_igSelectedCount}连抽!` : '生成';
+    if (genText) genText.textContent = _igSelectedCount > 1 ? t('main.igBatchGo', { n: _igSelectedCount }) : t('main.igGenerate');
   }
   /* ★ Restore aspect ratio selection */
   if (conv.imageGenAspect) {
@@ -637,8 +648,11 @@ function _restoreConvToolState(conv) {
   /* ★ If the Project Brain panel is open, re-resolve its feed to the new
    *   conversation's project (two projects must never bleed into one view). */
   if (typeof projectBrainRefresh === 'function') projectBrainRefresh();
-  /* ★ Re-pull the always-visible per-conversation Brain Influence bar with
-   *   the NEW convId so it re-renders for this conversation (or hides). */
+  /* ★ The always-visible per-conversation influence bar (#convInfluenceBar)
+   *   is conv-scoped, so re-pull it on every switch. It's exposed as
+   *   window.convInfluenceRefresh but was never wired here, so it only ever
+   *   populated while the Brain panel was already open and a push frame fired
+   *   (see index.html's own "Updates on conversation switch" comment). */
   if (typeof convInfluenceRefresh === 'function') convInfluenceRefresh();
   /* ★ Reflow toolbar after restoring conv tool state (toolbar width may differ). */
   _scheduleReflow();
@@ -651,7 +665,11 @@ function _resetToolsToDefaults() {
   _applyCodeExecUI(false);
   _applyBrowserUI(false);
   _applyMemoryUI(true);
-  _applySwarmUI(true);
+  /* ★ Swarm + Autopilot default OFF for a project-LESS chat. They are
+   * auto-enabled only when the user turns Project mode on (see
+   * _autoEnableProjectModes in project.js). A user can still enable either
+   * manually without a project — this only changes the default state. */
+  _applySwarmUI(false);
   _applyEndpointUI(false);
   _applyAutopilotUI(false);
   _applyFlowUI('');
@@ -685,9 +703,54 @@ function _resetToolsToDefaults() {
    ═══════════════════════════════════════════════════════════════════ */
 
 
+/**
+ * WebView zero-height guard. On some Android WebViews the initial containing
+ * block is measured as INDEFINITE height during/after load, so the base CSS
+ * `html{height:100%}` / `body{height:100dvh}` both resolve to 0 — collapsing
+ * the entire `.main → .chat-wrapper → #chatContainer` flex chain to height:0
+ * and painting a blank page, even though `window.innerHeight` reports the true
+ * viewport (observed: innerHeight=799 but html/body computed height=0). Desktop
+ * Chrome resolves the percentage/vh correctly; the WebView does not.
+ *
+ * Fix: pin html/body height to the KNOWN-GOOD `window.innerHeight` in pixels,
+ * sidestepping the broken %/dvh resolution. Kept in sync on resize/orientation.
+ * A no-op on browsers where the chain is already non-zero (setting the same
+ * pixel height the layout already has changes nothing visible). Runs at boot
+ * and once more on the next frame to catch a late viewport establishment.
+ *
+ * Also publishes `--vh100` (window.innerHeight in px) on :root so any CSS that
+ * sizes off the viewport (e.g. modal `max-height`) can consume a known-good
+ * pixel height with a plain `vh` fallback — same WebView quirk collapses those
+ * to ~0 too (observed: the software-update modal clipped to a sliver).
+ */
+function _installViewportHeightGuard() {
+  function apply() {
+    var h = window.innerHeight;
+    if (!h || h < 1) return;               // don't pin to a bogus 0
+    var px = h + 'px';
+    // Use setProperty(...,'important') so this inline value beats stylesheet
+    // rules marked !important (e.g. the phone block's
+    // `body{height:100dvh!important}`, where 100dvh collapses to 0 in this
+    // WebView). Inline !important outranks stylesheet !important.
+    document.documentElement.style.setProperty('height', px, 'important');
+    document.body.style.setProperty('height', px, 'important');
+    document.documentElement.style.setProperty('--vh100', px);
+  }
+  apply();
+  requestAnimationFrame(apply);            // re-apply after first layout frame
+  window.addEventListener('resize', apply);
+  window.addEventListener('orientationchange', function () {
+    // orientation metrics settle a beat late; re-apply shortly after.
+    setTimeout(apply, 50); setTimeout(apply, 300);
+  });
+}
+
 // ── Event bindings ──
 (function init() {
   try {
+  // WebView zero-height guard FIRST — before any layout-dependent init, so the
+  // document has a real pixel height for the flex chain to fill.
+  try { _installViewportHeightGuard(); } catch (_) {}
   // ── Init model toggle from config ──
   (function initModelToggle() {
     thinkingEnabled = true;
@@ -778,7 +841,15 @@ function _resetToolsToDefaults() {
     }
     // ★ Folder assign button — handled above
     const item = e.target.closest(".conv-item");
-    if (item && item.dataset.convId) loadConversation(item.dataset.convId);
+    if (item && item.dataset.convId) {
+      /* ★ Float-to-top on open (durable): a genuine user click bumps the
+       *   conversation's updatedAt (+persists) so it rises to the top of the
+       *   recency-first sidebar. Scoped to THIS click path — programmatic opens
+       *   (boot restore / undo / duplicate) call loadConversation directly and
+       *   must NOT rewrite recency. Active-task guarded inside the helper. */
+      if (typeof _bumpConvOnOpen === 'function') _bumpConvOnOpen(item.dataset.convId);
+      loadConversation(item.dataset.convId);
+    }
   }
   document
     .getElementById("convList")
@@ -815,10 +886,7 @@ function _resetToolsToDefaults() {
         e.preventDefault();
         hasImage = true;
         const f = item.getAsFile();
-        const d = await processImageFile(f);
-        pendingImages.push(d);
-        renderImagePreviews();
-        if (typeof _igUpdateGenButton === 'function') _igUpdateGenButton();
+        await _handleImageDrop(f);
       }
     }
     // Detect log noise in pasted text — server-side via /api/v1/logs/clean
@@ -842,6 +910,8 @@ function _resetToolsToDefaults() {
     document.addEventListener("dragenter", (e) => {
       e.preventDefault();
       if (!e.dataTransfer || !e.dataTransfer.types.includes("Files")) return;
+      // Project modal open → the folder browser owns file drops (save-to-disk).
+      if (window._tofuProjectModalOpen) return;
       _dragCounter++;
       if (_dragCounter === 1 && overlay) {
         overlay.classList.add("visible");
@@ -871,6 +941,10 @@ function _resetToolsToDefaults() {
       }
     });
     document.addEventListener("drop", async (e) => {
+      // Project modal open → the folder browser's capture-phase handler saves
+      // the file to disk and stopPropagation()s; if a drop lands OUTSIDE the
+      // browser box we simply ignore it rather than attaching to chat.
+      if (window._tofuProjectModalOpen) return;
       e.preventDefault();
       _dragCounter = 0;
       if (overlay) overlay.classList.remove("visible");
@@ -913,12 +987,34 @@ function _resetToolsToDefaults() {
         _scrollTicking = true;
         requestAnimationFrame(() => {
           updateActiveTurn();
+          _updateScrollToBottomBtn();
           _scrollTicking = false;
         });
       }
     },
     { passive: true },
   );
+  /* Keep the scroll-to-bottom button anchored just above the composer on
+   * every viewport (desktop full toolbar ≈150px, mobile compact ≈70-110px,
+   * grows with attachment previews / mode bars) — publish the live
+   * .input-area height as a CSS var instead of guessing a fixed offset. */
+  (function _trackInputAreaHeight() {
+    const inputArea = document.querySelector(".input-area");
+    const wrapper = document.querySelector(".chat-wrapper");
+    if (!inputArea || !wrapper) return;
+    const publish = () => {
+      wrapper.style.setProperty("--input-area-h", inputArea.offsetHeight + "px");
+      _updateScrollToBottomBtn();
+    };
+    publish();
+    if (typeof ResizeObserver === "function") {
+      try {
+        new ResizeObserver(publish).observe(inputArea);
+      } catch (err) {
+        console.warn("input-area ResizeObserver failed:", err);
+      }
+    }
+  })();
   document.addEventListener("keydown", (e) => {
     /* Ctrl/Cmd+K → toggle sidebar search */
     if ((e.ctrlKey || e.metaKey) && e.key === "k") {
@@ -973,6 +1069,9 @@ function _resetToolsToDefaults() {
     }
   });
   initSidebarSearch();
+  /* Voice input — probe backend capability + browser support; the mic button
+     stays hidden unless a transcription model is configured. Fire-and-forget. */
+  if (typeof initVoiceInput === 'function') { initVoiceInput(); }
   /* ★ DB-first boot: conversations[] starts empty and is populated by
    *   loadConversationsFromServer() inside initActiveTasks().
    *   The sidebar shows a brief loading indicator (~16ms) until the
@@ -1006,6 +1105,24 @@ function _resetToolsToDefaults() {
     hydrateSidebarFromCache().catch(e => debugLog(`cache hydrate: ${e.message}`, 'warn'));
   }
 
+  /* ★ Event-driven cross-device sync: subscribe to the server's `notify`
+   *   push so a sibling device's change (new turn / rename / delete / folder)
+   *   reconciles in real time — no manual refresh, no waiting for the poll.
+   *   Wired HERE (not at cross_tab_sync.js load) because that file is bundled
+   *   before push.js, so pushSubscribe isn't defined yet at its IIFE time. */
+  if (typeof _wireConvSyncPush === 'function') _wireConvSyncPush();
+
+  /* ★ Server→client history_rewrite alignment: subscribe to the `conv` push
+   *   channel so a backend reconcile (ghost-tail delete / husk collapse) is
+   *   applied in place the instant it lands — the "must refresh to sync state"
+   *   fix. Same late-wire reason as above (pushSubscribe defined by push.js). */
+  if (typeof _wireConvHistoryRewritePush === 'function') _wireConvHistoryRewritePush();
+
+  /* ★ Windowed-read scroll-up loader: when a long conversation is opened with
+   *   only its tail window, scrolling to the top fetches + prepends earlier
+   *   messages. Inert unless the server served a windowed response. */
+  if (typeof wireConvWindowScrollLoader === 'function') wireConvWindowScrollLoader();
+
   initActiveTasks().then(() => {
     /* ★ Decide reconnect by OBSERVABLE OUTCOME, not by a thrown error.
      *   loadConversationsFromServer swallows Failed to fetch (try/catch →
@@ -1020,20 +1137,12 @@ function _resetToolsToDefaults() {
       _clearBootReconnectBanner();
     }
     renderConversationList();
-    /* ★ Try to restore the last active conversation from before refresh */
-    const restoredConv = _restoredConvId && conversations.find(c => c.id === _restoredConvId);
-    if (restoredConv) {
-      loadConversation(_restoredConvId);
-    } else if (conversations.length > 0 && !conversations.find(c => c.id === activeConvId)) {
-      /* Fall back: auto-select the most recent conversation */
-      const input = document.getElementById('messageInput');
-      const hasInput = input && input.value.trim().length > 0;
-      if (!hasInput) {
-        loadConversation(conversations[0].id);
-      }
-    }
+    _bootRestoreActiveConv(_restoredConvId);
     // After task reconnection, resume any pending translation tasks for active conv
     if (activeConvId) _resumePendingTranslations(activeConvId);
+    /* ★ Re-attempt any durable pending-sync messages (poor-network send
+     *   failures carried across a reload) once the conv list is loaded. */
+    if (typeof _flushPendingSyncs === 'function') _flushPendingSyncs('boot');
   }).catch(e => {
     debugLog(`Boot load failed: ${e.message}`, 'warn');
     /* Even if server load fails, the app is still usable — user can create new
@@ -1046,24 +1155,13 @@ function _resetToolsToDefaults() {
   loadProjectStatus();
   _updateAutoApplyUI();
   _applyAutoTranslateUI();
-  setInterval(() => {
-    if (document.visibilityState !== "visible" || _editingMsgIdx !== null) return;
-    /* Yield to pending input: the merge + conv-list rebuild is ~tens of ms of
-     * main-thread work; running it on a bare timer adds input delay (poor INP)
-     * when a click lands mid-poll. requestIdleCallback defers it until the main
-     * thread is free. Fallback to a plain call where rIC is unavailable. */
-    const _poll = () => {
-      if (window._bootLoadInFlight) return;  // don't stack with boot-reconnect backoff
-      window._bootLoadInFlight = true;
-      Promise.resolve(loadConversationsFromServer())
-        .catch(e => debugLog(`[poll] ${e.message}`, 'warn'))
-        .finally(() => { window._bootLoadInFlight = false; });
-    };
-    if (typeof requestIdleCallback === "function")
-      requestIdleCallback(_poll, { timeout: 5000 });
-    else
-      _poll();
-  }, 60000);
+  /* Visible-idle conversation-list reconciliation is owned by the SINGLE
+   * fully-guarded reconciler `_crossDeviceReconcile` (core/cross_tab_sync.js).
+   * A second timer used to live here on a 60s cadence but with a WEAKER guard
+   * (it omitted the `activeStreams.size===0` check), so it could fire a
+   * full list merge + re-render mid-stream — needless churn and a divergent
+   * contract across timers. Consolidated into the one reconciler, which now
+   * carries the requestIdleCallback INP-yield this timer contributed. */
   // ── Tab visibility: resume pending translations when user switches back ──
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible' && activeConvId) {
@@ -1108,19 +1206,52 @@ function _resetToolsToDefaults() {
    * Concurrency: _bootLoadInFlight guards against stacking with the 60s
    * refresh timer / cross-tab triggers so a flaky tunnel can't spawn a pile of
    * overlapping fetches. */
+  /* ★ Restore the last active conversation from before a page refresh — but
+   *   ONLY when the user hasn't already navigated during this (possibly slow)
+   *   server load. The sidebar is painted from the IndexedDB cache instantly,
+   *   so on a poor connection the user can click into a conversation (or start
+   *   a new-chat send) BEFORE the boot load resolves. newChat() reset
+   *   activeConvId=null at boot and nothing but a user action sets it during
+   *   the load, so a non-null activeConvId here means "the user already chose
+   *   what to view" — restoring/auto-selecting now would yank them off it (the
+   *   "loading finished and suddenly switched my conversation" bug) and, for a
+   *   _needsLoad target, flash the loading skeleton at the top. Only act when
+   *   they're still on the welcome screen (activeConvId still null). */
+  function _bootRestoreActiveConv(restoredId) {
+    if (activeConvId) return;  // user already navigated during the load — leave them be
+    const restoredConv = restoredId && conversations.find(c => c.id === restoredId);
+    if (restoredConv) {
+      loadConversation(restoredId);
+      return;
+    }
+    if (conversations.length > 0) {
+      const input = document.getElementById('messageInput');
+      const hasInput = input && input.value.trim().length > 0;
+      if (!hasInput) loadConversation(conversations[0].id);
+    }
+  }
+
   function _showBootReconnectBanner() {
     if (document.getElementById('boot-reconnect-banner')) return;
     const banner = document.createElement('div');
     banner.id = 'boot-reconnect-banner';
+    /* If the DB-unavailable banner (z-index 10000, top:0) is already showing,
+     *   offset below it so the two STACK instead of overlapping at top:0 (the
+     *   9999 boot banner would otherwise be hidden behind the 10000 DB one). */
+    const _dbBanner = document.getElementById('db-warning-banner');
+    const _topOffset = _dbBanner ? (_dbBanner.offsetHeight || 44) : 0;
     banner.style.cssText =
-      'position:fixed;top:0;left:0;right:0;z-index:9999;' +
+      'position:fixed;top:' + _topOffset + 'px;left:0;right:0;z-index:9999;' +
       'background:#b45309;color:#fff;padding:8px 14px;font-size:13px;' +
       'text-align:center;box-shadow:0 2px 8px rgba(0,0,0,.3);' +
       'display:flex;align-items:center;justify-content:center;gap:8px;';
     /* SVG glyph per CLAUDE.md §3.4 — no emoji for UI status. */
+    const _bannerText = (typeof t === 'function')
+      ? t('conn.bootReconnect')
+      : '离线，显示缓存的对话，正在重连…';
     banner.innerHTML =
       '<span style="display:inline-flex"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg></span>' +
-      '<span>离线，显示缓存的对话，正在重连…<span style="opacity:.75"> Offline — showing cached conversations, reconnecting…</span></span>';
+      '<span>' + _bannerText + '</span>';
     document.body.prepend(banner);
   }
 
@@ -1145,14 +1276,37 @@ function _resetToolsToDefaults() {
     try {
       for (let i = 0; i < _delays.length; i++) {
         await new Promise(r => setTimeout(r, _delays[i]));
-        if (window._bootLoadInFlight) continue;  // another load (timer/cross-tab) is running
-        window._bootLoadInFlight = true;
+        /* Acquire the shared self-healing in-flight lease. `_acquireBootLoad`
+         *   is a no-op-returns-false when another load holds a FRESH lease, but
+         *   reclaims a STALE one (a prior load that never settled through the
+         *   tunnel) so a wedged load can't disable boot reconnect forever.
+         *   Fall back to the bare latch only if the helper isn't present
+         *   (cross_tab_sync.js is bundled before main.js, so it normally is). */
+        const _acq = (typeof window._acquireBootLoad === 'function')
+          ? window._acquireBootLoad
+          : () => { if (window._bootLoadInFlight) return false; window._bootLoadInFlight = Date.now(); return true; };
+        const _rel = (typeof window._releaseBootLoad === 'function')
+          ? window._releaseBootLoad
+          : () => { window._bootLoadInFlight = 0; };
+        if (!_acq()) continue;  // another load (timer/cross-tab) holds a fresh lease
         try {
           await loadConversationsFromServer();
           /* The call swallows errors + resolves, so success is the observable
            *   flag, not the absence of a throw. */
           if (typeof serverLoadOk !== 'function' || serverLoadOk()) {
             _clearBootReconnectBanner();
+            /* ★ Self-heal folders: loadFolders() runs ONCE at boot inside
+             *   initActiveTasks' Promise.all and has no retry of its own — a
+             *   failed first fetch leaves _foldersLoaded=false and the folder
+             *   rail hidden for the whole session ("sidebar folder gone after
+             *   refresh"). The reconnect loop only re-ran loadConversationsFromServer,
+             *   so folders never recovered. Re-fetch them here once the server
+             *   is reachable again. */
+            if (typeof loadFolders === 'function' &&
+                typeof areFoldersLoaded === 'function' && !areFoldersLoaded()) {
+              await Promise.resolve(loadFolders()).catch(e =>
+                debugLog(`[boot-reconnect] folder reload failed: ${e && e.message}`, 'warn'));
+            }
             renderConversationList();
             debugLog(`[boot-reconnect] recovered on attempt ${i + 1}`, 'success');
             return;
@@ -1161,7 +1315,7 @@ function _resetToolsToDefaults() {
         } catch (e) {
           debugLog(`[boot-reconnect] attempt ${i + 1} threw: ${e.message}`, 'warn');
         } finally {
-          window._bootLoadInFlight = false;
+          _rel();
         }
       }
       debugLog('[boot-reconnect] gave up after backoff; 60s timer will keep trying', 'warn');

@@ -79,6 +79,9 @@ global._pollTranslateTaskBatch = async () => [];
 
 // core/conversations.js — defines convAutoTranslate + convAutoTranslateEffective
 eval(fs.readFileSync(process.argv[2], 'utf8'));
+// core/translation_model.js — the REAL needsTranslation/readTranslation the
+// resume sweep decision now depends on (must load before translation.js).
+eval(fs.readFileSync(process.argv[4], 'utf8'));
 // translation.js — defines _resumePendingTranslations (+ registers push sub)
 eval(fs.readFileSync(process.argv[3], 'utf8'));
 
@@ -214,6 +217,7 @@ def test_frontend_retro_autotranslate_honors_live_toggle():
             ['node', harness,
              os.path.join(JS_DIR, 'core', 'conversations.js'),  # argv[2]
              os.path.join(JS_DIR, 'translation.js'),            # argv[3]
+             os.path.join(JS_DIR, 'core', 'translation_model.js'),  # argv[4]
              ],
             capture_output=True, text=True, timeout=60,
         )

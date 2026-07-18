@@ -101,6 +101,10 @@ win._convRenderFingerprint = global._convRenderFingerprint = () => 'fp';
 win._findAutopilotPendingCarrier = global._findAutopilotPendingCarrier = () => null;
 win._dispatchableQueueCount = global._dispatchableQueueCount = () => 0;
 win.convAutoTranslate = global.convAutoTranslate = () => false;
+// finishStream now also consults the EFFECTIVE resolver (unification fix —
+// live global toggle wins when ON). Both OFF here so no translation fires.
+win.convAutoTranslateEffective = global.convAutoTranslateEffective = () => false;
+win._startAutoTranslateForMsg = global._startAutoTranslateForMsg = spy('_startAutoTranslateForMsg');
 win.autoTranslate = global.autoTranslate = false;
 win.formatClockTime = global.formatClockTime = () => '';
 win._streamingBubbleHTML = global._streamingBubbleHTML = () => '';

@@ -238,19 +238,7 @@ def test_full_autonomous_flywheel(flask_app, monkeypatch):
 #  Source-level NEGATIVE CONTROL: the scheduler-tick wiring is load-bearing
 # ════════════════════════════════════════════════════════════════════
 
-def _patch_restore(path, old, new, run):
-    with open(path, encoding='utf-8') as f:
-        original = f.read()
-    assert old in original, f'anchor not found in {path}'
-    try:
-        with open(path, 'w', encoding='utf-8') as f:
-            f.write(original.replace(old, new, 1))
-        run()
-    finally:
-        with open(path, 'w', encoding='utf-8') as f:
-            f.write(original)
-    with open(path, encoding='utf-8') as f:
-        assert f.read() == original, 'source not restored byte-identical'
+from tests._nc_harness import patch_restore as _patch_restore  # noqa: E402
 
 
 def test_NC_scheduler_tick_wiring_is_load_bearing(flask_app, monkeypatch):
@@ -262,15 +250,14 @@ def test_NC_scheduler_tick_wiring_is_load_bearing(flask_app, monkeypatch):
     asserting: with the call intact an open epic gets claimed; with it no-opped
     it stays open.
     """
-    import importlib
-
     proj = os.path.abspath('/tmp/flywheel-nc')
     conv = 'conv-nc-worker'
 
     def _drive_tick_and_check(expect_claimed):
-        # Reload scheduler so the (possibly patched) source is in effect.
+        # The neutered scheduler module (when active) is live in sys.modules via
+        # the harness; import it directly (no reload — that would re-read the
+        # clean file). Outside the NC context this is the canonical module.
         import lib.scheduler.manager as sched
-        importlib.reload(sched)
         from lib.conversations.project_board import post_task, read_board
         from lib.database import DOMAIN_CHAT, get_thread_db
         monkeypatch.setattr('lib.project_mod.get_recent_projects',
@@ -308,9 +295,6 @@ def test_NC_scheduler_tick_wiring_is_load_bearing(flask_app, monkeypatch):
         '            pass  # NC sweep disabled',
         run,
     )
-    # restore scheduler module
-    import lib.scheduler.manager as sched
-    importlib.reload(sched)
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -440,14 +424,11 @@ def test_NC_reconcile_is_load_bearing(flask_app, monkeypatch):
     queued forever — exactly the shipped bug). With it intact: the stranded
     kickoff is drained + a task spawned. Neutered: zero tasks spawned, kickoff
     still queued. Byte-identical restore."""
-    import importlib
-
     proj = os.path.abspath('/tmp/strand-nc')
     conv = 'conv-strand-nc'
 
     def _strand_then_sweep_count():
         import lib.conversations.project_dispatch as pd
-        importlib.reload(pd)
         from lib.conversations.project_board import post_task
         from lib.database import DOMAIN_CHAT, get_thread_db
         from lib.message_queue import KIND_WORKFLOW, get_queue
@@ -499,10 +480,6 @@ def test_NC_reconcile_is_load_bearing(flask_app, monkeypatch):
         run,
     )
     _wipe_conv()
-    import lib.conversations.project_dispatch as pd
-    importlib.reload(pd)
-    import lib.scheduler.manager as sched
-    importlib.reload(sched)
 
 
 def test_NC_idle_drain_is_load_bearing(flask_app, monkeypatch):
@@ -512,18 +489,15 @@ def test_NC_idle_drain_is_load_bearing(flask_app, monkeypatch):
     With it intact: a task is spawned. Neutered: zero tasks spawned (kickoff
     rots in the queue — exactly the shipped bug). Byte-identical restore.
     """
-    import importlib
-
     proj = os.path.abspath('/tmp/coldstart-nc')
     conv = 'conv-coldstart-nc'
 
     def _drive_and_count_spawned():
-        # Reload project_dispatch FIRST (its source is what the NC patches),
-        # then scheduler (which imports sweep_all_active_projects at call time).
-        import lib.conversations.project_dispatch as pd
-        importlib.reload(pd)
+        # The neutered project_dispatch (when active) is live in sys.modules via
+        # the harness; scheduler imports sweep_all_active_projects at call time
+        # so it resolves the swapped module too — no reload needed.
+        import lib.conversations.project_dispatch as pd  # noqa: F401
         import lib.scheduler.manager as sched
-        importlib.reload(sched)
         from lib.conversations.project_board import post_task
         from lib.database import DOMAIN_CHAT, get_thread_db
         _clear_task_registry()
@@ -572,7 +546,3 @@ def test_NC_idle_drain_is_load_bearing(flask_app, monkeypatch):
         run,
     )
     _wipe_conv()
-    import lib.conversations.project_dispatch as pd
-    importlib.reload(pd)
-    import lib.scheduler.manager as sched
-    importlib.reload(sched)

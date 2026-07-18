@@ -83,9 +83,34 @@ def _load_app():
     return _APP
 
 
-# A tiny valid-enough PDF byte string. The real parser is monkeypatched, so the
-# bytes never have to parse — they only have to be written to disk.
-_FAKE_PDF = b'%PDF-1.4\n%%EOF\n'
+# A GENUINELY valid minimal PDF. The upload/fetch ingest path now runs a real
+# ``validate_pdf_bytes`` gate (rejects truncated/stub uploads before seeding a
+# library row — the 15-byte ``%PDF-1.4`` ghost fix), so the fixture must be an
+# openable PDF with >= 1 page. The text/figure PARSER is still monkeypatched, so
+# these bytes never have to yield real text — they only have to open.
+def _make_min_pdf():
+    try:
+        import pymupdf
+        doc = pymupdf.open()
+        doc.new_page()
+        buf = doc.tobytes()
+        doc.close()
+        return buf
+    except Exception:
+        # Fallback: a hand-built one-page PDF with a valid xref (openable by
+        # pymupdf) for environments without a writable pymupdf.
+        return (
+            b'%PDF-1.4\n'
+            b'1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n'
+            b'2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n'
+            b'3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]>>endobj\n'
+            b'xref\n0 4\n0000000000 65535 f \n0000000009 00000 n \n'
+            b'0000000052 00000 n \n0000000101 00000 n \n'
+            b'trailer<</Size 4/Root 1 0 R>>\nstartxref\n168\n%%EOF\n'
+        )
+
+
+_FAKE_PDF = _make_min_pdf()
 
 
 def _patch_parse(routes_paper):
@@ -140,9 +165,11 @@ def _count_rows(paper_id):
         _pool_put(db)
 
 
-def _seed_raw_row(paper_id, *, pdf_filename, paper_hash=''):
+def _seed_raw_row(paper_id, *, pdf_filename, paper_hash='', arxiv_id='',
+                  parsed_text='x' * 200):
     """Insert a paper_library row DIRECTLY (bypassing the ingest path), so a
-    test can plant a ghost (empty pdf_filename) or a healthy row."""
+    test can plant a ghost (empty pdf_filename), a healthy row, or a saved
+    recommendation (empty pdf_filename + arxiv_id, no parsed_text)."""
     import time as _t
     from lib.database._core import _pool_get, _pool_put
     from lib.database._core_schema import PAPER_LIBRARY, upsert
@@ -152,8 +179,8 @@ def _seed_raw_row(paper_id, *, pdf_filename, paper_hash=''):
         upsert(db, PAPER_LIBRARY, {
             'id': paper_id, 'user_id': 1, 'title': 'seeded',
             'pdf_url': ('/api/paper/pdf/' + pdf_filename) if pdf_filename else '',
-            'pdf_filename': pdf_filename, 'arxiv_id': '',
-            'paper_hash': paper_hash, 'parsed_text': 'x' * 200,
+            'pdf_filename': pdf_filename, 'arxiv_id': arxiv_id,
+            'paper_hash': paper_hash, 'parsed_text': parsed_text,
             'qa_history': '[]', 'images': '[]', 'babel_cache': '{}',
             'page_count': 1, 'created_at': now, 'updated_at': now,
         }, retry=True)
@@ -330,6 +357,49 @@ def test_ghost_row_reaped_from_listing_with_NC():
     _ok('ghost row reaped from listing; healthy kept; NC reappears when reap off')
 
 
+def test_saved_recommendation_row_survives_reaper_with_NC():
+    """A saved describe-to-recommend card is a lightweight row: empty
+    pdf_filename (never ingested) BUT a non-empty arxiv_id (re-openable via
+    lazy ingest). It MUST survive the ghost reaper — otherwise the whole
+    "directly persisted... otherwise lost" feature silently loses the list on
+    reload. A card with NEITHER pdf NOR arxiv_id is still a real ghost.
+
+    BITING NC: patch _is_ghost_library_row to the OLD empty-pdf==ghost rule
+    (ignoring arxiv_id) → the saved recommendation wrongly disappears; restore
+    → it comes back.
+    """
+    import asyncio
+    app = _load_app()
+    import routes.paper as rp
+
+    rec = f'paper_rec_{int(time.time()*1000)}'
+    dead = f'paper_dead_{int(time.time()*1000)}'
+    _seed_raw_row(rec, pdf_filename='', arxiv_id='2502.09992', parsed_text='')  # saved rec
+    _seed_raw_row(dead, pdf_filename='', arxiv_id='', parsed_text='')           # real ghost
+
+    async def _t():
+        async with app.test_client() as client:
+            ids = await _list_ids(client)
+            assert rec in ids, 'saved recommendation (empty pdf + arxivId) was wrongly reaped'
+            assert dead not in ids, 'a row with no pdf AND no arxivId must still be reaped'
+
+            # ── NC: revert to the old empty-pdf==ghost rule → rec disappears ──
+            orig = rp._is_ghost_library_row
+            rp._is_ghost_library_row = lambda p: not (p.get('pdfFilename') or '').strip()
+            try:
+                ids_nc = await _list_ids(client)
+                assert rec not in ids_nc, \
+                    'NC failed: saved rec should vanish under the old empty-pdf==ghost rule'
+            finally:
+                rp._is_ghost_library_row = orig
+
+            ids2 = await _list_ids(client)
+            assert rec in ids2, 'saved rec should reappear after NC restore'
+
+    asyncio.run(_t())
+    _ok('saved recommendation (empty pdf + arxivId) survives reaper; NC vanishes it')
+
+
 def test_ghost_row_kept_in_db_not_deleted():
     """The reap is NON-DESTRUCTIVE: a ghost skipped from the listing must still
     exist in the DB (a FUSE flap can transiently hide a real file — deleting
@@ -426,6 +496,7 @@ def main():
         test_upload_no_paper_id_persists_nothing_NC,
         test_upload_into_missing_paper_dir_still_succeeds,
         test_ghost_row_reaped_from_listing_with_NC,
+        test_saved_recommendation_row_survives_reaper_with_NC,
         test_ghost_row_kept_in_db_not_deleted,
         test_arxiv_stream_persists_row_end_to_end_zero_client_puts,
     ]

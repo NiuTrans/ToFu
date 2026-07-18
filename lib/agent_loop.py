@@ -107,15 +107,24 @@ class LoopOutcome:
             between-tools) — the caller should NOT persist a final result.
         completed: the model returned a turn with no tool calls (natural end).
         rounds: number of dispatch rounds actually executed.
+        exit_reason: WHY the loop stopped, for the orchestrator's diagnostic
+            parity — one of ``completed``, ``aborted_before_round``,
+            ``aborted_post_stream``, ``aborted_between_tools``,
+            ``max_rounds_exhausted``.
+        retry_bonus_used: how many premature-close bonus rounds were granted.
     """
 
-    __slots__ = ('aborted', 'completed', 'rounds')
+    __slots__ = ('aborted', 'completed', 'rounds', 'exit_reason',
+                 'retry_bonus_used')
 
     def __init__(self, aborted: bool = False, completed: bool = False,
-                 rounds: int = 0):
+                 rounds: int = 0, exit_reason: str = 'max_rounds_exhausted',
+                 retry_bonus_used: int = 0):
         self.aborted = aborted
         self.completed = completed
         self.rounds = rounds
+        self.exit_reason = exit_reason
+        self.retry_bonus_used = retry_bonus_used
 
 
 def run_agent_loop(
@@ -127,6 +136,8 @@ def run_agent_loop(
     execute_tool: Callable[[int, dict], None],
     on_round_result: Callable[[int, dict, Any, Any], None] | None = None,
     on_tool_round: Callable[[int, dict], None] | None = None,
+    retry_bonus: Callable[[int, dict, Any, Any], bool] | None = None,
+    max_retry_bonus: int = 2,
 ) -> LoopOutcome:
     """Drive a bounded LLM tool-calling loop with the triple abort check.
 
@@ -156,16 +167,39 @@ def run_agent_loop(
         on_tool_round: optional ``(rnd, msg) -> None`` hook fired once when a
             round HAS tool calls, before executing them (e.g. interim-draft
             discard + appending the assistant message to the history).
+        retry_bonus: optional ``(rnd, msg, finish, usage) -> bool`` hook fired
+            after ``on_round_result``. Returning True means "this turn ended
+            prematurely (e.g. a premature stream close) — grant ONE extra
+            round". It dynamically expands the round ceiling exactly like the
+            chat orchestrator's ``_premature_retry_count`` (so even a
+            no-tools turn can be retried), capped at ``max_retry_bonus``. When
+            it fires, the round is NOT treated as a natural completion. Default
+            ``None`` → the loop is byte-equivalent to the original for-range.
+        max_retry_bonus: ceiling on total bonus rounds ``retry_bonus`` may
+            grant, so a stuck premature-close can't loop forever (default 2,
+            matching orchestrator's ``_PREMATURE_RETRY_MAX``).
 
     Returns:
-        LoopOutcome describing why the loop stopped.
+        LoopOutcome describing why the loop stopped (incl. ``exit_reason``).
     """
     outcome = LoopOutcome()
 
-    for rnd in range(max_tool_rounds + 1):
+    # Dynamic ceiling (mirrors the orchestrator's while-loop): the base cap is
+    # ``max_tool_rounds`` tool-eligible rounds + 1 final tools=None round; a
+    # premature-close retry_bonus grows ``bonus`` so the ceiling expands
+    # mid-loop. rnd runs 0.. and the loop continues while rnd <= cap + bonus.
+    bonus = 0
+    rnd = -1
+    while True:
+        rnd += 1
+        if rnd > max_tool_rounds + bonus:
+            outcome.exit_reason = 'max_rounds_exhausted'
+            break
+
         # (1) BEFORE-ROUND — don't start a turn after Stop.
         if abort.aborted:
             outcome.aborted = True
+            outcome.exit_reason = 'aborted_before_round'
             break
 
         tools = round_tools if rnd < max_tool_rounds else None
@@ -174,15 +208,25 @@ def run_agent_loop(
         if on_round_result is not None:
             on_round_result(rnd, msg, finish, usage)
 
+        # Premature-close retry: grant one bonus round (capped) and DON'T treat
+        # this turn as a natural completion.
+        if retry_bonus is not None and bonus < max_retry_bonus \
+                and retry_bonus(rnd, msg, finish, usage):
+            bonus += 1
+            outcome.retry_bonus_used += 1
+            continue
+
         # (2) POST-STREAM — the stream can return a partial turn when the
         # abort landed during line iteration (no raise).
         if abort.aborted:
             outcome.aborted = True
+            outcome.exit_reason = 'aborted_post_stream'
             break
 
         tool_calls = msg.get('tool_calls') if isinstance(msg, dict) else None
         if not tool_calls:
             outcome.completed = True
+            outcome.exit_reason = 'completed'
             break
 
         if on_tool_round is not None:
@@ -194,6 +238,7 @@ def run_agent_loop(
             # this check reintroduces the "Stop has limited effect" bug.
             if abort.aborted:
                 outcome.aborted = True
+                outcome.exit_reason = 'aborted_between_tools'
                 break
             execute_tool(rnd, tc)
 

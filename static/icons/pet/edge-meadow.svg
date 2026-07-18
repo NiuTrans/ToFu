@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 18" width="120" height="18" preserveAspectRatio="none">
+  <!-- Organic grass silhouette that STRADDLES the top rim and reaches well
+       above it (the deliberate "break the neat rectangle" edge — no longer a
+       6px token poke). Dense blades of varied height + lean rise from a
+       continuous base band so the tile reads as one living crest.
+       SEAM: both tile ends are FLAT baseline (y=11) for the first/last ~2px, so
+       tile1's end meets tile2's start in a smooth trough — guaranteed seamless
+       under repeat-x (verified pixel-diff col0==col119). Same sage gradient
+       family as the ground so the crest is the top of the same surface. -->
+  <defs>
+    <linearGradient id="edg-mdw" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#8FBE60"/>
+      <stop offset="1" stop-color="#5C8340"/>
+    </linearGradient>
+  </defs>
+  <!-- continuous base band, y=11 at BOTH ends (seam-flat) -->
+  <path fill="url(#edg-mdw)" d="M0,18 L120,18 L120,11 L108,11 C96,9 78,12 60,10 C42,8 24,12 12,11 L0,11 Z"/>
+  <!-- blades: flat at x0..2 and x118..120 (both at y11), dense clump between -->
+  <path fill="url(#edg-mdw)" d="M0,11 L2,11
+    C3,7 4,4 5,2 C6,4 7,7 8,11
+    C10,7 11,5 12.5,3 C14,5 15,8 16,11
+    C18,6 19,3.5 20.5,1.5 C22,4 23,7.5 24,11
+    C26,7 27,5 28.5,3 C30,5.5 31,8 32,11
+    C34,6.5 35,4 36.5,2.5 C38,5 39,8 40,11
+    C42,6 43,4 44.5,2 C46,4.5 47,8 48,11
+    C50,7 51,5 52.5,3 C54,5 55,8 56,11
+    C58,6 59,3.5 60.5,2 C62,4.5 63,8 64,11
+    C66,7 67,5 68.5,3 C70,5.5 71,8 72,11
+    C74,6.5 75,4 76.5,2.5 C78,5 79,8 80,11
+    C82,6 83,4 84.5,2 C86,4.5 87,8 88,11
+    C90,7 91,5 92.5,3 C94,5 95,8 96,11
+    C98,6.5 99,4 100.5,2.5 C102,5 103,8 104,11
+    C106,7 107,5 108.5,3 C110,5.5 111,8 112,11
+    C113.5,7 114.5,5 116,3.5 C117.5,5.5 118,8.5 118,11
+    L120,11 L120,18 L0,18 Z"/>
+  <!-- lighter crest highlights on the tallest tips (sunlit) -->
+  <g stroke="#CFE6A6" stroke-width="0.9" stroke-linecap="round" fill="none" opacity="0.6">
+    <path d="M20.5,7 L20.5,2"/>
+    <path d="M44.5,7 L44.5,2.2"/>
+    <path d="M84.5,7 L84.5,2.2"/>
+  </g>
+</svg>

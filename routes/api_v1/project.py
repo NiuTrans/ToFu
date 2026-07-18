@@ -20,11 +20,15 @@ Routes (legacy snake_case path → new hyphen-case path):
   POST   /api/v1/project/rescan             — refresh file index
   POST   /api/v1/project/redo               — re-apply previously-undone round
   POST   /api/v1/project/write              — direct file write (Apply Code)
+  POST   /api/v1/project/upload            — save a dropped file into a folder (binary-safe)
   GET    /api/v1/project/feed               — Project Brain: activity feed (read)
   GET    /api/v1/project/charter            — Project Brain: charter (read)
   POST   /api/v1/project/charter/commit     — Project Brain: human-gated charter commit
   GET    /api/v1/project/charter/pending    — Project Brain: unresolved proposals
   POST   /api/v1/project/charter/dismiss    — Project Brain: reject a proposal
+  POST   /api/v1/project/charter/decision/update — Project Brain: edit a committed decision
+  POST   /api/v1/project/charter/decision/delete — Project Brain: remove a committed decision
+  POST   /api/v1/project/charter/delete     — Project Brain: delete the whole charter
   GET    /api/v1/project/board              — Project Brain: coordination board (read)
   POST   /api/v1/project/board/post         — Project Brain: human posts an epic
   POST   /api/v1/project/board/complete     — Project Brain: human marks epic done
@@ -34,6 +38,7 @@ Routes (legacy snake_case path → new hyphen-case path):
   GET    /api/v1/project/brain/peers        — Project Brain: LIVE peer/team roster
   GET    /api/v1/project/brain/influence    — Project Brain: per-conversation influence
   POST   /api/v1/project/brain/peer-message — Project Brain: human nudges a sibling conversation
+  POST   /api/v1/project/brain/peer-abort   — Project Brain: human hard-aborts a sibling's task(s)
 
 All require ``@require_auth``. Mutations that change ``data/config/`` or
 walk the filesystem keep the legacy ``rate_limit(10/60)`` to throttle
@@ -42,10 +47,12 @@ runaway client loops.
 
 from __future__ import annotations
 
+import os
+
 from flask import Blueprint, jsonify, request
 
 from lib.api_response import (
-    api_bad_request, api_internal_error, api_not_found, api_ok,
+    api_bad_request, api_error, api_internal_error, api_not_found, api_ok,
 )
 from lib.log import get_logger
 from lib.openapi import api_meta
@@ -117,8 +124,8 @@ def project_paths():
     data = parse_body()
     paths = data.get('paths', [])
     if not paths or not isinstance(paths, list):
-        return jsonify({'error': 'Provide a "paths" array with at least '
-                                  'one directory'}), 400
+        return api_error('Provide a "paths" array with at least '
+                         'one directory', status=400)
     readonly = data.get('readOnlyPaths') or []
     if not isinstance(readonly, list):
         readonly = []
@@ -135,6 +142,16 @@ def project_paths():
 @require_auth
 @api_meta(summary='Active project state', tags=['project'])
 def project_status():
+    # ★ Conv-scoped bar: when the client passes ?conv_id=<id>, source the
+    #   project state from THAT conversation's own scoped registry rather than
+    #   the process-global _roots. This stops a background task's absolute-path
+    #   write (which registers into the global registry) from bleeding extra
+    #   paths onto a different conversation's project bar. Without conv_id the
+    #   legacy global view is returned (byte-identical to before).
+    conv_id = (request.args.get('conv_id') or '').strip()
+    if conv_id:
+        from lib.project_mod import get_state_for_conv
+        return jsonify(get_state_for_conv(conv_id))
     from lib.project_mod import get_state
     return jsonify(get_state())
 
@@ -501,11 +518,13 @@ def project_feed():
         return api_bad_request('path is required', field='path')
     try:
         since = int(request.args.get('since') or 0)
-    except (ValueError, TypeError):
+    except (ValueError, TypeError) as e:
+        logger.debug('[Project] non-int since (%s) — defaulting to 0', e)
         since = 0
     try:
         limit = int(request.args.get('limit') or 100)
-    except (ValueError, TypeError):
+    except (ValueError, TypeError) as e:
+        logger.debug('[Project] non-int limit (%s) — defaulting to 100', e)
         limit = 100
     try:
         from lib.conversations.project_feed import read_project_feed
@@ -606,7 +625,27 @@ def project_board():
         return api_bad_request('path is required', field='path')
     try:
         from lib.conversations.project_board import read_board
-        return api_ok(read_board(project_path))
+        board = read_board(project_path)
+        # ── Backend-authoritative dispatch fact (front/back contract): the
+        #    frontend must NOT re-infer "will the brain pick this up" from
+        #    client state. Stamp `dispatchable=True` on the epics the heartbeat
+        #    would genuinely pick up on its next sweep (deps done, not on a live
+        #    cooldown, not live-claimed, has a routing target). The frontend
+        #    renders "auto-starts ~30s" purely from this flag. Best-effort:
+        #    a failure here just omits the flag (frontend shows no hint). ──
+        try:
+            from lib.conversations.project_dispatch import (
+                _dispatch_target, select_dispatchable)
+            pickable = {e['id']: _dispatch_target(e)
+                        for e in select_dispatchable(project_path)}
+            for t in board.get('tasks', []):
+                tgt = pickable.get(t.get('id'))
+                if tgt:
+                    t['dispatchable'] = True
+                    t['dispatch_target'] = tgt
+        except Exception as e:
+            logger.debug('[Project.v1] board dispatch-fact enrich skipped: %s', e)
+        return api_ok(board)
     except Exception as e:
         logger.error('[Project.v1] board read failed for %s: %s',
                      project_path, e, exc_info=True)
@@ -833,29 +872,441 @@ def project_charter_dismiss():
         return api_internal_error(e, source='api_v1.project.charter_dismiss')
 
 
+def _parse_expected_version(data):
+    """Return (expected_version|None, error_response|None) from a request body."""
+    ev = data.get('expected_version')
+    if ev is None:
+        return None, None
+    try:
+        return int(ev), None
+    except (ValueError, TypeError):
+        return None, api_bad_request('expected_version must be an int',
+                                     field='expected_version')
+
+
+@api_v1_project_bp.route('/api/v1/project/charter/decision/update', methods=['POST'])
+@require_auth
+@rate_limit(limit=30, per=60)
+@api_meta(
+    summary='HUMAN-GATED edit of one committed charter decision',
+    description=(
+        'Edit a single committed decision by its list ``index``. Body: '
+        '``{path, index, text, expected_version?, updated_by_conv?}``. '
+        'Optimistic-locked: a stale ``expected_version`` is rejected with '
+        '``version_conflict`` (409); an out-of-range index → 400.'),
+    tags=['project'],
+)
+def project_charter_decision_update():
+    data = parse_body()
+    project_path = (data.get('path') or '').strip()
+    if not project_path:
+        return api_bad_request('path is required', field='path')
+    text = (data.get('text') or '').strip()
+    if not text:
+        return api_bad_request('text is required', field='text')
+    try:
+        index = int(data.get('index'))
+    except (ValueError, TypeError):
+        return api_bad_request('index must be an int', field='index')
+    expected_version, err = _parse_expected_version(data)
+    if err is not None:
+        return err
+    try:
+        from lib.conversations.project_charter import update_decision
+        result = update_decision(
+            project_path, index, text, expected_version=expected_version,
+            updated_by_conv=(data.get('updated_by_conv') or '').strip())
+        if not result.get('ok'):
+            if result.get('error') == 'version_conflict':
+                return jsonify(result), 409
+            return jsonify(result), 400
+        return api_ok(result)
+    except Exception as e:
+        logger.error('[Project.v1] charter decision update failed for %s: %s',
+                     project_path, e, exc_info=True)
+        return api_internal_error(e, source='api_v1.project.charter_decision_update')
+
+
+@api_v1_project_bp.route('/api/v1/project/charter/decision/delete', methods=['POST'])
+@require_auth
+@rate_limit(limit=30, per=60)
+@api_meta(
+    summary='HUMAN-GATED removal of one committed charter decision',
+    description=(
+        'Remove a single committed decision by its list ``index``. Body: '
+        '``{path, index, expected_version?, updated_by_conv?}``. '
+        'Optimistic-locked (stale ``expected_version`` → 409; out-of-range '
+        'index → 400).'),
+    tags=['project'],
+)
+def project_charter_decision_delete():
+    data = parse_body()
+    project_path = (data.get('path') or '').strip()
+    if not project_path:
+        return api_bad_request('path is required', field='path')
+    try:
+        index = int(data.get('index'))
+    except (ValueError, TypeError):
+        return api_bad_request('index must be an int', field='index')
+    expected_version, err = _parse_expected_version(data)
+    if err is not None:
+        return err
+    try:
+        from lib.conversations.project_charter import delete_decision
+        result = delete_decision(
+            project_path, index, expected_version=expected_version,
+            updated_by_conv=(data.get('updated_by_conv') or '').strip())
+        if not result.get('ok'):
+            if result.get('error') == 'version_conflict':
+                return jsonify(result), 409
+            return jsonify(result), 400
+        return api_ok(result)
+    except Exception as e:
+        logger.error('[Project.v1] charter decision delete failed for %s: %s',
+                     project_path, e, exc_info=True)
+        return api_internal_error(e, source='api_v1.project.charter_decision_delete')
+
+
+@api_v1_project_bp.route('/api/v1/project/charter/delete', methods=['POST'])
+@require_auth
+@rate_limit(limit=20, per=60)
+@api_meta(
+    summary='HUMAN-GATED deletion of the ENTIRE charter',
+    description=(
+        'Delete the whole charter row (north star + all committed decisions). '
+        'Body: ``{path, expected_version?, updated_by_conv?}``. '
+        'Optimistic-locked (stale ``expected_version`` → 409). Deleting a '
+        'non-existent charter is a no-op success.'),
+    tags=['project'],
+)
+def project_charter_delete():
+    data = parse_body()
+    project_path = (data.get('path') or '').strip()
+    if not project_path:
+        return api_bad_request('path is required', field='path')
+    expected_version, err = _parse_expected_version(data)
+    if err is not None:
+        return err
+    try:
+        from lib.conversations.project_charter import delete_charter
+        result = delete_charter(
+            project_path, expected_version=expected_version,
+            updated_by_conv=(data.get('updated_by_conv') or '').strip())
+        if not result.get('ok'):
+            if result.get('error') == 'version_conflict':
+                return jsonify(result), 409
+            return jsonify(result), 400
+        return api_ok(result)
+    except Exception as e:
+        logger.error('[Project.v1] charter delete failed for %s: %s',
+                     project_path, e, exc_info=True)
+        return api_internal_error(e, source='api_v1.project.charter_delete')
+
+
 @api_v1_project_bp.route('/api/v1/project/brain/summary', methods=['GET'])
 @require_auth
 @api_meta(
     summary='One-shot Project Brain summary for the collaboration bar',
     description=(
         'Read-only, cheap aggregation across Board + Activity Feed + presence, '
-        'keyed strictly on the explicit ``path``. Returns ``{epicsOpen, '
-        'epicsClaimed, epicsDone, pendingDecisions, activePeers, peerEpics, '
-        'charterExists}``, where ``peerEpics`` maps an active peer conv_id → '
-        'the title of the epic it is currently advancing (a live claim).'),
+        'keyed strictly on the explicit ``path`` (+ optional ``convId``, '
+        'excluded from ``activePeers``/``peerEpics`` so the count is "OTHER '
+        'conversations online"). Returns ``{epicsOpen, epicsClaimed, '
+        'epicsDone, pendingDecisions, activePeers, peerEpics, charterExists}``, '
+        'where ``peerEpics`` maps an active peer conv_id → the title of the '
+        'epic it is currently advancing (a live claim).'),
     tags=['project'],
 )
 def project_brain_summary():
     project_path = _decoded_path_arg()
     if not project_path:
         return api_bad_request('path is required', field='path')
+    # convId is OPTIONAL: when present it's excluded from activePeers/peerEpics
+    # so the count means "OTHER conversations online" — the same self-exclusion
+    # the peers roster and the frontend's local push mirror apply.
+    conv_id = _decoded_path_arg('convId')
     try:
         from lib.conversations.project_brain_summary import build_brain_summary
-        return api_ok(build_brain_summary(project_path))
+        return api_ok(build_brain_summary(project_path, conv_id or ''))
     except Exception as e:
         logger.error('[Project.v1] brain summary failed for %s: %s',
                      project_path, e, exc_info=True)
+
         return api_internal_error(e, source='api_v1.project.brain_summary')
+
+
+
+# ── Project Brain: human↔brain status lane (Pillar #7, read-only) ────
+
+@api_v1_project_bp.route('/api/v1/project/brain/status', methods=['GET'])
+@require_auth
+@api_meta(
+    summary='Latest project-status snapshot (synthesized where-are-we + drift read)',
+    description=(
+        'The human↔brain status lane. Returns the CACHED latest snapshot + '
+        'history IMMEDIATELY (never blocks on the LLM), and — IF the pillar-'
+        'state fingerprint moved since the last snapshot (or ``refresh=1``) — '
+        'warms a fresh narrative + alignment read in the BACKGROUND, flagging '
+        '``refreshing=true`` so the client polls ``.../status/history`` for the '
+        'new row. Reads LIVE pillar state (board + charter + feed + presence + '
+        'sibling digest via the SAME claims_by_conv join the collab bar uses). '
+        'Query: ``path`` (REQUIRED), ``refresh`` (optional, force re-synth). '
+        'Returns ``{latest: {seq, narrative, pillar_state, trigger, ts}|null, '
+        'history: [...newest-first...], maxSeq, refreshing}``. HUMAN-FACING '
+        'ONLY — this memory is never injected into sibling agent prompts.'),
+    tags=['project'],
+)
+def project_brain_status():
+    project_path = _decoded_path_arg()
+    if not project_path:
+        return api_bad_request('path is required', field='path')
+    try:
+        limit = int(request.args.get('limit') or 30)
+    except (ValueError, TypeError) as e:
+        logger.debug('[Project] non-int status limit (%s) — default 30', e)
+        limit = 30
+    force = str(request.args.get('refresh') or '').strip() in ('1', 'true', 'yes')
+    try:
+        from lib.conversations.project_status import get_status_view
+        # NON-BLOCKING fresh-on-open: return the cached snapshot + history
+        # instantly and warm a fresh one in the background if the pillar-state
+        # moved (or refresh=1). The client polls .../status/history to pick up
+        # the new row — the HTTP response never waits on the LLM synthesis.
+        view = get_status_view(project_path, limit=limit, force=force)
+        return api_ok(view)
+    except Exception as e:
+        logger.error('[Project.v1] brain status failed for %s: %s',
+                     project_path, e, exc_info=True)
+        return api_internal_error(e, source='api_v1.project.brain_status')
+
+
+@api_v1_project_bp.route('/api/v1/project/brain/status/history', methods=['GET'])
+@require_auth
+@api_meta(
+    summary='The project-status snapshot TRAIL (read-only, no synthesis)',
+    description=(
+        'Read-only append-only history of status snapshots for ``path`` '
+        '(newest-first), so the human can see HOW the project got here — not '
+        'just where it is now. NO synthesis / no LLM. Query: ``path`` '
+        '(REQUIRED), ``limit`` (optional). Returns ``{snapshots: [...], '
+        'maxSeq}``.'),
+    tags=['project'],
+)
+def project_brain_status_history():
+    project_path = _decoded_path_arg()
+    if not project_path:
+        return api_bad_request('path is required', field='path')
+    try:
+        limit = int(request.args.get('limit') or 30)
+    except (ValueError, TypeError) as e:
+        logger.debug('[Project] non-int history limit (%s) — default 30', e)
+        limit = 30
+    try:
+        from lib.conversations.project_status import read_status_history
+        return api_ok(read_status_history(project_path, limit=limit))
+    except Exception as e:
+        logger.error('[Project.v1] brain status history failed for %s: %s',
+                     project_path, e, exc_info=True)
+        return api_internal_error(e, source='api_v1.project.brain_status_history')
+
+
+@api_v1_project_bp.route('/api/v1/project/brain/status/ask', methods=['POST'])
+@require_auth
+@rate_limit(limit=20, per=60)
+@api_meta(
+    summary='Read-only synthesis Q&A about the project status',
+    description=(
+        'Body: ``{path, question}``. The human asks a SPECIFIC question about '
+        'the project; the brain answers by synthesizing over LIVE pillar state '
+        '(same assembly as the status snapshot). Writes NOTHING — no snapshot '
+        'is appended, no charter/board mutation, no message to any sibling. '
+        'Returns ``{ok, answer, pillar_state}`` or a 400 ``{ok:false, error}``. '
+        'This is the read-only synthesis lane; the propose-actions layer is a '
+        'separate, human-gated increment.'),
+    tags=['project'],
+)
+def project_brain_status_ask():
+    data = parse_body()
+    project_path = (data.get('path') or '').strip()
+    if not project_path:
+        return api_bad_request('path is required', field='path')
+    question = (data.get('question') or data.get('text') or '').strip()
+    if not question:
+        return api_bad_request('question is required', field='question')
+    try:
+        from lib.conversations.project_status import answer_status_question
+        res = answer_status_question(project_path, question)
+        if not res.get('ok'):
+            return jsonify(res), 400
+        return api_ok(res)
+    except Exception as e:
+        logger.error('[Project.v1] brain status ask failed for %s: %s',
+                     project_path, e, exc_info=True)
+        return api_internal_error(e, source='api_v1.project.brain_status_ask')
+
+
+
+# ── Project Brain: the human's WATCH lane (Pillar #7) ────────────────
+# The human authors watch items (concern|question|goal); the brain addresses
+# them on a recurring basis (append-only response trail). HUMAN-FACING ONLY —
+# the only bridge to sibling agents is /watch/promote (a human-gated charter
+# commit). All authoring is human-gated by definition (the human is the author).
+
+@api_v1_project_bp.route('/api/v1/project/brain/watch', methods=['GET'])
+@require_auth
+@api_meta(
+    summary="List the human's watch items + brain response trails",
+    description=(
+        'Query: ``path`` (REQUIRED). Optionally re-addresses OPEN items on read '
+        '(``refresh=1``, the fresh-on-tab-open cadence — cheap via the per-item '
+        'staleness gate) then returns every item with its append-only response '
+        'trail (newest-first). Returns ``{items: [{item_id, kind, text, status, '
+        'promoted, responses:[...]}]}``.'),
+    tags=['project'],
+)
+def project_brain_watch_list():
+    project_path = _decoded_path_arg()
+    if not project_path:
+        return api_bad_request('path is required', field='path')
+    try:
+        from lib.conversations.project_watch import (
+            address_open_items, list_watch_items,
+        )
+        if request.args.get('refresh') in ('1', 'true', 'yes'):
+            # Fresh-on-tab-open: re-address open items (blocking so the returned
+            # list reflects fresh responses; per-item staleness gate keeps it
+            # cheap on a quiescent project).
+            address_open_items(project_path, trigger='on_open', blocking=True)
+        return api_ok(list_watch_items(project_path))
+    except Exception as e:
+        logger.error('[Project.v1] watch list failed for %s: %s',
+                     project_path, e, exc_info=True)
+        return api_internal_error(e, source='api_v1.project.brain_watch_list')
+
+
+@api_v1_project_bp.route('/api/v1/project/brain/watch/add', methods=['POST'])
+@require_auth
+@rate_limit(limit=30, per=60)
+@api_meta(
+    summary='Add a human-authored watch item (concern|question|goal)',
+    description='Body: ``{path, kind, text, convId?}``. Returns ``{ok, item}``.',
+    tags=['project'],
+)
+def project_brain_watch_add():
+    data = parse_body()
+    project_path = (data.get('path') or '').strip()
+    if not project_path:
+        return api_bad_request('path is required', field='path')
+    try:
+        from lib.conversations.project_watch import add_watch_item
+        res = add_watch_item(project_path, (data.get('kind') or 'concern'),
+                             (data.get('text') or ''),
+                             created_by_conv=(data.get('convId') or '').strip())
+        if not res.get('ok'):
+            return jsonify(res), 400
+        return api_ok(res)
+    except Exception as e:
+        logger.error('[Project.v1] watch add failed for %s: %s',
+                     project_path, e, exc_info=True)
+        return api_internal_error(e, source='api_v1.project.brain_watch_add')
+
+
+@api_v1_project_bp.route('/api/v1/project/brain/watch/update', methods=['POST'])
+@require_auth
+@rate_limit(limit=30, per=60)
+@api_meta(
+    summary='Edit / resolve / delete a watch item',
+    description=(
+        'Body: ``{itemId, action, text?, kind?}``. ``action`` ∈ '
+        '``edit|resolve|reopen|delete``. Returns ``{ok}``.'),
+    tags=['project'],
+)
+def project_brain_watch_update():
+    data = parse_body()
+    item_id = (data.get('itemId') or '').strip()
+    action = (data.get('action') or '').strip().lower()
+    if not item_id:
+        return api_bad_request('itemId is required', field='itemId')
+    try:
+        from lib.conversations import project_watch as pw
+        if action == 'edit':
+            res = pw.edit_watch_item(item_id, text=data.get('text'),
+                                     kind=data.get('kind'))
+        elif action == 'resolve':
+            res = pw.set_watch_status(item_id, 'resolved')
+        elif action == 'reopen':
+            res = pw.set_watch_status(item_id, 'open')
+        elif action == 'delete':
+            res = pw.delete_watch_item(item_id)
+        else:
+            return api_bad_request('unknown action', field='action')
+        if not res.get('ok'):
+            return jsonify(res), 400
+        return api_ok(res)
+    except Exception as e:
+        logger.error('[Project.v1] watch update failed item=%s: %s',
+                     item_id, e, exc_info=True)
+        return api_internal_error(e, source='api_v1.project.brain_watch_update')
+
+
+@api_v1_project_bp.route('/api/v1/project/brain/watch/address', methods=['POST'])
+@require_auth
+@rate_limit(limit=30, per=60)
+@api_meta(
+    summary='Re-address ONE watch item now (force a fresh brain response)',
+    description='Body: ``{itemId}``. Returns ``{ok, response}`` (latest).',
+    tags=['project'],
+)
+def project_brain_watch_address():
+    data = parse_body()
+    item_id = (data.get('itemId') or '').strip()
+    if not item_id:
+        return api_bad_request('itemId is required', field='itemId')
+    try:
+        from lib.conversations.project_watch import address_watch_item
+        resp = address_watch_item(item_id, trigger='manual', force=True)
+        return api_ok({'ok': True, 'response': resp})
+    except Exception as e:
+        logger.error('[Project.v1] watch address failed item=%s: %s',
+                     item_id, e, exc_info=True)
+        return api_internal_error(e, source='api_v1.project.brain_watch_address')
+
+
+@api_v1_project_bp.route('/api/v1/project/brain/watch/promote', methods=['POST'])
+@require_auth
+@rate_limit(limit=20, per=60)
+@api_meta(
+    summary='Promote a watch item into the charter (the ONLY bridge to agents)',
+    description=(
+        'Body: ``{itemId, convId?, expectedVersion?}``. Bridges the item into '
+        'the charter as a committed decision via the HUMAN-GATED charter-commit '
+        'path — the only way a watch item reaches sibling agents. No new write '
+        'path, no fan-out. Returns ``{ok, version}`` or a 409 on version skew.'),
+    tags=['project'],
+)
+def project_brain_watch_promote():
+    data = parse_body()
+    item_id = (data.get('itemId') or '').strip()
+    if not item_id:
+        return api_bad_request('itemId is required', field='itemId')
+    expected_version = data.get('expectedVersion')
+    try:
+        expected_version = int(expected_version) if expected_version is not None else None
+    except (ValueError, TypeError) as e:
+        logger.debug('[Project] bad expectedVersion arg, using fallback: %s', e)
+        expected_version = None
+    try:
+        from lib.conversations.project_watch import promote_watch_item
+        res = promote_watch_item(item_id, updated_by_conv=(data.get('convId') or '').strip(),
+                                 expected_version=expected_version)
+        if not res.get('ok'):
+            code = 409 if res.get('error') == 'version_conflict' else 400
+            return jsonify(res), code
+        return api_ok(res)
+    except Exception as e:
+        logger.error('[Project.v1] watch promote failed item=%s: %s',
+                     item_id, e, exc_info=True)
+        return api_internal_error(e, source='api_v1.project.brain_watch_promote')
 
 
 @api_v1_project_bp.route('/api/v1/project/brain/peers', methods=['GET'])
@@ -973,6 +1424,60 @@ def project_brain_peer_message():
         return api_internal_error(e, source='api_v1.project.brain_peer_message')
 
 
+@api_v1_project_bp.route('/api/v1/project/brain/peer-abort', methods=['POST'])
+@require_auth
+@rate_limit(limit=10, per=60)
+@api_meta(
+    summary='HUMAN hard-aborts a sibling conversation\'s running task(s)',
+    description=(
+        'Body: ``{path, convId, toConvId}``. An OPERATOR-INITIATED coercive '
+        'stop: the human, acting via the displayed conversation ``convId``, '
+        'aborts the RUNNING task(s) of sibling conversation ``toConvId``. This '
+        'is the human counterpart to the agent\'s ``project_intervene('
+        'hard_abort=True)`` \u2014 but here the authenticated operator IS the '
+        'approval, so it is passed as ``approved_by`` and honored by the SAME '
+        'audit gate (never a silent kill: it is audit-logged and mirrored to '
+        'the feed). It aborts the TASK only \u2014 it never touches the host '
+        'process. The frontend gates this behind a danger-confirm. Returns '
+        '``{ok, mode:\'hard_abort\', aborted:N}`` or a 400 with ``error``.'),
+    tags=['project'],
+)
+def project_brain_peer_abort():
+    from flask import g
+    data = parse_body()
+    project_path = (data.get('path') or '').strip()
+    if not project_path:
+        return api_bad_request('path is required', field='path')
+    from_conv = _board_conv_id(data)
+    if not from_conv:
+        return api_bad_request('convId is required (the acting conversation)',
+                               field='convId')
+    to_conv = (data.get('toConvId') or data.get('to_conv_id') or '').strip()
+    if not to_conv:
+        return api_bad_request('toConvId is required', field='toConvId')
+    # The authenticated operator IS the approval token (the confirm happened
+    # client-side). Stamp their identity for the audit trail; never blank.
+    ctx = getattr(g, 'auth_ctx', None)
+    approver = (getattr(ctx, 'name', '') or getattr(ctx, 'key_id', '')
+                or 'operator') if ctx else 'operator'
+    try:
+        from lib.conversations.project_peer import intervene_peer
+        res = intervene_peer(project_path, from_conv, to_conv, '',
+                             hard_abort=True, approved_by=approver)
+        if not res.get('ok'):
+            logger.info('[Project.v1] peer-abort refused %s→%s: %s',
+                        from_conv[:8], to_conv[:8], res.get('error'))
+            return jsonify(res), 400
+        logger.info('[Project.v1] operator peer-abort %s→%s aborted=%d '
+                    'approved_by=%s', from_conv[:8], to_conv[:8],
+                    res.get('aborted', 0), approver)
+        return api_ok(res)
+    except Exception as e:
+        logger.error('[Project.v1] peer-abort failed for %s: %s',
+                     project_path, e, exc_info=True)
+        return api_internal_error(e, source='api_v1.project.brain_peer_abort')
+
+
         return api_internal_error(e, source='api_v1.project.brain_influence')
 
 
@@ -1013,6 +1518,66 @@ def project_write():
         logger.warning('[Project.v1] write failed for %s: %s',
                        path, result.get('error'))
         return jsonify(result), 400
+    return jsonify(result)
+
+
+@api_v1_project_bp.route('/api/v1/project/upload', methods=['POST'])
+@require_auth
+@rate_limit(limit=20, per=60)
+@api_meta(
+    summary='Save a dropped file into a project folder (binary-safe)',
+    description=(
+        'multipart/form-data: ``file`` (the raw bytes) + ``dir`` (the '
+        'destination directory — absolute path inside an already-attached '
+        'workspace root, or empty for the active project root) + optional '
+        '``name`` override. Unlike ``/write`` (text only), this preserves '
+        'raw bytes so images / PDFs / archives land intact. The destination '
+        'must be inside an attached root (a drop never auto-registers a new '
+        'one); read-only roots are refused; name collisions auto-rename. The '
+        'write is recorded so it appears in the file-changes bar and is '
+        'undoable. Backs drag-and-drop onto the folder browser.'
+    ),
+    tags=['project'],
+)
+def project_upload():
+    dest_dir = (request.form.get('dir') or '').strip()
+    name_override = (request.form.get('name') or '').strip()
+
+    if 'file' not in request.files:
+        return api_bad_request('No file', field='file')
+    upload = request.files['file']
+    fname = name_override or (upload.filename or '')
+    # Reject navigation in the client-supplied filename — a drop names a leaf,
+    # never a path. os.path.basename strips any directory the browser attached.
+    fname = os.path.basename(fname.replace('\\', '/')).strip()
+    if not fname or fname in ('.', '..'):
+        return api_bad_request('No filename', field='file')
+
+    try:
+        data = upload.stream.read()
+    except Exception as e:
+        logger.error('[Project.v1] upload stream read failed: %s', e, exc_info=True)
+        return api_internal_error('internal_error')
+
+    # Destination directory: an explicit dir (must be inside an attached root,
+    # enforced by save_uploaded_file) or the active project root.
+    project_path = _active_project_path()
+    if dest_dir:
+        target_path = os.path.join(os.path.abspath(os.path.expanduser(dest_dir)), fname)
+    else:
+        if not project_path:
+            return api_bad_request('No active project')
+        target_path = fname  # project-relative → active root
+
+    from lib.project_mod.write_tools import save_uploaded_file
+    result = save_uploaded_file(project_path or dest_dir, target_path, data)
+    if not result.get('ok'):
+        logger.warning('[Project.v1] upload failed for %s: %s',
+                       target_path, result.get('error'))
+        return jsonify(result), 400
+    logger.info('[Project.v1] upload saved %s (%d bytes, renamed=%s)',
+                result.get('path'), result.get('bytesWritten', 0),
+                result.get('renamed'))
     return jsonify(result)
 
 __all__ = ['api_v1_project_bp']

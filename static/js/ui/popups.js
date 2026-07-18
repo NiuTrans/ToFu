@@ -142,8 +142,8 @@ function addConvRef(convId, convTitle) {
   _renderConvRefChips();
   // Focus the input and show confirmation
   document.getElementById("userInput")?.focus();
-  const shortTitle = (convTitle || "Untitled").slice(0, 30);
-  showToast?.(`已引用: ${shortTitle}${convTitle && convTitle.length > 30 ? "…" : ""}`, "success");
+  const shortTitle = (convTitle || "Untitled").slice(0, 30) + (convTitle && convTitle.length > 30 ? "…" : "");
+  showToast?.(t('convRef.referencedToast', { title: shortTitle }), "success");
 }
 
 function removeConvRef(index) {
@@ -179,14 +179,14 @@ function _renderConvRefChips() {
     // Show message count instead of raw ID
     const localConv = (typeof conversations !== "undefined" ? conversations : []).find(c => c.id === ref.id);
     const msgCount = localConv?.messages?.length || 0;
-    const subtitle = msgCount > 0 ? `${msgCount} 条消息` : "对话引用";
+    const subtitle = msgCount > 0 ? t('convRef.messagesCount', { n: msgCount }) : t('convRef.convRef');
     return `<div class="conv-ref-chip" data-index="${i}">
       <span class="conv-ref-chip-icon">@</span>
       <span class="conv-ref-chip-info">
         <span class="conv-ref-chip-title">${title}</span>
         <span class="conv-ref-chip-id">${escapeHtml(subtitle)}</span>
       </span>
-      <button class="conv-ref-chip-remove" data-index="${i}" title="移除引用">×</button>
+      <button class="conv-ref-chip-remove" data-index="${i}" title="${escapeHtml(t('convRef.removeRef'))}">×</button>
     </div>`;
   }).join("");
   container.querySelectorAll(".conv-ref-chip-remove").forEach(btn => {

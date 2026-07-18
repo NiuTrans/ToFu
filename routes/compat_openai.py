@@ -15,9 +15,7 @@ Auth: standard ``Authorization: Bearer tofu_…`` (validated by the
 
 from __future__ import annotations
 
-import uuid
-
-from flask import Blueprint, Response
+from flask import Blueprint
 
 from lib.agent_core.admission import (
     await_terminal, controller, on_terminal, register_waiter,
@@ -25,6 +23,7 @@ from lib.agent_core.admission import (
 )
 from lib.api_response import (
     api_bad_request, api_error, api_internal_error, api_not_found,
+    sse_response,
 )
 from lib.byo_resolve import resolve_model_and_provider
 from lib.compat.openai import (
@@ -32,6 +31,7 @@ from lib.compat.openai import (
     translate_openai_request,
 )
 from lib.idempotency import idempotent_post
+from lib.ids import short_id
 from lib.llm_dispatch.ephemeral import dispose_ephemeral_slot
 from lib.log import audit_log, get_logger
 from lib.openapi import api_meta
@@ -110,7 +110,7 @@ async def chat_completions():
               n_messages=len(messages), stream=options['stream'])
 
     from lib.tasks_pkg import create_task, spawn_task
-    conv_id = f'compat-openai-{uuid.uuid4().hex[:12]}'
+    conv_id = short_id('compat-openai-', 12)
     task = create_task(conv_id, messages, cfg)
     task['_inline_messages'] = True
     task['_compat_openai'] = True
@@ -167,14 +167,8 @@ async def chat_completions():
             task, model=model, requested_id=requested_id,
             include_tofu_native=False,
         )
-        resp = Response(gen, mimetype='text/event-stream', headers={
-            'Content-Type': 'text/event-stream; charset=utf-8',
-            'Cache-Control': 'no-cache, no-transform',
-            'X-Accel-Buffering': 'no',
-            'Connection': 'keep-alive',
-            'X-Tofu-Task-Id': task['id'],
-        })
-        return resp
+        return sse_response(
+            gen, extra_headers={'X-Tofu-Task-Id': task['id']})
 
     try:
         await _wait_terminal(task, options['timeout_s'])

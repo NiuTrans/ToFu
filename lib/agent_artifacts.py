@@ -71,6 +71,11 @@ USER_PROFILE_PENDING_FILE = '.tofu_user_profile_pending.json'
 # startup reconciliation / sweep). Written by ``lib/presence/registry.py``.
 PRESENCE_SUBDIR = 'presence'          # under FILE_HISTORY_ROOT_DIR (.tofu/)
 PRESENCE_REGISTRY_FILE = 'registry.json'
+# Legacy per-conversation git worktree isolation state dir. The isolation
+# feature was REMOVED; this constant is retained only so the ``.tofu*`` gitignore
+# glob + artifact consumers still recognise any stale ``.tofu_worktrees/`` dirs
+# left on disk as agent junk (safe to delete).
+WORKTREES_DIR = '.tofu_worktrees'
 
 # Explicit set of the artifacts known TODAY — useful for documentation,
 # tests, and consumers that want to enumerate rather than prefix-match.
@@ -110,6 +115,7 @@ __all__ = [
     'FILE_HISTORY_ROOT_DIR', 'TRASH_DIR', 'SANDBOX_DIR', 'ENV_MARKER_FILE',
     'USER_PROFILE_FILE', 'USER_PROFILE_PENDING_FILE',
     'PRESENCE_SUBDIR', 'PRESENCE_REGISTRY_FILE',
+    'WORKTREES_DIR',
     'KNOWN_ARTIFACT_NAMES', 'GITIGNORE_PATTERN',
     'is_agent_artifact',
 ]

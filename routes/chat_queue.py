@@ -5,11 +5,8 @@ The handlers register on the same ``chat_bp`` Blueprint (imported here)
 to keep the public URLs unchanged.
 """
 
-import json
-
 from flask import jsonify
 
-from lib.database import DOMAIN_CHAT, db_execute_with_retry, get_thread_db
 from lib.log import audit_log, get_logger
 from lib.api_response import api_not_found, api_ok
 from lib.request_parser import parse_body
@@ -94,26 +91,12 @@ def chat_autopilot_arm():
 
     # 1. Persist the setting (best-effort — a conv with no row yet just
     #    means nothing was sent; the frontend toggle state covers that).
+    #    Serialized read-merge-write (settings_store) so this doesn't clobber a
+    #    concurrent activeTaskId / tool-state write.
     try:
-        db = get_thread_db(DOMAIN_CHAT)
-        row = db.execute(
-            'SELECT settings FROM conversations WHERE id=? AND user_id=?',
-            (conv_id, DEFAULT_USER_ID),
-        ).fetchone()
-        if row:
-            try:
-                settings = json.loads(row[0] or '{}')
-            except (json.JSONDecodeError, TypeError) as e:
-                logger.debug('[Autopilot arm] settings parse failed for '
-                             'conv=%s: %s', conv_id[:8], e)
-                settings = {}
-            settings['autopilotEnabled'] = True
-            db_execute_with_retry(
-                db,
-                'UPDATE conversations SET settings=? WHERE id=? AND user_id=?',
-                (json.dumps(settings, ensure_ascii=False), conv_id,
-                 DEFAULT_USER_ID),
-            )
+        from lib.conversations import set_conversation_settings
+        set_conversation_settings(conv_id, {'autopilotEnabled': True},
+                                  user_id=DEFAULT_USER_ID)
     except Exception as e:
         logger.warning('[Autopilot arm] failed to persist autopilotEnabled '
                        'for conv=%s: %s', conv_id[:8], e)
@@ -144,27 +127,12 @@ def chat_autopilot_disarm():
         from lib.api_response import api_bad_request
         return api_bad_request('convId is required', field='convId')
 
-    # Persist autopilotEnabled=false (best-effort).
+    # Persist autopilotEnabled=false (best-effort). Serialized read-merge-write
+    # (settings_store) so this doesn't clobber a concurrent settings write.
     try:
-        db = get_thread_db(DOMAIN_CHAT)
-        row = db.execute(
-            'SELECT settings FROM conversations WHERE id=? AND user_id=?',
-            (conv_id, DEFAULT_USER_ID),
-        ).fetchone()
-        if row:
-            try:
-                settings = json.loads(row[0] or '{}')
-            except (json.JSONDecodeError, TypeError) as e:
-                logger.debug('[Autopilot disarm] settings parse failed for '
-                             'conv=%s: %s', conv_id[:8], e)
-                settings = {}
-            settings['autopilotEnabled'] = False
-            db_execute_with_retry(
-                db,
-                'UPDATE conversations SET settings=? WHERE id=? AND user_id=?',
-                (json.dumps(settings, ensure_ascii=False), conv_id,
-                 DEFAULT_USER_ID),
-            )
+        from lib.conversations import set_conversation_settings
+        set_conversation_settings(conv_id, {'autopilotEnabled': False},
+                                  user_id=DEFAULT_USER_ID)
     except Exception as e:
         logger.warning('[Autopilot disarm] failed to persist autopilotEnabled '
                        'for conv=%s: %s', conv_id[:8], e)
@@ -173,37 +141,6 @@ def chat_autopilot_disarm():
     result = disarm_autopilot(conv_id)
     audit_log('autopilot_disarm_request', conv_id=conv_id,
               disarmed=result['disarmed'])
-    return api_ok(result)
-
-
-@api_v1_chat_bp.route('/api/v1/chat/autopilot/summarize', methods=['POST'], endpoint='ui_chat_autopilot_summarize')
-@require_scope('chat')
-def chat_autopilot_summarize():
-    """Generate an on-demand close-out report for a concluded autopilot run.
-
-    For runs that ended WITHOUT a clean ``[VU: TASK_DONE]`` (the user clicked
-    Stop or sent a new message) no auto-summary is produced; this backs the
-    "Summarize this run" affordance so the user can request one after the fact.
-
-    Body: ``{convId, runId?, config?}``. Returns ``{ok, summary, runId}`` on
-    success (``summary`` is the sidecar record — human-only, NOT a chat
-    message), or 409/400 with ``{error}`` when there is nothing to summarize.
-    """
-    data = parse_body()
-    conv_id = (data.get('convId') or '').strip()
-    if not conv_id:
-        from lib.api_response import api_bad_request
-        return api_bad_request('convId is required', field='convId')
-    run_id = (data.get('runId') or '').strip()
-    config = data.get('config') or {}
-
-    from lib.tasks_pkg.autopilot import summarize_run
-    result = summarize_run(conv_id, run_id, config)
-    audit_log('autopilot_summarize_request', conv_id=conv_id,
-              run_id=result.get('runId'), ok=result.get('ok'))
-    if not result.get('ok'):
-        from lib.api_response import api_conflict
-        return api_conflict(result.get('error') or 'cannot_summarize')
     return api_ok(result)
 
 

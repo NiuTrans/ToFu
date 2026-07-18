@@ -17,7 +17,10 @@ from flask import Blueprint, Response, jsonify, make_response, request, send_fro
 
 import lib as _lib  # module ref for hot-reload
 from lib.css_bundler import get_styles_link_tag as _get_styles_link_tag
-from lib.js_bundler import get_bundle_script_tag as _get_bundle_tag
+from lib.js_bundler import (
+    get_bundle_script_tag as _get_bundle_tag,
+    get_feature_bundle_filename as _get_feature_bundle_filename,
+)
 from lib.log import get_logger
 from lib.api_response import api_bad_request, api_internal_error, api_ok
 from lib.request_parser import parse_body
@@ -76,6 +79,26 @@ def _db_safe(fn):
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_USER_ID = 1
 
+# ── Native mobile client (Android APK) download ──
+# The Android client lives in its OWN repo (github.com/rangehow/tofu-android),
+# so its CI publishes release APKs to that repo's /releases — NOT the backend's
+# rangehow/ToFu repo. The filename here MUST equal the asset that repo's CI
+# workflow publishes (.github/workflows/build-apk.yml). That two-repo coupling
+# is guarded by tests/test_mobile_client_apk_url.py so it can't silently drift
+# into a permanent 404.
+MOBILE_CLIENT_APK_ASSET = 'tofu-android.apk'
+# Direct-download DEEP LINK, not the releases HTML page. GitHub's
+# /releases/latest/download/<asset> is a stable redirect that always serves the
+# newest release's asset and triggers a real download on tap — exactly what a
+# phone needs. Before the first tagged release this 404s (honest "not published
+# yet"); that is a better mobile outcome than landing on the /releases/latest
+# page full of wrong-platform desktop installers. TOFU_MOBILE_CLIENT_URL
+# overrides it (e.g. to pin a specific version's asset).
+DEFAULT_MOBILE_CLIENT_URL = (
+    'https://github.com/rangehow/tofu-android/releases/latest/download/'
+    + MOBILE_CLIENT_APK_ASSET
+)
+
 common_bp = Blueprint('common', __name__)
 # v1 blueprint for the JSON routes (page-serving carve-outs above stay on common_bp).
 from routes.api_v1.common import api_v1_common_bp  # noqa: E402
@@ -87,6 +110,7 @@ from routes.api_v1.common import api_v1_common_bp  # noqa: E402
 # working for route modules that still import them from here.
 from lib.conversations.meta_cache import (  # noqa: E402,F401  — re-exported for route modules (conversations.py, chat.py)
     invalidate_meta_cache as _invalidate_meta_cache,
+    notify_conv_changed as _notify_conv_changed,
     refresh_meta_cache_if_stale as _refresh_meta_cache_if_stale,
 )
 
@@ -333,7 +357,7 @@ FAVICON_SVG = '''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
 # ── Cached bundled index.html (avoids re-reading + regex on every page load) ──
 # Keyed by (bundle_tag, styles_link_tag, html_mtime) so any of those changing
 # triggers a re-render of the cached HTML.
-_bundled_index_cache = {'tag': None, 'styles_tag': None, 'html': None, 'mtime': 0}
+_bundled_index_cache = {'tag': None, 'styles_tag': None, 'feature': None, 'html': None, 'mtime': 0}
 
 # Regex: match contiguous block of app script tags + interleaved HTML comments/blank lines.
 # Two important details:
@@ -349,10 +373,45 @@ _bundled_index_cache = {'tag': None, 'styles_tag': None, 'html': None, 'mtime': 
 #      fires multiple times (.*? doesn't cross \n → bundle injected per-block →
 #      duplicate-IIFE crash) or matches enormous spans ([\s\S]*? backtracks across
 #      <head> meta tags etc).
+# The SINGLE source of truth for "which static/js/<path> is an app script the
+# bundle replaces". Both the strip regex below AND the is_stripped_app_script()
+# predicate consume this ONE sub-pattern, so a test can drive the predicate to
+# assert manifest↔regex parity without re-typing (and thus drifting from) the
+# pattern. The `(?!bundle-)` negative lookahead excludes the built bundle tag
+# itself (bundle-<hash>.js) so re-serving the cached HTML doesn't strip its own
+# injected tag. See CLAUDE.md §3.2.1 and tests/test_bundle_manifest_parity.py.
+_APP_SCRIPT_SRC_SUBPATTERN = r'static/js/(?!bundle-)[\w./-]+\.js'
+
+# Predicate form of the sub-pattern above (anchored at start). True iff the
+# given <script src> value is an app script _APP_SCRIPTS_RE would strip — i.e.
+# a file the bundle MUST rebuild. Used by the parity test to close the
+# regex↔manifest edge structurally (never a re-typed copy of the pattern).
+_APP_SCRIPT_SRC_RE = re.compile(_APP_SCRIPT_SRC_SUBPATTERN)
+
+
+def is_stripped_app_script(src_attr):
+    """Return True iff ``src_attr`` names an app script the bundle replaces.
+
+    ``src_attr`` is a ``<script>`` ``src`` value (e.g.
+    ``"static/js/foo.js?v=1"``). Returns True for every app script the
+    ``_APP_SCRIPTS_RE`` strip pass removes from the served HTML, and False for
+    the built ``bundle-<hash>.js`` tag (and anything not under ``static/js/``).
+    Shares ``_APP_SCRIPT_SRC_SUBPATTERN`` with the strip regex so the two can
+    never diverge.
+
+    Args:
+        src_attr: The raw ``src`` attribute value of a ``<script>`` tag.
+
+    Returns:
+        True if this src would be stripped as an app script, else False.
+    """
+    return bool(_APP_SCRIPT_SRC_RE.match(src_attr or ''))
+
+
 _APP_SCRIPTS_RE = re.compile(
-    r'(?:(?:<!--[^<]*?-->\n)|(?:<script defer src="static/js/(?!bundle-)[\w./-]+\.js[^"]*"[^>]*></script>\n)|(?:\s*\n))*'
-    r'<script defer src="static/js/(?!bundle-)[\w./-]+\.js[^"]*"[^>]*></script>\n'
-    r'(?:(?:<!--[^<]*?-->\n)|(?:<script defer src="static/js/(?!bundle-)[\w./-]+\.js[^"]*"[^>]*></script>\n)|(?:\s*\n))*'
+    r'(?:(?:<!--[^<]*?-->\n)|(?:<script defer src="' + _APP_SCRIPT_SRC_SUBPATTERN + r'[^"]*"[^>]*></script>\n)|(?:\s*\n))*'
+    r'<script defer src="' + _APP_SCRIPT_SRC_SUBPATTERN + r'[^"]*"[^>]*></script>\n'
+    r'(?:(?:<!--[^<]*?-->\n)|(?:<script defer src="' + _APP_SCRIPT_SRC_SUBPATTERN + r'[^"]*"[^>]*></script>\n)|(?:\s*\n))*'
 )
 
 # Regex: match the app stylesheet `<link>` tag (with whatever ?v=… is in the
@@ -373,6 +432,22 @@ def index_page():
         resp.headers['Cache-Control'] = 'private, no-cache'
         return resp
 
+    # Deferred feature bundle (lazy-loaded by static/js/feature-loader.js). We
+    # expose its hashed URL to the page as window.__FEATURE_BUNDLE_SRC__ via a
+    # tiny inline <script> injected right before the core bundle tag. None when
+    # there is nothing to defer (dev fallback / empty deferred manifest) — the
+    # loader then no-ops and the deferred entry-point stubs are never installed.
+    feature_name = None
+    try:
+        feature_name = _get_feature_bundle_filename()
+    except Exception as _e_feat:
+        logger.debug('[Index] feature bundle unavailable: %s', _e_feat)
+    if feature_name:
+        feature_tag = ('<script>window.__FEATURE_BUNDLE_SRC__='
+                       f'"static/js/{feature_name}";</script>\n')
+    else:
+        feature_tag = ''
+
     # Use cached version if bundle tag, styles tag, AND index.html mtime
     # are all unchanged. Any of those changing → rebuild the served HTML.
     html_path = os.path.join(BASE_DIR, 'index.html')
@@ -383,6 +458,7 @@ def index_page():
         html_mtime = 0
     if (_bundled_index_cache['tag'] == bundle_tag
             and _bundled_index_cache['styles_tag'] == styles_tag
+            and _bundled_index_cache['feature'] == feature_tag
             and _bundled_index_cache['mtime'] == html_mtime
             and _bundled_index_cache['html']):
         resp = make_response(_bundled_index_cache['html'])
@@ -399,11 +475,14 @@ def index_page():
         with open(html_path, 'r', encoding='utf-8') as f:
             html = f.read()
 
-        html = _APP_SCRIPTS_RE.sub(bundle_tag + '\n', html)
+        # feature_tag prepended so window.__FEATURE_BUNDLE_SRC__ is defined
+        # BEFORE the core bundle (which contains feature-loader.js) executes.
+        html = _APP_SCRIPTS_RE.sub(feature_tag + bundle_tag + '\n', html)
         html = _APP_STYLES_RE.sub(styles_tag, html)
 
         _bundled_index_cache['tag'] = bundle_tag
         _bundled_index_cache['styles_tag'] = styles_tag
+        _bundled_index_cache['feature'] = feature_tag
         _bundled_index_cache['html'] = html
         _bundled_index_cache['mtime'] = html_mtime
 
@@ -531,6 +610,30 @@ def health_check():
     from lib.database import _BACKEND, db_available
     from lib.version import __version__
     result = {'ok': True, 'ts': int(time.time() * 1000), 'db_ok': db_available, 'version': __version__}
+
+    # ── Per-process boot identity (robust restart verification) ──
+    # The restart button re-execs in place (os.execv keeps the same PID +
+    # start-time), so "health answered ok" cannot prove a NEW process replied.
+    # bootId is a fresh uuid minted at module import — a re-exec re-imports and
+    # gets a new one, while a lingering old process keeps its old one. The
+    # restart client captures the pre-restart bootId and only succeeds when this
+    # differs. cacheFixGen surfaces the loaded (in-memory) cache-fix version so
+    # a stale-code restart is visible, not silently green. Best-effort.
+    try:
+        from lib import boot_identity as _bi
+        result['pid'] = _bi.PID
+        result['bootId'] = _bi.BOOT_ID
+        result['cacheFixGen'] = _bi.cache_fix_gen()
+    except Exception as _bi_e:
+        logger.debug('[Health] boot identity unavailable: %s', _bi_e)
+
+    # Native mobile-client download URL, surfaced in the Settings footer.
+    # Defaults to a DIRECT APK deep link (see DEFAULT_MOBILE_CLIENT_URL) so a
+    # phone tap downloads the app rather than landing on a wrong-platform
+    # releases page; TOFU_MOBILE_CLIENT_URL overrides.
+    _mobile_url = (os.environ.get('TOFU_MOBILE_CLIENT_URL') or '').strip() \
+        or DEFAULT_MOBILE_CLIENT_URL
+    result['mobile_client_url'] = _mobile_url
 
     # Report the active backend ('pg' or 'sqlite') — NOT a hardcoded value,
     # which previously mislabeled every PostgreSQL deployment as sqlite.

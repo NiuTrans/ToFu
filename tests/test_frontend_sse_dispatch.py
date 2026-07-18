@@ -82,7 +82,13 @@ for (const n of ['twUpdate','twStart','twStop','finishStream','renderChat',
 win._streamingBubbleHTML = global._streamingBubbleHTML = () => '<div id="streaming-msg"></div>';
 win._TOFU_PLANNER_SVG = global._TOFU_PLANNER_SVG = '<svg></svg>';
 win.renderMarkdown = global.renderMarkdown = (s) => s;
-win.ConvView = global.ConvView = { finalizeStreaming: spy('finalizeStreaming') };
+// i18n: the real t(key, params) interpolates; the harness only needs a
+// deterministic non-crashing string. Handlers like _handleMessagesSnapshot
+// call t('stream.roundMessages', {round,n}) — without this stub the whole
+// node process throws ReferenceError before later cases run.
+win.t = global.t = (key, params) => key;
+win.ConvView = global.ConvView = { finalizeStreaming: spy('finalizeStreaming'),
+  removeMessage: spy('removeMessage') };
 win.Artifacts = global.Artifacts = { attachToMessage: spy('attachToMessage') };
 win.flashGaugeForArchive = global.flashGaugeForArchive = spy('flashGaugeForArchive');
 win.Api = global.Api = { project: { status: () => Promise.resolve(null) } };
@@ -106,7 +112,43 @@ let _idc = 0;
 win._ensureMsgId = global._ensureMsgId = (m) => { if (m && !m._msgId) m._msgId = 'mid-' + (++_idc); return m; };
 win._resolveAssistantById = global._resolveAssistantById = (conv, id) =>
   (conv && conv.messages.find(m => m._msgId === id)) || null;
+// _hasRealToolRound lives in chat_render.js (loaded BEFORE sse_pipeline.js in
+// the real bundle). This harness doesn't load chat_render, so provide the SAME
+// predicate (port of reconcile._has_real_round) — the empty-turn splice (fix ②)
+// reads it. ConvView.removeMessage stub so the splice's DOM eviction is a no-op.
+win._hasRealToolRound = global._hasRealToolRound = (m) => {
+  const rounds = m && m.toolRounds;
+  if (!Array.isArray(rounds)) return false;
+  for (const r of rounds) {
+    if (!r || typeof r !== 'object') continue;
+    if (r.status === 'done' || r.toolContent) return true;
+    if (Array.isArray(r.results) && r.results.length) return true;
+  }
+  return false;
+};
+// _spliceInjectRow lives in core.js (loaded before sse_pipeline.js in the real
+// bundle). This harness doesn't load core.js, so provide the SAME impl — the
+// inject-inject handlers (swarm/peer/steer) call it to anchor the synthetic row
+// before its consuming round (llmRound === injectRound-1). Port of core.js.
+win._spliceInjectRow = global._spliceInjectRow = (arr, row, anchorLlmRound) => {
+  if (!Array.isArray(arr)) return arr;
+  let at = -1;
+  if (anchorLlmRound != null) {
+    for (let i = 0; i < arr.length; i++) {
+      const r = arr[i];
+      if (r && !r._userSteerInject && !r._peerInject && !r._inboxInject
+          && r.llmRound === anchorLlmRound) { at = i; break; }
+    }
+  }
+  if (at >= 0) arr.splice(at, 0, row); else arr.push(row);
+  return arr;
+};
 
+// RENDER_CONTRACT Phase 3: the pure stream reducer loads BEFORE the handlers +
+// pipeline in the bundle (js_bundler _BUNDLE_FILES), and dispatchSSEEvent's
+// COLD/POLL routing calls projectColdSnapshot — so the harness must eval it
+// first too, or dispatch throws ReferenceError: projectColdSnapshot.
+eval(fs.readFileSync(process.argv[9], 'utf8'));  // ui/stream_reducer.js
 // Load the extracted property-only handlers FIRST (in production they're
 // concatenated into the bundle before sse_pipeline.js and share window scope).
 eval(fs.readFileSync(process.argv[4], 'utf8'));  // ui/sse_handlers_tool.js
@@ -353,6 +395,16 @@ function line(obj) { return 'data: ' + JSON.stringify(obj); }
   const r = ctx.assistantMsg.toolRounds.find(x => x.toolCallId === 'wa1');
   check('write_approval_pending', r && r.status === 'pending_approval' &&
     r.approvalId === 'ap1' && r.approvalMeta && r.approvalMeta.path === 'x.txt');
+  // ★ RENDER_CONTRACT Phase 3 convergence: settling the round via tool_result
+  //   is now routed through the pure reducer, which owns the approval-clear
+  //   discipline (a settled round no longer awaits approval). The pending
+  //   approvalId/approvalMeta/guidanceId must be cleared exactly as the old
+  //   inline handler did — proving the reducer routing is behaviour-identical.
+  T.dispatchSSEEvent(line({ type: 'tool_result', roundNum: 1, toolCallId: 'wa1',
+    results: [{ title: 'written' }] }), ctx);
+  const r2 = ctx.assistantMsg.toolRounds.find(x => x.toolCallId === 'wa1');
+  check('approval_cleared_on_settle', r2 && r2.status === 'done' &&
+    r2.approvalId === null && r2.approvalMeta === null && r2.guidanceId === null);
 }
 
 // ── 15b. write_approval_request for run_command carries command/description ──
@@ -377,7 +429,7 @@ function line(obj) { return 'data: ' + JSON.stringify(obj); }
 // ── 16. round_usage stashes _liveLastRoundUsage; returns falsy ──
 {
   const { ctx } = setup();
-  const ret = T.dispatchSSEEvent(line({ type: 'round_usage', round: 2, model: 'm',
+  const ret = T.dispatchSSEEvent(line({ type: 'round_usage', roundNum: 2, model: 'm',
     tokensIn: 100, tokensOut: 20, usage: { total_tokens: 120 } }), ctx);
   check('round_usage_returns_falsy', !ret);
   const u = ctx.assistantMsg._liveLastRoundUsage;
@@ -438,7 +490,7 @@ function line(obj) { return 'data: ' + JSON.stringify(obj); }
 // ── 21. swarm_inbox_inject pushes a chip + a synthetic _inboxInject round (deduped) ──
 {
   const { ctx } = setup();
-  T.dispatchSSEEvent(line({ type: 'swarm_inbox_inject', round: 3, count: 2,
+  T.dispatchSSEEvent(line({ type: 'swarm_inbox_inject', roundNum: 3, count: 2,
     agentIds: ['a1', 'a2'], previews: ['p1', 'p2'] }), ctx);
   check('inbox_chip_pushed', (ctx.assistantMsg._inboxInjects || []).length === 1 &&
     ctx.assistantMsg._inboxInjects[0].count === 2);
@@ -446,16 +498,34 @@ function line(obj) { return 'data: ' + JSON.stringify(obj); }
   check('inbox_synthetic_round', synth.length === 1 && synth[0]._inboxKey === 'inbox:3' &&
     synth[0].status === 'done');
   // Replay the SAME round → must dedup (no second synthetic round).
-  T.dispatchSSEEvent(line({ type: 'swarm_inbox_inject', round: 3, count: 2,
+  T.dispatchSSEEvent(line({ type: 'swarm_inbox_inject', roundNum: 3, count: 2,
     agentIds: ['a1', 'a2'] }), ctx);
   check('inbox_dedup', (ctx.assistantMsg.toolRounds || []).filter(r => r._inboxInject).length === 1);
+}
+
+// ── 21b. peer_inbox_inject (Pillar #6 fast-path) pushes a synthetic
+//         _peerInject round carrying sender + text previews (deduped by round). ──
+{
+  const { ctx } = setup();
+  T.dispatchSSEEvent(line({ type: 'peer_inbox_inject', roundNum: 2, count: 1,
+    previews: [{ fromConv: 'senderco', text: 'watch the parser epic' }] }), ctx);
+  const synth = (ctx.assistantMsg.toolRounds || []).filter(r => r._peerInject);
+  check('peer_inject_synthetic_round', synth.length === 1 &&
+    synth[0]._peerKey === 'peer:2' && synth[0].status === 'done' &&
+    synth[0].peerCount === 1 &&
+    (synth[0].peerPreviews || [])[0].fromConv === 'senderco');
+  // Replay the SAME round → must dedup (no second synthetic peer round).
+  T.dispatchSSEEvent(line({ type: 'peer_inbox_inject', roundNum: 2, count: 1,
+    previews: [{ fromConv: 'senderco', text: 'watch the parser epic' }] }), ctx);
+  check('peer_inject_dedup',
+    (ctx.assistantMsg.toolRounds || []).filter(r => r._peerInject).length === 1);
 }
 
 // ── 22. messages_snapshot forwards to showMessagesInDebug (debug-only, no msg mutation) ──
 {
   const { ctx } = setup();
   const before = JSON.stringify(ctx.assistantMsg);
-  T.dispatchSSEEvent(line({ type: 'messages_snapshot', round: 1, messageCount: 3,
+  T.dispatchSSEEvent(line({ type: 'messages_snapshot', roundNum: 1, messageCount: 3,
     messages: [{ role: 'user', content: 'x' }] }), ctx);
   check('snapshot_calls_debug', calls.showMessagesInDebug >= 1);
   check('snapshot_no_msg_mutation', JSON.stringify(ctx.assistantMsg) === before);
@@ -585,19 +655,28 @@ function line(obj) { return 'data: ' + JSON.stringify(obj); }
     ctx.assistantMsg.content === 'AB');
 }
 
-// ── 28. PHASE 1 (parity-gap closure): a `done` event carrying
-//        `committedMessage` PROJECTS IT VERBATIM onto the settled bubble —
-//        the single source of truth for settled state. content/thinking go
-//        through keep-longer; toolRounds + terminal metadata are taken
-//        verbatim from the committed DB dict. ──
+// ── 28. PHASE 1 (parity-gap closure, epic pt_78579f57be1c4f60): a `done` event
+//        carrying `committedMessage` PROJECTS IT VERBATIM onto the settled
+//        bubble — the SINGLE source of truth for settled state (the
+//        separation-of-concerns directive). Since the backend stamps
+//        `_committedMsg` from the EXACT committed DB row (manager.py, on CAS
+//        success), the committed dict is authoritative AND complete — so
+//        content/thinking/toolRounds are taken VERBATIM, EVEN WHEN THE COMMITTED
+//        COPY IS SHORTER than the client's transient stream buffer (the
+//        directive case: settled = backend record, NOT a local keep-longer
+//        reconstruction). This is the exact behaviour the pre-fix keep-longer
+//        on the committed path violated. ──
 {
   const { am, ctx } = setup();
-  // Client streamed a short partial; the backend committed the fuller answer.
-  T.dispatchSSEEvent(line({ type: 'delta', content: 'short partial' }), ctx);
+  // Client streamed a LONGER partial (e.g. a stale/duplicated live buffer);
+  // the backend committed the AUTHORITATIVE (shorter) answer. Verbatim wins.
+  T.dispatchSSEEvent(line({ type: 'delta',
+    content: 'a long stale local streaming buffer that must NOT win over the DB' }), ctx);
+  T.dispatchSSEEvent(line({ type: 'delta', thinking: 'long stale local thinking buffer' }), ctx);
   const committed = {
     role: 'assistant',
-    content: 'THE FULL COMMITTED ANSWER from the DB, longer than the partial',
-    thinking: 'committed reasoning',
+    content: 'the committed answer',          // SHORTER than the local partial
+    thinking: 'brief',                        // SHORTER than local thinking
     toolRounds: [{ roundNum: 1, toolCallId: 'x', status: 'done', results: [] }],
     finishReason: 'stop', usage: { total_tokens: 77 }, model: 'db-model',
     cost: { costCny: 0.01 }, apiRounds: [{ round: 1 }],
@@ -605,9 +684,10 @@ function line(obj) { return 'data: ' + JSON.stringify(obj); }
   const ret = T.dispatchSSEEvent(line({ type: 'done', finishReason: 'stop',
     committedMessage: committed }), ctx);
   check('committed_done_returns_true', ret === true);
-  check('committed_projects_content_verbatim',
-    am.content === 'THE FULL COMMITTED ANSWER from the DB, longer than the partial');
-  check('committed_projects_thinking_verbatim', am.thinking === 'committed reasoning');
+  // ★ THE DIRECTIVE: the SHORTER committed content wins verbatim (keep-longer
+  //   on this path would have kept the stale longer local buffer = bubble≠DB).
+  check('committed_projects_content_verbatim', am.content === 'the committed answer');
+  check('committed_projects_thinking_verbatim', am.thinking === 'brief');
   check('committed_projects_toolrounds_verbatim',
     Array.isArray(am.toolRounds) && am.toolRounds.length === 1 &&
     am.toolRounds[0].toolCallId === 'x');
@@ -630,26 +710,193 @@ function line(obj) { return 'data: ' + JSON.stringify(obj); }
   check('no_committed_no_projection_flag', am._committedProjection === undefined);
 }
 
-console.log(out.join('\n'));
+// ── 32. EMPTY-BUBBLE ROOT FIX ②: a `done` for a GENUINELY-EMPTY turn (no
+//        content/thinking/toolRounds/error) with NO committedMessage (the
+//        backend deleted the placeholder at the source, so it ships none) must
+//        SPLICE the empty placeholder out of conv.messages — NOT leave a
+//        finishReason-stamped shell that renders as a blank "Agent" bubble
+//        until reload. Mirrors the endpoint_complete `!content → splice`. ──
+{
+  const { conv, am, ctx } = setup();
+  const _before = conv.messages.length;
+  const _idxBefore = conv.messages.indexOf(am);
+  check('empty_splice_setup_has_placeholder', _idxBefore >= 0 && am.content === '');
+  const ret = T.dispatchSSEEvent(line({ type: 'done', finishReason: 'stop' }), ctx);
+  check('empty_done_returns_true', ret === true);
+  check('empty_placeholder_spliced', conv.messages.indexOf(am) === -1 &&
+    conv.messages.length === _before - 1);
+  check('empty_splice_calls_removeMessage', calls.removeMessage >= 1);
+}
+
+// ── 33. FIX ② GUARD: an empty turn that produced a REAL tool round is
+//        legitimate output (e.g. the model only ran a tool and stopped) — it
+//        must NOT be spliced even though content/thinking are empty. ──
+{
+  const { conv, am, ctx } = setup();
+  am.toolRounds = [{ roundNum: 1, toolCallId: 'z', status: 'done', results: [] }];
+  const _before = conv.messages.length;
+  const ret = T.dispatchSSEEvent(line({ type: 'done', finishReason: 'stop' }), ctx);
+  check('tool_only_done_returns_true', ret === true);
+  check('tool_only_not_spliced', conv.messages.indexOf(am) >= 0 &&
+    conv.messages.length === _before);
+}
+
+// ── 34. FIX ② GUARD: an empty `done` that carries committedMessage (backend
+//        DID persist a real reply, e.g. a whitespace-trim edge or a legit empty
+//        record) must NOT be spliced — committedMessage is the authoritative
+//        "backend persisted this" signal. ──
+{
+  const { conv, am, ctx } = setup();
+  const _before = conv.messages.length;
+  const ret = T.dispatchSSEEvent(line({ type: 'done', finishReason: 'stop',
+    committedMessage: { role: 'assistant', content: '', finishReason: 'stop' } }), ctx);
+  check('committed_empty_done_returns_true', ret === true);
+  check('committed_empty_not_spliced', conv.messages.indexOf(am) >= 0 &&
+    conv.messages.length === _before);
+  check('committed_empty_projection_flag', am._committedProjection === true);
+}
+
+// ── 31. RECONNECT FIDELITY (item 4): a `state` snapshot delivered on
+//        reconnect that carries an IN-FLIGHT tool round (status:'searching',
+//        no results yet) must seed it onto the assistant msg + buf, so the
+//        re-rendered bubble shows "Searching…" (updateStreamingUI keys
+//        hasActiveSearch off a round with status==='searching') instead of the
+//        generic "等待中…/Waiting…" wait branch. This is the exact refresh
+//        case from the ORCA incident: the tool_start event was consumed by the
+//        pre-refresh page, so ONLY the state snapshot can restore the search
+//        card. Non-endpoint reconnect path. ──
+{
+  const { am, buf, ctx } = setup();
+  // Fresh reload: no content/thinking streamed yet, an in-flight search round
+  // arrives only via the reconnect state snapshot.
+  T.dispatchSSEEvent(line({ type: 'state', status: 'running', content: '', thinking: '',
+    toolRounds: [{ roundNum: 1, toolCallId: 'sr1', toolName: 'web_search',
+      query: 'HIV lymphoid follicle', status: 'searching', results: null }] }), ctx);
+  const r = (am.toolRounds || []).find(x => x.toolCallId === 'sr1');
+  check('state_reconnect_seeds_inflight_round', !!r && r.status === 'searching');
+  check('state_reconnect_seeds_buf_rounds',
+    Array.isArray(buf.toolRounds) &&
+    buf.toolRounds.some(x => x.toolCallId === 'sr1' && x.status === 'searching'));
+  // The whole point: a round with status 'searching' is present, so
+  // updateStreamingUI's hasActiveSearch is true → "Searching…" not "等待中…".
+  check('state_reconnect_has_active_search',
+    (am.toolRounds || []).some(x => x.status === 'searching'));
+}
+
+// ── 30. workspace_root_added: state parity — the handler refreshes
+//        projectState via Api.project.status(), mutates extraRoots, and
+//        persists the new root into conv.projectPaths (was toast-ONLY).
+//        ASYNC: the refresh runs in a status().then() microtask, so this
+//        scenario awaits a microtask flush before asserting, and the final
+//        console.log is deferred until after asyncTests() resolves. ──
+async function asyncTests() {
+  // (a) ACTIVE-conv event → EPHEMERAL bar paint, but NO durable persist.
+  {
+    const { conv, ctx } = setup();          // conv 'c1', activeConvId 'c1'
+    // The conv's durable record before the incidental root arrives: the user
+    // has an explicit primary and has NO extras (they removed the sibling).
+    conv.projectPath = '/proj';
+    conv.projectPaths = ['/proj'];
+    let ps = { extraRoots: [] };
+    // Real-ish _applyProjectData: mirrors project.js — sets extraRoots.
+    win._applyProjectData = global._applyProjectData = (data) => {
+      if (data && Array.isArray(data.extraRoots)) ps.extraRoots = data.extraRoots;
+    };
+    let statusCalls = 0, statusConvArg = undefined;
+    win.Api = global.Api = { project: { status: (cid) => { statusCalls++;
+      statusConvArg = cid;
+      return Promise.resolve({ path: '/proj',
+        extraRoots: [{ path: '/proj/sib', name: 'sib', readOnly: false }] }); } } };
+    // Spy counters are CUMULATIVE across all scenarios — snapshot before the
+    // event and assert no INCREASE (not an absolute === 0).
+    const _saveBefore = calls.saveConversations;
+    const _syncBefore = calls.syncConversationToServer;
+    T.dispatchSSEEvent(line({ type: 'workspace_root_added',
+      roots: [{ rootName: 'sib', path: '/proj/sib' }] }), ctx);
+    await Promise.resolve(); await Promise.resolve();   // flush the .then chain
+    check('wra_toast_shown', calls.showToast >= 1);
+    check('wra_status_refreshed', statusCalls === 1);
+    // Conv-scoped: the status probe passes the conv id (Fix 2).
+    check('wra_status_conv_scoped', statusConvArg === 'c1');
+    // Ephemeral paint: the bar DOES light up the incidental root this session.
+    check('wra_mutates_projectState_extraRoots',
+      ps.extraRoots.length === 1 && ps.extraRoots[0].path === '/proj/sib');
+    // ★ THE FIX: the incidental root is NOT written into the durable record.
+    check('wra_does_NOT_persist_conv_projectPaths',
+      Array.isArray(conv.projectPaths) && conv.projectPaths.length === 1 &&
+      conv.projectPaths[0] === '/proj' &&
+      !conv.projectPaths.includes('/proj/sib'));
+    check('wra_does_NOT_save', calls.saveConversations === _saveBefore);
+    check('wra_does_NOT_sync', calls.syncConversationToServer === _syncBefore);
+  }
+  // (b) GATE: an event whose conv is NOT the active one must NOT refresh
+  //     projectState (a background task's global _state may hold a different
+  //     project). Toast still fires; the status()/extraRoots refresh does not.
+  {
+    const { ctx } = setup();                 // ctx.convId 'c1'
+    let ps = { extraRoots: [] };
+    win._applyProjectData = global._applyProjectData = (data) => {
+      if (data && Array.isArray(data.extraRoots)) ps.extraRoots = data.extraRoots;
+    };
+    let statusCalls = 0;
+    win.Api = global.Api = { project: { status: () => { statusCalls++;
+      return Promise.resolve({ path: '/proj',
+        extraRoots: [{ path: '/proj/sib', name: 'sib' }] }); } } };
+    activeConvId = 'a-different-conv';        // ctx.convId ('c1') != active
+    T.dispatchSSEEvent(line({ type: 'workspace_root_added',
+      roots: [{ rootName: 'sib', path: '/proj/sib' }] }), ctx);
+    await Promise.resolve(); await Promise.resolve();
+    check('wra_inactive_conv_no_refresh', statusCalls === 0 && ps.extraRoots.length === 0);
+  }
+  // (c) RELOAD-NO-REPAINT: after an incidental auto-register, a page reload
+  //     restores the bar from the DURABLE conv.projectPaths. Because (a) did
+  //     not persist the sibling, the durable set the reload reads has ONLY the
+  //     explicit primary — so the removed/incidental root is NOT repainted.
+  //     This is the end-state proof the resurrection loop is broken.
+  {
+    const { conv, ctx } = setup();          // conv 'c1', activeConvId 'c1'
+    conv.projectPath = '/proj';
+    conv.projectPaths = ['/proj'];          // user removed the sibling earlier
+    win._applyProjectData = global._applyProjectData = () => {};
+    win.Api = global.Api = { project: { status: () => Promise.resolve({
+      path: '/proj', extraRoots: [{ path: '/proj/sib', name: 'sib' }] }) } };
+    T.dispatchSSEEvent(line({ type: 'workspace_root_added',
+      roots: [{ rootName: 'sib', path: '/proj/sib' }] }), ctx);
+    await Promise.resolve(); await Promise.resolve();
+    // Simulate what _restoreConvProject reads on the next reload: the durable
+    // per-conv path set. It must NOT contain the incidental sibling, so the
+    // reload cannot repaint it.
+    const reloadPaths = (Array.isArray(conv.projectPaths) && conv.projectPaths.length)
+      ? conv.projectPaths : [conv.projectPath];
+    check('reload_paths_exclude_incidental_root',
+      !reloadPaths.includes('/proj/sib') && reloadPaths.length === 1);
+  }
+}
+
+asyncTests()
+  .then(() => { console.log(out.join('\n')); })
+  .catch((e) => { out.push('FAIL asyncTests_threw ' + (e && e.stack || e)); console.log(out.join('\n')); });
 """
 
 
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
-def test_sse_dispatch_characterization():
+def _run_harness(sse_src_path: str, reducer_src_path: str | None = None) -> str:
+    """Run the jsdom harness against a given sse_pipeline.js source path.
+    ``reducer_src_path`` overrides ui/stream_reducer.js (argv[9]) so a NEUTER
+    test can inject a no-op reducer. Returns the harness stdout (PASS/FAIL)."""
     harness = os.path.join(HERE, '_sse_dispatch_harness.js')
     with open(harness, 'w') as f:
         f.write(_HARNESS)
     try:
         proc = subprocess.run(
             ['node', harness,
-             os.path.join(JS_DIR, 'ui', 'sse_pipeline.js'),   # argv[2]
+             sse_src_path,                                    # argv[2]
              ROOT,                                            # argv[3]
              os.path.join(JS_DIR, 'ui', 'sse_handlers_tool.js'),   # argv[4]
              os.path.join(JS_DIR, 'ui', 'sse_handlers_swarm.js'),  # argv[5]
              os.path.join(JS_DIR, 'ui', 'sse_handlers_io.js'),     # argv[6]
              os.path.join(JS_DIR, 'ui', 'sse_handlers_misc.js'),   # argv[7]
              os.path.join(JS_DIR, 'ui', 'sse_handlers_lifecycle.js'),  # argv[8]
+             reducer_src_path or os.path.join(JS_DIR, 'ui', 'stream_reducer.js'),  # argv[9]
              ],
             capture_output=True, text=True, timeout=60,
         )
@@ -658,9 +905,107 @@ def test_sse_dispatch_characterization():
             os.remove(harness)
         except OSError:
             pass
-    output = proc.stdout.strip()
-    assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
+    assert proc.returncode == 0, f'node failed: {proc.stderr}\n{proc.stdout}'
+    return proc.stdout.strip()
+
+
+@pytest.mark.skipif(not _node_deps_available(),
+                    reason='node + jsdom dev-deps not installed (run npm install)')
+def test_sse_dispatch_characterization():
+    output = _run_harness(os.path.join(JS_DIR, 'ui', 'sse_pipeline.js'))
     fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
     assert not fails, 'SSE dispatch characterization failures:\n' + output
-    # 29 scenario groups, ~74 individual checks.
-    assert output.count('PASS') >= 72, f'expected >=72 PASS lines, got:\n{output}'
+    # 34 scenario groups, ~92 individual checks (incl. empty-bubble fix ② splice).
+    assert output.count('PASS') >= 90, f'expected >=90 PASS lines, got:\n{output}'
+
+
+@pytest.mark.skipif(not _node_deps_available(),
+                    reason='node + jsdom dev-deps not installed (run npm install)')
+def test_nc_empty_splice_is_load_bearing(tmp_path):
+    """NEUTER for empty-bubble fix ②: force the empty-turn splice condition to
+    NEVER fire (patch the guard to `if (false && …)`). Scenario 32's
+    `empty_placeholder_spliced` MUST then FAIL — proving the splice is the thing
+    that removes the blank shell, not some incidental cleanup."""
+    src_path = os.path.join(JS_DIR, 'ui', 'sse_pipeline.js')
+    with open(src_path, encoding='utf-8') as f:
+        src = f.read()
+    marker = 'if (!assistantMsg._committedProjection\n          && !ev.autopilotNextTaskId'
+    assert marker in src, 'empty-splice guard anchor not found — did fix ② move?'
+    neutered = src.replace(marker,
+                           'if (false && !assistantMsg._committedProjection\n          && !ev.autopilotNextTaskId')
+    assert neutered != src, 'NC patch did not apply'
+    nc_file = tmp_path / 'sse_pipeline_nc.js'
+    nc_file.write_text(neutered, encoding='utf-8')
+    output = _run_harness(str(nc_file))
+    assert 'FAIL empty_placeholder_spliced' in output, (
+        'Neutering the empty-turn splice did NOT fail the splice assertion — '
+        'the splice is not load-bearing:\n' + output)
+
+
+@pytest.mark.skipif(not _node_deps_available(),
+                    reason='node + jsdom dev-deps not installed (run npm install)')
+def test_nc_tool_handlers_route_through_reducer(tmp_path):
+    """NEUTER for RENDER_CONTRACT Phase 3 tool-handler routing (①): prove the
+    tool_start / tool_result / tool_complete handlers ACTUALLY fold through the
+    pure reducer rather than having quietly regressed to inline mutation.
+
+    We neuter ``reduceStreamState`` to a no-op (return state unchanged) in a copy
+    of stream_reducer.js and re-run the dispatch harness. If the handlers route
+    through it, the tool scenarios MUST break: tool_start no longer pushes a
+    round, tool_result no longer settles it, tool_complete no longer stamps
+    content. So scenarios 2 + 8's assertions must FAIL. If a future edit moves
+    the round-shape mutation back inline, the reducer becomes non-load-bearing
+    and this NEUTER goes green — flagging the regression (errors can't hide)."""
+    src_path = os.path.join(JS_DIR, 'ui', 'stream_reducer.js')
+    with open(src_path, encoding='utf-8') as f:
+        src = f.read()
+    marker = 'function reduceStreamState(state, ev) {'
+    assert marker in src, 'reduceStreamState anchor not found — did the reducer move?'
+    # Force an immediate no-op return before any event action runs.
+    neutered = src.replace(
+        marker,
+        marker + '\n  if (state !== undefined) return state;  /* NEUTER: no-op */',
+        1)
+    assert neutered != src, 'NC patch did not apply'
+    nc_file = tmp_path / 'stream_reducer_nc.js'
+    nc_file.write_text(neutered, encoding='utf-8')
+    # Run the harness WITHOUT asserting returncode==0: a neutered reducer means
+    # tool_start never pushes a round, so scenario 2's `toolRounds[0].status`
+    # read dereferences undefined and crashes the (un-try-guarded) harness. That
+    # crash is itself proof the routing is load-bearing — the flow cannot even
+    # complete once the reducer is a no-op. So we accept EITHER a hard crash OR
+    # (if the flow survived) the ABSENCE of the tool PASS lines.
+    harness = os.path.join(HERE, '_sse_dispatch_harness_nc.js')
+    with open(harness, 'w') as f:
+        f.write(_HARNESS)
+    try:
+        proc = subprocess.run(
+            ['node', harness,
+             os.path.join(JS_DIR, 'ui', 'sse_pipeline.js'), ROOT,
+             os.path.join(JS_DIR, 'ui', 'sse_handlers_tool.js'),
+             os.path.join(JS_DIR, 'ui', 'sse_handlers_swarm.js'),
+             os.path.join(JS_DIR, 'ui', 'sse_handlers_io.js'),
+             os.path.join(JS_DIR, 'ui', 'sse_handlers_misc.js'),
+             os.path.join(JS_DIR, 'ui', 'sse_handlers_lifecycle.js'),
+             str(nc_file)],
+            capture_output=True, text=True, timeout=60)
+    finally:
+        try:
+            os.remove(harness)
+        except OSError:
+            pass
+    output = (proc.stdout or '') + (proc.stderr or '')
+    crashed = proc.returncode != 0
+    # The tool PASS lines that MUST be gone when the reducer is neutered.
+    tool_pass_lines = [
+        'PASS tool_start_pushes_round',
+        'PASS tool_result_marks_done',
+        'PASS tool_complete_sets_content',
+        'PASS tool_complete_sets_tokens',
+    ]
+    surviving = [ln for ln in tool_pass_lines if ln in output]
+    assert crashed or not surviving, (
+        'Neutering reduceStreamState left the tool scenarios PASSING '
+        f'({surviving}) and did not crash — the tool handlers are NOT routing '
+        'through the pure reducer (they must have regressed to inline '
+        'mutation). Routing is not load-bearing:\n' + output[-1500:])

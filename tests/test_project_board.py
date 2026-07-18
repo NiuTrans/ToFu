@@ -94,6 +94,39 @@ def test_complete(flask_app):
     assert 'completed' in _feed_kinds(flask_app, '/b/c')
 
 
+def test_long_title_survives_roundtrip_uncapped(flask_app):
+    """A multi-sentence epic description (~1500 chars) MUST survive
+    post_task → read_board → render_board_block with ZERO clipping.
+
+    Regression guard for the silent write-time clip that stood for a long
+    time: the epic-title cap had been set to project_feed._SUMMARY_MAX_CHARS
+    (280), so any epic longer than a feed-row summary was truncated mid-word
+    both in the panel and in the injected prompt block. The cap is now 2000;
+    this pins it so the next person who copies the feed-summary reasoning (or
+    'tidies' the cap back down) fails loudly instead of re-clipping silently.
+    """
+    from lib.conversations.project_board import (
+        _TITLE_MAX_CHARS, post_task, read_board, render_board_block,
+    )
+    from lib.conversations.project_feed import _SUMMARY_MAX_CHARS
+    # The title cap must stay well above the feed summary cap it was once
+    # accidentally equated with.
+    assert _TITLE_MAX_CHARS > _SUMMARY_MAX_CHARS, \
+        'epic-title cap must NOT be reduced to the feed-row summary cap'
+    tail = ' TAIL_SENTINEL_c0ffee_END'
+    long_title = ('D data-tier scale-out ceiling ' * 60).strip()[:1500] + tail
+    assert len(long_title) > _SUMMARY_MAX_CHARS * 4, 'title comfortably past any old cap'
+    with flask_app.app_context():
+        r = post_task('/b/long', 'cA', long_title)
+        assert r['ok']
+        board = read_board('/b/long')
+        block = render_board_block('/b/long', current_conv_id='cREADER')
+    stored = board['tasks'][0]['title']
+    assert stored == long_title, 'stored title must be BYTE-IDENTICAL (uncapped)'
+    assert stored.endswith(tail), 'the tail must survive (not clipped mid-word)'
+    assert tail in block, 'the full tail must appear in the injected board block'
+
+
 # ════════════════════════════════════════════════════════════════════
 #  claim writes owner + lease; emits claimed
 # ════════════════════════════════════════════════════════════════════
@@ -348,9 +381,6 @@ def test_NC3_no_normalization_breaks_slash_match(flask_app):
 
     def run():
         import lib.conversations.project_board as pb
-        import lib.conversations.project_feed as pf
-        importlib.reload(pf)
-        importlib.reload(pb)
         with flask_app.app_context():
             from lib.database import DOMAIN_CHAT, get_thread_db
             db = get_thread_db(DOMAIN_CHAT)
@@ -370,30 +400,13 @@ def test_NC3_no_normalization_breaks_slash_match(flask_app):
         "    return str(project_path or '')  # NC-3 (normalization disabled)",
         run,
     )
-    # Reload both modules from the restored source so later tests see the fix.
-    import lib.conversations.project_board as pb
-    import lib.conversations.project_feed as pf
-    importlib.reload(pf)
-    importlib.reload(pb)
 
 
 # ════════════════════════════════════════════════════════════════════
 #  Source-level NEGATIVE CONTROLS
 # ════════════════════════════════════════════════════════════════════
 
-def _patch_restore(path, old, new, run):
-    with open(path, encoding='utf-8') as f:
-        original = f.read()
-    assert old in original, f'anchor not found in {path}'
-    try:
-        with open(path, 'w', encoding='utf-8') as f:
-            f.write(original.replace(old, new, 1))
-        run()
-    finally:
-        with open(path, 'w', encoding='utf-8') as f:
-            f.write(original)
-    with open(path, encoding='utf-8') as f:
-        assert f.read() == original, 'source not restored byte-identical'
+from tests._nc_harness import patch_restore as _patch_restore  # noqa: E402
 
 
 def test_NC1_expired_lease_noop_breaks_antideadlock(flask_app):
@@ -403,7 +416,6 @@ def test_NC1_expired_lease_noop_breaks_antideadlock(flask_app):
 
     def run():
         import lib.conversations.project_board as pb
-        importlib.reload(pb)
         with flask_app.app_context():
             from lib.database import DOMAIN_CHAT, get_thread_db
             get_thread_db(DOMAIN_CHAT).execute("DELETE FROM project_tasks WHERE project_path='/nc1b'")
@@ -424,8 +436,6 @@ def test_NC1_expired_lease_noop_breaks_antideadlock(flask_app):
         "    return stored_status  # NC-1 (reclaim disabled)",
         run,
     )
-    import lib.conversations.project_board as pb
-    importlib.reload(pb)
 
 
 def test_NC2_avoidance_hint_noop_breaks_injection(flask_app):
@@ -435,7 +445,6 @@ def test_NC2_avoidance_hint_noop_breaks_injection(flask_app):
 
     def run():
         import lib.conversations.project_board as pb
-        importlib.reload(pb)
         with flask_app.app_context():
             from lib.database import DOMAIN_CHAT, get_thread_db
             get_thread_db(DOMAIN_CHAT).execute("DELETE FROM project_tasks WHERE project_path='/nc2b'")
@@ -452,8 +461,6 @@ def test_NC2_avoidance_hint_noop_breaks_injection(flask_app):
         "            hint = ''  # NC-2 (avoidance hint disabled)",
         run,
     )
-    import lib.conversations.project_board as pb
-    importlib.reload(pb)
 
 
 
@@ -622,7 +629,6 @@ def test_NC4_reopen_owner_clear_noop_breaks(flask_app):
 
     def run():
         import lib.conversations.project_board as pb
-        importlib.reload(pb)
         with flask_app.app_context():
             from lib.database import DOMAIN_CHAT, get_thread_db
             get_thread_db(DOMAIN_CHAT).execute(
@@ -640,12 +646,10 @@ def test_NC4_reopen_owner_clear_noop_breaks(flask_app):
 
     _patch_restore(
         _BOARD_SRC,
-        "        db.execute(\n            \"UPDATE project_tasks SET status='open', owner_conv_id='', \"\n            'lease_expires_at=0, dispatched=0, updated_at=? '\n            'WHERE id=? AND project_path=?',\n            (_now_ms(), task_id, project_path))\n        db.commit()",
+        "        db.execute(\n            \"UPDATE project_tasks SET status='open', owner_conv_id='', \"\n            \"lease_expires_at=0, dispatched=0, blocked_until=0, block_count=0, \"\n            \"block_reason='', wait_paths='[]', dispatch_target='', updated_at=? \"\n            'WHERE id=? AND project_path=?',\n            (_now_ms(), task_id, project_path))\n        db.commit()",
         "        pass  # NC-4 (reopen status/owner write disabled)",
         run,
     )
-    import lib.conversations.project_board as pb
-    importlib.reload(pb)
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -694,7 +698,6 @@ def test_NC5_board_post_audit_noop_breaks(flask_app):
         _log.audit_log = lambda action, **kw: captured.append((action, kw))
         try:
             import lib.conversations.project_board as pb
-            importlib.reload(pb)   # rebinds `from lib.log import audit_log`
             with flask_app.app_context():
                 from lib.database import DOMAIN_CHAT, get_thread_db
                 get_thread_db(DOMAIN_CHAT).execute(
@@ -713,5 +716,121 @@ def test_NC5_board_post_audit_noop_breaks(flask_app):
         "    return {'ok': True, 'id': task_id}  # NC-5 (audit disabled)",
         run,
     )
-    import lib.conversations.project_board as pb
-    importlib.reload(pb)
+
+
+# ════════════════════════════════════════════════════════════════════
+#  read_board COUNT PARTITION — the collab-bar / status-pillar counts MUST
+#  use the SAME partition as render_board_block / the panel lanes /
+#  select_dispatchable, so the top-bar "N open" number can never drift from
+#  the panel's "待认领" lane. The bug this pins: a block-cooldown'd epic is
+#  stored status='open' (block never changes status) so the naive
+#  `out[status] += 1` counted it as OPEN — the top bar said "1 open" while the
+#  panel (which partitions it into its Blocked lane) showed 0 to claim. And a
+#  LIVE kind='lease' row was counted as 'claimed' though it is a path
+#  reservation, not an epic being advanced.
+# ════════════════════════════════════════════════════════════════════
+
+def _insert_live_lease(flask_app, project_path, task_id, path_title):
+    """Insert a LIVE path lease (kind='lease', status='claimed', unexpired)
+    directly — leases are minted by the path-lease subsystem, not post_task."""
+    from lib.database import DOMAIN_CHAT, get_thread_db
+    from lib.timeutil import now_ms
+    with flask_app.app_context():
+        db = get_thread_db(DOMAIN_CHAT)
+        ts = now_ms()
+        db.execute(
+            'INSERT INTO project_tasks '
+            '(id, project_path, title, status, owner_conv_id, lease_expires_at, '
+            ' created_by_conv, depends_on, kind, created_at, updated_at) '
+            "VALUES (?, ?, ?, 'claimed', 'cHOLDER', ?, 'cHOLDER', '[]', "
+            "'lease', ?, ?)",
+            (task_id, project_path, path_title, ts + 30 * 60 * 1000, ts, ts))
+        db.commit()
+
+
+def test_read_board_blocked_epic_not_counted_open(flask_app):
+    """An epic on a LIVE block cooldown (stored status='open' + blocked_until in
+    the future) must be counted as 'blocked', NOT 'open' — matching the panel's
+    Blocked lane and render_board_block. This is the top-bar-vs-panel drift."""
+    from lib.conversations.project_board import (
+        block_task, post_task, read_board,
+    )
+    with flask_app.app_context():
+        open_id = post_task('/b/cnt1', 'cA', 'genuinely open epic')['id']
+        blk_id = post_task('/b/cnt1', 'cA', 'gated epic')['id']
+        # Block it — human reason → a live (1h) cooldown, status stays 'open'.
+        res = block_task('/b/cnt1', 'cA', blk_id, '[human-gated] waiting on sign-off')
+        assert res['ok'] and res['blocked_until'] > 0
+        board = read_board('/b/cnt1')
+    # The gated epic drops OUT of 'open' and into 'blocked'.
+    assert board['open'] == 1, 'only the genuinely-open epic counts as open'
+    assert board['blocked'] == 1, 'the cooldown epic counts as blocked, not open'
+    assert board['claimed'] == 0 and board['done'] == 0
+    # Its stored status is still 'open' (block never changes status) — proving
+    # the count partition, not a status change, is what fixed the drift.
+    blk = [t for t in board['tasks'] if t['id'] == blk_id][0]
+    assert blk['status'] == 'open' and int(blk['blocked_until']) > 0
+
+
+def test_read_board_live_lease_not_counted_claimed(flask_app):
+    """A LIVE path lease (kind='lease', effective status 'claimed') is a
+    reservation, not an epic — it must NOT inflate the 'claimed' count (the
+    panel renders it in its own Held lane)."""
+    from lib.conversations.project_board import (
+        claim_task, post_task, read_board,
+    )
+    with flask_app.app_context():
+        ep_id = post_task('/b/cnt2', 'cA', 'a real epic')['id']
+        claim_task('/b/cnt2', 'cOWNER', ep_id)   # one genuinely-claimed epic
+    _insert_live_lease(flask_app, '/b/cnt2', 'pt_lease_x', 'static/styles.css')
+    with flask_app.app_context():
+        board = read_board('/b/cnt2')
+    assert board['claimed'] == 1, 'only the real claimed epic counts (not the lease)'
+    assert board['open'] == 0 and board['done'] == 0 and board['blocked'] == 0
+    # The lease row is still present in tasks (readers that partition the list
+    # themselves — e.g. the Held lane — must still see it).
+    assert any(t['id'] == 'pt_lease_x' and t.get('kind') == 'lease'
+               for t in board['tasks']), 'lease row still present in tasks list'
+
+
+def test_NC6_naive_count_recounts_blocked_and_lease(flask_app):
+    """NEUTER: revert read_board's count loop to the naive `out[status] += 1`
+    (no lease/blocked partition) → the blocked epic is recounted as OPEN and the
+    live lease as CLAIMED → the drift returns. Proves the partition is
+    load-bearing. Byte-identical restore."""
+    def run():
+        import lib.conversations.project_board as pb
+        with flask_app.app_context():
+            from lib.database import DOMAIN_CHAT, get_thread_db
+            get_thread_db(DOMAIN_CHAT).execute(
+                "DELETE FROM project_tasks WHERE project_path='/nc6'")
+            get_thread_db(DOMAIN_CHAT).commit()
+            open_id = pb.post_task('/nc6', 'cA', 'open epic')['id']
+            blk_id = pb.post_task('/nc6', 'cA', 'gated epic')['id']
+            pb.block_task('/nc6', 'cA', blk_id, '[human-gated] gate')
+        _insert_live_lease(flask_app, '/nc6', 'pt_nc6_lease', 'some/path.py')
+        with flask_app.app_context():
+            board = pb.read_board('/nc6')
+        # With the naive count restored: blocked epic recounted as open (2) and
+        # the lease recounted as claimed (1) — the exact drift the fix removed.
+        assert board['open'] == 2, \
+            'NC-6: naive count recounts the blocked epic as open (drift)'
+        assert board['claimed'] == 1, \
+            'NC-6: naive count recounts the live lease as claimed (drift)'
+
+    _patch_restore(
+        _BOARD_SRC,
+        "        # Leases are reservations, not epics — never in the epic counts (the\n"
+        "        # panel renders them in a separate Held lane).\n"
+        "        if t.get('kind') == 'lease':\n"
+        "            continue\n"
+        "        # A live block cooldown is counted as 'blocked', not 'open' — mirrors\n"
+        "        # render_board_block / renderBoard / select_dispatchable so the collab\n"
+        "        # bar and status pillar agree with the panel lanes.\n"
+        "        if t['status'] == 'open' and int(t.get('blocked_until') or 0) > now:\n"
+        "            out['blocked'] = out.get('blocked', 0) + 1\n"
+        "            continue\n"
+        "        out[t['status']] = out.get(t['status'], 0) + 1",
+        "        out[t['status']] = out.get(t['status'], 0) + 1  # NC-6 (naive count)",
+        run,
+    )

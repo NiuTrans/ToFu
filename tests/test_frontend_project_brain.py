@@ -64,6 +64,7 @@ global.console = console;
 // Icon(): return a tiny static svg string.
 win.Icon = global.Icon = (name) => '<svg data-icon="' + name + '"></svg>';
 win.t = global.t = (k) => k;
+win.escapeHtml = global.escapeHtml = (s) => String(s == null ? '' : s);
 
 // loadConversation spy.
 const loaded = [];
@@ -223,6 +224,7 @@ global.window = win; global.document = win.document; global.console = console;
 
 win.Icon = global.Icon = (name) => '<svg data-icon="' + name + '"></svg>';
 win.t = global.t = (k) => k;
+win.escapeHtml = global.escapeHtml = (s) => String(s == null ? '' : s);
 win.loadConversation = global.loadConversation = () => {};
 // The displayed conversation's project path (the real resolver path).
 win.getActiveConv = global.getActiveConv = () => ({ id: 'c1', projectPath: '/proj/real' });
@@ -345,6 +347,7 @@ global.window = win; global.document = win.document; global.console = console;
 
 win.Icon = global.Icon = (name) => '<svg data-icon="' + name + '"></svg>';
 win.t = global.t = (k) => k;
+win.escapeHtml = global.escapeHtml = (s) => String(s == null ? '' : s);
 win.loadConversation = global.loadConversation = () => {};
 win.apiUrl = global.apiUrl = (p) => p;
 
@@ -420,6 +423,9 @@ Promise.resolve().then(()=>{}).then(()=>{}).then(() => {
   check('x_present_in_dom', html.indexOf('project X work') !== -1);
 
   console.log(out.join('\n'));
+  // push.js installs a reconnect interval that keeps node's event loop alive;
+  // force-exit once the assertions have printed (matches the other harnesses).
+  process.exit(0);
 });
 """
 
@@ -1400,9 +1406,10 @@ def test_NC_charter_summary_first_truncates_rendered_proposal():
 
 
 # ════════════════════════════════════════════════════════════════════
-#  Two-bars disambiguation: the conv-influence BAR deep-links to the
-#  Influence lens (openProjectBrainInfluence → un-hide + flash), instead of
-#  just opening the panel at the top like the project-wide collab bar.
+#  Influence-lens deep-link: openProjectBrainInfluence opens the panel AND
+#  un-hides + flashes the per-conversation Influence lens (rather than just
+#  opening the panel at the top). This is the public entry point a caller uses
+#  to jump straight to "how is THIS conversation influenced".
 # ════════════════════════════════════════════════════════════════════
 
 _HARNESS_DEEPLINK = r"""
@@ -1414,7 +1421,6 @@ const FRAG = process.argv[4];
 const fragment = fs.readFileSync(FRAG, 'utf8');
 const { JSDOM } = require(path.join(ROOT, 'node_modules', 'jsdom'));
 const dom = new JSDOM('<!DOCTYPE html><body>' +
-  '<button class="conv-influence-bar" id="convInfluenceBar" hidden></button>' +
   fragment + '</body>', { url: 'http://localhost/' });
 const win = dom.window;
 global.window = win; global.document = win.document; global.console = console;
@@ -1488,9 +1494,9 @@ def _run_deeplink(brain_src):
 @pytest.mark.skipif(not _node_deps_available(),
                     reason='node + jsdom dev-deps not installed (run npm install)')
 def test_conv_influence_bar_deeplinks_to_lens():
-    """The conv-influence bar's deep-link (openProjectBrainInfluence) opens the
-    panel AND un-hides + flashes the Influence lens — so the two stacked bars
-    take you to DIFFERENT places (project-wide columns vs. this-conv lens)."""
+    """openProjectBrainInfluence opens the panel AND un-hides + flashes the
+    per-conversation Influence lens — the deep-link entry point that jumps
+    straight to "how is THIS conversation influenced"."""
     output = _run_deeplink(_BRAIN_SRC)
     fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
     assert not fails, 'deep-link failures:\n' + output

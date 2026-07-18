@@ -126,6 +126,12 @@ def persist_conv_messages(db, conv_id, messages, title, settings_patch=None):
     ``manager.py`` for the partial/result sync paths.  Without this,
     newly appended messages on those flows would have no ``_msgId``,
     forcing PATCH /messages/by-id to silently fall back to index lookup.
+
+    Returns:
+        The post-write ``rev`` (int) the ``conversations_rev_bump_trg`` trigger
+        advanced to on this write, or ``None`` if it could not be read back.
+        Callers that emit ``notify_conv_changed`` should pass this rev so a
+        sibling device does a body refetch rather than a sidebar-only refresh.
     """
     # Lazy import to avoid the lib.chat → lib.tasks_pkg.manager import cycle.
     from lib.tasks_pkg.manager import _assign_message_ids
@@ -141,11 +147,20 @@ def persist_conv_messages(db, conv_id, messages, title, settings_patch=None):
     if settings_patch:
         settings_update.update(settings_patch)
 
-    # Always inject lastMsgRole/lastMsgTimestamp
+    # Always inject lastMsgRole/lastMsgTimestamp + the settled-turn facts the
+    # sidebar needs to render an incomplete/errored dot WITHOUT loading the
+    # (stripped) messages array. We store RAW facts only (finishReason / error
+    # bool / has-output bool); the incomplete/errored CLASSIFICATION stays in
+    # the frontend's _convStatusFlags so there is a single classifier.
     if messages:
         last = messages[-1]
         settings_update['lastMsgRole'] = last.get('role')
         settings_update['lastMsgTimestamp'] = last.get('timestamp')
+        settings_update['lastFinishReason'] = last.get('finishReason')
+        settings_update['lastMsgError'] = bool(last.get('error'))
+        settings_update['lastMsgHasOutput'] = bool(
+            (last.get('content') or '') or (last.get('thinking') or '')
+            or (last.get('toolRounds') or []) or last.get('_igResults'))
 
     # Merge with existing settings AND preserve original created_at
     existing = db.execute(
@@ -182,10 +197,148 @@ def persist_conv_messages(db, conv_id, messages, title, settings_patch=None):
     from lib.database.messages_rows import dual_write_conv
     dual_write_conv(db, conv_id, messages, now_ms=now_ms)
 
+    # Read back the post-write rev — the ``conversations_rev_bump_trg`` trigger
+    # advanced it in the SAME statement as this upsert (on a genuine messages
+    # change). This is the SINGLE source of truth for the new version: callers
+    # that emit a cross-device notify pass THIS rev so a sibling device's
+    # rev-gate refetches the body, instead of a rev=None frame that only nudges
+    # the sidebar. A RETURNING clause is NOT portable here — the SQLite mirror
+    # bumps rev in an AFTER-UPDATE nested statement, so RETURNING would surface
+    # the pre-bump value; a follow-up SELECT reads the committed post-bump rev
+    # on both backends. Best-effort: a read failure returns None (caller falls
+    # back to the old rev=None sidebar-only behaviour — no regression).
+    try:
+        rev_row = db.execute(
+            'SELECT rev FROM conversations WHERE id=? AND user_id=?',
+            (conv_id, DEFAULT_USER_ID)).fetchone()
+        if rev_row is not None:
+            return rev_row[0] if not isinstance(rev_row, dict) else rev_row.get('rev')
+    except Exception as e:
+        logger.debug('[chat] persist_conv_messages rev read-back failed conv=%s: %s',
+                     conv_id[:8] if conv_id else '?', e)
+    return None
+
+
+def append_pending_user_msg(db, conv_id, user_msg, valid_assistant_ids=None):
+    """CAS-append a QUEUED user message as a display-only ``_pendingQueued`` row
+    so a sibling device sees it immediately (before the current turn replies).
+
+    Cross-device visibility fix (queued lane): the queued user message used to
+    live ONLY in ``message_queue`` — never in the conversation body — so another
+    device could not see it until the whole current turn finished and the NEXT
+    task's first checkpoint bumped rev. This lands it in the body NOW, marked
+    ``_pendingQueued`` (display-only; ``dispatch_next_queued`` later reconciles
+    it in place by timestamp — never a duplicate — via
+    ``append_user_msg_idempotent``, and the reconcile clears the marker).
+
+    ORDER-SAFETY + SLOT-ADDRESSABILITY GATE (the load-bearing invariant). Both
+    must hold or we DECLINE (return ``(False, None)``) and the caller falls back
+    to today's queue-only behaviour (message still queued, just not instantly
+    mirrored — safe, no regression):
+
+      1. The current DB tail must be an ``assistant`` message — the running
+         turn's assistant slot already exists — so the row lands as
+         ``[…, userA, assistantA, userB]`` (correctly ordered). Appending onto a
+         non-assistant tail would create a user→user adjacency AND misorder the
+         eventual reply.
+      2. That tail assistant's ``_msgId`` must be in ``valid_assistant_ids``
+         (the ``_assistantMsgId`` set of the currently-running task(s)). This
+         guarantees the running task's ``_sync_partial/_sync_result`` locates
+         ITS slot BY ID (the id-first fix) and is NOT disturbed by the trailing
+         pending row. Without this match the sync's tail fallback would see the
+         pending ``user`` row and spawn a SECOND assistant — the exact
+         two-writer truncation this design must avoid. ``None``/empty set →
+         decline (a running task that shipped no stable id can't be protected).
+
+    CAS-guarded on ``updated_at`` so it never clobbers the concurrent
+    ``_sync_partial_to_conversation`` checkpoint of the running turn.
+
+    Returns ``(appended: bool, rev: int|None)``.
+    """
+    _valid_ids = {i for i in (valid_assistant_ids or ()) if i}
+    if not _valid_ids:
+        logger.debug('[Send] pending-user append DECLINED conv=%s — no running-task '
+                     'assistant id to protect; queue-only fallback', conv_id[:8])
+        return False, None
+    _MAX_CAS = 4
+    for attempt in range(_MAX_CAS):
+        row = db.execute(
+            'SELECT messages, updated_at, rev FROM conversations WHERE id=? AND user_id=?',
+            (conv_id, DEFAULT_USER_ID)).fetchone()
+        if not row:
+            logger.warning('[Send] pending-user append: conv=%s not found', conv_id[:8])
+            return False, None
+        try:
+            messages = json.loads(row['messages'] or '[]')
+        except (json.JSONDecodeError, TypeError) as e:
+            logger.warning('[Send] pending-user append: bad messages JSON conv=%s: %s',
+                           conv_id[:8], e)
+            return False, None
+        row['updated_at']
+        cur_rev = row['rev']  # Phase 4 W2: CAS token is rev (trigger-bumped); the
+        # loop re-reads the row at the top of every attempt, so cur_rev is
+        # refreshed each retry. updated_at is still stamped in SET, not the token.
+
+        _tail = messages[-1] if messages else None
+        if not _tail or _tail.get('role') != 'assistant':
+            # Order-safety gate: tail isn't the running turn's assistant slot.
+            logger.debug('[Send] pending-user append DECLINED conv=%s — tail role=%s '
+                         '(not assistant); falling back to queue-only',
+                         conv_id[:8], _tail.get('role') if _tail else None)
+            return False, None
+        if _tail.get('_msgId') not in _valid_ids:
+            # Slot-addressability gate: the running task can't locate this tail
+            # slot by id, so a trailing pending row would break its sync.
+            logger.debug('[Send] pending-user append DECLINED conv=%s — tail assistant '
+                         '_msgId not owned by a running task; queue-only fallback',
+                         conv_id[:8])
+            return False, None
+
+        # Idempotent: if a racing writer already planted this exact turn as the
+        # tail (same timestamp), don't add a second row.
+        _ts = user_msg.get('timestamp')
+        if (messages[-1].get('role') == 'user'
+                and messages[-1].get('timestamp') == _ts):
+            return False, None
+
+        pending = dict(user_msg)
+        pending['_pendingQueued'] = True
+        from lib.tasks_pkg.manager import _assign_message_ids
+        messages.append(pending)
+        _assign_message_ids(messages)
+
+        now_ms = int(time.time() * 1000)
+        cur = db.execute(
+            'UPDATE conversations SET messages=?, updated_at=?, msg_count=? '
+            'WHERE id=? AND user_id=? AND rev=?',
+            (json_dumps_pg(messages), now_ms, len(messages), conv_id,
+             DEFAULT_USER_ID, cur_rev))
+        db.commit()
+        if getattr(cur, 'rowcount', None) != 0:
+            try:
+                rev_row = db.execute(
+                    'SELECT rev FROM conversations WHERE id=? AND user_id=?',
+                    (conv_id, DEFAULT_USER_ID)).fetchone()
+                rev = (rev_row[0] if not isinstance(rev_row, dict)
+                       else rev_row.get('rev')) if rev_row is not None else None
+            except Exception as e:
+                logger.debug('[Send] pending-user append rev read-back failed: %s', e)
+                rev = None
+            return True, rev
+        # CAS miss — a concurrent writer bumped updated_at; re-read + retry.
+        logger.debug('[Send] pending-user append CAS miss conv=%s attempt %d/%d',
+                     conv_id[:8], attempt + 1, _MAX_CAS)
+        time.sleep(0.02 * (attempt + 1))
+
+    logger.debug('[Send] pending-user append CAS exhausted conv=%s — queue-only fallback',
+                 conv_id[:8])
+    return False, None
+
 
 __all__ = [
     'extract_db_meta',
     'extract_task_meta',
     'load_or_create_conv',
     'persist_conv_messages',
+    'append_pending_user_msg',
 ]

@@ -21,20 +21,20 @@ async function _checkProviderBalance(provIdx) {
   // Use explicit balance_url, or guess from base_url
   var balanceUrl = p.balance_url || _guessBalanceUrl(p.base_url || '');
   if (!balanceUrl) {
-    resultDiv.innerHTML = '<span class="stg-balance-err">未配置余额查询地址</span>';
+    resultDiv.innerHTML = '<span class="stg-balance-err">' + escapeHtml(t('settings.balNoUrl')) + '</span>';
     return;
   }
   if (!p.api_keys || p.api_keys.length === 0) {
-    resultDiv.innerHTML = '<span class="stg-balance-err">未配置 API 密钥</span>';
+    resultDiv.innerHTML = '<span class="stg-balance-err">' + escapeHtml(t('settings.balNoKey')) + '</span>';
     return;
   }
 
-  resultDiv.innerHTML = '<span class="stg-balance-loading">' + Icon('hourglass', 12) + ' 查询中…</span>';
+  resultDiv.innerHTML = '<span class="stg-balance-loading">' + Icon('hourglass', 12) + ' ' + escapeHtml(t('settings.balLoading')) + '</span>';
 
   try {
     var data = await Api.providers.balance({ balance_url: balanceUrl, api_key: p.api_keys[0] });
     if (!data || !data.ok) {
-      resultDiv.innerHTML = '<span class="stg-balance-err">❌ ' + escapeHtml((data && data.error) || '未知错误') + '</span>';
+      resultDiv.innerHTML = '<span class="stg-balance-err">❌ ' + escapeHtml((data && data.error) || t('settings.balUnknownError')) + '</span>';
       return;
     }
 
@@ -50,7 +50,7 @@ async function _checkProviderBalance(provIdx) {
       _renderProvidersTab();
     }
   } catch (e) {
-    resultDiv.innerHTML = '<span class="stg-balance-err">❌ 网络错误: ' + escapeHtml(e.message) + '</span>';
+    resultDiv.innerHTML = '<span class="stg-balance-err">❌ ' + escapeHtml(t('settings.balNetworkError', { error: e.message })) + '</span>';
   }
 }
 
@@ -72,24 +72,24 @@ function _renderBalanceInfo(info) {
       '<div class="stg-balance-bar" style="width:' + Math.min(pct, 100) + '%;background:' + barColor + '"></div>' +
     '</div>';
     html += '<div class="stg-balance-nums">' +
-      '<span>已用: <b>$' + used.toFixed(2) + '</b></span>' +
-      '<span>剩余: <b>$' + remaining.toFixed(2) + '</b></span>' +
-      '<span>额度: <b>$' + limit.toFixed(2) + '</b></span>' +
+      '<span>' + escapeHtml(t('settings.balUsed')) + ': <b>$' + used.toFixed(2) + '</b></span>' +
+      '<span>' + escapeHtml(t('settings.balRemaining')) + ': <b>$' + remaining.toFixed(2) + '</b></span>' +
+      '<span>' + escapeHtml(t('settings.balLimit')) + ': <b>$' + limit.toFixed(2) + '</b></span>' +
     '</div>';
   } else if (info.balance_usd != null) {
     // ── Balance-only format (DeepSeek, generic) ──
     var bal = info.balance_usd;
     var barColor = bal > 10 ? '#22c55e' : bal > 2 ? '#f59e0b' : '#ef4444';
     html += '<div class="stg-balance-nums">';
-    html += '<span>余额: <b style="color:' + barColor + '">$' + bal.toFixed(2) + '</b></span>';
+    html += '<span>' + escapeHtml(t('settings.balBalance')) + ': <b style="color:' + barColor + '">$' + bal.toFixed(2) + '</b></span>';
     if (info.currency && info.currency !== 'USD' && info.balance_local != null) {
       html += '<span>（' + info.currency + ' ' + info.balance_local.toFixed(2) + '）</span>';
     }
     if (info.granted_balance != null) {
-      html += '<span>赠送: ' + info.currency + ' ' + info.granted_balance.toFixed(2) + '</span>';
+      html += '<span>' + escapeHtml(t('settings.balGranted')) + ': ' + info.currency + ' ' + info.granted_balance.toFixed(2) + '</span>';
     }
     if (info.is_available === false) {
-      html += '<span style="color:#ef4444;font-weight:800">⚠ 余额不足</span>';
+      html += '<span style="color:#ef4444;font-weight:800">⚠ ' + escapeHtml(t('settings.balInsufficient')) + '</span>';
     }
     html += '</div>';
   } else if (info.raw) {

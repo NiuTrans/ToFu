@@ -31,7 +31,12 @@ import os
 import sys
 
 from lib.log import get_logger
-from lib.database import _bootstrap as b
+# Ownership functions relocated to _pg_ownership (Decoupling D, 2026-07-11).
+# pg_admin uses ONLY ownership symbols, so bind directly to the canonical
+# module — this keeps pg_admin and its tests patching the SAME namespace (a
+# facade re-export in _bootstrap is a separate binding that monkeypatch on the
+# canonical module would not intercept).
+from lib.database import _pg_ownership as b
 
 logger = get_logger(__name__)
 
@@ -109,7 +114,8 @@ def cmd_reset_ownership(pgdata, assume_yes):
     if not assume_yes:
         try:
             resp = input('Proceed? [y/N] ').strip().lower()
-        except EOFError:
+        except EOFError as e:
+            logger.debug('[pg_admin] no interactive stdin for confirm prompt: %s', e)
             resp = ''
         if resp not in ('y', 'yes'):
             print('Aborted.')

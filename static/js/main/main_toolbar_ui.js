@@ -8,42 +8,6 @@
    scope — no imports / exports needed.
    ═══════════════════════════════════════════════════════════════════ */
 
-function _buildToolHistoryRound(batch) {
-  const round = {
-    assistantContent: "",
-    toolCalls: [],
-    toolResults: [],
-  };
-  // ★ Pick up per-round assistantContent + thinking from the first entry in
-  //   the batch (tool_dispatch tags only the first entry per LLM round).
-  for (const r of batch) {
-    if (!round.assistantContent && r.assistantContent) {
-      round.assistantContent = r.assistantContent;
-    }
-    if (!round.thinking && r.thinking) {
-      round.thinking = r.thinking;
-    }
-    if (!round.thinkingSignature && r.thinkingSignature) {
-      round.thinkingSignature = r.thinkingSignature;
-    }
-    const tc = {
-      id: r.toolCallId,
-      name: r.toolName,
-      arguments: r.toolArgs || "{}",
-    };
-    // Gemini 3.x thought_signature — carried on the tool_call entry itself.
-    if (r.extraContent) {
-      tc.extraContent = r.extraContent;
-    }
-    round.toolCalls.push(tc);
-    round.toolResults.push({
-      tool_call_id: r.toolCallId,
-      content: r.toolContent || "",
-    });
-  }
-  return round;
-}
-
 // ── Toggles ──
 function toggleThinking() {
   thinkingEnabled = !thinkingEnabled;
@@ -51,7 +15,11 @@ function toggleThinking() {
 /* ★ Populate model dropdown dynamically from the registered models list.
  * Called once at startup from _loadServerConfigAndPopulate(). */
 function _populateModelDropdown(models) {
-  const dropdown = document.getElementById("presetDropdown");
+  /* ★ Write into the inner list container, NOT #presetDropdown itself — the
+   * dropdown now also holds the folded-in thinking-depth footer, which must
+   * survive a model-list rebuild. Fall back to the dropdown for older markup. */
+  const dropdown = document.getElementById("presetDropdownList")
+    || document.getElementById("presetDropdown");
   if (!dropdown || !models || models.length === 0) return;
   _registeredModels = models;
   dropdown.innerHTML = '';
@@ -396,8 +364,9 @@ function updateSubmenuCounts() {
   const aiTrigger = document.querySelector("#submenuAI .submenu-trigger");
   if (aiTrigger) aiTrigger.classList.toggle("has-active", aiCount > 0);
 
-  // Tools: browser, desktop, scheduler, image gen, human guidance
-  const toolCount = (browserEnabled ? 1 : 0) + (desktopEnabled ? 1 : 0) + (schedulerEnabled ? 1 : 0) + (imageGenEnabled ? 1 : 0) + (humanGuidanceEnabled ? 1 : 0);
+  // Tools: browser, desktop, image gen, human guidance
+  // (Scheduler is a default tool — always on, no toggle — so it does not count here.)
+  const toolCount = (browserEnabled ? 1 : 0) + (desktopEnabled ? 1 : 0) + (imageGenEnabled ? 1 : 0) + (humanGuidanceEnabled ? 1 : 0);
   _setCount(document.getElementById("submenuToolsCount"), toolCount);
   const toolTrigger = document.querySelector("#submenuTools .submenu-trigger");
   if (toolTrigger) toolTrigger.classList.toggle("has-active", toolCount > 0);
@@ -420,6 +389,7 @@ function cycleSearchMode() {
   _saveConvToolState();
   debugLog(`Search: ${searchMode}`, "success");
 }
+
 function toggleBrowser() {
   // If not enabled yet and clicking to enable — open setup modal instead of just toggling
   if (!browserEnabled) {
@@ -762,6 +732,20 @@ if (typeof window !== 'undefined') window._kickAutopilot = _kickAutopilot;
 var _orchFlowCache = null;   // cached [{id,name}] of stored custom flows
 
 function _applyFlowUI(flowVal) {
+  /* ★ Normalize a persisted/synced builtin:autopilot back to the autopilot
+   *   toggle state. New selections never store this (setActiveFlow aliases it
+   *   away), but a conversation saved BEFORE this change — or synced from a
+   *   peer/older client — carries activeFlow='builtin:autopilot'. Restoring it
+   *   as a flow would resurrect the flow badge + "runs on engine" identity for
+   *   what the backend actually runs as plain autopilot. Redirect it here so
+   *   EVERY caller (including _restoreConvToolState on reload) converges on the
+   *   autopilot toggle. Single choke point — do NOT re-list this per caller. */
+  if ((flowVal || '') === 'builtin:autopilot') {
+    activeFlow = '';
+    if (typeof _applyAutopilotUI === 'function') _applyAutopilotUI(true);
+    if (typeof _applyEndpointUI === 'function') _applyEndpointUI(false);
+    flowVal = '';
+  }
   activeFlow = flowVal || '';
   const btn = document.getElementById("flowToggle");
   if (btn) btn.classList.toggle("active", !!activeFlow);
@@ -784,6 +768,28 @@ function _flowDisplayName(flowVal) {
 }
 
 function setActiveFlow(flowVal) {
+  /* ★ builtin:autopilot is the standalone Autopilot toggle wearing a dropdown
+   *   entry. The backend routes flowBuiltin='autopilot' to the LIVE standalone
+   *   autopilot path (resolve_chat_flow_entry, Option C) unless the
+   *   TOFU_AUTOPILOT_VIA_FLOW dev flag is on — so the DEFAULT experience is the
+   *   plain autopilot loop, NOT an engine flow. Present it that way in the UI
+   *   too: alias the selection to the autopilot toggle so the badge, info-rail
+   *   mode chip, and the /config/resolve payload are byte-identical to picking
+   *   the toggle. Single writer — the flow selector delegates to toggleAutopilot
+   *   rather than growing its own parallel "autopilot but as a flow" state. */
+  if ((flowVal || '') === 'builtin:autopilot') {
+    _applyFlowUI('');                 // never carry a flow selection for autopilot
+    if (!autopilotEnabled) {
+      toggleAutopilot();              // → sets autopilotEnabled, clears endpoint/flow, saves
+    } else {
+      _saveConvToolState();
+    }
+    if (typeof updateSubmenuCounts === 'function') updateSubmenuCounts();
+    const _menu = document.getElementById("flowMenu");
+    if (_menu) _menu.classList.remove("open");
+    debugLog("Autopilot: ON (selected from Mode menu) — same as the toolbar toggle", "success");
+    return;
+  }
   _applyFlowUI(flowVal || '');
   /* Flow ⇄ toggles mutual exclusion: a flow owns the loop boundary. */
   if (activeFlow && (endpointEnabled || autopilotEnabled)) {

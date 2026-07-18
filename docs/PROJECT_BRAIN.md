@@ -53,13 +53,14 @@ human hand-dispatching** (无需人手).
 
 ---
 
-## 2. The Architecture: A Blackboard, in Five Pillars
+## 2. The Architecture: A Blackboard, in Seven Pillars
 
-The design is a classic **blackboard architecture** — a shared, evolving
-workspace that all agents read from and write to, rather than messaging each
-other point-to-point. Concretely it is **four durable artifacts + one live
-channel**, all keyed strictly on `projectPath`, realized as five
-independently-shippable pillars:
+The design is a **blackboard architecture** at its core — a shared, evolving
+workspace that all agents read from and write to rather than messaging each
+other point-to-point — later extended with a **direct peer channel** (#6) and a
+**human↔brain status lane** (#7). Concretely it is a set of per-project durable
+artifacts plus live delivery, all keyed strictly on `projectPath`, realized as
+**seven** independently-shippable pillars:
 
 | Pillar | Name | What it provides | The "brain" faculty |
 |---|---|---|---|
@@ -67,6 +68,8 @@ independently-shippable pillars:
 | #2 | **Charter** | the shared north-star doc + committed decisions | **Shared intent** |
 | #3 | **Board** | coordination board of claimable epics | **Coordination (anti-collision)** |
 | #5 | **Dispatch + Heartbeat** | auto-selects & starts pickable work | **Autonomy (无需人手)** |
+| #6 | **Peer Comms + Intervention** | targeted agent↔agent messaging + advisory nudge / audit-gated abort | **Direct coordination** |
+| #7 | **Status Lane** | synthesized "where are we / are we drifting" snapshots for the human | **Human situational awareness** |
 | — | **Panel (frontend)** | makes all of the above visible & correctable | **Observability / human control** |
 
 > **A note on the pillar numbering.** The numbers are *historical* — they are
@@ -74,8 +77,11 @@ independently-shippable pillars:
 > which jumped #1 → #2 → #3 → #5. **There is no Pillar #4 and none is missing.**
 > What would have been "#4" was the soft-lease *leasing* mechanism, and it was
 > folded into the Board (Pillar #3) rather than shipped as a separate component.
-> A reader reproducing from scratch should build exactly the five items in the
-> table above; do not go hunting for a nonexistent fourth component.
+> A reader reproducing from scratch should build exactly the seven items in the
+> table above (pillars #1–#3 and #5–#7); do not go hunting for a nonexistent
+> fourth component. Pillars #6 (peer comms) and #7 (status lane) were added
+> after the original five, so the doc's earlier sections still speak of "five"
+> in places — the authoritative count is seven.
 
 Two invariants hold across every pillar, because violating them previously
 caused real bugs:
@@ -126,8 +132,8 @@ producers:
 | `run_concluded` | autopilot run close-out | a whole autopilot run finished |
 | `claimed` | Board claim | a conversation took ownership of an epic |
 | `blocked` | Board block | an epic is stuck |
-| `decided` | Charter commit | a decision was committed |
-| `proposed_decision` | Charter propose | a decision was proposed for human review |
+| `decided` | Charter commit (agent self-commit or human) | a decision was committed |
+| `proposed_decision` | Charter propose | a decision was suggested (optional, non-binding) |
 | `note` | fallback | generic |
 
 **Granularity rule (important):** an autopilot run is dozens of tasks. Emitting
@@ -182,19 +188,39 @@ upsert semantics):
 - **`version`** — an **optimistic-lock** integer (defined below).
 - **`updated_by_conv`, `updated_at`**.
 
-### The three-stage discipline: read → propose → commit
-This is the heart of "shared intent that doesn't drift autonomously":
+### The discipline: read → propose → commit (DECISION-commit de-gated 2026-07-12)
+This is the heart of "shared intent that advances without a human in the loop":
 
 - **read** — any project-mode conversation may read the charter (tool
   `project_charter_read`). Read-only.
-- **propose** — an agent may only *propose* an amendment (tool
+- **propose** — an agent may *propose* an amendment (tool
   `project_charter_propose`). A proposal writes **exactly one
   `proposed_decision` event into the Activity Feed** and **never touches the
-  `project_charter` table**. This distinction — *proposal ≠ commit* — is
-  enforced at the source, not by convention.
-- **commit** — the actual charter change is **human-gated**: only a human,
-  through the UI, calls the commit route. It is **optimistic-locked** and, on
-  success, emits one `decided` event.
+  `project_charter` table**. Now OPTIONAL — a suggestion the agent is not yet
+  ready to make binding.
+- **commit** — an agent may now **self-COMMIT a DECISION** (tool
+  `project_charter_commit` → `commit_charter(add_decision=…)`), so shared
+  intent advances **without a human gate**. It is **optimistic-locked** and, on
+  success, emits one `decided` event. The agent path is **`add_decision`-only**
+  — it can NEVER edit the north-star `content` (the project goal/direction).
+
+> **Owner directive (2026-07-12): "further reduce human involvement — humans
+> no longer participate in charter decision-making or set task statuses; they
+> only receive information, set things about themselves, and define
+> problems/goals."** So decision-commit and every task status are
+> agent-autonomous. The **human retains only optional corrective levers** (NOT
+> required for normal progress): editing the north-star `content`,
+> `update_decision` / `delete_decision` / `delete_charter`, and board
+> `reopen_task` (override a stuck/wrong claim) — all reachable only through the
+> REST routes. The human defines the goal and can veto/correct a decision; it
+> need not approve each one.
+>
+> This does **not** widen the write surface: `commit_charter` already existed
+> (previously reached only via the human route); the agent tool exposes the
+> **same** function, one decision + one `decided` event per call — the
+> no-broadcast / anti-N²-storm invariant stands unchanged. The
+> `_MAX_DECISIONS`-cap rolling truncation applies to agent commits exactly as
+> before (no pagination).
 
 **Optimistic lock** — a concurrency-safety scheme where the writer supplies the
 `version` it *expects* the row to currently hold (`expected_version`). If the
@@ -333,7 +359,128 @@ start, get claimed so siblings avoid them, and run — with no human involved.
 
 ---
 
-## 7. The Panel (Observability & Human Control)
+## 7. Pillar #6 — Peer Communication & Intervention (Direct Coordination)
+
+The first five pillars coordinate **through the blackboard** — a conversation
+writes an epic/decision/feed event, and siblings read it later. That is
+deliberately indirect (no point-to-point messaging, so no storm). But two needs
+don't fit a blackboard: (a) a conversation wants to say something to **one
+specific sibling** ("I'm taking the parser refactor, stand down"), and (b) a
+conversation needs to **nudge or stop** a sibling that is duplicating or
+mis-heading work. Pillar #6 adds exactly that, while preserving the board's
+"advisory, never a hard lock" ethos.
+
+### The three agent tools (gated to project mode)
+- **`project_peer_status`** — LIVE introspection: which sibling conversations
+  (and their sub-agents) are active right now, their phase, the file being
+  edited, and the board epic they're advancing. This is the *live* complement
+  to reading past messages. It prints each peer's short id (`[convId[:8]]`) that
+  the other two tools consume verbatim.
+- **`project_message`** — agent-initiated messaging to ONE named sibling. The
+  message is enqueued as a `KIND_PEER_MSG` turn source into the target and seen
+  on the target's **next** turn.
+- **`project_intervene`** — an advisory nudge asking a peer to pause and re-check
+  the board; its optional **hard abort** actually cancels the peer's running
+  task.
+
+(`project_feed_read` — read the recent cross-conversation activity feed — rides
+in the same tool group.)
+
+### Isolation from the workflow lane
+Peer messaging uses a **dedicated** message-queue kind, `KIND_PEER_MSG`,
+distinct from `KIND_WORKFLOW` (brain dispatch). Its priority is **40** — *after*
+a human `real` turn (10, so a human always wins) but *before* a brain-dispatch
+`workflow_step` kickoff (50). A peer message is dispatchable and is seen on the
+target's next turn; it **NEVER interrupts a live turn mid-stream.**
+
+### The anti-storm invariants (why this can't melt down)
+A point-to-point channel is exactly the storm-class hazard the blackboard was
+built to avoid, so two structural guards are load-bearing:
+
+1. **Per-`(sender, target)` sliding-window rate limit** —
+   `_PEER_MSG_MAX_PER_WINDOW = 3` messages per `_PEER_MSG_WINDOW_S = 120.0`
+   seconds, computed by a pure, testable window check (`_prune_and_check`).
+2. **No auto-relay.** A received peer message is *plain turn content* that
+   triggers **no send path** — so an A→B→A auto-amplification (the N²-fan-out
+   failure) is structurally impossible. Do NOT add any code path that
+   auto-sends a peer message in response to receiving one.
+
+### Advisory-first, with one audit-gated exception
+Everything here is advisory except the `project_intervene` **hard abort**, which
+is the only coercive verb. It is **refused unless an explicit, non-empty
+`approved_by` token is present** (an audit-logged human approval:
+`audit_log('intervention', approved_by=…)`) — never a silent kill. Even then it
+aborts the peer's **TASK only**, never the host process. The presence⋈task⋈board
+join these tools read reuses the **same `claims_by_conv`** aggregation
+`build_brain_summary` uses — never a second hand-rolled join.
+
+*Code: `lib/conversations/project_peer.py`; tools in `lib/tools/conversation.py`;
+human-facing REST under `/api/v1/project/brain/`.*
+
+---
+
+## 8. Pillar #7 — The Status Lane (Human Situational Awareness)
+
+The first six pillars are **agent-facing** blackboards the human can read and
+poke per-cell. But as automation runs ahead of the human, two gaps open that no
+per-cell read closes: (a) there is no way to **ask the project** "where are we /
+are we drifting from the charter?" and get a synthesized answer, and (b) there
+is no persistent **memory of project STATUS** — the Charter is durable memory of
+*intent*, the Feed is a raw ephemeral pulse, and the per-conversation summaries
+were never aggregated. Pillar #7 is the human's window back in.
+
+### Data model — an append-only trail, not one overwritten narrative
+Table `project_status_snapshots`, composite primary key `(project_path, seq)`
+with a per-project **monotonic `seq`** minted under one module lock (mirrors
+`project_events` exactly). Each snapshot row carries a **`narrative`** (the
+synthesized "where-are-we + drift read" prose), a **`pillar_state`** evidence
+JSON (epic open/claimed/done/blocked counts, in-flight epics + owners, pending
+decisions, charter version + north-star, active-peer count, sibling digest), a
+**`trigger`** (`epic_completed` / `decision_committed` / `blocked` / `on_open` /
+`manual`), and **`ts`**. **Retention** is bounded (`_SNAPSHOTS_KEEP = 200`
+most-recent per project, pruned on insert): the human needs the **trail** — how
+the project got here — not a single clobbered line.
+
+### The synthesis generator, with a laziness gate
+`build_status_snapshot(project_path)` reads LIVE pillar state via the SAME
+cross-pillar `claims_by_conv` join `build_brain_summary` uses (never a second
+aggregation), then gates on a **material-change fingerprint** (`_fingerprint`
+over the coarse signals — epic counts, pending decisions, blocked count, charter
+version, in-flight titles). Only when that fingerprint moved does it call the
+**cheap model** for the narrative + an explicit alignment-to-north-star read. A
+quiescent project is never re-synthesized (no LLM, so repeated tab-opens are
+free). It is **best-effort** — it never raises into a caller and **keeps the
+previous snapshot** rather than writing an empty one on LLM failure.
+
+### Regeneration — both warm-keeping and on-demand
+- **Event-driven** — `epic_completed` / `decision_committed` / `blocked` warm a
+  fresh snapshot in a non-blocking daemon thread (like `ensure_summary`), so a
+  settled action never blocks on an LLM call.
+- **On tab-open** — the view path returns the CACHED latest snapshot + history
+  immediately, checks the staleness gate cheaply (a fingerprint compare, no
+  LLM), and if the project moved, warms a fresh snapshot in the background.
+
+### Surface
+A roomy **Project Brain status tab** shows the latest narrative + the snapshot
+trail; the always-visible **collab-bar** shows the one-line headline
+(`status_line`, read-only). A read-only Q&A answers a specific human question
+against LIVE pillar state and writes **nothing** (no snapshot appended).
+
+### The hard invariant — human-facing ONLY
+This memory is **NEVER** injected into `lib/tasks_pkg/system_context.py` or any
+sibling-agent prompt — doing so would blur the human↔brain lane into the
+agent↔agent lane and re-raise the coupling/storm concerns. The lane is strictly
+1:1 human↔synthesis: there is **no fan-out/broadcast verb** and **no new
+inter-conversation write path** — the only engine write remains dispatch.
+
+*Code: `lib/conversations/project_status.py`; table in
+`lib/database/_core_schema.py` (`project_status_snapshots`); REST at
+`/api/v1/project/brain/status`; design in
+[`PROJECT_BRAIN_STATUS_LANE.md`](PROJECT_BRAIN_STATUS_LANE.md).*
+
+---
+
+## 9. The Panel (Observability & Human Control)
 
 A brain whose coordination state is invisible can't be trusted or corrected. A
 slide-in **Project Brain panel** (opened from the project bar) presents three
@@ -341,11 +488,12 @@ columns, all keyed on the *displayed conversation's* project path (resolved via
 the same accessor the rest of the UI uses — never a global):
 
 - **Activity** — the live feed (backfill + PushHub stream, deduped as in §3).
-- **Charter** — north-star text + committed decisions, plus **pending
-  `proposed_decision` events** each with a human **Commit / Reject** control.
-  Commit calls the human-gated commit route with the proposal text +
-  `expected_version`; this is the *only* path that mutates the charter — the
-  human gate that was otherwise unreachable.
+- **Charter** — north-star text + committed decisions. Agents self-commit
+  decisions (they land here directly), so the panel is primarily the human's
+  window in + the **corrective levers**: edit the north-star `content`, and
+  edit/remove a committed decision (`update_decision` / `delete_decision` /
+  `delete_charter`), all optimistic-locked. Any residual `proposed_decision`
+  events still expose a **Commit / Reject** control for the human.
 - **Board** — a kanban (open / claimed / done) of epics; claimed cards show the
   owner-conversation chip (clicking it opens that conversation).
 
@@ -355,7 +503,7 @@ cross-side hash algorithm for the push key is byte-identical to the backend's.
 
 ---
 
-## 8. End-to-End: The Brain in Motion
+## 10. End-to-End: The Brain in Motion
 
 Putting the definitions together, here is the full loop for a project with
 several conversations:
@@ -372,13 +520,14 @@ several conversations:
    redo it."* B **auto-avoids** the collision and picks different work.
    Meanwhile B reads the `[PROJECT CHARTER]` block and aligns to the shared
    north star.
-4. B reaches a project-wide decision → `project_charter_propose` → a
-   `proposed_decision` event appears in the feed and in the panel's Charter
-   column.
-5. The **human** sees the proposal in the panel, clicks **Commit** → the
-   optimistic-locked commit route writes it into the Charter (`version` bumps),
-   emits a `decided` event → from now on every conversation's prompt carries
-   that committed decision.
+4. B reaches a project-wide decision → `project_charter_commit` → the
+   optimistic-locked commit writes it into the Charter (`version` bumps), emits
+   a `decided` event → from now on every conversation's prompt carries that
+   committed decision — **with no human in the loop**. (B may instead
+   `project_charter_propose` when it wants to leave a non-binding suggestion.)
+5. The **human** watches the decision land in the panel and, if it needs
+   correcting, uses a corrective lever (edit/remove the decision) — an optional
+   veto, not a required approval.
 6. A finishes → `project_board_complete` → `completed` event + the completion
    trigger dispatches any dependents that just unblocked.
 7. Throughout, the human watches the whole pulse — who's doing what, what's
@@ -393,14 +542,15 @@ own, while remaining fully visible and correctable by the owner.
 
 ---
 
-## 9. Reproduction Checklist (the minimal set of moving parts)
+## 11. Reproduction Checklist (the minimal set of moving parts)
 
 To rebuild this from scratch you need exactly:
 
-1. **Three tables**, all per-`projectPath`: `project_events` (append log,
+1. **Four tables**, all per-`projectPath`: `project_events` (append log,
    monotonic `seq`, bounded), `project_charter` (single row, `version`
    optimistic lock), `project_tasks` (epics, `status`, soft-lease
-   `lease_expires_at`, `depends_on`).
+   `lease_expires_at`, `depends_on`), and `project_status_snapshots` (Pillar
+   #7's append-only status trail, monotonic `seq`, bounded to 200).
 2. **A pure `_effective_status(stored, lease_expires_at, now)`** that treats an
    expired claim as `open` — the single, read-time, reaper-free anti-deadlock
    rule, reused by both the board read and dispatch selection.
@@ -409,16 +559,29 @@ To rebuild this from scratch you need exactly:
 4. **Prompt injection** of `[PROJECT CHARTER]` and `[PROJECT BOARD]` blocks
    (with the per-epic avoid-duplication hint) — ambient, existence-gated,
    path-keyed.
-5. **Agent tools** gated to project mode: charter read/propose (never commit),
+5. **Agent tools** gated to project mode: charter read/propose/**commit**
+   (commit appends a DECISION only, never the north-star `content`),
    board read/post/claim/complete/block.
-6. **A human-gated commit route** (optimistic-locked, emits `decided`) — the
-   only charter mutator.
+6. **A charter commit path** (optimistic-locked, emits `decided`) reachable by
+   BOTH the agent tool (decision-append only) and the human REST route (which
+   additionally owns the north-star `content` + the corrective edit/delete
+   levers).
 7. **A dispatch engine**: pure `select_dispatchable` + idempotent `dispatch_epic`
    (claim-then-enqueue a `workflow_step` kickoff, reusing the existing message
    queue) + a completion trigger + a **heartbeat sweep on the existing
    scheduler tick** (bounded, busy-guarded, best-effort).
 8. **A three-column panel** reading feed/charter/board and exposing the human
    Commit/Reject gate, all through the unified API client.
+9. **A peer channel** (Pillar #6): a dedicated `KIND_PEER_MSG` turn source
+   (priority between `real` and `workflow_step`), the three project-gated tools
+   (`project_peer_status` / `project_message` / `project_intervene`), a
+   per-`(sender,target)` sliding-window rate limit (3 / 120 s), no auto-relay,
+   and an `approved_by`-gated hard abort.
+10. **A status lane** (Pillar #7): the append-only `project_status_snapshots`
+    trail + a synthesis generator (`build_status_snapshot`) gated on a
+    material-change fingerprint (cheap-model, best-effort), warmed event-driven
+    + on tab-open, surfaced HUMAN-FACING ONLY (never injected into an agent
+    prompt).
 
 Hold to the two invariants — **key on `projectPath` (never a process-global)**
 and **best-effort (never block the triggering path)** — and the whole thing
@@ -426,19 +589,21 @@ composes without deadlocks, cross-project leaks, or thrash.
 
 ---
 
-## 10. Where the Code Lives (implementation map)
+## 12. Where the Code Lives (implementation map)
 
 | Component | File(s) |
 |---|---|
-| Table definitions | `lib/database/_core_schema.py` (`project_events`, `project_charter`, `project_tasks`); bootstrap in `_schema_sqlite.py` / `_schema_pg.py` |
+| Table definitions | `lib/database/_core_schema.py` (`project_events`, `project_charter`, `project_tasks`, `project_status_snapshots`); bootstrap in `_schema_sqlite.py` / `_schema_pg.py` |
 | Activity Feed engine | `lib/conversations/project_feed.py` (`VALID_KINDS`, `emit_event`, `sha1(path)[:16]` key, retention) |
 | Charter engine | `lib/conversations/project_charter.py` (`read`/`propose`/`commit`, optimistic lock) |
 | Board engine | `lib/conversations/project_board.py` (`_effective_status`, `claim`/`complete`/`block`, `[PROJECT BOARD]` render) |
 | Dispatch + heartbeat | `lib/conversations/project_dispatch.py` (`select_dispatchable`, `dispatch_epic`, `on_epic_completed`, `sweep_all_active_projects`) |
+| Peer comms + intervention (Pillar #6) | `lib/conversations/project_peer.py` (`project_peer_status`, `project_message`, `project_intervene`, `_prune_and_check` rate gate, `_authorize_hard_abort`) |
+| Status lane (Pillar #7) | `lib/conversations/project_status.py` (`build_status_snapshot`, `_fingerprint`, `status_line`) |
 | Heartbeat wiring | `lib/scheduler/manager.py` (call on the 30s tick) |
 | Prompt injection | `lib/tasks_pkg/system_context.py` (`[PROJECT CHARTER]` + `[PROJECT BOARD]` blocks) |
 | Agent tools | `lib/tools/conversation.py`, gated in `lib/tools/registry.py`, dispatched in `lib/tasks_pkg/handlers/misc.py` |
 | Turn source | `lib/message_queue.py` (`enqueue_message`, `workflow_step` kind) |
-| REST surface | `routes/api_v1/project.py` (`/project/feed`, `/project/charter`, `/project/charter/commit`, `/project/board`) |
+| REST surface | `routes/api_v1/project.py` (`/project/feed`, `/project/charter`, `/project/charter/commit`, `/project/board`, `/project/brain/peers`, `/project/brain/status`) |
 | Frontend panel | `static/js/project-brain.js`, markup in `index.html`, client methods in `static/js/api.js` (`Api.project.*`) |
-| Tests | `tests/test_project_feed.py`, `test_project_charter.py`, `test_project_board.py`, `test_project_dispatch.py`, `test_frontend_project_brain.py`, `test_core_schema_parity.py` |
+| Tests | `tests/test_project_feed.py`, `test_project_charter.py`, `test_project_board.py`, `test_project_dispatch.py`, `test_project_peer.py`, `test_project_status*.py`, `test_frontend_project_brain.py`, `test_core_schema_parity.py` |

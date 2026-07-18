@@ -16,13 +16,315 @@ seven-step sequence:
 from __future__ import annotations
 
 import json
+import os as _os
+import re as _re
+import subprocess
 import time
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
 from lib.log import get_logger
 
 logger = get_logger(__name__)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  Predicate condition primitive — shared by timer + proactive schedulers
+# ═════════════════════════════════════════════════════════════════════════════
+#
+# A "condition" a scheduler polls can be evaluated three ways:
+#   • llm       — a cheap LLM reads gathered evidence and decides (the legacy
+#                 path; open-ended / semantic conditions).
+#   • code      — a pure shell PREDICATE decides: exit code (0=ready) or a regex
+#                 over stdout. Zero LLM cost. Deterministic conditions only.
+#   • hybrid    — BOTH run every poll: the LLM stays authoritative (it is the
+#                 steering wheel while the predicate is still unproven), the
+#                 predicate runs alongside for RECONCILIATION. After the code
+#                 predicate agrees with the LLM for N consecutive polls it is
+#                 auto-PROMOTED to `code` (the LLM drops out → cost → 0).
+#
+# The two functions below are PURE (no DB writes, no LLM calls). Each scheduler
+# consumer (timer `_poll.py`, proactive `manager._run_proactive_poll`) owns its
+# own side effects (its distinct poll_log table + entity-row UPDATE), so the
+# reconciliation/promotion logic MUST stay side-effect-free to serve both.
+
+# Sentinel for "predicate result unknown" (not run, or ambiguous/errored). Kept
+# distinct from True/False so an ambiguous predicate NEVER reads as ready.
+PREDICATE_UNKNOWN = None
+
+# Default consecutive-agreement streak before a hybrid condition promotes to
+# pure `code`. Owner-set to 3 (a single disagreement is too eager — false
+# positives on an exit trigger are the most dangerous failure). env-tunable.
+DEFAULT_PROMOTION_STREAK = 3
+# Consecutive ambiguous/errored predicate polls (in the `code` tier) before we
+# DEMOTE the condition back to `hybrid` so the LLM re-takes the wheel — the
+# self-healing side of "if the promoted predicate later breaks, never silently
+# trigger and never let the timer die".
+DEFAULT_FALLBACK_STREAK = 3
+
+
+def promotion_streak_threshold() -> int:
+    """Consecutive predicate↔LLM agreements needed to promote hybrid→code."""
+    try:
+        return max(1, int(_os.environ.get('TOFU_PREDICATE_PROMOTION_STREAK',
+                                          str(DEFAULT_PROMOTION_STREAK))))
+    except (TypeError, ValueError) as e:
+        logger.debug('[Predicate] TOFU_PREDICATE_PROMOTION_STREAK parse failed: %s', e)
+        return DEFAULT_PROMOTION_STREAK
+
+
+def fallback_streak_threshold() -> int:
+    """Consecutive ambiguous `code`-tier polls needed to demote code→hybrid."""
+    try:
+        return max(1, int(_os.environ.get('TOFU_PREDICATE_FALLBACK_STREAK',
+                                          str(DEFAULT_FALLBACK_STREAK))))
+    except (TypeError, ValueError) as e:
+        logger.debug('[Predicate] TOFU_PREDICATE_FALLBACK_STREAK parse failed: %s', e)
+        return DEFAULT_FALLBACK_STREAK
+
+
+@dataclass
+class PredicateResult:
+    """Outcome of running a shell predicate.
+
+    ``matched`` is tri-state:
+      • True/False — a confident ready / not-ready verdict.
+      • None (PREDICATE_UNKNOWN) — predicate was not run, timed out, failed to
+        spawn, or returned an ambiguous exit code. NEVER treated as ready.
+    """
+    matched: bool | None
+    output: str = ''
+    exit_code: int = -1
+    errored: bool = False
+    error_note: str = ''
+
+
+def evaluate_predicate(command: str, regex: str = '', timeout: int = 30,
+                       log_id: str = '') -> PredicateResult:
+    """Run a shell predicate and classify its result.
+
+    Decision rule (Unix contract):
+      • With ``regex``: ready iff the pattern matches stdout+stderr.
+      • Without regex: ready iff exit code == 0; exit code 1 → not ready
+        (grep-style "no match"); ANY other code (2, 127, timeout, spawn
+        failure) → AMBIGUOUS (matched=None, errored=True) — deliberately NOT
+        ready, so a broken predicate can never fire a false-positive trigger.
+
+    This shares the same 30s timeout + cross-platform shell as the timer's
+    legacy ``check_command`` runner — it is the SAME already-exposed execution
+    surface, NOT a new one.
+
+    Args:
+        command: The shell predicate to run. Empty → matched=None (nothing ran).
+        regex: Optional pattern matched (search, multiline) against output.
+        timeout: Seconds before the predicate is killed.
+        log_id: Short id (timer/task) for log lines.
+
+    Returns:
+        A :class:`PredicateResult`.
+    """
+    if not (command or '').strip():
+        return PredicateResult(matched=PREDICATE_UNKNOWN, errored=False,
+                               error_note='no predicate command')
+    try:
+        from lib.compat import get_shell_args
+        result = subprocess.run(
+            get_shell_args(command),
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        logger.warning('[Predicate:%s] Command timed out after %ss: %.100s',
+                       log_id or '?', timeout, command)
+        return PredicateResult(matched=PREDICATE_UNKNOWN, errored=True,
+                               error_note=f'timed out after {timeout}s')
+    except Exception as e:
+        logger.warning('[Predicate:%s] Command failed to spawn: %s', log_id or '?', e)
+        return PredicateResult(matched=PREDICATE_UNKNOWN, errored=True,
+                               error_note=f'spawn error: {e}')
+
+    output = (result.stdout or '')[:3500]
+    if result.stderr:
+        output += f'\n[stderr] {result.stderr[:500]}'
+    output = output.strip()
+    code = result.returncode
+
+    if regex:
+        try:
+            matched = bool(_re.search(regex, output, _re.MULTILINE))
+        except _re.error as e:
+            logger.warning('[Predicate:%s] Invalid regex %r: %s', log_id or '?', regex, e)
+            return PredicateResult(matched=PREDICATE_UNKNOWN, output=output,
+                                   exit_code=code, errored=True,
+                                   error_note=f'invalid regex: {e}')
+        return PredicateResult(matched=matched, output=output, exit_code=code)
+
+    # Exit-code contract: 0 ready, 1 not-ready, anything else ambiguous.
+    if code == 0:
+        return PredicateResult(matched=True, output=output, exit_code=code)
+    if code == 1:
+        return PredicateResult(matched=False, output=output, exit_code=code)
+    logger.warning('[Predicate:%s] Ambiguous exit code %d — treating as NOT ready: %.100s',
+                   log_id or '?', code, command)
+    return PredicateResult(matched=PREDICATE_UNKNOWN, output=output, exit_code=code,
+                           errored=True, error_note=f'ambiguous exit code {code}')
+
+
+@dataclass
+class ReconcileOutcome:
+    """The decision of ``reconcile_and_decide`` — pure, no side effects.
+
+    The consumer applies this to its own poll_log + entity row.
+    """
+    authoritative_ready: bool          # who-wins ready verdict for THIS poll
+    tier: str                          # 'code' | 'predicate' | 'llm' — for the log
+    new_kind: str                      # condition_kind after this poll
+    new_streak: int                    # promotion streak after this poll
+    new_fallback_streak: int           # code-tier consecutive-ambiguity count after
+    predicate_matched: int             # 1/0/-1 for the log column
+    llm_agreed: int                    # 1/0/-1 for the log column
+    fallback_to_llm: bool = False      # code-tier predicate was ambiguous
+    promoted: bool = False             # hybrid crossed the promotion threshold
+    demoted: bool = False              # code fell back to hybrid
+    note: str = ''                     # short human-readable summary
+
+
+def _matched_to_col(matched: bool | None) -> int:
+    """Map tri-state predicate result to the poll_log integer column."""
+    if matched is True:
+        return 1
+    if matched is False:
+        return 0
+    return -1
+
+
+def reconcile_and_decide(kind: str, predicate: PredicateResult | None,
+                         llm_ready: bool | None, llm_available: bool,
+                         current_streak: int, fallback_streak: int = 0,
+                         promotion_threshold: int | None = None,
+                         fallback_threshold: int | None = None) -> ReconcileOutcome:
+    """Decide the authoritative ready verdict + promotion/demotion for one poll.
+
+    PURE. No DB, no LLM. The consumer runs the predicate (``evaluate_predicate``)
+    and/or the LLM poll first, then calls this to learn (a) who wins this poll
+    and (b) whether the condition_kind should change.
+
+    Args:
+        kind: The condition's current ``condition_kind`` — 'code'/'hybrid'/'llm'.
+        predicate: PredicateResult, or None when no predicate was run (llm tier).
+        llm_ready: The LLM's ready verdict, or None when the LLM was not called
+            (pure code tier) or its decision could not be parsed.
+        llm_available: True when an LLM verdict is usable (parsed cleanly).
+        current_streak: The condition's stored promotion streak (agreements).
+        fallback_streak: The condition's stored consecutive ambiguity count.
+        promotion_threshold: Override the env default (tests).
+        fallback_threshold: Override the env default (tests).
+
+    Returns:
+        A :class:`ReconcileOutcome`.
+    """
+    prom_thr = promotion_threshold if promotion_threshold is not None else promotion_streak_threshold()
+    fb_thr = fallback_threshold if fallback_threshold is not None else fallback_streak_threshold()
+
+    # ── Pure code tier ──────────────────────────────────────────────────────
+    if kind == 'code':
+        pm = predicate.matched if predicate else PREDICATE_UNKNOWN
+        if pm is PREDICATE_UNKNOWN:
+            # Ambiguous / errored predicate: NEVER trigger, never die. Count the
+            # ambiguity; on a sustained run, demote back to hybrid for LLM re-check.
+            new_fb = fallback_streak + 1
+            demote = new_fb >= fb_thr
+            return ReconcileOutcome(
+                authoritative_ready=False,
+                tier='code',
+                new_kind='hybrid' if demote else 'code',
+                new_streak=0,
+                new_fallback_streak=0 if demote else new_fb,
+                predicate_matched=-1,
+                llm_agreed=-1,
+                fallback_to_llm=True,
+                demoted=demote,
+                note=(f'predicate ambiguous ({predicate.error_note if predicate else "no result"}); '
+                      + ('demoting to hybrid for LLM re-check' if demote
+                         else f'waiting (ambiguity {new_fb}/{fb_thr})')),
+            )
+        return ReconcileOutcome(
+            authoritative_ready=bool(pm),
+            tier='code',
+            new_kind='code',
+            new_streak=current_streak,
+            new_fallback_streak=0,
+            predicate_matched=_matched_to_col(pm),
+            llm_agreed=-1,
+            note=f'predicate {"matched" if pm else "no match"} (exit={predicate.exit_code})',
+        )
+
+    # ── Pure LLM tier ───────────────────────────────────────────────────────
+    if kind != 'hybrid':
+        return ReconcileOutcome(
+            authoritative_ready=bool(llm_ready) if llm_available else False,
+            tier='llm',
+            new_kind='llm',
+            new_streak=current_streak,
+            new_fallback_streak=fallback_streak,
+            predicate_matched=-1,
+            llm_agreed=-1,
+            note='llm decision',
+        )
+
+    # ── Hybrid tier: LLM authoritative, predicate reconciled ─────────────────
+    pm = predicate.matched if predicate else PREDICATE_UNKNOWN
+    # The LLM is the steering wheel while the predicate is unproven.
+    authoritative = bool(llm_ready) if llm_available else False
+
+    if not llm_available or pm is PREDICATE_UNKNOWN:
+        # Can't reconcile this poll (LLM unparsed or predicate ambiguous):
+        # reset the streak (agreement must be CONSECUTIVE) but never promote.
+        return ReconcileOutcome(
+            authoritative_ready=authoritative,
+            tier='llm',
+            new_kind='hybrid',
+            new_streak=0,
+            new_fallback_streak=fallback_streak,
+            predicate_matched=_matched_to_col(pm),
+            llm_agreed=-1,
+            note=('cannot reconcile (LLM unparsed)' if not llm_available
+                  else f'predicate ambiguous ({predicate.error_note if predicate else "?"}); streak reset'),
+        )
+
+    agreed = (bool(pm) == authoritative)
+    new_streak = current_streak + 1 if agreed else 0
+    promote = agreed and new_streak >= prom_thr
+    return ReconcileOutcome(
+        authoritative_ready=authoritative,
+        tier='llm',
+        new_kind='code' if promote else 'hybrid',
+        new_streak=new_streak,
+        new_fallback_streak=0,
+        predicate_matched=_matched_to_col(pm),
+        llm_agreed=1 if agreed else 0,
+        promoted=promote,
+        note=(f'predicate {"agrees" if agreed else "disagrees"} with LLM '
+              f'(streak {new_streak}/{prom_thr})'
+              + (' → PROMOTED to code' if promote else '')),
+    )
+
+
+def derive_condition_kind(check_instruction: str, condition_command: str) -> str:
+    """Infer condition_kind from the caller's parameter combination.
+
+    Not exposed to the LLM — the backend derives it:
+      • instruction + predicate command → 'hybrid' (learn, then promote)
+      • predicate command only          → 'code'   (zero-cost from the start)
+      • instruction only (or neither)   → 'llm'    (legacy default)
+    """
+    has_cmd = bool((condition_command or '').strip())
+    has_instr = bool((check_instruction or '').strip())
+    if has_cmd and has_instr:
+        return 'hybrid'
+    if has_cmd:
+        return 'code'
+    return 'llm'
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -119,6 +421,17 @@ def inject_and_run_task(
             settings = {}
 
         # 2. Append caller-provided user message ─────────────────────
+        # Stamp the authoritative _initiator from the legacy source tag the
+        # caller carried (timer / proactive), so the turn is attributable
+        # through the ONE resolver rather than each reader re-sniffing tags.
+        from lib.conversations.turn_initiation import (INITIATOR_PROACTIVE,
+                                                       INITIATOR_TIMER,
+                                                       stamp_initiator)
+        _initiator = (INITIATOR_TIMER if user_message.get('_timer')
+                      else INITIATOR_PROACTIVE if user_message.get('_proactive')
+                      else None)
+        if _initiator:
+            stamp_initiator(user_message, _initiator)
         messages.append(user_message)
 
         # 3. Append placeholder assistant message ────────────────────
@@ -132,6 +445,8 @@ def inject_and_run_task(
         for tag in ('_timer', '_proactive'):
             if user_message.get(tag):
                 assistant_msg[tag] = True
+        if _initiator:
+            stamp_initiator(assistant_msg, _initiator)
         messages.append(assistant_msg)
 
         # 4. Write messages back to DB ───────────────────────────────
@@ -150,6 +465,18 @@ def inject_and_run_task(
         from lib.conversations import update_conversation_fts
         update_conversation_fts(db, conv_id, search_text)
 
+        # Event-driven cross-device sync: a proactive/timer turn appended a new
+        # user+assistant pair, so push the post-write rev → a sibling tab with
+        # this conv open surfaces the new turn without a manual refresh.
+        try:
+            from lib.conversations import notify_conv_changed as _notify_cc
+            _sch_rev_row = db.execute(
+                'SELECT rev FROM conversations WHERE id=? AND user_id=1',
+                (conv_id,)).fetchone()
+            _notify_cc(conv_id, rev=(_sch_rev_row[0] if _sch_rev_row else None))
+        except Exception as _ne:
+            logger.debug('%s conv-changed notify skipped: %s', log_prefix, _ne)
+
         # 5. Build config ────────────────────────────────────────────
         if isinstance(tools_config_json, str):
             try:
@@ -167,12 +494,14 @@ def inject_and_run_task(
         agentic_task = create_agentic_task(conv_id, messages, config)
         agentic_task_id = agentic_task['id']
 
-        settings['activeTaskId'] = agentic_task_id
-        settings_json = json.dumps(settings, ensure_ascii=False)
-        db_execute_with_retry(db,
-            'UPDATE conversations SET settings=? WHERE id=? AND user_id=1',
-            (settings_json, conv_id)
-        )
+        # Serialized read-merge-write (settings_store) so this activeTaskId
+        # stamp doesn't clobber a concurrent tool-state / autopilot settings
+        # write on the same row (reuses this thread's `db`).
+        from lib.conversations import set_conversation_settings
+        # notify=False: notify_conv_changed was already emitted after the
+        # messages write above (no double push); gate still invalidates cache.
+        set_conversation_settings(conv_id, {'activeTaskId': agentic_task_id},
+                                  db=db, notify=False)
 
         logger.info('%s Created agentic task %s in conv=%s',
                      log_prefix, agentic_task_id[:8], conv_id[:12])
@@ -278,13 +607,7 @@ def parse_json_decision(content: str | None, key: str = 'ready') -> tuple[bool, 
         json.JSONDecodeError: If the content cannot be parsed as JSON.
         TypeError: If the content is not a string.
     """
-    text = (content or '').strip()
-    # Strip markdown code fences (```json ... ```)
-    if text.startswith('```'):
-        text = text.split('\n', 1)[-1]
-        if text.endswith('```'):
-            text = text[:-3]
-        text = text.strip()
-
+    from lib.llm_json import strip_code_fences
+    text = strip_code_fences(content)
     decision = json.loads(text)
     return bool(decision.get(key, False)), str(decision.get('reason', ''))[:200]

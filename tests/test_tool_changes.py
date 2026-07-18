@@ -247,6 +247,31 @@ class ExtractFileChangesTest(unittest.TestCase):
         out = extract_file_changes(rounds)
         self.assertEqual(out[0].path, 'recovered/path.py')
 
+    def test_title_equal_to_tool_name_is_not_a_file(self):
+        # build_project_tool_meta DEFAULTS meta['title'] to the bare tool name
+        # when no builder overwrites it with a filename. A write round whose
+        # toolArgs carries no usable path (e.g. a malformed / auto-repaired
+        # apply_diff) must NOT surface a bogus file-change entry literally
+        # named after the tool ("apply_diff"). Regression for the file-edit
+        # display showing "apply_diff" as the modified file.
+        rounds = [{
+            'toolName': 'apply_diff',
+            'toolArgs': '{"search": "x", "replace": "y"}',  # no path
+            'results': [{'title': 'apply_diff', 'writeOk': True}],
+        }]
+        self.assertEqual(extract_file_changes(rounds), [])
+
+        # Same guard for the other write tools.
+        for tn in ('write_file', 'apply_diffs', 'insert_content',
+                   'insert_contents'):
+            rounds = [{
+                'toolName': tn,
+                'toolArgs': '{}',
+                'results': [{'title': tn, 'writeOk': True}],
+            }]
+            self.assertEqual(extract_file_changes(rounds), [],
+                             f'{tn}: title==tool name must not emit a file')
+
     def test_dict_args_supported(self):
         # Args may already be a dict (not a string) when the round dict
         # comes from the live task state rather than from JSON.

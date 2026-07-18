@@ -23,6 +23,46 @@ logger = get_logger(__name__)
 _TRANSLATE_SEND_TIMEOUT = 45
 
 
+def _should_translate_input(text, config):
+    """Decide whether ``text`` needs translating to English — the input gate.
+
+    Single source of truth for the "translate vs pass-through" decision shared
+    by the UI send path (:func:`auto_translate_user`) and the headless API path
+    (:func:`translate_user_text_to_english`). Returns True when a translation
+    should be attempted.
+
+    Precedence:
+      * An explicit ``config['translateSourceLang']`` wins: translate unless it
+        already IS English (the harness/SDK case that knows the language).
+      * Otherwise defer to the cascade detector
+        (:func:`lib.text_lang.detect_language`): skip only when it confidently
+        says English. This REPLACES the old ``is_predominantly_english``
+        Latin-ratio gate, which could not tell English from German/Spanish/
+        Italian/Portuguese (all ~0.97 Latin) and so wrongly skipped them.
+
+    The LLM-correction tier is consulted only when it is allowed for this
+    request — resolved through ``personal_scope`` (fail-closed on headless)
+    via :func:`lib.lang_correct.resolve_lang_correction_allowed` — so an
+    unrelated API caller is never silently billed for a correction call.
+    """
+    source_lang = (config.get('translateSourceLang') or '').strip()
+    if source_lang:
+        return source_lang.lower() not in ('english', 'en')
+    from lib.text_lang import detect_language
+    from lib.lang_correct import (
+        llm_language_corrector, resolve_lang_correction_allowed,
+    )
+    allow_llm = resolve_lang_correction_allowed(config)
+    res = detect_language(
+        text, allow_llm=allow_llm,
+        llm_corrector=llm_language_corrector if allow_llm else None)
+    # Skip translation only on a CONFIDENT English verdict. 'unknown' (no
+    # signal) falls through to translate — the translator's own prompt keeps
+    # already-English text intact, so a false "translate" is cheap-safe, while
+    # a false "skip" would leave a non-English message untranslated.
+    return res.code != 'en'
+
+
 # ══════════════════════════════════════════════════════════
 #  Send-path translate status (per-conv)
 #
@@ -111,17 +151,10 @@ def auto_translate_user(text, config, conv_id=None):
     # Source language: an explicit hint wins (harness/SDK callers that know it);
     # otherwise blank lets the translate prompt infer it.
     source_lang = (config.get('translateSourceLang') or '').strip()
-    if source_lang:
-        # Trust the pinned source — translate unless it already IS English.
-        if source_lang.strip().lower() in ('english', 'en'):
-            return text, None, None, None
-    else:
-        # Unknown source: skip only when the text is already English. The
-        # Latin-script heuristic can't distinguish English from other
-        # Latin-script languages, so it's a best-effort fallback only.
-        from lib.text_lang import is_predominantly_english
-        if is_predominantly_english(text):
-            return text, None, None, None
+    # Confidence-aware gate (cascade detector; LLM tier when allowed). Replaces
+    # the old Latin-ratio-only heuristic that misread German/Spanish as English.
+    if not _should_translate_input(text, config):
+        return text, None, None, None
 
     import concurrent.futures
 
@@ -271,18 +304,12 @@ def translate_user_text_to_english(text, config):
         return text, None, None, None
 
     source_lang = (config.get('translateSourceLang') or '').strip()
-    # When the caller pins a source language we trust it: translate unless it
-    # IS English. The Latin-script heuristic (is_predominantly_english) only
-    # applies when the source is unknown — it cannot tell English apart from
-    # other Latin-script languages (German/Spanish/Italian/Portuguese all read
-    # as ~0.97 Latin), so using it to gate those would wrongly skip them.
-    if source_lang:
-        if source_lang.strip().lower() in ('english', 'en'):
-            return text, None, None, None
-    else:
-        from lib.text_lang import is_predominantly_english
-        if is_predominantly_english(text):
-            return text, None, None, None
+    # Confidence-aware gate — same single source of truth as the UI send path.
+    # A pinned translateSourceLang wins; otherwise the cascade detector decides
+    # (skip only on a confident English verdict). This fixes the old
+    # Latin-ratio heuristic that wrongly skipped German/Spanish/etc.
+    if not _should_translate_input(text, config):
+        return text, None, None, None
 
     from lib.translate import (
         _build_translate_prompt, _translate_freetext,
@@ -334,6 +361,18 @@ def build_user_msg_from_payload(payload, config, conv_id=None):
         'content': translated_text,
         'timestamp': timestamp,
     }
+    # ★ Carry the client-generated stable _msgId through verbatim. The frontend
+    #   assigns _msgId to the optimistic user message BEFORE the send POST, and
+    #   its persistence layer dedups on _msgId (rescue-PUT rebase
+    #   _rebaseUnackedTail; PATCH /messages/by-id). If we dropped it here,
+    #   _assign_message_ids would mint a DIFFERENT server UUID → on a poor
+    #   network where the send succeeded but its response was lost, the client's
+    #   rescue-PUT rebase wouldn't recognise the server's copy and would append
+    #   the message a SECOND time (duplicate user bubble). Preserving the id
+    #   makes server and client agree on one identity for the turn.
+    _client_msg_id = payload.get('_msgId')
+    if _client_msg_id:
+        user_msg['_msgId'] = _client_msg_id
     if original_text:
         user_msg['originalContent'] = original_text
         user_msg['_translateDone'] = True

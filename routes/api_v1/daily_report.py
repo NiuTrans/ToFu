@@ -37,7 +37,7 @@ import time
 
 from flask import Blueprint, jsonify
 
-from lib.api_response import api_bad_request, api_not_found, api_ok
+from lib.api_response import api_bad_request, api_error, api_not_found, api_ok
 from lib.daily_report import (  # noqa: F401  — back-compat re-exports
     DEFAULT_USER_ID,
     _ANALYSIS_SYSTEM,
@@ -404,7 +404,7 @@ async def update_task_status():
         return api_bad_request('Missing required fields')
     valid_statuses = ('done', 'in_progress', 'blocked', 'incomplete')
     if not cycle and new_status not in valid_statuses:
-        return jsonify({'ok': False, 'error': f'Invalid status — must be one of {valid_statuses}'}), 400
+        return api_error(f'Invalid status — must be one of {valid_statuses}', status=400)
     if not re.match(r'^\d{4}-\d{2}-\d{2}$', date_str):
         return api_bad_request('Invalid date format')
 
@@ -597,8 +597,8 @@ async def add_manual_task():
     if not re.match(r'^\d{4}-\d{2}-\d{2}$', date_str):
         return api_bad_request('Invalid date format')
 
-    import uuid
-    todo_id = f'todo-{uuid.uuid4().hex[:8]}'
+    from lib.ids import short_id
+    todo_id = short_id('todo-', 8)
 
     report = _load_report(date_str) or {
         'streams': [], 'tomorrow': [], 'tasks': [],

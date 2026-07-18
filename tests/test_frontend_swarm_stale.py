@@ -104,6 +104,32 @@ check('stale_no_running_pill', !staleHtml.includes('>Running<') && !staleHtml.in
 // runaway elapsed (hundreds of minutes) must NOT be present
 check('stale_no_runaway_timer', !/\d{3,}m\d+s/.test(staleHtml));
 
+// ── 2b. FE-inference-debt #1: an OLD panel the backend CONFIRMED still active
+//        (fresh _swActiveConfirmedAt, stamped by _reconcileStuckSwarmPanels on
+//        an `active===true` probe) must NOT be labeled "Stale" — the wall-clock
+//        age is a guess and must never override the known backend fact. A big
+//        multi-agent wave can legitimately run well past _SW_STALE_MS. ──
+const ACTIVE_TTL = 90 * 1000;   // mirror _SW_ACTIVE_CONFIRM_TTL_MS (module const)
+const confirmedActiveRound = {
+  roundNum: 1, _swarm: true, _swarmActive: true, status: 'searching',
+  _swarmStartTime: OLD, _swActiveConfirmedAt: NOW - 5000,   // fresh confirmation
+  _swarmAgents: [{ id: 'a1', role: 'analyst', objective: 'long job', status: 'running', phase: 'tool_use' }],
+};
+const confirmedActiveHtml = _buildSwarmPanelHTML(confirmedActiveRound, [confirmedActiveRound]);
+check('confirmed_active_not_stale', !confirmedActiveHtml.includes('Stale'));
+check('confirmed_active_shows_running', confirmedActiveHtml.includes('Running'));
+
+// ── 2c. An OLD panel whose backend confirmation has EXPIRED (server since
+//        became unreachable → no fresh fact) falls back to the age guess and
+//        reads "Stale" — the offline residual still self-corrects a zombie. ──
+const expiredConfirmRound = {
+  roundNum: 1, _swarm: true, _swarmActive: true, status: 'searching',
+  _swarmStartTime: OLD, _swActiveConfirmedAt: NOW - (ACTIVE_TTL + 5000),   // aged out
+  _swarmAgents: [{ id: 'a1', role: 'analyst', objective: 'zombie', status: 'running', phase: 'tool_use' }],
+};
+const expiredConfirmHtml = _buildSwarmPanelHTML(expiredConfirmRound, [expiredConfirmRound]);
+check('expired_confirm_is_stale', expiredConfirmHtml.includes('Stale'));
+
 // ── 3. An OLD panel that DID settle (has _swarmEndTime) is NOT stale ──
 const settledRound = {
   roundNum: 1, _swarm: true, _swarmActive: false, status: 'done',
@@ -205,4 +231,53 @@ def test_swarm_stale_panel_guard_and_reconcile():
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
     fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
     assert not fails, 'Swarm stale-panel failures:\n' + output
-    assert output.count('PASS') >= 19, f'expected >=19 PASS lines, got:\n{output}'
+    assert output.count('PASS') >= 22, f'expected >=22 PASS lines, got:\n{output}'
+
+
+@pytest.mark.skipif(not _node_deps_available(),
+                    reason='node + jsdom dev-deps not installed (run npm install)')
+def test_backend_active_confirmation_guard_is_load_bearing():
+    """NEUTER: strip the `&& !_backendConfirmedActive` clause from the isStale
+    computation (the pre-fix wall-clock-only behavior) and prove the
+    backend-confirmed-active case then WRONGLY renders "Stale". Confirms the
+    guard is the load-bearing line, not incidental — a future edit that drops
+    it re-introduces the "known-alive swarm mislabeled Stale" inference bug."""
+    src_path = os.path.join(JS_DIR, 'ui', 'streaming_swarm_panel.js')
+    with open(src_path, encoding='utf-8') as f:
+        src = f.read()
+    needle = '    && (Date.now() - _swStartedAt) > _SW_STALE_MS\n    && !_backendConfirmedActive;'
+    assert needle in src, 'isStale guard shape changed — update this neuter test'
+    neutered_src = src.replace(
+        needle,
+        '    && (Date.now() - _swStartedAt) > _SW_STALE_MS;', 1)
+    assert neutered_src != src, 'neuter did not modify the source'
+
+    # Write the neutered module to a temp file the harness evals in place of the
+    # real one, then assert the confirmed-active case now FAILS.
+    neutered_path = os.path.join(HERE, '_swarm_stale_neutered.js')
+    harness = os.path.join(HERE, '_swarm_stale_neuter_harness.js')
+    with open(neutered_path, 'w', encoding='utf-8') as f:
+        f.write(neutered_src)
+    with open(harness, 'w') as f:
+        f.write(_HARNESS)
+    try:
+        proc = subprocess.run(
+            ['node', harness,
+             os.path.join(JS_DIR, 'ui', 'streaming_ui.js'),   # argv[2]
+             ROOT,                                            # argv[3]
+             neutered_path,                                   # argv[4] — neutered module
+             ],
+            capture_output=True, text=True, timeout=60,
+        )
+    finally:
+        for p in (neutered_path, harness):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+    output = proc.stdout.strip()
+    assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
+    # With the guard removed, a backend-confirmed-active OLD panel is wrongly
+    # judged stale → the confirmed_active_not_stale check must FAIL.
+    assert 'FAIL confirmed_active_not_stale' in output, \
+        'NC (guard removed) should mislabel the confirmed-active panel Stale:\n' + output

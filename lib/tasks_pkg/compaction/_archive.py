@@ -149,6 +149,19 @@ def _archive_transcript(conv_id: str, messages: list, summary: str = '',
                 len(messages),
                 int(tokens_before or 0), int(tokens_after or 0))
 
+    # ★ RETENTION (GC-on-insert) — every compaction inserts a full transcript
+    #   row, so without pruning the table grows unbounded on a long-lived
+    #   conversation.  Keep the newest N per conv (ring buffer).  Best-effort:
+    #   a prune failure must never break the archival/compaction path.
+    try:
+        from lib.tasks_pkg.compaction._constants import archive_retention
+        keep = archive_retention()
+        if keep and conv_id:
+            get_conversation_store().prune_archives(conv_id, keep)
+    except Exception as e_gc:
+        logger.debug('[Compact] archive prune skipped conv=%s: %s',
+                     conv_id[:8] if conv_id else '?', e_gc)
+
     # Emit SSE event so the frontend can render an inline marker.  We guard
     # against missing task / archive_id so the archival path never breaks
     # if the live task dict isn't wired through.

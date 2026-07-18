@@ -14,6 +14,10 @@ last sanctioned tuning pass.
 import os
 import threading
 
+from lib.log import get_logger
+
+logger = get_logger(__name__)
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  Layer 1 — Micro-compaction
@@ -67,6 +71,44 @@ With 1M context that's still 100k tokens of headroom."""
 _SUMMARY_MAX_TOKENS = 3000
 """Maximum output tokens for the summary LLM call."""
 
+_SUMMARY_INPUT_CHAR_CAP = 64_000
+"""Hard ceiling on the summary LLM's INPUT size, in characters (§10.1).
+
+The manual /compact's entire wall clock is the single cheap-model summary call
+(benchmarked ~96% of a 3 MB conversation's compaction time; all projection +
+reconcile CPU is <150 ms). The old ceiling was 200_000 chars — ~3× larger than
+a faithful 9-section working-state summary needs — so a giant fold fed the
+cheap model a ~200k-char prompt and that single call is what felt slow.
+
+Lowered 200k → 64k (owner sign-off 2026-07-18, §10.1). ``_summary_input_char_budget``
+takes ``min(this, usable - reserves)`` so small-window models still bind on
+``usable`` first (unchanged); this cap only bites on large (>=~200k) windows —
+exactly the multi-MB conversations where /compact was slow. Trimming beyond the
+cap is MESSAGE-AWARE (``_format_messages_for_summary``): every ``[user]`` message
+is preserved verbatim (summary prompt §6 is MANDATORY), only middle assistant
+content is elided. Env-overridable, FAIL-OPEN via
+``TOFU_SUMMARY_INPUT_CHAR_CAP`` (unset/garbage→64k; clamped to a sane
+[20k, 400k] range so a typo can neither disable the cap nor starve the summary)."""
+
+
+def summary_input_char_cap() -> int:
+    """Resolve the summary-input char ceiling (§10.1 hyperparameter).
+
+    FAIL-OPEN: unset/non-int → :data:`_SUMMARY_INPUT_CHAR_CAP`; any value is
+    clamped to [20_000, 400_000] so a bad override can neither remove the cap
+    (defeating the speed win) nor starve the summary below a usable floor. Read
+    at call time so an operator can retune without a restart."""
+    raw = (os.environ.get('TOFU_SUMMARY_INPUT_CHAR_CAP') or '').strip()
+    if not raw:
+        return _SUMMARY_INPUT_CHAR_CAP
+    try:
+        val = int(raw)
+    except (ValueError, TypeError) as e:
+        logger.debug('[Compact] TOFU_SUMMARY_INPUT_CHAR_CAP=%r not an int (%s) '
+                     '— using default %d', raw, e, _SUMMARY_INPUT_CHAR_CAP)
+        return _SUMMARY_INPUT_CHAR_CAP
+    return max(20_000, min(400_000, val))
+
 _SUMMARY_COOLDOWN = 30.0
 """Seconds between consecutive summary attempts for the same conv_id.
 Prevents rapid re-triggering when the model generates a long response
@@ -91,6 +133,38 @@ _COMPACTION_RESERVE = 8_000
 
 _COMPACT_TOOL_NAME = 'context_compact'
 """Tool name for the synthetic compact tool pair."""
+
+_ARCHIVE_RETENTION_DEFAULT = 50
+"""Max ``transcript_archive`` rows retained PER CONVERSATION (ring buffer).
+
+Every force + reactive compaction inserts a full ``messages_json`` row, so on
+a year-scale conversation with thousands of compactions the table grows
+unbounded (rows were previously only deleted on whole-conversation cleanup).
+A GC-on-insert in ``_archive_transcript`` keeps the newest N; older raw
+transcripts age out.  Recoverability for the compaction VIEWER is bounded to
+the last N compactions — ample for inspecting recent context, and the LIVE
+message list is never touched by pruning.  Env-overridable, FAIL-OPEN:
+``TOFU_COMPACTION_ARCHIVE_RETENTION`` unset→50, ``0``/<=0→unlimited (never
+prune), garbage→default."""
+
+
+def archive_retention() -> int:
+    """Resolve the per-conversation transcript_archive retention (ring buffer).
+
+    FAIL-OPEN: unset→:data:`_ARCHIVE_RETENTION_DEFAULT`, ``0``/<=0→UNLIMITED
+    (never prune), non-int→default.  Read at call time (not import) so an
+    operator can retune without a restart.
+    """
+    raw = (os.environ.get('TOFU_COMPACTION_ARCHIVE_RETENTION') or '').strip()
+    if not raw:
+        return _ARCHIVE_RETENTION_DEFAULT
+    try:
+        val = int(raw)
+    except (ValueError, TypeError) as e:
+        logger.debug('[Compact] TOFU_COMPACTION_ARCHIVE_RETENTION=%r not an int '
+                     '(%s) — using default %d', raw, e, _ARCHIVE_RETENTION_DEFAULT)
+        return _ARCHIVE_RETENTION_DEFAULT
+    return val if val > 0 else 0
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -149,6 +223,85 @@ _MAX_PRESERVE_TURNS = 16
 """Hard upper bound on how many turns may be preserved verbatim, even
 if budget allows more.  Defends against pathological short-turn streams
 (e.g. 100+ tiny user messages) from defeating the budget mechanism."""
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Manual /compact — intra-turn compaction (档B, 2026-07-16)
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# The turn-based boundary always preserves the CURRENT turn whole. A single
+# agentic turn (one user request answered with dozens of tool rounds) can
+# fill the whole window on its own, so the manual /compact used to refuse it
+# ("nothing_to_compact") — the 1M single-giant-turn bug. 档B folds the COLD
+# tool rounds INSIDE that one preserved assistant's ``toolRounds`` array (never
+# slicing across messages, so no tool round is ever split) when the preserved
+# turn itself exceeds ``usable * _PRESERVE_BUDGET_RATIO``.
+#
+# §10.1: these are hyperparameters — sign-off recorded in JOURNAL 2026-07-16 +
+# audit_log('config_change', approved_by='user') at the read site.
+
+_MANUAL_INTRA_TURN_HOT_ROUNDS = 8
+"""Most-recent tool rounds kept VERBATIM inside a giant preserved turn when
+档B folds it. Everything older than this hot tail is summarized + dropped.
+8 covers the immediate working state (the rounds the model is actively
+reasoning about) while collapsing the long cold body that fills the window.
+Owner-signed 2026-07-16 (§10.1)."""
+
+_MANUAL_COMPACT_MIN_TOKENS = 4000
+"""Manual /compact floor. The ONLY case that declines with
+``nothing_to_compact`` is a conversation whose projected total is below this —
+a genuinely tiny conversation where compaction would save nothing. Anything
+at/above the floor is compactable (turn-based OR intra-turn 档B), so a full
+1M single-giant-turn conversation is never wrongly refused. Owner-signed
+2026-07-16 (§10.1)."""
+
+_MANUAL_RECONCILE_BUDGET_SEC = 3.0
+"""Wall-clock budget for the manual /compact reload→reconcile→CAS loop.
+
+The summary LLM call takes seconds; a sibling agent turn can write to the
+conversation TAIL meanwhile. Those writes append/modify the PRESERVED region,
+NOT the folded (summarized) region — so the compaction is still valid and must
+NOT lose the concurrent work. The engine reloads after summarizing, verifies
+the folded prefix is byte-unchanged, rebuilds over the CURRENT tail, and CAS-es
+on the CURRENT ``updated_at``.
+
+Why a TIME budget, not a fixed retry COUNT: the reconcile window is now
+LLM-free, but on a multi-MB conversation one reload→rebuild→CAS pass still
+costs tens-to-hundreds of ms (DB read + json.loads + sorted-key fingerprint +
+build_search_text + json_dumps_pg + UPDATE). Under a real write burst
+(~1–2 PATCHes/sec, observed 15 in 25 s) a fixed count (e.g. 3 passes) can be
+punched through — every pass loses to a fresh tail write → the user sees a 409
+on the "must never fail" path. A time budget instead keeps retrying against the
+ever-fresher tail until it lands, so a bounded write burst can no longer surface
+as a failure. Only a change WITHIN the folded region (a genuine conflict) or
+exhausting this budget yields ``stale``. Env-overridable via
+``TOFU_MANUAL_RECONCILE_BUDGET_SEC`` (FAIL-OPEN: unset/garbage→3.0, <=0→a small
+floor so we always make at least one CAS attempt)."""
+
+_MANUAL_RECONCILE_HARD_ITER_CAP = 1000
+"""Absolute iteration ceiling for the reconcile loop — a pure infinite-loop
+guard, NOT the operative bound (the time budget above is). Reached only if the
+clock never advances (e.g. a frozen/mocked time source); a real burst is bounded
+by the seconds budget long before this."""
+
+
+def manual_reconcile_budget_sec() -> float:
+    """Resolve the manual /compact reconcile time budget (seconds).
+
+    FAIL-OPEN: unset/non-float → :data:`_MANUAL_RECONCILE_BUDGET_SEC`; a
+    non-positive value is floored to 0.001 s so the loop still makes at least
+    one reload→CAS attempt (never disables the reconcile entirely). Read at call
+    time so an operator can retune without a restart."""
+    raw = (os.environ.get('TOFU_MANUAL_RECONCILE_BUDGET_SEC') or '').strip()
+    if not raw:
+        return _MANUAL_RECONCILE_BUDGET_SEC
+    try:
+        val = float(raw)
+    except (ValueError, TypeError) as e:
+        logger.debug('[Compact] TOFU_MANUAL_RECONCILE_BUDGET_SEC=%r not a float '
+                     '(%s) — using default %.1f', raw, e, _MANUAL_RECONCILE_BUDGET_SEC)
+        return _MANUAL_RECONCILE_BUDGET_SEC
+    return val if val > 0 else 0.001
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

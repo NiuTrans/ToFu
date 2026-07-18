@@ -22,10 +22,11 @@ identical):
 
 from __future__ import annotations
 
-import importlib
 import os
 
 import pytest
+
+from tests._nc_harness import patch_restore as _patch_restore
 
 pytestmark = pytest.mark.unit
 
@@ -343,7 +344,6 @@ def test_NC3_no_exclude_filter_overcounts(flask_app):
     restore."""
     def run():
         import lib.conversations.project_charter as pc
-        importlib.reload(pc)
         p = os.path.abspath('/p/nc3')
         with flask_app.app_context():
             from lib.database import DOMAIN_CHAT, get_thread_db
@@ -366,8 +366,6 @@ def test_NC3_no_exclude_filter_overcounts(flask_app):
         "        if False and pid and pid in resolved:  # NC-3\n            continue",
         run,
     )
-    import lib.conversations.project_charter as pc
-    importlib.reload(pc)
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -480,7 +478,6 @@ def test_NC_pending_summary_first_reintroduces_truncation(flask_app):
     FAILS. Byte-identical restore."""
     def run():
         import lib.conversations.project_charter as pc
-        importlib.reload(pc)
         p = os.path.abspath('/p/nc-trunc')
         with flask_app.app_context():
             from lib.database import DOMAIN_CHAT, get_thread_db
@@ -500,27 +497,349 @@ def test_NC_pending_summary_first_reintroduces_truncation(flask_app):
         "            'summary': e.get('summary', '') or payload.get('proposal', ''),  # NC",
         run,
     )
+
+
+# ════════════════════════════════════════════════════════════════════
+#  EDIT / DELETE a committed decision + DELETE the whole charter
+#  (human-gated, optimistic-locked, feed-audited)
+# ════════════════════════════════════════════════════════════════════
+
+def test_update_decision_edits_in_place(flask_app):
+    from lib.conversations.project_charter import (
+        commit_charter, read_charter, update_decision,
+    )
+    p = os.path.abspath('/p/edit-dec')
+    with flask_app.app_context():
+        commit_charter(p, add_decision='Original A', updated_by_conv='cA')
+        commit_charter(p, add_decision='Original B', updated_by_conv='cA')
+        ver = read_charter(p)['version']
+        r = update_decision(p, 0, 'Edited A', expected_version=ver,
+                            updated_by_conv='human')
+        assert r['ok'] and r['version'] == ver + 1
+        rec = read_charter(p)
+    texts = [d['text'] for d in rec['decisions']]
+    assert texts == ['Edited A', 'Original B']
+    # The edit is auditable as a 'decided' event.
+    assert 'decided' in _feed_kinds(flask_app, p)
+
+
+def test_update_decision_optimistic_lock(flask_app):
+    from lib.conversations.project_charter import commit_charter, update_decision
+    p = os.path.abspath('/p/edit-lock')
+    with flask_app.app_context():
+        commit_charter(p, add_decision='D', updated_by_conv='cA')  # version 1
+        stale = update_decision(p, 0, 'X', expected_version=0)
+        assert stale['ok'] is False and stale['error'] == 'version_conflict'
+        assert stale['current_version'] == 1
+
+
+def test_update_decision_index_out_of_range(flask_app):
+    from lib.conversations.project_charter import commit_charter, update_decision
+    p = os.path.abspath('/p/edit-oor')
+    with flask_app.app_context():
+        commit_charter(p, add_decision='D', updated_by_conv='cA')
+        r = update_decision(p, 5, 'X')
+    assert r['ok'] is False and r['error'] == 'index_out_of_range'
+
+
+def test_delete_decision_removes_only_that_one(flask_app):
+    from lib.conversations.project_charter import (
+        commit_charter, delete_decision, read_charter,
+    )
+    p = os.path.abspath('/p/del-dec')
+    with flask_app.app_context():
+        commit_charter(p, add_decision='Keep 1', updated_by_conv='cA')
+        commit_charter(p, add_decision='Drop', updated_by_conv='cA')
+        commit_charter(p, add_decision='Keep 2', updated_by_conv='cA')
+        ver = read_charter(p)['version']
+        r = delete_decision(p, 1, expected_version=ver, updated_by_conv='human')
+        assert r['ok'] and r['version'] == ver + 1
+        rec = read_charter(p)
+    texts = [d['text'] for d in rec['decisions']]
+    assert texts == ['Keep 1', 'Keep 2'], 'only the addressed decision is removed'
+
+
+def test_delete_decision_optimistic_lock(flask_app):
+    from lib.conversations.project_charter import commit_charter, delete_decision
+    p = os.path.abspath('/p/del-lock')
+    with flask_app.app_context():
+        commit_charter(p, add_decision='D', updated_by_conv='cA')  # version 1
+        stale = delete_decision(p, 0, expected_version=0)
+        assert stale['ok'] is False and stale['error'] == 'version_conflict'
+
+
+def test_delete_charter_removes_row(flask_app):
+    from lib.conversations.project_charter import (
+        commit_charter, delete_charter, read_charter,
+    )
+    p = os.path.abspath('/p/del-all')
+    with flask_app.app_context():
+        commit_charter(p, content='NS', add_decision='D', updated_by_conv='cA')
+        ver = read_charter(p)['version']
+        r = delete_charter(p, expected_version=ver, updated_by_conv='human')
+        assert r['ok'] and r.get('deleted') is True
+        rec = read_charter(p)
+    assert rec['exists'] is False and rec['version'] == 0
+    assert _charter_rows(flask_app, p) == []
+
+
+def test_delete_charter_optimistic_lock(flask_app):
+    from lib.conversations.project_charter import commit_charter, delete_charter
+    p = os.path.abspath('/p/del-all-lock')
+    with flask_app.app_context():
+        commit_charter(p, content='NS', updated_by_conv='cA')  # version 1
+        stale = delete_charter(p, expected_version=0)
+        assert stale['ok'] is False and stale['error'] == 'version_conflict'
+        # The row must still be intact after a rejected delete.
+        from lib.conversations.project_charter import read_charter
+        with flask_app.app_context():
+            assert read_charter(p)['exists'] is True
+
+
+def test_delete_missing_charter_is_noop_success(flask_app):
+    from lib.conversations.project_charter import delete_charter
+    with flask_app.app_context():
+        r = delete_charter(os.path.abspath('/p/del-none'))
+    assert r['ok'] is True and r.get('deleted') is False
+
+
+def test_routes_charter_edit_delete_roundtrip(flask_app, flask_client):
+    import json as _json
+    p = os.path.abspath('/p/route-editdel')
+    flask_client.post('/api/v1/project/charter/commit',
+                      json={'path': p, 'content': 'NS', 'add_decision': 'D0'})
+    flask_client.post('/api/v1/project/charter/commit',
+                      json={'path': p, 'add_decision': 'D1'})
+    ver = _json.loads(flask_client.get(
+        '/api/v1/project/charter?path=' + p).get_data(as_text=True))['version']
+    # Edit decision 0 via route.
+    re = flask_client.post('/api/v1/project/charter/decision/update', json={
+        'path': p, 'index': 0, 'text': 'D0-edited', 'expected_version': ver})
+    assert re.status_code == 200, re.get_data(as_text=True)
+    ver = _json.loads(re.get_data(as_text=True))['version']
+    # Delete decision 1 via route.
+    rd = flask_client.post('/api/v1/project/charter/decision/delete', json={
+        'path': p, 'index': 1, 'expected_version': ver})
+    assert rd.status_code == 200
+    data = _json.loads(flask_client.get(
+        '/api/v1/project/charter?path=' + p).get_data(as_text=True))
+    assert [d['text'] for d in data['decisions']] == ['D0-edited']
+    # Delete the whole charter via route.
+    ver = data['version']
+    ra = flask_client.post('/api/v1/project/charter/delete',
+                           json={'path': p, 'expected_version': ver})
+    assert ra.status_code == 200
+    gone = _json.loads(flask_client.get(
+        '/api/v1/project/charter?path=' + p).get_data(as_text=True))
+    assert gone['exists'] is False
+
+
+def test_routes_charter_edit_delete_version_conflict_409(flask_app, flask_client):
+    p = os.path.abspath('/p/route-editdel-409')
+    flask_client.post('/api/v1/project/charter/commit',
+                      json={'path': p, 'add_decision': 'D'})  # version 1
+    # A stale expected_version on each mutation route → 409.
+    assert flask_client.post('/api/v1/project/charter/decision/update', json={
+        'path': p, 'index': 0, 'text': 'X', 'expected_version': 0}).status_code == 409
+    assert flask_client.post('/api/v1/project/charter/decision/delete', json={
+        'path': p, 'index': 0, 'expected_version': 0}).status_code == 409
+    assert flask_client.post('/api/v1/project/charter/delete', json={
+        'path': p, 'expected_version': 0}).status_code == 409
+
+
+def test_routes_charter_edit_delete_require_path_and_index(flask_client):
+    # missing path
+    assert flask_client.post('/api/v1/project/charter/decision/update',
+                             json={'index': 0, 'text': 'x'}).status_code == 400
+    assert flask_client.post('/api/v1/project/charter/delete',
+                             json={}).status_code == 400
+    # missing/invalid index
+    assert flask_client.post('/api/v1/project/charter/decision/update',
+                             json={'path': '/p/x', 'text': 'y'}).status_code == 400
+    assert flask_client.post('/api/v1/project/charter/decision/delete',
+                             json={'path': '/p/x'}).status_code == 400
+
+
+def test_NC_delete_decision_ignores_index_deletes_wrong_row(flask_app):
+    """NC: neuter delete_decision so it always pops index 0 regardless of the
+    requested index → deleting index 1 wrongly removes the FIRST decision,
+    breaking test_delete_decision_removes_only_that_one's ordering assertion.
+    Byte-identical restore."""
+    def run():
+        import lib.conversations.project_charter as pc
+        p = os.path.abspath('/p/nc-del')
+        with flask_app.app_context():
+            from lib.database import DOMAIN_CHAT, get_thread_db
+            db = get_thread_db(DOMAIN_CHAT)
+            db.execute('DELETE FROM project_charter WHERE project_path=?', (p,))
+            db.commit()
+            pc.commit_charter(p, add_decision='Keep 1', updated_by_conv='cA')
+            pc.commit_charter(p, add_decision='Drop', updated_by_conv='cA')
+            ver = pc.read_charter(p)['version']
+            pc.delete_decision(p, 1, expected_version=ver)
+            rec = pc.read_charter(p)
+        texts = [d['text'] for d in rec['decisions']]
+        # With the index ignored, index 0 ('Keep 1') is wrongly removed.
+        assert texts == ['Drop'], \
+            'NC: ignoring the index must delete the wrong decision'
+
+    _patch_restore(
+        _CHARTER_SRC,
+        "        removed = decisions.pop(index)",
+        "        removed = decisions.pop(0)  # NC (ignore index)",
+        run,
+    )
+
+
+# ════════════════════════════════════════════════════════════════════
+#  Agent self-commit tool (owner-directed 2026-07-12): project_charter_commit
+#  appends a DECISION only, can NEVER write the north-star `content`, and a
+#  matching proposal drops out of pending via resolves_proposal.
+# ════════════════════════════════════════════════════════════════════
+
+def _charter_tool(fn_name, fn_args, *, conv='cAgent', project_path):
+    from lib.conversations.project_charter import execute_charter_tool
+    return execute_charter_tool(fn_name, fn_args,
+                                current_conv_id=conv, project_path=project_path)
+
+
+def test_agent_commit_appends_decision_and_bumps_version(flask_app):
+    """The agent tool commits a decision, bumps version, and it lands in the
+    charter (read + injected block) — no human in the loop."""
+    from lib.conversations.project_charter import read_charter, render_charter_block
+    p = os.path.abspath('/p/agent-commit')
+    with flask_app.app_context():
+        out = _charter_tool('project_charter_commit',
+                            {'decision': 'Adopt AST boundaries in lib/.'},
+                            project_path=p)
+        assert 'version 1' in out, out
+        rec = read_charter(p)
+        block = render_charter_block(p)
+    assert rec['version'] == 1
+    assert any(d['text'] == 'Adopt AST boundaries in lib/.' for d in rec['decisions'])
+    # The decision reaches the model via the injected block.
+    assert 'Adopt AST boundaries in lib/.' in block
+    # And it is auditable as a 'decided' event (same path as a human commit).
+    assert 'decided' in _feed_kinds(flask_app, p)
+
+
+def test_agent_commit_resolves_proposal_dequeues(flask_app):
+    """An agent that first proposed can commit passing resolves_proposal, and
+    the proposal drops out of the pending-review list (no over-count)."""
+    from lib.conversations.project_charter import pending_proposals, propose_amendment
+    p = os.path.abspath('/p/agent-resolve')
+    with flask_app.app_context():
+        pid = propose_amendment(p, 'cAgent', 'Move logic into lib/.')['proposalId']
+        assert len(pending_proposals(p)) == 1
+        out = _charter_tool('project_charter_commit',
+                            {'decision': 'Move logic into lib/.',
+                             'resolves_proposal': pid},
+                            project_path=p)
+        assert 'committed' in out.lower()
+        pend = pending_proposals(p)
+    assert pend == [], 'the agent-committed proposal must not stay pending'
+
+
+def test_agent_commit_cannot_write_content_NC(flask_app):
+    """THE decisive guard: the agent commit path can NEVER edit the north-star
+    `content`. Committing a decision on an existing charter leaves `content`
+    untouched, and there is no argument by which the tool can set it."""
+    from lib.conversations.project_charter import commit_charter, read_charter
+    p = os.path.abspath('/p/agent-no-content')
+    with flask_app.app_context():
+        # A human sets the north star.
+        commit_charter(p, content='HUMAN NORTH STAR', updated_by_conv='human')
+        # The agent commits a decision AND maliciously tries to smuggle a
+        # `content` arg — the tool must ignore it entirely.
+        _charter_tool('project_charter_commit',
+                      {'decision': 'agent decision',
+                       'content': 'AGENT-HIJACKED GOAL'},
+                      project_path=p)
+        rec = read_charter(p)
+    assert rec['content'] == 'HUMAN NORTH STAR', \
+        'the agent commit tool must NOT be able to change the north-star content'
+    assert any(d['text'] == 'agent decision' for d in rec['decisions'])
+
+
+def test_agent_commit_source_never_passes_content():
+    """Source-level: the project_charter_commit branch of execute_charter_tool
+    must call commit_charter with add_decision and NOT pass `content=` — the
+    structural guarantee behind the behavioral NC above."""
+    with open(_CHARTER_SRC, encoding='utf-8') as f:
+        src = f.read()
+    start = src.index("if fn_name == 'project_charter_commit':")
+    end = src.index("return f\"Error: Unknown charter tool", start)
+    branch = src[start:end]
+    assert 'add_decision=' in branch, 'agent commit must append a decision'
+    assert 'content=' not in branch, \
+        'agent commit branch must NEVER pass content= to commit_charter'
+
+
+def test_agent_commit_version_conflict_surfaced(flask_app):
+    """A stale expected_version is rejected and the tool tells the agent to
+    re-read and retry (optimistic lock preserved through the tool)."""
+    from lib.conversations.project_charter import commit_charter
+    p = os.path.abspath('/p/agent-conflict')
+    with flask_app.app_context():
+        commit_charter(p, add_decision='v1', updated_by_conv='human')  # version 1
+        out = _charter_tool('project_charter_commit',
+                            {'decision': 'stale', 'expected_version': 0},
+                            project_path=p)
+    assert 'NOT committed' in out and 'version 1' in out
+
+
+def test_agent_commit_hits_max_decisions_truncation(flask_app):
+    """No human reviews decisions after self-commit, so confirm the append path
+    hits the EXISTING _MAX_DECISIONS rolling truncation (no pagination added):
+    committing past the cap keeps only the most-recent _MAX_DECISIONS, and the
+    newest survives while the oldest is dropped."""
     import lib.conversations.project_charter as pc
-    importlib.reload(pc)
+    from lib.conversations.project_charter import read_charter
+    p = os.path.abspath('/p/agent-cap')
+    cap = pc._MAX_DECISIONS
+    with flask_app.app_context():
+        for i in range(cap + 5):
+            _charter_tool('project_charter_commit',
+                          {'decision': f'decision #{i}'}, project_path=p)
+        rec = read_charter(p)
+    texts = [d['text'] for d in rec['decisions']]
+    assert len(texts) == cap, 'rolling truncation must cap at _MAX_DECISIONS'
+    # The 5 oldest were dropped; the newest is retained.
+    assert f'decision #{cap + 4}' in texts
+    assert 'decision #0' not in texts
+
+
+def test_agent_commit_requires_decision_text(flask_app):
+    p = os.path.abspath('/p/agent-empty')
+    with flask_app.app_context():
+        out = _charter_tool('project_charter_commit', {'decision': '  '},
+                            project_path=p)
+    assert 'required' in out.lower()
+
+
+def test_promote_watch_item_still_routes_through_commit(flask_app):
+    """The watch→charter bridge unfreezes with the de-gate but is UNCHANGED: it
+    still routes through commit_charter, landing the promoted item as a
+    committed decision (the ONLY watch→agent path)."""
+    from lib.conversations.project_watch import add_watch_item, promote_watch_item
+    from lib.conversations.project_charter import read_charter
+    p = os.path.abspath('/p/promote')
+    with flask_app.app_context():
+        item = add_watch_item(p, 'goal', 'Keep the DB layer dual-backend',
+                              created_by_conv='human')
+        assert item['ok'], item
+        iid = item['item']['item_id']
+        res = promote_watch_item(iid, updated_by_conv='human')
+        assert res['ok'], res
+        rec = read_charter(p)
+    assert any('Keep the DB layer dual-backend' in d['text']
+               for d in rec['decisions']), \
+        'promote must land the item as a committed decision via commit_charter'
 
 
 # ════════════════════════════════════════════════════════════════════
 #  Source-level NEGATIVE CONTROLS
 # ════════════════════════════════════════════════════════════════════
-
-def _patch_restore(path, old, new, run):
-    with open(path, encoding='utf-8') as f:
-        original = f.read()
-    assert old in original, f'anchor not found in {path}'
-    try:
-        with open(path, 'w', encoding='utf-8') as f:
-            f.write(original.replace(old, new, 1))
-        run()
-    finally:
-        with open(path, 'w', encoding='utf-8') as f:
-            f.write(original)
-    with open(path, encoding='utf-8') as f:
-        assert f.read() == original, 'source not restored byte-identical'
 
 
 def test_NC1_propose_writing_table_breaks_isolation(flask_app):
@@ -528,7 +847,6 @@ def test_NC1_propose_writing_table_breaks_isolation(flask_app):
     'propose never writes the table' behavioral test FAILS."""
     def run():
         import lib.conversations.project_charter as pc
-        importlib.reload(pc)
         with flask_app.app_context():
             from lib.database import DOMAIN_CHAT, get_thread_db
             get_thread_db(DOMAIN_CHAT).execute("DELETE FROM project_charter WHERE project_path='/nc1'")
@@ -551,16 +869,12 @@ def test_NC1_propose_writing_table_breaks_isolation(flask_app):
          "    audit_log('charter_proposed', project_path=project_path,"),
         run,
     )
-    import lib.conversations.project_charter as pc
-    importlib.reload(pc)
 
 
 def test_NC2_injection_noop_breaks_injection(flask_app):
     """NC-2: no-op the charter branch of the injection seam → the injection
     test FAILS (the charter is no longer injected)."""
     def run():
-        from lib.tasks_pkg import system_context as sc
-        importlib.reload(sc)
         out = _run_inject(flask_app, '/nc2', has_charter=True)
         assert '[PROJECT CHARTER]' not in out, \
             'NC-2: with the injection branch no-opped, the charter must NOT appear'
@@ -573,5 +887,3 @@ def test_NC2_injection_noop_breaks_injection(flask_app):
         "            _charter_spliced = _wrap_system_reminder(_charter_block)",
         run,
     )
-    from lib.tasks_pkg import system_context as sc
-    importlib.reload(sc)

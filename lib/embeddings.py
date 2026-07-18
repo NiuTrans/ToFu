@@ -88,6 +88,63 @@ def _pick_embedding_slot(model: str):
     return api_key, base, 'key_0', None
 
 
+def _post_batch(model: str, batch: list[str], batch_start: int,
+                all_embeddings: list, timeout: int, *,
+                is_retry: bool = False) -> bool:
+    """Embed one batch on a freshly-picked slot; scatter results in place.
+
+    Picks an embedding slot, POSTs the batch, and on HTTP 200 writes each
+    returned vector into ``all_embeddings[batch_start + item.index]``,
+    recording slot success. Returns True iff the batch was scattered.
+
+    On 429, any non-200, or a request exception it records the slot error and
+    returns False so the caller can retry ONCE on the next slot. Every failure
+    path is guarded (no exception escapes) — this is the single implementation
+    both the primary and retry attempts share, replacing three hand-copied
+    slot-pick→headers→POST→scatter blocks that had diverged (the old
+    except-retry copy lacked a nested try and could raise out of the loop).
+    """
+    api_key, base_url, key_name, slot = _pick_embedding_slot(model)
+    embed_url = f'{base_url}/embeddings'
+    headers = {
+        'Content-Type': 'application/json',
+        'Authorization': f'Bearer {api_key}',
+    }
+    if slot and slot.extra_headers:
+        headers.update(slot.extra_headers)
+    body = {'model': model, 'input': batch}
+    tag = 'retry ' if is_retry else ''
+    try:
+        resp = http_post(embed_url, headers=headers, json=body, timeout=timeout)
+        if resp.status_code == 200:
+            data = resp.json()
+            for item in data.get('data', []):
+                all_embeddings[batch_start + item['index']] = item['embedding']
+            if slot:
+                slot.record_success(latency_ms=0)
+            logger.debug('[Embed] %sEmbedded batch of %d texts (%s, model=%s, url=%s)',
+                         tag, len(batch), key_name, model, embed_url)
+            return True
+        if resp.status_code == 429:
+            if slot:
+                slot.record_error(is_rate_limit=True)
+            logger.warning('[Embed] %s429 rate-limited on %s model=%s%s',
+                           tag, key_name, model,
+                           '' if is_retry else ', retrying with next slot')
+            return False
+        if slot:
+            slot.record_error(is_rate_limit=False)
+        logger.error('[Embed] %sHTTP %d from %s model=%s url=%s: %s',
+                     tag, resp.status_code, key_name, model, embed_url, resp.text[:200])
+        return False
+    except Exception as e:
+        if slot:
+            slot.record_error(is_rate_limit=False)
+        logger.error('[Embed] %sError embedding batch (%s, model=%s, url=%s): %s',
+                     tag, key_name, model, embed_url, e, exc_info=True)
+        return False
+
+
 def embed_texts(
     texts: list[str],
     model: str = DEFAULT_MODEL,
@@ -128,111 +185,14 @@ def embed_texts(
 
     for batch_start in range(0, len(texts), batch_size):
         batch = texts[batch_start:batch_start + batch_size]
-
-        # Pick the best slot for this batch via dispatch
-        api_key, base_url, key_name, slot = _pick_embedding_slot(model)
-        embed_url = f'{base_url}/embeddings'
-
-        headers = {
-            'Content-Type': 'application/json',
-            'Authorization': f'Bearer {api_key}',
-        }
-        if slot and slot.extra_headers:
-            headers.update(slot.extra_headers)
-        body = {
-            'model': model,
-            'input': batch,
-        }
-
-        try:
-            resp = http_post(
-                embed_url, headers=headers, json=body, timeout=timeout,
-            )
-            if resp.status_code == 200:
-                data = resp.json()
-                for item in data.get('data', []):
-                    idx = item['index']
-                    all_embeddings[batch_start + idx] = item['embedding']
-                if slot:
-                    slot.record_success(latency_ms=0)
-                logger.debug('[Embed] Embedded batch of %d texts (%s, model=%s, url=%s)',
-                             len(batch), key_name, model, embed_url)
-            elif resp.status_code == 429:
-                if slot:
-                    slot.record_error(is_rate_limit=True)
-                logger.warning('[Embed] 429 rate-limited on %s model=%s, retrying with next slot', key_name, model)
-                # Retry with next slot
-                api_key2, base_url2, key_name2, slot2 = _pick_embedding_slot(model)
-                embed_url2 = f'{base_url2}/embeddings'
-                headers2 = {
-                    'Content-Type': 'application/json',
-                    'Authorization': f'Bearer {api_key2}',
-                }
-                if slot2 and slot2.extra_headers:
-                    headers2.update(slot2.extra_headers)
-                try:
-                    resp2 = http_post(
-                        embed_url2, headers=headers2, json=body, timeout=timeout,
-                    )
-                    if resp2.status_code == 200:
-                        data = resp2.json()
-                        for item in data.get('data', []):
-                            idx = item['index']
-                            all_embeddings[batch_start + idx] = item['embedding']
-                        if slot2:
-                            slot2.record_success(latency_ms=0)
-                        logger.debug('[Embed] Retry succeeded for batch (%s, model=%s, url=%s)',
-                                     key_name2, model, embed_url2)
-                    else:
-                        if slot2:
-                            slot2.record_error(is_rate_limit=False)
-                        logger.error('[Embed] Retry also failed: HTTP %d (%s, url=%s) — batch indices %d-%d will use zero vectors',
-                                     resp2.status_code, key_name2, embed_url2, batch_start, batch_start + len(batch) - 1)
-                except Exception as retry_exc:
-                    if slot2:
-                        slot2.record_error(is_rate_limit=False)
-                    logger.error('[Embed] Retry request failed (%s, url=%s): %s — batch indices %d-%d will use zero vectors',
-                                 key_name2, embed_url2, retry_exc, batch_start, batch_start + len(batch) - 1, exc_info=True)
-            else:
-                if slot:
-                    slot.record_error(is_rate_limit=False)
-                logger.error('[Embed] HTTP %d from %s model=%s url=%s: %s',
-                             resp.status_code, key_name, model, embed_url, resp.text[:200])
-        except Exception as e:
-            if slot:
-                slot.record_error(is_rate_limit=False)
-            logger.error('[Embed] Error embedding batch (%s, model=%s, url=%s): %s',
-                         key_name, model, embed_url, e, exc_info=True)
-            # Retry once with a different slot (the failed slot is now penalized
-            # via record_error, so pick_and_reserve should choose a different one)
-            try:
-                api_key2, base_url2, key_name2, slot2 = _pick_embedding_slot(model)
-                embed_url2 = f'{base_url2}/embeddings'
-                headers2 = {
-                    'Content-Type': 'application/json',
-                    'Authorization': f'Bearer {api_key2}',
-                }
-                if slot2 and slot2.extra_headers:
-                    headers2.update(slot2.extra_headers)
-                resp2 = http_post(
-                    embed_url2, headers=headers2, json=body, timeout=timeout,
-                )
-                if resp2.status_code == 200:
-                    data2 = resp2.json()
-                    for item in data2.get('data', []):
-                        idx = item['index']
-                        all_embeddings[batch_start + idx] = item['embedding']
-                    if slot2:
-                        slot2.record_success(latency_ms=0)
-                    logger.info('[Embed] Retry succeeded for batch (%s, model=%s, url=%s)',
-                                key_name2, model, embed_url2)
-                else:
-                    if slot2:
-                        slot2.record_error(is_rate_limit=False)
-                    logger.error('[Embed] Retry also failed: HTTP %d (%s, url=%s)',
-                                 resp2.status_code, key_name2, embed_url2)
-            except Exception as retry_exc:
-                logger.error('[Embed] Retry request also failed: %s', retry_exc)
+        # One attempt on a freshly-picked slot; on 429 / HTTP error / exception
+        # retry ONCE on the next slot (the failed slot is penalised, so
+        # pick_and_reserve steers away). Any un-scattered index is filled with a
+        # zero vector below. Both attempts run through the same _post_batch so
+        # the error handling can never diverge (was 3 hand-copied blocks).
+        if not _post_batch(model, batch, batch_start, all_embeddings, timeout):
+            _post_batch(model, batch, batch_start, all_embeddings, timeout,
+                        is_retry=True)
 
     # Fill any missing with zero vectors
     model_dim = AVAILABLE_EMBEDDING_MODELS.get(model, {}).get('dim', 1024)

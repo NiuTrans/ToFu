@@ -210,6 +210,15 @@ async def list_branches(conv_id, msg_idx):
         logger.warning('[api_v1.branches] conv=%s parse failed: %s',
                        conv_id[:8], e)
         return api_internal_error('Failed to parse conversation messages')
+    # Stable-id resolution (query msgId authoritative, index fallback) so a
+    # windowed-read client lists the correct message's branches.
+    from quart import request as _request
+    _anchor_msg_id = _request.args.get('msgId') or None
+    if _anchor_msg_id:
+        from lib.tasks_pkg.manager import find_message_by_id
+        _ridx, _ = find_message_by_id(messages, _anchor_msg_id)
+        if _ridx is not None:
+            msg_idx = _ridx
     if msg_idx < 0 or msg_idx >= len(messages):
         return api_bad_request(f'msg_idx {msg_idx} out of range')
     msg = messages[msg_idx]
@@ -273,6 +282,19 @@ async def create_branch(conv_id, msg_idx):
         logger.warning('[api_v1.branches] conv=%s parse failed: %s',
                        conv_id[:8], e)
         return api_internal_error('Failed to parse conversation messages')
+    # ── Stable-id resolution: msgId (body) is authoritative, index the fallback.
+    #    Drift-proof under windowed reads where the client's msg_idx is a tail
+    #    window position, NOT the absolute index. ──
+    _anchor_msg_id = optional_str(body, 'msg_id', default='', max_len=64) or ''
+    if _anchor_msg_id:
+        from lib.tasks_pkg.manager import find_message_by_id
+        _ridx, _ = find_message_by_id(messages, _anchor_msg_id)
+        if _ridx is not None:
+            if _ridx != msg_idx:
+                logger.info('[api_v1.branches] conv=%s msgId=%s resolved to index %d '
+                            '(client sent %d — drift corrected)',
+                            conv_id[:8], _anchor_msg_id[:12], _ridx, msg_idx)
+            msg_idx = _ridx
     if msg_idx < 0 or msg_idx >= len(messages):
         return api_bad_request(f'msg_idx {msg_idx} out of range')
     msg = messages[msg_idx]
@@ -338,13 +360,24 @@ async def create_branch(conv_id, msg_idx):
                      conv_id[:8], e, exc_info=True)
         return api_internal_error(f'Failed to persist branch: {e}')
 
-    # Invalidate the meta cache so the conversation list reflects the
-    # new branch on the next refresh.
+    # Event-driven cross-device sync: a new branch changes the conversation
+    # body, so push the post-write rev → a sibling tab with this conv open
+    # refetches without a manual refresh. notify_conv_changed also invalidates
+    # the sidebar meta cache, so it replaces the bare _invalidate_meta_cache().
     try:
-        from routes.common import _invalidate_meta_cache
-        _invalidate_meta_cache()
+        from routes.common import _notify_conv_changed
+        _rev_row = await async_fetchone(
+            'SELECT rev FROM conversations WHERE id=? AND user_id=?',
+            (conv_id, DEFAULT_USER_ID), domain=DOMAIN_CHAT)
+        _branch_rev = None
+        if _rev_row is not None:
+            try:
+                _branch_rev = _rev_row['rev']
+            except (KeyError, TypeError, IndexError):
+                _branch_rev = _rev_row[0]
+        _notify_conv_changed(conv_id, rev=_branch_rev)
     except Exception as e:
-        logger.debug('[api_v1.branches] meta cache invalidation: %s', e)
+        logger.debug('[api_v1.branches] conv-changed notify: %s', e)
 
     audit_log('branch_created', conv_id=conv_id, msg_idx=msg_idx,
               branch_idx=branch_idx, branch_id=branch['id'],

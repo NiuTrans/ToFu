@@ -116,6 +116,8 @@ class EventType:
     # ── lifecycle ──
     STATE = 'state'
     PHASE = 'phase'
+    ROUND_START = 'round_start'
+    ROUND_END = 'round_end'
     DONE = 'done'
     ERROR = 'error'
     RETRY_RESET = 'retry_reset'
@@ -168,6 +170,9 @@ class EventType:
     AUTOPILOT_RUN_CONCLUDED = 'autopilot_run_concluded'
     # ── presence (cross-conversation live coordination) ──
     PRESENCE = 'presence'
+    PEER_INBOX_INJECT = 'peer_inbox_inject'
+    # ── human steering (mid-turn human interjection) ──
+    USER_STEER_INJECT = 'user_steer_inject'
     # ── artifact / scheduler / transport ──
     ARTIFACT = 'artifact'
     TIMER_POLL_CHECK = 'timer_poll_check'
@@ -194,7 +199,27 @@ _SPECS: tuple[EventSpec, ...] = (
     EventSpec(EventType.PHASE, _C.LIFECYCLE,
               'Progress / status hint for the current turn.',
               fields={'phase': "phase key (llm_thinking|tool_exec|retrying|working|…)",
-                      'detail': 'human-readable detail', 'round': 'round number'}),
+                      'detail': 'human-readable detail', 'roundNum': 'round number'}),
+    EventSpec(EventType.ROUND_START, _C.LIFECYCLE,
+              'Explicit start boundary of an LLM round (the orchestrator loop '
+              'index). Emitted at the TOP of every round the model actually '
+              'runs — INCLUDING a prose-only round (streams text, no tool calls) '
+              'and BEFORE the phase hint — so the client keys round attribution '
+              'off a real boundary instead of inferring it from the first '
+              '`tool_start` (a round with no tools had NO signal before). '
+              'Non-terminal.',
+              fields={'roundNum': 'the round index this boundary opens'}),
+    EventSpec(EventType.ROUND_END, _C.LIFECYCLE,
+              'Explicit end boundary of an LLM round — the complement of '
+              '`round_start`. Emitted when a round concludes on EVERY exit path: '
+              'it issued tool calls (loop continues), it finished with prose and '
+              'no tools (terminal), or it was aborted/budget-capped. `reason` '
+              'distinguishes them so the client can close the round without '
+              'inferring end-of-round from the next `round_start` or a `done`. '
+              'Non-terminal (a `done` still follows on the terminal path).',
+              fields={'roundNum': 'the round index this boundary closes',
+                      'reason': 'tools|final|aborted|budget|error — why the '
+                                'round ended'}),
     EventSpec(EventType.DONE, _C.LIFECYCLE,
               'Terminal event — the turn finished (success or, with `error`, failure).',
               terminal=True,
@@ -236,7 +261,7 @@ _SPECS: tuple[EventSpec, ...] = (
               'in front of the terminal round\'s real answer. Unlike '
               '`retry_reset`, it MUST NOT touch tool rounds — the tool calls '
               'from this turn are legitimate and keep rendering. Non-terminal.',
-              fields={'round': 'the tool-call round number whose prose is dropped'}),
+              fields={'roundNum': 'the tool-call round number whose prose is dropped'}),
     # ───────────────────────── tool ─────────────────────────
     EventSpec(EventType.TOOL_START, _C.TOOL,
               'A tool call began executing.',
@@ -270,14 +295,14 @@ _SPECS: tuple[EventSpec, ...] = (
     # ───────────────────────── context ─────────────────────────
     EventSpec(EventType.ROUND_USAGE, _C.CONTEXT,
               'Token-usage accounting for a completed round.',
-              fields={'usage': 'usage dict', 'round': 'round number',
+              fields={'usage': 'usage dict', 'roundNum': 'round number',
                       'model': 'model id'}),
     EventSpec(EventType.ROUND_COMMITTED, _C.CONTEXT,
               'A round was persisted server-side (durable checkpoint).',
-              fields={'round': 'round number'}),
+              fields={'roundNum': 'round number'}),
     EventSpec(EventType.MESSAGES_SNAPSHOT, _C.CONTEXT,
               'A point-in-time copy of the message list (fallback/branch sync).',
-              fields={'messages': 'message list', 'round': 'round id/label',
+              fields={'messages': 'message list', 'roundNum': 'round id/label (may be a string label like final/fallback)',
                       'label': 'human label'}),
     EventSpec(EventType.COMPACTION, _C.CONTEXT,
               'Context-window compaction started.',
@@ -388,7 +413,18 @@ _SPECS: tuple[EventSpec, ...] = (
     EventSpec(EventType.AUTOPILOT_VU_START, _C.AUTOPILOT,
               'Autopilot kicked in — create the simulated-user bubble eagerly '
               '(in-memory only; not persisted until autopilot_vu_done).',
-              fields={'vuMsgId': 'stable id for the VU message bubble'}),
+              fields={'vuMsgId': 'stable id for the VU message bubble',
+                      'parentMessage': '(optional) the SETTLED parent worker '
+                                       'assistant dict (== the parent `done` '
+                                       "event's `committedMessage`), delivered "
+                                       'early so the frontend can complete the '
+                                       'parent bubble\'s finish bar (model / '
+                                       'usage / cost / finishReason) at handoff '
+                                       'instead of waiting for the parent `done` '
+                                       '(withheld until the VU stream ends). '
+                                       'Absent on skip paths → keep transient '
+                                       'buffer. Display-only; `done` still ships '
+                                       'the authoritative copy.'}),
     EventSpec(EventType.AUTOPILOT_VU_EVENT, _C.AUTOPILOT,
               'Autopilot value-unit progress event.',
               fields={'detail': 'vu detail'}),
@@ -447,6 +483,38 @@ _SPECS: tuple[EventSpec, ...] = (
                                   'sub-agent-vs-sub-agent overlap within ONE '
                                   'conversation is flagged like a cross-'
                                   'conversation one'}),
+    EventSpec(EventType.PEER_INBOX_INJECT, _C.PRESENCE,
+              'A peer message from a sibling conversation was delivered at a '
+              'round boundary of THIS live turn (the fast-path lane of Pillar '
+              '#6). Injected as a user-role message right before the next LLM '
+              'round — never mid-stream, never splitting a tool_call/tool_result '
+              'pair. The durable message_queue row is deleted in the same step '
+              '(de-dup by queueId), so the message is delivered exactly once. '
+              'Drives an in-timeline chip mirroring swarm_inbox_inject; the '
+              'idle-target queue-lane case renders the persisted .peer-msg-banner '
+              'instead.',
+              fields={'roundNum': 'round number the peer message was injected before',
+                      'count': 'number of peer messages injected this round',
+                      'previews': 'list of {fromConv, text} — sender short-id + '
+                                  'the original (unframed) message text'}),
+    EventSpec(EventType.USER_STEER_INJECT, _C.LIFECYCLE,
+              'A human "steer" message the user sent WHILE this turn was still '
+              'generating (composer inject-mode = steer) was drained from the '
+              'model-facing inbox and injected as a user-role message right '
+              'before the next LLM round — never mid-stream, never splitting a '
+              'tool_call/tool_result pair (postponed to the next CLEAN round '
+              'boundary after any open tool_result closes). Distinct from a '
+              'sibling peer message (peer_inbox_inject) and from a completed '
+              'sub-agent result (swarm_inbox_inject): it is the OPERATOR '
+              'talking to their own running turn. Delivered exactly once — the '
+              'chip is emitted only AFTER the LLM call confirms consumption '
+              '(deferred-confirm), and an abort before that re-routes the '
+              'undelivered steer to the durable message_queue as a fresh next '
+              'turn (never zero, never double). Drives an in-timeline chip '
+              'mirroring peer_inbox_inject.',
+              fields={'roundNum': 'round number the steer was injected before',
+                      'count': 'number of steer messages injected this round',
+                      'previews': 'list of {text} — the steer message text'}),
     # ───────────────── artifact / scheduler / transport ─────────────────
     EventSpec(EventType.ARTIFACT, _C.ARTIFACT,
               'An artifact (document/canvas) was created or updated.',
@@ -458,6 +526,10 @@ _SPECS: tuple[EventSpec, ...] = (
                       'pollId': 'stable per-poll id ({timerId}.p{N}) for log/DB/UI correlation',
                       'decision': 'started|wait|ready|skipped|error|parse_error',
                       'reason': 'LLM/decision rationale',
+                      'conditionKind': 'current decision tier (llm|hybrid|code) — '
+                                       'sent every poll so the UI reflects a mid-run '
+                                       'hybrid→code auto-promotion, not just the '
+                                       'creation-time kind',
                       'rawContent': "the LLM's full raw output (sent only on parse_error/error)",
                       'tokensUsed': 'tokens spent on this poll',
                       'checkInstruction': '(started) what is being verified',

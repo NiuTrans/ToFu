@@ -46,7 +46,8 @@ _READ_DROP_WASTE_TOKENS = 2000
 
 
 def _compute_write_breakdown(task: dict[str, Any], api_rounds: list,
-                             round_num: int) -> dict[str, int] | None:
+                             round_num: int,
+                             prev_turn_cache_read: int = 0) -> dict[str, int] | None:
     """Decompose a round's prompt-cache ``write`` into exact sub-items.
 
     A round's ``cache_write_tokens`` is the new context cached since the
@@ -92,6 +93,16 @@ def _compute_write_breakdown(task: dict[str, Any], api_rounds: list,
             is the previous round (round ``round_num``), whose output became
             part of this round's write.
         round_num: Zero-based orchestrator loop index of the CURRENT iteration.
+        prev_turn_cache_read: The CROSS-TURN ``cache_read`` baseline — the
+            previous USER TURN's final cached-prefix read, recovered across the
+            ``run_task`` thread boundary (see
+            ``cache_tracking.get_prev_turn_cache_read``). Used ONLY when this
+            round has no within-turn predecessor (``api_rounds[-2]`` absent, i.e.
+            the turn's round-1): without it round-1 had NO read baseline and
+            defaulted the whole ``write`` to benign ``contextWrite`` even when
+            the previous turn's cached prefix was partly evicted and re-billed
+            this round (the round-1 mislabel). Defaults to 0 (genuine first-ever
+            call → still ``contextWrite``, correctly).
 
     The residual above ``_ENVELOPE_MAX_TOKENS`` is ALWAYS context, not framing
     — a 64k round-1 "envelope" (the symptom that motivated this) is the whole
@@ -150,27 +161,52 @@ def _compute_write_breakdown(task: dict[str, Any], api_rounds: list,
         cur_read = int(_u.get('cache_read_tokens')
                        or _u.get('cache_read_input_tokens') or 0)
         prev_read = 0
-        if len(api_rounds) >= 2 and isinstance(api_rounds[-2], dict):
+        _have_within_turn_prev = (len(api_rounds) >= 2
+                                  and isinstance(api_rounds[-2], dict))
+        if _have_within_turn_prev:
             _pru = api_rounds[-2].get('usage') or {}
             prev_read = int(_pru.get('cache_read_tokens')
                             or _pru.get('cache_read_input_tokens') or 0)
+        else:
+            # No within-turn predecessor — this is the turn's round-1. Fall back
+            # to the CROSS-TURN baseline (previous turn's final cached-prefix
+            # read, carried across the run_task thread boundary). This is the
+            # traceability fix: round-1 previously had prev_read=0 → read_drop=0
+            # → the whole write defaulted to benign contextWrite, so an evicted
+            # tail re-billed this turn was mislabeled "first-cache warm-up".
+            # With a real prior-turn baseline, a round-1 read below it is
+            # correctly attributed to recacheBody. 0 (genuine first-ever call)
+            # leaves read_drop=0 → contextWrite, as before.
+            prev_read = int(prev_turn_cache_read or 0)
         read_drop = max(0, prev_read - cur_read)
 
         # (c) envelope = the genuine residual. INVARIANT: the three sub-items
         #     MUST sum to exactly `write` (the whole point — a breakdown that
         #     doesn't add up is worse than none). prev_output / tool_results
         #     are counted with a DIFFERENT (output-side / local) tokenizer than
-        #     the provider's input-side `cache_write_tokens`, so they can
+        #     the provider's input-side `cache_write_tokens`, so their SUM can
         #     legitimately overshoot `write`. When that happens we must NOT
-        #     print components that exceed the total. Resolve by treating
-        #     `write` as ground truth and capping the measured components to it
-        #     in priority order (tool results first — they're the most directly
-        #     attributable and match the ptool badges, then prev output), with
-        #     the envelope absorbing whatever is left. This keeps
-        #     toolResults + prevOutput + envelope == write ALWAYS.
-        tool_results = min(tool_results, write)
-        prev_output = min(prev_output, write - tool_results)
-        residual = write - tool_results - prev_output  # always >= 0 now
+        #     print components that exceed the total.
+        #
+        #     The old resolution capped in priority order (tool results first,
+        #     then prev output) — but that let a HIGH tool-result estimate eat
+        #     the entire `write` and zero out `prevOutput`, wrongly attributing
+        #     the previous round's real assistant output to "tool results"
+        #     (the round-2 bug: write 1.1k, tool est 1.6k → prevOutput 595 was
+        #     zeroed and its share mislabeled tool results). Resolve instead by
+        #     scaling BOTH measured components down PROPORTIONALLY to their
+        #     estimated share, so neither is annihilated by the other's
+        #     overshoot. prev_output takes the exact remainder so the two still
+        #     sum to `write` with no rounding drift. When they do NOT overshoot,
+        #     nothing is scaled and the residual flows on to envelope/context.
+        _measured = tool_results + prev_output
+        _capped = _measured > write
+        if _capped:
+            tool_results = round(write * tool_results / _measured) if _measured else 0
+            prev_output = write - tool_results  # exact remainder → sum == write
+            residual = 0
+        else:
+            residual = write - tool_results - prev_output  # always >= 0
 
         # (d) Split the residual. On a NORMAL round the residual is just the
         #     message JSON/role framing overhead (tens of tokens/message) — a
@@ -233,10 +269,10 @@ def _compute_write_breakdown(task: dict[str, Any], api_rounds: list,
                        f'cache_read 较上一轮下降 {read_drop} tok（已缓存正文被重新计费）'}
                       if recache_body > 0 else {})
             ),
-            # True when the measured components had to be capped because they
-            # exceeded `write` (output-side vs input-side tokenizer mismatch).
-            # The frontend can note the figures are approximate in this case.
-            'capped': (tool_results + prev_output) >= write and residual == 0,
+            # True when the measured components had to be scaled because their
+            # SUM exceeded `write` (output-side vs input-side tokenizer
+            # mismatch). The frontend notes the figures are approximate then.
+            'capped': _capped,
         }
     except Exception as e:
         logger.debug('write-breakdown compute failed: %s', e)

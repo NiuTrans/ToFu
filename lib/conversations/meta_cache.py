@@ -112,7 +112,8 @@ def _sidebar_limit() -> int:
     recommended)."""
     try:
         n = int(os.environ.get('TOFU_SIDEBAR_MAX', '') or '500')
-    except (ValueError, TypeError):
+    except (ValueError, TypeError) as e:
+        logger.debug('[meta_cache] TOFU_SIDEBAR_MAX parse failed, using default: %s', e)
         n = 500
     return max(0, n)
 
@@ -144,6 +145,50 @@ def invalidate_meta_cache(user_id: int = DEFAULT_USER_ID):
             logger.debug('[meta_cache] cross-replica invalidation publish failed: %s', e)
 
 
+def notify_conv_changed(conv_id, *, rev=None, deleted: bool = False,
+                        user_id: int = DEFAULT_USER_ID) -> None:
+    """Invalidate the sidebar cache AND push a real-time change signal to clients.
+
+    This is the single event-driven cross-device sync seam: every authoritative
+    conversation mutation (task-result save, PUT, rename, settings/folder,
+    message delete/edit, conversation delete) calls this so a sibling device
+    reconciles WITHOUT a manual refresh or waiting for the periodic poll.
+
+    The pushed frame is intentionally tiny — ``{type, convId, rev, userId}`` — a
+    targeting HINT, not the conversation data. The client rev-gates on it (a
+    frame whose ``rev`` is <= its known ``_serverRev`` for that conv is a no-op,
+    which is what makes SELF-ECHO cheap) then does a targeted refetch of just
+    that conversation. ``rev=None`` marks a metadata-only change (title / folder
+    / activeTaskId) — the DB ``rev`` trigger only bumps on a messages change —
+    so the client falls back to a debounced sidebar refresh, not a body refetch.
+
+    ``user_id`` scopes the frame for multi-user forward-safety (Epic D4): the
+    client ignores a frame whose ``userId`` is not its own, so once auth lands a
+    fleet ``notify`` broadcast can't surface one user's conversation to another.
+
+    Best-effort: a push failure never breaks the mutation path (the cache
+    invalidation above + the periodic-poll fallback still reconcile).
+    """
+    # Cache invalidation (local + cross-replica) — unchanged existing behaviour.
+    invalidate_meta_cache(user_id)
+    # Real-time client signal — the new event-driven half.
+    try:
+        from lib.agent_core.push import push_event
+        payload = {
+            'type': 'conv_deleted' if deleted else 'conv_changed',
+            'convId': conv_id,
+            'userId': user_id,
+        }
+        if rev is not None:
+            try:
+                payload['rev'] = int(rev)
+            except (TypeError, ValueError):
+                logger.debug('[meta_cache] conv=%s non-int rev=%r dropped', conv_id, rev)
+        push_event('notify', conv_id, payload)
+    except Exception as e:
+        logger.debug('[meta_cache] conv-changed push skipped conv=%s: %s', conv_id, e)
+
+
 def refresh_meta_cache_if_stale(db, user_id: int = DEFAULT_USER_ID):
     """Return (json_bytes, etag) for ``user_id``. Re-query DB only if TTL
     expired. The query is scoped to ``user_id`` AND bounded by a ``LIMIT`` so a
@@ -153,6 +198,22 @@ def refresh_meta_cache_if_stale(db, user_id: int = DEFAULT_USER_ID):
         e = _entry(user_id)
         if e['data'] is not None and (now - e['ts']) < e['ttl']:
             return e['data'], e['etag']
+
+    # Authoritative total for the sidebar "N earlier not loaded" affordance
+    # (C4). Computed ONLY here, at cache-rebuild — the 60s poll that hits the
+    # warm cache never reaches this COUNT, so it stays off the hot path. A
+    # COUNT(*) on the indexed user_id is cheap even for a huge history. Emitted
+    # BEFORE the list SELECT so the bounded LIMIT query remains the LAST DB call
+    # (the D4 bounded-scan guard inspects db.calls[-1]).
+    total_count = None
+    try:
+        _tc = db.execute(
+            'SELECT COUNT(*) AS c FROM conversations WHERE user_id=?',
+            (user_id,)
+        ).fetchone()
+        total_count = (_tc['c'] if _tc else 0) or 0
+    except Exception as _e:
+        logger.debug('[meta_cache] total-count query failed: %s', _e)
 
     limit = _sidebar_limit()
     if limit > 0:
@@ -168,6 +229,8 @@ def refresh_meta_cache_if_stale(db, user_id: int = DEFAULT_USER_ID):
                FROM conversations WHERE user_id=? ORDER BY updated_at DESC''',
             (user_id,)
         ).fetchall()
+    if total_count is None:
+        total_count = len(rows)
     convs = []
     for r in rows:
         settings = _safe_json(r['settings'], default=None, label='settings')
@@ -186,7 +249,21 @@ def refresh_meta_cache_if_stale(db, user_id: int = DEFAULT_USER_ID):
         e['data'] = payload
         e['etag'] = etag
         e['ts'] = time.monotonic()
+        e['total'] = total_count
     return payload, etag
 
 
-__all__ = ['invalidate_meta_cache', 'refresh_meta_cache_if_stale']
+def get_cached_total(user_id: int = DEFAULT_USER_ID):
+    """Return the authoritative conversation total captured at the last cache
+    rebuild for ``user_id``, or ``None`` if the cache hasn't been populated yet.
+
+    Read-only, lock-guarded, does NOT trigger a DB query — the route reads this
+    right after ``refresh_meta_cache_if_stale`` (which populates it), so it is
+    fresh without adding any cost to the poll path."""
+    with _meta_cache_lock:
+        e = _meta_cache_by_user.get(user_id)
+        return e.get('total') if e else None
+
+
+__all__ = ['invalidate_meta_cache', 'notify_conv_changed', 'refresh_meta_cache_if_stale',
+           'get_cached_total']

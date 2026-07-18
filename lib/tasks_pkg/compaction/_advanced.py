@@ -132,7 +132,10 @@ def advanced_compact(messages: list, conv_id: str = '',
     if conv_id:
         try:
             from lib.tasks_pkg.cache_tracking import get_cache_prefix_count
-            cache_prefix_count = get_cache_prefix_count(conv_id)
+            # Clamp the monotonic boundary to the live message count (see
+            # get_cache_prefix_count docstring — history-shrink guard).
+            cache_prefix_count = get_cache_prefix_count(
+                conv_id, current_msg_count=len(messages))
         except Exception as e:
             logger.debug('[AdvCompact] cache_tracking unavailable: %s', e)
 

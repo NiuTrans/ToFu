@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from flask import Blueprint, jsonify
 
-from lib.api_response import api_bad_request, api_internal_error, api_ok
+from lib.api_response import api_bad_request, api_error, api_internal_error, api_ok
 from lib.log import get_logger
 from lib.openapi import api_meta
 from lib.request_parser import parse_body
@@ -99,6 +99,10 @@ def list_servers_v1():
         # reconnect is currently failing+backing off, so the UI can show
         # "retrying in N min" instead of a bare "disconnected".
         breaker = bridge.get_breaker_state(name)
+        # Credential health: 'expired' means the subprocess is alive but the
+        # stored session cookie/token no longer authenticates (a second health
+        # axis the transport ping cannot see). None when never probed.
+        cred_health = bridge.get_cred_health(name)
         servers.append({
             'name': name,
             'config': {k: v for k, v in srv_cfg.items() if k != 'env'},
@@ -110,6 +114,7 @@ def list_servers_v1():
             'server_version': server_version,
             'server_impl_name': server_impl_name,
             'breaker': breaker,
+            'cred_health': cred_health,
         })
     return api_ok({'servers': servers})
 
@@ -304,7 +309,10 @@ def list_tools_v1():
         'Returns each catalog entry annotated with ``installed`` / '
         '``connected`` / ``tools_count`` / ``server_version`` / '
         '``stored_env_keys`` (which env vars already have a stored value, '
-        '*without* leaking the value).'
+        '*without* leaking the value) / ``cred_health`` (``expired`` when the '
+        'stored session cookie/token no longer authenticates a live server). '
+        'The top-level ``health_probe_contract`` describes how any server '
+        '(curated or custom) declares a background credential probe.'
     ),
     tags=['mcp'],
 )
@@ -347,6 +355,7 @@ def get_catalog_v1():
             'server_impl_name': server_impl_name,
             'stored_env_keys': stored_env_keys,
             'breaker': bridge.get_breaker_state(sid),
+            'cred_health': bridge.get_cred_health(sid),
         })
 
     # Surface servers that are configured in mcp_servers.json but have no
@@ -387,9 +396,16 @@ def get_catalog_v1():
             'server_impl_name': server_impl_name,
             'stored_env_keys': stored_env_keys,
             'breaker': bridge.get_breaker_state(sid),
+            'cred_health': bridge.get_cred_health(sid),
         })
 
-    return api_ok({'catalog': entries})
+    # Advertise the standard credential health-probe contract so the settings
+    # UI / API consumers can discover how ANY server (curated or custom) opts
+    # into background credential verification — reflected from the canonical
+    # schema, never hand-typed here (so it can't drift).
+    from lib.mcp.health_probe import HEALTH_PROBE_SCHEMA
+    return api_ok({'catalog': entries,
+                   'health_probe_contract': HEALTH_PROBE_SCHEMA})
 
 
 @api_v1_mcp_bp.route('/api/v1/mcp/catalog/install', methods=['POST'])
@@ -542,7 +558,7 @@ def install_status_v1():
 
     server_cfg = load_mcp_config().get(server_id)
     if server_cfg is None:
-        return jsonify({'ok': False, 'error': f'Unknown server: {server_id}'}), 404
+        return api_error(f'Unknown server: {server_id}', status=404)
 
     command = (server_cfg.get('command', '')
                if server_cfg.get('transport', 'stdio') != 'sse' else '')

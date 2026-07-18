@@ -90,3 +90,66 @@ class TestRegenClearsMsgStore:
         # Cleanup
         flask_client.delete(f"/api/v1/conversations/{conv_id}")
         server_message_store.clear(conv_id)
+
+    def test_truncate_conv_history_clears_both_side_channels(self, flask_client):
+        """Direct guard on the consolidation helper.
+
+        ``_truncate_conv_history`` (routes/chat.py) folds the two
+        post-truncation obligations — clear the message QUEUE + clear the
+        in-memory server_message_store — into one call so a future truncating
+        route can't half-apply the invariant. Seed BOTH channels, call the
+        helper, assert BOTH are drained.
+
+        (``flask_client`` is requested only to guarantee the session DB schema
+        exists — the message_queue table lives in it.)
+        """
+        from routes.chat import _truncate_conv_history
+        from lib import message_queue
+
+        conv_id = f"test-truncate-helper-{int(time.time()*1000)}"
+
+        # Seed the in-memory tool-history store.
+        _seed_store(conv_id, n_rounds=2)
+        assert server_message_store.get_messages(conv_id) is not None
+
+        # Seed a stale queued turn (the KIND_REAL analogue of the phantom
+        # auto-dispatch the queue-clear defends against).
+        message_queue.enqueue_message(
+            conv_id, {'text': 'stale queued turn'}, {'model': 'mock-model'})
+        assert len(message_queue.get_queue(conv_id)) == 1
+
+        # One call must discharge BOTH obligations.
+        _truncate_conv_history(conv_id)
+
+        assert server_message_store.get_messages(conv_id) is None, (
+            "_truncate_conv_history left the server_message_store populated")
+        assert message_queue.get_queue(conv_id) == [], (
+            "_truncate_conv_history left a stale message in the queue")
+
+    def test_store_clear_is_load_bearing_negative_control(self, flask_client, monkeypatch):
+        """NEGATIVE CONTROL: prove the store-clear is what makes the guard green.
+
+        Simulate the ``clear()`` line being removed by monkeypatching
+        ``server_message_store.clear`` to a no-op, then run the helper. The
+        store MUST remain populated — i.e. the ``is None`` assertion in the two
+        tests above would go RED. This is the ground-truth check the design
+        review demanded: an unrunnable / tautological guard is worse than none.
+        """
+        from routes.chat import _truncate_conv_history
+        from lib.tasks_pkg import server_message_store as _sms
+
+        conv_id = f"test-truncate-nc-{int(time.time()*1000)}"
+        _seed_store(conv_id, n_rounds=2)
+        assert _sms.get_messages(conv_id) is not None
+
+        # Neuter the clear (as if the line were deleted from the helper).
+        monkeypatch.setattr(_sms, 'clear', lambda *a, **k: None)
+        _truncate_conv_history(conv_id)
+
+        assert _sms.get_messages(conv_id) is not None, (
+            "store was cleared despite clear() being neutered — the guard "
+            "assertions are NOT actually exercising the clear")
+
+        # Cleanup: restore + genuinely clear (monkeypatch auto-undoes at teardown).
+        monkeypatch.undo()
+        server_message_store.clear(conv_id)

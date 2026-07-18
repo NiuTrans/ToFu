@@ -35,6 +35,7 @@ import secrets
 import time
 
 from lib.log import get_logger
+from lib.timeutil import now_ms
 
 logger = get_logger(__name__)
 
@@ -42,8 +43,7 @@ logger = get_logger(__name__)
 _TERMINAL = frozenset({'done', 'error', 'aborted'})
 
 
-def _now_ms() -> int:
-    return int(time.time() * 1000)
+_now_ms = now_ms
 
 
 def new_run_id() -> str:
@@ -227,7 +227,8 @@ def _parse_error(raw):
         return None
     try:
         return json.loads(raw)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError) as e:
+        logger.debug('[OrchRuns] error column not JSON, returning verbatim: %s', e)
         return raw
 
 

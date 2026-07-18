@@ -1,0 +1,156 @@
+"""lib/browser/handlers/_tabs.py — Tab lifecycle + navigation handlers.
+
+Handlers for listing, reading, creating, closing tabs and navigating.
+Each takes fn_args (dict) and returns a string result for the LLM.
+They communicate with the browser extension via send_browser_command().
+"""
+
+import json
+
+from lib.browser.display import update_tab_title
+from lib.log import get_logger
+
+logger = get_logger(__name__)
+
+
+def _facade():
+    """Return the package facade so collaborators resolve at call time.
+
+    Lets ``monkeypatch.setattr(lib.browser.handlers, 'send_browser_command', ...)``
+    (the historical patch point on the flat module) take effect here.
+    """
+    import lib.browser.handlers as _pkg
+    return _pkg
+
+
+def send_browser_command(*args, **kwargs):
+    """Facade-resolving proxy for lib.browser.queue.send_browser_command."""
+    return _facade().send_browser_command(*args, **kwargs)
+
+
+def _handle_list_tabs(fn_args):
+    result, error = send_browser_command('list_tabs', timeout=15)
+    if error:
+        return f'Error listing tabs: {error}'
+    if isinstance(result, list):
+        lines = [f'Open tabs ({len(result)} total):\n']
+        for t in result:
+            active_mark = ' * (active)' if t.get('active') else ''
+            url = t.get('url', '')
+            title = t.get('title', '(no title)')
+            # Cache tab ID → title + URL for display strings
+            update_tab_title(t.get('id'), title, url=url)
+            lines.append(f'  Tab {t["id"]}: {title}{active_mark}')
+            lines.append(f'    URL: {url}')
+        return '\n'.join(lines)
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+def _handle_read_tab(fn_args):
+    tab_id = fn_args.get('tabId')
+    if tab_id is None:
+        return 'Error: tabId is required. Use browser_list_tabs first to get tab IDs.'
+    result, error = send_browser_command('read_tab', {
+        'tabId': int(tab_id),
+        'selector': fn_args.get('selector'),
+        'maxChars': fn_args.get('maxChars', 50000),
+    }, timeout=30)
+    if error:
+        return f'Error reading tab {tab_id}: {error}'
+    if isinstance(result, dict):
+        if result.get('error'):
+            return f'Error: {result["error"]}'
+        title = result.get('title', '')
+        url = result.get('url', '')
+        # Cache tab ID → title + URL for display strings
+        if title or url:
+            update_tab_title(tab_id, title, url=url)
+        if result.get('elements'):
+            elements = result['elements']
+            lines = [f'Tab: {title}', f'URL: {url}',
+                     f'Found {result.get("count", len(elements))} element(s):\n']
+            for i, el in enumerate(elements):
+                text = el.get('text', '').strip()
+                if text:
+                    lines.append(f'[{i+1}] <{el.get("tag", "?")}> {text[:2000]}')
+            return '\n'.join(lines)
+        else:
+            # ── Prefer server-side extraction from HTML (same pipeline as fetch) ──
+            raw_html = result.get('html', '')
+            text = None
+            extract_method = 'innerText'
+            if raw_html and len(raw_html) > 200:
+                try:
+                    from tofu_search.fetch.html_extract import extract_html_text
+                    text = extract_html_text(raw_html, 80000, url=url)
+                    if text and len(text) > 50:
+                        extract_method = 'html→extract'
+                    else:
+                        text = None
+                except Exception as e:
+                    logger.warning('read_tab HTML extraction failed, falling back to innerText: %s', e)
+            if not text:
+                text = result.get('text', '')
+            truncated = result.get('truncated', False)
+            header = f'Tab: {title}\nURL: {url}\nContent ({len(text):,} chars, {extract_method}'
+            if truncated and extract_method == 'innerText':
+                header += f', truncated from {result.get("textLength", "?"):,}'
+            header += '):\n\n'
+            return header + text
+    return str(result)
+
+
+def _handle_create_tab(fn_args):
+    url = fn_args.get('url', 'about:blank')
+    params = {'url': url}
+    if fn_args.get('active') is not None:
+        params['active'] = fn_args['active']
+    result, error = send_browser_command('create_tab', params, timeout=10)
+    if error:
+        return f'Error creating tab: {error}'
+    if isinstance(result, dict):
+        # Cache the URL immediately so subsequent tool rows (wait / screenshot /
+        # execute_js on this new tab) render a hostname label instead of the
+        # opaque numeric tab id.
+        update_tab_title(result.get('id'), result.get('title'), url=result.get('url') or url)
+        return f'Created new tab #{result.get("id", "?")} -> {url}'
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+def _handle_close_tab(fn_args):
+    params = {}
+    if fn_args.get('tabId') is not None:
+        params['tabId'] = int(fn_args['tabId'])
+    if fn_args.get('tabIds'):
+        params['tabIds'] = [int(t) for t in fn_args['tabIds']]
+    result, error = send_browser_command('close_tab', params, timeout=10)
+    if error:
+        return f'Error closing tab(s): {error}'
+    if isinstance(result, dict) and result.get('closed'):
+        return f'Closed tab(s): {result["closed"]}'
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+def _handle_navigate(fn_args):
+    tab_id = fn_args.get('tabId')
+    url = fn_args.get('url')
+    if tab_id is None:
+        return 'Error: tabId is required.'
+    if not url:
+        return 'Error: url is required.'
+    params = {
+        'tabId': int(tab_id),
+        'url': url,
+        'waitForLoad': fn_args.get('waitForLoad', False),
+    }
+    result, error = send_browser_command('navigate', params, timeout=35)
+    if error:
+        return f'Error navigating tab {tab_id}: {error}'
+    if isinstance(result, dict):
+        # Cache tab title from navigation result
+        nav_title = result.get('title', '')
+        nav_url = result.get('url', '') or url
+        if nav_title or nav_url:
+            update_tab_title(result.get('id', tab_id), nav_title, url=nav_url)
+        return f'Navigated tab #{result.get("id", tab_id)} -> {result.get("url", url)} (status: {result.get("status", "?")})'
+    return json.dumps(result, ensure_ascii=False, indent=2)

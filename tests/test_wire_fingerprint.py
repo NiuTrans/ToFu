@@ -7,7 +7,8 @@ The load-bearing contract:
     cache_control markers, tool-call `arguments` key reordering (the
     ensure_ascii=False re-dump on the anthropic path).
   * REAL content changes the server WOULD see are CAUGHT and named: a mutated
-    tool result, a re-encoded image (the _downscale threshold=5 retro-shrink).
+    tool result, a re-encoded image (e.g. the _downscale first-send shrink to
+    the uniform 1568px cap).
   * OpenAI-shape and Anthropic-shape messages for the SAME conversation
     produce the SAME fingerprint (a protocol switch alone is not a change).
 
@@ -19,10 +20,17 @@ not vacuous.
 import copy
 import json
 
+import pytest
+
+pytestmark = pytest.mark.unit
+
 from lib.tasks_pkg.wire_fingerprint import (
     canonical_messages,
     diff_canonical,
+    first_changed_byte_index,
+    first_changed_index,
     static_prefix_hash,
+    wire_byte_prefix,
 )
 
 
@@ -76,8 +84,9 @@ def test_mutated_tool_result_caught():
 
 
 def test_reencoded_image_caught():
-    """The _downscale threshold=5 retro-shrink re-encodes an image → new
-    base64 bytes. The canonicaliser hashes image identity, so this shows."""
+    """A _downscale re-encode (shrinking an oversized image to the uniform
+    1568px cap) produces new base64 bytes. The canonicaliser hashes image
+    identity, so this shows."""
     a = [{'role': 'user', 'content': [
         {'type': 'text', 'text': 'x'},
         {'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,AAAA'}}]}]
@@ -148,6 +157,54 @@ def test_nc_str_block_would_differ_without_normalization():
     a = [{'role': 'tool', 'tool_call_id': 'c1', 'content': bare}]
     b = [{'role': 'tool', 'tool_call_id': 'c1', 'content': wrapped}]
     assert _diff(a, b) == []
+
+
+def test_byte_only_divergence_gets_honest_position():
+    """The byte-aware index reports WHERE a <bytes>-only divergence landed,
+    where the canonical index is blind.
+
+    ``reasoning_details`` is intentionally NOT part of the canonical
+    fingerprint (build_body synthesises it from reasoning_content/signature),
+    so a message whose ONLY change is a rebuilt ``reasoning_details`` is
+    canonical-identical yet byte-divergent. The canonical index must return -1
+    (blind); the byte index must return the real position (here idx 1)."""
+    old = [
+        {'role': 'user', 'content': 'go'},
+        {'role': 'assistant', 'content': 'a', 'reasoning_content': 't',
+         'thinking_signature': 's',
+         'reasoning_details': [{'type': 'reasoning.text', 'text': 't', 'v': 1}]},
+        {'role': 'user', 'content': 'more'},
+    ]
+    new = copy.deepcopy(old)
+    # Rebuild ONLY reasoning_details on msg[1] — canonical-invisible, byte-real.
+    new[1]['reasoning_details'] = [{'type': 'reasoning.text', 'text': 't', 'v': 2}]
+
+    co, cn = canonical_messages(old), canonical_messages(new)
+    bo, bn = wire_byte_prefix(old), wire_byte_prefix(new)
+
+    # Canonical is BLIND: no culprit, index -1.
+    assert diff_canonical(co, cn) == []
+    assert first_changed_index(co, cn) == -1
+    # Byte-aware index finds the real position.
+    assert first_changed_byte_index(bo, bn) == 1
+
+
+def test_nc_canonical_index_is_blind_to_byte_only_change():
+    """NEUTER: prove the byte index is load-bearing — the canonical index
+    alone would collapse a byte-only divergence to -1 (→ the meaningless
+    inside_prior_cached_prefix=False the fix repairs). If this ever starts
+    returning a real index, canonical grew to cover reasoning_details and the
+    byte fallback is no longer needed (update the caller)."""
+    old = [{'role': 'assistant', 'content': 'a', 'reasoning_content': 't',
+            'thinking_signature': 's',
+            'reasoning_details': [{'v': 1}]}]
+    new = [{'role': 'assistant', 'content': 'a', 'reasoning_content': 't',
+            'thinking_signature': 's',
+            'reasoning_details': [{'v': 2}]}]
+    assert first_changed_index(canonical_messages(old),
+                               canonical_messages(new)) == -1
+    assert first_changed_byte_index(wire_byte_prefix(old),
+                                    wire_byte_prefix(new)) == 0
 
 
 def test_static_prefix_hash_stable_and_sensitive():

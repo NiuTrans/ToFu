@@ -28,10 +28,11 @@ import uuid
 
 from flask import Blueprint
 
-from lib.api_response import api_internal_error, api_ok
+from lib.api_response import api_conflict, api_internal_error, api_ok
 from lib.log import audit_log, get_logger
 from lib.openapi import api_meta
 from lib.push import push_event
+from lib.request_parser import parse_body
 
 from .auth import require_auth, require_scope
 
@@ -100,11 +101,20 @@ def update_apply():
     """
     task_id = uuid.uuid4().hex
 
-    def _progress(stage: str, status: str, detail: str = ''):
-        push_event(UPDATE_CHANNEL, task_id, {
+    def _progress(stage: str, status: str, detail: str = '', meta=None):
+        frame = {
             'type': 'stage', 'stage': stage, 'status': status,
             'detail': (detail or '')[:300],
-        })
+        }
+        # Structured download / transfer telemetry (percent, bytes, speed)
+        # so the frontend can render a determinate bar + speed readout
+        # instead of an opaque spinner. Only present on the fetch/deps
+        # stages that report it; the schema tolerates it being absent.
+        if isinstance(meta, dict):
+            for k in ('pct', 'loaded', 'total', 'speed', 'phase'):
+                if meta.get(k) is not None:
+                    frame[k] = meta[k]
+        push_event(UPDATE_CHANNEL, task_id, frame)
 
     def _worker():
         from lib.self_update import apply_update
@@ -145,7 +155,8 @@ def _close_inheritable_listen_sockets():
     # potentially huge SC_OPEN_MAX range; fall back to a bounded range elsewhere.
     try:
         fds = [int(name) for name in os.listdir('/proc/self/fd') if name.isdigit()]
-    except OSError:
+    except OSError as e:
+        logger.debug('[Update] /proc/self/fd unavailable (%s) — scanning bounded FD range', e)
         _max = os.sysconf('SC_OPEN_MAX') if hasattr(os, 'sysconf') else 4096
         fds = range(3, min(_max, 65536))
     closed = 0
@@ -156,7 +167,8 @@ def _close_inheritable_listen_sockets():
             if os.get_inheritable(fd):
                 os.set_inheritable(fd, False)
                 closed += 1
-        except OSError:
+        except OSError as e:
+            logger.debug('[Update] could not clear inheritable flag on fd %d: %s', fd, e)
             continue
     if closed:
         logger.info('[Update] Cleared inheritable flag on %d FD(s) before re-exec '
@@ -173,6 +185,13 @@ def _deferred_reexec(delay: float = 0.6):
     time.sleep(delay)
     logger.info('[Update] Re-execing server: %s %s',
                 sys.executable, ' '.join(sys.argv))
+    # Flip the clean-shutdown dirty-bit: an in-place re-exec is a controlled
+    # exit, so the fresh image must NOT flag the previous PID as an OS kill.
+    try:
+        from lib.shutdown_marker import mark_clean
+        mark_clean('restart')
+    except Exception as _sm_e:
+        logger.warning('[Update] mark_clean(restart) failed: %s', _sm_e)
     try:
         # Let the env-reexec guard run again from a clean slate.
         os.environ.pop('_TOFU_ENV_REEXEC', None)
@@ -201,17 +220,99 @@ def _deferred_reexec(delay: float = 0.6):
         'Re-execs the server process so freshly-pulled code takes effect. '
         'Explicit and admin-only — there is no silent auto-restart. The '
         'response is sent before the process restarts; clients should wait '
-        'a few seconds and reconnect.'
+        'a few seconds and reconnect. Refuses with 409 when OTHER '
+        'conversations have in-flight tasks (a re-exec kills every running '
+        'task); pass {"force": true} to override.'
     ),
     tags=['system'],
 )
 def update_restart():
-    audit_log('self_update_restart', pid=os.getpid())
-    logger.warning('[Update] Restart requested — re-exec scheduled (pid=%d)',
-                   os.getpid())
+    # A restart is an unconditional os.execv of the whole server, so EVERY
+    # in-flight task dies with it. Refuse by default when sibling conversations
+    # are mid-run — otherwise an agent's own run_command probing this endpoint
+    # silently interrupts all its long-running siblings. The caller's own
+    # conversation (if any) is excluded so it can restart itself.
+    body = parse_body()
+    force = bool(body.get('force'))
+    own_conv = (body.get('convId') or body.get('conv_id') or '').strip() or None
+
+    running = []
+    try:
+        from lib.tasks_pkg.manager import list_running_tasks
+        running = list_running_tasks(exclude_conv_id=own_conv)
+    except Exception as e:
+        logger.warning('[Update] Could not check running tasks before restart: %s', e)
+
+    if running and not force:
+        logger.warning(
+            '[Update] Restart REFUSED — %d running task(s) would be killed: %s '
+            '(pass force=true to override)',
+            len(running), [r['taskId'][:8] for r in running])
+        audit_log('self_update_restart_refused', pid=os.getpid(),
+                  running_tasks=len(running))
+        return api_conflict(
+            'Restart refused: %d other conversation(s) have running tasks that '
+            'a restart would interrupt. Retry when idle, or pass force=true.'
+            % len(running),
+            runningTasks=running, needsForce=True)
+
+    audit_log('self_update_restart', pid=os.getpid(),
+              forced=force, running_tasks=len(running))
+    logger.warning('[Update] Restart requested — re-exec scheduled (pid=%d, '
+                   'force=%s, running_tasks=%d)',
+                   os.getpid(), force, len(running))
     threading.Thread(target=_deferred_reexec, name='tofu-restart',
                      daemon=True).start()
-    return api_ok({'restarting': True})
+    return api_ok({'restarting': True, 'forced': force,
+                   'interruptedTasks': len(running)})
+
+
+def _deferred_shutdown(delay: float = 0.6):
+    """Gracefully stop the server after a short delay (response flushes first).
+
+    Marks the clean-shutdown dirty-bit ``manual`` FIRST, then raises SIGTERM on
+    ourselves so the existing handler (server.py) drains in-flight requests and
+    exits cleanly. Because the marker is already ``clean``, the NEXT boot
+    classifies this exit as a deliberate manual stop — NOT an OS kill — so
+    recovery leaves those turns tagged ``manual`` and does not auto-recover
+    them. Runs in a daemon thread.
+    """
+    import signal as _signal
+    time.sleep(delay)
+    try:
+        from lib.shutdown_marker import mark_clean
+        mark_clean('manual')
+    except Exception as e:
+        logger.warning('[Shutdown] mark_clean(manual) failed: %s', e)
+    logger.warning('[Shutdown] Manual shutdown requested — raising SIGTERM (pid=%d)',
+                   os.getpid())
+    try:
+        os.kill(os.getpid(), _signal.SIGTERM)
+    except OSError as e:
+        logger.critical('[Shutdown] SIGTERM to self failed: %s', e, exc_info=True)
+
+
+@api_v1_update_bp.route('/api/v1/update/shutdown', methods=['POST'])
+@require_scope('admin')
+@api_meta(
+    summary='Shut the server down (manual, graceful)',
+    description=(
+        'Marks the clean-shutdown dirty-bit as a MANUAL stop, then gracefully '
+        'stops the server (drains in-flight requests via SIGTERM). This is the '
+        'operator marker for a deliberate shutdown: the next boot classifies '
+        'the exit as intentional rather than an OS SIGKILL/OOM, so '
+        'crash-recovery does NOT auto-recover the interrupted turns. Unlike '
+        'restart there is no re-exec — the process exits and does not come '
+        'back on its own.'
+    ),
+    tags=['system'],
+)
+def update_shutdown():
+    audit_log('manual_shutdown', pid=os.getpid())
+    logger.warning('[Shutdown] Manual shutdown requested (pid=%d)', os.getpid())
+    threading.Thread(target=_deferred_shutdown, name='tofu-shutdown',
+                     daemon=True).start()
+    return api_ok({'shuttingDown': True})
 
 
 __all__ = ['api_v1_update_bp']

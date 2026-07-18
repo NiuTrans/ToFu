@@ -34,7 +34,6 @@ node/Playwright, and open-mode loopback auth means no token is required.
 
 from __future__ import annotations
 
-import importlib
 import json
 import os
 import time
@@ -193,41 +192,29 @@ def test_NC_live_double_encode_decode_is_load_bearing(live_server, _seed_brain):
     module (which routes/api_v1/project.py imports lazily per-call) rebinds the
     decoder the handler dispatches to.
     """
+    from tests._nc_harness import neutered_source
     from urllib.parse import quote
     rp_src = os.path.join(ROOT, 'lib', 'request_parser.py')
-    with open(rp_src, encoding='utf-8') as f:
-        original = f.read()
     anchor = ("    raw = (request.args.get(name) or '').strip()\n"
               "    if not raw:\n        return default\n"
               "    for _ in range(_MAX_REDECODE_PASSES):")
-    assert anchor in original, 'decode anchor not found in request_parser.py'
-    patched = original.replace(
-        anchor,
+    patched = (
         "    raw = (request.args.get(name) or '').strip()\n"
         "    if not raw:\n        return default\n"
         "    return raw  # NC (re-decode disabled)\n"
-        "    for _ in range(_MAX_REDECODE_PASSES):", 1)
+        "    for _ in range(_MAX_REDECODE_PASSES):")
 
     double = quote(quote(_PROJ, safe=''), safe='')
-    try:
-        with open(rp_src, 'w', encoding='utf-8') as f:
-            f.write(patched)
-        import lib.request_parser as rp
-        importlib.reload(rp)
-        time.sleep(0.1)
+    # In-memory neuter (xdist-safe): the route resolves decode_proxy_path_arg via
+    # a call-time ``from lib.request_parser import ...``, so the swapped
+    # sys.modules entry is what the live server (same process) dispatches to for
+    # the duration of the ``with`` — no on-disk write, no reload.
+    with neutered_source(rp_src, anchor, patched):
         st, data = _get_json(live_server, '/api/v1/project/board?path=' + double)
         assert st == 200, data
         assert data.get('open') == 0, (
             'NC: with re-decode disabled the double-encoded live query MUST '
             f'return an empty board (reproduces the screenshot bug). got: {data}')
-    finally:
-        with open(rp_src, 'w', encoding='utf-8') as f:
-            f.write(original)
-        import lib.request_parser as rp
-        importlib.reload(rp)
-        time.sleep(0.1)
-    with open(rp_src, encoding='utf-8') as f:
-        assert f.read() == original, 'request_parser.py must be restored byte-identical'
 
 
 def test_NC_live_no_normalization_blanks_trailing_slash(live_server, flask_app):
@@ -249,66 +236,44 @@ def test_NC_live_no_normalization_blanks_trailing_slash(live_server, flask_app):
     (same interpreter, daemon thread), reloading the module here rebinds the
     functions the route calls too.
     """
-    with open(_FEED_SRC, encoding='utf-8') as f:
-        original = f.read()
+    from tests._nc_harness import neutered_source
     anchor = ("    if not project_path:\n        return ''\n"
               "    return _TRAILING_SEP_RE.sub('', str(project_path))")
-    assert anchor in original, 'normalize anchor not found in project_feed.py'
-    patched = original.replace(
-        anchor, "    return str(project_path or '')  # NC (normalization off)", 1)
+    patched = "    return str(project_path or '')  # NC (normalization off)"
 
     import lib.agent_core.push as _push
     _orig_push = _push.push_event
     _push.push_event = lambda *a, **k: None
+    # In-memory neuter (xdist-safe): project_board.post_task + read_board and the
+    # route's read all resolve normalize_project_path via a CALL-TIME
+    # ``from lib.conversations.project_feed import ...``, so the sys.modules swap
+    # makes BOTH the seeding write key and the live route's read key use the
+    # neutered (identity) normalizer for the ``with`` duration — no on-disk
+    # write, no pf/pb/pc reload chain.
     try:
-        with open(_FEED_SRC, 'w', encoding='utf-8') as f:
-            f.write(patched)
-        # Reload so BOTH the seeding calls AND the route handlers (same process)
-        # bind the neutered normalizer.
-        import lib.conversations.project_feed as pf
-        import lib.conversations.project_board as pb
-        import lib.conversations.project_charter as pc
-        importlib.reload(pf)
-        importlib.reload(pb)
-        importlib.reload(pc)
-
-        with flask_app.app_context():
-            from lib.database import DOMAIN_CHAT, get_thread_db
-            db = get_thread_db(DOMAIN_CHAT)
-            db.execute('DELETE FROM project_tasks WHERE project_path IN (?,?)',
-                       (_PROJ, _PROJ + '/'))
-            db.commit()
-            # Seed under the STRIPPED path (write key = '/proj' since the
-            # frontend-normalized value is what a correct client sends).
-            pb.post_task(_PROJ, 'cNC', 'NC EPIC')
-
-        # Give the reload a beat to settle in the route module refs.
-        time.sleep(0.1)
-        # The live route, now running the neutered normalizer, queries the
-        # trailing-slash key verbatim → MISS.
-        st, data = _get_json(live_server,
-                            '/api/v1/project/board?path=' + _qs(_PROJ + '/'))
-        assert st == 200, data
-        assert data.get('open') == 0, (
-            'NC: with normalization disabled the trailing-slash live route '
-            f'MUST return an empty board (reproduces the bug), got: {data}')
+        with neutered_source(_FEED_SRC, anchor, patched):
+            import lib.conversations.project_board as pb
+            with flask_app.app_context():
+                from lib.database import DOMAIN_CHAT, get_thread_db
+                db = get_thread_db(DOMAIN_CHAT)
+                db.execute('DELETE FROM project_tasks WHERE project_path IN (?,?)',
+                           (_PROJ, _PROJ + '/'))
+                db.commit()
+                # Seed under the STRIPPED path (write key = '/proj').
+                pb.post_task(_PROJ, 'cNC', 'NC EPIC')
+            # The live route, now running the neutered normalizer, queries the
+            # trailing-slash key verbatim → MISS.
+            st, data = _get_json(live_server,
+                                '/api/v1/project/board?path=' + _qs(_PROJ + '/'))
+            assert st == 200, data
+            assert data.get('open') == 0, (
+                'NC: with normalization disabled the trailing-slash live route '
+                f'MUST return an empty board (reproduces the bug), got: {data}')
     finally:
         _push.push_event = _orig_push
-        with open(_FEED_SRC, 'w', encoding='utf-8') as f:
-            f.write(original)
-        # Reload the restored (correct) source so later tests + the live
-        # server see the fix again.
-        import lib.conversations.project_feed as pf
-        import lib.conversations.project_board as pb
-        import lib.conversations.project_charter as pc
-        importlib.reload(pf)
-        importlib.reload(pb)
-        importlib.reload(pc)
         with flask_app.app_context():
             from lib.database import DOMAIN_CHAT, get_thread_db
             db = get_thread_db(DOMAIN_CHAT)
             db.execute('DELETE FROM project_tasks WHERE project_path IN (?,?)',
                        (_PROJ, _PROJ + '/'))
             db.commit()
-    with open(_FEED_SRC, encoding='utf-8') as f:
-        assert f.read() == original, 'project_feed.py must be restored byte-identical'

@@ -10,11 +10,20 @@
 
 
 /**
- * Render a translating indicator bubble in the chat DOM.
- * Shown while the server translates the user's message before starting the agent.
- * Removed when the real streaming bubble appears.
+ * Render a pre-stream assistant placeholder bubble in the chat DOM.
+ *
+ * Serves TWO phases on the SAME DOM node (#translating-msg) so every send /
+ * regenerate / edit exit path's existing `_removeTranslatingBubble()` tears it
+ * down uniformly:
+ *   • auto-translate on  → default label '翻译中…' (server pre-translates the
+ *     user message before starting the agent);
+ *   • auto-translate off → caller passes '连接中…' so the assistant side is NOT
+ *     blank during the synchronous /api/chat/send POST (load → task-start).
+ * Upgraded in place to the real streaming bubble once the POST returns a taskId.
+ *
+ * @param {string} [label] Status text. Defaults to the translating label.
  */
-function _renderTranslatingBubble() {
+function _renderTranslatingBubble(label) {
   const inner = document.getElementById("chatInner");
   if (!inner) return;
   // Remove any previous translating bubble
@@ -24,6 +33,7 @@ function _renderTranslatingBubble() {
   el.addEventListener('animationend', () => el.classList.remove('message-new'), { once: true });
   el.id = "translating-msg";
   const avatar = (typeof _TOFU_WORKER_SVG !== 'undefined') ? _TOFU_WORKER_SVG : '✦';
+  const _label = label || t('sidebar.translating');
   el.innerHTML = `<div class="message-avatar">${avatar}</div>
     <div class="message-content">
       <div class="message-header">
@@ -31,11 +41,13 @@ function _renderTranslatingBubble() {
         <span class="message-time">${formatClockTime()}</span>
       </div>
       <div class="message-body">
-        <div class="stream-status"><div class="pulse"></div> ${t('sidebar.translating')}</div>
+        <div class="stream-status"><div class="pulse"></div> ${_label}</div>
       </div>
     </div>`;
   inner.appendChild(el);
-  scrollToBottom();
+  /* ★ Real-height scroll (see sendMessage): plain scrollToBottom under-measures
+   *   against content-visibility:auto estimates and lands mid-history. */
+  _forceScrollToBottom(null, true);
 }
 
 function _removeTranslatingBubble() {
@@ -53,12 +65,21 @@ function _renderStreamingBubble(conv, sendConfig, msgId) {
   const role = _streamingBubbleRole(conv, sendConfig);
   // Stamp the assistant message id (data-msg-id) on the bubble so live
   // per-round translation partials can be routed to it while it streams.
-  inner.insertAdjacentHTML('beforeend', _streamingBubbleHTML(role, null, null, msgId || null));
+  /* ★ Dedup at the insert boundary via ConvView.startStreaming (_evictByMsgId)
+   *   so a residual #streaming-msg / drifted static twin can't leave a second
+   *   empty bubble. Fallback keeps dev-mode parity. */
+  if (window.ConvView && typeof window.ConvView.startStreaming === 'function') {
+    window.ConvView.startStreaming(conv.id, { role, msgId: msgId || null });
+  } else {
+    inner.insertAdjacentHTML('beforeend', _streamingBubbleHTML(role, null, null, msgId || null));
+  }
   const el = document.getElementById('streaming-msg');
   if (el) {
     el.classList.add('message-new');
     el.addEventListener('animationend', () => el.classList.remove('message-new'), { once: true });
   }
-  scrollToBottom();
+  /* ★ Real-height scroll (see sendMessage): plain scrollToBottom under-measures
+   *   against content-visibility:auto estimates and lands mid-history. */
+  _forceScrollToBottom(null, true);
 }
 

@@ -3,10 +3,12 @@
 Loads the REAL shipped static/js/ui/finish_info.js under node and drives the
 cache-verdict helpers directly, asserting:
 
-  • The new backend cause strings (server-side … PROVEN / … UNPROVEN) translate
-    to Chinese with NO leftover English on the zh path (the order-sensitivity
-    trap: a short alias must not eat a longer sentence).
-  • _cacheBreakState classifies proven / unproven / culprit correctly.
+  • The backend cause strings (upstream cache eviction / … UNPROVEN, and the
+    legacy server-side … PROVEN rows) translate to Chinese with NO leftover
+    English on the zh path (the order-sensitivity trap: a short alias must not
+    eat a longer sentence).
+  • _cacheBreakState classifies eviction / unproven / culprit correctly (and
+    folds the legacy PROVEN wording into 'eviction').
   • _cacheBreakCulprits extracts the "[changed: key.field]" list so the popover
     can show WHICH message broke cache.
 
@@ -95,6 +97,11 @@ check('proven_no_leftover_english', !_leftover(zhProven));
 check('unproven_no_leftover_english', !_leftover(zhUnproven));
 check('proven_is_chinese', zhProven.indexOf('已实证') !== -1);
 check('unproven_is_chinese', zhUnproven.indexOf('未证实') !== -1);
+// The CURRENT byte-identical wording (no over-claim) fully Sinicizes too.
+const _evict = 'prefix not read back though the wire bytes were byte-identical to the previous round — so this round is NOT a client-side prefix change. The whole cached prefix was not reused upstream: most likely an upstream cache miss (a per-request gateway miss, a TTL boundary, or contention in this key\'s shared cache pool when several large prefixes are active at once). (Most misses in this system are instead client-side and are named per-field above; this is not that class.)';
+const zhEvict = _translateCacheCause(_evict);
+check('byteident_no_leftover_english', !_leftover(zhEvict));
+check('byteident_is_chinese', zhEvict.indexOf('前缀未被读回') !== -1);
 
 // English UI path: returned verbatim (no Sinicization).
 _i18nLang = 'en';
@@ -102,7 +109,20 @@ check('english_verbatim', _translateCacheCause(_proven) === _proven);
 _i18nLang = 'zh';
 
 // ── 2. State classification ──
-check('state_proven', _cacheBreakState({ server_side: _proven }) === 'proven');
+// The CURRENT dominant real-traffic verdict: a byte-identical wire proves the
+// miss is NOT our client-side change → its OWN 'upstream' state (our side
+// cleared), NOT the apologetic 'unproven' guess.
+const _byteIdent = 'prefix not read back though the wire bytes were byte-identical to the previous round — so this round is NOT a client-side prefix change. The whole cached prefix was not reused upstream: most likely an upstream cache miss (a per-request gateway miss, a TTL boundary, or contention in this key\'s shared cache pool when several large prefixes are active at once). (Most misses in this system are instead client-side and are named per-field above; this is not that class.)';
+check('state_byteident_is_upstream', _cacheBreakState({ server_side: _byteIdent }) === 'upstream');
+// A TRUE no-fingerprint fallback (non-Claude / capture failure) stays 'unproven'.
+check('state_nofp_is_unproven',
+  _cacheBreakState({ server_side: 'prefix not reused — likely server-side miss or TTL expiry (UNPROVEN — no wire fingerprint)' }) === 'unproven');
+// LEGACY persisted rows: the old 'upstream cache eviction' verdict + the older
+// 'server-side … PROVEN' wording must still fold into 'eviction' so history
+// renders consistently (never the reassuring teal).
+const _legacyEvict = 'upstream cache eviction — bytes were byte-identical to the previous round, so this is NOT a client change and NOT a random server failure: the whole cached prefix was evicted from the shared cache pool on this key before read';
+check('state_legacy_eviction', _cacheBreakState({ server_side: _legacyEvict }) === 'eviction');
+check('state_legacy_proven_is_eviction', _cacheBreakState({ server_side: _proven }) === 'eviction');
 check('state_unproven', _cacheBreakState({ server_side: _unproven }) === 'unproven');
 check('state_culprit_prefix_mutation',
   _cacheBreakState({ prefix_mutation: 'cached prefix bytes changed between turns [changed: user:ab.content]' }) === 'culprit');
@@ -183,6 +203,8 @@ global.t = (k, o) => {
   if (k === 'finishInfo.cbCulpritLabel') return 'CULPRIT> ' + (o.culprits || '');
   if (k === 'finishInfo.cacheBreakLabel') return 'MISS: ' + (o.reason || '');
   if (k === 'finishInfo.cbState.culprit') return 'OUR-EDIT-BADGE';
+  if (k === 'finishInfo.cbState.eviction') return 'EVICTION-BADGE';
+  if (k === 'finishInfo.cbState.upstream') return 'UPSTREAM-BADGE';
   if (k === 'finishInfo.cbState.proven') return 'PROVEN-BADGE';
   if (k === 'finishInfo.cbState.unproven') return 'UNPROVEN-BADGE';
   if (k && k.indexOf('{') === -1 && o && Object.keys(o).length) {
@@ -228,12 +250,17 @@ check('render_shows_culprit_text',
 check('render_has_culprit_state_class', html.indexOf('cp-break-culprit') !== -1);
 check('render_has_our_edit_badge', html.indexOf('OUR-EDIT-BADGE') !== -1);
 
-// A PROVEN server-side round: badge present, but NO culprit line (not our fault).
+// A byte-identical round (read not reused): the CURRENT dominant real-traffic
+// verdict. It proves the miss is NOT our client change → its OWN 'upstream'
+// badge, NOT the apologetic 'unproven' one, and NO culprit line (not a client
+// byte change). This is the exact "疑似服务端（未证实）excuse" the user rejected.
 const html2 = _buildCostPopover(_ctx({ server_side:
-  'server-side cache miss — PROVEN: the wire bytes were byte-identical to the previous round (whole prefix not reused)' }));
-check('proven_has_badge', html2.indexOf('PROVEN-BADGE') !== -1);
-check('proven_no_culprit_line', html2.indexOf('cp-break-culprit') === -1);
-check('proven_state_class', html2.indexOf('cp-break-proven') !== -1);
+  'prefix not read back though the wire bytes were byte-identical to the previous round — so this round is NOT a client-side prefix change. The whole cached prefix was not reused upstream: most likely an upstream cache miss (a per-request gateway miss, a TTL boundary, or contention in this key\'s shared cache pool when several large prefixes are active at once). (Most misses in this system are instead client-side and are named per-field above; this is not that class.)' }));
+check('byteident_has_upstream_badge', html2.indexOf('UPSTREAM-BADGE') !== -1);
+check('byteident_not_unproven_badge', html2.indexOf('UNPROVEN-BADGE') === -1);
+check('byteident_no_culprit_line', html2.indexOf('cp-break-culprit') === -1);
+check('byteident_state_class', html2.indexOf('cp-break-upstream') !== -1);
+check('byteident_not_unproven_class', html2.indexOf('cp-break-unproven') === -1);
 
 console.log(out.join('\n'));
 """

@@ -170,6 +170,126 @@ function showAlert(message, opts) {
   });
 }
 
+/**
+ * Themed MULTI-OPTION chooser — a card with N stacked option buttons, each
+ * with a label, an optional subtitle, an optional inline SVG icon, and an
+ * optional accent style. Resolves the chosen option's `value`.
+ *
+ * Unlike confirm/prompt this is NOT ok/cancel — every button is a first-class
+ * choice. Escape / backdrop click resolve to `dismissValue` (default: the
+ * FIRST option's value, i.e. the safe default) so a dismiss is never a no-op
+ * limbo.
+ *
+ * @param {Object} cfg
+ * @param {string} [cfg.title]
+ * @param {string} [cfg.message]
+ * @param {Array<{value:string,label:string,subtitle?:string,icon?:string,accent?:boolean}>} cfg.options
+ * @param {string} [cfg.dismissValue]  Value returned on Escape/backdrop.
+ * @param {function():boolean} [cfg.liveCheck]  Polled ~4×/s; when it returns
+ *        false the dialog AUTO-RESOLVES to `dismissValue` and closes — used so
+ *        a choice that has become moot (e.g. the running turn just ended) never
+ *        leaves a stuck, meaningless dialog on screen.
+ * @returns {Promise<string>}
+ */
+function showChoice(cfg) {
+  cfg = cfg || {};
+  const options = Array.isArray(cfg.options) ? cfg.options : [];
+  const dismissValue = cfg.dismissValue != null
+    ? cfg.dismissValue
+    : (options[0] ? options[0].value : null);
+  return new Promise((resolve) => {
+    const overlay = document.createElement('div');
+    overlay.className = 'app-dialog-overlay';
+
+    const card = document.createElement('div');
+    card.className = 'app-dialog app-dialog-choice';
+    card.setAttribute('role', 'dialog');
+    card.setAttribute('aria-modal', 'true');
+
+    if (cfg.title) {
+      const h = document.createElement('div');
+      h.className = 'app-dialog-title';
+      h.textContent = cfg.title;
+      card.appendChild(h);
+    }
+    if (cfg.message) {
+      const body = document.createElement('div');
+      body.className = 'app-dialog-message';
+      _dlgSetMessage(body, cfg.message);
+      card.appendChild(body);
+    }
+
+    const list = document.createElement('div');
+    list.className = 'app-dialog-choices';
+
+    let done = false;
+    const prevFocus = document.activeElement;
+    let liveTimer = null;
+    function close(result) {
+      if (done) return;
+      done = true;
+      if (liveTimer) clearInterval(liveTimer);
+      document.removeEventListener('keydown', onKey, true);
+      overlay.classList.add('closing');
+      setTimeout(() => overlay.remove(), 160);
+      try { if (prevFocus && prevFocus.focus) prevFocus.focus(); } catch (e) { /* ignore */ }
+      resolve(result);
+    }
+
+    options.forEach((opt) => {
+      const btn = document.createElement('button');
+      btn.className = 'app-choice-btn' + (opt.accent ? ' is-accent' : '');
+      btn.type = 'button';
+      if (opt.icon) {
+        const ic = document.createElement('span');
+        ic.className = 'app-choice-icon icon-box';
+        ic.innerHTML = opt.icon;  // trusted inline SVG from call site (no user data)
+        btn.appendChild(ic);
+      }
+      const txt = document.createElement('span');
+      txt.className = 'app-choice-text';
+      const lbl = document.createElement('span');
+      lbl.className = 'app-choice-label';
+      lbl.textContent = opt.label || opt.value;
+      txt.appendChild(lbl);
+      if (opt.subtitle) {
+        const sub = document.createElement('span');
+        sub.className = 'app-choice-sub';
+        sub.textContent = opt.subtitle;
+        txt.appendChild(sub);
+      }
+      btn.appendChild(txt);
+      btn.onclick = () => close(opt.value);
+      list.appendChild(btn);
+    });
+
+    card.appendChild(list);
+    overlay.appendChild(card);
+    document.body.appendChild(overlay);
+
+    overlay.onclick = (e) => { if (e.target === overlay) close(dismissValue); };
+    function onKey(e) {
+      if (e.key === 'Escape') { e.preventDefault(); close(dismissValue); }
+    }
+    document.addEventListener('keydown', onKey, true);
+
+    // Auto-resolve when the choice becomes moot (running turn ended).
+    if (typeof cfg.liveCheck === 'function') {
+      liveTimer = setInterval(() => {
+        let live = true;
+        try { live = !!cfg.liveCheck(); } catch (e) { live = true; }
+        if (!live) close(dismissValue);
+      }, 250);
+    }
+
+    requestAnimationFrame(() => {
+      overlay.classList.add('open');
+      const first = list.querySelector('.app-choice-btn');
+      if (first) first.focus();
+    });
+  });
+}
+
 /** Themed replacement for window.prompt — resolves the string, or null. */
 function showPrompt(message, opts) {
   opts = opts || {};
@@ -188,4 +308,5 @@ if (typeof window !== 'undefined') {
   window.showConfirm = showConfirm;
   window.showAlert = showAlert;
   window.showPrompt = showPrompt;
+  window.showChoice = showChoice;
 }

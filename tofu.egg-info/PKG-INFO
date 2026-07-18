@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: tofu
-Version: 0.5.1
+Version: 0.13.0
 Summary: Tofu (豆腐) — Self-hosted AI assistant with Flask backend and vanilla JS frontend
 License: MIT
 Requires-Python: >=3.10
@@ -11,7 +11,10 @@ Requires-Dist: cryptography>=42.0
 Requires-Dist: flask>=3.0
 Requires-Dist: flask-compress>=1.14
 Requires-Dist: requests>=2.31
+Requires-Dist: urllib3>=1.26.19
+Requires-Dist: Jinja2>=3.1.6
 Requires-Dist: psutil>=5.9
+Requires-Dist: tofu-search>=0.5.0
 Requires-Dist: trafilatura>=1.6
 Requires-Dist: playwright>=1.40
 Requires-Dist: Pillow>=10.0
@@ -25,15 +28,27 @@ Requires-Dist: openpyxl>=3.1
 Requires-Dist: xlrd>=2.0
 Requires-Dist: olefile>=0.46
 Requires-Dist: mcp>=1.0
+Requires-Dist: orjson>=3.9
+Requires-Dist: tiktoken>=0.7
 Requires-Dist: pymupdf>=1.24
 Requires-Dist: pymupdf4llm>=0.0.17
 Requires-Dist: markdown>=3.5
+Requires-Dist: PyYAML>=6.0
 Requires-Dist: uv>=0.4
 Requires-Dist: sqlalchemy>=2.0
+Provides-Extra: test
+Requires-Dist: pytest>=7.0; extra == "test"
+Requires-Dist: pytest-cov>=4.0; extra == "test"
+Requires-Dist: pytest-xdist>=3.0; extra == "test"
+Requires-Dist: pytest-timeout>=2.1; extra == "test"
+Requires-Dist: fakeredis>=2.20; extra == "test"
 Provides-Extra: dev
-Requires-Dist: pytest>=7.0; extra == "dev"
-Requires-Dist: pytest-cov>=4.0; extra == "dev"
+Requires-Dist: tofu[test]; extra == "dev"
 Requires-Dist: ruff; extra == "dev"
+Provides-Extra: scale
+Requires-Dist: redis>=4.3; extra == "scale"
+Provides-Extra: trading
+Requires-Dist: tofu-trading<0.2,>=0.1; extra == "trading"
 
 <p align="center">
   <img src="static/icons/tofu-welcome.svg" width="140" height="160" alt="Tofu logo" /><br/>
@@ -62,9 +77,19 @@ Requires-Dist: ruff; extra == "dev"
 
 ## What is Tofu?
 
-Tofu is a **fully self-hosted AI assistant** you run with a single command. It connects to any OpenAI-compatible LLM and gives you a complete AI workspace — from simple Q&A to autonomous multi-step agents that can search the web, edit your codebase, control your browser, and collaborate as a team of specialist agents.
+Tofu is a **fully self-hosted AI assistant** you run with a single command. It connects to any OpenAI-compatible LLM and gives you a complete AI workspace — from simple Q&A to autonomous multi-step agents that can search the web, edit your codebase, read papers, control your browser, and collaborate as a team of specialist agents.
 
-Everything runs on your machine. Your data never leaves your infrastructure. One `python server.py` and you're live.
+Everything runs on your machine. Your data never leaves your infrastructure. One command and you're live.
+
+**What makes Tofu different:**
+
+- **One command, everything included** — the installer sets up the runtime, dependencies, database, and browser engine for you. No Docker required (though it's supported), no manual database setup, no config files to hand-edit.
+- **Bring any model** — OpenAI, Anthropic, Gemini, DeepSeek, Qwen, GLM, local models via Ollama/vLLM, or even your existing **Claude Pro/Max / ChatGPT subscription** logged in directly. Add several keys and Tofu rotates and load-balances across them automatically.
+- **A real agent, not just a chat box** — it can run multi-step tasks on its own: search, read, write code, run commands, generate images, and check its own work with a Planner → Worker → Critic loop.
+- **Truly yours** — self-hosted, MIT-licensed, no telemetry. Your conversations, keys, and files stay on your infrastructure.
+- **Everything is also an API** — every feature in the UI is a documented HTTP endpoint, so you can script Tofu or plug it into other tools (see [Headless API](#headless-api)).
+
+> **Looking to drive Tofu from an AI agent or coding assistant?** This README is written for *people*. There's a separate set of machine-facing materials — see [For AI Agents & Developers](#for-ai-agents--developers) at the bottom.
 
 ---
 
@@ -134,12 +159,12 @@ Everything you can do in the UI is also exposed as a documented HTTP API, so you
 
 ```bash
 # Python — sync `Tofu` class + `tofu` CLI
-pip install -e clients/python
+cd clients/python && pip install -e ".[cli]"
 export TOFU_API_KEY=tofu_admin_xxx TOFU_BASE_URL=http://localhost:15000
 tofu chat "hello"
 
 # TypeScript — Node 18+, browsers, Cloudflare Workers, Vercel Edge, Deno, Bun
-npm install ./clients/typescript
+cd clients/typescript && npm install
 ```
 
 Or use any OpenAI / Anthropic SDK directly by pointing it at your Tofu base URL with your `tofu_admin_*` key as the API key.
@@ -158,7 +183,7 @@ When `auth_mode=multi-user`, Tofu turns into a **paid AI relay station** — one
 - **Payments** — Stripe webhooks and Alipay async-notify, idempotent on `(provider, provider_id)`. Configure credentials in `data/config/payments.json`.
 - **Redeem codes** — generate batches, hand them to users, redeem to wallet.
 - **Pricing table** — per-model unit prices (input/output/cache) hot-reloaded from `data/config/pricing.json`, with family-prefix fallback and an admin-tunable margin.
-- **Admin Settings tabs** — Users, Pricing, Redeem Codes, Payments — visible only to keys with the `admin` scope under multi-user mode.
+- **Admin console** — a standalone **`/admin`** dashboard (Users, Pricing, Redeem Codes, Payments) reachable only with an `admin`-scoped key under multi-user mode.
 
 Everything is implemented in `lib/billing/` and `routes/api_v1/billing.py`; switch back to `open` or `private` and the tables stay empty, the customer pages stop being served, and the gate behaves as in the previous section.
 
@@ -184,6 +209,28 @@ The core experience: pick a model from the dropdown, type a message, get a strea
 3. **LLM summary** (force-triggered): when context pressure is high, a cheap model evaluates each turn for relevance and compresses accordingly
 
 **When you want to organize your conversations** — create folders in the sidebar to group related threads. Drag conversations between folders, or leave them unfiled.
+
+**When you'd rather read the reasoning in order** — finished multi-tool replies render as an *interleaved timeline*: each tool call appears inline right next to the thinking and narration that led to it, so you follow the assistant's actions in the order they actually happened instead of three separate "all thinking / all tools / all answer" blocks. On by default; toggle it in **Settings → General → "Per-tool inline timeline."**
+
+**When a conversation runs long** — a **context health bar** shows how much of the model's window you're using, and Tofu automatically **compacts** older turns so the thread keeps going without hitting the limit. You can open the **compaction viewer** to inspect exactly what was summarized, so nothing feels lost.
+
+---
+
+### 🎙️ Voice Input (Speech-to-Text)
+
+When typing is slower than talking — dictate straight into the message box.
+
+**How to use:** Click the **mic button** next to the composer, allow microphone access, speak, then click again to stop. Your speech is transcribed and inserted at the cursor — it's **never auto-sent**, so you review and edit before sending. It's dictation, not a spoken conversation.
+
+**The mic only appears** when your browser supports recording *and* a speech-to-text model is configured — otherwise it stays hidden. To enable it, add a provider whose model has the `transcription` (or `audio_chat`) capability in **Settings → Providers**:
+
+| Provider | Models |
+|---|---|
+| **OpenAI** | `gpt-4o-transcribe`, `gpt-4o-mini-transcribe`, `whisper-1` |
+| **Groq** | `whisper-large-v3-turbo`, `whisper-large-v3` (fast, low cost) |
+| **Omni chat models** | Gemini / LongCat and similar, via `audio_chat` |
+
+Optional env tuning: `TOFU_AUDIO_MAX_BYTES` (default 25 MB), `TOFU_AUDIO_MAX_DURATION_S` (default 600 s). There's no separate voice tab — availability is driven entirely by the configured model.
 
 ---
 
@@ -263,6 +310,24 @@ Point Tofu at any codebase and it becomes a coding assistant that can read, sear
 
 ---
 
+### 🧩 Project Brain — coordinate many conversations on one project
+
+When you have several conversations open on the same project, the **Project Brain** makes them act like one coordinated team instead of separate, forgetful chats. Each conversation can see what the others are doing, share the same goals and decisions, and avoid stepping on each other's work — and the project can even pick up pending work on its own, all while staying fully visible and controllable by you.
+
+**How you use it:** it's **automatic whenever a conversation is in project mode** (attached to a project folder) — no toggle to flip. You watch and steer it through the slide-in **Project Brain panel**, opened from the project bar (live activity, charter, board, and status tabs), plus a one-line status headline in the collab-bar. The one thing that needs *you*: agents can only *propose* changes to the shared charter — you click **Commit** or **Reject**.
+
+| Capability | What it gives you |
+|---|---|
+| **Charter** | A shared north-star doc + committed decisions every conversation follows. Changes are human-approved. |
+| **Board & epics** | A kanban of claimable workstreams so conversations divide work and don't duplicate it. |
+| **Activity feed** | A live pulse of what every conversation is doing right now. |
+| **Peer messaging** | One conversation can send another an advisory nudge — rate-limited, never interrupts mid-work. |
+| **Path leases** | A conversation reserves the files it's editing so siblings hold off, preventing edit collisions. |
+| **Status lane** | Ask the project "where are we? are we drifting?" and get a synthesized answer, plus a watch-list of concerns the brain revisits over time. |
+| **Autonomous dispatch** | Idle projects self-start ready, unblocked work with no hand-off. |
+
+---
+
 ### 🤖 Multi-Agent Swarm
 
 Some tasks are too big for a single agent. The swarm system lets a master orchestrator plan sub-tasks and delegate them to specialist agents running in parallel.
@@ -304,33 +369,16 @@ NiuTrans is the default provider with excellent Chinese↔English quality. Click
 
 ---
 
-### 🔀 CLI Backend Switching
+### 🔀 Subscription Login (Claude Pro/Max · ChatGPT)
 
-Already using **Claude Code** or **OpenAI Codex**? Tofu can act as a pure web frontend for them — you get Tofu's UI, conversation management, and persistence, while the external CLI handles all LLM calls and tool execution with its own authentication.
+Already paying for **Claude Pro/Max** or a **ChatGPT** subscription? Log in with it and Tofu uses that subscription as a model provider — no separate API key, billed under your existing plan.
 
-**Setup:**
-```bash
-# Install Claude Code
-npm install -g @anthropic-ai/claude-code && claude auth login
+**How it works:** Go to **Settings → Providers** and click **登录 Claude** / **登录 ChatGPT**. Tofu runs a PKCE OAuth flow (`lib/oauth/`), stores the token, and `lib/oauth/outbound.py` bridges the logged-in subscription into a managed provider slot — resolved per-request into a live token plus the required client-identity headers. From then on the subscription behaves like any other provider in the dispatcher (slot rotation, fallback, latency scoring all apply).
 
-# Or install Codex
-npm install -g @openai/codex && codex auth login
-```
+- **Claude** requests go to the Anthropic Messages API with the Claude-Code identity headers.
+- **ChatGPT (Codex)** requests are auto-converted to the Responses API format.
 
-Click the **backend selector** (🤖) in the top bar to switch. The UI automatically adapts — model selector and Tofu-specific features are hidden when using an external backend.
-
-| Feature | Built-in (Tofu) | Claude Code | Codex |
-|---------|:-:|:-:|:-:|
-| Chat & streaming | ✅ | ✅ | ✅ |
-| Web search | ✅ | ✅ (CC's) | ✅ (Codex's) |
-| File operations | ✅ | ✅ (CC's) | ✅ (Codex's) |
-| Code execution | ✅ | ✅ (Bash) | ✅ (exec) |
-| Model selection | ✅ | — | — |
-| Image generation | ✅ | ❌ | ❌ |
-| Browser extension | ✅ | ❌ | ❌ |
-| Multi-agent swarm | ✅ | ❌ | ❌ |
-
-> The CLI must be installed on the same machine as the Tofu server. Each conversation remembers its backend.
+> This is a normal in-dispatch provider, **not** a CLI subprocess. (An earlier CLI-subprocess "backend switching" mechanism — `lib/agent_backends/` — was removed in 2026-06 in favour of this simpler subscription-as-provider path.)
 
 ---
 
@@ -428,6 +476,14 @@ Multi-model dispatch cycles across Gemini and GPT image models, automatically re
 
 ---
 
+### 🎨 Artifacts (live canvas)
+
+When the assistant produces something you'd rather *see* than scroll past — a full HTML page, an SVG diagram, a React-style snippet, or a long document — it becomes an **Artifact**.
+
+**How it works:** A clickable chip appears next to the message; open it and Tofu renders the content live in a side panel — HTML/SVG in a sandboxed iframe, Markdown safely sanitized. Every artifact is versioned, so you can flip between revisions, **pin** favorites, browse them all in the per-conversation **library**, and **export to PDF**. Great for building a small web page, a chart, or a formatted report and iterating on it in place.
+
+---
+
 ### 🔗 MCP (Model Context Protocol)
 
 When you want to connect external tool servers — GitHub, databases, custom APIs — MCP bridges them into Tofu's tool system.
@@ -477,6 +533,14 @@ When you need something to run automatically — daily data pulls, periodic heal
 
 ---
 
+### 🔧 Self-Tuning (Daily Optimizer)
+
+Tofu quietly watches how it's performing and proposes small improvements to itself — you stay in control of every change.
+
+**How it works:** A nightly loop analyzes recent runs and drafts proposals (e.g. "block a spammy search domain," "adjust a default"). Click the **OPTIMIZER** badge in the top bar to review each one with its rationale, severity, and confidence — then **approve, reject, revert,** or hit **Run now**. Nothing is applied without your say-so (a small whitelist of safe tweaks can auto-apply, and everything is reversible). Turn it off entirely in Settings.
+
+---
+
 ### 🐦 Feishu (Lark) Bot
 
 When your team communicates in Feishu and you want AI assistance directly in group chats — Tofu connects as a Feishu bot via WebSocket.
@@ -494,11 +558,19 @@ When your team communicates in Feishu and you want AI assistance directly in gro
 
 When the assistant discovers something useful — a bug pattern, a project convention, your preferred coding style — it can save that knowledge as a **memory** for future sessions.
 
-**How it works:** Memories are Markdown files stored in `.chatui/skills/` (project-scoped) or `.chatui/skills/global/` (all projects). The assistant creates them proactively or when you ask. In future conversations, relevant memories are automatically loaded into context.
+**How it works:** Project-scoped memories are Markdown files stored in `.tofu/skills/` inside your project; global memories (shared across all projects) live in the server-side store `data/memories/global/`. The assistant creates them proactively or when you ask. In future conversations, relevant memories are automatically loaded into context.
 
 **Tools:** `create_memory`, `update_memory`, `delete_memory`, `merge_memories` — the assistant manages its own knowledge base across sessions.
 
 **When to use:** "Remember that our API always returns snake_case" — the assistant saves this convention and applies it in all future code generation for this project.
+
+---
+
+### 📚 Skills Store
+
+When you want to give the assistant reusable, packaged know-how — a set of instructions and helper scripts for a specific task — install a **Skill**.
+
+**How it works:** Skills follow the open Claude / OpenClaw / AgentSkills format (a `SKILL.md` plus optional reference files and scripts). Go to **Settings → Skills** to browse a **Catalog** of recommended packs (e.g. Anthropic's docx / xlsx / pdf / skill-creator skills) and **install with one click**, or **drag-and-drop a local `.zip`**. Installed skills appear under the **Installed** tab, where you can view or uninstall them. Bundled `install.sh` scripts are surfaced as hints — never auto-executed.
 
 ---
 
@@ -515,20 +587,33 @@ When you want to explore a different direction without losing the current thread
 
 ---
 
+### 🐾 Tofu Pet (just for fun)
+
+Switch to the **Tofu** theme and a little animated chibi-tofu mascot moves into the project bar. It wanders through a decorative scene with a real walk cycle and moods — thinking while a task loads, celebrating on success — and leaves interactive footstep effects (grass tufts, pool ripples, sky wisps). Use the **Scene** button (Meadow / Pool / Sky / Off) and **Pet** button (Tofu / Oneko) in the bar to customize it. It respects your OS "reduce motion" setting. Purely decorative — turn it off any time.
+
+---
+
 ## Settings Reference
 
 All configuration is done through the **⚙️ Settings** panel (top-right gear icon). Changes save instantly — no restart needed.
 
 | Tab | What you configure |
 |---|---|
-| **⚙️ General** | Theme (Dark/Light/Tofu), temperature, max tokens, thinking depth, system prompt |
-| **🔗 Providers** | API keys, endpoints, model lists, multi-key rotation, auto-discovery |
+| **⚙️ General** | Theme (Dark/Light/Tofu), temperature, max tokens, thinking depth, system prompt, per-tool inline timeline |
+| **🔗 Providers** | API keys, endpoints, model lists (incl. transcription/audio models), multi-key rotation, auto-discovery |
 | **📦 Display** | Which models appear in dropdowns, default model, fallback model |
 | **🔍 Search & Fetch** | Result count, timeouts, character limits, blocked domains, content filter |
 | **🌐 Translation** | Machine translation provider (NiuTrans / Custom), API key, endpoint |
 | **🌐 Network** | HTTP/HTTPS proxy, bypass domains |
+| **🔀 Subscription Login** | Log in to Claude Pro/Max or ChatGPT and use it as a provider |
 | **🐦 Feishu** | App credentials, default project, allowed users |
+| **🔗 MCP** | Model Context Protocol servers (App-Store catalog + custom) |
+| **📚 Skills** | Browse, install, and manage reusable Skill packs |
+| **🧠 Memory & Preferences** | Stored memories and your durable preference profile |
+| **🔑 API Keys** | Mint/scope/revoke headless API keys, per-key limits, auth mode |
 | **`</>` Advanced** | Price overrides, cache management, server info |
+
+> Multi-tenant relay admin (Users, Pricing, Redeem Codes, Payments) now lives in a standalone **`/admin`** console rather than a Settings tab.
 
 ### Environment Variables (fallback)
 
@@ -568,7 +653,7 @@ The `.env.example` file documents all supported variables. Key ones:
 ├── index.html                 Main chat UI (single-page app)
 │
 ├── lib/                       Core libraries
-│   ├── agent_backends/        CLI backend switching (builtin/Claude Code/Codex)
+│   ├── agent_core/            Reusable agent base (run loop, dispatch, TaskRuntime, push, profiles)
 │   ├── llm/                   LLM API client package (build_body / stream / cache / diagnostics)
 │   ├── llm_dispatch/          Multi-key multi-model smart dispatcher
 │   ├── database/              Dual backend — SQLite default, PostgreSQL auto-bootstrap
@@ -576,7 +661,7 @@ The `.env.example` file documents all supported variables. Key ones:
 │   │   ├── orchestrator.py    Main LLM ↔ tool loop
 │   │   ├── executor.py        Tool execution engine
 │   │   ├── endpoint.py        Planner → Worker → Critic loop
-│   │   └── compaction.py      3-layer context compaction
+│   │   └── compaction/        3-layer context compaction (package)
 │   ├── tools/                 Tool definitions & schemas
 │   ├── swarm/                 Multi-agent orchestration
 │   ├── fetch/                 Content fetching & extraction
@@ -592,7 +677,8 @@ The `.env.example` file documents all supported variables. Key ones:
 │   ├── desktop_agent.py       Desktop automation agent
 │   └── ...
 │
-├── routes/                    Flask Blueprints (28+ modules) + routes/api_v1/ (headless API)
+├── lib/conversations/         Project Brain — charter, board, feed, peer messaging, path leases, status lane
+├── routes/                    Quart Blueprints + routes/api_v1/ (headless API)
 ├── lib/billing/               Multi-tenant relay billing (wallet, ledger, pricing, payments)
 ├── lib/oauth/                 OAuth flows (Claude, Codex, PKCE, token store)
 ├── lib/optimizer/             Nightly self-tuning loop (analyzer → proposer → applier)
@@ -602,6 +688,9 @@ The `.env.example` file documents all supported variables. Key ones:
 ├── tests/                     Test suite (unit, API, E2E)
 └── data/                      Runtime data (git-ignored)
 ```
+
+> Tofu runs on **Quart** (async Flask) via **Hypercorn**; existing sync route
+> handlers run unchanged in a thread pool.
 
 ---
 
@@ -631,6 +720,12 @@ python tests/run_all.py
 python -m pytest tests/test_backend_unit.py
 python -m pytest tests/test_api_integration.py
 python -m pytest tests/test_visual_e2e.py
+
+# Or via the Makefile (parallelized; tune with JOBS=N)
+make test-unit        # fast unit tier
+make test-api         # API integration tier
+make test-frontend    # jsdom frontend suites
+make test-all         # everything
 ```
 
 ---
@@ -658,6 +753,24 @@ Tofu has a tri-state auth model, persisted at `data/config/auth.json` and switch
 - Tool execution — the assistant can run shell commands and edit files; dangerous patterns are blocked, but use with appropriate caution.
 - Desktop agent — requires explicit `--allow-write` / `--allow-exec` flags.
 - `TUNNEL_TOKEN` is a deprecated back-compat shim and prints a warning at boot — migrate to the API-keys system.
+
+---
+
+## For AI Agents & Developers
+
+This README is written for people. If you're driving Tofu from a coding
+assistant, building on top of it, or contributing code, the machine-facing
+materials live here:
+
+| Document | What it covers |
+|---|---|
+| [`CLAUDE.md`](CLAUDE.md) | Project intelligence & mandatory rules for AI-assisted code changes (logging discipline, code style, change-approval gates, the frontend/backend boundary). |
+| [`JOURNAL.md`](JOURNAL.md) | The project's evolution journal — what was tried, why it changed, current status. |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Full directory map + Mermaid architecture diagram (and `docs/architecture.html` for the visual version). |
+| [`docs/HEADLESS_API.md`](docs/HEADLESS_API.md) | Complete headless-API reference (the `/api/v1/*`, OpenAI, and Anthropic surfaces). |
+| [`docs/CUSTOM_TOOLS.md`](docs/CUSTOM_TOOLS.md) · [`docs/TOOL_PLUGINS.md`](docs/TOOL_PLUGINS.md) | Adding your own tools and plugin blueprints. |
+| [`docs/PROJECT_BRAIN.md`](docs/PROJECT_BRAIN.md) | Deep dive on cross-conversation coordination. |
+| `/api/openapi.json` · `/api/docs` | Live OpenAPI 3.1 spec + Swagger UI served by a running instance. |
 
 ---
 

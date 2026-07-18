@@ -60,7 +60,9 @@ _COMMAND_TTL_S = 90
 import os as _os
 try:
     POLL_WAIT_TIMEOUT = float(_os.environ.get('TOFU_DESKTOP_POLL_WAIT', '8'))
-except (ValueError, TypeError):
+except (ValueError, TypeError) as _e:
+    logger.debug('[Desktop] bad TOFU_DESKTOP_POLL_WAIT %r (%s) — using 8.0s default',
+                 _os.environ.get('TOFU_DESKTOP_POLL_WAIT'), _e)
     POLL_WAIT_TIMEOUT = 8.0
 
 
@@ -175,15 +177,16 @@ async def take_pending_commands_async(timeout: float = None) -> list:
                 break
             try:
                 await asyncio.wait_for(event.wait(), timeout=min(remaining, 1.0))
-            except asyncio.TimeoutError:
+            except asyncio.TimeoutError as e:
+                logger.debug('[Desktop] async poll slice elapsed, re-checking queue: %s', e)
                 pass
         return take_pending_commands()
     finally:
         with _async_waiters_lock:
             try:
                 _async_waiters.remove(waiter)
-            except ValueError:
-                pass
+            except ValueError as e:
+                logger.debug('[Desktop] async waiter already deregistered: %s', e)
 
 
 def pending_commands_count() -> int:

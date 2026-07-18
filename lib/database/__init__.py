@@ -56,6 +56,11 @@ from lib.database._core import (  # noqa: F401
     pg_available,
     # Opt-in SQL-error log suppression (expected-to-fail probes)
     suppress_sql_error_log,
+    # Shutdown-race awareness (concise finalize logging during PG stop)
+    is_expected_shutdown_error,
+    log_db_finalize_error,
+    mark_pg_stopping,
+    pg_is_stopping,
     # Sanitization
     strip_null_bytes_deep,
     # SQL translation
@@ -66,6 +71,8 @@ from lib.database._core import (  # noqa: F401
     heal_toast_corruption,
     # Graceful shutdown
     shutdown_pool,
+    # Load-shedding: typed pool-exhaustion error → mapped to HTTP 503
+    PoolExhaustedError,
 )
 from lib.database._bootstrap import (  # noqa: F401
     # Scheduled logical backup (pg_dumpall) — PG-only, no-op on SQLite
@@ -99,8 +106,11 @@ __all__ = [
     '_column_exists',
     'db_available', 'pg_available',
     'suppress_sql_error_log',
+    'is_expected_shutdown_error', 'log_db_finalize_error',
+    'mark_pg_stopping', 'pg_is_stopping',
     '_tune_connection',
     'shutdown_pool',
+    'PoolExhaustedError',
     'backup_pg_database',
     # Async facade
     'async_execute', 'async_fetchone', 'async_fetchall',

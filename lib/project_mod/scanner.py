@@ -63,9 +63,10 @@ def ensure_project_state(path_str, extra_paths=None, conv_id=None, readonly_path
     #   subsequent set_project* call is delayed, the conv's tool calls
     #   can still resolve via the conv registry.
     if conv_id:
+        conv_primary = abs_path
         try:
             from lib.project_mod.config import set_conv_roots
-            set_conv_roots(conv_id, abs_path, extras=abs_extras,
+            set_conv_roots(conv_id, conv_primary, extras=abs_extras,
                            readonly_paths=readonly_paths)
         except Exception as e:
             logger.warning('[Project] set_conv_roots failed conv=%s: %s',

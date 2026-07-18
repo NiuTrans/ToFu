@@ -82,6 +82,7 @@ LIVE_PG_CONVERSATIONS = """
         settings JSONB NOT NULL DEFAULT '{}'::jsonb,
         msg_count INTEGER NOT NULL DEFAULT 0,
         search_text TEXT NOT NULL DEFAULT '',
+        rev INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (id, user_id)
     )
 """
@@ -97,6 +98,7 @@ LIVE_SQLITE_CONVERSATIONS = """
         settings TEXT NOT NULL DEFAULT '{}',
         msg_count INTEGER NOT NULL DEFAULT 0,
         search_text TEXT NOT NULL DEFAULT '',
+        rev INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (id, user_id)
     )
 """
@@ -279,6 +281,7 @@ LIVE_PG_TASK_RESULTS = """
         tool_rounds TEXT,
         search_results TEXT,
         metadata TEXT,
+        segments TEXT,
         created_at BIGINT NOT NULL,
         completed_at BIGINT
     )
@@ -294,6 +297,7 @@ LIVE_SQLITE_TASK_RESULTS = """
         tool_rounds TEXT,
         search_results TEXT,
         metadata TEXT,
+        segments TEXT,
         created_at INTEGER NOT NULL,
         completed_at INTEGER
     )
@@ -926,7 +930,13 @@ LIVE_PG_SCHEDULED_TASKS = """
         last_execution_status TEXT DEFAULT '',
         execution_count INTEGER NOT NULL DEFAULT 0,
         max_executions INTEGER NOT NULL DEFAULT 0,
-        expires_at TEXT DEFAULT ''
+        expires_at TEXT DEFAULT '',
+        condition_kind TEXT NOT NULL DEFAULT 'llm',
+        condition_command TEXT NOT NULL DEFAULT '',
+        condition_regex TEXT NOT NULL DEFAULT '',
+        promotion_streak INTEGER NOT NULL DEFAULT 0,
+        fallback_streak INTEGER NOT NULL DEFAULT 0,
+        promoted_at TEXT DEFAULT ''
     )
 """
 LIVE_SQLITE_SCHEDULED_TASKS = """
@@ -960,7 +970,13 @@ LIVE_SQLITE_SCHEDULED_TASKS = """
         last_execution_status TEXT DEFAULT '',
         execution_count INTEGER NOT NULL DEFAULT 0,
         max_executions INTEGER NOT NULL DEFAULT 0,
-        expires_at TEXT DEFAULT ''
+        expires_at TEXT DEFAULT '',
+        condition_kind TEXT NOT NULL DEFAULT 'llm',
+        condition_command TEXT NOT NULL DEFAULT '',
+        condition_regex TEXT NOT NULL DEFAULT '',
+        promotion_streak INTEGER NOT NULL DEFAULT 0,
+        fallback_streak INTEGER NOT NULL DEFAULT 0,
+        promoted_at TEXT DEFAULT ''
     )
 """
 
@@ -975,7 +991,10 @@ LIVE_PG_PROACTIVE_POLL_LOG = """
         status_snapshot TEXT NOT NULL DEFAULT '',
         model TEXT NOT NULL DEFAULT '',
         tokens_used INTEGER NOT NULL DEFAULT 0,
-        execution_task_id TEXT DEFAULT ''
+        execution_task_id TEXT DEFAULT '',
+        tier TEXT NOT NULL DEFAULT 'llm',
+        predicate_matched INTEGER NOT NULL DEFAULT -1,
+        llm_agreed INTEGER NOT NULL DEFAULT -1
     )
 """
 LIVE_SQLITE_PROACTIVE_POLL_LOG = """
@@ -988,7 +1007,10 @@ LIVE_SQLITE_PROACTIVE_POLL_LOG = """
         status_snapshot TEXT NOT NULL DEFAULT '',
         model TEXT NOT NULL DEFAULT '',
         tokens_used INTEGER NOT NULL DEFAULT 0,
-        execution_task_id TEXT DEFAULT ''
+        execution_task_id TEXT DEFAULT '',
+        tier TEXT NOT NULL DEFAULT 'llm',
+        predicate_matched INTEGER NOT NULL DEFAULT (-1),
+        llm_agreed INTEGER NOT NULL DEFAULT (-1)
     )
 """
 
@@ -1013,7 +1035,14 @@ LIVE_PG_TIMER_WATCHERS = """
         execution_task_id TEXT DEFAULT '',
         last_poll_at TEXT DEFAULT '',
         last_poll_decision TEXT DEFAULT '',
-        last_poll_reason TEXT DEFAULT ''
+        last_poll_reason TEXT DEFAULT '',
+        condition_kind TEXT NOT NULL DEFAULT 'llm',
+        condition_command TEXT NOT NULL DEFAULT '',
+        condition_regex TEXT NOT NULL DEFAULT '',
+        promotion_streak INTEGER NOT NULL DEFAULT 0,
+        fallback_streak INTEGER NOT NULL DEFAULT 0,
+        promoted_at TEXT DEFAULT '',
+        origin TEXT NOT NULL DEFAULT 'inline'
     )
 """
 LIVE_SQLITE_TIMER_WATCHERS = LIVE_PG_TIMER_WATCHERS  # identical (all TEXT/INTEGER)
@@ -1030,7 +1059,10 @@ LIVE_PG_TIMER_POLL_LOG = """
         tokens_used INTEGER NOT NULL DEFAULT 0,
         model TEXT NOT NULL DEFAULT '',
         poll_id TEXT NOT NULL DEFAULT '',
-        raw_output TEXT NOT NULL DEFAULT ''
+        raw_output TEXT NOT NULL DEFAULT '',
+        tier TEXT NOT NULL DEFAULT 'llm',
+        predicate_matched INTEGER NOT NULL DEFAULT -1,
+        llm_agreed INTEGER NOT NULL DEFAULT -1
     )
 """
 LIVE_SQLITE_TIMER_POLL_LOG = """
@@ -1044,7 +1076,10 @@ LIVE_SQLITE_TIMER_POLL_LOG = """
         tokens_used INTEGER NOT NULL DEFAULT 0,
         model TEXT NOT NULL DEFAULT '',
         poll_id TEXT NOT NULL DEFAULT '',
-        raw_output TEXT NOT NULL DEFAULT ''
+        raw_output TEXT NOT NULL DEFAULT '',
+        tier TEXT NOT NULL DEFAULT 'llm',
+        predicate_matched INTEGER NOT NULL DEFAULT (-1),
+        llm_agreed INTEGER NOT NULL DEFAULT (-1)
     )
 """
 
@@ -1203,7 +1238,14 @@ LIVE_PG_PROJECT_TASKS = """
         lease_expires_at BIGINT NOT NULL DEFAULT 0,
         created_by_conv TEXT NOT NULL DEFAULT '',
         depends_on TEXT NOT NULL DEFAULT '[]',
+        kind TEXT NOT NULL DEFAULT 'epic',
         dispatched INTEGER NOT NULL DEFAULT 0,
+        blocked_until BIGINT NOT NULL DEFAULT 0,
+        block_count INTEGER NOT NULL DEFAULT 0,
+        block_reason TEXT NOT NULL DEFAULT '',
+        wait_paths TEXT NOT NULL DEFAULT '[]',
+        dispatch_target TEXT NOT NULL DEFAULT '',
+        write_set TEXT NOT NULL DEFAULT '[]',
         created_at BIGINT NOT NULL DEFAULT 0,
         updated_at BIGINT NOT NULL DEFAULT 0,
         PRIMARY KEY (id)
@@ -1219,7 +1261,14 @@ LIVE_SQLITE_PROJECT_TASKS = """
         lease_expires_at INTEGER NOT NULL DEFAULT 0,
         created_by_conv TEXT NOT NULL DEFAULT '',
         depends_on TEXT NOT NULL DEFAULT '[]',
+        kind TEXT NOT NULL DEFAULT 'epic',
         dispatched INTEGER NOT NULL DEFAULT 0,
+        blocked_until INTEGER NOT NULL DEFAULT 0,
+        block_count INTEGER NOT NULL DEFAULT 0,
+        block_reason TEXT NOT NULL DEFAULT '',
+        wait_paths TEXT NOT NULL DEFAULT '[]',
+        dispatch_target TEXT NOT NULL DEFAULT '',
+        write_set TEXT NOT NULL DEFAULT '[]',
         created_at INTEGER NOT NULL DEFAULT 0,
         updated_at INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (id)

@@ -260,7 +260,7 @@ def _analyse_conversations(convs, target_date):
 
     Returns a complete result dict (streams, carryover, stats, error).
     """
-    import uuid as _uuid
+    from lib.ids import short_id
 
     t0 = time.monotonic()
     total_rounds = sum(c.get('rounds', 0) for c in convs)
@@ -288,7 +288,7 @@ def _analyse_conversations(convs, target_date):
         logger.info('[DailyReport] No conversations to analyse for %s', target_date)
         # Surface yesterday's carryover as tomorrow items
         tomorrow_items = [
-            {'id': f'todo-{_uuid.uuid4().hex[:8]}', 'text': t, 'done': False}
+            {'id': short_id('todo-', 8), 'text': t, 'done': False}
             for t in carryover[:12] if t
         ]
         empty_result = {
@@ -410,7 +410,7 @@ def _analyse_conversations(convs, target_date):
 
     for s in raw_streams:
         stream = {
-            'id': f'stream-{_uuid.uuid4().hex[:8]}',
+            'id': short_id('stream-', 8),
             'title': s.get('title', '(未命名)'),
             'summary': s.get('summary', ''),
             'status': s.get('status', 'in_progress'),
@@ -436,7 +436,7 @@ def _analyse_conversations(convs, target_date):
     if unclaimed and len(unclaimed) >= 2:
         unc_convs = [conv_map[cid] for cid in unclaimed if cid in conv_map]
         final_streams.append({
-            'id': f'stream-{_uuid.uuid4().hex[:8]}',
+            'id': short_id('stream-', 8),
             'title': '零碎问答',
             'summary': f'{len(unc_convs)} 个独立对话',
             'status': 'done',
@@ -466,7 +466,7 @@ def _analyse_conversations(convs, target_date):
         if not text:
             continue
         item = {
-            'id': f'todo-{_uuid.uuid4().hex[:8]}',
+            'id': short_id('todo-', 8),
             'text': text[:60],
             'done': False,
         }

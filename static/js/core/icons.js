@@ -59,6 +59,7 @@
     star: '<path d="M11.525 2.295a.53.53 0 0 1 .95 0l2.31 4.679a2.123 2.123 0 0 0 1.595 1.16l5.166.756a.53.53 0 0 1 .294.904l-3.736 3.638a2.123 2.123 0 0 0-.611 1.878l.882 5.14a.53.53 0 0 1-.771.56l-4.618-2.428a2.122 2.122 0 0 0-1.973 0L6.396 21.01a.53.53 0 0 1-.77-.56l.881-5.139a2.122 2.122 0 0 0-.611-1.879L2.16 9.795a.53.53 0 0 1 .294-.906l5.165-.755a2.122 2.122 0 0 0 1.597-1.16z"/>',
     lightbulb: '<path d="M15 14c.2-1 .7-1.7 1.5-2.5 1-.9 1.5-2.2 1.5-3.5A6 6 0 0 0 6 8c0 1 .2 2.2 1.5 3.5.7.7 1.3 1.5 1.5 2.5"/><path d="M9 18h6"/><path d="M10 22h4"/>',
     ban: '<circle cx="12" cy="12" r="10"/><path d="M4.929 4.929 19.07 19.071"/>',
+    lock: '<rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>',
     download: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/>',
     upload: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" x2="12" y1="3" y2="15"/>',
     refresh: '<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M3 21v-5h5"/>',
@@ -70,6 +71,7 @@
     sliders: '<line x1="21" x2="14" y1="4" y2="4"/><line x1="10" x2="3" y1="4" y2="4"/><line x1="21" x2="12" y1="12" y2="12"/><line x1="8" x2="3" y1="12" y2="12"/><line x1="21" x2="16" y1="20" y2="20"/><line x1="12" x2="3" y1="20" y2="20"/><line x1="14" x2="14" y1="2" y2="6"/><line x1="8" x2="8" y1="10" y2="14"/><line x1="16" x2="16" y1="18" y2="22"/>',
     chevronDown: '<path d="m6 9 6 6 6-6"/>',
     plus: '<path d="M5 12h14"/><path d="M12 5v14"/>',
+    languages: '<path d="m5 8 6 6"/><path d="m4 14 6-6 2-3"/><path d="M2 5h12"/><path d="M7 2h1"/><path d="m22 22-5-10-5 10"/><path d="M14 18h6"/>',
   };
 
   // Solid-fill colored status dots (traffic-light style). Color is baked in
@@ -104,6 +106,26 @@
       '" style="vertical-align:middle;flex-shrink:0"><circle cx="12" cy="12" r="10"/></svg>';
   }
 
+  // Welcome-screen capability chips — icon + label. Shared by the three
+  // welcome render sites (index.html static markup, newChat(), renderChat()'s
+  // empty-conv branch) so the pill set stays identical everywhere.
+  var _WELCOME_PILLS = [
+    ['brain',    'welcome.extendedThinking'],
+    ['search',   'welcome.search'],
+    ['download', 'welcome.urlFetch'],
+    ['image',    'welcome.imageInput'],
+    ['zap',      'welcome.coPilot'],
+    ['compass',  'welcome.browser'],
+  ];
+  function _welcomePillsHtml() {
+    var _t = (typeof t === 'function') ? t : function (k) { return k; };
+    return _WELCOME_PILLS.map(function (p) {
+      return '<span class="feature-pill">' + Icon(p[0], 13) +
+        '<span data-i18n="' + p[1] + '">' + _t(p[1]) + '</span></span>';
+    }).join('');
+  }
+
   window.Icon = Icon;
   window.IconDot = IconDot;
+  window._welcomePillsHtml = _welcomePillsHtml;
 })();

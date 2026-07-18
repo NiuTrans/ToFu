@@ -18,7 +18,9 @@ __all__ = [
     'create_task', 'discard_task', 'append_event', 'persist_task_result', 'cleanup_old_tasks',
     'stream_llm_response',
     'abort_running_tasks_for_conv',
+    'quiesce_running_tasks',
     'recover_stale_tasks_on_startup',
+    'run_deferred_boot_dispatch',
     'load_tool_rounds_from_conversation',
     'load_endpoint_turns_from_conversation',
     # approval (lazy)
@@ -108,6 +110,7 @@ def spawn_task(task: dict) -> None:
 # ── Eagerly import only the lightweight manager (used by routes at import time) ──
 from lib.tasks_pkg.manager import (
     abort_running_tasks_for_conv,
+    quiesce_running_tasks,
     append_event,
     cleanup_old_tasks,
     create_task,
@@ -116,6 +119,7 @@ from lib.tasks_pkg.manager import (
     load_tool_rounds_from_conversation,
     persist_task_result,
     recover_stale_tasks_on_startup,
+    run_deferred_boot_dispatch,
     stream_llm_response,
     tasks,
     tasks_lock,

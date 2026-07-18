@@ -26,21 +26,9 @@ Design rules
 
 from __future__ import annotations
 
-from typing import Any
-
 from lib.log import audit_log, get_logger
 
 logger = get_logger(__name__)
-
-
-def _coerce_int(value: Any) -> int:
-    if value is None:
-        return 0
-    try:
-        return int(value)
-    except (TypeError, ValueError) as _e_audit:
-        logger.debug('[cost_estimator] _coerce_int caught %s: %s', type(_e_audit).__name__, _e_audit)
-        return 0
 
 
 def _split_tokens(usage: dict | None) -> tuple[int, int, int, int]:
@@ -61,12 +49,12 @@ def _split_tokens(usage: dict | None) -> tuple[int, int, int, int]:
     if not isinstance(usage, dict):
         return 0, 0, 0, 0
 
-    inp_raw = _coerce_int(usage.get('prompt_tokens') or usage.get('input_tokens'))
-    cw = _coerce_int(usage.get('cache_write_tokens')
-                     or usage.get('cache_creation_input_tokens'))
-    cr = _coerce_int(usage.get('cache_read_tokens')
-                     or usage.get('cache_read_input_tokens'))
-    out = _coerce_int(usage.get('completion_tokens') or usage.get('output_tokens'))
+    from lib.cost import normalize_usage
+    _u = normalize_usage(usage)
+    inp_raw = _u['input']
+    cw = _u['cache_write']
+    cr = _u['cache_read']
+    out = _u['output']
 
     # OpenAI convention: prompt_tokens may already include cached tokens.
     # Heuristic: if input <= (cw+cr), Anthropic convention (input excludes

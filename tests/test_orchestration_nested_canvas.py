@@ -38,25 +38,23 @@ ROOT = os.path.normpath(os.path.join(HERE, '..'))
 HARNESS = os.path.join(HERE, 'orch_nested_roundtrip_harness.js')
 
 
-ORCH_JS = os.path.join(ROOT, 'static', 'js', 'orchestration.js')
+STYLES_CSS = os.path.join(ROOT, 'static', 'styles.css')
 
 
 def _orch_base_css_rule_heads() -> list[str]:
-    """Return the selector heads of every top-level rule in orchestration.js's
-    injected base CSS (the ``var css = `...`;`` literal, before the first
-    ``@media`` block). Walks brace depth so descendant selectors and the bodies
-    are never mistaken for rule heads. Pure string parsing — no Node needed."""
-    import re
-
-    src = open(ORCH_JS, encoding='utf-8').read()
-    m = re.search(r'var css = `(.*?)`;', src, re.S)
-    assert m, 'could not locate the injected CSS literal in orchestration.js'
-    base = m.group(1).split('@media', 1)[0]   # responsive overrides are exempt
+    """Return the selector heads of every TOP-LEVEL ``.orch-*`` rule in
+    ``static/styles.css`` (the orchestration styles were moved out of the JS
+    ``var css`` literal into the stylesheet). Walks brace depth so descendant
+    selectors and rule bodies are never mistaken for rule heads, and so rules
+    nested inside an ``@media`` block (depth ≥ 1) are exempt by construction —
+    matching the original intent (responsive overrides are allowed to repeat).
+    Pure string parsing — no Node needed."""
+    src = open(STYLES_CSS, encoding='utf-8').read()
 
     heads: list[str] = []
     depth = 0
     cur = ''
-    for ch in base:
+    for ch in src:
         if ch == '{':
             if depth == 0:
                 heads.append(cur.strip())

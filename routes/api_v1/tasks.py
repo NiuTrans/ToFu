@@ -21,9 +21,11 @@ from __future__ import annotations
 import json
 import time
 
-from flask import Blueprint, Response, request
+from flask import Blueprint, request
 
-from lib.api_response import api_bad_request, api_not_found, api_ok
+from lib.api_response import (
+    api_bad_request, api_not_found, api_ok, sse_response,
+)
 from lib.log import audit_log, get_logger
 from lib.openapi import api_meta
 from lib.request_parser import optional_bool, parse_body, require_str
@@ -217,12 +219,7 @@ def task_stream(task_id):
                 last_heartbeat = now
             time.sleep(0.05)
 
-    return Response(gen(), mimetype='text/event-stream', headers={
-        'Content-Type': 'text/event-stream; charset=utf-8',
-        'Cache-Control': 'no-cache, no-transform',
-        'X-Accel-Buffering': 'no',
-        'Connection': 'keep-alive',
-    })
+    return sse_response(gen())
 
 
 @api_v1_tasks_bp.route('/api/v1/tasks/<task_id>/abort', methods=['POST'])

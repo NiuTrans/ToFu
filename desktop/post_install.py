@@ -243,7 +243,7 @@ def _prompt_gui(components: list[Component]) -> list[Component]:
         comp_frame = ttk.Frame(frame)
         comp_frame.pack(fill='x', pady=3)
 
-        status = ' ✓ installed' if comp.is_installed() else f' ({comp.size_hint})'
+        status = ' (installed)' if comp.is_installed() else f' ({comp.size_hint})'
         cb = ttk.Checkbutton(
             comp_frame,
             text=f'{comp.name}{status}',
@@ -275,14 +275,14 @@ def _prompt_gui(components: list[Component]) -> list[Component]:
 
 def _prompt_terminal(components: list[Component]) -> list[Component]:
     """Fallback: terminal-based prompt for headless environments."""
-    print('\n╔══════════════════════════════════════════════════════╗')
-    print('║       Tofu — Optional Components Setup              ║')
-    print('╚══════════════════════════════════════════════════════╝\n')
+    print('\n' + '=' * 56)
+    print('  Tofu — Optional Components Setup')
+    print('=' * 56 + '\n')
 
     selected = []
     for comp in components:
         if comp.is_installed():
-            print(f'  ✓ {comp.name} — already installed')
+            print(f'  [OK] {comp.name} — already installed')
             continue
 
         default = 'Y' if comp.recommended else 'N'
@@ -344,7 +344,7 @@ def run_first_launch_prompt():
         def _bg_install():
             results = _install_components(selected)
             for name, success, msg in results:
-                status = '✓' if success else '✗'
+                status = '[OK]' if success else '[FAIL]'
                 _diag(f'{status} {name}: {msg}')
 
         thread = threading.Thread(target=_bg_install, daemon=True,
@@ -367,7 +367,7 @@ if __name__ == '__main__':
         if selected:
             results = _install_components(selected)
             for name, success, msg in results:
-                status = '✓' if success else '✗'
+                status = '[OK]' if success else '[FAIL]'
                 print(f'  {status} {name}: {msg}')
         else:
             print('No components selected.')

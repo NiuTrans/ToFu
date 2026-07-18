@@ -13,6 +13,7 @@ from lib.chat.messages import (
     resolve_conv_refs,
 )
 from lib.chat.persistence import (
+    append_pending_user_msg,
     extract_db_meta,
     extract_task_meta,
     load_or_create_conv,
@@ -32,6 +33,7 @@ from lib.chat.turn_builder import (
 __all__ = [
     'append_user_msg_idempotent',
     'resolve_conv_refs',
+    'append_pending_user_msg',
     'extract_db_meta',
     'extract_task_meta',
     'load_or_create_conv',

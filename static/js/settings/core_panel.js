@@ -97,6 +97,9 @@ function switchSettingsTab(tabId) {
   if (tabId === 'preferences' && typeof _populatePreferencesTab === 'function') {
     _populatePreferencesTab();
   }
+  if (tabId === 'speech' && typeof _refreshSttStatus === 'function') {
+    _refreshSttStatus();
+  }
 }
 
 async function _loadServerConfig() {
@@ -205,13 +208,28 @@ function openSettings() {
   // Load OAuth status
   _loadOAuthStatus();
 
-  // Show version in footer
+  // Show version + the mobile-client download link in the footer. Both read
+  // from GET /api/health in one call. The link is config-gated: it renders only
+  // when the server exposes `mobile_client_url` (TOFU_MOBILE_CLIENT_URL /
+  // DEFAULT_MOBILE_CLIENT_URL) — otherwise it stays hidden so no dead link ever
+  // ships before a release APK exists. Moved here from the topbar: it's a
+  // one-time action, so it belongs in Settings rather than the always-visible
+  // bar (see routes/common.py mobile_client_url).
   var verEl = document.getElementById('settingsVersion');
-  if (verEl) {
-    Api.health.info().then(function(d){
-      if(d && d.version) verEl.textContent = 'v' + d.version;
-    }).catch(function(){});
-  }
+  Api.health.info().then(function(d){
+    if (verEl && d && d.version) verEl.textContent = 'v' + d.version;
+    var mcEl = document.getElementById('settingsMobileClient');
+    if (mcEl) {
+      var url = d && d.mobile_client_url;
+      if (url) {
+        mcEl.href = url;
+        mcEl.innerHTML = '<img src="static/icons/tofu-welcome.svg" alt="Tofu" width="15" height="15"> ' + t('settings.mobileClient');
+        mcEl.style.display = '';
+      } else {
+        mcEl.style.display = 'none';
+      }
+    }
+  }).catch(function(){});
 
   // Show loading states
   var provList = document.getElementById('stgProviderList');
@@ -254,6 +272,7 @@ function openSettings() {
     _populateAdvancedTab(cfg);
     _populateFeishuTab(cfg);
     _populateMtProviderSection(cfg);
+    if (typeof _populateSpeechTab === 'function') _populateSpeechTab(cfg);
     _populateMcpTab();
     if (typeof _populateSkillsTab === 'function') _populateSkillsTab();
     if (typeof _populatePreferencesTab === 'function') _populatePreferencesTab();

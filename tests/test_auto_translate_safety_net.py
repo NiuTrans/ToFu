@@ -51,8 +51,9 @@ def _install_accumulator_spy(monkeypatch):
     """Replace finalize/cancel with spies and report which fired."""
     calls = {'finalize': 0, 'cancel': 0}
 
-    def _fake_finalize(task, conv_id, msg_idx, content, msg_id=None):
+    def _fake_finalize(task, conv_id, msg_idx, content, msg_id=None, target=None):
         calls['finalize'] += 1
+        calls['target'] = target
         return True  # pretend an accumulator existed and we took ownership
 
     def _fake_cancel(task):

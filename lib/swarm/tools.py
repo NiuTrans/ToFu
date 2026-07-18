@@ -119,6 +119,16 @@ SPAWN_AGENTS_TOOL = {
                     "items": {
                         "type": "object",
                         "properties": {
+                            "id": {
+                                "type": "string",
+                                "description": (
+                                    "Optional stable id for THIS agent (e.g. 'audit', 'a1'). "
+                                    "Set it when another agent in the same call must reference "
+                                    "this one via `depends_on` — the referenced id must match "
+                                    "exactly. When omitted a random id is assigned, which "
+                                    "cannot be targeted by `depends_on` within the same call."
+                                ),
+                            },
                             "objective": {
                                 "type": "string",
                                 "description": (
@@ -223,21 +233,42 @@ GET_AGENT_RESULT_TOOL = {
     "function": {
         "name": "get_agent_result",
         "description": (
-            "Fetch the FULL final answer of a completed sub-agent. Use this "
-            "when a `<swarm-update>` preview was insufficient and you need "
-            "the agent's complete output (not just the truncated 200-char "
-            "preview). For agents that are still running, returns a "
-            "running-status notice. For unknown ids, returns an error."
+            "Fetch the FULL final answer of one or more completed sub-agents. "
+            "Use this when a `<swarm-update>` preview was insufficient and you "
+            "need an agent's complete output (not just the truncated 200-char "
+            "preview).\n\n"
+            "For MULTIPLE agents in one call, provide an `agent_ids` array — "
+            "all results come back together in a single `results` list. This "
+            "is much better than issuing several separate get_agent_result "
+            "calls: prefer ONE batched call when you want the full bodies of "
+            "the agents a `spawn_agents` wave produced.\n\n"
+            "For agents that are still running, the entry reports a "
+            "running-status notice; for unknown ids it reports an error — "
+            "neither aborts the rest of the batch."
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "agent_id": {
                     "type": "string",
-                    "description": "The agent id from a `<swarm-update>` payload or the spawn_agents handle.",
+                    "description": (
+                        "A single agent id from a `<swarm-update>` payload or "
+                        "the spawn_agents handle. Single-fetch mode; omit when "
+                        "using `agent_ids`."
+                    ),
+                },
+                "agent_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Array of agent ids to fetch in ONE call (batch mode). "
+                        "All results are returned together in the `results` "
+                        "field. Use INSTEAD of `agent_id` when you need several "
+                        "agents' full bodies — do NOT issue N separate "
+                        "get_agent_result calls."
+                    ),
                 },
             },
-            "required": ["agent_id"],
         },
     },
 }

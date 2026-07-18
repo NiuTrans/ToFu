@@ -19,11 +19,12 @@ Schema is bootstrapped once into the forced test SQLite DB (autouse fixture),
 mirroring tests/test_artifacts_meta_sanitize.py.
 """
 
-import importlib
 import os
 import threading
 
 import pytest
+
+from tests._nc_harness import patch_restore as _patch_restore
 
 pytestmark = pytest.mark.unit
 
@@ -139,6 +140,65 @@ def test_retention_prune(flask_app, monkeypatch):
     seqs = sorted(e['seq'] for e in feed['events'])
     # 8 emitted, keep window 5 → only the most-recent 5 survive (seq 4..8).
     assert seqs == [4, 5, 6, 7, 8], f'expected pruned tail, got {seqs}'
+
+
+# ════════════════════════════════════════════════════════════════════
+#  Engine: full-summary preservation (data-loss fix)
+#  The DISPLAY summary is capped at _SUMMARY_MAX_CHARS, but the UNtruncated
+#  text must survive in payload['summary_full'] so the panel can EXPAND a
+#  clamped row instead of losing the second half of a sentence mid-word.
+# ════════════════════════════════════════════════════════════════════
+
+def test_long_summary_preserves_full_in_payload(flask_app):
+    from lib.conversations.project_feed import (
+        emit_project_event, read_project_feed, _SUMMARY_MAX_CHARS,
+    )
+    # A realistic over-cap summary (an epic-length "Completed: …" line).
+    # .strip()'d because emit_project_event strips the summary before storing.
+    long_summary = ('Completed: ' + ('externalize the PushHub fan-out '
+                                      'via a Redis pub/sub substrate ') * 12).strip()
+    assert len(long_summary) > _SUMMARY_MAX_CHARS
+    with flask_app.app_context():
+        emit_project_event('/proj/full', 'c', 'completed', long_summary)
+        feed = read_project_feed('/proj/full')
+    ev = feed['events'][0]
+    # Display value is capped …
+    assert len(ev['summary']) == _SUMMARY_MAX_CHARS
+    # … but the FULL text is preserved verbatim for the expand affordance.
+    assert ev['payload'].get('summary_full') == long_summary, \
+        'full summary must be preserved in payload (no mid-word data loss)'
+    # And the display prefix is a true prefix of the full text.
+    assert long_summary.startswith(ev['summary'])
+
+
+def test_short_summary_has_no_redundant_full_copy(flask_app):
+    """A summary UNDER the cap must NOT carry a redundant summary_full — no
+    wasted bytes on the common short row."""
+    from lib.conversations.project_feed import emit_project_event, read_project_feed
+    with flask_app.app_context():
+        emit_project_event('/proj/short', 'c', 'note', 'a short one-line pulse')
+        feed = read_project_feed('/proj/short')
+    ev = feed['events'][0]
+    assert ev['summary'] == 'a short one-line pulse'
+    assert 'summary_full' not in ev['payload'], \
+        'short summaries need no summary_full duplicate'
+
+
+def test_full_summary_does_not_clobber_caller_payload(flask_app):
+    """summary_full preservation must not overwrite a caller-supplied
+    payload['summary_full'] nor drop other payload keys."""
+    from lib.conversations.project_feed import (
+        emit_project_event, read_project_feed, _SUMMARY_MAX_CHARS,
+    )
+    long_summary = 'X' * (_SUMMARY_MAX_CHARS + 50)
+    with flask_app.app_context():
+        emit_project_event('/proj/pl', 'c', 'note', long_summary,
+                           payload={'taskId': 't1', 'summary_full': 'CALLER'})
+        feed = read_project_feed('/proj/pl')
+    ev = feed['events'][0]
+    assert ev['payload'].get('taskId') == 't1', 'other payload keys preserved'
+    assert ev['payload'].get('summary_full') == 'CALLER', \
+        'caller-supplied summary_full must win (not be clobbered)'
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -286,52 +346,24 @@ def test_emit_run_concluded_helper(flask_app, monkeypatch):
 
 
 def test_auto_path_emits_one_run_concluded(flask_app, monkeypatch):
-    """The auto TASK_DONE path (_emit_run_summary) emits exactly one
-    run_concluded for the run."""
+    """The report-free close-out helper (_emit_run_concluded_event, used by the
+    clean TASK_DONE + budget-guard paths) emits exactly one run_concluded."""
     captured = _spy_feed(monkeypatch)
     from lib.tasks_pkg import autopilot
-    # Stub the heavy reporter (LLM) + sidecar store (DB) — we are testing the
-    # CALLER wiring, not the report content.
-    monkeypatch.setattr(autopilot, 'run_summary_reporter',
-                        lambda task: {'text': 'All green. Shipped pillar #1.'})
-    monkeypatch.setattr(autopilot, '_store_run_summary',
-                        lambda conv_id, run_id, text, translated='': {'runId': run_id})
-    monkeypatch.setattr(autopilot, '_translate_summary_sync', lambda t: '')
+    # Stub the sidecar store (DB) — we are testing the CALLER wiring. A None
+    # record would short-circuit before _emit_run_concluded.
+    monkeypatch.setattr(autopilot, '_store_run_record',
+                        lambda conv_id, run_id, *, reason='task_done':
+                        {'runId': run_id, 'status': 'concluded'})
+    monkeypatch.setattr('lib.tasks_pkg.manager.append_event', lambda *a, **k: None)
     task = {'id': 'task-auto-1', 'convId': 'conv-auto',
             'config': {'projectPath': '/proj/auto'}}
     with flask_app.app_context():
-        autopilot._emit_run_summary(task, 'conv-auto', 'ar-auto')
+        autopilot._emit_run_concluded_event(task, 'conv-auto', 'ar-auto')
     rc = [c for c in captured if c[2] == 'run_concluded']
     assert len(rc) == 1, f'auto path must emit ONE run_concluded, got {captured}'
     assert rc[0][0] == '/proj/auto'
     assert rc[0][4].get('payload', {}).get('runId') == 'ar-auto'
-
-
-def test_manual_path_emits_one_run_concluded(flask_app, monkeypatch):
-    """The manual summarize_run path emits exactly one run_concluded."""
-    captured = _spy_feed(monkeypatch)
-    from lib.tasks_pkg import autopilot
-    monkeypatch.setattr(autopilot, 'run_summary_reporter',
-                        lambda task: {'text': 'Manual debrief line.'})
-    monkeypatch.setattr(autopilot, '_store_run_summary',
-                        lambda conv_id, run_id, text, translated='': {'runId': run_id})
-    # build_api_messages_from_db is a LOCAL import inside summarize_run — patch
-    # it at its defining module so the local `from ... import` resolves the stub.
-    import lib.tasks_pkg.conv_message_builder as cmb
-    monkeypatch.setattr(cmb, 'build_api_messages_from_db',
-                        lambda conv_id, cfg: [{'role': 'user', 'content': 'go'}])
-    # summarize_run uses create_task as a throwaway carrier (conv_id='') then
-    # discards it — that carrier has no projectPath in its own emit path
-    # because we pass cfg with projectPath only into _emit_run_concluded; but
-    # create_task('') would also try a 'started' (no conv_id → skipped). Guard
-    # by asserting on run_concluded only.
-    with flask_app.app_context():
-        res = autopilot.summarize_run('conv-man', 'ar-man',
-                                      {'projectPath': '/proj/man'})
-    assert res.get('ok'), f'summarize_run failed: {res}'
-    rc = [c for c in captured if c[2] == 'run_concluded']
-    assert len(rc) == 1, f'manual path must emit ONE run_concluded, got {captured}'
-    assert rc[0][4].get('payload', {}).get('runId') == 'ar-man'
 
 
 def test_autopilot_run_suppression_and_rollup_complementary(flask_app, monkeypatch):
@@ -415,24 +447,7 @@ def test_route_feed_never_reads_global_state(flask_app, flask_client, monkeypatc
 _FEED_SRC = os.path.join(os.path.dirname(__file__), '..',
                          'lib', 'conversations', 'project_feed.py')
 _MANAGER_SRC = os.path.join(os.path.dirname(__file__), '..',
-                            'lib', 'tasks_pkg', 'manager.py')
-
-
-def _patch_restore(path, old, new, run):
-    """Replace `old`→`new` in file at `path`, run `run()`, restore byte-identical."""
-    with open(path, encoding='utf-8') as f:
-        original = f.read()
-    assert old in original, f'anchor not found for NC patch in {path}'
-    try:
-        with open(path, 'w', encoding='utf-8') as f:
-            f.write(original.replace(old, new, 1))
-        run()
-    finally:
-        with open(path, 'w', encoding='utf-8') as f:
-            f.write(original)
-    # prove byte-identical restore
-    with open(path, encoding='utf-8') as f:
-        assert f.read() == original, 'source not restored byte-identical'
+                            'lib', 'tasks_pkg', 'manager', '_registry.py')
 
 
 def test_NC1_seq_constant_breaks_monotonicity(flask_app):
@@ -440,9 +455,7 @@ def test_NC1_seq_constant_breaks_monotonicity(flask_app):
 
     def run():
         import lib.conversations.project_feed as pf
-        importlib.reload(pf)
-        # re-stub push on the reloaded module's dependency is unnecessary
-        # (push import is lazy); just drive sequential emits on one project.
+        # just drive sequential emits on one project.
         failed = False
         with flask_app.app_context():
             from lib.database import DOMAIN_CHAT, get_thread_db
@@ -466,24 +479,24 @@ def test_NC1_seq_constant_breaks_monotonicity(flask_app):
         "seq = 1  # NC-1",
         run,
     )
-    # restore the module after the reload-based NC so later tests use real code
-    import lib.conversations.project_feed as pf
-    importlib.reload(pf)
 
 
 def test_NC2_neutered_started_callsite_breaks_exactly_once(flask_app, monkeypatch):
     """NC-2: replace the started emit call in create_task with pass → the
     'exactly one started' wiring assertion fails (call site is load-bearing)."""
 
-    def run():
-        from lib.tasks_pkg import manager as mgr
-        importlib.reload(mgr)
+    def run(mod):
+        # ``manager.create_task`` is re-exported from ``manager._registry``
+        # (``from ._registry import create_task``), so neutering the _registry
+        # module in sys.modules does NOT rebind the reference cached on the
+        # ``manager`` package. Call the neutered module's OWN ``create_task``
+        # (handed to us by the harness) so the emit-callsite neuter bites.
         captured = []
         import lib.conversations.project_feed as pf
         monkeypatch.setattr(pf, 'emit_project_event',
                             lambda *a, **k: captured.append((a[2] if len(a) > 2 else None)))
         with flask_app.app_context():
-            mgr.create_task('conv-nc2', [{'role': 'user', 'content': 'x'}],
+            mod.create_task('conv-nc2', [{'role': 'user', 'content': 'x'}],
                             {'projectPath': '/nc2'})
         started = [k for k in captured if k == 'started']
         assert len(started) == 0, \
@@ -499,9 +512,6 @@ def test_NC2_neutered_started_callsite_breaks_exactly_once(flask_app, monkeypatc
         "            pass  # NC-2",
         run,
     )
-    # restore manager module
-    from lib.tasks_pkg import manager as mgr
-    importlib.reload(mgr)
 
 
 
@@ -510,35 +520,30 @@ _AUTOPILOT_SRC = os.path.join(os.path.dirname(__file__), '..',
 
 
 def test_NC3_neutered_run_concluded_callsite_breaks_rollup(flask_app, monkeypatch):
-    """NC-3: replace the _emit_run_concluded call in _emit_run_summary with
-    pass → the auto path emits ZERO run_concluded → the 'exactly one' wiring
-    assertion fails (the roll-up CALL SITE is load-bearing, complementary to
-    the per-turn suppression)."""
+    """NC-3: replace the _emit_run_concluded call inside _emit_run_concluded_event
+    with pass → the close-out helper emits ZERO run_concluded → the 'exactly
+    one' wiring assertion fails (the roll-up CALL SITE is load-bearing,
+    complementary to the per-turn suppression)."""
 
     def run():
         from lib.tasks_pkg import autopilot as ap
-        importlib.reload(ap)
         captured = []
         import lib.conversations.project_feed as pf
         monkeypatch.setattr(pf, 'emit_project_event',
                             lambda *a, **k: captured.append(a[2] if len(a) > 2 else None))
-        monkeypatch.setattr(ap, 'run_summary_reporter',
-                            lambda task: {'text': 'x'})
-        monkeypatch.setattr(ap, '_store_run_summary',
-                            lambda conv_id, run_id, text, translated='': {'runId': run_id})
-        monkeypatch.setattr(ap, '_translate_summary_sync', lambda t: '')
+        monkeypatch.setattr(ap, '_store_run_record',
+                            lambda conv_id, run_id, *, reason='task_done':
+                            {'runId': run_id, 'status': 'concluded'})
+        monkeypatch.setattr('lib.tasks_pkg.manager.append_event', lambda *a, **k: None)
         task = {'id': 't', 'convId': 'c', 'config': {'projectPath': '/nc3'}}
         with flask_app.app_context():
-            ap._emit_run_summary(task, 'c', 'ar-nc3')
+            ap._emit_run_concluded_event(task, 'c', 'ar-nc3')
         rc = [k for k in captured if k == 'run_concluded']
         assert len(rc) == 0, 'NC-3: neutered call site must emit NO run_concluded'
 
     _patch_restore(
         _AUTOPILOT_SRC,
-        "    _emit_run_concluded(conv_id, run_id, report['text'], task.get('config'))\n",
+        "    _emit_run_concluded(conv_id, run_id, '', task.get('config'))\n",
         "    pass  # NC-3\n",
         run,
     )
-    # restore autopilot module
-    from lib.tasks_pkg import autopilot as ap
-    importlib.reload(ap)

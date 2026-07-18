@@ -209,6 +209,15 @@ async function _saveServerConfig() {
     payload.mt_provider = _collectMtProviderConfig();
   }
 
+  // Speech-to-text: fold the dedicated STT provider into the providers list
+  // BEFORE it is shipped (payload.providers = _stgProviders below/above).
+  // Writes an explicit per-cell key_access capability override — see
+  // settings/speech.js header (the DEFAULT_SLOT_CONFIGS trap).
+  if (typeof _applySttToProviders === 'function') {
+    _applySttToProviders();
+    payload.providers = _stgProviders;
+  }
+
   try {
     var r = await Api.serverConfig.update(payload);
     var data = r ? await r.json().catch(function() { return {}; }) : {};

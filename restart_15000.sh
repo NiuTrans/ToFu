@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 #
-# restart_15000.sh — reload the Tofu server on :15000 so it picks up the
-# Project Brain path-normalization backend fix (lib/conversations/project_{feed,board,charter}.py).
+# restart_15000.sh — reliably reload the Tofu server on :15000.
 #
 # ┌─────────────────────────────────────────────────────────────────────────┐
 # │ RUN THIS FROM A TERMINAL THAT IS **NOT** A CHILD OF THE :15000 SERVER.    │
@@ -10,14 +9,44 @@
 # │ server would also kill the shell running this script (self-plug-pull).    │
 # └─────────────────────────────────────────────────────────────────────────┘
 #
-# Safe to re-run (idempotent): if no server is on :15000 it just launches one.
-# It does NOT use `set -e` on the whole script so a missing process (nothing to
-# kill) is not treated as a fatal error.
+# WHY THIS SCRIPT WAS REWRITTEN (2026-07-10):
+#   The live server is launched as `python server.py` with NO `--port` argument
+#   (the port defaults to $PORT / 15000 inside server.py). The previous version
+#   matched `pkill -f "server.py --port 15000"`, which matched NOTHING, so the
+#   old process was never killed; the relaunch then either shifted to :15001 via
+#   server.py's _find_free_port fallback OR aborted on the instance lock
+#   ("Another server instance is already running"). Root fix: kill the EXACT PID
+#   that is actually listening on :15000 (from `ss -ltnp`), escalate SIGTERM →
+#   SIGKILL if the port doesn't free, and only then relaunch — with the SAME
+#   command the process really uses (`python server.py`, no --port).
+#
+# Safe to re-run (idempotent): if nothing is on :15000 it just launches one.
+# No `set -e` on the whole script so "nothing to kill" is not fatal.
+#
+# DETACH (2026-07-16): the relaunch uses `setsid nohup` so the server starts in
+# its own session with NO controlling terminal — a code-server terminal/session
+# reap can no longer SIGTERM it. Output still goes to ${LOG} (the shell does the
+# redirect, not nohup). Step [4b/5] asserts the live listener really left this
+# terminal (tty=?, no "+" in STAT, sid≠this shell). For a server that must also
+# survive OOM/crash, prefer the supervisord program instead — see
+# deploy/supervisor/tofu.conf (autostart/autorestart=true).
+#
+# MUTEX (2026-07-16): this script and the supervisord program are TWO owners of
+# :15000 and must never both drive it. Step [pre/5] detects when supervisord
+# already manages tofu and REFUSES to kill/relaunch (pointing you at
+# `supervisorctl restart tofu`), so the two mechanisms can never fight. Once the
+# supervisord program is installed, use supervisorctl — not this script.
+#
+# SERIALIZE (2026-07-16): step [pre/5b] takes an flock on data/.restart.lock so
+# concurrent sibling restarts on a shared-HEAD box queue instead of both killing
+# the listener at once (the paired-SIGTERM signature). After acquiring the lock
+# it skips a redundant restart iff a sibling ALREADY brought up a healthy
+# instance that STARTED AFTER this restart began (start-time proof, not just
+# "port is occupied"), so a stale pre-existing process is still reloaded.
 
 PROJ="/path/to/your/project"
 PY="/path/to/your/project"
 PORT=15000
-PATTERN="server.py --port ${PORT}"
 LOG="server_${PORT}.log"
 
 echo "════════════════════════════════════════════════════════════════"
@@ -25,39 +54,198 @@ echo "[0/5] restart_15000.sh — reloading Tofu server on :${PORT}"
 echo "      project: ${PROJ}"
 cd "${PROJ}" || { echo "FATAL: cannot cd into project dir"; exit 1; }
 
-# ── Guard: refuse to run if THIS shell is a descendant of the :15000 server. ──
-# Walk our own parent chain; if we hit the current :15000 listener PID, abort —
-# killing it would terminate this very shell.
-LISTENER_PID="$(ss -ltnp 2>/dev/null | awk -v p=":${PORT}" '$4 ~ p {print $0}' \
-                | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2)"
-if [ -n "${LISTENER_PID}" ]; then
+# ── Helper: PIDs currently LISTENING on :PORT (the authoritative kill target). ──
+# `ss -ltnp` Local Address:Port column ($4) looks like 127.0.0.1:15000 or
+# *:15000 — match a literal ":PORT" at end of field, then pull pid=NNN.
+listener_pids() {
+  ss -ltnp 2>/dev/null \
+    | awk -v pat=":${PORT}\$" '$4 ~ pat {print}' \
+    | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u
+}
+
+# ── [pre/5] MUTEX GUARD — refuse to run if supervisord already OWNS tofu. ──
+# The durable fix (deploy/supervisor/tofu.conf) hands :PORT to the host
+# supervisord with autorestart=true. If BOTH mechanisms are live they FIGHT:
+# this script's [1/5] kill → supervisord instantly relaunches (grabbing the
+# port) → this script's [3/5] relaunch then aborts on the single-instance lock
+# (or races a second instance). So once supervisord owns tofu, the ONLY correct
+# restart entrypoint is `supervisorctl restart tofu`; this script must stand
+# down. Detection is layered so a partial install can't slip through:
+#   (1) the program is defined AND not STOPPED/absent (RUNNING/STARTING/BACKOFF
+#       — i.e. supervisord is actively managing/relaunching it), via whichever
+#       supervisorctl invocation works (plain, or sudo -n if the socket is
+#       root-only). A definitive RUNNING/STARTING/BACKOFF is authoritative.
+#   (2) fallback when supervisorctl is unreachable (no sudo, socket perms): the
+#       conf is installed under /etc/supervisor/conf.d AND a :PORT listener's
+#       process tree traces back to the supervisord daemon (ppid chain hits a
+#       `supervisord`) — that proves supervisord, not a terminal, spawned it.
+# A clean STOPPED/absent program, or conf present but the listener is NOT a
+# supervisord child, means the script may proceed (manual mode).
+SUPERVISOR_CONF="/etc/supervisor/conf.d/tofu.conf"
+SUPERVISOR_PROG="tofu"
+
+_supervisorctl() {
+  # Emit the program's status line ONLY on a genuine query success. Try an
+  # unprivileged call first, then non-interactive sudo (never prompts). Critical
+  # subtlety: `supervisorctl status` prints a socket "Permission denied" error
+  # to STDOUT and exits non-zero when the sock is root-only. We must NOT surface
+  # that error text as a status — otherwise the caller's `[ -n SV_STATUS ]`
+  # branch wins on garbage and the conf-installed fallback never runs. So we
+  # gate on exit code AND require the output to actually name the program.
+  command -v supervisorctl >/dev/null 2>&1 || return 1
+  local out
+  out="$(supervisorctl status "${SUPERVISOR_PROG}" 2>/dev/null)"
+  if [ $? -eq 0 ] && printf '%s' "${out}" | grep -q "^${SUPERVISOR_PROG}[[:space:]]"; then
+    printf '%s' "${out}"; return 0
+  fi
+  out="$(sudo -n supervisorctl status "${SUPERVISOR_PROG}" 2>/dev/null)"
+  if [ $? -eq 0 ] && printf '%s' "${out}" | grep -q "^${SUPERVISOR_PROG}[[:space:]]"; then
+    printf '%s' "${out}"; return 0
+  fi
+  return 1
+}
+
+_listener_is_supervisord_child() {
+  # Walk the ppid chain of each :PORT listener; return 0 if any ancestor's comm
+  # is 'supervisord'. Bounded to 12 hops (pid 1 terminates it anyway).
+  local pids p comm hops
+  pids="$(listener_pids)"
+  [ -z "${pids}" ] && return 1
+  for p in ${pids}; do
+    hops=0
+    while [ -n "${p}" ] && [ "${p}" != "1" ] && [ "${hops}" -lt 12 ]; do
+      comm="$(ps -o comm= -p "${p}" 2>/dev/null | tr -d ' ')"
+      case "${comm}" in *supervisord*) return 0 ;; esac
+      p="$(ps -o ppid= -p "${p}" 2>/dev/null | tr -d ' ')"
+      hops=$((hops + 1))
+    done
+  done
+  return 1
+}
+
+supervisord_owns=0
+SV_STATUS="$(_supervisorctl)"
+if [ -n "${SV_STATUS}" ]; then
+  # supervisorctl answered authoritatively. RUNNING/STARTING/BACKOFF = owned.
+  case "${SV_STATUS}" in
+    *RUNNING*|*STARTING*|*BACKOFF*) supervisord_owns=1 ;;
+  esac
+elif [ -f "${SUPERVISOR_CONF}" ] && _listener_is_supervisord_child; then
+  # supervisorctl unreachable, but the conf is installed and the live listener
+  # is genuinely a supervisord child — treat as owned.
+  supervisord_owns=1
+fi
+
+if [ "${supervisord_owns}" = "1" ]; then
+  echo "════════════════════════════════════════════════════════════════"
+  echo "[pre/5] REFUSING to run: tofu on :${PORT} is MANAGED BY supervisord."
+  echo "        This script kills + relaunches the port process; with"
+  echo "        autorestart=true that FIGHTS supervisord (double instance /"
+  echo "        instance-lock abort). The correct restart entrypoint is:"
+  echo ""
+  echo "            sudo supervisorctl restart ${SUPERVISOR_PROG}"
+  echo ""
+  echo "        (status:  sudo supervisorctl status ${SUPERVISOR_PROG}"
+  echo "         logs:    tail -f ${PROJ}/logs/supervisor_tofu.log )"
+  [ -n "${SV_STATUS}" ] && echo "        current: ${SV_STATUS}"
+  echo "        To hand control BACK to this script, first uninstall the"
+  echo "        program:  sudo rm ${SUPERVISOR_CONF} && sudo supervisorctl update"
+  echo "════════════════════════════════════════════════════════════════"
+  exit 0
+fi
+
+# ── Guard: refuse to run if THIS shell is a descendant of a :PORT listener. ──
+# Killing that PID would terminate this very shell (self-plug-pull).
+LPIDS_INIT="$(listener_pids)"
+if [ -n "${LPIDS_INIT}" ]; then
   up=$$
   for _ in 1 2 3 4 5 6 7 8; do
-    [ -z "${up}" ] || [ "${up}" = "1" ] && break
-    if [ "${up}" = "${LISTENER_PID}" ]; then
-      echo "FATAL: this shell (pid $$) is a DESCENDANT of the :${PORT} server"
-      echo "       (pid ${LISTENER_PID}). Killing it would terminate this shell."
-      echo "       Re-run from a plain VS Code terminal, not a Tofu agent shell."
-      exit 2
-    fi
+    { [ -z "${up}" ] || [ "${up}" = "1" ]; } && break
+    for lp in ${LPIDS_INIT}; do
+      if [ "${up}" = "${lp}" ]; then
+        echo "FATAL: this shell (pid $$) is a DESCENDANT of the :${PORT} server"
+        echo "       (pid ${lp}). Killing it would terminate this shell."
+        echo "       Re-run from a plain VS Code terminal, not a Tofu agent shell."
+        exit 2
+      fi
+    done
     up="$(ps -o ppid= -p "${up}" 2>/dev/null | tr -d ' ')"
   done
 fi
 
-# ── [1/5] Stop the current :15000 server. ──
-echo "[1/5] Stopping current server (pattern: '${PATTERN}') ..."
-if pgrep -f "${PATTERN}" >/dev/null 2>&1; then
-  pkill -f "${PATTERN}"
-  echo "      SIGTERM sent."
+# ── [pre/5b] RESTART SERIALIZATION LOCK — one restart at a time on this box. ──
+# On a shared-HEAD box, multiple sibling agents may each run this script to load
+# a commit, unaware of each other. Without a lock they BOTH reach [1/5] and kill
+# the same listener at the same second (the observed paired SIGTERMs), then race
+# two relaunches — one aborts on the single-instance lock. This flock serializes
+# restarts: the 2nd caller BLOCKS on fd 9 until the 1st fully finishes (the lock
+# is held for the whole kill→relaunch→verify span because fd 9 stays open until
+# this script exits). Placed AFTER the [pre/5] supervisord guard and BEFORE the
+# [1/5] kill, so the kill phase itself is always inside the lock.
+#
+# SECOND-PROBE (skip-if-already-done): after we finally GET the lock, a sibling
+# that held it first may have JUST relaunched a healthy new instance loading the
+# same HEAD — killing it and relaunching again is pure waste. So we skip ONLY
+# when BOTH hold: (i) the health endpoint answers, AND (ii) the live listener
+# was STARTED AFTER this restart began (a fresh instance a sibling spawned while
+# we waited), proven by process start-time — NOT merely "something is on the
+# port". A stale pre-existing process (started before this restart) fails (ii),
+# so we still kill+relaunch it and never falsely report success without loading
+# new code.
+RESTART_LOCK="${PROJ}/data/.restart.lock"
+RESTART_EPOCH="$(date +%s)"
+if command -v flock >/dev/null 2>&1 \
+   && mkdir -p "${PROJ}/data" 2>/dev/null \
+   && exec 9>"${RESTART_LOCK}" 2>/dev/null; then
+  echo "[pre/5b] Acquiring restart lock (${RESTART_LOCK}) — serialize concurrent restarts ..."
+  if flock -w 60 9; then
+    echo "      Restart lock acquired (held until this script exits)."
+    RL_PID="$(listener_pids | head -n1)"
+    if [ -n "${RL_PID}" ] \
+       && curl -s --max-time 2 "http://127.0.0.1:${PORT}/api/health" >/dev/null 2>&1; then
+      RL_AGE="$(ps -o etimes= -p "${RL_PID}" 2>/dev/null | tr -d ' ')"
+      if [ -n "${RL_AGE}" ]; then
+        RL_STARTED_AT=$(( $(date +%s) - RL_AGE ))
+        if [ "${RL_STARTED_AT}" -ge "${RESTART_EPOCH}" ]; then
+          echo "[pre/5b] A concurrent restart already brought up a HEALTHY new"
+          echo "        instance (pid ${RL_PID}, started ${RL_AGE}s ago — AFTER this"
+          echo "        restart began) — skipping redundant kill+relaunch. Done."
+          exit 0
+        fi
+        echo "      Live listener pid ${RL_PID} is healthy but PREDATES this restart"
+        echo "      (age ${RL_AGE}s) — it is the stale instance; proceeding to reload."
+      fi
+    fi
+  else
+    echo "[pre/5b] Another restart has held the lock for >60s — aborting to avoid a"
+    echo "        double kill+relaunch. Re-run once it settles."
+    exit 0
+  fi
 else
-  echo "      No running '${PATTERN}' process found — nothing to stop."
+  echo "[pre/5b] flock unavailable / ${PROJ}/data not writable — proceeding WITHOUT"
+  echo "        restart serialization (concurrent restarts on this box may collide)."
 fi
 
-# ── [2/5] Wait for the port to free (up to ~20s). ──
+# ── [1/5] Stop whatever is listening on :PORT (by exact PID). ──
+echo "[1/5] Stopping current server on :${PORT} ..."
+LPIDS="$(listener_pids)"
+if [ -z "${LPIDS}" ]; then
+  # Fallback: no listener socket found (e.g. mid-crash) — match the real
+  # launch command. NOTE: matches `python server.py`, NOT a --port substring.
+  LPIDS="$(pgrep -f 'server\.py' 2>/dev/null | tr '\n' ' ')"
+fi
+if [ -n "${LPIDS}" ]; then
+  echo "      Target PID(s): ${LPIDS}"
+  for lp in ${LPIDS}; do kill "${lp}" 2>/dev/null && echo "      SIGTERM -> ${lp}"; done
+else
+  echo "      No process found listening on :${PORT} — nothing to stop."
+fi
+
+# ── [2/5] Wait for the port to free (up to ~20s); escalate to SIGKILL. ──
 echo "[2/5] Waiting for :${PORT} to free ..."
 freed=0
 for i in $(seq 1 20); do
-  if ! ss -ltn 2>/dev/null | grep -q ":${PORT} "; then
+  if [ -z "$(listener_pids)" ] && ! ss -ltn 2>/dev/null | grep -q ":${PORT} "; then
     freed=1
     echo "      Port :${PORT} is free (after ${i}s)."
     break
@@ -65,19 +253,46 @@ for i in $(seq 1 20); do
   sleep 1
 done
 if [ "${freed}" != "1" ]; then
-  echo "      WARNING: :${PORT} still bound after 20s. Forcing kill of stragglers ..."
-  pkill -9 -f "${PATTERN}" 2>/dev/null
+  echo "      WARNING: :${PORT} still bound after 20s — escalating to SIGKILL."
+  KPIDS="$(listener_pids)"; [ -z "${KPIDS}" ] && KPIDS="$(pgrep -f 'server\.py' 2>/dev/null | tr '\n' ' ')"
+  for lp in ${KPIDS}; do kill -9 "${lp}" 2>/dev/null && echo "      SIGKILL -> ${lp}"; done
   sleep 2
+  if ss -ltn 2>/dev/null | grep -q ":${PORT} "; then
+    echo "      FATAL: :${PORT} STILL bound after SIGKILL. Aborting to avoid a"
+    echo "             stray second instance / port shift. Investigate manually."
+    exit 3
+  fi
+  echo "      Port :${PORT} freed after SIGKILL."
 fi
 
-# ── [3/5] Relaunch exactly as the previous process was started. ──
-echo "[3/5] Relaunching: nohup ${PY} server.py --port ${PORT} > ${LOG} 2>&1 &"
-nohup "${PY}" server.py --port "${PORT}" > "${LOG}" 2>&1 &
+# ── [3/5] Relaunch EXACTLY as the process is really started (no --port). ──
+#   Port comes from $PORT (server.py default 15000). We export it explicitly so
+#   the bind is deterministic and never drifts via _find_free_port.
+#
+#   DETACH (2026-07-16): launch with `setsid nohup` — NOT bare `nohup … &`.
+#   The bug was `nohup` ALONE: it only masks SIGHUP; the child stays in THIS
+#   shell's session and process group, so when code-server reaps the whole
+#   terminal session (its leader dies) the reap propagates to the server and it
+#   takes a SIGTERM — the "terminal churn kills :15000" bug. `setsid` fixes the
+#   root cause: it starts the server as the leader of a BRAND-NEW session with
+#   no controlling terminal, so it is no longer a member of the terminal's
+#   session/pgrp. We ALSO wrap in `nohup` as belt-and-suspenders (masks a stray
+#   SIGHUP some reap paths broadcast first); the order `setsid nohup` matters —
+#   setsid must be outermost so the new session is created regardless.
+#
+#   OUTPUT REDIRECTION (important): `> ${LOG} 2>&1` is done by THIS SHELL, not
+#   by nohup — bash points fd1/fd2 at the log file BEFORE exec'ing setsid, and
+#   setsid→nohup→python inherit those already-file fds. So ALL server output
+#   goes to ${LOG}, NEVER to this VS Code terminal, with or without nohup. And
+#   because stdout is already a file (not a tty), nohup never creates a stray
+#   `nohup.out`. (Both facts verified empirically 2026-07-16.)
+echo "[3/5] Relaunching (detached via setsid nohup): PORT=${PORT} setsid nohup ${PY} server.py > ${LOG} 2>&1 &"
+PORT="${PORT}" BIND_HOST="${BIND_HOST:-127.0.0.1}" setsid nohup "${PY}" server.py > "${LOG}" 2>&1 &
 NEWPID=$!
 echo "      Launched pid ${NEWPID}; logging to ${LOG}"
 
-# ── [4/5] Wait for the server to accept connections (up to ~40s; startup does
-#          PG bootstrap + blueprint registration, so give it room). ──
+# ── [4/5] Wait for the server to accept connections (up to ~40s; boot does PG
+#          bootstrap + blueprint registration). ──
 echo "[4/5] Waiting for the server to come up on :${PORT} ..."
 BASE="http://127.0.0.1:${PORT}"
 up_ok=0
@@ -87,56 +302,214 @@ for i in $(seq 1 40); do
     echo "      Server responding (after ${i}s)."
     break
   fi
+  # If the launched process already died (e.g. lock abort), fail fast.
+  if ! kill -0 "${NEWPID}" 2>/dev/null; then
+    echo "      ERROR: launched pid ${NEWPID} exited during startup. Tail of ${LOG}:"
+    tail -n 30 "${LOG}" 2>/dev/null
+    echo "      If this is a stale instance lock, last resort:"
+    echo "         PORT=${PORT} TOFU_SKIP_LOCK=1 nohup ${PY} server.py > ${LOG} 2>&1 &"
+    exit 4
+  fi
   sleep 1
 done
 if [ "${up_ok}" != "1" ]; then
   echo "      ERROR: server did not respond within 40s. Tail of ${LOG}:"
   tail -n 30 "${LOG}" 2>/dev/null
-  exit 3
-fi
-
-# ── [5/5] Self-verify the fix took: BOTH the stripped and trailing-slash board
-#          queries must now return done=3, and GET / must serve the fresh
-#          bundle/style hashes. ──
-echo "[5/5] Verifying the Project Brain path-normalization fix is LIVE ..."
-enc="$(${PY} -c "import urllib.parse;print(urllib.parse.quote('${PROJ}'))")"
-encs="$(${PY} -c "import urllib.parse;print(urllib.parse.quote('${PROJ}/'))")"
-
-read_done () {  # $1 = url-encoded path -> prints "done=N total=M"
-  curl -s --max-time 5 "${BASE}/api/v1/project/board?path=$1" \
-    | ${PY} -c 'import sys,json;d=json.load(sys.stdin);print("done=%s total=%s"%(d.get("done"),len(d.get("tasks",[]))))' \
-    2>/dev/null || echo "done=ERR total=ERR"
-}
-
-# The DOUBLE-encoded variant is what the VS Code proxy actually sends the
-# browser's already-encoded query as (%2F -> %252F). This is THE case that
-# blanked the panel; it must resolve too after the route-decode fix.
-encd="$(${PY} -c "import urllib.parse;print(urllib.parse.quote(urllib.parse.quote('${PROJ}')))")"
-stripped="$(read_done "${enc}")"
-slashed="$(read_done "${encs}")"
-doubled="$(read_done "${encd}")"
-echo "      board (stripped path)   -> ${stripped}"
-echo "      board (trailing slash)  -> ${slashed}"
-echo "      board (double-encoded)  -> ${doubled}   [VS Code proxy case]"
-
-echo "      GET / serves:"
-curl -s --max-time 5 "${BASE}/" \
-  | grep -oE '(bundle-[a-f0-9]+\.js|styles-[a-f0-9]+\.css)' | sort -u | sed 's/^/        /'
-
-# All three variants must resolve to the same non-empty board for the fix to
-# be live: stripped (baseline), trailing-slash (normalize fix), AND
-# double-encoded (the proxy re-encode fix — the actual blank-panel cause).
-sd="$(echo "${stripped}" | grep -oE 'done=[0-9]+' | cut -d= -f2)"
-ld="$(echo "${slashed}"  | grep -oE 'done=[0-9]+' | cut -d= -f2)"
-dd="$(echo "${doubled}"  | grep -oE 'done=[0-9]+' | cut -d= -f2)"
-echo "────────────────────────────────────────────────────────────────"
-if [ -n "${sd}" ] && [ "${sd}" = "${ld}" ] && [ "${sd}" = "${dd}" ] && [ "${sd}" != "0" ]; then
-  echo "✅ FIX LIVE: stripped, trailing-slash AND double-encoded board all agree (done=${sd}). Restart complete."
-else
-  echo "❌ FIX NOT CONFIRMED: stripped done=${sd:-?}, slashed done=${ld:-?}, double done=${dd:-?}."
-  echo "   Expected all three equal and > 0. The double-encoded case is the"
-  echo "   VS Code proxy path — if only it is 0, routes/api_v1/project.py's"
-  echo "   _decoded_path_arg fix is not loaded (stale bytecode → restart again)."
   exit 4
 fi
-echo "════════════════════════════════════════════════════════════════"
+
+# ── [4b/5] DETACH SELF-CHECK — prove the live listener really left the terminal.
+#   The whole point of the setsid launch is that the server must NOT be a
+#   foreground/background child of this VS Code terminal. Resolve the PID that
+#   is actually LISTENING on :PORT (not $NEWPID — that can be a transient
+#   launcher/re-exec parent) and assert, via `ps`:
+#     • TTY is "?"  (no controlling terminal), and
+#     • its session id (sid) is NOT this shell's sid.
+#   STAT containing "+" (foreground process group of a tty) is a hard fail.
+#   This is a WARNING, not a fatal exit: the server is already serving traffic;
+#   we surface the regression loudly so a broken detach can never pass silently.
+echo "[4b/5] Verifying the live :${PORT} listener is DETACHED from this terminal ..."
+LISTEN_PID="$(listener_pids | head -n1)"
+if [ -z "${LISTEN_PID}" ]; then
+  echo "      ⚠️  Could not resolve the :${PORT} listener PID to check detach; skipping."
+else
+  MY_SID="$(ps -o sid= -p $$ 2>/dev/null | tr -d ' ')"
+  L_TTY="$(ps -o tty= -p "${LISTEN_PID}" 2>/dev/null | tr -d ' ')"
+  L_STAT="$(ps -o stat= -p "${LISTEN_PID}" 2>/dev/null | tr -d ' ')"
+  L_SID="$(ps -o sid= -p "${LISTEN_PID}" 2>/dev/null | tr -d ' ')"
+  detach_bad=0
+  case "${L_TTY}" in ""|"?") : ;; *) detach_bad=1 ;; esac
+  case "${L_STAT}" in *"+"*) detach_bad=1 ;; esac
+  [ -n "${MY_SID}" ] && [ "${L_SID}" = "${MY_SID}" ] && detach_bad=1
+  if [ "${detach_bad}" = "0" ]; then
+    echo "      ✅ DETACHED: listener pid ${LISTEN_PID} tty=${L_TTY:-?} stat=${L_STAT} sid=${L_SID} (≠ this shell sid ${MY_SID})."
+  else
+    echo "      ❌ NOT DETACHED: listener pid ${LISTEN_PID} tty=${L_TTY} stat=${L_STAT} sid=${L_SID} (this shell sid ${MY_SID})."
+    echo "         The server is STILL bound to this terminal's session — a"
+    echo "         terminal/session reap will SIGTERM it again. The setsid launch"
+    echo "         did not take effect (wrong shell, or started manually). The"
+    echo "         durable fix is the supervisord program (deploy/supervisor/tofu.conf)."
+  fi
+fi
+
+# ── [5/5] Self-verify the EVENT-LOOP-FREEZE FIX (commit c194e18) is actually
+#          loaded in THIS running server — NOT some unrelated older feature.
+#          Two independent, fix-specific probes, BOTH must pass:
+#            (a) STATIC: the fix's new symbols import cleanly under the SAME
+#                interpreter that launched the server. If HEAD predates the fix
+#                these names don't exist → ImportError. This proves the code is
+#                on disk + importable for the launch interpreter.
+#            (b) RUNTIME: the new _serve guard code actually executed during
+#                THIS boot — the running process emitted a "Loop blocking-guard"
+#                line to ${LOG}. NOTE: that guard is DEFAULT OFF (set_debug is
+#                unsafe as a 24/7 default on this high-concurrency service), so
+#                the normal boot prints "Loop blocking-guard OFF (default)"; a
+#                diagnostic boot (TOFU_LOOP_DEBUG_GUARD=1) prints "... armed".
+#                EITHER line proves the NEW _serve code ran (both are new in
+#                this fix); a boot on OLD code prints neither. A static import
+#                can't prove the running process executed the new path — the
+#                live log line does. The always-on LoopWatch 5s net is what
+#                actually protects production; this guard is the opt-in
+#                sub-stall detector.
+#          Why probe THIS and not sticky-cwd: the previous [5/5] verified
+#          get_conv_cwd/set_conv_cwd (a DIFFERENT commit). A green there says
+#          nothing about whether the freeze fix shipped — the probe must assert
+#          the change this restart is FOR.
+echo "[5/5] Verifying the event-loop-freeze fix (c194e18) is loaded ..."
+echo "────────────────────────────────────────────────────────────────"
+probe_fail=0
+
+# (a) STATIC — the fix's new symbols must import under the server interpreter.
+if "${PY}" -c "from lib.translate.segment_backfill import _get_backfill_semaphore, _translate_and_stamp_eligible" 2>/dev/null; then
+  echo "✅ (a) CODE PRESENT: off-loop backfill symbols import from lib.translate.segment_backfill."
+else
+  echo "❌ (a) CODE ABSENT: _get_backfill_semaphore/_translate_and_stamp_eligible do NOT import."
+  echo "       git HEAD is missing commit c194e18, or ${PY} is the wrong interpreter."
+  probe_fail=1
+fi
+
+# (b) RUNTIME — the new _serve guard code must have run this boot. Match the
+#     shared "Loop blocking-guard" prefix so BOTH the default "OFF" line and the
+#     opt-in "armed" line count as proof the new path executed. The line is
+#     emitted early in _serve; poll briefly in case health came up first.
+guard_ok=0
+for i in $(seq 1 10); do
+  if grep -q "Loop blocking-guard" "${LOG}" 2>/dev/null; then guard_ok=1; break; fi
+  sleep 1
+done
+if [ "${guard_ok}" = "1" ]; then
+  echo "✅ (b) NEW _serve CODE RAN: '$(grep -m1 "Loop blocking-guard" "${LOG}" | sed 's/^[^[]*//')'"
+else
+  echo "❌ (b) NEW _serve CODE DID NOT RUN: no 'Loop blocking-guard' line in ${LOG}."
+  echo "       The running process is NOT executing the new _serve code —"
+  echo "       git HEAD likely predates the fix, or the wrong file booted."
+  probe_fail=1
+fi
+
+# (c) WINDOWED FIRST-OPEN — the byte-bounded conversation-open fix (commit
+#     0c03be2) must be live: a large conversation served over ?window=N must
+#     come back WINDOWED + heavy-field-TRIMMED and its body must be a fraction
+#     of the multi-MB full blob (the reported freeze-victim mrbu5j9azz8gi8 was
+#     5.78 MB → ~237 KB). This proves THIS fix shipped, not just the freeze fix.
+#     Resilient: if the probe conv is absent on this deployment (404 / not
+#     found), SKIP rather than fail (the endpoint contract is still checked by
+#     tests/test_conv_windowed_blob_slice.py); only FAIL if it exists but is
+#     served UNwindowed or over-size.
+probe_c_skipped=0
+PROBE_CONV="${TOFU_WINDOW_PROBE_CONV:-mrbu5j9azz8gi8}"
+PROBE_URL="${BASE}/api/v1/conversations/${PROBE_CONV}?window=60"
+PROBE_JSON="$(curl -s --max-time 20 "${PROBE_URL}" 2>/dev/null)"
+if [ -z "${PROBE_JSON}" ] || printf '%s' "${PROBE_JSON}" | grep -qiE '"error"|not.?found'; then
+  probe_c_skipped=1
+  echo "⏭️  (c) SKIPPED — windowed byte-trim NOT VERIFIED: probe conv '${PROBE_CONV}'"
+  echo "       is not present on this deployment (override with"
+  echo "       TOFU_WINDOW_PROBE_CONV=<an existing large conv id> to actually"
+  echo "       verify the live byte-trim). The endpoint contract is still covered"
+  echo "       offline by tests/test_conv_windowed_blob_slice.py, but THIS restart"
+  echo "       did NOT confirm the trim is live — do not treat it as fully proven."
+else
+  # Parse windowed/trimmed flags + byte size with the server interpreter (no jq dep).
+  PROBE_VERDICT="$("${PY}" - "$PROBE_URL" <<'PYEOF' 2>/dev/null
+import sys, json, urllib.request
+url = sys.argv[1]
+try:
+    raw = urllib.request.urlopen(url, timeout=20).read()
+except Exception as e:
+    print("ERR fetch %s" % e); sys.exit(0)
+n = len(raw)
+try:
+    d = json.loads(raw)
+except Exception as e:
+    print("ERR json %s" % e); sys.exit(0)
+w = d.get('windowed') is True
+t = d.get('trimmed') is True
+under = n < 1024 * 1024
+print("bytes=%d windowed=%s trimmed=%s under1MB=%s served=%d total=%s"
+      % (n, w, t, under, len(d.get('messages') or []), d.get('totalCount')))
+print("VERDICT_OK" if (w and t and under) else "VERDICT_BAD")
+PYEOF
+)"
+  echo "      ${PROBE_VERDICT}" | grep -v VERDICT_
+  if printf '%s' "${PROBE_VERDICT}" | grep -q "VERDICT_OK"; then
+    echo "✅ (c) WINDOWED-OPEN LIVE: '${PROBE_CONV}' served windowed+trimmed, body < 1 MB."
+  else
+    echo "❌ (c) WINDOWED-OPEN NOT LIVE: '${PROBE_CONV}' served UNwindowed or over 1 MB."
+    echo "       get_conv is shipping the full blob — commit 0c03be2 did not load."
+    probe_fail=1
+  fi
+fi
+
+# (d) CACHE-FIX GENERATION — the served process must self-report an in-memory
+#     CACHE_FIX_GEN >= the expected baseline. This ties restart success to the
+#     CURRENT prefix-cache deploy target (the whole ab161bf..1920827 chain =
+#     gen 5), not just the older event-loop/windowed commits above. Uses the
+#     boot-identity fields /api/health now returns (bootId + cacheFixGen). The
+#     check is >= (not ==) so a FUTURE gen never false-fails this baseline; the
+#     expected value tracks lib/llm/cache.CACHE_FIX_GEN and is overridable via
+#     env. If /api/health predates the field (old build) the loaded code is by
+#     definition older than gen 5 → FAIL (that is the point). Best-effort parse
+#     with the server interpreter (no jq dep).
+EXPECT_GEN="${CACHE_FIX_GEN_EXPECT:-5}"
+GEN_VERDICT="$("${PY}" - "${BASE}/api/health" "${EXPECT_GEN}" <<'PYEOF' 2>/dev/null
+import sys, json, urllib.request
+url, expect = sys.argv[1], int(sys.argv[2])
+try:
+    d = json.loads(urllib.request.urlopen(url, timeout=10).read())
+except Exception as e:
+    print("ERR %s" % e); sys.exit(0)
+gen = d.get('cacheFixGen')
+if not isinstance(gen, int):
+    print("gen=%r boot=%s NO_FIELD" % (gen, d.get('bootId'))); sys.exit(0)
+print("gen=%d expect>=%d boot=%s %s"
+      % (gen, expect, d.get('bootId'), "OK" if gen >= expect else "OLD"))
+PYEOF
+)"
+echo "      ${GEN_VERDICT}"
+if printf '%s' "${GEN_VERDICT}" | grep -q " OK$"; then
+  echo "✅ (d) CACHE-FIX LIVE: served process self-reports CACHE_FIX_GEN >= ${EXPECT_GEN} (in-memory)."
+elif printf '%s' "${GEN_VERDICT}" | grep -q "NO_FIELD"; then
+  echo "❌ (d) CACHE-FIX NOT LIVE: /api/health has no cacheFixGen field — the"
+  echo "       served code predates the boot-identity/self-report chain (< gen ${EXPECT_GEN})."
+  probe_fail=1
+else
+  echo "❌ (d) CACHE-FIX OLD: served CACHE_FIX_GEN < ${EXPECT_GEN} — the prefix-cache"
+  echo "       fix chain is NOT the loaded bytecode. Wrong tree booted / stale copy."
+  probe_fail=1
+fi
+
+if [ "${probe_fail}" = "1" ]; then
+  echo "────────────────────────────────────────────────────────────────"
+  echo "FATAL: a fix is NOT fully live on :${PORT} (pid ${NEWPID}). See above."
+  exit 5
+fi
+if [ "${probe_c_skipped}" = "1" ]; then
+  echo "────────────────────────────────────────────────────────────────"
+  echo "⚠️  PARTIAL: off-loop backfill + new _serve guard + CACHE_FIX_GEN>=${EXPECT_GEN}"
+  echo "    are LIVE on :${PORT} (pid ${NEWPID}), but the windowed byte-trim (c) was"
+  echo "    SKIPPED and is NOT verified live this restart (probe conv absent). Re-run"
+  echo "    with TOFU_WINDOW_PROBE_CONV=<existing large conv id> to confirm the trim."
+  echo "════════════════════════════════════════════════════════════════"
+else
+  echo "✅ FIX LIVE: off-loop backfill + new _serve guard + windowed byte-bounded open + CACHE_FIX_GEN>=${EXPECT_GEN} on :${PORT} (pid ${NEWPID})."
+  echo "════════════════════════════════════════════════════════════════"
+fi

@@ -78,6 +78,12 @@ def _reset_state(monkeypatch, js_dir, files):
     monkeypatch.setattr(js_bundler, '_BUNDLE_FILES', list(files.keys()))
     monkeypatch.setattr(js_bundler, '_bundle_filename', None)
     monkeypatch.setattr(js_bundler, '_bundle_mtime', 0)
+    # These tests assert the DEPENDENCY-FREE _minify_js output shape (per-file
+    # boundary headers, whitespace-preserving `window.A = 1;`). Force the
+    # optional esbuild enhancer off so they stay deterministic whether or not
+    # esbuild is installed — they exercise the corruption scanner / boundary
+    # guard / critical tier, not which minifier runs.
+    monkeypatch.setattr(js_bundler, '_resolve_esbuild', lambda: None)
 
 
 def test_corrupt_file_skipped_bundle_still_builds(tmp_path, monkeypatch):

@@ -258,12 +258,13 @@ class TestApiBreakCauseDisambiguation:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class TestWireFingerprintVerdict:
-    """The core upgrade: detect_cache_break no longer reaches 'server-side' by
-    ELIMINATION. When usage carries the authoritative post-translation wire
-    fingerprint (`_wire_fp`), the verdict is PROVEN:
-      * fingerprint identical to last round + read drop → 'server-side … PROVEN'
-      * fingerprint differs → names the exact client-caused culprit, never
-        'server-side'.
+    """The core upgrade: detect_cache_break no longer reaches its miss verdict
+    by ELIMINATION. When usage carries the authoritative post-translation wire
+    fingerprint (`_wire_fp`):
+      * fingerprint identical to last round + read drop → the miss is NOT a
+        client change; it is named an 'upstream cache eviction' (shared-pool
+        LRU on one key), explicitly NOT a random server fault.
+      * fingerprint differs → names the exact client-caused culprit.
     """
 
     def _fp(self, msgs):
@@ -281,14 +282,24 @@ class TestWireFingerprintVerdict:
         detect_cache_break('wire-1', msgs, None, 'claude-opus-4',
                            usage={'cache_read_tokens': 90000,
                                   '_wire_fp': fp, '_wire_static': st})
-        # Round 2: read DROPS but the wire bytes are IDENTICAL → proven server.
+        # Round 2: read DROPS but the wire bytes are IDENTICAL → THIS round is
+        # not a client-side prefix change. The verdict names an upstream cache
+        # MISS as a possibility WITHOUT over-claiming a single confident cause
+        # (no 'eviction PROVEN', no 'NOT a random server failure' assertion),
+        # and points to the client-side branches as the systemic dominant class.
         r2 = detect_cache_break('wire-1', msgs, None, 'claude-opus-4',
                                 usage={'cache_read_tokens': 40000,
                                        '_wire_fp': fp, '_wire_static': st})
         assert r2 is not None
         cause = r2['server_side']
-        assert 'PROVEN' in cause
-        assert 'server-side' in cause
+        assert 'byte-identical' in cause
+        assert 'NOT a client-side prefix change' in cause
+        assert 'upstream cache miss' in cause
+        # Must NOT over-claim: no confident eviction verdict, no 'not a random
+        # server failure' assertion, no PROVEN/UNPROVEN label.
+        assert 'upstream cache eviction' not in cause
+        assert 'NOT a random server failure' not in cause
+        assert 'PROVEN' not in cause
         assert 'UNPROVEN' not in cause
 
     def test_changed_wire_names_culprit_not_server_side(self):
@@ -321,10 +332,12 @@ class TestWireFingerprintVerdict:
 
     def test_benign_wrapping_flip_not_flagged(self):
         """NC-adjacent: a message whose content flips str ↔ [{type:text}]
-        between rounds (moving cache marker) must NOT be flagged — the server
-        prefix-matches tokenized content, and the canonicaliser erases the
-        wrapping. This is the exact false-positive the reconstruction hash and
-        the old len-2 probe were blind to."""
+        between rounds (moving cache marker) must NOT be flagged as a client
+        prefix mutation — the server prefix-matches tokenized content, and the
+        canonicaliser erases the wrapping. The resulting byte-identical read
+        drop is then named an upstream eviction, not a client culprit. This is
+        the exact false-positive the reconstruction hash and the old len-2
+        probe were blind to."""
         from lib.tasks_pkg.cache_tracking import detect_cache_break
         msgs = [{'role': 'system', 'content': 'sys'}]
         # Round 1: tail tool result WRAPPED (marker landed on it).
@@ -349,10 +362,14 @@ class TestWireFingerprintVerdict:
                                        'cache_creation_input_tokens': 50000,
                                        '_wire_fp': fp2, '_wire_static': st2})
         assert r2 is not None
-        # The wrapping flip is erased → NOT a prefix mutation → proven server.
+        # The wrapping flip is erased → NOT a prefix mutation → the byte-
+        # identical read drop is named an upstream cache MISS possibility, not a
+        # client culprit and not an over-claimed eviction verdict.
         assert 'prefix_mutation' not in r2
         assert 'server_side' in r2
-        assert 'PROVEN' in r2['server_side']
+        assert 'NOT a client-side prefix change' in r2['server_side']
+        assert 'upstream cache miss' in r2['server_side']
+        assert 'upstream cache eviction' not in r2['server_side']
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1236,7 +1253,8 @@ class TestSortToolResultsPrefixGate:
         import lib.tasks_pkg.cache_tracking as ct
 
         # Pretend the first 4 messages are inside the cache prefix.
-        monkeypatch.setattr(ct, 'get_cache_prefix_count', lambda cid: 4)
+        monkeypatch.setattr(ct, 'get_cache_prefix_count',
+                            lambda cid, current_msg_count=None: 4)
         messages = [
             {'role': 'system', 'content': 'sys'},
             {'role': 'assistant', 'tool_calls': [{'id': 'b'}]},
@@ -1254,7 +1272,8 @@ class TestSortToolResultsPrefixGate:
         import lib.tasks_pkg.cache_tracking as ct
 
         # No prefix tracked → sort everywhere (legacy behaviour).
-        monkeypatch.setattr(ct, 'get_cache_prefix_count', lambda cid: 0)
+        monkeypatch.setattr(ct, 'get_cache_prefix_count',
+                            lambda cid, current_msg_count=None: 0)
         messages = [
             {'role': 'assistant', 'tool_calls': [{'id': 'z'}]},
             {'role': 'tool', 'tool_call_id': 'z', 'content': 'Z'},
@@ -1269,7 +1288,7 @@ class TestTaskIdPassthrough:
     """_task_id is passed through body and cleaned up properly."""
 
     def test_task_id_stripped_for_non_claude(self):
-        """_task_id should be removed from body for non-Claude models."""
+        """_task_id should not crash the non-Claude early-return path."""
         from lib.llm import add_cache_breakpoints
 
         body = {
@@ -1278,12 +1297,22 @@ class TestTaskIdPassthrough:
             'messages': [{'role': 'user', 'content': 'hi'}],
         }
         add_cache_breakpoints(body)
-        # For non-Claude, add_cache_breakpoints returns early.
-        # _task_id should still be in body (cleaned by _stream_chat_once).
-        # But the key thing is it doesn't crash.
+        # For non-Claude, add_cache_breakpoints returns early — the key thing is
+        # it doesn't crash. _task_id is stripped later at the OpenAI
+        # serialization boundary in prepare_request.
 
-    def test_task_id_popped_for_claude(self):
-        """_task_id is consumed (popped) by add_cache_breakpoints for Claude."""
+    def test_task_id_survives_add_cache_breakpoints_for_claude(self):
+        """_task_id must SURVIVE add_cache_breakpoints (read non-destructively).
+
+        Regression guard for the mrne3bqe cache miss: the streaming retry loop
+        re-feeds the SAME body to add_cache_breakpoints on every 429/503
+        attempt. If _task_id were popped on attempt 1, attempt 2+ would fall
+        back to the live global CACHE_EXTENDED_TTL and flip the cache_control
+        TTL / beta header mid-task → different cache key → full prefix miss.
+        Keeping _task_id on the body is what makes the latch decision stable
+        across retries. It is stripped only at the serialization boundary
+        (prepare_request), covered by test_task_id_stripped_at_openai_boundary.
+        """
         from lib.llm import add_cache_breakpoints
 
         body = {
@@ -1295,4 +1324,175 @@ class TestTaskIdPassthrough:
             ],
         }
         add_cache_breakpoints(body)
-        assert '_task_id' not in body  # consumed by pop
+        assert body.get('_task_id') == 'task-456', (
+            'add_cache_breakpoints must NOT pop _task_id — a retry reusing the '
+            'same body would then lose the TTL latch and evict the prefix cache')
+
+    def test_task_id_stripped_at_openai_boundary(self):
+        """prepare_request removes _task_id on the OpenAI path (raw body is
+        serialized to the gateway) — but NOT before add_cache_breakpoints has
+        read it, and the read stays non-destructive across attempts."""
+        from lib.llm._sse_core import prepare_request
+
+        body = {
+            'model': 'gpt-4o',
+            '_task_id': 'task-789',
+            'messages': [
+                {'role': 'system', 'content': 'sys'},
+                {'role': 'user', 'content': 'hi'},
+            ],
+        }
+        plan = prepare_request(body, attempt=0, log_prefix='[t]',
+                               base_url='https://gw.example/v1',
+                               api_protocol='openai')
+        assert '_task_id' not in plan.body, (
+            '_task_id must be stripped before the OpenAI body is serialized')
+
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Representation invariance — a marker moving off a message must NOT change the
+#  message's content BYTES (str↔block flip root cause of early-round pin).
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestMarkerRepresentationInvariance:
+    """Root cause of "wrote-but-can't-read-back" early-round cache pin: when the
+    mid-anchor quantum-advances, the previously-anchored tool_result was rebuilt
+    from a bare ``str`` (marker wrap removed) → its wire bytes flipped
+    str↔[{type:text}]. For a ``tool`` role that flip survives
+    openai_body_to_anthropic, so the cached prefix no longer byte-matches and
+    the server can't extend the prior entry. Phase 0.5 normalizes every markable
+    str content to the single-block form UP FRONT, so anchoring only adds/removes
+    the ``cache_control`` key — content bytes are invariant."""
+
+    @staticmethod
+    def _strip_cc(content):
+        """Content with cache_control removed from every block (what the server
+        prefix-matches on and what _msg_bytes compares)."""
+        if isinstance(content, list):
+            return [{k: v for k, v in b.items() if k != 'cache_control'}
+                    if isinstance(b, dict) else b for b in content]
+        return content
+
+    def _mk_body(self, n_tool_msgs):
+        """A long tool loop: system + user + N (assistant,tool) pairs, big enough
+        that the mid-anchor arms and lands on a tool_result."""
+        msgs = [{'role': 'system', 'content': 'system prompt ' * 20},
+                {'role': 'user', 'content': 'kick off'}]
+        for i in range(n_tool_msgs):
+            msgs.append({'role': 'assistant', 'content': '',
+                         'tool_calls': [{'id': f'c{i}', 'type': 'function',
+                                         'function': {'name': 'read_files',
+                                                      'arguments': '{}'}}]})
+            msgs.append({'role': 'tool', 'tool_call_id': f'c{i}',
+                         'content': f'tool result payload {i} ' + ('x ' * 50)})
+        return {'model': 'claude-opus-4-20250514', 'messages': msgs}
+
+    def test_unanchored_tool_result_bytes_are_invariant(self):
+        """The message the mid-anchor SITS on in round A but MOVES OFF in round B
+        must have byte-identical (cache_control-stripped) content in both."""
+        from lib.llm import add_cache_breakpoints
+
+        # Round A: 40 tool pairs → mid-anchor lands somewhere mid-history.
+        bodyA = self._mk_body(40)
+        add_cache_breakpoints(bodyA)
+        # Find a mid-history tool_result that carries a marker in round A.
+        anchored_idx = None
+        for i, m in enumerate(bodyA['messages']):
+            if m.get('role') != 'tool':
+                continue
+            c = m.get('content')
+            if isinstance(c, list) and any(
+                    isinstance(b, dict) and 'cache_control' in b for b in c):
+                anchored_idx = i
+                break
+        assert anchored_idx is not None, 'no anchored tool_result in round A'
+        bytesA = self._strip_cc(bodyA['messages'][anchored_idx]['content'])
+
+        # Round B: 8 more pairs appended → the quantized mid-anchor jumps forward,
+        # moving OFF anchored_idx. Rebuild from scratch (as build_body does each
+        # round from the persistent list) so the content starts as bare str again.
+        bodyB = self._mk_body(48)
+        add_cache_breakpoints(bodyB)
+        mB = bodyB['messages'][anchored_idx]
+        assert mB.get('role') == 'tool'
+        # It must NOT carry a marker now (anchor moved) ...
+        cB = mB['content']
+        has_marker = isinstance(cB, list) and any(
+            isinstance(b, dict) and 'cache_control' in b for b in cB)
+        assert not has_marker, 'anchor did not move off — test setup invalid'
+        # ... yet its content bytes (sans cache_control) are IDENTICAL to round A.
+        assert self._strip_cc(cB) == bytesA, (
+            'un-anchored tool_result bytes changed between rounds (str↔block '
+            'flip regression)')
+
+    def test_plain_assistant_midhistory_content_is_normalized(self):
+        """A plain-text assistant turn (model prose, no tool_calls) sitting in
+        MID-HISTORY — NOT the tail, NOT where any anchor lands — must still be
+        normalized to block form by Phase 0.5. This isolates Phase 0.5 from the
+        tail/mid placement branches, which independently wrap str→list when they
+        stamp a marker (that wrapping is itself the flip source). Only Phase 0.5
+        can turn THIS un-marked assistant message into block form."""
+        from lib.llm import add_cache_breakpoints
+
+        msgs = [{'role': 'system', 'content': 'system prompt ' * 20},
+                {'role': 'user', 'content': 'kick off'}]
+        # An early plain-text assistant turn (index 2) — deep in the prefix,
+        # far from the tail and from the quantized mid-anchor's trail zone.
+        msgs.append({'role': 'assistant', 'content': 'early prose answer'})
+        target_idx = len(msgs) - 1
+        for i in range(30):
+            msgs.append({'role': 'assistant', 'content': '',
+                         'tool_calls': [{'id': f'c{i}', 'type': 'function',
+                                         'function': {'name': 'read_files',
+                                                      'arguments': '{}'}}]})
+            msgs.append({'role': 'tool', 'tool_call_id': f'c{i}',
+                         'content': f'result {i} ' + ('x ' * 40)})
+        body = {'model': 'claude-opus-4-20250514', 'messages': msgs}
+        add_cache_breakpoints(body)
+        target = body['messages'][target_idx]
+        assert target.get('role') == 'assistant'
+        # It carries NO marker (not tail/mid/system) — so only Phase 0.5 could
+        # have turned it into block form.
+        c = target['content']
+        has_marker = isinstance(c, list) and any(
+            isinstance(b, dict) and 'cache_control' in b for b in c)
+        assert not has_marker, 'target unexpectedly anchored — test setup invalid'
+        assert isinstance(c, list), (
+            'mid-history plain assistant content not normalized (Phase 0.5 gap)')
+
+    def test_assistant_with_tool_calls_not_wrapped(self):
+        """An assistant message carrying tool_calls must be left alone — its
+        content is not wrapped (tool_use blocks drive the marker logic)."""
+        from lib.llm import add_cache_breakpoints
+
+        msgs = [{'role': 'system', 'content': 'sys ' * 20},
+                {'role': 'user', 'content': 'go'},
+                {'role': 'assistant', 'content': 'thinking out loud',
+                 'tool_calls': [{'id': 'c0', 'type': 'function',
+                                 'function': {'name': 'read_files',
+                                              'arguments': '{}'}}]},
+                {'role': 'tool', 'tool_call_id': 'c0', 'content': 'r'}]
+        body = {'model': 'claude-opus-4-20250514', 'messages': msgs}
+        add_cache_breakpoints(body)
+        am = body['messages'][2]
+        assert am.get('tool_calls')
+        # content stays a str — tool_calls path handles it; wrapping would
+        # disturb _assistant_blocks' last-block marker placement.
+        assert isinstance(am['content'], str), (
+            'assistant-with-tool_calls content should not be wrapped'
+        )
+
+    def test_markable_tool_content_is_always_block_form(self):
+        """After add_cache_breakpoints every non-empty tool/user message is in
+        single-block list form regardless of whether it got a marker — so the
+        Anthropic translation is stable and _msg_bytes never flips."""
+        from lib.llm import add_cache_breakpoints
+
+        body = self._mk_body(30)
+        add_cache_breakpoints(body)
+        for m in body['messages']:
+            if m.get('role') in ('tool', 'user') and m.get('content'):
+                assert isinstance(m['content'], list), (
+                    f'{m.get("role")} content not normalized to block form: '
+                    f'{type(m["content"])}')

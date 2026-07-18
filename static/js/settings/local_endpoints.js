@@ -109,7 +109,7 @@ function addLocalProvider() {
   }
   _stgProviders.unshift({
     id: 'local_' + Date.now().toString(36),
-    name: '本地部署模型',
+    name: t('settings.epDefaultProviderName'),
     brand: 'local',
     enabled: true,
     endpoints: [''],
@@ -187,7 +187,7 @@ async function _clearLocalEndpoints(provIdx) {
   if (!p || !p.endpoints) return;
   var n = p.endpoints.filter(function(u) { return u && u.trim(); }).length;
   if (n === 0) return;
-  if (!await showConfirm('确定要清空全部 ' + n + ' 个端点 URL 吗？此操作不会立即保存到服务器。', { danger: true })) return;
+  if (!await showConfirm(t('settings.epClearAllConfirm', { n: n }), { danger: true })) return;
   p.endpoints = [''];
   _syncLocalBaseUrl(p);
   _renderProvidersTab();
@@ -205,11 +205,11 @@ function _openBulkEditEndpoints(provIdx) {
   var html = '<div id="' + existingId + '" class="stg-modal-overlay" onclick="if(event.target===this)this.remove()">' +
     '<div class="stg-modal" style="max-width:640px;">' +
       '<div class="stg-modal-header">' +
-        '<span class="stg-modal-title">' + Icon('edit', 14) + ' 批量编辑端点 URL</span>' +
+        '<span class="stg-modal-title">' + Icon('edit', 14) + ' ' + escapeHtml(t('settings.epBulkEditTitle')) + '</span>' +
         '<button class="stg-modal-close" onclick="document.getElementById(\'' + existingId + '\').remove()">✕</button>' +
       '</div>' +
       '<div class="stg-modal-body">' +
-        '<p class="stg-modal-desc">每行一个 URL。粘贴 <code>/chat/completions</code> 链接也会自动转换为 base URL。</p>' +
+        '<p class="stg-modal-desc">' + t('settings.epBulkEditDesc') + '</p>' +
         '<textarea id="stgBulkEditTa_' + provIdx + '" rows="10" ' +
           'style="width:100%;font-family:ui-monospace,monospace;font-size:12px;" ' +
           'placeholder="http://10.0.0.5:8000/v1&#10;http://10.0.0.6:8000/v1">' +
@@ -217,8 +217,8 @@ function _openBulkEditEndpoints(provIdx) {
         '</textarea>' +
       '</div>' +
       '<div class="stg-modal-footer">' +
-        '<button class="stg-btn-secondary" onclick="document.getElementById(\'' + existingId + '\').remove()">取消</button>' +
-        '<button class="stg-btn-primary" onclick="_applyBulkEditEndpoints(' + provIdx + ')">应用</button>' +
+        '<button class="stg-btn-secondary" onclick="document.getElementById(\'' + existingId + '\').remove()">' + escapeHtml(t('settings.epBulkCancel')) + '</button>' +
+        '<button class="stg-btn-primary" onclick="_applyBulkEditEndpoints(' + provIdx + ')">' + escapeHtml(t('settings.epBulkApply')) + '</button>' +
       '</div>' +
     '</div>' +
   '</div>';
@@ -496,14 +496,14 @@ async function _discoverLocalModels(provIdx) {
   if (!p) return;
   var urls = (p.endpoints && p.endpoints.length) ? p.endpoints : (p.base_url ? [p.base_url] : []);
   if (!urls.length) {
-    showAlert('请先在"端点 URL 列表"中添加至少一个 URL。');
+    showAlert(t('settings.epNoUrlToProbe'));
     return;
   }
   var statusEl = document.getElementById('stgLocalStatus_' + provIdx);
   if (statusEl) {
     statusEl.style.display = 'block';
     statusEl.className = 'stg-auto-status stg-auto-loading';
-    statusEl.textContent = '正在并行探测 ' + urls.length + ' 个端点…';
+    statusEl.textContent = t('settings.epProbingN', { n: urls.length });
   }
 
   var apiKey = (p.api_keys && p.api_keys[0]) || '';
@@ -513,7 +513,7 @@ async function _discoverLocalModels(provIdx) {
     if (!data || !data.ok) {
       if (statusEl) {
         statusEl.className = 'stg-auto-status stg-auto-error';
-        statusEl.textContent = data.error || '探测失败';
+        statusEl.textContent = data.error || t('settings.epProbeFailed');
       }
       return;
     }
@@ -541,14 +541,14 @@ async function _discoverLocalModels(provIdx) {
         // Cache under both raw and normalized URL keys.
         _localEndpointStatus[origUrl] = _localEndpointStatus[normUrl] = {
           ok: true, status: 'ok',
-          message: (r.models || []).length + ' 个模型',
+          message: t('settings.epModelsCount', { n: (r.models || []).length }),
           ts: nowTs, n_models: (r.models || []).length,
         };
       } else {
-        resultsList.push({ url: normUrl, ok: false, error: r.error || '探测失败' });
+        resultsList.push({ url: normUrl, ok: false, error: r.error || t('settings.epProbeFailed') });
         _localEndpointStatus[origUrl] = _localEndpointStatus[normUrl] = {
           ok: false, status: 'error',
-          message: r.error || '探测失败',
+          message: r.error || t('settings.epProbeFailed'),
           ts: nowTs, n_models: 0,
         };
       }
@@ -593,8 +593,7 @@ async function _discoverLocalModels(provIdx) {
       var okN = liveUrls.length;
       var totN = (data.results || []).length;
       statusEl.className = okN > 0 ? 'stg-auto-status stg-auto-success' : 'stg-auto-status stg-auto-error';
-      statusEl.textContent = '探测完成：' + okN + '/' + totN + ' 个端点存活，模型并集 ' +
-        Object.keys(unionModels).length + ' 个（详见各端点状态指示）。';
+      statusEl.textContent = t('settings.epProbeDone', { ok: okN, total: totN, models: Object.keys(unionModels).length });
     }
 
     _renderProvidersTab();
@@ -602,7 +601,7 @@ async function _discoverLocalModels(provIdx) {
   } catch (e) {
     if (statusEl) {
       statusEl.className = 'stg-auto-status stg-auto-error';
-      statusEl.textContent = '网络错误: ' + e.message;
+      statusEl.textContent = t('settings.epNetworkError', { error: e.message });
     }
   }
 }

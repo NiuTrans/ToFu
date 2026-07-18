@@ -124,12 +124,46 @@ def _poll_status_after_eviction(task_id):
     return asyncio.run(_do())
 
 
+def _ensure_conv_row(*conv_ids):
+    """Insert a real ``conversations`` row for each conv id.
+
+    The production send path (routes/chat.py ``chat_send``) inserts the
+    conversations row (``load_or_create_conv``) BEFORE the task starts, so any
+    aborted/superseded/stuck task's terminal-floor write finds its parent row on
+    disk. These tests fabricate tasks via ``create_task`` directly, bypassing
+    that route — so without this the orphan guard in ``_upsert_task_row``
+    (``_conv_row_exists`` → skip) correctly suppresses the floor write and the
+    post-eviction poll 404s. Insert the row to faithfully mirror production.
+    """
+    from lib.database import DOMAIN_CHAT, get_thread_db, db_execute_with_retry
+    db = get_thread_db(DOMAIN_CHAT)
+    now_ms = int(time.time() * 1000)
+    for cid in conv_ids:
+        try:
+            db_execute_with_retry(db, (
+                'INSERT INTO conversations '
+                '(id, user_id, title, messages, created_at, updated_at, '
+                'settings, msg_count, search_text) '
+                "VALUES (?, 1, 't', '[]', ?, ?, '{}', 0, '')"),
+                (cid, now_ms, now_ms))
+        except Exception:
+            pass
+    try:
+        db.commit()
+    except Exception:
+        pass
+
+
 def _cleanup_task_results(conv_ids):
     from lib.database import DOMAIN_CHAT, get_thread_db, db_execute_with_retry
     db = get_thread_db(DOMAIN_CHAT)
     for cid in conv_ids:
         try:
             db_execute_with_retry(db, 'DELETE FROM task_results WHERE conv_id=?', (cid,))
+        except Exception:
+            pass
+        try:
+            db_execute_with_retry(db, 'DELETE FROM conversations WHERE id=?', (cid,))
         except Exception:
             pass
     try:
@@ -166,6 +200,7 @@ def test_superseded_task_polls_terminal_after_restart_not_404():
     from lib.tasks_pkg.manager import create_task
     conv = 'cv-supersede-B'
     try:
+        _ensure_conv_row(conv)
         t_old = create_task(conv, [{'role': 'user', 'content': 'old'}], {})
         t_old['content'] = 'partial work before wedge'
         # New task supersedes t_old → abort sweep writes t_old's terminal floor.
@@ -216,6 +251,7 @@ def test_stuck_reaper_fails_wedged_but_spares_human_waiting():
                                         reap_stuck_running_tasks)
     conv_w, conv_h = 'cv-stuck-wedged', 'cv-stuck-human'
     try:
+        _ensure_conv_row(conv_w, conv_h)
         # Wedged: 0 events, 0 content, ancient — the 222c0f68 shape.
         tw = create_task(conv_w, [{'role': 'user', 'content': 'q'}], {})
         tw['created_at'] = time.time() - 100000
@@ -231,7 +267,7 @@ def test_stuck_reaper_fails_wedged_but_spares_human_waiting():
 
         assert tw['aborted'] is True, 'wedged task was not reaped'
         assert tw['status'] == 'error'
-        assert tw['_abort_reason'] == 'stuck_no_output'
+        assert tw['_abort_reason'] == 'stuck_no_progress'
         assert tw.get('error'), 'reaped task must carry an error envelope'
         assert th['aborted'] is False, (
             'human-waiting task (>=1 event) was WRONGLY reaped — the '
@@ -264,6 +300,7 @@ def test_aborted_floor_write_survives_missing_created_at():
                                         tasks_lock)
     conv = 'cv-floor-nocreated'
     tid = 'task-nocreated-at'
+    _ensure_conv_row(conv)
     task = {
         'id': tid, 'convId': conv, 'status': 'aborted', 'aborted': True,
         'content': 'partial', 'thinking': '', 'error': None,
@@ -291,7 +328,8 @@ def test_aborted_floor_write_survives_missing_created_at():
 _NC_SENSITIVE = {
     'abort': ('test_create_task_supersedes_prior_running_task',
               'test_superseded_task_polls_terminal_after_restart_not_404'),
-    'floor': ('test_superseded_task_polls_terminal_after_restart_not_404',),
+    'floor': ('test_superseded_task_polls_terminal_after_restart_not_404',
+              'test_aborted_floor_write_survives_missing_created_at'),
 }
 
 
@@ -300,6 +338,8 @@ def main():
     label = f' (NC revert={_REVERT})' if _REVERT else ' (clean)'
     print(_color(f'═══ Task Supersede + Stuck-Reaper Tests{label} ═══', '36'))
     print()
+    from tests._standalone_guard import guard_standalone_db
+    guard_standalone_db('test_task_supersede_and_stuck.__main__')
     _apply_negative_control()
     print()
 

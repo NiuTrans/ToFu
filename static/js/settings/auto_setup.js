@@ -24,29 +24,29 @@ function _showAutoSetupModal() {
   var html = '<div id="stgAutoSetupModal" class="stg-modal-overlay" onclick="if(event.target===this)this.remove()">' +
     '<div class="stg-modal">' +
       '<div class="stg-modal-header">' +
-        '<span class="stg-modal-title"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px"><path d="M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 0 0-2.91-.09z"/><path d="M12 15l-3-3a22 22 0 0 1 2-3.95A12.88 12.88 0 0 1 22 2c0 2.72-.78 7.5-6 11a22.35 22.35 0 0 1-4 2z"/><path d="M9 12H4s.55-3.03 2-4c1.62-1.08 5 0 5 0"/><path d="M12 15v5s3.03-.55 4-2c1.08-1.62 0-5 0-5"/></svg>自动配置服务商</span>' +
+        '<span class="stg-modal-title"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px"><path d="M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 0 0-2.91-.09z"/><path d="M12 15l-3-3a22 22 0 0 1 2-3.95A12.88 12.88 0 0 1 22 2c0 2.72-.78 7.5-6 11a22.35 22.35 0 0 1-4 2z"/><path d="M9 12H4s.55-3.03 2-4c1.62-1.08 5 0 5 0"/><path d="M12 15v5s3.03-.55 4-2c1.08-1.62 0-5 0-5"/></svg>' + escapeHtml(t('settings.asTitle')) + '</span>' +
         '<button class="stg-modal-close" onclick="document.getElementById(\'stgAutoSetupModal\').remove()">✕</button>' +
       '</div>' +
       '<div class="stg-modal-body">' +
-        '<p class="stg-modal-desc">只需填写 API 地址和密钥，系统将自动发现模型、检测余额接口、识别服务商品牌并获取定价信息。</p>' +
+        '<p class="stg-modal-desc">' + escapeHtml(t('settings.asDesc')) + '</p>' +
         '<div class="stg-field">' +
-          '<label>API 地址 (Base URL) <span class="stg-required">*</span></label>' +
+          '<label>' + escapeHtml(t('settings.asUrlLabel')) + ' <span class="stg-required">*</span></label>' +
           '<input type="text" id="stgAutoUrl" placeholder="https://api.deepseek.com" autocomplete="url">' +
-          '<span class="stg-hint">填写 OpenAI 兼容的 API 地址，通常以 /v1 结尾</span>' +
+          '<span class="stg-hint">' + escapeHtml(t('settings.asUrlHint')) + '</span>' +
         '</div>' +
         '<div class="stg-field">' +
-          '<label>API 密钥 <span class="stg-required">*</span></label>' +
+          '<label>' + escapeHtml(t('settings.asKeyLabel')) + ' <span class="stg-required">*</span></label>' +
           '<input type="password" id="stgAutoKey" placeholder="sk-..." autocomplete="off">' +
         '</div>' +
         '<div class="stg-field">' +
-          '<label>模型发现路径 <span class="stg-hint">（可选 — 默认 /models）</span></label>' +
+          '<label>' + escapeHtml(t('settings.asModelsPathLabel')) + ' <span class="stg-hint">' + escapeHtml(t('settings.asModelsPathHint')) + '</span></label>' +
           '<input type="text" id="stgAutoModelsPath" placeholder="/models">' +
         '</div>' +
         '<div id="stgAutoStatus" class="stg-auto-status" style="display:none"></div>' +
       '</div>' +
       '<div class="stg-modal-footer">' +
-        '<button class="stg-btn-secondary" onclick="document.getElementById(\'stgAutoSetupModal\').remove()">取消</button>' +
-        '<button class="stg-btn-primary" id="stgAutoProbeBtn" onclick="_runAutoProbe()">' + Icon('search', 13) + ' 开始探测</button>' +
+        '<button class="stg-btn-secondary" onclick="document.getElementById(\'stgAutoSetupModal\').remove()">' + escapeHtml(t('settings.cancel')) + '</button>' +
+        '<button class="stg-btn-primary" id="stgAutoProbeBtn" onclick="_runAutoProbe()">' + Icon('search', 13) + ' ' + escapeHtml(t('settings.asProbeBtn')) + '</button>' +
       '</div>' +
     '</div>' +
   '</div>';
@@ -70,11 +70,11 @@ async function _runAutoProbe() {
   var probeBtn = document.getElementById('stgAutoProbeBtn');
 
   if (!baseUrl) {
-    _showAutoStatus('error', '请填写 API 地址');
+    _showAutoStatus('error', t('settings.fillUrl'));
     return;
   }
   if (!apiKey) {
-    _showAutoStatus('error', '请填写 API 密钥');
+    _showAutoStatus('error', t('settings.fillKey'));
     return;
   }
 
@@ -87,19 +87,19 @@ async function _runAutoProbe() {
   // Show progress
   if (probeBtn) {
     probeBtn.disabled = true;
-    probeBtn.textContent = '正在探测…';
+    probeBtn.textContent = t('settings.asProbing');
   }
-  _showAutoStatus('loading', '正在发现模型… 这可能需要几秒钟');
+  _showAutoStatus('loading', t('settings.discoveringModels'));
 
   try {
     var data = await Api.providers.probe(baseUrl, apiKey, modelsPath || '');
     if (!data) {
-      _showAutoStatus('error', '探测失败 (网络/超时)');
+      _showAutoStatus('error', t('settings.asProbeNetFail'));
       return;
     }
 
     if (!data.ok) {
-      _showAutoStatus('error', data.error || '探测失败');
+      _showAutoStatus('error', data.error || t('settings.probeFailed'));
       return;
     }
 
@@ -109,18 +109,21 @@ async function _runAutoProbe() {
 
     // Build a summary message
     var parts = [];
-    if (summary.text) parts.push(summary.text + ' 个文本');
-    if (summary.thinking) parts.push(summary.thinking + ' 个推理');
-    if (summary.vision) parts.push(summary.vision + ' 个视觉');
-    if (summary.cheap) parts.push(summary.cheap + ' 个低价');
-    if (summary.image_gen) parts.push(summary.image_gen + ' 个图片生成');
-    if (summary.embedding) parts.push(summary.embedding + ' 个嵌入');
-    var modelSummary = parts.join('，') || (models.length + ' 个模型');
+    if (summary.text) parts.push(t('settings.asTextModels', { n: summary.text }));
+    if (summary.thinking) parts.push(t('settings.asThinkingModels', { n: summary.thinking }));
+    if (summary.vision) parts.push(t('settings.asVisionModels', { n: summary.vision }));
+    if (summary.cheap) parts.push(t('settings.asCheapModels', { n: summary.cheap }));
+    if (summary.image_gen) parts.push(t('settings.asIgModels', { n: summary.image_gen }));
+    if (summary.embedding) parts.push(t('settings.asEmbeddingModels', { n: summary.embedding }));
+    var modelSummary = parts.join(t('settings.asModelsJoin')) || t('settings.asModelsCount', { n: models.length });
 
     _showAutoStatus('success',
-      '✅ 发现 ' + models.length + ' 个模型（' + modelSummary + '）' +
-      (data.balance_url ? '，已检测到余额接口' : '') +
-      (data.thinking_format ? '，建议思维格式: ' + data.thinking_format : ''));
+      t('settings.asDiscovered', {
+        n: models.length,
+        summary: modelSummary,
+        balance: (data.balance_url ? t('settings.asBalanceDetected') : ''),
+        thinking: (data.thinking_format ? t('settings.asThinkingFormat', { fmt: data.thinking_format }) : '')
+      }));
 
     // Create the provider entry
     var provId = (data.brand || 'prov') + '_' + Date.now().toString(36);
@@ -156,11 +159,11 @@ async function _runAutoProbe() {
     }, 1500);
 
   } catch (e) {
-    _showAutoStatus('error', '网络错误: ' + e.message);
+    _showAutoStatus('error', t('settings.asNetworkError', { error: e.message }));
   } finally {
     if (probeBtn) {
       probeBtn.disabled = false;
-      probeBtn.textContent = '开始探测';
+      probeBtn.textContent = t('settings.asProbeBtn');
     }
   }
 }

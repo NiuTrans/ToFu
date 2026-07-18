@@ -13,19 +13,43 @@
 // ══════════════════════════════════════════════
 function _ensureStreamZones(body) {
   if (body.querySelector('[data-zone="tool"]')) return;
+  /* ★ FIX (blank streaming bubble on tablet): this innerHTML assignment WIPES
+   *   the "Preparing…/等待中…" pulse that _streamingBubbleHTML seeded into
+   *   #streaming-body. updateStreamingUI can then hit an early return before it
+   *   repopulates the status zone — the _hasSelectionInStreaming() guard (a
+   *   long-press text selection inside the bubble is common on tablets) or a
+   *   coalesced background-tab frame whose buffer is still empty. That left the
+   *   body as empty zones with NO pulse and NO content: a permanently blank
+   *   Agent bubble while the independent elapsed timer kept ticking. Seed the
+   *   same waiting pulse directly into the status zone so the wipe can never
+   *   produce a fully-blank body; the normal status logic overwrites it (keyed
+   *   on data-phase-key) the moment a real frame paints. */
+  const _waitPulse =
+    '<div class="stream-status"><div class="pulse"></div> ' +
+    escapeHtml(typeof t === 'function' ? t('stream.phase.waiting') : 'Waiting…') +
+    '</div>';
   body.innerHTML =
     '<div data-zone="memprefetch"></div>' +
     '<div data-zone="swarmInbox"></div>' +  /* async swarm-update chips */
     '<div data-zone="tool"></div>' +
     '<div data-zone="thinking"></div>' +
+    /* ★ Auto-translate render UNIFICATION (2026-07-07): when auto-translate is
+     * ON, the incremental translator's Chinese-so-far renders HERE — as the
+     * PRIMARY body, in its natural interleaved position ABOVE the English —
+     * mirroring the settled bilingual view (Chinese primary, English in the
+     * collapsed 原文/译文 toggle). This retires the old bottom-pinned
+     * translatePreview dump that made the Chinese arrive as "one big block at
+     * the very bottom" and caused a layout jump at finalize. The content zone
+     * below holds the still-untranslated English TAIL (the current round's
+     * prose), which swaps to Chinese in place as each round's segment lands. */
+    '<div data-zone="translatedPrimary"></div>' +
     '<div data-zone="content"></div>' +
     '<div data-zone="fc"></div>' +
-    '<div data-zone="status"></div>' +
-    /* Live per-round translation preview. A FIXED zone (not an after-the-fact
-     * append) so it survives a body rebuild: when this body is recreated mid
-     * stream the empty zone is recreated with it, and _renderStreamingTranslate
-     * Preview only needs to refill it — the Chinese-so-far can't vanish just
-     * because some other code triggered a full re-render. */
+    '<div data-zone="status">' + _waitPulse + '</div>' +
+    /* Legacy fallback slot — retained (hidden by default) only so a stale
+     * caller that predates translatedPrimary still has a target and degrades
+     * gracefully instead of throwing. The primary live-translation path no
+     * longer writes here. */
     '<div data-zone="translatePreview"></div>';
 }
 
@@ -57,6 +81,7 @@ function _getStreamZones() {
       swarmInbox:  body.querySelector('[data-zone="swarmInbox"]'),
       tool: body.querySelector('[data-zone="tool"]'),
       think: body.querySelector('[data-zone="thinking"]'),
+      translatedPrimary: body.querySelector('[data-zone="translatedPrimary"]'),
       content: body.querySelector('[data-zone="content"]'),
       fc: body.querySelector('[data-zone="fc"]'),
       status: body.querySelector('[data-zone="status"]'),
@@ -70,15 +95,6 @@ function updateStreamingUI(msg) {
   const { body, memprefetch: memprefetchZone, tool: toolZone, think: thinkZone, content: contentZone, fc: fcZone, status: statusZone } = zones;
   const rounds = msg.toolRounds || [];
   const hasActiveSearch = rounds.some((r) => r.status === "searching");
-  /* Stamp freshness across the WHOLE active conversation so the gradient
-   * shifts in real time as new tool rounds stream in.  Per-message
-   * stamping would be wrong: freshness is relative to the newest round
-   * in the conversation, not within a single assistant message. */
-  if (typeof activeConvId !== 'undefined' && activeConvId
-      && typeof conversations !== 'undefined') {
-    const _conv = conversations.find(c => c && c.id === activeConvId);
-    if (_conv) _stampFreshness(_conv);
-  }
   _syncToolRoundsDOM(toolZone, rounds);
   /* ★ Async swarm: render inbox-inject chips above the tool zone so the
    *   user sees "received N async swarm updates" the moment they land. */
@@ -170,6 +186,19 @@ function updateStreamingUI(msg) {
     const _thinkLbl = msg.content ? t('stream.thinking.done') : t('stream.thinking.active');
     if (labelEl && labelEl.textContent !== _thinkLbl)
       labelEl.textContent = _thinkLbl;
+  } else if (thinkZone.firstChild) {
+    /* ★ FIX (stale thinking pinned below the tool panel across rounds):
+     * clear the top-level thinking zone the instant the live buffer's thinking
+     * goes empty — SYMMETRIC with the content zone's clear-on-empty below
+     * (contentZone.innerHTML = ""). Without this, a round that streamed
+     * reasoning before its tool calls leaves its .thinking-block orphaned in
+     * this zone: delta_reset zeroes assistantMsg.thinking (the prose is moved
+     * onto the round's per-round .seg-thinking inside the tool panel), so every
+     * subsequent tool-only round skips the `if (msg.thinking)` write and the
+     * old block persists — visually stuck under the tool panel for the rest of
+     * the turn. Backend stays authoritative: finalize's committedMessage
+     * projection re-renders the bubble regardless. */
+    thinkZone.innerHTML = "";
   }
   /* ★ FIX: Skip content DOM update while user has active selection to prevent flicker/deselect */
   if (_hasSelectionInStreaming()) {
@@ -197,6 +226,22 @@ function updateStreamingUI(msg) {
    * every frame and dominates per-token allocation (GC storm). The block is
    * highlighted exactly once at finalizeStreaming via the renderMessage path. */
   window._streamRenderNoHighlight = true;
+  /* ★ Auto-translate render UNIFICATION: when a live Chinese translation is
+   * being painted into the translatedPrimary zone above, the English in THIS
+   * content zone is demoted to a subtle "live tail" (the still-untranslated
+   * current round), styled to read as the continuation of the Chinese rather
+   * than a competing full body. `data-xlate` is stamped by
+   * _renderStreamingTranslatePreview; `data-xlate-final` (set on the finalize
+   * 'started' frame) additionally HIDES the tail so the final round's English
+   * doesn't briefly double with its just-arriving Chinese. Both are pure
+   * class toggles on the existing zone — the content render logic below is
+   * unchanged. */
+  {
+    const _xl = body.getAttribute('data-xlate') === '1';
+    const _xlFinal = body.getAttribute('data-xlate-final') === '1';
+    contentZone.classList.toggle('stream-content-demoted', _xl);
+    contentZone.classList.toggle('stream-content-tail-hidden', _xlFinal);
+  }
   /* ★ Incremental content rendering: only re-render the new "tail" of content.
    * We split content at the last stable paragraph/block boundary and only update
    * the tail portion, avoiding full DOM teardown on every token.
@@ -213,8 +258,28 @@ function updateStreamingUI(msg) {
     if (msg.content) {
       const content = msg.content;
       const prevLen = contentZone._streamRendered || 0;
-      const frozenLen = contentZone._frozenLen || 0;
+      let frozenLen = contentZone._frozenLen || 0;
       const REFREEZE_THRESHOLD = 600; // advance freeze point when tail exceeds this
+
+      /* ★ Content-regression guard (stale frozen-prefix leak, 2026-07-09).
+       * The live buffer grows monotonically EXCEPT across a reset: delta_reset
+       * (new tool round) / retry_reset (turn re-run) zero buf.content. The
+       * freeze cache (_frozenLen/_frozenHtml) lives on the reused zone element
+       * and is dropped below ONLY on a frame that observes content==="" — but
+       * the render is COALESCED (_twFlush paints only the latest buffer per
+       * rAF), so that empty frame is routinely skipped when the next content
+       * delta beats the next animation frame. A content SHORTER than we last
+       * rendered therefore means the buffer was reset and the cached freeze
+       * belongs to a PRIOR round's prose; splicing the new content against that
+       * stale _frozenLen glues the prior round's frozen prefix in front of the
+       * real answer — pristine in the buffer + committed message, garbled only
+       * in the live projection (the reported thinking/content "swap"). Drop the
+       * stale cache so the terminal round re-renders from a clean slate. */
+      if (content.length < prevLen) {
+        contentZone._frozenLen = 0;
+        contentZone._frozenHtml = null;
+        frozenLen = 0;
+      }
 
       const mdContentEl = contentZone.querySelector(".md-content");
       const tailEl = mdContentEl && mdContentEl.querySelector(".md-stream-tail");
@@ -236,22 +301,55 @@ function updateStreamingUI(msg) {
         const freezeIdx = content.lastIndexOf("\n\n", content.length - 60);
 
         if (freezeIdx > 100 && content.length > 300) {
-          const frozenText = content.slice(0, freezeIdx);
           const tailText = content.slice(freezeIdx);
 
-          /* ★ PERF: reuse cached frozen HTML if freeze point didn't move */
-          let frozenHtml;
-          if (frozenLen === freezeIdx && contentZone._frozenHtml) {
-            frozenHtml = contentZone._frozenHtml;
+          if (frozenLen > 0 && mdContentEl && tailEl) {
+            /* ★ FLICKER FIX (root cause): the old refreeze rebuilt the ENTIRE
+             *   `.md-content` innerHTML every ~600 chars, recreating the
+             *   already-committed frozen nodes and re-parsing the whole answer
+             *   — a visible full-content flash on long replies. Instead keep the
+             *   existing frozen DOM intact: render ONLY the newly-frozen segment
+             *   (content between the old and new freeze points; both sit on
+             *   `\n\n` block boundaries, so rendering the segment independently
+             *   is faithful to rendering the whole prefix) and insert it as new
+             *   frozen siblings right before the tail, then reset only the small
+             *   tail. Nothing already painted is torn down, so no flash. Freeze
+             *   points advance monotonically (lastIndexOf ceiling grows with
+             *   content), so freezeIdx >= frozenLen always holds here. */
+            if (freezeIdx > frozenLen) {
+              const newlyFrozen = content.slice(frozenLen, freezeIdx);
+              let _nfHtml;
+              try { _nfHtml = renderMarkdown(newlyFrozen); }
+              catch (_) { _nfHtml = escapeHtml(newlyFrozen); }
+              tailEl.insertAdjacentHTML('beforebegin', _nfHtml);
+              contentZone._frozenLen = freezeIdx;
+            }
+            /* freezeIdx === frozenLen: the overflowing tail has no new `\n\n`
+             * boundary (one long paragraph) — nothing new to freeze; just
+             * refresh the tail in place. */
+            try { tailEl.innerHTML = renderMarkdown(tailText); }
+            catch (_) { tailEl.innerHTML = escapeHtml(tailText); }
+            /* The whole-prefix cache is no longer maintained on the incremental
+             * path (the frozen DOM itself is now the source of truth). */
+            contentZone._frozenHtml = null;
           } else {
-            frozenHtml = renderMarkdown(frozenText);
-            contentZone._frozenHtml = frozenHtml;
+            /* First substantial render (or frozen DOM missing): build the split
+             * structure ONCE. Subsequent frames take the fast path or the
+             * incremental branch above, so this full build is not a per-frame
+             * cost and cannot flash repeatedly. */
+            const frozenText = content.slice(0, freezeIdx);
+            let frozenHtml;
+            if (frozenLen === freezeIdx && contentZone._frozenHtml) {
+              frozenHtml = contentZone._frozenHtml;
+            } else {
+              frozenHtml = renderMarkdown(frozenText);
+              contentZone._frozenHtml = frozenHtml;
+            }
+            const tailHtml = renderMarkdown(tailText);
+            contentZone.innerHTML =
+              `<div class="md-content">${frozenHtml}<div class="md-stream-tail">${tailHtml}</div></div>`;
+            contentZone._frozenLen = freezeIdx;
           }
-
-          const tailHtml = renderMarkdown(tailText);
-          contentZone.innerHTML =
-            `<div class="md-content">${frozenHtml}<div class="md-stream-tail">${tailHtml}</div></div>`;
-          contentZone._frozenLen = freezeIdx;
         } else {
           /* Content too short to split — render whole thing */
           contentZone.innerHTML = `<div class="md-content">${renderMarkdown(content)}</div>`;
@@ -310,7 +408,7 @@ function updateStreamingUI(msg) {
     _phaseHtml = `<div class="stream-phase"><span class="stream-phase-text">${escapeHtml(phase.detail)}</span><span class="stream-phase-dots"><span>.</span><span>.</span><span>.</span></span></div>`;
   } else if (phase && phase.phase === "retrying") {
     _phaseKey = "retry:" + (phase.attempt || 0);
-    _phaseHtml = `<div class="stream-phase stream-phase-retrying"><span class="stream-phase-icon">⟳</span><span class="stream-phase-text">${escapeHtml(phase.detail || t('stream.phase.retrying'))}</span><span class="stream-phase-dots"><span>.</span><span>.</span><span>.</span></span></div>`;
+    _phaseHtml = `<div class="stream-phase stream-phase-retrying"><span class="stream-phase-icon">${Icon('refresh', 14)}</span><span class="stream-phase-text">${escapeHtml(phase.detail || t('stream.phase.retrying'))}</span><span class="stream-phase-dots"><span>.</span><span>.</span><span>.</span></span></div>`;
   } else if (phase && phase.phase === "tool_exec" && !hasActiveSearch) {
     _phaseKey = "exec:" + phase.detail;
     _phaseHtml = `<div class="stream-phase"><span class="stream-phase-text">${escapeHtml(phase.detail)}</span><span class="stream-phase-dots"><span>.</span><span>.</span><span>.</span></span></div>`;
@@ -329,7 +427,7 @@ function updateStreamingUI(msg) {
     _phaseKey = "think-only";
     const _thLen = msg.thinking.length;
     const _thSize = _thLen >= 1024 ? `${(_thLen / 1024).toFixed(1)}k` : `${_thLen}`;
-    _phaseHtml = `<div class="stream-phase stream-phase-thinking"><span class="stream-phase-text">${escapeHtml(t('stream.phase.deepThinking'))}<span class="stream-phase-counter">${escapeHtml(t('stream.phase.chars', { n: _thSize }))}</span></span><span class="stream-phase-dots"><span>.</span><span>.</span><span>.</span></span></div>`;
+    _phaseHtml = `<div class="stream-phase stream-phase-thinking"><span class="stream-phase-text">${escapeHtml(t('stream.phase.reasoning'))}<span class="stream-phase-counter">${escapeHtml(t('stream.phase.chars', { n: _thSize }))}</span></span><span class="stream-phase-dots"><span>.</span><span>.</span><span>.</span></span></div>`;
   } else {
     _phaseKey = "none";
     _phaseHtml = "";
@@ -351,53 +449,212 @@ function updateStreamingUI(msg) {
   if (isNearBottom(80)) scrollToBottom();
 }
 
+/* ★ Render one streaming round's per-round thinking + narration INSIDE its
+ *   `.ptool-turn` group, above the tool slots — the live mirror of the settled
+ *   `_renderTimelineBatch` (ui/tool_rounds.js). Called once per group during
+ *   `_syncToolRoundsDOM` when the segment-timeline flag is ON.
+ *
+ *   Markup is BYTE-IDENTICAL to the settled render's `.seg-thinking` /
+ *   `.seg-narration` blocks (the panel carries `seg-timeline`, so the settled
+ *   `.seg-timeline .seg-*` CSS applies verbatim — no fork). Idempotent: keyed
+ *   on the rendered text length via data attributes so a repeated call with
+ *   unchanged prose is a no-op (never churns the live tool DOM). The nodes are
+ *   inserted BEFORE the round-tag / parallel-header / first `[data-prn]` slot
+ *   so prose always sits above the tools it introduced, and the English
+ *   narration is skipped while auto-translate is live (the translator paints
+ *   the Chinese equivalent into `.stream-seg-narration` in the same group). */
+function _renderStreamRoundProse(groupEl, round) {
+  if (!groupEl || !round) return;
+  /* ★ PARITY WITH SETTLED (owner directive 2026-07-08): the per-round thinking
+   * + narration must render as INDEPENDENT SIBLINGS of the `.ptool-turn` tool
+   * card — inside `.ptool-panel-body`, immediately BEFORE the card — never
+   * nested inside it. The settled `_renderTimelineBatch` concatenates
+   *   [thinking][narration][.ptool-turn]
+   * as flat siblings in the panel body; this is the live mirror. Nesting the
+   * prose inside the card (the old behaviour) was exactly the "thinking +
+   * narration + tool glued in one box" the screenshot showed. Each prose block
+   * is tagged `data-seg-round` = the card's llmRound key so it is located
+   * idempotently and kept adjacent to its own card. */
+  const body = groupEl.parentNode;   // .ptool-panel-body — prose lives HERE
+  if (!body) return;
+  const gkey = groupEl.getAttribute("data-llm-round") || "";
+  const _esc = (typeof CSS !== "undefined" && CSS.escape) ? CSS.escape : (s) => s;
+  const _q = (cls) => body.querySelector(
+    `:scope > .${cls}[data-seg-round="${_esc(gkey)}"]`);
+
+  // ── Per-round thinking (collapsed disclosure, settled markup verbatim) ──
+  const _think = round.thinking || "";
+  let thinkEl = _q("seg-thinking");
+  if (_think) {
+    if (!thinkEl) {
+      const len = _think.length;
+      const meta = len >= 1024 ? ` (${Math.round(len / 1024)}k chars)` : ` (${len} chars)`;
+      thinkEl = document.createElement("div");
+      thinkEl.className = "thinking-block seg-thinking";
+      thinkEl.setAttribute("data-seg-round", gkey);
+      thinkEl.setAttribute("onclick", "this.classList.toggle('expanded')");
+      thinkEl.innerHTML =
+        `<div class="thinking-header"><span class="thinking-label">${escapeHtml(t('stream.thinking.done'))}${escapeHtml(meta)}</span><span class="thinking-toggle">▼</span></div>` +
+        `<div class="thinking-content"><div class="thinking-text"></div></div>`;
+      body.insertBefore(thinkEl, groupEl);
+    }
+    const _txtEl = thinkEl.querySelector(".thinking-text");
+    if (_txtEl && thinkEl._lastThink !== _think) {
+      thinkEl._lastThink = _think;
+      _txtEl.textContent = _think;
+      const _lbl = thinkEl.querySelector(".thinking-label");
+      const len = _think.length;
+      const meta = len >= 1024 ? ` (${Math.round(len / 1024)}k chars)` : ` (${len} chars)`;
+      if (_lbl) _lbl.textContent = t('stream.thinking.done') + meta;
+    }
+  } else if (thinkEl) {
+    thinkEl.remove();
+  }
+
+  // ── Per-round narration (English) — hidden ONLY for a round whose Chinese
+  //    twin has landed (see the per-round .xlate-hidden gate below); otherwise
+  //    it stays visible as the fallback. ──
+  const _narr = round.assistantContent || "";
+  let narrEl = _q("stream-seg-en-narration");
+  if (_narr) {
+    if (!narrEl) {
+      narrEl = document.createElement("div");
+      narrEl.className = "md-content seg-narration stream-seg-en-narration";
+      narrEl.setAttribute("data-seg-round", gkey);
+      body.insertBefore(narrEl, groupEl);
+    }
+    if (narrEl._lastNarr !== _narr) {
+      narrEl._lastNarr = _narr;
+      try { narrEl.innerHTML = renderMarkdown(_narr); }
+      catch (_e) { narrEl.textContent = _narr; }
+    }
+    /* ★ PER-ROUND bilingual gate: hide this round's English ONLY when its
+     * Chinese twin (.stream-seg-narration, painted by the incremental
+     * translator) already exists for the SAME round. A tool-sync re-render can
+     * run after the translator painted Chinese, so re-assert the class here;
+     * and never hide a round whose Chinese hasn't landed — that was the
+     * "intermediate narration vanishes under auto-translate" bug. */
+    const _zhTwin = _q("stream-seg-narration");
+    narrEl.classList.toggle("xlate-hidden", !!_zhTwin);
+  } else if (narrEl) {
+    narrEl.remove();
+  }
+
+  /* Deterministic sibling order directly before the card: thinking → English
+   * narration → Chinese narration (the incremental translator paints the
+   * latter into `.stream-seg-narration`). insertBefore(el, groupEl) applied in
+   * this order lands them contiguous and correctly sequenced regardless of
+   * which path (tool sync vs. translate push) created them first. */
+  const _zh = _q("stream-seg-narration");
+  for (const el of [thinkEl, narrEl, _zh]) {
+    if (el && el.parentNode === body) body.insertBefore(el, groupEl);
+  }
+}
+
+/* ── Live DOM reposition of synthetic inject-row groups ──────────────────
+ * The main _syncToolRoundsDOM loop appends a NEW group with `body.appendChild`
+ * and never relocates an existing one. A mid-turn inject chip (steer / peer /
+ * async swarm) always arrives AFTER its anchor round's tool_start events (the
+ * chip event is deferred until the round's LLM call confirms consumption), so
+ * its solo `S{roundNum}` group is created at the TAIL — the sink-to-bottom bug.
+ * The array-level `_spliceInjectRow` fixes the settled/rehydrate rebuild paths
+ * (which re-derive the DOM from scratch, honoring array order), but the live
+ * incremental DOM needs this corrective pass: after the group loop, move each
+ * synthetic group ABOVE its anchor round (llmRound === injectRound-1), landing
+ * it before that round's earliest prose sibling / tool group — the top of the
+ * round that consumed the inject. Additive + idempotent: a no-op once the chip
+ * already sits above its anchor. */
+function _repositionInjectGroups(body, rounds) {
+  if (!body || !Array.isArray(rounds)) return;
+  const _esc = (typeof CSS !== "undefined" && CSS.escape) ? CSS.escape : (s) => s;
+  for (const r of rounds) {
+    if (!r || !(r._userSteerInject || r._peerInject || r._inboxInject)) continue;
+    const injRound = r._userSteerInject ? r.steerRound
+      : (r._peerInject ? r.peerRound : r.inboxRound);
+    const anchor = (injRound || 0) - 1;
+    if (anchor < 0) continue;
+    const sGroup = body.querySelector(
+      `.ptool-turn[data-llm-round="${_esc("S" + r.roundNum)}"]`);
+    if (!sGroup) continue;
+    // The anchor round's earliest DOM node: its prose siblings (data-seg-round)
+    // sit as `body` children BEFORE its `.ptool-turn`, so scan all children in
+    // order and take the FIRST that belongs to the anchor round.
+    const lkey = "L" + anchor;
+    let target = null;
+    for (const child of body.children) {
+      if (child === sGroup) continue;
+      if (child.getAttribute("data-seg-round") === lkey
+          || child.getAttribute("data-llm-round") === lkey) { target = child; break; }
+    }
+    if (target && sGroup.nextSibling !== target && sGroup !== target) {
+      body.insertBefore(sGroup, target);
+    }
+  }
+}
+
 function _syncToolRoundsDOM(container, rounds) {
   // ★ Fast-path: skip if rounds haven't changed since last sync
   let _fp = rounds.length;
   for (let i = 0; i < rounds.length; i++) {
     const r = rounds[i];
-    _fp = _fp * 31 + (r.roundNum | 0);
-    _fp = _fp * 31 + (r.status === 'searching' ? 1 : r.status === 'done' ? 2
+    _fp = Math.imul(_fp, 31) + (r.roundNum | 0);
+    _fp = Math.imul(_fp, 31) + (r.status === 'searching' ? 1 : r.status === 'done' ? 2
         : r.status === 'awaiting_human' ? 3 : r.status === 'submitted' ? 4
         : r.status === 'pending_approval' ? 5 : 0);
-    _fp = _fp * 31 + ((r.results && r.results.length) || 0);
-    _fp = _fp * 31 + (r.toolContent ? 1 : 0);
+    _fp = Math.imul(_fp, 31) + ((r.results && r.results.length) || 0);
+    _fp = Math.imul(_fp, 31) + (r.toolContent ? 1 : 0);
+    /* ★ Per-round interleave prose (segment-timeline step 5b): delta_reset
+     * stamps assistantContent/thinking onto the batch's first round AFTER it
+     * was already rendered as a tool_start slot. Without these in the fp the
+     * gate bails and the captured narration never paints until the next tool
+     * event forces a rebuild — the exact "thinking lost live" bug. */
+    _fp = Math.imul(_fp, 31) + ((r.assistantContent && r.assistantContent.length) || 0);
+    _fp = Math.imul(_fp, 31) + ((r.thinking && r.thinking.length) || 0);
     /* llmRound drives parallel-batch grouping — a sibling arriving in the
      * same turn changes a group's size/header, so it must move the fp. */
-    _fp = _fp * 31 + ((r.llmRound | 0) + 1);
-    _fp = _fp * 31 + (r._hgTranslating ? 1 : 0);
+    _fp = Math.imul(_fp, 31) + ((r.llmRound | 0) + 1);
+    _fp = Math.imul(_fp, 31) + (r._hgTranslating ? 1 : 0);
     /* compactionLayer set means a tool_compacted SSE just landed —
      * re-render so the row picks up the COMPACTED label. Include
      * the from/to char counts so a follow-up compaction (e.g. L1 → L3
      * graduation) also re-renders. */
-    _fp = _fp * 31 + (r.compactionLayer ? r.compactionLayer.length : 0);
-    _fp = _fp * 31 + (r.compactedToChars | 0);
-    _fp = _fp * 31 + (r.compactedFromChars | 0);
-    if (r._translatedQuestion) _fp = _fp * 31 + r._translatedQuestion.length;
-    if (r._timerPolls) _fp = _fp * 31 + r._timerPolls.length;
-    if (r._timerSkipCount) _fp = _fp * 31 + r._timerSkipCount;
+    _fp = Math.imul(_fp, 31) + (r.compactionLayer ? r.compactionLayer.length : 0);
+    _fp = Math.imul(_fp, 31) + (r.compactedToChars | 0);
+    _fp = Math.imul(_fp, 31) + (r.compactedFromChars | 0);
+    if (r._translatedQuestion) _fp = Math.imul(_fp, 31) + r._translatedQuestion.length;
+    if (r._timerPolls) _fp = Math.imul(_fp, 31) + r._timerPolls.length;
+    if (r._timerSkipCount) _fp = Math.imul(_fp, 31) + r._timerSkipCount;
+    /* ★ Timer next-poll rollover — fold the scheduled next-poll time (in
+     *   seconds) so a new nextPollTs (sent every poll/skip via timer_poll_check)
+     *   ALWAYS forces this round to re-render and refresh its [data-timer-next]
+     *   attribute. Unlike swarm's data-sw-start (an immutable START time), the
+     *   timer countdown target CHANGES each cycle, so relying on _timerPolls
+     *   length correlation alone would be an implicit rollover dependency — this
+     *   makes the attribute update an explicit guarantee. The 1Hz ticker then
+     *   only animates the seconds within a cycle. */
+    if (r._timerNextPollTs) _fp = Math.imul(_fp, 31) + ((r._timerNextPollTs / 1000) | 0);
     /* ★ Swarm fields — without these, swarm_agent_* events mutate
      *   round._swarmAgents but the fingerprint stays equal, the gate
      *   bails, and the panel never re-renders until page refresh. */
     if (r._swarm) {
-      _fp = _fp * 31 + (r._swarmActive ? 1 : 0);
-      _fp = _fp * 31 + (r._asyncRunning ? 1 : 0);
+      _fp = Math.imul(_fp, 31) + (r._swarmActive ? 1 : 0);
+      _fp = Math.imul(_fp, 31) + (r._asyncRunning ? 1 : 0);
       const agents = r._swarmAgents || [];
-      _fp = _fp * 31 + agents.length;
+      _fp = Math.imul(_fp, 31) + agents.length;
       for (const a of agents) {
-        _fp = _fp * 31 + (a.status === 'running' ? 1 : a.status === 'done' ? 2
+        _fp = Math.imul(_fp, 31) + (a.status === 'running' ? 1 : a.status === 'done' ? 2
             : a.status === 'failed' ? 3 : a.status === 'thinking' ? 4 : 0);
-        _fp = _fp * 31 + ((a.phase || '').length);
-        _fp = _fp * 31 + ((a.preview || '').length);
-        _fp = _fp * 31 + ((a.tools || []).length);
-        _fp = _fp * 31 + ((a.modifiedFiles | 0) + 1);
-        _fp = _fp * 31 + (a._toolCalls ? a._toolCalls.length : 0);
+        _fp = Math.imul(_fp, 31) + ((a.phase || '').length);
+        _fp = Math.imul(_fp, 31) + ((a.preview || '').length);
+        _fp = Math.imul(_fp, 31) + ((a.tools || []).length);
+        _fp = Math.imul(_fp, 31) + ((a.modifiedFiles | 0) + 1);
+        _fp = Math.imul(_fp, 31) + (a._toolCalls ? a._toolCalls.length : 0);
         if (a._toolCalls && a._toolCalls.length) {
           /* Last call's status flips on every finish event — must
            * be in the fingerprint or the timeline freezes. */
           const last = a._toolCalls[a._toolCalls.length - 1];
-          _fp = _fp * 31 + (last.status === 'running' ? 1 : last.status === 'done' ? 2 : 3);
-          _fp = _fp * 31 + ((last.elapsed * 100) | 0);
+          _fp = Math.imul(_fp, 31) + (last.status === 'running' ? 1 : last.status === 'done' ? 2 : 3);
+          _fp = Math.imul(_fp, 31) + ((last.elapsed * 100) | 0);
         }
       }
     }
@@ -414,6 +671,14 @@ function _syncToolRoundsDOM(container, rounds) {
    *   they just live inside a [data-prn] slot now. */
   const toolRounds = rounds.slice();
 
+  /* ★ Segment-timeline streaming interleave: the live panel always carries the
+   *   `seg-timeline` class (hardcoded into the className strings below) so the
+   *   SETTLED `.seg-timeline .seg-thinking` / `.seg-timeline .seg-narration`
+   *   rules apply VERBATIM to the per-round prose rendered inside each group —
+   *   byte-identical look to the finished render, zero CSS fork. This is now
+   *   the only render path; the former `_segTimelineEnabled` toggle was
+   *   removed. */
+
   // ── Unified tool panel: all tools in chronological order ──
   const unifiedPanel = container.querySelector(".ptool-panel");
   if (toolRounds.length > 0) {
@@ -426,14 +691,14 @@ function _syncToolRoundsDOM(container, rounds) {
     if (!unifiedPanel) {
       const el = document.createElement("div");
       el.className =
-        "ptool-panel animation-slideUp" +
+        "ptool-panel animation-slideUp seg-timeline" +
         (anyActive ? " ptool-panel-active" : "");
       el.innerHTML = `<div class="ptool-panel-header"><span class="ptool-panel-label">${headerLabel}</span></div><div class="ptool-panel-body"></div>`;
       container.appendChild(el);
       body = el.querySelector(".ptool-panel-body");
     } else {
       unifiedPanel.className =
-        "ptool-panel" + (anyActive ? " ptool-panel-active" : "");
+        "ptool-panel seg-timeline" + (anyActive ? " ptool-panel-active" : "");
       const lbl = unifiedPanel.querySelector(".ptool-panel-label");
       if (lbl) lbl.textContent = headerLabel;
       body = unifiedPanel.querySelector(".ptool-panel-body");
@@ -482,6 +747,20 @@ function _syncToolRoundsDOM(container, rounds) {
           if (round.llmRound != null) groupEl.setAttribute("data-round-no", String(round.llmRound + 1));
           body.appendChild(groupEl);
         }
+        /* ★ Per-round interleave prose (segment-timeline step 5b): render THIS
+         *   round's thinking + narration INSIDE its group, ABOVE the tool
+         *   slots — the streaming mirror of the settled `_renderTimelineBatch`.
+         *   The prose is stamped onto the batch's FIRST round by the
+         *   `delta_reset` handler (sse_pipeline.js) exactly as the backend
+         *   `assemble_segments` does, so finalize is a visual no-op. Only the
+         *   first round of a batch carries the prose. Reuses the SETTLED
+         *   `.seg-thinking` / `.seg-narration` classes verbatim (the panel
+         *   carries `seg-timeline`) — zero CSS fork. Idempotent + fingerprint-
+         *   gated: only (re)writes when the text grew, so it never churns the
+         *   tool DOM. The English narration is HIDDEN when auto-translate is
+         *   live (`data-xlate`): the translator paints the Chinese equivalent
+         *   into `.stream-seg-narration` in the same slot. */
+        _renderStreamRoundProse(groupEl, round);
         let slot = body.querySelector(`[data-prn="${rn}"]`);
         /* ★ Determine if this round needs an interactive card (HG, stdin, approval).
          *   Interactive cards are tall (200-300px) and must NOT be collapsed by
@@ -520,14 +799,17 @@ function _syncToolRoundsDOM(container, rounds) {
           groupEl.appendChild(slot);
           if (_isSwarm) {
             slot.style.contentVisibility = "visible";
-            slot.innerHTML = _buildSwarmPanelHTML(round, toolRounds);
+            _morphSwarmSlot(slot, _buildSwarmPanelHTML(round, toolRounds));
           }
         } else if (_isSwarm) {
           /* Swarm rounds change frequently (per-agent phase / preview / tool-call
-           * timeline) — always rebuild from the latest snapshot. The fingerprint
-           * gate above already guaranteed something actually changed. */
+           * timeline) — the fingerprint gate above already guaranteed something
+           * actually changed. Morph the existing panel IN PLACE instead of
+           * `innerHTML =` (a full teardown/rebuild), which restarted the
+           * `swarmBorderPulse` animation from 0% every event → visible flicker,
+           * and collapsed any agent card the user had expanded. */
           slot.style.contentVisibility = "visible";
-          slot.innerHTML = _buildSwarmPanelHTML(round, toolRounds);
+          _morphSwarmSlot(slot, _buildSwarmPanelHTML(round, toolRounds));
         } else if (isActive || round.status === "pending_approval") {
           if (_isInteractive) slot.style.contentVisibility = "visible";
           slot.innerHTML = _renderUnifiedToolLine(round, isActive);
@@ -596,6 +878,15 @@ function _syncToolRoundsDOM(container, rounds) {
         } else if (round.toolContent && !slot.querySelector('[data-tc-preview]') && !slot.querySelector('.ptool-batch-done-block')) {
           const ptLine = slot.querySelector('.ptool-line');
           if (ptLine) {
+            /* A synthesized fallback model-view button (data-tc-preview-text,
+             * emitted by _rowModelViewBtn while toolContent was still empty —
+             * e.g. a tool pre-executed during streaming) shows a placeholder,
+             * NOT the real bytes sent to the model. Now that the verbatim
+             * toolContent has arrived, drop that stale fallback before adding
+             * the real toolContent-backed button, so the row keeps exactly ONE
+             * "model view" entry showing only the actual message content. */
+            const stale = ptLine.querySelector('[data-tc-preview-text]');
+            if (stale) stale.remove();
             ptLine.insertAdjacentHTML('beforeend', _tcPreviewBtn(round));
           }
         } else if (round.compactionLayer && !slot.querySelector('.ptool-compaction-label')) {
@@ -654,6 +945,13 @@ function _syncToolRoundsDOM(container, rounds) {
           }
         }
       }
+
+      /* ★ Corrective pass: relocate any synthetic inject-row group (steer /
+       *   peer / async swarm) ABOVE the round that consumed it. The main loop
+       *   above only ever appends a new group to the tail, so a late-arriving
+       *   chip sinks to the bottom — this moves it to the top of its anchor
+       *   round. Idempotent; runs after all groups + headers exist. */
+      _repositionInjectGroups(body, toolRounds);
     }
   }
 

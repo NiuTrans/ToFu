@@ -64,6 +64,16 @@ os.environ.setdefault('TOFU_DATA_DIR', DATA_DIR)
 
 DEFAULT_PORT = 15000
 
+# ── Update check ──────────────────────────────────────────────────────
+# The desktop app has no built-in updater, so a user on an old version never
+# learns a new one shipped. On startup we do ONE best-effort query of the
+# repo's latest published release and, if it is newer than the bundled
+# VERSION, surface a non-blocking "download update" affordance in the tray.
+# Anything that goes wrong (offline, rate-limited, parse error) is swallowed
+# and logged at diagnostic level — the check must never delay or break launch.
+_RELEASES_API = 'https://api.github.com/repos/rangehow/ToFu/releases/latest'
+_RELEASES_PAGE = 'https://github.com/rangehow/ToFu/releases/latest'
+
 # ── Null-safe diagnostics ─────────────────────────────────────────────
 # Opened lazily; in windowed builds sys.stderr is None so the file is the
 # only place these messages can land.
@@ -215,6 +225,73 @@ def _load_icon():
     return img
 
 
+def _local_version() -> str:
+    """Return the bundled app version (from the VERSION file), or '' if unknown."""
+    try:
+        from lib.version import __version__ as v
+        return (v or '').strip()
+    except Exception as e:
+        _log('Could not read local version: %s' % e)
+        return ''
+
+
+def _parse_version(v: str):
+    """Parse a version string into a comparable tuple of ints.
+
+    Strips a leading 'v' and any pre-release suffix (e.g. '0.14.1-beta' →
+    (0, 14, 1)). Returns None when nothing numeric can be parsed.
+    """
+    if not v:
+        return None
+    core = v.lstrip('vV').split('-', 1)[0].split('+', 1)[0]
+    parts = []
+    for chunk in core.split('.'):
+        digits = ''.join(ch for ch in chunk if ch.isdigit())
+        if digits == '':
+            break
+        parts.append(int(digits))
+    return tuple(parts) if parts else None
+
+
+def _fetch_latest_version(timeout: float = 6.0):
+    """Best-effort fetch of the latest published release tag from GitHub.
+
+    Returns the tag string (e.g. 'v0.14.1') or None on any failure. Never
+    raises. Drafts are excluded by the /releases/latest endpoint itself.
+    """
+    import json
+    import urllib.request
+    req = urllib.request.Request(
+        _RELEASES_API,
+        headers={'Accept': 'application/vnd.github+json', 'User-Agent': 'Tofu-Desktop'},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode('utf-8', 'replace'))
+        tag = (data.get('tag_name') or data.get('name') or '').strip()
+        return tag or None
+    except Exception as e:
+        _log('Update check failed (non-fatal): %s' % e)
+        return None
+
+
+def _check_for_update():
+    """Compare local vs latest release. Returns the newer tag string or None.
+
+    None means "no known newer version" (up to date, offline, or unparseable)
+    — the caller treats that as "show nothing", so a failed check is silent.
+    """
+    local = _parse_version(_local_version())
+    latest_tag = _fetch_latest_version()
+    latest = _parse_version(latest_tag or '')
+    if local is None or latest is None:
+        return None
+    if latest > local:
+        _log('Update available: local=%s latest=%s' % (_local_version(), latest_tag))
+        return latest_tag
+    return None
+
+
 def _run_tray(port: int, proc: subprocess.Popen):
     """Run the system tray icon (blocks on the main thread)."""
     url = f'http://127.0.0.1:{port}'
@@ -246,8 +323,14 @@ def _run_tray(port: int, proc: subprocess.Popen):
 
     icon_image = _load_icon()
 
+    # Holder mutated by the background update check; the tray reads it lazily.
+    _update = {'tag': None}
+
     def on_open(icon, item):
         webbrowser.open(url)
+
+    def on_update(icon, item):
+        webbrowser.open(_RELEASES_PAGE)
 
     def on_components(icon, item):
         """Launch the component installer dialog."""
@@ -272,8 +355,13 @@ def _run_tray(port: int, proc: subprocess.Popen):
         _shutdown()
         os._exit(0)
 
+    # Dynamic "update available" item: its text is computed at menu-open time
+    # and it is hidden entirely until the background check finds a newer tag.
     menu = pystray.Menu(
         MenuItem('Open Tofu', on_open, default=True),
+        MenuItem(lambda item: f'Download update ({_update["tag"]})',
+                 on_update,
+                 visible=lambda item: bool(_update['tag'])),
         pystray.Menu.SEPARATOR,
         MenuItem('Install Components...', on_components),
         MenuItem(f'Port: {port}', None, enabled=False),
@@ -282,6 +370,22 @@ def _run_tray(port: int, proc: subprocess.Popen):
     )
 
     icon = pystray.Icon('tofu', icon_image, 'Tofu', menu)
+
+    # Kick off the update check off the main thread so it never delays the
+    # tray appearing. When it finds a newer version it flips the holder and
+    # asks pystray to re-render the menu (the item then becomes visible).
+    def _bg_update_check():
+        tag = _check_for_update()
+        if tag:
+            _update['tag'] = tag
+            try:
+                icon.update_menu()
+            except Exception as e:
+                _log('Could not refresh tray menu after update check: %s' % e)
+
+    threading.Thread(target=_bg_update_check, daemon=True,
+                     name='tofu-update-check').start()
+
     icon.run()
     # Tray stopped (e.g. Quit) — make sure the server goes down too.
     _shutdown()
