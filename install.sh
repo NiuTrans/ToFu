@@ -2082,6 +2082,91 @@ fi
 
 ok ".env ready (PORT=${PORT})"
 
+
+# ═══════════════════════════════════════════════════════════════
+#  Step 9.5: Post-install DB smoke test (create → insert → read → delete)
+#
+#  Prove the SELECTED backend actually works on THIS machine before we
+#  declare success — a create/insert/read-back/delete/drop round-trip via
+#  the same interpreter and the same resolved DB target the server will use.
+#  Runs for BOTH the uv and conda paths (this is the shared tail; the conda
+#  guard closed back before Step 8.5). Failure ABORTS the install (fail) with
+#  a backend-specific hint. The temp table is dropped in a finally so no
+#  _tofu_install_smoke residue is left in the user's real DB.
+# ═══════════════════════════════════════════════════════════════
+step "Verifying the database backend works (create → insert → read → delete)"
+
+# Mirror the .env backend decision: sqlite unless a PG major was installed
+# AND we didn't pin sqlite.
+_SMOKE_BACKEND="sqlite"
+[[ -z "$DB_BACKEND_CHOICE" && -n "$PG_INSTALLED_MAJOR" ]] && _SMOKE_BACKEND="postgres"
+
+_SMOKE_TIMEOUT=""
+command -v timeout >/dev/null 2>&1 && _SMOKE_TIMEOUT="timeout -k 5 60"
+
+if (cd "$INSTALL_DIR" && TOFU_DB_BACKEND="$_SMOKE_BACKEND" $_SMOKE_TIMEOUT "$ENV_PYTHON" - <<'PYEOF'
+import os, sys
+backend = os.environ.get('TOFU_DB_BACKEND', 'sqlite').lower()
+conn = None
+created = False
+try:
+    if backend == 'postgres':
+        import psycopg2
+        from lib.database import PG_DSN
+        conn = psycopg2.connect(PG_DSN)
+        ph = '%s'
+    else:
+        import sqlite3
+        from lib.database import DB_PATH
+        # The server makedirs the data dir at boot; do the same here so a
+        # first-ever install has somewhere to put the file. An UNWRITABLE
+        # path still raises (→ caught below → exit 1), so this does not mask
+        # the permission-failure case.
+        os.makedirs(os.path.dirname(os.path.abspath(DB_PATH)) or '.', exist_ok=True)
+        conn = sqlite3.connect(DB_PATH)
+        ph = '?'
+    cur = conn.cursor()
+    # Single TEXT column: `INTEGER PRIMARY KEY` autofills on SQLite but is a
+    # NULL-PK error on PG, so keep it backend-neutral.
+    cur.execute('CREATE TABLE IF NOT EXISTS _tofu_install_smoke (v TEXT)')
+    created = True
+    cur.execute('INSERT INTO _tofu_install_smoke (v) VALUES (' + ph + ')', ('ok',))
+    conn.commit()
+    cur.execute('SELECT v FROM _tofu_install_smoke LIMIT 1')
+    row = cur.fetchone()
+    assert row is not None and row[0] == 'ok', 'read-back mismatch'
+    cur.execute('DELETE FROM _tofu_install_smoke')
+    conn.commit()
+    print('  DB smoke OK (backend=%s): create/insert/read/delete round-trip passed' % backend)
+except Exception as e:
+    sys.stderr.write('  DB smoke FAILED (backend=%s): %s\n' % (backend, e))
+    sys.exit(1)
+finally:
+    # Always drop the temp table so no _tofu_install_smoke residue survives,
+    # even if the round-trip raised midway.
+    if conn is not None:
+        try:
+            if created:
+                cur2 = conn.cursor()
+                cur2.execute('DROP TABLE IF EXISTS _tofu_install_smoke')
+                conn.commit()
+        except Exception as _drop_err:
+            sys.stderr.write('  (warning) could not drop smoke table: %s\n' % _drop_err)
+        try:
+            conn.close()
+        except Exception:
+            pass
+PYEOF
+); then
+    ok "Database backend verified (${_SMOKE_BACKEND}): create/insert/read/delete round-trip passed"
+else
+    if [[ "$_SMOKE_BACKEND" == "sqlite" ]]; then
+        fail "SQLite backend failed its post-install smoke test — check disk space / write permissions on ${INSTALL_DIR}/data, or re-run with --with-postgres to use PostgreSQL. Full log: ${TOFU_INSTALL_LOG}"
+    else
+        fail "PostgreSQL backend failed its post-install smoke test — see ${INSTALL_DIR}/logs/postgresql.log, or re-run with --force-sqlite to use SQLite. Full log: ${TOFU_INSTALL_LOG}"
+    fi
+fi
+
 # ═══════════════════════════════════════════════════════════════
 #  Step 10: Launch or print completion
 # ═══════════════════════════════════════════════════════════════

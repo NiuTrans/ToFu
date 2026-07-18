@@ -20037,6 +20037,52 @@ html:not([data-theme="tofu"]) .tofu-pet{display:none}
 .ctx-pop-icon > svg { display: block; }
 .ctx-pop-compact { color: var(--accent); font-weight: 600; }
 
+/* ── B: live-streaming summary overlay (context-bar.js _openLiveSummaryCard).
+ *    A small anchored panel that "grows" the /compact summary as it streams,
+ *    so the multi-second summary call feels responsive. Dissolves when the
+ *    settled boundary card lands. ── */
+.ctx-live-summary {
+  z-index: 10000;
+  width: 340px;
+  max-width: min(340px, 90vw);
+  padding: 10px 12px;
+  background: var(--bg-elevated, var(--bg-secondary));
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.28);
+}
+.ctx-live-summary-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+  margin-bottom: 6px;
+}
+/* A small pulsing dot before the label conveys "streaming" without a glyph. */
+.ctx-live-summary-head::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: ctxLiveSummaryPulse 1s ease-in-out infinite;
+}
+@keyframes ctxLiveSummaryPulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
+@media (prefers-reduced-motion: reduce) {
+  .ctx-live-summary-head::before { animation: none; opacity: 0.7; }
+}
+.ctx-live-summary-body {
+  max-height: 240px;
+  overflow-y: auto;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-secondary, var(--text));
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 /* Drawer container */
 .compaction-drawer {
   position: fixed;

@@ -2648,6 +2648,7 @@ var _i18n = {
   'compactNow.viewHistory': { zh: '查看压缩历史', en: 'View compaction history' },
   'compactNow.busy': { zh: '任务进行中，无法压缩', en: 'A task is running — cannot compact' },
   'compactNow.running': { zh: '正在压缩上下文…', en: 'Compacting context…' },
+  'compactNow.streaming': { zh: '正在生成压缩摘要…', en: 'Generating summary…' },
   'compactNow.done': { zh: '已压缩：{before} → {after} tokens（-{pct}%）', en: 'Compacted: {before} → {after} tokens (-{pct}%)' },
   'compactNow.nothing': { zh: '上下文太短，无需压缩', en: 'Context is too short to compact' },
   'compactNow.failed': { zh: '压缩失败', en: 'Compaction failed' },

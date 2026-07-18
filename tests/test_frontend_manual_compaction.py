@@ -341,6 +341,140 @@ def test_gauge_reserve_stale_usage_does_not_shadow_summary():
         assert want in output, f'missing {want}\n{output}'
 
 
+# ── B: live-streaming summary overlay. runManualCompaction must subscribe to
+#    the ('compaction', convId) push channel BEFORE the POST, grow a live card
+#    from summary_delta frames, and unsubscribe + tear the card down when done.
+#    Driven through the REAL runManualCompaction with a fake push bus. ──
+_STREAM_HARNESS = r"""
+const fs = require('fs');
+global.window = global;
+let LIVE = null;   // the live-summary overlay element created by the code
+function _mkEl(tag) {
+  const el = { tag, _children: [], classList: { add(){}, remove(){}, toggle(){} },
+    dataset: {}, style: { setProperty(){} }, attributes: {}, _text: '', _html: '',
+    setAttribute(k,v){ this.attributes[k]=v; }, getAttribute(k){ return this.attributes[k]; },
+    appendChild(c){ this._children.push(c); return c; }, removeChild(){},
+    querySelector(sel){
+      // Only the live-summary body query returns the growable body node; every
+      // other selector (the bubble's wave-group etc.) gets a full element.
+      if (sel === '.ctx-live-summary-body' && this._body) return this._body;
+      return _mkEl(tag);
+    },
+    querySelectorAll(){ return []; },
+    addEventListener(){}, removeEventListener(){}, remove(){ this._removed = true; },
+    getBoundingClientRect(){ return { left:0, right:0, top:0, bottom:0 }; },
+    get isConnected(){ return true; },
+    set innerHTML(v){ this._html = v;
+      // model the live-summary-body child node the overlay queries for.
+      this._body = { _text:'', scrollTop:0, scrollHeight:0,
+        set textContent(v){ this._text = v; }, get textContent(){ return this._text; } };
+    },
+    get innerHTML(){ return this._html; },
+    set textContent(v){ this._text = v; }, get textContent(){ return this._text; } };
+  return el;
+}
+const WRAPPER = _mkEl('div');   // stands in for .chat-wrapper so _ensureBar builds
+global.document = {
+  getElementById(){ return null; },
+  querySelector(sel){ return sel === '.chat-wrapper' ? WRAPPER : null; },
+  createElement(){ return _mkEl('div'); },
+  body: { appendChild(c){ if (c && c.id === 'ctxLiveSummary') LIVE = c; return c; } },
+  addEventListener(){}, removeEventListener(){}, readyState:'complete',
+};
+global.requestAnimationFrame = (fn) => { fn(); return 0; };
+global.setTimeout = (fn) => { return 0; };
+global.clearTimeout = () => {};
+let CONV = null;
+global.activeConvId = 'c1';
+global.getConvById = (id) => (CONV && CONV.id === id) ? CONV : null;
+global.config = { model: 'm' }; global.serverModel = 'm';
+global.activeStreams = new Map();
+global._contextPolicy = { default_limit: 200000, output_reserve: 8000,
+  compaction_reserve: 4000, summary_trigger_ratio: 0.9, min_usable_ratio: 0.5, per_model: {} };
+global.t = (k, vars) => k;
+
+// ── Fake push bus: record subscribe/unsubscribe; let the test drive frames ──
+let SUBS = [], UNSUBS = [], handler = null;
+global.pushSubscribe = (channel, taskId, fn) => { SUBS.push([channel, taskId]); handler = fn; };
+global.pushUnsubscribe = (channel, taskId, fn) => { UNSUBS.push([channel, taskId]); };
+
+// The POST resolves only AFTER we've pushed deltas, so we can assert the live
+// card grew mid-flight. compactNow drives frames through the captured handler.
+global.Api = { compactions: { compactNow: async (cid) => {
+  // simulate the backend stream landing during the awaited POST
+  if (handler) {
+    handler({ channel:'compaction', taskId: cid, type:'summary_start', archiveId: 3 });
+    handler({ channel:'compaction', taskId: cid, type:'summary_delta', text:'Hello ', archiveId: 3 });
+    handler({ channel:'compaction', taskId: cid, type:'summary_delta', text:'world', archiveId: 3 });
+  }
+  return { ok: true, archiveId: 3, tokensBefore: 50000, tokensAfter: 8000, reductionPct: 84 };
+}}};
+global.ConvCache = { remove: async () => {} };
+global.loadConversationMessages = async () => {};
+global.renderChat = () => {};
+global.showToast = () => {};
+
+eval(fs.readFileSync(process.argv[2], 'utf8'));   // context-bar.js
+
+const out = [];
+function check(n, c) { out.push((c ? 'PASS ' : 'FAIL ') + n); }
+(async () => {
+  CONV = { id:'c1', model:'m', activeTaskId:null, messages:[
+    { role:'user', content:'go' },
+    { role:'assistant', content:'x', usage:{ prompt_tokens: 20000 } } ] };
+  await window.runManualCompaction('c1');
+
+  check('subscribed_before_post', SUBS.length === 1
+        && SUBS[0][0] === 'compaction' && SUBS[0][1] === 'c1');
+  check('unsubscribed_after', UNSUBS.length === 1
+        && UNSUBS[0][0] === 'compaction' && UNSUBS[0][1] === 'c1');
+  // the live overlay was created and grew from the deltas (Hello + world)
+  check('live_card_created', LIVE !== null);
+  check('live_card_grew_from_deltas',
+        !!(LIVE && LIVE._body && LIVE._body.textContent === 'Hello world'));
+  // and it was torn down at the end (remove() called)
+  check('live_card_torn_down', !!(LIVE && LIVE._removed));
+  console.log(out.join('\n'));
+})();
+"""
+
+
+@pytest.mark.skipif(not _node_available(), reason='node not installed')
+def test_manual_compaction_streams_live_summary():
+    """B: the /compact button subscribes to the compaction push channel, grows a
+    live card from summary_delta frames, and tears it down + unsubscribes when
+    the POST closure completes."""
+    proc = _run(_STREAM_HARNESS, os.path.join(JS_DIR, 'context-bar.js'),
+                '_stream_harness.js')
+    output = proc.stdout.strip()
+    assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
+    fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
+    assert not fails, 'live-summary streaming regression:\n' + output
+    for want in ('PASS subscribed_before_post', 'PASS unsubscribed_after',
+                 'PASS live_card_created', 'PASS live_card_grew_from_deltas',
+                 'PASS live_card_torn_down'):
+        assert want in output, f'missing {want}\n{output}'
+
+
+@pytest.mark.skipif(not _node_available(), reason='node not installed')
+def test_manual_compaction_streaming_absent_push_is_safe(tmp_path):
+    """NEUTER/robustness: with pushSubscribe UNDEFINED (older bundle / no
+    socket), runManualCompaction must still POST and complete — the live card
+    is best-effort and never a hard dependency."""
+    src = open(os.path.join(JS_DIR, 'context-bar.js'), encoding='utf-8').read()
+    # Guard wiring must be present: the subscribe is gated on typeof.
+    assert "typeof pushSubscribe === 'function'" in src, (
+        'streaming subscribe is not guarded on pushSubscribe availability')
+    # Run the toast harness (which does NOT define pushSubscribe) — the success
+    # path must still fire exactly one success toast, proving no hard dep.
+    proc = _run(_TOAST_HARNESS, os.path.join(JS_DIR, 'context-bar.js'),
+                '_stream_absent_harness.js')
+    output = proc.stdout.strip()
+    assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
+    assert 'PASS ok_single_toast' in output and 'PASS ok_is_success' in output, (
+        'compaction broke when pushSubscribe was undefined:\n' + output)
+
+
 # ── Card render: chat_render buildCompactionCardHtml (standalone, testable) ──
 _CARD_HARNESS = r"""
 const fs = require('fs');
