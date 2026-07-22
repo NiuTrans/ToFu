@@ -16,10 +16,14 @@ import sqlite3
 from flask import Blueprint, Response, jsonify, make_response, request, send_from_directory
 
 import lib as _lib  # module ref for hot-reload
-from lib.css_bundler import get_styles_link_tag as _get_styles_link_tag
+from lib.css_bundler import (
+    get_styles_link_tag as _get_styles_link_tag,
+    get_settings_link_tag as _get_settings_link_tag,
+)
+from lib.settings_panels import inject_panels as _inject_settings_panels, panels_signature as _settings_panels_signature
 from lib.js_bundler import (
-    get_bundle_script_tag as _get_bundle_tag,
-    get_feature_bundle_filename as _get_feature_bundle_filename,
+    get_bundle_script_tag_nonblocking as _get_bundle_tag,
+    get_feature_bundle_filename_nonblocking as _get_feature_bundle_filename,
 )
 from lib.log import get_logger
 from lib.api_response import api_bad_request, api_internal_error, api_ok
@@ -357,7 +361,7 @@ FAVICON_SVG = '''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
 # ── Cached bundled index.html (avoids re-reading + regex on every page load) ──
 # Keyed by (bundle_tag, styles_link_tag, html_mtime) so any of those changing
 # triggers a re-render of the cached HTML.
-_bundled_index_cache = {'tag': None, 'styles_tag': None, 'feature': None, 'html': None, 'mtime': 0}
+_bundled_index_cache = {'tag': None, 'styles_tag': None, 'feature': None, 'html': None, 'mtime': 0, 'panels': None}
 
 # Regex: match contiguous block of app script tags + interleaved HTML comments/blank lines.
 # Two important details:
@@ -422,15 +426,39 @@ _APP_STYLES_RE = re.compile(
     r'<link rel="stylesheet" href="static/styles\.css(?:\?[^"]*)?">'
 )
 
+# Same treatment for the settings-specific stylesheet (static/settings.css),
+# extracted from styles.css so a settings page's styles live near its markup.
+_SETTINGS_STYLES_RE = re.compile(
+    r'<link rel="stylesheet" href="static/settings\.css(?:\?[^"]*)?">'
+)
+
+def _serve_raw_index_with_panels():
+    """Dev-fallback response: raw index.html (individual <script> tags) but
+    WITH settings-panel fragments spliced in. Used when bundling/injection
+    fails — the settings panels must still appear, so we can't just
+    ``send_from_directory`` the marker-only file. Falls back to the bare file
+    only if even reading it fails."""
+    html_path = os.path.join(BASE_DIR, 'index.html')
+    try:
+        with open(html_path, 'r', encoding='utf-8') as f:
+            html = _inject_settings_panels(f.read())
+        resp = make_response(html)
+        resp.content_type = 'text/html; charset=utf-8'
+    except Exception as e:
+        logger.warning('[Index] raw-index panel splice failed, serving bare file: %s', e)
+        resp = send_from_directory(BASE_DIR, 'index.html')
+    resp.headers['Cache-Control'] = 'private, no-cache'
+    return resp
+
+
 @common_bp.route('/')
 def index_page():
     bundle_tag = _get_bundle_tag()
     styles_tag = _get_styles_link_tag()
     if not bundle_tag:
         # Bundling failed — serve original index.html with individual scripts
-        resp = send_from_directory(BASE_DIR, 'index.html')
-        resp.headers['Cache-Control'] = 'private, no-cache'
-        return resp
+        # (panels still spliced in so the settings modal isn't crippled).
+        return _serve_raw_index_with_panels()
 
     # Deferred feature bundle (lazy-loaded by static/js/feature-loader.js). We
     # expose its hashed URL to the page as window.__FEATURE_BUNDLE_SRC__ via a
@@ -456,10 +484,12 @@ def index_page():
     except OSError as _e_audit:
         logger.debug('[common] index_page caught %s: %s', type(_e_audit).__name__, _e_audit)
         html_mtime = 0
+    panels_sig = _settings_panels_signature()
     if (_bundled_index_cache['tag'] == bundle_tag
             and _bundled_index_cache['styles_tag'] == styles_tag
             and _bundled_index_cache['feature'] == feature_tag
             and _bundled_index_cache['mtime'] == html_mtime
+            and _bundled_index_cache['panels'] == panels_sig
             and _bundled_index_cache['html']):
         resp = make_response(_bundled_index_cache['html'])
         resp.content_type = 'text/html; charset=utf-8'
@@ -479,10 +509,17 @@ def index_page():
         # BEFORE the core bundle (which contains feature-loader.js) executes.
         html = _APP_SCRIPTS_RE.sub(feature_tag + bundle_tag + '\n', html)
         html = _APP_STYLES_RE.sub(styles_tag, html)
+        html = _SETTINGS_STYLES_RE.sub(_get_settings_link_tag(), html)
+        # Splice decoupled settings-panel fragments back in at their markers
+        # (lib/settings_panels). Runs on the SAME rewrite pass; a missing
+        # fragment leaves its marker visible + logs an error (never a silent
+        # vanished tab).
+        html = _inject_settings_panels(html)
 
         _bundled_index_cache['tag'] = bundle_tag
         _bundled_index_cache['styles_tag'] = styles_tag
         _bundled_index_cache['feature'] = feature_tag
+        _bundled_index_cache['panels'] = panels_sig
         _bundled_index_cache['html'] = html
         _bundled_index_cache['mtime'] = html_mtime
 
@@ -490,7 +527,7 @@ def index_page():
         resp.content_type = 'text/html; charset=utf-8'
     except Exception as e:
         logger.warning('[Index] Bundle injection failed, serving original: %s', e)
-        resp = send_from_directory(BASE_DIR, 'index.html')
+        return _serve_raw_index_with_panels()
 
     resp.headers['Cache-Control'] = 'private, no-cache'
     return resp
@@ -624,6 +661,11 @@ def health_check():
         result['pid'] = _bi.PID
         result['bootId'] = _bi.BOOT_ID
         result['cacheFixGen'] = _bi.cache_fix_gen()
+        # Source-tree fingerprint (HEAD + uncommitted tracked edits) so the
+        # restart client can prove the NEW process loaded the code the operator
+        # edited — not just that SOME new process answered. None on a
+        # non-git deploy; the client then falls back to the bootId-only rule.
+        result['codeFingerprint'] = _bi.code_fingerprint()
     except Exception as _bi_e:
         logger.debug('[Health] boot identity unavailable: %s', _bi_e)
 

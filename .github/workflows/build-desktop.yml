@@ -76,7 +76,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
-          pip install pyinstaller pystray pillow psycopg2-binary
+          pip install pyinstaller pystray pillow psycopg2-binary pyautogui pyperclip psutil
 
       - name: Generate icons
         run: python scripts/gen_desktop_icons.py
@@ -239,7 +239,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
-          pip install pyinstaller pystray pillow psycopg2-binary
+          pip install pyinstaller pystray pillow psycopg2-binary pyautogui pyperclip psutil
 
       - name: Generate icons
         run: python scripts/gen_desktop_icons.py
@@ -327,7 +327,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
-          pip install pyinstaller pystray pillow psycopg2-binary
+          pip install pyinstaller pystray pillow psycopg2-binary pyautogui pyperclip psutil
 
       - name: Generate icons
         run: python scripts/gen_desktop_icons.py

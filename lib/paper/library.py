@@ -16,7 +16,7 @@ logger = get_logger(__name__)
 _PAPER_LIB_COLUMNS = (
     'id', 'title', 'pdf_url', 'pdf_filename', 'arxiv_id', 'paper_hash',
     'parsed_text', 'qa_history', 'images', 'babel_cache', 'page_count',
-    'created_at', 'updated_at',
+    'folder_id', 'created_at', 'updated_at',
 )
 
 # Soft caps to keep JSON payloads sane — the full report is in paper_reports,
@@ -50,6 +50,7 @@ def _lib_row_to_dict(row):
         'images': _j(row['images'], []),
         'babelCache': _j(row['babel_cache'], {}),
         'pageCount': int(row['page_count'] or 0),
+        'folderId': (row['folder_id'] or '') if 'folder_id' in row.keys() else '',
         'createdAt': int(row['created_at'] or 0),
         'updatedAt': int(row['updated_at'] or 0),
     }

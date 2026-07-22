@@ -191,6 +191,23 @@ def mark_payment_settled(payment_id: str, *, raw: Optional[dict] = None) -> None
     if status == 'settled':
         return  # already done; idempotent
     now = int(time.time())
+    # ★ Ordering fix (lost-top-up window): deposit BEFORE flipping status.
+    #   The old order (flip status=settled + commit, THEN deposit in a separate
+    #   txn) had a crash window — a crash between the two lost the credit
+    #   FOREVER, because on webhook redelivery the `status == 'settled'`
+    #   short-circuit above returns BEFORE re-attempting the deposit. The
+    #   deposit is idempotent on (user_id, kind=topup, ref_type=payment,
+    #   ref_id), so doing it FIRST is safe to repeat, and the status flip only
+    #   happens once the credit is durably in the wallet. New crash windows:
+    #     • crash after deposit, before flip → redelivery: status≠settled →
+    #       deposit repeats (idempotent no-op) → flip. Credit preserved.
+    #     • crash before deposit → redelivery: status≠settled → deposit + flip.
+    #   Either way the top-up is never lost.
+    if credit_micro > 0:
+        from lib.billing import deposit
+        deposit(user_id, credit_micro, kind='topup',
+                ref_type='payment', ref_id=provider_id or payment_id,
+                note=f'{provider} payment settled')
     raw_update = ''
     if raw is not None:
         raw_update = json.dumps(raw, ensure_ascii=False, sort_keys=True)
@@ -206,14 +223,6 @@ def mark_payment_settled(payment_id: str, *, raw: Optional[dict] = None) -> None
             ' WHERE id = ?',
             ('settled', now, payment_id))
     db.commit()
-    # Now drop credits into the wallet. Idempotent on
-    # (user_id, kind=topup, ref_type=payment, ref_id=provider_id) so a
-    # webhook re-delivery is a no-op.
-    if credit_micro > 0:
-        from lib.billing import deposit
-        deposit(user_id, credit_micro, kind='topup',
-                ref_type='payment', ref_id=provider_id or payment_id,
-                note=f'{provider} payment settled')
     audit_log('payment_settled', payment_id=payment_id,
               user_id=user_id, provider=provider,
               credit_micro=credit_micro)

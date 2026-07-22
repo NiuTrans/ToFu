@@ -66,6 +66,7 @@ from lib.tasks_pkg.compaction._layer2 import (
     _extract_recently_accessed_files,
     _generate_query_aware_summary,
     _objective_anchor_index,
+    _split_cold_rounds,
 )
 from lib.tasks_pkg.compaction._tokens import (
     _estimate_total_tokens,
@@ -246,10 +247,10 @@ def _collect_reserve_folds(reserve_raw: list) -> list:
         if not isinstance(m, dict) or m.get('role') != 'assistant':
             continue
         rounds = m.get('toolRounds') or []
-        if len(rounds) <= _MANUAL_INTRA_TURN_HOT_ROUNDS:
-            continue
-        hot = rounds[-_MANUAL_INTRA_TURN_HOT_ROUNDS:]
-        cold = rounds[:-_MANUAL_INTRA_TURN_HOT_ROUNDS]
+        # SHARED fold-boundary policy (``_split_cold_rounds``) — identical cut
+        # the automatic L2 path uses on api-form round spans, so the keep-vs-
+        # fold decision can never drift between the two compaction paths.
+        cold, hot = _split_cold_rounds(rounds, _MANUAL_INTRA_TURN_HOT_ROUNDS)
         if not cold:
             continue
         folds.append({'asst_idx': i, 'cold_rounds': cold, 'hot_rounds': hot})

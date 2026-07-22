@@ -58,6 +58,7 @@ class CacheState:
         'wire_fp', 'wire_static', 'wire_system', 'wire_markers', 'wire_bytes',
         'wire_field_bytes',
         'wire_region',
+        'wire_routing',
         'total_cache_read', 'total_cache_write',
         'total_breaks', 'total_input_tokens',
         'first_call_time',
@@ -136,6 +137,16 @@ class CacheState:
         # verdict can be gated on the hoisted region too, not just messages.
         # See wire_fingerprint.wire_byte_region.
         self.wire_region: dict | None = None
+        # Cache-NAMESPACE routing fingerprint from the PREVIOUS round
+        # ({'key','beta','endpoint'} — see wire_fingerprint.routing_fingerprint).
+        # Anthropic prompt caching is namespaced by (upstream key + anthropic-beta
+        # header + endpoint); the dispatch layer CAN flip the key mid-conversation
+        # (cooldown/429/401/timeout → sticky key scored inf → rebind) and the
+        # extended-cache-ttl beta is latched per-TASK, so a byte-identical prefix
+        # can land on a COLD namespace = a client-caused miss the BODY fingerprints
+        # are blind to. detect_cache_break diffs this BEFORE the byte-identical
+        # verdict so a namespace flip is NAMED client-side, not laundered upstream.
+        self.wire_routing: dict | None = None
         self.total_cache_read: int = 0
         self.total_cache_write: int = 0
         self.total_breaks: int = 0
@@ -209,22 +220,48 @@ def get_prev_turn_cache_read(conv_id: str) -> int:
                 continue
             if best is None or st.last_update_time > best.last_update_time:
                 best = st
-    return best.last_cache_read_tokens if best is not None else 0
+    if best is not None:
+        return best.last_cache_read_tokens
+
+    # ── DURABLE cold-state fallback ──────────────────────────────────────────
+    # No live sibling: this is a cold process (restart / >1h stale-eviction /
+    # multi-replica bounce). The memory-only path returns 0 here → the round-1
+    # boundary judgment short-circuits and a genuine collapsed/zero round-1 is
+    # laundered into no_break (log-proven: turn_boundary_rebill fired only 3×
+    # while dozens of floor-only round-1s went uncounted). Fall back to the
+    # DURABLE previous-turn read persisted on conversations.settings so the
+    # boundary re-bill buckets honestly even from a cold process — mirroring
+    # read_persisted_boundary's role for the compaction floor. Best-effort:
+    # a lazy import + guarded read that returns 0 on any miss (today's behavior).
+    try:
+        from lib.tasks_pkg.cache_tracking._persist import (
+            read_last_turn_cache_read)
+        return read_last_turn_cache_read(conv_id)
+    except Exception as e:
+        logger.debug('[CacheTrack] durable prev-turn read fallback '
+                     'unavailable conv=%s: %s', conv_id[:8], e)
+        return 0
 
 
 def _release_multiroot_sticky(conv_id: str) -> None:
-    """Release the tools-registry latches (multi-root + tool-schema) on evict.
+    """Release the tools-registry latches on evict.
 
-    Imported lazily so this low-level module doesn't pull in the tools
-    package at import time (and tolerates the symbol being absent). Both
-    latches key on conv_id and share the cache-state lifecycle, so they're
-    released together here.
+    Releases all three conv_id-keyed schema-stability latches together —
+    multi-root sticky, project-ready sticky, and the tool-schema latch —
+    because they share the cache-state lifecycle. Imported lazily so this
+    low-level module doesn't pull in the tools package at import time (and
+    tolerates the symbols being absent).
     """
     if not conv_id:
         return
     try:
-        from lib.tools import clear_multiroot_sticky, clear_tool_list_latch
+        from lib.tools import (
+            clear_multiroot_sticky,
+            clear_project_ready_sticky,
+            clear_tool_list_latch,
+        )
         clear_multiroot_sticky(conv_id)
+        clear_project_ready_sticky(conv_id)
         clear_tool_list_latch(conv_id)
     except Exception as e:
         logger.debug('[CacheTrack] tools-registry latch release unavailable: %s', e)

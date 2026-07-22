@@ -173,12 +173,18 @@ def handle_alipay_notify(form: dict) -> Tuple[int, str]:
         except (json.JSONDecodeError, ValueError) as e:
             logger.warning('[Alipay] passback_params parse failed: %s', e)
     if not user_id:
-        # Fall back to extracting from out_trade_no shape (`tofu_<uid>_<ms>`)
+        # Fall back to extracting from out_trade_no shape (`tofu_<uid>_<ms>`).
+        # The user_id itself contains underscores (it is `usr_<hex>`), so a
+        # naive split('_')[1] yields the literal 'usr' and credits a bogus
+        # account. Strip the known `tofu_` prefix and the trailing `_<ms>`
+        # epoch instead, so the full `usr_<hex>` id is recovered intact.
         if out_trade_no.startswith('tofu_'):
-            try:
-                user_id = out_trade_no.split('_')[1]
-            except IndexError as e:
-                logger.debug('[Alipay] out_trade_no parse failed: %s', e)
+            _mid = out_trade_no[len('tofu_'):]
+            _cut = _mid.rfind('_')
+            user_id = _mid[:_cut] if _cut > 0 else ''
+            if not user_id:
+                logger.debug('[Alipay] out_trade_no parse yielded empty uid: %s',
+                             out_trade_no)
     if not user_id:
         logger.error('[Alipay] notify with no user_id (out_trade_no=%s)',
                      out_trade_no)

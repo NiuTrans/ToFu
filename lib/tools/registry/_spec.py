@@ -30,7 +30,9 @@ from lib.log import get_logger
 from lib.tools.registry._latch import (
     clear_tool_list_latch,
     is_multiroot_sticky,
+    is_project_ready_sticky,
     mark_multiroot_sticky,
+    mark_project_ready_sticky,
 )
 
 logger = get_logger(__name__)
@@ -73,6 +75,13 @@ class ToolContext:
     image_gen_enabled: bool = False
     human_guidance_enabled: bool = False
     scheduler_enabled: bool = False
+    # ``lean`` is a retained backend seam (chat_mode.is_lean_mode, currently
+    # always False after the air/pro tier merge). When True, the always-on
+    # capability tools that attach purely on has_base_tools — memory / todo /
+    # scheduler — skip themselves, shipping only search+fetch+read+inspect
+    # (≈4 tools) instead of ~15. Kept for a future "auto-retract tools on a
+    # simple turn" feature. See lib/tasks_pkg/chat_mode.is_lean_mode.
+    lean: bool = False
     messages: list[dict[str, Any]] | None = None
 
     # Conversation id — used to make schema-shaping decisions sticky for a
@@ -163,6 +172,45 @@ class ToolContext:
             return False
         distinct = {p for p in paths if p}
         return len(distinct) > 1
+
+    @property
+    def project_ready(self) -> bool:
+        """True when this task has a project attached (``project_enabled``).
+
+        Read by the project spec builder (:func:`_build_project_or_code_exec`)
+        to gate the project tool family (list_dir / grep_search / find_files /
+        write_file / apply_diff / … / run_command).
+
+        **Sticky per conversation, but only the OFF→ON transition matters.**
+        A conversation whose FIRST turn had no project (empty roots) freezes a
+        no-project tool-schema snapshot; without this hook, attaching a project
+        on a later turn is masked forever by the tool-schema latch. Attaching a
+        project mid-conversation is a LEGITIMATE one-time schema change, so on
+        the OFF→ON transition we clear the tool-schema latch (exactly like the
+        multi-root OFF→ON path) so the next assembly — this same round, since
+        this property is read before ``latch_tool_list`` — re-freezes the
+        snapshot WITH the project tools. One deliberate cache rebuild, then
+        byte-stable again.
+
+        Note the asymmetry vs :attr:`multiroot_active`: this returns the LIVE
+        ``project_enabled`` value (never forcing the sticky ON when live is
+        False), because a project genuinely being detached mid-conversation
+        SHOULD drop the tools. The sticky set is used ONLY to fire the
+        one-time latch-clear on the first attach, not to pin the gate on.
+        """
+        live = bool(self.project_enabled)
+        if not self.conv_id:
+            # Stateless assembly (tests / compat adapters): raw signal, no latch.
+            return live
+        if live and mark_project_ready_sticky(self.conv_id):
+            # First time this conversation has a project attached. If it had
+            # already frozen a no-project tool-schema snapshot on an earlier
+            # (empty-roots) round, clear it so the project tools re-freeze in.
+            clear_tool_list_latch(self.conv_id)
+            logger.info('[ToolLatch] conv=%s attached a project — cleared '
+                        'tool-schema latch so the project tools re-freeze '
+                        '(one-time cache rebuild)', self.conv_id[:8])
+        return live
 
     @property
     def has_conv_ref(self) -> bool:

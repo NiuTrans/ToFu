@@ -150,7 +150,13 @@ function _restoreRebuttalPanel() {
     if (ta) ta.value = stored;
     var rv = _reportView('rebuttal');
     if (rv.stream && rv.stream.status === 'running') {
-      if (typeof _pollReportTask === 'function') _pollReportTask(rv);
+      // Only resume-poll when no poll chain is already live for this stream.
+      // Without this guard, every Review↔Rebuttal segment toggle (or tab
+      // re-entry) while a follow-up is generating stacks ANOTHER setTimeout
+      // poll chain on the same stream — duplicate timers, racing repaints, and
+      // eventually a wedged "Generate follow-up" button. Mirrors the
+      // `!view.stream.pollTimer` guard in _loadOrGenerateReport.
+      if (!rv.stream.pollTimer && typeof _pollReportTask === 'function') _pollReportTask(rv);
     } else if (rv.cache || (rv.stream && rv.stream.fullText)) {
       if (typeof _paintReportFromState === 'function' && rv.stream) _paintReportFromState(rv);
       else if (typeof _renderFinalReport === 'function' && rv.cache) {

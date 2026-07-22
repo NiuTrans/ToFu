@@ -79,17 +79,27 @@
       var param = _safe(function () {
         return (typeof convWindowParam === 'function') ? convWindowParam() : '';
       }, '');
-      var base = _safe(function () {
-        return (typeof BASE_PATH !== 'undefined' && BASE_PATH) ? BASE_PATH : '';
-      }, '');
-      var url = base + '/api/v1/conversations/' + encodeURIComponent(id)
-        + (param ? ('?window=' + encodeURIComponent(param)) : '');
       var t0 = (typeof performance !== 'undefined' ? performance.now() : Date.now());
       var ctrl = _safe(function () { return new AbortController(); }, null);
       var timer = setTimeout(function () { _safe(function () { ctrl && ctrl.abort(); }); }, 15000);
-      var opts = { headers: { 'Accept': 'application/json' } };
+      // Route through the unified API client — Api.conversations owns this
+      // endpoint's URL (static/js/api.js), so we no longer hand-build the
+      // /api/v1/... path or re-read BASE_PATH here. onError:'throw' + timeout:0
+      // keep the probe's own 15s abort as the SOLE deadline and let the
+      // .catch below classify an AbortError as a tunnel-truncation timeout.
+      var api = (typeof window !== 'undefined') ? window.Api : null;
+      if (!api || !api.conversations || typeof api.conversations.getResponse !== 'function') {
+        clearTimeout(timer);
+        resolve({
+          requestedWith: param ? ('window=' + param) : '(no window param — full blob)',
+          skipped: 'Api client unavailable',
+        });
+        return;
+      }
+      var opts = { headers: { 'Accept': 'application/json' }, onError: 'throw', timeout: 0 };
+      if (param) opts.query = { window: param };
       if (ctrl) opts.signal = ctrl.signal;
-      fetch(url, opts).then(function (resp) {
+      api.conversations.getResponse(id, opts).then(function (resp) {
         return resp.text().then(function (body) {
           clearTimeout(timer);
           var elapsedMs = Math.round((typeof performance !== 'undefined' ? performance.now() : Date.now()) - t0);

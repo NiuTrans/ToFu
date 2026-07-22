@@ -131,6 +131,58 @@ class PaymentsCommonTest(_BillingPhase2Base):
         mark_payment_settled(rec.id)
         self.assertEqual(get_balance(u.id), after)
 
+    def test_settle_crash_between_deposit_and_flip_never_loses_topup(self):
+        """Lost-top-up window guard: if the process crashes AFTER the deposit
+        but BEFORE the status flip, a webhook REDELIVERY must still land the
+        credit exactly once. Before the fix (flip-then-deposit) the redelivery
+        short-circuited on status=='settled' and the credit was lost forever;
+        the deposit-first ordering makes the redelivery re-attempt the
+        idempotent deposit and only then flip."""
+        from lib.billing import get_balance
+        from lib.billing.users import create_user
+        from lib.billing.payments import record_payment, mark_payment_settled
+        import lib.billing.payments._common as pc
+        u = create_user('gustav@example.com', password='password1')
+        rec = record_payment(user_id=u.id, provider='stripe',
+                              provider_id='pi_crash_1',
+                              amount_minor=1000, currency='USD')
+        before = get_balance(u.id)
+
+        # Simulate a crash immediately after the deposit, before the status
+        # UPDATE lands, by making the status-flip execute() raise ONCE.
+        real_get_db = pc.get_thread_db
+
+        class _CrashOnUpdateDB:
+            def __init__(self, real):
+                self._real = real
+            def execute(self, sql, *a, **k):
+                if sql.strip().upper().startswith('UPDATE BILLING_PAYMENTS'):
+                    raise RuntimeError('simulated crash before status flip')
+                return self._real.execute(sql, *a, **k)
+            def commit(self):
+                return self._real.commit()
+
+        from lib.database import DOMAIN_SYSTEM
+        crash_db = _CrashOnUpdateDB(real_get_db(DOMAIN_SYSTEM))
+        with patch.object(pc, 'get_thread_db', lambda *a, **k: crash_db):
+            with self.assertRaises(RuntimeError):
+                mark_payment_settled(rec.id)
+        # Deposit already landed (crash was AFTER it) …
+        mid = get_balance(u.id)
+        self.assertGreater(mid, before, 'deposit must land before the flip')
+        # … but the payment row is still NOT settled (flip never committed).
+        row = pc.find_by_provider_id('stripe', 'pi_crash_1')
+        self.assertEqual(row.status, 'pending',
+                         'status flip must not have happened (crash before it)')
+
+        # Webhook redelivery (normal DB): must NOT double-credit and must now
+        # flip the row to settled.
+        mark_payment_settled(rec.id)
+        self.assertEqual(get_balance(u.id), mid,
+                         'redelivery must be idempotent — no double credit')
+        row2 = pc.find_by_provider_id('stripe', 'pi_crash_1')
+        self.assertEqual(row2.status, 'settled')
+
 
 # ── stripe webhook ──────────────────────────────────────────────────
 

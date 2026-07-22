@@ -17,6 +17,43 @@
    ui/sse_pipeline.js; symbols share window scope, no exports needed.
    ═══════════════════════════════════════════════════════════════════ */
 
+/* ═══ Connection-toast dedupe (flicker/noise guard) ═══════════════════
+ * Each _pollFallback runs PER-CONVERSATION, so N concurrent streaming convs
+ * on a flaky tunnel would each fire their OWN "Connection Lost"/"Reconnected"/
+ * "Server Offline" toast — and a tunnel that drops→recovers→drops repeatedly
+ * would re-fire them every cycle. That is exactly the "connection noise" the
+ * user sees as confusing flicker. Route the three connection toasts through a
+ * single WINDOW-SCOPED state machine keyed by CONNECTION phase (not convId), so:
+ *   • 'lost' shows at most once per outage (a second conv / a re-entry within
+ *     the cooldown is suppressed);
+ *   • 'reconnected' shows ONLY if we had actually announced an outage — never a
+ *     spurious "Reconnected" with no preceding "Connection Lost";
+ *   • 'offline' shows at most once per cooldown.
+ * Pure display coalescing — the recovery LOGIC (health checks, poll resume,
+ * offline-recovery polling) is untouched. */
+function _connToast(phase, icon, title, msg, dur) {
+  if (typeof showToast !== 'function') return;
+  const st = (window._connToastState = window._connToastState || { phase: 'ok', at: 0 });
+  const now = Date.now();
+  const COOLDOWN_MS = 15000;
+  if (phase === 'reconnected') {
+    /* Only announce recovery if we had announced an outage — otherwise a brief
+     * per-conv blip that never surfaced a "Connection Lost" would pop a
+     * confusing bare "Reconnected". */
+    if (st.phase !== 'lost' && st.phase !== 'offline') return;
+    st.phase = 'ok'; st.at = now;
+    showToast(icon, title, msg, dur);
+    return;
+  }
+  /* 'lost' / 'offline': suppress a repeat of the SAME phase within the cooldown
+   * (a second concurrent conv, or a rapid re-drop). A transition lost→offline
+   * is allowed through immediately (it's a real escalation). */
+  if (st.phase === phase && (now - st.at) < COOLDOWN_MS) return;
+  st.phase = phase; st.at = now;
+  showToast(icon, title, msg, dur);
+}
+if (typeof window !== 'undefined') window._connToast = _connToast;
+
 async function _pollFallback(convId, taskId, stream, assistantMsg) {
   let lastSave = Date.now();
   const buf = streamBufs.get(convId);
@@ -413,7 +450,7 @@ async function _pollFallback(convId, taskId, stream, assistantMsg) {
           const _recoveryStart = Date.now();
           let _recovered = false;
           console.warn(`[_pollFallback] 🔄 Entering network recovery wait (up to ${_RECOVERY_WAIT_MS/1000}s) for conv=${convId.slice(0,8)}`);
-          showToast('🔄', 'Connection Lost',
+          _connToast('lost', '🔄', 'Connection Lost',
             'Server unreachable — waiting for reconnection… Task is still running on the server.', 8000);
           while (Date.now() - _recoveryStart < _RECOVERY_WAIT_MS) {
             if (stream.controller.signal.aborted) {
@@ -429,7 +466,7 @@ async function _pollFallback(convId, taskId, stream, assistantMsg) {
               console.warn(`[_pollFallback] ✅ Server is BACK after ${Math.round((Date.now() - _recoveryStart)/1000)}s — resuming poll for conv=${convId.slice(0,8)}`);
               _recovered = true;
               _consecutiveErrors = 0;
-              showToast('✅', 'Reconnected', 'Server connection restored — resuming…', 4000);
+              _connToast('reconnected', '✅', 'Reconnected', 'Server connection restored — resuming…', 4000);
               break;
             }
             console.debug(`[_pollFallback] Still waiting for server… ${Math.round((Date.now() - _recoveryStart)/1000)}s elapsed`);
@@ -442,7 +479,7 @@ async function _pollFallback(convId, taskId, stream, assistantMsg) {
             saveConversations(convId);
             twStop(convId);
             finishStream(convId);
-            showToast('⚠️', 'Server Offline',
+            _connToast('offline', '⚠️', 'Server Offline',
               'Backend server did not reconnect within 2 minutes. Your partial response has been saved. It will recover automatically when the server comes back.',
               12000);
             // ★ Start periodic recovery polling so the result is auto-recovered later

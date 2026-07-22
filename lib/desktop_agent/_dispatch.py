@@ -73,6 +73,12 @@ def dispatch_command(cmd_type, params, permissions):
         return {'error': f'Command {cmd_type} requires --allow-exec flag'}
     if cmd_type in GUI_COMMANDS and not permissions.get('allow_gui'):
         return {'error': f'Command {cmd_type} requires --allow-gui flag'}
+    # Param-aware gate: desktop_system_info is read-only EXCEPT type=kill, which
+    # terminates a process — that is a destructive/exec-tier action and must NOT
+    # be reachable from the read-only default. (overview / processes stay open.)
+    if cmd_type == 'desktop_system_info' and params.get('type') == 'kill' \
+            and not permissions.get('allow_exec'):
+        return {'error': 'desktop_system_info type=kill requires --allow-exec flag'}
 
     try:
         return COMMANDS[cmd_type](params)

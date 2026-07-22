@@ -84,6 +84,8 @@ __all__ = [
     'max_chars_per_second',
     'correction_enabled',
     'maybe_correct',
+    'normalize_zh_variant',
+    'zh_variant_target',
 ]
 
 
@@ -129,3 +131,9 @@ from lib.transcription._transcribe import (  # noqa: E402,F401
 
 # ── Correction: flag-gated LLM cleanup pass ─────────────────────────────
 from lib.transcription._correct import maybe_correct  # noqa: E402,F401
+
+# ── Chinese variant normalization (Traditional → Simplified) ────────────
+from lib.transcription._zh import (  # noqa: E402,F401
+    normalize_zh_variant,
+    zh_variant_target,
+)

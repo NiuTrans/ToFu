@@ -108,6 +108,63 @@ class OpenAITranslateTest(unittest.TestCase):
         resp = build_openai_response(task, model='m')
         self.assertEqual(resp['choices'][0]['finish_reason'], 'length')
 
+    def test_build_response_error_is_valid_enum_not_error(self):
+        """finish_reason='error' is NOT a valid OpenAI enum value; an
+        error-status task must map to a legal value ('stop'), not the bogus
+        'error' an SDK would reject."""
+        from lib.compat.openai import build_openai_response
+        task = {'id': 'a', 'status': 'error', 'content': 'partial',
+                'finishReason': 'stop'}
+        resp = build_openai_response(task, model='m')
+        fr = resp['choices'][0]['finish_reason']
+        self.assertIn(fr, ('stop', 'length', 'tool_calls', 'content_filter',
+                           'function_call'))
+        self.assertNotEqual(fr, 'error')
+
+    def test_build_response_tool_use_normalized_to_tool_calls(self):
+        from lib.compat.openai import build_openai_response
+        task = {'id': 'a', 'status': 'done', 'content': '',
+                'finishReason': 'tool_use', 'toolRounds': []}
+        resp = build_openai_response(task, model='m')
+        self.assertEqual(resp['choices'][0]['finish_reason'], 'tool_calls')
+
+    def test_streaming_emits_tool_calls_delta(self):
+        """A task that finished on a tool call must emit a tool_calls DELTA in
+        the stream (parity with the sync path). Before the fix the stream `done`
+        branch emitted only content+finish_reason → a streaming caller got
+        finish_reason=tool_calls with NO tool_calls payload."""
+        import asyncio
+        import json as _json
+        from lib.compat.openai import stream_openai_chunks
+        tc = {'id': 'call_1', 'type': 'function',
+              'function': {'name': 'get_weather', 'arguments': '{"city":"SF"}'}}
+        task = {
+            'id': 'abc', 'content': '',
+            'events': [{'type': 'done', 'finishReason': 'tool_calls', 'seq': 0}],
+            'events_lock': threading.Lock(),
+            'status': 'done', 'finishReason': 'tool_calls',
+            'toolRounds': [{'tool_calls': [tc]}],
+        }
+
+        async def _drain():
+            return [f async for f in stream_openai_chunks(task, model='m')]
+        frames = asyncio.new_event_loop().run_until_complete(_drain())
+        # Find a chunk carrying a tool_calls delta.
+        tool_deltas = []
+        for f in frames:
+            if not f.startswith('data: ') or '[DONE]' in f:
+                continue
+            payload = _json.loads(f[len('data: '):].strip())
+            delta = payload.get('choices', [{}])[0].get('delta', {})
+            if 'tool_calls' in delta:
+                tool_deltas.append(delta['tool_calls'])
+        self.assertTrue(tool_deltas,
+                        'stream must emit a tool_calls delta when the task '
+                        'finished on a tool call')
+        tcs = tool_deltas[0]
+        self.assertEqual(tcs[0]['function']['name'], 'get_weather')
+        self.assertEqual(tcs[0]['index'], 0, 'OpenAI streaming tool_calls need an index')
+
     def test_streaming_yields_done(self):
         from lib.compat.openai import stream_openai_chunks
         # NEW contract (epic pt_cb8f98b0cb9b47fb, step 3): raw content deltas

@@ -153,7 +153,13 @@ async function uploadImageToServer(imgObj) {
   try {
     const data = await Api.images.upload({ base64: imgObj.base64, mediaType: imgObj.mediaType });
     if (data && data.url) {
-      imgObj.url = apiUrl(data.url);
+      // Store the CANONICAL server-relative URL ('/api/images/<f>'), NOT
+      // apiUrl(data.url) — apiUrl() bakes in BASE_PATH (under a reverse proxy
+      // that is '/proxy/<port>'), which was persisted into the DB and later
+      // broke inspect_image's ref resolution (it expected a bare /api/images/
+      // path). Prefixing for display/fetch is done at the consumer via
+      // apiUrl(); the stored value stays environment-independent (§3.5).
+      imgObj.url = data.url;
     }
   } catch (e) {
     debugLog("Image upload failed: " + e.message, "warn");

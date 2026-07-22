@@ -132,8 +132,19 @@ function _openDialog(cfg) {
       if (e.key === 'Escape') { e.preventDefault(); close(cancelResult); }
       else if (e.key === 'Enter') {
         // In a prompt the input has focus; Enter confirms with its value.
+        // In a confirm/alert, Enter activates the currently-focused button so
+        // a keyboard user who moved the selection to Cancel gets Cancel.
         e.preventDefault();
-        close(cfg.prompt ? input.value : okResult);
+        if (cfg.prompt) { close(input.value); return; }
+        if (cancelBtn && document.activeElement === cancelBtn) close(cancelResult);
+        else close(okResult);
+      }
+      else if (!cfg.prompt && cancelBtn &&
+               (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+        // Left/right arrows move the selection between the two buttons
+        // (Cancel on the left, OK on the right) for full keyboard-only use.
+        e.preventDefault();
+        (e.key === 'ArrowLeft' ? cancelBtn : okBtn).focus();
       }
     }
     document.addEventListener('keydown', onKey, true);

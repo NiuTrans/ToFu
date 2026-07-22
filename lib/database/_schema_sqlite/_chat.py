@@ -261,6 +261,10 @@ def _init_chat_schema(conn):
     # IF NOT EXISTS). See tests/test_core_schema_parity.py.
     from lib.database._core_schema import PAPER_LIBRARY, create_if_absent
     create_if_absent(conn, PAPER_LIBRARY, table_exists=_table_exists)
+    # Migration: add `folder_id` (optional folder grouping) to existing DBs.
+    if not _column_exists(conn, 'paper_library', 'folder_id'):
+        cur.execute("ALTER TABLE paper_library ADD COLUMN folder_id TEXT NOT NULL DEFAULT ''")
+        logger.info('[DB] Migration: added column folder_id to paper_library')
     # ── Daily cost cache: pre-aggregated per-day LLM costs (avoids full
     # table scans on every calendar render).  date is 'YYYY-MM-DD' local time.
     # conversations_json stores the per-conv breakdown for drill-down.

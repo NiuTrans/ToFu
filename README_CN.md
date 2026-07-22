@@ -597,7 +597,7 @@ vim .env   # 填入你的值
 │   ├── agent_core/            可复用智能体基座（运行循环、调度、TaskRuntime、push、profiles）
 │   ├── llm/                   LLM API 客户端包（build_body / stream / cache / diagnostics）
 │   ├── llm_dispatch/          多密钥多模型智能调度器
-│   ├── database/              双后端—— SQLite 默认，PostgreSQL 自动初始化
+│   ├── database/              双后端—— SQLite 默认，PostgreSQL 通过 --with-postgres 开启
 │   ├── tasks_pkg/             任务编排与上下文压缩
 │   │   ├── orchestrator.py    LLM ↔ 工具主循环
 │   │   ├── executor.py        工具执行引擎

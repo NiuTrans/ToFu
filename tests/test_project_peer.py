@@ -254,6 +254,53 @@ def test_rate_limit_storm_guard(_stub_io):
     assert send_peer_message('/p', 'cA', 'cC', 'to a different peer')['ok']
 
 
+def test_failed_enqueue_refunds_rate_slot(monkeypatch):
+    """A FAILING enqueue must refund the rate-limit slot it consumed at check
+    time — otherwise a flapping (always-raising) target silently drains the
+    sender's per-window budget for messages that never landed.
+
+    With cap=3: three failing sends must NOT exhaust the budget (each refunds),
+    so a 4th send still passes the gate. NC below proves the refund is what
+    makes this hold."""
+    import lib.conversations.project_peer as pp
+    from lib.conversations.project_peer import send_peer_message
+    monkeypatch.setattr('lib.conversations.project_feed.emit_project_event',
+                        lambda *a, **k: None)
+    monkeypatch.setattr('lib.conversations.project_peer.audit_log',
+                        lambda *a, **k: None)
+    monkeypatch.setattr('lib.conversations.project_peer._resolve_target_conv_id',
+                        lambda t: ((t or '').strip(), ''))
+
+    def _boom(*a, **k):
+        raise RuntimeError('queue down')
+    monkeypatch.setattr('lib.message_queue.enqueue_message', _boom)
+
+    # Five consecutive FAILED sends — far past the cap of 3. Each must refund,
+    # so none is ever rate_limited (the failure is surfaced, not the budget).
+    for i in range(5):
+        res = send_peer_message('/p', 'cA', 'cB', f'flap {i}')
+        assert res['ok'] is False
+        assert res['error'] != 'rate_limited', (
+            f'send {i}: a failed enqueue must refund its slot, never exhaust '
+            f'the budget → got {res}')
+    # The window history for the pair is empty (every slot refunded).
+    with pp._rate_lock:
+        assert not pp._peer_msg_history.get(('cA', 'cB')), \
+            'all failed-send slots must have been refunded'
+
+
+def test_refund_only_on_failure_not_on_success(_stub_io):
+    """The refund must NOT fire on a SUCCESSFUL send — the storm guard still
+    bounds real traffic. Three successful sends fill the window; the 4th is
+    rate_limited exactly as before (the refund only covers failures)."""
+    from lib.conversations.project_peer import send_peer_message
+    for i in range(3):
+        assert send_peer_message('/p', 'cA', 'cB', f'ok {i}')['ok']
+    blocked = send_peer_message('/p', 'cA', 'cB', 'msg 4')
+    assert blocked['ok'] is False and blocked['error'] == 'rate_limited', \
+        'successful sends are NOT refunded — the storm guard must still bite'
+
+
 def test_no_auto_relay_body_is_plain_content(_stub_io):
     """The received message is PLAIN turn content — it carries no send
     directive, so receiving one can never auto-trigger another send."""

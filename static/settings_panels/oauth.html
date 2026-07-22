@@ -1,0 +1,70 @@
+        <div class="settings-tab-panel" id="settingsTab_oauth">
+          <div class="settings-section-title" data-i18n="settings.oauthTitle">订阅登录</div>
+          <p class="settings-desc"><span data-i18n="settings.oauthPageDesc">使用 ChatGPT Plus / Claude Pro 订阅账号登录，无需 API Key，直接使用订阅额度。</span><br><span style="color:#f0ad4e;font-size:12px" data-i18n-html="settings.oauthChinaNote">⚠️ 中国用户需要全程代理（Clash/VPN），授权弹窗和服务器换 token 都需要能访问外网。建议在<strong>本地浏览器无痕窗口</strong>中完成授权。</span></p>
+
+          <!-- Claude Pro -->
+          <div class="oauth-provider-card" id="oauthClaudeCard">
+            <div class="oauth-provider-header">
+              <img src="static/icons/claude.svg" width="20" height="20" style="vertical-align:-3px;filter:brightness(0) invert(1)" alt="Claude">
+              <span class="oauth-provider-name">Claude Pro / Max</span>
+              <span class="oauth-status-badge" id="oauthClaudeStatus" data-i18n="settings.notLoggedIn">未登录</span>
+            </div>
+            <p class="oauth-provider-desc" data-i18n="settings.oauthClaudeDesc">登录 Claude 订阅，使用 Sonnet / Opus 等模型，无需 API Key。</p>
+            <div class="oauth-provider-info" id="oauthClaudeInfo" style="display:none">
+              <span class="oauth-email" id="oauthClaudeEmail"></span>
+            </div>
+            <div class="oauth-provider-actions">
+              <button class="btn-small btn-primary" id="oauthClaudeLoginBtn" onclick="_oauthLogin('claude')" data-i18n="settings.loginClaude">登录 Claude</button>
+              <button class="btn-small btn-danger" id="oauthClaudeLogoutBtn" onclick="_oauthLogout('claude')" style="display:none" data-i18n="settings.logout">退出</button>
+            </div>
+            <div class="oauth-manual-fallback" id="oauthClaudeManual" style="display:none">
+              <p class="oauth-manual-hint" data-i18n-html="settings.oauthPopupBlocked">如弹窗无法打开，请复制链接到<strong>开了代理的浏览器无痕窗口</strong>中打开：</p>
+              <div style="display:flex;gap:8px;margin-bottom:8px">
+                <input type="text" class="oauth-manual-input" id="oauthClaudeAuthUrl" readonly style="color:#888;font-size:12px">
+                <button class="btn-small" onclick="var u=document.getElementById('oauthClaudeAuthUrl');u.select();document.execCommand('copy');this.textContent=t('settings.oauthCopied');setTimeout(function(){this.textContent=t('settings.oauthCopyLink')}.bind(this),1500)" style="white-space:nowrap" data-i18n="settings.oauthCopyLink">复制链接</button>
+              </div>
+              <p class="oauth-manual-hint" data-i18n-html="settings.oauthClaudeCodeHint">授权成功后页面显示授权码，复制 <strong>code#state</strong> 粘贴到下方：</p>
+              <div style="display:flex;gap:8px">
+                <input type="text" class="oauth-manual-input" id="oauthClaudeManualUrl" placeholder="粘贴 code#state（或完整回调 URL）" data-i18n-placeholder="settings.oauthClaudePh">
+                <button class="btn-small btn-primary" onclick="_oauthManualSubmit('claude')" data-i18n="settings.oauthSubmit">提交</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- ChatGPT Plus (Codex) -->
+          <div class="oauth-provider-card" id="oauthCodexCard">
+            <div class="oauth-provider-header">
+              <img src="static/icons/openai.svg" width="20" height="20" style="vertical-align:-3px;filter:brightness(0) invert(1)" alt="OpenAI">
+              <span class="oauth-provider-name">ChatGPT Plus / Pro</span>
+              <span class="oauth-status-badge" id="oauthCodexStatus" data-i18n="settings.notLoggedIn">未登录</span>
+            </div>
+            <p class="oauth-provider-desc" data-i18n="settings.oauthCodexDesc">登录 ChatGPT 订阅，使用 Codex 模型，请求自动转换为 Responses API 格式。</p>
+            <div class="oauth-provider-info" id="oauthCodexInfo" style="display:none">
+              <span class="oauth-email" id="oauthCodexEmail"></span>
+            </div>
+            <div class="oauth-provider-actions">
+              <button class="btn-small btn-primary" id="oauthCodexLoginBtn" onclick="_oauthLogin('codex')" data-i18n="settings.loginChatGPT">登录 ChatGPT</button>
+              <button class="btn-small btn-danger" id="oauthCodexLogoutBtn" onclick="_oauthLogout('codex')" style="display:none" data-i18n="settings.logout">退出</button>
+            </div>
+            <div class="oauth-manual-fallback" id="oauthCodexManual" style="display:none">
+              <p class="oauth-manual-hint" data-i18n-html="settings.oauthPopupBlocked">如弹窗无法打开，请复制链接到<strong>开了代理的浏览器无痕窗口</strong>中打开：</p>
+              <div style="display:flex;gap:8px;margin-bottom:8px">
+                <input type="text" class="oauth-manual-input" id="oauthCodexAuthUrl" readonly style="color:#888;font-size:12px">
+                <button class="btn-small" onclick="var u=document.getElementById('oauthCodexAuthUrl');u.select();document.execCommand('copy');this.textContent=t('settings.oauthCopied');setTimeout(function(){this.textContent=t('settings.oauthCopyLink')}.bind(this),1500)" style="white-space:nowrap" data-i18n="settings.oauthCopyLink">复制链接</button>
+              </div>
+              <p class="oauth-manual-hint" data-i18n="settings.oauthCodexCbHint">授权成功后，复制浏览器地址栏中的回调 URL 粘贴到下方：</p>
+              <div style="display:flex;gap:8px">
+                <input type="text" class="oauth-manual-input" id="oauthCodexManualUrl" placeholder="粘贴回调 URL (http://localhost:1455/auth/callback?code=...)" data-i18n-placeholder="settings.oauthCodexPh">
+                <button class="btn-small btn-primary" onclick="_oauthManualSubmit('codex')" data-i18n="settings.oauthSubmit">提交</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="settings-section-title" style="margin-top:20px" data-i18n="settings.oauthInstructions">使用说明</div>
+          <ul class="oauth-notes">
+            <li data-i18n="settings.oauthNote1">点击登录 → 弹窗打开官方授权页 → 用订阅账号登录并授权</li>
+            <li data-i18n-html="settings.oauthNote2">授权后 Claude 显示 <code>code#state</code>、ChatGPT 自动回调，按提示操作即可</li>
+            <li data-i18n-html="settings.oauthNote3">如弹窗被拦截，点击「复制链接」到<strong>本地浏览器无痕窗口</strong>中打开（避免登录态冲突）</li>
+            <li data-i18n="settings.oauthNote4">Token 过期后自动刷新，无需重新登录</li>
+          </ul>
+        </div>

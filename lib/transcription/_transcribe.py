@@ -278,6 +278,11 @@ def transcribe(audio_bytes: bytes, filename: str,
                 text = _facade._post_to_provider(slot, audio_bytes, filename, mime,
                                                  language=language, prompt=prompt)
             text = (text or '').strip()
+            # Fail-safe Chinese-variant normalization: ASR models transcribe
+            # Mandarin into Traditional by default, so convert to the configured
+            # variant (Simplified by default). Never raises / never degrades the
+            # text — see lib.transcription._zh.
+            text = _facade.normalize_zh_variant(text)
         except TranscriptionError as e:
             last_err = e
             logger.warning('[STT] slot %s:%s failed (%s) — trying next',

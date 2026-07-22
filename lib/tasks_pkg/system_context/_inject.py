@@ -269,6 +269,11 @@ def _inject_system_contexts(messages, project_path, project_enabled,
             tool_names=tool_names,
             # User-disabled blocks from the per-block system-prompt editor.
             disabled_blocks=disabled_blocks,
+            # Current date is NO LONGER baked into the cached static block —
+            # it rides the true tail (see ★4.5). Keeping it here re-billed the
+            # whole system prefix at every UTC-day rollover (Anthropic's named
+            # "don't inject timestamps into the cached prompt" anti-pattern).
+            include_date=False,
         )
         _append_to_system_message(messages, _static_block,
                                    as_separate_block=True)
@@ -725,18 +730,23 @@ Round N+3, a2's update lands. Synthesise the full picture for the user.
         else:
             _ctx_suppressed('peer_protocol', 'empty')
 
-    # ★ 4.5 Current date.
-    #   In append mode the date is already inlined by build_static_prompt()'s
-    #   section_current_date — do NOT append it again or it duplicates.
-    #   In replace mode the static block is suppressed, so the date would be
-    #   missing entirely; inject it here as its own cache-stable block
-    #   (changes once per UTC day, like the static section).
-    if _replace_static:
-        _date_line = system_prompt_cc.section_current_date()
-        if _date_line not in _existing:
-            _append_to_system_message(messages, _date_line,
-                                       as_separate_block=True)
-            _ctx_injected('date', len(_date_line))
+    # ★ 4.5 Current date → the TRUE tail, never the cached system floor.
+    #   The date changes once per UTC day. Previously it was inlined in the
+    #   static system block (append mode) or appended as its own system block
+    #   (replace mode) — either way it sat INSIDE the cached prefix, so the
+    #   daily rollover rewrote a cached block and re-billed the whole body
+    #   uncached at the UTC boundary (Anthropic names this exact anti-pattern:
+    #   "don't inject timestamps into the cached prompt"). Riding the true tail
+    #   — the SAME cache-safe seam the digest / charter / board use — keeps the
+    #   system prefix byte-stable across the day boundary and confines the date
+    #   bytes to the already-volatile 5m tail (which is re-billed every round
+    #   regardless, so the date rides for free). build_static_prompt() is now
+    #   always called with include_date=False, so this is the sole date source
+    #   in both append and replace modes.
+    _DATE_MARKER = 'Current date:'
+    _date_spliced = _wrap_system_reminder(system_prompt_cc.section_current_date())
+    _refresh_tail_block(messages, _date_spliced, _DATE_MARKER)
+    _ctx_injected('date', len(_date_spliced))
 
     # ── Per-assembly trace: ONE INFO line naming every block spliced this
     #   assembly + the total bytes. _inject_system_contexts runs ONCE per task

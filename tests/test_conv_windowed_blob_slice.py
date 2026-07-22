@@ -608,5 +608,81 @@ def test_scrollup_rearms_trimmed_and_hydrates(tmp_path):
     assert not fails, 'scroll-up/hydrate failures:\n' + out
 
 
+# ═══════════════════════════════════════════════════════════════════════
+#  Frontend: scroll-anchor is preserved on prepend (measured on the REAL
+#  scroll container #chatContainer, not the non-scrolling #chatInner child)
+# ═══════════════════════════════════════════════════════════════════════
+
+_SCROLL_ANCHOR_HARNESS = r"""
+const fs = require('fs');
+global.window = global;
+global.activeConvId = 'c1';
+global.renderChat = () => {
+  // Simulate the prepend growing the scroll content: taller after render.
+  chatContainer.scrollHeight = 2000;
+};
+
+// Fake DOM: #chatContainer is the overflow-y:auto scroll box (mutable
+// scrollTop/scrollHeight); #chatInner is a NON-scrolling child whose scrollTop
+// stays 0 and scrollHeight==clientHeight (exactly the CSS reality). If the fix
+// regresses and measures #chatInner, prevTop=0 & the re-pin writes to a dead
+// element, so chatContainer.scrollTop is left at its old value (asserted below).
+const chatContainer = { id:'chatContainer', scrollTop: 500, scrollHeight: 1200,
+                        clientHeight: 600 };
+const chatInner = { id:'chatInner', scrollTop: 0, scrollHeight: 600,
+                    clientHeight: 600 };
+global.document = { getElementById: (id) =>
+  id === 'chatContainer' ? chatContainer :
+  id === 'chatInner' ? chatInner : null };
+
+eval(fs.readFileSync(process.argv[2], 'utf8'));  // conv_window.js
+
+const out = [];
+function check(name, cond){ out.push((cond?'PASS ':'FAIL ')+name); }
+
+const conv = {
+  id:'c1', _windowed:true, _hasMoreEarlier:true, _firstLoadedSeq:60,
+  messages: [ { role:'user', content:'tail-q', _msgId:'u60', timestamp:61 } ],
+};
+global.conversations = [conv];
+
+// A page of 3 earlier messages; envelope advances the cursor.
+const EARLIER = { windowed:true, firstLoadedSeq:57, hasMore:true, messages: [
+  { role:'user', content:'e57', _msgId:'u57', timestamp:58 },
+  { role:'assistant', content:'e58', _msgId:'a58', timestamp:59 },
+  { role:'user', content:'e59', _msgId:'u59', timestamp:60 },
+]};
+global.Api = { conversations: { get: async () => EARLIER } };
+
+(async () => {
+  const n = await loadEarlierMessages('c1');
+  check('prepended_count', n === 3 && conv.messages.length === 4);
+  // Anchor math: prevTop(500) + (newHeight 2000 - prevHeight 1200) = 1300.
+  check('scroll_repinned_on_container', chatContainer.scrollTop === 1300);
+  // The non-scrolling inner child must NOT have been written.
+  check('inner_untouched', chatInner.scrollTop === 0);
+  console.log(out.join('\n'));
+  process.exit(0);
+})();
+"""
+
+
+@pytest.mark.skipif(not _node_available(), reason='node not installed')
+def test_scroll_anchor_preserved_on_prepend(tmp_path):
+    """Regression: loadEarlierMessages must measure + re-pin the scroll anchor
+    on the ACTUAL scroll box (#chatContainer), so the viewport does not jump to
+    the top when an earlier page is prepended. Guards against measuring the
+    non-scrolling #chatInner child (scrollTop always 0 → re-pin is a no-op)."""
+    harness = tmp_path / '_scroll_anchor_harness.js'
+    harness.write_text(_SCROLL_ANCHOR_HARNESS, encoding='utf-8')
+    proc = subprocess.run(
+        ['node', str(harness), os.path.join(JS_DIR, 'conv_window.js')],
+        capture_output=True, text=True, timeout=60)
+    out = proc.stdout.strip()
+    assert proc.returncode == 0, f'node failed: {proc.stderr}\n{out}'
+    fails = [ln for ln in out.splitlines() if ln.startswith('FAIL')]
+    assert not fails, 'scroll-anchor failures:\n' + out
+
+
 if __name__ == '__main__':
     sys.exit(pytest.main([__file__, '-v']))

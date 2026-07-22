@@ -237,8 +237,18 @@ def _build_user_message(msg: dict) -> dict:
                 # (survives compaction stripping the inline block); the model
                 # passes this to inspect_image to zoom the ORIGINAL. Emitted as
                 # a backend FACT so the model never fabricates a path.
-                _img_ref = img.get('url') or ''
-                if _img_ref.startswith('/api/images/'):
+                # canonical_image_ref tolerates a reverse-proxy prefix
+                # (``/proxy/<port>/api/images/<f>``) and strips it to the
+                # canonical ``/api/images/...`` tail — WITHOUT it the guard
+                # missed every proxied upload, so no ref hint was emitted and
+                # the model fabricated a bogus path from the tool docstring.
+                try:
+                    from lib.attachments import canonical_image_ref
+                    _img_ref = canonical_image_ref(img.get('url') or '')
+                except Exception as _cre:
+                    logger.debug('[Context] canonical_image_ref failed: %s', _cre)
+                    _img_ref = ''
+                if _img_ref:
                     content_blocks.append({
                         'type': 'text',
                         'text': f'[image ref: {_img_ref} — call inspect_image with '

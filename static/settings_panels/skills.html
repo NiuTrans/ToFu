@@ -1,0 +1,40 @@
+        <div class="settings-tab-panel" id="settingsTab_skills">
+          <!-- Header: title · counts · scope tabs · search -->
+          <div class="mcp-store-header">
+            <div class="mcp-store-header-title">
+              <span class="settings-section-title" data-i18n="skills.title">Skills</span>
+              <span class="stg-badge" id="skillsTotalCount" style="font-size:10px;">0 installed</span>
+              <span class="stg-badge" id="skillsCatalogCount" style="font-size:10px;display:none;">0 in catalog</span>
+            </div>
+            <div class="mcp-store-header-spacer"></div>
+            <div class="skills-scope-tabs">
+              <button class="skills-scope-tab active" data-scope="catalog" onclick="_skillsSetScope('catalog')" data-i18n="skills.tabCatalog">市场</button>
+              <button class="skills-scope-tab" data-scope="installed" onclick="_skillsSetScope('installed')" data-i18n="skills.tabInstalled">已安装</button>
+            </div>
+            <button class="skills-scope-tab" onclick="openMemoryCreateForm()" title="手动创建一条记忆" data-i18n-title="skills.newMemoryTitle">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" style="vertical-align:-1px"><path d="M12 5v14M5 12h14"/></svg>
+              <span data-i18n="skills.newMemory">新建记忆</span>
+            </button>
+            <input type="text" class="mcp-search" id="skillsSearch" placeholder="搜索 Skills…" data-i18n-placeholder="skills.searchPh"
+                   oninput="_skillsFilter(this.value)">
+          </div>
+
+          <p class="settings-desc" style="margin:8px 0 4px;font-size:12px;opacity:.8;" data-i18n="skills.intro">
+            Skills 是 Claude / OpenClaw / AgentSkills 标准的可重用知识包（SKILL.md + references/scripts/）。可拖入 .zip 或一键安装下方推荐。
+          </p>
+
+          <!-- Category filter pills (catalog mode) -->
+          <div class="mcp-category-bar" id="skillsCategoryBar"></div>
+
+          <!-- Drag-and-drop zone (always visible, becomes prominent on dragover) -->
+          <div class="skills-drop-zone" id="skillsDropZone" onclick="document.getElementById('skillsZipInput').click()">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            <span class="skills-drop-zone-text" data-i18n="skills.dropZone">拖入 .zip 安装本地技能包，或点击选择文件</span>
+            <input type="file" id="skillsZipInput" accept=".zip,application/zip" style="display:none" onchange="_skillsInstallFromInput(this)">
+          </div>
+
+          <!-- Catalog grid -->
+          <div id="skillsCatalogGrid" class="mcp-catalog-grid">
+            <p class="stg-loading" data-i18n="settings.loading">正在加载…</p>
+          </div>
+        </div>

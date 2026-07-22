@@ -246,7 +246,13 @@ var ConvCache = (function () {
           if (ik === 'base64' || ik === 'preview') continue;
           if (Object.prototype.hasOwnProperty.call(img, ik)) o[ik] = img[ik];
         }
-        if (img.url) { o.url = img.url; o.preview = img.url; }
+        if (img.url) {
+          o.url = img.url;
+          // preview is a render src — prefix the canonical '/api/images/<f>'
+          // with apiUrl() so it resolves through the reverse-proxy base path.
+          o.preview = (img.url.charAt(0) === '/' && typeof apiUrl === 'function')
+            ? apiUrl(img.url) : img.url;
+        }
         return o;
       });
     }

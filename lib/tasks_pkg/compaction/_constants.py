@@ -36,7 +36,24 @@ tail keeps them fully uncompressed. Normal chats rarely exceed 60 either.
 cut input tokens ~10% at the lowest cost/solve with no resolve-rate
 regression vs the 60-keep `tofu` arm. Keeping the count-based hot tail
 (not token-based) but tightening it to 40 captures most of that saving
-while still covering the 20-40-tool-call body of typical SWE-bench runs."""
+while still covering the 20-40-tool-call body of typical SWE-bench runs.
+
+2026-07 (single-giant-turn review): DELIBERATELY KEPT count-based (40), NOT
+switched to the token-budget ``adaptive_hot_tail``. The accumulation vector
+that motivated a token cap — a burst of L0-exempt ``read_files`` (each ~50–65k
+tokens) sitting inside the 40-count hot tail growing past the window before a
+turn ends — is now closed STRUCTURALLY at L2/L3, not by retuning L1:
+  • L2 ``execute_compact_tool`` folds cold tool-call ROUNDS out of the
+    preserved (in-flight) turn (``_fold_recent_intra_turn``), and its trigger
+    (``_should_force_compact``) is TOKEN-based — so a hot tail that is large in
+    BYTES still trips L2 and gets folded regardless of the L1 count.
+  • L3 ``_head_truncate`` is now tool-pairing-safe, the bounded last resort.
+So the count-based L1 tail is a cheap, cache-stable, well-understood default
+whose worst case is now bounded by the token-aware layers above it. Switching
+L1's default to ``adaptive_hot_tail`` is a hyperparameter change (§10.1)
+gated on a fresh A/B — it remains available as an opt-in arm
+(``compaction.steps=['adaptive_hot_tail']``) but is NOT the default, because
+the overflow risk it targeted no longer depends on the L1 count."""
 
 MICRO_COMPACT_THRESHOLD = 2000
 """Minimum character count before a tool result is worth compacting.
@@ -240,12 +257,25 @@ if budget allows more.  Defends against pathological short-turn streams
 # §10.1: these are hyperparameters — sign-off recorded in JOURNAL 2026-07-16 +
 # audit_log('config_change', approved_by='user') at the read site.
 
-_MANUAL_INTRA_TURN_HOT_ROUNDS = 8
+_INTRA_TURN_HOT_ROUNDS = 8
 """Most-recent tool rounds kept VERBATIM inside a giant preserved turn when
-档B folds it. Everything older than this hot tail is summarized + dropped.
-8 covers the immediate working state (the rounds the model is actively
-reasoning about) while collapsing the long cold body that fills the window.
-Owner-signed 2026-07-16 (§10.1)."""
+intra-turn folding (档B) fires — in BOTH the manual /compact path AND the
+automatic L2 force-compact path. Everything older than this hot tail is
+summarized + dropped. 8 covers the immediate working state (the rounds the
+model is actively reasoning about) while collapsing the long cold body that
+fills the window. Owner-signed 2026-07-16 (§10.1).
+
+Shared by ``_manual._collect_reserve_folds`` (RAW ``toolRounds``) and
+``_layer2._compact.execute_compact_tool`` (expanded api-form round spans) via
+the single fold-boundary policy ``_split_cold_rounds`` — one sanctioned value,
+two index spaces, so the keep-vs-fold decision can never drift between the two
+compaction paths."""
+
+_MANUAL_INTRA_TURN_HOT_ROUNDS = _INTRA_TURN_HOT_ROUNDS
+"""Back-compat alias — the manual path's original name for
+``_INTRA_TURN_HOT_ROUNDS`` (same sanctioned value, 8). Kept so existing imports
+and tests (``from ._constants import _MANUAL_INTRA_TURN_HOT_ROUNDS``) resolve
+unchanged now that the automatic path shares the constant."""
 
 _MANUAL_COMPACT_MIN_TOKENS = 4000
 """Manual /compact floor. The ONLY case that declines with

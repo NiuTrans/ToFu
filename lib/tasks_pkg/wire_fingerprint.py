@@ -462,29 +462,60 @@ def marker_signature(body: dict) -> dict[str, Any]:
 
         {'count': N,                       # total cache_control markers
          'msg': [(align_key, block_ord), …],  # per-message-block marker slots
-         'sys': K, 'tools': K}             # markers on hoisted system / tools
+         'sys': K, 'tools': K,             # markers on hoisted system / tools
+         'ttls': [(slot_key, ttl), …]}     # per-marker ttl VALUE (sorted)
 
     The per-message slot uses the stable ``canonical_key`` (not the list index)
     so a benign reindex does not register as a move.
+
+    ``ttls`` fingerprints each marker's ``cache_control.ttl`` VALUE (``''`` for
+    a bare ``{'type':'ephemeral'}`` = 5-minute default, ``'1h'`` for extended).
+    The ttl is part of the gateway's cache key, so a stable-block ttl flip
+    (5m↔1h) re-keys the whole prefix even when the body bytes AND the marker
+    count/position are unchanged — the ``_task_id``-drop latch bypass. It is
+    keyed by the marker's STABLE slot (``sys``/``tools``/the per-message
+    ``canonical_key``, NOT the list index) and SORTED, so the rolling tail
+    marker's normal forward advance does not perturb it — only an actual ttl
+    VALUE change on an otherwise-stable slot does. ``markers_ttl_flipped``
+    consumes this; ``markers_regressed`` deliberately ignores it (a ttl flip is
+    not a breakpoint LOSS).
     """
-    sig: dict[str, Any] = {'count': 0, 'msg': [], 'sys': 0, 'tools': 0}
+    sig: dict[str, Any] = {'count': 0, 'msg': [], 'sys': 0, 'tools': 0,
+                           'ttls': [], 'msg_blocks': [], 'body_msg_blocks': []}
     if not isinstance(body, dict):
         return sig
 
-    def _count_cc(blocks) -> int:
+    _ttls: list = []
+
+    def _count_cc(blocks, slot: str) -> int:
         n = 0
         if isinstance(blocks, list):
             for b in blocks:
-                if isinstance(b, dict) and b.get('cache_control'):
+                if isinstance(b, dict) and isinstance(b.get('cache_control'), dict):
+                    _ttls.append((slot, b['cache_control'].get('ttl', '')))
                     n += 1
         return n
 
     # Messages (both envelopes: OpenAI shape + translated Anthropic shape).
+    # ``_cum_blocks`` tracks each message-marker's CUMULATIVE content-block
+    # position in Anthropic's block space — the unit its ~20-block cache
+    # lookback is measured in. ``mid_anchor_out_of_window`` uses these positions
+    # to tell when the rolling tail can no longer reach the mid stepping-stone
+    # (the sawtooth whole-prefix rewrite). A block ≈ one content entry; an
+    # assistant ``tool_calls`` turn also emits one tool_use block per call.
+    _cum_blocks = 0
     for msg in body.get('messages') or ():
         if not isinstance(msg, dict):
+            _cum_blocks += 1
             continue
         content = msg.get('content')
+        _blocks_here = (len(content) if isinstance(content, list)
+                        else (1 if content else 0))
+        if isinstance(msg.get('tool_calls'), list):
+            _blocks_here += len(msg['tool_calls'])
+        _blocks_here = max(1, _blocks_here)
         if not isinstance(content, list):
+            _cum_blocks += _blocks_here
             continue
         marked = [bi for bi, b in enumerate(content)
                   if isinstance(b, dict) and b.get('cache_control')]
@@ -492,22 +523,44 @@ def marker_signature(body: dict) -> dict[str, Any]:
             entry = {'role': msg.get('role', ''),
                      'fields': _fields_of(msg), 'brief': _brief(msg)}
             key = canonical_key(entry)
+            # The system prompt sits at ``messages[0]`` on the OpenAI-protocol
+            # wire path (system is NOT hoisted out to a top-level field there),
+            # so its cache_control marker lands at cumulative block 0. That
+            # HEAD marker is the static-prefix anchor, NOT part of the mid→tail
+            # stepping-stone span. Including it in the span made
+            # ``mid_anchor_out_of_window`` compute max(msg_blocks)-min()=tail-0
+            # — always > lookback on any long conversation — a false positive
+            # unrelated to the real mid→tail geometry. ``body_msg_blocks`` keeps
+            # only the BODY (non-system) message markers so the predicate
+            # measures the true mid→tail span.
+            _is_head = msg.get('role') == 'system'
             for bi in marked:
                 sig['msg'].append((key, bi))
+                sig['msg_blocks'].append(_cum_blocks + bi)
+                if not _is_head:
+                    sig['body_msg_blocks'].append(_cum_blocks + bi)
                 sig['count'] += 1
+                _cc = content[bi].get('cache_control')
+                if isinstance(_cc, dict):
+                    _ttls.append((f'msg:{key}', _cc.get('ttl', '')))
+        _cum_blocks += _blocks_here
 
     # Hoisted system (Anthropic path: list of blocks) + tools.
     system = body.get('system')
     if isinstance(system, list):
-        _s = _count_cc(system)
+        _s = _count_cc(system, 'sys')
         sig['sys'] = _s
         sig['count'] += _s
     for t in body.get('tools') or ():
         if isinstance(t, dict):
             fn = t.get('function') if isinstance(t.get('function'), dict) else t
-            if isinstance(fn, dict) and fn.get('cache_control'):
+            if isinstance(fn, dict) and isinstance(fn.get('cache_control'), dict):
                 sig['tools'] += 1
                 sig['count'] += 1
+                _ttls.append(('tools', fn['cache_control'].get('ttl', '')))
+    # Sort by slot key so the list is order-stable across a benign reindex /
+    # tail advance; a genuine ttl VALUE change on a slot still shows.
+    sig['ttls'] = sorted(_ttls, key=lambda p: str(p[0]))
     return sig
 
 
@@ -538,6 +591,101 @@ def markers_regressed(prev: dict | None, cur: dict | None) -> bool:
     if prev.get('tools', 0) != cur.get('tools', 0):
         return True
     return False
+
+
+def markers_ttl_flipped(prev: dict | None, cur: dict | None) -> bool:
+    """True if a cache_control marker's ttl VALUE changed between rounds while
+    the marker layout was otherwise stable — a CLIENT-caused cache reset.
+
+    The companion to ``markers_regressed``: that catches a breakpoint being
+    LOST (count/sys/tools drop); THIS catches a breakpoint's ttl VALUE flipping
+    (5m↔1h) with the count unchanged. The ttl is part of the gateway's cache
+    key, so a stable-block ttl flip re-keys the whole prefix on a byte-identical
+    body — the ``_task_id``-drop latch bypass, which would otherwise launder
+    into a false "byte-identical → server-side" verdict. Compares the
+    slot-keyed, sorted ``ttls`` lists ``marker_signature`` emits.
+
+    Why this is false-positive-free on the rolling tail: ``ttls`` is keyed by
+    the marker's STABLE slot (``sys`` / ``tools`` / per-message
+    ``canonical_key``), so the tail marker's normal forward advance changes
+    WHICH message carries it (a new slot key) but not any existing slot's ttl.
+    A pure add/remove of a slot is already a COUNT change caught by
+    ``markers_regressed``; here we only fire when the MULTISET of (slot, ttl)
+    pairs differs in a way that is not merely a count change — i.e. an existing
+    slot's ttl value flipped. A missing side (mid-deploy / non-Claude / a
+    pre-fix signature with no ``ttls`` key) is inert.
+    """
+    if prev is None or cur is None:
+        return False
+    _p = prev.get('ttls')
+    _c = cur.get('ttls')
+    # Pre-fix signature (no ttls captured) → inert, never cry wolf.
+    if _p is None or _c is None:
+        return False
+    # Compare the DISTINCT ttl VALUE SET per slot, on slots PRESENT IN BOTH
+    # rounds. A value flip on a surviving slot is the signal; an added/removed
+    # slot is a count change (markers_regressed's job).
+    #
+    # ★ SET, not multiset. Every marker within a slot carries the SAME ttl in
+    #   normal operation (all `sys` markers use `_cc_stable`; `tools` is one
+    #   marker; each `msg:<canonical_key>` slot is one unique message with one
+    #   marker), so a slot's value set is homogeneous. The ONLY way a multiset
+    #   compare differed from a set compare was a pure COUNT change with the
+    #   value unchanged — e.g. the `sys` slot going ['1h','1h']→['1h'] when the
+    #   mid-history anchor arms as a conversation grows and `_system_bp_budget`
+    #   drops 2→1. That is NOT a ttl flip (no value changed) yet the old
+    #   multiset compare cried wolf → a spurious <ttl-flip> "cache re-keyed"
+    #   verdict on a byte-changed round, mislabelling a real miss as an in-task
+    #   latch bypass. Comparing distinct-value sets makes that count change
+    #   inert while a genuine 1h↔5m VALUE flip on a slot ({'1h'} vs {''}) still
+    #   fires — matching this function's own documented intent ("an existing
+    #   slot's ttl value flipped").
+    _pm: dict[str, set] = {}
+    for slot, ttl in _p:
+        _pm.setdefault(slot, set()).add(str(ttl))
+    _cm: dict[str, set] = {}
+    for slot, ttl in _c:
+        _cm.setdefault(slot, set()).add(str(ttl))
+    for slot in set(_pm) & set(_cm):
+        if _pm[slot] != _cm[slot]:
+            return True
+    return False
+
+
+def mid_anchor_out_of_window(cur: dict | None,
+                             lookback: int = 20) -> bool:
+    """True when the mid-history stepping-stone breakpoint sits FARTHER than
+    Anthropic's ~``lookback``-block cache window behind the rolling tail — so
+    the tail can no longer extend the mid entry and the whole prefix past the
+    mid is re-written on a byte-identical body.
+
+    Reads the cumulative message-marker BLOCK positions ``marker_signature``
+    records in ``msg_blocks``. The two message-level markers are the mid anchor
+    (earliest) and the rolling tail (latest); their block span is what must stay
+    within the lookback. This is a CLIENT-side breakpoint-LAYOUT miss (the
+    add_cache_breakpoints trail/step params let the stone slip past the window),
+    NOT a server/gateway fault — detect_cache_break names it so a periodic
+    read-collapse on a byte-identical, same-routing round is never laundered
+    into "upstream cache miss". Inert when the fingerprint is missing / pre-fix
+    (no ``msg_blocks``) or fewer than 2 message markers exist (no mid armed).
+    """
+    if not isinstance(cur, dict):
+        return False
+    # Measure the BODY (non-system) marker span. The system-prompt marker sits
+    # at cumulative block 0 on the OpenAI-protocol wire path (system stays at
+    # ``messages[0]``, not hoisted), so including it makes the span
+    # tail-minus-0 \u2014 always past the lookback on any long conversation, a false
+    # positive that has nothing to do with the mid\u2192tail stepping-stone geometry.
+    # ``body_msg_blocks`` (added alongside ``msg_blocks``) excludes that HEAD
+    # marker so the predicate reflects the true mid\u2192tail reach. Fall back to
+    # the legacy ``msg_blocks`` only when the newer field is absent (a signature
+    # captured before this fix, e.g. mid-deploy).
+    blocks = cur.get('body_msg_blocks')
+    if not isinstance(blocks, list):
+        blocks = cur.get('msg_blocks')
+    if not isinstance(blocks, list) or len(blocks) < 2:
+        return False
+    return (max(blocks) - min(blocks)) > lookback
 
 
 def _strip_cache_control(obj: Any) -> Any:
@@ -802,3 +950,71 @@ def static_prefix_hash(messages: list) -> str:
         else:
             break
     return _md5('\x01'.join(parts))
+
+
+def _canon_beta(anthropic_beta: Any) -> str:
+    """Normalize an ``anthropic-beta`` header into an ORDER-INDEPENDENT token set.
+
+    The header is a comma-joined list of beta flags (e.g.
+    ``prompt-caching-2024-07-31,extended-cache-ttl-2025-04-11``). Whether
+    ``extended-cache-ttl`` is present is part of the gateway's cache key, so a
+    presence flip must show — but a mere token REORDER (or added whitespace)
+    does not change what the gateway keys on, so it must NOT. Split on ``,``,
+    strip, drop empties, sort, re-join.
+    """
+    if not anthropic_beta:
+        return ''
+    parts = [p.strip() for p in str(anthropic_beta).split(',')]
+    return ','.join(sorted(p for p in parts if p))
+
+
+def routing_fingerprint(*, key_hash: Any = '', anthropic_beta: Any = '',
+                        endpoint: Any = '') -> dict[str, str]:
+    """Fingerprint the request's CACHE-NAMESPACE-determining routing attributes.
+
+    THE LAST BLIND SPOT. ``canonical_messages`` / ``system_fingerprint`` /
+    ``wire_byte_*`` all prove whether the request BODY changed. But Anthropic
+    prompt caching is namespaced by the request's *routing* too: the upstream
+    API key (a distinct key = a distinct cache namespace), the
+    ``anthropic-beta`` header (``extended-cache-ttl`` presence is part of the
+    key), and the endpoint. The dispatch layer CAN flip the key mid-conversation
+    (cooldown / 429 / 401 / timeout → sticky key scored ``inf`` → picker
+    rebinds), which drags the endpoint along, and the beta header is latched
+    per-TASK so a new turn can re-latch a changed global. When any of these
+    flips, a BYTE-IDENTICAL prefix lands on a COLD namespace → a guaranteed
+    client-caused miss that the body fingerprints are blind to.
+
+    This captures the three attributes so ``detect_cache_break`` can diff them
+    (``diff_routing``) BEFORE it reaches the "byte-identical → upstream" verdict
+    and instead NAME a client cache-namespace switch. ``key_hash`` is the
+    already-salted+truncated non-secret discriminator ``_sse_core`` computes;
+    the beta header is normalized order-independently so a token reorder is not
+    a false flip. Any field absent → ''.
+
+    Returns ``{'key': str, 'beta': str, 'endpoint': str}``.
+    """
+    return {
+        'key': '' if key_hash is None else str(key_hash),
+        'beta': _canon_beta(anthropic_beta),
+        'endpoint': '' if endpoint is None else str(endpoint),
+    }
+
+
+def diff_routing(old: dict | None, new: dict | None) -> list[str]:
+    """Name which cache-namespace attribute(s) flipped between rounds.
+
+    Compares two ``routing_fingerprint`` outputs. Returns a stable-ordered list
+    of ``<ns>key`` / ``<ns>beta`` / ``<ns>endpoint`` for each attribute whose
+    value changed — the precise, false-positive-free signal that a byte-
+    identical prefix was routed to a DIFFERENT gateway cache namespace (→ a
+    client-caused cold miss). A missing side (mid-deploy: no prior routing
+    captured, or non-Claude / capture failure) is inert — returns ``[]`` so it
+    never cries wolf before the fingerprint exists.
+    """
+    if not old or not new:
+        return []
+    changes: list[str] = []
+    for fld in ('key', 'beta', 'endpoint'):
+        if old.get(fld) != new.get(fld):
+            changes.append('<ns>' + fld)
+    return changes

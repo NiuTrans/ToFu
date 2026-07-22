@@ -220,6 +220,11 @@ function _recoverSwarmAgents(round, allRounds) {
   if (snap && Array.isArray(snap.agents) && snap.agents.length > 0) {
     return snap.agents.map((a) => {
       const status = a.status || "unknown";
+      /* Restore the tool timeline the backend persisted (see
+         master._snapshot_tool_timeline). Without this the reloaded card
+         showed no tools/timeline even though the agent used them live. */
+      const tools = Array.isArray(a.tools) ? a.tools : [];
+      const toolCalls = Array.isArray(a.toolCalls) ? a.toolCalls : [];
       return {
         id: a.id || "",
         role: a.role || "agent",
@@ -232,7 +237,8 @@ function _recoverSwarmAgents(round, allRounds) {
         tokens: (a.tokens === 0 || a.tokens) ? a.tokens : "",
         modifiedFiles: typeof a.modifiedFiles === "number" ? a.modifiedFiles : 0,
         error: a.error || "",
-        tools: [],
+        tools,
+        _toolCalls: toolCalls,
       };
     });
   }

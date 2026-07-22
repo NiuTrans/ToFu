@@ -39,7 +39,11 @@ def test_summary_on_delta_streams_and_accumulates(monkeypatch):
     def fake_dispatch_stream(messages, *, on_content=None, **kw):
         for c in chunks:
             on_content(c)
-        return (''.join(chunks), 'stop', {'prompt_tokens': 10, 'completion_tokens': 3})
+        # Real dispatch_stream returns the assistant message as a DICT
+        # ({'role':'assistant','content':...}), NOT a bare string — mirror
+        # that contract so this test guards the unwrap in _summary.py.
+        return ({'role': 'assistant', 'content': ''.join(chunks)}, 'stop',
+                {'prompt_tokens': 10, 'completion_tokens': 3})
 
     # dispatch_stream is imported lazily inside the fn from lib.llm_dispatch
     import lib.llm_dispatch as ld

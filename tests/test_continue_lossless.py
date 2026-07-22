@@ -47,6 +47,8 @@ from lib.model_info import (
 from lib.tasks_pkg.conv_message_builder import _reconstruct_tool_call_messages
 from lib.tasks_pkg.message_builder import inject_tool_history
 
+pytestmark = pytest.mark.unit
+
 
 # ═══════════════════════════════════════════════════════════
 #  Helpers
@@ -337,7 +339,23 @@ class TestConvBuilderReconstructionParity:
         assert asst['reasoning_content'] == 'reasoning trace'
         assert asst['thinking_signature'] == 'opaque-sig'
 
-    def test_thinking_without_signature_not_carried(self):
+    def test_thinking_without_signature_carries_reasoning_not_signature(self):
+        """Unsigned thinking → reasoning_content IS carried, signature is NOT.
+
+        The provider-agnostic reconstructor (per this class's docstring) ALWAYS
+        preserves vendor fields when the data is present — the model-specific
+        stripping happens later in build_body / openai_body_to_anthropic. Since
+        commit 8ecbbcf ("freeze the thinking-no-signature {reasoning_content}
+        live↔replay flip"), build_assistant_tool_call_message carries
+        reasoning_content whenever thinking text is present INDEPENDENT of
+        signature — mirroring the live tail — so replay↔live can't re-diverge
+        on this field. The UNSIGNED thinking block is dropped safely downstream
+        (proven by TestAnthropicOutboundReplay::test_unsigned_thinking_block_dropped),
+        so no HTTP 400, while DeepSeek's reasoning_content replay is preserved.
+
+        thinking_signature is still NOT carried when absent (a signature without
+        reasoning text — or here, no signature at all — is meaningless).
+        """
         rounds = [{
             'toolCallId': 'tc_1',
             'toolName': 'web_search',
@@ -349,7 +367,10 @@ class TestConvBuilderReconstructionParity:
         }]
         out = _reconstruct_tool_call_messages(rounds)
         asst = out[0]
-        assert 'reasoning_content' not in asst
+        # reasoning_content carried (independent of signature — the deliberate
+        # 8ecbbcf contract).
+        assert asst['reasoning_content'] == 'unsigned'
+        # signature dropped — none was present.
         assert 'thinking_signature' not in asst
 
     def test_extra_content_on_tool_call(self):

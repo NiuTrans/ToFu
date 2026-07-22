@@ -243,6 +243,7 @@ LIVE_PG_PAPER_LIBRARY = """
         images TEXT NOT NULL DEFAULT '[]',
         babel_cache TEXT NOT NULL DEFAULT '{}',
         page_count INTEGER NOT NULL DEFAULT 0,
+        folder_id TEXT NOT NULL DEFAULT '',
         created_at BIGINT NOT NULL,
         updated_at BIGINT NOT NULL,
         PRIMARY KEY (id, user_id)
@@ -262,6 +263,7 @@ LIVE_SQLITE_PAPER_LIBRARY = """
         images TEXT NOT NULL DEFAULT '[]',
         babel_cache TEXT NOT NULL DEFAULT '{}',
         page_count INTEGER NOT NULL DEFAULT 0,
+        folder_id TEXT NOT NULL DEFAULT '',
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
         PRIMARY KEY (id, user_id)

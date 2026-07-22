@@ -61,9 +61,17 @@ def _sync_endpoint_turns_to_conversation(task, endpoint_turns):
             return None
 
         # Find where the original conversation ends and endpoint turns begin.
+        # A flow-path autopilot VU turn is stamped ``_isVirtualUser`` (NOT an
+        # endpoint marker) so the LLM context builder keeps it — but it is
+        # still an ENGINE-PRODUCED turn here, so it must count as part of the
+        # run's turns, not the original conversation. Omitting it would place
+        # the base/endpoint boundary AFTER the VU row and re-append it on every
+        # incremental sync (duplicated VU turns).
         original_end = 0
         for i, msg in enumerate(messages):
-            if not msg.get('_epIteration') and not msg.get('_isEndpointReview') and not msg.get('_isEndpointPlanner'):
+            if (not msg.get('_epIteration') and not msg.get('_isEndpointReview')
+                    and not msg.get('_isEndpointPlanner')
+                    and not msg.get('_isVirtualUser')):
                 original_end = i + 1
 
         # Keep the original messages, replace all endpoint turns
@@ -138,11 +146,15 @@ def _trigger_per_turn_auto_translate(task, turn_msg, msg_idx):
     if not content:
         return
     role = turn_msg.get('role')
+    # A flow-path autopilot VU turn (role=user + _isVirtualUser) is
+    # DISPLAY-translated exactly like the live path — route it through the VU
+    # safety net (keyed by _msgId), NOT the critic/assistant path.
+    is_vu = bool(turn_msg.get('_isVirtualUser')) and role == 'user'
     is_critic = bool(turn_msg.get('_isEndpointReview')) and role == 'user'
     is_planner_or_worker = role == 'assistant' and (
         turn_msg.get('_isEndpointPlanner') or turn_msg.get('_epIteration')
     )
-    if not (is_critic or is_planner_or_worker):
+    if not (is_vu or is_critic or is_planner_or_worker):
         return
 
     try:
@@ -157,7 +169,11 @@ def _trigger_per_turn_auto_translate(task, turn_msg, msg_idx):
         return
 
     try:
-        if is_critic:
+        if is_vu:
+            from lib.tasks_pkg.autopilot import _maybe_auto_translate_vu
+            _maybe_auto_translate_vu(conv_id, turn_msg.get('_msgId') or '',
+                                     content)
+        elif is_critic:
             _maybe_auto_translate_critic(conv_id, content, msg_idx)
         else:
             _maybe_auto_translate_assistant(conv_id, content, msg_idx)
@@ -248,11 +264,12 @@ def _trigger_endpoint_auto_translate(task, endpoint_turns):
             is_planner = bool(msg.get('_isEndpointPlanner'))
             is_worker = bool(msg.get('_epIteration')) and not msg.get('_isEndpointReview')
             is_critic = bool(msg.get('_isEndpointReview')) and role == 'user'
+            is_vu = bool(msg.get('_isVirtualUser')) and role == 'user'
 
-            # Only handle endpoint-produced turns.  Everything else
+            # Only handle engine-produced turns.  Everything else
             # (the original user prompt, any non-endpoint assistant msg,
             # etc.) is skipped silently.
-            if not (is_planner or is_worker or is_critic):
+            if not (is_planner or is_worker or is_critic or is_vu):
                 continue
 
             content = msg.get('content') or ''
@@ -271,13 +288,20 @@ def _trigger_endpoint_auto_translate(task, endpoint_turns):
                     ep_tag = 'planner'
                 elif is_worker:
                     ep_tag = f"worker#{msg.get('_epIteration')}"
+                elif is_vu:
+                    ep_tag = 'vu'
                 else:
                     ep_tag = 'critic'
 
                 logger.info('%s conv=%s turn=%d role=%s ep=%s len=%d — scheduling auto-translate',
                             pfx, conv_id[:8], idx, role, ep_tag, len(content))
 
-                if is_critic:
+                if is_vu:
+                    from lib.tasks_pkg.autopilot import _maybe_auto_translate_vu
+                    _maybe_auto_translate_vu(conv_id, msg.get('_msgId') or '',
+                                             content)
+                    per_role_scheduled['vu'] = per_role_scheduled.get('vu', 0) + 1
+                elif is_critic:
                     _maybe_auto_translate_critic(conv_id, content, idx)
                     per_role_scheduled['critic'] += 1
                 else:

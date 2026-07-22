@@ -1,14 +1,17 @@
-"""CSS bundler — minify + content-hash the app stylesheet so browser caches
-invalidate automatically when the source changes.
+"""CSS bundler — minify + content-hash the app stylesheets so browser caches
+invalidate automatically when a source changes.
 
-There's only ONE app stylesheet (`static/styles.css`). This module:
-  1. Minifies it (string/comment-aware — see `_minify_css`) into a sibling
-     file `static/styles-<hash>.css`, where `<hash>` is the first 8 chars of
+Two app stylesheets are handled, keyed by their filename stem: the main
+`static/styles.css` and `static/settings.css` (settings-specific rules
+extracted for locality — see the settings-panel decoupling). Both flow through
+the SAME stem-parametrized minify/hash core. This module:
+  1. Minifies each (string/comment-aware — see `_minify_css`) into a sibling
+     file `static/<stem>-<hash>.css`, where `<hash>` is the first 8 chars of
      the SHA-256 of the SOURCE contents.
-  2. Exposes `get_styles_link_tag()` which returns
-     `<link rel="stylesheet" href="static/styles-<hash>.css">`.
-  3. `routes/common.py` swaps the original `<link ... href="static/styles.css">`
-     tag in the served HTML for this one via `_APP_STYLES_RE`.
+  2. Exposes `get_styles_link_tag()` / `get_settings_link_tag()` which return
+     `<link rel="stylesheet" href="static/<stem>-<hash>.css">`.
+  3. `routes/common.py` swaps the original `<link ... href="static/<stem>.css">`
+     tags in the served HTML for these via `_APP_STYLES_RE` / `_SETTINGS_STYLES_RE`.
 
 The minified file is written next to the source under `/static/`, so the
 existing static handler serves it directly (with the long cache lifetime in
@@ -34,14 +37,21 @@ logger = get_logger(__name__)
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STATIC_DIR = os.path.join(BASE_DIR, 'static')
 STYLES_PATH = os.path.join(STATIC_DIR, 'styles.css')
+SETTINGS_PATH = os.path.join(STATIC_DIR, 'settings.css')
 
-# Cached state — recomputed when the file's (mtime, size) signature changes.
-# Some filesystems (FUSE / NFS / SMB) only expose 1-second mtime resolution,
-# so two edits within the same second would slip past an mtime-only check.
-# Pairing mtime with file size catches the vast majority of those cases —
-# a CSS edit that changes content but keeps both mtime AND size identical
-# would still be missed, but that's vanishingly rare for real edits.
-_state = {'hash': None, 'filename': None, 'mtime': 0, 'size': -1}
+# Per-stylesheet cached state — recomputed when a file's (mtime, size)
+# signature changes. Some filesystems (FUSE / NFS / SMB) only expose 1-second
+# mtime resolution, so two edits within the same second would slip past an
+# mtime-only check. Pairing mtime with file size catches the vast majority of
+# those cases — a CSS edit that changes content but keeps both mtime AND size
+# identical would still be missed, but that's vanishingly rare for real edits.
+# Keyed by the source stem ('styles' / 'settings'); each value mirrors the
+# original single-sheet state shape.
+_states = {
+    'styles': {'hash': None, 'filename': None, 'mtime': 0, 'size': -1},
+    'settings': {'hash': None, 'filename': None, 'mtime': 0, 'size': -1},
+}
+_SOURCE_PATHS = {'styles': STYLES_PATH, 'settings': SETTINGS_PATH}
 
 
 def _minify_css(src: str) -> str:
@@ -110,21 +120,21 @@ def _minify_css(src: str) -> str:
     return minified.strip()
 
 
-def _stat_signature():
-    """Return ``(mtime, size)`` for the styles file, or ``(0, -1)`` on error."""
+def _stat_signature(path=STYLES_PATH):
+    """Return ``(mtime, size)`` for a stylesheet, or ``(0, -1)`` on error."""
     try:
-        st = os.stat(STYLES_PATH)
+        st = os.stat(path)
         return st.st_mtime, st.st_size
     except OSError as e:
-        logger.warning('[CSSBundle] Cannot stat styles.css: %s', e)
+        logger.warning('[CSSBundle] Cannot stat %s: %s', os.path.basename(path), e)
         return 0, -1
 
 
-def _clean_old_minified(keep_filename):
-    """Remove stale ``styles-*.css`` files (keep only the current hash)."""
+def _clean_old_minified(keep_filename, stem='styles'):
+    """Remove stale ``<stem>-*.css`` files (keep only the current hash)."""
     try:
         for f in os.listdir(STATIC_DIR):
-            if (f.startswith('styles-') and f.endswith('.css')
+            if (f.startswith(stem + '-') and f.endswith('.css')
                     and f != keep_filename):
                 try:
                     os.remove(os.path.join(STATIC_DIR, f))
@@ -134,20 +144,21 @@ def _clean_old_minified(keep_filename):
         logger.debug('[CSSBundle] Failed to clean old minified files: %s', e)
 
 
-def _build_minified():
-    """Read styles.css, minify it, write ``styles-<hash>.css``.
+def _build_minified(stem='styles'):
+    """Read ``<stem>.css``, minify it, write ``<stem>-<hash>.css``.
 
     Returns ``(hash, filename)`` or ``(None, None)`` on read/write failure.
     """
+    src_path = _SOURCE_PATHS[stem]
     try:
-        with open(STYLES_PATH, 'r', encoding='utf-8') as f:
+        with open(src_path, 'r', encoding='utf-8') as f:
             data = f.read()
     except OSError as e:
-        logger.warning('[CSSBundle] Cannot read styles.css: %s', e)
+        logger.warning('[CSSBundle] Cannot read %s.css: %s', stem, e)
         return None, None
 
     content_hash = hashlib.sha256(data.encode('utf-8')).hexdigest()[:8]
-    filename = f'styles-{content_hash}.css'
+    filename = f'{stem}-{content_hash}.css'
     out_path = os.path.join(STATIC_DIR, filename)
 
     if not os.path.exists(out_path):
@@ -168,48 +179,71 @@ def _build_minified():
         saved = len(data) - len(minified)
         logger.info('[CSSBundle] Built %s (%dKB → %dKB, saved %dKB)', filename,
                     len(data) // 1024, len(minified) // 1024, saved // 1024)
-        _clean_old_minified(filename)
+        _clean_old_minified(filename, stem)
     return content_hash, filename
 
 
-def get_styles_filename():
-    """Return the current minified stylesheet filename (``styles-<hash>.css``),
+def _filename_for(stem):
+    """Return the current minified filename for ``<stem>.css`` (``<stem>-<hash>.css``),
     rebuilding when the source changed. Returns ``None`` on failure so the
-    caller can fall back to the un-minified ``static/styles.css``.
+    caller can fall back to the un-minified source.
     """
-    mtime, size = _stat_signature()
-    if (_state['filename'] is None
-            or mtime != _state['mtime']
-            or size != _state['size']
-            or not os.path.exists(os.path.join(STATIC_DIR, _state['filename']))):
-        h, fn = _build_minified()
+    state = _states[stem]
+    mtime, size = _stat_signature(_SOURCE_PATHS[stem])
+    if (state['filename'] is None
+            or mtime != state['mtime']
+            or size != state['size']
+            or not os.path.exists(os.path.join(STATIC_DIR, state['filename']))):
+        h, fn = _build_minified(stem)
         if fn is None:
             return None
-        _state['hash'] = h
-        _state['filename'] = fn
-        _state['mtime'] = mtime
-        _state['size'] = size
-    return _state['filename']
+        state['hash'] = h
+        state['filename'] = fn
+        state['mtime'] = mtime
+        state['size'] = size
+    return state['filename']
 
 
-def get_styles_hash():
-    """Return the current content-hash for styles.css (back-compat helper).
-
-    Falls back to a time-bucketed pseudo-hash on failure so we still serve a
-    usable `<link>` tag and don't crash the index page.
-    """
-    if get_styles_filename() and _state['hash']:
-        return _state['hash']
+def _hash_for(stem):
+    """Content-hash for ``<stem>.css`` (time-bucketed pseudo-hash on failure)."""
+    if _filename_for(stem) and _states[stem]['hash']:
+        return _states[stem]['hash']
     return f'fallback-{int(time.time()) // 60}'
 
 
-def get_styles_link_tag():
-    """Return the full `<link>` tag pointing at the hashed minified stylesheet.
-
-    Falls back to the un-minified source (with a `?v=` cache-buster) when
-    minification/writing failed, so the page is never left without styles.
-    """
-    fn = get_styles_filename()
+def _link_tag_for(stem):
+    """`<link>` tag for the hashed minified ``<stem>.css`` (raw ?v= fallback)."""
+    fn = _filename_for(stem)
     if fn:
         return f'<link rel="stylesheet" href="static/{fn}">'
-    return f'<link rel="stylesheet" href="static/styles.css?v={get_styles_hash()}">'
+    return f'<link rel="stylesheet" href="static/{stem}.css?v={_hash_for(stem)}">'
+
+
+def get_styles_filename():
+    """Current minified filename for styles.css (``styles-<hash>.css``) or None."""
+    return _filename_for('styles')
+
+
+def get_styles_hash():
+    """Content-hash for styles.css (back-compat helper)."""
+    return _hash_for('styles')
+
+
+def get_styles_link_tag():
+    """`<link>` tag pointing at the hashed minified styles.css."""
+    return _link_tag_for('styles')
+
+
+def get_settings_filename():
+    """Current minified filename for settings.css (``settings-<hash>.css``) or None."""
+    return _filename_for('settings')
+
+
+def get_settings_hash():
+    """Content-hash for settings.css."""
+    return _hash_for('settings')
+
+
+def get_settings_link_tag():
+    """`<link>` tag pointing at the hashed minified settings.css."""
+    return _link_tag_for('settings')

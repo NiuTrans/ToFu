@@ -234,6 +234,13 @@ let thinkingEnabled = true,
   imageGenMode = false,
   humanGuidanceEnabled = false,
   searchMode = "multi",
+  /* ★ Two-tier capability dial (chat/studio). The ONE user-facing toolbar
+   * control; setChatMode() expands it into the atomic tool flags above
+   * (mirrors the backend lib/tasks_pkg/chat_mode). 'studio' ⟺ a project is
+   * attached, so the derived state stays truthful. Default 'chat' matches the
+   * everyday all-rounder + DEFAULT_CHAT_MODE on the backend. (The old lean
+   * 'air' tier merged into 'chat'; legacy air/pro normalise forward.) */
+  chatMode = "chat",
   debugVisible = false,
   sidebarSearchQuery = "";
 let serverModel = "aws.claude-opus-4.8";

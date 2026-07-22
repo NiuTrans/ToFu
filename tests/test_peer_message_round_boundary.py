@@ -523,8 +523,14 @@ class PeerRoundBoundaryTest(unittest.TestCase):
         — this test fails on that."""
         import re
 
-        import lib.tasks_pkg.orchestrator as orch
-        src = open(orch.__file__).read()
+        # The orchestrator was split into a package (2026-06): the run-loop code
+        # (peer-inject stash + deferred de-dup + the LLM unpack boundary) lives
+        # in the ``_run`` submodule, NOT the package facade ``__init__.py``.
+        # Reading ``orchestrator.__file__`` (the __init__) found none of the
+        # tokens → this guard silently read the wrong file after the split.
+        # Read the submodule that actually defines run_task's round loop.
+        import lib.tasks_pkg.orchestrator._run as orch_run
+        src = open(orch_run.__file__).read()
         # The deferral seam exists (exact token, not a substring of a rename).
         self.assertTrue(
             re.search(r"_peer_inject_pending\b", src),

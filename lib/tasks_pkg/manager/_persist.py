@@ -233,7 +233,7 @@ def build_result_meta(task):
 # usage sub-keys that are backend-only stream diagnostics (never read by any
 # render path). _wire_fp is the giant (~226 KB/round); the rest are tiny but
 # equally value-free once persisted, so drop the whole diagnostic set.
-_USAGE_TRANSIENT_KEYS = ('_wire_fp', '_wire_static')
+_USAGE_TRANSIENT_KEYS = ('_wire_fp', '_wire_static', '_wire_routing')
 
 
 def _sanitize_usage_for_persist(usage):

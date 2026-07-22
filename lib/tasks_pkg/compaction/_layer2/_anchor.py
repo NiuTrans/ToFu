@@ -8,12 +8,17 @@ the manual ``/compact`` path:
   * ``_find_turn_boundary``           — preservation boundary (turn-aware).
   * ``_coerce_spec_list``             — tolerant list-of-specs coercion.
   * ``_extract_recently_accessed_files`` — recent read/write file paths.
+  * ``_split_cold_rounds`` / ``_apiform_tool_rounds`` / ``_fold_recent_intra_turn``
+    — the SHARED intra-turn fold policy (single-giant-turn overflow).
 """
 
 import json
 
 from lib.log import get_logger
-from lib.tasks_pkg.compaction._constants import _MAX_PRESERVE_TURNS
+from lib.tasks_pkg.compaction._constants import (
+    _INTRA_TURN_HOT_ROUNDS,
+    _MAX_PRESERVE_TURNS,
+)
 from lib.tasks_pkg.compaction._tokens import _estimate_msg_tokens
 
 logger = get_logger(__name__)
@@ -119,6 +124,108 @@ def _find_turn_boundary(
         preserved_turn_count += 1
 
     return boundary
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Intra-turn folding — the SHARED policy for the single-giant-turn overflow.
+#
+#  A single agentic turn (one user request answered with dozens of tool
+#  rounds) can fill the whole window on its own.  The turn-based boundary
+#  (`_find_turn_boundary` / `_raw_turn_boundary`) ALWAYS preserves the current
+#  turn whole, so neither the automatic L2 path nor the manual /compact path
+#  could shrink it by turn-dropping alone.  The fix is to fold the COLD tool
+#  rounds INSIDE that one preserved turn: keep the most-recent `hot_rounds`
+#  verbatim and summarize + drop the older ones.
+#
+#  Two index spaces, ONE policy:
+#    * manual path  — folds RAW ``toolRounds`` dicts inside one assistant row
+#      (`_manual._collect_reserve_folds`).
+#    * automatic path — folds expanded api-form (assistant(tool_calls)+tool)
+#      round SPANS inside the preserved region (`_fold_recent_intra_turn`).
+#  Both call ``_split_cold_rounds`` so the keep-vs-fold cut can never drift
+#  between the two compaction paths.
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _split_cold_rounds(rounds: list, hot_rounds: int = _INTRA_TURN_HOT_ROUNDS):
+    """Split a round sequence into ``(cold, hot)`` at the intra-turn fold line.
+
+    ``rounds`` is any ordered sequence of round descriptors (RAW ``toolRounds``
+    dicts for the manual path, api-form ``(start, end)`` spans for the automatic
+    path — the policy is agnostic to the element type).  Keeps the last
+    ``hot_rounds`` as HOT (verbatim) and returns everything older as COLD (to
+    summarize + drop).  Returns ``([], list(rounds))`` when there is nothing to
+    fold (``len(rounds) <= hot_rounds``), so callers can cheaply no-op.
+
+    HARD CONSTRAINT (both paths): the fold unit is a WHOLE round — a
+    self-contained ``toolCallId``/``toolContent`` (raw) or a complete
+    assistant(tool_calls)+tool span (api-form).  Dropping whole cold rounds can
+    therefore never orphan a ``tool`` message nor split a tool_call/result pair.
+    """
+    hot_rounds = max(1, int(hot_rounds))
+    if len(rounds) <= hot_rounds:
+        return [], list(rounds)
+    return list(rounds[:-hot_rounds]), list(rounds[-hot_rounds:])
+
+
+def _apiform_tool_rounds(messages: list) -> list:
+    """Group api-form message indices into tool-call ROUNDS.
+
+    A *round* = an ``assistant`` message carrying ``tool_calls`` plus every
+    immediately-following ``tool`` result message.  Returns a list of
+    ``(start, end)`` half-open index spans, one per round, in order.  Messages
+    that are not part of any tool-call round (a leading ``user`` message, plain
+    ``assistant`` prose/thinking, a ``system`` row) belong to NO span and are
+    left untouched by the fold — so the leading user turn and the model's
+    reasoning survive.
+    """
+    rounds: list = []
+    i = 0
+    n = len(messages)
+    while i < n:
+        m = messages[i]
+        if isinstance(m, dict) and m.get('role') == 'assistant' and m.get('tool_calls'):
+            j = i + 1
+            while j < n and isinstance(messages[j], dict) \
+                    and messages[j].get('role') == 'tool':
+                j += 1
+            rounds.append((i, j))
+            i = j
+        else:
+            i += 1
+    return rounds
+
+
+def _fold_recent_intra_turn(recent_messages: list,
+                            hot_rounds: int = _INTRA_TURN_HOT_ROUNDS):
+    """Fold COLD tool-call rounds out of an api-form PRESERVED region.
+
+    Used by the automatic L2 path (``execute_compact_tool``) so an in-flight
+    giant turn preserved whole by ``_find_turn_boundary`` can still be shrunk.
+    Keeps the leading ``user`` message(s), any plain assistant prose, and the
+    most-recent ``hot_rounds`` tool-call rounds VERBATIM; the older (cold) round
+    SPANS are removed as WHOLE units (no orphan tool — see ``_split_cold_rounds``).
+
+    Returns ``(kept_messages, cold_round_messages)``:
+      * ``kept_messages``       — the folded preserved region (hot tail intact).
+      * ``cold_round_messages`` — the removed cold-round messages, IN ORDER, to
+        feed the summarizer (they are NEVER re-inserted verbatim).
+
+    A no-op (``recent_messages`` returned unchanged, ``[]``) when the region has
+    ``<= hot_rounds`` tool-call rounds — so a normal multi-turn chat near the
+    window is byte-identical to the pre-fold behaviour.
+    """
+    rounds = _apiform_tool_rounds(recent_messages)
+    cold_spans, _hot_spans = _split_cold_rounds(rounds, hot_rounds)
+    if not cold_spans:
+        return list(recent_messages), []
+
+    cold_idx: set[int] = set()
+    for (s, e) in cold_spans:
+        cold_idx.update(range(s, e))
+
+    kept = [m for k, m in enumerate(recent_messages) if k not in cold_idx]
+    cold_msgs = [recent_messages[k] for k in sorted(cold_idx)]
+    return kept, cold_msgs
 
 
 def _coerce_spec_list(value) -> list:

@@ -483,6 +483,13 @@ var _restartDone = false;
 // declares success when health returns a DIFFERENT bootId — so the OLD process
 // still answering during the drain window is never mistaken for a done restart.
 var _restartPreBootId = null;
+// The server's codeFingerprint.digest captured BEFORE the restart. After the
+// re-exec, the fresh process recomputes it from the source it actually loaded
+// (HEAD + uncommitted tracked edits). Comparing pre vs post lets us tell the
+// operator not just "a new process answered" (bootId) but whether that process
+// loaded DIFFERENT source — i.e. whether their edits are actually live. null
+// when the server can't produce one (non-git deploy) → degrade to bootId only.
+var _restartPreFingerprint = null;
 // True from the moment a restart is kicked off until it succeeds or times
 // out. Single source of truth that the dialog-render paths consult so they
 // never clobber the live restart progress card (e.g. re-opening the dialog
@@ -548,7 +555,7 @@ function _restartAnimate() {
 }
 
 /** Snap to 100% "Back online · vX", then reload the page. */
-function _restartSucceed(version) {
+function _restartSucceed(version, info) {
   if (_restartDone) return;
   _restartDone = true;
   _restartActive = false;
@@ -566,6 +573,18 @@ function _restartSucceed(version) {
   if (phaseEl) {
     phaseEl.textContent = t('update.phase.online') +
       (version ? ' · v' + version : '');
+  }
+  // Surface whether the fresh process actually loaded DIFFERENT source. A
+  // 'unchanged' verdict is the useful safety signal: the restart succeeded
+  // (new process) yet loaded byte-identical source — a heads-up that the
+  // operator's edits did NOT reach the running server (e.g. edited a different
+  // checkout, or the diff was reverted). 'changed' confirms edits are live.
+  const verdict = _restartCodeVerdict(info);
+  if (verdict === 'unchanged') {
+    showToast('⚠️', t('update.codeUnchangedTitle'), t('update.codeUnchangedHint'), 8000);
+    if (typeof debugLog === 'function') debugLog('[Update] restart: new process but source unchanged (edits not applied?)', 'warning');
+  } else if (verdict === 'changed') {
+    if (typeof debugLog === 'function') debugLog('[Update] restart: new source loaded (edits are live)', 'success');
   }
   // Brief pause so the user sees the completed state before the reload.
   setTimeout(function () { window.location.reload(); }, 750);
@@ -609,10 +628,14 @@ async function restartServer(opts) {
   // success rule then accepts any bootId-bearing health (still better than the
   // old 'any ok' rule) — see _restartCheckHealth.
   _restartPreBootId = null;
+  _restartPreFingerprint = null;
   try {
     const pre = await Api.health.info();
     if (pre && pre.bootId) _restartPreBootId = pre.bootId;
-  } catch (e) { _restartPreBootId = null; }
+    if (pre && pre.codeFingerprint && pre.codeFingerprint.digest) {
+      _restartPreFingerprint = pre.codeFingerprint.digest;
+    }
+  } catch (e) { _restartPreBootId = null; _restartPreFingerprint = null; }
 
   // Our own conversation id — the backend excludes it when counting in-flight
   // tasks, so the running-task count reflects only OTHER conversations a
@@ -715,11 +738,24 @@ async function _restartCheckHealth() {
   // Preferred, robust path: we know the old bootId AND the server reports one.
   if (_restartPreBootId && info.bootId) {
     if (info.bootId === _restartPreBootId) return;  // still the OLD process — keep waiting
-    _restartSucceed(info.version || '');
+    _restartSucceed(info.version || '', info);
     return;
   }
   // Degraded path (no pre-id captured, or old build without bootId): accept ok.
-  _restartSucceed(info.version || '');
+  _restartSucceed(info.version || '', info);
+}
+
+/** Classify whether the restarted process loaded DIFFERENT source than the
+ *  pre-restart one, using the code fingerprint. Returns:
+ *    'changed'   — post digest differs from pre → the operator's edits are live
+ *    'unchanged' — identical digest → a new process, but same source as before
+ *    null        — indeterminate (no pre/post digest; non-git deploy or old build)
+ *  Only a confident 'changed'/'unchanged' is surfaced; null stays silent so we
+ *  never make a claim the fingerprint can't support. */
+function _restartCodeVerdict(info) {
+  const post = info && info.codeFingerprint && info.codeFingerprint.digest;
+  if (!_restartPreFingerprint || !post) return null;
+  return (post === _restartPreFingerprint) ? 'unchanged' : 'changed';
 }
 
 function closeUpdateModal() {

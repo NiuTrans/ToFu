@@ -169,7 +169,7 @@ def poll_decision(task: dict[str, Any]) -> tuple[bool, str, int]:
         logger.warning('[Proactive:%s] Failed to parse poll response: %s — raw: %.500s',
                        task['id'][:8], e, content)
         should_act = False
-        reason = f'Parse error: {content[:100]}'
+        reason = f'Parse error: {(content or "")[:100]}'
 
     return should_act, reason, tokens_used
 

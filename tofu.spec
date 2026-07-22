@@ -77,6 +77,9 @@ hidden_imports += [
     'mcp',
     'playwright', 'playwright.sync_api', 'playwright.async_api',
     'tkinter', 'tkinter.ttk',
+    # Desktop-control agent (lib/desktop_agent): local machine automation.
+    # pyautogui pulls in platform-specific backends dynamically.
+    'pyautogui', 'pyperclip', 'pygetwindow', 'pyscreeze', 'pytweening', 'mouseinfo',
 ]
 
 # ── Data files to bundle ──

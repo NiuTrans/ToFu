@@ -499,7 +499,15 @@ function _renderStreamRoundProse(groupEl, round) {
       body.insertBefore(thinkEl, groupEl);
     }
     const _txtEl = thinkEl.querySelector(".thinking-text");
-    if (_txtEl && thinkEl._lastThink !== _think) {
+    /* ★ SELF-HEAL (shadow-key cache-invalidation fix): the skip key
+     * `_lastThink` is a shadow JS property, but the source of truth is the DOM
+     * text node. A transient clobber (a competing writer / rAF-vs-poll race)
+     * can dirty `_txtEl.textContent` WITHOUT updating `_lastThink`, so the
+     * `_lastThink === _think` skip would leave the dirty text pinned until a
+     * full rebuild (page reload → renderSegmentTimelineHTML). Re-sync when the
+     * DOM drifted from what we last wrote. Cheap: a single textContent string
+     * compare, NO re-render on the hot path (only writes when actually stale). */
+    if (_txtEl && (thinkEl._lastThink !== _think || _txtEl.textContent !== _think)) {
       thinkEl._lastThink = _think;
       _txtEl.textContent = _think;
       const _lbl = thinkEl.querySelector(".thinking-label");
@@ -523,10 +531,16 @@ function _renderStreamRoundProse(groupEl, round) {
       narrEl.setAttribute("data-seg-round", gkey);
       body.insertBefore(narrEl, groupEl);
     }
-    if (narrEl._lastNarr !== _narr) {
+    /* ★ SELF-HEAL: `_lastNarr` is a shadow key; the DOM is the truth. If the
+     * rendered innerHTML was clobbered externally without `_lastNarr` moving,
+     * the skip would pin the dirty markup until reload. Compare the current
+     * innerHTML against what we last wrote (cheap string compare — the
+     * expensive renderMarkdown only runs when genuinely stale). */
+    if (narrEl._lastNarr !== _narr || narrEl.innerHTML !== narrEl._lastNarrHtml) {
       narrEl._lastNarr = _narr;
       try { narrEl.innerHTML = renderMarkdown(_narr); }
       catch (_e) { narrEl.textContent = _narr; }
+      narrEl._lastNarrHtml = narrEl.innerHTML;
     }
     /* ★ PER-ROUND bilingual gate: hide this round's English ONLY when its
      * Chinese twin (.stream-seg-narration, painted by the incremental

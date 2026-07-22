@@ -383,11 +383,22 @@ def get_context_for_prompt(base_path=None, conv_id=None):
                                journal_path, e)
 
     if journal_exists:
+        # Rotate the oldest entries into .tofu/journal-archive/ when the live
+        # file grows large, so it stays bounded on disk. Only when the primary
+        # is writable (never write into a read-only root). Best-effort — a
+        # failure is logged inside and never raised into prompt assembly.
+        if not primary_is_ro:
+            try:
+                from lib.project_mod.journal import maybe_rotate
+                maybe_rotate(journal_path, path)
+            except Exception as e:
+                logger.debug('[Context] journal rotation skipped for %s: %s',
+                             journal_path, e)
         try:
-            with open(journal_path, encoding='utf-8', errors='replace') as f:
-                journal_content = f.read(32_000)
-        except OSError as e:
-            logger.warning('[Context] Failed to read journal file %s: %s',
+            from lib.project_mod.journal import read_for_injection
+            journal_content = read_for_injection(journal_path)
+        except Exception as e:
+            logger.warning('[Context] Failed to build journal injection for %s: %s',
                            journal_path, e)
             journal_content = ''
 

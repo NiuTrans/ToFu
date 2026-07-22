@@ -41,31 +41,13 @@ for _var in ('OMP_NUM_THREADS', 'ORT_NUM_THREADS',
 # In cgroup-restricted containers most of those CPUs are inaccessible
 # → a wall of EINVAL errors on stderr. Env vars don't help because
 # onnxruntime only reads intra_op_num_threads from the SessionOptions
-# object, not from the environment.  Monkeypatching the constructor
-# to inject an explicit thread count is the only reliable fix.
-try:
-    import onnxruntime as _ort
-
-    _OrigSession = _ort.InferenceSession
-
-    class _PatchedSession(_OrigSession):
-        def __init__(self, *args, **kwargs):
-            if 'sess_options' not in kwargs or kwargs['sess_options'] is None:
-                _so = _ort.SessionOptions()
-                _so.intra_op_num_threads = _thread_count
-                _so.inter_op_num_threads = _thread_count
-                kwargs['sess_options'] = _so
-            else:
-                _so = kwargs['sess_options']
-                if _so.intra_op_num_threads == 0:
-                    _so.intra_op_num_threads = _thread_count
-                if _so.inter_op_num_threads == 0:
-                    _so.inter_op_num_threads = _thread_count
-            super().__init__(*args, **kwargs)
-
-    _ort.InferenceSession = _PatchedSession
-except ImportError:
-    pass
+# object, not from the environment.  The single source of truth for the
+# patch is lib/onnx_thread_guard.py (server.py installs it at the top of
+# boot — before the critical-import chain can create the first session).
+# Delegating here keeps worker processes and direct PDF-tool callers
+# covered even when they never went through server boot. Idempotent.
+from lib.onnx_thread_guard import install_onnx_thread_guard as _install_onnx_guard
+_install_onnx_guard()
 
 __all__ = ['MAX_PDF_BYTES', 'HAS_PYMUPDF4LLM', 'HAS_PYMUPDF', 'HAS_DOCLING',
            'PYMUPDF_LOCK', 'PYMUPDF4LLM_UNAVAILABLE_REASON']

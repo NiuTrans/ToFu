@@ -129,7 +129,12 @@ async function loadEarlierMessages(convId) {
   if (typeof conv._firstLoadedSeq !== 'number') return 0;
   conv._loadingEarlier = true;
 
-  const container = document.getElementById('chatInner');
+  /* Measure on the ACTUAL scroll box. #chatContainer is the overflow-y:auto
+   *   element (styles.css: .chat-container{overflow-y:auto}); #chatInner is its
+   *   non-scrolling content child (scrollTop always 0, scrollHeight==client).
+   *   Measuring/re-pinning on #chatInner was a no-op → viewport jumped to top
+   *   on every earlier-page prepend. Match _getChatContainer/isNearBottom. */
+  const container = document.getElementById('chatContainer');
   const prevHeight = container ? container.scrollHeight : 0;
   const prevTop = container ? container.scrollTop : 0;
 
@@ -180,7 +185,10 @@ async function loadEarlierMessages(convId) {
 let _scrollUpWired = false;
 function wireConvWindowScrollLoader() {
   if (_scrollUpWired) return;
-  const container = document.getElementById('chatInner');
+  /* Listen on the actual scroll box (#chatContainer), not its non-scrolling
+   *   #chatInner child — the latter never fires a scroll event, so the
+   *   scroll-to-top prefetch trigger was dead. */
+  const container = document.getElementById('chatContainer');
   if (!container) return;
   _scrollUpWired = true;
   const THRESHOLD = 120;  // px from the top that triggers a prefetch

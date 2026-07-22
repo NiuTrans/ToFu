@@ -43,6 +43,13 @@ _CRITICAL_COLUMNS = {
     'proactive_poll_log': (
         'tier', 'predicate_matched', 'llm_agreed',
     ),
+    # paper_library.folder_id is named directly in _PAPER_LIB_COLUMNS (the
+    # GET /api/v1/paper/library SELECT), so a version-current DB missing it
+    # throws UndefinedColumn on every bookshelf load until re-migrated. The
+    # guarded ALTER lives in _chat.py but only runs on a full DDL pass.
+    'paper_library': (
+        'folder_id',
+    ),
 }
 
 

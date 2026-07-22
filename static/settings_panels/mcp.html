@@ -1,0 +1,29 @@
+        <div class="settings-tab-panel" id="settingsTab_mcp">
+          <!-- Header: title · tools badge · installed badge · connect-all · search -->
+          <div class="mcp-store-header">
+            <div class="mcp-store-header-title">
+              <span class="settings-section-title">Apps</span>
+              <span class="stg-badge" id="mcpToolCount" style="font-size:10px;">0 tools</span>
+              <span class="stg-badge" id="mcpInstalledCount" style="font-size:10px;display:none;">0 installed</span>
+            </div>
+            <div class="mcp-store-header-spacer"></div>
+            <div class="skills-scope-tabs" id="mcpScopeTabs">
+              <button class="skills-scope-tab active" data-scope="all" onclick="_mcpSetScope('all')" data-i18n="mcp.scopeAll">全部</button>
+              <button class="skills-scope-tab" data-scope="installed" onclick="_mcpSetScope('installed')" data-i18n="mcp.scopeInstalled">已安装</button>
+              <button class="skills-scope-tab" data-scope="available" onclick="_mcpSetScope('available')" data-i18n="mcp.scopeAvailable">未安装</button>
+            </div>
+            <button class="btn btn-secondary btn-xs" id="mcpAddCustomBtn" onclick="_mcpOpenAddModal()" data-i18n="mcp.addCustom">+ 添加</button>
+            <button class="btn btn-primary btn-xs mcp-connect-all-btn" id="mcpConnectAllBtn" onclick="_mcpConnectAll()" style="display:none;" data-i18n="settings.connectAll">全部连接</button>
+            <input type="text" class="mcp-search" id="mcpSearch" placeholder="搜索 Apps…" data-i18n-placeholder="settings.searchApps"
+                   oninput="_mcpFilterCatalog(this.value)">
+          </div>
+
+          <!-- Category filter pills -->
+          <div class="mcp-category-bar" id="mcpCategoryBar"></div>
+
+          <!-- Catalog grid -->
+          <div id="mcpCatalogGrid" class="mcp-catalog-grid">
+            <p class="stg-loading" data-i18n="settings.loading">正在加载…</p>
+          </div>
+
+        </div>

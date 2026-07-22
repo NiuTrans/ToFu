@@ -229,6 +229,17 @@ class TestSwarmSnapshotPersist(unittest.TestCase):
         self.assertEqual(agents['bb22']['modifiedFiles'], 2)
         self.assertEqual(agents['bb22']['role'], 'coder')
 
+        # The per-agent tool timeline must survive the reload path — without
+        # it the recovered card renders no tools/timeline (the reported bug).
+        self.assertEqual(agents['bb22']['tools'], ['write_file', 'apply_diff'])
+        self.assertEqual([c['toolName'] for c in agents['bb22']['toolCalls']],
+                         ['write_file', 'apply_diff'])
+        self.assertTrue(all(c['status'] == 'done'
+                            for c in agents['bb22']['toolCalls']))
+        # An agent that used no tools carries empty lists, not missing keys.
+        self.assertEqual(agents['aa11']['tools'], [])
+        self.assertEqual(agents['aa11']['toolCalls'], [])
+
     def test_failed_agent_status_recorded(self):
         """A failed sub-agent is snapshotted as 'failed' with its error — not a
         fake 'done'."""
@@ -462,6 +473,37 @@ class TestSnapshotMonotonicAndScoping(unittest.TestCase):
             m._persist_agent_snapshot(force=True)    # settle — always writes
             self.assertEqual(calls['n'], 2,
                              'forced settle write did not bypass the throttle')
+
+    def test_snapshot_tool_timeline_dedup_shape_and_cap(self):
+        """_snapshot_tool_timeline rebuilds the panel's tool list + per-call
+        timeline from tool_log: unique names (order preserved), row shape
+        {toolName,argsBrief,status:'done'}, capped at the last 30 rows."""
+        from lib.swarm.master import _SNAPSHOT_TOOLCALLS_CAP, _snapshot_tool_timeline
+        # Empty / falsy input → two empty lists.
+        self.assertEqual(_snapshot_tool_timeline(None), ([], []))
+        self.assertEqual(_snapshot_tool_timeline([]), ([], []))
+
+        log = [
+            {'round': 1, 'tool': 'read_files', 'args_brief': 'a.py'},
+            {'round': 1, 'tool': 'grep_search', 'args_brief': 'foo'},
+            {'round': 2, 'tool': 'read_files', 'args_brief': 'b.py'},  # dup name
+            {'round': 2, 'tool': None},                                 # skipped
+            'not-a-dict',                                               # skipped
+        ]
+        tools, calls = _snapshot_tool_timeline(log)
+        self.assertEqual(tools, ['read_files', 'grep_search'])
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(calls[0], {'toolName': 'read_files',
+                                    'argsBrief': 'a.py', 'status': 'done'})
+        self.assertEqual(calls[2]['argsBrief'], 'b.py')
+
+        # Cap: keep only the last _SNAPSHOT_TOOLCALLS_CAP rows.
+        big = [{'round': i, 'tool': 'read_files', 'args_brief': str(i)}
+               for i in range(_SNAPSHOT_TOOLCALLS_CAP + 15)]
+        _t, big_calls = _snapshot_tool_timeline(big)
+        self.assertEqual(len(big_calls), _SNAPSHOT_TOOLCALLS_CAP)
+        self.assertEqual(big_calls[-1]['argsBrief'],
+                         str(_SNAPSHOT_TOOLCALLS_CAP + 14))  # tail preserved
 
     def test_filter_snapshot_scopes_to_wave(self):
         from lib.swarm.snapshot import filter_snapshot

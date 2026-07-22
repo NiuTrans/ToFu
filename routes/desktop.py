@@ -144,7 +144,10 @@ def execute_desktop_tool(fn_name, fn_args):
 
     if not is_desktop_agent_connected():
         logger.warning('[Desktop] tool %s called but agent not connected', fn_name)
-        return 'Error: Desktop Agent not connected. Start it with: python lib/desktop_agent.py --server http://your-server:5000'
+        return ('Error: Desktop Agent not connected. In the Tofu desktop app, '
+                'enable "Computer Control" from the tray menu — or run the agent '
+                'manually: python -m lib.desktop_agent --server http://your-server:5000 '
+                '--allow-gui')
 
     # Map LLM tool names to agent command types
     cmd_type = fn_name  # e.g. "desktop_list_files"

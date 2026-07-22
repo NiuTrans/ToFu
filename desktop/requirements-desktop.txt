@@ -3,3 +3,11 @@ pyinstaller>=6.0
 pystray>=0.19
 Pillow>=10.0
 psycopg2-binary>=2.9
+
+# Desktop-control agent runtime deps (lib/desktop_agent) — screenshot, mouse /
+# keyboard automation, clipboard, process info. Without these the local-machine
+# control tools (desktop_gui_action / desktop_screenshot / desktop_clipboard)
+# ImportError at load; the frozen app then silently ships without them.
+pyautogui>=0.9.54
+pyperclip>=1.8
+psutil>=5.9

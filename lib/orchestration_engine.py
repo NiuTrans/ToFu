@@ -374,6 +374,18 @@ class FlowExecutor:
         # Deliverables snapshot of the most recent producer (non-verifier)
         # role turn — fed to the verifier so it can make the endpoint call.
         self._last_producer_snapshot: dict = {}
+        # ALL producer snapshots recorded during the CURRENT loop iteration.
+        # A linear loop body has exactly one producer per iteration, so this
+        # holds one entry (== _last_producer_snapshot). A parallel fan-out
+        # inside the body runs N producers CONCURRENTLY, each of which would
+        # otherwise clobber the single _last_producer_snapshot slot — leaving
+        # the loop's zero-deliverable / VU-churn decisions reading a
+        # nondeterministic branch's counts. The loop reads the AGGREGATE of
+        # this list instead (see _aggregate_iter_producers), so the decision
+        # is 'did THIS iteration produce any state-changing work' regardless
+        # of fan-out. Reset at the top of every iteration. Guarded by _lock
+        # because parallel branches append concurrently.
+        self._iter_producers: list[dict] = []
         # Verifier feedback history (per active loop) for stuck-detection.
         self._feedback_history: list[str] = []
         # ── VU progress ledger (per active loop, the diminishing-returns axis) ──
@@ -393,6 +405,13 @@ class FlowExecutor:
         # as an INCOMPLETE stop instead of silently reporting 'completed'.
         # A loop that exits on a clean verifier STOP records 'stop'.
         self._loop_exits: list[dict] = []
+        # Any role/subflow node that finished with status='failed' (a runner
+        # crash is caught in _run_role and folded into a failed result, so it
+        # never propagates as an exception). Without recording it the walk
+        # proceeds and the flow would report a dishonest 'completed'. run()'s
+        # terminal-honesty block consults this so a failed node surfaces as
+        # ok=False / stop_reason='node_failed'.
+        self._node_failures: list[dict] = []
         # Declared deliverables (artifact nodes) encountered during the walk.
         self._artifacts: list[dict] = []
 
@@ -456,12 +475,21 @@ class FlowExecutor:
         stop_reason = 'completed'
         incomplete = None
         if status == 'completed':
-            for ex in self._loop_exits:
-                if is_incomplete_stop(ex.get('reason') or ''):
-                    incomplete = ex
-                    break
-            if incomplete is not None:
-                stop_reason = incomplete['reason']
+            # A node that finished with status='failed' means the flow did NOT
+            # fully execute, even though the walk reached the stop node.
+            # Surface it first so the run is reported honestly rather than as
+            # a clean success (terminal-honesty parity with the loop path).
+            if self._node_failures:
+                incomplete = {'node_id': self._node_failures[0]['node_id'],
+                              'reason': 'node_failed'}
+                stop_reason = 'node_failed'
+            else:
+                for ex in self._loop_exits:
+                    if is_incomplete_stop(ex.get('reason') or ''):
+                        incomplete = ex
+                        break
+                if incomplete is not None:
+                    stop_reason = incomplete['reason']
         elif status == 'aborted':
             stop_reason = 'aborted'
         elif status == 'failed':
@@ -623,6 +651,11 @@ class FlowExecutor:
         self._record(nid, role, out, st, res.get('error') or '',
                      _elapsed, sc_count=sc_count,
                      explore_count=explore_count)
+        if st == 'failed':
+            with self._lock:
+                self._node_failures.append(
+                    {'node_id': nid, 'role': role,
+                     'error': str(res.get('error') or 'failed')})
         # Durable per-node trace: the RESOLVED brief (rendered role prompt),
         # the bounded effective input, and the full bounded output — for the
         # canvas/inspector overlay. render_role_brief is pure (same text the
@@ -659,11 +692,13 @@ class FlowExecutor:
             # "runner didn't report tool info" — the guard only fires on the
             # former, so mock runners without tool data never trip it.
             with self._lock:
-                self._last_producer_snapshot = {
+                _prod_snap = {
                     'node_id': nid, 'role': role, 'sc_count': sc_count,
                     'explore_count': explore_count, 'names': sc_names,
                     'reported': reported,
                 }
+                self._last_producer_snapshot = _prod_snap
+                self._iter_producers.append(_prod_snap)
 
         self._emit({'type': 'step_complete', 'node_id': nid, 'role': role,
                     'status': st, 'preview': out[:200], 'output': out,
@@ -849,15 +884,62 @@ class FlowExecutor:
                 explore += 1
         return len(sc), explore, sc, reported
 
+    def _aggregate_iter_producers(self) -> dict:
+        """Fold this iteration's producer snapshots into one deterministic dict.
+
+        A linear loop body records exactly one producer, so the aggregate is
+        that producer (byte-identical to reading _last_producer_snapshot). A
+        parallel fan-out inside the body records N producers concurrently; the
+        aggregate answers "did THIS iteration produce any state-changing work"
+        deterministically instead of depending on which branch happened to
+        write the single slot last:
+
+          * sc_count / explore_count — SUM across branches (total work done)
+          * names                    — concatenation across branches
+          * reported                 — True if ANY branch reported tool info
+
+        Returns ``{}`` when no producer ran this iteration (e.g. a
+        verifier-only body), matching the old empty-snapshot semantics.
+        """
+        with self._lock:
+            prods = list(self._iter_producers)
+        if not prods:
+            return {}
+        if len(prods) == 1:
+            return dict(prods[0])
+        names: list[str] = []
+        sc = explore = 0
+        reported = False
+        for p in prods:
+            sc += int(p.get('sc_count') or 0)
+            explore += int(p.get('explore_count') or 0)
+            names.extend(p.get('names') or [])
+            reported = reported or bool(p.get('reported'))
+        return {'node_id': ','.join(str(p.get('node_id') or '') for p in prods),
+                'role': 'parallel', 'sc_count': sc, 'explore_count': explore,
+                'names': names, 'reported': reported}
+
     def _append_deliverables_snapshot(self, context: str) -> str:
         """Append the producer's latest-turn deliverables block for a verifier.
 
         Mirrors endpoint's _format_deliverables_snapshot: tells the verifier
         how many state-changing vs exploratory calls the producer just made,
         with the endpoint pre-verdict hint when the producer did zero work.
+
+        Inside a loop iteration a parallel fan-out records N producers that
+        race on the single ``_last_producer_snapshot`` slot, so the block is
+        built from the deterministic per-iteration AGGREGATE — matching the
+        zero-deliverable / VU-churn guards, which already read the aggregate.
+        Outside a loop (``_cur_iteration == 0``) ``_iter_producers`` is a
+        cross-node accumulation, not a per-turn set, so the single slot is
+        kept there (byte-identical to the legacy behavior for linear flows).
         """
         with self._lock:
-            snap = dict(self._last_producer_snapshot)
+            in_loop = self._cur_iteration > 0
+        snap = self._aggregate_iter_producers() if in_loop else None
+        if not snap:
+            with self._lock:
+                snap = dict(self._last_producer_snapshot)
         if not snap or not snap.get('reported'):
             return context
         sc = snap.get('sc_count', 0)
@@ -1026,6 +1108,23 @@ class FlowExecutor:
         logger.info('[FlowEngine] parallel %s → %d branches, barrier=%s',
                     pid, len(branches), barrier)
 
+        # A parallel fan-out running INSIDE a loop body: the per-iteration
+        # DELIVERABLE snapshot is now aggregated across branches (see
+        # _aggregate_iter_producers / _iter_producers), so the zero-deliverable
+        # + VU-churn decisions are deterministic regardless of fan-out. What
+        # remains order-dependent is the FEEDBACK/DIRECTIVE injection channel
+        # (_pending_feedback / _pending_directive) — single-valued and consumed
+        # once by the next producer. The composer's recommended pattern keeps
+        # parallel branches as one-shot fresh-context agents (fan-out → barrier
+        # → synthesize) that do NOT emit verifier verdicts into the loop, so
+        # this is latent for normal flows; log at debug when it CAN apply.
+        if len(branches) > 1 and self._cur_iteration > 0:
+            logger.debug('[FlowEngine] parallel %s runs %d concurrent branches '
+                         'inside a loop (iteration=%d): deliverable counts are '
+                         'aggregated; feedback/directive injection remains '
+                         'order-dependent for verdict-feeding producers',
+                         pid, len(branches), self._cur_iteration)
+
         outputs: list[str] = []
         # Each branch is a linear chain from the branch entry up to (not
         # including) the barrier. Runs concurrently.
@@ -1044,8 +1143,21 @@ class FlowExecutor:
                     except _AbortSignal:
                         raise
                     except Exception as e:
+                        # A runner crash is normally caught inside _run_role
+                        # and folded into a failed node result (recorded in
+                        # _node_failures). This except only fires for a rarer
+                        # structural crash in the branch walk itself; record
+                        # it the same way so terminal honesty still applies.
+                        bid = futs[fut]
                         logger.error('[FlowEngine] parallel branch %s failed: %s',
-                                     futs[fut], e, exc_info=True)
+                                     bid, e, exc_info=True)
+                        with self._lock:
+                            self._node_failures.append(
+                                {'node_id': bid, 'role': None,
+                                 'error': f'{type(e).__name__}: {e}'})
+                        self._emit({'type': 'error', 'node_id': bid,
+                                    'error': {'detail': f'parallel branch failed: {e}'}})
+                        outputs.append(f'[branch {bid} FAILED: {type(e).__name__}: {e}]')
 
         merged = context
         for o in outputs:
@@ -1096,11 +1208,19 @@ class FlowExecutor:
             completed_iterations = i + 1
             self._emit({'type': 'loop_iteration', 'node_id': lid,
                         'iteration': i + 1, 'max': cap})
+            # Fresh producer accumulator for this iteration so a parallel
+            # fan-out in the body aggregates deterministically instead of
+            # racing on the single _last_producer_snapshot slot.
+            with self._lock:
+                self._iter_producers = []
             # Run the body chain, stopping when it loops back to the loop node.
             context = self._walk(body_entry, context, stop_at=lid)
 
             # ── Zero-deliverable guard (endpoint-faithful) ──
-            snap = self._last_producer_snapshot
+            # Aggregate across ALL producers this iteration (1 for a linear
+            # body; N for a parallel fan-out) so the guard reflects the whole
+            # iteration's state-changing work, not a nondeterministic branch.
+            snap = self._aggregate_iter_producers()
             if snap and snap.get('reported') and snap.get('sc_count', 0) == 0:
                 zero_streak += 1
             else:
@@ -1143,7 +1263,7 @@ class FlowExecutor:
                     if _delta < 0:
                         _delta = 0
                     _cum = resolved
-                snap = self._last_producer_snapshot or {}
+                snap = self._aggregate_iter_producers()
                 _targets = sorted({str(n) for n in (snap.get('names') or []) if n})
                 self._vu_progress.append({'resolved_delta': _delta,
                                           'cum_resolved': _cum,

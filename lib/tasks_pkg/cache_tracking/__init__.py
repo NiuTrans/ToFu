@@ -115,6 +115,7 @@ from lib.tasks_pkg.cache_tracking._detect import (  # noqa: E402,F401
     _MIN_NO_REUSE_TOKENS,
     _classify_break,
     _resolve_break_cause,
+    classify_verdict,
     detect_cache_break,
 )
 
@@ -170,7 +171,8 @@ __all__ = [
     '_diff_prefix_fields',
     # detection
     'EDITABLE_TAIL_COUNT', '_MIN_CACHE_MISS_TOKENS', '_MIN_NO_REUSE_TOKENS',
-    '_classify_break', '_resolve_break_cause', 'detect_cache_break',
+    '_classify_break', '_resolve_break_cause', 'classify_verdict',
+    'detect_cache_break',
     # roi / stats / notify
     '_emit_l2_roi', 'record_l2_compaction', 'get_session_cache_stats',
     'log_round_cache_stats', 'notify_compaction', 'notify_history_rewrite',

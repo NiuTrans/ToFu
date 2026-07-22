@@ -202,6 +202,7 @@ def compose(requirement: str, *, current: dict | None = None,
                 temperature=0,
                 capability='text',
                 log_prefix='[Composer]',
+                timeout=90,
             )
     except Exception as e:
         logger.error('[Composer] LLM call failed: %s', e, exc_info=True)

@@ -571,10 +571,14 @@ async function mpApplyFolders() {
   const nExtras = extras.length;
   const nRO = readOnly.length;
   debugLog(`Project set: ${primary}` + (nExtras ? ` + ${nExtras} extra folder(s)` : '') + (nRO ? ` (${nRO} read-only)` : ''), "success");
-  /* ★ Turning Project mode ON auto-enables Swarm + Autopilot (project-oriented
-   * execution modes), unless the user already enabled them or has Endpoint/Flow
-   * active. See _autoEnableProjectModes above. */
-  _autoEnableProjectModes();
+  /* ★ Attaching a project IS the Studio tier. Promote the capability dial so
+   * the UI + derived flags stay truthful. NOTE (owner-directed 2026-07-19):
+   * the tier is DECOUPLED from execution strategy — attaching a project no
+   * longer auto-enables Swarm / Autopilot (those are orthogonal B-axis modes
+   * the user turns on explicitly). _autoEnableProjectModes is retired from
+   * this path. */
+  if (typeof onProjectAttached === 'function') onProjectAttached();
+  else if (typeof _saveConvToolState === 'function') _saveConvToolState();
 
   // ── Reconcile with the server in the background ──
   try {
@@ -620,6 +624,9 @@ async function clearProject() {
   };
   _updateProjectUI();
   closeProjectModal();
+  /* ★ A project-less chat is never Studio — fall back to Pro (unless the user
+   * is deliberately in Air). Keeps the dial truthful. */
+  if (typeof onProjectCleared === 'function') onProjectCleared();
   debugLog("Project cleared", "success");
 }
 
@@ -786,11 +793,23 @@ async function undoConvModifications(msgIdx) {
           (data.failed ? ` (${data.failed} failed)` : ''),
           4000);
       }
+      // ★ Stash the round's file list + the pin needed to redo it, THEN clear
+      //   the live counter fields. Undo deletes the round's server-side record,
+      //   so redo must resupply taskId + the conversation's projectPath (the
+      //   route never falls back to the globally-active UI project). Keeping
+      //   modifiedFiles/modifiedFileList cleared keeps sidebar badges and the
+      //   render fingerprint honest — the "undone → Redo" bar renders off the
+      //   stashed _undoneFileList instead.
+      if (msg._taskId) {
+        msg._undoneFileList = Array.isArray(msg.modifiedFileList) ? msg.modifiedFileList : [];
+        msg._undoneTaskId = msg._taskId;
+        msg._undoneProjectPath = _getConvProjectPath(conv) || '';
+      }
       // Clear the modifiedFiles flag on this message
       msg.modifiedFiles = 0;
       msg.modifiedFileList = null;
       saveConversations(conv.id);
-      // Re-render the message to remove the undo button
+      // Re-render the message to swap the undo button for a redo button
       const el = document.getElementById(`msg-${msgIdx}`);
       if (el) el.outerHTML = renderMessage(msg, msgIdx);
       _lastRenderedFingerprint = _convRenderFingerprint(conv);
@@ -853,6 +872,49 @@ async function undoAllModifications() {
   }
 }
 
+async function redoConvModifications(msgIdx) {
+  if (!projectState.active) return;
+  const conv = getActiveConv();
+  if (!conv) return;
+  const msg = conv.messages[msgIdx];
+  // Only meaningful on a round that was undone (carries the stash below).
+  if (!msg || msg.role !== "assistant" || !msg._undoneTaskId) return;
+  try {
+    // ★ Redo requires the round's taskId AND an explicit projectPath pin: undo
+    //   deleted the round's record, so the route resolves the project from the
+    //   pin, never the globally-active UI project (mirrors the undo contract;
+    //   covered by test_project_undo_redo_concurrent_resolution.py).
+    const body = { taskId: msg._undoneTaskId };
+    if (msg._undoneProjectPath) body.projectPath = msg._undoneProjectPath;
+    const resp = await Api.project.redo(body);
+    const data = resp ? await resp.json().catch(() => ({})) : {};
+    if (resp && resp.ok && data.ok) {
+      if (typeof showToast === 'function') {
+        showToast('↪️', 'Redo Complete',
+          `Re-applied ${data.redone} file change${data.redone !== 1 ? 's' : ''}`,
+          4000);
+      }
+      // Restore the live counter fields from the stash, clear the undone marks.
+      const restored = Array.isArray(msg._undoneFileList) ? msg._undoneFileList : [];
+      msg.modifiedFileList = restored;
+      msg.modifiedFiles = restored.length;
+      delete msg._undoneFileList;
+      delete msg._undoneTaskId;
+      delete msg._undoneProjectPath;
+      saveConversations(conv.id);
+      // Re-render the message to swap the redo button back for undo.
+      const el = document.getElementById(`msg-${msgIdx}`);
+      if (el) el.outerHTML = renderMessage(msg, msgIdx);
+      _lastRenderedFingerprint = _convRenderFingerprint(conv);
+      rescanProject();
+    } else {
+      debugLog("Redo failed: " + (data.error || "unknown error"), "warn");
+    }
+  } catch (e) {
+    debugLog("Redo failed: " + e.message, "warn");
+  }
+}
+
 
 function _applyProjectData(data) {
   projectState = {
@@ -905,16 +967,19 @@ function _updateProjectUI() {
   const foldersEl = document.getElementById("projectBarFolders");
 
   if (!projectState.active) {
-    bar.style.display = "none";
-    bar.classList.remove("scanning");
+    if (bar) { bar.style.display = "none"; bar.classList.remove("scanning"); }
     badge?.classList.remove("visible");
-    toggle.classList.remove("active");
+    /* #projectToggle was retired when the toolbar collapsed into the
+     * Air/Pro/Studio dial — the Studio segment IS the project affordance now.
+     * Guard it so a project-less newChat/clear never NPEs here (the crash that
+     * looked like "all CSS broke" — the throw aborted the render pipeline). */
+    toggle?.classList.remove("active");
     return;
   }
 
-  bar.style.display = "flex";
+  if (bar) bar.style.display = "flex";
   badge?.classList.add("visible");
-  toggle.classList.add("active");
+  toggle?.classList.add("active");
 
   // ── Render folder badges ──
   // ★ BUG FIX: Build badge list directly from projectState instead of

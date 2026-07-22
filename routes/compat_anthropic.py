@@ -187,7 +187,13 @@ async def messages():
           tags=['compat:anthropic'], scope='chat')
 def count_tokens():
     body = parse_body()
-    msgs, _cfg, _opts = translate_anthropic_request(body)
+    try:
+        msgs, _cfg, _opts = translate_anthropic_request(body)
+    except ValueError as e:
+        # Mirror the /v1/messages handler: a malformed body is a 400, not an
+        # uncaught 500 (translate_anthropic_request raises ValueError on bad
+        # input, and this call was the one place it wasn't guarded).
+        return api_bad_request(str(e))
     # Reuse Tofu's token counter if available.
     n = 0
     try:

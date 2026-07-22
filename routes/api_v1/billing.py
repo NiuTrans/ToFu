@@ -211,8 +211,11 @@ async def get_ledger_route():
         return api_forbidden(str(e))
     if not user_id:
         return api_ok(entries=[], total=0)
-    limit = max(1, min(int(request.args.get('limit') or 100), 500))
-    offset = max(0, int(request.args.get('offset') or 0))
+    try:
+        limit = max(1, min(int(request.args.get('limit') or 100), 500))
+        offset = max(0, int(request.args.get('offset') or 0))
+    except (ValueError, TypeError):
+        return api_bad_request('limit/offset must be integers', field='limit')
     kinds_raw = request.args.get('kinds') or ''
     kinds = [k.strip() for k in kinds_raw.split(',') if k.strip()] or None
     entries = list_entries(user_id, limit=limit, offset=offset, kinds=kinds)
@@ -416,8 +419,11 @@ async def mint_codes_route():
 async def list_codes_route():
     batch = (request.args.get('batch') or '').strip()
     status = (request.args.get('status') or 'all').strip().lower()
-    limit = max(1, min(int(request.args.get('limit') or 100), 1000))
-    offset = max(0, int(request.args.get('offset') or 0))
+    try:
+        limit = max(1, min(int(request.args.get('limit') or 100), 1000))
+        offset = max(0, int(request.args.get('offset') or 0))
+    except (ValueError, TypeError):
+        return api_bad_request('limit/offset must be integers', field='limit')
     where = []
     params: list = []
     if batch:
@@ -566,8 +572,11 @@ async def list_payments_route():
     except PermissionError as e:
         return api_forbidden(str(e))
     from lib.billing.payments import list_payments
-    limit = max(1, min(int(request.args.get('limit') or 50), 500))
-    offset = max(0, int(request.args.get('offset') or 0))
+    try:
+        limit = max(1, min(int(request.args.get('limit') or 50), 500))
+        offset = max(0, int(request.args.get('offset') or 0))
+    except (ValueError, TypeError):
+        return api_bad_request('limit/offset must be integers', field='limit')
     status = (request.args.get('status') or '').strip()
     rows = list_payments(user_id=user_id, status=status,
                           limit=limit, offset=offset)

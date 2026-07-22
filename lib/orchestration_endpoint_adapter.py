@@ -38,6 +38,7 @@ Either may be ``None`` (tests drive ``on_event`` directly and read
 from __future__ import annotations
 
 import time
+import uuid
 from collections.abc import Callable
 
 from lib.log import get_logger
@@ -73,9 +74,16 @@ class EndpointEventAdapter:
     """
 
     def __init__(self, emit: Callable | None = None,
-                 on_stream: Callable | None = None):
+                 on_stream: Callable | None = None,
+                 *, vu_run_id: str = '', vu_flow: bool = False):
         self._emit = emit
         self._on_stream = on_stream
+        # Autopilot (virtual_user) context: a run id to anchor VU turns to (so
+        # they group as one autopilot run, parity with the live path) and a
+        # flag marking this flow as a VU graph (so a synthetic guard row is
+        # stamped as a VU turn, not a critic review).
+        self._vu_run_id = vu_run_id or ''
+        self._vu_flow = bool(vu_flow)
         self.messages: list[dict] = []
         self._iteration = 0           # worker iteration counter
         self._planner_iteration = 0   # planner (re)plan counter
@@ -209,20 +217,24 @@ class EndpointEventAdapter:
                           'thinking': thinking})
         elif emits == 'user':
             # A "user-side" turn — a critic verdict (endpoint) OR a virtual
-            # user reply (autopilot). Both render on the user side and carry
-            # the review markers the frontend keys off.
+            # user reply (autopilot). They render on the user side but carry
+            # DIFFERENT markers, and the difference is LOAD-BEARING for the
+            # context builder: a critic review is display-only (skipped by
+            # _transform_messages — its feedback reaches the worker via the
+            # engine's _pending_feedback, not the message history), whereas a
+            # VU reply is a REAL user turn that MUST survive into context or
+            # the next worker is starved of the "keep going / here's the
+            # checklist" instruction. Stamp them apart (_mark_user_side).
             next_phase = self._derive_next_phase(out)
             self._next_phase = next_phase
-            self._push({
+            msg = {
                 'role': 'user',
                 'content': out,
                 'thinking': thinking,
                 'timestamp': _now(),
-                '_isEndpointReview': True,
-                '_epIteration': self._iteration,
-                '_epApproved': next_phase == 'stop',
-                '_epNextPhase': next_phase,
-            })
+            }
+            self._mark_user_side(msg, role, next_phase=next_phase)
+            self._push(msg)
             # Finalize the critic/VU bubble live.
             self._stream({'type': 'endpoint_critic_msg',
                           'iteration': self._iteration, 'content': out,
@@ -241,6 +253,31 @@ class EndpointEventAdapter:
                 '_epStateChangingCount': ev.get('state_changing', 0),
             })
 
+    def _mark_user_side(self, msg: dict, role: str, *, next_phase: str,
+                        synthetic: bool = False) -> None:
+        """Stamp a user-side turn with the CORRECT lane markers.
+
+        ``virtual_user`` (autopilot) → ``_isVirtualUser`` (+ a routable
+        ``_msgId`` / optional ``_autopilotRunId``), mirroring the live
+        autopilot path (lib/tasks_pkg/autopilot.py). Crucially these rows
+        carry NO endpoint marker, so ``_transform_messages`` KEEPS them and
+        the VU instruction reaches the model. ``critic`` / ``reviewer``
+        (endpoint) → ``_isEndpointReview`` display-only markers (skipped by
+        the context builder). A synthetic guard row follows the flow's kind
+        (``self._vu_flow``).
+        """
+        is_vu = role == 'virtual_user' or (synthetic and self._vu_flow)
+        if is_vu:
+            msg['_isVirtualUser'] = True
+            msg['_msgId'] = uuid.uuid4().hex
+            if self._vu_run_id:
+                msg['_autopilotRunId'] = self._vu_run_id
+        else:
+            msg['_isEndpointReview'] = True
+            msg['_epIteration'] = self._iteration
+            msg['_epApproved'] = next_phase == 'stop'
+            msg['_epNextPhase'] = next_phase
+
     @staticmethod
     def _derive_emits(role: str) -> str:
         """Fallback message-axis derivation for events lacking ``emits``.
@@ -258,16 +295,14 @@ class EndpointEventAdapter:
         # Open + finalize a synthetic critic bubble live (no deltas).
         self._stream({'type': 'endpoint_iteration',
                       'iteration': self._iteration, 'phase': 'reviewing'})
-        self._push({
+        guard_msg = {
             'role': 'user',
             'content': content,
             'timestamp': _now(),
-            '_isEndpointReview': True,
-            '_epIteration': self._iteration,
-            '_epApproved': False,
-            '_epNextPhase': 'worker',
             '_isSyntheticCritic': True,
-        })
+        }
+        self._mark_user_side(guard_msg, '', next_phase='worker', synthetic=True)
+        self._push(guard_msg)
         self._stream({'type': 'endpoint_critic_msg',
                       'iteration': self._iteration, 'content': content,
                       'next_phase': 'worker', 'synthetic': True})

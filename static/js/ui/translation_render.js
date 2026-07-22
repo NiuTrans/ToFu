@@ -114,7 +114,10 @@ function _patchTranslateLoadingDom(loadingEl, msg) {
       loadingEl.classList.add('has-preview');
     }
     const mdEl = previewEl.querySelector('.md-content');
-    if (mdEl && previewEl._lastPartial !== msg._translatePartial) {
+    /* ★ SELF-HEAL: `_lastPartial` is a shadow key; re-sync if mdEl's rendered
+     * content was clobbered without it moving (cheap innerHTML compare). */
+    if (mdEl && (previewEl._lastPartial !== msg._translatePartial
+                 || mdEl.innerHTML !== previewEl._lastPartialHtml)) {
       previewEl._lastPartial = msg._translatePartial;
       const nearBottom = (previewEl.scrollHeight - previewEl.scrollTop
                           - previewEl.clientHeight) < 32;
@@ -127,6 +130,7 @@ function _patchTranslateLoadingDom(loadingEl, msg) {
       } catch (e) { html = null; }
       if (html != null) mdEl.innerHTML = html;
       else mdEl.textContent = msg._translatePartial;
+      previewEl._lastPartialHtml = mdEl.innerHTML;
       if (nearBottom) previewEl.scrollTop = previewEl.scrollHeight;
     }
   } else if (previewEl) {
@@ -172,7 +176,12 @@ function _renderStreamingTranslatePreview(convId, msgId, partial, byRound) {
         narr.setAttribute('data-seg-round', gkey);
         panelBody.insertBefore(narr, group);
       }
-      if (narr._lastZh !== zh) {
+      /* ★ SELF-HEAL: `_lastZh` is a shadow key; the DOM is the source of truth.
+       * If this node's rendered content was clobbered externally without
+       * `_lastZh` moving, the equality skip would pin the dirty content until a
+       * full rebuild (reload). Re-sync when the DOM drifted from what we wrote
+       * (cheap innerHTML string compare — renderMarkdown only re-runs on drift). */
+      if (narr._lastZh !== zh || narr.innerHTML !== narr._lastZhHtml) {
         narr._lastZh = zh;
         let h = null;
         try {
@@ -181,6 +190,7 @@ function _renderStreamingTranslatePreview(convId, msgId, partial, byRound) {
           h = fn ? fn(strip(zh)) : null;
         } catch (e) { h = null; }
         if (h != null) narr.innerHTML = h; else narr.textContent = zh;
+        narr._lastZhHtml = narr.innerHTML;
       }
       /* ★ PER-ROUND English hide: now that THIS round's Chinese twin exists,
        * hide its English sibling (avoid a bilingual double). Gated per round —
@@ -215,7 +225,8 @@ function _renderStreamingTranslatePreview(convId, msgId, partial, byRound) {
     blobText = _rem.join('\n\n');
   }
   const mdEl = zone.querySelector('.md-content');
-  if (mdEl && zone._lastPartial !== blobText) {
+  /* ★ SELF-HEAL: `_lastPartial` shadow key; re-sync on external clobber. */
+  if (mdEl && (zone._lastPartial !== blobText || mdEl.innerHTML !== zone._lastPartialHtml)) {
     zone._lastPartial = blobText;
     if (!blobText) {
       mdEl.innerHTML = '';
@@ -229,6 +240,7 @@ function _renderStreamingTranslatePreview(convId, msgId, partial, byRound) {
       if (html != null) mdEl.innerHTML = html;
       else mdEl.textContent = blobText;
     }
+    zone._lastPartialHtml = mdEl.innerHTML;
   }
   body.setAttribute('data-xlate', '1');
   const _contentZone = body.querySelector('[data-zone="content"]');
@@ -259,7 +271,10 @@ function _applyPartialByRoundToSettled(convId, idx, byRound) {
     const gkey = 'L' + rk;
     const narr = el.querySelector(`.seg-narration[data-seg-round="${_esc(gkey)}"]`);
     if (!narr) continue;
-    if (narr._lastZh === zh) { painted++; continue; }
+    /* ★ SELF-HEAL: skip only when BOTH the shadow key matches AND the DOM still
+     * holds what we last wrote — a clobber that left `_lastZh` stale must
+     * re-sync, not stay pinned until reload (cheap innerHTML compare). */
+    if (narr._lastZh === zh && narr.innerHTML === narr._lastZhHtml) { painted++; continue; }
     narr._lastZh = zh;
     let h = null;
     try {
@@ -268,6 +283,7 @@ function _applyPartialByRoundToSettled(convId, idx, byRound) {
       h = fn ? fn(strip(zh)) : null;
     } catch (e) { h = null; }
     if (h != null) narr.innerHTML = h; else narr.textContent = zh;
+    narr._lastZhHtml = narr.innerHTML;
     painted++;
   }
   return painted > 0;

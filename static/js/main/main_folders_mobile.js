@@ -542,10 +542,16 @@ function closeMobileSheet() {
 }
 
 function updateMobileSheet() {
-  /* Sync each mobile sheet item's .active class with the desktop toggle state */
+  /* ★ Capability-mode rows (Chat/Studio) mirror the segmented dial — a
+   * radio-style highlight, NOT a toggle. Reflect the live chatMode global. */
+  const _mode = (typeof chatMode !== 'undefined' ? chatMode : 'chat');
+  document.querySelectorAll('.mobile-mode-item').forEach(el => {
+    el.classList.toggle('active', el.dataset.mode === _mode);
+  });
+
+  /* Sync each mobile sheet item's .active class with the desktop toggle state.
+   * codeExec / memory are gone — the capability mode owns them now. */
   const map = {
-    mobileCodeExec:    "codeExecToggle",
-    mobileMemory:      "memoryToggle",
     mobileTranslate:   "translateToggle",
     mobileBrowser:     "browserToggle",
     mobileImageGen:    "imageGenToggle",

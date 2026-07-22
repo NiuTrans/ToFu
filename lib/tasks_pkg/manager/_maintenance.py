@@ -61,6 +61,11 @@ def cleanup_old_tasks():
     # ★ Stuck-task backstop (rides the same tick). cleanup_stale only evicts
     #   FINISHED tasks, so a purely-wedged running task (never superseded) would
     #   otherwise live forever with no terminal state. See reap_stuck_running_tasks.
+    try:
+        reap_stuck_running_tasks()
+    except Exception as e:
+        logger.warning('[Manager] reap_stuck_running_tasks failed: %s', e, exc_info=True)
+
 
 def _malloc_trim() -> bool:
     """Ask glibc to return free heap arenas to the OS. Returns True on success.
@@ -128,12 +133,6 @@ def shed_memory_under_pressure() -> dict:
     logger.info('[Manager] shed_memory_under_pressure: evicted=%d gc=%d trim=%s',
                 evicted, collected, trimmed)
     return {'evicted': evicted, 'gc_collected': collected, 'trimmed': trimmed}
-
-
-    try:
-        reap_stuck_running_tasks()
-    except Exception as e:
-        logger.warning('[Manager] reap_stuck_running_tasks failed: %s', e, exc_info=True)
 
 
 # Age (seconds) after which a running task that has produced ZERO output

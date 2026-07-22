@@ -275,6 +275,72 @@ class WalletTest(_BillingTestBase):
 
 # ── route smoke ──────────────────────────────────────────────────────
 
+class AlipayUserIdExtractionTest(unittest.TestCase):
+    """The alipay notify fallback recovers the user_id from out_trade_no when
+    passback_params is missing. out_trade_no is `tofu_<user_id>_<ms>` and the
+    user_id ITSELF contains underscores (`usr_<hex>`), so the naive
+    split('_')[1] yielded the literal 'usr' and credited a bogus account.
+    """
+
+    def _extract(self, out_trade_no):
+        # Mirror the fixed fallback in alipay.handle_alipay_notify.
+        if out_trade_no.startswith('tofu_'):
+            mid = out_trade_no[len('tofu_'):]
+            cut = mid.rfind('_')
+            return mid[:cut] if cut > 0 else ''
+        return ''
+
+    def test_recovers_full_usr_id_with_underscore(self):
+        # Real id shape from lib.ids.short_id('usr_') → usr_<hex>.
+        uid = 'usr_ab12cd34ef'
+        otn = f'tofu_{uid}_1784690000000'
+        self.assertEqual(self._extract(otn), uid)
+
+    def test_naive_split_would_return_wrong_id(self):
+        # NEUTER: the OLD code path (split('_')[1]) returns 'usr', proving the
+        # bug was real and the rfind-based fix is load-bearing.
+        uid = 'usr_ab12cd34ef'
+        otn = f'tofu_{uid}_1784690000000'
+        self.assertEqual(otn.split('_')[1], 'usr')       # the old (wrong) result
+        self.assertNotEqual(otn.split('_')[1], uid)
+        self.assertEqual(self._extract(otn), uid)         # the fixed result
+
+    def test_real_handler_credits_correct_user_via_out_trade_no_fallback(self):
+        # End-to-end against the REAL handle_alipay_notify: with NO
+        # passback_params it must fall back to out_trade_no and credit the
+        # FULL usr_<hex> id — proving the source fix (not a test-local copy)
+        # is load-bearing. Stub signature-verify + capture record_payment.
+        from unittest.mock import patch
+        import lib.billing.payments.alipay as ap
+        uid = 'usr_deadbeef99'
+        otn = f'tofu_{uid}_1784690000000'
+        captured = {}
+
+        class _Rec:
+            id = 'pay_test_1'
+
+        def _rec(*, user_id, **kw):
+            captured['user_id'] = user_id
+            return _Rec()
+
+        form = {
+            'sign': 'x', 'trade_status': 'TRADE_SUCCESS',
+            'out_trade_no': otn, 'total_amount': '9.99',
+            # NB: no passback_params → forces the out_trade_no fallback path.
+        }
+        with patch.object(ap, '_alipay_settings',
+                          lambda: {'alipay_public_key_pem': 'stub-pub'}), \
+             patch.object(ap, '_verify_rsa2', lambda *a: True), \
+             patch.object(ap._common, 'record_payment', _rec), \
+             patch.object(ap._common, 'mark_payment_settled',
+                          lambda *a, **k: None):
+            status, body = ap.handle_alipay_notify(form)
+        self.assertEqual(status, 200)
+        self.assertEqual(captured.get('user_id'), uid,
+                         'notify fallback must credit the FULL usr_<hex> id, '
+                         'not the truncated "usr"')
+
+
 class BillingRouteSmokeTest(unittest.TestCase):
     """Smoke tests for the billing routes — registration + URL map.
 

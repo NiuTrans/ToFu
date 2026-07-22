@@ -1,30 +1,41 @@
-"""jsdom regression: picking "自动驾驶" from the Mode (flow) dropdown produces a
-toolbar + info-rail + config-payload state that is BYTE-IDENTICAL to flipping
-the standalone Autopilot toggle.
+"""jsdom regression: picking "自动驾驶" from the 编排流程 dropdown selects a REAL
+engine flow (``activeFlow='builtin:autopilot'``) — SYMMETRIC with
+``builtin:endpoint`` — and is deliberately DIFFERENT from flipping the "模式"
+Autopilot toggle.
 
 WHY
 ---
-The backend routes ``flowBuiltin='autopilot'`` to the LIVE standalone autopilot
-path (``resolve_chat_flow_entry`` Option C) unless ``TOFU_AUTOPILOT_VIA_FLOW`` is
-set — so the DEFAULT dropdown experience is the plain autopilot loop, not an
-engine flow. But the frontend historically set ``activeFlow='builtin:autopilot'``
-(a distinct state): flow badge instead of the autopilot badge, the info-rail
-mode chip coming from the flow branch, and the misleading "runs on the
-orchestration engine" hint. Same behavior, different-looking UI — the exact
-"performs oddly" the objective is about.
+The dropdown and the toggle intentionally drive two DIFFERENT implementations:
 
-The fix makes ``setActiveFlow('builtin:autopilot')`` an ALIAS for
-``toggleAutopilot()`` (single writer — the flow selector delegates, it does not
-grow a parallel state). This suite drives the REAL shipped ``setActiveFlow`` /
-``toggleAutopilot`` / ``_applyFlowUI`` / ``_applyAutopilotUI`` /
-``_buildToolbarOverrides`` under jsdom and asserts the resulting state equals
-the standalone-toggle state on every axis that reaches the backend or the eye:
-``autopilotEnabled`` true, ``activeFlow`` empty, autopilot badge visible + flow
-badge hidden, and the ``_buildToolbarOverrides`` payload identical.
+  * 模式 → 自动驾驶 (toggle)  → live standalone autopilot loop
+    (``lib/tasks_pkg/autopilot.py``); this is the day-to-day path.
+  * 编排流程 → 自动驾驶 (dropdown) → the FlowExecutor engine autopilot
+    (worker⇄VU graph via ``run_flow_via_chat``); this is how engine behavior is
+    made OBSERVABLE in the frontend for debugging.
 
-NC is a genuine byte-revert: it rewrites the alias branch back to the old
-``_applyFlowUI('builtin:autopilot')`` behavior in a temp copy and proves the
-parity assertions FAIL against it — so a regression can't slip back.
+An earlier iteration aliased the dropdown selection to the toggle (setting
+``autopilotEnabled`` and clearing ``activeFlow``), and the backend Option-C
+rewrite forced ``flowBuiltin='autopilot'`` back to the live path. That made the
+two builtins ASYMMETRIC — ``builtin:endpoint`` ran on the engine but
+``builtin:autopilot`` did not — and hid engine bugs behind the live loop. That
+alias + normalization has been removed; ``builtin:autopilot`` is now a plain
+flow selection exactly like ``builtin:endpoint``.
+
+This suite drives the REAL shipped ``setActiveFlow`` / ``toggleAutopilot`` /
+``_applyFlowUI`` / ``_applyAutopilotUI`` / ``_buildToolbarOverrides`` under jsdom
+and asserts:
+  * the dropdown sets ``activeFlow='builtin:autopilot'``, autopilot OFF, flow
+    badge visible, autopilot badge hidden, and the ``_buildToolbarOverrides``
+    payload carries ``activeFlow='builtin:autopilot'`` with ``autopilot=false``;
+  * ``builtin:autopilot`` and ``builtin:endpoint`` behave IDENTICALLY (both set
+    activeFlow to their own token, neither flips autopilotEnabled) — the
+    symmetry the fix restores;
+  * the standalone toggle still works and is DISTINCT (autopilot ON,
+    activeFlow empty).
+
+NC is a genuine byte-revert: it re-introduces the old alias branch in
+``setActiveFlow`` in a temp copy and proves the "dropdown is a real flow"
+assertions FAIL against it — so the regression can't slip back.
 
 Skips cleanly when node + jsdom aren't installed.
 """
@@ -43,20 +54,21 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
 SRC = os.path.join(ROOT, 'static', 'js', 'main', 'main_toolbar_ui.js')
 
-# The two convergence choke points the fix introduced. The NC byte-reverts
-# BOTH — either alone would still converge builtin:autopilot to the toggle, so
-# proving load-bearing requires removing both.
-_APPLYFLOWUI_BLOCK = (
-    "  if ((flowVal || '') === 'builtin:autopilot') {\n"
-    "    activeFlow = '';\n"
-    "    if (typeof _applyAutopilotUI === 'function') _applyAutopilotUI(true);\n"
-    "    if (typeof _applyEndpointUI === 'function') _applyEndpointUI(false);\n"
-    "    flowVal = '';\n"
-    "  }\n"
+# The marker at the top of the shipped setActiveFlow — it must go STRAIGHT into
+# the normal flow path (no builtin:autopilot alias branch). The NC re-inserts a
+# legacy alias branch right after it to prove the assertions bite.
+_SETACTIVEFLOW_HEAD = (
+    "function setActiveFlow(flowVal) {\n"
 )
-_SETACTIVEFLOW_MARKER = (
+# The legacy alias branch the NC re-introduces (mirrors the removed code): route
+# builtin:autopilot to the toggle instead of treating it as a flow.
+_NC_ALIAS_BRANCH = (
     "  if ((flowVal || '') === 'builtin:autopilot') {\n"
-    "    _applyFlowUI('');"
+    "    _applyFlowUI('');\n"
+    "    if (!autopilotEnabled) { toggleAutopilot(); } else { _saveConvToolState(); }\n"
+    "    if (typeof updateSubmenuCounts === 'function') updateSubmenuCounts();\n"
+    "    return;\n"
+    "  }\n"
 )
 
 
@@ -141,9 +153,13 @@ function _snapshot() {
   };
 }
 
-// ── Path A: the standalone toggle (the reference state) ──
-autopilotEnabled = false; endpointEnabled = false; activeFlow = '';
-_applyAutopilotUI(false); _applyEndpointUI(false); _applyFlowUI('');
+function _reset() {
+  autopilotEnabled = false; endpointEnabled = false; activeFlow = '';
+  _applyAutopilotUI(false); _applyEndpointUI(false); _applyFlowUI('');
+}
+
+// ── Path A: the standalone toggle (live autopilot loop — DISTINCT) ──
+_reset();
 toggleAutopilot();
 const A = _snapshot();
 check('toggle_sets_autopilot', A.autopilotEnabled === true);
@@ -153,38 +169,37 @@ check('toggle_flow_badge_hidden', A.flowBadge === 'none');
 check('toggle_ov_autopilot_true', A.ovAutopilot === true);
 check('toggle_ov_activeflow_empty', A.ovActiveFlow === '');
 
-// ── Path B: pick builtin:autopilot from the Mode menu (must equal A) ──
-autopilotEnabled = false; endpointEnabled = false; activeFlow = '';
-_applyAutopilotUI(false); _applyEndpointUI(false); _applyFlowUI('');
+// ── Path B: pick builtin:autopilot from the 编排流程 dropdown (a REAL flow) ──
+_reset();
 setActiveFlow('builtin:autopilot');
 const B = _snapshot();
-check('dropdown_sets_autopilot', B.autopilotEnabled === true);
-check('dropdown_no_flow_selection', B.activeFlow === '');
-check('dropdown_ap_badge_visible', B.apBadge === '');
-check('dropdown_flow_badge_hidden', B.flowBadge === 'none');
+check('dropdown_selects_flow', B.activeFlow === 'builtin:autopilot');
+check('dropdown_autopilot_off', B.autopilotEnabled === false);
+check('dropdown_flow_badge_visible', B.flowBadge === '');
+check('dropdown_ap_badge_hidden', B.apBadge === 'none');
+check('dropdown_ov_activeflow_flow', B.ovActiveFlow === 'builtin:autopilot');
+check('dropdown_ov_autopilot_false', B.ovAutopilot === false);
 
-// ── The biting parity assertion: B == A on every axis ──
-check('parity_autopilotEnabled', B.autopilotEnabled === A.autopilotEnabled);
-check('parity_activeFlow', B.activeFlow === A.activeFlow);
-check('parity_apBadge', B.apBadge === A.apBadge);
-check('parity_flowBadge', B.flowBadge === A.flowBadge);
-check('parity_ov_autopilot', B.ovAutopilot === A.ovAutopilot && B.ovAutopilot === true);
-check('parity_ov_activeFlow', B.ovActiveFlow === A.ovActiveFlow && B.ovActiveFlow === '');
-check('parity_ov_endpoint', B.ovEndpoint === A.ovEndpoint);
+// ── The biting assertion: the dropdown is DISTINCT from the toggle ──
+check('dropdown_distinct_from_toggle',
+  B.activeFlow !== A.activeFlow && B.autopilotEnabled !== A.autopilotEnabled);
 
-// ── A real custom/endpoint flow is UNAFFECTED (still sets activeFlow) ──
-autopilotEnabled = false; endpointEnabled = false; activeFlow = '';
-_applyAutopilotUI(false); _applyEndpointUI(false); _applyFlowUI('');
+// ── Symmetry: builtin:endpoint behaves identically to builtin:autopilot ──
+_reset();
 setActiveFlow('builtin:endpoint');
-check('endpoint_flow_still_sets_activeFlow', activeFlow === 'builtin:endpoint');
-check('endpoint_flow_no_autopilot', autopilotEnabled === false);
+const E = _snapshot();
+check('endpoint_selects_flow', E.activeFlow === 'builtin:endpoint');
+check('endpoint_autopilot_off', E.autopilotEnabled === false);
+check('symmetry_flow_badge', E.flowBadge === B.flowBadge);
+check('symmetry_ap_off', E.autopilotEnabled === B.autopilotEnabled);
+check('symmetry_ov_autopilot', E.ovAutopilot === B.ovAutopilot && B.ovAutopilot === false);
 
 console.log(out.join('\n'));
 """
 
 
 def _run(toolbar_src: str) -> str:
-    harness = os.path.join(HERE, '_builtin_autopilot_parity_harness.js')
+    harness = os.path.join(HERE, '_builtin_autopilot_flow_route_harness.js')
     with open(harness, 'w') as f:
         f.write(_HARNESS)
     try:
@@ -210,26 +225,17 @@ def _status(output: str, name: str) -> str | None:
 
 
 def _build_reverted_copy() -> str:
-    """Byte-revert BOTH convergence choke points so builtin:autopilot falls
-    through to the OLD behavior (activeFlow='builtin:autopilot', autopilot OFF):
-      1. the setActiveFlow alias branch (new selections), and
-      2. the _applyFlowUI normalization (restore/reload/sync).
-    Returns the temp file path."""
+    """Byte-revert: re-introduce the legacy alias branch in setActiveFlow so
+    builtin:autopilot is routed to the toggle again (autopilotEnabled ON,
+    activeFlow cleared). Returns the temp file path."""
     src = open(SRC, encoding='utf-8').read()
-    # (1) Remove the setActiveFlow alias branch (from its marker to `return;\n  }`).
-    assert _SETACTIVEFLOW_MARKER in src, (
-        'setActiveFlow alias marker not found — did the source change? Update this test.')
-    start = src.index(_SETACTIVEFLOW_MARKER)
-    end_tok = 'return;\n  }'
-    end = src.index(end_tok, start) + len(end_tok)
-    reverted = src[:start] + '/* alias branch removed by NC */' + src[end:]
-    # (2) Remove the _applyFlowUI normalization block (exact literal).
-    assert _APPLYFLOWUI_BLOCK in reverted, (
-        '_applyFlowUI normalization block not found — did the source change? Update this test.')
-    reverted = reverted.replace(_APPLYFLOWUI_BLOCK, '  /* normalization removed by NC */\n')
-    assert reverted != src and _SETACTIVEFLOW_MARKER not in reverted \
-        and _APPLYFLOWUI_BLOCK not in reverted
-    dst = os.path.join(HERE, '_main_toolbar_ui_reverted.js')
+    assert _SETACTIVEFLOW_HEAD in src, (
+        'setActiveFlow head not found — did the source change? Update this test.')
+    # Insert the legacy alias branch immediately after the function head.
+    idx = src.index(_SETACTIVEFLOW_HEAD) + len(_SETACTIVEFLOW_HEAD)
+    reverted = src[:idx] + _NC_ALIAS_BRANCH + src[idx:]
+    assert reverted != src and _NC_ALIAS_BRANCH in reverted
+    dst = os.path.join(HERE, '_main_toolbar_ui_nc_alias.js')
     with open(dst, 'w', encoding='utf-8') as f:
         f.write(reverted)
     return dst
@@ -237,22 +243,22 @@ def _build_reverted_copy() -> str:
 
 @pytest.mark.skipif(not _node_deps_available(),
                     reason='node + jsdom dev-deps not installed (run npm install)')
-def test_builtin_autopilot_matches_standalone_toggle():
-    """Selecting 自动驾驶 from the Mode menu yields state byte-identical to the
-    Autopilot toggle; a real endpoint/custom flow is unaffected."""
+def test_builtin_autopilot_is_a_real_engine_flow():
+    """Selecting 自动驾驶 from the 编排流程 dropdown yields a real flow selection
+    (activeFlow='builtin:autopilot', autopilot OFF), symmetric with endpoint
+    and distinct from the standalone toggle."""
     output = _run(SRC)
     fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
-    assert not fails, 'parity failures:\n' + output
-    # 7 parity_* + several toggle_/dropdown_ + endpoint_ = plenty
-    assert output.count('PASS') >= 20, f'expected >=20 PASS, got:\n{output}'
+    assert not fails, 'flow-route failures:\n' + output
+    assert output.count('PASS') >= 18, f'expected >=18 PASS, got:\n{output}'
 
 
 @pytest.mark.skipif(not _node_deps_available(),
                     reason='node + jsdom dev-deps not installed (run npm install)')
-def test_nc_byte_revert_breaks_parity():
-    """Byte-revert NC: removing the alias branch makes the dropdown set
-    activeFlow='builtin:autopilot' with autopilot OFF again — the parity
-    assertions MUST fail. Proves the alias is load-bearing."""
+def test_nc_alias_revert_breaks_flow_route():
+    """Byte-revert NC: re-inserting the legacy alias branch makes the dropdown
+    set autopilotEnabled + clear activeFlow again — the "real flow" assertions
+    MUST fail. Proves the removal is load-bearing."""
     dst = _build_reverted_copy()
     try:
         output = _run(dst)
@@ -264,11 +270,11 @@ def test_nc_byte_revert_breaks_parity():
     # The toggle reference path still passes (unchanged)…
     assert _status(output, 'toggle_sets_autopilot') == 'PASS', \
         'NC harness precondition broke:\n' + output
-    # …but the dropdown no longer aliases → parity breaks.
-    assert _status(output, 'parity_autopilotEnabled') == 'FAIL', \
-        'NC should leave autopilot OFF for the dropdown:\n' + output
-    assert _status(output, 'parity_activeFlow') == 'FAIL', \
-        'NC should set activeFlow=builtin:autopilot:\n' + output
-    # The endpoint-flow control case is untouched by the revert.
-    assert _status(output, 'endpoint_flow_still_sets_activeFlow') == 'PASS', \
+    # …but the dropdown aliases to the toggle again → real-flow route breaks.
+    assert _status(output, 'dropdown_selects_flow') == 'FAIL', \
+        'NC should route builtin:autopilot to the toggle (no activeFlow):\n' + output
+    assert _status(output, 'dropdown_autopilot_off') == 'FAIL', \
+        'NC should flip autopilotEnabled ON for the dropdown:\n' + output
+    # The endpoint-flow symmetry case is untouched by the alias revert.
+    assert _status(output, 'endpoint_selects_flow') == 'PASS', \
         'endpoint flow must remain a real flow selection:\n' + output

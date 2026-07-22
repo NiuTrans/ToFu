@@ -416,7 +416,22 @@ def _tool_display_inspect_image(fn_name, fn_args, tc_id, tc_args_str):
     rotate / grid) so the tool-call line reads e.g. ``diagram.png — crop, 2×``.
     """
     path = fn_args.get('path', '?') or '?'
-    base = os.path.basename(path) or path
+    # The model may pass a chat-upload reference rather than a filesystem path:
+    # a bare '/api/images/<f>', a proxy-prefixed '/proxy/<port>/api/images/<f>',
+    # or even the whole '[image ref: /api/images/<f> — …]' hint string verbatim.
+    # os.path.basename on those yields junk like 'uploaded]'. Recognise the
+    # /api/images/ marker and show the real uploaded filename instead.
+    try:
+        from lib.attachments import canonical_image_ref
+        import re as _re
+        _m = _re.search(r'/api/images/[^\s\]\'"]+', path)
+        _canon = canonical_image_ref(_m.group(0)) if _m else ''
+    except Exception:
+        _canon = ''
+    if _canon:
+        base = os.path.basename(_canon) or _canon
+    else:
+        base = os.path.basename(path) or path
     ops = []
     if fn_args.get('crop'):
         ops.append('crop')

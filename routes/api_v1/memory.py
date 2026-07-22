@@ -119,7 +119,7 @@ def get_memory_v1(memory_id):
 )
 def create_memory_v1():
     from lib.memory import create_memory
-    data = request.get_json(force=True)
+    data = parse_body(force=True)
     name = data.get('name', 'Untitled')
     logger.info('[Memory.v1] creating %r (scope=%s)', name,
                 data.get('scope', 'global'))
@@ -141,7 +141,7 @@ def create_memory_v1():
 @api_meta(summary='Update a memory', tags=['memory'])
 def update_memory_v1(memory_id):
     from lib.memory import update_memory
-    data = request.get_json(force=True)
+    data = parse_body(force=True)
     mem = update_memory(memory_id, data, project_path=_project_path())
     if not mem:
         return api_not_found('Memory not found')
@@ -170,7 +170,7 @@ def delete_memory_v1(memory_id):
 )
 def merge_memories_v1():
     from lib.memory import merge_memories
-    data = request.get_json(force=True)
+    data = parse_body(force=True)
     logger.info('[Memory.v1] merging %s → %s',
                 data.get('memory_ids', []), data.get('name', '?'))
     try:

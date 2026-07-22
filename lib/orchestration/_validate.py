@@ -255,6 +255,98 @@ def _validate_subflow_node(node: dict, where: str, params: dict,
         warnings.append(f'{where} subflow: {w}')
 
 
+#: Verifier roles whose turn writes the loop's single-valued pending-feedback
+#: slot (mirrors the engine's ``_VERIFIER_ROLES``). A shared-context producer
+#: is the READER of that slot (+ the guard directive). Either one inside a
+#: concurrent parallel region races on the single channel.
+_VERDICT_CHANNEL_VERIFIER_ROLES = frozenset({'critic', 'reviewer', 'virtual_user'})
+
+
+def _parallel_verdict_channel_warnings(nodes: list, edges: list,
+                                       id_to_node: dict) -> list[str]:
+    """Warn when a parallel region contains a verdict-feeding producer.
+
+    The engine forwards verifier feedback + the zero-deliverable guard
+    directive through the single-valued ``_pending_feedback`` /
+    ``_pending_directive`` slots, read once by the next shared-context
+    producer and written by any verifier turn. A ``parallel`` fan-out runs
+    its branches CONCURRENTLY (real thread pool), so if a branch contains a
+    shared-context producer (the reader) or a verifier role (the writer),
+    the branches race on that single channel — feedback/directive delivery
+    becomes order-dependent (whichever branch clears the slot first denies
+    the others).
+
+    This is a WARNING, not an error: the composer's recommended fan-out uses
+    one-shot fresh-context agents (fan-out → barrier → synthesize) that never
+    touch the channel, so a normal parallel stays clean. Pure; never raises.
+
+    Region membership = the nodes reachable from a parallel node's branch
+    entries, stopping at (and excluding) the barrier where the branches
+    re-converge — the same span the engine walks per branch.
+    """
+    warnings: list[str] = []
+    fwd: dict[str, list[str]] = {}
+    for e in edges:
+        if not isinstance(e, dict):
+            continue
+        s, d = e.get('from'), e.get('to')
+        if isinstance(s, str) and isinstance(d, str):
+            fwd.setdefault(s, []).append(d)
+
+    def _reachable(start: str) -> set[str]:
+        seen: set[str] = set()
+        stack = [start]
+        while stack:
+            n = stack.pop()
+            if n in seen:
+                continue
+            seen.add(n)
+            stack.extend(fwd.get(n, []))
+        return seen
+
+    for pid, pnode in id_to_node.items():
+        if not (isinstance(pnode, dict) and pnode.get('type') == 'control'
+                and pnode.get('kind') == 'parallel'):
+            continue
+        branches = [b for b in fwd.get(pid, []) if b in id_to_node]
+        if len(branches) < 2:
+            continue   # a single-branch "parallel" runs serially — no race
+        # Common barrier = a barrier node reachable from every branch.
+        reach = [_reachable(b) for b in branches]
+        common = set.intersection(*reach) if reach else set()
+        barriers = {n for n in common
+                    if (id_to_node.get(n) or {}).get('kind') == 'barrier'}
+        # Region = everything reachable from a branch entry, minus the
+        # convergence point(s) and anything at/after them.
+        region: set[str] = set()
+        for r in reach:
+            region |= r
+        region -= common   # drop the join + everything shared past it
+        for bid in branches:            # branch entries are always in-region
+            region.add(bid)
+        region -= barriers
+        offenders: list[str] = []
+        for nid in region:
+            n = id_to_node.get(nid) or {}
+            if n.get('type') != 'role':
+                continue
+            params = n.get('params') or {}
+            role = n.get('role') or ''
+            iso = params.get('isolation') if isinstance(params, dict) else None
+            if role in _VERDICT_CHANNEL_VERIFIER_ROLES or iso == 'shared-context':
+                offenders.append(nid)
+        if offenders:
+            warnings.append(
+                f"parallel {pid!r} region contains verdict-feeding "
+                f"producer(s) {sorted(offenders)!r} (a verifier role or a "
+                "shared-context producer) — the single-valued feedback/"
+                "directive channel is consumed order-dependently across "
+                "concurrent branches. Use fresh-context one-shot agents in a "
+                "fan-out, or move the verifier/shared-context node out of the "
+                "parallel region.")
+    return warnings
+
+
 def validate_definition(defn: Any, *, _depth: int = 0,
                         _seen_refs: frozenset[str] = frozenset()) -> dict[str, Any]:
     """Validate an orchestration definition.
@@ -433,5 +525,7 @@ def validate_definition(defn: Any, *, _depth: int = 0,
             warnings.append('no stop node — the flow has no defined terminal')
         if role_count == 0:
             warnings.append('no agent nodes — the flow does no work')
+        warnings.extend(
+            _parallel_verdict_channel_warnings(nodes, edges, id_to_node))
 
     return {'ok': not errors, 'errors': errors, 'warnings': warnings}

@@ -454,7 +454,12 @@ class ScheduledTaskManager:
 
             # One-time tasks
             if schedule.startswith('once:'):
-                target_time = datetime.fromisoformat(schedule[5:].strip())
+                try:
+                    target_time = datetime.fromisoformat(schedule[5:].strip())
+                except ValueError:
+                    logger.warning('[Scheduler] invalid once: schedule for task %s: %s — skipping',
+                                   task.get('id', '?'), schedule, exc_info=True)
+                    continue
                 if now >= target_time:
                     # Check if already run
                     if task['run_count'] > 0:

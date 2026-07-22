@@ -102,10 +102,13 @@ from lib.tools.registry._latch import (  # noqa: E402,F401
     _toolset_latch_enabled,
     clear_all_tool_list_latches,
     clear_multiroot_sticky,
+    clear_project_ready_sticky,
     clear_tool_list_latch,
     is_multiroot_sticky,
+    is_project_ready_sticky,
     latch_tool_list,
     mark_multiroot_sticky,
+    mark_project_ready_sticky,
     tool_list_diff,
     tool_list_diverged,
 )
@@ -173,6 +176,9 @@ __all__ = [
     'assemble_tool_list',
     # multiroot sticky latch
     'mark_multiroot_sticky', 'is_multiroot_sticky', 'clear_multiroot_sticky',
+    # project-ready sticky latch
+    'mark_project_ready_sticky', 'is_project_ready_sticky',
+    'clear_project_ready_sticky',
     # tool-schema latch
     'latch_tool_list', 'tool_list_diverged', 'tool_list_diff',
     'clear_tool_list_latch', 'clear_all_tool_list_latches',

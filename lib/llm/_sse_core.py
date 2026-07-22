@@ -417,6 +417,29 @@ def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
         }
     except Exception as _rfe:
         logger.debug('%s cache-probe routing capture failed: %s', log_prefix, _rfe)
+
+    # ── ALWAYS-ON cache-namespace routing fingerprint (relayed into usage) ──
+    # The byte-probe above is default-OFF, so historically the routing captured
+    # here reached NOTHING at runtime and the cache-miss verdict was blind to a
+    # key/beta/endpoint flip — mislabeling a client cache-namespace switch as a
+    # server-side miss. Distil _routing down to the three attributes that
+    # DETERMINE the gateway cache namespace and stash them on the dumper so
+    # SSEAccumulator.finalize relays them into `usage['_wire_routing']` UNCONDI-
+    # TIONALLY (like _wire_fp). detect_cache_break diffs it round-over-round and
+    # NAMES a namespace switch instead of blaming the gateway. Best-effort: a
+    # capture failure leaves wire_routing=None → the detector's diff is inert.
+    raw_dumper.wire_routing = None
+    if _routing is not None:
+        try:
+            from lib.tasks_pkg.wire_fingerprint import routing_fingerprint
+            raw_dumper.wire_routing = routing_fingerprint(
+                key_hash=_routing.get('key_hash', ''),
+                anthropic_beta=_routing.get('anthropic_beta', ''),
+                endpoint=_routing.get('url', ''))
+        except Exception as _rfpe:
+            logger.debug('%s routing fingerprint build failed: %s',
+                         log_prefix, _rfpe)
+
     _maybe_dump_cache_probe(body, _task_id_for_latch, log_prefix, routing=_routing)
 
     return RequestPlan(url=url, hdrs=hdrs, body=body, trace_id=trace_id,
@@ -1010,6 +1033,16 @@ class SSEAccumulator:
             _wregion = getattr(self.raw_dumper, 'wire_region', None)
             if _wregion is not None:
                 usage['_wire_region'] = _wregion
+
+        # Cache-namespace routing fingerprint — relayed on its OWN guard (not
+        # nested under _wfp), because routing is captured independently of the
+        # body fingerprint in prepare_request, so it can be present even when
+        # the message-fingerprint capture failed. detect_cache_break diffs it to
+        # name a client cache-namespace switch (key/beta/endpoint flip) instead
+        # of laundering a byte-identical miss into "server-side".
+        _wrouting = getattr(self.raw_dumper, 'wire_routing', None)
+        if _wrouting is not None:
+            usage['_wire_routing'] = _wrouting
 
         # Stream anomaly flags
         _has_anomaly = False

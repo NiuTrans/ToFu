@@ -24,6 +24,15 @@ logger = get_logger(__name__)
 # Strategy: replace blocked exact strings with semantically-equivalent
 # alternatives that the LLM understands identically.
 #
+# NOTE (2026-07-20): the values below are currently IDENTITY placeholders —
+# each term maps to itself, so the sanitizer is INERT (it changes nothing).
+# Supplying real replacement values is owner-gated: (1) choosing them is a
+# content/policy call (a euphemism, or an invisible-separator technique), and
+# (2) their efficacy can only be verified against the live corporate gateway
+# (your-llm-gateway.example.com), which is not reachable from CI/dev. Identity entries are
+# skipped in _sanitize_gateway_content so they never emit a false "Replaced"
+# log line. Replace a value with a genuine alternative to activate a term.
+#
 # Discovered via binary search probing (2026-04-03):
 _GATEWAY_BLOCKED_TERMS = {
     '习主席':  '习主席',     # Xi Jinping / General Secretary Xi → Chairman Xi
@@ -48,6 +57,11 @@ def _sanitize_gateway_content(text: str) -> str:
         return text
     replaced = []
     for blocked, safe in _GATEWAY_BLOCKED_TERMS.items():
+        if blocked == safe:
+            # Identity placeholder (see NOTE on _GATEWAY_BLOCKED_TERMS): a
+            # no-op that must NOT be reported as a replacement. Skip it so the
+            # debug log stays honest until a real value is supplied.
+            continue
         if blocked in text:
             text = text.replace(blocked, safe)
             replaced.append(f'{blocked}→{safe}')

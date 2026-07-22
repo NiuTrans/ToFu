@@ -101,7 +101,18 @@ _SIBLING_TAG = '[sibling]'
 _TITLE_MAX_CHARS = 2000  # epics carry multi-sentence design descriptions; a
                          # tight cap silently clipped titles mid-word (both in
                          # the board panel and the injected prompt block)
-_MAX_BOARD_TASKS = 200  # coarse epics only — a guard against runaway posting
+# Admission guard against runaway posting. This caps only the ACTIVE epics
+# (stored status != 'done') — the working set a reader actually has to reason
+# about. Completed epics are history: they must NEVER count toward admission
+# (otherwise a long-lived project accretes 200 finished epics and the board is
+# PERMANENTLY "full", unable to accept a single new epic — the reported bug).
+_MAX_ACTIVE_TASKS = 200
+# Completed epics are retained for the "Recently done" lane, but capped so the
+# table can't grow without bound over a project's life. When a post pushes the
+# done-row count past this, the OLDEST done rows are pruned (best-effort, in the
+# same connection). The panel/prompt only ever surface the last ~8 done epics.
+_MAX_DONE_RETAINED = 100
+_MAX_BOARD_TASKS = _MAX_ACTIVE_TASKS  # back-compat alias (was the total cap)
 
 
 _now_ms = now_ms
@@ -296,10 +307,36 @@ def post_task(project_path: str, conv_id: str, title: str, *,
     project_path = normalize_project_path(project_path)
     try:
         db = get_thread_db(DOMAIN_CHAT)
-        n = db.execute('SELECT COUNT(*) AS c FROM project_tasks WHERE project_path=?',
-                       (project_path,)).fetchone()
-        if n and int(n['c']) >= _MAX_BOARD_TASKS:
-            return {'ok': False, 'error': 'board full (coarse epics only)'}
+        # Admission counts ACTIVE epics only (status != 'done') — completed
+        # epics are history and must never block a new post, else a long-lived
+        # project's board is permanently "full".
+        n = db.execute(
+            "SELECT COUNT(*) AS c FROM project_tasks "
+            "WHERE project_path=? AND status!='done'",
+            (project_path,)).fetchone()
+        if n and int(n['c']) >= _MAX_ACTIVE_TASKS:
+            return {'ok': False,
+                    'error': f'board full: {_MAX_ACTIVE_TASKS} active epics '
+                             '(complete or reopen some before posting more)'}
+        # Prune the oldest completed epics so the retained history stays bounded
+        # over the project's life. Best-effort in the same connection; the
+        # "Recently done" lane only ever shows the last ~8 anyway.
+        try:
+            d = db.execute(
+                "SELECT COUNT(*) AS c FROM project_tasks "
+                "WHERE project_path=? AND status='done'",
+                (project_path,)).fetchone()
+            done_n = int(d['c']) if d else 0
+            if done_n > _MAX_DONE_RETAINED:
+                db.execute(
+                    'DELETE FROM project_tasks WHERE id IN ('
+                    "  SELECT id FROM project_tasks "
+                    "  WHERE project_path=? AND status='done' "
+                    '  ORDER BY updated_at ASC LIMIT ?)',
+                    (project_path, done_n - _MAX_DONE_RETAINED))
+        except Exception as e:
+            logger.debug('[Board] done-row prune skipped proj=%.40r: %s',
+                         project_path, e)
         task_id = short_id('pt_', 16)
         ts = _now_ms()
         deps = json.dumps([str(d) for d in (depends_on or [])], ensure_ascii=False)
@@ -350,13 +387,43 @@ def claim_task(project_path: str, conv_id: str, task_id: str, *,
         if (row['status'] or '') == 'done':
             return {'ok': False, 'error': 'already_done'}
         lease = now + max(60_000, int(ttl_ms or DEFAULT_LEASE_TTL_MS))
-        db.execute(
+        # ── CAS claim (TOCTOU guard) ──
+        # The eligibility read above and this write are two statements; two
+        # conversations racing an OPEN epic would both read 'open' and, with an
+        # unconditional UPDATE, both write their own owner (last-writer-wins) —
+        # each getting ok=True while only one truly holds the advisory lease.
+        # Make the write CONDITIONAL on the exact (owner, lease) pre-state we
+        # decided on, so the DB serializes the two writers: the loser's UPDATE
+        # matches 0 rows (the winner already changed owner_conv_id /
+        # lease_expires_at) and is reported as an advisory refusal, never a
+        # silent steal. The precondition admits all three eligible cases —
+        # open ('' owner), self-refresh (owner==conv), and expired-lease reclaim
+        # (lease<=now) — via the OR below.
+        prev_owner = owner
+        prev_lease = int(row['lease_expires_at'] or 0)
+        res = db.execute(
             "UPDATE project_tasks SET status='claimed', owner_conv_id=?, "
             'lease_expires_at=?, dispatched=?, updated_at=? '
-            'WHERE id=? AND project_path=?',
+            'WHERE id=? AND project_path=? '
+            '  AND COALESCE(owner_conv_id,?)=? '
+            '  AND COALESCE(lease_expires_at,0)=?',
             (conv_id or '', lease, 1 if dispatched else 0, now,
-             task_id, project_path))
+             task_id, project_path, prev_owner, prev_owner, prev_lease))
         db.commit()
+        if getattr(res, 'rowcount', 1) == 0:
+            # Lost the race: another writer claimed/refreshed between our read
+            # and write. Re-read to report the current owner (advisory refusal).
+            cur = db.execute(
+                'SELECT owner_conv_id FROM project_tasks '
+                'WHERE id=? AND project_path=?', (task_id, project_path)).fetchone()
+            cur_owner = (cur['owner_conv_id'] if cur else '') or ''
+            if cur_owner and cur_owner != (conv_id or ''):
+                logger.info('[Board] claim lost race proj=%.40r task=%s → owner=%s',
+                            project_path, task_id, cur_owner)
+                return {'ok': False, 'error': 'already_claimed', 'owner': cur_owner}
+            # Rare: state changed but not into a foreign claim (e.g. concurrent
+            # complete). Report generically rather than a false success.
+            return {'ok': False, 'error': 'claim_conflict'}
         title = _task_title(db, project_path, task_id)
     except Exception as e:
         logger.error('[Board] claim failed proj=%.40r task=%s: %s',

@@ -72,6 +72,7 @@
     chevronDown: '<path d="m6 9 6 6 6-6"/>',
     plus: '<path d="M5 12h14"/><path d="M12 5v14"/>',
     languages: '<path d="m5 8 6 6"/><path d="m4 14 6-6 2-3"/><path d="M2 5h12"/><path d="M7 2h1"/><path d="m22 22-5-10-5 10"/><path d="M14 18h6"/>',
+    maximize: '<polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" x2="14" y1="3" y2="10"/><line x1="3" x2="10" y1="21" y2="14"/>',
   };
 
   // Solid-fill colored status dots (traffic-light style). Color is baked in

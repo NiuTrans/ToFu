@@ -292,9 +292,75 @@ def _check_for_update():
     return None
 
 
+def _start_computer_control(port: int, state: dict) -> None:
+    """Start the in-process desktop-control agent against the local server.
+
+    Safety posture is **deny by default**: enabling computer control grants
+    only READ-ONLY tools (list/read files, system overview). The write / exec /
+    GUI tiers each stay OFF until the user ticks them in the tray. The agent
+    reads the SAME ``permissions`` dict every poll, so toggling a tier live
+    takes effect on the next command without restarting the agent.
+
+    A ``threading.Event`` in *state* lets the tray toggle it back off cleanly.
+    Replaces the old "install a second program and run python -m
+    lib.desktop_agent" flow.
+    """
+    if state.get('thread') and state['thread'].is_alive():
+        return
+    try:
+        from lib.desktop_agent import run_agent
+        from lib.desktop_agent._permissions import safe_default
+    except Exception as e:
+        _log('Computer control unavailable (import failed): %s' % e)
+        state['error'] = str(e)
+        return
+
+    stop_event = threading.Event()
+    state['stop'] = stop_event
+    state['error'] = None
+    # Shared, live-mutable permissions dict. Created deny-all; the tray tier
+    # toggles mutate it in place and run_agent picks up the change each poll.
+    if not isinstance(state.get('perms'), dict):
+        state['perms'] = safe_default()
+    permissions = state['perms']
+    server_url = f'http://127.0.0.1:{port}'
+    bridge_secret = (os.environ.get('TOFU_BRIDGE_SECRET') or '').strip()
+
+    def _loop():
+        try:
+            run_agent(server_url, permissions, poll_interval=1.0,
+                      bridge_secret=bridge_secret, stop_event=stop_event)
+        except Exception as e:
+            _log('Computer-control agent crashed: %s' % e)
+            state['error'] = str(e)
+        finally:
+            state['enabled'] = False
+
+    t = threading.Thread(target=_loop, daemon=True, name='tofu-desktop-agent')
+    state['thread'] = t
+    state['enabled'] = True
+    t.start()
+    _log('Computer control ENABLED (read-only; perms=%s, agent polling %s)'
+         % (permissions, server_url))
+
+
+def _stop_computer_control(state: dict) -> None:
+    """Signal the in-process desktop-control agent to stop at the next poll."""
+    ev = state.get('stop')
+    if ev is not None:
+        ev.set()
+    state['enabled'] = False
+    _log('Computer control DISABLED')
+
+
 def _run_tray(port: int, proc: subprocess.Popen):
     """Run the system tray icon (blocks on the main thread)."""
     url = f'http://127.0.0.1:{port}'
+    # Desktop-control agent state (started/stopped via the tray toggle below).
+    # 'perms' is the live, deny-all-by-default permissions dict shared with the
+    # agent loop; the per-tier toggles mutate it in place.
+    _cc_state: dict = {'enabled': False, 'thread': None, 'stop': None,
+                       'error': None, 'perms': None}
 
     def _shutdown():
         if proc.poll() is None:
@@ -350,7 +416,41 @@ def _run_tray(port: int, proc: subprocess.Popen):
                     _log('%s %s: %s' % ('OK' if success else 'FAIL', name, msg))
             threading.Thread(target=_bg, daemon=True).start()
 
+    def on_toggle_computer_control(icon, item):
+        """Enable/disable the in-process desktop-control agent."""
+        if _cc_state.get('enabled'):
+            _stop_computer_control(_cc_state)
+        else:
+            _start_computer_control(port, _cc_state)
+        try:
+            icon.update_menu()
+        except Exception as e:
+            _log('Could not refresh tray menu after CC toggle: %s' % e)
+
+    def _toggle_perm(key: str):
+        """Flip one permission tier on the live shared perms dict."""
+        def _handler(icon, item):
+            perms = _cc_state.get('perms')
+            if not isinstance(perms, dict):
+                # Not enabled yet — ticking a tier has nothing to mutate.
+                return
+            perms[key] = not perms.get(key)
+            _log('Computer control tier %s -> %s' % (key, perms[key]))
+            try:
+                icon.update_menu()
+            except Exception as e:
+                _log('Could not refresh tray menu after perm toggle: %s' % e)
+        return _handler
+
+    def _perm_checked(key: str):
+        return lambda item: bool((_cc_state.get('perms') or {}).get(key))
+
+    def _perm_enabled(item):
+        # Tier toggles are only meaningful while the agent is running.
+        return bool(_cc_state.get('enabled'))
+
     def on_quit(icon, item):
+        _stop_computer_control(_cc_state)
         icon.stop()
         _shutdown()
         os._exit(0)
@@ -363,6 +463,16 @@ def _run_tray(port: int, proc: subprocess.Popen):
                  on_update,
                  visible=lambda item: bool(_update['tag'])),
         pystray.Menu.SEPARATOR,
+        MenuItem('Enable Computer Control', on_toggle_computer_control,
+                 checked=lambda item: bool(_cc_state.get('enabled'))),
+        MenuItem('Permissions', pystray.Menu(
+            MenuItem('Allow file writes', _toggle_perm('allow_write'),
+                     checked=_perm_checked('allow_write'), enabled=_perm_enabled),
+            MenuItem('Allow run commands / open apps', _toggle_perm('allow_exec'),
+                     checked=_perm_checked('allow_exec'), enabled=_perm_enabled),
+            MenuItem('Allow mouse / keyboard / screenshot', _toggle_perm('allow_gui'),
+                     checked=_perm_checked('allow_gui'), enabled=_perm_enabled),
+        )),
         MenuItem('Install Components...', on_components),
         MenuItem(f'Port: {port}', None, enabled=False),
         pystray.Menu.SEPARATOR,

@@ -11,28 +11,77 @@ import os
 import platform
 from pathlib import Path
 
-import psutil
-import pyautogui
-import pyperclip
-
 from lib.desktop_agent._files import _get_root_path
+from lib.desktop_agent._scaling import (
+    api_to_real,
+    real_to_api,
+    scaled_dimensions,
+)
 from lib.log import get_logger
 
 logger = get_logger(__name__)
 
+# ── Optional GUI/system dependencies ──
+# pyautogui (screenshot + mouse/keyboard), pyperclip (clipboard) and psutil
+# (process/system info) are only needed when the desktop-control agent actually
+# runs on a user's machine. They are NOT hard requirements of the Tofu server
+# package, so importing this module must never crash when they are absent
+# (e.g. a server-only checkout, or a desktop build where the deps were not
+# bundled). We import lazily and record the failure; each handler surfaces a
+# clear "not enabled" hint instead of the whole package raising ImportError.
+_MISSING_DEP_HINT = (
+    'Desktop computer-control is not enabled: the "{mod}" package is not '
+    'installed. Install the agent deps (pip install pyautogui pyperclip psutil) '
+    'or enable computer control from the Tofu tray menu, then retry.'
+)
+
+try:
+    import pyautogui
+except Exception as e:  # ImportError, or DISPLAY/Xlib errors on headless boxes
+    pyautogui = None
+    logger.warning('[Desktop] pyautogui unavailable — GUI/screenshot tools disabled: %s', e)
+
+try:
+    import pyperclip
+except Exception as e:
+    pyperclip = None
+    logger.warning('[Desktop] pyperclip unavailable — clipboard tool disabled: %s', e)
+
+try:
+    import psutil
+except Exception as e:
+    psutil = None
+    logger.warning('[Desktop] psutil unavailable — system-info tool disabled: %s', e)
+
+
+def _dep_error(mod: str) -> dict:
+    """Uniform 'dependency missing' result for a desktop handler."""
+    return {'error': _MISSING_DEP_HINT.format(mod=mod)}
+
 
 def cmd_screenshot_desktop(params):
     """Take a screenshot of the entire desktop (or a region)."""
+    if pyautogui is None:
+        return _dep_error('pyautogui')
     region = params.get('region')  # (x, y, w, h) or None for full screen
     try:
         img = pyautogui.screenshot(region=tuple(region) if region else None)
+        real_w, real_h = img.width, img.height
 
-        # Resize if too large
-        max_dim = params.get('maxDimension', 1920)
-        if max(img.size) > max_dim:
-            ratio = max_dim / max(img.size)
-            new_size = (int(img.width * ratio), int(img.height * ratio))
-            img = img.resize(new_size)
+        # Downscale to XGA (default 1024x768) per Anthropic's Computer Use
+        # grounding guidance: vision models pick coordinates far more reliably
+        # on a small image, and we map the model's click back to real pixels in
+        # cmd_gui_action via compute_scale(real_w, real_h). A legacy
+        # 'maxDimension' param still caps the long edge if the caller insists on
+        # a larger image, but XGA is the default.
+        scaled_w, scaled_h, scale = scaled_dimensions(real_w, real_h)
+        max_dim = params.get('maxDimension')
+        if max_dim and max(scaled_w, scaled_h) > max_dim:
+            ratio = max_dim / max(scaled_w, scaled_h)
+            scaled_w, scaled_h = max(1, round(scaled_w * ratio)), max(1, round(scaled_h * ratio))
+            scale *= ratio
+        if (scaled_w, scaled_h) != (real_w, real_h):
+            img = img.resize((scaled_w, scaled_h))
 
         buf = io.BytesIO()
         img.save(buf, format='JPEG', quality=75)
@@ -41,6 +90,9 @@ def cmd_screenshot_desktop(params):
         return {
             'width': img.width,
             'height': img.height,
+            'real_width': real_w,
+            'real_height': real_h,
+            'scale': round(scale, 6),
             'format': 'jpeg',
             'base64': b64,
             'size_bytes': len(buf.getvalue()),
@@ -52,19 +104,42 @@ def cmd_screenshot_desktop(params):
 
 def cmd_gui_action(params):
     """Perform GUI automation: click, type, hotkey, scroll at screen coordinates."""
+    if pyautogui is None:
+        return _dep_error('pyautogui')
     pyautogui.FAILSAFE = True   # Move mouse to corner to abort
     pyautogui.PAUSE = 0.1
     action = params.get('action', '')
+
+    # The model produced its coordinates against the downscaled (XGA) screenshot
+    # from cmd_screenshot_desktop, so translate them back to real screen pixels
+    # before driving pyautogui. The scale is derived deterministically from the
+    # real screen size (no shared state with the screenshot call). If a caller
+    # already passes real coordinates it can set scale=1 to opt out.
+    try:
+        real_w, real_h = pyautogui.size()
+    except Exception as e:
+        logger.debug('[Desktop] pyautogui.size() unavailable, assuming 1:1 coords: %s', e)
+        real_w = real_h = 0
+    _, _, _scale = scaled_dimensions(real_w, real_h)
+    if 'scale' in params:  # explicit override (e.g. caller sends real coords)
+        try:
+            _scale = float(params['scale']) or 1.0
+        except (ValueError, TypeError):
+            _scale = 1.0
+
+    def _pt(x, y):
+        return api_to_real(x, y, _scale)
+
     try:
         if action == 'click':
-            x, y = params.get('x', 0), params.get('y', 0)
+            x, y = _pt(params.get('x', 0), params.get('y', 0))
             button = params.get('button', 'left')
             clicks = params.get('clicks', 1)
             pyautogui.click(x=x, y=y, button=button, clicks=clicks)
             return {'action': 'click', 'x': x, 'y': y, 'success': True}
 
         elif action == 'doubleclick':
-            x, y = params.get('x', 0), params.get('y', 0)
+            x, y = _pt(params.get('x', 0), params.get('y', 0))
             pyautogui.doubleClick(x=x, y=y)
             return {'action': 'doubleclick', 'x': x, 'y': y, 'success': True}
 
@@ -80,7 +155,7 @@ def cmd_gui_action(params):
             return {'action': 'hotkey', 'keys': keys, 'success': True}
 
         elif action == 'moveto':
-            x, y = params.get('x', 0), params.get('y', 0)
+            x, y = _pt(params.get('x', 0), params.get('y', 0))
             duration = params.get('duration', 0.3)
             pyautogui.moveTo(x, y, duration=duration)
             return {'action': 'moveto', 'x': x, 'y': y, 'success': True}
@@ -88,12 +163,14 @@ def cmd_gui_action(params):
         elif action == 'scroll':
             amount = params.get('amount', -3)
             x, y = params.get('x'), params.get('y')
+            if x is not None and y is not None:
+                x, y = _pt(x, y)
             pyautogui.scroll(amount, x=x, y=y)
             return {'action': 'scroll', 'amount': amount, 'success': True}
 
         elif action == 'drag':
-            x1, y1 = params.get('x1', 0), params.get('y1', 0)
-            x2, y2 = params.get('x2', 0), params.get('y2', 0)
+            x1, y1 = _pt(params.get('x1', 0), params.get('y1', 0))
+            x2, y2 = _pt(params.get('x2', 0), params.get('y2', 0))
             duration = params.get('duration', 0.5)
             pyautogui.moveTo(x1, y1)
             pyautogui.drag(x2 - x1, y2 - y1, duration=duration)
@@ -116,7 +193,11 @@ def cmd_gui_action(params):
             loc = pyautogui.locateOnScreen(tmp_path, confidence=params.get('confidence', 0.8))
             if loc:
                 center = pyautogui.center(loc)
-                return {'found': True, 'x': center.x, 'y': center.y, 'region': list(loc)}
+                # Report coordinates in the same scaled space the model sees, so
+                # a follow-up click(x,y) round-trips correctly.
+                api_x, api_y = real_to_api(center.x, center.y, _scale)
+                return {'found': True, 'x': api_x, 'y': api_y,
+                        'real_x': center.x, 'real_y': center.y, 'region': list(loc)}
             return {'found': False}
 
         else:
@@ -129,6 +210,8 @@ def cmd_gui_action(params):
 
 def cmd_clipboard(params):
     """Read or write the system clipboard."""
+    if pyperclip is None:
+        return _dep_error('pyperclip')
     action = params.get('action', 'read')
 
     if action == 'read':
@@ -141,6 +224,8 @@ def cmd_clipboard(params):
 
 def cmd_system_info(params):
     """Get system information."""
+    if psutil is None:
+        return _dep_error('psutil')
     info_type = params.get('type', 'overview')
 
     if info_type == 'overview':

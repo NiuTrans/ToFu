@@ -198,6 +198,11 @@ function _msgFingerprint(msg) {
   let _fcFp = '';
   if (Array.isArray(msg.modifiedFileList) && msg.modifiedFileList.length) {
     _fcFp = _hashStr(msg.modifiedFileList.join('\n'));
+  } else if (Array.isArray(msg._undoneFileList) && msg._undoneFileList.length) {
+    /* Undone round: the "undone → Redo" bar renders off _undoneFileList, so its
+     * presence must move the fingerprint (undo flips modifiedFileList→undone,
+     * redo flips it back) or the surgical re-render would miss the state swap. */
+    _fcFp = 'u' + _hashStr(msg._undoneFileList.join('\n'));
   } else if (msg._fcResolvedFp) {
     /* Lazy file-change path (RENDER_CONTRACT L2): the extracted fallback list
      * lives in the `_fcResultByMsg` WeakMap (a DIFFERENT shape than the
@@ -1673,7 +1678,14 @@ function renderMessage(msg, idx) {
   /* messageTime is a formatter output (digits + localized separators) —
    * escape it by default via safeHtml (it carries no markup). */
   const messageTimeHtml = messageTime ? safeHtml`<span class="message-time">${messageTime}</span>` : '';
-  const mfpAttr = typeof idx === "number" ? raw(` data-mfp="${_msgFingerprint(msg)}"`) : "";
+  /* Escape the fingerprint for attribute storage: it now folds in fields that
+   * can contain HTML-special chars (e.g. a run_command round's `title` = the
+   * raw shell command, with literal `"`). A plain-string `raw()` splice let a
+   * quote close the attribute early and spill the rest of the fingerprint into
+   * the DOM as visible text. `safeHtml` &quot;-escapes it; the surgical-diff
+   * read at line ~636 uses getAttribute(), which returns the browser-DECODED
+   * value, so the escaped storage stays byte-equal to _msgFingerprint(msg). */
+  const mfpAttr = typeof idx === "number" ? safeHtml` data-mfp="${_msgFingerprint(msg)}"` : "";
   const epWorkerCls = (!isUser && !msg._isEndpointPlanner && !msg._isEndpointReview) ? ' ep-worker-msg' : '';
   const epPlannerCls = msg._isEndpointPlanner ? ' ep-planner-msg' : '';
   const vuCls = msg._isVirtualUser ? ' vu-user-msg' : '';

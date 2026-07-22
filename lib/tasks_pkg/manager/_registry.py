@@ -196,7 +196,7 @@ def discard_task(task_id: str, conv_id: str | None = None) -> None:
                 del _conv_latest_task[conv_id]
 
 def list_running_tasks(exclude_conv_id: str | None = None) -> list[dict]:
-    """Return a snapshot of currently-running tasks.
+    """Return one entry per CONVERSATION with genuinely-live running work.
 
     Used by the self-update restart guard to refuse a process re-exec that
     would kill sibling conversations' in-flight work. A restart is an
@@ -204,17 +204,49 @@ def list_running_tasks(exclude_conv_id: str | None = None) -> list[dict]:
     dies with it — this lets the caller detect that and require an explicit
     override.
 
+    Two filters make the count reflect reality rather than registry cruft, so
+    the guard never blocks a restart for work that is not actually running:
+
+      * **Activity filter (same judge as the reaper).** A task whose BOTH
+        liveness clocks (``_t_last_event`` and ``_dispatch_heartbeat``) have
+        been silent past ``_stuck_task_max_silent_secs()`` is WEDGED — the exact
+        signal ``reap_stuck_running_tasks`` uses to force-fail it. Such a task
+        is excluded here too, so a just-died zombie does not block a restart for
+        the whole 30-minute reaper window (it would otherwise be counted until
+        the next reaper tick flips it terminal). ``status=='running'`` alone is
+        NOT liveness — it is exactly the false signal that produced the "63
+        other conversations have running tasks" phantom. If the reaper is
+        disabled (threshold ``<=0``) no task is treated as wedged (mirrors the
+        reaper), so behaviour is unchanged there.
+      * **Per-conversation dedup.** A single conversation (autopilot especially)
+        can spawn dozens of tasks; counting per-task turned "3 busy convs" into
+        "63". Entries are keyed by ``convId`` so the count is the number of
+        distinct conversations a restart would interrupt. Tasks with no convId
+        (headless / external callers) are NOT collapsed — each stays its own
+        entry keyed on its task id.
+
     Args:
         exclude_conv_id: When set, running tasks belonging to this conversation
             are omitted (the caller triggering the restart doesn't count its
             own conversation against itself).
 
     Returns:
-        A list of ``{'taskId', 'convId', 'elapsed'}`` dicts, one per running
-        task. Best-effort snapshot taken under ``tasks_lock``.
+        A list of ``{'taskId', 'convId', 'elapsed'}`` dicts, one per distinct
+        live conversation (representative = the earliest-created live task of
+        that conv). Best-effort snapshot taken under ``tasks_lock``.
     """
+    try:
+        from lib.tasks_pkg.manager._maintenance import _stuck_task_max_silent_secs
+        max_silent = _stuck_task_max_silent_secs()
+    except Exception as e:
+        logger.debug('[Manager] list_running_tasks: reaper threshold lookup failed '
+                     '(%s) — skipping activity filter', e)
+        max_silent = 0
+
     now = time.time()
-    out: list[dict] = []
+    # Keyed by dedup identity so one conversation counts once. Keep the
+    # earliest-created live task as the representative (stable, oldest work).
+    by_key: dict[str, tuple[float, dict]] = {}
     with tasks_lock:
         for tid, t in tasks.items():
             if t.get('status') != 'running' or t.get('aborted'):
@@ -222,12 +254,27 @@ def list_running_tasks(exclude_conv_id: str | None = None) -> list[dict]:
             conv = t.get('convId') or ''
             if exclude_conv_id and conv == exclude_conv_id:
                 continue
-            out.append({
+            created = t.get('created_at', now)
+            # Activity filter — exclude WEDGED tasks (both clocks stale), the
+            # same predicate reap_stuck_running_tasks uses. Either clock fresh
+            # = alive. Disabled (max_silent<=0) → never treat as wedged.
+            if max_silent > 0:
+                last_event = t.get('_t_last_event', created)
+                heartbeat = t.get('_dispatch_heartbeat', created)
+                if (now - last_event) >= max_silent and (now - heartbeat) >= max_silent:
+                    continue
+            # Dedup key: real conversations collapse by convId; convId-less
+            # tasks each stay distinct (keyed on their unique task id).
+            key = conv if conv else ('\x00task:' + tid)
+            entry = {
                 'taskId': tid,
                 'convId': conv,
-                'elapsed': round(now - t.get('created_at', now), 1),
-            })
-    return out
+                'elapsed': round(now - created, 1),
+            }
+            prior = by_key.get(key)
+            if prior is None or created < prior[0]:
+                by_key[key] = (created, entry)
+    return [entry for _created, entry in by_key.values()]
 
 
 def abort_running_tasks_for_conv(conv_id: str, exclude_task_id: str | None = None) -> int:

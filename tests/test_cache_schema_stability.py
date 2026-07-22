@@ -453,5 +453,122 @@ class TestMultirootTransitionReestablishesLatch(unittest.TestCase):
         self.assertFalse(_reg.mark_multiroot_sticky(self.CONV))
 
 
+class TestProjectAttachRestoresTools(unittest.TestCase):
+    """Attaching a project mid-conversation must restore the project tool
+    family (run_command / write_file / apply_diff / grep_search / list_dir /
+    find_files).
+
+    Root cause this pins (DB record mrroj7zr0lso93): a conversation whose FIRST
+    turn had empty roots assembles a tool list WITHOUT the project family
+    (gated on project_enabled); the tool-schema latch then freezes that
+    no-project snapshot for the whole conversation, so attaching a project on a
+    LATER turn was masked forever (only the always-on read_files / inspect_image
+    survived). The fix mirrors the multi-root OFF→ON precedent: the
+    project-ready OFF→ON transition clears the tool-schema latch so the project
+    tools re-freeze in on the same round.
+    """
+
+    CONV = '_proj_attach_conv'
+    _PROJECT_NAMES = frozenset({
+        'list_dir', 'grep_search', 'find_files', 'write_file',
+        'apply_diff', 'run_command',
+    })
+
+    def setUp(self):
+        from lib.tools import clear_project_ready_sticky, clear_tool_list_latch
+        clear_project_ready_sticky(self.CONV)
+        clear_tool_list_latch(self.CONV)
+
+    def tearDown(self):
+        from lib.tools import clear_project_ready_sticky, clear_tool_list_latch
+        clear_project_ready_sticky(self.CONV)
+        clear_tool_list_latch(self.CONV)
+
+    def _assemble_and_latch(self, *, project):
+        """Mirror the orchestrator: assemble (project_ready may clear the latch
+        on the OFF→ON transition) THEN latch_tool_list, in that order."""
+        from lib.tools import latch_tool_list
+        if project:
+            ctx = _ctx(conv_id=self.CONV, project_path='/tmp/proj',
+                       project_enabled=True,
+                       cfg={'projectPaths': ['/tmp/proj'], 'mcpEnabled': False},
+                       search_mode='multi', search_enabled=True)
+        else:
+            # Empty-roots first turn: no project, but a base tool (search) so
+            # the tool list is non-empty (matches the real Autopilot+Swarm turn).
+            ctx = _ctx(conv_id=self.CONV, project_path='', project_enabled=False,
+                       cfg={'mcpEnabled': False},
+                       search_mode='multi', search_enabled=True)
+        tl, _has = assemble_tool_list(ctx)
+        eff, diverged = latch_tool_list(self.CONV, tl)
+        return eff, diverged
+
+    def test_attach_after_empty_first_turn_restores_run_command(self):
+        # Round 1: empty roots → NO project tools frozen.
+        eff1, div1 = self._assemble_and_latch(project=False)
+        self.assertFalse(div1)
+        self.assertNotIn('run_command', _names(eff1),
+                         'empty-roots first turn must not carry run_command')
+        self.assertIn('read_files', _names(eff1),
+                      'read_files is always-on regardless of project')
+        # Round 2: project attached → OFF→ON transition clears + re-freezes the
+        # latch WITH the project family, in the same round.
+        eff2, _div2 = self._assemble_and_latch(project=True)
+        names2 = set(_names(eff2))
+        self.assertTrue(self._PROJECT_NAMES <= names2,
+                        f'project tools must be restored; missing '
+                        f'{sorted(self._PROJECT_NAMES - names2)}')
+
+    def test_stable_after_attach(self):
+        # Rounds 3+ stay byte-stable (diverged=False) on the frozen project list.
+        self._assemble_and_latch(project=False)
+        self._assemble_and_latch(project=True)
+        for _ in range(3):
+            eff, div = self._assemble_and_latch(project=True)
+            self.assertFalse(div, 'post-attach rounds must be byte-stable')
+            self.assertIn('run_command', _names(eff))
+
+    def test_attach_transition_fires_once(self):
+        from lib.tools import registry as _r
+        # First attach marks sticky (transition fires the clear); repeats don't.
+        self.assertTrue(_r.mark_project_ready_sticky(self.CONV))
+        self.assertFalse(_r.mark_project_ready_sticky(self.CONV))
+        self.assertFalse(_r.mark_project_ready_sticky(self.CONV))
+
+    def test_without_project_ready_hook_stays_masked(self):
+        # NEUTER / negative control: proving the OFF→ON latch-clear is
+        # load-bearing. If the project attach did NOT clear the latch, the
+        # frozen no-project snapshot would be served and run_command would stay
+        # absent. Simulate that by NOT letting the transition fire: pre-mark the
+        # conversation sticky BEFORE the empty-roots round, so the later attach
+        # sees mark_project_ready_sticky()==False (no clear).
+        from lib.tools import latch_tool_list, registry as _r
+        _r.mark_project_ready_sticky(self.CONV)  # suppress the OFF→ON clear
+        # Round 1: empty roots freezes the no-project snapshot.
+        eff1, _ = self._assemble_and_latch(project=False)
+        self.assertNotIn('run_command', _names(eff1))
+        # Round 2: attach — but the transition can't fire, so the stale latch
+        # is served and run_command stays masked (the pre-fix defect).
+        eff2, diverged = self._assemble_and_latch(project=True)
+        self.assertNotIn('run_command', _names(eff2),
+                         'without the OFF→ON latch-clear the frozen no-project '
+                         'snapshot masks run_command (the bug)')
+        self.assertTrue(diverged, 'fresh list has project tools but frozen '
+                        'snapshot lacks them → divergence')
+
+    def test_stateless_assembly_no_latch(self):
+        # conv_id='' (tests / compat adapters) → raw project_enabled, no latch.
+        tl_no, _ = assemble_tool_list(
+            _ctx(conv_id='', project_path='', project_enabled=False,
+                 cfg={'mcpEnabled': False}, search_mode='multi',
+                 search_enabled=True))
+        self.assertNotIn('run_command', _names(tl_no))
+        tl_yes, _ = assemble_tool_list(
+            _ctx(conv_id='', project_path='/tmp/proj', project_enabled=True,
+                 cfg={'projectPaths': ['/tmp/proj'], 'mcpEnabled': False},
+                 search_mode='multi', search_enabled=True))
+        self.assertIn('run_command', _names(tl_yes))
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

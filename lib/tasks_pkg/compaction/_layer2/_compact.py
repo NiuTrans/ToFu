@@ -16,6 +16,7 @@ from lib.tasks_pkg.compaction._constants import (
     _cooldown_lock,
     _MAX_PRESERVE_TURNS,
     _PRESERVE_BUDGET_RATIO,
+    _SUMMARY_TRIGGER_RATIO,
     _summary_cooldowns,
 )
 from lib.tasks_pkg.compaction._tokens import (
@@ -28,6 +29,7 @@ from lib.tasks_pkg.compaction._layer2._anchor import (
     _extract_current_query,
     _extract_recently_accessed_files,
     _find_turn_boundary,
+    _fold_recent_intra_turn,
     _objective_anchor_index,
 )
 from lib.tasks_pkg.compaction._layer2._summary import _generate_query_aware_summary
@@ -191,17 +193,56 @@ def execute_compact_tool(messages: list, task: dict | None = None, **kwargs) -> 
         logger.info('%s [Compact] Preserving objective anchor verbatim '
                     '(msg idx=%d) across summary', pfx, anchor_idx)
 
+    # ── INTRA-TURN FOLD (single-giant-turn overflow) ──
+    #   ``_find_turn_boundary`` ALWAYS preserves the current turn whole, so a
+    #   single agentic turn (one user request answered with dozens of tool
+    #   rounds) that fills the window on its own left ``recent_messages`` huge
+    #   and ``old_messages`` tiny — summarizing only the old region barely
+    #   shrank anything, and the automatic path could not reduce it at all
+    #   (the structural gap the manual /compact 档B fold already fixed). Fold
+    #   the COLD tool-call rounds OUT of the preserved region here too: keep
+    #   the most-recent hot-tail rounds verbatim, and feed the cold rounds to
+    #   the summarizer alongside ``old_messages``. Whole-round removal (shared
+    #   ``_split_cold_rounds`` policy) can never orphan a ``tool`` message. A
+    #   no-op when the preserved region has <= hot-tail tool-call rounds, so a
+    #   normal multi-turn chat near the window is byte-identical to before.
+    folded_recent, cold_round_msgs = _fold_recent_intra_turn(recent_messages)
+    if cold_round_msgs:
+        logger.info('%s [Compact] Intra-turn fold: %d cold round-message(s) '
+                    'folded out of the preserved region (%d recent → %d kept)',
+                    pfx, len(cold_round_msgs), len(recent_messages),
+                    len(folded_recent))
+    recent_messages = folded_recent
+    summary_input = list(old_messages) + list(cold_round_msgs)
+
+    # Nothing to summarize: no old region with real content AND the preserved
+    # turn had too few tool-call rounds to fold (or is one fat non-tool
+    # message). A summary_input of only leading ``system`` rows carries no
+    # foldable history — summarizing it would waste a cheap-model call and
+    # inject a contentless summary, so decline gracefully — mirrors the manual
+    # path's "decline rather than risk a cross-message break".
+    # _result_meta.compacted stays False so the reactive head-truncate net
+    # still engages.
+    if not any(m.get('role') != 'system' for m in summary_input):
+        logger.info('%s [Compact] Nothing foldable — no old region and preserved '
+                    'turn has <= hot-tail tool rounds; skipping', pfx)
+        if isinstance(_result_meta, dict):
+            _result_meta['compacted'] = False
+        return ('Context compaction skipped — no foldable history '
+                '(preserved turn within the hot-round tail). '
+                'Messages preserved as-is.')
+
     preserved_turns = sum(
         1 for m in recent_messages if m.get('role') == 'user'
     )
 
-    logger.info('%s [Compact] Summarizing %d old messages, '
-                'preserving %d recent (%d turns), query=%.100s',
-                pfx, len(old_messages), len(recent_messages),
-                preserved_turns, current_query)
+    logger.info('%s [Compact] Summarizing %d messages (%d old + %d cold intra-turn '
+                'rounds), preserving %d recent (%d turns), query=%.100s',
+                pfx, len(summary_input), len(old_messages), len(cold_round_msgs),
+                len(recent_messages), preserved_turns, current_query)
 
     summary_text = _generate_query_aware_summary_dyn(
-        old_messages, current_query, pfx, conv_id=conv_id, task=task
+        summary_input, current_query, pfx, conv_id=conv_id, task=task
     )
 
     if not summary_text:
@@ -250,7 +291,7 @@ def execute_compact_tool(messages: list, task: dict | None = None, **kwargs) -> 
                 pfx, log_id,
                 tokens_before, tokens_after, reduction_pct,
                 msg_count_before, len(messages),
-                boundary - len(system_msgs))
+                (boundary - len(system_msgs)) + len(cold_round_msgs))
 
     # ── Phase-C: record the 'saved' half of this L2 event's cache ROI ──
     # The following round's detect_cache_break completes it with the re-billed
@@ -290,13 +331,77 @@ def execute_compact_tool(messages: list, task: dict | None = None, **kwargs) -> 
 
     result_parts = [
         '## Context Compacted — Selective Summary\n',
-        f'Compressed {boundary - len(system_msgs)} historical messages '
+        f'Compressed {(boundary - len(system_msgs)) + len(cold_round_msgs)} '
+        f'historical messages '
         f'({tokens_before:,} → {tokens_after:,} tokens, '
         f'{reduction_pct:.0f}% reduction)\n',
         summary_text,
     ]
+    compact_result = '\n'.join(result_parts)
 
-    return '\n'.join(result_parts)
+    # ── SUCCESS-PATH CONVERGENCE CHECK (post-fold hot-tail overflow) ──
+    #   The fold + summary succeeded, but ``_find_turn_boundary`` preserves the
+    #   hot-tail rounds WHOLE. If those surviving rounds are themselves so large
+    #   that the PROJECTED request — the current ``messages`` PLUS the summary
+    #   tool-pair the caller (``force_compact_if_needed``) will append — STILL
+    #   exceeds the same trigger ceiling, sending it would only be bounded next
+    #   round or by the reactive 413 net. In an OOM-kill-prone deploy the "next
+    #   round" may never arrive, so converge NOW with the pairing-safe
+    #   head-truncate rather than emit an over-window request. Measured with the
+    #   SAME yardstick as ``_should_force_compact`` (authoritative count vs
+    #   ``usable × _SUMMARY_TRIGGER_RATIO``) so the check and the trigger agree.
+    _summary_pair = [
+        {'role': 'assistant', 'content': None,
+         'tool_calls': [{'id': '_conv_proj', 'type': 'function',
+                         'function': {'name': _COMPACT_TOOL_NAME,
+                                      'arguments': '{}'}}]},
+        {'role': 'tool', 'tool_call_id': '_conv_proj',
+         'name': _COMPACT_TOOL_NAME, 'content': compact_result},
+    ]
+
+    def _project_tokens() -> tuple[int, str]:
+        try:
+            return _count_tokens_authoritative(list(messages) + _summary_pair, task)
+        except Exception as _pe:
+            logger.debug('%s [Compact] convergence projection count failed '
+                         '(%s) — using heuristic', pfx, _pe)
+            return _estimate_total_tokens(messages), 'heuristic'
+
+    ceiling = int(usable * _SUMMARY_TRIGGER_RATIO)
+    proj_tokens, proj_method = _project_tokens()
+    if proj_tokens > ceiling:
+        logger.warning(
+            '%s [Compact] Post-fold STILL over ceiling: projected=%d (via %s) '
+            '> ceiling=%d (usable=%d × %.2f) — preserved hot-tail rounds are '
+            'oversized; converging with pairing-safe head-truncate',
+            pfx, proj_tokens, proj_method, ceiling, usable, _SUMMARY_TRIGGER_RATIO)
+        from lib.tasks_pkg.compaction._reactive import _head_truncate
+        _tok_pre = _estimate_total_tokens(messages)
+        _dropped = _head_truncate(
+            messages, task, reported_token_count=proj_tokens,
+            event_name='post_compact_converge')
+        _tok_post = _estimate_total_tokens(messages)
+        logger.warning(
+            '%s [Compact] Post-fold head-truncate dropped %d message(s): '
+            'preserved-region tokens %d → %d (conv=%s round=%s)',
+            pfx, _dropped, _tok_pre, _tok_post, log_id,
+            (task.get('round_num') if task else '?'))
+        # Re-measure. If STILL over (pathological: a single hot round bigger
+        # than the window — head-truncate is floored at system_end+4 messages),
+        # do NOT raise and abort the round. Log an ERROR so this boundary is
+        # visible in error.log, and pass through: the reactive 413 net is the
+        # last resort this round.
+        proj_after, _ = _project_tokens()
+        if proj_after > ceiling:
+            logger.error(
+                '%s [Compact] Post-fold convergence INCOMPLETE — projected still '
+                '%d > ceiling=%d after head-truncate (dropped=%d; only the system '
+                'prefix + an oversized hot round remain). Passing through; the '
+                'reactive 413 net must bound this request. conv=%s round=%s',
+                pfx, proj_after, ceiling, _dropped, log_id,
+                (task.get('round_num') if task else '?'))
+
+    return compact_result
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

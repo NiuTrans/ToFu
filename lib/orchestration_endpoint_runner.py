@@ -121,36 +121,29 @@ def resolve_chat_flow_entry(config: dict):
       1. An explicit flow selection (``flowDefinition`` / ``flowBuiltin`` /
          ``flowId``) → :func:`run_flow_via_chat` (a NEW capability — honored
          whenever the user selects a flow; no flag, the selection is the
-         opt-in).
+         opt-in). This is SYMMETRIC across builtins: BOTH
+         ``flowBuiltin='endpoint'`` and ``flowBuiltin='autopilot'`` run on the
+         FlowExecutor engine. The "编排流程" dropdown is the deliberate way to
+         exercise the ENGINE implementation of each mode (so engine bugs are
+         observable in the frontend), distinct from the "模式" toggles which
+         drive the live ``tasks_pkg`` implementations.
       2. ``endpointMode`` + ``TOFU_ENDPOINT_VIA_FLOW`` → :func:`run_endpoint_via_flow`.
       3. ``autopilot`` + ``TOFU_AUTOPILOT_VIA_FLOW`` → :func:`run_autopilot_via_flow`.
+
+    The ``TOFU_*_VIA_FLOW`` flags govern ONLY the "模式" TOGGLE paths (2/3):
+    with the flag OFF the toggle uses the live ``tasks_pkg`` loop; ON reroutes
+    it through the engine. A dropdown flow SELECTION (1) is always the engine,
+    flag-independent.
 
     Returns a ``callable(task)`` or ``None`` (caller falls back to the live
     endpoint path or a normal task).
     """
     config = config or {}
-    # ── builtin:autopilot → LIVE standalone autopilot (Option C) ──
-    # The "编排流程 → 自动驾驶" dropdown sends flowBuiltin='autopilot', which would
-    # otherwise match the selection branch below and force the FlowExecutor
-    # engine path (worker⇄VU as SubAgents in one task) — the explicitly
-    # NOT-yet-authoritative path per this module's docstring. Rewrite that
-    # selection to the live loop instead, so the dropdown runs the IDENTICAL
-    # code as the standalone autopilot toggle (parity by construction): set
-    # config['autopilot'], CLEAR the flow selection so the selection branch
-    # can't re-grab it, and return None → routes/chat.py falls through to a
-    # normal spawn_task whose done-hook fires maybe_run_autopilot (gated by
-    # is_autopilot_enabled on cfg['autopilot']). The engine path stays
-    # reachable via the TOFU_AUTOPILOT_VIA_FLOW=1 dev/validation escape hatch
-    # (and via a virtual_user node embedded in a real custom flow).
-    if config.get('flowBuiltin') == 'autopilot' and not autopilot_via_flow_enabled():
-        config['autopilot'] = True
-        config['flowBuiltin'] = None
-        audit_log('autopilot_builtin_to_live',
-                  reason='builtin:autopilot rewritten to live standalone path '
-                         '(TOFU_AUTOPILOT_VIA_FLOW off)')
-        logger.info('[FlowChat] flowBuiltin=autopilot → live standalone '
-                    'autopilot (engine path gated behind TOFU_AUTOPILOT_VIA_FLOW)')
-        return None
+    # A dropdown flow selection ALWAYS runs on the engine — the selection is
+    # the opt-in. builtin:autopilot is NOT special-cased: it routes to the
+    # engine exactly like builtin:endpoint, so the dropdown surfaces the
+    # FlowExecutor autopilot (worker⇄VU graph) for observation/debugging, while
+    # the "模式" toggle still runs the live standalone autopilot loop.
     if (config.get('flowDefinition') or config.get('flowBuiltin')
             or config.get('flowId')):
         return run_flow_via_chat
@@ -346,8 +339,19 @@ def _run_flow_as_endpoint_task(task: dict, defn: dict, *, label: str,
                 logger.warning('[FlowChat] per-turn DB sync/translate failed '
                                '(non-fatal) task=%s: %s', tid, e)
 
+    # Detect a virtual_user (autopilot) graph so the adapter stamps a
+    # SYNTHETIC guard row as a VU turn (not a critic review) when this flow's
+    # verifier is the VU. Real VU turns are detected per-node by role; this
+    # flag only governs the roleless synthetic guard. Anchor VU turns to the
+    # task id so they group as one autopilot run (parity with the live path).
+    _vu_flow = any(
+        isinstance(n, dict) and n.get('role') == 'virtual_user'
+        for n in (defn.get('nodes') or [])
+    )
     adapter = EndpointEventAdapter(emit=_persist_endpoint_msg,
-                                   on_stream=_stream_endpoint_event)
+                                   on_stream=_stream_endpoint_event,
+                                   vu_flow=_vu_flow,
+                                   vu_run_id=(task['id'] if _vu_flow else ''))
     _adapter_ref['messages'] = adapter.messages
 
     # Surface raw engine progress too (loop/replan/guard) for diagnostics.

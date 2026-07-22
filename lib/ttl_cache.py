@@ -36,9 +36,36 @@ import time
 from collections import OrderedDict
 from typing import Any, Callable, Hashable, Optional
 
+import weakref
+
 from lib.log import get_logger
 
 logger = get_logger(__name__)
+
+# Registry of all live TTLCache instances so a memory-pressure relief pass
+# (lib.cgroup_guard) can drop our own reclaimable caches. WeakSet so a cache
+# that goes out of scope is auto-removed and never keeps itself alive.
+_ALL_CACHES: 'weakref.WeakSet[TTLCache]' = weakref.WeakSet()
+_ALL_CACHES_LOCK = threading.Lock()
+
+
+def clear_all_caches() -> int:
+    """Drop every entry from every live TTLCache. Returns total entries removed.
+
+    Used by the cgroup pressure monitor to shrink our RSS under memory
+    pressure. Best-effort and thread-safe; a per-cache clear() failure is
+    logged and skipped, never fatal.
+    """
+    with _ALL_CACHES_LOCK:
+        caches = list(_ALL_CACHES)
+    total = 0
+    for c in caches:
+        try:
+            total += c.clear()
+        except Exception as e:
+            logger.warning('[ttl_cache] clear_all_caches: %s failed: %s',
+                           getattr(c, 'name', '?'), e)
+    return total
 
 
 class TTLCache:
@@ -76,6 +103,8 @@ class TTLCache:
         self._misses = 0
         self._expired_evicts = 0
         self._size_evicts = 0
+        with _ALL_CACHES_LOCK:
+            _ALL_CACHES.add(self)
 
     # ── Internal helpers ──────────────────────────────────────────
 
@@ -266,4 +295,4 @@ class TTLCache:
             }
 
 
-__all__ = ['TTLCache']
+__all__ = ['TTLCache', 'clear_all_caches']

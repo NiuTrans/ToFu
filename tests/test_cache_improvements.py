@@ -1461,9 +1461,26 @@ class TestMarkerRepresentationInvariance:
         assert isinstance(c, list), (
             'mid-history plain assistant content not normalized (Phase 0.5 gap)')
 
-    def test_assistant_with_tool_calls_not_wrapped(self):
-        """An assistant message carrying tool_calls must be left alone — its
-        content is not wrapped (tool_use blocks drive the marker logic)."""
+    def test_assistant_with_tool_calls_nonempty_content_is_normalized(self):
+        """★ THE {content} FLOOR-MISS FIX (commit ab161bf) — updated baseline.
+
+        An assistant turn that carries tool_calls AND non-empty ``str`` content
+        (the prose-before-run_command shape) is now NORMALIZED to single-block
+        form UP FRONT by Phase 0.5. This is intentional and load-bearing: the
+        old carve-out left the ``str`` un-normalized, so the tail phase wrapped
+        it into a block the round it was the tail and it reverted to a bare
+        ``str`` once buried prefix — a canonical-INVISIBLE ``str``↔block flip on
+        ``content`` that re-billed the cached prefix EVERY round (the dominant
+        residual floor-miss the field tracer proved as ``…(run_command){content}``).
+        Normalizing up front makes anchoring only toggle a ``cache_control`` key
+        on an already-list block, so the turn's content bytes are invariant
+        whether or not it is the tail. The tool_use blocks still drive
+        ``_assistant_blocks``' last-block marker hoist, so the marker logic is
+        undisturbed.
+
+        (This test formerly asserted the PRE-fix behaviour — that such content
+        stays a bare ``str``. That baseline was superseded by ab161bf; the
+        assertion is flipped to the current, correct contract.)"""
         from lib.llm import add_cache_breakpoints
 
         msgs = [{'role': 'system', 'content': 'sys ' * 20},
@@ -1476,12 +1493,37 @@ class TestMarkerRepresentationInvariance:
         body = {'model': 'claude-opus-4-20250514', 'messages': msgs}
         add_cache_breakpoints(body)
         am = body['messages'][2]
-        assert am.get('tool_calls')
-        # content stays a str — tool_calls path handles it; wrapping would
-        # disturb _assistant_blocks' last-block marker placement.
-        assert isinstance(am['content'], str), (
-            'assistant-with-tool_calls content should not be wrapped'
-        )
+        assert am.get('tool_calls'), 'tool_calls must be preserved'
+        # Non-empty content is normalized to the single-block form so its
+        # cache_control-stripped bytes are invariant across rounds.
+        assert am['content'] == [{'type': 'text', 'text': 'thinking out loud'}], (
+            'assistant-with-tool_calls NON-EMPTY content must be normalized to '
+            f'single-block form (the {{content}} floor-miss fix) — got '
+            f'{am["content"]!r}')
+
+    def test_assistant_with_tool_calls_empty_content_stays_str(self):
+        """The carve-out that SURVIVES the {content} fix: EMPTY assistant content
+        is left as a bare ``str`` (never fabricated into a ``[{text:''}]`` block
+        the model never wrote). The normalization guard is
+        ``isinstance(content, str) and content`` — empty string is falsy, so it
+        is skipped. This is the invariant the old test's spirit protected, now
+        scoped to the empty case where it is actually correct."""
+        from lib.llm import add_cache_breakpoints
+
+        msgs = [{'role': 'system', 'content': 'sys ' * 20},
+                {'role': 'user', 'content': 'go'},
+                {'role': 'assistant', 'content': '',
+                 'tool_calls': [{'id': 'c0', 'type': 'function',
+                                 'function': {'name': 'read_files',
+                                              'arguments': '{}'}}]},
+                {'role': 'tool', 'tool_call_id': 'c0', 'content': 'r'}]
+        body = {'model': 'claude-opus-4-20250514', 'messages': msgs}
+        add_cache_breakpoints(body)
+        am = body['messages'][2]
+        assert am.get('tool_calls'), 'tool_calls must be preserved'
+        assert am['content'] == '', (
+            'EMPTY assistant-with-tool_calls content must stay a bare str — a '
+            f'fabricated empty text block is the carve-out — got {am["content"]!r}')
 
     def test_markable_tool_content_is_always_block_form(self):
         """After add_cache_breakpoints every non-empty tool/user message is in

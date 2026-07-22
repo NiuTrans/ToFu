@@ -2521,7 +2521,7 @@ async def upsert_library_entry(paper_id):
             # are the only places that originate those big columns.
             existing = db.execute(
                 'SELECT title, pdf_url, pdf_filename, arxiv_id, paper_hash, '
-                '       parsed_text, images, page_count, created_at '
+                '       parsed_text, images, page_count, folder_id, created_at '
                 'FROM paper_library WHERE id=? AND user_id=?',
                 (paper_id, DEFAULT_USER_ID),
             ).fetchone()
@@ -2545,6 +2545,15 @@ async def upsert_library_entry(paper_id):
             arxiv_id = _take('arxivId', 'arxiv_id', cap=64)
             paper_hash = _take('paperHash', 'paper_hash', cap=64)
             parsed_text = _take('parsedText', 'parsed_text', cap=_LIB_PARSED_TEXT_CAP)
+            # folder_id: a metadata-only assign PUT sends folderId; when the
+            # client omits it (heavy first-save from ingest), preserve existing.
+            # An explicit empty string means "unfile", which _take can't express
+            # (it treats '' as absent) — so honour a present-but-empty folderId
+            # directly from the request body.
+            if 'folderId' in data:
+                folder_id = str(data.get('folderId') or '')[:64]
+            else:
+                folder_id = (existing['folder_id'] if existing else '') or ''
 
             # Images: accept client list on first write; fall back to disk
             # manifest (server source of truth) so the row always reflects reality.
@@ -2578,7 +2587,8 @@ async def upsert_library_entry(paper_id):
                 'qa_history': json.dumps(qa, ensure_ascii=False),
                 'images': json.dumps(images, ensure_ascii=False),
                 'babel_cache': json.dumps(babel, ensure_ascii=False),
-                'page_count': _page_count, 'created_at': created_at,
+                'page_count': _page_count, 'folder_id': folder_id,
+                'created_at': created_at,
                 'updated_at': now_ms,
             }, retry=True)
             logger.info('[Paper:Library] Upserted %s — title=%.60s qa=%d imgs=%d',

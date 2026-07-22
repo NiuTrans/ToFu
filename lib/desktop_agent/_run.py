@@ -24,7 +24,8 @@ logger = get_logger(__name__)
 #  Polling Loop (runs on your local machine)
 # ══════════════════════════════════════════════════════════
 
-def run_agent(server_url, permissions, poll_interval=1.0, bridge_secret=''):
+def run_agent(server_url, permissions, poll_interval=1.0, bridge_secret='',
+              stop_event=None):
     """Main agent loop — polls server for commands, executes locally, returns results.
 
     Args:
@@ -34,6 +35,9 @@ def run_agent(server_url, permissions, poll_interval=1.0, bridge_secret=''):
         bridge_secret: optional X-Bridge-Secret value. Required when the
             server has TOFU_BRIDGE_SECRET configured. Pass empty string to
             disable (LAN-only deployments).
+        stop_event: optional ``threading.Event``; when set, the loop exits
+            cleanly at the next poll boundary. Lets the desktop tray toggle the
+            agent off without killing the process.
     """
 
     endpoint = f'{server_url.rstrip("/")}/api/desktop/poll'
@@ -54,6 +58,9 @@ def run_agent(server_url, permissions, poll_interval=1.0, bridge_secret=''):
     consecutive_errors = 0
 
     while True:
+        if stop_event is not None and stop_event.is_set():
+            logger.info('[Agent] stop_event set — shutting down cleanly')
+            break
         try:
             # Send results + get new commands (single endpoint, like browser extension)
             resp = requests.post(
@@ -163,11 +170,13 @@ Examples:
 
     args = parser.parse_args(argv)
 
-    permissions = {
-        'allow_write': args.allow_write or args.allow_all,
-        'allow_exec': args.allow_exec or args.allow_all,
-        'allow_gui': args.allow_gui or args.allow_all,
-    }
+    from lib.desktop_agent._permissions import build_permissions
+    permissions = build_permissions(
+        allow_write=args.allow_write,
+        allow_exec=args.allow_exec,
+        allow_gui=args.allow_gui,
+        allow_all=args.allow_all,
+    )
 
     bridge_secret = (args.bridge_secret
                      or os.environ.get('TOFU_BRIDGE_SECRET')

@@ -45,6 +45,23 @@ def exchange_code(provider: str, code: str, state: str = '') -> dict:
     if not pkce_verifier:
         return {'error': 'No active OAuth flow found. Please start a new login first.'}
 
+    # ── CSRF state validation ──
+    # If the caller supplied a `state` AND the flow recorded one, they MUST
+    # match — a mismatch means the code/state pair did not originate from the
+    # flow this server started (classic OAuth CSRF: an attacker feeds a victim
+    # their own auth code). Reject rather than exchange. When the caller omits
+    # state we fall back to the flow's own state (the manual copy-paste flow
+    # has no channel to echo it back); this preserves that path while closing
+    # the hole for any caller that DOES present a forged state.
+    if state and flow_state and state != flow_state:
+        logger.warning('[OAuth] state mismatch for %s — rejecting code exchange '
+                       '(possible CSRF)', provider)
+        with _flows_lock:
+            if provider in _active_flows:
+                _active_flows[provider]['status'] = 'error'
+                _active_flows[provider]['error'] = 'state_mismatch'
+        return {'error': 'OAuth state mismatch — possible CSRF; start a new login.'}
+
     # Use the state from the active flow if not explicitly provided
     if not state:
         state = flow_state

@@ -125,3 +125,12 @@ uv>=0.4
 # opened; execution stays on the existing get_db() connection. Importing the
 # _core_schema module is optional — the legacy DB path does not depend on it.
 sqlalchemy>=2.0
+# zhconv — pure-Python (MediaWiki tables, MIT) Traditional↔Simplified Chinese
+# converter. Used by lib/transcription/_zh.py as a FAIL-SAFE last gate on voice
+# transcripts: Whisper-family / omni-chat ASR models emit Mandarin as Traditional
+# by default, so a Simplified-Chinese user sees garbled variant text. No native
+# build step (fits a vanilla self-hosted box + bootstrap.py). Soft dep at runtime:
+# normalize_zh_variant() degrades to a no-op on ImportError, so the transcribe
+# path works without it — shipping it makes voice input Just Work in Simplified.
+# Disable/retarget via TOFU_ASR_ZH_VARIANT (default zh-cn; empty/off = raw).
+zhconv>=1.4

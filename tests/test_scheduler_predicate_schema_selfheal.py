@@ -43,6 +43,23 @@ def _critical(module_path):
     return {t: set(cols) for t, cols in mod._CRITICAL_COLUMNS.items()}
 
 
+# Same divergence class, second occurrence (2026-07-22): paper_library.folder_id
+# was added via a guarded ALTER in _chat.py + declared on the Core table, but
+# NOT registered in _CRITICAL_COLUMNS. It is named directly in the
+# GET /api/v1/paper/library SELECT (_PAPER_LIB_COLUMNS), so a version-current DB
+# missing it threw UndefinedColumn on every bookshelf load (HTTP 500).
+def test_paper_library_folder_id_is_critical_on_both_backends():
+    for module_path, label in (
+        ('lib.database._schema_sqlite._selfheal', 'SQLite'),
+        ('lib.database._schema_pg._selfheal', 'PG'),
+    ):
+        crit = _critical(module_path)
+        assert 'folder_id' in crit.get('paper_library', set()), (
+            f'{label} _CRITICAL_COLUMNS missing paper_library.folder_id — the '
+            f'version fast-path will skip the ALTER on an existing DB and '
+            f'GET /api/v1/paper/library throws UndefinedColumn')
+
+
 def test_sqlite_critical_columns_cover_predicate_columns():
     crit = _critical('lib.database._schema_sqlite._selfheal')
     for table, required in _REQUIRED_PREDICATE_CRITICAL.items():

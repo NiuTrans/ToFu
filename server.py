@@ -510,7 +510,11 @@ if _fault_shm_log is not None:
 # on a small box) pinning the whole C-extension working set can push RSS
 # past memory.max → the OOM killer SIGKILLs the process at boot (a bare
 # "Killed" with no traceback). mlockall only HELPS on a FUSE mount and is
-# only SAFE with headroom under the cgroup limit, so we gate on both.
+# only SAFE with headroom under the cgroup limit, so we gate on both the
+# limit AND live usage: on a SHARED cgroup the ceiling can be the whole
+# machine yet already ~full, and pinning there both adds unreclaimable pages
+# and inflates our oom_score so the killer targets us first — so we also skip
+# when the cgroup is already past TOFU_MLOCK_MAX_USAGE_PCT (default 85%) full.
 # Override: TOFU_MLOCK=1 forces it on, =0 forces it off (default 'auto').
 def _tofu_path_is_fuse(_path):
     """Best-effort: True if *_path* sits on a FUSE filesystem (stdlib-only)."""
@@ -558,6 +562,30 @@ def _tofu_cgroup_mem_limit_bytes():
     return None
 
 
+def _tofu_cgroup_mem_usage_bytes():
+    """Current cgroup memory usage in bytes, or None if unknown (stdlib-only).
+
+    Includes reclaimable page cache on purpose: a shared cgroup running at the
+    cache edge is exactly the contended, spike-prone state where adding
+    unreclaimable pinned pages is net-harmful (see _tofu_should_mlock).
+    """
+    for _p in ('/sys/fs/cgroup/memory.current',                    # cgroup v2
+               '/sys/fs/cgroup/memory/memory.usage_in_bytes'):      # cgroup v1
+        try:
+            with open(_p, 'r') as _f:
+                _raw = _f.read().strip()
+        except OSError:
+            continue
+        try:
+            _val = int(_raw)
+        except ValueError:
+            continue
+        if _val < 0:
+            return None
+        return _val
+    return None
+
+
 def _tofu_should_mlock():
     """Decide whether mlockall is worth it. Returns (do_it, reason)."""
     _mode = os.environ.get('TOFU_MLOCK', 'auto').strip().lower()
@@ -580,10 +608,30 @@ def _tofu_should_mlock():
     except ValueError:
         _min_gb = 8.0
     _gib = float(1 << 30)
-    if _limit >= _min_gb * _gib:
-        return True, 'on FUSE, cgroup limit %.1fGiB >= %.1fGiB' % (_limit / _gib, _min_gb)
-    return False, ('on FUSE but cgroup limit %.1fGiB < %.1fGiB — skipping to avoid '
-                   'OOM (set TOFU_MLOCK=1 to force)' % (_limit / _gib, _min_gb))
+    if _limit < _min_gb * _gib:
+        return False, ('on FUSE but cgroup limit %.1fGiB < %.1fGiB — skipping to avoid '
+                       'OOM (set TOFU_MLOCK=1 to force)' % (_limit / _gib, _min_gb))
+    # The cgroup limit is generous, but on a SHARED cgroup that ceiling can be
+    # the whole machine and already ~full of siblings + FUSE page/slab cache.
+    # Pinning here adds unreclaimable pages AND inflates our own oom_score, so
+    # the OOM killer picks us first (highest-RSS process in the group). Gate on
+    # LIVE headroom: skip if usage already sits above TOFU_MLOCK_MAX_USAGE_PCT
+    # (default 85%) of the limit. Unknown usage → proceed (matches prior behaviour).
+    _usage = _tofu_cgroup_mem_usage_bytes()
+    if _usage is not None and _usage > 0:
+        try:
+            _max_pct = float(os.environ.get('TOFU_MLOCK_MAX_USAGE_PCT', '85'))
+        except ValueError:
+            _max_pct = 85.0
+        _used_pct = 100.0 * _usage / float(_limit)
+        if _used_pct >= _max_pct:
+            return False, ('on FUSE but cgroup %.1f%% full (%.1f/%.1fGiB) >= %.0f%% — '
+                           'skipping to avoid OOM on a contended shared cgroup '
+                           '(set TOFU_MLOCK=1 to force)'
+                           % (_used_pct, _usage / _gib, _limit / _gib, _max_pct))
+        return True, ('on FUSE, cgroup limit %.1fGiB >= %.1fGiB and %.1f%% used < %.0f%%'
+                      % (_limit / _gib, _min_gb, _used_pct, _max_pct))
+    return True, 'on FUSE, cgroup limit %.1fGiB >= %.1fGiB (usage unknown)' % (_limit / _gib, _min_gb)
 
 
 _tofu_do_mlock, _tofu_mlock_reason = _tofu_should_mlock()
@@ -1249,6 +1297,19 @@ def _boot(msg, *args):
 
 _boot('🫧 Tofu (async) starting up — loading core modules…')
 
+# ── Cap onnxruntime threads BEFORE any import can create an InferenceSession ──
+# pymupdf4llm → pymupdf_layout → onnxruntime (also rapidocr/cadtrans) spawns one
+# worker per HOST cpu and pins each via pthread_setaffinity_np. On a cpuset-
+# restricted host (containers, YARN/Hope, exported cluster deployments) the pins
+# fail with EINVAL → a stderr storm during `python server.py`. The guard must
+# run before the critical-import chain (tofu_search.fetch imports pymupdf4llm),
+# so install it here, first thing after the boot banner.
+try:
+    from lib.onnx_thread_guard import install_onnx_thread_guard
+    install_onnx_thread_guard()
+except Exception as _onnx_guard_err:  # never let the guard itself break boot
+    _boot('onnx thread guard install skipped: %s', _onnx_guard_err)
+
 from lib.database import close_db, init_db, warmup_db
 
 
@@ -1404,8 +1465,8 @@ async def method_override():
                 if isinstance(data, str):
                     corrected = json.dumps(json.loads(data)).encode('utf-8')
                     request._body = corrected
-            except (json.JSONDecodeError, TypeError):
-                pass
+            except (json.JSONDecodeError, TypeError) as e:
+                _lifecycle_log.debug('[method_override] body unwrap skipped: %s', e)
 
 
 # ── Request lifecycle logging ──
@@ -1415,6 +1476,41 @@ import uuid as _uuid
 _lifecycle_log = get_logger('server.lifecycle')
 _QUIET_PREFIXES = ('/api/browser/', '/api/desktop/', '/static/', '/api/task/')
 _SLOW_THRESHOLD_S = 2.0
+# Responses at/above this size are flagged even when the server returned
+# quickly — the "fast but heavy" case (e.g. a multi-MB conversation fetch)
+# that otherwise only shows up as a client-side timeout over a slow proxy.
+_HEAVY_RESPONSE_BYTES = 1_048_576  # 1 MiB
+
+
+def _response_size(response):
+    """Return the response body size in bytes from Content-Length, else None.
+
+    Streaming / chunked responses (SSE, ``Content-Range`` partials) carry no
+    reliable ``Content-Length``; we return None so the caller omits the size
+    rather than blocking to materialize the body.
+    """
+    try:
+        raw = response.headers.get('Content-Length')
+    except Exception:
+        return None
+    if raw is None:
+        return None
+    try:
+        n = int(raw)
+    except (ValueError, TypeError):
+        return None
+    return n if n >= 0 else None
+
+
+def _fmt_size(n):
+    """Format a byte count as a compact human string ('2.8MB'); '' if unknown."""
+    if not isinstance(n, int) or n < 0:
+        return ''
+    if n < 1024:
+        return '%dB' % n
+    if n < 1024 * 1024:
+        return '%.1fKB' % (n / 1024)
+    return '%.1fMB' % (n / (1024 * 1024))
 
 @app.before_request
 async def _assign_req_id_and_log():
@@ -1429,25 +1525,46 @@ async def _assign_req_id_and_log():
 
 @app.after_request
 async def _log_response(response):
-    elapsed = time.time() - getattr(request, '_start_time', time.time())
     rid = _get_req_id()
     path = request.full_path.rstrip('?')
     status = response.status_code
     is_quiet = any(path.startswith(p) for p in _QUIET_PREFIXES)
 
+    size = _response_size(response)
+    size_str = _fmt_size(size)
+
+    # Elapsed is only meaningful when before_request stamped _start_time. Some
+    # early-error / middleware paths reach after_request without it — the old
+    # `time.time() - getattr(request, '_start_time', time.time())` evaluated
+    # the left clock BEFORE the default on the right, yielding a slightly
+    # NEGATIVE span that polluted the log. Detect the absence explicitly (emit
+    # size only), and clamp against clock skew when present.
+    _start = getattr(request, '_start_time', None)
+    if _start is None:
+        elapsed = None
+        timing = '(%s)' % size_str if size_str else '(elapsed n/a)'
+    else:
+        elapsed = max(0.0, time.time() - _start)
+        timing = '(%.3fs, %s)' % (elapsed, size_str) if size_str else '(%.3fs)' % elapsed
+
     if status >= 500:
-        _lifecycle_log.error('[%s] ← %s %s %d (%.3fs)', rid, request.method, path, status, elapsed)
+        _lifecycle_log.error('[%s] ← %s %s %d %s', rid, request.method, path, status, timing)
     elif status >= 400:
         if status == 404 and request.path.startswith('/.well-known/'):
-            _lifecycle_log.debug('[%s] ← %s %s %d (%.3fs)', rid, request.method, path, status, elapsed)
+            _lifecycle_log.debug('[%s] ← %s %s %d %s', rid, request.method, path, status, timing)
         else:
-            _lifecycle_log.warning('[%s] ← %s %s %d (%.3fs)', rid, request.method, path, status, elapsed)
-    elif elapsed >= _SLOW_THRESHOLD_S and not is_quiet:
-        _lifecycle_log.warning('[%s] ← %s %s %d SLOW (%.3fs)', rid, request.method, path, status, elapsed)
+            _lifecycle_log.warning('[%s] ← %s %s %d %s', rid, request.method, path, status, timing)
+    elif elapsed is not None and elapsed >= _SLOW_THRESHOLD_S and not is_quiet:
+        _lifecycle_log.warning('[%s] ← %s %s %d SLOW %s', rid, request.method, path, status, timing)
+    elif size is not None and size >= _HEAVY_RESPONSE_BYTES and not is_quiet:
+        # Fast but heavy: the server was quick, yet a multi-MB body will feel
+        # slow to the client over a constrained proxy. Surface it at WARN so
+        # "fast server, heavy experience" is traceable in server logs.
+        _lifecycle_log.warning('[%s] ← %s %s %d HEAVY %s', rid, request.method, path, status, timing)
     elif not is_quiet:
-        _lifecycle_log.info('[%s] ← %s %s %d (%.3fs)', rid, request.method, path, status, elapsed)
+        _lifecycle_log.info('[%s] ← %s %s %d %s', rid, request.method, path, status, timing)
     else:
-        _lifecycle_log.debug('[%s] ← %s %s %d (%.3fs)', rid, request.method, path, status, elapsed)
+        _lifecycle_log.debug('[%s] ← %s %s %d %s', rid, request.method, path, status, timing)
 
     response.headers['X-Request-ID'] = rid
     return response
@@ -2405,6 +2522,15 @@ if __name__ == '__main__':
             _validate_imports()
             _start_background_workers()
 
+            # Shared-cgroup memory-pressure defenses (① self-check + ② monitor).
+            # Both graceful no-ops off-cgroup. See lib/cgroup_guard.py.
+            try:
+                from lib import cgroup_guard
+                cgroup_guard.startup_self_check()
+                cgroup_guard.start_monitor()
+            except Exception as e:
+                _server_log.warning('[cgroup] pressure defenses failed to start: %s', e)
+
             if _shutdown_requested.is_set():
                 _server_log.info('[Server] Shutdown requested during import '
                                  'validation — skipping MCP + background starts.')
@@ -2487,6 +2613,17 @@ if __name__ == '__main__':
                 start_fs_keepalive()
             except Exception as e:
                 _server_log.warning('FS keepalive failed: %s', e)
+
+            # ── code-server fileWatcher excludes sync ──
+            # Mirror the project's canonical watcherExclude globs into the
+            # User-scope code-server settings so opening a PARENT dir as the
+            # workspace root can't recurse into swebench_workdir/ and OOM the
+            # host via fileWatcher workers (see lib/code_server_excludes.py).
+            try:
+                from lib.code_server_excludes import start_code_server_excludes_sync
+                start_code_server_excludes_sync()
+            except Exception as e:
+                _server_log.warning('code-server excludes sync failed: %s', e)
 
             # ── Cross-DC detection ──
             try:
@@ -2599,8 +2736,33 @@ if __name__ == '__main__':
             _bid = '?'
         _boot('[CacheFixGen] CACHE_FIX_GEN=%d pid=%d bootId=%s (in-memory)'
               % (_cfg, os.getpid(), _bid))
+        # Also self-report the RESOLVED mid-anchor layout mode. The cache-cost
+        # acceptance analyzer reads this to POSITIVELY confirm the running
+        # process placed no mid stepping-stone (mode=drop) — so a post-restart
+        # cache_mid_out_of_window=0 is attributable to the fix, not merely to
+        # traffic too short to have armed a mid. In-memory (post-import) value,
+        # so it reflects the bytecode + env actually loaded.
+        try:
+            from lib.llm.cache import _mid_placement_mode as _mpm
+            _boot('[CacheMidMode] TOFU_CACHE_MID_MODE=%s pid=%d bootId=%s (in-memory)'
+                  % (_mpm(), os.getpid(), _bid))
+        except Exception as _mpm_e:
+            _boot_logger.warning('[CacheMidMode] self-report failed: %s', _mpm_e)
     except Exception as _cfg_e:  # never let a diagnostic line block boot
         _boot_logger.warning('[CacheFixGen] self-report failed: %s', _cfg_e)
+
+    # ── Source-tree fingerprint (restart-applied-my-edits ground truth) ──
+    # Warm + freeze the code fingerprint at boot so it reflects the on-disk
+    # source THIS process actually loaded (HEAD + uncommitted tracked edits).
+    # The restart UI captures the OLD process's digest and only declares
+    # "your changes are live" when the NEW process reports a DIFFERENT one.
+    try:
+        from lib import boot_identity as _bi2
+        _fp = _bi2.code_fingerprint()
+        _boot('[CodeFingerprint] head=%s dirty=%s digest=%s'
+              % (_fp.get('head'), _fp.get('dirty'), _fp.get('digest')))
+    except Exception as _fp_e:  # never let a diagnostic line block boot
+        _boot_logger.warning('[CodeFingerprint] self-report failed: %s', _fp_e)
 
     _boot('Ready — handing off to Hypercorn.')
     try:

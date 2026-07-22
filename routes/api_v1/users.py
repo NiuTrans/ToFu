@@ -293,8 +293,11 @@ def me_route():
                        'suspended / deleted).',
           tags=['users'], scope='admin')
 def list_users_route():
-    limit = max(1, min(int(request.args.get('limit') or 100), 1000))
-    offset = max(0, int(request.args.get('offset') or 0))
+    try:
+        limit = max(1, min(int(request.args.get('limit') or 100), 1000))
+        offset = max(0, int(request.args.get('offset') or 0))
+    except (ValueError, TypeError):
+        return api_bad_request('limit/offset must be integers', field='limit')
     status = (request.args.get('status') or '').strip()
     try:
         rows = list_users(limit=limit, offset=offset, status=status)

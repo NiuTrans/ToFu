@@ -185,6 +185,7 @@ _BUILTIN_PROVIDER_TEMPLATES = [
      'name': 'Moonshot (Kimi)',
      'base_url': 'https://api.moonshot.ai/v1',
      'models': [
+         {'model_id': 'kimi-k3',          'capabilities': ['text', 'thinking', 'cheap']},
          {'model_id': 'kimi-k2.6',        'capabilities': ['text', 'vision', 'thinking', 'cheap']},
          {'model_id': 'kimi-k2-thinking', 'capabilities': ['text', 'thinking', 'cheap']},
      ]},

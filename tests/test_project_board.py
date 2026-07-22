@@ -94,6 +94,112 @@ def test_complete(flask_app):
     assert 'completed' in _feed_kinds(flask_app, '/b/c')
 
 
+def test_done_epics_do_not_count_toward_admission_cap(flask_app):
+    """A board full of COMPLETED epics must still accept a new post — the
+    reported "board full indefinitely" bug. The active-only admission counts
+    status!='done' rows, so completing epics frees the board back up."""
+    from lib.conversations.project_board import (
+        _MAX_ACTIVE_TASKS, complete_task, post_task,
+    )
+    import lib.conversations.project_board as pb
+    with flask_app.app_context():
+        # Fill the board to the active cap, then COMPLETE them all.
+        ids = []
+        # Shrink the cap for the test so we don't insert 200 rows.
+        orig_active = pb._MAX_ACTIVE_TASKS
+        pb._MAX_ACTIVE_TASKS = 3
+        try:
+            for i in range(3):
+                r = post_task('/b/cap', 'cA', f'epic {i}')
+                assert r['ok'], r
+                ids.append(r['id'])
+            # At the cap now → a further active post is refused.
+            refused = post_task('/b/cap', 'cA', 'one too many')
+            assert not refused['ok'] and 'full' in refused['error']
+            # Complete them all → board should accept new epics again.
+            for tid in ids:
+                assert complete_task('/b/cap', 'cA', tid)['ok']
+            after = post_task('/b/cap', 'cA', 'now there is room')
+            assert after['ok'], \
+                'completed epics must not count toward the admission cap'
+        finally:
+            pb._MAX_ACTIVE_TASKS = orig_active
+    # sanity: the alias still points somewhere sensible
+    assert _MAX_ACTIVE_TASKS >= 1
+
+
+def test_claim_cas_prevents_concurrent_double_claim(flask_app, monkeypatch):
+    """TOCTOU guard: two conversations racing an OPEN epic must NOT both
+    succeed. We force the read→write interleave deterministically — during the
+    LOSER's claim, right after its eligibility SELECT (in _effective_status), a
+    competing conversation's claim commits. With the CAS precondition the
+    loser's UPDATE matches 0 rows → advisory refusal naming the real owner, and
+    the board shows exactly ONE owner."""
+    import lib.conversations.project_board as pb
+    from lib.conversations.project_board import claim_task, post_task, read_board
+
+    with flask_app.app_context():
+        tid = post_task('/b/cas', 'cWinner', 'contended epic')['id']
+
+        real_eff = pb._effective_status
+        fired = {'done': False}
+
+        def _racing_eff(stored, lease, now):
+            # First call happens inside cLoser's claim, after its SELECT and
+            # before its UPDATE. Slip the winner's full claim in there ONCE.
+            if not fired['done']:
+                fired['done'] = True
+                res = claim_task('/b/cas', 'cWinner', tid)
+                assert res['ok'], f'winner claim should succeed: {res}'
+            return real_eff(stored, lease, now)
+
+        monkeypatch.setattr(pb, '_effective_status', _racing_eff)
+        loser = claim_task('/b/cas', 'cLoser', tid)
+
+        assert loser['ok'] is False, 'loser must NOT also succeed (no silent steal)'
+        assert loser.get('error') == 'already_claimed'
+        assert loser.get('owner') == 'cWinner'
+
+        monkeypatch.undo()
+        board = read_board('/b/cas')
+    owners = [t['owner_conv_id'] for t in board['tasks'] if t['status'] == 'claimed']
+    assert owners == ['cWinner'], f'exactly one owner must hold the epic, got {owners}'
+
+
+def test_old_done_epics_are_pruned_on_post(flask_app):
+    """Completed epics are retained but BOUNDED — posting past the done-retain
+    cap prunes the OLDEST done rows so project_tasks can't grow forever."""
+    from lib.conversations.project_board import complete_task, post_task
+    from lib.database import DOMAIN_CHAT, get_thread_db
+    import lib.conversations.project_board as pb
+    with flask_app.app_context():
+        orig_done = pb._MAX_DONE_RETAINED
+        pb._MAX_DONE_RETAINED = 3
+        try:
+            # Create + complete 5 epics (staggered updated_at so "oldest" is
+            # well-defined), then one more post triggers the prune.
+            for i in range(5):
+                tid = post_task('/b/prune', 'cA', f'done epic {i}')['id']
+                complete_task('/b/prune', 'cA', tid)
+                db = get_thread_db(DOMAIN_CHAT)
+                db.execute('UPDATE project_tasks SET updated_at=? WHERE id=?',
+                           (1000 + i, tid))
+                db.commit()
+            # A fresh post runs the prune: keep only _MAX_DONE_RETAINED done rows.
+            post_task('/b/prune', 'cA', 'the trigger')
+            db = get_thread_db(DOMAIN_CHAT)
+            done = db.execute(
+                "SELECT title FROM project_tasks WHERE project_path=? "
+                "AND status='done' ORDER BY updated_at ASC",
+                ('/b/prune',)).fetchall()
+        finally:
+            pb._MAX_DONE_RETAINED = orig_done
+    titles = [r['title'] for r in done]
+    assert len(titles) == 3, f'done rows must be pruned to the cap, got {titles}'
+    # The oldest two (epic 0, epic 1) were pruned; the newest three remain.
+    assert titles == ['done epic 2', 'done epic 3', 'done epic 4'], titles
+
+
 def test_long_title_survives_roundtrip_uncapped(flask_app):
     """A multi-sentence epic description (~1500 chars) MUST survive
     post_task → read_board → render_board_block with ZERO clipping.

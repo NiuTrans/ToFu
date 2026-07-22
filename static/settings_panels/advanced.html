@@ -1,0 +1,28 @@
+        <div class="settings-tab-panel" id="settingsTab_advanced">
+          <div class="settings-section-title" data-i18n="settings.importExport">导入 / 导出</div>
+          <p class="settings-desc" data-i18n="settings.importExportDesc">将所有服务器端配置导出为 JSON，或从文件导入。</p>
+          <div class="settings-row" style="gap:10px;">
+            <button class="btn btn-secondary btn-sm" onclick="exportServerConfig()" data-i18n="settings.exportJson">⬇ 导出 JSON</button>
+            <button class="btn btn-secondary btn-sm" onclick="document.getElementById('settingsImportFile').click()" data-i18n="settings.importJson">⬆ 导入 JSON</button>
+            <input type="file" id="settingsImportFile" accept=".json" style="display:none" onchange="importServerConfig(event)">
+          </div>
+
+          <div class="settings-divider"></div>
+          <div class="settings-section-title" data-i18n="settings.pricingOverride">价格覆盖</div>
+          <p class="settings-desc" data-i18n="settings.pricingOverrideDesc">模型定价（美元 / 每百万 Token）。编辑以下 JSON 进行自定义。</p>
+          <textarea id="settingPricing" class="settings-textarea settings-mono" rows="8" placeholder="正在加载价格数据..." data-i18n-placeholder="settings.loadingPricing"></textarea>
+
+          <div class="settings-divider"></div>
+          <div class="settings-section-title" data-i18n="settings.localCache">本地缓存</div>
+          <p class="settings-desc" data-i18n="settings.localCacheDesc">对话缓存在 IndexedDB 中以实现即时加载。服务器始终是数据的唯一来源。</p>
+          <div class="settings-row" style="gap:10px; align-items:center;">
+            <span class="settings-info-value" id="settingsCacheStats" style="font-size:13px;opacity:0.7;">—</span>
+            <button class="btn btn-secondary btn-sm" id="settingsClearCacheBtn" onclick="_clearConvCacheFromSettings()" data-i18n="settings.clearCache">清除缓存</button>
+          </div>
+
+          <div class="settings-divider"></div>
+          <div class="settings-section-title" data-i18n="settings.serverInfo">服务器信息</div>
+          <div class="settings-server-info" id="settingsServerInfo">
+            <div class="settings-info-row"><span class="settings-info-label" data-i18n="settings.status">状态</span><span class="settings-info-value" id="settingsSrvStatus">—</span></div>
+          </div>
+        </div>

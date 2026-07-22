@@ -95,6 +95,65 @@ class TestResolveImageRef:
 
 
 # ═══════════════════════════════════════════════════════════════════════
+#  Reverse-proxy prefix tolerance (the mrvn167fid7kdw crop bug)
+#  Uploaded URLs get a '/proxy/<port>/' base path baked in under a VS Code /
+#  code-server reverse proxy. The stored URL is '/proxy/15002/api/images/<f>',
+#  which a bare startswith('/api/images/') missed → no ref hint emitted → the
+#  model fabricated a bogus path → File not found.
+# ═══════════════════════════════════════════════════════════════════════
+
+@pytest.mark.unit
+class TestProxyPrefixTolerance:
+
+    _PROXIED = '/proxy/15002/api/images/1784697853816_4f7e49b5.jpg'
+
+    def test_canonical_image_ref_strips_proxy_prefix(self):
+        from lib.attachments import canonical_image_ref
+        assert canonical_image_ref(self._PROXIED) == '/api/images/1784697853816_4f7e49b5.jpg'
+        # Bare canonical URL is returned unchanged.
+        assert canonical_image_ref('/api/images/a.png') == '/api/images/a.png'
+        # Non-image refs → '' (falsy recognition predicate).
+        assert canonical_image_ref('/dev/null') == ''
+        assert canonical_image_ref('') == ''
+        assert canonical_image_ref(None) == ''
+
+    def test_is_attachment_ref_accepts_proxied(self):
+        from lib.attachments import is_attachment_ref
+        assert is_attachment_ref(self._PROXIED) is True
+
+    def test_resolve_proxied_reads_disk(self, uploads_dir):
+        from lib.attachments import resolve_attachment
+        _write_image(str(uploads_dir / '1784697853816_4f7e49b5.jpg'), w=120, h=90)
+        out = resolve_attachment(self._PROXIED)
+        assert out and out['kind'] == 'image'
+        assert out['mime_type'] == 'image/jpeg'
+
+    def test_inspect_image_on_proxied_ref_succeeds(self, uploads_dir):
+        # End-to-end: the reported bug. A proxy-prefixed uploaded ref must
+        # crop the original, NOT return 'File not found'.
+        from lib.project_mod import tool_inspect_image
+        _write_image(str(uploads_dir / '1784697853816_4f7e49b5.jpg'), w=1000, h=800)
+        out = tool_inspect_image('/proj/base', self._PROXIED,
+                                 crop=[0.1, 0.5, 0.5, 0.9])
+        img, _ = _decode_view(out)
+        assert out['sourceSize'] == [1000, 800]
+
+    def test_NEUTER_startswith_regresses_proxied(self, uploads_dir, monkeypatch):
+        # NEUTER: reverting is_attachment_ref to the old startswith() check
+        # makes a proxied ref UNrecognised → falls through to path resolution
+        # and fails. Proves the .find() marker tolerance is load-bearing.
+        import lib.attachments as att
+        from lib.project_mod import tool_inspect_image
+        _write_image(str(uploads_dir / '1784697853816_4f7e49b5.jpg'), w=200, h=200)
+        monkeypatch.setattr(
+            att, 'is_attachment_ref',
+            lambda ref: bool(ref) and isinstance(ref, str) and (
+                ref.startswith(att._DIRECT_IMAGE_PREFIXES) or ref.startswith(att._TEXT_REF_PREFIX)))
+        out = tool_inspect_image('/proj/base', self._PROXIED)
+        assert isinstance(out, str) and out.startswith('Error:')
+
+
+# ═══════════════════════════════════════════════════════════════════════
 #  resolve_attachment — text (PDF/TXT/doc) refs
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -248,3 +307,55 @@ class TestMessageBuilderRefs:
         built = _build_user_message(msg)
         ref_texts = [b.get('text', '') for b in built['content'] if b.get('type') == 'text']
         assert not any('image ref:' in t for t in ref_texts)
+
+    def test_proxied_url_emits_canonical_ref(self):
+        # The crop bug: a proxy-prefixed uploaded URL must STILL emit the
+        # inspect_image ref hint, canonicalized to the bare /api/images/ tail
+        # (so the model passes a resolvable path, not a fabricated one).
+        from lib.tasks_pkg.conv_message_builder._transform import _build_user_message
+        msg = {'role': 'user', 'content': 'look',
+               'images': [{'url': '/proxy/15002/api/images/abc.png',
+                           'mediaType': 'image/png'}]}
+        built = _build_user_message(msg)
+        ref_texts = [b['text'] for b in built['content'] if b.get('type') == 'text']
+        # Emits a ref, canonicalized (no /proxy/ prefix leaked into the hint).
+        assert any('path="/api/images/abc.png"' in t and 'inspect_image' in t
+                   for t in ref_texts)
+        assert not any('/proxy/' in t for t in ref_texts)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  inspect_image collapsed-header display label — no 'uploaded]' junk
+# ═══════════════════════════════════════════════════════════════════════
+
+@pytest.mark.unit
+class TestInspectImageDisplayLabel:
+
+    def test_bracketed_ref_arg_shows_real_filename(self):
+        # The model sometimes passes the whole hint string verbatim as `path`.
+        # The label must show the real uploaded filename, NOT basename junk
+        # like 'uploaded]' from the reported bug.
+        from lib.tasks_pkg.tool_display._renderers import _tool_display_inspect_image
+        disp, extra = _tool_display_inspect_image(
+            'inspect_image',
+            {'path': '[image ref: /api/images/uploaded]', 'crop': [0.1, 0.5, 0.5, 0.9]},
+            'tc1', '')
+        assert extra['toolName'] == 'inspect_image'
+        assert 'uploaded]' not in disp
+        assert disp.startswith('uploaded')  # real filename
+        assert 'crop' in disp
+
+    def test_proxied_path_arg_shows_real_filename(self):
+        from lib.tasks_pkg.tool_display._renderers import _tool_display_inspect_image
+        disp, _ = _tool_display_inspect_image(
+            'inspect_image',
+            {'path': '/proxy/15002/api/images/shot_1234.jpg', 'zoom': 2},
+            'tc1', '')
+        assert disp.startswith('shot_1234.jpg')
+
+    def test_plain_filesystem_path_unchanged(self):
+        # Control: an ordinary local image path still shows its basename.
+        from lib.tasks_pkg.tool_display._renderers import _tool_display_inspect_image
+        disp, _ = _tool_display_inspect_image(
+            'inspect_image', {'path': 'diagrams/schema.png', 'crop': [0, 0, 1, 1]}, 'tc1', '')
+        assert disp.startswith('schema.png')

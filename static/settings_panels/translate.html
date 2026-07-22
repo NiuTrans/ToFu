@@ -1,0 +1,128 @@
+        <!-- ═══ Translation Tab ═══ -->
+        <div class="settings-tab-panel" id="settingsTab_translate">
+          <div class="settings-section-title">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-3px;margin-right:6px;opacity:.65"><path d="M5 8l6 6"/><path d="M4 14l6-6 2-3"/><path d="M2 5h12"/><path d="M7 2v3"/><path d="M22 22l-5-10-5 10"/><path d="M14 18h6"/></svg>
+            <span data-i18n="settings.mtService">机器翻译服务</span>
+          </div>
+          <p class="settings-desc" data-i18n-html="settings.mtServiceDesc">配置专用机器翻译 API，比 LLM 翻译更快、更便宜。<br>未配置或关闭时，翻译将自动使用 LLM cheap 模型。</p>
+
+          <div class="settings-group">
+            <div class="settings-toggle-row">
+              <div>
+                <span class="settings-toggle-label" data-i18n="settings.mtEnable">启用机器翻译</span>
+                <div class="settings-toggle-desc" data-i18n="settings.mtEnableDesc">开启后，翻译将优先使用机器翻译 API，失败时自动回退到 LLM</div>
+              </div>
+              <label class="stg-toggle">
+                <input type="checkbox" id="settingMtEnabled">
+                <span class="stg-toggle-track"><span class="stg-toggle-thumb"></span></span>
+              </label>
+            </div>
+          </div>
+
+          <div id="mtProviderFields" style="display:none">
+            <div class="settings-divider"></div>
+
+            <!-- Provider selector -->
+            <div class="settings-section-title" style="display:flex;align-items:center;gap:8px">
+              <span data-i18n="settings.mtProvider">翻译服务商</span>
+              <select id="settingMtProvider" class="mt-provider-select" onchange="_switchMtProvider(this.value)">
+                <option value="niutrans" data-i18n="settings.mtProviderNiutrans">小牛翻译 NiuTrans</option>
+                <option value="custom" data-i18n="settings.mtProviderCustom">自定义 Custom</option>
+              </select>
+            </div>
+
+            <!-- ── NiuTrans provider card ── -->
+            <div class="mt-provider-card" id="mtCardNiutrans">
+              <div class="mt-provider-card-header">
+                <div class="mt-provider-logo" style="background:linear-gradient(135deg,rgba(85,137,252,.12),rgba(85,137,252,.04));border-color:rgba(85,137,252,.25)">
+                  <img src="static/icons/niutrans.svg" width="22" height="22" alt="NiuTrans">
+                </div>
+                <div class="mt-provider-info">
+                  <div class="mt-provider-name">
+                    <span data-i18n="settings.mtNiutransName">小牛翻译</span> <span style="color:var(--text-tertiary);font-weight:400">NiuTrans</span>
+                  </div>
+                  <div class="mt-provider-desc" data-i18n="settings.mtNiutransDesc">支持 400+ 语种互译 · 中英日韩高质量翻译 · 东北大学 NLP 实验室</div>
+                </div>
+                <a href="https://niutrans.com/cloud/overview" target="_blank" rel="noopener noreferrer" class="mt-apply-link">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+                  <span data-i18n="settings.mtApplyKey">申请 API Key</span>
+                </a>
+              </div>
+
+              <div class="mt-provider-card-body">
+                <div class="settings-row">
+                  <div class="settings-field">
+                    <label>API Key</label>
+                    <input type="password" id="settingMtApiKey" placeholder="在小牛翻译控制台 → API 管理中获取" data-i18n-placeholder="settings.mtApiKeyPh" spellcheck="false">
+                  </div>
+                </div>
+
+                <div class="settings-row two-col">
+                  <div class="settings-field">
+                    <label><span data-i18n="settings.mtAppIdLabel">App ID</span> <span style="color:var(--text-tertiary);font-weight:normal" data-i18n="settings.mtAppIdHint">（可选，v2 签名鉴权）</span></label>
+                    <input type="text" id="settingMtAppId" placeholder="留空使用简单 API Key 鉴权 (v1)" data-i18n-placeholder="settings.mtAppIdPh" spellcheck="false">
+                  </div>
+                  <div class="settings-field">
+                    <label><span data-i18n="settings.mtApiUrlLabel">API 地址</span> <span style="color:var(--text-tertiary);font-weight:normal" data-i18n="settings.mtApiUrlHint">（可选）</span></label>
+                    <input type="text" id="settingMtApiUrl" class="settings-mono" placeholder="留空使用默认地址" data-i18n-placeholder="settings.mtApiUrlPh" spellcheck="false">
+                  </div>
+                </div>
+
+                <div class="settings-row" style="align-items:center;gap:12px;margin-top:4px">
+                  <button class="stg-btn-secondary" onclick="_testMtProvider()" id="mtTestBtn">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:4px"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+                    <span data-i18n="settings.mtTestBtn">测试连接</span>
+                  </button>
+                  <span id="mtTestResult" style="font-size:13px"></span>
+                </div>
+              </div>
+            </div>
+            <!-- end NiuTrans card -->
+
+            <!-- ── Custom provider card ── -->
+            <div class="mt-provider-card" id="mtCardCustom" style="display:none">
+              <div class="mt-provider-card-header">
+                <div class="mt-provider-logo" style="background:linear-gradient(135deg,rgba(136,136,136,.10),rgba(136,136,136,.04));border-color:rgba(136,136,136,.2)">
+                  <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#888" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="12" cy="12" r="10"/>
+                    <path d="M2 12h20"/>
+                    <path d="M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10A15.3 15.3 0 0112 2z"/>
+                  </svg>
+                </div>
+                <div class="mt-provider-info">
+                  <div class="mt-provider-name">
+                    <span data-i18n="settings.mtCustomName">自定义服务商</span> <span style="color:var(--text-tertiary);font-weight:400">Custom</span>
+                  </div>
+                  <div class="mt-provider-desc" data-i18n="settings.mtCustomDesc">接入其他兼容 NiuTrans API 格式的翻译服务</div>
+                </div>
+              </div>
+              <div class="mt-provider-card-body">
+                <div class="settings-row">
+                  <div class="settings-field">
+                    <label>API Key</label>
+                    <input type="password" id="settingMtApiKeyCustom" placeholder="翻译服务 API Key" data-i18n-placeholder="settings.mtCustomApiKeyPh" spellcheck="false">
+                  </div>
+                </div>
+                <div class="settings-row two-col">
+                  <div class="settings-field">
+                    <label><span data-i18n="settings.mtAppIdLabel">App ID</span> <span style="color:var(--text-tertiary);font-weight:normal" data-i18n="settings.mtAppIdHint">（可选）</span></label>
+                    <input type="text" id="settingMtAppIdCustom" placeholder="如需签名鉴权则填写" data-i18n-placeholder="settings.mtCustomAppIdPh" spellcheck="false">
+                  </div>
+                  <div class="settings-field">
+                    <label><span data-i18n="settings.mtApiUrlLabel">API 地址</span> <span style="color:var(--text-tertiary);font-weight:normal" data-i18n="settings.mtCustomApiUrlHint">（必填）</span></label>
+                    <input type="text" id="settingMtApiUrlCustom" class="settings-mono" placeholder="https://your-mt-api.com/translate" spellcheck="false">
+                  </div>
+                </div>
+                <div class="settings-row" style="align-items:center;gap:12px;margin-top:4px">
+                  <button class="stg-btn-secondary" onclick="_testMtProvider()" id="mtTestBtnCustom">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:4px"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+                    <span data-i18n="settings.mtTestBtn">测试连接</span>
+                  </button>
+                  <span id="mtTestResultCustom" style="font-size:13px"></span>
+                </div>
+              </div>
+            </div>
+            <!-- end Custom card -->
+
+          </div>
+        </div>

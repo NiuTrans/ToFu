@@ -56,6 +56,22 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None):
     """
     pfx = f'[Task {task["id"][:8]}][{tag}]'
     model = body.get('model', '?')
+    # ★ SESSION-STABLE TTL LATCH — single chokepoint guarantee. Every
+    #   task-based LLM send flows through here, so stamp the task id on the body
+    #   unconditionally (only when absent — never clobber a call site that set
+    #   its own latch key, e.g. the swarm agent's agent_id). add_cache_breakpoints
+    #   keys the CACHE_EXTENDED_TTL decision on _task_id via latch_extended_ttl();
+    #   a body that reaches the wire WITHOUT it silently falls back to the LIVE
+    #   GLOBAL CACHE_EXTENDED_TTL — which can differ from the value this task
+    #   latched, flipping the stable system/tools cache_control ttl (1h↔5m) and
+    #   re-keying the ENTIRE prefix (the live "<ttl-flip> sole culprit" re-key,
+    #   144 rounds in one log window). The main loop / reactive-compact /
+    #   fallback set it too, but a synthesize-answer / endpoint / future path can
+    #   forget; stamping HERE makes the latch impossible to bypass regardless of
+    #   which call site built the body.
+    _tid = task.get('id')
+    if _tid and not body.get('_task_id'):
+        body['_task_id'] = _tid
     # ★ Init to 0.0 (epoch) so the FIRST content/thinking delta checkpoints
     #   immediately, then settle into the _STREAM_CHECKPOINT_INTERVAL cadence.
     #   Starting at time.time() left a pre-first-checkpoint window where a
@@ -206,6 +222,64 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None):
     # ★ Timing fallback: if the first round was tool-call-only (no content/
     #   thinking deltas fired the TTFT hook), log it now using stream return.
     _log_ttft_once()
+
+    # ★ Floor-collapse identical-resend mitigation (env-gated, default OFF).
+    #   A byte-STABLE round whose cache_read pinned at the system+tools floor
+    #   is the SERVER-SIDE stochastic cache-write-visibility miss (proven by
+    #   4-run identical-byte replay: different rounds collapse each run). A
+    #   resend of the IDENTICAL body re-rolls the gateway's dice and usually
+    #   hits the now-visible cache write — driving effective floor% toward zero
+    #   (harness: mrsfs9d6 20%->0%). Discipline: only on a proven byte-stable
+    #   collapse, capped, and STOP on a throttle error (don't pile retries on
+    #   an already-throttled gateway). See lib/tasks_pkg/floor_retry.py +
+    #   docs/CACHE_GATEWAY_STOCHASTIC_REPORT.md.
+    try:
+        from lib.tasks_pkg import floor_retry as _fr
+        _conv_for_fr = task.get('convId', '') or ''
+        if (_fr.floor_retry_enabled() and _conv_for_fr
+                and _fr.is_floor_collapse(usage)
+                and _fr.wire_prefix_stable(_conv_for_fr, usage)):
+            _fr_max = _fr.floor_retry_max()
+            for _fr_i in range(_fr_max):
+                if task.get('aborted', False):
+                    break
+                logger.warning(
+                    '%s conv=%s [FloorRetry] byte-stable floor-collapse '
+                    '(read=%s write=%s) — resending identical body (%d/%d)',
+                    pfx, _conv_for_fr,
+                    (usage or {}).get('cache_read_tokens'),
+                    (usage or {}).get('cache_creation_input_tokens'),
+                    _fr_i + 1, _fr_max)
+                try:
+                    _rmsg, _rfin, _rusage = _dispatch_stream(
+                        body,
+                        on_thinking=None, on_content=None,
+                        on_tool_call_ready=on_tool_call_ready,
+                        abort_check=lambda: task.get('aborted', False),
+                        prefer_model=model, log_prefix=f'{pfx}[floor-retry{_fr_i+1}]',
+                        strict_model=True, on_retry=_on_retry,
+                        avoid_pairs=_avoid_pairs)
+                except Exception as _rerr:
+                    # 503/throttle/transient — do NOT keep piling resends on an
+                    # already-throttled gateway; that only deepens the throttle.
+                    logger.warning('%s [FloorRetry] resend %d errored, stopping: '
+                                   '%s: %s', pfx, _fr_i + 1,
+                                   type(_rerr).__name__, str(_rerr)[:120])
+                    break
+                if not _fr.is_floor_collapse(_rusage):
+                    # Recovered: the resend hit the now-visible cache write.
+                    # Adopt its response + usage (a genuine cache read, cheaper
+                    # AND the same conversation content — the body was identical).
+                    logger.warning('%s conv=%s [FloorRetry] RECOVERED on resend %d '
+                                   '(read=%s write=%s)', pfx, _conv_for_fr, _fr_i + 1,
+                                   (_rusage or {}).get('cache_read_tokens'),
+                                   (_rusage or {}).get('cache_creation_input_tokens'))
+                    msg, finish_reason, usage = _rmsg, _rfin, _rusage
+                    break
+                # Still floored — keep the freshest usage and try again.
+                msg, finish_reason, usage = _rmsg, _rfin, _rusage
+    except Exception as _fre:
+        logger.debug('%s [FloorRetry] mitigation skipped (non-fatal): %s', pfx, _fre)
 
     # ★ Propagate provider_id from dispatch metadata into task
     _dispatch = (usage or {}).get('_dispatch', {})

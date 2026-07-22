@@ -15,6 +15,51 @@ from lib.log import get_logger
 logger = get_logger(__name__)
 
 
+def _tool_rounds_from_task_row(task_row):
+    """Resolve the interrupted task's toolRounds for the recovery merge.
+
+    Two persisted sources, in priority order:
+      1. ``task_results.tool_rounds`` — populated ONLY for inline-message tasks
+         (no conversation row: eval harness / /v1 + compat APIs / VU carriers).
+      2. ``task_results.segments`` — the THIN typed-segment blob written on
+         EVERY checkpoint (``assemble_segments``). For a normal DB-backed chat
+         ``tool_rounds`` is deliberately NULL (the rounds live in
+         ``conversations.messages``; see ``_tool_rounds_have_dedicated_home``),
+         but ``segments`` still carries them, so it is the authoritative
+         crash-recovery source when the ``conversations.messages`` copy is
+         staler than the crash point (the 5s partial-sync coalescing window).
+
+    Returns the toolRounds list (possibly empty). NEVER raises — a malformed
+    blob just yields ``[]`` so recovery degrades to content/thinking-only
+    rather than crashing the whole startup sweep.
+    """
+    # Source 1: the dedicated column (inline tasks).
+    raw_tr = task_row['tool_rounds'] if 'tool_rounds' in task_row.keys() else None
+    if raw_tr:
+        try:
+            tr = json.loads(raw_tr)
+            if tr:
+                return tr
+        except (json.JSONDecodeError, TypeError) as e:
+            logger.debug('[Startup] tool_rounds parse failed, trying segments: %s', e)
+    # Source 2: rebuild from the thin persisted segments (normal chats).
+    raw_seg = task_row['segments'] if 'segments' in task_row.keys() else None
+    if raw_seg:
+        try:
+            thin = json.loads(raw_seg)
+            if thin:
+                from lib.tasks_pkg.segments import _rounds_view_from_segments
+                rebuilt = _rounds_view_from_segments(thin)
+                if rebuilt:
+                    return rebuilt
+        except (json.JSONDecodeError, TypeError, KeyError) as e:
+            logger.debug('[Startup] segments->toolRounds rebuild failed: %s', e)
+        except Exception as e:
+            logger.warning('[Startup] segments->toolRounds rebuild error (non-fatal): %s',
+                           e, exc_info=True)
+    return []
+
+
 def recover_stale_tasks_on_startup(prev_shutdown=None, dispatch=True):
     """Clean up stale tasks from a previous server crash at startup time.
 
@@ -155,7 +200,7 @@ def recover_stale_tasks_on_startup(prev_shutdown=None, dispatch=True):
             task_row = None
             if merge_task_id:
                 task_row = db.execute(
-                    "SELECT content, thinking, tool_rounds, metadata FROM task_results WHERE task_id=?",
+                    "SELECT content, thinking, tool_rounds, segments, metadata FROM task_results WHERE task_id=?",
                     (merge_task_id,)
                 ).fetchone()
 
@@ -183,15 +228,16 @@ def recover_stale_tasks_on_startup(prev_shutdown=None, dispatch=True):
                                 # OS kill but leave a deliberate stop alone.
                                 if _interrupt_reason and not last_msg.get('interruptedReason'):
                                     last_msg['interruptedReason'] = _interrupt_reason
-                                # Merge toolRounds from task
-                                if task_row['tool_rounds']:
-                                    try:
-                                        tr = json.loads(task_row['tool_rounds'])
-                                        if tr and len(tr) > len(last_msg.get('toolRounds') or []):
-                                            last_msg['toolRounds'] = tr
-                                    except (json.JSONDecodeError, TypeError) as _e_audit:
-                                        logger.debug('[manager] recover_stale_tasks_on_startup caught %s: %s', type(_e_audit).__name__, _e_audit)
-                                        pass
+                                # Merge toolRounds from task — tool_rounds
+                                # column OR (for normal chats where it is NULL)
+                                # rebuilt from the segments column. Without the
+                                # segments fallback a crash-interrupted turn
+                                # whose messages copy lagged the crash point had
+                                # NO recoverable rounds → Continue regenerated
+                                # from scratch (the OS-kill bug).
+                                _rec_tr = _tool_rounds_from_task_row(task_row)
+                                if _rec_tr and len(_rec_tr) > len(last_msg.get('toolRounds') or []):
+                                    last_msg['toolRounds'] = _rec_tr
                                 # Merge metadata
                                 if task_row['metadata']:
                                     try:
@@ -213,12 +259,9 @@ def recover_stale_tasks_on_startup(prev_shutdown=None, dispatch=True):
                                 }
                                 if _interrupt_reason:
                                     new_msg['interruptedReason'] = _interrupt_reason
-                                if task_row['tool_rounds']:
-                                    try:
-                                        new_msg['toolRounds'] = json.loads(task_row['tool_rounds'])
-                                    except (json.JSONDecodeError, TypeError) as _e_audit:
-                                        logger.debug('[manager] recover_stale_tasks_on_startup caught %s: %s', type(_e_audit).__name__, _e_audit)
-                                        pass
+                                _rec_tr = _tool_rounds_from_task_row(task_row)
+                                if _rec_tr:
+                                    new_msg['toolRounds'] = _rec_tr
                                 if task_row['metadata']:
                                     try:
                                         meta = json.loads(task_row['metadata'])

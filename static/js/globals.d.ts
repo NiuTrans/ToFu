@@ -68,7 +68,7 @@ declare var openProjectBrain: any;       // static/js/project-brain.js — windo
 declare var closeProjectBrain: any;      // static/js/project-brain.js — window.closeProjectBrain
 declare var toggleProjectBrain: any;     // static/js/project-brain.js — window.toggleProjectBrain
 declare var __translatePushWired: any;   // static/js/translation.js — window.*
-declare var ChipInput: any;              // static/js/settings/chip_input.js — window.ChipInput (used in other settings/* files)
+declare var ChipInput: any;              // static/js/widgets/chip_input.js — window.ChipInput (reusable widget, used in settings/* and elsewhere)
 declare var buildTurnCtxSnapshot: any;   // static/js/info-rail.js — window.* (used by send pipeline / edit_message)
 declare var renderTurnCtxNote: any;      // static/js/info-rail.js — window.* (used by chat_render)
 declare var reconcileTurnCtxCapsule: any; // static/js/info-rail.js — window.* (used by sse_pipeline)

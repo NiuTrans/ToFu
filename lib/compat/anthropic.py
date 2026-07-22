@@ -254,6 +254,47 @@ async def stream_anthropic_chunks(task, model: str
                         'index': block_index,
                     })
                     text_block_open = False
+                # ★ Tool-use parity with the sync path
+                #   (_content_blocks_from_task): the model may have finished on
+                #   a tool call. The sync response includes tool_use blocks, but
+                #   the stream `done` branch previously emitted none — so a
+                #   streaming caller that requested tools got stop_reason=
+                #   tool_use with NO tool_use block. Emit them as their own
+                #   content blocks here (Anthropic's streaming tool_use shape).
+                _rounds = task.get('toolRounds') or []
+                _last = _rounds[-1] if (_rounds and isinstance(_rounds[-1], dict)) else None
+                _tcs = _last.get('tool_calls') if _last else None
+                if _tcs:
+                    if answer:
+                        block_index += 1
+                    for tc in _tcs:
+                        fn = tc.get('function', {})
+                        try:
+                            args = json.loads(fn.get('arguments') or '{}')
+                        except (json.JSONDecodeError, TypeError) as _e:
+                            logger.debug('[compat:anthropic] stream tool_call args '
+                                         'JSON decode failed: %s', _e)
+                            args = {}
+                        yield _evt('content_block_start', {
+                            'type': 'content_block_start',
+                            'index': block_index,
+                            'content_block': {
+                                'type': 'tool_use',
+                                'id': tc.get('id') or short_id('toolu_', 16),
+                                'name': fn.get('name', ''),
+                                'input': {},
+                            },
+                        })
+                        yield _evt('content_block_delta', {
+                            'type': 'content_block_delta',
+                            'index': block_index,
+                            'delta': {'type': 'input_json_delta',
+                                      'partial_json': json.dumps(args, ensure_ascii=False)},
+                        })
+                        yield _evt('content_block_stop', {
+                            'type': 'content_block_stop', 'index': block_index,
+                        })
+                        block_index += 1
                 stop_reason = 'end_turn'
                 if ev.get('finishReason') in ('length',):
                     stop_reason = 'max_tokens'

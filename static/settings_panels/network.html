@@ -1,0 +1,33 @@
+        <div class="settings-tab-panel" id="settingsTab_network">
+          <div class="settings-section-title" data-i18n="settings.httpProxy">HTTP 代理</div>
+          <p class="settings-desc" data-i18n-html="settings.httpProxyBody">配置用于所有出站请求（LLM API、网页搜索、页面抓取）的 HTTP/HTTPS 代理。留空则使用系统环境变量（<code>http_proxy</code> / <code>https_proxy</code>）。修改立即生效，无需重启。</p>
+          <div id="proxyEnvBanner" class="settings-hint-banner" style="display:none;margin-top:0;margin-bottom:12px">
+            ℹ️ <span id="proxyEnvBannerText"></span>
+          </div>
+          <div class="settings-group">
+            <div class="settings-row two-col">
+              <div class="settings-field">
+                <label data-i18n="settings.httpProxy">HTTP 代理</label>
+                <input type="text" id="settingHttpProxy" class="settings-mono" placeholder="http://proxy.example.com:8080" spellcheck="false">
+              </div>
+              <div class="settings-field">
+                <label data-i18n="settings.httpsProxy">HTTPS 代理</label>
+                <input type="text" id="settingHttpsProxy" class="settings-mono" placeholder="http://proxy.example.com:8080" spellcheck="false">
+              </div>
+            </div>
+          </div>
+
+          <div class="settings-divider"></div>
+          <div class="settings-section-title" data-i18n="settings.proxyBypassTitle">不代理域名</div>
+          <p class="settings-desc" data-i18n-html="settings.proxyBypassBody">在此添加不需要走代理的域名后缀或主机名（每行一个，后缀匹配）。匹配的请求会<strong>完全绕过 HTTP 代理</strong>。</p>
+          <p class="settings-desc" style="margin-top:4px" data-i18n-html="settings.proxyBypassTipFull"><strong>💡 提示：</strong>内网地址和 LLM API 域名都应加在这里。企业/VPN 代理会静默断开长连接（SSE 流），导致 <code>BrokenPipeError</code>，添加对应域名即可解决。也可通过环境变量 <code>PROXY_BYPASS_DOMAINS</code>（逗号分隔）配置，两处合并生效。</p>
+          <div class="settings-group">
+            <div class="settings-field">
+              <label data-i18n-html="settings.bypassDomainsFull">绕过域名 <span style="color:var(--text-tertiary);font-weight:normal">（后缀匹配 — 例如 <code>.your-corp.com</code>，回车添加）</span></label>
+              <div id="settingProxyBypass" class="chip-input" data-placeholder=".internal.example.com"></div>
+            </div>
+          </div>
+          <div id="proxyEnvHint" class="settings-hint-banner" style="display:none;margin-top:8px">
+            ℹ️ <span id="proxyEnvHintText"></span>
+          </div>
+        </div>

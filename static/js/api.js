@@ -29,7 +29,7 @@
      Api.get/post/put/del    — JSON convenience wrappers
      Api.stream(...)         — SSE / chunked streaming
      Api.<domain>.<method>   — domain-grouped public surface:
-                                folders, conversations, chat, paper,
+                                folders, paperFolders, conversations, chat, paper,
                                 translate, daily, project, settings,
                                 memory, mcp, oauth, optimizer, image,
                                 pdf, browser, scheduler, ...
@@ -222,6 +222,17 @@
     update: (id, updates)      => put(`/api/v1/folders/${encodeURIComponent(id)}`, updates, { onError: 'null' }),
     remove: async (id)         => {
       const r = await del(`/api/v1/folders/${encodeURIComponent(id)}`, { parse: 'response', onError: 'null' });
+      return !!(r && r.ok);
+    },
+  };
+
+  // paper-folders (Reading-mode library folders — same shape as `folders`) ---
+  const paperFolders = {
+    list:   async ()           => (await get('/api/v1/paper-folders', { onError: 'null' })) || [],
+    create: (name, color)      => post('/api/v1/paper-folders', { name, color: color || '' }, { onError: 'null' }),
+    update: (id, updates)      => put(`/api/v1/paper-folders/${encodeURIComponent(id)}`, updates, { onError: 'null' }),
+    remove: async (id)         => {
+      const r = await del(`/api/v1/paper-folders/${encodeURIComponent(id)}`, { parse: 'response', onError: 'null' });
       return !!(r && r.ok);
     },
   };
@@ -922,6 +933,13 @@
     undoAll:       (body)     =>
       request('/api/v1/project/undo-all',
               { method: 'POST', json: body || {}, parse: 'response' }),
+    // Re-apply a previously-undone round. Backend requires taskId; the caller
+    // MUST also pin the conversation's own projectPath (undo deleted the
+    // round's record, so redo resolves the project from the pin, never the
+    // globally-active UI project). Mirrors undo's concurrency contract.
+    redo:          (body)     =>
+      request('/api/v1/project/redo',
+              { method: 'POST', json: body, parse: 'response' }),
     browse:        (path, showHidden) => post('/api/v1/project/browse', { path, showHidden: !!showHidden }),
     mkdir:         (parent, name)     =>
       request('/api/v1/project/mkdir',
@@ -1278,7 +1296,7 @@
     ApiError,
     _resolve,         // exposed for SSE/WS path building
     // domains
-    folders, orchestrations, memory, profile, timer, scheduler, optimizer, compactions,
+    folders, paperFolders, orchestrations, memory, profile, timer, scheduler, optimizer, compactions,
     conversations, text, translate, chat, images, pdf, doc, audio, artifacts,
     health, pricing, clientError, serverConfig, browser, project, daily, paper,
     features, providers, dispatch, oauth, mcp, update, trading, authSources,

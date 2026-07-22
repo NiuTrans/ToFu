@@ -486,5 +486,80 @@ def test_derive_kind_used_by_create_timer_defaults_llm():
     assert derive_condition_kind('is it done', '') == 'llm'
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+#  Regression — sweep robustness (2026-07-22 bug-sweep)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def test_malformed_once_schedule_does_not_wedge_sweep(monkeypatch):
+    """A single row with a malformed ``once:`` timestamp must be skipped, NOT
+    abort the whole due-task sweep (which would silently starve every other
+    due task). Before the fix, ``datetime.fromisoformat`` on the bad row raised
+    unguarded and escaped ``_check_and_run_due_tasks``."""
+    from lib.scheduler.manager import ScheduledTaskManager
+
+    mgr = ScheduledTaskManager.__new__(ScheduledTaskManager)
+    rows = [
+        {'id': 'bad', 'schedule': 'once:not-a-timestamp', 'run_count': 0,
+         'task_type': 'command', 'last_run': None},
+        {'id': 'good', 'schedule': 'once:2000-01-01T00:00:00', 'run_count': 0,
+         'task_type': 'command', 'last_run': None},
+    ]
+    mgr._get_db = lambda: _FakeCursor(rows)  # execute(...).fetchall() → rows
+    # Give the FakeCursor an execute() that returns itself so .fetchall() works.
+    ran = []
+    mgr._run_and_record = lambda task: ran.append(task['id'])
+    mgr.toggle_task = lambda tid, enabled=None: None
+
+    # _get_db().execute(sql) must return something with .fetchall(); wrap.
+    class _DB:
+        def execute(self, *a, **k):
+            return _FakeCursor(rows)
+    mgr._get_db = lambda: _DB()
+
+    # Must not raise, and the 'good' due row must still run despite the bad one.
+    mgr._check_and_run_due_tasks()
+    assert 'good' in ran, 'the valid due task must still run after a malformed once: row'
+
+
+def test_NEUTER_malformed_once_would_wedge_without_guard(monkeypatch):
+    """LOAD-BEARING: prove the guard is what saves the sweep. Feed ONLY the
+    malformed row and confirm the guarded sweep swallows it (no exception).
+    Removing the try/except in manager.py makes datetime.fromisoformat raise
+    here and this test goes red."""
+    from lib.scheduler.manager import ScheduledTaskManager
+
+    mgr = ScheduledTaskManager.__new__(ScheduledTaskManager)
+    rows = [{'id': 'bad', 'schedule': 'once:garbage', 'run_count': 0,
+             'task_type': 'command', 'last_run': None}]
+
+    class _DB:
+        def execute(self, *a, **k):
+            return _FakeCursor(rows)
+    mgr._get_db = lambda: _DB()
+    mgr._run_and_record = lambda task: None
+    mgr.toggle_task = lambda tid, enabled=None: None
+
+    mgr._check_and_run_due_tasks()  # must NOT raise
+
+
+def test_poll_decision_survives_none_content(monkeypatch):
+    """poll_decision must not crash inside its own parse-error handler when the
+    LLM returns content=None. parse_json_decision raises AttributeError on
+    None (caught), then the handler formats ``(content or '')[:100]`` — before
+    the fix this was ``content[:100]`` → TypeError escaping poll_decision."""
+    from lib.scheduler import proactive
+
+    def _fake_smart_chat(messages, **kwargs):
+        return None, {'total_tokens': 0}
+    import lib.llm_dispatch as _ld
+    monkeypatch.setattr(_ld, 'smart_chat', _fake_smart_chat, raising=True)
+    monkeypatch.setattr(proactive, 'gather_system_status', lambda task: 'STATUS')
+
+    task = {'id': 'task_none01', 'command': 'do it'}
+    should_act, reason, tokens = proactive.poll_decision(task)
+    assert should_act is False
+    assert reason.startswith('Parse error:')
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v', '-s'])

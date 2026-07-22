@@ -135,8 +135,9 @@ static/js/.bundle-build.lock
 static/js/.bundle-*.js
 static/js/.feature-*.js
 
-# ── Minified stylesheet (auto-generated at startup by lib/css_bundler) ──
+# ── Minified stylesheets (auto-generated at startup by lib/css_bundler) ──
 static/styles-*.css
+static/settings-*.css
 
 # ── Frontend type-check harness (tsc --checkJs) ──
 node_modules/

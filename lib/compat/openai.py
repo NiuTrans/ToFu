@@ -95,9 +95,17 @@ def build_openai_response(task: dict, model: str,
     """Turn a finished task into an OpenAI ``chat.completion`` body."""
     finish = task.get('finishReason') or 'stop'
     if task.get('status') == 'error':
-        finish = 'error'
+        # 'error' is NOT a valid OpenAI finish_reason enum value
+        # (stop|length|tool_calls|content_filter|function_call). A task that
+        # reached build_openai_response already produced a completion body, so
+        # report the neutral 'stop' — real error surfacing is the route's
+        # api_internal_error path, not a bogus enum an SDK would reject.
+        finish = 'stop'
     elif task.get('status') == 'aborted':
         finish = 'length'  # OpenAI doesn't have an 'aborted' code
+    # Normalize our internal 'tool_use' to OpenAI's 'tool_calls' enum too.
+    elif finish == 'tool_use':
+        finish = 'tool_calls'
     usage = task.get('usage') or {}
     return {
         'id': requested_id or short_id('chatcmpl-'),
@@ -187,6 +195,28 @@ async def stream_openai_chunks(task, model: str, requested_id: str = '',
                         emitted_role = True
                     ans_chunk['choices'][0]['delta']['content'] = answer
                     yield f'data: {json.dumps(ans_chunk, ensure_ascii=False)}\n\n'
+                # ★ Tool-calls parity with the sync path (_assistant_message):
+                #   the model may have finished on a tool call. The sync
+                #   completion emits message.tool_calls, but the stream `done`
+                #   branch previously emitted only content+finish_reason — so a
+                #   streaming caller that requested tools saw
+                #   finish_reason='tool_calls' with NO tool_calls payload. Emit
+                #   them as a delta here (the OpenAI streaming tool-call shape).
+                _rounds = task.get('toolRounds') or []
+                _last = _rounds[-1] if (_rounds and isinstance(_rounds[-1], dict)) else None
+                _tcs = _last.get('tool_calls') if _last else None
+                if _tcs:
+                    tc_chunk = {
+                        'id': completion_id, 'object': 'chat.completion.chunk',
+                        'created': int(time.time()), 'model': model,
+                        'choices': [{'index': 0, 'delta': {}, 'finish_reason': None}],
+                    }
+                    if not emitted_role:
+                        tc_chunk['choices'][0]['delta']['role'] = 'assistant'
+                        emitted_role = True
+                    tc_chunk['choices'][0]['delta']['tool_calls'] = [
+                        {'index': i, **tc} for i, tc in enumerate(_tcs)]
+                    yield f'data: {json.dumps(tc_chunk, ensure_ascii=False)}\n\n'
                 final = {
                     'id': completion_id, 'object': 'chat.completion.chunk',
                     'created': int(time.time()), 'model': model,

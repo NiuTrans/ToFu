@@ -44,11 +44,14 @@ from lib.tasks_pkg.compaction._layer2._prompt import (  # noqa: F401
     _summary_input_char_budget,
 )
 from lib.tasks_pkg.compaction._layer2._anchor import (  # noqa: F401
+    _apiform_tool_rounds,
     _coerce_spec_list,
     _extract_current_query,
     _extract_recently_accessed_files,
     _find_turn_boundary,
+    _fold_recent_intra_turn,
     _objective_anchor_index,
+    _split_cold_rounds,
 )
 from lib.tasks_pkg.compaction._layer2._summary import (  # noqa: F401
     _generate_query_aware_summary,
@@ -70,6 +73,9 @@ __all__ = [
     '_extract_recently_accessed_files',
     '_find_turn_boundary',
     '_objective_anchor_index',
+    '_split_cold_rounds',
+    '_apiform_tool_rounds',
+    '_fold_recent_intra_turn',
     '_generate_query_aware_summary',
     '_archive_transcript',
     '_COMPACT_TOOL_NAME',

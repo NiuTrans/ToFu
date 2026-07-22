@@ -71,7 +71,68 @@ _MID_LOOKBACK = 20
 # caches once, is read back for the next _MID_STEP rounds, then jumps forward.
 # _MID_TRAIL < 20 so the stone stays inside the rolling tail's lookback window.
 _MID_STEP = 8
-_MID_TRAIL = 12
+# _MID_TRAIL is measured in MESSAGES, but Anthropic's ~20-block lookback is in
+# CONTENT BLOCKS. A tool round emits ~3 blocks (assistant prose + tool_use +
+# tool_result), and the stone only JUMPS forward every _MID_STEP messages, so
+# between jumps the rolling tail keeps pulling away: with _MID_TRAIL=12 the
+# mid→tail BLOCK span sawtoothed 17→20→23→26 and spent HALF the rounds PAST 20,
+# on which the tail could no longer extend the mid entry → the whole prefix
+# past the mid was re-written every such round (measured live: read collapsing
+# to the ~74–80k static floor on a byte-identical, same-routing body, then
+# mislabelled "upstream_identical"). _MID_TRAIL=4 keeps the peak block span at
+# ~16 (< the 20-block lookback with margin) across prose / empty / parallel-
+# tool shapes, while the stone stays quantized (jumps every _MID_STEP rounds,
+# never on the early-user turn). Verified by test_cache_mid_anchor_window.py.
+_MID_TRAIL = 4
+
+# ── Mid-anchor LAYOUT MODE (env-gated experiment seam) ──
+# The single mid stepping-stone is mathematically insufficient to keep BOTH the
+# system→mid and mid→tail hops within the ~20-block lookback once the body grows
+# past ~40 blocks (proven: with one stone, min achievable max-hop = ceil(tail/2),
+# which exceeds 20 beyond block 40). Worse, every _MID_STEP-message JUMP writes a
+# fresh mid entry the tail can't chain back to the system prefix from — the live
+# "read collapses to the 74k static floor" sawtooth (~13-20% of rounds/conv).
+# The FIX depended on Anthropic's cache-EXTENSION semantics that cannot be
+# verified offline (does a per-round-moving marker ever read back? is the mid net
+# NEGATIVE?), so a live A/B on the real gateway decided it. VERDICT (2026-07-20,
+# 3 real conversations replayed on the live gateway with frozen byte-STABLE
+# prefixes, R1 excluded): dropping the mid stone cut the ~74k floor-collapse rate
+# ~34%→~8% and re-billed write tokens 3.1x (943k→306k across 50 rounds), and
+# `drop` NEVER lost on any conversation. So the mid stepping-stone is NET-NEGATIVE
+# on byte-stable prefixes — it IS the sawtooth floor-collapse driver, not a victim
+# of it. `drop` is therefore the DEFAULT.
+#   drop     — place NO mid stone. DEFAULT. The freed marker slot is left unused
+#              (the system prefix is contiguous, so one marker already caches it,
+#              and the rolling tail extends directly from the head within the
+#              lookback for the conversation lengths we see).
+#   current  — the pre-2026-07-20 behaviour (single far mid, message-quantized).
+#              Kept as an EXPLICIT env opt-in for emergency rollback
+#              (TOFU_CACHE_MID_MODE=current) and for re-running the A/B.
+#   smooth / cascade — RESERVED names for future single-stone reshuffles; until
+#              a live A/B justifies one, they fall back to the DEFAULT (`drop`).
+# Read per-call (cheap). Flip back instantly with TOFU_CACHE_MID_MODE=current.
+_MID_MODE_VALID = ('current', 'drop', 'smooth', 'cascade')
+_MID_MODE_IMPLEMENTED = ('current', 'drop')
+
+
+def _mid_placement_mode() -> str:
+    """Return the active mid-anchor layout mode from ``TOFU_CACHE_MID_MODE``.
+
+    Default ``drop`` — the live-A/B-proven winner (mid stepping-stone is
+    net-negative on byte-stable prefixes; see the mode comment above). Unknown
+    or not-yet-implemented names (a typo, or the reserved ``smooth``/``cascade``)
+    degrade to the DEFAULT so no unvalidated layout ever ships. Set
+    ``TOFU_CACHE_MID_MODE=current`` for an instant rollback to the pre-2026-07-20
+    single-mid behaviour.
+    """
+    raw = (getenv_compat('TOFU_CACHE_MID_MODE', default='drop')
+           or 'drop').strip().lower()
+    if raw not in _MID_MODE_VALID:
+        return 'drop'
+    if raw not in _MID_MODE_IMPLEMENTED:
+        # Reserved-but-stubbed: behave as the DEFAULT until a live A/B lands it.
+        return 'drop'
+    return raw
 
 
 def _is_prefill_converted(msg) -> bool:
@@ -257,7 +318,9 @@ def add_cache_breakpoints(body, log_prefix=''):
     # past the head.
     _head_floor = _n_sys + 1  # system block(s) + the first user turn
     _mid_target = len(messages) - _MID_TRAIL
-    _mid_armed = _mid_target >= _head_floor + _MID_LOOKBACK
+    _mid_mode = _mid_placement_mode()
+    _mid_armed = (_mid_mode != 'drop'
+                  and _mid_target >= _head_floor + _MID_LOOKBACK)
     _reserve = 0
     if body.get('tools'):
         _reserve += _TOOL_RESERVED_BP

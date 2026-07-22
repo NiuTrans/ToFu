@@ -78,6 +78,15 @@ def _resolve_model_config(cfg, task_id):
     browser_enabled, desktop_enabled, swarm_enabled.
     """
     tid = task_id[:8]
+    # ── Two-tier chat mode (chat/studio) → atomic flags ──
+    #   Single source of truth: lib/tasks_pkg/chat_mode. When the request
+    #   declares a tier, its derived flags OVERRIDE the atomic flags below so
+    #   the UI dial and the resolved tool set can never disagree; absent a
+    #   tier this is a byte-identical pass-through (legacy / headless callers).
+    from lib.tasks_pkg.chat_mode import apply_chat_mode, is_lean_mode, normalize_chat_mode
+    _chat_mode = normalize_chat_mode(cfg)
+    if _chat_mode is not None:
+        cfg = apply_chat_mode(cfg)
     model = cfg.get('model', _lib.LLM_MODEL)
     # ``.get(k, default)`` only substitutes when the key is ABSENT — a config
     # that carries maxTokens=None (e.g. resolve_conv_config with no
@@ -154,8 +163,11 @@ def _resolve_model_config(cfg, task_id):
     image_gen_enabled = cfg.get('imageGenEnabled', False)
     human_guidance_enabled = cfg.get('humanGuidanceEnabled', False)
     scheduler_enabled = cfg.get('schedulerEnabled', False)
+    lean = is_lean_mode(_chat_mode)
     return {
         'model': model,
+        'chat_mode': _chat_mode,
+        'lean': lean,
         'thinking_enabled': thinking_enabled,
         'thinking_depth': thinking_depth,
         'preset': preset,
@@ -225,8 +237,15 @@ def _assemble_tool_list(cfg, project_path, project_enabled, task_id,
     # TOFU_DEFAULT_TOOL_PLUGINS env → fail-closed (no plugins). See
     # lib/tools/registry.py "Plugin isolation" and docs/TOOL_PLUGINS.md.
     enabled_plugins = resolve_enabled_plugins(cfg)
+    # ``lean`` is a retained seam (is_lean_mode, always False after the air/pro
+    # merge) that would drop the always-on capability tools (memory/todo/
+    # scheduler). Derived from cfg here so every _assemble_tool_list caller
+    # (orchestrator, swarm rehydrate, endpoint runner, tests) honors it with
+    # no signature change — the chatMode key rides on cfg.
+    from lib.tasks_pkg.chat_mode import is_lean_mode, normalize_chat_mode
+    _lean = is_lean_mode(normalize_chat_mode(cfg))
     ctx = ToolContext(
-        cfg=cfg, task_id=task_id,
+        cfg=cfg, task_id=task_id, lean=_lean,
         project_path=project_path, project_enabled=project_enabled,
         search_mode=search_mode, search_enabled=search_enabled,
         fetch_enabled=fetch_enabled, code_exec_enabled=code_exec_enabled,

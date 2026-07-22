@@ -1442,6 +1442,15 @@ async function _pollReportTask(view) {
   view = view || _reportView('report');
   var s = view.stream;
   if (!s || !s.taskId) return;
+  // Abandon guard: this poll chain belongs to stream `s`. If the view's active
+  // stream has since been REPLACED (paper switch, force-regenerate, reset),
+  // `s` is orphaned — stop this chain dead so it can neither repaint into a
+  // dead stream nor schedule a DUPLICATE poll onto the new stream. This is the
+  // root fix for the "clicked Regenerate / toggled segment a few times → the
+  // button freezes" bug: without it, an in-flight poll captured on the old
+  // stream resumes, sees its own stale status==='running', and stacks a second
+  // poll chain (and racing repaints) on whatever stream is now active.
+  if (view.stream !== s) return;
   if (s.pollBusy) return;
   s.pollBusy = true;
   try {
@@ -1518,14 +1527,20 @@ async function _pollReportTask(view) {
       _paintReportFromState(view);
     }
 
-    // Schedule next poll if still running
-    if (s.status === 'running') {
+    // Schedule next poll if still running — but ONLY while this chain still
+    // owns the view's active stream (see the abandon guard above). On any
+    // terminal status, null the timer handle so the single-poll-chain
+    // invariant (`!view.stream.pollTimer`) elsewhere reads true.
+    if (s.status === 'running' && view.stream === s) {
       s.pollTimer = setTimeout(function() { _pollReportTask(view); }, 1200);
+    } else {
+      s.pollTimer = null;
     }
   } catch (e) {
     console.warn('[Paper:Report] Poll failed:', e);
-    // Transient network error — retry with backoff
-    if (s && s.status === 'running') {
+    // Transient network error — retry with backoff, only if this chain still
+    // owns the active stream (otherwise a duplicate chain would be spawned).
+    if (s && s.status === 'running' && view.stream === s) {
       s.pollTimer = setTimeout(function() { _pollReportTask(view); }, 3000);
     }
   } finally {
@@ -2406,6 +2421,21 @@ function _stopPaperReport(view) {
   // Don't flip status locally — the server emits the authoritative `aborted`
   // event, which the poll loop applies and repaints. Re-enable the label on
   // the next paint cycle so a failed abort doesn't leave the button stuck.
+  //
+  // Safety net: if the abort request fails OR the server never emits the
+  // `aborted` event (task died, poll loop stalled), `status` would stay
+  // 'running' forever — Stop disabled + Regenerate hidden = a permanently
+  // frozen toolbar (the reported freeze). After a grace period, if this exact
+  // stream is still 'running' and we asked it to stop, force a local terminal
+  // state so Regenerate reappears and the user can recover.
+  setTimeout(function() {
+    if (view.stream === s && s.status === 'running' && s.stopRequested) {
+      console.warn('[Paper:Report] abort not confirmed by server — forcing local aborted state for task ' + s.taskId);
+      s.status = 'aborted';
+      if (s.pollTimer) { clearTimeout(s.pollTimer); s.pollTimer = null; }
+      if (s.paperId === _activePaperId) _paintReportFromState(view);
+    }
+  }, 8000);
 }
 
 function _stopPaperReview() { return _stopPaperReport(_reportView('review')); }

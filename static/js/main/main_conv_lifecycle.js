@@ -819,6 +819,7 @@ function _buildToolbarOverrides() {
     endpointMode: endpointEnabled,
     autopilot: autopilotEnabled,
     activeFlow: activeFlow || '',
+    chatMode: (typeof chatMode !== 'undefined' ? chatMode : 'chat'),
     autoTranslate: !!autoTranslate,
     // OUTPUT-side translate target: the UI language the reply is rendered into
     // (model → human). The backend maps this code to a language name and
@@ -853,6 +854,7 @@ function _buildConvSnapshot(conv, isActive) {
     activeFlow: conv.activeFlow || '',
     imageGenEnabled: conv.imageGenEnabled,
     humanGuidanceEnabled: conv.humanGuidanceEnabled,
+    chatMode: conv.chatMode || 'chat',
     projectPath: isActive ? _getConvProjectPath(conv) : conv.projectPath,
     projectPaths: conv.projectPaths || [],
     readOnlyPaths: conv.readOnlyPaths || [],

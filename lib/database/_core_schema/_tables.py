@@ -203,6 +203,10 @@ PAPER_LIBRARY = define_table(
     sa.Column('images', sa.Text, nullable=False, server_default='[]'),
     sa.Column('babel_cache', sa.Text, nullable=False, server_default='{}'),
     sa.Column('page_count', sa.Integer, nullable=False, server_default=sa.text('0')),
+    # folder_id — optional organizational grouping (mirrors conversation
+    # folders). Empty string = unfiled. Folder metadata lives in a separate
+    # JSON store (paper_folders.json); this is just the membership link.
+    sa.Column('folder_id', sa.Text, nullable=False, server_default=''),
     sa.Column('created_at', bigint_column(), nullable=False),
     sa.Column('updated_at', bigint_column(), nullable=False),
     sa.PrimaryKeyConstraint('id', 'user_id'),

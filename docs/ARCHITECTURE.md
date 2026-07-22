@@ -4,7 +4,7 @@
 > `docs/architecture.html` (visual diagram) and whenever an AI assistant
 > needs a birds-eye view.
 >
-> **Last re-scanned:** 2026-07-17 against `lib/`, `routes/`, `static/js/`,
+> **Last re-scanned:** 2026-07-18 against `lib/`, `routes/`, `static/js/`,
 > `server.py`, `routes/__init__.py`.
 > **VERSION:** 0.13.0
 
@@ -229,12 +229,21 @@ Grounded against the current filesystem (2026-07-06).
 | `trading.html` | Legacy trading SPA shell (core trading code now lives in the external `tofu-trading` plugin) |
 | `healthcheck.py` · `install.{py,sh,ps1}` | Install / health helpers |
 
-### 3.2 `lib/` — core libraries (28 top-level sub-packages + 85 top-level modules)
+### 3.2 `lib/` — core libraries (52 top-level sub-packages + top-level modules)
 
-**Sub-packages** (28 directories under `lib/` carrying an `__init__.py`,
+**Sub-packages** (52 directories under `lib/` carrying an `__init__.py`,
 excluding the `tests/` test package). The `tasks_pkg/handlers/` row below is a
 *nested* sub-package of `tasks_pkg/`, listed for convenience — it is NOT counted
-in the 28.
+in the 52.
+
+> **Note (2026-07-18 re-scan):** many former loose `lib/*.py` modules have been
+> promoted to facade **packages** (`image_gen/`, `pricing/`, `model_info/`,
+> `key_stats/`, `log_clean/`, `file_reader/`, `doc_parser/`, `text_lang/`,
+> `mt_provider/`, `conv_config/`, `conv_ref/`, `self_update/`, `orchestration/`,
+> `error_envelope/`, `openapi/`, `context_limits/`, `llm_sanitize/`,
+> `tool_input_repair/`, …). Each keeps a package-level `__init__.py` facade so
+> import paths are unchanged. The `.py`→package migration is COMPLETE — there is
+> no lingering same-named `.py` shadowing any of these package dirs.
 
 | Package | Purpose |
 |---|---|
@@ -267,6 +276,30 @@ in the 28.
 | `token_counter/` | Context-window token accounting / budget |
 | `tools/` | **Definitions**: project · search · browser · meta · human_guidance · image_gen · code_exec · conversation |
 | `translate/` | Translation engine + cache + provider plumbing |
+| `agent_inbox/` | Per-task model-facing inbox for async swarm updates |
+| `agent_verdict/` | Shared STOP/CONTINUE verdict + loop-control heuristics (facade pkg; see CLAUDE.md §4) |
+| `api_keys/` | Bearer-token API-key auth — single source for scopes / minting (see CLAUDE.md §15) |
+| `context_limits/` | Auto-learned per-(provider, model) context-window sizes |
+| `conv_config/` | Conversation config + settings resolution (server-side canonical merge) |
+| `conv_ref/` | Conversation Reference — retrieve + format other conversations for context |
+| `cross_dc/` | Cross-datacenter FUSE latency detection (env-var driven, auto-benchmarks) |
+| `desktop_agent/` | Local-machine control bridge (pairs with `desktop/`) |
+| `doc_parser/` | Document text extraction for non-PDF formats |
+| `error_envelope/` | Typed backend→frontend error envelope (shaping / fingerprint / format) |
+| `file_reader/` | Read arbitrary local files: images · PDFs · Office docs |
+| `image_gen/` | Image generation dispatch (was a single 1125-line module; now a package) |
+| `key_stats/` | Per-day per-key success/failure tracking with auto-disable |
+| `llm_sanitize/` | Message-list sanitization (gateway terms · orphan tool calls · role merge) |
+| `log_clean/` | Pure-function log-noise detection (facade pkg) |
+| `model_info/` | **HOT_PATH** per-model capabilities + `_clamp_max_tokens` (see CLAUDE.md §12) |
+| `mt_provider/` | Machine-translation provider adapters (unified interface) |
+| `openapi/` | OpenAPI 3.1 spec generation (facade pkg; `api_meta` / `build_spec`) |
+| `orchestration/` | Orchestration definition schema + validator (facade pkg; engine is `orchestration_engine.py`) |
+| `pricing/` | Model pricing tables · exchange-rate fetch · background refresh |
+| `self_update/` | In-place self-update via `git pull --ff-only` |
+| `text_lang/` | Lightweight text-language helpers (facade pkg) |
+| `tool_input_repair/` | Centralized tool-argument repair for open-model tool-calling failures |
+| `transcription/` | Provider-agnostic speech-to-text (STT / ASR) |
 
 #### 3.2.1 `lib/tasks_pkg/` — execution package (38 modules + 3 sub-packages)
 

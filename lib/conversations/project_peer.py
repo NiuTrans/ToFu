@@ -62,6 +62,13 @@ _PEER_MSG_MAX_PER_WINDOW = 3
 # Soft cap on a peer message body (mirrors the feed summary cap intent).
 _PEER_MSG_MAX_CHARS = 1200
 
+
+# The canonical conversation-id width the message-queue / task-registry key is
+# matched on. A shorter value is a TRUNCATED id (a prefix a peer copied from a
+# status view); enqueuing under it lands in a phantom queue no conversation
+# drains. _resolve_target_conv_id fails CLOSED for a sub-length id on DB error.
+_FULL_CONV_ID_LEN = 14
+
 # In-memory sliding-window history: (sender_conv, target_conv) -> [ts_seconds].
 # Guarded by _rate_lock. Bounded (pruned on every check) so it can't grow.
 _peer_msg_history: dict[tuple, list] = {}
@@ -92,6 +99,37 @@ def _prune_and_check(timestamps: list, now: float, *,
     oldest = min(kept)
     retry_after = max(0.0, (oldest + window_s) - now)
     return False, kept, retry_after
+
+
+def _refund_rate_slot(from_conv: str, to_conv: str, ts: float) -> bool:
+    """Give back the rate-limit slot recorded by :func:`_rate_gate` for one
+    (sender, target) pair — used when the send it was gating FAILED.
+
+    ``_rate_gate`` records ``ts`` at CHECK time (before the fallible enqueue) so
+    concurrent/rapid retries correctly see the budget consumed and cannot storm
+    a live target. But if the enqueue then RAISES, no message was delivered, so
+    a flapping target would otherwise silently drain a sender's window budget.
+    This removes exactly ONE occurrence of ``ts`` (the slot that send took),
+    restoring the budget without disarming the guard for the racing case.
+
+    Returns True if a slot was removed. Thread-safe (takes ``_rate_lock``).
+    """
+    key = (from_conv, to_conv)
+    with _rate_lock:
+        hist = _peer_msg_history.get(key)
+        if not hist:
+            return False
+        try:
+            hist.remove(ts)
+        except ValueError:
+            # The exact timestamp already aged out / was pruned — nothing to
+            # refund (the window moved on, which is itself budget relief).
+            return False
+        if hist:
+            _peer_msg_history[key] = hist
+        else:
+            _peer_msg_history.pop(key, None)
+        return True
 
 
 def _authorize_hard_abort(hard_abort: bool, approved_by: str) -> tuple:
@@ -336,8 +374,10 @@ def _resolve_target_conv_id(to_conv_id: str) -> tuple:
     Returns ``(full_id, '')`` on success, or ``('', reason)`` where reason is
     ``'unknown_target'`` (no conversation matches) or ``'ambiguous_target'``
     (the prefix matches >1 conversation — refuse rather than mis-deliver). On a
-    DB error the id is returned UNCHANGED (fail-open: no worse than the prior
-    behaviour, and the subsequent enqueue would surface the DB fault anyway).
+    DB error a FULL-length id is passed through unchanged (already canonical —
+    a transient blip must not drop a valid send), but a sub-length (truncated /
+    prefix) id fails CLOSED with ``'resolve_failed'``: enqueuing a truncated id
+    is exactly the phantom-queue silent loss this function exists to prevent.
     """
     tid = (to_conv_id or '').strip()
     if not tid:
@@ -364,6 +404,14 @@ def _resolve_target_conv_id(to_conv_id: str) -> tuple:
     except Exception as e:
         logger.warning('[PeerMsg] target-id resolve failed for %s: %s',
                        tid[:12], e)
+        # Fail-CLOSED for a truncated/prefix id: enqueuing it would land in a
+        # phantom queue key no conversation drains (silent loss) — the exact
+        # thing this function exists to prevent. A full-length id is already
+        # canonical, so passing it through on a transient DB blip is harmless
+        # (the subsequent enqueue surfaces any real DB fault). _FULL_CONV_ID_LEN
+        # is the registry-key width the drain path matches on.
+        if len(tid) < _FULL_CONV_ID_LEN:
+            return '', 'resolve_failed'
         return tid, ''
 
 
@@ -528,7 +576,14 @@ def send_peer_message(project_path: str, from_conv_id: str, to_conv_id: str,
         res = enqueue_message(
             to_conv_id, payload, config or {}, kind=KIND_PEER_MSG)
     except Exception as e:
-        logger.error('[PeerMsg] enqueue failed %s→%s: %s',
+        # The send FAILED — no message was delivered, so refund the rate-limit
+        # slot _rate_gate consumed at check time. Otherwise a flapping (always-
+        # raising) target would silently drain the sender's per-window budget
+        # for messages that never landed. The refund keeps the storm guard
+        # intact for the concurrent case (the slot WAS held during the attempt)
+        # while not penalising the sender for the target's failure.
+        _refund_rate_slot(from_conv_id, to_conv_id, now)
+        logger.error('[PeerMsg] enqueue failed %s→%s (rate slot refunded): %s',
                      from_conv_id[:8], to_conv_id[:8], e, exc_info=True)
         return {'ok': False, 'error': str(e)}
 

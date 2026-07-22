@@ -59,6 +59,29 @@ _IMG_EXT_MIME = {
     '.svg': 'image/svg+xml',
 }
 
+# Marker for an uploaded image URL. A reverse proxy (VS Code / code-server
+# ``/proxy/<port>/``) prepends a base path, so the stored URL can be
+# ``/proxy/15002/api/images/<f>`` rather than a bare ``/api/images/<f>``. We
+# recognise the marker ANYWHERE in the string (``.find`` semantics, mirroring
+# lib/llm/body/_images.py) and canonicalize to the ``/api/images/...`` tail so
+# both freshly-uploaded and already-proxy-polluted DB rows resolve.
+_API_IMAGES_MARKER = '/api/images/'
+
+
+def canonical_image_ref(ref: str) -> str:
+    """Return the canonical ``/api/images/<f>`` tail of an uploaded-image URL.
+
+    Tolerates a reverse-proxy base-path prefix (``/proxy/<port>/api/images/x``
+    → ``/api/images/x``). Returns ``''`` when *ref* is not an uploaded-image
+    URL, so callers can use a truthy check as the recognition predicate.
+    """
+    if not ref or not isinstance(ref, str):
+        return ''
+    idx = ref.find(_API_IMAGES_MARKER)
+    if idx < 0:
+        return ''
+    return ref[idx:]
+
 
 def _images_dir() -> str:
     """Absolute path to the uploads/images dir under the resolved runtime base.
@@ -95,6 +118,11 @@ def is_attachment_ref(ref: str) -> bool:
     """True if *ref* is any reference this module knows how to resolve."""
     if not ref or not isinstance(ref, str):
         return False
+    # An uploaded image may arrive with a reverse-proxy prefix
+    # (``/proxy/<port>/api/images/<f>``) — recognise the ``/api/images/``
+    # marker anywhere, not only at the start.
+    if _API_IMAGES_MARKER in ref:
+        return True
     return ref.startswith(_DIRECT_IMAGE_PREFIXES) or ref.startswith(_TEXT_REF_PREFIX)
 
 
@@ -117,6 +145,11 @@ def _resolve_image_bytes(ref: str) -> dict | None:
             return None
 
     # ── Local uploaded image: /api/images/xxx.png → read from disk ──
+    # Tolerate a reverse-proxy prefix (``/proxy/<port>/api/images/<f>``) by
+    # canonicalizing to the ``/api/images/...`` tail first.
+    _canon = canonical_image_ref(ref)
+    if _canon:
+        ref = _canon
     if ref.startswith('/api/images/'):
         filename = os.path.basename(ref)
         filepath = os.path.join(_images_dir(), filename)

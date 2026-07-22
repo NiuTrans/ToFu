@@ -60,11 +60,20 @@ logger = get_logger(__name__)
 # settings key for the durable high-water mark.
 _HWM_KEY = 'cachePrefixHWM'
 
+# settings key for the durable per-conv round-1 cache_read baseline. Unlike the
+# HWM (a monotonic message-count floor), this is the PREVIOUS turn's FINAL
+# cached-prefix read in TOKENS — last-writer-wins (NOT max), so it tracks the
+# real prior warm read and never leaves a stale-high value that would make
+# every later floor-only read look like a collapse forever.
+_LAST_TURN_READ_KEY = 'lastTurnCacheRead'
+
 # Read-cache TTL: the cold-thread fallback reads at most once per this window.
 _HWM_TTL_S = 30.0
 
 # conv_id → (value, expires_at). Guarded by _hwm_lock.
 _hwm_read_cache: dict[str, tuple[int, float]] = {}
+# conv_id → (value, expires_at) for the round-1 read baseline. Guarded by _hwm_lock.
+_last_turn_read_cache: dict[str, tuple[int, float]] = {}
 _hwm_lock = threading.Lock()
 
 
@@ -152,15 +161,110 @@ def advance_persisted_boundary(conv_id: str, boundary: int) -> None:
         logger.debug('[CacheHWM] advance failed conv=%s: %s', conv_id[:8], e)
 
 
+def read_last_turn_cache_read(conv_id: str) -> int:
+    """Return the DURABLE previous-turn final cached-prefix read in tokens
+    (0 if none / unavailable).
+
+    THE COLD-STATE FALLBACK for round-1 boundary bucketing. ``turn_boundary_break``
+    needs the previous turn's final ``cache_read`` as the baseline to decide
+    whether this turn's round-1 collapsed. The primary source
+    (``get_prev_turn_cache_read``) scans the in-memory ``_cache_states`` siblings,
+    but that memory is wiped by a restart, a >1h stale-eviction, or a
+    multi-replica bounce — exactly the cases where the round-1 miss was silently
+    laundered into ``no_break``. This persists the baseline on
+    ``conversations.settings.lastTurnCacheRead`` so the boundary judgment
+    survives a cold process, just like ``read_persisted_boundary`` does for the
+    compaction floor.
+
+    Cheap: served from a short TTL cache, hitting the DB at most once per
+    ``_HWM_TTL_S`` per conv. Best-effort — any error returns 0 (degrade to the
+    memory-only path, i.e. today's behavior).
+    """
+    if not conv_id:
+        return 0
+    now = time.time()
+    with _hwm_lock:
+        hit = _last_turn_read_cache.get(conv_id)
+        if hit is not None and hit[1] > now:
+            return hit[0]
+    val = 0
+    try:
+        from lib.database import DOMAIN_CHAT, get_thread_db
+        from lib.utils import safe_json
+        db = get_thread_db(DOMAIN_CHAT)
+        row = db.execute(
+            'SELECT settings FROM conversations WHERE id=? AND user_id=?',
+            (conv_id, 1),
+        ).fetchone()
+        if row is not None:
+            try:
+                raw = row['settings']
+            except (TypeError, KeyError, IndexError):
+                raw = row[0] if row else None
+            settings = safe_json(raw, default={}, label='cache_last_turn_read')
+            if isinstance(settings, dict):
+                cand = settings.get(_LAST_TURN_READ_KEY)
+                if isinstance(cand, int) and cand > 0:
+                    val = cand
+    except Exception as e:
+        logger.debug('[CacheLastRead] read failed conv=%s: %s', conv_id[:8], e)
+        val = 0
+    with _hwm_lock:
+        _last_turn_read_cache[conv_id] = (val, now + _HWM_TTL_S)
+    return val
+
+
+def write_last_turn_cache_read(conv_id: str, cache_read: int) -> None:
+    """Persist the previous-turn final cached-prefix read (tokens).
+
+    LAST-WRITER-WINS (NOT monotonic-max): the baseline must track the real
+    latest warm read, so a later floor-only turn lowers it and a warm turn
+    raises it. Skips the write when the value is unchanged (steady-state warm
+    conversation on the same durable value → no DB churn). Uses the serialized
+    settings RMW so a concurrent writer merges rather than clobbers.
+    Best-effort — never raises.
+    """
+    if not conv_id or not isinstance(cache_read, int) or cache_read <= 0:
+        return
+    # Fast-path skip: our cached read already equals this value → nothing to write.
+    with _hwm_lock:
+        hit = _last_turn_read_cache.get(conv_id)
+    if hit is not None and hit[0] == cache_read and hit[1] > time.time():
+        return
+    try:
+        from lib.conversations.settings_store import update_conversation_settings
+
+        def _mutate(settings: dict) -> Any:
+            cur = settings.get(_LAST_TURN_READ_KEY)
+            cur = cur if isinstance(cur, int) else 0
+            if cache_read == cur:
+                return False  # unchanged — skip the write
+            settings[_LAST_TURN_READ_KEY] = cache_read
+            return None
+
+        # notify=False: internal cache-accounting field, NOT a UI-visible
+        # setting — must not push a conv_changed frame or reorder the sidebar.
+        res = update_conversation_settings(conv_id, _mutate, notify=False)
+        if res is not None:
+            with _hwm_lock:
+                _last_turn_read_cache[conv_id] = (
+                    cache_read, time.time() + _HWM_TTL_S)
+    except Exception as e:
+        logger.debug('[CacheLastRead] write failed conv=%s: %s', conv_id[:8], e)
+
+
 def _reset_read_cache_for_tests() -> None:
-    """Test hook: clear the in-process read cache so a test can observe a fresh
+    """Test hook: clear the in-process read caches so a test can observe a fresh
     DB read (used by the restart-simulation NEUTER)."""
     with _hwm_lock:
         _hwm_read_cache.clear()
+        _last_turn_read_cache.clear()
 
 
 __all__ = [
     'read_persisted_boundary',
     'advance_persisted_boundary',
+    'read_last_turn_cache_read',
+    'write_last_turn_cache_read',
     '_reset_read_cache_for_tests',
 ]

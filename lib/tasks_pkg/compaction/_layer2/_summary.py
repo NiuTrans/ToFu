@@ -95,11 +95,17 @@ def _generate_query_aware_summary(messages: list, current_query: str,
                 # summary generation (the DB rewrite is the source of truth).
                 logger.debug('%s on_delta callback failed: %s', tag, _cb_e)
 
-        content, _finish, usage = dispatch_stream(
+        msg, _finish, usage = dispatch_stream(
             _summary_messages,
             on_content=_on_content,
             max_tokens=_SUMMARY_MAX_TOKENS, temperature=0,
             capability=capability, log_prefix=tag)
+        # dispatch_stream returns the assistant message as a dict
+        # ({'role': 'assistant', 'content': '...'}), NOT a bare string like
+        # dispatch_chat — unwrap it so the shared post-processing (re.sub /
+        # .strip below) receives a str. Same canonical unwrap as
+        # lib/translate/engine/_engine.py.
+        content = msg.get('content', '') if isinstance(msg, dict) else msg
         return content, usage
 
     try:

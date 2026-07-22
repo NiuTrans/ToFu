@@ -102,6 +102,42 @@ class PeerMessageTargetResolutionTest(unittest.TestCase):
         self.assertEqual(err, 'unknown_target')
         self.assertEqual(full, '')
 
+    # ── DB-error fail-CLOSED for a truncated id (no phantom-queue loss) ──
+    def test_resolve_db_error_truncated_id_fails_closed(self):
+        """On a DB fault a TRUNCATED (prefix) id must NOT be returned verbatim —
+        enqueuing it would land in a phantom queue no conversation drains
+        (silent loss). It must fail closed with 'resolve_failed'."""
+        import lib.conversations.project_peer as pp
+
+        def _boom(_domain):
+            raise RuntimeError('db down')
+        import lib.database as _db
+        orig = _db.get_thread_db
+        _db.get_thread_db = _boom
+        try:
+            full, err = pp._resolve_target_conv_id(self._target_short)  # 8-char
+        finally:
+            _db.get_thread_db = orig
+        self.assertEqual(full, '')
+        self.assertEqual(err, 'resolve_failed')
+
+    def test_resolve_db_error_full_id_passes_through(self):
+        """A FULL-length id is already canonical — a transient DB blip must not
+        drop a valid send. It passes through unchanged (no error)."""
+        import lib.conversations.project_peer as pp
+
+        def _boom(_domain):
+            raise RuntimeError('db down')
+        import lib.database as _db
+        orig = _db.get_thread_db
+        _db.get_thread_db = _boom
+        try:
+            full, err = pp._resolve_target_conv_id(self._target_full)  # 14-char
+        finally:
+            _db.get_thread_db = orig
+        self.assertEqual(full, self._target_full)
+        self.assertEqual(err, '')
+
     # ── end-to-end: the message lands under the FULL id ───────────────
     def test_short_id_message_enqueues_under_full_id(self):
         from lib.conversations.project_peer import send_peer_message

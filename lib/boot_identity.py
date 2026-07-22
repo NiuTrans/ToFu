@@ -24,7 +24,9 @@ the pid and minting one uuid.
 
 from __future__ import annotations
 
+import hashlib
 import os
+import threading
 import time
 import uuid
 
@@ -62,4 +64,88 @@ def cache_fix_gen():
         return None
 
 
-__all__ = ['BOOT_ID', 'BOOT_TS', 'PID', 'cache_fix_gen']
+# Computed ONCE at first request and frozen for the process lifetime. Because a
+# restart is an os.execv re-exec (fresh import), the next process recomputes it
+# from the on-disk source it actually loaded. Freezing means the value reflects
+# code-as-loaded-at-boot, not a later mid-run edit — so the restart verifier
+# compares "source the OLD process loaded" vs "source the NEW process loaded".
+_FINGERPRINT_LOCK = threading.Lock()
+_FINGERPRINT_CACHE: 'dict | None' = None
+
+
+def _compute_code_fingerprint() -> dict:
+    """Fingerprint the tracked source tree as loaded by this process.
+
+    Combines the committed HEAD sha with a hash of ``git diff HEAD`` so that
+    UNCOMMITTED edits to tracked files (this project's dominant change mode)
+    are reflected too — a HEAD-only signal would report "unchanged" across a
+    restart that only picked up working-tree edits. Returns a dict with:
+
+      ``head``   — HEAD commit sha (short), or None outside a git checkout.
+      ``dirty``  — True when there are uncommitted tracked-source edits.
+      ``digest`` — 12-hex fold of (head + ``git diff HEAD`` bytes); the single
+                   value the restart verifier compares. None when git is
+                   unavailable (non-checkout deploy) — the caller then falls
+                   back to the bootId-only rule.
+
+    Best-effort: any failure yields ``{'head': None, 'dirty': None,
+    'digest': None}`` so ``/api/health`` never breaks over this.
+    """
+    try:
+        from lib.self_update._git import _head_sha, _run_git
+    except Exception as e:
+        logger.debug('[BootIdentity] git helpers unavailable: %s', e)
+        return {'head': None, 'dirty': None, 'digest': None}
+
+    # NOTE: we deliberately do NOT gate on _git.git_available() — it probes
+    # os.path.isdir(_ROOT/'.git') where _ROOT resolves to <project>/lib, so it
+    # false-negatives on a real checkout. _head_sha() + `git diff HEAD` run with
+    # cwd inside the tree and git walks UP to the repo, so they succeed
+    # regardless; a genuine non-git deploy yields head=None + non-zero diff rc,
+    # which the all-None guard below handles correctly.
+    head = _head_sha()
+    diff_bytes = b''
+    dirty = False
+    try:
+        # diff HEAD covers staged + unstaged edits to TRACKED files. Untracked
+        # files (build artifacts, .tofu runtime state) are intentionally
+        # excluded — they are not the loaded source and would make the digest
+        # churn on every request.
+        cp = _run_git(['diff', 'HEAD'])
+        if cp.returncode == 0 and cp.stdout:
+            diff_bytes = cp.stdout.encode('utf-8', 'replace')
+            dirty = bool(diff_bytes.strip())
+    except Exception as e:
+        logger.debug('[BootIdentity] git diff HEAD failed: %s', e)
+
+    if not head and not diff_bytes:
+        return {'head': None, 'dirty': None, 'digest': None}
+
+    h = hashlib.sha256()
+    h.update((head or '').encode('ascii', 'replace'))
+    h.update(b'\x00')
+    h.update(diff_bytes)
+    return {
+        'head': (head or '')[:12] or None,
+        'dirty': dirty,
+        'digest': h.hexdigest()[:12],
+    }
+
+
+def code_fingerprint() -> dict:
+    """Return the frozen source-tree fingerprint for this process.
+
+    Computed lazily on first call and cached for the process lifetime (a
+    restart re-execs → fresh process → recomputes from freshly-loaded source).
+    See :func:`_compute_code_fingerprint` for the dict shape.
+    """
+    global _FINGERPRINT_CACHE
+    if _FINGERPRINT_CACHE is not None:
+        return _FINGERPRINT_CACHE
+    with _FINGERPRINT_LOCK:
+        if _FINGERPRINT_CACHE is None:
+            _FINGERPRINT_CACHE = _compute_code_fingerprint()
+    return _FINGERPRINT_CACHE
+
+
+__all__ = ['BOOT_ID', 'BOOT_TS', 'PID', 'cache_fix_gen', 'code_fingerprint']

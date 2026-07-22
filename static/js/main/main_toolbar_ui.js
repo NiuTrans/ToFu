@@ -12,6 +12,164 @@
 function toggleThinking() {
   thinkingEnabled = !thinkingEnabled;
 }
+
+// ══════════════════════════════════════════════════════
+// ★ Two-tier capability dial (Chat / Studio)
+//   SINGLE source of truth mirrored from the backend
+//   (lib/tasks_pkg/chat_mode.chat_mode_defaults). The parity test
+//   tests/test_chat_mode_parity.py asserts this table is byte-equal to the
+//   Python one — keep them in lock-step.
+//
+//   Only the atomic flags a tier PINS are listed. Extras (browser/desktop/
+//   imageGen/humanGuidance/autoTranslate) are orthogonal — a tier switch
+//   never clobbers them.
+//
+//   (The old lean 'air' tier was merged into 'chat'; legacy air/pro persisted
+//   in old convs normalise forward to 'chat' — see chat_mode.normalize.)
+// ══════════════════════════════════════════════════════
+const _CHAT_MODE_DEFAULTS = {
+  chat: {
+    searchMode: 'multi',
+    fetchEnabled: true,
+    codeExecEnabled: true,
+    memoryEnabled: true,
+  },
+  studio: {
+    searchMode: 'multi',
+    fetchEnabled: true,
+    memoryEnabled: true,
+  },
+};
+if (typeof window !== 'undefined') window._CHAT_MODE_DEFAULTS = _CHAT_MODE_DEFAULTS;
+
+/* Paint the segmented control's active state + reflect the derived flags into
+ * the atomic-flag setters. Does NOT persist or open modals — that's the
+ * caller's job (setChatMode). Safe to call on restore. */
+function _applyChatModeUI(mode) {
+  // Normalise legacy tier codes (air/pro) forward to the merged 'chat' tier.
+  mode = (mode === 'studio') ? 'studio' : 'chat';
+  chatMode = mode;
+  const d = _CHAT_MODE_DEFAULTS[mode] || {};
+  if (typeof _applySearchModeUI === 'function') _applySearchModeUI(d.searchMode || 'multi');
+  if (typeof _applyFetchEnabledUI === 'function') _applyFetchEnabledUI(d.fetchEnabled !== false);
+  // codeExec: studio leaves it alone (run_command supersedes it in project
+  // mode); chat pins it on explicitly.
+  if (d.codeExecEnabled !== undefined && typeof _applyCodeExecUI === 'function') {
+    _applyCodeExecUI(!!d.codeExecEnabled);
+  }
+  if (d.memoryEnabled !== undefined && typeof _applyMemoryUI === 'function') {
+    _applyMemoryUI(!!d.memoryEnabled);
+  }
+  // ── Paint the popover trigger (icon + label) and the menu's selected row.
+  //    The trigger mirrors the active tier's glyph so the collapsed control
+  //    still communicates the current mode at a glance. ──
+  const _MODE_LABEL = { chat: 'Chat', studio: 'Studio' };
+  const _MODE_ICON = {
+    chat: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>',
+    studio: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>',
+  };
+  const lbl = document.getElementById('chatModeLabel');
+  if (lbl) lbl.textContent = _MODE_LABEL[mode] || 'Chat';
+  const ic = document.getElementById('chatModeIcon');
+  if (ic) ic.innerHTML = _MODE_ICON[mode] || _MODE_ICON.chat;
+  const trig = document.getElementById('chatModeToggle');
+  if (trig) trig.dataset.mode = mode;
+  document.querySelectorAll('#chatModeMenu .chat-mode-item').forEach(el => {
+    el.classList.toggle('selected', el.dataset.mode === mode);
+  });
+  if (typeof updateSubmenuCounts === 'function') updateSubmenuCounts();
+}
+if (typeof window !== 'undefined') window._applyChatModeUI = _applyChatModeUI;
+
+/* Open/close the mode popover (upward). Twin of toggleFlowMenu — one popover
+ * open at a time; closes on outside click (handler below). */
+function toggleChatModeMenu(e) {
+  if (e) e.stopPropagation();
+  const menu = document.getElementById('chatModeMenu');
+  if (!menu) return;
+  const willOpen = !menu.classList.contains('open');
+  // Close the sibling flow menu so only one popover shows at once.
+  const flow = document.getElementById('flowMenu');
+  if (flow) flow.classList.remove('open');
+  menu.classList.toggle('open', willOpen);
+}
+if (typeof window !== 'undefined') window.toggleChatModeMenu = toggleChatModeMenu;
+
+function closeChatModeMenu() {
+  const menu = document.getElementById('chatModeMenu');
+  if (menu) menu.classList.remove('open');
+}
+if (typeof window !== 'undefined') window.closeChatModeMenu = closeChatModeMenu;
+
+// Close the mode menu on outside click (mirrors the flow menu handler).
+if (typeof document !== 'undefined') {
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest('#modeMenuWrapper')) {
+      const menu = document.getElementById('chatModeMenu');
+      if (menu) menu.classList.remove('open');
+    }
+  });
+}
+
+/* User clicked a tier. Studio is special: it REQUIRES a project, so clicking
+ * it opens the project panel directly; the tier only becomes 'studio' once a
+ * project is actually attached (mpApplyFolders → onProjectAttached). Clicking
+ * Studio while a project is already attached just re-selects it. */
+function setChatMode(mode) {
+  if (mode === 'studio') {
+    const hasProject = (typeof projectState !== 'undefined')
+      && projectState && projectState.active && projectState.path;
+    if (!hasProject) {
+      // Don't flip the dial yet — wait for a real project attach. Just open
+      // the panel; onProjectAttached() promotes to studio on success.
+      if (typeof openProjectModal === 'function') openProjectModal();
+      return;
+    }
+    _applyChatModeUI('studio');
+    _saveConvToolState();
+    debugLog('Mode: Studio (project attached)', 'success');
+    return;
+  }
+  // chat. Switching AWAY from studio while a project is attached would be
+  // contradictory (studio ⟺ project); clearing the project is an explicit act
+  // via the project panel, so here we only change the dial + flags. If a
+  // project is attached and the user picks chat, we still detach-in-spirit by
+  // clearing the project so the derived state stays truthful.
+  if (mode !== 'studio'
+      && typeof projectState !== 'undefined' && projectState
+      && projectState.active && projectState.path
+      && typeof clearProject === 'function') {
+    clearProject();  // clears projectPath; async server reconcile is fire-and-forget
+  }
+  _applyChatModeUI(mode);
+  _saveConvToolState();
+  debugLog('Mode: Chat', 'success');
+}
+if (typeof window !== 'undefined') window.setChatMode = setChatMode;
+
+/* Called by mpApplyFolders after a project is successfully attached — promote
+ * the dial to Studio (the tier IS "a project is attached"). Kept separate from
+ * setChatMode so the project path owns the promotion. */
+function onProjectAttached() {
+  if (chatMode !== 'studio') _applyChatModeUI('studio');
+}
+if (typeof window !== 'undefined') window.onProjectAttached = onProjectAttached;
+
+/* Called by clearProject — a project-less chat is never Studio; fall back to
+ * the everyday Chat tier. */
+function onProjectCleared() {
+  if (chatMode === 'studio') _applyChatModeUI('chat');
+}
+if (typeof window !== 'undefined') window.onProjectCleared = onProjectCleared;
+
+/* Derive the correct tier from the current atomic flags — used on restore of
+ * an OLD conversation that has no stored chatMode (pre-feature convs). With
+ * the air/pro merge there are only two tiers: a project ⇒ studio, else chat. */
+function _deriveChatModeFromFlags(conv) {
+  if (conv && conv.projectPath) return 'studio';
+  return 'chat';
+}
+if (typeof window !== 'undefined') window._deriveChatModeFromFlags = _deriveChatModeFromFlags;
 /* ★ Populate model dropdown dynamically from the registered models list.
  * Called once at startup from _loadServerConfigAndPopulate(). */
 function _populateModelDropdown(models) {
@@ -358,29 +516,63 @@ function updateSubmenuCounts() {
     el.classList.toggle("visible", want);
   };
 
-  // AI enhance: codeExec, memory, translate
-  const aiCount = (codeExecEnabled ? 1 : 0) + (memoryEnabled ? 1 : 0) + (autoTranslate ? 1 : 0);
-  _setCount(document.getElementById("submenuAICount"), aiCount);
-  const aiTrigger = document.querySelector("#submenuAI .submenu-trigger");
-  if (aiTrigger) aiTrigger.classList.toggle("has-active", aiCount > 0);
+  // ★ Gate the AI-drawing extra by model availability: hide the whole row when
+  //   NO image-gen model is configured (a dead button otherwise). Uses the
+  //   registered-model list captured at boot.
+  _applyImageGenAvailability();
 
-  // Tools: browser, desktop, image gen, human guidance
-  // (Scheduler is a default tool — always on, no toggle — so it does not count here.)
-  const toolCount = (browserEnabled ? 1 : 0) + (desktopEnabled ? 1 : 0) + (imageGenEnabled ? 1 : 0) + (humanGuidanceEnabled ? 1 : 0);
-  _setCount(document.getElementById("submenuToolsCount"), toolCount);
-  const toolTrigger = document.querySelector("#submenuTools .submenu-trigger");
-  if (toolTrigger) toolTrigger.classList.toggle("has-active", toolCount > 0);
+  // Extras drawer count = every orthogonal capability the user turned on.
+  // (Scheduler is a default tool — no toggle — so it doesn't count.)
+  const extrasCount = (autoTranslate ? 1 : 0) + (humanGuidanceEnabled ? 1 : 0)
+    + (browserEnabled ? 1 : 0) + (desktopEnabled ? 1 : 0)
+    + (imageGenEnabled ? 1 : 0) + (swarmEnabled ? 1 : 0)
+    + (endpointEnabled ? 1 : 0) + (autopilotEnabled ? 1 : 0);
+  _setCount(document.getElementById("submenuExtrasCount"), extrasCount);
+  const extrasTrigger = document.querySelector("#submenuExtras .submenu-trigger");
+  if (extrasTrigger) extrasTrigger.classList.toggle("has-active", extrasCount > 0);
 
-  // Mode: swarm, endpoint, autopilot, flow
-  const modeCount = (swarmEnabled ? 1 : 0) + (endpointEnabled ? 1 : 0) + (autopilotEnabled ? 1 : 0) + (activeFlow ? 1 : 0);
-  _setCount(document.getElementById("submenuModeCount"), modeCount);
-  const modeTrigger = document.querySelector("#submenuMode .submenu-trigger");
-  if (modeTrigger) modeTrigger.classList.toggle("has-active", modeCount > 0);
+  // Flow: standalone box — no count pill, just reflect active-state on the trigger.
+  const flowTrigger = document.getElementById("flowToggle");
+  if (flowTrigger) flowTrigger.classList.toggle("has-active", !!activeFlow);
 
   /* A pill appeared/disappeared → toolbar's intrinsic width shifted by the
    * pill's box.  Re-measure so .ps-label gets its space back. */
   if (widthChanged && typeof _scheduleReflow === "function") _scheduleReflow();
 }
+
+/* Hide the AI-drawing toggle(s) when no image-gen model is configured — a
+ * button that can't do anything is worse than an absent one. Detection reuses
+ * the registered-model list (_registeredModels, populated by
+ * _populateModelDropdown from /api/server-config). Best-effort: if the list
+ * isn't ready yet we leave the row visible (it re-runs on the next
+ * updateSubmenuCounts after config loads). */
+function _hasImageGenModel() {
+  const models = (typeof _registeredModels !== 'undefined' && _registeredModels) || [];
+  for (const m of models) {
+    const caps = (m && m.capabilities) || [];
+    for (let i = 0; i < caps.length; i++) if (caps[i] === 'image_gen') return true;
+  }
+  return false;
+}
+if (typeof window !== 'undefined') window._hasImageGenModel = _hasImageGenModel;
+
+function _applyImageGenAvailability() {
+  const models = (typeof _registeredModels !== 'undefined' && _registeredModels) || [];
+  if (!models.length) return;  // config not loaded yet — don't hide prematurely
+  const ok = _hasImageGenModel();
+  const ids = ['imageGenToggle', 'imageGenModeBtn', 'mobileImageGenToggle', 'mobileImageGenModeBtn'];
+  for (const id of ids) {
+    const el = document.getElementById(id);
+    if (el) el.style.display = ok ? '' : 'none';
+  }
+  // If image-gen was somehow enabled but no model exists, turn it off so the
+  // wire config never asks for a tool the server can't honor.
+  if (!ok && typeof imageGenEnabled !== 'undefined' && imageGenEnabled
+      && typeof _applyImageGenToolUI === 'function') {
+    _applyImageGenToolUI(false);
+  }
+}
+if (typeof window !== 'undefined') window._applyImageGenAvailability = _applyImageGenAvailability;
 
 function cycleSearchMode() {
   const modes = ["off", "multi"];
@@ -732,27 +924,26 @@ if (typeof window !== 'undefined') window._kickAutopilot = _kickAutopilot;
 var _orchFlowCache = null;   // cached [{id,name}] of stored custom flows
 
 function _applyFlowUI(flowVal) {
-  /* ★ Normalize a persisted/synced builtin:autopilot back to the autopilot
-   *   toggle state. New selections never store this (setActiveFlow aliases it
-   *   away), but a conversation saved BEFORE this change — or synced from a
-   *   peer/older client — carries activeFlow='builtin:autopilot'. Restoring it
-   *   as a flow would resurrect the flow badge + "runs on engine" identity for
-   *   what the backend actually runs as plain autopilot. Redirect it here so
-   *   EVERY caller (including _restoreConvToolState on reload) converges on the
-   *   autopilot toggle. Single choke point — do NOT re-list this per caller. */
-  if ((flowVal || '') === 'builtin:autopilot') {
-    activeFlow = '';
-    if (typeof _applyAutopilotUI === 'function') _applyAutopilotUI(true);
-    if (typeof _applyEndpointUI === 'function') _applyEndpointUI(false);
-    flowVal = '';
-  }
+  /* ★ builtin:autopilot is a REAL engine flow selection (symmetric with
+   *   builtin:endpoint) — the "编排流程 → 自动驾驶" dropdown runs the FlowExecutor
+   *   autopilot (worker⇄VU) graph, distinct from the "模式" toggle which runs
+   *   the live standalone autopilot loop. So restore/sync it as-is like any
+   *   other flow; do NOT redirect it to the autopilot toggle. */
   activeFlow = flowVal || '';
   const btn = document.getElementById("flowToggle");
   if (btn) btn.classList.toggle("active", !!activeFlow);
   const badge = document.getElementById("flowBadge");
   if (badge) badge.style.display = activeFlow ? "" : "none";
   const label = document.getElementById("flowActiveLabel");
-  if (label) label.textContent = _flowDisplayName(activeFlow);
+  if (label) {
+    if (activeFlow) {
+      label.textContent = _flowDisplayName(activeFlow);
+      label.classList.add("visible");
+    } else {
+      label.textContent = "";
+      label.classList.remove("visible");
+    }
+  }
   // Reflect the radio-style selection in the dropdown list.
   document.querySelectorAll('#flowMenuList .flow-menu-item').forEach(el => {
     el.classList.toggle('selected', (el.dataset.flow || '') === activeFlow);
@@ -768,28 +959,11 @@ function _flowDisplayName(flowVal) {
 }
 
 function setActiveFlow(flowVal) {
-  /* ★ builtin:autopilot is the standalone Autopilot toggle wearing a dropdown
-   *   entry. The backend routes flowBuiltin='autopilot' to the LIVE standalone
-   *   autopilot path (resolve_chat_flow_entry, Option C) unless the
-   *   TOFU_AUTOPILOT_VIA_FLOW dev flag is on — so the DEFAULT experience is the
-   *   plain autopilot loop, NOT an engine flow. Present it that way in the UI
-   *   too: alias the selection to the autopilot toggle so the badge, info-rail
-   *   mode chip, and the /config/resolve payload are byte-identical to picking
-   *   the toggle. Single writer — the flow selector delegates to toggleAutopilot
-   *   rather than growing its own parallel "autopilot but as a flow" state. */
-  if ((flowVal || '') === 'builtin:autopilot') {
-    _applyFlowUI('');                 // never carry a flow selection for autopilot
-    if (!autopilotEnabled) {
-      toggleAutopilot();              // → sets autopilotEnabled, clears endpoint/flow, saves
-    } else {
-      _saveConvToolState();
-    }
-    if (typeof updateSubmenuCounts === 'function') updateSubmenuCounts();
-    const _menu = document.getElementById("flowMenu");
-    if (_menu) _menu.classList.remove("open");
-    debugLog("Autopilot: ON (selected from Mode menu) — same as the toolbar toggle", "success");
-    return;
-  }
+  /* ★ builtin:autopilot is a REAL engine flow, symmetric with builtin:endpoint:
+   *   selecting it runs the FlowExecutor autopilot (worker⇄VU) graph so engine
+   *   behavior is observable in the frontend — deliberately DIFFERENT from the
+   *   "模式" Autopilot toggle, which runs the live standalone loop. Handle it on
+   *   the normal flow path below (no alias to the toggle). */
   _applyFlowUI(flowVal || '');
   /* Flow ⇄ toggles mutual exclusion: a flow owns the loop boundary. */
   if (activeFlow && (endpointEnabled || autopilotEnabled)) {
@@ -840,11 +1014,32 @@ async function _populateFlowMenu() {
   list.innerHTML = items.map(it =>
     '<div class="flow-menu-item' + ((it.flow === activeFlow) ? ' selected' : '') + '" '
     + 'data-flow="' + escapeHtml(it.flow) + '" onclick="setActiveFlow(\'' + escapeHtml(it.flow).replace(/'/g, "\\'") + '\')">'
-    + '<span class="flow-menu-check">✓</span>'
+    + '<span class="flow-menu-icon">' + _flowMenuIcon(it.flow) + '</span>'
     + '<span class="flow-menu-text"><span class="flow-menu-name">' + escapeHtml(it.name) + '</span>'
     + '<span class="flow-menu-desc">' + escapeHtml(it.desc) + '</span></span>'
+    + '<span class="flow-menu-check">✓</span>'
     + '</div>'
   ).join('');
+}
+
+/* SVG icon for a flow-menu row (§3.4 — SVG only, never emoji). The two
+ * builtins reuse the EXACT glyphs from their Mode-menu toggles (endpointToggle
+ * / autopilotToggle) so the two surfaces read as the same capability; "none"
+ * (plain chat) is a speech bubble; any custom Studio flow is a node-graph. */
+function _flowMenuIcon(flow) {
+  const SW = 'fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"';
+  if (flow === 'builtin:endpoint') {
+    return '<svg width="16" height="16" viewBox="0 0 24 24" ' + SW + '><path d="M12 2v4"/><path d="M12 18v4"/><path d="M4.93 4.93l2.83 2.83"/><path d="M16.24 16.24l2.83 2.83"/><path d="M2 12h4"/><path d="M18 12h4"/><path d="M4.93 19.07l2.83-2.83"/><path d="M16.24 7.76l2.83-2.83"/><circle cx="12" cy="12" r="4"/></svg>';
+  }
+  if (flow === 'builtin:autopilot') {
+    return '<svg width="16" height="16" viewBox="0 0 24 24" ' + SW + '><circle cx="12" cy="12" r="3"/><path d="M12 1v6m0 10v6m11-11h-6m-10 0H1m17.66-6.34l-4.24 4.24m-5.66 5.66l-4.24 4.24m12.14 0l-4.24-4.24m-5.66-5.66L4.34 4.34"/></svg>';
+  }
+  if (!flow) {
+    // "none" — plain conversation (no engine flow)
+    return '<svg width="16" height="16" viewBox="0 0 24 24" ' + SW + '><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>';
+  }
+  // A stored custom Studio flow — node graph
+  return '<svg width="16" height="16" viewBox="0 0 24 24" ' + SW + '><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg>';
 }
 
 // Close the flow menu on outside click.

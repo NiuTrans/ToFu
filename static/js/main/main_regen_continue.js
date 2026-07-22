@@ -299,7 +299,13 @@ async function continueAssistant() {
   if (!conv || activeStreams.has(conv.id) || conv.activeTaskId) return;
   const assistantMsg = conv.messages[conv.messages.length - 1];
   if (!assistantMsg || assistantMsg.role !== "assistant") return;
-  if (!assistantMsg.content && !assistantMsg.thinking) {
+  // ★ Align with the backend chat_continue empty-guard, which treats a turn as
+  //   empty only when content AND thinking AND toolRounds are all absent. A
+  //   turn cut off mid-tool-loop (tool rounds present, no prose yet) is NOT
+  //   empty — it has a recoverable checkpoint the server can resume from — so
+  //   it must go through the POST, not this pop-and-regenerate shortcut.
+  const _hasRounds = !!(getToolRoundsFromMsg(assistantMsg) || []).length;
+  if (!assistantMsg.content && !assistantMsg.thinking && !_hasRounds) {
     // Nothing to continue — message is empty, just regenerate
     conv.messages.pop();
     conv._needsLoad = false;

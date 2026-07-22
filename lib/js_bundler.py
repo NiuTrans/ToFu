@@ -25,6 +25,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 
 try:
@@ -385,6 +386,11 @@ _BUNDLE_FILES = [
     # memory + skills install dropzones. Load before memory_skill_install.js
     # and skills_install.js (both call it at runtime; core loads first anyway).
     'core/zip_drop_zone.js',
+    # Bounded-concurrency task runner (runWithConcurrency) — caps the
+    # reconnect "thundering herd" (all N conv reattach/probe calls firing at
+    # once on wake). Leaf module (window only); load before its consumers
+    # core/cross_tab_sync.js + core/health_stream_timer.js.
+    'core/async_pool.js',
     'core/cross_tab_sync.js',
     'core/conversations.js',
     # Shared SSE fetch-response read/decode/buffer loop (readSSEStream) —
@@ -556,9 +562,9 @@ _BUNDLE_FILES = [
     'settings/balance.js',
     'settings/template_actions.js',
     'settings/model_edit.js',
-    'settings/access_matrix.js',
+    'settings/providers/access_matrix.js',
     'settings/visibility_defaults.js',
-    'settings/chip_input.js',
+    'widgets/chip_input.js',
     'settings/other_tabs.js',
     'settings/speech.js',
     'settings/auth_sources.js',
@@ -1078,6 +1084,96 @@ def build_bundle():
         logger.info('[Bundle] Built %s (%d files, %dKB minified) in %.1fms — no deferred bundle',
                     core_name, len(_BUNDLE_FILES), core_size // 1024, elapsed * 1000)
     return core_name
+
+
+# ── Background rebuild (keeps a slow build off the request thread) ──
+# `get_bundle_filename()` rebuilds INLINE when a source file changed. That is
+# fine at startup, but it must NEVER run on the `GET /` request thread: a stale
+# in-memory manifest (e.g. a source file renamed under a still-running process)
+# turns every first page load into a full node-gate + minify + hash cycle,
+# which — during a reconnect storm — stalled the event loop and produced a 95s
+# `GET /`. The non-blocking accessor below serves the last-good bundle
+# immediately and schedules the rebuild in a daemon thread instead.
+_bg_rebuild_lock = threading.Lock()
+_bg_rebuild_active = False
+
+
+def _schedule_background_rebuild():
+    """Kick off build_bundle() in a daemon thread, deduplicated.
+
+    A no-op when a background rebuild is already in flight (only one runs at a
+    time; concurrent callers just adopt the last-good bundle until it lands).
+    """
+    global _bg_rebuild_active
+    with _bg_rebuild_lock:
+        if _bg_rebuild_active:
+            return
+        _bg_rebuild_active = True
+
+    def _run():
+        global _bg_rebuild_active
+        try:
+            build_bundle()
+        except Exception as e:
+            logger.error('[Bundle] background rebuild failed: %s', e, exc_info=True)
+        finally:
+            with _bg_rebuild_lock:
+                _bg_rebuild_active = False
+
+    t = threading.Thread(target=_run, name='tofu-bundle-rebuild', daemon=True)
+    t.start()
+
+
+def get_bundle_filename_nonblocking():
+    """Like get_bundle_filename() but NEVER runs build_bundle() on the caller.
+
+    Serves the current bundle immediately. When source files changed since the
+    last build, it schedules a background rebuild and returns the still-valid
+    last-good bundle — so the browser gets the OLD bundle for one more load and
+    picks up the new one on the next page load (the hashed filename makes that
+    cache-safe). The only case that still blocks is a genuine cold start with NO
+    serviceable bundle on disk (startup normally builds it first, so this is the
+    dev/first-boot fallback, not the request-path hot case).
+
+    Returns:
+        Bundle filename string, or None if no bundle could be produced.
+    """
+    current_mtime = _source_max_mtime()
+    have_current = (
+        _bundle_filename
+        and current_mtime <= _bundle_mtime
+        and os.path.exists(os.path.join(JS_DIR, _bundle_filename))
+    )
+    if have_current:
+        return _bundle_filename
+
+    # Stale (or missing) — but if the last-good bundle is still on disk we can
+    # serve it now and rebuild off-thread. Only block when there is nothing
+    # serviceable to hand back.
+    if _bundle_filename and os.path.exists(os.path.join(JS_DIR, _bundle_filename)):
+        _schedule_background_rebuild()
+        return _bundle_filename
+
+    return build_bundle()
+
+
+def get_feature_bundle_filename_nonblocking():
+    """Non-blocking companion to get_feature_bundle_filename().
+
+    Resolves the pair via get_bundle_filename_nonblocking() (which may schedule
+    a background rebuild) and returns the currently-published feature filename.
+    """
+    get_bundle_filename_nonblocking()
+    return _feature_filename
+
+
+def get_bundle_script_tag_nonblocking():
+    """Non-blocking companion to get_bundle_script_tag() for the request path."""
+    filename = get_bundle_filename_nonblocking()
+    if not filename:
+        return None
+    return (f'<script defer src="static/js/{filename}"'
+            f' onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>')
 
 
 def get_bundle_filename():

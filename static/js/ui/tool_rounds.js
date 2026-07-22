@@ -876,8 +876,9 @@ function _renderVerticalCard(v) {
   const rows = items.slice(0, 12).map(it => {
     const title = escapeHtml(String(it.title || "(untitled)"));
     const url = String(it.url || "");
-    const titleHtml = url
-      ? `<a href="${escapeHtml(url)}" target="_blank" rel="noopener">${title}</a>`
+    const safeUrl = /^https?:\/\//i.test(url) ? url : "";
+    const titleHtml = safeUrl
+      ? `<a href="${escapeHtml(safeUrl)}" target="_blank" rel="noopener">${title}</a>`
       : `<span>${title}</span>`;
     const meta = [];
     if (it.upvotes != null && it.upvotes !== "")
@@ -1221,23 +1222,54 @@ function _unescapeEntities(s) {
 
 /** Explicit transition line for a board mutation (verb + epic + new status).
  *  The epic title is rendered as light inline Markdown (bold/italic/code) with
- *  entities un-escaped, so `**x**` and `<venue>` display correctly. */
+ *  entities un-escaped, so `**x**` and `<venue>` display correctly. The epic
+ *  TITLE is the whole point of this card ("what was posted/claimed/…"), so it
+ *  gets its own prominent row; the short epic id is a monospace traceability
+ *  chip. When the backend couldn't resolve a title we degrade to a labelled
+ *  placeholder rather than rendering a bare verb badge with nothing after it
+ *  (the reported "shows nothing" card). */
 function _renderBoardTransition(tr) {
   if (!tr || !tr.verb) return "";
   const _t = (typeof t === "function") ? t : (k, d) => d;
+  // A mutation can FAIL by returning an error (board full, already-claimed,
+  // task-not-found). The backend now carries `ok:false` + `error` so we render
+  // an explicit failed card instead of a green "posted → open" that lies about
+  // what happened (the reported bug: no visible failure, only in the raw text).
+  const failed = tr.ok === false;
   const verbLabel = _t("projectBrain.boardVerb." + tr.verb, tr.verb);
-  const title = tr.title || tr.taskId || "";
-  const titleHtml = (typeof _tpInlineMd === "function")
-    ? _tpInlineMd(_unescapeEntities(title))
-    : escapeHtml(title);
+  const rawTitle = (tr.title || "").trim();
+  const titleHtml = rawTitle
+    ? ((typeof _tpInlineMd === "function")
+        ? _tpInlineMd(_unescapeEntities(rawTitle))
+        : escapeHtml(rawTitle))
+    : `<span class="ptool-board-tr-untitled">${escapeHtml(
+        _t("projectBrain.boardUntitled", "(untitled epic)"))}</span>`;
+  const idChip = tr.taskId
+    ? `<span class="ptool-board-tr-id" title="${escapeHtml(tr.taskId)}">${escapeHtml(tr.taskId)}</span>`
+    : "";
   const statusLabel = tr.status
     ? `<span class="ptool-board-tr-status ptool-board-mini-${escapeHtml(tr.status)}">${escapeHtml(_t("projectBrain.lane" + tr.status.charAt(0).toUpperCase() + tr.status.slice(1), tr.status))}</span>`
     : "";
-  return `<div class="ptool-board-transition">` +
+  // On failure the "→ status" chip is replaced by a FAILED badge; the error
+  // message gets its own prominent row so the user sees WHY without opening
+  // the raw model text.
+  const failBadge = failed
+    ? `<span class="ptool-board-tr-failed">${(typeof Icon === "function") ? Icon("alertTriangle", 12) : ""}<span>${escapeHtml(_t("projectBrain.boardFailed", "failed"))}</span></span>`
+    : "";
+  const headRow = `<div class="ptool-board-tr-head">` +
     `<span class="ptool-board-tr-verb">${escapeHtml(verbLabel)}</span>` +
-    `<span class="ptool-board-tr-title">${titleHtml}</span>` +
-    (tr.status ? `<span class="ptool-board-tr-arrow">${(typeof Icon === "function") ? Icon("chevronDown", 12) : "→"}</span>${statusLabel}` : "") +
+    (failed
+      ? failBadge
+      : (tr.status ? `<span class="ptool-board-tr-arrow">${(typeof Icon === "function") ? Icon("chevronDown", 12) : "→"}</span>${statusLabel}` : "")) +
     `</div>`;
+  const titleRow = `<div class="ptool-board-tr-titlerow">` +
+    `<span class="ptool-board-tr-title">${titleHtml}</span>${idChip}` +
+    `</div>`;
+  const errRow = (failed && (tr.error || "").trim())
+    ? `<div class="ptool-board-tr-error">${escapeHtml((tr.error || "").trim())}</div>`
+    : "";
+  const cls = failed ? "ptool-board-transition ptool-board-transition-failed" : "ptool-board-transition";
+  return `<div class="${cls}">${headRow}${titleRow}${errRow}</div>`;
 }
 
 /* Localize the small known set of backend statusLabel tokens ("generating" /
@@ -2086,7 +2118,8 @@ function _renderUnifiedToolLine(round, isSearching) {
         : r.fetched
         ? `<span class="search-result-fetched${r.source === "PDF" ? " pdf" : ""}">✓ ${r.fetchedChars ? (r.fetchedChars > 1000 ? Math.round(r.fetchedChars / 1000) + "k" : r.fetchedChars) + " chars" : "fetched"}</span>`
         : "";
-      return `<div class="search-result-item"><div class="search-result-title">${r.url ? `<a href="${escapeHtml(r.url)}" target="_blank" rel="noopener">${escapeHtml(r.title)}</a>` : `<span>${escapeHtml(r.title)}</span>`}<span class="search-result-source">${escapeHtml(r.source)}</span>${fb}</div>${r.snippet ? `<div class="search-result-snippet">${escapeHtml(r.snippet)}</div>` : ""}${r.url ? `<div class="search-result-url">${escapeHtml(r.url)}</div>` : ""}</div>`;
+      const _safeRu = /^https?:\/\//i.test(String(r.url || "")) ? r.url : "";
+      return `<div class="search-result-item"><div class="search-result-title">${_safeRu ? `<a href="${escapeHtml(_safeRu)}" target="_blank" rel="noopener">${escapeHtml(r.title)}</a>` : `<span>${escapeHtml(r.title)}</span>`}<span class="search-result-source">${escapeHtml(r.source)}</span>${fb}</div>${r.snippet ? `<div class="search-result-snippet">${escapeHtml(r.snippet)}</div>` : ""}${r.url ? `<div class="search-result-url">${escapeHtml(r.url)}</div>` : ""}</div>`;
     };
     // ── Per-query grouping: when a batch search tagged each result with its
     //    source query (`_q`), render a subheader per query so the user can
@@ -2176,9 +2209,10 @@ function _renderUnifiedToolLine(round, isSearching) {
         const totalRaw = engines.reduce((s, e) => s + (eb[e] ? eb[e].length : 0), 0);
         const ebInner = engines.map((eng) => {
           const urls = eb[eng] || [];
-          const urlItems = urls.map((u) =>
-            `<div class="eb-url-item"><a href="${escapeHtml(u.url)}" target="_blank" rel="noopener">${escapeHtml(u.title || u.url)}</a><div class="eb-url-text">${escapeHtml(u.url)}</div></div>`
-          ).join("");
+          const urlItems = urls.map((u) => {
+            const _safeEu = /^https?:\/\//i.test(String(u.url || "")) ? u.url : "";
+            return `<div class="eb-url-item">${_safeEu ? `<a href="${escapeHtml(_safeEu)}" target="_blank" rel="noopener">${escapeHtml(u.title || u.url)}</a>` : `<span>${escapeHtml(u.title || u.url)}</span>`}<div class="eb-url-text">${escapeHtml(u.url)}</div></div>`;
+          }).join("");
           return `<div class="eb-engine"><div class="eb-engine-name">${escapeHtml(eng)} <span class="eb-engine-count">(${urls.length})</span></div><div class="eb-engine-urls">${urlItems}</div></div>`;
         }).join("");
         engineBkdnHtml = `<div class="eb-section">

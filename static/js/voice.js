@@ -47,7 +47,7 @@
 
   function _toast(kind, key, fallback) {
     try {
-      if (typeof showToast === 'function') showToast(kind, _t(key, fallback));
+      if (typeof showToast === 'function') showToast(_t(key, fallback), kind);
     } catch (e) {
       if (typeof console !== 'undefined') console.warn('[Voice] toast failed:', e);
     }

@@ -733,13 +733,21 @@ function _probeStuckStream(convId, opts) {
  */
 function _probeAllStuckStreamsOnWake(trigger) {
   const now = Date.now();
-  let n = 0;
+  /* Collect the silent streams first, then probe them under a concurrency
+   *   cap. Each _probeStuckStream issues an Api.chat.active()/reconnect; firing
+   *   all of them the instant a long-slept tab wakes is the reconnect
+   *   thundering herd. Bounded fan-out drains them a few at a time. Fall back
+   *   to the immediate loop only if the shared pool isn't bundled yet. */
+  const stuck = [];
   for (const [convId, info] of _streamTimers.entries()) {
     const silentSec = Math.floor((now - info.lastDataTime) / 1000);
-    if (silentSec >= _SILENCE_THRESHOLD) {
-      _probeStuckStream(convId, { silentSec, wake: true });
-      n++;
-    }
+    if (silentSec >= _SILENCE_THRESHOLD) stuck.push({ convId, silentSec });
+  }
+  const n = stuck.length;
+  if (typeof runWithConcurrency === 'function') {
+    runWithConcurrency(stuck, (s) => _probeStuckStream(s.convId, { silentSec: s.silentSec, wake: true }), 4);
+  } else {
+    for (const s of stuck) _probeStuckStream(s.convId, { silentSec: s.silentSec, wake: true });
   }
   if (n) console.info(`[StreamTimer] ★ wake sweep (${trigger}) — probed ${n} silent stream(s)`);
   return n;

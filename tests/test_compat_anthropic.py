@@ -108,5 +108,45 @@ class AnthropicTranslateTest(unittest.TestCase):
         self.assertIn('event: message_stop', out)
 
 
+    def test_streaming_emits_tool_use_block(self):
+        """A task that finished on a tool call must emit a tool_use content
+        block in the stream (parity with the sync _content_blocks_from_task).
+        Before the fix the stream `done` branch emitted no tool_use block → a
+        streaming caller got stop_reason=tool_use with no tool_use payload."""
+        import asyncio
+        from lib.compat.anthropic import stream_anthropic_chunks
+        tc = {'id': 'toolu_x', 'type': 'function',
+              'function': {'name': 'get_weather', 'arguments': '{"city":"SF"}'}}
+        task = {
+            'id': 'abc', 'content': '',
+            'events': [{'type': 'done', 'finishReason': 'tool_use', 'seq': 0}],
+            'events_lock': threading.Lock(),
+            'status': 'done', 'finishReason': 'tool_use',
+            'toolRounds': [{'tool_calls': [tc]}],
+        }
+
+        async def _drain():
+            return [f async for f in stream_anthropic_chunks(task, model='claude')]
+        out = ''.join(asyncio.new_event_loop().run_until_complete(_drain()))
+        self.assertIn('"type": "tool_use"', out,
+                      'stream must emit a tool_use content block when the task '
+                      'finished on a tool call')
+        self.assertIn('get_weather', out)
+        self.assertIn('input_json_delta', out)
+        self.assertIn('"stop_reason": "tool_use"', out)
+
+    def test_malformed_body_raises_valueerror_for_count_tokens_guard(self):
+        # count_tokens now wraps translate_anthropic_request in try/except
+        # ValueError → 400 (mirroring /v1/messages). This asserts the raise
+        # the guard relies on: a non-array `messages` is a ValueError, not an
+        # uncaught 500. (NEUTER context: without the route guard this same
+        # exception escapes count_tokens as a 500.)
+        from lib.compat.anthropic import translate_anthropic_request
+        with self.assertRaises(ValueError):
+            translate_anthropic_request({
+                'model': 'claude', 'max_tokens': 10, 'messages': 'not-a-list',
+            })
+
+
 if __name__ == '__main__':
     unittest.main()

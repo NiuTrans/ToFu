@@ -612,7 +612,7 @@ The `.env.example` file documents all supported variables. Key ones:
 │   ├── agent_core/            Reusable agent base (run loop, dispatch, TaskRuntime, push, profiles)
 │   ├── llm/                   LLM API client package (build_body / stream / cache / diagnostics)
 │   ├── llm_dispatch/          Multi-key multi-model smart dispatcher
-│   ├── database/              Dual backend — SQLite default, PostgreSQL auto-bootstrap
+│   ├── database/              Dual backend — SQLite default, PostgreSQL opt-in via --with-postgres
 │   ├── tasks_pkg/             Task orchestration & context compaction
 │   │   ├── orchestrator.py    Main LLM ↔ tool loop
 │   │   ├── executor.py        Tool execution engine

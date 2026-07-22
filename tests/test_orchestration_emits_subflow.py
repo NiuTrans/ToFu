@@ -401,5 +401,64 @@ class VirtualUserVerdictTest(unittest.TestCase):
         self.assertEqual(phase, 'stop')
 
 
+class ParallelVerdictChannelWarningTest(unittest.TestCase):
+    """A parallel fan-out whose branches contain a verdict-feeding producer
+    (a verifier role, or a shared-context producer that reads the pending
+    feedback/directive slot) races on the single-valued
+    _pending_feedback / _pending_directive channel — the engine's concurrent
+    branches consume it order-dependently. The validator WARNS about this so
+    the author knows; it does NOT error (a fresh-context one-shot fan-out —
+    the composer's recommended pattern — stays clean)."""
+
+    def _fanout(self, w1_params=None, w2_params=None, w1_role='worker',
+                w2_role='worker'):
+        # start → parallel → {w1, w2} → barrier → stop
+        return {
+            'schema': SCHEMA_ID, 'name': 'PAR',
+            'nodes': [
+                {'id': 's', 'type': 'control', 'kind': 'start'},
+                {'id': 'p', 'type': 'control', 'kind': 'parallel'},
+                {'id': 'w1', 'type': 'role', 'role': w1_role,
+                 'params': w1_params or {}},
+                {'id': 'w2', 'type': 'role', 'role': w2_role,
+                 'params': w2_params or {}},
+                {'id': 'b', 'type': 'control', 'kind': 'barrier'},
+                {'id': 'e', 'type': 'control', 'kind': 'stop'}],
+            'edges': [{'from': 's', 'to': 'p'},
+                      {'from': 'p', 'to': 'w1'}, {'from': 'p', 'to': 'w2'},
+                      {'from': 'w1', 'to': 'b'}, {'from': 'w2', 'to': 'b'},
+                      {'from': 'b', 'to': 'e'}]}
+
+    def _has_par_warning(self, v):
+        return any('parallel' in w and (
+            'feedback' in w or 'directive' in w or 'order-dependent' in w)
+            for w in v['warnings'])
+
+    def test_fresh_context_fanout_no_warning(self):
+        # The safe/recommended pattern: two fresh-context one-shot workers.
+        v = validate_definition(self._fanout())
+        self.assertTrue(v['ok'], v['errors'])
+        self.assertFalse(self._has_par_warning(v), v['warnings'])
+
+    def test_shared_context_producer_in_parallel_warns(self):
+        v = validate_definition(self._fanout(
+            w1_params={'isolation': 'shared-context'}))
+        self.assertTrue(v['ok'], v['errors'])   # warning, not error
+        self.assertTrue(self._has_par_warning(v), v['warnings'])
+
+    def test_verifier_role_in_parallel_warns(self):
+        v = validate_definition(self._fanout(w2_role='critic'))
+        self.assertTrue(v['ok'], v['errors'])
+        self.assertTrue(self._has_par_warning(v), v['warnings'])
+
+    def test_shared_context_outside_parallel_no_warning(self):
+        # A shared-context worker in a plain linear loop is the CORRECT
+        # endpoint pattern — it must NOT trip the parallel warning.
+        d = build_endpoint_definition()
+        v = validate_definition(d)
+        self.assertTrue(v['ok'], v['errors'])
+        self.assertFalse(self._has_par_warning(v), v['warnings'])
+
+
 if __name__ == '__main__':
     unittest.main()

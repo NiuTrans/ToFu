@@ -10,6 +10,8 @@ project charter, project board, live peer status / messaging / intervention.
 
 from __future__ import annotations
 
+import re
+
 from lib.conv_ref import execute_conv_ref_tool
 from lib.log import get_logger
 from lib.tasks_pkg.executor import tool_registry
@@ -148,16 +150,55 @@ def _handle_board_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, 
             }
         else:
             # Mutation → an explicit transition (verb + target epic + status).
-            tid = (_fn_args.get('task_id') or '').strip()
-            title = ''
-            status = ''
-            for tk in board.get('tasks', []):
-                if tk.get('id') == tid:
-                    title = tk.get('title', '')
-                    status = tk.get('status', '')
-                    break
+            # A mutation can FAIL by RETURNING an error string (board full,
+            # already-claimed, task-not-found) rather than raising — the old
+            # transition meta looked byte-identical to a success (verb + title +
+            # a GUESSED 'open' status), so a failed post/claim rendered as a
+            # normal green card and the user only learned of the failure by
+            # opening the raw model text (the reported bug). Detect the error
+            # sentinel and carry ok/error onto the transition so the frontend
+            # can render an explicit failed card.
+            _content = _tool_content if isinstance(_tool_content, str) else str(_tool_content)
+            _failed = _content.lstrip()[:40].startswith(('Error', '❌', 'NOT claimed', 'Failed'))
+            _err_msg = _content.strip() if _failed else ''
+            # A POST carries NO task_id in its args (the id is minted
+            # server-side); the epic title lives in the args and the freshly
+            # posted epic is always 'open'. So a post is keyed off the args +
+            # the id parsed from the result string ("Posted epic <id> …"),
+            # NOT an args task_id lookup (which was empty → the card rendered a
+            # bare verb with no title, the reported "shows nothing" bug).
+            if fn_name == 'project_board_post':
+                tid = ''
+                content = _tool_content if isinstance(_tool_content, str) else str(_tool_content)
+                m = re.search(r'\bpt_[0-9a-f]{6,}', content)
+                if m:
+                    tid = m.group(0)
+                title = (_fn_args.get('title') or '').strip()
+                status = 'open'
+                # Prefer the authoritative board row when the id resolves (it
+                # carries the stored, length-capped title); fall back to args.
+                if tid:
+                    for tk in board.get('tasks', []):
+                        if tk.get('id') == tid:
+                            title = tk.get('title', '') or title
+                            status = tk.get('status', '') or status
+                            break
+            else:
+                tid = (_fn_args.get('task_id') or '').strip()
+                title = ''
+                status = ''
+                for tk in board.get('tasks', []):
+                    if tk.get('id') == tid:
+                        title = tk.get('title', '')
+                        status = tk.get('status', '')
+                        break
+            # A failed mutation posts/claims/etc NOTHING, so a guessed status
+            # ('open') would be a lie — clear it and surface the error instead.
+            if _failed:
+                status = ''
             meta['boardTransition'] = {
                 'verb': _verb, 'taskId': tid, 'title': title, 'status': status,
+                'ok': not _failed, 'error': _err_msg,
             }
 
     return simple_call(

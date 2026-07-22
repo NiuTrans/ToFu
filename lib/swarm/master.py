@@ -96,6 +96,48 @@ def _count_file_writes(tool_log: list) -> int:
                if isinstance(e, dict) and e.get('tool') in _FILE_WRITE_TOOLS)
 
 
+#: Max tool-call rows to persist per agent in the durable snapshot — mirrors
+#: the frontend's live 30-row cap (``_swarmAgents[].._toolCalls``) so a
+#: reloaded panel shows the same bounded timeline a live one did.
+_SNAPSHOT_TOOLCALLS_CAP = 30
+
+
+def _snapshot_tool_timeline(tool_log: list):
+    """Derive the panel's tool timeline from a sub-agent's ``tool_log``.
+
+    The live ``_swarmAgents`` array carries both an aggregate ``tools`` name
+    list and a per-call ``_toolCalls`` timeline (synthesized frontend-side from
+    ``swarm_agent_tool_call`` SSE events). Neither survives reload, so the
+    recovered panel showed no tools at all. Rebuild both from the persisted
+    ``tool_log`` (``[{round, tool, args_brief, timestamp}, ...]``).
+
+    Returns ``(tools, tool_calls)`` where ``tools`` is the unique tool-name
+    list (order preserved) and ``tool_calls`` matches the frontend row shape
+    ``{toolName, argsBrief, status}``. ``tool_log`` records only calls that
+    completed, so every row is ``status='done'``.
+    """
+    if not tool_log:
+        return [], []
+    tools: list = []
+    tool_calls: list = []
+    for e in tool_log:
+        if not isinstance(e, dict):
+            continue
+        name = e.get('tool')
+        if not name:
+            continue
+        if name not in tools:
+            tools.append(name)
+        tool_calls.append({
+            'toolName':  name,
+            'argsBrief': e.get('args_brief') or '',
+            'status':    'done',
+        })
+    if len(tool_calls) > _SNAPSHOT_TOOLCALLS_CAP:
+        tool_calls = tool_calls[-_SNAPSHOT_TOOLCALLS_CAP:]
+    return tools, tool_calls
+
+
 # ═══════════════════════════════════════════════════════════
 #  Sub-agent factory (replaces lib/swarm/compat.py:spawn_sub_agent)
 # ═══════════════════════════════════════════════════════════
@@ -342,6 +384,7 @@ class MasterOrchestrator:
                           else 'failed' if result.status == SubAgentStatus.FAILED.value
                           else result.status)
                 total_tokens += result.total_tokens or 0
+                _tools, _tool_calls = _snapshot_tool_timeline(result.tool_log)
                 agents.append({
                     'id':            spec.id,
                     'role':          spec.role,
@@ -353,6 +396,8 @@ class MasterOrchestrator:
                     'tokens':        result.total_tokens,
                     'preview':       (result.final_answer or '')[:_PREVIEW_CHARS],
                     'modifiedFiles': _count_file_writes(result.tool_log),
+                    'tools':         _tools,
+                    'toolCalls':     _tool_calls,
                     'error':         (result.error_message or '')
                                      if result.status != SubAgentStatus.COMPLETED.value
                                      else '',

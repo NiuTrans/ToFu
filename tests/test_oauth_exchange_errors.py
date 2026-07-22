@@ -86,6 +86,44 @@ class TestManagerSurfacesRealReason(unittest.TestCase):
         self.assertIn('region block', res['error'])
 
 
+class TestExchangeCsrfStateValidation(unittest.TestCase):
+    """CSRF: exchange_code must REJECT a caller-supplied state that does not
+    match the flow's recorded state, and must NEVER reach the token exchange."""
+
+    def test_mismatched_state_is_rejected_without_exchanging(self):
+        _seed_flow('claude')  # flow state = 'st'
+        with mock.patch('lib.oauth.claude.claude_exchange_code') as ex:
+            res = mgr.exchange_code('claude', 'code', state='forged-state')
+        self.assertIn('error', res)
+        self.assertIn('CSRF', res['error'])
+        ex.assert_not_called()  # the forged pair must never be exchanged
+        self.assertEqual(mgr._active_flows['claude']['status'], 'error')
+
+    def test_matching_state_proceeds_to_exchange(self):
+        _seed_flow('claude')  # flow state = 'st'
+        fake_token = {'email': 'u@x.com'}
+        with mock.patch('lib.oauth.claude.claude_exchange_code',
+                        return_value=fake_token) as ex, \
+             mock.patch('lib.oauth.outbound.provision_oauth_provider',
+                        return_value=True):
+            res = mgr.exchange_code('claude', 'code', state='st')
+        ex.assert_called_once()
+        self.assertTrue(res.get('ok'))
+
+    def test_omitted_state_falls_back_to_flow_state(self):
+        # The manual copy-paste flow cannot echo state back; an omitted state
+        # must still work (falls back to the flow's own state).
+        _seed_flow('claude')
+        fake_token = {'email': 'u@x.com'}
+        with mock.patch('lib.oauth.claude.claude_exchange_code',
+                        return_value=fake_token) as ex, \
+             mock.patch('lib.oauth.outbound.provision_oauth_provider',
+                        return_value=True):
+            res = mgr.exchange_code('claude', 'code')  # no state arg
+        ex.assert_called_once()
+        self.assertTrue(res.get('ok'))
+
+
 class TestBrowserStoreToken(unittest.TestCase):
     """B1 flow: the browser exchanges the code; store_token persists it."""
 

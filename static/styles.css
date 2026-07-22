@@ -749,6 +749,32 @@ textarea::placeholder{color:var(--text-tertiary)}
 
 /* ── Toolbar Sub-menus ── */
 .toolbar-submenu{position:relative;flex-shrink:0}
+/* ── Capability mode picker (Chat / Pro / Studio) ──
+ * Collapsed into a single pill that opens an UPWARD popover — the visual twin
+ * of the orchestration-flow control (.flow-menu), so Model · Mode · Flow read
+ * as one consistent control family. The trigger shows the active tier's glyph
+ * + label; the popover (styled by .flow-menu / .flow-menu-item, reused) lists
+ * the three tiers with a radio-style check. */
+.chat-mode-trigger{gap:6px}
+.chat-mode-trigger-ic{display:inline-flex;align-items:center;justify-content:center;width:15px;height:15px;flex-shrink:0}
+.chat-mode-trigger-ic>svg{display:block}
+.chat-mode-trigger-label{letter-spacing:.01em}
+/* Active-tier accent on the collapsed trigger — a subtle tint so the current
+ * mode is legible without opening the menu (Studio is the "strongest" tier). */
+.chat-mode-trigger[data-mode="studio"]{color:var(--accent);border-color:var(--accent-subtle);background:var(--accent-subtle)}
+#modeMenuWrapper{position:relative}
+/* The mode popover borrows every .flow-menu rule; only its open-state pivot is
+ * keyed on its own id so it doesn't require the #flowMenuWrapper :has() rule. */
+.chat-mode-menu.open{opacity:1;visibility:visible;transform:translateX(-50%) translateY(0) scale(1)}
+#modeMenuWrapper:has(.chat-mode-menu.open) .chat-mode-trigger .submenu-arrow{transform:rotate(180deg)}
+/* "更多" extras trigger — a bare dots button (no text label). */
+.submenu-more-dots{display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;color:inherit}
+.submenu-more-dots>svg{display:block}
+/* Section label inside the extras dropdown (e.g. "执行策略"). */
+.submenu-section-label{font-size:10px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--text-tertiary);padding:4px 10px 3px;user-select:none}
+
+/* ── Toolbar Sub-menus ── */
+.toolbar-submenu{position:relative;flex-shrink:0}
 .submenu-trigger{display:flex;align-items:center;gap:4px;padding:4px 10px;min-height:32px;box-sizing:border-box;background:none;border:1px solid transparent;border-radius:10px;cursor:pointer;color:var(--text-tertiary);font-size:12px;font-weight:600;font-family:'Jakarta Toolbar','Plus Jakarta Sans','Jakarta Fallback',sans-serif;transition:all .15s ease;white-space:nowrap;line-height:1}
 .submenu-trigger:hover{color:var(--text-primary);background:var(--bg-hover);border-color:var(--border-light)}
 .submenu-trigger.open{color:var(--text-primary);background:var(--bg-hover);border-color:var(--border)}
@@ -786,22 +812,40 @@ textarea::placeholder{color:var(--text-tertiary)}
 .submenu-item-check{font-size:14px;font-weight:700;color:var(--accent);opacity:0;transition:opacity .15s ease;flex-shrink:0;width:18px;text-align:center}
 .submenu-item.active .submenu-item-check{opacity:1}
 
-/* ── Orchestration Flow selector (nested inside the Mode dropdown) ── */
-.submenu-flow-row{position:relative;border-top:1px solid var(--border);margin-top:4px;padding-top:4px}
+/* ── Orchestration Flow selector (its own standalone toolbar box) ── */
+.submenu-flow-row{position:relative}
 .submenu-item .submenu-arrow{margin-left:auto;display:flex;align-items:center;color:var(--text-tertiary);transition:transform .15s ease}
-.submenu-flow-row .flow-menu.open ~ #flowToggle .submenu-arrow,
-#flowMenuWrapper .flow-menu.open + #flowToggle .submenu-arrow{transform:rotate(180deg)}
-.flow-menu{position:absolute;bottom:calc(100% + 6px);left:0;right:0;background:var(--bg-secondary);border:1px solid var(--border);border-radius:12px;box-shadow:0 8px 32px rgba(0,0,0,0.3),0 2px 8px rgba(0,0,0,0.15);padding:4px;z-index:110;opacity:0;visibility:hidden;transform:translateY(6px);transition:opacity .15s ease,transform .15s ease,visibility .15s;max-height:300px;overflow-y:auto}
-.flow-menu.open{opacity:1;visibility:visible;transform:translateY(0)}
-.flow-menu-item{display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:8px;cursor:pointer;transition:background .12s ease;user-select:none}
+#flowMenuWrapper:has(.flow-menu.open) #flowToggle .submenu-arrow{transform:rotate(180deg)}
+/* Active-flow name pill shown next to the "编排流程" label on the trigger */
+.flow-active-pill{font-size:10px;font-weight:700;font-family:'JetBrains Mono',monospace;line-height:1;padding:2px 6px;border-radius:7px;background:var(--accent);color:#fff;max-width:110px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:none}
+.flow-active-pill.visible{display:inline-flex;align-items:center}
+/* Aligned 1:1 with .submenu-dropdown so the "编排流程" popover reads as the
+ * SAME component as the Mode/Enhance/Tools sub-menus: center-anchored, caret,
+ * matching border/radius/padding/gap + scale-in animation. The ONE structural
+ * difference from .submenu-dropdown: scroll lives on the inner .flow-menu-list
+ * (the flow list can be long) — the menu itself stays overflow:visible so the
+ * bottom caret (at bottom:-5px, OUTSIDE the box) is never clipped. */
+.flow-menu{position:absolute;bottom:calc(100% + 8px);left:50%;min-width:236px;background:var(--bg-secondary);border:1px solid var(--border-light);border-radius:14px;box-shadow:var(--submenu-shadow,0 12px 40px rgba(0,0,0,0.36),0 2px 10px rgba(0,0,0,0.18));padding:5px;z-index:100;opacity:0;visibility:hidden;transform:translateX(-50%) translateY(6px) scale(.97);transform-origin:bottom center;transition:opacity .16s ease,transform .18s cubic-bezier(0.16,1,0.3,1),visibility .16s ease}
+.flow-menu.open{opacity:1;visibility:visible;transform:translateX(-50%) translateY(0) scale(1)}
+.flow-menu::after{content:'';position:absolute;bottom:-5px;left:50%;width:10px;height:10px;background:var(--bg-secondary);border-right:1px solid var(--border-light);border-bottom:1px solid var(--border-light);border-bottom-right-radius:2px;transform:translateX(-50%) rotate(45deg);pointer-events:none}
+[data-theme="light"] .flow-menu{--submenu-shadow:0 10px 30px rgba(50,42,26,0.14),0 2px 8px rgba(50,42,26,0.08);border-color:var(--border)}
+[data-theme="light"] .flow-menu::after{border-right-color:var(--border);border-bottom-color:var(--border)}
+/* Scroll on the inner list, NOT the menu (which must stay overflow:visible
+ * for the caret). max-height preserved so long custom-flow lists scroll. */
+.flow-menu-list{max-height:300px;overflow-y:auto}
+.flow-menu-item{display:flex;align-items:center;gap:11px;padding:9px 10px;border-radius:9px;cursor:pointer;transition:background .12s ease;user-select:none;position:relative}
 .flow-menu-item:hover{background:var(--bg-hover)}
+.flow-menu-item:hover .flow-menu-icon{color:var(--text-primary)}
 .flow-menu-item.selected{background:var(--accent-subtle)}
 .flow-menu-item.selected .flow-menu-name{color:var(--accent)}
-.flow-menu-check{font-size:13px;font-weight:700;color:var(--accent);opacity:0;flex-shrink:0;width:16px;text-align:center}
-.flow-menu-item.selected .flow-menu-check{opacity:1}
-.flow-menu-text{display:flex;flex-direction:column;gap:1px;min-width:0}
+.flow-menu-icon{width:26px;height:26px;display:flex;align-items:center;justify-content:center;border-radius:8px;background:transparent;color:var(--text-tertiary);flex-shrink:0;transition:all .15s ease}
+.flow-menu-item.selected .flow-menu-icon{background:var(--accent-subtle);color:var(--accent)}
+.flow-menu-icon>svg{display:block}
+.flow-menu-text{display:flex;flex-direction:column;gap:1px;flex:1;min-width:0}
 .flow-menu-name{font-size:13px;font-weight:600;color:var(--text-primary);line-height:1.2}
 .flow-menu-desc{font-size:11px;color:var(--text-tertiary);line-height:1.2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.flow-menu-check{font-size:14px;font-weight:700;color:var(--accent);opacity:0;transition:opacity .15s ease;flex-shrink:0;width:18px;text-align:center}
+.flow-menu-item.selected .flow-menu-check{opacity:1}
 
 /* Hide tool-badges inside submenu (they exist for JS compat) */
 .submenu-item .tool-badge,.submenu-dropdown .tool-badge{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)}
@@ -1063,6 +1107,36 @@ textarea::placeholder{color:var(--text-tertiary)}
 .paper-lib-item-del{display:none;position:absolute;right:8px;top:50%;transform:translateY(-50%);width:22px;height:22px;border:none;background:var(--bg-hover);border-radius:6px;color:var(--text-tertiary);cursor:pointer;align-items:center;justify-content:center;transition:all .15s}
 .paper-lib-item:hover .paper-lib-item-del{display:flex}
 .paper-lib-item-del:hover{background:var(--error-bg);color:var(--error-text)}
+
+/* ── Paper library folders (Reading-mode; mirrors chat folders) ── */
+.paper-folder-bar{display:flex;align-items:center;justify-content:flex-end;padding:2px 8px 6px}
+.paper-folder-new-btn{display:inline-flex;align-items:center;gap:5px;padding:4px 9px;border:1px solid var(--border-light);background:var(--bg-secondary);border-radius:8px;color:var(--text-secondary);font-size:11px;font-weight:600;cursor:pointer;transition:all .15s}
+.paper-folder-new-btn:hover{background:var(--bg-hover);color:var(--text-primary)}
+.paper-folder-new-btn>svg{display:block}
+.paper-folder-group{margin-bottom:2px}
+.paper-folder-head{display:flex;align-items:center;gap:7px;padding:7px 10px;border-radius:9px;cursor:pointer;color:var(--text-secondary);font-size:12px;font-weight:600;transition:background .15s;position:relative}
+.paper-folder-head:hover{background:var(--bg-hover)}
+.paper-folder-caret{flex-shrink:0;transition:transform .15s;color:var(--text-tertiary)}
+.paper-folder-group:not(.collapsed) .paper-folder-caret{transform:rotate(90deg)}
+.paper-folder-ic{flex-shrink:0;color:var(--text-tertiary)}
+.paper-folder-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.paper-folder-count{flex-shrink:0;font-size:10px;font-weight:700;color:var(--text-tertiary);background:var(--bg-secondary);border-radius:9px;padding:1px 7px}
+.paper-folder-open,.paper-folder-rename,.paper-folder-del{display:none;flex-shrink:0;align-items:center;justify-content:center;width:20px;height:20px;border-radius:6px;color:var(--text-tertiary);cursor:pointer}
+.paper-folder-head:hover .paper-folder-open,.paper-folder-head:hover .paper-folder-rename,.paper-folder-head:hover .paper-folder-del{display:inline-flex}
+.paper-folder-open:hover,.paper-folder-rename:hover{background:var(--bg-active);color:var(--text-primary)}
+.paper-folder-del:hover{background:var(--error-bg);color:var(--error-text)}
+.paper-folder-open>svg,.paper-folder-rename>svg,.paper-folder-del>svg{display:block}
+.paper-folder-body{padding-left:8px}
+.paper-folder-group.collapsed .paper-folder-body{display:none}
+/* Folder view (drilled into one folder): a back crumb above a flat list */
+.paper-folder-crumb{display:flex;align-items:center;gap:6px;padding:8px 10px;margin-bottom:2px;border-radius:9px;cursor:pointer;color:var(--text-secondary);font-size:12px;font-weight:600;transition:background .15s}
+.paper-folder-crumb:hover{background:var(--bg-hover)}
+.paper-folder-crumb>svg{flex-shrink:0}
+.paper-folder-crumb-name{color:var(--text-primary);font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* Per-item "move to folder" select — hidden until the row is hovered, sits
+   left of the (absolute) delete button so the two never overlap. */
+.paper-lib-item-folder{display:none;flex-shrink:0;max-width:96px;margin-right:24px;font-size:10px;padding:2px 4px;border:1px solid var(--border-light);border-radius:6px;background:var(--bg-secondary);color:var(--text-secondary);cursor:pointer}
+.paper-lib-item:hover .paper-lib-item-folder{display:block}
 
 /* Paper library empty state */
 .paper-lib-empty{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;padding:40px 16px;color:var(--text-tertiary);text-align:center;font-size:12px}
@@ -3009,6 +3083,8 @@ html:not([data-theme="light"]):not([data-theme="tofu"]) .paper-qa-send-btn:activ
 .cost-popover .cp-round-break.cp-break-eviction{color:#e8a55d}
 .cost-popover .cp-round-break.cp-break-unproven{color:#e8a55d}
 .cost-popover .cp-round-break.cp-break-culprit{color:#f87171}
+.cost-popover .cp-round-break.cp-break-namespace{color:#f87171}
+.cost-popover .cp-round-break.cp-break-boundary{color:#e8a55d}
 .cost-popover .cp-break-badge{
   flex:none;font-size:9px;font-weight:600;padding:0 5px;border-radius:8px;
   line-height:1.5;border:1px solid currentColor;opacity:.95
@@ -3018,6 +3094,8 @@ html:not([data-theme="light"]):not([data-theme="tofu"]) .paper-qa-send-btn:activ
 .cost-popover .cp-break-badge-eviction{color:#e8a55d}
 .cost-popover .cp-break-badge-unproven{color:#e8a55d}
 .cost-popover .cp-break-badge-culprit{color:#f87171}
+.cost-popover .cp-break-badge-namespace{color:#f87171}
+.cost-popover .cp-break-badge-boundary{color:#e8a55d}
 /* The named culprit — WHICH message broke cache. Monospace so the msg.field
    keys read clearly; red to match the 'our fault' state. */
 .cost-popover .cp-break-culprit{
@@ -3133,14 +3211,19 @@ html:not([data-theme="light"]):not([data-theme="tofu"]) .paper-qa-send-btn:activ
 .fc-icon.fc-pending{color:var(--text-tertiary);background:rgba(255,255,255,0.06);border-radius:50%}
 /* ── File Changes: Undo actions bar ── */
 .fc-actions{display:flex;align-items:center;gap:4px;margin-left:auto}
-.fc-undo-btn,.fc-undo-all-btn{display:inline-flex;align-items:center;gap:3px;padding:2px 8px;border:1px solid transparent;border-radius:6px;font-size:10px;font-weight:600;font-family:'JetBrains Mono',monospace;letter-spacing:.02em;cursor:pointer;transition:all .2s ease;line-height:1.3;white-space:nowrap;background:transparent}
+.fc-undo-btn,.fc-undo-all-btn,.fc-redo-btn{display:inline-flex;align-items:center;gap:3px;padding:2px 8px;border:1px solid transparent;border-radius:6px;font-size:10px;font-weight:600;font-family:'JetBrains Mono',monospace;letter-spacing:.02em;cursor:pointer;transition:all .2s ease;line-height:1.3;white-space:nowrap;background:transparent}
 .fc-undo-btn{color:rgba(96,165,250,0.85);border-color:rgba(96,165,250,0.25)}
 .fc-undo-btn:hover{color:#60a5fa;background:rgba(96,165,250,0.1);border-color:rgba(96,165,250,0.45);box-shadow:0 0 8px rgba(96,165,250,0.12)}
 .fc-undo-all-btn{color:rgba(248,113,113,0.75);border-color:rgba(248,113,113,0.2)}
 .fc-undo-all-btn:hover{color:#f87171;background:rgba(248,113,113,0.08);border-color:rgba(248,113,113,0.4);box-shadow:0 0 8px rgba(248,113,113,0.1)}
-.fc-undo-btn svg,.fc-undo-all-btn svg{flex-shrink:0;opacity:0.85}
-.fc-undo-btn:hover svg,.fc-undo-all-btn:hover svg{opacity:1}
-.fc-undo-btn:active,.fc-undo-all-btn:active{transform:scale(0.96)}
+.fc-redo-btn{color:rgba(52,211,153,0.85);border-color:rgba(52,211,153,0.25)}
+.fc-redo-btn:hover{color:#34d399;background:rgba(52,211,153,0.1);border-color:rgba(52,211,153,0.45);box-shadow:0 0 8px rgba(52,211,153,0.12)}
+.fc-undo-btn svg,.fc-undo-all-btn svg,.fc-redo-btn svg{flex-shrink:0;opacity:0.85}
+.fc-undo-btn:hover svg,.fc-undo-all-btn:hover svg,.fc-redo-btn:hover svg{opacity:1}
+.fc-undo-btn:active,.fc-undo-all-btn:active,.fc-redo-btn:active{transform:scale(0.96)}
+/* Undone round: dim the bar to read as reverted, Redo restores it. */
+.file-changes-bar.fc-undone{opacity:0.6}
+.file-changes-bar.fc-undone .fc-summary-text{text-decoration:line-through;text-decoration-thickness:1px}
 /* ── File Changes: animate new entries during streaming ── */
 .fc-pulse .fc-file{animation:fcFileIn .3s ease}
 @keyframes fcFileIn{from{opacity:0;transform:translateX(-8px)}to{opacity:1;transform:translateX(0)}}
@@ -3424,181 +3507,11 @@ input.settings-mono {
   font-family: 'JetBrains Mono', monospace;
   font-size: 13px;
 }
-
-/* ── System-prompt mode row: dropdown + edit button, aligned ── */
-.sysprompt-label {
-  display: block;
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--s-ink);
-  margin-bottom: 6px;
-}
-.sysprompt-control-row {
-  display: flex;
-  align-items: stretch;
-  gap: 10px;
-  margin-bottom: 8px;
-}
-.sysprompt-control-row select {
-  flex: 1;
-  min-width: 0;
-}
-.sysprompt-control-row .stg-btn-balance {
-  flex: 0 0 auto;
-  white-space: nowrap;
-}
 .stg-btn-balance:disabled {
   opacity: 0.45;
   cursor: not-allowed;
   transform: none;
 }
-
-/* ── System-prompt compact summary row (editor lives in a modal) ── */
-.sysprompt-summary-row {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin-bottom: 10px;
-}
-.sysprompt-summary {
-  flex: 1;
-  min-width: 0;
-  font-size: 12px;
-  color: var(--s-ink-soft);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.sysprompt-summary.has-value {
-  color: var(--s-ink);
-  font-family: 'JetBrains Mono', monospace;
-}
-
-/* ── Per-block system-prompt editor ── */
-.sysprompt-blocks-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  flex-wrap: wrap;
-}
-.sysprompt-blocks-mode {
-  font-size: 12px;
-  color: var(--text-tertiary);
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.sysprompt-preview-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  cursor: pointer;
-  user-select: none;
-  font-size: 12px;
-  color: var(--text-secondary);
-}
-.sysprompt-blocks-mode-label {
-  opacity: 0.65;
-}
-.sysprompt-blocks-list {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-.sysprompt-block {
-  position: relative;
-  border: 1px solid var(--border-color, rgba(128,128,128,0.2));
-  border-radius: 8px;
-  overflow: hidden;
-  background: var(--bg-elevated, var(--bg-secondary, rgba(128,128,128,0.03)));
-  transition: border-color .12s, background .12s;
-}
-/* Accent edge bar shows on/off at a glance without reading the toggle. */
-.sysprompt-block::before {
-  content: '';
-  position: absolute;
-  left: 0; top: 0; bottom: 0;
-  width: 3px;
-  background: var(--accent, #4caf50);
-  transition: background .12s;
-}
-.sysprompt-block.is-off { background: transparent; }
-.sysprompt-block.is-off::before { background: var(--border-color, rgba(128,128,128,0.25)); }
-
-.sysprompt-block-head {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 9px 12px 9px 14px;
-  cursor: pointer;
-}
-.sysprompt-block-head:hover { background: rgba(128,128,128,0.06); }
-.sysprompt-block-chevron {
-  flex: 0 0 auto;
-  width: 14px; height: 14px;
-  color: var(--text-tertiary);
-  transition: transform .15s;
-}
-.sysprompt-block.is-open .sysprompt-block-chevron { transform: rotate(90deg); }
-.sysprompt-block-title {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 13px;
-  font-weight: 600;
-  min-width: 0;
-  flex: 1;
-}
-.sysprompt-block-title > span:first-child {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.sysprompt-block.is-off .sysprompt-block-title { color: var(--text-tertiary); }
-.sysprompt-block-badge {
-  font-size: 9px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  padding: 1px 6px;
-  border-radius: 4px;
-  background: var(--accent-soft, rgba(120,120,200,0.16));
-  color: var(--text-secondary);
-  flex: 0 0 auto;
-}
-/* Project-affected blocks: blocks whose text differs in code/project mode.
-   Distinct amber badge + a thicker, amber accent edge so the user can see at
-   a glance which sections "code/project mode" actually rewrites. */
-.sysprompt-block-badge.is-project-badge {
-  background: var(--accent-amber-soft, rgba(212, 160, 23, 0.18));
-  color: var(--accent-amber, #c79100);
-  cursor: help;
-}
-.sysprompt-block.is-project:not(.is-off)::before {
-  width: 4px;
-  background: var(--accent-amber, #d4a017);
-}
-.sysprompt-block.is-project:not(.is-off) {
-  border-color: var(--accent-amber-soft, rgba(212, 160, 23, 0.35));
-}
-.sysprompt-block-toggle {
-  flex: 0 0 auto;
-}
-.sysprompt-block-text {
-  margin: 0;
-  padding: 2px 14px 12px 14px;
-  max-height: 220px;
-  overflow: auto;
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 11px;
-  line-height: 1.5;
-  white-space: pre-wrap;
-  word-break: break-word;
-  color: var(--text-secondary);
-  border-top: 1px solid var(--border-color, rgba(128,128,128,0.12));
-}
-.sysprompt-block:not(.is-open) .sysprompt-block-text { display: none; }
 
 /* ── Divider — thick line like My Day section border ── */
 .settings-divider {
@@ -3609,99 +3522,8 @@ input.settings-mono {
 }
 
 
-/* ── Machine Translation provider selector ── */
-.mt-provider-select {
-  padding: 3px 8px;
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--s-ink);
-  background: var(--s-white);
-  border: var(--s-border);
-  border-radius: 6px;
-  cursor: pointer;
-  outline: none;
-  transition: border-color .15s;
-}
-.mt-provider-select:focus { border-color: var(--accent-color, #d4a853); }
-
-/* ── Machine Translation provider card ── */
-.mt-provider-card {
-  background: var(--s-white);
-  border: var(--s-border);
-  border-radius: var(--s-radius);
-  box-shadow: var(--s-shadow-xs);
-  overflow: hidden;
-  margin-bottom: 14px;
-  transition: transform 0.15s, box-shadow 0.15s;
-}
-.mt-provider-card:hover {
-  transform: translate(-1px, -1px);
-  box-shadow: var(--s-shadow-sm);
-}
-.mt-provider-card-header {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 14px 16px;
-  border-bottom: 1px solid rgba(26,24,20,0.08);
-  background: rgba(26,24,20,0.02);
-}
-.mt-provider-logo {
-  flex-shrink: 0;
-  width: 38px;
-  height: 38px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 10px;
-  background: linear-gradient(135deg, rgba(212,168,83,0.10), rgba(212,168,83,0.04));
-  border: 1px solid rgba(212,168,83,0.2);
-}
-.mt-provider-info { flex: 1; min-width: 0; }
-.mt-provider-name {
-  font-size: 14px;
-  font-weight: 700;
-  color: var(--s-ink);
-  line-height: 1.3;
-}
-.mt-provider-desc {
-  font-size: 11.5px;
-  color: var(--s-ink-soft);
-  margin-top: 2px;
-}
-.mt-apply-link {
-  flex-shrink: 0;
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 6px 14px;
-  font-size: 12.5px;
-  font-weight: 600;
-  color: var(--s-white);
-  background: var(--accent-color, #d4a853);
-  border: 2px solid var(--s-ink);
-  border-radius: 8px;
-  box-shadow: 2px 2px 0 var(--s-ink);
-  text-decoration: none;
-  transition: transform 0.1s, box-shadow 0.1s;
-  white-space: nowrap;
-}
-.mt-apply-link:hover {
-  transform: translate(1px, 1px);
-  box-shadow: 1px 1px 0 var(--s-ink);
-}
-.mt-apply-link:active {
-  transform: translate(2px, 2px);
-  box-shadow: none;
-}
-.mt-provider-card-body {
-  padding: 14px 16px;
-}
-.mt-provider-card-body .settings-row { margin-bottom: 8px; }
-.mt-provider-card-body .settings-field label {
-  font-size: 12.5px;
-  font-weight: 600;
-}
+/* ── Machine Translation provider styles moved to static/settings.css
+      (translate settings page decoupling, 2026-07-18). ── */
 
 /* ── Settings groups & rows ── */
 .settings-group {
@@ -3792,7 +3614,6 @@ input.settings-mono {
   color: var(--s-gold-dim);
   border-radius: var(--s-radius);
 }
-.feishu-status-dot { font-size: 16px; flex-shrink: 0; cursor: default; }
 
 /* ══════════════════════════════════════
    Toggle Switch — brutalist square track
@@ -4115,19 +3936,6 @@ input.settings-mono {
   font-size: 12px;
   color: var(--s-ink-soft);
   font-weight: 600;
-}
-
-/* ══════════════════════════════════════
-   Dropdown Visibility — tofu list
-   ══════════════════════════════════════ */
-.stg-dropdown-visibility {
-  max-height: 360px;
-  overflow-y: auto;
-  border: var(--s-border);
-  border-radius: var(--s-radius);
-  box-shadow: var(--s-shadow-xs);
-  padding: 6px;
-  background: #fff;
 }
 .stg-dv-group { margin-bottom: 6px; }
 .stg-dv-group:last-child { margin-bottom: 0; }
@@ -5303,7 +5111,6 @@ input.settings-mono {
 }
 
 
-
 /* ── Icon / secondary / primary buttons ── */
 .stg-btn-icon {
   background: none;
@@ -5567,360 +5374,7 @@ input.settings-mono {
    from active models without removing it from the list. */
 .stg-mcard.disabled { opacity: 0.55; background: var(--s-cream); }
 .stg-mcard.disabled .stg-mcard-id { text-decoration: line-through; text-decoration-thickness: 1.5px; }
-
-
-/* ══════════════════════════════════════
-   Access Matrix — per-(key × model) grid
-   Same neo-brutalist house style as .stg-mcard: solid 1.5px ink borders,
-   hard shadows, JetBrains Mono ids. Cells are clickable access toggles.
-   ══════════════════════════════════════ */
-.stg-matrix-toggle.active {
-  background: var(--s-ink);
-  color: var(--s-white);
-}
-.stg-matrix { margin-top: 8px; }
-.stg-matrix-toolbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  margin-bottom: 8px;
-  flex-wrap: wrap;
-}
-.stg-matrix-tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-/* Uniform control height so the probe button, apply button, attempts
-   selector and clear button all sit on a single baseline. */
-.stg-matrix-tools > .stg-btn-add,
-.stg-matrix-tools > .stg-mx-attempts {
-  height: 30px;
-  display: inline-flex;
-  align-items: center;
-  box-sizing: border-box;
-  margin: 0;
-}
-.stg-mx-status {
-  font-size: 11px;
-  font-weight: 700;
-  color: var(--s-ink-soft);
-}
-.stg-mx-status.running { color: #2563eb; }
-.stg-mx-status.error { color: #b91c1c; }
-.stg-mx-status.running::before {
-  content: '';
-  display: inline-block;
-  width: 9px; height: 9px;
-  margin-right: 5px;
-  border: 2px solid #2563eb;
-  border-top-color: transparent;
-  border-radius: 50%;
-  animation: stg-mx-spin 0.7s linear infinite;
-  vertical-align: -1px;
-}
 @keyframes stg-mx-spin { to { transform: rotate(360deg); } }
-.stg-mx-probe.running { opacity: 0.6; cursor: progress; }
-.stg-mx-apply {
-  background: #16a34a !important;
-  color: var(--s-white) !important;
-  border: 2px solid #16a34a !important;
-  border-radius: var(--s-radius);
-  font-weight: 800;
-  box-shadow: var(--s-shadow-xs);
-}
-.stg-mx-apply:hover { background: #15923f !important; border-color: #15923f !important; filter: none; }
-.stg-matrix-legend {
-  display: flex;
-  gap: 14px;
-  align-items: center;
-  font-size: 10px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--s-ink-soft);
-}
-.stg-mx-leg { display: inline-flex; align-items: center; gap: 5px; }
-.stg-mx-leg .stg-mx-dot {
-  width: 10px; height: 10px; border-radius: 50%;
-  border: 1.5px solid var(--s-ink); display: inline-block;
-}
-.stg-mx-leg.on .stg-mx-dot { background: #16a34a; border-color: #16a34a; }
-.stg-mx-leg.off .stg-mx-dot { background: var(--s-cream); }
-.stg-mx-leg.ov .stg-mx-pip {
-  display: inline-flex; align-items: center; justify-content: center;
-  width: 14px; height: 14px; font-size: 11px; font-weight: 900;
-  border: 1.5px solid #c2410c; color: #c2410c; border-radius: 3px;
-}
-.stg-matrix-scroll {
-  overflow-x: auto;
-  border: 1.5px solid var(--s-ink);
-  border-radius: var(--s-radius);
-  box-shadow: var(--s-shadow-xs);
-  background: var(--s-white);
-}
-.stg-matrix-table { border-collapse: collapse; width: 100%; }
-.stg-matrix-table th,
-.stg-matrix-table td {
-  border: 1px solid var(--s-line, rgba(0,0,0,0.12));
-  padding: 0;
-}
-.stg-mx-corner {
-  background: var(--s-cream);
-  font-size: 10px;
-  font-weight: 800;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--s-ink-soft);
-  padding: 8px 10px !important;
-  text-align: left;
-  position: sticky; left: 0; z-index: 3;
-}
-.stg-mx-keyhead {
-  background: var(--s-cream);
-  padding: 6px 8px !important;
-  min-width: 92px;
-  vertical-align: bottom;
-}
-.stg-mx-keyname {
-  width: 100%;
-  border: 1px solid transparent;
-  background: transparent;
-  font-family: inherit;
-  font-size: 11px;
-  font-weight: 800;
-  color: var(--s-ink);
-  padding: 2px 4px;
-  border-radius: 4px;
-  text-align: center;
-}
-.stg-mx-keyname:hover { border-color: var(--s-ink); background: var(--s-white); }
-.stg-mx-keyname:focus { outline: none; border-color: var(--s-ink); background: var(--s-white); }
-.stg-mx-keytail {
-  display: block;
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 9px;
-  color: var(--s-ink-soft);
-  opacity: 0.7;
-  text-align: center;
-  margin-top: 2px;
-}
-.stg-mx-model {
-  background: var(--s-white);
-  padding: 6px 10px !important;
-  position: sticky; left: 0; z-index: 2;
-  white-space: nowrap;
-}
-.stg-mx-model .stg-mx-gtoggle { vertical-align: middle; margin-right: 6px; }
-.stg-mx-model .stg-mx-gtoggle .stg-toggle-track { width: 30px; height: 18px; }
-.stg-mx-model .stg-mx-gtoggle .stg-toggle-thumb { width: 12px; height: 12px; top: 1px; left: 2px; }
-.stg-mx-model .stg-mx-gtoggle input:checked ~ .stg-toggle-track .stg-toggle-thumb { left: 14px; }
-.stg-mx-brand { vertical-align: middle; margin-right: 5px; display: inline-flex; }
-.stg-mx-mid {
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 11px;
-  font-weight: 700;
-  color: var(--s-ink);
-  vertical-align: middle;
-}
-.stg-mx-row.model-off { opacity: 0.5; }
-.stg-mx-row.model-off .stg-mx-mid { text-decoration: line-through; }
-
-/* ── Model groups: a root model + its aliases (each a distinct upstream) ──
-   A model that HAS aliases is bracketed with a left accent rail so the root
-   and its alias rows read as one unit; the last alias closes the bracket. */
-.stg-mx-row.grouped .stg-mx-model { position: relative; }
-.stg-mx-row.grouped.is-root .stg-mx-model::before,
-.stg-mx-row.grouped.is-alias .stg-mx-model::before {
-  content: '';
-  position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
-  background: var(--s-ink);
-}
-.stg-mx-row.grouped.is-root .stg-mx-model::before { top: 50%; border-top-left-radius: 2px; }
-.stg-mx-row.grouped.group-end .stg-mx-model::before { bottom: 50%; border-bottom-left-radius: 2px; }
-.stg-mx-row.is-root .stg-mx-aliascount {
-  margin-left: 8px;
-  font-size: 9px; font-weight: 800; line-height: 1;
-  text-transform: uppercase; letter-spacing: 0.03em;
-  padding: 2px 7px; border-radius: 999px;
-  border: 1.5px solid var(--s-ink); background: var(--s-cream); color: var(--s-ink);
-  vertical-align: 1px;
-}
-
-/* ── Alias rows: a concrete id mapping to a distinct upstream model ── */
-.stg-mx-row.is-alias .stg-mx-model.alias {
-  padding-left: 14px !important;
-  background: linear-gradient(90deg,
-    hsla(var(--alias-hue, 265), 70%, 55%, 0.10), transparent 55%);
-}
-.stg-mx-tree {
-  display: inline-block; width: 14px;
-  color: var(--s-ink-soft); font-weight: 700;
-  font-family: 'JetBrains Mono', monospace; margin-right: 2px;
-}
-.stg-mx-aliasidx {
-  display: inline-flex; align-items: center; justify-content: center;
-  min-width: 20px; height: 16px; padding: 0 4px; margin-right: 6px;
-  font-size: 9px; font-weight: 900; line-height: 1;
-  font-family: 'JetBrains Mono', monospace;
-  border-radius: 4px;
-  color: hsl(var(--alias-hue, 265), 65%, 40%);
-  background: hsla(var(--alias-hue, 265), 70%, 55%, 0.16);
-  border: 1.5px solid hsl(var(--alias-hue, 265), 60%, 55%);
-}
-.stg-mx-mid.alias-id { font-weight: 600; font-size: 10.5px; }
-.stg-mx-row.is-alias .stg-mx-brand { opacity: 0.85; }
-
-/* ── Attempts selector (false-429 filter) ── */
-.stg-mx-attempts {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 11px; font-weight: 700; color: var(--s-ink-soft);
-  line-height: 1;
-  padding: 0 8px;
-  border: 2px dashed var(--s-ink-soft);
-  border-radius: var(--s-radius);
-  background: none;
-  white-space: nowrap;
-}
-.stg-mx-attempts select {
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 11px; font-weight: 800;
-  height: 22px;
-  margin: 0;
-  padding: 0 4px;
-  border: 1.5px solid var(--s-ink);
-  border-radius: 4px;
-  background: var(--s-white); color: var(--s-ink);
-  cursor: pointer;
-  box-sizing: border-box;
-  vertical-align: middle;
-  line-height: 1;
-  box-shadow: none;
-}
-.stg-mx-attempts select:focus {
-  box-shadow: none;
-  transform: none;
-}
-
-/* ── Cells ── */
-.stg-mx-cell {
-  position: relative;
-  text-align: center;
-  vertical-align: middle;
-  height: 44px;
-  min-width: 92px;
-  transition: background 0.12s;
-}
-.stg-mx-cell.on { background: rgba(74, 222, 128, 0.10); }
-.stg-mx-cell.off { background: repeating-linear-gradient(45deg, var(--s-cream), var(--s-cream) 5px, rgba(0,0,0,0.04) 5px, rgba(0,0,0,0.04) 10px); }
-.stg-mx-cell.overridden { box-shadow: inset 0 0 0 2px #c2410c; }
-.stg-mx-toggle {
-  border: none; background: none; cursor: pointer;
-  padding: 4px; display: inline-flex; align-items: center; justify-content: center;
-}
-.stg-mx-cell .stg-mx-dot {
-  width: 16px; height: 16px; border-radius: 50%;
-  border: 1.5px solid var(--s-ink);
-  transition: transform 0.1s, background 0.12s;
-}
-.stg-mx-cell.on .stg-mx-dot { background: #16a34a; border-color: #16a34a; box-shadow: 0 0 0 3px rgba(74,222,128,0.25); }
-.stg-mx-cell.off .stg-mx-dot { background: var(--s-white); }
-.stg-mx-toggle:hover .stg-mx-dot { transform: scale(1.18); }
-.stg-mx-badges {
-  position: absolute; top: 2px; left: 3px;
-  display: flex; gap: 2px; flex-wrap: wrap; max-width: 70%;
-}
-.stg-mx-badge {
-  font-size: 8px; font-weight: 800; line-height: 1;
-  padding: 1px 3px; border-radius: 3px;
-  border: 1px solid currentColor;
-  font-family: 'JetBrains Mono', monospace;
-}
-.stg-mx-badge.rpm { color: #2563eb; background: rgba(96,165,250,0.12); }
-.stg-mx-badge.alias { color: #7c3aed; background: rgba(167,139,250,0.12); }
-.stg-mx-badge.caps { color: #0d9488; background: rgba(45,212,191,0.12); }
-
-/* Probe-status health pip (top-right of a cell, set by Probe & Recommend) */
-.stg-mx-probe-pip {
-  position: absolute; top: 2px; right: 3px;
-  display: inline-flex; align-items: center; justify-content: center;
-  min-width: 15px; height: 15px; padding: 0 3px;
-  font-size: 9px; font-weight: 900; line-height: 1;
-  border-radius: 4px;
-  border: 1.5px solid currentColor;
-  font-family: 'JetBrains Mono', monospace;
-  pointer-events: auto;
-}
-.stg-mx-probe-pip.ok     { color: #16a34a; background: rgba(74,222,128,0.18); }
-.stg-mx-probe-pip.rate   { color: #c2410c; background: rgba(251,146,60,0.20); }
-.stg-mx-probe-pip.unauth { color: #b91c1c; background: rgba(248,113,113,0.20); }
-.stg-mx-probe-pip.nf     { color: #6b7280; background: rgba(156,163,175,0.20); }
-.stg-mx-probe-pip.down   { color: #a16207; background: rgba(250,204,21,0.20); }
-.stg-mx-probe-pip.err    { color: #b91c1c; background: rgba(248,113,113,0.20); }
-/* When a cell is flagged (non-ok pip) but still enabled, nudge attention. */
-.stg-mx-cell:has(.stg-mx-probe-pip.rate) .stg-mx-dot,
-.stg-mx-cell:has(.stg-mx-probe-pip.unauth) .stg-mx-dot,
-.stg-mx-cell:has(.stg-mx-probe-pip.down) .stg-mx-dot { box-shadow: 0 0 0 2px rgba(194,65,12,0.25); }
-.stg-mx-edit {
-  position: absolute; bottom: 2px; right: 3px;
-  border: none; background: none; cursor: pointer;
-  font-size: 11px; color: var(--s-ink-soft); opacity: 0;
-  transition: opacity 0.12s;
-  padding: 1px 3px; line-height: 1;
-}
-.stg-mx-cell:hover .stg-mx-edit { opacity: 0.85; }
-.stg-mx-edit:hover { opacity: 1 !important; color: var(--s-ink); transform: scale(1.15); }
-.stg-matrix-empty {
-  padding: 16px;
-  text-align: center;
-  font-size: 12px;
-  color: var(--s-ink-soft);
-  border: 1.5px dashed var(--s-ink);
-  border-radius: var(--s-radius);
-  margin-top: 8px;
-}
-
-/* ── Inline per-cell override editor (reuses .stg-edit-form base) ── */
-.stg-mx-editor { margin-top: 10px; }
-.stg-mx-editor-title {
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 12px;
-  font-weight: 800;
-  color: var(--s-ink);
-  margin-bottom: 4px;
-  padding-bottom: 6px;
-  border-bottom: 1.5px solid var(--s-ink);
-}
-.stg-mx-editor-sub {
-  font-size: 11px;
-  color: var(--s-ink-soft);
-  margin-bottom: 10px;
-  line-height: 1.4;
-}
-.stg-mxe-ovrow {
-  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
-  margin-top: 8px;
-}
-.stg-mxe-ovrow.caps { align-items: flex-start; flex-direction: column; }
-.stg-mxe-chk {
-  display: inline-flex; align-items: center; gap: 5px;
-  font-size: 11px; font-weight: 700; color: var(--s-ink);
-  cursor: pointer; min-width: 130px;
-}
-.stg-mxe-ovrow input[type="number"],
-.stg-mxe-ovrow input[type="text"] {
-  flex: 1; min-width: 120px;
-  padding: 5px 8px;
-  border: 1.5px solid var(--s-ink);
-  border-radius: var(--s-radius);
-  font-size: 12px;
-}
-.stg-mxe-ovrow input:disabled { opacity: 0.4; background: var(--s-cream); }
-.stg-cap-btn.stg-mxe-cap.locked { opacity: 0.35; cursor: not-allowed; }
-
-@media (max-width: 640px) {
-  .stg-mx-keyhead, .stg-mx-cell { min-width: 76px; }
-  .stg-mxe-chk { min-width: 100%; }
-}
 
 /* ══════════════════════════════════════
    Model Edit Form (inline below card)
@@ -6062,519 +5516,10 @@ input.settings-mono {
   font-size: 11.5px;
   font-weight: 600;
 }
-
-
-/* ══════════════════════════════════════
-   MCP Apps Tab — App Store (brutalist tofu)
-   ══════════════════════════════════════ */
-
-/* ── Header row: title · tool count · connect-all · search ── */
-.mcp-store-header {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-bottom: 14px;
-  flex-wrap: wrap;
-}
-.mcp-store-header-title {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  flex-shrink: 0;
-}
-.mcp-store-header-title .settings-section-title { margin: 0; }
-.mcp-store-header-spacer { flex: 1; min-width: 12px; }
-
-.mcp-search {
-  flex: 1;
-  min-width: 180px;
-  max-width: 320px;
-  padding: 7px 12px 7px 30px;
-  font-size: 12px;
-  font-weight: 600;
-  border: var(--s-border);
-  border-radius: var(--s-radius);
-  background: var(--s-white) url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 16 16' fill='none' stroke='%233d362c' stroke-width='2'><circle cx='7' cy='7' r='5'/><path d='M11 11l3 3' stroke-linecap='round'/></svg>") no-repeat 10px center;
-  color: var(--s-ink);
-  font-family: inherit;
-  box-shadow: var(--s-shadow-xs);
-  transition: box-shadow 0.1s, transform 0.1s;
-}
-.mcp-search:focus {
-  outline: none;
-  transform: translate(-1px, -1px);
-  box-shadow: 3px 3px 0 var(--s-ink);
-}
-.mcp-search::placeholder { color: var(--s-ink-soft); opacity: 0.7; }
-
-/* ── Category pills ── */
-.mcp-category-bar {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-bottom: 14px;
-}
-.mcp-cat-pill {
-  padding: 5px 11px;
-  font-size: 11px;
-  font-weight: 800;
-  letter-spacing: 0.02em;
-  border: var(--s-border-sm);
-  border-radius: var(--s-radius);
-  background: var(--s-white);
-  color: var(--s-ink-soft);
-  cursor: pointer;
-  transition: background 0.1s, color 0.1s, transform 0.08s, box-shadow 0.08s;
-  font-family: inherit;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-}
-.mcp-cat-pill:hover {
-  background: var(--s-cream);
-  color: var(--s-ink);
-  transform: translate(-1px, -1px);
-  box-shadow: 2px 2px 0 var(--s-ink);
-}
-.mcp-cat-pill.active {
-  background: var(--s-ink);
-  color: var(--s-white);
-  border-color: var(--s-ink);
-  box-shadow: 2px 2px 0 var(--s-gold);
-}
-.mcp-cat-pill.active .mcp-cat-count { color: var(--s-gold); opacity: 1; }
-.mcp-cat-count {
-  font-weight: 700;
-  font-size: 10px;
-  opacity: 0.6;
-  font-family: 'JetBrains Mono', monospace;
-}
-
-/* ── Catalog: 2-col responsive grid ── */
-.mcp-catalog-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
-  max-height: 460px;
-  overflow-y: auto;
-  padding: 2px 6px 2px 2px;
-}
-@media (max-width: 820px) {
-  .mcp-catalog-grid { grid-template-columns: 1fr; }
-}
-
-/* ── Skills pagination ── */
-.skills-pagination {
-  grid-column: 1 / -1;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  margin-top: 6px;
-  padding: 6px 2px 2px;
-  border-top: 1px solid var(--border, rgba(255,255,255,.08));
-  font-size: 11px;
-  opacity: .85;
-}
-.skills-page-info { opacity: .7; }
-.skills-page-ctrls { display: flex; align-items: center; gap: 2px; }
-.skills-page-btn {
-  min-width: 24px;
-  height: 24px;
-  padding: 0 6px;
-  border: 1px solid var(--border, rgba(255,255,255,.12));
-  background: transparent;
-  color: inherit;
-  border-radius: 4px;
-  cursor: pointer;
-  font-size: 11px;
-  line-height: 1;
-}
-.skills-page-btn:hover:not([disabled]):not(.is-active) {
-  background: var(--hover-bg, rgba(255,255,255,.06));
-}
-.skills-page-btn.is-active {
-  background: var(--accent, #b38b5d);
-  color: #fff;
-  border-color: var(--accent, #b38b5d);
-  cursor: default;
-}
-.skills-page-btn[disabled] { opacity: .4; cursor: not-allowed; }
-.skills-page-ellipsis { opacity: .6; padding: 0 2px; }
-
-/* ── App card ── */
-.mcp-app-card {
-  position: relative;
-  display: grid;
-  grid-template-columns: 44px 1fr;
-  grid-template-rows: auto 1fr auto;
-  column-gap: 12px;
-  row-gap: 4px;
-  padding: 12px 14px 10px;
-  border: var(--s-border);
-  border-radius: var(--s-radius);
-  background: var(--s-white);
-  box-shadow: var(--s-shadow-xs);
-  transition: transform 0.1s, box-shadow 0.1s;
-}
-.mcp-app-card:hover {
-  transform: translate(-1px, -1px);
-  box-shadow: 4px 4px 0 var(--s-ink);
-}
-.mcp-app-card.connected {
-  background: linear-gradient(180deg, rgba(201, 153, 63, 0.05) 0%, var(--s-white) 60%);
-  box-shadow: 2px 2px 0 var(--s-gold), var(--s-shadow-xs);
-}
-.mcp-app-card.connected:hover {
-  box-shadow: 3px 3px 0 var(--s-gold), 4px 4px 0 var(--s-ink);
-}
-.mcp-app-card.installed { background: var(--s-cream); }
-
-/* Icon tile */
-.mcp-app-icon {
-  grid-row: 1 / span 2;
-  font-size: 24px;
-  width: 44px;
-  height: 44px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  border: var(--s-border-sm);
-  border-radius: var(--s-radius);
-  background: var(--s-cream);
-  box-shadow: 2px 2px 0 var(--s-ink);
-  line-height: 1;
-}
-.mcp-app-card.connected .mcp-app-icon {
-  background: var(--s-white);
-  box-shadow: 2px 2px 0 var(--s-gold);
-}
-.mcp-app-icon img,
-.mcp-app-icon svg {
-  width: 26px;
-  height: 26px;
-  object-fit: contain;
-}
-
-/* Name + status dot */
-.mcp-app-name {
-  grid-column: 2;
-  font-size: 13px;
-  font-weight: 900;
-  color: var(--s-ink);
-  line-height: 1.25;
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  min-width: 0;
-}
-.mcp-app-name-text {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.mcp-app-status {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  font-size: 9px;
-  font-weight: 800;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  padding: 2px 6px;
-  border-radius: var(--s-radius);
-  font-family: 'JetBrains Mono', monospace;
-  flex-shrink: 0;
-}
-.mcp-app-status .dot {
-  width: 6px; height: 6px; border-radius: 50%;
-  background: currentColor;
-  box-shadow: 0 0 0 2px rgba(255,255,255,0.6);
-}
-.mcp-app-status.on {
-  background: var(--s-ink); color: var(--s-gold);
-}
-.mcp-app-status.off {
-  background: var(--s-cream); color: var(--s-ink-soft);
-  border: 1px solid var(--s-ink-soft);
-}
-.mcp-app-status.reconnecting {
-  background: #7c2d12; color: #fdba74;
-  animation: mcp-reconnect-pulse 1.6s ease-in-out infinite;
-}
 @keyframes mcp-reconnect-pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.55; }
 }
-/* A subtle amber edge on a card whose server is failing to reconnect. */
-.mcp-app-card.reconnecting {
-  border-color: #b45309;
-}
-
-/* Credential-expired badge: the server is connected (live subprocess) but its
-   stored cookie/token no longer authenticates. Amber-warning tone, distinct
-   from the green "ON" so it reads as "attention needed, not offline". */
-.mcp-app-status.cred-expired {
-  background: #7c2d12; color: #fdba74;
-  display: inline-flex; align-items: center; gap: 3px;
-}
-.mcp-app-status.cred-expired > svg { display: block; }
-/* Amber edge on a connected-but-stale-credentials card. */
-.mcp-app-card.cred-expired {
-  border-color: #b45309;
-}
-.mcp-app-reconnecting-note {
-  font-size: 10px;
-  font-weight: 700;
-  color: #b45309;
-  font-family: 'JetBrains Mono', monospace;
-  white-space: nowrap;
-}
-
-/* Description */
-.mcp-app-desc {
-  grid-column: 2;
-  font-size: 11.5px;
-  color: var(--s-ink-soft);
-  line-height: 1.45;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
-
-/* Card footer: repo link + action
- * Use min-height matching the .btn-xs height so the left-side text
- * (Repo) and the right-side buttons (卸载/连接/…) share a common
- * vertical axis regardless of whether the right side is rendered as
- * plain text only (no button), plain buttons, or text + button. */
-.mcp-app-footer {
-  grid-column: 1 / -1;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  margin-top: 6px;
-  padding-top: 8px;
-  min-height: 30px;   /* = .btn-xs content box (~18px) + padding (6px×2) */
-  border-top: 1px dashed rgba(26, 24, 20, 0.18);
-}
-.mcp-app-repo {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  font-size: 10px;
-  font-weight: 700;
-  color: var(--s-ink-soft);
-  text-decoration: none;
-  opacity: 0.7;
-  transition: opacity 0.1s, color 0.1s;
-  line-height: 1;
-  letter-spacing: 0.02em;
-}
-.mcp-app-repo svg { flex-shrink: 0; }
-.mcp-app-repo:hover { opacity: 1; color: var(--s-ink); text-decoration: underline; }
-
-.mcp-app-tools-count {
-  font-size: 10px;
-  font-weight: 800;
-  color: var(--s-ink);
-  font-family: 'JetBrains Mono', monospace;
-  opacity: 0.7;
-  line-height: 1;
-}
-
-/* Version badge: server-reported upstream version (InitializeResult.serverInfo.version) */
-.mcp-app-version {
-  font-size: 10px;
-  font-weight: 700;
-  color: var(--s-ink-soft);
-  font-family: 'JetBrains Mono', monospace;
-  padding: 2px 5px;
-  border: 1px solid rgba(26, 24, 20, 0.18);
-  border-radius: var(--s-radius);
-  background: rgba(201, 153, 63, 0.08);
-  line-height: 1;
-  white-space: nowrap;
-}
-
-/* Action buttons cluster — share the button baseline with left-side text */
-.mcp-app-action {
-  display: flex;
-  gap: 6px;
-  flex-shrink: 0;
-  align-items: center;
-}
-
-/* ── Header quick action ──
- * Lock both children of .mcp-store-header to the same explicit
- * 36px height with the same vertical metrics so they sit on a
- * shared baseline regardless of the later tofu-theme overrides
- * (`[data-theme="tofu"] .btn-primary` at line ~8014 forces
- * padding:9px 20px / font-size:13px). The button uses inline-flex
- * to vertically center its text; the <input> uses traditional
- * top/bottom padding so the native browser baseline algorithm
- * keeps the placeholder centered. */
-.mcp-store-header .mcp-search {
-  height: 36px !important;
-  box-sizing: border-box !important;
-  padding-top: 0 !important;
-  padding-bottom: 0 !important;
-  line-height: 32px !important;  /* 36 - 2*2 border */
-  margin: 0 !important;
-  vertical-align: middle !important;
-}
-.mcp-store-header .mcp-connect-all-btn {
-  height: 36px !important;
-  box-sizing: border-box !important;
-  padding: 0 14px !important;
-  margin: 0 !important;
-  font-size: 12px !important;
-  line-height: 1 !important;
-  display: inline-flex !important;
-  align-items: center !important;
-  justify-content: center !important;
-  vertical-align: middle !important;
-  flex-shrink: 0;
-  border: var(--s-border) !important;
-  border-radius: var(--s-radius) !important;
-  box-shadow: var(--s-shadow-xs) !important;
-  transform: none !important;
-}
-
-/* Advanced toggle */
-.mcp-advanced-toggle {
-  margin-top: 4px;
-}
-.mcp-advanced-toggle summary { list-style: none; }
-.mcp-advanced-toggle summary::-webkit-details-marker { display: none; }
-.mcp-add-form {
-  padding: 14px;
-  border: var(--s-border);
-  border-radius: var(--s-radius);
-  background: var(--s-cream);
-}
-.mcp-add-actions {
-  display: flex;
-  gap: 8px;
-  margin-top: 10px;
-}
-
-/* Install Modal */
-.mcp-install-modal-overlay {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.5);
-  z-index: 10001;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-.mcp-install-modal {
-  background: var(--s-white);
-  border: 3px solid var(--s-ink);
-  border-radius: var(--s-radius);
-  box-shadow: 8px 8px 0 var(--s-ink);
-  width: 420px;
-  max-width: 90vw;
-  max-height: 90vh;
-  max-height: calc(var(--vh100,100vh)*0.9);
-  overflow-y: auto;
-  padding: 24px;
-}
-.mcp-install-modal-header {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  margin-bottom: 18px;
-}
-.mcp-install-modal-icon {
-  font-size: 36px;
-  width: 56px;
-  height: 56px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border: var(--s-border);
-  border-radius: var(--s-radius);
-  background: var(--s-cream);
-  flex-shrink: 0;
-}
-.mcp-install-modal-icon img,
-.mcp-install-modal-icon svg {
-  width: 34px;
-  height: 34px;
-  object-fit: contain;
-}
-.mcp-install-modal-title {
-  font-size: 18px;
-  font-weight: 900;
-  color: var(--s-ink);
-}
-.mcp-install-modal-desc {
-  font-size: 12px;
-  color: var(--s-ink-soft);
-  margin-top: 2px;
-}
-.mcp-install-noenv {
-  font-size: 12px;
-  color: var(--s-ink-soft);
-  padding: 8px;
-  text-align: center;
-  background: var(--s-cream);
-  border-radius: var(--s-radius);
-}
-.mcp-install-modal-actions {
-  display: flex;
-  gap: 8px;
-  margin-top: 16px;
-}
-.mcp-install-status {
-  margin-top: 12px;
-  padding: 8px 12px;
-  border-radius: var(--s-radius);
-  font-size: 12px;
-  font-weight: 700;
-}
-.mcp-install-status.info {
-  background: rgba(99, 102, 241, 0.08);
-  color: #6366f1;
-}
-.mcp-install-status.success {
-  background: rgba(34, 197, 94, 0.1);
-  color: #16a34a;
-}
-.mcp-install-status.error {
-  background: rgba(239, 68, 68, 0.1);
-  color: #ef4444;
-}
-
-.mcp-env-input {
-  width: 100%;
-  padding: 5px 8px;
-  font-size: 12px;
-  font-family: 'JetBrains Mono', monospace;
-  border: var(--s-border);
-  border-radius: var(--s-radius);
-  background: var(--s-white);
-  color: var(--s-ink);
-}
-.mcp-env-input:focus { outline: 2px solid var(--s-ink); outline-offset: -1px; }
-
-.mcp-env-select {
-  width: 100%;
-  padding: 5px 8px;
-  font-size: 12px;
-  font-family: 'JetBrains Mono', monospace;
-  border: var(--s-border);
-  border-radius: var(--s-radius);
-  background: var(--s-white);
-  color: var(--s-ink);
-}
-.mcp-env-select:focus { outline: 2px solid var(--s-ink); outline-offset: -1px; }
 
 /* ══════════════════════════════════════
    Footer — thick top border like stats bar
@@ -6860,7 +5805,7 @@ input.settings-mono {
 .sw-tl-row.sw-tl-open .sw-tl-detail{display:block}
 .sw-tl-detail-error{border-left-color:#f87171;color:#fca5a5}
 /* Agent output preview */
-.sw-a-preview{font-size:11px;color:var(--text-secondary);line-height:1.5;margin-bottom:6px;padding:8px;background:rgba(255,255,255,0.02);border-radius:6px;border:1px solid rgba(255,255,255,0.04);max-height:160px;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:6;-webkit-box-orient:vertical}
+.sw-a-preview{font-size:11px;color:var(--text-secondary);line-height:1.5;margin-bottom:6px;padding:8px;background:rgba(255,255,255,0.02);border-radius:6px;border:1px solid rgba(255,255,255,0.04);max-height:220px;overflow-y:auto;overscroll-behavior:contain;white-space:pre-wrap;word-break:break-word}
 .sw-a-err{font-size:10px;color:#f87171;font-family:'JetBrains Mono',monospace;padding:4px 8px;background:rgba(248,113,113,0.05);border-radius:4px;margin-bottom:6px}
 .sw-a-meta{display:flex;align-items:center;gap:10px;font-size:10px;font-family:'JetBrains Mono',monospace;color:var(--text-tertiary)}
 /* ── Footer stats ── */
@@ -6987,6 +5932,7 @@ input.settings-mono {
 .app-dialog-btn:active{transform:translateY(1px)}
 .app-dialog-cancel{background:var(--bg-tertiary);color:var(--text-secondary);border-color:var(--border)}
 .app-dialog-cancel:hover{background:var(--bg-hover);color:var(--text-primary)}
+.app-dialog-cancel:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .app-dialog-ok{background:var(--accent);color:#fff}
 .app-dialog-ok:hover{background:var(--accent-hover)}
 .app-dialog-ok:focus-visible{outline:2px solid var(--accent-hover);outline-offset:2px}
@@ -9115,12 +8061,20 @@ html:not([data-theme="tofu"]) .scene-switch-btn{display:none}
 .ptool-board-mini-owner { font-size: 10px; color: var(--accent); font-family: var(--mono, monospace); }
 .ptool-board-mini-auto { display: inline-flex; color: var(--accent); }
 .ptool-board-mini-empty { font-size: 11px; color: var(--text-tertiary); padding: 2px 4px; }
-/* Board transition line */
-.ptool-board-transition { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; font-size: 12.5px; }
+/* Board transition card — verb+status head row, then the epic title row (the
+   epic title is the whole point of the card; the id is a small mono chip). */
+.ptool-board-transition { display: flex; flex-direction: column; gap: 6px; font-size: 12.5px; }
+.ptool-board-tr-head { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+.ptool-board-tr-titlerow { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; padding: 6px 9px; background: var(--bg-secondary); border: 1px solid var(--border); border-left: 2px solid var(--accent); border-radius: 5px; }
 .ptool-board-tr-verb { font-weight: 700; color: var(--accent); }
-.ptool-board-tr-title { overflow-wrap: anywhere; color: var(--text-primary); }
+.ptool-board-tr-title { flex: 1; overflow-wrap: anywhere; color: var(--text-primary); }
+.ptool-board-tr-untitled { color: var(--text-tertiary); font-style: italic; }
+.ptool-board-tr-id { font-size: 10px; color: var(--text-tertiary); font-family: var(--mono, monospace); white-space: nowrap; }
 .ptool-board-tr-arrow { display: inline-flex; color: var(--text-tertiary); transform: rotate(-90deg); }
 .ptool-board-tr-status { font-size: 10.5px; font-weight: 700; padding: 1px 8px; border-radius: 8px; border: 1px solid var(--border); }
+.ptool-board-tr-failed { display: inline-flex; align-items: center; gap: 4px; font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.02em; padding: 1px 8px; border-radius: 8px; color: var(--pb-red, #ef4444); border: 1px solid color-mix(in srgb, var(--pb-red, #ef4444) 45%, transparent); }
+.ptool-board-transition-failed .ptool-board-tr-titlerow { border-left-color: var(--pb-red, #ef4444); }
+.ptool-board-tr-error { font-size: 11.5px; line-height: 1.5; color: var(--pb-red, #ef4444); overflow-wrap: anywhere; padding: 5px 9px; background: color-mix(in srgb, var(--pb-red, #ef4444) 8%, transparent); border: 1px solid color-mix(in srgb, var(--pb-red, #ef4444) 30%, transparent); border-radius: 5px; }
 /* Peer status cards */
 .ptool-peer-list { display: flex; flex-direction: column; gap: 7px; }
 .ptool-peer-card { padding: 7px 10px; background: var(--bg-secondary); border: 1px solid var(--border); border-radius: 6px; }
@@ -13111,6 +12065,21 @@ html:not([data-theme="tofu"]) .tofu-pet{display:none}
 [data-theme="tofu"] .folder-nav-btn{border-radius:var(--radius-sm)}
 [data-theme="tofu"] .folder-nav-btn.active{background:rgba(196,149,106,0.08);color:#A67B52;border-color:rgba(196,149,106,0.22);box-shadow:none}
 
+/* ── Capability mode picker — tofu (clay) theme ──
+ * The trigger inherits the pixel-pill [data-theme="tofu"] .submenu-trigger
+ * style and the popover inherits [data-theme="tofu"] .flow-menu, so only the
+ * active-Studio accent is bespoke here. */
+[data-theme="tofu"] .chat-mode-trigger[data-mode="studio"]{color:#A67B52;background:rgba(196,149,106,0.12);border-color:rgba(196,149,106,0.35)}
+[data-theme="tofu"] .submenu-section-label{color:#8A7A56;font-family:var(--sans-body)}
+/* ── Light theme ── */
+[data-theme="light"] .chat-mode-trigger[data-mode="studio"]{color:var(--accent);background:var(--accent-subtle);border-color:var(--accent-subtle)}
+[data-theme="light"] .submenu-section-label{color:var(--text-tertiary)}
+/* Mobile capability-mode rows read as a radio group — active row painted
+ * like an active submenu item (accent tint), NOT a check toggle. */
+.mobile-mode-item.active .mobile-sheet-item-name{color:var(--accent)}
+.mobile-mode-item .mobile-sheet-item-check{opacity:0}
+.mobile-mode-item.active .mobile-sheet-item-check{opacity:1}
+
 /* ── Submenu triggers — pixel pill buttons with JetBrains Mono ── */
 [data-theme="tofu"] .submenu-trigger{
   border-radius:4px;
@@ -13183,6 +12152,29 @@ html:not([data-theme="tofu"]) .tofu-pet{display:none}
   clip-path:none
 }
 [data-theme="tofu"] .submenu-dropdown::after{background:#F4F2EB;border-right-color:#A89878;border-bottom-color:#A89878;border-bottom-right-radius:1px;bottom:-6px}
+
+/* ── Flow menu: same clay treatment as the Mode/Enhance/Tools sub-menus ── */
+[data-theme="tofu"] .flow-menu{
+  border-radius:4px;
+  border:2px solid #C2BCA4;
+  border-top-color:#FFFCF6;
+  border-left-color:#FFFCF6;
+  border-right-color:#A89878;
+  border-bottom-color:#A89878;
+  box-shadow:var(--clay-sm);
+  background:#F4F2EB;
+  padding:4px;
+  z-index:9999
+}
+[data-theme="tofu"] .flow-menu::after{background:#F4F2EB;border-right-color:#A89878;border-bottom-color:#A89878;border-bottom-right-radius:1px;bottom:-6px}
+[data-theme="tofu"] .flow-menu-item{border-radius:3px;padding:8px 10px;font-family:var(--sans-body);font-size:11px;font-weight:600}
+[data-theme="tofu"] .flow-menu-item:hover{background:rgba(196,149,106,0.08)}
+[data-theme="tofu"] .flow-menu-item.selected{background:rgba(196,149,106,0.07);border-radius:3px}
+[data-theme="tofu"] .flow-menu-item.selected .flow-menu-name,[data-theme="tofu"] .flow-menu-item.selected .flow-menu-icon,[data-theme="tofu"] .flow-menu-item.selected .flow-menu-check{color:#A67B52}
+[data-theme="tofu"] .flow-menu-icon{border-radius:3px;background:transparent;color:#8A7A5A}
+[data-theme="tofu"] .flow-menu-item.selected .flow-menu-icon{background:#E8E5DC}
+[data-theme="tofu"] .flow-menu-name{color:#3D3022;font-weight:700;-webkit-font-smoothing:antialiased}
+[data-theme="tofu"] .flow-menu-desc{font-size:10px;color:#6A5A3A;font-weight:500}
 
 /* ── Scrollbar — thin pixel track ── */
 [data-theme="tofu"] ::-webkit-scrollbar{width:5px}
@@ -13850,7 +12842,6 @@ html:not([data-theme="tofu"]) .tofu-pet{display:none}
   border-right-color: rgba(150, 80, 65, 0.3);
   border-bottom-color: rgba(150, 80, 65, 0.3);
 }
-
 
 
 /* 🕹️ Image-gen generate btn — pixel art style */
@@ -15918,49 +14909,6 @@ html:not([data-theme="tofu"]) .tofu-pet{display:none}
 /* ── Skill-package badge on memory cards ── */
 .memory-card-pkg{display:inline-flex;align-items:center;gap:3px;padding:1px 6px;border:1px solid var(--m-ink);border-radius:3px;background:var(--m-skin);color:var(--m-ink);font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.04em}
 .memory-card-pkg svg{display:block}
-
-/* ── Skills Settings tab ── App-Store layout ── */
-.skills-scope-tabs{display:inline-flex;gap:4px;margin-right:10px;padding:2px;background:var(--bg-tertiary,#1a1a1a);border:1px solid var(--border-color,#333);border-radius:6px}
-.skills-scope-tab{padding:3px 12px;border:none;background:transparent;color:var(--text-secondary,#aaa);font-size:12px;border-radius:4px;cursor:pointer;transition:all .15s ease}
-.skills-scope-tab:hover{color:var(--text-primary,#fff)}
-.skills-scope-tab.active{background:var(--bg-secondary,#2a2a2a);color:var(--text-primary,#fff);box-shadow:0 1px 3px rgba(0,0,0,.2)}
-
-.skills-drop-zone{display:flex;align-items:center;justify-content:center;gap:10px;padding:14px 18px;margin:8px 0 14px;border:1.5px dashed var(--border-color,#444);border-radius:8px;color:var(--text-secondary,#888);font-size:12.5px;cursor:pointer;transition:all .2s ease;background:transparent}
-.skills-drop-zone:hover{border-color:var(--accent,#6c64e6);color:var(--text-primary,#ccc);background:rgba(108,100,230,.05)}
-.skills-drop-zone.is-dragging{border-color:var(--accent,#6c64e6);border-style:solid;background:rgba(108,100,230,.12);color:var(--text-primary,#fff);transform:scale(1.005)}
-.skills-drop-zone-text{pointer-events:none}
-
-/* Skill card uses mcp-app-card as base; add skill-specific accents.
- * The base .mcp-app-card is a 2-col grid (44px icon | 1fr content). The
- * skill-only children (author line, requirement warning, footer) MUST be
- * pinned to the content column / full width — otherwise the grid
- * auto-places them in column 1 under the icon and the card looks broken. */
-.mcp-app-card.skill-card .mcp-app-icon{filter:saturate(1.1)}
-.mcp-app-card .skill-badge-official{display:inline-flex;align-items:center;gap:3px;padding:1px 6px;margin-left:6px;border:1px solid currentColor;border-radius:10px;background:transparent;color:#d97706;font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;vertical-align:middle}
-.mcp-app-card .skill-badge-warn{grid-column:2;justify-self:start;display:inline-flex;align-items:center;gap:3px;padding:1px 6px;margin-top:4px;border:1px solid rgba(234,179,8,.4);border-radius:3px;background:rgba(234,179,8,.1);color:#d4a518;font-size:10px;font-weight:500}
-.mcp-app-card .skill-author{grid-column:2;font-size:10px;opacity:.55;margin-top:2px}
-.mcp-app-card .skill-card-footer{grid-column:1 / -1;display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:8px;padding-top:8px;min-height:30px;border-top:1px solid var(--border-color,#333)}
-.mcp-app-card .skill-card-actions{display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end}
-
-.mcp-app-card.is-installed{background:rgba(34,197,94,.05);border-color:rgba(34,197,94,.25)}
-.mcp-app-card .skill-installed-tag{display:inline-flex;align-items:center;gap:3px;padding:1px 7px;border-radius:10px;background:rgba(34,197,94,.15);color:#15803d;font-size:9px;font-weight:800;text-transform:uppercase;letter-spacing:.04em;align-self:center}
-
-/* Skills file browser list */
-.skills-files-modal{max-width:640px;max-height:80vh;max-height:calc(var(--vh100,100vh)*0.8);display:flex;flex-direction:column}
-.skills-files-list{flex:1;overflow-y:auto;margin:12px 0;padding:8px 0;border:1px solid var(--border-color,#333);border-radius:6px;background:var(--bg-tertiary,#161616);max-height:50vh;max-height:calc(var(--vh100,100vh)*0.5)}
-.skills-file-row{display:flex;align-items:center;gap:10px;padding:6px 12px;font-size:12.5px;color:var(--text-primary,#ddd);border-bottom:1px solid rgba(255,255,255,.03)}
-.skills-file-row:last-child{border-bottom:none}
-.skills-file-row:hover{background:rgba(255,255,255,.03)}
-.skills-file-kind{flex:0 0 16px;font-size:14px;text-align:center}
-.skills-file-kind svg{width:14px;height:14px;vertical-align:middle}
-.skills-file-path{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--font-mono,monospace);font-size:11.5px}
-.skills-file-size{flex:0 0 auto;font-size:10px;opacity:.55;font-variant-numeric:tabular-nums}
-.skills-file-row.is-skill{background:rgba(108,100,230,.08);font-weight:500}
-
-/* Toast used by catalog install */
-.skills-toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);padding:10px 18px;background:var(--bg-secondary,#1e1e1e);color:var(--text-primary,#fff);border:1px solid var(--border-color,#333);border-radius:6px;font-size:13px;box-shadow:0 4px 12px rgba(0,0,0,.3);z-index:10020;animation:skillsToastIn .25s cubic-bezier(.2,1,.3,1)}
-.skills-toast.is-error{border-color:rgba(239,68,68,.5);color:#fca5a5}
-.skills-toast.is-success{border-color:rgba(34,197,94,.5)}
 @keyframes skillsToastIn{from{opacity:0;transform:translate(-50%,10px)}to{opacity:1;transform:translate(-50%,0)}}
 
 /* ── Drag-and-drop overlay (skill package install) ── */
@@ -16554,7 +15502,6 @@ html:not([data-theme="tofu"]) .tofu-pet{display:none}
 [data-theme="light"] .selection-popup{background:#fff;box-shadow:0 4px 20px rgba(0,0,0,0.12)}
 [data-theme="light"] .reply-quote-badge{background:rgba(0,0,0,0.03);border-color:rgba(0,0,0,0.08)}
 [data-theme="light"] .reply-quote-chip{background:#f8f8f8;border-color:rgba(0,0,0,0.08)}
-
 
 
 /* ══════════════════════════════════════════
@@ -17156,6 +16103,13 @@ html:not([data-theme="tofu"]) .tofu-pet{display:none}
   box-shadow: 0 2px 12px rgba(0,0,0,0.15);
   animation: queueSlideIn 0.25s cubic-bezier(0.22,1,0.36,1);
   transition: opacity 0.2s ease, transform 0.2s ease;
+  /* ★ Bound the bar so a long queue scrolls INSIDE it instead of growing
+     upward and covering the chat transcript (reported: "too many queued
+     messages, can't see the content behind"). The header below is sticky so
+     the count + Clear-all stay visible while the item list scrolls. */
+  max-height: min(42vh, 320px);
+  overflow-y: auto;
+  scrollbar-width: thin;
 }
 .pending-queue-bar.queue-removing {
   opacity: 0;
@@ -17170,6 +16124,13 @@ html:not([data-theme="tofu"]) .tofu-pet{display:none}
   font-weight: 600;
   color: var(--accent);
   letter-spacing: 0.3px;
+  /* Stay pinned to the top of the scroll area so the count + Clear-all button
+     remain reachable no matter how far the item list is scrolled. */
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--bg-secondary);
+  padding-bottom: 4px;
 }
 .pending-queue-bar .queue-header svg {
   flex-shrink: 0;
@@ -17219,9 +16180,14 @@ html:not([data-theme="tofu"]) .tofu-pet{display:none}
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   word-break: break-word;
-  max-height: calc(1.4em * 6);
-  overflow-y: auto;
-  scrollbar-width: thin;
+  /* Clamp each preview to 3 lines with an ellipsis so one long message can't
+     dominate the bar; the full text is still sent/removed intact. Replaces the
+     old per-item 6-line nested scrollbar (double-scrollbar with the bar). */
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  max-height: calc(1.4em * 3);
 }
 /* Attachment badges */
 .pending-queue-item .queue-item-attachments {
@@ -17487,7 +16453,7 @@ html:not([data-theme="tofu"]) .tofu-pet{display:none}
    * grep for hidden misses it). Root-cause fix: apply the phone's compaction —
    * move the submenus + standalone actions into the "···" bottom sheet and free
    * the row width, so the model picker keeps its natural size. */
-  #submenuAI,#submenuTools,#submenuMode,
+  #submenuExtras,#submenuFlow,#submenuMode,
   #imageGenBtn,#projectBtn{display:none!important}
   .mobile-more-btn{display:flex!important;width:40px;height:40px;align-items:center;
     justify-content:center;flex-shrink:0;border:1.5px solid var(--border);
@@ -17497,55 +16463,6 @@ html:not([data-theme="tofu"]) .tofu-pet{display:none}
    * room — pin a floor so it can never collapse to a sliver again. */
   #modelGroup{flex-shrink:0}
   .preset-toggle{flex-shrink:0;min-width:96px;max-width:200px}
-
-  /* ===== BOTTOM SHEET + backdrop at TABLET / coarse width =====
-   * The "···" more-button (and the toolbar compaction that moves tools INTO
-   * the sheet) is shown in THIS block, but the rules that make #mobileSheet
-   * actually visible (position:fixed + .open{display:block}) historically
-   * lived ONLY in @media(max-width:768px). On a 769–1024px coarse-pointer
-   * viewport (tablets, and the Android WebView when it reports a CSS width
-   * >768) the button opened a sheet that the base `.mobile-bottom-sheet
-   * {display:none}` kept hidden → tools unreachable in BOTH Chrome and the
-   * WebView. Mirror the phone sheet rules here so the button has a target.
-   * (Follows the same cross-block duplication as .mobile-more-btn.) */
-  .mobile-bottom-sheet{position:fixed;bottom:0;left:0;right:0;z-index:250;
-    background:var(--bg-secondary);border-radius:16px 16px 0 0;
-    box-shadow:0 -4px 24px rgba(0,0,0,0.2);padding:12px 12px calc(12px + env(safe-area-inset-bottom,0px));
-    max-height:70dvh;max-height:calc(var(--vh100,100vh) * 0.7);overflow-y:auto;transform:translateY(100%);transition:transform .25s cubic-bezier(.4,0,.2,1);
-    display:none}
-  .mobile-bottom-sheet.open{display:block;transform:translateY(0)}
-  .mobile-bottom-sheet-backdrop{position:fixed;inset:0;background:rgba(0,0,0,0.3);z-index:249;
-    display:none;-webkit-tap-highlight-color:transparent}
-  .mobile-bottom-sheet-backdrop.open{display:block}
-  .mobile-flow-sheet{z-index:260}
-  .mobile-sheet-header{font-size:13px;font-weight:700;color:var(--text-secondary);padding:4px 8px 10px;
-    border-bottom:1px solid var(--border);margin-bottom:8px}
-  .mobile-sheet-section{margin-bottom:8px}
-  .mobile-sheet-section-title{font-size:10px;font-weight:700;color:var(--text-tertiary);
-    text-transform:uppercase;letter-spacing:.08em;padding:4px 8px}
-  .mobile-sheet-item{display:flex;align-items:center;gap:12px;padding:12px 10px;border-radius:10px;
-    cursor:pointer;transition:background .12s;user-select:none;min-height:44px}
-  .mobile-sheet-item:active{background:var(--bg-hover)}
-  .mobile-sheet-item.active{background:var(--accent-subtle)}
-  .mobile-sheet-item-icon{width:20px;height:20px;display:flex;align-items:center;justify-content:center;
-    color:var(--text-secondary);flex-shrink:0}
-  .mobile-sheet-item.active .mobile-sheet-item-icon{color:var(--accent)}
-  .mobile-sheet-item-text{flex:1;min-width:0;display:flex;flex-direction:column}
-  .mobile-sheet-item-name{font-size:14px;font-weight:600;color:var(--text-primary);line-height:1.3}
-  .mobile-sheet-item.active .mobile-sheet-item-name{color:var(--accent)}
-  .mobile-sheet-item-desc{font-size:11px;color:var(--text-tertiary);margin-top:2px;line-height:1.3}
-  .mobile-sheet-item-check{font-size:14px;color:var(--accent);opacity:0}
-  .mobile-sheet-item.active .mobile-sheet-item-check{opacity:1}
-  .mobile-sheet-item.disabled{pointer-events:none;opacity:0.45}
-  .mobile-sheet-item.disabled .mobile-sheet-item-check{opacity:0}
-  .mobile-depth-bar{display:flex;gap:6px;padding:6px 8px}
-  .mobile-depth-btn{flex:1;padding:10px 0;border:1.5px solid var(--border);border-radius:10px;
-    background:var(--bg-tertiary);color:var(--text-secondary);font-size:13px;font-weight:600;
-    cursor:pointer;text-align:center;transition:all .15s;-webkit-tap-highlight-color:transparent}
-  .mobile-depth-btn:active{transform:scale(.96)}
-  .mobile-depth-btn.active{background:var(--accent-subtle);color:var(--accent);border-color:var(--accent)}
-  [data-theme="tofu"] .mobile-bottom-sheet{background:var(--bg-secondary);border:1px solid var(--border);border-bottom:none}
-  [data-theme="tofu"] .mobile-sheet-item{font-family:var(--sans-body);font-size:13px}
 }
 
 
@@ -17572,7 +16489,7 @@ html:not([data-theme="tofu"]) .tofu-pet{display:none}
    the picker, and make the sheet + model dropdown reachable. Guarded by
    tests/test_preset_dropdown_coarse_escape.py. */
 @media (pointer:coarse) and (min-width:1025px){
-  #submenuAI,#submenuTools,#submenuMode,
+  #submenuExtras,#submenuFlow,#submenuMode,
   #imageGenBtn,#projectBtn{display:none!important}
   .mobile-more-btn{display:flex!important;width:40px;height:40px;align-items:center;
     justify-content:center;flex-shrink:0;border:1.5px solid var(--border);
@@ -17582,18 +16499,6 @@ html:not([data-theme="tofu"]) .tofu-pet{display:none}
    * room — pin a floor so it can never collapse to a sliver again. */
   #modelGroup{flex-shrink:0}
   .preset-toggle{flex-shrink:0;min-width:96px;max-width:200px}
-  /* The "···" sheet + backdrop must be visible (base rule keeps them
-   * display:none). Mirror the ≤1024 coarse block. */
-  .mobile-bottom-sheet{position:fixed;bottom:0;left:0;right:0;z-index:250;
-    background:var(--bg-secondary);border-radius:16px 16px 0 0;
-    box-shadow:0 -4px 24px rgba(0,0,0,0.2);padding:12px 12px calc(12px + env(safe-area-inset-bottom,0px));
-    max-height:70dvh;max-height:calc(var(--vh100,100vh) * 0.7);overflow-y:auto;transform:translateY(100%);transition:transform .25s cubic-bezier(.4,0,.2,1);
-    display:none}
-  .mobile-bottom-sheet.open{display:block;transform:translateY(0)}
-  .mobile-bottom-sheet-backdrop{position:fixed;inset:0;background:rgba(0,0,0,0.3);z-index:249;
-    display:none;-webkit-tap-highlight-color:transparent}
-  .mobile-bottom-sheet-backdrop.open{display:block}
-  .mobile-flow-sheet{z-index:260}
 }
 /* ── Safe area insets for notched phones ──
  * env(safe-area-inset-*) resolves to 0px where unsupported, so these are
@@ -17766,7 +16671,7 @@ html:not([data-theme="tofu"]) .tofu-pet{display:none}
   /* --- Hide submenus & standalone action btns on mobile ---
    * These are accessible via the "more" (···) bottom sheet.
    * Only the model picker (#modelGroup) stays in the toolbar. */
-  #submenuAI,#submenuTools,#submenuMode{display:none!important}
+  #submenuExtras,#submenuFlow,#submenuMode{display:none!important}
 
   /* --- Model picker: compact, 40px tall to match the other controls --- */
   .preset-toggle{height:40px;padding:0 10px;gap:5px;max-width:150px;overflow:hidden;box-sizing:border-box;align-items:center}
@@ -17803,17 +16708,6 @@ html:not([data-theme="tofu"]) .tofu-pet{display:none}
   .attach-btn{display:flex!important;width:40px;height:40px;min-width:40px;margin:0;border-radius:12px;box-sizing:border-box;align-items:center;justify-content:center;flex-shrink:0}
   .attach-btn svg{width:20px;height:20px}
 
-  /* --- Bottom sheet for submenus/actions (shared mobile pattern) --- */
-  .mobile-bottom-sheet{position:fixed;bottom:0;left:0;right:0;z-index:250;
-    background:var(--bg-secondary);border-radius:16px 16px 0 0;
-    box-shadow:0 -4px 24px rgba(0,0,0,0.2);padding:12px 12px calc(12px + env(safe-area-inset-bottom,0px));
-    max-height:70dvh;max-height:calc(var(--vh100,100vh) * 0.7);overflow-y:auto;transform:translateY(100%);transition:transform .25s cubic-bezier(.4,0,.2,1);
-    display:none}
-  .mobile-bottom-sheet.open{display:block;transform:translateY(0)}
-  .mobile-bottom-sheet-backdrop{position:fixed;inset:0;background:rgba(0,0,0,0.3);z-index:249;
-    display:none;-webkit-tap-highlight-color:transparent}
-  .mobile-bottom-sheet-backdrop.open{display:block}
-
   /* --- Portaled desktop popovers (timer / optimizer) as bottom sheets ---
    * mobile_panels.js re-parents #timerPanel / #optimizerPanel to <body> and
    * adds .mobile-panel-portaled. Their desktop absolute-position rules (anchored
@@ -17830,42 +16724,6 @@ html:not([data-theme="tofu"]) .tofu-pet{display:none}
     transform:translateY(100%);transition:transform .25s cubic-bezier(.4,0,.2,1);display:block!important}
   .timer-panel.mobile-panel-portaled.visible,
   .optimizer-panel.mobile-panel-portaled.visible{transform:translateY(0)}
-  /* Flow picker sheet reuses .mobile-bottom-sheet; lift it above the shared
-   * panel backdrop so it isn't dimmed by it. */
-  .mobile-flow-sheet{z-index:260}
-  .mobile-sheet-header{font-size:13px;font-weight:700;color:var(--text-secondary);padding:4px 8px 10px;
-    border-bottom:1px solid var(--border);margin-bottom:8px}
-  .mobile-sheet-section{margin-bottom:8px}
-  .mobile-sheet-section-title{font-size:10px;font-weight:700;color:var(--text-tertiary);
-    text-transform:uppercase;letter-spacing:.08em;padding:4px 8px}
-  .mobile-sheet-item{display:flex;align-items:center;gap:12px;padding:12px 10px;border-radius:10px;
-    cursor:pointer;transition:background .12s;user-select:none;min-height:44px}
-  .mobile-sheet-item:active{background:var(--bg-hover)}
-  .mobile-sheet-item.active{background:var(--accent-subtle)}
-  .mobile-sheet-item-icon{width:20px;height:20px;display:flex;align-items:center;justify-content:center;
-    color:var(--text-secondary);flex-shrink:0}
-  .mobile-sheet-item.active .mobile-sheet-item-icon{color:var(--accent)}
-  .mobile-sheet-item-text{flex:1;min-width:0;display:flex;flex-direction:column}
-  .mobile-sheet-item-name{font-size:14px;font-weight:600;color:var(--text-primary);line-height:1.3}
-  .mobile-sheet-item.active .mobile-sheet-item-name{color:var(--accent)}
-  .mobile-sheet-item-desc{font-size:11px;color:var(--text-tertiary);margin-top:2px;line-height:1.3}
-  .mobile-sheet-item-check{font-size:14px;color:var(--accent);opacity:0}
-  .mobile-sheet-item.active .mobile-sheet-item-check{opacity:1}
-
-  .mobile-sheet-item.disabled{pointer-events:none;opacity:0.45}
-  .mobile-sheet-item.disabled .mobile-sheet-item-check{opacity:0}
-
-  /* --- Mobile depth bar (thinking depth in bottom sheet) --- */
-  .mobile-depth-bar{display:flex;gap:6px;padding:6px 8px}
-  .mobile-depth-btn{flex:1;padding:10px 0;border:1.5px solid var(--border);border-radius:10px;
-    background:var(--bg-tertiary);color:var(--text-secondary);font-size:13px;font-weight:600;
-    cursor:pointer;text-align:center;transition:all .15s;-webkit-tap-highlight-color:transparent}
-  .mobile-depth-btn:active{transform:scale(.96)}
-  .mobile-depth-btn.active{background:var(--accent-subtle);color:var(--accent);border-color:var(--accent)}
-  [data-theme="tofu"] .mobile-depth-btn{font-family:var(--sans-body);font-size:12px;
-    border-color:rgba(194,188,164,0.4);color:#5C4A33;background:#FAF8F3}
-  [data-theme="tofu"] .mobile-depth-btn.active{background:rgba(196,149,106,0.15);
-    color:#6A4E2E;border-color:#A67B52}
 
   /* --- Preset/submenu dropdowns: bottom sheet style on mobile --- */
   .preset-dropdown{position:fixed;bottom:0;left:0;right:0;top:auto;transform:none;min-width:auto;width:100%;
@@ -17913,13 +16771,6 @@ html:not([data-theme="tofu"]) .tofu-pet{display:none}
   [data-theme="tofu"] .send-btn{width:40px!important;height:40px!important}
   [data-theme="tofu"] .input-actions::before{display:none!important}
   [data-theme="tofu"] .input-actions-scroll .input-group:not(:last-child)::after{display:none!important}
-  /* Tofu theme bottom sheet styling */
-  [data-theme="tofu"] .mobile-bottom-sheet{background:var(--bg-secondary);border:1px solid var(--border);border-bottom:none}
-  [data-theme="tofu"] .mobile-sheet-item{font-family:var(--sans-body);font-size:13px}
-  [data-theme="tofu"] .mobile-sheet-item.active{background:var(--accent-subtle)}
-  [data-theme="tofu"] .mobile-sheet-item-name{color:var(--text-primary)}
-  [data-theme="tofu"] .mobile-sheet-item.active .mobile-sheet-item-name{color:var(--accent)}
-  [data-theme="tofu"] .mobile-sheet-item-check{color:var(--accent)}
   [data-theme="tofu"] .mobile-more-btn{border-color:var(--border);color:var(--text-primary);border-radius:var(--radius-xs)}
   [data-theme="tofu"] .attach-btn{color:var(--text-primary);border-radius:var(--radius-xs)}
 
@@ -18047,7 +16898,73 @@ html:not([data-theme="tofu"]) .tofu-pet{display:none}
 }
 
 
+/* ═══════════════════════════════════════════════════════════
+   ★ SINGLE SOURCE — bottom-sheet CONTAINER + CONTENT for every
+   touch/narrow viewport that can OPEN the "···" sheet.
+   Union = ≤768 (any pointer) + 769–1024 coarse + ≥1025 coarse.
+   Placed AFTER all three width blocks so it is never reverse-bitten
+   at equal specificity. fine-pointer desktops keep the full toolbar and
+   never open this sheet, so the (pointer:coarse) arm can't leak the sheet
+   layout onto them. The per-width blocks keep ONLY their real differences
+   (.mobile-more-btn value, #modelGroup pin, submenu hides, drawer geometry,
+   .preset-dropdown, topbar). Guarded by
+   tests/test_mobile_sheet_content_reaches_wide_coarse.py. Historic bug: the
+   container was copied into all 3 width blocks but the content into only 2
+   (≤768 + 769–1024 coarse) → a ≥1025 coarse tablet popped an UNSTYLED sheet
+   (bare-text rows / naked depth buttons). Single source ends that class. */
+@media (max-width:768px),(pointer:coarse){
+  /* ── Container + backdrop + flow-sheet ── */
+  .mobile-bottom-sheet{position:fixed;bottom:0;left:0;right:0;z-index:250;
+    background:var(--bg-secondary);border-radius:16px 16px 0 0;
+    box-shadow:0 -4px 24px rgba(0,0,0,0.2);padding:12px 12px calc(12px + env(safe-area-inset-bottom,0px));
+    max-height:70dvh;max-height:calc(var(--vh100,100vh) * 0.7);overflow-y:auto;transform:translateY(100%);transition:transform .25s cubic-bezier(.4,0,.2,1);
+    display:none}
+  .mobile-bottom-sheet.open{display:block;transform:translateY(0)}
+  .mobile-bottom-sheet-backdrop{position:fixed;inset:0;background:rgba(0,0,0,0.3);z-index:249;
+    display:none;-webkit-tap-highlight-color:transparent}
+  .mobile-bottom-sheet-backdrop.open{display:block}
+  .mobile-flow-sheet{z-index:260}
 
+  /* ── Sheet content ── */
+  .mobile-sheet-header{font-size:13px;font-weight:700;color:var(--text-secondary);padding:4px 8px 10px;
+    border-bottom:1px solid var(--border);margin-bottom:8px}
+  .mobile-sheet-section{margin-bottom:8px}
+  .mobile-sheet-section-title{font-size:10px;font-weight:700;color:var(--text-tertiary);
+    text-transform:uppercase;letter-spacing:.08em;padding:4px 8px}
+  .mobile-sheet-item{display:flex;align-items:center;gap:12px;padding:12px 10px;border-radius:10px;
+    cursor:pointer;transition:background .12s;user-select:none;min-height:44px}
+  .mobile-sheet-item:active{background:var(--bg-hover)}
+  .mobile-sheet-item.active{background:var(--accent-subtle)}
+  .mobile-sheet-item-icon{width:20px;height:20px;display:flex;align-items:center;justify-content:center;
+    color:var(--text-secondary);flex-shrink:0}
+  .mobile-sheet-item.active .mobile-sheet-item-icon{color:var(--accent)}
+  .mobile-sheet-item-text{flex:1;min-width:0;display:flex;flex-direction:column}
+  .mobile-sheet-item-name{font-size:14px;font-weight:600;color:var(--text-primary);line-height:1.3}
+  .mobile-sheet-item.active .mobile-sheet-item-name{color:var(--accent)}
+  .mobile-sheet-item-desc{font-size:11px;color:var(--text-tertiary);margin-top:2px;line-height:1.3}
+  .mobile-sheet-item-check{font-size:14px;color:var(--accent);opacity:0}
+  .mobile-sheet-item.active .mobile-sheet-item-check{opacity:1}
+  .mobile-sheet-item.disabled{pointer-events:none;opacity:0.45}
+  .mobile-sheet-item.disabled .mobile-sheet-item-check{opacity:0}
+  .mobile-depth-bar{display:flex;gap:6px;padding:6px 8px}
+  .mobile-depth-btn{flex:1;padding:10px 0;border:1.5px solid var(--border);border-radius:10px;
+    background:var(--bg-tertiary);color:var(--text-secondary);font-size:13px;font-weight:600;
+    cursor:pointer;text-align:center;transition:all .15s;-webkit-tap-highlight-color:transparent}
+  .mobile-depth-btn:active{transform:scale(.96)}
+  .mobile-depth-btn.active{background:var(--accent-subtle);color:var(--accent);border-color:var(--accent)}
+
+  /* ── tofu theme variants (superset from the former ≤768 block) ── */
+  [data-theme="tofu"] .mobile-bottom-sheet{background:var(--bg-secondary);border:1px solid var(--border);border-bottom:none}
+  [data-theme="tofu"] .mobile-sheet-item{font-family:var(--sans-body);font-size:13px}
+  [data-theme="tofu"] .mobile-sheet-item.active{background:var(--accent-subtle)}
+  [data-theme="tofu"] .mobile-sheet-item-name{color:var(--text-primary)}
+  [data-theme="tofu"] .mobile-sheet-item.active .mobile-sheet-item-name{color:var(--accent)}
+  [data-theme="tofu"] .mobile-sheet-item-check{color:var(--accent)}
+  [data-theme="tofu"] .mobile-depth-btn{font-family:var(--sans-body);font-size:12px;
+    border-color:rgba(194,188,164,0.4);color:#5C4A33;background:#FAF8F3}
+  [data-theme="tofu"] .mobile-depth-btn.active{background:rgba(196,149,106,0.15);
+    color:#6A4E2E;border-color:#A67B52}
+}
 
 
 /* ═══════════════════════════════════════════════════════════
@@ -19108,137 +18025,6 @@ html:not([data-theme="tofu"]) .tofu-pet{display:none}
   .welcome h2{font-size:18px}
 }
 
-/* ══════════════════════════════════════════════════════
-   OAuth Subscription Login Tab
-   ══════════════════════════════════════════════════════ */
-.oauth-provider-card {
-  border: var(--s-border);
-  border-radius: var(--s-radius);
-  padding: 16px;
-  margin-bottom: 12px;
-  background: var(--s-white);
-  box-shadow: var(--s-shadow-sm);
-}
-.oauth-provider-header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 8px;
-}
-.oauth-provider-name {
-  font-weight: 800;
-  font-size: 14px;
-  color: var(--s-ink);
-  flex: 1;
-}
-.oauth-status-badge {
-  font-size: 11px;
-  font-weight: 700;
-  padding: 2px 8px;
-  border-radius: 10px;
-  background: var(--s-cream);
-  color: var(--s-muted);
-  border: 1px solid var(--s-border-color, #ccc);
-}
-.oauth-status-badge.authenticated {
-  background: #d4edda;
-  color: #155724;
-  border-color: #28a745;
-}
-.oauth-status-badge.pending {
-  background: #fff3cd;
-  color: #856404;
-  border-color: #ffc107;
-}
-.oauth-status-badge.error {
-  background: #f8d7da;
-  color: #721c24;
-  border-color: #dc3545;
-}
-.oauth-provider-desc {
-  font-size: 12px;
-  color: var(--s-muted);
-  margin: 4px 0 10px;
-  line-height: 1.5;
-}
-.oauth-provider-info {
-  font-size: 12px;
-  color: var(--s-ink);
-  margin-bottom: 10px;
-  padding: 6px 10px;
-  background: var(--s-cream);
-  border-radius: var(--s-radius);
-}
-.oauth-email {
-  font-family: var(--font-mono, monospace);
-  font-size: 12px;
-}
-.oauth-provider-actions {
-  display: flex;
-  gap: 8px;
-}
-.oauth-provider-actions .btn-small,
-.oauth-manual-fallback .btn-small {
-  padding: 6px 16px;
-  font-size: 12px;
-  font-weight: 700;
-  border: var(--s-border);
-  border-radius: var(--s-radius);
-  cursor: pointer;
-  box-shadow: var(--s-shadow-xs);
-  transition: transform 0.1s, box-shadow 0.1s;
-}
-.oauth-provider-actions .btn-small:hover,
-.oauth-manual-fallback .btn-small:hover {
-  transform: translate(1px, 1px);
-  box-shadow: 1px 1px 0 var(--s-ink);
-}
-.oauth-provider-actions .btn-primary,
-.oauth-manual-fallback .btn-primary {
-  background: var(--s-ink);
-  color: var(--s-white);
-}
-.oauth-provider-actions .btn-danger,
-.oauth-manual-fallback .btn-danger {
-  background: #dc3545;
-  color: #fff;
-  border-color: #dc3545;
-}
-.oauth-manual-fallback .btn-small:not(.btn-primary):not(.btn-danger) {
-  background: var(--s-white);
-  color: var(--s-ink);
-}
-.oauth-notes {
-  font-size: 12px;
-  color: var(--s-muted);
-  line-height: 1.8;
-  padding-left: 20px;
-  margin: 8px 0;
-}
-.oauth-notes li { margin-bottom: 2px; }
-.oauth-manual-fallback {
-  margin-top: 10px;
-  padding: 10px;
-  background: rgba(255,255,255,0.03);
-  border-radius: 8px;
-  border: 1px dashed var(--s-border);
-}
-.oauth-manual-hint {
-  font-size: 12px;
-  color: var(--s-muted);
-  margin: 0 0 8px;
-}
-.oauth-manual-input {
-  flex: 1;
-  padding: 6px 10px;
-  border-radius: 6px;
-  border: 1px solid var(--s-border);
-  background: var(--bg-input);
-  color: var(--fg);
-  font-size: 12px;
-  font-family: monospace;
-}
-
 
 /* ══════════════════════════════════════════════════════════════════
    ★ Pre-tool indicator chips (Memory Prefetch + MCP Login Hint)
@@ -19489,118 +18275,6 @@ html:not([data-theme="tofu"]) .tofu-pet{display:none}
   background:rgba(45,212,191,0.06);
   border-color:rgba(45,212,191,0.22);
   color:var(--text-primary,#e4e4e7);
-}
-
-/* "Noted: you prefer X" — the learn/confirm moment (layer 3). A calm card
-   with one row per learned/staged preference; pending rows carry the
-   Confirm/Dismiss propose-then-confirm buttons. */
-.pref-learned-box{
-  display:flex;flex-direction:column;gap:6px;margin:0 0 8px 0;
-}
-.pref-learned-box .pl-row{
-  display:flex;align-items:center;gap:8px;flex-wrap:wrap;
-  padding:7px 10px;border-radius:6px;
-  background:rgba(148,163,184,0.04);
-  border:1px solid rgba(148,163,184,0.16);
-  font-size:12px;line-height:1.45;color:var(--text-secondary);
-}
-/* Pending rows (with Confirm/Dismiss) keep a faint indigo accent so the
-   actionable card stands out from the informational ones. */
-.pref-learned-box .pl-row.pl-pending{
-  background:rgba(99,102,241,0.05);
-  border-color:rgba(99,102,241,0.22);
-}
-.pref-learned-box .pl-lead{flex-shrink:0;display:flex;align-items:center;color:rgba(45,212,191,0.85)}
-.pref-learned-box .pl-pending .pl-lead{color:rgba(129,140,248,0.95)}
-.pref-learned-box .pl-text{flex:1;min-width:0;color:var(--text-primary,#e4e4e7)}
-.pref-learned-box .pl-text b{font-weight:600}
-.pref-learned-box .pl-hint{
-  display:block;font-size:10.5px;opacity:0.65;margin-top:2px;
-}
-.pref-learned-box .pl-actions{display:flex;gap:6px;flex-shrink:0}
-.pref-learned-box .pl-btn{
-  font:inherit;font-size:11px;font-weight:600;cursor:pointer;
-  padding:4px 12px;border-radius:6px;border:1px solid transparent;
-  transition:background .15s ease,border-color .15s ease;
-}
-.pref-learned-box .pl-confirm{
-  background:rgba(99,102,241,0.85);border-color:rgba(99,102,241,0.95);
-  color:#ffffff;
-}
-.pref-learned-box .pl-confirm:hover{background:rgba(99,102,241,1)}
-.pref-learned-box .pl-dismiss{
-  background:transparent;border-color:rgba(148,163,184,0.3);
-  color:var(--text-secondary);
-}
-.pref-learned-box .pl-dismiss:hover{background:rgba(148,163,184,0.12)}
-.pref-learned-box .pl-resolved{opacity:0.75}
-
-/* ── Preferences settings tab — pending-proposal rows ── */
-.prefs-pending-list{display:flex;flex-direction:column;gap:8px;margin:6px 0 4px 0}
-.prefs-pending-row{
-  display:flex;align-items:center;gap:10px;flex-wrap:wrap;
-  padding:8px 12px;border-radius:8px;
-  background:rgba(99,102,241,0.06);border:1px solid rgba(99,102,241,0.18);
-}
-.prefs-pending-text{flex:1;min-width:0;color:var(--text-primary,#e4e4e7);font-size:12.5px}
-.prefs-pending-text b{font-weight:600}
-.prefs-pending-evidence{font-size:10.5px;opacity:0.65;margin-top:2px}
-.prefs-pending-actions{display:flex;gap:6px;flex-shrink:0}
-
-/* ── Preferences settings tab — per-item editable list ── */
-.prefs-list{display:flex;flex-direction:column;gap:16px;margin:10px 0 4px 0}
-.pref-section{display:flex;flex-direction:column;gap:6px}
-.pref-section-head{
-  display:flex;align-items:center;justify-content:space-between;
-  padding-bottom:4px;margin-bottom:2px;
-  border-bottom:1px solid var(--border-subtle,rgba(148,163,184,0.16));
-}
-.pref-section-title{
-  font-size:12px;font-weight:600;letter-spacing:0.02em;
-  color:var(--text-secondary,#a1a1aa);text-transform:uppercase;
-}
-.pref-add-btn{
-  display:flex;align-items:center;gap:4px;
-  font:inherit;font-size:11px;font-weight:600;cursor:pointer;
-  padding:3px 9px;border-radius:6px;
-  background:transparent;border:1px solid var(--border-subtle,rgba(148,163,184,0.28));
-  color:var(--text-secondary,#a1a1aa);
-  transition:background .15s ease,border-color .15s ease,color .15s ease;
-}
-.pref-add-btn:hover{
-  background:rgba(99,102,241,0.1);border-color:rgba(99,102,241,0.5);
-  color:var(--text-primary,#e4e4e7);
-}
-.pref-add-btn svg{display:block}
-.pref-item-row{
-  display:flex;align-items:center;gap:10px;
-  padding:7px 11px;border-radius:8px;
-  background:var(--surface-2,rgba(148,163,184,0.05));
-  border:1px solid var(--border-subtle,rgba(148,163,184,0.14));
-  transition:border-color .15s ease;
-}
-.pref-item-row:focus-within{border-color:rgba(99,102,241,0.5)}
-.pref-item-dot{
-  flex-shrink:0;width:5px;height:5px;border-radius:50%;
-  background:rgba(99,102,241,0.7);
-}
-.pref-item-input{
-  flex:1;min-width:0;font:inherit;font-size:13px;line-height:1.5;
-  background:transparent;border:none;outline:none;padding:0;
-  color:var(--text-primary,#e4e4e7);
-}
-.pref-item-input::placeholder{color:var(--text-tertiary,rgba(148,163,184,0.5))}
-.pref-item-del{
-  flex-shrink:0;display:flex;align-items:center;justify-content:center;
-  width:24px;height:24px;border-radius:6px;cursor:pointer;
-  background:transparent;border:none;color:var(--text-tertiary,rgba(148,163,184,0.55));
-  transition:background .15s ease,color .15s ease;
-}
-.pref-item-del:hover{background:rgba(229,72,77,0.12);color:var(--danger,#e5484d)}
-.pref-item-del svg{display:block}
-.pref-section-empty{
-  font-size:12px;color:var(--text-tertiary,rgba(148,163,184,0.6));
-  padding:4px 2px;font-style:italic;
 }
 
 /* Icon + text column */
@@ -20446,7 +19120,6 @@ body.compaction-drawer-open .chat-shell {
   }
   .cd-meta-grid { grid-template-columns: 1fr; }
 }
-
 
 
 /* ═══════════════════════════════════════════════════════════════════

@@ -168,7 +168,12 @@ const fafSpawnRound = {
         modifiedFiles: 0, error: '' },
       { id: 'bb22', role: 'coder', model: 'm', objective: 'Patch B',
         status: 'done', elapsed: 2.5, tokens: 900, preview: 'B PATCH BODY',
-        modifiedFiles: 2, error: '' },
+        modifiedFiles: 2, error: '',
+        tools: ['read_files', 'apply_diff'],
+        toolCalls: [
+          { toolName: 'read_files', argsBrief: 'lib/x.py', status: 'done' },
+          { toolName: 'apply_diff', argsBrief: 'lib/x.py', status: 'done' },
+        ] },
     ],
   },
 };
@@ -187,6 +192,16 @@ const fafHtml = _buildSwarmPanelHTML(fafSpawnRound, fafRounds);
 check('faf_panel_complete_pill', fafHtml.includes('Complete'));
 check('faf_panel_renders_body', fafHtml.includes('B PATCH BODY') && fafHtml.includes('sw-agent'));
 check('faf_panel_pencil_pill', fafHtml.includes('sw-a-edited'));   // bb22 edited 2 files
+// The per-agent tool timeline persisted in the snapshot must survive reload
+// (the reported bug: tool records vanished on a completed swarm after refresh).
+check('faf_tools_recovered',
+  fafById['bb22'] && Array.isArray(fafById['bb22'].tools)
+  && fafById['bb22'].tools.join(',') === 'read_files,apply_diff');
+check('faf_toolcalls_recovered',
+  fafById['bb22'] && Array.isArray(fafById['bb22']._toolCalls)
+  && fafById['bb22']._toolCalls.length === 2);
+check('faf_panel_renders_timeline',
+  fafHtml.includes('sw-a-timeline') && fafHtml.includes('sw-tl-row'));
 // The gate must consider a snapshot-only round renderable.
 if (typeof _isRoundSwarm === 'function') {
   check('faf_isRoundSwarm_true', _isRoundSwarm(fafSpawnRound) === true);
@@ -287,4 +302,4 @@ def test_swarm_panel_recovery_from_sibling_rounds():
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
     fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
     assert not fails, 'Swarm recovery failures:\n' + output
-    assert output.count('PASS') >= 25, f'expected >=25 PASS lines, got:\n{output}'
+    assert output.count('PASS') >= 28, f'expected >=28 PASS lines, got:\n{output}'

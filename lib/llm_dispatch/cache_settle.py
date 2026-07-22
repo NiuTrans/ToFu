@@ -83,10 +83,14 @@ __all__ = [
     'settle_enabled',
     'settle_window_ms',
     'settle_max_wait_ms',
+    'settle_cold_enabled',
+    'settle_cold_window_ms',
+    'settle_cold_max_wait_ms',
     'settle_threshold_tokens',
     'settle_before_send',
     'async_settle_before_send',
     'record_stream_end',
+    'is_cold_write',
     '_reset_settle_for_tests',
 ]
 
@@ -122,6 +126,58 @@ def settle_max_wait_ms() -> float:
     except (ValueError, TypeError) as e:
         logger.debug('[CacheSettle] TOFU_CACHE_SETTLE_MAX_MS parse failed, default: %s', e)
         return 4000.0
+
+
+def settle_cold_enabled() -> bool:
+    """Whether the LONG cold-write blocking window is active. DEFAULT OFF.
+
+    ★ Deliberately opt-in. The cold-write case (large write, ~0 read) is the
+    typical shape of a conversation's FIRST round, so a long blocking window
+    would add up to ~cold_window of wall-clock latency to the SECOND round of
+    almost every conversation — punishing the main path. Measured live: a cold
+    tool loop wastes only ~14k rewrite tokens (a fraction of a cent at Opus
+    rates) to skip the block, versus ~10s of user wait to enforce it. For a
+    cost-indifferent, experience-sensitive deployment that trade is BACKWARDS,
+    so the long block is OFF by default: cold writes keep the ordinary short
+    window (accept the cheap re-write, never stall the user). The detector
+    still names the miss ``cache_write_unsettled`` (non-blocking, honest
+    attribution) regardless. Set ``TOFU_CACHE_SETTLE_COLD=1`` to enable the
+    blocking cold window where saving the re-write tokens is worth the latency."""
+    val = os.environ.get('TOFU_CACHE_SETTLE_COLD', '0')
+    return val.strip().lower() in ('1', 'true', 'yes', 'on')
+
+
+def settle_cold_window_ms() -> float:
+    """Minimum ms between a conv's prior COLD-WRITE stream END and its next big
+    send. Default 18000. ONLY consulted when settle_cold_enabled() is True.
+
+    A freshly-WRITTEN Anthropic cache entry is not readable for ~15–20s (the
+    anthropic-sdk-python #1451 write-visibility race — reproduced live: a cold
+    prefix re-sent every 4s missed at t=3s/t=10s and only HIT at t≈16s; a
+    settle sweep missed at ≤14s and hit at ≥17s). The ordinary 1.5s window
+    (settle_window_ms) is ~10x too short to bridge THAT gap, so after a COLD
+    write the next same-conv send must wait this longer window instead. A WARM
+    round keeps the short window (see _compute_wait_s) so tool-loop throughput
+    is not crippled."""
+    try:
+        v = float(os.environ.get('TOFU_CACHE_SETTLE_COLD_MS', '18000'))
+        return v if v > 0 else 18000.0
+    except (ValueError, TypeError) as e:
+        logger.debug('[CacheSettle] TOFU_CACHE_SETTLE_COLD_MS parse failed, default: %s', e)
+        return 18000.0
+
+
+def settle_cold_max_wait_ms() -> float:
+    """Hard ceiling (ms) on a single COLD-write settle wait. Default 20000.
+
+    Same clock-skew guard as settle_max_wait_ms, but sized for the longer cold
+    window. A wait is NEVER longer than this even with a bogus timestamp."""
+    try:
+        v = float(os.environ.get('TOFU_CACHE_SETTLE_COLD_MAX_MS', '20000'))
+        return v if v > 0 else 20000.0
+    except (ValueError, TypeError) as e:
+        logger.debug('[CacheSettle] TOFU_CACHE_SETTLE_COLD_MAX_MS parse failed, default: %s', e)
+        return 20000.0
 
 
 _DEFAULT_SETTLE_THRESHOLD_TOKENS = 30_000
@@ -160,11 +216,12 @@ def settle_threshold_tokens() -> int:
     return _DEFAULT_SETTLE_THRESHOLD_TOKENS
 
 
-# ── Process-global recency map: conv_id → last stream-END timestamp ──
+# ── Process-global recency map: conv_id → (last stream-END timestamp, cold) ──
 # One entry per conversation, recording when its most recent big request's
-# stream finished. Thread-safe, TTL-pruned, and size-capped so a long-lived
-# server with many conversations can't grow it without bound.
-_last_end: dict[str, float] = {}
+# stream finished AND whether that round was a COLD WRITE (large cache_write,
+# ~0 read — the entry that actually needs ~15–20s to become visible). A warm
+# round keeps the short settle window. Thread-safe, TTL-pruned, size-capped.
+_last_end: dict[str, tuple[float, bool]] = {}
 _lock = threading.Lock()
 
 # Entries older than this (seconds) are useless — well past any settle window,
@@ -175,26 +232,61 @@ _MAX_ENTRIES = 4096
 
 def _prune_locked(now: float) -> None:
     """Drop stale entries; if still over the cap, drop the oldest. Caller holds lock."""
-    stale = [cid for cid, ts in _last_end.items() if now - ts > _ENTRY_TTL_S]
+    stale = [cid for cid, (ts, _c) in _last_end.items() if now - ts > _ENTRY_TTL_S]
     for cid in stale:
         del _last_end[cid]
     if len(_last_end) > _MAX_ENTRIES:
-        ordered = sorted(_last_end.items(), key=lambda kv: kv[1])
+        ordered = sorted(_last_end.items(), key=lambda kv: kv[1][0])
         for cid, _ in ordered[:len(_last_end) - _MAX_ENTRIES]:
             del _last_end[cid]
 
 
-def record_stream_end(conv_id: str, *, now: float | None = None) -> None:
+_COLD_WRITE_MIN_TOKENS = 20_000
+
+
+def is_cold_write(usage) -> bool:
+    """Whether a finished round was a COLD cache WRITE — a freshly-created cache
+    entry (large ``cache_write``, negligible ``cache_read``) that needs ~15–20s
+    to become visible upstream before the next same-conv round can read it back.
+
+    Single source of the cold-write signal, shared by both dispatch record
+    sites. A round that mostly READ its prefix (warm) returns False, so the next
+    send keeps the short settle window. Gated on a non-trivial write so a tiny
+    prefix (whose miss is nearly free) never arms the long cold hold."""
+    if not isinstance(usage, dict):
+        return False
+    cw = (usage.get('cache_write_tokens')
+          or usage.get('cache_creation_input_tokens') or 0)
+    cr = (usage.get('cache_read_tokens')
+          or usage.get('cache_read_input_tokens') or 0)
+    try:
+        cw = int(cw); cr = int(cr)
+    except (ValueError, TypeError):
+        return False
+    if cw < _COLD_WRITE_MIN_TOKENS:
+        return False
+    # Cold = the write dominated; a warm round reads back most of its prefix.
+    return cr < cw
+
+
+def record_stream_end(conv_id: str, *, now: float | None = None,
+                      cold_write: bool = False) -> None:
     """Record that ``conv_id``'s current request stream just ENDED.
 
     Called after a successful (or terminal) stream so the NEXT request on the
     same conversation can measure the gap and settle if it arrives too soon.
-    No-op when the gate is disabled or ``conv_id`` is empty."""
+    No-op when the gate is disabled or ``conv_id`` is empty.
+
+    ``cold_write`` marks the finishing round as a COLD cache WRITE (large
+    cache_write, ~0 read — a freshly-created entry that needs ~15–20s to become
+    visible upstream). When True the NEXT same-conv send waits the LONG cold
+    window (settle_cold_window_ms); a warm round keeps the short window. Default
+    False keeps existing callers on the short window (back-compat)."""
     if not conv_id or not settle_enabled():
         return
     ts = now if now is not None else time.time()
     with _lock:
-        _last_end[conv_id] = ts
+        _last_end[conv_id] = (ts, bool(cold_write))
         if len(_last_end) > _MAX_ENTRIES:
             _prune_locked(ts)
 
@@ -218,8 +310,20 @@ def _compute_wait_s(conv_id: str, est_tokens: int, now: float | None) -> tuple[f
         # settle behind. Never delay the opening request of a turn.
         return 0.0, 0.0, 0.0
 
-    window_s = settle_window_ms() / 1000.0
-    elapsed = now - last
+    last_ts, last_cold = last
+    # A COLD write needs the long visibility window, but the long BLOCKING wait
+    # is opt-in (settle_cold_enabled, default OFF) because it would stall the
+    # second round of nearly every conversation to save a sub-cent re-write.
+    # When the cold block is disabled, a cold prior round falls back to the
+    # ordinary short window — we accept the cheap re-write instead of blocking
+    # the user, and the detector still names it cache_write_unsettled.
+    if last_cold and settle_cold_enabled():
+        window_s = settle_cold_window_ms() / 1000.0
+        cap_s = settle_cold_max_wait_ms() / 1000.0
+    else:
+        window_s = settle_window_ms() / 1000.0
+        cap_s = settle_max_wait_ms() / 1000.0
+    elapsed = now - last_ts
     # Guard against a clock going backwards (elapsed < 0) → treat as 0 elapsed.
     if elapsed < 0:
         elapsed = 0.0
@@ -227,7 +331,7 @@ def _compute_wait_s(conv_id: str, est_tokens: int, now: float | None) -> tuple[f
     if remaining <= 0:
         # The prior write has already had the full window to settle.
         return 0.0, elapsed, window_s
-    wait_s = min(remaining, settle_max_wait_ms() / 1000.0)
+    wait_s = min(remaining, cap_s)
     return wait_s, elapsed, window_s
 
 

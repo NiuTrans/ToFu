@@ -543,7 +543,17 @@ function _ensureNewest() {
     if (activeStreams.has(activeConvId)) showStreamingUIForConv(activeConvId);
     else {
       const c = getActiveConv();
-      if (c) renderChat(c);
+      /* ★ Don't clobber an in-flight first-open skeleton. When boot restored the
+       *   last conversation from cache BEFORE the server round-trip (see
+       *   main.js), an idle restored conv may still be mid initial-switch-load
+       *   (`_initialSwitchLoad` set, messages not yet arrived) with the shimmer
+       *   skeleton painted. A full renderChat here would repaint the generic
+       *   "Loading conversation…" welcome over that skeleton — a downgrade
+       *   flash before loadConversationMessages lands the real messages. Leave
+       *   the skeleton up; the load's own `.then` paints the messages. */
+      if (c && !(c._initialSwitchLoad && c._needsLoad && c.messages.length === 0)) {
+        renderChat(c);
+      }
     }
     // ★ Restore server-side queue state (survives page refresh)
     _refreshServerQueue(activeConvId);

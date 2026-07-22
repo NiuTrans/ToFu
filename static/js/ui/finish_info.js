@@ -35,6 +35,51 @@ const _CACHE_CAUSE_PHRASES = [
   // leaves the remainder untranslated (e.g. the bare 'stochastic server-side
   // cache miss' alias would eat the prefix of the full sentence). Each block
   // below is sorted full-sentence → clause → short alias.
+  // ── CURRENT verdict wording ACTUALLY emitted today by
+  //    _detect.py:_resolve_break_cause (2026-07). These MUST stay at the TOP
+  //    of the array: several contain the word "endpoint", and the namespace
+  //    block below adds a bare ['endpoint', …] clause — a full sentence has to
+  //    match BEFORE that short alias can mangle it. The legacy "most likely …
+  //    shared cache pool" rows further down are kept only for old persisted
+  //    rounds. FULL sentences precede their shorter substrings. Guarded by
+  //    tests/test_frontend_cache_verdict_render.py, which DERIVES these
+  //    strings from the backend fn so any future drift turns the test red. ──
+  ['The routing was also identical (key + anthropic-beta + endpoint all match last round), so this is not a client cache-namespace switch either.',
+   '本轮的路由也完全相同（key、anthropic-beta 头、endpoint 均与上一轮一致），因此也不是客户端切换了缓存命名空间。'],
+  ['The cached prefix was not reused upstream: an upstream cache miss (a per-request gateway miss or a TTL boundary).',
+   '缓存前缀未在上游被复用：一次上游缓存未命中（网关偶发的单次未命中，或 TTL 边界）。'],
+  ['The whole cached prefix was not reused upstream: an upstream cache miss (a per-request gateway miss or a TTL boundary).',
+   '整段缓存前缀未在上游被复用：一次上游缓存未命中（网关偶发的单次未命中，或 TTL 边界）。'],
+  ['Only the body past the static prefix was not read back.',
+   '仅静态前缀之后的正文未被读回。'],
+  ['an upstream cache miss (a per-request gateway miss or a TTL boundary)',
+   '一次上游缓存未命中（网关偶发的单次未命中，或 TTL 边界）'],
+  // ── Breakpoint-lost / byte-divergence / backend-history-rewrite verdicts
+  //    (client-side culprits — also emitted today, previously untranslated). ──
+  ['cache breakpoint lost between turns (a cache_control marker the client placed did not survive to the wire — e.g. dropped in the tool_result translation) — the body past the last surviving marker was re-billed uncached',
+   '缓存断点在轮次间丢失（客户端放置的某个 cache_control 标记没能送到线上——例如在 tool_result 转换中被丢掉）——最后一个存活标记之后的正文按未命中重新计费'],
+  ['hoisted system/tools bytes changed between turns while the lossy system fingerprint matched — a canonical-invisible change in the per-turn-injected system prefix (block reorder, wrapping flip, re-serialization, or tool-param key reorder) altered the exact bytes the gateway caches on → the cached prefix was re-billed uncached',
+   '被上提的 system/tools 段字节在轮次间发生变化，而有损的 system 指纹却仍显示一致——每轮注入的 system 前缀里发生了一个规范化不可见的改动（块重排、包裹翻转、重新序列化，或工具参数键重排），改变了网关据以缓存的确切字节 → 缓存前缀按未命中重新计费'],
+  ['wire bytes changed between turns while the lossy content fingerprint matched — a canonical-invisible change (reasoning_details rebuild, consecutive same-role merge, JSON field reorder, or an OpenAI↔Anthropic envelope/endpoint switch) altered the exact bytes the gateway caches on → the affected prefix was re-billed uncached',
+   '线上字节在轮次间发生变化，而有损的内容指纹却仍显示一致——一个规范化不可见的改动（reasoning_details 重建、相邻同角色合并、JSON 字段重排，或 OpenAI↔Anthropic 信封/endpoint 切换）改变了网关据以缓存的确切字节 → 受影响的前缀按未命中重新计费'],
+  ['backend history rewrite (reconcile / committed-dict projection) edited or deleted a cached message — the prefix was re-billed uncached',
+   '后端历史重写（reconcile / committed-dict 投影）改写或删除了一条已缓存的消息——前缀按未命中重新计费'],
+  ['the body past the last surviving marker was re-billed uncached', '最后一个存活标记之后的正文按未命中重新计费'],
+  ['altered the exact bytes the gateway caches on', '改变了网关据以缓存的确切字节'],
+  ['the affected prefix was re-billed uncached', '受影响的前缀按未命中重新计费'],
+  ['the cached prefix was re-billed uncached', '缓存前缀按未命中重新计费'],
+  ['the prefix was re-billed uncached', '前缀按未命中重新计费'],
+  // ── Cache-NAMESPACE switch (2026-07: byte-identical body, routing flipped —
+  //    upstream key / anthropic-beta / endpoint. A CLIENT-side cold-namespace
+  //    miss, NOT a server fault. See _detect.py:_resolve_break_cause. FULL
+  //    sentence first, then the flipped-attribute sub-names as clauses.) ──
+  ['same prefix bytes routed to a different cache namespace — the ',
+   '相同的前缀字节被路由到了不同的缓存命名空间——'],
+  ['changed between turns (a client-side dispatch rebind on cooldown/429, or a per-task TTL-latch flip), so the byte-identical prefix landed on a COLD gateway cache and was re-billed uncached. NOT a server-side miss.',
+   '在轮次间发生了变化（客户端在冷却/429 时重新选路，或 per-task 的 TTL 锁存翻转），于是逐字节相同的前缀落到了一个冷的网关缓存上、按未命中重新计费。这不是服务端未命中。'],
+  ['anthropic-beta header (e.g. extended-cache-ttl)', 'anthropic-beta 头（如 extended-cache-ttl）'],
+  ['upstream API key', '上游 API key'],
+  ['endpoint', 'endpoint（服务端点）'],
   // ── Byte-identical upstream-miss verdict (2026-07: byte-identical prefix NOT
   //    read back — see lib/tasks_pkg/cache_tracking/_detect.py). Byte-identity
   //    proves the miss is NOT a client prefix change THIS round; it does NOT
@@ -168,7 +213,8 @@ function _cacheBreakReason(cb) {
   const bits = [];
   for (const k of Object.keys(cb)) {
     const val = cb[k];
-    if (k === 'server_side' || k === 'no_cache_reuse' || k === 'prefix_mutation') {
+    if (k === 'server_side' || k === 'no_cache_reuse' || k === 'prefix_mutation'
+        || k === 'turn_boundary_rebill') {
       // Render the backend's own cause string verbatim (translated). No
       // fixed label that could contradict it.
       if (val) bits.push(escapeHtml(_translateCacheCause(val)));
@@ -214,6 +260,23 @@ function _cacheBreakState(cb) {
   if ('prefix_mutation' in cb) return 'culprit';
   if (keys.some(k => k === 'system_prompt' || k === 'tools'
                   || k === 'model' || k === 'message_count')) return 'culprit';
+  // ★ Cache-namespace switch (byte-identical body, routing flipped: upstream
+  //   key / anthropic-beta / endpoint). A CLIENT-side cold-namespace miss (a
+  //   dispatch rebind on cooldown/429, or a per-task TTL-latch flip) — NOT a
+  //   server fault. Its own state so the popover shows the actionable routing
+  //   switch instead of no badge (the backend already returns the key +
+  //   verbatim cause; this just classifies it). Keyed on the dict key, which
+  //   is stable regardless of the free-form cause wording.
+  if ('cache_namespace_switch' in cb) return 'namespace';
+  // ★ Round-1 (new-turn) boundary re-bill (backend detect_cache_break, 2026-07):
+  //   the FIRST round of a new user turn read back far less than the previous
+  //   turn's warm cached prefix — the prefix was not reused across the turn
+  //   boundary and got re-billed. That round is invisible to the detector's
+  //   other predicates (they gate on call_count>0), so it used to show NO badge
+  //   and look benign — the user-facing half of "too optimistic". Its own state
+  //   so the popover surfaces it as a real, client-visible miss (likely a
+  //   tail-TTL window boundary; see the tail-TTL ticket). Keyed on the dict key.
+  if ('turn_boundary_rebill' in cb) return 'boundary';
   // Otherwise inspect the server_side / no_cache_reuse cause text.
   const txt = String(cb.server_side || cb.no_cache_reuse || '');
   // LEGACY persisted rows: the old 'upstream cache eviction' verdict + the
@@ -1114,6 +1177,16 @@ function renderFileChangesBar(msg, msgIdx) {
     }));
     return _renderFileChangesHtml(files, false, msgIdx);
   }
+  // ★ Undone round: undo stashed the round's file list (clearing the live
+  //   modifiedFiles counter so badges/fingerprints stay honest). Render the
+  //   bar in a compact "undone → Redo" state so the action is reversible.
+  if (Array.isArray(msg._undoneFileList) && msg._undoneFileList.length) {
+    const files = msg._undoneFileList.map(f => ({
+      path: f.path, action: f.action, ok: true, count: 1,
+      root: f.root || ''
+    }));
+    return _renderFileChangesHtml(files, false, msgIdx, true);
+  }
   // Fallback: extract from toolRounds via /api/v1/messages/extract-file-changes.
   if (!msg.toolRounds || !msg.toolRounds.length) return '';
   const cached = _extractFileChangesFromRoundsCached(msg);
@@ -1144,7 +1217,7 @@ function renderFileChangesBar(msg, msgIdx) {
  * @param {Array} files - [{path, action, ok, count}]
  * @param {boolean} isStreaming - if true, add pulse animation
  */
-function _renderFileChangesHtml(files, isStreaming, msgIdx) {
+function _renderFileChangesHtml(files, isStreaming, msgIdx, isUndone) {
   if (!files.length) return '';
   const pendingCount = files.filter(f => f.pending).length;
   const okCount = files.filter(f => f.ok && !f.pending).length;
@@ -1164,9 +1237,13 @@ function _renderFileChangesHtml(files, isStreaming, msgIdx) {
 
   // Summary line
   const summaryParts = [];
-  if (okCount > 0) summaryParts.push(t('fileChanges.filesChanged', { n: okCount, s: okCount > 1 ? 's' : '' }));
-  if (pendingCount > 0) summaryParts.push(t('fileChanges.inProgress', { n: pendingCount }));
-  if (failCount > 0) summaryParts.push(t('fileChanges.failed', { n: failCount }));
+  if (isUndone) {
+    summaryParts.push(t('fileChanges.undone', { n: totalFiles, s: totalFiles > 1 ? 's' : '' }));
+  } else {
+    if (okCount > 0) summaryParts.push(t('fileChanges.filesChanged', { n: okCount, s: okCount > 1 ? 's' : '' }));
+    if (pendingCount > 0) summaryParts.push(t('fileChanges.inProgress', { n: pendingCount }));
+    if (failCount > 0) summaryParts.push(t('fileChanges.failed', { n: failCount }));
+  }
   const summaryText = summaryParts.join(t('fileChanges.summarySep'));
   const pulseClass = isStreaming ? ' fc-pulse' : '';
   const summaryIcon = '';
@@ -1205,26 +1282,35 @@ function _renderFileChangesHtml(files, isStreaming, msgIdx) {
     </div>`;
   }).join('');
 
+  // ★ Redo button — replaces Undo/Undo-All once the round has been undone.
+  //   Mirror-image icon (arrow curving the other way) to read as "re-apply".
+  const redoBtn = (isUndone && !isStreaming && typeof msgIdx === 'number')
+    ? `<button class="fc-redo-btn" onclick="event.stopPropagation();redoConvModifications(_msgElIndex(this))" title="${escapeHtml(t('fileChanges.redoTip'))}">` +
+      `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 7v6h-6"/><path d="M3 17a9 9 0 0 1 15-6.7L21 13"/></svg>` +
+      `<span>${escapeHtml(t('fileChanges.redo'))}</span></button>`
+    : '';
+
   // ★ Undo button — only for finalized (non-streaming) messages with a valid msgIdx
-  const undoBtn = (!isStreaming && typeof msgIdx === 'number')
+  const undoBtn = (!isUndone && !isStreaming && typeof msgIdx === 'number')
     ? `<button class="fc-undo-btn" onclick="event.stopPropagation();undoConvModifications(_msgElIndex(this))" title="${escapeHtml(t('fileChanges.undoTip'))}">` +
       `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7v6h6"/><path d="M21 17a9 9 0 0 0-15-6.7L3 13"/></svg>` +
       `<span>${escapeHtml(t('fileChanges.undo'))}</span></button>`
     : '';
 
   // ★ Undo All button — always available as a separate interaction point
-  const undoAllBtn = (!isStreaming && typeof msgIdx === 'number')
+  const undoAllBtn = (!isUndone && !isStreaming && typeof msgIdx === 'number')
     ? `<button class="fc-undo-all-btn" onclick="event.stopPropagation();undoAllModifications()" title="${escapeHtml(t('fileChanges.undoAllTip'))}">` +
       `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7v6h6"/><path d="M21 17a9 9 0 0 0-15-6.7L3 13"/><line x1="12" y1="7" x2="12" y2="3"/><line x1="8" y1="7" x2="12" y2="7"/></svg>` +
       `<span>${escapeHtml(t('fileChanges.undoAll'))}</span></button>`
     : '';
 
-  const actionBtns = (undoBtn || undoAllBtn)
-    ? `<div class="fc-actions">${undoBtn}${undoAllBtn}</div>` : '';
+  const actionBtns = (redoBtn || undoBtn || undoAllBtn)
+    ? `<div class="fc-actions">${redoBtn}${undoBtn}${undoAllBtn}</div>` : '';
 
   // Auto-expand for ≤ 5 files so users see details immediately
   const autoExpand = totalFiles <= 5 ? ' fc-expanded' : '';
-  return `<div class="file-changes-bar${pulseClass}${autoExpand}" data-fc-count="${totalFiles}">
+  const undoneClass = isUndone ? ' fc-undone' : '';
+  return `<div class="file-changes-bar${pulseClass}${autoExpand}${undoneClass}" data-fc-count="${totalFiles}">
     <div class="fc-summary" onclick="this.parentElement.classList.toggle('fc-expanded')">
       <span class="fc-summary-icon">${summaryIcon}</span>
       <span class="fc-summary-text">${summaryText}</span>

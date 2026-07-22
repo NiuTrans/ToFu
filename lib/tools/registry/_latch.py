@@ -79,6 +79,57 @@ def clear_multiroot_sticky(conv_id: str) -> None:
 
 
 # ══════════════════════════════════════════════════════════
+#  Sticky project-ready latch (prompt-cache stability)
+# ══════════════════════════════════════════════════════════
+# The whole project tool family (list_dir / grep_search / find_files /
+# write_file / apply_diff / insert_content / create_project / run_command) is
+# gated on ``project_enabled`` (= a non-empty project_path). A conversation
+# whose FIRST turn had no project attached (empty roots) assembles a tool list
+# WITHOUT that family; the tool-schema latch then freezes that "no-project"
+# snapshot for the whole conversation, so attaching a project on a LATER turn
+# never restores the tools (read_files / inspect_image survive only because
+# they are always-on). Attaching a project mid-conversation is a LEGITIMATE
+# one-time schema change (exactly like going multi-root), so we latch the
+# OFF→ON transition and use it to re-establish the tool-schema latch once —
+# mirroring ``mark_multiroot_sticky``.
+_project_ready_sticky: set[str] = set()
+_project_ready_sticky_lock = threading.Lock()
+
+
+def mark_project_ready_sticky(conv_id: str) -> bool:
+    """Latch *conv_id* as project-enabled for the rest of the conversation.
+
+    Returns ``True`` only on the OFF→ON transition (the first time this
+    conversation is seen with a project attached), ``False`` if it was already
+    sticky. Callers use the transition signal to re-establish the tool-schema
+    latch exactly once — see :meth:`ToolContext.project_ready`.
+    """
+    if not conv_id:
+        return False
+    with _project_ready_sticky_lock:
+        if conv_id in _project_ready_sticky:
+            return False
+        _project_ready_sticky.add(conv_id)
+        return True
+
+
+def is_project_ready_sticky(conv_id: str) -> bool:
+    """Whether *conv_id* has been latched project-enabled."""
+    if not conv_id:
+        return False
+    with _project_ready_sticky_lock:
+        return conv_id in _project_ready_sticky
+
+
+def clear_project_ready_sticky(conv_id: str) -> None:
+    """Release the project-ready latch for *conv_id* (on cache-state cleanup)."""
+    if not conv_id:
+        return
+    with _project_ready_sticky_lock:
+        _project_ready_sticky.discard(conv_id)
+
+
+# ══════════════════════════════════════════════════════════
 #  Per-conversation tool-SCHEMA latch (the (B) root fix)
 # ══════════════════════════════════════════════════════════
 # The whole tools array sits in the cached prompt prefix (BP1-3). ANY byte

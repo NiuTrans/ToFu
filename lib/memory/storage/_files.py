@@ -10,6 +10,7 @@ import shutil
 import uuid
 from datetime import datetime, timezone
 
+from lib.json_store import write_text_atomic
 from lib.log import get_logger
 
 from ._dirs import _ensure_dir
@@ -173,8 +174,7 @@ def _write_memory_file(filepath, mem):
     body = mem.get('body', '')
     content = _build_frontmatter(meta) + '\n' + body + '\n'
 
-    with open(filepath, 'w', encoding='utf-8') as f:
-        f.write(content)
+    write_text_atomic(filepath, content)
     return now
 
 

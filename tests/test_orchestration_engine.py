@@ -257,6 +257,126 @@ class DeliverablesTest(unittest.TestCase):
         self.assertEqual(seq['w'], 2)
 
 
+class ParallelBodyVerdictTest(unittest.TestCase):
+    """A parallel fan-out INSIDE a loop body must feed the verdict guards a
+    DETERMINISTIC aggregate of all branches, not a nondeterministic single
+    branch's counts (the _iter_producers / _aggregate_iter_producers fix)."""
+
+    def _loop_with_parallel_body(self, max_iter=4):
+        # loop → parallel → {w1, w2} → barrier → critic → loop ; loop → stop
+        return {'schema': 'tofu.orchestration/v1', 'name': 'LP', 'nodes': [
+            _ctrl('s', 'start'), _ctrl('l', 'loop', max_iterations=max_iter),
+            _ctrl('p', 'parallel', max_concurrent=2),
+            _role('w1', 'worker'), _role('w2', 'worker'),
+            _ctrl('b', 'barrier'), _role('c', 'critic'), _ctrl('e', 'stop')],
+            'edges': [{'from': 's', 'to': 'l'}, {'from': 'l', 'to': 'p'},
+                      {'from': 'p', 'to': 'w1'}, {'from': 'p', 'to': 'w2'},
+                      {'from': 'w1', 'to': 'b'}, {'from': 'w2', 'to': 'b'},
+                      {'from': 'b', 'to': 'c'}, {'from': 'c', 'to': 'l'},
+                      {'from': 'l', 'to': 'e'}]}
+
+    def test_aggregate_helper_folds_branches(self):
+        eng = FlowExecutor(self._loop_with_parallel_body(), agent_runner=_MockRunner())
+        # No producers yet → empty (old empty-snapshot semantics).
+        self.assertEqual(eng._aggregate_iter_producers(), {})
+        eng._iter_producers = [
+            {'node_id': 'w1', 'role': 'worker', 'sc_count': 0,
+             'explore_count': 2, 'names': [], 'reported': True},
+            {'node_id': 'w2', 'role': 'worker', 'sc_count': 3,
+             'explore_count': 0, 'names': ['write_file', 'apply_diff', 'write_file'],
+             'reported': True},
+        ]
+        agg = eng._aggregate_iter_producers()
+        self.assertEqual(agg['sc_count'], 3)          # summed
+        self.assertEqual(agg['explore_count'], 2)     # summed
+        self.assertTrue(agg['reported'])              # any
+        self.assertEqual(sorted(agg['names']),
+                         ['apply_diff', 'write_file', 'write_file'])
+        # Single producer folds byte-identically to that producer.
+        eng._iter_producers = [eng._iter_producers[1]]
+        self.assertEqual(eng._aggregate_iter_producers(), eng._iter_producers[0])
+
+    def test_zero_deliverable_guard_needs_ALL_branches_idle(self):
+        # One branch WRITES every turn (state-changing), the other only reads.
+        # The aggregate sc_count > 0 each turn → the zero-deliverable guard
+        # must NEVER fire (the iteration DID produce work), even though one
+        # branch alone looks idle.
+        def runner(node, ctx, it):
+            role = node.get('role')
+            if node['id'] == 'w1':
+                return {'output': 'read', 'status': 'completed',
+                        'error': '', 'tool_names': ['read_files']}
+            if node['id'] == 'w2':
+                return {'output': 'wrote', 'status': 'completed',
+                        'error': '', 'tool_names': ['write_file']}
+            if role == 'critic':
+                return {'output': 'CONTINUE: keep going', 'status': 'completed', 'error': ''}
+            return {'output': 'x', 'status': 'completed', 'error': ''}
+        events = []
+        FlowExecutor(self._loop_with_parallel_body(max_iter=4),
+                     agent_runner=runner, on_event=events.append).run()
+        self.assertFalse(any(e['type'] == 'zero_deliverable_guard' for e in events),
+                         'aggregate sc_count>0 must suppress the zero-deliverable guard')
+
+    def test_zero_deliverable_guard_fires_when_all_branches_idle(self):
+        # BOTH branches only explore every turn; critic keeps CONTINUE. The
+        # aggregate is genuinely zero-deliverable → the guard fires (parity
+        # with the linear-loop behavior, now aggregated across the fan-out).
+        def runner(node, ctx, it):
+            role = node.get('role')
+            if node['id'] in ('w1', 'w2'):
+                return {'output': 'looked', 'status': 'completed',
+                        'error': '', 'tool_names': ['read_files']}
+            if role == 'critic':
+                return {'output': 'CONTINUE: keep going', 'status': 'completed', 'error': ''}
+            return {'output': 'x', 'status': 'completed', 'error': ''}
+        events = []
+        FlowExecutor(self._loop_with_parallel_body(max_iter=5),
+                     agent_runner=runner, on_event=events.append).run()
+        self.assertTrue(any(e['type'] == 'zero_deliverable_guard' for e in events),
+                        'all-idle fan-out must trip the zero-deliverable guard')
+
+
+    def test_verifier_snapshot_block_uses_loop_aggregate(self):
+        # Inside a loop iteration the verifier-injected Deliverables Snapshot
+        # must reflect the AGGREGATE of all parallel branches, not whichever
+        # branch happened to write the single _last_producer_snapshot slot
+        # last. w1 writes twice, w2 once → aggregate sc_count must be 3.
+        eng = FlowExecutor(self._loop_with_parallel_body(), agent_runner=_MockRunner())
+        eng._cur_iteration = 1
+        eng._iter_producers = [
+            {'node_id': 'w1', 'role': 'worker', 'sc_count': 2,
+             'explore_count': 0, 'names': ['write_file', 'apply_diff'],
+             'reported': True},
+            {'node_id': 'w2', 'role': 'worker', 'sc_count': 1,
+             'explore_count': 1, 'names': ['insert_content'], 'reported': True},
+        ]
+        # The racy single slot holds only the LAST branch to finish (w2).
+        eng._last_producer_snapshot = dict(eng._iter_producers[1])
+        block = eng._append_deliverables_snapshot('CTX')
+        self.assertIn('3 state-changing', block)
+        self.assertNotIn('1 state-changing', block)
+        for name in ('write_file', 'apply_diff', 'insert_content'):
+            self.assertIn(name, block)
+
+    def test_verifier_snapshot_block_single_slot_outside_loop(self):
+        # Outside a loop (_cur_iteration == 0) the block must be byte-identical
+        # to the legacy single-slot behavior — no aggregation across the
+        # cross-node _iter_producers accumulation.
+        eng = FlowExecutor(self._loop_with_parallel_body(), agent_runner=_MockRunner())
+        eng._cur_iteration = 0
+        eng._iter_producers = [
+            {'node_id': 'a', 'role': 'worker', 'sc_count': 5,
+             'explore_count': 0, 'names': ['write_file'] * 5, 'reported': True},
+        ]
+        eng._last_producer_snapshot = {
+            'node_id': 'b', 'role': 'worker', 'sc_count': 1,
+            'explore_count': 0, 'names': ['apply_diff'], 'reported': True}
+        block = eng._append_deliverables_snapshot('CTX')
+        self.assertIn('1 state-changing', block)
+        self.assertNotIn('5 state-changing', block)
+
+
 class ReplanTest(unittest.TestCase):
     """Engine ports endpoint's CONTINUE_PLANNER + PLAN_DEFECT gate."""
 
@@ -431,6 +551,37 @@ class ParallelTest(unittest.TestCase):
         for tok in ('A', 'B', 'C'):
             self.assertIn(tok, sy_call['context'])
         self.assertEqual(out['agents_run'], 4)
+
+    def test_failed_node_is_not_silently_completed(self):
+        # A node that crashes (runner raises → folded into status='failed')
+        # must NOT be silently reported as a clean success. The flow reports
+        # ok=False / stop_reason='node_failed' and records the failure in the
+        # transcript — terminal honesty (parity with the loop path).
+        def runner(node, ctx, it):
+            if node['id'] == 'r2':
+                raise RuntimeError('boom in r2')
+            return {'output': node.get('role') + '-out', 'status': 'completed', 'error': ''}
+        events = []
+        out = FlowExecutor(self._fanout(), agent_runner=runner,
+                           on_event=events.append).run()
+        self.assertFalse(out['ok'])
+        self.assertEqual(out['stop_reason'], 'node_failed')
+        # The failed node is visible in the transcript with status='failed'.
+        failed = [e for e in out['transcript']
+                  if e.get('node_id') == 'r2' and e.get('status') == 'failed']
+        self.assertTrue(failed)
+        # A step_complete event carried the failed status (observable in UI).
+        self.assertTrue(any(e['type'] == 'step_complete'
+                            and e.get('node_id') == 'r2'
+                            and e.get('status') == 'failed'
+                            for e in events))
+
+    def test_all_branches_succeed_stays_ok(self):
+        # Guard against a regression that would flag clean fan-outs.
+        r = _MockRunner(outputs={'r1': 'A', 'r2': 'B', 'r3': 'C', 'sy': 'M'})
+        out = FlowExecutor(self._fanout(), agent_runner=r).run()
+        self.assertTrue(out['ok'])
+        self.assertEqual(out['stop_reason'], 'completed')
 
 
 class BranchAndCapsTest(unittest.TestCase):
