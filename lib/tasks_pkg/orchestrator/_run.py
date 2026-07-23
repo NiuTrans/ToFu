@@ -1279,6 +1279,20 @@ def run_task(task: dict[str, Any]) -> None:
                     model=model, tid=task['id'],
                 )
 
+            # ★ Settle orphan early-announced rounds left by a discarded stream
+            #   retry. stream_chat re-runs the SSE stream on a transient
+            #   mid-stream error while reusing the same on_tool_call_ready
+            #   callback, so a tool call whose args streamed far enough on an
+            #   EARLIER attempt already got a 'searching' round + tool_start —
+            #   but only the FINAL attempt's tool calls survive into
+            #   assistant_msg. Any announced round whose tc_id isn't in the
+            #   final message is orphaned at 'searching' forever (a permanently
+            #   spinning tool row, live AND after reload). Reconcile here — the
+            #   per-round complement of the task-end dangling sweep — BEFORE
+            #   parse_tool_calls so the orphan never reaches the render/persist
+            #   path unsettled.
+            _stream_acc.reconcile_announced_rounds(assistant_msg)
+
             # ★ Read back updated tool_round_num from streaming accumulator
             #   (tool_start events emitted during streaming already consumed
             #   round numbers, so parse_tool_calls must start from here).

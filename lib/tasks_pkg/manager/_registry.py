@@ -32,6 +32,34 @@ from lib.tasks_pkg.manager._persist import (
 logger = get_logger(__name__)
 
 
+def is_carrier_task(task: dict) -> bool:
+    """True if ``task`` is a non-streaming CARRIER/HOLDER, not user-visible work.
+
+    Some flows use ``create_task`` purely as a message container that runs a
+    synchronous sub-turn and NEVER streams a ``done`` event of its own:
+
+      * the autopilot virtual-user (VU) sub-task (``_vu_subtask``), and
+      * inline reporter / summarize holders (``_inline_messages``).
+
+    These are ``status='running'`` while they execute but are invisible to the
+    frontend by design: ``GET /api/chat/active`` hides them (reconnecting an SSE
+    that never completes would birth a stuck "Waiting…" bubble), the sidebar
+    never lights a dot for them (no ``activeTaskId`` / SSE), and they are
+    discarded from the registry the moment their synchronous run returns.
+
+    This predicate is the SINGLE SOURCE OF TRUTH for "carrier, not real running
+    work". BOTH the reconnect endpoint (``routes/chat.py`` ``/api/chat/active``)
+    AND the self-update restart guard (``list_running_tasks``) consult it, so
+    the two can never again disagree about whether a carrier counts as a
+    running conversation — the exact divergence that made the restart dialog
+    report "N conversations running" while the sidebar showed none.
+
+    The autopilot-KICK carrier (``_autopilot_kick``) is deliberately NOT a
+    carrier here: it is a real UI-streaming task and must stay reconnectable.
+    """
+    return bool(task.get('_inline_messages') or task.get('_vu_subtask'))
+
+
 def create_task(conv_id, messages, config, *, supersede=True):
     """Create (and register) a chat task.
 
@@ -204,9 +232,15 @@ def list_running_tasks(exclude_conv_id: str | None = None) -> list[dict]:
     dies with it — this lets the caller detect that and require an explicit
     override.
 
-    Two filters make the count reflect reality rather than registry cruft, so
+    Three filters make the count reflect reality rather than registry cruft, so
     the guard never blocks a restart for work that is not actually running:
 
+      * **Carrier filter (same judge as ``/api/chat/active``).** A non-streaming
+        CARRIER/HOLDER (``is_carrier_task``: the autopilot VU sub-task or an
+        inline reporter holder) is ``status='running'`` while it executes but is
+        invisible to the frontend by design (the reconnect endpoint hides it,
+        the sidebar never lights a dot for it). Counting it made the restart
+        dialog report "N conversations running" that the user could see nowhere.
       * **Activity filter (same judge as the reaper).** A task whose BOTH
         liveness clocks (``_t_last_event`` and ``_dispatch_heartbeat``) have
         been silent past ``_stuck_task_max_silent_secs()`` is WEDGED — the exact
@@ -250,6 +284,14 @@ def list_running_tasks(exclude_conv_id: str | None = None) -> list[dict]:
     with tasks_lock:
         for tid, t in tasks.items():
             if t.get('status') != 'running' or t.get('aborted'):
+                continue
+            # ★ Skip non-streaming CARRIER/HOLDER tasks (VU sub-task / inline
+            #   reporter) — same predicate GET /api/chat/active uses to hide
+            #   them from reconnect. Without this a background autopilot VU
+            #   carrier (convId='', never surfaced in the sidebar) counted as
+            #   a "running conversation" and made the restart dialog claim work
+            #   was in flight that the user could not see anywhere.
+            if is_carrier_task(t):
                 continue
             conv = t.get('convId') or ''
             if exclude_conv_id and conv == exclude_conv_id:

@@ -334,9 +334,13 @@ async def get_calendar_month(year, month):
             logger.warning('[DailyReport] Calendar conv-days %d-%02d: %s', year, month, e)
 
         # ── Server-side per-day cost calculation ──
+        # _get_monthly_costs does synchronous DB scans that can take several
+        # seconds on a cache-cold month; run it in a worker thread so it does
+        # NOT block the event loop (and every other in-flight request).
         cost_days = {}
         try:
-            raw_costs = _get_monthly_costs(year, month)
+            import asyncio
+            raw_costs = await asyncio.to_thread(_get_monthly_costs, year, month)
             for day_num, day_data in raw_costs.items():
                 cost_days[day_num] = {
                     'cost': day_data['cost'],

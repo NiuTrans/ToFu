@@ -1020,19 +1020,6 @@
         + '">' + ((typeof Icon === 'function') ? Icon('rocket', 11) : '')
         + '<span>' + _esc(_t('projectBrain.dispatched', 'auto')) + '</span></span>'
       : '';
-    // "auto-starts" hint — the epic is genuinely pickable RIGHT NOW (deps done,
-    // not on a cooldown, not live-claimed, has a routing target). The backend
-    // stamps `dispatchable` (never inferred client-side); the frontend just
-    // renders that the ~30s heartbeat sweep will pick it up, and to which
-    // conversation. This answers "why is nothing happening — will it ever fire".
-    var pending = (t.status === 'open' && t.dispatchable)
-      ? '<span class="pb-board-badge pb-board-badge-pending" title="'
-        + _esc(_t('projectBrain.autoStartTitle',
-                  'The project brain heartbeat (~30s) will pick this up automatically'))
-        + (t.dispatch_target ? ' → ' + _esc(t.dispatch_target) : '')
-        + '">' + ((typeof Icon === 'function') ? Icon('clock', 11) : '')
-        + '<span>' + _esc(_t('projectBrain.autoStart', 'auto-starts ~30s')) + '</span></span>'
-      : '';
     // Human lifecycle controls, gated by status:
     //   • complete + block on open|claimed (live-work lifecycle)
     //   • reopen on claimed (break a stuck live claim) AND done (revive)
@@ -1056,7 +1043,7 @@
     return '<div class="pb-board-card pb-board-' + _esc(t.status) + '" data-task-id="' +
       _esc(t.id) + '">' +
       '<div class="pb-board-title">' + titleHtml + '</div>' +
-      '<div class="pb-board-card-meta">' + ownerChip + badge + pending + '</div>' +
+      '<div class="pb-board-card-meta">' + ownerChip + badge + '</div>' +
       actionsRow + '</div>';
   }
 

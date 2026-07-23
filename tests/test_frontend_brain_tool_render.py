@@ -409,11 +409,34 @@ check('digest_tools_hint', dHtml.includes('ptool-convdigest-tools') && dHtml.inc
 check('digest_image_hint', dHtml.includes('ptool-convdigest-att') && dHtml.includes('1 image'));
 // the raw ═══ transcript prose must NOT be dumped as Markdown
 check('digest_not_md_dump', !dHtml.includes('MD-DUMP:'));
+// ★ point-3: the card REPLACES the raw body — the verbatim transcript prose
+//   carried on toolContent must NOT appear anywhere in the rendered output.
+check('digest_replaces_raw_body', !dHtml.includes('RAW TRANSCRIPT PROSE'));
+// ★ raw-mode (get_conversation raw=true): the backend now attaches convDigest
+//   even though toolContent is the big "═══ Raw Conversation Record" + JSON
+//   dump. The card must render and the raw JSON dump must be REPLACED (this is
+//   exactly the reported screenshot: raw JSON blob instead of a card).
+const digestRawWithCard = {
+  status: 'done', toolName: 'get_conversation', query: 'get_conversation: rawcid',
+  toolContent: '═'.repeat(60) + '\nRaw Conversation Record: "Big raw dump"\n'
+    + '```json\n{"id":"rawcid","messages":[...]}\n``` RAW-JSON-BLOB-MARKER',
+  toolRounds: [],
+  results: [{ source: 'Conversations', convDigest: {
+    convId: 'rawcid', title: 'Big raw dump', preset: 'sonnet',
+    msgCount: 2, truncated: false, messages: [
+      { index: 1, role: 'user', text: 'raw mode question' },
+      { index: 2, role: 'assistant', text: 'raw mode answer' },
+    ] } }],
+};
+const rawHtml = _renderUnifiedToolLine(digestRawWithCard, false);
+check('rawmode_card_rendered', rawHtml.includes('ptool-convdigest') && rawHtml.includes('raw mode answer'));
+check('rawmode_raw_json_replaced', !rawHtml.includes('RAW-JSON-BLOB-MARKER') && !rawHtml.includes('Raw Conversation Record'));
 check('digest_is_conv_meta', _isRoundConvMeta({ toolName: 'get_conversation' }));
-// routine read → collapsed, with an at-a-glance message-count chip + why caption
+// get_conversation is the PRIMARY viewing product → default EXPANDED (not a
+// collapsed routine read). The message count lives in the digest meta row.
 function _isOpenD(h) { return h.includes('ptool-convmeta-block" open'); }
-check('digest_collapsed', dHtml.includes('ptool-convmeta-block" data-rn') && !_isOpenD(dHtml));
-check('digest_count_chip', dHtml.includes('ptool-convmeta-count') && dHtml.includes('1 messages'));
+check('digest_open', _isOpenD(dHtml));
+check('digest_count_in_meta', dHtml.includes('ptool-convdigest-msgcount') && dHtml.includes('1 messages'));
 check('digest_why_caption', dHtml.includes('ptool-convmeta-why') && dHtml.includes('full transcript'));
 check('digest_head_friendly', dHtml.includes('Opened a past conversation'));
 
@@ -507,8 +530,10 @@ def test_structured_brain_tool_renderers():
         'PASS digest_user_text', 'PASS digest_assistant_text',
         'PASS digest_role_chip', 'PASS digest_tools_hint',
         'PASS digest_image_hint', 'PASS digest_not_md_dump',
-        'PASS digest_is_conv_meta', 'PASS digest_collapsed',
-        'PASS digest_count_chip', 'PASS digest_why_caption',
+        'PASS digest_replaces_raw_body',
+        'PASS rawmode_card_rendered', 'PASS rawmode_raw_json_replaced',
+        'PASS digest_is_conv_meta', 'PASS digest_open',
+        'PASS digest_count_in_meta', 'PASS digest_why_caption',
         'PASS digest_head_friendly', 'PASS digest_raw_falls_back',
     ):
         assert must in output, output

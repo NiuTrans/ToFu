@@ -35,9 +35,6 @@ from ._segments import (  # noqa: E402,F401
     _translate_segments_to_map,
 )
 
-# ── DB commit (monkeypatch seam — see ._worker note below) ──
-from ..commit import _commit_translation_to_db  # noqa: E402,F401
-
 # ── The background worker thread ──
 from ._worker import _do_translate  # noqa: E402,F401
 
@@ -58,8 +55,6 @@ __all__ = [
     '_read_message_segments',
     '_build_segment_translation_map',
     '_translate_segments_to_map',
-    # db commit (monkeypatch seam)
-    '_commit_translation_to_db',
     # worker
     '_do_translate',
     # engine passthrough (monkeypatch target)

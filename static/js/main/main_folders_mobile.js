@@ -162,9 +162,6 @@ function _promptRenameFolder(folderId) {
   const existing = document.getElementById('_folderCreateDialog');
   if (existing) existing.remove();
 
-  const colors = ['#6e56cf', '#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#ec4899', '#8b5cf6', '#14b8a6'];
-  let selectedColor = f.color || '';
-
   const overlay = document.createElement('div');
   overlay.id = '_folderCreateDialog';
   overlay.className = 'folder-dialog-overlay';
@@ -173,9 +170,6 @@ function _promptRenameFolder(folderId) {
       <div class="folder-dialog-title">${t('folder.renameTitle')}</div>
       <input type="text" class="folder-dialog-input" id="_folderNameInput"
              placeholder="${t('folder.namePh')}" maxlength="50" autocomplete="off" spellcheck="false">
-      <div class="folder-dialog-colors" id="_folderColorPicker">
-        ${colors.map(c => `<span class="folder-color-dot${c === selectedColor ? ' selected' : ''}" data-color="${c}" style="background:${c}"></span>`).join('')}
-      </div>
       <div class="folder-dialog-actions">
         <button class="folder-dialog-cancel" id="_folderDialogCancel">${t('folder.cancel')}</button>
         <button class="folder-dialog-ok" id="_folderDialogOk">${t('folder.ok')}</button>
@@ -185,34 +179,15 @@ function _promptRenameFolder(folderId) {
   document.body.appendChild(overlay);
 
   const nameInput = document.getElementById('_folderNameInput');
-  const colorPicker = document.getElementById('_folderColorPicker');
   nameInput.value = f.name;
   setTimeout(() => { nameInput.focus(); nameInput.select(); }, 50);
-
-  // Color selection — a second tap on the selected dot clears the color.
-  colorPicker.addEventListener('click', (e) => {
-    const dot = e.target.closest('.folder-color-dot');
-    if (!dot) return;
-    const wasSelected = dot.classList.contains('selected');
-    colorPicker.querySelectorAll('.folder-color-dot').forEach(d => d.classList.remove('selected'));
-    if (wasSelected) {
-      selectedColor = '';
-    } else {
-      dot.classList.add('selected');
-      selectedColor = dot.dataset.color;
-    }
-  });
 
   function _closeDialog() { overlay.remove(); }
 
   async function _submit() {
     const name = nameInput.value.trim();
-    const colorChanged = selectedColor !== (f.color || '');
-    if ((!name || name === f.name) && !colorChanged) { _closeDialog(); return; }
-    const updates = {};
-    if (name && name !== f.name) updates.name = name;
-    if (colorChanged) updates.color = selectedColor;
-    await updateFolder(folderId, updates);
+    if (!name || name === f.name) { _closeDialog(); return; }
+    await updateFolder(folderId, { name });
     _closeDialog();
     renderConversationList();
   }
@@ -557,6 +532,7 @@ function updateMobileSheet() {
     mobileImageGen:    "imageGenToggle",
     mobileHumanGuidance: "humanGuidanceToggle",
     mobileDesktop:     "desktopToggle",
+    mobileScheduler:   "schedulerToggle",
     mobileSwarm:       "swarmToggle",
     mobileEndpoint:    "endpointToggle",
     mobileAutopilot:   "autopilotToggle"
@@ -577,70 +553,7 @@ function updateMobileSheet() {
   if (typeof updateSubmenuCounts === "function") updateSubmenuCounts();
   /* Sync mobile depth section visibility + active state */
   updateMobileDepth();
-  /* Sync the Context section — the compaction entry point (the desktop
-   * context sphere is display:none below 900px, so this is the only mobile
-   * access). Reflect live usage % + disable "compact now" while a task runs
-   * (mirrors the desktop popover's busy guard), and hide "view history" when
-   * this conversation has no compaction snapshots. */
-  updateMobileContext();
 }
-
-/** Sync the mobile bottom-sheet Context section with live usage + state. */
-function updateMobileContext() {
-  const section = document.getElementById("mobileContextSection");
-  if (!section) return;
-  const conv = (typeof getActiveConv === "function") ? getActiveConv() : null;
-  const summary = (typeof window.contextUsageSummary === "function")
-    ? window.contextUsageSummary() : null;
-
-  /* "Compact now" — disabled while a task is live (can't rewrite mid-turn). */
-  const compactItem = document.getElementById("mobileCompactNow");
-  const desc = document.getElementById("mobileCompactDesc");
-  const busy = !!(conv && ((typeof activeStreams !== "undefined" && activeStreams &&
-      typeof activeStreams.has === "function" && activeStreams.has(conv.id)) ||
-      conv.activeTaskId));
-  if (compactItem) {
-    compactItem.classList.toggle("disabled", busy || !conv);
-    if (desc) {
-      if (busy) {
-        desc.textContent = (typeof t === "function")
-          ? t("compactNow.busy") : "A task is running — cannot compact";
-      } else if (summary && summary.hasUsage) {
-        /* Show the live percentage so the user sees WHY they'd compact. */
-        desc.textContent = (typeof t === "function")
-          ? t("mobile.compactUsage", { pct: summary.pct }) : (summary.pct + "% used");
-      } else {
-        desc.textContent = (typeof t === "function")
-          ? t("mobile.compactDesc") : "Compact this conversation to free context";
-      }
-    }
-  }
-
-  /* "View history" — only meaningful when snapshots exist. */
-  const histItem = document.getElementById("mobileCompactHistory");
-  if (histItem) {
-    const hasHistory = !!(summary && summary.compactions > 0);
-    histItem.style.display = hasHistory ? "" : "none";
-  }
-}
-if (typeof window !== "undefined") window.updateMobileContext = updateMobileContext;
-
-/** Run manual compaction from the mobile sheet, then close it. Delegates to
- * the same closure the desktop context sphere uses (reload + re-render +
- * gauge drop + toast), so behaviour is identical across surfaces. */
-function _mobileCompactNow() {
-  const item = document.getElementById("mobileCompactNow");
-  if (item && item.classList.contains("disabled")) return;
-  const cid = (typeof activeConvId !== "undefined") ? activeConvId : null;
-  if (!cid) return;
-  closeMobileSheet();
-  if (typeof window.runManualCompaction === "function") {
-    window.runManualCompaction(cid);
-  } else {
-    console.warn("[mobileCompact] runManualCompaction not loaded");
-  }
-}
-if (typeof window !== "undefined") window._mobileCompactNow = _mobileCompactNow;
 
 /**
  * Sync the mobile bottom sheet depth bar with the desktop depth bar.

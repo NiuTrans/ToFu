@@ -57,20 +57,7 @@ global.console = console;
 win.escapeHtml = global.escapeHtml = (s) =>
   String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
     .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-// t(): the dangling reason is built via t('paper.termDanglingReason',
-// {term, referencedTerm}); the dangling term (RM) appears ONLY inside that
-// interpolated template (the <code> element carries referencedTerm=DPO). The
-// KEY STRING itself has no {term} placeholder, so the stub must map the key to
-// the real i18n template (mirroring static/js/i18n.js) THEN interpolate — else
-// 'RM' never renders.
-const _TMPL = {
-  'paper.termDanglingReason': 'the glossary definition of “{term}” references undefined “{referencedTerm}”',
-};
-win.t = global.t = (k, p) => {
-  let s = (k in _TMPL) ? _TMPL[k] : k;
-  if (p) for (const kk in p) s = s.replace(new RegExp('\\{' + kk + '\\}', 'g'), p[kk]);
-  return s;
-};
+win.t = global.t = (k) => k;
 // renderMarkdown must exist and non-trivially transform so _renderFinalReport
 // takes the real (non-<pre>) path where the audit cards are prepended.
 win.renderMarkdown = global.renderMarkdown = (s) => '<p>' + escapeHtml(s || '') + '</p>';

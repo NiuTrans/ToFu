@@ -758,7 +758,7 @@ async function _autoTranslateHumanGuidance(convId, roundNum, question, responseT
 async function _startAutoTranslateForMsg(conv, convId, idx, msg) {
   return _runTranslationPipeline(conv, idx, msg, {
     sourceLang: 'English',
-    targetLang: (typeof _uiTranslateTarget === 'function') ? _uiTranslateTarget() : 'Chinese',
+    targetLang: 'Chinese',
     field: 'translatedContent',
     mode: 'auto',
   });

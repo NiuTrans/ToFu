@@ -36,11 +36,7 @@ import tempfile
 import pytest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-# The recommend flow was split across paper/arxiv.js (_applyRecommendEvent,
-# _fetchArxivPaper) and paper/library.js (_persistRecommendedCard,
-# _createPaperEntry, _isRecommendedEntry, _onPaperLibClick); the harness evals
-# both in bundle order.
-PAPER_JS = os.path.join(ROOT, 'static', 'js', 'paper', 'arxiv.js')
+PAPER_JS = os.path.join(ROOT, 'static', 'js', 'paper-reader.js')
 
 
 def _node_deps_available():
@@ -78,11 +74,6 @@ global.localStorage = {
 };
 try { Object.defineProperty(dom.window, 'localStorage', { value: global.localStorage, configurable: true }); } catch (e) {}
 global.debugLog = () => {};
-// Cross-file UI helper: _fetchArxivPaper (paper/arxiv.js) paints ingest
-// progress via _renderArxivFetchProgress, which stays in the residual
-// paper-reader.js core (not evaled here). It only draws progress chrome —
-// irrelevant to the persistence/dedup assertions — so stub it as a no-op.
-global._renderArxivFetchProgress = () => {};
 
 // Record every library upsert PUT the client fires.
 const puts = [];
@@ -97,13 +88,8 @@ global.Api = {
   },
 };
 
-// The recommend + library functions were split out of paper-reader.js into
-// paper/arxiv.js (_applyRecommendEvent, _fetchArxivPaper) and paper/library.js
-// (_persistRecommendedCard, _createPaperEntry, _isRecommendedEntry,
-// _onPaperLibClick). Eval both in bundle order (arxiv before library); the
-// cross-file references resolve at call time in shared global scope.
-(0, eval)(fs.readFileSync(path.join(ROOT, 'static', 'js', 'paper', 'arxiv.js'), 'utf8'));
-(0, eval)(fs.readFileSync(path.join(ROOT, 'static', 'js', 'paper', 'library.js'), 'utf8'));
+const src = fs.readFileSync(path.join(ROOT, 'static', 'js', 'paper-reader.js'), 'utf8');
+(0, eval)(src);
 
 // ── On-disk NEUTER: break the reuse branch of _createPaperEntry so the click
 //    can no longer upgrade in place → proves that branch is load-bearing. We

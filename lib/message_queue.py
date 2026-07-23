@@ -417,22 +417,13 @@ def drain_idle_peer_messages() -> list[str]:
     for conv_id in convs:
         if not conv_id:
             continue
-        # Busy guard: never force-drain a conv that has a FAST-PATH-ELIGIBLE
-        # live task — its inbox twin / round-boundary drain (or the completion
-        # hook) owns delivery there, so force-draining would double-dispatch.
-        # The predicate MUST mirror project_peer._live_drain_eligible_task
-        # (running + not aborted, matched on convId OR _peer_drain_key): a VU
-        # sub-task runs with convId='' and carries the parent conv in
-        # _peer_drain_key, so a bare convId==conv_id check would MISS it and let
-        # idle-drain wrongly pre-empt the VU loop's in-turn delivery. A conv
-        # whose only live task is NOT eligible (aborted / non-running) falls
-        # through and IS drained here — the intended strand-closing behaviour.
+        # Busy guard: never force-drain a conv with a live task (the fast-path
+        # inbox twin / completion hook owns delivery there).
         try:
             from lib.tasks_pkg.manager import tasks, tasks_lock
             with tasks_lock:
                 _live = any(
-                    (t.get('convId') == conv_id
-                     or t.get('_peer_drain_key') == conv_id)
+                    t.get('convId') == conv_id
                     and t.get('status') == 'running'
                     and not t.get('aborted')
                     for t in tasks.values()
@@ -950,10 +941,7 @@ def dispatch_next_queued(conv_id: str) -> str | None:
         # tool-state / autopilot settings write on the same row (reuses `db`).
         try:
             from lib.conversations import set_conversation_settings
-            # notify=False: this path emits its own notify_conv_changed after
-            # spawn (no double push); the gate still invalidates the cache.
-            set_conversation_settings(conv_id, {'activeTaskId': task_id}, db=db,
-                                      notify=False)
+            set_conversation_settings(conv_id, {'activeTaskId': task_id}, db=db)
         except Exception as e:
             logger.warning('[Queue] Failed to update activeTaskId for conv=%s: %s',
                            conv_id[:8], e, exc_info=True)

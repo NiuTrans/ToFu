@@ -406,6 +406,83 @@ class TestConvBuilderReconstructionParity:
         assert 'extra_content' not in asst['tool_calls'][0]
 
 
+class TestReconstructOrphanImmunity:
+    """The reconstructor must NOT collapse a whole turn because ONE round is a
+    result-less orphan (an early-announced 'searching' row left by a discarded
+    FloorRetry / stream-retry attempt, later swept to status='aborted' with an
+    empty result).
+
+    Root cause (bug on live conv mrw0rubcbb5qv9): the old first-pass validation
+    returned None if ANY round had status != 'done' or toolContent is None, so a
+    single orphan among 66 completed calls collapsed the ENTIRE assistant turn
+    into the lossy toolSummary placeholder — erasing every tool call from the
+    model's replayed context AND shifting the prefix-cache bytes. The fix: an
+    entry filter keyed on FIELD COMPLETENESS (toolCallId + toolName +
+    non-None toolContent), NOT on status — drop only the unreconstructable rows
+    and rebuild from the survivors.
+    """
+
+    def _good(self, tc_id, name, lr, content='ok'):
+        return {'toolCallId': tc_id, 'toolName': name, 'toolArgs': '{}',
+                'toolContent': content, 'status': 'done', 'llmRound': lr}
+
+    def _orphan(self, tc_id, name, lr):
+        # An early-announced round that never got a result: no toolContent,
+        # swept to 'aborted' by the dangling sweep.
+        return {'toolCallId': tc_id, 'toolName': name, 'query': name,
+                'status': 'aborted', 'llmRound': lr,
+                'results': [{'badge': 'interrupted', 'source': 'Interrupted'}]}
+
+    def test_orphan_round_does_not_collapse_turn(self):
+        rounds = [
+            self._good('tc_1', 'read_files', 0),
+            self._orphan('tc_orphan', 'grep_search', 0),
+            self._good('tc_2', 'grep_search', 1),
+        ]
+        out = _reconstruct_tool_call_messages(rounds)
+        # BEFORE the fix this returned None (whole turn collapsed). AFTER: the
+        # two completed calls survive, the orphan is dropped.
+        assert out is not None
+        tool_call_ids = [tc['id']
+                         for m in out if m.get('role') == 'assistant'
+                         for tc in m.get('tool_calls', [])]
+        assert tool_call_ids == ['tc_1', 'tc_2']
+        assert 'tc_orphan' not in tool_call_ids
+        # Every tool_use has its paired tool_result (no orphan tool role).
+        tool_ids = [m['tool_call_id'] for m in out if m.get('role') == 'tool']
+        assert sorted(tool_ids) == ['tc_1', 'tc_2']
+
+    def test_interrupted_round_WITH_result_is_kept(self):
+        """A genuine interruption that DID capture a real result (toolContent
+        present) forms a legal pair and must be PRESERVED — the filter keys on
+        field completeness, not on the 'aborted' label."""
+        rounds = [
+            self._good('tc_1', 'read_files', 0),
+            {'toolCallId': 'tc_partial', 'toolName': 'run_command',
+             'toolArgs': '{}', 'toolContent': 'partial output before stop',
+             'status': 'aborted', 'llmRound': 1},
+        ]
+        out = _reconstruct_tool_call_messages(rounds)
+        assert out is not None
+        tool_call_ids = [tc['id']
+                         for m in out if m.get('role') == 'assistant'
+                         for tc in m.get('tool_calls', [])]
+        assert tool_call_ids == ['tc_1', 'tc_partial']
+        partial_result = [m for m in out
+                          if m.get('role') == 'tool'
+                          and m['tool_call_id'] == 'tc_partial'][0]
+        assert partial_result['content'] == 'partial output before stop'
+
+    def test_all_orphans_returns_none(self):
+        """If NOTHING is reconstructable, still return None (caller uses the
+        legacy summary fallback) — the empty-after-filter contract."""
+        rounds = [
+            self._orphan('o1', 'read_files', 0),
+            self._orphan('o2', 'grep_search', 1),
+        ]
+        assert _reconstruct_tool_call_messages(rounds) is None
+
+
 # ═══════════════════════════════════════════════════════════
 #  Anthropic Messages API: signature CAPTURE + outbound replay
 # ═══════════════════════════════════════════════════════════

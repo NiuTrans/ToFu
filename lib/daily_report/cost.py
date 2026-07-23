@@ -402,6 +402,56 @@ def _cost_days_for_messages(messages, conv_start=0, conv_end=0):
     return days
 
 
+def _persisted_cost_dates(date_strs):
+    """Return the subset of ``date_strs`` that already have a persisted row.
+
+    A ``daily_cost_cache`` row for a past day is a *settled snapshot* — the
+    day is over, its messages are immutable, so its aggregate never needs to
+    change again. This lookup lets :func:`invalidate_cost_cache_for_messages`
+    recognise such days and refuse to drop them.
+
+    Args:
+        date_strs: Iterable of ``'YYYY-MM-DD'`` day strings.
+
+    Returns:
+        set[str] of the day strings that have a persisted cache row.
+    """
+    dates = [d for d in date_strs if d]
+    if not dates:
+        return set()
+    from lib.database import DOMAIN_CHAT, get_thread_db
+
+    try:
+        db = get_thread_db(DOMAIN_CHAT)
+        placeholders = ','.join('?' for _ in dates)
+        rows = db.execute(
+            'SELECT date FROM daily_cost_cache '
+            f'WHERE user_id=? AND date IN ({placeholders})',
+            (DEFAULT_USER_ID, *dates)
+        ).fetchall()
+    except Exception as e:
+        logger.warning('[DailyReport] Persisted-date lookup failed: %s', e)
+        return set()
+    return {r['date'] for r in rows}
+
+
+def _should_pin_day(date_str, today_str, persisted_dates):
+    """Whether a day is a settled, immutable snapshot that must NOT be dropped.
+
+    A day is pinned iff it is strictly BEFORE today AND already persisted in
+    ``daily_cost_cache``. Once a day is over its cost aggregate is final, so a
+    later edit/delete of a *cross-midnight* conversation (whose messages span
+    that past day) must leave the past day's cache untouched — otherwise a
+    single such edit forces a full live rescan of that day on the next
+    calendar open, permanently defeating the persistent cost cache.
+
+    This predicate is load-bearing: neutering it to ``return False`` makes
+    every touched day invalidate again (the old behaviour) and turns the
+    regression guard red.
+    """
+    return bool(date_str) and date_str < today_str and date_str in persisted_dates
+
+
 def invalidate_cost_cache_for_messages(messages, conv_start=0, conv_end=0):
     """Scoped cost-cache invalidation for a delete/edit of specific messages.
 
@@ -411,6 +461,14 @@ def invalidate_cost_cache_for_messages(messages, conv_start=0, conv_end=0):
     live-rescan the entire month (~10s), so a single delete would otherwise
     permanently defeat the persistent cost cache.
 
+    Settled-day pinning: a touched day that is strictly BEFORE today AND
+    already persisted is treated as an immutable snapshot and is NOT
+    invalidated (see :func:`_should_pin_day`). This is what makes historical
+    balances stay stable + instant: a cross-midnight edit today can only ever
+    drop *today's* (unsettled) entry, never yesterday's. An explicit recompute
+    (a direct :func:`invalidate_day_cost_cache` call or a forced report
+    regeneration) is unaffected — it bypasses this path entirely.
+
     Args:
         messages: The messages being removed (or the whole conversation's
             messages when a conversation is deleted).
@@ -418,15 +476,29 @@ def invalidate_cost_cache_for_messages(messages, conv_start=0, conv_end=0):
         conv_end: Conversation updated_at (epoch-ms) — timestamp fallback.
 
     Returns:
-        set[str] of the day strings that were invalidated.
+        set[str] of the day strings that were actually invalidated (pinned
+        settled days are excluded).
     """
     day_strs = _cost_days_for_messages(messages, conv_start, conv_end)
-    for date_str in day_strs:
+    if not day_strs:
+        return set()
+
+    today_str = _dt.date.today().isoformat()
+    # Only past days can possibly be pinned; look those up in one query.
+    past_days = {d for d in day_strs if d < today_str}
+    persisted = _persisted_cost_dates(past_days) if past_days else set()
+    pinned = {d for d in day_strs if _should_pin_day(d, today_str, persisted)}
+
+    to_invalidate = day_strs - pinned
+    for date_str in to_invalidate:
         invalidate_day_cost_cache(date_str)
-    if day_strs:
+    if pinned:
+        logger.debug('[DailyReport] Pinned %d settled day(s) (not invalidated): %s',
+                     len(pinned), sorted(pinned))
+    if to_invalidate:
         logger.debug('[DailyReport] Scoped cost invalidation for %d day(s): %s',
-                     len(day_strs), sorted(day_strs))
-    return day_strs
+                     len(to_invalidate), sorted(to_invalidate))
+    return to_invalidate
 
 
 def _get_monthly_costs(year, month):

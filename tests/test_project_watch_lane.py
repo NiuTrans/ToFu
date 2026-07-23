@@ -249,14 +249,37 @@ def test_promote_propagates_charter_version_conflict(db, monkeypatch):
 #  (b) HUMAN-FACING ONLY — not on the system-context injection path
 # ════════════════════════════════════════════════════════════════════
 
-def test_watch_not_in_system_context_source():
+def _system_context_package_sources():
+    """Return {relpath: source} for EVERY .py under the system_context package.
+
+    system_context was split from a single module into a package (commit
+    86567af); the injection logic now spans several files. This guard scans the
+    whole package dir so it keeps holding if the injection logic moves between
+    package members. Fails loudly if the dir is absent (never a silent no-op)."""
     import os
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    with open(os.path.join(root, 'lib', 'tasks_pkg', 'system_context.py'),
-              encoding='utf-8') as f:
-        src = f.read()
+    pkg = os.path.join(root, 'lib', 'tasks_pkg', 'system_context')
+    assert os.path.isdir(pkg), (
+        f'system_context package dir not found at {pkg!r} — the source guard '
+        f'cannot verify the injection path; update this test to the new layout')
+    sources = {}
+    for dirpath, _dirs, files in os.walk(pkg):
+        if '__pycache__' in dirpath:
+            continue
+        for fn in files:
+            if fn.endswith('.py'):
+                p = os.path.join(dirpath, fn)
+                with open(p, encoding='utf-8') as f:
+                    sources[os.path.relpath(p, root)] = f.read()
+    assert sources, f'no .py sources found under {pkg!r}'
+    return sources
+
+
+def test_watch_not_in_system_context_source():
+    sources = _system_context_package_sources()
     for banned in ('project_watch', 'address_watch_item', 'list_watch_items',
                    'add_watch_item', 'generate_item_response'):
-        assert banned not in src, (
-            f'system_context.py references {banned!r} — the watch lane must NOT '
-            f'be on the ambient prompt-injection path')
+        for rel, src in sources.items():
+            assert banned not in src, (
+                f'{rel} references {banned!r} — the watch lane must NOT '
+                f'be on the ambient prompt-injection path')

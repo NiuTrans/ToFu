@@ -76,18 +76,38 @@ def build_assistant_tool_call_message(
     return msg
 
 
+def _is_reconstructable_round(r: dict) -> bool:
+    """A round can contribute a valid assistant(tool_use)+tool(result) PAIR.
+
+    The identity + result fields must all be present:
+      * ``toolCallId`` (non-empty) — pairs the tool_use with its tool_result
+      * ``toolName`` (non-empty)   — the function name
+      * ``toolContent`` is not None — the result the model saw
+
+    Keyed on field COMPLETENESS, NOT on ``status``. ``status`` is only the label
+    the last-touching path stamped (``done`` / ``aborted`` / ``error`` / a future
+    lane); the real invariant for wire reconstruction is "does this row have the
+    data to form a legal pair". So an interrupted round that DID capture a real
+    result (``toolContent`` present) is a legitimate pair and is KEPT, while an
+    orphan announcement round left result-less by a discarded FloorRetry /
+    stream-retry attempt is dropped regardless of what status it was swept to.
+    """
+    return (bool(r.get('toolCallId'))
+            and bool(r.get('toolName'))
+            and r.get('toolContent') is not None)
+
+
 def _reconstruct_tool_call_messages(rounds: list[dict]) -> list[dict] | None:
     """Expand ``toolRounds`` into structured assistant/tool message pairs.
 
-    Returns a list of messages on success, or ``None`` if any round
-    lacks the data needed to reconstruct a proper tool_call sequence.
-    Callers fall back to the legacy summary placeholder on ``None``.
+    Returns a list of messages on success, or ``None`` when NO round survives
+    the entry filter (i.e. there is nothing reconstructable at all). Callers
+    fall back to the legacy summary placeholder on ``None``.
 
-    Required per-round fields:
-      * ``toolCallId`` (non-empty str) — uniquely identifies the call
-      * ``toolName`` (non-empty str)
-      * ``status == 'done'`` — round ran to completion
-      * ``toolContent`` (str) — the tool's result as seen by the model
+    Per-round requirements (see ``_is_reconstructable_round``): ``toolCallId`` +
+    ``toolName`` + non-None ``toolContent``. A row lacking any of these is
+    DROPPED and the turn is rebuilt from the survivors — it no longer collapses
+    the WHOLE turn (see the entry-filter rationale below).
 
     ``toolArgs`` is best-effort normalized to a JSON string suitable for
     ``function.arguments``.  ``assistantContent`` on the first round of
@@ -95,28 +115,34 @@ def _reconstruct_tool_call_messages(rounds: list[dict]) -> list[dict] | None:
     alongside the tool_calls, à la Claude).
     """
     # ── Wire-purity guard ──
-    # Drop frontend display-only inbox-inject rows (async <swarm-update> / peer
-    # / user-steer chips). They carry a lane marker and no tool_call data, so
-    # letting them through would fail the required-fields validation below and
-    # collapse the WHOLE turn into a lossy summary — breaking tool-turn
-    # continuation and shifting prefix-cache bytes. They persist as a separate
-    # display-only underscore sidecar, never on the wire. See
-    # lib/tasks_pkg/segments/_types.is_synthetic_inbox_round.
+    # Drop rows that cannot contribute a valid assistant(tool_use)+tool(result)
+    # PAIR — at the single entry seam, so the reconstructor is immune to partial
+    # rows from ANY source and rebuilds from the survivors instead of collapsing
+    # the whole turn. TWO classes are dropped:
+    #
+    #   1. Synthetic inbox-inject rows (async <swarm-update> / peer / user-steer
+    #      display chips): a lane marker, no tool_call data — persisted as a
+    #      display-only underscore sidecar, never on the wire. See
+    #      lib/tasks_pkg/segments/_types.is_synthetic_inbox_round.
+    #   2. Result-less / identity-less rounds (``_is_reconstructable_round`` is
+    #      False): e.g. an orphan 'searching' round left by a discarded FloorRetry
+    #      or stream-retry attempt (reused on_tool_call_ready announced a round
+    #      whose tc_id never survived into the final assistant_msg) and later
+    #      swept to 'aborted' with an EMPTY result. Such a round cannot form a
+    #      pair; keeping it USED TO fail the all-or-nothing validation and
+    #      collapse the ENTIRE turn — dozens of completed tool calls — into the
+    #      lossy toolSummary placeholder, erasing them from the model's context
+    #      AND shifting the prefix-cache bytes. Dropping ONLY the unreconstructable
+    #      row preserves every completed call. (Verified on live conv
+    #      mrw0rubcbb5qv9: a single such orphan collapsed a 66-tool-call turn to
+    #      one 1871-char text blob.)
     from lib.tasks_pkg.segments._types import is_synthetic_inbox_round
-    rounds = [r for r in rounds if not is_synthetic_inbox_round(r)]
+    rounds = [
+        r for r in rounds
+        if not is_synthetic_inbox_round(r) and _is_reconstructable_round(r)
+    ]
     if not rounds:
         return None
-
-    # First pass: validate every round has the required data.
-    for r in rounds:
-        if not r.get('toolCallId'):
-            return None
-        if not r.get('toolName'):
-            return None
-        if r.get('status') != 'done':
-            return None
-        if r.get('toolContent') is None:
-            return None
 
     # Group into batches by llmRound (preferred) or roundNum gap (legacy).
     has_llm_round = any(r.get('llmRound') is not None for r in rounds)

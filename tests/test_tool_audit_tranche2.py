@@ -86,17 +86,7 @@ def test_update_memory_desc_no_phantom_tool():
 # ── 3. system_prompt_cc tool-substitution comments accurate ─────────
 
 def test_cc_tool_substitution_comments_accurate():
-    # system_prompt_cc became a PACKAGE (system_prompt_cc/); its prompt sections
-    # + substitution comments are spread across submodules. Concatenate every
-    # .py in the package so the absence-checks cover wherever the comment lives.
-    pkg_dir = os.path.join(REPO, 'lib', 'tasks_pkg', 'system_prompt_cc')
-    if os.path.isdir(pkg_dir):
-        src = ''
-        for name in sorted(os.listdir(pkg_dir)):
-            if name.endswith('.py'):
-                src += _src(os.path.join('lib', 'tasks_pkg', 'system_prompt_cc', name))
-    else:  # legacy single-file layout
-        src = _src('lib/tasks_pkg/system_prompt_cc.py')
+    src = _src('lib/tasks_pkg/system_prompt_cc.py')
     assert 'Tofu has no todo tool' not in src, (
         'todo_write exists — the stale "no todo tool" comment must be fixed')
     assert 'ask_user via human_guidance' not in src, (

@@ -237,6 +237,12 @@ class _Acc:
                     self._do_finalize(conv_id, msg_idx, content, msg_id, *helpers)
                     self._cleanup()
                     return
+                elif kind == 'finstamp':
+                    _, conv_id, msg_idx, msg_id, fallback_segments = item
+                    self._fallback_segments = fallback_segments
+                    self._do_stamp_only(conv_id, msg_idx, msg_id)
+                    self._cleanup()
+                    return
                 elif kind == 'cancel':
                     logger.info('[IncTranslate] task=%s cancelled before finalize '
                                 '(%d segments translated, discarded) — caller skipped '
@@ -397,6 +403,54 @@ class _Acc:
         except Exception as be:
             logger.debug('[IncTranslate] task=%s narration backfill (finalize) '
                          'failed: %s', self.task_id[:8], be)
+
+    def _do_stamp_only(self, conv_id, msg_idx, msg_id):
+        """Stamp the accumulator's ALREADY-CACHED per-round narration WITHOUT
+        committing a ``translatedContent``.
+
+        This is the ``already in target language`` path: the DELIVERABLE needs no
+        translation, but the worker already translated N inter-round narration
+        segments live. Before this existed, that path returned then
+        ``cancel_incremental`` DISCARDED those N segments — the reported "the
+        narration I already translated gets thrown away" loss. Here we drain the
+        cached ``{round_num: 中文}`` and commit a STAMP-ONLY (``field=None``)
+        write so the settled timeline shows the interleaved Chinese, reusing the
+        same self-heal ``fallback_segments`` the finalize path uses so a
+        segment-less DB row still receives the stamp.
+
+        Releases the in-flight guard on exit (this path OWNS it, like finalize).
+        """
+        try:
+            from lib.translate.commit import _commit_translation_to_db
+            with self.lock:
+                seg_trans = {rn: txt for rn, txt in self.segments.items()
+                             if txt and txt.strip()}
+            if not seg_trans:
+                logger.debug('[IncTranslate] task=%s stamp-only: no cached '
+                             'segments to stamp', self.task_id[:8])
+                return
+            _commit_translation_to_db(conv_id, msg_idx, None, '',
+                                      msg_id=msg_id or None,
+                                      segment_translations=seg_trans,
+                                      fallback_segments=self._fallback_segments)
+            segments_by_round = {str(rn): txt for rn, txt in seg_trans.items()}
+            self._push({'type': 'done', 'status': 'done',
+                        'segmentsByRound': segments_by_round},
+                       conv_id, msg_idx, msg_id)
+            logger.info('[IncTranslate] task=%s ✓ stamp-only committed %d cached '
+                        'narration segment(s) (deliverable already in target '
+                        'language — no translatedContent)',
+                        self.task_id[:8], len(seg_trans))
+        except Exception as e:
+            logger.warning('[IncTranslate] task=%s stamp-only failed: %s',
+                           self.task_id[:8], e, exc_info=True)
+        finally:
+            try:
+                from lib.translate.inflight import release_inflight
+                release_inflight(conv_id, msg_id, msg_idx)
+            except Exception as e:
+                logger.debug('[IncTranslate] task=%s stamp-only release_inflight '
+                             'failed: %s', self.task_id[:8], e)
 
     def _translate_whole(self, content, system_prompt, translate_fn,
                          extract_nt, reattach_nt, conv_id, msg_idx, msg_id):
@@ -604,6 +658,46 @@ def finalize_incremental(task, conv_id, msg_idx, content, msg_id=None,
     except Exception as e:
         logger.warning('[IncTranslate] finalize_incremental failed task=%s: %s',
                        (task or {}).get('id', '?')[:8], e)
+        return False
+
+
+def finalize_incremental_stamp_only(task, conv_id, msg_idx, msg_id=None) -> bool:
+    """Stamp the accumulator's cached narration WITHOUT committing a deliverable.
+
+    The ``already in target language`` companion to :func:`finalize_incremental`:
+    the DELIVERABLE needs no ``translatedContent`` (it is already in the target
+    language), but the worker already translated the inter-round narration live.
+    Calling this instead of :func:`cancel_incremental` on that skip path stamps
+    those cached segments onto the settled render — so the Chinese the worker
+    already produced is NOT thrown away (the reported loss). Returns True when an
+    accumulator existed and was handed the stamp-only job (caller must then
+    suppress the cancel), False otherwise (caller falls back to a fresh backfill).
+
+    Captures the authoritative thin segments now (same self-heal contract as
+    finalize) so a segment-less DB row still receives the stamp.
+    """
+    try:
+        tid = task.get('id') if task else None
+        if not tid:
+            return False
+        with _acc_lock:
+            acc = _accumulators.get(tid)
+        if acc is None:
+            return False
+        fallback_segments = None
+        try:
+            _segs = task.get('segments')
+            if _segs:
+                from lib.tasks_pkg.segments import segments_to_json
+                fallback_segments = segments_to_json(_segs)
+        except Exception as _fe:
+            logger.debug('[IncTranslate] stamp-only fallback-segments capture '
+                         'failed task=%s: %s', tid[:8], _fe)
+        acc.q.put(('finstamp', conv_id, msg_idx, msg_id, fallback_segments))
+        return True
+    except Exception as e:
+        logger.warning('[IncTranslate] finalize_incremental_stamp_only failed '
+                       'task=%s: %s', (task or {}).get('id', '?')[:8], e)
         return False
 
 

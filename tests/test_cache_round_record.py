@@ -169,6 +169,38 @@ def test_round_record_labels_ttl_flip():
         f'a ttl-flip break must name <ttl-flip> in culprits: {r2}')
 
 
+def test_no_cache_reuse_byte_identical_is_upstream_not_body_change():
+    """A ``no_cache_reuse`` verdict whose cause proves the wire bytes were
+    byte-identical (empty client_changes → the whole-prefix-not-read-back
+    upstream miss) MUST bucket as ``upstream_identical``, NOT ``body_change``.
+
+    Regression: 8 real-traffic rounds (verified byte-identical by DB
+    reconstruction) were being mislabelled ``body_change`` — which reads as a
+    CLIENT-side miss — because ``classify_verdict`` lumped the ``no_cache_reuse``
+    key with the genuine client-change keys. The break code returns
+    ``{'no_cache_reuse': ...}`` ONLY when client_changes is empty, so that key
+    can never be a real client body change; a byte-identical one is upstream.
+    """
+    from lib.tasks_pkg.cache_tracking._detect import classify_verdict
+
+    upstream_cause = (
+        'prefix not read back though the wire bytes were byte-identical to the '
+        'previous round — so this round is NOT a client-side prefix change. The '
+        'cached prefix was not reused upstream: an upstream cache miss (a '
+        'per-request gateway miss or a TTL boundary).')
+    v = {'no_cache_reuse': upstream_cause}
+    assert classify_verdict(v) == 'upstream_identical', classify_verdict(v)
+
+    # A GENUINE client body change (system prompt changed) must still be
+    # body_change — the fix must not launder real client misses upstream.
+    assert classify_verdict({'system_prompt': 'changed'}) == 'body_change'
+    # A prefix BYTE mutation (non-idempotent history edit) is still a client
+    # body change.
+    assert classify_verdict(
+        {'prefix_mutation': 'cached prefix bytes changed between turns'}
+    ) == 'body_change'
+
+
 def test_round_record_labels_upstream_identical():
     """Body + routing + markers all identical → bucket=upstream_identical and
     namespace_verified=True (the only bucket allowed to be called upstream)."""

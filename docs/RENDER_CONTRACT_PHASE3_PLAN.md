@@ -54,38 +54,13 @@ sse_handlers_misc.js:420, streaming_render.js:445/454/462).
 
 ## 3. Defensive patches in sse_pipeline.js = the bug scars this heals
 
-AMENDED (2026-07-17, after routing + scar assessment): the original list
-conflated TWO axes. Only the **assembly-axis** patches are subsumable by a
-projection reducer; the **targeting/buffer-axis** ones are NOT (they decide
-*which slot* or *which render buffer*, not *how to build the projection*), and
-force-deleting them reintroduces the exact bug they patch. Honest split:
-
-ASSEMBLY-AXIS (subsumed / handled by the reducer):
-- **`_snapshotLongerRounds` keep-longer belt** (:66-70, :903) — RETAINED but
-  RECLASSIFIED: it is the keep-longer MERGE that FEEDS the cold snapshot (a cold
-  checkpoint may legitimately lag SHORTER than the live panel), proven correct
-  by golden F3. Not a bug scar the reducer removes — a routing-layer merge the
-  reducer projects AFTER. Kept deliberately.
-
-TARGETING/BUFFER-AXIS (NOT subsumable — stay, by design):
-- **endpoint "ghost worker placeholder"** (:323-350) — a PRE-STREAM targeting
-  decision (runs in `connectToTask` before `_trySSE`): should a worker slot be
-  pre-created for the incoming turn? Decided from persisted critic-verdict
-  fields. A projection reducer (which runs on in-stream events, after the slot
-  exists) cannot make this call. Round boundaries don't help (verdict §5). STAY.
-- **"上一轮对话又重新流式吐出" stale-tail guard** (:289) — also PRE-STREAM
-  targeting: is the persisted tail a prior completed turn? Already delegates to
-  the shared pure predicate `assistantTailIsPriorTurn` (core/conversations.js).
-  Orthogonal to projection. STAY.
-- **"Defensive recovery — last msg not assistant"** (:352-366) — a race guard
-  for the persisted-state load, pre-stream. STAY.
-- **`_reentryBuf` "Defensive re-entry seed"** (:507-523) — seeds the RENDER
-  BUFFER (`streamBufs`) for the `_twFlush` "等待中…" wait-branch, not the
-  `{content,thinking,toolRounds}` projection. Different object. STAY.
-
-Net: the reducer's job was to unify the FIVE projection ASSEMBLERS (done —
-§1/§7), which it did without needing to delete any targeting/buffer scar. The
-"reducer can DELETE these" framing was wrong for four of the five entries.
+Each is a symptom of "no single projection". Enumerated so the reducer can
+DELETE them, not preserve them:
+- **"上一轮对话又重新流式吐出"** (:276, :288) — stale-prior-turn guard: a reused tail replays the previous turn's content because COLD/POLL assemble verbatim into whatever tail they find. Reducer keys writes by turn identity → guard unnecessary.
+- **endpoint "ghost worker placeholder"** (:316-333) — a placeholder created on critic-STOP re-materializes the last worker's content via SSE-replay/poll writing `td.content` into the ghost. One reducer with explicit round boundaries never fabricates a phantom round.
+- **"Defensive recovery — last msg not assistant"** (:352-366) — a race between `loadConversationMessages` Phase 2 and `startAssistantResponse`; the reducer's target is turn-id-addressed, not tail-positional.
+- **`_snapshotLongerRounds` keep-longer belt** (:66-70, :903) — exists ONLY because COLD sources a shorter rounds array than LIVE already showed. A reducer whose COLD projection == LIVE projection makes shrink structurally impossible → belt retired.
+- **`_reentryBuf` "Defensive re-entry seed"** (:507-523) — reseeds toolRounds because twUpdate path and reconnect path disagree on the buffer. One reducer, one buffer.
 
 ## 4. The reducer (target design)
 
@@ -117,31 +92,10 @@ function locateRound(state, event)       -> round|null  // the ONE index normali
   DELTA_RESET, ROUND_USAGE, ROUND_COMMITTED, MESSAGES_SNAPSHOT, peer/steer inject
   specs (keep a back-compat read on the client during the transition; emit only
   `roundNum`). This is a WIRE-CONTRACT change → owner sign-off + the roundNum guard.
-- **`ROUND_START` / `ROUND_END`** — VERDICT (2026-07-17, code-backed): **DROP as
-  a required clause; NOT needed.** Two independent checks settle it:
-  1. *They cannot retire the two remaining scars.* Both the endpoint
-     ghost-placeholder (sse_pipeline.js:323-350) and the stale-tail guard
-     (:289) run inside `connectToTask` BEFORE the stream opens (`_trySSE`
-     at :528). They are **pre-stream, persisted-state TARGETING** decisions —
-     "which `conv.messages` slot does the about-to-open stream write into?" —
-     resolved purely from persisted fields (`_taskId`, `finishReason`,
-     `_epApproved`, `_epNextPhase`). `round_start`/`round_end` are IN-stream
-     events that do not exist until after the slot is already chosen, so they
-     have no bearing on either decision. (The plan §3 claim that they'd remove
-     "when did a round begin/end?" guessing conflated the in-stream
-     delta_reset-grouping with the pre-stream targeting — the ghost scar is the
-     latter and is on a different axis, as classified in the 2026-07-17 scar
-     assessment.)
-  2. *The reducer does not need them for its fixed point.* The reducer already
-     infers round boundaries from `tool_start` (opens a round) + `delta_reset`
-     (closes a round's prose), and the golden F1/F2/F3 prove all four paths
-     reach a BYTE-IDENTICAL fixed point WITHOUT any explicit boundary event.
-     Adding round_start/end would be a wire-contract change that buys zero
-     projection-correctness and deletes zero scar.
-  → Therefore the epic's "add round_start/round_end" clause is **formally
-  dropped as unnecessary**. The two scars stay (they are correct pre-stream
-  targeting logic, not projection divergence); §3's "reducer can DELETE them"
-  line is amended below.
+- **Add `ROUND_START` / `ROUND_END`** EventSpecs bracketing each LLM round so the
+  client has explicit round boundaries instead of inferring them from the first
+  `tool_start` / a `delta_reset`. Removes the "when did a round begin/end?"
+  guessing that the ghost-placeholder + delta_reset-grouping patches encode.
 
 ## 6. Tests-first (the acceptance anchors — committed RED now)
 

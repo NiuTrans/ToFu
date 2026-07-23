@@ -196,11 +196,11 @@ def test_NC_FE_lease_partition_is_load_bearing():
     with open(_BRAIN_SRC, encoding='utf-8') as f:
         original = f.read()
     anchor = (
-        "      if (t.kind === 'lease') { if (t.status === 'claimed') held.push(t); continue; }\n")
+        "      if (t.kind === 'lease') { held.push(t); continue; }\n"
+        "      (cols[t.status] || cols.open).push(t);")
     assert anchor in original, 'lease-partition anchor not found (source changed?)'
-    # Drop the lease partition entirely so a lease falls through to the later
-    # `(cols[t.status] || cols.open).push(t)` = the Claimed bucket.
-    patched = original.replace(anchor, "", 1)
+    patched = original.replace(
+        anchor, "      (cols[t.status] || cols.open).push(t);", 1)
     copy_path = os.path.join(HERE, '_pb_lease_nc_copy.js')
     try:
         with open(copy_path, 'w', encoding='utf-8') as f:

@@ -325,23 +325,15 @@ _try_uv_install() {
     _ensure_uv || { warn "Could not obtain uv — falling back to conda"; return 1; }
 
     local _venv="${INSTALL_DIR}/.venv"
-    # Idempotent re-run: `uv venv` refuses to overwrite an existing venv (it
-    # errors "use --clear"), which would spuriously drop a good install into the
-    # conda fallback on every re-run. If a usable interpreter is already present,
-    # reuse it — the `uv pip install` below is itself idempotent and fast.
-    if [[ -x "${_venv}/bin/python" ]]; then
-        info "Reusing existing uv virtualenv at ${_venv}"
-    else
-        info "Creating uv virtualenv at ${_venv} (Python ${PY_VER})..."
-        # --python-preference only-managed: seed the venv from uv's OWN standalone
-        # CPython, never a system/conda interpreter. Two reasons: (1) hermetic +
-        # reproducible (no dependence on whatever python the host ships); (2) it
-        # guarantees .venv/bin/python resolves (realpath) to a DISTINCT base binary,
-        # so server.py's re-exec guard is never short-circuited by a symlink
-        # collision with the interpreter the user later launches from.
-        uv venv "$_venv" --python "${PY_VER}" --python-preference only-managed 2>&1 || {
-            warn "uv venv failed — falling back to conda"; return 1; }
-    fi
+    info "Creating uv virtualenv at ${_venv} (Python ${PY_VER})..."
+    # --python-preference only-managed: seed the venv from uv's OWN standalone
+    # CPython, never a system/conda interpreter. Two reasons: (1) hermetic +
+    # reproducible (no dependence on whatever python the host ships); (2) it
+    # guarantees .venv/bin/python resolves (realpath) to a DISTINCT base binary,
+    # so server.py's re-exec guard is never short-circuited by a symlink
+    # collision with the interpreter the user later launches from.
+    uv venv "$_venv" --python "${PY_VER}" --python-preference only-managed 2>&1 || {
+        warn "uv venv failed — falling back to conda"; return 1; }
 
     local _uvpy="${_venv}/bin/python"
     [[ -x "$_uvpy" ]] || { warn "uv venv produced no python — falling back to conda"; return 1; }
@@ -441,12 +433,6 @@ fi
 # ═══════════════════════════════════════════════════════════════
 CONDA_BASE="${CONDA_BASE:-}"
 CONDA_OWNED_BY_US="${CONDA_OWNED_BY_US:-0}"
-# PG_INSTALLED_MAJOR is normally set inside the conda block (Step 5). On the uv
-# fast path that block is skipped, so pre-seed it empty here — the shared
-# pgdata-validation tail (Step 8.5+) reads it under `set -u` and would otherwise
-# crash with "PG_INSTALLED_MAJOR: unbound variable". Empty = "no PG installed",
-# which the tail already handles by pinning TOFU_DB_BACKEND=sqlite.
-PG_INSTALLED_MAJOR="${PG_INSTALLED_MAJOR:-}"
 if [[ "$_FAST_PATH_DONE" -ne 1 ]]; then
 
 # ═══════════════════════════════════════════════════════════════
@@ -1040,11 +1026,6 @@ PIP_ONLY_PKGS=(
     "pytz>=2024.1"         # required by dateparser
     "regex>=2024.0"        # required by dateparser
     "tzlocal>=5.0"         # required by dateparser
-    # zhconv — pure-Python (MediaWiki tables, MIT), zero deps. Fail-safe gate
-    # that normalizes voice-transcription output to Simplified Chinese
-    # (lib/transcription/_zh.py). Not on conda-forge, so pip-only; --no-deps
-    # is safe since it imports nothing beyond the stdlib.
-    "zhconv>=1.4"
 )
 
 # ── Drift guard: every dep declared in requirements.txt must be covered by

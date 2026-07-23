@@ -1,6 +1,6 @@
 """jsdom test for the Paper Reading-Mode glossary hover card.
 
-Loads the REAL shipped ``static/js/paper/report.js`` under jsdom and drives the
+Loads the REAL shipped ``static/js/paper-reader.js`` under jsdom and drives the
 glossary pipeline (``_extractGlossary`` + ``_decorateGlossaryTerms``) against a
 report article whose "Core Terminology" table holds an ALREADY-RENDERED KaTeX
 definition — the exact situation in production, where the report body has been
@@ -67,7 +67,7 @@ global.console = console;
 win.escapeHtml = global.escapeHtml = (s) =>
   String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
-eval(fs.readFileSync(process.argv[2], 'utf8'));  // paper/report.js (real, shipped)
+eval(fs.readFileSync(process.argv[2], 'utf8'));  // paper-reader.js (real, shipped)
 
 const out = [];
 function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
@@ -148,7 +148,7 @@ def _run():
         f.write(_HARNESS)
     try:
         proc = subprocess.run(
-            ['node', harness, os.path.join(JS_DIR, 'paper', 'report.js'), ROOT],
+            ['node', harness, os.path.join(JS_DIR, 'paper-reader.js'), ROOT],
             capture_output=True, text=True, timeout=60,
         )
     finally:

@@ -192,13 +192,6 @@ function _renderStreamingTranslatePreview(convId, msgId, partial, byRound) {
         if (h != null) narr.innerHTML = h; else narr.textContent = zh;
         narr._lastZhHtml = narr.innerHTML;
       }
-      /* ★ PER-ROUND English hide: now that THIS round's Chinese twin exists,
-       * hide its English sibling (avoid a bilingual double). Gated per round —
-       * NOT a global body flag — so an intermediate round whose Chinese hasn't
-       * landed keeps showing its English instead of vanishing. */
-      const _en = panelBody.querySelector(
-        `:scope > .stream-seg-en-narration[data-seg-round="${_esc(gkey)}"]`);
-      if (_en) _en.classList.add('xlate-hidden');
       _routed.add(rk);
     }
   }

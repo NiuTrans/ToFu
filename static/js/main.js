@@ -900,7 +900,10 @@ function _installViewportHeightGuard() {
         e.preventDefault();
         hasImage = true;
         const f = item.getAsFile();
-        await _handleImageDrop(f);
+        const d = await processImageFile(f);
+        pendingImages.push(d);
+        renderImagePreviews();
+        if (typeof _igUpdateGenButton === 'function') _igUpdateGenButton();
       }
     }
     // Detect log noise in pasted text — server-side via /api/v1/logs/clean

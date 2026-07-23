@@ -198,11 +198,15 @@ def chat_active():
         #   only ever makes sense for real UI-streaming tasks, so hide carriers.
         #   (The autopilot-kick carrier sets ``_autopilot_kick``, NOT these
         #   flags, so it is still reported and reconnectable.)
+        #   ★ SINGLE SOURCE OF TRUTH: the same is_carrier_task predicate the
+        #     restart guard (list_running_tasks) uses, so the reconnect view and
+        #     the restart-guard count can never diverge about carriers.
+        from lib.tasks_pkg.manager import is_carrier_task
         result = [{'id': t.get('id', ''), 'convId': t.get('convId', ''),
                    'status': t.get('status', ''),
                    'aborted': bool(t.get('aborted'))}
                   for t in tasks.values()
-                  if not t.get('_inline_messages') and not t.get('_vu_subtask')]
+                  if not is_carrier_task(t)]
     return jsonify(result)
 
 

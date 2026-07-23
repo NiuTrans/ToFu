@@ -316,70 +316,6 @@ function _getFileExt(name) {
   return i >= 0 ? name.slice(i).toLowerCase() : '';
 }
 
-// Document MIME types (mirrors the `application/*` half of #fileInput's accept).
-// Needed because Android content:// URIs handed to <input type=file> often
-// carry a display name with NO extension (or a placeholder like "document"),
-// so extension-only routing silently drops the file. The ContentResolver
-// almost always supplies a MIME type though, so we classify on that too.
-var _DOC_MIMES = new Set([
-  'application/json', 'application/xml', 'application/x-yaml', 'application/yaml',
-  'application/rtf', 'application/msword',
-  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-  'application/vnd.ms-excel',
-  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-  'application/vnd.ms-powerpoint',
-  'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-]);
-/**
- * True when a picked file should go through the server-side document parser.
- * Extension first (fast, precise), then MIME fallback for extensionless
- * content:// files. `text/*` covers .txt/.md/.csv/.html/source code whose
- * name may lack a suffix on some Android pickers.
- */
-function _looksLikeDoc(f) {
-  if (_DOC_EXTS.has(_getFileExt(f.name))) return true;
-  const mt = (f.type || '').toLowerCase();
-  if (!mt) return false;
-  if (mt.startsWith('text/')) return true;
-  return _DOC_MIMES.has(mt);
-}
-
-// MIME → canonical extension. The SERVER's doc parser (lib/doc_parser: both
-// is_supported_document and extract_document_text) dispatches PURELY on the
-// filename extension — it has NO magic-byte fallback like the PDF route does.
-// So an extensionless content:// file (common on Android pickers) would sail
-// past the client _looksLikeDoc reroute only to be 400'd server-side. We fix
-// that here rather than in the server: synthesize a supported extension on the
-// upload filename from the MIME type. `text/*` subtypes we can't map default
-// to .txt (the plaintext extractor handles any UTF-8 payload).
-var _MIME_TO_EXT = {
-  'application/json': '.json', 'application/xml': '.xml',
-  'application/x-yaml': '.yaml', 'application/yaml': '.yaml',
-  'application/rtf': '.txt', 'application/msword': '.doc',
-  'application/vnd.openxmlformats-officedocument.wordprocessingml.document': '.docx',
-  'application/vnd.ms-excel': '.xls',
-  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': '.xlsx',
-  'application/vnd.ms-powerpoint': '.ppt',
-  'application/vnd.openxmlformats-officedocument.presentationml.presentation': '.pptx',
-  'text/html': '.html', 'text/csv': '.csv', 'text/markdown': '.md',
-  'text/xml': '.xml', 'text/plain': '.txt',
-};
-/**
- * Filename to send to the server so its extension-based dispatch works.
- * If the picked file already has a supported extension, keep the name as-is;
- * otherwise append an extension derived from the MIME type.
- * @returns {string} a filename ending in a server-supported extension.
- */
-function _uploadDocFilename(f) {
-  const name = f.name || 'document';
-  if (_DOC_EXTS.has(_getFileExt(name))) return name;
-  const mt = (f.type || '').toLowerCase();
-  let ext = _MIME_TO_EXT[mt];
-  if (!ext && mt.startsWith('text/')) ext = '.txt';
-  if (!ext) ext = '.txt';  // reached only when _looksLikeDoc already matched
-  return name + ext;
-}
-
 async function handleFileUpload(e) {
   const files = Array.from(e.target.files);
   // 2026-05-06 (Option C): launch ALL uploads in parallel. Previously we
@@ -390,7 +326,7 @@ async function handleFileUpload(e) {
       return handlePDFUpload(f);
     if (f.type.startsWith("image/"))
       return _handleImageDrop(f);
-    if (_looksLikeDoc(f))
+    if (_DOC_EXTS.has(_getFileExt(f.name)))
       return handleDocUpload(f);
     return Promise.resolve();
   });
@@ -500,52 +436,12 @@ async function handlePDFUpload(file) {
 
 
 
-// ── Shared helper: process an image from drag-drop, paste or file picker ──
-// Optimistic: push a preview chip IMMEDIATELY (via an object URL) so the image
-// appears the instant it is selected, then compress + upload in the background
-// and reconcile the entry in place. The entry carries `_status:'processing'`
-// until both stages finish — sendMessage's _waitForImageProcessing() gate
-// blocks on this flag so a still-decoding 2nd/3rd image is never dropped.
+// ── Shared helper: process an image from drag-drop or file picker ──
 async function _handleImageDrop(f) {
-  const imgObj = {
-    base64: '', mediaType: f.type || 'image/png',
-    preview: '', sizeKB: 0, _status: 'processing',
-  };
-  try {
-    imgObj._objectUrl = URL.createObjectURL(f);
-    imgObj.preview = imgObj._objectUrl;
-  } catch (e) {
-    debugLog('createObjectURL failed: ' + e.message, 'warn');
-  }
-  pendingImages.push(imgObj);
+  const d = await processImageFile(f);
+  pendingImages.push(d);
   renderImagePreviews();
   if (typeof _igUpdateGenButton === 'function') _igUpdateGenButton();
-  await _processPendingImage(f, imgObj);
-}
-
-// Compress + upload an already-previewed image entry, mutating it in place.
-async function _processPendingImage(f, imgObj) {
-  try {
-    const d = await compressImage(f, config.imageMaxWidth || 0);
-    if (!pendingImages.includes(imgObj)) return;  // chip removed mid-flight
-    imgObj.base64 = d.base64;
-    imgObj.mediaType = d.mediaType;
-    imgObj.sizeKB = d.sizeKB;
-    if (imgObj._objectUrl) {
-      try { URL.revokeObjectURL(imgObj._objectUrl); } catch (e) { /* ignore */ }
-    }
-    imgObj.preview = d.preview;   // canonical data URL (survives reload)
-    renderImagePreviews();
-    await uploadImageToServer(imgObj);   // sets imgObj.url on success
-  } catch (e) {
-    debugLog('Image processing failed: ' + e.message, 'warn');
-  } finally {
-    if (pendingImages.includes(imgObj)) {
-      delete imgObj._status;
-      delete imgObj._objectUrl;
-      renderImagePreviews();
-    }
-  }
 }
 
 // ── Document upload (Word, Excel, PPT, plain text) → server-side parse ──
@@ -557,11 +453,8 @@ async function handleDocUpload(file) {
   pText.textContent = `Parsing "${file.name}"…`;
   pFill.style.width = "10%";
 
-  // The server dispatches on the filename extension only, so ensure the
-  // uploaded part carries a supported one (Android content:// names may lack
-  // an extension entirely). Icons follow the effective extension too.
-  const uploadName = _uploadDocFilename(file);
-  const ext = _getFileExt(uploadName);
+  // Determine icon by extension
+  const ext = _getFileExt(file.name);
   const iconMap = {'.docx':Icon('file',22), '.pptx':Icon('slides',22), '.xlsx':Icon('fileSheet',22), '.txt':Icon('file',22), '.md':Icon('file',22),
                    '.csv':Icon('fileSheet',22), '.json':Icon('fileCode',22), '.xml':Icon('fileCode',22), '.py':Icon('fileCode',22), '.js':Icon('fileCode',22),
                    '.html':Icon('fileCode',22), '.yaml':Icon('cog',22), '.yml':Icon('cog',22)};
@@ -569,7 +462,7 @@ async function handleDocUpload(file) {
 
   try {
     const formData = new FormData();
-    formData.append("file", file, uploadName);
+    formData.append("file", file);
     formData.append("maxTextChars", "0");
     const data = await Api.doc.parse(formData);
     if (!data || !data.success) throw new Error((data && data.error) || "Parse failed");
@@ -648,12 +541,7 @@ function renderImagePreviews() {
         : isPdf
           ? `PDF page ${img.pdfPage}`
           : "";
-      const processing = img._status === 'processing';
-      const overlay = processing
-        ? `<div class="img-processing-overlay"><div class="img-processing-spinner"></div></div>`
-        : "";
-      const dragAttr = processing ? "" : ' draggable="true"';
-      return `<div class="img-preview${isPdf ? " pdf-page" : ""}${processing ? " img-processing" : ""}"${dragAttr} data-img-idx="${i}" ${tip ? `title="${tip}"` : ""}  onclick="previewPendingImage(${i})"><img src="${img.preview}" alt="preview" draggable="false">${overlay}${srcLabel ? `<div class="pdf-badge">${srcLabel}</div>` : ""}<button class="remove-img" onclick="event.stopPropagation();removeImage(${i})">✕</button><div class="img-size">${processing ? t('upload.processing') || '…' : label}</div></div>`;
+      return `<div class="img-preview${isPdf ? " pdf-page" : ""}" draggable="true" data-img-idx="${i}" ${tip ? `title="${tip}"` : ""}  onclick="previewPendingImage(${i})"><img src="${img.preview}" alt="preview" draggable="false">${srcLabel ? `<div class="pdf-badge">${srcLabel}</div>` : ""}<button class="remove-img" onclick="event.stopPropagation();removeImage(${i})">✕</button><div class="img-size">${label}</div></div>`;
     })
     .join("");
   // ★ Target-aware: render into edit area when editing, main input otherwise
@@ -667,10 +555,7 @@ function renderImagePreviews() {
   if (otherEl) otherEl.innerHTML = "";
 }
 function removeImage(i) {
-  const gone = pendingImages.splice(i, 1)[0];
-  if (gone && gone._objectUrl) {
-    try { URL.revokeObjectURL(gone._objectUrl); } catch (e) { /* ignore */ }
-  }
+  pendingImages.splice(i, 1);
   renderImagePreviews();
   if (typeof _igUpdateGenButton === 'function') _igUpdateGenButton();
 }

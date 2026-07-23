@@ -37,7 +37,7 @@ pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-PAPER_JS = os.path.join(ROOT, 'static', 'js', 'paper', 'report.js')
+PAPER_JS = os.path.join(ROOT, 'static', 'js', 'paper-reader.js')
 
 
 def _node_deps_available() -> bool:

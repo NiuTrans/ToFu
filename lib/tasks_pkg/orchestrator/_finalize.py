@@ -115,6 +115,46 @@ def _check_suspicious_completion(task, last_finish_reason, _loop_exit_reason,
     if last_finish_reason == 'stop' and tool_call_happened and _content_len < 50:
         suspicion_reasons.append(f'short_content_after_tool_calls({_content_len}chars)')
 
+    # ── Content-track divergence guard (bug-class net for the FloorRetry
+    #    3411→215 silent loss, commit 6464592) ──
+    # task['content'] is the APPEND-ONLY delta accumulator (_on_content) that
+    # _sync persists; assistant_msg['content'] is the AUTHORITATIVE returned
+    # answer. They must agree. Any retry/resend/fallback path that swaps in a
+    # fresh authoritative msg WITHOUT reconciling the accumulator (as FloorRetry
+    # did by streaming the adopted resend with on_content=None) re-creates the
+    # exact silent loss — the model was billed for a long answer but the DB
+    # stores a short residue. This check is PATH-AGNOSTIC: it fires at finalize
+    # regardless of which door caused the divergence, so a FUTURE regression
+    # surfaces LOUDLY in error.log + audit instead of shipping silently. We only
+    # flag a genuine, non-marginal shortfall (msg has real prose AND the
+    # accumulator kept <60% of it AND the gap is >200 chars) so normal
+    # server-side footer/sanitize tweaks to task['content'] never trip it.
+    _auth_content_len = len((assistant_msg or {}).get('content') or '')
+    if (_auth_content_len > 200
+            and _content_len < _auth_content_len * 0.6
+            and (_auth_content_len - _content_len) > 200
+            and not task.get('aborted')):
+        suspicion_reasons.append(
+            f'content_track_divergence(persisted={_content_len}<<'
+            f'authoritative={_auth_content_len}chars)')
+        logger.error(
+            '[%s] conv=%s ⚠️ CONTENT-TRACK DIVERGENCE: persisted task[content]=%dchars '
+            'but the authoritative assistant_msg[content]=%dchars — the DB will store '
+            'the SHORT residue and the model output is silently LOST. This is the '
+            'FloorRetry-class bug (6464592): a retry/resend produced the real answer '
+            'without reconciling the delta accumulator. finish=%s model=%s',
+            tid, task.get('convId', ''), _content_len, _auth_content_len,
+            last_finish_reason, model)
+        try:
+            from lib.log import audit_log
+            audit_log('content_track_divergence',
+                      task_id=task['id'], conv=task.get('convId', ''),
+                      persisted_chars=_content_len,
+                      authoritative_chars=_auth_content_len,
+                      finish_reason=last_finish_reason, model=model)
+        except Exception as _ae:
+            logger.debug('[%s] content_track_divergence audit failed: %s', tid, _ae)
+
     if _loop_exit_reason == 'max_rounds_exhausted':
         suspicion_reasons.append('loop_fell_through_max_rounds')
         _tc_count = len((assistant_msg or {}).get('tool_calls', []))

@@ -238,13 +238,8 @@ def test_scanner_sees_the_known_keys():
     nothing (which would make the ratchet vacuously green)."""
     refs = _scan_source_refs()
     all_keys = set().union(*refs.values()) if refs else set()
-    # Canary keys: complete literal projectBrain.* keys the board-action code
-    # actually references today (project-brain.js _boardActionBtn calls). The
-    # scanner MUST find these — proving it isn't vacuously matching nothing.
-    # (The earlier canaries actResume/actDefer/deferReasonPrompt/laneDeferred
-    # were removed along with the resume/defer board actions; using live keys
-    # keeps the sanity floor meaningful.)
-    for key in ('projectBrain.actBlock', 'projectBrain.actReopen'):
+    for key in ('projectBrain.actResume', 'projectBrain.actDefer',
+                'projectBrain.deferReasonPrompt', 'projectBrain.laneDeferred'):
         assert key in all_keys, (
             f'{key} not discovered by the scanner — the extraction regex or '
             'the dynamic-prefix filter is too aggressive.'

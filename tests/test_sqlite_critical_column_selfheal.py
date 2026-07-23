@@ -33,12 +33,7 @@ class _Conn:
 class TestCriticalColumnSelfHeal:
     def test_reports_missing_columns_on_existing_table(self, monkeypatch):
         """A present table missing a critical column is reported (would force migration)."""
-        # ``_schema_sqlite`` became a package: ``_missing_critical_columns``
-        # lives in ``_selfheal`` and calls ``_table_exists`` / ``_column_exists``
-        # from ITS OWN namespace (imported from ``_meta``). Patch + call THERE,
-        # or the facade patch never reaches the probe (it would read the real
-        # PRAGMA and report []).
-        import lib.database._schema_sqlite._selfheal as ss
+        import lib.database._schema_sqlite as ss
 
         present = {('project_tasks', 'blocked_until'), ('project_tasks', 'block_count')}
         monkeypatch.setattr(ss, '_table_exists', lambda conn, t: t == 'project_tasks')

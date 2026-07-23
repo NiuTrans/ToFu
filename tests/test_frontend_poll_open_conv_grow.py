@@ -105,15 +105,7 @@ function _hydrateImageBase64(){}
 function saveConversations(){}
 function _serverConvCount(sc){ if(!sc) return 0; const v = sc.messageCount!=null?sc.messageCount:(sc.msgCount!=null?sc.msgCount:sc.msg_count); return v||0; }
 const ConvCache = { isAvailable(){return false;}, get(){return null;}, put(){}, remove(){}, getAllMeta(){return [];} };
-// loadConversationsFromServer now fetches the sidebar list via
-// Api.conversations.listMeta({prefetch, headers, signal}) (core split, 2026-07)
-// rather than a raw fetch(). Return a Response-shaped envelope wrapping the
-// ?meta=1 list ([META_ROW]); the keep-longer verify still uses Api.conversations.get.
-const Api = { conversations: {
-  listMeta: async () => ({ ok:true, status:200, headers:{ get(){ return null; } },
-    json: async () => [ META_ROW ] }),
-  get: async () => FULL_CONV,
-} };
+const Api = { conversations: { get: async () => FULL_CONV } };
 function apiUrl(u){ return u; }
 const AbortSignal = { timeout: () => ({}) };
 

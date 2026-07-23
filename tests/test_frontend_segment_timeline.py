@@ -68,7 +68,15 @@ def _extract_timeline_fns() -> str:
     chunk = src[start:end]
     assert 'renderSegmentTimelineHTML' in chunk, 'extraction missed the timeline fns'
     assert '_renderTimelineBatch' in chunk, 'extraction missed _renderTimelineBatch'
-    return chunk
+    # renderSegmentTimelineHTML now calls _isSupersededOrphanRound (shared with
+    # renderToolRoundsHTML) to drop superseded orphan tool_use segments. That
+    # predicate is defined LATER in the file, outside the timeline block, so
+    # append the REAL function (not a stub) to the extracted chunk.
+    sup_start = src.index('function _isSupersededOrphanRound(')
+    sup_end = src.index('\nfunction renderToolRoundsHTML(')
+    sup_chunk = src[sup_start:sup_end]
+    assert '_isSupersededOrphanRound' in sup_chunk, 'extraction missed the shared predicate'
+    return chunk + '\n' + sup_chunk
 
 
 # Stubs for the collaborators the timeline helper calls. Each emits an
@@ -325,6 +333,97 @@ console.log(out.join('\n'));
 """
 
 
+_SUPERSEDED_DROP_HARNESS = _STUBS + r"""
+const src = process.env.TL_SRC;
+eval(src);
+const out = [];
+function check(name, cond){ out.push((cond ? 'PASS ' : 'FAIL ') + name); }
+
+// ── Reproduce conversation mrx0kdufyo5niq's exact shape ──
+// A FloorRetry/stream-retry duplicate: the model announced tc 'dup' (a
+// list_dir), the attempt was discarded, and the backend reconcile stamped it
+// badge='superseded' (result-less, status='aborted'). Its ADOPTED twin 'real'
+// (same tool, same args) is the call that actually ran and completed. BOTH
+// appear in msg.toolRounds; assemble_segments minted a tool_use segment for
+// EACH (segment.result carries only {content,status} — NO badge). This is the
+// segment-timeline render path (msg has segments), which does NOT run
+// renderToolRoundsHTML's filter — so before the fix the superseded twin drew a
+// misleading "interrupted" chip on a normally-completed (finishReason=stop) turn.
+const segments = [
+  { type: 'thinking', text: 'reason0', deliverable: false, llmRound: 0 },
+  // superseded orphan tool_use — MUST be dropped (no chip)
+  { type: 'tool_use', id: 'dup', name: 'list_dir', input: '{"path":"lib"}', llmRound: 0,
+    result: { content: null, status: 'aborted' } },
+  // the real adopted twin — MUST render
+  { type: 'tool_use', id: 'real', name: 'list_dir', input: '{"path":"lib"}', llmRound: 0,
+    result: { content: 'Directory: lib', status: 'done' } },
+  { type: 'text', text: 'THE ANSWER', deliverable: true, terminal: true },
+];
+const msg = { role: 'assistant', content: 'THE ANSWER', finishReason: 'stop', toolRounds: [
+  // superseded twin: result-less + badge='superseded' (what reconcile_announced_rounds stamps)
+  { toolCallId: 'dup', toolName: 'list_dir', status: 'aborted', llmRound: 0, toolContent: null,
+    results: [{ badge: 'superseded', source: 'Interrupted', interrupted: true,
+                fetched: false, fetchedChars: 0 }] },
+  // adopted twin: the real completed call
+  { toolCallId: 'real', toolName: 'list_dir', status: 'done', llmRound: 0,
+    toolContent: 'Directory: lib', results: [{ source: 'Project' }] },
+]};
+
+const html = renderSegmentTimelineHTML(segments, msg, 0);
+check('nonempty', !!html && html.indexOf('ptool-panel') !== -1);
+// The superseded twin renders NO chip; but a plain-stub _renderToolGroupsHTML
+// emits '<TOOL name=list_dir>' per resolved round, so count the markers.
+const nTools = (html.match(/<TOOL name=list_dir>/g) || []).length;
+check('exactly_one_tool_rendered', nTools === 1);          // only the real twin
+check('no_interrupted_chip', html.indexOf('ptool-badge-interrupted') === -1);
+// Header count / data-full-count must EXCLUDE the superseded round (filtered
+// out of realRounds EARLY), so render and count agree — not "2 tools" for 1 chip.
+const m = html.match(/data-full-count="(\d+)"/);
+check('data_full_count_present', !!m);
+check('data_full_count_is_1', !!m && m[1] === '1');
+console.log(out.join('\n'));
+"""
+
+
+_NC_SUPERSEDED_DROP_HARNESS = _STUBS + r"""
+// NEUTER: force _isSupersededOrphanRound to ALWAYS return false, so the
+// superseded twin is NOT filtered out of realRounds and its tool_use segment
+// is NOT skipped. The misleading second chip must then reappear AND the header
+// count must inflate to 2 — proving the shared-predicate filter is load-bearing
+// for BOTH the render and the count (the exact coverage-gap regression).
+let src = process.env.TL_SRC;
+const neutered = src.replace(
+  /function _isSupersededOrphanRound\(r\) \{/,
+  'function _isSupersededOrphanRound(r) { return false;');
+if (neutered === src) { console.log('FAIL nc_superseded_pattern_matched'); process.exit(0); }
+eval(neutered);
+
+const out = [];
+function check(name, cond){ out.push((cond ? 'PASS ' : 'FAIL ') + name); }
+const segments = [
+  { type: 'tool_use', id: 'dup', name: 'list_dir', input: '{"path":"lib"}', llmRound: 0,
+    result: { content: null, status: 'aborted' } },
+  { type: 'tool_use', id: 'real', name: 'list_dir', input: '{"path":"lib"}', llmRound: 0,
+    result: { content: 'Directory: lib', status: 'done' } },
+  { type: 'text', text: 'THE ANSWER', deliverable: true, terminal: true },
+];
+const msg = { role: 'assistant', content: 'THE ANSWER', finishReason: 'stop', toolRounds: [
+  { toolCallId: 'dup', toolName: 'list_dir', status: 'aborted', llmRound: 0, toolContent: null,
+    results: [{ badge: 'superseded', source: 'Interrupted', interrupted: true,
+                fetched: false, fetchedChars: 0 }] },
+  { toolCallId: 'real', toolName: 'list_dir', status: 'done', llmRound: 0,
+    toolContent: 'Directory: lib', results: [{ source: 'Project' }] },
+]};
+const html = renderSegmentTimelineHTML(segments, msg, 0);
+const nTools = (html.match(/<TOOL name=list_dir>/g) || []).length;
+const m = html.match(/data-full-count="(\d+)"/);
+// Neutered: BOTH twins render (2 tools) and the count inflates to 2.
+check('nc_neuter_renders_both', nTools === 2);
+check('nc_neuter_count_inflates_to_2', !!m && m[1] === '2');
+console.log(out.join('\n'));
+"""
+
+
 def _run(harness: str) -> str:
     env = dict(os.environ, TL_SRC=_extract_timeline_fns())
     proc = subprocess.run(['node', '-e', harness], capture_output=True,
@@ -393,6 +492,116 @@ def test_NC_stripping_the_strip_leaks_the_marker():
         '(so the strip is not what prevents the marker leak):\n' + out)
 
 
+@pytest.mark.skipif(not shutil.which('node'), reason='node not installed')
+def test_superseded_orphan_dropped_from_segment_timeline():
+    """Root-fix for conversation mrx0kdufyo5niq: a FloorRetry/stream-retry
+    superseded orphan (badge='superseded', result-less) must NOT render an
+    'interrupted' chip in the SEGMENT-TIMELINE render path — parity with
+    renderToolRoundsHTML's existing filter, via the SHARED
+    _isSupersededOrphanRound predicate. Its adopted twin (same tool, done) is
+    the real call and IS rendered. The header count / data-full-count must
+    exclude the superseded round too (filtered out of realRounds early), so
+    render and count agree (1 tool, count=1)."""
+    out = _run(_SUPERSEDED_DROP_HARNESS)
+    fails = [ln for ln in out.splitlines() if ln.startswith('FAIL')]
+    assert not fails, 'superseded-drop failures:\n' + out
+    assert out.count('PASS') >= 5, f'expected >=5 PASS, got:\n{out}'
+
+
+@pytest.mark.skipif(not shutil.which('node'), reason='node not installed')
+def test_NC_unfiltered_superseded_orphan_reappears_and_inflates_count():
+    """NEUTER: force _isSupersededOrphanRound → false and confirm the
+    superseded twin reappears as a second chip AND the header count inflates to
+    2 — proving the shared-predicate filter is load-bearing for BOTH the render
+    and the count in the segment-timeline path (the coverage gap this fixes)."""
+    out = _run(_NC_SUPERSEDED_DROP_HARNESS)
+    fails = [ln for ln in out.splitlines() if ln.startswith('FAIL')]
+    assert not fails, (
+        'NC control failed — neutering the superseded predicate did not '
+        'reintroduce the second chip / inflate the count (so the filter is not '
+        'what drops the orphan in the timeline path):\n' + out)
+    assert out.count('PASS') >= 2, f'expected >=2 PASS, got:\n{out}'
+
+
+# ── Live-status leak: a superseded husk whose LIVE status is 'done' ──
+# The reconcile emits a tool_result SSE event (no status field), so the pure
+# reducer's 'tool_result' case settles the LIVE round to status='done'. Only
+# the backend's LOCAL entry becomes status='aborted' (→ what the persisted
+# snapshot carries). The OLD predicate gated on status==='aborted', so during
+# the live turn (status 'done') the husk LEAKED a misleading chip; it only
+# vanished after the done-event/reload rewrote status to 'aborted'. The fix
+# keys on badge+result-less regardless of status → dropped on BOTH paths.
+_LIVE_DONE_LEAK_HARNESS = _STUBS + r"""
+const src = process.env.TL_SRC;
+eval(src);
+const out = [];
+function check(name, cond){ out.push((cond ? 'PASS ' : 'FAIL ') + name); }
+
+// A superseded husk exactly as the LIVE reducer leaves it: badge='superseded',
+// result-less, but status='done' (the tool_result event carried no status, so
+// reduceStreamState's tool_result case set status='done').
+const liveHusk = { toolCallId: 'dup', toolName: 'list_dir', status: 'done',
+  llmRound: 0, toolContent: null,
+  results: [{ badge: 'superseded', source: 'Interrupted', interrupted: true,
+              fetched: false, fetchedChars: 0 }] };
+const realTwin = { toolCallId: 'real', toolName: 'list_dir', status: 'done',
+  llmRound: 0, toolContent: 'Directory: lib', results: [{ source: 'Project' }] };
+
+// The predicate must drop the live-'done' husk (the leak) …
+check('drops_live_done_husk', _isSupersededOrphanRound(liveHusk) === true);
+// … and must NOT drop the real completed twin …
+check('keeps_real_twin', _isSupersededOrphanRound(realTwin) === false);
+// … nor a still-in-flight round (searching, results=null → no badge).
+check('keeps_inflight', _isSupersededOrphanRound(
+  { toolCallId: 'x', toolName: 'grep_search', status: 'searching', results: null }) === false);
+
+// End-to-end: the segment-timeline render with a LIVE-'done' husk must still
+// render exactly ONE chip (the real twin), not two.
+const segments = [
+  { type: 'tool_use', id: 'dup', name: 'list_dir', input: '{"path":"lib"}', llmRound: 0,
+    result: { content: null, status: 'done' } },
+  { type: 'tool_use', id: 'real', name: 'list_dir', input: '{"path":"lib"}', llmRound: 0,
+    result: { content: 'Directory: lib', status: 'done' } },
+  { type: 'text', text: 'ANSWER', deliverable: true, terminal: true },
+];
+const msg = { role: 'assistant', content: 'ANSWER', finishReason: 'stop',
+  toolRounds: [liveHusk, realTwin] };
+const html = renderSegmentTimelineHTML(segments, msg, 0);
+const nTools = (html.match(/<TOOL name=list_dir>/g) || []).length;
+check('live_done_exactly_one_tool', nTools === 1);
+console.log(out.join('\n'));
+"""
+
+
+@pytest.mark.skipif(not shutil.which('node'), reason='node not installed')
+def test_superseded_husk_dropped_even_when_live_status_done():
+    """Root-fix: a superseded orphan whose LIVE status is 'done' (because the
+    reconcile's tool_result SSE event carried no status, so the reducer settled
+    the live round to 'done') must STILL be dropped. The old predicate gated on
+    status==='aborted' and thus leaked the husk for the whole live turn — it
+    only disappeared after the done-event/reload rewrote status to 'aborted'.
+    Keying on badge+result-less drops it on both the live and persisted paths."""
+    out = _run(_LIVE_DONE_LEAK_HARNESS)
+    fails = [ln for ln in out.splitlines() if ln.startswith('FAIL')]
+    assert not fails, 'live-done husk leak failures:\n' + out
+    assert out.count('PASS') >= 4, f'expected >=4 PASS, got:\n{out}'
+
+
+def test_predicate_not_gated_on_aborted_status():
+    """Guard the fix in source: _isSupersededOrphanRound must NOT gate on
+    status==='aborted' (the old check that leaked the live-'done' husk). The
+    authoritative signal is the 'superseded' badge + result-less."""
+    src = open(TR_JS, encoding='utf-8').read()
+    start = src.index('function _isSupersededOrphanRound(')
+    end = src.index('\nfunction renderToolRoundsHTML(')
+    body = src[start:end]
+    assert 'r.status !== "aborted"' not in body, (
+        'the predicate must not early-return on status!=="aborted" — that gate '
+        'leaked the live-"done" husk (fixed by keying on badge+result-less)')
+    assert 'meta.badge === "superseded"' in body, (
+        'the predicate must key on the authoritative superseded badge')
+
+
 def test_source_has_timeline_helper():
     src = open(TR_JS, encoding='utf-8').read()
     assert 'function renderSegmentTimelineHTML(' in src
@@ -402,6 +611,12 @@ def test_source_has_timeline_helper():
     # The settled narration render must apply the notranslate strip (the fix).
     assert 'stripNoTranslateTags(_segText)' in src, \
         'the settled seg-narration render must strip notranslate markers before renderMarkdown'
+    # The segment-timeline path must reuse the SHARED superseded-orphan predicate
+    # (parity with renderToolRoundsHTML) — not a duplicate/divergent check.
+    assert '_isSupersededOrphanRound(r)' in src, \
+        'renderSegmentTimelineHTML must filter superseded orphans via the shared predicate'
+    assert '_supersededTcIds' in src, \
+        'the segment walk must skip superseded tool_use segments by tc_id'
 
 
 # ═══════════════════════════════════════════════════════════════════════════

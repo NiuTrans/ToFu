@@ -242,8 +242,6 @@ async function _execDeleteTurn(idx, mode) {
   if (activeStreams.has(conv.id) || conv.activeTaskId) return;
 
   const convId = conv.id;
-  const msg = conv.messages[idx];
-  if (!msg) return;
   // ★ Capture the exact target objects (and, for a turn, the following
   //   assistant) BEFORE the request so we can remove them by IDENTITY after —
   //   the server may resolve a DIFFERENT index (list drift from a server-side

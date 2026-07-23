@@ -40,12 +40,10 @@ def execute_conv_ref_tool(fn_name, fn_args, current_conv_id=None,
             if not conv_id:
                 return "Error: conversation_id is required."
             include_details = fn_args.get('include_tool_details', True)
-            raw = fn_args.get('raw', False)
             return get_conversation(
                 conversation_id=conv_id,
                 include_tool_details=include_details,
-                current_conv_id=current_conv_id,
-                raw=raw,
+                current_conv_id=current_conv_id
             )
 
         else:

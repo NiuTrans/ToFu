@@ -27,7 +27,7 @@ from lib.tasks_pkg.manager._state import (
     tasks,
     tasks_lock,
 )
-from lib.tasks_pkg.manager._events import _assign_message_ids, _new_assistant_slot
+from lib.tasks_pkg.manager._events import _assign_message_ids
 from lib.tasks_pkg.manager._persist import (
     _merge_tool_rounds,
     _tool_rounds_have_dedicated_home,
@@ -379,93 +379,6 @@ def _reconcile_orphan_placeholder_on_settle(task):
                        conv_id[:8], e, exc_info=True)
 
 
-def _stamp_aborted_fragment_finish_reason(task):
-    """Stamp ``finishReason='aborted'`` on the persisted trailing fragment left
-    behind by a task that is being SKIPPED by the freshness guard.
-
-    ROOT CAUSE this closes: when a user Stop→Regenerates, the aborted task's
-    terminal ``_sync_result_to_conversation`` early-returns at the freshness
-    guard (a newer task is 'latest'), so it never writes terminal fields. But
-    its own ``_sync_partial_to_conversation`` checkpoints (status='running')
-    already wrote a fragment into ``conversations.messages`` — and those DELIBERATELY
-    omit terminal fields (finishReason/usage/toolSummary aren't final mid-stream).
-    The net effect is a PERSISTED assistant message carrying real content but
-    ``finishReason=None`` — an ambiguous "settled but no terminal reason" husk
-    that renders in full completed chrome yet is a truncated abort fragment (the
-    reported bug: a stale fragment shown as a finished turn).
-
-    The invariant this enforces: a persisted assistant message with content MUST
-    carry a truthful terminal reason. We locate the task's OWN fragment by its
-    stable ``_assistantMsgId`` (never a positional guess — the fragment may sit
-    mid-list once the regenerate appended its own answer after it) and stamp
-    ``finishReason='aborted'`` in place. Content is PRESERVED (data-preservation);
-    it now renders as the aborted partial it truthfully is. Reconcile
-    (``is_superseded_incomplete_fragment``) then collapses it when a settled
-    sibling answer for the same user turn is adjacent.
-
-    Keyed by ``_assistantMsgId`` and idempotent (no-op if already stamped or the
-    fragment is not found). Best-effort: never raises — a stamp failure must not
-    break finalization. Returns True iff a stamp was written.
-    """
-    conv_id = task.get('convId', '')
-    amid = task.get('_assistantMsgId')
-    if not conv_id or not amid:
-        # No stable id to target the fragment safely — a positional guess could
-        # stamp the WRONG (newer) message. Skip; reconcile still guards render.
-        return False
-    db = None
-    try:
-        db = get_thread_db(DOMAIN_CHAT)
-        row = db.execute(
-            'SELECT messages, updated_at FROM conversations WHERE id=? AND user_id=1',
-            (conv_id,)).fetchone()
-        if not row:
-            return False
-        _row_updated_at = row['updated_at']
-        try:
-            messages = json.loads(row[0] or '[]')
-        except (json.JSONDecodeError, TypeError):
-            return False
-        from lib.tasks_pkg.manager._events import find_message_by_id
-        idx, frag = find_message_by_id(messages, amid)
-        if frag is None or frag.get('role') != 'assistant':
-            return False
-        # Only stamp a genuine unfinished fragment: has content/thinking but NO
-        # terminal reason. A fragment that already carries a finishReason (or is
-        # empty) is left untouched.
-        if frag.get('finishReason'):
-            return False
-        if not (frag.get('content') or '').strip() and not (frag.get('thinking') or '').strip():
-            return False
-        frag['finishReason'] = 'aborted'
-        messages_json = json_dumps_pg(messages)
-        now_ms = int(time.time() * 1000)
-        cur = db.execute(
-            'UPDATE conversations SET messages=?, updated_at=? '
-            'WHERE id=? AND user_id=1 AND updated_at=?',
-            (messages_json, now_ms, conv_id, _row_updated_at))
-        db.commit()
-        if (getattr(cur, 'rowcount', 0) or 0) <= 0:
-            logger.debug('[AbortStamp] conv=%s CAS miss stamping fragment %s (safe)',
-                         conv_id[:8], amid[:8] if amid else '?')
-            return False
-        logger.info('[AbortStamp] conv=%s stamped finishReason=aborted on superseded '
-                    'fragment msgId=%s idx=%d (%dchars) — no more finishReason=None husk',
-                    conv_id[:8], amid[:8], idx, len(frag.get('content') or ''))
-        try:
-            from lib.conversations import notify_conv_changed
-            _rev_row = db.execute('SELECT rev FROM conversations WHERE id=? AND user_id=1',
-                                  (conv_id,)).fetchone()
-            notify_conv_changed(conv_id, rev=(_rev_row[0] if _rev_row else None))
-        except Exception as e:
-            logger.debug('[AbortStamp] conv=%s notify skipped: %s', conv_id[:8], e)
-        return True
-    except Exception as e:
-        logger.warning('[AbortStamp] conv=%s stamp failed (non-fatal): %s',
-                       conv_id[:8], e, exc_info=True)
-        return False
-
-
 def _sync_result_to_conversation(task, meta):
     """Write the completed task result into the conversation's messages in the DB.
 
@@ -531,13 +444,7 @@ def _sync_result_to_conversation(task, meta):
                     '(this task aborted, reason=%s, %dchars stale content discarded)',
                     pfx, conv_id[:8], latest[:8], _abort_reason or 'superseded', len(content),
                 )
-                # ★ Close the finishReason=None husk: this aborted task's own
-                #   partial checkpoints wrote a fragment (status='running', no
-                #   terminal fields) into conversations.messages. We skip the
-                #   full write, but the fragment must not linger as an ambiguous
-                #   "settled-but-no-reason" bubble that renders in completed
-                #   chrome — stamp its truthful terminal reason in place.
-                _stamp_aborted_fragment_finish_reason(task)
+            elif _autopilot_child:
                 # Expected path: this task's OWN autopilot hook spawned a
                 # follow-up task (the virtual-user turn) before persist ran,
                 # so the follow-up is now 'latest' for the conv. This task was
@@ -560,10 +467,6 @@ def _sync_result_to_conversation(task, meta):
                     'Unexpected — a new task replaced this one without aborting it.',
                     pfx, conv_id[:8], latest[:8], len(content),
                 )
-                # Same husk defect as the aborted branch: a superseded task's
-                # partial-checkpoint fragment must carry a truthful terminal
-                # reason rather than linger as finishReason=None.
-                _stamp_aborted_fragment_finish_reason(task)
             return
 
     # ── External-caller short-circuit ──
@@ -744,13 +647,10 @@ def _sync_result_to_conversation(task, meta):
                 logger.info('%s conv=%s reaped wedged task — appending assistant '
                             'error bubble for the unanswered trailing turn',
                             pfx, conv_id)
-            # No trailing assistant message — append one. Adopt the client's
-            # stable _assistantMsgId (if shipped) as the slot _msgId so the live
-            # frontend bubble and this committed row share ONE identity — else a
-            # reconnect / rescue-PUT re-appends the tmp_-id bubble as a duplicate.
+            # No trailing assistant message — append one
             logger.info('%s conv=%s Last message is role=%s, appending new assistant message',
                        pfx, conv_id, last_msg.get('role'))
-            last_msg = _new_assistant_slot(task)
+            last_msg = {'role': 'assistant', 'content': '', 'thinking': ''}
             messages.append(last_msg)
 
         # ── Guard: don't overwrite with LESS content ──
@@ -912,26 +812,6 @@ def _sync_result_to_conversation(task, meta):
         # what makes routes/translate.py and PATCH /messages/by-id/<mid>
         # robust against concurrent inserts.
         _assign_message_ids(messages)
-
-        # ★ Self-heal a superseded aborted sibling in THIS (the superseding)
-        #   task's own settle write. On Stop→Regenerate the regenerate task B
-        #   takes THIS content-bearing path (never the drop-before-token settle
-        #   reconcile), so without this the aborted task A's finishReason=None
-        #   fragment would only heal at A's own settle (Fix A, app-path only) or
-        #   the next GET. Marking it here closes the headless/legacy gap at the
-        #   moment B lands its answer. MARK-only (stamps finishReason='aborted',
-        #   never deletes/reindexes) → message COUNT is unchanged, so the
-        #   terminal CAS write below is unaffected, and finishReason is not a
-        #   wire-fingerprint field so the prompt cache prefix stays neutral.
-        try:
-            from lib.conversations.reconcile import mark_superseded_incomplete_fragments
-            messages, _frag_marked = mark_superseded_incomplete_fragments(messages)
-            if _frag_marked:
-                logger.info('%s conv=%s marked %d superseded aborted fragment(s) '
-                            'finishReason=aborted in this task settle', pfx, conv_id, _frag_marked)
-        except Exception as _fe:
-            logger.warning('%s conv=%s superseded-fragment mark skipped (non-fatal): %s',
-                           pfx, conv_id, _fe)
 
         # memory prefetch: persist indicator payload for reload visibility
         if task.get('_memoryPrefetch'):
@@ -1369,10 +1249,7 @@ def _sync_partial_to_conversation(task):
                                  'row — thinking-only first checkpoint (no content yet)',
                                  conv_id[:8])
                     return
-                # Adopt the client _assistantMsgId (if shipped) so the mid-stream
-                # checkpoint row shares its identity with the live frontend
-                # bubble — same anti-duplicate fix as the terminal sync above.
-                last_msg = _new_assistant_slot(task)
+                last_msg = {'role': 'assistant', 'content': '', 'thinking': ''}
                 messages.append(last_msg)
 
             existing_content_len = len(last_msg.get('content') or '')

@@ -73,10 +73,9 @@ def test_dispatch_false_returns_descriptor_and_defers(monkeypatch):
     """dispatch=False: the synchronous half returns a descriptor and the billed
     dispatch is NOT invoked inline."""
     from lib.tasks_pkg import manager
-    import lib.tasks_pkg.manager._recovery as _recovery
 
     spy = {'called': 0}
-    monkeypatch.setattr(_recovery, 'run_deferred_boot_dispatch',
+    monkeypatch.setattr(manager, 'run_deferred_boot_dispatch',
                         lambda *a, **k: spy.__setitem__('called', spy['called'] + 1))
 
     # Drive the real function with dispatch=False. Its DB queries run against
@@ -94,18 +93,13 @@ def test_dispatch_true_calls_deferred_inline(monkeypatch):
     """dispatch=True (legacy default): the billed dispatch IS invoked inline —
     the deferral is opt-in, back-compat preserved for direct callers/tests."""
     from lib.tasks_pkg import manager
-    # manager.py became a package; recover_stale_tasks_on_startup +
-    # run_deferred_boot_dispatch both live in manager/_recovery.py and the
-    # former calls the latter via its OWN module binding. Patch on _recovery
-    # (the call site), not the manager facade re-export, or the spy is bypassed.
-    import lib.tasks_pkg.manager._recovery as _recovery
 
     spy = {'called': 0, 'arg': None}
 
     def _spy(recovery_result, **kw):
         spy['called'] += 1
         spy['arg'] = recovery_result
-    monkeypatch.setattr(_recovery, 'run_deferred_boot_dispatch', _spy)
+    monkeypatch.setattr(manager, 'run_deferred_boot_dispatch', _spy)
 
     manager.recover_stale_tasks_on_startup(prev_shutdown=None, dispatch=True)
     assert spy['called'] == 1, 'dispatch=True must invoke the billed dispatch inline'

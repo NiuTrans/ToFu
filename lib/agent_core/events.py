@@ -526,10 +526,6 @@ _SPECS: tuple[EventSpec, ...] = (
                       'pollId': 'stable per-poll id ({timerId}.p{N}) for log/DB/UI correlation',
                       'decision': 'started|wait|ready|skipped|error|parse_error',
                       'reason': 'LLM/decision rationale',
-                      'conditionKind': 'current decision tier (llm|hybrid|code) — '
-                                       'sent every poll so the UI reflects a mid-run '
-                                       'hybrid→code auto-promotion, not just the '
-                                       'creation-time kind',
                       'rawContent': "the LLM's full raw output (sent only on parse_error/error)",
                       'tokensUsed': 'tokens spent on this poll',
                       'checkInstruction': '(started) what is being verified',

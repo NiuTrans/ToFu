@@ -220,6 +220,52 @@ check('empty_rounds_blank', renderToolRoundsHTML([], false) === '' &&
     !frag(html).querySelector('.ptool-interrupted'));
 }
 
+// ── 10d. superseded orphan (FloorRetry/stream-retry dup) → DROPPED entirely ──
+{
+  // A result-less round reconcile stamped badge='superseded'. It must NOT
+  // render — no interrupted chip, no line. Its real twin is the adopted call.
+  const html = renderToolRoundsHTML([
+    { roundNum: 1, toolName: 'read_files', status: 'aborted',
+      query: 'Read a.py',
+      results: [{ toolName: 'read_files', badge: 'superseded',
+        source: 'Interrupted', interrupted: true, fetched: false, fetchedChars: 0 }] },
+  ], false);
+  // The ONLY round was a superseded orphan → whole panel collapses to ''.
+  check('superseded_orphan_dropped_blank', html === '');
+}
+
+// ── 10e. superseded orphan among real rounds → only it is dropped ──
+{
+  const html = renderToolRoundsHTML([
+    { roundNum: 1, llmRound: 1, toolName: 'read_files', status: 'done',
+      query: 'real one', results: [{ title: 'ok' }] },
+    { roundNum: 2, llmRound: 1, toolName: 'grep_search', status: 'aborted',
+      query: 'orphan dup',
+      results: [{ badge: 'superseded', source: 'Interrupted',
+        interrupted: true, fetched: false, fetchedChars: 0 }] },
+  ], false);
+  const d = frag(html);
+  check('superseded_sibling_dropped', d.querySelectorAll('.ptool-line').length === 1);
+  check('superseded_real_kept', html.includes('real one'));
+  check('superseded_orphan_text_absent', !html.includes('orphan dup'));
+  check('superseded_no_interrupted_chip', !d.querySelector('.ptool-interrupted'));
+  check('superseded_count_reflects_drop', d.querySelector('.ptool-panel-body')
+    .getAttribute('data-full-count') === '1');
+}
+
+// ── 10f. genuine user-Stop interruption (badge='interrupted') → KEPT ──
+{
+  const html = renderToolRoundsHTML([
+    { roundNum: 1, toolName: 'run_command', status: 'aborted',
+      query: '$ sleep 99', results: [{ toolName: 'run_command',
+        badge: 'interrupted', interrupted: true, source: 'Interrupted' }] },
+  ], false);
+  const d = frag(html);
+  // A real Stop is NOT a superseded orphan → keeps its interrupted affordance.
+  check('genuine_interrupted_kept', !!d.querySelector('.ptool-interrupted'));
+  check('genuine_interrupted_badge', !!d.querySelector('.ptool-badge-interrupted'));
+}
+
 // ── 10. mixed timeline: tool + swarm + tool keeps chronological order ──
 {
   const html = renderToolRoundsHTML([
@@ -246,6 +292,6 @@ def test_tool_rounds_render_characterization():
         target_js=os.path.join(JS_DIR, 'ui', 'tool_rounds.js'),
         body_js=_BODY,
         extra_targets=[os.path.join(JS_DIR, 'ui', 'streaming_swarm_panel.js')],
-        min_pass=36,
+        min_pass=44,
         label='tool_rounds render',
     )

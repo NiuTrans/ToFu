@@ -247,67 +247,6 @@ async def list_convs():
     real pooled connection) via ``asyncio.to_thread`` so it never blocks the loop.
     """
     import asyncio
-
-    # ── Folder-scoped / keyset-paginated metadata query ──────────────────
-    # Evaluated FIRST so it can never be short-circuited by the ?meta=1 cached
-    # branch below. This path is DELIBERATELY un-cached: the sidebar's 60s poll
-    # uses the top-N ?meta=1 cache, but a folder view (?folderId=) or a
-    # "load more" page (?before=) is a click-time direct read of a DIFFERENT
-    # result set. Routing it through the cache would (a) pollute the top-N blob
-    # and (b) move a full-table json_extract scan onto the 60s poll — exactly
-    # what constraint keeps them physically separated.
-    #
-    # A folder's members are resolved by their real folderId (stored in the
-    # settings JSON), INDEPENDENT of the global "most-recent-N" window, so a
-    # folder whose members all sort past the sidebar cap is still returned in
-    # full. json_extract(settings,'$.folderId') is dialect-translated to a PG
-    # jsonb accessor by lib/database/_sql_translate.py, so this runs on both
-    # SQLite and PG unchanged.
-    folder_id = request.args.get('folderId', '').strip()
-    before_updated = request.args.get('before', '').strip()
-    before_id = request.args.get('before_id', '').strip()
-    try:
-        req_limit = int(request.args.get('limit', '') or 0)
-    except (TypeError, ValueError):
-        req_limit = 0
-    if folder_id or before_updated:
-        where = ['user_id=?']
-        params = [DEFAULT_USER_ID]
-        if folder_id:
-            where.append("json_extract(settings,'$.folderId')=?")
-            params.append(folder_id)
-        if before_updated:
-            # Keyset cursor on (updated_at, id) — strictly "older than" the last
-            # loaded row, tie-broken by id so a same-timestamp boundary neither
-            # skips nor duplicates. Both halves of the OR carry updated_at so the
-            # comparison stays index-friendly.
-            where.append('(updated_at < ? OR (updated_at = ? AND id < ?))')
-            params.extend([before_updated, before_updated, before_id])
-        page_limit = req_limit if req_limit > 0 else (300 if folder_id else 100)
-        sql = ('SELECT id, title, msg_count, created_at, updated_at, settings, rev '
-               'FROM conversations WHERE ' + ' AND '.join(where) +
-               ' ORDER BY updated_at DESC, id DESC LIMIT ?')
-        # Fetch one extra row to compute hasMore without a second COUNT.
-        params.append(page_limit + 1)
-        rows = await async_fetchall(sql, tuple(params), domain=DOMAIN_CHAT)
-        has_more = len(rows) > page_limit
-        rows = rows[:page_limit]
-        convs = [_conv_row_to_meta_dict(r) for r in rows]
-        envelope = {'conversations': convs, 'hasMore': has_more}
-        if rows:
-            last = rows[-1]
-            envelope['nextBefore'] = last['updated_at']
-            envelope['nextBeforeId'] = last['id']
-        if folder_id:
-            # Real member count so the frontend distinguishes a genuinely empty
-            # folder from one whose members simply aren't loaded yet.
-            cnt = await async_fetchone(
-                "SELECT COUNT(*) AS c FROM conversations "
-                "WHERE user_id=? AND json_extract(settings,'$.folderId')=?",
-                (DEFAULT_USER_ID, folder_id), domain=DOMAIN_CHAT)
-            envelope['totalCount'] = (cnt['c'] if cnt else 0)
-        return jsonify(envelope)
-
     meta_only = request.args.get('meta') == '1'
     prefetch_id = request.args.get('prefetch', '').strip()
     if meta_only:
@@ -318,11 +257,6 @@ async def list_convs():
             db = _pool_get()
             try:
                 payload, etag = _refresh_meta_cache_if_stale(db)
-                # Authoritative global total (captured at cache rebuild, read
-                # from the cached entry — no extra query on a warm poll). Powers
-                # the sidebar "N earlier not loaded" affordance (C4).
-                from lib.conversations.meta_cache import get_cached_total
-                total = get_cached_total()
                 prefetch_data = None
                 if prefetch_id:
                     try:
@@ -334,11 +268,11 @@ async def list_convs():
                             prefetch_data = _prefetch_reconciled_dict(db, prefetch_id, r)
                     except Exception as e:
                         logger.warning('[Common] prefetch conv %s failed: %s', prefetch_id[:12], e)
-                return payload, etag, prefetch_data, total
+                return payload, etag, prefetch_data
             finally:
                 _pool_put(db)
 
-        payload, etag, prefetch_data, total = await asyncio.to_thread(_meta_branch)
+        payload, etag, prefetch_data = await asyncio.to_thread(_meta_branch)
 
         if prefetch_id:
             combo = json.dumps({
@@ -347,8 +281,6 @@ async def list_convs():
             }, ensure_ascii=False).encode('utf-8')
             combo_resp = Response(combo, mimetype='application/json')
             combo_resp.headers['Cache-Control'] = 'no-cache'
-            if total is not None:
-                combo_resp.headers['X-Total-Count'] = str(total)
             return combo_resp
 
         if request.if_none_match and etag in request.if_none_match:
@@ -356,8 +288,6 @@ async def list_convs():
         resp = Response(payload, mimetype='application/json')
         resp.headers['ETag'] = etag
         resp.headers['Cache-Control'] = 'private, max-age=5'
-        if total is not None:
-            resp.headers['X-Total-Count'] = str(total)
         return resp
 
     # Default: metadata-only (no message BODIES) — a headless caller listing

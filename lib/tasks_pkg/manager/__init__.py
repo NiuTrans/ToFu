@@ -135,6 +135,7 @@ from lib.tasks_pkg.manager._sync import (  # noqa: E402,F401
 from lib.tasks_pkg.manager._registry import (  # noqa: E402,F401
     create_task,
     discard_task,
+    is_carrier_task,
     list_running_tasks,
     abort_running_tasks_for_conv,
     quiesce_running_tasks,
@@ -185,7 +186,7 @@ __all__ = [
     # shared state
     'tasks', 'tasks_lock',
     # registry
-    'create_task', 'discard_task', 'list_running_tasks',
+    'create_task', 'discard_task', 'is_carrier_task', 'list_running_tasks',
     'abort_running_tasks_for_conv', 'quiesce_running_tasks',
     # events
     'append_event', 'find_message_by_id',

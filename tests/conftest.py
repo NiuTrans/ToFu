@@ -305,6 +305,21 @@ _NC_GUARDED_SOURCES = (
     'lib/scheduler/manager.py',
     'lib/project_mod/config.py',
     'routes/conversations.py',
+    # Frontend: test_frontend_tofu_scene_pixeldiff.py byte-patches this shipped
+    # source IN PLACE (record-freeze + pale-neuter) and restores in a finally.
+    # If the node subprocess is SIGKILLed / times out, the finally is skipped
+    # and the shipped file is left neutered — poisoning every later tofu-scene
+    # test. It is the only UNPROTECTED in-place shipped-source writer, so it
+    # belongs on the belt like the on-disk NC .py targets above.
+    'static/js/tofu-scene.js',
+    # Discovered by tests/test_nc_guard_registry.py (the self-enforcing
+    # meta-guard) — each is byte-patched IN PLACE by an NC with a finally
+    # restore, so they need the same crash-heal backstop:
+    #   static/styles.css — test_memory_modal_specificity.py (CSS-cascade NC)
+    #                        + test_mobile_tofu_touch_polish.py (touch-padding NC)
+    #   lib/conversations/reconcile.py — test_orphan_resumable_classifier.py
+    'static/styles.css',
+    'lib/conversations/reconcile.py',
 )
 _ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _nc_source_snapshots: dict = {}
@@ -343,6 +358,48 @@ def restore_drifted_nc_sources() -> list:
         except OSError as e:
             _conftest_logger.debug('[nc-guard] restore skip %s: %s', p, e)
     return healed
+
+
+def warn_on_nc_source_poison_at_session_start() -> list:
+    """Surface a guarded source that a PRIOR run may have left poisoned.
+
+    The autouse fixture below heals WITHIN a session — but its ``finally`` only
+    runs on normal teardown / exception / KeyboardInterrupt. A HARD crash
+    (SIGKILL, OOM-killer, ``os._exit``, power loss) mid-patch skips it, leaving
+    the shipped file NEUTERED on disk. Worse: the fixture snapshots LAZILY from
+    the WORKING TREE on the first test, so the NEXT session would adopt that
+    leftover neuter AS ITS BASELINE and heal nothing — the poison becomes
+    permanent until a human notices (this is the recurring-"new bug" engine).
+
+    We can't silently auto-restore, because in this shared-HEAD repo a guarded
+    file may carry LEGITIMATE uncommitted sibling WIP (e.g. message_queue.py
+    right now) — a blind ``git checkout`` would destroy it. So the safe move is
+    DETECT + WARN LOUDLY, using git HEAD as the known-good oracle: at session
+    start, list every guarded file that differs from HEAD so a human/CI sees
+    "these may be poisoned from a prior aborted run — verify before trusting a
+    green/red result". Returns the drifted relpaths (also emitted as a warning).
+    Best-effort: silent no-op when git is unavailable (nothing to compare to)."""
+    import subprocess
+    drifted = []
+    for rel in _NC_GUARDED_SOURCES:
+        try:
+            r = subprocess.run(['git', 'diff', '--quiet', 'HEAD', '--', rel],
+                               cwd=_ROOT_DIR, capture_output=True, timeout=15)
+        except (OSError, subprocess.SubprocessError) as e:
+            _conftest_logger.debug('[nc-guard] HEAD-drift probe skip %s: %s', rel, e)
+            continue
+        if r.returncode == 1:  # 1 = differs; 0 = clean; other = git error
+            drifted.append(rel)
+    if drifted:
+        msg = ('[nc-guard] SESSION START: %d guarded NC source(s) differ from '
+               'git HEAD: %s. This is EITHER legitimate uncommitted WIP OR a '
+               'leftover neuter from a HARD-CRASHED prior run (SIGKILL/OOM skips '
+               'the restore finally). The belt will snapshot the CURRENT '
+               '(possibly poisoned) bytes as its baseline, so verify these are '
+               'intended before trusting this run. To clear a suspected poison: '
+               'git checkout HEAD -- <file>.' % (len(drifted), ', '.join(drifted)))
+        _conftest_logger.warning(msg)
+    return drifted
 
 
 @pytest.fixture(autouse=True)
@@ -459,6 +516,14 @@ def pytest_configure(config):
     ``_assert_test_database`` calls (live_server, sdk_e2e, headless) remain as
     belt-and-suspenders for direct/non-pytest invocation."""
     _assert_test_database('pytest_configure (session start)')
+    # NC belt: BEFORE any test can byte-patch a guarded source, (1) warn if one
+    # already differs from git HEAD — a possible leftover neuter from a
+    # hard-crashed prior run (SIGKILL skips the restore finally) — and (2)
+    # snapshot eagerly here at session start rather than lazily on the first
+    # test, so the baseline is captured as early as possible in the run.
+    warn_on_nc_source_poison_at_session_start()
+    if not _nc_source_snapshots:
+        _snapshot_nc_sources()
     config.addinivalue_line(
         'markers',
         'auth_mode(mode): override TOFU_AUTH_MODE for this test '

@@ -324,23 +324,6 @@ function isNearBottom(threshold) {
   if (!c) return true;
   return c.scrollHeight - c.scrollTop - c.clientHeight < (threshold || 150);
 }
-/* Run a programmatic scroll write (`el.scrollTop = …`) with the container's
- * `scroll-behavior:smooth` temporarily forced OFF, then restored. The chat
- * container declares `scroll-behavior:smooth` (nice for user wheel/keyboard
- * scrolls), but that also ANIMATES every JS-driven `scrollTop` assignment —
- * which reads as an unexplained "slide/jump", most visibly right when a
- * streaming turn finalizes and the code snaps back to the bottom. This is the
- * SAME seam `_forceScrollToBottom` already opens; sharing it here means every
- * programmatic scroll is instant. The assignment inside `fn` takes effect
- * immediately under `auto` (no animation is queued), so restoring synchronously
- * afterwards is safe. */
-function _withInstantScroll(el, fn) {
-  if (!el || !el.style) { fn(); return; }
-  const prev = el.style.scrollBehavior;
-  el.style.scrollBehavior = 'auto';
-  try { fn(); }
-  finally { el.style.scrollBehavior = prev; }
-}
 let _scrollRafId = null;
 function scrollToBottom(force) {
   const c = _getChatContainer();
@@ -358,9 +341,7 @@ function scrollToBottom(force) {
   if (_scrollRafId) return; // already scheduled
   _scrollRafId = requestAnimationFrame(() => {
     _scrollRafId = null;
-    /* ★ JUMP FIX: write scrollTop with smooth disabled so the completion snap
-     *   is instant, not an animated slide (the reported "生成结束后莫名跳动"). */
-    _withInstantScroll(c, () => { c.scrollTop = c.scrollHeight; });
+    c.scrollTop = c.scrollHeight;
   });
 }
 /* ── Scroll-to-bottom button ──────────────────────────────────────────
@@ -392,16 +373,14 @@ function _updateScrollToBottomBtn() {
 if (typeof window !== "undefined") {
   window.scrollChatToBottom = scrollChatToBottom;
   window._updateScrollToBottomBtn = _updateScrollToBottomBtn;
-  window._withInstantScroll = _withInstantScroll;
 }
 
 function getToolRoundsFromMsg(msg) {
-  let base;
-  if (msg.toolRounds && msg.toolRounds.length > 0) base = msg.toolRounds;
+  if (msg.toolRounds && msg.toolRounds.length > 0) return msg.toolRounds;
   // ── Backward compat: old conversations stored under 'searchRounds' ──
-  else if (msg.searchRounds && msg.searchRounds.length > 0) base = msg.searchRounds;
-  else if (msg.searchResults && msg.searchResults.length > 0)
-    base = [
+  if (msg.searchRounds && msg.searchRounds.length > 0) return msg.searchRounds;
+  if (msg.searchResults && msg.searchResults.length > 0)
+    return [
       {
         roundNum: 1,
         query: msg.searchQuery || "search",

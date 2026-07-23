@@ -199,22 +199,6 @@ def refresh_meta_cache_if_stale(db, user_id: int = DEFAULT_USER_ID):
         if e['data'] is not None and (now - e['ts']) < e['ttl']:
             return e['data'], e['etag']
 
-    # Authoritative total for the sidebar "N earlier not loaded" affordance
-    # (C4). Computed ONLY here, at cache-rebuild — the 60s poll that hits the
-    # warm cache never reaches this COUNT, so it stays off the hot path. A
-    # COUNT(*) on the indexed user_id is cheap even for a huge history. Emitted
-    # BEFORE the list SELECT so the bounded LIMIT query remains the LAST DB call
-    # (the D4 bounded-scan guard inspects db.calls[-1]).
-    total_count = None
-    try:
-        _tc = db.execute(
-            'SELECT COUNT(*) AS c FROM conversations WHERE user_id=?',
-            (user_id,)
-        ).fetchone()
-        total_count = (_tc['c'] if _tc else 0) or 0
-    except Exception as _e:
-        logger.debug('[meta_cache] total-count query failed: %s', _e)
-
     limit = _sidebar_limit()
     if limit > 0:
         rows = db.execute(
@@ -229,8 +213,6 @@ def refresh_meta_cache_if_stale(db, user_id: int = DEFAULT_USER_ID):
                FROM conversations WHERE user_id=? ORDER BY updated_at DESC''',
             (user_id,)
         ).fetchall()
-    if total_count is None:
-        total_count = len(rows)
     convs = []
     for r in rows:
         settings = _safe_json(r['settings'], default=None, label='settings')
@@ -249,21 +231,7 @@ def refresh_meta_cache_if_stale(db, user_id: int = DEFAULT_USER_ID):
         e['data'] = payload
         e['etag'] = etag
         e['ts'] = time.monotonic()
-        e['total'] = total_count
     return payload, etag
 
 
-def get_cached_total(user_id: int = DEFAULT_USER_ID):
-    """Return the authoritative conversation total captured at the last cache
-    rebuild for ``user_id``, or ``None`` if the cache hasn't been populated yet.
-
-    Read-only, lock-guarded, does NOT trigger a DB query — the route reads this
-    right after ``refresh_meta_cache_if_stale`` (which populates it), so it is
-    fresh without adding any cost to the poll path."""
-    with _meta_cache_lock:
-        e = _meta_cache_by_user.get(user_id)
-        return e.get('total') if e else None
-
-
-__all__ = ['invalidate_meta_cache', 'notify_conv_changed', 'refresh_meta_cache_if_stale',
-           'get_cached_total']
+__all__ = ['invalidate_meta_cache', 'notify_conv_changed', 'refresh_meta_cache_if_stale']

@@ -301,55 +301,22 @@ function updateStreamingUI(msg) {
         const freezeIdx = content.lastIndexOf("\n\n", content.length - 60);
 
         if (freezeIdx > 100 && content.length > 300) {
+          const frozenText = content.slice(0, freezeIdx);
           const tailText = content.slice(freezeIdx);
 
-          if (frozenLen > 0 && mdContentEl && tailEl) {
-            /* ★ FLICKER FIX (root cause): the old refreeze rebuilt the ENTIRE
-             *   `.md-content` innerHTML every ~600 chars, recreating the
-             *   already-committed frozen nodes and re-parsing the whole answer
-             *   — a visible full-content flash on long replies. Instead keep the
-             *   existing frozen DOM intact: render ONLY the newly-frozen segment
-             *   (content between the old and new freeze points; both sit on
-             *   `\n\n` block boundaries, so rendering the segment independently
-             *   is faithful to rendering the whole prefix) and insert it as new
-             *   frozen siblings right before the tail, then reset only the small
-             *   tail. Nothing already painted is torn down, so no flash. Freeze
-             *   points advance monotonically (lastIndexOf ceiling grows with
-             *   content), so freezeIdx >= frozenLen always holds here. */
-            if (freezeIdx > frozenLen) {
-              const newlyFrozen = content.slice(frozenLen, freezeIdx);
-              let _nfHtml;
-              try { _nfHtml = renderMarkdown(newlyFrozen); }
-              catch (_) { _nfHtml = escapeHtml(newlyFrozen); }
-              tailEl.insertAdjacentHTML('beforebegin', _nfHtml);
-              contentZone._frozenLen = freezeIdx;
-            }
-            /* freezeIdx === frozenLen: the overflowing tail has no new `\n\n`
-             * boundary (one long paragraph) — nothing new to freeze; just
-             * refresh the tail in place. */
-            try { tailEl.innerHTML = renderMarkdown(tailText); }
-            catch (_) { tailEl.innerHTML = escapeHtml(tailText); }
-            /* The whole-prefix cache is no longer maintained on the incremental
-             * path (the frozen DOM itself is now the source of truth). */
-            contentZone._frozenHtml = null;
+          /* ★ PERF: reuse cached frozen HTML if freeze point didn't move */
+          let frozenHtml;
+          if (frozenLen === freezeIdx && contentZone._frozenHtml) {
+            frozenHtml = contentZone._frozenHtml;
           } else {
-            /* First substantial render (or frozen DOM missing): build the split
-             * structure ONCE. Subsequent frames take the fast path or the
-             * incremental branch above, so this full build is not a per-frame
-             * cost and cannot flash repeatedly. */
-            const frozenText = content.slice(0, freezeIdx);
-            let frozenHtml;
-            if (frozenLen === freezeIdx && contentZone._frozenHtml) {
-              frozenHtml = contentZone._frozenHtml;
-            } else {
-              frozenHtml = renderMarkdown(frozenText);
-              contentZone._frozenHtml = frozenHtml;
-            }
-            const tailHtml = renderMarkdown(tailText);
-            contentZone.innerHTML =
-              `<div class="md-content">${frozenHtml}<div class="md-stream-tail">${tailHtml}</div></div>`;
-            contentZone._frozenLen = freezeIdx;
+            frozenHtml = renderMarkdown(frozenText);
+            contentZone._frozenHtml = frozenHtml;
           }
+
+          const tailHtml = renderMarkdown(tailText);
+          contentZone.innerHTML =
+            `<div class="md-content">${frozenHtml}<div class="md-stream-tail">${tailHtml}</div></div>`;
+          contentZone._frozenLen = freezeIdx;
         } else {
           /* Content too short to split — render whole thing */
           contentZone.innerHTML = `<div class="md-content">${renderMarkdown(content)}</div>`;
@@ -427,7 +394,7 @@ function updateStreamingUI(msg) {
     _phaseKey = "think-only";
     const _thLen = msg.thinking.length;
     const _thSize = _thLen >= 1024 ? `${(_thLen / 1024).toFixed(1)}k` : `${_thLen}`;
-    _phaseHtml = `<div class="stream-phase stream-phase-thinking"><span class="stream-phase-text">${escapeHtml(t('stream.phase.reasoning'))}<span class="stream-phase-counter">${escapeHtml(t('stream.phase.chars', { n: _thSize }))}</span></span><span class="stream-phase-dots"><span>.</span><span>.</span><span>.</span></span></div>`;
+    _phaseHtml = `<div class="stream-phase stream-phase-thinking"><span class="stream-phase-text">${escapeHtml(t('stream.phase.deepThinking'))}<span class="stream-phase-counter">${escapeHtml(t('stream.phase.chars', { n: _thSize }))}</span></span><span class="stream-phase-dots"><span>.</span><span>.</span><span>.</span></span></div>`;
   } else {
     _phaseKey = "none";
     _phaseHtml = "";
@@ -519,9 +486,8 @@ function _renderStreamRoundProse(groupEl, round) {
     thinkEl.remove();
   }
 
-  // ── Per-round narration (English) — hidden ONLY for a round whose Chinese
-  //    twin has landed (see the per-round .xlate-hidden gate below); otherwise
-  //    it stays visible as the fallback. ──
+  // ── Per-round narration (English) — hidden while auto-translate is live
+  //    (the incremental translator paints the Chinese into .stream-seg-narration). ──
   const _narr = round.assistantContent || "";
   let narrEl = _q("stream-seg-en-narration");
   if (_narr) {
@@ -542,14 +508,6 @@ function _renderStreamRoundProse(groupEl, round) {
       catch (_e) { narrEl.textContent = _narr; }
       narrEl._lastNarrHtml = narrEl.innerHTML;
     }
-    /* ★ PER-ROUND bilingual gate: hide this round's English ONLY when its
-     * Chinese twin (.stream-seg-narration, painted by the incremental
-     * translator) already exists for the SAME round. A tool-sync re-render can
-     * run after the translator painted Chinese, so re-assert the class here;
-     * and never hide a round whose Chinese hasn't landed — that was the
-     * "intermediate narration vanishes under auto-translate" bug. */
-    const _zhTwin = _q("stream-seg-narration");
-    narrEl.classList.toggle("xlate-hidden", !!_zhTwin);
   } else if (narrEl) {
     narrEl.remove();
   }
@@ -565,7 +523,7 @@ function _renderStreamRoundProse(groupEl, round) {
   }
 }
 
-/* ── Live DOM reposition of synthetic inject-row groups ──────────────────
+/* ── Live DOM reposition of synthetic inject-row groups ─────────────────
  * The main _syncToolRoundsDOM loop appends a NEW group with `body.appendChild`
  * and never relocates an existing one. A mid-turn inject chip (steer / peer /
  * async swarm) always arrives AFTER its anchor round's tool_start events (the
@@ -607,6 +565,41 @@ function _repositionInjectGroups(body, rounds) {
 }
 
 function _syncToolRoundsDOM(container, rounds) {
+  /* ★ Superseded-orphan drop, LIVE-streaming path (parity with the SETTLED
+   *   renderToolRoundsHTML / renderSegmentTimelineHTML filters in
+   *   ui/tool_rounds.js). A FloorRetry / stream-retry duplicate whose tc_id
+   *   never survived into the final assistant_msg is stamped badge='superseded'
+   *   (result-less) by the backend reconcile_announced_rounds — its adopted /
+   *   recovered twin is the real call. This LIVE path was the remaining
+   *   coverage gap: it renders straight from msg.toolRounds and never ran the
+   *   filter, so the husk showed a misleading "interrupted"/"superseded" chip
+   *   for the whole rest of the turn, only vanishing on a full page reload
+   *   (which rebuilds via the already-fixed renderSegmentTimelineHTML). Two
+   *   steps are needed here (not just a render-list filter): the husk's slot
+   *   was already CREATED as 'searching' on tool_start, THEN downgraded by
+   *   reconcile, so we must also PRUNE that stale [data-prn] slot. Filtering
+   *   `rounds` up-front also keeps the header count / fingerprint / visible-
+   *   window all consistent, since the whole function keys off `rounds`. */
+  if (typeof _isSupersededOrphanRound === "function") {
+    let _hasSup = false;
+    for (const r of rounds) { if (_isSupersededOrphanRound(r)) { _hasSup = true; break; } }
+    if (_hasSup) {
+      for (const r of rounds) {
+        if (!_isSupersededOrphanRound(r)) continue;
+        const _slot = container.querySelector(`[data-prn="${r.roundNum}"]`);
+        if (_slot) {
+          const _grp = _slot.parentElement;
+          _slot.remove();
+          /* Drop a group left empty by the pruned husk (shouldn't normally
+           * happen — the recovered twin shares the batch — but keep the DOM
+           * clean if it does). */
+          if (_grp && _grp.classList.contains("ptool-turn")
+              && !_grp.querySelector("[data-prn]")) _grp.remove();
+        }
+      }
+      rounds = rounds.filter((r) => !_isSupersededOrphanRound(r));
+    }
+  }
   // ★ Fast-path: skip if rounds haven't changed since last sync
   let _fp = rounds.length;
   for (let i = 0; i < rounds.length; i++) {
@@ -638,15 +631,6 @@ function _syncToolRoundsDOM(container, rounds) {
     if (r._translatedQuestion) _fp = Math.imul(_fp, 31) + r._translatedQuestion.length;
     if (r._timerPolls) _fp = Math.imul(_fp, 31) + r._timerPolls.length;
     if (r._timerSkipCount) _fp = Math.imul(_fp, 31) + r._timerSkipCount;
-    /* ★ Timer next-poll rollover — fold the scheduled next-poll time (in
-     *   seconds) so a new nextPollTs (sent every poll/skip via timer_poll_check)
-     *   ALWAYS forces this round to re-render and refresh its [data-timer-next]
-     *   attribute. Unlike swarm's data-sw-start (an immutable START time), the
-     *   timer countdown target CHANGES each cycle, so relying on _timerPolls
-     *   length correlation alone would be an implicit rollover dependency — this
-     *   makes the attribute update an explicit guarantee. The 1Hz ticker then
-     *   only animates the seconds within a cycle. */
-    if (r._timerNextPollTs) _fp = Math.imul(_fp, 31) + ((r._timerNextPollTs / 1000) | 0);
     /* ★ Swarm fields — without these, swarm_agent_* events mutate
      *   round._swarmAgents but the fingerprint stays equal, the gate
      *   bails, and the panel never re-renders until page refresh. */

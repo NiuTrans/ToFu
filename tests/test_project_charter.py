@@ -33,7 +33,7 @@ pytestmark = pytest.mark.unit
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
 _CHARTER_SRC = os.path.join(ROOT, 'lib', 'conversations', 'project_charter.py')
-_SYSCTX_SRC = os.path.join(ROOT, 'lib', 'tasks_pkg', 'system_context.py')
+_SYSCTX_SRC = os.path.join(ROOT, 'lib', 'tasks_pkg', 'system_context', '_inject.py')
 
 
 @pytest.fixture(scope='module', autouse=True)
@@ -184,13 +184,20 @@ def _run_inject(flask_app, project_path, has_charter):
     """Drive the system_context charter-injection seam and return the assembled
     system text. Builds a minimal messages list + calls the public injector."""
     from lib.conversations.project_charter import commit_charter
-    from lib.tasks_pkg import system_context as sc
+    # Resolve the injector through the _inject SUBMODULE (not the package
+    # re-export): the NC neuter swaps sys.modules[...system_context._inject]
+    # for a patched copy, but the package __init__'s re-exported
+    # _inject_system_contexts name still points at the ORIGINAL function, so
+    # calling it via the package would bypass the neuter. Look it up on the
+    # submodule at call time so the swapped (neutered) copy is what runs.
+    import importlib
+    sc_inject = importlib.import_module('lib.tasks_pkg.system_context._inject')
     with flask_app.app_context():
         if has_charter:
             commit_charter(project_path, content='Injected north star.',
                            add_decision='Inj decision.', updated_by_conv='cA')
         messages = [{'role': 'user', 'content': 'hello'}]
-        sc._inject_system_contexts(
+        sc_inject._inject_system_contexts(
             messages, project_path, True,   # project_path, project_enabled
             False, False, False, True,      # memory, search, swarm, has_real_tools
             conv_id='cTest', task=None)

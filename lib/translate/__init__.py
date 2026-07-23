@@ -65,6 +65,7 @@ from .commit import (
 from .incremental import (
     submit_round_segment,
     finalize_incremental,
+    finalize_incremental_stamp_only,
     cancel_incremental,
 )
 
@@ -105,7 +106,8 @@ __all__ = [
     # commit
     '_commit_translation_to_db', '_commit_translation_inner', '_get_commit_lock',
     # incremental per-round translation
-    'submit_round_segment', 'finalize_incremental', 'cancel_incremental',
+    'submit_round_segment', 'finalize_incremental',
+    'finalize_incremental_stamp_only', 'cancel_incremental',
     # in-flight dedup guard
     'claim_inflight', 'release_inflight', 'is_inflight', 'msg_key',
     # pptx

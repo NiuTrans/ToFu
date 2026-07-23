@@ -129,6 +129,161 @@ def _translate_and_stamp_eligible(eligible, system_prompt, tag):
     return msgs_stamped, segs_stamped
 
 # Process-wide in-flight guard: conv_ids with a backfill task currently running.
+
+
+def _read_message(conv_id, msg_id, msg_idx):
+    """Read the target assistant message dict from the DB (by id → position).
+
+    Returns the message dict or ``None`` when the conversation / message is
+    absent. Never raises — best-effort. Distinct from
+    :func:`lib.translate.runtime._read_message_segments`, which returns only the
+    ``segments`` list; here we need the whole message so the segment-less path
+    can reach ``toolRounds`` and ``_translatePartialByRound``.
+    """
+    import json
+    from lib.database import DOMAIN_CHAT, get_thread_db
+    from lib.translate.constants import DEFAULT_USER_ID
+    try:
+        db = get_thread_db(DOMAIN_CHAT)
+        row = db.execute(
+            'SELECT messages FROM conversations WHERE id=? AND user_id=?',
+            (conv_id, DEFAULT_USER_ID)).fetchone()
+        if not row:
+            return None
+        messages = json.loads(row['messages'] or '[]')
+    except Exception as e:
+        logger.warning('[narration-backfill] message read failed for conv=%s: %s',
+                       (conv_id or '?')[:8], e)
+        return None
+    if msg_id:
+        for cand in messages:
+            if isinstance(cand, dict) and cand.get('_msgId') == msg_id:
+                return cand
+    if msg_idx is not None:
+        try:
+            idx = int(msg_idx)
+        except (ValueError, TypeError):
+            idx = -1
+        if 0 <= idx < len(messages):
+            m = messages[idx]
+            return m if isinstance(m, dict) else None
+    return None
+
+
+def _tool_round_narrations(msg):
+    """Return ``{llmRound: english_narration}`` for a segment-less turn.
+
+    The per-round assistant commentary of a turn persisted WITHOUT a ``segments``
+    array (the reported bug: only ``toolRounds`` survived) lives in
+    ``toolRounds[*].assistantContent``. Key by ``llmRound`` (≡ the round_num the
+    incremental translator / segment timeline use). Skips tool-only rounds
+    (empty ``assistantContent``). Returns ``{}`` when there are no toolRounds or
+    none carry narration.
+    """
+    rounds = msg.get('toolRounds') if isinstance(msg, dict) else None
+    if not isinstance(rounds, list) or not rounds:
+        return {}
+    out = {}
+    for r in rounds:
+        if not isinstance(r, dict):
+            continue
+        lr = r.get('llmRound')
+        if lr is None:
+            lr = r.get('roundNum')
+        if lr is None:
+            continue
+        text = (r.get('assistantContent') or '').strip()
+        if not text:
+            continue
+        # First narration wins for a given round (parallel-batch siblings share
+        # an llmRound; the first carries the round's prose).
+        out.setdefault(lr, text)
+    return out
+
+
+def _narration_map_from_tool_rounds(msg, system_prompt, source, target, *,
+                                    log_tag='?'):
+    """Build ``{llmRound: 中文}`` for a SEGMENT-LESS turn from its toolRounds.
+
+    The durable path-independent fix for a turn persisted with ``toolRounds`` but
+    no ``segments`` (so :func:`_read_message_segments` — and every narration
+    path keyed on it — is blind). Two zero-drift sources, cheapest first:
+
+      1. ``_translatePartialByRound`` — the Chinese the LIVE incremental worker
+         already computed and persisted on the message before the turn was
+         flagged already-target. Reused VERBATIM → ZERO LLM calls.
+      2. For any round that field doesn't cover, translate the round's
+         ``toolRounds[*].assistantContent`` via the SAME engine the segment core
+         uses (notranslate handling + already-target skip), so the two paths
+         never diverge on eligibility.
+
+    Enrich-only: returns only rounds that gained Chinese. ``{}`` when the turn
+    has no toolRounds narration. Never raises for a single bad round.
+    """
+    narrations = _tool_round_narrations(msg)
+    if not narrations:
+        return {}
+    # Chinese already computed live and persisted on the message — reuse free.
+    partial = msg.get('_translatePartialByRound')
+    partial = partial if isinstance(partial, dict) else {}
+
+    from lib.text_lang import is_predominantly_chinese
+    from lib.translate.notranslate import (_extract_notranslate_blocks,
+                                           _reattach_notranslate_blocks)
+    import lib.translate.runtime as _rt_pkg
+
+    seg_map = {}
+    for lr, english in narrations.items():
+        # (1) Reuse the persisted per-round translation (str-keyed on the wire).
+        cached = partial.get(str(lr))
+        if cached is None:
+            cached = partial.get(lr)
+        if isinstance(cached, str) and cached.strip():
+            seg_map[lr] = cached.strip()
+            continue
+        # (2) Translate afresh — same core the segment path uses.
+        try:
+            if is_predominantly_chinese(english):
+                seg_map[lr] = english
+                continue
+            body, nt_blocks = _extract_notranslate_blocks(english)
+            if not body.strip():
+                seg_map[lr] = english
+                continue
+            translated, _usage = _rt_pkg._translate_freetext(
+                body, system_prompt, source=source, target=target)
+            translated = (translated or '').strip()
+            if nt_blocks:
+                translated = _reattach_notranslate_blocks(translated, nt_blocks)
+            if translated:
+                seg_map[lr] = translated
+        except Exception as e:
+            logger.warning('[narration-backfill] toolRound round=%s translate '
+                           'failed for %s: %s', lr, log_tag, e)
+    return seg_map
+
+
+def _synthesize_narration_segments(narrations, seg_map):
+    """Build thin narration text segments to splice onto a segment-less message.
+
+    Each round with narration becomes a non-deliverable ``text`` segment
+    carrying the English ``text`` (from ``toolRounds[*].assistantContent``) plus
+    its ``translatedText`` (from ``seg_map``) — enough for
+    :func:`lib.translate.commit._stamp_segment_translations` and the settled
+    ``renderSegmentTimelineHTML`` to render the interleaved narration
+    bilingually. Ordered by ``llmRound`` so the timeline reads in round order.
+    These are DISPLAY-side narration segments only — the full tool bodies still
+    live in the sibling ``toolRounds`` column (single source of truth), so this
+    is not a second source of truth for the tools.
+    """
+    segs = []
+    for lr in sorted(seg_map.keys()):
+        segs.append({'type': 'text', 'deliverable': False, 'llmRound': lr,
+                     'text': narrations.get(lr, ''),
+                     'translatedText': seg_map[lr]})
+    return segs
+
+# Process-wide in-flight guard: conv_ids with a backfill task currently running.
 # The candidate gate reads the SERVED (uncommitted) messages, so re-opening a
 # conv while its (multi-second, LLM-calling) backfill is still in flight would
 # otherwise spawn a SECOND task that burns duplicate LLM calls for the same
@@ -193,18 +348,33 @@ def has_untranslated_narration(msg) -> bool:
     if not isinstance(msg, dict):
         return False
     segs = msg.get('segments')
-    if not isinstance(segs, list) or not segs:
+    if isinstance(segs, list) and segs:
+        for seg in segs:
+            if not isinstance(seg, dict):
+                continue
+            if seg.get('type') != 'text' or seg.get('deliverable'):
+                continue
+            if seg.get('llmRound') is None:
+                continue
+            if not (seg.get('text') or '').strip():
+                continue
+            if not (seg.get('translatedText') or '').strip():
+                return True
         return False
-    for seg in segs:
-        if not isinstance(seg, dict):
-            continue
-        if seg.get('type') != 'text' or seg.get('deliverable'):
-            continue
-        if seg.get('llmRound') is None:
-            continue
-        if not (seg.get('text') or '').strip():
-            continue
-        if not (seg.get('translatedText') or '').strip():
+    # ★ SEGMENT-LESS turn (the reported bug): no segments array, so the
+    #   per-round narration lives only in toolRounds[*].assistantContent. It is
+    #   a candidate iff any narration round has no Chinese yet in
+    #   ``_translatePartialByRound`` (the field the live worker persisted).
+    narrations = _tool_round_narrations(msg)
+    if not narrations:
+        return False
+    partial = msg.get('_translatePartialByRound')
+    partial = partial if isinstance(partial, dict) else {}
+    for lr in narrations:
+        cached = partial.get(str(lr))
+        if cached is None:
+            cached = partial.get(lr)
+        if not (isinstance(cached, str) and cached.strip()):
             return True
     return False
 
@@ -246,18 +416,67 @@ def backfill_message_narration_sync(conv_id, msg_idx, msg_id, target,
         system_prompt = _build_translate_prompt(target, source)
         seg_map = _rt_pkg._build_segment_translation_map(
             conv_id, msg_id or '', msg_idx, system_prompt, source, target)
+        if seg_map:
+            # ── Path 1: the message HAS segments → stamp them in place. ──
+            # Stamp-only commit (field=None): leaves translatedContent/content
+            # alone, writes ONLY the per-round translatedText onto the segments.
+            _commit_translation_to_db(conv_id, msg_idx, None, '',
+                                      msg_id=msg_id or None,
+                                      segment_translations=seg_map)
+            logger.info('[narration-backfill] conv=%s stamped %d narration '
+                        'segment(s) (target=%s)', tag, len(seg_map), target)
+            try:
+                audit_log('narration_segment_backfill', conv_id=conv_id,
+                          segments=len(seg_map), target=target,
+                          trigger='terminal')
+            except Exception as ae:
+                logger.debug('[narration-backfill] audit_log failed (non-fatal): %s', ae)
+            return len(seg_map)
+
+        # ── Path 2: SEGMENT-LESS turn (the reported bug) ──────────────────
+        # ``_build_segment_translation_map`` returned nothing because the DB
+        # message carries no ``segments`` array — the turn persisted with only
+        # ``toolRounds`` (a crash/kill-recovery or live-persist write that never
+        # assembled segments; the GET-path rehydrate is display-only and never
+        # wrote them back). Every narration path keyed on ``msg.segments`` is
+        # blind to it, so the interleaved English narration in ``toolRounds`` was
+        # NEVER translatable — even though its Chinese may already sit unused in
+        # ``_translatePartialByRound``. Recover it here: synthesise the narration
+        # map from ``toolRounds[*].assistantContent`` (reusing that field, zero
+        # LLM) and SPLICE thin narration segments onto the message in the same
+        # self-heal commit so the settled timeline can render the Chinese.
+        msg = _read_message(conv_id, msg_id or '', msg_idx)
+        if not isinstance(msg, dict):
+            return 0
+        has_segments = isinstance(msg.get('segments'), list) and msg.get('segments')
+        has_tool_rounds = isinstance(msg.get('toolRounds'), list) and msg.get('toolRounds')
+        if has_segments or not has_tool_rounds:
+            return 0
+        # ★ TRACEABILITY (owner requirement): a turn with toolRounds but NO
+        #   segments is exactly the "invisible narration" shape — make it one
+        #   grep away next time instead of a DB dig. conv/msg/_taskId included.
+        logger.warning('[narration-backfill] conv=%s msg_idx=%s msgId=%s taskId=%s '
+                       'has toolRounds but no segments — narration was untranslatable '
+                       'via the segment path; synthesising from toolRounds.assistantContent',
+                       tag, msg_idx, (msg_id or '-')[:8],
+                       msg.get('_taskId') or '-')
+        seg_map = _narration_map_from_tool_rounds(
+            msg, system_prompt, source, target, log_tag=tag)
         if not seg_map:
             return 0
-        # Stamp-only commit (field=None): leaves translatedContent/content
-        # alone, writes ONLY the per-round translatedText onto the segments.
+        synth_segments = _synthesize_narration_segments(
+            _tool_round_narrations(msg), seg_map)
+        # Self-heal commit: fallback_segments splices the synthesised narration
+        # segments onto the segment-less row in the SAME CAS write, then stamps.
         _commit_translation_to_db(conv_id, msg_idx, None, '',
                                   msg_id=msg_id or None,
-                                  segment_translations=seg_map)
-        logger.info('[narration-backfill] conv=%s stamped %d narration '
-                    'segment(s) (target=%s)', tag, len(seg_map), target)
+                                  segment_translations=seg_map,
+                                  fallback_segments=synth_segments)
+        logger.info('[narration-backfill] conv=%s stamped %d narration segment(s) '
+                    'synthesised from toolRounds (target=%s)', tag, len(seg_map), target)
         try:
             audit_log('narration_segment_backfill', conv_id=conv_id,
-                      segments=len(seg_map), target=target, trigger='terminal')
+                      segments=len(seg_map), target=target, trigger='toolrounds')
         except Exception as ae:
             logger.debug('[narration-backfill] audit_log failed (non-fatal): %s', ae)
         return len(seg_map)

@@ -881,6 +881,23 @@ def run_virtual_user(task: dict, vu_msg_id: str | None = None) -> dict | None:
         return None
     finally:
         _stop_mirror.set()
+        # ★ Lifecycle owner: the VU carrier is created with create_task('') and
+        #   runs synchronously under _endpoint_managed=True, which SUPPRESSES the
+        #   orchestrator's terminal-status flip + persist_task_result — so it
+        #   NEVER reaches a terminal status on its own and would linger in the
+        #   registry as status='running' until the 30-min stuck-task reaper.
+        #   That immortal carrier is what the restart guard counted as an
+        #   invisible "running conversation". The synchronous turn is finished
+        #   the moment _run_single_turn returns, so discard the carrier NOW —
+        #   the local sub_task dict stays valid for the toolRounds / segment
+        #   reads below (discard only unregisters it). Mirrors the reporter
+        #   carrier's discard_task-in-finally contract.
+        try:
+            from lib.tasks_pkg.manager import discard_task
+            discard_task(sub_task['id'])
+        except Exception as _disc_err:
+            logger.debug('[Autopilot %s] VU carrier discard failed: %s',
+                         tid, _disc_err)
 
     if task.get('aborted'):
         logger.info('[Autopilot %s] Aborted during VU sub-task — stopping', tid)

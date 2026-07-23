@@ -48,19 +48,25 @@ def _make_task(task_id='t-net', auto=True):
 
 
 def _install_accumulator_spy(monkeypatch):
-    """Replace finalize/cancel with spies and report which fired."""
-    calls = {'finalize': 0, 'cancel': 0}
+    """Replace finalize/stamp-only/cancel with spies and report which fired."""
+    calls = {'finalize': 0, 'cancel': 0, 'stamp_only': 0}
 
     def _fake_finalize(task, conv_id, msg_idx, content, msg_id=None, target=None):
         calls['finalize'] += 1
         calls['target'] = target
         return True  # pretend an accumulator existed and we took ownership
 
+    def _fake_stamp_only(task, conv_id, msg_idx, msg_id=None):
+        calls['stamp_only'] += 1
+        return True  # pretend an accumulator existed and we stamped its cache
+
     def _fake_cancel(task):
         calls['cancel'] += 1
         return True
 
     monkeypatch.setattr('lib.translate.finalize_incremental', _fake_finalize)
+    monkeypatch.setattr('lib.translate.finalize_incremental_stamp_only',
+                        _fake_stamp_only)
     monkeypatch.setattr('lib.translate.cancel_incremental', _fake_cancel)
     return calls
 
@@ -80,9 +86,13 @@ def test_autotranslate_off_cancels_accumulator(monkeypatch):
     assert calls['cancel'] == 1, 'orphaned accumulator must be cancelled on the skip path'
 
 
-def test_already_chinese_cancels_accumulator(monkeypatch):
-    """Already-Chinese content → skip translation, but still tear down the
-    accumulator."""
+def test_already_chinese_stamps_cached_narration_not_discards(monkeypatch):
+    """★ FIX #1: already-target content → the DELIVERABLE needs no
+    translatedContent, but the accumulator already translated the inter-round
+    narration LIVE. That path must STAMP the cached narration (stamp-only
+    finalize) and take ownership — NOT cancel it (which threw the Chinese away,
+    the reported loss). No whole-message finalize either (no deliverable to
+    translate)."""
     calls = _install_accumulator_spy(monkeypatch)
     zh = '你好世界，这是一段中文内容用于测试。'
     db = _FakeDB(messages=[{'role': 'assistant', 'content': zh}],
@@ -91,8 +101,9 @@ def test_already_chinese_cancels_accumulator(monkeypatch):
 
     at._maybe_auto_translate_assistant('conv-net', zh, 0, db=db, task=task)
 
-    assert calls['finalize'] == 0
-    assert calls['cancel'] == 1, 'already-Chinese skip must cancel the accumulator'
+    assert calls['finalize'] == 0, 'no deliverable translation on the already-target path'
+    assert calls['stamp_only'] == 1, 'cached narration must be stamped, not discarded'
+    assert calls['cancel'] == 0, 'stamp-only took ownership → the finally must NOT cancel'
 
 
 def test_happy_path_hands_off_and_does_not_cancel(monkeypatch):

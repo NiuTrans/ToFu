@@ -17,6 +17,79 @@ logger = get_logger(__name__)
 # model's context window. Applies to both the prose transcript and the raw dump.
 MAX_CHARS = 80000
 
+# ── Conversation-digest (human-view card) shaping constants ──
+# The digest is a bounded PROJECTION of a conversation for the frontend card,
+# NOT the verbatim transcript (that stays in get_conversation / the "model
+# view" button). A long conversation keeps its HEAD (what it was about) and its
+# TAIL (where it ended up / the conclusion) with a "… X omitted …" marker in
+# between — showing only the opening N messages is the least useful slice.
+DIGEST_HEAD = 3          # opening messages always kept (the "what is this about")
+DIGEST_TAIL = 100        # most-recent messages kept (the "where did it end up")
+DIGEST_PREVIEW = 750     # per-message text preview length (chars)
+DIGEST_FULL_CAP = 8000   # per-message expandable full-text cap (chars)
+# NOTE (2026-07-23): tail/preview/full were widened (60/400/4000 → 100/750/8000)
+# because L0 disk-persistence (lib/tasks_pkg/compaction) is the safety net for an
+# oversized RENDERED result — the digest can afford to carry more of the
+# conversation. This is a deliberate, bounded widening, NOT "unlimited": the
+# digest stays a PROJECTION (the verbatim record is the model-view transcript).
+
+
+def _digest_tool_desc(rnd):
+    """Build a compact ``{name, arg, status}`` descriptor for one tool round.
+
+    Reuses the same primary-argument heuristic the prose renderer
+    (:func:`_format_tool_rounds`) relies on — ``query`` first, then the common
+    single-value arg keys — so the card shows ``read_files → lib/foo.py`` /
+    ``run_command → git status`` instead of a bare tool name. Returns ``None``
+    for a non-dict round or one with no resolvable name.
+    """
+    if not isinstance(rnd, dict):
+        return None
+    name = (rnd.get('toolName') or rnd.get('tool_name') or '').strip()
+    if not name:
+        return None
+    arg = rnd.get('query') or ''
+    if not arg:
+        args = rnd.get('args') or rnd.get('arguments') or {}
+        if isinstance(args, dict):
+            for key in ('path', 'file_path', 'command', 'pattern', 'url',
+                        'query', 'conversation_id', 'title'):
+                if args.get(key):
+                    arg = args[key]
+                    break
+            else:
+                # Fall back to the first scalar arg value.
+                for val in args.values():
+                    if isinstance(val, (str, int, float)) and str(val).strip():
+                        arg = val
+                        break
+    arg = _truncate(str(arg), 90) if arg else ''
+    return {'name': name, 'arg': arg, 'status': rnd.get('status', 'done')}
+
+
+def _msg_fallback_text(msg):
+    """Fallback display text for a message whose ``content`` is empty.
+
+    A tool-only assistant round (the model called tools and emitted no visible
+    prose THAT round) has empty ``content`` — so a digest row for it would
+    otherwise render as a bare "(no text)". A conversation's conclusion often
+    sits amid such rounds, so an empty row buries exactly what the reader
+    wants. Fall back to the round's ``thinking`` first (real prose), else a
+    compact summary of its tool calls (name + primary arg). Returns '' only
+    when there is genuinely nothing to show.
+    """
+    if not isinstance(msg, dict):
+        return ''
+    thinking = msg.get('thinking')
+    if isinstance(thinking, str) and thinking.strip():
+        return thinking.strip()
+    parts = []
+    for r in (msg.get('toolRounds') or []):
+        d = _digest_tool_desc(r)
+        if d:
+            parts.append(d['name'] + (f' {d["arg"]}' if d['arg'] else ''))
+    return ', '.join(parts)
+
 
 def _coerce_json(value, default, label=''):
     """Parse a JSON column value regardless of DB backend.
@@ -151,7 +224,8 @@ def get_conversation(conversation_id, include_tool_details=True,
     return result
 
 
-def build_conversation_digest(conversation_id, current_conv_id=None, max_messages=40):
+def build_conversation_digest(conversation_id, current_conv_id=None,
+                              head=DIGEST_HEAD, tail=DIGEST_TAIL, raw=False):
     """Build a STRUCTURED digest of a conversation for the human-view card.
 
     This is the display sibling of :func:`get_conversation` (which returns the
@@ -163,23 +237,40 @@ def build_conversation_digest(conversation_id, current_conv_id=None, max_message
     typed structure (mirrors the ``boardSnapshot`` / ``peerStatus`` pattern in
     ``lib/tasks_pkg/handlers/misc/_brain.py``).
 
+    HEAD+TAIL policy: a long conversation keeps its opening ``head`` messages
+    (what it is about) AND its most-recent ``tail`` messages (where it ended
+    up), with a structured ``omitted`` marker row between them — showing only
+    the first N messages is the least useful slice. Each message carries a
+    truncated ``text`` preview plus the ``full`` text (capped) so the frontend
+    can expand a single message in place instead of forcing a jump to the
+    "model view". Assistant messages carry per-round ``tools`` descriptors
+    (name + primary arg + status), not just tool names.
+
     Args:
         conversation_id: the conversation to summarize.
         current_conv_id: the active conversation (self-reference is a no-op).
-        max_messages: cap on per-message rows included in the digest.
+        head: opening messages always kept.
+        tail: most-recent messages kept.
+        raw: when True, mark the digest ``raw: true`` + carry the row-level
+            ``rev``, and attach per-message low-level metadata
+            (``model`` / ``usage`` / ``finishReason`` / ``msgId``) so the human
+            card visibly reflects the debug read. Non-raw omits all of these.
 
     Returns:
-        A dict ``{convId, title, preset, msgCount, messages: [...], truncated}``
-        or ``None`` when the conversation can't be read (self-ref / missing /
-        empty) so the caller falls back to the prose dump.
+        A dict ``{convId, title, preset, msgCount, createdAt, updatedAt,
+        messages: [...], truncated, omitted}`` or ``None`` when the
+        conversation can't be read (self-ref / missing / empty) so the caller
+        falls back to the prose dump. Each message row is either a content row
+        (``role``/``text``/``full``/``ts``/``tools``/…) or an omission marker
+        (``{omitted: X}``).
     """
     if current_conv_id and conversation_id == current_conv_id:
         return None
     try:
         db = _get_db()
         row = db.execute(
-            'SELECT id, title, messages, settings FROM conversations '
-            'WHERE id=? AND user_id=?',
+            'SELECT id, title, messages, settings, created_at, updated_at, rev '
+            'FROM conversations WHERE id=? AND user_id=?',
             (conversation_id, DEFAULT_USER_ID)
         ).fetchone()
     except Exception as e:
@@ -194,20 +285,79 @@ def build_conversation_digest(conversation_id, current_conv_id=None, max_message
         return None
     settings = _coerce_json(row['settings'], default={}, label='conv-digest-settings')
 
-    def _preview(text, limit=180):
+    def _preview(text, limit=DIGEST_PREVIEW):
         s = ' '.join(str(text or '').split())
         return (s[:limit] + '…') if len(s) > limit else s
 
-    rows = []
-    for i, msg in enumerate(messages[:max_messages]):
-        if not isinstance(msg, dict):
-            continue
+    def _full(text):
+        s = str(text or '').strip()
+        return (s[:DIGEST_FULL_CAP] + '…') if len(s) > DIGEST_FULL_CAP else s
+
+    n = len(messages)
+
+    # ── TAIL ANCHORING ──
+    # The tail must END on the conversation's CONCLUSION, not on a trailing
+    # run of tool-only rounds. Find the last message that carries SUBSTANTIVE
+    # prose — real ``content`` OR ``thinking`` (a round's model reasoning is
+    # substantive; a bare cleanup tool call with neither is the "empty closer"
+    # we drop) — and anchor the tail there, dropping the rounds after it.
+    # Without this a tool-heavy ending fills the tail with blank rows and the
+    # "where did it end up" half of head+tail shows nothing.
+    def _is_anchor_worthy(m):
+        if not isinstance(m, dict):
+            return False
+        if _extract_text(m.get('content', '')).strip():
+            return True
+        th = m.get('thinking')
+        return isinstance(th, str) and bool(th.strip())
+
+    last_content_idx = None
+    for idx in range(n - 1, -1, -1):
+        if _is_anchor_worthy(messages[idx]):
+            last_content_idx = idx
+            break
+    tail_end = last_content_idx if last_content_idx is not None else n - 1
+    trailing_dropped = (n - 1) - tail_end
+
+    # HEAD+TAIL selection with 1-based original indices preserved, so a message
+    # row always reports its true position in the conversation.
+    if tail_end + 1 <= head + tail:
+        # Head and tail windows meet/overlap — no middle gap.
+        kept = list(enumerate(messages[:tail_end + 1]))
+        omitted = 0
+    else:
+        tail_start = tail_end - tail + 1
+        kept = list(enumerate(messages[:head]))
+        kept += [(i, messages[i]) for i in range(tail_start, tail_end + 1)]
+        omitted = tail_start - head
+
+    def _row(i, msg):
         role = msg.get('role', 'unknown')
+        full_text = _extract_text(msg.get('content', ''))
+        is_fallback = False
+        if not full_text.strip():
+            fb = _msg_fallback_text(msg)
+            if fb:
+                full_text, is_fallback = fb, True
+        preview = _preview(full_text)
         entry = {
             'index': i + 1,
             'role': role,
-            'text': _preview(_extract_text(msg.get('content', ''))),
+            'text': preview,
         }
+        # A row whose text is a thinking/tool summary (not the message's own
+        # visible content) is flagged so the frontend can style it as a
+        # summary rather than pass it off as the real message.
+        if is_fallback:
+            entry['textFallback'] = True
+        full = _full(full_text)
+        # Only carry `full` when it adds something beyond the preview, so the
+        # frontend knows whether an "expand" affordance is meaningful.
+        if full and full != preview:
+            entry['full'] = full
+        ts = msg.get('timestamp') or msg.get('ts')
+        if isinstance(ts, (int, float)) and ts > 0:
+            entry['ts'] = int(ts)
         imgs = msg.get('images')
         if imgs:
             entry['images'] = len(imgs)
@@ -215,24 +365,78 @@ def build_conversation_digest(conversation_id, current_conv_id=None, max_message
         if pdfs:
             entry['pdfs'] = len(pdfs)
         if role == 'assistant':
-            tools = [
-                (r.get('toolName') or r.get('tool_name') or '')
-                for r in (msg.get('toolRounds') or [])
-                if isinstance(r, dict)
-            ]
-            tools = [t for t in tools if t]
+            tools = []
+            for r in (msg.get('toolRounds') or []):
+                desc = _digest_tool_desc(r)
+                if desc:
+                    tools.append(desc)
             if tools:
                 entry['tools'] = tools
-        rows.append(entry)
+        # ── RAW-mode per-message metadata (debug view) ──
+        # Only in raw mode do we surface the low-level fields the prose/normal
+        # card drops — a few compact chips per row (model / token usage /
+        # finish reason / message id), NOT the whole message. This is what
+        # makes a raw read visibly RICHER than a normal read in the human card
+        # (previously identical). The full verbatim JSON still lives on the
+        # "model view" channel.
+        if raw:
+            mdl = msg.get('model')
+            if isinstance(mdl, str) and mdl.strip():
+                entry['model'] = mdl.strip()
+            fr = msg.get('finishReason')
+            if isinstance(fr, str) and fr.strip():
+                entry['finishReason'] = fr.strip()
+            mid = msg.get('_msgId')
+            if isinstance(mid, str) and mid.strip():
+                entry['msgId'] = mid.strip()
+            usage = msg.get('usage')
+            if isinstance(usage, dict):
+                inp = usage.get('input_tokens')
+                out = usage.get('output_tokens')
+                u = {}
+                if isinstance(inp, (int, float)):
+                    u['in'] = int(inp)
+                if isinstance(out, (int, float)):
+                    u['out'] = int(out)
+                if u:
+                    entry['usage'] = u
+        return entry
 
-    return {
+    rows = []
+    inserted_marker = False
+    prev_idx = None
+    for i, msg in kept:
+        if not isinstance(msg, dict):
+            continue
+        # Insert the omission marker at the head/tail seam (first index jump).
+        if (omitted and not inserted_marker and prev_idx is not None
+                and i - prev_idx > 1):
+            rows.append({'omitted': omitted})
+            inserted_marker = True
+        rows.append(_row(i, msg))
+        prev_idx = i
+
+    result = {
         'convId': conversation_id,
         'title': row['title'] or '(untitled)',
         'preset': settings.get('preset', ''),
-        'msgCount': len(messages),
+        'msgCount': n,
+        'createdAt': row['created_at'] or 0,
+        'updatedAt': row['updated_at'] or 0,
         'messages': rows,
-        'truncated': len(messages) > max_messages,
+        'truncated': bool(omitted or trailing_dropped),
+        'omitted': omitted,
+        'trailingDropped': trailing_dropped,
     }
+    if raw:
+        # Mark the digest as a RAW/debug view + carry the row-level revision so
+        # the frontend can render a distinct "RAW · debug" badge. Non-raw reads
+        # get NONE of these keys (byte-identical to the prior behaviour).
+        result['raw'] = True
+        rev = row['rev']
+        if isinstance(rev, (int, float)):
+            result['rev'] = int(rev)
+    return result
 
 
 def _render_raw_conversation(row, conversation_id):

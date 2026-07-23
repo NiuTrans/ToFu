@@ -31,10 +31,9 @@ async function _refreshTimerPanel() {
     const badge = document.getElementById("timerBadge");
     const countEl = document.getElementById("timerCount");
 
-    // Update badge visibility & count. Scheduler is a default (always-on) tool,
-    // so the badge surfaces whenever any timer exists.
+    // Update badge visibility & count (only when scheduler is enabled)
     if (badge) {
-      badge.style.display = (timers.length > 0) ? "inline-flex" : "none";
+      badge.style.display = (schedulerEnabled && timers.length > 0) ? "inline-flex" : "none";
     }
     if (countEl) {
       if (activeCount > 0) {
@@ -221,8 +220,12 @@ function _startTimerPolling() {
 }
 
 async function _refreshTimerBadge() {
-  // Scheduler is a default (always-on) tool — the timer badge surfaces
-  // whenever any timer exists, no per-conversation toggle gate.
+  // Don't show timer badge or poll API when scheduler is disabled
+  if (!schedulerEnabled) {
+    const badge = document.getElementById("timerBadge");
+    if (badge) badge.style.display = "none";
+    return;
+  }
   try {
     const data = await Api.timer.list();
     if (!data || !data.ok) return;

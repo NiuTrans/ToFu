@@ -594,6 +594,52 @@ def test_cancel_tears_down_accumulator_without_commit(monkeypatch):
     assert 'args' not in committed, 'cancel must never commit a translation'
 
 
+def test_stamp_only_commits_cached_narration_without_translatedContent(monkeypatch):
+    """★ FIX #1: the already-target path must STAMP the accumulator's cached
+    per-round narration (field=None commit) WITHOUT committing a
+    translatedContent — instead of cancel_incremental discarding it. The
+    deliverable is already in the target language, so only the interleaved
+    narration is committed."""
+    monkeypatch.setenv(inc._KILL_ENV, '1')
+    monkeypatch.setattr('lib.translate.engine._translate_freetext', _fake_translate)
+    captured = {}
+    monkeypatch.setattr('lib.translate.commit._commit_translation_to_db',
+                        lambda *a, **k: captured.update(args=a, kw=k))
+    monkeypatch.setattr(inc, 'push_event', lambda *a, **k: None, raising=False)
+
+    task = _make_task(task_id='t-stamponly', msg_id='m-so')
+    inc.submit_round_segment(task, 0, 'First segment.')
+    inc.submit_round_segment(task, 1, 'Second segment.')
+
+    assert inc.finalize_incremental_stamp_only(task, 'conv-1', 5, msg_id='m-so') is True
+
+    deadline = time.time() + 5
+    while time.time() < deadline and 'kw' not in captured:
+        time.sleep(0.02)
+    assert 'kw' in captured, 'stamp-only must commit the cached narration'
+    # field (positional arg 3 of _commit_translation_to_db: conv,idx,field,text)
+    assert captured['args'][2] is None, 'stamp-only must use field=None (no translatedContent)'
+    seg_trans = captured['kw'].get('segment_translations') or {}
+    assert seg_trans.get(0) == 'ZH:First segment.'
+    assert seg_trans.get(1) == 'ZH:Second segment.'
+    # The accumulator cleaned itself up (no leak).
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        with inc._acc_lock:
+            if 't-stamponly' not in inc._accumulators:
+                break
+        time.sleep(0.02)
+    with inc._acc_lock:
+        assert 't-stamponly' not in inc._accumulators
+
+
+def test_stamp_only_without_accumulator_declines():
+    """No accumulator → stamp-only declines (False) so the caller falls back to
+    the toolRounds backfill."""
+    task = _make_task(task_id='t-so-none')
+    assert inc.finalize_incremental_stamp_only(task, 'conv-1', 0, msg_id='m') is False
+
+
 def test_finalize_then_cancel_is_harmless(monkeypatch):
     """After finalize takes ownership the accumulator self-cleans; a late
     cancel (the finally-block belt-and-suspenders) must not raise or commit

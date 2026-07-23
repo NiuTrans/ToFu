@@ -1130,7 +1130,7 @@ function _renderConvDigest(cd) {
     if (r === "system") return _t("convDigest.roleSystem", "System");
     return escapeHtml(r || "");
   };
-  // ── Meta row: preset + message count. ──
+  // ── Meta row: preset + message count + last-updated time. ──
   const metaBits = [];
   if (cd.preset) {
     metaBits.push(`<span class="ptool-convdigest-preset">${escapeHtml(cd.preset)}</span>`);
@@ -1138,6 +1138,26 @@ function _renderConvDigest(cd) {
   const nMsg = (cd.msgCount != null) ? cd.msgCount : (cd.messages || []).length;
   metaBits.push(`<span class="ptool-convdigest-msgcount">${escapeHtml(
     _t("convDigest.msgCount", "{n} messages").replace("{n}", nMsg))}</span>`);
+  const updRel = _convMetaRelTime(cd.updatedAt);
+  if (updRel) {
+    metaBits.push(`<span class="ptool-convdigest-time" title="${escapeHtml(
+      _convMetaAbsTime(cd.updatedAt))}">${escapeHtml(
+      _t("convDigest.updated", "updated {t}").replace("{t}", updRel))}</span>`);
+  }
+  // ── RAW/debug badge: only for a get_conversation(raw=true) read. Marks the
+  //    card as the debug view (per-message low-level metadata chips below) so
+  //    a raw read is visibly RICHER than a normal read — inline SVG per §3.4
+  //    (no emoji/glyph). A `rev` is appended when present. ──
+  const isRaw = !!cd.raw;
+  if (isRaw) {
+    const revTxt = (cd.rev != null)
+      ? " · " + _t("convDigest.rev", "rev") + " " + cd.rev : "";
+    const bugSvg = '<svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:block"><path d="m8 2 1.88 1.88"/><path d="M14.12 3.88 16 2"/><path d="M9 7.13v-1a3.003 3.003 0 1 1 6 0v1"/><path d="M12 20c-3.3 0-6-2.7-6-6v-3a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v3c0 3.3-2.7 6-6 6"/><path d="M12 20v-9"/><path d="M6.53 9C4.6 8.8 3 7.1 3 5"/><path d="M6 13H2"/><path d="M3 21c0-2.1 1.7-3.9 3.8-4"/><path d="M20.97 5c0 2.1-1.6 3.8-3.5 4"/><path d="M22 13h-4"/><path d="M17.2 17c2.1.1 3.8 1.9 3.8 4"/></svg>';
+    metaBits.push(`<span class="ptool-convdigest-rawbadge icon-box" title="${escapeHtml(
+      _t("convDigest.rawTip", "Raw debug read — shows per-message low-level metadata (model, tokens, finish reason, id)."))}">` +
+      bugSvg + `<span class="ptool-convdigest-rawbadge-lbl">${escapeHtml(
+        _t("convDigest.raw", "RAW · debug"))}${escapeHtml(revTxt)}</span></span>`);
+  }
   let html = `<div class="ptool-convdigest">` +
     `<div class="ptool-convdigest-meta">${metaBits.join("")}</div>` +
     `<div class="ptool-convdigest-msgs">`;
@@ -1147,13 +1167,32 @@ function _renderConvDigest(cd) {
       _t("convDigest.empty", "This conversation has no messages."))}</div>`;
   }
   for (const m of msgs) {
+    // Omission marker row (head/tail seam).
+    if (m && m.omitted != null) {
+      html += `<div class="ptool-convdigest-omitted">${escapeHtml(
+        _t("convDigest.omitted", "… {n} messages omitted …").replace("{n}", m.omitted))}</div>`;
+      continue;
+    }
     const roleCls = (m.role === "user" || m.role === "assistant" || m.role === "system")
       ? m.role : "other";
     const hints = [];
     if (Array.isArray(m.tools) && m.tools.length) {
+      const shown = m.tools.slice(0, 6);
+      const chips = shown.map(function (tl) {
+        // Tools may be a rich descriptor {name, arg, status} (new) or a bare
+        // string (legacy). Render name + primary arg, with a failed-status cue.
+        const isObj = tl && typeof tl === "object";
+        const name = isObj ? (tl.name || "") : String(tl || "");
+        const arg = isObj ? (tl.arg || "") : "";
+        const st = isObj ? (tl.status || "") : "";
+        const failed = /error|fail|reject|abort/i.test(st);
+        return `<span class="ptool-convdigest-tool${failed ? " ptool-convdigest-tool-failed" : ""}">` +
+          `<span class="ptool-convdigest-tool-name">${escapeHtml(name)}</span>` +
+          (arg ? `<span class="ptool-convdigest-tool-arg">${escapeHtml(arg)}</span>` : "") +
+          `</span>`;
+      }).join("");
       hints.push(`<span class="ptool-convdigest-tools">${(typeof Icon === "function") ? Icon("wrench", 10) : ""}` +
-        `<span>${escapeHtml(m.tools.slice(0, 6).join(", "))}` +
-        `${m.tools.length > 6 ? " +" + (m.tools.length - 6) : ""}</span></span>`);
+        chips + `${m.tools.length > 6 ? `<span class="ptool-convdigest-tool-more">+${m.tools.length - 6}</span>` : ""}</span>`);
     }
     if (m.images) {
       hints.push(`<span class="ptool-convdigest-att">${escapeHtml(
@@ -1163,24 +1202,91 @@ function _renderConvDigest(cd) {
       hints.push(`<span class="ptool-convdigest-att">${escapeHtml(
         _t("convDigest.pdfs", "{n} PDF").replace("{n}", m.pdfs))}</span>`);
     }
+    // ── RAW-mode per-message metadata chips (model / tokens / finishReason /
+    //    msgId). Rendered ONLY when the digest is a raw read AND the field is
+    //    present — a few compact chips, never the whole message. This is the
+    //    visible difference between a raw and a normal card. ──
+    if (isRaw) {
+      if (m.model) {
+        hints.push(`<span class="ptool-convdigest-metachip ptool-convdigest-meta-model" title="${escapeHtml(
+          _t("convDigest.metaModel", "model"))}">${escapeHtml(String(m.model))}</span>`);
+      }
+      if (m.usage && (m.usage.in != null || m.usage.out != null)) {
+        const inT = (m.usage.in != null) ? m.usage.in : "?";
+        const outT = (m.usage.out != null) ? m.usage.out : "?";
+        hints.push(`<span class="ptool-convdigest-metachip ptool-convdigest-meta-tok" title="${escapeHtml(
+          _t("convDigest.metaTokens", "tokens in/out"))}">${escapeHtml(
+          "tok " + inT + "/" + outT)}</span>`);
+      }
+      if (m.finishReason) {
+        hints.push(`<span class="ptool-convdigest-metachip ptool-convdigest-meta-fr" title="${escapeHtml(
+          _t("convDigest.metaFinish", "finish reason"))}">${escapeHtml(String(m.finishReason))}</span>`);
+      }
+      if (m.msgId) {
+        hints.push(`<span class="ptool-convdigest-metachip ptool-convdigest-meta-id" title="${escapeHtml(
+          _t("convDigest.metaId", "message id"))}">${escapeHtml(String(m.msgId))}</span>`);
+      }
+    }
     const text = (m.text || "").trim();
-    const textHtml = text
-      ? `<div class="ptool-convdigest-text">${escapeHtml(text)}</div>`
-      : (hints.length ? "" : `<div class="ptool-convdigest-text ptool-convdigest-notext">${escapeHtml(
-        _t("convDigest.noText", "(no text)"))}</div>`);
+    // Per-message expand: when a capped `full` text exists and differs from the
+    // preview, render a <details> so the user can open THIS message in place
+    // instead of jumping to the model view.
+    const full = (typeof m.full === "string") ? m.full.trim() : "";
+    // `textFallback` marks a row whose text is a thinking/tool SUMMARY (the
+    // message's own content was empty — a tool-only round), so we style it as
+    // a muted summary with a label, never passing it off as real prose.
+    const isFallback = !!m.textFallback;
+    const fallbackCls = isFallback ? " ptool-convdigest-summary" : "";
+    const fallbackTag = isFallback
+      ? `<span class="ptool-convdigest-summary-tag">${escapeHtml(
+        _t("convDigest.summary", "summary"))}</span>`
+      : "";
+    let textHtml;
+    if (text && full && full !== text) {
+      textHtml = `<details class="ptool-convdigest-expand">` +
+        `<summary class="ptool-convdigest-text${fallbackCls}">${fallbackTag}${escapeHtml(text)}` +
+        `<span class="ptool-convdigest-expand-hint">${escapeHtml(
+          _t("convDigest.expand", "expand"))}</span></summary>` +
+        `<div class="ptool-convdigest-full">${escapeHtml(full)}</div></details>`;
+    } else {
+      textHtml = text
+        ? `<div class="ptool-convdigest-text${fallbackCls}">${fallbackTag}${escapeHtml(text)}</div>`
+        : (hints.length ? "" : `<div class="ptool-convdigest-text ptool-convdigest-notext">${escapeHtml(
+          _t("convDigest.noText", "(no text)"))}</div>`);
+    }
+    const msgRel = _convMetaRelTime(m.ts);
+    const idxHtml = `<span class="ptool-convdigest-idx">#${escapeHtml(String(m.index || ""))}</span>`;
+    const tsHtml = msgRel
+      ? `<span class="ptool-convdigest-msgtime" title="${escapeHtml(
+        _convMetaAbsTime(m.ts))}">${escapeHtml(msgRel)}</span>`
+      : "";
     html += `<div class="ptool-convdigest-msg ptool-convdigest-${escapeHtml(roleCls)}">` +
+      `<div class="ptool-convdigest-gutter">` +
       `<span class="ptool-convdigest-role">${escapeHtml(roleLabel(m.role))}</span>` +
+      idxHtml + `</div>` +
       `<div class="ptool-convdigest-msgbody">${textHtml}` +
-      (hints.length ? `<div class="ptool-convdigest-hints">${hints.join("")}</div>` : "") +
+      ((hints.length || tsHtml) ? `<div class="ptool-convdigest-hints">${hints.join("")}${tsHtml}</div>` : "") +
       `</div></div>`;
   }
   html += `</div>`;
-  if (cd.truncated) {
+  if (cd.truncated && !(cd.omitted > 0)) {
+    // Fallback marker when a truncation happened without an inline seam.
     html += `<div class="ptool-convdigest-more">${escapeHtml(
       _t("convDigest.truncated", "… earlier messages omitted — open the model view for the full transcript."))}</div>`;
   }
   html += `</div>`;
   return html;
+}
+
+/* Absolute-time formatter (locale string) for the digest tooltips. */
+function _convMetaAbsTime(ts) {
+  const n = Number(ts) || 0;
+  if (!n) return "";
+  try {
+    return new Date(n).toLocaleString();
+  } catch (e) {
+    return String(n);
+  }
 }
 
 /** Mini-kanban for project_board_read: counts + per-lane epic titles. */
@@ -1535,12 +1641,15 @@ function _renderCommitResult(cr) {
    mutations) represent an action the agent TOOK and stay OPEN. */
 const _CONV_META_ROUTINE_READS = new Set([
   "project_peer_status", "project_board_read", "project_feed_read",
-  "project_charter_read", "list_conversations", "get_conversation",
+  "project_charter_read", "list_conversations",
 ]);
 function _convMetaDefaultOpen(round) {
   const tn = round.toolName || "";
   // Board MUTATIONS (post/claim/complete/block) are actions → open.
   if (tn.startsWith("project_board_") && tn !== "project_board_read") return true;
+  // get_conversation is the PRIMARY viewing product of the "View Conversation"
+  // tool — its digest card is the main deliverable, so it stays OPEN (default
+  // expanded) rather than hiding the transcript behind a click.
   return !_CONV_META_ROUTINE_READS.has(tn);
 }
 
@@ -3282,6 +3391,22 @@ function renderSegmentTimelineHTML(segments, msg, idx) {
    * up as a positional tool body nor inflate the "N tools" header. */
   const _injByAnchor = new Map();
   const realRounds = [];
+  /* ★ Superseded-orphan drop, SEGMENT-TIMELINE path (parity with
+   *   renderToolRoundsHTML's filter). A FloorRetry / stream-retry duplicate
+   *   whose tc_id never survived into the final assistant_msg is stamped
+   *   badge='superseded' (result-less) by the backend reconcile_announced_rounds
+   *   — its adopted/recovered twin is the real call. This path renders from
+   *   `segments` (assemble_segments mints a tool_use segment for EVERY round,
+   *   carrying only {content,status} with NO badge), so the toolRounds-side
+   *   filter never runs here — the exact coverage gap that left a misleading
+   *   "interrupted" chip on a reloaded turn. Drop these rounds from `realRounds`
+   *   EARLY so both the render AND the header count / data-full-count (which read
+   *   realRounds.length) exclude them together; record their tc_ids so the
+   *   segment walk skips the matching tool_use WITHOUT falling to positional
+   *   no-id resolution (which could otherwise mis-grab an unrelated round).
+   *   Authoritative signal is the 'superseded' badge — NOT blind name+arg
+   *   structural matching (a turn may legitimately call the same tool twice). */
+  const _supersededTcIds = new Set();
   for (const r of allRounds) {
     if (r && (r._userSteerInject || r._peerInject || r._inboxInject)) {
       const injRound = r._userSteerInject ? r.steerRound
@@ -3289,6 +3414,8 @@ function renderSegmentTimelineHTML(segments, msg, idx) {
       const anchor = (injRound || 0) - 1;
       if (!_injByAnchor.has(anchor)) _injByAnchor.set(anchor, []);
       _injByAnchor.get(anchor).push(r);
+    } else if (_isSupersededOrphanRound(r)) {
+      if (r && r.toolCallId) _supersededTcIds.add(String(r.toolCallId));
     } else {
       realRounds.push(r);
     }
@@ -3316,12 +3443,18 @@ function renderSegmentTimelineHTML(segments, msg, idx) {
       batches.push(cur);
       curKey = key;
     }
-    cur.segs.push(s);
     if (s.type === "tool_use") {
+      // A superseded-orphan tool_use (its round was dropped from realRounds
+      // above): skip it entirely — no chip, and DON'T consume a positional
+      // no-id round for it (that would mis-pair an unrelated body).
+      if (s.id && _supersededTcIds.has(String(s.id))) continue;
+      cur.segs.push(s);
       // Resolve the render-rich round for this tool_use.
       let r = s.id ? byId.get(String(s.id)) : null;
       if (!r && noIdCursor < noId.length) r = noId[noIdCursor++];
       if (r) cur.rounds.push(r);
+    } else {
+      cur.segs.push(s);
     }
   }
   if (batches.length === 0) return "";
@@ -3926,8 +4059,48 @@ function renderPreferenceLearnedHtml(learned) {
   return `<div class="pref-learned-box">${rows}</div>`;
 }
 
+/* A "superseded" orphan round: an early-announced tool_start that was left
+ * result-less when a discarded FloorRetry / stream-retry attempt's tc_id never
+ * survived into the final assistant_msg, then settled by the backend
+ * reconcile_announced_rounds (badge='superseded', interrupted=true, NO real
+ * result). It is pure noise — its adopted twin (or the recovered response) is
+ * the real call — so we DROP it from the render entirely rather than show a
+ * misleading "interrupted" chip for a call the user never actually lost.
+ *
+ * NOT dropped: a genuine user-Stop dangling round (badge='interrupted', from
+ * _finalize_dangling_tool_rounds) — the user really interrupted that one, so it
+ * keeps its static interrupted affordance. Discriminator = the 'superseded'
+ * badge, which ONLY reconcile_announced_rounds stamps. */
+function _isSupersededOrphanRound(r) {
+  if (!r) return false;
+  const meta = (r.results && r.results[0]) || {};
+  // result-less: reconcile writes a single meta with no tool content/toolContent
+  const hasRealResult = r.toolContent != null
+    || (meta && (meta.fetched || (meta.fetchedChars | 0) > 0));
+  // ★ Authoritative signal is the 'superseded' badge (ONLY
+  //   reconcile_announced_rounds stamps it) + result-less — NOT the status.
+  //   The status intentionally DIFFERS between the two apply paths for the
+  //   SAME husk: the backend stamps entry.status='aborted' locally (→ what the
+  //   persisted/reloaded snapshot carries), but the live tool_result SSE event
+  //   the reconcile emitted carries no status, so the pure reducer's
+  //   'tool_result' case settles the live round to status='done'. Gating on
+  //   status==='aborted' (the old guard) therefore dropped the husk ONLY after
+  //   the done-event/reload rewrote it to 'aborted' — the live in-turn round
+  //   stayed 'done' and rendered a misleading "interrupted"/"superseded" chip
+  //   for the whole rest of the turn. Keying on badge+result-less drops it on
+  //   BOTH paths. A still-in-flight round (status 'searching'/'executing') has
+  //   results=null → meta={} → badge undefined → correctly NOT dropped. */
+  return meta.badge === "superseded" && !hasRealResult;
+}
+
 function renderToolRoundsHTML(rounds, isStreaming, segments) {
   if (!rounds || rounds.length === 0) return "";
+  /* ★ Drop superseded orphan rounds (FloorRetry/stream-retry duplicates left
+   *   result-less and reconciled) so they never render a misleading
+   *   "interrupted" chip. The user's real call is the adopted/recovered twin.
+   *   Genuine user-Stop interruptions (badge='interrupted') are kept. */
+  rounds = rounds.filter((r) => !_isSupersededOrphanRound(r));
+  if (rounds.length === 0) return "";
   /* ★ UNIFIED: every round — tool calls AND swarm panels — goes into
    *   the single ptool-panel in chronological order. Swarm rounds
    *   render the full agent dashboard inline as a "row" so the user

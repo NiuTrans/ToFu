@@ -8142,24 +8142,50 @@ html:not([data-theme="tofu"]) .scene-switch-btn{display:none}
    referenced transcript: a meta row (preset + message count) then one row per
    message with a role chip, text preview, and tool/attachment hints. Replaces
    the raw ═══ / ── User Message # ASCII dump. */
-.ptool-convdigest { display: flex; flex-direction: column; gap: 8px; }
-.ptool-convdigest-meta { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+.ptool-convdigest { display: flex; flex-direction: column; gap: 9px; }
+.ptool-convdigest-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding-bottom: 7px; border-bottom: 1px solid var(--border); }
 .ptool-convdigest-preset { display: inline-flex; align-items: center; height: 17px; padding: 0 8px; font-size: 10px; font-weight: 650; letter-spacing: 0.02em; line-height: 1; border-radius: 999px; color: var(--accent); background: color-mix(in srgb, var(--accent) 15%, transparent); white-space: nowrap; }
 .ptool-convdigest-msgcount { font-size: 11px; color: var(--text-tertiary); }
-.ptool-convdigest-msgs { display: flex; flex-direction: column; gap: 5px; }
-.ptool-convdigest-msg { display: flex; align-items: flex-start; gap: 8px; padding: 6px 9px; background: var(--bg-secondary); border: 1px solid var(--border); border-left: 2px solid var(--border); border-radius: 5px; }
-.ptool-convdigest-user { border-left-color: var(--accent); }
+.ptool-convdigest-time { font-size: 11px; color: var(--text-tertiary); margin-left: auto; white-space: nowrap; }
+.ptool-convdigest-msgs { display: flex; flex-direction: column; gap: 6px; }
+.ptool-convdigest-msg { display: flex; align-items: flex-start; gap: 9px; padding: 7px 10px; background: var(--bg-secondary); border: 1px solid var(--border); border-left: 3px solid var(--border); border-radius: 6px; }
+.ptool-convdigest-user { border-left-color: var(--accent); background: color-mix(in srgb, var(--accent) 5%, var(--bg-secondary)); }
 .ptool-convdigest-assistant { border-left-color: var(--pb-green, #22c55e); }
 .ptool-convdigest-system { border-left-color: #a78bfa; }
-.ptool-convdigest-role { flex-shrink: 0; display: inline-flex; align-items: center; height: 16px; padding: 0 7px; font-size: 9.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em; color: var(--text-secondary); background: var(--bg-tertiary); border-radius: 7px; white-space: nowrap; }
+.ptool-convdigest-gutter { flex-shrink: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 3px; width: 62px; }
+.ptool-convdigest-role { display: inline-flex; align-items: center; height: 16px; padding: 0 7px; font-size: 9.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em; color: var(--text-secondary); background: var(--bg-tertiary); border-radius: 7px; white-space: nowrap; }
+.ptool-convdigest-idx { font-size: 9.5px; color: var(--text-tertiary); font-family: var(--mono, monospace); padding-left: 2px; }
 .ptool-convdigest-msgbody { flex: 1; min-width: 0; }
-.ptool-convdigest-text { font-size: 12px; line-height: 1.5; color: var(--text-primary); overflow-wrap: anywhere; }
+.ptool-convdigest-text { font-size: 12.5px; line-height: 1.55; color: var(--text-primary); overflow-wrap: anywhere; }
 .ptool-convdigest-notext { color: var(--text-tertiary); font-style: italic; }
-.ptool-convdigest-hints { margin-top: 4px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.ptool-convdigest-tools { display: inline-flex; align-items: center; gap: 4px; font-size: 10.5px; font-family: var(--mono, monospace); color: var(--text-tertiary); }
+.ptool-convdigest-summary { color: var(--text-secondary); }
+.ptool-convdigest-summary-tag { display: inline-flex; align-items: center; height: 14px; margin-right: 6px; padding: 0 6px; font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em; color: var(--text-tertiary); background: var(--bg-tertiary); border-radius: 6px; vertical-align: 1px; }
+.ptool-convdigest-expand > summary { cursor: pointer; list-style: none; }
+.ptool-convdigest-expand > summary::-webkit-details-marker { display: none; }
+.ptool-convdigest-expand-hint { margin-left: 6px; font-size: 10px; font-weight: 600; color: var(--accent); text-transform: uppercase; letter-spacing: 0.03em; opacity: 0.8; }
+.ptool-convdigest-expand[open] > summary .ptool-convdigest-expand-hint { display: none; }
+.ptool-convdigest-full { margin-top: 6px; padding: 7px 9px; font-size: 12px; line-height: 1.55; color: var(--text-primary); background: var(--bg-tertiary); border-radius: 5px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.ptool-convdigest-hints { margin-top: 5px; display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+.ptool-convdigest-tools { display: inline-flex; align-items: center; gap: 5px; flex-wrap: wrap; color: var(--text-tertiary); }
+.ptool-convdigest-tool { display: inline-flex; align-items: center; gap: 5px; max-width: 320px; padding: 1px 7px; font-size: 10.5px; font-family: var(--mono, monospace); background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 6px; }
+.ptool-convdigest-tool-name { font-weight: 650; color: var(--text-secondary); white-space: nowrap; }
+.ptool-convdigest-tool-arg { color: var(--text-tertiary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ptool-convdigest-tool-failed { border-color: color-mix(in srgb, var(--danger, #ef4444) 45%, var(--border)); }
+.ptool-convdigest-tool-failed .ptool-convdigest-tool-name { color: var(--danger, #ef4444); }
+.ptool-convdigest-tool-more { font-size: 10px; color: var(--text-tertiary); font-family: var(--mono, monospace); }
+.ptool-convdigest-msgtime { font-size: 10px; color: var(--text-tertiary); white-space: nowrap; }
 .ptool-convdigest-att { display: inline-flex; align-items: center; height: 15px; padding: 0 6px; font-size: 10px; font-weight: 600; color: var(--text-secondary); background: var(--bg-tertiary); border-radius: 7px; white-space: nowrap; }
 .ptool-convdigest-empty { font-size: 12px; color: var(--text-tertiary); font-style: italic; }
 .ptool-convdigest-more { font-size: 11px; color: var(--text-tertiary); font-style: italic; }
+.ptool-convdigest-omitted { padding: 4px 0; text-align: center; font-size: 10.5px; color: var(--text-tertiary); font-style: italic; letter-spacing: 0.02em; position: relative; }
+.ptool-convdigest-omitted::before, .ptool-convdigest-omitted::after { content: ""; position: absolute; top: 50%; width: 22%; height: 1px; background: var(--border); }
+.ptool-convdigest-omitted::before { left: 6%; }
+.ptool-convdigest-omitted::after { right: 6%; }
+/* RAW/debug read markers — only rendered for get_conversation(raw=true). */
+.ptool-convdigest-rawbadge { gap: 4px; height: 17px; padding: 0 8px; font-size: 10px; font-weight: 700; letter-spacing: 0.03em; line-height: 1; border-radius: 999px; color: var(--pb-amber, #f59e0b); background: color-mix(in srgb, var(--pb-amber, #f59e0b) 15%, transparent); border: 1px solid color-mix(in srgb, var(--pb-amber, #f59e0b) 40%, transparent); }
+.ptool-convdigest-metachip { display: inline-flex; align-items: center; height: 15px; padding: 0 6px; font-size: 10px; font-weight: 600; font-family: var(--mono, monospace); color: var(--text-tertiary); background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 6px; white-space: nowrap; max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
+.ptool-convdigest-meta-model { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 35%, var(--border)); }
+.ptool-convdigest-meta-fr { color: var(--text-secondary); }
 .ptool-batch-done-summary {
   display: flex;
   /* Top-align so a multi-line description keeps the status glyph / index

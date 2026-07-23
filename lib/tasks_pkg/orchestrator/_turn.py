@@ -12,16 +12,71 @@ Both delegate to ``run_task`` in ``_run.py``.
 
 from __future__ import annotations
 
+import re
+import threading
+import time
 from typing import Any
 
-from lib.log import get_logger
+from lib.log import get_logger, set_req_id
+from lib.protocols import BodyBuilder
 
 logger = get_logger(__name__)
 
+from lib.llm import build_body as _build_body_impl
 
+from lib.llm import AbortedError
+from lib.tasks_pkg.attachments import compute_turn_attachments, inject_attachments
+from lib.tasks_pkg.cache_tracking import (
+    cleanup_stale_cache_states,
+    detect_cache_break,
+    get_session_cache_stats,
+    log_round_cache_stats,
+    release_ttl_latch,
+    sort_tool_results,
+)
+from lib.agent_core.events import EventType, build_event
+from lib.tasks_pkg.compaction import run_compaction_pipeline
+from lib.tasks_pkg.executor import (
+    _finalize_tool_round,
+    _generate_tool_summary,
+)
+from lib.tasks_pkg.llm_fallback import _llm_call_with_fallback
+from lib.tasks_pkg.manager import (
+    _strip_base64_for_snapshot,
+    append_event,
+    checkpoint_task_partial,
+    persist_task_result,
+    stream_llm_response,
+)
 from lib.tasks_pkg.commit_round import (  # noqa: E402
     _run_commit_round_async,  # noqa: F401  (re-export for back-comp)
-    )
+    _spawn_async_commit_round,
+    _spawn_async_profile_consolidation,
+    derive_round_modified_files,
+)
+from lib.tasks_pkg.message_builder import inject_tool_history
+from lib.tasks_pkg.model_config import (
+    _assemble_tool_list,
+    _resolve_model_config,
+)
+from lib.tasks_pkg.stream_handler import analyse_stream_result
+from lib.tasks_pkg.system_context import (
+    _inject_system_contexts,
+    _disabled_prompt_blocks,
+    inject_search_addendum_to_user,
+)
+from lib.tasks_pkg.wire_messages import apply_wire_sanitize
+from lib.tasks_pkg.server_message_store import (
+    rebuild_messages_with_history as _rebuild_messages_with_history,
+    save_messages as _save_messages_to_store,
+    estimate_token_overhead as _estimate_token_overhead,
+)
+from lib.tasks_pkg.tool_dispatch import (
+    emit_tool_exec_phase,
+    execute_tool_pipeline,
+    parse_tool_calls,
+    tool_label,
+)
 
 
 

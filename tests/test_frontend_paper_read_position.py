@@ -46,13 +46,7 @@ pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS_DIR = os.path.join(ROOT, 'static', 'js')
-# _persistReadingPosition / _loadReadingPosition / _loadOrGenerateReport moved to
-# paper/report.js (Epic E split, 2026-07-11); paper-reader.js keeps _reportView
-# + shared helpers. Both must be eval'd; the NC markers live in report.js.
-REPORT_JS = os.path.join(JS_DIR, 'paper', 'report.js')
-CORE_JS = os.path.join(JS_DIR, 'paper-reader.js')
-PAPER_JS = REPORT_JS  # the file under test (holds the NC markers)
+PAPER_JS = os.path.join(ROOT, 'static', 'js', 'paper-reader.js')
 
 
 def _node_deps_available() -> bool:
@@ -95,8 +89,7 @@ global.Api = win.Api = { paper: {
 localStorage.setItem('paper_active_id', 'paper-1');
 localStorage.setItem('paper_library_migrated_v1', '1');
 
-eval(fs.readFileSync(process.argv[2], 'utf8'));  // paper/report.js (report/review fns)
-if (process.argv[4]) eval(fs.readFileSync(process.argv[4], 'utf8'));  // paper-reader.js core
+eval(fs.readFileSync(process.argv[2], 'utf8'));  // real, shipped paper-reader.js
 
 const out = [];
 function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
@@ -187,12 +180,12 @@ function genBtn(id) { return document.getElementById(id).querySelector('.paper-r
 """
 
 
-def _run(report_js: str, core_js: str = CORE_JS) -> subprocess.CompletedProcess:
+def _run(paper_js: str) -> subprocess.CompletedProcess:
     harness = os.path.join(HERE, '_paper_read_position_harness.js')
     with open(harness, 'w', encoding='utf-8') as f:
         f.write(_HARNESS)
     try:
-        return subprocess.run(['node', harness, report_js, ROOT, core_js],
+        return subprocess.run(['node', harness, paper_js, ROOT],
                               capture_output=True, text=True, timeout=60)
     finally:
         try:

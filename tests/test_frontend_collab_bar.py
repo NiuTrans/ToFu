@@ -294,33 +294,51 @@ def test_NC_conflict_segment_is_load_bearing():
 
 # Same harness, but: activePeers=2 + a peerEpics map, and the local mirror is
 # left EMPTY (no CB._setPeers) — simulating a dead presence push stream.
-# Same harness, but: activePeers=2 + a peerEpics map, and the local mirror is
-# left EMPTY (no CB._setPeers) — simulating a dead presence push stream.
-#
-# Built by SLICING the base harness at the `// Drive a summary:` marker and
-# appending the dead-push scenario + assertions (the base uses `.replace()` on
-# specific summary/assertion text; that drifted when the base comments/blocks
-# were reworded, silently no-op'ing the substitution so the dead-push checks
-# never ran). Slicing is anchor-stable — mirrors _HARNESS_EMPTY below.
-_HARNESS_DEADPUSH = _HARNESS[:_HARNESS.index("// Drive a summary:")] + (
+_HARNESS_DEADPUSH = _HARNESS.replace(
+    "CB._setSummary('/proj/real', {\n"
+    "  epicsOpen: 2, epicsClaimed: 1, epicsDone: 0, pendingDecisions: 1,\n"
+    "  activePeers: 1, charterExists: true,\n"
+    "  peerEpics: { 'c-worker': 'Refactor the parser' },\n"
+    "});\n"
+    "CB._setPeers('/proj/real', ['c-worker']);\n"
+    "CB._render();",
     "CB._setSummary('/proj/real', {\n"
     "  epicsOpen: 0, epicsClaimed: 0, epicsDone: 0, pendingDecisions: 0,\n"
     "  activePeers: 2, charterExists: true,\n"
     "  peerEpics: { 'c-worker': 'Refactor the parser' },\n"
     "});\n"
     "// NO CB._setPeers — the local push mirror is EMPTY (degraded stream).\n"
-    "CB._render();\n"
+    "CB._render();"
+).replace(
+    "const html = stripEl.innerHTML;\n"
+    "// Action-first headline: the decisions segment renders (and is the emphasised one).\n"
+    "check('decisions_segment', html.indexOf('decisionsAwaiting') !== -1 && html.indexOf('collab-seg-decisions') !== -1);\n"
+    "check('decisions_count', html.indexOf('1') !== -1);\n"
+    "check('has_decisions_accent', html.indexOf('collab-has-decisions') !== -1);\n"
+    "// In-progress + open segments render.\n"
+    "check('progress_segment', html.indexOf('epicsInProgress') !== -1);\n"
+    "check('open_segment', html.indexOf('collab-seg-open') !== -1);\n"
+    "// The DEEP join: the online peer's epic title renders as \"advancing «title»\".\n"
+    "check('peer_epic_title', html.indexOf('Refactor the parser') !== -1);\n"
+    "check('peer_advancing', html.indexOf('collab-peer-epic') !== -1);\n"
+    "// Not shown: raw activity noise like a \"generating\" status word (the whole\n"
+    "// point — the bar shows collaboration semantics, not activity state).\n"
+    "check('no_generating_noise', html.indexOf('generating') === -1);\n"
+    "// Single slim line — no multi-row peer box.\n"
+    "check('single_line_bar', !!stripEl.querySelector('.collab-bar-inner')\n"
+    "  && !stripEl.querySelector('.presence-peer-meta'));\n"
+    "// Click opens the Project Brain panel.\n"
+    "const inner = stripEl.querySelector('.collab-bar-inner');\n"
+    "if (inner) { inner.click(); check('click_opens_brain', _opened === 1); }",
     "const html = stripEl.innerHTML;\n"
     "// The bar is VISIBLE even though the local push mirror is empty — the\n"
     "// peer segment comes from the backend summary.activePeers.\n"
     "check('bar_visible_on_dead_push', stripEl.hidden === false);\n"
     "check('peers_segment_from_backend', html.indexOf('collab-seg-peers') !== -1);\n"
     "check('peers_count_two', html.indexOf('peersOnline 2') !== -1);\n"
-    "// The peer\u2192epic join line renders from backend peerEpics, NOT the mirror.\n"
+    "// The peer→epic join line renders from backend peerEpics, NOT the mirror.\n"
     "check('peer_epic_title', html.indexOf('Refactor the parser') !== -1);\n"
-    "check('peer_advancing', html.indexOf('collab-peer-epic') !== -1);\n\n"
-    "console.log(out.join('\\n'));\n"
-    "process.exit(0);\n"
+    "check('peer_advancing', html.indexOf('collab-peer-epic') !== -1);"
 )
 
 

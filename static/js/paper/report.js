@@ -2372,10 +2372,6 @@ function _syncReportToolbar(running, view) {
     if (genBtn) genBtn.style.display = (running || hasOutput) ? 'none' : '';
     if (regenBtn) regenBtn.style.display = (!running && hasOutput) ? '' : 'none';
     if (copyBtn) copyBtn.style.display = (!running && hasOutput) ? '' : 'none';
-    // Light the Rebuttal segment dot as soon as a follow-up reply exists, so
-    // the reviewer sees it without switching (idempotent; does not change the
-    // active segment).
-    if (typeof _syncReviewSegState === 'function') { try { _syncReviewSegState(); } catch (e) {} }
   }
   // Keep the EN/中 segmented control in sync on every paint (both views).
   if (typeof _syncReportLangToggle === 'function') _syncReportLangToggle(view);

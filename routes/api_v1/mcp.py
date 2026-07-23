@@ -421,6 +421,8 @@ def get_catalog_v1():
     tags=['mcp'],
 )
 def install_from_catalog_v1():
+    from lib.mcp import get_bridge
+    from lib.mcp.client import MCPConnectError
     from lib.mcp.config import load_mcp_config, upsert_server as cfg_upsert
     from lib.mcp.registry import build_server_config, get_catalog_entry
 

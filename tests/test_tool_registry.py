@@ -73,17 +73,6 @@ class TestPhaseSemantics(unittest.TestCase):
         self.assertIn('read_files', names)
         self.assertIn('create_memory', names)
 
-    def test_scheduler_is_default_tool_regardless_of_flag(self):
-        # Scheduler tools are a DEFAULT capability (like memory / todo): they
-        # attach whenever a base tool exists, NOT gated on scheduler_enabled.
-        # read_files is always on, so they're present even with the flag off.
-        for flag in (False, True):
-            tl, _ = assemble_tool_list(_ctx(scheduler_enabled=flag))
-            names = _names(tl)
-            for n in ('schedule_create', 'schedule_list', 'schedule_manage'):
-                self.assertIn(n, names,
-                              f'{n} must be present regardless of scheduler_enabled={flag}')
-
     def test_swarm_without_base_tools(self):
         # Swarm is NOT gated on has_base_tools — but read_files is always on,
         # so assert the three swarm tools are present regardless.

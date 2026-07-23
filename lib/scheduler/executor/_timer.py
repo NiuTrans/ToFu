@@ -108,15 +108,11 @@ def _execute_timer_create(fn_args):
         # so the UI can explain WHAT is being verified and HOW — not just a
         # bare "watching" line.
         _check_cmd_full = timer.get('check_command', '') or ''
-        _cond_kind = timer.get('condition_kind', 'llm') or 'llm'
-        _cond_cmd = timer.get('condition_command', '') or ''
         if parent_task and round_num is not None:
             for sr in parent_task.get('toolRounds', []):
                 if sr.get('roundNum') == round_num:
                     sr['_timerCheckInstruction'] = check_instruction
                     sr['_timerCheckCommand'] = _check_cmd_full
-                    sr['_timerConditionKind'] = _cond_kind
-                    sr['_timerConditionCommand'] = _cond_cmd
                     sr['_timerPollInterval'] = poll_interval
                     sr['_timerMaxPolls'] = max_polls
                     break
@@ -137,10 +133,8 @@ def _execute_timer_create(fn_args):
                 pollNum=0,
                 decision='started',
                 reason=f'Timer created — polling every {poll_interval}s (max {max_polls})',
-                checkInstruction=check_instruction[:4000],
+                checkInstruction=check_instruction[:600],
                 checkCommand=_check_cmd_full[:400],
-                conditionKind=_cond_kind,
-                conditionCommand=_cond_cmd[:400],
                 pollInterval=poll_interval,
                 maxPolls=max_polls,
                 nextPollTs=int((_time.time() + poll_interval) * 1000),
@@ -245,19 +239,6 @@ def _execute_timer_create(fn_args):
                 continue
 
             decision = 'ready' if ready else ('parse_error' if parse_error else 'wait')
-            # A hybrid timer can AUTO-PROMOTE to pure `code` mid-run once its
-            # predicate has agreed with the LLM enough times (see
-            # reconcile_and_decide). Re-read the CURRENT kind each poll so the
-            # UI badge flips hybrid→command-based when that happens, instead of
-            # showing the stale creation-time kind forever.
-            _cur_kind = _cond_kind
-            try:
-                from lib.scheduler.timer import get_timer as _get_timer
-                _cur_row = _get_timer(timer_id)
-                if _cur_row and _cur_row.get('condition_kind'):
-                    _cur_kind = _cur_row['condition_kind']
-            except Exception as _ke:
-                logger.debug('[Timer:%s] current-kind read failed: %s', timer_id, _ke)
             # Persist the raw LLM output only when diagnostically useful (a
             # malformed decision) — a clean wait/ready needs no raw dump.
             _raw_to_store = raw_content if parse_error else ''
@@ -295,13 +276,6 @@ def _execute_timer_create(fn_args):
                     'ts': int(_time.time() * 1000),
                 }
                 _attach_poll_to_round(_poll_entry)
-                # Keep the toolRound's kind in sync with a mid-run promotion so
-                # a page refresh / reconnect (which rebuilds from the snapshot)
-                # shows the CURRENT kind, not the creation-time one.
-                for sr in parent_task.get('toolRounds', []):
-                    if sr.get('roundNum') == round_num:
-                        sr['_timerConditionKind'] = _cur_kind
-                        break
                 # Mark the round as triggered if ready
                 if ready:
                     for sr in parent_task.get('toolRounds', []):
@@ -318,7 +292,6 @@ def _execute_timer_create(fn_args):
                     pollId=poll_id,
                     decision=decision,
                     reason=reason[:400],
-                    conditionKind=_cur_kind,
                     tokensUsed=tokens_used,
                     cmdOutput=_cmd_snippet,
                     parseError=parse_error,

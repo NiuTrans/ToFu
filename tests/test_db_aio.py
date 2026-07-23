@@ -90,37 +90,22 @@ class TestAsyncCrud:
     def test_fetchall_multiple(self):
         from lib.database import async_execute, async_fetchall
 
-        # Self-contained: seed our own rows in a private id range and assert
-        # only on those. Tests must NOT depend on rows inserted by sibling
-        # tests — under xdist (-n auto) methods are distributed across workers
-        # with separate DB files, so no ordering/shared-state can be assumed.
         async def _scenario():
             await async_execute('INSERT INTO _aio_test (id, name, val) VALUES (?, ?, ?)',
-                                (2001, 'beta', 20))
+                                (2, 'beta', 20))
             await async_execute('INSERT INTO _aio_test (id, name, val) VALUES (?, ?, ?)',
-                                (2002, 'gamma', 30))
-            return await async_fetchall(
-                'SELECT id FROM _aio_test WHERE id IN (?, ?) ORDER BY id',
-                (2001, 2002))
+                                (3, 'gamma', 30))
+            return await async_fetchall('SELECT id FROM _aio_test ORDER BY id')
 
         rows = _run(_scenario())
         ids = [r['id'] for r in rows]
-        assert ids == [2001, 2002]
+        assert ids == [1, 2, 3]
 
     def test_execute_returns_rowcount(self):
         from lib.database import async_execute
 
-        # Self-contained: seed exactly 3 rows in a private id range, then
-        # UPDATE only those and assert the rowcount. Never rely on rows left
-        # by sibling tests (xdist distributes methods across separate DBs).
         async def _scenario():
-            for i in (3001, 3002, 3003):
-                await async_execute(
-                    'INSERT INTO _aio_test (id, name, val) VALUES (?, ?, ?)',
-                    (i, 'rc', 0))
-            return await async_execute(
-                'UPDATE _aio_test SET val = val + 1 WHERE id IN (?, ?, ?)',
-                (3001, 3002, 3003))
+            return await async_execute('UPDATE _aio_test SET val = val + 1 WHERE id <= ?', (3,))
 
         n = _run(_scenario())
         assert n == 3

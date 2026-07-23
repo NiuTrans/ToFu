@@ -1201,7 +1201,25 @@ function renderMessage(msg, idx) {
     const _tlIcon = (typeof Icon === 'function') ? Icon('wrench', 13) : '';
     body += `<div class="trimmed-tool-activity" onclick="hydrateFullConversation('${escapeHtml(_cid)}')" title="${escapeHtml(_label)}">${_tlIcon}<span>${escapeHtml(_label)}</span></div>`;
   }
-  if (msg.thinking && !_segTimelineRendered) {
+  /* ── Terminal thinking block ──────────────────────────────────────────
+   * `msg.thinking` is the TERMINAL round's reasoning (the prose the model
+   * produced right before its final answer — task['thinking'], reset each
+   * tool round; the per-round reasoning of earlier batches lives in the
+   * segments, NOT here). Render it whenever present.
+   *
+   * ★ ROOT-FIX (recurring "reasoning_content missing" bug): the block used to
+   * be gated on `!_segTimelineRendered` under the assumption that the timeline
+   * "already includes the thinking". That is TRUE only for the per-round
+   * (non-terminal) thinking segments — the timeline DELIBERATELY skips every
+   * `terminal` segment (renderSegmentTimelineHTML: `if (s.terminal) continue`),
+   * exactly like the deliverable text is excluded there and rendered separately
+   * by the `else if (msg.content)` branch above. So when the timeline rendered,
+   * the terminal reasoning had NO render path at all and was silently dropped.
+   * The terminal thinking string is distinct from every inline per-round
+   * segment (different accumulator), so rendering it here never duplicates the
+   * inline thinking. See tests/test_frontend_terminal_thinking_render.py for
+   * the load-bearing guard (NEUTER re-adds the gate → terminal thinking drops). */
+  if (msg.thinking) {
     const thinkLen = msg.thinking.length;
     const thinkMeta = thinkLen >= 1024 ? ` (${Math.round(thinkLen / 1024)}k chars)` : ` (${thinkLen} chars)`;
     const _thinkLbl = (typeof t === 'function') ? t('stream.thinking.done') : 'Thinking Process';

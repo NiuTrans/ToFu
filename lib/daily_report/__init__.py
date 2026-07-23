@@ -43,6 +43,8 @@ from .cost import (
     _scan_costs_in_range,
     _load_cached_day_costs,
     _persist_day_cost,
+    _persisted_cost_dates,
+    _should_pin_day,
     invalidate_day_cost_cache,
     invalidate_cost_cache_for_messages,
     _get_monthly_costs,
@@ -96,6 +98,7 @@ __all__ = [
     '_calendar_cache', '_CALENDAR_CACHE_TTL', '_LEGACY_PRESET_TO_MODEL',
     '_qwen_cny', '_calc_msg_cost_cny', '_scan_costs_in_range',
     '_load_cached_day_costs', '_persist_day_cost',
+    '_persisted_cost_dates', '_should_pin_day',
     'invalidate_day_cost_cache', 'invalidate_cost_cache_for_messages',
     '_get_monthly_costs',
     # todos

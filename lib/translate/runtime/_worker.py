@@ -7,11 +7,10 @@ commits the result + per-round segment map to the DB, and reports errors via
 an error envelope. Reads/writes the shared task registry through the
 ``_translate_tasks`` / ``_translate_tasks_lock`` aliases from ``._state``.
 
-``_translate_freetext``, ``_build_segment_translation_map`` and
-``_commit_translation_to_db`` are resolved dynamically through the
-``lib.translate.runtime`` package facade at call time so callers/tests that
-monkeypatch those names on the facade module (as the pre-split single module
-allowed) keep working byte-identically.
+``_translate_freetext`` and ``_build_segment_translation_map`` are resolved
+dynamically through the ``lib.translate.runtime`` package facade at call time
+so callers/tests that monkeypatch those names on the facade module (as the
+pre-split single module allowed) keep working byte-identically.
 """
 
 import time
@@ -22,6 +21,7 @@ from ..engine import _translate_freetext  # noqa: F401 (facade re-export; resolv
 from ..notranslate import _extract_notranslate_blocks, _reattach_notranslate_blocks
 from ..prompt import _build_translate_prompt, _strip_notranslate_tags
 from ..status import _format_status_message
+from ..commit import _commit_translation_to_db
 from ._state import _translate_tasks, _translate_tasks_lock
 from ._segments import _build_segment_translation_map  # noqa: F401 (facade re-export; resolved dynamically below)
 
@@ -137,8 +137,7 @@ def _do_translate(task_id, text, target, source, conv_id, msg_idx, field, *, msg
                             logger.warning('[Translate] segment map build failed for task %s: %s',
                                            task_id[:8], se, exc_info=True)
                     try:
-                        import lib.translate.runtime as _rt_pkg
-                        _rt_pkg._commit_translation_to_db(conv_id, msg_idx, field, content,
+                        _commit_translation_to_db(conv_id, msg_idx, field, content,
                                                   original_text=original_text,
                                                   model='skipped', msg_id=msg_id,
                                                   segment_translations=seg_trans)
@@ -274,8 +273,7 @@ def _do_translate(task_id, text, target, source, conv_id, msg_idx, field, *, msg
 
         if conv_id and (msg_idx is not None or msg_id):
             try:
-                import lib.translate.runtime as _rt_pkg
-                _rt_pkg._commit_translation_to_db(conv_id, msg_idx, field, content,
+                _commit_translation_to_db(conv_id, msg_idx, field, content,
                                          original_text=original_text, model=_model,
                                          msg_id=msg_id,
                                          segment_translations=seg_trans)

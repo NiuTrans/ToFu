@@ -21,9 +21,11 @@ marker, and asserts:
   (b) the widened gate did not regress the ASSISTANT path (still timelines);
   (c) the widened gate did not OVER-broaden — a plain human USER turn (no
       _isVirtualUser) never renders the timeline;
-  (d) the two downstream effects of ``_segTimelineRendered`` fire for the VU:
-      the standalone thinking block is SUPPRESSED, and the translate-loading
-      block is stamped ``data-seg-timeline="1"`` (the preview-dup skip).
+  (d) the translate-loading block is stamped ``data-seg-timeline="1"`` (the
+      preview-dup skip). The standalone TERMINAL thinking block is NOT
+      suppressed — the timeline excludes terminal segments, so ``msg.thinking``
+      (the terminal reasoning) still renders below the panel (guarded in full
+      by test_frontend_terminal_thinking_render.py).
 
 NEUTER CONTROL
   • NC-gate: revert the gate to ``!isUser`` (drop the ``|| msg._isVirtualUser``)
@@ -173,9 +175,13 @@ function mkUser() {
   const html = renderMessage(mkVu(), 3);
   check('a_vu_timeline_rendered', html.indexOf('SEG-TIMELINE') !== -1);
   check('a_vu_no_grouped_panel', html.indexOf('GROUPED-PANEL') === -1);
-  // _segTimelineRendered=true suppresses the standalone thinking block.
-  check('a_vu_thinking_suppressed',
-        html.indexOf('thinking-block" onclick="_toggleThinking') === -1);
+  // The TERMINAL thinking (msg.thinking) is NOT suppressed: the timeline
+  // excludes terminal segments, so the standalone block must still render it
+  // (the recurring "reasoning_content missing" root-fix). The stubbed
+  // renderSegmentTimelineHTML emits no thinking, so this block is the ONLY
+  // path for the terminal reasoning here.
+  check('a_vu_terminal_thinking_rendered',
+        html.indexOf('thinking-block" onclick="_toggleThinking') !== -1);
   // Still a VU bubble (avatar/label unchanged — the only identity signal).
   const frag = win.document.createElement('div'); frag.innerHTML = html;
   const roleEl = frag.querySelector('.message-role');

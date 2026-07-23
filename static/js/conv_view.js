@@ -305,12 +305,6 @@
       if (!html) return false;
       const ct = document.getElementById('chatContainer');
       const savedScroll = ct ? ct.scrollTop : -1;
-      /* ★ JUMP FIX: decide the target BEFORE the swap. A reader parked at the
-       *   bottom (the common case at turn end) should stay pinned to the bottom;
-       *   otherwise we hold their exact offset. Measured on the OLD DOM so the
-       *   streaming-bubble geometry is what we compare against. */
-      const _wasNearBottom = (ct && typeof isNearBottom === 'function')
-        ? isNearBottom(80) : false;
       try {
         sm.outerHTML = html;
       } catch (e) {
@@ -330,33 +324,7 @@
         const _keep = document.getElementById('msg-' + idx);
         _evictByMsgId(_inner, msg._msgId, _keep);
       }
-      /* ★ JUMP FIX — two parts:
-       *   (1) The final `renderMessage` collapses the thinking block, drops the
-       *       phase indicator and re-runs syntax highlighting, so the finalized
-       *       node is a DIFFERENT height than the streaming bubble. Restoring the
-       *       raw pre-swap scrollTop therefore visually shifts content. Instead:
-       *       if the reader was at the bottom, re-pin to the bottom; else hold
-       *       their offset. Write with smooth OFF (via _withInstantScroll) so the
-       *       chat-container's `scroll-behavior:smooth` does not ANIMATE the snap
-       *       — the animated slide is the "莫名跳动" the user sees.
-       *   (2) hljs highlighting and (lazy) KaTeX typesetting change block heights
-       *       AFTER this synchronous pass, so a scroll set now is stale the moment
-       *       they land. Re-apply the same target on the next two frames (rAF²) so
-       *       the final position is taken AFTER layout settles — killing the
-       *       "定位完再变高" second jump. */
-      const _repin = () => {
-        if (!ct) return;
-        const _apply = () => {
-          if (_wasNearBottom) ct.scrollTop = ct.scrollHeight;
-          else if (savedScroll >= 0) ct.scrollTop = savedScroll;
-        };
-        if (typeof _withInstantScroll === 'function') _withInstantScroll(ct, _apply);
-        else _apply();
-      };
-      _repin();
-      if (typeof requestAnimationFrame === 'function') {
-        requestAnimationFrame(() => requestAnimationFrame(_repin));
-      }
+      if (savedScroll >= 0 && ct) ct.scrollTop = savedScroll;
       if (typeof _lastRenderedFingerprint !== 'undefined' &&
           typeof _convRenderFingerprint === 'function') {
         try { _lastRenderedFingerprint = _convRenderFingerprint(conv); }

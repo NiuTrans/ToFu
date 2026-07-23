@@ -484,89 +484,6 @@ const _CONV_WINDOW_PAGE = 50;          // rows rendered per page
 const _CONV_WINDOW_PREFETCH_PX = 600;  // append the next page this far before the sentinel is reached
 let _convVirtual = { observer: null, sentinel: null };
 
-/* ── C3: global keyset "load more" — fetch conversations OLDER than the
- *    oldest one currently in memory, so a conv that sorts past the first
- *    sidebar window is still reachable (instead of silently dropped). This is
- *    the GLOBAL/uncategorized list pager — distinct from the per-conversation
- *    message window (conv_window.js) and from folder-member loading
- *    (loadFolderMembers). Guarded so only ONE page fetch is in flight. */
-const _CONV_PAGE_SIZE = 100;
-let _globalPageFetching = false;
-
-/** True iff the server reports more conversations than we hold in memory. */
-function _hasMoreGlobalConvs() {
-  const total = (typeof getServerTotalCount === 'function') ? getServerTotalCount() : null;
-  if (total == null) return false;
-  return (typeof conversations !== 'undefined' ? conversations.length : 0) < total;
-}
-
-/** Count of not-yet-loaded earlier conversations (for the affordance label). */
-function _unloadedGlobalConvCount() {
-  const total = (typeof getServerTotalCount === 'function') ? getServerTotalCount() : null;
-  if (total == null) return 0;
-  return Math.max(0, total - (typeof conversations !== 'undefined' ? conversations.length : 0));
-}
-
-/**
- * Fetch the next global page (conversations older than the globally-oldest
- * one in memory) and incrementally merge it via mergeServerConvShells, then
- * re-render. Fire-and-forget; no-ops if a fetch is already running, if the
- * server has nothing more, or if we're inside a folder view (that path uses
- * loadFolderMembers instead).
- */
-async function loadMoreGlobalConvs() {
-  if (_globalPageFetching) return;
-  if (typeof getActiveFolderId === 'function' && getActiveFolderId()) return;
-  if (!_hasMoreGlobalConvs()) return;
-  if (typeof Api === 'undefined' || !Api.conversations || !Api.conversations.listPage) return;
-  /* Cursor = the globally-oldest conv in memory (smallest updatedAt, id as
-   * tie-break) so the next page is strictly older with no overlap. */
-  let cur = null;
-  for (const c of conversations) {
-    const u = c.updatedAt || c.createdAt || 0;
-    if (!cur || u < cur.u || (u === cur.u && String(c.id) < String(cur.id))) {
-      cur = { u, id: c.id };
-    }
-  }
-  if (!cur) return;
-  _globalPageFetching = true;
-  try {
-    const env = await Api.conversations.listPage(cur.u, cur.id, _CONV_PAGE_SIZE);
-    const rows = env && Array.isArray(env.conversations) ? env.conversations : [];
-    const added = (typeof mergeServerConvShells === 'function')
-      ? mergeServerConvShells(rows) : 0;
-    if (added > 0 && typeof renderConversationList === 'function') {
-      renderConversationList();
-    }
-  } catch (e) {
-    console.warn('[loadMoreGlobalConvs] page fetch failed: %s', e && e.message);
-  } finally {
-    _globalPageFetching = false;
-  }
-}
-
-/**
- * Append the "N earlier conversations not loaded · Load more" affordance at the
- * bottom of the sidebar list when the server holds more global convs than are
- * in memory (C4 — kills the silent drop). Clicking it triggers a keyset page
- * fetch. No-op inside a folder view or when everything is already loaded.
- */
-function _appendLoadMoreAffordance(listEl) {
-  if (!listEl) return;
-  if (typeof getActiveFolderId === 'function' && getActiveFolderId()) return;
-  const n = _unloadedGlobalConvCount();
-  if (n <= 0) return;
-  const label = (typeof t === 'function')
-    ? t('sidebar.loadMoreEarlier').replace('{n}', String(n))
-    : (n + ' earlier conversations not loaded · Load more');
-  const el = document.createElement('button');
-  el.type = 'button';
-  el.className = 'conv-load-more';
-  el.textContent = label;
-  el.addEventListener('click', () => { loadMoreGlobalConvs(); });
-  listEl.appendChild(el);
-}
-
 /** Disconnect any active windowing observer and drop the sentinel ref. */
 function _teardownConvVirtual() {
   if (_convVirtual.observer) {
@@ -662,14 +579,8 @@ function _renderConvWindow(listEl, filtered) {
   }
   listEl.innerHTML = html;
 
-  /* Everything in memory fits in the first window — no sentinel/observer
-   * needed. But the SERVER may still hold older conversations we never loaded
-   * (they sort past the sidebar window): show a "load more" affordance so
-   * they're reachable instead of silently dropped (C4). */
-  if (firstEnd >= plan.length) {
-    _appendLoadMoreAffordance(listEl);
-    return;
-  }
+  /* Everything fits in the first window — no sentinel/observer needed. */
+  if (firstEnd >= plan.length) return;
 
   let cursor = firstEnd;
   const sentinel = document.createElement('div');
@@ -692,16 +603,6 @@ function _renderConvWindow(listEl, filtered) {
     cursor = end;
 
     if (cursor >= plan.length) {
-      /* Reached the end of what's in memory. If the server holds MORE
-       * conversations than we've loaded (global view only), fetch the next
-       * keyset page — mergeServerConvShells appends them and re-renders, which
-       * rebuilds the window with a fresh sentinel. Otherwise show the manual
-       * "load more" affordance as a fallback and stop. */
-      if (_hasMoreGlobalConvs()) {
-        loadMoreGlobalConvs();
-      } else {
-        _appendLoadMoreAffordance(listEl);
-      }
       _teardownConvVirtual();
       return;
     }
@@ -807,18 +708,7 @@ function renderConversationList() {
     let listHtml = null;  // non-null only for the empty / special states below
 
     /* ── Empty state ── */
-    /* ── Folder members still loading (C4): a folder view with nothing yet in
-     *    memory AND an in-flight member fetch must show a LOADING state, not a
-     *    "folder is empty" state — the members may simply not be merged yet. ── */
-    const _membersLoading = _activeFolderId
-      && typeof isFolderMembersLoading === 'function'
-      && isFolderMembersLoading(_activeFolderId);
-    if (filtered.length === 0 && _activeFolderId && _membersLoading) {
-      listHtml = `<div class="folder-view-empty">` +
-        `<div class="folder-view-spinner" aria-hidden="true"></div>` +
-        `<div style="font-size:12px;color:var(--text-tertiary)">${t('sidebar.folderLoading')}</div>` +
-        `</div>`;
-    } else if (filtered.length === 0 && (_activeFolderId || folders.length > 0)) {
+    if (filtered.length === 0 && (_activeFolderId || folders.length > 0)) {
       const isUncategorized = !_activeFolderId;
       const emptyIcon = isUncategorized
         ? `<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.3;margin-bottom:8px"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg>`

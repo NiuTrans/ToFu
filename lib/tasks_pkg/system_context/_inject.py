@@ -269,10 +269,6 @@ def _inject_system_contexts(messages, project_path, project_enabled,
             tool_names=tool_names,
             # User-disabled blocks from the per-block system-prompt editor.
             disabled_blocks=disabled_blocks,
-            # Current date is NO LONGER baked into the cached static block —
-            # it rides the true tail (see ★4.5). Keeping it here re-billed the
-            # whole system prefix at every UTC-day rollover (Anthropic's named
-            # "don't inject timestamps into the cached prompt" anti-pattern).
             include_date=False,
         )
         _append_to_system_message(messages, _static_block,
@@ -615,11 +611,9 @@ Round N+3, a2's update lands. Synthesise the full picture for the user.
             _digest = ''
         if _digest:
             _digest_spliced = _wrap_system_reminder(_digest)
-            # Volatile (re-orders as siblings evolve) → ride the TRUE tail, NOT
-            # the system floor. Keeping it in system re-bills the whole body
-            # uncached every turn (prefix-cache 29298-pin bug). See
-            # _refresh_tail_block.
-            _refresh_tail_block(messages, _digest_spliced, _DIGEST_MARKER)
+            _append_to_system_message(messages, _digest_spliced,
+                                       as_separate_block=True)
+            _existing = _system_text(messages)
             _ctx_injected('digest', len(_digest_spliced))
         else:
             _ctx_suppressed('digest', 'empty')
@@ -663,9 +657,9 @@ Round N+3, a2's update lands. Synthesise the full picture for the user.
             _charter_block = ''
         if _charter_block:
             _charter_spliced = _wrap_system_reminder(_charter_block)
-            # Semi-volatile (grows on a commit) → ride the TRUE tail so a
-            # charter change never re-bills the cached system floor.
-            _refresh_tail_block(messages, _charter_spliced, _CHARTER_MARKER)
+            _append_to_system_message(messages, _charter_spliced,
+                                       as_separate_block=True)
+            _existing = _system_text(messages)
             _ctx_injected('charter', len(_charter_spliced))
         else:
             _ctx_suppressed('charter', 'empty')
@@ -694,9 +688,9 @@ Round N+3, a2's update lands. Synthesise the full picture for the user.
             _board_block = ''
         if _board_block:
             _board_spliced = _wrap_system_reminder(_board_block)
-            # Volatile (epics move every turn) → ride the TRUE tail, never the
-            # cached system floor.
-            _refresh_tail_block(messages, _board_spliced, _BOARD_MARKER)
+            _append_to_system_message(messages, _board_spliced,
+                                       as_separate_block=True)
+            _existing = _system_text(messages)
             _ctx_injected('board', len(_board_spliced))
         else:
             _ctx_suppressed('board', 'empty')
@@ -730,19 +724,13 @@ Round N+3, a2's update lands. Synthesise the full picture for the user.
         else:
             _ctx_suppressed('peer_protocol', 'empty')
 
-    # ★ 4.5 Current date → the TRUE tail, never the cached system floor.
-    #   The date changes once per UTC day. Previously it was inlined in the
-    #   static system block (append mode) or appended as its own system block
-    #   (replace mode) — either way it sat INSIDE the cached prefix, so the
-    #   daily rollover rewrote a cached block and re-billed the whole body
-    #   uncached at the UTC boundary (Anthropic names this exact anti-pattern:
-    #   "don't inject timestamps into the cached prompt"). Riding the true tail
-    #   — the SAME cache-safe seam the digest / charter / board use — keeps the
-    #   system prefix byte-stable across the day boundary and confines the date
-    #   bytes to the already-volatile 5m tail (which is re-billed every round
-    #   regardless, so the date rides for free). build_static_prompt() is now
-    #   always called with include_date=False, so this is the sole date source
-    #   in both append and replace modes.
+    # ★ 4.5 Current date rides the TRUE tail, never the cached system floor.
+    #   It changes once per UTC day; baked into the static block it re-billed
+    #   the whole prefix at the UTC rollover. Riding the true tail (the SAME
+    #   seam the digest / charter / board use) keeps the system prefix byte-
+    #   stable across the day boundary and confines the date to the already-
+    #   volatile 5m tail. build_static_prompt() is now always called with
+    #   include_date disabled, so this is the sole date source in both modes.
     _DATE_MARKER = 'Current date:'
     _date_spliced = _wrap_system_reminder(system_prompt_cc.section_current_date())
     _refresh_tail_block(messages, _date_spliced, _DATE_MARKER)

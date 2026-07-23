@@ -34,8 +34,6 @@
       "pricing": { "input": 0.691, "output": 3.039, "cacheWriteMul": 1.00, "cacheReadMul": 0.240, "name": "GLM-5 Turbo (TokenHub)" } },
     { "model_id": "glm-5v-turbo",                  "capabilities": ["text", "vision", "cheap"],   "rpm": 60, "cost": 0.002,
       "pricing": { "input": 0.691, "output": 3.039, "cacheWriteMul": 1.00, "cacheReadMul": 0.240, "name": "GLM-5V Turbo (TokenHub)" } },
-    { "model_id": "kimi-k3",                       "capabilities": ["text", "thinking", "cheap"], "rpm": 30, "cost": 0.0083,
-      "pricing": { "input": 2.762, "output": 13.812, "cacheWriteMul": 1.00, "cacheReadMul": 0.10, "name": "Kimi K3 (TokenHub)" } },
     { "model_id": "kimi-k2.6",                     "capabilities": ["text", "cheap"],             "rpm": 30, "cost": 0.003,
       "pricing": { "input": 0.898, "output": 3.729, "cacheWriteMul": 1.00, "cacheReadMul": 0.169, "name": "Kimi K2.6 (TokenHub)" } },
     { "model_id": "kimi-k2.5",                     "capabilities": ["text", "cheap"],             "rpm": 30, "cost": 0.002,

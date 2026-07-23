@@ -249,6 +249,17 @@ function _renderToolGroupsHTML(rounds, allRounds){
   return (rounds || []).map(function(r){ return '<TOOL name=' + (r.toolName||'') + '>'; }).join('');
 }
 function stripNoTranslateTags(text){ return text; }
+// renderSegmentTimelineHTML now calls the shared _isSupersededOrphanRound
+// predicate (to drop FloorRetry/stream-retry superseded orphans). This suite's
+// rounds are all real (status:'done') or synthetic inject rows — none is a
+// superseded orphan — so a faithful mirror of the real predicate returns false
+// for every one here, leaving inject-positioning behaviour unchanged.
+function _isSupersededOrphanRound(r){
+  if (!r || r.status !== 'aborted') return false;
+  const meta = (r.results && r.results[0]) || {};
+  const hasRealResult = r.toolContent != null || (meta && (meta.fetched || (meta.fetchedChars | 0) > 0));
+  return meta.badge === 'superseded' && !hasRealResult;
+}
 // _renderToolSlot renders a synthetic inject row's chip in the timeline. Stub it
 // to an identifiable marker so we can assert PRESENCE + ORDER.
 function _renderToolSlot(r, ctx){
@@ -318,7 +329,7 @@ _L4_NC_HARNESS = _TIMELINE_STUBS + r"""
 // extraction/prepend is load-bearing for settled visibility.
 let src = process.env.FN_SRC;
 const neutered = src.replace(/const _injByAnchor = new Map\(\);[\s\S]*?\/\* END_INJECT_EXTRACTION \*\//,
-                             'const _injByAnchor = new Map(); const realRounds = allRounds;');
+                             'const _injByAnchor = new Map(); const _supersededTcIds = new Set(); const realRounds = allRounds;');
 if (neutered === src) { console.log('FAIL nc_pattern_matched'); process.exit(0); }
 eval(neutered);
 const out = [];

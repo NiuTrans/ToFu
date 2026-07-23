@@ -39,6 +39,7 @@ from lib.tasks_pkg.tool_display._renderers import (
     _tool_display_human_guidance,
     _tool_display_image_gen,
     _tool_display_inspect_image,
+    _tool_display_mcp,
     _tool_display_memory,
     _tool_display_project,
     _tool_display_scheduler,

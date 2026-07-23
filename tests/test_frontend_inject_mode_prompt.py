@@ -69,6 +69,8 @@ const dialogSrc = fs.readFileSync(
   path.join(ROOT, 'static', 'js', 'core', 'dialog.js'), 'utf8');
 eval(dialogSrc);   // defines showChoice etc. on this scope + window
 
+const NEUTER_ARROWS = process.argv[2] === 'neuter_arrows';
+
 if (NEUTER) {
   // NEUTER: break the liveCheck auto-resolve — the dialog will then hang open
   // forever even when the running turn ends. Scenario 2 must FAIL under this.
@@ -78,6 +80,16 @@ if (NEUTER) {
     delete c.liveCheck;              // drop the auto-resolve
     return _orig(c);
   };
+}
+
+if (NEUTER_ARROWS) {
+  // NEUTER: swallow ArrowDown/ArrowUp at the capture phase BEFORE showChoice's
+  // handler runs, so focus never moves. Scenario 4 must then FAIL (focus stays
+  // on the first button after ArrowDown). Proves the arrow handler is
+  // load-bearing.
+  win.document.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') e.stopImmediatePropagation();
+  }, true);
 }
 
 // ── Extract _promptInjectMode from the shipped send pipeline ──
@@ -142,6 +154,35 @@ function clickChoice(value) {
   ]);
   win.document.querySelectorAll('.app-dialog-overlay').forEach((o) => o.remove());
 
+  // ── Scenario 4: ArrowDown/ArrowUp move focus between option buttons ──
+  {
+    const p2 = showChoice({
+      title: 'nav',
+      options: [
+        { value: 'steer', label: 'Steer', accent: true },
+        { value: 'queue', label: 'Queue' },
+      ],
+      dismissValue: 'queue',
+    });
+    // Wait for the rAF-deferred initial focus, then fire the arrow keys.
+    await new Promise((res) => setTimeout(res, 20));
+    const overlay = [...win.document.querySelectorAll('.app-dialog-overlay')].pop();
+    const btns = [...overlay.querySelectorAll('.app-choice-btn')];
+    out.arrow_first_focus = (win.document.activeElement === btns[0]);
+    const fire = (key) => win.document.dispatchEvent(
+      new win.KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }));
+    fire('ArrowDown');
+    out.arrow_down_moves = (win.document.activeElement === btns[1]);
+    fire('ArrowDown');   // wraps back to first
+    out.arrow_down_wraps = (win.document.activeElement === btns[0]);
+    fire('ArrowUp');     // wraps to last
+    out.arrow_up_wraps = (win.document.activeElement === btns[1]);
+    // Activate the focused (second) button with a click to resolve the promise.
+    btns[1].click();
+    out.arrow_activate = await p2;
+    win.document.querySelectorAll('.app-dialog-overlay').forEach((o) => o.remove());
+  }
+
   // ── Scenario 3: no dialog base → graceful 'queue' ──
   const savedSC = win.showChoice;
   global.showChoice = win.showChoice = undefined;
@@ -154,8 +195,8 @@ function clickChoice(value) {
 """
 
 
-def _run(neuter: bool = False) -> dict:
-    arg = 'neuter' if neuter else 'normal'
+def _run(neuter: bool = False, mode: str | None = None) -> dict:
+    arg = mode if mode else ('neuter' if neuter else 'normal')
     proc = subprocess.run(
         ['node', '-e', _HARNESS, ROOT, arg],
         capture_output=True, text=True, timeout=60, cwd=ROOT)
@@ -202,6 +243,35 @@ def test_NEUTER_no_livecheck_leaves_dialog_stuck():
     assert r['auto_resolve'] == '__TIMEOUT__', (
         'NEUTER: without liveCheck the moot dialog must NOT auto-resolve '
         f'(expected a timeout, got {r["auto_resolve"]!r})')
+
+
+@pytest.mark.skipif(not _node_deps_available(),
+                    reason='node + jsdom dev-deps not installed (run npm install)')
+def test_arrow_keys_navigate_options():
+    r = _run()
+    assert 'error' not in r, r.get('error')
+    assert r['arrow_first_focus'] is True, \
+        'the first (accent) option must be focused when the chooser opens'
+    assert r['arrow_down_moves'] is True, \
+        'ArrowDown must move focus to the next option button'
+    assert r['arrow_down_wraps'] is True, \
+        'ArrowDown on the last option must wrap focus back to the first'
+    assert r['arrow_up_wraps'] is True, \
+        'ArrowUp on the first option must wrap focus to the last'
+    assert r['arrow_activate'] == 'queue', \
+        'activating the arrow-focused second option must resolve its value'
+
+
+@pytest.mark.skipif(not _node_deps_available(),
+                    reason='node + jsdom dev-deps not installed (run npm install)')
+def test_NEUTER_no_arrow_nav_leaves_focus_stuck():
+    """Byte-reverting NEUTER: swallow the arrow keydown before showChoice sees
+    it → focus never moves off the first button. Proves the arrow-navigation
+    handler is load-bearing."""
+    r = _run(mode='neuter_arrows')
+    assert r['arrow_down_moves'] is False, (
+        'NEUTER: with the arrow handler suppressed, ArrowDown must NOT move '
+        f'focus (got arrow_down_moves={r["arrow_down_moves"]!r})')
 
 
 if __name__ == '__main__':

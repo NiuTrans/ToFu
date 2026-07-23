@@ -24,91 +24,6 @@ from ._split import _ends_midsentence
 
 logger = get_logger(__name__)
 
-# ── Over-generation guard thresholds (symmetric to the truncation floors) ──
-# A translation should be roughly the same order of magnitude as its input.
-# When a cheap model finishes the real translation of a SHORT input then keeps
-# going — appending a large block of unrelated training-corpus text (the
-# "poetry bleed" contamination: a 45→2373 char, 52x expansion committed as
-# verdict=ok because every other guard only defends against SHORT output) —
-# reject it. Both floors must be crossed together so a legitimately terse input
-# ("你好" → a short sentence) is never killed: the output must be BOTH more than
-# _OVERGEN_RATIO× the input AND more than _OVERGEN_ABS chars longer than it.
-# Module-level so tests can monkeypatch (a NEUTER control raises them so the
-# guard cannot fire, proving it is load-bearing).
-_OVERGEN_RATIO = 8.0
-_OVERGEN_ABS = 800
-# Below this input length the ratio is meaningless (a 3-char input trivially
-# expands), so the guard is disabled — matches the truncation guard's own
-# length gates.
-_OVERGEN_MIN_INPUT = 20
-
-# ── Identity-invariant content detection ──
-# A URL or filesystem-path token (whole content, no internal whitespace).
-# Covers scheme://… URLs and POSIX / home / relative / Windows-drive paths.
-_URL_OR_PATH_RE = re.compile(
-    r'^(?:'
-    r'[A-Za-z][A-Za-z0-9+.\-]*://'   # scheme://  (http, https, ftp, file, ws…)
-    r'|/'                            # POSIX absolute
-    r'|~/'                           # home-relative
-    r'|\.{1,2}/'                     # ./ or ../ relative
-    r'|[A-Za-z]:[\\/]'               # Windows drive
-    r')\S*$'
-)
-# Any Unicode letter (script-agnostic — CJK, Latin, Cyrillic, kana, …). Content
-# with NO letter at all (digits / symbols / punctuation / whitespace only) has
-# nothing to translate in any language. ``[^\W\d_]`` = a word char that is
-# neither a digit nor an underscore = a letter.
-_HAS_LETTER_RE = re.compile(r'[^\W\d_]', re.UNICODE)
-
-
-def _is_identity_invariant(text, target):
-    """Return ``(bool, reason)`` — True when ``text`` legitimately equals its
-    own translation, so no model call is needed.
-
-    Three shapes never need translating and, worse, provoke the no-op detector
-    into burning the whole retry budget across many models when the model
-    correctly echoes them — surfacing a ``ValueError`` for content that never
-    needed a translation (observed: a 98-char absolute path burned 9 model
-    attempts, task ``inc-translate-89dd9bf7``):
-
-    * (a) no translatable letters — pure symbols / digits / punctuation.
-    * (b) a single path or URL token (whole content, no internal whitespace).
-    * (c) already predominantly in the target language with negligible foreign
-          script — there is essentially nothing to translate. A MIXED
-          bilingual message is deliberately EXCLUDED (its foreign part still
-          needs the model), so the threshold is stricter than the plain
-          "predominantly target" ratio.
-
-    Pure predicate (no I/O) so the caller can short-circuit before any MT / LLM
-    call. Deliberately conservative: a false negative merely falls through to
-    the normal path (one wasted call at worst); a false positive would skip a
-    genuinely-needed translation, so the bar is set to avoid that.
-    """
-    if not text:
-        return False, ''
-    # (a) no translatable letters anywhere.
-    if not _HAS_LETTER_RE.search(text):
-        return True, 'no translatable letters (symbols/digits only)'
-    # (b) a lone path / URL token (single token, no internal whitespace).
-    if not any(ch.isspace() for ch in text) and _URL_OR_PATH_RE.match(text):
-        return True, 'path-or-URL token'
-    # (c) already in the target language (monolingual, negligible foreign script).
-    from lib.text_lang import (
-        cjk_ratio, is_predominantly_chinese, is_predominantly_english,
-        latin_ratio,
-    )
-    tl = (target or '').lower()
-    _is_zh_target = (tl.startswith('chinese') or 'zh' in tl)
-    _is_en_target = (tl == 'en' or tl.startswith('english')
-                     or tl.startswith('en-') or tl.startswith('en_'))
-    if _is_zh_target:
-        if is_predominantly_chinese(text) and latin_ratio(text) < 0.15:
-            return True, 'source already Chinese (target Chinese)'
-    elif _is_en_target:
-        if is_predominantly_english(text) and cjk_ratio(text) < 0.05:
-            return True, 'source already English (target English)'
-    return False, ''
-
 
 def _build_trace(*, path, model, in_chars, out_chars, attempts=1,
                  content_fails=0, dispatch_fails=0, elapsed=0.0,
@@ -227,30 +142,6 @@ def _translate_one_chunk(chunk, system_prompt, chunk_label='',
                                  path='cache', model=cached_model,
                                  in_chars=len(chunk), out_chars=len(cached_text),
                                  verdict='cache', target=target)}
-
-    # ── Identity-invariant short-circuit ──
-    # Some content legitimately equals its own translation: a lone path/URL,
-    # pure symbols/digits, or text already in the target language. Sending it
-    # through the LLM makes a correct model echo it verbatim, which the no-op
-    # detector below reads as a FAILURE — burning the whole retry budget across
-    # many models and finally raising ValueError for content that never needed
-    # translating (observed: a 98-char absolute path burned 9 model attempts,
-    # task inc-translate-89dd9bf7). Accept it verbatim BEFORE the retry loop.
-    _inv, _inv_reason = _is_identity_invariant(chunk.strip(), target)
-    if _inv:
-        _passthrough = chunk.strip()
-        logger.info('[Translate%s] Identity-invariant content accepted verbatim '
-                    '(%d chars, reason=%s) — skipping translation',
-                    chunk_label, len(_passthrough), _inv_reason)
-        if use_cache:
-            translate_cache.put(chunk, source, target, _passthrough,
-                                model='identity')
-        return _passthrough, {
-            'model': 'identity', '_dispatch': {'model': 'identity'},
-            '_identity_invariant': True,
-            '_translate_trace': _build_trace(
-                path='identity', model='identity', in_chars=len(chunk),
-                out_chars=len(_passthrough), verdict='identity', target=target)}
 
     # ── Try dedicated MT provider first (if configured) ──
     from lib.mt_provider import is_mt_configured, mt_translate_chunked
@@ -657,65 +548,6 @@ def _translate_one_chunk(chunk, system_prompt, chunk_label='',
                            chunk_label, _attempt, _content_fail_count, _flip_reason)
             _notify('wrong_language', _attempt, _elapsed,
                     f'output flipped to wrong language, retrying (fails={_content_fail_count})')
-            continue
-
-        # ── Over-generation detection (the mirror of truncation) ──
-        # Every guard above defends against output that is TOO SHORT. None
-        # catches the opposite failure: the model translates the input
-        # correctly, then keeps generating a large block of unrelated text
-        # (hallucinated web-page / training-corpus prose). On a short input
-        # this is unmistakable — a 45-char message must not translate to
-        # 2373 chars (52x). Require BOTH an outsized ratio AND a large
-        # absolute increase so a legitimately terse input ("你好" → a full
-        # sentence) is never falsely rejected. Same remediation shape as
-        # no-op/flip: exclude the model + retry; refuse to commit after the
-        # budget (committing the contamination is worse than failing loudly).
-        _is_overgen = False
-        _overgen_reason = ''
-        if (clen >= _OVERGEN_MIN_INPUT
-                and len(_c_stripped) > clen * _OVERGEN_RATIO
-                and len(_c_stripped) - clen > _OVERGEN_ABS):
-            _is_overgen = True
-            _overgen_reason = (
-                f'over-generated: output {len(_c_stripped)}/{clen} = '
-                f'{len(_c_stripped)/clen:.1f}x input (ratio floor={_OVERGEN_RATIO:.0f}x, '
-                f'abs floor={_OVERGEN_ABS}), model={_model}')
-
-        if _is_overgen:
-            _content_fail_count += 1
-            _last_err = _overgen_reason
-            if _used_key and _model:
-                _dispatcher.record_truncation(_used_key, _model, error=_overgen_reason)
-                _excluded_models.add(_model)
-            if _content_fail_count >= _MAX_CONTENT_RETRIES:
-                logger.error('[Translate%s] Still over-generated after %d content retries: %s '
-                             '— giving up, will surface error',
-                             chunk_label, _content_fail_count, _overgen_reason)
-                _notify('over_generated_final', _attempt, _elapsed,
-                        f'over-generated after {_content_fail_count} retries')
-                # 溯源: symmetric to translate_truncated_accept — leave a loud,
-                # machine-parseable trail for the rejected contamination.
-                try:
-                    from lib.log import audit_log
-                    audit_log('translate_over_generated_reject',
-                              chunk_label=chunk_label, model=_model,
-                              in_chars=clen, out_chars=len(_c_stripped),
-                              ratio=round(len(_c_stripped) / max(1, clen), 3),
-                              content_fails=_content_fail_count,
-                              reason=_overgen_reason, target=target)
-                except Exception as _ae:
-                    logger.debug('[Translate%s] audit_log failed: %s', chunk_label, _ae)
-                # Refuse to commit the over-generated body — it would persist a
-                # correct translation fused with unrelated hallucinated text.
-                # Force the trailing emptiness check to raise.
-                _terminal_verdict = 'over_generated'
-                c = ''
-                break
-            logger.warning('[Translate%s] Over-generated translation (attempt %d, content_fails=%d): %s '
-                           '— excluding model and retrying',
-                           chunk_label, _attempt, _content_fail_count, _overgen_reason)
-            _notify('over_generated', _attempt, _elapsed,
-                    f'output over-generated, retrying (fails={_content_fail_count})')
             continue
         break  # success
 

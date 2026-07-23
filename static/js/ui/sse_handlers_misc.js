@@ -422,11 +422,6 @@ function _handleTimerPollCheck(ev, c) {
           r._timerTimerId = ev.timerId;
           // Capture the next-poll timestamp so the UI can render a countdown.
           if (ev.nextPollTs) r._timerNextPollTs = ev.nextPollTs;
-          // A hybrid timer can AUTO-PROMOTE to pure `code` mid-run; the backend
-          // now stamps the CURRENT kind on every poll (not just 'started'), so
-          // refresh it here — otherwise the badge shows the stale creation-time
-          // 'hybrid' forever after the predicate took over.
-          if (ev.conditionKind) r._timerConditionKind = ev.conditionKind;
           // Remember the model the poll LLM resolved to (shown in the header).
           if (ev.model) r._timerModel = ev.model;
           // The 'started' event carries the verification metadata (what is
@@ -435,8 +430,6 @@ function _handleTimerPollCheck(ev, c) {
           if (ev.decision === "started") {
             if (ev.checkInstruction) r._timerCheckInstruction = ev.checkInstruction;
             if (ev.checkCommand) r._timerCheckCommand = ev.checkCommand;
-            if (ev.conditionKind) r._timerConditionKind = ev.conditionKind;
-            if (ev.conditionCommand) r._timerConditionCommand = ev.conditionCommand;
             if (ev.pollInterval) r._timerPollInterval = ev.pollInterval;
             if (ev.maxPolls) r._timerMaxPolls = ev.maxPolls;
           }

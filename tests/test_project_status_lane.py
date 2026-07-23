@@ -392,17 +392,42 @@ def test_status_line_empty_when_no_snapshot(db):
 #  7. HUMAN-FACING ONLY — not on the system-context injection path
 # ════════════════════════════════════════════════════════════════════
 
-def test_status_memory_not_in_system_context_source():
-    """The status lane must never be injected into sibling agent prompts. Guard
-    at the source: lib/tasks_pkg/system_context.py must not reference the status
-    module / its synthesis entry points."""
+def _system_context_package_sources():
+    """Return {relpath: source} for EVERY .py under the system_context package.
+
+    system_context was split from a single module into a package (commit
+    86567af), so the injection logic now lives across several files
+    (_inject.py, _reminders.py, …). This guard therefore scans the whole
+    package dir — pinning it to one file would silently stop guarding the
+    moment the injection logic moves again. Fails loudly if the package dir is
+    absent, so a future rename can't turn the guard into a silent no-op."""
     import os
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    with open(os.path.join(root, 'lib', 'tasks_pkg', 'system_context.py'),
-              encoding='utf-8') as f:
-        src = f.read()
+    pkg = os.path.join(root, 'lib', 'tasks_pkg', 'system_context')
+    assert os.path.isdir(pkg), (
+        f'system_context package dir not found at {pkg!r} — the source guard '
+        f'cannot verify the injection path; update this test to the new layout')
+    sources = {}
+    for dirpath, _dirs, files in os.walk(pkg):
+        if '__pycache__' in dirpath:
+            continue
+        for fn in files:
+            if fn.endswith('.py'):
+                p = os.path.join(dirpath, fn)
+                with open(p, encoding='utf-8') as f:
+                    sources[os.path.relpath(p, root)] = f.read()
+    assert sources, f'no .py sources found under {pkg!r}'
+    return sources
+
+
+def test_status_memory_not_in_system_context_source():
+    """The status lane must never be injected into sibling agent prompts. Guard
+    at the source: NO file in the lib/tasks_pkg/system_context package may
+    reference the status module / its synthesis entry points."""
+    sources = _system_context_package_sources()
     for banned in ('project_status', 'build_status_snapshot', 'status_line',
                    'collect_pillar_state', 'read_status_history'):
-        assert banned not in src, (
-            f'system_context.py references {banned!r} — the human-facing status '
-            f'lane must NOT be on the ambient prompt-injection path')
+        for rel, src in sources.items():
+            assert banned not in src, (
+                f'{rel} references {banned!r} — the human-facing status '
+                f'lane must NOT be on the ambient prompt-injection path')

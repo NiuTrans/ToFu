@@ -231,17 +231,9 @@ def parse_tool_calls(
             if _hallucinated:
                 round_entry['status'] = 'rejected'
                 round_entry['_rejected'] = _hallucinated
-            # ★ Attach per-round prose to the first early-announced entry.
-            #   thinking/signature are captured INDEPENDENTLY of content: a
-            #   reasoning model routinely emits thinking then calls a tool with
-            #   NO interstitial prose (_assistant_content == ''). Gating the
-            #   whole block on content dropped that round's thinking, which then
-            #   vanished at finalize (assemble_segments reads round['thinking'],
-            #   and committedMessage overwrites the live-stamped copy).
-            if not _ac_tagged and (_assistant_content or _assistant_thinking
-                                   or _assistant_thinking_signature):
-                if _assistant_content:
-                    round_entry['assistantContent'] = _assistant_content
+            # ★ Attach assistantContent to the first early-announced entry
+            if _assistant_content and not _ac_tagged:
+                round_entry['assistantContent'] = _assistant_content
                 if _assistant_thinking:
                     round_entry['thinking'] = _assistant_thinking
                 if _assistant_thinking_signature:
@@ -289,18 +281,10 @@ def parse_tool_calls(
             round_entry['_rejected'] = _hallucinated
             event_payload['status'] = 'rejected'
             event_payload['_rejected'] = _hallucinated
-        # ★ Tag first entry with per-round prose so Continue can replay it and
-        #   the settled segment timeline renders it adjacent to the tool.
-        #   thinking/signature are captured INDEPENDENTLY of content — a
-        #   thinking-only round (reasoning then a direct tool call, no
-        #   interstitial prose) must still stamp its reasoning, or it is lost at
-        #   finalize (assemble_segments reads round['thinking'] and the
-        #   authoritative committedMessage overwrites the live-stamped copy).
-        if not _ac_tagged and (_assistant_content or _assistant_thinking
-                               or _assistant_thinking_signature):
-            if _assistant_content:
-                round_entry['assistantContent'] = _assistant_content
-                event_payload['assistantContent'] = _assistant_content
+        # ★ Tag first entry with assistant content so Continue can replay it
+        if _assistant_content and not _ac_tagged:
+            round_entry['assistantContent'] = _assistant_content
+            event_payload['assistantContent'] = _assistant_content
             if _assistant_thinking:
                 round_entry['thinking'] = _assistant_thinking
                 event_payload['thinking'] = _assistant_thinking

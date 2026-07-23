@@ -83,57 +83,12 @@ def _row_settings(row: Any) -> Any:
             return None
 
 
-def _invalidate_after_settings_write(conv_id: str, user_id: int,
-                                     notify: bool) -> None:
-    """Drop the stale sidebar cache after a settings write; optionally push.
-
-    STRUCTURAL GUARANTEE: this runs for EVERY successful settings write routed
-    through the gate, so a caller can no longer forget to invalidate the meta
-    cache (the root cause of the "sidebar/other-tab shows a stale toggle for up
-    to the 120s TTL" bug). The sidebar ``?meta=1`` cache stores the WHOLE
-    ``settings`` blob, so any settings mutation makes that entry stale.
-
-    Ordering (the trap flagged in review): a settings-only change carries
-    ``rev=None``, so the client reacts with a *debounced sidebar refresh* that
-    RE-READS ``refresh_meta_cache_if_stale`` — if the local cache entry is not
-    already cleared when that refresh lands, it just re-serves the stale blob.
-    Both branches below clear the LOCAL entry SYNCHRONOUSLY before returning
-    (``invalidate_meta_cache`` / ``notify_conv_changed`` both set ``ts=0``
-    first), and ``notify_conv_changed`` emits the push only AFTER that clear —
-    so the clear always happens-before any refresh the push could trigger.
-
-    Args:
-        conv_id: Conversation whose settings changed.
-        user_id: Owner id — scopes the (user-keyed) meta cache entry.
-        notify: When True, also emit the cross-device ``conv_changed`` push
-            (``rev=None`` → debounced sidebar refresh on peers) via
-            ``notify_conv_changed`` — which itself invalidates first. When
-            False, ONLY invalidate the local + cross-replica cache (no push):
-            for pure-prompt writes (``projectSummary``) and for callers that
-            already emit their own ``notify_conv_changed`` (activeTaskId
-            writers), so we never double-push.
-
-    Best-effort: a cache/push failure must never break the settings write.
-    """
-    try:
-        if notify:
-            from lib.conversations.meta_cache import notify_conv_changed
-            notify_conv_changed(conv_id, rev=None, user_id=user_id)
-        else:
-            from lib.conversations.meta_cache import invalidate_meta_cache
-            invalidate_meta_cache(user_id)
-    except Exception as e:
-        logger.warning('[SettingsStore] cache invalidation after settings '
-                       'write failed conv=%s: %s', conv_id[:8], e)
-
-
 def update_conversation_settings(
     conv_id: str,
     mutate: Callable[[dict], Any],
     *,
     user_id: int = DEFAULT_USER_ID,
     db: Any = None,
-    notify: bool = True,
 ) -> dict | None:
     """Serialized read-merge-write of a conversation's ``settings`` JSON.
 
@@ -146,12 +101,6 @@ def update_conversation_settings(
     Does NOT touch ``messages`` / ``updated_at`` / ``msg_count`` — this is a
     settings-only write and must not reorder the sidebar.
 
-    On a write that actually lands (``mutate`` did not return ``False`` and the
-    row exists) the sidebar meta cache is ALWAYS invalidated — see
-    :func:`_invalidate_after_settings_write`. This is the structural guarantee
-    that replaces the old "every caller must remember to call
-    ``invalidate_meta_cache``" convention.
-
     Args:
         conv_id: Conversation id.
         mutate: Callback invoked with the freshly-parsed settings dict. Mutate
@@ -162,12 +111,6 @@ def update_conversation_settings(
         user_id: Owner id (single-user default).
         db: Optional pooled/thread-local connection to reuse. When ``None`` the
             thread-local chat connection is used (safe from worker threads).
-        notify: Whether the invalidation also emits the cross-device
-            ``conv_changed`` push (default True → UI-visible writes propagate to
-            peer tabs/devices). Set False for pure-prompt writes
-            (``projectSummary``) and for callers that already emit their own
-            ``notify_conv_changed`` (to avoid a double push). The LOCAL cache is
-            invalidated regardless of this flag.
 
     Returns:
         The (post-mutate) settings dict, or ``None`` when the conversation row
@@ -188,18 +131,13 @@ def update_conversation_settings(
             settings = {}
         res = mutate(settings)
         if res is False:
-            # Nothing changed — the cache is still valid, so DON'T invalidate.
             return settings
         db_execute_with_retry(
             _db,
             'UPDATE conversations SET settings=? WHERE id=? AND user_id=?',
             (json.dumps(settings, ensure_ascii=False), conv_id, user_id),
         )
-    # The write landed → the sidebar cache's stored settings blob is now stale.
-    # Invalidate OUTSIDE the per-conv lock (the cache has its own lock; holding
-    # both would widen the critical section for no benefit).
-    _invalidate_after_settings_write(conv_id, user_id, notify)
-    return settings
+        return settings
 
 
 def set_conversation_settings(
@@ -208,24 +146,20 @@ def set_conversation_settings(
     *,
     user_id: int = DEFAULT_USER_ID,
     db: Any = None,
-    notify: bool = True,
 ) -> dict | None:
     """Convenience: merge a flat dict of key→value ``updates`` into settings.
 
     Thin wrapper over :func:`update_conversation_settings` for the common
     "set these keys" case (``dict.update`` returns ``None`` → the write always
-    proceeds). Returns the same value as the underlying helper. ``notify``
-    forwards to the gate (see :func:`update_conversation_settings`).
+    proceeds). Returns the same value as the underlying helper.
     """
     if not updates:
         # Read-only no-op mutation: never lose the write path's row-absent
-        # semantics, but skip the UPDATE (nothing to merge). No write → no
-        # invalidation (the cache is still valid).
+        # semantics, but skip the UPDATE (nothing to merge).
         return update_conversation_settings(
-            conv_id, lambda _s: False, user_id=user_id, db=db, notify=notify)
+            conv_id, lambda _s: False, user_id=user_id, db=db)
     return update_conversation_settings(
-        conv_id, lambda s: s.update(updates), user_id=user_id, db=db,
-        notify=notify)
+        conv_id, lambda s: s.update(updates), user_id=user_id, db=db)
 
 
 __all__ = ['update_conversation_settings', 'set_conversation_settings']

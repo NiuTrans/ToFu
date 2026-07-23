@@ -290,16 +290,10 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
         # absolute paths still work (routed inside tool_read_files via
         # lib.file_reader); project-relative paths error out helpfully.
         if fn_name in ('read_files', 'inspect_image') and not project_path:
-            # inspect_image needs the task so an /api/images/ or att_txt_ ref can
-            # be resolved (text refs scan task['messages']).
-            _no_proj_kw = {'task': task} if fn_name == 'inspect_image' else {}
-            tool_content = execute_tool(fn_name, fn_args, '.', conv_id=_root_conv_id,
-                                        task_id=task['id'], **_no_proj_kw)
+            tool_content = execute_tool(fn_name, fn_args, '.', conv_id=_root_conv_id, task_id=task['id'])
         else:
             _progress_cb = None
             _extra_kw = {}
-            if fn_name == 'inspect_image':
-                _extra_kw = {'task': task}
             if fn_name == 'run_command':
                 _cmd = fn_args.get('command', '') or ''
                 _stdin_cb = _make_stdin_callback(task, rn, round_entry, _cmd)

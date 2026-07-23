@@ -411,6 +411,15 @@ def classify_verdict(verdict: dict | None) -> str:
             return BUCKET_MID_WINDOW
         if 'breakpoint lost' in _cause:
             return BUCKET_BREAKPOINT_LOST
+        # ``no_cache_reuse`` is returned ONLY when client_changes was empty
+        # (see the no_reuse / partial_no_reuse branches in detect_cache_break),
+        # so a byte-identical one — whose cause names the whole/partial prefix
+        # "an upstream cache miss" — is NOT a client body change. It must bucket
+        # as upstream_identical, never body_change (which reads as a client
+        # miss). Verified against real traffic: 8 rounds carrying this verdict
+        # were all byte-identical by DB reconstruction.
+        if 'upstream cache miss' in _cause:
+            return BUCKET_UPSTREAM
         return BUCKET_BODY_CHANGE
     if 'ttl marker flipped' in _cause or 'new cache key' in _cause:
         return BUCKET_TTL_FLIP

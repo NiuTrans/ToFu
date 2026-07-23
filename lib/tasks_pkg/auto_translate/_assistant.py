@@ -228,10 +228,35 @@ def _maybe_auto_translate_assistant(conv_id, content, msg_idx, db=None, task=Non
             logger.info('%s conv=%s msg=%d content already in target language '
                         '(target=%s/%s) — skipping auto-translate (no-op)',
                         pfx, conv_id[:8], msg_idx, target_lang, target_code)
+            # ★ FIX #1 (don't discard already-translated narration): when an
+            #   incremental accumulator is active, it already translated the
+            #   inter-round narration LIVE. The deliverable needs no
+            #   translatedContent (it's already in the target language), but the
+            #   cancel_incremental in the finally would THROW AWAY those cached
+            #   segments — the reported loss. Hand the accumulator a STAMP-ONLY
+            #   finalize instead: it commits the cached per-round Chinese onto
+            #   the settled render (self-healing a segment-less row via
+            #   fallback_segments) and takes ownership so the finally skips the
+            #   cancel. Falls through to the backfill below when no accumulator
+            #   exists (segment-less historical turn → toolRounds synthesis).
+            if task is not None:
+                try:
+                    from lib.translate import finalize_incremental_stamp_only
+                    if finalize_incremental_stamp_only(task, conv_id, eff_idx,
+                                                       msg_id=_msg_id or None):
+                        _inc_handed_off = True
+                        logger.info('%s conv=%s msg=%d stamp-only finalize owns the '
+                                    'cached narration (already-target deliverable)',
+                                    pfx, conv_id[:8], eff_idx)
+                except Exception as se:
+                    logger.warning('%s conv=%s stamp-only finalize failed, falling '
+                                   'back to backfill: %s', pfx, conv_id[:8], se)
             # ★ PATH-INDEPENDENT narration backfill (Path B fix): the
             #   DELIVERABLE is already in the target language (so it has no
             #   translatedContent), but the interleaved English narration still
             #   needs translating. Enrich off-thread (enrich-only + idempotent).
+            #   This ALSO covers the segment-less historical turn (no live
+            #   accumulator) by synthesising narration from toolRounds.
             _spawn_narration_backfill(conv_id, eff_idx, _msg_id,
                                       target_lang, messages)
             return

@@ -89,9 +89,6 @@ def _commit_translation_to_db(conv_id, msg_idx, field, translated_text,
     if not conv_id:
         logger.debug('[Translate] commit: missing conv_id — skipping')
         return
-    if field is None and not segment_translations:
-        logger.debug('[Translate] commit: stamp-only with empty map — skipping')
-        return
 
     lock = _get_commit_lock(conv_id)
     with lock:
@@ -196,50 +193,44 @@ def _commit_translation_inner(conv_id, msg_idx, field, translated_text,
                 msg['_translateDone'] = True
                 if model:
                     msg['_translateModel'] = model
+                # ★ Per-round carry to the settled segment timeline: stamp each
+                #   non-deliverable text segment with its translated Chinese,
+                #   keyed by llmRound ≡ round_num (exact — never text-equality,
+                #   which whitespace-normalization can miss and identical
+                #   narration can collide). Deliverable/terminal segments are
+                #   excluded from the timeline (rendered via translatedContent),
+                #   so they need nothing.
+                if segment_translations:
+                    # ★ SELF-HEAL (SSOT ordering guarantee): the stamp is a
+                    #   no-op when the resolved DB message carries no
+                    #   `segments` — which happens when this commit raced
+                    #   ahead of (or the frontend row-write CAS beat)
+                    #   _sync_result_to_conversation, the reported 0/N bug. If
+                    #   the caller handed the authoritative thin segments
+                    #   (task['segments'] captured at finalize), splice them
+                    #   onto the message in THIS SAME CAS write so the stamp
+                    #   has something to land on. Gated on a non-empty map so
+                    #   a plain translatedContent commit never fabricates
+                    #   segments; segments are backend-authoritative so this
+                    #   is not a second source of truth. `updated_at` still
+                    #   bumps below (segments are new state here, unlike the
+                    #   byte-identical save_conv preserve merge).
+                    _existing_segs = msg.get('segments')
+                    if (not (isinstance(_existing_segs, list) and _existing_segs)
+                            and isinstance(fallback_segments, list)
+                            and fallback_segments):
+                        msg['segments'] = fallback_segments
+                        logger.info('[Translate] commit: DB msg had no segments '
+                                    '— spliced %d authoritative segments before '
+                                    'stamp (conv=%s)', len(fallback_segments),
+                                    conv_id[:8])
+                    _stamp_segment_translations(msg, segment_translations)
             elif field == 'content':
                 if not msg.get('originalContent'):
                     msg['originalContent'] = msg.get('content', '')
                 msg['content'] = translated_text
-            elif field is None:
-                # Stamp-only commit (path-independent narration backfill): the
-                # deliverable is already settled (translatedContent set) OR is
-                # itself already in the target language (no translatedContent
-                # needed) — either way translatedContent/content stay untouched
-                # and ONLY the interleaved narration segments are stamped below.
-                pass
             else:
                 msg[field] = translated_text
-
-            # ★ Per-round narration stamp — PATH-INDEPENDENT. Runs for a
-            #   translatedContent commit AND for a field=None stamp-only commit,
-            #   so EVERY terminal path (incremental-owned finalize, whole-message
-            #   already-translated / already-target early-return, autopilot) can
-            #   enrich the narration segments regardless of how the deliverable
-            #   was settled. Keyed by llmRound ≡ round_num (exact — never
-            #   text-equality). Deliverable/terminal segments are excluded from
-            #   the timeline (rendered via translatedContent), so need nothing.
-            if segment_translations:
-                # ★ SELF-HEAL (SSOT ordering guarantee): the stamp is a no-op
-                #   when the resolved DB message carries no `segments` — which
-                #   happens when this commit raced ahead of (or the frontend
-                #   row-write CAS beat) _sync_result_to_conversation, the
-                #   reported 0/N bug. If the caller handed the authoritative
-                #   thin segments (task['segments'] captured at finalize),
-                #   splice them onto the message in THIS SAME CAS write so the
-                #   stamp has something to land on. Gated on a non-empty map so
-                #   a plain translatedContent commit never fabricates segments;
-                #   segments are backend-authoritative so this is not a second
-                #   source of truth.
-                _existing_segs = msg.get('segments')
-                if (not (isinstance(_existing_segs, list) and _existing_segs)
-                        and isinstance(fallback_segments, list)
-                        and fallback_segments):
-                    msg['segments'] = fallback_segments
-                    logger.info('[Translate] commit: DB msg had no segments '
-                                '— spliced %d authoritative segments before '
-                                'stamp (conv=%s)', len(fallback_segments),
-                                conv_id[:8])
-                _stamp_segment_translations(msg, segment_translations)
 
             new_updated = int(time.time() * 1000)
             # CAS — only update if rev hasn't advanced since we read it.

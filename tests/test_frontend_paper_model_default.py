@@ -51,10 +51,7 @@ pytestmark = pytest.mark.unit
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
 JS_DIR = os.path.join(ROOT, 'static', 'js')
-PAPER_JS = os.path.join(JS_DIR, 'paper', 'report.js')
-# _reportView + the _paperReportModel/_paperReviewModel module state live in
-# the (still-shipped) paper-reader.js; report.js only carries the seed logic.
-PAPER_READER_DEPS = os.path.join(JS_DIR, 'paper-reader.js')
+PAPER_JS = os.path.join(JS_DIR, 'paper-reader.js')
 
 
 def _node_deps_available() -> bool:
@@ -89,14 +86,7 @@ global.Api = win.Api = { paper: {
   libraryList: async () => ({ ok: true, papers: [] }),
 }};
 
-// _reportView + _paperReportModel/_paperReviewModel state come from the
-// still-shipped paper-reader.js (deps, argv[4]); the seed logic under test is
-// in paper/report.js (target, argv[2]). Eval deps first (best-effort — its
-// load-time bootstrap is stubbed/permissive), then the target.
-try { eval(fs.readFileSync(process.argv[4], 'utf8')); } catch (e) {
-  console.error('deps eval warning: ' + (e && e.message));
-}
-eval(fs.readFileSync(process.argv[2], 'utf8'));  // paper/report.js (real, shipped, target)
+eval(fs.readFileSync(process.argv[2], 'utf8'));  // paper-reader.js (real, shipped)
 
 const out = [];
 function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
@@ -165,7 +155,7 @@ def _run_harness(paper_js: str) -> subprocess.CompletedProcess:
         f.write(_HARNESS)
     try:
         return subprocess.run(
-            ['node', harness, paper_js, ROOT, PAPER_READER_DEPS],
+            ['node', harness, paper_js, ROOT],
             capture_output=True, text=True, timeout=60,
         )
     finally:

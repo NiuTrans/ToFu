@@ -128,54 +128,10 @@ function areFoldersLoaded() { return _foldersLoaded; }
 
 /* ── Folder View Mode: when set, sidebar shows only this folder's conversations ── */
 let _activeFolderId = null;
-/* Tracks the in-flight member fetch per folder so the sidebar can show a
- * loading affordance (C4) and so a genuine empty folder (totalCount 0) is
- * distinguished from "members not loaded yet". */
-let _folderMembersLoading = null;   // folderId currently being fetched, or null
-const _folderMembersLoaded = new Set();  // folderIds whose members were merged
 function getActiveFolderId() { return _activeFolderId; }
-function isFolderMembersLoading(id) { return _folderMembersLoading === id; }
-function folderMembersLoaded(id) { return _folderMembersLoaded.has(id); }
-
-/**
- * Fetch a folder's members from the server (resolved by real folderId,
- * independent of the top-N sidebar window) and INCREMENTALLY merge them into
- * the in-memory `conversations` array. Members that sort past the sidebar cap —
- * and were therefore never in the sidebar's top-N list — become visible here.
- *
- * The merge is delegated to mergeServerConvShells (core/conversations.js) so it
- * reuses the ONE id-keyed merge path: an already-present conv (in the window,
- * streaming, or fully loaded) keeps its messages / _serverRev / activeTaskId /
- * _needsLoad; a new member is added as a visibility-gate-passing shell.
- */
-async function loadFolderMembers(id) {
-  if (!id) return;
-  _folderMembersLoading = id;
-  if (typeof renderConversationList === 'function') renderConversationList();
-  try {
-    const env = typeof Api !== 'undefined' && Api.conversations && Api.conversations.listByFolder
-      ? await Api.conversations.listByFolder(id) : null;
-    const rows = env && Array.isArray(env.conversations) ? env.conversations : [];
-    if (typeof mergeServerConvShells === 'function') mergeServerConvShells(rows);
-    _folderMembersLoaded.add(id);
-  } catch (e) {
-    console.warn('[loadFolderMembers] fetch failed for folder=%s: %s', id, e && e.message);
-  } finally {
-    if (_folderMembersLoading === id) _folderMembersLoading = null;
-    if (typeof renderConversationList === 'function') renderConversationList();
-  }
-}
-
 function setActiveFolderId(id) {
   _activeFolderId = id || null;
   renderConversationList();
-  /* Fetch the folder's real members on first entry so a folder whose members
-   * all sort past the sidebar window still shows them. Fire-and-forget: the
-   * synchronous render above shows whatever is already in memory + a loading
-   * affordance; loadFolderMembers re-renders when the merge lands. */
-  if (_activeFolderId && !_folderMembersLoaded.has(_activeFolderId)) {
-    loadFolderMembers(_activeFolderId);
-  }
 }
 
 function _convSorter(a, b) {

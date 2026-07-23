@@ -145,16 +145,21 @@ async function startAssistantResponse(convId) {
   const _ep = !!baseConfig.endpointMode;
   const _pp = baseConfig.projectPath;
   /* Decide API route: endpoint mode uses /api/v1/endpoint/start */
+  const startUrl = _ep
+    ? apiUrl("/api/v1/endpoint/start")
+    : apiUrl("/api/v1/chat/start");
   try {
-    const _startBody = { convId, config: baseConfig };
-    const _startOpts = {
+    const resp = await fetch(startUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        convId,
+        config: baseConfig,
+      }),
       signal: typeof AbortSignal.timeout === 'function'
         ? AbortSignal.timeout(30000)    // 30s timeout to prevent infinite hang
         : undefined,
-    };
-    const resp = _ep
-      ? await Api.endpoint.start(_startBody, _startOpts)
-      : await Api.chat.start(_startBody, _startOpts);
+    });
     if (!resp.ok) {
       const err = await resp
         .json()
@@ -237,9 +242,8 @@ async function sendMessage() {
       const input = document.getElementById("userInput");
       const text = (input?.value || "").trim();
       if (!text && pendingImages.length === 0) return;
-      // Wait for any still-processing images, then collect and clear.
-      await _waitForImageProcessing();
-      const imgs = [...pendingImages].filter(im => im && (im.base64 || im.url));
+      // Collect images and clear, then delegate to branch sender
+      const imgs = [...pendingImages];
       pendingImages = [];
       renderImagePreviews();
       input.value = "";
@@ -337,22 +341,10 @@ async function sendMessage() {
   }
   const convId = conv.id;
 
-  // ── Wait for any still-processing images (mobile: a large 2nd/3rd photo may
-  //    still be compressing/uploading when the user taps send). Without this
-  //    the [...pendingImages] snapshot below would capture an entry whose
-  //    base64 isn't ready yet — dropping the image silently. ──
-  await _waitForImageProcessing();
-
   // ── Build message payload for backend ──
-  // Snapshot images: keep only entries with usable data (base64 or an
-  // uploaded url) and strip transient processing fields (_status/_objectUrl)
-  // so a still-unready entry never reaches the backend or gets persisted.
-  const _imgSnapshot = pendingImages
-    .filter(im => im && (im.base64 || im.url))
-    .map(({ _status, _objectUrl, ...rest }) => rest);
   const msgPayload = {
     text: finalText,
-    images: _imgSnapshot,
+    images: [...pendingImages],
     pdfTexts: [...pendingPdfTexts],
     timestamp: Date.now(),
     // ★ Mint the turn's stable _msgId HERE and ship it to the server, so the
@@ -985,27 +977,6 @@ function _attachAutopilotFollowup(convId, payload) {
 // ══════════════════════════════════════════════════════
 
 /**
- * Wait for any pending images that are still compressing/uploading
- * (`_status === 'processing'`) to finish before the send snapshot is taken.
- * On mobile, decoding + compressing a large photo takes long enough that a
- * user can tap send while the 2nd/3rd image is still in flight — this gate
- * ensures every selected image's base64 is ready and none is silently dropped.
- */
-async function _waitForImageProcessing() {
-  if (typeof pendingImages === 'undefined' || !pendingImages.length) return;
-  const MAX_IMG_WAIT = 120; // 120 × 500ms = 60s safety cap
-  for (let i = 0; i < MAX_IMG_WAIT; i++) {
-    const inFlight = pendingImages.filter(im => im && im._status === 'processing');
-    if (inFlight.length === 0) return;
-    if (i === 0) {
-      console.log(`%c[Image-Wait] Waiting for ${inFlight.length} image(s) to finish processing…`, 'color:#f59e0b;font-weight:bold');
-    }
-    await new Promise(r => setTimeout(r, 500));
-  }
-  console.warn('[Image-Wait] Timed out waiting for image processing — sending what is ready');
-}
-
-/**
  * Wait for all VLM-parsing PDFs in a user message to complete.
  * Shows a waiting indicator in the chat area while blocking.
  * This ensures the LLM always sees VLM-quality text, never rule-based.
@@ -1456,24 +1427,8 @@ async function _refreshServerQueue(convId) {
       return;
     }
     if (serverQueue.length > 0) {
-      // ── Peer/operator rows are NOT input-box queue items ──
-      // A KIND_PEER_MSG row is an INBOUND delivery-in-flight signal (being
-      // consumed by the round-boundary inbox twin or the idle-drain), not an
-      // OUTBOUND message the human typed and is waiting to send. It renders in
-      // its own place — a `_renderPeerInjectRow` tool-round card when a live
-      // task drains it, or a `.peer-msg-banner` fresh turn when idle-drained —
-      // so surfacing it here would wrongly impersonate a "queued message" and
-      // pad the "N messages queued" count. Backend get_queue stays the full
-      // truth source; the queue BAR shows only real human + autopilot rows.
-      const outboundQueue = serverQueue.filter(item => item.kind !== 'peer_msg');
-      if (outboundQueue.length === 0) {
-        pendingMessageQueue.delete(convId);
-        renderPendingQueueUI(convId);
-        updateSendButton();
-        return;
-      }
       // Convert server format to local format
-      const localQueue = outboundQueue.map(item => ({
+      const localQueue = serverQueue.map(item => ({
         queueId: item.queueId,
         kind: item.kind || 'real',
         text: item.text || '',

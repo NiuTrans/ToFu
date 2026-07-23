@@ -113,9 +113,7 @@
     if (typeof desktopEnabled !== 'undefined' && desktopEnabled) out.push({ label: 'Desktop', tone: 'net' });
     if (typeof codeExecEnabled !== 'undefined' && codeExecEnabled) out.push({ label: 'Code Exec', tone: 'code' });
     if (typeof memoryEnabled !== 'undefined' && memoryEnabled) out.push({ label: 'Memory', tone: 'ai' });
-    // Scheduler is a default tool (always on, no toggle) — like read_files /
-    // todo it is intentionally NOT shown as a per-turn chip (would be constant
-    // noise). The reconcile rule below still maps its fn names defensively.
+    if (typeof schedulerEnabled !== 'undefined' && schedulerEnabled) out.push({ label: 'Scheduler', tone: 'ai' });
     if (typeof imageGenEnabled !== 'undefined' && imageGenEnabled) out.push({ label: 'Image Gen', tone: 'ai' });
     if (typeof humanGuidanceEnabled !== 'undefined' && humanGuidanceEnabled) out.push({ label: 'Ask User', tone: 'ai' });
     if (typeof autoTranslate !== 'undefined' && autoTranslate) out.push({ label: 'Translate', tone: 'ai' });

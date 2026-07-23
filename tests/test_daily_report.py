@@ -156,6 +156,129 @@ class TestScopedCostInvalidation:
 
 
 # ═══════════════════════════════════════════════════════════
+#  1c. cost.py — SETTLED-DAY PINNING (regression: a cross-midnight
+#      edit today must NOT drop yesterday's already-persisted cost
+#      snapshot → historical balances stay stable + instant).
+# ═══════════════════════════════════════════════════════════
+
+@pytest.mark.unit
+class TestSettledDayPinning:
+    import datetime as _dt
+
+    def _msg(self, date_obj, hour=12):
+        import datetime as _dt
+        ts = int(_dt.datetime(date_obj.year, date_obj.month, date_obj.day, hour)
+                 .timestamp() * 1000)
+        return {"role": "assistant", "timestamp": ts,
+                "usage": {"prompt_tokens": 100, "completion_tokens": 50}}
+
+    def _yesterday_today(self):
+        import datetime as _dt
+        today = _dt.date.today()
+        yesterday = today - _dt.timedelta(days=1)
+        return yesterday, today
+
+    def test_should_pin_predicate(self):
+        """_should_pin_day: pin iff strictly-past AND already persisted."""
+        assert cost._should_pin_day("2026-06-10", "2026-06-12",
+                                    {"2026-06-10"}) is True
+        # persisted but IS today → not pinned (today is still being written)
+        assert cost._should_pin_day("2026-06-12", "2026-06-12",
+                                    {"2026-06-12"}) is False
+        # past but NOT persisted → not pinned (nothing to protect; let it scan)
+        assert cost._should_pin_day("2026-06-10", "2026-06-12", set()) is False
+
+    def test_cross_midnight_edit_pins_yesterday_drops_today(self):
+        """A conversation whose messages span yesterday+today: editing/deleting
+        it invalidates ONLY today (unsettled). Yesterday, already persisted, is
+        pinned → its cache hit + value survive."""
+        yesterday, today = self._yesterday_today()
+        msgs = [self._msg(yesterday, hour=23), self._msg(today, hour=1)]
+        y_str = yesterday.isoformat()
+        t_str = today.isoformat()
+
+        calls = []
+        # yesterday is already a persisted snapshot; today is not.
+        with mock.patch.object(cost, "_persisted_cost_dates",
+                               return_value={y_str}), \
+                mock.patch.object(cost, "invalidate_day_cost_cache",
+                                  side_effect=lambda d=None: calls.append(d)):
+            touched = cost.invalidate_cost_cache_for_messages(msgs)
+
+        # Yesterday pinned → NOT invalidated; only today dropped.
+        assert y_str not in touched, "settled yesterday must be pinned"
+        assert t_str in touched, "today (unsettled) must still be invalidated"
+        assert y_str not in calls
+        assert calls == [t_str]
+
+    def test_neuter_pin_predicate_reverts_to_old_behavior(self):
+        """NEUTER: force _should_pin_day → False (the pre-fix behavior). Now the
+        cross-midnight edit invalidates YESTERDAY too — proving the predicate is
+        load-bearing for historical-balance stability."""
+        yesterday, today = self._yesterday_today()
+        msgs = [self._msg(yesterday, hour=23), self._msg(today, hour=1)]
+        y_str = yesterday.isoformat()
+        t_str = today.isoformat()
+
+        calls = []
+        with mock.patch.object(cost, "_persisted_cost_dates",
+                               return_value={y_str}), \
+                mock.patch.object(cost, "_should_pin_day", return_value=False), \
+                mock.patch.object(cost, "invalidate_day_cost_cache",
+                                  side_effect=lambda d=None: calls.append(d)):
+            touched = cost.invalidate_cost_cache_for_messages(msgs)
+
+        # With pinning neutered, yesterday IS invalidated again (the old bug).
+        assert y_str in touched and t_str in touched
+        assert set(calls) == {y_str, t_str}
+
+
+# ═══════════════════════════════════════════════════════════
+#  1d. cost.py — FULLY-CACHED PAST MONTH does ZERO live scans
+#      (the whole point of pinning:翻旧账永远读缓存, never re-scan).
+# ═══════════════════════════════════════════════════════════
+
+@pytest.mark.unit
+class TestPastMonthNoRescan:
+    def test_fully_cached_past_month_never_scans(self):
+        """A past month whose every day is already persisted must resolve from
+        the cache with ZERO calls to _scan_costs_in_range (the 8s DB scan)."""
+        import datetime as _dt
+        today = _dt.date.today()
+        # Pick a month strictly before this one (fully in the past).
+        if today.month == 1:
+            year, month = today.year - 1, 12
+        else:
+            year, month = today.year, today.month - 1
+        days_in_month = (_dt.date(year + (month // 12), (month % 12) + 1, 1)
+                         - _dt.timedelta(days=1)).day
+
+        # Seed a cache hit for EVERY day of that past month (some non-zero).
+        cached = {d: {"cost": (1.0 if d % 2 else 0.0), "conversations": {}}
+                  for d in range(1, days_in_month + 1)}
+
+        scan_calls = []
+
+        def _fake_scan(*a, **k):
+            scan_calls.append((a, k))
+            return {}
+
+        with mock.patch.object(cost, "_load_cached_day_costs",
+                               return_value=cached), \
+                mock.patch.object(cost, "_scan_costs_in_range",
+                                  side_effect=_fake_scan), \
+                mock.patch.object(cost, "_persist_day_cost"):
+            result = cost._get_monthly_costs(year, month)
+
+        # Zero rescans — the whole month came from cache.
+        assert scan_calls == [], (
+            f"expected 0 scans for fully-cached past month, got {len(scan_calls)}")
+        # And the non-zero days are surfaced.
+        assert all(v["cost"] > 0 for v in result.values())
+        assert len(result) == sum(1 for d in range(1, days_in_month + 1) if d % 2)
+
+
+# ═══════════════════════════════════════════════════════════
 #  2. conversations.py — transcript building + timestamp coercion
 # ═══════════════════════════════════════════════════════════
 

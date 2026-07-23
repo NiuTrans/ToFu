@@ -175,13 +175,7 @@ window.showPrompt = window.showPrompt || async function(msg, opts) {
      label through the global t(). It is self-contained (reads localStorage +
      a DOMContentLoaded hook with null-safe DOM queries) and respects the UI
      language the user picked in the main app (same-origin localStorage). -->
-<script defer src="static/js/i18n.js?v=0.15.1"></script>
-<!-- api.js is the unified backend client (window.Api). relay-admin.js routes
-     all its /api/v1/* calls through Api.request (CLAUDE.md §3.2.0); it is
-     self-contained (its _base() falls back to location.pathname when core.js's
-     apiUrl() is absent, as it is on this standalone page). MUST load before
-     relay-admin.js. -->
-<script defer src="static/js/api.js?v=0.15.1"></script>
-<script defer src="static/js/relay-admin.js?v=0.15.1"></script>
+<script defer src="static/js/i18n.js?v=0.15.2"></script>
+<script defer src="static/js/relay-admin.js?v=0.15.2"></script>
 </body>
 </html>

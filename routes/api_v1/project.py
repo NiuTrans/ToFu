@@ -625,27 +625,7 @@ def project_board():
         return api_bad_request('path is required', field='path')
     try:
         from lib.conversations.project_board import read_board
-        board = read_board(project_path)
-        # ── Backend-authoritative dispatch fact (front/back contract): the
-        #    frontend must NOT re-infer "will the brain pick this up" from
-        #    client state. Stamp `dispatchable=True` on the epics the heartbeat
-        #    would genuinely pick up on its next sweep (deps done, not on a live
-        #    cooldown, not live-claimed, has a routing target). The frontend
-        #    renders "auto-starts ~30s" purely from this flag. Best-effort:
-        #    a failure here just omits the flag (frontend shows no hint). ──
-        try:
-            from lib.conversations.project_dispatch import (
-                _dispatch_target, select_dispatchable)
-            pickable = {e['id']: _dispatch_target(e)
-                        for e in select_dispatchable(project_path)}
-            for t in board.get('tasks', []):
-                tgt = pickable.get(t.get('id'))
-                if tgt:
-                    t['dispatchable'] = True
-                    t['dispatch_target'] = tgt
-        except Exception as e:
-            logger.debug('[Project.v1] board dispatch-fact enrich skipped: %s', e)
-        return api_ok(board)
+        return api_ok(read_board(project_path))
     except Exception as e:
         logger.error('[Project.v1] board read failed for %s: %s',
                      project_path, e, exc_info=True)

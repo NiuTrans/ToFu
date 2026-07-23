@@ -106,27 +106,16 @@ global.ConvCache = {
 // getActiveConv lives in core.js — stub it to the in-memory list.
 global.getActiveConv = () => conversations.find((c) => c.id === activeConvId) || null;
 
-// ── The re-pull counter: record every body re-pull the merge triggers. ──
-// After the ui.js/core split, loadConversationsFromServer fetches the sidebar
-// list through Api.conversations.listMeta (not raw fetch), and routes a
-// CONTENT-ONLY append on a settled open conv through _verifyActiveConvFromServer
-// while a COUNT increase / pinned conv still uses loadConversationMessages. BOTH
-// are "the body re-pull fired" — the counter records either.
+// ── The re-pull counter: record every loadConversationMessages(convId). ──
 let repullCalls = [];
 // Server meta list for the NEXT loadConversationsFromServer() call.
 let SERVER_LIST = [];
-const _metaResp = () => ({
+global.fetch = async () => ({
   status: 200, ok: true,
   headers: { get: () => null },
   json: async () => SERVER_LIST,
   clone() { return this; },
 });
-global.fetch = async () => _metaResp();
-global.Api = {
-  conversations: {
-    listMeta: async () => _metaResp(),
-  },
-};
 
 global.conversations = [];
 
@@ -139,15 +128,6 @@ loadConversationMessages = async (cid) => {
   repullCalls.push(cid);
   const c = conversations.find((x) => x.id === cid);
   if (c) c._needsLoad = false;
-  return c || null;
-};
-// The content-only append path (settled open conv, equal count) adopts via
-// _verifyActiveConvFromServer instead of loadConversationMessages. It lives in
-// another module (not conversations.js), so define it here as a re-pull counter.
-global._verifyActiveConvFromServer = async (cid) => {
-  repullCalls.push(cid);
-  const c = conversations.find((x) => x.id === cid);
-  if (c) { c._needsLoad = false; c._contentGrewNeedsVerify = false; }
   return c || null;
 };
 
@@ -260,10 +240,10 @@ def test_NC_content_only_trigger_is_load_bearing(tmp_path):
     with open(conv_js, encoding='utf-8') as f:
         src = f.read()
 
-    needle = 'if (_contentStale) {\n              local._needsLoad = true;'
+    needle = 'if (_contentStale) local._needsLoad = true;'
     assert src.count(needle) == 1, 'content-only trigger fragment drifted — update the neuter target'
     # Revert to a condition that can never fire → old count-only behaviour.
-    neutered = src.replace(needle, 'if (false) {\n              local._needsLoad = true;', 1)
+    neutered = src.replace(needle, 'if (false) local._needsLoad = true;', 1)
     assert neutered != src, 'neuter produced no change'
 
     copy = tmp_path / 'conversations_neutered_trigger.js'

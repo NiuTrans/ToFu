@@ -280,7 +280,20 @@ function showChoice(cfg) {
 
     overlay.onclick = (e) => { if (e.target === overlay) close(dismissValue); };
     function onKey(e) {
-      if (e.key === 'Escape') { e.preventDefault(); close(dismissValue); }
+      if (e.key === 'Escape') { e.preventDefault(); close(dismissValue); return; }
+      // Up/Down arrows move focus between the stacked option buttons (wrapping)
+      // for full keyboard-only navigation. Enter/Space on a focused button is
+      // handled natively (<button>), so the focused option is what activates.
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        const btns = [...list.querySelectorAll('.app-choice-btn')];
+        if (!btns.length) return;
+        e.preventDefault();
+        const cur = btns.indexOf(document.activeElement);
+        const step = e.key === 'ArrowDown' ? 1 : -1;
+        const next = (cur < 0 ? (step > 0 ? 0 : btns.length - 1)
+                              : (cur + step + btns.length) % btns.length);
+        btns[next].focus();
+      }
     }
     document.addEventListener('keydown', onKey, true);
 

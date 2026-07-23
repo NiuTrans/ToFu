@@ -92,11 +92,6 @@ var _paperRebuttalStream = null;
 var _paperRebuttalModel = '';
 var _paperRebuttalInputText = '';  // author rebuttal text the user pasted (per paper)
 var _REBUTTAL_REGEN_INTENT_KEY = 'paper_rebuttal_regen_intent';
-// Which Review-tab segment is on screen: 'review' (the peer review) or
-// 'rebuttal' (the author-response → follow-up reply). The two are
-// MUTUALLY-EXCLUSIVE full-height panels (see _setReviewSeg) so their two long
-// documents never compete for the same flex-column height.
-var _paperReviewSeg = 'review';
 // Per-paper venue preference — persisted so the SAME paper re-opens on the
 // venue the user last picked (survives tab switches AND hard refresh), like
 // the model selection survives. Keyed by paper id in one localStorage map.
@@ -165,61 +160,6 @@ function _restoreRebuttalPanel() {
       }
     }
   } catch (e) { console.warn('[Paper:Rebuttal] restore panel failed:', e); }
-}
-
-/** Switch the Review tab between its two mutually-exclusive segments:
- *   - 'review'   → the peer-review report (#paperReviewContent)
- *   - 'rebuttal' → the author-rebuttal paste + follow-up reply (#paperRebuttalContent)
- *  Only the chosen .paper-review-seg-panel stays in layout; the other is
- *  display:none. Because the two long documents are never co-laid-out, neither
- *  can be squeezed to 0 height by the other (the old stacked-<details> bug).
- *  Pure display toggle — containerId / cache / stream state are untouched, so
- *  the shared report-engine pipeline (_reportView, poll, paint) is unaffected.
- *  Flushes the active reading tracker on switch so one segment's reading
- *  position is never mis-attributed to the other (each keys its own langKey
- *  slot). */
-function _setReviewSeg(seg) {
-  if (seg !== 'review' && seg !== 'rebuttal') seg = 'review';
-  // Leaving a segment: flush its reading session so the tracker for the newly
-  // shown segment starts clean (the paint path re-wires it against the right
-  // scroller + view). Cheap + idempotent.
-  if (_paperReviewSeg !== seg && typeof _teardownReadingTracker === 'function') {
-    _teardownReadingTracker(true);
-  }
-  _paperReviewSeg = seg;
-  var root = document.querySelector('.paper-tab-panel[data-tab="review"]');
-  if (!root) return;
-  root.querySelectorAll('.paper-review-seg-panel').forEach(function(p) {
-    p.style.display = (p.dataset.seg === seg) ? '' : 'none';
-  });
-  root.querySelectorAll('#paperReviewSeg .paper-review-seg-btn').forEach(function(b) {
-    var on = b.dataset.seg === seg;
-    b.classList.toggle('active', on);
-    b.setAttribute('aria-selected', on ? 'true' : 'false');
-  });
-  // When the rebuttal segment becomes visible its scroller finally has real
-  // geometry; repaint any existing follow-up so the score card + reply land.
-  if (seg === 'rebuttal') {
-    try { _restoreRebuttalPanel(); } catch (e) { console.warn('[Paper:Rebuttal] seg repaint failed:', e); }
-  }
-}
-
-/** Reflect rebuttal state on the segment switcher: light the Rebuttal tab's
- *  status dot when a follow-up reply exists for this paper (cache or a live
- *  stream), so the reviewer sees there is something to read without switching.
- *  Reset the active segment to 'review' on paper switch / tab (re)entry so a
- *  new paper never opens straight into a stale rebuttal panel. */
-function _syncReviewSegState(resetToReview) {
-  if (resetToReview) _setReviewSeg('review');
-  else _setReviewSeg(_paperReviewSeg);
-  try {
-    var dot = document.getElementById('paperRebuttalSegDot');
-    if (dot) {
-      var rv = _reportView('rebuttal');
-      var has = !!(rv && (rv.cache || (rv.stream && rv.stream.fullText)));
-      dot.style.display = has ? '' : 'none';
-    }
-  } catch (e) { console.warn('[Paper:Rebuttal] sync seg state failed:', e); }
 }
 
 function _reportView(kind) {
@@ -954,9 +894,6 @@ function _switchPaperTab(tab) {
         // any existing rebuttal stream or cache (the rebuttal sub-panel lives
         // inside the Review tab, so it shares this entry point).
         _restoreRebuttalPanel();
-        // Open on the Review segment (never straight into a stale rebuttal
-        // panel) and light the Rebuttal dot if a follow-up reply already exists.
-        _syncReviewSegState(true);
       } else {
         _loadOrGenerateReport(_view);
       }

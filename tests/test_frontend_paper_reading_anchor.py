@@ -3,7 +3,7 @@
 Requirement: toggling the report language (EN/中) fully rebuilds the report DOM
 via ``_renderFinalReport`` (``container.innerHTML=''``). Before this fix that
 snapped the reader back to the TOP — a reading-flow break mid-paper. The fix
-adds two pure helpers in ``static/js/paper/report.js``:
+adds two pure helpers in ``static/js/paper-reader.js``:
 
   • ``_captureReadingAnchor(scroller)`` → {index, offset} : the index of the
     heading nearest the top of the viewport + that heading's pixel offset below
@@ -13,7 +13,7 @@ adds two pure helpers in ``static/js/paper/report.js``:
   • ``_restoreReadingAnchor(scroller, article, anchor)`` : re-applies that anchor
     onto the rebuilt article so the reader lands where their eye was.
 
-The harness loads the REAL shipped ``paper/report.js`` under jsdom, builds a
+The harness loads the REAL shipped ``paper-reader.js`` under jsdom, builds a
 scroller with several headings, STUBS getBoundingClientRect + scroll geometry
 (jsdom does no layout), captures an anchor at a mid-report heading, rebuilds the
 article, and asserts the restored scrollTop lands on that heading (not 0).
@@ -39,7 +39,7 @@ pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-PAPER_JS = os.path.join(ROOT, 'static', 'js', 'paper', 'report.js')
+PAPER_JS = os.path.join(ROOT, 'static', 'js', 'paper-reader.js')
 
 
 def _node_deps_available() -> bool:
@@ -69,7 +69,7 @@ global.requestAnimationFrame = win.requestAnimationFrame = (fn) => { fn(); retur
 global.setTimeout = win.setTimeout = (fn) => { if (typeof fn === 'function') fn(); return 0; };
 win.matchMedia = global.matchMedia = (q) => ({ matches:false, media:q, addEventListener(){}, removeEventListener(){} });
 
-eval(fs.readFileSync(process.argv[2], 'utf8'));  // real paper/report.js
+eval(fs.readFileSync(process.argv[2], 'utf8'));  // real paper-reader.js
 
 const CONTENT_H = 2000, VIEW_H = 600, H0 = 100, GAP = 400;
 

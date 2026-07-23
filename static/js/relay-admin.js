@@ -53,25 +53,12 @@
     catch (_) { return String(ts); }
   }
 
-  /**
-   * Thin wrapper over the unified Api client (window.Api, api.js). Routes
-   * every /api/v1/* call through Api.request so this file never raw-fetches
-   * /api/* directly (CLAUDE.md §3.2.0). Preserves the legacy contract:
-   *   - GET when no opts; otherwise opts.method + opts.body (a JSON string).
-   *   - Returns the parsed JSON body (or null on empty).
-   *   - Throws Error(body.error || body.message || 'HTTP <status>') on non-OK.
-   * @returns {Promise<any>}
-   */
+  /** @returns {Promise<any>} */
   async function _api(url, opts) {
-    opts = opts || {};
-    const init = {
-      method: opts.method || 'GET',
-      parse: 'response',
-      headers: {'Content-Type': 'application/json'},
-    };
-    // Legacy callers pass a pre-serialized JSON string in opts.body.
-    if (opts.body !== undefined) init.body = opts.body;
-    const r = await Api.request(url, init);
+    const r = await fetch(typeof apiUrl === 'function' ? apiUrl(url) : url,
+      Object.assign({credentials: 'same-origin',
+                      headers: {'Content-Type': 'application/json'}},
+                     opts || {}));
     let body = null;
     try { body = await r.json(); } catch (_) {}
     if (!r.ok) {

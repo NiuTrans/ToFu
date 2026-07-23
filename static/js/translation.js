@@ -47,48 +47,6 @@ async function _isAlreadyChinese(text) {
   return !!(body && body.is_chinese);
 }
 
-/* ── OUTPUT-side (model reply → human) translate target ──
- * The assistant reply is rendered into the UI language, not a hard-pinned
- * Chinese. Maps _i18nLang to the language NAME the translate engine expects
- * (mirrors lib/conv_config._UILANG_TO_TARGET). Falls back to Chinese so an
- * unknown/absent UI language is byte-identical to the former hard-pin. */
-const _UILANG_TO_TARGET = {
-  zh: 'Chinese', 'zh-cn': 'Chinese', 'zh-tw': 'Chinese',
-  en: 'English', ja: 'Japanese', ko: 'Korean',
-  fr: 'French', de: 'German', es: 'Spanish', ru: 'Russian',
-};
-function _uiTranslateTarget() {
-  const code = (typeof _i18nLang !== 'undefined' && _i18nLang)
-    ? String(_i18nLang).toLowerCase() : 'zh';
-  return _UILANG_TO_TARGET[code] || 'Chinese';
-}
-/* Target-language NAME → detector code (detected.code from the backend),
- * so the skip gate compares like with like. */
-const _TARGET_TO_CODE = {
-  Chinese: 'zh', English: 'en', Japanese: 'ja', Korean: 'ko',
-  French: 'fr', German: 'de', Spanish: 'es', Russian: 'ru',
-};
-
-/* Generic "already in the target language?" skip gate. Uses the cascade
- * detector's `detected.code` (fastText-backed server-side) instead of the
- * coarse is_chinese flag, so a Japanese reply into a Japanese UI is not
- * mistaken for its target and a genuinely-target reply is still short-
- * circuited. Fail-open (translate) on any error. */
-async function _isAlreadyInTarget(text, targetLang) {
-  if (!text || typeof text !== 'string' || text.replace(/\s+/g, '').length < 8) {
-    return false;
-  }
-  const wantCode = _TARGET_TO_CODE[targetLang];
-  if (!wantCode) return false;
-  // force_fasttext: this gate decides whether to translate; the script+
-  // heuristic tier cannot separate kanji-heavy Japanese from Chinese, so
-  // without the statistical model a JP reply would be wrongly skipped as
-  // already-in-target (the same bug the server-side safety net force-fixes).
-  const body = await Api.text.detectLanguage(text, { forceFasttext: true });
-  const code = body && body.detected && body.detected.code;
-  return !!(code && code === wantCode);
-}
-
 /* _renderMsgInPlace, _patchTranslateLoadingDom, _renderStreamingTranslatePreview
  * and _applyPartialByRoundToSettled were RELOCATED to ui/translation_render.js
  * (decoupling step 4). This engine module no longer touches the DOM — it
@@ -547,11 +505,9 @@ async function _runTranslationPipeline(conv, idx, msg, opts) {
   // "translation" of an already-Chinese message (the bug the user reported:
   // “原文中文 · 译文却是英文”). Marks the message as done so the
   // spinner clears and the bilingual block is not shown.
-  // Generic already-in-target skip (fastText-backed detected.code) — replaces
-  // the Chinese-only is_chinese gate so a Japanese reply into a Japanese UI is
-  // not mistaken for its own target and a genuinely-target reply still skips.
-  if (await _isAlreadyInTarget(text, opts.targetLang)) {
-    console.info(`[Translate] skip msg ${idx}: source is already in target ${opts.targetLang} (mode=${mode})`);
+  // _isAlreadyChinese is async — policy lives in lib/text_lang.py.
+  if (opts.targetLang === 'Chinese' && (await _isAlreadyChinese(text))) {
+    console.info(`[Translate] skip msg ${idx}: source is already predominantly Chinese (mode=${mode})`);
     msg._translateDone = true;
     msg._translateSkippedReason = 'already_target_language';
     delete msg._translateTaskId;
@@ -805,7 +761,7 @@ async function _resumePendingTranslations(convId) {
         console.log(`%c[TranslateTask] 🔄 Auto-starting missed translation for msg ${i} in conv=${convId.slice(0,8)}`, 'color:#8b5cf6');
       }
       _runTranslationPipeline(conv, i, msg, {
-        sourceLang: 'English', targetLang: _uiTranslateTarget(),
+        sourceLang: 'English', targetLang: 'Chinese',
         field: 'translatedContent', mode: 'auto',
       });
     }
@@ -869,11 +825,11 @@ async function _resumePendingTranslations(convId) {
       const recovered = await _tryRecoverFromServer(convId, p.idx, p.msg, field);
       if (recovered) continue;
       // No DB recovery available — auto-mode pipeline will retry, manual will surface error.
-      if (convAutoTranslate(conv) && field === 'translatedContent' && p.msg.content) {
+      if (_convAutoTranslate && field === 'translatedContent' && p.msg.content) {
         p.msg._translateTaskId = null;
         delete p.msg._translateError;
         _runTranslationPipeline(conv, p.idx, p.msg, {
-          sourceLang: 'English', targetLang: _uiTranslateTarget(),
+          sourceLang: 'English', targetLang: 'Chinese',
           field: 'translatedContent', mode: 'auto',
         });
       } else {
@@ -911,13 +867,7 @@ async function _resumePendingTranslations(convId) {
     try {
       if (!frame) return;
       const _isRunning = frame.status === 'running' || frame.type === 'running';
-      const _isError = frame.status === 'error' || frame.type === 'error';
-      // Accept running, done-with-translation, AND error frames. The
-      // server-driven auto-translate has no client poll loop, so its terminal
-      // 'error' frame (worker _do_translate pushes it when retries are
-      // exhausted) is the ONLY signal the live view gets — dropping it left a
-      // failed translation completely invisible (bare English, no annotation).
-      if (!_isRunning && !_isError && (frame.status !== 'done' || !frame.translated)) return;
+      if (!_isRunning && (frame.status !== 'done' || !frame.translated)) return;
       const convId = frame.convId;
       if (!convId) return;
       const conv = (typeof conversations !== 'undefined')
@@ -1014,19 +964,6 @@ async function _resumePendingTranslations(convId) {
         // dropped (socket reconnect / queue overflow). Arm a DB-polling
         // watchdog so the live view recovers without a conversation switch.
         _armAutoTranslateWatchdog(convId, idx, msg);
-        return;
-      }
-
-      // ── Terminal error frame (server-driven auto-translate exhausted its
-      //    retries). No client poll loop owns this task, so this push frame is
-      //    the authoritative failure signal. Surface the subtle click-to-retry
-      //    annotation instead of leaving the bare English with no hint. ──
-      if (_isError) {
-        if (field !== 'translatedContent') return;
-        if (msg.translatedContent) return;   // a translation landed anyway
-        const _errMsg = (typeof frame.error === 'string' && frame.error)
-          ? frame.error : 'Translation failed';
-        _applyTranslationError(convId, idx, msg, _errMsg);
         return;
       }
 

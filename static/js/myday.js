@@ -30,7 +30,8 @@ const _myday = {
 const _mydayIDB = (function () {
   const DB_NAME = 'tofu_myday_cache';
   const STORE = 'reports';
-  const VER = 1;
+  const STORE_MONTHS = 'months';   // month overview (cost_days/conv_days) cache
+  const VER = 2;
   let _dbp = null;
   function _open() {
     if (_dbp) return _dbp;
@@ -41,6 +42,7 @@ const _mydayIDB = (function () {
         rq.onupgradeneeded = (e) => {
           const db = e.target.result;
           if (!db.objectStoreNames.contains(STORE)) db.createObjectStore(STORE, { keyPath: 'date' });
+          if (!db.objectStoreNames.contains(STORE_MONTHS)) db.createObjectStore(STORE_MONTHS, { keyPath: 'month' });
         };
         rq.onsuccess = (e) => resolve(e.target.result);
         rq.onerror = () => { console.warn('[MyDay] report cache open failed'); resolve(null); };
@@ -73,7 +75,35 @@ const _mydayIDB = (function () {
       });
     });
   }
-  return { get: get, put: put };
+  // Month overview cache (cost_days + conv_days), keyed by 'YYYY-MM'. Lets the
+  // calendar paint historical ¥ balances INSTANTLY on reopen/reload before the
+  // (multi-second, cache-cold) calendar fetch returns; the fetch then reconciles.
+  function getMonth(monthKey) {
+    return _open().then((db) => {
+      if (!db) return null;
+      return new Promise((resolve) => {
+        try {
+          const rq = db.transaction(STORE_MONTHS, 'readonly').objectStore(STORE_MONTHS).get(monthKey);
+          rq.onsuccess = () => resolve(rq.result ? rq.result.data : null);
+          rq.onerror = () => resolve(null);
+        } catch (e) { resolve(null); }
+      });
+    });
+  }
+  function putMonth(monthKey, data) {
+    return _open().then((db) => {
+      if (!db) return;
+      return new Promise((resolve) => {
+        try {
+          const tx = db.transaction(STORE_MONTHS, 'readwrite');
+          tx.objectStore(STORE_MONTHS).put({ month: monthKey, data: data, cachedAt: Date.now() });
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => resolve();
+        } catch (e) { resolve(); }
+      });
+    });
+  }
+  return { get: get, put: put, getMonth: getMonth, putMonth: putMonth };
 })();
 
 /* Set both the in-memory + persistent cache from an authoritative server
@@ -310,14 +340,35 @@ function _mydayRenderCalendar() {
   _mydayFetchMonthOverview(year, month);
 }
 
-/* Fetch month overview from API for calendar dots (with 15s client-side TTL) */
+/* Fetch month overview from API for calendar dots (with 15s client-side TTL).
+   Instant-paint: before the (possibly multi-second, cache-cold) network call,
+   paint the calendar's ¥ balances + conv counts from the persistent IDB month
+   cache so historical days show up immediately; the fetch then reconciles and
+   rewrites the cache. Mirrors the per-day report instant-paint (_mydaySelectDay). */
 async function _mydayFetchMonthOverview(year, month) {
   const cacheKey = `${year}-${month}`;
+  const monthKey = `${year}-${String(month + 1).padStart(2, '0')}`;
   const now = Date.now();
   if (_myday._overviewCache && _myday._overviewCache.key === cacheKey &&
       now - _myday._overviewCache.ts < 15000) {
     return; // skip — data is fresh enough
   }
+
+  // ── INSTANT PAINT from persistent month cache ──
+  // Only when the in-memory cost/conv maps aren't already populated for this
+  // month (a fresh reopen / reload). The server fetch below still runs and
+  // reconciles, so a stale cache is only ever shown for a few hundred ms.
+  try {
+    const cachedMonth = await _mydayIDB.getMonth(monthKey);
+    // Guard: user may have navigated to a different month while IDB read was in flight.
+    if (cachedMonth && _myday.year === year && _myday.month === month) {
+      if (cachedMonth.cost_days) _myday._costDays = cachedMonth.cost_days;
+      if (cachedMonth.conv_days) _myday._convDays = cachedMonth.conv_days;
+      _mydayRenderCalendar();
+      if (_myday.selectedDateStr) _mydayRenderSidebarInfo(_myday.selectedDateStr);
+    }
+  } catch (e) { console.warn('[MyDay] month cache read failed:', e && e.message); }
+
   try {
     const data = await Api.daily.calendar(year, month + 1);
     if (!data) {
@@ -345,6 +396,9 @@ async function _mydayFetchMonthOverview(year, month) {
       _myday._costDays = data.cost_days;
       changed = true;
     }
+    // Persist the authoritative month overview so the next reopen/reload paints
+    // historical balances instantly (server stays the source of truth).
+    try { _mydayIDB.putMonth(monthKey, { cost_days: data.cost_days || {}, conv_days: data.conv_days || {} }); } catch (e) { /* cache optional */ }
     _myday._overviewCache = { key: `${year}-${month}`, ts: Date.now() };
     if (changed) {
       _mydayRenderCalendar();

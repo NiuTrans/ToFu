@@ -316,11 +316,8 @@ def _persist_summary(conv_id: str, summary: str, msg_count: int) -> None:
     }
     try:
         from lib.conversations import set_conversation_settings
-        # notify=False: projectSummary is pure prompt-assembly state (never
-        # rendered in the UI), so invalidate the local sidebar cache (its blob
-        # now carries the new summary) but do NOT push a cross-device frame.
         set_conversation_settings(conv_id, {'projectSummary': record},
-                                  user_id=DEFAULT_USER_ID, notify=False)
+                                  user_id=DEFAULT_USER_ID)
         logger.debug('[ProjSummary] persisted summary conv=%s (msg_count=%d)',
                      conv_id[:8], msg_count)
     except Exception as e:

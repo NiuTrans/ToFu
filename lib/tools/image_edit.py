@@ -51,11 +51,7 @@ INSPECT_IMAGE_TOOL = {
                     "description": (
                         "Path to the image file (relative to the project root, or an "
                         "absolute / ~ path). Same path rules as read_files. Supported "
-                        "formats: png, jpg, jpeg, gif, webp, bmp.\n"
-                        "For an image the USER UPLOADED in the chat, there is no "
-                        "filesystem path — pass the '[image ref: /api/images/<file>]' "
-                        "value shown next to the image (an /api/images/... string) as "
-                        "this `path`. Do NOT invent a path like /dev/null."
+                        "formats: png, jpg, jpeg, gif, webp, bmp."
                     )
                 },
                 "crop": {

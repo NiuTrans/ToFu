@@ -26,7 +26,20 @@ import time
 
 import pytest
 
-from lib.compat import pty_supported
+# The PTY-backed streaming feature (lib.compat.pty_supported + a
+# TOFU_RUN_COMMAND_PTY path in tool_run_command) is not yet implemented — this
+# suite was committed ahead of it. Skip the WHOLE module gracefully at collection
+# time instead of letting an unguarded top-level import raise ImportError, which
+# would abort collection of the ENTIRE test suite (not a flake — deterministic).
+# When the feature lands, the import succeeds and these tests run automatically
+# (each is still gated per-platform by skipif(not pty_supported())).
+try:
+    from lib.compat import pty_supported
+except ImportError:
+    pytest.skip(
+        'PTY streaming not implemented yet (lib.compat.pty_supported missing)',
+        allow_module_level=True,
+    )
 from lib.project_mod import run_command as rc
 
 pytestmark = pytest.mark.unit

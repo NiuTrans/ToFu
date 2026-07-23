@@ -108,8 +108,7 @@ global.Api = win.Api = { paper: {
 localStorage.setItem('paper_active_id', 'paper-1');
 localStorage.setItem('paper_library_migrated_v1', '1');
 
-eval(fs.readFileSync(process.argv[2], 'utf8'));  // paper/report.js (report/review fns)
-if (process.argv[4]) eval(fs.readFileSync(process.argv[4], 'utf8'));  // paper-reader.js core
+eval(fs.readFileSync(process.argv[2], 'utf8'));  // paper-reader.js (real, shipped)
 
 const out = [];
 function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
@@ -231,9 +230,7 @@ def _run():
         f.write(_HARNESS)
     try:
         proc = subprocess.run(
-            ['node', harness,
-             os.path.join(JS_DIR, 'paper', 'report.js'), ROOT,
-             os.path.join(JS_DIR, 'paper-reader.js')],
+            ['node', harness, os.path.join(JS_DIR, 'paper-reader.js'), ROOT],
             capture_output=True, text=True, timeout=60,
         )
     finally:

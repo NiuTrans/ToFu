@@ -244,6 +244,118 @@ class TestStreamingToolAccumulator:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+#  Test 1b: Orphan early-announced round reconciliation (stream-retry bug)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@pytest.mark.unit
+class TestReconcileAnnouncedRounds:
+    """Regression: a transient mid-stream error makes ``stream_chat`` re-run the
+    SSE stream while reusing the SAME on_tool_call_ready callback. Each attempt
+    that streamed a tool call's args far enough already appended a
+    ``status='searching'`` round + emitted a tool_start (the live spinner), each
+    under a DISTINCT tc_id. Only the FINAL attempt's tool calls survive into
+    ``assistant_msg``, so the dispatch pipeline settles only those — every
+    discarded attempt's round is orphaned at 'searching' forever (a permanently
+    spinning tool row, live AND after reload). ``reconcile_announced_rounds``
+    settles those orphans to 'aborted' before parse_tool_calls.
+
+    Root cause found in conversation mrw5w13hrray3n: llmRound 1 held THREE
+    read_files blocks with identical args and distinct tc_ids — two stuck at
+    status='searching'/content=null, one 'done'.
+    """
+
+    def _make_task(self, tid='reconcile-task-1'):
+        return {
+            'id': tid,
+            'aborted': False,
+            'lastUserQuery': 'q',
+            'toolRounds': [],
+            'events': [],
+            'events_lock': threading.Lock(),
+        }
+
+    def _announce(self, acc, tc_id, fn_name='read_files', args=None):
+        """Drive a real early-announce (appends a searching round + tool_start)."""
+        acc._emit_tool_start(fn_name, args or {'reads': [{'path': 'x.py'}]},
+                             tc_id, json.dumps(args or {'reads': [{'path': 'x.py'}]}))
+
+    def test_orphan_round_settled_survivor_untouched(self):
+        """Two announced rounds, only the second survives → the first is settled
+        to 'aborted' and the survivor stays 'searching' (pipeline settles it)."""
+        from lib.tasks_pkg.streaming_tool_executor import StreamingToolAccumulator
+        task = self._make_task()
+        acc = StreamingToolAccumulator(task, project_path='/tmp',
+                                       project_enabled=True)
+
+        # Attempt #1 (discarded) announced tc_orphan; retry announced tc_final.
+        self._announce(acc, 'tc_orphan')
+        self._announce(acc, 'tc_final')
+        assert len(task['toolRounds']) == 2
+        assert all(r['status'] == 'searching' for r in task['toolRounds'])
+
+        # Final assistant_msg only carries the surviving call.
+        assistant_msg = {'role': 'assistant',
+                         'tool_calls': [{'id': 'tc_final', 'type': 'function',
+                                         'function': {'name': 'read_files',
+                                                      'arguments': '{}'}}]}
+        n = acc.reconcile_announced_rounds(assistant_msg)
+        assert n == 1
+
+        by_id = {}
+        for tc_id, (rn, entry) in acc.announced_tc_map.items():
+            by_id[tc_id] = entry
+        # Orphan settled to a terminal state (renders as interrupted, NOT a spinner).
+        assert by_id['tc_orphan']['status'] == 'aborted'
+        assert by_id['tc_orphan']['results']  # has a terminal result meta
+        # Survivor is left for the normal dispatch pipeline to settle.
+        assert by_id['tc_final']['status'] == 'searching'
+        assert by_id['tc_final']['results'] is None
+
+    def test_no_orphans_when_all_survive(self):
+        """When every announced tc_id is in the final message, nothing is settled."""
+        from lib.tasks_pkg.streaming_tool_executor import StreamingToolAccumulator
+        task = self._make_task()
+        acc = StreamingToolAccumulator(task, project_path='/tmp',
+                                       project_enabled=True)
+        self._announce(acc, 'tc_a')
+        self._announce(acc, 'tc_b')
+        assistant_msg = {'role': 'assistant', 'tool_calls': [
+            {'id': 'tc_a', 'type': 'function', 'function': {'name': 'read_files', 'arguments': '{}'}},
+            {'id': 'tc_b', 'type': 'function', 'function': {'name': 'read_files', 'arguments': '{}'}},
+        ]}
+        n = acc.reconcile_announced_rounds(assistant_msg)
+        assert n == 0
+        assert all(r['status'] == 'searching' for r in task['toolRounds'])
+
+    def test_reconcile_emits_tool_result_event_for_orphan(self):
+        """The orphan settle emits a tool_result event carrying the orphan's
+        tc_id, so the LIVE frontend flips its spinner to the interrupted card
+        (not just the persisted state)."""
+        from lib.tasks_pkg.streaming_tool_executor import StreamingToolAccumulator
+        task = self._make_task()
+        acc = StreamingToolAccumulator(task, project_path='/tmp',
+                                       project_enabled=True)
+        self._announce(acc, 'tc_orphan')
+        self._announce(acc, 'tc_final')
+        _n_events_before = len(task['events'])
+        assistant_msg = {'role': 'assistant', 'tool_calls': [
+            {'id': 'tc_final', 'type': 'function', 'function': {'name': 'read_files', 'arguments': '{}'}},
+        ]}
+        acc.reconcile_announced_rounds(assistant_msg)
+        results = [e for e in task['events'][_n_events_before:]
+                   if e.get('type') == 'tool_result' and e.get('toolCallId') == 'tc_orphan']
+        assert len(results) == 1
+
+    def test_reconcile_no_op_without_announced(self):
+        """A round with no early-announced tools reconciles to a clean 0."""
+        from lib.tasks_pkg.streaming_tool_executor import StreamingToolAccumulator
+        task = self._make_task()
+        acc = StreamingToolAccumulator(task, project_path='/tmp',
+                                       project_enabled=True)
+        assert acc.reconcile_announced_rounds({'role': 'assistant', 'tool_calls': []}) == 0
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 #  Test 2: on_tool_call_ready callback in SSE streaming
 # ═══════════════════════════════════════════════════════════════════════════════
 

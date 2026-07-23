@@ -72,6 +72,11 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None):
     _tid = task.get('id')
     if _tid and not body.get('_task_id'):
         body['_task_id'] = _tid
+    # ★ Reset the per-round FloorRetry-adoption marker so reconcile_announced_rounds
+    #   (called by _run.py right after this returns) attributes THIS round's
+    #   orphans correctly — a round that adopted then a later round that did not
+    #   must not read a stale True.
+    task['_floor_retry_adopted'] = False
     # ★ Init to 0.0 (epoch) so the FIRST content/thinking delta checkpoints
     #   immediately, then settle into the _STREAM_CHECKPOINT_INTERVAL cadence.
     #   Starting at time.time() left a pre-first-checkpoint window where a
@@ -233,6 +238,16 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None):
     #   collapse, capped, and STOP on a throttle error (don't pile retries on
     #   an already-throttled gateway). See lib/tasks_pkg/floor_retry.py +
     #   docs/CACHE_GATEWAY_STOCHASTIC_REPORT.md.
+    # ★ Tracks whether ANY floor-retry resend's response was adopted into the
+    #   returned (msg, finish_reason, usage). Both adoption sites below
+    #   (RECOVERED and still-floored-loop-exhausted) stream with
+    #   on_content=None / on_thinking=None, so the adopted resend's text NEVER
+    #   reached task['content']/task['thinking'] — those still hold ONLY the
+    #   FIRST attempt's (floor-collapsed, often partial) deltas. Since _sync
+    #   persists from task['content'] (not the returned msg), an adopted resend
+    #   would silently persist the first-attempt residue (the live 3411→215
+    #   loss). We converge ONCE after the loop, covering both doors.
+    _fr_adopted = False
     try:
         from lib.tasks_pkg import floor_retry as _fr
         _conv_for_fr = task.get('convId', '') or ''
@@ -251,10 +266,23 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None):
                     (usage or {}).get('cache_creation_input_tokens'),
                     _fr_i + 1, _fr_max)
                 try:
+                    # ★ Layer-1 orphan fix: a FloorRetry resend re-streams the
+                    #   IDENTICAL body purely to re-roll the gateway's cache-write
+                    #   dice for a cheaper usage — its token/tool deltas are
+                    #   THROWAWAY unless it RECOVERS (adopted below). Reusing
+                    #   on_tool_call_ready here made every discarded resend
+                    #   announce a fresh 'searching' tool round (new tc_id) that
+                    #   never survived into the final assistant_msg → an orphan
+                    #   swept to status='aborted' with an empty result, which the
+                    #   reader then had to defend against (layer 2). Pass None —
+                    #   exactly as on_thinking/on_content already are — so the
+                    #   resend announces NOTHING. If it RECOVERS, parse_tool_calls
+                    #   re-emits the adopted response's tool_start (a few-hundred-ms
+                    #   later chip; functionally lossless — owner-approved).
                     _rmsg, _rfin, _rusage = _dispatch_stream(
                         body,
                         on_thinking=None, on_content=None,
-                        on_tool_call_ready=on_tool_call_ready,
+                        on_tool_call_ready=None,
                         abort_check=lambda: task.get('aborted', False),
                         prefer_model=model, log_prefix=f'{pfx}[floor-retry{_fr_i+1}]',
                         strict_model=True, on_retry=_on_retry,
@@ -275,11 +303,42 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None):
                                    (_rusage or {}).get('cache_read_tokens'),
                                    (_rusage or {}).get('cache_creation_input_tokens'))
                     msg, finish_reason, usage = _rmsg, _rfin, _rusage
+                    _fr_adopted = True
                     break
                 # Still floored — keep the freshest usage and try again.
                 msg, finish_reason, usage = _rmsg, _rfin, _rusage
+                _fr_adopted = True
     except Exception as _fre:
         logger.debug('%s [FloorRetry] mitigation skipped (non-fatal): %s', pfx, _fre)
+
+    # ★ FloorRetry content-track convergence (fixes the 3411→215 silent loss).
+    #   When a resend was adopted, its full text lives ONLY in the returned
+    #   `msg` — the adopted resend streamed with on_content=None/on_thinking=None,
+    #   so task['content']/task['thinking'] still hold the FIRST attempt's
+    #   (floor-collapsed, partial) deltas. _sync persists from task['content'],
+    #   so without this the partial first-attempt text is what lands in the DB.
+    #   A resend is a byte-identical-body FRESH generation, so REPLACE (not
+    #   append) — the adopted msg is the whole, authoritative answer. We do NOT
+    #   emit DELTA_RESET / replay here: the live tab is reconciled by the done
+    #   event's committedMessage (existing mechanism), so no new visual behavior.
+    if _fr_adopted:
+        with task['content_lock']:
+            task['content'] = msg.get('content') or ''
+            task['thinking'] = msg.get('reasoning_content') or ''
+        # ★ Record the TRUE cause of any orphan tool round this turn produces.
+        #   When a FloorRetry resend is adopted, the FIRST attempt's tool calls
+        #   (announced live via on_tool_call_ready → 'searching' rounds) are NOT
+        #   in the adopted msg (the resend re-minted fresh tc_ids), so
+        #   reconcile_announced_rounds settles them as 'superseded' orphans.
+        #   This marker lets reconcile log the accurate cause (FloorRetry
+        #   adoption) instead of the hardcoded — and, per the app.log evidence,
+        #   FALSE — "discarded stream-retry attempt" story: stream transient
+        #   retries were 0 while FloorRetry drove 100% of observed orphans.
+        task['_floor_retry_adopted'] = True
+        logger.info('%s [FloorRetry] converged task content/thinking from adopted '
+                    'resend (content=%dchars thinking=%dchars) — prevents first-'
+                    'attempt residue from being persisted',
+                    pfx, len(task['content']), len(task['thinking']))
 
     # ★ Propagate provider_id from dispatch metadata into task
     _dispatch = (usage or {}).get('_dispatch', {})

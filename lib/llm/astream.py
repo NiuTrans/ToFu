@@ -20,6 +20,7 @@ from lib.llm._sse_core import (
     prepare_request,
 )
 from lib.llm._transport import (
+    CONNECT_TIMEOUT,
     MAX_STREAM_RETRIES,
     async_abortable_sleep,
     get_async_client,

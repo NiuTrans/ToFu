@@ -228,10 +228,7 @@ def _start_autocontinue_turn(conv_id: str) -> bool:
             # stamp doesn't clobber a concurrent tool-state / autopilot settings
             # write on the same row (reuses this thread's `db`).
             from lib.conversations import set_conversation_settings
-            # notify=False: notify_conv_changed already emitted after the
-            # messages write above (no double push); gate invalidates cache.
-            set_conversation_settings(conv_id, {'activeTaskId': task_id}, db=db,
-                                      notify=False)
+            set_conversation_settings(conv_id, {'activeTaskId': task_id}, db=db)
         except Exception as e:
             logger.debug('[Swarm:%s] autocontinue activeTaskId persist failed: %s',
                          conv_id, e)

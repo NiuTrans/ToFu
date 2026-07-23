@@ -45,7 +45,6 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
 SSE = os.path.join(ROOT, 'static', 'js', 'ui', 'sse_pipeline.js')
 CL = os.path.join(ROOT, 'static', 'js', 'ui', 'conversation_list.js')
-CONV = os.path.join(ROOT, 'static', 'js', 'core', 'conversations.js')
 
 
 def _node_available() -> bool:
@@ -257,27 +256,15 @@ def test_source_carries_identity_first_resolution():
         sse_src = f.read()
     assert '_resolveAssistantByTaskId(conv, taskId)' in sse_src, \
         'connectToTask no longer calls _resolveAssistantByTaskId (identity-first resolution removed)'
-    # The completed-turn decision was refactored into a single shared reducer
-    # (`assistantTailIsPriorTurn`) in core/conversations.js — connectToTask now
-    # calls it instead of re-inlining the predicate. Assert the call site is
-    # present so the identity-first guard still routes through the reducer.
-    assert 'assistantTailIsPriorTurn(assistantMsg, taskId)' in sse_src, \
-        'connectToTask no longer routes the completed-turn decision through the shared reducer assistantTailIsPriorTurn(assistantMsg, taskId)'
-
-    # The reducer itself lives in core/conversations.js. Its completed-turn
-    # arm must treat ANY completed tail as a prior turn (`!!msg.finishReason`);
-    # this is the reload-safe form — a completed tail with NO persisted _taskId
-    # still pushes fresh, never replays the old turn.
-    with open(CONV, encoding='utf-8') as f:
-        conv_src = f.read()
-    assert 'function assistantTailIsPriorTurn(' in conv_src, \
-        'assistantTailIsPriorTurn reducer missing from core/conversations.js'
-    assert 'const _isCompletedTurn = !!msg.finishReason;' in conv_src, \
-        'reducer completed-turn arm is not the reload-safe `!!msg.finishReason` form — reload-safe dedupe fix reverted'
-    # The over-narrow `_taskId && ... !== taskId` clause must NOT gate the
-    # COMPLETED-TURN arm (it regressed the page-reload no-_taskId case). The
-    # separate `_staleTaskId` line legitimately keeps that shape.
-    assert 'const _isCompletedTurn = !!msg.finishReason\n      && msg._taskId && msg._taskId !== activeTaskId' not in conv_src, \
-        'the over-narrow `_taskId && ... !== taskId` clause is back on the completed-turn arm — it wrongly reuses a reloaded foreign completed tail (no persisted _taskId)'
+    # The completed-turn predicate must reuse ONLY this task's own slot
+    # (_taskId === taskId); anything else (different OR absent _taskId) pushes
+    # fresh. The `_taskId &&` truthiness clause must NOT be present (it regressed
+    # the page-reload no-_taskId case).
+    assert "assistantMsg.finishReason\n      && assistantMsg._taskId !== taskId" in sse_src, \
+        'stale-guard completed-turn predicate is not the refined `_taskId !== taskId` form — reload-safe dedupe fix reverted'
+    # Scoped to the COMPLETED-TURN predicate only (preceded by finishReason);
+    # the separate `_staleTaskId` line legitimately keeps `_taskId && ... !== taskId`.
+    assert "assistantMsg.finishReason\n      && assistantMsg._taskId && assistantMsg._taskId !== taskId" not in sse_src, \
+        'the over-narrow `_taskId && ... !== taskId` clause is back on the completed-turn predicate — it wrongly reuses a reloaded foreign completed tail (no persisted _taskId)'
     assert 'if (assistantMsg && !assistantMsg._taskId) assistantMsg._taskId = taskId;' in sse_src, \
         'bind-time _taskId stamp missing — reconnect after finishStream cannot resolve by identity'

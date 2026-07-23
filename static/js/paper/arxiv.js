@@ -646,7 +646,6 @@ async function _fetchArxivPaper(directUrl, reuseId) {
       throw new Error(errText || ('HTTP ' + resp.status));
     }
 
-    /** @type {any} */
     var doneData = null;
     var streamErr = '';
     var curArxivId = '';

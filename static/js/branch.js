@@ -157,7 +157,7 @@ function _injectAnchoredBranches(html, msg, msgIdx) {
         <span class="branch-node-label">${escapeHtml(b.title.length > 50 ? b.title.slice(0, 48) + "…" : b.title)}</span>
         ${count ? `<span class="branch-node-count">${count}</span>` : ""}
         ${isStreaming ? '<span class="branch-node-pulse"></span>' : ""}
-        <span class="branch-node-close" onclick="event.stopPropagation();branchCloseOrDelete(${msgIdx},${bi})" title="${isActive ? escapeHtml(t('branch.collapse')) : escapeHtml(t('branch.delete'))}">✕</span>
+        <span class="branch-node-close" onclick="event.stopPropagation();branchCloseOrDelete(${msgIdx},${bi})" title="${isActive ? '收起' : '删除'}">✕</span>
       </button>`;
 
     // If this anchored branch is expanded, render panel inline too
@@ -192,7 +192,7 @@ function renderBranchZone(msg, msgIdx, inlinedSet) {
       <span class="branch-node-label">${escapeHtml(b.title.length > 20 ? b.title.slice(0, 18) + "…" : b.title)}</span>
       ${count ? `<span class="branch-node-count">${count}</span>` : ""}
       ${isStreaming ? '<span class="branch-node-pulse"></span>' : ""}
-      <span class="branch-node-close" onclick="event.stopPropagation();branchCloseOrDelete(${msgIdx},${bi})" title="${isActive ? escapeHtml(t('branch.collapse')) : escapeHtml(t('branch.delete'))}">✕</span>
+      <span class="branch-node-close" onclick="event.stopPropagation();branchCloseOrDelete(${msgIdx},${bi})" title="${isActive ? '收起' : '删除'}">✕</span>
     </button>`;
   }).filter(Boolean);
 
@@ -234,7 +234,7 @@ function _renderBranchMsg(m, msgIdx, bi, i) {
   // Conversation reference badges in branch messages
   if (m.convRefs && m.convRefs.length > 0) {
     for (const cr of m.convRefs) {
-      content += `<div class="reply-quote-badge conv-ref-badge" style="margin-bottom:6px;font-size:11px" title="${escapeHtml(t('chat.convRefTitle', { title: escapeHtml(cr.title || cr.id) }))}">
+      content += `<div class="reply-quote-badge conv-ref-badge" style="margin-bottom:6px;font-size:11px" title="引用对话: ${escapeHtml(cr.title || cr.id)}">
         <span class="reply-quote-badge-icon">@</span>
         <span class="reply-quote-badge-info"><span class="reply-quote-badge-name">${escapeHtml(cr.title || cr.id)}</span></span></div>`;
     }
@@ -322,25 +322,25 @@ function _renderBranchPanel(msg, msgIdx, bi) {
   let emptyMsg = "";
   if (!msgs.length && !isStreaming) {
     const selCtx = branch.parentSelection
-      ? `<div class="branch-selection-ctx">${escapeHtml(t('branch.selectionCtx', { text: escapeHtml(branch.parentSelection.slice(0, 120)) + (branch.parentSelection.length > 120 ? "…" : "") }))}</div>`
+      ? `<div class="branch-selection-ctx">选中内容：「${escapeHtml(branch.parentSelection.slice(0, 120))}${branch.parentSelection.length > 120 ? "…" : ""}」</div>`
       : "";
-    emptyMsg = `<div class="branch-empty">${selCtx}${escapeHtml(t('branch.emptyHint'))}</div>`;
+    emptyMsg = `<div class="branch-empty">${selCtx}点击底部输入框发送消息开始分支对话</div>`;
   }
 
   return `<div class="branch-panel" id="branch-panel-${msgIdx}-${bi}">
     <div class="branch-panel-header">
       <span class="branch-panel-icon">${icon}</span>
       <span class="branch-panel-title">${escapeHtml(branch.title)}</span>
-      <span class="branch-panel-count">${escapeHtml(t('branch.userTurns', { n: userCount }))}</span>
+      <span class="branch-panel-count">${userCount}条对话</span>
       <span class="branch-panel-tools" style="font-size:10px;opacity:0.5;margin-left:4px">${searchMode !== "off" ? "" : ""}${fetchEnabled ? "" : ""}${codeExecEnabled ? "⚡" : ""}${browserEnabled ? "" : ""}${memoryEnabled ? "" : ""}</span>
-      ${(isStreaming || hasPersistentTask) ? `<button class="branch-panel-stop" onclick="stopBranchStream(${msgIdx},${bi})" title="${escapeHtml(t('branch.stopGen'))}">${escapeHtml(t('branch.stop'))}</button>` : ""}
-      <button class="branch-panel-collapse" onclick="closeBranchPanel()" title="${escapeHtml(t('branch.collapseBranch'))}">▾ ${escapeHtml(t('branch.collapseCta'))}</button>
-      <button class="branch-panel-delete" onclick="deleteBranch(${msgIdx},${bi})" title="${escapeHtml(t('branch.deleteBranch'))}"></button>
+      ${(isStreaming || hasPersistentTask) ? `<button class="branch-panel-stop" onclick="stopBranchStream(${msgIdx},${bi})" title="停止生成">停止</button>` : ""}
+      <button class="branch-panel-collapse" onclick="closeBranchPanel()" title="收起分支">▾ 收起</button>
+      <button class="branch-panel-delete" onclick="deleteBranch(${msgIdx},${bi})" title="删除分支"></button>
     </div>
     <div class="branch-messages" id="branch-messages-${msgIdx}-${bi}">
       ${emptyMsg}${msgsHtml}${streamingHtml}${approvalHtml}
     </div>
-    <div class="branch-input-hint">${escapeHtml(t('branch.inputHint'))}</div>
+    <div class="branch-input-hint">主输入框已切换为分支模式 — 在下方输入并发送</div>
   </div>`;
 }
 
@@ -403,7 +403,7 @@ function branchCloseOrDelete(msgIdx, branchIdx) {
 }
 
 async function deleteBranch(msgIdx, branchIdx) {
-  if (!await showConfirm(t('branch.deleteConfirm'), { danger: true })) return;
+  if (!await showConfirm("删除这个分支？", { danger: true })) return;
   const conv = getActiveConv();
   if (!conv) return;
   const msg = conv.messages[msgIdx];
@@ -536,7 +536,7 @@ function _enterBranchMode(msgIdx, branchIdx) {
   if (!branch) return;
   const icon = branch.icon || '';
   const input = document.getElementById("userInput");
-  if (input) input.placeholder = t('branch.inputPlaceholder', { title: branch.title });
+  if (input) input.placeholder = `在「${branch.title}」分支中输入消息…`;
 
   // Add banner above input box
   let banner = document.getElementById("branch-mode-banner");
@@ -548,8 +548,8 @@ function _enterBranchMode(msgIdx, branchIdx) {
     if (inputBox) inputBox.parentElement.insertBefore(banner, inputBox);
   }
   banner.innerHTML = `<span class="branch-mode-banner-icon">${icon}</span>
-    <span class="branch-mode-banner-text">${escapeHtml(t('branch.modeBanner', { title: escapeHtml(branch.title) }))}</span>
-    <button class="branch-mode-banner-exit" onclick="closeBranchPanel()">✕ ${escapeHtml(t('branch.exit'))}</button>`;
+    <span class="branch-mode-banner-text">分支: ${escapeHtml(branch.title)}</span>
+    <button class="branch-mode-banner-exit" onclick="closeBranchPanel()">✕ 退出</button>`;
   banner.style.display = "flex";
 
   // Scroll branch panel to bottom
@@ -680,7 +680,7 @@ async function promptNewBranch(msgIdx, preTitle, selectedText, selectionRange) {
   if (!msg) return;
   // Branches are primarily for assistant messages, but allow user messages too
   if (msg.role === "user" && !selectedText) return;
-  const title = preTitle || await showPrompt(t('branch.namePrompt'));
+  const title = preTitle || await showPrompt("分支名称：");
   if (!title?.trim()) return;
 
   // Server-authoritative branch creation: ID, icon, kind, validation,
@@ -693,7 +693,7 @@ async function promptNewBranch(msgIdx, preTitle, selectedText, selectionRange) {
     selectedText || '',
   );
   if (!created) {
-    await showAlert(t('branch.createFailed'));
+    await showAlert('分支创建失败，请重试');
     return;
   }
   const branch = created.branch;
@@ -729,7 +729,7 @@ async function promptNewBranch(msgIdx, preTitle, selectedText, selectionRange) {
           onclick="toggleBranchPanel(${msgIdx},${bi})" title="${escapeHtml(branch.title)}">
           <span class="branch-node-icon">${branch.icon}</span>
           <span class="branch-node-label">${escapeHtml(branch.title.length > 48 ? branch.title.slice(0, 46) + "…" : branch.title)}</span>
-          <span class="branch-node-close" onclick="event.stopPropagation();branchCloseOrDelete(${msgIdx},${bi})" title="${escapeHtml(t('branch.collapse'))}">✕</span>
+          <span class="branch-node-close" onclick="event.stopPropagation();branchCloseOrDelete(${msgIdx},${bi})" title="收起">✕</span>
         </button>`;
         wrapper.innerHTML = pillHtml;
 

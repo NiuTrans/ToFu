@@ -33,19 +33,13 @@ Two accuracy defects fixed 2026-07-06 (audited by a 3-way parallel sweep):
 
 4. IN-STREAM LIVENESS HUD WAS HARDCODED ENGLISH (the most connection-failure-
    specific surface). ``_updateStreamTimerUI`` header spans + ``_setBubbleLiveness``
-   in-bubble lines + the "Force Finish" button + the ``_streamPhaseLabel``
-   fallbacks ("running tools", "reasoning", …) were English. All now route
-   through a guarded ``_connT()`` with new ``conn.*`` / ``conn.phase*`` keys (zh
+   in-bubble lines ("server not responding", "still working", "No update for
+   Ns…") + the "Force Finish" button + the ``_streamPhaseLabel`` fallbacks
+   ("running tools", "reasoning", …) were English. All now route through a
+   guarded ``_connT()`` with new ``conn.hud*`` / ``conn.phase*`` keys (zh
    primary; ``{n}`` silent-seconds + ``{what}`` activity interpolation). The
    HUD harness drives ``_updateStreamTimerUI`` into the dead-server AND
    still-working branches under the REAL zh i18n and asserts zh renders.
-
-   UPDATE (2026-07-14): the AUTOMATIC dead-server HUD path no longer stamps the
-   terminal "服务器无响应 / 健康检查失败" verdict — the 「连接中断」false-positive
-   fix made a health-ping failure a TRANSIENT reconnecting state, so the HUD now
-   renders the calmer ``conn.reconnectingShort`` header + ``conn.reconnecting``
-   bubble (Force-Finish button retained as a manual escape hatch). The HUD
-   assertions were updated to the reconnecting strings accordingly.
 
 The harnesses load the REAL shipped JS under jsdom and drive the real
 functions. DOUBLE-NEUTER: each fix is reverted on a COPY of the source and the
@@ -301,19 +295,14 @@ if (typeof _updateStreamTimerUI !== 'function') { console.log('FAIL fn missing')
   const hud = document.getElementById('stream-elapsed-timer').innerHTML;
   const bubble = document.querySelector('[data-zone="status"]').innerHTML;
 
-  // Header timer: the automatic dead-server path NO LONGER stamps a terminal
-  // "服务器无响应" verdict — the 2026-07-14 「连接中断」false-positive fix made a
-  // health-ping failure a TRANSIENT reconnecting state (conn.reconnectingShort
-  // header + conn.reconnecting bubble), with the Force-Finish button kept as a
-  // manual escape hatch. Assert the calmer reconnecting banner + button, zh.
-  check('hud_zh_reconnecting', hud.includes('正在重连'));
+  // Header timer: zh "服务器无响应" + zh Force Finish button, NOT English.
+  check('hud_zh_not_responding', hud.includes('服务器无响应'));
   check('hud_zh_force_finish', hud.includes('强制结束'));
   check('hud_no_english_force', !hud.includes('Force Finish'));
   check('hud_no_english_notresp', !hud.includes('server not responding'));
-  // In-bubble line: the zh reconnecting sentence, NOT the old terminal verdict.
-  check('bubble_zh_reconnecting', bubble.includes('连接不稳定，正在重连并与服务器同步'));
-  check('bubble_no_english', !bubble.includes('Server not responding')
-        && !bubble.includes('服务器无响应'));
+  // In-bubble line: zh full sentence with the {n} silent-seconds interpolated.
+  check('bubble_zh_full', bubble.includes('服务器无响应（静默') && bubble.includes('健康检查失败'));
+  check('bubble_no_english', !bubble.includes('Server not responding'));
 
   // Also exercise the "still working" branch → zh phase label (reasoning).
   globalThis.__seedTimer(CONV, {

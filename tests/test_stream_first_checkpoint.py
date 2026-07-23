@@ -42,22 +42,11 @@ def _make_task():
 
 def test_first_delta_checkpoints_immediately(monkeypatch):
     import lib.tasks_pkg.manager as m
-    import lib.tasks_pkg.manager._stream as st
 
     calls = []
-    # ★ Package-split binding: ``stream_llm_response`` lives in the ``_stream``
-    #   submodule, which imports ``checkpoint_task_partial`` (from ._sync) and
-    #   ``append_event`` (from ._events) into ITS OWN namespace at import and
-    #   calls them directly. Patching the ``manager`` facade attribute rebinds
-    #   only the facade's re-export, NOT ``_stream``'s binding, so the stub
-    #   never installs (the pre-split monolith made these patchable on the
-    #   facade; the split moved the true binding site). Patch ``_stream``.
-    #   ``dispatch_stream`` is the exception: ``_stream`` deliberately resolves
-    #   it THROUGH the facade at call time (getattr(_mgr_facade, ...)), so it
-    #   stays patched on the facade — mirroring the pre-split contract.
-    monkeypatch.setattr(st, 'checkpoint_task_partial', lambda task: calls.append(time.time()))
+    monkeypatch.setattr(m, 'checkpoint_task_partial', lambda task: calls.append(time.time()))
     # Don't actually persist events to DB during the test.
-    monkeypatch.setattr(st, 'append_event', lambda task, ev: task['events'].append(ev))
+    monkeypatch.setattr(m, 'append_event', lambda task, ev: task['events'].append(ev))
 
     def _fake_dispatch_stream(body, *, on_content=None, on_thinking=None, **kwargs):
         # Emit a content delta on the very first token — must checkpoint NOW.
@@ -82,13 +71,10 @@ def test_checkpoint_throttled_after_first(monkeypatch):
     """The first delta checkpoints; rapid subsequent deltas within 5s do NOT
     re-checkpoint (cadence preserved — we didn't turn it into per-delta writes)."""
     import lib.tasks_pkg.manager as m
-    import lib.tasks_pkg.manager._stream as st
 
     calls = []
-    # See test_first_delta_checkpoints_immediately for why these patch _stream
-    # (real binding site) while dispatch_stream stays on the facade.
-    monkeypatch.setattr(st, 'checkpoint_task_partial', lambda task: calls.append(time.time()))
-    monkeypatch.setattr(st, 'append_event', lambda task, ev: task['events'].append(ev))
+    monkeypatch.setattr(m, 'checkpoint_task_partial', lambda task: calls.append(time.time()))
+    monkeypatch.setattr(m, 'append_event', lambda task, ev: task['events'].append(ev))
 
     def _fake_dispatch_stream(body, *, on_content=None, on_thinking=None, **kwargs):
         for _ in range(10):

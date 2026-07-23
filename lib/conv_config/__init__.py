@@ -62,10 +62,7 @@ from lib.conv_config._legacy import (  # noqa: E402,F401
 
 from lib.conv_config._translate import (  # noqa: E402,F401
     AUTO_TRANSLATE_DEFAULT,
-    TRANSLATE_TARGET_DEFAULT,
     resolve_auto_translate,
-    resolve_translate_target,
-    target_lang_code,
 )
 
 from lib.conv_config._flow import (  # noqa: E402,F401
@@ -89,5 +86,4 @@ __all__ = [
     'resolve_conv_config', 'resolve_conv_settings',
     'canonicalise_model_id', 'extract_legacy_thinking_depth',
     'resolve_auto_translate', 'AUTO_TRANSLATE_DEFAULT',
-    'resolve_translate_target', 'target_lang_code', 'TRANSLATE_TARGET_DEFAULT',
 ]

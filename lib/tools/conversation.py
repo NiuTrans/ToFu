@@ -40,19 +40,11 @@ CONV_REF_GET_TOOL = {
     "function": {
         "name": "get_conversation",
         "description": (
-            "Retrieve the content of another conversation by its ID. "
+            "Retrieve the full content of another conversation by its ID. "
+            "Returns all messages including user prompts, assistant responses, tool calls, and tool results. "
             "Use this when the user asks you to reference specific information, decisions, code changes, "
             "debugging context, or tool outputs from a previous conversation. "
             "First use list_conversations to find the right conversation ID.\n\n"
-            "TWO output modes:\n"
-            "• Default (raw=false) — a READABLE prose transcript of user prompts + assistant "
-            "responses + a condensed view of tool calls/results. Best for understanding what was "
-            "discussed, but it SUMMARIZES tool rounds and drops per-message metadata.\n"
-            "• raw=true — for DEBUGGING / inspecting exact state. Returns the COMPLETE, un-summarized "
-            "DB record as structured JSON: every row column (created_at, updated_at, msg_count, rev, "
-            "settings) plus every field of every message preserved (finishReason, usage, model, "
-            "timestamp, _msgId, modifiedFileList, the full toolRounds), nothing summarized or "
-            "truncated away. Use this when you need the original metadata, not just the readable gist.\n\n"
             "IMPORTANT: Only use this when the user EXPLICITLY requests information from a past conversation. "
             "Never call this proactively or speculatively."
         ),
@@ -65,11 +57,7 @@ CONV_REF_GET_TOOL = {
                 },
                 "include_tool_details": {
                     "type": "boolean",
-                    "description": "Whether to include full tool call arguments and results (default: true). Set to false for a shorter summary. Ignored when raw=true."
-                },
-                "raw": {
-                    "type": "boolean",
-                    "description": "When true, return the full raw DB record (all columns + settings + every message field preserved) as structured JSON for debugging, instead of the readable prose transcript. Default: false."
+                    "description": "Whether to include full tool call arguments and results (default: true). Set to false for a shorter summary."
                 }
             },
             "required": ["conversation_id"]

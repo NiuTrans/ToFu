@@ -50,18 +50,26 @@ def _handle_conv_ref_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cf
     def _post_build(meta, _tool_content, _fn_args):
         """Attach a STRUCTURED conversation digest for get_conversation so the
         frontend renders a clean human-view card instead of dumping the raw
-        ``═══`` / ``── User Message #`` transcript as Markdown. Read off the DB
-        (never re-parsed from the prose result); the verbatim transcript stays
-        available via the row's "model view" affordance. Skipped for raw-mode
-        reads (the debugging JSON dump is meant to be shown verbatim)."""
-        if fn_name != 'get_conversation' or _fn_args.get('raw'):
+        transcript. Read off the DB (never re-parsed from the prose/raw result);
+        the verbatim record stays available via the row's "model view"
+        affordance.
+
+        Applies to raw-mode reads TOO (2026-07-23): the raw ``═══ Raw
+        Conversation Record`` + JSON dump is tens of KB and tripped the L0
+        "Output too large → persist → preview" path, so a raw read rendered as
+        an ugly truncated JSON blob with NO card. The digest is rebuilt
+        INDEPENDENTLY off the DB row, so raw mode now gets the same human card;
+        the full JSON stays available on the model channel."""
+        if fn_name != 'get_conversation':
             return
         conv_id = (_fn_args.get('conversation_id') or '').strip()
         if not conv_id:
             return
         try:
             from lib.conv_ref import build_conversation_digest
-            digest = build_conversation_digest(conv_id, current_conv_id=current_conv_id)
+            digest = build_conversation_digest(
+                conv_id, current_conv_id=current_conv_id,
+                raw=bool(_fn_args.get('raw')))
         except Exception as e:
             logger.debug('[ConvRef] digest build failed for %s: %s', conv_id, e)
             return

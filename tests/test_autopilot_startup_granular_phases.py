@@ -39,7 +39,7 @@ pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-ORCH = os.path.join(ROOT, 'lib', 'tasks_pkg', 'orchestrator', '_run.py')
+ORCH = os.path.join(ROOT, 'lib', 'tasks_pkg', 'orchestrator.py')
 
 
 # The exact phase details the fix emits during run_task prep (source of truth).

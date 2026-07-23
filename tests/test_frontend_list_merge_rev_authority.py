@@ -72,20 +72,8 @@ let prunedIds = [];       // ConvCache.remove(id) — IDB tombstone prune
 let rescuedIds = [];      // conv re-PUT rescue (observed via Api.conversations.put)
 global.ConvCache = { put() {}, remove(id) { prunedIds.push(id); }, get: async () => null };
 global._bootLoadInFlight = false;
-// A fetch-Response-like envelope the split loadConversationsFromServer expects
-// back from Api.conversations.listMeta() (status/ok/headers.get/json).
-const _metaResp = () => ({
-  ok: true, status: 200,
-  headers: { get: () => null },
-  json: async () => SERVER_LIST,
-});
 global.Api = {
   conversations: {
-    // loadConversationsFromServer now fetches the sidebar list via
-    // Api.conversations.listMeta({prefetch, headers, signal}) (core split,
-    // 2026-07) instead of a raw fetch / Api.conversations.list. Return the
-    // Response-shaped envelope wrapping the per-scenario SERVER_LIST.
-    listMeta: async () => _metaResp(),
     list: async () => SERVER_LIST,
     get: async () => null,
     // The real syncConversationToServer (declared in conversations.js, shadows
@@ -95,12 +83,14 @@ global.Api = {
     save: async (id) => { rescuedIds.push(id); return { ok: true, rev: 1 }; },
   },
 };
-// Raw fetch fallback (unused once listMeta is stubbed, kept for safety).
-global.fetch = async () => _metaResp();
+// loadConversationsFromServer may fetch via Api.conversations.list OR a raw
+// fetch fallback; provide both.
+global.fetch = async () => ({
+  ok: true, status: 200,
+  headers: { get: () => null },
+  json: async () => SERVER_LIST,
+});
 global.apiUrl = (p) => p;
-// listMeta passes a signal from AbortSignal.timeout(ms); provide it.
-global.AbortSignal = { timeout: () => ({}) };
-global.AbortController = function(){ this.signal={}; this.abort=function(){}; };
 
 eval(fs.readFileSync(process.argv[2], 'utf8'));  // core/conversations.js
 

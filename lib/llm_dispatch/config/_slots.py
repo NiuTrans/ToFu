@@ -176,7 +176,6 @@ DEFAULT_SLOT_CONFIGS = {
 
     # ── GLM Turbo / Kimi older / MiniMax older — TokenHub catalog ──
     'glm-5-turbo':                   {'caps': {'text', 'cheap'},                   'rpm': 60,  'latency': 2000, 'cost': 0.002},
-    'kimi-k3':                       {'caps': {'text', 'thinking', 'cheap'},       'rpm': 60,  'latency': 3000, 'cost': 0.0083},
     'kimi-k2.6':                     {'caps': {'text', 'cheap'},                   'rpm': 30,  'latency': 3000, 'cost': 0.003},
     'kimi-k2.5':                     {'caps': {'text', 'cheap'},                   'rpm': 30,  'latency': 3000, 'cost': 0.002},
     'minimax-m2.5':                  {'caps': {'text', 'cheap'},                   'rpm': 60,  'latency': 2000, 'cost': 0.001},
