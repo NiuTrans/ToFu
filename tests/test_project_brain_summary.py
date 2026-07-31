@@ -181,7 +181,11 @@ def test_summary_empty_project(flask_app):
         'epicsOpen': 0, 'epicsClaimed': 0, 'epicsDone': 0,
         'pendingDecisions': 0, 'activePeers': 0, 'peerEpics': {},
         'charterExists': False, 'conflicts': 0, 'conflictMessages': [],
-        'statusLine': ''}
+        'statusLine': '',
+        # Attention roll-up (project_attention) — the counts the collab bar
+        # leads with. `blocking` drives the bar's emphasis; `waiting` is the
+        # reassurance count (self-expiring cooldowns, no human needed).
+        'needsYou': 0, 'blocking': 0, 'advisory': 0, 'waiting': 0}
 
 
 def test_summary_conflicts_from_file_overlap(flask_app):

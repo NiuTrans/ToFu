@@ -48,10 +48,10 @@ function _renderMsgInPlace(convId, idx, msg) {
   const el = document.getElementById(`msg-${idx}`);
   if (!el) {
     console.warn(`[Translate] _renderMsgInPlace: no #msg-${idx} node ` +
-      `(conv=${convId.slice(0,8)}) — falling back to renderChat(scroll-preserving)`);
+      `(conv=${convId.slice(0,8)}) — falling back to ConvView.replaceAll(scroll-preserving)`);
     const _conv = (typeof conversations !== 'undefined')
       ? conversations.find(c => c.id === convId) : null;
-    if (_conv && typeof renderChat === 'function') renderChat(_conv, false);
+    if (_conv) window.ConvView.replaceAll(convId, { forceScroll: false });
     return;
   }
   const ct = document.getElementById('chatContainer');
@@ -61,7 +61,18 @@ function _renderMsgInPlace(convId, idx, msg) {
     inner.classList.add('cv-off');
     void inner.scrollHeight;
   }
-  el.outerHTML = renderMessage(msg, idx);
+  /* RENDER_CONTRACT Phase 3.5: the whole-bubble repaint routes through the
+   * single DOM-apply seam (ConvView.apply = renderMessage + identity sweep
+   * + fingerprint refresh). No raw fallback — the boot-time hard check in
+   * main.js turns a missing ConvView into a loud startup failure instead of
+   * a silent per-call degradation (§5 step 4 precondition). */
+  if (!window.ConvView || typeof window.ConvView.apply !== 'function') {
+    console.error('[Translate] ConvView.apply missing — bundle broken; ' +
+      'see the boot banner. Bubble NOT repainted (conv=%s idx=%d).',
+      convId && convId.slice(0, 8), idx);
+  } else {
+    window.ConvView.apply(convId, idx, msg);
+  }
   if (inner) {
     void inner.scrollHeight;
     inner.classList.remove('cv-off');
@@ -168,11 +179,21 @@ function _renderStreamingTranslatePreview(convId, msgId, partial, byRound) {
       if (!group) continue;
       const panelBody = group.parentNode;
       if (!panelBody) continue;
+      /* ★ BYTE PARITY WITH THE SETTLED RENDER (RENDER_CONTRACT Phase 3.5):
+       * the live zh node carries the SAME class list as the settled slot
+       * (`md-content seg-narration`, tool_rounds.js:_renderSegNarrationHTML)
+       * — no `stream-seg-narration` marker. Visuals are unchanged: the live
+       * panel carries `seg-timeline`, so `.seg-timeline .seg-narration`
+       * (styles.css:6096, identical values to the now-inert :6158 block)
+       * applies verbatim. The zh twin is distinguished from the English
+       * sibling by EXCLUSION (`:not(.stream-seg-en-narration)`), keeping
+       * live-preview and cold-reload DOM byte-identical for the same fact. */
       let narr = panelBody.querySelector(
-        `:scope > .stream-seg-narration[data-seg-round="${_esc(gkey)}"]`);
+        `:scope > .seg-narration[data-seg-round="${_esc(gkey)}"]` +
+        `:not(.stream-seg-en-narration)`);
       if (!narr) {
         narr = document.createElement('div');
-        narr.className = 'md-content seg-narration stream-seg-narration';
+        narr.className = 'md-content seg-narration';
         narr.setAttribute('data-seg-round', gkey);
         panelBody.insertBefore(narr, group);
       }
@@ -192,6 +213,13 @@ function _renderStreamingTranslatePreview(convId, msgId, partial, byRound) {
         if (h != null) narr.innerHTML = h; else narr.textContent = zh;
         narr._lastZhHtml = narr.innerHTML;
       }
+      /* ★ PER-ROUND English hide: now that THIS round's Chinese twin exists,
+       * hide its English sibling (avoid a bilingual double). Gated per round —
+       * NOT a global body flag — so an intermediate round whose Chinese hasn't
+       * landed keeps showing its English instead of vanishing. */
+      const _en = panelBody.querySelector(
+        `:scope > .stream-seg-en-narration[data-seg-round="${_esc(gkey)}"]`);
+      if (_en) _en.classList.add('xlate-hidden');
       _routed.add(rk);
     }
   }
@@ -315,8 +343,8 @@ function emitMessageChanged(convId, idx, msg, detail) {
   const kind = detail.kind || 'full';
   if (kind === 'conv') {
     if (typeof activeConvId !== 'undefined' && activeConvId === convId
-        && detail.conv && typeof renderChat === 'function') {
-      renderChat(detail.conv, false);
+        && detail.conv) {
+      window.ConvView.replaceAll(convId, { forceScroll: false });
     }
     return true;
   }

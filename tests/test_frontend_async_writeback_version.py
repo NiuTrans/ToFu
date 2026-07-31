@@ -65,6 +65,8 @@ global.escapeHtml = (s) => String(s == null ? '' : s)
   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 global.t = (k) => String(k || '').split('.').pop();
 global._TOOL_DISPLAY = {};
+// cost.js JSON parse helper (sibling-module symbol not eval'd by this harness).
+global._safeJsonParse = (raw, fallback) => fallback;
 global.serverModel = 'aws.claude-opus-4.8';
 // cost.js migration preamble reads config.* at load — seed a minimal config.
 global.config = { model: 'aws.claude-opus-4.8' };

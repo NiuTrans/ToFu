@@ -8,6 +8,7 @@ context-window clamp (``_clamp``).
 
 import lib as _lib
 from lib.llm_sanitize import (
+    _drop_empty_assistant_messages,
     _fix_empty_user_messages,
     _fix_orphaned_tool_calls,
     _merge_consecutive_same_role,
@@ -18,16 +19,20 @@ from lib.log import get_logger
 from lib.model_info import (
     _clamp_max_tokens,
     gemini_reasoning_effort,
+    gpt_reasoning_effort,
     is_claude,
     is_claude_opus_47,
     is_doubao,
     is_ernie,
     is_gemini,
     is_glm,
+    is_gpt5,
     is_kimi,
+    is_kimi_k3,
     is_longcat,
     is_minimax,
     is_qwen,
+    kimi_k3_reasoning_effort,
     model_supports_vision,
 )
 
@@ -55,7 +60,8 @@ def build_body(model, messages, *, max_tokens=128000, temperature=1.0,
 
     Handles provider-specific parameters automatically:
       - Claude:   thinking.type='adaptive', effort param, cache breakpoints
-      - Kimi:     thinking.type='enabled'/'disabled', fixed temp
+      - Kimi K3:  top-level reasoning_effort (low/high/max), no temperature
+      - Kimi K2:  thinking.type='enabled'/'disabled', fixed temp
       - GLM:      thinking.type='enabled', temperature clamped to (0, 1)
       - Doubao:   thinking.type='enabled'/'disabled'
       - LongCat:  enable_thinking flag, temperature adjustment
@@ -94,10 +100,17 @@ def build_body(model, messages, *, max_tokens=128000, temperature=1.0,
     clean_messages = _strip_non_api_fields(messages)
 
     _pid = provider_id.lower() if provider_id else ''
-    if _pid == 'sankuai' or (not _pid and 'sankuai' in _lib.LLM_BASE_URL):
+    # Keyed on the GATEWAY, not one provider id's exact spelling: every
+    # example-corp* provider (example-corp, example-corp_anthropic, …) terminates at
+    # your-llm-gateway.example.com, whose keyword filter is surface-agnostic — the
+    # 2026-07-28 Claude → Anthropic-native migration proved exact-equality
+    # silently strips the ZWSP sanitizer from the new surface (HTTP 450
+    # re-exposure on blocked-term conversations).
+    if _pid.startswith('example-corp') or (not _pid and 'example-corp' in _lib.LLM_BASE_URL):
         _sanitize_messages(clean_messages)
 
     clean_messages = _fix_orphaned_tool_calls(clean_messages)
+    clean_messages = _drop_empty_assistant_messages(clean_messages)
     clean_messages = _merge_consecutive_same_role(clean_messages)
 
     _validate_image_blocks(clean_messages)
@@ -218,31 +231,93 @@ def build_body(model, messages, *, max_tokens=128000, temperature=1.0,
             body['thinking'] = {'type': 'disabled'}
             body['temperature'] = max(temperature, 0.01) if temperature else 0.7
     elif not _tf and is_kimi(model):
-        _is_k2_thinking = 'k2-thinking' in model.lower() and 'turbo' not in model.lower()
-        if _is_k2_thinking or thinking_enabled:
-            body['thinking'] = {'type': 'enabled'}
-            body['temperature'] = 1.0
+        if is_kimi_k3(model):
+            # K3 contract (official quickstart + verified live against the
+            # example-corp gateway 2026-07-24): top-level ``reasoning_effort``
+            # (low/high/max, default max); K3 always thinks, so depth 'off'
+            # degrades to 'low'. Temperature is FIXED at 1.0 — sending any
+            # other value is HTTP 400 — so it must be omitted entirely.
+            body['reasoning_effort'] = kimi_k3_reasoning_effort(
+                _effort, thinking_enabled)
         else:
-            body['thinking'] = {'type': 'disabled'}
-            body['temperature'] = 0.6
+            _is_k2_thinking = ('k2-thinking' in model.lower()
+                               and 'turbo' not in model.lower())
+            if _is_k2_thinking or thinking_enabled:
+                body['thinking'] = {'type': 'enabled'}
+                body['temperature'] = 1.0
+            else:
+                body['thinking'] = {'type': 'disabled'}
+                body['temperature'] = 0.6
         body.pop('top_p', None)
         body.pop('presence_penalty', None)
         body.pop('frequency_penalty', None)
     elif not _tf and is_minimax(model):
         body['temperature'] = temperature or 0.7
         body['reasoning_split'] = True
+    elif not _tf and is_gpt5(model):
+        # OpenAI GPT-5 family is a reasoning model driven by the native
+        # ``reasoning_effort`` string (minimal/low/medium/high, plus the
+        # GPT-5.6 ``ultra`` tier). gpt_reasoning_effort maps Tofu's depth
+        # ladder and downgrades ``ultra`` to ``high`` on pre-5.6 models.
+        # Temperature is omitted — GPT-5 reasoning ignores sampling params.
+        body['reasoning_effort'] = gpt_reasoning_effort(
+            _effort, thinking_enabled, model)
     elif not _tf and is_claude(model) and thinking_enabled:
         body['thinking'] = {'type': 'adaptive'}
         if is_claude_opus_47(model):
             body['thinking']['display'] = 'summarized'
         else:
             body['temperature'] = 1.0
-        if _effort and _effort != 'medium':
+        # Effort rung. On the ADAPTIVE generation (Opus 4.7+) EVERY rung is
+        # stated, including ``medium``. That exclusion used to be correct --
+        # medium WAS the model default, so omitting it was a free byte saving.
+        # Opus 5 moved the default to ``high``, which silently turned the
+        # omission into an UPGRADE of the user's explicit choice. Measured on
+        # the example-corp gateway (yuju-claude-opus-5-evaDaily, identical prompt,
+        # n=6, 2026-07-26): effort dropped -> median 2812.5 completion tokens,
+        # effort=medium -> median 1855.0 (~1.52x). index.html ships
+        # data-depth="medium" as the ACTIVE default on both the desktop (:795)
+        # and mobile (:1708) selectors, so this is the common path.
+        #
+        # Pre-4.7 Claude still defaults to medium, so omitting it there means
+        # the same thing -- that wire stays byte-identical.
+        _omit_medium = not is_claude_opus_47(model)
+        if _effort and not (_omit_medium and _effort == 'medium'):
             if _effort == 'xhigh' and not is_claude_opus_47(model):
                 logger.info('[build_body] effort=xhigh not supported on %s — '
                             'downgrading to high', model)
                 _effort = 'high'
+            elif _effort == 'ultra':
+                # ``ultra`` is a GPT-5.6 tier with no Claude equivalent —
+                # map to Claude's top rung (max) so the effort is honoured.
+                logger.info('[build_body] effort=ultra has no Claude tier on '
+                            '%s — mapping to max', model)
+                _effort = 'max'
             body['effort'] = _effort
+    elif not _tf and is_claude_opus_47(model):
+        # ── Thinking OFF on the ADAPTIVE-thinking generation (Opus 4.7+) ──
+        # Claude Opus 5 runs adaptive thinking ON BY DEFAULT: a body with NO
+        # ``thinking`` key thinks anyway. Every earlier Claude defaulted OFF,
+        # so "disabled" used to be expressible by omitting the key — correct
+        # then, silently wrong now. The user picks depth=off, we send nothing,
+        # and Opus 5 bills them for reasoning they declined.
+        #
+        # Live-measured on the example-corp gateway (yuju-claude-opus-5-evaDaily,
+        # identical prompt, 4 samples, 2026-07-26):
+        #   omit thinking       → median 2925 completion tokens (36.3s, 24.8s)
+        #   {"type":"disabled"} → median 1518 completion tokens (19.4s, 19.6s)
+        #
+        # Gated on is_claude_opus_47 (the adaptive generation) rather than all
+        # Claude: this is the documented disable form for 4.7+, and it was
+        # verified a live no-op on 4.7 (omit [562,536,628] vs disabled
+        # [462,535,601]), so it corrects 5+ without changing 4.7/4.8 outcomes.
+        # Pre-4.7 Claude keeps the byte-identical omit wire — it already
+        # defaults off, and those revisions were never verified to accept the
+        # key, so adding one would be an unforced 400 risk.
+        #
+        # No ``effort`` is set here, and that is load-bearing: Anthropic
+        # returns HTTP 400 for thinking=disabled combined with xhigh/max.
+        body['thinking'] = {'type': 'disabled'}
     else:
         body['temperature'] = temperature
 

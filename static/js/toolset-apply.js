@@ -98,7 +98,7 @@ function _renderToolsetDiff(diff) {
   let chips = shown.map(({ e, kind }) => chip(e, kind)).join('');
   if (hidden > 0) {
     const more = (typeof t === 'function') ? t('toolset.moreChips') : '…还有 %n 项';
-    chips += `<span class="toolset-diff-chip more">${esc(more.replace('%n', hidden))}</span>`;
+    chips += `<span class="toolset-diff-chip more">${esc(more.replace('%n', String(hidden)))}</span>`;
   }
   textEl.innerHTML =
     `<span class="toolset-diff-lead">${esc(lead)}</span>` +
@@ -158,8 +158,6 @@ const _SAFE_REVERT_FAMILIES = [
     apply: (on) => { if (typeof _applyHumanGuidanceUI === 'function') _applyHumanGuidanceUI(on); } },
   { match: (n) => ['create_memory', 'update_memory', 'delete_memory', 'merge_memories', 'search_memories'].indexOf(n) !== -1,
     apply: (on) => { if (typeof _applyMemoryUI === 'function') _applyMemoryUI(on); } },
-  { match: (n) => ['schedule_create', 'schedule_list', 'schedule_manage', 'await_task', 'timer_create', 'timer_manage'].indexOf(n) !== -1,
-    apply: (on) => { if (typeof _applySchedulerUI === 'function') _applySchedulerUI(on); } },
   { match: (n) => n === 'run_command',
     apply: (on) => { if (typeof _applyCodeExecUI === 'function') _applyCodeExecUI(on); } },
   { match: (n) => ['spawn_agents', 'await_agents', 'get_agent_result'].indexOf(n) !== -1,

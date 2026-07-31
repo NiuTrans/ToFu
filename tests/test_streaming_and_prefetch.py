@@ -706,7 +706,111 @@ class TestMemoryPrefetch:
         assert 'memory_accumulation' in sys_text
         assert '42 accumulated memories' in sys_text
         assert '<available_memories>' not in sys_text
-        assert '<available_skills>' not in sys_text
+        # No skills LISTING is injected. The anchor is the block's CLOSING
+        # tag, not the bare noun: the static memory_accumulation prose itself
+        # mentions `<available_skills>` (in backticks, no closing tag), while
+        # a real build_skills_index listing always ends with the close tag.
+        assert '</available_skills>' not in sys_text
+
+    def test_skills_index_not_suppressed_by_memory_prose(self):
+        """REGRESSION (found via this suite's own failing assertion): the
+        skills-index idempotency gate checked the BARE noun
+        ``'<available_skills>' in _existing`` — which the static
+        memory_accumulation prose itself contains (backticked). On every
+        memory-enabled turn (the default) the skills index was therefore
+        silently suppressed: installed skills were never advertised.
+
+        The gate now checks the listing's CLOSING tag. Assert the RESULT:
+        with skills installed AND memory enabled, the listing LANDS; and a
+        second assembly of the same messages does not double-splice.
+        """
+        from lib.tasks_pkg.system_context import _inject_system_contexts
+
+        listing = ('<available_skills>\n'
+                   'The USER has installed the following skill packages.\n'
+                   '- fake-skill (project): NC listing\n'
+                   '</available_skills>')
+        proj_future = Future()
+        proj_future.set_result('Proj ctx')
+        task = {'_prefetch_project': proj_future, '_prefetch_memory': None}
+        messages = [{'role': 'system', 'content': 'Base'},
+                    {'role': 'user', 'content': 'Help me'}]
+
+        def _assemble():
+            with patch('lib.memory.build_memory_context',
+                       return_value='You have 42 accumulated memories.'), \
+                 patch('lib.skills.build_skills_index', return_value=listing):
+                _inject_system_contexts(
+                    messages, '/tmp/proj', True,
+                    True, False, False,  # memory_enabled=True
+                    has_real_tools=True, conv_id='', task=task)
+
+        _assemble()
+        sc = messages[0]['content']
+        st = '\n\n'.join(b['text'] for b in sc if isinstance(b, dict)) \
+            if isinstance(sc, list) else sc
+        # THE regression assertion: the listing LANDS on a memory-enabled turn.
+        assert 'fake-skill (project)' in st, (
+            'skills index suppressed on a memory-enabled turn — the '
+            'marker gate regressed to the bare noun')
+        assert '</available_skills>' in st
+        # Idempotency: a second assembly of the same messages must NOT
+        # double-splice (the close-tag marker is what catches it).
+        _assemble()
+        sc2 = messages[0]['content']
+        st2 = '\n\n'.join(b['text'] for b in sc2 if isinstance(b, dict)) \
+            if isinstance(sc2, list) else sc2
+        assert st2.count('</available_skills>') == 1, (
+            f"skills index double-spliced: {st2.count('</available_skills>')}")
+
+    def test_NC_skills_gate_reverted_to_bare_noun_breaks_the_guard(self, tmp_path):
+        """NEUTER: revert the idempotency gate to the bare noun → the listing
+        is suppressed again and test_skills_index_not_suppressed_by_memory_prose's
+        core assertion fails. Shipped file byte-identical after."""
+        src_path = os.path.join(
+            os.path.dirname(ROOT := os.path.dirname(os.path.abspath(__file__))),
+            'lib', 'tasks_pkg', 'system_context', '_inject.py')
+        with open(src_path, encoding='utf-8') as f:
+            original = f.read()
+        anchor = "        if '</available_skills>' in _existing:"
+        assert anchor in original, 'skills gate anchor not found'
+        patched = original.replace(
+            anchor, "        if '<available_skills>' in _existing:  # NC", 1)
+        assert patched != original
+        try:
+            with open(src_path, 'w', encoding='utf-8') as f:
+                f.write(patched)
+            import importlib
+
+            import lib.tasks_pkg.system_context._inject as _inj
+            importlib.reload(_inj)
+            from concurrent.futures import Future as _F
+            listing = ('<available_skills>\nx\n- fake-skill (project): NC\n'
+                       '</available_skills>')
+            fut = _F(); fut.set_result('Proj ctx')
+            task = {'_prefetch_project': fut, '_prefetch_memory': None}
+            messages = [{'role': 'system', 'content': 'Base'},
+                        {'role': 'user', 'content': 'Help me'}]
+            with patch('lib.memory.build_memory_context',
+                       return_value='You have 42 accumulated memories.'), \
+                 patch('lib.skills.build_skills_index', return_value=listing):
+                _inj._inject_system_contexts(
+                    messages, '/tmp/proj', True, True, False, False,
+                    has_real_tools=True, conv_id='', task=task)
+            sc = messages[0]['content']
+            st = '\n\n'.join(b['text'] for b in sc if isinstance(b, dict)) \
+                if isinstance(sc, list) else sc
+            assert 'fake-skill (project)' not in st, (
+                'NC did not bite: listing landed despite the bare-noun gate')
+        finally:
+            with open(src_path, 'w', encoding='utf-8') as f:
+                f.write(original)
+            import importlib
+
+            import lib.tasks_pkg.system_context._inject as _inj
+            importlib.reload(_inj)
+        with open(src_path, encoding='utf-8') as f:
+            assert f.read() == original, 'shipped _inject.py must be byte-identical'
 
         # User message should NOT contain the memory count hint (it's in system now)
         user_msg = messages[-1]

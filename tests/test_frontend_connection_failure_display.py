@@ -33,13 +33,19 @@ Two accuracy defects fixed 2026-07-06 (audited by a 3-way parallel sweep):
 
 4. IN-STREAM LIVENESS HUD WAS HARDCODED ENGLISH (the most connection-failure-
    specific surface). ``_updateStreamTimerUI`` header spans + ``_setBubbleLiveness``
-   in-bubble lines ("server not responding", "still working", "No update for
-   Ns…") + the "Force Finish" button + the ``_streamPhaseLabel`` fallbacks
-   ("running tools", "reasoning", …) were English. All now route through a
-   guarded ``_connT()`` with new ``conn.hud*`` / ``conn.phase*`` keys (zh
+   in-bubble lines + the "Force Finish" button + the ``_streamPhaseLabel``
+   fallbacks ("running tools", "reasoning", …) were English. All now route
+   through a guarded ``_connT()`` with new ``conn.*`` / ``conn.phase*`` keys (zh
    primary; ``{n}`` silent-seconds + ``{what}`` activity interpolation). The
    HUD harness drives ``_updateStreamTimerUI`` into the dead-server AND
    still-working branches under the REAL zh i18n and asserts zh renders.
+
+   UPDATE (2026-07-14): the AUTOMATIC dead-server HUD path no longer stamps the
+   terminal "服务器无响应 / 健康检查失败" verdict — the 「连接中断」false-positive
+   fix made a health-ping failure a TRANSIENT reconnecting state, so the HUD now
+   renders the calmer ``conn.reconnectingShort`` header + ``conn.reconnecting``
+   bubble (Force-Finish button retained as a manual escape hatch). The HUD
+   assertions were updated to the reconnecting strings accordingly.
 
 The harnesses load the REAL shipped JS under jsdom and drive the real
 functions. DOUBLE-NEUTER: each fix is reverted on a COPY of the source and the
@@ -100,6 +106,13 @@ global.localStorage = win.localStorage;
 global.conversations = win.conversations = [];
 global.activeStreams = win.activeStreams = new Map();
 global.streamBufs = win.streamBufs = new Map();
+// Uniform streamSessions stub (streamBufs retired — phase lives in session)
+global.streamSessions = win.streamSessions = new Map();
+global.getStreamSession = win.getStreamSession = (cid) => { let s = win.streamSessions.get(cid); if (!s) { s = { phase: null }; win.streamSessions.set(cid, s); } return s; };
+global.setStreamPhase = win.setStreamPhase = (cid, p) => { if (!win.streamSessions.has(cid) && !(typeof win.activeStreams !== undefined && win.activeStreams.has(cid))) return; win.getStreamSession(cid).phase = p; };
+global.clearStreamSession = win.clearStreamSession = (cid) => { win.streamSessions.delete(cid); };
+// Stub for _drBuf used in sse_pipeline delta handler (streamBufs retired)
+let _drBuf = null;
 global.activeConvId = win.activeConvId = null;
 global.escapeHtml = win.escapeHtml = (s) => String(s == null ? '' : s);
 
@@ -265,6 +278,13 @@ global.activeConvId = win.activeConvId = CONV;
 global.conversations = win.conversations = [];
 global.activeStreams = win.activeStreams = new Map();
 global.streamBufs = win.streamBufs = new Map();
+// Uniform streamSessions stub (streamBufs retired — phase lives in session)
+global.streamSessions = win.streamSessions = new Map();
+global.getStreamSession = win.getStreamSession = (cid) => { let s = win.streamSessions.get(cid); if (!s) { s = { phase: null }; win.streamSessions.set(cid, s); } return s; };
+global.setStreamPhase = win.setStreamPhase = (cid, p) => { if (!win.streamSessions.has(cid) && !(typeof win.activeStreams !== undefined && win.activeStreams.has(cid))) return; win.getStreamSession(cid).phase = p; };
+global.clearStreamSession = win.clearStreamSession = (cid) => { win.streamSessions.delete(cid); };
+// Stub for _drBuf used in sse_pipeline delta handler (streamBufs retired)
+let _drBuf = null;
 // Real escapeHtml semantics enough for the assertions.
 global.escapeHtml = win.escapeHtml = (s) => String(s == null ? '' : s)
   .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
@@ -288,21 +308,27 @@ if (typeof _updateStreamTimerUI !== 'function') { console.log('FAIL fn missing')
     startTime: now - 90000, lastDataTime: now - 90000, intervalId: 0,
     _lastHealthResult: false, _healthChecking: true,  // true → skip the async re-probe
   });
-  streamBufs.set(CONV, { phase: { phase: 'thinking_active' } });
+  win.streamSessions.set(CONV, { phase: null });
+win.setStreamPhase(CONV, { phase: 'thinking_active' });
 
   await _updateStreamTimerUI(CONV);
 
   const hud = document.getElementById('stream-elapsed-timer').innerHTML;
   const bubble = document.querySelector('[data-zone="status"]').innerHTML;
 
-  // Header timer: zh "服务器无响应" + zh Force Finish button, NOT English.
-  check('hud_zh_not_responding', hud.includes('服务器无响应'));
+  // Header timer: the automatic dead-server path NO LONGER stamps a terminal
+  // "服务器无响应" verdict — the 2026-07-14 「连接中断」false-positive fix made a
+  // health-ping failure a TRANSIENT reconnecting state (conn.reconnectingShort
+  // header + conn.reconnecting bubble), with the Force-Finish button kept as a
+  // manual escape hatch. Assert the calmer reconnecting banner + button, zh.
+  check('hud_zh_reconnecting', hud.includes('正在重连'));
   check('hud_zh_force_finish', hud.includes('强制结束'));
   check('hud_no_english_force', !hud.includes('Force Finish'));
   check('hud_no_english_notresp', !hud.includes('server not responding'));
-  // In-bubble line: zh full sentence with the {n} silent-seconds interpolated.
-  check('bubble_zh_full', bubble.includes('服务器无响应（静默') && bubble.includes('健康检查失败'));
-  check('bubble_no_english', !bubble.includes('Server not responding'));
+  // In-bubble line: the zh reconnecting sentence, NOT the old terminal verdict.
+  check('bubble_zh_reconnecting', bubble.includes('连接不稳定，正在重连并与服务器同步'));
+  check('bubble_no_english', !bubble.includes('Server not responding')
+        && !bubble.includes('服务器无响应'));
 
   // Also exercise the "still working" branch → zh phase label (reasoning).
   globalThis.__seedTimer(CONV, {

@@ -59,7 +59,8 @@ def _keyword_clause(keyword, params):
 
 
 def list_conversations(keyword=None, limit=20, scope='auto',
-                       project_path=None, current_conv_id=None):
+                       project_path=None, current_conv_id=None,
+                       user_id=None):
     """List other conversations, optionally scoped to the current project.
 
     Args:
@@ -74,6 +75,12 @@ def list_conversations(keyword=None, limit=20, scope='auto',
         project_path: the current task's project path (supplied by the tool
             handler). Required for project scoping; ignored otherwise.
         current_conv_id: the active conversation, excluded from results.
+        user_id: the OWNING principal whose conversations may be listed.
+            ``None`` falls back to :data:`DEFAULT_USER_ID` so a single-user
+            install behaves byte-identically. Callers on a request thread pass
+            ``routes.common._request_user_id()``; background task threads pass
+            ``task_user_id(task)``. Hard-coding the default here would make
+            every tenant read user 1's conversations.
 
     Returns a formatted string with conversation metadata.
     """
@@ -88,7 +95,7 @@ def list_conversations(keyword=None, limit=20, scope='auto',
         effective_scope = 'all'
 
     where = ['user_id=?']
-    params = [DEFAULT_USER_ID]
+    params = [DEFAULT_USER_ID if user_id is None else user_id]
 
     if effective_scope == 'project':
         # json_extract is rewritten to the PG jsonb accessor by _sql_translate,

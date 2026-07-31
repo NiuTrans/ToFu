@@ -6,8 +6,8 @@
 
 function _handleToolStart(ev, c) {
   const convId = c.convId, taskId = c.taskId;
-  const assistantMsg = c.assistantMsg, buf = c.buf;
-  const _epCriticPhase = c.epCriticPhase, _epCriticMsg = c.epCriticMsg, _epCriticBuf = c.epCriticBuf;
+  const assistantMsg = c.assistantMsg;
+  const _epCriticPhase = c.epCriticPhase, _epCriticMsg = c.epCriticMsg;
       if (_epCriticPhase) {
         /* Critic's tool usage → accumulate into critic message */
         if (_epCriticMsg) {
@@ -19,9 +19,8 @@ function _handleToolStart(ev, c) {
           };
           if (!_epCriticMsg.toolRounds) _epCriticMsg.toolRounds = [];
           _epCriticMsg.toolRounds.push(r);
-          if (_epCriticBuf) _epCriticBuf.toolRounds = _epCriticMsg.toolRounds;
         }
-        twUpdate(convId);
+        if (typeof twUpdate === 'function') twUpdate(convId);
       } else {
         /* ★ RENDER_CONTRACT Phase 3: build + push the tool round through the ONE
          *   pure reducer (reduceStreamState 'tool_start' action) instead of an
@@ -61,7 +60,6 @@ function _handleToolStart(ev, c) {
               username: _un,
               updatedAt: Date.now(),
             };
-            if (buf) buf._mcpLoginHint = assistantMsg._mcpLoginHint;
           }
         } catch (_e) { /* best-effort */ }
         /* Track swarm round number so swarm_phase events can find it. Guard on
@@ -70,16 +68,14 @@ function _handleToolStart(ev, c) {
          * keeps the handler crash-safe (the routing NEUTER guard relies on
          * this to report a clean failure rather than a TypeError). */
         if (r && r._swarm) assistantMsg._swarmRoundNum = r.roundNum;
-        if (buf)
-          buf.toolRounds = assistantMsg.toolRounds;
-        twUpdate(convId);
+        if (typeof twUpdate === 'function') twUpdate(convId);
       }
 }
 
 function _handleToolResult(ev, c) {
   const convId = c.convId, taskId = c.taskId;
-  const assistantMsg = c.assistantMsg, buf = c.buf;
-  const _epCriticPhase = c.epCriticPhase, _epCriticMsg = c.epCriticMsg, _epCriticBuf = c.epCriticBuf;
+  const assistantMsg = c.assistantMsg;
+  const _epCriticPhase = c.epCriticPhase, _epCriticMsg = c.epCriticMsg;
       if (_epCriticPhase && _epCriticMsg) {
         /* Critic's tool result → accumulate into critic message */
         if (_epCriticMsg.toolRounds) {
@@ -89,8 +85,7 @@ function _handleToolResult(ev, c) {
           ) || _epCriticMsg.toolRounds.find(r => r.roundNum === ev.roundNum);
           if (r) { r.results = ev.results; r.status = "done"; if (ev.searchDiag) r.searchDiag = ev.searchDiag; if (ev.engineBreakdown) r.engineBreakdown = ev.engineBreakdown; if (ev.vertical) r.vertical = ev.vertical; if (ev.verticals) r.verticals = ev.verticals; }
         }
-        if (_epCriticBuf) _epCriticBuf.toolRounds = _epCriticMsg.toolRounds || [];
-        twUpdate(convId);
+        if (typeof twUpdate === 'function') twUpdate(convId);
       } else if (assistantMsg.toolRounds) {
         /* ★ RENDER_CONTRACT Phase 3: settle the round through the ONE pure
          *   reducer (reduceStreamState 'tool_result' action) — it locates the
@@ -153,15 +148,16 @@ function _handleToolResult(ev, c) {
             snippet: _snippet,
             updatedAt: Date.now(),
           };
-          if (buf) buf._mcpLoginHint = assistantMsg._mcpLoginHint;
           /* Auto-dismiss on success after 4s so the chip doesn't linger
-           * forever once the session is live. */
+           * forever once the session is live. Identity check: only clear
+           * the hint if it is still the object we just stamped (a newer
+           * hint may have replaced it — don't dismiss that one). */
           if (_phase === 'approved') {
+            const _stampedHint = assistantMsg._mcpLoginHint;
             setTimeout(() => {
-              if (assistantMsg._mcpLoginHint === buf?._mcpLoginHint) {
+              if (assistantMsg._mcpLoginHint === _stampedHint) {
                 assistantMsg._mcpLoginHint = null;
-                if (buf) buf._mcpLoginHint = null;
-                twUpdate(convId);
+                if (typeof twUpdate === 'function') twUpdate(convId);
               }
             }, 4000);
           }
@@ -217,9 +213,7 @@ function _handleToolResult(ev, c) {
           showToast('', title, body, ok ? 5000 : 8000);
         }
       }
-      if (buf)
-        buf.toolRounds = assistantMsg.toolRounds || [];
-      twUpdate(convId);
+      if (typeof twUpdate === 'function') twUpdate(convId);
       // ★ If this was an ask_human tool_result, refresh sidebar to clear amber dot
       if (ev.results && ev.results.some(r2 => r2.toolName === 'ask_human')) {
         renderConversationList();
@@ -228,8 +222,8 @@ function _handleToolResult(ev, c) {
 
 function _handleToolComplete(ev, c) {
   const convId = c.convId, taskId = c.taskId;
-  const assistantMsg = c.assistantMsg, buf = c.buf;
-  const _epCriticPhase = c.epCriticPhase, _epCriticMsg = c.epCriticMsg, _epCriticBuf = c.epCriticBuf;
+  const assistantMsg = c.assistantMsg;
+  const _epCriticPhase = c.epCriticPhase, _epCriticMsg = c.epCriticMsg;
       // ★ Store raw tool content for continue context restoration
       const _applyToolComplete = (r) => {
         if (!r) return;
@@ -246,8 +240,6 @@ function _handleToolComplete(ev, c) {
         if (_epCriticMsg.toolRounds) {
           _applyToolComplete(_epCriticMsg.toolRounds.find(r => r.roundNum === ev.roundNum && r.toolCallId === ev.toolCallId));
         }
-        if (_epCriticBuf)
-          _epCriticBuf.toolRounds = _epCriticMsg.toolRounds || [];
       } else if (assistantMsg.toolRounds) {
         /* ★ RENDER_CONTRACT Phase 3: settle tool content/tokens/compaction on
          *   the in-flight round through the ONE pure reducer (tool_complete
@@ -261,16 +253,14 @@ function _handleToolComplete(ev, c) {
       }
       // ★ Sync to buf and let the reactive pipeline (twUpdate → _syncToolRoundsDOM)
       //   handle preview button rendering — no fragile direct DOM injection needed.
-      if (buf)
-        buf.toolRounds = assistantMsg.toolRounds || [];
-      twUpdate(convId);
+      if (typeof twUpdate === 'function') twUpdate(convId);
 
 }
 
 function _handleToolCompacted(ev, c) {
   const convId = c.convId, taskId = c.taskId;
-  const assistantMsg = c.assistantMsg, buf = c.buf;
-  const _epCriticPhase = c.epCriticPhase, _epCriticMsg = c.epCriticMsg, _epCriticBuf = c.epCriticBuf;
+  const assistantMsg = c.assistantMsg;
+  const _epCriticPhase = c.epCriticPhase, _epCriticMsg = c.epCriticMsg;
       /* ★ Per-tool compaction event — emitted by lib/tasks_pkg/compaction.py
        * micro_compact() (L1) and the aggregate-budget pass in
        * tool_dispatch.py (L0). Tags the matching round so its chip can
@@ -300,7 +290,6 @@ function _handleToolCompacted(ev, c) {
       if (_epCriticPhase && _epCriticMsg && _epCriticMsg.toolRounds
           && _applyCompacted(_epCriticMsg.toolRounds.find(r => r.toolCallId === ev.toolCallId))) {
         _stampedMsg = _epCriticMsg;
-        if (_epCriticBuf) _epCriticBuf.toolRounds = _epCriticMsg.toolRounds || [];
       }
       // 2. Fall through to every assistant message in this conversation.
       //    Most events match in the in-flight assistantMsg; cold-round
@@ -318,8 +307,7 @@ function _handleToolCompacted(ev, c) {
           }
         }
       }
-      if (buf && assistantMsg && Array.isArray(assistantMsg.toolRounds))
-        buf.toolRounds = assistantMsg.toolRounds;
+
       /* Resolve the stamped message's array index if branch 1 (critic) matched
        * — the surgical repaint below addresses the DOM node by `msg-<idx>`. */
       if (_stampedMsg && _stampedIdx < 0) {
@@ -327,7 +315,7 @@ function _handleToolCompacted(ev, c) {
           ? conversations.find(c => c && c.id === convId) : null;
         if (_conv && Array.isArray(_conv.messages)) _stampedIdx = _conv.messages.indexOf(_stampedMsg);
       }
-      twUpdate(convId);
+      if (typeof twUpdate === 'function') twUpdate(convId);
       /* If we stamped a round in an OLDER message (not the in-flight bubble),
        * twUpdate alone won't re-render it — twUpdate only refreshes the
        * streaming bubble. The older row needs its COMPACTED pill materialized.
@@ -358,10 +346,10 @@ function _handleToolCompacted(ev, c) {
             const _el = document.getElementById('msg-' + _stampedIdx);
             if (_el) _el.outerHTML = renderMessage(_stampedMsg, _stampedIdx);
           }
-        } else if (typeof renderChat === 'function') {
+        } else {
           const _conv = (typeof conversations !== 'undefined')
             ? conversations.find(c => c && c.id === convId) : null;
-          if (_conv) renderChat(_conv, false);
+          if (_conv) window.ConvView.replaceAll(convId, { forceScroll: false });
         }
       }
       /* ── Debug-panel alignment ──

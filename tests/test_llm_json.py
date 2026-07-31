@@ -135,8 +135,9 @@ def test_consumers_still_import_helper():
     import lib.optimizer.proposer as proposer
     import lib.orchestration_composer as composer
     importlib.reload(composer)
-    # proposer aliases the shared fn as _strip_fences.
-    assert proposer._strip_fences is llm_json.strip_code_fences
+    # proposer uses the shared extractor directly (repair=True) — the local
+    # _strip_fences alias was deleted in 96d20a13.
+    assert proposer.extract_json is llm_json.extract_json
     # composer._extract_json delegates to extract_json.
     assert composer._extract_json('```json\n{"reply":"x","definition":{}}\n```') == {
         'reply': 'x', 'definition': {}}

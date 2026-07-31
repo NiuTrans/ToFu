@@ -241,5 +241,167 @@ class NormalizeUsageTest(unittest.TestCase):
         self.assertEqual(cost_mod.normalize_usage(anthropic)['input'], 42)
 
 
+# The exact usage payload the sankuai gateway returned for kimi-k3 on a warm
+# (second, byte-identical) request — probed live 2026-07-24. Note the hit is
+# reported as cached_tokens / prompt_tokens_details.cached_tokens /
+# effectiveCachedTokens while the canonical cache_read_tokens is pinned at 0.
+KIMI_WARM_USAGE = {
+    'effectiveCachedTokens': 3328,
+    'completion_tokens': 16,
+    'prompt_tokens': 3367,
+    'total_tokens': 3383,
+    'completion_tokens_details': {'reasoning_tokens': 13},
+    'prompt_tokens_details': {'cached_tokens': 3328, 'audio_tokens': 0,
+                              'image_tokens': 0, 'video_tokens': 0,
+                              'text_tokens': 0},
+    'cache_write_tokens': 0,
+    'cache_read_tokens': 0,
+    'input_tokens': 0,
+    'output_tokens': 0,
+    'output_tokens_details': None,
+    'cached_tokens': 3328,
+}
+
+
+class MultiVendorUsageTest(unittest.TestCase):
+    """normalize_usage must read cache/thinking under every probed vendor
+    spelling — not just the two canonical ones."""
+
+    def test_kimi_gateway_shape(self):
+        from lib.cost import normalize_usage
+        u = normalize_usage(dict(KIMI_WARM_USAGE))
+        self.assertEqual(u['input'], 3367)
+        self.assertEqual(u['output'], 16)
+        self.assertEqual(u['cache_read'], 3328)
+        self.assertEqual(u['cache_write'], 0)
+        self.assertEqual(u['thinking'], 13)  # nested completion_tokens_details
+
+    def test_openai_nested_cached_tokens(self):
+        from lib.cost import normalize_usage
+        u = normalize_usage({'prompt_tokens': 1000, 'completion_tokens': 50,
+                             'prompt_tokens_details': {'cached_tokens': 400}})
+        self.assertEqual(u['cache_read'], 400)
+
+    def test_deepseek_shape(self):
+        from lib.cost import normalize_usage
+        u = normalize_usage({'prompt_tokens': 1000, 'completion_tokens': 50,
+                             'prompt_cache_hit_tokens': 700,
+                             'prompt_cache_miss_tokens': 300})
+        self.assertEqual(u['cache_read'], 700)
+
+    def test_gemini_shape(self):
+        from lib.cost import normalize_usage
+        u = normalize_usage({'prompt_tokens': 1000, 'completion_tokens': 50,
+                             'cached_content_token_count': 600})
+        self.assertEqual(u['cache_read'], 600)
+
+    def test_explicit_zero_canonical_does_not_shadow_vendor(self):
+        # The gateway pins cache_read_tokens=0 while reporting the real hit as
+        # cached_tokens — the falsy canonical key must fall through, not win.
+        from lib.cost import normalize_usage
+        u = normalize_usage({'cache_read_tokens': 0, 'cached_tokens': 900,
+                             'prompt_tokens': 1000})
+        self.assertEqual(u['cache_read'], 900)
+
+    def test_no_double_count_when_flat_and_nested_agree(self):
+        # cached_tokens and prompt_tokens_details.cached_tokens are the SAME
+        # number reported twice — first truthy (flat) wins, never summed.
+        from lib.cost import normalize_usage
+        u = normalize_usage({'cached_tokens': 500,
+                             'prompt_tokens_details': {'cached_tokens': 500}})
+        self.assertEqual(u['cache_read'], 500)
+
+    def test_canonical_spelling_still_wins(self):
+        from lib.cost import normalize_usage
+        u = normalize_usage({'cache_read_input_tokens': 800,
+                             'cached_tokens': 999})
+        self.assertEqual(u['cache_read'], 800)
+
+    def test_neuter_vendor_aliases_blinds_kimi_hit(self):
+        """NEUTER: stripping the vendor aliases + nested table must drop the
+        kimi hit back to 0 — proving they (not luck) carry the read."""
+        import lib.cost as cost_mod
+        orig_flat = cost_mod._USAGE_KEY_ALIASES
+        orig_nested = cost_mod._USAGE_NESTED_ALIASES
+        self.assertEqual(cost_mod.normalize_usage(dict(KIMI_WARM_USAGE))['cache_read'],
+                         3328)
+        try:
+            cost_mod._USAGE_KEY_ALIASES = dict(orig_flat)
+            cost_mod._USAGE_KEY_ALIASES['cache_read'] = (
+                'cache_read_tokens', 'cache_read_input_tokens')
+            cost_mod._USAGE_NESTED_ALIASES = {}
+            self.assertEqual(
+                cost_mod.normalize_usage(dict(KIMI_WARM_USAGE))['cache_read'], 0,
+                'neutered alias tables should miss the kimi cache hit')
+        finally:
+            cost_mod._USAGE_KEY_ALIASES = orig_flat
+            cost_mod._USAGE_NESTED_ALIASES = orig_nested
+        self.assertEqual(cost_mod.normalize_usage(dict(KIMI_WARM_USAGE))['cache_read'],
+                         3328)
+
+
+class CanonicalizeUsageCacheKeysTest(unittest.TestCase):
+
+    def test_stamps_kimi_hit(self):
+        from lib.cost import canonicalize_usage_cache_keys
+        u = dict(KIMI_WARM_USAGE)
+        out = canonicalize_usage_cache_keys(u)
+        self.assertIs(out, u)  # in-place, same dict returned
+        self.assertEqual(u['cache_read_tokens'], 3328)
+        self.assertNotIn('cache_write_tokens_set', u)
+        self.assertEqual(u['cache_write_tokens'], 0)  # untouched (no write)
+
+    def test_idempotent(self):
+        from lib.cost import canonicalize_usage_cache_keys
+        u = dict(KIMI_WARM_USAGE)
+        canonicalize_usage_cache_keys(u)
+        snapshot = dict(u)
+        canonicalize_usage_cache_keys(u)
+        self.assertEqual(u, snapshot)
+
+    def test_anthropic_untouched(self):
+        from lib.cost import canonicalize_usage_cache_keys
+        u = {'input_tokens': 12, 'cache_creation_input_tokens': 200,
+             'cache_read_input_tokens': 800, 'cached_tokens': 999}
+        canonicalize_usage_cache_keys(u)
+        self.assertNotIn('cache_read_tokens', u)
+        self.assertNotIn('cache_write_tokens', u)
+
+    def test_nondict_passthrough(self):
+        from lib.cost import canonicalize_usage_cache_keys
+        self.assertIsNone(canonicalize_usage_cache_keys(None))
+        self.assertEqual(canonicalize_usage_cache_keys('x'), 'x')  # type: ignore[arg-type]
+
+
+class KimiComputeCostTest(unittest.TestCase):
+    """End-to-end: the kimi warm-round payload must bill the cached portion at
+    the kimi-k3 cacheReadMul (0.10), not full input price."""
+
+    def test_kimi_warm_round_cost(self):
+        r = compute_cost(dict(KIMI_WARM_USAGE), model_id='kimi-k3')
+        # OpenAI convention: prompt_tokens (3367) includes the 3328 cached.
+        self.assertEqual(r['inputTokens'], 39)
+        self.assertEqual(r['totalInputTokens'], 3367)
+        self.assertEqual(r['cacheReadTokens'], 3328)
+        # kimi-k3 pricing: input $2.76/M, cacheReadMul 0.10 → the cached share
+        # costs 3328 * 2.76 * 0.10 / 1e6 ≈ $0.00092 instead of ≈ $0.00919.
+        self.assertAlmostEqual(r['cacheReadCostUsd'],
+                               3328 * 2.76 * 0.10 / 1e6, places=6)
+        self.assertGreater(r['cacheSavingsUsd'], 0.008)
+
+    def test_migrated_consumers_see_kimi_hit(self):
+        """The migrated direct-read sites must observe the kimi cache hit."""
+        from lib.tasks_pkg.floor_retry import _cache_tokens
+        self.assertEqual(_cache_tokens(dict(KIMI_WARM_USAGE)), (3328, 0))
+
+        from lib.llm_dispatch.cache_settle import is_cold_write
+        # kimi: read-only hit, no write → never a cold write.
+        self.assertFalse(is_cold_write(dict(KIMI_WARM_USAGE)))
+        # Regression guard for the migration: a genuine Anthropic cold write
+        # (big creation, negligible read) must still be detected.
+        self.assertTrue(is_cold_write({'cache_creation_input_tokens': 50000,
+                                       'cache_read_input_tokens': 0}))
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import tempfile
 
 import pytest
@@ -132,11 +133,52 @@ def _install_shim_for_collection():
     # test process — they run live LLM polls + web searches against the
     # shared DB, stealing CPU/IO and making timing-sensitive tests flaky.
     _os.environ.setdefault('TOFU_DISABLE_SCHEDULER', '1')
+    # Never start the netpath prober thread in test processes either:
+    # server.py calls start_prober() at import, and the daemon would fire
+    # real network probes (through the env proxy) 10s later and write into
+    # the production logs/app.log. netpath's own tests opt back in via
+    # monkeypatch (tests/test_netpath.py).
+    _os.environ.setdefault('TOFU_NETPATH', 'off')
+    # ⚠️ LOG ISOLATION (2026-07-27, after app.log hit 9.1 GB in one day).
+    # Everything else in this block is already isolated — DB, scheduler,
+    # netpath, mlock — but logs were NOT, so the test process appended to the
+    # REAL <repo>/logs/app.log. Measured: one test emitting a single
+    # logger.error() + audit_log() grew the production app.log by 83 bytes and
+    # landed its marker in app.log AND audit.log (four production file
+    # handlers are attached to the root logger once `import server` runs).
+    # The netpath comment right above even names this hazard out loud —
+    # evidence the risk was known but only ever patched case-by-case.
+    #
+    # ORDERING IS LOAD-BEARING: lib/log.py computes LOG_DIR at IMPORT time
+    # from _writable_base_dir(), which honours TOFU_DATA_DIR first. So this
+    # must be set BEFORE the `import server` below — the same constraint that
+    # governs TOFU_DB_PATH above. Keyed on PYTEST_XDIST_WORKER for the same
+    # reason: each worker is its own process inheriting the controller's env.
+    if not _os.environ.get('TOFU_DATA_DIR'):
+        import tempfile as _tf_log
+        _log_worker = _os.environ.get('PYTEST_XDIST_WORKER', '')
+        _log_suffix = f'-{_log_worker}' if _log_worker else ''
+        _os.environ['TOFU_DATA_DIR'] = _tf_log.mkdtemp(
+            prefix=f'tofu-test-logs{_log_suffix}-')
     try:
         import server  # noqa: F401 — side-effect: installs Flask→Quart shim
     except Exception as _e:  # never block collection on the shim probe
         import sys as _sys
         _sys.stderr.write(f'[conftest] shim pre-install skipped: {_e}\n')
+
+    # ─── HARD PATH LOCK (2026-07-26) ──────────────────────────────────
+    # Force lib.database._core.DB_PATH to the session-specific temp path
+    # immediately after the server import. This is a belt-and-suspenders
+    # guard against any test or background thread that might try to
+    # resolve the default data/tofu.db path, ensuring all test-side
+    # DB writes are contained within the temporary test area.
+    if _os.environ.get('TOFU_ALLOW_PG_TESTS') != '1':
+        try:
+            import lib.database._core as _dbc
+            _dbc.DB_PATH = _os.environ['TOFU_DB_PATH']
+            _dbc._BACKEND = 'sqlite'
+        except Exception as _e:
+            _sys.stderr.write(f'[conftest] hard path lock failed: {_e}\n')
 
 
 # ─── DATA-LOSS GUARD: refuse to run the suite against a production DB ──
@@ -323,6 +365,14 @@ _NC_GUARDED_SOURCES = (
 )
 _ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _nc_source_snapshots: dict = {}
+_ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_nc_source_snapshots: dict = {}
+
+# NC poison signature: every on-disk NC patch embeds an ``NC-WORD`` marker in
+# its replacement text (project convention — ``# NC-STORM``,
+# ``pass  # NC-OBSERVE``, ``'nc-deny-forced'``, ``# NC-DISPATCH-HUMAN`` …).
+# The belt heals ONLY when this matches (see restore_drifted_nc_sources).
+_NC_POISON_RE = re.compile(r'(?i)\bNC-[A-Z0-9][A-Z0-9_-]{2,}')
 
 
 def _snapshot_nc_sources():
@@ -341,13 +391,33 @@ def restore_drifted_nc_sources() -> list:
 
     Plain callable (not the fixture) so it can be driven directly by the belt's
     own regression test — the fixture body just delegates here in its finally.
+
+    ★ MARKER GATE (2026-07-25, the "phantom reverter" incident): heal ONLY
+    when the drifted bytes carry the NC poison signature (``NC-WORD`` — every
+    on-disk NC patch embeds it in the replacement text by convention:
+    ``# NC-STORM`` / ``pass  # NC-OBSERVE`` / ``'nc-deny-forced'`` …). A file
+    that merely differs from the session-start baseline WITHOUT a marker is
+    LEGITIMATE work — a commit landed mid-run, or sibling WIP — and must be
+    left alone. Before this gate, a long suite on the shared tree silently
+    un-wrote a real mid-run commit (lib/message_queue.py, 83c7f1ed) every
+    per-test cadence for over an hour (strace: O_WRONLY|O_TRUNC from the
+    pytest pid). A leftover neuter from a crashed patch ALWAYS carries the
+    marker, so the crash-heal behaviour is unchanged.
     """
     healed = []
     for p, original in _nc_source_snapshots.items():
         try:
             with open(p, encoding='utf-8') as f:
-                if f.read() == original:
-                    continue
+                current = f.read()
+            if current == original:
+                continue
+            if not _NC_POISON_RE.search(current):
+                # Legit mid-run work (a commit / sibling WIP), not NC poison —
+                # the belt has no mandate to touch it.
+                _conftest_logger.debug(
+                    '[nc-guard] drift without NC marker, leaving as-is '
+                    '(legit mid-run work): %s', p)
+                continue
             with open(p, 'w', encoding='utf-8') as f:
                 f.write(original)
             rel = os.path.relpath(p, _ROOT_DIR)
@@ -860,6 +930,62 @@ _TEST_TIMER_SOURCE_LIKE = (
     'task-x',
 )
 
+# Task-id patterns used EXCLUSIVELY by tests (production task ids are
+# timestamp-random and never start with these).
+_TEST_TASK_ID_LIKE = (
+    'usagetas%',
+    'task-cause%',
+    'seamtask%',
+    'task-freeze%',
+    'task-parallel%',
+    'task-artifact%',
+    'tfeedpb%',
+    'aaaaaaaa%',
+)
+
+
+def _purge_test_task_events(reason: str = '') -> int:
+    """Delete test-pattern task_events rows from the active DB. Best-effort.
+
+    Returns the number of rows deleted (0 on any failure). Pattern-gated so it
+    is safe to run against the production DB the tests share.
+    """
+    try:
+        from lib.database import DOMAIN_SYSTEM, close_thread_db, get_thread_db
+    except Exception as e:
+        _conftest_logger.debug('task event purge skipped (db import failed): %s', e)
+        return 0
+
+    deleted = 0
+    try:
+        db = get_thread_db(DOMAIN_SYSTEM)
+
+        def _del(sql, params):
+            nonlocal deleted
+            try:
+                cur = db.execute(sql, params)
+                deleted += int(getattr(cur, 'rowcount', 0) or 0)
+            except Exception as ex:
+                _conftest_logger.debug('task event purge stmt failed (%s): %s', sql, ex)
+
+        for pat in _TEST_TASK_ID_LIKE:
+            _del('DELETE FROM task_events WHERE task_id LIKE ?', (pat,))
+        try:
+            db.commit()
+        except Exception as ex:
+            _conftest_logger.debug('task event purge commit failed: %s', ex)
+    except Exception as e:
+        _conftest_logger.warning('purge_test_task_events failed %s: %s', reason, e)
+    finally:
+        try:
+            close_thread_db()
+        except Exception:
+            pass
+
+    if deleted:
+        _conftest_logger.info('purged %d leaked test task_event row(s) %s', deleted, reason)
+    return deleted
+
 
 def _purge_test_timers(reason: str = '') -> int:
     """Delete test-pattern timer_watchers rows from the active DB. Best-effort.
@@ -928,11 +1054,13 @@ def _purge_leaked_test_conversations(_db_guard_session):
     DB before any DELETE is issued."""
     _purge_test_conversations('(session start)')
     _purge_test_timers('(session start)')
+    _purge_test_task_events('(session start)')
     try:
         yield
     finally:
         _purge_test_conversations('(session end)')
         _purge_test_timers('(session end)')
+        _purge_test_task_events('(session end)')
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -1040,34 +1168,24 @@ def live_server(flask_app):
 
 
 def _ensure_chromium_library_path():
-    """Augment ``LD_LIBRARY_PATH`` so a rootless Chromium build finds its GUI
-    shared libs (libatk / libgbm / libxkbcommon / …) on hosts without sudo.
+    """Make headless Chromium launchable, via the shared single source of truth.
 
-    Mirrors ``_ensure_chromium_library_path()`` in the tofu_search package's
-    ``playwright_pool.py`` (the mechanism the app itself relies on): prepend
-    ``$CONDA_PREFIX/lib`` and the cos7 sysroot lib dir, where the GUI libs are
-    installed via conda-forge (see the ``playwright-chromium-rootless-conda-libs``
-    project skill). Extra dirs can be injected via ``CHROMIUM_EXTRA_LIB_DIRS``
-    (colon-separated). Idempotent + best-effort: a missing CONDA_PREFIX or
-    unreadable dir is simply skipped, so this is a no-op on a vanilla machine
-    that already has the libs (e.g. a CI runner after ``--with-deps``).
+    Delegates to ``chromium_env.ensure_chromium_env()`` (repo root), which the
+    app itself uses. This used to be a local copy keyed on ``$CONDA_PREFIX``,
+    which is unset in any shell that never ran ``conda activate`` and on the
+    uv/venv install path — so the fixture skipped with "chromium unavailable"
+    on hosts where the libs were present all along. chromium_env resolves from
+    ``sys.prefix`` instead, and also handles the fontconfig half (a fontless
+    Chromium screenshots blank-but-styled rather than erroring).
+
+    Returns the list of directories added (empty when nothing was needed).
     """
-    candidates = []
-    prefix = os.environ.get('CONDA_PREFIX', '')
-    if prefix:
-        candidates.append(os.path.join(prefix, 'lib'))
-        candidates.append(os.path.join(
-            prefix, 'x86_64-conda-linux-gnu', 'sysroot', 'usr', 'lib64'))
-    extra = os.environ.get('CHROMIUM_EXTRA_LIB_DIRS', '')
-    if extra:
-        candidates.extend(p for p in extra.split(os.pathsep) if p)
-    existing = os.environ.get('LD_LIBRARY_PATH', '')
-    have = set(existing.split(os.pathsep)) if existing else set()
-    prepend = [p for p in candidates if p and os.path.isdir(p) and p not in have]
-    if prepend:
-        os.environ['LD_LIBRARY_PATH'] = os.pathsep.join(
-            prepend + ([existing] if existing else []))
-    return prepend
+    import sys as _sys
+    _repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if _repo_root not in _sys.path:
+        _sys.path.insert(0, _repo_root)
+    from chromium_env import ensure_chromium_env
+    return ensure_chromium_env()['lib_dirs_added']
 
 
 @pytest.fixture(scope='session')
@@ -1131,6 +1249,163 @@ def _conv_global_ready(pg):
         return False
 
 
+#: Console-error substrings that are KNOWN, app-authored degradation notices
+#: rather than defects. Kept deliberately SHORT and specific — this list is the
+#: one place a real regression could hide, so every entry needs a reason.
+#:
+#: Measured on a healthy app (2026-07-28, live server + real Chromium): boot
+#: produced 4 console errors, ALL of them `_trySSE` premature-close notices
+#: from reconnecting to pre-existing background tasks. They are the frontend
+#: correctly REPORTING a degraded transport and falling back to polling — a
+#: working recovery path, not a broken page.
+_BENIGN_CONSOLE_ERRORS = (
+    'SSE PREMATURE CLOSE',        # transport degraded → poll fallback engaged
+    'falling back to poll',       # the same path's follow-up line
+)
+
+
+def _attach_js_error_capture(pg):
+    """Record uncaught JS exceptions + unexpected console errors on ``pg``.
+
+    WHY THIS EXISTS
+    ---------------
+    Measured 2026-07-28: **no test in this repo listened to the browser
+    console**. `grep -rn "on('pageerror'" tests/` returned zero. So a page
+    could throw `TypeError: x is not a function` on every boot and the whole
+    visual ring would still pass, because assertions only ever looked at the
+    DOM nodes each test happened to name. An uncaught exception aborts the rest
+    of that script — later handlers silently never bind — which is exactly the
+    "click does nothing" bug class this project keeps rediscovering by hand.
+
+    WHY IT CLASSIFIES INSTEAD OF COUNTING
+    -------------------------------------
+    A strict "zero console errors" gate measured 4 errors on a HEALTHY app, so
+    it would be red on day one and promptly deleted. Instead:
+
+      * ``pageerror``   → ALWAYS hard. An uncaught exception is never fine.
+      * ``console.error`` → hard UNLESS it matches :data:`_BENIGN_CONSOLE_ERRORS`.
+      * ``requestfailed`` → hard unless ``ERR_ABORTED``, which is the browser
+        cancelling an in-flight preload/navigation, not a missing asset.
+        (Verified: the ERR_ABORTED seen at boot is a pet sprite preload, and
+        that file EXISTS on disk — treating it as a 404 would be a false
+        accusation of the kind the charter warns about.)
+
+    Findings are attached to the page as ``pg._tofu_js_errors``; the
+    ``assert_no_js_errors`` fixture is what turns them into a failure, so
+    capture stays cheap and always-on while enforcement is opt-in per test.
+    """
+    hard = []
+    pg._tofu_js_errors = hard
+
+    def _on_pageerror(exc):
+        hard.append(f'uncaught exception: {str(exc)[:300]}')
+
+    def _on_console(msg):
+        if msg.type != 'error':
+            return
+        text = msg.text or ''
+        if any(b in text for b in _BENIGN_CONSOLE_ERRORS):
+            return
+        hard.append(f'console.error: {text[:300]}')
+
+    def _on_requestfailed(req):
+        failure = req.failure or ''
+        if 'ERR_ABORTED' in failure:
+            return
+        hard.append(f'request failed: {req.url[:200]} ({failure})')
+
+    try:
+        pg.on('pageerror', _on_pageerror)
+        pg.on('console', _on_console)
+        pg.on('requestfailed', _on_requestfailed)
+    except Exception as e:  # pragma: no cover - defensive
+        _conftest_logger.debug('js error capture not attached: %s', e)
+
+
+def _dismiss_onboarding_modals(pg):
+    """Close the first-run settings modal so it can't swallow clicks.
+
+    NOT a test hack — it reproduces what a real user does. `_maybeAutoOpenSettings`
+    (static/js/main/main_toolbar_ui.js) deliberately auto-opens Settings when the
+    server has **zero API keys**, which is always true of the ephemeral test
+    server. The modal is a full-viewport `.modal-overlay`, so every subsequent
+    `click()` lands on the overlay instead of the target and times out after 30s.
+
+    Measured 2026-07-28: this single seam accounted for **12 of the 12** visual
+    failures across test_e2e_smoke.py and test_visual_e2e.py. Those had been
+    invisible because the whole ring skipped on "chromium unavailable" until
+    ff0a94f3 made the browser work.
+
+    Deliberately does NOT use ``click(force=True)`` at the call sites: that
+    would paper over the interception, leave the modal open, and let the next
+    obscured element repeat the failure somewhere less obvious.
+
+    WHY IT POLLS INSTEAD OF CLOSING ONCE (measured, after my first attempt
+    failed): the open is not synchronous with load. The chain is
+    ``_loadServerConfigAndPopulate`` (async fetch of the server config)
+    ``→ _maybeAutoOpenSettings → setTimeout(..., 500)``. A single close right
+    after ``domcontentloaded`` therefore runs BEFORE the timer fires and the
+    modal opens again a moment later — which is exactly what happened: the
+    first version of this helper changed nothing and the same 12 tests kept
+    failing with the identical interception message. So we wait for the
+    overlay to be reliably ABSENT rather than closing once and hoping.
+    """
+    import time
+    deadline = time.monotonic() + 12.0
+    closed_any = False
+    try:
+        while time.monotonic() < deadline:
+            has_overlay = pg.evaluate(
+                "() => !!document.querySelector('.modal-overlay.open')")
+            if has_overlay:
+                pg.evaluate(
+                    "() => { if (typeof closeSettings === 'function') closeSettings();"
+                    "  document.querySelectorAll('.modal-overlay.open')"
+                    "    .forEach(el => el.classList.remove('open')); }")
+                closed_any = True
+                pg.wait_for_timeout(120)
+                continue
+            # Absent right now — but the 500ms auto-open timer may still be
+            # pending. Settle past it before declaring the page usable.
+            pg.wait_for_timeout(700)
+            if not pg.evaluate(
+                    "() => !!document.querySelector('.modal-overlay.open')"):
+                if closed_any:
+                    _conftest_logger.debug(
+                        'onboarding modal dismissed (auto-open on a keyless '
+                        'test server is expected product behaviour)')
+                return
+        _conftest_logger.warning(
+            'onboarding overlay still reopening after 12s — clicks will be '
+            'intercepted; check _maybeAutoOpenSettings')
+    except Exception as e:
+        _conftest_logger.warning(
+            'onboarding modal dismiss failed (%s) — clicks may be intercepted', e)
+
+
+@pytest.fixture()
+def assert_no_js_errors(page):
+    """Fail the test if the page raised uncaught JS errors (opt-in).
+
+    Request it alongside ``page`` to bind the browser's own error channel into
+    the assertion set::
+
+        def test_something(page, assert_no_js_errors):
+            ...
+
+    Enforcement is a separate fixture from capture so that adopting it is a
+    per-test decision: a test that legitimately drives an error path can keep
+    using ``page`` alone instead of being forced to widen the benign list,
+    which would weaken the signal for everyone else.
+    """
+    yield
+    errors = getattr(page, '_tofu_js_errors', [])
+    assert not errors, (
+        'the page reported %d JavaScript error(s) — an uncaught exception '
+        'aborts the rest of that script, so later handlers silently never '
+        'bind:\n  %s' % (len(errors), '\n  '.join(errors[:10])))
+
+
 @pytest.fixture()
 def page(browser, live_server):
     """A fresh page navigated to the live app, with automatic cleanup of any
@@ -1139,11 +1414,14 @@ def page(browser, live_server):
     """
     ctx = browser.new_context()
     pg = ctx.new_page()
+    _attach_js_error_capture(pg)
     pg.goto(live_server, wait_until='domcontentloaded')
     try:
         pg.wait_for_function("typeof conversations !== 'undefined'", timeout=10000)
     except Exception as e:
         _conftest_logger.debug('page: conversations global not ready: %s', e)
+
+    _dismiss_onboarding_modals(pg)
 
     ids_before = _conv_ids_in_page(pg)
     # Did we get a TRUSTWORTHY baseline? ``_conv_ids_in_page`` returns an empty

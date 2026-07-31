@@ -119,7 +119,7 @@ api_v1_agent_run_bp = Blueprint('api_v1_agent_run', __name__)
 # ── Capability translation ──────────────────────────────────────────
 
 
-_THINKING_DEPTHS = {'low', 'medium', 'high', 'xhigh', 'max'}
+_THINKING_DEPTHS = {'low', 'medium', 'high', 'xhigh', 'max', 'ultra'}
 
 # Friendly tool tags → orchestrator cfg toggles.
 _TOOL_TAG_MAP = {
@@ -193,6 +193,30 @@ _ALIAS_SETTERS = {
     # → fail-closed (no plugins). See docs/TOOL_PLUGINS.md.
     'plugins':        lambda c, v: c.__setitem__('plugins', v),
 }
+
+
+def _apply_remote_alias(cfg: dict, value, *, user_id: str = ''):
+    """``config.remote = '<agent_id>:<root>'`` → ``cfg['project_remote']``.
+
+    RWA P4 入口:validates the target against the live bridge registry
+    (agent online, root declared, bridge-user match) before binding —
+    every refusal is an honest 400, never a silent fall-through.
+    Returns ``(cfg, error)``.
+    """
+    text = str(value or '').strip()
+    if ':' not in text:
+        return cfg, ("config.remote must be '<agent_id>:<root>' "
+                     "(see /api/v1/desktop/status for online agents)")
+    agent_id, root = (p.strip() for p in text.split(':', 1))
+    if not agent_id or not root:
+        return cfg, ("config.remote must be '<agent_id>:<root>' "
+                     '(both parts non-empty)')
+    from lib.desktop.remote import validate_remote_binding
+    binding, error = validate_remote_binding(agent_id, root, user_id=user_id)
+    if error:
+        return cfg, error
+    cfg['project_remote'] = binding
+    return cfg, None
 
 
 def _build_cfg(model_id: str, raw_config: dict | None,
@@ -519,6 +543,21 @@ async def agent_run():
         return api_bad_request('`config` / `capabilities` must be objects',
                                 field='config')
     cfg = _build_cfg(model_id, raw_config, capabilities_legacy)
+
+    # ── 2b. RWA remote-worktree binding (config.remote='<agent>:<root>') ──
+    _remote_val = cfg.pop('remote', None)
+    if _remote_val is not None:
+        cfg, _remote_err = _apply_remote_alias(
+            cfg, _remote_val,
+            user_id=(auth.user_id if auth and getattr(auth, 'user_id', '')
+                     else ''))
+        if _remote_err:
+            if handle:
+                dispose_ephemeral_slot(handle)
+            return api_bad_request(_remote_err, field='config.remote')
+        audit_log('agent_run_remote_bind', key_id=owner_key_id,
+                  agent_id=cfg['project_remote']['agent_id'],
+                  root=cfg['project_remote']['root'])
 
     # ── 3. Other request knobs ────────────────────────────────────
     stream = optional_bool(body, 'stream', default=False)

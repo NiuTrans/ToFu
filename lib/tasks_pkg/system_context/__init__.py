@@ -21,7 +21,7 @@ block in the system message.  CLAUDE.md / project-intelligence content is
 with ``_isMeta: True`` wrapped in ``<system-reminder>`` tags (mirroring
 Claude Code's ``prependUserContext`` in ``utils/api.ts:449``).  A/B-validated
 to save 18% cost / +49% cache hit — see
-``.tofu/skills/claudemd-placement-ab-test-results.md``.
+``.tofu/memories/claudemd-placement-ab-test-results.md``.
 
 ──────────────────────────────────────────────────────────────────────────
 This module is a **facade-preserving package** (split from the original

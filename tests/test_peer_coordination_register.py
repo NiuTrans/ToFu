@@ -77,12 +77,16 @@ class PeerProtocolBlockTest(unittest.TestCase):
     def test_block_injected_into_system_prompt(self):
         """End-to-end: the block reaches the assembled system prompt in project
         mode via system_context (the §4.47 injection site)."""
-        import lib.tasks_pkg.system_context as sc
+        import lib.tasks_pkg.system_context._inject as sc_inject
         # Drive only the marker-based injection: build a minimal messages list
         # and confirm render_peer_protocol_block's marker appears once the
         # renderer returns content. We assert the renderer is wired (imported)
         # in the module rather than exercising the full 1000-line assembler.
-        src = open(sc.__file__).read()
+        # NOTE: system_context was split into a package (2026-06) — the §4.47
+        # injection site lives in the ``_inject`` submodule, NOT the facade
+        # ``__init__``. Reading ``system_context.__file__`` finds none of the
+        # tokens → read the submodule that actually wires the block.
+        src = open(sc_inject.__file__).read()
         self.assertIn('[PEER MESSAGING PROTOCOL]', src)
         self.assertIn('render_peer_protocol_block', src)
         self.assertIn("_ctx_injected('peer_protocol'", src)

@@ -29,6 +29,9 @@ This harness loads the REAL shipped ``health_stream_timer.js`` under node,
 stubs the window globals it touches, and drives ``_healStuckPlaceholder``
 directly for both scenarios + the no-op guards.
 
+Post-§7 streamBufs RETIREMENT: `twStop` calls `clearStreamSession(convId)`,
+so assertions check `!streamSessions.has(cid)` instead of `!streamBufs.has(cid)`.
+
 TWO levels of coverage:
   1. ``test_heal_stuck_placeholder`` drives ``_healStuckPlaceholder`` directly
      (the recovery PRIMITIVE) under bare node.
@@ -93,7 +96,15 @@ global.ConvCache = { put: (c) => { calls.convCachePut++; } };
 global.normalizeErrorEnvelope = (e) => e;
 global.escapeHtml = (s) => String(s == null ? '' : s);
 global.showToast = () => {};
-global.streamBufs = new Map();
+
+// ── §7 streamBufs RETIREMENT: uniform session stub (health_stream_timer
+//    references streamSessions / getStreamSession / clearStreamSession
+//    directly; these must exist before we eval the real file). ──
+global.streamSessions = new Map();
+global.getStreamSession = (cid) => { let s = global.streamSessions.get(cid); if (!s) { s = { phase: null }; global.streamSessions.set(cid, s); } return s; };
+global.setStreamPhase = (cid, p) => { if (!global.streamSessions.has(cid) && !(typeof activeStreams !== 'undefined' && activeStreams.has(cid))) return; global.getStreamSession(cid).phase = p; };
+global.clearStreamSession = (cid) => { global.streamSessions.delete(cid); };
+
 global.Api = { health: { check: async () => ({ ok: true }) },
                chat: { poll: async () => ({ ok: false, status: 404 }) } };
 global._startOfflineRecoveryPolling = () => {};
@@ -110,6 +121,7 @@ check('fn_exposed', true);
 function reset() {
   conversations.length = 0;
   activeStreams.clear();
+  streamSessions.clear();
   for (const k of Object.keys(calls)) calls[k] = 0;
   activeConvId = null;
   global.activeConvId = null;
@@ -127,7 +139,10 @@ function reset() {
     ],
   };
   conversations.push(conv);
-  streamBufs.set('conv-ghost-1', { content: '', thinking: '', toolRounds: [] });
+  // §7: seed the live session (twStart does this in production, but
+  // _healStuckPlaceholder doesn't call twStart — it reads streamSessions
+  // indirectly via twStop → clearStreamSession). Create the session.
+  getStreamSession('conv-ghost-1');
   const ctrl = { abort: () => { calls.abort++; } };
   activeStreams.set('conv-ghost-1', { controller: ctrl });
 
@@ -138,10 +153,8 @@ function reset() {
   check('heal_empty_ghost_activeTaskId_cleared', conv.activeTaskId === null);
   check('heal_empty_ghost_activeStreams_cleared', !activeStreams.has('conv-ghost-1'));
   check('heal_empty_ghost_sse_aborted', calls.abort === 1);
-  // NOTE: the REAL twStop (defined in the eval'd file) shadows any window stub,
-  // so we can't spy it; assert its observable effect instead — the conv's
-  // streamBuf is gone after recovery.
-  check('heal_empty_ghost_streambuf_cleared', !streamBufs.has('conv-ghost-1'));
+  // §7: twStop → clearStreamSession deletes from streamSessions.
+  check('heal_empty_ghost_session_cleared', !streamSessions.has('conv-ghost-1'));
   check('heal_empty_ghost_persisted', calls.saveConversations === 1);
   check('heal_empty_ghost_cleared_at_stamped', typeof conv._activeTaskClearedAt === 'number');
 }
@@ -295,10 +308,16 @@ function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
 // State + stubs.
 const conversations = [];
 const activeStreams = new Map();
-const streamBufs = new Map();
 global.conversations = win.conversations = conversations;
 global.activeStreams = win.activeStreams = activeStreams;
-global.streamBufs = win.streamBufs = streamBufs;
+
+// ── §7 streamBufs RETIREMENT: uniform session stub ──
+const streamSessions = new Map();
+win.streamSessions = global.streamSessions = streamSessions;
+win.getStreamSession = global.getStreamSession = (cid) => { let s = streamSessions.get(cid); if (!s) { s = { phase: null }; streamSessions.set(cid, s); } return s; };
+win.setStreamPhase = global.setStreamPhase = (cid, p) => { if (!streamSessions.has(cid) && !(typeof activeStreams !== 'undefined' && activeStreams.has(cid))) return; win.getStreamSession(cid).phase = p; };
+win.clearStreamSession = global.clearStreamSession = (cid) => { streamSessions.delete(cid); };
+
 global.escapeHtml = win.escapeHtml = (s) => String(s == null ? '' : s);
 global.normalizeErrorEnvelope = win.normalizeErrorEnvelope = (e) => e;
 global.showToast = win.showToast = () => {};
@@ -331,19 +350,14 @@ const conv = {
   ],
 };
 conversations.push(conv);
-streamBufs.set('conv-live-404', { content: '', thinking: '', toolRounds: [] });
 activeStreams.set('conv-live-404', { controller: { abort: () => {} } });
 
 // Make _updateStreamTimerUI take the probe path: active conv + stale timer
 // (lastDataTime far enough back to exceed _SILENCE_THRESHOLD=20s) + a DOM timer.
 global.activeConvId = win.activeConvId = 'conv-live-404';
-const _now = Date.now();
 // _streamTimers is module-internal; seed it via the public twStart then age it.
 twStart('conv-live-404');
-// Re-fetch the entry node and backdate lastDataTime + startTime by 60s, and
-// reset the health-check throttle so the probe actually fires this tick.
-// (twStart re-created streamBufs — restore the empty-ghost buf shape.)
-streamBufs.set('conv-live-404', { content: '', thinking: '', toolRounds: [] });
+// twStart calls getStreamSession which creates the live session.
 
 (async () => {
   // Drive the timer tick. _updateStreamTimerUI reads _streamTimers internally;
@@ -386,10 +400,16 @@ function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
 
 const conversations = [];
 const activeStreams = new Map();
-const streamBufs = new Map();
 global.conversations = conversations;
 global.activeStreams = activeStreams;
-global.streamBufs = streamBufs;
+
+// ── §7 streamBufs RETIREMENT: uniform session stub ──
+const streamSessions = new Map();
+global.streamSessions = streamSessions;
+global.getStreamSession = (cid) => { let s = streamSessions.get(cid); if (!s) { s = { phase: null }; streamSessions.set(cid, s); } return s; };
+global.setStreamPhase = (cid, p) => { if (!streamSessions.has(cid) && !(typeof activeStreams !== 'undefined' && activeStreams.has(cid))) return; global.getStreamSession(cid).phase = p; };
+global.clearStreamSession = (cid) => { streamSessions.delete(cid); };
+
 global.escapeHtml = (s) => String(s == null ? '' : s);
 global.normalizeErrorEnvelope = (e) => e;
 global.showToast = () => {};

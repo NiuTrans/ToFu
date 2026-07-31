@@ -125,8 +125,26 @@ def _strip_comments(css_text: str) -> str:
     """Remove /* ... */ comments. The sibling's `_iter_rules` splits on `{`/`}`,
     so a comment containing literal braces (e.g. an explanatory `{padding:...}` )
     corrupts rule parsing. Browsers ignore comments entirely; we do too — AFTER
-    any marker-based slicing, since some block markers live inside comments."""
-    return re.sub(r'/\*.*?\*/', '', css_text, flags=re.DOTALL)
+    any marker-based slicing, since some block markers live inside comments.
+
+    Delegates to the SINGLE shared implementation (charter #24).
+
+    EQUIVALENCE, MEASURED on the real 22k-line static/styles.css rather than
+    assumed: the local ``re.sub(r'/\*.*?\*/', '', css, flags=re.DOTALL)`` this
+    replaced and ``strip_comments(lang='css', inline=True)`` produce an
+    IDENTICAL selector set (6466 rules, 0 selectors unique to either side) and
+    a byte-identical whitespace-stripped content signature. They differ only in
+    LINE NUMBERING -- the shared one blanks comment lines to preserve line
+    count, the local one deleted them (20295 vs 22400 lines) -- which leaves 25
+    rule bodies differing in whitespace alone. Every assertion here is
+    whitespace-insensitive (substring / regex on a rule body), so the swap is
+    behaviour-preserving; the suite is the proof.
+
+    Keeping N copies of "what counts as a comment" is what let a fix land in one
+    copy and not its duplicate -- incident 3 in the shared module's docstring.
+    """
+    from tests._source_scan import strip_comments
+    return strip_comments(css_text, lang='css', inline=True)
 
 
 def _mobile_cascade(css_text: str, marker: str) -> str:
@@ -255,11 +273,15 @@ def test_nc_removing_decoration_hide_regresses():
 # ─────────────────────────── 3. orientation-aware landscape ───────────────────────────
 
 def test_landscape_phone_rule_is_orientation_aware():
-    """The landscape-phone block anchors on orientation:landscape and covers up
-    to 600px tall — not the old max-height:500px-only rule."""
+    """The landscape-phone LAYOUT block anchors on orientation:landscape and
+    covers up to 600px tall — not the old max-height:500px-only rule. Scoped
+    to the layout block (header + its first payload line): the same media
+    condition also heads the tofu welcome-brand ladder, so a bare-header
+    presence check can pass while the layout rule is gone."""
     css = _css()
-    assert '@media(orientation:landscape) and (max-height:600px) and (max-width:900px){' in css, (
-        'orientation-aware landscape-phone media query missing')
+    assert ('@media(orientation:landscape) and (max-height:600px) and (max-width:900px){'
+            '\n  .topbar{') in css, (
+        'orientation-aware landscape-phone LAYOUT rule missing')
     # The old 500px-only header must be gone (proves the edit replaced it).
     assert '@media(max-height:500px) and (max-width:900px){' not in css, (
         'the old max-height:500px-only landscape rule is still present')
@@ -271,13 +293,35 @@ def test_nc_reverting_landscape_to_500_only_regresses():
     original = _css()
     new_header = '@media(orientation:landscape) and (max-height:600px) and (max-width:900px){'
     old_header = '@media(max-height:500px) and (max-width:900px){'
-    assert original.count(new_header) == 1, 'landscape header not unique/found'
+    # The same media CONDITION legitimately heads SEVERAL blocks (the tofu
+    # welcome-brand breakpoint ladder, the brand-area mobile scale ladder near
+    # the end of the file, and the landscape-phone layout block) — their payloads
+    # are disjoint, so the CSS is correct. Scope the revert to the LAYOUT block
+    # via its first payload line; a replace(1) on the bare header would hit one
+    # of the brand blocks and the NC would revert the wrong thing.
+    layout_anchor = new_header + '\n  .topbar{'
+    assert original.count(layout_anchor) == 1, 'landscape layout block not unique/found'
+    # DERIVED, not hardcoded: assert the revert consumes EXACTLY ONE occurrence.
+    # An earlier revision asserted `count == 1` outright, which turned into a
+    # false red the moment a legitimate third block shared this condition.
+    headers_before = original.count(new_header)
+    assert headers_before >= 2, (
+        f'expected the layout block plus at least one brand block to share this '
+        f'condition, found {headers_before}')
     try:
         with open(CSS, 'w', encoding='utf-8') as f:
-            f.write(original.replace(new_header, old_header, 1))
+            f.write(original.replace(layout_anchor, old_header + '\n  .topbar{', 1))
         reverted = _css()
-        assert new_header not in reverted and old_header in reverted, (
-            'NC setup failed to revert the landscape header')
+        assert new_header + '\n  .topbar{' not in reverted, (
+            'NC setup failed: the LAYOUT block still anchors on orientation:landscape')
+        assert old_header + '\n  .topbar{' in reverted, (
+            'NC setup failed: the LAYOUT block was not reverted to 500-only')
+        # The brand blocks share the media condition — they must remain untouched
+        # (the NC reverts ONLY the layout block), i.e. exactly one fewer header.
+        assert reverted.count(new_header) == headers_before - 1, (
+            f'NC clobbered a brand-block occurrence — the anchor was not scoped: '
+            f'{headers_before} headers before, {reverted.count(new_header)} after '
+            f'(expected {headers_before - 1})')
     finally:
         with open(CSS, 'w', encoding='utf-8') as f:
             f.write(original)

@@ -50,22 +50,28 @@ class _FakeConn:
         self.conv_id = conv_id
         self.messages_json = json.dumps(messages)
         self.updated_at = 1000
+        # The commit CAS token (lib/translate/commit.py): SELECT reads
+        # ``messages, updated_at, rev`` and the UPDATE's WHERE is ``AND rev=?``
+        # — ``updated_at`` is no longer the token (RENDER_CONTRACT Phase 4 W6;
+        # the DB trigger is the sole rev bumper).
+        self.rev = 7
         self._pending = None
 
     def execute(self, sql, params=()):
         s = ' '.join(sql.split())
-        if s.startswith('SELECT messages, updated_at FROM conversations'):
+        if s.startswith('SELECT messages, updated_at, rev FROM conversations'):
             self._pending = ('sel2', None)
             return self
         if s.startswith('SELECT messages FROM conversations'):
             self._pending = ('sel1', None)
             return self
         if s.startswith('UPDATE conversations SET messages'):
-            new_messages, new_updated, _cid, _uid, cas_updated = params
-            if cas_updated != self.updated_at:
+            new_messages, new_updated, _cid, _uid, cas_rev = params
+            if cas_rev != self.rev:
                 return _Cursor(0)               # CAS miss
             self.messages_json = new_messages
             self.updated_at = new_updated
+            self.rev += 1                       # the trigger bumps rev on write
             return _Cursor(1)
         self._pending = ('other', None)
         return self
@@ -73,7 +79,8 @@ class _FakeConn:
     def fetchone(self):
         kind = (self._pending or ('none', None))[0]
         if kind == 'sel2':
-            return _Row(messages=self.messages_json, updated_at=self.updated_at)
+            return _Row(messages=self.messages_json, updated_at=self.updated_at,
+                        rev=self.rev)
         if kind == 'sel1':
             return _Row(messages=self.messages_json)
         return None

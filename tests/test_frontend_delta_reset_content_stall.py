@@ -97,6 +97,13 @@ const streamBufs = new Map(); const activeStreams = new Map();
 win.conversations = conversations;
 Object.defineProperty(win, 'activeConvId', { get: () => activeConvId, set: v => activeConvId = v });
 win.streamBufs = streamBufs; win.activeStreams = activeStreams;
+// Uniform streamSessions stub (streamBufs retired — phase lives in session)
+win.streamSessions = global.streamSessions = new Map();
+win.getStreamSession = global.getStreamSession = (cid) => { let s = win.streamSessions.get(cid); if (!s) { s = { phase: null }; win.streamSessions.set(cid, s); } return s; };
+win.setStreamPhase = global.setStreamPhase = (cid, p) => { if (!win.streamSessions.has(cid) && !(typeof activeStreams !== 'undefined' && activeStreams.has(cid))) return; win.getStreamSession(cid).phase = p; };
+win.clearStreamSession = global.clearStreamSession = (cid) => { win.streamSessions.delete(cid); };
+// Stub for _drBuf used in sse_pipeline delta handler (streamBufs retired)
+let _drBuf = null;
 // twUpdate is a NO-OP — this is the COALESCED-frame-drop the bug relies on.
 // If the content zone ends up cleared, it can ONLY be the SYNCHRONOUS repaint
 // inside the delta_reset handler (the fix). That is the test's teeth.
@@ -132,7 +139,7 @@ function _mkCtx() {
   conversations.push(conv);
   activeConvId = 'c1';
   const buf = { content: '', thinking: '', toolRounds: [], phase: null };
-  streamBufs.set('c1', buf);
+  // streamBufs retired — assistantMsg is the accumulation target (handler mutates it)
   const ctx = T.makeCtx({ convId: 'c1', taskId: 't1',
     stream: { controller: { signal: { aborted: false } } }, assistantMsg: am, buf });
   const chatInner = document.getElementById('chatInner');
@@ -142,9 +149,9 @@ function _mkCtx() {
   if (typeof _streamZoneCache !== 'undefined') { try { _streamZoneCache = { body: null }; } catch (_) {} }
   return { conv, am, buf, ctx };
 }
-function _frame(buf) {
-  return { thinking: buf.thinking || '', content: buf.content || '',
-           toolRounds: buf.toolRounds || [], phase: buf.phase };
+function _frame(am) {
+  return { thinking: am.thinking || '', content: am.content || '',
+           toolRounds: am.toolRounds || [], phase: null };
 }
 function _contentZoneText() {
   const body = document.getElementById('streaming-body');
@@ -164,7 +171,7 @@ function _stallScenario(segOn, tag) {
   for (const ch of PARTIAL.split('')) {
     T.dispatchSSEEvent(line({ type: 'delta', content: ch }), ctx);
   }
-  updateStreamingUI(_frame(buf));
+  updateStreamingUI(_frame(am));
   const before = _contentZoneText();
   check(tag + '_zone_shows_partial_before', norm(before) === norm(PARTIAL),
     JSON.stringify(before));
@@ -196,12 +203,12 @@ _stallScenario(true, 'S2_segon');
   for (const ch of PARTIAL.split('')) {
     T.dispatchSSEEvent(line({ type: 'delta', content: ch }), ctx);
   }
-  updateStreamingUI(_frame(buf));
+  updateStreamingUI(_frame(am));
   // delta_reset for a round that has NO tool_start applied yet.
   T.dispatchSSEEvent(line({ type: 'delta_reset', roundNum: 99 }), ctx);
   check('S3_guard_content_kept_when_no_round_to_stamp',
     norm(am.content) === norm(PARTIAL), JSON.stringify(am.content));
-  updateStreamingUI(_frame(buf));
+  updateStreamingUI(_frame(am));
   check('S3_guard_zone_still_shows_partial',
     norm(_contentZoneText()) === norm(PARTIAL), JSON.stringify(_contentZoneText()));
 }

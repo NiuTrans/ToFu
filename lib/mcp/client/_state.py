@@ -48,9 +48,9 @@ def _pkg():
 # the same source of truth WITHOUT importing this heavy package. The
 # underscore aliases below preserve the historical internal names used
 # throughout this package (and monkeypatched by tests).
-from lib.mcp import vendored as _vendored_mod  # noqa: E402
-from lib.mcp.vendored import VENDORED_LAUNCHERS as _VENDORED_LAUNCHERS  # noqa: E402
-from lib.mcp.vendored import repo_root as _repo_root  # noqa: E402
+from lib.mcp import vendored as _vendored_mod  # noqa: E402,F401
+from lib.mcp.vendored import VENDORED_LAUNCHERS as _VENDORED_LAUNCHERS  # noqa: E402,F401
+from lib.mcp.vendored import repo_root as _repo_root  # noqa: E402,F401
 
 
 # ── First-connect auto-install guard/registry ────────────

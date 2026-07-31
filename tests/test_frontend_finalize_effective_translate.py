@@ -40,8 +40,10 @@ let _watchdogArms = [];
 const { document, check, report } = setup({
   root: process.argv[3],
   html: '<!DOCTYPE html><body><div id="chatContainer"><div id="chatInner"></div></div></body>',
-  // core/conversations.js (resolvers) then ui/stream_lifecycle.js (finishStream).
-  targets: [process.argv[2], process.argv[4]],
+  // core/conversations.js, then core/conv_reducers.js (the resolvers —
+  // convAutoTranslate / convAutoTranslateEffective moved there in the
+  // pt_3879f00e decomposition), then ui/stream_lifecycle.js (finishStream).
+  targets: [process.argv[2], process.argv[4], process.argv[5]],
   globals: {
     activeConvId: 'c1',
     activeStreams: new Map([['c1', { taskId: 't' }]]),   // finishStream deletes it
@@ -167,7 +169,8 @@ def test_finalize_effective_translate():
     run_harness(
         target_js=os.path.join(JS_DIR, 'core', 'conversations.js'),
         body_js=_BODY,
-        extra_targets=[os.path.join(JS_DIR, 'ui', 'stream_lifecycle.js')],
+        extra_targets=[os.path.join(JS_DIR, 'core', 'conv_reducers.js'),
+                       os.path.join(JS_DIR, 'ui', 'stream_lifecycle.js')],
         min_pass=10,
         label='finalize-effective-translate',
     )

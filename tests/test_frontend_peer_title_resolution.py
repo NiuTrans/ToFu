@@ -46,9 +46,23 @@ pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-CONV_JS = os.path.join(ROOT, 'static', 'js', 'core', 'conversations.js')
+# NOTE: convTitleById is NOT looked up by a hard-coded path. It started life in
+# core/conversations.js and moved to core/conv_reducers.js in the decomposition;
+# a pinned path turns that legitimate refactor into `convTitleById not found`,
+# which reads like the seam was deleted. Resolve it by SYMBOL from the
+# production bundle manifests so the next slice carries this guard with it.
 TR_JS = os.path.join(ROOT, 'static', 'js', 'ui', 'tool_rounds.js')
 SEND_JS = os.path.join(ROOT, 'static', 'js', 'main', 'main_send_pipeline.js')
+
+
+def _src_defining(symbol: str) -> str:
+    """Absolute path of the shipped file that defines *symbol*.
+
+    Raises with a four-state diagnosis (gone / unbundled / duplicated /
+    resolved) rather than a bare 'not found'.
+    """
+    from tests._conv_bundle_sources import sources_defining
+    return sources_defining(symbol)[-1]
 
 
 def _read(path: str) -> str:
@@ -82,6 +96,21 @@ def _node() -> str:
     if not node:
         pytest.skip('node not available for extraction-and-eval')
     return node
+
+
+def _extract_queue_block(src: str) -> str:
+    """The queue source/collapse helpers + renderPendingQueueUI as ONE block.
+
+    renderPendingQueueUI now delegates to the source/collapse helpers
+    (``_queueSourceOf``, ``_queueCollapsedNow``, the ``_QUEUE_*`` icon
+    consts, …), so extracting the bare function would ReferenceError under
+    eval. The block spans from the sources marker through the end of the
+    render function (the collapse toggle is defined in between)."""
+    start = src.index('/* ── Queue item sources')
+    m = re.search(r'function\s+renderPendingQueueUI\s*\(', src)
+    assert m and m.start() > start
+    i = src.find('{', m.end())
+    return src[start:_brace_match(src, i)]
 
 
 # The conversations the harness pretends are loaded. The peer ids the backend
@@ -142,6 +171,10 @@ _els['pendingQueueContainer'] = global.document.createElement('div');
 
 // pendingMessageQueue is the Map renderPendingQueueUI reads.
 var pendingMessageQueue = new Map();
+// renderPendingQueueUI now gates DOM mutations on activeConvId — declare it so
+// the queue-source-line assertions still see the paint. See
+// test_frontend_pending_queue_active_conv_gate.py for the cross-conv guard.
+var activeConvId = 'c1';
 
 {extracted}
 
@@ -164,7 +197,7 @@ def _run(harness: str) -> str:
 
 def _extracted(*, poison: bool = False) -> str:
     """The real convTitleById + _renderPeerDelivery + renderPendingQueueUI."""
-    conv_src = _read(CONV_JS)
+    conv_src = _read(_src_defining('convTitleById'))
     tr_src = _read(TR_JS)
     send_src = _read(SEND_JS)
     fn_title = _extract_fn(conv_src, 'convTitleById')
@@ -178,7 +211,7 @@ def _extracted(*, poison: bool = False) -> str:
         assert neutered != fn_title, 'NC poison did not apply to convTitleById'
         fn_title = neutered
     fn_delivery = _extract_fn(tr_src, '_renderPeerDelivery')
-    fn_queue = _extract_fn(send_src, 'renderPendingQueueUI')
+    fn_queue = _extract_queue_block(send_src)
     return '\n'.join([fn_title, fn_delivery, fn_queue])
 
 

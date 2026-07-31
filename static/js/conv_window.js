@@ -102,8 +102,9 @@ async function hydrateFullConversation(convId) {
       delete dst._trimmedToolRoundCount;
     });
     conv._trimmed = false;
-    if (typeof activeConvId !== 'undefined' && activeConvId === convId
-        && typeof renderChat === 'function') renderChat(conv, false);
+    if (typeof activeConvId !== 'undefined' && activeConvId === convId) {
+      window.ConvView.replaceAll(convId, { forceScroll: false });
+    }
     return true;
   } catch (e) {
     console.warn('[conv-window] hydrateFull failed for %s: %s',
@@ -160,9 +161,8 @@ async function loadEarlierMessages(convId) {
       conv._trimmed = true;
     }
 
-    if (typeof activeConvId !== 'undefined' && activeConvId === convId
-        && typeof renderChat === 'function') {
-      renderChat(conv, false);
+    if (typeof activeConvId !== 'undefined' && activeConvId === convId) {
+      window.ConvView.replaceAll(convId, { forceScroll: false });
       // re-pin the scroll anchor: keep the previously-top message in place by
       // restoring scrollTop + (newHeight - oldHeight).
       if (container) {

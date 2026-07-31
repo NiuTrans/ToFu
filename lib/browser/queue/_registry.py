@@ -17,7 +17,7 @@ from ._state import _clients, _clients_lock, _commands, _commands_lock, _STALE_G
 logger = get_logger(__name__)
 
 
-def mark_poll(client_id=None, chrome_major=0):
+def mark_poll(client_id=None, chrome_major=0, user_id=''):
     """Record a poll from a client (or anonymous legacy client).
 
     Args:
@@ -25,6 +25,12 @@ def mark_poll(client_id=None, chrome_major=0):
         chrome_major: Chromium major version reported by the extension (0 if
             unknown). Stored so the UI can surface Chrome 142+ Local Network
             Access prompt guidance for the browser actually running the bridge.
+        user_id: The bridge caller this poll authenticated as. Mirrors the
+            desktop bridge's per-user scoping (``lib/desktop/bridge.py``):
+            without it a multi-tenant relay lets tenant A's extension collect
+            tenant B's commands — and a browser command can read cookies and
+            attach the debugger, so that is a session-takeover primitive.
+            ``''`` = unscoped (single-user deployment / legacy global secret).
     """
     now = time.time()
     _state._last_poll_time = now
@@ -32,7 +38,8 @@ def mark_poll(client_id=None, chrome_major=0):
         with _clients_lock:
             if client_id not in _clients:
                 _clients[client_id] = {'first_seen': now, 'last_poll': now, 'name': '',
-                                       'poll_count': 1, 'chrome_major': chrome_major or 0}
+                                       'poll_count': 1, 'chrome_major': chrome_major or 0,
+                                       'user_id': str(user_id or '')}
                 logger.info('[Browser] New client registered: %s (total clients: %d)',
                             client_id[:12], len(_clients))
             else:
@@ -40,22 +47,43 @@ def mark_poll(client_id=None, chrome_major=0):
                 _clients[client_id]['poll_count'] = _clients[client_id].get('poll_count', 0) + 1
                 if chrome_major:
                     _clients[client_id]['chrome_major'] = chrome_major
+                # Re-registration may arrive on a different credential; the
+                # latest authenticated identity wins (same as desktop).
+                _clients[client_id]['user_id'] = str(user_id or '')
 
 
-def get_connected_clients():
-    """Return list of currently connected client dicts."""
+def client_user_id(client_id):
+    """Return the bridge user a registered client authenticated as ('' if none)."""
+    if not client_id:
+        return ''
+    with _clients_lock:
+        info = _clients.get(client_id)
+    return str((info or {}).get('user_id') or '')
+
+
+def get_connected_clients(user_id=None):
+    """Return list of currently connected client dicts.
+
+    ``user_id`` (B0): when given, only clients registered by that bridge
+    caller are returned — a tenant must never see another tenant's browsers.
+    ``None`` = unfiltered operator view.
+    """
     now = time.time()
     with _clients_lock:
-        return [
+        out = [
             {'client_id': cid, 'last_poll': info['last_poll'],
              'seconds_ago': round(now - info['last_poll'], 1),
              'name': info.get('name', ''),
              'poll_count': info.get('poll_count', 0),
              'chrome_major': info.get('chrome_major', 0),
-             'first_seen': info.get('first_seen', 0)}
+             'first_seen': info.get('first_seen', 0),
+             'user_id': info.get('user_id', '')}
             for cid, info in _clients.items()
             if now - info['last_poll'] < 15
         ]
+    if user_id is not None:
+        out = [c for c in out if (c.get('user_id') or '') == (user_id or '')]
+    return out
 
 
 def is_extension_connected(client_id=None):

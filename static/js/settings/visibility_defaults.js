@@ -19,6 +19,8 @@ function _renderPresetsTab(cfg) {
   _renderDropdownVisibility();
   // Render model defaults (fallback model, preset defaults)
   _populateModelDefaults(cfg);
+  // Repaint probe-health dots from any persisted snapshots (no new run).
+  if (typeof _ddResumeProbeSnapshots === 'function') _ddResumeProbeSnapshots();
 }
 
 // ══════════════════════════════════════════════════════
@@ -58,25 +60,32 @@ function _renderIgVisibility() {
   // Load hidden set from server config
   var hidden = new Set((_serverConfig && _serverConfig.hidden_ig_models) || []);
 
-  // Group by brand (same logic as _renderDropdownVisibility)
+  // Group by the SHARED brand rule (core/model_group.js) — the same key the
+  // toolbar picker uses, so the two lists can never disagree. brandNames
+  // come from the module, never re-typed here.
   var grouped = {};
   for (var i = 0; i < unique.length; i++) {
     var entry = unique[i];
-    var brandHint = (entry.provider.name || '') + ' ' + (entry.provider.base_url || '') + ' ' + entry.model.model_id;
-    var bkey = entry.provider.brand || _detectBrand(brandHint);
-    if (!grouped[bkey]) grouped[bkey] = { name: entry.provider.name || bkey, models: [] };
+    var bkey = (typeof modelGroupKey === 'function')
+      ? modelGroupKey(entry.provider, entry.model)
+      : (entry.provider.brand || _detectBrand((entry.provider.name || '') + ' '
+          + (entry.provider.base_url || '') + ' ' + entry.model.model_id));
+    var bname = (typeof modelGroupLabel === 'function')
+      ? modelGroupLabel(bkey, entry.provider.name)
+      : (entry.provider.name || bkey);
+    if (!grouped[bkey]) grouped[bkey] = { name: bname, models: [] };
     grouped[bkey].models.push(entry.model);
   }
 
-  var brandNames = {
-    claude:'Claude', openai:'OpenAI', gemini:'Gemini', qwen:'Qwen', doubao:'Doubao',
-    minimax:'MiniMax', deepseek:'DeepSeek', grok:'Grok', mistral:'Mistral', glm:'GLM',
-    meituan:'Meituan', generic:'Other',
-  };
+  var brandNames = (typeof modelGroupBrandNames === 'function')
+    ? modelGroupBrandNames() : {};
 
   var html = '';
-  for (var brand in grouped) {
+  var brandKeys = _sortedBrandKeys(grouped, brandNames);
+  for (var bi = 0; bi < brandKeys.length; bi++) {
+    var brand = brandKeys[bi];
     var group = grouped[brand];
+    _sortModelsByDisplayName(group.models);
     var displayName = brandNames[brand] || group.name || brand;
     html += '<div class="stg-dv-group">';
     html += '<div class="stg-dv-brand">' + _brandSvg(brand, 14) + ' <span>' + escapeHtml(displayName) + '</span></div>';
@@ -138,14 +147,16 @@ function _renderDropdownVisibility() {
   var container = document.getElementById('stgDropdownVisibility');
   if (!container) return;
 
-  // Collect all chat models from all enabled providers (exclude image_gen / embedding)
+  // Collect all chat models from all enabled providers. isChatModel comes
+  // from core/model_caps.js — SSOT for chat vs non-chat classification.
+  // Guard: a stale/incomplete bundle can strand this filter without
+  // isChatModel(); degrade to "show everything" instead of throwing and
+  // leaving the settings list empty. Same rationale as main_toolbar_ui.
+  var _hasCaps = (typeof isChatModel === 'function');
+  if (!_hasCaps && typeof _warnModelCapsMissing === 'function') _warnModelCapsMissing();
   var allModels = _getAllModels().filter(function(entry) {
     if (entry.provider.enabled === false) return false;
-    var caps = entry.model.capabilities || ['text'];
-    for (var c = 0; c < caps.length; c++) {
-      if (caps[c] === 'image_gen' || caps[c] === 'embedding') return false;
-    }
-    return true;
+    return _hasCaps ? isChatModel(entry.model) : true;
   });
 
   if (allModels.length === 0) {
@@ -156,25 +167,32 @@ function _renderDropdownVisibility() {
   // Load hidden set from server config (synced at openSettings)
   var hidden = new Set((_serverConfig && _serverConfig.hidden_models) || []);
 
-  // Group by provider brand
+  // Group by the SHARED brand rule (core/model_group.js) — the same key the
+  // toolbar picker uses, so the two lists can never disagree. brandNames
+  // come from the module, never re-typed here.
   var grouped = {};
   for (var i = 0; i < allModels.length; i++) {
     var entry = allModels[i];
-    var brandHint = (entry.provider.name || '') + ' ' + (entry.provider.base_url || '') + ' ' + entry.model.model_id;
-    var bkey = entry.provider.brand || _detectBrand(brandHint);
-    if (!grouped[bkey]) grouped[bkey] = { name: entry.provider.name || bkey, models: [] };
+    var bkey = (typeof modelGroupKey === 'function')
+      ? modelGroupKey(entry.provider, entry.model)
+      : (entry.provider.brand || _detectBrand((entry.provider.name || '') + ' '
+          + (entry.provider.base_url || '') + ' ' + entry.model.model_id));
+    var bname = (typeof modelGroupLabel === 'function')
+      ? modelGroupLabel(bkey, entry.provider.name)
+      : (entry.provider.name || bkey);
+    if (!grouped[bkey]) grouped[bkey] = { name: bname, models: [] };
     grouped[bkey].models.push(entry.model);
   }
 
-  var html = '';
-  var brandNames = {
-    claude:'Claude', openai:'OpenAI', gemini:'Gemini', qwen:'Qwen', doubao:'Doubao',
-    minimax:'MiniMax', deepseek:'DeepSeek', grok:'Grok', mistral:'Mistral', glm:'GLM',
-    meituan:'Meituan', generic:'Other',
-  };
+  var brandNames = (typeof modelGroupBrandNames === 'function')
+    ? modelGroupBrandNames() : {};
 
-  for (var brand in grouped) {
+  var html = '';
+  var brandKeys = _sortedBrandKeys(grouped, brandNames);
+  for (var bi = 0; bi < brandKeys.length; bi++) {
+    var brand = brandKeys[bi];
     var group = grouped[brand];
+    _sortModelsByDisplayName(group.models);
     var displayName = brandNames[brand] || group.name || brand;
     html += '<div class="stg-dv-group">';
     html += '<div class="stg-dv-brand">' + _brandSvg(brand, 14) + ' <span>' + escapeHtml(displayName) + '</span></div>';
@@ -185,6 +203,7 @@ function _renderDropdownVisibility() {
       var shortName = typeof _modelShortName === 'function' ? _modelShortName(mid) : mid;
       html += '<div class="stg-dv-item">';
       html += '  <span class="stg-dv-name" title="' + escapeHtml(mid) + '">' + escapeHtml(shortName) + '</span>';
+      html += _ddHealthSpan(mid);
       html += '  <label class="stg-toggle stg-dv-toggle">';
       html += '    <input type="checkbox" data-model-id="' + escapeHtml(mid) + '" ' + (isVisible ? 'checked' : '') + ' onchange="_onDropdownVisibilityChange(this)">';
       html += '    <span class="stg-toggle-track"><span class="stg-toggle-thumb"></span></span>';
@@ -238,14 +257,13 @@ function _toggleAllDropdownModels(show) {
  * Uses all chat models from all enabled providers as options.
  */
 function _populateModelDefaults(cfg) {
-  // Collect all chat models (exclude image_gen / embedding)
+  // Collect all chat models (exclude non-chat caps via core/model_caps.js).
+  // Guard: see _renderDropdownVisibility above — same failure mode.
+  var _hasCapsDef = (typeof isChatModel === 'function');
+  if (!_hasCapsDef && typeof _warnModelCapsMissing === 'function') _warnModelCapsMissing();
   var chatModels = _getAllModels().filter(function(entry) {
     if (entry.provider.enabled === false) return false;
-    var caps = entry.model.capabilities || ['text'];
-    for (var c = 0; c < caps.length; c++) {
-      if (caps[c] === 'image_gen' || caps[c] === 'embedding') return false;
-    }
-    return true;
+    return _hasCapsDef ? isChatModel(entry.model) : true;
   });
 
   // Deduplicate by model_id
@@ -258,6 +276,14 @@ function _populateModelDefaults(cfg) {
       uniqueModels.push(chatModels[i]);
     }
   }
+
+  // Order the options by the DISPLAY name shown in the <select>, via the ONE
+  // shared comparator (settings/branding.js). These previously inherited
+  // whatever order _getAllModels walked the provider arrays in — model_id
+  // order, which the settings cold sort writes back — while the option TEXT is
+  // _modelShortName. Models with no MODEL_PRICING entry render their raw id and
+  // so landed at arbitrary positions among the friendly-named ones.
+  _sortModelEntriesByDisplayName(uniqueModels);
 
   // Read saved model_defaults from config
   var defaults = (cfg && cfg.model_defaults) || {};
@@ -302,6 +328,210 @@ function _populateModelDefaults(cfg) {
 /**
  * Collect current model defaults from the UI for saving.
  */
+// ══════════════════════════════════════════════════════
+//  Dropdown Probe Health — "test each model so I can select with confidence"
+// ══════════════════════════════════════════════════════
+//
+// Each dropdown row gets a health dot next to the visibility toggle. "测试
+// 全部" runs the EXISTING probe-cells engine (no new probe machinery) — one
+// task per enabled provider, each with its own protocol/oauth — and the
+// results are merged back per logical model and folded with the SHARED pool
+// judgment (core/model_health.js). A dot's colour answers "is this model
+// usable RIGHT NOW", and the tooltip says WHEN it was last tested and WHICH
+// provider/protocol the verdict came from (the two Meituan faces share keys
+// but probe different protocols — the source is part of the verdict).
+
+var _ddProbeSnaps = {};   // provider_id → { snapshot, providerName, protocol }
+var _ddProbeRunning = false;
+
+/** The provider object from _stgProviders by id (undefined when absent). */
+function _ddProviderById(pid) {
+  for (var i = 0; i < _stgProviders.length; i++) {
+    var p = _stgProviders[i];
+    if ((p && (p.id || ('idx_' + i))) === pid) return p;
+  }
+  return undefined;
+}
+
+/** Health dot HTML for one dropdown row. */
+function _ddHealthSpan(mid) {
+  return '<span class="stg-dv-health" data-health-for="' + escapeHtml(mid) + '">' +
+         '<span class="stg-dv-health-dot" title="' + escapeHtml(t('settings.mhNeverProbed')) + '"></span>' +
+         '</span>';
+}
+
+/** Fold one model's probe cells into a dot state and paint it.
+ *  Reads _ddProbeSnaps for the provider(s) that carry this model_id. */
+function _ddPaintHealth(mid) {
+  var dot = document.querySelector('.stg-dv-health[data-health-for="' + CSS.escape(mid) + '"] .stg-dv-health-dot');
+  if (!dot) return;
+  // Find the provider(s) containing this model and gather their cells.
+  var entry = null;
+  var all = _getAllModels();
+  for (var i = 0; i < all.length; i++) {
+    if (all[i].model.model_id === mid) { entry = all[i]; break; }
+  }
+  if (!entry) return;
+  var pid = entry.provider.id || ('idx_' + entry.provIdx);
+  var rec = _ddProbeSnaps[pid];
+  if (!rec || !rec.snapshot) return;  // never probed → keep the muted dot
+
+  var cells = [];
+  var snapCells = (rec.snapshot && rec.snapshot.cells) || {};
+  for (var k in snapCells) {
+    var c = snapCells[k];
+    if (c && c.root_model_id === mid) {
+      cells.push({
+        key_idx: c.key_idx, model_id: c.model_id,
+        status: c.status, detail: c.detail,
+        provider: rec.providerName, protocol: rec.protocol,
+      });
+    }
+  }
+  if (typeof foldProbeHealth !== 'function') return;
+  var agg = foldProbeHealth(cells, {
+    finishedAt: (rec.snapshot && rec.snapshot.finished_at) || 0,
+    now: Date.now() / 1000,
+  });
+  var cls = (typeof modelHealthLevelClass === 'function')
+    ? modelHealthLevelClass(agg) : (agg.level || 'unknown');
+  dot.className = 'stg-dv-health-dot mh-' + cls;
+
+  // Tooltip: level + age + per-cell provider/protocol source.
+  var lines = [];
+  lines.push(t('settings.mhProbedAt', { t: agg.probedAt
+    ? new Date(agg.probedAt * 1000).toLocaleString() : '—' }));
+  if (agg.stale) lines.push(t('settings.mhStaleTip'));
+  var shown = {};
+  for (var j = 0; j < cells.length; j++) {
+    var cc = cells[j];
+    var key = cc.provider + '|' + cc.model_id + '|' + cc.status;
+    if (shown[key]) continue;
+    shown[key] = 1;
+    var src = cc.provider + (cc.protocol ? ' · ' + cc.protocol : '');
+    if (cc.status !== 'ok') lines.push(src + ' — ' + cc.model_id + ': ' + cc.status + (cc.detail ? ' (' + cc.detail + ')' : ''));
+  }
+  dot.title = lines.join('\n');
+}
+
+/** Re-paint every visible health dot from the current snapshots. */
+function _renderDropdownProbeHealth() {
+  var dots = document.querySelectorAll('.stg-dv-health[data-health-for]');
+  for (var i = 0; i < dots.length; i++) {
+    _ddPaintHealth(dots[i].getAttribute('data-health-for'));
+  }
+}
+
+/** Kick off (or resume) the probe for ONE provider, then poll to done. */
+function _ddProbeProvider(entry, force) {
+  var p = entry.provider;
+  var pid = p.id || ('idx_' + entry.provIdx);
+  var pname = p.name || pid;
+  var proto = p.protocol || 'openai';
+  var chatModels = [];
+  var seen = {};
+  var all = _getAllModels();
+  for (var i = 0; i < all.length; i++) {
+    if (all[i].provider === p) {
+      var m = all[i].model;
+      if (!seen[m.model_id] && (typeof isChatModel !== 'function' || isChatModel(m))) {
+        seen[m.model_id] = 1;
+        chatModels.push({ model_id: m.model_id, aliases: (m.aliases || []),
+                          capabilities: (m.capabilities || []) });
+      }
+    }
+  }
+  if (!chatModels.length) return Promise.resolve();
+  var keys = (p.api_keys || []).filter(function(k) { return k != null; });
+  if (!keys.length && p.brand === 'local') keys = [''];
+  if (!keys.length) return Promise.resolve();
+
+  return Api.providers.probeCellsStart({
+    provider_id: pid, base_url: p.base_url || '',
+    api_keys: keys, extra_headers: p.extra_headers || {},
+    protocol: proto, oauth: p.oauth || '',
+    faces: p.faces || {},
+    models: chatModels, attempts: 3, force: !!force,
+  }).then(function(snap) {
+    if (!snap) return;
+    _ddProbeSnaps[pid] = { snapshot: snap, providerName: pname, protocol: proto };
+    // Poll until terminal (probe-cells snapshots are persisted server-side).
+    return _ddPollProvider(pid);
+  });
+}
+
+/** Poll one provider's probe status until it leaves 'running'. */
+function _ddPollProvider(pid) {
+  return Api.providers.probeCellsStatus(pid).then(function(snap) {
+    if (snap && snap.status && snap.status !== 'none') {
+      _ddProbeSnaps[pid].snapshot = snap;
+    }
+    if (snap && snap.status === 'running') {
+      return new Promise(function(res) {
+        setTimeout(function() { res(_ddPollProvider(pid)); }, 800);
+      });
+    }
+  }).catch(function() { /* keep last-known snapshot */ });
+}
+
+/** "测试全部": probe every enabled provider and refresh the dots. */
+function _probeAllDropdownModels() {
+  if (_ddProbeRunning) return;
+  _ddProbeRunning = true;
+  var btn = document.getElementById('stgProbeAllModelsBtn');
+  if (btn) { btn.disabled = true; btn.textContent = t('settings.mhProbing'); }
+
+  var byProvider = {};
+  var all = _getAllModels();
+  for (var i = 0; i < all.length; i++) {
+    var e = all[i];
+    if (e.provider.enabled === false) continue;
+    var pidKey = e.provider.id || ('idx_' + e.provIdx);
+    if (!byProvider[pidKey]) byProvider[pidKey] = e;
+  }
+  var entries = [];
+  for (var pid in byProvider) entries.push(byProvider[pid]);
+
+  return Promise.all(entries.map(function(e) { return _ddProbeProvider(e, true); }))
+    .catch(function() { /* per-provider failures already isolated */ })
+    .finally(function() {
+      _ddProbeRunning = false;
+      if (btn) { btn.disabled = false; btn.textContent = t('settings.probeAllModels'); }
+      _renderDropdownProbeHealth();
+    });
+}
+
+/** On preset-tab open, resume any persisted probe results (no new run). */
+function _ddResumeProbeSnapshots() {
+  // Best-effort repaint: if the Api seam is unavailable (stale bundle), skip
+  // silently rather than break the preset render — the dots stay muted, which
+  // is a correct "no signal yet" state, not an error.
+  if (typeof Api === 'undefined' || !Api.providers
+      || typeof Api.providers.probeCellsStatus !== 'function') return;
+  var byProvider = {};
+  var all = _getAllModels();
+  for (var i = 0; i < all.length; i++) {
+    var e = all[i];
+    if (e.provider.enabled === false) continue;
+    var pidKey = e.provider.id || ('idx_' + e.provIdx);
+    if (!byProvider[pidKey]) byProvider[pidKey] = e;
+  }
+  for (var pid in byProvider) {
+    (function(pid, e) {
+      Api.providers.probeCellsStatus(pid).then(function(snap) {
+        if (snap && snap.status && snap.status !== 'none') {
+          _ddProbeSnaps[pid] = {
+            snapshot: snap,
+            providerName: e.provider.name || pid,
+            protocol: e.provider.protocol || 'openai',
+          };
+          _renderDropdownProbeHealth();
+        }
+      });
+    })(pid, byProvider[pid]);
+  }
+}
+
 function _collectModelDefaults() {
   var result = {};
   var fields = [

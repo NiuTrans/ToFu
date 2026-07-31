@@ -5,11 +5,15 @@ permission your manifest declares, labelled "Justify the use of …". Paste the
 matching block below into each. Keep them concise and concrete — reviewers
 reject vague answers like "needed for functionality."
 
-These blocks correspond to the **trimmed** `manifest.store.json`, which removes
-6 permissions that the current code never calls (see the bottom of this file).
-If you submit the original `browser_extension/manifest.json` instead, you will
-be asked to justify those 6 too — and you cannot, because they are unused.
-**Submit the trimmed manifest.**
+These blocks correspond to the **trimmed** `manifest.store.json`, which drops
+the permissions listed at the bottom of this file — the ones the current code
+never calls. If you submit the original `browser_extension/manifest.json`
+instead, you will be asked to justify those too — and you cannot, because they
+are unused. **Submit the trimmed manifest.**
+
+> The trim is verified by `tests/test_chrome_store_manifest_parity.py`, which
+> derives the required permission set from the extension's actual `chrome.*`
+> calls. Do not hand-edit `manifest.store.json` without running it.
 
 ---
 
@@ -31,10 +35,10 @@ Used to inject content scripts (chrome.scripting.executeScript) into the tab the
 Used to list the user's open tabs (titles and URLs) so they can choose which tab a task runs on, to look up a tab by id, to activate a tab before screenshotting it, and to wait for navigation to settle. No tab data is sent anywhere except back to the user's own Tofu server.
 ```
 
-## `activeTab`
+## `downloads`
 
 ```
-Used to resolve the currently active tab when a task does not specify a tab id (for example "screenshot the current page").
+The assistant can be asked to save a file the user is looking at (for example "download this report"). That task is carried out with chrome.downloads.download, using the URL the task names and an optional filename. This is the only use; the extension does not read, search, or modify the user's existing download history.
 ```
 
 ## `storage`
@@ -105,6 +109,7 @@ them, so they are unjustifiable and would trigger rejection:
 | `declarativeNetRequest` | No DNR ruleset and no `chrome.declarativeNetRequest.*` call. |
 | `management` | No `chrome.management.*` call. (This permission is a major review red flag — good to remove.) |
 | `offscreen` | No `chrome.offscreen.*` call and no offscreen document. |
+| `activeTab` | **Not a call-count decision** — `chrome.activeTab` is not an API, so grepping for it proves nothing. It is granted only on a *user gesture* (action click, keyboard command, context menu) and exists to widen `tabs.captureVisibleTab` to sensitive targets (`chrome://` pages, other extensions' pages, `data:` URLs). This extension has no `commands` key, no `context_menus`, and `popup.js` never captures: every command arrives from the server long-poll via `executeAndReport`, so **no gesture ever precedes a screenshot and the permission could never actually be granted**. Ordinary-page capture is covered by the `<all_urls>` host permission, which is declared. |
 
 If you later add a feature that needs one of these, re-declare only that one
 and add a justification block above.

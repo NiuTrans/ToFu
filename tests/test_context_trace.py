@@ -221,8 +221,13 @@ def test_project_mode_covers_digest_charter_board_and_detail_seams(caplog, monke
                         lambda *a, **k: _DIGEST)
     monkeypatch.setattr(ps, 'project_digest_entries',
                         lambda *a, **k: [])
-    monkeypatch.setattr(pc, 'render_charter_block', lambda *a, **k: _CHARTER)
-    monkeypatch.setattr(pb, 'render_board_block', lambda *a, **k: _BOARD)
+    monkeypatch.setattr(pc, 'render_charter_injection_block',
+                        lambda *a, **k: _CHARTER)
+    # The injection seam calls render_board_injection_block (the abridged
+    # per-turn shape) since the board split — patch THAT call site, not the
+    # full-text renderer the project_board_read tool uses.
+    monkeypatch.setattr(pb, 'render_board_injection_block',
+                        lambda *a, **k: _BOARD)
     monkeypatch.setattr(up, 'load_profile', lambda *a, **k: _PROFILE)
     # No CLAUDE.md content — keep the assembly focused on the seams under test
     # (the project-context loader would otherwise auto-create JOURNAL/intel).

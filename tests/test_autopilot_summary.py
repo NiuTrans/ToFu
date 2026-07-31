@@ -171,14 +171,22 @@ def test_emit_run_concluded_event_stores_and_emits(monkeypatch):
     """The helper persists the concluded record, fires the feed pulse, and
     emits the autopilot_run_concluded SSE — with NO report content."""
     import lib.tasks_pkg.autopilot as ap
+    # Post-slice-3 (pt_00459503): ``_emit_run_concluded_event`` lives in
+    # ``lib.tasks_pkg.autopilot_run_lifecycle`` (a leaf module). Its
+    # internal calls to ``_store_run_record`` and ``_emit_run_concluded``
+    # resolve from that module's OWN globals, not the facade — so we
+    # patch the origin bindings there. The facade re-export identity
+    # (ap._store_run_record IS leaf._store_run_record) is separately
+    # guarded by test_autopilot_markers_lazy_import_contract.py.
+    import lib.tasks_pkg.autopilot_run_lifecycle as apl
 
     stored = {}
-    monkeypatch.setattr(ap, '_store_run_record',
+    monkeypatch.setattr(apl, '_store_run_record',
                         lambda conv_id, run_id, *, reason='task_done':
                         stored.update(conv_id=conv_id, run_id=run_id, reason=reason)
                         or {'runId': run_id, 'status': 'concluded', 'reason': reason})
     concluded = []
-    monkeypatch.setattr(ap, '_emit_run_concluded',
+    monkeypatch.setattr(apl, '_emit_run_concluded',
                         lambda conv_id, run_id, text, cfg: concluded.append(text))
     events = []
     monkeypatch.setattr('lib.tasks_pkg.manager.append_event',
@@ -199,9 +207,11 @@ def test_emit_run_concluded_event_stores_and_emits(monkeypatch):
 def test_emit_run_concluded_event_none_record_short_circuits(monkeypatch):
     """A persist failure (None record) short-circuits — no pulse, no SSE."""
     import lib.tasks_pkg.autopilot as ap
-    monkeypatch.setattr(ap, '_store_run_record', lambda *a, **k: None)
+    # Post-slice-3: patch the origin binding on autopilot_run_lifecycle.
+    import lib.tasks_pkg.autopilot_run_lifecycle as apl
+    monkeypatch.setattr(apl, '_store_run_record', lambda *a, **k: None)
     fired = []
-    monkeypatch.setattr(ap, '_emit_run_concluded',
+    monkeypatch.setattr(apl, '_emit_run_concluded',
                         lambda *a, **k: fired.append('pulse'))
     monkeypatch.setattr('lib.tasks_pkg.manager.append_event',
                         lambda task, ev: fired.append('sse'))

@@ -56,7 +56,10 @@ const _timers = [];
 const { document, check, report } = setup({
   root: process.argv[3],
   html: '<!DOCTYPE html><body><div id="convList"></div></body>',
-  targets: [process.argv[2]],
+  // argv[4] = conv_state_reducer.js (the REAL _frameIsOurs — the handler's
+  // multi-user gate delegates to it; missing here it fails OPEN and
+  // C_foreign_user_ignored cannot be exercised). Load it FIRST.
+  targets: [process.argv[4], process.argv[2]],
   globals: {
     setTimeout: (fn) => { _timers.push(fn); return _timers.length; },
     clearTimeout: () => {},
@@ -140,6 +143,7 @@ def test_folders_changed_applies_without_refresh():
     run_harness(
         target_js=_SRC,
         body_js=_BODY,
+        extra_targets=[os.path.join(JS_DIR, 'core', 'conv_state_reducer.js')],
         min_pass=7,
         label='folders-changed apply',
     )
@@ -166,6 +170,7 @@ def test_NC_no_unassign_leaves_stale_folderid():
         run_harness(
             target_js=neutered_path,
             body_js=_BODY,
+            extra_targets=[os.path.join(JS_DIR, 'core', 'conv_state_reducer.js')],
             min_pass=3,
             label='folders-changed apply NC',
         )

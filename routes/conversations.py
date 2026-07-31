@@ -31,7 +31,7 @@ from lib.database._core_schema import CONVERSATIONS, upsert
 # search_text) — so the partial insert lets the trigger own that column.
 _CONV_INSERT_COLS = ['id', 'user_id', 'title', 'messages', 'created_at',
                      'updated_at', 'settings', 'msg_count', 'search_text']
-from routes.common import DEFAULT_USER_ID, _db_safe, _invalidate_meta_cache, _notify_conv_changed, _refresh_meta_cache_if_stale
+from routes.common import DEFAULT_USER_ID, _db_safe, _invalidate_meta_cache, _notify_conv_changed, _refresh_meta_cache_if_stale, _request_user_id
 
 # Whitelisted keys for PATCH /messages/<idx> — only these fields can be mutated
 # in-place on a single message without writing the whole conversation.
@@ -247,6 +247,67 @@ async def list_convs():
     real pooled connection) via ``asyncio.to_thread`` so it never blocks the loop.
     """
     import asyncio
+
+    # ── Folder-scoped / keyset-paginated metadata query ──────────────────
+    # Evaluated FIRST so it can never be short-circuited by the ?meta=1 cached
+    # branch below. This path is DELIBERATELY un-cached: the sidebar's 60s poll
+    # uses the top-N ?meta=1 cache, but a folder view (?folderId=) or a
+    # "load more" page (?before=) is a click-time direct read of a DIFFERENT
+    # result set. Routing it through the cache would (a) pollute the top-N blob
+    # and (b) move a full-table json_extract scan onto the 60s poll — exactly
+    # what constraint keeps them physically separated.
+    #
+    # A folder's members are resolved by their real folderId (stored in the
+    # settings JSON), INDEPENDENT of the global "most-recent-N" window, so a
+    # folder whose members all sort past the sidebar cap is still returned in
+    # full. json_extract(settings,'$.folderId') is dialect-translated to a PG
+    # jsonb accessor by lib/database/_sql_translate.py, so this runs on both
+    # SQLite and PG unchanged.
+    folder_id = request.args.get('folderId', '').strip()
+    before_updated = request.args.get('before', '').strip()
+    before_id = request.args.get('before_id', '').strip()
+    try:
+        req_limit = int(request.args.get('limit', '') or 0)
+    except (TypeError, ValueError):
+        req_limit = 0
+    if folder_id or before_updated:
+        where = ['user_id=?']
+        params = [DEFAULT_USER_ID]
+        if folder_id:
+            where.append("json_extract(settings,'$.folderId')=?")
+            params.append(folder_id)
+        if before_updated:
+            # Keyset cursor on (updated_at, id) — strictly "older than" the last
+            # loaded row, tie-broken by id so a same-timestamp boundary neither
+            # skips nor duplicates. Both halves of the OR carry updated_at so the
+            # comparison stays index-friendly.
+            where.append('(updated_at < ? OR (updated_at = ? AND id < ?))')
+            params.extend([before_updated, before_updated, before_id])
+        page_limit = req_limit if req_limit > 0 else (300 if folder_id else 100)
+        sql = ('SELECT id, title, msg_count, created_at, updated_at, settings, rev '
+               'FROM conversations WHERE ' + ' AND '.join(where) +
+               ' ORDER BY updated_at DESC, id DESC LIMIT ?')
+        # Fetch one extra row to compute hasMore without a second COUNT.
+        params.append(page_limit + 1)
+        rows = await async_fetchall(sql, tuple(params), domain=DOMAIN_CHAT)
+        has_more = len(rows) > page_limit
+        rows = rows[:page_limit]
+        convs = [_conv_row_to_meta_dict(r) for r in rows]
+        envelope = {'conversations': convs, 'hasMore': has_more}
+        if rows:
+            last = rows[-1]
+            envelope['nextBefore'] = last['updated_at']
+            envelope['nextBeforeId'] = last['id']
+        if folder_id:
+            # Real member count so the frontend distinguishes a genuinely empty
+            # folder from one whose members simply aren't loaded yet.
+            cnt = await async_fetchone(
+                "SELECT COUNT(*) AS c FROM conversations "
+                "WHERE user_id=? AND json_extract(settings,'$.folderId')=?",
+                (DEFAULT_USER_ID, folder_id), domain=DOMAIN_CHAT)
+            envelope['totalCount'] = (cnt['c'] if cnt else 0)
+        return jsonify(envelope)
+
     meta_only = request.args.get('meta') == '1'
     prefetch_id = request.args.get('prefetch', '').strip()
     if meta_only:
@@ -257,6 +318,11 @@ async def list_convs():
             db = _pool_get()
             try:
                 payload, etag = _refresh_meta_cache_if_stale(db)
+                # Authoritative global total (captured at cache rebuild, read
+                # from the cached entry — no extra query on a warm poll). Powers
+                # the sidebar "N earlier not loaded" affordance (C4).
+                from lib.conversations.meta_cache import get_cached_total
+                total = get_cached_total()
                 prefetch_data = None
                 if prefetch_id:
                     try:
@@ -268,11 +334,11 @@ async def list_convs():
                             prefetch_data = _prefetch_reconciled_dict(db, prefetch_id, r)
                     except Exception as e:
                         logger.warning('[Common] prefetch conv %s failed: %s', prefetch_id[:12], e)
-                return payload, etag, prefetch_data
+                return payload, etag, prefetch_data, total
             finally:
                 _pool_put(db)
 
-        payload, etag, prefetch_data = await asyncio.to_thread(_meta_branch)
+        payload, etag, prefetch_data, total = await asyncio.to_thread(_meta_branch)
 
         if prefetch_id:
             combo = json.dumps({
@@ -281,6 +347,8 @@ async def list_convs():
             }, ensure_ascii=False).encode('utf-8')
             combo_resp = Response(combo, mimetype='application/json')
             combo_resp.headers['Cache-Control'] = 'no-cache'
+            if total is not None:
+                combo_resp.headers['X-Total-Count'] = str(total)
             return combo_resp
 
         if request.if_none_match and etag in request.if_none_match:
@@ -288,6 +356,8 @@ async def list_convs():
         resp = Response(payload, mimetype='application/json')
         resp.headers['ETag'] = etag
         resp.headers['Cache-Control'] = 'private, max-age=5'
+        if total is not None:
+            resp.headers['X-Total-Count'] = str(total)
         return resp
 
     # Default: metadata-only (no message BODIES) — a headless caller listing
@@ -435,7 +505,7 @@ def _compute_reconcile(conv_id, r):
     return cleaned, True, settings_dict
 
 
-def _persist_reconcile(db, conv_id, cleaned, settings_dict):
+def _persist_reconcile(db, conv_id, cleaned, settings_dict, expected_rev=None):
     """WRITE half of the reconcile — the (FUSE-fsync) ``UPDATE``+``commit`` that
     the GET read path defers to a background task (see ``_schedule_reconcile_persist``).
 
@@ -444,22 +514,59 @@ def _persist_reconcile(db, conv_id, cleaned, settings_dict):
         sort order is untouched (backend mirror of the ``saveConversations``
         load-time-restamp gotcha).
       • ``_reconciledAt`` already stamped into ``settings_dict`` by ``_compute_reconcile``.
+      • ★ rev-CAS. ``cleaned`` was computed from a row read EARLIER, and this
+        write runs on a BACKGROUND task (``_schedule_reconcile_persist``), so an
+        append that landed in between would be erased by this stale array —
+        the whole-blob read-modify-write data loss this module is being audited
+        for (conv ms3sfyrmn31omb: 13 VU appends, 8 survivors). ``expected_rev``
+        pins the version the verdict was computed from; a lost race is a no-op
+        (rev unchanged → 0 rows), NOT an overwrite, and the caller re-reads.
+        Reconcile is idempotent, so dropping the write is always safe: the next
+        GET recomputes the same verdict against the newer row.
+        ``expected_rev=None`` keeps the legacy unconditional write for callers
+        that hold the row inside the same transaction.
+
     After the write it signals ``notify_history_rewrite`` (honest cache-break
     naming) AND emits ``push_event('conv', conv_id, {kind:'history_rewrite', rev})``
     so every client that has this conversation open re-aligns WITHOUT a manual
-    refresh. Returns the post-write ``rev`` (0 if unreadable).
+    refresh. Returns the post-write ``rev`` (0 if unreadable, -1 if the CAS lost
+    its race and nothing was written).
     """
     from lib.tasks_pkg.cache_tracking import notify_history_rewrite
 
     messages_json = json_dumps_pg(cleaned)
     settings_json = json.dumps(settings_dict, ensure_ascii=False)
     search_text = build_search_text(cleaned)
-    db.execute(
-        'UPDATE conversations SET messages=?, settings=?, msg_count=?, '
-        'search_text=? WHERE id=? AND user_id=?',
-        (messages_json, settings_json, len(cleaned), search_text,
-         conv_id, DEFAULT_USER_ID))
-    db.commit()
+    if expected_rev is None:
+        db.execute(
+            'UPDATE conversations SET messages=?, settings=?, msg_count=?, '
+            'search_text=? WHERE id=? AND user_id=?',
+            (messages_json, settings_json, len(cleaned), search_text,
+             conv_id, DEFAULT_USER_ID))
+        db.commit()
+    else:
+        cur = db.execute(
+            'UPDATE conversations SET messages=?, settings=?, msg_count=?, '
+            'search_text=? WHERE id=? AND user_id=? AND rev=?',
+            (messages_json, settings_json, len(cleaned), search_text,
+             conv_id, DEFAULT_USER_ID, int(expected_rev)))
+        db.commit()
+        # rowcount 0 == another writer advanced rev between the read that
+        # produced `cleaned` and this write. Standing down is the CORRECT
+        # outcome: writing would erase that writer's row. Reconcile is
+        # idempotent so the next GET recomputes against the fresher row.
+        affected = getattr(cur, 'rowcount', None)
+        if affected == 0:
+            logger.info(
+                '[get_conv] reconcile persist STOOD DOWN conv=%s expected_rev=%s '
+                '— a concurrent writer advanced the row; not overwriting with a '
+                'stale %d-message array (next GET will recompute)',
+                conv_id[:8], expected_rev, len(cleaned))
+            return -1
+    # Phase 5 dual-write (flag-gated, inert when off): reconcile re-sequences
+    # the array, so mirror with a full rebuild, not the tail heuristic.
+    from lib.database.messages_rows import mirror_write_and_commit
+    mirror_write_and_commit(db, conv_id, cleaned, full=True)
 
     # The ``conversations_rev_bump_trg`` trigger advanced rev on the UPDATE;
     # read it back so the push carries the NEW version the client can dedupe on.
@@ -540,7 +647,7 @@ def _reconcile_conv_served_readonly(db, conv_id, r):
 _bg_reconcile_persist_tasks: set = set()
 
 
-def _schedule_reconcile_persist(conv_id, cleaned, settings_dict):
+def _schedule_reconcile_persist(conv_id, cleaned, settings_dict, expected_rev=None):
     """Fire-and-forget the reconcile WRITE off the GET request.
 
     The read handler has already returned the cleaned dict to the opening
@@ -555,7 +662,8 @@ def _schedule_reconcile_persist(conv_id, cleaned, settings_dict):
     async def _run():
         try:
             await run_pooled(
-                lambda db: _persist_reconcile(db, conv_id, cleaned, settings_dict))
+                lambda db: _persist_reconcile(db, conv_id, cleaned, settings_dict,
+                                              expected_rev=expected_rev))
         except Exception as e:
             logger.warning('[get_conv] background reconcile persist failed '
                            'conv=%s: %s', conv_id[:8], e, exc_info=True)
@@ -967,7 +1075,8 @@ async def get_conv(conv_id):
                         lambda db: _windowed_blob_slice_readonly(
                             conv_id, r, _window, _before_seq))
                 if changed and cleaned_full is not None:
-                    _schedule_reconcile_persist(conv_id, cleaned_full, sd)
+                    _schedule_reconcile_persist(conv_id, cleaned_full, sd,
+                                                expected_rev=_row_rev(r))
                 _maybe_backfill_narration_on_open(conv_id, served)
                 return jsonify(served)
             except Exception as e:
@@ -994,7 +1103,8 @@ async def get_conv(conv_id):
         #    persist + history_rewrite push are deferred off-request so this GET
         #    never blocks on a FUSE-fsync UPDATE+commit. ──
         if changed:
-            _schedule_reconcile_persist(conv_id, cleaned, settings_dict)
+            _schedule_reconcile_persist(conv_id, cleaned, settings_dict,
+                                        expected_rev=_row_rev(r))
         _maybe_backfill_narration_on_open(conv_id, served)
         return jsonify(served)
     except Exception as e:
@@ -1173,14 +1283,20 @@ def _save_conv_blocking(db, conv_id, data):
     # ★ Inject lastMsgRole/lastMsgTimestamp into settings for Case E orphan detection.
     # This ensures metadata shells always have last-message info even when the
     # frontend didn't include it (e.g. server-side syncs from _sync_result_to_conversation).
+    # ★ ALSO re-derive the settled-turn sidebar facts (lastFinishReason /
+    # lastMsgError / lastMsgHasOutput) from the AUTHORITATIVE posted tail —
+    # never from the client's settings payload, whose whitelist omits them:
+    # previously every full-conv PUT silently clobbered the manager-stamped
+    # error facts, and the meta-only sidebar shell lost its error/incomplete
+    # dot until somebody re-opened the conversation.
+    from lib.chat.persistence import settled_turn_facts
     settings_dict = data.get('settings') or {}
     if msg_count > 0:
-        last_msg = raw_messages[-1]
-        settings_dict['lastMsgRole'] = last_msg.get('role')
-        settings_dict['lastMsgTimestamp'] = last_msg.get('timestamp')
+        settings_dict.update(settled_turn_facts(raw_messages[-1]))
     else:
-        settings_dict.pop('lastMsgRole', None)
-        settings_dict.pop('lastMsgTimestamp', None)
+        for _fact_k in ('lastMsgRole', 'lastMsgTimestamp', 'lastFinishReason',
+                        'lastMsgError', 'lastMsgHasOutput'):
+            settings_dict.pop(_fact_k, None)
     settings = json.dumps(settings_dict, ensure_ascii=False)
 
     # ── Guard: prevent stale syncs from overwriting newer data ──
@@ -1240,11 +1356,10 @@ def _save_conv_blocking(db, conv_id, data):
                 msg_count = len(raw_messages)
                 messages = json_dumps_pg(raw_messages)
                 # Re-derive lastMsgRole/lastMsgTimestamp (Case-E orphan detection)
-                # from the POST-sweep tail so settings don't point at a removed husk.
+                # + the settled-turn sidebar facts from the POST-sweep tail so
+                # settings don't point at a removed husk.
                 if msg_count > 0:
-                    _lm = raw_messages[-1]
-                    settings_dict['lastMsgRole'] = _lm.get('role')
-                    settings_dict['lastMsgTimestamp'] = _lm.get('timestamp')
+                    settings_dict.update(settled_turn_facts(raw_messages[-1]))
                     settings = json.dumps(settings_dict, ensure_ascii=False)
                 logger.info('[save_conv] \U0001f9f9 Swept %d ghost husk(s) from '
                             'incoming PUT conv=%s (%d\u2192%d) — write-seam symmetry '
@@ -1649,7 +1764,7 @@ def _save_conv_blocking(db, conv_id, data):
     # Event-driven cross-device sync: push the change (carrying the new rev) so
     # a sibling device reconciles this conv without a manual refresh. Rev-gated
     # on the client → self-echo is a cheap no-op.
-    _notify_conv_changed(conv_id, rev=new_rev)
+    _notify_conv_changed(conv_id, rev=new_rev, user_id=_request_user_id())
     return _Defer(api_ok, rev=new_rev)
 
 
@@ -1716,7 +1831,7 @@ async def patch_conv_settings(conv_id):
             (_touch_ms, conv_id, DEFAULT_USER_ID), domain=DOMAIN_CHAT)
     # Metadata-only change (folder move / pin / activeTaskId): rev unchanged →
     # client does a debounced sidebar refresh, not a body refetch.
-    _notify_conv_changed(conv_id, rev=None)
+    _notify_conv_changed(conv_id, rev=None, user_id=_request_user_id())
     logger.info('[patch_settings] Conv %s — patched keys: %s', conv_id[:12], list(data.keys()))
     return api_ok()
 
@@ -1750,7 +1865,7 @@ async def rename_conv(conv_id):
     # Metadata-only change (rev=None): the DB rev trigger only bumps on a
     # messages change, so a rename doesn't move rev — the client falls back to
     # a debounced sidebar refresh (title/folder) rather than a body refetch.
-    _notify_conv_changed(conv_id, rev=None)
+    _notify_conv_changed(conv_id, rev=None, user_id=_request_user_id())
     logger.info('[rename_conv] Conv %s — title=%.50s', conv_id[:12], title)
     audit_log('conversation_renamed', conv_id=conv_id, title=title[:60])
     return api_ok(title=title)
@@ -1788,7 +1903,7 @@ async def generate_conv_title(conv_id):
     await async_execute(
         'UPDATE conversations SET title=? WHERE id=? AND user_id=?',
         (title, conv_id, DEFAULT_USER_ID), domain=DOMAIN_CHAT)
-    _notify_conv_changed(conv_id, rev=None)
+    _notify_conv_changed(conv_id, rev=None, user_id=_request_user_id())
     logger.info('[generate_title] Conv %s — title=%.50s', conv_id[:12], title)
     audit_log('conversation_title_generated', conv_id=conv_id, title=title[:60])
     return api_ok(title=title)
@@ -1904,10 +2019,14 @@ def _delete_message_blocking(db, conv_id, msg_idx, mode, msg_id=None):
     }, insert_cols=_CONV_INSERT_COLS, retry=True)
 
     update_conversation_fts(db, conv_id, search_text)
+    # Phase 5 dual-write (flag-gated, inert when off): arbitrary-index
+    # deletion re-sequences the array — full rebuild mirror.
+    from lib.database.messages_rows import mirror_write_and_commit
+    mirror_write_and_commit(db, conv_id, messages, now_ms=now_ms, full=True)
 
     _dm_rev_row = db.execute('SELECT rev FROM conversations WHERE id=? AND user_id=?',
                              (conv_id, DEFAULT_USER_ID)).fetchone()
-    _notify_conv_changed(conv_id, rev=(_row_rev(_dm_rev_row) if _dm_rev_row else None))
+    _notify_conv_changed(conv_id, rev=(_row_rev(_dm_rev_row) if _dm_rev_row else None), user_id=_request_user_id())
     # Invalidate persisted per-day cost cache — but ONLY for the day(s) the
     # deleted messages actually contributed cost to.  A whole-table wipe
     # would force the next calendar open to live-rescan the entire month.
@@ -2061,10 +2180,14 @@ def _patch_message_blocking(db, conv_id, msg_idx, data):
     }, insert_cols=_CONV_INSERT_COLS, retry=True)
 
     update_conversation_fts(db, conv_id, search_text)
+    # Phase 5 dual-write (flag-gated, inert when off): single-message edit.
+    from lib.database.messages_rows import mirror_write_and_commit
+    mirror_write_and_commit(db, conv_id, messages, now_ms=now_ms,
+                            changed_seqs=[msg_idx])
 
     _pm_rev_row = db.execute('SELECT rev FROM conversations WHERE id=? AND user_id=?',
                              (conv_id, DEFAULT_USER_ID)).fetchone()
-    _notify_conv_changed(conv_id, rev=(_row_rev(_pm_rev_row) if _pm_rev_row else None))
+    _notify_conv_changed(conv_id, rev=(_row_rev(_pm_rev_row) if _pm_rev_row else None), user_id=_request_user_id())
     logger.info('[patch_msg] conv=%s idx=%d keys=%s preview=%.50s',
                 conv_id[:8], msg_idx, applied_keys, _preview)
     try:
@@ -2174,10 +2297,15 @@ def _patch_message_by_id_blocking(db, conv_id, msg_id, data):
     }, insert_cols=_CONV_INSERT_COLS, retry=True)
 
     update_conversation_fts(db, conv_id, search_text)
+    # Phase 5 dual-write (flag-gated, inert when off): single-message edit,
+    # mirror just that row via the seq hint.
+    from lib.database.messages_rows import mirror_write_and_commit
+    mirror_write_and_commit(db, conv_id, messages, now_ms=now_ms,
+                            changed_seqs=[target_idx])
 
     _pmi_rev_row = db.execute('SELECT rev FROM conversations WHERE id=? AND user_id=?',
                               (conv_id, DEFAULT_USER_ID)).fetchone()
-    _notify_conv_changed(conv_id, rev=(_row_rev(_pmi_rev_row) if _pmi_rev_row else None))
+    _notify_conv_changed(conv_id, rev=(_row_rev(_pmi_rev_row) if _pmi_rev_row else None), user_id=_request_user_id())
     logger.info('[patch_msg_id] conv=%s id=%s idx=%d keys=%s preview=%.50s',
                 conv_id[:8], msg_id[:8], target_idx, applied_keys, _preview)
     try:
@@ -2294,6 +2422,10 @@ def _delete_branch_blocking(db, conv_id, msg_idx, branch_idx, msg_id=None):
     }, insert_cols=_CONV_INSERT_COLS, retry=True)
 
     update_conversation_fts(db, conv_id, search_text)
+    # Phase 5 dual-write (flag-gated, inert when off): branches edit one message.
+    from lib.database.messages_rows import mirror_write_and_commit
+    mirror_write_and_commit(db, conv_id, messages, now_ms=now_ms,
+                            changed_seqs=[msg_idx])
 
     # Event-driven cross-device sync: a branch delete changes the conversation
     # body, so carry the post-write rev → a sibling tab with this conv open
@@ -2301,7 +2433,7 @@ def _delete_branch_blocking(db, conv_id, msg_idx, branch_idx, msg_id=None):
     # the sidebar meta cache, so it replaces the bare _invalidate_meta_cache().
     _db_rev_row = db.execute('SELECT rev FROM conversations WHERE id=? AND user_id=?',
                              (conv_id, DEFAULT_USER_ID)).fetchone()
-    _notify_conv_changed(conv_id, rev=(_row_rev(_db_rev_row) if _db_rev_row else None))
+    _notify_conv_changed(conv_id, rev=(_row_rev(_db_rev_row) if _db_rev_row else None), user_id=_request_user_id())
     logger.info('[delete_branch] conv=%s msg_idx=%d branch_idx=%d remaining=%d',
                 conv_id[:8], msg_idx, branch_idx, branch_count)
     try:
@@ -2420,7 +2552,7 @@ def _delete_conv_blocking(db, conv_id):
     # Event-driven cross-device sync: tell siblings this conv is gone so they
     # drop it from the sidebar (+ IDB cache) without a manual refresh.
     if _deleted_committed:
-        _notify_conv_changed(conv_id, deleted=True)
+        _notify_conv_changed(conv_id, deleted=True, user_id=_request_user_id())
     else:
         _invalidate_meta_cache()
     # Invalidate persisted per-day cost cache — but ONLY for the day(s) this

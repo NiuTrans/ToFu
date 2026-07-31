@@ -48,6 +48,37 @@ def _env_bool(key: str, default: bool) -> bool:
     return raw.strip().lower() in ('1', 'true', 'yes', 'on')
 
 
+def _store_private_hosts() -> set:
+    """Enabled internal-host allowlist entries from the Settings store.
+
+    Returns an empty set when the store is empty OR unreadable — the fail-safe
+    direction: an unreadable allowlist blocks internal hosts rather than
+    silently widening the network boundary.
+    """
+    try:
+        from lib.private_hosts import enabled_hosts
+        return set(enabled_hosts())
+    except Exception as e:
+        logger.warning('[Bridge] private-hosts store unreadable, '
+                       'treating allowlist as empty: %s', e)
+        return set()
+
+
+def _env_csv(key: str) -> list:
+    """Parse a comma/whitespace-separated env var into a de-duped list.
+
+    Returns ``[]`` when unset or blank, which callers treat as "leave the
+    library default alone" rather than "set it to empty".
+    """
+    raw = (os.environ.get(key) or '').replace(',', ' ')
+    out = []
+    for tok in raw.split():
+        tok = tok.strip()
+        if tok and tok not in out:
+            out.append(tok)
+    return out
+
+
 # ═══════════════════════════════════════════════════════
 #  LLM seam — chatui dispatch_chat
 # ═══════════════════════════════════════════════════════
@@ -273,7 +304,33 @@ def sync_search_config():
     search_deadline_secs = int(os.environ.get('TOFU_SEARCH_DEADLINE_SECS', '45'))
     fetch_url_deadline_secs = int(os.environ.get('TOFU_SEARCH_FETCH_URL_DEADLINE_SECS', '25'))
 
-    tofu_search.configure(
+    # ── Security posture (tofu-search >=0.5.3) ──
+    # These had NEITHER an env fallback inside configure() NOR a bridge kwarg,
+    # so chatui could not express "fetch this internal host" or audit the
+    # effective posture without editing library source. Defaults keep the
+    # shipped fail-safe behaviour; the allowlist is empty unless asked for.
+    #
+    # allow_private_hosts is anchored on the HOSTNAME, never a resolved IP:
+    # an internal load balancer rotates its address between lookups (one
+    # observed host answered as both 10.176.18.71 and 10.192.19.176 minutes
+    # apart), so an IP allowlist rots silently while the hostname stays true.
+    #
+    # SOURCE OF TRUTH is the Settings store (data/config/private_hosts.json).
+    # The env var remains only as a bootstrap/CI fallback: a capability that
+    # WORKS ONLY via an env var is broken in an exported copy, because export.py
+    # does not carry the environment. Never make env the sole source.
+    allow_private_hosts = _store_private_hosts()
+    if not allow_private_hosts:
+        allow_private_hosts = set(
+            _env_csv('TOFU_SEARCH_ALLOW_PRIVATE_HOSTS')
+            or getattr(_lib, 'SEARCH_ALLOW_PRIVATE_HOSTS', None) or [])
+    block_private_addresses = _env_bool('TOFU_SEARCH_BLOCK_PRIVATE_ADDRESSES', True)
+    allow_insecure_ssl_fallback = _env_bool('TOFU_SEARCH_ALLOW_INSECURE_SSL', False)
+    min_request_interval_ms = int(os.environ.get('TOFU_SEARCH_MIN_REQUEST_INTERVAL_MS', '400'))
+    # Public SearXNG instances churn; an empty override leaves the library list.
+    searxng_instances = _env_csv('TOFU_SEARCH_SEARXNG_INSTANCES')
+
+    _cfg = dict(
         llm_function=_chatui_llm,
         fetch_top_n=_lib.FETCH_TOP_N,
         fetch_timeout=_lib.FETCH_TIMEOUT,
@@ -287,16 +344,31 @@ def sync_search_config():
         filter_enabled=filter_enabled,
         filter_min_chars=int(os.environ.get('FETCH_FILTER_MIN_CHARS', '3000')),
         filter_timeout=int(os.environ.get('FETCH_FILTER_TIMEOUT', '300')),
-        proxy_url=proxy_url,
         proxy_dual_attempt=proxy_dual_attempt,
         prefetch_gate_enabled=prefetch_gate_enabled,
         prefetch_gate_min_query_terms=prefetch_gate_min_query_terms,
         prefetch_gate_min_fetch=prefetch_gate_min_fetch,
+        allow_private_hosts=allow_private_hosts,
+        block_private_addresses=block_private_addresses,
+        allow_insecure_ssl_fallback=allow_insecure_ssl_fallback,
+        min_request_interval_ms=min_request_interval_ms,
     )
+    # Pass proxy_url ONLY when we resolved one. configure() applies its env
+    # default just for fields ABSENT from kwargs, so an explicit '' would
+    # suppress TOFU_SEARCH_PROXY_URL — the opposite of "no proxy configured
+    # here, fall back to the environment".
+    if proxy_url:
+        _cfg['proxy_url'] = proxy_url
+    if searxng_instances:
+        _cfg['searxng_instances'] = searxng_instances
+
+    tofu_search.configure(**_cfg)
     logger.info('[Bridge] tofu-search config synced: top_n=%d timeout=%ds '
                 'deadline(call=%ds url=%ds) '
                 'max_chars(search=%d direct=%d pdf=%d) filter=%s model=%r proxy=%s '
-                'dual_attempt=%s prefetch_gate=%s(terms>=%d,floor=%d)',
+                'dual_attempt=%s prefetch_gate=%s(terms>=%d,floor=%d) '
+                'ssrf_guard=%s allow_private_hosts=%s insecure_ssl=%s '
+                'throttle=%dms searxng=%s',
                 _lib.FETCH_TOP_N, _lib.FETCH_TIMEOUT,
                 search_deadline_secs, fetch_url_deadline_secs,
                 _lib.FETCH_MAX_CHARS_SEARCH, _lib.FETCH_MAX_CHARS_DIRECT,
@@ -306,7 +378,12 @@ def sync_search_config():
                 'set' if proxy_url else 'env/none',
                 'on' if proxy_dual_attempt else 'off',
                 'on' if prefetch_gate_enabled else 'off',
-                prefetch_gate_min_query_terms, prefetch_gate_min_fetch)
+                prefetch_gate_min_query_terms, prefetch_gate_min_fetch,
+                'on' if block_private_addresses else 'OFF',
+                ','.join(sorted(allow_private_hosts)) or 'none',
+                'ALLOWED' if allow_insecure_ssl_fallback else 'off',
+                min_request_interval_ms,
+                ('%d override' % len(searxng_instances)) if searxng_instances else 'library')
 
 
 def install_search_bridge():

@@ -33,7 +33,7 @@ from lib.conv_ref._detail import (  # noqa: E402,F401
 )
 
 # ── Tool-dispatch entrypoint (._tool) ────────────────────────────────────────
-from lib.conv_ref._tool import execute_conv_ref_tool  # noqa: E402,F401
+from lib.conv_ref._tool import execute_conv_ref_tool, raw_requested  # noqa: E402,F401
 
 
 __all__ = [
@@ -48,4 +48,5 @@ __all__ = [
     '_extract_result_text',
     '_truncate',
     'execute_conv_ref_tool',
+    'raw_requested',
 ]

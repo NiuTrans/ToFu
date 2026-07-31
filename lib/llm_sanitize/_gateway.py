@@ -1,7 +1,9 @@
 """lib/llm_sanitize/_gateway.py — Gateway keyword sanitization.
 
-Replaces corporate-gateway-blocked keywords with semantically-equivalent
-alternatives, and applies that replacement across a whole message list.
+Replaces corporate-gateway-blocked keywords with invisible-separator
+variants that break the gateway's exact-substring match while staying
+meaning-identical to the LLM, and applies that replacement across a
+whole message list.
 """
 
 from lib.log import get_logger
@@ -21,25 +23,50 @@ logger = get_logger(__name__)
 # The filter is key-specific (key_1 only) but since dispatch rotates keys,
 # any request containing blocked terms will intermittently fail.
 #
-# Strategy: replace blocked exact strings with semantically-equivalent
-# alternatives that the LLM understands identically.
+# Strategy (owner-ratified 2026-07-26, board epic pt_871a26c73d494a83,
+# question-block answer "A: Invisible-separator insertion"): insert a
+# ZERO-WIDTH SPACE (U+200B) after the first character of each blocked
+# term. Properties:
+#   * breaks the gateway's exact-substring match — the term no longer
+#     appears contiguously anywhere in the request body;
+#   * invisible when rendered — a human reader sees the original term;
+#   * meaning-identical to the LLM (U+200B is near-transparent glue
+#     between the surrounding characters);
+#   * degrades to the previous INERT no-op if the gateway ever
+#     normalizes the separator away — the downside floor is zero, which
+#     is why this needed no invented euphemism content.
 #
-# NOTE (2026-07-20): the values below are currently IDENTITY placeholders —
-# each term maps to itself, so the sanitizer is INERT (it changes nothing).
-# Supplying real replacement values is owner-gated: (1) choosing them is a
-# content/policy call (a euphemism, or an invisible-separator technique), and
-# (2) their efficacy can only be verified against the live corporate gateway
-# (your-llm-gateway.example.com), which is not reachable from CI/dev. Identity entries are
-# skipped in _sanitize_gateway_content so they never emit a false "Replaced"
-# log line. Replace a value with a genuine alternative to activate a term.
+# The replacement values are DERIVED by _invisible_break(), never typed
+# as literals: an invisible character in a source literal is invisible to
+# code review too.
 #
-# Discovered via binary search probing (2026-04-03):
+# Terms discovered via binary search probing (2026-04-03):
+
+_ZWSP = '\u200b'  # ZERO-WIDTH SPACE — the only non-ASCII char we insert
+
+
+def _invisible_break(term: str) -> str:
+    """Return ``term`` with a zero-width space after its first character.
+
+    One insertion point is sufficient: an exact-substring filter keys on
+    the contiguous term, and any contiguous match is destroyed by a single
+    break. Stripping ``_ZWSP`` from the result reproduces the original term
+    exactly — the semantic round-trip the test suite asserts.
+    """
+    if len(term) < 2:
+        return term
+    return term[0] + _ZWSP + term[1:]
+
+
 _GATEWAY_BLOCKED_TERMS = {
-    '习主席':  '习主席',     # Xi Jinping / General Secretary Xi → Chairman Xi
-    '江主席':  '江主席',     # Jiang Zemin → Chairman Jiang
-    '赵总理':  '赵总理',     # Zhao Ziyang → Premier Zhao
-    'FLG':  'FLG',       # Falun Gong / Falun Dafa → abbreviation
-    'QNS':  'QNS',       # Eastern Lightning → abbreviation
+    term: _invisible_break(term)
+    for term in (
+        '习主席',   # Xi Jinping / General Secretary Xi
+        '江主席',   # Jiang Zemin
+        '赵总理',   # Zhao Ziyang
+        'FLG',      # Falun Gong / Falun Dafa — abbreviation
+        'QNS',      # Eastern Lightning — abbreviation
+    )
 }
 
 
@@ -58,9 +85,10 @@ def _sanitize_gateway_content(text: str) -> str:
     replaced = []
     for blocked, safe in _GATEWAY_BLOCKED_TERMS.items():
         if blocked == safe:
-            # Identity placeholder (see NOTE on _GATEWAY_BLOCKED_TERMS): a
-            # no-op that must NOT be reported as a replacement. Skip it so the
-            # debug log stays honest until a real value is supplied.
+            # Identity (no-op) entry: must NOT be reported as a replacement.
+            # Never fires under the derived-ZWSP map above, but kept so a
+            # future hand-edit that reintroduces one cannot silently lie in
+            # the debug log (the original placeholder-era bug).
             continue
         if blocked in text:
             text = text.replace(blocked, safe)

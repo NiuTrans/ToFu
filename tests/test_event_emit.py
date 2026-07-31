@@ -115,8 +115,13 @@ class TestConvertedOrchestratorSites(unittest.TestCase):
         task = _chat_runtime.create()
         orch._emit_tool_round_phase(task, {'tool_calls': []}, 0)
         got = {k: v for k, v in task['events'][-1].items() if k != 'seq'}
+        # `detailKey` was added so localized clients render the label in the
+        # UI language while `detail` remains the English fallback for
+        # headless clients. Order matters (byte-identity of the wire event).
         expected = {'type': 'phase', 'phase': 'llm_thinking',
-                    'detail': 'Generating response…', 'roundNum': 1}
+                    'detail': 'Generating response…',
+                    'detailKey': 'stream.phase.generatingResponse',
+                    'roundNum': 1}
         self.assertEqual(json.dumps(got, ensure_ascii=False),
                          json.dumps(expected, ensure_ascii=False))
 
@@ -127,10 +132,15 @@ class TestConvertedOrchestratorSites(unittest.TestCase):
         am = {'tool_calls': [{'function': {'name': 'web_search'}}]}
         orch._emit_tool_round_phase(task, am, 2)
         got = {k: v for k, v in task['events'][-1].items() if k != 'seq'}
+        # Order matters: detail, detailKey, detailArgs, toolContext, roundNum
+        # (see _emit_tool_round_phase in lib/tasks_pkg/orchestrator/_finalize.py).
         self.assertEqual(list(got.keys()),
-                         ['type', 'phase', 'detail', 'toolContext', 'roundNum'])
+                         ['type', 'phase', 'detail', 'detailKey', 'detailArgs',
+                          'toolContext', 'roundNum'])
         self.assertEqual(got['type'], 'phase')
         self.assertEqual(got['roundNum'], 3)
+        self.assertEqual(got['detailKey'], 'stream.phase.analyzingRound')
+        self.assertEqual(got['detailArgs'], {'round': 3})
 
 
 class TestUnregisteredTypeAllowed(unittest.TestCase):

@@ -4,7 +4,7 @@ This is a THIRD memory placement, distinct from the two that already exist:
 
   1. System-prefix injection (BP1–3, always-on) — cache-poison for anything
      that changes; the memory-count hint was ripped out for exactly this
-     reason (see ``.tofu/skills/memory-count-hint-mutates-cached-system-prefix.md``).
+     reason (see ``.tofu/memories/memory-count-hint-mutates-cached-system-prefix.md``).
   2. Per-turn BM25 prefetch (``<relevant_memories>`` in the tail) — cache-safe,
      but its cheap-LLM reranker is *designed to drop* anything without a
      concrete task step, so a standing preference ("always answer in Chinese")

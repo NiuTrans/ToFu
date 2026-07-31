@@ -90,7 +90,7 @@ function _ensureKatex() {
       if (typeof _mdCache !== 'undefined') _mdCache.clear();
       /* Trigger a re-render of current chat */
       const conv = typeof getActiveConv === 'function' && getActiveConv();
-      if (conv && typeof renderChat === 'function') renderChat(conv);
+      if (conv) window.ConvView.replaceAll(conv.id);
       /* Notify other surfaces (paper reader, artifacts, etc.) that
        * placed math-pending fallback markup so they can repaint with
        * real KaTeX output instead of staying stuck on `<code>` spans. */
@@ -125,13 +125,10 @@ function _ensurePdfJs() {
 }
 
 const TAB_ID = Math.random().toString(36).slice(2, 10);
-let _syncChannel = null;
-try {
-  _syncChannel = new BroadcastChannel("claude_dialogue_sync");
-  _syncChannel.onmessage = (e) => {
-    if (e.data && e.data.sourceTab !== TAB_ID) _handleCrossTabMsg(e.data);
-  };
-} catch (_) {}
+/* BroadcastChannel + listener registration RELOCATED to
+ * core/cross_tab_sync.js (pt_3879f00e Epic-E sub-part 3). See that module
+ * for the construction; TAB_ID stays here (leaf constant with multiple
+ * consumers, incl. main.js's boot log). */
 
 /* ★ DB-first: conversations start empty and are populated by
  *   loadConversationsFromServer() in initActiveTasks().
@@ -150,7 +147,6 @@ let _foldersLoaded = false;  // true after first loadFolders() completes
 
 let activeConvId = sessionStorage.getItem('tofu_activeConvId') || null,
   activeStreams = new Map(),
-  streamBufs = new Map(),
   pendingImages = [],
   pdfProcessing = 0;  // counter: # of in-flight PDF text-parses (see upload.js)
 /** Message-queue MIRROR of server state (read-only on the client).
@@ -243,18 +239,25 @@ let thinkingEnabled = true,
   chatMode = "chat",
   debugVisible = false,
   sidebarSearchQuery = "";
+/* Boot-path localStorage reads must never throw: one corrupted key (hand
+ * edit, a truncated write in private mode, an older schema) would otherwise
+ * kill module evaluation and white-screen the whole app (pt_26a427d3). */
+function _safeJsonParse(raw, fallback) {
+  if (raw == null) return fallback;
+  try { return JSON.parse(raw); } catch (_) { return fallback; }
+}
 let serverModel = "aws.claude-opus-4.8";
-let config = JSON.parse(
-  localStorage.getItem("claude_client_config") ||
-    JSON.stringify({
-      temperature: 1,
-      maxTokens: 128000,
-      thinkingBudget: 64000,
-      thinkingEffort: "medium",
-      imageMaxWidth: 0,           // 0 = follow server upload-shrink policy (recommended)
-      systemPrompt: "",
-      model: serverModel,
-    }),
+let config = _safeJsonParse(
+  localStorage.getItem("claude_client_config"),
+  {
+    temperature: 1,
+    maxTokens: 128000,
+    thinkingBudget: 64000,
+    thinkingEffort: "medium",
+    imageMaxWidth: 0,           // 0 = follow server upload-shrink policy (recommended)
+    systemPrompt: "",
+    model: serverModel,
+  },
 );
 
 /* ── (cost.js, debug_panel.js extracted here) ── */
@@ -324,6 +327,26 @@ function isNearBottom(threshold) {
   if (!c) return true;
   return c.scrollHeight - c.scrollTop - c.clientHeight < (threshold || 150);
 }
+/* ── Instant-scroll seam ───────────────────────────────────────────────
+ * Run `fn` with `scroll-behavior` forced to `auto` on `el`, then restore the
+ * previous value. If any stylesheet sets `scroll-behavior:smooth` on a scroll
+ * container, a `scrollTop` write becomes an ANIMATION: during streaming it
+ * perpetually chases a growing scrollHeight (reader drifts off the bottom then
+ * snaps back), and at turn-finalize it visibly slides instead of re-pinning.
+ *
+ * Every programmatic scroll write that must land IMMEDIATELY goes through
+ * here, so the restore is never forgotten and callers cannot half-implement
+ * it. Restores in a `finally` so a throwing `fn` cannot leave the container
+ * stuck on `auto`. */
+function _withInstantScroll(el, fn) {
+  if (!el) { fn(); return; }
+  const _prev = el.style.scrollBehavior;
+  el.style.scrollBehavior = 'auto';
+  try { fn(); }
+  finally { el.style.scrollBehavior = _prev; }
+}
+if (typeof window !== 'undefined') window._withInstantScroll = _withInstantScroll;
+
 let _scrollRafId = null;
 function scrollToBottom(force) {
   const c = _getChatContainer();
@@ -341,16 +364,97 @@ function scrollToBottom(force) {
   if (_scrollRafId) return; // already scheduled
   _scrollRafId = requestAnimationFrame(() => {
     _scrollRafId = null;
-    c.scrollTop = c.scrollHeight;
+    /* ★ SCROLL-JITTER FIX: during streaming this fires once per rAF while
+     * scrollHeight is still growing. If any stylesheet sets
+     * `scroll-behavior:smooth` on the chat container (some themes did),
+     * the write becomes an animation that perpetually chases a moving
+     * target — the reader visibly drifts off the bottom then snaps back.
+     * Force instant scroll for the duration of the write. The tofu theme
+     * no longer sets smooth; this is belt-and-suspenders for future
+     * themes / user stylesheets. */
+    _withInstantScroll(c, () => { c.scrollTop = c.scrollHeight; });
   });
 }
 /* ── Scroll-to-bottom button ──────────────────────────────────────────
  * A simple, always-available fallback affordance: when the reader scrolls
  * up away from the latest message, a floating pill appears; clicking it jumps
- * to the bottom via the real-height force-scroll path. This does NOT fix the
- * underlying "chat jumps to the middle" bug — it just gives the user a
- * reliable one-click way back to the newest content. */
+ * to the bottom via the real-height force-scroll path. */
+/* One-time arming of the manual-scroll-up listeners that CLEAR the explicit
+ * bottom latch: wheel-up and touch drag-down (= scroll content up) are the
+ * user's "stop following the bottom" signal. Registered lazily on the first
+ * click so the chat container is guaranteed to exist. */
+let _stbLatchListenersArmed = false;
+function _armStbLatchClearListeners() {
+  if (_stbLatchListenersArmed) return;
+  const c = _getChatContainer();
+  if (!c) return;  // container not in DOM yet — retry on next click
+  _stbLatchListenersArmed = true;
+  c.addEventListener("wheel", (e) => {
+    if (e.deltaY < 0) _explicitBottomLatch = null;
+  }, { passive: true });
+  let _touchY = null;
+  c.addEventListener("touchstart", (e) => {
+    _touchY = e.touches.length ? e.touches[0].clientY : null;
+  }, { passive: true });
+  c.addEventListener("touchmove", (e) => {
+    if (_touchY != null && e.touches.length
+        && e.touches[0].clientY > _touchY + 4) {
+      _explicitBottomLatch = null;  // drag down = scroll content up
+    }
+  }, { passive: true });
+}
 function scrollChatToBottom() {
+  /* ★ Explicit-bottom latch: this click is a COMMAND — "take me to the
+   * latest". Latch it so EVERY render still to come during this open
+   * (Phase-2 reconcile, .then fallback, background repaints) re-pins to the
+   * TRUE bottom instead of the anchor / no-scroll-on-open heuristics, which
+   * exist for unsolicited paints only. Cleared by manual scroll-up, an
+   * explicit scrollToTurn navigation, a conversation switch, or open end. */
+  const _latchConv = getActiveConv();
+  if (_latchConv && typeof _explicitBottomLatch !== "undefined") {
+    _explicitBottomLatch = _latchConv.id;
+    _armStbLatchClearListeners();
+  }
+  /* ★ Hidden-tail restore (bounded-window fix). When the reader scrolled up
+   * through history, `_loadOlderMessages` evicted the TAIL bubbles and
+   * `_lazyRenderedTo` caps the window BELOW the newest message. A bare
+   * `_forceScrollToBottom` then only reaches the bottom SENTINEL — the
+   * IntersectionObserver drip-feeds one 20-message batch at a time INTO the
+   * fold, and each insert strands the reader further above the real bottom
+   * (the reported "scroll-to-bottom keeps bouncing me back to the middle").
+   * Restore the tail FIRST, then scroll:
+   *   • few hidden: walk the existing downward loader — continuous DOM, no
+   *     repaint side effects (the same guarded pump scrollToTurn uses);
+   *   • many hidden: cheaper to repaint just the tail window via
+   *     ConvView.replaceAll. Pre-scroll to the old DOM's bottom first so
+   *     renderChat's reader-parked-up anchor heuristic (meant for
+   *     UNSOLICITED background repaints) does not override this EXPLICIT
+   *     jump-to-bottom command. */
+  const _stbConv = getActiveConv();
+  if (_stbConv && !activeStreams.has(_stbConv.id)
+      && typeof _loadNewerMessages === "function"
+      && _lazyConvId === _stbConv.id
+      && Number.isFinite(_lazyRenderedTo)
+      && _lazyRenderedTo < _stbConv.messages.length) {
+    const _hidden = _stbConv.messages.length - _lazyRenderedTo;
+    const _PUMP_MAX = 60;  // 3 batches — beyond this a tail repaint is cheaper
+    if (_hidden <= _PUMP_MAX) {
+      let _guard = Math.ceil(_hidden / 20) + 2;
+      while (_guard-- > 0 && Number.isFinite(_lazyRenderedTo)
+             && _lazyRenderedTo < _stbConv.messages.length) {
+        const _before = _lazyRenderedTo;
+        _loadingNewer = false;
+        _loadNewerMessages();
+        if (_lazyRenderedTo === _before) break;  // stalled — never spin
+      }
+    } else if (window.ConvView && typeof window.ConvView.replaceAll === "function") {
+      const _c = _getChatContainer();
+      if (_c) _c.scrollTop = _c.scrollHeight;  // pre-pin: see comment above
+      window.ConvView.replaceAll(_stbConv.id, { forceScroll: true });
+      _updateScrollToBottomBtn();
+      return;
+    }
+  }
   if (typeof _forceScrollToBottom === "function") {
     _forceScrollToBottom(null, true);
   } else {
@@ -376,9 +480,15 @@ if (typeof window !== "undefined") {
 }
 
 function getToolRoundsFromMsg(msg) {
-  if (msg.toolRounds && msg.toolRounds.length > 0) return msg.toolRounds;
+  // The inject sidecars must be rehydrated onto REAL rounds too, not only
+  // onto the empty base — after a reload/poll/committedMessage projection a
+  // turn normally has both. Returning `msg.toolRounds` directly here dropped
+  // every swarm/peer/steer chip from exactly the common case.
+  if (msg.toolRounds && msg.toolRounds.length > 0)
+    return _rehydrateInjectRows(msg, msg.toolRounds);
   // ── Backward compat: old conversations stored under 'searchRounds' ──
-  if (msg.searchRounds && msg.searchRounds.length > 0) return msg.searchRounds;
+  if (msg.searchRounds && msg.searchRounds.length > 0)
+    return _rehydrateInjectRows(msg, msg.searchRounds);
   if (msg.searchResults && msg.searchResults.length > 0)
     return [
       {
@@ -388,7 +498,7 @@ function getToolRoundsFromMsg(msg) {
         status: "done",
       },
     ];
-  else base = [];
+  const base = [];
   return _rehydrateInjectRows(msg, base);
 }
 
@@ -426,7 +536,7 @@ function _spliceInjectRow(arr, row, anchorLlmRound) {
     for (let i = 0; i < arr.length; i++) {
       const r = arr[i];
       if (r && !r._userSteerInject && !r._peerInject && !r._inboxInject
-          && r.llmRound === anchorLlmRound) { at = i; break; }
+          && !r._stallNudge && r.llmRound === anchorLlmRound) { at = i; break; }
     }
   }
   if (at >= 0) arr.splice(at, 0, row);
@@ -440,7 +550,8 @@ function _rehydrateInjectRows(msg, base) {
   const swarm = Array.isArray(msg._inboxInjects) ? msg._inboxInjects : [];
   const peer = Array.isArray(msg._peerInjects) ? msg._peerInjects : [];
   const steer = Array.isArray(msg._userSteerInjects) ? msg._userSteerInjects : [];
-  if (!swarm.length && !peer.length && !steer.length) return base;
+  const stall = Array.isArray(msg._stallNudges) ? msg._stallNudges : [];
+  if (!swarm.length && !peer.length && !steer.length && !stall.length) return base;
   const out = base.slice();
   const _has = (pred) => out.some(pred);
   for (const s of swarm) {
@@ -481,6 +592,22 @@ function _rehydrateInjectRows(msg, base) {
       steerRound: rnd,
       steerCount: s.count || 0,
       steerPreviews: Array.isArray(s.previews) ? s.previews : [],
+    }, rnd - 1);
+  }
+  for (const s of stall) {
+    const rnd = s.round || 0;
+    if (_has(r => r._stallNudge && r._stallKey === "stall:" + rnd)) continue;
+    _spliceInjectRow(out, {
+      roundNum: 9000000 + out.length,
+      status: "done",
+      _stallNudge: true,
+      _stallKey: "stall:" + rnd,
+      stallRound: rnd,
+      stallTool: s.tool || "",
+      stallFailedRound: s.failedRound,
+      stallBadge: s.badge || "",
+      stallPrompt: s.prompt || "",
+      stallMax: s.max || 1,
     }, rnd - 1);
   }
   return out;

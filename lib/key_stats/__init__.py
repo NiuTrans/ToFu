@@ -13,12 +13,33 @@ to stats (success/failure/429 counters, the ``exhausted`` flag) but NOT to
 manual overrides, so a key the user disabled yesterday stays disabled
 today.
 
-Rate-limit errors (HTTP 429) are tracked separately because provider 429
-messages are ambiguous — the SAME error body can mean "RPM overrun, retry in
-a moment" or "balance exhausted, give up forever". We therefore rely on a
-streak heuristic rather than trying to parse the body: a key that returns
-429 MAX_CONSECUTIVE_429 times IN A ROW without a single success is marked
-exhausted for the day. Any success or non-429 error resets the streak.
+Rate-limit errors (HTTP 429) are tracked separately (``rate_limited`` /
+``consecutive_429`` counters for the UI) because provider 429 messages are
+ambiguous — the SAME error body can mean "RPM overrun, retry in a moment" or
+"balance exhausted, give up forever". A 429 streak NEVER disables a key
+(owner policy 2026-07-29): 429 is backpressure, answered by the slot-local
+steering cooldown + RPM decay, so a key rejoins on its own the moment the
+upstream recovers. Only the explicit billing-stop below disables for the day.
+
+Quota/billing errors (HTTP 402 / 429-insufficient_quota) are recorded at
+**(key, model)** granularity (``exhausted_models``) whenever the observing
+slot names a model — on an aggregating gateway one key proxies several
+upstream vendors, so a billing-stop on one model must not cross-poison the
+others (2026-07-28: qwen→Aliyun quota-death on a sankuai key must not stop
+kimi→Moonshot on the same key). Callers that cannot name a model still flip
+the key-wide ``exhausted`` flag. Manual overrides keep winning over BOTH
+(user supremacy); the Settings card surfaces the override-vs-stop conflict
+instead of letting a stale manual ON silently defeat a fresh billing-stop.
+
+Namespace fold (account/face separation, charter #23):
+  History may have been recorded under an absorbed duplicate face CARD
+  (``sankuai_anthropic::…``) while the UI renders one card per ACCOUNT
+  (``sankuai::…``). At every load, ``_fold_namespaces_unlocked`` folds such
+  namespaces into their account using
+  ``lib.llm_dispatch.provider_face.account_namespace_map`` — so a
+  billing-stop or a PERSISTENT manual override can never be orphaned onto
+  a namespace nothing reads and nothing renders (2026-07-29 invisible
+  total-outage).
 
 Last-resort guard:
   The auto-disable logic (exhausted flag + success-rate threshold) will NEVER
@@ -35,7 +56,8 @@ Persistence:
       "providerId::key_name": {
         "success": 12, "failure": 3,
         "rate_limited": 48, "consecutive_429": 5,
-        "last_error": "...", "exhausted": false
+        "last_error": "...", "exhausted": false,
+        "exhausted_models": {"qwen3.5-plus": "insufficient_quota ..."}
       },
       ...
     },
@@ -71,7 +93,6 @@ from lib.log import get_logger
 
 # ── Shared singletons + low-level helpers (BY REFERENCE — never duplicate) ──
 from lib.key_stats._state import (
-    MAX_CONSECUTIVE_429,
     MIN_ATTEMPTS,
     MIN_SUCCESS_RATE,
     _SIBLINGS_TTL_SEC,
@@ -129,7 +150,6 @@ __all__ = [
     'clear_key_override',
     'MIN_ATTEMPTS',
     'MIN_SUCCESS_RATE',
-    'MAX_CONSECUTIVE_429',
 ]
 
 

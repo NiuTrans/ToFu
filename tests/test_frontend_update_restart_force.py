@@ -75,7 +75,8 @@ global.showToast = () => {};
 // placeholder so the code's .replace('%s', count) is observable (real i18n
 // returns a string WITH %s; an identity stub would have nothing to substitute).
 global.t = (k) => (k === 'update.restartForceConfirm'
-  ? '%s other conversation(s) have running tasks — continue?' : k);
+  ? '%s other conversation(s) have running tasks — continue?'
+  : k === 'update.restartCooldown' ? 'cooldown %ss left' : k);
 global.activeConvId = 'my-own-conv';
 // DOM: getElementById returns a throwaway element with the props the code sets.
 global.document = {
@@ -98,13 +99,30 @@ global.location = { reload: () => {} };
 // ── Instrumented Api + showConfirm (rebound per scenario) ──
 let restartCalls = [];   // each entry = the payload object passed to restart()
 let confirmCalls = [];   // each entry = the message passed to showConfirm()
+let toastCalls = [];     // each entry = [icon, title, body]
+let decideCalls = [];    // each entry = [approvalId, approved]
 let confirmReturns = true;
 let firstThrows409 = true;
+let pendingFirst = false;   // first restart call answers 202 {pendingApproval}
+let always429 = false;      // every restart call 429s (cooldown)
 
+global.showToast = (icon, title, body) => { toastCalls.push([icon, title, body]); };
 global.Api = {
   update: {
     restart: async (payload) => {
       restartCalls.push(payload || {});
+      if (always429) {
+        const e = new Error('HTTP 429');
+        e.status = 429;
+        e.body = { ok: false, retryAfterSec: 812 };
+        throw e;
+      }
+      // Human-approval gate emulation: without an approvalId the endpoint
+      // only REGISTERS a pending approval (202 shape) — nothing executes.
+      if (pendingFirst && !(payload && payload.approvalId)) {
+        return { ok: true, needsApproval: true,
+                 pendingApproval: { id: 'tok-1', action: 'restart', status: 'pending' } };
+      }
       // Emulate the backend guard: the FIRST (force-less) call 409s when
       // siblings are running; a subsequent force call succeeds.
       const forced = !!(payload && payload.force);
@@ -116,6 +134,10 @@ global.Api = {
         throw e;
       }
       return { ok: true, restarting: true, forced };
+    },
+    decideLifecycleApproval: async (id, approved) => {
+      decideCalls.push([id, approved]);
+      return { ok: true };
     },
   },
   health: { info: async () => ({ ok: true, version: '9.9.9' }) },
@@ -130,8 +152,12 @@ function loadModule(src) { (0, eval)(src); }
 function reset(opts) {
   restartCalls = [];
   confirmCalls = [];
+  toastCalls = [];
+  decideCalls = [];
   confirmReturns = ('confirmReturns' in opts) ? opts.confirmReturns : true;
   firstThrows409 = ('firstThrows409' in opts) ? opts.firstThrows409 : true;
+  pendingFirst = ('pendingFirst' in opts) ? opts.pendingFirst : false;
+  always429 = ('always429' in opts) ? opts.always429 : false;
   // _restartActive is a module-level var; force it false between scenarios.
   try { _restartActive = false; } catch (_) {}
 }
@@ -195,6 +221,45 @@ const flush = () => new Promise((r) => setImmediate(r));
     check('neuter_no_forced_retry', !restartCalls.some(c => c.force === true));
   }
 
+  // ══ 5. approval gate: 202 pending → JS approves (the click IS the gesture) → retries with approvalId ══
+  {
+    reset({ pendingFirst: true });
+    await restartServer();
+    await flush(); await flush();
+    check('s5_two_calls', restartCalls.length === 2);
+    check('s5_first_no_token', restartCalls.length >= 1 && !restartCalls[0].approvalId);
+    check('s5_decide_approved_once', decideCalls.length === 1 && decideCalls[0][0] === 'tok-1' && decideCalls[0][1] === true);
+    check('s5_second_carries_token', restartCalls.length === 2 && restartCalls[1].approvalId === 'tok-1');
+    check('s5_no_confirm', confirmCalls.length === 0);
+  }
+
+  // ══ 6. cooldown 429 → toast, no retry, no confirm, no progress ══
+  {
+    reset({ always429: true });
+    await restartServer();
+    await flush(); await flush();
+    check('s6_single_call', restartCalls.length === 1);
+    check('s6_no_confirm', confirmCalls.length === 0);
+    check('s6_cooldown_toast', toastCalls.some(c => String(c[1]).indexOf('cooldown') !== -1 && String(c[1]).indexOf('812') !== -1));
+    check('s6_no_decide', decideCalls.length === 0);
+  }
+
+  // ══ 7. NEUTER #2: strip the pendingApproval dance → token never minted ══
+  {
+    const NEEDLE = 'if (r && r.pendingApproval) {';
+    const neutered = SRC.replace(NEEDLE, 'if (false) {');
+    check('neuter2_patch_applied', neutered !== SRC);
+    loadModule(neutered);
+    reset({ pendingFirst: true });
+    await restartServer();
+    await flush(); await flush();
+    // With the dance gone: the 202 is treated as success directly — NO
+    // decide call, NO approvalId retry. The s5 assertions would now FAIL,
+    // proving the pendingApproval branch is load-bearing.
+    check('neuter2_no_decide', decideCalls.length === 0);
+    check('neuter2_no_token_retry', !restartCalls.some(c => !!c.approvalId));
+  }
+
   console.log(out.join('\n'));
   process.exit(0);
 })();
@@ -220,4 +285,4 @@ def test_update_restart_force_confirm_flow():
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
     fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
     assert not fails, 'update restart force-flow failures:\n' + output
-    assert output.count('PASS') >= 15, f'expected >=15 PASS lines, got:\n{output}'
+    assert output.count('PASS') >= 24, f'expected >=24 PASS lines, got:\n{output}'

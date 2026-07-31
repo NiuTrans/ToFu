@@ -55,6 +55,10 @@ const win = dom.window;
 global.window = win;
 global.document = win.document;
 
+// conv_reducers.js is where pollWriteWouldClobberSettledTail lives after the
+// conversations.js decomposition; conversations.js is eval'd too for any
+// cross-file references the reducer touches at load.
+eval(fs.readFileSync(path.join(ROOT, 'static', 'js', 'core', 'conv_reducers.js'), 'utf8'));
 eval(fs.readFileSync(path.join(ROOT, 'static', 'js', 'core', 'conversations.js'), 'utf8'));
 
 const out = [];

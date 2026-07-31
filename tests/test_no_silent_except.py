@@ -62,6 +62,20 @@ ALLOWED: dict[str, int] = {
     # recurse into a failing logging backend. §2.2 logging-path exemption.
     # (Relocated from lib/tasks_pkg/system_context.py when it became a package.)
     'lib/tasks_pkg/system_context/_inject.py': 1,
+    # terminal_state_log_summary BUILDS the diagnostic string that the
+    # persist-failure branch then hands to logger.error. Its own fallback
+    # returns a marker string instead of logging, for the same reason as
+    # _trace_fallback above: logging here would recurse into the very failure
+    # it is describing. §2.2 logging-path exemption.
+    #
+    # This entry was MISSING while the sibling guard
+    # (test_code_quality.py::TestSilentCatches.ACCEPTABLE_SIGS) had blessed
+    # the same handler with that documented reason — so the two guards
+    # disagreed and this one produced a permanent false positive. Measured
+    # 2026-07-28: "fixing" the product to satisfy this guard immediately broke
+    # test_code_quality's dead-entry meta-assertion, which is what surfaced the
+    # disagreement. When you bless or un-bless a handler, update BOTH lists.
+    'lib/tasks_pkg/manager/_persist.py': 1,
 }
 
 

@@ -13,10 +13,13 @@ logger = get_logger(__name__)
 try:
     import pymupdf
 except ImportError:
-    pymupdf = None  # type: ignore[assignment]
-    logger.debug('pymupdf not available in core — guarded by HAS_PYMUPDF')
+    try:
+        import fitz as pymupdf  # PyMuPDF <1.24.3 legacy module name
+    except ImportError:
+        pymupdf = None  # type: ignore[assignment]
+        logger.debug('pymupdf not available in core — guarded by HAS_PYMUPDF')
 from lib.pdf_parser.images import detect_and_clip_figures
-from lib.pdf_parser.text import extract_pdf_text
+from lib.pdf_parser.text import extract_pdf_text_with_meta
 
 __all__ = ['parse_pdf']
 
@@ -42,7 +45,13 @@ def parse_pdf(pdf_bytes: bytes, *,
             from the callback are swallowed (logged at DEBUG).
 
     Returns dict with keys:
-        text, images, totalPages, textLength, isScanned, method, warnings
+        text, images, totalPages, textLength, isScanned, method, extractor,
+        warnings
+
+        ``extractor`` is the per-document winner reported by
+        ``extract_pdf_text_with_meta`` (``'pymupdf4llm'`` / ``'pymupdf-raw'`` /
+        ``'docling'`` / ``'error'``) — the value ``parser_version`` stamping is
+        keyed on. ``method`` is the legacy label derived from it.
     """
     # Defensive normalize — accept None / unknown modes gracefully.
     if text_mode not in ('rich', 'structured', 'fast'):
@@ -61,9 +70,9 @@ def parse_pdf(pdf_bytes: bytes, *,
         except Exception as e:
             logger.debug('[PDF] progress_callback raised (ignored): %s', e)
 
-    text = extract_pdf_text(pdf_bytes, max_chars,
-                            progress_callback=_text_cb,
-                            mode=text_mode) or ''
+    text, extractor = extract_pdf_text_with_meta(
+        pdf_bytes, max_chars, progress_callback=_text_cb, mode=text_mode)
+    text = text or ''
 
     with PYMUPDF_LOCK:
         doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
@@ -71,15 +80,13 @@ def parse_pdf(pdf_bytes: bytes, *,
             total_pages = len(doc)
             avg_chars = len(text) / max(total_pages, 1)
             is_scanned = (avg_chars < 50)
-            # Method label reflects the winning strategy — docling may have
-            # been requested but silently fallen back to pymupdf4llm.
-            if text_mode == 'structured':
-                # Best-effort: import guard mirrors text.py logic. We don't
-                # track the actual winner from here, so we tag both.
-                from lib.pdf_parser._common import HAS_DOCLING
-                method = 'docling' if HAS_DOCLING else ('pymupdf4llm' if HAS_PYMUPDF4LLM else 'pymupdf_raw')
-            else:
-                method = 'pymupdf4llm' if HAS_PYMUPDF4LLM else 'pymupdf_raw'
+            # Method label = the strategy that ACTUALLY produced the text
+            # (per-document truth from extract_pdf_text_with_meta — a
+            # pymupdf4llm attempt that fell back to raw is tagged raw).
+            method = {'pymupdf4llm': 'pymupdf4llm', 'docling': 'docling',
+                      'pymupdf-raw': 'pymupdf_raw'}.get(
+                          extractor,
+                          'pymupdf4llm' if HAS_PYMUPDF4LLM else 'pymupdf_raw')
 
             warnings = []
             if is_scanned:
@@ -125,5 +132,6 @@ def parse_pdf(pdf_bytes: bytes, *,
         'textLength': len(text),
         'isScanned': is_scanned,
         'method': method,
+        'extractor': extractor,
         'warnings': warnings,
     }

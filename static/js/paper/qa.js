@@ -143,6 +143,40 @@ async function _sendPaperQuestion() {
 async function _pollQATask(taskId, asst, startPaperId) {
   var cursor = 0;
   var POLL_MS = 700;
+
+  /* ★ Push transport (pt_f6aec3ad). `qa_runtime` declares push_channel='paper'
+   *   and `qa_engine` appends `tool_done` the instant each tool returns — so
+   *   the backend has ALWAYS been broadcasting per-tool completion in real
+   *   time. This view only polled, so a search that finished at t=0 kept its
+   *   spinner for up to POLL_MS. Subscribing here is the missing leg; the poll
+   *   below stays as the FLOOR (a client whose WebSocket is blocked by a
+   *   corporate proxy has no push channel at all).
+   *
+   *   Both transports carry the SAME events, so every apply on both paths
+   *   routes through the shared seq gate — otherwise each delta lands twice
+   *   and the answer renders doubled.
+   *
+   *   Keyed on `asst`: Q&A mints a NEW task per question, and `asst` is that
+   *   question's own message object, so each question gets its own
+   *   subscription and its own high-water mark. `isCurrent` reuses the
+   *   existing abandon guard (the paper must still be the active one). */
+  paperAttachPush(asst, taskId, {
+    isCurrent: function () { return startPaperId === _activePaperId; },
+    onEvent: function (ev) {
+      var dirty = paperIngestEvent(asst, ev, _applyQAEvent);
+      if (ev.type === 'done') {
+        asst.status = 'done';
+        if (ev.answer) asst.content = ev.answer;
+        dirty = true;
+      } else if (ev.type === 'error') {
+        asst.status = 'error';
+        dirty = true;
+      }
+      if (dirty) _renderPaperQA();
+    },
+  });
+
+  try {
   while (true) {
     if (_paperQAAbortRequested) { _paperQAAbortRequested = false; break; }
     var resp = await Api.paper.qaPoll(taskId, cursor);
@@ -159,7 +193,9 @@ async function _pollQATask(taskId, asst, startPaperId) {
     if (!data.ok) throw new Error((typeof data.error === 'string' ? data.error : 'Poll failed'));
 
     var events = data.events || [];
-    for (var i = 0; i < events.length; i++) _applyQAEvent(asst, events[i]);
+    for (var i = 0; i < events.length; i++) {
+      paperIngestEvent(asst, events[i], _applyQAEvent);
+    }
     cursor = data.next_cursor;
 
     if (data.status === 'done') {
@@ -178,6 +214,11 @@ async function _pollQATask(taskId, asst, startPaperId) {
     if (startPaperId === _activePaperId) _renderPaperQA();
     await new Promise(function(r) { setTimeout(r, POLL_MS); });
   }
+  } finally {
+    // Release the subscription on EVERY exit path — including abort and the
+    // 404/expired branch, which the terminal-frame auto-release never sees.
+    paperDetachPush(asst);
+  }
 }
 
 /** Apply one Q&A event to the assistant message state (chat-compatible). */
@@ -189,7 +230,7 @@ function _applyQAEvent(asst, ev) {
         toolCallId: ev.toolCallId, toolArgs: ev.toolArgs,
         status: 'searching', results: null,
       });
-      return;
+      return true;
     case 'tool_done': {
       for (var j = 0; j < asst.toolRounds.length; j++) {
         var r = asst.toolRounds[j];
@@ -205,18 +246,18 @@ function _applyQAEvent(asst, ev) {
           break;
         }
       }
-      return;
+      return true;
     }
     case 'delta':
       asst.content += (ev.delta || '');
-      return;
+      return true;
     case 'delta_reset':
       // Interim draft emitted alongside a tool call — discard it (the model
       // rewrites the full answer after the tool result lands).
       asst.content = '';
-      return;
+      return true;
     default:
-      return;
+      return false;
   }
 }
 

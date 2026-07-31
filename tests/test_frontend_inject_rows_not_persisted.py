@@ -53,19 +53,72 @@ pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-CONV_JS = os.path.join(ROOT, 'static', 'js', 'core', 'conversations.js')
+CORE_DIR = os.path.join(ROOT, 'static', 'js', 'core')
+
+
+def _locate(symbol: str) -> str:
+    """Find the ONE file under static/js/core/ defining ``function <symbol>(``.
+
+    Anchored on the SYMBOL, never on a file path: this helper cluster has
+    already migrated once (conversations.js -> conv_persist_helpers.js, slice 3
+    of pt_3879f00e), which killed the previous hard-coded-path version of this
+    guard. Three states are separately reportable so a future failure says what
+    actually happened instead of "substring not found":
+      none  -> the implementation was deleted (a REAL regression, not drift)
+      many  -> the single source of truth got copied (collapse it first)
+      one   -> re-point automatically
+    """
+    pat = re.compile(r'^function\s+' + re.escape(symbol) + r'\s*\(', re.M)
+    hits = []
+    for name in sorted(os.listdir(CORE_DIR)):
+        if not name.endswith('.js'):
+            continue
+        path = os.path.join(CORE_DIR, name)
+        if pat.search(open(path, encoding='utf-8').read()):
+            hits.append(path)
+    if not hits:
+        raise AssertionError(
+            f'{symbol}() is not defined anywhere under static/js/core/ — the '
+            f'implementation was removed. This is a REAL regression: the belt '
+            f'that keeps synthetic inject rows out of the DB toolRounds is gone. '
+            f'Restore it before touching this guard.')
+    if len(hits) > 1:
+        raise AssertionError(
+            f'{symbol}() defined in {len(hits)} files ({hits}) — the single '
+            f'source of truth was duplicated; collapse it before re-pointing.')
+    return hits[0]
+
+
+def _fn_span(src: str, name: str) -> str:
+    """Return the full text of a top-level ``function <name>(...) {...}``,
+    balancing braces so nested blocks survive."""
+    m = re.search(r'^function\s+' + re.escape(name) + r'\s*\(', src, re.M)
+    assert m, f'{name}() vanished between locate and slice'
+    i = src.index('{', m.start())
+    depth = 0
+    for j in range(i, len(src)):
+        if src[j] == '{':
+            depth += 1
+        elif src[j] == '}':
+            depth -= 1
+            if depth == 0:
+                return src[m.start():j + 1]
+    raise AssertionError(f'unbalanced braces while slicing {name}()')
 
 
 def _extract_trim_fn() -> str:
-    """Pull the `_USAGE_TRANSIENT_KEYS` const + `_stripUsageTransient` +
-    `_trimMsgForPersist` out of conversations.js so they eval standalone
-    (module-private, not on window). Same extraction contract as
-    tests/test_frontend_segments_not_echoed.py."""
-    src = open(CONV_JS, encoding='utf-8').read()
-    start = src.index('const _USAGE_TRANSIENT_KEYS')
-    end = src.index('\nfunction _trimMsgForPersist(')
-    end = src.index('\n}', end) + 2  # close of _trimMsgForPersist
-    chunk = src[start:end]
+    """Splice the shipped `_USAGE_TRANSIENT_KEYS` + `_stripUsageTransient` +
+    `_trimMsgForPersist` so they eval standalone (module-private, not on
+    window). Located by symbol; never by file path."""
+    path = _locate('_trimMsgForPersist')
+    src = open(path, encoding='utf-8').read()
+    const_m = re.search(r'^const _USAGE_TRANSIENT_KEYS\s*=.*?;', src, re.M)
+    assert const_m, '_USAGE_TRANSIENT_KEYS const missing from ' + path
+    chunk = '\n'.join([
+        const_m.group(0),
+        _fn_span(src, '_stripUsageTransient'),
+        _fn_span(src, '_trimMsgForPersist'),
+    ])
     assert '_trimMsgForPersist' in chunk, 'extraction missed _trimMsgForPersist'
     return chunk
 
@@ -142,12 +195,13 @@ console.log(out.join('\n'));
 """
 
 _NC_HARNESS = r"""
-// NEUTER: strip the inbox-inject filter block from the extracted function, then
-// prove the synthetic rows LEAK into the persist copy — the strip is load-bearing.
+// NEUTER: disable the inject-row filter by making its marker test always false,
+// then prove the synthetic rows LEAK into the persist copy — i.e. the strip is
+// load-bearing. Neutralising the MARKER NAMES (rather than pattern-matching the
+// whole block) survives reformatting of the block itself.
 let trimSrc = process.env.TRIM_SRC;
 const neutered = trimSrc.replace(
-  /if \(Array\.isArray\(r\.toolRounds\)\s*\n\s*&& r\.toolRounds\.some\(\(rd\) => rd && \(rd\._inboxInject[\s\S]*?rd\._userSteerInject\)\)\) \};\s*\}/,
-  '/* NEUTERED inject-row strip */');
+  /rd\._inboxInject \|\| rd\._peerInject \|\| rd\._userSteerInject/g, 'false');
 if (neutered === trimSrc) { console.log('FAIL nc_pattern_matched'); process.exit(0); }
 eval(neutered);
 
@@ -200,12 +254,50 @@ def test_NC_without_strip_synthetic_rows_leak():
         'rows did not leak without the strip:\n' + out)
 
 
-def test_source_has_inject_row_strip():
-    """Cheap source guard (runs even without node): the belt exists and lists
-    all three lane markers (lock-step with segments/_types.SYNTHETIC_INBOX_MARKERS)."""
-    src = open(CONV_JS, encoding='utf-8').read()
-    assert re.search(r"rd\._inboxInject \|\| rd\._peerInject \|\| rd\._userSteerInject", src), \
-        'the inbox-inject strip block is missing from _trimMsgForPersist'
+@pytest.mark.skipif(not shutil.which('node'), reason='node not installed')
+def test_scan_surface_report():
+    """Print WHERE the guard is currently pointed before asserting anything.
+
+    charter: a source-anchored guard must show its scan surface, or it can pass
+    while pointed at nothing. This cluster already moved file once.
+    """
+    path = _locate('_trimMsgForPersist')
+    print('_trimMsgForPersist located in:', os.path.relpath(path, ROOT))
+    chunk = _extract_trim_fn()
+    print(f'spliced {len(chunk)} chars / {chunk.count(chr(10)) + 1} lines')
+    for marker in ('_inboxInject', '_peerInject', '_userSteerInject'):
+        print(f'  marker {marker}: {chunk.count(marker)} occurrence(s)')
+
+
+@pytest.mark.skipif(not shutil.which('node'), reason='node not installed')
+def test_every_inject_lane_is_actually_filtered():
+    """Each of the three lanes must be stripped INDIVIDUALLY.
+
+    Asserts the RESULT (a row bearing lane marker X does not survive the persist
+    copy), not the presence of a source literal — so reformatting or reordering
+    the condition cannot produce a false red, while dropping a lane goes red.
+    Replaces the old literal-regex source guard, which died when this cluster
+    moved to conv_persist_helpers.js and could not tell drift from regression.
+    """
+    harness = r"""
+eval(process.env.TRIM_SRC);
+const out = [];
+for (const marker of ['_inboxInject', '_peerInject', '_userSteerInject']) {
+  const real = { roundNum: 1, toolCallId: 'tc_1', toolName: 'x',
+                 toolContent: 'y', status: 'done' };
+  const synth = { roundNum: 9000001, status: 'done' };
+  synth[marker] = true;
+  const res = _trimMsgForPersist({ role: 'assistant', content: 'c',
+                                   toolRounds: [real, synth] });
+  const kept = res.toolRounds.length === 1 && res.toolRounds[0].toolCallId === 'tc_1';
+  out.push((kept ? 'PASS ' : 'FAIL ') + 'lane_stripped:' + marker);
+}
+console.log(out.join('\n'));
+"""
+    out = _run_node(harness, _extract_trim_fn())
+    fails = [ln for ln in out.splitlines() if ln.startswith('FAIL')]
+    assert not fails, 'a synthetic inject lane reaches the DB toolRounds:\n' + out
+    assert out.count('PASS') == 3, f'expected 3 lanes checked, got:\n{out}'
 
 
 if __name__ == '__main__':
@@ -215,5 +307,6 @@ if __name__ == '__main__':
         _src = _extract_trim_fn()
         print(_run_node(_HARNESS, _src))
         print(_run_node(_NC_HARNESS, _src))
-        test_source_has_inject_row_strip()
-        print('PASS test_source_has_inject_row_strip')
+        test_scan_surface_report()
+        test_every_inject_lane_is_actually_filtered()
+        print('PASS test_every_inject_lane_is_actually_filtered')

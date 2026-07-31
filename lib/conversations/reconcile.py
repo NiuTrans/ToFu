@@ -206,6 +206,128 @@ def is_superseded_error_husk(
     return _is_settled_assistant(messages[idx + 1])
 
 
+# Per-round diagnostic keys that ride along on a usage dict but carry NO
+# user-visible or billing meaning. Two snapshots of the SAME committed reply
+# routinely differ ONLY by these (live evidence: conv ms0z3wedmvs5l9 msgs[17]
+# vs msgs[20] — `_wire_routing` present on one copy made all 23 apiRounds
+# compare unequal), so a byte-compare that does not normalize them under-fires
+# and leaves the duplicate on screen. Kept in lock-step with the frontend's
+# `_USAGE_TRANSIENT_KEYS` (static/js/core/conv_persist_helpers.js) plus
+# `_wire_routing`, which only the server writes.
+_TWIN_TRANSIENT_KEYS = frozenset({'_wire_fp', '_wire_static', '_wire_routing'})
+
+# The payload a reader would actually LOSE if a row were dropped, and the
+# terminal facts that make a row's outcome distinct. A twin may be collapsed
+# only when it adds nothing across BOTH sets.
+_TWIN_PAYLOAD_FIELDS = ('content', 'thinking', 'toolRounds', 'segments',
+                        'apiRounds')
+_TWIN_TERMINAL_FIELDS = ('finishReason', 'usage', 'error')
+
+
+def _twin_normalize(value: Any) -> Any:
+    """Strip transient diagnostic keys so two snapshots of one reply compare equal."""
+    if isinstance(value, dict):
+        return {k: _twin_normalize(v) for k, v in value.items()
+                if k not in _TWIN_TRANSIENT_KEYS}
+    if isinstance(value, list):
+        return [_twin_normalize(v) for v in value]
+    return value
+
+
+def _twin_key(value: Any) -> str:
+    import json as _json
+    return _json.dumps(_twin_normalize(value), sort_keys=True, default=str)
+
+
+def _twin_subsumed_by(keeper: dict[str, Any], twin: dict[str, Any]) -> bool:
+    """True when dropping ``twin`` loses NOTHING that ``keeper`` does not hold.
+
+    Every payload/terminal field the twin carries must be byte-equal to the
+    keeper's after transient normalization. A twin field the keeper lacks (or
+    holds differently) means real divergence — measured on the live DB, 64 of
+    121 duplicate groups are exactly that (different toolRounds / thinking /
+    segments), and dropping either side there would destroy content.
+    """
+    for field in _TWIN_PAYLOAD_FIELDS + _TWIN_TERMINAL_FIELDS:
+        tv = twin.get(field)
+        if not tv:
+            continue  # empty / absent — nothing to lose
+        if _twin_key(tv) != _twin_key(keeper.get(field)):
+            return False
+    return True
+
+
+def is_duplicate_task_twin(
+    messages: list[dict[str, Any]], idx: int, *,
+    cache_prefix_count: int = 0,
+) -> bool:
+    """True if ``messages[idx]`` is a redundant SECOND copy of a reply another
+    assistant row already holds in full, under the same ``_taskId``.
+
+    THE ARTIFACT (measured, whole production DB): 87 of 4163 conversations hold
+    138 extra assistant rows — two-plus rows sharing ONE ``_taskId``, identical
+    content, differing only in identity (a server UUID vs a client ``tmp_`` id)
+    and in which fields survived. The user sees the answer twice, and the twin
+    is frequently thinking-less, so when it sorts last it becomes the turn's
+    "final state" source. A server commit can never mint a ``tmp_`` id, so the
+    extra row is a CLIENT echo that rode a full PUT — the path
+    ``_rebaseUnackedTail``'s existing ``_taskId`` dedup never sees (it runs only
+    on the 409-CAS rescue-PUT).
+
+    DELIBERATELY NARROW — every guard below is backed by a live counter-example,
+    because a blind ``_taskId`` dedup would destroy data:
+
+      * both rows must be assistants carrying the SAME non-empty ``_taskId``;
+      * neither may be a special turn (endpoint planner/worker/critic share ONE
+        task dict; an autopilot VU is not a reply at all);
+      * no USER turn may sit between them — that is two exchanges, and
+        collapsing it would leave a user turn unanswered (34 of 121 live groups
+        span a user turn);
+      * the keeper must sit OUTSIDE the immutable cache prefix, and so must this
+        row — removing an in-prefix message shifts every following byte and
+        busts the prompt cache (same rule the buried-ghost sweep honours);
+      * the row must be LOSSLESSLY SUBSUMED by the keeper (see
+        ``_twin_subsumed_by``).
+
+    The keeper is searched BACKWARD only, so the FIRST (richest, usually
+    server-committed) copy always survives and the verdict is order-stable —
+    which is what makes ``reconcile_conversation_messages`` idempotent.
+    """
+    if idx <= 0 or idx >= len(messages):
+        return False
+    twin = messages[idx]
+    if not isinstance(twin, dict) or twin.get('role') != 'assistant':
+        return False
+    if _is_special_turn(twin):
+        return False
+    task_id = twin.get('_taskId')
+    if not task_id:
+        return False
+
+    guard = max(0, cache_prefix_count)
+    if idx < guard:
+        return False
+
+    for j in range(idx - 1, -1, -1):
+        prev = messages[j]
+        if not isinstance(prev, dict):
+            continue
+        # A user turn between the two rows means they answer DIFFERENT
+        # exchanges — stop looking, never collapse across it.
+        if prev.get('role') == 'user':
+            return False
+        if prev.get('role') != 'assistant':
+            continue
+        if prev.get('_taskId') != task_id:
+            continue
+        if _is_special_turn(prev):
+            return False
+        if j < guard:
+            return False
+        return _twin_subsumed_by(prev, twin)
+    return False
+
+
 def is_superseded_incomplete_fragment(
     messages: list[dict[str, Any]], idx: int,
 ) -> bool:
@@ -441,6 +563,32 @@ def reconcile_conversation_messages(
                         'finishReason=aborted (truncated partial adjacent to a '
                         'settled answer for the same turn).', _marked)
 
+    # ── 0c. Duplicate-task-twin COLLAPSE (one reply committed twice) ──
+    #    Remove a redundant SECOND assistant row that shares a ``_taskId`` with
+    #    an earlier row already holding its full payload — the client ``tmp_``
+    #    echo that rode a normal full PUT (``_rebaseUnackedTail``'s dedup only
+    #    covers the 409-CAS rescue path). Runs on BOTH conv seams through this
+    #    one predicate: ``_save_conv_blocking`` sweeps the incoming payload, so
+    #    a new twin can never land, and ``get_conv`` heals the rows already on
+    #    disk. Honours the same cache-prefix guard as the sweeps below, and is
+    #    deliberately partial — a divergent pair is LEFT ALONE rather than
+    #    silently losing content (see ``is_duplicate_task_twin``).
+    if len(out) >= 2:
+        _guard = max(0, cache_prefix_count)
+        kept = []
+        twins = 0
+        for i, m in enumerate(out):
+            if is_duplicate_task_twin(out, i, cache_prefix_count=_guard):
+                twins += 1
+                continue
+            kept.append(m)
+        if twins:
+            out = kept
+            changed = True
+            logger.info('[Reconcile] Collapsed %d duplicate task-twin '
+                        'assistant row(s) (one reply committed twice under the '
+                        'same _taskId). Remaining=%d', twins, len(out))
+
     # ── 1. Buried-ghost sweep (all but the tail) ──
     if len(out) >= 2:
         last_idx = len(out) - 1
@@ -496,6 +644,7 @@ __all__ = [
     'classify_ghost_tail',
     'is_error_husk',
     'is_superseded_error_husk',
+    'is_duplicate_task_twin',
     'is_superseded_incomplete_fragment',
     'mark_superseded_incomplete_fragments',
     'reconcile_conversation_messages',

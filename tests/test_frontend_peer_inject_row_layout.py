@@ -1,29 +1,30 @@
 #!/usr/bin/env python3
 """The peer-message inbox row must (a) attribute the sender by conversation
-TITLE, not a raw id, and (b) place the verbatim "模型原文" entry on the FAR
-RIGHT of the header — the same convention every other tool row follows.
+TITLE, not a raw id, and (b) carry NO "模型原文" (model-view) button anywhere
+— the whole model-view mechanism was removed on 2026-07-28 per owner
+directive ("其信息不如调试面板有用"); the round-scoped debug entry is the
+surviving way to inspect what a tool call saw.
 
 WHY THIS TEST EXISTS
 --------------------
 The reported bug (screenshot): a round-boundary peer injection ("收到 N 条对话
-消息") rendered the sender as a bare truncated conv id (``mrnaj25i``) and buried
-the verbatim "model view" toggle INSIDE each body card. Every other tool row
-carries its "模型原文" affordance on the far right of the header, and a human
-cares WHO sent the message — a title, not an opaque id.
+消息") rendered the sender as a bare truncated conv id (``mrnaj25i``). Every
+human cares WHO sent the message — a title, not an opaque id.
 
 FIX (static/js/ui/tool_rounds.js ``_renderPeerInjectRow``)
   1. The sender is resolved through the shared ``convTitleById`` seam into a
      ``.sw-peer-from-bubble`` TITLE bubble (raw id only in the tooltip).
-  2. The verbatim model text moves to a header ``[data-tc-preview-text]`` button
-     (``_tcModelViewBtnForText`` + ``_injectVerbatimText``) rendered AFTER the
-     info badge, so CSS ``margin-left:auto`` floats it to the far right. The
-     per-card ``.sw-card-raw`` toggle and the explicit ``.sw-inbox-row-chev``
-     span are removed (a CSS ``::after`` caret handles the collapse affordance).
+  2. The per-card ``.sw-card-raw`` toggle and the explicit ``.sw-inbox-row-chev``
+     span are gone (a CSS ``::after`` caret handles the collapse affordance).
+  3. (2026-07-28) The header ``[data-tc-preview-text]`` model-view button is
+     gone with the rest of the mechanism; this suite now PINS ITS ABSENCE so
+     the affordance is not re-introduced row-by-row.
 
 This test EXTRACTS the real shipped helpers + ``_renderPeerInjectRow`` and evals
-them in node, asserting the title bubble, the far-right model-view button, and
-the absence of the raw id from the visible label. NC neuters ``convTitleById``
-so the bubble falls back — proving the title lookup is load-bearing.
+them in node, asserting the title bubble, the absence of the raw id from the
+visible label, and the absence of any model-view control. NC neuters
+``convTitleById`` so the bubble falls back — proving the title lookup is
+load-bearing.
 
 Skips cleanly when node isn't installed.
 """
@@ -73,16 +74,11 @@ global.convTitleById = NEUTER
   ? (cid => 'Untitled chat')                       // NC: lookup always falls back
   : (cid => _TITLES[cid] || '');
 global.window = {};
-const _tcModelTextRegistry = new Map();
-let _tcModelTextSeq = 0;
-global._tcModelTextRegistry = _tcModelTextRegistry;
 
 function pull(name){const i=src.indexOf('function '+name+'(');let d=0,j=src.indexOf('{',i);
   for(let k=j;k<src.length;k++){if(src[k]==='{')d++;else if(src[k]==='}'){d--;if(d===0)return src.slice(i,k+1);}}}
-eval(pull('_injectVerbatimText'));
 eval(pull('_peerFromBubble'));
 eval(pull('_peerFromBubbleGroup'));
-eval(pull('_tcModelViewBtnForText'));
 eval(pull('_renderPeerInjectRow'));
 
 // Count occurrences of a substring.
@@ -106,14 +102,11 @@ if (!NEUTER) {
   // The raw id must NOT be a visible label — only inside the title= tooltip.
   check('raw_id_not_a_label', !html.includes('>mrnaj25i<'));
   check('raw_id_in_tooltip', html.includes('title="conv mrnaj25i"'));
-  // Verbatim model-view button present AND after the info badge (far-right).
-  check('modelview_btn_present', html.includes('data-tc-preview-text'));
-  check('modelview_after_badge',
-    html.indexOf('data-tc-preview-text') > html.indexOf('ptool-badge-info'));
-  // The registry got the verbatim text (what the model actually saw).
-  const entry = [..._tcModelTextRegistry.values()].pop();
-  check('verbatim_text_registered',
-    entry && entry.text.includes('Heads up: fixing the bug'));
+  // The model-view affordance is GONE (removed 2026-07-28 per owner) and must
+  // not creep back — neither the toolContent-backed nor the registry-backed
+  // variant, in the header or the body.
+  check('no_modelview_btn',
+    !html.includes('data-tc-preview') && !html.includes('tc-preview-btn'));
   // The dead chevron span is gone (CSS ::after handles collapse now).
   check('no_chevron_span', !html.includes('sw-inbox-row-chev'));
   // No per-card raw toggle inside the body anymore.
@@ -170,11 +163,11 @@ def _run(neuter: bool) -> str:
 
 
 @pytest.mark.skipif(not shutil.which('node'), reason='node not installed')
-def test_peer_inject_row_title_bubble_and_far_right_modelview():
+def test_peer_inject_row_title_bubble_and_no_modelview():
     out = _run(neuter=False)
     fails = [ln for ln in out.splitlines() if ln.startswith('FAIL')]
     assert not fails, 'peer-inject row layout failures:\n' + out
-    assert out.count('PASS') >= 15, f'expected >=15 PASS, got:\n{out}'
+    assert out.count('PASS') >= 13, f'expected >=13 PASS, got:\n{out}'
 
 
 @pytest.mark.skipif(not shutil.which('node'), reason='node not installed')
@@ -198,13 +191,15 @@ def test_NC_neutered_convtitle_loses_the_title_bubble():
         'NC control failed — multi-sender header fell back to raw ids:\n' + out)
 
 
-def test_source_uses_title_bubble_and_header_modelview():
+def test_source_uses_title_bubble_and_no_modelview():
     """Cheap source guard (runs without node): the peer row builds a sender
-    bubble + a header model-view button, and no longer emits a chevron span."""
+    bubble, emits NO model-view button (removed 2026-07-28), and no longer
+    emits a chevron span or a raw-id list."""
     src = open(TR_JS, encoding='utf-8').read()
     peer = _pull_fn(src, '_renderPeerInjectRow')
     assert '_peerFromBubbleGroup' in peer, 'peer row header no longer uses the title-bubble group'
-    assert '_tcModelViewBtnForText' in peer, 'peer row no longer emits a header model-view button'
+    assert '_tcModelViewBtnForText' not in peer, (
+        'the model-view button crept back into the peer row header')
     assert 'sw-inbox-row-chev' not in peer, 'the dead chevron span was re-introduced'
     assert 'sw-inbox-row-ids' not in peer, 'the raw-id fallback list was re-introduced in the peer row'
 
@@ -215,5 +210,5 @@ if __name__ == '__main__':
     else:
         print(_run(neuter=False))
         print(_run(neuter=True))
-    test_source_uses_title_bubble_and_header_modelview()
+    test_source_uses_title_bubble_and_no_modelview()
     print('PASS source guard')

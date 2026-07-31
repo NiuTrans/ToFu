@@ -86,7 +86,7 @@ for (const n of ['twUpdate','twStart','twStop','finishStream','renderChat',
   'renderConversationList','buildTurnNav','saveConversations','updateContextBar',
   'scrollToBottom','_forceScrollToBottom','showToast','debugLog','showMessagesInDebug',
   '_handleAutopilotVuEvent','_retriggerHgTranslations','_streamTimerTouch',
-  '_reportClientError']) {
+  'setStreamPhase','_reportClientError']) {
   win[n] = global[n] = spy(n);
 }
 win._streamingBubbleHTML = global._streamingBubbleHTML = () => '<div id="streaming-msg"></div>';
@@ -120,6 +120,7 @@ eval(fs.readFileSync(process.argv[5], 'utf8'));  // ui/sse_handlers_swarm.js
 eval(fs.readFileSync(process.argv[6], 'utf8'));  // ui/sse_handlers_io.js
 eval(fs.readFileSync(process.argv[7], 'utf8'));  // ui/sse_handlers_misc.js
 eval(fs.readFileSync(process.argv[8], 'utf8'));  // ui/sse_handlers_lifecycle.js
+eval(fs.readFileSync(process.argv[9], 'utf8'));  // ui/stream_reducer.js (defines projectColdSnapshot)
 eval(fs.readFileSync(process.argv[2], 'utf8'));  // sse_pipeline.js
 
 const T = win.__sse_test__;
@@ -182,7 +183,6 @@ const LONG = 'The quick brown fox jumps over the lazy dog. '.repeat(4);  // ~180
   T.dispatchSSEEvent(line({ type: 'retry_reset' }), ctx);
   check('retry_reset_clears_content', am.content === '');
   check('retry_reset_clears_thinking', am.thinking === '');
-  check('retry_reset_clears_buf', buf.content === '' && buf.thinking === '');
 }
 
 console.log(out.join('\n'));
@@ -196,6 +196,7 @@ _ARGS = [
     os.path.join(JS_DIR, 'ui', 'sse_handlers_io.js'),         # argv[6]
     os.path.join(JS_DIR, 'ui', 'sse_handlers_misc.js'),       # argv[7]
     os.path.join(JS_DIR, 'ui', 'sse_handlers_lifecycle.js'),  # argv[8]
+    os.path.join(JS_DIR, 'ui', 'stream_reducer.js'),          # argv[9]
 ]
 
 
@@ -229,14 +230,15 @@ def test_state_snapshot_no_wipe():
     assert not fails, 'state-snapshot verbatim failures:\n' + output
     assert output.count('PASS') >= 6, f'expected >=6 PASS lines, got:\n{output}'
 
-    # Source guard: the plain-assistant state branch now assigns content
-    # VERBATIM (backend-authoritative), NOT through the retired _snapshotLonger
-    # text belt.
+    # Source guard: the plain-assistant state branch now applies the
+    # projectColdSnapshot reducer projection VERBATIM (backend-authoritative;
+    # the reducer is the identity fold for content), NOT through the retired
+    # _snapshotLonger text belt.
     with open(pipeline, encoding='utf-8') as f:
         src = f.read()
-    assert 'assistantMsg.content = ev.content || ""' in src, (
-        'regression: the plain-assistant `state` handler no longer assigns '
-        'content verbatim — the verbatim projection was changed.')
+    assert 'assistantMsg.content = _proj.content;' in src, (
+        'regression: the plain-assistant `state` handler no longer applies the '
+        'reducer projection verbatim — the verbatim projection was changed.')
     assert '_snapshotLonger(' not in src, (
         'the retired _snapshotLonger text belt reappeared — state text must be '
         'a verbatim projection of the backend-authoritative snapshot.')
@@ -252,7 +254,7 @@ def test_state_snapshot_verbatim_neuter(tmp_path):
     pipeline = os.path.join(JS_DIR, 'ui', 'sse_pipeline.js')
     with open(pipeline, encoding='utf-8') as f:
         src = f.read()
-    fixed = 'assistantMsg.content = ev.content || "";'
+    fixed = 'assistantMsg.content = _proj.content;'
     assert fixed in src, 'verbatim assignment not found — update the neuter target'
     neutered_src = src.replace(
         fixed, 'assistantMsg.content = "__NEUTERED__";', 1)

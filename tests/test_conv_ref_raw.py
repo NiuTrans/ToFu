@@ -192,9 +192,18 @@ class TestGetConversationRaw:
         # …and the raw flag propagates through the handler so the card renders
         # the RAW badge + per-message metadata (the fix this turn).
         assert meta_raw['convDigest'].get('raw') is True
-        # …and the default (non-raw) read attaches it as before (no regression).
-        meta_default = self._capture_post_build_meta(
+        # …and the TOOL-SURFACE DEFAULT is now raw too (owner-directed
+        # 2026-07-28): a bare call reads like a DB query, so its card carries
+        # the RAW badge. Pinned in tests/test_conv_ref_raw_default.py.
+        meta_bare = self._capture_post_build_meta(
             {'conversation_id': self.cid})
+        assert 'convDigest' in meta_bare
+        assert meta_bare['convDigest'].get('raw') is True
+        # …and an EXPLICIT opt-out still attaches a plain, non-raw card — the
+        # protection this assertion has always carried: the badge must not
+        # claim a debug read that did not happen.
+        meta_default = self._capture_post_build_meta(
+            {'conversation_id': self.cid, 'raw': False})
         assert 'convDigest' in meta_default
         assert meta_default['convDigest']['convId'] == self.cid
         assert 'raw' not in meta_default['convDigest']

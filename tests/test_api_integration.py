@@ -658,7 +658,13 @@ class TestMiscEndpoints:
         assert resp.status_code == 200
 
     def test_browser_commands(self, flask_client):
-        resp = flask_client.get("/api/browser/commands")
+        # /api/browser/commands is bridge-scoped (B0): a credential is
+        # required regardless of peer address. Use the in-process loopback
+        # agent token, as the desktop bridge tests do.
+        from routes.api_v1.auth import loopback_agent_token
+        resp = flask_client.get("/api/browser/commands", headers={
+            'X-Bridge-Secret': loopback_agent_token(),
+        })
         assert resp.status_code == 200
 
     def test_scheduler_tasks(self, flask_client):

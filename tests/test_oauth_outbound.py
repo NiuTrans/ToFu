@@ -155,6 +155,22 @@ class TestProvisioning(unittest.TestCase):
         self.assertNotIn('oauth_claude', ids)
         self.assertIn('user_prov', ids)
 
+    def test_managed_models_are_current(self):
+        # Guards the preset model lists against silently drifting stale — the
+        # managed providers must ship the current flagship IDs.
+        self._run(outbound.provision_oauth_provider, 'claude')
+        self._run(outbound.provision_oauth_provider, 'codex')
+        cfg = self._load()
+        claude = next(p for p in cfg['providers'] if p['id'] == 'oauth_claude')
+        codex = next(p for p in cfg['providers'] if p['id'] == 'oauth_codex')
+        claude_ids = [m['model_id'] for m in claude['models']]
+        codex_ids = [m['model_id'] for m in codex['models']]
+        # Latest verified GA flagships (Anthropic 2025-11-24 / OpenAI Codex).
+        self.assertIn('claude-opus-4-5-20251101', claude_ids)
+        self.assertIn('gpt-5.2-codex', codex_ids)
+        # Claude models must keep the thinking capability.
+        self.assertTrue(all('thinking' in m['capabilities'] for m in claude['models']))
+
 
 if __name__ == '__main__':
     unittest.main()

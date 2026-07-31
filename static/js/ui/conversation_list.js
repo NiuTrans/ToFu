@@ -411,7 +411,12 @@ function _renderFolderTabsInner(tabsEl, folders, activeFolderId, allConvs) {
     return;
   }
 
-  const sortedFolders = [...safeFolders].sort((a, b) => (lastActiveMap[b.id] || 0) - (lastActiveMap[a.id] || 0) || (a.order || 0) - (b.order || 0));
+  /* Rank by the project's most recent SIGNAL, counting creation as one: a
+   * just-created project has no conversations yet, so activity-only ranking
+   * scored it 0 and buried it at the rail bottom — exactly when the user is
+   * about to file something into it. */
+  const _folderSortTs = (f) => Math.max(lastActiveMap[f.id] || 0, f.createdAt || 0);
+  const sortedFolders = [...safeFolders].sort((a, b) => _folderSortTs(b) - _folderSortTs(a) || (a.order || 0) - (b.order || 0));
 
   /* ── Vertical project rail ──
    * Each project is a full-width ROW (dot + name + count) so names of any
@@ -622,6 +627,81 @@ function _renderConvWindow(listEl, filtered) {
   _convVirtual.observer = obs;
 }
 
+
+/* ── C3/C4 — global keyset pagination of the sidebar window ─────────────
+ * The top-N sidebar window (Epic D4) is a performance floor, not a ceiling:
+ * conversations that sort past it must stay REACHABLE. While the server
+ * total exceeds what is loaded, a "N earlier · Load more" affordance hangs
+ * below the windowed list (CSS at styles.css .conv-load-more); clicking it —
+ * or scrolling it into view — fetches the next keyset page
+ * (Api.conversations.listPage) and merges it via mergeServerConvShells. */
+let _loadingMoreGlobalConvs = false;
+
+/* True only for the GLOBAL list (not a folder view, not search) when the
+ * server reports more conversations than are currently in memory. */
+function _hasMoreGlobalConvs() {
+  if (typeof getActiveFolderId === 'function' && getActiveFolderId()) return false;
+  const total = typeof getServerTotalCount === 'function' ? getServerTotalCount() : null;
+  if (!Number.isFinite(total)) return false;
+  return total > conversations.length;
+}
+
+function _unloadedGlobalConvCount() {
+  const total = typeof getServerTotalCount === 'function' ? getServerTotalCount() : null;
+  if (!Number.isFinite(total)) return 0;
+  return Math.max(0, total - conversations.length);
+}
+
+/* Append the load-more affordance to `listEl` (no-op when caught up). */
+function _appendLoadMoreAffordance(listEl) {
+  if (!listEl || !_hasMoreGlobalConvs()) return;
+  const n = _unloadedGlobalConvCount();
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'conv-load-more';
+  btn.textContent = (typeof t === 'function'
+    ? t('sidebar.loadMoreEarlier')
+    : '{n} earlier conversations not loaded · Load more').replace('{n}', String(n));
+  btn.addEventListener('click', () => { loadMoreGlobalConvs(); });
+  listEl.appendChild(btn);
+  /* C3: scrolling the affordance into view auto-loads (same handler as the
+   * click). The window sentinel pages IN-MEMORY rows; this pages the SERVER
+   * once the in-memory rows run out. */
+  if (typeof IntersectionObserver === 'function') {
+    const obs = new IntersectionObserver((entries) => {
+      if (!entries.some(e => e.isIntersecting)) return;
+      obs.disconnect();
+      loadMoreGlobalConvs();
+    }, { root: listEl, rootMargin: '0px 0px 200px 0px' });
+    obs.observe(btn);
+  }
+}
+
+/* Fetch the next keyset page (cursor = oldest in-memory conv) and merge it. */
+async function loadMoreGlobalConvs() {
+  if (_loadingMoreGlobalConvs || !_hasMoreGlobalConvs()) return;
+  _loadingMoreGlobalConvs = true;
+  try {
+    let oldestTs = Infinity, oldestId = null;
+    for (const c of conversations) {
+      if (!c) continue;
+      const ts = c.updatedAt || c.createdAt || 0;
+      if (ts < oldestTs) { oldestTs = ts; oldestId = c.id; }
+    }
+    if (oldestId == null) return;
+    const data = await Api.conversations.listPage(oldestTs, oldestId, 200);
+    const rows = (data && (data.conversations || data.items)) || [];
+    if (rows.length && typeof mergeServerConvShells === 'function') {
+      const added = mergeServerConvShells(rows);
+      if (added > 0) renderConversationList();
+    }
+  } catch (e) {
+    console.warn('[sidebar] loadMoreGlobalConvs failed:', e && e.message);
+  } finally {
+    _loadingMoreGlobalConvs = false;
+  }
+}
+
 function renderConversationList() {
   const listEl = document.getElementById("convList"),
     statsEl = document.getElementById("sidebarSearchStats");
@@ -671,11 +751,15 @@ function renderConversationList() {
      *    status tag IN PLACE — no innerHTML rebuild, no full reparse/relayout
      *    of the sidebar (the dominant long-task cost during a send's
      *    translate→stream→done lifecycle). Mirrors the folder-tab fast path. ── */
-    const _structHash = `AF${_activeFolderId||''}|FL${foldersReady?1:0}|CG${[..._collapsedConvGroups].sort().join('.')}|F${folderHash}|` +
+    /* DBG: per-row action buttons (copy-conv-ID) are baked into the row HTML
+     * by _buildConvItemHTML under the debug flag — include it in the struct
+     * hash or toggling debug mode in Settings early-returns here and the
+     * buttons only appear on the next full page load. */
+    const _structHash = `AF${_activeFolderId||''}|FL${foldersReady?1:0}|DBG${(typeof _featureFlags !== 'undefined' && _featureFlags.debug_mode)?1:0}|CG${[..._collapsedConvGroups].sort().join('.')}|F${folderHash}|` +
       filtered.map(c => `${c.id}|${c.title}|${c.updatedAt||""}|${c.folderId||""}|${(c.projectSummary && c.projectSummary.text) ? "S" : ""}`).join("\n");
     const _statusHash = filtered.map(c => {
       const f = _convStatusFlags(c);
-      return `${c.id===activeConvId?1:0}${f.streaming?1:0}${f.translating?1:0}${f.memoryPrefetching?1:0}${f.awaitingHuman?1:0}${f.errored?1:0}${f.incomplete?1:0}`;
+      return `${c.id===activeConvId?1:0}${f.streaming?1:0}${f.translating?1:0}${f.memoryPrefetching?1:0}${f.awaitingHuman?1:0}${f.errored?1:0}${f.incomplete?1:0}${f.unconfirmed?1:0}`;
     }).join(",");
     const _fullHash = `${_structHash}|||${_statusHash}`;
     if (_fullHash === _lastConvListHash) return;
@@ -732,6 +816,10 @@ function renderConversationList() {
       listEl.innerHTML = listHtml;
     } else {
       _renderConvWindow(listEl, filtered);
+      /* C3/C4: global list only — hang the keyset "load earlier" affordance
+       * below the windowed rows (folder views filter a client-side subset,
+       * so a global page count would mislead there). */
+      if (!_activeFolderId) _appendLoadMoreAffordance(listEl);
     }
     /* ★ Keep _lastActiveConvId in sync after a full rebuild so
      * _swapActiveConvItem can do O(1) swaps on subsequent switches. */
@@ -878,6 +966,21 @@ function showConvSummary(badgeEl, ev) {
  * @returns {boolean}
  */
 function convIsBusy(conv) {
+  /* pt_conv_state_ssot P2: delegate to the reducer's UNION predicate so
+   * the "supposed to be running" fact is a single computation across:
+   * - local activeStreams (this tab's live SSE)
+   * - local optimistic conv.activeTaskId (this tab's own send)
+   * - server-authoritative conv._authoritativeActiveTaskIds (sibling
+   *   device generating, or connect-snapshot at boot)
+   * - prefix scan for branch/compound task IDs.
+   * The reducer is bundled BEFORE this file (core/conv_state_reducer.js
+   * in _BUNDLE_FILES); computeConvBusy accepts activeStreams via
+   * dependency injection, keeping the fn side-effect-free. */
+  if (typeof computeConvBusy === 'function') {
+    return computeConvBusy(conv, activeStreams);
+  }
+  /* Fallback for degenerate load orders (bundle build partial). Same
+   * two-source predicate the pre-P2 code shipped. */
   if (!conv) return false;
   if (activeStreams.has(conv.id) || !!conv.activeTaskId) return true;
   const prefix = conv.id + ":";
@@ -965,7 +1068,19 @@ function _convStatusFlags(c) {
       incomplete = !c.lastMsgHasOutput;
     }
   }
-  return { streaming, translating, memoryPrefetching, awaitingHuman, errored, incomplete };
+  /* ★ Freshness of the busy verdict (pt_cadaa70ffa6b468d). NOT a second
+   * busy-ness source: `streaming` above is unchanged and still authoritative.
+   * This only records whether the authoritative channel is currently
+   * DELIVERING, so a busy dot inherited from a frame that arrived before the
+   * socket went dark is rendered as "unconfirmed" rather than as settled fact.
+   * Only meaningful while `streaming` — an idle conv has no claim to soften. */
+  let unconfirmed = false;
+  if (streaming && typeof computeConvStateConfidence === 'function') {
+    try {
+      unconfirmed = computeConvStateConfidence(c, activeStreams) !== 'confirmed';
+    } catch (e) { unconfirmed = false; }
+  }
+  return { streaming, translating, memoryPrefetching, awaitingHuman, errored, incomplete, unconfirmed };
 }
 
 /**
@@ -982,7 +1097,9 @@ function _convStatusHtml(f) {
   } else if (f.memoryPrefetching) {
     dotHtml = `<div class="conv-memprefetch-dot" title="${t('sidebar.memoryPrefetch')}"></div>`;
   } else if (f.streaming) {
-    dotHtml = '<div class="conv-streaming-dot"></div>';
+    dotHtml = f.unconfirmed
+      ? `<div class="conv-streaming-dot conv-state-unconfirmed" title="${t('sidebar.stateUnconfirmed')}"></div>`
+      : '<div class="conv-streaming-dot"></div>';
   } else if (f.errored) {
     dotHtml = `<div class="conv-error-dot" title="${t('sidebar.errorState')}"></div>`;
   } else if (f.incomplete) {
@@ -994,7 +1111,9 @@ function _convStatusHtml(f) {
   } else if (f.memoryPrefetching) {
     statusTag = `<span class="conv-status-tag conv-status-memprefetch">${t('sidebar.memoryPrefetchTag')}</span>`;
   } else if (f.streaming) {
-    statusTag = `<span class="conv-status-tag conv-status-streaming">${t('sidebar.answering')}</span>`;
+    statusTag = f.unconfirmed
+      ? `<span class="conv-status-tag conv-status-streaming conv-state-unconfirmed" title="${t('sidebar.stateUnconfirmed')}">${t('sidebar.answering')}?</span>`
+      : `<span class="conv-status-tag conv-status-streaming">${t('sidebar.answering')}</span>`;
   } else if (f.errored) {
     statusTag = `<span class="conv-status-tag conv-status-error" title="${t('sidebar.errorState')}">${t('sidebar.errorTag')}</span>`;
   } else if (f.incomplete) {
@@ -1041,10 +1160,11 @@ function _buildConvItemHTML(c, titleHtml, snippetHtml) {
   const eid = escapeHtml(c.id);
   const isActive = c.id === activeConvId ? " active" : "";
   const feishuBadge = c.source === 'feishu' ? `<span class="conv-feishu-badge" title="${t('sidebar.feishuConv')}">Feishu</span>` : '';
-  const _summaryText = (c.projectSummary && c.projectSummary.text) ? String(c.projectSummary.text) : '';
-  const summaryBadge = _summaryText
-    ? `<span class="conv-summary-badge" data-summary="${escapeHtml(_summaryText)}" title="${t('sidebar.summaryBadge')}" onclick="showConvSummary(this, event)">${_CONV_SUMMARY_SVG}</span>`
-    : '';
+  // Sidebar conversation-summary badge is PAUSED: the feature is unstable
+  // (render location + timing issues) and backend generation is disabled, so
+  // there is nothing to surface. Keep _CONV_SUMMARY_SVG + showConvSummary for
+  // the future revival — do not render the badge for now.
+  const summaryBadge = '';
   const _isDebug = typeof _featureFlags !== 'undefined' && _featureFlags.debug_mode;
   const copyIdBtn = _isDebug ? `<button class="conv-action-btn conv-copy-id" data-conv-id="${eid}" title="${t('sidebar.copyConvId')}">${_CONV_CP_SVG}</button>` : '';
   const folderClass = c.folderId ? ' in-folder' : '';

@@ -17,10 +17,23 @@ byte-stable body re-rolls the dice and usually hits the now-visible cache write
 — the harness proved this drives the effective floor% toward zero (mrsfs9d6
 20%->0%). This module is the production wiring of that mitigation.
 
-Discipline (mirrors the TOFU_CACHE_MID_MODE=drop rollout)
-=========================================================
-  * ENV-GATED (``TOFU_CACHE_FLOOR_RETRY``), DEFAULT ON after production-path
-    acceptance (0.0% floor on mrsfs9d6 / mrt1ijef); ``=0`` for instant rollback.
+Discipline (2026-07-23 flip — DEFAULT OFF; owner-authored reversal)
+==================================================================
+  * ENV-GATED (``TOFU_CACHE_FLOOR_RETRY``), **DEFAULT OFF** as of 2026-07-23.
+    Why the flip: the "0.0% floor" acceptance metric was REPORT-KIND
+    ("effective floor%") — computed from the ADOPTED resend's usage only. The
+    DISCARDED first attempt was NEVER billed into apiRounds / accumulated_usage
+    / compute_cost / the wallet, so the gateway charged us twice (once at the
+    full 1.25× cache_write rate, once at ~0.11× read+tail-write) while the
+    frontend cost popover displayed only the second. The North-Star is COST
+    MINIMISATION, not any single reported metric — and per-request the resend
+    is a strict expected-cost LOSS (a collapse costs 1.25× base whether or not
+    we resend; a resend adds another 0.11×~1.25× on top with no proven
+    downstream cache-price reduction for the same turn, since is_floor_collapse
+    is a per-request predicate with no cross-round memory).
+  * Kept env-controllable so a future controlled A/B (with the honest
+    accounting fix landed) can re-evaluate against real billing data. Set
+    ``TOFU_CACHE_FLOOR_RETRY=1`` to opt in.
   * Only fires on a BYTE-STABLE floor-collapse (the wire prefix is proven
     identical to the previous round). A resend on a body the client actually
     changed would be a wasted call, so it is refused.
@@ -29,6 +42,12 @@ Discipline (mirrors the TOFU_CACHE_MID_MODE=drop rollout)
   * 503/throttle-AWARE: a resend that raises a rate-limit/throttle error stops
     the loop immediately (do not pile retries onto an already-throttled gateway;
     that is what limited the harness mrt1ijef arm to 11.8%).
+  * HONEST ACCOUNTING (companion fix, always-on): whenever a resend fires, the
+    DISCARDED attempt's usage is preserved onto ``usage['_extra_billing_rounds']``
+    (list of {model, usage, tag}) — the LLM-fallback loop reads it and appends
+    to api_rounds + accumulated_usage so the cost popover, per-round breakdown
+    and wallet debit match what the gateway actually charged. The mitigation
+    can no longer hide cost from the reports.
 
 Public API
 ==========
@@ -41,6 +60,7 @@ Public API
 """
 from __future__ import annotations
 
+from lib.cost import normalize_usage
 from lib.env_compat import getenv_compat
 from lib.log import get_logger
 
@@ -58,11 +78,16 @@ _FLOOR_WRITE_LO = 20_000
 def floor_retry_enabled() -> bool:
     """True when the floor-collapse resend mitigation is enabled.
 
-    DEFAULT ON (2026-07-20): production-path acceptance drove effective floor%
-    to 0.0% on two real miss-heavy convs (mrsfs9d6 / mrt1ijef). Set
-    ``TOFU_CACHE_FLOOR_RETRY=0`` for instant rollback.
+    **DEFAULT OFF (2026-07-23)**: the mitigation drove the *reported* floor%
+    to zero by ADOPTING the resend's usage while silently discarding the first
+    attempt's (billed) usage — but the gateway charged for BOTH. With honest
+    accounting now landed (``_extra_billing_rounds`` propagated into
+    ``api_rounds`` / ``accumulated_usage`` / ``compute_cost``), the per-request
+    expected cost of a resend is strictly HIGHER than doing nothing. Cost
+    minimisation is the North-Star; report-only wins do not justify default-on.
+    Set ``TOFU_CACHE_FLOOR_RETRY=1`` to opt in for future controlled A/B tests.
     """
-    raw = (getenv_compat('TOFU_CACHE_FLOOR_RETRY', default='1') or '1').strip().lower()
+    raw = (getenv_compat('TOFU_CACHE_FLOOR_RETRY', default='0') or '0').strip().lower()
     return raw in ('1', 'true', 'yes', 'on')
 
 
@@ -77,22 +102,16 @@ def floor_retry_max() -> int:
     raw = (getenv_compat('TOFU_CACHE_FLOOR_RETRY_MAX', default='2') or '2').strip()
     try:
         n = int(raw)
-    except (ValueError, TypeError):
+    except (ValueError, TypeError) as _e:
+        logger.debug('floor retry max: unparseable/unexpected type (%s)', _e)
         n = 2
     return max(0, min(3, n))
 
 
 def _cache_tokens(usage) -> tuple[int, int]:
     """Return (cache_read, cache_write) from a usage dict, tolerant of aliases."""
-    u = usage or {}
-    cr = (u.get('cache_read_tokens')
-          or u.get('cache_read_input_tokens') or 0)
-    cw = (u.get('cache_creation_input_tokens')
-          or u.get('cache_write_tokens') or 0)
-    try:
-        return int(cr or 0), int(cw or 0)
-    except (ValueError, TypeError):
-        return 0, 0
+    u = normalize_usage(usage)
+    return u['cache_read'], u['cache_write']
 
 
 def is_floor_collapse(usage) -> bool:

@@ -292,6 +292,50 @@ REQ_FILE="${INSTALL_DIR}/requirements.txt"
 # ═══════════════════════════════════════════════════════════════
 _FAST_PATH_DONE=0
 
+# ═══════════════════════════════════════════════════════════════
+#  Step 0.55: Download accelerants — MUST precede the backend fork
+#
+#  These were previously configured at ~L784, INSIDE the conda-only block
+#  ($_FAST_PATH_DONE != 1). But _try_uv_install runs BEFORE that block and
+#  returns on success, so on the DEFAULT (uv) path the mirror was never read:
+#  a corp/China user's `uv pip install` went straight to pypi.org and hung to
+#  the 900s timeout. The faster route was the one with zero acceleration.
+#  Everything that redirects or caches a DOWNLOAD therefore lives here, above
+#  the fork, so both backends inherit one source of truth.
+# ═══════════════════════════════════════════════════════════════
+
+# ── PyPI index (baked by export.py for corp hosts) ──
+# pip and uv read DIFFERENT variables: exporting PIP_INDEX_URL alone leaves
+# `uv pip install` pointed at the public PyPI, which is the whole bug. Set
+# both. UV_INDEX_URL is uv's documented override (UV_DEFAULT_INDEX on newer
+# builds) — export both names so the redirect survives a uv upgrade.
+if [[ -n "${TOFU_PYPI_INDEX:-}" ]]; then
+    info "PyPI index override: ${TOFU_PYPI_INDEX}"
+    export PIP_INDEX_URL="${TOFU_PYPI_INDEX}"
+    export UV_INDEX_URL="${TOFU_PYPI_INDEX}"
+    export UV_DEFAULT_INDEX="${TOFU_PYPI_INDEX}"
+    _PYPI_HOST="$(printf '%s' "$TOFU_PYPI_INDEX" | sed -E 's|^https?://([^/:]+).*|\1|')"
+    export PIP_TRUSTED_HOST="${_PYPI_HOST}"
+    export UV_INSECURE_HOST="${_PYPI_HOST}"
+fi
+
+# ── Playwright browser CDN mirror (opt-in) ──
+# cdn.playwright.dev is slow-to-unreachable from mainland China. Honour a
+# mirror when the operator sets one; empty = upstream, so public installs are
+# unaffected.
+if [[ -n "${TOFU_PLAYWRIGHT_MIRROR:-}" ]]; then
+    info "Playwright download host: ${TOFU_PLAYWRIGHT_MIRROR}"
+    export PLAYWRIGHT_DOWNLOAD_HOST="${TOFU_PLAYWRIGHT_MIRROR}"
+fi
+
+# ── Persistent, backend-shared download caches ──
+# Both default to a per-env location, so a venv rebuild (`uv venv --clear`),
+# a second env, or a plain re-run re-downloads ~115 MB of browser and the
+# entire wheel set. Pin them to the user cache dir instead — deliberately
+# OUTSIDE ${INSTALL_DIR}/.venv, which gets wiped on rebuild.
+export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-${HOME}/.cache/ms-playwright}"
+export UV_CACHE_DIR="${UV_CACHE_DIR:-${HOME}/.cache/uv}"
+
 # Return 0 iff this host's glibc is >= 2.28 (or non-Linux, e.g. macOS where
 # wheels are arch-tagged and the old GLIBC trap doesn't apply). Conservative:
 # if the version can't be determined, return non-zero (→ prefer conda).
@@ -325,15 +369,23 @@ _try_uv_install() {
     _ensure_uv || { warn "Could not obtain uv — falling back to conda"; return 1; }
 
     local _venv="${INSTALL_DIR}/.venv"
-    info "Creating uv virtualenv at ${_venv} (Python ${PY_VER})..."
-    # --python-preference only-managed: seed the venv from uv's OWN standalone
-    # CPython, never a system/conda interpreter. Two reasons: (1) hermetic +
-    # reproducible (no dependence on whatever python the host ships); (2) it
-    # guarantees .venv/bin/python resolves (realpath) to a DISTINCT base binary,
-    # so server.py's re-exec guard is never short-circuited by a symlink
-    # collision with the interpreter the user later launches from.
-    uv venv "$_venv" --python "${PY_VER}" --python-preference only-managed 2>&1 || {
-        warn "uv venv failed — falling back to conda"; return 1; }
+    # Idempotent re-run: `uv venv` refuses to overwrite an existing venv (it
+    # errors "use --clear"), which would spuriously drop a good install into the
+    # conda fallback on every re-run. If a usable interpreter is already present,
+    # reuse it — the `uv pip install` below is itself idempotent and fast.
+    if [[ -x "${_venv}/bin/python" ]]; then
+        info "Reusing existing uv virtualenv at ${_venv}"
+    else
+        info "Creating uv virtualenv at ${_venv} (Python ${PY_VER})..."
+        # --python-preference only-managed: seed the venv from uv's OWN standalone
+        # CPython, never a system/conda interpreter. Two reasons: (1) hermetic +
+        # reproducible (no dependence on whatever python the host ships); (2) it
+        # guarantees .venv/bin/python resolves (realpath) to a DISTINCT base binary,
+        # so server.py's re-exec guard is never short-circuited by a symlink
+        # collision with the interpreter the user later launches from.
+        uv venv "$_venv" --python "${PY_VER}" --python-preference only-managed 2>&1 || {
+            warn "uv venv failed — falling back to conda"; return 1; }
+    fi
 
     local _uvpy="${_venv}/bin/python"
     [[ -x "$_uvpy" ]] || { warn "uv venv produced no python — falling back to conda"; return 1; }
@@ -369,9 +421,54 @@ _try_uv_install() {
     # Playwright Chromium — best-effort, never blocks (browser tools degrade).
     if [[ "$SKIP_PLAYWRIGHT" -eq 0 ]]; then
         info "Installing Playwright Chromium (best-effort)..."
-        "$_uvpy" -m playwright install chromium >/dev/null 2>&1 \
+        # --only-shell: a default `install chromium` fetches BOTH the full
+        # Chromium build (175.4 MB) and chrome-headless-shell (113.2 MB) plus
+        # ffmpeg — measured 290.9 MB. Shell-only = 115.5 MB (-60%).
+        #
+        # The trade-off, stated honestly (an earlier version of this comment
+        # claimed "no headless=False call site exists" — measured FALSE on
+        # 2026-07-29): there is EXACTLY ONE headed call site in the product,
+        # tofu_search/fetch/interactive_login.py (login-wall cookie capture).
+        # chrome-headless-shell has NO headed mode — it is a separate, smaller
+        # binary, not a flag — so shell-only means that ONE feature is
+        # unavailable. Everything else (all fetch/render/screenshot paths) is
+        # headless and fully served by the shell.
+        #
+        # We keep --only-shell: -60% download for every user, at the cost of a
+        # rare, user-initiated feature that now degrades HONESTLY instead of
+        # dying at launch — chromium_env.headed_chromium_executable() decides,
+        # and the caller returns reason='headed_unavailable' naming the fix.
+        # Users who need login-wall capture run:
+        #   python -m playwright install chromium     (adds the full build)
+        "$_uvpy" -m playwright install --only-shell chromium >/dev/null 2>&1 \
             && ok "Playwright Chromium installed" \
             || warn "Playwright Chromium install skipped/failed — JS-rendered fetch disabled until you run it manually"
+        # Downloading the browser is not the same as being able to RUN it.
+        # Unlike the conda path, a uv venv has no conda-forge to source
+        # Chromium's GUI libs (libatk, libnss, fontconfig, fonts) from, so on a
+        # bare host the binary lands but every launch dies on a missing .so.
+        # Prove it launches now, while we can still say something useful —
+        # otherwise the failure only surfaces much later as a dead browser tool.
+        info "Verifying Chromium can actually launch..."
+        if "$_uvpy" - <<'PYEOF' 2>/dev/null
+from playwright.sync_api import sync_playwright
+with sync_playwright() as p:
+    b = p.chromium.launch(args=['--no-sandbox'])
+    pg = b.new_page()
+    pg.set_content('<h1>x</h1>')
+    assert pg.evaluate(
+        "(()=>{const c=document.createElement('canvas').getContext('2d');"
+        "c.font='60px sans-serif';return c.measureText('x').width;})()") > 0, 'no fonts'
+    b.close()
+PYEOF
+        then
+            ok "Chromium launches and renders text"
+        else
+            warn "Chromium is installed but cannot launch/render on this host (missing system libs or fonts)."
+            warn "  Browser screenshots + JS-rendered fetch will be unavailable; plain HTTP fetching still works."
+            warn "  Fix with root:    sudo $_uvpy -m playwright install-deps chromium"
+            warn "  Fix rootless:     re-run ./install.sh --use-conda  (sources the libs + fonts from conda-forge)"
+        fi
     fi
 
     # Publish the env for the shared downstream steps (.env, launch, pgdata probe).
@@ -433,6 +530,12 @@ fi
 # ═══════════════════════════════════════════════════════════════
 CONDA_BASE="${CONDA_BASE:-}"
 CONDA_OWNED_BY_US="${CONDA_OWNED_BY_US:-0}"
+# PG_INSTALLED_MAJOR is normally set inside the conda block (Step 5). On the uv
+# fast path that block is skipped, so pre-seed it empty here — the shared
+# pgdata-validation tail (Step 8.5+) reads it under `set -u` and would otherwise
+# crash with "PG_INSTALLED_MAJOR: unbound variable". Empty = "no PG installed",
+# which the tail already handles by pinning TOFU_DB_BACKEND=sqlite.
+PG_INSTALLED_MAJOR="${PG_INSTALLED_MAJOR:-}"
 if [[ "$_FAST_PATH_DONE" -ne 1 ]]; then
 
 # ═══════════════════════════════════════════════════════════════
@@ -736,21 +839,11 @@ EOF
     ok "Wrote ${CONDA_BASE}/.condarc (conda-forge → ${TOFU_CONDA_MIRROR}/conda-forge)"
 fi
 
-# Similarly for pip: if TOFU_PYPI_INDEX is set (by export, for corp hosts),
-# configure the sibling env's pip to use it.  pip.conf is scoped to this
-# user/home; put it in $HOME/.config/pip/pip.conf IF not already present,
-# but prefer the per-conda-env pip.conf if we can determine the env path.
-# (We actually write it after the env is created — see later.)
-if [[ -n "${TOFU_PYPI_INDEX:-}" ]]; then
-    info "PyPI index override: ${TOFU_PYPI_INDEX}"
-    # Export PIP_INDEX_URL for any pip invocation during install.sh.
-    # The pip-stanza writer lower in the script picks up this variable
-    # too, so the env's pip.conf is permanently pinned.
-    export PIP_INDEX_URL="${TOFU_PYPI_INDEX}"
-    # Trust the mirror host (common for corp http mirrors without TLS).
-    _PYPI_HOST="$(printf '%s' "$TOFU_PYPI_INDEX" | sed -E 's|^https?://([^/:]+).*|\1|')"
-    export PIP_TRUSTED_HOST="${_PYPI_HOST}"
-fi
+# PyPI index override is configured ONCE at Step 0.55, ABOVE the uv-vs-conda
+# fork, so both backends inherit it (PIP_INDEX_URL + UV_INDEX_URL + trusted
+# host). It used to be duplicated here, inside the conda-only block, which is
+# exactly why the uv fast path never saw the mirror. The env's pip.conf writer
+# further down still reads $PIP_INDEX_URL — unchanged.
 
 # ═══════════════════════════════════════════════════════════════
 #  Step 2: Update conda — ONLY if it's the sibling we own
@@ -1026,6 +1119,11 @@ PIP_ONLY_PKGS=(
     "pytz>=2024.1"         # required by dateparser
     "regex>=2024.0"        # required by dateparser
     "tzlocal>=5.0"         # required by dateparser
+    # zhconv — pure-Python (MediaWiki tables, MIT), zero deps. Fail-safe gate
+    # that normalizes voice-transcription output to Simplified Chinese
+    # (lib/transcription/_zh.py). Not on conda-forge, so pip-only; --no-deps
+    # is safe since it imports nothing beyond the stdlib.
+    "zhconv>=1.4"
 )
 
 # ── Drift guard: every dep declared in requirements.txt must be covered by
@@ -1096,18 +1194,49 @@ CONDA_CONFLICT_PKGS=(
     lxml libxml2 libxml2-16 libxslt
     icu
 )
+# Snapshot the env's package list BEFORE the purge, so we can tell whether the
+# purge actually removed anything (see _PURGED_SOMETHING below). Cheap: one
+# `conda list` against an env we are about to solve anyway.
+_CONDA_PKGS_BEFORE_PURGE="$(conda list -n "$ENV_NAME" 2>/dev/null || true)"
 conda remove -n "$ENV_NAME" -y --force "${CONDA_CONFLICT_PKGS[@]}" >/dev/null 2>&1 || true
 ok "Conflict-prone packages cleared (will reinstall below)"
+
+# Did the purge ACTUALLY remove anything? `conda remove` above is best-effort
+# and silently succeeds on a clean env where none of those packages are
+# present — which is the common re-run case.
+_PURGED_SOMETHING=0
+for _p in "${CONDA_CONFLICT_PKGS[@]}"; do
+    if [[ -n "${_CONDA_PKGS_BEFORE_PURGE:-}" ]] && \
+       grep -qE "^${_p}[[:space:]]" <<< "${_CONDA_PKGS_BEFORE_PURGE}"; then
+        _PURGED_SOMETHING=1
+        break
+    fi
+done
 
 # Also purge any pip-installed trafilatura/htmldate from prior runs so
 # pip's own install below is clean.
 python -m pip uninstall -y trafilatura htmldate courlan >/dev/null 2>&1 || true
 
-# --force-reinstall: make sure conda actually re-lays-down the files even if
-# its metadata still thinks the package is satisfied (common right after a
-# pip-uninstall — conda's view of the env can be stale).
+# --force-reinstall makes conda re-lay-down files even when its metadata still
+# thinks the package is satisfied — genuinely needed right after the purge
+# above, because a pip-uninstall leaves conda's view stale.
+#
+# But it is NOT free: applied unconditionally it re-downloads and re-links all
+# ~30 CONDA_PKGS on EVERY run, including a re-run of an already-correct env.
+# So gate it on the purge having actually removed something. When nothing was
+# purged there is no stale metadata to repair, and a plain `conda install` is
+# a fast no-op. The retry branch below still force-reinstalls unconditionally,
+# so a genuinely broken env is still repaired — we only skip the sledgehammer
+# on the happy path.
+_FORCE_REINSTALL=""
+if [[ "$_PURGED_SOMETHING" -eq 1 ]]; then
+    _FORCE_REINSTALL="--force-reinstall"
+    info "Purge removed packages — using --force-reinstall to repair conda metadata"
+else
+    info "Nothing was purged — skipping --force-reinstall (re-run stays fast)"
+fi
 _install_main_deps() {
-    conda install -n "$ENV_NAME" -c conda-forge --override-channels -y --force-reinstall "${CONDA_PKGS[@]}"
+    conda install -n "$ENV_NAME" -c conda-forge --override-channels -y ${_FORCE_REINSTALL} "${CONDA_PKGS[@]}"
 }
 
 if ! _install_main_deps; then
@@ -1711,8 +1840,9 @@ if [[ "$SKIP_PLAYWRIGHT" -eq 0 ]]; then
     step "Installing Playwright Chromium"
 
     # On Linux, install Chromium's shared libs from conda-forge so that no
-    # sudo / system packages are required. tofu_search/fetch/playwright_pool.py
-    # auto-prepends $CONDA_PREFIX/lib to LD_LIBRARY_PATH at runtime.
+    # sudo / system packages are required. server.py / bootstrap.py export
+    # $env_prefix/lib on LD_LIBRARY_PATH at startup (before any re-exec early
+    # return) so the Chromium child process can resolve them.
     if [[ "$OS" == "Linux" ]]; then
         info "Installing Chromium shared-lib deps from conda-forge (rootless)..."
         CHROMIUM_LIBS=(
@@ -1728,6 +1858,15 @@ if [[ "$SKIP_PLAYWRIGHT" -eq 0 ]]; then
             nspr
             nss
             mesa-libgbm-cos7-x86_64
+            # Text rendering. Without fontconfig + at least one real font
+            # family, Chromium launches and paints CSS fine but draws every
+            # glyph as nothing — screenshots come back blank-but-styled, which
+            # reads as "the page didn't load" rather than as an error. These
+            # were previously only present as transitive deps of other
+            # packages; pin them explicitly so a solver change can't drop them.
+            fontconfig
+            font-ttf-dejavu-sans-mono
+            font-ttf-ubuntu
         )
         if ! conda install -n "$ENV_NAME" -c conda-forge --override-channels -y "${CHROMIUM_LIBS[@]}"; then
             warn "Some Chromium shared-lib deps failed to install — browser may not launch"
@@ -1752,10 +1891,14 @@ if [[ "$SKIP_PLAYWRIGHT" -eq 0 ]]; then
 
     if ! python -c "import playwright" 2>/dev/null; then
         warn "playwright still not importable — skipping Chromium download (fetching still works via requests)"
-        warn "Manual recovery: conda activate ${ENV_NAME} && pip install 'playwright>=1.40' && python -m playwright install chromium"
+        warn "Manual recovery: conda activate ${ENV_NAME} && pip install 'playwright>=1.40' && python -m playwright install --only-shell chromium"
     else
-        info "Downloading Chromium browser binary via playwright..."
-        if python -m playwright install chromium; then
+        info "Downloading Chromium headless shell via playwright..."
+        # --only-shell: see the uv path above for the full trade-off. Skips the
+        # 175 MB full Chromium build that no HEADLESS path needs — the single
+        # headed feature (login-wall capture) degrades with an actionable
+        # message and is recovered by `python -m playwright install chromium`.
+        if python -m playwright install --only-shell chromium; then
             ok "Playwright Chromium installed"
         else
             warn "Playwright Chromium install failed (non-critical — fetching still works via requests)"
@@ -2194,6 +2337,7 @@ echo ""
 
 if [[ "$NO_LAUNCH" -eq 1 ]]; then
     info "Install-only mode — not launching server."
+    info "After starting, verify the install any time with: python healthcheck.py --runtime"
     exit 0
 fi
 
@@ -2206,4 +2350,15 @@ echo "  Press Ctrl+C to stop the server"
 echo ""
 
 cd "$INSTALL_DIR"
+
+# Post-install runtime self-check: server boot (imports + DB init + first
+# bundle build) takes a few seconds, so `healthcheck.py --runtime --wait`
+# polls /api/health until the server answers, then prints a green "you're
+# good" table — or a precise diagnosis (DB down, no LLM key, browser engine
+# missing) — instead of leaving a fresh user to guess from raw startup logs.
+# Backgrounded: the subshell survives the exec below as an orphan and its
+# output interleaves with the server logs. A probe FAILURE never fails the
+# install — the server itself is already starting.
+( python healthcheck.py --runtime --port "${PORT}" --wait 90 || true ) &
+
 exec python server.py

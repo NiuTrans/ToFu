@@ -94,6 +94,10 @@ win._renderTurnHead=global._renderTurnHead=()=>''; win._renderSoloRoundTag=globa
 win._turnLabelText=global._turnLabelText=()=>''; win.Icon=global.Icon=()=>'';
 win.CSS=global.CSS=undefined;
 win.activeStreams=global.activeStreams=new Map(); win.streamBufs=global.streamBufs=new Map();
+win.streamSessions = global.streamSessions = new Map();
+win.getStreamSession = global.getStreamSession = (cid) => { let s = win.streamSessions.get(cid); if (!s) { s = { phase: null }; win.streamSessions.set(cid, s); } return s; };
+win.setStreamPhase = global.setStreamPhase = (cid, p) => { if (!win.streamSessions.has(cid) && !(typeof activeStreams !== "undefined" && activeStreams.has(cid))) return; win.getStreamSession(cid).phase = p; };
+win.clearStreamSession = global.clearStreamSession = (cid) => { win.streamSessions.delete(cid); };
 win.conversations=global.conversations=[]; global.activeConvId=win.activeConvId='c1';
 
 let SUI = fs.readFileSync(process.argv[3], 'utf8');
@@ -162,11 +166,14 @@ check('c2_narr_self_healed', q('.stream-seg-en-narration') === 'Right — protec
 freshBody();
 updateStreamingUI({content:'',thinking:'',toolRounds:[r1],phase:null});
 _renderStreamingTranslatePreview('c1','m1','中文', {'1':'护栏是对的要求。'});
-check('c3_zh_clean', q('.stream-seg-narration') === '护栏是对的要求。');
-(function(){ const e=document.getElementById('streaming-body').querySelector('.stream-seg-narration'); e.innerHTML = '<p>Right脏了</p>'; })();
-check('c3_zh_dirtied', q('.stream-seg-narration').indexOf('Right') === 0);
+/* §3.5 step 2 byte-parity: the live zh node carries the SETTLED class list
+ * (.seg-narration) and is located by exclusion from the English sibling —
+ * same selector production uses (translation_render.js). */
+check('c3_zh_clean', q('.seg-narration:not(.stream-seg-en-narration)') === '护栏是对的要求。');
+(function(){ const e=document.getElementById('streaming-body').querySelector('.seg-narration:not(.stream-seg-en-narration)'); e.innerHTML = '<p>Right脏了</p>'; })();
+check('c3_zh_dirtied', q('.seg-narration:not(.stream-seg-en-narration)').indexOf('Right') === 0);
 _renderStreamingTranslatePreview('c1','m1','中文', {'1':'护栏是对的要求。'});
-check('c3_zh_self_healed', q('.stream-seg-narration') === '护栏是对的要求。');
+check('c3_zh_self_healed', q('.seg-narration:not(.stream-seg-en-narration)') === '护栏是对的要求。');
 
 console.log(out.join('\n'));
 """

@@ -61,6 +61,7 @@ from lib.agent_verdict._handoff import (  # noqa: E402,F401
     count_state_changing_rounds,
     _PROGRESS_RE,
     parse_progress,
+    strip_machine_tokens,
 )
 
 
@@ -130,6 +131,7 @@ __all__ = [
     'replan_enabled',
     'count_state_changing_rounds',
     'parse_progress',
+    'strip_machine_tokens',
     # ._verdict
     'classify_verdict',
     'is_incomplete_stop',

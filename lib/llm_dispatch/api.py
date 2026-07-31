@@ -236,7 +236,7 @@ def dispatch_chat(messages, *, max_tokens=4096, temperature=0,
     Returns:
         (content_text: str, usage_dict: dict)
     """
-    from lib.llm import ContentFilterError, InvalidImageError, PermissionError_, PromptTooLongError, RateLimitError, StreamOnlyError, chat
+    from lib.llm import BadRequestError, ContentFilterError, InvalidImageError, PermissionError_, PromptTooLongError, RateLimitError, StreamOnlyError, chat
     from lib.llm_errors import EndpointUnreachableError
 
     # 2026-05-05 config-surface change (CLAUDE.md §10): per-cycle 429
@@ -264,13 +264,14 @@ def dispatch_chat(messages, *, max_tokens=4096, temperature=0,
             logger.debug('%s Excluding stream-only model %s from non-streaming dispatch',
                         log_prefix, slot.model)
 
-    # ★ Total time budget — all attempts share this deadline to prevent
-    #   serial timeout accumulation (e.g. 5 × 35s = 175s).
-    #   429 retries do NOT consume the budget — only real errors do.
-    _per_attempt_timeout = timeout if timeout is not None else (
-        30 if capability == 'cheap' else 120)
-    _total_budget = _per_attempt_timeout * min(max_retries, 3)  # cap at 3× single timeout
-    _deadline = time.time() + _total_budget
+    # ★ NO total time budget. A non-streaming call is waited out for as long
+    #   as the upstream needs — truncating a translate/summarize call at a
+    #   deadline produced silently incomplete content, which is worse than
+    #   waiting. ``timeout`` is honored when a caller explicitly passes one;
+    #   otherwise None = no read timeout (connect phase stays bounded, so a
+    #   dead host still fails over). Retries are bounded by max_retries, and
+    #   an abort is honored by the transport's abort poll.
+    _per_attempt_timeout = timeout
 
     # ★ hard_attempts counts only non-429 failures; 429 loops forever.
     hard_attempts = 0
@@ -279,12 +280,6 @@ def dispatch_chat(messages, *, max_tokens=4096, temperature=0,
     _EXCLUSION_RESET_INTERVAL = 60  # reset exclude_pairs every 60s during 429 cycling
 
     while hard_attempts < max_retries:
-        _remaining = _deadline - time.time()
-        if _remaining < 3:   # less than 3s left — not worth trying
-            logger.debug('%s Total budget exhausted (%.1fs left), stopping dispatch',
-                         log_prefix, _remaining)
-            break
-
         total_attempts = hard_attempts + _429_count
 
         # ★ Periodically reset hard-error exclusions during 429 cycling.
@@ -348,8 +343,9 @@ def dispatch_chat(messages, *, max_tokens=4096, temperature=0,
             if tools:
                 _extra['tools'] = tools
 
-            # Use the lesser of per-attempt timeout and remaining budget
-            _timeout = min(_per_attempt_timeout, _remaining)
+            # No budget clamp: pass the caller's timeout through unchanged
+            # (None = no read timeout).
+            _timeout = _per_attempt_timeout
 
             content, usage = chat(
                 model=slot.model, messages=messages,
@@ -393,11 +389,27 @@ def dispatch_chat(messages, *, max_tokens=4096, temperature=0,
 
         except RateLimitError as e:
             _is_quota = bool(getattr(e, 'is_quota', False))
+            _is_gateway = bool(getattr(e, 'is_gateway', False))
+            _is_contention = bool(getattr(e, 'is_shared_contention', False))
+            # HTTP 402 (account credit dead) → key-wide stop; 429-quota →
+            # per-model (see Slot.record_error is_account_quota).
+            _is_account_quota = bool(
+                _is_quota
+                and int(getattr(e, 'status_code', 0) or 0) == 402)
             _err_str = str(e)[:200]
             slot.record_error(is_rate_limit=True,
                               is_quota_exhausted=_is_quota,
+                              is_account_quota=_is_account_quota,
+                              is_gateway=_is_gateway,
+                              is_shared_contention=_is_contention,
                               error=_err_str if _is_quota else '')
             last_err = e
+            if _is_contention:
+                try:
+                    dispatcher.note_shared_contention(slot)
+                except Exception as _nce:
+                    logger.debug('%s note_shared_contention failed: %s',
+                                 log_prefix, _nce)
             if _is_quota:
                 # ★ Persistent billing/quota exhaustion (HTTP 402 or
                 #   429+insufficient_quota). Retrying on this key all day
@@ -428,21 +440,6 @@ def dispatch_chat(messages, *, max_tokens=4096, temperature=0,
                 logger.info(
                     '%s 429 rate-limited on %s:%s (cycle #%d)',
                     log_prefix, slot.key_name, slot.model, _429_count)
-            # ★ If this 429 just tripped the consecutive-429 streak threshold,
-            #   the key was auto-marked as exhausted — exclude it explicitly
-            #   so the current retry loop moves on immediately.
-            try:
-                from lib.key_stats import is_key_enabled
-                if not is_key_enabled(slot.provider_id, slot.key_name):
-                    exclude_keys.add(slot.key_name)
-                    hard_attempts += 1
-                    logger.warning(
-                        '%s Key %s auto-exhausted after %d consecutive 429s '
-                        '— excluding for today',
-                        log_prefix, slot.key_name, _429_count)
-                    continue
-            except Exception as e:
-                logger.debug('%s is_key_enabled probe failed: %s', log_prefix, e)
             time.sleep(0.3)
             # ★ Don't increment hard_attempts — 429 retries are free
             continue
@@ -478,6 +475,7 @@ def dispatch_chat(messages, *, max_tokens=4096, temperature=0,
             #   slot — same handling as dispatch_stream.
             slot.record_error(is_rate_limit=False, error=str(e)[:200])
             slot.cooldown_until = time.time() + _UNREACHABLE_COOLDOWN
+            slot.cooldown_reason = 'upstream'
             last_err = e
             exclude_pairs.add((slot.key_name, slot.model))
             hard_attempts += 1
@@ -519,6 +517,21 @@ def dispatch_chat(messages, *, max_tokens=4096, temperature=0,
             logger.warning('%s Model %s only supports streaming — excluding '
                           'from non-streaming dispatch, trying next model',
                           log_prefix, slot.model)
+
+        except BadRequestError as e:
+            # Deterministic HTTP 400 — a PAYLOAD-level rejection, not slot
+            # health. Release the slot (no consecutive_errors → no 300s
+            # lockout, no key_stats feed — the ContentFilterError /
+            # InvalidImageError precedent) and exclude only the PAIR: a 400
+            # CAN be key-specific, so the remaining keys each get one try;
+            # exhaustion falls through to the turn-level model fallback.
+            slot.release()
+            last_err = e
+            exclude_pairs.add((slot.key_name, slot.model))
+            hard_attempts += 1
+            logger.warning('%s Bad request (HTTP 400, deterministic) on %s:%s '
+                           '— released slot, excluded pair, trying next: %.500s',
+                           log_prefix, slot.key_name, slot.model, str(e))
 
         except Exception as e:
             latency = (time.time() - t0) * 1000
@@ -563,12 +576,17 @@ def _readjust_thinking_params(body: dict, new_model: str, thinking_format: str):
       - MiniMax:  reasoning_split = True
       - Qwen/LongCat: enable_thinking = True/False
       - Gemini 3.x: reasoning_effort = 'minimal'/'low'/'medium'/'high'
+      - Kimi K3:    reasoning_effort = 'low'/'high'/'max', NO temperature
+      - Kimi K2:    thinking.type = 'enabled'/'disabled'
 
     When dispatch swaps the model (e.g. Claude → Doubao), the body may carry
     the wrong format, causing HTTP 400 errors. This function detects mismatches
     and converts to the correct format for the new model.
     """
-    from lib.llm import is_claude, is_doubao, is_gemini, is_glm, is_longcat, is_minimax, is_qwen
+    from lib.llm import (
+        is_claude, is_doubao, is_gemini, is_glm, is_gpt5, is_kimi,
+        is_kimi_k3, is_longcat, is_minimax, is_qwen,
+    )
 
     # Detect current thinking state from the body
     thinking_dict = body.get('thinking')
@@ -642,6 +660,9 @@ def _readjust_thinking_params(body: dict, new_model: str, thinking_format: str):
             kw = {}
         kw['enable_thinking'] = bool(is_enabled)
         body['chat_template_kwargs'] = kw
+    elif not _tf and is_gpt5(new_model):
+        from lib.llm import gpt_reasoning_effort
+        body['reasoning_effort'] = gpt_reasoning_effort(effort, is_enabled, new_model)
     elif _tf == 'reasoning_effort' or (not _tf and is_gemini(new_model)):
         from lib.llm import gemini_reasoning_effort
         body['reasoning_effort'] = gemini_reasoning_effort(effort, is_enabled)
@@ -649,6 +670,15 @@ def _readjust_thinking_params(body: dict, new_model: str, thinking_format: str):
         body['enable_thinking'] = is_enabled
     elif _tf == 'thinking_type' or (not _tf and is_doubao(new_model)):
         body['thinking'] = {'type': 'enabled' if is_enabled else 'disabled'}
+    elif not _tf and is_kimi(new_model):
+        if is_kimi_k3(new_model):
+            # K3: top-level reasoning_effort only; temperature stripped below.
+            from lib.llm import kimi_k3_reasoning_effort
+            body['reasoning_effort'] = kimi_k3_reasoning_effort(
+                effort, is_enabled)
+        else:
+            body['thinking'] = {'type': 'enabled' if is_enabled else 'disabled'}
+            body['temperature'] = 1.0 if is_enabled else 0.6
     elif not _tf and is_glm(new_model):
         body['thinking'] = {'type': 'enabled' if is_enabled else 'disabled'}
         if is_enabled:
@@ -659,23 +689,40 @@ def _readjust_thinking_params(body: dict, new_model: str, thinking_format: str):
         if is_enabled:
             body['reasoning_split'] = True
     elif not _tf and is_claude(new_model):
+        from lib.llm import is_claude_opus_47
         if is_enabled:
             # Keep this in sync with the Claude branch in build_body().
             #   • 4.6 and earlier: adaptive + temperature=1.0
             #   • 4.7+: adaptive + display='summarized' (required to see
             #           reasoning trace), and NO temperature (ignored today,
             #           may be rejected in a future revision).
-            from lib.llm import is_claude_opus_47
             body['thinking'] = {'type': 'adaptive'}
             if is_claude_opus_47(new_model):
                 body['thinking']['display'] = 'summarized'
             else:
                 body['temperature'] = 1.0
-            if effort:
+            # Effort rung -- kept in lockstep with build_body(). The adaptive
+            # generation states EVERY rung (its default is `high`, so an
+            # omitted `medium` would be a silent upgrade); pre-4.7 Claude
+            # still defaults to medium and keeps the omit wire. The two paths
+            # diverged on exactly this rung before
+            # tests/test_claude_effort_rung_parity.py pinned them together.
+            _omit_medium = not is_claude_opus_47(new_model)
+            if effort and not (_omit_medium and effort == 'medium'):
                 # xhigh is Opus 4.7-only; downgrade on older Claude to avoid HTTP 400.
                 if effort == 'xhigh' and not is_claude_opus_47(new_model):
                     effort = 'high'
+                elif effort == 'ultra':
+                    # 'ultra' is a GPT-5.6 tier; map to Claude's top rung.
+                    effort = 'max'
                 body['effort'] = effort
+        elif is_claude_opus_47(new_model):
+            # Thinking OFF must be STATED on the adaptive generation — Opus 5
+            # defaults adaptive thinking ON, so the popped-key state above
+            # would silently re-enable it after a swap (live-measured ~1.93x
+            # completion tokens; see the build_body branch for the numbers).
+            # No effort is set: disabled + xhigh/max is HTTP 400.
+            body['thinking'] = {'type': 'disabled'}
     # else: standard OpenAI-compatible — no thinking params needed
 
     # ── Claude Opus 4.7+ rejects sampling params (HTTP 400) ──
@@ -684,6 +731,14 @@ def _readjust_thinking_params(body: dict, new_model: str, thinking_format: str):
     from lib.llm import is_claude_opus_47
     if is_claude_opus_47(new_model):
         for _k in ('temperature', 'top_p', 'top_k'):
+            body.pop(_k, None)
+
+    # ── Kimi K3 fixes temperature=1.0 — any other value is HTTP 400 ──
+    # Strip unconditionally: a body swapped in from another family (e.g.
+    # Qwen's temperature=0.7) would otherwise carry a rejected value.
+    if is_kimi_k3(new_model):
+        for _k in ('temperature', 'top_p', 'presence_penalty',
+                   'frequency_penalty'):
             body.pop(_k, None)
 
     # Observability: which dialect actually landed on the wire? Debug
@@ -769,6 +824,53 @@ def _adapt_stream_body_for_slot(slot, body_or_messages, is_body, *,
         thinking_format=slot.thinking_format or '',
         provider_id=slot.provider_id or '',
     )
+
+
+def _finalize_stream_success(slot, usage, *, latency, ttft, state,
+                             cache_conv_id, tag):
+    """Shared success-path bookkeeping for both stream dispatch loops.
+
+    The sync ``dispatch_stream`` and async ``async_dispatch_stream`` loops
+    differ in their transport call + the production-only pre-send gates the
+    sync path carries (cgroup headroom, warm-key hold, big-prefix admission),
+    so the LOOPS are intentionally NOT unified. But the moment a slot answers,
+    both do the identical side-effect sequence — record output tokens, mark the
+    slot healthy, stamp ``usage['_dispatch']`` metadata, run the premature-close
+    cooldown check, and record the conv's stream-end for the cache-settle gate.
+    That verbatim block lived twice and could drift on WHICH usage fields get
+    stamped; it now lives here.
+
+    Mutates ``usage`` in place (stamps ``_dispatch``) and returns nothing.
+    """
+    _out_tokens = 0
+    if isinstance(usage, dict):
+        _out_tokens = (usage.get('completion_tokens')
+                       or usage.get('output_tokens') or 0)
+        try:
+            _out_tokens = int(_out_tokens)
+        except (ValueError, TypeError) as _e_audit:
+            logger.debug('[api] _finalize_stream_success caught %s: %s',
+                         type(_e_audit).__name__, _e_audit)
+            _out_tokens = 0
+    _prev_ce = slot.consecutive_errors
+    slot.record_success(latency, ttft_ms=ttft, output_tokens=_out_tokens)
+    if isinstance(usage, dict):
+        usage['_dispatch'] = {
+            'key': slot.key_name, 'model': slot.model,
+            'key_tail': (slot.api_key or '')[-4:],
+            'provider_id': slot.provider_id,
+            'latency_ms': round(latency),
+            'attempt': state.hard_attempts + 1,
+            '429_retries': state._429_count,
+        }
+    _cool_slot_on_premature_close(slot, usage, _prev_ce)
+    if cache_conv_id:
+        try:
+            from lib.llm_dispatch.cache_settle import (
+                is_cold_write, record_stream_end)
+            record_stream_end(cache_conv_id, cold_write=is_cold_write(usage))
+        except ImportError as _cs_err:
+            logger.debug('%s cache-settle record unavailable: %s', tag, _cs_err)
 
 
 class _StreamRetryState:
@@ -919,11 +1021,6 @@ class _StreamRetryState:
         self.exclude_keys.add(slot.key_name)
         self.hard_attempts += 1
 
-    def note_auto_exhausted_key(self, slot):
-        """Key auto-exhausted after consecutive 429s — exclude key; hard attempt."""
-        self.exclude_keys.add(slot.key_name)
-        self.hard_attempts += 1
-
     def note_permission_pair(self, slot, dispatcher, capability, log_prefix):
         """Permission denied — exclude the (key, model) PAIR; escalate to a
         whole-key exclusion only if EVERY model for this key is now excluded."""
@@ -964,7 +1061,8 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
                     capability='text', prefer_model=None, tools=None,
                     max_retries=3, log_prefix='', strict_model=False,
                     on_retry=None, avoid_pairs=None,
-                    exclude_models=None):
+                    exclude_models=None, on_attempt_restart=None,
+                    on_waiting=None):
     """Smart dispatch for streaming requests.
 
     Accepts either:
@@ -993,6 +1091,17 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
       model's slots (different keys / alias group members).  Use this for
       user-facing requests where the frontend explicitly chose a model.
 
+    on_waiting:
+      Optional ``on_waiting(elapsed=…, slot=…)`` callback fired every
+      IDLE_HEARTBEAT_S seconds while the attempt is SILENT — both before
+      the first SSE byte and during any mid-stream stall. The slot context
+      lets the caller surface what the pool already knows (cooldown cause
+      / last error) instead of a static spinner. Orthogonal to on_retry:
+      that one fires on STATE TRANSITIONS (error caught, cooldown entered),
+      this one fires DURING a healthy-but-silent in-flight wait. With no
+      read timeout left, this is also what keeps the stuck-task reaper's
+      liveness clocks fresh — see lib/llm/_transport.IDLE_HEARTBEAT_S.
+
     avoid_pairs:
       Optional set of ``(key_name, model)`` tuples the caller wants the
       dispatcher to avoid for THIS call (in addition to whatever
@@ -1009,6 +1118,7 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
     """
     from lib.llm import (
         AbortedError,
+        BadRequestError,
         ContentFilterError,
         InvalidImageError,
         PermissionError_,
@@ -1017,6 +1127,18 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
         stream_chat,
     )
     from lib.llm_errors import EndpointUnreachableError
+
+    def _fire_attempt_restart(reason: str) -> None:
+        """Notify the callee an in-flight attempt is being discarded and the
+        request restarts from scratch (its partial stream will be re-sent).
+        Distinct from on_retry: that one also fires for pure cooldown waits
+        where NO attempt ran and nothing needs truncation."""
+        if on_attempt_restart is None:
+            return
+        try:
+            on_attempt_restart(reason=reason)
+        except Exception as _oar_e:
+            logger.debug('%s on_attempt_restart raised: %s', log_prefix, _oar_e)
 
     dispatcher = get_dispatcher()
     state = _StreamRetryState(exclude_models=exclude_models, avoid_pairs=avoid_pairs)
@@ -1041,27 +1163,17 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
     except Exception as _hr_e:
         logger.debug('%s cgroup headroom check skipped: %s', log_prefix, _hr_e)
 
-    # ★ hard_attempts counts only non-429 failures; 429 loops forever.
-    #   Set _MAX_429_CYCLES = 0 to disable the cap (retry indefinitely).
-    #   The abort_check runs every cycle so the user can always cancel.
-    _MAX_429_CYCLES = 0  # 0 = infinite; set >0 to re-enable safety cap
+    # ★ hard_attempts counts only non-429 failures; 429 loops forever
+    #   (the abort_check runs every cycle so the user can always cancel).
+    #   A blanket 429-cycle cap was intentionally removed: the meaningful
+    #   bound is the gateway-outage cap below (whole-upstream 5xx storm),
+    #   which frees the worker without capping genuine per-key contention.
 
     while state.hard_attempts < max_retries:
         # Abort check — let the user cancel during 429 cycling
         if abort_check and abort_check():
             from lib.llm import AbortedError as _AE
             raise _AE('Aborted during dispatch retry')
-
-        # ★ Safety cap on 429 cycling — if we've been rate-limited for
-        #   too many cycles, something is fundamentally wrong (e.g. payload
-        #   too large causing 413 on some slots and 429 on the rest).
-        if _MAX_429_CYCLES > 0 and state._429_count >= _MAX_429_CYCLES:
-            logger.error(
-                '%s dispatch_stream: 429 cycling exceeded safety cap '
-                '(%d cycles) — giving up. Last error: %s',
-                log_prefix, _MAX_429_CYCLES, str(state.last_err)[:200])
-            raise state.last_err or RuntimeError(
-                'Rate-limited %d times without success' % state._429_count)
 
         # ★ Gateway-outage cap — when the WHOLE upstream is down (only
         #   502/503/504 coming back from every slot for > the outage budget),
@@ -1205,9 +1317,21 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
                 #   caller surface a transient "waiting for model…" phase.
                 if on_retry and (state._429_count == 1 or state._429_count % 20 == 0):
                     try:
+                        # ★ Honest label: a cooldown wait is 限流 ONLY when a
+                        #   cooling slot actually says rate_limit. Error /
+                        #   upstream backoffs (the yuju opus-5 vendor 4xx
+                        #   storm, 2026-07-26) used to be hardcoded
+                        #   "rate-limited" here — the fake 限流排队.
+                        _causes = dispatcher.cooling_cause_summary(
+                            capability,
+                            exclude_models=state.exclude,
+                            exclude_keys=state.exclude_keys,
+                            exclude_pairs=state.exclude_pairs)
+                        from lib.llm_dispatch.retry_i18n import (
+                            cooldown_wait_label)
+                        _reason, _status = cooldown_wait_label(_causes)
                         on_retry(attempt=state._429_count,
-                                 reason='Waiting for model (rate-limited)',
-                                 status_code=429)
+                                 reason=_reason, status_code=_status)
                     except Exception as _ore:
                         logger.debug('%s on_retry (cooldown) raised: %s',
                                      log_prefix, _ore)
@@ -1302,6 +1426,18 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
 
         try:
           with _big_gate:
+            # Idle-heartbeat seam: the transport fires this every
+            # IDLE_HEARTBEAT_S while the attempt is silent (pre-first-byte
+            # or a mid-stream stall); enrich it with the CURRENT slot so
+            # the caller can show what the pool knows about this line
+            # (cooldown cause / last error / consecutive errors).
+            _on_first_byte_wait = None
+            if on_waiting:
+                def _on_first_byte_wait(elapsed, _slot=slot):
+                    try:
+                        on_waiting(elapsed=elapsed, slot=_slot)
+                    except Exception as _owe:
+                        logger.debug('%s on_waiting raised: %s', tag, _owe)
             msg, finish, usage = stream_chat(
                 body, api_key=slot.api_key,
                 base_url=slot.base_url or None,
@@ -1312,32 +1448,14 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
                 on_tool_call_ready=on_tool_call_ready,
                 abort_check=abort_check,
                 log_prefix=tag,
+                on_attempt_restart=on_attempt_restart,
+                on_first_byte_wait=_on_first_byte_wait,
                 api_protocol=slot.protocol or 'openai',
             )
             latency = (time.time() - t0) * 1000
-            _out_tokens = 0
-            if isinstance(usage, dict):
-                _out_tokens = (usage.get('completion_tokens')
-                               or usage.get('output_tokens') or 0)
-                try:
-                    _out_tokens = int(_out_tokens)
-                except (ValueError, TypeError) as _e_audit:
-                    logger.debug('[api] dispatch_stream caught %s: %s', type(_e_audit).__name__, _e_audit)
-                    _out_tokens = 0
-            _prev_ce = slot.consecutive_errors
-            slot.record_success(latency, ttft_ms=ttft_value[0],
-                                output_tokens=_out_tokens)
-            # Inject dispatch metadata so callers know which slot served this
-            if isinstance(usage, dict):
-                usage['_dispatch'] = {
-                    'key': slot.key_name, 'model': slot.model,
-                    'key_tail': (slot.api_key or '')[-4:],
-                    'provider_id': slot.provider_id,
-                    'latency_ms': round(latency),
-                    'attempt': state.hard_attempts + 1,
-                    '429_retries': state._429_count,
-                }
-            _cool_slot_on_premature_close(slot, usage, _prev_ce)
+            _finalize_stream_success(
+                slot, usage, latency=latency, ttft=ttft_value[0], state=state,
+                cache_conv_id=_cache_conv_id, tag=tag)
             if state._429_count > 0:
                 logger.info('%s dispatch_stream OK after %d 429-retries: '
                             'finish_reason=%s model=%s provider=%s latency=%.0fms',
@@ -1349,28 +1467,31 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
                             log_prefix, finish, slot.model,
                             slot.provider_id, latency, state.hard_attempts + 1,
                             max_retries)
-            # ── Cache write-visibility settle: mark this conv's stream END ──
-            # The NEXT big request on this conversation measures its gap from
-            # here and settles if it arrives before the prior write is visible
-            # (see cache_settle.py / settle_before_send above).
-            if _cache_conv_id:
-                try:
-                    from lib.llm_dispatch.cache_settle import (
-                        is_cold_write, record_stream_end)
-                    record_stream_end(_cache_conv_id,
-                                      cold_write=is_cold_write(usage))
-                except ImportError as _cs_err:
-                    logger.debug('%s cache-settle record unavailable: %s',
-                                 tag, _cs_err)
             return msg, finish, usage
 
         except RateLimitError as e:
             _is_quota = bool(getattr(e, 'is_quota', False))
+            _is_gateway = bool(getattr(e, 'is_gateway', False))
+            _is_contention = bool(getattr(e, 'is_shared_contention', False))
+            # HTTP 402 (account credit dead) → key-wide stop; 429-quota →
+            # per-model (see Slot.record_error is_account_quota).
+            _is_account_quota = bool(
+                _is_quota
+                and int(getattr(e, 'status_code', 0) or 0) == 402)
             _err_str = str(e)[:200]
             slot.record_error(is_rate_limit=True,
                               is_quota_exhausted=_is_quota,
+                              is_account_quota=_is_account_quota,
+                              is_gateway=_is_gateway,
+                              is_shared_contention=_is_contention,
                               error=_err_str if _is_quota else '')
             state.last_err = e
+            if _is_contention:
+                try:
+                    dispatcher.note_shared_contention(slot)
+                except Exception as _nce:
+                    logger.debug('%s note_shared_contention failed: %s',
+                                 log_prefix, _nce)
             if _is_quota:
                 # ★ Persistent billing/quota exhaustion — disable this key
                 #   for the remainder of this dispatch and flag it so the
@@ -1383,6 +1504,7 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
                 if on_retry:
                     on_retry(attempt=state.hard_attempts,
                              reason='Key balance exhausted', status_code=429)
+                _fire_attempt_restart('key balance exhausted')
                 continue
             state.note_free_429(is_gateway=bool(getattr(e, 'is_gateway', False)))
             # ★ Don't exclude anything — slot.record_error() sets a 0.5s
@@ -1408,25 +1530,17 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
                 logger.info(
                     '%s 429 rate-limited on %s:%s (cycle #%d)',
                     log_prefix, slot.key_name, slot.model, state._429_count)
-            # ★ If the streak just tripped, the key is now flagged as
-            #   exhausted — exclude it so we don't cycle back to it.
-            try:
-                from lib.key_stats import is_key_enabled
-                if not is_key_enabled(slot.provider_id, slot.key_name):
-                    state.note_auto_exhausted_key(slot)
-                    logger.warning(
-                        '%s Key %s auto-exhausted after %d consecutive 429s '
-                        '— excluding for today',
-                        log_prefix, slot.key_name, state._429_count)
-                    if on_retry:
-                        on_retry(attempt=state.hard_attempts,
-                                 reason='Key auto-exhausted (consecutive 429s)',
-                                 status_code=429)
-                    continue
-            except Exception as e:
-                logger.debug('%s is_key_enabled probe failed (stream): %s', log_prefix, e)
             if on_retry:
-                on_retry(attempt=state._429_count, reason='Rate limited (429)', status_code=429)
+                if _is_gateway:
+                    # Upstream-outage class (gateway 5xx / vendor transient
+                    # wrapped in 4xx) — NOT 限流; the cause is a sick
+                    # upstream, not per-key contention.
+                    on_retry(attempt=state._429_count,
+                             reason='Upstream error',
+                             status_code=int(getattr(e, 'status_code', 0) or 0))
+                else:
+                    on_retry(attempt=state._429_count, reason='Rate limited (429)', status_code=429)
+            _fire_attempt_restart('rate limited (429) — rotating slot')
             time.sleep(0.3)
             # ★ Don't increment hard_attempts — 429 retries are free
             continue
@@ -1453,6 +1567,7 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
             #   health checker clears the cooldown when the box recovers.
             slot.record_error(is_rate_limit=False, error=str(e)[:200])
             slot.cooldown_until = time.time() + _UNREACHABLE_COOLDOWN
+            slot.cooldown_reason = 'upstream'
             state.last_err = e
             state.note_unreachable_pair(slot)
             logger.warning(
@@ -1486,6 +1601,20 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
             logger.warning('%s Image content error — not retrying on other slots '
                            '(same image = same rejection)', tag)
             raise   # ★ Same payload = same rejection on all keys
+
+        except BadRequestError as e:
+            # Deterministic HTTP 400 — PAYLOAD-level, not slot health (see
+            # the sync dispatch_chat branch). Release + pair-exclude only.
+            slot.release()
+            state.last_err = e
+            state.exclude_pairs.add((slot.key_name, slot.model))
+            state.hard_attempts += 1
+            logger.warning('%s Bad request (HTTP 400, deterministic) on %s:%s '
+                           '— released slot, excluded pair, trying next: %.500s',
+                           log_prefix, slot.key_name, slot.model, str(e))
+            if on_retry:
+                on_retry(attempt=state.hard_attempts,
+                         reason='Upstream error', status_code=400)
 
         except Exception as e:
             latency = (time.time() - t0) * 1000
@@ -1531,7 +1660,7 @@ async def async_dispatch_stream(body_or_messages, *, on_thinking=None,
                                 capability='text', prefer_model=None, tools=None,
                                 max_retries=3, log_prefix='', strict_model=False,
                                 on_retry=None, avoid_pairs=None,
-                                exclude_models=None):
+                                exclude_models=None, on_waiting=None):
     """Native-async streaming dispatch — non-blocking on the event loop.
 
     Unlike the previous ``to_thread(dispatch_stream)`` stopgap, this drives the
@@ -1568,6 +1697,7 @@ async def async_dispatch_stream(body_or_messages, *, on_thinking=None,
     """
     from lib.llm import (
         AbortedError,
+        BadRequestError,
         ContentFilterError,
         InvalidImageError,
         PermissionError_,
@@ -1654,6 +1784,14 @@ async def async_dispatch_stream(body_or_messages, *, on_thinking=None,
             logger.debug('%s cache-settle (async) unavailable: %s', tag, _cs_err)
 
         try:
+            # Waiting-heartbeat seam — see the sync dispatch_stream branch.
+            _on_first_byte_wait = None
+            if on_waiting:
+                def _on_first_byte_wait(elapsed, _slot=slot):
+                    try:
+                        on_waiting(elapsed=elapsed, slot=_slot)
+                    except Exception as _owe:
+                        logger.debug('%s on_waiting raised: %s', tag, _owe)
             msg, finish, usage = await async_stream_chat(
                 body, api_key=slot.api_key,
                 base_url=slot.base_url or None,
@@ -1663,49 +1801,37 @@ async def async_dispatch_stream(body_or_messages, *, on_thinking=None,
                 on_content=_on_content_wrapper,
                 on_tool_call_ready=on_tool_call_ready,
                 abort_check=abort_check, log_prefix=tag,
+                on_first_byte_wait=_on_first_byte_wait,
                 api_protocol=slot.protocol or 'openai')
             latency = (time.time() - t0) * 1000
-            _out_tokens = 0
-            if isinstance(usage, dict):
-                _out_tokens = (usage.get('completion_tokens')
-                               or usage.get('output_tokens') or 0)
-                try:
-                    _out_tokens = int(_out_tokens)
-                except (ValueError, TypeError) as _e_audit:
-                    logger.debug('[api] async_dispatch_stream caught %s: %s',
-                                 type(_e_audit).__name__, _e_audit)
-                    _out_tokens = 0
-            _prev_ce = slot.consecutive_errors
-            slot.record_success(latency, ttft_ms=ttft_value[0],
-                                output_tokens=_out_tokens)
-            if isinstance(usage, dict):
-                usage['_dispatch'] = {
-                    'key': slot.key_name, 'model': slot.model,
-                    'key_tail': (slot.api_key or '')[-4:],
-                    'provider_id': slot.provider_id,
-                    'latency_ms': round(latency),
-                    'attempt': state.hard_attempts + 1,
-                    '429_retries': state._429_count,
-                }
-            _cool_slot_on_premature_close(slot, usage, _prev_ce)
+            _finalize_stream_success(
+                slot, usage, latency=latency, ttft=ttft_value[0], state=state,
+                cache_conv_id=_cache_conv_id, tag=tag)
             logger.debug('%s async_dispatch_stream OK: finish=%s model=%s '
                          'latency=%.0fms', log_prefix, finish, slot.model, latency)
-            if _cache_conv_id:
-                try:
-                    from lib.llm_dispatch.cache_settle import (
-                        is_cold_write, record_stream_end)
-                    record_stream_end(_cache_conv_id,
-                                      cold_write=is_cold_write(usage))
-                except ImportError as _cs_err:
-                    logger.debug('%s cache-settle record (async) unavailable: %s',
-                                 tag, _cs_err)
             return msg, finish, usage
 
         except RateLimitError as e:
             _is_quota = bool(getattr(e, 'is_quota', False))
+            _is_gateway = bool(getattr(e, 'is_gateway', False))
+            _is_contention = bool(getattr(e, 'is_shared_contention', False))
+            # HTTP 402 (account credit dead) → key-wide stop; 429-quota →
+            # per-model (see Slot.record_error is_account_quota).
+            _is_account_quota = bool(
+                _is_quota
+                and int(getattr(e, 'status_code', 0) or 0) == 402)
             slot.record_error(is_rate_limit=True, is_quota_exhausted=_is_quota,
+                              is_account_quota=_is_account_quota,
+                              is_gateway=_is_gateway,
+                              is_shared_contention=_is_contention,
                               error=str(e)[:200] if _is_quota else '')
             state.last_err = e
+            if _is_contention:
+                try:
+                    dispatcher.note_shared_contention(slot)
+                except Exception as _nce:
+                    logger.debug('%s note_shared_contention failed: %s',
+                                 log_prefix, _nce)
             if _is_quota:
                 state.note_quota_key(slot)
                 if on_retry:
@@ -1714,7 +1840,12 @@ async def async_dispatch_stream(body_or_messages, *, on_thinking=None,
                 continue
             state.note_free_429(is_gateway=bool(getattr(e, 'is_gateway', False)))
             if on_retry:
-                on_retry(attempt=state._429_count, reason='Rate limited (429)', status_code=429)
+                if _is_gateway:
+                    on_retry(attempt=state._429_count,
+                             reason='Upstream error',
+                             status_code=int(getattr(e, 'status_code', 0) or 0))
+                else:
+                    on_retry(attempt=state._429_count, reason='Rate limited (429)', status_code=429)
             await async_abortable_sleep(0.3, abort_check)
             continue
 
@@ -1730,6 +1861,7 @@ async def async_dispatch_stream(body_or_messages, *, on_thinking=None,
             #   over. Mirrors the sync dispatch_stream handler.
             slot.record_error(is_rate_limit=False, error=str(e)[:200])
             slot.cooldown_until = time.time() + _UNREACHABLE_COOLDOWN
+            slot.cooldown_reason = 'upstream'
             state.last_err = e
             state.note_unreachable_pair(slot)
             logger.warning(
@@ -1760,6 +1892,20 @@ async def async_dispatch_stream(body_or_messages, *, on_thinking=None,
             slot.release()
             logger.warning('%s Image content error — not retrying', tag)
             raise
+
+        except BadRequestError as e:
+            # Deterministic HTTP 400 — PAYLOAD-level, not slot health (see
+            # the sync dispatch_chat branch). Release + pair-exclude only.
+            slot.release()
+            state.last_err = e
+            state.exclude_pairs.add((slot.key_name, slot.model))
+            state.hard_attempts += 1
+            logger.warning('%s Bad request (HTTP 400, deterministic) on %s:%s '
+                           '— released slot, excluded pair, trying next: %.500s',
+                           log_prefix, slot.key_name, slot.model, str(e))
+            if on_retry:
+                on_retry(attempt=state.hard_attempts,
+                         reason='Upstream error', status_code=400)
 
         except Exception as e:
             slot.record_error(is_rate_limit=False)
@@ -2024,7 +2170,7 @@ def smart_chat(messages, *, model=None, max_tokens=4096, temperature=0,
         logger.warning('%s[Dispatch] All slots exhausted (%s), '
                     'falling back to direct chat()', log_prefix, e, exc_info=True)
         from lib.llm import chat
-        _fb_timeout = timeout if timeout is not None else 120
+        _fb_timeout = timeout
         # ★ For 'cheap' tasks (translate etc.), fall back to a cheap model,
         #   NOT the default LLM_MODEL (which is Opus — way too slow/expensive).
         _fb_model = model

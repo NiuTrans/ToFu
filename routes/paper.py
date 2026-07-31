@@ -55,6 +55,7 @@ from lib.api_response import (
     api_internal_error,
     api_not_found,
     api_ok,
+    safe_route,
 )
 from lib.database import (
     DOMAIN_CHAT,
@@ -122,9 +123,12 @@ from lib.paper import (  # noqa: F401  — back-compat re-exports
     _run_qa_task,
     build_qa_messages,
     _paper_hash,
+    resolve_paper_hash,
     _report_dedup_index,
     fetch_arxiv_title,
     search_arxiv,
+    search_arxiv_explained,
+    ArxivQuerySyntaxError,
     recommend_papers,
     _new_recommend_task,
     _append_recommend_event,
@@ -497,7 +501,7 @@ async def start_report_task():
     if client_title.lower().endswith('.pdf'):
         client_title = client_title[:-4].strip()
 
-    phash = _paper_hash(paper_text)
+    phash = resolve_paper_hash(data.get('paper_hash'), paper_text)
     # Server is the source of truth for figure manifests. The client never
     # forwards the images list any more — we load (or extract) it here.
     images = _load_image_manifest(phash)
@@ -720,7 +724,10 @@ async def start_report_task():
     tool_instruction = (
         date_anchor_clause(ui_lang) +
         injection_notice(ui_lang, _inj_findings) +
-        "You have access to web_search (batch) and fetch_url (batch) tools.\n\n"
+        "You have access to the full standard tool set — web_search (batch) and "
+        "fetch_url (batch) are your primary research instruments; read_files opens "
+        "any local file a fetch stages (or an oversized tool result spills to "
+        "disk); code_exec runs numeric checks.\n\n"
         "BEFORE writing any of the report, you are EXPECTED to do a research-grade "
         "literature scan. The reader's most common complaint is that follow-up work "
         "is missing — do not let that happen.\n\n"
@@ -1463,7 +1470,25 @@ async def search_arxiv_route():
         logger.debug('[Paper:arXiv:Search] non-int max_results (%s) — defaulting to 10', e)
         max_results = 10
 
-    results = await asyncio.to_thread(search_arxiv, query, max_results)
+    # A failure MUST surface as an error, never as an empty result list:
+    # 2026-07-28 the live server 500'd every search for ~1h (stale process
+    # holding a pre-search_by_query tofu_search) and the frontend rendered
+    # every one of them as "no papers found". Three failure shapes, three
+    # explicit exits — the ok:[] payload is reserved for a query that ran
+    # clean and legitimately matched nothing.
+    try:
+        results, search_error = await asyncio.to_thread(
+            search_arxiv_explained, query, max_results)
+    except ArxivQuerySyntaxError as e:
+        logger.warning('[Paper:arXiv:Search] rejected built-syntax query %.120s: %s',
+                       query, e)
+        return api_bad_request(str(e))
+    except Exception as e:
+        logger.error('[Paper:arXiv:Search] route failed for %.120s: %s',
+                     query, e, exc_info=True)
+        return api_error('arXiv search failed: %s' % e, status=502)
+    if search_error:
+        return api_error('arXiv search failed: %s' % search_error, status=502)
     return api_ok({'query': query, 'results': results})
 
 
@@ -1946,11 +1971,14 @@ async def fetch_arxiv_stream():
         # control back, so the fetched paper survives even if the client's PUT
         # never lands (tab closed mid-stream). Runs on the SSE generator thread.
         if client_paper_id:
+            from lib.pdf_parser._common import current_parser_version as _cpv
             _persist_ingested_library_row(
                 client_paper_id, title=(paper_title or f'arXiv:{arxiv_id}'),
                 pdf_url=f'/api/paper/pdf/{filename}', pdf_filename=filename,
                 arxiv_id=arxiv_id, paper_hash=phash, parsed_text=parsed_text,
-                images=images, page_count=total_pages)
+                images=images, page_count=total_pages,
+                parser_version=(_cpv(result.get('extractor'))
+                                if parsed_text else ''))
 
         # ── Done — return everything the client needs ──
         yield _sse({'stage': 'done', 'ok': True,
@@ -2214,7 +2242,7 @@ def _is_broken_stub_row(paper):
 
 def _persist_ingested_library_row(paper_id, *, title, pdf_url, pdf_filename,
                                   arxiv_id, paper_hash, parsed_text, images,
-                                  page_count):
+                                  page_count, parser_version=''):
     r"""Create/refresh a ``paper_library`` row at INGEST time (server-authoritative).
 
     The ingestion endpoints (``/api/paper/upload``, ``/api/paper/fetch-arxiv-stream``)
@@ -2252,6 +2280,13 @@ def _persist_ingested_library_row(paper_id, *, title, pdf_url, pdf_filename,
             qa_history = (existing['qa_history'] if existing else '[]') or '[]'
             babel_cache = (existing['babel_cache'] if existing else '{}') or '{}'
             imgs = images[:_LIB_IMAGES_CAP] if isinstance(images, list) else []
+            # insert_cols: PARTIAL insert — folder_id is deliberately NOT
+            # written. A full-row upsert (insert_cols=None lists ALL columns)
+            # both breaks on any Core column the row-dict doesn't supply (the
+            # folder_id binding break, 705cc8e3) and would CLOBBER an existing
+            # folder assignment on re-ingest; the partial form lets the INSERT
+            # take the column DEFAULT ('') and ON CONFLICT updates only the
+            # columns actually written — the PUT path's own preserve contract.
             upsert(db, PAPER_LIBRARY, {
                 'id': paper_id, 'user_id': DEFAULT_USER_ID,
                 'title': (title or '')[:_LIB_TITLE_CAP],
@@ -2260,12 +2295,19 @@ def _persist_ingested_library_row(paper_id, *, title, pdf_url, pdf_filename,
                 'arxiv_id': (arxiv_id or '')[:64],
                 'paper_hash': (paper_hash or '')[:64],
                 'parsed_text': (parsed_text or '')[:_LIB_PARSED_TEXT_CAP],
+                'parser_version': (parser_version or '')[:128],
                 'qa_history': qa_history,
                 'images': json.dumps(imgs, ensure_ascii=False),
                 'babel_cache': babel_cache,
                 'page_count': int(page_count or 0),
                 'created_at': created_at, 'updated_at': now_ms,
-            }, retry=True)
+            }, insert_cols=(
+                'id', 'user_id', 'title', 'pdf_url', 'pdf_filename',
+                'arxiv_id', 'paper_hash', 'parsed_text', 'parser_version',
+                'qa_history',
+                'images', 'babel_cache', 'page_count',
+                'created_at', 'updated_at',
+            ), retry=True)
             logger.info('[Paper:Ingest] Persisted library row %s — hash=%s imgs=%d',
                         paper_id[:16], (paper_hash or '')[:12], len(imgs))
             return True
@@ -2391,11 +2433,14 @@ def upload_paper():
     # write the bookshelf row NOW (don't wait on the client's PUT). The PDF is
     # viewable even when parsing failed, so we persist regardless of parse_error.
     if client_paper_id:
+        from lib.pdf_parser._common import current_parser_version as _cpv
         _persist_ingested_library_row(
             client_paper_id, title=original_name,
             pdf_url=f'/api/paper/pdf/{filename}', pdf_filename=filename,
             arxiv_id='', paper_hash=phash, parsed_text=parsed_text,
-            images=images, page_count=total_pages)
+            images=images, page_count=total_pages,
+            parser_version=(_cpv(result.get('extractor'))
+                            if parsed_text else ''))
 
     resp = {
         'ok': True,
@@ -2419,62 +2464,65 @@ def upload_paper():
 # ══════════════════════════════════════════════════════
 
 @api_v1_paper_bp.route('/api/v1/paper/library', methods=['GET'])
+@safe_route
 async def list_library():
     """Return all papers on the current user's bookshelf, newest first.
 
     Each entry includes a ``hasReport`` flag computed from ``paper_reports``
     so the UI can show a "· report" badge without a second round-trip.
+
+    @safe_route (pt_63eb7f02 batch 5): the outer try/except was pure
+    logger.error + api_internal_error; @safe_route reproduces it. The
+    INNER try/except around the hasReport lookup (a soft-fail with
+    local recovery: log.debug + fall through) is DELIBERATELY retained.
     """
-    try:
-        rows = await async_fetchall(
-            'SELECT ' + ', '.join(_PAPER_LIB_COLUMNS) +
-            ' FROM paper_library WHERE user_id=? ORDER BY updated_at DESC',
-            (DEFAULT_USER_ID,), domain=DOMAIN_CHAT,
-        )
-        papers = [_lib_row_to_dict(r) for r in rows]
+    rows = await async_fetchall(
+        'SELECT ' + ', '.join(_PAPER_LIB_COLUMNS) +
+        ' FROM paper_library WHERE user_id=? ORDER BY updated_at DESC',
+        (DEFAULT_USER_ID,), domain=DOMAIN_CHAT,
+    )
+    papers = [_lib_row_to_dict(r) for r in rows]
 
-        # Reap GHOST rows — non-viewable bookshelf entries left by the OLD
-        # fire-and-forget persistence (a client PUT that raced/replaced a failed
-        # upload wrote a row with no PDF). A row is a ghost when its
-        # ``pdfFilename`` is empty OR the referenced file is missing from
-        # PAPER_DIR. We HARD-SKIP them from the listing (never return them —
-        # returning one reproduces the vanishing-paper ghost the user saw) but
-        # do NOT delete: a FUSE/cross-DC mount can transiently report a real
-        # file missing, and a listing must never be a destructive operation.
-        # A recovered mount makes a real paper reappear on the next listing.
-        _kept = [p for p in papers if not _is_ghost_library_row(p)]
-        _reaped = len(papers) - len(_kept)
-        if _reaped:
-            logger.info('[Paper:Library] Reaped %d ghost row(s) (empty/missing PDF) '
-                        'from listing (kept in DB, non-destructive)', _reaped)
-        papers = _kept
+    # Reap GHOST rows — non-viewable bookshelf entries left by the OLD
+    # fire-and-forget persistence (a client PUT that raced/replaced a failed
+    # upload wrote a row with no PDF). A row is a ghost when its
+    # ``pdfFilename`` is empty OR the referenced file is missing from
+    # PAPER_DIR. We HARD-SKIP them from the listing (never return them —
+    # returning one reproduces the vanishing-paper ghost the user saw) but
+    # do NOT delete: a FUSE/cross-DC mount can transiently report a real
+    # file missing, and a listing must never be a destructive operation.
+    # A recovered mount makes a real paper reappear on the next listing.
+    _kept = [p for p in papers if not _is_ghost_library_row(p)]
+    _reaped = len(papers) - len(_kept)
+    if _reaped:
+        logger.info('[Paper:Library] Reaped %d ghost row(s) (empty/missing PDF) '
+                    'from listing (kept in DB, non-destructive)', _reaped)
+    papers = _kept
 
-        # Single-query JOIN-ish: collect hashes, ask paper_reports which exist
-        hashes = [p['paperHash'] for p in papers if p['paperHash']]
-        reported = set()
-        if hashes:
-            try:
-                placeholders = ','.join(['?'] * len(hashes))
-                rrows = await async_fetchall(
-                    'SELECT DISTINCT paper_hash FROM paper_reports '
-                    'WHERE paper_hash IN (' + placeholders + ')',
-                    tuple(hashes), domain=DOMAIN_CHAT,
-                )
-                reported = {r['paper_hash'] for r in rrows}
-            except Exception as e:
-                logger.debug('[Paper:Library] hasReport lookup failed: %s', e)
-        for p in papers:
-            p['hasReport'] = bool(p['paperHash'] and p['paperHash'] in reported)
+    # Single-query JOIN-ish: collect hashes, ask paper_reports which exist
+    hashes = [p['paperHash'] for p in papers if p['paperHash']]
+    reported = set()
+    if hashes:
+        try:
+            placeholders = ','.join(['?'] * len(hashes))
+            rrows = await async_fetchall(
+                'SELECT DISTINCT paper_hash FROM paper_reports '
+                'WHERE paper_hash IN (' + placeholders + ')',
+                tuple(hashes), domain=DOMAIN_CHAT,
+            )
+            reported = {r['paper_hash'] for r in rrows}
+        except Exception as e:
+            logger.debug('[Paper:Library] hasReport lookup failed: %s', e)
+    for p in papers:
+        p['hasReport'] = bool(p['paperHash'] and p['paperHash'] in reported)
 
-        logger.debug('[Paper:Library] Listed %d papers (%d with reports)',
-                     len(papers), len(reported))
-        return api_ok({'papers': papers})
-    except Exception as e:
-        logger.error('[Paper:Library] List failed: %s', e, exc_info=True)
-        return api_internal_error(e)
+    logger.debug('[Paper:Library] Listed %d papers (%d with reports)',
+                 len(papers), len(reported))
+    return api_ok({'papers': papers})
 
 
 @api_v1_paper_bp.route('/api/v1/paper/library/<paper_id>', methods=['PUT'])
+@safe_route
 async def upsert_library_entry(paper_id):
     """Create or update a paper on the bookshelf.
 
@@ -2521,7 +2569,8 @@ async def upsert_library_entry(paper_id):
             # are the only places that originate those big columns.
             existing = db.execute(
                 'SELECT title, pdf_url, pdf_filename, arxiv_id, paper_hash, '
-                '       parsed_text, images, page_count, folder_id, created_at '
+                '       parsed_text, images, page_count, folder_id, created_at, '
+                '       parser_version '
                 'FROM paper_library WHERE id=? AND user_id=?',
                 (paper_id, DEFAULT_USER_ID),
             ).fetchone()
@@ -2554,6 +2603,13 @@ async def upsert_library_entry(paper_id):
                 folder_id = str(data.get('folderId') or '')[:64]
             else:
                 folder_id = (existing['folder_id'] if existing else '') or ''
+            # parser_version: same preserve contract as folder_id — the stamp
+            # is server-made at ingest/parse time, and a later metadata PUT
+            # must NOT clobber it. A client may only set it explicitly.
+            if 'parserVersion' in data:
+                parser_version = str(data.get('parserVersion') or '')[:128]
+            else:
+                parser_version = (existing['parser_version'] if existing else '') or ''
 
             # Images: accept client list on first write; fall back to disk
             # manifest (server source of truth) so the row always reflects reality.
@@ -2584,6 +2640,7 @@ async def upsert_library_entry(paper_id):
                 'pdf_url': pdf_url, 'pdf_filename': pdf_filename,
                 'arxiv_id': arxiv_id, 'paper_hash': paper_hash,
                 'parsed_text': parsed_text,
+                'parser_version': parser_version,
                 'qa_history': json.dumps(qa, ensure_ascii=False),
                 'images': json.dumps(images, ensure_ascii=False),
                 'babel_cache': json.dumps(babel, ensure_ascii=False),
@@ -2596,15 +2653,13 @@ async def upsert_library_entry(paper_id):
         finally:
             _pool_put(db)
 
-    try:
-        await asyncio.to_thread(_do_upsert)
-        return api_ok({'id': paper_id, 'updatedAt': now_ms})
-    except Exception as e:
-        logger.error('[Paper:Library] Upsert failed for %s: %s', paper_id[:16], e, exc_info=True)
-        return api_internal_error(e)
+    # @safe_route (pt_63eb7f02 batch 5) catches any exception from _do_upsert.
+    await asyncio.to_thread(_do_upsert)
+    return api_ok({'id': paper_id, 'updatedAt': now_ms})
 
 
 @api_v1_paper_bp.route('/api/v1/paper/library/<paper_id>', methods=['DELETE'])
+@safe_route
 async def delete_library_entry(paper_id):
     """Remove a paper from the bookshelf.
 
@@ -2631,15 +2686,13 @@ async def delete_library_entry(paper_id):
         finally:
             _pool_put(db)
 
-    try:
-        await asyncio.to_thread(_do_delete)
-        return api_ok()
-    except Exception as e:
-        logger.error('[Paper:Library] Delete failed for %s: %s', paper_id[:16], e, exc_info=True)
-        return api_internal_error(e)
+    # @safe_route (pt_63eb7f02 batch 5) catches any exception from _do_delete.
+    await asyncio.to_thread(_do_delete)
+    return api_ok()
 
 
 @api_v1_paper_bp.route('/api/v1/paper/library/prune-broken', methods=['POST'])
+@safe_route
 async def prune_broken_library_rows():
     """One-time cleanup of DEFINITIVELY-broken stub rows (opt-in, destructive).
 
@@ -2685,13 +2738,517 @@ async def prune_broken_library_rows():
             _pool_put(db)
         return pruned_ids
 
-    try:
-        ids = await asyncio.to_thread(_prune)
-        return api_ok({'pruned': len(ids), 'ids': ids})
-    except Exception as e:
-        logger.error('[Paper:Library] Prune failed: %s', e, exc_info=True)
-        return api_internal_error(e)
+    # @safe_route (pt_63eb7f02 batch 5) catches any exception from _prune.
+    ids = await asyncio.to_thread(_prune)
+    return api_ok({'pruned': len(ids), 'ids': ids})
 
+
+
+# ═══ Podcast (paper podcast: report → spoken script → TTS audio) ═══
+#
+# The paper-podcast surface (docs/PAPER_PODCAST_DESIGN.md, epic
+# pt_80943e765e9444ca). Report-first UX: the start route GATES on a report
+# existing in either language (report_required → the frontend chains the
+# report flow first, then retries). Without any configured TTS slot the
+# worker degrades to script_only (script + transcript, honest reason) —
+# owner directive 2026-07-25: no hard failure, no hardcoded model/voice.
+
+from lib.paper.podcast_prompts import PODCAST_MODES
+from lib.paper.podcast_runtime import (
+    _podcast_index_get,
+    _podcast_index_register,
+    _podcast_runtime,
+    _podcast_tasks,
+    _podcast_tasks_lock,
+    _cleanup_stale_podcast_tasks,
+    _new_podcast_task,
+    _podcast_task_id,
+)
+from lib.paper.podcast_engine import (
+    has_report,
+    load_cached_podcast,
+    podcast_audio_url,
+    _run_podcast_task,
+)
+
+
+@api_v1_paper_bp.route('/api/v1/paper/podcast/status', methods=['GET'])
+def podcast_status():
+    """Feature status: is a TTS slot configured, which models, mode bands."""
+    from lib import tts as _tts
+    available = _tts.tts_available()
+    return jsonify({
+        'ok': True,
+        'tts_available': available,
+        'models': _tts.list_tts_models() if available else [],
+        'default_voice': _tts.default_voice() if available else '',
+        'modes': {m: {'target': band[0], 'min': band[1], 'max': band[2]}
+                  for m, band in PODCAST_MODES.items()},
+    })
+
+
+def _resolve_podcast_request(data):
+    """Shared request parsing for start/lookup; returns (phash, mode, lang,
+    voice, model, force, error_response)."""
+    phash = (data.get('paper_hash') or '').strip()
+    paper_text = (data.get('paper_text') or '').strip()
+    if phash and not _safe_hash_dir(phash):
+        phash = ''
+    if not phash and paper_text:
+        phash = _paper_hash(paper_text)
+    if not phash:
+        return None, None, None, None, None, None, (
+            jsonify({'ok': False, 'error': 'paper_hash or paper_text required'}), 400)
+    mode = (data.get('mode') or 'short').strip() or 'short'
+    lang = (data.get('lang') or 'zh').strip() or 'zh'
+    if mode not in PODCAST_MODES:
+        return None, None, None, None, None, None, (
+            jsonify({'ok': False, 'error': f'unknown mode: {mode}'}), 400)
+    if lang not in ('zh', 'en'):
+        return None, None, None, None, None, None, (
+            jsonify({'ok': False, 'error': f'unsupported lang: {lang}'}), 400)
+    voice = (data.get('voice') or '').strip()
+    model = (data.get('model') or '').strip() or None
+    force = bool(data.get('force'))
+    return phash, mode, lang, voice, model, force, None
+
+
+@api_v1_paper_bp.route('/api/v1/paper/podcast/start', methods=['POST'])
+async def start_podcast_task():
+    """Start (or join) a podcast task; report-gated; cache-aware.
+
+    Request: {paper_hash?, paper_text?, mode?, lang?, voice?, force?, model?}
+    Responses:
+      - {ok, task_id, reused?}           — live task (new or joined)
+      - {ok, cached: true, ...}          — finished/script_only cache hit
+      - {ok: false, report_required}     — no report yet; chain report first
+    """
+    data = await async_parse_body()
+    _cleanup_stale_podcast_tasks()
+    phash, mode, lang, voice, model, force, err = _resolve_podcast_request(data)
+    if err:
+        return err
+    if not has_report(phash):
+        return jsonify({'ok': False, 'report_required': True,
+                        'report_lang': lang,
+                        'error': 'a report is required before a podcast can '
+                                 'be generated'})
+    from lib import tts as _tts
+    eff_voice = voice or _tts.default_voice()
+
+    tid = _podcast_index_get(phash, mode, lang, eff_voice, model)
+    if tid:
+        return jsonify({'ok': True, 'task_id': tid, 'reused': True})
+
+    cached = load_cached_podcast(phash, mode, lang, eff_voice)
+    # The cache row is ONE slot per (paper_hash, mode, lang, voice) — and
+    # the model that MADE it is part of its honest identity: asking for a
+    # different model and being served the previous model's audio would be
+    # the cache-key-skew family (label says X, key is generic). A requested
+    # model that differs from the row's model is a cache MISS (regenerate +
+    # overwrite the slot); a legacy caller sending no model accepts the
+    # row as-is, preserving pre-picker behaviour for API clients.
+    if (cached and not force
+            and not (model and (cached.get('model') or '') != model)):
+        status = cached.get('status') or ''
+        return jsonify({
+            'ok': True, 'cached': True, 'status': status,
+            'script': cached.get('script_json') or {},
+            'meta': cached.get('meta') or {},
+            'scriptOnly': status == 'script_only',
+            'model': cached.get('model') or '',
+            'audioUrl': (podcast_audio_url(phash, mode, lang, eff_voice)
+                         if status == 'done' else ''),
+            'durationSec': cached.get('duration_sec') or 0,
+        })
+
+    task_id = _podcast_task_id()
+    _podcast_index_register(phash, mode, lang, eff_voice, model, task_id)
+    task = _new_podcast_task(task_id, phash, mode, lang, eff_voice, model)
+    _podcast_runtime.spawn(task_id, _run_podcast_task, task)
+    return jsonify({'ok': True, 'task_id': task_id})
+
+
+@api_v1_paper_bp.route('/api/v1/paper/video/start', methods=['POST'])
+async def start_video_abstract_task():
+    """Start a paper video abstract (report → narrated MG video).
+
+    Request: {paper_hash, lang?, voice?, speed?, alignment?, narration?,
+              burn_in?, quality?, parallel?, max_scenes?, model?}
+    Responses:
+      - {ok, task_id, scenes, source_kind}  — motion task started; poll via
+        GET /api/v1/motion/videos/poll/<task_id>, download via
+        /api/v1/motion/videos/<task_id>/file
+      - {ok: false, report_required}        — chain a report first
+    """
+    from lib.paper.video_abstract import start_video_abstract
+
+    data = await async_parse_body()
+    phash = (data.get('paper_hash') or '').strip()
+    if not phash:
+        return api_bad_request('paper_hash is required', field='paper_hash')
+    lang = (data.get('lang') or 'zh').strip()
+    if lang not in ('zh', 'en'):
+        return api_bad_request('lang must be zh|en', field='lang')
+    quality = (data.get('quality') or 'standard').strip()
+    if quality not in ('draft', 'standard', 'high'):
+        return api_bad_request('quality must be draft|standard|high',
+                               field='quality')
+    alignment = (data.get('alignment') or 'loose').strip()
+    if alignment not in ('loose', 'strict'):
+        return api_bad_request('alignment must be loose|strict',
+                               field='alignment')
+    try:
+        parallel = max(1, min(int(data.get('parallel') or 2), 4))
+        max_scenes = max(1, min(int(data.get('max_scenes') or 8), 16))
+    except (TypeError, ValueError):
+        return api_bad_request('parallel/max_scenes must be ints',
+                               field='parallel')
+    # Composition tier. None = follow the fleet default (authored), which is
+    # resolved in ONE place (lib/motion_video/_scene_author.scene_author_enabled)
+    # rather than re-stated here. This is deliberately NOT the draft/standard/
+    # high knob above: that one is the RENDER preset (bitrate/scale) and says
+    # nothing about whether a scene gets a bespoke composition.
+    scene_author = data.get('scene_author')
+    if scene_author is not None:
+        scene_author = bool(scene_author)
+    res = start_video_abstract(
+        phash, lang=lang, voice=(data.get('voice') or '').strip(),
+        speed=data.get('speed'), alignment=alignment,
+        narration=bool(data.get('narration', True)),
+        burn_in=bool(data.get('burn_in', False)), quality=quality,
+        parallel=parallel, max_scenes=max_scenes,
+        scene_author=scene_author,
+        model=(data.get('model') or '').strip() or None,
+        force=bool(data.get('force', False)))
+    if not res.get('ok'):
+        return jsonify({'ok': False, 'report_required':
+                        res.get('reason') == 'report_required',
+                        'error': res.get('reason')})
+    return jsonify(res)
+
+
+@api_v1_paper_bp.route('/api/v1/paper/video/lookup', methods=['GET'])
+def lookup_video_abstract():
+    """Re-attach a paper's video-abstract task on tab open.
+
+    Scans the motion runtime for the newest task tagged with this
+    paper_hash (tasks live for the runtime TTL, 1h). Returns
+    {ok, found, running, task_id, result, report_available}.
+    """
+    from lib.motion_video.runtime import _motion_tasks, _motion_tasks_lock
+    from lib.paper.podcast_engine import has_report
+
+    phash = (request.args.get('paper_hash') or '').strip()
+    if not phash:
+        return api_bad_request('paper_hash is required', field='paper_hash')
+    best = None
+    with _motion_tasks_lock:
+        for t in _motion_tasks.values():
+            if t.get('paper_hash') == phash:
+                if best is None or t.get('created_at', 0) > best.get('created_at', 0):
+                    best = t
+    resp = {'ok': True, 'report_available': has_report(phash)}
+    if best:
+        from lib.agent_core.task_runtime import _epoch_ms
+        resp.update({
+            'found': True,
+            'task_id': best['task_id'],
+            'running': best['status'] in ('pending', 'running'),
+            'status': best['status'],
+            'model': best.get('model') or '',
+            # ★ Start clock on the re-attach frame (epoch ms) — this lands
+            #   before the first poll, so without it a refreshed tab paints
+            #   0:00 for a frame. `created_at` was already read above to pick
+            #   the newest task; it just was never surfaced.
+            'createdAt': _epoch_ms(best.get('created_at')),
+            'updatedAt': _epoch_ms(best.get('updated_at')
+                                   or best.get('created_at')),
+        })
+        if best['status'] == 'done' and best.get('result'):
+            resp['result'] = best['result']
+        # Product-quality axis (lib/agent_core/task_runtime.py). A degraded
+        # film keeps status='done' BY DESIGN, so this field is the only thing
+        # separating "all 8 scenes fell back to the plain template card" from
+        # a clean success. Dropping it here is what let the panel render both
+        # identically.
+        if best.get('artifact_quality'):
+            resp['artifact_quality'] = best['artifact_quality']
+        return jsonify(resp)
+
+    # P-UX4: memory missed — fall back to the on-disk job manifests so a
+    # finished video survives a server restart (and an interrupted one is
+    # honestly reported instead of vanishing).
+    disk = _lookup_paper_video_on_disk(phash)
+    if disk:
+        resp.update(disk)
+    else:
+        resp['found'] = False
+    return jsonify(resp)
+
+
+def _lookup_paper_video_on_disk(phash: str) -> dict | None:
+    """Newest on-disk motion job for this paper (P-UX4 disk fallback).
+
+    Scans ``<motion_root>/jobs/*/job.json`` for manifests tagged with this
+    paper_hash. A ``done`` manifest with its final.mp4 still on disk is a
+    playable result; a ``running`` manifest whose task is NOT live in the
+    runtime means the resume scanner already declined it (or it died
+    again) — report interrupted. Returns a lookup-response fragment or
+    None when nothing on disk matches.
+    """
+    from lib.agent_core.task_runtime import _epoch_ms
+    from lib.motion_video._env import motion_root
+    from lib.motion_video.runtime import _motion_runtime
+    from lib.production.jobs import read_manifest
+
+    jobs_dir = os.path.join(motion_root(), 'jobs')
+    try:
+        names = sorted(os.listdir(jobs_dir))
+    except OSError as e:
+        logger.debug('[Paper:Video] disk lookup cannot list %s: %s', jobs_dir, e)
+        return None
+    best = None  # (mtime, task_id, manifest)
+    for name in names:
+        workdir = os.path.join(jobs_dir, name)
+        m = read_manifest(workdir)
+        if not m or m.get('paper_hash') != phash:
+            continue
+        try:
+            mt = os.path.getmtime(os.path.join(workdir, 'job.json'))
+        except OSError as _e:
+            logger.debug('lookup paper video on disk: unreadable (%s)', _e)
+            mt = 0.0
+        if best is None or mt > best[0]:
+            best = (mt, m.get('task_id') or name, m)
+    if not best:
+        return None
+    _mt, task_id, m = best
+    state = m.get('state')
+
+    # ★ Server-authoritative clocks on the DISK path too.
+    #
+    # This branch IS the post-restart re-attach: the task is gone from memory,
+    # so unlike the in-memory branch there is no first poll to correct a
+    # locally-minted stopwatch afterwards — runtime.poll() 404s on a task it
+    # does not hold. Whatever this response says is what the panel shows for
+    # the rest of the run, so omitting the clocks here made a resumed job
+    # restart its elapsed at 0:00 permanently.
+    #
+    # `created_at` is persisted in the manifest precisely because
+    # resume_running_jobs() mints a fresh task (see motion_video.engine's
+    # _MANIFEST_FIELDS note); job.json's mtime is the last time the worker
+    # actually wrote its state, which is the honest liveness signal available
+    # from disk. Both are OMITTED rather than guessed when unavailable: a
+    # missing field lets the client fall back to its local clock, whereas a
+    # fabricated one renders as 1970 or year 58000 — silently wrong beats
+    # nothing here only if it is TRUE.
+    def _disk_clocks() -> dict:
+        out = {}
+        created = _epoch_ms(m.get('created_at'))
+        if created is not None:
+            out['createdAt'] = created
+        seen = _epoch_ms(_mt) if _mt else None
+        # Liveness may never claim to predate the start.
+        if seen is not None and (created is None or seen >= created):
+            out['updatedAt'] = seen
+        elif created is not None:
+            out['updatedAt'] = created
+        return out
+
+    if state == 'running' and _motion_runtime.get(task_id) is None:
+        return {'found': True, 'interrupted': True, 'task_id': task_id,
+                'model': m.get('model') or '',
+                **_disk_clocks()}
+    if state == 'done':
+        workdir = os.path.join(jobs_dir, task_id)
+        final = os.path.join(workdir, 'final.mp4')
+        if os.path.isfile(final):
+            duration = 0.0
+            try:
+                from lib import motion_video as mv
+                probe = mv.probe_video(final)
+                duration = round(float((probe or {}).get('duration') or 0), 3)
+            except Exception as e:
+                logger.debug('[Paper:Video] disk lookup probe failed: %s', e)
+            return {'found': True, 'running': False, 'status': 'done',
+                    'task_id': task_id,
+                    'model': m.get('model') or '',
+                    'result': {'final_path': final, 'duration': duration,
+                               'workdir': workdir,
+                               'narrated': bool(m.get('narration'))},
+                    # Read from the manifest, which the engine writes AFTER
+                    # computing the verdict. This branch has no later poll to
+                    # correct it (runtime.poll 404s on a task it no longer
+                    # holds), so whatever is omitted here is lost for good.
+                    **({'artifact_quality': m['artifact_quality']}
+                       if m.get('artifact_quality') else {}),
+                    **_disk_clocks()}
+    return None
+
+
+@api_v1_paper_bp.route('/api/v1/paper/podcast/poll', methods=['GET'])
+def poll_podcast_task():
+    """Poll podcast events. Same cursor protocol as the report poll; on done
+    the response flattens script / audioUrl / durationSec / scriptOnly."""
+    task_id = request.args.get('task_id', '')
+    try:
+        cursor = int(request.args.get('cursor', '0') or 0)
+    except (ValueError, TypeError) as _e:
+        logger.debug('poll podcast task: unparseable/unexpected type (%s)', _e)
+        cursor = 0
+    with _podcast_tasks_lock:
+        t = _podcast_tasks.get(task_id)
+    if not t:
+        return jsonify({'ok': False, 'error': 'Task not found'}), 404
+    # ★ Go through the shared throat rather than re-deriving the reply here.
+    #   runtime.poll() owns the stall reap AND the server-authoritative clocks
+    #   (createdAt / updatedAt, epoch ms) that let a refreshed client continue
+    #   its elapsed timer instead of restarting at 0:00. A hand-rolled reply
+    #   silently misses every field the throat gains later — which is exactly
+    #   how this endpoint came to be the one production surface with no clocks.
+    base = _podcast_runtime.poll(task_id, cursor=cursor)
+    status = t.get('status')
+    resp = {
+        'ok': True,
+        'status': base.get('status', status),
+        'done': base.get('done', status in ('done', 'error', 'aborted')),
+        'events': base.get('events', []),
+        # This endpoint's wire name for the cursor is `cursor`, not
+        # `next_cursor` — keep it (the podcast client reads `cursor`).
+        'cursor': base.get('next_cursor', 0),
+        'progress': t.get('progress') or {'done': 0, 'total': 0},
+        'createdAt': base.get('createdAt'),
+        'updatedAt': base.get('updatedAt'),
+    }
+    if base.get('finishedAt') is not None:
+        resp['finishedAt'] = base['finishedAt']
+    # The reap may have just flipped the task terminal.
+    status = resp['status']
+    events = t['events']
+    if status == 'done':
+        resp['script'] = t.get('script')
+        resp['meta'] = t.get('script_meta') or {}
+        resp['scriptOnly'] = bool(t.get('script_only'))
+        resp['audioUrl'] = t.get('audio_url') or ''
+        resp['durationSec'] = t.get('duration_sec') or 0
+        resp['model'] = t.get('model') or ''
+    elif status == 'error':
+        for ev in reversed(events):
+            if ev.get('type') == 'error':
+                resp['error'] = ev.get('error', 'unknown error')
+                if ev.get('reason'):
+                    resp['reason'] = ev['reason']
+                break
+    return jsonify(resp)
+
+
+@api_v1_paper_bp.route('/api/v1/paper/podcast/lookup', methods=['POST'])
+async def lookup_podcast():
+    """Find a live task or cached podcast for (paper_hash, mode, lang, voice)."""
+    data = await async_parse_body()
+    phash, mode, lang, voice, _model, _force, err = _resolve_podcast_request(data)
+    if err:
+        return err
+    from lib import tts as _tts
+    eff_voice = voice or _tts.default_voice()
+    tid = _podcast_index_get(phash, mode, lang, eff_voice, _model)
+    if tid:
+        # ★ The re-attach frame lands BEFORE the first poll, so it must carry
+        #   the start clock too — otherwise a refreshed panel paints 0:00 for
+        #   one frame before the first poll corrects it (a visible flash).
+        from lib.agent_core.task_runtime import _epoch_ms
+        _lt = _podcast_runtime.get(tid) or {}
+        return jsonify({'ok': True, 'found': True, 'running': True,
+                        'task_id': tid, 'model': _lt.get('model') or '',
+                        'createdAt': _epoch_ms(_lt.get('created_at')),
+                        'updatedAt': _epoch_ms(_lt.get('updated_at')
+                                               or _lt.get('created_at'))})
+    cached = load_cached_podcast(phash, mode, lang, eff_voice)
+    if cached:
+        status = cached.get('status') or ''
+        return jsonify({
+            'ok': True, 'found': True, 'cached': True, 'status': status,
+            'script': cached.get('script_json') or {},
+            'meta': cached.get('meta') or {},
+            'scriptOnly': status == 'script_only',
+            'model': cached.get('model') or '',
+            'audioUrl': (podcast_audio_url(phash, mode, lang, eff_voice)
+                         if status == 'done' else ''),
+            'durationSec': cached.get('duration_sec') or 0,
+        })
+    # P-UX4: a generating row flipped to interrupted at boot = the last run
+    # was cut by a server restart. Surface it honestly (regenerate button).
+    from lib.paper.podcast_engine import load_interrupted_podcast
+    if load_interrupted_podcast(phash, mode, lang, eff_voice):
+        return jsonify({'ok': True, 'found': True, 'interrupted': True,
+                        'report_available': has_report(phash)})
+    return jsonify({'ok': True, 'found': False,
+                    'tts_available': _tts.tts_available(),
+                    'report_available': has_report(phash)})
+
+
+@api_v1_paper_bp.route('/api/v1/paper/podcast/script', methods=['GET'])
+def get_podcast_script():
+    """Return the cached spoken script + meta (transcript tab, md export)."""
+    phash = (request.args.get('paper_hash') or '').strip()
+    mode = (request.args.get('mode') or 'short').strip() or 'short'
+    lang = (request.args.get('lang') or 'zh').strip() or 'zh'
+    voice = (request.args.get('voice') or '').strip()
+    if not phash or not _safe_hash_dir(phash):
+        return jsonify({'ok': False, 'error': 'paper_hash required'}), 400
+    from lib import tts as _tts
+    eff_voice = voice or _tts.default_voice()
+    cached = load_cached_podcast(phash, mode, lang, eff_voice)
+    if not cached:
+        return jsonify({'ok': False, 'error': 'Podcast not found'}), 404
+    return jsonify({
+        'ok': True,
+        'script': cached.get('script_json') or {},
+        'meta': cached.get('meta') or {},
+        'scriptOnly': (cached.get('status') or '') == 'script_only',
+        'audioUrl': (podcast_audio_url(phash, mode, lang, eff_voice)
+                     if (cached.get('status') or '') == 'done' else ''),
+        'durationSec': cached.get('duration_sec') or 0,
+    })
+
+
+@api_v1_paper_bp.route('/api/v1/paper/podcast/audio/<paper_hash>/<mode>/<lang>/<voice>',
+                       methods=['GET'])
+def serve_podcast_audio(paper_hash, mode, lang, voice):
+    """Stream the podcast audio with HTTP Range support (seekable player).
+
+    Path containment mirrors _safe_paper_file: the persisted file_path must
+    resolve under PAPER_DIR/podcast/<paper_hash>/ — a row pointing anywhere
+    else is treated as tampered and 404s (logged).
+    """
+    import os as _os
+    from urllib.parse import unquote
+
+    from lib.paper.hashing import PAPER_DIR as _PAPER_DIR
+
+    if not _safe_hash_dir(paper_hash):
+        return jsonify({'ok': False, 'error': 'invalid paper_hash'}), 400
+    voice = unquote(voice or '')
+    if voice == '-':
+        voice = ''
+    cached = load_cached_podcast(paper_hash, mode, lang, voice)
+    fpath = (cached or {}).get('file_path') or ''
+    if not cached or not fpath:
+        return jsonify({'ok': False, 'error': 'Podcast audio not found'}), 404
+    root = _os.path.abspath(_os.path.join(_PAPER_DIR, 'podcast', paper_hash))
+    real = _os.path.abspath(fpath)
+    if not real.startswith(root + _os.sep):
+        logger.warning('[Paper:Podcast] audio path escapes podcast dir: %s', fpath)
+        return jsonify({'ok': False, 'error': 'Podcast audio not found'}), 404
+    if not _os.path.exists(real):
+        logger.warning('[Paper:Podcast] audio file missing on disk (stale row): '
+                       '%s', real)
+        return jsonify({'ok': False, 'error': 'Podcast audio file missing'}), 404
+    ext = real.rsplit('.', 1)[-1].lower() if '.' in real else ''
+    mime = {'mp3': 'audio/mpeg', 'wav': 'audio/wav',
+            'bin': 'application/octet-stream'}.get(ext, 'application/octet-stream')
+    return _stream_file_response(real, mime)
 
 
 # ── Abort routes (factory-minted) ───────────────────────────────────
@@ -2724,3 +3281,5 @@ register_task_routes(api_v1_paper_bp, _qa_runtime,
                      url_prefix='/api/v1/paper/qa', enable_poll=False)
 register_task_routes(api_v1_paper_bp, _translate_runtime,
                      url_prefix='/api/v1/paper/translate', enable_poll=False)
+register_task_routes(api_v1_paper_bp, _podcast_runtime,
+                     url_prefix='/api/v1/paper/podcast', enable_poll=False)

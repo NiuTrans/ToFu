@@ -15,6 +15,7 @@
 function closeSettings() {
   _stopBalancePolling();
   _stopLocalMetricsPolling();
+  if (typeof _stopModelHealthPolling === 'function') _stopModelHealthPolling();
   document.getElementById("settingsModal").classList.remove("open");
   // Refresh model dropdown to reflect any visibility changes
   if (typeof _populateModelDropdown === 'function' && typeof _registeredModels !== 'undefined' && _registeredModels.length > 0) {
@@ -82,10 +83,12 @@ function saveSettings() {
         if (data && data.ok) {
           debugLog('Trading module ' + (newVal ? 'enabled' : 'disabled') + ' — applied', 'success');
           if (typeof _featureFlags !== 'undefined') _featureFlags.trading_enabled = newVal;
-          // Server tells us whether the toggle takes effect now or only after
-          // a restart (blueprint registration is import-time — see A14).
-          var hint = document.getElementById('tradingRestartHint');
-          if (hint) hint.style.display = data.needs_restart ? 'block' : 'none';
+          // Show/hide the topbar entry immediately. The backend enforces the
+          // same flag per request and in its background workers, so this is
+          // presentation only — nothing here is what stops the module.
+          if (typeof window._applyTradingVisibility === 'function') {
+            window._applyTradingVisibility();
+          }
         }
       }).catch(function(e) { debugLog('Feature flag save failed: ' + e.message, 'error'); });
     }
@@ -118,13 +121,18 @@ function saveSettings() {
         if (data && data.ok) {
           debugLog('Debug mode ' + (newDbg ? 'enabled' : 'disabled'), 'success');
           if (typeof _featureFlags !== 'undefined') _featureFlags.debug_mode = newDbg;
+          // Show/hide unfinished orchestration surfaces (Flow submenu, Studio /
+          // Tasks topbar + mobile-sheet items). See index.html loadFeatureFlags.
+          if (typeof window._applyDebugModeVisibility === 'function') {
+            window._applyDebugModeVisibility();
+          }
           // Re-render sidebar and messages to show/hide debug elements.
           // Former renderMessages() never existed — whole-chat repaint is
           // renderChat(conv). (caught by tsc --checkJs)
           if (typeof renderConversationList === 'function') renderConversationList();
-          if (typeof renderChat === 'function' && typeof getActiveConv === 'function') {
+          if (typeof getActiveConv === 'function') {
             var _dbgConv = getActiveConv();
-            if (_dbgConv) renderChat(_dbgConv, true);
+            if (_dbgConv) window.ConvView.replaceAll(_dbgConv.id, { forceScroll: true });
           }
         }
       }).catch(function(e) { debugLog('Feature flag save failed: ' + e.message, 'error'); });

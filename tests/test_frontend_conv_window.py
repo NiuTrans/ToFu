@@ -15,6 +15,7 @@ Verifies the strangler-fig invariant + the scroll-up pagination logic:
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -39,19 +40,24 @@ const out = [];
 function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
 
 let getCalls = [];
-let renderChatCalls = [];
+let repaintCalls = [];
 let serverResp = null;
 global.debugLog = () => {};
 global.conversations = [];
 global.activeConvId = null;
-global.renderChat = (c) => renderChatCalls.push(c && c.id);
+/* The repaint collaborator conv_window.js actually calls. Stubbing the OLD
+ * `renderChat` name left the real call throwing inside the try{}, which the
+ * catch swallowed into `return 0` — the guard then reported a pagination
+ * failure that did not exist. Located by symbol below so a future rename is
+ * reported instead of silently mis-stubbed. */
+global.ConvView = { replaceAll: (id, opts) => repaintCalls.push(id) };
 global.document = { getElementById: () => null };  // no chatInner in this harness
 global.Api = { conversations: { get: async (id, opts) => { getCalls.push([id, opts]); return serverResp; } } };
 
 (0, eval)(fs.readFileSync(process.argv[2], 'utf8'));
 
 function reset() {
-  getCalls = []; renderChatCalls = []; serverResp = null;
+  getCalls = []; repaintCalls = []; serverResp = null;
   global.conversations = []; global.activeConvId = null; global.window.TOFU_CONV_WINDOW = 60;
 }
 
@@ -92,7 +98,7 @@ async function run() {
   check('loadEarlier: earlier is now first', conv3.messages[0].content === 'q160');
   check('loadEarlier: original tail preserved last', conv3.messages[2].content === 'q180');
   check('loadEarlier: cursor advanced to 160', conv3._firstLoadedSeq === 160);
-  check('loadEarlier: re-rendered active conv', renderChatCalls.length === 1);
+  check('loadEarlier: re-rendered active conv', repaintCalls.length === 1);
 
   // 2b. loadEarlier stops when hasMore False
   reset();
@@ -125,6 +131,48 @@ def _run(js_path):
         return r.stdout + r.stderr
     finally:
         os.unlink(h)
+
+
+def _repaint_collaborator(js_src: str) -> str:
+    """Return the repaint collaborator conv_window.js actually calls.
+
+    The harness has to STUB that collaborator; stubbing a stale name makes the
+    real call throw inside loadEarlierMessages' try{}, whose catch turns it into
+    `return 0` — producing a pagination failure that does not exist. (That is
+    exactly how this suite went red: it stubbed `renderChat`, which still exists
+    elsewhere in the codebase but is not what this module calls.) Derive the name
+    from the shipped source so a future rename is REPORTED, not mis-stubbed.
+    """
+    names = set(re.findall(r'window\.(\w+)\.\w+\(convId', js_src))
+    if not names:
+        raise AssertionError(
+            'conv_window.js no longer calls any window.<X>.<m>(convId) repaint '
+            'collaborator — re-point this guard after checking whether the '
+            'repaint was removed on purpose')
+    if len(names) > 1:
+        raise AssertionError(f'multiple repaint collaborators {names}; '
+                             'the harness can only stub a single one')
+    return names.pop()
+
+
+@pytest.mark.skipif(not _node(), reason='node not available')
+def test_scan_surface_harness_stubs_the_real_collaborator():
+    """Print the scan surface, then assert the harness stub MATCHES production.
+
+    charter: verify what the guard is actually pointed at before trusting its
+    green. Without this, the harness can drift from the module again and the
+    resulting red looks like a product bug.
+    """
+    js = open(JS_SRC, encoding='utf-8').read()
+    collaborator = _repaint_collaborator(js)
+    print('conv_window.js repaints via: window.%s.replaceAll(convId, ...)' % collaborator)
+    stubbed = set(re.findall(r'^global\.(\w+) = \{', _HARNESS, re.M))
+    print('harness stubs:', sorted(stubbed))
+    assert collaborator in stubbed, (
+        f'harness does not stub the real repaint collaborator '
+        f'{collaborator!r} (stubs: {sorted(stubbed)}) — the real call would '
+        f'throw into loadEarlierMessages\' catch and be misread as a '
+        f'pagination failure')
 
 
 @pytest.mark.skipif(not _node(), reason='node not available')

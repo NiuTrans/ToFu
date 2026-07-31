@@ -44,6 +44,18 @@ function _renderUpdateBadge() {
   } else {
     btn.title = t('update.checkTitle');
   }
+  _renderSettingsUpdatePill();
+}
+
+/** Mirror the "update available" state onto the Settings › General card.
+ *  The update entry point now lives there (the topbar button is a hidden
+ *  stub), so the pill must follow the same state rather than being computed
+ *  a second time — one source of truth, two surfaces. Safe to call before
+ *  the settings panel is in the DOM; it simply no-ops. */
+function _renderSettingsUpdatePill() {
+  const pill = document.getElementById('settingsUpdatePill');
+  if (!pill) return;
+  pill.style.display = (_updateState && _updateState.update_available) ? '' : 'none';
 }
 
 /** Open the update dialog. Re-checks live so the dialog is never stale. */
@@ -52,6 +64,7 @@ async function openUpdateDialog() {
   if (!modal) return;
   modal.classList.add('open');
   _runUpdateCheck();
+  _renderPendingLifecycleApprovals();
 }
 
 /** Run the version check with a visible spinner + bounded timeout.
@@ -216,7 +229,9 @@ function _renderUpdateDialogBody(r) {
 
   body.innerHTML =
     _updateHeroHtml(r) +
-    '<div class="upd-action" id="updateActionArea">' + actionHtml + '</div>';
+    '<div class="upd-action" id="updateActionArea">' + actionHtml + '</div>' +
+    '<div id="updateLifecycleApprovals" style="display:none"></div>';
+  _renderPendingLifecycleApprovals();
 }
 
 /** Render the live stepper (one row per stage) into the action area. */
@@ -400,7 +415,7 @@ function _onUpdateDone(r) {
     if (r.changed && r.deps_changed && !r.deps_installed) {
       _renderDepsFailed(r);
     } else {
-      _showUpdateError(r.error || t('update.applyFailed'));
+      _showUpdateError(r.error || t('update.applyFailed'), r.detail || r.deps_detail || '');
     }
     if (typeof debugLog === 'function') {
       debugLog('[Update] apply failed: ' + (r.error || ''), 'error');
@@ -436,20 +451,78 @@ function _onUpdateDone(r) {
   }
 }
 
-/** Render a terminal error message in the action area. */
-function _showUpdateError(msg) {
-  const area = document.getElementById('updateActionArea');
-  if (area) area.innerHTML = '<p class="upd-error">' + escapeHtml(String(msg)) + '</p>';
+/** Build a full, scrollable log block with a "copy" button.
+ *  The COMPLETE text is shown verbatim (never truncated) so the operator can
+ *  read and copy-paste the whole error — the reported gap was a mangled tail.
+ *  The raw log is stashed on the element (dataset) so the copy button lifts
+ *  the exact bytes, not the HTML-escaped/DOM-reflowed version. */
+function _updateLogBlockHtml(logText) {
+  const text = String(logText || '');
+  if (!text) return '';
+  // Base64-stash the raw log so the copy handler recovers exact bytes without
+  // re-reading escaped DOM text (encodeURIComponent handles any UTF-8).
+  let stash = '';
+  try { stash = btoa(unescape(encodeURIComponent(text))); } catch (e) { stash = ''; }
+  const copyIcon =
+    '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+    'stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
+    '<rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>' +
+    '<path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
+  return '<div class="upd-log" data-log="' + escapeHtml(stash) + '">' +
+    '<div class="upd-log-head">' +
+      '<span class="upd-log-label">' + escapeHtml(t('update.logLabel')) + '</span>' +
+      '<button type="button" class="upd-log-copy" onclick="_copyUpdateLog(this)">' +
+        copyIcon + '<span class="upd-log-copy-txt">' + escapeHtml(t('update.copyLog')) + '</span>' +
+      '</button>' +
+    '</div>' +
+    '<pre class="upd-files upd-log-pre">' + escapeHtml(text) + '</pre>' +
+  '</div>';
 }
 
-/** Code was pulled but pip install failed — explain + still allow restart. */
+/** Copy the full raw log of the nearest .upd-log block to the clipboard. */
+function _copyUpdateLog(btn) {
+  const wrap = btn && btn.closest ? btn.closest('.upd-log') : null;
+  if (!wrap) return;
+  let text = '';
+  try { text = decodeURIComponent(escape(atob(wrap.dataset.log || ''))); }
+  catch (e) { text = (wrap.querySelector('.upd-log-pre') || {}).textContent || ''; }
+  const done = function () {
+    const txt = btn.querySelector('.upd-log-copy-txt');
+    const orig = txt ? txt.textContent : '';
+    if (txt) txt.textContent = t('update.logCopied');
+    btn.classList.add('copied');
+    setTimeout(function () {
+      btn.classList.remove('copied');
+      if (txt) txt.textContent = orig;
+    }, 1500);
+  };
+  if (typeof _safeClipboardWrite === 'function') {
+    _safeClipboardWrite(text).then(done).catch(function () {});
+  } else if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(done).catch(function () {});
+  }
+}
+
+/** Render a terminal error message in the action area.
+ *  When a diagnostic ``detail`` log is available (e.g. an unexpected apply
+ *  failure), show it IN FULL with a copy button so the user can paste it. */
+function _showUpdateError(msg, detail) {
+  const area = document.getElementById('updateActionArea');
+  if (!area) return;
+  area.innerHTML =
+    '<p class="upd-error">' + escapeHtml(String(msg)) + '</p>' +
+    _updateLogBlockHtml(detail);
+}
+
+/** Code was pulled but pip install failed — explain + still allow restart.
+ *  Shows the COMPLETE dependency-install log (no truncation) with a copy
+ *  button so the operator can paste the whole error verbatim. */
 function _renderDepsFailed(b) {
   const area = document.getElementById('updateActionArea');
   if (!area) return;
-  const detail = (b.deps_detail || '').slice(-600);
   area.innerHTML =
     '<p class="upd-warn">' + escapeHtml(t('update.depsFailed').replace('%s', 'v' + (b.new_version || ''))) + '</p>' +
-    (detail ? '<pre class="upd-files">' + escapeHtml(detail) + '</pre>' : '') +
+    _updateLogBlockHtml(b.deps_detail || '') +
     '<button class="upd-apply-btn" id="updateRestartBtn" onclick="restartServer()">' +
     escapeHtml(t('update.restartBtn')) + '</button>' +
     '<p class="upd-hint">' + escapeHtml(t('update.restartHint')) + '</p>';
@@ -622,6 +695,26 @@ async function restartServer(opts) {
   };
   if (btn) { btn.disabled = true; btn.textContent = t('update.restarting'); }
 
+  // Human-approval gate (pt_40d00fd526e5479a): a restart POST without an
+  // approvalId only REGISTERS a pending request (202). The human's click on
+  // this very button IS the approval gesture, so we approve the pending
+  // request immediately and retry with the token — the flow stays seamless
+  // for the operator while agent shells (no UI, no gesture) stay gated.
+  // A pre-approved id (from the pending-approvals card) rides in via opts.
+  var _approvalId = (opts && opts.approvalId) || '';
+  async function _requestRestart(forceFlag) {
+    const payload = { convId: _ownConv };
+    if (forceFlag) payload.force = true;
+    if (_approvalId) payload.approvalId = _approvalId;
+    const r = await Api.update.restart(payload);
+    if (r && r.pendingApproval) {
+      _approvalId = r.pendingApproval.id;
+      await Api.update.decideLifecycleApproval(_approvalId, true);
+      return _requestRestart(forceFlag);
+    }
+    return r;
+  }
+
   // Capture the CURRENT process's bootId first, so we can require the
   // post-restart health to report a DIFFERENT one (proof a new process
   // answered). Best-effort: if this probe fails we fall back to null, and the
@@ -652,22 +745,43 @@ async function restartServer(opts) {
   // (so there is no double-confirm) and never silently kills sibling tasks.
   var _triggered = false;
   try {
-    await Api.update.restart({ convId: _ownConv });
+    await _requestRestart(false);
     _triggered = true;
   } catch (e) {
+    if (e && e.status === 429) {
+      // Cooldown: the server was restarted moments ago — surface the
+      // remaining seconds and stay put (NO progress card, nothing fired).
+      const secs = (e.body && e.body.retryAfterSec) || '?';
+      showToast('⏳', t('update.restartCooldown').replace('%s', String(secs)), '', 6000);
+      _restartActive = false;
+      _restoreBtn();
+      return;
+    }
+    if (e && (e.status === 400 || e.status === 403 || e.status === 404)) {
+      // Approval rejected/expired — definitive refusal, nothing is scheduled.
+      showToast('⚠️', (e && e.message) || t('update.errUnknown'), '', 6000);
+      if (typeof debugLog === 'function') debugLog('[Update] restart refused: HTTP ' + e.status + ' ' + (e && e.message), 'warning');
+      _restartActive = false;
+      _restoreBtn();
+      return;
+    }
     if (e && e.status === 409 && e.body && e.body.needsForce) {
       const count = (e.body.runningTasks || []).length;
       const ok = await showConfirm(
         t('update.restartForceConfirm').replace('%s', String(count)),
         { danger: true });
       if (!ok) {
-        // Declined — abort cleanly; leave the dialog on its current card.
+        // Declined — deny the still-unconsumed approval so a stray approved
+        // token cannot be fired later, then abort cleanly.
+        if (_approvalId) {
+          try { await Api.update.decideLifecycleApproval(_approvalId, false); } catch (_e) { /* best effort */ }
+        }
         _restartActive = false;
         _restoreBtn();
         return;
       }
       try {
-        await Api.update.restart({ force: true, convId: _ownConv });
+        await _requestRestart(true);
       } catch (e2) {
         if (typeof debugLog === 'function') debugLog('[Update] forced restart request failed: ' + (e2 && e2.message), 'warning');
       }
@@ -696,15 +810,27 @@ async function restartServer(opts) {
 /** Manual graceful shutdown — writes the manual-shutdown marker so the next
  *  boot won't mistake this for an OS kill, then stops the server (no re-exec,
  *  so it does NOT come back on its own). Admin-only; always confirms. */
-async function shutdownServer() {
+async function shutdownServer(opts) {
   if (_restartActive) return;   // a restart already owns the modal body
   if (!await showConfirm(t('update.shutdownConfirm'), { danger: true })) return;
   const rBtn = document.getElementById('updateRestartNowBtn');
   const sBtn = document.getElementById('updateShutdownBtn');
   if (rBtn) rBtn.disabled = true;
   if (sBtn) { sBtn.disabled = true; }
+  await _fireShutdown((opts && opts.approvalId) || '');
+}
+
+/** Fire the shutdown through the approval gate (shared by the button and
+ *  the pending-approvals card). The confirm click IS the human gesture, so
+ *  a freshly-pended request is approved immediately and retried. */
+async function _fireShutdown(approvalId) {
   try {
-    await Api.update.shutdown();
+    const payload = approvalId ? { approvalId: approvalId } : {};
+    const r = await Api.update.shutdown(payload);
+    if (r && r.pendingApproval) {
+      await Api.update.decideLifecycleApproval(r.pendingApproval.id, true);
+      await Api.update.shutdown({ approvalId: r.pendingApproval.id });
+    }
   } catch (e) {
     if (typeof debugLog === 'function') debugLog('[Shutdown] request failed: ' + (e && e.message), 'warning');
   }
@@ -715,6 +841,73 @@ async function shutdownServer() {
       escapeHtml(t('update.shuttingDown')) + '</span></div>';
   }
   showToast('◐', t('update.shuttingDown'), t('update.shutdownHint'), 8000);
+}
+
+// ── Pending lifecycle approvals (agent-initiated restart/shutdown requests) ──
+// An agent curl against /api/v1/update/restart|shutdown now ONLY registers a
+// pending request; the human reviews the queue here and approves/denies.
+// Approving executes the action immediately through the same UX as the
+// operator's own button (force-confirm on running tasks included).
+async function _renderPendingLifecycleApprovals() {
+  const host = document.getElementById('updateLifecycleApprovals');
+  if (!host) return;
+  let records = [];
+  try {
+    const r = await Api.update.listLifecycleApprovals({ status: 'pending' });
+    records = (r && r.records) || [];
+  } catch (e) { records = []; }
+  if (!records.length) {
+    host.innerHTML = '';
+    host.style.display = 'none';
+    return;
+  }
+  host.style.display = '';
+  host.innerHTML = '<div class="upd-lc-card">' +
+    '<div class="upd-lc-title">' + escapeHtml(t('update.pendingApprovals')) + '</div>' +
+    records.map(function (rec) {
+      const o = rec.origin || {};
+      let when = '';
+      try { when = new Date((rec.requested_at || 0) * 1000).toLocaleTimeString(); } catch (_e) { when = ''; }
+      const meta = [o.ua, o.conv_id, o.remote_addr].filter(Boolean).join(' · ');
+      const btnLabel = rec.action === 'shutdown'
+        ? t('update.approveExecuteShutdown') : t('update.approveExecuteRestart');
+      return '<div class="upd-lc-row" data-id="' + escapeHtml(rec.id) +
+        '" data-action="' + escapeHtml(rec.action) + '">' +
+        '<div class="upd-lc-meta"><span class="upd-lc-action">' + escapeHtml(rec.action) +
+        '</span> · ' + escapeHtml(when) + (meta ? ' · ' + escapeHtml(meta) : '') + '</div>' +
+        '<div class="upd-lc-btns">' +
+        '<button class="upd-lc-approve" onclick="_lcDecide(this,true)">' + escapeHtml(btnLabel) + '</button>' +
+        '<button class="upd-lc-deny" onclick="_lcDecide(this,false)">' + escapeHtml(t('update.deny')) + '</button>' +
+        '</div></div>';
+    }).join('') + '</div>';
+}
+
+/** Approve (and execute) or deny one pending lifecycle request. */
+async function _lcDecide(btn, approved) {
+  const row = btn && btn.closest ? btn.closest('.upd-lc-row') : null;
+  const id = row && row.dataset ? row.dataset.id : '';
+  const action = row && row.dataset ? row.dataset.action : '';
+  if (!id) return;
+  btn.disabled = true;
+  try {
+    await Api.update.decideLifecycleApproval(id, approved);
+  } catch (e) {
+    showToast('⚠️', (e && e.message) || t('update.errUnknown'), '', 5000);
+    btn.disabled = false;
+    return;
+  }
+  if (!approved) {
+    showToast('◐', t('update.approvalDenied'), '', 4000);
+    _renderPendingLifecycleApprovals();
+    return;
+  }
+  if (action === 'shutdown') {
+    await _fireShutdown(id);
+  } else {
+    // The approved id rides into the standard restart flow (progress card,
+    // force-confirm on running tasks, health-poll, auto-reload).
+    restartServer({ approvalId: id });
+  }
 }
 
 /** One health probe; on success finish, on overall timeout bail.

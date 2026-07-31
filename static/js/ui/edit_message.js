@@ -140,10 +140,9 @@ function cancelEditMessage(idx) {
    * the original message DOM for the edited element. */
   const msgEl = document.getElementById("msg-" + idx);
   if (msgEl && conv.messages[idx]) {
-    msgEl.outerHTML = renderMessage(conv.messages[idx], idx);
-    _lastRenderedFingerprint = _convRenderFingerprint(conv);
+    window.ConvView.apply(conv.id, idx, conv.messages[idx]);
   } else {
-    renderChat(conv);
+    window.ConvView.replaceAll(conv.id);
   }
 }
 function saveEditOnly(idx) {
@@ -260,7 +259,7 @@ function saveEditOnly(idx) {
           saveConversations(_convIdLocal);
           if (activeConvId === _convIdLocal) {
             const _el = document.getElementById('msg-' + idx);
-            if (_el) _el.outerHTML = renderMessage(_c.messages[idx], idx);
+            if (_el) window.ConvView.apply(_convIdLocal, idx, _c.messages[idx]);
           }
         }
         if (typeof showToast === 'function') showToast('Edit failed — reverted', 'error');
@@ -276,10 +275,9 @@ function saveEditOnly(idx) {
    * Since saveEditOnly only changes one message, replace just that element. */
   const msgEl = document.getElementById("msg-" + idx);
   if (msgEl) {
-    msgEl.outerHTML = renderMessage(msg, idx);
-    _lastRenderedFingerprint = _convRenderFingerprint(conv);
+    window.ConvView.apply(conv.id, idx, msg);
   } else {
-    renderChat(conv);
+    window.ConvView.replaceAll(conv.id);
   }
 }
 async function saveEditAndResend(idx) {
@@ -328,7 +326,7 @@ async function saveEditAndResend(idx) {
     msg.timestamp = Date.now();
     conv.messages = conv.messages.slice(0, idx);
     saveConversations(conv.id);
-    if (typeof renderChat === 'function') renderChat(conv);
+    window.ConvView.replaceAll(conv.id);
     if (typeof renderConversationList === 'function') renderConversationList();
     // Seed textarea + pendingImages so generateImageDirect picks them up.
     let prompt = t || '';
@@ -381,7 +379,7 @@ async function saveEditAndResend(idx) {
   /* ── Surgical DOM truncation (re-render edited msg + remove later ones) ── */
   if (activeConvId === convId) {
     const editedEl = document.getElementById("msg-" + idx);
-    if (editedEl) editedEl.outerHTML = renderMessage(msg, idx);
+    if (editedEl) window.ConvView.apply(convId, idx, msg);
   }
   const _syncMsgsBefore = conv.messages.length;
   /* Funnel through unified controller — falls back to renderChat()
@@ -481,7 +479,7 @@ async function saveEditAndResend(idx) {
       Object.assign(msg, result.userMessage);
       if (activeConvId === convId) {
         const msgEl = document.getElementById('msg-' + idx);
-        if (msgEl) msgEl.outerHTML = renderMessage(msg, idx);
+        if (msgEl) window.ConvView.apply(convId, idx, msg);
       }
     }
     if (result.title) conv.title = result.title;
@@ -545,11 +543,7 @@ async function saveEditAndResend(idx) {
       if (typeof _ensureMsgId === 'function') _ensureMsgId(errAssistant);
       conv.messages.push(errAssistant);
       if (activeConvId === convId) {
-        const chatInnerEl = document.getElementById('chatInner');
-        if (chatInnerEl) {
-          chatInnerEl.insertAdjacentHTML('beforeend',
-            renderMessage(errAssistant, conv.messages.length - 1));
-        }
+        window.ConvView.apply(convId, conv.messages.length - 1, errAssistant);
       }
       saveConversations(convId);
       syncConversationToServer(conv, { allowTruncate: true });

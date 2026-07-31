@@ -438,7 +438,28 @@ class StreamingToolAccumulator:
                 #   clobber — see lib/project_mod/config.py::set_conv_roots).
                 _conv_id = self._task.get('convId') or self._task.get('id') or ''
                 _base = self._project_path or '.'
-                return execute_tool(fn_name, fn_args, _base, conv_id=_conv_id)
+                _content = execute_tool(fn_name, fn_args, _base, conv_id=_conv_id)
+                # ★ Write-freshness token — THIS pre-exec path bypasses
+                #   _handle_project_tool (its result is cached as authoritative
+                #   and the serial pipeline skips re-execution), so the
+                #   handler's record_read_paths never runs for streamed reads.
+                #   Without the stamp here, a conversation that READ a file is
+                #   unprotected on its next write (fail-open clobber), and a
+                #   refused write can NEVER recover — the instructed re-read
+                #   lands here and refreshes nothing (production refusal loop,
+                #   2026-07-25: repeated 'stale' refusals after each re-read).
+                if fn_name == 'read_files':
+                    try:
+                        from lib.tasks_pkg.handlers._write_freshness_gate import (
+                            record_read_paths,
+                        )
+                        record_read_paths(self._task, fn_args,
+                                          self._project_path, _content)
+                    except Exception as _fe:
+                        logger.debug('[%s] StreamingToolExec: freshness '
+                                     'read-token record failed (non-fatal): %s',
+                                     self._tid, _fe)
+                return _content
 
             elif fn_name == 'web_search':
                 # Delegate to the SINGLE SOURCE OF TRUTH for search —

@@ -3,8 +3,9 @@
 The assistant writes a handful of hidden directories / files **into the
 user's project directory** (NOT into the Tofu install) as it works:
 
-  * ``.tofu/``          — file-history copy-backups (``.tofu/file-history``)
-                          and memories / skills (``.tofu/skills``); written by
+  * ``.tofu/``          — file-history copy-backups (``.tofu/file-history``),
+                          memories (``.tofu/memories``) and skill packages
+                          (``.tofu/skills``); written by
                           ``lib/file_history/store.py`` and ``lib/memory/storage.py``.
   * ``.tofu_trash/``    — recoverable-delete bin (the ``rm`` → trash shim);
                           written by ``lib/project_mod/run_command.py``.

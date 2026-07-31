@@ -43,8 +43,8 @@ if (config.imageMaxWidth === 1024) config.imageMaxWidth = 0;
 // Default OPT-IN (OFF) — matches the backend canonical
 // lib.conv_config.AUTO_TRANSLATE_DEFAULT so the toolbar toggle display and
 // every trigger path agree (the historical three-way default split).
-let autoTranslate = JSON.parse(
-  localStorage.getItem("claude_auto_translate") || "false",
+let autoTranslate = _safeJsonParse(
+  localStorage.getItem("claude_auto_translate"), false,
 );
 
 let projectState = {
@@ -61,8 +61,8 @@ let projectState = {
   scannedAt: 0,
   extraRoots: [],  // [{name, path, fileCount, dirCount, totalSize, scanning}]
 };
-let autoApplyWrites = JSON.parse(
-  localStorage.getItem("claude_auto_apply") || "true",
+let autoApplyWrites = _safeJsonParse(
+  localStorage.getItem("claude_auto_apply"), true,
 );
 
 // NOTE: the old client-side `pricingData` + `loadPricing()` pair was removed

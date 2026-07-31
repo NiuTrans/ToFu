@@ -22,7 +22,10 @@ from lib.log import get_logger
 from .qa_runtime import _append_qa_event, _cleanup_stale_qa_tasks
 from .tools import (
     _execute_report_tool,
+    cap_tool_result,
     display_query_for as _display_query_for,
+    make_paper_exec_shim,
+    paper_effective_tool_name,
     parse_and_repair_tool_args,
 )
 
@@ -56,6 +59,10 @@ def _run_qa_task(task, messages):
     user_question = question[:300]
 
     abort_signal = AbortSignal.from_event(abort_event)
+    # Shim for the SHARED dispatch (full tool set) — one per run; see the
+    # report engine for the policy + state-survival rationale.
+    _exec_shim = make_paper_exec_shim(task_id=task['task_id'],
+                                      abort=abort_signal.is_set)
     # Per-round content buffer (reset each dispatch), shared with the
     # draft-discard hook via a mutable holder — same interim-draft fix as the
     # report engine.
@@ -111,9 +118,11 @@ def _run_qa_task(task, messages):
         task['round_counter'] += 1
         rn = task['round_counter']
         display_query = _display_query_for(fn_name, fn_args)
+        # run_command → code_exec in a project-less engine (mirrors chat).
+        effective_name = paper_effective_tool_name(fn_name)
 
         round_entry = {
-            'roundNum': rn, 'toolName': fn_name, 'query': display_query,
+            'roundNum': rn, 'toolName': effective_name, 'query': display_query,
             'toolCallId': tc_id,
             'toolArgs': (fn_args_raw if isinstance(fn_args_raw, str)
                          else json.dumps(fn_args, ensure_ascii=False)),
@@ -121,7 +130,7 @@ def _run_qa_task(task, messages):
         }
         task['tool_rounds'].append(round_entry)
         _append_qa_event(task, {
-            'type': 'tool_start', 'roundNum': rn, 'toolName': fn_name,
+            'type': 'tool_start', 'roundNum': rn, 'toolName': effective_name,
             'query': display_query, 'toolCallId': tc_id,
             'toolArgs': round_entry['toolArgs'],
         })
@@ -129,7 +138,8 @@ def _run_qa_task(task, messages):
         tool_t0 = time.time()
         result, display_results, search_diag, engine_breakdown, verticals = _execute_report_tool(
             fn_name, fn_args_raw, user_question=user_question,
-            abort=abort_signal.is_set)
+            abort=abort_signal.is_set,
+            exec_shim=_exec_shim, round_entry=round_entry)
         tool_elapsed = time.time() - tool_t0
         logger.info('[Paper:QA:Tool] %s → %d chars in %.1fs',
                     fn_name, len(result), tool_elapsed)
@@ -144,7 +154,7 @@ def _run_qa_task(task, messages):
         round_entry['toolContent'] = result[:4000]
 
         done_ev = {
-            'type': 'tool_done', 'roundNum': rn, 'toolName': fn_name,
+            'type': 'tool_done', 'roundNum': rn, 'toolName': effective_name,
             'toolCallId': tc_id, 'elapsed': round(tool_elapsed, 1),
             'toolContent': result[:4000], 'results': display_results,
         }
@@ -158,7 +168,9 @@ def _run_qa_task(task, messages):
 
         messages.append({
             'role': 'tool', 'tool_call_id': tc_id,
-            'content': result[:30000],
+            'content': cap_tool_result(result, fn_name, tc_id,
+                                       conv_id=f"paper-qa-{task['paper_hash']}",
+                                       can_read=True),
         })
 
     try:
@@ -198,5 +210,8 @@ def _run_qa_task(task, messages):
         _cleanup_stale_qa_tasks()
 
 
-# Tool list — reuse the report engine's batch search/fetch tools.
-from .prompts import _REPORT_TOOLS as _QA_TOOLS  # noqa: E402
+# Tool list — the FULL chat-tier set (report engine parity): search/fetch
+# plus read_files / code_exec / memory / todo / scheduler / …, assembled via
+# the shared registry. The research-only engines (insight/recommend/ideate)
+# deliberately keep the narrow ``_REPORT_TOOLS``.
+from .prompts import _FULL_REPORT_TOOLS as _QA_TOOLS  # noqa: E402

@@ -20,8 +20,8 @@ Two public entry points
     The model-agnostic, IO-free tail of ``build_body`` — the transforms that
     change the *OpenAI-form messages array* the model receives:
         sort_tool_results → _strip_non_api_fields → (gated) _sanitize_messages
-        → _fix_orphaned_tool_calls → _merge_consecutive_same_role
-        → _fix_empty_user_messages
+        → _fix_orphaned_tool_calls → _drop_empty_assistant_messages
+        → _merge_consecutive_same_role → _fix_empty_user_messages
     DELIBERATELY OMITS the transport-layer / provider-body steps
     (_validate_image_blocks disk I/O, _downscale_oversized_images Pillow,
     vision-strip, gemini/claude reasoning injection, provider-specific body
@@ -57,6 +57,7 @@ from __future__ import annotations
 
 import lib as _lib
 from lib.llm_sanitize import (
+    _drop_empty_assistant_messages,
     _fix_empty_user_messages,
     _fix_orphaned_tool_calls,
     _merge_consecutive_same_role,
@@ -98,8 +99,10 @@ def apply_wire_sanitize(messages: list, *, conv_id: str = '',
       3. ``_sanitize_messages`` — gateway-blocked-term replacement, GATED on
          ``_gateway_sanitize_enabled`` (verbatim build_body:511 gate).
       4. ``_fix_orphaned_tool_calls`` — Anthropic orphan tool_use/result repair.
-      5. ``_merge_consecutive_same_role`` — consecutive user/assistant merge.
-      6. ``_fix_empty_user_messages`` — empty-content placeholder.
+      5. ``_drop_empty_assistant_messages`` — pure-ghost assistant drop (strict
+         providers HTTP 400 on empty assistant content).
+      6. ``_merge_consecutive_same_role`` — consecutive user/assistant merge.
+      7. ``_fix_empty_user_messages`` — empty-content placeholder.
 
     Args:
         messages: API-form messages (post system-context injection).
@@ -117,6 +120,7 @@ def apply_wire_sanitize(messages: list, *, conv_id: str = '',
     if _gateway_sanitize_enabled(provider_id):
         _sanitize_messages(clean)
     clean = _fix_orphaned_tool_calls(clean)
+    clean = _drop_empty_assistant_messages(clean)
     clean = _merge_consecutive_same_role(clean)
     _fix_empty_user_messages(clean)
     return clean

@@ -237,7 +237,10 @@ class _FakeStore:
     def ensure(self, conv_id, **kw):
         self.rows.setdefault(conv_id, {}).update(kw)
 
-    def update(self, conv_id, mutate, *, user_id=1, db=None):
+    def update(self, conv_id, mutate, *, user_id=1, db=None, notify=True):
+        # ``notify`` accepted (and ignored) — production passes notify=False
+        # for internal run-bookkeeping writes; a fake without the kwarg turns
+        # the call into a swallowed TypeError and the mutate never runs.
         if conv_id not in self.rows:
             return None
         mutate(self.rows[conv_id])

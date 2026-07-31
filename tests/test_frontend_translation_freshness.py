@@ -59,21 +59,28 @@ import subprocess
 
 import pytest
 
+from tests._conv_bundle_sources import sources_defining
+
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
 JS_DIR = os.path.join(ROOT, 'static', 'js')
-SRC_PATH = os.path.join(JS_DIR, 'core', 'conversations.js')
 
 
 def _node_available() -> bool:
     return bool(shutil.which('node'))
 
 
-def _read_src() -> str:
-    with open(SRC_PATH, encoding='utf-8') as f:
-        return f.read()
+def _read_src(symbol: str) -> str:
+    """Source of the bundled file defining *symbol*.
+
+    Located by SYMBOL, not by path: the predicate moved out of
+    core/conversations.js in pt_3879f00e slice 3 while the merge closure stayed,
+    so a single hard-coded path cannot serve both (that is what broke this
+    suite). Resolving each independently means a further slice re-points itself.
+    """
+    return open(sources_defining(symbol)[0], encoding='utf-8').read()
 
 
 def _slice_predicate(src: str) -> str:
@@ -83,7 +90,10 @@ def _slice_predicate(src: str) -> str:
         src, re.DOTALL,
     )
     if not m:
-        raise AssertionError('could not locate _serverHasTranslationLocalLacks in conversations.js')
+        raise AssertionError(
+            '_serverHasTranslationLocalLacks not found in the bundled file that '
+            'declares it — the implementation may have been removed (a real '
+            'regression) or its shape changed; re-point this slice.')
     return m.group(0)
 
 
@@ -99,8 +109,53 @@ def _slice_merge(src: str) -> str:
         src, re.DOTALL,
     )
     if not m:
-        raise AssertionError('could not locate _mergeServerTranslations in conversations.js')
+        raise AssertionError(
+            '_mergeServerTranslations not found in the bundled file that '
+            'declares loadConversationMessages — removed or reshaped; '
+            're-point this slice.')
     return m.group(0)
+
+
+def _fn_span(src: str, name: str) -> str:
+    """Full text of a top-level ``function <name>(...) {...}``, brace-balanced."""
+    m = re.search(r'^function\s+' + re.escape(name) + r'\s*\(', src, re.M)
+    assert m, f'{name}() not found — implementation removed or renamed'
+    i = src.index('{', m.start())
+    depth = 0
+    for j in range(i, len(src)):
+        if src[j] == '{':
+            depth += 1
+        elif src[j] == '}':
+            depth -= 1
+            if depth == 0:
+                return src[m.start():j + 1]
+    raise AssertionError(f'unbalanced braces while slicing {name}()')
+
+
+def _merge_chain(neuter_segment_branch: bool = False) -> str:
+    """The FULL shipped merge chain: the closure PLUS the reducer it delegates to.
+
+    The per-segment narration merge used to live INLINE in the closure; it now
+    lives in ``core/conv_reducers.js::_mergeTranslationFields`` (documented
+    there as "THE single source of truth"), which the closure calls per aligned
+    index. Slicing only the closure therefore left this guard asserting a branch
+    that no longer exists in it — charter's THIRD failure mode (a guard testing
+    code that moved out from under it). Delivering both halves makes the guard
+    drive the REAL end-to-end merge.
+
+    *neuter_segment_branch* excises the segment loop from the REDUCER (its real
+    home today), which is what the NEUTER must target now.
+    """
+    reducer = _fn_span(_read_src('_mergeTranslationFields'), '_mergeTranslationFields')
+    if neuter_segment_branch:
+        neutered = re.sub(
+            r'  if \(Array\.isArray\(sm\.segments\) && Array\.isArray\(lm\.segments\)\) \{.*?\n  \}\n',
+            '', reducer, count=1, flags=re.DOTALL)
+        assert neutered != reducer, (
+            'NEUTER did not modify _mergeTranslationFields — the segment loop '
+            'moved again; re-point the marker')
+        reducer = neutered
+    return reducer + '\n' + _slice_merge(_read_src('_mergeServerTranslations'))
 
 
 _HARNESS = r"""
@@ -220,8 +275,8 @@ def _run(predicate_js: str, merge_js: str) -> str:
 
 @pytest.mark.skipif(not _node_available(), reason='node not installed')
 def test_translation_freshness_and_merge():
-    src = _read_src()
-    output = _run(_slice_predicate(src), _slice_merge(src))
+    output = _run(_slice_predicate(_read_src('_serverHasTranslationLocalLacks')),
+                  _merge_chain())
     fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
     assert not fails, 'translation-freshness failures:\n' + output
     assert output.count('PASS') >= 8, f'expected >=8 PASS lines, got:\n{output}'
@@ -231,15 +286,14 @@ def test_translation_freshness_and_merge():
 def test_NEUTER_predicate_without_segment_branch_misses_narration_gap():
     """Strip the per-round segment gap check from the predicate → the
     narration-only staleness case is missed (proves that branch is load-bearing)."""
-    src = _read_src()
-    pred = _slice_predicate(src)
+    pred = _slice_predicate(_read_src('_serverHasTranslationLocalLacks'))
     # Excise the `if (Array.isArray(sm.segments) ...` narration block.
     neutered = re.sub(
         r'    // Per-round narration gap.*?\n    \}\n(?=  \}\n  return false;)',
         '', pred, flags=re.DOTALL,
     )
     assert neutered != pred, 'NEUTER regex did not modify the predicate — update the marker'
-    output = _run(neutered, _slice_merge(src))
+    output = _run(neutered, _merge_chain())
     # With the branch gone, the narration-only gap is NOT flagged stale.
     assert 'FAIL narration_gap_is_stale' in output, (
         'expected narration_gap_is_stale to FAIL under NEUTER, got:\n' + output)
@@ -247,16 +301,11 @@ def test_NEUTER_predicate_without_segment_branch_misses_narration_gap():
 
 @pytest.mark.skipif(not _node_available(), reason='node not installed')
 def test_NEUTER_merge_without_segment_branch_skips_narration():
-    """Strip the segment-merge branch → per-round translatedText is not merged
-    (proves that branch is load-bearing)."""
-    src = _read_src()
-    merge = _slice_merge(src)
-    # Excise the `if (Array.isArray(sm.segments) && Array.isArray(lm.segments))` block.
-    neutered = re.sub(
-        r'        if \(Array\.isArray\(sm\.segments\) && Array\.isArray\(lm\.segments\)\) \{.*?\n        \}\n',
-        '', merge, count=1, flags=re.DOTALL,
-    )
-    assert neutered != merge, 'NEUTER regex did not modify the merge — update the marker'
-    output = _run(_slice_predicate(src), neutered)
+    """Strip the segment-merge branch from the REDUCER
+    (core/conv_reducers.js::_mergeTranslationFields — its single source of
+    truth) → per-round translatedText is not merged, proving that branch is
+    load-bearing."""
+    output = _run(_slice_predicate(_read_src('_serverHasTranslationLocalLacks')),
+                  _merge_chain(neuter_segment_branch=True))
     assert 'FAIL merge_stamps_segment_translatedText' in output, (
         'expected merge_stamps_segment_translatedText to FAIL under NEUTER, got:\n' + output)

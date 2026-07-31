@@ -85,6 +85,7 @@ function _resetReportLocalState(view) {
   if (view.stream && view.stream.pollTimer) {
     clearTimeout(view.stream.pollTimer);
   }
+  if (view.stream) _detachReportPush(view.stream);
   view.stream = null;
   view.meta = null;  // drop stale finish tag from the previous paper/run
   // Review: drop the per-paper translated reading view so it never leaks
@@ -131,6 +132,12 @@ function _makeReportStreamState(paperId, lang, taskId, kind) {
     fullText: '',
     thinkingText: '',
     toolRounds: [],      // chat-compatible: [{roundNum, toolName, query, toolCallId, toolArgs, status, toolContent, _elapsed}]
+    // Chat-shaped segment timeline — thinking / narration / tool_use folded
+    // per dispatch round from the ordered event stream, rendered through the
+    // SAME inline tool timeline the chat agent bubbles use
+    // (renderSegmentTimelineHTML). Rebuilt deterministically on cursor replay.
+    segments: [],
+    _segInferRound: 0,   // round inference for events without llmRound (old server shape)
     contentStarted: false,
     insightText: '',       // gated insight second-pass section (appended after `done`)
     _insightRunning: false,
@@ -173,8 +180,176 @@ function _renderReportSkeleton(container, lang, view) {
     '</div>';
 }
 
-/** Apply a single event to the in-memory stream state. Returns dirty flag. */
+/** Segment-timeline builders (chat-shaped). The report engine emits its
+ *  thinking / delta / tool events in strict order (seq-cursor polling), each
+ *  tagged with the 0-based dispatch round that produced it (`llmRound`).
+ *  Folding them into per-round segments is what lets the report stream render
+ *  through the chat inline tool timeline instead of the old three-zone layout.
+ *  Events lacking `llmRound` (an older server mid-upgrade) fall back to
+ *  order-based inference — thinking/delta before a tool_start belong to the
+ *  round that tool_start opens. */
+function _segRoundOf(s, ev) {
+  return (typeof ev.llmRound === 'number') ? ev.llmRound : s._segInferRound;
+}
+
+function _segAppendProse(s, type, delta, llmRound) {
+  if (!delta) return;
+  var last = s.segments[s.segments.length - 1];
+  if (last && last.type === type && last.llmRound === llmRound) {
+    last.text += delta;
+  } else {
+    s.segments.push({ type: type, text: delta, llmRound: llmRound });
+  }
+}
+
+function _segApplyToolStart(s, ev) {
+  var r = _segRoundOf(s, ev);
+  s.segments.push({ type: 'tool_use', id: ev.toolCallId || '', llmRound: r });
+  // Prose that arrives after this tool belongs to the NEXT dispatch round.
+  s._segInferRound = r + 1;
+}
+
+function _segApplyDeltaReset(s, ev) {
+  // The backend discards a tool round's interim DRAFT (the terminal round
+  // rewrites the whole report), so its narration segment goes with it — a
+  // discarded draft must not linger next to the tools. Thinking is never
+  // reset, so thinking segments are kept.
+  var r = _segRoundOf(s, ev);
+  s.segments = s.segments.filter(function (seg) {
+    return !(seg.type === 'text' && seg.llmRound === r);
+  });
+}
+
+/** Segments for the timeline render. Text (narration) segments render ONLY
+ *  for rounds that actually called tools — the terminal tool-less round's
+ *  text IS the report body, which the caller renders separately below the
+ *  panel; letting it into the timeline would double it (mirrors the chat
+ *  timeline, which skips `deliverable` segments). */
+function _reportSegmentsForRender(s) {
+  var withTools = {};
+  var i, seg;
+  for (i = 0; i < s.segments.length; i++) {
+    seg = s.segments[i];
+    if (seg.type === 'tool_use') withTools[seg.llmRound] = true;
+  }
+  return s.segments.filter(function (sg) {
+    return sg.type !== 'text' || withTools[sg.llmRound];
+  });
+}
+
+/** Bind the 'paper' push channel to a report stream (pt_67ffc2b7).
+ *
+ * ── The asymmetry this closes ──
+ * The BACKEND has always been ready: ``lib/paper/report_runtime.py`` builds its
+ * TaskRuntime with ``push_channel='paper'``, so every ``_append_report_event``
+ * is broadcast on the unified /api/push WebSocket the moment it is appended,
+ * and ``report_engine._execute_tool`` appends ``tool_done`` the instant the
+ * tool returns. The report view simply never listened: its only transport was
+ * ``setTimeout(_pollReportTask, 1200)``. So a search that finished at t=0 kept
+ * its spinner until somewhere in t+1.2s…t+3s for no reason other than that
+ * nobody subscribed to the channel already carrying the news.
+ *
+ * ``static/js/paper/research.js`` does exactly this on the same mechanism;
+ * this is the same layering: push is the ACCELERATOR, the poll stays as the
+ * floor (a WS-blocked client must still converge, so the poll is never
+ * removed).
+ *
+ * De-duplication between the two transports is the seq gate in
+ * ``_applyReportEvent`` — this function does not need to coordinate with the
+ * poll beyond handing frames to the same gate.
+ *
+ * Safe to call repeatedly for the same stream (idempotent per task id).
+ */
+function _attachReportPush(view, s) {
+  if (!view || !s || !s.taskId) return;
+  if (typeof pushSubscribe !== 'function') return;   // push module not loaded
+  if (s._pushTaskId === s.taskId) return;            // already bound
+  _detachReportPush(s);
+  var taskId = s.taskId;
+  try {
+    pushSubscribe('paper', taskId, function (ev) {
+      // Ignore frames for a stream this view has since replaced (paper switch,
+      // regenerate) — the same abandon guard the poll chain uses.
+      if (view.stream !== s) return;
+      if (!ev || !ev.type) return;
+      var dirty = _applyReportEvent(s, ev);
+
+      // Terminal frames settle the view AND release the subscription, so a
+      // long session does not accumulate live handlers for finished tasks.
+      if (ev.type === 'done' || ev.type === 'error' || ev.type === 'aborted') {
+        if (ev.type === 'done') {
+          s.status = 'done';
+          if (ev.report) s.fullText = ev.report;
+        } else if (ev.type === 'aborted') {
+          s.status = 'aborted';
+          if (typeof ev.partial === 'string' && ev.partial) {
+            s.fullText = ev.partial;
+            s.contentStarted = true;
+          }
+        } else {
+          s.status = 'error';
+        }
+        _detachReportPush(s);
+        // Let the poll do the authoritative terminal fetch (report body,
+        // meta, resolvedTitle, DB persistence side-effects). The push frame
+        // stops the spinner NOW; the poll fills in the rest.
+        if (typeof _pollReportTask === 'function') _pollReportTask(view);
+        dirty = true;
+      }
+      if (dirty && s.paperId === _activePaperId) _paintReportFromState(view);
+    });
+    s._pushTaskId = taskId;
+  } catch (e) {
+    // A failed subscription is NOT fatal: the poll floor still converges.
+    console.debug('[Paper:Report] push subscribe failed:', e);
+  }
+}
+
+/** Release a report stream's push subscription. */
+function _detachReportPush(s) {
+  if (!s || !s._pushTaskId) return;
+  try {
+    if (typeof pushUnsubscribe === 'function') pushUnsubscribe('paper', s._pushTaskId);
+  } catch (e) {
+    console.debug('[Paper:Report] push unsubscribe failed:', e);
+  }
+  s._pushTaskId = '';
+}
+
+
+/** Ordered, exactly-once ingest gate for report events (pt_67ffc2b7).
+ *
+ * ── Why this exists ──
+ * The report view now has TWO transports feeding the same state:
+ *   • the 'paper' push channel — frames arrive the instant the backend appends
+ *     them (report_runtime sets push_channel='paper'), and
+ *   • the 1.2s poll — the catch-up floor for a client whose WebSocket is
+ *     blocked by a proxy, and the reconnect path after a refresh.
+ * Both deliver the SAME events, so applying them naively would double-append
+ * every delta (the report body rendered twice) and re-push tool rounds.
+ *
+ * Every event carries a monotonic ``seq`` (assigned in TaskRuntime.append_event),
+ * which makes de-duplication exact rather than heuristic: apply an event only
+ * when its seq advances the stream's high-water mark. That also keeps the two
+ * transports ORDERED with respect to each other — a push frame that overtakes
+ * the poll is applied once, and the poll's later replay of it is a no-op.
+ *
+ * An event with no seq (defensive: an older server, or a synthetic frame) is
+ * applied unconditionally — dropping it would be worse than a rare duplicate.
+ */
 function _applyReportEvent(s, ev) {
+  if (!s || !ev) return false;
+  var seq = ev.seq;
+  if (typeof seq === 'number') {
+    if (s._seqSeen == null) s._seqSeen = -1;
+    if (seq <= s._seqSeen) return false;     // already applied by the other transport
+    s._seqSeen = seq;
+  }
+  return _applyReportEventRaw(s, ev);
+}
+
+/** Apply a single event to the in-memory stream state. Returns dirty flag. */
+function _applyReportEventRaw(s, ev) {
   switch (ev.type) {
     case 'status':
       s.status = ev.status || s.status;
@@ -182,6 +357,7 @@ function _applyReportEvent(s, ev) {
 
     case 'thinking':
       s.thinkingText += (ev.delta || '');
+      _segAppendProse(s, 'thinking', ev.delta || '', _segRoundOf(s, ev));
       return true;
 
     case 'tool_start': {
@@ -195,6 +371,7 @@ function _applyReportEvent(s, ev) {
         status: 'searching',
         results: null,
       });
+      _segApplyToolStart(s, ev);
       return true;
     }
 
@@ -231,6 +408,7 @@ function _applyReportEvent(s, ev) {
     case 'delta':
       s.fullText += (ev.delta || '');
       s.contentStarted = true;
+      _segAppendProse(s, 'text', ev.delta || '', _segRoundOf(s, ev));
       return true;
 
     case 'delta_reset':
@@ -241,6 +419,7 @@ function _applyReportEvent(s, ev) {
       s.fullText = '';
       s.contentStarted = false;
       s._lastRenderedLen = -1;
+      _segApplyDeltaReset(s, ev);
       return true;
 
     case 'enriched':
@@ -1224,6 +1403,25 @@ function _renderFinalReport(container, text, meta, view) {
   var entries = _indexHeadings(article);
   var tocHTML = _buildReportTOC(entries);
 
+  // Inline tool timeline (live session only): a freshly finished generation
+  // keeps its tool/thinking timeline ABOVE the final body, exactly like a
+  // settled chat agent bubble keeps its tool panel above the deliverable.
+  // Reopened/cached reports have no live stream — no timeline (segments are
+  // not persisted; accepted simplification).
+  var _timelineHtml = '';
+  try {
+    var _st = view.stream;
+    if (_st && _st.toolRounds && _st.toolRounds.length
+        && typeof renderSegmentTimelineHTML === 'function') {
+      var _finalSegs = _reportSegmentsForRender(_st);
+      _timelineHtml = renderSegmentTimelineHTML(_finalSegs, { toolRounds: _st.toolRounds }, 0)
+        || (typeof renderToolRoundsHTML === 'function'
+            ? renderToolRoundsHTML(_st.toolRounds, false, _finalSegs) : '');
+    }
+  } catch (e) {
+    console.warn('[Paper:Report] timeline render failed (non-fatal):', e);
+  }
+
   container.classList.add('paper-report-enhanced');
   // Reading-time bar: sticky at the top of the scroll container, above the
   // doc/article. Built before mount so we can measure the article's word
@@ -1236,11 +1434,13 @@ function _renderFinalReport(container, text, meta, view) {
     doc.innerHTML = tocHTML;
     doc.appendChild(article);
     container.innerHTML = '';
+    if (_timelineHtml) container.insertAdjacentHTML('beforeend', _timelineHtml);
     if (readBar) container.appendChild(readBar);
     container.appendChild(doc);
     _wireReportScrollSpy(container, article, doc.querySelector('.paper-report-toc'));
   } else {
     container.innerHTML = '';
+    if (_timelineHtml) container.insertAdjacentHTML('beforeend', _timelineHtml);
     if (readBar) container.appendChild(readBar);
     container.appendChild(article);
   }
@@ -1389,14 +1589,24 @@ function _paintReportFromState(view) {
     _renderReportSkeleton(container, s.lang, view);
   }
 
-  // Tool rounds — reuse chat's unified renderer for identical look & feel
+  // Tool rounds + thinking — rendered through the chat inline tool
+  // timeline (renderSegmentTimelineHTML) so reasoning sits adjacent to the
+  // most recent tool calls, exactly like a chat agent bubble. Falls back to
+  // the grouped panel when the timeline can't resolve the rounds.
   var toolZone = document.getElementById(px + 'ToolZone');
   if (toolZone) {
     var toolCount = s.toolRounds.length;
     var searchingCount = s.toolRounds.filter(r => r.status === 'searching').length;
-    var toolKey = toolCount + ':' + searchingCount;
+    var toolKey = toolCount + ':' + searchingCount + ':' + s.segments.length
+      + ':' + s.thinkingText.length + ':' + s.fullText.length;
     if (s._lastToolKey !== toolKey) {
-      if (toolCount > 0 && typeof renderToolRoundsHTML === 'function') {
+      if (toolCount > 0 && typeof renderSegmentTimelineHTML === 'function') {
+        var _segs = _reportSegmentsForRender(s);
+        toolZone.innerHTML =
+          renderSegmentTimelineHTML(_segs, { toolRounds: s.toolRounds }, 0)
+          || (typeof renderToolRoundsHTML === 'function'
+              ? renderToolRoundsHTML(s.toolRounds, s.status === 'running', _segs) : '');
+      } else if (toolCount > 0 && typeof renderToolRoundsHTML === 'function') {
         toolZone.innerHTML = renderToolRoundsHTML(s.toolRounds, s.status === 'running');
       } else {
         toolZone.innerHTML = '';
@@ -1405,12 +1615,15 @@ function _paintReportFromState(view) {
     }
   }
 
-  // Thinking
+  // Thinking — the standalone strip is the PRE-TOOL placeholder only: once
+  // the first tool call lands, the timeline panel carries every thinking
+  // segment (including the pre-tool one), so the strip must get out of the
+  // way or the same reasoning shows twice.
   if (s.thinkingText) {
     var thBlock = document.getElementById(px + 'ThinkingBlock');
     var thBody = document.getElementById(px + 'ThinkingBody');
     if (thBlock) {
-      thBlock.style.display = '';
+      thBlock.style.display = s.toolRounds.length ? 'none' : '';
       if (s.contentStarted) thBlock.open = false;
     }
     if (thBody && thBody.textContent.length !== s.thinkingText.length) {
@@ -1535,6 +1748,10 @@ async function _pollReportTask(view) {
       s.pollTimer = setTimeout(function() { _pollReportTask(view); }, 1200);
     } else {
       s.pollTimer = null;
+      // Terminal: the push subscription has no more work to do. Releasing here
+      // covers the path where the POLL observed the terminal status first
+      // (a WS-blocked client never gets the push frame that would release it).
+      if (s.status !== 'running') _detachReportPush(s);
     }
   } catch (e) {
     console.warn('[Paper:Report] Poll failed:', e);
@@ -1688,6 +1905,7 @@ async function _generatePaperReport(force, view) {
     _clearReportRegenIntent(view.regenIntentKey);
     view.stream = _makeReportStreamState(startPaperId, reportLang, data.task_id, view.kind);
     _syncReportToolbar(true, view);
+    _attachReportPush(view, view.stream);
     _pollReportTask(view);
     // Honour a Stop pressed before the task_id existed: now that we know the
     // id, abort the just-started task instead of silently dropping the intent.
@@ -1965,6 +2183,7 @@ async function _loadOrGenerateReport(view) {
   if (view.stream && view.stream.paperId === _activePaperId) {
     _paintReportFromState(view);
     if (view.stream.status === 'running' && !view.stream.pollTimer) {
+      _attachReportPush(view, view.stream);
       _pollReportTask(view);
     } else if (view.stream.status === 'done') {
       // Terminal English render on tab re-entry — re-apply a persisted Chinese
@@ -2028,6 +2247,7 @@ async function _loadOrGenerateReport(view) {
         if (container) _renderReportSkeleton(container, reportLang, view);
         view.stream = _makeReportStreamState(startPaperId, reportLang, lookupData.task_id, view.kind);
         _syncReportToolbar(true, view);
+        _attachReportPush(view, view.stream);
         _pollReportTask(view);
         return;
       }
@@ -2149,14 +2369,12 @@ function _populatePaperReportModelDropdown(view) {
 
   dropdown.innerHTML = '';
 
-  // Filter to chat-capable visible models
+  // Filter to chat-capable visible models. isChatModel is the SSOT-backed
+  // predicate from core/model_caps.js — falls back to the hardcoded set
+  // {image_gen, embedding, transcription} when the server payload is absent.
   var chatModels = models.filter(function(m) {
     if (hiddenSet.has(m.model_id)) return false;
-    var caps = m.capabilities || [];
-    for (var i = 0; i < caps.length; i++) {
-      if (caps[i] === 'image_gen' || caps[i] === 'embedding') return false;
-    }
-    return true;
+    return (typeof isChatModel === 'function') ? isChatModel(m) : true;
   });
 
   // No "Default (auto)" option — generation should always use a specific,
@@ -2184,9 +2402,28 @@ function _populatePaperReportModelDropdown(view) {
     grouped[pid].models.push(m);
   }
 
+  /* Order both axes the way the user READS them, via the SAME shared
+   * comparator the toolbar picker uses (_compareModelsByDisplayName,
+   * settings/branding.js): provider sections by provider name, in-section
+   * models by display name (_modelShortName — NOT the raw model_id, which
+   * sorts `yuju-claude-opus-5-evaDaily` under 'y' while rendering as
+   * "Claude Opus 5"). Both pickers read the same _registeredModels, so
+   * routing through one comparator keeps the two lists from ever
+   * disagreeing. Guarded: a stale bundle missing branding.js leaves the
+   * list in arrival order rather than throwing and stranding an empty
+   * dropdown (same rationale as the toolbar picker's isChatModel guard). */
+  var _canSort = (typeof _compareModelsByDisplayName === 'function');
   var pids = Object.keys(grouped);
+  if (_canSort) {
+    pids.sort(function(x, y) {
+      var nx = String((grouped[x] && grouped[x].name) || x);
+      var ny = String((grouped[y] && grouped[y].name) || y);
+      return _compareModelsByDisplayName(nx, ny);
+    });
+  }
   for (var pi = 0; pi < pids.length; pi++) {
     var group = grouped[pids[pi]];
+    if (_canSort) group.models.sort(_compareModelsByDisplayName);
     if (pids.length > 1) {
       var section = document.createElement('div');
       section.className = 'paper-report-model-dropdown-section';
@@ -2216,6 +2453,21 @@ function _selectPaperReportModel(modelId, view) {
   if (label) {
     if (modelId) {
       label.textContent = (typeof _modelShortName === 'function') ? _modelShortName(modelId) : modelId;
+      /* The markup ships data-i18n="paper.reportSelectModel" for the initial
+       * placeholder. Once a real model is chosen that attribute must go: the
+       * next _applyI18n() (language toggle, and it also runs on boot) walks
+       * every [data-i18n] and would overwrite the model name with "Select
+       * model" — losing the one piece of state this button exists to show. */
+      label.removeAttribute('data-i18n');
+      /* Long ids are ellipsized by CSS; the button's tooltip carries the full
+       * id so it stays recoverable. Set it on the BUTTON (the label span is
+       * the clipped box) and drop the static data-i18n-title for the same
+       * clobber reason as above. */
+      var btn = label.closest('.paper-report-model-btn');
+      if (btn) {
+        btn.removeAttribute('data-i18n-title');
+        btn.title = modelId;
+      }
     } else {
       // No model available (empty model list) — keep the button usable.
       label.textContent = (typeof t === 'function') ? t('paper.reportSelectModel') : 'Select model';
@@ -2372,6 +2624,10 @@ function _syncReportToolbar(running, view) {
     if (genBtn) genBtn.style.display = (running || hasOutput) ? 'none' : '';
     if (regenBtn) regenBtn.style.display = (!running && hasOutput) ? '' : 'none';
     if (copyBtn) copyBtn.style.display = (!running && hasOutput) ? '' : 'none';
+    // Light the Rebuttal segment dot as soon as a follow-up reply exists, so
+    // the reviewer sees it without switching (idempotent; does not change the
+    // active segment).
+    if (typeof _syncReviewSegState === 'function') { try { _syncReviewSegState(); } catch (e) {} }
   }
   // Keep the EN/中 segmented control in sync on every paint (both views).
   if (typeof _syncReportLangToggle === 'function') _syncReportLangToggle(view);

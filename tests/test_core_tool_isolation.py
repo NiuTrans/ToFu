@@ -31,7 +31,7 @@ MODEL_CONFIG = os.path.normpath(
 # Concrete tool-schema symbols that used to be imported into model_config.
 # These now live behind the registry; core must NOT import them again.
 _FORBIDDEN_IMPORT_SYMBOLS = {
-    'SEARCH_TOOL_MULTI', 'FETCH_URL_TOOL',
+    'build_search_tool', 'FETCH_URL_TOOL',
     'PROJECT_TOOLS', 'READ_FILES_TOOL', 'CODE_EXEC_TOOL',
     'BROWSER_TOOLS', 'ADVANCED_BROWSER_TOOLS', 'DESKTOP_TOOLS',
     'GENERATE_IMAGE_TOOL', 'CONV_REF_TOOLS', 'ASK_HUMAN_TOOL',

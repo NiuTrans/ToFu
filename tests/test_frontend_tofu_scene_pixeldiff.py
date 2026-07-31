@@ -21,10 +21,18 @@ How it's faithful (not a re-implementation):
     compositing + real linear/radial gradients. So the pixels are what a canvas
     would composite, just without a browser.
 
-A headless browser (Playwright/Chromium) is unavailable in this environment
-(the Chromium build is missing ~12 system libs — libatk/libcairo/libpango/… —
-and there's no apt on the shared host), so cairo replay is the strongest
-faithful pixel evidence obtainable here.
+A headless browser is NOT used here — but not because one is unavailable: that
+claim was measured and found FALSE on 2026-07-29. All 10 GUI libs Chromium
+needs are present in the env prefix (``describe_chromium_env()['issues']`` is
+empty) and a real Playwright screenshot renders glyphs; the libs were never
+missing, ``LD_LIBRARY_PATH`` simply has to be exported first, which
+``chromium_env.ensure_chromium_env()`` now does for every entry point.
+
+This file stays on cairo anyway, for a reason that has nothing to do with
+availability: replaying the recorded draw stream is DETERMINISTIC and isolates
+the compositing maths, so a pixel delta here can only come from the scene
+module. Tests that need a real browser use the ``browser`` fixture
+(tests/conftest.py) instead.
 
 Env gate: requires `node` on PATH + `cairocffi` importable; skipped otherwise
 (never a hard CI failure on a bare box).

@@ -29,6 +29,15 @@ TRIPLE-NEUTER (all in COPIES; shipped files byte-identical after):
     circuit → a re-apply rewrites innerHTML even when unchanged (the
     "no redundant DOM write on re-apply" assertion fails).
 
+BOARD EAGER-TRANSLATION (2026-07-25): a LONG epic title renders as a
+COLLAPSED `.pb-clamp`. The overlay used to defer translating collapsed
+clamps until the reader clicked 展开全文 — which left the whole board (the
+surface the operator actually scans) in the source language: the reported
+"project dashboard isn't translated" bug. The defer gate is gone; collapsed
+clamps translate eagerly on render (one cached call per item). NC-5 proves
+the assertion bites: re-introducing a defer gate in a COPY makes the
+"collapsed clamp shows the translation" assertion fail.
+
 Skips cleanly when node + jsdom aren't installed.
 """
 
@@ -55,6 +64,15 @@ _EN_PROPOSAL = ('Adopt Redis as the single externalization substrate for both '
                 'push fan-out and lease-TTL counters across all replicas.')
 # An already-CHINESE decision; UI target = Chinese → it must be SKIPPED.
 _ZH_DECISION = '所有横向扩展的运行时状态都必须通过共享租约存储，默认关闭以保持单机字节一致。'
+# A LONG English epic title (> _CLAMP_THRESHOLD 240) → renders as a COLLAPSED
+# .pb-clamp; the overlay must translate it EAGERLY (no expand click). Plain
+# prose only — no markdown/backticks/URLs, so _mdLite is a pass-through and
+# textContent compares byte-for-byte after a revert.
+_LONG_EN_EPIC = ('Redesign the project board panel for readability: deepen the status '
+                 'colour tokens on light themes so badges and lane accents stay legible, '
+                 'shorten the collapsed text fade so it no longer covers a whole line, and '
+                 'translate every long epic title into the UI language immediately instead '
+                 'of waiting for the reader to expand it first.')
 
 
 def _node_deps_available():
@@ -175,6 +193,23 @@ function drain() {
       proposalNode.firstChild === childBefore && proposalNode.firstChild._mark === 'keep');
   }
 
+  // ── Board: a LONG English epic renders as a COLLAPSED .pb-clamp and must
+  // be translated EAGERLY — the old defer-until-expand gate left the whole
+  // board in the source language (the "dashboard isn't translated" bug). ──
+  const charterPanel = win.document.querySelector('[data-pb-panel="charter"]');
+  const boardPanel = win.document.querySelector('[data-pb-panel="board"]');
+  charterPanel.classList.remove('pb-tab-panel-active');   // _isVisible gate:
+  boardPanel.classList.add('pb-tab-panel-active');        // board becomes visible
+  PB.renderBoard({ tasks: [ { id: 'pt_long', title: LONG_EPIC_PH, status: 'open' } ] });
+  await drain();
+  const boardBody = win.document.getElementById('projectBrainBoardBody');
+  const longNode = boardBody.querySelector('.pb-board-card[data-task-id="pt_long"] .pb-clamp');
+  out.boardClampCollapsed = !!(longNode && !longNode.classList.contains('pb-clamp-open'));
+  out.boardTitleSent = TR_CALLS.indexOf(LONG_EPIC_PH) !== -1;
+  out.boardTitleTranslated = !!(longNode && longNode.getAttribute('data-pb-tr') === '1' &&
+    longNode.textContent.indexOf('译文：') === 0);
+  out.boardTitleSrcKept = !!(longNode && longNode.getAttribute('data-pb-src') === LONG_EPIC_PH);
+
   // ── Toggle OFF → every node reverts to its ORIGINAL byte-for-byte ──
   const callsBeforeOff = TR_CALLS.length;
   I.toggle();  // now OFF
@@ -182,13 +217,16 @@ function drain() {
   out.disabledAfterToggle = !I.isEnabled();
   out.proposalRevertedToOriginal = !!(proposalNode &&
     proposalNode.textContent === EN_PROPOSAL_PH && !proposalNode.getAttribute('data-pb-tr'));
+  out.boardRevertedToOriginal = !!(longNode &&
+    longNode.textContent === LONG_EPIC_PH && !longNode.getAttribute('data-pb-tr'));
   out.noNewCallsWhenOff = TR_CALLS.length === callsBeforeOff;
 
   console.log('__RESULT__' + JSON.stringify(out));
 })();
 '''.replace('DOM_PLACEHOLDER', json.dumps(_DOM)) \
    .replace('EN_PROPOSAL_PH', json.dumps(_EN_PROPOSAL)) \
-   .replace('ZH_DECISION_PH', json.dumps(_ZH_DECISION))
+   .replace('ZH_DECISION_PH', json.dumps(_ZH_DECISION)) \
+   .replace('LONG_EPIC_PH', json.dumps(_LONG_EN_EPIC))
 
 
 def _run(brain=_BRAIN_SRC, i18n=_I18N_SRC):
@@ -229,10 +267,22 @@ def test_content_overlay_translates_without_mutating_source():
     # Anti-flicker: compare-before-swap.
     assert out['reapplyNoRewrite'] is True, \
         f're-apply must not rewrite an unchanged node: {out}'
+    # Board eager-translation: a COLLAPSED long-title clamp must already show
+    # the translation — no 展开全文 click required (the dashboard-i18n bug).
+    assert out['boardClampCollapsed'] is True, \
+        f'the long epic must render as a collapsed clamp for this test to mean anything: {out}'
+    assert out['boardTitleSent'] is True, \
+        f'the collapsed clamp title must be SENT to the engine (no defer): {out}'
+    assert out['boardTitleTranslated'] is True, \
+        f'the collapsed clamp must SHOW the translation eagerly: {out}'
+    assert out['boardTitleSrcKept'] is True, \
+        f'the collapsed clamp data-pb-src must stay the original: {out}'
     # Toggle off → byte-for-byte revert to originals.
     assert out['disabledAfterToggle'] is True, out
     assert out['proposalRevertedToOriginal'] is True, \
         f'toggling off must restore the original text: {out}'
+    assert out['boardRevertedToOriginal'] is True, \
+        f'toggling off must restore the collapsed clamp original too: {out}'
     assert out['noNewCallsWhenOff'] is True, out
 
 
@@ -315,6 +365,43 @@ def test_NC3_compare_before_swap_is_load_bearing(tmp_path):
     out = _run(i18n=src)
     assert out['reapplyNoRewrite'] is False, \
         f'NC-3: without compare-before-swap a re-apply rewrites the node: {out}'
+    with open(_I18N_SRC, encoding='utf-8') as f:
+        assert f.read() == original, 'shipped project-brain-i18n.js must be byte-identical'
+
+
+@pytest.mark.skipif(not _node_deps_available(),
+                    reason='node + jsdom dev-deps not installed (run npm install)')
+def test_NC5_defer_gate_would_restore_the_dashboard_i18n_bug(tmp_path):
+    """NC-5: re-introduce the defer-until-expand gate in a COPY (a collapsed
+    .pb-clamp is skipped until opened) → the "collapsed clamp shows the
+    translation eagerly" assertion fails. Shipped file byte-identical after."""
+    with open(_I18N_SRC, encoding='utf-8') as f:
+        original = f.read()
+    anchor = ("      // Long text (a collapsed .pb-clamp) is translated EAGERLY too: the\n"
+              "      // collapsed preview is exactly what the operator scans, so deferring\n"
+              "      // left the whole board in the source language (the \"untranslated UI\"\n"
+              "      // complaint). One cached call per item; the clamp-toggle re-apply is a\n"
+              "      // compare-before-swap no-op afterwards.\n"
+              "      var key = _cacheKey(src, target);")
+    assert anchor in original, 'eager-clamp anchor not found'
+    patched = original.replace(
+        anchor,
+        ("      // NC-5: restore the defer gate (collapsed clamps wait for expand).\n"
+         "      if (el.classList && el.classList.contains('pb-clamp') &&\n"
+         "          !el.classList.contains('pb-clamp-open')) { _revert(el); continue; }\n"
+         "      var key = _cacheKey(src, target);"),
+        1)
+    assert patched != original, 'NC-5 patch did not apply'
+    src = os.path.join(tmp_path, 'i18n-nc5.js')
+    with open(src, 'w', encoding='utf-8') as f:
+        f.write(patched)
+    out = _run(i18n=src)
+    assert out['boardClampCollapsed'] is True, \
+        f'NC-5: the long epic still renders as a collapsed clamp: {out}'
+    assert out['boardTitleTranslated'] is False, \
+        f'NC-5: with the defer gate restored the collapsed clamp must stay UNtranslated: {out}'
+    assert out['boardTitleSent'] is False, \
+        f'NC-5: with the defer gate the collapsed title is never sent to the engine: {out}'
     with open(_I18N_SRC, encoding='utf-8') as f:
         assert f.read() == original, 'shipped project-brain-i18n.js must be byte-identical'
 

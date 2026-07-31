@@ -14,7 +14,7 @@ logger = get_logger(__name__)
 #  Schema Version Cache — Skip redundant DDL on subsequent startups
 # ═══════════════════════════════════════════════════════════════════════
 
-_SCHEMA_VERSION = 41  # Increment when tables/columns/indexes change
+_SCHEMA_VERSION = 43  # Increment when tables/columns/indexes change
 
 
 def _column_exists(conn, table, column):

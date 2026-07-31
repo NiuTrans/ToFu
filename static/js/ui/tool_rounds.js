@@ -65,6 +65,11 @@ const _CONV_META_TOOLS = new Set([
   "project_board_read", "project_board_post", "project_board_claim",
   "project_board_complete", "project_board_block",
   "project_charter_read", "project_charter_propose",
+  // Withdrawn from the agent toolset 2026-07-30 (the charter is human-reviewed
+  // — see lib/tools/conversation.py::CHARTER_TOOLS), but HISTORICAL rounds in
+  // existing conversations still carry it and must keep rendering their content
+  // instead of collapsing to a bare tool name.
+  "project_charter_commit",
   "list_conversations", "get_conversation",
   "project_peer_status", "project_feed_read",
   "project_message", "project_intervene",
@@ -613,11 +618,10 @@ function _swarmStatusClass(status) {
   return "ptool-badge-info";
 }
 
-/* Render one beautified sub-agent update card from a parsed field map `f`,
- * carrying the raw payload `rawText` behind an inline "model view · verbatim"
- * toggle. Human view = agent/role header + status badge + elapsed/tokens meta
+/* Render one beautified sub-agent update card from a parsed field map `f`.
+ * Human view = agent/role header + status badge + elapsed/tokens meta
  * + the preview rendered as Markdown; nothing angle-bracketed on screen. */
-function _renderSwarmUpdateCard(f, rawText) {
+function _renderSwarmUpdateCard(f) {
   const _t = (typeof t === "function") ? t : (k, d) => d;
   const aid = escapeHtml(f.agentId || "");
   const role = f.role ? `<span class="sw-card-role">${escapeHtml(f.role)}</span>` : "";
@@ -640,8 +644,6 @@ function _renderSwarmUpdateCard(f, rawText) {
   const fileHtml = f.outputFile
     ? `<div class="sw-card-file" title="${escapeHtml(f.outputFile)}">${Icon("file", 11)}<span>${escapeHtml(f.outputFile)}</span></div>`
     : "";
-  const modelTag = _t("tool.modelViewChip", "The model's view · verbatim");
-  const modelLbl = _t("tool.modelView", "Model view");
   return `<div class="sw-card">
        <div class="sw-card-head">
          ${aid ? `<span class="sw-card-agent">${aid}</span>` : ""}
@@ -652,27 +654,7 @@ function _renderSwarmUpdateCard(f, rawText) {
        ${errHtml}
        ${previewHtml}
        ${fileHtml}
-       <details class="sw-card-raw">
-         <summary class="sw-card-raw-toggle">${Icon("eye", 11)}<span>${escapeHtml(modelLbl)}</span></summary>
-         <div class="sw-card-raw-meta">${escapeHtml(modelTag)}</div>
-         <pre class="sw-card-raw-pre">${escapeHtml(String(rawText == null ? "" : rawText))}</pre>
-       </details>
      </div>`;
-}
-
-/* Build the verbatim "what the model actually saw" text for an inbox / peer /
- * steer synthetic row out of its previews. These rows have NO toolContent (they
- * mark an injected user message, not a tool return), so the far-right "模型原文"
- * entry sources its verbatim text from here — the exact payload joined per
- * preview, with an optional `[from <conv>]` attribution for multi-sender peer
- * injections. */
-function _injectVerbatimText(previews, withFrom) {
-  if (!Array.isArray(previews) || !previews.length) return "";
-  return previews.map((p) => {
-    const text = String((p && p.text) == null ? "" : p.text);
-    if (withFrom && p && p.fromConv) return `[from ${String(p.fromConv)}]\n${text}`;
-    return text;
-  }).join("\n\n———\n\n");
 }
 
 /* Header attribution for a peer-inject row: one title bubble per DISTINCT
@@ -727,7 +709,7 @@ function _renderInboxInjectRow(round) {
           // Backend may not have carried <agent-id> inside the payload — fall
           // back to the sibling `p.agentId` field so the card is never faceless.
           if (!parsed.agentId && p.agentId) parsed.agentId = p.agentId;
-          return _renderSwarmUpdateCard(parsed, p.text || "");
+          return _renderSwarmUpdateCard(parsed);
         }
         // Unrecognized payload — show it verbatim (still the model's view).
         const aid = escapeHtml(p.agentId || "");
@@ -739,15 +721,12 @@ function _renderInboxInjectRow(round) {
     : `<div class="sw-inbox-row-empty">${escapeHtml(_t("swarmCard.noPayload", "No payload available."))}</div>`;
   const badge = _t("peer.injectRowBadge", "injected → context");
   const label = _t("swarmCard.received", "Received");
-  const modelBtn = _tcModelViewBtnForText(
-    round, _injectVerbatimText(previews, false));
   return `<details class="sw-inbox-row" data-rn="${round.roundNum}">
        <summary class="ptool-line sw-inbox-row-header">
          <span class="ptool-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg></span>
          <span class="ptool-text">${escapeHtml(label)} <b>${count}</b> ${escapeHtml(word)}</span>
          ${idsLabel}
          <span class="ptool-badge ptool-badge-info">${escapeHtml(badge)}</span>
-         ${modelBtn}
        </summary>
        <div class="sw-inbox-row-body">${bodyHtml}</div>
      </details>`;
@@ -776,8 +755,7 @@ function _renderPeerInjectRow(round) {
         const text = String(p.text == null ? "" : p.text);
         // Attribution reads as a conversation-title bubble (via convTitleById),
         // NOT a raw id — users care who sent it. Peer messages are plain prose,
-        // rendered as Markdown for the human view; the far-right "模型原文" header
-        // entry carries the verbatim text the model saw.
+        // rendered as Markdown for the human view.
         const fromBubble = p.fromConv ? _peerFromBubble(p.fromConv) : "";
         const bodyMd = text.trim()
           ? `<div class="sw-card-preview md-content">${(typeof renderMarkdown === "function") ? renderMarkdown(text) : escapeHtml(text)}</div>`
@@ -792,14 +770,12 @@ function _renderPeerInjectRow(round) {
   // then a +K overflow chip). NEVER a raw id list — users care who sent it, and
   // multi-sibling injection is this project's normal case.
   const headBubble = _peerFromBubbleGroup(previews, 3);
-  const modelBtn = _tcModelViewBtnForText(round, _injectVerbatimText(previews, true));
   return `<details class="sw-inbox-row sw-peer-row" data-rn="${round.roundNum}">
        <summary class="ptool-line sw-inbox-row-header">
          <span class="ptool-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></span>
          <span class="ptool-text">${escapeHtml(label)} <b>${count}</b> ${escapeHtml(word)}</span>
          ${headBubble}
          <span class="ptool-badge ptool-badge-info">${escapeHtml(badge)}</span>
-         ${modelBtn}
        </summary>
        <div class="sw-inbox-row-body">${bodyHtml}</div>
      </details>`;
@@ -831,15 +807,63 @@ function _renderUserSteerInjectRow(round) {
         return `<div class="sw-card sw-steer-card-item">` + bodyMd + `</div>`;
       }).join("")
     : `<div class="sw-inbox-row-empty">${escapeHtml(_t("steer.noPayload", "No message available."))}</div>`;
-  const modelBtn = _tcModelViewBtnForText(round, _injectVerbatimText(previews, false));
   return `<details class="sw-inbox-row sw-steer-row" data-rn="${round.roundNum}">
        <summary class="ptool-line sw-inbox-row-header">
          <span class="ptool-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z"/></svg></span>
          <span class="ptool-text">${escapeHtml(label)} <b>${count}</b> ${escapeHtml(word)}</span>
          <span class="ptool-badge ptool-badge-info">${escapeHtml(badge)}</span>
-         ${modelBtn}
        </summary>
        <div class="sw-inbox-row-body">${bodyHtml}</div>
+     </details>`;
+}
+
+/* ── Intent-stall nudge row (the loop re-driving a stalled model) ──
+ * Renders a synthetic toolRound (flagged `_stallNudge`) marking the moment the
+ * orchestrator detected an INTENT STALL — a tool call that did not run,
+ * followed by a prose-only round with no tool calls ("I'll do X" then nothing)
+ * — and injected a system instruction to re-drive the model.
+ *
+ * Distinct from the other three inject lanes in WHO wrote the injected text:
+ * swarm (`_inboxInject`) carries a sub-agent's result, peer (`_peerInject`)
+ * another conversation's message, steer (`_userSteerInject`) the operator's own
+ * words. This one is written by the LOOP ITSELF. That is exactly why it must be
+ * legible as a system action — a system-authored `role='user'` message must
+ * never read as something the user said.
+ *
+ * The header states the bound ("at most once per turn") because otherwise
+ * "the system re-drove my agent" reads as an unbounded spend risk; the body
+ * names the tool that failed and shows the VERBATIM instruction that was sent,
+ * so the user can judge the intervention instead of trusting a paraphrase. */
+function _renderStallNudgeRow(round) {
+  const _t = (typeof t === "function") ? t : (k, d) => d;
+  const label = _t("stall.injectRowLabel", "Nudged the model to continue");
+  const badge = _t("peer.injectRowBadge", "injected → context");
+  const tool = round.stallTool || "";
+  const reason = tool
+    ? _t("stall.reasonWithTool", "`{tool}` did not run, and the next round was "
+         + "text only — the model said what it would do, then stopped.")
+        .replace("{tool}", tool)
+    : _t("stall.reasonGeneric", "The previous tool call did not run, and the "
+         + "next round was text only.");
+  const boundTxt = _t("stall.bound", "At most once per turn — if the model "
+                      + "stalls again it is allowed to stop.");
+  const promptHtml = round.stallPrompt
+    ? `<div class="sw-card sw-stall-card-item">`
+      + `<div class="sw-card-head"><span class="sw-card-role">`
+      + `${escapeHtml(_t("stall.promptLabel", "Sent to the model"))}</span></div>`
+      + `<pre class="sw-card-raw-pre">${escapeHtml(round.stallPrompt)}</pre></div>`
+    : "";
+  return `<details class="sw-inbox-row sw-stall-row" data-rn="${round.roundNum}">
+       <summary class="ptool-line sw-inbox-row-header">
+         <span class="ptool-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em"><path d="M3 2v6h6"/><path d="M3 8a9 9 0 1 0 3-5.7L3 8"/></svg></span>
+         <span class="ptool-text">${escapeHtml(label)}</span>
+         <span class="ptool-badge ptool-badge-info">${escapeHtml(badge)}</span>
+       </summary>
+       <div class="sw-inbox-row-body">
+         <div class="sw-stall-reason">${escapeHtml(reason)}</div>
+         <div class="sw-stall-bound">${escapeHtml(boundTxt)}</div>
+         ${promptHtml}
+       </div>
      </details>`;
 }
 
@@ -952,7 +976,7 @@ function _renderMemoryBlock(round, svg, q, compactionLabelHtml, rootPill, badgeH
          ${rootPill}
          <span class="ptool-text">${q}</span>
          ${badgeHtml}
-         ${_rowModelViewBtn(round)}
+         ${_rowRightControls(round)}
        </summary>
        <div class="ptool-memory-body">${inner}</div>
      </details>`;
@@ -1023,7 +1047,7 @@ function _renderTodoBlock(round, svg, q, badgeHtml) {
          <span class="ptool-text">${escapeHtml(headLabel)}</span>
          ${barHtml}
          ${countChip}
-         ${_rowModelViewBtn(round)}
+         ${_rowRightControls(round)}
        </summary>
        <div class="ptool-todo-body"><div class="ptool-todo-list">${rows}</div></div>
      </details>`;
@@ -1272,7 +1296,7 @@ function _renderConvDigest(cd) {
   if (cd.truncated && !(cd.omitted > 0)) {
     // Fallback marker when a truncation happened without an inline seam.
     html += `<div class="ptool-convdigest-more">${escapeHtml(
-      _t("convDigest.truncated", "… earlier messages omitted — open the model view for the full transcript."))}</div>`;
+      _t("convDigest.truncated", "… earlier messages omitted — use the </> button on a tool row for the full request record."))}</div>`;
   }
   html += `</div>`;
   return html;
@@ -1756,7 +1780,6 @@ function _renderConvMetaBlock(round, svg, q, badgeHtml) {
          ${countChip}
          ${sourceChip}
          ${badgeHtml}
-         ${_convMetaModelViewBtn(round)}
        </summary>
        <div class="ptool-convmeta-body">${purposeHtml}${bodyHtml}</div>
      </details>`;
@@ -1792,6 +1815,29 @@ function _linkifyMcpLabels(text, round) {
   return out;
 }
 
+/* Recovery-rebuilt rounds can carry NO `query` at all: boot crash recovery
+ * rebuilds toolRounds from the persisted segments (a wire-replay view — only
+ * toolCallId/toolName/toolArgs/toolContent/status/llmRound) and, for history
+ * written before the display projection landed, persisted them as-is. The
+ * generic line below interpolates `q` as the whole title, so a query-less
+ * round rendered as an EMPTY card (an icon and nothing else —
+ * the ms1auj3n restart symptom). Never render blank: fall back to the tool
+ * label plus a short first-string-arg summary so the row still says what ran. */
+function _recoveryRoundFallbackTitle(round, td) {
+  const base = (td && td.label) || round.toolName || 'tool';
+  let summary = '';
+  try {
+    const args = typeof round.toolArgs === 'string' ? JSON.parse(round.toolArgs) : round.toolArgs;
+    if (args && typeof args === 'object') {
+      for (const k of Object.keys(args)) {
+        const v = args[k];
+        if (typeof v === 'string' && v.trim()) { summary = v.trim().split('\n')[0].slice(0, 80); break; }
+      }
+    }
+  } catch (e) { /* malformed toolArgs — the label alone still beats a blank row */ }
+  return escapeHtml(summary ? base + ' — ' + summary : base);
+}
+
 function _renderUnifiedToolLine(round, isSearching) {
   const svg = _getToolSvg(round);
   const td = _getToolDisplay(round);
@@ -1799,7 +1845,9 @@ function _renderUnifiedToolLine(round, isSearching) {
    * displays render one item per line so users can see every candidate
    * without elision. escapeHtml first (HTML-safe), THEN substitute
    * \n → <br> so the browser actually breaks the line. */
-  const q = _linkifyMcpLabels(escapeHtml(round.query || "").replace(/\n/g, '<br>'), round);
+  const q = round.query
+    ? _linkifyMcpLabels(escapeHtml(round.query).replace(/\n/g, '<br>'), round)
+    : _recoveryRoundFallbackTitle(round, td);
   const results = round.results || [];
   const meta = results[0] || {};
   const rootPill = _renderToolRootPill(round);
@@ -1812,6 +1860,10 @@ function _renderUnifiedToolLine(round, isSearching) {
    *   Surfacing it tells the user the displayed/executed args differ from
    *   the model's raw (broken) output. */
   const repairedBadge = _renderToolRepairedBadge(round);
+  /* Shared locals handed to the per-branch renderer helpers below — built
+   * once; each helper destructures only what it needs so the moved code
+   * stays byte-identical to the pre-split inline branches. */
+  const ctx = { svg, td, q, results, meta, rootPill, cmdRootPill, repairedBadge, isSearching };
 
   // ★ Async-swarm inbox injection — synthetic timeline row marking the point
   //   where the model received N <swarm-update> messages (sub-agent results)
@@ -1830,6 +1882,10 @@ function _renderUnifiedToolLine(round, isSearching) {
     return _renderUserSteerInjectRow(round);
   }
 
+  if (round._stallNudge) {
+    return _renderStallNudgeRow(round);
+  }
+
   // ★ Hallucinated / rejected tool — the model invented a tool that does not
   //   exist this turn (e.g. `search_web` when only `web_search` is real).
   //   The backend classified + rejected it (status:'rejected' + _rejected),
@@ -1844,7 +1900,135 @@ function _renderUnifiedToolLine(round, isSearching) {
     return _renderHumanGuidanceCard(round, svg);
   }
 
-  // ★ Human Guidance — skipped (task ended before user answered)
+  // ★ Human Guidance — skipped (task ended before user answered) /
+  //   submitted but not yet confirmed by server (tool_result pending)
+  const hgRowHtml = _renderHumanGuidanceRows(round, ctx);
+  if (hgRowHtml) return hgRowHtml;
+
+  // ★ Pending approval state — show approve/reject buttons
+  const approvalHtml = _renderPendingApprovalBlock(round, ctx);
+  if (approvalHtml) return approvalHtml;
+
+  // ★ Timer Watcher: render collapsible poll checks
+  if ((round._timerPolls && round._timerPolls.length > 0) || round._timerSkipCount) {
+    return _renderTimerWatcherBlock(round, svg);
+  }
+  // Timer tool with "searching" status but no polls yet — show initial waiting
+  // After reconnection, backend now includes _timerPolls in state snapshots,
+  // so this state should be brief (only before the first poll fires).
+  const timerWaitHtml = _renderTimerWaitingRow(round, ctx);
+  if (timerWaitHtml) return timerWaitHtml;
+
+  // ★ Interactive stdin: subprocess is waiting for user keyboard input
+  const stdinHtml = _renderStdinBlock(round, ctx);
+  if (stdinHtml) return stdinHtml;
+
+  // ★ Interrupted — the task was aborted (Stop) while this tool round was
+  //   still in-flight. The backend dangling-round sweep
+  //   (orchestrator._finalize_dangling_tool_rounds) stamps status='aborted'
+  //   on rounds the abort short-circuit left in 'searching'. Render a static
+  //   "interrupted" affordance — NO spinner — so it never shows "Running…"
+  //   live or after reload. Real results (if any) fall through to the normal
+  //   done renderers below, since the sweep only marks result-less rounds.
+  const abortedHtml = _renderAbortedRow(round, ctx);
+  if (abortedHtml) return abortedHtml;
+
+  const searchingHtml = _renderSearchingRow(round, ctx);
+  if (searchingHtml) return searchingHtml;
+
+  // ★ run_command / code_exec: render as inline terminal block with collapsible output
+  const cmdDoneHtml = _renderCmdDoneBlock(round, ctx);
+  if (cmdDoneHtml) return cmdDoneHtml;
+
+  // ★ browser_execute_js — render as an inline code block (JS in, result out),
+  //   mirroring the run_command terminal block. A cramped one-line "12165686:
+  //   (() => {…" row is unreadable; show the full snippet + collapsible result.
+  const execJsHtml = _renderBrowserExecJsBlock(round, ctx);
+  if (execJsHtml) return execJsHtml;
+
+  // ★ Web search / fetch — descriptive 0-result reason row, or collapsible
+  //   result list (per-query grouping, vertical cards, engine breakdown).
+  const searchRowsHtml = _renderSearchRows(round, ctx);
+  if (searchRowsHtml) return searchRowsHtml;
+
+  // ★ read_files / inspect_image image(s): render inline thumbnails when the
+  //   backend attached data URIs (meta.imageDataUris).
+  const readImgHtml = _renderReadImagesBlock(round, ctx);
+  if (readImgHtml) return readImgHtml;
+
+  // ★ Image generation / editing: render inline image card.
+  const imageGenHtml = _renderImageGenBlock(round, ctx);
+  if (imageGenHtml) return imageGenHtml;
+
+  // Determine badge
+  const badgeHtml = _computeToolBadgeHtml(round, ctx);
+
+  const compactionLabelHtml = _renderCompactionLabel(round);
+  // ★ create_memory / update_memory / merge_memories — collapsible,
+  //   Markdown-rendered preview of the saved memory body itself (mirrors the
+  //   apply_diff expand block). The opaque description-snippet "Preview" was
+  //   useless to users; expanding now shows the actual memory text, well-
+  //   rendered. The full body lives in round.toolArgs.body. update_memory may
+  //   omit body on a partial (name/tags-only) update — the body.trim() guard
+  //   below falls through to the normal row in that case.
+  if ((round.toolName === "create_memory" || round.toolName === "update_memory" || round.toolName === "merge_memories") && round.toolArgs) {
+    const memHtml = _renderMemoryBlock(round, svg, q, compactionLabelHtml, rootPill, badgeHtml);
+    if (memHtml) return memHtml;
+  }
+
+  // ★ todo_write — collapsible checklist progress card (state glyphs + a slim
+  //   progress bar), rendered off the structured meta.todos the backend
+  //   attaches. Falls through to the generic line only if the list is absent.
+  if (round.toolName === "todo_write") {
+    const todoHtml = _renderTodoBlock(round, svg, q, badgeHtml);
+    if (todoHtml) return todoHtml;
+  }
+
+  // ★ write_file — collapsible inline preview of the written content,
+  //   mirroring the apply_diff expand-on-click block.
+  const writeFileHtml = _renderWriteFileBlock(round, ctx, badgeHtml, compactionLabelHtml);
+  if (writeFileHtml) return writeFileHtml;
+
+  // ★ Single apply_diff / insert_content — collapsible inline diff
+  const singleDiffHtml = _renderSingleDiffBlock(round, ctx, badgeHtml, compactionLabelHtml);
+  if (singleDiffHtml) return singleDiffHtml;
+
+  // ★ Batch edit tools (apply_diffs / insert_contents) — collapsible per-edit list
+  const batchEditsHtml = _renderBatchEditsBlock(round, ctx, badgeHtml, compactionLabelHtml);
+  if (batchEditsHtml) return batchEditsHtml;
+
+  // ★ Project-brain / conversation-meta tools — render their full prose
+  //   output in a collapsible Markdown card instead of the bare generic line
+  //   (which hid all the content). Only when the round has settled (done);
+  //   the in-flight "searching…" state is handled by the generic active
+  //   branch above.
+  if (_isRoundConvMeta(round) && round.status !== "rejected") {
+    const convMetaHtml = _renderConvMetaBlock(round, svg, q, badgeHtml);
+    if (convMetaHtml) return convMetaHtml;
+  }
+
+  return `<div class="ptool-line">
+       <span class="ptool-icon">${svg}</span>
+       ${compactionLabelHtml}
+       ${rootPill}
+       <span class="ptool-text">${q}</span>
+       ${repairedBadge}
+       ${badgeHtml}
+       ${_rowRightControls(round)}
+     </div>`;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * Per-branch renderers for _renderUnifiedToolLine. Each helper guards on its
+ * own trigger condition and returns "" when the branch does not apply, so the
+ * dispatcher stays a flat ordered list of `if (html) return html;` probes —
+ * the probe ORDER is the render priority and must not change.
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+// ★ Human Guidance — skipped (task ended before user answered) /
+//   submitted but not yet confirmed by server (tool_result pending)
+function _renderHumanGuidanceRows(round, ctx) {
+  const { svg, td } = ctx;
   if (round.status === "done" && round.toolName === "ask_human" && round._hgSkipped) {
     const skippedQ = escapeHtml((round.guidanceQuestion || '').slice(0, 60));
     return `<div class="ptool-line hg-skipped-line">
@@ -1853,8 +2037,6 @@ function _renderUnifiedToolLine(round, isSearching) {
       <span class="ptool-badge ptool-badge-skip">${escapeHtml(t('project.hgUnanswered'))}</span>
     </div>`;
   }
-
-  // ★ Human Guidance — submitted but not yet confirmed by server (tool_result pending)
   if (round.status === "submitted" && round.toolName === "ask_human") {
     const respPreview = escapeHtml((round._hgUserResponse || '').slice(0, 80));
     return `<div class="ptool-line hg-submitted-line">
@@ -1864,90 +2046,123 @@ function _renderUnifiedToolLine(round, isSearching) {
       <span class="hg-submitted-spinner" title="${escapeHtml(t('project.hgWaitingContinue'))}"></span>
     </div>`;
   }
+  return "";
+}
 
-  // ★ Pending approval state — show approve/reject buttons
-  if (round.status === "pending_approval" && round.approvalId) {
-    const aid = escapeHtml(round.approvalId);
-    const ameta = round.approvalMeta || {};
-    let detailHtml = "";
-    if (ameta.batchMode && ameta.editSummaries) {
-      // ★ Batch apply_diff — show collapsible preview of all edits
-      const edits = ameta.editSummaries;
-      const maxPreviewLines = 12;
-      let batchHtml = `<div class="ptool-batch-header">${edits.length} edit${edits.length > 1 ? "s" : ""} across ${ameta.path || "?"}</div>`;
-      edits.forEach((ed, i) => {
-        const sLines = (ed.search || "").split("\n");
-        const rLines = (ed.replace || "").split("\n");
-        const sShow = sLines.slice(0, maxPreviewLines);
-        const rShow = rLines.slice(0, maxPreviewLines);
-        let diffLines = "";
-        sShow.forEach((l) => {
-          diffLines += `<div class="ptool-diff-line ptool-diff-del"><span class="ptool-diff-sign">-</span><span class="ptool-diff-code">${escapeHtml(l)}</span></div>`;
-        });
-        if (sLines.length > maxPreviewLines)
-          diffLines += `<div class="ptool-diff-line ptool-diff-del ptool-diff-ellipsis"><span class="ptool-diff-sign"> </span><span class="ptool-diff-code">… ${sLines.length - maxPreviewLines} more lines</span></div>`;
-        diffLines += `<div class="ptool-diff-separator"></div>`;
-        rShow.forEach((l) => {
-          diffLines += `<div class="ptool-diff-line ptool-diff-add"><span class="ptool-diff-sign">+</span><span class="ptool-diff-code">${escapeHtml(l)}</span></div>`;
-        });
-        if (rLines.length > maxPreviewLines)
-          diffLines += `<div class="ptool-diff-line ptool-diff-add ptool-diff-ellipsis"><span class="ptool-diff-sign"> </span><span class="ptool-diff-code">… ${rLines.length - maxPreviewLines} more lines</span></div>`;
-        const desc = ed.description ? escapeHtml(ed.description) : `Edit ${i + 1}`;
-        const pathLabel = escapeHtml(ed.path || "?");
-        batchHtml += `<details class="ptool-batch-edit"${i === 0 ? " open" : ""}>
+// ★ Pending approval state — show approve/reject buttons
+function _renderPendingApprovalBlock(round, ctx) {
+  const { svg, q } = ctx;
+  if (!(round.status === "pending_approval" && round.approvalId)) return "";
+  const aid = escapeHtml(round.approvalId);
+  const ameta = round.approvalMeta || {};
+  let detailHtml = "";
+  if (Array.isArray(ameta.riskFields) && ameta.riskFields.length) {
+    // ★ Generic risk-field list — the shape EVERY write tool can use.
+    //
+    // The four shapes below (batch / diff / command / contentPreview) are
+    // hardcoded per tool family, which is why a write tool outside those
+    // families used to render NO detail block at all: the user saw a bare
+    // tool name plus Approve/Reject and approved blind. Rather than invent a
+    // fifth, sixth, … bespoke shape per family, an enricher now just declares
+    // WHICH arguments carry the risk and this branch renders them uniformly.
+    // Checked FIRST so an enricher can opt into it explicitly.
+    const rows = ameta.riskFields
+      .filter((f) => f && f.label != null)
+      .map((f) => {
+        const val = f.value == null ? "" : String(f.value);
+        const shown = val.length > 2000 ? val.slice(0, 2000) + "…" : val;
+        const lines = shown.split("\n");
+        const body = lines
+          .map(
+            (l) =>
+              `<div class="ptool-diff-line ptool-diff-add"><span class="ptool-diff-sign">+</span><span class="ptool-diff-code">${escapeHtml(l)}</span></div>`,
+          )
+          .join("");
+        return `<div class="ptool-risk-field"><div class="ptool-risk-label">${escapeHtml(String(f.label))}</div>${body}</div>`;
+      })
+      .join("");
+    const noteHtml = ameta.description
+      ? `<div class="ptool-cmd-desc">${escapeHtml(ameta.description)}</div>`
+      : "";
+    detailHtml = `<div class="ptool-diff-preview">${noteHtml}${rows}</div>`;
+  } else if (ameta.batchMode && ameta.editSummaries) {
+    // ★ Batch apply_diff — show collapsible preview of all edits
+    const edits = ameta.editSummaries;
+    const maxPreviewLines = 12;
+    let batchHtml = `<div class="ptool-batch-header">${edits.length} edit${edits.length > 1 ? "s" : ""} across ${ameta.path || "?"}</div>`;
+    edits.forEach((ed, i) => {
+      const sLines = (ed.search || "").split("\n");
+      const rLines = (ed.replace || "").split("\n");
+      const sShow = sLines.slice(0, maxPreviewLines);
+      const rShow = rLines.slice(0, maxPreviewLines);
+      let diffLines = "";
+      sShow.forEach((l) => {
+        diffLines += `<div class="ptool-diff-line ptool-diff-del"><span class="ptool-diff-sign">-</span><span class="ptool-diff-code">${escapeHtml(l)}</span></div>`;
+      });
+      if (sLines.length > maxPreviewLines)
+        diffLines += `<div class="ptool-diff-line ptool-diff-del ptool-diff-ellipsis"><span class="ptool-diff-sign"> </span><span class="ptool-diff-code">… ${sLines.length - maxPreviewLines} more lines</span></div>`;
+      diffLines += `<div class="ptool-diff-separator"></div>`;
+      rShow.forEach((l) => {
+        diffLines += `<div class="ptool-diff-line ptool-diff-add"><span class="ptool-diff-sign">+</span><span class="ptool-diff-code">${escapeHtml(l)}</span></div>`;
+      });
+      if (rLines.length > maxPreviewLines)
+        diffLines += `<div class="ptool-diff-line ptool-diff-add ptool-diff-ellipsis"><span class="ptool-diff-sign"> </span><span class="ptool-diff-code">… ${rLines.length - maxPreviewLines} more lines</span></div>`;
+      const desc = ed.description ? escapeHtml(ed.description) : `Edit ${i + 1}`;
+      const pathLabel = escapeHtml(ed.path || "?");
+      batchHtml += `<details class="ptool-batch-edit"${i === 0 ? " open" : ""}>
           <summary class="ptool-batch-summary"><span class="ptool-batch-idx">#${i + 1}</span> <span class="ptool-batch-path">${pathLabel}</span> <span class="ptool-batch-desc">${desc}</span> <span class="ptool-batch-stats">${ed.searchLines || "?"}→${ed.replaceLines || "?"} lines</span></summary>
           <div class="ptool-diff-preview">${diffLines}</div>
         </details>`;
-      });
-      if ((ameta.editCount || edits.length) > edits.length)
-        batchHtml += `<div class="ptool-batch-more">… and ${ameta.editCount - edits.length} more edits</div>`;
-      detailHtml = `<div class="ptool-batch-preview">${batchHtml}</div>`;
-    } else if (ameta.search != null && ameta.replace != null) {
-      // Single apply_diff — show search→replace preview with line-by-line diff
-      const searchLines = (ameta.search || "").split("\n");
-      const replaceLines = (ameta.replace || "").split("\n");
-      const totalSearchLines = ameta.searchLines || searchLines.length;
-      const totalSearchChars = ameta.searchChars || ameta.search.length;
-      const totalReplaceLines = ameta.replaceLines || replaceLines.length;
-      const totalReplaceChars = ameta.replaceChars || ameta.replace.length;
-      const maxLines = 30;
-      const searchShow = searchLines.slice(0, maxLines);
-      const replaceShow = replaceLines.slice(0, maxLines);
-      let diffLines = "";
-      searchShow.forEach((l) => {
-        diffLines += `<div class="ptool-diff-line ptool-diff-del"><span class="ptool-diff-sign">-</span><span class="ptool-diff-code">${escapeHtml(l)}</span></div>`;
-      });
-      if (totalSearchLines > maxLines)
-        diffLines += `<div class="ptool-diff-line ptool-diff-del ptool-diff-ellipsis"><span class="ptool-diff-sign"> </span><span class="ptool-diff-code">… ${totalSearchLines - maxLines} more lines (${totalSearchLines} lines · ${totalSearchChars.toLocaleString()} chars total)</span></div>`;
-      diffLines += `<div class="ptool-diff-separator"></div>`;
-      replaceShow.forEach((l) => {
-        diffLines += `<div class="ptool-diff-line ptool-diff-add"><span class="ptool-diff-sign">+</span><span class="ptool-diff-code">${escapeHtml(l)}</span></div>`;
-      });
-      if (totalReplaceLines > maxLines)
-        diffLines += `<div class="ptool-diff-line ptool-diff-add ptool-diff-ellipsis"><span class="ptool-diff-sign"> </span><span class="ptool-diff-code">… ${totalReplaceLines - maxLines} more lines (${totalReplaceLines} lines · ${totalReplaceChars.toLocaleString()} chars total)</span></div>`;
-      detailHtml = `<div class="ptool-diff-preview">${diffLines}</div>`;
-    } else if (ameta.command != null) {
-      // run_command — show command preview
-      const cmdText = escapeHtml(ameta.command || "");
-      const cmdDescHtml = ameta.description
-        ? `<div class="ptool-cmd-desc">${escapeHtml(ameta.description)}</div>`
-        : "";
-      detailHtml = `<div class="ptool-diff-preview">${cmdDescHtml}<pre class="ptool-cmd-code" style="margin:0;padding:8px 12px;font-size:12px;"><code>$ ${cmdText}</code></pre></div>`;
-    } else if (ameta.contentPreview) {
-      const previewLines = (ameta.contentPreview || "")
-        .split("\n")
-        .slice(0, 12);
-      let previewContent = previewLines
-        .map(
-          (l) =>
-            `<div class="ptool-diff-line ptool-diff-add"><span class="ptool-diff-sign">+</span><span class="ptool-diff-code">${escapeHtml(l)}</span></div>`,
-        )
-        .join("");
-      if ((ameta.contentPreview || "").split("\n").length > 12)
-        previewContent += `<div class="ptool-diff-line ptool-diff-add ptool-diff-ellipsis"><span class="ptool-diff-sign"> </span><span class="ptool-diff-code">… more lines</span></div>`;
-      detailHtml = `<div class="ptool-diff-preview">${previewContent}<div class="ptool-write-meta">${ameta.contentLines || "?"} lines · ${(ameta.contentChars || 0).toLocaleString()} chars</div></div>`;
-    }
-    return `<div class="ptool-pending-wrap">
+    });
+    if ((ameta.editCount || edits.length) > edits.length)
+      batchHtml += `<div class="ptool-batch-more">… and ${ameta.editCount - edits.length} more edits</div>`;
+    detailHtml = `<div class="ptool-batch-preview">${batchHtml}</div>`;
+  } else if (ameta.search != null && ameta.replace != null) {
+    // Single apply_diff — show search→replace preview with line-by-line diff
+    const searchLines = (ameta.search || "").split("\n");
+    const replaceLines = (ameta.replace || "").split("\n");
+    const totalSearchLines = ameta.searchLines || searchLines.length;
+    const totalSearchChars = ameta.searchChars || ameta.search.length;
+    const totalReplaceLines = ameta.replaceLines || replaceLines.length;
+    const totalReplaceChars = ameta.replaceChars || ameta.replace.length;
+    const maxLines = 30;
+    const searchShow = searchLines.slice(0, maxLines);
+    const replaceShow = replaceLines.slice(0, maxLines);
+    let diffLines = "";
+    searchShow.forEach((l) => {
+      diffLines += `<div class="ptool-diff-line ptool-diff-del"><span class="ptool-diff-sign">-</span><span class="ptool-diff-code">${escapeHtml(l)}</span></div>`;
+    });
+    if (totalSearchLines > maxLines)
+      diffLines += `<div class="ptool-diff-line ptool-diff-del ptool-diff-ellipsis"><span class="ptool-diff-sign"> </span><span class="ptool-diff-code">… ${totalSearchLines - maxLines} more lines (${totalSearchLines} lines · ${totalSearchChars.toLocaleString()} chars total)</span></div>`;
+    diffLines += `<div class="ptool-diff-separator"></div>`;
+    replaceShow.forEach((l) => {
+      diffLines += `<div class="ptool-diff-line ptool-diff-add"><span class="ptool-diff-sign">+</span><span class="ptool-diff-code">${escapeHtml(l)}</span></div>`;
+    });
+    if (totalReplaceLines > maxLines)
+      diffLines += `<div class="ptool-diff-line ptool-diff-add ptool-diff-ellipsis"><span class="ptool-diff-sign"> </span><span class="ptool-diff-code">… ${totalReplaceLines - maxLines} more lines (${totalReplaceLines} lines · ${totalReplaceChars.toLocaleString()} chars total)</span></div>`;
+    detailHtml = `<div class="ptool-diff-preview">${diffLines}</div>`;
+  } else if (ameta.command != null) {
+    // run_command — show command preview
+    const cmdText = escapeHtml(ameta.command || "");
+    const cmdDescHtml = ameta.description
+      ? `<div class="ptool-cmd-desc">${escapeHtml(ameta.description)}</div>`
+      : "";
+    detailHtml = `<div class="ptool-diff-preview">${cmdDescHtml}<pre class="ptool-cmd-code" style="margin:0;padding:8px 12px;font-size:12px;"><code>$ ${cmdText}</code></pre></div>`;
+  } else if (ameta.contentPreview) {
+    const previewLines = (ameta.contentPreview || "")
+      .split("\n")
+      .slice(0, 12);
+    let previewContent = previewLines
+      .map(
+        (l) =>
+          `<div class="ptool-diff-line ptool-diff-add"><span class="ptool-diff-sign">+</span><span class="ptool-diff-code">${escapeHtml(l)}</span></div>`,
+      )
+      .join("");
+    if ((ameta.contentPreview || "").split("\n").length > 12)
+      previewContent += `<div class="ptool-diff-line ptool-diff-add ptool-diff-ellipsis"><span class="ptool-diff-sign"> </span><span class="ptool-diff-code">… more lines</span></div>`;
+    detailHtml = `<div class="ptool-diff-preview">${previewContent}<div class="ptool-write-meta">${ameta.contentLines || "?"} lines · ${(ameta.contentChars || 0).toLocaleString()} chars</div></div>`;
+  }
+  return `<div class="ptool-pending-wrap">
          <div class="ptool-line ptool-pending">
            <span class="ptool-icon">${svg}</span>
            <span class="ptool-text">${q}</span>
@@ -1959,35 +2174,35 @@ function _renderUnifiedToolLine(round, isSearching) {
            <button class="ptool-reject-btn" onclick="event.stopPropagation();resolveWriteApproval('${aid}',false)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg> Reject</button>
          </div>
        </div>`;
-  }
+}
 
-  // ★ Timer Watcher: render collapsible poll checks
-  if ((round._timerPolls && round._timerPolls.length > 0) || round._timerSkipCount) {
-    return _renderTimerWatcherBlock(round, svg);
+// Timer tool with "searching" status but no polls yet — show initial waiting
+// After reconnection, backend now includes _timerPolls in state snapshots,
+// so this state should be brief (only before the first poll fires).
+function _renderTimerWaitingRow(round, ctx) {
+  const { q } = ctx;
+  if (!(round.toolName === "timer_create" && round.status === "searching" && !round._timerPolls)) return "";
+  // ★ Try to recover timer polls from the API if timerId is known
+  if (round._timerTimerId && !round._timerPollsRecoveryAttempted) {
+    round._timerPollsRecoveryAttempted = true;
+    _recoverTimerPolls(round);
   }
-  // Timer tool with "searching" status but no polls yet — show initial waiting
-  // After reconnection, backend now includes _timerPolls in state snapshots,
-  // so this state should be brief (only before the first poll fires).
-  if (round.toolName === "timer_create" && round.status === "searching" && !round._timerPolls) {
-    // ★ Try to recover timer polls from the API if timerId is known
-    if (round._timerTimerId && !round._timerPollsRecoveryAttempted) {
-      round._timerPollsRecoveryAttempted = true;
-      _recoverTimerPolls(round);
-    }
-    return `<div class="ptool-line ptool-active">
+  return `<div class="ptool-line ptool-active">
          <span class="ptool-icon">${Icon('timer')}</span>
          <span class="ptool-text">${q || escapeHtml(t('timerBlock.watcherTitle'))}</span>
          <span class="ptool-badge ptool-badge-warn">${escapeHtml(t('timerBlock.waitingFirstPoll'))}</span>
          <span class="ptool-spinner"></span>
        </div>`;
-  }
+}
 
-  // ★ Interactive stdin: subprocess is waiting for user keyboard input
-  if (round.status === "awaiting_stdin" && round.stdinId) {
-    const cmdText = escapeHtml(round.query || round.stdinCommand || "");
-    const promptText = escapeHtml(round.stdinPrompt || "");
-    const sid = escapeHtml(round.stdinId);
-    return `<div class="ptool-cmd-block ptool-cmd-stdin" data-rn="${round.roundNum}">
+// ★ Interactive stdin: subprocess is waiting for user keyboard input
+function _renderStdinBlock(round, ctx) {
+  const { svg, rootPill } = ctx;
+  if (!(round.status === "awaiting_stdin" && round.stdinId)) return "";
+  const cmdText = escapeHtml(round.query || round.stdinCommand || "");
+  const promptText = escapeHtml(round.stdinPrompt || "");
+  const sid = escapeHtml(round.stdinId);
+  return `<div class="ptool-cmd-block ptool-cmd-stdin" data-rn="${round.roundNum}">
          <div class="ptool-cmd-header">
            <span class="ptool-cmd-icon">${svg}</span>
            ${rootPill}
@@ -2012,51 +2227,66 @@ function _renderUnifiedToolLine(round, isSearching) {
            </div>
          </div>
        </div>`;
-  }
+}
 
-  // ★ Interrupted — the task was aborted (Stop) while this tool round was
-  //   still in-flight. The backend dangling-round sweep
-  //   (orchestrator._finalize_dangling_tool_rounds) stamps status='aborted'
-  //   on rounds the abort short-circuit left in 'searching'. Render a static
-  //   "interrupted" affordance — NO spinner — so it never shows "Running…"
-  //   live or after reload. Real results (if any) fall through to the normal
-  //   done renderers below, since the sweep only marks result-less rounds.
-  if (round.status === "aborted" && !(round.results && round.results.length && !meta.interrupted)) {
-    const cmdText = escapeHtml(round.query || meta.title || td.label || round.toolName || "");
-    return `<div class="ptool-line ptool-interrupted" data-rn="${round.roundNum}">
+// ★ Interrupted — the task was aborted (Stop) while this tool round was
+//   still in-flight. The backend dangling-round sweep
+//   (orchestrator._finalize_dangling_tool_rounds) stamps status='aborted'
+//   on rounds the abort short-circuit left in 'searching'. Render a static
+//   "interrupted" affordance — NO spinner — so it never shows "Running…"
+//   live or after reload. Real results (if any) fall through to the normal
+//   done renderers below, since the sweep only marks result-less rounds.
+function _renderAbortedRow(round, ctx) {
+  const { svg, td, meta, rootPill } = ctx;
+  if (!(round.status === "aborted" && !(round.results && round.results.length && !meta.interrupted))) return "";
+  const cmdText = escapeHtml(round.query || meta.title || td.label || round.toolName || "");
+  return `<div class="ptool-line ptool-interrupted" data-rn="${round.roundNum}">
          <span class="ptool-icon">${svg}</span>
          ${rootPill}
          <span class="ptool-text">${cmdText}</span>
          <span class="ptool-badge ptool-badge-interrupted">interrupted</span>
        </div>`;
-  }
+}
 
-  if (isSearching) {
-    // ★ run_command / code_exec: show running state with full command.
-    //   If streaming output has started arriving via tool_progress events,
-    //   render it live inside the block so the user can follow along.
-    if (round.toolName === "run_command" || round.toolName === "code_exec") {
-      const cmdText = escapeHtml(round.query || "");
-      let _cmdDesc = "";
-      try {
-        const _a = typeof round.toolArgs === "string" ? JSON.parse(round.toolArgs) : (round.toolArgs || {});
-        _cmdDesc = (_a && _a.description) || "";
-      } catch (_e) { /* malformed toolArgs — skip description */ }
-      const descInlineHtml = _cmdDesc
-        ? `<span class="ptool-cmd-desc-inline" title="${escapeHtml(_cmdDesc)}">${escapeHtml(_cmdDesc)}</span>`
-        : "";
-      const partial = typeof round._partialOutput === "string" ? round._partialOutput : "";
-      let liveOutHtml = "";
-      if (partial) {
-        // Cap the live-view length so the DOM stays snappy on very chatty
-        // commands; the authoritative full output lands in meta.output on done.
-        const MAX_LIVE = 20000;
-        const shown = partial.length > MAX_LIVE
-          ? ("… [" + (partial.length - MAX_LIVE).toLocaleString() + " earlier chars elided] …\n" + partial.slice(-MAX_LIVE))
-          : partial;
-        liveOutHtml = `<pre class="ptool-cmd-output ptool-cmd-output-live"><code>${escapeHtml(shown)}</code></pre>`;
-      }
-      return `<div class="ptool-cmd-block ptool-cmd-running">
+// In-flight ("searching") states: running command with live output, search
+// orbit animation, or the generic active row.
+function _renderSearchingRow(round, ctx) {
+  const { svg, q, rootPill, cmdRootPill, repairedBadge, isSearching } = ctx;
+  if (!isSearching) return "";
+  // ★ run_command / code_exec: show running state with full command.
+  //   If streaming output has started arriving via tool_progress events,
+  //   render it live inside the block so the user can follow along.
+  if (round.toolName === "run_command" || round.toolName === "code_exec") {
+    const cmdText = escapeHtml(round.query || "");
+    let _cmdDesc = "";
+    try {
+      const _a = typeof round.toolArgs === "string" ? JSON.parse(round.toolArgs) : (round.toolArgs || {});
+      _cmdDesc = (_a && _a.description) || "";
+    } catch (_e) { /* malformed toolArgs — skip description */ }
+    const descInlineHtml = _cmdDesc
+      ? `<span class="ptool-cmd-desc-inline" title="${escapeHtml(_cmdDesc)}">${escapeHtml(_cmdDesc)}</span>`
+      : "";
+    const partial = typeof round._partialOutput === "string" ? round._partialOutput : "";
+    let liveOutHtml = "";
+    if (partial) {
+      // Cap the live-view length so the DOM stays snappy on very chatty
+      // commands; the authoritative full output lands in meta.output on done.
+      const MAX_LIVE = 20000;
+      const shown = partial.length > MAX_LIVE
+        ? ("… [" + (partial.length - MAX_LIVE).toLocaleString() + " earlier chars elided] …\n" + partial.slice(-MAX_LIVE))
+        : partial;
+      liveOutHtml = `<pre class="ptool-cmd-output ptool-cmd-output-live"><code>${escapeHtml(shown)}</code></pre>`;
+    }
+    /* ★ Live QR — the scan-to-login seam. A device-code / QR login command
+     * PRINTS the code and then BLOCKS waiting for the scan, so this running
+     * state is exactly when the user needs to scan it. The art in the live
+     * <pre> above is unscannable by construction (that pane is `pre-wrap` +
+     * `word-break: break-all`, which re-wraps the module rows), so the
+     * backend's recovered bitmap is drawn here, before the pane. While the
+     * round is in flight the descriptors live on the round itself (there is
+     * no `results` entry until tool_result lands). */
+    const liveQrHtml = _renderQrStrip(round);
+    return `<div class="ptool-cmd-block ptool-cmd-running">
            <div class="ptool-cmd-header">
              <span class="ptool-cmd-icon">${svg}</span>
              ${cmdRootPill}
@@ -2065,124 +2295,189 @@ function _renderUnifiedToolLine(round, isSearching) {
              <span class="ptool-spinner"></span>
            </div>
            <pre class="ptool-cmd-code"><code>$ ${cmdText}</code></pre>
-           ${liveOutHtml}
-         </div>`;
-    }
-    // ★ Web search: show orbit animation
-    if (_isRoundSearch(round)) {
-      return `<div class="ptool-line ptool-active ptool-search-line">
+           ${liveQrHtml}${liveOutHtml}
+         </div>`;  }
+  // ★ Web search: show orbit animation
+  if (_isRoundSearch(round)) {
+    return `<div class="ptool-line ptool-active ptool-search-line">
            <span class="ptool-icon"><div class="search-orbit-container" style="width:16px;height:16px"><div class="search-orbit-center" style="inset:4px"></div><div class="search-orbit-dot" style="width:3px;height:3px;margin:-1.5px"></div><div class="search-orbit-dot" style="width:3px;height:3px;margin:-1.5px"></div><div class="search-orbit-dot" style="width:3px;height:3px;margin:-1.5px"></div></div></span>
-           <span class="ptool-text">${q}</span>
+           <span class="ptool-text">${q}</span>${_renderBatchProgress(round)}
            <span class="ptool-spinner"></span>
          </div>`;
-    }
-    return `<div class="ptool-line ptool-active">
+  }
+  return `<div class="ptool-line ptool-active">
          <span class="ptool-icon">${svg}</span>
          ${rootPill}
          <span class="ptool-text">${q}</span>
-         ${repairedBadge}
+         ${repairedBadge}${_renderBatchProgress(round)}
          <span class="ptool-spinner"></span>
        </div>`;
-  }
+}
 
-  // ★ run_command / code_exec: render as inline terminal block with collapsible output
-  if ((round.toolName === "run_command" || round.toolName === "code_exec") && (meta.command != null || meta.output != null)) {
-    const cmd = escapeHtml(meta.command || round.query || "");
-    const descInlineHtml = meta.description
-      ? `<span class="ptool-cmd-desc-inline" title="${escapeHtml(meta.description)}">${escapeHtml(meta.description)}</span>`
-      : "";
-    const output = meta.output || "";
-    const exitCode = meta.exitCode ?? "?";
-    const timedOut = meta.timedOut || false;
-    // ★ "not run": the command was refused/blocked BEFORE it executed (read-only
-    //   root, dangerous pattern, no project, pre-hook block, abort, start error).
-    //   There is no real exit code — show the cause, never the cryptic "exit ?".
-    const notRun = meta.notRun === true || exitCode === "not-run";
-    const isOk = !notRun && (exitCode === "0" || exitCode === 0);
-    const statusCls = notRun
-      ? "ptool-cmd-notrun"
-      : timedOut
-        ? "ptool-cmd-timeout"
-        : isOk
-          ? "ptool-cmd-ok"
-          : "ptool-cmd-err";
-    const notRunBadge = meta.badge && meta.badge !== `exit ${exitCode}`
-      ? meta.badge : "not run";
-    const statusLabel = notRun
-      ? `⊘ ${escapeHtml(notRunBadge)}`
-      : timedOut
-        ? "timeout"
-        : isOk
-          ? "✓ done"
-          : `✗ exit ${exitCode}`;
-    // For a not-run command the reason IS the message — surface it inline
-    // (not hidden behind a collapse toggle) so the user sees why immediately.
-    const reason = notRun ? (meta.reason || output || "") : "";
-    let outputHtml = "";
-    if (notRun && reason) {
-      outputHtml = `<div class="ptool-cmd-reason">${escapeHtml(reason)}</div>`;
-    } else if (output) {
-      outputHtml = `<div class="ptool-cmd-output-wrap">
+/* ★ Batch per-item progress pill (pt_67ffc2b7).
+ *
+ * A batch call — web_search(queries=[a,b,c]) / fetch_url(urls=[…]) — is ONE
+ * tool round, so before this the row showed "3 searches" + a spinner and
+ * nothing else until ALL of them returned. A 2s query sitting beside a 40s one
+ * was indistinguishable from three slow ones, which is precisely the "I can't
+ * tell where the lag is" complaint.
+ *
+ * Renders nothing for a non-batch call, so the single-query path (the
+ * overwhelmingly common one) is visually unchanged. */
+function _renderBatchProgress(round) {
+  if (!round || round._batchTotal == null) return "";
+  const total = Number(round._batchTotal) || 0;
+  if (total <= 1) return "";           // a 1-item "batch" adds no information
+  const done = Number(round._batchDone) || 0;
+  const failed = Number(round._batchFailed) || 0;
+  const failHtml = failed
+    ? `<span class="ptool-batch-failed" title="${escapeHtml(String(failed))} failed">${escapeHtml(String(failed))}✗</span>`
+    : "";
+  return `<span class="ptool-batch-progress" title="${escapeHtml(String(done))}/${escapeHtml(String(total))}">${escapeHtml(String(done))}/${escapeHtml(String(total))}${failHtml}</span>`;
+}
+
+// ★ Scannable QR recovered from terminal output (meta.qrImages, attached by
+//   lib/qr.py via the shared finalize chokepoint). A QR printed as block art
+//   is unscannable in the output <pre> — that pane is `white-space: pre-wrap`
+//   + `word-break: break-all`, which re-wraps the module rows and destroys
+//   the grid — so the backend reconstructs a real bitmap and we surface it
+//   here, ABOVE the collapsed output, because the whole point is that the
+//   user must be able to scan it without hunting for a toggle.
+//
+//   Takes any object carrying `qrImages`, because the descriptors live in two
+//   places across a round's life: on the ROUND while the command is still
+//   running (tool_progress delivers them before any `results` exists), and on
+//   the RESULT meta once tool_result lands. Both callers pass what they have.
+function _renderQrStrip(meta) {
+  const qrs = Array.isArray(meta.qrImages)
+    ? meta.qrImages.filter((d) => d && d.uri) : [];
+  if (!qrs.length) return "";
+  const tiles = qrs.map((d) => {
+    const cap = escapeHtml(d.filename || "qr.png");
+    return `<figure class="ptool-qr-tile">
+             <img src="${escapeHtml(d.uri)}" alt="${cap}" loading="lazy"
+                  onclick="event.stopPropagation();_openImageFullscreen(this.src)" />
+           </figure>`;
+  }).join("");
+  // NOTE: t()'s second argument is a PARAMS map for {placeholder} substitution,
+  // NOT a fallback string — passing prose there does nothing and the raw key
+  // ("project.qrScan") is what reaches the user when the key is undefined.
+  const label = qrs.length > 1
+    ? `${qrs.length} ${escapeHtml(t("project.qrScanMulti"))}`
+    : escapeHtml(t("project.qrScan"));
+  return `<div class="ptool-qr-strip">
+           <div class="ptool-qr-label">${label}</div>
+           <div class="ptool-qr-grid">${tiles}</div>
+         </div>`;
+}
+
+// ★ run_command / code_exec: render as inline terminal block with collapsible output
+function _renderCmdDoneBlock(round, ctx) {
+  const { svg, meta, cmdRootPill } = ctx;
+  if (!((round.toolName === "run_command" || round.toolName === "code_exec") && (meta.command != null || meta.output != null))) return "";
+  const cmd = escapeHtml(meta.command || round.query || "");
+  const descInlineHtml = meta.description
+    ? `<span class="ptool-cmd-desc-inline" title="${escapeHtml(meta.description)}">${escapeHtml(meta.description)}</span>`
+    : "";
+  const output = meta.output || "";
+  const exitCode = meta.exitCode ?? "?";
+  const timedOut = meta.timedOut || false;
+  // ★ "not run": the command was refused/blocked BEFORE it executed (read-only
+  //   root, dangerous pattern, no project, pre-hook block, abort, start error).
+  //   There is no real exit code — show the cause, never the cryptic "exit ?".
+  const notRun = meta.notRun === true || exitCode === "not-run";
+  const isOk = !notRun && (exitCode === "0" || exitCode === 0);
+  const statusCls = notRun
+    ? "ptool-cmd-notrun"
+    : timedOut
+      ? "ptool-cmd-timeout"
+      : isOk
+        ? "ptool-cmd-ok"
+        : "ptool-cmd-err";
+  const notRunBadge = meta.badge && meta.badge !== `exit ${exitCode}`
+    ? meta.badge : "not run";
+  const statusLabel = notRun
+    ? `⊘ ${escapeHtml(notRunBadge)}`
+    : timedOut
+      ? "timeout"
+      : isOk
+        ? "✓ done"
+        : `✗ exit ${exitCode}`;
+  // For a not-run command the reason IS the message — surface it inline
+  // (not hidden behind a collapse toggle) so the user sees why immediately.
+  const reason = notRun ? (meta.reason || output || "") : "";
+  const qrStripHtml = _renderQrStrip(meta);
+  let outputHtml = "";
+  if (notRun && reason) {
+    outputHtml = `<div class="ptool-cmd-reason">${escapeHtml(reason)}</div>`;
+  } else if (output) {
+    outputHtml = `<div class="ptool-cmd-output-wrap">
            <div class="ptool-cmd-toggle" onclick="event.stopPropagation();var w=this.parentElement;w.classList.toggle('expanded');this.textContent=w.classList.contains('expanded')?'▾ Collapse':'▸ Show output';">▸ Show output</div>
            <pre class="ptool-cmd-output"><code>${escapeHtml(output)}</code></pre>
          </div>`;
-    }
-    return `<div class="ptool-cmd-block ${statusCls}" data-rn="${round.roundNum}">
+  }
+  return `<div class="ptool-cmd-block ${statusCls}" data-rn="${round.roundNum}">
          <div class="ptool-cmd-header">
            <span class="ptool-cmd-icon">${svg}</span>
            ${cmdRootPill}
            ${descInlineHtml}
            <span class="ptool-cmd-status">${statusLabel}</span>
-           ${_rowModelViewBtn(round)}
+           ${_rowRightControls(round)}
          </div>
          <pre class="ptool-cmd-code"><code>$ ${cmd}</code></pre>
-         ${outputHtml}
+         ${qrStripHtml}${outputHtml}
        </div>`;
-  }
+}
 
-  // ★ browser_execute_js — render as an inline code block (JS in, result out),
-  //   mirroring the run_command terminal block. A cramped one-line "12165686:
-  //   (() => {…" row is unreadable; show the full snippet + collapsible result.
-  if (round.toolName === "browser_execute_js") {
-    let jsCode = "";
-    let jsDesc = "";
-    try {
-      const a = typeof round.toolArgs === "string" ? JSON.parse(round.toolArgs) : (round.toolArgs || {});
-      jsCode = (a && a.code) || "";
-      jsDesc = (a && a.description) || "";
-    } catch (_e) { /* malformed toolArgs */ }
-    const isErr = meta.badge === "error";
-    const statusLabel = isErr ? "✗ error" : "✓ ok";
-    const statusCls = isErr ? "ptool-cmd-err" : "ptool-cmd-ok";
-    // The result returned to the model lives in round.toolContent.
-    const out = typeof round.toolContent === "string" ? round.toolContent : "";
-    let outputHtml = "";
-    if (out) {
-      outputHtml = `<div class="ptool-cmd-output-wrap">
+// ★ browser_execute_js — render as an inline code block (JS in, result out),
+//   mirroring the run_command terminal block. A cramped one-line "12165686:
+//   (() => {…" row is unreadable; show the full snippet + collapsible result.
+function _renderBrowserExecJsBlock(round, ctx) {
+  const { svg, meta, rootPill } = ctx;
+  if (!(round.toolName === "browser_execute_js")) return "";
+  let jsCode = "";
+  let jsDesc = "";
+  try {
+    const a = typeof round.toolArgs === "string" ? JSON.parse(round.toolArgs) : (round.toolArgs || {});
+    jsCode = (a && a.code) || "";
+    jsDesc = (a && a.description) || "";
+  } catch (_e) { /* malformed toolArgs */ }
+  const isErr = meta.badge === "error";
+  const statusLabel = isErr ? "✗ error" : "✓ ok";
+  const statusCls = isErr ? "ptool-cmd-err" : "ptool-cmd-ok";
+  // The result returned to the model lives in round.toolContent.
+  const out = typeof round.toolContent === "string" ? round.toolContent : "";
+  let outputHtml = "";
+  if (out) {
+    outputHtml = `<div class="ptool-cmd-output-wrap">
            <div class="ptool-cmd-toggle" onclick="event.stopPropagation();var w=this.parentElement;w.classList.toggle('expanded');this.textContent=w.classList.contains('expanded')?'▾ Collapse':'▸ Show result';">▸ Show result</div>
            <pre class="ptool-cmd-output"><code>${escapeHtml(out)}</code></pre>
          </div>`;
-    }
-    const descHtml = jsDesc
-      ? `<div class="ptool-cmd-desc">${escapeHtml(jsDesc)}</div>`
-      : "";
-    const codeHtml = jsCode
-      ? `<pre class="ptool-cmd-code"><code>${escapeHtml(jsCode)}</code></pre>`
-      : "";
-    return `<div class="ptool-cmd-block ptool-cmd-js ${statusCls}" data-rn="${round.roundNum}">
+  }
+  const descHtml = jsDesc
+    ? `<div class="ptool-cmd-desc">${escapeHtml(jsDesc)}</div>`
+    : "";
+  const codeHtml = jsCode
+    ? `<pre class="ptool-cmd-code"><code>${escapeHtml(jsCode)}</code></pre>`
+    : "";
+  return `<div class="ptool-cmd-block ptool-cmd-js ${statusCls}" data-rn="${round.roundNum}">
          <div class="ptool-cmd-header">
            <span class="ptool-cmd-icon">${svg}</span>
            ${rootPill}
            <span class="ptool-cmd-label">${escapeHtml(round.query || "Execute JS")}</span>
            <span class="ptool-cmd-status">${statusLabel}</span>
-           ${_rowModelViewBtn(round)}
+           ${_rowRightControls(round)}
          </div>
          ${descHtml}
          ${codeHtml}
          ${outputHtml}
        </div>`;
-  }
+}
 
+// ★ Web search / fetch — descriptive 0-result reason row, or collapsible
+//   result list (per-query grouping, vertical cards, engine breakdown).
+function _renderSearchRows(round, ctx) {
+  const { svg, q, results } = ctx;
   // ★ Web search / fetch with 0 results — show descriptive reason
   if ((_isRoundSearch(round) || _isRoundFetch(round)) && results.length === 0) {
     const diag = round.searchDiag;
@@ -2214,7 +2509,7 @@ function _renderUnifiedToolLine(round, isSearching) {
          <span class="ptool-icon">${svg}</span>
          <span class="ptool-text">${q}</span>
          <span class="ptool-badge ${badgeCls}">${badgeText}</span>
-         ${_rowModelViewBtn(round)}
+         ${_rowRightControls(round)}
          ${detailHtml}
        </div>`;
   }
@@ -2331,99 +2626,104 @@ function _renderUnifiedToolLine(round, isSearching) {
       }
     }
     return `<div class="ptool-results-block" data-rn="${round.roundNum}">
-         <div class="ptool-line ptool-results-header" onclick="if(event.target.closest('[data-tc-preview],[data-tc-preview-text]'))return;event.stopPropagation();this.parentElement.classList.toggle('expanded')">
+         <div class="ptool-line ptool-results-header" onclick="if(event.target.closest('.ri-tool-anchor'))return;event.stopPropagation();this.parentElement.classList.toggle('expanded')">
            <span class="ptool-icon">${svg}</span>
            <span class="ptool-text">${q}</span>
            ${verts.length ? (()=>{const doms=[...new Set(verts.map(v=>v.domain||'').filter(Boolean))];return `<span class="ptool-badge vertical-badge" title="Vertical domain data">vertical: ${escapeHtml(doms.join(' · ') || 'auto')}</span>`;})() : ''}
            <span class="ptool-badge ptool-badge-info">${results.length} result${results.length !== 1 ? "s" : ""}</span>
-           ${_rowModelViewBtn(round)}
+           ${_rowRightControls(round)}
            <span class="ptool-results-toggle">▼</span>
          </div>
          <div class="ptool-results-content">${verticalHtml}${items}${engineBkdnHtml}</div>
        </div>`;
   }
+  return "";
+}
 
-  // ★ read_files / inspect_image image(s): render inline thumbnails when the
-  //   backend attached data URIs (meta.imageDataUris). Each descriptor carries
-  //   a full data: URL the browser can render directly. inspect_image is the
-  //   zoom/rotate/crop viewer — it gets a distinct accent + an "ops" chip
-  //   describing the transform (e.g. "crop, 2×").
-  if ((round.toolName === "read_files" || round.toolName === "inspect_image" || round.toolName === "browser_screenshot") &&
-      Array.isArray(meta.imageDataUris) && meta.imageDataUris.length) {
-    const imgs = meta.imageDataUris.filter((d) => d && d.uri);
-    if (imgs.length) {
-      const isInspect = round.toolName === "inspect_image";
-      const multi = imgs.length > 1;
-      const tiles = imgs.map((d) => {
-        const cap = escapeHtml(d.filename || d.format || "");
-        return `<figure class="rf-img-tile">
+// ★ read_files / inspect_image image(s): render inline thumbnails when the
+//   backend attached data URIs (meta.imageDataUris). Each descriptor carries
+//   a full data: URL the browser can render directly. inspect_image is the
+//   zoom/rotate/crop viewer — it gets a distinct accent + an "ops" chip
+//   describing the transform (e.g. "crop, 2×").
+function _renderReadImagesBlock(round, ctx) {
+  const { svg, q, meta } = ctx;
+  if (!((round.toolName === "read_files" || round.toolName === "inspect_image" || round.toolName === "browser_screenshot") &&
+      Array.isArray(meta.imageDataUris) && meta.imageDataUris.length)) return "";
+  const imgs = meta.imageDataUris.filter((d) => d && d.uri);
+  if (!imgs.length) return "";
+  const isInspect = round.toolName === "inspect_image";
+  const multi = imgs.length > 1;
+  const tiles = imgs.map((d) => {
+    const cap = escapeHtml(d.filename || d.format || "");
+    return `<figure class="rf-img-tile">
              <img src="${escapeHtml(d.uri)}" alt="${cap}" loading="lazy"
                   onclick="_openImageFullscreen(this.src)" />
              ${cap ? `<figcaption class="rf-img-cap" title="${cap}">${cap}</figcaption>` : ""}
            </figure>`;
-      }).join("");
-      // inspect_image: prefer the ops badge (crop/zoom/rotate); read_files
-      // multi: image count; else fall back to the generic meta badge.
-      const opsChip = isInspect && meta.inspectOps
-        ? `<span class="ptool-badge rf-inspect-chip" title="${escapeHtml(_localizeInspectOps(t, meta.inspectOps, "title"))}">${escapeHtml(_localizeInspectOps(t, meta.inspectOps))}</span>`
-        : "";
-      const countBadge = multi
-        ? `<span class="ptool-badge ptool-badge-info">${imgs.length} images</span>`
-        : (!isInspect && meta.badge ? `<span class="ptool-badge ptool-badge-info">${escapeHtml(meta.badge)}</span>` : "");
-      return `<div class="ptool-readimg-block${isInspect ? " ptool-inspectimg-block" : ""}" data-rn="${round.roundNum}">
+  }).join("");
+  // inspect_image: prefer the ops badge (crop/zoom/rotate); read_files
+  // multi: image count; else fall back to the generic meta badge.
+  const opsChip = isInspect && meta.inspectOps
+    ? `<span class="ptool-badge rf-inspect-chip" title="${escapeHtml(_localizeInspectOps(t, meta.inspectOps, "title"))}">${escapeHtml(_localizeInspectOps(t, meta.inspectOps))}</span>`
+    : "";
+  const countBadge = multi
+    ? `<span class="ptool-badge ptool-badge-info">${imgs.length} images</span>`
+    : (!isInspect && meta.badge ? `<span class="ptool-badge ptool-badge-info">${escapeHtml(meta.badge)}</span>` : "");
+  return `<div class="ptool-readimg-block${isInspect ? " ptool-inspectimg-block" : ""}" data-rn="${round.roundNum}">
            <div class="ptool-line ptool-readimg-header">
              <span class="ptool-icon">${svg}</span>
              <span class="ptool-text">${q}</span>
              ${opsChip}
              ${countBadge}
-             ${_rowModelViewBtn(round)}
+             ${_rowRightControls(round)}
            </div>
            <div class="rf-img-grid${multi ? " rf-img-grid-multi" : ""}${isInspect ? " rf-img-grid-inspect" : ""}">${tiles}</div>
          </div>`;
-    }
-  }
+}
 
-  // ★ Image generation / editing: render inline image card.
-  //   The two functions are visually distinguished by a mode theme:
-  //   • generate → magenta "Generated" theme + framed-photo icon
-  //   • edit     → cyan "Edited" theme + wand icon + before→after strip
-  if (_isRoundImageGen(round)) {
-    const isEdit = meta.imageMode === "edit";
-    const modeCls = isEdit ? "ig-mode-edit" : "ig-mode-generate";
-    const modeChip = isEdit
-      ? `<span class="ig-mode-chip ig-mode-chip-edit" title="Edited an existing image">${_imageEditChipSvg}Edited</span>`
-      : `<span class="ig-mode-chip ig-mode-chip-gen" title="Generated from a text prompt">${_imageGenChipSvg}Generated</span>`;
-    const srcUrl = meta.imageSourceUrl || "";
-    const imgUri = meta.imageDataUri || "";
-    const imgErr = meta.imageError || "";
-    const prompt = meta.imagePrompt || escapeHtml(round.query || "").replace(/^🎨\s*Generating[^:]*:\s*/i, "");
-    const imgAR = meta.imageAspectRatio || "";
-    const imgRes = meta.imageResolution || "";
-    const paramsBadges = (imgAR || imgRes)
-      ? `<span class="ptool-badge ptool-badge-info ig-params">${imgAR ? escapeHtml(imgAR) : ""}${imgAR && imgRes ? " · " : ""}${imgRes ? escapeHtml(imgRes) : ""}</span>`
+// ★ Image generation / editing: render inline image card.
+//   The two functions are visually distinguished by a mode theme:
+//   • generate → magenta "Generated" theme + framed-photo icon
+//   • edit     → cyan "Edited" theme + wand icon + before→after strip
+function _renderImageGenBlock(round, ctx) {
+  const { svg, q, meta } = ctx;
+  if (!_isRoundImageGen(round)) return "";
+  const isEdit = meta.imageMode === "edit";
+  const modeCls = isEdit ? "ig-mode-edit" : "ig-mode-generate";
+  const modeChip = isEdit
+    ? `<span class="ig-mode-chip ig-mode-chip-edit" title="Edited an existing image">${_imageEditChipSvg}Edited</span>`
+    : `<span class="ig-mode-chip ig-mode-chip-gen" title="Generated from a text prompt">${_imageGenChipSvg}Generated</span>`;
+  const srcUrl = meta.imageSourceUrl || "";
+  const imgUri = meta.imageDataUri || "";
+  const imgErr = meta.imageError || "";
+  const prompt = meta.imagePrompt || escapeHtml(round.query || "").replace(/^🎨\s*Generating[^:]*:\s*/i, "");
+  const imgAR = meta.imageAspectRatio || "";
+  const imgRes = meta.imageResolution || "";
+  const paramsBadges = (imgAR || imgRes)
+    ? `<span class="ptool-badge ptool-badge-info ig-params">${imgAR ? escapeHtml(imgAR) : ""}${imgAR && imgRes ? " · " : ""}${imgRes ? escapeHtml(imgRes) : ""}</span>`
+    : "";
+  if (imgUri) {
+    const projPath = meta.imageProjectPath || "";
+    const svgUrl = meta.svgSavedUrl || "";
+    const svgPath = meta.svgProjectPath || "";
+    const hasSvg = !!(svgUrl || svgPath);
+    const svgBadge = hasSvg
+      ? `<span class="ptool-badge ptool-badge-info ig-svg-badge" title="${escapeHtml("SVG version generated" + (svgPath ? ": " + svgPath : ""))}">SVG</span>`
       : "";
-    if (imgUri) {
-      const projPath = meta.imageProjectPath || "";
-      const svgUrl = meta.svgSavedUrl || "";
-      const svgPath = meta.svgProjectPath || "";
-      const hasSvg = !!(svgUrl || svgPath);
-      const svgBadge = hasSvg
-        ? `<span class="ptool-badge ptool-badge-info ig-svg-badge" title="${escapeHtml("SVG version generated" + (svgPath ? ": " + svgPath : ""))}">SVG</span>`
-        : "";
-      const svgBtn = svgUrl
-        ? `<button class="ig-action-btn" onclick="event.stopPropagation();window.open('${escapeHtml(svgUrl)}','_blank')" title="${escapeHtml("Open SVG" + (svgPath ? " — " + svgPath : ""))}">SVG</button>`
-        : "";
-      const pathBadges = [
-        projPath ? `<span class="ig-path-chip" title="Saved to project: ${escapeHtml(projPath)}"><span class="ig-path-icon">${Icon('image', 12)}</span>${escapeHtml(projPath)}</span>` : "",
-        svgPath ? `<span class="ig-path-chip ig-path-chip-svg" title="SVG saved to project: ${escapeHtml(svgPath)}"><span class="ig-path-icon">⬡</span>${escapeHtml(svgPath)}</span>` : "",
-      ].filter(Boolean).join("");
-      const pathFooter = pathBadges
-        ? `<div class="ig-path-bar">${pathBadges}</div>`
-        : "";
-      // For edits with a loadable source, show a before→after strip so the
-      // transformation is obvious at a glance; otherwise a single result image.
-      const imageArea = (isEdit && srcUrl)
-        ? `<div class="ig-beforeafter">
+    const svgBtn = svgUrl
+      ? `<button class="ig-action-btn" onclick="event.stopPropagation();window.open('${escapeHtml(svgUrl)}','_blank')" title="${escapeHtml("Open SVG" + (svgPath ? " — " + svgPath : ""))}">SVG</button>`
+      : "";
+    const pathBadges = [
+      projPath ? `<span class="ig-path-chip" title="Saved to project: ${escapeHtml(projPath)}"><span class="ig-path-icon">${Icon('image', 12)}</span>${escapeHtml(projPath)}</span>` : "",
+      svgPath ? `<span class="ig-path-chip ig-path-chip-svg" title="SVG saved to project: ${escapeHtml(svgPath)}"><span class="ig-path-icon">⬡</span>${escapeHtml(svgPath)}</span>` : "",
+    ].filter(Boolean).join("");
+    const pathFooter = pathBadges
+      ? `<div class="ig-path-bar">${pathBadges}</div>`
+      : "";
+    // For edits with a loadable source, show a before→after strip so the
+    // transformation is obvious at a glance; otherwise a single result image.
+    const imageArea = (isEdit && srcUrl)
+      ? `<div class="ig-beforeafter">
                <figure class="ig-ba-item">
                  <img src="${escapeHtml(srcUrl)}" alt="source image" loading="lazy"
                       onclick="event.stopPropagation();_openImageFullscreen(this.src)" />
@@ -2436,9 +2736,9 @@ function _renderUnifiedToolLine(round, isSearching) {
                  <figcaption>After</figcaption>
                </figure>
              </div>`
-        : `<img src="${imgUri}" alt="${escapeHtml((prompt || "").slice(0, 100))}" loading="lazy"
+      : `<img src="${imgUri}" alt="${escapeHtml((prompt || "").slice(0, 100))}" loading="lazy"
                   onclick="_openImageFullscreen(this.src)" />`;
-      return `<div class="ptool-imagegen-block ${modeCls}" data-rn="${round.roundNum}">
+    return `<div class="ptool-imagegen-block ${modeCls}" data-rn="${round.roundNum}">
            <div class="ptool-line ptool-imagegen-header">
              <span class="ptool-icon">${svg}</span>
              <span class="ptool-text">${q}</span>
@@ -2446,7 +2746,7 @@ function _renderUnifiedToolLine(round, isSearching) {
              ${paramsBadges}
              ${svgBadge}
              <span class="ptool-badge ptool-badge-ok">${escapeHtml(meta.badge || "✓ done")}</span>
-             ${_rowModelViewBtn(round)}
+             ${_rowRightControls(round)}
            </div>
            <div class="imagegen-card">
              ${imageArea}
@@ -2461,25 +2761,25 @@ function _renderUnifiedToolLine(round, isSearching) {
              ${pathFooter}
            </div>
          </div>`;
-    } else if (imgErr) {
-      return `<div class="ptool-imagegen-block ptool-imagegen-error ${modeCls}" data-rn="${round.roundNum}">
+  } else if (imgErr) {
+    return `<div class="ptool-imagegen-block ptool-imagegen-error ${modeCls}" data-rn="${round.roundNum}">
            <div class="ptool-line">
              <span class="ptool-icon">${svg}</span>
              <span class="ptool-text">${q}</span>
              ${modeChip}
              <span class="ptool-badge ptool-badge-err">failed</span>
-             ${_rowModelViewBtn(round)}
+             ${_rowRightControls(round)}
            </div>
            <div class="imagegen-error">
              <div class="ig-error-title">${isEdit ? "Image editing failed" : "Image generation failed"}</div>
              <div class="ig-error-text">${escapeHtml(imgErr)}</div>
            </div>
          </div>`;
-    }
-    // In-progress: no image yet, no error — show animated working state
-    const progressBadge = meta.badge || (isEdit ? "editing…" : "generating…");
-    const progressCls = progressBadge.includes("rate limited") ? "ptool-badge-err" : "ptool-badge-warn";
-    return `<div class="ptool-imagegen-block ptool-imagegen-loading ${modeCls}" data-rn="${round.roundNum}">
+  }
+  // In-progress: no image yet, no error — show animated working state
+  const progressBadge = meta.badge || (isEdit ? "editing…" : "generating…");
+  const progressCls = progressBadge.includes("rate limited") ? "ptool-badge-err" : "ptool-badge-warn";
+  return `<div class="ptool-imagegen-block ptool-imagegen-loading ${modeCls}" data-rn="${round.roundNum}">
          <div class="ptool-line ptool-active">
            <span class="ptool-icon">${svg}</span>
            <span class="ptool-text">${q}</span>
@@ -2489,11 +2789,122 @@ function _renderUnifiedToolLine(round, isSearching) {
            <span class="ptool-spinner"></span>
          </div>
        </div>`;
-  }
+}
 
-  // Determine badge
+/* ── Write-gate refusal presentation ─────────────────────────────────
+ * The shared-worktree guards (read-before-edit + write-freshness,
+ * lib/tasks_pkg/handlers/project.py) REFUSE a write tool call: nothing
+ * executed, the model re-reads and re-issues. The raw badge tokens
+ * ('stale', 'read first', 'partial: …', 'ref failed') are developer
+ * jargon — meaningless on a user-facing card. New rounds carry
+ * structured meta.refusal {kind, paths, skipped, proceeded}; older
+ * persisted rounds only have the badge string, still recognized below.
+ * Rendering: a localized amber badge (an interception, not a crash)
+ * with the reason as tooltip, plus an explanation card naming the
+ * file(s) and the automatic next step. */
+const _GATE_REFUSAL_BADGE_KINDS = {
+  "stale": "stale",
+  "read first": "read_first",
+  "partial: stale": "partial_stale",
+  "partial: read first": "partial_read_first",
+  "ref failed": "content_ref",
+};
+const _GATE_REFUSAL_TOOLS = ["write_file", "apply_diff", "apply_diffs", "insert_content", "insert_contents"];
+
+function _refusalInfo(round, meta) {
+  if (!round || !meta || _GATE_REFUSAL_TOOLS.indexOf(round.toolName) === -1) return null;
+  const r = meta.refusal;
+  if (r && typeof r === "object" && typeof r.kind === "string" && r.kind) {
+    return {
+      kind: r.kind,
+      paths: Array.isArray(r.paths) ? r.paths.filter(function (p) { return !!p; }) : [],
+      skipped: r.skipped | 0,
+      proceeded: r.proceeded | 0,
+    };
+  }
+  const kind = _GATE_REFUSAL_BADGE_KINDS[meta.badge];
+  return kind ? { kind: kind, paths: [], skipped: 0, proceeded: 0 } : null;
+}
+
+function _gateRefusalBadgeLabel(kind) {
+  const _t = (typeof t === "function") ? t : (k, d) => d;
+  const M = {
+    stale: ["tool.gateStaleBadge", "changed on disk"],
+    read_first: ["tool.gateReadFirstBadge", "must read first"],
+    partial_stale: ["tool.gatePartialStaleBadge", "partial · changed"],
+    partial_read_first: ["tool.gatePartialReadFirstBadge", "partial · unread"],
+    content_ref: ["tool.gateContentRefBadge", "content ref failed"],
+  };
+  const e = M[kind];
+  return e ? _t(e[0], e[1]) : kind;
+}
+
+function _gateRefusalTitle(kind, info) {
+  const _t = (typeof t === "function") ? t : (k, d) => d;
+  const M = {
+    stale: ["tool.gateStaleTitle", "Write blocked — file changed on disk"],
+    read_first: ["tool.gateReadFirstTitle", "Edit blocked — file not read in this conversation yet"],
+    partial_stale: ["tool.gatePartialStaleTitle", "{skipped} edit(s) blocked — target file(s) changed on disk"],
+    partial_read_first: ["tool.gatePartialReadFirstTitle", "{skipped} edit(s) blocked — must read first"],
+    content_ref: ["tool.gateContentRefTitle", "Write not executed — content reference failed"],
+  };
+  const e = M[kind];
+  if (!e) return "";
+  return _t(e[0], e[1]).split("{skipped}").join(String((info && info.skipped) || 0));
+}
+
+function _renderGateNotice(info) {
+  if (!info) return "";
+  const _t = (typeof t === "function") ? t : (k, d) => d;
+  const TEXT = {
+    stale: ["tool.gateStaleText",
+      "{paths} was modified by another conversation or process after this conversation last read/wrote it. To avoid silently overwriting their change, this write was NOT executed — the assistant will re-read the file and re-issue the edit; no action needed from you."],
+    read_first: ["tool.gateReadFirstText",
+      "The read-before-edit guard requires reading {paths} with read_files in this conversation before patching it, so patches are never built from guessed or remembered content. This edit was NOT executed — the assistant will read the file first and re-issue."],
+    partial_stale: ["tool.gatePartialStaleText",
+      "{paths} changed on disk after this conversation last read/wrote it, so {skipped} edit(s) targeting it were NOT executed; the other {proceeded} edit(s) ran normally. The blocked edits will be re-issued after a fresh read."],
+    partial_read_first: ["tool.gatePartialReadFirstText",
+      "{paths} has not been read in this conversation, so {skipped} edit(s) targeting it were NOT executed; the other {proceeded} edit(s) ran normally. The assistant will read the file and re-issue the blocked edits."],
+    content_ref: ["tool.gateContentRefText",
+      "The content_ref used by write_file points to a previous tool result that does not exist or has no content. The assistant will retry with explicit content instead."],
+  };
+  const e = TEXT[info.kind];
+  const title = _gateRefusalTitle(info.kind, info);
+  if (!e || !title) return "";
+  const pathsHtml = (info.paths || []).map(function (p) {
+    const base = p.split("/").filter(Boolean).pop() || p;
+    return `<code class="ptool-gate-note-path" title="${escapeHtml(p)}">${escapeHtml(base)}</code>`;
+  }).join(", ");
+  const targetFallback = escapeHtml(_t("tool.gateTargetGeneric", "The target file"));
+  const raw = _t(e[0], e[1])
+    .split("{paths}").join("\x00P\x00")
+    .split("{skipped}").join(String(info.skipped || 0))
+    .split("{proceeded}").join(String(info.proceeded || 0));
+  const textHtml = escapeHtml(raw).split("\x00P\x00").join(pathsHtml || targetFallback);
+  const shieldSvg = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>';
+  /* The leading \n lives INSIDE the return value so a "" (non-refusal)
+   * splice at the call site is byte-identical to not having the call at
+   * all — the tool-rounds wire-parity baseline freezes non-refusal markup. */
+  return `\n             <div class="ptool-gate-note">
+      <span class="ptool-gate-note-icon icon-box">${shieldSvg}</span>
+      <div class="ptool-gate-note-body">
+        <div class="ptool-gate-note-title">${escapeHtml(title)}</div>
+        <div class="ptool-gate-note-text">${textHtml}</div>
+      </div>
+    </div>`;
+}
+
+// Determine the trailing badge (explicit meta.badge → token count → fetched
+// chars → generic ✓ done).
+function _computeToolBadgeHtml(round, ctx) {
+  const { meta, results } = ctx;
   let badgeHtml = "";
   if (meta.badge) {
+    const refusal = _refusalInfo(round, meta);
+    if (refusal) {
+      const tip = _gateRefusalTitle(refusal.kind, refusal);
+      badgeHtml = `<span class="ptool-badge ptool-badge-warn ptool-badge-gate"${tip ? ` title="${escapeHtml(tip)}"` : ""}>${escapeHtml(_gateRefusalBadgeLabel(refusal.kind))}</span>`;
+    } else {
     const isWrite =
       round.toolName === "write_file" || round.toolName === "apply_diff" ||
       round.toolName === "apply_diffs" || round.toolName === "insert_content" ||
@@ -2516,6 +2927,7 @@ function _renderUnifiedToolLine(round, isSearching) {
       ? "ptool-badge-ok"
       : "ptool-badge-info";
     badgeHtml = `<span class="ptool-badge ${cls}">${escapeHtml(meta.badge)}</span>`;
+    }
   } else if (round.toolTokens) {
     /* ★ Per-tool token count — emitted by lib/tasks_pkg/tool_dispatch.py
      * tool_complete event. Falls back to fetchedChars on older rounds. */
@@ -2542,25 +2954,28 @@ function _renderUnifiedToolLine(round, isSearching) {
     const elapsed = round._elapsed ? ` · ${round._elapsed}` : "";
     badgeHtml = `<span class="ptool-badge ptool-badge-ok">✓ done${elapsed}</span>`;
   }
+  return badgeHtml;
+}
 
-  /* COMPACTION LABEL (mandatory per UX directive):
-   *
-   * If this row's tool result has been replaced by a server-side
-   * compaction placeholder (round.compactionLayer is set by the
-   * `tool_compacted` SSE event), render an UNAMBIGUOUS solid-color
-   * pill that says exactly what happened. NO opacity fading, NO
-   * subtle accent strips that read as decoration — the user has to
-   * know at a glance: "this tool result is no longer in the model's
-   * view; here is the layer responsible."
-   *
-   * Layers (from compaction.py):
-   *   L0 — born too big, persisted to disk, model never saw full text
-   *   L1 — was visible once, aged out of the hot tail (60 rounds back)
-   *   L3 — replaced by an LLM-generated summary (transcript_archive)
-   *
-   * The label is placed BEFORE the tool name so it's the first thing
-   * the eye lands on, and uses solid colors at full opacity per the
-   * "no transparency" rule. */
+/* COMPACTION LABEL (mandatory per UX directive):
+ *
+ * If this row's tool result has been replaced by a server-side
+ * compaction placeholder (round.compactionLayer is set by the
+ * `tool_compacted` SSE event), render an UNAMBIGUOUS solid-color
+ * pill that says exactly what happened. NO opacity fading, NO
+ * subtle accent strips that read as decoration — the user has to
+ * know at a glance: "this tool result is no longer in the model's
+ * view; here is the layer responsible."
+ *
+ * Layers (from compaction.py):
+ *   L0 — born too big, persisted to disk, model never saw full text
+ *   L1 — was visible once, aged out of the hot tail (60 rounds back)
+ *   L3 — replaced by an LLM-generated summary (transcript_archive)
+ *
+ * The label is placed BEFORE the tool name so it's the first thing
+ * the eye lands on, and uses solid colors at full opacity per the
+ * "no transparency" rule. */
+function _renderCompactionLabel(round) {
   let compactionLabelHtml = "";
   if (round.compactionLayer) {
     const layer = round.compactionLayer;       // 'L0' | 'L1' | 'L3'
@@ -2586,125 +3001,112 @@ function _renderUnifiedToolLine(round, isSearching) {
         (reduction ? `<span class="ptool-compaction-delta">${reduction.trim()}</span>` : '') +
       `</span>`;
   }
-  // ★ create_memory / update_memory / merge_memories — collapsible,
-  //   Markdown-rendered preview of the saved memory body itself (mirrors the
-  //   apply_diff expand block). The opaque description-snippet "Preview" was
-  //   useless to users; expanding now shows the actual memory text, well-
-  //   rendered. The full body lives in round.toolArgs.body. update_memory may
-  //   omit body on a partial (name/tags-only) update — the body.trim() guard
-  //   below falls through to the normal row in that case.
-  if ((round.toolName === "create_memory" || round.toolName === "update_memory" || round.toolName === "merge_memories") && round.toolArgs) {
-    const memHtml = _renderMemoryBlock(round, svg, q, compactionLabelHtml, rootPill, badgeHtml);
-    if (memHtml) return memHtml;
-  }
+  return compactionLabelHtml;
+}
 
-  // ★ todo_write — collapsible checklist progress card (state glyphs + a slim
-  //   progress bar), rendered off the structured meta.todos the backend
-  //   attaches. Falls through to the generic line only if the list is absent.
-  if (round.toolName === "todo_write") {
-    const todoHtml = _renderTodoBlock(round, svg, q, badgeHtml);
-    if (todoHtml) return todoHtml;
-  }
-
-  // ★ write_file — collapsible inline preview of the written content,
-  //   mirroring the apply_diff expand-on-click block. The full content
-  //   lives in round.toolArgs.content; render it as added lines so the
-  //   user can review what was written instead of an opaque "Preview".
-  if (round.toolName === "write_file" && round.toolArgs) {
-    let pe = null;
-    try { pe = typeof round.toolArgs === 'string' ? JSON.parse(round.toolArgs) : round.toolArgs; } catch (_) {}
-    if (pe && typeof pe.content === 'string' && pe.content.length) {
-      const diffHtml = _renderLineDiff("", pe.content);
-      if (diffHtml) {
-        return `<details class="ptool-batch-done-block" data-rn="${round.roundNum}">
+// ★ write_file — collapsible inline preview of the written content,
+//   mirroring the apply_diff expand-on-click block. The full content
+//   lives in round.toolArgs.content; render it as added lines so the
+//   user can review what was written instead of an opaque "Preview".
+function _renderWriteFileBlock(round, ctx, badgeHtml, compactionLabelHtml) {
+  const { svg, q, rootPill, meta } = ctx;
+  if (!(round.toolName === "write_file" && round.toolArgs)) return "";
+  let pe = null;
+  try { pe = typeof round.toolArgs === 'string' ? JSON.parse(round.toolArgs) : round.toolArgs; } catch (_) {}
+  if (!(pe && typeof pe.content === 'string' && pe.content.length)) return "";
+  const diffHtml = _renderLineDiff("", pe.content);
+  if (!diffHtml) return "";
+  const gateNoticeHtml = _renderGateNotice(_refusalInfo(round, meta));
+  return `<details class="ptool-batch-done-block" data-rn="${round.roundNum}">
              <summary class="ptool-line ptool-batch-done-header">
                <span class="ptool-icon">${svg}</span>
                ${compactionLabelHtml}
                ${rootPill}
                <span class="ptool-text">${q}</span>
                ${badgeHtml}
-             </summary>
+             </summary>${gateNoticeHtml}
              <div class="ptool-batch-done-list">
                <div class="ptool-batch-done-single">${diffHtml}</div>
              </div>
            </details>`;
-      }
-    }
-  }
+}
 
-  // ★ Single apply_diff / insert_content — collapsible inline diff
-  if (!meta.editSummaries && (round.toolName === "apply_diff" || round.toolName === "insert_content") && round.toolArgs) {
-    let pe = null;
-    try { pe = typeof round.toolArgs === 'string' ? JSON.parse(round.toolArgs) : round.toolArgs; } catch (_) {}
-    if (pe && (pe.search || pe.anchor)) {
+// ★ Single apply_diff / insert_content — collapsible inline diff
+function _renderSingleDiffBlock(round, ctx, badgeHtml, compactionLabelHtml) {
+  const { svg, q, meta, rootPill } = ctx;
+  if (!(!meta.editSummaries && (round.toolName === "apply_diff" || round.toolName === "insert_content") && round.toolArgs)) return "";
+  let pe = null;
+  try { pe = typeof round.toolArgs === 'string' ? JSON.parse(round.toolArgs) : round.toolArgs; } catch (_) {}
+  if (!(pe && (pe.search || pe.anchor))) return "";
+  const isInsert = !pe.search && pe.anchor;
+  const oldText = pe.search || pe.anchor || "";
+  const newText = isInsert
+    ? ((pe.position === "before" ? (pe.content + "\n") : "") + (pe.anchor || "") + (pe.position !== "before" ? ("\n" + pe.content) : ""))
+    : (pe.replace || "");
+  const diffHtml = _renderLineDiff(oldText, newText);
+  if (!diffHtml) return "";
+  const gateNoticeHtml = _renderGateNotice(_refusalInfo(round, meta));
+  return `<details class="ptool-batch-done-block" data-rn="${round.roundNum}">
+             <summary class="ptool-line ptool-batch-done-header">
+               <span class="ptool-icon">${svg}</span>
+               ${compactionLabelHtml}
+               ${rootPill}
+               <span class="ptool-text">${q}</span>
+               ${badgeHtml}
+             </summary>${gateNoticeHtml}
+             <div class="ptool-batch-done-list">
+               <div class="ptool-batch-done-single">${diffHtml}</div>
+             </div>
+           </details>`;
+}
+
+// ★ Batch edit tools (apply_diffs / insert_contents) — collapsible per-edit list
+//   Guard on toolName: editSummaries is only meaningful for the batch edit
+//   tools. Without this guard, ANY round whose results[0] happens to carry
+//   an editSummaries array (e.g. a tool_result leaked from a sub-agent's
+//   apply_diffs grafted onto a same-roundNum run_command — see
+//   sse_handlers_tool.js roundNum fallback) renders as a batch-edit block.
+function _renderBatchEditsBlock(round, ctx, badgeHtml, compactionLabelHtml) {
+  const { svg, q, meta, rootPill } = ctx;
+  const _isBatchEditTool = round.toolName === "apply_diffs" || round.toolName === "insert_contents";
+  if (!(_isBatchEditTool && meta.editSummaries && Array.isArray(meta.editSummaries) && meta.editSummaries.length > 1)) return "";
+  const edits = meta.editSummaries;
+  let parsedEdits = null;
+  if (round.toolArgs) {
+    try {
+      const args = typeof round.toolArgs === 'string' ? JSON.parse(round.toolArgs) : round.toolArgs;
+      if (args.edits && Array.isArray(args.edits)) parsedEdits = args.edits;
+    } catch (_) {}
+  }
+  // The header already names the target file (e.g. "Patch /a/b/c.sh (2 edits)").
+  // Only repeat a per-row path when edits span DIFFERENT files, and then show
+  // just the basename — never the full absolute path, which would starve the
+  // description column down to one character per line.
+  const _multiFile = edits.some(e => (e.path || "") !== (edits[0].path || ""));
+  let itemsHtml = "";
+  edits.forEach((ed, i) => {
+    const statusIcon = ed.status === "fail"
+      ? '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>'
+      : '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
+    const statusCls = ed.status === "fail" ? "ptool-batch-fail" : "ptool-batch-ok";
+    const rawDesc = ed.description ? _stripPathPrefixFromDesc(ed.description, ed.path) : "";
+    const desc = rawDesc ? escapeHtml(rawDesc) : `Edit ${i + 1}`;
+    const fullPath = ed.path || "";
+    const baseName = fullPath ? (fullPath.split("/").filter(Boolean).pop() || fullPath) : "";
+    const pathHtml = (_multiFile && baseName)
+      ? `<span class="ptool-batch-path" title="${escapeHtml(fullPath)}">${escapeHtml(baseName)}</span>`
+      : "";
+    let diffHtml = "";
+    if (ed.status !== "fail" && parsedEdits && parsedEdits[i]) {
+      const pe = parsedEdits[i];
       const isInsert = !pe.search && pe.anchor;
       const oldText = pe.search || pe.anchor || "";
       const newText = isInsert
         ? ((pe.position === "before" ? (pe.content + "\n") : "") + (pe.anchor || "") + (pe.position !== "before" ? ("\n" + pe.content) : ""))
         : (pe.replace || "");
-      const diffHtml = _renderLineDiff(oldText, newText);
-      if (diffHtml) {
-        return `<details class="ptool-batch-done-block" data-rn="${round.roundNum}">
-             <summary class="ptool-line ptool-batch-done-header">
-               <span class="ptool-icon">${svg}</span>
-               ${compactionLabelHtml}
-               ${rootPill}
-               <span class="ptool-text">${q}</span>
-               ${badgeHtml}
-             </summary>
-             <div class="ptool-batch-done-list">
-               <div class="ptool-batch-done-single">${diffHtml}</div>
-             </div>
-           </details>`;
-      }
+      if (oldText || newText) diffHtml = _renderLineDiff(oldText, newText);
     }
-  }
-
-  // ★ Batch edit tools (apply_diffs / insert_contents) — collapsible per-edit list
-  //   Guard on toolName: editSummaries is only meaningful for the batch edit
-  //   tools. Without this guard, ANY round whose results[0] happens to carry
-  //   an editSummaries array (e.g. a tool_result leaked from a sub-agent's
-  //   apply_diffs grafted onto a same-roundNum run_command — see
-  //   sse_handlers_tool.js roundNum fallback) renders as a batch-edit block.
-  const _isBatchEditTool = round.toolName === "apply_diffs" || round.toolName === "insert_contents";
-  if (_isBatchEditTool && meta.editSummaries && Array.isArray(meta.editSummaries) && meta.editSummaries.length > 1) {
-    const edits = meta.editSummaries;
-    let parsedEdits = null;
-    if (round.toolArgs) {
-      try {
-        const args = typeof round.toolArgs === 'string' ? JSON.parse(round.toolArgs) : round.toolArgs;
-        if (args.edits && Array.isArray(args.edits)) parsedEdits = args.edits;
-      } catch (_) {}
-    }
-    // The header already names the target file (e.g. "Patch /a/b/c.sh (2 edits)").
-    // Only repeat a per-row path when edits span DIFFERENT files, and then show
-    // just the basename — never the full absolute path, which would starve the
-    // description column down to one character per line.
-    const _multiFile = edits.some(e => (e.path || "") !== (edits[0].path || ""));
-    let itemsHtml = "";
-    edits.forEach((ed, i) => {
-      const statusIcon = ed.status === "fail"
-        ? '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>'
-        : '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
-      const statusCls = ed.status === "fail" ? "ptool-batch-fail" : "ptool-batch-ok";
-      const rawDesc = ed.description ? _stripPathPrefixFromDesc(ed.description, ed.path) : "";
-      const desc = rawDesc ? escapeHtml(rawDesc) : `Edit ${i + 1}`;
-      const fullPath = ed.path || "";
-      const baseName = fullPath ? (fullPath.split("/").filter(Boolean).pop() || fullPath) : "";
-      const pathHtml = (_multiFile && baseName)
-        ? `<span class="ptool-batch-path" title="${escapeHtml(fullPath)}">${escapeHtml(baseName)}</span>`
-        : "";
-      let diffHtml = "";
-      if (ed.status !== "fail" && parsedEdits && parsedEdits[i]) {
-        const pe = parsedEdits[i];
-        const isInsert = !pe.search && pe.anchor;
-        const oldText = pe.search || pe.anchor || "";
-        const newText = isInsert
-          ? ((pe.position === "before" ? (pe.content + "\n") : "") + (pe.anchor || "") + (pe.position !== "before" ? ("\n" + pe.content) : ""))
-          : (pe.replace || "");
-        if (oldText || newText) diffHtml = _renderLineDiff(oldText, newText);
-      }
-      itemsHtml += `<details class="ptool-batch-done-edit ${statusCls}">
+    itemsHtml += `<details class="ptool-batch-done-edit ${statusCls}">
         <summary class="ptool-batch-done-summary">
           <span class="ptool-batch-status">${statusIcon}</span>
           <span class="ptool-batch-idx">${i + 1}</span>
@@ -2713,38 +3115,18 @@ function _renderUnifiedToolLine(round, isSearching) {
         </summary>
         ${diffHtml}
       </details>`;
-    });
-    return `<details class="ptool-batch-done-block" open data-rn="${round.roundNum}">
+  });
+  const gateNoticeHtml = _renderGateNotice(_refusalInfo(round, meta));
+  return `<details class="ptool-batch-done-block" open data-rn="${round.roundNum}">
          <summary class="ptool-line ptool-batch-done-header">
            <span class="ptool-icon">${svg}</span>
            ${compactionLabelHtml}
            ${rootPill}
            <span class="ptool-text">${q}</span>
            ${badgeHtml}
-         </summary>
+         </summary>${gateNoticeHtml}
          <div class="ptool-batch-done-list">${itemsHtml}</div>
        </details>`;
-  }
-
-  // ★ Project-brain / conversation-meta tools — render their full prose
-  //   output in a collapsible Markdown card instead of the bare generic line
-  //   (which hid all the content). Only when the round has settled (done);
-  //   the in-flight "searching…" state is handled by the generic active
-  //   branch above.
-  if (_isRoundConvMeta(round) && round.status !== "rejected") {
-    const convMetaHtml = _renderConvMetaBlock(round, svg, q, badgeHtml);
-    if (convMetaHtml) return convMetaHtml;
-  }
-
-  return `<div class="ptool-line">
-       <span class="ptool-icon">${svg}</span>
-       ${compactionLabelHtml}
-       ${rootPill}
-       <span class="ptool-text">${q}</span>
-       ${repairedBadge}
-       ${badgeHtml}
-       ${_rowModelViewBtn(round)}
-     </div>`;
 }
 
 /* Format a token count compactly: 12000 → "12k", 1500000 → "1.5M". */
@@ -2804,7 +3186,7 @@ async function _recoverTimerPolls(round) {
             if (triggered) { liveRound._timerTriggered = true; liveRound.status = 'done'; }
           }
         }
-        twUpdate(activeConvId);
+        if (typeof twUpdate === 'function') twUpdate(activeConvId);
       }
       console.info(`[Timer] Recovered ${recoveredPolls.length} polls for timer ${timerId.slice(0,12)}`);
     }
@@ -3107,13 +3489,13 @@ function _renderTimerWatcherBlock(round, svg) {
   const uid = "tmr-r" + round.roundNum;
   const expandedByDefault = isActive;  // auto-expand while active
   return `<div class="timer-watcher-block ${headerCls}" data-rn="${round.roundNum}">
-       <div class="timer-watcher-header" onclick="if(event.target.closest('.timer-id-chip,[data-tc-preview],[data-tc-preview-text]'))return;event.stopPropagation();var w=document.getElementById('${uid}-wrap');w.classList.toggle('expanded');var t=this.querySelector('.timer-toggle');if(t)t.textContent=w.classList.contains('expanded')?'▾':'▸';">
+       <div class="timer-watcher-header" onclick="if(event.target.closest('.timer-id-chip,.ri-tool-anchor'))return;event.stopPropagation();var w=document.getElementById('${uid}-wrap');w.classList.toggle('expanded');var t=this.querySelector('.timer-toggle');if(t)t.textContent=w.classList.contains('expanded')?'▾':'▸';">
          <span class="timer-watcher-icon icon-box">${Icon('timer', 13)}</span>
          ${idChip}
          <span class="timer-watcher-label">${headerLabel}</span>
          ${kindBadge}
          ${isActive ? '<span class="ptool-spinner"></span>' : ''}
-         ${_rowModelViewBtn(round)}
+         ${_rowRightControls(round)}
          <span class="timer-toggle">${expandedByDefault ? '▾' : '▸'}</span>
        </div>
        <div class="timer-watcher-body${expandedByDefault ? ' expanded' : ''}" id="${uid}-wrap">
@@ -3212,14 +3594,91 @@ function _renderTurnHead(size, rno) {
 
 /* Render one tool round into its `[data-prn]` slot. Swarm rounds get the
  * full agent dashboard; everything else the compact tool line. `allRounds`
- * is the full timeline (swarm panels need it for cross-round context). */
+ * is the full timeline (swarm panels need it for cross-round context).
+ *
+ * The debug entry rides inside the row's own header (see _rowRightControls),
+ * occupying its own space in the row's flex flow instead of floating over
+ * anything. Swarm panels have no `.ptool-line` header of that shape, so they
+ * — and only they — still get a standalone entry appended after the panel. */
 function _renderToolSlot(r, allRounds) {
-  const inner = _isRoundSwarm(r)
+  const isSwarm = _isRoundSwarm(r);
+  const inner = isSwarm
     ? _buildSwarmPanelHTML(r, allRounds)
     : _renderUnifiedToolLine(r, r.status === "searching");
-  const swarmAttr = _isRoundSwarm(r) ? ' data-prn-kind="swarm"' : '';
-  return `<div data-prn="${r.roundNum}"${swarmAttr}>${inner}</div>`;
+  const swarmAttr = isSwarm ? ' data-prn-kind="swarm"' : '';
+  const trailing = isSwarm ? _renderStandaloneDebugEntry(r) : '';
+  return `<div data-prn="${r.roundNum}"${swarmAttr}>${inner}${trailing}</div>`;
 }
+
+/* ── Debug entry per TOOL ROW ────────────────────────────────────────────
+ * The owner's original complaint: "I see a suspicious tool call in chatinner
+ * and there is no way to find WHICH request produced it." A single per-bubble
+ * anchor is the wrong granularity — one bubble holds N rounds x M tool calls.
+ * So every tool row carries its own entry.
+ *
+ * The mapping needs no new backend data: the backend tags each round with
+ * `llmRound` (0-based orchestrator loop index, see _computeToolBatches), and
+ * the request snapshot's `roundNum` is 1-based — so this row was PRODUCED by
+ * request R(llmRound+1), and its result was carried INTO R(llmRound+2).
+ *
+ * ONE entry, ONE view. The former R (producing request) and S (post-tool state
+ * mirror) buttons were two controls onto the same round; they briefly became
+ * two tabs inside one panel, and on 2026-07-29 the owner removed the second
+ * one outright ("we don't need both a request and a result status button") —
+ * correctly, because the mirror is captured AFTER the tool results are appended
+ * to the same message list the request was built from, so it is a SUPERSET of
+ * the request. The request axis survives only as a fallback for rounds that
+ * emitted no mirror. (The separate verbatim "model view" button was removed on
+ * 2026-07-28 per owner directive — the round-scoped record this entry shows is
+ * the surviving way to inspect what a tool call saw and returned.)
+ *
+ * `data-ri-state` addresses this row's state mirror so the drawer's state list
+ * can find this slot for its inline jump.
+ *
+ * Rendered ONLY in debug mode, and only when we can name a task + round. */
+function _renderDebugEntry(r) {
+  if (typeof _featureFlags === 'undefined' || !_featureFlags.debug_mode) return '';
+  if (!r || r._inboxInject || r._peerInject || r._userSteerInject || r._stallNudge) return '';
+  const taskId = r._taskId || (typeof _riTaskIdForRound === 'function'
+    ? _riTaskIdForRound(r) : '');
+  const lr = r.llmRound;
+  if (!taskId || lr == null) return '';
+  const round = Number(lr) + 1;          // llmRound 0-based → roundNum 1-based
+  const tip = (typeof t === 'function') ? t('ri.toolAnchorTip', { round }) : '';
+  const esc = escapeHtml(String(taskId));
+  return `<button type="button" class="ri-tool-anchor" ` +
+    `data-ri-state="${esc}:${round}" ` +
+    `title="${escapeHtml(tip)}" ` +
+    `onclick="openToolDebugPanel('${esc}',${round},this)">` +
+    `${_RI_TOOL_ANCHOR_SVG}<span class="ri-tool-anchor-label">R${round}</span></button>`;
+}
+
+/* Swarm-panel variant: the dashboard has no shared header to sit in, so the
+ * entry gets its own right-aligned strip UNDER the panel. Still a real block
+ * in normal flow — never a negative-margin overlay. */
+function _renderStandaloneDebugEntry(r) {
+  const btn = _renderDebugEntry(r);
+  return btn ? `<div class="ri-tool-anchor-row">${btn}</div>` : '';
+}
+
+/* The row's right-hand control group — the SINGLE owner of a tool row's right
+ * edge. Every control lives here and each occupies its own space, so nothing
+ * can overlap: previously `.tc-preview-btn` claimed the right end with
+ * `margin-left:auto` while the debug entry floated over it from a zero-height
+ * block. Now `margin-left:auto` belongs to this wrapper alone.
+ *
+ * The debug entry is the ONLY control left: the verbatim "model view" button
+ * was removed on 2026-07-28 per owner directive (its content duplicated what
+ * the debug panel answers better, round-scoped). */
+function _rowRightControls(round) {
+  return `<span class="ptool-row-ctl">${_renderDebugEntry(round)}</span>`;
+}
+
+/* Code-glyph SVG (§3.4: SVG only, never a unicode glyph as a control). */
+const _RI_TOOL_ANCHOR_SVG =
+  '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+  'stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+  '<path d="m8 6-6 6 6 6"/><path d="m16 6 6 6-6 6"/></svg>';
 
 /* Build a llmRound-key → [narration text segments] map from a message's
  * `segments`. Mirrors the timeline's narration selection EXACTLY (non-
@@ -3244,7 +3703,8 @@ function _narrationByRound(segments) {
 
 /* Render a round's narration segments as flat `.md-content.seg-narration`
  * blocks — BYTE-IDENTICAL to the settled timeline (_renderTimelineBatch) and
- * the streaming preview (.stream-seg-narration in translation.js): show the
+ * to the live streaming preview (translation_render.js paints the SAME class
+ * list since Phase 3.5 step 2; formerly `.stream-seg-narration`): show the
  * per-round Chinese (seg.translatedText, stamped by the incremental translator)
  * when present, else the English narration. This is what makes per-round
  * translation render IN PLACE in the grouped panel (toggle OFF / timeline
@@ -3258,8 +3718,9 @@ function _renderSegNarrationHTML(segs) {
     /* data-seg-round keys this narration block to its llmRound so the unified
      * per-round translate painter (_applyPartialByRoundToSettled) can update
      * just this block's Chinese in place when a retro/on-open translation
-     * streams round-by-round — no whole-bubble swap. Mirrors the streaming
-     * preview's .stream-seg-narration[data-seg-round]. */
+     * streams round-by-round — no whole-bubble swap. Mirrors the live preview's
+     * `.seg-narration[data-seg-round]` (same settled class since Phase 3.5
+     * step 2). */
     const _rk = (s.llmRound != null) ? ` data-seg-round="L${escapeHtml(String(s.llmRound))}"` : '';
     html += `<div class="md-content seg-narration"${_rk}>${renderMarkdown(_segClean)}</div>`;
   }
@@ -3408,9 +3869,10 @@ function renderSegmentTimelineHTML(segments, msg, idx) {
    *   structural matching (a turn may legitimately call the same tool twice). */
   const _supersededTcIds = new Set();
   for (const r of allRounds) {
-    if (r && (r._userSteerInject || r._peerInject || r._inboxInject)) {
+    if (r && (r._userSteerInject || r._peerInject || r._inboxInject || r._stallNudge)) {
       const injRound = r._userSteerInject ? r.steerRound
-        : (r._peerInject ? r.peerRound : r.inboxRound);
+        : (r._peerInject ? r.peerRound
+          : (r._stallNudge ? r.stallRound : r.inboxRound));
       const anchor = (injRound || 0) - 1;
       if (!_injByAnchor.has(anchor)) _injByAnchor.set(anchor, []);
       _injByAnchor.get(anchor).push(r);
@@ -3572,101 +4034,6 @@ document.addEventListener("click", function (e) {
 // ★ Backwards compat aliases
 const _renderProjectGroup = _renderUnifiedGroup;
 const _renderBrowserGroup = _renderUnifiedGroup;
-
-// ── Tool content preview button ──
-function _tcPreviewBtn(round) {
-  if (!round || !round.toolContent) return "";
-  /* ★ "Model view" — the exact bytes this tool returned to the LLM, verbatim.
-   *   Renamed from the old ambiguous "Preview" (users read that as a human
-   *   summary, not "what the model actually saw"). An eye icon + label makes
-   *   the human-view / model-view distinction explicit. The class/data-attrs
-   *   stay identical so the click-delegation + streaming-inject paths that key
-   *   off `.tc-preview-btn` / `[data-tc-preview]` are unaffected. */
-  const _t = (typeof t === "function") ? t : (k, d) => d;
-  const label = _t("tool.modelView", "Model view");
-  const tip = _t("tool.modelViewTip", "Show the exact text this tool returned to the model — verbatim, nothing omitted.");
-  const eye = (typeof Icon === "function") ? Icon("eye", 12) : "";
-  return `<button class="tc-preview-btn" data-tc-preview data-tc-rn="${round.roundNum}" data-tc-tcid="${escapeHtml(round.toolCallId || '')}" title="${escapeHtml(tip)}"><span class="tc-preview-ico">${eye}</span><span class="tc-preview-lbl">${escapeHtml(label)}</span></button>`;
-}
-
-/* ★ Fallback verbatim-text registry for rows whose model view is NOT the raw
- *   `round.toolContent`. Some rows (board post/claim, charter, peer status,
- *   feed) render a STRUCTURED human card and, after a reload/poll projection,
- *   may arrive with an EMPTY `toolContent` — so `_tcPreviewBtn` would return ""
- *   and the row would have NO model-view entry (the exact gap the owner
- *   flagged: "每个工具行都要有模型原文"). For those we synthesize the best
- *   available verbatim source (see `_roundModelText`) and stash it here keyed by
- *   a synthetic id, so the click handler can open arbitrarily large text
- *   without bloating a DOM attribute. */
-const _tcModelTextRegistry = new Map();
-let _tcModelTextSeq = 0;
-if (typeof window !== "undefined") window._tcModelTextRegistry = _tcModelTextRegistry;
-
-/* Resolve the verbatim "what the model saw" text for a round, in priority
- * order: the real toolContent → the structured backend meta rendered as pretty
- * JSON (that IS what the tool returned, just already parsed) → the meta snippet
- * → a localized "no content" note. Never returns null so the affordance is
- * unconditional. */
-function _roundModelText(round) {
-  if (round && typeof round.toolContent === "string" && round.toolContent.trim()) {
-    return round.toolContent;
-  }
-  const meta = (round && round.results && round.results[0]) || null;
-  if (meta && typeof meta === "object") {
-    // Drop display-only chrome keys; keep the substantive tool payload so the
-    // verbatim view reflects the tool's actual structured return.
-    const OMIT = new Set(["icon", "badge", "title", "fetched", "fetchedChars", "source"]);
-    const keep = {};
-    for (const k of Object.keys(meta)) {
-      if (!OMIT.has(k) && meta[k] != null && meta[k] !== "") keep[k] = meta[k];
-    }
-    if (Object.keys(keep).length) {
-      try { return JSON.stringify(keep, null, 2); }
-      catch (_e) { /* fall through to snippet */ }
-    }
-    if (typeof meta.snippet === "string" && meta.snippet.trim()) return meta.snippet;
-  }
-  const _t = (typeof t === "function") ? t : (k, d) => d;
-  return _t("tool.noContent", "No content returned.");
-}
-
-/* Model-view button for a row that supplies an EXPLICIT verbatim text (not the
- * raw toolContent lookup). Used by convmeta / brain-mutation rows so every one
- * of them carries a "模型原文" entry even when toolContent is empty. The text is
- * parked in `_tcModelTextRegistry`; the delegated click handler opens it. */
-function _tcModelViewBtnForText(round, text, titleHint) {
-  const _t = (typeof t === "function") ? t : (k, d) => d;
-  const label = _t("tool.modelView", "Model view");
-  const tip = _t("tool.modelViewTip", "Show the exact text this tool returned to the model — verbatim, nothing omitted.");
-  const eye = (typeof Icon === "function") ? Icon("eye", 12) : "";
-  const id = "tcmt_" + (++_tcModelTextSeq);
-  // ★ Source-layer guard: never park an empty entry. An inject row whose
-  //   previews resolved to "" (a common case — autopilot/sub-agent/peer/steer
-  //   rows carry no toolContent) would otherwise register "" and open a body-
-  //   less "single bar" popup. Fall back to the same localized sentinel the
-  //   normal-row path (_roundModelText) uses, so the registry has no empty rows.
-  const resolved = String(text == null ? "" : text);
-  _tcModelTextRegistry.set(id, {
-    text: resolved.trim() ? resolved : _t("tool.noContent", "No content returned."),
-    title: titleHint || label,
-  });
-  return `<button class="tc-preview-btn" data-tc-preview-text="${id}" title="${escapeHtml(tip)}"><span class="tc-preview-ico">${eye}</span><span class="tc-preview-lbl">${escapeHtml(label)}</span></button>`;
-}
-
-/* Unconditional model-view entry for ANY tool row: prefer the normal
- * toolContent-backed button; when toolContent is empty, fall back to the
- * synthesized verbatim source (structured meta → snippet → "no content") so
- * the entry is NEVER missing. This is the row-agnostic guarantee behind the
- * objective "every tool row must carry a 模型原文 view" — used by convmeta /
- * brain rows, the timer watcher, memory, todo, and the generic command line. */
-function _rowModelViewBtn(round) {
-  if (round && typeof round.toolContent === "string" && round.toolContent.trim()) {
-    return _tcPreviewBtn(round);
-  }
-  return _tcModelViewBtnForText(round, _roundModelText(round));
-}
-// Alias kept for the convmeta call site (semantics identical).
-const _convMetaModelViewBtn = _rowModelViewBtn;
 
 // ── Memory Prefetch indicator (chip above tool panel) ──
 // Rendered in the streaming bubble AND in the finished assistant message.

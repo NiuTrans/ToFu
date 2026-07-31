@@ -75,6 +75,14 @@ def _init_chat_schema(conn):
     # replay. event_id is monotonic per task, mirrored in the SSE 'id:' field.
     create_if_absent(conn, TASK_EVENTS, table_exists=_table_exists)
     cur.execute('CREATE INDEX IF NOT EXISTS idx_task_events_ts ON task_events(ts_ms)')
+    # (task_id, type) — the Request Inspector's access pattern. Every read it
+    # makes is "this task's rows, optionally of one type":
+    # request_inspector._read_events (WHERE task_id=?), the per-conv kind tally
+    # (WHERE task_id IN (…) AND type='messages_snapshot'), and the tiered prune
+    # (WHERE ts_ms<? AND type [NOT] IN (…)). Without this, those degrade to a
+    # seq scan that DETOASTS every snapshot payload — measured 5.9s on a ~900MB
+    # table, which would show up as a multi-second stall when opening the drawer.
+    cur.execute('CREATE INDEX IF NOT EXISTS idx_task_events_task_type ON task_events(task_id, type)')
 
     # ── conversation_messages: Phase 5 messages-as-rows (migrator-first) ──
     # Empty on existing installs until the TOFU_MESSAGES_ROWS-gated backfill /
@@ -276,6 +284,10 @@ def _init_chat_schema(conn):
     for col, sql in {
         'kind':     "ALTER TABLE message_queue ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'real'",
         'priority': "ALTER TABLE message_queue ADD COLUMN IF NOT EXISTS priority INTEGER NOT NULL DEFAULT 100",
+        # Dispatch lease columns (pt_4ab943fa) — dequeue leases, delete lands
+        # only after spawn succeeds; reaper reclaims expired dead leases.
+        'leased_until':  "ALTER TABLE message_queue ADD COLUMN IF NOT EXISTS leased_until BIGINT",
+        'lease_task_id': "ALTER TABLE message_queue ADD COLUMN IF NOT EXISTS lease_task_id TEXT NOT NULL DEFAULT ''",
     }.items():
         try:
             cur.execute(sql)
@@ -302,6 +314,12 @@ def _init_chat_schema(conn):
     if not _column_exists(conn, 'paper_library', 'folder_id'):
         cur.execute("ALTER TABLE paper_library ADD COLUMN folder_id TEXT NOT NULL DEFAULT ''")
         logger.info('[DB] Migration: added column folder_id to paper_library')
+    # Migration: add `parser_version` (parse-once cache key — the extractor+
+    # version that produced parsed_text) to existing DBs. Legacy rows keep ''
+    # and miss the harvest probe by construction (self-heal on next touch).
+    if not _column_exists(conn, 'paper_library', 'parser_version'):
+        cur.execute("ALTER TABLE paper_library ADD COLUMN parser_version TEXT NOT NULL DEFAULT ''")
+        logger.info('[DB] Migration: added column parser_version to paper_library')
     # ── Daily cost cache: pre-aggregated per-day LLM costs (avoids full
     # table scans on every calendar render).  date is 'YYYY-MM-DD' local time.
     # conversations_json stores the per-conv breakdown for drill-down.
@@ -323,6 +341,13 @@ def _init_chat_schema(conn):
     # DBs. See tests/test_core_schema_parity.py.
     from lib.database._core_schema import PAPER_TRANSLATIONS, create_if_absent
     create_if_absent(conn, PAPER_TRANSLATIONS, table_exists=_table_exists)
+
+    # ── Paper podcasts: spoken-script + audio cache (paper podcast feature,
+    # docs/PAPER_PODCAST_DESIGN.md). Core-defined; guarded create is a no-op
+    # on existing DBs. Audio binaries live on disk; this table holds the
+    # script JSON + metadata (same text-in-DB / binary-on-disk convention).
+    from lib.database._core_schema import PAPER_PODCASTS, create_if_absent
+    create_if_absent(conn, PAPER_PODCASTS, table_exists=_table_exists)
 
     # Seed default user
     cur.execute("""

@@ -19,7 +19,26 @@ Recognised "fresh enough" sources for a target file:
      they haven't completed yet — write tools run before parallel reads.
   2. A successful ``read_files`` / ``write_file`` / ``apply_diff`` /
      ``insert_content`` in a prior assistant turn (``task['messages']``).
-  3. The file did not exist on disk at gate-check time — apply_diff would
+     Stored arguments are the VERBATIM model emission — the dispatch-time
+     repair layer (lib/tool_input_repair) renames wrong-harness keys
+     (``file_path``→``path``, ``old_string``→``search``, Claude MultiEdit
+     shape→``apply_diffs``) only in its own copy — so the collectors here
+     run the same alias/structural normalization before extracting paths,
+     or a read performed under an aliased key would be invisible to the
+     gate (production-observed refusal loop, 2026-07-25).
+  3. A NON-STALE write-freshness token for (this conv, the file). The
+     message/toolRounds scan is ephemeral — compaction rewrites
+     ``task['messages']`` mid-run, persisted histories get compacted to
+     zero tool_calls, and a new task starts with empty toolRounds — so
+     sources 1–2 "forget" reads that demonstrably happened. The token
+     store (lib/write_freshness.py) is keyed by (conv_key, abs_path),
+     survives compaction AND restart, is only written after a SUCCESSFUL
+     read/write, and re-fingerprints the file on check — a non-stale
+     token is strictly STRONGER evidence than a message scan (read +
+     byte-unchanged since). A STALE token never satisfies: the companion
+     FreshGate owns the precise "changed on disk" refusal, and refusing
+     here too keeps the composition fail-closed when FreshGate is off.
+  4. The file did not exist on disk at gate-check time — apply_diff would
      fail with a clearer "File not found" message, so we let it through.
 
 Disable via env: ``TOFU_APPLY_DIFF_READ_GATE=0``.
@@ -90,6 +109,69 @@ def _resolve_abs(project_path: str | None, conv_id: str | None, raw_path: str) -
         return ''
 
 
+# Canonical argument keys across the gate's satisfying tools. Passed as the
+# ``expected`` schema to the repair layer's alias renamer: its guards only
+# require ``canonical in expected`` and ``alias not in expected``, and this
+# superset satisfies both for every satisfying tool (aliases are foreign
+# names like ``file_path`` / ``old_string`` / ``paths`` / ``file_text``).
+_GATE_ARG_KEYS = {k: 'string' for k in (
+    'path', 'reads', 'edits', 'search', 'replace', 'content',
+    'anchor', 'position', 'description', 'replace_all',
+)}
+
+
+def _normalize_historical_args(name: str, args: dict) -> dict:
+    """Canonicalize a STORED tool call's args for path extraction.
+
+    Messages persist the arguments exactly as the model emitted them; the
+    dispatch-time repair layer renames wrong-harness keys (and reshapes
+    Claude MultiEdit payloads) only in its execution copy. Run the SAME
+    transforms here so a successful historical read/write performed under
+    aliased keys still satisfies the gate. Fail-open: any error returns
+    the args unchanged (the old blind behaviour — never worse).
+    """
+    if not isinstance(args, dict):
+        return args
+    try:
+        from lib.tool_input_repair import (
+            _apply_param_aliases,
+            _apply_structural_transform,
+        )
+        out, _changed = _apply_structural_transform(name, args)
+        out, _log = _apply_param_aliases(name, dict(out), _GATE_ARG_KEYS)
+        return out
+    except Exception as e:
+        logger.debug('[ReadGate] historical-arg normalization failed for %s: %s',
+                     name, e)
+        return args
+
+
+def _freshness_token_covers(task: dict, abs_path: str) -> bool:
+    """True when the write-freshness store holds a NON-STALE token for
+    (this conversation, ``abs_path``) — compaction/restart-proof evidence
+    that the file was read/written here AND is byte-unchanged since.
+
+    Fail-open on any error (the guard must never become an availability
+    risk); a stale token returns False so the write is still refused.
+    """
+    try:
+        from lib import write_freshness
+        # Same namespace discipline as handlers/_write_freshness_gate.py
+        # (_conv_key): convId, falling back to the task id for sub-tasks
+        # (e.g. the autopilot virtual-user) so they don't leak into the
+        # shared '' bucket. Kept inline — importing _write_freshness_gate
+        # here would be circular (it already imports from this module).
+        key = task.get('convId') or task.get('id') or ''
+        if not key:
+            return False
+        return (write_freshness.has_token(key, abs_path)
+                and not write_freshness.is_stale(key, abs_path))
+    except Exception as e:
+        logger.debug('[ReadGate] freshness-token probe failed for %s: %s',
+                     abs_path, e)
+        return False
+
+
 def _collect_satisfied_paths_from_rounds(task: dict, project_path: str | None) -> set[str]:
     """Return the set of absolute paths satisfied by ``task['toolRounds']``.
 
@@ -113,6 +195,7 @@ def _collect_satisfied_paths_from_rounds(task: dict, project_path: str | None) -
             continue
         if not isinstance(args, dict):
             continue
+        args = _normalize_historical_args(tn, args)
         # read_files supports batch ``reads`` array; the others use ``edits``
         # or top-level ``path``. Re-use the same collector.
         if tn == 'read_files':
@@ -187,6 +270,7 @@ def _collect_satisfied_paths_from_messages(task: dict, project_path: str | None)
                 continue
             if not isinstance(args, dict):
                 continue
+            args = _normalize_historical_args(name, args)
             if name == 'read_files':
                 reads = args.get('reads')
                 if isinstance(reads, list):
@@ -271,6 +355,10 @@ def check_read_before_edit(task: dict, fn_name: str, fn_args: dict,
         # "File not found" error and the model can decide to write_file.
         if not os.path.isfile(ap):
             continue
+        # Compaction/restart-proof evidence: a non-stale freshness token
+        # proves this conv read/wrote the file AND it is unchanged since.
+        if _freshness_token_covers(task, ap):
+            continue
         unread.append((raw, ap))
 
     if not unread:
@@ -344,6 +432,8 @@ def partition_batch_edits(task: dict, fn_name: str, fn_args: dict,
         if ap in satisfied:
             continue
         if not os.path.isfile(ap):
+            continue
+        if _freshness_token_covers(task, ap):
             continue
         skip_indices.append(idx)
         if rp not in seen_raw:

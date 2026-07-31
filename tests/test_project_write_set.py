@@ -207,11 +207,8 @@ def test_NC_WS_no_reorder_leaves_conflicting_first(flask_app):
 
     _patch_restore(
         _DISPATCH_SRC,
-        ("    if claimed_write_sets and len(candidates) > 1:\n"
-         "        candidates.sort(\n"
-         "            key=lambda c: 1 if _write_set_conflicts(_write_set_of(c),\n"
-         "                                                     claimed_write_sets) else 0)"),
-        "    if False:  # NC-WS (disjoint-first reorder disabled)\n        pass",
+        "        candidates.sort(key=_demote_key)",
+        "        pass  # NC-WS (disjoint-first reorder disabled)",
         run,
     )
 

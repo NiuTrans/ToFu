@@ -9,8 +9,11 @@ import re
 try:
     import pymupdf
 except ImportError:
-    pymupdf = None  # type: ignore[assignment]
-    # Warning already logged by _common.py — silent here to avoid duplicate noise
+    try:
+        import fitz as pymupdf  # PyMuPDF <1.24.3 legacy module name
+    except ImportError:
+        pymupdf = None  # type: ignore[assignment]
+        # Warning already logged by _common.py — silent here to avoid duplicate noise
 
 from lib.log import get_logger
 from lib.pdf_parser._common import HAS_PYMUPDF4LLM, MAX_PDF_BYTES, PYMUPDF_LOCK
@@ -19,7 +22,7 @@ from lib.pdf_parser.postprocess import cleanup_markdown, strip_manuscript_line_n
 
 logger = get_logger(__name__)
 
-__all__ = ['extract_pdf_text', 'validate_pdf_bytes']
+__all__ = ['extract_pdf_text', 'extract_pdf_text_with_meta', 'validate_pdf_bytes']
 
 
 def validate_pdf_bytes(pdf_bytes):
@@ -77,9 +80,52 @@ def _safe_progress(cb, page: int, total: int) -> None:
         logger.debug('[PDF] progress_callback raised (ignored): %s', e)
 
 
+# pymupdf4llm ≥1.26 flips its module-global default to the NEW layout/OCR
+# pipeline whenever the optional ``pymupdf.layout`` package is importable
+# (import-time ``use_layout(True)``). That pipeline needs ONNX models and a
+# compatible RapidOCR, crashes on born-digital PDFs in our env
+# (``'RapidOCR' object has no attribute 'text_detector'``), and silently
+# swallows the kwargs this module relies on (``table_strategy`` /
+# ``page_chunks`` / ``show_progress`` fall into ``**kwargs``). The CLASSIC
+# implementation — the one that honors those kwargs — lives on at
+# ``pymupdf4llm.helpers.pymupdf_rag``. Call it directly so the markdown
+# contract here does not depend on a process-global flag keyed off whether
+# an optional package happens to be installed. Measured on arXiv 1706.03762
+# with the layout package PRESENT: classic → 40,608 chars with 35 table
+# rows; layout-routed top-level call → crash → raw fallback with 0.
+_pymupdf_rag = None
+_pymupdf_rag_tried = False
+
+
+def _to_markdown_classic(md_doc, **kw):
+    """``pymupdf4llm.to_markdown`` pinned to the classic rag implementation."""
+    global _pymupdf_rag, _pymupdf_rag_tried
+    if not _pymupdf_rag_tried:
+        _pymupdf_rag_tried = True
+        try:
+            from pymupdf4llm.helpers import pymupdf_rag as _rag
+            _pymupdf_rag = _rag
+        except Exception as e:
+            logger.debug('[PDF] pymupdf_rag direct import unavailable, '
+                         'falling back to top-level to_markdown: %s', e)
+    if _pymupdf_rag is not None:
+        return _pymupdf_rag.to_markdown(md_doc, **kw)
+    import pymupdf4llm
+    return pymupdf4llm.to_markdown(md_doc, **kw)
+
+
 def extract_pdf_text(pdf_bytes: bytes, max_chars: int = 0, url: str = '',
                      progress_callback=None, mode: str = 'rich') -> str:
-    """Extract text from PDF as Markdown.
+    """Back-compat wrapper returning only the text. See
+    :func:`extract_pdf_text_with_meta`."""
+    return extract_pdf_text_with_meta(
+        pdf_bytes, max_chars=max_chars, url=url,
+        progress_callback=progress_callback, mode=mode)[0]
+
+
+def extract_pdf_text_with_meta(pdf_bytes: bytes, max_chars: int = 0, url: str = '',
+                               progress_callback=None, mode: str = 'rich'):
+    """Extract text from PDF as Markdown, and report WHICH strategy won.
 
     Strategy 0: docling           → Layout-aware (TableFormer + math model);
                                     only when ``mode='structured'`` AND
@@ -117,7 +163,7 @@ def extract_pdf_text(pdf_bytes: bytes, max_chars: int = 0, url: str = '',
         logger.warning('[PDF] File too large (%s MB, limit %s MB) — %s',
                        len(pdf_bytes) // (1024*1024), MAX_PDF_BYTES // (1024*1024),
                        url[:80])
-        return f'[PDF too large: {len(pdf_bytes) // (1024*1024)} MB exceeds {MAX_PDF_BYTES // (1024*1024)} MB limit]'
+        return f'[PDF too large: {len(pdf_bytes) // (1024*1024)} MB exceeds {MAX_PDF_BYTES // (1024*1024)} MB limit]', 'error'
 
     limit = max_chars if max_chars > 0 else 999_999_999
 
@@ -137,7 +183,7 @@ def extract_pdf_text(pdf_bytes: bytes, max_chars: int = 0, url: str = '',
                 # consistent shape regardless of which strategy ran.
                 md = postprocess_math_blocks(md)
                 md = cleanup_markdown(md)
-                return md
+                return md, 'docling'
             logger.info("[PDF] structured mode: docling unavailable/failed, "
                         "falling back to pymupdf4llm — %s", url[:60])
             # fall through to Strategy 1
@@ -163,7 +209,6 @@ def extract_pdf_text(pdf_bytes: bytes, max_chars: int = 0, url: str = '',
     # acceptable tradeoff for honest progress reporting.
     if HAS_PYMUPDF4LLM and mode != 'fast':
         try:
-            import pymupdf4llm
             with PYMUPDF_LOCK:
                 md_doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
                 try:
@@ -173,7 +218,7 @@ def extract_pdf_text(pdf_bytes: bytes, max_chars: int = 0, url: str = '',
                     total = 0
                     truncated = False
                     for pi in range(n):
-                        chunks = pymupdf4llm.to_markdown(
+                        chunks = _to_markdown_classic(
                             md_doc,
                             pages=[pi],
                             page_chunks=True,
@@ -208,7 +253,7 @@ def extract_pdf_text(pdf_bytes: bytes, max_chars: int = 0, url: str = '',
             logger.debug('pymupdf4llm OK: %d pages, %s chars '
                          '(table_strategy=lines, per-page, truncated=%s) — %s',
                          n, f'{total:,}', truncated, url[:60])
-            return text
+            return text, 'pymupdf4llm'
 
         except Exception as e:
             logger.warning('pymupdf4llm failed (%s), falling back to pymupdf raw', e, exc_info=True)
@@ -234,12 +279,12 @@ def extract_pdf_text(pdf_bytes: bytes, max_chars: int = 0, url: str = '',
             finally:
                 doc.close()
         if not parts:
-            return '[PDF: no extractable text]'
+            return '[PDF: no extractable text]', 'error'
         full = re.sub(r'\n{3,}', '\n\n', '\n\n'.join(parts))
         logger.debug('get_text fallback OK: %d pages, %s chars — %s',
                      n, f'{total:,}', url[:60])
-        return full
+        return full, 'pymupdf-raw'
     except Exception as e:
         logger.warning('[PDF] get_text fallback extraction failed for %s: %s',
                        url[:80] if url else '?', e, exc_info=True)
-        return f'[PDF extraction failed: {e}]'
+        return f'[PDF extraction failed: {e}]', 'error'

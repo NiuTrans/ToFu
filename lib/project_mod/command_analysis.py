@@ -127,9 +127,31 @@ def _extract_progress_label(line):
 
 
 # ── Device / worker detection for multi-GPU annotation ──────────
+# ⚠️ NO PRODUCTION CALLER. This permissive union (accelerator words AND plain
+# numbered workers in one class) is retained only for the exported-symbol
+# contract asserted by tests/test_command_analysis_extraction.py. Because it
+# cannot distinguish "cuda:0" from "io worker 0", using it to label output is
+# exactly how the folder came to report three postgres processes as three CUDA
+# devices. NEW CODE MUST USE _extract_accelerator_ids (hardware claims) or
+# _extract_ordinal_ids (index-only claims) — never this regex.
 _DEVICE_RE = re.compile(
     r'(?:cuda|gpu|device|rank|worker)[\s:_]*(\d+)', re.IGNORECASE
 )
+
+# ★ Only these words are EVIDENCE of a real compute accelerator, and only
+# they may licence a ``cuda:`` prefix in the fold marker. ``worker``/``rank``
+# deliberately excluded: real ``ps aux`` output contains lines like
+# "postgres: io worker 0/1/2", which the old union regex turned into
+# "×3 devices on cuda:0-2" — three database processes reported as three
+# GPUs. A fold marker that invents hardware is worse than no marker at all,
+# so accelerator attribution now requires an accelerator word.
+_ACCEL_RE = re.compile(r'(?:cuda|gpu|nvidia|hip|rocm|xpu)[\s:_]*(\d+)',
+                       re.IGNORECASE)
+
+# Numbered-variant words: enough to say "these lines differ by an index",
+# NOT enough to name the hardware.
+_ORDINAL_RE = re.compile(r'(?:device|rank|worker|shard|replica)[\s:_]*(\d+)',
+                         re.IGNORECASE)
 
 
 def _extract_progress_pct(line):
@@ -146,10 +168,42 @@ def _extract_device_ids(lines):
 
     Looks for patterns like cuda:0, GPU 3, Worker 5, rank 2.
     Returns sorted list of unique integer IDs, or empty list.
+
+    ⚠️ NO PRODUCTION CALLER — kept for the exported-symbol contract only.
+    This is the permissive union (accelerators AND plain numbered workers), so
+    it does NOT establish that a GPU is involved. New code must use
+    :func:`_extract_accelerator_ids` for anything that renders a ``cuda:``
+    label, or :func:`_extract_ordinal_ids` for index-only claims; reusing this
+    one is how the fold marker started claiming hardware that isn't there.
     """
     ids = set()
     for ln in lines:
         for m in _DEVICE_RE.finditer(ln):
+            ids.add(int(m.group(1)))
+    return sorted(ids)
+
+
+def _extract_accelerator_ids(lines):
+    """Extract IDs backed by EXPLICIT accelerator evidence (cuda/gpu/…).
+
+    Returns sorted unique ints, or [] when the lines carry no accelerator
+    word — in which case the caller must not emit a ``cuda:`` label.
+    """
+    ids = set()
+    for ln in lines:
+        for m in _ACCEL_RE.finditer(ln):
+            ids.add(int(m.group(1)))
+    return sorted(ids)
+
+
+def _extract_ordinal_ids(lines):
+    """Extract IDs from plain numbered-variant words (worker/rank/shard/…).
+
+    Used to say "N numbered variants" WITHOUT naming any hardware.
+    """
+    ids = set()
+    for ln in lines:
+        for m in _ORDINAL_RE.finditer(ln):
             ids.add(int(m.group(1)))
     return sorted(ids)
 
@@ -279,17 +333,30 @@ def _clean_command_output(output):
             if n <= 3:
                 result.extend(group)
             else:
-                # ── Percentage-aware sampling + device detection ──
+                # ── Percentage-aware sampling + concurrency detection ──
                 pcts = [(_extract_progress_pct(g), g) for g in group]
                 valid = [(p, g) for p, g in pcts if p is not None]
 
-                # Detect device parallelism: max lines sharing same %
-                device_count = 1
+                # ★ How many lines share a percentage tells us the output is
+                # CONCURRENT — it does NOT tell us what the workers are. The
+                # old code called every such group "×N devices", so four tqdm
+                # bars from a single-process data loader were reported as four
+                # devices. Same rule as the Phase 4 marker: name hardware only
+                # with an explicit accelerator word, otherwise describe the
+                # shape ('parallel streams') and claim nothing about what runs
+                # them.
+                stream_count = 1
                 if valid:
                     pct_freq = Counter(p for p, _ in valid)
-                    device_count = max(pct_freq.values())
-                device_note = (f', ×{device_count} devices'
-                               if device_count > 1 else '')
+                    stream_count = max(pct_freq.values())
+                accel_ids = _extract_accelerator_ids(group)
+                if len(accel_ids) > 1:
+                    device_note = (f', ×{len(accel_ids)} devices on '
+                                   f'{_format_cuda_device_range(accel_ids)}')
+                elif stream_count > 1:
+                    device_note = f', ×{stream_count} parallel streams'
+                else:
+                    device_note = ''
 
                 if valid:
                     # Pick lines by percentage: start / mid / end
@@ -334,15 +401,32 @@ def _clean_command_output(output):
                 result.extend(group)
             else:
                 result.append(group[0])
-                device_ids = _extract_device_ids(group)
-                if len(device_ids) > 1:
-                    dev_range = _format_cuda_device_range(device_ids)
+                # ★ Attribution is gated on EVIDENCE, not on "some word had a
+                # number after it". Three tiers, narrowest first:
+                #   1. explicit accelerator word → may say cuda:N-M
+                #   2. plain numbered variant (worker/rank/…) → count only
+                #   3. neither → state the grouping rule, claim nothing
+                # Tier 1 vs 2 matters: real `ps aux` has "postgres: io
+                # worker 0/1/2", and calling that three CUDA devices is an
+                # invented fact, not a lossy summary.
+                accel_ids = _extract_accelerator_ids(group)
+                ord_ids = _extract_ordinal_ids(group)
+                if len(accel_ids) > 1:
+                    dev_range = _format_cuda_device_range(accel_ids)
                     result.append(
-                        f'  … (×{len(device_ids)} devices on '
-                        f'{dev_range}) …')
+                        f'  … (+{n - 1} lines folded, '
+                        f'×{len(accel_ids)} devices on {dev_range}) …')
+                elif len(ord_ids) > 1:
+                    result.append(
+                        f'  … (+{n - 1} lines folded, '
+                        f'{len(ord_ids)} numbered variants) …')
                 else:
+                    # NOT "similar lines": these lines share a structural
+                    # fingerprint (digit runs normalised to #) and their
+                    # non-numeric text may differ completely.
                     result.append(
-                        f'  … (and {n - 1} more similar lines) …')
+                        f'  … (+{n - 1} lines folded: same structure, '
+                        f'differing values) …')
                 total_compressed += n - 1
             i = j
             continue
@@ -351,6 +435,18 @@ def _clean_command_output(output):
         i += 1
 
     cleaned = '\n'.join(result)
+    # ★ The fold total must reach the MODEL, not just the log. Without it a
+    # reader cannot tell whether they are looking at the whole output or a
+    # fraction of it — each marker states its own group, but nothing states
+    # the aggregate. Only emitted when folding actually happened, so
+    # untouched output stays byte-identical.
+    if total_compressed > 0:
+        kept = cleaned.count('\n') + 1
+        cleaned += (
+            f'\n[output folded: {total_compressed} of '
+            f'{len(lines)} lines omitted, {kept} shown — consecutive lines '
+            f'sharing a structural fingerprint were grouped]'
+        )
     if total_compressed > 5:
         logger.debug('_clean_command_output: compressed %d repetitive lines '
                      '(%d → %d chars)', total_compressed, original_len,
@@ -772,6 +868,44 @@ _DELETE_COMMANDS = frozenset({'rm', 'rmdir', 'unlink'})
 # ``/mnt/foo`` → 2 (allowed). Tunable via env for stricter sites.
 _MIN_DELETE_DEPTH = max(1, int(os.environ.get('TOFU_MIN_DELETE_DEPTH', '2')))
 
+# Privilege wrappers that can precede the real command word. A delete behind
+# one (``sudo rm -rf /``) must be judged by the ``rm``, not by the ``sudo`` —
+# otherwise a one-word prefix smuggles a catastrophic delete past every
+# argument-level guard. (The retired substring guard ``\brm\s+-rf\s+/``
+# caught this shape precisely because it never parsed; when the regex was
+# removed in favour of this parser, seeing through sudo/doas is what keeps
+# coverage neutral-or-better.)
+_PRIV_WRAPPERS = frozenset({'sudo', 'doas'})
+# Wrapper flags that consume the NEXT token as their argument
+# (``sudo -u root rm …``) — skip them together or the argument is mistaken
+# for the command word.
+_PRIV_WRAPPER_ARG_FLAGS = frozenset(
+    {'-u', '-g', '-h', '-p', '-C', '-U', '-r', '-t'})
+
+
+def _unwrap_command_parts(parts):
+    """Strip a leading privilege wrapper (``sudo``/``doas`` + its flags).
+
+    Returns the token list of the wrapped command, or *parts* unchanged when
+    no wrapper is present. Only ONE wrapper level is unwrapped; anything more
+    exotic (``xargs rm``, ``find -exec rm``, ``timeout 5 rm``) is out of
+    scope for this best-effort net — the same blind spots the retired
+    substring guard also had.
+    """
+    if not parts or parts[0].split('/')[-1] not in _PRIV_WRAPPERS:
+        return parts
+    i = 1
+    while i < len(parts):
+        tok = parts[i]
+        if tok in _PRIV_WRAPPER_ARG_FLAGS:
+            i += 2
+            continue
+        if tok.startswith('-'):
+            i += 1
+            continue
+        return parts[i:]
+    return []
+
 
 def _is_catastrophic_delete(command, cwd=None):
     """Return the offending path if *command* deletes a forbidden abs target.
@@ -795,6 +929,9 @@ def _is_catastrophic_delete(command, cwd=None):
          project (e.g. ``rm -rf ~/old_build``) is preserved — no product
          regression.
 
+    A leading privilege wrapper (``sudo rm -rf /``) is seen through via
+    :func:`_unwrap_command_parts` before the delete-command check.
+
     Only absolute / ``~`` / env-var-expanded targets are evaluated: a
     relative ``rm -rf build`` stays inside ``cwd`` and is always safe.
     """
@@ -816,7 +953,7 @@ def _is_catastrophic_delete(command, cwd=None):
             continue
         while _re.match(r'^\w+=\S*\s', seg):
             seg = _re.sub(r'^\w+=\S*\s+', '', seg, count=1)
-        parts = seg.split()
+        parts = _unwrap_command_parts(seg.split())
         if not parts:
             continue
         base_cmd = parts[0].split('/')[-1]

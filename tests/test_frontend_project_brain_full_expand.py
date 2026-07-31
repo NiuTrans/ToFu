@@ -191,7 +191,10 @@ def test_NC_A_board_title_flat_render_is_load_bearing(tmp_path):
     longer inside a .pb-clamp. Shipped file byte-identical after."""
     with open(_BRAIN_SRC, encoding='utf-8') as f:
         original = f.read()
-    anchor = ("    var titleHtml = _clampBlock(_esc(t.title), t.title || '');\n"
+    # NOTE: the shipped render mdLite-ifies the title before clamping; the
+    # anchor must name _mdLite(t.title), not the older _esc(t.title) (drift
+    # repair 2026-07-25 — the NC was red at HEAD, anchor never updated).
+    anchor = ("    var titleHtml = _clampBlock(_mdLite(t.title), t.title || '');\n"
               "    return '<div class=\"pb-board-card pb-board-' + _esc(t.status) + '\" data-task-id=\"' +\n"
               "      _esc(t.id) + '\">' +\n"
               "      '<div class=\"pb-board-title\">' + titleHtml + '</div>' +")

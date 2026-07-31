@@ -359,7 +359,7 @@ def test_NC_2_reopen_reset_is_load_bearing(flask_app):
     _patch_restore(
         _BOARD_SRC,
         "lease_expires_at=0, dispatched=0, blocked_until=0, block_count=0, "
-        "\"\n            \"block_reason='', wait_paths='[]', dispatch_target='', updated_at=? \"",
+        "\"\n            \"block_reason='', wait_paths='[]', dispatch_target='', \"\n            \"block_question='', human_answer='', updated_at=? \"",
         "lease_expires_at=0, dispatched=0, updated_at=? \"",
         run,
     )

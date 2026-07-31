@@ -43,9 +43,3 @@ from . import prefetch
 from .prefetch import *  # noqa: F401,F403
 
 build_facade(__all__, prefetch)
-
-# ── Skill-package installer (drag-and-drop zip install) ──
-from . import installer
-from .installer import *  # noqa: F401,F403
-
-build_facade(__all__, installer)

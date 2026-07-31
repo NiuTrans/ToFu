@@ -323,8 +323,20 @@ def _start_computer_control(port: int, state: dict) -> None:
     if not isinstance(state.get('perms'), dict):
         state['perms'] = safe_default()
     permissions = state['perms']
+
+    # Where to poll. A remote attachment (tray → "Connect to remote Tofu…")
+    # wins; with none configured we poll the server this app just started,
+    # which is the packaged-app default and must stay untouched.
     server_url = f'http://127.0.0.1:{port}'
     bridge_secret = (os.environ.get('TOFU_BRIDGE_SECRET') or '').strip()
+    try:
+        from lib.desktop_agent.config import remote_server
+        _rurl, _rsecret = remote_server()
+        if _rurl:
+            server_url, bridge_secret = _rurl, _rsecret
+    except Exception as e:
+        _log('Could not read remote attachment, using local server: %s' % e)
+    state['server_url'] = server_url
 
     def _loop():
         try:
@@ -342,6 +354,82 @@ def _start_computer_control(port: int, state: dict) -> None:
     t.start()
     _log('Computer control ENABLED (read-only; perms=%s, agent polling %s)'
          % (permissions, server_url))
+
+
+def _prompt_connect_line(current_url: str = ''):
+    """Ask for ONE pasted connect line; return (url, secret) or None.
+
+    The web UI (Local Control → "This computer", remote case) renders a single
+    click-to-copy line carrying BOTH the server address and the token. This
+    dialog therefore takes ONE field: the user pastes what they copied and is
+    done. Two separate fields would make them split the string by hand, which
+    is the cognitive load the merged surface exists to remove.
+
+    Parsing is delegated to lib.desktop_agent.config.parse_connect_line — the
+    single owner of the format — so this dialog can never drift from what the
+    web side emits. Returns None when the user cancels.
+    """
+    from lib.desktop_agent.config import parse_connect_line
+    try:
+        import tkinter as tk
+        from tkinter import ttk
+    except ImportError as e:
+        _log('Connect dialog unavailable (no tkinter): %s' % e)
+        return None
+
+    result = {'value': None}
+    root = tk.Tk()
+    root.title('Connect to remote Tofu')
+    root.resizable(False, False)
+    frame = ttk.Frame(root, padding=16)
+    frame.grid(sticky='nsew')
+
+    ttk.Label(frame, text='Connect this computer to a remote Tofu',
+              font=('', 11, 'bold')).grid(row=0, column=0, columnspan=2,
+                                          sticky='w')
+    ttk.Label(frame, wraplength=430, justify='left',
+              text=('In Tofu, open Local Control \u2192 This computer and press '
+                    '"Generate connect line". Paste the whole line here.')
+              ).grid(row=1, column=0, columnspan=2, sticky='w', pady=(6, 10))
+
+    entry = ttk.Entry(frame, width=58)
+    entry.grid(row=2, column=0, columnspan=2, sticky='we')
+    if current_url:
+        ttk.Label(frame, foreground='#666',
+                  text='Currently attached to: %s' % current_url
+                  ).grid(row=3, column=0, columnspan=2, sticky='w', pady=(6, 0))
+    err = ttk.Label(frame, foreground='#b00', wraplength=430, justify='left')
+    err.grid(row=4, column=0, columnspan=2, sticky='w', pady=(6, 0))
+
+    def _ok(*_a):
+        try:
+            result['value'] = parse_connect_line(entry.get())
+        except ValueError as ve:
+            # Keep the dialog open with a specific reason — silently closing
+            # would leave the user unable to tell what was wrong.
+            err.config(text=str(ve))
+            return
+        root.destroy()
+
+    def _cancel(*_a):
+        result['value'] = None
+        root.destroy()
+
+    btns = ttk.Frame(frame)
+    btns.grid(row=5, column=0, columnspan=2, sticky='e', pady=(12, 0))
+    ttk.Button(btns, text='Cancel', command=_cancel).grid(row=0, column=0,
+                                                          padx=(0, 8))
+    ttk.Button(btns, text='Connect', command=_ok).grid(row=0, column=1)
+    entry.bind('<Return>', _ok)
+    root.bind('<Escape>', _cancel)
+    entry.focus_set()
+
+    try:
+        root.mainloop()
+    except Exception as e:
+        _log('Connect dialog failed: %s' % e)
+        return None
+    return result['value']
 
 
 def _stop_computer_control(state: dict) -> None:
@@ -416,6 +504,39 @@ def _run_tray(port: int, proc: subprocess.Popen):
                     _log('%s %s: %s' % ('OK' if success else 'FAIL', name, msg))
             threading.Thread(target=_bg, daemon=True).start()
 
+    def _attached_url() -> str:
+        """The remote server this app is attached to, or '' when local-only."""
+        try:
+            from lib.desktop_agent.config import remote_server
+            return remote_server()[0]
+        except Exception as e:
+            _log('Could not read remote attachment: %s' % e)
+            return ''
+
+    def on_connect_remote(icon, item):
+        """Paste a connect line to attach this computer to a remote Tofu."""
+        parsed = _prompt_connect_line(_attached_url())
+        if parsed is None:
+            return
+        url, secret = parsed
+        try:
+            from lib.desktop_agent.config import save_remote_server
+            save_remote_server(url, secret)
+        except Exception as e:
+            _log('Could not save remote attachment: %s' % e)
+            return
+        _log('Attached to remote Tofu at %s' % url)
+        # Re-point a RUNNING agent: it captured the old address when it
+        # started, so without this the user would have to toggle it off and on
+        # (and would get no hint that they must).
+        if _cc_state.get('enabled'):
+            _stop_computer_control(_cc_state)
+            _start_computer_control(port, _cc_state)
+        try:
+            icon.update_menu()
+        except Exception as e:
+            _log('Could not refresh tray menu after connect: %s' % e)
+
     def on_toggle_computer_control(icon, item):
         """Enable/disable the in-process desktop-control agent."""
         if _cc_state.get('enabled'):
@@ -473,8 +594,13 @@ def _run_tray(port: int, proc: subprocess.Popen):
             MenuItem('Allow mouse / keyboard / screenshot', _toggle_perm('allow_gui'),
                      checked=_perm_checked('allow_gui'), enabled=_perm_enabled),
         )),
+        MenuItem('Connect to remote Tofu…', on_connect_remote),
         MenuItem('Install Components...', on_components),
-        MenuItem(f'Port: {port}', None, enabled=False),
+        # Which server the agent talks to. Silence here was a real gap: after
+        # pasting a connect line the user had no way to tell it took effect.
+        MenuItem(lambda item: ('Server: %s' % (_attached_url() or
+                                               f'this computer (port {port})')),
+                 None, enabled=False),
         pystray.Menu.SEPARATOR,
         MenuItem('Quit', on_quit),
     )
@@ -516,10 +642,14 @@ def main():
     # work (main() would just boot a second app). Instead post_install.py
     # relaunches us with TOFU_PLAYWRIGHT_INSTALL=1, and here we drive the
     # bundled playwright package in-process to fetch its Chromium binary.
+    #
+    # --only-shell matches install.sh + post_install.py: a default install
+    # also fetches the 175 MB full build, which no call site here launches
+    # (every one is headless).
     if os.environ.get('TOFU_PLAYWRIGHT_INSTALL') == '1':
         try:
             from playwright.__main__ import main as _pw_main
-            sys.argv = ['playwright', 'install', 'chromium']
+            sys.argv = ['playwright', 'install', '--only-shell', 'chromium']
             _pw_main()
         except SystemExit:
             raise

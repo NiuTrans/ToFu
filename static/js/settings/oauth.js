@@ -409,6 +409,14 @@ function _oauthLogin(provider) {
       // ── Detect popup closed → auto-reset ONLY if manual box not used ──
       if (popup) {
         var popupCheckInterval = setInterval(function() {
+          /* Self-terminate once the login resolves (success / error / cancel):
+           *   the old code only stopped on popup.closed, leaking a 1s interval
+           *   for every Connect click that never closed its popup (pt_3cd6cd48). */
+          var badgeNow = document.getElementById('oauth' + capProvider + 'Status');
+          if (badgeNow && !badgeNow.classList.contains('pending')) {
+            clearInterval(popupCheckInterval);
+            return;
+          }
           if (!popup || popup.closed) {
             clearInterval(popupCheckInterval);
             // Don't reset if manual paste box is visible (user may be pasting code)

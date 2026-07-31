@@ -127,3 +127,56 @@ def test_expand_only_above_preset():
     assert cl.learn_expand_from_success(P, M, 500_000, preset_limit=PRESET) is None
     r = cl.learn_expand_from_success(P, M, 1_200_000, preset_limit=PRESET)
     assert r and r['new_limit'] == int(1_200_000 * 1.05)
+
+
+# ── source-aware resolution (expand-below-preset starvation pin) ───────
+# A learned *expand* entry recorded when the static preset was smaller must
+# never lower the effective window below today's preset: the compaction gate
+# caps prompts below the pin, so no observation can ever climb out, and
+# expand entries never expire — the mirror of the shrink-side deadlock.
+# Live evidence: sankuai::kimi-k3 pinned at 383,727 (expand) while kimi-k3's
+# real window is 1M (2026-07-26).
+
+def test_resolve_expand_below_preset_does_not_lower_window():
+    k = cl._key(P, M)
+    cl._LEARNED[k] = 383727
+    cl._META[k] = {'ts': time.time(), 'source': 'expand', 'strikes': 0}
+    assert cl.resolve_learned_context_limit(P, M, PRESET) == PRESET
+
+
+def test_resolve_expand_above_preset_still_wins():
+    k = cl._key(P, M)
+    cl._LEARNED[k] = 1_260_000
+    cl._META[k] = {'ts': time.time(), 'source': 'expand', 'strikes': 0}
+    assert cl.resolve_learned_context_limit(P, M, PRESET) == 1_260_000
+
+
+def test_resolve_shrink_below_preset_still_wins():
+    k = cl._key(P, M)
+    cl._LEARNED[k] = 200278
+    cl._META[k] = {'ts': time.time(), 'source': 'shrink', 'strikes': 0}
+    assert cl.resolve_learned_context_limit(P, M, PRESET) == 200278
+
+
+def test_resolve_legacy_entry_stays_absolute():
+    # Hand-edited / pre-TTL values keep their historical absolute semantics.
+    k = cl._key(P, M)
+    cl._LEARNED[k] = 192614
+    assert cl.resolve_learned_context_limit(P, M, PRESET) == 192614
+
+
+def test_resolve_no_entry_returns_static():
+    assert cl.resolve_learned_context_limit(P, M, PRESET) == PRESET
+
+
+def test_get_context_limit_kimi_k3_unpinned():
+    """kimi-k3 (real 1M window) must not be capped by a stale expand pin."""
+    from lib.tasks_pkg.compaction import _get_context_limit, _get_static_context_limit
+
+    task = {'config': {'model': 'kimi-k3'}, 'provider_id': 'sankuai'}
+    assert _get_static_context_limit(task) == 1_000_000
+
+    k = cl._key('sankuai', 'kimi-k3')
+    cl._LEARNED[k] = 383727
+    cl._META[k] = {'ts': time.time(), 'source': 'expand', 'strikes': 0}
+    assert _get_context_limit(task) == 1_000_000

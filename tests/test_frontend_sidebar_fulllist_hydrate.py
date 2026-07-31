@@ -21,6 +21,9 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 CONV_JS = REPO / "static" / "js" / "core" / "conversations.js"
+# hydrateSidebarFromCache lives in its own leaf as of pt_3879f00e slice 6.
+# Point the fn-body extract at the leaf so the harness stays green post-split.
+HYDRATE_JS = REPO / "static" / "js" / "core" / "conv_hydrate_cache.js"
 
 
 def _extract_fn(src: str, name: str) -> str:
@@ -113,7 +116,7 @@ def _run(fn_src: str, full_list_js: str = _FULL_LIST) -> dict:
 def test_prefers_full_list_mirror():
     """REAL fn: paints ALL THREE convs from the full-list mirror (not the one
     from getAllMeta), sorted newest-first, with rev adopted as _serverRev."""
-    src = CONV_JS.read_text()
+    src = HYDRATE_JS.read_text()
     fn = _extract_fn(src, "hydrateSidebarFromCache")
     r = _run(fn)
     assert r["added"] == 3, r
@@ -131,7 +134,7 @@ def test_prefers_full_list_mirror():
 def test_falls_back_to_getallmeta_when_mirror_empty():
     """Empty mirror (first run / v2→v3 upgrade) → fall back to getAllMeta so the
     OLD behaviour (paint opened convs) is preserved, never a blank sidebar."""
-    src = CONV_JS.read_text()
+    src = HYDRATE_JS.read_text()
     fn = _extract_fn(src, "hydrateSidebarFromCache")
     r = _run(fn, full_list_js="[]")
     assert r["added"] == 1, r

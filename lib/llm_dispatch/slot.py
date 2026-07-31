@@ -134,6 +134,13 @@ class Slot:
     consecutive_errors: int = 0
     total_requests: int = 0
     total_errors: int = 0
+    # External shared-project contention (429s naming a project-level TPM
+    # limit saturated by OTHER tenants). Counted separately so the model
+    # success-rate column and the consecutive-429 auto-exhaust streak
+    # reflect only genuine key health (2026-07-28 kimi-k3 incident: 782
+    # contention 429s crushed the card's success rate to 24% while the
+    # genuine failure rate was ~1%).
+    contention_errors: int = 0
     last_error_time: float = 0.0
     last_error_msg: str = ''
 
@@ -143,6 +150,16 @@ class Slot:
     # ── Availability ──
     is_available: bool = True
     cooldown_until: float = 0.0     # timestamp — slot is cooled down until
+    # WHY the current cooldown was imposed — single source of truth for the
+    # dispatch wait-loop's HUD label (the old code hardcoded "rate-limited"
+    # for EVERY cooldown wait, so a hard-error 300s backoff masqueraded as
+    # 限流排队). One of: '' (none) / 'rate_limit' (per-key 429, 0.5s) /
+    # 'upstream' (gateway 5xx, upstream-vendor transient, endpoint
+    # unreachable) / 'error' (consecutive-error backoff) / 'quota' (billing)
+    # / 'contention' (shared project-level TPM saturation by other tenants,
+    # escalated 2s→60s family window — see
+    # LLMDispatcher.note_shared_contention).
+    cooldown_reason: str = ''
 
     # ── Cost ──
     cost_per_1k_tokens: float = 0.01  # USD — used as a tiebreaker
@@ -300,13 +317,16 @@ class Slot:
             if self.consecutive_errors >= 3:
                 cooldown = min(300, 5 * (2 ** (self.consecutive_errors - 3)))
                 self.cooldown_until = time.time() + cooldown
+                self.cooldown_reason = 'error'
                 logger.warning('  ⚠️ Slot %s:%s cooled down %ds '
                                'after %d consecutive truncations/empty outputs',
                                self.key_name, self.model, cooldown,
                                self.consecutive_errors)
 
     def record_error(self, is_rate_limit=False, error: str = '',
-                     is_quota_exhausted: bool = False):
+                     is_quota_exhausted: bool = False, is_gateway: bool = False,
+                     is_shared_contention: bool = False,
+                     is_account_quota: bool = False):
         """Call after a failed request.
 
         Args:
@@ -319,11 +339,43 @@ class Slot:
                 billing/quota problem (insufficient balance, credits too low).
                 Such keys should be marked as exhausted for the rest of the day,
                 not briefly cooled down and retried.
+            is_account_quota: True when the quota signal is HTTP 402 Payment
+                Required — the gateway ACCOUNT's own credit pool is empty
+                (sankuai body: ext.error.source=AIGC, stage=validation), so
+                EVERY model on this key is dead and the honest stop is the
+                key-wide ``exhausted`` flag. Per-model convergence there
+                just burns one live 402 per remaining model (2026-07-29
+                sankuai_key_2: 12 of 43 model entries stopped, ~30 more
+                live 402s queued for real users). A 429+insufficient_quota
+                body stays VENDOR-AMBIGUOUS and keeps per-model granularity
+                (2026-07-28 aggregating-gateway contract).
+            is_gateway: True when the failure is an UPSTREAM outage class
+                (gateway 502/503/504, or an upstream-vendor transient wrapped
+                in a 4xx) rather than per-key contention. Such errors do not
+                feed the consecutive-429 telemetry streak in key_stats; they
+                are still recorded as ordinary failures via
+                record_outcome so the dead-key safety net (daily failure
+                stats) keeps working.
+            is_shared_contention: True when the 429 names a PROJECT-LEVEL
+                limit shared with other tenants of the gateway account
+                (RateLimitError.is_shared_contention). Counted into
+                ``contention_errors`` instead of ``total_errors`` (the
+                success-rate column stays honest) and feeds neither
+                key_stats path. Slot-local cooldown still applies so the
+                picker rotates away briefly.
         """
         with self._lock:
             self.inflight = max(0, self.inflight - 1)
             self.consecutive_errors += 1
-            self.total_errors += 1
+            if is_shared_contention and not is_gateway:
+                # External project-level contention: NOT this key's health.
+                # Count it separately and pull the attempt back out of
+                # total_requests (record_request already added it) so the
+                # success-rate column reflects genuine outcomes only.
+                self.contention_errors += 1
+                self.total_requests = max(0, self.total_requests - 1)
+            else:
+                self.total_errors += 1
             self.last_error_time = time.time()
             if error:
                 self.last_error_msg = str(error)[:200]
@@ -333,49 +385,67 @@ class Slot:
                 # process stops cycling to the dead key for at least an hour
                 # (the daily key-stats tracker also disables it).
                 self.cooldown_until = time.time() + 3600
+                self.cooldown_reason = 'quota'
             elif is_rate_limit:
-                # Reduce effective RPM estimate
-                self.rpm_limit = max(5, self.rpm_limit * 0.8)
+                # Reduce effective RPM estimate — but NOT for external
+                # shared-project contention: the pipe is full of OTHER
+                # tenants' tokens, so decaying our own pacing estimate
+                # teaches the scorer a false "this key is slow" lesson it
+                # then has to recover from at 1.1x.
+                if not is_shared_contention:
+                    self.rpm_limit = max(5, self.rpm_limit * 0.8)
                 # Very brief cooldown — just enough to steer picker to
                 # another slot; the caller will keep cycling rapidly.
                 self.cooldown_until = time.time() + 0.5
+                self.cooldown_reason = 'upstream' if is_gateway else 'rate_limit'
             elif self.consecutive_errors >= 3:
                 # Exponential backoff cooldown after repeated failures.
                 # Cap at 300s (5min) for sustained failures (e.g. DNS unreachable).
                 cooldown = min(300, 5 * (2 ** (self.consecutive_errors - 3)))
                 self.cooldown_until = time.time() + cooldown
+                self.cooldown_reason = 'error'
                 logger.warning('  ⚠️ Slot %s:%s cooled down %ds '
                       'after %d consecutive errors', self.key_name, self.model, cooldown, self.consecutive_errors)
 
         # Daily key-health tracker.
         #   - Quota-exhausted 429/402 (clear billing signal in body): immediately
         #     mark the key as exhausted so it's disabled for the rest of today.
-        #   - Generic 429 rate-limit: feed the consecutive-429 streak counter —
-        #     provider error bodies are ambiguous ("达到使用量上限" can mean either
-        #     RPM-overrun on a paid key OR a dead key), so we only auto-exhaust
-        #     after the streak crosses MAX_CONSECUTIVE_429. Any success or non-
-        #     429 error resets the streak.
+        #   - Generic 429 rate-limit: telemetry only (rate_limited /
+        #     consecutive_429 counters for the UI). A 429 streak NEVER
+        #     disables the key (owner policy 2026-07-29) — the brief steering
+        #     cooldown above is the whole answer, so the key rejoins on its
+        #     own the moment the upstream recovers.
         #   - Other errors: count as a regular failure for the success-rate column.
         if is_quota_exhausted:
             try:
                 from lib.key_stats import mark_key_exhausted
+                # HTTP 402 = account credit pool dead → key-wide stop;
+                # 429-quota = vendor-ambiguous → per-model stop.
                 mark_key_exhausted(self.provider_id, self.key_name,
-                                   reason=error or 'quota exhausted (HTTP 402/429)')
+                                   reason=error or 'quota exhausted (HTTP 402/429)',
+                                   model='' if is_account_quota else self.model)
             except Exception as e:
                 logger.debug('[Slot] key_stats mark_key_exhausted failed: %s', e)
-        elif is_rate_limit:
+        elif is_shared_contention and not is_gateway:
+            # External contention feeds NEITHER the consecutive-429
+            # telemetry streak NOR the daily failure stats (nothing failed —
+            # someone else's traffic filled the pipe). The slot-local
+            # contention_errors counter above keeps the volume visible on
+            # the model card.
+            pass
+        elif is_rate_limit and not is_gateway:
             try:
                 from lib.key_stats import record_rate_limit
-                just_exhausted = record_rate_limit(
-                    self.provider_id, self.key_name,
-                    reason=error or 'HTTP 429')
-                if just_exhausted:
-                    # Streak threshold tripped — stop hammering this key for
-                    # an hour (the UI toggle / day rollover will revive it).
-                    self.cooldown_until = time.time() + 3600
+                record_rate_limit(self.provider_id, self.key_name,
+                                  reason=error or 'HTTP 429')
             except Exception as e:
                 logger.debug('[Slot] key_stats record_rate_limit failed: %s', e)
         else:
+            # Generic failure — and, since is_gateway=True also lands here,
+            # UPSTREAM outages too. record_outcome feeds the daily success-rate
+            # column (no auto-exhaust threshold), so the dead-key safety net
+            # keeps working while the consecutive-429 auto-exhaust streak is
+            # reserved for genuine per-key contention.
             try:
                 from lib.key_stats import record_outcome
                 record_outcome(self.provider_id, self.key_name,

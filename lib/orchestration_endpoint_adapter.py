@@ -179,6 +179,15 @@ class EndpointEventAdapter:
             out['attempt'] = ev.get('attempt')
         if ev.get('status_code'):
             out['statusCode'] = ev.get('status_code')
+        # i18n passthrough (pt_18ebee9c9ea64cf3): the swarm emitter ships
+        # structured detailKey/detailArgs (+ typed reasonKey) in the
+        # step_phase meta so the frontend HUD localizes the retry cause
+        # instead of rendering the raw dispatcher log token. Forward them
+        # verbatim; the legacy `detail` stays for headless clients.
+        if ev.get('detailKey'):
+            out['detailKey'] = ev.get('detailKey')
+        if ev.get('detailArgs'):
+            out['detailArgs'] = ev.get('detailArgs')
         self._stream(out)
 
     def _on_step_complete(self, ev: dict):

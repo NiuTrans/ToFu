@@ -36,6 +36,10 @@ pytestmark = pytest.mark.unit
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
 SRC_JS = os.path.join(ROOT, 'static', 'js', 'ui', 'chat_render.js')
+# The clean-finish constant was extracted out of chat_render.js into the
+# turn-settlement module (core/turn_settlement.js) as _TS_CLEAN_FINISH_REASONS;
+# chat_render.js consumes the verdict via continueButtonForSettlement.
+SETTLEMENT_JS = os.path.join(ROOT, 'static', 'js', 'core', 'turn_settlement.js')
 
 
 def _node_available() -> bool:
@@ -47,38 +51,67 @@ def _read_src() -> str:
         return f.read()
 
 
+def _read_settlement_src() -> str:
+    with open(SETTLEMENT_JS, encoding='utf-8') as f:
+        return f.read()
+
+
+_CLEAN_CONST_RE = r'const _TS_CLEAN_FINISH_REASONS = new Set\((\[[^\]]*\])\);'
+
+
 def test_source_gates_continue_on_finish_reason():
     """Structural guard: the Continue button HTML must be gated on the finish
     reason, not just on being the last assistant message."""
+    ts_src = _read_settlement_src()
+    assert re.search(_CLEAN_CONST_RE, ts_src), (
+        'Continue gate constant _TS_CLEAN_FINISH_REASONS missing from '
+        'turn_settlement.js — the button may have reverted to a '
+        'position-only gate.')
     src = _read_src()
-    assert '_FINISH_CLEAN' in src, (
-        'Continue gate constant _FINISH_CLEAN missing — the button may have '
-        'reverted to a position-only gate.')
-    # The continue button must be produced only when NOT a clean finish.
-    m = re.search(r'const continueH = \(([^)]*)\)', src)
-    assert m, 'continueH gate expression not found in expected shape'
-    gate = m.group(1)
-    assert 'isLastAssistant' in gate and '!_turnFinishedClean' in gate, (
-        f'continueH is not gated on both position AND clean-finish: {gate!r}')
+    # The continue button must be produced only when the settlement verdict
+    # says so (clean finish → show:false), AND only on the last assistant msg.
+    assert 'continueButtonForSettlement' in src, (
+        'chat_render.js no longer consults continueButtonForSettlement — the '
+        'Continue gate is decoupled from the finish reason.')
+    assert 'isLastAssistant && _tsBtn.show' in src, (
+        'continueH is not gated on both position AND settlement verdict')
 
 
 _HARNESS = r"""
 const fs = require('fs');
 const src = fs.readFileSync(process.argv[2], 'utf8');
 
-// Extract the shipped gate: the _FINISH_CLEAN constant + the derivation of
-// _turnFinishedClean, so we test the REAL constants/expression, not a copy.
-const cleanM = src.match(/const _FINISH_CLEAN = (\[[^\]]*\]);/);
+// Extract the shipped gate: the _TS_CLEAN_FINISH_REASONS constant (now in
+// core/turn_settlement.js), so we test the REAL constants, not a copy.
+const cleanM = src.match(/const _TS_CLEAN_FINISH_REASONS = new Set\((\[[^\]]*\])\);/);
 if (!cleanM) { console.log('FAIL clean_const_found'); process.exit(0); }
-const _FINISH_CLEAN = eval(cleanM[1]);
+const _TS_CLEAN_FINISH_REASONS = new Set(eval(cleanM[1]));
 
 function turnFinishedClean(finishReason) {
-  return _FINISH_CLEAN.includes(finishReason);
+  return _TS_CLEAN_FINISH_REASONS.has(finishReason);
 }
-// The shipped gate also requires isLastAssistant; we hold that true here and
-// vary only the finish reason.
+// The shipped gate requires BOTH position+liveness (isLastAssistant) AND the
+// settlement verdict. `isLastAssistant` is NOT hardcoded: pinning it to a
+// constant `true` made this file structurally blind to the liveness half of the
+// gate (pt_ae8777b4eee04ef1 — a turn still being generated rendered Continue).
+// So drive the REAL predicate: a settled conv (no live stream, no task pin, no
+// authoritative busy set) on the tail assistant message.
+function isLastAssistantFor(conv, idx) {
+  // Mirrors chat_render.js: tail position AND the turn is not in flight.
+  const inFlight = !!(conv
+    && idx === conv.messages.length - 1
+    && (activeStreams.has(conv.id) || conv.activeTaskId
+        || (conv._authoritativeActiveTaskIds
+            && conv._authoritativeActiveTaskIds.size > 0)));
+  return !!(conv && idx === conv.messages.length - 1 && !inFlight);
+}
+const activeStreams = new Map();
+const _settledConv = {
+  id: 'convA', activeTaskId: null,
+  messages: [{ role: 'user' }, { role: 'assistant' }],
+};
 function showsContinue(finishReason) {
-  const isLastAssistant = true;
+  const isLastAssistant = isLastAssistantFor(_settledConv, 1);
   const _turnFinishedClean = turnFinishedClean(finishReason);
   return isLastAssistant && !_turnFinishedClean;
 }
@@ -109,7 +142,7 @@ console.log(out.join('\n'));
 def _run_harness(tmp_path):
     harness = tmp_path / '_continue_gate_harness.js'
     harness.write_text(_HARNESS, encoding='utf-8')
-    return subprocess.run(['node', str(harness), SRC_JS],
+    return subprocess.run(['node', str(harness), SETTLEMENT_JS],
                           capture_output=True, text=True, timeout=60)
 
 
@@ -127,16 +160,18 @@ def test_neuter_position_only_gate_shows_on_clean(tmp_path):
     """NEUTER: reduce the gate to position-only (drop !_turnFinishedClean) and
     prove a clean end_turn turn then WRONGLY shows Continue — i.e. the guard
     genuinely discriminates finish reason."""
-    src = _read_src()
-    cleanM = re.search(r'const _FINISH_CLEAN = (\[[^\]]*\]);', src)
-    assert cleanM, '_FINISH_CLEAN not found'
+    src = _read_settlement_src()
+    cleanM = re.search(_CLEAN_CONST_RE, src)
+    assert cleanM, '_TS_CLEAN_FINISH_REASONS not found'
     neutered_harness = _HARNESS.replace(
         'return isLastAssistant && !_turnFinishedClean;',
         'return isLastAssistant;  // NEUTER: position-only gate')
-    assert neutered_harness != _HARNESS
+    assert neutered_harness != _HARNESS, (
+        'NEUTER substitution did not apply — the gate expression in _HARNESS '
+        'changed shape; update this replacement.')
     harness = tmp_path / '_continue_gate_neutered.js'
     harness.write_text(neutered_harness, encoding='utf-8')
-    proc = subprocess.run(['node', str(harness), SRC_JS],
+    proc = subprocess.run(['node', str(harness), SETTLEMENT_JS],
                           capture_output=True, text=True, timeout=60)
     output = proc.stdout.strip()
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'

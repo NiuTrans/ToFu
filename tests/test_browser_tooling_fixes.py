@@ -115,8 +115,13 @@ def test_screenshot_override_clear_neuter_bites():
 # ── 2. fill_form clears + reverse pointers ──────────────────────────
 
 def test_fill_form_type_uses_type_text_not_append():
+    from tests._source_scan import python_block
     src = _src('lib/browser/advanced.py')
-    body = src[src.index('def fill_form_sequential'):src.index('def fill_form_sequential') + 2000]
+    # Brace/indent-matched body, not a fixed 2000-byte window: the real function
+    # is far longer than any constant we could pick, so a window TRUNCATES it
+    # and these POSITIVE assertions would pass only while the tokens happen to
+    # sit early. Move the dispatch down and the guard goes quietly green.
+    body = python_block(src, 'def fill_form_sequential')
     # The 'type' branch must send type_text with clearFirst, NOT keyboard_input.
     assert "'type_text'" in body
     assert "'clearFirst': True" in body
@@ -126,12 +131,16 @@ def test_fill_form_type_branch_no_longer_appends_via_keyboard():
     # Neuter/regression sentinel: the old code path used keyboard_input to type
     # the value (which appends). That specific pattern must be gone from the
     # 'type' branch so a pre-filled field is replaced, not concatenated.
+    from tests._source_scan import python_block
     src = _src('lib/browser/advanced.py')
-    start = src.index("if field_type == 'type':")
-    branch = src[start:start + 800]
+    # Indent-matched branch (charter #24 / pt_b95c6d39): the old
+    # ``src[start:start + 800]`` window stopped 5.6 KB short of this branch's
+    # real end, so a keyboard_input dispatch added past the cutoff would never
+    # be seen -- a NEGATIVE assertion that silently stops looking.
+    branch = python_block(src, "if field_type == 'type':")
     # The regression is CALLING keyboard_input to send the value. Match the
     # actual command dispatch (the word may still appear in an explanatory
-    # comment, which is fine).
+    # comment, which is fine -- python_block strips comments first).
     assert "send_browser_command('keyboard_input'" not in branch, (
         "the 'type' branch must not send keyboard_input for the value (that "
         "appends onto the existing field value)")

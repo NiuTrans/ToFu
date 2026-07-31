@@ -60,6 +60,7 @@ from lib.project_mod.run_command import (  # noqa: E402,F401
 from lib.project_mod.read_tools import (  # noqa: E402,F401
     _extract_symbols,
     _merge_same_file_ranges,
+    _normalize_line_range,
     _python_grep,
     tool_find_files,
     tool_find_files_batch,
@@ -936,6 +937,16 @@ def execute_standalone_command(fn_name, fn_args, working_dir=None, stdin_callbac
     return f'Unknown tool: {fn_name}'
 
 
+#: Tool names ``project_tool_display`` has a dedicated branch for. Kept adjacent
+#: to that if/elif chain so a new branch added there is added here in the same
+#: edit — ``format_tool_args_brief`` relies on this membership set.
+_PROJECT_DISPLAY_TOOLS = frozenset({
+    'list_dir', 'read_files', 'grep_search', 'find_files', 'create_project',
+    'write_file', 'apply_diff', 'apply_diffs',
+    'insert_content', 'insert_contents', 'run_command',
+})
+
+
 def project_tool_display(fn_name, fn_args):
     """Return a concise display string for a project tool call (no emoji prefix — added by frontend)."""
     if not isinstance(fn_args, dict):
@@ -973,6 +984,9 @@ def project_tool_display(fn_name, fn_args):
                 continue
             p = r.get('path', '?')
             sl, el = r.get('start_line'), r.get('end_line')
+            # Mirror the reversed-range repair execute_tool applies, so the
+            # chip shows the range actually read rather than the raw one.
+            sl, el, _ = _normalize_line_range(sl, el)
             grouped.setdefault(p, [])
             if sl is not None and el is not None:
                 grouped[p].append(f'L{sl}-{el}')
@@ -1097,4 +1111,78 @@ def project_tool_display(fn_name, fn_args):
         cmd = fn_args.get('command', '?')
         return cmd  # Full command without $ prefix — frontend adds it
     return fn_name
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Compact one-line args brief (swarm sub-agent timeline, timer poll trace)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _clip_brief(text, max_len):
+    if len(text) > max_len:
+        return text[:max_len - 1] + '…'
+    return text
+
+
+def _batch_terms_brief(items, key, singular_header):
+    """Extract ``key`` from a batch list of dicts/strings into a one-line brief."""
+    parts = []
+    for it in items:
+        if isinstance(it, dict):
+            parts.append(str(it.get(key) or '?'))
+        else:
+            parts.append(str(it))
+    if len(parts) == 1:
+        return parts[0]
+    return f"{len(parts)} {singular_header}: {'; '.join(parts)}"
+
+
+def format_tool_args_brief(fn_name, fn_args, max_len=200):
+    """Return a one-line human brief of a tool call's salient args.
+
+    Backs the compact per-call lines where the full
+    ``lib.tasks_pkg.tool_display`` round-entry rendering is too heavy: the
+    swarm panel's sub-agent tool timeline (live SSE + ``tool_log`` → reload
+    recovery) and the timer poll's toolTrace.
+
+    Extraction is name-keyed, so it is immune to LLM argument ORDERING — the
+    pre-fix ``str(fn_args)[:N]`` showed whatever key the model happened to
+    emit first (for ``write_file``/``apply_diff`` usually ``content``/
+    ``search``), hiding the path entirely.
+
+    Args:
+        fn_name: Canonical tool name.
+        fn_args: Argument dict, or a raw JSON string (coerced when possible).
+        max_len: Hard cap on the result (ellipsis marks truncation).
+
+    Returns:
+        e.g. ``Write lib/foo.py — add retry``, ``Read 3 files: a.py; b.py; c.py``,
+        the query for web_search, the URL for fetch_url, the command for
+        run_command, or a truncated repr for unknown tools.
+    """
+    if isinstance(fn_args, str):
+        import json
+        try:
+            parsed = json.loads(fn_args)
+        except (ValueError, TypeError) as e:
+            logger.debug('[ToolBrief] args string not JSON for %s: %s', fn_name, e)
+            parsed = None
+        if isinstance(parsed, dict):
+            fn_args = parsed
+        else:
+            return _clip_brief(fn_args, max_len)
+    if not isinstance(fn_args, dict):
+        return _clip_brief(str(fn_args), max_len)
+    if fn_name in _PROJECT_DISPLAY_TOOLS:
+        return _clip_brief(project_tool_display(fn_name, fn_args), max_len)
+    if fn_name == 'web_search':
+        queries = fn_args.get('queries')
+        if isinstance(queries, list) and queries:
+            return _clip_brief(_batch_terms_brief(queries, 'query', 'searches'), max_len)
+        return _clip_brief(str(fn_args.get('query') or 'web_search'), max_len)
+    if fn_name == 'fetch_url':
+        urls = fn_args.get('urls')
+        if isinstance(urls, list) and urls:
+            return _clip_brief(_batch_terms_brief(urls, 'url', 'URLs'), max_len)
+        return _clip_brief(str(fn_args.get('url') or 'fetch_url'), max_len)
+    return _clip_brief(str(fn_args), max_len)
 

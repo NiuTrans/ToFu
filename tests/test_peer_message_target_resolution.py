@@ -22,6 +22,7 @@ no-match. This suite proves — against a REAL seeded DB — that:
 
 from __future__ import annotations
 
+import contextlib
 import os
 import tempfile
 import time
@@ -30,6 +31,25 @@ import unittest
 import pytest
 
 pytestmark = pytest.mark.unit
+
+
+@contextlib.contextmanager
+def _fake_live_task(conv_id, *, task_id='livetask00001x'):
+    """Register a fake LIVE task for the duration of the block. With a live
+    (drain-eligible) target, send_peer_message keeps the durable row QUEUED
+    (the fast-path twin + completion hook own delivery) — the shape these
+    resolution tests assert. Without it the event-channel send-time idle
+    drain would deliver immediately and consume the row."""
+    from lib.tasks_pkg.manager import tasks, tasks_lock
+    t = {'id': task_id, 'convId': conv_id, 'status': 'running',
+         'aborted': False, 'config': {'model': 'm'}, 'toolRounds': []}
+    with tasks_lock:
+        tasks[task_id] = t
+    try:
+        yield t
+    finally:
+        with tasks_lock:
+            tasks.pop(task_id, None)
 
 
 class PeerMessageTargetResolutionTest(unittest.TestCase):
@@ -78,6 +98,10 @@ class PeerMessageTargetResolutionTest(unittest.TestCase):
         for cid in ('mr7hh5n6llzwnm', 'mr7hn42qp518zu',
                     'dupdupab1111aa', 'dupdupab2222bb'):
             clear_queue(cid)
+        # The busy-target path enqueues fast-path inbox twins — reset them too.
+        from lib import agent_inbox
+        for cid in ('mr7hh5n6llzwnm', 'mr7hn42qp518zu'):
+            agent_inbox.reset_for_test(cid)
 
     # ── the resolver itself ──────────────────────────────────────────
     def test_resolve_exact(self):
@@ -143,8 +167,12 @@ class PeerMessageTargetResolutionTest(unittest.TestCase):
         from lib.conversations.project_peer import send_peer_message
         from lib.message_queue import get_queue
 
-        res = send_peer_message('/proj', self._sender, self._target_short,
-                                'watch the parser epic')
+        # Busy target: the event-channel send-time drain defers (the twin +
+        # completion hook own delivery), so the durable row stays QUEUED —
+        # the resolution-keyed shape this test asserts.
+        with _fake_live_task(self._target_full):
+            res = send_peer_message('/proj', self._sender, self._target_short,
+                                    'watch the parser epic')
         self.assertTrue(res.get('ok'), f'send failed: {res}')
 
         # The queue must be keyed on the FULL id (what dequeue_next reads) …
@@ -160,7 +188,8 @@ class PeerMessageTargetResolutionTest(unittest.TestCase):
     def test_full_id_message_still_works(self):
         from lib.conversations.project_peer import send_peer_message
         from lib.message_queue import get_queue
-        res = send_peer_message('/proj', self._sender, self._target_full, 'hi')
+        with _fake_live_task(self._target_full):
+            res = send_peer_message('/proj', self._sender, self._target_full, 'hi')
         self.assertTrue(res.get('ok'))
         self.assertEqual(len(get_queue(self._target_full)), 1)
 

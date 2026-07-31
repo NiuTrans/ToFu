@@ -290,6 +290,15 @@ def write_text_atomic(path: str, text: str, *, fsync: bool = True,
                 except OSError as _e_audit:
                     logger.debug('[json_store] write_text_atomic caught %s: %s', type(_e_audit).__name__, _e_audit)
                     pass
+            # Big one-shot JSON (server_config, history, manifests) is
+            # write-once/read-rarely — drop its just-written pages from the
+            # page cache so they stop counting against a shared cgroup limit
+            # (lib/cgroup_guard context, 2026-07-27). Pure hint, no-op off-Linux.
+            if len(text) >= 262144:
+                try:
+                    os.posix_fadvise(f.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
+                except (OSError, AttributeError) as e:
+                    logger.debug('[json_store] fadvise DONTNEED skipped: %s', e)
         os.replace(tmp, path)
     except BaseException:
         with contextlib.suppress(OSError):

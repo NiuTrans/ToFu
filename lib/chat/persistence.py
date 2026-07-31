@@ -115,6 +115,31 @@ def load_or_create_conv(db, conv_id, config, payload):
     return [], True, title
 
 
+def settled_turn_facts(last_msg):
+    """Derive the sidebar's settled-turn facts from the tail message.
+
+    Single source of truth for the ``lastMsgRole`` / ``lastMsgTimestamp`` /
+    ``lastFinishReason`` / ``lastMsgError`` / ``lastMsgHasOutput`` settings
+    quintet the meta-only sidebar shell classifies its status dot from. RAW
+    facts only — the incomplete/errored CLASSIFICATION stays in the
+    frontend's ``_convStatusFlags``. Every write path that rebuilds the
+    settings column from a messages array MUST re-derive these from that
+    array's authoritative tail (never trust a client-echoed copy) — the
+    full-conv PUT handler previously omitted them, so any client sync
+    silently clobbered the manager-stamped error facts and the unloaded
+    sidebar shell lost its error dot.
+    """
+    return {
+        'lastMsgRole': last_msg.get('role'),
+        'lastMsgTimestamp': last_msg.get('timestamp'),
+        'lastFinishReason': last_msg.get('finishReason'),
+        'lastMsgError': bool(last_msg.get('error')),
+        'lastMsgHasOutput': bool(
+            (last_msg.get('content') or '') or (last_msg.get('thinking') or '')
+            or (last_msg.get('toolRounds') or []) or last_msg.get('_igResults')),
+    }
+
+
 def persist_conv_messages(db, conv_id, messages, title, settings_patch=None):
     """Write messages + metadata to the conversation row.
 
@@ -153,14 +178,7 @@ def persist_conv_messages(db, conv_id, messages, title, settings_patch=None):
     # bool / has-output bool); the incomplete/errored CLASSIFICATION stays in
     # the frontend's _convStatusFlags so there is a single classifier.
     if messages:
-        last = messages[-1]
-        settings_update['lastMsgRole'] = last.get('role')
-        settings_update['lastMsgTimestamp'] = last.get('timestamp')
-        settings_update['lastFinishReason'] = last.get('finishReason')
-        settings_update['lastMsgError'] = bool(last.get('error'))
-        settings_update['lastMsgHasOutput'] = bool(
-            (last.get('content') or '') or (last.get('thinking') or '')
-            or (last.get('toolRounds') or []) or last.get('_igResults'))
+        settings_update.update(settled_turn_facts(messages[-1]))
 
     # Merge with existing settings AND preserve original created_at
     existing = db.execute(
@@ -194,8 +212,38 @@ def persist_conv_messages(db, conv_id, messages, title, settings_patch=None):
     update_conversation_fts(db, conv_id, search_text)
     # Phase 5 dual-write (flag-gated, best-effort): mirror the JSONB array into
     # conversation_messages rows. No-op unless TOFU_MESSAGES_ROWS; never raises.
-    from lib.database.messages_rows import dual_write_conv
+    #
+    # P1 durability (pt_7e4afe73, 2026-07-24): commit the mirror rows RIGHT
+    # HERE, not deep inside dual_write_conv, and NOT at the caller. Reasoning:
+    #   * The authoritative JSONB write above went through upsert(retry=True)
+    #     which routes to db_execute_with_retry(commit=True) — so the JSONB
+    #     row is already committed and the current transaction on ``db`` is
+    #     empty when dual_write_conv runs.
+    #   * update_conversation_fts (line above) also commits internally on
+    #     SQLite (no-op on PG).
+    #   * Therefore the ONLY writes sitting in the current implicit
+    #     transaction at this point are the mirror rows dual_write_conv just
+    #     inserted. Committing here can NOT prematurely flush any other
+    #     pending caller-side writes (there aren't any — see JOURNAL 续15's
+    #     transaction-boundary caveat: it applies to arbitrary mid-flow
+    #     commits, NOT to a commit that immediately follows our own writes
+    #     with a clean prior state).
+    #   * Best-effort per dual_write_conv's contract — swallow exceptions so
+    #     a mirror-side failure cannot break the JSONB write path. The
+    #     mirror's parity gate (verify_conv_parity) is the load-bearing
+    #     check for whether reads can safely flip to rows.
+    from lib.database.messages_rows import dual_write_conv, rows_write_enabled
     dual_write_conv(db, conv_id, messages, now_ms=now_ms)
+    if rows_write_enabled():
+        # Only commit when dual_write actually ran; keep the flag-off path
+        # byte-identical to the pre-fix behaviour.
+        try:
+            db.commit()
+        except Exception as _p1_commit_e:
+            logger.warning('[chat] persist_conv_messages: mirror-row commit '
+                           'failed conv=%s (non-fatal, JSONB truth is already '
+                           'committed): %s',
+                           conv_id[:8] if conv_id else '?', _p1_commit_e)
 
     # Read back the post-write rev — the ``conversations_rev_bump_trg`` trigger
     # advanced it in the SAME statement as this upsert (on a genuine messages
@@ -315,6 +363,9 @@ def append_pending_user_msg(db, conv_id, user_msg, valid_assistant_ids=None):
              DEFAULT_USER_ID, cur_rev))
         db.commit()
         if getattr(cur, 'rowcount', None) != 0:
+            # Phase 5 dual-write (flag-gated, inert when off): tail append.
+            from lib.database.messages_rows import mirror_write_and_commit
+            mirror_write_and_commit(db, conv_id, messages, now_ms=now_ms)
             try:
                 rev_row = db.execute(
                     'SELECT rev FROM conversations WHERE id=? AND user_id=?',
@@ -341,4 +392,5 @@ __all__ = [
     'load_or_create_conv',
     'persist_conv_messages',
     'append_pending_user_msg',
+    'settled_turn_facts',
 ]

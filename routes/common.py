@@ -7,6 +7,7 @@ Split from the original monolithic common.py:
   routes/translate.py      — Translation (sync + async)
 """
 
+import json
 import os
 import re
 import time
@@ -24,6 +25,8 @@ from lib.settings_panels import inject_panels as _inject_settings_panels, panels
 from lib.js_bundler import (
     get_bundle_script_tag_nonblocking as _get_bundle_tag,
     get_feature_bundle_filename_nonblocking as _get_feature_bundle_filename,
+    get_i18n_pack_tag as _get_i18n_pack_tag,
+    get_i18n_pack_urls as _get_i18n_pack_urls,
 )
 from lib.log import get_logger
 from lib.api_response import api_bad_request, api_internal_error, api_ok
@@ -117,6 +120,43 @@ from lib.conversations.meta_cache import (  # noqa: E402,F401  — re-exported f
     notify_conv_changed as _notify_conv_changed,
     refresh_meta_cache_if_stale as _refresh_meta_cache_if_stale,
 )
+
+
+def _request_user_id():
+    """Resolve the effective user_id for the current request thread.
+
+    Returns the authenticated ``AuthContext.user_id`` when a login-bound
+    session is present, else falls back to ``DEFAULT_USER_ID = 1``. Callable
+    from any route handler; safe outside a request context (returns the
+    default without raising).
+
+    pt_abae3a85a92440fd (2026-07-25): the standard helper for threading
+    request-thread user_id into ``notify_conv_changed`` and adjacent
+    seams. Owner-approved wire (DO IT NOW): route callers use this, and
+    background threads read ``task['_userId']`` via ``task_user_id`` (from
+    lib.tasks_pkg.manager._registry), both landing at the same
+    notify_conv_changed signature already accepting ``user_id=``.
+
+    NOTE: single-user default (empty AuthContext.user_id) is preserved
+    byte-identically — c6d1bd71 already coerces ``user_id == DEFAULT_USER_ID``
+    to unscoped for the snapshot projection.
+    """
+    try:
+        from routes.api_v1.auth import current_auth
+        ctx = current_auth()
+    except Exception as _e:  # noqa: BLE001 — outside request context / test env
+        logger.debug('request user id: failed (%s)', _e)
+        return DEFAULT_USER_ID
+    uid = getattr(ctx, 'user_id', '') if ctx is not None else ''
+    if not uid:
+        return DEFAULT_USER_ID
+    # If it looks like a numeric string, coerce so downstream str/int
+    # comparisons behave uniformly with existing DEFAULT_USER_ID=1 semantics.
+    try:
+        return int(uid) if str(uid).isdigit() else uid
+    except (TypeError, ValueError) as _e:
+        logger.debug('request user id: unexpected type/unparseable (%s)', _e)
+        return uid
 
 
 # ══════════════════════════════════════════════════════
@@ -282,6 +322,28 @@ def dispatch_endpoint_metrics():
     return jsonify(aggregate_endpoint_metrics(slots))
 
 
+@api_v1_common_bp.route('/api/v1/dispatch/model-health', methods=['GET'])
+def dispatch_model_health():
+    """Return per-(provider, wire-model) runtime health for the Settings
+    model cards: success rate, error counts, consecutive-error streaks, and
+    any ACTIVE cooldown (the error-rate throttling imposed after repeated
+    failures) with its remaining seconds + reason.
+
+    Response: ``{providers: {provider_id: {model: {...}}}, ts}`` — see
+    ``lib.dispatch_stats.aggregate_model_health`` for the row shape.
+    """
+    try:
+        from lib.llm_dispatch import get_dispatcher
+        d = get_dispatcher()
+        slots = d.get_slots_info()
+    except Exception as e:
+        logger.warning('[dispatch/model-health] Failed: %s', e, exc_info=True)
+        return jsonify({'providers': {}, 'ts': time.time()})
+
+    from lib.dispatch_stats import aggregate_model_health
+    return jsonify(aggregate_model_health(slots))
+
+
 @api_v1_common_bp.route('/api/v1/dispatch/key-stats', methods=['GET'])
 def dispatch_key_stats():
     """Return today's success/failure counts per API key.
@@ -361,7 +423,38 @@ FAVICON_SVG = '''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
 # ── Cached bundled index.html (avoids re-reading + regex on every page load) ──
 # Keyed by (bundle_tag, styles_link_tag, html_mtime) so any of those changing
 # triggers a re-render of the cached HTML.
-_bundled_index_cache = {'tag': None, 'styles_tag': None, 'feature': None, 'html': None, 'mtime': 0, 'panels': None}
+_bundled_index_cache = {'tag': None, 'styles_tag': None, 'feature': None, 'html': None, 'mtime': 0, 'panels': None, 'lang': None}
+
+# ── UI language as a SERVER-VISIBLE signal (Epic-E sub-part 1, owner-approved) ──
+# The UI language has always lived in localStorage['tofu_ui_lang'], which the
+# server cannot read. That made a per-language bundle impossible: an eagerly
+# shipped single-language pack must be chosen at serve time by a server with no
+# way to choose (see tests/test_i18n_split_blocked_on_lang_signal.py).
+#
+# Owner picked option A: mirror the language into a cookie so the server CAN
+# choose. localStorage stays AUTHORITATIVE for the client; the cookie is a
+# write-through mirror maintained by i18n.js (on boot and in setLanguage). The
+# server only ever READS it, and treats anything unrecognised as the default —
+# a hostile or stale cookie can therefore only ever select a real language,
+# never inject a filename.
+_UI_LANG_COOKIE = 'tofu_ui_lang'
+_UI_LANGS = ('zh', 'en')
+_UI_LANG_DEFAULT = 'zh'
+
+
+def request_ui_lang():
+    """Resolve the UI language for the current request from its cookie.
+
+    Returns one of ``_UI_LANGS``, defaulting to ``_UI_LANG_DEFAULT``. Safe to
+    call outside a request context. The whitelist is the security boundary:
+    the value reaches a bundle filename, so it must never be attacker-shaped.
+    """
+    try:
+        raw = (request.cookies.get(_UI_LANG_COOKIE) or '').strip().lower()
+    except Exception as e:  # noqa: BLE001 — no request context (tests, workers)
+        logger.debug('[Index] ui-lang cookie unavailable: %s', e)
+        return _UI_LANG_DEFAULT
+    return raw if raw in _UI_LANGS else _UI_LANG_DEFAULT
 
 # Regex: match contiguous block of app script tags + interleaved HTML comments/blank lines.
 # Two important details:
@@ -455,6 +548,7 @@ def _serve_raw_index_with_panels():
 def index_page():
     bundle_tag = _get_bundle_tag()
     styles_tag = _get_styles_link_tag()
+    ui_lang = request_ui_lang()
     if not bundle_tag:
         # Bundling failed — serve original index.html with individual scripts
         # (panels still spliced in so the settings modal isn't crippled).
@@ -476,6 +570,19 @@ def index_page():
     else:
         feature_tag = ''
 
+    # i18n single-language pack (Epic-E sub-part 1 slice 2). When the core
+    # bundle excludes i18n.js, its per-language replacement MUST be injected
+    # BEFORE the bundle tag (both are defer; document order decides), or t()
+    # is undefined for every module. The pack URLs let setLanguage() fetch
+    # the other language on demand. Both are None in the dual-bundle
+    # fallback — inject nothing then, the dictionary is already in the bundle.
+    pack_tag = _get_i18n_pack_tag(ui_lang) or ''
+    pack_urls = _get_i18n_pack_urls()
+    i18n_tag = (pack_tag + '\n') if pack_tag else ''
+    if pack_urls:
+        i18n_tag += ('<script>window.__I18N_PACK_URLS__='
+                     + json.dumps(pack_urls) + ';</script>\n')
+
     # Use cached version if bundle tag, styles tag, AND index.html mtime
     # are all unchanged. Any of those changing → rebuild the served HTML.
     html_path = os.path.join(BASE_DIR, 'index.html')
@@ -490,6 +597,8 @@ def index_page():
             and _bundled_index_cache['feature'] == feature_tag
             and _bundled_index_cache['mtime'] == html_mtime
             and _bundled_index_cache['panels'] == panels_sig
+            and _bundled_index_cache['lang'] == ui_lang
+            and _bundled_index_cache.get('i18n') == i18n_tag
             and _bundled_index_cache['html']):
         resp = make_response(_bundled_index_cache['html'])
         resp.content_type = 'text/html; charset=utf-8'
@@ -505,9 +614,10 @@ def index_page():
         with open(html_path, 'r', encoding='utf-8') as f:
             html = f.read()
 
+        # Pack tag FIRST (t() must be defined before the bundle executes),
         # feature_tag prepended so window.__FEATURE_BUNDLE_SRC__ is defined
         # BEFORE the core bundle (which contains feature-loader.js) executes.
-        html = _APP_SCRIPTS_RE.sub(feature_tag + bundle_tag + '\n', html)
+        html = _APP_SCRIPTS_RE.sub(i18n_tag + feature_tag + bundle_tag + '\n', html)
         html = _APP_STYLES_RE.sub(styles_tag, html)
         html = _SETTINGS_STYLES_RE.sub(_get_settings_link_tag(), html)
         # Splice decoupled settings-panel fragments back in at their markers
@@ -520,6 +630,8 @@ def index_page():
         _bundled_index_cache['styles_tag'] = styles_tag
         _bundled_index_cache['feature'] = feature_tag
         _bundled_index_cache['panels'] = panels_sig
+        _bundled_index_cache['lang'] = ui_lang
+        _bundled_index_cache['i18n'] = i18n_tag
         _bundled_index_cache['html'] = html
         _bundled_index_cache['mtime'] = html_mtime
 

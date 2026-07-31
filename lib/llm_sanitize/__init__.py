@@ -15,6 +15,7 @@ Public surface
 - :func:`_fix_orphaned_tool_calls` — defensive Anthropic tool_use/tool_result fixer
 - :func:`_fix_tool_call_adjacency` — Anthropic adjacency requirement enforcer
 - :func:`_fix_empty_user_messages` — replace empty user content with placeholder
+- :func:`_drop_empty_assistant_messages` — drop pure-ghost assistant messages
 - :func:`_merge_consecutive_same_role` — merge consecutive user/assistant pairs
 
 These functions are pure data transformations with no I/O side effects
@@ -64,6 +65,7 @@ from lib.llm_sanitize._toolcalls import (  # noqa: E402,F401
 # ══════════════════════════════════════════════════════════
 
 from lib.llm_sanitize._messages import (  # noqa: E402,F401
+    _drop_empty_assistant_messages,
     _fix_empty_user_messages,
     _merge_consecutive_same_role,
 )
@@ -79,5 +81,6 @@ __all__ = [
     '_fix_orphaned_tool_calls',
     '_fix_tool_call_adjacency',
     '_fix_empty_user_messages',
+    '_drop_empty_assistant_messages',
     '_merge_consecutive_same_role',
 ]

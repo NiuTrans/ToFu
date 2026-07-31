@@ -44,7 +44,18 @@ function _renderTranslatingBubble(label) {
         <div class="stream-status"><div class="pulse"></div> ${_label}</div>
       </div>
     </div>`;
-  inner.appendChild(el);
+  /* Tail insert via the shared furniture-aware primitive: a raw appendChild
+   * lands BELOW `#_lazyLoadSentinelBottom` when a lazy window has evicted the
+   * tail, putting this placeholder under the "⬇ N newer messages" strip. */
+  if (typeof chatInnerInsert === 'function') {
+    chatInnerInsert(inner, el, {
+      position: 'tail',
+      conv: (typeof getActiveConv === 'function') ? getActiveConv() : null,
+      site: '_renderTranslatingBubble',
+    });
+  } else {
+    inner.appendChild(el);
+  }
   /* ★ Real-height scroll (see sendMessage): plain scrollToBottom under-measures
    *   against content-visibility:auto estimates and lands mid-history. */
   _forceScrollToBottom(null, true);
@@ -67,12 +78,9 @@ function _renderStreamingBubble(conv, sendConfig, msgId) {
   // per-round translation partials can be routed to it while it streams.
   /* ★ Dedup at the insert boundary via ConvView.startStreaming (_evictByMsgId)
    *   so a residual #streaming-msg / drifted static twin can't leave a second
-   *   empty bubble. Fallback keeps dev-mode parity. */
-  if (window.ConvView && typeof window.ConvView.startStreaming === 'function') {
-    window.ConvView.startStreaming(conv.id, { role, msgId: msgId || null });
-  } else {
-    inner.insertAdjacentHTML('beforeend', _streamingBubbleHTML(role, null, null, msgId || null));
-  }
+   *   empty bubble. No raw fallback — the boot-time ConvView hard check
+   *   (main.js) turns a missing seam into a loud startup failure. */
+  window.ConvView.startStreaming(conv.id, { role, msgId: msgId || null });
   const el = document.getElementById('streaming-msg');
   if (el) {
     el.classList.add('message-new');

@@ -1,13 +1,29 @@
-"""Tool execution for the paper-report agent.
+"""Tool execution for the paper-report agent — a THIN ADAPTER over chat's seams.
 
-Reuses chat mode's web_search / fetch_url helpers (``_web_search_one`` /
-``_fetch_url_one`` from ``lib.tasks_pkg.handlers.search``) so read-mode tool
-rounds emit the EXACT same display schema the frontend's
-``renderToolRoundsHTML`` expects — vertical cards, engine-source breakdown,
-filtered-vs-raw char counts, File-Asset staging labels, rejected-scheme rows.
-Never re-implement the search/fetch call here: a parallel implementation
-silently drops whatever fields the chat helper computes.
+Two execution families, both owned by chat and reused here:
+
+* ``web_search`` / ``fetch_url`` — chat's helpers (``_web_search_one`` /
+  ``_fetch_url_one`` from ``lib.tasks_pkg.handlers.search``) so read-mode tool
+  rounds emit the EXACT same display schema the frontend's
+  ``renderToolRoundsHTML`` expects — vertical cards, engine-source breakdown,
+  filtered-vs-raw char counts, File-Asset staging labels, rejected-scheme rows.
+  Never re-implement the search/fetch call here: a parallel implementation
+  silently drops whatever fields the chat helper computes.
+* everything else (read_files / code_exec / memory / todo / scheduler / …) —
+  routed through the SHARED single-tool dispatch
+  (``lib.tasks_pkg.executor._execute_tool_one``), so the exact handlers chat
+  runs serve the paper engines too. ``_execute_report_tool`` only translates
+  paper's 5-tuple result contract + event/display schema; per-tool branches
+  must NEVER grow here (charter: fix the chassis, don't patch the caller).
+
+Also here: ``make_paper_exec_shim`` (the task-dict shim the shared dispatch
+expects, with the explicit unattended auto-approval policy), ``cap_tool_result``
+(the honest bounding contract — chat's spill-to-disk where read_files can page
+the result back, an explicit TRUNCATED marker where it cannot), and
+``paper_effective_tool_name`` (the no-project run_command → code_exec flip).
 """
+
+import json
 
 from lib.log import get_logger
 from lib.tasks_pkg.handlers._adapter import run_batch_concurrent
@@ -35,11 +51,168 @@ logger = get_logger(__name__)
 # Re-exported canonical helpers (chat's seams) the paper engines import from
 # this module. Listed here so the re-export is intentional, not dead code.
 __all__ = ['_execute_report_tool', 'parse_and_repair_tool_args', 'display_query_for',
-           'make_research_tool_executor']
+           'make_research_tool_executor', 'make_paper_exec_shim', 'cap_tool_result',
+           'paper_effective_tool_name']
+
+
+def paper_effective_tool_name(fn_name):
+    """The dispatch/display tool name for a call in a paper (project-less) engine.
+
+    Mirrors chat's tool_display override (``_build_tool_round_entry``): with no
+    project attached, ``run_command`` IS the standalone code_exec tool (its
+    schema is a deepcopy of the project run_command schema), and the registry
+    keys its special ``__code_exec__`` handler + the frontend's terminal-block
+    rendering off ``round_entry['toolName'] == 'code_exec'`` — not
+    ``'run_command'``. Without this flip a paper ``run_command`` call would
+    fall through to the PROJECT handler and die with "No project path".
+    """
+    from lib.tools import CODE_EXEC_TOOL_NAMES
+    if fn_name in CODE_EXEC_TOOL_NAMES:
+        return 'code_exec'
+    return fn_name
+
+
+def make_paper_exec_shim(*, task_id, conv_id='', abort=None, cfg=None):
+    """Build the shim task dict the SHARED dispatch (``_execute_tool_one``)
+    expects, for a headless paper engine run.
+
+    Approval policy (EXPLICIT — do not change silently): chat's write-approval
+    gate lives in the batch pipeline and fires ONLY for ATTENDED tasks (a
+    human must be present to answer); unattended / headless chat tasks
+    auto-apply. Paper engines are unattended by construction — there is no
+    human to prompt — so they inherit chat's own unattended semantics:
+    write-partition tools (memory CRUD, scheduler create/manage, MCP tools)
+    execute without a prompt, and EVERY such call is recorded via
+    ``audit_log('paper_tool_auto_approve', …)`` in ``_execute_shared_tool``.
+    Never route a paper engine through the attended pipeline (a background
+    task must never block on a click that cannot happen), and never strip the
+    audit trail (it is the visible record of this policy).
+
+    ``_suppressEvents`` follows the swarm sub-agent precedent
+    (``lib/tasks_pkg/manager/_events.py:append_event``): the inner handler's
+    ``_finalize_tool_round`` / progress events never leak onto a stream — the
+    paper engines emit their OWN ``tool_start`` / ``tool_done`` events from
+    the finalized ``round_entry``.
+    """
+    return {
+        'id': task_id,
+        'convId': conv_id,
+        '_suppressEvents': True,
+        # Mirrored from the engine's abort predicate on EVERY call by
+        # _execute_shared_tool (the shared dispatch reads task['aborted']).
+        'aborted': bool(abort and abort()),
+        '_abort': abort,
+        '_cfg': dict(cfg or {}),
+    }
+
+
+def cap_tool_result(content, tool_name, tool_use_id='', *, conv_id='',
+                    can_read=False):
+    """Bound a tool result before it enters the message history — honestly.
+
+    Paper engines ride ``run_agent_loop``, which has NO compaction layer, and
+    historically HARD-TRUNCATED every tool result at 30k chars — silently
+    dropping the tail (the model then hallucinated the missing content). Chat's
+    Layer-0 (``compaction/_budget``) instead spills oversized results to disk
+    with a preview + path the model pages back via read_files. This helper
+    gives each engine family the honest version of that contract:
+
+    * ``can_read=True`` (report / Q&A — full tool set incl. read_files): spill
+      via the SAME ``_persist_to_disk`` chat uses; the returned summary carries
+      real file paths the model CAN open (read_files is in its tool set).
+    * ``can_read=False`` (insight / recommend / ideate — research-only set, no
+      read_files): truncate with an EXPLICIT marker naming the dropped size,
+      so the model knows the content is incomplete instead of guessing.
+    """
+    from lib.tasks_pkg.compaction._constants import (
+        _DEFAULT_TOOL_RESULT_MAX,
+        TOOL_RESULT_MAX_CHARS,
+    )
+    if not isinstance(content, str):
+        return content
+    cap = TOOL_RESULT_MAX_CHARS.get(tool_name, _DEFAULT_TOOL_RESULT_MAX)
+    # A 0 table value means BUDGET-EXEMPT (e.g. read_files — chat's L0 never
+    # caps it, see _BUDGET_EXEMPT_TOOLS): pass through whole, never spill.
+    if not cap or len(content) <= cap:
+        return content
+    if can_read:
+        from lib.tasks_pkg.compaction._persist import _persist_to_disk
+        return _persist_to_disk(content, tool_name, tool_use_id, conv_id)
+    logger.info('[Paper:Tool] %s result %d chars over %d budget — explicit '
+                'truncation (engine has no read_files)', tool_name,
+                len(content), cap)
+    return (
+        f'{content[:cap]}\n\n'
+        f'[TRUNCATED — the tool result was {len(content):,} chars, over the '
+        f'{cap:,}-char budget for "{tool_name}". The tail was dropped and is '
+        f'NOT recoverable in this engine (no read_files tool). Do NOT '
+        f'fabricate the missing content — narrow the query and retry if you '
+        f'need it.]'
+    )
+
+
+def _execute_shared_tool(name, args, shim, round_entry, abort):
+    """Route one non-search tool call through chat's SHARED single-tool dispatch.
+
+    Returns the same 5-tuple ``_execute_report_tool`` produces for search
+    tools; the display payload is whatever the chat handler finalized onto
+    ``round_entry['results']`` (a ``_build_simple_meta`` / project-meta list —
+    the exact shape ``renderToolRoundsHTML`` already renders for chat).
+    """
+    from lib.log import audit_log
+    from lib.tasks_pkg.executor import _execute_tool_one
+    from lib.tasks_pkg.tool_dispatch._flags import _WRITE_TOOLS
+
+    # Refresh the abort mirror — the shared dispatch reads task['aborted'].
+    shim['aborted'] = bool(abort and abort())
+
+    tc_id = (round_entry or {}).get('toolCallId', '')
+    # Unattended auto-approval — explicit + audited (see make_paper_exec_shim).
+    # MCP tools get chat's conservative default-write classification.
+    if name in _WRITE_TOOLS or name.startswith('mcp__'):
+        audit_log('paper_tool_auto_approve', tool=name,
+                  task_id=shim.get('id', ''),
+                  reason='unattended_headless_engine')
+        logger.info('[Paper:Tool] auto-approved write-partition tool %s '
+                    '(unattended engine, task=%s)', name,
+                    str(shim.get('id', ''))[:8])
+
+    tc = {'id': tc_id,
+          'function': {'name': name,
+                       'arguments': json.dumps(args, ensure_ascii=False)}}
+    try:
+        _tc_id, content, _is_search = _execute_tool_one(
+            shim, tc, name, tc_id, args,
+            (round_entry or {}).get('roundNum', 0),
+            round_entry if round_entry is not None
+            else {'query': name, 'toolCallId': tc_id},
+            shim.get('_cfg') or {}, None, False)
+    except Exception as e:
+        logger.error('[Paper:Tool] shared dispatch of %s failed: %s',
+                     name, e, exc_info=True)
+        return (f'Error: tool "{name}" execution failed: {e}',
+                [], None, None, None)
+
+    # Image reads come back as a __screenshot__ DICT — the paper message
+    # channel is text-only, so degrade to the text fallback with an explicit
+    # note instead of crashing on dict slicing downstream.
+    if isinstance(content, dict):
+        if content.get('__screenshot__'):
+            fallback = content.get('_text_fallback') or ''
+            content = (
+                (fallback + '\n\n' if fallback else '')
+                + f"[Image loaded: {content.get('filename', '?')} — the paper "
+                  "channel is text-only, so the image itself is not attached. "
+                  "Work from the fallback text above or the file path.]")
+        else:
+            content = json.dumps(content, ensure_ascii=False)
+
+    display = list((round_entry or {}).get('results') or [])
+    return content, display, None, None, None
 
 
 def _execute_report_tool(name, args_str, user_question='', abort=None,
-                         force_vertical=None):
+                         force_vertical=None, exec_shim=None, round_entry=None):
     """Execute a tool call from the report agent.
 
     Args:
@@ -60,6 +233,15 @@ def _execute_report_tool(name, args_str, user_question='', abort=None,
             lookup always consults the arXiv / Semantic Scholar JSON APIs
             (whose uptime is independent of the HTML-engine fleet and its
             per-engine circuit breakers), rather than hoping the model asks.
+        exec_shim: optional shim task dict from ``make_paper_exec_shim``. When
+            provided, ANY tool name beyond web_search / fetch_url is routed
+            through chat's shared single-tool dispatch (full-set engines:
+            report + Q&A). When absent (research-only engines), unknown names
+            keep the legacy ``Unknown tool`` reply — a hallucinated tool name
+            can never escape into the shared dispatch.
+        round_entry: the caller's chat-shaped round entry dict. The shared
+            handler finalizes it in place (``results`` + ``status``), and the
+            adapter returns those results as the display payload.
 
     Returns:
         tuple: (tool_content_str, display_results, search_diag, engine_breakdown, verticals)
@@ -233,7 +415,13 @@ def _execute_report_tool(name, args_str, user_question='', abort=None,
         return '\n\n---\n\n'.join(all_parts), all_display, None, None, None
 
     else:
-        return f'Unknown tool: {name}', [], None, None, None
+        # ── Full-set branch: every non-search tool goes through chat's SHARED
+        #    dispatch — never grow parallel per-tool branches here. Engines
+        #    without a shim (research-only set) keep the legacy Unknown-tool
+        #    reply so a hallucinated name stops at the adapter.
+        if exec_shim is None:
+            return f'Unknown tool: {name}', [], None, None, None
+        return _execute_shared_tool(name, args, exec_shim, round_entry, abort)
 
 
 
@@ -309,7 +497,10 @@ def make_research_tool_executor(messages, *, user_question, abort_signal,
             on_tool_event(done_ev)
 
         messages.append({
-            'role': 'tool', 'tool_call_id': tc_id, 'content': result[:30000],
+            'role': 'tool', 'tool_call_id': tc_id,
+            # Research-only engines have no read_files — bound HONESTLY (an
+            # explicit TRUNCATED marker) instead of the old silent 30k slice.
+            'content': cap_tool_result(result, fn_name, tc_id, can_read=False),
         })
 
     return _execute_tool

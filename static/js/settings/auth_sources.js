@@ -8,8 +8,16 @@
      2. "在浏览器中打开登录页" opens the site's login page in the USER's
         OWN browser tab (window.open) — NOT the server's browser. This is
         the key correctness fix: the server may be remote/headless.
-     3. User logs in there, copies the Cookie request header from devtools,
-        pastes it back here, and saves.
+     3. User logs in there, copies each required cookie's VALUE from
+        devtools into its own labelled input, and saves.
+
+   Why one input per cookie instead of one textarea? A single free-text
+   "paste the whole Cookie header" box makes the user responsible for the
+   `name=value; name=value` syntax, and a mistyped delimiter stored a
+   garbage cookie set that the UI then reported as "已连接" — the failure
+   only surfaced later as an unexplained empty fetch. The fields are
+   declared server-side (lib/auth_sources.py DEFAULT_SOURCES) and arrive
+   on each source row, so this file hardcodes no per-site knowledge.
 
    Why not auto-capture? A page on Tofu's origin cannot read another site's
    cookies (cross-origin + HttpOnly web_session). Without a browser
@@ -19,18 +27,6 @@
 
    Concatenated by lib/js_bundler.py — shared window scope, no imports.
    ═══════════════════════════════════════════════════════════════════ */
-
-// Per-domain login landing pages for the "open login page" button.
-var _AUTH_SRC_LOGIN_URLS = {
-  'xiaohongshu.com': 'https://www.xiaohongshu.com/explore',
-};
-
-// Per-domain "which cookie actually carries the login session" hint. The
-// store keeps the whole Cookie header, but flagging the critical one helps
-// users confirm they grabbed the right thing. Shown in the connect panel.
-var _AUTH_SRC_KEY_COOKIE = {
-  'xiaohongshu.com': 'web_session',
-};
 
 function _renderAuthSources() {
   var box = document.getElementById('authSourcesList');
@@ -94,37 +90,60 @@ function _authSourceCardHtml(src) {
         ${raw(primaryBtn)}
         ${raw(disconnectBtn)}
       </div>
-      ${raw(_authSourceConnectPanel(dom, id))}
+      ${raw(_authSourceConnectPanel(src, dom, id))}
       <div class="auth-src-msg" id="authSrcMsg_${raw(id)}"></div>
     </div>`;
 }
 
-function _authSourceConnectPanel(dom, id) {
-  var hasLoginUrl = !!_AUTH_SRC_LOGIN_URLS[dom];
-  var step1 = hasLoginUrl
+/** One labelled input per declared cookie. Falls back to a single generic
+ *  field when the server declares none (an unknown//custom domain). */
+function _authSourceFieldRows(src, id) {
+  var fields = (src && src.fields) || [];
+  if (!fields.length) {
+    fields = [{ name: 'cookie', importance: 'required' }];
+  }
+  return fields.map(function (f, i) {
+    var imp = f.importance || 'optional';
+    var badge = imp === 'required'
+      ? (t('settings.authSrcRequired') || '必填')
+      : (imp === 'recommended' ? (t('settings.authSrcRecommended') || '建议填写')
+                               : (t('settings.authSrcOptional') || '可选'));
+    return safeHtml`
+      <div class="auth-src-field">
+        <label class="auth-src-field-label" for="authSrcField_${raw(id)}_${raw(String(i))}">
+          <code>${f.name}</code>
+          <span class="auth-src-field-badge ${raw(imp)}">${badge}</span>
+        </label>
+        <input type="text" class="auth-src-field-input" spellcheck="false" autocomplete="off"
+               id="authSrcField_${raw(id)}_${raw(String(i))}"
+               data-cookie-name="${f.name}" data-importance="${imp}"
+               placeholder="${(t('settings.authSrcFieldPh') || '粘贴 {name} 的值').replace('{name}', f.name)}">
+      </div>`;
+  }).join('');
+}
+
+function _authSourceConnectPanel(src, dom, id) {
+  var loginUrl = (src && src.login_url) || '';
+  var step1 = loginUrl
     ? safeHtml`
       <li>
         <span class="auth-src-step-txt">${t('settings.authSrcStep1') || '在你自己的浏览器中打开该站点并登录'}</span>
-        <button class="auth-src-btn sm" onclick="_authSourceOpenLogin('${raw(dom)}')">
+        <button class="auth-src-btn sm" onclick="_authSourceOpenLogin('${raw(dom)}', '${raw(loginUrl)}')">
           ${t('settings.authSrcOpenLogin') || '打开登录页 ↗'}
         </button>
       </li>`
     : safeHtml`<li><span class="auth-src-step-txt">${t('settings.authSrcStep1Generic') || '在你自己的浏览器中登录该站点'}</span></li>`;
 
-  var keyCookieHint = _AUTH_SRC_KEY_COOKIE[dom]
-    ? safeHtml`<div class="auth-src-key-cookie">${raw(t('settings.authSrcKeyCookie') || '关键 Cookie：登录态由 <code>web_session</code> 携带，请确保它在内。')}</div>`
-    : '';
-
   return safeHtml`
     <div class="auth-src-panel" id="authSrcPanel_${raw(id)}" style="display:none">
       <ol class="auth-src-steps">
         ${raw(step1)}
-        <li>${t('settings.authSrcStep2') || '打开开发者工具 (F12) → Network，点任一请求，复制 Request Headers 里完整的 Cookie'}</li>
-        <li>${t('settings.authSrcStep3') || '粘贴到下方并保存'}</li>
+        <li>${t('settings.authSrcStep2Fields') || '打开开发者工具 (F12) → Application → Cookies，找到下面每个 Cookie，逐个复制它的 Value'}</li>
+        <li>${t('settings.authSrcStep3Fields') || '分别粘贴到对应输入框并保存（只填值，不要带名字或分号）'}</li>
       </ol>
-      ${raw(keyCookieHint)}
-      <textarea class="auth-src-cookie" id="authSrcCookie_${raw(id)}" rows="3"
-                placeholder="${t('settings.authSrcCookiePh') || 'web_session=...; a1=...'}"></textarea>
+      <div class="auth-src-fields">
+        ${raw(_authSourceFieldRows(src, id))}
+      </div>
       <input type="text" class="auth-src-proxy" id="authSrcProxy_${raw(id)}"
              placeholder="${t('settings.authSrcProxyPh') || '可选代理，例如 http://host:port'}">
       <div class="auth-src-panel-actions">
@@ -155,25 +174,55 @@ function _authSourceTogglePanel(dom) {
   if (el) el.style.display = el.style.display === 'none' ? '' : 'none';
 }
 
-function _authSourceOpenLogin(dom) {
-  var url = _AUTH_SRC_LOGIN_URLS[dom] || ('https://' + dom + '/');
-  window.open(url, '_blank', 'noopener');
+function _authSourceOpenLogin(dom, url) {
+  window.open(url || ('https://' + dom + '/'), '_blank', 'noopener');
 }
 
 function _authSourceToggle(dom, on) {
   Api.authSources.toggle(dom, on).then(_renderAuthSources);
 }
 
+/** Collect the per-cookie inputs of one card into a {name: value} map.
+ *  A pasted `name=value` (or a whole `a=1; b=2` header) in a single field is
+ *  unwrapped rather than stored verbatim: it is unambiguously not a raw value,
+ *  and silently keeping it would reproduce the very bug the fields removed. */
+function _authSourceCollectFields(id) {
+  var out = {};
+  var missing = [];
+  var inputs = document.querySelectorAll('#authSrcPanel_' + id + ' .auth-src-field-input');
+  for (var i = 0; i < inputs.length; i++) {
+    var el = inputs[i];
+    var name = el.getAttribute('data-cookie-name') || '';
+    var val = (el.value || '').trim();
+    if (val.indexOf('=') !== -1) {
+      var pairs = val.split(';');
+      for (var j = 0; j < pairs.length; j++) {
+        var pair = pairs[j].trim();
+        if (!pair) continue;
+        var eq = pair.indexOf('=');
+        if (eq <= 0) continue;
+        out[pair.slice(0, eq).trim()] = pair.slice(eq + 1).trim();
+      }
+    } else if (val) {
+      out[name] = val;
+    }
+    if (!val && el.getAttribute('data-importance') === 'required') missing.push(name);
+  }
+  return { values: out, missing: missing };
+}
+
 function _authSourceSavePaste(dom) {
   var id = _domId(dom);
-  var cookie = (document.getElementById('authSrcCookie_' + id) || {}).value || '';
+  var collected = _authSourceCollectFields(id);
   var proxy = (document.getElementById('authSrcProxy_' + id) || {}).value || '';
-  if (!cookie.trim()) {
-    _authSrcSetMsg(dom, t('settings.authSrcCookieEmpty') || '请粘贴 Cookie', 'err');
+
+  if (collected.missing.length) {
+    _authSrcSetMsg(dom, (t('settings.authSrcFieldMissing') || '请填写必填 Cookie：') +
+      collected.missing.join(', '), 'err');
     return;
   }
   _authSrcSetMsg(dom, t('common.saving') || '保存中…');
-  Api.authSources.upsert({ domain: dom, cookie_header: cookie, proxy: proxy, enabled: true })
+  Api.authSources.upsert({ domain: dom, cookie_fields: collected.values, proxy: proxy, enabled: true })
     .then(function () {
       _authSrcSetMsg(dom, t('settings.authSrcSaved') || '已连接', 'ok');
       _renderAuthSources();

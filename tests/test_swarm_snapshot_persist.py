@@ -493,8 +493,12 @@ class TestSnapshotMonotonicAndScoping(unittest.TestCase):
         tools, calls = _snapshot_tool_timeline(log)
         self.assertEqual(tools, ['read_files', 'grep_search'])
         self.assertEqual(len(calls), 3)
+        # Row shape now also carries the tool RESULT text (preview/error) so a
+        # reloaded panel shows what the live one did — legacy tool_log rows
+        # predate those keys and default to ''.
         self.assertEqual(calls[0], {'toolName': 'read_files',
-                                    'argsBrief': 'a.py', 'status': 'done'})
+                                    'argsBrief': 'a.py', 'status': 'done',
+                                    'preview': '', 'error': ''})
         self.assertEqual(calls[2]['argsBrief'], 'b.py')
 
         # Cap: keep only the last _SNAPSHOT_TOOLCALLS_CAP rows.

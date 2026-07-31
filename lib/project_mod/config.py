@@ -12,7 +12,7 @@ logger = get_logger(__name__)
 # ═══════════════════════════════════════════════════════
 
 IGNORE_DIRS = {
-    '.git', 'node_modules', '__pycache__', '.venv', 'venv', 'env',
+    '.git', '.tofu', 'node_modules', '__pycache__', '.venv', 'venv', 'env',
     '.idea', '.vscode', '.next', 'dist', 'build', '.cache',
     '.tox', '.mypy_cache', '.pytest_cache', 'target', 'vendor',
     '.bundle', 'coverage', '.nyc_output', '.eggs', '.sass-cache',
@@ -71,9 +71,22 @@ SHELL_PREFIX = os.environ.get('SHELL_PREFIX', '')  # ★ e.g. 'source ~/.bashrc 
 
 # ★ Dangerous command patterns to block
 # Includes both Unix and Windows equivalents for cross-platform safety.
+#
+# NOTE: there is deliberately NO ``rm -rf /`` pattern here. Delete commands
+# are guarded by the argument-PARSING ``_is_catastrophic_delete`` (depth
+# rule: ``/`` / ``/mnt`` / any <2-component target refused, scoped deep
+# paths allowed — plus workspace containment for restricted principals),
+# which runs in every enforcement point (run_command, desktop agent,
+# safety pre-hook). This list used to carry the blunt regex
+# ``\brm\s+-rf\s+/``, which fired on EVERY absolute-path delete: it
+# hard-blocked legitimate scoped cleanup such as ``rm -rf /tmp/wt_fill``
+# (a temp git-worktree path an agent is expected to manage) with the
+# generic "matches dangerous pattern" error BEFORE the parser could allow
+# it — while catching nothing the parser doesn't catch better (flag-order
+# smuggles like ``rm /mnt -r -f``, ``sudo rm -rf /``). Do not re-add a
+# substring/regex delete rule here; extend the parser instead.
 DANGEROUS_PATTERNS = [
     # ── Unix ──
-    r'\brm\s+-rf\s+/',         # rm -rf /
     r'\bmkfs\b',               # format disk
     r'\bdd\s+.*of=/',          # dd overwrite
     r'>\s*/dev/sd',            # overwrite block device

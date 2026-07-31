@@ -21,6 +21,23 @@ def _format_fetch_display(item, _short_url) -> dict:
     raw_chars = item['raw_chars']
     page_content = item['page_content']
     is_pdf = item['is_pdf']
+    reason = item.get('reason')
+    if reason == 'soft_blocked':
+        return {
+            'title': f'Blocked: {_short_url(target_url)}',
+            'snippet': 'Host answered HTTP 200 with a region-unavailable page',
+            'url': target_url,
+            'source': 'Host Blocked',
+            'fetched': False, 'fetchedChars': 0,
+        }
+    if reason == 'irrelevant':
+        return {
+            'title': f'Irrelevant: {_short_url(target_url)}',
+            'snippet': f'Read {raw_chars:,} chars — filtered out as off-topic',
+            'url': target_url,
+            'source': 'Filtered',
+            'fetched': False, 'fetchedChars': 0,
+        }
     if item.get('is_asset'):
         return {
             'title': f'File: {_short_url(target_url)}',

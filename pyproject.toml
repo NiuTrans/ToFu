@@ -70,7 +70,23 @@ testpaths = ["tests"]
 python_files = "test_*.py"
 python_classes = "Test*"
 python_functions = "test_*"
-addopts = "-v --tb=short --strict-markers"
+addopts = "-v --tb=short --strict-markers -p pytest_timeout"
+# Per-test hang guard. pytest-timeout has been an installed, DECLARED dep for
+# a while, but with no default configured it never fired — measured
+# 2026-07-27: a sleep(600) test ran until an EXTERNAL kill stopped the shell,
+# with pytest emitting no verdict at all. That silently un-verifies every
+# hang-shaped NEUTER in the suite (deleting the agent-loop no-progress
+# breaker makes its test HANG rather than fail, because the breaker is the
+# only exit from an infinite dispatcher).
+#
+# 300s is well above the slowest healthy tests here (jsdom harnesses,
+# PDF/VLM parsing, live_server boots) and far below any wedged loop.
+# `-p pytest_timeout` above is load-bearing: this suite is normally run with
+# PYTEST_DISABLE_PLUGIN_AUTOLOAD=1, which turns off entry-point autoloading,
+# so without naming the plugin the setting below is inert.
+# Use the `signal` method (default on POSIX) — the `thread` method mis-fires
+# on the endpoint-loop tests. Override per-test with @pytest.mark.timeout(N).
+timeout = 300
 markers = [
     "unit: Pure unit tests (no server, no DB)",
     "api: API integration tests (requires PostgreSQL)",

@@ -195,6 +195,29 @@ def _apply_via_git(progress=None) -> dict:
         logger.warning('[Update] Could not re-read VERSION post-pull: %s', e)
         new = old
     result['new_version'] = new
+
+    # Post-pull integrity: git pull --ff-only writes objects then atomically
+    # moves them into place, so partial-write corruption is very rare — but
+    # a cheap `git fsck --no-dangling` catches any object-store damage
+    # (bad blob length, truncated pack) before we mark the update ok and
+    # trigger a restart into a broken tree. Non-zero → fail loudly.
+    if result['changed']:
+        try:
+            fsck_cp = _run_git(['fsck', '--no-dangling'], timeout=30)
+        except Exception as e:
+            logger.warning('[Update] post-pull git fsck errored (skipping): %s', e)
+            fsck_cp = None
+        if fsck_cp is not None and fsck_cp.returncode != 0:
+            blob = ((fsck_cp.stderr or '') + (fsck_cp.stdout or ''))[:500]
+            result['ok'] = False
+            result['error'] = ('Post-pull integrity check failed — the local '
+                               'git object store may be corrupt. Run '
+                               '"git fsck" and repair before restarting.')
+            result['detail'] = blob
+            logger.error('[Update] post-pull git fsck failed: %s', blob)
+            _emit('pull', 'error', result['detail'])
+            return result
+
     result['ok'] = True
     # Any successful pull that changed files needs a restart to take effect.
     result['needs_restart'] = result['changed']
@@ -247,6 +270,70 @@ def _overlay_skip(rel: str) -> bool:
     ``lib.runtime_layout.OVERLAY_SKIP_PREFIXES``). Delegates to the single-source
     registry, which also covers any ``.tofu*`` agent artifact at any depth."""
     return _rl_is_overlay_skipped(rel)
+
+
+def _verify_landed_py_integrity(src_root, dest_root, backup_dir=None):
+    """Post-overlay landing check: every ``.py`` in the release tree must be
+    present and byte-plausible in ``dest_root``.
+
+    The classic failure this catches: cross-DC FUSE / DolphinFS atomic-move
+    windows can leave a facade ``__init__.py`` at **0 bytes** even though
+    ``shutil.copy2`` returned success — a 0-byte file still ``py_compile``s
+    cleanly, so a syntax check would NOT see it. The tree then boots into
+    ``ImportError: cannot import name X`` the moment another module touches
+    the empty facade. Build-time ``export._verify_exported_py_integrity``
+    catches this in the source-of-truth-facing direction; the update-overlay
+    path was previously unchecked, so a bad overlay silently corrupted the
+    live install.
+
+    Compares source-tarball size vs landed size for every ``.py``. Flags a
+    file when the landed size is missing or **strictly smaller** than the
+    source (0 bytes → dropped, ``dest<src`` → truncated). On any hit, if
+    ``backup_dir`` is provided AND the file was backed up before the
+    overlay, restore the pre-overlay version so the tree is not left in a
+    boot-crashing state. Returns a dict::
+
+        {'ok': bool, 'bad': [(rel, src_size, dest_size, 'restored'|'no_backup')...]}
+    """
+    from pathlib import Path
+    src_root_p = Path(src_root)
+    dest_root_p = Path(dest_root)
+    backup_root_p = Path(backup_dir) if backup_dir else None
+    bad: list = []
+    for abs_src in src_root_p.rglob('*.py'):
+        if not abs_src.is_file():
+            continue
+        rel = abs_src.relative_to(src_root_p).as_posix()
+        if _facade('_overlay_skip', _overlay_skip)(rel):
+            continue
+        try:
+            ssz = abs_src.stat().st_size
+        except OSError as e:
+            logger.debug('[Update] verify: cannot stat src %s: %s', rel, e)
+            continue
+        if ssz == 0:
+            continue
+        dest_p = dest_root_p / rel
+        try:
+            dsz = dest_p.stat().st_size
+        except OSError as _e:
+            logger.debug('verify landed py integrity: unreadable (%s)', _e)
+            dsz = -1
+        if dsz < 0 or dsz < ssz:
+            action = 'no_backup'
+            if backup_root_p is not None:
+                bpath = backup_root_p / rel
+                if bpath.is_file():
+                    try:
+                        import shutil as _sh
+                        os.makedirs(os.path.dirname(str(dest_p)), exist_ok=True)
+                        _sh.copy2(str(bpath), str(dest_p))
+                        action = 'restored'
+                    except OSError as e:
+                        logger.warning('[Update] verify: restore %s failed: %s',
+                                       rel, e)
+            bad.append((rel, ssz, dsz, action))
+    return {'ok': not bad, 'bad': bad}
 
 
 def _apply_via_tarball(tag: str, progress=None) -> dict:
@@ -437,7 +524,10 @@ def _apply_via_tarball(tag: str, progress=None) -> dict:
         def _req_digest(p) -> str:
             try:
                 return hashlib.sha256(Path(p).read_bytes()).hexdigest()
-            except Exception:
+            except Exception as e:
+                # Expected/harmless (file may not exist) — caller treats '' as
+                # "unknown" and installs defensively — but §2.2: still leave a trace.
+                logger.debug('[Update] requirements digest unavailable for %s: %s', p, e)
                 return ''
         _req_old = _req_digest(os.path.join(_root, 'requirements.txt'))
         _req_new = _req_digest(os.path.join(src_root, 'requirements.txt'))
@@ -489,6 +579,33 @@ def _apply_via_tarball(tag: str, progress=None) -> dict:
                            f'remove files deleted upstream)')
         logger.info('[Update] tarball overlay: copied=%d backed_up=%d skipped=%d '
                     'backup=%s', copied, backed_up, skipped, backup_dir)
+
+        # ── 2b. Landing verification ─────────────────────────────────
+        # The overlay's shutil.copy2 may return success while cross-DC FUSE
+        # leaves a 0-byte facade __init__.py behind (atomic-move window). A
+        # 0-byte file still compiles, so the tree boots straight into
+        # ImportError. Re-stat every landed .py against the tarball source
+        # size; on any truncation, restore the pre-overlay copy from
+        # backup_dir and fail the update loudly with the offending list.
+        integ = _verify_landed_py_integrity(src_root_p, _root, backup_dir)
+        if not integ['ok']:
+            bad = integ['bad']
+            names = ', '.join(rel for rel, _s, _d, _a in bad[:5])
+            more = '' if len(bad) <= 5 else f' (+{len(bad)-5} more)'
+            n_restored = sum(1 for _r, _s, _d, a in bad if a == 'restored')
+            result['ok'] = False
+            result['error'] = (
+                f'Update landed {len(bad)} truncated / missing Python file(s) '
+                'on disk (likely a cross-DC filesystem atomic-move race). '
+                'The update was NOT applied. '
+                f'{n_restored} pre-update file(s) were restored from backup.')
+            result['detail'] = (f'{names}{more} — backup at '
+                                f'{os.path.relpath(backup_dir, _root) if os.path.isdir(backup_dir) else backup_dir}')
+            logger.error('[Update] landing verification failed: %d bad file(s): %s',
+                         len(bad), [(rel, ssz, dsz, a) for rel, ssz, dsz, a in bad[:20]])
+            _emit('pull', 'error', result['detail'])
+            return result
+
         _emit('pull', 'done')
 
         # ── 3. Dependencies ──────────────────────────────────────────

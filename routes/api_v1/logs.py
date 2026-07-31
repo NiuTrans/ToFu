@@ -223,9 +223,16 @@ def detect_text_language():
                             allow_empty=True)
     except BadRequest as e:
         return api_bad_request(str(e), field=e.field or 'text')
+    # ``forceFasttext`` forces Tier-1 fastText on regardless of the env backend
+    # — for the frontend auto-translate skip gate, which (like the server-side
+    # safety net) MUST tell kanji-heavy Japanese apart from Chinese; the
+    # script+heuristic tier cannot, so without this a JP reply is wrongly
+    # skipped as "already Chinese". ``detected.source`` lets the caller/test
+    # verify the statistical model actually ran.
+    force_ft = bool(body.get('forceFasttext') or body.get('force_fasttext'))
     # Cascade detection (Tier-0/1 only — never the billed LLM tier from an
     # unauthenticated detection endpoint).
-    det = detect_language(text)
+    det = detect_language(text, force_fasttext=force_ft)
     return api_ok({
         'language': guess_language(text),
         'cjk_ratio': round(cjk_ratio(text), 4),

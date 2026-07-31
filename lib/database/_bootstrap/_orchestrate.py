@@ -439,7 +439,7 @@ def _ensure_pg_running(pgdata, base_dir, pg_host, pg_port, pg_user, pg_password,
     # postmaster is not enough: it could be the stale tail of a previous,
     # unclean exit on another host — in which case we must take over
     # rather than route every DB call across a dying link (see
-    # .tofu/skills/pg-cross-host-heartbeat-takeover.md).
+    # .tofu/memories/pg-cross-host-heartbeat-takeover.md).
     is_remote, remote_host = _pg_already_running_on_another_machine(pgdata, pg_port)
     if is_remote and remote_host:
         fresh, hb_info = _heartbeat_is_fresh(pgdata)

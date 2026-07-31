@@ -1,9 +1,12 @@
 /* ═══════════════════════════════════════════════════════════════════
    context-bar.js — Context Health Bar (the "liquid bubble")
 
-   A small status chip on the left flank of `.chat-wrapper` that shows
-   the current conversation's prompt-token usage as a percentage of
-   the active model's context window.
+   A small status chip in the conversation-status strip (`#convStatusStrip`,
+   directly above the composer) that shows the current conversation's
+   prompt-token usage as a percentage of the active model's context window.
+   It used to float absolutely on the left flank of `.chat-wrapper` — that
+   anchoring genuinely overlapped the message column below a ~1420px pane,
+   so it moved in-flow (see tests/test_turn_ctx_rail_geometry.py).
 
    The visual is a 28×28 SOLID circular vessel filled with liquid that
    rises from the bottom as context grows.  The vessel has a glass rim
@@ -294,14 +297,19 @@
     if (_state && _state.el && _state.el.isConnected) return _state;
     const existing = document.getElementById('contextHealthBar');
     if (existing && _state && _state.el === existing) return _state;
-    const wrapper = document.querySelector('.chat-wrapper');
-    if (!wrapper) return null;
+    /* The gauge is CONVERSATION-scoped chrome, so it lives IN-FLOW in the
+     * conversation-status strip directly above the composer — never floated
+     * over the message flow (its old absolute left:18px/top:50% anchoring
+     * genuinely overlapped the message column below a ~1420px pane).
+     * prepended so it is the strip's LEFT cell; the turn-nav is the right. */
+    const host = document.getElementById('convStatusStrip');
+    if (!host) return null;
     const el = existing || document.createElement('aside');
     if (!existing) {
       el.id = 'contextHealthBar';
       el.className = 'ctx-health-bar';
       el.setAttribute('aria-label', 'Context usage');
-      wrapper.appendChild(el);
+      host.prepend(el);
     }
     /* One-shot DOM build — never rebuilt on hot path.
      *
@@ -644,8 +652,8 @@
             await loadConversationMessages(convId);
           }
         } catch (e) { console.warn('[compactNow] reload failed', e); }
-        if (convId === activeConvId && typeof renderChat === 'function') {
-          renderChat(c, false);                  // re-render → boundary card shows
+        if (convId === activeConvId) {
+          window.ConvView.replaceAll(c.id, { forceScroll: false }); // re-render → boundary card shows
         }
       }
       updateContextBar();                        // gauge scheme B drops the level

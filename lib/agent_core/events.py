@@ -180,6 +180,32 @@ class EventType:
     PING = 'ping'
 
 
+# ── Tool-lifecycle timing contract ──────────────────────────────────
+# Every tool event carries backend clocks so a slow turn is ATTRIBUTABLE. Three
+# segments are derivable per tool row, and without them they are indivisible:
+#
+#   execution = tEnd - tStart            (upstream HTTP / MCP / subprocess)
+#   transport = receivedAt - emittedAt   (queueing, SSE buffering, proxies)
+#   render    = painted - receivedAt     (the client dropped or delayed a paint)
+#
+# ``receivedAt`` is stamped CLIENT-side at stream ingress; the two backend
+# clocks and the emission clock are stamped here. All are epoch MILLISECONDS
+# (the project has shipped a seconds/ms confusion before — see
+# ``_isPlausibleEpochMs`` in the paper media tabs).
+_TOOL_CLOCK_FIELDS: dict[str, str] = {
+    'tStart': 'epoch ms when the tool actually began executing — present on '
+              'EVERY tool frame so a still-running row can render a truthful '
+              'elapsed time instead of a client stopwatch that re-mints on '
+              'each paint',
+    'emittedAt': 'epoch ms when the backend handed this frame to the event '
+                 'chokepoint. Transport latency = receivedAt - emittedAt',
+}
+_TOOL_END_CLOCK_FIELD: dict[str, str] = {
+    'tEnd': 'epoch ms when the tool returned (terminal frames only). '
+            'Execution time = tEnd - tStart',
+}
+
+
 # ── The registry: every event the runtime can emit ──
 _C = EventCategory
 _SPECS: tuple[EventSpec, ...] = (
@@ -199,7 +225,15 @@ _SPECS: tuple[EventSpec, ...] = (
     EventSpec(EventType.PHASE, _C.LIFECYCLE,
               'Progress / status hint for the current turn.',
               fields={'phase': "phase key (llm_thinking|tool_exec|retrying|working|…)",
-                      'detail': 'human-readable detail', 'roundNum': 'round number'}),
+                      'detail': 'human-readable detail (English fallback; '
+                                'headless / non-i18n clients render this verbatim)',
+                      'detailKey': '(optional) stable i18n key the client resolves '
+                                   'through its translation table so the label reads '
+                                   'in the UI language; falls back to `detail` when '
+                                   'absent',
+                      'detailArgs': '(optional) interpolation args for `detailKey` '
+                                    '(e.g. {"round": 3, "model": "claude-4"})',
+                      'roundNum': 'round number'}),
     EventSpec(EventType.ROUND_START, _C.LIFECYCLE,
               'Explicit start boundary of an LLM round (the orchestrator loop '
               'index). Emitted at the TOP of every round the model actually '
@@ -218,8 +252,8 @@ _SPECS: tuple[EventSpec, ...] = (
               'inferring end-of-round from the next `round_start` or a `done`. '
               'Non-terminal (a `done` still follows on the terminal path).',
               fields={'roundNum': 'the round index this boundary closes',
-                      'reason': 'tools|final|aborted|budget|error — why the '
-                                'round ended'}),
+                      'reason': 'tools|final|aborted|budget|error|tool_timeout '
+                                '— why the round ended'}),
     EventSpec(EventType.DONE, _C.LIFECYCLE,
               'Terminal event — the turn finished (success or, with `error`, failure).',
               terminal=True,
@@ -271,11 +305,21 @@ _SPECS: tuple[EventSpec, ...] = (
                       'status': "(optional) 'rejected' when the tool was a "
                                 'hallucination and never ran',
                       '_rejected': '(optional) {attempted, suggestions} for a '
-                                   'rejected hallucinated tool'}),
+                                   'rejected hallucinated tool',
+                      **_TOOL_CLOCK_FIELDS}),
     EventSpec(EventType.TOOL_PROGRESS, _C.TOOL,
               'Streaming progress emitted by a long-running tool.',
               fields={'roundNum': 'round index', 'toolCallId': 'tool-call id',
-                      'detail': 'progress text'}),
+                      'detail': 'progress text',
+                      'batchItem': '(optional) the ONE item of a batch call '
+                                   '(query string / URL) this frame reports',
+                      'batchDone': '(optional) how many batch items have '
+                                   'settled so far (1-based, monotonic)',
+                      'batchTotal': '(optional) total items in the batch call',
+                      'batchOk': '(optional) False when THIS item failed — a '
+                                 'failed item must still advance the counter, '
+                                 'else the row looks stuck on a dead query',
+                      **_TOOL_CLOCK_FIELDS}),
     EventSpec(EventType.TOOL_RESULT, _C.TOOL,
               'A tool produced a (possibly partial) result payload.',
               fields={'roundNum': 'round index', 'toolCallId': 'tool-call id',
@@ -284,11 +328,13 @@ _SPECS: tuple[EventSpec, ...] = (
                       'status': "(optional) 'rejected' for a hallucinated tool "
                                 'that was rejected without executing',
                       '_rejected': '(optional) {attempted, suggestions} for a '
-                                   'rejected hallucinated tool'}),
+                                   'rejected hallucinated tool',
+                      **_TOOL_CLOCK_FIELDS, **_TOOL_END_CLOCK_FIELD}),
     EventSpec(EventType.TOOL_COMPLETE, _C.TOOL,
               'A tool call finished; carries the final tool message.',
               fields={'roundNum': 'round index', 'toolCallId': 'tool-call id',
-                      'content': 'final tool result', 'isError': 'bool'}),
+                      'content': 'final tool result', 'isError': 'bool',
+                      **_TOOL_CLOCK_FIELDS, **_TOOL_END_CLOCK_FIELD}),
     EventSpec(EventType.TOOL_COMPACTED, _C.TOOL,
               'A prior tool result was compacted out of context to save tokens.',
               fields={'toolCallId': 'tool-call id', 'roundNum': 'round index'}),
@@ -526,6 +572,10 @@ _SPECS: tuple[EventSpec, ...] = (
                       'pollId': 'stable per-poll id ({timerId}.p{N}) for log/DB/UI correlation',
                       'decision': 'started|wait|ready|skipped|error|parse_error',
                       'reason': 'LLM/decision rationale',
+                      'conditionKind': 'current decision tier (llm|hybrid|code) — '
+                                       'sent every poll so the UI reflects a mid-run '
+                                       'hybrid→code auto-promotion, not just the '
+                                       'creation-time kind',
                       'rawContent': "the LLM's full raw output (sent only on parse_error/error)",
                       'tokensUsed': 'tokens spent on this poll',
                       'checkInstruction': '(started) what is being verified',
@@ -552,6 +602,29 @@ _BY_TYPE: dict[str, EventSpec] = {s.type: s for s in _SPECS}
 # these from the "frontend must handle every type" direction).
 TRANSPORT_TYPES: frozenset[str] = frozenset({EventType.PING, EventType.SSE_TIMEOUT})
 
+#: Event types that get an ``emittedAt`` stamp at construction time.
+#: Deliberately ONLY the tool lifecycle: it is the surface a human debugs when
+#: a turn feels slow, and it is low-frequency. ``delta`` is excluded on purpose
+#: — stamping every token frame would add bytes to the hottest path in the
+#: product for no diagnostic value.
+_CLOCK_STAMPED_TYPES: frozenset[str] = frozenset({
+    EventType.TOOL_START, EventType.TOOL_PROGRESS,
+    EventType.TOOL_RESULT, EventType.TOOL_COMPLETE,
+})
+
+
+def now_ms() -> float:
+    """Wall-clock epoch MILLISECONDS — the wire unit for every event clock.
+
+    Milliseconds, not seconds: the frontend compares these against
+    ``Date.now()``, and a seconds/ms mixup renders as a 1970 timestamp that
+    silently poisons every derived duration (the reason the paper media tabs
+    carry a defensive ``_isPlausibleEpochMs``). One helper so the unit is
+    decided in exactly one place.
+    """
+    import time as _time
+    return _time.time() * 1000.0
+
 
 def build_event(type_: str, **fields: Any) -> dict[str, Any]:
     """Construct a wire event dict ``{'type': type_, **fields}``.
@@ -567,12 +640,21 @@ def build_event(type_: str, **fields: Any) -> dict[str, Any]:
     event whose fields are built up conditionally, call ``build_event(TYPE)``
     and mutate the returned dict exactly as before.
 
+    TOOL events additionally get an ``emittedAt`` stamp here — at the ONE typed
+    construction chokepoint rather than at each call site, so the value always
+    means the same instant ("the backend handed this frame to the stream") and
+    cannot drift between emitters. That is what makes the transport segment
+    (``receivedAt - emittedAt``) comparable across tools. An explicit
+    ``emittedAt=`` kwarg wins, so a replay path can preserve the original.
+
     Unregistered types are allowed (the wire stays forward-compatible) but log
     a debug line — the drift test is what enforces registration at CI time.
     """
     if type_ not in _BY_TYPE:
         logger.debug('[events] build_event for unregistered type=%r '
                      '(add an EventSpec to lib/agent_core/events.py)', type_)
+    if type_ in _CLOCK_STAMPED_TYPES and 'emittedAt' not in fields:
+        fields['emittedAt'] = now_ms()
     return {'type': type_, **fields}
 
 

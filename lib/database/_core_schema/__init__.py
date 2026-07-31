@@ -140,6 +140,7 @@ from ._tables import (  # noqa: E402,F401
     PAPER_REPORTS,
     PAPER_LIBRARY,
     PAPER_TRANSLATIONS,
+    PAPER_PODCASTS,
     TASK_RESULTS,
     TASK_EVENTS,
     CHAT_ARTIFACTS,
@@ -170,6 +171,15 @@ from ._tables import (  # noqa: E402,F401
     BILLING_PAYMENTS,
 )
 
+# Snapshot of the REAL Core table set, taken AFTER this package's own
+# registration completes (the ``_tables`` import above). The boot probe
+# (``core_boot_table_names``) derives from THIS — never the live shared
+# MetaData — so later ``define_table()`` calls on that MetaData (compile-only
+# test fixtures in test_core_schema_groundwork, domain plugins) cannot leak
+# into the probe and fool it into forcing a full DDL pass on every boot for
+# tables the bootstrap intentionally never creates.
+_CORE_REGISTERED_TABLES = frozenset(metadata.tables.keys())
+
 __all__ = [
     # ── helpers / dialects / MetaData ──
     'metadata',
@@ -187,6 +197,7 @@ __all__ = [
     'bool_column',
     'bigint_column',
     'define_table',
+    '_CORE_REGISTERED_TABLES',
     # ── DDL + upsert layer ──
     'ddl_for',
     'index_ddl_for',
@@ -207,6 +218,7 @@ __all__ = [
     'PAPER_REPORTS',
     'PAPER_LIBRARY',
     'PAPER_TRANSLATIONS',
+    'PAPER_PODCASTS',
     'TASK_RESULTS',
     'TASK_EVENTS',
     'CHAT_ARTIFACTS',

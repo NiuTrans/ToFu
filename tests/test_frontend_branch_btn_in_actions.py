@@ -153,7 +153,7 @@ function parse(html) {
   const br = actions && actions.querySelector('.msg-branch-btn');
   const isActionBtn = br && br.classList.contains('msg-action-btn');
   const oc = br ? (br.getAttribute('onclick') || '') : '';
-  check('A_branch_btn_in_actions', !!br && !!isActionBtn && oc.indexOf('promptNewBranch(0)') >= 0);
+  check('A_branch_btn_in_actions', !!br && !!isActionBtn && oc.indexOf('promptNewBranch(_msgElIndex(this))') >= 0);
 }
 
 // ══ B. user message → NO branch btn ══

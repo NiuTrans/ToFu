@@ -111,6 +111,13 @@ global.console = console;
 global.config = {};
 global.renderConversationList = () => {};
 global.renderChat = () => {};
+// Phase-1 paints through window.ConvView.replaceAll (renderChat retired);
+// without the stub the paint throws, the cache branch is aborted, and the
+// verifying dim (the behaviour under test) never applies.
+global.ConvView = { replaceAll: () => {} };
+global._applySettingsToConv = () => {};   // extracted to core/conv_apply_settings.js (fc0d8d60)
+global._hydrateImageBase64 = () => {};    // extracted to core/conv_image_hydrate.js (2ba63a12)
+global.convHasPendingSync = () => false;  // extracted to core/pending_sync.js (be0e4076)
 global.showStreamingUIForConv = () => {};
 global._restoreConvToolState = () => {};
 global.attachCompactionMarkersToConversation = undefined;

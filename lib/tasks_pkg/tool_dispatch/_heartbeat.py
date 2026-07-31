@@ -46,6 +46,16 @@ def _execute_tool_one_pooled(*args, **kwargs):
 # These tools must run serially (outside the thread pool) because they block
 # for user input or extended periods, exceeding TOOL_PARALLEL_TIMEOUT.
 # Each entry: tool_name → {match: callable(fn_args) → bool, inject: dict of extra args}
+#
+# Owner decision (2026-07-25, epic pt_1acd0bcdb2174566 F4, option A): while a
+# task sits in one of these waits, the heartbeat below keeps refreshing
+# ``_dispatch_heartbeat``, so the stuck-reaper NEVER reaps it. For
+# ``ask_human`` that is the INTENDED semantics — a human may answer hours or
+# days later, and there is deliberately NO human-wait timeout. The accepted
+# trade-off, also ratified: a genuinely-hung non-human serial tool (dead
+# socket inside await_task/timer_create) is equally immune to the reaper —
+# a phantom "running" that clears only on abort/restart. Do NOT "fix" this
+# by capping the heartbeat; the cap question was decided as status-quo.
 _SERIAL_BLOCKING_TOOLS: dict[str, dict] = {
     'ask_human': {
         'match': lambda _args: True,

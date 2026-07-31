@@ -4,7 +4,62 @@ from lib.log import get_logger
 
 logger = get_logger(__name__)
 
-SEARCH_TOOL_MULTI = {
+
+def _vertical_domains() -> list[dict]:
+    """Capability metadata for every currently-usable vertical domain.
+
+    Sourced from tofu_search rather than restated here: a domain whose
+    credential is missing must not appear in the enum, and that state is only
+    known at request time (the key is set in Settings, not at import).
+    """
+    try:
+        from tofu_search.search.vertical import describe_domains
+        return describe_domains()
+    except Exception as e:
+        logger.warning('[Tools] vertical capability lookup failed: %s', e)
+        return []
+
+
+def _vertical_enum(domains: list[dict]) -> list[str]:
+    return ['auto'] + [d['domain'] for d in domains] + ['off']
+
+
+def _render_vertical_section(domains: list[dict]) -> str:
+    """Render the explicit-vertical prose from capability metadata."""
+    if not domains:
+        return ''
+    lines = ["**Explicit vertical**: pass ``vertical='<domain>'`` to FORCE a "
+             "domain-level vertical search regardless of phrasing.\n"]
+    for d in domains:
+        line = f"- ``{d['domain']}`` — {d.get('purpose', '')} {d.get('when_to_use', '')}".rstrip()
+        examples = d.get('examples') or []
+        if examples:
+            line += ' Examples: ' + '; '.join(f'"{e}"' for e in examples[:3]) + '.'
+        # A partially-available domain must say so, or the model will ask it for
+        # the capability that is switched off and come back empty-handed.
+        gap = [u['type'] for u in (d.get('unavailable_types') or [])]
+        if gap and d.get('available_types'):
+            line += (f" NOTE: only {', '.join(d['available_types'])} is available "
+                     f"right now; {', '.join(gap)} needs "
+                     f"{d.get('credential_env') or 'a credential'} to be configured "
+                     f"— do NOT use this domain for {', '.join(gap)} queries.")
+        lines.append(line)
+    lines.append("- ``auto`` (default) → phrase-detect from query.")
+    lines.append("- ``off`` → web only, skip vertical entirely.")
+    return '\n'.join(lines)
+
+
+def build_search_tool() -> dict:
+    """Build the web_search tool schema.
+
+    Built per call, NOT cached at import: the set of available vertical domains
+    depends on runtime credentials, so a module-level constant would freeze
+    whatever was configured when the process started.
+    """
+    domains = _vertical_domains()
+    vertical_enum = _vertical_enum(domains)
+    vertical_section = _render_vertical_section(domains)
+    return {
     "type": "function",
     "function": {
         "name": "web_search",
@@ -40,24 +95,7 @@ SEARCH_TOOL_MULTI = {
             "('freshness' filters only the WEB results, best-effort per engine; it does "
             "NOT change the Hugging Face time window — that comes from query phrasing "
             "like 'this week'.)\n\n"
-            "**Explicit vertical**: pass ``vertical='academic'`` (or another domain) to "
-            "FORCE a domain-level vertical search regardless of phrasing.\n"
-            "- ``academic`` — works with FREE-TEXT topics. The dispatcher adapts to the "
-            "query: an arXiv ID → paper metadata + Semantic Scholar citations; a DOI → "
-            "CrossRef; 'trending/daily' phrasing → Hugging Face Papers; 'related to / "
-            "citing X' → Semantic Scholar; otherwise free-text → Hugging Face keyword "
-            "search + Semantic Scholar related work (run in parallel).\n"
-            "- ``code`` — needs a package/repo IDENTIFIER, not a free-text concept "
-            "(tries PyPI + npm + GitHub for that exact name; 'best react libraries' "
-            "returns nothing — use a plain web search for discovery).\n"
-            "- ``finance`` — needs a ticker symbol (e.g. AAPL).\n"
-            "- ``security`` — needs a CVE ID (e.g. CVE-2024-1234).\n"
-            "- ``network`` — needs an IP address.\n"
-            "- ``auto`` (default) → phrase-detect from query.\n"
-            "- ``off`` → web only, skip vertical entirely.\n"
-            "Rule of thumb: use ``academic`` for any research/paper query; the other "
-            "explicit domains only help when the query already IS an identifier (and "
-            "``auto`` would catch those anyway)."
+            + vertical_section
         ),
         "parameters": {
             "type": "object",
@@ -73,8 +111,8 @@ SEARCH_TOOL_MULTI = {
                 },
                 "vertical": {
                     "type": "string",
-                    "enum": ["auto", "academic", "code", "finance", "security", "network", "off"],
-                    "description": "Force a vertical data source. 'auto' (default) phrase-detects. 'academic' accepts free-text topics (papers/citations). 'code'/'finance'/'security'/'network' only work when the query already IS an identifier (package name / ticker / CVE ID / IP) — not for free-text discovery. 'off' = web only."
+                    "enum": vertical_enum,
+                    "description": "Force a vertical data source. 'auto' (default) phrase-detects. 'off' = web only. See the tool description for what each domain covers and which need an identifier."
                 },
                 "queries": {
                     "type": "array",
@@ -93,8 +131,8 @@ SEARCH_TOOL_MULTI = {
                             },
                             "vertical": {
                                 "type": "string",
-                                "enum": ["auto", "academic", "code", "finance", "security", "network", "off"],
-                                "description": "Force a vertical data source for this query. 'academic' = free-text papers/citations; 'code'/'finance'/'security'/'network' need an identifier; 'off' = web only."
+                                "enum": vertical_enum,
+                                "description": "Force a vertical data source for this query. 'off' = web only. See the tool description for per-domain coverage."
                             }
                         },
                         "required": ["query"]
@@ -190,4 +228,4 @@ def _build_fetch_url_tool():
 
 FETCH_URL_TOOL = _build_fetch_url_tool()
 
-__all__ = ['SEARCH_TOOL_MULTI', 'FETCH_URL_TOOL']
+__all__ = ['build_search_tool', 'FETCH_URL_TOOL']

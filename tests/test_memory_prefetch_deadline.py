@@ -53,7 +53,10 @@ def _events_sink():
 
 def _install_common(monkeypatch, dispatch_impl):
     """Stub eligible-memories + dispatch_chat so no real LLM/disk is touched."""
-    monkeypatch.setattr(prefetch, 'get_eligible_memories', lambda *a, **k: list(_MEMS),
+    # _run.py resolves this from lib.memory.storage (NOT the package facade,
+    # which never re-exported it) — patch it where the lazy import lands.
+    import lib.memory.storage as _storage_mod
+    monkeypatch.setattr(_storage_mod, 'get_eligible_memories', lambda *a, **k: list(_MEMS),
                         raising=False)
     # dispatch_chat is imported inside _call_cheap_reranker via
     # `from lib.llm_dispatch import dispatch_chat`, so patch it on that module.

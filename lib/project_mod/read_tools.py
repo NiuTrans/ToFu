@@ -381,6 +381,14 @@ def _read_project_file(base, rel_path, start_line=None, end_line=None):
             else:
                 text = f.read()
                 total = text.count('\n') + 1
+                # One-shot big read: hint its pages out of the page cache so
+                # they stop counting against a shared cgroup limit (no-op
+                # off-Linux). Ranged reads stay cached — likely re-read soon.
+                if sz >= 8 << 20:
+                    try:
+                        os.posix_fadvise(f.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
+                    except (OSError, AttributeError) as e:
+                        logger.debug('[Tools] fadvise skipped for %s: %s', rel_path, e)
 
                 if is_data or (sz > 20_000 and _is_likely_data_content(text)):
                     preview = text[:MAX_DATA_FILE_PREVIEW]
@@ -406,6 +414,27 @@ def _read_project_file(base, rel_path, start_line=None, end_line=None):
     except Exception as e:
         logger.warning('[Tools] read_file failed for %s: %s', rel_path, e, exc_info=True)
         return f'Error reading {rel_path}: {e}'
+
+
+def _normalize_line_range(start_line, end_line):
+    """Return ``(start, end, swapped)`` with a reversed range corrected.
+
+    A range whose start exceeds its end (``start_line=6171,
+    end_line=6162``) is UNAMBIGUOUS — there is exactly one interval the
+    caller can mean, and an inverted interval is never a legitimate
+    request. Models emit these regularly (transposed digits, or naming a
+    grep hit bottom-up), so we repair rather than reject.
+
+    ONLY the reversed case is repaired. A range that is merely OUT OF
+    BOUNDS (lines 20000-20100 of a 9000-line file) is a real error and is
+    left untouched for the readers to report — swapping cannot rescue it,
+    and silently "fixing" it would mask a genuinely wrong request.
+    Single-sided (one bound ``None``) and equal bounds cannot be reversed
+    and pass through unchanged, so the helper is idempotent.
+    """
+    if start_line is None or end_line is None or start_line <= end_line:
+        return start_line, end_line, False
+    return end_line, start_line, True
 
 
 def _merge_same_file_ranges(reads):
@@ -503,6 +532,24 @@ def tool_read_files(base, reads):
                 logger.debug('[Tools] read_files: dropping non-numeric %s=%r (%s)', k, v, e)
                 spec[k] = None
 
+    # ★ Repair reversed ranges (start > end) BEFORE merging. Order matters:
+    #   _merge_same_file_ranges sorts by (start, end) and coalesces within
+    #   GAP_THRESHOLD, so a reversed spec batched with another range for the
+    #   same file is absorbed by it and vanishes — the model then receives a
+    #   clean result for lines it never asked for, with NO error. Normalising
+    #   here fixes both that silent case and the lone-spec case (which merely
+    #   errored). Note the swap so the reader sees its call was malformed.
+    swapped_paths = []
+    for spec in reads:
+        if not isinstance(spec, dict):
+            continue
+        s, e_, was_swapped = _normalize_line_range(spec.get('start_line'), spec.get('end_line'))
+        if was_swapped:
+            spec['start_line'], spec['end_line'] = s, e_
+            swapped_paths.append(f'{spec.get("path", "?")} ({e_}→{s} read as {s}-{e_})')
+            logger.info('[Tools] read_files: reversed line range %s=%s-%s corrected to %s-%s',
+                        spec.get('path'), e_, s, s, e_)
+
     reads = _merge_same_file_ranges(reads)
 
     parts = []
@@ -589,6 +636,11 @@ def tool_read_files(base, reads):
         parts.append(result)
 
     text_result = '\n\n'.join(parts)
+
+    if swapped_paths:
+        text_result = ('[Note] read_files: reversed line range(s) auto-corrected — '
+                       + '; '.join(swapped_paths[:5])
+                       + '. start_line must be <= end_line.\n\n') + text_result
 
     # If any image results, return a mixed result with __batch_images__
     if image_results:
@@ -689,8 +741,11 @@ def _build_rg_cmd(base, target, pattern, include, ctx_n, cap=MAX_GREP_RESULTS, c
         cmd = ['rg', '-ci', '--color=never', '--no-heading']
     else:
         cmd = ['rg', '-ni', '--color=never', '--no-heading']
-    # Skip ignored dirs
-    for d in list(IGNORE_DIRS)[:30]:
+    # Skip ignored dirs — ALL of them, in a deterministic order.
+    # (Was list(IGNORE_DIRS)[:30]: once the set grew past 30 entries the
+    # per-process hash order silently dropped arbitrary exclusions, so
+    # node_modules & co. leaked back into grep results ~nondeterministically.)
+    for d in sorted(IGNORE_DIRS):
         cmd.extend(['-g', f'!{d}/'])
     # ★ rg auto-respects .gitignore only inside a git repo (.git/ present).
     #   When there's no .git/ (e.g. exported projects, workdir copies),
@@ -720,7 +775,8 @@ def _build_grep_cmd(base, target, pattern, include, ctx_n, cap=MAX_GREP_RESULTS,
         cmd = ['grep', '-rci', '--color=never', '-I']
     else:
         cmd = ['grep', '-rni', '--color=never', '-I']
-    for d in list(IGNORE_DIRS)[:30]:
+    # See _build_rg_cmd: complete, deterministic exclusions (no [:30] cap).
+    for d in sorted(IGNORE_DIRS):
         cmd.extend(['--exclude-dir', d])
     # ★ GNU grep doesn't have --ignore-file, so parse .gitignore manually
     #   and add --exclude-dir for directory patterns found there.

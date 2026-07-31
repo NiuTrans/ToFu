@@ -262,18 +262,42 @@ def _fields_of(msg: dict) -> dict[str, str]:
     return fields
 
 
+def _tool_id_token(tool_id) -> str:
+    """Return a short but DISCRIMINATING token for a tool-call id.
+
+    This token is not merely cosmetic: ``marker_signature`` uses the ``_brief``
+    string as a per-message SLOT KEY, and ``markers_ttl_flipped`` compares each
+    slot's ttl value set across rounds. Two distinct tool_results sharing a slot
+    key therefore merge into one slot whose value set holds BOTH markers' ttls.
+
+    A fixed ``id[:10]`` prefix did exactly that on AWS Bedrock, whose ids are
+    shaped ``toolu_bdrk_01ABC…`` — the first 10 chars are the vendor prefix, so
+    EVERY tool_result collapsed onto ``tool_result(toolu_bdrk)``. The stable mid
+    marker (ttl='1h') and the rolling tail marker (ttl='') then appeared as one
+    slot valued ``{'1h',''}``, and the tail's normal advance read as a ttl VALUE
+    flip — 358 false client-caused verdicts in one 7-day window, which also
+    suppressed the honest "server-side" verdict those rounds deserved.
+
+    Keying on the id's TAIL keeps the token short while carrying the random,
+    discriminating part for both vendor shapes (Anthropic ``toolu_01ABC…`` and
+    Bedrock ``toolu_bdrk_01ABC…``).
+    """
+    s = str(tool_id or '')
+    return s[-12:] if len(s) > 12 else s
+
+
 def _brief(msg: dict) -> str:
     """Short human token for a message (for readable diff output)."""
     role = msg.get('role', '?')
     if role == 'tool':
-        return f'tool_result({(msg.get("tool_call_id") or "")[:10]})'
+        return f'tool_result({_tool_id_token(msg.get("tool_call_id"))})'
     content = msg.get('content')
     if isinstance(content, list) and content and isinstance(content[0], dict):
         t0 = content[0].get('type')
         if t0 == 'tool_result':
             # Same brief shape as the OpenAI ``tool`` role above, keyed on the
             # FIRST tool_use_id, so both envelopes align on the same key.
-            return f'tool_result({(content[0].get("tool_use_id") or "")[:10]})'
+            return f'tool_result({_tool_id_token(content[0].get("tool_use_id"))})'
     tcs = msg.get('tool_calls') or ()
     if tcs and isinstance(tcs[0], dict):
         return f'{role}/tool_call({((tcs[0].get("function") or {}).get("name") or "?")})'

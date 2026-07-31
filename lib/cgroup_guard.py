@@ -34,6 +34,10 @@ Env vars (all optional):
   TOFU_CGROUP_POLL_SEC           default 30  — ② poll interval (clamped >=30)
   TOFU_CGROUP_REQUEST_MIN_BYTES  default 2_000_000 — ③ only guards bodies >= this
   TOFU_CGROUP_REQUEST_GUARD      default 1   — ③ set 0 to log-only (never raise)
+  TOFU_CGROUP_DROP_LOGS          default 1   — relief also fadvise-drops logs/*.log*
+  TOFU_CGROUP_LOGDROP_MIN_BYTES  default 1 MiB — size floor for the log drop
+  TOFU_CGROUP_JOURNAL            default 1   — rolling pressure journal to
+                                               logs/cgroup_pressure.log
 """
 
 from __future__ import annotations
@@ -60,13 +64,15 @@ def _read_first_int(paths) -> Optional[int]:
         try:
             with open(_p, 'r') as _f:
                 _raw = _f.read().strip()
-        except OSError:
+        except OSError as _e:
+            logger.debug('read first int: unreadable (%s)', _e)
             continue
         if _raw == 'max':
             return None
         try:
             return int(_raw)
-        except ValueError:
+        except ValueError as _e:
+            logger.debug('read first int: unparseable (%s)', _e)
             continue
     return None
 
@@ -107,7 +113,8 @@ def swap_total_bytes() -> Optional[int]:
                     parts = _line.split()
                     # "SwapTotal:  0 kB"
                     return int(parts[1]) * 1024
-    except (OSError, ValueError, IndexError):
+    except (OSError, ValueError, IndexError) as _e:
+        logger.debug('swap total bytes: unreadable/unparseable/short/malformed (%s)', _e)
         return None
     return None
 
@@ -133,12 +140,90 @@ def pressure() -> Optional[dict]:
 def _env_pct(name: str, default: float) -> float:
     try:
         return float(os.environ.get(name, str(default)))
-    except (ValueError, TypeError):
+    except (ValueError, TypeError) as _e:
+        logger.debug('env pct: unparseable/unexpected type (%s)', _e)
         return default
 
 
 def _gib(n: int) -> float:
     return n / float(1 << 30)
+
+
+# ── page-cache relief (the part that actually moves the needle) ──
+#
+# relieve_memory() used to only drop tofu's own heap caches (~2 GiB) — futile
+# against a cgroup whose usage is dominated by PAGE CACHE charged by our own
+# one-shot IO (rotated logs agents grep once, snapshots, render outputs).
+# posix_fadvise(POSIX_FADV_DONTNEED) drops a file's CLEAN pages from the page
+# cache; on a shared cgroup those bytes stop counting against our limit.
+# Measured live on beegfs-fuse 2026-07-27: fadvising a 105 MB rotated log
+# freed ~100 MB of cgroup cache instantly.
+
+def fadvise_dontneed(path: str) -> int:
+    """Drop *path*'s clean page-cache pages. Returns file size advised, 0 on any failure.
+
+    Never raises: non-Linux, missing file, or a filesystem that rejects the
+    hint (ENOSYS/EINVAL) all degrade to a no-op. Only CLEAN pages are dropped
+    — dirty pages stay until written back, which is exactly what we want
+    (no data-loss semantics, purely a cache-hint).
+    """
+    try:
+        size = os.path.getsize(path)
+        if size <= 0:
+            return 0
+        fd = os.open(path, os.O_RDONLY)
+        try:
+            os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+        finally:
+            os.close(fd)
+        return size
+    except (OSError, AttributeError) as e:  # AttributeError: no posix_fadvise (non-Linux)
+        logger.debug('[cgroup] fadvise DONTNEED failed for %s: %s', path, e)
+        return 0
+
+
+def drop_files_cache(paths, min_bytes: int = 0) -> dict:
+    """fadvise-DONTNEED every file in *paths* at least *min_bytes* large.
+
+    Returns ``{'files': n, 'bytes': b}`` — files touched and total size
+    advised (an upper bound on what the kernel may reclaim).
+    """
+    files = 0
+    total = 0
+    for p in paths:
+        try:
+            if min_bytes and os.path.getsize(p) < min_bytes:
+                continue
+        except OSError as _e:
+            logger.debug('drop files cache: unreadable (%s)', _e)
+            continue
+        n = fadvise_dontneed(p)
+        if n > 0:
+            files += 1
+            total += n
+    return {'files': files, 'bytes': total}
+
+
+def drop_logs_cache(log_dir: str = 'logs') -> dict:
+    """fadvise every log file in *log_dir* above the size floor.
+
+    Log files are the canonical write-once/grep-once payload: tofu appends
+    them all day, agent run_commands grep 100 MB+ rotated files and leave the
+    whole file sitting in our cgroup's page cache. Dropping them is pure win —
+    the next grep re-faults from disk (FUSE) at trivial cost.
+    """
+    import glob
+    try:
+        min_bytes = int(os.environ.get('TOFU_CGROUP_LOGDROP_MIN_BYTES', str(1 << 20)))
+    except (ValueError, TypeError) as _e:
+        logger.debug('drop logs cache: unparseable/unexpected type (%s)', _e)
+        min_bytes = 1 << 20
+    try:
+        paths = glob.glob(os.path.join(log_dir, '*.log*'))
+    except Exception as e:
+        logger.debug('[cgroup] log glob failed: %s', e)
+        return {'files': 0, 'bytes': 0}
+    return drop_files_cache(paths, min_bytes=min_bytes)
 
 
 # ── memory relief primitives ──
@@ -168,14 +253,25 @@ def relieve_memory(reason: str) -> dict:
     except Exception as e:
         logger.warning('[cgroup] cache clear during relief failed: %s', e)
     trimmed = malloc_trim()
+    # Page-cache relief: drop OUR one-shot log files' clean pages. This is the
+    # lever that actually moves cgroup usage — heap caches are ~2 GiB while
+    # cached logs/snapshots can be tens of GiB. Env-off switch for debugging.
+    logs_dropped = {'files': 0, 'bytes': 0}
+    if os.environ.get('TOFU_CGROUP_DROP_LOGS', '1') != '0':
+        try:
+            logs_dropped = drop_logs_cache()
+        except Exception as e:
+            logger.warning('[cgroup] log page-cache drop failed: %s', e)
     after = pressure()
     after_pct = after['pct'] if after else None
     logger.warning('[cgroup] relief (%s): dropped %d cache entries, malloc_trim=%s, '
-                   'usage %.1f%% -> %.1f%%',
+                   'log_pages=%d files/%.1fMB, usage %.1f%% -> %.1f%%',
                    reason, dropped, trimmed,
+                   logs_dropped['files'], logs_dropped['bytes'] / 1e6,
                    before_pct if before_pct is not None else -1.0,
                    after_pct if after_pct is not None else -1.0)
     return {'reason': reason, 'dropped': dropped, 'trimmed': trimmed,
+            'log_pages_bytes': logs_dropped['bytes'],
             'pct_before': before_pct, 'pct_after': after_pct}
 
 
@@ -213,6 +309,153 @@ def startup_self_check() -> Optional[dict]:
     return None
 
 
+# ── ④ rolling pressure journal + OOM-kill witness ──
+#
+# The next "Killed" must not be a mystery again. Every monitor tick appends a
+# one-line JSON snapshot (usage/cache/kmem/tofu-RSS breakdown, plus the top-3
+# RSS processes when under pressure) to logs/cgroup_pressure.log, ring-bounded.
+# After a SIGKILL, the minute before death is on disk. The oom_kill counter
+# watch turns "cgroup OOM fired" from a guess into a CRITICAL log line.
+
+_JOURNAL_PATH = os.path.join('logs', 'cgroup_pressure.log')
+_JOURNAL_MAX_BYTES = 4 << 20
+_OOM_CONTROL_PATH = '/sys/fs/cgroup/memory/memory.oom_control'
+_last_oom_kill_count: Optional[int] = None
+
+
+def _read_memory_stat() -> dict:
+    """Parse cache/rss from memory.stat + kmem counter. Empty dict on failure."""
+    out = {}
+    try:
+        with open('/sys/fs/cgroup/memory/memory.stat', 'r') as f:
+            for line in f:
+                k, _, v = line.partition(' ')
+                if k in ('cache', 'rss'):
+                    try:
+                        out[k] = int(v)
+                    except ValueError as _e:
+                        logger.debug('read memory stat: unparseable (%s)', _e)
+                        pass
+    except OSError as _e:
+        logger.debug('read memory stat: unreadable (%s)', _e)
+        pass
+    kmem = _read_first_int(('/sys/fs/cgroup/memory/memory.kmem.usage_in_bytes',))
+    if kmem is not None:
+        out['kmem'] = kmem
+    return out
+
+
+def _self_rss_bytes() -> Optional[int]:
+    """This process's RSS via /proc/self/statm. None on failure."""
+    try:
+        with open('/proc/self/statm', 'r') as f:
+            fields = f.read().split()
+        return int(fields[1]) * os.sysconf('SC_PAGE_SIZE')
+    except (OSError, ValueError, IndexError) as _e:
+        logger.debug('self rss bytes: unreadable/unparseable/short/malformed (%s)', _e)
+        return None
+
+
+def _top_rss_processes(n: int = 3) -> list:
+    """Top-n processes by RSS (same-uid visible), as [{'pid','comm','rss'}].
+
+    Only called under pressure (>= relief threshold) — a /proc scan is a few
+    ms and this runs at most every 30s. Best-effort: skips unreadable pids.
+    """
+    rows = []
+    try:
+        pids = [d for d in os.listdir('/proc') if d.isdigit()]
+    except OSError as _e:
+        logger.debug('top rss processes: unreadable (%s)', _e)
+        return rows
+    for pid in pids:
+        try:
+            with open('/proc/%s/statm' % pid, 'r') as f:
+                rss = int(f.read().split()[1]) * os.sysconf('SC_PAGE_SIZE')
+            with open('/proc/%s/comm' % pid, 'r') as f:
+                comm = f.read().strip()
+            rows.append({'pid': int(pid), 'comm': comm, 'rss': rss})
+        except (OSError, ValueError, IndexError) as _e:
+            logger.debug('top rss processes: unreadable/unparseable/short/malformed (%s)', _e)
+            continue
+    rows.sort(key=lambda r: -r['rss'])
+    return rows[:n]
+
+
+def write_pressure_journal(snap: dict) -> bool:
+    """Append one JSON snapshot line to the ring-bounded pressure journal."""
+    if os.environ.get('TOFU_CGROUP_JOURNAL', '1') == '0':
+        return False
+    import json as _json
+    import time as _time
+    stat = _read_memory_stat()
+    rec = {
+        'ts': round(_time.time(), 1),
+        'pct': round(snap['pct'], 1),
+        'usage_gib': round(_gib(snap['usage']), 2),
+        'cache_gib': round(_gib(stat.get('cache', 0)), 2) if stat else None,
+        'kmem_gib': round(_gib(stat.get('kmem', 0)), 2) if stat else None,
+        'self_rss_gib': round(_gib(_self_rss_bytes() or 0), 2),
+    }
+    relief_pct = _env_pct('TOFU_CGROUP_RELIEF_PCT', 92.0)
+    if snap['pct'] >= relief_pct:
+        rec['top'] = [{'comm': r['comm'], 'rss_gib': round(_gib(r['rss']), 2)}
+                      for r in _top_rss_processes()]
+    try:
+        os.makedirs(os.path.dirname(_JOURNAL_PATH), exist_ok=True)
+        line = _json.dumps(rec, separators=(',', ':')) + '\n'
+        # Ring bound: when over budget, keep the newest half.
+        try:
+            if os.path.getsize(_JOURNAL_PATH) > _JOURNAL_MAX_BYTES:
+                with open(_JOURNAL_PATH, 'r', encoding='utf-8', errors='replace') as f:
+                    tail = f.read()[-_JOURNAL_MAX_BYTES // 2:]
+                tmp = _JOURNAL_PATH + '.tmp'
+                with open(tmp, 'w', encoding='utf-8') as f:
+                    f.write(tail)
+                os.replace(tmp, _JOURNAL_PATH)
+        except OSError as _e:
+            logger.debug('write pressure journal: unreadable (%s)', _e)
+            pass
+        with open(_JOURNAL_PATH, 'a', encoding='utf-8') as f:
+            f.write(line)
+        return True
+    except OSError as e:
+        logger.debug('[cgroup] pressure journal write failed: %s', e)
+        return False
+
+
+def check_oom_kill_count() -> bool:
+    """Watch the cgroup oom_kill counter; CRITICAL + audit when it increments.
+
+    Returns True on the tick that detects a NEW OOM kill. This is the only
+    in-process signal that proves the memcg OOM killer fired — dmesg is
+    unreachable from inside the container.
+    """
+    global _last_oom_kill_count
+    count = None
+    try:
+        with open(_OOM_CONTROL_PATH, 'r') as f:
+            for line in f:
+                if line.startswith('oom_kill '):
+                    count = int(line.split()[1])
+                    break
+    except (OSError, ValueError, IndexError) as _e:
+        logger.debug('check oom kill count: unreadable/unparseable/short/malformed (%s)', _e)
+        return False
+    if count is None:
+        return False
+    prev = _last_oom_kill_count
+    _last_oom_kill_count = count
+    if prev is not None and count > prev:
+        logger.critical(
+            '[cgroup] OOM KILL CONFIRMED: memory.oom_control oom_kill %d -> %d — '
+            'the kernel memcg OOM killer fired inside our cgroup. See %s for the '
+            'pressure curve leading up to it.', prev, count, _JOURNAL_PATH)
+        audit_log('cgroup_oom_kill_confirmed', prev=prev, count=count)
+        return True
+    return False
+
+
 # ── ② runtime pressure monitor ──
 
 _monitor_thread: Optional[threading.Thread] = None
@@ -229,6 +472,11 @@ def run_monitor_once() -> Optional[dict]:
     snap = pressure()
     if snap is None:
         return None
+    try:
+        write_pressure_journal(snap)
+        check_oom_kill_count()
+    except Exception as e:  # journaling must never break the relief path
+        logger.debug('[cgroup] journal/oom-watch tick failed: %s', e)
     relief_pct = _env_pct('TOFU_CGROUP_RELIEF_PCT', 92.0)
     if snap['pct'] >= relief_pct:
         return relieve_memory('monitor %.1f%% >= %.0f%%' % (snap['pct'], relief_pct))
@@ -289,7 +537,8 @@ def check_request_headroom(ident: str = '', approx_bytes: int = 0) -> tuple[bool
     min_bytes = 0
     try:
         min_bytes = int(os.environ.get('TOFU_CGROUP_REQUEST_MIN_BYTES', '2000000'))
-    except (ValueError, TypeError):
+    except (ValueError, TypeError) as _e:
+        logger.debug('check request headroom: unparseable/unexpected type (%s)', _e)
         min_bytes = 2_000_000
     if approx_bytes < min_bytes:
         return True, None
@@ -343,7 +592,8 @@ def approx_body_bytes(body_or_messages) -> int:
                         else:
                             total += 512  # image/tool part — rough fixed cost
         return total
-    except Exception:
+    except Exception as _e:
+        logger.debug('approx body bytes: failed (%s)', _e)
         return 0
 
 
@@ -351,6 +601,8 @@ __all__ = [
     'MemoryPressureError',
     'mem_limit_bytes', 'mem_usage_bytes', 'swap_total_bytes', 'pressure',
     'malloc_trim', 'relieve_memory',
+    'fadvise_dontneed', 'drop_files_cache', 'drop_logs_cache',
+    'write_pressure_journal', 'check_oom_kill_count',
     'startup_self_check',
     'run_monitor_once', 'start_monitor', 'stop_monitor',
     'check_request_headroom', 'approx_body_bytes',

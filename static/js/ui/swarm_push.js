@@ -146,7 +146,7 @@
            forceScroll stays false so a user reading scrolled-up history is
            NOT yanked to the bottom on every background agent update. */
         if (typeof _lastRenderedFingerprint !== "undefined") _lastRenderedFingerprint = "";
-        renderChat(conv, false);
+        window.ConvView.replaceAll(convId, { forceScroll: false });
       }
     } catch (e) {
       console.debug("[SwarmPush] handler error:", e && e.message);

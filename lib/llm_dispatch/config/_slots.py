@@ -18,6 +18,13 @@ logger = get_logger(__name__)
 #  These are overridden by benchmark data at runtime.
 # ══════════════════════════════════════════════════════════════
 DEFAULT_SLOT_CONFIGS = {
+    # ── Anthropic Fable 5 (creative-flagship line, May 2026) ──
+    'fable-5':                       {'caps': {'text', 'vision', 'thinking'},      'rpm': 30,  'latency': 5000, 'cost': 0.015},
+    'aws.fable-5':                   {'caps': {'text', 'vision', 'thinking'},      'rpm': 30,  'latency': 5000, 'cost': 0.015},
+    'us.anthropic.fable-5-v1:0':     {'caps': {'text', 'vision', 'thinking'},      'rpm': 30,  'latency': 5000, 'cost': 0.015},
+    # Meituan-gateway name for Fable 5 (Jul 2026 marketplace) — pricier tier
+    # than the public API (¥72/¥360 per 1M ≈ $9.94/$49.72).
+    'claude-fable-5':                {'caps': {'text', 'vision', 'thinking'},      'rpm': 30,  'latency': 5000, 'cost': 0.030},
     # ── Claude (Anthropic — current gen: 4.8 flagship, May 2026) ──
     'claude-opus-4-8':               {'caps': {'text', 'vision', 'thinking'},      'rpm': 30,  'latency': 5000, 'cost': 0.015},
     # ── Claude (Anthropic — 4.7 family, Apr 2026) ──
@@ -57,16 +64,32 @@ DEFAULT_SLOT_CONFIGS = {
     'aws.claude-sonnet-4.6':         {'caps': {'text', 'vision', 'thinking'},      'rpm': 50,  'latency': 2000, 'cost': 0.015},
     'vertex.claude-sonnet-4.6':      {'caps': {'text', 'vision', 'thinking'},      'rpm': 50,  'latency': 2000, 'cost': 0.015},
 
-    # ── OpenAI (GPT-5.4 family — March 2026) ──
+    # ── OpenAI (GPT-5.6 family — May 2026) ──
+    # GPT-5.6 dropped the mini/nano SKUs — the generation ships as a two-tier
+    # flagship/pro lineup only. Adds the 'ultra' reasoning-effort tier.
+    'gpt-5.6':                       {'caps': {'text', 'vision', 'thinking'},      'rpm': 30,  'latency': 3000, 'cost': 0.015},
+    'gpt-5.6-pro':                   {'caps': {'text', 'vision', 'thinking'},      'rpm': 10,  'latency': 10000,'cost': 0.180},
+    # GPT-5.6 sub-SKUs on the Meituan gateway (Jul 2026 marketplace): Sol is
+    # the SOTA flagship, Terra the balanced daily driver, Luna the
+    # high-throughput lightweight tier. (Still no mini/nano this generation.)
+    'gpt-5.6-sol':                   {'caps': {'text', 'vision', 'thinking'},      'rpm': 30,  'latency': 5000, 'cost': 0.030},
+    'gpt-5.6-terra':                 {'caps': {'text', 'vision', 'thinking', 'cheap'}, 'rpm': 30,  'latency': 3000, 'cost': 0.015},
+    'gpt-5.6-luna':                  {'caps': {'text', 'vision', 'thinking', 'cheap'}, 'rpm': 60,  'latency': 2000, 'cost': 0.005},
+    # NOTE: There is NO GPT-5.5. OpenAI's actual release cadence went
+    # 5.2 (Nov 2025) → 5.4 (Mar 2026) → 5.6 (May 2026), skipping the odd
+    # minor for the same reason iPhone 9 / Windows 9 were skipped: the
+    # 5.5 number was reserved for an internal branch that never shipped
+    # externally. Do NOT add a 'gpt-5.5' entry here.
+    # ── OpenAI (GPT-5.4 family — March 2026; kept as the cost tier) ──
     'gpt-5.4':                       {'caps': {'text', 'vision', 'thinking'},      'rpm': 30,  'latency': 3000, 'cost': 0.015},
     'gpt-5.4-pro':                   {'caps': {'text', 'vision', 'thinking'},      'rpm': 10,  'latency': 10000,'cost': 0.180},
     'gpt-5.4-mini':                  {'caps': {'text', 'vision', 'thinking', 'cheap'}, 'rpm': 60,  'latency': 2000, 'cost': 0.005},
     'gpt-5.4-nano':                  {'caps': {'text', 'vision', 'cheap'},         'rpm': 200, 'latency': 1000, 'cost': 0.001},
-    # ── OpenAI (GPT-5 family) ──
-    'gpt-5':                         {'caps': {'text', 'vision', 'thinking', 'cheap'}, 'rpm': 30,  'latency': 3000, 'cost': 0.010},
-    'gpt-5.2':                       {'caps': {'text', 'vision', 'thinking', 'cheap'}, 'rpm': 30,  'latency': 3000, 'cost': 0.014},
-    'gpt-5-mini':                    {'caps': {'text', 'vision', 'cheap'},         'rpm': 60,  'latency': 2000, 'cost': 0.002},
-    'gpt-5-nano':                    {'caps': {'text', 'cheap'},                   'rpm': 200, 'latency': 1000, 'cost': 0.001},
+    # NOTE: The original GPT-5 family (gpt-5, gpt-5.2, gpt-5-mini, gpt-5-nano)
+    # has been retired — 5.4 and 5.6 fully cover its capabilities and the
+    # OpenAI gateway no longer routes to them. Codex-branded snapshots
+    # (gpt-5.2-codex / gpt-5.1-codex-mini) remain in the Codex block below
+    # since Codex is a separate lineup on its own cadence.
     # ── OpenAI (o-series reasoning) ──
     'o3':                            {'caps': {'text', 'vision', 'thinking', 'cheap'}, 'rpm': 30,  'latency': 5000, 'cost': 0.010},
     'o4-mini':                       {'caps': {'text', 'vision', 'thinking', 'cheap'}, 'rpm': 30,  'latency': 3000, 'cost': 0.005},
@@ -103,6 +126,9 @@ DEFAULT_SLOT_CONFIGS = {
     # /chat/completions (audio_chat), NOT the /audio/transcriptions endpoint.
     'LongCat-Flash-Omni-2603':       {'caps': {'text', 'vision', 'audio_chat'}, 'rpm': 60,  'latency': 2000, 'cost': 0.0},
     'gemini-3.5-flash':              {'caps': {'text', 'vision', 'thinking', 'cheap'}, 'rpm': 30,  'latency': 2000, 'cost': 0.005},
+    # Jul 2026 marketplace additions — marketplace default quota is 20 RPM each.
+    'gemini-3.6-flash':              {'caps': {'text', 'vision', 'thinking', 'cheap'}, 'rpm': 20,  'latency': 2000, 'cost': 0.005},
+    'gemini-3.5-flash-lite':         {'caps': {'text', 'vision', 'thinking', 'cheap'}, 'rpm': 20,  'latency': 1500, 'cost': 0.001},
 
     # ── Qwen (DashScope) ──
     'qwen3.6-plus':                  {'caps': {'text', 'vision', 'thinking', 'cheap'}, 'rpm': 60, 'latency': 2000, 'cost': 0.002},
@@ -176,6 +202,9 @@ DEFAULT_SLOT_CONFIGS = {
 
     # ── GLM Turbo / Kimi older / MiniMax older — TokenHub catalog ──
     'glm-5-turbo':                   {'caps': {'text', 'cheap'},                   'rpm': 60,  'latency': 2000, 'cost': 0.002},
+    # kimi-k3 (2026-07-17): native vision + native VIDEO understanding,
+    # always-on thinking mode. See platform.kimi.com/docs/guide/use-kimi-vision-model.
+    'kimi-k3':                       {'caps': {'text', 'vision', 'video', 'thinking', 'cheap'}, 'rpm': 60,  'latency': 3000, 'cost': 0.0083},
     'kimi-k2.6':                     {'caps': {'text', 'cheap'},                   'rpm': 30,  'latency': 3000, 'cost': 0.003},
     'kimi-k2.5':                     {'caps': {'text', 'cheap'},                   'rpm': 30,  'latency': 3000, 'cost': 0.002},
     'minimax-m2.5':                  {'caps': {'text', 'cheap'},                   'rpm': 60,  'latency': 2000, 'cost': 0.001},
@@ -216,6 +245,18 @@ DEFAULT_SLOT_CONFIGS = {
     # Doubao-Seed-ASR-2.0 (Volcengine Seed-ASR 2.0) — served on the Meituan
     # gateway's OpenAI-native multipart /audio/transcriptions surface.
     'Doubao-Seed-ASR-2.0':           {'caps': {'transcription'},                   'rpm': 60,  'latency': 3000, 'cost': 0.001},
+
+    # ── Text-to-speech (tts) ──
+    # Reference targets for spoken-audio output (paper podcast, read-aloud).
+    # Any provider exposing the OpenAI-compatible POST /v1/audio/speech
+    # endpoint works once a slot carries the 'tts' capability — these are
+    # pre-seeded metadata for well-known PUBLIC model names only (same
+    # pattern as the whisper-1 transcription block above). A deployment's
+    # actual TTS model is registered via server config with
+    # capabilities: ['tts']; the podcast code never hardcodes a model/voice.
+    'tts-1':                         {'caps': {'tts'},                            'rpm': 60,  'latency': 3000, 'cost': 0.015},
+    'tts-1-hd':                      {'caps': {'tts'},                            'rpm': 60,  'latency': 5000, 'cost': 0.030},
+    'gpt-4o-mini-tts':               {'caps': {'tts'},                            'rpm': 60,  'latency': 3000, 'cost': 0.012},
 
     # ── Embeddings ──
     'text-embedding-v4':             {'caps': {'embedding'},                       'rpm': 100, 'latency': 500,  'cost': 0.001},

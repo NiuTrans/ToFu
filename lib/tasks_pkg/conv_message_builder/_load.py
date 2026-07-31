@@ -157,7 +157,81 @@ def build_api_messages_from_db(
     if raw_messages is None:
         return None
 
-    return _transform_messages(raw_messages, config, exclude_last=exclude_last)
+    # Lifecycle no-refire note (pt_40d00fd526e5479a): a regenerate re-asks the
+    # model for the turn the crash interrupted. When the interrupted tail had
+    # ALREADY emitted a restart/shutdown-class tool call, a fresh generation
+    # must not blindly re-fire it — the command may have succeeded (its result
+    # was simply never delivered). Inject a caution into the last user message
+    # so every regenerate path (killed-recovery, continueAssistant, autopilot
+    # re-drive) inherits the "result unknown — do not re-fire" contract.
+    caution = _lifecycle_caution_note(raw_messages) if exclude_last else None
+
+    built = _transform_messages(raw_messages, config, exclude_last=exclude_last)
+
+    if caution and built:
+        if _prepend_note_to_last_user(built, caution):
+            logger.warning('[MsgBuilder] conv=%s lifecycle no-refire note '
+                           'injected (interrupted tail carried a restart-class '
+                           'call)', conv_id[:8])
+            try:
+                from lib.log import audit_log
+                audit_log('lifecycle_recovery_norefire_note', conv_id=conv_id)
+            except Exception as _e:
+                logger.debug('[MsgBuilder] audit for lifecycle note skipped: %s', _e)
+
+    return built
+
+
+_LIFECYCLE_CAUTION_NOTE = (
+    '[系统提示 / system note] 上一个被中断的回合在结果未知的情况下发出过服务器'
+    '重启/关机类指令（restart/shutdown）。该指令可能已经成功执行——严禁再次发出'
+    '同类指令；只允许做只读检查（如 data/.server_boots.json、进程与端口状态）确认'
+    '当前状态，并向真人用户报告：重启/关机操作必须经真人批准。\n'
+    '(The interrupted turn already issued a server restart/shutdown command whose '
+    'outcome is unknown — it may have succeeded. Do NOT issue it again: verify '
+    'state read-only and report to the human; restart/shutdown requires human '
+    'approval.)'
+)
+
+
+def _lifecycle_caution_note(raw_messages: list[dict]) -> str | None:
+    """The no-refire note when the interrupted tail carries lifecycle calls.
+
+    Fires only for an interrupted assistant tail (``interruptedReason`` set)
+    whose persisted toolRounds contain a restart/shutdown-class command —
+    exactly the regenerate situation where a blind re-fire is possible.
+    """
+    if not raw_messages or not isinstance(raw_messages[-1], dict):
+        return None
+    tail = raw_messages[-1]
+    if tail.get('role') != 'assistant' or not tail.get('interruptedReason'):
+        return None
+    try:
+        from lib.lifecycle_approval import detect_lifecycle_calls
+        if detect_lifecycle_calls(tail.get('toolRounds')):
+            return _LIFECYCLE_CAUTION_NOTE
+    except Exception as e:
+        logger.debug('[MsgBuilder] lifecycle-call detection failed: %s', e)
+    return None
+
+
+def _prepend_note_to_last_user(built: list[dict], note: str) -> bool:
+    """Prepend ``note`` to the last user message of an API message list.
+
+    Handles both content shapes (plain string and block list). Returns False
+    when there is no user message to carry the note (caller then skips).
+    """
+    for msg in reversed(built or []):
+        if not isinstance(msg, dict) or msg.get('role') != 'user':
+            continue
+        content = msg.get('content')
+        if isinstance(content, str):
+            msg['content'] = note + '\n\n' + content
+            return True
+        if isinstance(content, list):
+            content.insert(0, {'type': 'text', 'text': note})
+            return True
+    return False
 
 
 def _load_messages_from_db(conv_id: str) -> list[dict] | None:

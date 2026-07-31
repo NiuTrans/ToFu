@@ -38,10 +38,25 @@ function _turnWriteInfo(conv, userMsgIdx) {
   }
   return files.size > 0 ? [...files] : null;
 }
-/* ★ Perf: skip rebuild when user message count + last user content haven't changed.
+/* ★ Perf: skip the rebuild when nothing a dot RENDERS FROM has changed.
  * buildTurnNav scans ALL messages and JSON.parse-s tool args (_turnWriteInfo),
- * which costs 50-200ms for large conversations. During streaming, only assistant
- * content changes — user messages are static, so the turn nav doesn't need updates. */
+ * which costs 50-200ms for large conversations. During streaming only assistant
+ * content changes — user messages are static, so the nav needs no update.
+ *
+ * ★ The fingerprint must sample EVERY input a dot is built from, or the guard
+ * strands dots that address messages which have moved. It previously sampled
+ * `userCount + LAST user content + length` only, which is blind to two things
+ * that DO change the dots:
+ *   • WHICH CONVERSATION this is. `_turnNavFp` is one module-level slot shared
+ *     across conversations, so switching to a different conv with the same
+ *     shape (same length, same user count, same trailing user text) was a HIT →
+ *     early return → the sidebar kept the PREVIOUS conversation's dots, whose
+ *     `data-msg-idx` / `scrollToTurn(idx)` now index a different array.
+ *   • Any NON-LAST user message — edited, deleted mid-history, or shifted by an
+ *     insert. Only the tail was sampled, so those rebuilt nothing.
+ * Seed with `conv.id` and fold each turn's INDEX + content preview, hashed to
+ * keep the token short. Still O(messages) with no JSON.parse, so the streaming
+ * skip (the reason this guard exists) is unaffected. */
 let _turnNavFp = "";
 function buildTurnNav(conv) {
   const nav = document.getElementById("turnNav");
@@ -51,17 +66,23 @@ function buildTurnNav(conv) {
     _turnNavFp = "";
     return;
   }
-  /* Fingerprint: count of user messages + last user message content (first 40 chars) */
-  let _uCount = 0, _lastUContent = "";
+  let _fpSeed = conv.id + "|";
+  let _uCount = 0;
   for (let i = 0; i < conv.messages.length; i++) {
-    if (conv.messages[i].role === "user") {
-      _uCount++;
-      _lastUContent = (conv.messages[i].content || "").slice(0, 40);
-    }
+    const m = conv.messages[i];
+    if (m.role !== "user") continue;
+    _uCount++;
+    _fpSeed += i + "=" + (m._isEndpointReview ? "R" : "") + (m.content || "").slice(0, 40) + ";";
   }
-  const _fp = _uCount + ":" + _lastUContent + ":" + conv.messages.length;
+  const _fp = _uCount + ":" + conv.messages.length + ":" +
+    (typeof _hashStr === "function" ? _hashStr(_fpSeed) : _fpSeed);
   if (_fp === _turnNavFp) return;
   _turnNavFp = _fp;
+  /* A rebuild replaces every dot node, so the cached active-dot index no longer
+   * refers to anything. Clear it or updateActiveTurn can compute the same index
+   * as before, take its `ai !== _lastActiveDotIdx` early-out, and leave the
+   * fresh nav with NO dot marked active. */
+  _lastActiveDotIdx = -1;
   let tn = 0;
   const turns = [];
   for (let i = 0; i < conv.messages.length; i++) {
@@ -112,7 +133,7 @@ function buildTurnNav(conv) {
     });
   }
 }
-function scrollToTurn(idx) {
+function scrollToTurn(idx, _noRerender) {
   let el = document.getElementById("msg-" + idx);
   if (el) {
     el.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -123,6 +144,39 @@ function scrollToTurn(idx) {
   const inner = document.getElementById("chatInner");
   const container = document.getElementById("chatContainer");
   if (!inner || !container) return;
+
+  /* Case A0: the target was evicted BELOW the rendered window.
+   *
+   * The bounded render window (_MAX_RENDER_WINDOW, streaming_render.js) drops
+   * TAIL bubbles when the reader scrolls up through history, so the rendered
+   * span becomes e.g. [160,240) of 300 messages. A dot for index 250 then has
+   * no node, and this case was MISSING — the only window walk here was the
+   * upward one (Case A). Falling through to the force-re-render below does NOT
+   * rescue it: that repaints only the tail window [total-_INITIAL_RENDER,
+   * total), so any target above that stayed absent and the click was a SILENT
+   * no-op (the reported "some dots are unresponsive").
+   *
+   * Walk the EXISTING downward loader instead of hand-rolling a second
+   * renderer: `_loadNewerMessages` already owns the bottom sentinel, the head
+   * eviction that keeps the window bounded, and the scroll compensation. */
+  if (Number.isFinite(_lazyRenderedTo) && idx >= _lazyRenderedTo) {
+    /* Bound the walk by the number of BATCHes that could possibly be needed,
+     * and break the moment a call makes no progress (e.g. a live stream owns
+     * the tail, so _loadNewerMessages declines) — never spin. */
+    let guard = Math.ceil(conv.messages.length / 20) + 2;
+    while (guard-- > 0 && Number.isFinite(_lazyRenderedTo) && idx >= _lazyRenderedTo) {
+      const before = _lazyRenderedTo;
+      _loadingNewer = false;
+      _loadNewerMessages();
+      if (_lazyRenderedTo === before) break;
+    }
+    el = document.getElementById("msg-" + idx);
+    if (el) {
+      el.scrollIntoView({ behavior: "smooth", block: "start" });
+      return;
+    }
+    /* Still missing — fall through to the re-render fallback below. */
+  }
 
   /* Case A: target idx is above the currently rendered range — lazy-load upward */
   if (idx < _lazyRenderedFrom) {
@@ -144,7 +198,15 @@ function scrollToTurn(idx) {
     if (sentinel) {
       sentinel.after(frag);
     } else {
-      inner.prepend(frag);
+      /* No head sentinel: insert at the HEAD via the shared furniture-aware
+       * primitive. A raw `inner.prepend` would land ABOVE a bottom sentinel's
+       * sibling set correctly today, but it also ignores any leading
+       * furniture — the same class of bug as the head/tail anchors. */
+      if (typeof chatInnerInsert === 'function') {
+        chatInnerInsert(inner, frag, { position: 'head', conv: conv, site: 'turn_nav.scrollToTurn' });
+      } else {
+        inner.prepend(frag);
+      }
     }
     _lazyRenderedFrom = targetStart;
 
@@ -178,7 +240,7 @@ function scrollToTurn(idx) {
     if (activeStreams.has(conv.id) && typeof showStreamingUIForConv === 'function') {
       showStreamingUIForConv(conv.id);
     } else {
-      renderChat(conv, true);
+      window.ConvView.replaceAll(conv.id, { forceScroll: true });
     }
     el = document.getElementById("msg-" + idx);
     if (el) {

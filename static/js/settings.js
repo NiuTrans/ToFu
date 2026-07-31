@@ -10,7 +10,7 @@ var _serverConfig = null;
 /** Cached today's per-key success/failure stats: { day, providers: {pid: {key_name: {...}}} } */
 var _keyStatsCache = {
   day: '', providers: {},
-  min_attempts: 5, min_success_rate: 0.5, max_consecutive_429: 100,
+  min_attempts: 5, min_success_rate: 0.5,
 };
 var _keyStatsLoading = false;
 

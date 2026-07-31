@@ -6,7 +6,7 @@ conversations by 2.5× and caused the ``conv=mo4fr5xeup9ogp`` compaction
 failure (see 2026-05-04 post-mortem).
 
 Per-provider support matrix (see
-``<project>/.tofu/skills/token-counter-api-support-matrix.md`` for full
+``<project>/.tofu/memories/token-counter-api-support-matrix.md`` for full
 details and verification dates):
 
   ==============  ==============================  ==================

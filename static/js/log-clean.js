@@ -24,12 +24,6 @@ var _pendingLogClean = null;  // shared with main.js — must be var
 // typing while a request is in-flight.
 let _logCleanReqGen = 0;
 
-// ── Fetch helper ────────────────────────────────────────────────
-
-function _logCleanApiUrl(p) {
-  return (typeof apiUrl === 'function') ? apiUrl(p) : p;
-}
-
 /**
  * Detect log noise. Returns a CleaningResult or null.
  * Mirrors the previous client-side function shape, but the policy
@@ -47,21 +41,11 @@ async function detectLogNoise(text) {
 
   const myGen = ++_logCleanReqGen;
   try {
-    const resp = await fetch(_logCleanApiUrl('/api/v1/logs/clean'), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text }),
-      credentials: 'same-origin',
-    });
+    // Api.logs.clean uses onError:'null' → null on HTTP/network error, matching
+    // the old !resp.ok / catch paths (the per-status warn is dropped; the
+    // unified client already console.warns failures).
+    const body = await Api.logs.clean(text);
     if (myGen !== _logCleanReqGen) return null;  // superseded
-    if (!resp.ok) {
-      // Don't spam the console for transient 4xx/5xx — log once per kind.
-      if (typeof debugLog === 'function') {
-        debugLog(`[LogClean] /api/v1/logs/clean → ${resp.status}`, 'warn');
-      }
-      return null;
-    }
-    const body = await resp.json();
     if (!body || body.no_noise) return null;
     if (!body.cleanedText) return null;
     // Server returns dataclass-shaped object; it's already in the
@@ -153,14 +137,9 @@ async function aiCompressLog() {
   btn.innerHTML = _aiBtnIconHtml() + ' ' + t('logClean.compressing');
 
   try {
-    const resp = await fetch(_logCleanApiUrl('/api/v1/logs/compress'), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text: originalText }),
-      credentials: 'same-origin',
-    });
-    const data = await resp.json();
-    if (!resp.ok) throw new Error(data.error || 'API error');
+    // Api.logs.compress throws Error(data.error || 'API error') on non-OK,
+    // exactly like the old inline handling.
+    const data = await Api.logs.compress(originalText);
     const compressed = data.compressed || '';
     if (!compressed.trim()) throw new Error('LLM returned empty result');
 

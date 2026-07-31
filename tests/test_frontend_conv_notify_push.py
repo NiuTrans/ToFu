@@ -105,6 +105,10 @@ global.loadConversation = () => {};
 global.newChat = () => {};
 global.renderConversationList = () => {};
 global.renderChat = (conv) => { renderChatCalls.push(conv && conv.id); };
+/* The shipped repaint seam moved from renderChat(conv) to
+ * window.ConvView.replaceAll(convId) — stub it into the SAME counter so the
+ * '*_rendered' assertions keep their original meaning. */
+global.ConvView = { replaceAll: (id) => renderChatCalls.push(id) };
 global.saveConversations = (id) => { saveCalls.push(id); };
 global._applySettingsToConv = (conv, settings) => { if (settings && settings.activeTaskId && conv && !conv.activeTaskId && !conv._activeTaskClearedAt) conv.activeTaskId = settings.activeTaskId; };
 global._restoreConvToolState = () => {};
@@ -117,7 +121,17 @@ global.pushSubscribe = () => {};
 global.Api = { conversations: { get: async (id) => { getCalls.push(id); return serverResponse; } } };
 
 const SRC = fs.readFileSync(process.argv[2], 'utf8');
+// Epic-E slices: _verifyActiveConvFromServer now calls _mergeTerminalTurnFields
+// (conv_reducers.js) — load the REAL reducer first (same pattern as the
+// conv_persist_helpers harness), so the verify path executes for real.
+const REDUCERS = fs.readFileSync(process.argv[3], 'utf8');
+// _onConvNotifyPush's multi-user gate delegates to window._frameIsOurs, whose
+// real implementation lives in conv_state_reducer.js — load it too, else the
+// gate fails OPEN in the harness and other_user_dropped can't be exercised.
+const STATE_REDUCER = fs.readFileSync(process.argv[4], 'utf8');
 function loadModule(src) { (0, eval)(src); }
+loadModule(REDUCERS);
+loadModule(STATE_REDUCER);
 
 function reset() {
   getCalls = []; renderChatCalls = []; saveCalls = [];
@@ -271,14 +285,29 @@ const settle = async () => { for (let i = 0; i < 5; i++) await flush(); };
     check('revgate_no_get', getCalls.length === 0);
   }
 
-  // ══ 4. SELF-ECHO fast-path: fresh local PUT (_localWriteAt) → skip ══
+  // ══ 4. SELF-ECHO fast-path: fresh local PUT (_localWriteAt) → no DESTRUCTIVE verify ══
+  //    2026-07-27: the frame is no longer discarded outright — it diverts to the
+  //    TRANSLATION-ONLY lane (_translationOnlyVerify), because server-side
+  //    auto-translate commits inside this very window and the rev channel has no
+  //    replay. What this case protects is unchanged and still asserted: our own
+  //    PUT is authoritative, so NO content/thinking/toolRounds may be adopted.
   {
     reset();
-    conversations = [{ id: 'c1', _serverRev: 5, messages: [{}], _localWriteAt: Date.now() }];
+    conversations = [{ id: 'c1', _serverRev: 5, messages: [
+      { role: 'user', content: 'q' },
+      { role: 'assistant', content: 'local copy' },
+    ], _localWriteAt: Date.now() }];
     activeConvId = 'c1';
+    serverResponse = { rev: 9, messages: [
+      { role: 'user', content: 'q' },
+      { role: 'assistant', content: 'STALE SERVER CONTENT' },
+    ] };
     _onConvNotifyPush({ type: 'conv_changed', convId: 'c1', rev: 9, userId: 1 });
     await flush(); fireTimers(); await settle();
-    check('self_echo_localwrite_skipped', getCalls.length === 0);
+    check('self_echo_no_destructive_adopt',
+      conversations[0].messages[1].content === 'local copy');
+    check('self_echo_not_rendered', renderChatCalls.length === 0);
+    check('self_echo_rev_not_advanced', conversations[0]._serverRev === 5);
   }
 
   // ══ 4b. SELF-ECHO caught in timer: our PUT advances _serverRev during debounce ══
@@ -333,22 +362,44 @@ const settle = async () => { for (let i = 0; i < 5; i++) await flush(); };
     check('bg_list_refresh', listRefreshCalls === 1);
   }
 
-  // ══ 8. Editing / live-stream on the active conv → suppressed ══
+  // ══ 8. Editing / live-stream on the active conv → DESTRUCTIVE adopt suppressed ══
+  //    2026-07-27: these frames divert to the translation-only lane rather than
+  //    being dropped (auto-translate must not need a manual refresh). The
+  //    property these cases exist to protect — never overwrite the content this
+  //    device holds more recently — is asserted directly below.
   {
     reset();
-    conversations = [{ id: 'c1', _serverRev: 5, messages: [{}] }];
+    conversations = [{ id: 'c1', _serverRev: 5, messages: [
+      { role: 'user', content: 'q' },
+      { role: 'assistant', content: 'being edited locally' },
+    ] }];
     activeConvId = 'c1'; _editingMsgIdx = 2;
+    serverResponse = { rev: 9, messages: [
+      { role: 'user', content: 'q' },
+      { role: 'assistant', content: 'STALE SERVER CONTENT' },
+    ] };
     _onConvNotifyPush({ type: 'conv_changed', convId: 'c1', rev: 9, userId: 1 });
     await flush(); fireTimers(); await settle();
-    check('editing_suppressed', getCalls.length === 0);
+    check('editing_no_destructive_adopt',
+      conversations[0].messages[1].content === 'being edited locally');
+    check('editing_not_rendered', renderChatCalls.length === 0);
   }
   {
     reset();
-    conversations = [{ id: 'c1', _serverRev: 5, messages: [{}] }];
+    conversations = [{ id: 'c1', _serverRev: 5, messages: [
+      { role: 'user', content: 'q' },
+      { role: 'assistant', content: 'streaming so far' },
+    ] }];
     activeConvId = 'c1'; activeStreams.set('c1', { controller: {} });
+    serverResponse = { rev: 9, messages: [
+      { role: 'user', content: 'q' },
+      { role: 'assistant', content: 'STALE SERVER CONTENT' },
+    ] };
     _onConvNotifyPush({ type: 'conv_changed', convId: 'c1', rev: 9, userId: 1 });
     await flush(); fireTimers(); await settle();
-    check('live_stream_suppressed', getCalls.length === 0);
+    check('live_stream_no_destructive_adopt',
+      conversations[0].messages[1].content === 'streaming so far');
+    check('live_stream_not_rendered', renderChatCalls.length === 0);
   }
 
   // ══ 9. conv_deleted → removed ══
@@ -373,10 +424,13 @@ const settle = async () => { for (let i = 0; i < 5; i++) await flush(); };
     check('other_user_dropped', getCalls.length === 0 && listRefreshCalls === 0);
   }
 
-  // ══ 11. DOUBLE-NEUTER A: strip both _localWriteAt guards → wrongly verifies ══
+  // ══ 11. DOUBLE-NEUTER A: strip both _localWriteAt guards → wrongly adopts ══
+  //    The guards now DIVERT to the translation-only lane instead of returning,
+  //    so the neuter targets the diverting block and replaces it with a
+  //    fall-through into the destructive verify.
   {
-    const G1 = 'if (conv._localWriteAt && (Date.now() - conv._localWriteAt) < _CONV_SELF_ECHO_MS) return;';
-    const G2 = 'if (c._localWriteAt && (Date.now() - c._localWriteAt) < _CONV_SELF_ECHO_MS) return;';
+    const G1 = 'if (conv._localWriteAt && (Date.now() - conv._localWriteAt) < _CONV_SELF_ECHO_MS) {\n      _scheduleTranslationOnlyVerify(convId);\n      return;\n    }';
+    const G2 = 'if (c._localWriteAt && (Date.now() - c._localWriteAt) < _CONV_SELF_ECHO_MS) {\n          _scheduleTranslationOnlyVerify(convId);\n          return;\n        }';
     const neutered = SRC.split(G1).join('/* NEUTERED self-echo (conv) */')
                         .split(G2).join('/* NEUTERED self-echo (c) */');
     check('neuterA_patch_applied', neutered !== SRC && !neutered.includes(G1) && !neutered.includes(G2));
@@ -387,7 +441,8 @@ const settle = async () => { for (let i = 0; i < 5; i++) await flush(); };
     serverResponse = { rev: 9, messages: [{ role: 'user' }, { role: 'assistant', content: 'x' }] };
     _onConvNotifyPush({ type: 'conv_changed', convId: 'c1', rev: 9, userId: 1 });
     await flush(); fireTimers(); await settle();
-    check('neuterA_selfecho_wrongly_verifies', getCalls.length === 1);
+    check('neuterA_selfecho_wrongly_adopts',
+      conversations[0].messages[1].content === 'x');
     loadModule(SRC);
   }
 
@@ -452,7 +507,9 @@ def test_conv_notify_push_handler():
         f.write(_HARNESS)
     try:
         proc = subprocess.run(
-            ['node', harness, os.path.join(JS_DIR, 'core', 'cross_tab_sync.js')],
+            ['node', harness, os.path.join(JS_DIR, 'core', 'cross_tab_sync.js'),
+             os.path.join(JS_DIR, 'core', 'conv_reducers.js'),
+             os.path.join(JS_DIR, 'core', 'conv_state_reducer.js')],
             capture_output=True, text=True, timeout=60,
         )
     finally:

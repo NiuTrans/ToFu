@@ -21,10 +21,12 @@ import uuid
 from flask import Blueprint, jsonify
 
 from lib.api_response import api_bad_request, api_error, api_internal_error, api_ok
+from lib.error_envelope import from_exception
 from lib.log import get_logger
 from lib.openapi import api_meta
 from lib.request_parser import parse_body
 from lib.translate import (
+    TranslationContentRefused,
     _build_translate_prompt,
     _cleanup_translate_tasks,
     _do_translate,
@@ -137,6 +139,17 @@ def translate_text_v1():
                           == 'truncated')
         return jsonify({'translated': content, 'model': _model,
                         'truncated': _truncated})
+    except TranslationContentRefused as e:
+        # Content guards exhausted their retry budget — NOT a server crash.
+        # 502 + typed envelope so the frontend shows the real reason
+        # ('translation rejected by quality check') instead of a bare
+        # 'INTERNAL SERVER ERROR' (pt_75d8f8c7, 73× 500/day).
+        logger.warning('[Translate.v1] content refused (%d chars, target=%s): %s',
+                       input_len, target, e)
+        return api_error(
+            from_exception(e, kind='content_refused',
+                           source='api_v1.translate.sync'),
+            status=502)
     except Exception as e:
         logger.error('[Translate.v1] sync error (%d chars, %s): %s',
                      input_len, target, e, exc_info=True)

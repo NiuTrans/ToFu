@@ -8,6 +8,14 @@
    ═══════════════════════════════════════════════════════════════════ */
 
 function debugLog(msg, type = "") {
+  /* Normalize level aliases: many callers pass 'warning', but the server
+   * forwarding gate below only matches 'warn'/'error' exactly — so 'warning'
+   * messages were silently kept client-side. Map it (and any case variant)
+   * to 'warn' so the intended reports actually reach the server. */
+  if (typeof type === "string") {
+    const t = type.toLowerCase();
+    if (t === "warning") type = "warn";
+  }
   console.log(`[${type || "info"}]`, msg);
   /* Bounded in-memory ring of recent log lines so the one-click diagnostics
    * collector (diag_collect.js → window.__tofuCollectDiagnostics) can attach
@@ -67,6 +75,46 @@ window.addEventListener("unhandledrejection", (evt) => {
 });
 // Per-conversation debug message cache: { convId: { messages, label } }
 const _debugCache = {};
+/* ── Request Inspector data plane (P1, docs/DEBUG_PANEL_REDESIGN.md §4) ──
+ * Per-TASK per-round snapshot log: { taskId: { rounds, roundOrder, states } }.
+ * SSE `messages_snapshot` events APPEND here (never overwrite) — the old
+ * _debugCache keeps only the latest snapshot for the legacy panel render and
+ * is untouched. kind='state' snapshots (post-tool / final / fallback) are NOT
+ * LLM requests and land in .states; a missing kind (legacy event) is treated
+ * as 'request' for back-compat. */
+const _debugRequests = {};
+function _debugRecordSnapshot(taskId, rec) {
+  if (!taskId || !rec) return;
+  const t = (_debugRequests[taskId] = _debugRequests[taskId] ||
+    { rounds: {}, roundOrder: [], states: [] });
+  if (rec.kind === "state") {
+    t.states.push(rec);
+  } else {
+    /* Endpoint phases re-number rounds from 1 — key by turn|roundNum so a
+     * planner R1 and a worker R1 never overwrite each other (P4). */
+    const key = rec.turn ? rec.turn + '|' + rec.roundNum : String(rec.roundNum);
+    if (!(key in t.rounds)) t.roundOrder.push(key);
+    t.rounds[key] = rec;
+  }
+  /* Memory cap (owner P2 constraint): full payloads only for the CURRENT
+   * task — every OTHER task degrades to metadata-only (messages/tools
+   * stripped, counts kept, `_stripped` flag set), and the log is capped at
+   * 20 tasks. Request payloads stay re-fetchable on demand from
+   * /api/v1/tasks/<id>/requests/<round> (the server-authoritative source). */
+  for (const id of Object.keys(_debugRequests)) {
+    if (id === taskId) continue;
+    const o = _debugRequests[id];
+    for (const k of Object.keys(o.rounds)) {
+      const r = o.rounds[k];
+      if (r.messages) { r.messages = null; r.tools = null; r._stripped = true; }
+    }
+    for (const s of o.states) {
+      if (s.messages) { s.messages = null; s.tools = null; s._stripped = true; }
+    }
+  }
+  const ids = Object.keys(_debugRequests);
+  if (ids.length > 20) delete _debugRequests[ids[0]];
+}
 function clearDebug() {
   document.getElementById("debugContent").innerHTML = "";
   document.getElementById("debugTitle").innerHTML = Icon('inbox', 14) + ' Messages';
@@ -202,6 +250,13 @@ function _debugMsgIdentity(msg) {
   return "r:" + role + ":" + text.length + ":" + (h >>> 0).toString(36);
 }
 function toggleDebug() {
+  /* P2: the global floating box is retired — the debug entry now opens the
+   * Request Inspector drawer (right-side, conversation-scoped). Falls back
+   * to the legacy floating panel only if the inspector failed to load. */
+  if (typeof toggleRequestInspector === "function") {
+    toggleRequestInspector();
+    return;
+  }
   debugVisible = !debugVisible;
   document
     .getElementById("debugPanel")
@@ -220,6 +275,10 @@ function toggleDebug() {
 // Close the debug panel (top-right ✕). Distinct from clearDebug(), which only
 // wipes content — the ✕ must actually hide the panel.
 function closeDebug() {
+  if (typeof closeRequestInspector === "function") {
+    closeRequestInspector();
+    return;
+  }
   debugVisible = false;
   const panel = document.getElementById("debugPanel");
   if (panel) panel.classList.remove("visible");
@@ -238,6 +297,9 @@ function closeDebug() {
 // — newly switched-to old conversations showed an empty debug panel until
 // the user sent a message and the streaming pipeline emitted a snapshot.
 function restoreDebugForConv(convId) {
+  /* P2 hook: refresh the Request Inspector's task list on conv switch
+   * (no-op while the drawer is closed). */
+  if (typeof _riOnConvSwitch === "function") _riOnConvSwitch(convId);
   const cached = _debugCache[convId];
   if (cached && cached.messages && cached.messages.length > 0) {
     showMessagesInDebug(cached.messages, cached.label, false, undefined, cached.tools, cached.approx);
@@ -285,6 +347,265 @@ function restoreDebugForConv(convId) {
       if (typeof activeConvId !== "undefined" && convId === activeConvId) clearDebug();
     });
 }
+/* ── Message-block render helpers (module scope) ─────────────────────
+ * Hoisted out of showMessagesInDebug so the request-inspector INLINE state
+ * panel renders a state snapshot through the exact same code path as the
+ * debug drawer — one renderer, two containers. */
+// Helper: syntax-color JSON (full, no truncation)
+function colorJson(obj, depth) {
+  if (depth === undefined) depth = 0;
+  const indent = "  ".repeat(depth);
+  if (obj === null) return '<span class="debug-null">null</span>';
+  if (obj === undefined) return '<span class="debug-null">undefined</span>';
+  if (typeof obj === "number") return `<span class="debug-num">${obj}</span>`;
+  if (typeof obj === "boolean")
+    return `<span class="debug-num">${obj}</span>`;
+  if (typeof obj === "string") {
+    const escaped = obj
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+    return `<span class="debug-str">"${escaped}"</span>`;
+  }
+  if (Array.isArray(obj)) {
+    if (obj.length === 0) return "[]";
+    let items = obj.map((v) => indent + "  " + colorJson(v, depth + 1));
+    return "[\n" + items.join(",\n") + "\n" + indent + "]";
+  }
+  if (typeof obj === "object") {
+    const keys = Object.keys(obj);
+    if (keys.length === 0) return "{}";
+    let lines = keys.map(
+      (k) =>
+        indent +
+        "  " +
+        '<span class="debug-key">"' +
+        k +
+        '"</span>: ' +
+        colorJson(obj[k], depth + 1),
+    );
+    return "{\n" + lines.join(",\n") + "\n" + indent + "}";
+  }
+  return String(obj);
+}
+// Build summary text for a message
+function msgSummary(msg, i) {
+  const parts = ["#" + (i + 1)];
+  const chars = _debugMsgChars(msg);
+  if (typeof msg.content === "string") {
+    parts.push(_fmtKB(chars));
+  } else if (Array.isArray(msg.content)) {
+    parts.push(msg.content.length + " blocks · " + _fmtKB(chars));
+  }
+  const tok = _debugMsgTokens(msg);
+  if (tok > 0) parts.push("~" + (tok >= 1000 ? (tok / 1000).toFixed(1) + "K" : tok) + "tok");
+  if (msg.tool_calls) parts.push(msg.tool_calls.length + " tool_calls");
+  if (msg.name) parts.push("fn:" + msg.name);
+  if (msg.tool_call_id) {
+    // Truncate long IDs — full one is in the body JSON anyway
+    const tc = msg.tool_call_id;
+    parts.push("tc:" + (tc.length > 12 ? tc.slice(0, 8) + "…" + tc.slice(-4) : tc));
+  }
+  return parts.join(" · ");
+}
+// Build one block DOM element
+function createBlock(msg, i) {
+  const role = msg.role || "unknown";
+  const block = document.createElement("div");
+  block.className = "debug-msg-block";
+  block.dataset.idx = i;
+  block.dataset.mid = _debugMsgIdentity(msg);
+  const compInfo = _debugCompactionInfo(msg);
+  if (compInfo) block.classList.add("debug-msg-compacted");
+  // Header
+  const header = document.createElement("div");
+  header.className = "debug-msg-header";
+  const roleSpan = document.createElement("span");
+  roleSpan.className = "role-" + role;
+  roleSpan.textContent = role.toUpperCase();
+  header.appendChild(roleSpan);
+  if (compInfo) {
+    const badge = document.createElement("span");
+    badge.className = "debug-compact-badge";
+    const fromKB = compInfo.from != null ? _fmtKB(compInfo.from) : "?";
+    const toKB = compInfo.to != null ? _fmtKB(compInfo.to) : "?";
+    badge.innerHTML = `${Icon('archive', 11)} ${escapeHtml(compInfo.layer)} ${fromKB}→${toKB}`;
+    badge.title = `Tool result compacted (${compInfo.layer}) — original ${fromKB}, now ${toKB}`;
+    header.appendChild(badge);
+  }
+  // Project-Brain injection badge — sniffed from the authoritative markers
+  // the model actually saw. Names which brain blocks this system msg carries.
+  const brainInfo = _debugBrainInfo(msg);
+  if (brainInfo) {
+    block.classList.add("debug-msg-brain");
+    const bParts = [];
+    if (brainInfo.charter) bParts.push(t('debug.brainCharter'));
+    if (brainInfo.board) bParts.push(t('debug.brainBoard'));
+    const bBadge = document.createElement("span");
+    bBadge.className = "debug-brain-badge";
+    bBadge.innerHTML = `${Icon('brain', 11)} ${escapeHtml(bParts.join('/'))}`;
+    bBadge.title = t('debug.brainBadgeTitle');
+    header.appendChild(bBadge);
+  }
+  const summary = document.createElement("span");
+  summary.className = "debug-msg-summary";
+  summary.textContent = msgSummary(msg, i);
+  header.appendChild(summary);
+  const arrow = document.createElement("span");
+  arrow.textContent = "▶";
+  arrow.style.cssText =
+    "font-size:9px;transition:transform 0.2s;color:var(--text-tertiary)";
+  header.appendChild(arrow);
+  // Store msg ref on block element so incremental updates can swap it
+  block._msgRef = msg;
+  header.onclick = () => {
+    const isOpen = block.classList.toggle("open");
+    arrow.style.transform = isOpen ? "rotate(90deg)" : "";
+    // Lazy-render body content on first open — always from block._msgRef
+    // (updated by the incremental path), never a stale closure capture.
+    const body = block.querySelector(".debug-msg-body");
+    if (isOpen && body && !body.dataset.rendered) {
+      body.dataset.rendered = "1";
+      const pre = body.querySelector("pre");
+      if (pre) pre.innerHTML = colorJson(block._msgRef, 0);
+    }
+  };
+  block.appendChild(header);
+  // Tool calls quick view
+  if (msg.tool_calls && msg.tool_calls.length > 0) {
+    const tcDiv = document.createElement("div");
+    tcDiv.className = "debug-tool-calls";
+    tcDiv.innerHTML =
+      Icon('wrench', 12) + ' ' +
+      escapeHtml(msg.tool_calls
+        .map((tc) => (tc.function ? tc.function.name : "?"))
+        .join(", "));
+    block.appendChild(tcDiv);
+  }
+  // Body (collapsed, lazy-rendered)
+  const body = document.createElement("div");
+  body.className = "debug-msg-body";
+  const pre = document.createElement("pre");
+  body.appendChild(pre);
+  block.appendChild(body);
+  return block;
+}
+// Generate a fingerprint for a message to detect changes.
+// Includes a compaction marker so a tool_compacted patch (which only
+// mutates content + sets _compactionLayer) reliably triggers re-render
+// in the incremental update path.
+function msgFingerprint(msg) {
+  const role = msg.role || "";
+  let size = 0;
+  if (typeof msg.content === "string") size = msg.content.length;
+  else if (Array.isArray(msg.content)) size = msg.content.length;
+  const tcs = msg.tool_calls ? msg.tool_calls.length : 0;
+  const tcid = msg.tool_call_id || "";
+  const ci = _debugCompactionInfo(msg);
+  const cm = ci ? `c:${ci.layer}:${ci.from || 0}:${ci.to || 0}` : "";
+  return role + "|" + size + "|" + tcs + "|" + tcid + "|" + cm;
+}
+/* Shared full-render of message blocks into a container — the debug drawer's
+ * full-render path AND the request-inspector inline state panel both render
+ * through here. Wipes `p`, renders the optional prefix fold + one block per
+ * message. Pure full render only: the drawer's incremental path, open-state
+ * restore and scroll handling stay in showMessagesInDebug; tools are synced
+ * separately via updateDebugToolsBlock (the drawer updates them on the
+ * incremental path too, outside any wipe). */
+function renderDebugBlocksInto(p, messages, opts) {
+  p.innerHTML = "";
+  /* Request Inspector P3: prefix-fold diff view. When the caller passes
+   * opts.foldPrefix (K leading messages byte-identical to the PREVIOUS
+   * round's payload), collapse them behind a fold row and mark the
+   * increment with .debug-msg-new — the diff is the whole point of the
+   * per-round view (what did THIS request add to the context). */
+  const _foldK = (opts && opts.foldPrefix > 0)
+    ? Math.min(opts.foldPrefix, messages.length) : 0;
+  if (_foldK > 0) {
+    const foldRow = document.createElement('div');
+    foldRow.className = 'debug-prefix-fold';
+    foldRow.innerHTML = Icon('chevronDown', 11) + ' ' +
+      escapeHtml(t('ri.prefixFold', { k: _foldK, base: opts.diffBase || '' }));
+    foldRow.onclick = () => {
+      const open = foldRow.classList.toggle('open');
+      p.querySelectorAll('.debug-msg-prefix').forEach((b) => {
+        b.style.display = open ? '' : 'none';
+      });
+    };
+    p.appendChild(foldRow);
+  }
+  messages.forEach((msg, i) => {
+    const block = createBlock(msg, i);
+    if (_foldK > 0) {
+      if (i < _foldK) {
+        block.classList.add('debug-msg-prefix');
+        block.style.display = 'none';
+      } else {
+        block.classList.add('debug-msg-new');
+      }
+    }
+    block.dataset.fp = msgFingerprint(msg);
+    block._msgRef = msg;
+    p.appendChild(block);
+  });
+}
+/* Create the collapsible TOOLS block skeleton (header + lazy body). The body
+ * renders from toolsBlock._toolsRef on first open. */
+function _createDebugToolsBlock() {
+  const toolsBlock = document.createElement('div');
+  toolsBlock.className = 'debug-tools-block debug-msg-block';
+  const tHeader = document.createElement('div');
+  tHeader.className = 'debug-msg-header';
+  const tRole = document.createElement('span');
+  tRole.className = 'role-tools';
+  tRole.innerHTML = Icon('wrench', 12) + ' TOOLS';
+  tHeader.appendChild(tRole);
+  const tSummary = document.createElement('span');
+  tSummary.className = 'debug-msg-summary';
+  tHeader.appendChild(tSummary);
+  const tArrow = document.createElement('span');
+  tArrow.textContent = '▶';
+  tArrow.style.cssText = 'font-size:9px;transition:transform 0.2s;color:var(--text-tertiary)';
+  tHeader.appendChild(tArrow);
+  const tBody = document.createElement('div');
+  tBody.className = 'debug-msg-body';
+  const tPre = document.createElement('pre');
+  tBody.appendChild(tPre);
+  tHeader.onclick = () => {
+    const isOpen = toolsBlock.classList.toggle('open');
+    tArrow.style.transform = isOpen ? 'rotate(90deg)' : '';
+    if (isOpen && !tBody.dataset.rendered) {
+      tBody.dataset.rendered = '1';
+      tPre.innerHTML = colorJson(toolsBlock._toolsRef, 0);
+    }
+  };
+  toolsBlock.appendChild(tHeader);
+  toolsBlock.appendChild(tBody);
+  return toolsBlock;
+}
+/* Insert (or reuse) the TOOLS block at the top of container `p` and sync it
+ * with the current tools array: summary text, _toolsRef, and an invalidated /
+ * re-rendered body when the block is open. */
+function updateDebugToolsBlock(p, tools) {
+  let toolsBlock = p.querySelector('.debug-tools-block');
+  if (!toolsBlock) {
+    toolsBlock = _createDebugToolsBlock();
+    p.insertBefore(toolsBlock, p.firstChild);
+  }
+  const names = tools.map(t => (t.function ? t.function.name : '?'));
+  const tSum = toolsBlock.querySelector('.debug-msg-summary');
+  if (tSum) tSum.textContent = `${tools.length} tools: ${names.join(', ')}`;
+  toolsBlock._toolsRef = tools;
+  const tBody = toolsBlock.querySelector('.debug-msg-body');
+  if (tBody && tBody.dataset.rendered && toolsBlock.classList.contains('open')) {
+    tBody.dataset.rendered = '1';
+    const tPre = tBody.querySelector('pre');
+    if (tPre) tPre.innerHTML = colorJson(tools, 0);
+  } else if (tBody) {
+    tBody.dataset.rendered = '';
+  }
+}
 // ★ Render full messages array into debug panel — supports incremental updates
 //   isUpdate=true → streaming update, preserve collapse states, only patch changed blocks
 //   approx=true → COLD-path reconstruction (the /debug-messages endpoint, which
@@ -293,7 +614,26 @@ function restoreDebugForConv(convId) {
 //     chip so the human knows they are NOT looking at a precise capture of a
 //     specific round. The live SSE snapshot path (the real wire form) passes
 //     approx=false/undefined and must NEVER show this chip.
-function showMessagesInDebug(messages, label, isUpdate, forConvId, tools, approx) {
+function showMessagesInDebug(messages, label, isUpdate, forConvId, tools, approx, meta, opts) {
+  /* Request Inspector (P1): when the SSE handler forwards the snapshot's
+   * envelope metadata, record the round into the per-task log (append, never
+   * overwrite). The legacy cold path (/debug-messages) passes no meta and is
+   * not recorded — it is an approximation, not a specific round. */
+  if (meta && typeof meta === "object") {
+    _debugRecordSnapshot(meta.taskId, {
+      kind: meta.kind || "request",
+      roundNum: meta.roundNum,
+      turn: meta.turn || "",
+      label: label,
+      model: meta.model || "",
+      params: meta.params || null,
+      messageCount: messages.length,
+      toolsCount: (tools && tools.length) || 0,
+      ts: Date.now(),
+      messages: messages,
+      tools: tools || null,
+    });
+  }
   const cid =
     forConvId || (typeof activeConvId !== "undefined" ? activeConvId : null);
   // Cache for conversation switching
@@ -393,162 +733,6 @@ function showMessagesInDebug(messages, label, isUpdate, forConvId, tools, approx
     } else if (_chip) {
       _chip.remove();
     }
-  }
-  // Helper: syntax-color JSON (full, no truncation)
-  function colorJson(obj, depth) {
-    if (depth === undefined) depth = 0;
-    const indent = "  ".repeat(depth);
-    if (obj === null) return '<span class="debug-null">null</span>';
-    if (obj === undefined) return '<span class="debug-null">undefined</span>';
-    if (typeof obj === "number") return `<span class="debug-num">${obj}</span>`;
-    if (typeof obj === "boolean")
-      return `<span class="debug-num">${obj}</span>`;
-    if (typeof obj === "string") {
-      const escaped = obj
-        .replace(/&/g, "&amp;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;")
-        .replace(/"/g, "&quot;");
-      return `<span class="debug-str">"${escaped}"</span>`;
-    }
-    if (Array.isArray(obj)) {
-      if (obj.length === 0) return "[]";
-      let items = obj.map((v) => indent + "  " + colorJson(v, depth + 1));
-      return "[\n" + items.join(",\n") + "\n" + indent + "]";
-    }
-    if (typeof obj === "object") {
-      const keys = Object.keys(obj);
-      if (keys.length === 0) return "{}";
-      let lines = keys.map(
-        (k) =>
-          indent +
-          "  " +
-          '<span class="debug-key">"' +
-          k +
-          '"</span>: ' +
-          colorJson(obj[k], depth + 1),
-      );
-      return "{\n" + lines.join(",\n") + "\n" + indent + "}";
-    }
-    return String(obj);
-  }
-  // Build summary text for a message
-  function msgSummary(msg, i) {
-    const parts = ["#" + (i + 1)];
-    const chars = _debugMsgChars(msg);
-    if (typeof msg.content === "string") {
-      parts.push(_fmtKB(chars));
-    } else if (Array.isArray(msg.content)) {
-      parts.push(msg.content.length + " blocks · " + _fmtKB(chars));
-    }
-    const tok = _debugMsgTokens(msg);
-    if (tok > 0) parts.push("~" + (tok >= 1000 ? (tok / 1000).toFixed(1) + "K" : tok) + "tok");
-    if (msg.tool_calls) parts.push(msg.tool_calls.length + " tool_calls");
-    if (msg.name) parts.push("fn:" + msg.name);
-    if (msg.tool_call_id) {
-      // Truncate long IDs — full one is in the body JSON anyway
-      const tc = msg.tool_call_id;
-      parts.push("tc:" + (tc.length > 12 ? tc.slice(0, 8) + "…" + tc.slice(-4) : tc));
-    }
-    return parts.join(" · ");
-  }
-  // Build one block DOM element
-  function createBlock(msg, i) {
-    const role = msg.role || "unknown";
-    const block = document.createElement("div");
-    block.className = "debug-msg-block";
-    block.dataset.idx = i;
-    block.dataset.mid = _debugMsgIdentity(msg);
-    const compInfo = _debugCompactionInfo(msg);
-    if (compInfo) block.classList.add("debug-msg-compacted");
-    // Header
-    const header = document.createElement("div");
-    header.className = "debug-msg-header";
-    const roleSpan = document.createElement("span");
-    roleSpan.className = "role-" + role;
-    roleSpan.textContent = role.toUpperCase();
-    header.appendChild(roleSpan);
-    if (compInfo) {
-      const badge = document.createElement("span");
-      badge.className = "debug-compact-badge";
-      const fromKB = compInfo.from != null ? _fmtKB(compInfo.from) : "?";
-      const toKB = compInfo.to != null ? _fmtKB(compInfo.to) : "?";
-      badge.innerHTML = `${Icon('archive', 11)} ${escapeHtml(compInfo.layer)} ${fromKB}→${toKB}`;
-      badge.title = `Tool result compacted (${compInfo.layer}) — original ${fromKB}, now ${toKB}`;
-      header.appendChild(badge);
-    }
-    // Project-Brain injection badge — sniffed from the authoritative markers
-    // the model actually saw. Names which brain blocks this system msg carries.
-    const brainInfo = _debugBrainInfo(msg);
-    if (brainInfo) {
-      block.classList.add("debug-msg-brain");
-      const bParts = [];
-      if (brainInfo.charter) bParts.push(t('debug.brainCharter'));
-      if (brainInfo.board) bParts.push(t('debug.brainBoard'));
-      const bBadge = document.createElement("span");
-      bBadge.className = "debug-brain-badge";
-      bBadge.innerHTML = `${Icon('brain', 11)} ${escapeHtml(bParts.join('/'))}`;
-      bBadge.title = t('debug.brainBadgeTitle');
-      header.appendChild(bBadge);
-    }
-    const summary = document.createElement("span");
-    summary.className = "debug-msg-summary";
-    summary.textContent = msgSummary(msg, i);
-    header.appendChild(summary);
-    const arrow = document.createElement("span");
-    arrow.textContent = "▶";
-    arrow.style.cssText =
-      "font-size:9px;transition:transform 0.2s;color:var(--text-tertiary)";
-    header.appendChild(arrow);
-    // Store msg ref on block element so incremental updates can swap it
-    block._msgRef = msg;
-    header.onclick = () => {
-      const isOpen = block.classList.toggle("open");
-      arrow.style.transform = isOpen ? "rotate(90deg)" : "";
-      // Lazy-render body content on first open
-      // ★ FIX: use block._msgRef (updated by incremental path) instead of
-      //   the closure-captured 'msg' which goes stale after server snapshots.
-      const body = block.querySelector(".debug-msg-body");
-      if (isOpen && body && !body.dataset.rendered) {
-        body.dataset.rendered = "1";
-        const pre = body.querySelector("pre");
-        if (pre) pre.innerHTML = colorJson(block._msgRef, 0);
-      }
-    };
-    block.appendChild(header);
-    // Tool calls quick view
-    if (msg.tool_calls && msg.tool_calls.length > 0) {
-      const tcDiv = document.createElement("div");
-      tcDiv.className = "debug-tool-calls";
-      tcDiv.innerHTML =
-        Icon('wrench', 12) + ' ' +
-        escapeHtml(msg.tool_calls
-          .map((tc) => (tc.function ? tc.function.name : "?"))
-          .join(", "));
-      block.appendChild(tcDiv);
-    }
-    // Body (collapsed, lazy-rendered)
-    const body = document.createElement("div");
-    body.className = "debug-msg-body";
-    const pre = document.createElement("pre");
-    body.appendChild(pre);
-    block.appendChild(body);
-    return block;
-  }
-  // Generate a fingerprint for a message to detect changes.
-  // Includes a compaction marker so a tool_compacted patch (which only
-  // mutates content + sets _compactionLayer) reliably triggers re-render
-  // in the incremental update path.
-  function msgFingerprint(msg) {
-    const role = msg.role || "";
-    let size = 0;
-    if (typeof msg.content === "string") size = msg.content.length;
-    else if (Array.isArray(msg.content)) size = msg.content.length;
-    const tcs = msg.tool_calls ? msg.tool_calls.length : 0;
-    const tcid = msg.tool_call_id || "";
-    const ci = _debugCompactionInfo(msg);
-    const cm = ci ? `c:${ci.layer}:${ci.from || 0}:${ci.to || 0}` : "";
-    return role + "|" + size + "|" + tcs + "|" + tcid + "|" + cm;
   }
   // --- Incremental update path ---
   // ★ FIX: detect when incremental update is not appropriate and fall back to full render
@@ -662,52 +846,16 @@ function showMessagesInDebug(messages, label, isUpdate, forConvId, tools, approx
     for (let i = existingCount - 1; i >= newCount; i--) {
       existing[i].remove();
     }
-    // Append new blocks
+    // Append new blocks (createBlock already binds lazy render on _msgRef)
     for (let i = existingCount; i < newCount; i++) {
       const block = createBlock(messages[i], i);
       block.dataset.fp = msgFingerprint(messages[i]);
       block._msgRef = messages[i];
-      // Rebind lazy render to use _msgRef
-      const hdr = block.querySelector(".debug-msg-header");
-      hdr.onclick = (function (b, idx) {
-        return function () {
-          const isOpen = b.classList.toggle("open");
-          b.querySelector(".debug-msg-header span:last-child").style.transform =
-            isOpen ? "rotate(90deg)" : "";
-          const body = b.querySelector(".debug-msg-body");
-          if (isOpen && body && !body.dataset.rendered) {
-            body.dataset.rendered = "1";
-            const pre = body.querySelector("pre");
-            if (pre) pre.innerHTML = colorJson(b._msgRef || messages[idx], 0);
-          }
-        };
-      })(block, i);
       p.appendChild(block);
     }
   } else {
     // --- Full render path (initial) ---
-    p.innerHTML = "";
-    messages.forEach((msg, i) => {
-      const block = createBlock(msg, i);
-      block.dataset.fp = msgFingerprint(msg);
-      block._msgRef = msg;
-      // Rebind lazy render to use _msgRef
-      const hdr = block.querySelector(".debug-msg-header");
-      hdr.onclick = (function (b, idx) {
-        return function () {
-          const isOpen = b.classList.toggle("open");
-          b.querySelector(".debug-msg-header span:last-child").style.transform =
-            isOpen ? "rotate(90deg)" : "";
-          const body = b.querySelector(".debug-msg-body");
-          if (isOpen && body && !body.dataset.rendered) {
-            body.dataset.rendered = "1";
-            const pre = body.querySelector("pre");
-            if (pre) pre.innerHTML = colorJson(b._msgRef, 0);
-          }
-        };
-      })(block, i);
-      p.appendChild(block);
-    });
+    renderDebugBlocksInto(p, messages, opts);
     // Re-apply the expanded state captured before the wipe so a snapshot
     // update that fell through to this full render doesn't collapse what the
     // user expanded to inspect. Match by stable IDENTITY (data-mid), iterating
@@ -735,53 +883,7 @@ function showMessagesInDebug(messages, label, isUpdate, forConvId, tools, approx
   }
   // ★ Render tools section (collapsible, before messages)
   if (tools && tools.length > 0) {
-    let toolsBlock = p.querySelector('.debug-tools-block');
-    if (!toolsBlock) {
-      toolsBlock = document.createElement('div');
-      toolsBlock.className = 'debug-tools-block debug-msg-block';
-      const tHeader = document.createElement('div');
-      tHeader.className = 'debug-msg-header';
-      const tRole = document.createElement('span');
-      tRole.className = 'role-tools';
-      tRole.innerHTML = Icon('wrench', 12) + ' TOOLS';
-      tHeader.appendChild(tRole);
-      const tSummary = document.createElement('span');
-      tSummary.className = 'debug-msg-summary';
-      tHeader.appendChild(tSummary);
-      const tArrow = document.createElement('span');
-      tArrow.textContent = '▶';
-      tArrow.style.cssText = 'font-size:9px;transition:transform 0.2s;color:var(--text-tertiary)';
-      tHeader.appendChild(tArrow);
-      const tBody = document.createElement('div');
-      tBody.className = 'debug-msg-body';
-      const tPre = document.createElement('pre');
-      tBody.appendChild(tPre);
-      tHeader.onclick = () => {
-        const isOpen = toolsBlock.classList.toggle('open');
-        tArrow.style.transform = isOpen ? 'rotate(90deg)' : '';
-        if (isOpen && !tBody.dataset.rendered) {
-          tBody.dataset.rendered = '1';
-          tPre.innerHTML = colorJson(toolsBlock._toolsRef, 0);
-        }
-      };
-      toolsBlock.appendChild(tHeader);
-      toolsBlock.appendChild(tBody);
-      p.insertBefore(toolsBlock, p.firstChild);
-    }
-    // Update summary and ref
-    const names = tools.map(t => (t.function ? t.function.name : '?'));
-    const tSum = toolsBlock.querySelector('.debug-msg-summary');
-    if (tSum) tSum.textContent = `${tools.length} tools: ${names.join(', ')}`;
-    toolsBlock._toolsRef = tools;
-    // Invalidate body if open
-    const tBody = toolsBlock.querySelector('.debug-msg-body');
-    if (tBody && tBody.dataset.rendered && toolsBlock.classList.contains('open')) {
-      tBody.dataset.rendered = '1';
-      const tPre = tBody.querySelector('pre');
-      if (tPre) tPre.innerHTML = colorJson(tools, 0);
-    } else if (tBody) {
-      tBody.dataset.rendered = '';
-    }
+    updateDebugToolsBlock(p, tools);
   }
   // Re-apply the TOOLS block's expanded state — a full render wipes it too
   // (it re-creates collapsed), so restore it alongside the message blocks.
@@ -799,6 +901,13 @@ function showMessagesInDebug(messages, label, isUpdate, forConvId, tools, approx
       }
     }
   }
+  /* opts.resetScroll: snap to top regardless of render path. The incremental
+   * path deliberately preserves scroll for live streaming, but the request
+   * inspector sets resetScroll when SWITCHING ROUNDS — a different round is
+   * a new context where the previous round's scroll offset is meaningless
+   * (and the incremental role-match often keeps the switch ON the
+   * scroll-preserving path, so a full-path-only reset would not bite). */
+  if (opts && opts.resetScroll) p.scrollTop = 0;
   // Store for copy
   p._rawMessages = messages;
   p._rawTools = tools || null;

@@ -35,6 +35,7 @@ _TOOL_EXEC_LABELS = {
     'code_exec':    '▶️ Running code',
     'bash_exec':    '▶️ Running command',
     'create_memory': '💡 Saving memory',
+    'activate_skill': '📦 Loading skill',
     'ask_human': '🙋 Asking for your input',
 }
 

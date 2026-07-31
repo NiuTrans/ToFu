@@ -119,6 +119,7 @@ def _kimi_max_output(model: str) -> int:
     """Return the max output token limit for a specific Kimi model.
 
     Moonshot Kimi model limits:
+      - kimi-k3:                   32,768  (1000K context window, 2026-07-17)
       - kimi-k2.6:                 32,768  (default for K2.6 per docs)
       - kimi-k2.5:                 32,768  (default for K2.5)
       - kimi-k2-turbo-preview:     32,768

@@ -194,7 +194,7 @@ def build_user_context_reminder(claude_md: str | None,
     Claude Code places CLAUDE.md in a prepended user message rather than
     the system prompt (see ``utils/api.ts:prependUserContext``).  A/B
     testing on Tofu confirmed this saves 18% cost / +49% cache hit
-    (see ``.tofu/skills/claudemd-placement-ab-test-results.md``).
+    (see ``.tofu/memories/claudemd-placement-ab-test-results.md``).
 
     Args:
         claude_md:     Rendered project-intelligence text (or None).

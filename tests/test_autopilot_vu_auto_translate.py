@@ -30,7 +30,31 @@ from tests._nc_harness import neutered_source
 
 pytestmark = pytest.mark.unit
 
-_AUTOPILOT_SRC = os.path.join(
+def _resolver_src():
+    """File that really DEFINES ``_maybe_auto_translate_vu``, found by SYMBOL.
+
+    It used to live in ``autopilot.py``; the baton extraction moved it to
+    ``autopilot_baton.py`` while ``autopilot.py`` kept only a re-export. A
+    hard-coded path therefore made the NEUTER below anchor on a file that no
+    longer contains the line, which reads as "the guard is broken" when the
+    product is fine. Ask the module where its function actually came from.
+    """
+    import inspect
+    fn = getattr(ap, '_maybe_auto_translate_vu')
+    fn = inspect.unwrap(fn)
+    path = inspect.getsourcefile(fn)
+    assert path, '_maybe_auto_translate_vu has no source file'
+    return path
+
+
+_AUTOPILOT_SRC = _resolver_src()
+
+# The CALL-SITE ordering assertion below is about the ORCHESTRATOR's wiring
+# (`maybe_run_autopilot` calling the hook after the append), which lives in
+# autopilot.py — a different file from the resolver's definition since the baton
+# extraction. Two distinct subjects must not share one path constant, or
+# re-pointing it for one silently breaks the other.
+_ORCHESTRATOR_SRC = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
     'lib', 'tasks_pkg', 'autopilot.py',
 )
@@ -47,14 +71,40 @@ class _FakeDB:
 
     def __init__(self, messages=None):
         self.messages = list(messages or [])
+        # `rev` is the CAS token the append now reads and writes under. The
+        # bump mirrors conversations_rev_bump_trg so a retry sees a new value.
+        self.rev = 0
+        self.rowcount = 1
 
     def execute(self, sql, params=()):
         self._sql = sql
         self._params = params
+        if sql.strip().upper().startswith('UPDATE'):
+            # rev-CAS write: honour the predicate so a stale token is a no-op
+            # rather than a blind overwrite (the data-loss shape under audit).
+            if ' AND rev=?' in sql:
+                if int(params[-1]) != self.rev:
+                    self.rowcount = 0
+                    return self
+            try:
+                self.messages = json.loads(params[0])
+            except (TypeError, ValueError, json.JSONDecodeError):
+                pass
+            self.rev += 1
+            self.rowcount = 1
         return self
+
+    def commit(self):
+        """The CAS path commits explicitly; a fake without this raises
+        AttributeError INSIDE the append's try/except and silently degrades to
+        'VU turn not persisted'."""
+        return None
 
     def fetchone(self):
         if 'SELECT messages' in self._sql:
+            # Mirror the production SELECT's column list: messages + rev.
+            if 'rev' in self._sql:
+                return (json.dumps(self.messages), self.rev)
             return (json.dumps(self.messages),)
         return None
 
@@ -128,9 +178,9 @@ def test_missing_vu_row_does_not_fire(monkeypatch):
 def test_call_site_wired_after_vu_append(monkeypatch):
     """maybe_run_autopilot must call _maybe_auto_translate_vu right after the
     VU append succeeds — the wiring, not just the helper, is load-bearing."""
-    src = open(_AUTOPILOT_SRC, encoding='utf-8').read()
+    src = open(_ORCHESTRATOR_SRC, encoding='utf-8').read()
     i_append = src.index('vu_msg = _append_vu_message_to_conv(')
-    i_call = src.index('_maybe_auto_translate_vu(conv_id, vu_msg_id, vu_text)')
+    i_call = src.index('_maybe_auto_translate_vu(conv_id, vu_msg_id, vu_text_clean)')
     assert i_call > i_append, 'translate call must follow the VU append site'
 
 
@@ -148,10 +198,17 @@ def test_neuter_index_resolver_makes_it_miss(monkeypatch):
 
     calls.clear()
     # Neuter the equality that matches the VU row by its _msgId.
+    # ★ Anchor must be UNIQUE. The bare equality now appears TWICE in the
+    #   module: once in `_append_vu_message_to_conv`'s idempotency check (added
+    #   with the rev-CAS retry loop — a replay must not double-append) and once
+    #   in the resolver below. `count=1` would neuter the FIRST, leaving the
+    #   resolver intact, so the NEUTER would silently stop biting and this test
+    #   would go green for the wrong reason. Include the enumerate() context
+    #   that only the resolver has.
     with neutered_source(
         _AUTOPILOT_SRC,
-        "m.get('_msgId') == vu_msg_id",
-        "m.get('_msgId') == '__nc_never_matches__'",
+        "if isinstance(m, dict) and m.get('_msgId') == vu_msg_id),",
+        "if isinstance(m, dict) and m.get('_msgId') == '__nc_never_matches__'),",
     ) as mod:
         mod._maybe_auto_translate_vu('conv-1', 'vu-xyz', 'text')
 

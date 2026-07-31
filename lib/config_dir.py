@@ -23,8 +23,10 @@ Contents:
   need a config file OUTSIDE this directory, update `export.py`.
 
 Note:
-  Project-scoped memories live under ``<project>/.tofu/skills/`` (they
-  travel with the project tree). GLOBAL memories live in the server-side
+  Project-scoped MEMORIES live under ``<project>/.tofu/memories/`` and
+  project-scoped SKILL PACKAGES under ``<project>/.tofu/skills/<id>/`` —
+  two different nouns, split 2026-07 (they travel with the project tree).
+  GLOBAL memories live in the server-side
   store ``<data>/memories/global/`` (``$TOFU_DATA_DIR`` or ``<root>/data``)
   so they are shared across all projects and reachable with no project
   attached — see ``lib/memory/storage.py``. Both inherit ``data/``'s

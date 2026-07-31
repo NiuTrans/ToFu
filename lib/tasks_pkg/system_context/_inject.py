@@ -269,6 +269,10 @@ def _inject_system_contexts(messages, project_path, project_enabled,
             tool_names=tool_names,
             # User-disabled blocks from the per-block system-prompt editor.
             disabled_blocks=disabled_blocks,
+            # Current date is NO LONGER baked into the cached static block —
+            # it rides the true tail (see ★4.5). Keeping it here re-billed the
+            # whole system prefix at every UTC-day rollover (Anthropic's named
+            # "don't inject timestamps into the cached prompt" anti-pattern).
             include_date=False,
         )
         _append_to_system_message(messages, _static_block,
@@ -469,6 +473,38 @@ def _inject_system_contexts(messages, project_path, project_enabled,
             # wrapper included) — that is the byte delta this seam adds.
             _ctx_injected('memory_accum', len(_mem_spliced))
 
+    # ★ 3.5. Available-skills index — the always-visible skills channel.
+    #   Gated on has_real_tools ONLY: skills are USER-installed capability
+    #   packs, a different noun from memories, so they do NOT follow the
+    #   memory toggle. The block is byte-stable for a fixed install set
+    #   (sorted by id) and splices as its OWN cache block, same rule as
+    #   the memory count hint.
+    if has_real_tools:
+        # The idempotency marker MUST be the listing's closing tag, not the
+        # bare noun: the static memory_accumulation prose itself mentions
+        # `<available_skills>` (backticked, no close tag), so checking the
+        # noun suppressed the skills index on EVERY memory-enabled turn —
+        # installed skills were never advertised. A real listing (from a
+        # prior assembly of the same messages) always carries the close tag.
+        if '</available_skills>' in _existing:
+            _ctx_suppressed('skills_index', 'marker_present')
+        else:
+            from lib.skills import build_skills_index
+            _skills_block = build_skills_index(
+                project_path=project_path if project_enabled else None) or ''
+            if _skills_block:
+                _skills_spliced = _wrap_system_reminder(_skills_block)
+                _append_to_system_message(
+                    messages,
+                    _skills_spliced,
+                    as_separate_block=True)
+                _existing = _system_text(messages)
+                _ctx_injected('skills_index', len(_skills_spliced))
+            else:
+                _ctx_suppressed('skills_index', 'none_installed')
+    else:
+        _ctx_suppressed('skills_index', 'no_tools')
+
     # ★ 4. Swarm system prompt injection — gated ONLY on swarm_enabled.
     #   Decoupled from project_enabled because a bare-conversation research
     #   swarm is a valid use case (mirrors the read_files decoupling done
@@ -611,9 +647,11 @@ Round N+3, a2's update lands. Synthesise the full picture for the user.
             _digest = ''
         if _digest:
             _digest_spliced = _wrap_system_reminder(_digest)
-            _append_to_system_message(messages, _digest_spliced,
-                                       as_separate_block=True)
-            _existing = _system_text(messages)
+            # Volatile (re-orders as siblings evolve) → ride the TRUE tail, NOT
+            # the system floor. Keeping it in system re-bills the whole body
+            # uncached every turn (prefix-cache 29298-pin bug). See
+            # _refresh_tail_block.
+            _refresh_tail_block(messages, _digest_spliced, _DIGEST_MARKER)
             _ctx_injected('digest', len(_digest_spliced))
         else:
             _ctx_suppressed('digest', 'empty')
@@ -649,20 +687,57 @@ Round N+3, a2's update lands. Synthesise the full picture for the user.
         _ctx_suppressed('charter', 'marker_present')
     if project_enabled and project_path and _CHARTER_MARKER not in _existing:
         try:
-            from lib.conversations.project_charter import render_charter_block
-            _charter_block = render_charter_block(project_path)
+            from lib.conversations.project_charter import (
+                render_charter_injection_block)
+            _charter_block = render_charter_injection_block(project_path)
         except Exception as e:
             logger.debug('[Inject] charter build failed conv=%s: %s',
                          (_cid or '?')[:8], e)
             _charter_block = ''
         if _charter_block:
             _charter_spliced = _wrap_system_reminder(_charter_block)
-            _append_to_system_message(messages, _charter_spliced,
-                                       as_separate_block=True)
-            _existing = _system_text(messages)
+            # Semi-volatile (grows on a commit) → ride the TRUE tail so a
+            # charter change never re-bills the cached system floor.
+            _refresh_tail_block(messages, _charter_spliced, _CHARTER_MARKER)
             _ctx_injected('charter', len(_charter_spliced))
         else:
             _ctx_suppressed('charter', 'empty')
+
+    # ★ 4.455 Project GOALS (Status & Focus, Pillar #7) — the human's standing
+    #   intent, injected DIRECTLY from the watch lane.
+    #
+    #   Deliberately its OWN block rather than a copy inside the charter
+    #   (owner-directed 2026-07-30: "goals are goals, they should work without
+    #   being in the charter"). The morning's design promoted a goal into
+    #   charter.content, which meant TWO copies of one sentence and therefore a
+    #   diverged state, a replacement preview and a version gate to reconcile
+    #   them. One copy needs none of that.
+    #
+    #   Only kind='goal' + status='open' ships — concerns/questions remain
+    #   human-facing-only (see the source-grep guard in
+    #   tests/test_project_watch_lane.py). Empty lane ⇒ '' ⇒ zero prompt weight.
+    #   Rides the TRUE tail on the SAME cache-safe seam as the charter/board so
+    #   editing a goal never re-bills the cached system floor.
+    _GOALS_MARKER = '[PROJECT GOALS]'
+    if not (project_enabled and project_path):
+        _ctx_suppressed('goals', 'project_off')
+    elif _GOALS_MARKER in _existing:
+        _ctx_suppressed('goals', 'marker_present')
+    if project_enabled and project_path and _GOALS_MARKER not in _existing:
+        try:
+            from lib.conversations.project_watch import (
+                render_goals_injection_block)
+            _goals_block = render_goals_injection_block(project_path)
+        except Exception as e:
+            logger.debug('[Inject] goals build failed conv=%s: %s',
+                         (_cid or '?')[:8], e)
+            _goals_block = ''
+        if _goals_block:
+            _goals_spliced = _wrap_system_reminder(_goals_block)
+            _refresh_tail_block(messages, _goals_spliced, _GOALS_MARKER)
+            _ctx_injected('goals', len(_goals_spliced))
+        else:
+            _ctx_suppressed('goals', 'empty')
 
     # ★ 4.46 Project Board (auto-coordination — Pillar #3).
     #   The mechanism that makes conversations STOP colliding/duplicating: the
@@ -671,8 +746,8 @@ Round N+3, a2's update lands. Synthesise the full picture for the user.
     #   hint per epic another conversation holds an UNEXPIRED lease on. NOT a
     #   passive display: this is what a reading conversation acts on to step
     #   aside. Injected only when the board is non-empty; keyed STRICTLY on the
-    #   explicit project_path. render_board_block evaluates lease expiry at
-    #   read time (an abandoned claim reads open → never deadlocks).
+    #   explicit project_path. render_board_injection_block evaluates lease
+    #   expiry at read time (an abandoned claim reads open → never deadlocks).
     _BOARD_MARKER = '[PROJECT BOARD]'
     if not (project_enabled and project_path):
         _ctx_suppressed('board', 'project_off')
@@ -680,17 +755,17 @@ Round N+3, a2's update lands. Synthesise the full picture for the user.
         _ctx_suppressed('board', 'marker_present')
     if project_enabled and project_path and _BOARD_MARKER not in _existing:
         try:
-            from lib.conversations.project_board import render_board_block
-            _board_block = render_board_block(project_path, current_conv_id=_cid or '')
+            from lib.conversations.project_board import render_board_injection_block
+            _board_block = render_board_injection_block(project_path, current_conv_id=_cid or '')
         except Exception as e:
             logger.debug('[Inject] board build failed conv=%s: %s',
                          (_cid or '?')[:8], e)
             _board_block = ''
         if _board_block:
             _board_spliced = _wrap_system_reminder(_board_block)
-            _append_to_system_message(messages, _board_spliced,
-                                       as_separate_block=True)
-            _existing = _system_text(messages)
+            # Volatile (epics move every turn) → ride the TRUE tail, never the
+            # cached system floor.
+            _refresh_tail_block(messages, _board_spliced, _BOARD_MARKER)
             _ctx_injected('board', len(_board_spliced))
         else:
             _ctx_suppressed('board', 'empty')
@@ -724,13 +799,19 @@ Round N+3, a2's update lands. Synthesise the full picture for the user.
         else:
             _ctx_suppressed('peer_protocol', 'empty')
 
-    # ★ 4.5 Current date rides the TRUE tail, never the cached system floor.
-    #   It changes once per UTC day; baked into the static block it re-billed
-    #   the whole prefix at the UTC rollover. Riding the true tail (the SAME
-    #   seam the digest / charter / board use) keeps the system prefix byte-
-    #   stable across the day boundary and confines the date to the already-
-    #   volatile 5m tail. build_static_prompt() is now always called with
-    #   include_date disabled, so this is the sole date source in both modes.
+    # ★ 4.5 Current date → the TRUE tail, never the cached system floor.
+    #   The date changes once per UTC day. Previously it was inlined in the
+    #   static system block (append mode) or appended as its own system block
+    #   (replace mode) — either way it sat INSIDE the cached prefix, so the
+    #   daily rollover rewrote a cached block and re-billed the whole body
+    #   uncached at the UTC boundary (Anthropic names this exact anti-pattern:
+    #   "don't inject timestamps into the cached prompt"). Riding the true tail
+    #   — the SAME cache-safe seam the digest / charter / board use — keeps the
+    #   system prefix byte-stable across the day boundary and confines the date
+    #   bytes to the already-volatile 5m tail (which is re-billed every round
+    #   regardless, so the date rides for free). build_static_prompt() is now
+    #   always called with include_date=False, so this is the sole date source
+    #   in both append and replace modes.
     _DATE_MARKER = 'Current date:'
     _date_spliced = _wrap_system_reminder(system_prompt_cc.section_current_date())
     _refresh_tail_block(messages, _date_spliced, _DATE_MARKER)

@@ -27,7 +27,7 @@ Two levels of support, both zero-to-one line:
 
   * **Zero-config (compliant servers).** A server that follows the project's
     structured auth convention — emitting ``login_required: true`` (see
-    ``.tofu/skills/mcp-tool-error-hint-pattern.md``) or a plain ``MCP Error:``
+    ``.tofu/memories/mcp-tool-error-hint-pattern.md``) or a plain ``MCP Error:``
     with a standard auth phrase — is detected by DEFAULT_CRED_FAIL_PATTERNS /
     STRUCTURED_EXPIRED_MARKERS alone. Declaring ``{"tool": "whoami"}`` is
     enough; no ``fail_patterns`` needed.
@@ -67,7 +67,7 @@ __all__ = [
 # credential is no longer valid. Kept SPECIFIC (multi-word phrases, not bare
 # "login") so terse read-only probe output doesn't false-positive. EN + 中文
 # variants mirror the project's central auth-expired convention
-# (.tofu/skills/mcp-tool-error-hint-pattern.md).
+# (.tofu/memories/mcp-tool-error-hint-pattern.md).
 DEFAULT_CRED_FAIL_PATTERNS: tuple[str, ...] = (
     'session expired',
     'session has expired',

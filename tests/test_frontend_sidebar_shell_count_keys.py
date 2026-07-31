@@ -78,7 +78,17 @@ global._migratePinnedToFolder = () => {};
 global._ensureMsgId = (m) => m;
 global.ConvCache = { put() {}, remove() {}, get: async () => null };
 global._bootLoadInFlight = false;
-global.Api = { conversations: { list: async () => SERVER_LIST, get: async () => null } };
+// The shipped loader fetches via Api.conversations.listMeta (the ?meta=1
+// sidebar seam) — stubbing the retired `.list` leaves listMeta undefined and
+// the loader bails before creating any shell.
+const _listResp = () => ({
+  ok: true, status: 200,
+  headers: { get: () => null },
+  json: async () => SERVER_LIST,
+});
+global.Api = { conversations: { listMeta: async () => _listResp(),
+                                list: async () => SERVER_LIST,
+                                get: async () => null } };
 global.fetch = async () => ({
   ok: true, status: 200,
   headers: { get: () => null },
@@ -87,6 +97,11 @@ global.fetch = async () => ({
 global.apiUrl = (p) => p;
 
 eval(fs.readFileSync(process.argv[2], 'utf8'));  // core/conversations.js
+// Extracted leaves (pt_3879f00e sub-part 2): _serverConvCount +
+// mergeServerConvShells (slice 7) live in core/conv_merge_shells.js;
+// _applySettingsToConv (slice 5) in conv_apply_settings.js. Both are
+// referenced by loadConversationsFromServer at call time via bundle scope.
+for (const extra of process.argv.slice(3)) eval(fs.readFileSync(extra, 'utf8'));
 
 const out = [];
 function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
@@ -158,7 +173,13 @@ def _run(js_path: str):
     try:
         with os.fdopen(fd, 'w') as f:
             f.write(_HARNESS)
-        return subprocess.run(['node', harness, js_path],
+        # Extracted leaves (pt_3879f00e sub-part 2 slices 5 + 7) fed as
+        # extra argv so the harness eval loop finds them AT bundle-scope.
+        extra_js = [
+            os.path.join(JS_DIR, 'core', 'conv_merge_shells.js'),
+            os.path.join(JS_DIR, 'core', 'conv_apply_settings.js'),
+        ]
+        return subprocess.run(['node', harness, js_path, *extra_js],
                               capture_output=True, text=True, timeout=60)
     finally:
         try:
@@ -188,9 +209,16 @@ def test_sidebar_shell_count_keys_neuter(tmp_path):
     load-bearing. Real file untouched."""
     with open(CONV_JS, encoding='utf-8') as f:
         src = f.read()
-    anchor = 'const _scCount = _serverConvCount(sc);'
+    # Two sites read `const _scCount = _serverConvCount(sc);` — the harness
+    # drives loadConversationsFromServer (the second). Anchor with the
+    # following shell-build line so the neuter bites the path under test.
+    anchor = ('const _scCount = _serverConvCount(sc);\n'
+              '        const nc = {\n'
+              '          id: sc.id,')
     assert anchor in src, 'new-shell count anchor not found — update the neuter target'
-    neutered = src.replace(anchor, 'const _scCount = sc.messageCount || 0;', 1)
+    neutered = src.replace(anchor, 'const _scCount = sc.messageCount || 0;\n'
+                                   '        const nc = {\n'
+                                   '          id: sc.id,', 1)
     assert neutered != src, 'neuter did not change source'
     nfile = tmp_path / 'conversations_neutered.js'
     nfile.write_text(neutered, encoding='utf-8')

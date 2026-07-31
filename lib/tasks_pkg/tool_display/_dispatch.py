@@ -14,6 +14,7 @@ from lib.browser.advanced import ADVANCED_BROWSER_TOOL_NAMES
 from lib.desktop_tools import DESKTOP_TOOL_NAMES
 from lib.scheduler import SCHEDULER_TOOL_NAMES
 from lib.memory import MEMORY_TOOL_NAMES
+from lib.skills import SKILL_TOOL_NAMES
 from lib.tasks_pkg.executor import SWARM_TOOL_NAMES
 from lib.tools import (
     BOARD_TOOL_NAMES,
@@ -39,10 +40,10 @@ from lib.tasks_pkg.tool_display._renderers import (
     _tool_display_human_guidance,
     _tool_display_image_gen,
     _tool_display_inspect_image,
-    _tool_display_mcp,
     _tool_display_memory,
     _tool_display_project,
     _tool_display_scheduler,
+    _tool_display_skills,
     _tool_display_swarm,
     _tool_display_todo,
     _tool_display_web_search,
@@ -93,6 +94,10 @@ def _build_display_dispatch_table():
     # Memory tools
     for name in MEMORY_TOOL_NAMES:
         table[name] = _tool_display_memory
+
+    # Skill tools (activate_skill — read-only progressive disclosure)
+    for name in SKILL_TOOL_NAMES:
+        table[name] = _tool_display_skills
 
     # Conversation reference tools
     for name in CONV_REF_TOOL_NAMES:
@@ -197,6 +202,16 @@ def _build_tool_round_entry(fn_name, fn_args, tc_id, tc_args_str, tool_round_num
     tool_round_num += 1
     rn = tool_round_num
 
+    # ★ Start clock (pt_67ffc2b7). Stamped HERE — the instant the round is
+    #   announced — so a still-running tool can render a truthful "running for
+    #   38s" from a SERVER clock. A client-side stopwatch cannot: it re-mints on
+    #   every paint and on every reconnect, washing a long call into looking
+    #   fresh (the bug `_pmAdoptServerClocks` exists to prevent in the media
+    #   tabs). Carried onto every later frame for this round by
+    #   `_finalize_tool_round`, so the row is self-describing even on a cold
+    #   replay that never saw this tool_start.
+    from lib.agent_core.events import now_ms
+    _t_start = now_ms()
     # Build round_entry
     round_entry = {
         'roundNum': rn,
@@ -205,17 +220,24 @@ def _build_tool_round_entry(fn_name, fn_args, tc_id, tc_args_str, tool_round_num
         'status': 'searching',
         'toolCallId': tc_id,
         'toolArgs': tc_args_str,
+        'tStart': _t_start,
     }
     round_entry.update(extra)
 
-    # Build tool_start event — same fields + type
-    event = {
-        'type': 'tool_start',
-        'roundNum': rn,
-        'query': extra.get('_display_query', display_query),
-        'toolCallId': tc_id,
-        'toolArgs': tc_args_str,
-    }
+    # Build tool_start event — same fields + type.
+    # Routed through build_event so `emittedAt` is stamped at the ONE chokepoint
+    # (lib/agent_core/events.build_event). A second stamper here would drift
+    # from the one every other tool frame uses and make the transport segment
+    # incomparable — the whole point of having a single constructor.
+    from lib.agent_core.events import EventType, build_event
+    event = build_event(
+        EventType.TOOL_START,
+        roundNum=rn,
+        query=extra.get('_display_query', display_query),
+        toolCallId=tc_id,
+        toolArgs=tc_args_str,
+        tStart=_t_start,
+    )
     # Copy relevant extra fields into event (toolName, _swarm, etc.)
     for k, v in extra.items():
         if not k.startswith('_display_'):

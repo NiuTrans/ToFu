@@ -62,6 +62,7 @@ VALID_KINDS = frozenset({
     'run_concluded',
     'claimed',
     'blocked',
+    'answered',
     'decided',
     'proposed_decision',
     'dismissed',

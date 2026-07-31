@@ -21,6 +21,7 @@ def _classify_exception(exc: BaseException) -> str:
     try:
         from lib.llm import (
             AbortedError as _Abort,
+            BadRequestError as _BR,
             ContentFilterError as _CF,
             EndpointUnreachableError as _Unreach,
             InvalidImageError as _Img,
@@ -28,11 +29,12 @@ def _classify_exception(exc: BaseException) -> str:
             PermissionError_ as _Perm,
             PromptTooLongError as _Plong,
             RateLimitError as _RL,
+            RetryableAPIError as _Retry,
             StreamOnlyError as _SO,
         )
     except Exception as _imp_err:
         logger.debug('lib.llm import failed in error classifier: %s', _imp_err)
-        _Abort = _CF = _Img = _Mlim = _Perm = _Plong = _RL = _SO = _Unreach = None  # type: ignore
+        _Abort = _BR = _CF = _Img = _Mlim = _Perm = _Plong = _RL = _Retry = _SO = _Unreach = None  # type: ignore
 
     if _Abort is not None and isinstance(exc, _Abort):
         return 'aborted'
@@ -43,7 +45,18 @@ def _classify_exception(exc: BaseException) -> str:
     if _Unreach is not None and isinstance(exc, _Unreach):
         return 'endpoint_unreachable'
     if _RL is not None and isinstance(exc, _RL):
+        # A gateway-shaped RateLimitError (vendor 401/403/429 surfaced through
+        # the upstream-vendor-transient raise path, is_gateway=True) is a
+        # VENDOR OUTAGE, not a per-key 429 — mapping it to 'ratelimit' sends
+        # the user to Settings → Keys for a problem their keys cannot fix.
+        if getattr(exc, 'is_gateway', False):
+            return 'upstream_error'
         return 'quota' if getattr(exc, 'is_quota', False) else 'ratelimit'
+    # 5xx-after-retries: same vendor-outage truth as the gateway RL above.
+    if _Retry is not None and isinstance(exc, _Retry):
+        return 'upstream_error'
+    if _BR is not None and isinstance(exc, _BR):
+        return 'bad_request'
     if _Perm is not None and isinstance(exc, _Perm):
         return 'permission'
     if _CF is not None and isinstance(exc, _CF):

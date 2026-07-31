@@ -50,7 +50,8 @@ from lib.onnx_thread_guard import install_onnx_thread_guard as _install_onnx_gua
 _install_onnx_guard()
 
 __all__ = ['MAX_PDF_BYTES', 'HAS_PYMUPDF4LLM', 'HAS_PYMUPDF', 'HAS_DOCLING',
-           'PYMUPDF_LOCK', 'PYMUPDF4LLM_UNAVAILABLE_REASON']
+           'PYMUPDF_LOCK', 'PYMUPDF4LLM_UNAVAILABLE_REASON',
+           'current_parser_version', 'expected_parser_version']
 
 # PyMuPDF's C library (MuPDF) is NOT thread-safe. The official docs state:
 # "PyMuPDF does not support running on multiple threads - doing so may cause
@@ -61,17 +62,30 @@ PYMUPDF_LOCK = threading.Lock()
 MAX_PDF_BYTES = 200 * 1024 * 1024  # 200 MB safety limit
 
 # ─── PyMuPDF (core PDF engine) ───
+# PyMuPDF exposes its top-level package as ``pymupdf`` since 1.24.3; older
+# installs (e.g. 1.24.1) ship ONLY the legacy ``fitz`` module name. Importing
+# solely as ``pymupdf`` silently disabled PDF parsing on a host that actually
+# had the library (real R4 harvest run: every parse raised
+# ``'NoneType' has no attribute 'open'`` because HAS_PYMUPDF was False). Try
+# the modern name, then fall back to ``fitz`` — same C library, identical API
+# (open / TOOLS.mupdf_display_*).
 try:
     import pymupdf
     HAS_PYMUPDF = True
-    # Suppress noisy MuPDF C-library warnings — they are harmless;
-    # MuPDF recovers gracefully.
     pymupdf.TOOLS.mupdf_display_errors(False)
     pymupdf.TOOLS.mupdf_display_warnings(False)
-except ImportError as e:
-    pymupdf = None  # type: ignore[assignment]
-    HAS_PYMUPDF = False
-    logger.warning('[PDF] pymupdf not installed — PDF parsing disabled: %s', e)
+except ImportError:
+    try:
+        import fitz as pymupdf  # PyMuPDF <1.24.3 legacy module name
+        HAS_PYMUPDF = True
+        pymupdf.TOOLS.mupdf_display_errors(False)
+        pymupdf.TOOLS.mupdf_display_warnings(False)
+        logger.info('[PDF] pymupdf imported via legacy "fitz" module name '
+                    '(PyMuPDF <1.24.3)')
+    except ImportError as e:
+        pymupdf = None  # type: ignore[assignment]
+        HAS_PYMUPDF = False
+        logger.warning('[PDF] pymupdf/fitz not installed — PDF parsing disabled: %s', e)
 
 # ─── pymupdf4llm (preferred for table/header-aware extraction) ───
 # Distinguish two failure modes that BOTH surface as ImportError so the log
@@ -151,3 +165,48 @@ except ImportError:
     # Intentionally silent on import — Docling is opt-in. We don't want
     # to spam the log on every server start when the user never asked
     # for the structured mode in the first place.
+
+
+# ─── Parse-once cache key: which extractor + version produced a parsed_text ───
+# The paper_library corpus is a LONG-LIVED asset (auto-research R1 contract,
+# docs/AUTO_RESEARCH_SYSTEM_DESIGN.md): a row written by a degraded or older
+# parser must NOT be served as a cache hit forever. Every writer of
+# paper_library.parsed_text stamps `parser_version` with the string below;
+# the harvest pre-download probe requires an exact match with
+# expected_parser_version(). A parser-stack upgrade — or a raw-fallback write
+# — therefore invalidates naturally instead of freezing degraded text into
+# the corpus. Legacy rows written before this contract have '' and miss by
+# construction (self-heal on next touch, no backfill script).
+def current_parser_version(extractor: str) -> str:
+    """Map the extractor tag that ACTUALLY produced a parsed_text (the
+    per-document winner reported by ``extract_pdf_text_with_meta``) to its
+    versioned cache-key string, e.g. ``pymupdf4llm-1.27.2.3`` or
+    ``pymupdf-raw-1.27.2.3``. Unknown tags pass through unchanged so a
+    foreign value never accidentally equals the expected one."""
+    tag = (extractor or '').strip()
+    if not tag or tag == 'error':
+        return ''
+    import importlib.metadata as _md
+    pkg = {'pymupdf4llm': 'pymupdf4llm',
+           'pymupdf-raw': 'pymupdf',
+           'pymupdf_raw': 'pymupdf',
+           'docling': 'docling'}.get(tag)
+    if pkg is None:
+        return tag
+    canon = 'pymupdf-raw' if tag == 'pymupdf_raw' else tag
+    try:
+        return f'{canon}-{_md.version(pkg)}'
+    except _md.PackageNotFoundError as _e:
+        logger.debug('current parser version: PackageNotFoundError (%s)', _e)
+        return f'{canon}-?'
+
+
+def expected_parser_version() -> str:
+    """The ``parser_version`` a FRESH rich-mode parse would write in this
+    environment — the value the harvest cache probe requires. In a healthy
+    env this is the pymupdf4llm markdown pipeline; when the markdown
+    extractor is unavailable it is the raw-fallback tag, so a degraded env
+    stays self-consistent (raw rows hit) while a FIXED env never serves
+    raw-tagged rows as markdown-corpus hits."""
+    return current_parser_version(
+        'pymupdf4llm' if HAS_PYMUPDF4LLM else 'pymupdf-raw')

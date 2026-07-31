@@ -148,6 +148,11 @@ global.conversations = [];
 global._convSorter = (a, b) => (b.updatedAt || 0) - (a.updatedAt || 0);
 
 eval(fs.readFileSync(process.argv[2], 'utf8'));  // REAL core/conversations.js
+// Extracted leaf modules (pt_3879f00e decomposition): convHasPendingSync /
+// _flushPendingSyncs live in core/pending_sync.js; the hydrate path also calls
+// _applySettingsToConv (core/conv_apply_settings.js) + the persist helpers
+// (core/conv_persist_helpers.js). Eval them so harness scope matches the bundle.
+for (const extra of process.argv.slice(3)) eval(fs.readFileSync(extra, 'utf8'));
 global.conversations = conversations;   // rebind to the module-scoped array
 
 const out = [];
@@ -218,16 +223,24 @@ check('fn_exposed', true);
 """
 
 
-def _run(js_path: str, hydratable: bool = True, p2fail: bool = False) -> subprocess.CompletedProcess:
+def _run(js_path: str, hydratable: bool = True, p2fail: bool = False,
+         pending_sync_path: str | None = None) -> subprocess.CompletedProcess:
     harness = os.path.join(HERE, '_pending_sync_shell_harness.js')
     with open(harness, 'w') as f:
         f.write(_HARNESS)
     env = dict(os.environ)
     env['HYDRATABLE'] = '1' if hydratable else '0'
     env['P2FAIL'] = '1' if p2fail else '0'
+    extra_js = [
+        pending_sync_path or os.path.join(JS_DIR, 'core', 'pending_sync.js'),
+        os.path.join(JS_DIR, 'core', 'conv_apply_settings.js'),
+        os.path.join(JS_DIR, 'core', 'conv_persist_helpers.js'),
+        os.path.join(JS_DIR, 'core', 'conv_merge_shells.js'),
+        os.path.join(JS_DIR, 'core', 'conv_hydrate_cache.js'),
+    ]
     try:
         return subprocess.run(
-            ['node', harness, js_path],
+            ['node', harness, js_path, *extra_js],
             capture_output=True, text=True, timeout=60, env=env,
         )
     finally:
@@ -293,8 +306,11 @@ def test_shell_flush_triple_neuter(tmp_path):
     skips it, and the stranded message never reaches the server → (B) FAILS.
     Proves the hydration step is what delivers the message. Also asserts the
     invariant that the neuter changes ONLY that call. Real file untouched."""
-    conv_js = os.path.join(JS_DIR, 'core', 'conversations.js')
-    with open(conv_js, encoding='utf-8') as f:
+    # `_flushPendingSyncs` (with its hydrate-before-sync call) was extracted to
+    # core/pending_sync.js in the conversations.js decomposition — neuter THERE.
+    sync_js = os.path.join(JS_DIR, 'core', 'pending_sync.js')
+    conv_js = sync_js
+    with open(sync_js, encoding='utf-8') as f:
         src = f.read()
 
     needle = 'await loadConversationMessages(conv.id);'
@@ -303,10 +319,11 @@ def test_shell_flush_triple_neuter(tmp_path):
     neutered = src.replace(needle, 'await Promise.resolve();  /* neutered hydrate */', 1)
     assert neutered != src, 'neuter produced no change'
 
-    copy = tmp_path / 'conversations_neutered.js'
+    copy = tmp_path / 'pending_sync_neutered.js'
     copy.write_text(neutered, encoding='utf-8')
 
-    proc = _run(str(copy), hydratable=True)
+    proc = _run(os.path.join(JS_DIR, 'core', 'conversations.js'),
+                hydratable=True, pending_sync_path=str(copy))
     output = proc.stdout.strip()
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
     assert 'FAIL flush_synced_shell' in output or 'FAIL server_got_stranded_msg' in output, (

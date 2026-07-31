@@ -75,6 +75,7 @@ import os
 import threading
 import time
 
+from lib.cost import normalize_usage
 from lib.log import get_logger
 
 logger = get_logger(__name__)
@@ -255,14 +256,8 @@ def is_cold_write(usage) -> bool:
     prefix (whose miss is nearly free) never arms the long cold hold."""
     if not isinstance(usage, dict):
         return False
-    cw = (usage.get('cache_write_tokens')
-          or usage.get('cache_creation_input_tokens') or 0)
-    cr = (usage.get('cache_read_tokens')
-          or usage.get('cache_read_input_tokens') or 0)
-    try:
-        cw = int(cw); cr = int(cr)
-    except (ValueError, TypeError):
-        return False
+    _u = normalize_usage(usage)
+    cw, cr = _u['cache_write'], _u['cache_read']
     if cw < _COLD_WRITE_MIN_TOKENS:
         return False
     # Cold = the write dominated; a warm round reads back most of its prefix.

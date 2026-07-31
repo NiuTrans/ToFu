@@ -288,9 +288,21 @@ var ConvCache = (function () {
   }
 
   // Settings whitelist — same fields the v1 record persisted.
+  //
+  // ★ The model field MUST mirror the READER's resolution
+  //   (_applySettingsToConv: `settings.model || settings.preset ||
+  //   settings.effort`). Persisting only the flat `conv.model` cached a
+  //   model-LESS record for any conv carrying just `preset`/`effort`; the
+  //   reader's three-key guard then saw all-falsy and skipped the assignment
+  //   entirely, leaving conv.model undefined so the composer fell through to
+  //   serverModel and painted the WRONG model (2026-07-27, conv
+  //   ms352oniikgq10 — Opus 5 conv painted as the kimi-k3 default).
+  //   Writer and reader must resolve identically or the cache silently
+  //   downgrades a conversation's identity.
   function _extractSettings(conv) {
     return {
-      model: conv.model, thinkingDepth: conv.thinkingDepth,
+      model: conv.model || conv.preset || conv.effort,
+      thinkingDepth: conv.thinkingDepth,
       searchMode: conv.searchMode, fetchEnabled: conv.fetchEnabled,
       codeExecEnabled: conv.codeExecEnabled, browserEnabled: conv.browserEnabled,
       desktopEnabled: conv.desktopEnabled, memoryEnabled: conv.memoryEnabled,
@@ -972,5 +984,10 @@ var ConvCache = (function () {
     clear: clear,
     stats: stats,
     isAvailable: isAvailable,
+    /* Test-only seam: the settings mirror is a pure function whose
+     * resolution MUST stay identical to _applySettingsToConv's. Exposed so a
+     * behaviour guard can round-trip it (writer → reader) without reaching
+     * into the IIFE. Not used by product code. */
+    __testExtractSettings: _extractSettings,
   };
 })();

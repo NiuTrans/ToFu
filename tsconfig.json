@@ -37,6 +37,7 @@
   },
   "include": [
     "static/js/globals.d.ts",
+    "static/js/globals.generated.d.ts",
     "static/js/**/*.js"
   ],
   "exclude": [
@@ -46,6 +47,11 @@
     // 8-char glob deliberately spares the SOURCE file feature-loader.js.
     "static/js/bundle-*.js",
     "static/js/feature-????????.js",
+    // Content-hashed per-language i18n packs (i18n-<lang>-<8hex>.js), emitted
+    // by lib/js_bundler.py alongside the bundles and git-ignored. The SOURCE is
+    // static/js/i18n.js; a pack redeclares its `_i18n` with a single-language
+    // shape, so type-checking both packs conflicts by construction.
+    "static/js/i18n-??-????????.js",
     // Transient neutered-source COPIES written into static/js by frontend NC
     // tests (``<source>.nc_copy.js``) — they redeclare every global from their
     // original, so a concurrent tsc run (test_frontend_typecheck) would see

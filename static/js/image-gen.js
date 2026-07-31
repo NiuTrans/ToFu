@@ -280,7 +280,7 @@ async function generateImageDirect() {
     renderConversationList();
   }
 
-  renderChat(conv, true);
+  window.ConvView.replaceAll(conv.id, { forceScroll: true });
 
   // ── Clear input and pending images ──
   textarea.value = '';
@@ -308,7 +308,15 @@ async function generateImageDirect() {
     <div class="ig-gen-status" id="${loadingId}-status"></div>
     <button class="ig-gen-cancel" onclick="_igCancelGeneration()" title="Cancel">${Icon('x', 13)} Cancel</button>
   </div>`;
-  chatDiv.insertAdjacentHTML('beforeend', loadingHtml);
+  /* Tail insert via the shared furniture-aware primitive — a raw `beforeend`
+   * lands BELOW a bottom lazy-window sentinel. */
+  if (typeof chatInnerInsert === 'function') {
+    chatInnerInsert(chatDiv, loadingHtml, {
+      position: 'tail', conv: conv, site: 'generateImageDirect:loading',
+    });
+  } else {
+    chatDiv.insertAdjacentHTML('beforeend', loadingHtml);
+  }
   scrollToBottom();
 
   // ── Save early so page refresh doesn't lose the user message ──
@@ -321,9 +329,13 @@ async function generateImageDirect() {
     if (el) el.textContent = ((Date.now() - t0) / 1000).toFixed(0) + 's' + resLabel;
   }, 1000);
 
-  // ── AbortController with 150s timeout ──
+  // ── AbortController ──
+  // NO watchdog timer. Image generation is a WAIT, not a crash: a 2K
+  // multi-turn edit legitimately runs past any fixed ceiling, and the old
+  // 150s abort threw away an image the server was still rendering (and
+  // still billing) while telling the user it "timed out". The user ends it
+  // with Cancel, which calls _igCancelGeneration() -> abort().
   _igAbortController = new AbortController();
-  const abortTimer = setTimeout(() => _igAbortController?.abort(), 150_000);
 
   try {
     const reqBody = {
@@ -349,7 +361,6 @@ async function generateImageDirect() {
     }
 
     const data = await Api.images.generate(reqBody, { signal: _igAbortController.signal });
-    clearTimeout(abortTimer);
     clearInterval(timerInterval);
     const loadingEl = document.getElementById(loadingId);
 
@@ -382,7 +393,7 @@ async function generateImageDirect() {
       };
       _ensureMsgId(assistantMsg);
       conv.messages.push(assistantMsg);
-      if (conv.id === activeConvId) renderChat(conv, true);
+      if (conv.id === activeConvId) window.ConvView.replaceAll(conv.id, { forceScroll: true });
       saveConversations(conv.id);
       syncConversationToServer(conv);
 
@@ -403,34 +414,32 @@ async function generateImageDirect() {
                        _igError: errInfo };
       _ensureMsgId(errMsg);
       conv.messages.push(errMsg);
-      if (conv.id === activeConvId) renderChat(conv, true);
+      if (conv.id === activeConvId) window.ConvView.replaceAll(conv.id, { forceScroll: true });
       saveConversations(conv.id);
       syncConversationToServer(conv);
     }
 
   } catch (err) {
-    clearTimeout(abortTimer);
     clearInterval(timerInterval);
     const loadingEl = document.getElementById(loadingId);
     const isAbort = err.name === 'AbortError';
-    const errText = isAbort ? 'Request timed out (150s). The server may still be generating — please try again.'
-                            : (err.message || 'Failed to connect to server');
+    /* With the 150s watchdog gone, an abort can only be the user pressing
+     * Cancel (or a page teardown) — never a client-side timeout. */
+    const isUserCancel = isAbort;
+    const errText = isUserCancel ? 'Cancelled by user.'
+                                 : (err.message || 'Failed to connect to server');
     if (loadingEl) loadingEl.remove();
     console.error('[ImageGen] Direct generation error:', err);
 
-    // Show timeout toast
-    if (isAbort) {
-      _igToast('⏱ Generation timed out (150s)', 'warning');
-    }
-
     // ★ CRITICAL: Always push an assistant error message to prevent orphaned user messages
-    const errTitle = isAbort ? 'Generation timed out' : 'Network error';
-    const errMsg = { role: 'assistant', content: `${isAbort ? 'Image generation timed out' : 'Image generation network error'}: ${errText}`,
+    const errTitle = isUserCancel ? 'Cancelled' : 'Network error';
+    const errType = isUserCancel ? 'cancelled' : 'network';
+    const errMsg = { role: 'assistant', content: `${isUserCancel ? 'Image generation cancelled' : 'Image generation network error'}: ${errText}`,
                      timestamp: Date.now(), _isImageGen: true,
-                     _igError: { title: errTitle, text: errText, detail: '', errorType: isAbort ? 'timeout' : 'network', isTimeout: isAbort, isRateLimit: false, isContentBlocked: false } };
+                     _igError: { title: errTitle, text: errText, detail: '', errorType: errType, isTimeout: false, isRateLimit: false, isContentBlocked: false } };
     _ensureMsgId(errMsg);
     conv.messages.push(errMsg);
-    if (conv.id === activeConvId) renderChat(conv, true);
+    if (conv.id === activeConvId) window.ConvView.replaceAll(conv.id, { forceScroll: true });
     saveConversations(conv.id);
     syncConversationToServer(conv);
   } finally {

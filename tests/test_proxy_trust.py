@@ -1,226 +1,263 @@
-"""Tests for TOFU_TRUST_PROXY_HOPS / Werkzeug ProxyFix wiring (C7 step 1).
+"""Behaviour guard: X-Forwarded-For is NEVER trusted, and the docs say so.
 
-Strategy:
-  * The session-scoped ``flask_app`` fixture builds the Flask app once
-    with TOFU_TRUST_PROXY_HOPS unset → ProxyFix is NOT installed in that
-    instance.  The first test confirms that default behaviour is exactly
-    what we ship (X-Forwarded-For ignored, remote_addr unchanged).
-  * The remaining tests build a tiny Flask app PER-TEST with ProxyFix
-    explicitly wrapped at varying hop counts.  This exercises the
-    Werkzeug primitive directly so we don't have to tear down and rebuild
-    the production app's ~30-blueprint import stack.
+Replaces the ProxyFix-wiring suite that used to live in
+``tests/test_proxy_trust.py``. That suite was a "dead guard" — the most
+dangerous shape in this repo (charter 2026-07-27): it was 9/9 GREEN while the
+implementation it claimed to protect had never existed.
 
-Run:  pytest tests/test_proxy_trust.py -v
+What was wrong with it (measured 2026-07-27, epic pt_30d400a167df4440):
+  * Its docstring announced "Tests for TOFU_TRUST_PROXY_HOPS / Werkzeug
+    ProxyFix wiring", but ``git grep ProxyFix`` outside that file matched
+    only a COMMENT in ``.env.example``. The production app never installed
+    ProxyFix. Not anchor drift — the guarded implementation never landed.
+  * 7 of its 9 tests built their OWN mini Flask app, wrapped ProxyFix on it
+    by hand, and asserted that Werkzeug behaves like Werkzeug. That is an
+    upstream-library test; it can never fail because of anything in Tofu.
+  * ``TestServerEnvParsing`` asserted ``int('not-a-number')`` raises
+    ValueError — a Python-builtin test — under a docstring claiming "the
+    production code does this", pointing at code that does not exist.
+  * Its one test against the real app conceded in its own comment: "If
+    ProxyFix were silently active, this still 200s" — i.e. it could not
+    detect the condition it was named for.
+
+Why ProxyFix can never be wired here (measured, not inferred):
+  * ``server.py:1373`` → ``app = Quart(...)``. Quart is ASGI.
+  * ``hasattr(app, 'wsgi_app')`` is **False**; ``asgi_app`` is True.
+  * ``ProxyFix`` is WSGI middleware that wraps ``app.wsgi_app``.
+  * Neither Quart nor Hypercorn exposes any trusted-proxy / forwarded-header
+    option (probed: zero matching attributes on either class).
+So "just wire up ProxyFix" is not an option that exists — the ticket's
+either/or was really a single choice.
+
+What this file guards instead — the two things that are actually TRUE and
+that a future change could plausibly break:
+
+  1. ``X-Forwarded-For`` does not influence ``request.remote_addr``. This is
+     the safe default (a spoofed header must never move an IP-keyed
+     decision), and the assertion is on the OBSERVED value, so it keeps
+     biting if someone later adds an ASGI forwarded-header middleware
+     without gating it.
+  2. ``.env.example`` does not promise a trusted-proxy feature that the
+     server does not implement. A config file that documents a
+     non-existent security control is worse than silence: an operator who
+     sets it believes real client IPs are being honoured when every
+     IP-keyed decision is in fact seeing the proxy's own address.
+
+Run:  PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest tests/test_proxy_trust.py -v
 """
 from __future__ import annotations
 
-import importlib
-import sys
+import pathlib
+import re
 
 import pytest
 
 
-def _import_real_flask():
-    """Return the genuine Flask package, even when another test module has
-    installed the session-wide ``sys.modules['flask'] = quart`` shim at
-    collection time.
-
-    This suite tests Werkzeug ProxyFix wiring against a *real* Flask app, so
-    it needs the actual ``Flask`` class (Quart exposes ``Quart``, not
-    ``Flask``). We temporarily lift the shim, import the real distribution
-    from disk, then restore the shim so other tests keep getting Quart.
-    """
-    cur = sys.modules.get('flask')
-    if cur is not None and hasattr(cur, 'Flask'):
-        return cur
-    shim = sys.modules.pop('flask', None)
-    shim_subs = {k: sys.modules.pop(k)
-                 for k in list(sys.modules) if k.startswith('flask.')}
-    try:
-        real = importlib.import_module('flask')
-        # ``app.test_client()`` lazily does ``from .testing import FlaskClient``.
-        # If we restore the shim before that runs, the relative import would
-        # resolve through Quart's package path. Eagerly import the real
-        # submodules now (while the shim is lifted) so they stay cached as the
-        # genuine Flask modules.
-        for sub in ('flask.testing', 'flask.cli'):
-            try:
-                importlib.import_module(sub)
-            except ImportError:
-                pass
-        return real
-    finally:
-        if shim is not None:
-            # Re-pin the shim, but keep our freshly-imported REAL flask.*
-            # submodules — they must win over any quart-era cached entries.
-            real_subs = {k: sys.modules[k]
-                         for k in list(sys.modules) if k.startswith('flask.')}
-            sys.modules['flask'] = shim
-            sys.modules.update(shim_subs)
-            sys.modules.update(real_subs)
-
-
-_flask = _import_real_flask()
-Flask = _flask.Flask
-request = _flask.request
+REPO = pathlib.Path(__file__).resolve().parent.parent
 
 
 # ═══════════════════════════════════════════════════════════
-#  Default: ProxyFix NOT installed → header is ignored
+#  1. Observed behaviour: XFF must not move remote_addr
 # ═══════════════════════════════════════════════════════════
 
 @pytest.mark.api
-class TestDefaultIgnoresXForwardedFor:
-    """When TOFU_TRUST_PROXY_HOPS is unset, the production app must NOT
-    trust X-Forwarded-For — that's the whole reason the env var exists."""
+class TestForwardedHeaderNeverTrusted:
+    """A spoofed ``X-Forwarded-For`` must not change the peer address the
+    app sees, because that address keys real security decisions:
 
-    def test_remote_addr_not_overridden_when_disabled(self, flask_client):
-        # The app under test was built with TOFU_TRUST_PROXY_HOPS unset
-        # (default in conftest.py / .env.example). A spoofed XFF header
-        # MUST be ignored — request.remote_addr stays as the test client's
-        # synthetic 127.0.0.1.
-        #
-        # We use /api/v1/users/me because it's a public probe endpoint that
-        # always 200s without side effects (returns {user: null} when
-        # unauthenticated), and the assertion is on the response code (we
-        # never log remote_addr in the body — checking via request
-        # inspection in a sentinel route would require app mutation, which
-        # we avoid).
-        resp = flask_client.get('/api/v1/users/me',
-                                headers={'X-Forwarded-For': '198.51.100.42'})
-        assert resp.status_code == 200
-        # If ProxyFix were silently active, this still 200s — so we test
-        # the negative more directly with the mini-app fixture below.
+      * per-IP rate-limit buckets — ``lib/rate_limit_api.py:226``,
+        ``lib/rate_limiter.py:40``
+      * the open-mode loopback grant — ``routes/api_v1/auth.py:173``
+      * audit trails — ``routes/api_v1/auth.py:326,360,394``
 
+    These assert the RESULT (what address arrived), never how it got there,
+    so the guard survives any reasonable rewrite of the transport layer.
+    """
 
-# ═══════════════════════════════════════════════════════════
-#  ProxyFix wired at various hop counts
-# ═══════════════════════════════════════════════════════════
+    def _observe_peer(self, flask_client, monkeypatch, path, sent_client, headers):
+        """Return the ``remote_addr`` the app observed for one real request.
 
-def _make_app_with_proxyfix(hops: int) -> Flask:
-    """Build a minimal Flask app with ProxyFix installed at ``hops`` trust
-    level.  Returns the app with a single ``/_remote`` echo route so tests
-    can inspect what the WSGI layer reported as ``request.remote_addr``."""
-    app = Flask(__name__)
-    if hops > 0:
-        from werkzeug.middleware.proxy_fix import ProxyFix
-        app.wsgi_app = ProxyFix(app.wsgi_app, x_for=hops, x_proto=1, x_host=1,
-                                x_port=0, x_prefix=0)
-
-    @app.route('/_remote')
-    def _remote():
-        return {
-            'remote_addr': request.remote_addr,
-            'scheme': request.scheme,
-            'host': request.host,
-        }
-
-    return app
-
-
-@pytest.mark.unit
-class TestProxyFixPrimitive:
-    """Exercise the ProxyFix wiring directly so we don't depend on the
-    session-scoped production app's env captured at import time."""
-
-    def test_disabled_ignores_x_forwarded_for(self):
-        app = _make_app_with_proxyfix(0)
-        with app.test_client() as c:
-            r = c.get('/_remote', headers={'X-Forwarded-For': '198.51.100.42'})
-            assert r.status_code == 200
-            # Werkzeug test client default is 127.0.0.1 — XFF must be ignored.
-            assert r.get_json()['remote_addr'] != '198.51.100.42'
-
-    def test_one_hop_honors_x_forwarded_for(self):
-        app = _make_app_with_proxyfix(1)
-        with app.test_client() as c:
-            r = c.get('/_remote', headers={'X-Forwarded-For': '198.51.100.42'})
-            assert r.status_code == 200
-            assert r.get_json()['remote_addr'] == '198.51.100.42'
-
-    def test_two_hops_walks_chain(self):
-        """With 2 trusted hops, the rightmost-but-2nd entry wins.
-        XFF semantics: ``client, hop1, hop2`` — the closest *trusted* hop
-        is the rightmost; we trust 2 hops so we walk past them and pick
-        the third-from-right (the original client IP).
-
-        Werkzeug ProxyFix counts FROM the right end of XFF.  With
-        x_for=2 it picks the second-from-right entry.
+        Two things this has to get right (both cost a failing run to find):
+          * the probe path must be in the auth gate's PUBLIC allow-list,
+            otherwise ``auth_before_request`` 401s it and the view never
+            runs — the capture dict stays empty and the test reports a
+            misleading ``None``;
+          * each probe needs a UNIQUE endpoint name, since the app is
+            session-scoped and a duplicate name raises
+            "View function mapping is overwriting an existing endpoint".
         """
-        app = _make_app_with_proxyfix(2)
-        with app.test_client() as c:
-            # client_ip, edge_proxy, internal_lb  → with 2 trusted hops,
-            # the second-from-right (edge_proxy) is picked. Let's verify.
-            r = c.get('/_remote',
-                      headers={'X-Forwarded-For': '203.0.113.7, 192.0.2.10, 192.0.2.11'})
-            assert r.status_code == 200
-            assert r.get_json()['remote_addr'] == '192.0.2.10'
+        from flask import request
+        from routes.api_v1 import auth as auth_mod
 
-    def test_more_hops_than_xff_entries_falls_back_to_remote_addr(self):
-        """When the configured trust depth exceeds the actual XFF chain,
-        Werkzeug ProxyFix refuses to rewrite remote_addr — falling back
-        to the immediate-peer REMOTE_ADDR rather than the (untrusted)
-        leftmost XFF entry. This is intentional: it prevents an attacker
-        from spoofing a client IP via a too-short header on a deployment
-        that claims more hops than exist.
+        app = flask_client._c.app
+        captured = {}
+        endpoint = 'probe_peer_%s' % abs(hash(path))
+
+        if endpoint not in app.view_functions:
+            async def _probe():
+                captured['addr'] = request.remote_addr
+                return {'addr': request.remote_addr}
+            app.add_url_rule(path, endpoint, _probe)
+        else:
+            # Re-point the existing view at THIS call's capture dict.
+            async def _probe():
+                captured['addr'] = request.remote_addr
+                return {'addr': request.remote_addr}
+            app.view_functions[endpoint] = _probe
+
+        monkeypatch.setattr(
+            auth_mod, '_PUBLIC_EXACT',
+            frozenset(auth_mod._PUBLIC_EXACT) | {path})
+
+        flask_client.get(path, headers=headers,
+                         scope_base={'client': sent_client})
+        assert 'addr' in captured, (
+            'probe view never ran for %s — the request was rejected before '
+            'reaching it, so this test proves nothing' % path)
+        return captured['addr']
+
+    def test_spoofed_xff_does_not_become_the_peer(self, flask_client, monkeypatch):
+        """The header names a different IP than the socket — socket wins."""
+        addr = self._observe_peer(
+            flask_client, monkeypatch, '/_probe_peer_xff',
+            ('203.0.113.7', 5555),
+            {'X-Forwarded-For': '198.51.100.42'})
+        assert addr == '203.0.113.7', (
+            'X-Forwarded-For moved remote_addr to %r — a spoofable header '
+            'must never key rate limits / loopback grants / audit logs' % (addr,))
+
+    def test_xff_chain_does_not_become_the_peer(self, flask_client, monkeypatch):
+        """A multi-hop chain is equally untrusted."""
+        addr = self._observe_peer(
+            flask_client, monkeypatch, '/_probe_peer_chain',
+            ('10.1.2.3', 5555),
+            {'X-Forwarded-For': '203.0.113.7, 192.0.2.10, 192.0.2.11'})
+        assert addr == '10.1.2.3', (
+            'an X-Forwarded-For chain rewrote remote_addr to %r' % (addr,))
+
+    def test_loopback_peer_is_reported_verbatim(self, flask_client, monkeypatch):
+        """A same-host reverse proxy presents 127.0.0.1 — pin that reality.
+
+        This is the fact that makes 'loopback == trusted' unsafe: the app
+        cannot distinguish a genuine local process from a public request
+        forwarded by a proxy on the same box.
         """
-        app = _make_app_with_proxyfix(5)
-        with app.test_client() as c:
-            r = c.get('/_remote',
-                      headers={'X-Forwarded-For': '203.0.113.7'})
-            assert r.status_code == 200
-            # ProxyFix returns the original peer (test client default).
-            assert r.get_json()['remote_addr'] != '203.0.113.7'
-
-    def test_malformed_xff_does_not_crash(self):
-        """Garbage in XFF is just garbage out — ProxyFix should hand
-        whatever it parses to remote_addr without raising."""
-        app = _make_app_with_proxyfix(1)
-        with app.test_client() as c:
-            r = c.get('/_remote', headers={'X-Forwarded-For': '   '})
-            # Either falls back to default or returns the empty trim
-            # result. Crucially, no 500.
-            assert r.status_code == 200
-
-    def test_x_forwarded_proto_honored_when_trusted(self):
-        app = _make_app_with_proxyfix(1)
-        with app.test_client() as c:
-            r = c.get('/_remote', headers={
-                'X-Forwarded-For': '198.51.100.42',
-                'X-Forwarded-Proto': 'https',
-            })
-            assert r.get_json()['scheme'] == 'https'
-
-    def test_x_forwarded_proto_ignored_when_disabled(self):
-        app = _make_app_with_proxyfix(0)
-        with app.test_client() as c:
-            r = c.get('/_remote', headers={
-                'X-Forwarded-For': '198.51.100.42',
-                'X-Forwarded-Proto': 'https',
-            })
-            # Default scheme — not the spoofed https.
-            assert r.get_json()['scheme'] == 'http'
+        addr = self._observe_peer(
+            flask_client, monkeypatch, '/_probe_peer_loopback',
+            ('127.0.0.1', 5555),
+            {'X-Forwarded-For': '203.0.113.7'})
+        assert addr == '127.0.0.1', (
+            'expected the verbatim socket peer, got %r' % (addr,))
 
 
 # ═══════════════════════════════════════════════════════════
-#  Integration: the production install function parses env correctly
+#  2. The docs must not promise a control that does not exist
 # ═══════════════════════════════════════════════════════════
 
 @pytest.mark.unit
-class TestServerEnvParsing:
-    """Verify the production-side env reader handles edge cases without
-    crashing at boot."""
+class TestDocsDoNotPromiseUnwiredProxyTrust:
+    """``.env.example`` must not advertise a trusted-proxy knob unless the
+    server actually honours it.
 
-    def test_invalid_value_falls_back_to_zero(self, monkeypatch, caplog):
-        """An invalid TOFU_TRUST_PROXY_HOPS value must NOT abort startup —
-        it logs a warning and proceeds with proxy fix disabled."""
-        # We don't re-import server here (heavyweight); instead exercise
-        # the same parsing logic shape inline.
-        from lib.env_compat import getenv_compat
+    This is a BEHAVIOUR guard on the documentation contract: it asserts the
+    OUTCOME ("the file does not promise trusted-proxy support while the
+    server has no implementation"), computed from the live tree, rather
+    than pinning any particular wording. If someone genuinely wires
+    forwarded-header support later, the promise becomes true and the guard
+    stops objecting — see ``_server_honours_forwarded_headers``.
+    """
 
-        monkeypatch.setenv('TOFU_TRUST_PROXY_HOPS', 'not-a-number')
-        raw = (getenv_compat('TOFU_TRUST_PROXY_HOPS') or '').strip()
-        assert raw == 'not-a-number'
-        # The production code does this:  int(raw) → ValueError → log and return 0.
-        with pytest.raises(ValueError):
-            int(raw)
+    @staticmethod
+    def _server_honours_forwarded_headers() -> bool:
+        """True when SOME real mechanism CONSUMES X-Forwarded-For.
+
+        Deliberately mechanism-agnostic: ProxyFix (WSGI), an ASGI
+        forwarded-header middleware, or a hand-rolled parser all count.
+
+        ⚠️ Must distinguish MENTIONING the header from TRUSTING it. Three
+        production files name ``X-Forwarded-For`` today
+        (``lib/agent_core/principal.py:12``, ``routes/api_v1/auth.py:167``,
+        ``routes/api_v1/browser.py:64``) and every one is a COMMENT saying
+        the header is deliberately ignored. A predicate that counts those
+        would report "feature exists", which is exactly backwards — and it
+        would keep reporting that after someone deleted a real
+        implementation and left the comment behind. So we look for the
+        syntax of actually reading or installing it, never prose.
+        """
+        import subprocess
+        # Real-consumption signatures only:
+        #   headers.get('X-Forwarded-For')  / headers['X-Forwarded-For']
+        #   ProxyFix(                        (installation, not the word)
+        #   x_for=                           (ProxyFix / uvicorn hop config)
+        #   forwarded_allow_ips              (hypercorn/uvicorn trust list)
+        patterns = [
+            r"headers\s*(\.get\s*\(|\[)\s*['\"][Xx]-[Ff]orwarded-[Ff]or",
+            r'ProxyFix\s*\(',
+            r'\bx_for\s*=',
+            r'\bforwarded_allow_ips\b',
+        ]
+        found = set()
+        for pat in patterns:
+            try:
+                out = subprocess.run(
+                    ['git', 'grep', '-lIE', pat, '--', '*.py'],
+                    cwd=str(REPO), capture_output=True, text=True,
+                    timeout=60).stdout
+            except Exception as e:  # pragma: no cover - git present here
+                pytest.skip('git grep unavailable: %s' % e)
+            found |= {ln.strip() for ln in out.splitlines() if ln.strip()}
+        # This guard file itself documents the patterns; never count it.
+        found -= {'tests/test_proxy_trust.py'}
+        return any(not f.startswith('tests/') for f in found)
+
+    def test_env_example_does_not_advertise_unwired_proxy_hops(self):
+        env = (REPO / '.env.example')
+        assert env.is_file(), '.env.example missing'
+        text = env.read_text(encoding='utf-8')
+
+        # A PROMISE is a settable variable line — `# TOFU_TRUST_PROXY_HOPS=0`
+        # (commented-out entries are the file's way of advertising a knob).
+        # Merely NAMING the variable in prose is not a promise: the file is
+        # allowed — encouraged — to explain that the setting was removed and
+        # why. Matching the bare string would make this guard reject its own
+        # fix, which is how a guard ends up being deleted instead of heeded.
+        promise = re.search(
+            r'^\s*#?\s*[A-Z_]*TRUST_PROXY_HOPS\s*=', text, re.M)
+        if not promise:
+            return  # nothing advertised — fine
+
+        if self._server_honours_forwarded_headers():
+            return  # promise is backed by an implementation — fine
+
+        pytest.fail(
+            '.env.example advertises a settable %r but no non-test code '
+            'consumes X-Forwarded-For / ProxyFix. An operator who sets it '
+            'will believe real client IPs are honoured while every IP-keyed '
+            'decision (rate-limit buckets, the open-mode loopback grant, '
+            'audit logs) still sees the proxy address. Either wire a real '
+            'ASGI forwarded-header mechanism, or state the true semantics: '
+            'remote_addr is always the direct peer.'
+            % (promise.group(0).strip(),))
+
+    def test_env_example_states_the_true_peer_semantics(self):
+        """Silence is not enough — the file must tell operators the truth.
+
+        Removing the false promise without saying what actually happens
+        leaves the same trap one step further away: a same-host reverse
+        proxy makes every public request look like 127.0.0.1, and an
+        operator has no way to know that from the config file.
+        """
+        text = (REPO / '.env.example').read_text(encoding='utf-8')
+        if self._server_honours_forwarded_headers():
+            return
+        # Look for an explicit statement about the direct-peer semantics
+        # near any proxy discussion. Accept any phrasing that names the
+        # invariant; we assert the FACT is stated, not its wording.
+        has_statement = bool(re.search(
+            r'(direct(ly)?[- ]connected peer|direct peer|immediate peer|'
+            r'always the (direct|immediate) )', text, re.I))
+        assert has_statement, (
+            '.env.example must state that remote_addr is always the '
+            'directly-connected peer (X-Forwarded-For is ignored), so an '
+            'operator behind a same-host reverse proxy understands that '
+            'every request appears to come from loopback.')

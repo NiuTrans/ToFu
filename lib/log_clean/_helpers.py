@@ -79,6 +79,28 @@ def _format_device_range(ids: List[int]) -> str:
     return ', '.join(ranges)
 
 
+def _describe_numbered_variants(ids: List[int]) -> str:
+    """Describe collapsed lines by their INDEX SPREAD, claiming no hardware.
+
+    ``_DEVICE_ID_PATTERNS`` deliberately matches ``worker``/``rank``/``device``
+    alongside ``cuda``/``gpu``, because for FINGERPRINTING purposes any of them
+    is just "a number that varies between otherwise-identical lines". That is
+    correct for grouping but NOT a licence to call the group "devices": eight
+    DataLoader workers rendered as ``×8 devices: 0-7`` with no GPU anywhere in
+    the input, and three postgres ``io worker`` processes as ``×3 devices``.
+
+    A numbered variant is not a device. This module has no ``cuda:`` label to
+    support (unlike command_analysis, which needed evidence tiers to justify
+    one), so the whole fix is to say what we actually know — how many numbered
+    variants there were, and which indices.
+
+    Returns e.g. ``×8 numbered variants: 0-7``, or '' for fewer than two.
+    """
+    if len(ids) < 2:
+        return ''
+    return f'×{len(ids)} numbered variants: {_format_device_range(ids)}'
+
+
 def _fingerprint(line: str) -> str:
     s = line
     s = _HEX_ADDR_RE.sub('⊕', s)

@@ -543,4 +543,8 @@ class AgentRunRouteTest(unittest.TestCase):
 
 
 if __name__ == '__main__':
+    import pathlib
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+    from tests._standalone_guard import guard_standalone_db
+    guard_standalone_db('test_api_v1_agent_run.py')
     unittest.main()

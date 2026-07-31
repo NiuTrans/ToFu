@@ -46,6 +46,12 @@ _REVERT = os.environ.get('TOFU_WIRE_REVERT', '')
 # reorders), and a whitespace-only user turn (so _fix_empty_user_messages
 # visibly rewrites). The trailing consecutive assistants exercise the
 # builder's own merge (a finding: redundant at the wire layer).
+# NOTE: the whitespace turn MUST NOT be the tail — _inject_system_contexts
+# splices the Current-date reminder into the TRUE tail (turning its string
+# content into a non-empty block array), which legitimately suppresses the
+# empty-user rewrite there (the 2026-07-25 drift). The trailing
+# assistant+user turns keep the whitespace turn mid-list so the fix stays
+# observable in the real pipeline.
 def _fixture():
     return [
         {'role': 'user', 'content': 'Tell me about the policy report.', 'timestamp': 1000},
@@ -62,6 +68,8 @@ def _fixture():
             ],
         },
         {'role': 'user', 'content': '   ', 'timestamp': 2000},
+        {'role': 'assistant', 'content': 'Noted — continuing.'},
+        {'role': 'user', 'content': 'And the pricing section?', 'timestamp': 3000},
     ]
 
 

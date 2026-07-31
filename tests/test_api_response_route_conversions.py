@@ -164,7 +164,10 @@ def _sites():
              new=lambda: api_error('File too large (%dMB, max %dMB)' % (5, 10), status=400),
              old_src="return jsonify({'error': f'File too large ({len(file_bytes) // 1048576}MB, '",
              new_src="return api_error(f'File too large ({len(file_bytes) // 1048576}MB, '"),
-        dict(file='routes/api_v1/memory.py', category='C', status=400,
+        # ── The skill-install upload endpoint moved memory.py → skills.py in
+        #    757c3626 (API/frontend split P4); the converted api_error call
+        #    survived the move verbatim (skills.py:182). ──
+        dict(file='routes/api_v1/skills.py', category='C', status=400,
              legacy_body={'error': 'Provide a file upload or {"path": ...}'},
              new=lambda: api_error('Provide a file upload or {"path": ...}', status=400),
              old_src='return jsonify({\'error\': \'Provide a file upload or {"path": ...}\'}), 400',
@@ -193,6 +196,36 @@ def _sites():
              new=lambda: api_error('pdf_render_failed', status=503, detail='boom'),
              old_src="return jsonify({'error': 'pdf_render_failed', 'detail': str(e)}), 503",
              new_src="return api_error('pdf_render_failed', status=503, detail=str(e))"),
+
+        # ── routes/config.py template-update 404 (续18 batch) ──
+        dict(file='routes/config.py', category='B', status=404,
+             legacy_body={'ok': False,
+                          'error': "Template key '%s' not found in any JS file" % 'foo'},
+             new=lambda: api_error("Template key '%s' not found in any JS file" % 'foo', status=404),
+             old_src="return jsonify({'ok': False,\n                       'error': \"Template key '%s' not found in any JS file\" % tpl_key}), 404",
+             new_src="return api_error(\"Template key '%s' not found in any JS file\" % tpl_key, status=404)"),
+
+        # ── chat helper-return sites (续18 batch): _start_task_from_messages
+        #    returns (task_id, err_tuple) where err_tuple is (Response, status).
+        #    The caller returns err_tuple raw → wire-identical to a direct
+        #    return jsonify(...)-with-status. Category C: bare {'error':...}.
+        #    The helper later moved chat.py → chat_task_start.py; the
+        #    converted api_error tuples survived the move verbatim. ──
+        dict(file='routes/chat_task_start.py', category='C', status=500,
+             legacy_body={'error': 'Conversation not found after save'},
+             new=lambda: api_error('Conversation not found after save', status=500),
+             old_src="return None, (jsonify({'error': 'Conversation not found after save'}), 500)",
+             new_src="return None, api_error('Conversation not found after save', status=500)"),
+        dict(file='routes/chat_task_start.py', category='C', status=400,
+             legacy_body={'error': 'No messages to process'},
+             new=lambda: api_error('No messages to process', status=400),
+             old_src="return None, (jsonify({'error': 'No messages to process'}), 400)",
+             new_src="return None, api_error('No messages to process', status=400)"),
+        dict(file='routes/chat_task_start.py', category='C', status=500,
+             legacy_body={'error': 'Failed to start task'},
+             new=lambda: api_error('Failed to start task', status=500),
+             old_src="return None, (jsonify({'error': 'Failed to start task'}), 500)",
+             new_src="return None, api_error('Failed to start task', status=500)"),
     ]
 
 
@@ -287,21 +320,25 @@ def test_sse_helper_matches_legacy_headers():
 
 
 def test_chat_sse_blocks_converted():
-    """chat.py's 3 streaming Response(...) blocks are converted to sse_response,
-    including the timeout_none=True path for the long-lived UI stream."""
+    """chat.py's streaming Response(...) blocks are converted to sse_response,
+    including the timeout_none=True path for the long-lived UI stream.
+
+    History: the epic converted 3 SSE blocks; the later turn-settlement
+    refactor (d4811ff1/38d48669) DELETED the gen_persisted / gen_done
+    endpoints entirely, leaving exactly one SSE stream (line ~1285). The
+    guard now trips on ANY raw event-stream Response in chat.py."""
     with open(os.path.join(_ROOT, 'routes/chat.py'), encoding='utf-8') as f:
         src = f.read()
-    # The raw SSE Response(...) block must be gone.
-    assert "Response(gen_persisted(), mimetype='text/event-stream'" not in src
-    assert "Response(gen_done(), mimetype='text/event-stream'" not in src
-    assert "Response(generate_with_disconnect_log(), mimetype='text/event-stream'" not in src
-    # The three sse_response conversions must be present.
-    assert 'return sse_response(gen_persisted())' in src
-    assert 'return sse_response(gen_done())' in src
+    # No raw SSE Response(...) block may exist in chat.py — every event-stream
+    # response must go through sse_response (which sets the mimetype itself).
+    assert "mimetype='text/event-stream'" not in src, (
+        'chat.py grew a raw Response(..., mimetype=\'text/event-stream\') — '
+        'use sse_response() instead')
+    # The surviving long-lived UI stream keeps its conversion (timeout off).
     assert 'return sse_response(generate_with_disconnect_log(), timeout_none=True)' in src
     # sse_response must be imported.
     assert 'sse_response' in src.split('\n\n', 1)[0] or 'import' in src
-    _ok('chat.py 3 SSE Response(...) blocks converted to sse_response (incl. timeout_none)')
+    _ok('chat.py SSE streaming converted to sse_response (no raw event-stream Response)')
 
 
 def main():

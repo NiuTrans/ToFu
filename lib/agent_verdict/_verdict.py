@@ -332,10 +332,11 @@ def classify_verdict(
 #  Loop terminal-outcome classification
 # ══════════════════════════════════════════════════════════
 
-# Stop reasons that mean "the loop was CUT OFF by a safety cap, not genuinely
-# finished" — the objective is NOT verified-complete.  Endpoint's
-# max_iterations / max_replans / stuck, and autopilot's budget_exhausted /
-# stuck / no_progress (the last from the Part-2 diminishing-returns guard).
+# Stop reasons that mean "the loop was CUT OFF, not genuinely finished" — the
+# objective is NOT verified-complete.  Endpoint's max_iterations / max_replans /
+# stuck, autopilot's budget_exhausted / stuck / no_progress (the last from the
+# Part-2 diminishing-returns guard), plus the three MID-FLIGHT autopilot cutoffs
+# below.
 INCOMPLETE_STOP_REASONS = frozenset({
     'max_iterations',
     'max_replans',
@@ -343,6 +344,16 @@ INCOMPLETE_STOP_REASONS = frozenset({
     'stuck',
     'budget_exhausted',
     'no_progress',
+    # ── Autopilot runs cut short while still working ──
+    # The VU had already produced another turn (or was mid-flight) when a human
+    # took the conversation back, the task was aborted, or a newer task
+    # superseded the run. The objective is UNVERIFIED in all three, so the fold
+    # must render "stopped early — needs review" rather than a clean
+    # conclusion. Registering them here is what stops a yield from LOOKING like
+    # a successful finish.
+    'yielded_to_human',
+    'aborted_mid_vu',
+    'superseded',
 })
 
 

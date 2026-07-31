@@ -52,23 +52,21 @@ function _shouldFetchPdfAsData() {
   catch (_) { return false; }
 }
 
-/** Download a PDF to a Uint8Array for pdf.js ``getDocument({data})``, with a
- *  client-owned timeout (default 120s). Routes through the unified API client
- *  (``Api.paper.pdfArrayBuffer``) rather than a raw fetch so base-path
- *  resolution stays single-sourced in api.js and the §3.2.0 isolation seam
- *  holds; we pass the CANONICAL ``/api/...`` path (Api re-applies the live
- *  BASE_PATH) and own the deadline via our AbortController (timeout:0 on the
- *  Api side). Throws on non-2xx / abort so the caller surfaces a clear error. */
-async function _fetchPdfArrayBuffer(url, timeoutMs) {
+/** Download a PDF to a Uint8Array for pdf.js ``getDocument({data})``. Routes
+ *  through the unified API client (``Api.paper.pdfArrayBuffer``) rather than a
+ *  raw fetch so base-path resolution stays single-sourced in api.js and the
+ *  §3.2.0 isolation seam holds; we pass the CANONICAL ``/api/...`` path (Api
+ *  re-applies the live BASE_PATH). Throws on non-2xx / abort so the caller
+ *  surfaces a clear error.
+ *
+ *  NO deadline: this is a byte TRANSFER, not a liveness probe — a big paper
+ *  over a slow link legitimately runs past any fixed ceiling, and the old 120s
+ *  abort surfaced as "Failed to load PDF" for a download that was still
+ *  progressing. Pinned by tests/test_frontend_no_client_timeouts.py. */
+async function _fetchPdfArrayBuffer(url) {
   var i = (url || '').indexOf('/api/');
   var canonical = i >= 0 ? url.slice(i) : url;  // strip any baked prefix; Api re-resolves
-  var ctrl = new AbortController();
-  var timer = setTimeout(function () { ctrl.abort(); }, timeoutMs || 120000);
-  try {
-    return await Api.paper.pdfArrayBuffer(canonical, { signal: ctrl.signal, timeout: 0 });
-  } finally {
-    clearTimeout(timer);
-  }
+  return await Api.paper.pdfArrayBuffer(canonical, { timeout: 0 });
 }
 
 /** Open a PDF with pdf.js, auto-falling back to a client-side byte download if

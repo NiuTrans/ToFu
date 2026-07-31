@@ -19,6 +19,7 @@ It also guards the myday.js emit seam: the digest is derived from the report
 shape, and both My Day open + the boot fetch route through the ONE cache choke.
 """
 import json
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -50,9 +51,42 @@ global.requestAnimationFrame = function(){ return 0; };
 global.cancelAnimationFrame = function(){};
 global.ResizeObserver = function(){ return { observe(){}, disconnect(){} }; };
 global.localStorage = { _d:{}, getItem(k){return this._d[k]||null;}, setItem(k,v){this._d[k]=v;} };
-global.Image = function(){ return { set src(v){}, get src(){return '';} }; };
-// t() is optional in the pet; provide a passthrough so bubble text uses fallbacks.
-global.t = undefined;
+// The engine builds each frame with new Image() and decorates it (style,
+// setAttribute, draggable, onload) — a bare src-accessor stub throws on
+// node.style. _fakeEl below is a full enough element; frames never finish
+// "loading" here (onload never fires), which these tests don't mind.
+global.Image = function(){ return _fakeEl('img'); };
+// t() is driven by the REAL i18n dictionary, read from the path in argv[1].
+// It is passed as a FILE, not inlined: the dictionary is ~3000 keys and
+// inlining it into `node -e` overflows the argv limit (measured: OSError
+// "Argument list too long").
+//
+// It used to be `global.t = undefined`, simulating a state production cannot
+// reach: index.html:80 installs a `window.t = key => key` boot stub before any
+// script parses, and i18n.js is _BUNDLE_FILES[0] while tofu-pet.js is #135.
+// That fiction forced the pet to carry a defensive `typeof t` alias, and the
+// alias made its keys INVISIBLE to lib/i18n_boot_keys (charter #18) — the
+// scanner only follows a literal string as t()'s FIRST argument, so every
+// pet.* key silently missed the boot pack.
+//
+// Production signature is t(key, params) where params is a {placeholder} map,
+// NOT a default string. A harness written `(k, d) => (d || k)` inverts that and
+// manufactures prose the real UI never produces — the trap that shipped a
+// literal `project.qrScan` to users while 11 render guards stayed green. Here a
+// MISSING key returns the key, exactly as production does.
+const _petDict = JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8'));
+global.t = function (key, params) {
+  const e = _petDict[key];
+  let text = (e && e.zh != null) ? e.zh : key;   // missing → the KEY
+  if (params) {
+    for (const k in params) {
+      if (Object.prototype.hasOwnProperty.call(params, k)) {
+        text = text.split('{' + k + '}').join(params[k]);
+      }
+    }
+  }
+  return text;
+};
 
 // A DOM that tracks children appended to the bar so we can inspect the bubble.
 let _mounted = null;
@@ -134,6 +168,22 @@ process.exit(0);
 """
 
 
+def _i18n_dict():
+    """Scrape ``static/js/i18n.js`` into ``{key: {zh, en}}``.
+
+    Parsing the REAL file (instead of hand-listing keys) is what makes the
+    harness honest: a key absent from production is absent here too, so ``t()``
+    returns the bare key in BOTH places and a guard can actually see it.
+    """
+    src = (REPO / "static" / "js" / "i18n.js").read_text(encoding="utf-8")
+    pat = re.compile(
+        r"""^[ \t]*'([\w.\-]+)':\s*\{\s*zh:\s*(['"])(.*?)\2\s*,"""
+        r"""\s*en:\s*(['"])(.*?)\4""",
+        re.MULTILINE)
+    return {m.group(1): {'zh': m.group(3), 'en': m.group(5)}
+            for m in pat.finditer(src)}
+
+
 def _run(hour=14, now=0, digest=None, click=False, mood=None, src=None):
     src = src if src is not None else PET_JS.read_text()
     script = (_HARNESS
@@ -142,10 +192,19 @@ def _run(hour=14, now=0, digest=None, click=False, mood=None, src=None):
               .replace("__NOW__", str(now))
               .replace("__DIGEST__", json.dumps(digest) if digest is not None else "null")
               .replace("__CLICK__", "true" if click else "false"))
-    # Optionally patch mood before the digest by prepending a setState — but the
-    # tests here set mood via the pet's own default, so no extra step needed.
-    out = subprocess.run(["node", "-e", script], capture_output=True, text=True,
-                         cwd=str(REPO), timeout=20)
+    # The dictionary rides in a temp FILE (argv[1]), never inlined into `node
+    # -e` — ~3000 keys overflows the argv limit (measured: "Argument list too
+    # long"). node -e puts extra args at argv[1] (no script-path entry).
+    import tempfile
+    with tempfile.NamedTemporaryFile('w', suffix='.json', delete=False) as fh:
+        json.dump(_i18n_dict(), fh)
+        dict_path = fh.name
+    try:
+        out = subprocess.run(["node", "-e", script, dict_path],
+                             capture_output=True, text=True,
+                             cwd=str(REPO), timeout=20)
+    finally:
+        os.unlink(dict_path)
     assert out.returncode == 0, f"node failed: {out.stderr}\n{out.stdout}"
     line = [ln for ln in out.stdout.strip().splitlines() if ln.strip().startswith("{")][-1]
     return json.loads(line)
@@ -179,8 +238,13 @@ def test_click_renders_svg_bubble_with_counts():
     assert r["bubbleSvg"], "bubble shape must be an inline SVG (no emoji/glyph, §3.4)"
     # done = streams.done(2)+todos.done(1)=3 ; total = 4+2 = 6 ; blocked = 1
     assert "3/6" in r["bubbleText"], f"bubble must carry live done/total counts, got {r['bubbleText']!r}"
-    assert "1" in r["bubbleText"] and "block" in r["bubbleText"].lower(), \
-        f"bubble must mention blocked count, got {r['bubbleText']!r}"
+    # Blocked count present. Assert the NUMBER, not an English word: this
+    # harness drives t() from the REAL dictionary (zh), so the text is
+    # `今日完成 3/6 · 1 项受阻`, not the English fallback the old `t=undefined`
+    # fiction produced. Tying the guard to "block" would mean asserting on the
+    # fallback language, not on whether the count reached the bubble.
+    assert "1" in r["bubbleText"], \
+        f"bubble must mention the blocked count, got {r['bubbleText']!r}"
     # No emoji / unicode-glyph icon smuggled into the text.
     assert not re.search(r"[\U0001F000-\U0001FAFF\u2600-\u27BF]", r["bubbleText"]), \
         f"bubble text must not contain emoji glyphs, got {r['bubbleText']!r}"

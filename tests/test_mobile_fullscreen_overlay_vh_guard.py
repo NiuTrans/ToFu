@@ -38,6 +38,15 @@ pytestmark = pytest.mark.unit
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
 _CSS_PATH = os.path.join(ROOT, 'static', 'styles.css')
+# Overlay rules are split across both stylesheets (e.g. .mcp-install-modal
+# lives in settings.css, whose --vh100 guard sits at :838). The sweep must
+# scan BOTH.
+_CSS_PATH2 = os.path.join(ROOT, 'static', 'settings.css')
+
+
+def _read_all_css() -> str:
+    return (open(_CSS_PATH, encoding='utf-8').read()
+            + '\n' + open(_CSS_PATH2, encoding='utf-8').read())
 
 # Full-screen overlay selectors that go edge-to-edge on phones and therefore
 # pin height to the full viewport. These are the ones the WebView collapses.
@@ -329,8 +338,10 @@ def _bodies_for(css, selector, *, phone):
 
 def test_sweep_base_overlays_use_vh100_guard():
     """Every A/B-list overlay's BASE rule that pins a viewport height must be
-    guarded by var(--vh100, …). Governs the 837px coarse tablet."""
-    css = open(_CSS_PATH, encoding='utf-8').read()
+    guarded by var(--vh100, …). Governs the 837px coarse tablet.
+    Scans BOTH static/styles.css and static/settings.css (overlay rules are
+    split across them — .mcp-install-modal moved to settings.css)."""
+    css = _read_all_css()
     for sel in _SWEEP_BASE_SELECTORS:
         bodies = _bodies_for(css, sel, phone=False)
         assert bodies, f'{sel!r} base rule not found — positive test stale.'
@@ -349,7 +360,7 @@ def test_sweep_base_overlays_use_vh100_guard():
 def test_sweep_phone_overlays_use_vh100_guard():
     """Every ≤768/≤680 overlay/drawer/dropdown/sheet that pins a viewport
     height must be guarded (the phone-block dvh sweep)."""
-    css = open(_CSS_PATH, encoding='utf-8').read()
+    css = _read_all_css()
     for sel in _SWEEP_PHONE_SELECTORS:
         bodies = _bodies_for(css, sel, phone=True)
         assert bodies, f'{sel!r} phone-block rule not found — positive test stale.'

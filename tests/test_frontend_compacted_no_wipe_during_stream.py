@@ -19,12 +19,13 @@ innerHTML wipe — the flash — still fired.)
 
 THE FIX
 -------
-When a stream is active, DON'T call renderChat. Surgically replace ONLY the
-stamped older message's node (`document.getElementById('msg-'+idx).outerHTML =
-renderMessage(msg, idx)`), leaving the streaming bubble and every other node's
-DOM identity intact. With no active stream, keep renderChat(_conv,false) (its
-per-message data-mfp diff is already surgical + it runs the grouping/turn-nav
-passes).
+When a stream is active, DON'T take the whole-list path (renderChat — since
+the Phase 3.5 step-4 SEAM-2 fold, reached via `ConvView.replaceAll`).
+Surgically replace ONLY the stamped older message's node
+(`document.getElementById('msg-'+idx).outerHTML = renderMessage(msg, idx)`),
+leaving the streaming bubble and every other node's DOM identity intact.
+With no active stream, keep the whole-list repaint (the engine's per-message
+data-mfp diff is already surgical + it runs the grouping/turn-nav passes).
 
 This harness loads the SHIPPED sse_handlers_tool.js under jsdom, seeds a conv
 with an older assistant message (whose cold round the event compacts) + a live
@@ -96,9 +97,14 @@ win.escapeHtml = global.escapeHtml = (s) => String(s == null ? '' : s);
 let _twUpdateCalls = 0;
 win.twUpdate = global.twUpdate = () => { _twUpdateCalls++; };
 
-// renderChat is the WHOLE-LIST path we want to AVOID during stream. Spy on it.
+// The WHOLE-LIST path we want to AVOID during stream. Post-SEAM-2-fold
+// (RENDER_CONTRACT Phase 3.5 step 4), the handler's no-stream branch calls
+// window.ConvView.replaceAll — the public full-repaint entry that DELEGATES
+// to renderChat. Stub the seam and count both into the same counter: a call
+// to EITHER is the whole-list wipe this test guards against.
 let _renderChatCalls = 0;
 win.renderChat = global.renderChat = () => { _renderChatCalls++; };
+win.ConvView = global.ConvView = { replaceAll: () => { _renderChatCalls++; } };
 
 // renderMessage: deterministic marker that reflects the compaction pill so we
 // can assert the older row was actually repainted.

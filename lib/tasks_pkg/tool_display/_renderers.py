@@ -250,6 +250,15 @@ def _tool_display_memory(fn_name, fn_args, tc_id, tc_args_str):
     return display, {'toolName': fn_name}
 
 
+def _tool_display_skills(fn_name, fn_args, tc_id, tc_args_str):
+    """Build display info for skill activation calls.
+
+    No emoji prefix — the frontend renders a per-tool SVG icon (§3.4).
+    """
+    skill = fn_args.get('skill', '?') if isinstance(fn_args, dict) else '?'
+    return f'Activating skill: {skill}', {'toolName': fn_name}
+
+
 def _tool_display_conv_ref(fn_name, fn_args, tc_id, tc_args_str):
     """Build display info for conversation reference tool calls.
 
@@ -426,7 +435,8 @@ def _tool_display_inspect_image(fn_name, fn_args, tc_id, tc_args_str):
         import re as _re
         _m = _re.search(r'/api/images/[^\s\]\'"]+', path)
         _canon = canonical_image_ref(_m.group(0)) if _m else ''
-    except Exception:
+    except Exception as e:
+        logger.debug('[ToolDisplay] image ref canonicalization failed for %.80s: %s', path, e)
         _canon = ''
     if _canon:
         base = os.path.basename(_canon) or _canon

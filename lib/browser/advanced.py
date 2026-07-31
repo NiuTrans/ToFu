@@ -239,9 +239,17 @@ def fill_form_sequential(
                     fields_filled += 1
                     field_results.append({'index': i, 'selector': selector, 'type': 'click', 'ok': True})
             elif field_type == 'select':
-                send_browser_command('click_element', {
+                _res, _err = send_browser_command('click_element', {
                     'tabId': tab_id, 'selector': selector, 'scrollTo': True
                 }, timeout=2)
+                if _err:
+                    # Without this check a failed open-click fell through to
+                    # get_interactive_elements and was misreported as
+                    # "option not found" — every other branch here checks _err.
+                    field_results.append({'index': i, 'selector': selector, 'type': 'select',
+                                          'ok': False, 'error': f'select open failed: {_err}'})
+                    time.sleep(field_delay)
+                    continue
                 time.sleep(0.3)
                 result, error = send_browser_command('get_interactive_elements', {
                     'tabId': tab_id, 'viewport': True, 'maxElements': 100

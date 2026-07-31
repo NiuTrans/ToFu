@@ -15,9 +15,10 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from lib.log import get_logger
+from lib.log import audit_log, get_logger
 
 from lib.tool_input_repair._classify import classify_tool_call, resolve_tool_name
+from lib.tool_input_repair._concat import split_concatenated_tool_name
 from lib.tool_input_repair._rejection import (
     build_rejection_message,
     clear_rejection,
@@ -191,6 +192,46 @@ def ingest_tool_call(
     # Done here (post-alias, pre-parse) so a rejected call never parses/repairs
     # args it will never use — mirrors the chat dispatcher's short-circuit.
     if reject_hallucinated and fn_name not in known:
+        # ── Defensive assertion: is this OUR concatenation, not a model
+        #    invention? The root cause (a tool name accumulated with ``+=``
+        #    across a slot collision) is fixed in lib/llm/_sse_core.py; this
+        #    catches any path that still produces the shape and names it as
+        #    ours, LOUDLY, instead of letting it be misfiled as a
+        #    hallucination. It never repairs the call: the fused calls'
+        #    arguments are already interleaved, so re-splitting them would be
+        #    guessing at model intent.
+        _parts = split_concatenated_tool_name(fn_name, known)
+        if _parts:
+            logger.warning(
+                '[ToolRepair] CONCATENATED tool name %r splits into real tools '
+                '%s — this is a HARNESS defect (tool-name accumulation), not a '
+                'model hallucination. Rejecting without executing; NOT counted '
+                'toward the hallucination streak. model=%s conv=%s',
+                fn_name, _parts, model, conv_id)
+            if emit_audit:
+                audit_log('tool_name_concatenated',
+                          attempted=fn_name, parts=_parts,
+                          model=model, conv_id=conv_id)
+            descriptor = {
+                'kind': 'concatenated',
+                'attempted': fn_name,
+                'suggestions': _parts,
+                '_repeat_count': 0,
+                '_harness_defect': True,
+            }
+            msg = (
+                f'Error: `{fn_name}` is not a real tool and was NOT executed. '
+                f'This name was produced by a harness defect that fused two '
+                f'tool calls together — it is not your mistake. Please re-issue '
+                f'the calls you intended, one at a time, using exact names '
+                f'from the tool list (likely: '
+                + ', '.join(f'`{p}`' for p in _parts) + ').'
+            )
+            # Deliberately NOT record_rejection(): a defect of ours must never
+            # push the conversation toward the autopilot hallucination abort.
+            return IngestedToolCall(
+                raw_name=raw_name, fn_name=fn_name, alias_kind=alias_kind,
+                rejection=descriptor, parse_error=msg, repeat_count=0)
         descriptor = classify_tool_call(fn_name, known)
         if descriptor is not None:
             repeat_n = record_rejection(conv_id, fn_name)

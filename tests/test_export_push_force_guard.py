@@ -83,5 +83,118 @@ def test_case_insensitive():
     assert _is_nonff_push_rejection("AUTHENTICATION FAILED") is False
 
 
+# ═══════════════════════════════════════════════════════════════════════
+#  Owner-ratified policy (2026-07-25, pt_6598ae21 — "most long-term robust"):
+#  divergence default = PRESERVE remote history (ours-merge → fast-forward),
+#  force only via explicit --force; published tags never move silently.
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def test_tag_push_action_pure():
+    from export import _tag_push_action
+    # Not on remote → plain push.
+    assert _tag_push_action('', 'aaa111', force=False) == 'push'
+    assert _tag_push_action('   \n', 'aaa111', force=True) == 'push'
+    # Same commit on remote → nothing to do.
+    assert _tag_push_action('aaa111\trefs/tags/v1.2.3', 'aaa111', force=False) == 'skip-same'
+    # Different commit: force only with --force, otherwise keep the published tag.
+    assert _tag_push_action('bbb222\trefs/tags/v1.2.3', 'aaa111', force=False) == 'keep'
+    assert _tag_push_action('bbb222\trefs/tags/v1.2.3', 'aaa111', force=True) == 'force'
+
+
+# ── Real-git end-to-end (skipped when git is unavailable) ─────────────
+
+import shutil
+import subprocess
+
+_GIT = shutil.which('git')
+
+
+def _git_run(cwd):
+    def run(cmd):
+        result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True,
+                                timeout=60)
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr or result.stdout or 'git failed')
+        return result.stdout.strip()
+    return run
+
+
+def _init_repo(path, branch='main'):
+    path.mkdir(parents=True, exist_ok=True)
+    r = _git_run(path)
+    r(['git', 'init'])
+    r(['git', 'checkout', '-b', branch])
+    r(['git', 'config', 'user.email', 'test@example.com'])
+    r(['git', 'config', 'user.name', 'test'])
+    return r
+
+
+def _commit_file(run, path, name, content, msg):
+    (path / name).write_text(content, encoding='utf-8')
+    run(['git', 'add', '-A'])
+    run(['git', 'commit', '-m', msg])
+    return run(['git', 'rev-parse', 'HEAD'])
+
+
+def _remote_log(remote_git_dir, branch='main'):
+    result = subprocess.run(
+        ['git', '--git-dir', str(remote_git_dir), 'log', '--format=%H', branch],
+        capture_output=True, text=True, timeout=60)
+    return result.stdout.split()
+
+
+def _remote_file(remote_git_dir, branch, name):
+    result = subprocess.run(
+        ['git', '--git-dir', str(remote_git_dir), 'show', f'{branch}:{name}'],
+        capture_output=True, text=True, timeout=60)
+    return result.stdout if result.returncode == 0 else None
+
+
+def _make_diverged_remote(tmp_path):
+    """Bare remote holding commit R1 (file remote.txt); an unrelated fresh
+    export tree holding commit E1 (file export.txt). Returns (remote, exp, r1)."""
+    remote = tmp_path / 'remote.git'
+    remote.mkdir()
+    subprocess.run(['git', 'init', '--bare', str(remote)],
+                   capture_output=True, check=True, timeout=60)
+    seed = _init_repo(tmp_path / 'seed')
+    r1 = _commit_file(seed, tmp_path / 'seed', 'remote.txt', 'v1\n', 'R1')
+    seed(['git', 'remote', 'add', 'origin', str(remote)])
+    seed(['git', 'push', 'origin', 'main'])
+    # Fresh export tree — UNRELATED history (the re-git-init'd mirror case).
+    exp_dir = tmp_path / 'export'
+    exp = _init_repo(exp_dir)
+    _commit_file(exp, exp_dir, 'export.txt', 'snapshot\n', 'E1')
+    exp(['git', 'remote', 'add', 'origin', str(remote)])
+    return remote, exp_dir, r1
+
+
+@pytest.mark.skipif(_GIT is None, reason='git not installed')
+def test_push_branch_preserves_remote_history(tmp_path):
+    """Default (no --force): a non-ff divergence must NOT clobber the remote.
+
+    The export snapshot becomes the tip content, and the remote's own commit
+    R1 stays reachable in the DAG (ours-merge → fast-forward). If the
+    implementation ever regresses to force-push-by-default, R1 disappears and
+    this test goes red."""
+    from export import _push_branch
+    remote, exp_dir, r1 = _make_diverged_remote(tmp_path)
+    _push_branch(_git_run(exp_dir), 'origin', 'main', force=False)
+    assert _remote_file(remote, 'main', 'export.txt') == 'snapshot\n'
+    assert r1 in _remote_log(remote), 'remote history R1 lost — force happened?'
+
+
+@pytest.mark.skipif(_GIT is None, reason='git not installed')
+def test_push_branch_force_overwrites_only_when_explicit(tmp_path):
+    """Explicit --force: the overwrite IS available for a deliberate reset —
+    remote-only commits become unreachable from the branch tip."""
+    from export import _push_branch
+    remote, exp_dir, r1 = _make_diverged_remote(tmp_path)
+    _push_branch(_git_run(exp_dir), 'origin', 'main', force=True)
+    assert _remote_file(remote, 'main', 'export.txt') == 'snapshot\n'
+    assert r1 not in _remote_log(remote), '--force should drop remote-only history'
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])

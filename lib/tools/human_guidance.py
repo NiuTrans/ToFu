@@ -32,7 +32,15 @@ ASK_HUMAN_TOOL = {
                     "type": "string",
                     "description": (
                         "The question to ask the user. Be clear and specific. "
-                        "Provide enough context so the user can answer effectively."
+                        "Provide enough context so the user can answer effectively. "
+                        "Rendered as MARKDOWN, so an image reference like "
+                        "`![alt](/api/images/<name>.png)` is displayed inline — this "
+                        "is how you show something the user must LOOK AT or SCAN "
+                        "(e.g. a scan-to-login QR code) while this call blocks "
+                        "waiting for them. Build that question body with "
+                        "`lib.qr.qr_login_question(url)`, which writes the QR PNG "
+                        "and returns the markdown; do NOT paste base64 image data "
+                        "into this field."
                     ),
                 },
                 "response_type": {

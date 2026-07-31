@@ -352,7 +352,7 @@ def test_auto_path_emits_one_run_concluded(flask_app, monkeypatch):
     from lib.tasks_pkg import autopilot
     # Stub the sidecar store (DB) — we are testing the CALLER wiring. A None
     # record would short-circuit before _emit_run_concluded.
-    monkeypatch.setattr(autopilot, '_store_run_record',
+    monkeypatch.setattr('lib.tasks_pkg.autopilot_run_lifecycle._store_run_record',
                         lambda conv_id, run_id, *, reason='task_done':
                         {'runId': run_id, 'status': 'concluded'})
     monkeypatch.setattr('lib.tasks_pkg.manager.append_event', lambda *a, **k: None)
@@ -516,7 +516,7 @@ def test_NC2_neutered_started_callsite_breaks_exactly_once(flask_app, monkeypatc
 
 
 _AUTOPILOT_SRC = os.path.join(os.path.dirname(__file__), '..',
-                              'lib', 'tasks_pkg', 'autopilot.py')
+                              'lib', 'tasks_pkg', 'autopilot_run_lifecycle.py')
 
 
 def test_NC3_neutered_run_concluded_callsite_breaks_rollup(flask_app, monkeypatch):
@@ -526,12 +526,19 @@ def test_NC3_neutered_run_concluded_callsite_breaks_rollup(flask_app, monkeypatc
     complementary to the per-turn suppression)."""
 
     def run():
-        from lib.tasks_pkg import autopilot as ap
+        # Resolve via sys.modules so the harness's neutered lifecycle module
+        # (swapped in under the canonical name) is the one we call — a
+        # re-exported reference on `autopilot` would keep the UN-neutered
+        # function object and the neuter would never bite.
+        import lib.tasks_pkg.autopilot_run_lifecycle as ap
         captured = []
         import lib.conversations.project_feed as pf
         monkeypatch.setattr(pf, 'emit_project_event',
                             lambda *a, **k: captured.append(a[2] if len(a) > 2 else None))
-        monkeypatch.setattr(ap, '_store_run_record',
+        # The close-out helpers live in autopilot_run_lifecycle (re-exported by
+        # autopilot); the neutered module resolves its own _store_run_record, so
+        # patch the LIVE lifecycle module for the un-neutered path.
+        monkeypatch.setattr('lib.tasks_pkg.autopilot_run_lifecycle._store_run_record',
                             lambda conv_id, run_id, *, reason='task_done':
                             {'runId': run_id, 'status': 'concluded'})
         monkeypatch.setattr('lib.tasks_pkg.manager.append_event', lambda *a, **k: None)

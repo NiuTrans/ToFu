@@ -36,6 +36,17 @@ Four things (mirrors the memory pilot's acceptance criteria):
   4. NO OVER-NARROWING (control) — a GENERIC tofu modal input (browser/apply
      modal, NOT recent-search) STILL resolves to the tofu bleed, proving the
      `:not()` removed the recent-search input ONLY, not the whole theme.
+  5. BASE .modal input BLEED (theme-agnostic, 2026-07-25) — the base
+     `.modal input` mega-line rule ((0,1,1): margin-bottom:16px /
+     padding:10px 12px / font-size:13px) out-specifies a BARE
+     `.recent-search-input` (0,1,0). The 16px bottom margin inflated
+     `.recent-search` to 48px and dropped the absolute clear button ~8px
+     below the input's true middle (the off-center × bug); the padding
+     bleed also killed the 30px right padding that keeps typed text clear
+     of the button. Fix: chain the authored selectors to
+     `.recent-search .recent-search-input` (0,2,0) — mirrors the
+     `.mp-add-row .mp-path-input` pattern. NC: un-chain the base rule on
+     disk → padding flips to the bleed's 10px 12px.
 """
 
 from __future__ import annotations
@@ -223,6 +234,101 @@ def test_nc_reverting_exclusion_reintroduces_bleed():
 
     with open(CSS, encoding='utf-8') as f:
         assert f.read() == original, 'CSS not restored byte-identical after NC'
+
+
+# ─────────────── 5. BASE .modal input bleed (theme-agnostic) ───────────────
+
+_AUTHORED_PADDING = '6px 30px 6px 12px'    # 30px right padding clears the × button
+_BASE_BLEED_PADDING = '10px 12px'          # the .modal input mega-line bleed
+_AUTHORED_FONT_SIZE = '12.5px'
+_BASE_BLEED_FONT_SIZE = '13px'
+
+
+def test_base_modal_bleed_loses_padding_and_font_size(css_text):
+    """The base `.modal input` bleed (margin-bottom:16px / padding:10px 12px /
+    font-size:13px — (0,1,1)) must LOSE to the authored chained rule
+    `.recent-search .recent-search-input` (0,2,0). When the selector was bare
+    (0,1,0), the bleed's 16px bottom margin inflated .recent-search to 48px
+    and dropped the absolute clear button ~8px below the input's true middle
+    (the off-center × bug). margin-bottom itself is not resolvable here (the
+    engine does not expand the authored `margin: 0` shorthand), so padding and
+    font-size stand in as witnesses of the same cascade battle."""
+    padding = _resolve(css_text, _RECENT_INPUT, 'padding')
+    assert padding == _AUTHORED_PADDING, (
+        f'recent-search input padding resolved to {padding!r}; expected the '
+        f'authored {_AUTHORED_PADDING!r}. If it is the bleed '
+        f'{_BASE_BLEED_PADDING!r} the chained selector lost to the base '
+        f'.modal input rule again (the off-center × regression).')
+    assert padding != _BASE_BLEED_PADDING
+    font_size = _resolve(css_text, _RECENT_INPUT, 'font-size')
+    assert font_size == _AUTHORED_FONT_SIZE, (
+        f'recent-search input font-size resolved to {font_size!r}; expected '
+        f'{_AUTHORED_FONT_SIZE!r} (bleed = {_BASE_BLEED_FONT_SIZE!r})')
+
+
+def test_specificity_math_chained_selector_beats_base_bleed():
+    """Encode the relationship the ×-centering fix relies on:
+    - authored `.recent-search .recent-search-input` = (0,2,0)
+    - base bleed `.modal input`                      = (0,1,1) → authored wins
+    - bare `.recent-search-input` (the pre-fix form) = (0,1,0) → would LOSE."""
+    authored = _specificity('.recent-search .recent-search-input')
+    base = _specificity('.modal input')
+    bare = _specificity('.recent-search-input')
+    assert authored == (0, 2, 0), authored
+    assert base == (0, 1, 1), base
+    assert bare == (0, 1, 0), bare
+    assert authored > base, 'chained selector must out-specify the base .modal input'
+    assert base > bare, 'the bare selector WOULD lose (that was the off-center × bug)'
+
+
+_NC2_FIND = '.recent-search .recent-search-input {'
+_NC2_REPL = '.recent-search-input {'
+
+
+def _subrun_resolve_recent_padding() -> str:
+    """In a FRESH subprocess, resolve the recent-search input padding from the
+    CURRENT on-disk styles.css."""
+    code = (
+        'import tests.test_recent_search_tofu_specificity as t; '
+        'print("PADDING=" + str(t._resolve(t._css(), t._RECENT_INPUT, "padding")))'
+    )
+    r = subprocess.run([sys.executable, '-c', code], cwd=ROOT,
+                       capture_output=True, text=True)
+    out = r.stdout + r.stderr
+    for line in out.splitlines():
+        if line.startswith('PADDING='):
+            return line[len('PADDING='):]
+    raise AssertionError(f'subprocess did not report PADDING=: {out}')
+
+
+def test_nc_unchaining_selector_reintroduces_base_bleed():
+    """DOUBLE-NEUTER: un-chain `.recent-search .recent-search-input` →
+    `.recent-search-input` (ON DISK) → the base `.modal input` bleed wins
+    again → padding flips to 10px 12px. Restore byte-identical."""
+    with open(CSS, encoding='utf-8') as f:
+        original = f.read()
+    assert original.count(_NC2_FIND) == 1, (
+        f'NC-2 anchor not unique: count={original.count(_NC2_FIND)}')
+
+    base_padding = _subrun_resolve_recent_padding()
+    assert base_padding == _AUTHORED_PADDING, (
+        f'baseline not authored padding: {base_padding!r}')
+
+    try:
+        with open(CSS, 'w', encoding='utf-8') as f:
+            f.write(original.replace(_NC2_FIND, _NC2_REPL, 1))
+        neut_padding = _subrun_resolve_recent_padding()
+        assert neut_padding == _BASE_BLEED_PADDING, (
+            f'NC-2 did not bite: with the selector un-chained the recent input '
+            f'padding resolved {neut_padding!r}, expected the base bleed '
+            f'{_BASE_BLEED_PADDING!r}. The chained selector is not what '
+            f'protects it.')
+    finally:
+        with open(CSS, 'w', encoding='utf-8') as f:
+            f.write(original)
+
+    with open(CSS, encoding='utf-8') as f:
+        assert f.read() == original, 'CSS not restored byte-identical after NC-2'
 
 
 if __name__ == '__main__':

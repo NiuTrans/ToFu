@@ -23,6 +23,15 @@ real traffic:
 * **Expand** — when an LLM call succeeds, look at the actual ``prompt_tokens``
   it accepted. If the call sent more tokens than our currently-known limit,
   bump the learned ceiling up to that observed count plus a small headroom.
+  Expand entries are FLOOR-ONLY at resolution time
+  (:func:`resolve_learned_context_limit` returns ``max(static, learned)``):
+  an expand recorded when the static preset was smaller is stale history,
+  and treating it as an absolute ceiling would pin the window below the
+  true one forever (the compaction gate caps prompts below the pin, so no
+  observation can ever climb out — the expand-side mirror of the
+  shrink-starvation deadlock below, with no TTL escape since expand
+  entries are permanent). Live instance: sankuai::kimi-k3 pinned at
+  383,727 while kimi-k3's real window is 1M (2026-07-26).
 
 **TTL self-heal.** Shrink entries are inherently uncertain (the rejection may
 have been a transient gateway/route hiccup, and once a limit shrinks our own
@@ -92,6 +101,7 @@ _LEARNED, _META = _load()
 # ── Read path — re-exported from ._lookup ───────────────────────────────
 from lib.context_limits._lookup import (  # noqa: E402,F401
     lookup_learned_context_limit,
+    resolve_learned_context_limit,
     _SHRINK_TTL_DAYS,
     _SHRINK_TTL_SEC,
 )
@@ -112,6 +122,7 @@ from lib.context_limits._learn import (  # noqa: E402,F401
 
 __all__ = [
     'lookup_learned_context_limit',
+    'resolve_learned_context_limit',
     'learn_shrink_from_error',
     'learn_expand_from_success',
 ]

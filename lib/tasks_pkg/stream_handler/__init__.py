@@ -30,6 +30,7 @@ from lib.tasks_pkg.stream_handler._audit import (  # noqa: E402,F401
 
 # ── Retry-budget caps + backoff + paced sleep ──
 from lib.tasks_pkg.stream_handler._budget import (  # noqa: E402,F401
+    _CANNED_GREETING_RETRY_MAX,
     _EMPTY_STOP_RETRY_MAX,
     _PREMATURE_RETRY_MAX_CLASSIC,
     _PREMATURE_RETRY_MAX_ZERO_BYTE,
@@ -39,6 +40,13 @@ from lib.tasks_pkg.stream_handler._budget import (  # noqa: E402,F401
     _interruptible_sleep,
     _todo_continuation_max,
     _zero_byte_backoff_seconds,
+)
+
+
+# ── Canned-greeting upstream-artifact detector ──
+from lib.tasks_pkg.stream_handler._canned_greeting import (  # noqa: E402,F401
+    is_canned_greeting_reply,
+    last_user_is_smalltalk,
 )
 
 

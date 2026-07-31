@@ -24,6 +24,7 @@ function _populateSearchTab(cfg) {
   _setVal('settingMaxBytes', s.max_bytes || 20971520);
   if (typeof ChipInput !== 'undefined') ChipInput.init('settingSkipDomains', s.skip_domains || []);
   if (typeof _renderAuthSources === 'function') _renderAuthSources();
+  if (typeof _renderPrivateHosts === 'function') _renderPrivateHosts();
 }
 
 // ══════════════════════════════════════════════════════

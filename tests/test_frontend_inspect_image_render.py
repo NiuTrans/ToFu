@@ -108,6 +108,10 @@ check('chip_title_localized', html.includes('已应用的图像变换'));
 check('chip_no_hardcoded_title', !html.includes('title="Applied transform"'));
 
 console.log(out.join('\n'));
+// jsdom keeps the event loop alive (its fake timers/raF handles are never
+// released) — without an explicit exit node hangs past the subprocess
+// timeout even when every check has already printed.
+process.exit(0);
 """
 
 
@@ -118,7 +122,7 @@ def _run(tr_path, if_path):
     try:
         proc = subprocess.run(
             ['node', harness, tr_path, ROOT, if_path],
-            capture_output=True, text=True, timeout=60)
+            capture_output=True, text=True, timeout=240)   # jsdom require alone is ~80s on FUSE
     finally:
         try:
             os.remove(harness)

@@ -38,10 +38,18 @@ def _strip_js_comments(src: str) -> str:
     """Remove /* block */ and // line comments so a substring assertion bites on
     EXECUTABLE code, not comment prose. (Round-1/round-4 lesson: a bare
     substring like "conversations[0]" also matches the explanatory comment next
-    to the statement, so the guard passes even when the statement is deleted.)"""
-    src = re.sub(r"/\*[\s\S]*?\*/", "", src)
-    src = re.sub(r"//[^\n]*", "", src)
-    return src
+    to the statement, so the guard passes even when the statement is deleted.)
+
+    Delegates to the SINGLE shared implementation (charter #24). MEASURED on the
+    two files this guard scans: the set of surviving code identifiers is
+    IDENTICAL, so every substring assertion here keeps its verdict. The swap
+    also fixes a latent defect — the local regexes DELETED comment lines rather
+    than blanking them (main.js 1519 -> 1162, main_init_tasks.js 584 -> 431), so
+    any future line-number reporting would have been badly off; the shared pass
+    returns the exact source line count.
+    """
+    from tests._source_scan import strip_comments
+    return strip_comments(src, lang='js', inline=True)
 
 
 def _hydrate_then_block(src: str, *, strip_comments: bool = False) -> str:
@@ -109,18 +117,20 @@ def test_last_active_conv_mirrored_to_localstorage_on_leave():
 
 
 def test_ensure_newest_preserves_inflight_skeleton():
-    """_ensureNewest must skip its full renderChat when the active conv is still
+    """_ensureNewest must skip its full repaint when the active conv is still
     mid first-open load (skeleton painted): _initialSwitchLoad + _needsLoad +
     empty messages. Otherwise it repaints the generic loading welcome over the
-    skeleton (downgrade flash)."""
+    skeleton (downgrade flash). The repaint call itself moved
+    renderChat → ConvView.replaceAll (the ConvView fold) — the GUARD is what's
+    pinned, not the retired callee name."""
     src = INIT_JS.read_text()
     m = re.search(r"function _ensureNewest\s*\(\)\s*\{([\s\S]*?)\n\}", src)
     assert m, "_ensureNewest not found"
     body = m.group(1)
     assert re.search(
-        r"_initialSwitchLoad[\s\S]{0,80}_needsLoad[\s\S]{0,80}messages\.length\s*===\s*0[\s\S]{0,80}renderChat\(c\)",
+        r"_initialSwitchLoad[\s\S]{0,80}_needsLoad[\s\S]{0,80}messages\.length\s*===\s*0[\s\S]{0,80}ConvView\.replaceAll\(c\.id\)",
         body,
-    ), "_ensureNewest must guard renderChat(c) against an in-flight first-open skeleton"
+    ), "_ensureNewest must guard the full repaint (ConvView.replaceAll) against an in-flight first-open skeleton"
 
 
 if __name__ == "__main__":

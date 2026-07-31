@@ -1,0 +1,527 @@
+"""lib/netpath.py — Adaptive direct-vs-proxy path selection.
+
+Answers one question per host the app talks to: **is the direct path or
+the HTTP-proxy path faster / more reliable right now?** — and pins the
+winner, per host, with no domain-specific rules anywhere.
+
+Three signal sources feed a per-host scorer:
+
+1. **Passive outcomes** — every real request routed through
+   :func:`lib.proxy.proxies_for` reports success/failure + latency via
+   :func:`report_outcome` (hooked in the LLM transports and
+   ``lib.http_client``). Real traffic is ground truth.
+2. **Active probing** — a daemon thread periodically fetches
+   ``scheme://host/`` over BOTH paths (lightweight: headers only, ~3s
+   timeout) so latency comparisons exist even when traffic is quiet and
+   so a healed path is discovered without waiting for a user-visible
+   failure.
+3. **Persistence** — learned state survives restarts via
+   ``data/config/netpath.json``.
+
+Decision rules (anti-flap by construction):
+
+- A path becomes *bad* after ``_FAIL_THRESHOLD`` consecutive failures;
+  a single success redeems it.
+- A bad current path is abandoned for the other path as soon as the
+  other is not known-bad.
+- Latency switches require the challenger to have ``_MIN_SAMPLES``
+  measurements and be ``_LAT_MARGIN`` (25%) faster — hysteresis so the
+  pin doesn't oscillate on jitter.
+- Both paths bad → undecided → fall back to the deployment default
+  (env proxy behaviour), which is the last hope anyway.
+
+Precedence in ``lib.proxy.proxies_for``: explicit user config (always-
+bypass hosts, registered no-proxy hosts, bypass-domain suffixes) wins
+over learned decisions; learned decisions win over the env default.
+
+Env knobs:
+  ``TOFU_NETPATH``          on/off master switch (default: on)
+  ``TOFU_NETPATH_INTERVAL`` probe round interval seconds (default: 180)
+  ``TOFU_NETPATH_TIMEOUT``  per-probe connect/read timeout (default: 3)
+"""
+
+from __future__ import annotations
+
+import ipaddress
+import json
+import os
+import random
+import threading
+import time
+from urllib.parse import urlparse
+
+from lib.config_dir import config_path
+from lib.log import get_logger
+
+logger = get_logger(__name__)
+
+__all__ = [
+    'note_url', 'decide', 'report_outcome', 'probe_host',
+    'start_prober', 'stop_prober', 'status_summary',
+    'reset_proxy_stats', 'reset_for_test',
+]
+
+# ── Tunables ─────────────────────────────────────────────────────
+_FAIL_THRESHOLD = 2        # consecutive failures before a path is "bad"
+_LAT_MARGIN = 0.75         # challenger must be ≤75% of incumbent's EWMA
+_MIN_SAMPLES = 2           # measurements required before latency switch
+_EWMA_ALPHA = 0.3          # latency smoothing factor
+_MAX_HOSTS = 64            # LRU cap on tracked hosts
+_HOST_TTL = 24 * 3600      # stop probing hosts not seen for this long
+_SAVE_THROTTLE = 30        # seconds between disk writes
+_MAX_LAT_MS = 30_000       # discard insane latency outliers
+
+try:
+    _PROBE_INTERVAL = float(os.environ.get('TOFU_NETPATH_INTERVAL', '180'))
+    if _PROBE_INTERVAL <= 0:
+        _PROBE_INTERVAL = 180.0
+except (ValueError, TypeError) as _e:
+    logger.debug('<module>: unparseable/unexpected type (%s)', _e)
+    _PROBE_INTERVAL = 180.0
+try:
+    _PROBE_TIMEOUT = float(os.environ.get('TOFU_NETPATH_TIMEOUT', '3'))
+    if _PROBE_TIMEOUT <= 0:
+        _PROBE_TIMEOUT = 3.0
+except (ValueError, TypeError) as _e:
+    logger.debug('<module>: unparseable/unexpected type (%s)', _e)
+    _PROBE_TIMEOUT = 3.0
+
+_STORE_PATH = config_path('netpath.json')
+_STORE_VERSION = 1
+
+
+def _enabled() -> bool:
+    return os.environ.get('TOFU_NETPATH', 'on').strip().lower() not in (
+        '0', 'off', 'false', 'no')
+
+
+# Hosts netpath must never track or probe: loopback-style names and ANY IP
+# literal (v4/v6). Self-hosted endpoints are commonly addressed by raw IP or
+# localhost; probing them over the corporate proxy is meaningless (the proxy
+# cannot reach them), and one jittery direct probe could pin them onto the
+# proxy path and black-hole the local model server.
+_EXEMPT_HOSTNAMES = frozenset({'localhost', 'localhost.localdomain'})
+
+
+def _is_ip_literal(host: str) -> bool:
+    """True when *host* is an IPv4/IPv6 literal rather than a DNS name."""
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except ValueError as _e:
+        logger.debug('is ip literal: unparseable (%s)', _e)
+        return False
+
+
+def _is_exempt_host(host: str) -> bool:
+    """True for hosts netpath must leave alone: localhost & IP literals."""
+    h = (host or '').lower()
+    return h in _EXEMPT_HOSTNAMES or _is_ip_literal(h)
+
+
+def _proxy_url() -> 'str | None':
+    """The proxy URL probes should use, straight from the environment."""
+    return (os.environ.get('https_proxy')
+            or os.environ.get('HTTPS_PROXY')
+            or os.environ.get('http_proxy')
+            or os.environ.get('HTTP_PROXY')
+            or None)
+
+
+def _new_path() -> dict:
+    return {
+        'ewma_ms': None,   # smoothed latency, None = never measured
+        'samples': 0,      # successful measurements
+        'fails': 0,        # CONSECUTIVE failures (reset by any success)
+        'last_ok': 0.0,
+        'last_fail': 0.0,
+    }
+
+
+def _new_state(host: str, sample_url: str) -> dict:
+    return {
+        'host': host,
+        'sample_url': sample_url,
+        'last_seen': time.time(),
+        'decision': None,        # 'direct' | 'proxy' | None (undecided)
+        'effective': None,       # path the last decide() actually resolved to
+        'decision_since': 0.0,
+        'paths': {'direct': _new_path(), 'proxy': _new_path()},
+    }
+
+
+_lock = threading.Lock()
+_states: 'dict[str, dict]' = {}
+_dirty = False
+_last_save = 0.0
+
+_prober_thread: 'threading.Thread | None' = None
+_prober_stop = threading.Event()
+
+
+# ═════════════════════════════════════════════════════════════
+#  Registration + decision (hot path — called per request)
+# ═════════════════════════════════════════════════════════════
+
+def note_url(url: str) -> None:
+    """Register *url*'s host as worth managing. Cheap and idempotent."""
+    if not _enabled():
+        return
+    try:
+        parsed = urlparse(url)
+        host = (parsed.hostname or '').lower()
+        if not host or _is_exempt_host(host):
+            return
+        origin = '%s://%s/' % (parsed.scheme or 'https',
+                               parsed.netloc.split('@')[-1])
+    except Exception as _e:
+        logger.debug('note url: failed (%s)', _e)
+        return
+    with _lock:
+        st = _states.get(host)
+        if st is None:
+            if len(_states) >= _MAX_HOSTS:
+                # LRU evict: drop the stalest host.
+                stale = min(_states, key=lambda h: _states[h]['last_seen'])
+                _states.pop(stale, None)
+            st = _new_state(host, origin)
+            _states[host] = st
+            logger.debug('[Netpath] Tracking host: %s', host)
+        st['last_seen'] = time.time()
+
+
+def decide(host: str) -> 'str | None':
+    """Return the pinned path for *host*: 'direct', 'proxy', or None.
+
+    None means "no learned preference — follow the deployment default".
+    Also records the *effective* path (decision or env default) so a later
+    :func:`report_outcome` can be attributed correctly.
+    """
+    if not _enabled():
+        return None
+    host = (host or '').lower()
+    if _is_exempt_host(host):
+        return None
+    with _lock:
+        st = _states.get(host)
+        if st is None:
+            return None
+        eff = st['decision']
+        if eff is None:
+            eff = 'proxy' if _proxy_url() else 'direct'
+        st['effective'] = eff
+        return st['decision']
+
+
+def _is_bad(path: dict) -> bool:
+    return path['fails'] >= _FAIL_THRESHOLD
+
+
+def _reevaluate(st: dict) -> None:
+    """Recompute st['decision'] from current path stats. Caller holds lock."""
+    paths = st['paths']
+    d, p = paths['direct'], paths['proxy']
+    have_proxy = _proxy_url() is not None
+    cur = st['decision']
+    new = cur
+
+    if _is_bad(d) and (not have_proxy or _is_bad(p)):
+        # Both paths bad → stop pinning anything; env default is the last hope.
+        new = None
+    elif cur is not None and _is_bad(paths[cur]):
+        other = 'proxy' if cur == 'direct' else 'direct'
+        if other == 'proxy' and not have_proxy:
+            new = None
+        elif not _is_bad(paths[other]):
+            new = other
+        else:
+            new = None
+    else:
+        # Latency contest among healthy, measured paths.
+        candidates = []
+        if d['ewma_ms'] is not None and not _is_bad(d):
+            candidates.append('direct')
+        if have_proxy and p['ewma_ms'] is not None and not _is_bad(p):
+            candidates.append('proxy')
+        if candidates:
+            best = min(candidates, key=lambda k: paths[k]['ewma_ms'])
+            if cur is None:
+                new = best
+            elif best != cur and paths[best]['samples'] >= _MIN_SAMPLES:
+                cur_lat = paths[cur]['ewma_ms']
+                if cur_lat is None or paths[best]['ewma_ms'] < cur_lat * _LAT_MARGIN:
+                    new = best
+
+    if new != cur:
+        st['decision'] = new
+        st['decision_since'] = time.time()
+        logger.info('[Netpath] %s: path %s → %s (direct=%s proxy=%s)',
+                    st['host'], cur or 'default', new or 'default',
+                    _fmt_path(d), _fmt_path(p))
+
+
+def _fmt_path(path: dict) -> str:
+    if path['ewma_ms'] is None and not path['fails']:
+        return 'unmeasured'
+    lat = '%.0fms' % path['ewma_ms'] if path['ewma_ms'] is not None else '?'
+    return '%s%s' % (lat, ' BAD' if _is_bad(path) else '')
+
+
+# ═════════════════════════════════════════════════════════════
+#  Outcome reporting (passive feed + prober feed)
+# ═════════════════════════════════════════════════════════════
+
+def report_outcome(url: str, ok: bool, latency_ms: 'float | None' = None,
+                   *, path: 'str | None' = None) -> None:
+    """Attribute a real (or probe) request outcome to a path.
+
+    ``path`` forces attribution ('direct'/'proxy') — used by the prober,
+    which chooses the path itself. Real traffic omits it and the outcome is
+    attributed to the effective path the request actually used.
+    Never raises — transports call this on their hot path.
+    """
+    if not _enabled():
+        return
+    global _dirty
+    try:
+        host = (urlparse(url).hostname or '').lower()
+    except Exception as _e:
+        logger.debug('report outcome: failed (%s)', _e)
+        return
+    if not host:
+        return
+    now = time.time()
+    with _lock:
+        st = _states.get(host)
+        if st is None:
+            return
+        path_name = path if path in ('direct', 'proxy') else st.get('effective')
+        if path_name not in ('direct', 'proxy'):
+            path_name = 'proxy' if _proxy_url() else 'direct'
+        path = st['paths'][path_name]
+        if ok:
+            path['fails'] = 0
+            path['last_ok'] = now
+            if latency_ms is not None and 0 < latency_ms <= _MAX_LAT_MS:
+                path['samples'] += 1
+                if path['ewma_ms'] is None:
+                    path['ewma_ms'] = float(latency_ms)
+                else:
+                    a = _EWMA_ALPHA
+                    path['ewma_ms'] = a * latency_ms + (1 - a) * path['ewma_ms']
+        else:
+            path['fails'] += 1
+            path['last_fail'] = now
+        _reevaluate(st)
+        _dirty = True
+    _maybe_save()
+
+
+# ═════════════════════════════════════════════════════════════
+#  Active probing
+# ═════════════════════════════════════════════════════════════
+
+def _probe_once(url: str, use_proxy: bool) -> 'tuple[bool, float | None]':
+    """Fetch *url* headers-only over one path. Any HTTP status = path works."""
+    import requests  # local import: keep module import light for non-server use
+    if use_proxy:
+        proxy = _proxy_url()
+        if not proxy:
+            return (False, None)
+        proxies = {'http': proxy, 'https': proxy}
+    else:
+        proxies = {'no_proxy': '*'}
+    t0 = time.monotonic()
+    try:
+        resp = requests.get(
+            url, timeout=(_PROBE_TIMEOUT, _PROBE_TIMEOUT),
+            proxies=proxies, stream=True, allow_redirects=False)
+        resp.close()
+        return (True, (time.monotonic() - t0) * 1000.0)
+    except Exception as _e:
+        logger.debug('probe once: failed (%s)', _e)
+        return (False, None)
+
+
+def probe_host(host: str) -> None:
+    """Probe both paths for one host and feed the scorer. Exposed for tests."""
+    host = (host or '').lower()
+    with _lock:
+        st = _states.get(host)
+        url = st['sample_url'] if st else None
+    if not url:
+        return
+    for use_proxy, name in ((False, 'direct'), (True, 'proxy')):
+        if use_proxy and not _proxy_url():
+            continue
+        ok, lat = _probe_once(url, use_proxy)
+        report_outcome(url, ok, lat, path=name)
+
+
+def _probe_round() -> None:
+    with _lock:
+        now = time.time()
+        hosts = [h for h, st in _states.items()
+                 if now - st['last_seen'] < _HOST_TTL]
+    for host in hosts:
+        if _prober_stop.is_set():
+            return
+        try:
+            probe_host(host)
+        except Exception as e:
+            logger.debug('[Netpath] probe failed for %s: %s', host, e)
+        # Small jitter between hosts so a round never bursts.
+        _prober_stop.wait(random.uniform(0.1, 0.4))
+    _save()
+
+
+def start_prober(interval: 'float | None' = None) -> bool:
+    """Start the background probe loop (idempotent). Returns True if running."""
+    global _prober_thread
+    if not _enabled():
+        logger.debug('[Netpath] Disabled via TOFU_NETPATH — prober not started')
+        return False
+    with _lock:
+        if _prober_thread is not None and _prober_thread.is_alive():
+            return True
+        _prober_stop.clear()
+        period = interval or _PROBE_INTERVAL
+        _prober_thread = threading.Thread(
+            target=_prober_loop, args=(period,),
+            name='netpath-prober', daemon=True)
+        _prober_thread.start()
+    logger.info('[Netpath] Prober started (interval %.0fs, timeout %.1fs)',
+                period, _PROBE_TIMEOUT)
+    return True
+
+
+def _prober_loop(period: float) -> None:
+    # First round soon after boot (paths are unknown — data is most valuable
+    # early), then settle into the regular cadence with ±20% jitter.
+    if _prober_stop.wait(10):
+        return
+    while not _prober_stop.is_set():
+        try:
+            _probe_round()
+        except Exception as e:
+            logger.debug('[Netpath] probe round failed: %s', e)
+        _prober_stop.wait(period * random.uniform(0.8, 1.2))
+
+
+def stop_prober() -> None:
+    """Stop the background probe loop (test helper / shutdown)."""
+    global _prober_thread
+    _prober_stop.set()
+    t = _prober_thread
+    if t is not None and t.is_alive():
+        t.join(timeout=5)
+    _prober_thread = None
+
+
+# ═════════════════════════════════════════════════════════════
+#  Persistence + status
+# ═════════════════════════════════════════════════════════════
+
+def _maybe_save() -> None:
+    global _last_save
+    now = time.time()
+    if now - _last_save >= _SAVE_THROTTLE:
+        _save()
+
+
+def _save() -> None:
+    global _dirty, _last_save
+    with _lock:
+        if not _dirty:
+            return
+        payload = {
+            'version': _STORE_VERSION,
+            'saved_at': time.time(),
+            'hosts': list(_states.values()),
+        }
+        _dirty = False
+        _last_save = time.time()
+    try:
+        os.makedirs(os.path.dirname(_STORE_PATH), exist_ok=True)
+        tmp = _STORE_PATH + '.tmp'
+        with open(tmp, 'w') as f:
+            json.dump(payload, f)
+        os.replace(tmp, _STORE_PATH)
+    except Exception as e:
+        logger.debug('[Netpath] save failed: %s', e)
+
+
+def _load() -> None:
+    global _dirty
+    try:
+        with open(_STORE_PATH) as f:
+            payload = json.load(f)
+        if payload.get('version') != _STORE_VERSION:
+            return
+        now = time.time()
+        with _lock:
+            for st in payload.get('hosts', []):
+                host = (st.get('host') or '').lower()
+                if not host or host in _states or _is_exempt_host(host):
+                    continue
+                # Restore only measurement data + decision; timestamps that
+                # drive TTL/LRU are refreshed so stale hosts age out.
+                fresh = _new_state(host, st.get('sample_url') or
+                                   'https://%s/' % host)
+                fresh['decision'] = st.get('decision')
+                fresh['last_seen'] = now
+                for name in ('direct', 'proxy'):
+                    src = (st.get('paths') or {}).get(name) or {}
+                    dst = fresh['paths'][name]
+                    dst['ewma_ms'] = src.get('ewma_ms')
+                    dst['samples'] = int(src.get('samples') or 0)
+                    dst['fails'] = int(src.get('fails') or 0)
+                _states[host] = fresh
+            _dirty = False
+        logger.info('[Netpath] Restored %d host(s) from disk', len(_states))
+    except FileNotFoundError as _e:
+        logger.debug('load: missing (%s)', _e)
+        pass
+    except Exception as e:
+        logger.debug('[Netpath] load failed: %s', e)
+
+
+def status_summary() -> dict:
+    """Compact per-host view for the Settings UI / diagnostics."""
+    with _lock:
+        out = {}
+        for host, st in _states.items():
+            out[host] = {
+                'decision': st['decision'] or 'default',
+                'direct_ms': _round(st['paths']['direct']['ewma_ms']),
+                'proxy_ms': _round(st['paths']['proxy']['ewma_ms']),
+                'direct_fails': st['paths']['direct']['fails'],
+                'proxy_fails': st['paths']['proxy']['fails'],
+            }
+        return {'enabled': _enabled(), 'hosts': out}
+
+
+def _round(v):
+    return None if v is None else round(float(v), 1)
+
+
+def reset_proxy_stats() -> None:
+    """Invalidate all proxy-path measurements (proxy address changed)."""
+    with _lock:
+        for st in _states.values():
+            st['paths']['proxy'] = _new_path()
+            if st['decision'] == 'proxy':
+                st['decision'] = None
+    logger.info('[Netpath] Proxy stats reset (proxy address changed)')
+
+
+def reset_for_test() -> None:
+    """Clear all learned state and stop the prober. Test-only."""
+    global _dirty
+    stop_prober()
+    with _lock:
+        _states.clear()
+        _dirty = False
+
+
+_load()

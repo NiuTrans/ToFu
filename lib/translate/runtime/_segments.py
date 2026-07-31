@@ -86,7 +86,11 @@ def _build_segment_translation_map(conv_id, msg_id, msg_idx, system_prompt,
     Per-segment failures are logged and skipped (the whole-message
     ``translatedContent`` commit is unaffected — this is pure enrichment).
     """
-    segs = _read_message_segments(conv_id, msg_id, msg_idx)
+    # Resolve through the package facade so tests that monkeypatch
+    # ``lib.translate.runtime._read_message_segments`` (as the pre-split single
+    # module allowed) are honoured byte-identically.
+    import lib.translate.runtime as _rt_pkg
+    segs = _rt_pkg._read_message_segments(conv_id, msg_id, msg_idx)
     if not segs:
         return None
     seg_map = _translate_segments_to_map(segs, system_prompt, source, target,

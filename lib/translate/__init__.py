@@ -40,7 +40,7 @@ from .notranslate import (
 from .dedup import _dedup_repetition_loop, _dedup_inline_loop
 
 # Engine (one-chunk LLM/MT dispatcher + retry loop, + chunked free-text wrapper)
-from .engine import _translate_one_chunk, _translate_freetext
+from .engine import TranslationContentRefused, _translate_one_chunk, _translate_freetext
 
 # Status formatter (used by routes/chat.py auto-translate flow)
 from .status import _format_status_message
@@ -97,7 +97,7 @@ __all__ = [
     # dedup
     '_dedup_repetition_loop', '_dedup_inline_loop',
     # engine
-    '_translate_one_chunk', '_translate_freetext',
+    '_translate_one_chunk', '_translate_freetext', 'TranslationContentRefused',
     # status
     '_format_status_message',
     # runtime

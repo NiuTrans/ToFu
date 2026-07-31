@@ -77,3 +77,83 @@ class TestInternalErrorClassification:
         # A bare RuntimeError with no recognised substring is NOT a leaf
         # programming-defect builtin → stays generic (dispatch owns it).
         assert _classify_exception(RuntimeError('something opaque upstream')) == 'generic'
+
+
+
+@pytest.mark.unit
+class TestVendorOutageClassification:
+    """Regression: an upstream-VENDOR outage must surface as
+    ``upstream_error`` (warning, retryable, 'not your keys') — never as
+    per-key ``ratelimit`` / ``permission`` or opaque keys-first ``generic``.
+
+    Root cause (2026-07-26, logs/error.log): the toio gateway wraps vendor
+    transients in 4xx bodies (``ext.error.source=UPSTREAM_VENDOR``). The
+    raise layer (lib/llm_errors.py) already re-raises them as
+    ``RateLimitError(is_gateway=True)`` / ``RetryableAPIError`` so dispatch
+    rotates slots — but the DISPLAY classifier mapped a gateway-RL to
+    ``ratelimit`` (Settings→Keys hint) and a 5xx-after-retries fell to the
+    string heuristics' ``generic`` — both sent the user chasing keys for a
+    vendor-side outage. ``BadRequestError`` (deterministic HTTP-400 payload
+    rejection) likewise fell through to ``generic``'s keys-first hint.
+    """
+
+    def test_gateway_ratelimit_is_upstream_error_not_ratelimit(self):
+        from lib.error_envelope._classify import _classify_exception
+        from lib.llm import RateLimitError
+        exc = RateLimitError('SSE error: {"error":{"message":"请求失败，请稍后再尝试"}}',
+                             is_gateway=True, reason='HTTP 403: …')
+        assert _classify_exception(exc) == 'upstream_error'
+
+    def test_real_429_and_auth_not_swallowed_by_gateway_branch(self):
+        """NEUTER: per-key 429 / quota / real auth failures keep their kinds."""
+        from lib.error_envelope._classify import _classify_exception
+        from lib.llm import PermissionError_, RateLimitError
+        assert _classify_exception(RateLimitError('HTTP 429 too many requests')) == 'ratelimit'
+        assert _classify_exception(RateLimitError('insufficient_quota', is_quota=True)) == 'quota'
+        assert _classify_exception(PermissionError_('HTTP 403 invalid api key')) == 'permission'
+
+    def test_retryable_api_error_is_upstream_error(self):
+        from lib.error_envelope._classify import _classify_exception
+        from lib.llm import RetryableAPIError
+        assert _classify_exception(
+            RetryableAPIError('SSE error: gateway exploded', status_code=503)) == 'upstream_error'
+
+    def test_bad_request_has_own_kind(self):
+        from lib.error_envelope._classify import _classify_exception
+        from lib.llm import BadRequestError
+        assert _classify_exception(
+            BadRequestError('API HTTP 400: invalid_request_error: messages.0.content')) == 'bad_request'
+
+    def test_upstream_error_envelope_retryable_no_keys_misdirection(self):
+        from lib.error_envelope import from_exception
+        from lib.llm import RateLimitError
+        env = from_exception(
+            RateLimitError('SSE error: …', is_gateway=True, reason='HTTP 502: …'),
+            model='yuju-claude-opus-5-evaDaily', context='', source='llm-stream')
+        assert env['kind'] == 'upstream_error'
+        assert env['severity'] == 'warning'
+        assert env['retryable'] is True
+        assert 'Keys / Providers' not in env['hint']
+        assert '稍后重试' in env['hint']
+
+    def test_bad_request_envelope_explicitly_not_keys(self):
+        from lib.error_envelope import from_exception
+        from lib.llm import BadRequestError
+        env = from_exception(BadRequestError('API HTTP 400: invalid payload'),
+                             model='kimi-k3', context='', source='llm-stream')
+        assert env['kind'] == 'bad_request'
+        assert env['severity'] == 'error'
+        assert env['retryable'] is False
+        assert '这不是 Key / 配额 / 429 问题' in env['hint']
+
+    def test_generic_hint_detail_first_not_keys_first(self):
+        """The generic kind's hint must open with 'expand the error detail /
+        check logs', offering Settings→Keys only as a conditional last
+        resort — the old keys-first phrasing manufactured quota chases."""
+        from lib.error_envelope import from_exception
+        env = from_exception(RuntimeError('something opaque upstream'),
+                             model='kimi-k3', context='', source='llm-stream')
+        assert env['kind'] == 'generic'
+        assert '展开下方错误详情' in env['hint']
+        # Keys advice, when present, must come AFTER the logs guidance.
+        assert env['hint'].index('logs/error.log') < env['hint'].index('Keys / Providers')

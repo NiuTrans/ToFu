@@ -39,6 +39,12 @@ def _images_dir() -> str:
 def _resolve_source_image(image_ref: str) -> dict | None:
     """Resolve an image reference (URL or local path) to ``{image_b64, mime_type}``.
 
+    Thin wrapper over the centralized :func:`lib.attachments.resolve_attachment`
+    (which owns the disk/DB/URL/data-URI resolution for every uploaded-file
+    kind). Kept as the image-gen edit path's entry point — it narrows the
+    resolver's richer result to the ``{image_b64, mime_type}`` shape this path
+    has always returned.
+
     Handles:
     - Local ``/api/images/xxx.png`` paths → read from disk
     - Remote ``https://...`` URLs → download
@@ -47,82 +53,13 @@ def _resolve_source_image(image_ref: str) -> dict | None:
     Returns:
         dict ``{image_b64, mime_type}`` on success, None on failure.
     """
-    import base64 as _b64
-
-    from lib.http_client import http_get
-
     if not image_ref:
         return None
-
-    # ── Data URI ──
-    if image_ref.startswith('data:'):
-        try:
-            header, b64_part = image_ref.split(',', 1)
-            mime_type = header.split(':')[1].split(';')[0]
-            return {'image_b64': b64_part, 'mime_type': mime_type}
-        except (ValueError, IndexError) as e:
-            logger.warning('[Tool:generate_image] Failed to parse data URI: %s', e)
-            return None
-
-    # ── Local file: /api/images/xxx.png → read from disk ──
-    if image_ref.startswith('/api/images/'):
-        filename = os.path.basename(image_ref)
-        filepath = os.path.join(_images_dir(), filename)
-        try:
-            with open(filepath, 'rb') as f:
-                raw = f.read()
-            image_b64 = _b64.b64encode(raw).decode('ascii')
-            mime_type = 'image/png'
-            if filename.endswith(('.jpg', '.jpeg')):
-                mime_type = 'image/jpeg'
-            elif filename.endswith('.webp'):
-                mime_type = 'image/webp'
-            return {'image_b64': image_b64, 'mime_type': mime_type}
-        except Exception as e:
-            logger.warning('[Tool:generate_image] Failed to read local image %s: %s', filepath, e)
-            return None
-
-    # ── Remote URL ──
-    if image_ref.startswith(('http://', 'https://')):
-        try:
-            resp = http_get(image_ref, timeout=30)
-            resp.raise_for_status()
-            image_b64 = _b64.b64encode(resp.content).decode('ascii')
-            ct = resp.headers.get('Content-Type', 'image/png')
-            mime_type = ct.split(';')[0].strip() if ct.startswith('image/') else 'image/png'
-            return {'image_b64': image_b64, 'mime_type': mime_type}
-        except Exception as e:
-            logger.warning('[Tool:generate_image] Failed to download image %.80s: %s', image_ref[:80], e)
-            return None
-
-    # ── Local filesystem path (absolute or relative to app root) ──
-    filepath = image_ref
-    if not os.path.isabs(filepath):
-        filepath = os.path.join(_APP_ROOT, filepath)
-    # Also handle absolute paths that point inside the app root (e.g. model passes full server path)
-    if os.path.isfile(filepath):
-        try:
-            _EXT_MIME = {
-                '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
-                '.webp': 'image/webp', '.gif': 'image/gif', '.bmp': 'image/bmp',
-                '.svg': 'image/svg+xml',
-            }
-            ext = os.path.splitext(filepath)[1].lower()
-            mime_type = _EXT_MIME.get(ext, 'image/png')
-            with open(filepath, 'rb') as f:
-                raw = f.read()
-            image_b64 = _b64.b64encode(raw).decode('ascii')
-            logger.info('[Tool:generate_image] Resolved local file path: %.80s (%d KB)',
-                        image_ref[:80], len(raw) // 1024)
-            return {'image_b64': image_b64, 'mime_type': mime_type}
-        except Exception as e:
-            logger.warning('[Tool:generate_image] Failed to read local file %.80s: %s',
-                           image_ref[:80], e)
-            return None
-
-    logger.warning('[Tool:generate_image] Unrecognized source_image format or file not found: %.80s',
-                   image_ref[:80])
-    return None
+    from lib.attachments import resolve_attachment
+    resolved = resolve_attachment(image_ref)
+    if not resolved or resolved.get('kind') != 'image':
+        return None
+    return {'image_b64': resolved['image_b64'], 'mime_type': resolved['mime_type']}
 
 
 def _extract_image_gen_history(task, messages=None):

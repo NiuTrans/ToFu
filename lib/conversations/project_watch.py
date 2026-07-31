@@ -7,20 +7,37 @@ goals — that the brain ADDRESSES on a recurring basis, keeping an append-only
 trail of its responses per item so the human can see how the answer to a
 concern DRIFTS over time.
 
-Owner-locked decisions (2026-07-08):
-  1. **Human-facing-only, with ONE explicit bridge.** A watch item is authored
-     by the HUMAN and is NEVER injected into sibling agent prompts (same
-     source-grep guard as the status memory). The ONLY way an item reaches
-     agents is ``promote_watch_item`` → a charter commit (``commit_charter``),
-     because the charter is already the ambient-to-agents surface. This is a
-     HUMAN action on a HUMAN-authored item (the human decides to promote their
-     own watch item), distinct from an agent self-committing a decision. No
-     auto-steering, no new inter-conv write, no fan-out.
+Owner-locked decisions (2026-07-08; goals-inject-directly 2026-07-30):
+  1. **A GOAL is live because it exists — it never travels through the
+     charter.** ``kind=goal`` items render as their own ``[PROJECT GOALS]``
+     prompt block (see :func:`render_goals_injection_block`), read straight
+     from this lane. ``concern`` / ``question`` stay human-facing-only and are
+     NEVER injected; their one bridge to agents is still
+     ``promote_watch_item`` → ``commit_charter(add_decision=…)``.
+
+     This replaces the 2026-07-30-morning design in which a goal was COPIED
+     into the charter's north-star ``content`` column. That copy is what forced
+     every mechanism now deleted: two copies of one sentence need "which side
+     moved?" detection, a three-state badge, a replacement-preview card, and a
+     version gate. One copy needs none of them. The owner's framing: *goals are
+     goals; they should work without being in the charter.* A goal's state
+     model is therefore the whole of: it exists, and it is not resolved.
+
+     **Single-goal-ness is NOT enforced and deliberately so.** Several goals is
+     a legitimate thing for a project to have; they all inject. The charter's
+     ``content`` column remains the human's separate north-star statement.
   2. **Append-only response trail per item** (bounded), not latest-only — the
      drift is the signal.
   3. **Cadence = on-tab-open + event-driven now** (reuse the staleness gate so a
      quiescent project costs nothing). The closed-panel scheduler cadence is a
      deliberately-deferred follow-up.
+  4. **The promotion verdict is COMPUTED, never stored** — and applies ONLY to
+     concern/question now. The ``promoted`` column is a one-shot audit marker
+     that cannot answer "is this reaching agents right now": measured on the
+     live project, ``promoted=1`` while ``read_charter()`` reported
+     ``exists=False``, i.e. the badge asserted something already untrue.
+     :func:`promotion_state` recomputes it against the LIVE charter per read.
+     A goal has no promotion state at all — it is injected or it is resolved.
 
 All functions key STRICTLY on ``project_path`` / ``item_id`` — never a
 process-global. Best-effort throughout; the address generator never raises.
@@ -41,14 +58,28 @@ logger = get_logger(__name__)
 
 # Keep at most this many responses per item (bounded trail; pruned on insert).
 _RESPONSES_KEEP = 100
-# Soft cap on a human-authored item's text (keeps a row cheap; a watch item is
-# a prompt, not a document).
-_ITEM_TEXT_MAX = 2000
+# Soft cap on a human-authored item's text. A goal is injected into every
+# sibling's prompt verbatim, so this is also the per-goal prompt-weight ceiling.
+# NOT tied to project_charter._CONTENT_MAX_CHARS any more: a goal is no longer
+# copied into that column, so there is no "adopt the other side" direction that
+# could truncate, and the two texts are now genuinely independent settings.
+_ITEM_TEXT_MAX = 8000
 # Bounded response length.
 _RESPONSE_MAX_CHARS = 2000
 
+# Total budget for the [PROJECT GOALS] block. Goals ride EVERY turn of EVERY
+# sibling conversation, so an unbounded lane would let one long paste tax the
+# whole project forever. Oldest-first truncation is deliberate: the block states
+# plainly when it elided goals rather than silently shipping a subset.
+_GOALS_BLOCK_MAX_CHARS = 4000
+
 VALID_KINDS = ('concern', 'question', 'goal')
 VALID_STATUSES = ('open', 'resolved')
+
+# The COMPUTED promotion states for concern/question (decision 4). Never
+# persisted. A GOAL never has one of these — it is injected, or it is resolved.
+PROMOTION_NONE = 'none'      # no promotion on record → offer "add to charter"
+PROMOTION_ACTIVE = 'active'  # item text IS a live committed decision
 
 # Serializes the read-max-then-insert of the per-item monotonic seq.
 _response_lock = threading.Lock()
@@ -116,7 +147,9 @@ def add_watch_item(project_path: str, kind: str, text: str, *,
               kind=kind)
     return {'ok': True, 'item': {
         'item_id': item_id, 'kind': kind, 'text': text, 'status': 'open',
-        'promoted': False, 'created_at': ts, 'updated_at': ts, 'responses': []}}
+        'promotedAudit': False, 'promotionState': PROMOTION_NONE,
+        'divergedSide': '', 'injected': kind == 'goal',
+        'created_at': ts, 'updated_at': ts, 'responses': []}}
 
 
 def _get_item_row(db, item_id: str):
@@ -160,7 +193,16 @@ def edit_watch_item(item_id: str, *, text: str | None = None,
 
 
 def set_watch_status(item_id: str, status: str) -> dict:
-    """Mark an item open|resolved. Returns ``{'ok', 'error'?}``."""
+    """Mark an item open|resolved. Returns ``{'ok', 'error'?}``.
+
+    For a GOAL this is the lever that withdraws it from every sibling's prompt:
+    :func:`render_goals_injection_block` ships open goals only. That is the
+    whole of a goal's lifecycle — no separate "un-promote" step to forget.
+
+    Deliberately does NOT touch the charter. The charter's own north-star
+    ``content`` is a human-owned statement edited in the Charter panel; a
+    bookkeeping action on a watch card must never rewrite shared intent as a
+    side effect."""
     status = (status or '').strip().lower()
     if not item_id:
         return {'ok': False, 'error': 'no item'}
@@ -182,7 +224,12 @@ def set_watch_status(item_id: str, status: str) -> dict:
 
 
 def delete_watch_item(item_id: str) -> dict:
-    """Delete a watch item AND its response trail. Returns ``{'ok', 'error'?}``."""
+    """Delete a watch item AND its response trail. Returns ``{'ok', 'error'?}``.
+
+    Deleting a GOAL card removes it from every sibling's prompt on the next
+    turn — the card IS the goal, so there is no orphaned copy left behind
+    anywhere. Deliberately does NOT touch the charter: the charter's north-star
+    ``content`` is separately human-owned and is edited in the Charter panel."""
     if not item_id:
         return {'ok': False, 'error': 'no item'}
     try:
@@ -220,14 +267,141 @@ def _response_trail(db, item_id: str, limit: int = 20) -> list[dict]:
     return out
 
 
+# ══════════════════════════════════════════════════════════════════════
+#  The COMPUTED promotion verdict — concern/question ONLY (decision 4)
+# ══════════════════════════════════════════════════════════════════════
+
+def _norm(text: str) -> str:
+    """Normalize text for promotion-equality comparison.
+
+    Strips outer whitespace and collapses every internal whitespace run
+    (including newlines) to one space, so a reflowed paragraph still counts as
+    the same item. Case is deliberately PRESERVED — capitalization carries
+    meaning, and folding it would call two genuinely different texts equal.
+    """
+    return ' '.join((text or '').split())
+
+
+def promotion_state(item: dict, charter: dict) -> dict:
+    """Compute — never read — whether a concern/question is in the charter.
+
+    The stored ``promoted`` boolean cannot answer this: it records that a
+    promotion once happened, not that its effect survives. The charter can be
+    deleted or the decision FIFO-evicted, and the boolean still reads 1 while
+    nothing reaches the model. (Measured on the live project: promoted=1,
+    read_charter() exists=False, injection block 0 bytes.)
+
+    A ``goal`` ALWAYS returns ``none``: goals do not go through the charter at
+    all (decision 1), so "is it promoted" is not a question about them. Their
+    prompt presence is decided by :func:`render_goals_injection_block`, and the
+    UI renders that as an injected/not-injected fact rather than a promotion.
+
+    Returns ``{state, divergedSide}``. ``divergedSide`` is retained as an
+    always-empty key so a stale frontend reading it gets a falsy value instead
+    of ``undefined``. Pure; never raises.
+    """
+    kind = (item or {}).get('kind') or 'concern'
+    if kind == 'goal':
+        return {'state': PROMOTION_NONE, 'divergedSide': ''}
+    item_text = (item or {}).get('text') or ''
+    charter = charter or {}
+    live_norms = []
+    for d in (charter.get('decisions') or []):
+        txt = (d.get('text') if isinstance(d, dict) else str(d)) or ''
+        if _norm(txt):
+            live_norms.append(_norm(txt))
+    norm_item = _norm(item_text)
+    # The bridge prefixes the committed text ("[Concern — promoted by owner] …"),
+    # so containment — not equality — is the right test here.
+    if norm_item and any(norm_item in live for live in live_norms):
+        return {'state': PROMOTION_ACTIVE, 'divergedSide': ''}
+    return {'state': PROMOTION_NONE, 'divergedSide': ''}
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  The [PROJECT GOALS] prompt block — the ONE way a goal reaches agents
+# ══════════════════════════════════════════════════════════════════════
+
+def render_goals_injection_block(project_path: str) -> str:
+    """Render this project's OPEN goals for per-turn prompt injection.
+
+    This is the whole of "a goal takes effect": the human writes a goal in
+    Status & Focus and it ships in every sibling conversation's prompt. No
+    promotion step, no charter copy, no version gate — decision 1.
+
+    Scope rules, each of which is a behaviour the human can predict:
+      * ``kind='goal'`` ONLY. Concerns and questions are things the human is
+        TRACKING, not intent they are declaring; injecting a worry as if it were
+        direction would steer the project on an unresolved question.
+      * ``status='open'`` ONLY, so resolving a goal withdraws it from prompts —
+        that is the one lever that stops it being injected, and it is the same
+        lever the human already uses for the recurring cadence.
+      * The brain's synthesized RESPONSES are deliberately excluded. They are
+        the brain talking to the human about progress; feeding them back to
+        agents would turn one summarizer's opinion into project direction.
+
+    Returns '' when the project has no open goals, so an empty lane adds ZERO
+    prompt weight (same contract as the charter block). Never raises.
+    """
+    from lib.conversations.project_feed import normalize_project_path
+    project_path = normalize_project_path(project_path)
+    if not project_path:
+        return ''
+    try:
+        db = get_thread_db(DOMAIN_CHAT)
+        rows = db.execute(
+            "SELECT text FROM project_watch_items "
+            "WHERE project_path=? AND kind='goal' AND status='open' "
+            "ORDER BY created_at ASC", (project_path,)).fetchall()
+    except Exception as e:
+        logger.warning('[Watch] goals block read failed proj=%.40r: %s',
+                       project_path, e)
+        return ''
+    texts = [(r['text'] or '').strip() for r in rows]
+    texts = [t for t in texts if t]
+    if not texts:
+        return ''
+    header = (
+        '[PROJECT GOALS] — what the human owner wants this project to achieve. '
+        'They set these directly; treat them as standing intent that outranks '
+        'local convenience, and say so when a request conflicts with one.')
+    body, elided = [], 0
+    used = 0
+    for t in texts:
+        entry = f'  • {t}'
+        if used + len(entry) > _GOALS_BLOCK_MAX_CHARS and body:
+            elided = len(texts) - len(body)
+            break
+        body.append(entry)
+        used += len(entry)
+    lines = [header, ''] + body
+    if elided:
+        lines.append(f'  … and {elided} more goal(s) not shown (block is '
+                     f'capped at {_GOALS_BLOCK_MAX_CHARS} chars).')
+    return '\n'.join(lines)
+
+
 def _row_to_item(db, row, *, with_responses: bool = True,
-                 resp_limit: int = 20) -> dict:
+                 resp_limit: int = 20, charter: dict | None = None) -> dict:
+    kind = row['kind']
     item = {
-        'item_id': row['item_id'], 'kind': row['kind'], 'text': row['text'] or '',
-        'status': row['status'] or 'open', 'promoted': bool(row['promoted']),
+        'item_id': row['item_id'], 'kind': kind, 'text': row['text'] or '',
+        'status': row['status'] or 'open',
+        # AUDIT ONLY — never render this. `promotionState` below is the live
+        # verdict; see promotion_state. Kept under a renamed key so a stale
+        # consumer that blindly renders a truthy flag fails loudly on a missing
+        # key instead of silently resurrecting the lying badge.
+        'promotedAudit': bool(row['promoted']),
         'created_at': int(row['created_at'] or 0),
         'updated_at': int(row['updated_at'] or 0),
     }
+    # A goal's prompt presence is a FACT about this lane, not a promotion:
+    # open ⇒ it is in every sibling's prompt (render_goals_injection_block).
+    # Computed here so the badge cannot drift from the injector's own rule.
+    item['injected'] = bool(kind == 'goal' and item['status'] == 'open')
+    verdict = promotion_state(item, charter or {})
+    item['promotionState'] = verdict['state']
+    item['divergedSide'] = verdict['divergedSide']
     if with_responses:
         item['responses'] = _response_trail(db, row['item_id'], limit=resp_limit)
     return item
@@ -236,11 +410,30 @@ def _row_to_item(db, row, *, with_responses: bool = True,
 def list_watch_items(project_path: str, *, include_resolved: bool = True,
                      resp_limit: int = 20) -> dict:
     """List watch items for a project (newest-updated-first) with their response
-    trails. Returns ``{'items': [...]}``; empty on no project / error."""
+    trails, each goal's ``injected`` fact and each concern/question's LIVE
+    promotion verdict.
+
+    The charter is read ONCE here and threaded into every row so the whole list
+    is judged against one snapshot. Returns ``{'items': [...],
+    'charterVersion': int}``. ``charterContent`` is deliberately NO LONGER
+    returned: it existed only to render the goal replacement preview, and goals
+    no longer touch the charter — shipping it would invite a new consumer to
+    rebuild exactly the coupling this design removes. Empty on no project /
+    error."""
     from lib.conversations.project_feed import normalize_project_path
     project_path = normalize_project_path(project_path)
     if not project_path:
-        return {'items': []}
+        return {'items': [], 'charterVersion': 0}
+    charter = {}
+    try:
+        from lib.conversations.project_charter import read_charter
+        charter = read_charter(project_path)
+    except Exception as e:
+        # Degrade to "no charter": concern/question then read as not-promoted
+        # rather than falsely claiming to be in it. Goals are unaffected —
+        # their injected fact does not consult the charter at all.
+        logger.warning('[Watch] charter read failed proj=%.40r: %s',
+                       project_path, e)
     try:
         db = get_thread_db(DOMAIN_CHAT)
         sql = ('SELECT item_id, project_path, kind, text, status, promoted, '
@@ -253,8 +446,10 @@ def list_watch_items(project_path: str, *, include_resolved: bool = True,
         rows = db.execute(sql, tuple(params)).fetchall()
     except Exception as e:
         logger.warning('[Watch] list failed proj=%.40r: %s', project_path, e)
-        return {'items': []}
-    return {'items': [_row_to_item(db, r, resp_limit=resp_limit) for r in rows]}
+        return {'items': [], 'charterVersion': 0}
+    return {'items': [_row_to_item(db, r, resp_limit=resp_limit, charter=charter)
+                      for r in rows],
+            'charterVersion': int(charter.get('version') or 0)}
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -420,16 +615,43 @@ def _address_open_items_blocking(project_path: str, trigger: str) -> None:
 
 
 # ══════════════════════════════════════════════════════════════════════
-#  Promote-to-charter — the ONE explicit bridge to agent awareness
+#  Promote-to-charter — concern/question ONLY (a goal never travels here)
 # ══════════════════════════════════════════════════════════════════════
+
+def _goal_summary(text: str) -> str:
+    """One-line summary for a committed decision (its first line, bounded).
+
+    ``commit_charter`` renders ONLY this line in the per-turn injection block
+    (via ``_decision_headline``), so omitting it — as this bridge used to — left
+    every promoted concern/question showing as a first line clipped mid-sentence
+    by the generic fallback. The charter owns the ceiling; we import it rather
+    than re-hardcoding 240.
+    """
+    from lib.conversations.project_charter import _SUMMARY_MAX_CHARS
+    first = (text or '').strip().split('\n', 1)[0].strip()
+    if len(first) > _SUMMARY_MAX_CHARS:
+        first = first[:_SUMMARY_MAX_CHARS].rstrip() + '…'
+    return first
+
 
 def promote_watch_item(item_id: str, *, updated_by_conv: str = '',
                        expected_version: int | None = None) -> dict:
-    """Bridge a watch item into the charter as a committed decision — the ONLY
-    path by which a watch item reaches sibling agents. Routes strictly through
-    ``commit_charter`` (no new write path, no fan-out) as a HUMAN action on a
-    HUMAN-authored item. Marks the item ``promoted``. Returns ``{'ok',
-    'version'?, 'error'?}``.
+    """Bridge a CONCERN or QUESTION into the charter as a committed decision —
+    the only path by which one of those reaches sibling agents. Routes strictly
+    through ``commit_charter(add_decision=…)`` (no new write path, no fan-out)
+    as a HUMAN action on a HUMAN-authored item. Appends commute, so
+    ``expected_version`` is advisory here.
+
+    **A ``goal`` is REFUSED** (``error='goal_not_promotable'``). Goals reach
+    agents by existing — :func:`render_goals_injection_block` injects every open
+    one — so there is nothing to promote, and copying a goal into the charter is
+    exactly the duplication this design removed (decision 1). Refusing loudly
+    rather than silently succeeding matters: a caller that still asks for this
+    is running against the old contract and must be told, not quietly no-op'd
+    into thinking it set the north star. Editing the charter's own north-star
+    ``content`` is a HUMAN action in the Charter panel.
+
+    Returns ``{'ok', 'version'?, 'error'?}``.
     """
     if not item_id:
         return {'ok': False, 'error': 'no item'}
@@ -443,14 +665,21 @@ def promote_watch_item(item_id: str, *, updated_by_conv: str = '',
     if not row:
         return {'ok': False, 'error': 'not found'}
     project_path = row['project_path']
-    label = {'goal': 'Goal', 'concern': 'Concern', 'question': 'Question'}.get(
-        row['kind'], 'Watch item')
-    decision = f'[{label} — promoted by owner] {row["text"]}'
-    # The bridge: a charter commit invoked by a HUMAN promoting their own
-    # watch item. NOTHING here writes into the agent prompt path directly — the
-    # charter is the ambient-to-agents surface.
+    kind = row['kind'] or 'concern'
+    item_text = row['text'] or ''
+
+    if kind == 'goal':
+        logger.info('[Watch] promote refused for goal item=%s — goals inject '
+                    'directly and never touch the charter', item_id)
+        return {'ok': False, 'error': 'goal_not_promotable'}
+
     from lib.conversations.project_charter import commit_charter
-    res = commit_charter(project_path, add_decision=decision,
+    label = {'concern': 'Concern', 'question': 'Question'}.get(
+        kind, 'Watch item')
+    promoted_text = f'[{label} — promoted by owner] {item_text}'
+    res = commit_charter(project_path, add_decision=promoted_text,
+                         decision_kind='invariant',
+                         summary=_goal_summary(item_text),
                          updated_by_conv=updated_by_conv or '',
                          expected_version=expected_version)
     if not res.get('ok'):
@@ -462,13 +691,15 @@ def promote_watch_item(item_id: str, *, updated_by_conv: str = '',
     except Exception as e:
         logger.debug('[Watch] promoted-flag update skipped item=%s: %s', item_id, e)
     audit_log('watch_item_promoted', project_path=project_path, item_id=item_id,
-              charter_version=res.get('version'))
+              kind=kind, charter_version=res.get('version'))
     return {'ok': True, 'version': res.get('version')}
 
 
 __all__ = [
     'add_watch_item', 'edit_watch_item', 'set_watch_status', 'delete_watch_item',
     'list_watch_items', 'generate_item_response', 'address_watch_item',
-    'address_open_items', 'promote_watch_item', 'VALID_KINDS', 'VALID_STATUSES',
+    'address_open_items', 'promote_watch_item', 'promotion_state',
+    'render_goals_injection_block',
+    'VALID_KINDS', 'VALID_STATUSES', 'PROMOTION_NONE', 'PROMOTION_ACTIVE',
     '_RESPONSES_KEEP',
 ]

@@ -2,7 +2,7 @@
    skills_install.js — skill-package (.zip) drag/drop + upload + toast
    Extracted from skills.js (2026-07). The install-transport layer of the
    Skills tab: _skillsAttachDropZone (OS file drag/drop) + _skillsInstallFromInput
-   + _skillsUploadZip (Api.memory.install) + _openSkillsStoreFromMemory +
+   + _skillsUploadZip (Api.skills.install) + _openSkillsStoreFromMemory +
    _skillsToast. Plain window-scope concatenation (NOT an IIFE) —
    _skillsAttachDropZone is called at runtime from _populateSkillsTab; the OS
    drag/drop plumbing is now the shared core/zip_drop_zone.js helper, and the
@@ -40,7 +40,7 @@ async function _skillsUploadZip(file) {
   fd.append('file', file);
   fd.append('scope', 'project');
   try {
-    var r = await Api.memory.install(fd);
+    var r = await Api.skills.install(fd);
     var d = (r ? await r.json().catch(function () { return {}; }) : {});
     if (!r || !r.ok) {
       _skillsToast(t('skills.installFailed', { err: (d.error || (r && r.statusText) || t('skills.noResponse')) }), 'error');

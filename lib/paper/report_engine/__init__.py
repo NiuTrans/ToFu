@@ -46,11 +46,18 @@ from lib.paper.images import (
     _is_placeholder_title,
     _lookup_paper_title,
 )
-from lib.paper.prompts import _MAX_REPORT_TOOL_ROUNDS, _REPORT_TOOLS
+from lib.paper.prompts import (
+    _FULL_REPORT_TOOLS,
+    _MAX_REPORT_TOOL_ROUNDS,
+    _REPORT_TOOLS,
+)
 from lib.paper.report_runtime import _append_report_event, _cleanup_stale_report_tasks
 from lib.paper.tools import (
     _execute_report_tool,
+    cap_tool_result,
     display_query_for,
+    make_paper_exec_shim,
+    paper_effective_tool_name,
     parse_and_repair_tool_args,
 )
 
@@ -77,6 +84,11 @@ def _run_report_task(task, messages, images):
       - {type: 'enriched',   text}             — post-stream image injection
       - {type: 'done',       report, paperHash}
       - {type: 'error',      error}
+
+    thinking / delta / delta_reset / tool_start / tool_done all carry
+    ``llmRound`` (the 0-based dispatch round that produced them) so the
+    frontend can fold the ordered event stream into a chat-shaped segment
+    timeline (thinking adjacent to the tool calls of the same round).
     """
     task['status'] = 'running'
     _append_report_event(task, {'type': 'status', 'status': 'running'})
@@ -127,6 +139,11 @@ def _run_report_task(task, messages, images):
 
     abort_signal = AbortSignal.from_event(abort_event)
 
+    # Shim for the SHARED dispatch (full tool set): one per run, reused across
+    # rounds so per-run state (e.g. the todo checklist) survives between calls.
+    _exec_shim = make_paper_exec_shim(task_id=task['task_id'],
+                                      abort=abort_signal.is_set)
+
     # Per-round content buffer. Tool-calling models often emit a full interim
     # DRAFT of the report in a round that ALSO issues a tool call, then rewrite
     # the whole report from scratch in the final (no-tool-call) round.
@@ -153,10 +170,12 @@ def _run_report_task(task, messages, images):
             _round['content'] += text
             full_content += text
             task['full_text'] = full_content
-            _append_report_event(task, {'type': 'delta', 'delta': text})
+            _append_report_event(task, {'type': 'delta', 'delta': text,
+                                        'llmRound': rnd})
 
         def _on_thinking(text):
-            _append_report_event(task, {'type': 'thinking', 'delta': text})
+            _append_report_event(task, {'type': 'thinking', 'delta': text,
+                                        'llmRound': rnd})
 
         logger.info('[Paper:Report] Task %s round %d — model=%s msgs=%d',
                     task['task_id'], rnd + 1, model_name, len(messages))
@@ -191,19 +210,15 @@ def _run_report_task(task, messages, images):
         if isinstance(msg, dict) and not msg.get('tool_calls'):
             _terminal['content'] = msg.get('content') or ''
         if isinstance(usage, dict):
-            _usage_total['prompt_tokens'] += int(
-                usage.get('prompt_tokens') or usage.get('input_tokens') or 0)
-            _usage_total['completion_tokens'] += int(
-                usage.get('completion_tokens') or usage.get('output_tokens') or 0)
-            _usage_total['cache_read_tokens'] += int(
-                usage.get('cache_read_tokens')
-                or usage.get('cache_read_input_tokens') or 0)
-            _usage_total['cache_write_tokens'] += int(
-                usage.get('cache_write_tokens')
-                or usage.get('cache_creation_input_tokens') or 0)
-            _usage_total['reasoning_tokens'] += int(
-                usage.get('reasoning_tokens')
-                or usage.get('thinking_tokens') or 0)
+            # Absolute import so the negative-control test's exec'd copy of
+            # this module resolves the real helper regardless of __package__.
+            from lib.cost import normalize_usage as _normalize_usage
+            _nu = _normalize_usage(usage)
+            _usage_total['prompt_tokens'] += _nu['input']
+            _usage_total['completion_tokens'] += _nu['output']
+            _usage_total['cache_read_tokens'] += _nu['cache_read']
+            _usage_total['cache_write_tokens'] += _nu['cache_write']
+            _usage_total['reasoning_tokens'] += _nu['thinking']
             _disp = usage.get('_dispatch') or {}
             if _disp.get('model'):
                 _resolved_model = _disp['model']
@@ -224,7 +239,7 @@ def _run_report_task(task, messages, images):
                         task['task_id'], len(round_content), rnd + 1)
             full_content = full_content[:-len(round_content)]
             task['full_text'] = full_content
-            _append_report_event(task, {'type': 'delta_reset'})
+            _append_report_event(task, {'type': 'delta_reset', 'llmRound': rnd})
         messages.append(msg)
 
     def _execute_tool(rnd, tc):
@@ -246,10 +261,13 @@ def _run_report_task(task, messages, images):
         rn = task['round_counter']
 
         display_query = display_query_for(fn_name, fn_args)
+        # The dispatch/display name: run_command → code_exec in a project-less
+        # engine (chat's tool_display override, mirrored by the adapter).
+        effective_name = paper_effective_tool_name(fn_name)
 
         round_entry = {
             'roundNum': rn,
-            'toolName': fn_name,
+            'toolName': effective_name,
             'query': display_query,
             'toolCallId': tc_id,
             'toolArgs': fn_args_raw if isinstance(fn_args_raw, str) else json.dumps(fn_args, ensure_ascii=False),
@@ -261,7 +279,8 @@ def _run_report_task(task, messages, images):
         _append_report_event(task, {
             'type': 'tool_start',
             'roundNum': rn,
-            'toolName': fn_name,
+            'llmRound': rnd,
+            'toolName': effective_name,
             'query': display_query,
             'toolCallId': tc_id,
             'toolArgs': round_entry['toolArgs'],
@@ -270,7 +289,8 @@ def _run_report_task(task, messages, images):
         tool_t0 = time.time()
         result, display_results, search_diag, engine_breakdown, verticals = _execute_report_tool(
             fn_name, fn_args_raw, user_question=_report_user_question,
-            abort=abort_signal.is_set)
+            abort=abort_signal.is_set,
+            exec_shim=_exec_shim, round_entry=round_entry)
         tool_elapsed = time.time() - tool_t0
         logger.info('[Paper:Report:Tool] %s → %d chars in %.1fs', fn_name, len(result), tool_elapsed)
 
@@ -289,7 +309,8 @@ def _run_report_task(task, messages, images):
         tool_done_event = {
             'type': 'tool_done',
             'roundNum': rn,
-            'toolName': fn_name,
+            'llmRound': rnd,
+            'toolName': effective_name,
             'toolCallId': tc_id,
             'elapsed': round(tool_elapsed, 1),
             'toolContent': tool_preview,
@@ -306,14 +327,16 @@ def _run_report_task(task, messages, images):
         messages.append({
             'role': 'tool',
             'tool_call_id': tc_id,
-            'content': result[:30000],
+            'content': cap_tool_result(result, fn_name, tc_id,
+                                       conv_id=f'paper-{phash}',
+                                       can_read=True),
         })
 
     try:
         _outcome = run_agent_loop(
             abort=abort_signal,
             max_tool_rounds=_MAX_REPORT_TOOL_ROUNDS,
-            round_tools=_REPORT_TOOLS,
+            round_tools=_FULL_REPORT_TOOLS,
             dispatch=_dispatch,
             execute_tool=_execute_tool,
             on_round_result=_accumulate_usage,
@@ -627,4 +650,5 @@ __all__ = [
     '_lookup_paper_title',
     '_MAX_REPORT_TOOL_ROUNDS',
     '_REPORT_TOOLS',
+    '_FULL_REPORT_TOOLS',
 ]

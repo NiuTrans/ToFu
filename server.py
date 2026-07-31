@@ -672,6 +672,72 @@ try:
 except OSError:
     pass
 
+
+# ── Native-linkage forensics: which libstdc++ owns the soname? ──
+# On 2026-07-31 10:33:27 a boot died with
+#   ImportError: /lib64/libstdc++.so.6: version `GLIBCXX_3.4.30' not found
+#       (required by .../lxml/../../.././libicuuc.so.75)
+# The system /lib64 copy (2019) exports no GLIBCXX_3.4.30; the conda copy does.
+# The crash is therefore "the libstdc++.so.6 soname was bound to the system copy
+# before libicuuc loaded", and it is NOT reproducible from the environment we
+# can still observe: the platform's own LD_PRELOAD (dolphinfs client, set by
+# /etc/profile.d/pc_env.sh) was measured clean 10/10, as were an RTLD_GLOBAL
+# dlopen of the system copy and a NEEDED-chain pull via libjvm — the loader
+# happily maps two libstdc++ copies side by side. Only an explicit LD_PRELOAD
+# of the system copy reproduces it.
+#
+# The failing process died before anything recorded its environment, so the
+# trigger is still unknown and cannot be recovered after the fact (ImportError
+# is a clean exit, so no core is written). This line closes that gap: the
+# binding is already decided HERE — measured, the healthy boot shows the conda
+# path and the failing shape shows /usr/lib64, both before any heavy import —
+# so recording it now makes the next occurrence diagnosable instead of a
+# standing start. Diagnostic only: it changes no behaviour.
+#
+# Note on the two-branch read: whether libstdc++ is ALREADY mapped this early
+# depends on whether something preloaded it. Under the platform's own preload
+# (production always has it — /etc/profile.d/pc_env.sh exports it
+# unconditionally) it is mapped, and so it is in the failing shape. With no
+# preload at all it is not yet mapped, and reporting a bare "not-yet-mapped"
+# would record nothing about the binding that is about to be chosen. So when
+# it is absent we resolve the soname the way the loader will (ctypes, which
+# performs the same search) and label the value as resolved-not-yet-bound. The
+# distinction is kept in the output rather than flattened, because "nothing had
+# claimed the soname yet" and "this copy owns it" are different facts.
+try:
+    _stdcxx_paths = []
+    with open('/proc/self/maps', 'r') as _mf:
+        for _line in _mf:
+            if 'libstdc++' in _line:
+                _p = _line.rsplit(' ', 1)[-1].strip()
+                if _p and _p not in _stdcxx_paths:
+                    _stdcxx_paths.append(_p)
+    if _stdcxx_paths:
+        _stdcxx_state = 'mapped=' + ','.join(_stdcxx_paths)
+    else:
+        # Not yet bound — ask the loader which copy it WOULD pick.
+        try:
+            import ctypes as _fx_ctypes
+            _fx_ctypes.CDLL('libstdc++.so.6')
+            _probe = [l.rsplit(' ', 1)[-1].strip()
+                      for l in open('/proc/self/maps') if 'libstdc++' in l]
+            _seen = []
+            for _p in _probe:
+                if _p and _p not in _seen:
+                    _seen.append(_p)
+            _stdcxx_state = ('would-resolve=' + ','.join(_seen)) if _seen \
+                else 'unresolvable'
+        except Exception as _fx_e:
+            _stdcxx_state = 'probe-failed:%s' % (str(_fx_e)[:80],)
+    os.write(2, ('[boot] libstdc++ soname -> %s | LD_PRELOAD=%s | LD_LIBRARY_PATH=%s\n' % (
+        _stdcxx_state,
+        (os.environ.get('LD_PRELOAD') or '<unset>'),
+        (os.environ.get('LD_LIBRARY_PATH') or '<unset>'),
+    )).encode(errors='replace'))
+except Exception:
+    # Forensics must never be able to break a boot it only observes.
+    pass
+
 # ── Auto-activate conda env (reuse server.py logic) ──
 # This must happen before any third-party imports.
 _PROJ_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -685,10 +751,50 @@ if _TOFU_SEARCH_PATH and os.path.isdir(_TOFU_SEARCH_PATH):
     sys.path.insert(0, _TOFU_SEARCH_PATH)
 
 
+def _tofu_export_env_native_paths(env_prefix, backend):
+    """Put the env's lib/ + bin/ on the search paths for CHILD processes.
+
+    The headless-Chromium half (LD_LIBRARY_PATH + fontconfig) is delegated to
+    chromium_env.ensure_chromium_env() — the single source of truth shared with
+    bootstrap.py, tests/conftest.py and lib/motion_video. It resolves from
+    sys.prefix, so it works even with no .tofu_env.json marker (a fresh clone,
+    an exported bundle, or Docker), which is precisely the case the four
+    hand-copied versions used to miss. See chromium_env.py's docstring.
+
+    What stays here is the marker-specific part: PATH and the CONDA_* shims.
+    """
+    # Chromium's GUI libs + fonts. Passing env_prefix only ADDS a candidate;
+    # resolution still works when the marker is absent or wrong.
+    try:
+        from chromium_env import ensure_chromium_env
+        ensure_chromium_env(env_prefix=env_prefix)
+    except Exception as _e:
+        sys.stderr.write(f'[server.py] chromium env setup skipped: {_e}\n')
+
+    if not env_prefix or not os.path.isdir(env_prefix):
+        return
+    env_bin = os.path.join(env_prefix, 'bin')
+    if os.path.isdir(env_bin):
+        _cur = os.environ.get('PATH', '')
+        if env_bin not in _cur.split(os.pathsep):
+            os.environ['PATH'] = (env_bin + os.pathsep + _cur) if _cur else env_bin
+    # Only masquerade as a conda env when we ARE one. A uv venv
+    # (backend='uv') is not conda; setting CONDA_PREFIX would make
+    # bootstrap.py's _running_in_conda_env() misfire and route its pip
+    # fallback down the conda-forge branch.
+    if backend != 'uv':
+        os.environ.setdefault('CONDA_PREFIX', env_prefix)
+
+
 def _tofu_maybe_reexec_into_env():
     """Re-exec into Tofu's conda env if not already there."""
     marker = os.path.join(_PROJ_DIR, '.tofu_env.json')
     if not os.path.isfile(marker):
+        # No marker (fresh clone, exported bundle, Docker, pip layout) — there
+        # is nothing to re-exec into, but Chromium still needs its GUI libs and
+        # fonts on the search paths. chromium_env resolves those from
+        # sys.prefix, so this path is no longer a dead browser.
+        _tofu_export_env_native_paths('', '')
         return
     try:
         with open(marker, 'r', encoding='utf-8') as f:
@@ -717,24 +823,20 @@ def _tofu_maybe_reexec_into_env():
             already_in_env = os.path.realpath(target_py) == os.path.realpath(sys.executable)
         except OSError:
             already_in_env = (target_py == sys.executable)
+    # Export the env's native-library search path BEFORE the already_in_env
+    # early return. Chromium is a CHILD process and resolves libatk /
+    # libatk-bridge / libnss out of $env_prefix/lib, which is not on the
+    # default linker path. `python server.py` launched directly with the env
+    # interpreter (the documented way, and how the supervisor runs it) takes
+    # that early return, so while this lived inside the re-exec branch the
+    # variables were only ever set on the path that re-execs — a directly
+    # launched server left them unset and every Playwright launch died with
+    # "libatk-1.0.so.0: cannot open shared object file".
+    _tofu_export_env_native_paths(env_prefix, backend)
     if already_in_env:
         return
     if os.environ.get('_TOFU_ENV_REEXEC') == '1':
         return
-    if env_prefix and os.path.isdir(env_prefix):
-        env_lib = os.path.join(env_prefix, 'lib')
-        if os.path.isdir(env_lib):
-            os.environ['LD_LIBRARY_PATH'] = (
-                env_lib + os.pathsep + os.environ.get('LD_LIBRARY_PATH', ''))
-        env_bin = os.path.join(env_prefix, 'bin')
-        if os.path.isdir(env_bin):
-            os.environ['PATH'] = env_bin + os.pathsep + os.environ.get('PATH', '')
-        # Only masquerade as a conda env when we ARE one. A uv venv
-        # (backend='uv') is not conda; setting CONDA_PREFIX would make
-        # bootstrap.py's _running_in_conda_env() misfire and route its pip
-        # fallback down the conda-forge branch.
-        if backend != 'uv':
-            os.environ.setdefault('CONDA_PREFIX', env_prefix)
     os.environ['_TOFU_ENV_REEXEC'] = '1'
     try:
         os.execv(target_py, [target_py, *sys.argv])
@@ -1391,9 +1493,50 @@ _COMPRESS_MIN_SIZE = 256
 
 import gzip as _gzip
 
+from lib.ttl_cache import TTLCache
+
+try:
+    import brotli as _brotli
+except ImportError as _e:
+    _brotli = None
+    _lifecycle_log.info('[Compress] brotli unavailable (%s) — gzip only', _e)
+
+# Compressed-artifact cache for CONTENT-ADDRESSED immutable assets.
+#
+# Without it every single page load re-compresses the whole JS bundle: measured
+# 1711 KB → 463 KB costs ~55 ms of executor CPU, paid again for every visitor
+# and every hard refresh. The bundle filename carries a content hash and the
+# ETag carries mtime+size+adler32, so the compressed bytes are a pure function
+# of the ETag — cache them and the cost is paid once per build instead of once
+# per request. This is what makes it affordable to spend a HIGHER brotli quality
+# on these bodies (see _BR_QUALITY_CACHED).
+_COMPRESS_CACHE = TTLCache(ttl=6 * 3600, max_size=48)
+# Don't let one pathological body evict the whole cache / balloon RSS.
+_COMPRESS_CACHE_MAX_BYTES = 8 * 1024 * 1024
+
+# Two-tier brotli quality, justified by the cache above:
+#   cached  — compressed once per build, so buy the extra ratio (387 KB @ ~92 ms)
+#   uncached— on the request's critical path, so stay cheap (~26 ms for 1.7 MB;
+#             microseconds for a typical API JSON body)
+_BR_QUALITY_CACHED = 9
+_BR_QUALITY_LIVE = 4
+
+
+def _compress_bytes(data, encoding, quality):
+    """Compress *data* with *encoding*. Runs in a worker thread (CPU-bound)."""
+    if encoding == 'br':
+        return _brotli.compress(data, quality=quality)
+    return _gzip.compress(data, 6)
+
+
 @app.after_request
 async def _compress_response(response):
-    """Simple gzip compression for eligible responses."""
+    """gzip/brotli compression for eligible responses.
+
+    Immutable content-addressed static assets are compressed ONCE and served
+    from ``_COMPRESS_CACHE`` thereafter; everything else is compressed live at
+    a cheaper setting so the per-request cost stays negligible.
+    """
     # Skip SSE (buffering breaks streaming), small responses, already encoded
     if (response.content_type
             and 'text/event-stream' in response.content_type):
@@ -1409,7 +1552,13 @@ async def _compress_response(response):
     if response.status_code != 200 or 'Content-Range' in response.headers:
         return response
     accept_enc = request.headers.get('Accept-Encoding', '')
-    if 'gzip' not in accept_enc:
+    # Prefer brotli when the client advertises it: measured on the real
+    # 1711 KB bundle, br q=9 lands 387 KB vs gzip's 463 KB (-16% transfer).
+    if _brotli is not None and 'br' in accept_enc:
+        encoding = 'br'
+    elif 'gzip' in accept_enc:
+        encoding = 'gzip'
+    else:
         return response
     mime = (response.content_type or '').split(';')[0].strip()
     if mime not in _COMPRESS_MIMETYPES:
@@ -1417,15 +1566,32 @@ async def _compress_response(response):
     data = await response.get_data()
     if len(data) < _COMPRESS_MIN_SIZE:
         return response
-    # gzip is CPU-bound; running it inline would block the event loop (and
-    # every other connection / SSE keepalive) for the duration. Offload to
-    # the sync executor so a multi-MB body doesn't stall the whole server.
-    loop = asyncio.get_running_loop()
-    compressed = await loop.run_in_executor(None, _gzip.compress, data, 6)
+
+    # Cache key: the ETag identifies the exact bytes, so a hit means the
+    # compressed body is still valid. Only immutable content-addressed static
+    # assets are cached — a dynamic API body would just churn the cache.
+    etag = response.headers.get('ETag', '')
+    cache_key = None
+    if etag and len(data) <= _COMPRESS_CACHE_MAX_BYTES and request.path.startswith('/static/'):
+        cache_key = (etag, encoding)
+
+    compressed = _COMPRESS_CACHE.get(cache_key) if cache_key else None
+    if compressed is None:
+        # Compression is CPU-bound; running it inline would block the event
+        # loop (and every other connection / SSE keepalive) for the duration.
+        # Offload to the sync executor so a multi-MB body doesn't stall the
+        # whole server.
+        quality = _BR_QUALITY_CACHED if cache_key else _BR_QUALITY_LIVE
+        loop = asyncio.get_running_loop()
+        compressed = await loop.run_in_executor(
+            None, _compress_bytes, data, encoding, quality)
+        if cache_key:
+            _COMPRESS_CACHE.set(cache_key, compressed)
+
     if len(compressed) >= len(data):
         return response
     response.set_data(compressed)
-    response.headers['Content-Encoding'] = 'gzip'
+    response.headers['Content-Encoding'] = encoding
     response.headers['Content-Length'] = len(compressed)
     response.headers.pop('Vary', None)
     response.headers['Vary'] = 'Accept-Encoding'
@@ -1470,7 +1636,8 @@ async def method_override():
 
 
 # ── Request lifecycle logging ──
-from lib.log import get_logger, set_req_id, req_id as _get_req_id
+from lib.log import (get_logger, set_req_id, req_id as _get_req_id,
+                     resolve_inbound_rid as _resolve_inbound_rid)
 import uuid as _uuid
 
 _lifecycle_log = get_logger('server.lifecycle')
@@ -1512,9 +1679,13 @@ def _fmt_size(n):
         return '%.1fKB' % (n / 1024)
     return '%.1fMB' % (n / (1024 * 1024))
 
+
 @app.before_request
 async def _assign_req_id_and_log():
-    rid = request.headers.get('X-Request-ID') or _uuid.uuid4().hex[:12]
+    rid = _resolve_inbound_rid(
+        request.headers.get('X-Request-ID'),
+        request.args.get('_rid'),
+    )
     set_req_id(rid)
     request._start_time = time.time()
     path = request.path
@@ -1861,6 +2032,14 @@ except Exception as _e:
     _lifecycle_log.warning('Failed to load proxy config: %s', _e)
 
 
+# ── Adaptive direct-vs-proxy path prober ──
+try:
+    from lib.netpath import start_prober as _start_netpath_prober
+    _start_netpath_prober()
+except Exception as _e:
+    _lifecycle_log.warning('Failed to start netpath prober: %s', _e)
+
+
 # ── Global error handlers ──
 from lib.api_response import (
     api_internal_error,
@@ -2142,6 +2321,36 @@ def _start_background_workers():
     ``routes.register_all`` after blueprints are mounted. Core no longer
     imports any optional feature here.
     """
+    # Crash-resume: re-spawn motion-video jobs left ``running`` on disk by a
+    # process that died mid-render. The stage-graph checkpoint + per-scene mp4
+    # skip make the re-run resume rather than restart (owner correctness
+    # contract, docs/PRODUCTION_PIPELINE_DESIGN.md). Best-effort — never blocks
+    # startup.
+    try:
+        from lib.motion_video.engine import resume_interrupted_jobs
+        n = resume_interrupted_jobs()
+        if n:
+            _server_log.info('[Server] resumed %d interrupted motion job(s)', n)
+    except Exception as e:
+        _server_log.warning('[Server] motion job resume failed: %s', e)
+    # Auto-research counterpart (R4): same checkpointed stage-graph contract —
+    # a job left 'running' on disk resumes from its last completed stage, so
+    # an already-harvested corpus is not re-crawled.
+    try:
+        from lib.research import resume_interrupted_research
+        n = resume_interrupted_research()
+        if n:
+            _server_log.info('[Server] resumed %d interrupted research job(s)', n)
+    except Exception as e:
+        _server_log.warning('[Server] research job resume failed: %s', e)
+    # Podcast counterpart (P-UX4): a 'generating' cache row can only belong
+    # to the process that just died — flip them to 'interrupted' so the tab
+    # says "被重启打断" instead of pretending nothing happened.
+    try:
+        from lib.paper.podcast_engine import mark_interrupted_podcasts
+        mark_interrupted_podcasts()
+    except Exception as e:
+        _server_log.warning('[Server] podcast interrupted sweep failed: %s', e)
     return
 
 
@@ -2427,7 +2636,32 @@ if __name__ == '__main__':
     _shutdown_requested = _threading.Event()
     from lib.compat import safe_signal
     def _signal_shutdown(signum, frame):
+        # A SECOND signal while we're already draining = the user is impatient
+        # (or a task is wedged). Honour it as an immediate force-quit escape
+        # hatch instead of forcing them to wait out the drain window. os._exit
+        # skips the atexit PG-stop hook, but mark_clean already ran on the first
+        # signal so the next boot still classifies this as a clean exit.
+        if _shutdown_requested.is_set():
+            try:
+                sys.stderr.write(
+                    '\n\033[31m[Server] Force-quit — terminating now.\033[0m\n')
+                sys.stderr.flush()
+            except Exception:
+                pass
+            os._exit(130)
         _server_log.info('[Server] Received signal %s — shutting down…', signum)
+        # The logger line above lands in logs/app.log, NOT the terminal — so
+        # from the user's seat Ctrl+C looked like a silent freeze. Echo a
+        # visible notice to stderr (the terminal) that we're draining, and how
+        # to bail out immediately.
+        try:
+            sys.stderr.write(
+                '\n\033[33m[Server] Shutting down gracefully — draining in-flight '
+                'requests…\n'
+                '  Press Ctrl+C again to force-quit immediately.\033[0m\n')
+            sys.stderr.flush()
+        except Exception:
+            pass
         # Flip the clean-shutdown dirty-bit so the next boot classifies this as
         # a controlled exit, NOT an OS kill. One atomic write; never raises.
         try:
@@ -2451,6 +2685,17 @@ if __name__ == '__main__':
         _atexit.register(stop_local_pg_if_owned)
     except Exception as _e:
         _server_log.warning('[Server] PG shutdown hook failed: %s', _e)
+
+    # ── Write-freshness snapshot on clean exit ──
+    # Signal-path restarts (SIGTERM/SIGINT/SIGHUP drain → normal exit) run
+    # atexit; the re-exec path does NOT (execv) and saves explicitly in
+    # routes/api_v1/update.py::_perform_server_reexec instead.
+    try:
+        import atexit as _atexit2
+        from lib import write_freshness as _wf_mod
+        _atexit2.register(_wf_mod.save_snapshot)
+    except Exception as _e:
+        _server_log.warning('[Server] write-freshness snapshot hook failed: %s', _e)
 
     # On an in-place restart (re-exec), the previous image's listener may
     # still be draining on the original port for a fraction of a second.
@@ -2606,6 +2851,13 @@ if __name__ == '__main__':
                 start_local_health_checker()
             except Exception as e:
                 _server_log.warning('[HealthLocal] Failed: %s', e)
+
+            # ── Local engine auto-discovery (well-known loopback ports) ──
+            try:
+                from lib.llm_dispatch.autodiscover_local import start_local_autodiscovery
+                start_local_autodiscovery()
+            except Exception as e:
+                _server_log.warning('[AutoDiscover] Failed: %s', e)
 
             # ── FS keepalive ──
             try:
@@ -2764,6 +3016,17 @@ if __name__ == '__main__':
     except Exception as _fp_e:  # never let a diagnostic line block boot
         _boot_logger.warning('[CodeFingerprint] self-report failed: %s', _fp_e)
 
+    # Clear the re-exec marker (pt_aa3cd224b3b346e7): boot is done —
+    # tofu_guard may resume judging this process by the normal signals
+    # (listener / health / instance lock). Best-effort: a leftover marker
+    # just yields for the remainder of its 300s TTL, never blocks boot.
+    try:
+        os.unlink(os.path.join(_tofu_data_root(), '.reexec_in_progress'))
+    except FileNotFoundError:
+        pass
+    except Exception as _mkc_e:
+        _boot_logger.debug('[Update] re-exec marker clear failed: %s', _mkc_e)
+
     _boot('Ready — handing off to Hypercorn.')
     try:
         sys.stderr.write('\n' + _banner + '\n\n')
@@ -2781,7 +3044,14 @@ if __name__ == '__main__':
     # but we increase it to avoid edge cases where a proxy holds a
     # connection just past the threshold. Graceful timeout for shutdown.
     hconfig.keep_alive_timeout = 600
-    hconfig.graceful_timeout = 10
+    # Shutdown drain window for in-flight connections. Kept short so Ctrl+C
+    # feels responsive on a local dev server (a second Ctrl+C force-quits —
+    # see _signal_shutdown). Override via TOFU_GRACEFUL_TIMEOUT.
+    try:
+        hconfig.graceful_timeout = float(
+            os.environ.get('TOFU_GRACEFUL_TIMEOUT', '') or '3')
+    except (ValueError, TypeError):
+        hconfig.graceful_timeout = 3.0
 
     # ── Listen backlog ──
     # Hypercorn's default (100) is small: if the event loop briefly stalls
@@ -2934,8 +3204,12 @@ if __name__ == '__main__':
         _agent_executor = ThreadPoolExecutor(
             max_workers=_agent_workers, thread_name_prefix='tofu-agent')
         try:
-            from lib.tasks_pkg import set_agent_executor
+            from lib.tasks_pkg import set_agent_executor, set_serving_loop
             set_agent_executor(_agent_executor)
+            # F3 (pt_1acd0bcdb2174566): let spawn_task hop onto THIS loop from
+            # loop-less worker threads (queue dispatch / reaper successors)
+            # instead of degrading to untracked daemon threads.
+            set_serving_loop(loop)
             _server_log.info('[Server] Agent-worker executor sized to %d threads',
                              _agent_workers)
         except Exception as _ae_err:
@@ -3115,6 +3389,31 @@ if __name__ == '__main__':
         else:
             _server_log.info('[Server] Loop-stall watchdog disabled (TOFU_LOOP_STALL_SECS=0)')
 
+        # ── Write-freshness token replay ──
+        # Restore the read/write fingerprints saved by the previous image
+        # (re-exec or clean exit) so the shared-tree overwrite guard is NOT
+        # fail-open in the post-restart window. Must run BEFORE the
+        # deferred boot dispatch below (which spawns tasks that write).
+        try:
+            from lib import write_freshness as _wf
+            _wf.load_snapshot()
+        except Exception as _wf_err:
+            _server_log.warning('[Server] write-freshness snapshot replay failed: %s',
+                                _wf_err)
+
+        # ── HEAD-moved auto-restart watcher (opt-in) ──
+        # The "effective" contract for agent work on a shared checkout: a
+        # commit only counts once the RUNNING process serves it. With
+        # TOFU_AUTO_RESTART=1 this daemon re-execs the server when the
+        # checked-out HEAD moves while idle (no in-flight tasks, shutdown
+        # not requested) — the same guard the manual restart endpoint uses.
+        try:
+            from lib.auto_restart import maybe_start_auto_restart_watch
+            if maybe_start_auto_restart_watch(shutdown_requested=_shutdown_requested):
+                _server_log.info('[Server] Auto-restart watcher armed (TOFU_AUTO_RESTART=1)')
+        except Exception as _ar_err:
+            _server_log.warning('[Server] Auto-restart watcher setup failed: %s', _ar_err)
+
         # ── Deferred BILLED boot dispatch ──
         # killed-recovery + autopilot-resume were split out of the startup path
         # (they SPAWN carriers). Run them HERE, on the SERVING loop, so a
@@ -3183,12 +3482,22 @@ if __name__ == '__main__':
             _server_log.warning('[Server] task quiesce failed: %s', _q_err)
             _n_quiesced = 0
         try:
-            _drain_secs = float(os.environ.get('TOFU_SHUTDOWN_DRAIN_SECS', '') or '8')
+            _drain_secs = float(os.environ.get('TOFU_SHUTDOWN_DRAIN_SECS', '') or '3')
         except (ValueError, TypeError):
-            _drain_secs = 8.0
+            _drain_secs = 3.0
         if _n_quiesced and _drain_secs > 0:
             _server_log.info('[Server] Draining %d aborted task(s) up to %.0fs '
                              'before PG stop…', _n_quiesced, _drain_secs)
+            # Terminal feedback so the post-HTTP drain isn't a silent wait; a
+            # Ctrl+C here hits _signal_shutdown (flag already set) → force-quit.
+            try:
+                sys.stderr.write(
+                    '\033[33m[Server] Waiting up to %.0fs for %d running task(s) '
+                    'to stop (Ctrl+C to skip)…\033[0m\n'
+                    % (_drain_secs, _n_quiesced))
+                sys.stderr.flush()
+            except Exception:
+                pass
             _deadline = time.monotonic() + _drain_secs
             try:
                 from lib.tasks_pkg import tasks as _tasks, tasks_lock as _tasks_lock

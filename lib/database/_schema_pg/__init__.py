@@ -39,6 +39,7 @@ from lib.database._schema_pg._meta import (  # noqa: E402,F401
 # ── Self-heal + backfill helpers + critical-column map ──────────────────
 from lib.database._schema_pg._selfheal import (  # noqa: E402,F401
     _CRITICAL_COLUMNS,
+    _missing_core_tables,
     _missing_critical_columns,
     _backfill_search_text,
     _backfill_search_tsv,
@@ -65,6 +66,7 @@ __all__ = [
     '_get_schema_domains',
     '_set_schema_domains',
     '_CRITICAL_COLUMNS',
+    '_missing_core_tables',
     '_missing_critical_columns',
     '_backfill_search_text',
     '_backfill_search_tsv',

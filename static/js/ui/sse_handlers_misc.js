@@ -6,8 +6,8 @@
 
 function _handleRoundUsage(ev, c) {
   const convId = c.convId, taskId = c.taskId;
-  const assistantMsg = c.assistantMsg, buf = c.buf;
-  const _epCriticPhase = c.epCriticPhase, _epCriticMsg = c.epCriticMsg, _epCriticBuf = c.epCriticBuf;
+  const assistantMsg = c.assistantMsg;
+  const _epCriticPhase = c.epCriticPhase, _epCriticMsg = c.epCriticMsg;
       /* ── Per-round usage tick ──────────────────────────────────────────
        * The orchestrator emits this immediately after EACH LLM round
        * lands, carrying the raw usage dict + a pre-computed `tokensIn`
@@ -42,8 +42,8 @@ function _handleRoundUsage(ev, c) {
 
 function _handleArtifact(ev, c) {
   const convId = c.convId, taskId = c.taskId;
-  const assistantMsg = c.assistantMsg, buf = c.buf;
-  const _epCriticPhase = c.epCriticPhase, _epCriticMsg = c.epCriticMsg, _epCriticBuf = c.epCriticBuf;
+  const assistantMsg = c.assistantMsg;
+  const _epCriticPhase = c.epCriticPhase, _epCriticMsg = c.epCriticMsg;
       /* ── Renderable artifact (md/html/svg) — see lib/artifacts/ ───────
        * Producer A (write_file post-hook in lib/tasks_pkg/handlers/project.py)
        * persists the bytes server-side and emits this metadata-only event.
@@ -75,17 +75,14 @@ function _handleArtifact(ev, c) {
           console.debug("[Artifacts] attachToMessage failed:", e);
         }
       }
-      if (buf) {
-        buf._artifacts = (assistantMsg && assistantMsg._artifacts) || buf._artifacts || [];
-      }
-      twUpdate(convId);
+      if (typeof twUpdate === 'function') twUpdate(convId);
 
 }
 
 function _handleCompaction(ev, c) {
   const convId = c.convId, taskId = c.taskId;
-  const assistantMsg = c.assistantMsg, buf = c.buf;
-  const _epCriticPhase = c.epCriticPhase, _epCriticMsg = c.epCriticMsg, _epCriticBuf = c.epCriticBuf;
+  const assistantMsg = c.assistantMsg;
+  const _epCriticPhase = c.epCriticPhase, _epCriticMsg = c.epCriticMsg;
       /* ── Compaction marker ────────────────────────────────────────────
        * Emitted by lib/tasks_pkg/compaction.py when an archive row is
        * inserted (transcript_archive). Each marker becomes an inline
@@ -126,7 +123,6 @@ function _handleCompaction(ev, c) {
           marker.status = 'done';
         }
       }
-      if (buf) buf._compactions = assistantMsg._compactions;
       /* Bind the gauge to the compaction event the moment it fires.
        * 'compaction' arrives before the LLM summary call and carries
        * tokensBefore — the new tick on the donut materializes here.
@@ -136,14 +132,14 @@ function _handleCompaction(ev, c) {
       if (ev.type === 'compaction_done' && typeof window.flashGaugeForArchive === 'function') {
         window.flashGaugeForArchive(ev.archiveId);
       }
-      twUpdate(convId);
+      if (typeof twUpdate === 'function') twUpdate(convId);
 
 }
 
 function _handleMemoryPrefetch(ev, c) {
   const convId = c.convId, taskId = c.taskId;
-  const assistantMsg = c.assistantMsg, buf = c.buf;
-  const _epCriticPhase = c.epCriticPhase, _epCriticMsg = c.epCriticMsg, _epCriticBuf = c.epCriticBuf;
+  const assistantMsg = c.assistantMsg;
+  const _epCriticPhase = c.epCriticPhase, _epCriticMsg = c.epCriticMsg;
       /* ── Memory Prefetch indicator ────────────────────────────────────
        * Phases emitted by lib/memory/prefetch.py:
        *   started       — BM25 scoring about to run
@@ -175,7 +171,6 @@ function _handleMemoryPrefetch(ev, c) {
         fellBack: ev.fell_back ?? prev.fellBack,
         startedAt: prev.startedAt || Date.now(),
       };
-      if (buf) buf._memoryPrefetch = assistantMsg._memoryPrefetch;
 
       // Sidebar status mirror — only the cheap-LLM running phases mark the
       // conversation as "filtering memories"; terminal phases clear it.
@@ -194,13 +189,13 @@ function _handleMemoryPrefetch(ev, c) {
           renderConversationList();
         }
       }
-      twUpdate(convId);
+      if (typeof twUpdate === 'function') twUpdate(convId);
 
 }
 
 function _handlePreferencesApplied(ev, c) {
   const convId = c.convId;
-  const assistantMsg = c.assistantMsg, buf = c.buf;
+  const assistantMsg = c.assistantMsg;
       /* ── Preferences-applied indicator ────────────────────────────────
        * Emitted once at task start by the orchestrator when the bounded
        * personal-preference profile was injected onto the cache-safe
@@ -213,14 +208,13 @@ function _handlePreferencesApplied(ev, c) {
         core: Array.isArray(ev.core) ? ev.core : undefined,
         detail: Array.isArray(ev.detail) ? ev.detail : undefined,
       };
-      if (buf) buf._preferencesApplied = assistantMsg._preferencesApplied;
-      twUpdate(convId);
+      if (typeof twUpdate === 'function') twUpdate(convId);
 
 }
 
 function _handleRelatedConversations(ev, c) {
   const convId = c.convId;
-  const assistantMsg = c.assistantMsg, buf = c.buf;
+  const assistantMsg = c.assistantMsg;
       /* ── Related-conversations indicator ──────────────────────────────
        * Emitted once at task start by the orchestrator when the bounded
        * cross-conversation project digest was injected for ambient
@@ -233,14 +227,13 @@ function _handleRelatedConversations(ev, c) {
         items: Array.isArray(ev.items) ? ev.items : [],
         toolsAvailable: !!ev.toolsAvailable,
       };
-      if (buf) buf._relatedConversations = assistantMsg._relatedConversations;
-      twUpdate(convId);
+      if (typeof twUpdate === 'function') twUpdate(convId);
 
 }
 
 function _handlePreferenceLearned(ev, c) {
   const convId = c.convId;
-  const assistantMsg = c.assistantMsg, buf = c.buf;
+  const assistantMsg = c.assistantMsg;
       /* ── Preference-learned moment ("Noted: you prefer X") ────────────
        * Emitted by the layer-3 consolidation pass (orchestrator) for each
        * reinforced / staged preference. We accumulate them on the assistant
@@ -255,8 +248,7 @@ function _handlePreferenceLearned(ev, c) {
         id: ev.id || '',
       });
       assistantMsg._preferencesLearned = list;
-      if (buf) buf._preferencesLearned = list;
-      twUpdate(convId);
+      if (typeof twUpdate === 'function') twUpdate(convId);
 
 }
 
@@ -300,8 +292,8 @@ function _toastConvTitle(convId) {
 
 function _handleProjectExternalEdit(ev, c) {
   const convId = c.convId, taskId = c.taskId;
-  const assistantMsg = c.assistantMsg, buf = c.buf;
-  const _epCriticPhase = c.epCriticPhase, _epCriticMsg = c.epCriticMsg, _epCriticBuf = c.epCriticBuf;
+  const assistantMsg = c.assistantMsg;
+  const _epCriticPhase = c.epCriticPhase, _epCriticMsg = c.epCriticMsg;
       // ★ Git-shim: external edits (an IDE / another tool changed tracked
       //   files outside a Tofu round). Tofu has AUTO-SNAPSHOTTED them into
       //   file-history so the next round's diff stays clean and the edits are
@@ -404,8 +396,8 @@ function _handleWorkspaceRootAdded(ev, c) {
 
 function _handleTimerPollCheck(ev, c) {
   const convId = c.convId, taskId = c.taskId;
-  const assistantMsg = c.assistantMsg, buf = c.buf;
-  const _epCriticPhase = c.epCriticPhase, _epCriticMsg = c.epCriticMsg, _epCriticBuf = c.epCriticBuf;
+  const assistantMsg = c.assistantMsg;
+  const _epCriticPhase = c.epCriticPhase, _epCriticMsg = c.epCriticMsg;
       /* ═══ Timer Watcher inline poll progress ═══
          Each poll emits a sub-event attached to the timer_create tool round.
          We store polls as _timerPolls[] on the round for collapsible rendering.
@@ -469,9 +461,7 @@ function _handleTimerPollCheck(ev, c) {
           }
         }
       }
-      if (buf)
-        buf.toolRounds = assistantMsg.toolRounds || [];
-      twUpdate(convId);
+      if (typeof twUpdate === 'function') twUpdate(convId);
 
     /* ═══ Swarm mode events ═══ */
 }

@@ -37,12 +37,21 @@ def _append_event(task, ev):
                         description='List and retrieve past conversations')
 def _handle_conv_ref_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, project_path, project_enabled, all_tools=None):
     current_conv_id = task.get('convId')
+    # Multi-tenant scoping: conv_ref reads the conversations table, so it must
+    # be scoped to the principal who owns THIS task. Background task threads
+    # have no request context, so the owner comes from task['_userId'] via the
+    # canonical helper (same wire pt_abae3a85a92440fd used for
+    # notify_conv_changed). Falls back to DEFAULT_USER_ID for a single-user
+    # install, so behaviour there is unchanged.
+    from lib.tasks_pkg.manager._registry import task_user_id
+    _user_id = task_user_id(task)
 
     def _run(_fn_name, _fn_args):
         return execute_conv_ref_tool(
             _fn_name, _fn_args,
             current_conv_id=current_conv_id,
             project_path=project_path,
+            user_id=_user_id,
         )
 
     detail = fn_args.get('keyword', 'all') if fn_name == 'list_conversations' else fn_args.get('conversation_id', '?')[:8]
@@ -66,10 +75,11 @@ def _handle_conv_ref_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cf
         if not conv_id:
             return
         try:
-            from lib.conv_ref import build_conversation_digest
+            from lib.conv_ref import build_conversation_digest, raw_requested
             digest = build_conversation_digest(
                 conv_id, current_conv_id=current_conv_id,
-                raw=bool(_fn_args.get('raw')))
+                raw=raw_requested(_fn_args),
+                user_id=_user_id)
         except Exception as e:
             logger.debug('[ConvRef] digest build failed for %s: %s', conv_id, e)
             return

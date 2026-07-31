@@ -110,15 +110,45 @@ def _extract_read_only_hint(tool: Any) -> bool:
     / … fields). Older servers omit it entirely. We treat a tool as read-only
     ONLY when the hint is explicitly True — anything else (missing, False,
     unparsable) is conservatively treated as a write tool by the caller.
+
+    BOTH SPELLINGS ARE CHECKED, AND THAT IS LOAD-BEARING
+    ----------------------------------------------------
+    The WIRE name is always camelCase ``readOnlyHint``. The PYTHON ATTRIBUTE
+    name is not: MCP SDK v1 exposes the field as ``readOnlyHint``, while v2
+    moved every model field to snake_case (``read_only_hint``) and kept
+    camelCase only as a serialization alias. Measured against both SDKs::
+
+        v1: getattr(ann, 'readOnlyHint')   -> True    'read_only_hint' -> ABSENT
+        v2: getattr(ann, 'readOnlyHint')   -> ABSENT  'read_only_hint' -> True
+
+    A single-spelling lookup therefore does not raise on the other SDK — it
+    silently returns False for EVERY tool. Because False is also the honest
+    answer for an un-annotated server, the failure is indistinguishable from
+    "this server declares no hints": every read-only tool would quietly drop
+    out of the parallel pool and start demanding write approval, with nothing
+    in any log. Checking both names costs one ``getattr`` and removes the
+    entire failure mode.
+
+    The dict branch additionally covers servers/transports that hand us a raw
+    JSON object rather than a parsed model — there the key is the wire name.
     """
     annotations = getattr(tool, 'annotations', None)
     if annotations is None:
         return False
     try:
-        hint = getattr(annotations, 'readOnlyHint', None)
-        if hint is None and isinstance(annotations, dict):
+        if isinstance(annotations, dict):
+            # Raw wire object: camelCase is the only correct key, but accept
+            # the snake_case spelling too rather than silently reading False.
             hint = annotations.get('readOnlyHint')
-        return hint is True
+            if hint is None:
+                hint = annotations.get('read_only_hint')
+            return hint is True
+        # Parsed model: attribute name differs by SDK major (see docstring).
+        for attr in ('readOnlyHint', 'read_only_hint'):
+            hint = getattr(annotations, attr, None)
+            if hint is not None:
+                return hint is True
+        return False
     except Exception as e:
         logger.debug('[MCP] readOnlyHint extraction failed for %s: %s',
                      getattr(tool, 'name', '?'), e)

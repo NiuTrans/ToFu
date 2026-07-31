@@ -34,6 +34,12 @@ content buffering / interim-draft discard, tool-result events, usage
 accumulation) stays in the caller via small hooks. The loop deliberately does
 NOT catch exceptions — a dispatcher ``AbortedError`` propagates to the caller's
 own handler unchanged.
+
+Generic per-round machinery extensions (all opt-in, all owned HERE so no
+engine re-implements them): ``before_round`` halt hook (timeouts),
+``retry_bonus`` (premature-close ceiling expansion), ``execute_tools`` batch
+hook (parallel pools), ``max_consecutive_tool_timeouts`` (timeout circuit
+breaker) and ``on_round_end`` (crash-checkpoint placement).
 """
 
 from __future__ import annotations
@@ -110,21 +116,31 @@ class LoopOutcome:
         exit_reason: WHY the loop stopped, for the orchestrator's diagnostic
             parity — one of ``completed``, ``aborted_before_round``,
             ``aborted_post_stream``, ``aborted_between_tools``,
-            ``max_rounds_exhausted``.
+            ``max_rounds_exhausted``, ``no_progress``, or the custom reason
+            string returned by a ``before_round`` halt hook (e.g.
+            ``'timeout'``).
+        halted: a ``before_round`` hook stopped the loop (exit_reason carries
+            the hook's reason) — distinct from both abort and the round cap.
         retry_bonus_used: how many premature-close bonus rounds were granted.
     """
 
     __slots__ = ('aborted', 'completed', 'rounds', 'exit_reason',
-                 'retry_bonus_used')
+                 'retry_bonus_used', 'halted', 'consecutive_tool_timeouts',
+                 'consecutive_no_progress_rounds')
 
     def __init__(self, aborted: bool = False, completed: bool = False,
                  rounds: int = 0, exit_reason: str = 'max_rounds_exhausted',
-                 retry_bonus_used: int = 0):
+                 retry_bonus_used: int = 0, halted: bool = False,
+                 consecutive_tool_timeouts: int = 0,
+                 consecutive_no_progress_rounds: int = 0):
         self.aborted = aborted
         self.completed = completed
         self.rounds = rounds
         self.exit_reason = exit_reason
         self.retry_bonus_used = retry_bonus_used
+        self.halted = halted
+        self.consecutive_tool_timeouts = consecutive_tool_timeouts
+        self.consecutive_no_progress_rounds = consecutive_no_progress_rounds
 
 
 def run_agent_loop(
@@ -133,11 +149,17 @@ def run_agent_loop(
     max_tool_rounds: int,
     round_tools: Any,
     dispatch: Callable[[int, Any], tuple],
-    execute_tool: Callable[[int, dict], None],
+    execute_tool: Callable[[int, dict], None] | None = None,
     on_round_result: Callable[[int, dict, Any, Any], None] | None = None,
     on_tool_round: Callable[[int, dict], None] | None = None,
     retry_bonus: Callable[[int, dict, Any, Any], bool] | None = None,
     max_retry_bonus: int = 2,
+    before_round: Callable[[int], str | None] | None = None,
+    tools_terminal_round: bool = True,
+    execute_tools: Callable[[int, list], dict | None] | None = None,
+    max_consecutive_tool_timeouts: int = 0,
+    max_consecutive_no_progress_rounds: int = 0,
+    on_round_end: Callable[[int], None] | None = None,
 ) -> LoopOutcome:
     """Drive a bounded LLM tool-calling loop with the triple abort check.
 
@@ -178,6 +200,68 @@ def run_agent_loop(
         max_retry_bonus: ceiling on total bonus rounds ``retry_bonus`` may
             grant, so a stuck premature-close can't loop forever (default 2,
             matching orchestrator's ``_PREMATURE_RETRY_MAX``).
+        before_round: optional ``(rnd) -> str | None`` halt hook checked at
+            the TOP of every round (after the abort check). Returning a
+            non-empty reason string stops the loop with
+            ``outcome.halted=True`` and ``exit_reason=<reason>`` — the generic
+            seam for per-round guards the chassis does not own (swarm's
+            wall-clock timeout is the first adopter). Returning None lets
+            the round proceed.
+        tools_terminal_round: when True (default), the final round (index
+            ``max_tool_rounds``) is offered ``tools=None`` so the model must
+            answer without more tools. When False, EVERY round is offered
+            ``round_tools`` and the cap is a pure safety ceiling — the
+            contract swarm's loop always had (its max-rounds exit extracts
+            a partial answer from history instead of forcing a tool-less
+            final turn).
+        execute_tools: optional BATCH hook ``(rnd, tool_calls) ->
+            dict | None``. When provided it replaces the per-tool
+            ``execute_tool`` loop ENTIRELY (including the between-tools
+            abort checks — the hook holds the ``abort`` signal and owns its
+            own intra-batch behavior). This exists for engines like swarm
+            that execute a round's tools in a parallel pool; prefer the
+            per-tool ``execute_tool`` contract for new engines so the
+            between-tools abort check (the "Stop has limited effect" fix)
+            keeps biting. The hook MAY return a note dict; the chassis
+            currently reads one key: ``'timed_out'`` (bool) — see
+            ``max_consecutive_tool_timeouts``.
+        max_consecutive_tool_timeouts: consecutive-tool-timeout circuit
+            breaker (0 = off, default). When > 0, the chassis counts
+            CONSECUTIVE batch notes carrying ``timed_out=True`` (a round
+            whose note is falsy/absent resets the count) and halts the
+            loop at the threshold with ``outcome.halted=True`` and
+            ``exit_reason='tool_timeout'`` — the generic form of the
+            chat orchestrator's ``_MAX_CONSECUTIVE_TOOL_TIMEOUTS`` guard.
+            Detection stays with the engine (it knows what a timeout is);
+            the counter + halt mechanics live here, not re-implemented
+            per engine (mirrors the orchestrator: breaker break happens
+            BEFORE the crash-checkpoint, so a halted round fires no
+            ``on_round_end``).
+        max_consecutive_no_progress_rounds: wedged-loop circuit breaker
+            (0 = off, default). When > 0, the chassis fingerprints each
+            round's tool calls (name + arguments, in order) and counts
+            CONSECUTIVE rounds whose fingerprint is IDENTICAL to the
+            previous round's; a differing fingerprint resets the count. At
+            the threshold the loop halts with ``outcome.halted=True`` and
+            ``exit_reason='no_progress'``.
+
+            This is the guard the 2026-07-27 runaway needed: one sub-agent
+            re-issued the same tool call for 26.7M rounds (3.5h, 9.1 GB of
+            log) because ``max_rounds=0`` collapses to the ``2**30`` ceiling
+            and ``timeout_seconds=0`` disabled the only wall-clock net.
+
+            The criterion is REPETITION, not empty content: measured across
+            the 07-24..07-26 logs, 866/1723 (50.3%) of legitimate rounds have
+            ``content_len == 0`` — an empty-content round is simply what a
+            pure tool-calling turn looks like, so halting on it would kill
+            half of all real agents.
+        on_round_end: optional ``(rnd) -> None`` hook fired at the natural
+            end of a round whose tools were executed WITHOUT an abort and
+            WITHOUT a timeout-breaker halt — the seam for crash-recovery
+            checkpoints (the orchestrator's throttled ``checkpoint_task_
+            partial`` and swarm's per-round ``_checkpoint`` both live here;
+            throttling policy stays in the hook, the PLACEMENT is owned by
+            the chassis so the two engines can't drift into two shapes).
 
     Returns:
         LoopOutcome describing why the loop stopped (incl. ``exit_reason``).
@@ -190,6 +274,7 @@ def run_agent_loop(
     # mid-loop. rnd runs 0.. and the loop continues while rnd <= cap + bonus.
     bonus = 0
     rnd = -1
+    prev_tool_fingerprint = None
     while True:
         rnd += 1
         if rnd > max_tool_rounds + bonus:
@@ -202,7 +287,17 @@ def run_agent_loop(
             outcome.exit_reason = 'aborted_before_round'
             break
 
-        tools = round_tools if rnd < max_tool_rounds else None
+        # Generic per-round halt hook (timeout and future guards live here,
+        # NOT re-implemented per engine).
+        if before_round is not None:
+            reason = before_round(rnd)
+            if reason:
+                outcome.halted = True
+                outcome.exit_reason = reason
+                break
+
+        tools = round_tools \
+            if (rnd < max_tool_rounds or not tools_terminal_round) else None
         msg, finish, usage = dispatch(rnd, tools)
         outcome.rounds += 1
         if on_round_result is not None:
@@ -232,17 +327,66 @@ def run_agent_loop(
         if on_tool_round is not None:
             on_tool_round(rnd, msg)
 
-        for tc in tool_calls:
-            # (3) BETWEEN-TOOLS — a Stop pressed during a slow tool must skip
-            # the remaining queued tools and NOT start a fresh round. Removing
-            # this check reintroduces the "Stop has limited effect" bug.
-            if abort.aborted:
-                outcome.aborted = True
-                outcome.exit_reason = 'aborted_between_tools'
-                break
-            execute_tool(rnd, tc)
+        # Wedged-loop breaker: a round that re-issues the PREVIOUS round's
+        # tool calls byte-for-byte made no progress. Consecutive repeats are
+        # counted; any differing fingerprint resets the streak. Checked here
+        # (before the tools run) so a wedged agent cannot keep re-executing
+        # the same side-effecting call while the counter climbs.
+        if max_consecutive_no_progress_rounds > 0:
+            fingerprint = repr([
+                (tc.get('function', {}).get('name', ''),
+                 tc.get('function', {}).get('arguments', ''))
+                for tc in tool_calls if isinstance(tc, dict)
+            ])
+            if fingerprint == prev_tool_fingerprint:
+                outcome.consecutive_no_progress_rounds += 1
+                if outcome.consecutive_no_progress_rounds \
+                        >= max_consecutive_no_progress_rounds:
+                    logger.warning(
+                        '[AgentLoop] no-progress breaker tripped at round %d: '
+                        '%d consecutive identical tool-call rounds',
+                        rnd + 1, outcome.consecutive_no_progress_rounds)
+                    outcome.halted = True
+                    outcome.exit_reason = 'no_progress'
+                    break
+            else:
+                outcome.consecutive_no_progress_rounds = 0
+            prev_tool_fingerprint = fingerprint
+
+        note = None
+        if execute_tools is not None:
+            # Batch path (e.g. swarm's parallel tool pool): the hook owns
+            # intra-batch behavior incl. any abort checks.
+            note = execute_tools(rnd, tool_calls)
+        else:
+            for tc in tool_calls:
+                # (3) BETWEEN-TOOLS — a Stop pressed during a slow tool must
+                # skip the remaining queued tools and NOT start a fresh
+                # round. Removing this check reintroduces the "Stop has
+                # limited effect" bug.
+                if abort.aborted:
+                    outcome.aborted = True
+                    outcome.exit_reason = 'aborted_between_tools'
+                    break
+                execute_tool(rnd, tc)
 
         if outcome.aborted:
             break
+
+        # Consecutive-tool-timeout circuit breaker (before on_round_end:
+        # a halted round is NOT checkpointed, mirroring the orchestrator).
+        if max_consecutive_tool_timeouts > 0:
+            if note and note.get('timed_out'):
+                outcome.consecutive_tool_timeouts += 1
+                if outcome.consecutive_tool_timeouts \
+                        >= max_consecutive_tool_timeouts:
+                    outcome.halted = True
+                    outcome.exit_reason = 'tool_timeout'
+                    break
+            else:
+                outcome.consecutive_tool_timeouts = 0
+
+        if on_round_end is not None:
+            on_round_end(rnd)
 
     return outcome

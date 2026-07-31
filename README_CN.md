@@ -71,10 +71,12 @@ Tofu 是一个**完全自托管的 AI 助手**，一条命令即可启动。它�
 | 服务商 | 配置方式 |
 |---|---|
 | OpenAI、Anthropic、Amazon Bedrock、Google Gemini、DeepSeek、Qwen、MiniMax、GLM、Doubao、Mistral、Grok、百度千帆、OpenRouter | 点击 **⚡ 从模板添加** —— 一键完成 |
-| Ollama、vLLM 或任何本地模型服务 | 添加为自定义服务商，填入你的本地端点 |
+| Ollama、vLLM 或任何本地模型服务 | 使用默认端口（Ollama `11434`、vLLM `8000`、SGLang `30000`）时启动即**自动发现** —— 或添加为自定义服务商，填入你的本地端点 |
 | Azure OpenAI | 模板可用，填入部署专属的 Base URL |
 
 **同一服务商多个密钥** —— 添加多个 API 密钥，当某个密钥触发限速时自动轮换到下一个。跨服务商的智能调度器会根据实时延迟评分和错误率追踪来路由请求。
+
+**本地引擎自动发现** —— Tofu 启动后约 5 秒、之后每 2 分钟探测一次本机规范端口（Ollama `:11434`、vLLM `:8000`、SGLang `:30000`，另加 `$OLLAMA_HOST`）。引擎返回非空模型列表时会自动注册为普通本地服务商——健康检查和设置卡片与手动添加完全一致。删除自动添加的服务商后其端口会被永久忽略（不会复活）。设 `TOFU_LOCAL_AUTODISCOVER=0` 可关闭。
 
 或者通过环境变量配置（适用于无界面/Docker 部署）：
 ```bash
@@ -333,10 +335,14 @@ cd clients/typescript && npm install
 
 当你需要助手阅读登录后才能看的页面 —— 内部仪表盘、JIRA 工单、需要认证的管理后台 —— 浏览器插件可以桥接你真实的浏览器会话到 Tofu。
 
+支持 **Chrome、Edge、Chromium** —— 它们同属 Chromium 系，同一份插件无需改动即可加载。（不支持 Firefox：它没有持久的"加载已解压扩展"路径 —— `about:debugging` 加载的扩展重启浏览器就会消失，终端用户只能安装经 Mozilla 签名的扩展包。）
+
 **安装：**
-1. 打开 `chrome://extensions` → 启用开发者模式
+1. 打开浏览器的扩展管理页 —— Chrome/Chromium 是 `chrome://extensions`，Edge 是 `edge://extensions` —— 并启用开发者模式
 2. 加载已解压的扩展程序 → 选择 `browser_extension/` 目录
 3. 点击插件图标 → 输入你的 Tofu 服务器地址
+
+> Tofu 就跑在你这台机器上？设置 → 本机控制会自动识别你装的是哪个浏览器，并提供一键按钮直接打开对应的扩展管理页，路径也已复制好。
 
 **可以做什么：**
 
@@ -365,10 +371,26 @@ cd clients/typescript && npm install
 **安装：**
 ```bash
 pip install pyautogui pillow psutil
-python lib/desktop_agent.py --server http://your-server:15000 --allow-write --allow-exec
+python -m lib.desktop_agent --server http://your-server:15000 --allow-write --allow-exec
 ```
 
 代理连接到你的 Tofu 服务器，提供文件操作、剪贴板、截图、GUI 自动化（pyautogui）和系统信息等工具。所有危险操作需要显式启用 `--allow-write` / `--allow-exec` 标志。
+
+#### 远程工作树（Remote Worktree）
+
+让 Studio **直接修改你本地机器上的项目代码**（Windows / macOS 均可）——不共享文件系统，只把「文件意图」安全地路由到本机执行。
+
+**使用旅程：**
+1. 在本机启动 agent，用 `--root 名字=路径` 声明共享根（哪些项目目录允许被访问；可重复，持久化到 `~/.tofu/desktop_agent.json`，重启不失）：
+   ```bash
+   python -m lib.desktop_agent --server https://your-server --allow-write --allow-exec \
+       --bridge-secret <第 2 步的令牌> --root myapp=~/code/myapp
+   ```；
+2. 打开 **设置 → 设备**，颁发一个 bridge 令牌（只显示一次），填进 agent 配置——令牌绑定你的账号，命令只投递给你自己的设备；
+3. 在项目选择器顶部的「远程设备」分组里，把某个共享根加进工作区（离线设备灰显不可选）；
+4. 之后 Studio 的 `write_file` / `apply_diff` / `run_command` 等全部落在**你的本地磁盘**——写前自动快照（`<项目>/.tofu/file-history/` 可回滚），外部改动会拒写并要求先重读，`run_command` 输出像服务器端一样**实时流式**显示在终端块里。
+
+**安全边界：** 路径只允许根内相对路径（符号链接/`..`/绝对路径逃逸全拒）；删除类命令目标必须落在根内；远程写入默认走 Manual 批准门；每用户令牌在 relay 部署下隔离命令投递。总开关 `TOFU_REMOTE_WORKTREE`（服务端）默认关闭，开启后以上才生效。详见 `docs/REMOTE_WORKTREE_DESIGN.md`。
 
 ---
 
@@ -383,6 +405,7 @@ python lib/desktop_agent.py --server http://your-server:15000 --allow-write --al
 - **论文库** —— 左侧侧边栏展示你读过的所有论文，按时间分组；切换论文不丢失上下文
 - **并排阅读** —— 滚动 PDF 的同时聊天；助手可感知你当前所在页面
 - **笔记面板** —— 在论文旁边记录你自己的笔记，跨会话持久保存
+- **播客面板** —— 把论文的分析报告变成一档可收听的单人播客（约 5 分钟短版 / 约 15 分钟完整版）。公式只讲直觉（绝不念符号），最关键的图用三段式口播讲解，剧本里的每个数字都经机器溯源校验后才合成语音。可在面板内直接播放（逐字稿点击跳转、睡眠定时），也可下载 MP3 或导出剧本。需先生成报告；未配置 TTS 语音合成槽位时（OpenAI 兼容 `/audio/speech` 服务商、模型声明 `capabilities: ["tts"]`）自动降级为仅生成剧本与逐字稿。详见 `docs/PAPER_PODCAST_DESIGN.md`。
 
 > ⚠️ **Beta：** 论文阅读模式正在持续迭代中，欢迎在 [GitHub Issues](https://github.com/rangehow/ToFu/issues) 反馈。
 
@@ -416,6 +439,28 @@ pip install docling --extra-index-url https://download.pytorch.org/whl/cpu
 多模型调度在 Gemini 和 GPT 图片模型之间轮转，遇到限速自动重试。
 
 ---
+多模型调度在 Gemini 和 GPT 图片模型之间轮转，遇到限速自动重试。
+
+---
+
+### 🎬 动画视频（MG 动效）
+
+把字幕稿（SRT）变成竖屏 MG 动画视频 —— Tofu 会把字幕按语义分镜、为每个镜头编写 HyperFrames HTML 动画、用无头 Chrome 逐镜头渲染，最后拼接出 `final.mp4`。不依赖任何外部 agent 命令行，也不需要视频剪辑软件。
+
+**使用方法：** 挂载项目（Studio），贴一段 SRT（或给一个口播主题），然后说生成视频 —— 例如“把这份字幕做成竖屏短视频”。助手会在项目的 `.tofu/motion_video/<slug>/` 下工作，并报告成品 MP4 路径。
+
+- **确定性渲染** —— 每一帧都由时间戳独立计算（可寻址的 GSAP 时间轴）；某个镜头不满意时，只重渲该镜头再重新拼接即可
+- **零 LLM 质量闸** —— 分镜时间轴校验（完整覆盖、时长和 ±0.1s）、每次渲染前的 HyperFrames lint/validate/inspect、渲染后的 ffprobe 规格复核（分辨率/帧率/时长/静音）
+- **工具链自举** —— `motion_video_env_check` 首次使用自动安装钉版 HyperFrames CLI；ffmpeg 来自 `imageio-ffmpeg`、ffprobe 来自静态构建（均免 root）；Chrome 复用 Playwright 缓存
+- **失败分类** —— 渲染错误按类返回（`env_missing` / `lint` / `chrome` / `timeout` / `aborted`）并附带上游修复提示，不用啃原始日志
+- **TTS 配音（音画合成）** —— `motion_video_narrate` 用字幕文本为每个镜头配音（复用播客链的 TTS 槽位），音频偏长的镜头自动延长对齐，`motion_video_mux` 以响度归一的 AAC 收尾；没有配置 TTS 槽位时自动降级为静音视频而不是报错
+- **无头 API + 并行渲染** —— `POST /api/v1/motion/videos` 在服务端跑完整条流水线（零 LLM 分镜 + 模板镜头、有界并行渲染、重复请求自动合并入队），成品经支持 Range 的 `/api/v1/motion/videos/<id>/file` 下载，并附对齐后的侧车 SRT
+- **单镜重生成 + 字幕烧录** —— 只重渲某一个镜头并自动重组装（`POST …/scenes/<id>/regen`，成品 URL 不变），逐镜状态可查（`GET …/scenes`），可选硬烧字幕（`burn_in: true`，libass，支持中文字体）
+- **论文视频摘要** —— 一次调用把论文报告变成一条配音 MG 短视频（`POST /api/v1/paper/video/start`，与播客链同款报告门）
+- **论文「视频」页签** —— 论文阅读器第五个页签：生成卡（语言/画质/音色/配音/烧录）、实时相位进度、内嵌播放器，以及逐镜网格——每个镜头都有自己的预览和重渲按钮
+- **深度知识包** —— 来自 vibe-motion/auto-motion 的 29 条动效规则、13 个镜头蓝图、20+ 设计帧预设，在 设置 → 技能 里搜 “hyperframes” 一键安装
+
+---
 
 ### 🎨 Artifacts（实时画布）
 
@@ -429,7 +474,7 @@ pip install docling --extra-index-url https://download.pytorch.org/whl/cpu
 
 当你想连接外部工具服务器 —— GitHub、数据库、自定义 API —— MCP 可以把它们桥接到 Tofu 的工具系统中。
 
-**工作原理：** MCP 服务器作为子进程运行，通过 stdio/SSE（JSON-RPC 2.0）通信。Tofu 将它们的工具翻译成 OpenAI function-calling 格式，让 LLM 可以像使用原生工具一样发现和调用它们。
+**工作原理：** MCP 服务器既可以作为本地子进程运行（stdio），也可以是远程 HTTP 端点（`streamable-http` / `sse`），统一使用 JSON-RPC 2.0 通信。Tofu 将它们的工具翻译成 OpenAI function-calling 格式，让 LLM 可以像使用原生工具一样发现和调用它们。
 
 **配置：** 在 **设置** 中或编辑 `data/config/mcp_servers.json`：
 ```json
@@ -442,7 +487,32 @@ pip install docling --extra-index-url https://download.pytorch.org/whl/cpu
 }
 ```
 
+**远程服务器**若需要鉴权，密钥只放在 `env` 里；`headers` 与 `url` 只写
+`${VAR}` 引用，连接时才代入。这样密钥只有一个存放处，并且会从所有 API
+响应与日志中被脱敏掉：
+```json
+{
+  "rollinggo-hotel": {
+    "transport": "streamable-http",
+    "url": "https://mcp.rollinggo.cn/mcp",
+    "headers": { "Authorization": "Bearer ${ROLLINGGO_API_KEY}" },
+    "env": { "ROLLINGGO_API_KEY": "你的 key" }
+  },
+  "amap-maps": {
+    "transport": "streamable-http",
+    "url": "https://mcp.amap.com/mcp?key=${AMAP_MAPS_API_KEY}",
+    "env": { "AMAP_MAPS_API_KEY": "你的 key" }
+  }
+}
+```
+
 之后助手就可以调用 `mcp__github__create_issue`、`mcp__github__search_code` 等工具 —— 任何 MCP 兼容的服务器都能接入。
+
+**本地生活与出行（中国）。** 内置目录里有一类「办日常事」的服务器，个人开发者都能自助拿到
+凭证：**高德地图**（路径规划、周边搜索、天气）、**RollingGo** 酒店 + 机票（真实可订库存）、
+**途牛**（酒店/机票/火车/门票/邮轮/度假，支持完整下单链路）、**12306**（火车余票查询，本地运行、
+无需 key）。**飞猪**是 Skill 形态而非 MCP 服务器，请在 **设置 → Skills** 中查找。
+携程与美团**故意未收录**：它们的 AI 开放平台仅对企业客户开放，做成一键安装卡片会点不动。
 
 ---
 
@@ -530,7 +600,7 @@ Tofu 会默默观察自己的表现，并提议一些小改进 —— 每一处�
 
 ### 🐾 豆腐宠物（纯为好玩）
 
-切换到 **豆腐（Tofu）** 主题，会有一只小小的 Q 版豆腐吉祥物入驻项目栏。它在一片装饰场景里走来走去，有真实的行走动画和情绪 —— 任务加载时思考、成功时庆祝 —— 还会留下互动的脚步特效（草丛、水波、天空光点）。用项目栏里的 **场景** 按钮（草地 / 水池 / 天空 / 关闭）和 **宠物** 按钮（Tofu / Oneko）来自定义。它会尊重系统的"减少动态效果"设置。纯装饰，随时可关。
+切换到 **豆腐（Tofu）** 主题，豆腐吉祥物本尊会入驻项目栏 —— 就是应用 logo 那块等轴测奶油色豆腐，用同一套配色绘制。它在一片装饰场景里走来走去，有真实的行走动画和情绪 —— 任务加载时思考、成功时庆祝、入夜后打盹 —— 走过时还会惊动场景（草丛分开、水面起波、云朵流动）。因为它是一块豆腐而不是有手脚的生物，它靠「软」来演：落地时压扁、起跳时拉伸、停下时晃一晃。可以把它拖到栏里任何位置，或者点一下看今天的概况。用项目栏里的 **场景** 按钮（草地 / 水池 / 天空 / 关闭）换它的世界。它会尊重系统的"减少动态效果"设置。纯装饰，随时可关。
 
 ---
 
@@ -615,7 +685,7 @@ vim .env   # 填入你的值
 │   ├── scheduler/             任务调度（cron、主动代理）
 │   ├── image_gen.py           图片生成（多模型调度）
 │   ├── mt_provider.py         机器翻译服务商适配（小牛翻译、自定义）
-│   ├── desktop_agent.py       桌面自动化代理
+│   ├── desktop_agent/         桌面自动化代理（本地桥）
 │   └── ...
 │
 ├── lib/conversations/         项目大脑 —— 章程、看板、活动流、对话间消息、路径租约、状态通道

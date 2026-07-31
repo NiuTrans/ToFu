@@ -262,6 +262,21 @@ def has_pending(task_id: str) -> bool:
     return peek(task_id) > 0
 
 
+def is_tombstoned(task_id: str) -> bool:
+    """Return True if *task_id*'s inbox slot has been tombstoned (task ended).
+
+    A tombstoned slot silently drops any :func:`enqueue` — the orchestrator has
+    stopped draining it. The human-steer send path probes this to decide
+    whether a mid-turn steer can still be injected into the live turn, or must
+    instead fall back to the durable ``message_queue`` as a fresh next turn
+    (the exactly-once "never-zero" guarantee).
+    """
+    if not task_id:
+        return False
+    with _lock:
+        return task_id in _tombstones
+
+
 def clear(task_id: str) -> int:
     """Discard all queued items for *task_id* AND tombstone the slot.
 

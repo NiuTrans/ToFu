@@ -432,7 +432,7 @@ _CATALOGUE_EXCLUDED_ROLES = frozenset({
 
 
 def format_role_catalogue() -> str:
-    """Return a multi-line "role: when_to_use" listing for prompt injection.
+    """Return a multi-line "role: when_to_use + tools" listing for prompt injection.
 
     This is what the master LLM reads in the ``spawn_agents`` tool
     description.  Mirrors Claude Code's ``Available agent types and the
@@ -441,16 +441,37 @@ def format_role_catalogue() -> str:
     role to pick and either falls back to ``general`` or doesn't spawn
     at all.
 
+    Each role line ALSO carries its tool list (from ``tools_hint``),
+    because a "when to use" blurb alone let the master hand a
+    ``get_conversation`` task to ``researcher`` — which physically
+    cannot run it (2026-07-27 incident).  Roles with an empty hint are
+    unrestricted, so the catalogue spells that out as ``ALL tools minus
+    <denylist>`` instead of leaving it ambiguous.  The tool names are
+    derived from the same constants the executor enforces
+    (:data:`AGENT_ROLES`, ``SUB_AGENT_DENYLIST``, ``ARTIFACT_TOOLS``) —
+    never a hand-copied second list.
+
     Only MANUALLY-SPAWNABLE roles are listed; endpoint/autopilot-internal
     roles (see :data:`_CATALOGUE_EXCLUDED_ROLES`) are omitted so the catalogue
     matches the ``role`` param's advertised set.
     """
+    # Local import — registry is loaded before tools.py finishes (circular
+    # import avoidance), same pattern as scope_tools_for_role below.
+    from lib.swarm.tools import ARTIFACT_TOOLS, SUB_AGENT_DENYLIST
+
+    deny_str = '/'.join(sorted(SUB_AGENT_DENYLIST))
     lines = []
     for role, cfg in AGENT_ROLES.items():
         if role in _CATALOGUE_EXCLUDED_ROLES:
             continue
         when = cfg.get('when_to_use', '').strip().replace('\n', ' ')
-        lines.append(f'  - {role}: {when}')
+        hint = cfg.get('tools_hint') or []
+        tools_str = (', '.join(hint) if hint
+                     else f'ALL tools minus {deny_str}')
+        lines.append(f'  - {role}: {when} [tools: {tools_str}]')
+    artifact_names = ', '.join(t['function']['name'] for t in ARTIFACT_TOOLS)
+    lines.append(f'  Every role additionally receives the shared artifact '
+                 f'tools: {artifact_names}.')
     return '\n'.join(lines)
 
 

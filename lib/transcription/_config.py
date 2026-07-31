@@ -19,9 +19,24 @@ logger = get_logger(__name__)
 #   TRANSCRIPTION_CAP → dedicated multipart /audio/transcriptions endpoint.
 #   AUDIO_CHAT_CAP    → omni chat model, audio sent inline as an input_audio
 #                       content-part through /chat/completions.
+# The literal cap strings live in lib.model_info.capability_taxonomy so a
+# rename in one spot can't drift the transcription plumbing.
 TRANSCRIPTION_CAP = 'transcription'
 AUDIO_CHAT_CAP = 'audio_chat'
 TRANSCRIPTION_CAPS = frozenset({TRANSCRIPTION_CAP, AUDIO_CHAT_CAP})
+# Sanity: the two names must be exactly the caps the taxonomy classifies as
+# their respective roles. If someone renames the cap string upstream but
+# forgets to update here, the assert fires at import time.
+from lib.model_info.capability_taxonomy import (
+    CAPABILITY_SEMANTICS as _CAP_SEMANTICS,
+    CHAT_EXCLUDED_CAPS as _CHAT_EXCLUDED_CAPS,
+)
+assert TRANSCRIPTION_CAP in _CHAT_EXCLUDED_CAPS, (
+    'TRANSCRIPTION_CAP must be in CHAT_EXCLUDED_CAPS (frontend picker filter)'
+)
+assert _CAP_SEMANTICS.get(AUDIO_CHAT_CAP, {}).get('in_chat_picker') is True, (
+    "AUDIO_CHAT_CAP must remain chat-picker-visible in capability_taxonomy"
+)
 
 
 def audio_byte_cap() -> int:

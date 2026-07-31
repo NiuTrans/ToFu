@@ -267,17 +267,6 @@ var ProjectBrainI18n = (function () {
     return panel.classList.contains('pb-tab-panel-active');
   }
 
-  /** Lazy-on-expand: a long-text clamp (`.pb-clamp`) is visually COLLAPSED
-   *  until the user expands it (`.pb-clamp-open`). Defer translating a
-   *  collapsed clamp so we don't spend a call on a wall of text nobody
-   *  opened; short text (`.pb-clamp-inner`) is never deferred. The clamp
-   *  toggle re-invokes apply() on expand (project-brain.js _wireClampToggles). */
-  function _deferUntilExpand(el) {
-    if (!el || !el.classList) return false;
-    if (!el.classList.contains('pb-clamp')) return false;   // short text or non-clamp
-    return !el.classList.contains('pb-clamp-open');          // collapsed → defer
-  }
-
   // ── Core: apply translations to a rendered subtree ──────────────
   /**
    * Overlay translations onto every `[data-pb-src]` node under `root`.
@@ -306,9 +295,11 @@ var ProjectBrainI18n = (function () {
         _revert(el);
         continue;
       }
-      // Lazy: a collapsed long-text clamp waits until the user expands it.
-      // Leave it showing the original (a partial fragment) until then.
-      if (_deferUntilExpand(el)) { _revert(el); continue; }
+      // Long text (a collapsed .pb-clamp) is translated EAGERLY too: the
+      // collapsed preview is exactly what the operator scans, so deferring
+      // left the whole board in the source language (the "untranslated UI"
+      // complaint). One cached call per item; the clamp-toggle re-apply is a
+      // compare-before-swap no-op afterwards.
       var key = _cacheKey(src, target);
       var cached = _memCache[key];
       if (cached != null) { _scheduleSwap(el, src, cached); continue; }

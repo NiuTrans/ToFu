@@ -462,6 +462,16 @@ def inject_and_run_task(
             (messages_json, now_ms, len(messages),
              search_text, conv_id)
         )
+        # Phase 5 dual-write (flag-gated, inert when off): user+assistant append.
+        # Guarded separately: the messages are already committed, so a mirror
+        # failure must not reach this function's `except` and return None —
+        # that would leave the injected turn on disk with NO task ever spawned.
+        try:
+            from lib.database.messages_rows import mirror_write_and_commit
+            mirror_write_and_commit(db, conv_id, messages, now_ms=now_ms)
+        except Exception as _mirror_err:
+            logger.warning('%s row mirror failed (non-fatal, messages already '
+                           'durable): %s', log_prefix, _mirror_err, exc_info=True)
         from lib.conversations import update_conversation_fts
         update_conversation_fts(db, conv_id, search_text)
 

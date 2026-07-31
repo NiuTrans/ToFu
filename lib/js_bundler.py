@@ -357,7 +357,25 @@ JS_DIR = os.path.join(BASE_DIR, 'static', 'js')
 # with 'feature-' (e.g. feature-loader.js) is NOT matched by the stale-bundle
 # cleaner. Cf. the corruption-guard skill: a runtime-assembled artifact must
 # never delete its own source.
-_BUILT_BUNDLE_RE = re.compile(r'^(?:bundle|feature)-[0-9a-f]{8}\.js$')
+# Built artifacts: core/deferred bundles AND the single-language i18n packs
+# emitted by lib/i18n_packs.py (Epic-E sub-part 1 slice 2). Kept in lockstep
+# with tests/test_bundle_manifest_parity.py::_BUILT_BUNDLE_RE — the parity
+# test's disk-orphan edge treats anything NOT matching this as a source file.
+_BUILT_BUNDLE_RE = re.compile(
+    r'^(?:(?:bundle|feature)-[0-9a-f]{8}|i18n-(?:zh|en)-[0-9a-f]{8})\.js$')
+
+# The i18n-pack subset of _BUILT_BUNDLE_RE, CAPTURING the language — a stale
+# pack can only ever heal to the current pack of the same language, so the
+# resolver needs the language, not just "is a pack".
+_PACK_LANG_RE = re.compile(r'^i18n-(zh|en)-[0-9a-f]{8}\.js$')
+
+# How long a built artifact is immune to another process's cleanup (seconds).
+# Covers the longest realistic serve overlap: a browser holding an old
+# index.html (bfcache / long-lived tab / caching proxy) plus an i18n pack
+# fetch. 2h by default so an hourly deploy cadence can never 404 an in-flight
+# page; 0 restores the pre-grace behaviour (keep-set only).
+_BUILT_ARTIFACT_GRACE_S = int(
+    os.environ.get('TOFU_BUNDLE_ARTIFACT_GRACE_S', '7200'))
 
 # ── Load order MUST match index.html (dependencies flow top → bottom) ──
 _BUNDLE_FILES = [
@@ -372,16 +390,62 @@ _BUNDLE_FILES = [
     # generateId, _ensureMsgId, scrollToBottom, ...) BEFORE these load,
     # so each extracted file can reference them at module-load time.
     # Symbols share window scope; no exports/imports needed.
-    # See `.tofu/skills/frontend-core-decomposition.md` for rationale.
+    # See `.tofu/memories/frontend-core-decomposition.md` for rationale.
     'core/folders.js',
     'core/cost.js',
     'core/debug_panel.js',
+    'core/request_inspector.js',  # after debug_panel.js (calls showMessagesInDebug at runtime)
     'core/escape_html.js',
     'core/safe_html.js',   # after escape_html.js (uses escapeHtml), before ui/ consumers
     'core/error_envelope.js',
     # Shared bytes->human size formatter (formatFileSize) — de-dupes
     # image-gen.js _formatFileSize + skills.js _skillsFmtSize. Load before them.
     'core/format_size.js',
+    # Capability taxonomy — window.isChatModel + CHAT_EXCLUDED_CAPS. Consumed
+    # by main_toolbar_ui.js / paper/report.js / settings/visibility_defaults.js
+    # / settings/template_actions.js so all of them load after this. Only
+    # touches window at load; server-config payload is applied at runtime.
+    # See lib/model_info/capability_taxonomy.py for the SSOT.
+    'core/model_caps.js',
+    # THE brand mascot URL (2026-07-29). Owns the cache-bust token (icons ship
+    # with max-age=86400, so a bare path made a logo change invisible for 24h —
+    # that is how a rollback once looked like it "didn't happen") AND the
+    # runtime try-on skin, so a candidate logo can be WORN in-product before
+    # anyone commits to shipping it. Consumed by ui/chat_render.js,
+    # main/main_conv_lifecycle.js, settings/core_panel.js and main.js boot —
+    # all load after this. Leaf module (window only at load).
+    'core/brand_logo.js',
+    # THE model-availability judgment (2026-07-28, pt_464f2baf). A logical
+    # model is served by a POOL of (wire id × key) slots and the dispatcher
+    # rotates over all of them, so the ONLY correct rule is "any usable slot
+    # ⇒ usable model". The rule it replaces summed the pool's requests/errors
+    # and divided, which paints a model with 8 dead slots + 1 healthy one as
+    # ~11% (red) even though the dispatcher serves it fine — one redeployed
+    # upstream made whole cards permanently red. Same function folds BOTH
+    # axes (runtime dispatch-health rows + active probe cells) so the passive
+    # and active signals can never disagree. Consumed by
+    # settings/key_stats.js; leaf module (window only at load), so its
+    # ordering requirement is just "before its consumers".
+    'core/model_health.js',
+    # THE model-grouping rule (2026-07-28, pt_464f2baf). The toolbar picker
+    # grouped by provider_id — so moving Claude to the Anthropic-native face
+    # (same gateway, same keys, just a different wire protocol) split the
+    # dropdown into two "Meituan" sections, leaking a backend detail to the
+    # user. The settings preset tab grouped by brand and never split. Two
+    # lists of the SAME data must not disagree about grouping; this is the
+    # single key/label both use. Also owns the brand-name table (previously
+    # duplicated verbatim twice in visibility_defaults.js). Consumed by
+    # main_toolbar_ui.js + settings/visibility_defaults.js (both load after).
+    'core/model_group.js',
+    # pt_679d064f68ac4dd6 (2026-07-25) — boot-time tenant identity probe.
+    # Defines initCurrentUserId(), which main.js awaits (as a promise chain)
+    # BEFORE wiring the push subscribers so the four multi-user gates
+    # (conv_state_reducer::_frameIsOurs, cross_tab_sync::_onConvNotifyPush /
+    # _onFoldersChangedPush, conv_sync_push::_onConvSyncPush) have an
+    # identity to compare frame.userId against. Leaf module (touches only
+    # window + Api at CALL time, never at load), so its only ordering
+    # requirement is "before main.js" — which every entry here satisfies.
+    'core/current_user.js',
     # Shared OS-file .zip drag/drop wiring (attachZipDropZone) — de-dupes the
     # memory + skills install dropzones. Load before memory_skill_install.js
     # and skills_install.js (both call it at runtime; core loads first anyway).
@@ -390,8 +454,143 @@ _BUNDLE_FILES = [
     # reconnect "thundering herd" (all N conv reattach/probe calls firing at
     # once on wake). Leaf module (window only); load before its consumers
     # core/cross_tab_sync.js + core/health_stream_timer.js.
+    # pt_conv_state_ssot P2 (2026-07-24) — pure reducer for server-
+    # authoritative conv busy state (applyRunningTaskIdsFrame /
+    # applyConvStateSnapshot / computeConvBusy / pickAuthoritativeTaskIdForReconnect).
+    # Consumed by ui/conversation_list.js (convIsBusy union read),
+    # core/cross_tab_sync.js (notify + conv_state_snapshot frame dispatch),
+    # main/main_conv_lifecycle.js (reconnect target picker). Leaf module
+    # (window only); MUST load before every consumer.
+    # pt_turn_settlement C1 (2026-07-24) — canonical JS port of the
+    # turn-settlement verdict (computeTurnSettlement / _tsScanKeptRounds).
+    # Consumed by ui/chat_render.js (Continue-button affordance),
+    # ui/finish_info.js (interrupt bubble label),
+    # main/main_regen_continue.js (Continue executor). Pure leaf module
+    # (window only); MUST load before every consumer. Behaviour-locked with
+    # lib/conversations/turn_settlement.py via
+    # tests/test_frontend_turn_settlement_equivalence.py.
+    'core/turn_settlement.js',
+    # THE ordered-insert primitive for #chatInner (2026-07-26). Owns the head
+    # and tail anchors that step over lazy-window furniture
+    # (#_lazyLoadSentinel / #_lazyLoadSentinelBottom), plus the RENDER_CONTRACT
+    # Invariant-1 runtime tripwire. Exists because the head-anchor rule first
+    # shipped as a CLOSURE inside renderChat, which ConvView could not reach —
+    # so the identical bug reappeared at the tail (a sent message rendering
+    # BELOW the bottom sentinel). Leaf module (document + console only); MUST
+    # load before ui/chat_render.js and conv_view.js.
+    # Order pinned by tests/test_frontend_lazy_sentinel_anchor.py.
+    'core/chatinner_dom.js',
+    # pt_679d064f68ac4dd6 follow-up — the multi-user identity gate's WATCHDOG.
+    # Owns the fail-open latch + reporter + a self-owned flush, and depends on
+    # NOTHING it watches. MUST load BEFORE core/conv_state_reducer.js: the
+    # degrade it reports is "the reducer failed to load", so hosting it inside
+    # the reducer (as it was until 2026-07-26) made it structurally unable to
+    # fire on its own trigger — latch, reader and the probe timer that ships it
+    # all vanished with the predicate. Leaf module (window + Api at CALL time).
+    # Order pinned by tests/test_frontend_identity_gate_parity.py.
+    'core/identity_gate_tripwire.js',
+    'core/conv_state_reducer.js',
     'core/async_pool.js',
+    # Settings-column adopter extracted 2026-07-27 from
+    # core/conversations.js (pt_3879f00e sub-part 2, slice 5):
+    # _applySettingsToConv — 8 call sites inside conversations.js AND
+    # 1 cross-file call site inside cross_tab_sync.js's
+    # _handleConvNotifyPush. Load-order constraint: MUST come before
+    # cross_tab_sync (the earlier consumer) — the leaf must precede
+    # BOTH consumers so the bare-name call resolves via bundle-level
+    # window scope. Pure helper: reads settings, writes onto conv.
+    'core/conv_apply_settings.js',
     'core/cross_tab_sync.js',
+    # Pure conversation reducers extracted 2026-07-25 from
+    # core/conversations.js (pt_3879f00e sub-part 2, slice 1):
+    # convAutoTranslate / assistantTailIsPriorTurn /
+    # pollWriteWouldClobberSettledTail / convTitleById /
+    # convAutoTranslateEffective. Leaf module (window only, no runtime
+    # state); load BEFORE core/conversations.js so downstream reads
+    # inside its heavier functions still resolve the bare names.
+    'core/conv_reducers.js',
+    # Pending-sync retry cluster extracted 2026-07-25 from
+    # core/conversations.js (pt_3879f00e sub-part 2, slice 2):
+    # markConvPendingSync / _clearPendingSyncMarkers / convHasPendingSync
+    # / _startPendingSyncPolling / _flushPendingSyncs plus the two
+    # state variables (_pendingSyncInterval, _PENDING_SYNC_POLL_MS).
+    # Reads ConvCache / Api.health / activeStreams / conversations /
+    # loadConversationMessages / syncConversationToServer at CALL time
+    # via bundle-level window scope. Load BEFORE core/conversations.js
+    # so its still-in-file writer (_clearPendingSyncMarkers call inside
+    # syncConversationToServer's success branch) resolves.
+    'core/pending_sync.js',
+    # Persist / freshness / rebase helpers extracted 2026-07-25 from
+    # core/conversations.js (pt_3879f00e sub-part 2, slice 3):
+    # _stripUsageTransient / _trimMsgForPersist /
+    # _serverHasSegmentsLocalLacks / _serverHasTranslationLocalLacks /
+    # _isErrorOnlyAssistant / _rebaseUnackedTail + the
+    # _USAGE_TRANSIENT_KEYS module-level constant. Pure helpers — every
+    # dependency is read at CALL time via bundle-level window scope.
+    # Load BEFORE core/conversations.js so syncConversationToServer
+    # (which calls _trimMsgForPersist and _rebaseUnackedTail) and
+    # loadConversationMessages (which calls both freshness signals)
+    # still resolve the bare names at runtime.
+    'core/conv_persist_helpers.js',
+    # Per-conv image base64 hydrator extracted 2026-07-26 from
+    # core/conversations.js (pt_3879f00e sub-part 2, slice 4):
+    # _hydrateImageBase64. Pure helper — fetches base64 for images
+    # arriving from DB with base64 stripped (post-restart), stashes a
+    # promise on conv._hydratePromise for downstream awaits. Reads
+    # apiUrl() at CALL time via bundle-level window scope. Load BEFORE
+    # core/conversations.js so its two call sites inside
+    # loadConversationMessages still resolve the bare name at runtime.
+    'core/conv_image_hydrate.js',
+    # Cold-boot cache-first sidebar paint extracted 2026-07-28 from
+    # core/conversations.js (pt_3879f00e sub-part 2, slice 6):
+    # hydrateSidebarFromCache. Reads ConvCache (getSidebarList /
+    # getAllMeta), seeds `conversations` with lightweight shells before
+    # any server round-trip so first paint has zero network dependency.
+    # Called ONCE from main.js's bootstrap. Load BEFORE
+    # core/conversations.js so main.js's bare-name call resolves via
+    # bundle-level window scope; the leaf itself calls `_serverConvCount`
+    # (still in conversations.js), `_applySettingsToConv`,
+    # `_startPendingSyncPolling` / `_flushPendingSyncs`, `_convSorter`,
+    # `renderConversationList` — all resolved AT CALL TIME via bundle
+    # scope, so the leaf-before-conversations order is safe.
+    'core/conv_hydrate_cache.js',
+    # ── conv_merge_shells.js: `_serverConvCount` (3-key coalescing) +
+    # `mergeServerConvShells` (id-keyed shell merge with never-overwrite
+    # discipline) — the pair `folders.js` / `ui/conversation_list.js`
+    # / conversations.js's `loadConversationsFromServer` all call.
+    # Must load BEFORE conversations.js so the two remaining
+    # `_serverConvCount` call sites inside `loadConversationsFromServer`
+    # resolve via bundle window scope (pt_3879f00e slice 7). Kept
+    # CONTIGUOUS as a single leaf so `test_frontend_folder_members_load`'s
+    # source extract (start of `_serverConvCount` → end of
+    # `mergeServerConvShells`) still succeeds.
+    'core/conv_merge_shells.js',
+    # ── conv_rescue_tail.js: `_rescuableLocalTail(localMsgs, serverMsgs)` —
+    # pure verdict that answers whether a server reply's shortfall is a
+    # legitimate delete (empty rescue → overwrite) or the signature of a
+    # lost-race whole-blob write (non-empty rescue → keep local, push back).
+    # ONE call site inside `loadConversationMessages` (conversations.js
+    # ~L1453). Load BEFORE conversations.js so the surviving call resolves
+    # via bundle-level window scope. Pure seam — no DOM, no globals, no
+    # state (pt_3879f00e slice 8).
+    'core/conv_rescue_tail.js',
+    # ── conv_disaster_recovery.js: forceRecoverFromServer /
+    # auditConversations / recoverAll — console-invokable last-resort
+    # rescue trio. Zero cross-file callers (grep-verified); the three
+    # reach each other inside this leaf. Load BEFORE conversations.js so
+    # the trio is available on window scope for console use, and AFTER
+    # conv_apply_settings.js because forceRecoverFromServer calls
+    # `_applySettingsToConv` (pt_3879f00e slice 9).
+    'core/conv_disaster_recovery.js',
+    # ── conv_verify_visibility.js: _setCacheVerifying (DOM decoration)
+    # + _openConvMayHoldOrphanGhost (ghost predicate). Two pure helpers
+    # on the cache-verify visibility path. Load BEFORE conversations.js
+    # so the 11 bare-name call sites (9 for the visibility toggle, 2
+    # for the ghost predicate) resolve via bundle-level window scope
+    # (pt_3879f00e slice 10). The bounded self-heal retry cluster
+    # remains in conversations.js — it calls into the still-unextracted
+    # _verifyActiveConvFromServer path.
+    'core/conv_verify_visibility.js',
     'core/conversations.js',
     # Shared SSE fetch-response read/decode/buffer loop (readSSEStream) —
     # extracted 2026-07-11 from branch.js / paper-reader.js / ui/sse_pipeline.js.
@@ -415,6 +614,15 @@ _BUNDLE_FILES = [
     # apiUrl() from core.js, consumed by every feature module below.
     'api.js',
     'push.js',         # after core.js (uses apiUrl), before ui.js (uses pushSubscribe)
+    # Login-wall cookie-capture consent banner. Subscribes pushSubscribe
+    # (push.js, directly above) + Api.authSources (api.js) at runtime;
+    # everything else is typeof-guarded. Self-inits on DOMContentLoaded.
+    'cookie_capture_consent.js',
+    # Global backend-liveness watch + prominent offline banner. Subscribes
+    # pushOnLatency (push.js) + probes via Api.health (api.js) — both loaded
+    # directly above; every other app symbol (showToast / recovery fns) is
+    # referenced only inside function bodies and typeof-guarded.
+    'core/backend_offline_monitor.js',
     # On-demand loader for the DEFERRED feature bundle (_DEFERRED_FILES). Must
     # be in the CORE bundle (installs the lazy stubs for the deferred entry
     # points before main.js boots). Only references document/debugLog/toast/t
@@ -435,7 +643,7 @@ _BUNDLE_FILES = [
     # The 11 files below were extracted from ui.js (8917 LOC). Concatenated
     # in load order — symbols share window scope so no exports needed.
     # IMPORTANT: this list MUST stay in dependency order.
-    # See `.tofu/skills/ui-decomposition.md` for the rationale.
+    # See `.tofu/memories/ui-decomposition.md` for the rationale.
     # Shared image fullscreen/download helpers (_openImageFullscreen /
     # _downloadGenImage). CORE because chat_render.js + tool_rounds.js call
     # them via inline onclick= on image thumbnails; image-gen.js (their old
@@ -465,6 +673,10 @@ _BUNDLE_FILES = [
     # window scope. Load BEFORE streaming_ui.js for clear intent.
     'ui/streaming_swarm_panel.js',
     'ui/streaming_ui.js',
+    # RENDER_CONTRACT Phase 3.5 §7 live stream session — the phase home
+    # (convId-keyed runtime slice; replaces streamBufs). Zero deps; load
+    # BEFORE the reducer/handlers/pipeline that read+write it.
+    'ui/stream_session.js',
     # RENDER_CONTRACT Phase 3 pure stream reducer — the single {content,
     # thinking,toolRounds} projection all four apply paths fold through. Pure
     # (no DOM/globals); load BEFORE the handlers + pipeline that consume it.
@@ -533,7 +745,6 @@ _BUNDLE_FILES = [
     # (typeof-guarded), and both load together in the feature bundle, so the
     # ordering constraint is preserved within _DEFERRED_FILES. See
     # feature-loader.js.
-    'scheduler.js',
     'optimizer.js',
     'update.js',
     'timer.js',
@@ -551,13 +762,24 @@ _BUNDLE_FILES = [
     # ── settings/ subpackage (split 2026-05-28 from monolithic settings.js) ──
     # The 15 files below were extracted from settings.js (4755 LOC).
     # Concatenated in load order; symbols share window scope.
-    # See `.tofu/skills/frontend-settings-decomposition.md`.
+    # See `.tofu/memories/frontend-settings-decomposition.md`.
     'settings/branding.js',
     'settings/provider_templates.js',
     'settings/auto_setup.js',
     'settings/local_endpoints.js',
+    # Degraded-section contract (2026-07-29): a settings block that depends on a
+    # JS symbol declares it via data-requires; when the symbol is absent (stale
+    # bundle after adding a module) the controls are hidden and a "needs
+    # restart" notice is shown, so a feature that cannot work never presents
+    # itself as usable. Must load BEFORE core_panel.js, which calls it.
+    'settings/section_requires.js',
     'settings/core_panel.js',
     'settings/provider_render.js',
+    # Wire-face visibility + editing (2026-07-29). Must load BEFORE
+    # provider_render.js consumers run, but AFTER core_panel.js declares
+    # _stgProviders. Placed here so _faceChipHTML / _renderFacesSection
+    # exist by the time a provider card renders.
+    'settings/provider_faces.js',
     'settings/key_stats.js',
     'settings/balance.js',
     'settings/template_actions.js',
@@ -568,16 +790,18 @@ _BUNDLE_FILES = [
     'settings/other_tabs.js',
     'settings/speech.js',
     'settings/auth_sources.js',
+    'settings/private_hosts.js',
     'settings/save_export.js',
     'settings/system_prompt_editor.js',
     'settings/oauth.js',
     'settings/mcp.js',
+    'settings/devices.js',
     # relay-admin.js intentionally NOT bundled — it loads only on the
     # standalone /admin page (static/admin.html), not in index.html.
     # ── main/ subpackage (split 2026-05-28 from monolithic main.js) ──
     # The 8 files below were extracted from main.js. They must come BEFORE
     # main.js so the boot IIFE in main.js can reference their symbols.
-    # See `.tofu/skills/frontend-main-decomposition.md` for the rationale.
+    # See `.tofu/memories/frontend-main-decomposition.md` for the rationale.
     'main/main_conv_lifecycle.js',
     'main/main_translating_bubble.js',
     'main/main_send_pipeline.js',
@@ -653,6 +877,12 @@ _BUNDLE_FILES = [
     # after main.js. Consumed by ui/chat_render.js (renderTurnCtxNote) and
     # main/main_send_pipeline.js (buildTurnCtxSnapshot).
     'info-rail.js',
+    # Merged "Local Control" surface (browser bridge + desktop agent in ONE
+    # toolbar entry + ONE setup modal). Reads the toolbar globals
+    # (browserEnabled / desktopEnabled) and calls _applyBrowserUI /
+    # _applyDesktopUI / _saveConvToolState, so it MUST come after main.js and
+    # main/main_toolbar_ui.js.
+    'local-control.js',
     # Real-time network-latency signal indicator in the topbar. Pure runtime
     # subscriber on push.js's RTT probe (pushOnLatency) + reads t() at render
     # time, so it MUST come after main.js (and after push.js, loaded far above).
@@ -710,6 +940,7 @@ _DEFERRED_FILES = [
     'task-mode.js',       # Task Mode viewer (openTaskMode) — reads _ORCH_* at runtime → AFTER orchestration.js
     # paper-reader.js decomposition (Epic E, 2026-07-11). Cohesive leaf siblings
     # load BEFORE paper-reader.js; all window-scope var (no load-time cross-read).
+    'paper/push_transport.js',  # shared push-vs-poll transport: paperAttachPush/paperDetachPush + the seq-gated exactly-once ingest (paperIngestEvent), used by report/qa/recommend → window-scope leaf, MUST load before every paper/* consumer
     'paper/reader_prefs.js',  # reader comfort prefs (text-size + width); leaf
     'paper/arxiv.js',     # arXiv search + describe-recommend + fetch; owns _recStream (read by core KaTeX hook at runtime) → load before paper-reader.js
     'paper/qa.js',        # Q&A tab render+send+poll; QA state + _ensurePaperText stay in core → load before paper-reader.js
@@ -718,6 +949,9 @@ _DEFERRED_FILES = [
     'paper/report.js',    # Report + Review Mode (task/poll/render/export + 7 load-time listeners); report/review STATE stays in core → load before paper-reader.js
     'paper/babel.js',     # Babel PDF-translation tab; owns _babelTranslatedPages (read by core library-persist at runtime) → load before paper-reader.js
     'paper/library.js',   # Paper Library (bookshelf) cache+CRUD+render; owns _paperLibrary state (extracted from paper-reader.js 2026-07) → runtime cross-refs, order free; before paper-reader.js
+    'paper/podcast.js',   # Paper Podcast tab (player + transcript + sleep timer); reads _paperHash/Api.paper.podcast* at RUNTIME only → before paper-reader.js
+    'paper/video.js',     # Paper Video Abstract tab (player + scene grid + per-scene regen); reads _paperHash/Api.motion* at RUNTIME only → before paper-reader.js
+    'paper/research.js',  # Auto-research console (direction → scored ideas). Reads NO paper state (pre-paper capability); reached from paper-reader.js:708's describe-box button → MUST load before paper-reader.js
     'paper-reader.js',    # Paper Reader (togglePaperMode) — ~54KB gz; init via _onReady (feature-loader.js)
     # Image-Gen mode (enterImageGenMode + panel controls) — ~11KB gz. No
     # load-time side effect; only load-time core read is `escapeHtml` (present,
@@ -739,6 +973,7 @@ _DEFERRED_FILES = [
     # the panel was never opened). Ordering: peers/status/i18n read
     # window.ProjectBrain._state at RUNTIME → MUST come after project-brain.js.
     'project-brain.js',
+    'project-brain-attention.js',
     'project-brain-peers.js',
     'project-brain-status.js',
     'project-brain-i18n.js',
@@ -770,6 +1005,11 @@ _DEFERRED_ENTRY_POINTS = (
 _bundle_filename = None    # e.g. 'bundle-a3f8b2c1.js'  (core)
 _feature_filename = None   # e.g. 'feature-b7c1d2e3.js' (deferred; None if empty/failed)
 _bundle_mtime = 0          # max mtime of source files when bundle was built
+_pack_filenames = {}       # {'zh': 'i18n-zh-<hash>.js', 'en': ...} — EMPTY when the
+                           # current bundle CONTAINS i18n.js (dual fallback), set when
+                           # it excludes it. The two are ONE atomic fact: a bundle
+                           # without i18n.js must NEVER be served without its pack.
+_bundle_includes_i18n = True
 
 
 def _source_max_mtime():
@@ -801,23 +1041,47 @@ def _source_max_mtime():
     return max_mt
 
 
-def _clean_old_bundles(keep_core, keep_feature):
-    """Remove stale built bundles (keep the current pair).
+def _clean_old_bundles(keep_core, keep_feature, keep_packs=()):
+    """Remove stale built bundles (keep the current set + anything YOUNG).
 
     Matches ONLY the content-hashed output filenames — ``bundle-<hash>.js`` /
-    ``feature-<hash>.js`` where <hash> is 8 hex chars — so a SOURCE file like
+    ``feature-<hash>.js`` / ``i18n-<lang>-<hash>.js`` — so a SOURCE file like
     ``feature-loader.js`` (which also starts with ``feature-``) is never
     deleted. (Deleting feature-loader.js would silently break the lazy loader.)
+    ``keep_packs`` is the CURRENT i18n pack filenames; any other pack-shaped
+    artifact is stale.
+
+    ★ CROSS-PROCESS AGE GRACE: an artifact younger than
+    ``_BUILT_ARTIFACT_GRACE_S`` is NEVER deleted, whatever the keep-set says.
+    The keep-set is per-process, but the directory is shared — a second
+    builder (an xdist worker, a supervisor-restart overlap, a sibling agent
+    running the bundler tests) computes its own keep-set and would delete the
+    bundle/pack THIS process is currently serving: an old index.html still
+    references it, and an ``i18n-<lang>-<hash>.js`` has no stale-resolver
+    heal — its 404 blanks the whole UI through t()'s silent fallback. The
+    build lock serializes builder-vs-builder, never builder-vs-reader, so the
+    only safe reap clock is the filesystem's own mtime (process-independent).
+    The grace bounds the disk the same way a TTL does: stale artifacts are
+    still reaped, just never while they can still be in anyone's serve path.
     """
+    keep = {keep_core, keep_feature, *keep_packs}
+    now = time.time()
     try:
         for f in os.listdir(JS_DIR):
-            if f in {keep_core, keep_feature}:
+            if f in keep:
                 continue
-            if _BUILT_BUNDLE_RE.match(f):
-                try:
-                    os.remove(os.path.join(JS_DIR, f))
-                except OSError as e:
-                    logger.debug('[Bundle] Failed to remove old bundle %s: %s', f, e)
+            if not _BUILT_BUNDLE_RE.match(f):
+                continue
+            path = os.path.join(JS_DIR, f)
+            try:
+                if now - os.path.getmtime(path) < _BUILT_ARTIFACT_GRACE_S:
+                    continue  # another process may have just published + be serving this
+            except OSError:
+                continue
+            try:
+                os.remove(path)
+            except OSError as e:
+                logger.debug('[Bundle] Failed to remove old bundle %s: %s', f, e)
     except OSError as e:
         logger.debug('Failed to clean old bundles: %s', e)
 
@@ -1059,21 +1323,63 @@ def build_bundle():
         ``_feature_filename`` (read via ``get_feature_bundle_filename``).
     """
     global _bundle_filename, _feature_filename, _bundle_mtime
+    global _pack_filenames, _bundle_includes_i18n
 
     t0 = time.time()
 
     with _build_lock():
-        core_name, core_size = _assemble_bundle(_BUNDLE_FILES, 'bundle-', critical=True)
+        # i18n single-language packs (Epic-E sub-part 1 slice 2) — emit FIRST,
+        # before assembling the core bundle, so the bundle's shape (with vs
+        # without i18n.js) can be decided by whether packs exist. FAIL-OPEN:
+        # emission needs node (extraction + the roundtrip gate); when it fails
+        # we assemble the bundle WITH i18n.js exactly as before and serve no
+        # packs — the status quo. A pack failure must never take the bundle
+        # down, because a served broken pack is invisible in production (t()
+        # silently falls back), whereas a missing pack just means "no split".
+        pack_names = ()
+        pack_map = {}
+        try:
+            from lib.i18n_packs import emit_pack_files
+            # Extract from THIS tree's i18n.js, never the global default —
+            # the pack and the bundle must always derive from the same
+            # sources (and tests monkeypatch JS_DIR to a temp tree).
+            pack_map = emit_pack_files(
+                JS_DIR, source_path=os.path.join(JS_DIR, 'i18n.js'))
+            pack_names = tuple(pack_map.values())
+        except Exception as e:  # noqa: BLE001 — fail-open by design (see above)
+            logger.warning('[Bundle] i18n pack emission failed; serving '
+                           'dual-language i18n.js as before: %s', e)
+
+        # Only exclude i18n.js from the core bundle when its replacement packs
+        # actually exist. The bundle content and _pack_filenames are ONE
+        # atomic fact (set together below): a bundle without i18n.js must
+        # never be served alongside an empty pack set.
+        core_files = ([f for f in _BUNDLE_FILES if f != 'i18n.js']
+                      if pack_map else list(_BUNDLE_FILES))
+
+        core_name, core_size = _assemble_bundle(core_files, 'bundle-', critical=True)
         if not core_name:
             return None
 
         # Deferred bundle — non-fatal. If it fails to build, ship core alone.
         feature_name, feature_size = _assemble_bundle(_DEFERRED_FILES, 'feature-', critical=False)
 
-        _clean_old_bundles(core_name, feature_name)
-        _bundle_filename = core_name
-        _feature_filename = feature_name
+        _clean_old_bundles(core_name, feature_name, keep_packs=pack_names)
+        # PUBLISH ORDER IS LOAD-BEARING. Readers of this manifest
+        # (get_i18n_pack_tag / get_i18n_pack_urls) are lock-free, so they can
+        # observe a partially-updated manifest. Publish the i18n pair FIRST and
+        # the `_bundle_filename` pointer that advertises it LAST: then a reader
+        # either sees the old pointer (with a pack pair that is valid for it too,
+        # since both packs are hash-named and still on disk) or the new pointer
+        # with its own pair. The reverse order let a reader pair the NEW bundle
+        # (i18n.js excluded) with the STALE `_bundle_includes_i18n = True`, so it
+        # injected neither the dictionary nor a pack and the whole UI rendered
+        # raw i18n keys with no error.
+        _pack_filenames = pack_map
+        _bundle_includes_i18n = not pack_map
         _bundle_mtime = _source_max_mtime()
+        _feature_filename = feature_name
+        _bundle_filename = core_name
 
     elapsed = time.time() - t0
     if feature_name:
@@ -1122,6 +1428,42 @@ def _schedule_background_rebuild():
 
     t = threading.Thread(target=_run, name='tofu-bundle-rebuild', daemon=True)
     t.start()
+
+
+def reset_manifest_for_tests():
+    """Drop the in-process bundle/pack manifest so the next read REBUILDS it.
+
+    ★ WHY THIS EXISTS — the save/restore trap.
+
+    ``_pack_filenames`` / ``_bundle_includes_i18n`` are PUBLISHED as a side
+    effect of building (see build_bundle), so a test that snapshots them,
+    mutates them, and replays the snapshot does NOT restore the world: its
+    snapshot was taken BEFORE the build it triggered, so replaying it stamps
+    the pre-build values (``{}`` / ``True``) over the real published state.
+    The module then reports "packs inactive" for the rest of the process and
+    every later test asking for a pack tag silently gets None — a
+    cross-file poisoning that NEITHER file reveals alone.
+
+    That is the same defect shape as the production bug this module was just
+    fixed for: a snapshot/restore pair reinstating a stale fact.
+
+    So the ONLY supported way to undo manifest mutation is to invalidate it
+    and let the next reader rebuild from the real sources. Tests MUST call
+    this instead of assigning the private globals back.
+
+    Cheap: the content-hash short-circuit means a rebuild re-publishes the
+    same filenames without rewriting any artifact.
+    """
+    global _bundle_filename, _feature_filename, _bundle_mtime
+    global _pack_filenames, _bundle_includes_i18n
+    with _build_lock():
+        _bundle_filename = None
+        _feature_filename = None
+        # 0 forces the staleness gate in get_bundle_filename* to miss, so a
+        # reader cannot be fooled into serving the cleared manifest.
+        _bundle_mtime = 0
+        _pack_filenames = {}
+        _bundle_includes_i18n = True
 
 
 def get_bundle_filename_nonblocking():
@@ -1174,6 +1516,45 @@ def get_bundle_script_tag_nonblocking():
         return None
     return (f'<script defer src="static/js/{filename}"'
             f' onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>')
+def get_i18n_pack_tag(lang):
+    """Script tag for the single-language i18n pack, or None.
+
+    Returns a tag ONLY when the currently-served core bundle EXCLUDES i18n.js
+    (i.e. packs were emitted in the same build). When the bundle contains
+    i18n.js (dual fallback after a failed emission), returns None so the
+    caller injects nothing — the dictionary is already in the bundle.
+
+    The ``_bundle_includes_i18n`` / ``_pack_filenames`` pair is published
+    BEFORE the ``_bundle_filename`` pointer inside build_bundle(), and read
+    into locals in ONE snapshot here, so a tag can never be handed out for a
+    bundle that already carries the dictionary.
+    """
+    filename = get_bundle_filename_nonblocking()
+    includes_i18n, packs = _bundle_includes_i18n, _pack_filenames
+    if not filename or includes_i18n:
+        return None
+    pack = packs.get(lang) or packs.get('zh')
+    if not pack:
+        return None
+    # _onI18nPackError (index.html), NOT the generic _onScriptError: in pack
+    # mode this file is the only copy of the dictionary, so its failure gets a
+    # retry + an explicit banner rather than a silent wall of raw i18n keys.
+    return (f'<script defer src="static/js/{pack}"'
+            f' onload="_onScriptLoad()" onerror="_onI18nPackError(event)"></script>')
+
+
+def get_i18n_pack_urls():
+    """{lang: 'static/js/<pack>'} for setLanguage()'s on-demand fetch, or None.
+
+    Injected into the page by routes/common.py as ``window.__I18N_PACK_URLS__``.
+    None when packs are inactive (dual bundle) — setLanguage then needs no
+    fetch because the dictionary already carries both languages.
+    """
+    filename = get_bundle_filename_nonblocking()
+    includes_i18n, packs = _bundle_includes_i18n, _pack_filenames
+    if not filename or includes_i18n or not packs:
+        return None
+    return {lang: f'static/js/{name}' for lang, name in packs.items()}
 
 
 def get_bundle_filename():
@@ -1226,10 +1607,26 @@ def resolve_stale_bundle(filename):
         None. Returns None when the request already names the current file
         (let it serve normally) or is not a built-bundle name at all (a real
         404 — must NOT be masked).
+
+    ★ KIND IS THREE-WAY, NOT TWO-WAY. ``_BUILT_BUNDLE_RE`` also admits the
+    single-language ``i18n-<lang>-<hash>.js`` packs, and a pack must heal to
+    the current pack OF THE SAME LANGUAGE. A two-way ``bundle-`` / else-
+    ``feature-`` split sent every stale pack request to the FEATURE bundle:
+    the browser then ran the feature bundle in the pack's place, so the core
+    bundle (which EXCLUDES i18n.js whenever packs are active) never got
+    ``_i18n`` / ``_i18nLang`` / ``t()`` at all — the whole UI rendered raw
+    i18n keys — while the doubly-executed feature bundle threw
+    ``Identifier already declared``, killing the rest of boot.
     """
     if not filename or not _BUILT_BUNDLE_RE.match(filename):
         return None
-    if filename.startswith('bundle-'):
+    pack = _PACK_LANG_RE.match(filename)
+    if pack:
+        # Keeps the pair coherent: _pack_filenames is published inside
+        # build_bundle() together with the bundle pointer this resolves against.
+        get_bundle_filename()
+        current = _pack_filenames.get(pack.group(1))
+    elif filename.startswith('bundle-'):
         current = get_bundle_filename()
     else:  # 'feature-'
         current = get_feature_bundle_filename()

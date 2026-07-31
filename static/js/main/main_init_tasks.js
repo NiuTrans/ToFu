@@ -339,6 +339,21 @@ async function initActiveTasks() {
                 if (td.fallbackReason) am.fallbackReason = td.fallbackReason;
                 if (td.fallbackKind) am.fallbackKind = td.fallbackKind;
                 if (td.modifiedFiles) am.modifiedFiles = td.modifiedFiles;
+                /* ★ Terminal turn fields the hand-written list above never
+                 *   covered — apiRounds / _taskId / cost / provider_id /
+                 *   thinkingDepth / modifiedFileList / model. A refresh
+                 *   landing just after the task finished rendered the
+                 *   degraded cost bar (aggregate rows only, no per-round
+                 *   table, no Task ID) until the next full reload. Single
+                 *   source of the field list: core/conv_reducers.js. Runs
+                 *   AFTER the deliberate server-wins lines above (the poll
+                 *   is terminal-authoritative), so those no-op here and
+                 *   only the missing fields land. The poll payload carries
+                 *   the task id as taskId/id (not _taskId) — adapt it onto
+                 *   the merge source so _taskId fills too. */
+                _mergeTerminalTurnFields(am, Object.assign({}, td, {
+                  _taskId: td.taskId || td.id || conv.activeTaskId,
+                }));
               }
               /* ★ If server returned status='interrupted', the task was checkpointed
                  but the server crashed before completing. Mark it as interrupted
@@ -449,6 +464,7 @@ async function initActiveTasks() {
         await Promise.all(offlineConvs.map(async (conv) => {
           const am = conv.messages[conv.messages.length - 1];
           const localContentLen = am.content?.length || 0;
+          let _cleared = false;
           try {
             // Try to get server's version — it may have the completed result
             const data = await Api.conversations.get(conv.id);
@@ -457,6 +473,14 @@ async function initActiveTasks() {
               if (serverMsgs.length > 0) {
                 const serverLast = serverMsgs[serverMsgs.length - 1];
                 if (serverLast && serverLast.role === 'assistant') {
+                  /* ★ Same single-source terminal-field fill (core/
+                   *   conv_reducers.js) — independent of the growth gate
+                   *   below: a settled turn's apiRounds/_taskId/cost must
+                   *   land even when its content no longer grows. Local
+                   *   'server_offline' finishReason is already present so
+                   *   the helper can't clobber it — the AC3 verdict below
+                   *   still owns replacing the badge. */
+                  if (_mergeTerminalTurnFields(am, serverLast) > 0) _cleared = true;
                   const serverContentLen = serverLast.content?.length || 0;
                   // If server has more content, adopt it (task completed after frontend gave up)
                   if (serverContentLen > localContentLen) {
@@ -467,13 +491,22 @@ async function initActiveTasks() {
                     am.content = serverLast.content;
                     if (serverLast.thinking) am.thinking = serverLast.thinking;
                     if (serverLast.toolRounds) am.toolRounds = serverLast.toolRounds;
-                    if (serverLast.finishReason && serverLast.finishReason !== 'server_offline') {
-                      am.finishReason = serverLast.finishReason;
-                    }
                     if (serverLast.usage) am.usage = serverLast.usage;
                     if (serverLast.model) am.model = serverLast.model;
                     if (serverLast.modifiedFiles) am.modifiedFiles = serverLast.modifiedFiles;
                     if (serverLast.modifiedFileList) am.modifiedFileList = serverLast.modifiedFileList;
+                    _cleared = true;
+                  }
+                  /* ★ AC3: adopt the server's REAL terminal reason regardless of
+                   *   content length. The badge on the bubble is the visible
+                   *   residue — if the server settled the turn (e.g. 'stop'),
+                   *   the stale 'server_offline' badge must be REPLACED by it,
+                   *   not merely have its error text wiped. */
+                  if (serverLast.finishReason && serverLast.finishReason !== 'server_offline'
+                      && am.finishReason === 'server_offline') {
+                    am.finishReason = serverLast.finishReason;
+                    if (serverLast.usage) am.usage = serverLast.usage;
+                    _cleared = true;
                   }
                 }
               }
@@ -481,14 +514,26 @@ async function initActiveTasks() {
           } catch (e) {
             console.debug(`[initActiveTasks CaseF] Server fetch failed for conv=${conv.id.slice(0,8)}: ${e.message}`);
           }
-          // Always clear the misleading error text — server is online now
+          // Clear the misleading error text — server is online now.
           if (am.error && errorEnvelopeKind(am.error) === 'server_offline') {
-            console.info(
-              `[initActiveTasks CaseF] conv=${conv.id.slice(0,8)}: clearing stale error text ` +
-              `(content=${(am.content?.length||0)}chars, finishReason=${am.finishReason})`
-            );
             delete am.error;
-            saveConversations(null);  // clearing a stale offline error — not new activity, don't bump updatedAt
+            _cleared = true;
+          }
+          /* ★ AC3: if the server had no fresher finishReason to adopt but the
+           *   bubble is STILL stuck on the frontend-only 'server_offline' badge
+           *   (server is provably back — we just fetched /api/chat/active), drop
+           *   the badge so no "connection lost / server offline" residue lingers
+           *   on a bubble whose answer is already complete. */
+          if (am.finishReason === 'server_offline') {
+            console.info(
+              `[initActiveTasks CaseF] conv=${conv.id.slice(0,8)}: dropping stale server_offline badge ` +
+              `(server back online, content=${(am.content?.length||0)}chars)`
+            );
+            delete am.finishReason;
+            _cleared = true;
+          }
+          if (_cleared) {
+            saveConversations(null);  // clearing stale offline residue — not new activity, don't bump updatedAt
             syncConversationToServer(conv);
           }
         }));
@@ -507,7 +552,7 @@ async function initActiveTasks() {
       renderConversationList();
       if (activeConvId && !activeStreams.has(activeConvId)) {
         const c = getActiveConv();
-        if (c && !c.activeTaskId) renderChat(c, false);
+        if (c && !c.activeTaskId) window.ConvView.replaceAll(c.id, { forceScroll: false });
       }
     }).catch(e => console.warn('[initActiveTasks] Background recovery error:', e.message));
 
@@ -530,7 +575,7 @@ function _ensureNewest() {
        *   flash before loadConversationMessages lands the real messages. Leave
        *   the skeleton up; the load's own `.then` paints the messages. */
       if (c && !(c._initialSwitchLoad && c._needsLoad && c.messages.length === 0)) {
-        renderChat(c);
+        window.ConvView.replaceAll(c.id);
       }
     }
     // ★ Restore server-side queue state (survives page refresh)

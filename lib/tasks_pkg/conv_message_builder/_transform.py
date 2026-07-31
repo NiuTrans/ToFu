@@ -305,16 +305,27 @@ def _build_assistant_messages(msg: dict) -> list[dict]:
 
     # ── Short-circuit: no tool rounds → single plain assistant message ──
     if not rounds:
-        if final_content or final_thinking:
-            return [{'role': 'assistant', 'content': final_content or ''}]
+        if final_content:
+            return [{'role': 'assistant', 'content': final_content}]
         # No rounds, no content — but a legacy `toolSummary` placeholder
         # may still describe what the assistant did. Use it as the body
         # so the model sees something instead of an empty turn.
         if msg.get('toolSummary'):
             return [{'role': 'assistant', 'content': msg['toolSummary']}]
-        # Empty assistant with nothing at all → preserve as empty placeholder
-        # (downstream merge-consecutive may clean it up).
-        return [{'role': 'assistant', 'content': ''}]
+        # Empty assistant with nothing at all — almost always an ERROR GHOST:
+        # a failed task persisted content=0 + an error envelope so the UI has
+        # a bubble to render. On the wire it carries ZERO information, and
+        # strict providers HARD-400 the whole request on it (Kimi/Moonshot:
+        # "the message at position N with role 'assistant' must not be empty"
+        # — 3 production convs became unretryable on this 2026-07-25).
+        # Thinking-only rows land here too: stored `thinking` is never
+        # replayed as wire `reasoning_content` for plain turns, so they would
+        # serialize as the same empty ghost. Drop the row — adjacent user
+        # neighbours are merged downstream by _merge_consecutive_same_role.
+        logger.info('[MsgBuilder] Dropping empty assistant row from wire '
+                    '(error=%s thinking=%dchars) — strict providers 400 on it',
+                    bool(msg.get('error')), len(final_thinking))
+        return []
 
     # ── Attempt structured reconstruction ──
     # Segment-first (epic pt_cb8f98b0cb9b47fb, step 4): when this row carries a

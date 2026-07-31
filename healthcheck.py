@@ -2,7 +2,11 @@
 """
 healthcheck.py — Automated project diagnostics for tofu.
 
-Run:  python3 healthcheck.py
+Run:  python3 healthcheck.py            — dev lint (source-tree checks)
+      python3 healthcheck.py --runtime [--port N] [--wait SEC]
+                                        — probe a RUNNING server (post-install
+                                          self-check: reachable? DB? index page?
+                                          LLM key? browser engine?)
 Exit code 0 = all green, 1 = issues found.
 
 Checks:
@@ -83,6 +87,211 @@ def fail(msg):
 def warn(msg):
     warnings.append(msg)
     print(f"  {C.WARN} {msg}")
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Runtime mode (--runtime): probe a RUNNING server instead of linting source.
+#
+# The dev lint below proves the source tree is coherent; it says NOTHING about
+# whether a freshly-installed server actually came up. install.sh launches
+# `python server.py` and previously never verified the result — a failed boot
+# (port busy, DB unwritable, missing wheel) was left for the user to spot in
+# raw startup logs. This mode is the post-install self-check: poll
+# /api/health (reachable + DB responsive), check the index page serves HTML,
+# then report the two things a new user needs next (an LLM credential, the
+# optional browser engine). Exits 0 on usable / 1 on broken, so install.sh can
+# surface the verdict automatically.
+# ═══════════════════════════════════════════════════════════════════════
+if '--runtime' in sys.argv:
+    import json as _json
+    import time as _time
+    import urllib.request as _urlreq
+
+    def _arg(flag, default=None):
+        if flag in sys.argv:
+            i = sys.argv.index(flag)
+            if i + 1 < len(sys.argv):
+                return sys.argv[i + 1]
+        return default
+
+    try:
+        _port = int(_arg('--port', os.environ.get('PORT', '')) or 15000)
+    except (TypeError, ValueError):
+        _port = 15000
+    try:
+        _wait = float(_arg('--wait', '0') or 0)
+    except (TypeError, ValueError):
+        _wait = 0.0
+    _base = f'http://127.0.0.1:{_port}'
+
+    section(f"Runtime Probe — server on port {_port}")
+
+    def _get(path, timeout=4):
+        try:
+            with _urlreq.urlopen(_base + path, timeout=timeout) as r:
+                return r.status, r.read()
+        except Exception:
+            return None, None
+
+    # 1. /api/health — optionally polling until the server finishes booting
+    #    (imports + DB init + first bundle build take a few seconds).
+    _deadline = _time.monotonic() + _wait
+    _status = _body = None
+    while True:
+        _status, _body = _get('/api/health')
+        if _status == 200 or _time.monotonic() >= _deadline:
+            break
+        _time.sleep(2)
+
+    if _status != 200:
+        fail(f"server not answering {_base}/api/health"
+             + (f" after {_wait:.0f}s wait" if _wait else ""))
+        print(f"\n{C.BOLD}  RESULT: {C.FAIL} server unreachable{C.END}")
+        sys.exit(1)
+
+    _health = {}
+    try:
+        _health = _json.loads(_body.decode('utf-8', 'replace'))
+    except Exception as e:
+        fail(f"/api/health returned non-JSON: {e}")
+
+    ok(f"server reachable (version {_health.get('version', '?')}, "
+       f"bootId {str(_health.get('bootId', '?'))[:8]})")
+
+    # 2. Database
+    if _health.get('db_responsive'):
+        ok(f"database responsive ({_health.get('db_engine', '?')})")
+    else:
+        fail(f"database NOT responsive ({_health.get('db_engine', '?')}): "
+             f"{_health.get('db_error', 'unknown')}")
+
+    # 3. Index page actually serves HTML (bundle injection / static serving)
+    _s2, _b2 = _get('/')
+    if _s2 == 200 and _b2 and b'<html' in _b2[:2000].lower():
+        ok("index page serves HTML")
+    else:
+        fail(f"index page did not serve HTML (status={_s2})")
+
+    # 4. At least one LLM credential somewhere the server reads:
+    #    env vars → .env → server_config providers (api_keys or oauth slot).
+    _has_key = bool(os.environ.get('LLM_API_KEY') or os.environ.get('LLM_API_KEYS'))
+    if not _has_key:
+        try:
+            with open(ROOT / '.env', encoding='utf-8', errors='ignore') as _f:
+                for _line in _f:
+                    _ls = _line.strip()
+                    if _ls.startswith('#'):
+                        continue
+                    if _ls.startswith(('LLM_API_KEYS=', 'LLM_API_KEY=')) \
+                            and _ls.split('=', 1)[1].strip().strip('"\''):
+                        _has_key = True
+                        break
+        except OSError:
+            pass
+    if not _has_key:
+        try:
+            with open(ROOT / 'data/config/server_config.json', encoding='utf-8') as _f:
+                _cfg = _json.load(_f)
+            for _p in (_cfg.get('providers') or []):
+                if _p.get('oauth'):
+                    _has_key = True
+                    break
+                for _k in (_p.get('api_keys') or []):
+                    if (isinstance(_k, str) and _k.strip()) or \
+                            (isinstance(_k, dict) and (_k.get('key') or '').strip()):
+                        _has_key = True
+                        break
+                if _has_key:
+                    break
+        except Exception:
+            pass
+    if _has_key:
+        ok("at least one LLM credential is configured")
+    else:
+        warn("no LLM API key found (env / .env / server_config) — the server "
+             "is up but chat will not answer until you add one in "
+             "Settings → Providers")
+
+    # 5. Optional browser engine (JS-rendered page fetching)
+    #
+    # `import playwright` is NOT evidence the browser works: it stays green when
+    # Chromium cannot launch at all (missing libatk/libnss → the binary dies
+    # instantly), and ALSO when Chromium launches but has zero fonts, which
+    # renders every glyph as nothing so screenshots come back blank-but-styled.
+    # Both were live defects here. Actually launch it and measure a glyph.
+    try:
+        import playwright  # noqa: F401
+    except ImportError:
+        warn("playwright not importable — JS-rendered page fetching disabled (optional)")
+    else:
+        try:
+            from playwright.sync_api import sync_playwright
+            # Chromium is a CHILD process: it needs the env's lib dir on
+            # LD_LIBRARY_PATH (libatk/libnss) and, on hosts without /etc/fonts,
+            # FONTCONFIG_* pointing at the env's config — or it either refuses
+            # to start or renders zero glyphs. chromium_env resolves both from
+            # sys.prefix, so this works with no .tofu_env.json marker (a bare
+            # `python3 healthcheck.py`, a fresh clone, or an exported bundle);
+            # the marker is only consulted as an extra candidate prefix.
+            _diag = {}
+            try:
+                from chromium_env import describe_chromium_env, ensure_chromium_env
+                _prefix = ''
+                try:
+                    import json as _j
+                    with open(ROOT / '.tofu_env.json', encoding='utf-8') as _mf:
+                        _prefix = (_j.load(_mf).get('env_prefix') or '')
+                except Exception as _me:
+                    logger.debug('no .tofu_env.json marker (fine): %s', _me)
+                ensure_chromium_env(env_prefix=_prefix)
+                _diag = describe_chromium_env(env_prefix=_prefix)
+            except Exception as _ce:
+                logger.debug('chromium_env unavailable: %s', _ce)
+            with sync_playwright() as _pw:
+                _br = _pw.chromium.launch(headless=True, args=['--no-sandbox'])
+                try:
+                    _pg = _br.new_page()
+                    _pg.set_content('<h1>tofu</h1>')
+                    _gw = _pg.evaluate(
+                        "(()=>{const c=document.createElement('canvas')"
+                        ".getContext('2d');c.font='60px sans-serif';"
+                        "return c.measureText('tofu').width;})()")
+                finally:
+                    _br.close()
+            if _gw and _gw > 0:
+                _exe = (_diag or {}).get('executable') or ''
+                _which = ''
+                if _exe:
+                    _which = (' [headless shell]' if 'headless' in _exe
+                              else ' [full build]')
+                ok(f"browser engine launches and renders text "
+                   f"(glyph width {_gw:.0f}px){_which}")
+                if _exe:
+                    print(f"      binary: {_exe}")
+            else:
+                fail("Chromium launches but renders NO text (zero fonts) — "
+                     "screenshots will come back blank-but-styled. Install "
+                     "fontconfig + a font family into the env "
+                     "(conda install -c conda-forge fontconfig font-ttf-dejavu-sans-mono)")
+        except Exception as _e:
+            _msg = str(_e).replace('\n', ' ')[:200]
+            # Report the RESOLVED cause when we know it, not just the symptom:
+            # "cannot launch" alone sends people hunting the wrong thing.
+            _hint = '; '.join((_diag or {}).get('issues') or [])
+            fail(f"playwright imports but Chromium cannot launch — browser "
+                 f"screenshots unavailable: {_msg}"
+                 + (f" [diagnosis: {_hint}]" if _hint else ""))
+
+    print(f"\n{C.BOLD}{'═'*60}{C.END}")
+    if errors:
+        print(f"{C.BOLD}  RESULT: {C.FAIL} {len(errors)} error(s), {len(warnings)} warning(s){C.END}")
+        sys.exit(1)
+    elif warnings:
+        print(f"{C.BOLD}  RESULT: {C.WARN} 0 errors, {len(warnings)} warning(s) — server usable{C.END}")
+        sys.exit(0)
+    else:
+        print(f"{C.BOLD}  RESULT: {C.OK} SERVER HEALTHY{C.END}")
+        sys.exit(0)
 
 
 # ═══════════════════════════════════════════════════════════════════════

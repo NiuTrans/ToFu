@@ -31,6 +31,10 @@ def _empty_summary() -> dict:
         'pendingDecisions': 0, 'activePeers': 0, 'peerEpics': {},
         'charterExists': False, 'conflicts': 0, 'conflictMessages': [],
         'statusLine': '',
+        # Attention roll-up (lib.conversations.project_attention) — the counts
+        # the collaboration bar leads with. `blocking` is the only one that
+        # drives emphasis; see the note in build_brain_summary.
+        'needsYou': 0, 'blocking': 0, 'advisory': 0, 'waiting': 0,
     }
 
 
@@ -135,6 +139,29 @@ def build_brain_summary(project_path: str, conv_id: str = '') -> dict:
                                        if a.get('message')]
     except Exception as e:
         logger.debug('[BrainSummary] conflict detect failed proj=%.40r: %s',
+                     project_path, e)
+
+    # ── Attention roll-up: everything genuinely waiting on the human ──
+    #    ONE call into the attention SSOT, so the always-visible bar and the
+    #    panel's Needs-you tab can never disagree about the count.
+    #
+    #    Why this matters: before it existed the bar led with pendingDecisions
+    #    (charter proposals) rendered with emphasis — but agents have
+    #    self-committed decisions since the 2026-07-12 de-gating, so a pending
+    #    proposal blocks nothing. Meanwhile an epic halted on a structured
+    #    question, which project_dispatch skips on EVERY heartbeat and which
+    #    therefore never resolves on its own, was not in this payload at all.
+    #    The loudest signal was the least urgent one. `blocking` is now what
+    #    drives the bar's emphasis; `needsYou` is what it counts.
+    try:
+        from lib.conversations.project_attention import build_attention_items
+        attn = build_attention_items(project_path, conv_id)
+        out['needsYou'] = attn['needsYou']
+        out['blocking'] = attn['blocking']
+        out['advisory'] = attn['advisory']
+        out['waiting'] = attn['waiting']
+    except Exception as e:
+        logger.debug('[BrainSummary] attention read failed proj=%.40r: %s',
                      project_path, e)
 
     # ── Pillar #7: the ambient one-line project-status headline. Read-only

@@ -50,9 +50,48 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 # pip / conda / subprocess logic so the rest of bootstrap.py operates
 # inside the right interpreter (so subprocess [sys.executable, 'server.py']
 # correctly inherits the env's python).
+def _tofu_export_env_native_paths(env_prefix, backend, env_name=None):
+    """Put the env's lib/ + bin/ on the search paths for CHILD processes.
+
+    The headless-Chromium half (LD_LIBRARY_PATH + fontconfig) is delegated to
+    chromium_env.ensure_chromium_env() — the single source of truth shared with
+    server.py, tests/conftest.py and lib/motion_video. It resolves from
+    sys.prefix rather than from this marker, so it also works on a fresh clone /
+    exported bundle where no .tofu_env.json exists. chromium_env is stdlib-only
+    BY CONTRACT precisely so bootstrap.py — whose job is to run when deps are
+    still missing — can import it safely.
+
+    Must run even when we are ALREADY in the env, since that path spawns
+    Chromium too. Idempotent.
+    """
+    try:
+        from chromium_env import ensure_chromium_env
+        ensure_chromium_env(env_prefix=env_prefix)
+    except Exception as e:
+        sys.stderr.write(f'[bootstrap.py] chromium env setup skipped: {e}\n')
+
+    if not env_prefix or not os.path.isdir(env_prefix):
+        return
+    env_bin = os.path.join(env_prefix, 'bin')
+    if os.path.isdir(env_bin):
+        _cur = os.environ.get('PATH', '')
+        if env_bin not in _cur.split(os.pathsep):
+            os.environ['PATH'] = (env_bin + os.pathsep + _cur) if _cur else env_bin
+    # A uv venv (backend='uv') is not a conda env — don't set CONDA_PREFIX,
+    # or _running_in_conda_env() below misfires and routes the pip fallback
+    # down the conda-forge branch.
+    if backend != 'uv':
+        os.environ.setdefault('CONDA_PREFIX', env_prefix)
+        if env_name:
+            os.environ.setdefault('CONDA_DEFAULT_ENV', env_name)
+
+
 def _tofu_maybe_reexec_into_env():
     marker = os.path.join(BASE_DIR, '.tofu_env.json')
     if not os.path.isfile(marker):
+        # No marker — nothing to re-exec into, but Chromium still needs its GUI
+        # libs + fonts, which chromium_env resolves from sys.prefix.
+        _tofu_export_env_native_paths('', '')
         return
     try:
         with open(marker, 'r', encoding='utf-8') as f:
@@ -83,6 +122,10 @@ def _tofu_maybe_reexec_into_env():
             same = os.path.realpath(target_py) == os.path.realpath(sys.executable)
         except OSError:
             same = (target_py == sys.executable)
+    # Export BEFORE the early return — see server.py's twin helper. A direct
+    # `python bootstrap.py` with the env interpreter takes this return, and
+    # every Chromium it later spawns would otherwise miss $env_prefix/lib.
+    _tofu_export_env_native_paths(env_prefix, backend, cfg.get('env_name'))
     if same:
         return
     if os.environ.get('_TOFU_ENV_REEXEC') == '1':
@@ -95,21 +138,6 @@ def _tofu_maybe_reexec_into_env():
             '  Run:  unset _TOFU_ENV_REEXEC _TOFU_VIA_BOOTSTRAP\n'
             '  Overriding the leaked guard and re-execing into the env python now.\033[0m\n')
         sys.stderr.flush()
-    if env_prefix and os.path.isdir(env_prefix):
-        env_lib = os.path.join(env_prefix, 'lib')
-        if os.path.isdir(env_lib):
-            os.environ['LD_LIBRARY_PATH'] = (
-                env_lib + os.pathsep + os.environ.get('LD_LIBRARY_PATH', ''))
-        env_bin = os.path.join(env_prefix, 'bin')
-        if os.path.isdir(env_bin):
-            os.environ['PATH'] = env_bin + os.pathsep + os.environ.get('PATH', '')
-        # A uv venv (backend='uv') is not a conda env — don't set CONDA_PREFIX,
-        # or _running_in_conda_env() below misfires and routes the pip fallback
-        # down the conda-forge branch.
-        if backend != 'uv':
-            os.environ.setdefault('CONDA_PREFIX', env_prefix)
-    if backend != 'uv' and cfg.get('env_name'):
-        os.environ.setdefault('CONDA_DEFAULT_ENV', cfg['env_name'])
     os.environ['_TOFU_ENV_REEXEC'] = '1'
     sys.stderr.write(f'[bootstrap.py] Re-exec into Tofu env python: {target_py}\n')
     sys.stderr.flush()
@@ -149,9 +177,9 @@ _BUILTIN_PROVIDER_TEMPLATES = [
      'name': 'OpenAI',
      'base_url': 'https://api.openai.com/v1',
      'models': [
+         {'model_id': 'gpt-5.6',      'capabilities': ['text', 'vision', 'thinking']},
+         {'model_id': 'gpt-5.6-pro',  'capabilities': ['text', 'vision', 'thinking']},
          {'model_id': 'gpt-5.4',      'capabilities': ['text', 'vision', 'thinking']},
-         {'model_id': 'gpt-5.4-mini', 'capabilities': ['text', 'vision', 'thinking', 'cheap']},
-         {'model_id': 'gpt-5.4-nano', 'capabilities': ['text', 'vision', 'cheap']},
          {'model_id': 'o3',           'capabilities': ['text', 'vision', 'thinking']},
          {'model_id': 'o4-mini',      'capabilities': ['text', 'vision', 'thinking', 'cheap']},
          {'model_id': 'gpt-4.1',      'capabilities': ['text', 'vision']},
@@ -161,6 +189,8 @@ _BUILTIN_PROVIDER_TEMPLATES = [
      'name': 'Anthropic',
      'base_url': 'https://api.anthropic.com/v1',
      'models': [
+         {'model_id': 'fable-5',           'capabilities': ['text', 'vision', 'thinking']},
+         {'model_id': 'claude-opus-4-8',   'capabilities': ['text', 'vision', 'thinking']},
          {'model_id': 'claude-opus-4-7',   'capabilities': ['text', 'vision', 'thinking']},
          {'model_id': 'claude-sonnet-4-6', 'capabilities': ['text', 'vision', 'thinking']},
          {'model_id': 'claude-haiku-4-5',  'capabilities': ['text', 'vision', 'cheap']},
@@ -185,6 +215,7 @@ _BUILTIN_PROVIDER_TEMPLATES = [
      'name': 'Moonshot (Kimi)',
      'base_url': 'https://api.moonshot.ai/v1',
      'models': [
+         {'model_id': 'kimi-k3',          'capabilities': ['text', 'vision', 'video', 'thinking', 'cheap']},
          {'model_id': 'kimi-k2.6',        'capabilities': ['text', 'vision', 'thinking', 'cheap']},
          {'model_id': 'kimi-k2-thinking', 'capabilities': ['text', 'thinking', 'cheap']},
      ]},
@@ -470,6 +501,19 @@ def _call_llm(error_text: str, cfg: dict) -> dict:
 # on CentOS-7-class hosts where pip's manylinux wheels crash with
 # "GLIBC_2.25 not found" (classic lxml failure mode).
 _CONDA_PYTHON_DEPS = [
+    # ── Boot-critical: the server cannot start without these ──
+    # quart + hypercorn are the ASGI stack (server.py); flask is only a
+    # transitive dep of quart, so listing flask alone left the conda repair
+    # path installing a web framework the app doesn't actually run on.
+    'quart>=0.20',
+    'hypercorn>=0.17',
+    # orjson is REQUIRED (not optional) — the SSE state snapshot in
+    # routes/chat.py depends on it to avoid the event-loop stall (see
+    # requirements.txt). sqlalchemy is imported UNCONDITIONALLY in the chat
+    # hot-path (lib/chat/persistence.py → _core_schema), so its absence breaks
+    # chat send, not just an optional feature.
+    'orjson>=3.9',
+    'sqlalchemy>=2.0',
     'flask>=3.0',
     'flask-compress>=1.14',
     'requests>=2.31',
@@ -480,8 +524,17 @@ _CONDA_PYTHON_DEPS = [
     'python-pptx>=0.6.21',
     'lxml>=5.3',
     'lxml_html_clean>=0.4',
-    'mcp>=1.0',
+    # Upper bound is load-bearing — see requirements.txt. This list feeds the
+    # PRE-BOOT installer, so an unbounded spec here installs the breaking 2.x
+    # into Tofu's own interpreter before the app has even started.
+    'mcp>=1.0,<2',
 ]
+
+# Boot-critical packages the conda-forge repair path MUST cover — asserted by
+# tests/test_bootstrap_conda_deps_coverage.py so this list can never again
+# silently drift below what server boot + the chat hot-path require. Names are
+# the bare (version-stripped, lower-cased) package names.
+_CRITICAL_BOOT_PACKAGES = ('quart', 'hypercorn', 'orjson', 'sqlalchemy')
 
 
 def _running_in_conda_env() -> bool:
@@ -1658,12 +1711,77 @@ def _try_start_server(first_attempt: bool = False) -> tuple[bool, str, int]:
     stderr_text = ''.join(stderr_lines)
 
     # Exit code 0 means graceful shutdown (user hit Ctrl+C, SIGTERM, etc.)
-    # — that's not a crash, it's intentional.
-    if rc == 0:
+    # — that's not a crash, it's intentional. 130 (SIGINT / a second-Ctrl+C
+    # force-quit) and 143 (SIGTERM) are likewise deliberate stops, not crashes:
+    # do NOT feed them into the LLM dependency-repair loop.
+    if rc in (0, 130, 143):
         sys.exit(0)
 
     # Non-zero exit → crash.
     return False, stderr_text, rc
+
+
+def _is_external_kill(rc: int) -> bool:
+    """True when server.py died from SIGKILL (rc -9, or shell-style 137).
+
+    SIGKILL is untrappable and leaves no traceback: feeding the empty stderr
+    into the LLM dependency-repair loop would 'diagnose' nothing. The cause
+    is almost always the container OOM killer (shared cgroup — see
+    lib/cgroup_guard.py) or an external reaper. The right response is to
+    record evidence and RESTART, not to repair dependencies.
+    """
+    return rc in (-9, 137)
+
+
+def _log_external_kill(rc: int) -> None:
+    """Durable evidence of a SIGKILL death — stderr + logs/watchdog.log."""
+    import datetime
+    line = ('%s [bootstrap] server.py SIGKILLed (exit %s) — almost always the '
+            'container OOM killer (shared cgroup, zero swap). See '
+            'logs/cgroup_pressure.log for the pressure curve; restarting.'
+            % (datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'), rc))
+    print(line, file=sys.stderr)
+    try:
+        os.makedirs(os.path.join(BASE_DIR, 'logs'), exist_ok=True)
+        with open(os.path.join(BASE_DIR, 'logs', 'watchdog.log'), 'a',
+                  encoding='utf-8') as f:
+            f.write(line + '\n')
+    except OSError as e:
+        print(f'[bootstrap] could not write watchdog.log: {e}', file=sys.stderr)
+
+
+def _restart_after_external_kill(first_rc: int, max_relaunches: int = 5) -> None:
+    """Relaunch server.py after SIGKILL deaths, with linear backoff.
+
+    A SIGKILLed server is healthy code killed by the environment — restarting
+    is the whole fix (same contract as supervisord autorestart=true, for
+    users who launch via bootstrap). Gives up after max_relaunches
+    consecutive kills so a pathological kill-loop cannot spin forever.
+    Never returns on success (server runs forever / clean exit sys.exit()s
+    inside _try_start_server). When the relaunched server dies of something
+    OTHER than SIGKILL, RETURNS that death's ``(stderr_text, rc)`` so the
+    caller can enter the repair flow with the real error.
+    """
+    rc = first_rc
+    for attempt in range(1, max_relaunches + 1):
+        _log_external_kill(rc)
+        backoff = min(5 * attempt, 30)
+        print(f'[bootstrap] 🔄 relaunching after SIGKILL '
+              f'(attempt {attempt}/{max_relaunches}, backoff {backoff}s)…',
+              file=sys.stderr)
+        time.sleep(backoff)
+        _, stderr_text, rc = _try_start_server()
+        # On success / clean exit _try_start_server never returns.
+        if _is_external_kill(rc):
+            continue
+        print(f'[bootstrap] ⚠ relaunched server crashed differently '
+              f'(exit {rc}) — entering repair mode.', file=sys.stderr)
+        return stderr_text, rc
+    print(f'[bootstrap] ❌ server.py SIGKILLed {max_relaunches}× in a row — '
+          f'giving up. The container is under sustained memory pressure; '
+          f'see logs/cgroup_pressure.log and lib/cgroup_guard.py.',
+          file=sys.stderr)
+    sys.exit(137)
 
 
 def _is_import_or_package_error(stderr_text: str) -> bool:
@@ -1842,6 +1960,14 @@ def main():
     # returns at all, the process crashed.  On clean shutdown (rc=0, e.g.
     # Ctrl+C) it calls sys.exit(0) internally — so reaching here means crash.
     _, stderr_text, rc = _try_start_server(first_attempt=True)
+
+    # ── SIGKILL (OOM killer / external reaper): record + auto-relaunch ──
+    # The server ran fine and was killed by the environment — dependencies
+    # are not the problem, so skip the LLM repair flow entirely. If the
+    # relaunched server then crashes with a REAL error, the function hands
+    # us its (stderr, rc) and we enter repair mode with the real data.
+    if _is_external_kill(rc):
+        stderr_text, rc = _restart_after_external_kill(rc)
 
     # ── Enter repair mode ──
     print(f'[bootstrap] ⚠ server.py crashed (exit code {rc}). '

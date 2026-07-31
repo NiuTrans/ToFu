@@ -62,11 +62,30 @@ API_JS = os.path.join(JS_DIR, 'api.js')
 
 # ── Shared helpers ────────────────────────────────────────────────────
 def _strip_comments(src: str) -> str:
-    """Remove /* */ block and // line comments (not a full JS parser — good
-    enough to stop a path/call mentioned in a comment from being counted)."""
-    src = re.sub(r'/\*.*?\*/', '', src, flags=re.DOTALL)
-    src = re.sub(r'//[^\n]*', '', src)
-    return src
+    """Remove /* */ block and // line comments WITHOUT ever treating a comment
+    marker that appears inside a string/template literal — or a ``/*`` that
+    appears inside an already-open ``//`` line comment — as real syntax.
+
+    WHY that rule matters (the incident this guard was born from): the naive
+    ``re.sub(r'/\*.*?\*/', …, DOTALL)`` pass ran FIRST and matched the ``/*``
+    inside the *line* comment ``// … /api/paper/* (multipart …)`` — that ``*``
+    is a path wildcard, not a comment closer. It then ate forward to the next
+    real ``*/``, deleting the live ``upload:`` / ``fetchArxivStream:`` entries
+    of the ``paper`` domain in api.js, and Direction-2 reported those real call
+    sites as "method NOT defined under that domain". The only correct rule is
+    "whichever comment/string opener comes FIRST wins".
+
+    Delegates to the SINGLE shared implementation (charter #24), which
+    implements exactly that rule with the same single-pass, state-tracking
+    scanner. MEASURED equivalent before the swap, both ways:
+      * on the real api.js this guard scans — identical line count (1680) and
+        an IDENTICAL set of surviving code identifiers;
+      * on the incident itself, reproduced as a fixture: with
+        ``// … /api/paper/* (multipart form-data)`` immediately above them,
+        both ``upload:`` and ``fetchArxivStream:`` survive the shared pass.
+    """
+    from tests._source_scan import strip_comments
+    return strip_comments(src, lang='js', inline=True)
 
 
 def _norm_path(p: str) -> str:

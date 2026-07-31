@@ -23,7 +23,41 @@ from lib.log import get_logger
 
 logger = get_logger(__name__)
 
-__all__ = ['DefaultConversationStore']
+__all__ = ['DefaultConversationStore', 'ConcurrentWriteConflict']
+
+
+def _row_fields(row, *names):
+    """Pull ``names`` off a DB row that may be mapping-like OR sequence-like.
+
+    The two backends hand back different row types (psycopg ``DictRow``,
+    ``sqlite3.Row``, and plain tuples from test doubles). Indexing by position
+    as a fallback is wrong for mapping types: on a dict, ``row[1]`` looks up the
+    KEY ``1`` and raises ``KeyError`` rather than returning the second column.
+    Decide by capability once, here, instead of at each call site.
+    """
+    if hasattr(row, 'keys'):
+        keys = set(row.keys())
+        if all(n in keys for n in names):
+            return tuple(row[n] for n in names)
+        # Mapping row missing a requested column: report None for it rather
+        # than falling through to positional access, where `row[1]` on a dict
+        # is a KEY lookup that raises KeyError.
+        return tuple(row[n] if n in keys else None for n in names)
+    # Sequence row. A row shorter than the request means the caller asked for a
+    # column this query did not select (e.g. a legacy `SELECT messages` reached
+    # by a test double); yield None for the missing tail instead of raising
+    # IndexError, so a widened SELECT degrades to "no CAS token" rather than
+    # killing the write path.
+    return tuple(row[i] if i < len(row) else None for i in range(len(names)))
+
+
+class ConcurrentWriteConflict(RuntimeError):
+    """A rev-guarded transcript write lost its race and was NOT applied.
+
+    Raised instead of silently overwriting, so a caller that read-modify-wrote
+    the whole blob learns it must re-read rather than destroying the rows a
+    concurrent writer appended in the meantime.
+    """
 
 
 class DefaultConversationStore:
@@ -33,6 +67,27 @@ class DefaultConversationStore:
     thread-local pool, so a single shared instance is safe across all worker
     threads.  Satisfies the protocol structurally (no inheritance).
     """
+
+    # ── The CAS token is ``rev``, and it travels WITH the data ──
+    # Every whole-blob write takes an ``expected_rev`` the caller got from its
+    # own read. Two properties make ``rev`` the only sound token here:
+    #
+    #   * it is issued by the DB, not by the writer — a ``BEFORE UPDATE OF
+    #     messages`` trigger advances it inside the same statement, so a writer
+    #     can neither forge it nor skip it. ``updated_at`` is the opposite: the
+    #     writer supplies its own value, so a clock that does not advance (same
+    #     millisecond, NTP step, container clock skew) yields a predicate that
+    #     PASSES while the data underneath has changed. That is a structural
+    #     defect, not a precision one — raising the resolution would not fix it;
+    #   * the trigger is guarded by ``messages IS DISTINCT FROM``, so a
+    #     settings-only or title-only write does not bump it and cannot cause a
+    #     spurious conflict.
+    #
+    # The token is a PARAMETER rather than remembered state on the store. An
+    # earlier revision kept it in a ``threading.local`` keyed by conversation;
+    # under the ASGI worker pool threads are REUSED, so a token left behind by
+    # one request would silently guard an unrelated write in the next — and it
+    # would fail in the "looks like it worked" direction.
 
     def release_connection(self) -> None:
         """Release this thread's pooled DB connection(s) back to the pool.
@@ -45,23 +100,41 @@ class DefaultConversationStore:
         close_thread_db()
 
     def load_conversation_messages(self, conv_id):
-        """Read a conversation's messages + updated_at from the chat DB.
+        """Read ``(messages, updated_at, rev)`` for a conversation, or ``None``.
 
         ``user_id=1`` is the single-user chatui convention (hidden behind the
         seam).  Returns ``None`` if the row is absent; an empty list with
-        whatever ``updated_at`` exists on a parse failure.
+        whatever ``updated_at``/``rev`` exists on a parse failure.
+
+        ``rev`` is the CAS token for any subsequent whole-blob write: it rides
+        the return value so it travels WITH the data the caller is about to
+        modify.  All three fields come from ONE statement — reading them
+        separately opens the exact window this module exists to close, because a
+        writer that appends between the two reads leaves the caller holding the
+        OLD messages with the NEW rev, and the CAS then passes while destroying
+        the append.  A single-row read is atomic on both backends.
         """
         import json
         from lib.database import DOMAIN_CHAT, get_thread_db
         db = get_thread_db(DOMAIN_CHAT)
+        return self._load_with_rev(db, conv_id)
+
+    @staticmethod
+    def _load_with_rev(db, conv_id):
+        """``(messages, updated_at, rev)`` from ONE SELECT, or ``None``.
+
+        Shared by the public read and by the internal retry loops so there is a
+        single place that decides how a row is turned into a message list.
+        """
+        import json
         row = db.execute(
-            'SELECT messages, updated_at FROM conversations WHERE id=? AND user_id=1',
+            'SELECT messages, updated_at, rev FROM conversations '
+            'WHERE id=? AND user_id=1',
             (conv_id,),
         ).fetchone()
         if not row:
             return None
-        raw = row['messages'] if 'messages' in row.keys() else row[0]
-        updated_at = (row['updated_at'] if 'updated_at' in row.keys() else row[1]) or 0
+        raw, updated_at, rev = _row_fields(row, 'messages', 'updated_at', 'rev')
         try:
             messages = json.loads(raw or '[]')
             if not isinstance(messages, list):
@@ -70,10 +143,65 @@ class DefaultConversationStore:
             logger.warning('[Store] load_conversation_messages parse failed conv=%s: %s',
                            conv_id, e)
             messages = []
-        return messages, int(updated_at or 0)
+        return messages, int(updated_at or 0), int(rev or 0)
 
-    def save_conversation_messages(self, conv_id, messages):
-        """Overwrite a conversation's messages (non-CAS) and bump updated_at."""
+    def save_conversation_messages(self, conv_id, messages, *, expected_rev):
+        """Persist ``messages``, but only while the row is still at ``expected_rev``.
+
+        The blob holds the WHOLE transcript, so every caller is doing a
+        read-modify-write. An unconditional ``UPDATE`` therefore erases any row
+        a concurrent thread appended between the caller's read and this write —
+        silently, with no error and no failing test. Measured incident (conv
+        ms3sfyrmn31omb, 2026-07-28): 13 autopilot ``Appended VU msg`` log lines
+        vs 8 surviving rows, because the per-round snapshot daemon kept writing
+        back a transcript copy it had read before the append landed.
+
+        ``expected_rev`` is REQUIRED and comes from the caller's own
+        :meth:`load_conversation_messages` — there is no ``None`` escape hatch,
+        so "read-modify-write that loses someone else's row" cannot be spelled.
+        A caller that must genuinely win unconditionally has to say so out loud
+        via :meth:`overwrite_conversation_messages_unconditional`.
+
+        Raises ``ConcurrentWriteConflict`` when the row moved instead of
+        overwriting. Callers setting FIELDS on one message should use
+        :meth:`patch_message_fields_by_task`, which replays the mutation onto a
+        re-read copy rather than making the caller retry.
+
+        Returns the new ``updated_at`` timestamp (epoch-ms).
+        """
+        import time
+        from lib.database import DOMAIN_CHAT, get_thread_db, json_dumps_pg
+        db = get_thread_db(DOMAIN_CHAT)
+        now_ms = int(time.time() * 1000)
+        cur = db.execute(
+            'UPDATE conversations SET messages=?, updated_at=? '
+            'WHERE id=? AND user_id=1 AND rev=?',
+            (json_dumps_pg(messages), now_ms, conv_id, int(expected_rev)),
+        )
+        db.commit()
+        affected = getattr(cur, 'rowcount', None)
+        affected = affected if affected is not None else 0
+        if not affected:
+            raise ConcurrentWriteConflict(
+                f'conv={conv_id} changed since it was loaded at '
+                f'rev={expected_rev} — refusing to clobber the concurrent '
+                f'writer. Re-load and re-apply your change.')
+        from lib.database.messages_rows import mirror_write_and_commit
+        mirror_write_and_commit(db, conv_id, messages, now_ms=now_ms, full=True)
+        return now_ms
+
+    def overwrite_conversation_messages_unconditional(self, conv_id, messages):
+        """DANGEROUS: overwrite the transcript blob, ignoring concurrent writers.
+
+        Any row another thread appended after this caller read the blob is LOST.
+        Only correct when the caller is provably the sole writer for the
+        conversation at that instant — e.g. boot-time crash recovery, which runs
+        before any task or client can be attached to the row. The name is
+        deliberately long and explicit so that choosing it is a visible decision
+        at the call site rather than the accidental default; the ratchet
+        ``tests/test_conv_messages_cas_writes.py`` treats it as the ONLY
+        sanctioned unconditional whole-blob writer.
+        """
         import time
         from lib.database import (DOMAIN_CHAT, db_execute_with_retry,
                                   get_thread_db, json_dumps_pg)
@@ -85,12 +213,93 @@ class DefaultConversationStore:
             'WHERE id=? AND user_id=1',
             (json_dumps_pg(messages), now_ms, conv_id),
         )
+        from lib.database.messages_rows import mirror_write_and_commit
+        mirror_write_and_commit(db, conv_id, messages, now_ms=now_ms, full=True)
         return now_ms
 
-    def cas_update_conversation_messages(self, conv_id, messages, expected_updated_at):
-        """Compare-and-swap overwrite guarded by ``updated_at``.
+    def patch_message_fields_by_task(self, conv_id, task_id, fields,
+                                     *, max_attempts=5):
+        """Set ``fields`` on the assistant message tagged ``_taskId == task_id``.
+
+        The narrow-write path for post-settle enrichment (snapshot id, learned
+        preferences): it re-reads the transcript, applies the field mutation to
+        the ONE message it owns, and commits under a rev-CAS, retrying on a lost
+        race. Concurrent appends therefore survive — the retry replays this
+        patch against the newer transcript instead of overwriting it.
+
+        There is deliberately NO "fall back to the last assistant message" path.
+        The daemons that call this run after the turn settled, so a missing
+        ``_taskId`` means the message was compacted away or the row was rebuilt
+        — and positional guessing under concurrency stamps one task's snapshot
+        onto ANOTHER task's turn (the same class of bug as the blob clobber,
+        just quieter). Returns True when the patch landed, False when the target
+        message no longer exists or the race could not be won.
+        """
+        if not (conv_id and task_id and fields):
+            return False
+        import time
+        from lib.database import DOMAIN_CHAT, get_thread_db, json_dumps_pg
+        db = get_thread_db(DOMAIN_CHAT)
+        for attempt in range(1, int(max_attempts) + 1):
+            loaded = self._load_with_rev(db, conv_id)
+            if loaded is None:
+                return False
+            messages, _updated_at, expected_rev = loaded
+            if not isinstance(messages, list) or not messages:
+                return False
+            target_idx = -1
+            for i in range(len(messages) - 1, -1, -1):
+                m = messages[i]
+                if (isinstance(m, dict) and m.get('role') == 'assistant'
+                        and m.get('_taskId') == task_id):
+                    target_idx = i
+                    break
+            if target_idx < 0:
+                # WARNING, not info: with the positional fallback deliberately
+                # gone, this line is the ONLY signal that a snapshot / learned
+                # preference never reached the transcript. At info level a
+                # systematic loss would look like ordinary chatter.
+                logger.warning('[Store] patch_message_fields_by_task: conv=%s no '
+                               'assistant message tagged task=%s — fields %s were '
+                               'NOT persisted', conv_id[:8], task_id[:8],
+                               sorted(fields))
+                return False
+            messages[target_idx].update(fields)
+            now_ms = int(time.time() * 1000)
+            cur = db.execute(
+                'UPDATE conversations SET messages=?, updated_at=? '
+                'WHERE id=? AND user_id=1 AND rev=?',
+                (json_dumps_pg(messages), now_ms, conv_id, expected_rev),
+            )
+            db.commit()
+            affected = getattr(cur, 'rowcount', None)
+            affected = affected if affected is not None else 0
+            if affected:
+                from lib.database.messages_rows import mirror_write_and_commit
+                mirror_write_and_commit(db, conv_id, messages, now_ms=now_ms,
+                                        changed_seqs=[target_idx])
+                return True
+            logger.debug('[Store] patch_message_fields_by_task conv=%s lost the '
+                         'rev=%s race (attempt %d/%d) — re-reading',
+                         conv_id[:8], expected_rev, attempt, max_attempts)
+        logger.warning('[Store] patch_message_fields_by_task conv=%s task=%s gave '
+                       'up after %d CAS attempts', conv_id[:8], task_id[:8],
+                       max_attempts)
+        return False
+
+    def cas_update_conversation_messages(self, conv_id, messages, expected_rev):
+        """Compare-and-swap overwrite guarded by the row's ``rev``.
 
         Returns affected-row count (0 = a concurrent writer won the race).
+
+        The token is ``rev`` and not ``updated_at`` for a structural reason, not
+        a precision one: ``updated_at`` is a value the WRITER supplies, so a
+        clock that fails to advance between two writes (same millisecond, an NTP
+        step, container clock skew) produces a predicate that PASSES while the
+        data underneath has already changed. A guard whose token is signed by
+        the party being guarded is not a guard. ``rev`` is advanced by a DB
+        trigger inside the same statement, so it cannot be forged or skipped —
+        switching to a finer timestamp would NOT have fixed this.
         """
         import time
         from lib.database import DOMAIN_CHAT, get_thread_db, json_dumps_pg
@@ -98,27 +307,40 @@ class DefaultConversationStore:
         now_ms = int(time.time() * 1000)
         cur = db.execute(
             'UPDATE conversations SET messages=?, updated_at=? '
-            'WHERE id=? AND user_id=1 AND updated_at=?',
-            (json_dumps_pg(messages), now_ms, conv_id, expected_updated_at),
+            'WHERE id=? AND user_id=1 AND rev=?',
+            (json_dumps_pg(messages), now_ms, conv_id, int(expected_rev)),
         )
         db.commit()
         affected = getattr(cur, 'rowcount', None)
-        return affected if affected is not None else 0
+        affected = affected if affected is not None else 0
+        if affected:
+            # Phase 5 dual-write (flag-gated): CAS won — mirror the overwrite.
+            from lib.database.messages_rows import mirror_write_and_commit
+            mirror_write_and_commit(db, conv_id, messages, now_ms=now_ms,
+                                    full=True)
+        return affected
 
-    def cas_sync_conversation_with_search(self, conv_id, messages, expected_updated_at):
+    def cas_sync_conversation_with_search(self, conv_id, messages, expected_rev):
         """CAS overwrite that ALSO refreshes msg_count + search_text + FTS.
 
         The CAS-guarded sibling of :meth:`sync_conversation_with_search`: writes
-        only if the row's ``updated_at`` still equals ``expected_updated_at``
-        (0 rows affected → a concurrent writer won → caller treats as a skip),
-        and updates the full-text-search index ONLY on a landed write so a
-        losing race never repoints FTS at content it didn't commit.
+        only if the row's ``rev`` still equals ``expected_rev`` (0 rows affected
+        → a concurrent writer won → caller treats as a skip), and updates the
+        full-text-search index ONLY on a landed write so a losing race never
+        repoints FTS at content it didn't commit.
 
         Use this (not the plain ``cas_update_conversation_messages``) whenever a
         write CHANGES THE MESSAGE SET — e.g. manual /compact removes whole
         messages, so msg_count and the searchable text genuinely change; a plain
         CAS would leave the sidebar count stale and let search still match
         compacted-away text.  Returns affected-row count (0 = skipped).
+
+        ORTHOGONAL to a caller's own content check: this proves only that the
+        ROW did not move. It cannot prove that WHAT moved was outside the region
+        the caller folded, so a caller that summarises part of the transcript
+        (manual compaction) must ALSO verify its folded prefix is byte-unchanged.
+        Dropping that check because "the CAS covers it" turns every legitimate
+        tail append into a spurious conflict.
         """
         import time
         from lib.conversations import build_search_text, update_conversation_fts
@@ -129,9 +351,9 @@ class DefaultConversationStore:
         now_ms = int(time.time() * 1000)
         cur = db.execute(
             'UPDATE conversations SET messages=?, updated_at=?, msg_count=?, '
-            'search_text=? WHERE id=? AND user_id=1 AND updated_at=?',
+            'search_text=? WHERE id=? AND user_id=1 AND rev=?',
             (messages_json, now_ms, len(messages), search_text, conv_id,
-             expected_updated_at),
+             int(expected_rev)),
         )
         db.commit()
         affected = getattr(cur, 'rowcount', None)
@@ -142,6 +364,11 @@ class DefaultConversationStore:
             except Exception as e:
                 logger.debug('[Store] cas_sync FTS update skipped conv=%s: %s',
                              conv_id[:8] if conv_id else '?', e)
+            # Phase 5 dual-write (flag-gated): /compact removes messages
+            # (re-sequences) — full rebuild mirror.
+            from lib.database.messages_rows import mirror_write_and_commit
+            mirror_write_and_commit(db, conv_id, messages, now_ms=now_ms,
+                                    full=True)
         return affected
 
     def ensure_compaction_schema(self):
@@ -264,33 +491,66 @@ class DefaultConversationStore:
                            conv_id[:8] if conv_id else '?', e)
             return 0
 
-    def sync_conversation_with_search(self, conv_id, messages):
-        """Overwrite messages + msg_count + search_text and refresh FTS.
+    def sync_conversation_with_search(self, conv_id, messages, *, expected_rev,
+                                      rebuild=None, max_attempts=5):
+        """Rev-guarded overwrite of messages + msg_count + search_text + FTS.
 
-        This is the NON-CAS variant: it overwrites unconditionally and always
-        updates the FTS row.  Use it for callers that hold the only writer for
-        the conversation at that moment (e.g. endpoint multi-turn sync).  The
-        CAS-guarded sibling — which gates the FTS update on a successful
-        compare-and-swap of ``updated_at`` so a losing write never repoints
-        FTS at uncommitted content — lives inline in
-        ``lib.tasks_pkg.manager._sync_partial_to_conversation`` /
-        ``_sync_result_to_conversation``.  Keep the two separate: collapsing
-        them would drop that guard.
+        Endpoint multi-turn sync: the engine owns the ENGINE-PRODUCED tail and
+        rewrites it wholesale, so this is a whole-blob write rather than a
+        field patch. It is still guarded — an unconditional overwrite here
+        erases anything another writer appended after ``expected_rev`` (the
+        autopilot VU append fires on exactly this boundary), which is the same
+        silent data loss the snapshot daemon caused.
+
+        ``rebuild(messages, rev)`` is an OPTIONAL callback used to replay the
+        caller's transform onto a freshly-read transcript after a lost race; it
+        must return the new full message list. Without it a conflict raises
+        ``ConcurrentWriteConflict`` rather than being retried, because blindly
+        re-writing the SAME stale list is precisely the clobber being prevented.
+
+        Returns the new ``updated_at`` (epoch-ms).
         """
         import time
         from lib.conversations import build_search_text, update_conversation_fts
-        from lib.database import (DOMAIN_CHAT, db_execute_with_retry,
-                                  get_thread_db, json_dumps_pg)
+        from lib.database import DOMAIN_CHAT, get_thread_db, json_dumps_pg
         db = get_thread_db(DOMAIN_CHAT)
-        messages_json = json_dumps_pg(messages)
-        search_text = build_search_text(messages)
-        now_ms = int(time.time() * 1000)
-        db_execute_with_retry(db, '''UPDATE conversations
-            SET messages=?, updated_at=?, msg_count=?, search_text=?
-            WHERE id=? AND user_id=1''',
-            (messages_json, now_ms, len(messages), search_text, conv_id))
-        update_conversation_fts(db, conv_id, search_text)
-        return now_ms
+        cur_messages, cur_rev = list(messages), int(expected_rev)
+        for attempt in range(1, int(max_attempts) + 1):
+            messages_json = json_dumps_pg(cur_messages)
+            search_text = build_search_text(cur_messages)
+            now_ms = int(time.time() * 1000)
+            cur = db.execute(
+                'UPDATE conversations SET messages=?, updated_at=?, '
+                'msg_count=?, search_text=? '
+                'WHERE id=? AND user_id=1 AND rev=?',
+                (messages_json, now_ms, len(cur_messages), search_text,
+                 conv_id, cur_rev),
+            )
+            db.commit()
+            affected = getattr(cur, 'rowcount', None)
+            affected = affected if affected is not None else 0
+            if affected:
+                update_conversation_fts(db, conv_id, search_text)
+                from lib.database.messages_rows import mirror_write_and_commit
+                mirror_write_and_commit(db, conv_id, cur_messages,
+                                        now_ms=now_ms, full=True)
+                return now_ms
+            if rebuild is None:
+                raise ConcurrentWriteConflict(
+                    f'conv={conv_id} changed since it was loaded at '
+                    f'rev={cur_rev} and no rebuild callback was supplied \u2014 '
+                    f'refusing to overwrite the concurrent writer.')
+            reloaded = self._load_with_rev(db, conv_id)
+            if reloaded is None:
+                return 0
+            fresh_messages, _fresh_updated, cur_rev = reloaded
+            cur_messages = rebuild(fresh_messages, cur_rev)
+            logger.debug('[Store] sync_conversation_with_search conv=%s lost the '
+                         'rev race (attempt %d/%d) \u2014 replayed onto rev=%s',
+                         conv_id[:8], attempt, max_attempts, cur_rev)
+        raise ConcurrentWriteConflict(
+            f'conv={conv_id} sync_conversation_with_search gave up after '
+            f'{max_attempts} CAS attempts')
 
     def notify_conversation_changed(self, conv_id):
         """Look up the conversation's current rev and fire the conv-changed push.

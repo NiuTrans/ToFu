@@ -157,7 +157,7 @@ function _injectAnchoredBranches(html, msg, msgIdx) {
         <span class="branch-node-label">${escapeHtml(b.title.length > 50 ? b.title.slice(0, 48) + "…" : b.title)}</span>
         ${count ? `<span class="branch-node-count">${count}</span>` : ""}
         ${isStreaming ? '<span class="branch-node-pulse"></span>' : ""}
-        <span class="branch-node-close" onclick="event.stopPropagation();branchCloseOrDelete(${msgIdx},${bi})" title="${isActive ? '收起' : '删除'}">✕</span>
+        <span class="branch-node-close" onclick="event.stopPropagation();branchCloseOrDelete(${msgIdx},${bi})" title="${isActive ? escapeHtml(t('branch.collapse')) : escapeHtml(t('branch.delete'))}">✕</span>
       </button>`;
 
     // If this anchored branch is expanded, render panel inline too
@@ -192,7 +192,7 @@ function renderBranchZone(msg, msgIdx, inlinedSet) {
       <span class="branch-node-label">${escapeHtml(b.title.length > 20 ? b.title.slice(0, 18) + "…" : b.title)}</span>
       ${count ? `<span class="branch-node-count">${count}</span>` : ""}
       ${isStreaming ? '<span class="branch-node-pulse"></span>' : ""}
-      <span class="branch-node-close" onclick="event.stopPropagation();branchCloseOrDelete(${msgIdx},${bi})" title="${isActive ? '收起' : '删除'}">✕</span>
+      <span class="branch-node-close" onclick="event.stopPropagation();branchCloseOrDelete(${msgIdx},${bi})" title="${isActive ? escapeHtml(t('branch.collapse')) : escapeHtml(t('branch.delete'))}">✕</span>
     </button>`;
   }).filter(Boolean);
 
@@ -234,7 +234,7 @@ function _renderBranchMsg(m, msgIdx, bi, i) {
   // Conversation reference badges in branch messages
   if (m.convRefs && m.convRefs.length > 0) {
     for (const cr of m.convRefs) {
-      content += `<div class="reply-quote-badge conv-ref-badge" style="margin-bottom:6px;font-size:11px" title="引用对话: ${escapeHtml(cr.title || cr.id)}">
+      content += `<div class="reply-quote-badge conv-ref-badge" style="margin-bottom:6px;font-size:11px" title="${escapeHtml(t('chat.convRefTitle', { title: escapeHtml(cr.title || cr.id) }))}">
         <span class="reply-quote-badge-icon">@</span>
         <span class="reply-quote-badge-info"><span class="reply-quote-badge-name">${escapeHtml(cr.title || cr.id)}</span></span></div>`;
     }
@@ -308,39 +308,28 @@ function _renderBranchPanel(msg, msgIdx, bi) {
       </div></div>`;
   }
 
-  // Approval buttons
-  const stream = _branchStreams.get(bk);
-  const lastAssistant = msgs[msgs.length - 1];
-  let approvalHtml = "";
-  if (lastAssistant?.approvalRequired) {
-    approvalHtml = `<div class="branch-approval">
-      <span>Tool needs approval</span>
-      <button class="branch-approve-btn" onclick="approveBranchTool(${msgIdx},${bi},'approve')">Approve</button>
-      <button class="branch-reject-btn" onclick="approveBranchTool(${msgIdx},${bi},'deny')">Deny</button></div>`;
-  }
-
   let emptyMsg = "";
   if (!msgs.length && !isStreaming) {
     const selCtx = branch.parentSelection
-      ? `<div class="branch-selection-ctx">选中内容：「${escapeHtml(branch.parentSelection.slice(0, 120))}${branch.parentSelection.length > 120 ? "…" : ""}」</div>`
+      ? `<div class="branch-selection-ctx">${escapeHtml(t('branch.selectionCtx', { text: escapeHtml(branch.parentSelection.slice(0, 120)) + (branch.parentSelection.length > 120 ? "…" : "") }))}</div>`
       : "";
-    emptyMsg = `<div class="branch-empty">${selCtx}点击底部输入框发送消息开始分支对话</div>`;
+    emptyMsg = `<div class="branch-empty">${selCtx}${escapeHtml(t('branch.emptyHint'))}</div>`;
   }
 
   return `<div class="branch-panel" id="branch-panel-${msgIdx}-${bi}">
     <div class="branch-panel-header">
       <span class="branch-panel-icon">${icon}</span>
       <span class="branch-panel-title">${escapeHtml(branch.title)}</span>
-      <span class="branch-panel-count">${userCount}条对话</span>
+      <span class="branch-panel-count">${escapeHtml(t('branch.userTurns', { n: userCount }))}</span>
       <span class="branch-panel-tools" style="font-size:10px;opacity:0.5;margin-left:4px">${searchMode !== "off" ? "" : ""}${fetchEnabled ? "" : ""}${codeExecEnabled ? "⚡" : ""}${browserEnabled ? "" : ""}${memoryEnabled ? "" : ""}</span>
-      ${(isStreaming || hasPersistentTask) ? `<button class="branch-panel-stop" onclick="stopBranchStream(${msgIdx},${bi})" title="停止生成">停止</button>` : ""}
-      <button class="branch-panel-collapse" onclick="closeBranchPanel()" title="收起分支">▾ 收起</button>
-      <button class="branch-panel-delete" onclick="deleteBranch(${msgIdx},${bi})" title="删除分支"></button>
+      ${(isStreaming || hasPersistentTask) ? `<button class="branch-panel-stop" onclick="stopBranchStream(${msgIdx},${bi})" title="${escapeHtml(t('branch.stopGen'))}">${escapeHtml(t('branch.stop'))}</button>` : ""}
+      <button class="branch-panel-collapse" onclick="closeBranchPanel()" title="${escapeHtml(t('branch.collapseBranch'))}">▾ ${escapeHtml(t('branch.collapseCta'))}</button>
+      <button class="branch-panel-delete" onclick="deleteBranch(${msgIdx},${bi})" title="${escapeHtml(t('branch.deleteBranch'))}"></button>
     </div>
     <div class="branch-messages" id="branch-messages-${msgIdx}-${bi}">
-      ${emptyMsg}${msgsHtml}${streamingHtml}${approvalHtml}
+      ${emptyMsg}${msgsHtml}${streamingHtml}
     </div>
-    <div class="branch-input-hint">主输入框已切换为分支模式 — 在下方输入并发送</div>
+    <div class="branch-input-hint">${escapeHtml(t('branch.inputHint'))}</div>
   </div>`;
 }
 
@@ -403,7 +392,7 @@ function branchCloseOrDelete(msgIdx, branchIdx) {
 }
 
 async function deleteBranch(msgIdx, branchIdx) {
-  if (!await showConfirm("删除这个分支？", { danger: true })) return;
+  if (!await showConfirm(t('branch.deleteConfirm'), { danger: true })) return;
   const conv = getActiveConv();
   if (!conv) return;
   const msg = conv.messages[msgIdx];
@@ -432,27 +421,33 @@ async function deleteBranch(msgIdx, branchIdx) {
   //   anchor text stay intact on the server. On error we restore the
   //   in-memory branches array and force a re-render from server state.
   (async () => {
+    /* Shared rollback: server rejection AND network failure both restore the
+     *   splice and resync from the server — a network failure may or may not
+     *   have landed the delete, and only the server state is the truth
+     *   (pt_3cd6cd48: the old catch left local/server diverged). */
+    const _revertAndResync = async (why, extra) => {
+      console.warn('[branch.delete]', why, extra || '');
+      msg.branches = _prevBranches;
+      saveConversations(conv.id);
+      try {
+        const data = await Api.conversations.get(conv.id);
+        if (data && Array.isArray(data.messages)) {
+          conv.messages = data.messages;
+          saveConversations(conv.id);
+          if (activeConvId === conv.id) window.ConvView.replaceAll(conv.id);
+        }
+      } catch (e2) { console.warn('[branch.delete] reload failed', e2); }
+      if (typeof showToast === 'function') showToast('Branch delete failed — restored', 'error');
+    };
     try {
       const res = await Api.conversations.deleteBranch(conv.id, msgIdx, branchIdx, { msgId: msg._msgId });
       if (!res || !res.ok) {
         let body = null;
         try { body = res ? await res.json() : null; } catch (_e) { /* ignore */ }
-        console.warn('[branch.delete] server rejected branch delete', res && res.status, body);
-        // Revert the local splice and reload from server to resync.
-        msg.branches = _prevBranches;
-        saveConversations(conv.id);
-        try {
-          const data = await Api.conversations.get(conv.id);
-          if (data && Array.isArray(data.messages)) {
-            conv.messages = data.messages;
-            saveConversations(conv.id);
-            if (activeConvId === conv.id) renderChat(conv);
-          }
-        } catch (e2) { console.warn('[branch.delete] reload failed', e2); }
-        if (typeof showToast === 'function') showToast('Branch delete failed — restored', 'error');
+        await _revertAndResync('server rejected branch delete', [res && res.status, body]);
       }
     } catch (e) {
-      console.warn('[branch.delete] network error', e);
+      await _revertAndResync('network error', e && e.message);
     }
   })();
 
@@ -536,7 +531,7 @@ function _enterBranchMode(msgIdx, branchIdx) {
   if (!branch) return;
   const icon = branch.icon || '';
   const input = document.getElementById("userInput");
-  if (input) input.placeholder = `在「${branch.title}」分支中输入消息…`;
+  if (input) input.placeholder = t('branch.inputPlaceholder', { title: branch.title });
 
   // Add banner above input box
   let banner = document.getElementById("branch-mode-banner");
@@ -548,8 +543,8 @@ function _enterBranchMode(msgIdx, branchIdx) {
     if (inputBox) inputBox.parentElement.insertBefore(banner, inputBox);
   }
   banner.innerHTML = `<span class="branch-mode-banner-icon">${icon}</span>
-    <span class="branch-mode-banner-text">分支: ${escapeHtml(branch.title)}</span>
-    <button class="branch-mode-banner-exit" onclick="closeBranchPanel()">✕ 退出</button>`;
+    <span class="branch-mode-banner-text">${escapeHtml(t('branch.modeBanner', { title: escapeHtml(branch.title) }))}</span>
+    <button class="branch-mode-banner-exit" onclick="closeBranchPanel()">✕ ${escapeHtml(t('branch.exit'))}</button>`;
   banner.style.display = "flex";
 
   // Scroll branch panel to bottom
@@ -680,7 +675,7 @@ async function promptNewBranch(msgIdx, preTitle, selectedText, selectionRange) {
   if (!msg) return;
   // Branches are primarily for assistant messages, but allow user messages too
   if (msg.role === "user" && !selectedText) return;
-  const title = preTitle || await showPrompt("分支名称：");
+  const title = preTitle || await showPrompt(t('branch.namePrompt'));
   if (!title?.trim()) return;
 
   // Server-authoritative branch creation: ID, icon, kind, validation,
@@ -693,7 +688,7 @@ async function promptNewBranch(msgIdx, preTitle, selectedText, selectionRange) {
     selectedText || '',
   );
   if (!created) {
-    await showAlert('分支创建失败，请重试');
+    await showAlert(t('branch.createFailed'));
     return;
   }
   const branch = created.branch;
@@ -729,7 +724,7 @@ async function promptNewBranch(msgIdx, preTitle, selectedText, selectionRange) {
           onclick="toggleBranchPanel(${msgIdx},${bi})" title="${escapeHtml(branch.title)}">
           <span class="branch-node-icon">${branch.icon}</span>
           <span class="branch-node-label">${escapeHtml(branch.title.length > 48 ? branch.title.slice(0, 46) + "…" : branch.title)}</span>
-          <span class="branch-node-close" onclick="event.stopPropagation();branchCloseOrDelete(${msgIdx},${bi})" title="收起">✕</span>
+          <span class="branch-node-close" onclick="event.stopPropagation();branchCloseOrDelete(${msgIdx},${bi})" title="${escapeHtml(t('branch.collapse'))}">✕</span>
         </button>`;
         wrapper.innerHTML = pillHtml;
 
@@ -801,17 +796,4 @@ function _scrollBranchToBottom(msgIdx, branchIdx) {
   if (container) container.scrollTop = container.scrollHeight;
 }
 
-// ── Approve branch tool ──
-function approveBranchTool(msgIdx, branchIdx, action) {
-  const conv = getActiveConv();
-  if (!conv) return;
-  const bk = _branchKey(conv.id, msgIdx, branchIdx);
-  const stream = _branchStreams.get(bk);
-  if (!stream?.taskId) return;
-
-  // External backend approval_required events are informational —
-  // the CLI backend manages its own approval flow via subprocess stdin.
-  // This is a best-effort attempt: won't work for external backends.
-  console.warn("[Branch] approveBranchTool: external backend approvals are not fully supported in branch mode");
-}
 

@@ -151,6 +151,68 @@ def test_committed_msg_carries_terminal_metadata():
     _ok('committed frame carries terminal metadata the done event projects verbatim')
 
 
+def test_committed_msg_segments_refreshed_at_sync():
+    """pt_687b87ac: the terminal sync must RE-ASSEMBLE the segment timeline
+    before writing last_msg / stamping _committedMsg — never persist whatever
+    mid-stream checkpoint assembly happens to sit on ``task['segments']``.
+
+    The race this pins: the pre-emit sync stamps the done frame's
+    committedMessage while ``task['segments']`` still holds a mid-round
+    checkpoint timeline (terminal text segment = only the first streamed
+    word); persist_task_result's later re-assembly then completes the DB
+    tail — the done frame already left with the stale prefix. Seed that
+    exact stale state and demand the sync converge BOTH channels to the
+    final text. RED before the fix (the sync used to persist the stale
+    list verbatim), GREEN after.
+    """
+    from lib.database import DOMAIN_CHAT, get_thread_db, db_execute_with_retry
+    from lib.tasks_pkg.manager import (create_task, _sync_result_to_conversation,
+                                        build_result_meta,
+                                        _conv_latest_task, _conv_latest_task_lock)
+
+    conv_id = 'cv-parity-segments'
+    db = get_thread_db(DOMAIN_CHAT)
+    _seed_conv(db, conv_id, [
+        {'role': 'user', 'content': 'U1', 'timestamp': 1},
+        {'role': 'assistant', 'content': '', 'timestamp': 2},
+    ])
+    try:
+        task = create_task(conv_id, [{'role': 'user', 'content': 'U1'}], {})
+        task['content'] = 'Studio iteration complete — the file is on disk.'
+        task['finishReason'] = 'stop'
+        # The stale mid-stream checkpoint timeline: terminal segment holds
+        # ONLY the first streamed word — exactly what the e2e caught riding
+        # the done frame.
+        task['segments'] = [
+            {'type': 'text', 'text': 'Studio ',
+             'deliverable': True, 'terminal': True},
+        ]
+        with _conv_latest_task_lock:
+            _conv_latest_task[conv_id] = task['id']
+        _sync_result_to_conversation(task, build_result_meta(task))
+
+        committed = task.get('_committedMsg')
+        assert committed is not None, '_committedMsg not stamped'
+        c_segs = committed.get('segments') or []
+        c_text = next((s.get('text') for s in c_segs
+                       if s.get('type') == 'text' and s.get('terminal')), None)
+        assert c_text == task['content'], (
+            'committedMessage carries a STALE segment timeline: '
+            f'terminal text={c_text!r} (expected {task["content"]!r}) — the '
+            'done frame ships a prefix of the final answer (pt_687b87ac).')
+        db_segs = (_read_tail(db, conv_id).get('segments') or [])
+        d_text = next((s.get('text') for s in db_segs
+                       if s.get('type') == 'text' and s.get('terminal')), None)
+        assert d_text == task['content'], (
+            f'DB tail carries the stale timeline: terminal text={d_text!r}')
+    finally:
+        with _conv_latest_task_lock:
+            _conv_latest_task.pop(conv_id, None)
+        db_execute_with_retry(db, 'DELETE FROM conversations WHERE id=? AND user_id=1', (conv_id,))
+        db.commit()
+    _ok('terminal sync re-assembles segments — committed frame + DB tail carry the FINAL timeline')
+
+
 def test_no_committed_msg_on_skip_path():
     """Inline-message tasks (no conversation row) legitimately skip the write.
     The frame MUST stay unset so the done event omits committedMessage and the
@@ -177,6 +239,7 @@ def main():
     tests = [
         test_committed_msg_equals_db_tail,
         test_committed_msg_carries_terminal_metadata,
+        test_committed_msg_segments_refreshed_at_sync,
         test_no_committed_msg_on_skip_path,
     ]
     for fn in tests:

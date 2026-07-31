@@ -47,17 +47,23 @@ FORBIDDEN = [
 def _strip_comments_and_strings(src: str) -> str:
     """Remove // line comments, /* */ block comments, and string literals so the
     scan only sees CODE identifiers (a forbidden word inside a comment or a
-    string message is fine)."""
-    # block comments
-    src = re.sub(r'/\*.*?\*/', ' ', src, flags=re.DOTALL)
-    # line comments
-    src = re.sub(r'//[^\n]*', ' ', src)
-    # string literals (single, double, backtick) — non-greedy, no escape-aware
-    # needed for this guard's purpose
-    src = re.sub(r"'(?:\\.|[^'\\])*'", "''", src)
-    src = re.sub(r'"(?:\\.|[^"\\])*"', '""', src)
-    src = re.sub(r'`(?:\\.|[^`\\])*`', '``', src)
-    return src
+    string message is fine).
+
+    Delegates to the SINGLE shared implementation (charter #24) via the
+    ``strings=True`` option, which was added for exactly this caller: the shared
+    module already tracked quote state for its inline block pass, so emptying
+    literals reuses that scanner instead of introducing a second literal parser.
+
+    Equivalence MEASURED on the real file this guard scans
+    (``static/js/ui/stream_reducer.js``), at the level the guard actually works
+    at: the set of CODE IDENTIFIERS surviving the strip is IDENTICAL under both
+    implementations (zero identifiers unique to either side). Comparing raw text
+    would have been the wrong test — the two legitimately differ in whitespace,
+    because the shared pass preserves line count while the local regexes
+    collapsed each comment and literal to a single space.
+    """
+    from tests._source_scan import strip_comments
+    return strip_comments(src, lang='js', strings=True)
 
 
 def test_reducer_is_pure_no_side_effect_symbols():
@@ -101,6 +107,51 @@ def test_NC_forbidden_scan_catches_injected_side_effect():
     code = _strip_comments_and_strings(poisoned).replace('module.exports', '').replace('typeof module', '')
     hit = bool(re.search(r'\btwUpdate\b', code))
     assert hit, 'NEUTER FAILED: the purity scan did not catch an injected twUpdate() call'
+
+
+def test_NC_forbidden_word_inside_a_string_is_not_a_violation():
+    """NEUTER, the other direction — pins the ``strings=True`` half.
+
+    The test above injects twUpdate as CODE, which ANY stripper catches, so it
+    cannot tell a literal-emptying stripper from a comments-only one. This one
+    can: it puts forbidden words where they are legal — inside a comment and
+    inside a string message — and requires the scan to stay silent.
+
+    Worth pinning explicitly because the real ``stream_reducer.js`` currently
+    contains ZERO occurrences of any FORBIDDEN symbol even with literals kept
+    (measured), so the production scan alone exercises neither half. Drop
+    ``strings=True`` and the fixture below starts failing; without this test
+    that regression is invisible until someone writes an error message
+    mentioning ``localStorage`` and the guard fails on prose.
+    """
+    fixture = (
+        '// this reducer must never call saveConversations directly\n'
+        'function reduce(state, ev) {\n'
+        '  if (!ev) throw new Error("cannot use localStorage in a reducer");\n'
+        '  const hint = `pass state in, do not read window here`;\n'
+        '  return state;\n'
+        '}\n'
+    )
+    code = _strip_comments_and_strings(fixture)
+    hits = sorted({p for p in FORBIDDEN if re.search(p, code)})
+    assert not hits, (
+        'forbidden symbols were counted while appearing ONLY in a comment or a '
+        f'string literal: {hits}. The scan must see CODE identifiers only — a '
+        'user-facing message naming localStorage is not an impure read.')
+    # Complement: the same words AS CODE in the same shapes must still be caught,
+    # so this is not merely "the stripper deletes everything".
+    as_code = (
+        'function reduce(state, ev) {\n'
+        '  saveConversations();\n'
+        '  localStorage.getItem("x");\n'
+        '  return state;\n'
+        '}\n'
+    )
+    code2 = _strip_comments_and_strings(as_code)
+    assert re.search(r'\bsaveConversations\b', code2), (
+        'a real saveConversations() call was destroyed by the stripper')
+    assert re.search(r'\blocalStorage\b', code2), (
+        'a real localStorage read was destroyed by the stripper')
 
 
 def _run(fn):

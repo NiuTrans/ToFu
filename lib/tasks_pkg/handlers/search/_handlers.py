@@ -11,8 +11,10 @@ the package split.
 
 from __future__ import annotations
 
+import threading
 from urllib.parse import urlparse
 
+from lib.agent_core.events import EventType, build_event
 from lib.log import get_logger
 from lib.tasks_pkg.executor import _finalize_tool_round, tool_registry
 from tofu_search.search import format_search_for_tool_response
@@ -27,6 +29,72 @@ from lib.tasks_pkg.handlers.search._display import (
 )
 
 logger = get_logger(__name__)
+
+
+def _batch_progress_reporter(task, rn, round_entry, total, label_of):
+    """Build an ``on_item`` callback that emits per-item batch progress.
+
+    ★ WHY (pt_67ffc2b7). A batch call — ``web_search(queries=[a,b,c])`` or
+    ``fetch_url(urls=[...])`` — is ONE tool round with ONE ``round_entry``, so
+    its terminal ``tool_result`` is the round's ONLY observable transition. With
+    a 2s query beside a 40s one, the user watches an undifferentiated spinner
+    for 40s and cannot tell whether every query is slow or just one is. This
+    reports each item AT ITS OWN completion instant.
+
+    Deliberately a ``tool_progress`` and NOT a partial ``tool_result``: a
+    result settles the round (``status='done'``), which would stop the spinner
+    while N-1 queries are still running — trading a late-truth for an
+    early-lie.
+
+    The payload does NOT use ``chunk``: that field is run_command's live
+    terminal buffer (``_handleToolProgress`` appends it to ``_partialOutput``,
+    which ``tool_result`` later replaces wholesale), so routing search progress
+    through it would print queries into a terminal pane and then lose them.
+
+    Args:
+        task: Live task dict (events appended).
+        rn: The batch round number.
+        round_entry: The batch round entry (for toolCallId + clocks).
+        total: Total item count in the batch.
+        label_of: ``(index, item) -> str`` producing the item's display label.
+
+    Returns:
+        An ``on_item(index, item, result, ok)`` callable for
+        :func:`run_batch_concurrent`.
+    """
+    _done = {'n': 0}
+    _lock = threading.Lock()
+
+    def _on_item(idx, item, _result, ok):
+        with _lock:
+            _done['n'] += 1
+            n_done = _done['n']
+        try:
+            label = label_of(idx, item)
+        except Exception as e:
+            logger.debug('[Search] batch label failed at idx=%d: %s', idx, e)
+            label = str(idx + 1)
+        try:
+            _evt = build_event(
+                EventType.TOOL_PROGRESS,
+                roundNum=rn,
+                toolCallId=(round_entry or {}).get('toolCallId', ''),
+                toolName=(round_entry or {}).get('toolName') or '',
+                detail='%d/%d · %s' % (n_done, total, label),
+                batchItem=label,
+                batchDone=n_done,
+                batchTotal=total,
+                batchOk=bool(ok),
+            )
+            _t_start = (round_entry or {}).get('tStart')
+            if _t_start is not None:
+                _evt['tStart'] = _t_start
+            append_event(task, _evt)
+        except Exception as e:
+            logger.warning('[Search] batch progress emit failed at idx=%d '
+                           '(non-fatal): %s', idx, e)
+
+    return _on_item
 
 
 # ══════════════════════════════════════════════════════════
@@ -147,7 +215,10 @@ def _handle_web_search_batch(task, tc, fn_name, tc_id, fn_args, queries, rn, rou
         return (q, results, search_diag, engine_breakdown, formatted, vertical_result)
 
     ordered = run_batch_concurrent(query_specs, _worker, max_workers=5, tag='Search',
-                                   abort=lambda: bool(task.get('aborted')))
+                                   abort=lambda: bool(task.get('aborted')),
+                                   on_item=_batch_progress_reporter(
+                                       task, rn, round_entry, n,
+                                       lambda idx, _spec: query_list[idx]))
 
     all_display_results = []
     all_formatted = []
@@ -269,8 +340,14 @@ def _handle_fetch_url(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, p
 
     page_content = item['page_content']
     filtered_chars = item['filtered_chars']
+    # A failure MUST carry its typed reason (soft_blocked / irrelevant / …).
+    # A bare "Failed to fetch" tells the model nothing, so it retries sibling
+    # hosts of the same dead origin — the exact loop this reason text kills.
+    error_msg = item.get('error_msg')
     tool_content = (f"Content from {target_url} ({filtered_chars:,} chars):\n\n{page_content}"
-                    if page_content else f"Failed to fetch {target_url}.")
+                    if page_content
+                    else f"Failed to fetch {target_url}."
+                         + (f' ({error_msg})' if error_msg else ''))
     return tc_id, tool_content, True
 
 
@@ -307,7 +384,10 @@ def _handle_fetch_url_batch(task, tc, fn_name, tc_id, fn_args, urls_specs, rn, r
         return _facade._fetch_url_one(target_url, user_question, fetch_reason='')
 
     ordered = run_batch_concurrent(url_list, _worker, max_workers=8, tag='Fetch',
-                                   abort=lambda: bool(task.get('aborted')))
+                                   abort=lambda: bool(task.get('aborted')),
+                                   on_item=_batch_progress_reporter(
+                                       task, rn, round_entry, n,
+                                       lambda idx, _u: url_list[idx]))
 
     from lib.tasks_pkg.tool_display import _short_url
     all_display_results = []

@@ -21,7 +21,11 @@ from typing import Optional
 from lib.env_compat import getenv_compat
 from lib.log import get_logger
 
-from lib.text_lang._ratios import MIN_CHARS_FOR_DETECTION, _WHITESPACE_RE
+from lib.text_lang._ratios import (
+    MIN_CHARS_FOR_DETECTION,
+    DetectionResult,
+    _WHITESPACE_RE,
+)
 
 logger = get_logger(__name__)
 
@@ -61,6 +65,16 @@ _SCRIPT_FASTPATH_RATIO = 0.50
 _ft_lock = threading.Lock()
 _ft_detect = None            # the fast_langdetect.detect callable, or False if unavailable
 _ft_backend: str = ''
+#: Separate memo for a FORCED fastText build (``_get_ft_detector(force=True)``).
+#: A caller on a decision path where the script+heuristic tier is
+#: LINGUISTICALLY INSUFFICIENT — most notably the auto-translate
+#: already-in-target-language skip gate, which must tell kanji-heavy Japanese
+#: apart from Chinese (both share the CJK-ideograph block, so the ratio
+#: heuristic wrongly calls ja "zh") — opts into the statistical model
+#: regardless of ``TOFU_LANGDETECT_BACKEND``. Kept in its own slot so it never
+#: thrashes the env-keyed memo above (the default detection path stays exactly
+#: as configured). ``False`` once we learn the optional dep is unavailable.
+_ft_detect_forced = None
 
 
 def _fasttext_available() -> bool:
@@ -68,7 +82,7 @@ def _fasttext_available() -> bool:
     return _get_ft_detector() is not None
 
 
-def _get_ft_detector():
+def _get_ft_detector(force: bool = False):
     """Return the memoized ``fast_langdetect.detect`` callable, or None.
 
     Backend is chosen from ``TOFU_LANGDETECT_BACKEND`` (default ``script``):
@@ -76,8 +90,29 @@ def _get_ft_detector():
       * ``fasttext`` → lazily import ``fast_langdetect`` (bundled lite .ftz,
                        917 KB, offline). Import failure logs once and pins
                        None so a missing optional dep degrades gracefully.
+
+    ``force=True`` builds (and memoizes in a SEPARATE slot) the fastText
+    detector regardless of the env backend — for the auto-translate skip gate
+    that genuinely needs the ja/zh distinction the script+heuristic tier
+    cannot make. Still fail-open: a box without ``fast_langdetect`` returns
+    None and the caller degrades to script+heuristic (the accepted
+    pure-kanji-Japanese corner case).
     """
-    global _ft_detect, _ft_backend
+    global _ft_detect, _ft_backend, _ft_detect_forced
+    if force:
+        with _ft_lock:
+            if _ft_detect_forced is None:
+                try:
+                    from fast_langdetect import detect as _detect
+                    _ft_detect_forced = _detect
+                    logger.info('[LangDetect] fastText backend force-built '
+                                '(translate skip-gate ja/zh disambiguation)')
+                except Exception as e:
+                    _ft_detect_forced = False
+                    logger.warning('[LangDetect] forced fastText requested but '
+                                   'fast_langdetect unavailable (%s) — falling '
+                                   'back to script+heuristic path', e)
+            return _ft_detect_forced or None
     desired = (getenv_compat('TOFU_LANGDETECT_BACKEND') or 'script').strip().lower()
     with _ft_lock:
         if _ft_detect is not None and _ft_backend == desired:
@@ -100,10 +135,11 @@ def _get_ft_detector():
 
 def reset_for_test():
     """Force the next detector lookup to rebuild — test-only helper."""
-    global _ft_detect, _ft_backend
+    global _ft_detect, _ft_backend, _ft_detect_forced
     with _ft_lock:
         _ft_detect = None
         _ft_backend = ''
+        _ft_detect_forced = None
 
 
 def detect_script(text: str) -> Optional[str]:
@@ -132,9 +168,8 @@ def detect_script(text: str) -> Optional[str]:
     return None
 
 
-def _fasttext_result(text: str) -> Optional["DetectionResult"]:
+def _fasttext_result(text: str) -> Optional[DetectionResult]:
     """Tier-1: run the fastText detector. Returns None when unavailable/failed."""
-    from lib.text_lang._ratios import DetectionResult
     detect = _get_ft_detector()
     if detect is None:
         return None

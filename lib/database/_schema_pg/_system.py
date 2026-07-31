@@ -195,6 +195,11 @@ def _init_system_schema(conn):
     # treated as non-conflicting, so an old epic stays dispatchable. Added
     # 2026-07. See docs/PROJECT_BRAIN_WORKTREE_ISOLATION.md §4.
     cur.execute("ALTER TABLE project_tasks ADD COLUMN IF NOT EXISTS write_set TEXT NOT NULL DEFAULT '[]'")
+    # Migration: structured human-gate columns (Pillar #3). Pre-existing rows
+    # default to '' → no pending question → dispatchable exactly as before.
+    # Added 2026-07. See project_board.py::answer_task.
+    cur.execute("ALTER TABLE project_tasks ADD COLUMN IF NOT EXISTS block_question TEXT NOT NULL DEFAULT ''")
+    cur.execute("ALTER TABLE project_tasks ADD COLUMN IF NOT EXISTS human_answer TEXT NOT NULL DEFAULT ''")
     # Migration: the shelving/park mechanism was removed (the project pushes
     # every open epic forward at full speed). Revive any retired 'deferred'
     # epic to 'open' so it dispatches again. Idempotent.
@@ -212,6 +217,13 @@ def _init_system_schema(conn):
         PROJECT_WATCH_ITEMS, PROJECT_WATCH_RESPONSES)
     create_if_absent(conn, PROJECT_WATCH_ITEMS, table_exists=_table_exists)
     create_if_absent(conn, PROJECT_WATCH_RESPONSES, table_exists=_table_exists)
+    # NOTE (2026-07-30): the promoted_text / promoted_at columns added here in
+    # 2026-07 were DROPPED from the Core schema — they backed the three-state
+    # goal promotion verdict, and a goal is no longer copied into the charter
+    # (it injects directly from the watch lane), so divergence is not a
+    # reachable state. Deliberately NOT issuing a DROP COLUMN: on an
+    # already-migrated database they are inert (NOT NULL with defaults, no
+    # reader, no writer), and dropping columns on a live table buys nothing.
     cur.execute('CREATE INDEX IF NOT EXISTS idx_project_watch_items_path ON project_watch_items(project_path, updated_at DESC)')
     cur.execute('CREATE INDEX IF NOT EXISTS idx_project_watch_resp_item_seq ON project_watch_responses(item_id, seq DESC)')
 

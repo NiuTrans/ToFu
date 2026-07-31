@@ -287,6 +287,133 @@ async def _stream_generator(task, model: str, requested_id: str,
 
 # ── Routes ──────────────────────────────────────────────────────────
 
+@api_v1_chat_bp.route('/api/v1/chat/conv-state', methods=['GET'],
+                      endpoint='v1_chat_conv_state')
+@require_scope('chat')
+def chat_conv_state():
+    """Running-task projection per conversation — the POLL transport's copy of
+    the push ``conv_state_snapshot`` frame.
+
+    WHY THIS IS NOT ``/api/v1/chat/active``.
+    That endpoint answers a DIFFERENT question: "which tasks may I reconnect an
+    SSE to?" It therefore EXCLUDES carriers, and correctly so — five frontend
+    callers feed its result to the PLAIN ``connectToTask`` path, and an
+    autopilot VU carrier there would bind a real assistant placeholder to a
+    stream that only ever emits the ``autopilot_vu_*`` contract (the
+    permanently-stuck "Waiting…" / ghost second-"Agent" bubble its carrier
+    filter exists to prevent).
+
+    This endpoint answers "which conversations are WORKING, and how may each be
+    attached?" — busy-ness, not reconnectability. A live VU carrier is exactly
+    the case where those two answers differ: its existence IS the fact that the
+    conversation is working, while it is attachable only through the VU
+    connector.
+
+    Without it the poll fallback was blind. When the push socket is down (a
+    flaky tunnel / VS Code port-forward), ``_crossDeviceReconcile`` is the only
+    remaining channel and its sole probe was ``/api/v1/chat/active`` — so a
+    multi-minute VU turn left the user on a finished-looking conversation with
+    no bubble and no stream until a manual refresh.
+
+    SINGLE SOURCE OF TRUTH: the body is built from the SAME
+    ``snapshot_running_by_conv`` projection ``build_conv_state_snapshot`` (the
+    push frame) uses, and ships the SAME ``runningTaskIds`` field with the
+    ``#vu`` carrier marker intact — so ONE client reducer
+    (``applyConvStateSnapshot``) consumes both transports. Adding a second
+    registry scan here is precisely how "busy" and "attachable" drifted apart
+    and produced this family of bugs; do not.
+
+    Scoped by the caller's tenant exactly like the push snapshot, so a poll can
+    never leak a sibling tenant's tasks.
+    """
+    # ── Frame-level rev on EVERY exit path (pt_781ae072d6ee4e84) ──────────
+    # ``{'convs': {...}}`` is not merely data: to the client reducer, a conv
+    # ABSENT from the projection means CLEAR. So an empty body is the maximally
+    # destructive frame this endpoint can emit — it extinguishes every busy dot
+    # the tab holds. A frame that says "clear everything" while carrying no rev
+    # is only HALF a frame: the client clears but cannot advance its gate, so
+    # nothing authoritative supersedes the clear and the correction waits for a
+    # later tick.
+    #
+    # Both failure branches below therefore ship a rev too. That needs the mint
+    # resolved BEFORE the import that can fail, hence this nested import with
+    # its own fallback: if even the mint is unreachable we emit no rev rather
+    # than a locally-invented one (the client's "no rev → clear but don't
+    # advance" branch is the correct conservative behaviour there, and is
+    # strictly better than shipping a value from a foreign clock domain).
+    try:
+        from lib.conversations.meta_cache import _running_task_ids_rev
+    except Exception as e:
+        logger.warning('[api_v1.chat] conv-state rev mint unavailable: %s', e)
+        _running_task_ids_rev = None
+
+    def _mint():
+        """Mint a rev, or None when the mint is unreachable.
+
+        Separating the mint import from the registry import (they used to share
+        one try block) means the mint can be absent while the projection still
+        works — so BOTH rev call sites must tolerate that. Routing both through
+        here is what keeps them from diverging: a bare
+        ``_running_task_ids_rev()`` at either site raises
+        ``'NoneType' is not callable`` and 500s the endpoint that exists
+        precisely to keep answering when everything else is broken.
+        """
+        if _running_task_ids_rev is None:
+            return None
+        try:
+            return _running_task_ids_rev()
+        except Exception as e:
+            logger.warning('[api_v1.chat] conv-state rev mint failed: %s', e)
+            return None
+
+    def _envelope(convs_payload):
+        """Wrap a projection in the wire envelope, always with a rev when one
+        can be minted. ONE construction site for every exit path so a future
+        edit cannot add another that forgets the rev."""
+        body = {'convs': convs_payload}
+        rev = _mint()
+        if rev is not None:
+            body['rev'] = rev
+        return api_ok(body)
+
+    try:
+        from lib.tasks_pkg.manager._registry import snapshot_running_by_conv
+    except Exception as e:
+        logger.warning('[api_v1.chat] conv-state imports failed: %s', e)
+        return _envelope({})
+
+    _auth = current_auth()
+    _uid = getattr(_auth, 'user_id', None) if _auth else None
+    # Mirror the sync-digest scoping in routes/api_v1/conversations.py: the
+    # single-user / pre-auth default is UNSCOPED (empty string), which makes
+    # this byte-identical to the push snapshot on a personal install.
+    _scope = '' if _uid in (None, '', 1, '1') else str(_uid)
+    try:
+        raw = snapshot_running_by_conv(user_id=_scope)
+    except Exception as e:
+        # Fail EMPTY, never fail loud. The client reads an empty projection as
+        # "nothing running", which is the safe direction: a false negative is
+        # re-lit by the next tick or the next notify frame, whereas a 500 would
+        # wedge the only channel left when push is down.
+        logger.warning('[api_v1.chat] conv-state projection failed: %s', e)
+        raw = {}
+
+    convs = {}
+    for conv_id, tids in raw.items():
+        entry = {'runningTaskIds': list(tids)}
+        _per_conv_rev = _mint()
+        if _per_conv_rev is not None:
+            entry['runningTaskIdsRev'] = _per_conv_rev
+        convs[conv_id] = entry
+    # Frame-level rev is added by _envelope() — minted AFTER the per-conv revs
+    # above, so it dominates them (the projection is by construction the newest
+    # view of the registry). Both transports feed the SAME reducer, so this
+    # lane missing the rev would leave the poll path unable to clear a conv
+    # without the client minting its own value — the cross-clock-domain bug
+    # this ticket removed.
+    return _envelope(convs)
+
+
 @api_v1_chat_bp.route('/api/v1/chat/completions', methods=['POST'])
 @require_scope('chat')
 @idempotent_post()

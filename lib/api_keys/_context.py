@@ -28,6 +28,7 @@ ALL_SCOPES = frozenset({
     'agents:scheduler',
     'agents:memory',
     'agents:browser',
+    'agents:bridge',  # X-Bridge-Secret per-user token (RWA P4a, poll auth)
     'agents:search',
     'agents:trading',
     'agents:image',

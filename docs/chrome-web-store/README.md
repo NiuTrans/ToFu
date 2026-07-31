@@ -1,39 +1,73 @@
-# Chrome Web Store submission kit — Tofu Browser Bridge
+# Extension store submission kit — Tofu Browser Bridge
 
-This folder is everything you need to submit the **Tofu Browser Bridge**
-extension to the Chrome Web Store. It does **not** automate the submission —
-that requires your Google account, a one-time **$5** developer registration,
-and identity verification, none of which can be done from code.
+Everything needed to publish the **Tofu Browser Bridge** extension to the two
+Chromium extension stores. It does **not** automate submission — that needs
+your own account and identity verification, which cannot be done from code.
 
-> **⚠️ Read this first — honest expectation setting.**
+**One package, two stores.** `scripts/package_extension.sh --store` produces a
+single zip that both the Chrome Web Store and Microsoft Edge Add-ons accept;
+every justification, listing and privacy answer in this folder is reused for
+both.
+
+| | Chrome Web Store | Microsoft Edge Add-ons |
+|---|---|---|
+| Fee | **$5** one-time | **none** |
+| Individual account | yes | yes (shorter verification) |
+| Where to start | `SUBMISSION_CHECKLIST.md` | `EDGE_ADDONS.md` |
+
+> **Try Edge first, or in parallel.** It costs nothing, takes the same zip, and
+> reuses this entire kit — so it is the cheapest real shot at one-click
+> install, not a consolation prize. Registration verification is asynchronous,
+> so start it early.
+
+> **⚠️ Honest expectation setting.**
 > This extension uses `debugger`, `<all_urls>`, `cookies`, `history`,
 > `bookmarks`, and a tool (`browser_execute_js`) that runs JavaScript sent
-> from the Tofu server. The Chrome Web Store's **remote-code** and
+> from the Tofu server. Both stores' **remote-code** and
 > **minimum-permissions / single-purpose** policies are exactly the policies
-> this design strains. A rejection on the first pass is the *likely* outcome,
-> not a surprise. The materials here are written to give the best possible
-> shot and to make the review reasons concrete if it is rejected. See
-> `REVIEW_RISKS.md` for the mitigation plan.
+> this design strains — and Edge's MV3 remote-code wording is *stricter* than
+> Chrome's, not looser. A rejection on the first pass is the *likely* outcome,
+> not a surprise. `REVIEW_RISKS.md` has the mitigation plan and the outcome
+> ladder; read it before spending review cycles.
 
 ## Files
 
 | File | What it is |
 |---|---|
-| `LISTING.md` | Store-listing copy: name, summary, full description, category, language. Paste into the Developer Dashboard fields. |
-| `PERMISSIONS_JUSTIFICATION.md` | Per-permission justification text. The dashboard requires one box per permission — copy each block verbatim. |
-| `PRIVACY.md` | Privacy-policy page content + the exact answers for the "Data usage" disclosure form. You must host the privacy policy at a public URL and paste that URL into the dashboard. |
-| `manifest.store.json` | A **trimmed** manifest (6 unused permissions removed) intended for the *store* build. See `REVIEW_RISKS.md` for why. |
-| `SUBMISSION_CHECKLIST.md` | Step-by-step: register → package → upload → fill forms → submit → respond to review. |
-| `ASSETS_CHECKLIST.md` | The exact image assets the store requires (icon, screenshots, tile) with sizes and a shot list. |
-| `REVIEW_RISKS.md` | The specific policies this extension trips and how each is mitigated. Read before submitting. |
+| `SUBMISSION_CHECKLIST.md` | Chrome, step by step: register → package → upload → fill forms → submit → respond to review. |
+| `EDGE_ADDONS.md` | Edge Add-ons: the Partner Center route, what is reused verbatim, and the places Edge differs (incl. where it is stricter). |
+| `REVIEW_RISKS.md` | The specific policies this extension trips, how each is mitigated, and the realistic outcome ladder across both stores. |
+| `LISTING.md` | Store-listing copy: name, summary, full description, category, language. Used by both stores. |
+| `PERMISSIONS_JUSTIFICATION.md` | Per-permission justification text — one box per declared permission on both dashboards. Also records which permissions the store build drops, and why. |
+| `PRIVACY.md` | Privacy-policy page content + the exact answers for the data-usage disclosure form. Host it publicly and paste the URL into both dashboards. |
+| `manifest.store.json` | The **trimmed** manifest for the store build — only the permissions the code actually calls. Kept in step with `browser_extension/manifest.json` by `tests/test_chrome_store_manifest_parity.py`. |
+| `ASSETS_CHECKLIST.md` | The exact image assets each store requires, with sizes and a screenshot shot list. |
 | `../../scripts/package_extension.sh` | Builds the upload `.zip` from `browser_extension/`, optionally swapping in `manifest.store.json`. |
 
 ## The 60-second version
 
-1. Register once at https://chrome.google.com/webstore/devconsole ($5).
-2. `bash scripts/package_extension.sh --store` → produces `dist/tofu-browser-bridge-<version>-store.zip`.
+1. Register: Edge at
+   <https://partner.microsoft.com/dashboard/microsoftedge/public/login> (free)
+   and/or Chrome at <https://chrome.google.com/webstore/devconsole> ($5).
+2. `bash scripts/package_extension.sh --store` → produces
+   `dist/tofu-browser-bridge-<version>-store.zip`.
 3. Host `PRIVACY.md` somewhere public, note the URL.
-4. In the dashboard: create item → upload the zip → paste `LISTING.md` fields,
-   `PERMISSIONS_JUSTIFICATION.md` blocks, the privacy URL, and the data-usage answers.
+4. Create the item → upload the zip → paste `LISTING.md` fields,
+   `PERMISSIONS_JUSTIFICATION.md` blocks, the privacy URL, and the data-usage
+   answers. Chrome: `SUBMISSION_CHECKLIST.md`. Edge: `EDGE_ADDONS.md`.
 5. Upload assets from `ASSETS_CHECKLIST.md`.
 6. Submit. Expect a review reply; answer it using `REVIEW_RISKS.md`.
+
+## Before you touch anything here
+
+Run the parity guard — it derives the required permission set from the
+extension's real `chrome.*` calls and cross-checks the manifests, the
+justification blocks and these docs:
+
+```bash
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest tests/test_chrome_store_manifest_parity.py -q
+```
+
+It exists because the store manifest once omitted `downloads` while
+`background.js` really called `chrome.downloads.download` — the `download`
+command would have thrown for every store-installed user.

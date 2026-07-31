@@ -72,6 +72,24 @@ def _mk_task(conv_id, content='', thinking=''):
     return task
 
 
+def _set_min_delta(n):
+    """Set CHECKPOINT_MIN_DELTA_CHARS where the code that READS it lives.
+    ``manager.py`` became a package: ``_sync.py`` imported the constant by
+    value (``from ._state import CHECKPOINT_MIN_DELTA_CHARS``), so assigning
+    only ``manager.CHECKPOINT_MIN_DELTA_CHARS`` (the facade copy) never changes
+    what ``_sync_partial_to_conversation`` sees. Set it on the read site
+    (``_sync``) plus the facade + ``_state`` so every binding agrees. Returns
+    the prior ``_sync`` value for restore."""
+    import lib.tasks_pkg.manager as _mgr
+    import lib.tasks_pkg.manager._sync as _sync
+    import lib.tasks_pkg.manager._state as _st
+    prev = _sync.CHECKPOINT_MIN_DELTA_CHARS
+    _sync.CHECKPOINT_MIN_DELTA_CHARS = n
+    _mgr.CHECKPOINT_MIN_DELTA_CHARS = n
+    _st.CHECKPOINT_MIN_DELTA_CHARS = n
+    return prev
+
+
 def _cleanup(db, conv_id, task_id):
     from lib.database import db_execute_with_retry
     from lib.tasks_pkg.manager import _conv_latest_task, _conv_latest_task_lock
@@ -177,8 +195,7 @@ def test_reload_equivalence_task_results_vs_per_delta_messages():
         ])
         task = _mk_task(conv_id)
         acc = ''
-        orig = mgr.CHECKPOINT_MIN_DELTA_CHARS
-        mgr.CHECKPOINT_MIN_DELTA_CHARS = min_delta
+        orig = _set_min_delta(min_delta)
         try:
             for d in deltas:
                 acc += d
@@ -187,7 +204,7 @@ def test_reload_equivalence_task_results_vs_per_delta_messages():
             tr = _read_task_results(db, task['id'])
             return tr[0], task['id']
         finally:
-            mgr.CHECKPOINT_MIN_DELTA_CHARS = orig
+            _set_min_delta(orig)
 
     # Coalesced (default-ish large threshold → most deltas withheld from
     # messages) vs per-delta (threshold 0 → every delta written).
@@ -279,8 +296,7 @@ def test_disabled_threshold_writes_every_delta():
         {'role': 'assistant', 'content': ''},
     ])
     task = _mk_task(conv_id)
-    orig = mgr.CHECKPOINT_MIN_DELTA_CHARS
-    mgr.CHECKPOINT_MIN_DELTA_CHARS = 0
+    orig = _set_min_delta(0)
     try:
         task['content'] = 'M' * 100
         mgr.checkpoint_task_partial(task)
@@ -290,7 +306,7 @@ def test_disabled_threshold_writes_every_delta():
         assert got == 'M' * 100 + 'z', (
             f'threshold 0 must write every delta, got {len(got)}')
     finally:
-        mgr.CHECKPOINT_MIN_DELTA_CHARS = orig
+        _set_min_delta(orig)
         _cleanup(db, conv_id, task['id'])
 
 

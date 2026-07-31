@@ -18,9 +18,14 @@ logger = get_logger(__name__)
 # ══════════════════════════════════════════════════════════
 
 def is_claude(model: str) -> bool:
-    """Anthropic Claude models (including AWS/GCP-prefixed variants)."""
+    """Anthropic models (Claude + Fable, including AWS/GCP-prefixed variants).
+
+    ``fable`` is Anthropic's Fable line (Fable 5, May 2026) — it speaks the
+    same Messages API shape as Claude (thinking.type='adaptive', cache
+    1.25/0.10 multipliers, no assistant prefill), so every Claude-family
+    code path treats it identically."""
     m = model.lower()
-    return 'claude' in m or 'anthropic' in m
+    return 'claude' in m or 'anthropic' in m or 'fable' in m
 
 
 def is_claude_opus_47(model: str) -> bool:
@@ -44,10 +49,13 @@ def is_claude_opus_47(model: str) -> bool:
         return False
     # Extract (major, minor) from "opus-X-Y" or "opus-X.Y" — returns True iff
     # (major, minor) >= (4, 7).  Handles opus-4-7, opus-4.8, opus-5-0, etc.
-    match = re.search(r'opus[-_.]?(\d+)[-_.](\d+)', m)
+    # The minor digit is OPTIONAL: bare-major gateway aliases
+    # (yuju-claude-opus-5-evaDaily, claude-opus-5) parse as (major, 0).
+    match = re.search(r'opus[-_.]?(\d+)(?:[-_.](\d+))?', m)
     if not match:
         return False
-    major, minor = int(match.group(1)), int(match.group(2))
+    major = int(match.group(1))
+    minor = int(match.group(2)) if match.group(2) else 0
     return (major, minor) >= (4, 7)
 
 
@@ -90,6 +98,18 @@ def is_kimi(model: str) -> bool:
     return 'kimi' in m or 'moonshot' in m
 
 
+def is_kimi_k3(model: str) -> bool:
+    """Moonshot Kimi K3 specifically (kimi-k3, kimi-k3.1, …).
+
+    K3 speaks a DIFFERENT thinking contract from the K2 line: top-level
+    ``reasoning_effort`` (low/high/max, default max) and a fixed
+    temperature=1.0 that rejects any other value with HTTP 400 (verified
+    live against the sankuai gateway 2026-07-24). The K2-style
+    ``thinking:{type:...}`` + temperature shape must NOT be sent to K3.
+    """
+    return 'kimi-k3' in model.lower()
+
+
 def is_ernie(model: str) -> bool:
     """Baidu ERNIE models (ERNIE-5.0, ERNIE-X1, ERNIE-4.5, etc.)."""
     return 'ernie' in model.lower()
@@ -98,6 +118,34 @@ def is_ernie(model: str) -> bool:
 def is_gpt(model: str) -> bool:
     """OpenAI GPT models (gpt-4, gpt-4.1, gpt-4o, etc.)."""
     return 'gpt' in model.lower()
+
+
+def is_gpt5(model: str) -> bool:
+    """OpenAI GPT-5 family reasoning models (gpt-5, gpt-5.2, gpt-5.4, gpt-5.6,
+    including -mini / -nano / -pro / -codex variants).
+
+    These take the OpenAI-native ``reasoning_effort`` knob. Deliberately
+    excludes ``gpt-oss`` (no 'gpt-5' substring) and the o-series / gpt-4o
+    (which route through the plain-OpenAI branch unchanged).
+    """
+    return 'gpt-5' in model.lower()
+
+
+def is_gpt_56(model: str) -> bool:
+    """GPT-5.6+ — the first GPT generation to expose the ``ultra`` reasoning
+    effort tier. Older GPT-5.x models clamp ``ultra`` down to ``high``.
+
+    Extracts the minor version from ``gpt-5``/``gpt-5.6``/``gpt-5.6-mini`` and
+    returns True iff minor >= 6 (``gpt-5`` alone == minor 0).
+    """
+    m = model.lower()
+    if 'gpt-5' not in m:
+        return False
+    match = re.search(r'gpt-5(?:[.\-](\d+))?', m)
+    if not match:
+        return False
+    minor = int(match.group(1)) if match.group(1) else 0
+    return minor >= 6
 
 
 def is_deepseek(model: str) -> bool:

@@ -1,24 +1,51 @@
-"""tests/test_log_pytest_sink_isolation.py — 2026-07-13.
+"""tests/test_log_pytest_sink_isolation.py — 2026-07-13, REPOINTED 2026-07-27.
 
-Regression guard for the pytest log-sink isolation added in server.py.
+Regression guard: the test suite must never write into the PRODUCTION logs.
 
-WHY: ``tests/conftest.py`` does ``import server`` at collection time, which
-runs ``logging.basicConfig(handlers=[...])`` and attaches the rotating FILE
-handlers (app.log / error.log / vendor.log / access.log) to the ROOT logger
-for the whole session. The suite deliberately drives error paths with mocked
-exceptions ('llm down', 'disk full', 'reload boom', a merge-conflict 'bad.js').
-Without isolation, every test's ``logger.error()`` bled those fixtures into the
-REAL ``logs/error.log`` & ``logs/app.log`` — poisoning the operator's #1
-diagnostic surface (a reader can't tell a fixture from a real outage).
+WHY (unchanged since 2026-07-13): ``tests/conftest.py`` does ``import server``
+at collection time, which runs ``logging.basicConfig(handlers=[...])`` and
+attaches the rotating FILE handlers (app.log / error.log / vendor.log /
+access.log) to the ROOT logger for the whole session. The suite deliberately
+drives error paths with mocked exceptions ('llm down', 'disk full', 'reload
+boom', a merge-conflict 'bad.js'). Without isolation every test's
+``logger.error()`` bleeds those fixtures into the REAL ``logs/error.log`` and
+``logs/app.log`` — poisoning the operator's #1 diagnostic surface, because a
+reader cannot tell a fixture from a real outage.
 
-The fix: under pytest, redirect the FILE handlers to an isolated
-``logs/pytest/`` sink. Production logging is untouched when not under pytest.
+★ WHY THIS FILE WAS REWRITTEN (2026-07-27)
+
+The original guard asserted a SPECIFIC IMPLEMENTATION: ``server._UNDER_PYTEST``
+and ``server._FILE_LOG_DIR == <repo>/logs/pytest``. Both symbols are GONE from
+server.py — no ``git log -S`` hit, so they vanished in a wholesale rewrite of
+the logging block rather than a traceable deletion. The guard had therefore
+been RED for ~14 days, and with it dead the leak came back: measured
+2026-07-27, one test emitting a single ``logger.error()`` + ``audit_log()``
+grew the production ``app.log`` by 83 bytes and landed markers in BOTH
+``app.log`` and ``audit.log``. Meanwhile that same app.log reached 9.1 GB in a
+day (96% of it one wedged sub-agent), with test noise mixed in.
+
+The replacement isolation is UPSTREAM of the handlers: ``tests/conftest.py``
+sets ``TOFU_DATA_DIR`` to a per-worker temp dir BEFORE ``import server``, so
+``lib/log.py`` resolves ``LOG_DIR`` (frozen at import time) into that temp dir
+and EVERY consumer follows — the four file handlers, ``audit_log()``'s own
+``AUDIT_LOG_FILE`` path, and anything else derived from the base dir. That is
+strictly broader than the old ``logs/pytest/`` sink, which redirected only the
+four handlers and still wrote inside the repo.
+
+So these tests now assert the OUTCOME (nothing lands in <repo>/logs) rather
+than the mechanism, which is what a guard should have pinned in the first
+place — an implementation-shaped assertion is exactly what let this one rot
+into a false red while the real protection silently disappeared.
+
+Companion: tests/test_log_isolation_guard.py (path + write-through checks on
+the lib.log constants). This file covers the server.py handler objects.
 """
 
 from __future__ import annotations
 
 import logging
 import os
+import uuid
 
 import pytest
 
@@ -28,63 +55,89 @@ import server
 
 pytestmark = pytest.mark.unit
 
-
-def test_running_under_pytest_flag_is_set():
-    """The suite itself must be recognised as running under pytest."""
-    assert server._UNDER_PYTEST is True
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_PROD_LOG_DIR = os.path.join(_ROOT, 'logs')
 
 
-def test_file_handlers_point_into_pytest_sink():
-    """All four rotating FILE handlers must write under logs/pytest/, never the
-    production logs/ directory."""
-    expected_dir = os.path.join(server.LOG_DIR, 'pytest')
-    assert server._FILE_LOG_DIR == expected_dir
+def _prod(name: str) -> str:
+    return os.path.join(_PROD_LOG_DIR, name)
 
-    for handler in (server._error_handler, server._app_handler,
-                    server._vendor_handler, server._access_handler):
-        parent = os.path.dirname(handler.baseFilename)
-        assert parent == expected_dir, (
-            f'{handler.baseFilename} escaped the pytest sink '
-            f'(expected under {expected_dir})'
-        )
+
+def test_log_dir_is_isolated_from_the_repo():
+    """server.LOG_DIR must not be the production <repo>/logs directory."""
+    assert os.path.abspath(server.LOG_DIR) != os.path.abspath(_PROD_LOG_DIR), (
+        'the test session resolved LOG_DIR to the PRODUCTION log dir; set '
+        'TOFU_DATA_DIR in conftest BEFORE `import server` (LOG_DIR is frozen '
+        'at import time in lib/log.py)')
+
+
+def test_all_file_handlers_write_outside_production():
+    """Every rotating FILE handler must live outside <repo>/logs.
+
+    Asserts the OUTCOME, not a particular sink layout — the previous version
+    pinned ``server._FILE_LOG_DIR``, which no longer exists.
+    """
+    handlers = [(n, getattr(server, n, None)) for n in
+                ('_app_handler', '_error_handler',
+                 '_vendor_handler', '_access_handler')]
+    present = [(n, h) for n, h in handlers if h is not None]
+    assert present, 'no file handlers found on server — has the logging block moved?'
+
+    for name, handler in present:
+        base = getattr(handler, 'baseFilename', None)
+        if base is None:
+            continue
+        parent = os.path.abspath(os.path.dirname(base))
+        assert parent != os.path.abspath(_PROD_LOG_DIR), (
+            f'{name} writes to {base} — inside the PRODUCTION log dir')
 
 
 def test_console_handler_still_targets_stderr():
     """The stderr console handler is unchanged so -s / caplog keep working."""
-    assert isinstance(server._console_handler, logging.StreamHandler)
+    h = getattr(server, '_console_handler', None)
+    if h is None:
+        pytest.skip('server._console_handler not exposed')
+    assert isinstance(h, logging.StreamHandler)
     # A StreamHandler over stderr has no baseFilename — it must NOT have been
     # accidentally swapped for a file handler.
-    assert not hasattr(server._console_handler, 'baseFilename')
+    assert not hasattr(h, 'baseFilename')
 
 
-def test_mock_error_lands_in_sink_not_production():
-    """A biz-logger error emitted during a test must land in the pytest sink's
-    error.log and NOT append to the production logs/error.log."""
-    prod_error_log = os.path.join(server.LOG_DIR, 'error.log')
-    sink_error_log = os.path.join(server._FILE_LOG_DIR, 'error.log')
+def test_mock_error_does_not_reach_production_error_log():
+    """A biz-logger error emitted during a test must not append to the real
+    logs/error.log (nor app.log)."""
+    # Minted PER RUN, deliberately. A hardcoded literal made this guard
+    # SELF-POISONING: once the marker leaked into logs/error.log (measured
+    # 2026-07-27 17:58, a single occurrence), the content assertion below
+    # failed on every subsequent run FOREVER — even once isolation was fully
+    # restored — because the string it searches for was already in the file.
+    # A red that cannot be cleared by fixing the bug is indistinguishable from
+    # noise, which is precisely how this file's predecessor rotted for 14 days.
+    marker = 'TOFU_SINK_ISOLATION_PROBE_' + uuid.uuid4().hex[:12]
+    prod_error, prod_app = _prod('error.log'), _prod('app.log')
 
-    # Guard: the fix must actually redirect — the two paths must differ.
-    assert prod_error_log != sink_error_log
+    def _size(p):
+        return os.path.getsize(p) if os.path.exists(p) else 0
 
-    marker = 'TOFU_SINK_ISOLATION_PROBE_9c3f21'
-
-    def _read(path):
+    def _read(p):
         try:
-            with open(path, encoding='utf-8') as f:
+            with open(p, encoding='utf-8', errors='replace') as f:
                 return f.read()
         except FileNotFoundError:
             return ''
 
-    prod_before = _read(prod_error_log)
+    before_error, before_app = _size(prod_error), _size(prod_app)
 
-    # Emit through a biz-prefixed logger (passes _BizAndServerOnly), forcing a
-    # flush so the write is observable synchronously.
     logging.getLogger('lib.test_sink_probe').error(marker)
-    server._error_handler.flush()
+    for h in logging.getLogger().handlers:
+        try:
+            h.flush()
+        except Exception:
+            pass
 
-    assert marker in _read(sink_error_log), 'probe did not reach the pytest sink'
-    assert marker not in _read(prod_error_log), (
-        'probe leaked into the PRODUCTION error.log — sink isolation broken'
-    )
-    # Production error.log must be byte-untouched by the probe.
-    assert _read(prod_error_log) == prod_before
+    assert _size(prod_error) == before_error, (
+        'probe grew the PRODUCTION error.log — isolation broken')
+    assert _size(prod_app) == before_app, (
+        'probe grew the PRODUCTION app.log — isolation broken')
+    assert marker not in _read(prod_error), (
+        'probe leaked into the PRODUCTION error.log')

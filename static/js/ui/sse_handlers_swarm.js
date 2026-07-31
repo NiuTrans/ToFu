@@ -6,8 +6,8 @@
 
 function _handleSwarmPhase(ev, c) {
   const convId = c.convId, taskId = c.taskId;
-  const assistantMsg = c.assistantMsg, buf = c.buf;
-  const _epCriticPhase = c.epCriticPhase, _epCriticMsg = c.epCriticMsg, _epCriticBuf = c.epCriticBuf;
+  const assistantMsg = c.assistantMsg;
+  const _epCriticPhase = c.epCriticPhase, _epCriticMsg = c.epCriticMsg;
       /* Master-level swarm lifecycle: planning → spawning → wave_start → complete */
       if (!assistantMsg.toolRounds) assistantMsg.toolRounds = [];
       /* Async swarm: ``complete`` may fire AFTER assistantMsg has rotated
@@ -128,15 +128,14 @@ function _handleSwarmPhase(ev, c) {
           }
         }
       }
-      if (buf) buf.toolRounds = assistantMsg.toolRounds || [];
-      twUpdate(convId);
+      if (typeof twUpdate === 'function') twUpdate(convId);
 
 }
 
 function _handleSwarmAgent(ev, c) {
   const convId = c.convId, taskId = c.taskId;
-  const assistantMsg = c.assistantMsg, buf = c.buf;
-  const _epCriticPhase = c.epCriticPhase, _epCriticMsg = c.epCriticMsg, _epCriticBuf = c.epCriticBuf;
+  const assistantMsg = c.assistantMsg;
+  const _epCriticPhase = c.epCriticPhase, _epCriticMsg = c.epCriticMsg;
       /* Per-agent updates may arrive AFTER the spawning assistantMsg has
          rotated to a different turn (async swarm).  Look up the swarm
          panel in the current msg first, then walk back through the
@@ -241,8 +240,7 @@ function _handleSwarmAgent(ev, c) {
           }
         }
       }
-      if (buf) buf.toolRounds = assistantMsg.toolRounds || [];
-      twUpdate(convId);
+      if (typeof twUpdate === 'function') twUpdate(convId);
 
       } else if (_swarm_evtype === "swarm_agent_progress") {
       /* Agent progress: tool usage, partial results, etc. */
@@ -263,8 +261,7 @@ function _handleSwarmAgent(ev, c) {
           }
         }
       }
-      if (buf) buf.toolRounds = assistantMsg.toolRounds || [];
-      twUpdate(convId);
+      if (typeof twUpdate === 'function') twUpdate(convId);
 
       } else if (_swarm_evtype === "swarm_agent_complete") {
       /* Individual agent finished */
@@ -301,8 +298,7 @@ function _handleSwarmAgent(ev, c) {
           if (ev.error) agent.preview = errorEnvelopeMessage(ev.error) || (typeof ev.error === 'string' ? ev.error : '');
         }
       }
-      if (buf) buf.toolRounds = assistantMsg.toolRounds || [];
-      twUpdate(convId);
+      if (typeof twUpdate === 'function') twUpdate(convId);
 
       } else if (_swarm_evtype === "swarm_agent_error") {
       const sr = _findOwningSwarmRound();
@@ -323,8 +319,7 @@ function _handleSwarmAgent(ev, c) {
           agent.preview = errorEnvelopeMessage(ev.error) || (typeof ev.error === 'string' ? ev.error : '') || ev.content || "Agent failed";
         }
       }
-      if (buf) buf.toolRounds = assistantMsg.toolRounds || [];
-      twUpdate(convId);
+      if (typeof twUpdate === 'function') twUpdate(convId);
 
       } else if (_swarm_evtype === "swarm_agent_tool_call") {
       /* Per-tool-call timeline entry from a sub-agent.
@@ -357,8 +352,7 @@ function _handleSwarmAgent(ev, c) {
           if (ev.argsBrief) entry.argsBrief = ev.argsBrief;
         }
       }
-      if (buf) buf.toolRounds = assistantMsg.toolRounds || [];
-      twUpdate(convId);
+      if (typeof twUpdate === 'function') twUpdate(convId);
       }  /* end inner _swarm_evtype dispatch */
 
 }

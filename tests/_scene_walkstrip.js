@@ -26,22 +26,26 @@ function recorder() {
   const ops = [];
   const st = { fill: '#000000', alpha: 1, comp: 'source-over', grad: null };
   const stack = [];
-  let cur = null;
+  // Batched-dab convention (see _scene_pixeldiff.js): geometry lives in the
+  // ellipse() args and ONE fill() emits a whole colour bucket.
+  let pending = [];
   const ctx = {
     canvas: { width: W, height: H },
     setTransform() {}, clearRect() {},
     save() { stack.push({ fill: st.fill, alpha: st.alpha, comp: st.comp, grad: st.grad }); },
-    restore() { const p = stack.pop(); if (p) { st.fill = p.fill; st.alpha = p.alpha; st.comp = p.comp; st.grad = p.grad; } cur = null; },
-    translate(x, y) { cur = { x, y, ang: 0 }; },
-    rotate(a) { if (cur) cur.ang = a; },
-    beginPath() {},
-    ellipse(cx, cy, rx, ry) { if (cur) { cur.rx = rx; cur.ry = ry; } },
+    restore() { const p = stack.pop(); if (p) { st.fill = p.fill; st.alpha = p.alpha; st.comp = p.comp; st.grad = p.grad; } },
+    translate() {},
+    rotate() {},
+    beginPath() { pending = []; },
+    moveTo() {},
+    ellipse(cx, cy, rx, ry, ang) { pending.push({ x: cx, y: cy, rx, ry, ang: ang || 0 }); },
     arc() {},
     fill() {
-      if (cur && cur.rx != null) {
-        ops.push({ t: 'dab', x: cur.x, y: cur.y, rx: cur.rx, ry: cur.ry,
-                   ang: cur.ang, color: st.fill, alpha: st.alpha, comp: st.comp });
+      for (const e of pending) {
+        ops.push({ t: 'dab', x: e.x, y: e.y, rx: e.rx, ry: e.ry,
+                   ang: e.ang, color: st.fill, alpha: st.alpha, comp: st.comp });
       }
+      pending = [];
     },
     fillRect(x, y, w, h) {
       ops.push({ t: 'rect', x, y, w, h, color: st.fill, grad: st.grad,
@@ -70,6 +74,7 @@ let canvasN = 0;
 const visRec = recorder();
 const bufRec = recorder();
 const fgRec = recorder();
+const glowRec = recorder();     // the baked sun-glow tile (4th canvas created)
 
 let rafCb = null;
 global.requestAnimationFrame = function (cb) { rafCb = cb; return 1; };
@@ -107,7 +112,7 @@ global.document = {
   createElement(t) {
     if (t === 'canvas') {
       canvasN++;
-      const rec = canvasN === 1 ? visRec : (canvasN === 2 ? bufRec : fgRec);
+      const rec = canvasN === 1 ? visRec : (canvasN === 2 ? bufRec : (canvasN === 3 ? fgRec : glowRec));
       const e = mkEl();
       e.getContext = function () { return rec.ctx; };
       return e;
@@ -116,6 +121,13 @@ global.document = {
   },
 };
 
+// Pin the scene clock to 14:00 (the neutral 'afternoon' bucket, zero tint wash)
+// so colour-keyed assertions are deterministic no matter what hour CI runs at.
+// Without this, the time-of-day palette shifts every hardcoded hex in this file.
+{ const _RealDate = Date;
+  global.Date = function(...a){ return a.length ? new _RealDate(...a) : new _RealDate(2026, 0, 1, 14, 0, 0); };
+  global.Date.now = _RealDate.now; global.Date.parse = _RealDate.parse; global.Date.UTC = _RealDate.UTC;
+  global.Date.prototype = _RealDate.prototype; }
 const src = fs.readFileSync(path.join(__dirname, '..', 'static', 'js', 'tofu-scene.js'), 'utf8');
 eval(src);   // IIFE mounts + bakes buffer + registers _loop via rAF
 

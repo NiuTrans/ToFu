@@ -86,7 +86,7 @@ const allRounds = [
 ];
 const msgA = { role: 'assistant', content: 'R1 full answer tail that gets rolled back',
                thinking: 'live thinking tail', toolRounds: allRounds.slice(),
-               finishReason: 'length', error: 'stale' };
+               finishReason: 'length', error: 'stale', _taskId: 'T-dead' };
 const ckptA = {
   resumeMode: 'checkpoint', keptRounds: 1, discardedRounds: 2,
   contentPrefix: 'R1', priorContent: ' full answer tail that gets rolled back',
@@ -101,6 +101,11 @@ check('A_thinking_cleared', msgA.thinking === '');
 check('A_priorContent_from_fact', msgA.priorContent === ' full answer tail that gets rolled back');
 check('A_priorThinking_from_fact', msgA.priorThinking === 'live thinking tail');
 check('A_stale_meta_cleared', msgA.finishReason === undefined && msgA.error === undefined);
+// The DEAD task's bind must go too — keeping `_taskId` makes
+// assistantTailIsPriorTurn (sse_pipeline.js connectToTask) classify this
+// adopted bubble as a PRIOR turn and mint a placeholder twin for the resume
+// task (the ms43foj3 restart double-bubble).
+check('A_taskid_unbound', msgA._taskId === undefined);
 // Streaming-merge seed set from the server-decided kept rounds.
 check('A_merge_seed_rounds', Array.isArray(msgA._continueToolRounds) && msgA._continueToolRounds.length === 1);
 check('A_merge_seed_prefix', msgA._continueContentPrefix === 'R1');
@@ -187,8 +192,14 @@ def test_empty_guard_includes_toolrounds():
     with open(SRC_JS, encoding='utf-8') as f:
         src = f.read()
     fn_start = src.index('async function continueAssistant()')
-    # Bound the search to the empty-guard region (before the POST).
-    guard_region = src[fn_start:fn_start + 1200]
+    fn_body = src[fn_start:]
+    # Anchor the region on the GUARD ITSELF, not on a fixed byte window from the
+    # function start. The old `src[fn_start:fn_start + 1200]` slice broke the
+    # moment anything was added above the guard (the 2026-07-29 in-flight-gate
+    # comment pushed it to offset ~1146, so the 66-char match ran off the end)
+    # — a guard that goes red for a reason unrelated to what it asserts.
+    g = fn_body.index('if (!assistantMsg.content')
+    guard_region = fn_body[max(0, g - 600):g + 400]
     # The guard must consult tool rounds, not just content/thinking.
     assert 'getToolRoundsFromMsg(assistantMsg)' in guard_region, (
         'continueAssistant empty-guard does not consult toolRounds — a '
@@ -199,6 +210,32 @@ def test_empty_guard_includes_toolrounds():
     assert m, 'empty-guard condition not found in expected shape'
     assert '_hasRounds' in m.group(1) or 'Rounds' in m.group(1), (
         f'empty-guard still ignores toolRounds: {m.group(0)!r}')
+
+
+@pytest.mark.skipif(not _node_available(), reason='node not installed')
+def test_reducer_neuter_keeps_dead_task_bind(tmp_path):
+    """NEUTER: remove the `delete assistantMsg._taskId;` line and prove the
+    adopted bubble then KEEPS the dead task's bind — the exact fact that made
+    connectToTask's assistantTailIsPriorTurn mint the placeholder twin (the
+    ms43foj3 double-bubble)."""
+    with open(SRC_JS, encoding='utf-8') as f:
+        reducer = _extract_reducer(f.read())
+    anchor = '  delete assistantMsg._taskId;'
+    assert anchor in reducer, (
+        'reducer _taskId-unbind anchor not found — the twin-bubble fix is '
+        'gone; update the neuter target')
+    neutered = reducer.replace(anchor, '  // NEUTER: keep the dead task bind')
+    assert neutered != reducer
+    rfile = tmp_path / 'reducer_neutered.js'
+    rfile.write_text(neutered, encoding='utf-8')
+    proc = _run(str(rfile))
+    output = proc.stdout.strip()
+    assert proc.returncode == 0, f'node failed on neutered copy: {proc.stderr}\n{output}'
+    lines = {ln.split(' ', 1)[1]: ln.startswith('PASS')
+             for ln in output.splitlines() if ln.startswith(('PASS', 'FAIL'))}
+    assert lines.get('A_taskid_unbound') is False, (
+        'NEUTER did not bite: keeping the dead task bind still passed the '
+        'unbind check — the test does not pin the twin-bubble fix.\n' + output)
 
 
 @pytest.mark.skipif(not _node_available(), reason='node not installed')

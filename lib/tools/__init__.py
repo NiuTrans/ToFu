@@ -27,6 +27,7 @@ from . import (  # noqa: E402
     image_edit,
     image_gen,
     meta,
+    motion_video,
     project,
     search,
 )
@@ -37,10 +38,11 @@ from .human_guidance import *  # noqa: F401,F403
 from .image_edit import *  # noqa: F401,F403
 from .image_gen import *  # noqa: F401,F403
 from .meta import *  # noqa: F401,F403
+from .motion_video import *  # noqa: F401,F403
 from .project import *  # noqa: F401,F403
 from .search import *  # noqa: F401,F403
 
-build_facade(__all__, search, browser, code_exec, conversation, image_gen, image_edit, meta, project, human_guidance)
+build_facade(__all__, search, browser, code_exec, conversation, image_gen, image_edit, meta, project, human_guidance, motion_video)
 
 # ── Declarative tool-assembly registry (imported last: its built-in spec
 #    builders lazily reference the schema constants above at request time) ──

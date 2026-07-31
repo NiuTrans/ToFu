@@ -14,7 +14,10 @@ from lib.database._schema_pg._meta import (
     _get_schema_version, _set_schema_version,
     _get_schema_domains, _set_schema_domains,
 )
-from lib.database._schema_pg._selfheal import _missing_critical_columns
+from lib.database._schema_pg._selfheal import (
+    _missing_core_tables,
+    _missing_critical_columns,
+)
 from lib.database._schema_pg._chat import _init_chat_schema
 from lib.database._schema_pg._system import _init_system_schema
 
@@ -47,6 +50,13 @@ def init_db(_new_pg_connection, _STATEMENT_TIMEOUT_MS):
         from lib.database._orphan_heal import heal_orphan_tables
         heal_orphan_tables(conn, table_exists=_table_exists, count_rows=_count_rows)
 
+        # ── Data backfill (flag-gated one-shot, runs BEFORE the version
+        #    fast-path so a converged DB still heals): re-key the paper
+        #    identity fork — reports saved under hash(strip(text)) vs library
+        #    hash(raw) (epic pt_c9a103fe). No-op once flagged in schema_meta.
+        from lib.paper.hash_backfill import backfill_paper_hash_canonical
+        backfill_paper_hash_canonical(conn)
+
         # ── Fast path: check if schema is already at current version AND
         #    the set of optional domains is unchanged. The domain set is part
         #    of the cache key because enabling a new domain (e.g. trading) on a
@@ -59,10 +69,12 @@ def init_db(_new_pg_connection, _STATEMENT_TIMEOUT_MS):
         want_domains = ','.join(active_domains())
         if current_version == _SCHEMA_VERSION and current_domains == want_domains:
             missing = _missing_critical_columns(conn)
-            if missing:
-                logger.warning('[DB] Schema version %d current but critical columns '
-                               'missing %s — forcing full DDL migration to converge',
-                               _SCHEMA_VERSION, missing)
+            missing_tables = _missing_core_tables(conn)
+            if missing or missing_tables:
+                logger.warning('[DB] Schema version %d current but divergence found '
+                               '(missing critical columns %s, missing core tables %s) '
+                               '— forcing full DDL migration to converge',
+                               _SCHEMA_VERSION, missing, missing_tables)
             else:
                 elapsed = time.monotonic() - t0
                 logger.info('[DB] Schema version %d + domains [%s] current — skipping '

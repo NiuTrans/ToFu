@@ -31,7 +31,7 @@
      Api.<domain>.<method>   — domain-grouped public surface:
                                 folders, paperFolders, conversations, chat, paper,
                                 translate, daily, project, settings,
-                                memory, mcp, oauth, optimizer, image,
+                                memory, skills, mcp, oauth, optimizer, image,
                                 pdf, browser, scheduler, ...
 
    Error model
@@ -85,8 +85,68 @@
       this.code = (opts && opts.code) || null;
       this.body = (opts && opts.body) !== undefined ? opts.body : null;
       this.url = (opts && opts.url) || null;
+      /* ── Diagnostic surface (declared, not bolted on) ──────────────────
+       * These were previously assigned ad-hoc at the throw sites, which made
+       * them invisible to `tsc --checkJs` AND to anyone reading the class:
+       * the error's contract lived scattered across the request path. They
+       * are part of what an ApiError IS, so they are declared here.
+       *
+       *   requestId       the id to quote when reporting this failure — the
+       *                   server-resolved one when we know it, else ours
+       *   clientRequestId the id THIS client put on the wire
+       *   serverRequestId the id the server echoed back; a mismatch with
+       *                   clientRequestId proves a proxy rewrote the header
+       *   envelope        the backend's typed error envelope when it sent one
+       *                   (see lib/error_envelope/ + core/error_envelope.js)
+       */
+      this.requestId = (opts && opts.requestId) || null;
+      this.clientRequestId = (opts && opts.clientRequestId) || null;
+      this.serverRequestId = (opts && opts.serverRequestId) || null;
+      this.envelope = (opts && opts.envelope) || null;
     }
   }
+
+  /* ── Request correlation id (frontend → backend log join key) ───────
+   *
+   * The backend ALREADY prefers an inbound `X-Request-ID`
+   * (server.py::_assign_req_id_and_log) and stamps it on every log line for
+   * the request via a contextvar, then echoes it back on the response
+   * (`X-Request-ID`). Before this, the frontend never sent one, so every rid
+   * was server-minted and the client held no copy — a user-reported bug had
+   * NO join key back to the server logs (only timestamp + URL guessing).
+   *
+   * Shape: `<page>-<seq>` where `page` is a short id minted once per document
+   * load. The page prefix is what makes a whole page-load's requests
+   * groupable with one `grep` in app.log; the monotonic seq keeps every
+   * request individually addressable and makes a gap (a request that never
+   * reached the server) visible.
+   *
+   * Kept to [a-z0-9-] and short: it lands in a header, in log lines, and in
+   * an error surface a user may read aloud or screenshot.
+   */
+  const _PAGE_ID = (function () {
+    try {
+      const c = global.crypto;
+      if (c && typeof c.randomUUID === 'function') return c.randomUUID().slice(0, 6);
+      if (c && typeof c.getRandomValues === 'function') {
+        const b = new Uint8Array(3);
+        c.getRandomValues(b);
+        return Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
+      }
+    } catch (e) { /* crypto unavailable (old WebView / insecure origin) */ }
+    return Math.random().toString(36).slice(2, 8);
+  })();
+
+  let _ridSeq = 0;
+
+  /** Mint the next correlation id for an outbound request. */
+  function _nextRequestId() {
+    _ridSeq += 1;
+    return _PAGE_ID + '-' + _ridSeq;
+  }
+
+  /** The page id every request from this document load shares. */
+  function pageRequestId() { return _PAGE_ID; }
 
   // ── Core request ──────────────────────────────────────────────────
   // opts:
@@ -95,7 +155,7 @@
   //   json          object — JSON body, sets Content-Type
   //   body          raw body (string|FormData|Blob); used if json absent
   //   headers       extra headers
-  //   timeout       ms (default 30000, 0 = none)
+  //   timeout       ms (default 0 = none; a probe passes its own budget)
   //   parse         'json' (default) | 'text' | 'blob' | 'response' | 'none'
   //   signal        AbortSignal
   //   onError       'throw' (default) | 'null' — null returns null on failure
@@ -104,6 +164,15 @@
     const method = (opts.method || 'GET').toUpperCase();
     const url = _resolve(path) + _qs(opts.query);
     const headers = Object.assign({}, opts.headers || {});
+    /* ★ Correlation id — injected HERE, at the ONE chokepoint every frontend
+     * backend call passes through (get/post/put/patch/del/stream all delegate
+     * to request()), so coverage is total without touching a single call site.
+     * That total coverage from one edit is the concrete payoff of the api.js
+     * isolation rule enforced by tests/test_frontend_api_isolation.py.
+     * A caller may override it explicitly (retry that wants to reuse the
+     * original id); we never clobber a provided value. */
+    const _rid = headers['X-Request-ID'] || _nextRequestId();
+    headers['X-Request-ID'] = _rid;
     let body = opts.body;
     if (opts.json !== undefined) {
       headers['Content-Type'] = headers['Content-Type'] || 'application/json';
@@ -116,7 +185,24 @@
     const userSignal = opts.signal;
     let timeoutId = null;
     let ctrl = null;
-    const timeout = opts.timeout === 0 ? 0 : (opts.timeout || 30000);
+    /* ★ NO DEFAULT TIMEOUT (opts.timeout omitted => 0 => none).
+     *
+     * A blanket client-side ceiling is the browser-side twin of the read
+     * timeouts removed from the transport (lib/llm/_transport.py): it turns
+     * "slow" into "failed" for work the server is still doing, and reports it
+     * as code:'timeout' so the user is told the request died when it did not.
+     * The default being a ceiling was also demonstrably backwards — 22 call
+     * sites had to opt OUT with `timeout: 0` to be allowed to wait.
+     *
+     * The rule, same as the backend: a LIVENESS PROBE may bound itself, a
+     * WAIT may not. Probes therefore pass their own budget explicitly
+     * (health.check 3s/5s, backend_offline_monitor, cross_tab_sync 8s/15s
+     * — all via AbortSignal.timeout or an explicit `timeout:`), and are
+     * unaffected by this default. Anything that omits `timeout` is by
+     * definition not a probe, and waits until it answers or the user aborts.
+     *
+     * Pinned by tests/test_frontend_no_client_timeouts.py. */
+    const timeout = opts.timeout || 0;
     if (timeout > 0) {
       ctrl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
       if (ctrl) {
@@ -139,11 +225,22 @@
     } catch (e) {
       if (timeoutId) clearTimeout(timeoutId);
       if (opts.onError === 'null') {
-        console.warn('[Api] %s %s failed: %s', method, url, e && e.message);
+        console.warn('[Api] %s %s failed: %s [rid=%s]', method, url, e && e.message, _rid);
         return null;
       }
-      if (e && e.name === 'AbortError') throw e;
-      throw new ApiError(e && e.message || 'network error', { url, code: 'network' });
+      // Rethrow abort AND timeout DOMExceptions verbatim so callers that
+      // branch on e.name ('AbortError' / 'TimeoutError' — e.g. the chat-start
+      // 30s AbortSignal.timeout in main_send_pipeline.js) keep working exactly
+      // as they did with a raw fetch.
+      if (e && (e.name === 'AbortError' || e.name === 'TimeoutError')) throw e;
+      /* No response arrived, so there is no server-echoed id — but the id we
+       * SENT is still the join key: if the request reached the app at all,
+       * server.py logged this exact rid, which distinguishes "never left the
+       * client" from "server received it and then the connection broke". */
+      const _netErr = new ApiError(e && e.message || 'network error', { url, code: 'network' });
+      _netErr.clientRequestId = _rid;
+      _netErr.requestId = _rid;
+      throw _netErr;
     }
     if (timeoutId) clearTimeout(timeoutId);
 
@@ -155,14 +252,50 @@
       try {
         const ct = resp.headers.get('content-type') || '';
         bodyData = ct.includes('application/json') ? await resp.json() : await resp.text();
-      } catch (_) { /* ignore body parse error */ }
+      } catch (e) {
+        console.warn('[Api] failed to parse error body for %s %s (HTTP %s): %s',
+                     method, url, resp.status, e && e.message);
+      }
       const code = (bodyData && typeof bodyData === 'object' && bodyData.error) || null;
+      /* Duck-typed envelope detection (api.js must stay load-order
+       * independent of core/error_envelope.js). When the backend shipped a
+       * typed envelope, err.message must BE the backend's real message —
+       * every caller that toasts e.message would otherwise show only the
+       * opaque 'HTTP 500 on …' status line. The full envelope rides along
+       * for callers that render it properly. */
+      const isEnvelope = !!code && typeof code === 'object'
+        && typeof code.kind === 'string' && typeof code.message === 'string';
       const err = new ApiError(
-        'HTTP ' + resp.status + ' on ' + method + ' ' + url,
+        isEnvelope && code.message
+          ? code.message
+          : 'HTTP ' + resp.status + ' on ' + method + ' ' + url,
         { status: resp.status, code, body: bodyData, url }
       );
+      if (isEnvelope) err.envelope = code;
+      /* ★ Correlation: the id WE sent, plus the id the server actually used
+       * (echoed at server.py's after_request). They are normally identical
+       * — the backend prefers our inbound header — so a MISMATCH is itself a
+       * finding: something between us and the app (proxy / tunnel / CDN)
+       * rewrote or stripped the header. Keep both rather than assuming. */
+      err.clientRequestId = _rid;
+      const _srvRid = resp.headers.get('X-Request-ID');
+      if (_srvRid) err.serverRequestId = _srvRid;
+      if (bodyData && typeof bodyData === 'object'
+          && typeof bodyData.request_id === 'string' && bodyData.request_id) {
+        err.requestId = bodyData.request_id;
+      } else if (_srvRid) {
+        /* Backends that don't echo request_id in the JSON body still gave us
+         * the header — populate the same field so every consumer of
+         * `err.requestId` (diagnostics, error surfaces) works uniformly. */
+        err.requestId = _srvRid;
+      } else {
+        err.requestId = _rid;
+      }
       if (opts.onError === 'null') {
-        console.warn('[Api] %s', err.message);
+        /* Log the rid on the swallow path too: `onError:'null'` is the
+         * QUIETEST failure mode and therefore the one most in need of a
+         * server-side join key. */
+        console.warn('[Api] %s [rid=%s]', err.message, err.requestId);
         return null;
       }
       throw err;
@@ -220,6 +353,18 @@
       const r = await del(`/api/v1/folders/${encodeURIComponent(id)}`, { parse: 'response', onError: 'null' });
       return !!(r && r.ok);
     },
+  };
+
+  // users -----------------------------------------------------------
+  //  `me` is PUBLIC (routes/api_v1/users.py:266) and is the boot-time
+  //  identity probe for core/current_user.js. Three response shapes:
+  //    multi-tenant login → {authenticated:true,  user:{id, email, …}}
+  //    personal install   → {authenticated:true,  user:null, principal:{…}}
+  //    unauthenticated    → {authenticated:false, user:null}
+  //  onError:'null' so a boot hiccup degrades to "no identity" (gates stay
+  //  accept-all) instead of rejecting the whole boot chain.
+  const users = {
+    me: () => get('/api/v1/users/me', { onError: 'null' }),
   };
 
   // paper-folders (Reading-mode library folders — same shape as `folders`) ---
@@ -291,10 +436,17 @@
     create:         (entry)     => post('/api/v1/memory', entry, { parse: 'response' }),
     remove:         (id)        => del(`/api/v1/memory/${encodeURIComponent(id)}`, { parse: 'response' }),
     toggle:         (id)        => post(`/api/v1/memory/${encodeURIComponent(id)}/toggle`, undefined, { parse: 'response' }),
-    files:          (id)        => get(`/api/v1/memory/${encodeURIComponent(id)}/files`),
-    install:        (formData)  => request('/api/v1/memory/install', { method: 'POST', body: formData, parse: 'response' }),
-    catalog:        ()          => get('/api/v1/memory/catalog'),
-    catalogInstall: (skillId, scope) => post('/api/v1/memory/catalog/install', { skill_id: skillId, scope: scope || 'project' }, { parse: 'response' }),
+  };
+
+  // skills (user-installed skill packages — a different noun from memory)
+  const skills = {
+    list:           (scope)     => get('/api/v1/skills', { query: { scope: scope || 'all' } }),
+    uninstall:      (id)        => del(`/api/v1/skills/${encodeURIComponent(id)}`, { parse: 'response' }),
+    toggle:         (id)        => post(`/api/v1/skills/${encodeURIComponent(id)}/toggle`, undefined, { parse: 'response' }),
+    files:          (id)        => get(`/api/v1/skills/${encodeURIComponent(id)}/files`),
+    install:        (formData)  => request('/api/v1/skills/install', { method: 'POST', body: formData, parse: 'response' }),
+    catalog:        ()          => get('/api/v1/skills/catalog'),
+    catalogInstall: (skillId, scope) => post('/api/v1/skills/catalog/install', { skill_id: skillId, scope: scope || 'project' }, { parse: 'response' }),
   };
 
   // profile (personal-preference profile) ---------------------------
@@ -322,6 +474,67 @@
     pauseTask:       (taskId)        => post(`/api/v1/scheduler/tasks/${encodeURIComponent(taskId)}/pause`, undefined, { onError: 'null' }),
     resumeTask:      (taskId)        => post(`/api/v1/scheduler/tasks/${encodeURIComponent(taskId)}/resume`, undefined, { onError: 'null' }),
     pollLog:         (taskId, limit) => get(`/api/v1/scheduler/tasks/${encodeURIComponent(taskId)}/poll-log`, { query: { limit: limit || 20 } }),
+  };
+
+  // tasks (Request Inspector) ----------------------------------------
+  // Server-authoritative per-task request fold (docs/DEBUG_PANEL_REDESIGN.md
+  // P2). byConv: task rows for a conversation; getRequests: metadata-only
+  // request rows + attempts; getRequestPayload: full payload for one round
+  // (kind='state' serves the post-tool / final / fallback mirrors).
+  const tasks = {
+    byConv: (convId) =>
+      get(`/api/v1/tasks/by-conv/${encodeURIComponent(convId)}`,
+          { onError: 'null' }),
+    getRequests: (taskId) =>
+      get(`/api/v1/tasks/${encodeURIComponent(taskId)}/requests`,
+          { onError: 'null' }),
+    getRequestPayload: (taskId, roundNum, turn, kind) =>
+      get(`/api/v1/tasks/${encodeURIComponent(taskId)}/requests/${encodeURIComponent(roundNum)}`,
+          { query: { ...(turn ? { turn } : {}), ...(kind ? { kind } : {}) },
+            onError: 'null' }),
+
+    // ── Generic production-job lifecycle ──
+    // start/get/events/abort are CAPABILITY-AGNOSTIC: the backend dispatches
+    // on `kind` (research | longform-report | …), so the next capability needs
+    // ZERO new client methods. Deliberately NOT routed through an LLM tool —
+    // the produce_* tools are search-gated and only fire if the model elects
+    // to call them, which cannot back a UI control.
+    start: (kind, payload) =>
+      post('/api/v1/tasks/start', Object.assign({ kind: kind }, payload || {})),
+    // Full snapshot. Carries `artifact_quality`: a degraded job keeps
+    // status='done' by design, so that field is the ONLY thing separating
+    // "good artifact" from "valid artifact out of a broken pipeline".
+    get: (taskId) =>
+      get(`/api/v1/tasks/${encodeURIComponent(taskId)}`, { onError: 'null' }),
+    events: (taskId, cursor) =>
+      get(`/api/v1/tasks/${encodeURIComponent(taskId)}/events`,
+          { query: { cursor: cursor || 0 }, onError: 'null' }),
+    abort: (taskId) =>
+      post(`/api/v1/tasks/${encodeURIComponent(taskId)}/abort`, undefined,
+           { onError: 'null' }),
+    list: (kind, status) =>
+      get('/api/v1/tasks', { query: Object.assign({}, kind ? { kind: kind } : {},
+                                                  status ? { status: status } : {}),
+                             onError: 'null' }),
+  };
+
+  // research (auto-research: direction → scored ideas) -------------
+  // DURABLE read path. `Api.tasks.get(taskId)` resolves against the in-memory
+  // task registry, so it 404s once the finished job is TTL-swept (7200s) or
+  // the server restarts. This is addressed by DIRECTION and served from
+  // paper_reports, so it keeps working forever — it is what makes a finished
+  // research job re-openable at all. `found:false` is a normal answer.
+  const research = {
+    lookup: (direction, lang) =>
+      get('/api/v1/research/lookup',
+          { query: { direction: direction || '', lang: lang || 'en' },
+            onError: 'null' }),
+    // The direction INDEX. The persisted rows are keyed by a one-way hash of
+    // the direction, so without this a user who forgot their exact original
+    // wording could never address their own artifacts again.
+    list: (limit) =>
+      get('/api/v1/research/list',
+          { query: { limit: limit || 50 }, onError: 'null' }),
   };
 
   // optimizer -------------------------------------------------------
@@ -371,6 +584,22 @@
     patchSettings: (convId, patch) =>
       request(`/api/v1/conversations/${encodeURIComponent(convId)}/settings`,
               { method: 'PATCH', json: patch, parse: 'response', onError: 'null' }),
+    // Server-side folder-scoped member query — resolves a folder's members by
+    // their real folderId, INDEPENDENT of the top-N sidebar window (so members
+    // that sort past the cap are still returned). Envelope:
+    //   { conversations:[metaRow], hasMore, nextBefore, nextBeforeId, totalCount }
+    listByFolder: (folderId, opts) =>
+      get('/api/v1/conversations',
+          { query: Object.assign({ folderId }, (opts && opts.before)
+              ? { before: opts.before, before_id: opts.beforeId || '', limit: opts.limit || '' }
+              : {}), onError: 'null' }),
+    // Keyset-paginated global list page (older than the given cursor). Used by
+    // the sidebar "load more" affordance so conversations past the first window
+    // stay reachable. Same envelope shape as listByFolder (minus totalCount).
+    listPage: (before, beforeId, limit) =>
+      get('/api/v1/conversations',
+          { query: { before: before || '', before_id: beforeId || '', limit: limit || '' },
+            onError: 'null' }),
     put: (convId, body) =>
       request(`/api/v1/conversations/${encodeURIComponent(convId)}`,
               { method: 'PUT', json: body, parse: 'response', onError: 'null' }),
@@ -378,6 +607,25 @@
     setTitle: (convId, title) =>
       patch(`/api/v1/conversations/${encodeURIComponent(convId)}/title`,
             { title }, { onError: 'null' }),
+    // pt_conv_state_ssot P5: report the client's per-conv state digest
+    // (authoritative busy set + last-converged rev) for the server-side
+    // drift comparison. Returns parsed {ok, checked, divergences} or null.
+    // `extra` carries optional top-level telemetry alongside the digests
+    // (currently {identityGateDegraded:true} — the multi-user identity
+    // gate's fail-open tripwire, so the degrade reaches logs/app.log
+    // instead of only a browser console).
+    // ``pushRid`` names THIS tab's push socket so a server-detected SUSTAINED
+    // stall can be repaired by pushing a corrective conv_state_snapshot back to
+    // this exact socket rather than broadcasting to the fleet
+    // (pt_cadaa70ffa6b468d). Omitted when the id is unavailable — the server
+    // then logs that it cannot target a repair instead of guessing at one.
+    reportSyncDigest: (digests, extra) => {
+      const _rid = (typeof pushSocketRequestId === 'function')
+        ? pushSocketRequestId() : '';
+      return post('/api/v1/conversations/sync-digest',
+                  Object.assign({ digests }, _rid ? { pushRid: _rid } : {},
+                                extra || {}), { onError: 'null' });
+    },
     // LLM-generated title. Returns parsed {ok, title} or null on failure.
     // `lang` ('zh'|'en') forces the title language to match the UI; defaults
     // to the current interface language.
@@ -475,12 +723,36 @@
     // response `costs` array aligns by index. Returns parsed body or null.
     costBatch: (items) =>
       post('/api/v1/messages/cost/batch', { items }, { onError: 'null' }),
+    // Server-authoritative config/settings resolution. JS ships only the
+    // inputs; the server merges (lib/conv_config.py) and returns the canonical
+    // dict. Both throw ApiError on non-OK so the caller keeps its error text.
+    resolveConfig:   (payload) => post('/api/v1/conversations/config/resolve', payload),
+    resolveSettings: (payload) => post('/api/v1/conversations/settings/resolve', payload),
+    // Sidebar metadata list (no message bodies). Returns the raw Response so
+    // the caller can inspect 304 / 503 + Retry-After and pass If-None-Match /
+    // an AbortSignal. opts: { prefetch, headers, signal }.
+    listMeta: (opts) => {
+      opts = opts || {};
+      const q = { meta: 1 };
+      if (opts.prefetch) q.prefetch = opts.prefetch;
+      // No onError:'null' — parse:'response' already returns the Response for
+      // any HTTP status (incl. 304/503) without throwing; only a network drop
+      // / abort throws, exactly like the raw fetch this replaced, so the
+      // caller's retry loop + outer try/catch behave identically.
+      return request('/api/v1/conversations', {
+        method: 'GET', query: q, parse: 'response',
+        headers: opts.headers || {}, signal: opts.signal,
+      });
+    },
   };
 
   // text utilities --------------------------------------------------
   // Server-side language detection (mirrors lib/text_lang.is_predominantly_chinese).
   const text = {
-    detectLanguage: (textBody) => post('/api/v1/text/detect-language', { text: textBody }, { onError: 'null' }),
+    // opts.forceFasttext: force the statistical detector (skip-gate callers
+    // that must distinguish kanji-heavy Japanese from Chinese pass true).
+    detectLanguage: (textBody, opts = {}) => post('/api/v1/text/detect-language',
+      { text: textBody, forceFasttext: !!opts.forceFasttext }, { onError: 'null' }),
   };
 
   // translate -------------------------------------------------------
@@ -527,6 +799,12 @@
     // is route-defined; we don't pre-parse it. For convenience, errors of
     // the network/abort kind reject so the caller's try/catch handles them
     // (matches the legacy fetch shape these were lifted from).
+    // start() kicks off a fresh assistant turn (normal, non-endpoint mode).
+    // Returns the raw Response so the caller reads .ok/.status + parses
+    // {taskId} itself. Pass {signal} for the 30s startup timeout.
+    start:       (body, opts)   => request('/api/v1/chat/start',
+                                           Object.assign({ method: 'POST', json: body, parse: 'response', timeout: 0 },
+                                                         opts || {})),
     send:        (body, opts)   => request('/api/v1/chat/send',
                                            Object.assign({ method: 'POST', json: body, parse: 'response', timeout: 0 },
                                                          opts || {})),
@@ -562,6 +840,18 @@
     // Active-tasks listing — used on init to reconnect SSE streams.
     active:       (opts)        => get('/api/v1/chat/active', Object.assign({ onError: 'null' }, opts || {})),
     activeResponse: (opts)      => request('/api/v1/chat/active', Object.assign({ method: 'GET', parse: 'response', onError: 'null' }, opts || {})),
+    // Per-conversation running-task PROJECTION — the poll transport's copy of
+    // the `conv_state_snapshot` push frame, same wire shape (`{convs:{id:
+    // {runningTaskIds, runningTaskIdsRev}}}`) so ONE client reducer
+    // (applyConvStateSnapshot) consumes both transports.
+    //
+    // NOT interchangeable with active() above: that answers "what may I
+    // reconnect an SSE to?" and EXCLUDES autopilot VU carriers (a carrier on
+    // the plain connectToTask path births a permanently-stuck "Waiting…"
+    // bubble). This answers "which convs are WORKING?" and INCLUDES carriers
+    // behind a non-attachable `#vu` marker — which is the only way the 25s
+    // poll fallback can see a live VU turn while the push socket is down.
+    convState:    (opts)        => get('/api/v1/chat/conv-state', Object.assign({ onError: 'null' }, opts || {})),
     // Tool-state PATCH — debounced settings flush from main.js.
     patchToolState: (convId, settings) =>
       request(`/api/v1/chat/tool-state/${encodeURIComponent(convId)}`,
@@ -586,6 +876,28 @@
       post('/api/v1/chat/human-response', { guidanceId, response }),
   };
 
+  // endpoint (Planner→Worker→Critic mode) --------------------------
+  // start() mirrors chat.start() for endpoint mode. Returns the raw Response.
+  const endpoint = {
+    start: (body, opts) => request('/api/v1/endpoint/start',
+                                   Object.assign({ method: 'POST', json: body, parse: 'response', timeout: 0 },
+                                                 opts || {})),
+  };
+
+  // logs (server-side log-noise cleaning / compression) -------------
+  // clean() best-effort (null on any failure) so the banner just doesn't show.
+  // compress() throws ApiError on non-OK so the caller's catch shows retry.
+  const logs = {
+    clean:    (text) => post('/api/v1/logs/clean', { text }, { onError: 'null' }),
+    compress: async (text) => {
+      const resp = await request('/api/v1/logs/compress',
+                                 { method: 'POST', json: { text }, parse: 'response' });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(data.error || 'API error');
+      return data;
+    },
+  };
+
   // update (self-update via git pull) -------------------------------
   // check:   GET  — compare local VERSION vs latest GitHub release tag
   // apply:   POST — launches git pull + pip install in a background thread,
@@ -604,7 +916,19 @@
     restart: (payload) => post('/api/v1/update/restart', payload || {}, { onError: 'throw' }),
     // shutdown: POST — graceful manual stop (writes the manual-shutdown
     // marker so the next boot won't mistake it for an OS kill). No re-exec.
-    shutdown: ()    => post('/api/v1/update/shutdown', {}, { onError: 'null' }),
+    // Takes {approvalId} once a human approved the pending request.
+    shutdown: (payload) => post('/api/v1/update/shutdown', payload || {}, { onError: 'throw' }),
+    // Lifecycle approvals (pt_40d00fd526e5479a human-approval gate): a
+    // restart/shutdown POST without an approvalId answers 202 +
+    // {pendingApproval}; the human decides here; the caller retries with
+    // {approvalId}. onError:'throw' so callers can read 403/404 bodies.
+    listLifecycleApprovals: (query) =>
+      get('/api/v1/update/lifecycle-approvals', { query: query || {}, onError: 'null' }),
+    getLifecycleApproval: (id) =>
+      get(`/api/v1/update/lifecycle-approvals/${encodeURIComponent(id)}`, { onError: 'null' }),
+    decideLifecycleApproval: (id, approved) =>
+      post(`/api/v1/update/lifecycle-approvals/${encodeURIComponent(id)}/decide`,
+           { approved: !!approved }, { onError: 'throw' }),
   };
 
   // swarm (multi-agent control plane) -------------------------------
@@ -619,6 +943,21 @@
           Object.assign({ onError: 'null' }, opts || {})),
     abort:  (taskId) =>
       post(`/api/v1/swarm/abort/${encodeURIComponent(taskId)}`, {}, { onError: 'null' }),
+  };
+
+  // desktop bridge (RWA Devices page) ----------------------------------
+  const desktop = {
+    /* `arch` is the architecture the CLIENT resolved for itself via
+     * navigator.userAgentData.getHighEntropyValues(['architecture']). It is
+     * threaded to the server because macOS cannot be narrowed any other way:
+     * an Apple Silicon Mac reports "Intel Mac OS X" in its UA, so without this
+     * the server must offer BOTH DMGs rather than guess wrong. Omit it and the
+     * ambiguous (correct, two-choice) answer comes back. */
+    status:      (arch) => get('/api/v1/desktop/status',
+                              { onError: 'null', query: arch ? { arch: arch } : {} }),
+    devices:     () => get('/api/v1/desktop/devices', { onError: 'null' }),
+    mintToken:   (name) => post('/api/v1/desktop/token', { name: name || '' }),
+    revokeToken: (keyId) => del(`/api/v1/desktop/token/${encodeURIComponent(keyId)}`),
   };
 
   // health / status -------------------------------------------------
@@ -683,6 +1022,13 @@
            { onError: 'null' }),
     probeCellsStart:  (body)                            =>
       post('/api/v1/providers/probe-cells/start', body, { onError: 'null' }),
+    /* Which wire face does each model of THIS (possibly unsaved) provider
+     * dispatch over? Answered by the backend's resolve_face — the same
+     * resolver the dispatcher uses — so the Settings pills can never
+     * disagree with routing. Never re-implement the family rule here. */
+    resolveFaces:     (provider)                        =>
+      post('/api/v1/providers/resolve-faces', { provider },
+           { onError: 'null' }),
     probeCellsStatus: (providerId)                      =>
       get('/api/v1/providers/probe-cells/status?provider_id=' + encodeURIComponent(providerId),
           { onError: 'null' }),
@@ -701,6 +1047,7 @@
   const dispatch = {
     endpointMetrics: () => get('/api/v1/dispatch/endpoint-metrics', { onError: 'null' }),
     keyStats:        () => get('/api/v1/dispatch/key-stats', { onError: 'null' }),
+    modelHealth:     () => get('/api/v1/dispatch/model-health', { onError: 'null' }),
     keyOverride:     (body) =>
       post('/api/v1/dispatch/key-override', body, { onError: 'null', parse: 'none' }),
   };
@@ -770,6 +1117,10 @@
 
   const browser = {
     status: () => get('/api/v1/browser/status'),
+    // Guided install step (loopback-gated server-side): opens the SERVER
+    // machine's Chrome at chrome://extensions. null on refusal/failure.
+    openExtensions: () => post('/api/v1/browser/open-extensions', {},
+                               { onError: 'null' }),
   };
 
   // authSources (login-walled fetch sources: Xiaohongshu, …) ---------
@@ -780,6 +1131,22 @@
     remove: (domain)        => del(`/api/v1/auth-sources/${encodeURIComponent(domain)}`, { parse: 'response', onError: 'null' }),
     // Interactive headful login — long-running; no client timeout.
     login:  (domain, timeout) => post(`/api/v1/auth-sources/${encodeURIComponent(domain)}/login`, { timeout: timeout || 180 }, { timeout: 0 }),
+    // Login-wall cookie-capture consent (cookie_capture_consent.js banner).
+    cookieConsentPending: () => get('/api/v1/auth-sources/cookie-consent/pending', { onError: 'null' }),
+    cookieConsentResolve: (id, approved) => post('/api/v1/auth-sources/cookie-consent/resolve', { id, approved: !!approved }),
+    cookieConsentGrants:  () => get('/api/v1/auth-sources/cookie-consent/grants', { onError: 'null' }),
+    cookieConsentRevoke:  (domain) => del(`/api/v1/auth-sources/cookie-consent/${encodeURIComponent(domain)}`, { parse: 'response', onError: 'null' }),
+  };
+
+  // privateHosts (internal-host SSRF allowlist) ---------------------
+  // REACHABILITY only. An entry here exempts a host from the SSRF guard and
+  // grants NO credentials; authSources above grants credentials and NO SSRF
+  // exemption. Two separate gates on purpose — do not merge them.
+  const privateHosts = {
+    list:   ()           => get('/api/v1/private-hosts', { onError: 'null' }),
+    upsert: (body)       => post('/api/v1/private-hosts', body),
+    toggle: (host, on)   => post(`/api/v1/private-hosts/${encodeURIComponent(host)}/toggle`, { enabled: !!on }, { onError: 'null' }),
+    remove: (host)       => del(`/api/v1/private-hosts/${encodeURIComponent(host)}`, { parse: 'response', onError: 'null' }),
   };
 
   // trading (AI investment assistant SPA — trading.html) ------------
@@ -804,7 +1171,10 @@
       }, {}));
       if (!resp.ok) {
         let err = {};
-        try { err = await resp.json(); } catch (_) { /* non-JSON error body */ }
+        try { err = await resp.json(); } catch (e) {
+          console.warn('[Api][trading] non-JSON error body for %s (HTTP %s): %s',
+                       _TRADING_BASE + path, resp.status, e && e.message);
+        }
         throw new Error((err && err.error) || ('HTTP ' + resp.status));
       }
       return await resp.json();
@@ -899,6 +1269,12 @@
            Object.assign({ path, proposalId }, body || {})),
     // Human-gated edit / delete of a committed decision (by list index) and
     // deletion of the whole charter. All optimistic-locked (expected_version).
+    // NOTE on updateDecision: `summary` is the ONE line the per-turn injection
+    // renders (the body is read back on demand). Pass it in `body` whenever the
+    // entry has one — OMITTING it is refused with `summary_required`, because a
+    // silent keep would leave every sibling conversation reading the OLD rule
+    // while the panel showed the edit as saved. Send `summary: ''` to drop it
+    // deliberately and let the headline fall back to the fresh text.
     updateDecision: (path, index, text, body) =>
       post('/api/v1/project/charter/decision/update',
            Object.assign({ path, index, text }, body || {})),
@@ -927,11 +1303,24 @@
            { path, taskId, convId: convId || '', reason: reason || '' }),
     boardReopen:   (path, taskId, convId) =>
       post('/api/v1/project/board/reopen', { path, taskId, convId: convId || '' }),
+    // HUMAN answer to a pending block question — closes the structured gate
+    // (stamps human_answer, clears the cooldown, immediate re-dispatch whose
+    // kickoff carries the answer).
+    boardAnswer:   (path, taskId, convId, answer) =>
+      post('/api/v1/project/board/answer',
+           { path, taskId, convId: convId || '', answer: answer || '' }),
     // Collaboration-bar one-shot summary (board + decisions + peer→epic join).
     // convId (optional) is excluded from activePeers/peerEpics so the count is
     // "OTHER conversations online" — matching the local push-mirror semantics.
     brainSummary:  (path, convId) =>
       get('/api/v1/project/brain/summary',
+          { query: { path, convId: convId || '' }, onError: 'null' }),
+    // The "needs you" SSOT — everything genuinely waiting on the human,
+    // priority-ordered server-side (blocking first). One payload backs both
+    // the Needs-you tab and the collab bar's count, so they cannot drift.
+    // convId is optional and only marks `mine`; it never filters.
+    brainAttention: (path, convId) =>
+      get('/api/v1/project/brain/attention',
           { query: { path, convId: convId || '' }, onError: 'null' }),
     // LIVE peer/team roster (presence ⋈ task ⋈ claimed-epic). convId optional
     // — when present it's excluded so a conv never lists itself as a peer.
@@ -1008,8 +1397,12 @@
     fetchArxivStream: (url, paperId, opts) =>
       request('/api/paper/fetch-arxiv-stream',
               Object.assign({ method: 'POST', json: { url, paper_id: paperId || '' }, parse: 'response', timeout: 0 }, opts || {})),
+    /* searchArxiv MUST throw on failure (default onError:'throw'), not
+     * swallow to null: the caller renders null/!ok as "no papers found",
+     * which made every server/upstream outage look like an empty result set
+     * (2026-07-28 live 500 incident). The caller has a real error surface. */
     searchArxiv:    (query, maxResults)   =>
-      post('/api/v1/paper/search-arxiv', { query, max_results: maxResults || 10 }, { onError: 'null' }),
+      post('/api/v1/paper/search-arxiv', { query, max_results: maxResults || 10 }),
     recommend:      (description, maxResults) =>
       post('/api/v1/paper/recommend', { description, max_results: maxResults || 6 }, { onError: 'null' }),
     // Streaming describe-to-recommend (server-owned task; polled like Q&A so
@@ -1085,6 +1478,54 @@
       _resolve('/api/v1/paper/report/export?paper_hash=' + encodeURIComponent(paperHash) +
                '&lang=' + encodeURIComponent(lang || 'en') +
                '&format=' + encodeURIComponent(format || 'md')),
+    // Paper podcast — server-owned task (report → spoken script → TTS audio),
+    // polled exactly like the report task beside it. timeout:0 on start: the
+    // route does report-gate + cache checks before spawning; the task itself
+    // is then polled with no client-side deadline (same reason as reportStart).
+    podcastStatus:  ()                   =>
+      request('/api/v1/paper/podcast/status', { method: 'GET', onError: 'null' }),
+    podcastStart:   (body)               => post('/api/v1/paper/podcast/start', body, { timeout: 0 }),
+    podcastPoll:    (taskId, cursor)     =>
+      request('/api/v1/paper/podcast/poll',
+              { method: 'GET', query: { task_id: taskId, cursor }, parse: 'response', onError: 'null' }),
+    podcastLookup:  (body)               => post('/api/v1/paper/podcast/lookup', body, { onError: 'null' }),
+    podcastAbort:   (taskId)             => post(`/api/v1/paper/podcast/abort/${encodeURIComponent(taskId)}`, {}, { onError: 'null', parse: 'none' }),
+    podcastScript:  (paperHash, mode, lang) =>
+      request('/api/v1/paper/podcast/script',
+              { method: 'GET', query: { paper_hash: paperHash, mode, lang }, onError: 'null' }),
+    // Paper video abstract — server-owned motion-engine task (report →
+    // narrated MG video). Progress/results ride the motion endpoints below.
+    videoStart:   (body)               => post('/api/v1/paper/video/start', body, { timeout: 0 }),
+    videoLookup:  (body)               =>
+      request('/api/v1/paper/video/lookup',
+              { method: 'GET', query: { paper_hash: body.paper_hash }, onError: 'null' }),
+  };
+
+  // motion (video generation pipeline) -------------------------------
+  // Server-owned TaskRuntime (SRT/scenes → narrated MG video). The paper
+  // video-abstract tab polls these directly; the chat agent drives the
+  // motion_video_* tools instead.
+  const motion = {
+    status:    ()                     =>
+      request('/api/v1/motion/status', { method: 'GET', onError: 'null' }),
+    start:     (body)                 => post('/api/v1/motion/videos', body, { timeout: 0 }),
+    poll:      (taskId, cursor)       =>
+      request(`/api/v1/motion/videos/poll/${encodeURIComponent(taskId)}`,
+              { method: 'GET', query: { cursor }, parse: 'response', onError: 'null' }),
+    abort:     (taskId)               =>
+      post(`/api/v1/motion/videos/abort/${encodeURIComponent(taskId)}`, {}, { onError: 'null', parse: 'none' }),
+    scenes:    (taskId)               =>
+      request(`/api/v1/motion/videos/${encodeURIComponent(taskId)}/scenes`,
+              { method: 'GET', onError: 'null' }),
+    regenScene: (taskId, sceneId)     =>
+      post(`/api/v1/motion/videos/${encodeURIComponent(taskId)}/scenes/${encodeURIComponent(sceneId)}/regen`,
+           {}, { onError: 'null' }),
+    // URL builders for <video> src / download anchors (no fetch involved).
+    fileUrl:   (taskId, part)         =>
+      _resolve(`/api/v1/motion/videos/${encodeURIComponent(taskId)}/file` +
+               (part ? '?part=' + encodeURIComponent(part) : '')),
+    sceneFileUrl: (taskId, sceneId)   =>
+      _resolve(`/api/v1/motion/videos/${encodeURIComponent(taskId)}/scenes/${encodeURIComponent(sceneId)}/file`),
   };
 
   // daily-report (MyDay panel) -------------------------------------
@@ -1223,12 +1664,15 @@
     request, get, post, put, patch, del, stream,
     ApiError,
     _resolve,         // exposed for SSE/WS path building
+    pageRequestId,    // the correlation prefix every request of this page shares
     // domains
-    folders, paperFolders, orchestrations, memory, profile, timer, scheduler, optimizer, compactions,
+    folders, paperFolders, orchestrations, memory, skills, profile, timer, scheduler, optimizer, compactions,
     conversations, text, translate, chat, images, pdf, doc, audio, artifacts,
     health, pricing, clientError, serverConfig, browser, project, daily, paper,
+    desktop,
     features, providers, dispatch, oauth, mcp, update, trading, authSources,
-    swarm,
+    privateHosts,
+    swarm, endpoint, logs, motion, tasks, users, research,
   };
 
   global.Api = Api;

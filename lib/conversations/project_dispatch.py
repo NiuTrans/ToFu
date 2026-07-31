@@ -24,6 +24,15 @@ Locked design (owner, 2026-06-30):
     from ``complete_task`` (a completion may unblock a dependent); it reuses
     the existing post-task ``dispatch_next_queued`` machinery to actually start
     the enqueued kickoff. No background poller is added here.
+  • **Trigger needs no new global / thread.** ``on_epic_completed`` is called
+    from ``complete_task`` (a completion may unblock a dependent); it reuses
+    the existing post-task ``dispatch_next_queued`` machinery to actually start
+    the enqueued kickoff. No background poller is added here.
+  • **Event channel (2026-07-27).** The 30 s sweep is the crash/lease/strand
+    SAFETY NET, not the starter: common flows dispatch AT THE EVENT —
+    ``on_epic_posted`` (post time, idle existing target), ``on_conv_idle``
+    (a task completes with an empty queue), ``on_epic_completed`` /
+    ``on_epic_answered`` (dependency done / human answered).
   • **Per ``project_path``, never a process-global.**
 """
 
@@ -182,6 +191,14 @@ def select_dispatchable(project_path: str) -> list[dict]:
         #    retried), with NO reaper and NO human un-block gate. ──
         if int(t.get('blocked_until') or 0) > now_ms:
             continue
+        # ── pending-question filter: an epic blocked WITH a structured human
+        #    question waits for the ANSWER, not for time — re-dispatching
+        #    before the human answers can only re-discover the same gate (the
+        #    billed-turn loop this redesign exists to kill). answer_task
+        #    clears the question + cooldown, so an ANSWERED epic falls through
+        #    to normal pick-up (and carries its answer into the kickoff). ──
+        if t.get('block_question') and not (t.get('human_answer') or '').strip():
+            continue
         # ── dependency filter: every dependency must be DONE. An epic with an
         #    unfinished (or unknown) dependency is NOT yet pickable. ──
         deps = t.get('depends_on') or []
@@ -296,8 +313,24 @@ def dispatch_epic(project_path: str, epic: dict, target_conv_id: str, *,
             f"this epic precisely while a sibling holds a lease on those paths "
             f"(releasing automatically when they do), instead of blind retries. "
             f"Either way the block puts the epic on a self-expiring cooldown so "
-            f"it is not pointlessly re-dispatched. Do NOT silently no-op."
+            f"it is not pointlessly re-dispatched. When the gate needs a HUMAN "
+            f"decision, also pass the question (and options when the choice is "
+            f"enumerable) to project_board_block — the human answers with one "
+            f"click on the board and the answer re-dispatches you immediately "
+            f"(a question-block does NOT auto-retry). Do NOT silently no-op."
         )
+        # An epic unblocked by a HUMAN ANSWER carries that answer into the
+        # kickoff — the assignee proceeds on it directly instead of
+        # re-discovering (or worse, re-asking) the question.
+        answer = (epic.get('human_answer') or '').strip()
+        if answer:
+            kickoff += (
+                f"\n\nThis epic was blocked waiting on a human decision — "
+                f"the human has now answered: \"{answer}\". Proceed on "
+                f"that basis; do NOT re-ask the same question or re-block "
+                f"on the same gate unless the answer genuinely does not "
+                f"resolve it."
+            )
         # Resolve a REAL config from the target conv's settings when the caller
         # passed none (the sweep/completion callers do): the kickoff is later
         # drained into create_task, which needs a model + projectPath to work.
@@ -366,6 +399,65 @@ def _has_queued_kickoff(conv_id: str) -> bool:
         return False
 
 
+def _convs_holding_undrained_kickoffs(project_path: str, board: dict) -> set:
+    """Every conversation that may be holding an UNDRAINED brain kickoff.
+
+    THE SCAN SET, and the thing that must not be keyed on the epic's momentary
+    status. The obvious set — "convs owning a *claimed* epic" — has a hole with
+    a 30-minute fuse: ``_effective_status`` reclaims an expired soft lease AT
+    READ TIME, so once the lease lapses the epic reads ``open`` and its
+    ``owner_conv_id`` is blanked. The conv then vanishes from a claimed-keyed
+    scan, while its queue row is still sitting there. Measured in production
+    (2026-07-29): 7 ``workflow_step`` rows stranded across 3 idle conversations,
+    none of them reachable.
+
+    And the normal dispatch loop cannot rescue them either — it re-selects the
+    now-``open`` epic, but ``_epic_already_queued`` sees the surviving kickoff
+    and refuses to enqueue a second one. Both doors shut on the same row, which
+    is what made the strand permanent rather than merely slow.
+
+    So we take the union of two sources:
+
+      * the board's ``owner_conv_id`` for CLAIMED epics — covers a conv whose
+        lease is still live but whose drain chain broke; and
+      * every conv with a queued ``workflow_step`` row and a ``projectPath``
+        pointing at THIS project — covers the lease-expired case, keyed on the
+        durable fact (the queue row) instead of the expiring one (the lease).
+
+    Scoped to this project so a sweep never drains a sibling project's queue.
+    Best-effort: a probe failure degrades to the board-derived set, which is
+    the old behaviour — never an exception into the sweep.
+    """
+    convs = {t['owner_conv_id'] for t in board.get('tasks', [])
+             if t.get('status') == 'claimed' and t.get('owner_conv_id')}
+    try:
+        import json as _json
+
+        from lib.conversations.project_feed import normalize_project_path
+        from lib.database import DOMAIN_CHAT, get_thread_db
+        from lib.message_queue import KIND_WORKFLOW
+        want = normalize_project_path(project_path)
+        db = get_thread_db(DOMAIN_CHAT)
+        rows = db.execute(
+            'SELECT DISTINCT conv_id, config FROM message_queue WHERE kind=?',
+            (KIND_WORKFLOW,)).fetchall()
+        for r in rows:
+            cid = r['conv_id']
+            if not cid or cid in convs:
+                continue
+            try:
+                cfg = _json.loads(r['config'] or '{}')
+            except (TypeError, ValueError):
+                continue
+            row_proj = cfg.get('projectPath') or ''
+            if row_proj and normalize_project_path(row_proj) == want:
+                convs.add(cid)
+    except Exception as e:
+        logger.debug('[Dispatch] queued-kickoff scan failed proj=%.40r '
+                     '(falling back to board-derived set): %s', project_path, e)
+    return convs
+
+
 def _reconcile_stranded_kickoffs(project_path: str) -> int:
     """Re-drain idle conversations that still hold an UNDRAINED brain kickoff.
 
@@ -400,11 +492,11 @@ def _reconcile_stranded_kickoffs(project_path: str) -> int:
     try:
         from lib.conversations.project_board import read_board
         board = read_board(project_path)
-        # Only convs that OWN a claimed epic can be holding an undrained
-        # kickoff (select_dispatchable already excludes claimed epics, so the
-        # normal dispatch loop can NEVER re-drain these — that's the strand).
-        convs = {t['owner_conv_id'] for t in board['tasks']
-                 if t.get('status') == 'claimed' and t.get('owner_conv_id')}
+        # Convs that may hold an undrained kickoff. Keyed on the DURABLE fact
+        # (a queued workflow_step row) unioned with the board's claimed owners —
+        # never on the epic's momentary status, whose 30-min lease expiry used
+        # to make this scan blind to the strand (see the helper's docstring).
+        convs = _convs_holding_undrained_kickoffs(project_path, board)
         for conv_id in convs:
             if _conv_has_live_task(conv_id):
                 continue
@@ -513,6 +605,49 @@ def _kickoff_age_ms(conv_id: str, board_task_id: str, now_ms: int) -> int | None
         return None
 
 
+def _paths_waited_but_held(epic: dict, board_tasks: list) -> list:
+    """The subset of the epic's ``wait_paths`` currently under a LIVE path
+    lease held by a DIFFERENT conversation than the epic's dispatch target.
+
+    The inverse read of the kind='lease' board rows
+    (docs/PROJECT_BRAIN_WAIT_ON_PATH.md): the lease claim says "conv X is
+    actively touching path Y — hold off"; wait-on-path reads the same rows
+    from the epic's side ("hold my epic while Y is held by someone else").
+    A lease the epic's OWN target holds is not a hold — that conv is the one
+    supposed to run the work.
+
+    Fail-open by construction (design invariant 3): an empty/unparseable
+    ``wait_paths``, or a path nobody leases, resolves to [] (not held) so a
+    stale entry can never strand an epic. Matching reuses the write-set
+    ``_paths_intersect`` semantics (exact or containment either direction) —
+    conservative: a false overlap only HOLDS an epic (safe), never migrates
+    one. Returns the held subset (empty = not waiting).
+    """
+    paths = epic.get('wait_paths') or []
+    if not isinstance(paths, list) or not paths:
+        return []
+    target = _dispatch_target(epic)
+    live_foreign_leases = [
+        t for t in (board_tasks or [])
+        if isinstance(t, dict)
+        and t.get('kind') == 'lease'
+        and t.get('status') == 'claimed'          # effective: lease unexpired
+        and (t.get('owner_conv_id') or '') != target
+    ]
+    if not live_foreign_leases:
+        return []
+    held = []
+    for p in paths:
+        ps = str(p).strip()
+        if not ps:
+            continue
+        for lease in live_foreign_leases:
+            if _paths_intersect(ps, lease.get('title') or ''):
+                held.append(ps)
+                break
+    return held
+
+
 def _originator_stuck(project_path: str, epic: dict, board_tasks: list,
                       now_ms: int) -> bool:
     """True iff the epic's current dispatch target is GENUINELY unable to run
@@ -535,6 +670,12 @@ def _originator_stuck(project_path: str, epic: dict, board_tasks: list,
             return False
         # 3 — correctly held (cooldown) is NOT stuck.
         if int(epic.get('blocked_until') or 0) > now_ms:
+            return False
+        # 3b — correctly held (wait-on-path: a listed path is under a LIVE
+        # lease owned by a DIFFERENT conversation) is NOT stuck. Migrating
+        # would override the hold the epic declared, and the hold self-expires
+        # with the lease (never a deadlock, so never a migration trigger).
+        if _paths_waited_but_held(epic, board_tasks):
             return False
         # 2 — a busy target is working, not stuck.
         if _conv_has_live_task(target):
@@ -831,6 +972,38 @@ def on_epic_completed(project_path: str, completed_conv_id: str = '') -> int:
                 # No conversation to route the work to — leave it open for a
                 # human (or a future idle-sibling selector). Never invent a conv.
                 continue
+            # ── Which guard belongs on THIS seam (measured twice) ──
+            # ``_conv_has_live_task`` must stay OUT: it BREAKS this seam's
+            # actual job — the dependency chain. When A completes, dependent B
+            # must be claimed + enqueued *while the conv is still busy
+            # finishing A*, then drained by the post-task queue chain.
+            # test_project_brain_integration::test_full_autonomous_flywheel
+            # pins exactly that ("B claimed + enqueued but NOT drained" while
+            # busy) and goes RED with the check in place — A/B measured 6/6
+            # without it, 5/6 with it.
+            #
+            # ``_epic_already_queued`` DOES belong here. It was once argued
+            # unreachable-by-construction (dispatch_epic claims the epic and
+            # select_dispatchable excludes 'claimed', so a re-entrant call
+            # cannot reach this line for the same epic) and its NEUTER did not
+            # bite. That argument holds only while the claim LIVES. The claim
+            # is a 30-min soft lease and a target task can run for hours, so at
+            # every lease expiry the board reads the epic 'open' again and this
+            # seam stacks ANOTHER kickoff onto a conv that never drained the
+            # first. Measured 2026-07-28 on conv ms4b67gmthqc17: 11 queued rows
+            # for 4 distinct epics (pt_3c7f29f8 ×3, pt_c2e59181 ×3, pt_2c613da1
+            # ×2, pt_c1e3318a ×2), every one from this seam — the heartbeat
+            # sweep, which carries both guards, dispatched zero. The earlier
+            # NEUTER missed it because its fixture kept the lease LIVE; the
+            # guard is not unreachable, it is reachable once per lease TTL.
+            # Guarded by tests/test_project_brain_dispatch_dedup.py.
+            #
+            # Consume-time discard (message_queue.dispatch_next_queued) remains
+            # the backstop for a kickoff whose epic finished while queued — it
+            # stops the BILLED task, but only after the queue has already
+            # misreported its depth to the user, so it does not replace this.
+            if _epic_already_queued(target, epic.get('id', '')):
+                continue
             res = dispatch_epic(project_path, epic, target)
             if res.get('ok'):
                 dispatched += 1
@@ -844,7 +1017,145 @@ def on_epic_completed(project_path: str, completed_conv_id: str = '') -> int:
     return dispatched
 
 
+def on_epic_answered(project_path: str, task_id: str) -> int:
+    """Trigger seam: the human just ANSWERED a board question → re-dispatch
+    that epic IMMEDIATELY (no 30 s heartbeat wait). The epic is re-read fresh
+    and sanity-gated (effectively open, answer present, dependencies done) so
+    a stale/answered-elsewhere call can't double-dispatch; then routed via the
+    normal ``_dispatch_target`` + drained if idle (same cold-start machinery
+    as the sweep). Best-effort; returns 1 when dispatched.
+    """
+    if not project_path or not task_id:
+        return 0
+    try:
+        from lib.conversations.project_board import read_board
+        board = read_board(project_path)
+        epic = next((t for t in board['tasks'] if t['id'] == task_id), None)
+        if not epic or epic.get('status') != 'open':
+            return 0
+        if not (epic.get('human_answer') or '').strip():
+            return 0  # nothing to act on — the heartbeat sweep stays the path
+        done_ids = {t['id'] for t in board['tasks'] if t['status'] == 'done'}
+        if any(d not in done_ids for d in (epic.get('depends_on') or [])):
+            logger.info('[Dispatch] answer received for %s but deps unmet; '
+                        'leaving to the heartbeat sweep', task_id)
+            return 0
+        target = _dispatch_target(epic)
+        if not target:
+            logger.info('[Dispatch] answer received for %s but no routing '
+                        'target; leaving to the heartbeat sweep', task_id)
+            return 0
+        if _conv_has_live_task(target) or _epic_already_queued(target, task_id):
+            logger.info('[Dispatch] answer received for %s; target conv=%s is '
+                        'busy/already-queued — kickoff left to the sweep',
+                        task_id, target[:8])
+            return 0
+        res = dispatch_epic(project_path, epic, target)
+        if res.get('ok'):
+            _drain_idle_target(target)
+            logger.info('[Dispatch] answer → immediate re-dispatch epic=%s '
+                        'conv=%s', task_id, target[:8])
+            return 1
+        return 0
+    except Exception as e:
+        logger.warning('[Dispatch] on_epic_answered failed proj=%.40r '
+                       'task=%s: %s', project_path, task_id, e)
+        return 0
+
+
+def on_epic_posted(project_path: str, task_id: str) -> int:
+    """Trigger seam: an epic was just POSTED to the board → start it
+    IMMEDIATELY when it can genuinely start (no 30 s heartbeat wait).
+
+    Fires ONLY on the genuinely-startable shape — the epic reads ``open``,
+    every dependency is ``done``, the routing target conversation EXISTS and
+    is IDLE. Every other shape falls back to the existing machinery
+    unchanged:
+
+      • deps unmet → the completion trigger (``on_epic_completed``) owns it;
+      • target busy (the common case — an agent posts mid-turn) → the
+        completion nudge (``on_conv_idle``) picks it up the moment the
+        poster's turn ends, else the next heartbeat sweep;
+      • target conv row MISSING → deliberately NOT dispatched here:
+        ``dispatch_epic`` claims FIRST, so dispatching into a dead conv would
+        strand the claim until lease expiry (worse than today's ≤30 s sweep
+        delay). The sweep's claim/migration path owns that shape.
+
+    Best-effort; returns 1 when dispatched. Never raises into the post path.
+    """
+    if not project_path or not task_id:
+        return 0
+    try:
+        from lib.conversations.project_board import read_board
+        board = read_board(project_path)
+        epic = next((t for t in board['tasks'] if t['id'] == task_id), None)
+        if not epic or epic.get('status') != 'open':
+            return 0
+        done_ids = {t['id'] for t in board['tasks'] if t['status'] == 'done'}
+        if any(d not in done_ids for d in (epic.get('depends_on') or [])):
+            return 0  # unmet deps — the completion trigger owns this one
+        target = _dispatch_target(epic)
+        if not target:
+            return 0
+        if _conv_has_live_task(target) or _epic_already_queued(target, task_id):
+            return 0  # busy target — the completion nudge / sweep owns it
+        from lib.database import DOMAIN_CHAT, get_thread_db
+        db = get_thread_db(DOMAIN_CHAT)
+        row = db.execute(
+            'SELECT 1 FROM conversations WHERE id=? AND user_id=1 LIMIT 1',
+            (target,)).fetchone()
+        if not row:
+            return 0  # dead/missing target — the sweep's migration owns it
+        res = dispatch_epic(project_path, epic, target)
+        if not res.get('ok'):
+            return 0
+        _drain_idle_target(target)
+        logger.info('[Dispatch] epic %s started at POST time (target %s idle; '
+                    'no heartbeat wait)', task_id, target[:8])
+        return 1
+    except Exception as e:
+        logger.warning('[Dispatch] on_epic_posted failed proj=%.40r task=%s: %s',
+                       project_path, task_id, e)
+        return 0
+
+
+def on_conv_idle(project_path: str, conv_id: str) -> int:
+    """Trigger seam: a conversation's task just completed with an EMPTY queue
+    — it is going idle. If an open epic routes to THIS conv, dispatch + drain
+    it NOW (no 30 s heartbeat wait).
+
+    Bounded ONE per call: the drained task's own completion hook re-fires this
+    seam for any remaining epics — the same chain shape the queue drain uses,
+    so a backlog of open epics advances one per completed turn with zero
+    heartbeat involvement. Epics routed to OTHER convs are not this seam's
+    business (their own completion hooks, or the sweep, handle them).
+    Best-effort; returns 1 when an epic was dispatched.
+    """
+    if not project_path or not conv_id:
+        return 0
+    try:
+        if _conv_has_live_task(conv_id):
+            return 0  # a successor already took over (fail-safe: never stack)
+        for epic in select_dispatchable(project_path):
+            if _dispatch_target(epic) != conv_id:
+                continue
+            res = dispatch_epic(project_path, epic, conv_id)
+            if not res.get('ok'):
+                return 0
+            _drain_idle_target(conv_id)
+            logger.info('[Dispatch] epic %s started at completion-nudge time '
+                        '(conv %s went idle; no heartbeat wait)',
+                        epic.get('id', '?'), conv_id[:8])
+            return 1
+        return 0
+    except Exception as e:
+        logger.warning('[Dispatch] on_conv_idle failed proj=%.40r conv=%s: %s',
+                       project_path, conv_id[:8], e)
+        return 0
+
+
 __all__ = [
     'select_dispatchable', 'dispatch_epic', 'on_epic_completed',
+    'on_epic_answered', 'on_epic_posted', 'on_conv_idle',
     'sweep_dispatch', 'sweep_all_active_projects', 'BRAIN_DISPATCH_MARKER',
 ]

@@ -40,22 +40,33 @@ def _handle_scheduler_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, c
     )
 
 
-def _run_desktop(fn_name, fn_args):
-    """Desktop tool executor — wraps send_desktop_command + format_desktop_result."""
+def _run_desktop(fn_name, fn_args, user_id=''):
+    """Desktop tool executor — wraps send_desktop_command + format_desktop_result.
+
+    The wire cmd_type is the full tool name verbatim: the agent's dispatch
+    table (lib/desktop_agent/_dispatch.COMMANDS) is keyed by it, prefix and
+    all — never strip or rewrite it here. ``user_id`` (RWA P4a) scopes the
+    command to the caller's own agents on relay deployments.
+    """
     from lib.desktop import format_desktop_result, send_desktop_command
-    cmd_type = fn_name.replace('desktop_', '', 1)
-    result, error = send_desktop_command(cmd_type, fn_args, timeout=30)
+    result, error = send_desktop_command(fn_name, fn_args, timeout=30,
+                                         user_id=user_id)
     if error:
         return f'Desktop Agent Error: {error}'
-    return format_desktop_result(cmd_type, result)
+    return format_desktop_result(fn_name, result)
 
 
 @tool_registry.tool_set(DESKTOP_TOOL_NAMES, category='desktop',
                         description='Interact with the desktop agent')
 def _handle_desktop_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, project_path, project_enabled, all_tools=None):
+    # Closure (same pattern as _run_swarm) so the task's bridge user rides
+    # into the command — RWA P4a user scoping on relay deployments.
+    def _exec_desktop(_fn_name, _fn_args):
+        return _run_desktop(_fn_name, _fn_args,
+                            user_id=task.get('_userId', '') or '')
     return simple_call(
         task, fn_name, fn_args, rn, round_entry, tc_id,
-        executor=_run_desktop,
+        executor=_exec_desktop,
         source='Desktop Agent', module_tag='Desktop',
     )
 

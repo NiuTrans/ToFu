@@ -1,21 +1,26 @@
 # Store assets checklist
 
-The Chrome Web Store requires specific images. Sizes are enforced — wrong
+Both Chromium stores require specific images, and sizes are enforced — wrong
 dimensions are rejected at upload. Prepare these before you start the listing.
+Unless a row says otherwise, one asset satisfies both stores.
 
 ## Required
 
 | Asset | Size (px) | Format | Notes |
 |---|---|---|---|
-| **Store icon** | 128 × 128 | PNG | You already have `browser_extension/icon128.png`. Confirm it is exactly 128×128 and has no alpha-edge artifacts. |
-| **Screenshot(s)** | 1280 × 800 **or** 640 × 400 | PNG/JPEG | At least **1**, up to 5. 1280×800 strongly preferred. See shot list below. |
+| **Store icon / extension logo** | 128 × 128 (Chrome) · **300 × 300 preferred** (Edge, 128 min) | PNG | You already have `browser_extension/icon128.png`. Confirm it is exactly 128×128 and has no alpha-edge artifacts. Edge wants a 1:1 logo and recommends 300 × 300, so render one if you publish there too. |
+| **Screenshot(s)** | 1280 × 800 **or** 640 × 400 | PNG/JPEG | At least **1**, up to 5. 1280×800 strongly preferred. Optional on Edge, but include them. See shot list below. |
 
 ## Optional but recommended
 
 | Asset | Size (px) | Notes |
 |---|---|---|
-| **Small promo tile** | 440 × 280 | Shown in store search/category. Improves listing quality. |
-| **Marquee promo tile** | 1400 × 560 | Only used if featured; skip unless you want it. |
+| **Small promo tile** | 440 × 280 | Shown in store search/category. Improves listing quality. Same size on both stores. |
+| **Marquee / large promo tile** | 1400 × 560 | Only used if featured; skip unless you want it. Same size on both stores. |
+
+> **Edge listing copy has a floor Chrome does not:** the description must be at
+> least **250 characters**. Use the detailed description from `LISTING.md`, not
+> the short summary.
 
 ## Verify the icon size
 

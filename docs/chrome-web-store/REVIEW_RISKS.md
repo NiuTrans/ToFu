@@ -2,8 +2,12 @@
 
 This is the honest risk assessment. The extension's design (a server-driven
 automation bridge with `debugger`, `<all_urls>`, `cookies`, and remote JS
-execution) directly strains several Chrome Web Store policies. Going in with
+execution) directly strains several Chromium-store policies. Going in with
 eyes open is better than a surprise rejection.
+
+The risks below apply to **both** the Chrome Web Store and Microsoft Edge
+Add-ons — same package, near-identical policies. Where Edge is stricter
+(remote code under MV3) it is called out in `EDGE_ADDONS.md`.
 
 ## Risk 1 — Remote code execution (HIGHEST)
 
@@ -45,11 +49,15 @@ change in `background.js` (the `fullPage=false` path already exists).
 
 **Policy:** request the narrowest permissions that work.
 
-**Mitigation already applied:** `manifest.store.json` removes the 6 permissions
-the code never uses (`webNavigation`, `clipboardRead`, `clipboardWrite`,
-`declarativeNetRequest`, `management`, `offscreen`). `management` in particular
-is a classic rejection trigger, and it was pure dead weight. Each remaining
-permission has a concrete, code-backed justification.
+**Mitigation already applied:** `manifest.store.json` drops every permission
+the code cannot justify — `webNavigation`, `clipboardRead`, `clipboardWrite`,
+`declarativeNetRequest`, `management`, `offscreen` (all zero-call), plus
+`activeTab` (which is gesture-granted and can never be granted here, since
+every command arrives from the server long-poll rather than a user click).
+`management` in particular is a classic rejection trigger, and it was pure
+dead weight. Each remaining permission has a concrete, code-backed
+justification — see the REMOVED table in `PERMISSIONS_JUSTIFICATION.md`, which
+`tests/test_chrome_store_manifest_parity.py` keeps in step with the manifest.
 
 `<all_urls>` + `cookies` + `history` + `bookmarks` together still constitute a
 broad request. The defense is the genuinely general-purpose single purpose
@@ -79,20 +87,39 @@ URL and shows status.
 
 ## Realistic outcome ladder
 
+Applies to BOTH Chromium stores — the Chrome Web Store and Microsoft Edge
+Add-ons take the same package, so a rung reached in one is usually reachable
+in the other. See `EDGE_ADDONS.md`.
+
 1. **Best case:** accepted after a manual review round, possibly after one
    clarifying reply about remote code. One-click install achieved.
 2. **Middle case:** accepted only after shipping the **no-`browser_execute_js`,
-   no-`debugger`** reduced Chrome build (Risk 1 + 2 fallbacks). Slightly less
+   no-`debugger`** reduced build (Risk 1 + 2 fallbacks). Slightly less
    powerful, but a real store listing with one-click install.
-3. **Worst case:** rejected for remote-code policy regardless. Fall back to
-   Firefox AMO (signed self-hosted `.xpi`, one-click, tolerant of these
-   permissions) or stay on "load unpacked" for Chrome. This is the path the
-   `cross-platform-installer-architecture` reality already anticipated.
+3. **If Chrome rejects on remote code — next stop is Edge Add-ons, not
+   Firefox.** Same zip, **no registration fee**, individual accounts
+   supported, and the whole justification kit is reused verbatim, so the
+   marginal cost is close to zero. Be honest about the odds though: Edge's MV3
+   rule on remote code is worded MORE absolutely than Chrome's (see
+   `EDGE_ADDONS.md`), so this is most likely to succeed with the reduced build
+   from rung 2 — not as a way to keep `browser_execute_js`.
+4. **Worst case:** rejected by both Chromium stores. Firefox AMO is the next
+   option (signed, self-hostable `.xpi`, one-click, historically tolerant of
+   these permissions) but it is the MOST expensive path, not the fallback of
+   first resort: Firefox needs a real code port (no `chrome.debugger`, so
+   full-page screenshots must be rebuilt on scroll-and-stitch
+   `captureVisibleTab`, plus a `background.scripts`/`service_worker` dual
+   declaration) AND a signing pipeline, because Firefox has no persistent
+   "load unpacked" — an `about:debugging` add-on disappears on browser
+   restart. Otherwise stay on "load unpacked" for Chromium, which is what the
+   in-app Local Control guidance already supports.
 
 ## Decision to make NOW
 
-Before you spend review cycles: are you willing to ship the **reduced** Chrome
-build (no remote JS, no debugger) if asked? If yes, the odds of an eventual
-acceptance are decent. If no (you need full `browser_execute_js` in the store
-build), the honest expectation is rejection, and Firefox AMO is the better
-investment.
+Before you spend review cycles: are you willing to ship the **reduced** build
+(no remote JS, no debugger) if asked? If yes, the odds of an eventual
+acceptance on a Chromium store are decent, and you get two shots at it for one
+package — Chrome and Edge Add-ons. If no (you need full `browser_execute_js`
+in the store build), the honest expectation is rejection from BOTH Chromium
+stores, and the question becomes whether the Firefox port + AMO signing
+pipeline is worth building.

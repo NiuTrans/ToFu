@@ -88,8 +88,15 @@ win.renderMarkdown = global.renderMarkdown = (s) => s;
 // node process throws ReferenceError before later cases run.
 win.t = global.t = (key, params) => key;
 win.ConvView = global.ConvView = { finalizeStreaming: spy('finalizeStreaming'),
-  removeMessage: spy('removeMessage') };
+  removeMessage: spy('removeMessage'), replaceAll: spy('replaceAll'),
+  upsertMessage: spy('upsertMessage'), startStreaming: spy('startStreaming') };
 win.Artifacts = global.Artifacts = { attachToMessage: spy('attachToMessage') };
+// §7 streamBufs retirement: the PHASE handler + delta phase management write
+// phase via setStreamPhase (ui/stream_session.js). Stub the writer surface —
+// phase content assertions, if any, live on assistantMsg like every other
+// dispatch fact.
+win.setStreamPhase = global.setStreamPhase = spy('setStreamPhase');
+win.getStreamSession = global.getStreamSession = () => ({ phase: null });
 win.flashGaugeForArchive = global.flashGaugeForArchive = spy('flashGaugeForArchive');
 win.Api = global.Api = { project: { status: () => Promise.resolve(null) } };
 win.getActiveConv = global.getActiveConv = () => conversations.find(c => c.id === activeConvId);
@@ -175,24 +182,29 @@ function setup() {
   const conv = { id: 'c1', messages: [{ role: 'user', content: 'hi' }, am] };
   conversations.push(conv);
   activeConvId = 'c1';
-  const buf = { content: '', thinking: '', toolRounds: [] };
-  streamBufs.set('c1', buf);
+  /* §7 streamBufs retirement: no buf fixture — deltas mutate the message
+   * document (assistantMsg); phase goes to the session via the setStreamPhase
+   * stub installed above. */
   const ctx = T.makeCtx({ convId: 'c1', taskId: 't1',
     stream: { controller: { signal: { aborted: false } } },
-    assistantMsg: am, buf });
-  return { conv, am, buf, ctx };
+    assistantMsg: am });
+  return { conv, am, ctx };
 }
 function line(obj) { return 'data: ' + JSON.stringify(obj); }
 
-// ── 1. delta accumulates into assistantMsg + buf ──
+// ── 1. delta accumulates into assistantMsg (doc SSOT); phase → session ──
 {
-  const { am, buf, ctx } = setup();
+  const { am, ctx } = setup();
+  calls['setStreamPhase'] = 0;
+  T.dispatchSSEEvent(line({ type: 'delta', thinking: 'hmm' }), ctx);
+  check('delta_accumulates_thinking', ctx.assistantMsg.thinking === 'hmm');
+  check('delta_thinking_sets_phase_session',
+    calls['setStreamPhase'] === 1);
   T.dispatchSSEEvent(line({ type: 'delta', content: 'Hello' }), ctx);
   T.dispatchSSEEvent(line({ type: 'delta', content: ' world' }), ctx);
   check('delta_accumulates_content', ctx.assistantMsg.content === 'Hello world');
-  check('delta_syncs_buf', buf.content === 'Hello world');
-  T.dispatchSSEEvent(line({ type: 'delta', thinking: 'hmm' }), ctx);
-  check('delta_accumulates_thinking', ctx.assistantMsg.thinking === 'hmm');
+  check('delta_content_clears_phase_session',
+    calls['setStreamPhase'] === 3);
 }
 
 // ── 2. tool_start pushes a round; tool_result completes it ──
@@ -271,7 +283,8 @@ function line(obj) { return 'data: ' + JSON.stringify(obj); }
   T.dispatchSSEEvent(line({ type: 'endpoint_critic_msg', content: 'Looks good',
     thinking: 'CRITIC-REASONING', next_phase: 'stop' }), ctx);
   check('critic_msg_clears_phase', ctx.epCriticPhase === false);
-  check('critic_msg_clears_buf_refs', ctx.epCriticMsg === null && ctx.epCriticBuf === null);
+  check('critic_msg_clears_refs', ctx.epCriticMsg === null
+    && ctx.epCriticBuf === undefined /* §7: the field no longer exists */);
   /* ★ Thinking-persistence: the critic bubble's thinking must survive
    *   finalize (the flow path now sends ev.thinking; sse_pipeline must
    *   apply it). _epCriticMsg is nulled, so read the persisted critic
@@ -436,7 +449,7 @@ function line(obj) { return 'data: ' + JSON.stringify(obj); }
   check('round_usage_stashes', u && u.round === 2 && u.tokensIn === 100 && u.tokensOut === 20);
 }
 
-// ── 17. artifact attaches via window.Artifacts + mirrors buf._artifacts ──
+// ── 17. artifact attaches via window.Artifacts (doc-backed since §7) ──
 {
   const { ctx } = setup();
   T.dispatchSSEEvent(line({ type: 'artifact', id: 'art1', format: 'md',
@@ -766,7 +779,7 @@ function line(obj) { return 'data: ' + JSON.stringify(obj); }
 //        pre-refresh page, so ONLY the state snapshot can restore the search
 //        card. Non-endpoint reconnect path. ──
 {
-  const { am, buf, ctx } = setup();
+  const { am, ctx } = setup();
   // Fresh reload: no content/thinking streamed yet, an in-flight search round
   // arrives only via the reconnect state snapshot.
   T.dispatchSSEEvent(line({ type: 'state', status: 'running', content: '', thinking: '',
@@ -774,11 +787,9 @@ function line(obj) { return 'data: ' + JSON.stringify(obj); }
       query: 'HIV lymphoid follicle', status: 'searching', results: null }] }), ctx);
   const r = (am.toolRounds || []).find(x => x.toolCallId === 'sr1');
   check('state_reconnect_seeds_inflight_round', !!r && r.status === 'searching');
-  check('state_reconnect_seeds_buf_rounds',
-    Array.isArray(buf.toolRounds) &&
-    buf.toolRounds.some(x => x.toolCallId === 'sr1' && x.status === 'searching'));
-  // The whole point: a round with status 'searching' is present, so
-  // updateStreamingUI's hasActiveSearch is true → "Searching…" not "等待中…".
+  // The whole point: a round with status 'searching' is present on the
+  // DOCUMENT (the only source updateStreamingUI reads since §7), so
+  // hasActiveSearch is true → "Searching…" not "等待中…".
   check('state_reconnect_has_active_search',
     (am.toolRounds || []).some(x => x.status === 'searching'));
 }

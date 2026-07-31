@@ -19,10 +19,36 @@
 // ══════════════════════════════════════════
 //  Branch SSE streaming
 // ══════════════════════════════════════════
+
+/* Write-approval gate for branch tasks — mirrors the main chat handler
+ * (ui/sse_handlers_io.js::_handleWriteApproval). Stamps the matching tool
+ * round; the shared renderer (_renderPendingApprovalBlock in ui/tool_rounds.js)
+ * paints working Approve/Reject buttons that call the global
+ * resolveWriteApproval → POST /api/v1/project/write-approval. Top-level so
+ * the wiring AND the stamping are independently testable. */
+function _branchHandleWriteApproval(ev, assistantMsg) {
+  if (!assistantMsg || !assistantMsg.toolRounds) return;
+  const r = (ev.toolCallId
+    ? assistantMsg.toolRounds.find(rr => rr.toolCallId === ev.toolCallId)
+    : null
+  ) || assistantMsg.toolRounds.find(rr => rr.roundNum === ev.roundNum);
+  if (r) {
+    r.status = "pending_approval";
+    r.approvalId = ev.approvalId;
+    r.approvalMeta = ev.meta;
+  }
+}
 async function _branchStreamSSE(conv, msgIdx, branchIdx, branch, assistantMsg, taskId, controller, bk) {
   let lastSave = Date.now();
   let gotData = false;
-  const sseTimeout = setTimeout(() => { if (!gotData) controller.abort(); }, 45000);
+  /* NO first-byte timeout. A branch stream is the same object as the main
+   * chat stream, which runs on Api.chat.streamResponse -> stream() ->
+   * timeout:0. This used to abort after 45s without a first byte, i.e. a
+   * client-side re-implementation of the very TTFT kill we removed from the
+   * transport (and 4x more aggressive than the 180s it replaced): the server
+   * kept generating and billing while the browser had already dropped to the
+   * poll fallback. Slow is not failed. The user ends a wait by pressing Stop,
+   * which aborts `controller` directly. */
 
   function _processEvent(ev) {
     gotData = true;
@@ -141,13 +167,12 @@ async function _branchStreamSSE(conv, msgIdx, branchIdx, branch, assistantMsg, t
         }
       } catch (e) { console.warn('[branch.project_external_edit] toast failed', e); }
       console.log('[branch.project_external_edit]', { sha, files });
-    } else if (ev.type === "approval_required") {
-      assistantMsg.approvalRequired = true;
-      // Targeted update: rebuild only the branch panel to show approval buttons
-      if (activeConvId === conv.id) {
-        const parentMsg = conv.messages[msgIdx];
-        if (parentMsg) _rebuildBranchPanelDOM(parentMsg, msgIdx, branchIdx);
-      }
+    } else if (ev.type === "write_approval_request") {
+      /* The REAL server write gate (lib/tasks_pkg/tool_dispatch/_approval.py).
+       * The old placeholder-event branch fed dead buttons and is gone — the
+       * server never emits that type (only registered in lib/agent_core/events.py). */
+      _branchHandleWriteApproval(ev, assistantMsg);
+      _updateBranchStreamingUI(msgIdx, branchIdx, assistantMsg);
     } else if (ev.type === "done") {
       /* ★ DIAGNOSTIC: log endpoint/swarm done event */
       const _doneErrSummary = ev.error
@@ -172,7 +197,6 @@ async function _branchStreamSSE(conv, msgIdx, branchIdx, branch, assistantMsg, t
       if (ev.usage) assistantMsg.usage = ev.usage;
       /* ★ git-shim: round commit sha for redo/diff references */
       if (ev.gitSha) assistantMsg._gitSha = ev.gitSha;
-      assistantMsg.approvalRequired = false;
       return "done";
     } else if (ev.type === "error") {
       const _errSummary = ev.error
@@ -212,12 +236,9 @@ async function _branchStreamSSE(conv, msgIdx, branchIdx, branch, assistantMsg, t
       },
     });
   } catch (e) {
-    clearTimeout(sseTimeout);
     if (e.name === "AbortError") throw e;
     console.warn("Branch SSE failed, falling back to poll:", e.message);
     await _branchStreamPoll(conv, msgIdx, branchIdx, branch, assistantMsg, taskId, controller, bk);
-  } finally {
-    clearTimeout(sseTimeout);
   }
 }
 

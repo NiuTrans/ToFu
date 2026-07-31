@@ -16,10 +16,10 @@ from lib.log_clean._patterns import (
     _WORKER_TAG_RE,
 )
 from lib.log_clean._helpers import (
+    _describe_numbered_variants,
     _extract_device_ids,
     _extract_tqdm_pct,
     _fingerprint,
-    _format_device_range,
     _is_tqdm_line,
 )
 
@@ -163,8 +163,9 @@ def _collapse_progress_bars(lines: List[str]) -> tuple[List[str], int]:
         dropped = len(group) - len(picks)
         result.append(picks[0]['line'])
         summary = f'  … ({dropped} more progress updates'
-        if len(dev_ids) > 1:
-            summary += f', ×{len(dev_ids)} devices'
+        variants = _describe_numbered_variants(dev_ids)
+        if variants:
+            summary += f', {variants}'
         summary += ') …'
         result.append(summary)
         for p in picks[1:]:
@@ -192,9 +193,9 @@ def _collapse_similar_lines(lines: List[str]) -> tuple[List[str], int]:
             dev_ids = _extract_device_ids(run_lines)
             dropped_a = run_len - 1
             summary_a = f'  … ({dropped_a} more similar'
-            if len(dev_ids) > 1:
-                summary_a += (f', ×{len(dev_ids)} devices: '
-                               f'{_format_device_range(dev_ids)}')
+            variants_a = _describe_numbered_variants(dev_ids)
+            if variants_a:
+                summary_a += f', {variants_a}'
             summary_a += ') …'
             pass_a.append(summary_a)
             collapsed += dropped_a
@@ -231,9 +232,9 @@ def _collapse_similar_lines(lines: List[str]) -> tuple[List[str], int]:
             dev_ids = _extract_device_ids(all_lines)
             dropped_b = total - 1
             summary_b = f'  … ({dropped_b} more similar'
-            if len(dev_ids) > 1:
-                summary_b += (f', ×{len(dev_ids)} devices: '
-                               f'{_format_device_range(dev_ids)}')
+            variants_b = _describe_numbered_variants(dev_ids)
+            if variants_b:
+                summary_b += f', {variants_b}'
             summary_b += ') …'
             pass_b.append(summary_b)
             pass_b_dropped += dropped_b

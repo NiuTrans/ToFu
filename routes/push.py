@@ -24,7 +24,7 @@ from flask import Blueprint, jsonify, request
 from quart import websocket
 
 from lib.api_response import api_error
-from lib.log import get_logger
+from lib.log import get_logger, resolve_inbound_rid
 from lib.push import PushClient, hub
 
 logger = get_logger(__name__)
@@ -104,10 +104,89 @@ def debug_presence():
 
 @push_bp.websocket('/api/push')
 async def push_ws():
-    """Global push channel WebSocket endpoint."""
-    client = PushClient()
+    """Global push channel WebSocket endpoint.
+
+    Resolves ``AuthContext`` at handshake and stashes ``user_id`` on the
+    ``PushClient`` so downstream frame handlers scope by owner without
+    re-doing auth. Quart's ``before_request`` middleware does NOT fire
+    on WS routes, so we resolve inline from ``websocket.cookies`` and
+    ``websocket.headers`` — same transports the HTTP gate accepts, but
+    read from the WebSocket-scoped globals rather than ``request``.
+
+    Pre-auth / open-mode / bad-token clients still get through (empty
+    ``user_id='' → unscoped``); a valid Bearer/cookie token yields the
+    real ``AuthContext.user_id`` so multi-tenant snapshots are correctly
+    scoped. pt_ab42421158214591.
+    """
+    # ── Correlation id (pt_3d28727f / pt_ccaec091) ────────────────
+    # Quart's @app.before_request does NOT run on WS routes, so the HTTP
+    # middleware that resolves X-Request-ID never fires here and this socket
+    # would otherwise be invisible in the request-id log axis. A browser
+    # WebSocket cannot set custom headers, so the client puts its id in the
+    # `_rid` QUERY PARAM (static/js/push.js::_buildUrl); we honor it through
+    # the SAME validated resolver the HTTP path uses (lib.log), so one id
+    # space covers both transports and a malformed id can never reach a log
+    # line.
+    #
+    # A socket ALWAYS has an id: resolve_inbound_rid mints one when the
+    # client's is absent or unsafe, and the except branch below mints one
+    # too. There is deliberately no "no id" state — a socket whose lines
+    # cannot be joined to anything is the exact failure this closes.
+    #
+    # ⚠️ Deliberately NOT set_req_id(): lib.log stores the rid in a
+    # THREAD-LOCAL, not a ContextVar. This handler is a long-lived coroutine
+    # sharing its event-loop thread with every HTTP request, so writing the
+    # thread-local here would stamp THIS socket's id onto unrelated requests
+    # (measured: after two concurrent HTTP handlers ran, the socket coroutine
+    # itself observed the SECOND handler's id). The rid therefore rides the
+    # PushClient and is passed EXPLICITLY to the log calls that describe
+    # this socket — including the frame handlers, which are module-level
+    # functions and cannot see this coroutine's locals.
+    try:
+        _rid = resolve_inbound_rid(websocket.headers.get('X-Request-ID'),
+                                   websocket.args.get('_rid'))
+    except Exception as _e:
+        # Never let correlation bookkeeping break the socket — but never
+        # leave it without an id either.
+        _rid = resolve_inbound_rid(None, None)
+        logger.debug('[Push] rid resolve failed (minted %s): %s', _rid, _e)
+
+    # ── pt_ab42421158214591: resolve WS handshake auth ────────────
+    _user_id = ''
+    try:
+        from lib.api_keys import validate_token
+        from routes.api_v1.auth import SESSION_COOKIE
+        _tok = ''
+        # Priority mirrors _extract_bearer_or_cookie() in the HTTP gate:
+        # Authorization header > x-api-key > session cookie. Query-string
+        # token is not accepted on a WS upgrade (the URL is HTTP-only).
+        try:
+            _auth_hdr = (websocket.headers.get('Authorization') or '')
+            if _auth_hdr.lower().startswith('bearer '):
+                _tok = _auth_hdr[7:].strip()
+            if not _tok:
+                _xapi = (websocket.headers.get('x-api-key') or '').strip()
+                if _xapi.startswith(('tofu_live_', 'tofu_admin_')):
+                    _tok = _xapi
+            if not _tok:
+                _cookie = (websocket.cookies.get(SESSION_COOKIE) or '').strip()
+                if _cookie.startswith(('tofu_live_', 'tofu_admin_')):
+                    _tok = _cookie
+        except Exception as _e:
+            logger.debug('[Push] WS auth transport read failed: %s', _e)
+        if _tok:
+            _ctx = validate_token(_tok)
+            if _ctx is not None:
+                _user_id = getattr(_ctx, 'user_id', '') or ''
+    except Exception as _e:
+        logger.debug('[Push] WS auth resolve failed (proceeding unscoped): %s',
+                     _e)
+        _user_id = ''
+
+    client = PushClient(user_id=_user_id, req_id=_rid)
     hub.register(client)
-    logger.info('[Push] WS connected (clients=%d)', hub.client_count)
+    logger.info('[Push] WS connected (clients=%d, user=%s, rid=%s)',
+                hub.client_count, _user_id or '<unscoped>', _rid)
 
     send_task = None
     recv_task = None
@@ -132,7 +211,7 @@ async def push_ws():
         except asyncio.CancelledError:
             pass
         except Exception as e:
-            logger.debug('[Push] Sender error: %s', e)
+            logger.debug('[Push] Sender error (rid=%s): %s', _rid, e)
 
     async def _receiver():
         """Receive client commands (subscribe, unsubscribe, abort, ping)."""
@@ -143,7 +222,7 @@ async def push_ws():
         except asyncio.CancelledError:
             pass
         except Exception as e:
-            logger.debug('[Push] Receiver error: %s', e)
+            logger.debug('[Push] Receiver error (rid=%s): %s', _rid, e)
 
     try:
         send_task = asyncio.create_task(_sender())
@@ -158,7 +237,8 @@ async def push_ws():
             send_task.cancel()
         if recv_task and not recv_task.done():
             recv_task.cancel()
-        logger.info('[Push] WS disconnected (clients=%d)', hub.client_count)
+        logger.info('[Push] WS disconnected (clients=%d, rid=%s)',
+                    hub.client_count, _rid)
 
 
 def _handle_client_frame(client: PushClient, raw) -> None:
@@ -179,11 +259,33 @@ def _handle_client_frame(client: PushClient, raw) -> None:
 
     if action == 'subscribe' and channel:
         hub.subscribe(client, channel, task_id)
-        logger.debug('[Push] Subscribe: channel=%s taskId=%s', channel, task_id[:8])
+        logger.debug('[Push] Subscribe: channel=%s taskId=%s rid=%s',
+                     channel, task_id[:8], client.req_id)
+        # ── pt_conv_state_ssot P1.5: server-authoritative connect snapshot ──
+        # When a client subscribes to the notify wildcard (the sidebar's
+        # subscription) send it a one-shot snapshot of the current running-
+        # task state so it has authoritative busy info without waiting for
+        # the next notify_conv_changed frame or the 25/90s poll fallback.
+        # Delivered DIRECTLY to this client's outbound queue — never via
+        # hub.push_event, which would fan out to every subscriber (leaking
+        # snapshots into unrelated tabs/users) and cross-replica bus.
+        if channel == 'notify' and task_id == '*':
+            try:
+                from lib.agent_core.push import build_conv_state_snapshot
+                # pt_ab42421158214591: use the user_id resolved at
+                # handshake and stashed on the client. Empty string is
+                # the pre-auth default → unscoped snapshot (same as
+                # before this change for personal-install / open-mode).
+                # A real AuthContext.user_id gives a per-user scoped
+                # snapshot that cannot leak sibling tenants' tasks.
+                client.enqueue(build_conv_state_snapshot(user_id=client.user_id))
+            except Exception as e:
+                logger.debug('[Push] connect snapshot enqueue failed '
+                             '(rid=%s): %s', client.req_id, e)
     elif action == 'unsubscribe' and channel:
         hub.unsubscribe(client, channel, task_id)
     elif action == 'abort' and channel == 'chat' and task_id != '*':
-        _handle_abort(task_id)
+        _handle_abort(task_id, req_id=client.req_id)
     elif action == 'ping':
         # Round-trip latency probe. Echo the client's timestamp back so the
         # client can compute RTT = now - t. Pure echo (no shared state) → works
@@ -196,17 +298,26 @@ def _handle_client_frame(client: PushClient, raw) -> None:
         client.enqueue({'channel': 'system', 'type': 'pong', 't': raw.get('t')})
 
 
-def _handle_abort(task_id: str):
+def _handle_abort(task_id: str, req_id: str = ''):
     """Handle a client abort request for a chat task.
 
     Chat tasks predate the unified ``TaskRuntime.abort_event`` flag and
     still gate their work loop on ``task['aborted']``. We set both so
     the orchestrator stops regardless of which path it consults.
+
+    ``req_id`` is the requesting socket's correlation id, passed in because
+    this is a module-level function with no view of the handler coroutine's
+    locals. "I pressed stop and it kept going" is the most-investigated
+    complaint on this channel, so this line has to name the socket that
+    asked — otherwise the user's id gets them only the connect/disconnect
+    pair and nothing in between.
     """
     from lib.tasks_pkg import tasks, tasks_lock
     with tasks_lock:
         task = tasks.get(task_id)
     if not task:
+        logger.info('[Push] Client abort for unknown task %s (rid=%s)',
+                    task_id[:8], req_id)
         return
     task['aborted'] = True
     abort_evt = task.get('abort_event')
@@ -214,5 +325,7 @@ def _handle_abort(task_id: str):
         try:
             abort_evt.set()
         except Exception as e:
-            logger.debug('[Push] abort_event.set failed: %s', e)
-    logger.info('[Push] Client abort for task %s', task_id[:8])
+            logger.debug('[Push] abort_event.set failed (rid=%s): %s',
+                         req_id, e)
+    logger.info('[Push] Client abort for task %s (rid=%s)',
+                task_id[:8], req_id)

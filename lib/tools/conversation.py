@@ -40,11 +40,28 @@ CONV_REF_GET_TOOL = {
     "function": {
         "name": "get_conversation",
         "description": (
-            "Retrieve the full content of another conversation by its ID. "
-            "Returns all messages including user prompts, assistant responses, tool calls, and tool results. "
+            "Retrieve the content of another conversation by its ID. "
             "Use this when the user asks you to reference specific information, decisions, code changes, "
             "debugging context, or tool outputs from a previous conversation. "
             "First use list_conversations to find the right conversation ID.\n\n"
+            "DEFAULT OUTPUT IS RAW — omit `raw` and you get the COMPLETE, "
+            "un-summarized DB record as structured JSON, the way you would read "
+            "it straight out of the database: every row column (created_at, "
+            "updated_at, msg_count, rev, settings) plus every field of every "
+            "message preserved (finishReason, usage, model, timestamp, _msgId, "
+            "modifiedFileList, the full toolRounds). This is what you want for "
+            "debugging and for any question about what actually happened, "
+            "because nothing is summarized away.\n"
+            "Pass raw=false ONLY when you want a READABLE prose transcript "
+            "instead — user prompts + assistant responses + a condensed view of "
+            "tool calls. It reads more easily but SUMMARIZES tool rounds and "
+            "drops per-message metadata, so a detail you need may simply not be "
+            "there.\n\n"
+            "Long conversations are WINDOWED (head + tail) rather than cut "
+            "mid-token, so the JSON always parses. The header states DELIVERED "
+            "N of M messages — check it, because on a long conversation one "
+            "call cannot carry everything. Use `before` to page backwards "
+            "through older messages and `limit` to widen the window.\n\n"
             "IMPORTANT: Only use this when the user EXPLICITLY requests information from a past conversation. "
             "Never call this proactively or speculatively."
         ),
@@ -57,7 +74,19 @@ CONV_REF_GET_TOOL = {
                 },
                 "include_tool_details": {
                     "type": "boolean",
-                    "description": "Whether to include full tool call arguments and results (default: true). Set to false for a shorter summary."
+                    "description": "Whether to include full tool call arguments and results (default: true). Set to false for a shorter summary. Only applies to the raw=false prose transcript; the raw record always carries them."
+                },
+                "raw": {
+                    "type": "boolean",
+                    "description": "Output mode. DEFAULT true — the full raw DB record (all columns + settings + every message field preserved) as structured JSON, nothing summarized. Pass false for the readable prose transcript, which drops per-message metadata and condenses tool rounds."
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "How many recent messages to render. Omit for a window sized to fit the output budget with whole, unclamped messages. Raising it past what fits causes per-message fields to be clamped, which the header reports."
+                },
+                "before": {
+                    "type": "integer",
+                    "description": "Page backwards: render the window ending just BEFORE this message number (1-based, exclusive). Take it from the header's 're-read with before=N' hint to walk further back through a long history."
                 }
             },
             "required": ["conversation_id"]
@@ -71,13 +100,12 @@ CONV_REF_TOOL_NAMES = {'list_conversations', 'get_conversation'}
 
 # ── Project Charter tools (Pillar #2 of the project brain) ──
 # The Charter is the shared "north star" of a project — read by every
-# conversation, so they coordinate around one intent. An agent may READ it,
-# PROPOSE amendments, and (2026-07-12, owner-directed) self-COMMIT a DECISION
-# (append implementation-level consensus) so shared intent advances without a
-# human in the loop. The agent path can ONLY append a decision — it can never
-# edit the north-star `content` (goal/direction stays human-owned), and a human
-# retains the corrective levers (edit/remove a decision, delete the charter).
-# Project-scoped, registered only in project mode (registry._build_conv_ref).
+# conversation, so they coordinate around one intent. An agent may READ it and
+# PROPOSE amendments. It may NOT commit: a charter always requires human review
+# (owner-directed 2026-07-30, reversing the 2026-07-12 self-commit de-gating).
+# Committing, editing and removing decisions are human actions on the REST
+# routes. Project-scoped, registered only in project mode
+# (registry._build_conv_ref).
 
 CHARTER_READ_TOOL = {
     "type": "function",
@@ -88,9 +116,20 @@ CHARTER_READ_TOOL = {
             "conversation of the project reads: the project goal/direction plus the "
             "list of COMMITTED key decisions. Use it to align your work with the "
             "project's shared intent and to avoid contradicting an already-committed "
-            "decision. Read-only; returns the current charter text + decisions + version."
+            "decision. Read-only. DEFAULT returns the headline list (the same "
+            "shape the per-turn injection shows); pass `index` for ONE entry's "
+            "full text — the evidence chain costs one entry, not the whole charter."
         ),
-        "parameters": {"type": "object", "properties": {}, "required": []},
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "index": {
+                    "type": "integer",
+                    "description": "Optional. 0-based decision index (negative counts from the end). When given, returns ONLY that entry's full text + its summary."
+                },
+            },
+            "required": [],
+        },
     },
 }
 
@@ -99,12 +138,20 @@ CHARTER_PROPOSE_TOOL = {
     "function": {
         "name": "project_charter_propose",
         "description": (
-            "PROPOSE an amendment to the project charter (a new goal direction or a "
-            "key decision you believe should become project-wide shared intent). This "
-            "does NOT change the charter — it records your proposal for a human to "
-            "review and commit. Use it when you've reached a decision that other "
-            "conversations of this project should know about and align to. Be specific "
-            "and actionable; anchor the proposal to concrete evidence, not vague intent."
+            "PROPOSE an amendment to the project charter — the ONLY way an "
+            "agent can put something into the charter, and it takes effect only "
+            "after the HUMAN approves it. The charter is human-reviewed by "
+            "design: it is the shared north star every sibling conversation "
+            "reads, so nothing lands in it unilaterally.\n"
+            "Use this for a binding rule / architecture invariant you have "
+            "concluded and want other conversations to align to — state it as a "
+            "decision, not a musing, and anchor it to concrete measured "
+            "evidence. Your work does NOT wait on the review; continue, and "
+            "record what you actually did in JOURNAL.md.\n"
+            "For a methodology lesson (how to work, not what is true of this "
+            "codebase), prefer create_memory — it surfaces by relevance when a "
+            "conversation touches that topic, instead of growing the charter "
+            "every conversation pays for on every turn."
         ),
         "parameters": {
             "type": "object",
@@ -128,28 +175,53 @@ CHARTER_COMMIT_TOOL = {
     "function": {
         "name": "project_charter_commit",
         "description": (
-            "COMMIT a new key DECISION to the project charter — this makes it "
-            "project-wide shared intent that every sibling conversation reads. "
-            "Unlike project_charter_propose (which only records a suggestion for "
-            "later), this WRITES the decision immediately and bumps the charter "
-            "version. Use it when you and/or siblings have reached an "
-            "implementation-level consensus other conversations must align to "
-            "(an architecture invariant, a build-order rule, a resolved design "
-            "question). Be specific and actionable; anchor to concrete evidence.\n"
-            "SCOPE: this tool can ONLY append a decision — it can NOT edit the "
-            "project's north-star goal/direction text (that stays human-owned). "
-            "A human retains the ability to edit or remove a committed decision "
-            "afterwards, so this is self-service progress, not an irreversible "
-            "act. If this decision resolves a proposal you (or a sibling) raised "
-            "earlier with project_charter_propose, pass its proposalId as "
-            "`resolves_proposal` so it drops out of the pending-review list."
+            "COMMIT a new key DECISION — immediately, without a human gate. "
+            "Every commit MUST declare its `kind`, and the kind decides WHERE "
+            "the text lands:\n"
+            "  invariant — a binding rule that constrains FUTURE code and "
+            "decisions (an architecture invariant, a build-order rule, a "
+            "resolved design question other conversations must align to). "
+            "LANDS IN THE CHARTER; every sibling reads its one-line `summary` "
+            "in the injected block; the full `decision` text (evidence, "
+            "archaeology) is read back on demand via project_charter_read.\n"
+            "  lesson — a methodology experience note (e.g. 'guards must "
+            "assert results, not implementation'). ROUTED TO PROJECT MEMORY "
+            "instead — it surfaces via relevance prefetch exactly when a "
+            "conversation works on that topic, and same-topic lessons are "
+            "dedup-ed into one living memory. Does NOT grow the charter.\n"
+            "  report — a completion / 'we decided not to' record. REJECTED: "
+            "it constrains no future decision. Append it to JOURNAL.md "
+            "instead.\n"
+            "The test for the kind: does this text CHANGE what someone "
+            "decides next week? Binding rule → invariant. How-to-work "
+            "knowledge → lesson. What-happened → report.\n"
+            "SCOPE: this tool can ONLY append — it can NOT edit the project's "
+            "north-star goal/direction text (that stays human-owned). A human "
+            "retains the ability to edit or remove a committed invariant "
+            "afterwards, so this is self-service progress, not an "
+            "irreversible act. If this resolves a proposal raised earlier with "
+            "project_charter_propose, pass its proposalId as "
+            "`resolves_proposal`."
         ),
         "parameters": {
             "type": "object",
             "properties": {
+                "kind": {
+                    "type": "string",
+                    "enum": ["invariant", "lesson", "report"],
+                    "description": "Where this text lands: invariant → charter (binding rule); lesson → project memory (methodology, dedup-ed); report → rejected, belongs in JOURNAL.md."
+                },
                 "decision": {
                     "type": "string",
-                    "description": "The decision text to commit. Specific and actionable — it becomes injected shared intent for all conversations."
+                    "description": "The full text. For an invariant this is the complete record (evidence, reasoning, anchors) — the injection shows only `summary`. For a lesson, the experience note that lands in project memory."
+                },
+                "summary": {
+                    "type": "string",
+                    "description": "REQUIRED when kind=invariant: ONE line stating the binding rule itself (e.g. 'Credential redaction is a fail-closed whitelist; never revert to name-based exclusion'). The per-turn injection renders ONLY this line."
+                },
+                "into_memory": {
+                    "type": "string",
+                    "description": "Optional, kind=lesson only: id or exact name of the EXISTING project memory this lesson is a variant of — it is then folded into that memory instead of creating a new file. When you have read a same-topic memory (via prefetch or search_memories), pass it here; the auto-fold fallback only catches near-duplicates."
                 },
                 "resolves_proposal": {
                     "type": "string",
@@ -157,15 +229,32 @@ CHARTER_COMMIT_TOOL = {
                 },
                 "expected_version": {
                     "type": "integer",
-                    "description": "Optional concurrency guard: the charter version you last read. If the charter has since changed, the commit is rejected and you should re-read and retry."
+                    "description": "Optional and rarely useful. This tool only ever APPENDS a decision, and appends commute — so a charter that moved since you read it is NOT a conflict: the commit re-reads and lands yours alongside the other one instead of refusing. A stale value here does not block the commit."
                 },
             },
-            "required": ["decision"],
+            "required": ["kind", "decision"],
         },
     },
 }
 
-CHARTER_TOOLS = [CHARTER_READ_TOOL, CHARTER_PROPOSE_TOOL, CHARTER_COMMIT_TOOL]
+# The MODEL-FACING charter toolset: read + propose ONLY (owner-directed
+# 2026-07-30). project_charter_commit is NOT here — a charter always requires
+# human review, so an agent may raise a binding rule but never make it binding.
+#
+# This is a REVERSAL of the 2026-07-12 de-gating. What made that de-gating
+# survive unnoticed is instructive: registry/_build.py's comment claimed commit
+# "is NEVER exposed as an agent tool" while CHARTER_TOOLS shipped all three
+# names, so the code READ as safe. The comment is now true.
+#
+# CHARTER_COMMIT_TOOL itself is deliberately KEPT as a module symbol, and
+# 'project_charter_commit' stays in CHARTER_TOOL_NAMES, for two reasons:
+#   * execute_charter_tool must still RECOGNISE the name to refuse it with an
+#     explanation — a model that learned the tool from an older transcript gets
+#     told where the human gate is, instead of an opaque "unknown tool".
+#     Dropping the name would turn a clear refusal into a phantom-tool error.
+#   * historical tool rounds in existing conversations carry it and must still
+#     render (static/js/ui/tool_rounds.js::_CONV_META_TOOLS).
+CHARTER_TOOLS = [CHARTER_READ_TOOL, CHARTER_PROPOSE_TOOL]
 CHARTER_TOOL_NAMES = {'project_charter_read', 'project_charter_propose',
                       'project_charter_commit'}
 
@@ -261,8 +350,29 @@ BOARD_BLOCK_TOOL = {
     "function": {
         "name": "project_board_block",
         "description": (
-            "Note that a board epic is WAITING on an external gate (a dependency, a "
-            "missing decision, an external wait). This puts the epic on a "
+            "Note that a board epic is WAITING on an external gate that YOU cannot "
+            "clear yourself.\n\n"
+            "BEFORE YOU CALL THIS — the autonomy rule. Blocking parks a workstream "
+            "on a human who may not look for hours or days, so it is EXPENSIVE. "
+            "Ask a human ONLY when the decision is one of these three:\n"
+            "  (a) IRREVERSIBLE or expensive to undo (deleting data, force-pushing, "
+            "spending money, anything visible to other people);\n"
+            "  (b) a matter of TASTE, POLICY or PRODUCT INTENT with no "
+            "technically-best answer (what the product should do, what wording is "
+            "acceptable, which of two equally-valid designs the owner prefers);\n"
+            "  (c) UNVERIFIABLE from inside the repo (needs a credential, a "
+            "production system, or knowledge that exists only in someone's head).\n"
+            "Everything else you are expected to DECIDE YOURSELF. If one option is "
+            "more robust, more general, or better for the long term — take it, even "
+            "when it costs more work — then raise the choice with "
+            "project_charter_propose so a human can make it binding for siblings, "
+            "and record what you did in JOURNAL.md. A reversible decision made now beats a perfect "
+            "decision made after a two-day stall; the human can always overrule a "
+            "committed decision, but they cannot recover the time an epic spent "
+            "parked waiting to be asked. 'I wasn't sure' is NOT a reason to "
+            "block — investigate, pick the most defensible option, and say in the "
+            "charter decision what you chose and why.\n\n"
+            "WHAT THIS DOES: puts the epic on a "
             "SELF-EXPIRING, escalating cooldown so the autonomous heartbeat stops "
             "re-dispatching it (and burning a billed turn) while its gate is unmet — "
             "the cooldown grows on repeated blocks and auto-clears with NO human "
@@ -276,13 +386,42 @@ BOARD_BLOCK_TOOL = {
             "'[sibling] path=lib/x.py,static/js/y.js …' — the epic is then HELD "
             "precisely while a sibling holds a lease on those paths (auto-released when "
             "they finish), the precise complement to the cooldown. Then state the "
-            "concrete blocker."
+            "concrete blocker.\n\n"
+            "HUMAN QUESTION: when you have applied the rule above and a HUMAN "
+            "decision genuinely is required, also pass "
+            "`question` (and `options` when the choice is enumerable). The epic "
+            "then appears in the panel's 'Needs you' surface with one-click "
+            "answer controls, and waits for the ANSWER instead of auto-retrying — "
+            "the "
+            "moment the human answers, the epic is re-dispatched with the answer "
+            "in its kickoff. Always prefer this over a bare [human-gated] block "
+            "(which keeps auto-retrying into the same unanswered gate). Make the "
+            "question answerable in one word: state the concrete trade-off, give "
+            "enumerated options with what each implies, and say which you would "
+            "pick if forced — a question that requires an essay is another way of "
+            "stalling."
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "task_id": {"type": "string", "description": "The board epic id."},
                 "reason": {"type": "string", "description": "Why it's blocked. PREFIX with the block class: '[human-gated] …' or '[sibling] …'. For a sibling-commit blocker, name the files as '[sibling] path=a.py,b.py …' to auto-hold on them."},
+                "question": {
+                    "type": "string",
+                    "description": "Optional. The concrete question you need the HUMAN to answer (for a [human-gated] block). Renders on the board with answer controls; the epic auto-re-dispatches the moment it is answered."
+                },
+                "options": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "label": {"type": "string", "description": "The choice label (concise)."},
+                            "description": {"type": "string", "description": "Optional: what choosing this means."}
+                        },
+                        "required": ["label"]
+                    },
+                    "description": "Optional (max 6). Predefined choices for the human; omit for a free-text answer."
+                },
             },
             "required": ["task_id"],
         },

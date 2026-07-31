@@ -419,8 +419,13 @@ def test_server_wires_orphan_redispatch_on_serving_loop(monkeypatch):
     assert 'asyncio.to_thread(redispatch_orphaned_queue_on_startup)' in src, (
         'orphaned-queue redispatch must run in a thread (blocking DB/spawn work)')
     # … and gated on the shutdown flag so a ^C during boot skips it.
-    _fn_start = src.index('async def _run_orphan_queue_redispatch')
-    _fn_body = src[_fn_start:_fn_start + 800]
+    # Indent-matched body, not a fixed 800-byte window (charter #24 /
+    # pt_b95c6d39): the real coroutine is 3.7 KB, so the window saw under a
+    # quarter of it. A POSITIVE assertion over a truncated window passes only
+    # while the token sits early — move the gate toward the end of the
+    # coroutine and this guard silently stops protecting anything.
+    from tests._source_scan import python_block
+    _fn_body = python_block(src, 'async def _run_orphan_queue_redispatch')
     assert '_shutdown_requested.is_set()' in _fn_body, (
         'orphaned-queue redispatch is not gated on _shutdown_requested')
     _ok('server.py wires redispatch_orphaned_queue_on_startup on the serving loop, shutdown-gated')

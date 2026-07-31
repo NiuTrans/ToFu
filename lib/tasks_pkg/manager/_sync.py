@@ -27,7 +27,14 @@ from lib.tasks_pkg.manager._state import (
     tasks,
     tasks_lock,
 )
-from lib.tasks_pkg.manager._events import _assign_message_ids
+from lib.tasks_pkg.manager._events import _assign_message_ids, _new_assistant_slot
+# The SINGLE SOURCE OF TRUTH for "carrier task, not user-visible work" — shared
+# with /api/chat/active, the restart guard and the sidebar. BOTH conv-sync paths
+# below consult it so they can never drift apart (they once did: the terminal
+# path matched only `_inline_messages` while the partial path matched nothing,
+# which let the autopilot VU carrier write its stop-sentinel into a conversation
+# as a real assistant message). Acyclic: _registry imports only _state/_persist.
+from lib.tasks_pkg.manager._registry import is_carrier_task
 from lib.tasks_pkg.manager._persist import (
     _merge_tool_rounds,
     _tool_rounds_have_dedicated_home,
@@ -38,8 +45,8 @@ from lib.tasks_pkg.manager._persist import (
 logger = get_logger(__name__)
 
 
-# ── Inbox-inject sidecar lanes (swarm / peer / user-steer) ───────────────────
-# The three async-inject lanes each stash a DISPLAY-ONLY record on the task under
+# ── Inbox-inject sidecar lanes (swarm / peer / user-steer / stall-nudge) ─────
+# The four async-inject lanes each stash a DISPLAY-ONLY record on the task under
 # its own underscore key. These are persisted VERBATIM onto the settled assistant
 # message under the SAME key (an underscore field, exactly like
 # ``_relatedConversations`` / ``_memoryPrefetch``). CRITICAL INVARIANT: they must
@@ -52,7 +59,15 @@ logger = get_logger(__name__)
 # fields — so persisting these is provably wire-neutral. The frontend rebuilds
 # the in-timeline inject chip from these at render time; the synthetic row is
 # NEVER written back into the DB ``toolRounds``.
-INBOX_INJECT_SIDECAR_FIELDS = ('_inboxInjects', '_peerInjects', '_userSteerInjects')
+#
+# ``_stallNudges`` is the intent-stall lane. It differs from the other three in
+# WHO authored the injected message: swarm/peer/steer all carry text a human or
+# another agent produced, while the nudge is text the LOOP ITSELF wrote. That is
+# precisely why it needs the same display-only treatment — a system-authored
+# ``role='user'`` message must be legible as a system action, never mistaken for
+# something the user said.
+INBOX_INJECT_SIDECAR_FIELDS = ('_inboxInjects', '_peerInjects',
+                              '_userSteerInjects', '_stallNudges')
 
 
 def _persist_inject_sidecars(task, last_msg):
@@ -167,20 +182,12 @@ def _maybe_refresh_project_summary(task):
     so this just decides whether the conversation is even a project candidate
     and kicks off a background, fire-and-forget refresh.
     """
-    try:
-        if task.get('status') != 'done' or task.get('aborted'):
-            return
-        conv_id = task.get('convId')
-        if not conv_id:
-            return
-        cfg = task.get('config') or {}
-        if not cfg.get('projectEnabled') or not cfg.get('projectPath'):
-            return
-        from lib.conversations.project_summary import ensure_summary
-        ensure_summary(conv_id, blocking=False)
-    except Exception as e:
-        logger.debug('[ProjSummary] post-reply trigger skipped conv=%s: %s',
-                     task.get('convId', '?'), e)
+    # PAUSED: the sidebar conversation-summary feature is unstable (render
+    # location + timing issues), so we no longer REQUEST generation. The
+    # engine (lib/conversations/project_summary) is left intact for a later
+    # revival; this trigger and the get_conversation trigger are the only two
+    # request sites, both currently disabled. Revisit later.
+    return
 
 
 def _update_proactive_execution_status(task):
@@ -246,6 +253,11 @@ def _dispatch_queued_message(task):
         # Check if there are queued messages before dispatching
         depth = get_queue_depth(conv_id)
         if depth == 0:
+            # Event channel: the conv is going idle with an EMPTY queue — let
+            # the brain start an open epic routed to it NOW (no 30 s
+            # heartbeat wait). A non-empty queue drains normally; the LAST
+            # drained turn's own completion hook fires this nudge then.
+            _nudge_brain_dispatch(task, conv_id)
             return
 
         if task.get('aborted'):
@@ -259,6 +271,27 @@ def _dispatch_queued_message(task):
         from lib.database import log_db_finalize_error
         log_db_finalize_error(logger, 'warning', e,
                               f'[Queue] Auto-dispatch failed for conv={conv_id[:8]}')
+
+
+def _nudge_brain_dispatch(task, conv_id):
+    """Brain event-channel completion nudge: a task just completed leaving an
+    EMPTY queue — the conversation is going idle. If the project board has an
+    open epic routed to this conv, dispatch + drain it NOW instead of waiting
+    for the 30 s heartbeat sweep.
+
+    Best-effort: any failure leaves the epic to the sweep (the unchanged
+    fallback). No-op for conversations without a projectPath.
+    """
+    try:
+        project_path = ((task.get('config') or {}).get('projectPath')
+                        or '').strip()
+        if not project_path:
+            return
+        from lib.conversations.project_dispatch import on_conv_idle
+        on_conv_idle(project_path, conv_id)
+    except Exception as e:
+        logger.debug('[Queue] brain completion-nudge skipped conv=%s: %s',
+                     conv_id[:8], e)
 
 
 def _reconcile_orphan_placeholder_on_settle(task):
@@ -364,19 +397,68 @@ def _reconcile_orphan_placeholder_on_settle(task):
             update_conversation_fts(db, conv_id, search_text)
         except Exception as e:
             logger.debug('[SettleReconcile] conv=%s FTS update skipped: %s', conv_id[:8], e)
+        # Phase 5 dual-write (flag-gated, inert when off): reconcile drops a
+        # message mid-array (re-sequences) — full rebuild mirror.
+        from lib.database.messages_rows import mirror_write_and_commit
+        mirror_write_and_commit(db, conv_id, cleaned, now_ms=now_ms, full=True)
         logger.info('[SettleReconcile] conv=%s swept orphaned placeholder at task-end '
                     '(%d\u2192%d msgs, dropped-before-first-token)',
                     conv_id[:8], len(messages), len(cleaned))
         try:
             from lib.conversations import notify_conv_changed
+            from lib.tasks_pkg.manager._registry import task_user_id
             _rev_row = db.execute('SELECT rev FROM conversations WHERE id=? AND user_id=1',
                                   (conv_id,)).fetchone()
-            notify_conv_changed(conv_id, rev=(_rev_row[0] if _rev_row else None))
+            notify_conv_changed(conv_id, rev=(_rev_row[0] if _rev_row else None),
+                                user_id=task_user_id(task))
         except Exception as e:
             logger.debug('[SettleReconcile] conv=%s notify skipped: %s', conv_id[:8], e)
     except Exception as e:
         logger.warning('[SettleReconcile] conv=%s reconcile failed (non-fatal): %s',
                        conv_id[:8], e, exc_info=True)
+
+
+def _is_floor_retry_residue(task, msg_dict):
+    """True when ``msg_dict``'s content+thinking BYTE-MATCH a FloorRetry first
+    attempt this task DISCARDED (recorded at adoption — see _stream.py's
+    ``_floor_retry_residue``).
+
+    The ~5s streaming checkpoint mirrors ``task['content']``/``['thinking']``
+    into the conversation row DURING an attempt; when a resend is adopted the
+    row can still hold the discarded draft (longer than the final answer). The
+    "existing > new → frontend genuinely won" guards must NOT treat that
+    residue as a frontend win — a genuine frontend write can never byte-match
+    a server-internal discarded attempt. Both fields must match the SAME
+    residue entry exactly, so a row the frontend genuinely touched (edited /
+    translated mid-flight) still qualifies as a frontend win.
+    """
+    residue = (task or {}).get('_floor_retry_residue') or []
+    if not residue:
+        return False
+    content = (msg_dict or {}).get('content') or ''
+    thinking = (msg_dict or {}).get('thinking') or ''
+    for r in residue:
+        if (content == (r.get('content') or '')
+                and thinking == (r.get('thinking') or '')):
+            return True
+    return False
+
+
+def _is_own_vu_carrier(latest_task_id, task) -> bool:
+    """True when ``latest_task_id`` is the VU carrier spawned by ``task``'s OWN
+    autopilot hook (HB-1, pt_8dc03017).
+
+    The carrier deliberately claims the conv→latest index BEFORE the parent's
+    done event so the client can attach to the successor
+    transport-agnostically — a DESIGNED supersede, not an unexpected
+    replacement. Keyed on the plain ``task['_vu_carrier_id']`` stamp (set at
+    carrier creation in autopilot.run_virtual_user), NOT a registry lookup:
+    the carrier is discarded from the in-memory registry before the parent's
+    trailing persist runs, so a registry probe would miss it and mislabel the
+    handoff as the WARNING branch (the every-autopilot-turn false alarm seen
+    in the pt_8a491f9d forensics).
+    """
+    return bool(latest_task_id) and latest_task_id == (task.get('_vu_carrier_id') or '')
 
 
 def _sync_result_to_conversation(task, meta):
@@ -457,6 +539,21 @@ def _sync_result_to_conversation(task, meta):
                     'follow-up %s (%dchars; autopilot owns the DB write)',
                     pfx, conv_id[:8], _autopilot_child[:8], len(content),
                 )
+            elif _is_own_vu_carrier(latest, task):
+                # Expected path (HB-1, pt_8dc03017): this task's OWN autopilot
+                # hook created the VU carrier sub-task, which deliberately
+                # claims the conv→latest index BEFORE this task's done event
+                # so the client can attach to the successor
+                # transport-agnostically. The parent was not aborted (it
+                # finished normally); its reply reached the conv via the
+                # pre-emit sync / committedMessage. NOT an unexpected
+                # replacement — the WARNING below used to fire on EVERY
+                # autopilot turn (pt_8a491f9d forensics, app.log:75363).
+                logger.debug(
+                    '%s conv=%s skipping conv sync: superseded by own VU '
+                    'carrier %s (HB-1 by design, %dchars)',
+                    pfx, conv_id[:8], latest[:8], len(content),
+                )
             else:
                 # Unexpected: a task that was never aborted is no longer the
                 # latest for its conv. This shouldn't normally happen and may
@@ -475,8 +572,8 @@ def _sync_result_to_conversation(task, meta):
     # corresponding row in the `conversations` table — results are read by
     # the caller from `task_results` directly. Skip the write-back path so
     # we don't flood error.log with "Conversation not found" warnings.
-    if task.get('_inline_messages'):
-        logger.debug('%s conv=%s Inline-message task — skipping conv sync by design', pfx, conv_id)
+    if is_carrier_task(task):
+        logger.debug('%s conv=%s Carrier task — skipping conv sync by design', pfx, conv_id)
         return
 
     db = None
@@ -647,10 +744,13 @@ def _sync_result_to_conversation(task, meta):
                 logger.info('%s conv=%s reaped wedged task — appending assistant '
                             'error bubble for the unanswered trailing turn',
                             pfx, conv_id)
-            # No trailing assistant message — append one
+            # No trailing assistant message — append one. Build the slot via
+            # _new_assistant_slot so it ADOPTS the client-shipped
+            # _assistantMsgId as its _msgId (divergent-id duplicate-bubble
+            # root fix — see RENDER_CONTRACT §2.3 identity alignment).
             logger.info('%s conv=%s Last message is role=%s, appending new assistant message',
                        pfx, conv_id, last_msg.get('role'))
-            last_msg = {'role': 'assistant', 'content': '', 'thinking': ''}
+            last_msg = _new_assistant_slot(task)
             messages.append(last_msg)
 
         # ── Guard: don't overwrite with LESS content ──
@@ -663,7 +763,26 @@ def _sync_result_to_conversation(task, meta):
         # ★ Merge checkpoint toolRounds for continue flow
         tool_rounds = _merge_tool_rounds(task)
 
-        if existing_content_len > new_content_len and existing_thinking_len > new_thinking_len:
+        # ★ FloorRetry-residue exemption: decide BEFORE the guard. When the
+        #   "longer existing content" byte-matches a first attempt THIS task
+        #   discarded (recorded at adoption in _stream.py) and mirrored here
+        #   by the streaming checkpoint before convergence, it is NOT a
+        #   frontend win — the guard must not engage, so the normal path
+        #   overwrites the residue with the authoritative final answer (the
+        #   mrxij7q34xm070 root bug: the discarded 4344-char R3 draft
+        #   out-ranked the 3751-char R7 answer, and the residue then rode
+        #   _committedMsg verbatim to the client).
+        _fr_residue_exempt = (existing_content_len > new_content_len
+                              and existing_thinking_len > new_thinking_len
+                              and _is_floor_retry_residue(task, last_msg))
+        if _fr_residue_exempt:
+            logger.info('%s conv=%s Content guard: existing=%d+%d > new=%d+%d but '
+                        'existing BYTE-MATCHES this task\'s discarded FloorRetry '
+                        'attempt — overwriting with the authoritative final answer',
+                        pfx, conv_id, existing_content_len, existing_thinking_len,
+                        new_content_len, new_thinking_len)
+        if existing_content_len > new_content_len and existing_thinking_len > new_thinking_len \
+                and not _fr_residue_exempt:
             # ★ FIX: Even when frontend has more content (synced before us),
             #   still update toolRounds + metadata — the backend has richer
             #   tool data (toolContent, assistantContent) that the frontend
@@ -689,6 +808,20 @@ def _sync_result_to_conversation(task, meta):
                 last_msg['model'] = meta['model']
             if meta.get('provider_id') and not last_msg.get('provider_id'):
                 last_msg['provider_id'] = meta['provider_id']
+            # ★ _taskId MUST be copied on this path too. It is pure PROVENANCE
+            #   (which task produced this turn), never content, so writing it
+            #   can never clobber the fuller content this branch is protecting.
+            #   Omitting it was a real data defect: this branch stamps
+            #   finishReason but not _taskId, so a turn that took it settled
+            #   PERMANENTLY without a task id — measured at 24 of 42 anchor-less
+            #   turns, "finishReason present + _taskId absent" being this
+            #   branch's exact fingerprint. The consequence is user-visible: the
+            #   per-tool-row debug entry resolves through msg._taskId, so every
+            #   tool row of such a turn silently loses its entry.
+            _taskid_wrote = False
+            if meta.get('taskId') and not last_msg.get('_taskId'):
+                last_msg['_taskId'] = meta['taskId']
+                _taskid_wrote = True
             # ★ Inbox-inject sidecars: persist EVEN on the content-guard path.
             #   The frontend PUT'd fuller content before we settled, but it can
             #   never carry these (they are backend-observed at inject time), so
@@ -696,12 +829,13 @@ def _sync_result_to_conversation(task, meta):
             #   this branch fall through to the DB write below instead of the
             #   bare skip `return`.
             _sidecar_wrote = _persist_inject_sidecars(task, last_msg)
-            if _tr_updated or meta.get('finishReason') or _sidecar_wrote:
+            if _tr_updated or meta.get('finishReason') or _sidecar_wrote or _taskid_wrote:
                 logger.info('%s conv=%s Content guard: existing=%d+%d > new=%d+%d, '
-                           'but still updating toolRounds=%s metadata=%s sidecar=%s',
+                           'but still updating toolRounds=%s metadata=%s sidecar=%s taskId=%s',
                            pfx, conv_id, existing_content_len, existing_thinking_len,
                            new_content_len, new_thinking_len,
-                           _tr_updated, bool(meta.get('finishReason')), _sidecar_wrote)
+                           _tr_updated, bool(meta.get('finishReason')), _sidecar_wrote,
+                           _taskid_wrote)
             else:
                 logger.info('%s conv=%s Server already has MORE content (existing=%d+%d > new=%d+%d) — '
                            'frontend likely already synced. Skipping.',
@@ -730,6 +864,28 @@ def _sync_result_to_conversation(task, meta):
         #   conversations.messages JSON column). Co-persisted with toolRounds
         #   above, so rehydrate_segments can rebuild _round on read. Dark:
         #   nothing reads msg['segments'] yet.
+        #
+        # ★ pt_687b87ac root fix: RE-ASSEMBLE the timeline here, at the exact
+        #   point it is consumed — never persist whatever mid-stream
+        #   checkpoint assembly happens to sit on ``task['segments']``. The
+        #   pre-emit sync (orchestrator/_finalize.py) otherwise stamps
+        #   ``_committedMsg`` with a timeline whose terminal text segment
+        #   holds only the first streamed word, while persist_task_result's
+        #   later re-assembly completes the DB tail — the done frame has
+        #   already left with the stale prefix. ``assemble_segments`` is a
+        #   pure projection of (toolRounds, content, thinking); its only
+        #   writers are the checkpoint/persist assemblies, so refreshing can
+        #   never clobber hand-authored state. Best-effort: on assembly
+        #   failure fall back to the task's existing list (today's behaviour).
+        try:
+            from lib.tasks_pkg.segments import assemble_segments
+            _fresh_segs = assemble_segments(task, merged=_merge_tool_rounds(task))
+            if _fresh_segs:
+                task['segments'] = _fresh_segs
+        except Exception as _sa_e:
+            logger.warning('%s conv=%s terminal segment re-assembly failed '
+                           '(non-fatal, using existing timeline): %s',
+                           pfx, conv_id, _sa_e, exc_info=True)
         try:
             _segs = task.get('segments')
             if _segs:
@@ -954,10 +1110,14 @@ def _sync_result_to_conversation(task, meta):
             _fresh_tail = _fresh_messages[-1]
             if (_fresh_tail.get('role') == 'assistant'
                     and len(_fresh_tail.get('content') or '') >= new_content_len
-                    and len(_fresh_tail.get('thinking') or '') >= new_thinking_len):
+                    and len(_fresh_tail.get('thinking') or '') >= new_thinking_len
+                    and not _is_floor_retry_residue(task, _fresh_tail)):
                 # Genuine frontend win landed between our read and our write:
                 # a fuller answer is already persisted. Do NOT shrink it — the
                 # historical "safe skip", now proven rather than assumed.
+                # A byte-match against this task's discarded FloorRetry attempt
+                # is NOT a frontend win (the residue exemption): fall through
+                # to the graft + retry so the final answer overwrites it.
                 logger.info('%s conv=%s terminal CAS miss %d/%d — fresh row holds '
                             '>= our content (frontend genuinely won); not shrinking',
                             pfx, conv_id, _cas_attempt + 1, MAX_TERMINAL_CAS)
@@ -984,6 +1144,11 @@ def _sync_result_to_conversation(task, meta):
         if _cas_succeeded:
             from lib.conversations import update_conversation_fts
             update_conversation_fts(db, conv_id, search_text)
+            # Phase 5 dual-write (flag-gated, inert when off): terminal
+            # append/graft onto the tail — incremental tail mirror.
+            from lib.database.messages_rows import mirror_write_and_commit
+            mirror_write_and_commit(db, conv_id, messages,
+                                    now_ms=int(time.time() * 1000))
             # ── Phase-1 parity stamp (the never-landed write) ──
             # Freeze the EXACT terminal assistant dict we just committed to
             # conversations.messages so orchestrator.py can ship it verbatim as
@@ -1012,11 +1177,12 @@ def _sync_result_to_conversation(task, meta):
         #    so the client rev-gate refetches this conv's body exactly once. ──
         try:
             from lib.conversations import notify_conv_changed
+            from lib.tasks_pkg.manager._registry import task_user_id
             _mgr_rev_row = db.execute(
                 'SELECT rev FROM conversations WHERE id=? AND user_id=1',
                 (conv_id,)).fetchone()
             _mgr_rev = _mgr_rev_row[0] if _mgr_rev_row else None
-            notify_conv_changed(conv_id, rev=_mgr_rev)
+            notify_conv_changed(conv_id, rev=_mgr_rev, user_id=task_user_id(task))
         except Exception as e:
             logger.debug('[Manager] conv-changed notify skipped: %s', e)
 
@@ -1181,6 +1347,20 @@ def _sync_partial_to_conversation(task):
     if not content and not thinking:
         return
 
+    # ── CARRIER GUARD (must mirror the terminal sync exactly) ──
+    # A carrier runs no user-visible turn, so it must never materialise a row
+    # in conversations.messages. The freshness guard below cannot substitute
+    # for this: the autopilot VU sub-task records ITSELF as the conversation's
+    # latest task (pt_8dc03017 HB-1), so it passes freshness by construction.
+    # Without this, its first streaming delta was appended as a headless
+    # assistant message that could never be settled — the terminal sync
+    # (correctly) rejects carriers, so the row stayed frozen at that delta with
+    # a finish bar that could never complete.
+    if is_carrier_task(task):
+        logger.debug('[Checkpoint] conv=%s Carrier task %s — skipping partial '
+                     'conv sync by design', conv_id[:8], task['id'][:8])
+        return
+
     # ── FRESHNESS GUARD: reject checkpoint writes from stale tasks ──
     if conv_id:
         with _conv_latest_task_lock:
@@ -1249,7 +1429,7 @@ def _sync_partial_to_conversation(task):
                                  'row — thinking-only first checkpoint (no content yet)',
                                  conv_id[:8])
                     return
-                last_msg = {'role': 'assistant', 'content': '', 'thinking': ''}
+                last_msg = _new_assistant_slot(task)
                 messages.append(last_msg)
 
             existing_content_len = len(last_msg.get('content') or '')
@@ -1274,21 +1454,39 @@ def _sync_partial_to_conversation(task):
             # is lost — only the mid-stream messages mirror lags by < threshold.
             _content_grew = bool(content and len(content) > existing_content_len)
             _thinking_grew = bool(thinking and len(thinking) > existing_thinking_len)
+            # ★ Convergence, not just growth (FloorRetry-residue root fix): the
+            #   authoritative task text can legitimately SHRINK mid-task — a
+            #   FloorRetry adoption discards the first attempt AFTER its deltas
+            #   were already mirrored here by earlier checkpoints, and the
+            #   per-round reset restarts prose per round. A grew-only guard
+            #   pinned the longest-ever attempt in the row forever (later
+            #   rounds — including the final answer — never exceeded it), which
+            #   then poisoned the terminal content guard into "frontend
+            #   genuinely won" (live conv mrxij7q34xm070: the 4344-char
+            #   discarded R3 draft out-ranked the 3751-char R7 answer).
+            #   Write whenever the value differs (non-empty only — an empty
+            #   post-reset accumulator must never wipe the mirror); a SHRINK is
+            #   semantically load-bearing, so it bypasses delta coalescing.
+            _content_changed = bool(content and content != (last_msg.get('content') or ''))
+            _thinking_changed = bool(thinking and thinking != (last_msg.get('thinking') or ''))
+            _content_shrank = _content_changed and not _content_grew
+            _thinking_shrank = _thinking_changed and not _thinking_grew
             _pending_delta = ((len(content) - existing_content_len if _content_grew else 0)
                               + (len(thinking) - existing_thinking_len if _thinking_grew else 0))
             _terminal = bool(task.get('finishReason')
                              or task.get('status') in ('done', 'error', 'aborted'))
             # The text delta alone justifies a write only when it is big enough
-            # (or coalescing is disabled, or the task is terminal).
-            _text_write_worthy = _pending_delta > 0 and (
+            # (or coalescing is disabled, or the task is terminal, or it is a
+            # convergence shrink as above).
+            _text_write_worthy = (_pending_delta > 0 and (
                 CHECKPOINT_MIN_DELTA_CHARS == 0
                 or _terminal
                 or _pending_delta >= CHECKPOINT_MIN_DELTA_CHARS
-            )
+            )) or _content_shrank or _thinking_shrank
 
-            if _content_grew:
+            if _content_changed:
                 last_msg['content'] = content
-            if _thinking_grew:
+            if _thinking_changed:
                 last_msg['thinking'] = thinking
             if _text_write_worthy:
                 mutated = True
@@ -1433,6 +1631,10 @@ def _sync_partial_to_conversation(task):
                              conv_id[:8], attempt + 1, MAX_CAS)
                 time.sleep(0.02 * (attempt + 1))
                 continue
+            # Phase 5 dual-write (flag-gated, inert when off): checkpoint
+            # mutates/appends the tail — incremental tail mirror.
+            from lib.database.messages_rows import mirror_write_and_commit
+            mirror_write_and_commit(db, conv_id, messages, now_ms=now_ms)
             logger.debug('[Checkpoint] conv=%s Synced partial: content=%d→%d thinking=%d→%d tools=%d',
                          conv_id, existing_content_len, len(content),
                          existing_thinking_len, len(thinking), len(tool_rounds or []))

@@ -8,6 +8,7 @@ default (``_boot_auto_dispatch_enabled``).
 
 import json
 import time
+import uuid
 
 from lib.database import DOMAIN_CHAT, get_thread_db, json_dumps_pg
 from lib.log import get_logger
@@ -39,7 +40,7 @@ def _tool_rounds_from_task_row(task_row):
         try:
             tr = json.loads(raw_tr)
             if tr:
-                return tr
+                return _project_display_fields(tr)
         except (json.JSONDecodeError, TypeError) as e:
             logger.debug('[Startup] tool_rounds parse failed, trying segments: %s', e)
     # Source 2: rebuild from the thin persisted segments (normal chats).
@@ -51,13 +52,176 @@ def _tool_rounds_from_task_row(task_row):
                 from lib.tasks_pkg.segments import _rounds_view_from_segments
                 rebuilt = _rounds_view_from_segments(thin)
                 if rebuilt:
-                    return rebuilt
+                    return _project_display_fields(rebuilt)
         except (json.JSONDecodeError, TypeError, KeyError) as e:
             logger.debug('[Startup] segments->toolRounds rebuild failed: %s', e)
         except Exception as e:
             logger.warning('[Startup] segments->toolRounds rebuild error (non-fatal): %s',
                            e, exc_info=True)
     return []
+
+
+def _merge_home_index(messages, merge_task_id):
+    """Index of the message that ALREADY belongs to ``merge_task_id``, or None.
+
+    A message carrying ``_taskId == merge_task_id`` is that task's durable
+    home in the conversation. When it exists ANYWHERE but the tail, merging
+    the interrupted task's data into/appending after the (newer) tail would
+    stitch this task's rounds into ANOTHER turn's bubble — the ms1auj3n
+    incident (peer message slipped in post-finalize → tail became a user
+    message → recovery appended a shell the live task adopted).
+    """
+    if not merge_task_id:
+        return None
+    for i, m in enumerate(messages or []):
+        if isinstance(m, dict) and m.get('_taskId') == merge_task_id:
+            return i
+    return None
+
+
+def _task_superseded_by_newer_reply(db, conv_id, task_created_at) -> bool:
+    """True when ANOTHER task of this conv reached a TERMINAL state
+    (done / error / aborted) AFTER this stale task STARTED — i.e. the
+    interrupted task's turn already SETTLED visibly.
+
+    Resurrecting its checkpoint would fabricate a bubble for a turn the
+    conversation has long moved past — the ms2gipv5 incident (2026-07-27):
+    an autopilot twin spawned 90s before its parent completed hung as a
+    'running' zombie for 3.5h, and the next restart's recovery appended its
+    stale checkpoint as a FRESH tail bubble even though the parent's reply
+    had landed at 08:08. Four identical 'interrupted' cards rendered after
+    client-side identity re-minting fanned the id-less shell out.
+
+    error / aborted count as settled too (owner-reviewed widening, same
+    day): an error bubble is a settled turn, and resurrecting content
+    after a user-initiated ABORT would directly contradict the explicit
+    stop. Production evidence: 7-day statuses error=112 / aborted=2; the
+    widen-pattern (interrupted zombie + newer error/aborted + no newer
+    done) matched exactly ONE historical conv, so the widening closes the
+    invariant hole at essentially zero behaviour-change cost. 'interrupted'
+    deliberately does NOT count — that is the zombie state itself; the
+    newest non-superseded stale task remains the crash frontier.
+
+    Fails OPEN (not superseded) on probe error — the probe runs inside the
+    same DB sweep as every other SELECT, so a failure here coincides with
+    total sweep failure; losing a genuine crash-frontier recovery to a
+    transient hiccup is the worse outcome.
+    """
+    try:
+        row = db.execute(
+            "SELECT 1 AS x FROM task_results WHERE conv_id=? "
+            "AND status IN ('done','error','aborted') "
+            "AND COALESCE(completed_at, created_at) > ? LIMIT 1",
+            (conv_id, int(task_created_at or 0))).fetchone()
+        return row is not None
+    except Exception as e:
+        logger.warning('[Startup] superseded probe failed conv=%s: %s',
+                       (conv_id or '')[:8], e)
+        return False
+
+
+def _conv_has_live_task_for_recovery(conv_id, db) -> bool:
+    """True when a task for ``conv_id`` is ALIVE RIGHT NOW (two signals).
+
+    1. The in-memory task registry (freshest — a task spawned seconds ago may
+       not have checkpointed yet). Lazy import: this module is imported by
+       ``manager/__init__``, so a top-level import of the registry would be
+       circular.
+    2. ``task_results.status='running'`` rows for the conv — Step 1 already
+       marked every pre-boot 'running' row interrupted, so a row STILL
+       'running' at merge time can only belong to a task THIS process spawned.
+
+    A recovery merge must not touch the messages of a conv whose tail another
+    task is actively writing: the appended shell is adopted as that task's
+    bubble and the old task's rebuilt rounds ride along (the stitch).
+    Fails CLOSED (treat as live → skip) when BOTH probes error — a skipped
+    merge costs a staler bubble; a wrong merge costs crossed data.
+    """
+    registry_verdict = None
+    try:
+        from lib.tasks_pkg.manager import tasks, tasks_lock
+        with tasks_lock:
+            registry_verdict = any(
+                t.get('convId') == conv_id and t.get('status') == 'running'
+                and not t.get('_vu_subtask')
+                for t in tasks.values())
+    except Exception as e:
+        logger.warning('[Startup] live-task registry probe failed conv=%s: %s',
+                       conv_id[:8], e)
+    if registry_verdict:
+        return True
+    db_verdict = None
+    try:
+        row = db.execute(
+            "SELECT 1 AS x FROM task_results WHERE conv_id=? AND status='running' LIMIT 1",
+            (conv_id,)).fetchone()
+        db_verdict = row is not None
+    except Exception as e:
+        logger.warning('[Startup] live-task DB probe failed conv=%s: %s',
+                       conv_id[:8], e)
+    if db_verdict:
+        return True
+    if registry_verdict is None and db_verdict is None:
+        return True   # both probes failed → fail closed (skip the merge)
+    return False
+
+
+def _project_display_fields(rounds):
+    """Attach the DISPLAY projection (roundNum/query/results) the live pipeline
+    would have attached, onto recovery-rebuilt rounds that lack it.
+
+    ``_rounds_view_from_segments`` is a wire-replay view: it produces only
+    toolCallId/toolName/toolArgs/toolContent/status/llmRound. Persisting THAT
+    as the message's toolRounds renders as rows of empty cards (the frontend
+    reads ``round.query`` for the title and ``round.results[0]`` for the
+    badge/snippet). The projection is best-effort and honest:
+
+      * ``roundNum`` — sequential (the persisted segments carry no roundNum).
+      * ``query`` — ``tool_round_label`` (the SAME builder the live pipeline
+        uses) over the round's decoded args.
+      * ``results`` — a single SYNTHETIC entry marked ``recovered: True``
+        (this is a recovery projection, not live-fidelity data) carrying the
+        label + a toolContent excerpt. Live results entries are built
+        per-tool at execution time and cannot be faithfully rebuilt from the
+        persisted segments — the material does not exist (JOURNAL 续49).
+
+    Idempotent: rounds that already carry live display fields (e.g. source 1,
+    the tool_rounds column) are left untouched.
+    """
+    from lib.tasks_pkg.tool_display import tool_round_label
+    for i, r in enumerate(rounds):
+        if not isinstance(r, dict):
+            continue
+        if not r.get('roundNum'):
+            r['roundNum'] = i + 1
+        name = r.get('toolName') or ''
+        label = ''
+        if name and (not r.get('query') or not r.get('results')):
+            args = r.get('toolArgs')
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args) if args.strip() else {}
+                except (json.JSONDecodeError, TypeError) as e:
+                    logger.debug('[Startup] toolArgs parse failed for %s: %s', name, e)
+                    args = {}
+            if not isinstance(args, dict):
+                args = {}
+            try:
+                label = tool_round_label(name, args)
+            except Exception as e:
+                logger.debug('[Startup] tool_round_label failed for %s: %s', name, e)
+                label = ''
+        if not r.get('query'):
+            r['query'] = label or name
+        if not isinstance(r.get('results'), list) or not r['results']:
+            r['results'] = [{
+                'toolName': name,
+                'badge': r.get('status') or '',
+                'title': label or name,
+                'snippet': (r.get('toolContent') or '')[:200],
+                'recovered': True,
+            }]
+    return rounds
 
 
 def recover_stale_tasks_on_startup(prev_shutdown=None, dispatch=True):
@@ -115,19 +279,28 @@ def recover_stale_tasks_on_startup(prev_shutdown=None, dispatch=True):
 
         # ── Step 1: Mark stale running tasks as interrupted ──
         stale_rows = db.execute(
-            "SELECT task_id, conv_id, content, thinking FROM task_results WHERE status='running'"
+            "SELECT task_id, conv_id, content, thinking, created_at FROM task_results WHERE status='running'"
         ).fetchall()
 
-        # conv_id → task_id of the interrupted task carrying the MOST recovered
-        # text.  task_results.conv_id is BACKEND-AUTHORITATIVE (create_task stamps
+        # conv_id → task_id of the interrupted task to merge.
+        # task_results.conv_id is BACKEND-AUTHORITATIVE (create_task stamps
         # it), unlike the frontend-synced settings.activeTaskId which is null/stale
         # after a mid-stream crash (the PUT that persists it may never have landed).
         # Keying the merge off THIS map is what lets a crash-interrupted turn be
         # recovered into conversations.messages even when activeTaskId was lost —
         # the root fix for "Continue starts a brand-new agent from scratch".
+        #
+        # Candidate selection (G3, 2026-07-27): the NEWEST stale task that is
+        # NOT superseded by a newer completed reply. The previous "most
+        # recovered text" heuristic resurrected the meatiest checkpoint even
+        # when its turn had been answered hours and many turns later — in
+        # ms2gipv5 it picked a 3.5h-old superseded autopilot twin (4.6k
+        # thinking) over the fresher frontier task and appended a phantom
+        # bubble. A superseded task is still marked interrupted above (the
+        # row settles), it is just NEVER merged.
         interrupted_task_by_conv = {}
         if stale_rows:
-            _best_recovered_len = {}
+            _by_conv: dict = {}
             for row in stale_rows:
                 tid = row['task_id']
                 cid = row['conv_id'] or ''
@@ -137,12 +310,20 @@ def recover_stale_tasks_on_startup(prev_shutdown=None, dispatch=True):
                             'content=%dchars thinking=%dchars',
                             tid[:8], cid[:8], clen, tlen)
                 if cid:
-                    _tot = clen + tlen
-                    if _tot >= _best_recovered_len.get(cid, -1):
-                        _best_recovered_len[cid] = _tot
-                        interrupted_task_by_conv[cid] = tid
+                    _by_conv.setdefault(cid, []).append(row)
             db.execute("UPDATE task_results SET status='interrupted' WHERE status='running'")
             db.commit()
+            for cid, rows in _by_conv.items():
+                rows.sort(key=lambda r: int(r['created_at'] or 0), reverse=True)
+                for row in rows:
+                    if _task_superseded_by_newer_reply(db, cid, row['created_at']):
+                        logger.info('[Startup] stale task %s (conv=%s) SUPERSEDED by a '
+                                    'newer settled turn (done/error/aborted) — settled '
+                                    'but NOT merged (its turn is already closed)',
+                                    row['task_id'][:8], cid[:8])
+                        continue
+                    interrupted_task_by_conv[cid] = row['task_id']
+                    break
             logger.info('[Startup] Marked %d stale running task(s) as interrupted '
                         '(%d owning conv(s) identified via task_results.conv_id)',
                         len(stale_rows), len(interrupted_task_by_conv))
@@ -176,6 +357,7 @@ def recover_stale_tasks_on_startup(prev_shutdown=None, dispatch=True):
 
         cleared = 0
         recovered_conv_ids: list = []
+        _mirror_pending: list = []  # (cid, messages) for the Phase-5 post-commit mirror
         for cid, crow in conv_by_id.items():
             try:
                 settings = json.loads(crow['settings'] or '{}')
@@ -197,7 +379,19 @@ def recover_stale_tasks_on_startup(prev_shutdown=None, dispatch=True):
 
             # ── Merge interrupted task data into the conversation messages
             #    (the checkpoint may carry partial content the UI never saw) ──
+            #    GATE 2 (live task): when a task for this conv is ALIVE RIGHT
+            #    NOW (spawned after boot — e.g. a peer message that landed
+            #    while the sweep runs), the live task owns the tail. Merging
+            #    into/appending after it fabricates a slot the live task then
+            #    ADOPTS as its own bubble, stitching the stale task's rebuilt
+            #    rounds into the live turn (ms1auj3n msg#9, JOURNAL 续49).
             task_row = None
+            if merge_task_id and _conv_has_live_task_for_recovery(cid, db):
+                logger.info('[Startup] conv=%s has a live task — skipping '
+                            'recovery merge for task=%s (its tail belongs to '
+                            'the live task)',
+                            cid[:8], merge_task_id[:8])
+                merge_task_id = None
             if merge_task_id:
                 task_row = db.execute(
                     "SELECT content, thinking, tool_rounds, segments, metadata FROM task_results WHERE task_id=?",
@@ -211,6 +405,42 @@ def recover_stale_tasks_on_startup(prev_shutdown=None, dispatch=True):
                 if task_content or task_thinking:
                     try:
                         messages = json.loads(crow['messages'] or '[]')
+                        if messages:
+                            # GATE 1 (task home): if this task ALREADY has a
+                            # durable home in the conversation (a message
+                            # carrying its _taskId) and that home is NOT the
+                            # tail, the tail belongs to a NEWER turn. Merging
+                            # into it or appending after it would stitch this
+                            # task's data into another turn. The home-at-tail
+                            # case falls through to the normal merge (that IS
+                            # the crash-interrupted bubble we're restoring).
+                            _home = _merge_home_index(messages, merge_task_id)
+                            if _home is not None and _home != len(messages) - 1:
+                                logger.info('[Startup] conv=%s task=%s already '
+                                            'has a message home at idx=%d '
+                                            '(tail=%d) — skipping merge '
+                                            '(cross-turn stitch guard)',
+                                            cid[:8], merge_task_id[:8], _home,
+                                            len(messages) - 1)
+                                messages = []
+                        if messages:
+                            last_msg = messages[-1]
+                            # GATE 4 (tail owner): a tail assistant bubble
+                            # explicitly owned by a DIFFERENT task (_taskId set,
+                            # ≠ ours) must never receive this task's checkpoint
+                            # — the G1 cross-turn stitch with the roles
+                            # reversed (our task has no home; the tail is
+                            # someone else's home). A tail carrying NO _taskId
+                            # keeps the legacy merge (pre-identity data).
+                            if (last_msg.get('role') == 'assistant'
+                                    and last_msg.get('_taskId')
+                                    and last_msg.get('_taskId') != merge_task_id):
+                                logger.info('[Startup] conv=%s tail assistant belongs '
+                                            'to task=%s — skipping merge of task=%s '
+                                            '(tail-owner stitch guard)',
+                                            cid[:8], (last_msg.get('_taskId') or '')[:8],
+                                            merge_task_id[:8])
+                                messages = []
                         if messages:
                             last_msg = messages[-1]
                             if last_msg.get('role') == 'assistant':
@@ -249,13 +479,26 @@ def recover_stale_tasks_on_startup(prev_shutdown=None, dispatch=True):
                                         pass
                                 messages_json = json_dumps_pg(messages)
                             elif last_msg.get('role') == 'user':
-                                # Task started but no assistant msg was appended yet
+                                # Task started but no assistant msg was appended yet.
+                                # Durable identity is stamped at birth: without a
+                                # backend _msgId the frontend mints a FRESH client
+                                # id on every independent fetch (core.js
+                                # _ensureMsgId), so a conv fetched through two
+                                # projections concurrently (windowed lite slice +
+                                # full/debug fetch) renders the SAME bubble twice
+                                # and a PUT persists the twin (the ms2gipv5
+                                # four-bubble fan-out). _taskId gives the task its
+                                # durable home → the NEXT recovery sweep finds it
+                                # via G1 and merges in place instead of appending
+                                # a second shell.
                                 new_msg = {
                                     'role': 'assistant',
                                     'content': task_content,
                                     'thinking': task_thinking,
                                     'finishReason': 'interrupted',
                                     'timestamp': int(time.time() * 1000),
+                                    '_msgId': str(uuid.uuid4()),
+                                    '_taskId': merge_task_id,
                                 }
                                 if _interrupt_reason:
                                     new_msg['interruptedReason'] = _interrupt_reason
@@ -350,6 +593,11 @@ def recover_stale_tasks_on_startup(prev_shutdown=None, dispatch=True):
             if messages_json:
                 from lib.conversations import build_search_text
                 messages_parsed = json.loads(messages_json)
+                # Phase 5: collect for the post-commit mirror below (inert
+                # unless TOFU_MESSAGES_ROWS; recovery rewrites arbitrarily).
+                from lib.database.messages_rows import rows_write_enabled as _rwe
+                if _rwe():
+                    _mirror_pending.append((cid, messages_parsed))
                 search_text = build_search_text(messages_parsed)
                 db.execute(
                     "UPDATE conversations SET settings=?, messages=?, updated_at=?, "
@@ -384,6 +632,15 @@ def recover_stale_tasks_on_startup(prev_shutdown=None, dispatch=True):
             db.commit()
             logger.info('[Startup] Recovered %d conversation(s) (merged interrupted '
                         'content + cleared any dead activeTaskId)', cleared)
+            # Phase 5 dual-write (flag-gated; collection above is flag-gated
+            # too, so this loop is empty when off): recovery merges + ghost
+            # reconciles rewrite the array arbitrarily → full rebuild mirror
+            # per conv, AFTER the authoritative commit (transaction shape
+            # unchanged — pt_7e4afe73 discipline).
+            if _mirror_pending:
+                from lib.database.messages_rows import mirror_write_and_commit
+                for _cid, _msgs in _mirror_pending:
+                    mirror_write_and_commit(db, _cid, _msgs, full=True)
 
         total = len(stale_rows) + cleared
         if total:

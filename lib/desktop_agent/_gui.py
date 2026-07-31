@@ -124,7 +124,8 @@ def cmd_gui_action(params):
     if 'scale' in params:  # explicit override (e.g. caller sends real coords)
         try:
             _scale = float(params['scale']) or 1.0
-        except (ValueError, TypeError):
+        except (ValueError, TypeError) as _e:
+            logger.debug('cmd gui action: unparseable/unexpected type (%s)', _e)
             _scale = 1.0
 
     def _pt(x, y):

@@ -34,6 +34,7 @@ from lib.database._schema_sqlite._meta import (  # noqa: F401
 )
 from lib.database._schema_sqlite._selfheal import (  # noqa: F401
     _CRITICAL_COLUMNS,
+    _missing_core_tables,
     _missing_critical_columns,
     _backfill_search_fts,
 )
@@ -67,6 +68,32 @@ def init_db(_new_connection):
         from lib.database._orphan_heal import heal_orphan_tables
         heal_orphan_tables(conn, table_exists=_table_exists, count_rows=_count_rows)
 
+        # ── Data backfill (flag-gated one-shot, runs BEFORE the version
+        #    fast-path so a converged DB still heals): re-key the paper
+        #    identity fork — reports saved under hash(strip(text)) vs library
+        #    hash(raw) (epic pt_c9a103fe). No-op once flagged in schema_meta.
+        #
+        # ★ ISOLATED from DDL (pt_2a8aed4d). This import is the ONLY edge from
+        #    schema init into the lib.paper → LLM/swarm chain: importing
+        #    lib.paper.hash_backfill runs lib/paper/__init__.py (an eager
+        #    barrel) which transitively loads the entire LLM-dispatch + swarm
+        #    stack. On 2026-07-26 a single merge-conflict marker in
+        #    lib/llm_sanitize/_gateway.py therefore made init_db raise a
+        #    SyntaxError and abort ALL DDL — crashing boot and leaving a serving
+        #    process answering requests against a schema-less DB for 22 min.
+        #    A DATA-heal step must never be able to abort schema initialisation:
+        #    it is idempotent and re-runs on the next boot, so on ANY failure
+        #    (import error / a syntax error in the paper chain / a backfill
+        #    runtime error) we log at ERROR and CONTINUE with DDL. Schema init
+        #    is a correctness contract; data heal is not.
+        try:
+            from lib.paper.hash_backfill import backfill_paper_hash_canonical
+            backfill_paper_hash_canonical(conn)
+        except Exception as e:
+            logger.error('[DB] paper hash backfill failed — schema init continues '
+                         '(the idempotent heal re-runs on next boot): %s', e,
+                         exc_info=True)
+
         # ── Fast path: version AND optional-domain set both unchanged.
         #    The domain set is part of the cache key so enabling a new domain
         #    (e.g. trading) re-triggers its DDL instead of being skipped.
@@ -77,10 +104,12 @@ def init_db(_new_connection):
         want_domains = ','.join(active_domains())
         if current_version == _SCHEMA_VERSION and current_domains == want_domains:
             missing = _missing_critical_columns(conn)
-            if missing:
-                logger.warning('[DB] Schema version %d current but critical columns '
-                               'missing %s — forcing full DDL migration to converge',
-                               _SCHEMA_VERSION, missing)
+            missing_tables = _missing_core_tables(conn)
+            if missing or missing_tables:
+                logger.warning('[DB] Schema version %d current but divergence found '
+                               '(missing critical columns %s, missing core tables %s) '
+                               '— forcing full DDL migration to converge',
+                               _SCHEMA_VERSION, missing, missing_tables)
             else:
                 elapsed = time.monotonic() - t0
                 logger.info('[DB] Schema version %d + domains [%s] current — skipping '

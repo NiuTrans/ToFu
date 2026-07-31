@@ -130,6 +130,45 @@ def clear_project_ready_sticky(conv_id: str) -> None:
 
 
 # ══════════════════════════════════════════════════════════
+#  Sticky project-REMOTE latch (RWA 拍板 3A, same precedent)
+# ══════════════════════════════════════════════════════════
+# Binding a conversation to a remote worktree changes tool DESCRIPTIONS
+# (with_remote_hint — the local-execution note) while keeping names +
+# parameter schemas byte-identical. That description change is a
+# LEGITIMATE one-time schema change, so the OFF→ON transition clears the
+# tool-schema latch exactly once — mirroring mark_project_ready_sticky.
+_project_remote_sticky: set[str] = set()
+_project_remote_sticky_lock = threading.Lock()
+
+
+def mark_project_remote_sticky(conv_id: str) -> bool:
+    """Latch *conv_id* as remote-bound. True only on the OFF→ON transition."""
+    if not conv_id:
+        return False
+    with _project_remote_sticky_lock:
+        if conv_id in _project_remote_sticky:
+            return False
+        _project_remote_sticky.add(conv_id)
+        return True
+
+
+def is_project_remote_sticky(conv_id: str) -> bool:
+    """Whether *conv_id* has been latched remote-bound."""
+    if not conv_id:
+        return False
+    with _project_remote_sticky_lock:
+        return conv_id in _project_remote_sticky
+
+
+def clear_project_remote_sticky(conv_id: str) -> None:
+    """Release the project-remote latch for *conv_id*."""
+    if not conv_id:
+        return
+    with _project_remote_sticky_lock:
+        _project_remote_sticky.discard(conv_id)
+
+
+# ══════════════════════════════════════════════════════════
 #  Per-conversation tool-SCHEMA latch (the (B) root fix)
 # ══════════════════════════════════════════════════════════
 # The whole tools array sits in the cached prompt prefix (BP1-3). ANY byte

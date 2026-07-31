@@ -3,8 +3,11 @@
 try:
     import pymupdf
 except ImportError:
-    pymupdf = None  # type: ignore[assignment]
-    # Warning already logged by _common.py — debug-only here to avoid noise
+    try:
+        import fitz as pymupdf  # PyMuPDF <1.24.3 legacy module name
+    except ImportError:
+        pymupdf = None  # type: ignore[assignment]
+        # Warning already logged by _common.py — debug-only here to avoid noise
 
 from lib.log import get_logger
 from lib.pdf_parser._common import PYMUPDF_LOCK

@@ -1,35 +1,36 @@
 /* ═══════════════════════════════════════════════════════════════════
-   info-rail.js — Per-turn context note
+   info-rail.js — Per-turn context note (a fact card, not a UI snapshot)
 
-   Each USER turn carries a small, frozen-in-time note (rendered on the
-   right side of the turn, inside the chat column) describing the context
-   that was active AT THE MOMENT THE TURN WAS SENT:
+   Each USER turn carries a small note in the right gutter describing what
+   the turn ACTUALLY ran with. Two-phase lifecycle:
 
-     • Workspace — which project folder(s) were wired to the conversation.
-     • Tools — which capabilities were switched on for that turn.
-     • Model — the model + thinking depth the turn used.
+     • SEND (client) — `buildTurnCtxSnapshot()` captures the LIVE toolbar
+       state (workspace roots, tools, modes, model, depth) and freezes it
+       onto `userMsg._ctx`. This is a best-effort SNAPSHOT and may drift
+       from truth for up to a few seconds — the user can pause in the
+       composer and switch preset / toggle a mode between send and the
+       stream actually starting.
+     • DONE (server-authoritative) — the DONE SSE frame ships the FACT
+       card (`actualModel` / `actualDepth` / `actualModes` +
+       `toolsetDiff`). `reconcileTurnCtxCapsule()` OVERWRITES the snapshot
+       fields with those facts, so the note settles as the truth: which
+       model actually answered (after any dispatcher fallback), which
+       thinking depth actually applied, which run-mode set was live
+       server-side, and which tools actually ran (after the schema latch
+       held / restored toggles).
 
-   WHY this replaced the old live-mirroring right-gutter rail: the previous
-   rail re-rendered the CURRENT input-box/toolbar state in real time, so it
-   told you nothing about any past turn and it overlapped the turn-nav in
-   the gutter. The information is far more useful frozen per-turn: scrolling
-   back through a conversation you can see exactly which model / tools /
-   project each turn ran with.
+   Between SEND and DONE the note may briefly display the send-time
+   snapshot — that is the honest "fact-not-yet-in" state, not a bug.
 
-   ── How it works ──
-   1. `buildTurnCtxSnapshot()` reads the same in-memory state the old rail
-      read (projectState, toolbar globals, config) and returns a plain,
-      serializable snapshot. The send pipeline calls this when the user
-      message is created and stores it on `userMsg._ctx` (and in the send
-      payload, so the backend persists it → survives reload).
-   2. `renderTurnCtxNote(snapshot)` turns that snapshot into the note HTML.
-      `renderMessage()` (static/js/ui/chat_render.js) calls it for user
-      turns and splices the result under the message body.
-
-   Both are pure functions over existing state — no DOM ownership, no
-   fetches, no timers. Public API:
-     window.buildTurnCtxSnapshot()      — capture current context (or null).
-     window.renderTurnCtxNote(snapshot) — snapshot → note HTML string.
+   ── Public API ──
+     window.buildTurnCtxSnapshot()               — capture current context (or null).
+     window.renderTurnCtxNote(snapshot)          — snapshot → note HTML.
+     window.reconcileTurnCtxCapsule(snap, fact)  — overwrite snap in place
+        with facts from the done event; `fact` fields are ALL optional:
+          { added?, removed?, toolsetDiff?, actualModel?, actualDepth?,
+            actualModes? } — mixes tool/schema-latch reconciliation with
+          the model/depth/mode fact card. Returns true when anything
+          changed. Called from sse_pipeline.js on every done frame.
    ═══════════════════════════════════════════════════════════════════ */
 (function () {
   'use strict';
@@ -113,7 +114,9 @@
     if (typeof desktopEnabled !== 'undefined' && desktopEnabled) out.push({ label: 'Desktop', tone: 'net' });
     if (typeof codeExecEnabled !== 'undefined' && codeExecEnabled) out.push({ label: 'Code Exec', tone: 'code' });
     if (typeof memoryEnabled !== 'undefined' && memoryEnabled) out.push({ label: 'Memory', tone: 'ai' });
-    if (typeof schedulerEnabled !== 'undefined' && schedulerEnabled) out.push({ label: 'Scheduler', tone: 'ai' });
+    // Scheduler is a default tool (always on, no toggle) — like read_files /
+    // todo it is intentionally NOT shown as a per-turn chip (would be constant
+    // noise). The reconcile rule below still maps its fn names defensively.
     if (typeof imageGenEnabled !== 'undefined' && imageGenEnabled) out.push({ label: 'Image Gen', tone: 'ai' });
     if (typeof humanGuidanceEnabled !== 'undefined' && humanGuidanceEnabled) out.push({ label: 'Ask User', tone: 'ai' });
     if (typeof autoTranslate !== 'undefined' && autoTranslate) out.push({ label: 'Translate', tone: 'ai' });
@@ -193,21 +196,42 @@
     return '';
   }
 
-  const _ICON_TOOLS = '<svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a4 4 0 0 1-5 5L4 17l3 3 5.7-5.7a4 4 0 0 1 5-5 4 4 0 0 0-3-6.6 4 4 0 0 0 0 3.6z"/></svg>';
-  const _ICON_FOLDER = '<svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.7-.9L9.6 3.9A2 2 0 0 0 7.9 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2z"/></svg>';
   const _LOCK = '<svg class="tctx-lock" width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>';
 
+  /** Max tool chips rendered up-front; the rest collapse behind a "+N"
+   * CLICK toggle. This cap — together with `_MAX_VISIBLE_PATHS` — decides
+   * what a card shows up-front so a TYPICAL card renders complete (the old
+   * 132px `overflow:hidden` guillotine clipped ordinary cards mid-WORKSPACE
+   * with no way to reach the facts). Genuinely fat cards are then bounded
+   * by the scrollable pixel backstop in styles.css. WHY a bound at all:
+   * the rail is permanent furniture in a grid track, so its height adds to
+   * the turn's height — and `_collectTools()` emits one chip per connected
+   * MCP server, which can be dozens. 9 keeps a typical setup (a few feature
+   * toggles + a few MCP servers) fully visible while the geometry guard's
+   * 10-tool probe stays gated. Expansion is a click (not hover) because a
+   * hover overlay would have to escape `.message`'s content-visibility
+   * paint containment — exactly the carve-out this redesign deleted. */
+  const _MAX_VISIBLE_CHIPS = 9;
+
+  /** Max workspace paths rendered up-front; extra roots collapse behind
+   * the same "+N" toggle as chips (the delegated click handler only asks
+   * for a `.tctx-overflow` sibling, so the mechanism is shared verbatim).
+   * Roots were previously unbounded — the same defect family as chips:
+   * rail height driven by how many roots the workspace happens to have. */
+  const _MAX_VISIBLE_PATHS = 3;
+
   /**
-   * Render a captured snapshot into the per-turn note HTML.
+   * Render a captured snapshot into the per-turn rail HTML.
    *
-   * Design: a self-contained widget in the right gutter that has two
-   * states driven purely by CSS `:hover` — no native tooltip:
-   *   • COLLAPSED `.tctx-bar` — brand logo + model name + depth + small
-   *     tool/workspace count badges. Always visible.
-   *   • EXPANDED `.tctx-panel` — grows DOWN into the empty gutter on hover,
-   *     listing the full model id, every enabled tool as a toned chip, and
-   *     each workspace path. Because it lives in the gutter (a direct child
-   *     of `.message`, not `.message-content`) it never covers chat content.
+   * Two surfaces, both in normal flow — there is NO hover overlay:
+   *   • `.turn-ctx` — the RAIL. Lives in the third grid track that
+   *     `.chat-inner` owns, so it can never overflow the viewport. Shows
+   *     model + depth + mode badges + tool chips + workspace paths
+   *     permanently. Visible only when the container query grants the track.
+   *   • `.tctx-fold` — the same facts compressed to ONE line under the
+   *     message header, shown exactly when the rail track is absent (narrow
+   *     pane, or the request-inspector drawer is open and the pane has as
+   *     little as 74px to give). The context is compacted, never lost.
    *
    * @param {object|null} snap — output of buildTurnCtxSnapshot (or a
    *   persisted copy loaded from the DB).
@@ -231,50 +255,91 @@
     const logo = model ? _brandLogo(snap.model, 15) : '';
     const depthChip = snap.depth ? '<span class="tctx-depth">' + _esc(snap.depth) + '</span>' : '';
 
-    // ── Collapsed bar ──
-    const bar = ['<div class="tctx-bar">'];
-    if (logo) bar.push('<span class="tctx-logo">' + logo + '</span>');
-    if (model) bar.push('<span class="tctx-model">' + _esc(model) + '</span>');
-    if (depthChip) bar.push(depthChip);
-    // Mode badge(s) — always visible so the run mode is legible at a glance.
+    // ── Rail head: brand + model + depth + mode badges ──
+    const head = ['<div class="tctx-head">'];
+    if (logo) head.push('<span class="tctx-logo">' + logo + '</span>');
+    if (model) head.push('<span class="tctx-model">' + _esc(model) + '</span>');
+    if (depthChip) head.push(depthChip);
     for (const md of modes) {
-      bar.push('<span class="tctx-mode-badge">' + _esc(md.label) + '</span>');
+      head.push('<span class="tctx-mode-badge">' + _esc(md.label) + '</span>');
     }
-    if (tools.length) bar.push('<span class="tctx-count tctx-count-tools">' + _ICON_TOOLS + tools.length + '</span>');
-    if (roots.length) bar.push('<span class="tctx-count tctx-count-ws">' + _ICON_FOLDER + roots.length + '</span>');
-    bar.push('</div>');
+    head.push('</div>');
 
-    // ── Expand panel ──
     const rows = [];
-    if (modes.length) {
-      const mchips = modes.map((md) =>
-        '<span class="tctx-chip tctx-tone-mode">' + _esc(md.label) + '</span>'
-      ).join('');
-      rows.push('<div class="tctx-row"><span class="tctx-row-h">Mode</span>' +
-        '<div class="tctx-chips">' + mchips + '</div></div>');
-    }
-    if (model) {
-      rows.push('<div class="tctx-row"><span class="tctx-row-h">Model</span>' +
-        '<span class="tctx-row-v">' + (logo ? '<span class="tctx-logo">' + logo + '</span>' : '') +
-        '<span class="tctx-row-model">' + _esc(snap.model) + '</span>' + depthChip + '</span></div>');
-    }
     if (tools.length) {
-      const chips = tools.map((tl) =>
-        '<span class="tctx-chip tctx-tone-' + _esc(tl.tone || 'mode') + '">' + _esc(tl.label) + '</span>'
-      ).join('');
+      const _chip = (tl) =>
+        '<span class="tctx-chip tctx-tone-' + _esc(tl.tone || 'mode') + '">' +
+        _esc(tl.label) + '</span>';
+      const shown = tools.slice(0, _MAX_VISIBLE_CHIPS).map(_chip).join('');
+      const rest = tools.slice(_MAX_VISIBLE_CHIPS);
+      let overflow = '';
+      if (rest.length) {
+        overflow =
+          '<span class="tctx-overflow" hidden>' + rest.map(_chip).join('') + '</span>' +
+          '<button type="button" class="tctx-more" data-tctx-more="1"' +
+          ' aria-expanded="false">+' + rest.length + '</button>';
+      }
       rows.push('<div class="tctx-row"><span class="tctx-row-h">Tools</span>' +
-        '<div class="tctx-chips">' + chips + '</div></div>');
+        '<div class="tctx-chips">' + shown + overflow + '</div></div>');
     }
     if (roots.length) {
-      const paths = roots.map((r) =>
-        '<div class="tctx-path">' + (r.ro ? _LOCK : '') + '<span>' + _esc(r.path || r.short) + '</span></div>'
-      ).join('');
+      // SHORT path (last two segments) with the full path on hover: a full
+      // absolute path is ~90 chars and `word-break:break-all` would stack it
+      // four lines high inside a 232px rail, inflating every turn that has a
+      // workspace. The rail is a glance surface; the full path stays reachable.
+      const _path = (r) =>
+        '<div class="tctx-path" title="' + _esc(r.path || r.short) + '">' +
+        (r.ro ? _LOCK : '') + '<span>' + _esc(r.short || r.path) + '</span></div>';
+      const shownPaths = roots.slice(0, _MAX_VISIBLE_PATHS).map(_path).join('');
+      const restPaths = roots.slice(_MAX_VISIBLE_PATHS);
+      let pathOverflow = '';
+      if (restPaths.length) {
+        pathOverflow =
+          '<div class="tctx-overflow" hidden>' + restPaths.map(_path).join('') + '</div>' +
+          '<button type="button" class="tctx-more" data-tctx-more="1"' +
+          ' aria-expanded="false">+' + restPaths.length + '</button>';
+      }
       rows.push('<div class="tctx-row"><span class="tctx-row-h">Workspace</span>' +
-        '<div class="tctx-paths">' + paths + '</div></div>');
+        '<div class="tctx-paths">' + shownPaths + pathOverflow + '</div></div>');
     }
 
-    return '<div class="turn-ctx">' + bar.join('') +
-           '<div class="tctx-panel">' + rows.join('') + '</div></div>';
+    // ── Fold line for panes with no rail track ──
+    const foldBits = [];
+    if (model) foldBits.push(model);
+    if (snap.depth) foldBits.push(snap.depth);
+    for (const md of modes) foldBits.push(md.label);
+    if (tools.length) foldBits.push(tools.length + ' tools');
+    if (roots.length) foldBits.push(roots.length + ' ws');
+    const fold = '<div class="tctx-fold"><span class="tctx-fold-dot"></span>' +
+      '<span>' + _esc(foldBits.join(' · ')) + '</span></div>';
+
+    return fold + '<div class="turn-ctx">' + head.join('') + rows.join('') + '</div>';
+  }
+
+  /* "+N" toggle + rail click guard. Delegated at document level so it
+   * survives every re-render of the message list without per-node listener
+   * bookkeeping. Expanding changes the rail's height IN FLOW — no overlay,
+   * no paint containment to escape. The rail is hit-testable (its backstop
+   * scrolls, paths have hover titles), but a click ANYWHERE inside it must
+   * never be seen by a message-level delegated handler — so every rail
+   * click is swallowed here, toggle or not. */
+  function _onTctxClick(ev) {
+    const rail = (ev.target && ev.target.closest)
+      ? ev.target.closest('.turn-ctx') : null;
+    if (!rail) return;
+    const btn = ev.target.closest('[data-tctx-more]');
+    if (btn) {
+      const chips = btn.parentNode;
+      const hidden = chips && chips.querySelector('.tctx-overflow');
+      if (hidden) {
+        const opening = hidden.hasAttribute('hidden');
+        if (opening) hidden.removeAttribute('hidden');
+        else hidden.setAttribute('hidden', '');
+        btn.setAttribute('aria-expanded', opening ? 'true' : 'false');
+        btn.textContent = opening ? '−' : '+' + hidden.children.length;
+      }
+    }
+    ev.stopPropagation();
   }
 
   /* ── Reconcile a captured snapshot against the tool-schema latch ──
@@ -334,18 +399,43 @@
     return { label: fnName, tone: 'mode', kind: 'tool' };
   }
 
+  /* Fact-card fields on the done frame the reconcile MAY overwrite. Kept as
+   * a named list so a test / audit can enumerate what "settles" at done. */
+  const _CTX_FACT_FIELDS = ['actualModel', 'actualDepth', 'actualModes'];
+
   /**
-   * Correct `snap` to the tools that actually ran, given a latch diff.
-   * Mutates `snap.tools` / `snap.modes` in place. Returns true if changed.
+   * Reconcile a captured/persisted turn-ctx snapshot against the done
+   * frame's authoritative fact card. Mutates `snap` in place; returns true
+   * when anything changed. Two independent reconciliations happen here:
+   *
+   *   1. TOOL-SCHEMA LATCH DIFF — `fact.added` / `fact.removed` (or a
+   *      nested `fact.toolsetDiff`) in tool FUNCTION-name space:
+   *        • added   = toggled ON  but held back → did NOT run → drop
+   *        • removed = toggled OFF but held back → still ran   → restore
+   *      Maps function names to feature-label chips via `_CTX_FAMILY_RULES`;
+   *      unknown names surface the raw name rather than get lost.
+   *
+   *   2. FACT-CARD OVERWRITE — `fact.actualModel` / `fact.actualDepth` /
+   *      `fact.actualModes` are the server-authoritative record of what
+   *      the turn actually ran with. When present they OVERWRITE
+   *      `snap.model` / `snap.depth` / `snap.modes` verbatim so the note
+   *      settles as the truth after a dispatcher fallback or a preset
+   *      switched in the pause between send and stream-start. See the
+   *      file-header contract at the top for the send-vs-done lifecycle.
    *
    * @param {object} snap — a captured/persisted turn-ctx snapshot (msg._ctx).
-   * @param {object} diff — {added:[fnName...], removed:[fnName...]}.
+   * @param {object} fact — done-event projection; ALL fields optional:
+   *   { added?, removed?, toolsetDiff?, actualModel?, actualDepth?, actualModes? }
    */
-  function reconcileTurnCtxCapsule(snap, diff) {
-    if (!snap || typeof snap !== 'object' || !diff || typeof diff !== 'object') return false;
-    const added = Array.isArray(diff.added) ? diff.added : [];
-    const removed = Array.isArray(diff.removed) ? diff.removed : [];
-    if (!added.length && !removed.length) return false;
+  function reconcileTurnCtxCapsule(snap, fact) {
+    if (!snap || typeof snap !== 'object' || !fact || typeof fact !== 'object') return false;
+    // Accept the diff either flattened onto `fact` OR nested under
+    // `fact.toolsetDiff` (call site convenience — sse_pipeline used to pass
+    // the diff object bare).
+    const diffSrc = (fact.toolsetDiff && typeof fact.toolsetDiff === 'object')
+      ? fact.toolsetDiff : fact;
+    const added = Array.isArray(diffSrc.added) ? diffSrc.added : [];
+    const removed = Array.isArray(diffSrc.removed) ? diffSrc.removed : [];
 
     // Family descriptors, deduped by label (a family spans several fn names).
     const addedFams = new Map();
@@ -389,8 +479,39 @@
       snap.tools = tools;
       snap.modes = modes;
     }
+
+    // ── Fact-card overwrite (independent of the latch diff) ──
+    if (typeof fact.actualModel === 'string' && fact.actualModel
+        && snap.model !== fact.actualModel) {
+      snap.model = fact.actualModel;
+      changed = true;
+    }
+    if (Object.prototype.hasOwnProperty.call(fact, 'actualDepth')) {
+      const _newDepth = typeof fact.actualDepth === 'string' ? fact.actualDepth : '';
+      if ((snap.depth || '') !== _newDepth) {
+        snap.depth = _newDepth;
+        changed = true;
+      }
+    }
+    if (Array.isArray(fact.actualModes)) {
+      // Full replacement so a mode that was live at send-time but not
+      // actually on the run (or vice versa) reflects truth. Preserve the
+      // {label, tone:'mode'} shape the renderer expects.
+      const _newModes = fact.actualModes
+        .filter((m) => m && typeof m.label === 'string' && m.label)
+        .map((m) => ({ label: m.label, tone: 'mode' }));
+      const _sameLen = _newModes.length === modes.length;
+      const _sameLabels = _sameLen && _newModes.every(
+        (m, i) => modes[i] && modes[i].label === m.label);
+      if (!_sameLabels) {
+        snap.modes = _newModes;
+        changed = true;
+      }
+    }
+
     return changed;
   }
+  reconcileTurnCtxCapsule._FACT_FIELDS = _CTX_FACT_FIELDS;
 
   window.buildTurnCtxSnapshot = buildTurnCtxSnapshot;
   window.renderTurnCtxNote = renderTurnCtxNote;
@@ -401,6 +522,7 @@
    * already reflects connected servers (not just after the settings panel
    * is opened). Best-effort; failures are swallowed inside the function. */
   if (typeof document !== 'undefined') {
+    document.addEventListener('click', _onTctxClick);
     if (document.readyState === 'loading') {
       document.addEventListener('DOMContentLoaded', () => { refreshMcpRailState(); }, { once: true });
     } else {

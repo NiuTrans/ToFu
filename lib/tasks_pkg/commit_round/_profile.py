@@ -108,7 +108,9 @@ def _patch_assistant_message_with_prefs(task: dict, learned: list) -> None:
 
     Called from the consolidation daemon AFTER ``persist_task_result`` ran, so
     the chip is recoverable on reload. Mirrors
-    :func:`_patch_assistant_message_with_git`'s message-locating logic.
+    :func:`_patch_assistant_message_with_git`: a field-level, rev-CAS patch of
+    the one message this task owns — NOT a whole-transcript rewrite, which would
+    erase rows a concurrent writer (autopilot VU append) added in between.
     """
     conv_id = task.get('convId') or ''
     task_id = task.get('id') or ''
@@ -116,29 +118,11 @@ def _patch_assistant_message_with_prefs(task: dict, learned: list) -> None:
         return
     from lib.agent_core.store import get_conversation_store
     store = get_conversation_store()
-    loaded = store.load_conversation_messages(conv_id)
-    if loaded is None:
-        return
-    messages, _updated_at = loaded
-    if not isinstance(messages, list) or not messages:
-        return
-    target_idx = -1
-    for i in range(len(messages) - 1, -1, -1):
-        m = messages[i]
-        if not isinstance(m, dict) or m.get('role') != 'assistant':
-            continue
-        if m.get('_taskId') == task_id:
-            target_idx = i
-            break
-        if target_idx == -1:
-            target_idx = i
-    if target_idx < 0:
-        return
-    messages[target_idx]['_preferencesLearned'] = learned
     try:
-        store.save_conversation_messages(conv_id, messages)
-        logger.info('[Task:%s] persisted %d preference_learned to conv=%s msg[%d]',
-                    task_id[:8], len(learned), conv_id[:8], target_idx)
+        if store.patch_message_fields_by_task(
+                conv_id, task_id, {'_preferencesLearned': learned}):
+            logger.info('[Task:%s] persisted %d preference_learned to conv=%s',
+                        task_id[:8], len(learned), conv_id[:8])
     except Exception as e:
         logger.warning('[Task:%s] preferences_learned DB write failed: %s',
                        task_id[:8], e, exc_info=True)

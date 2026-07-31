@@ -77,17 +77,27 @@ class PlaywrightChromium(Component):
         'Enables advanced web page fetching, JavaScript rendering, '
         'and browser automation. Required for fetch_url on JS-heavy sites.'
     )
-    size_hint = '~150 MB download'
+    size_hint = '~115 MB download'
     recommended = True
 
     def is_installed(self) -> bool:
+        """True when a usable Chromium binary is on disk.
+
+        Deliberately NOT ``playwright.chromium.executable_path``: that property
+        names the FULL build (``chromium-<rev>/chrome-linux64/chrome``) even
+        when only the headless shell is installed. install.sh installs
+        ``--only-shell`` on purpose (-60% download), so that path is one this
+        product never creates — checking it reported "not installed" for a
+        browser that launches fine, and the app kept offering the ~150 MB
+        download forever.
+        """
         try:
-            from playwright.sync_api import sync_playwright
-            # Check if chromium binary exists
-            with sync_playwright() as p:
-                path = p.chromium.executable_path
-                return os.path.isfile(path)
-        except Exception:
+            if BASE_DIR not in sys.path:
+                sys.path.insert(0, BASE_DIR)
+            from chromium_env import chromium_executable
+            return bool(chromium_executable())
+        except Exception as e:
+            _diag(f'chromium detection failed: {e}')
             return False
 
     def install(self, progress_callback=None) -> tuple[bool, str]:
@@ -109,7 +119,10 @@ class PlaywrightChromium(Component):
                 cmd = [sys.executable]
                 env['TOFU_PLAYWRIGHT_INSTALL'] = '1'
             else:
-                cmd = [sys.executable, '-m', 'playwright', 'install', 'chromium']
+                # --only-shell matches install.sh: the full build is 175 MB
+                # nobody launches here (every call site is headless).
+                cmd = [sys.executable, '-m', 'playwright', 'install',
+                       '--only-shell', 'chromium']
 
             result = subprocess.run(
                 cmd, env=env, capture_output=True, text=True, timeout=600

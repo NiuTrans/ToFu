@@ -53,7 +53,14 @@ psutil>=5.9
 # min_request_interval_ms to configure(), so an older tofu-search does not crash — it
 # just lacks the throttle. Live-tune via the TOFU_SEARCH_MIN_REQUEST_INTERVAL_MS env
 # var (configure() picks it up for any field the bridge leaves unset).
-tofu-search>=0.5.1
+# >=0.5.2: identity fallback seams — 200+SPA-shell / login-wall / known-SPA-empty /
+# auth-source-failed outcomes now consult the host BrowserProvider (the user's live
+# logged-in browser) instead of dying at anonymous Playwright. SOFT floor: with no
+# extension connected the seams are no-ops (byte-identical to 0.5.1); an older
+# tofu-search does not crash, it just never reaches the browser on shell outcomes
+# (the your-llm-gateway.example.com failure shape). Deployed-package acceptance:
+# tests/_acceptance_fetch_identity_fallback.py.
+tofu-search>=0.5.3
 trafilatura>=1.6
 # playwright is optional — powers the JS-rendered fallback in tofu_search.fetch.
 # On Linux, Chromium needs X11/GTK shared libs (libatk, libgbm, libXcomposite, …).
@@ -64,10 +71,23 @@ trafilatura>=1.6
 playwright>=1.40
 Pillow>=10.0
 python-pptx>=0.6.21
-lxml>=4.9
-# lxml.html.clean was extracted into a separate package in lxml 5.2+;
-# justext (a trafilatura dep) still does `from lxml.html.clean import Cleaner`,
-# so we must ensure the extracted package is present.
+# lxml — floor aligned with bootstrap.py's _CONDA_PYTHON_DEPS so the pip path
+# and the conda-repair path build the SAME environment (they drifted: 4.9 here
+# vs >=5.3 there). >=5.3 is not a guess, it is the floor our own declared deps
+# already impose, measured from installed metadata:
+#     trafilatura 2.0.0   -> lxml>=5.3.0   (non-Darwin)
+#     justext     3.0.2   -> lxml[html_clean]>=4.4.2
+#     lxml_html_clean 0.4.5 -> lxml>=6.1.1
+# So a resolver could never actually hand us 4.9 while trafilatura is declared;
+# the old floor was dead text that only served to disagree with the other list.
+#
+# NOTE the comment below is about PACKAGING, not about this floor: since lxml
+# 5.2 the `lxml.html.clean` module is a backward-compat shim that re-exports the
+# separately-distributed `lxml_html_clean` and raises ImportError when it is
+# absent (verified by reading the installed lxml/html/clean.py). justext pulls
+# it via the `lxml[html_clean]` extra, but we declare it explicitly so the
+# dependency survives even if justext's extras change.
+lxml>=5.3
 lxml_html_clean>=0.4
 # BeautifulSoup — HTML fallback parser in tofu_search/fetch/html_extract.py.
 # Usually pulled in transitively by trafilatura, but listed here so it's
@@ -83,7 +103,23 @@ python-docx>=1.0
 openpyxl>=3.1
 xlrd>=2.0
 olefile>=0.46
-mcp>=1.0
+# MCP Python SDK. THE UPPER BOUND IS LOAD-BEARING: `pip install mcp` now
+# resolves to 2.x, a breaking rework that lib/mcp/client/_bridge.py cannot
+# speak — `streamablehttp_client` was RENAMED to `streamable_http_client`
+# (ImportError) and yields a 2-tuple where we unpack 3 (ValueError), and model
+# fields moved to snake_case (isError → is_error, inputSchema → input_schema).
+#
+# This bound BUYS TIME FOR A MIGRATION; it is not a resting place. Measured:
+# the v1 line does NOT speak the 2026-07-28 protocol revision (1.29.0's
+# protocol constants stop at 2025-11-25 / 2025-03-26), v1 is a maintenance
+# line, and HTTP+SSE is already inside a 12-month deprecation window. Staying
+# on <2 forever means third-party servers that ship 2026-07-28-only will
+# eventually be unreachable.
+#
+# The FLOOR stays at the version actually deployed (1.27.2 satisfies >=1.0):
+# raising it to 1.28/1.29 would force an unverified upgrade that fixes nothing
+# about this failure mode. Enforced by tests/test_mcp_sdk_pin_bounded.py.
+mcp>=1.0,<2
 # orjson — fast C JSON encoder. REQUIRED (not optional): routes/chat.py's SSE
 # state snapshot serializes the ENTIRE conversation (content+thinking+toolRounds,
 # 10+ MB for long convs). Plain json.dumps holds the GIL for the whole call, so
@@ -103,8 +139,19 @@ tiktoken>=0.7
 # PDF parsing stack — pymupdf (fitz) is used across lib/pdf_parser, routes/paper,
 # and tofu_search.fetch for fast local PDF text/image extraction. pymupdf4llm is an
 # optional LLM-oriented Markdown extractor built on top of pymupdf.
-pymupdf>=1.24
-pymupdf4llm>=0.0.17
+# PINNED AS A TRIO at the same exact version: pymupdf4llm 1.27.2.3 exact-pins
+# pymupdf==1.27.2.3 AND pymupdf_layout==1.27.2.3, so the three lines MUST move
+# together — a floor-only pin is what produced the 2026-07-27 split-brain env
+# (pymupdf 1.24.1 without the `pymupdf` module name → pymupdf4llm ImportError →
+# every parse silently degraded to flat raw text and the corpus froze that way).
+# pymupdf_layout is only exercised by pymupdf4llm's OPTIONAL layout/OCR pipeline,
+# which lib/pdf_parser/text.py deliberately bypasses (it calls the classic
+# pymupdf_rag implementation directly); it is declared because it is a hard
+# transitive dep. Some internal mirrors do not carry pymupdf-layout — install it
+# from pypi.org if your index lacks it.
+pymupdf==1.27.2.3
+pymupdf_layout==1.27.2.3
+pymupdf4llm==1.27.2.3
 # Markdown — server-side renderer for paper-report HTML export
 # (routes/paper.py:export_report). Frontend still uses marked.js for live
 # rendering; this dep is only used for downloadable .html exports.
@@ -134,3 +181,16 @@ sqlalchemy>=2.0
 # path works without it — shipping it makes voice input Just Work in Simplified.
 # Disable/retarget via TOFU_ASR_ZH_VARIANT (default zh-cn; empty/off = raw).
 zhconv>=1.4
+
+# qrcode — QR symbol encoder used by lib/qr.py to turn a scan-to-login URL
+# into a PNG the browser can render (the ask_human scan-to-login prompt).
+# Pure-Python, no native build step; Pillow (already declared above) does the
+# PNG write. SOFT dep at runtime: qr_png_data_uri() logs and returns '' on
+# ImportError, so the app runs without it — but the scan-to-login prompt then
+# has no code to show, and RECOVERY of QR codes printed as terminal art by
+# other CLIs (lib/qr.terminal_qr_images, which needs only Pillow) is the half
+# that keeps working. Declared because it was previously present only by
+# accident in this env: a clean install would have degraded generation
+# silently, which for a login prompt looks like a broken feature rather than a
+# missing optional extra.
+qrcode>=7.4

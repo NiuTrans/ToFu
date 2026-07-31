@@ -40,7 +40,10 @@ from lib.model_info._family import (  # noqa: E402,F401
     is_gemini,
     is_glm,
     is_gpt,
+    is_gpt5,
+    is_gpt_56,
     is_kimi,
+    is_kimi_k3,
     is_longcat,
     is_minimax,
     is_qwen,
@@ -49,7 +52,11 @@ from lib.model_info._family import (  # noqa: E402,F401
 # ── Capability probes (reasoning / replay / vision) ──
 from lib.model_info._capabilities import (  # noqa: E402,F401
     _GEMINI_EFFORT_MAP,
+    _GPT_EFFORT_MAP,
+    _KIMI_K3_EFFORT_MAP,
     gemini_reasoning_effort,
+    gpt_reasoning_effort,
+    kimi_k3_reasoning_effort,
     model_requires_reasoning_content_replay,
     model_requires_thinking_signature_replay,
     model_requires_thought_signature_on_tool_calls,
@@ -82,10 +89,12 @@ from lib.model_info._limits import (  # noqa: E402,F401
 __all__ = [
     # family detection
     'is_claude', 'is_claude_opus_47', 'is_deepseek', 'is_doubao', 'is_ernie',
-    'is_gemini', 'is_glm', 'is_gpt', 'is_kimi', 'is_longcat', 'is_minimax',
-    'is_qwen',
+    'is_gemini', 'is_glm', 'is_gpt', 'is_gpt5', 'is_gpt_56', 'is_kimi',
+    'is_kimi_k3', 'is_longcat', 'is_minimax', 'is_qwen',
     # capabilities
     'gemini_reasoning_effort', '_GEMINI_EFFORT_MAP',
+    'gpt_reasoning_effort', '_GPT_EFFORT_MAP',
+    'kimi_k3_reasoning_effort', '_KIMI_K3_EFFORT_MAP',
     'model_requires_reasoning_content_replay',
     'model_requires_thinking_signature_replay',
     'model_requires_thought_signature_on_tool_calls',

@@ -25,7 +25,7 @@ handling, and timeout logic. That made it impossible to:
 - Add cross-cutting concerns (auth headers, retries, telemetry) in one
   place.
 - Enforce the **separation of concerns** rule from CLAUDE.md (see also
-  `.tofu/skills/separation-of-concerns-directive.md`): the frontend
+  `.tofu/memories/separation-of-concerns-directive.md`): the frontend
   should only render and call the backend, never duplicate backend
   logic. Talking through one client makes that boundary obvious.
 
@@ -196,7 +196,7 @@ The remaining domains follow the same pattern.
 
 - `static/js/api.js`                                    — implementation
 - `tests/test_frontend_api_isolation.py`                — ratchet guard
-- `.tofu/skills/separation-of-concerns-directive.md`  — frontend/backend boundary
+- `.tofu/memories/separation-of-concerns-directive.md`  — frontend/backend boundary
 - `routes/api_v1/`                                      — v1 backend surface (long-term target)
 - `static/js/push.js`                                   — server-push hub
 - `lib/js_bundler.py`                                   — bundle order (`api.js` after `core.js`)

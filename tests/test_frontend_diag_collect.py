@@ -100,24 +100,32 @@ global.AbortController = class {
 const realSetTimeout = setTimeout;
 global.setTimeout = (fn, ms) => realSetTimeout(fn, ms === 15000 ? 150 : ms);
 
+// The collector routes the live probe through the UNIFIED API client
+// (window.Api.conversations.getResponse), NOT a hand-built fetch — so the
+// harness stubs that seam. onError:'throw' + timeout:0 are what let the
+// collector's own 15s abort remain the sole deadline.
 if (mode === 'wedged') {
   // Tunnel that never returns the body → only aborts when the timeout fires.
-  global.fetch = (url, opts) => new Promise((resolve, reject) => {
-    const sig = opts && opts.signal;
-    const iv = setInterval(() => {
-      if (sig && sig.__aborted) {
-        clearInterval(iv);
-        const e = new Error('aborted'); e.name = 'AbortError'; reject(e);
-      }
-    }, 5);
-  });
+  global.Api = { conversations: {
+    getResponse: (id, opts) => new Promise((resolve, reject) => {
+      const sig = opts && opts.signal;
+      const iv = setInterval(() => {
+        if (sig && sig.__aborted) {
+          clearInterval(iv);
+          const e = new Error('aborted'); e.name = 'AbortError'; reject(e);
+        }
+      }, 5);
+    }),
+  } };
 } else {
-  global.fetch = () => Promise.resolve({
-    status: 200,
-    text: () => Promise.resolve(JSON.stringify({
-      windowed: true, totalCount: 1500, messages: new Array(60).fill({ role: 'user' }),
-    })),
-  });
+  global.Api = { conversations: {
+    getResponse: () => Promise.resolve({
+      status: 200,
+      text: () => Promise.resolve(JSON.stringify({
+        windowed: true, totalCount: 1500, messages: new Array(60).fill({ role: 'user' }),
+      })),
+    }),
+  } };
 }
 
 eval(fs.readFileSync(collectorPath, 'utf8'));

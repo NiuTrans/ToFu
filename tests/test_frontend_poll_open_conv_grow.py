@@ -98,6 +98,10 @@ function getActiveConv(){ return conversations.find(c => c.id === activeConvId);
 function _convSorter(a,b){ return (b.updatedAt||0)-(a.updatedAt||0); }
 let _renderChatCalls = 0;
 function renderChat(){ _renderChatCalls++; }
+/* RENDER_CONTRACT migration: an adopted change now renders via
+ * window.ConvView.replaceAll (the bare renderChat seam was removed from
+ * _verifyActiveConvFromServer). The counter below is wired to the ConvView
+ * seam in the driver — the assertion is unchanged ("must re-render"). */
 function renderConversationList(){}
 function _restoreConvToolState(){}
 function _applySettingsToConv(){}
@@ -105,7 +109,15 @@ function _hydrateImageBase64(){}
 function saveConversations(){}
 function _serverConvCount(sc){ if(!sc) return 0; const v = sc.messageCount!=null?sc.messageCount:(sc.msgCount!=null?sc.msgCount:sc.msg_count); return v||0; }
 const ConvCache = { isAvailable(){return false;}, get(){return null;}, put(){}, remove(){}, getAllMeta(){return [];} };
-const Api = { conversations: { get: async () => FULL_CONV } };
+// loadConversationsFromServer now fetches the sidebar list via
+// Api.conversations.listMeta({prefetch, headers, signal}) (core split, 2026-07)
+// rather than a raw fetch(). Return a Response-shaped envelope wrapping the
+// ?meta=1 list ([META_ROW]); the keep-longer verify still uses Api.conversations.get.
+const Api = { conversations: {
+  listMeta: async () => ({ ok:true, status:200, headers:{ get(){ return null; } },
+    json: async () => [ META_ROW ] }),
+  get: async () => FULL_CONV,
+} };
 function apiUrl(u){ return u; }
 const AbortSignal = { timeout: () => ({}) };
 
@@ -130,6 +142,7 @@ __LOAD_FN__
 (async () => {
   Date.now = () => NOW;
   window = (typeof window==='undefined') ? {} : window;
+  window.ConvView = { replaceAll: function(){ _renderChatCalls++; } };
   // Drive the REAL loadConversationsFromServer with the ?meta=1 list.
   await loadConversationsFromServer();
   const ac = getActiveConv();
@@ -160,13 +173,26 @@ def _run(neuter=False):
     load_fn = _extract_fn(src, "loadConversationsFromServer")
     verify_fn = _extract_fn((REPO / "static" / "js" / "core" / "cross_tab_sync.js").read_text(),
                             "_verifyActiveConvFromServer")
+    # The Case-2 terminal-field fill was centralised into ONE shared reducer
+    # (core/conv_reducers.js::_mergeTerminalTurnFields, 2026-07-25) which the
+    # real _verifyActiveConvFromServer now CALLS — splice it too, else the
+    # standalone extraction crashes with ReferenceError before the growth gate.
+    helper_fn = _extract_fn((REPO / "static" / "js" / "core" / "conv_reducers.js").read_text(),
+                            "_mergeTerminalTurnFields")
+    # Same reason, second reducer: _verifyActiveConvFromServer also calls
+    # core/conv_reducers.js::_mergeTranslationFields (the server-committed
+    # translation adopt, 2026-07-27) BEFORE the growth gate. In the real bundle
+    # conv_reducers.js loads first; this standalone extraction must splice it
+    # too or the function throws ReferenceError before ever reaching the grow.
+    xlate_fn = _extract_fn((REPO / "static" / "js" / "core" / "conv_reducers.js").read_text(),
+                           "_mergeTranslationFields")
     if neuter:
         # NEUTER: strip the routing flag the fix sets, so the tail can never
         # take the keep-longer verify branch and falls back to the
         # count-plus-clock loadConversationMessages path (which drops the grow).
         load_fn = load_fn.replace("local._contentGrewNeedsVerify = true;",
                                   "local._contentGrewNeedsVerify = false;")
-    script = (_fetch_stub() + _HARNESS
+    script = (_fetch_stub() + helper_fn + "\n" + xlate_fn + "\n" + _HARNESS
               .replace("__VERIFY_FN__", verify_fn)
               .replace("__LOAD_FN__", load_fn))
     out = subprocess.run(["node", "-e", script], capture_output=True, text=True, cwd=str(REPO))

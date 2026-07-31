@@ -12,7 +12,7 @@ from flask import jsonify, request
 
 from lib.config_dir import config_path as _config_path
 from lib.log import get_logger
-from lib.api_response import api_bad_request, api_error, api_internal_error, api_ok
+from lib.api_response import api_bad_request, api_error, api_internal_error, api_ok, safe_route
 from lib.request_parser import parse_body
 
 logger = get_logger(__name__)
@@ -228,10 +228,23 @@ def get_server_config():
         for m in prov.get('models', []):
             mid = m.get('model_id', '')
             if mid and mid not in model_pricing:
-                if m.get('input_price') is not None and m.get('output_price') is not None:
+                # Two on-model shapes carry the same data: top-level
+                # input_price/output_price (discovery enrichment) and the
+                # nested pricing{input,output} dict (user/template override,
+                # also registered into PROVIDER_PRICING below). Both should
+                # feed the frontend pricing cache or a user-set price stays
+                # invisible until some other mechanism fills the row.
+                _pinfo = m.get('pricing') if isinstance(m.get('pricing'), dict) else {}
+                _inp = m.get('input_price')
+                if _inp is None:
+                    _inp = _pinfo.get('input')
+                _out = m.get('output_price')
+                if _out is None:
+                    _out = _pinfo.get('output')
+                if _inp is not None and _out is not None:
                     model_pricing[mid] = {
-                        'input': m['input_price'],
-                        'output': m['output_price'],
+                        'input': _inp,
+                        'output': _out,
                         'name': mid,
                     }
 
@@ -293,6 +306,12 @@ def get_server_config():
         'proxy_bypass_domains': saved.get('proxy_bypass_domains', []),
         'env_proxy_bypass': os.environ.get('PROXY_BYPASS_DOMAINS', ''),
     }
+    try:
+        from lib.netpath import status_summary as _np_status
+        network_info['netpath'] = _np_status()
+    except Exception as _e:
+        logger.debug('get server config: failed (%s)', _e)
+        pass
 
     # Machine translation provider config
     mt_provider_cfg = getattr(_lib, 'MT_PROVIDER_CONFIG', {})
@@ -356,11 +375,34 @@ def get_server_config():
         logger.warning('[ServerConfig] lang-detect policy unavailable: %s', e)
         lang_detect_policy = {}
 
+    # Capability classification (single source of truth) — the frontend
+    # reads this at boot to filter chat-model pickers, so ASR-only /
+    # image-gen / embedding models don't leak into the model dropdown.
+    try:
+        from lib.model_info.capability_taxonomy import taxonomy_payload
+        capability_taxonomy = taxonomy_payload()
+    except Exception as e:
+        logger.warning('[ServerConfig] capability taxonomy unavailable: %s', e)
+        capability_taxonomy = {}
+
+    # Model entries the dispatcher REFUSED to register because their wire face
+    # could not be resolved safely (a Claude model on a dual-face gateway whose
+    # provider declares no anthropic face). Surfaced because a refusal the user
+    # cannot see is its own silent failure: the model would simply be absent
+    # from the picker with no explanation.
+    face_refusals = []
+    try:
+        from lib.llm_dispatch.factory import get_dispatcher
+        face_refusals = list(getattr(get_dispatcher(), 'face_refusals', []) or [])
+    except Exception as e:
+        logger.debug('[ServerConfig] face_refusals unavailable: %s', e)
+
     return jsonify({
         'providers': providers, 'presets': presets,
         'models': models, 'search': search_info,
         'server_info': server_info,
         'feishu': feishu_info,
+        'face_refusals': face_refusals,
         'dropdown_models': dropdown_models,
         'hidden_models': hidden_models,
         'hidden_ig_models': hidden_ig_models,
@@ -375,12 +417,20 @@ def get_server_config():
         'context': context_policy,
         'translation': translation_policy,
         'langDetect': lang_detect_policy,
+        'capability_taxonomy': capability_taxonomy,
     })
 
 
 @config_bp.route('/api/v1/feishu/status')
+@safe_route
 def feishu_status():
-    """Return Feishu bot runtime status."""
+    """Return Feishu bot runtime status.
+
+    @safe_route (pt_63eb7f02 batch 5): the ad-hoc "except Exception →
+    api_internal_error(e)" wrap around the body was a pure logger.warning
+    + api_internal_error with no distinct context / side effects; the
+    decorator reproduces it via fn.__qualname__.
+    """
     from lib.feishu._state import (
         ALLOWED_USERS,
         APP_ID,
@@ -390,22 +440,18 @@ def feishu_status():
         WORKSPACE_ROOT,
         _conversations,
     )
-    try:
-        active_users = len(_conversations)
-        return jsonify({
-            'ok': True,
-            'enabled': ENABLED,
-            'connected': _feishu_is_connected(),
-            'app_id_masked': ('***' + APP_ID[-4:]) if len(APP_ID) > 4 else '',
-            'has_secret': bool(APP_SECRET),
-            'active_users': active_users,
-            'allowed_users': sorted(ALLOWED_USERS),
-            'default_project': DEFAULT_PROJECT_PATH,
-            'workspace_root': WORKSPACE_ROOT,
-        })
-    except Exception as e:
-        logger.warning('[Feishu] Status check error: %s', e, exc_info=True)
-        return api_internal_error(e)
+    active_users = len(_conversations)
+    return jsonify({
+        'ok': True,
+        'enabled': ENABLED,
+        'connected': _feishu_is_connected(),
+        'app_id_masked': ('***' + APP_ID[-4:]) if len(APP_ID) > 4 else '',
+        'has_secret': bool(APP_SECRET),
+        'active_users': active_users,
+        'allowed_users': sorted(ALLOWED_USERS),
+        'default_project': DEFAULT_PROJECT_PATH,
+        'workspace_root': WORKSPACE_ROOT,
+    })
 
 
 @config_bp.route('/api/v1/providers/balance', methods=['POST'])
@@ -449,8 +495,14 @@ def check_provider_balance():
 
 
 @config_bp.route('/api/v1/providers/discover-models', methods=['POST'])
+@safe_route
 def discover_models_endpoint():
-    """Auto-discover models from a provider's /v1/models endpoint."""
+    """Auto-discover models from a provider's /v1/models endpoint.
+
+    @safe_route (pt_63eb7f02 batch 5): the ad-hoc "except Exception \u2192
+    api_internal_error(e)" wrapping the discover_models + enrich pass was
+    pure logger.error + api_internal_error; @safe_route reproduces it.
+    """ 
     data = parse_body()
     base_url = data.get('base_url', '').strip()
     api_key = data.get('api_key', '').strip()
@@ -461,18 +513,16 @@ def discover_models_endpoint():
     if not api_key:
         return api_bad_request('api_key is required')
 
-    try:
-        from lib.llm_dispatch.discovery import discover_models, enrich_models_with_pricing
-        models = discover_models(base_url, api_key, models_path=models_path)
-        if not models:
-            return api_error('No models found at %s' % base_url, status=404)
+    # @safe_route on the enclosing view catches any exception from either
+    # discover_models or enrich_models_with_pricing (pt_63eb7f02 batch 5).
+    from lib.llm_dispatch.discovery import discover_models, enrich_models_with_pricing
+    models = discover_models(base_url, api_key, models_path=models_path)
+    if not models:
+        return api_error('No models found at %s' % base_url, status=404)
 
-        models = enrich_models_with_pricing(models)
-        logger.info('[Discovery] Endpoint returned %d models for %s', len(models), base_url)
-        return api_ok({'models': models})
-    except Exception as e:
-        logger.error('[Discovery] Endpoint failed: %s', e, exc_info=True)
-        return api_internal_error(e)
+    models = enrich_models_with_pricing(models)
+    logger.info('[Discovery] Endpoint returned %d models for %s', len(models), base_url)
+    return api_ok({'models': models})
 
 
 @config_bp.route('/api/v1/providers/templates/update', methods=['PUT'])
@@ -618,13 +668,140 @@ def update_provider_template():
             logger.error('[TemplateUpdate] Failed to update %s: %s', fpath, e, exc_info=True)
 
     if not updated_files:
-        return jsonify({'ok': False,
-                       'error': "Template key '%s' not found in any JS file" % tpl_key}), 404
+        return api_error("Template key '%s' not found in any JS file" % tpl_key, status=404)
 
     return jsonify({
         'ok': True,
         'updated_files': updated_files,
         'model_count': len(clean_models),
+    })
+
+
+@config_bp.route('/api/v1/providers/resolve-faces', methods=['POST'])
+@safe_route
+def resolve_provider_faces():
+    """Resolve which wire face every model of ONE provider dispatches over.
+
+    Body: ``{provider: {...}}`` — a provider dict shaped like a
+    ``config['providers'][i]`` entry. Only the routing-relevant fields are
+    read (``base_url`` / ``protocol`` / ``faces`` / ``models``); credentials
+    are never touched, so the Settings UI can post its UNSAVED working copy.
+
+    Returns ``{ok, resolutions: [{model_id, ok, face, protocol, base_url,
+    forced, error}], faces: [name, ...], dual_face_host: bool}``.
+
+    WHY THIS ENDPOINT EXISTS
+    ------------------------
+    The Settings panel edits a working copy that has not been saved yet, so
+    the ``face_refusals`` list computed at GET-time (dispatcher slot build)
+    goes STALE the moment the user pins a face, adds a Claude model or edits
+    ``faces{}``. Rendering a stale verdict is worse than rendering none: the
+    failure mode is a pill reading "anthropic" on a model that will actually
+    dispatch over the OpenAI wire — the silent signature-dropping shape
+    ``provider_face`` exists to prevent.
+
+    The alternative — re-implementing the family rule in JavaScript — is
+    barred by charter #12 (no hand-copied backend enums) and would drift in
+    exactly that direction. So the UI asks the SAME resolver the dispatcher
+    uses (``lib.llm_dispatch.provider_face.resolve_face``); there is one
+    implementation of "which wire does this model use", and the UI cannot
+    disagree with routing.
+
+    Stateless: reads no config file, mutates nothing, builds no slots.
+    """
+    from lib.llm_dispatch.provider_face import (
+        DEFAULT_FACE, dual_face_hosts, provider_faces, resolve_face,
+    )
+
+    data = parse_body()
+    provider = data.get('provider')
+    if not isinstance(provider, dict):
+        return api_bad_request('provider (object) is required')
+
+    models = provider.get('models')
+    if not isinstance(models, list):
+        models = []
+
+    known = dual_face_hosts()
+    faces = provider_faces(provider)
+
+    # ── The dispatcher's PRE-RESOLVE filters, mirrored ──
+    # ``_build_slots_from_providers`` skips these BEFORE it calls
+    # resolve_face, so a skipped entry can never appear in ``face_refusals``.
+    # Reporting a refusal for one would paint an amber "missing wire face"
+    # banner on a model the user simply switched off — an alarm naming the
+    # wrong cause. Charter #26: a new consumer of a filtered surface MUST
+    # inventory that filter.
+    #
+    # The card-level reason is computed once; ``effective_keys`` mirrors
+    # dispatcher.py L401 exactly — a brand=='local' provider with NO keys
+    # still builds (one blank-key slot), so keying this on ``api_keys``
+    # alone would wrongly blank the pills on every self-hosted deployment.
+    card_skip = ''
+    if provider.get('enabled', True) is False:
+        card_skip = 'provider_disabled'
+    else:
+        # The UI posts a COUNT, never the key strings (this endpoint promises
+        # credentials never travel to it). A saved provider dict passed
+        # straight in still has `api_keys`, so accept either shape.
+        if 'api_key_count' in provider:
+            n_keys = provider.get('api_key_count') or 0
+        else:
+            n_keys = len([k for k in (provider.get('api_keys') or [])
+                          if isinstance(k, str) and k.strip()])
+        # Mirrors dispatcher.py L401: a brand=='local' card with no keys is
+        # given ONE blank-key slot and does build, so `no_keys` must not fire
+        # for it. Keying this on key-count alone would blank the pills on
+        # every self-hosted deployment.
+        if not n_keys and provider.get('brand') != 'local':
+            card_skip = 'no_keys'
+
+    resolutions = []
+    for m in models:
+        if not isinstance(m, dict):
+            continue
+        mid = (m.get('model_id') or '').strip()
+        if not mid:
+            continue
+
+        # Skipped entries are REPORTED (with the reason) rather than omitted:
+        # omitting them would be a cache miss on the client, and a miss
+        # renders nothing — the right pixels for the wrong reason. An
+        # explicit marker also lets the UI grow a real "disabled" state
+        # later without another round of backend archaeology.
+        skip = card_skip or ('model_disabled' if m.get('enabled') is False else '')
+        if skip:
+            resolutions.append({
+                'model_id': mid, 'skipped': skip, 'ok': True,
+                'face': DEFAULT_FACE, 'protocol': '', 'base_url': '',
+                'forced': False, 'error': '',
+            })
+            continue
+
+        r = resolve_face(provider, m, dual_face_hosts=known)
+        resolutions.append({
+            'model_id': mid,
+            'ok': r.ok,
+            'face': r.face_name,
+            'protocol': r.protocol or '',
+            'base_url': r.base_url,
+            'forced': r.forced,
+            'error': r.error or '',
+        })
+
+    from urllib.parse import urlparse
+    host = (urlparse(provider.get('base_url') or '').hostname or '').lower()
+
+    n_skipped = sum(1 for r in resolutions if r.get('skipped'))
+    logger.debug('[Face] resolved %d model(s) for provider %s (faces=%s, '
+                 '%d skipped)', len(resolutions), provider.get('id', '?'),
+                 sorted(faces), n_skipped)
+    return api_ok({
+        'resolutions': resolutions,
+        # The declared face names, default first — the UI's pin dropdown is
+        # built from THIS, never from a hand-written list (charter #12).
+        'faces': [DEFAULT_FACE] + sorted(n for n in faces if n != DEFAULT_FACE),
+        'dual_face_host': host in known,
     })
 
 
@@ -769,6 +946,7 @@ from lib.provider_probe import (  # noqa: E402,F401
     probe_one_cell as _probe_one_cell,
     probe_cell_multi as _probe_cell_multi,
     run_cell_probe_task as _run_cell_probe_task,
+    build_probe_work as _build_probe_work,
     probe_cache_path as _probe_cache_path,
     probe_cell_key as _probe_cell_key,
     persist_probe_task as _persist_probe_task,
@@ -804,7 +982,33 @@ def probe_provider_cells_start():
     timeout = int(data.get('timeout') or 12)
     attempts = max(1, min(5, int(data.get('attempts') or 3)))
     protocol = (data.get('protocol') or 'openai').strip() or 'openai'
+    # Alternate wire faces of this ONE account (account/face separation). A
+    # gateway can serve some models over OpenAI-compat and others over the
+    # Anthropic-native wire with the SAME keys, so the probe must ask each
+    # cell on the wire that cell actually dispatches over — probing a
+    # Claude model on the OpenAI face yields a false 'not_found'.
+    # Resolution is delegated to lib.llm_dispatch.provider_face so the probe
+    # and the dispatcher can never disagree about which wire a model uses.
+    faces = data.get('faces') if isinstance(data.get('faces'), dict) else {}
+    # 'claude' / 'codex' for a SUBSCRIPTION provider — its configured api_key
+    # is the 'oauth-managed' sentinel, so the probe resolves the live token
+    # per cell instead of sending the sentinel (which would 401 → false
+    # recommend-disable). Empty for normal key-based providers.
+    oauth = (data.get('oauth') or '').strip()
     force = bool(data.get('force'))
+
+    # Optional scope for row / column / single-cell probes. When present the
+    # work list is restricted to the requested (key_idx × model_id) cells and
+    # the fresh results are MERGED into the persisted snapshot (the rest of
+    # the grid keeps its previous verdicts) instead of replacing it.
+    only = data.get('only') if isinstance(data.get('only'), dict) else {}
+    _ok = only.get('key_idxs')
+    _om = only.get('model_ids')
+    only_key_idxs = ({i for i in _ok if isinstance(i, int) and not isinstance(i, bool)}
+                     if isinstance(_ok, list) else None)
+    only_model_ids = ({x.strip() for x in _om if isinstance(x, str) and x.strip()}
+                      if isinstance(_om, list) else None)
+    scoped = bool(only_key_idxs) or bool(only_model_ids)
 
     if not provider_id:
         return api_bad_request('provider_id is required')
@@ -821,7 +1025,7 @@ def probe_provider_cells_start():
             logger.info('[CellProbe] %s already running — returning live snapshot', provider_id)
             return api_ok(_public_probe_snapshot(existing))
 
-    if not force:
+    if not force and not scoped:
         cached = read_json(_probe_cache_path(provider_id), default=None)
         if isinstance(cached, dict) and cached.get('cells'):
             logger.info('[CellProbe] %s resumed from disk (%d cells, status=%s)',
@@ -830,19 +1034,40 @@ def probe_provider_cells_start():
 
     # Build the work list: one cell per (key_idx, concrete id). Every alias
     # is its own cell because aliases can be different upstream models.
-    work = []
-    for key_idx, api_key in enumerate(api_keys):
-        for m in models:
-            root = (m.get('model_id') or '').strip()
-            if not root:
-                continue
-            for mid in [root] + [a for a in (m.get('aliases') or []) if a]:
-                work.append((key_idx, api_key, root, mid))
+    # Capabilities ride along so the probe can SKIP non-chat models
+    # (image_gen / embedding / transcription) instead of chat-probing them
+    # into a guaranteed false 'unavailable' verdict.
+    work = _build_probe_work(
+        {'id': provider_id, 'base_url': base_url, 'protocol': protocol,
+         'faces': faces},
+        models, api_keys)
 
     if not work:
         return api_bad_request('no testable (key, model) pairs')
     if len(work) > 400:
         return api_bad_request('too many cells to probe (%d > 400)' % len(work))
+
+    # Scoped probe: restrict the run to the requested cells and seed the task
+    # with the persisted snapshot's OTHER cells so the result merges into the
+    # full grid. Seeds are pruned to the provider's current (key × id) space —
+    # a model/key deleted since the cache was written must not come back as a
+    # ghost pip. done_count tracks only this run's completions, so seeded
+    # cells never inflate the progress counter.
+    seed_cells = {}
+    if scoped:
+        full_work = work
+        work = [w for w in full_work
+                if (not only_key_idxs or w[0] in only_key_idxs)
+                and (not only_model_ids or w[3] in only_model_ids)]
+        if not work:
+            return api_bad_request('no cells match the requested scope')
+        probed_keys = {_probe_cell_key(w[0], w[3]) for w in work}
+        valid_keys = {_probe_cell_key(w[0], w[3]) for w in full_work}
+        cached = read_json(_probe_cache_path(provider_id), default=None)
+        if isinstance(cached, dict) and isinstance(cached.get('cells'), dict):
+            for k, v in cached['cells'].items():
+                if k in valid_keys and k not in probed_keys and isinstance(v, dict):
+                    seed_cells[k] = v
 
     task = {
         'provider_id': provider_id,
@@ -851,7 +1076,7 @@ def probe_provider_cells_start():
         'finished_at': None,
         'total': len(work),
         'done_count': 0,
-        'cells': {},
+        'cells': dict(seed_cells),
         'summary': {'ok': 0, 'disable': 0},
         'error': None,
         'attempts': attempts,
@@ -859,6 +1084,7 @@ def probe_provider_cells_start():
         '_base_url': base_url,
         '_extra_headers': extra_headers,
         '_protocol': protocol,
+        '_oauth': oauth,
     }
     with _CELL_PROBE_LOCK:
         _CELL_PROBE_TASKS[provider_id] = task
@@ -868,8 +1094,8 @@ def probe_provider_cells_start():
                           name='cell-probe-%s' % provider_id[:24], daemon=True)
     th.start()
 
-    logger.info('[CellProbe] Launched background probe for %s (%d cells, force=%s)',
-                provider_id, len(work), force)
+    logger.info('[CellProbe] Launched background probe for %s (%d cells, force=%s, scoped=%s, seeded=%d)',
+                provider_id, len(work), force, scoped, len(seed_cells))
     return api_ok(_public_probe_snapshot(task))
 
 

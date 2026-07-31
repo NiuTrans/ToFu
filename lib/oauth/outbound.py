@@ -173,9 +173,9 @@ _MANAGED_SPECS = {
         'base_url': 'https://chatgpt.com/backend-api/codex',
         'protocol': 'openai',
         'models': [
+            {'model_id': 'gpt-5.2-codex', 'capabilities': ['text', 'vision']},
             {'model_id': 'gpt-5.1-codex', 'capabilities': ['text', 'vision']},
             {'model_id': 'gpt-5-codex', 'capabilities': ['text', 'vision']},
-            {'model_id': 'gpt-5', 'capabilities': ['text', 'vision']},
         ],
         # The Codex path is Responses-API streaming only (no non-stream
         # translator), so every model must dispatch with stream=True.
@@ -188,8 +188,9 @@ _MANAGED_SPECS = {
         'protocol': 'anthropic',
         'thinking_format': 'thinking_type',
         'models': [
+            {'model_id': 'claude-opus-4-5-20251101', 'capabilities': ['text', 'vision', 'thinking']},
             {'model_id': 'claude-sonnet-4-5-20250929', 'capabilities': ['text', 'vision', 'thinking']},
-            {'model_id': 'claude-opus-4-1-20250805', 'capabilities': ['text', 'vision', 'thinking']},
+            {'model_id': 'claude-haiku-4-5-20251001', 'capabilities': ['text', 'vision', 'thinking']},
         ],
         'stream_only': False,
     },

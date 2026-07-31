@@ -581,7 +581,7 @@ Promise.resolve().then(()=>{}).then(()=>{}).then(()=>{}).then(()=>{}).then(() =>
   // Feature A: the brain-dispatched claim shows the autonomy badge.
   check('board_dispatched_badge', !!board.querySelector('.pb-board-badge-dispatched'));
 
-  // Click commit → calls the commit route with the proposal text + version.
+  // Click commit → calls the commit route with the proposal text + summary.
   if (commitBtn) {
     commitBtn.click();
     Promise.resolve().then(()=>{}).then(() => {
@@ -589,7 +589,13 @@ Promise.resolve().then(()=>{}).then(()=>{}).then(()=>{}).then(()=>{}).then(() =>
       check('commit_path', committed.length && committed[0].p === '/proj/real');
       check('commit_carries_text', committed.length &&
         (committed[0].body.add_decision || '').indexOf('Adopt the soft-lease board') !== -1);
-      check('commit_carries_version', committed.length && committed[0].body.expected_version === 7);
+      // Re-anchored 2026-07-29 (was: expected_version === 7). Committing a
+      // proposal is a pure APPEND, and appends commute — the version baked in
+      // at render time goes stale the moment any sibling self-commits, so
+      // pinning it made the button 409 exactly when the project was busy.
+      // Concurrent appends are kept safe by the backend CAS instead.
+      check('commit_sends_no_version', committed.length &&
+        committed[0].body.expected_version === undefined);
       // Root-cause fix: the commit must carry resolves_proposal (the id from
       // the pending list) so the proposal drops out of pending durably.
       check('commit_carries_proposal', committed.length &&
@@ -640,7 +646,7 @@ def test_charter_board_render_into_real_fragment_and_commit():
                  'PASS board_open_card', 'PASS board_claimed_card',
                  'PASS board_owner_chip', 'PASS board_dispatched_badge',
                  'PASS commit_called', 'PASS commit_carries_proposal',
-                 'PASS commit_carries_text', 'PASS commit_carries_version'):
+                 'PASS commit_carries_text', 'PASS commit_sends_no_version'):
         assert must in output, output
 
 
@@ -652,7 +658,7 @@ def test_NC_commit_wiring_is_load_bearing():
     byte-identical afterward."""
     with open(_BRAIN_SRC, encoding='utf-8') as f:
         original = f.read()
-    anchor = "        _commitCharterDecision(path, text, ver, pid, btn);"
+    anchor = "        _commitCharterDecision(path, text, ver, pid, btn, summary);"
     assert anchor in original, 'commit-wiring anchor not found'
     patched = original.replace(anchor, "        void 0;  // NC (commit wiring disabled)", 1)
     copy_path = os.path.join(HERE, '_pb_cb_nc_copy.js')
@@ -1526,6 +1532,143 @@ def test_NC_deeplink_flash_is_load_bearing():
         # discriminating: the panel still opens (only the flash was removed).
         assert 'PASS overlay_open' in output and 'PASS influence_banner_visible' in output, \
             'NC must be surgical — the panel still opens:\n' + output
+    finally:
+        try:
+            os.remove(copy_path)
+        except OSError:
+            pass
+    with open(_BRAIN_SRC, encoding='utf-8') as f:
+        assert f.read() == original, 'shipped project-brain.js must be byte-identical'
+
+
+# ════════════════════════════════════════════════════════════════════
+#  No-project open — the panel must say WHY it is empty, never open into
+#  blank or stale tabs.
+#
+#  Reported bug (2026-07-28): the collab bar still showed the previous
+#  conversation's project counts on a fresh New Chat; clicking it opened the
+#  panel with _displayedProjectPath() === '' → openProjectBrain loaded
+#  NOTHING → every tab blank while the bar claimed "N need you · M open".
+#  The else-branch now paints an explicit no-project empty state into every
+#  tab body and clears the count badges.
+# ════════════════════════════════════════════════════════════════════
+
+_HARNESS_NO_PROJECT = r"""
+const fs = require('fs');
+const path = require('path');
+const SRC = process.argv[2];
+const ROOT = process.argv[3];
+const FRAG = process.argv[4];
+const fragment = fs.readFileSync(FRAG, 'utf8');
+const { JSDOM } = require(path.join(ROOT, 'node_modules', 'jsdom'));
+const dom = new JSDOM('<!DOCTYPE html><body>' + fragment + '</body>', { url: 'http://localhost/' });
+const win = dom.window;
+global.window = win; global.document = win.document; global.console = console;
+
+win.Icon = global.Icon = (name) => '<svg data-icon="' + name + '"></svg>';
+win.t = global.t = (k) => k;
+win.escapeHtml = global.escapeHtml = (s) => String(s == null ? '' : s);
+// PROJECT-LESS state: no active conv at all (the New Chat page), and no
+// projectState singleton — exactly what _displayedProjectPath() resolves to ''.
+win.getActiveConv = global.getActiveConv = () => null;
+win._getConvProjectPath = global._getConvProjectPath = (c) => (c && c.projectPath) || '';
+win.pushSubscribe = global.pushSubscribe = () => {};
+win.pushUnsubscribe = global.pushUnsubscribe = () => {};
+// Any fetch firing here would prove the panel loads for a project it does not have.
+let _fetchFired = false;
+win.Api = global.Api = { project: new Proxy({}, { get: () => () => { _fetchFired = true; return Promise.resolve(null); } }) };
+
+eval(fs.readFileSync(SRC, 'utf8'));  // project-brain.js
+
+const out = [];
+function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
+
+win.openProjectBrain({ needsYou: 1 });   // the stale bar's exact call shape
+const overlay = win.document.getElementById('projectBrainOverlay');
+check('overlay_opens', overlay && overlay.hidden === false);
+const BODIES = ['projectBrainAttentionBody', 'projectBrainCharterBody',
+                'projectBrainBoardBody', 'projectBrainActivityList',
+                'projectBrainPeersBody', 'projectBrainStatusBody'];
+let allEmpty = true;
+for (const id of BODIES) {
+  const el = win.document.getElementById(id);
+  if (!el || el.innerHTML.indexOf('pb-no-project') === -1) allEmpty = false;
+}
+check('all_tabs_show_no_project_state', allEmpty);
+check('no_fetch_fired', _fetchFired === false);
+const badges = ['pbTabCountAttention', 'pbTabCountCharter', 'pbTabCountBoard', 'pbTabCountPeers'];
+let badgesCleared = true;
+for (const id of badges) {
+  const el = win.document.getElementById(id);
+  if (el && el.hidden === false) badgesCleared = false;
+}
+check('count_badges_cleared', badgesCleared);
+const banner = win.document.getElementById('projectBrainInfluence');
+check('influence_banner_hidden', !banner || banner.hidden === true);
+console.log(out.join('\n'));
+"""
+
+
+def _run_no_project(brain_src: str) -> str:
+    frag = _extract_panel_fragment()
+    frag_file = os.path.join(HERE, '_pb_np_fragment.html')
+    harness = os.path.join(HERE, '_pb_np_harness.js')
+    with open(frag_file, 'w', encoding='utf-8') as f:
+        f.write(frag)
+    with open(harness, 'w', encoding='utf-8') as f:
+        f.write(_HARNESS_NO_PROJECT)
+    try:
+        proc = subprocess.run(
+            ['node', harness, brain_src, ROOT, frag_file],
+            capture_output=True, text=True, timeout=60)
+    finally:
+        for p in (frag_file, harness):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+    output = proc.stdout.strip()
+    assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
+    return output
+
+
+@pytest.mark.skipif(not _node_deps_available(),
+                    reason='node + jsdom dev-deps not installed (run npm install)')
+def test_open_panel_without_project_shows_explicit_empty_state():
+    """Opening the Brain panel with no displayed project paints the explicit
+    no-project state in every tab body (never blank/stale tabs) and fires no
+    data fetch."""
+    output = _run_no_project(_BRAIN_SRC)
+    fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
+    assert not fails, 'no-project open failures:\n' + output
+    for must in ('PASS overlay_opens', 'PASS all_tabs_show_no_project_state',
+                 'PASS no_fetch_fired', 'PASS count_badges_cleared',
+                 'PASS influence_banner_hidden'):
+        assert must in output, output
+
+
+@pytest.mark.skipif(not _node_deps_available(),
+                    reason='node + jsdom dev-deps not installed (run npm install)')
+def test_NC_no_project_empty_state_is_load_bearing():
+    """NEUTER: drop the _renderNoProject() call from the else-branch → the
+    panel opens into void tabs again (baked defaults / stale content, no
+    pb-no-project) → all_tabs_show_no_project_state goes red."""
+    with open(_BRAIN_SRC, encoding='utf-8') as f:
+        original = f.read()
+    anchor = '      _renderNoProject();'
+    assert anchor in original, 'no-project render call anchor not found'
+    patched = original.replace(
+        anchor, '      void 0;  // NC (no-project empty state disabled)', 1)
+    copy_path = os.path.join(HERE, '_pb_np_nc_copy.js')
+    try:
+        with open(copy_path, 'w', encoding='utf-8') as f:
+            f.write(patched)
+        output = _run_no_project(copy_path)
+        assert 'FAIL all_tabs_show_no_project_state' in output, (
+            'NC: removing the empty-state render must fail the assertion:\n'
+            + output)
+        # discriminating: the panel itself still opens.
+        assert 'PASS overlay_opens' in output, output
     finally:
         try:
             os.remove(copy_path)

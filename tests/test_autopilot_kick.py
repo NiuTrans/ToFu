@@ -126,8 +126,15 @@ def test_kick_sets_flag_and_strips_checkpoints(monkeypatch):
 
 # ── _run_autopilot_kick carrier ────────────────────────────────────────
 
-def test_run_kick_emits_baton_on_done(monkeypatch):
-    """The carrier runs the VU hook and rides the baton out on `done`."""
+def test_run_kick_emits_no_retired_baton_on_done(monkeypatch):
+    """Post-pt_8dc03017 contract (updated 2026-07-27): the kick carrier's
+    done carries NO withheld autopilot baton and the task keeps NO
+    ``_autopilot_followup`` stash — that discovery mechanism was
+    deliberately retired (aa6f7ea6).  The follow-up is discovered via
+    ``latestLiveTaskId`` on the terminal tick (pinned by
+    tests/test_vu_carrier_stream_contract.py) or /api/chat/active.
+    This test pins the RETIREMENT so the dual mechanism cannot silently
+    come back."""
     import lib.tasks_pkg.autopilot as ap
     from lib.tasks_pkg import create_task
 
@@ -147,11 +154,14 @@ def test_run_kick_emits_baton_on_done(monkeypatch):
     ap._run_autopilot_kick(task)
 
     assert task['status'] == 'done'
-    assert task['_autopilot_followup']['next_task_id'] == 'next-123'
+    assert '_autopilot_followup' not in task, (
+        'the retired withheld-baton stash must NOT come back')
     done = [e for e in appended if e.get('type') == 'done']
     assert len(done) == 1
-    assert done[0]['autopilotNextTaskId'] == 'next-123'
-    assert done[0]['autopilotVuMessage']['content'] == 'go on'
+    assert 'autopilotNextTaskId' not in done[0], (
+        'the retired baton fields must NOT ride the kick done — discovery '
+        'is via latestLiveTaskId (terminal tick) or /api/chat/active')
+    assert 'autopilotVuMessage' not in done[0]
 
 
 def test_run_kick_done_without_followup(monkeypatch):

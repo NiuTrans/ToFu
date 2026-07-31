@@ -46,10 +46,13 @@ CHEAP_BLENDED_THRESHOLD = 9.0
 # Caps that indicate a non-chat model — pricing tier tags never apply.
 # Must list EVERY non-chat cap: a stray managed tag (e.g. 'cheap') on a non-chat
 # slot makes {transcription, cheap} no longer a subset of the dispatcher's
-# _NON_CHAT_CAPS, so the slot leaks into the chat picker (and 404s). Keep this in
-# sync with LLMDispatcher._NON_CHAT_CAPS and the debug/reeval_pricing_tags.py
-# skip-sets.
-_NON_CHAT_CAPS = frozenset({'image_gen', 'embedding', 'transcription', 'audio_chat'})
+# _NON_CHAT_CAPS, so the slot leaks into the chat picker (and 404s). Single
+# source of truth is lib.model_info.capability_taxonomy — this alias imports
+# the dispatcher-shaped set (includes 'audio_chat', which matters for the
+# subset check above). Keep debug/reeval_pricing_tags.py skip-sets in sync.
+from lib.model_info.capability_taxonomy import (
+    DISPATCHER_NON_CHAT_CAPS as _NON_CHAT_CAPS,
+)
 
 
 def _resolve_prices(model_id: str,
@@ -125,6 +128,34 @@ def is_model_cheap(model_id: str, fallback_cost_per_1k: float = None,
     )
 
 
+def _model_input_price(m: dict):
+    """Resolve a model entry's per-1M input price from its two on-disk shapes.
+
+    Top-level ``input_price`` is what auto-discovery/OpenRouter enrichment
+    writes; the nested ``pricing: {input, output, …}`` dict is the
+    per-provider override a user (or a provider template) declares — the same
+    dict ``routes/config.py`` registers into ``PROVIDER_PRICING`` so cost
+    accounting honors it. Tier evaluation must see BOTH or a user-set price
+    silently fails to update the 'cheap' tag.
+    """
+    v = m.get('input_price')
+    if v is None:
+        pinfo = m.get('pricing')
+        if isinstance(pinfo, dict):
+            v = pinfo.get('input')
+    return v
+
+
+def _model_output_price(m: dict):
+    """Output-price twin of :func:`_model_input_price`."""
+    v = m.get('output_price')
+    if v is None:
+        pinfo = m.get('pricing')
+        if isinstance(pinfo, dict):
+            v = pinfo.get('output')
+    return v
+
+
 def reevaluate_pricing_tags(models: list[dict], *, log_prefix: str = '') -> dict:
     """Re-evaluate all managed pricing-tier tags on *models* in place.
 
@@ -168,8 +199,8 @@ def reevaluate_pricing_tags(models: list[dict], *, log_prefix: str = '') -> dict
         desired = get_pricing_tiers(
             mid,
             fallback_cost_per_1k=m.get('cost'),
-            input_price=m.get('input_price'),
-            output_price=m.get('output_price'),
+            input_price=_model_input_price(m),
+            output_price=_model_output_price(m),
         )
 
         current_tier_tags = caps & MANAGED_TIER_TAGS

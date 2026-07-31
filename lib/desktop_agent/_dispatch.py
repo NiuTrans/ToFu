@@ -25,6 +25,15 @@ from lib.desktop_agent._gui import (
     cmd_screenshot_desktop,
     cmd_system_info,
 )
+from lib.desktop_agent._project import (
+    cmd_project_apply_diff,
+    cmd_project_find_files,
+    cmd_project_grep_search,
+    cmd_project_list_dir,
+    cmd_project_read_files,
+    cmd_project_run_command,
+    cmd_project_write_file,
+)
 from lib.log import get_logger
 
 logger = get_logger(__name__)
@@ -53,11 +62,22 @@ COMMANDS = {
 
     # System
     'desktop_system_info':   cmd_system_info,
+
+    # Project (RWA P1 — share-root worktree commands; wire type = full name)
+    'project_list_dir':      cmd_project_list_dir,
+    'project_read_files':    cmd_project_read_files,
+    'project_write_file':    cmd_project_write_file,
+    'project_apply_diff':    cmd_project_apply_diff,
+    'project_grep_search':   cmd_project_grep_search,
+    'project_find_files':    cmd_project_find_files,
+    'project_run_command':   cmd_project_run_command,
 }
 
 # Permission levels
-WRITE_COMMANDS = {'desktop_write_file', 'desktop_move_file'}
-EXEC_COMMANDS = {'desktop_run_command', 'desktop_open_file', 'desktop_open_app'}
+WRITE_COMMANDS = {'desktop_write_file', 'desktop_move_file',
+                  'project_write_file', 'project_apply_diff'}
+EXEC_COMMANDS = {'desktop_run_command', 'desktop_open_file', 'desktop_open_app',
+                 'project_run_command'}
 GUI_COMMANDS = {'desktop_gui_action', 'desktop_screenshot'}
 
 

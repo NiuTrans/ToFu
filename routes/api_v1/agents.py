@@ -40,7 +40,7 @@ import time
 
 from flask import Blueprint
 
-from lib.api_response import api_bad_request, api_internal_error, api_ok
+from lib.api_response import api_bad_request, api_internal_error, api_ok, safe_route
 from lib.log import get_logger, log_context
 from lib.openapi import api_meta
 from lib.request_parser import (
@@ -235,7 +235,21 @@ def paper_translate_poll_v1():
 @require_scope('agents:memory')
 @api_meta(summary='Search memories', tags=['agents'],
           scope='agents:memory')
+@safe_route
 def memory_search():
+    """Search memories.
+
+    @safe_route wraps the FINAL search_memories(...) call — the ad-hoc
+    ``except Exception as e: logger.exception + api_internal_error(e)``
+    was pure (no distinct context, no side effects) so the decorator
+    reproduces its behaviour with the correct qualname source. The
+    other two try/except blocks in this function are DELIBERATELY
+    RETAINED because they are NOT the same pattern:
+      * ``except ImportError as e:`` (module-availability check) →
+        distinct 'Memory unavailable' context that must survive.
+      * ``except (ValueError, TypeError)`` for ``int(top_k)`` → local
+        recovery-with-default, not a 500 escape hatch.
+    """
     body = parse_body()
     query = optional_str(body, 'query', default='', max_len=500)
     if not query:
@@ -250,11 +264,7 @@ def memory_search():
     except (ValueError, TypeError) as _e_audit:
         logger.debug('[agents] memory_search caught %s: %s', type(_e_audit).__name__, _e_audit)
         top_k = 30
-    try:
-        results = search_memories(query, top_k=top_k)
-    except Exception as e:
-        logger.exception('[api_v1.memory] search failed')
-        return api_internal_error(e)
+    results = search_memories(query, top_k=top_k)
     return api_ok(results=results, count=len(results))
 
 

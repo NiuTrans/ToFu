@@ -44,7 +44,7 @@ def _get_g():
     test in the same pytest run. Importing ``g`` at call time always yields
     whatever ``flask`` currently resolves to (the shim's quart, in the app;
     real flask if genuinely unshimmed), so the proxy matches the live
-    context. See .tofu/skills/test-server-shim-load-order.md.
+    context. See .tofu/memories/test-server-shim-load-order.md.
     """
     from flask import g
     return g

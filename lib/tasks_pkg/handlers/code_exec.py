@@ -13,6 +13,12 @@ from lib.tasks_pkg.manager import append_event
 
 logger = get_logger(__name__)
 
+try:
+    from lib.qr import LiveQrScanner as _LiveQrScanner
+except Exception as _e:  # pragma: no cover - defensive: never break run_command
+    _LiveQrScanner = None
+    logger.warning('[code_exec] live QR scanning unavailable: %s', _e)
+
 
 # ── Streaming output coalescing ─────────────────────────────
 # The subprocess can emit chunks faster than the SSE channel can deliver them
@@ -42,6 +48,12 @@ def _make_run_command_progress_cb(task, rn, round_entry, command):
         'last_flush': time.monotonic(),
         'lock': threading.Lock(),
         'timer': None,
+        # ★ Live QR recovery. A scan-to-login QR is printed while the command
+        #   is STILL RUNNING and blocking for the scan, so recovering it only
+        #   at finalize delivers the image after the authorization window has
+        #   closed. The scanner is stateful (dedup + growth throttle) because
+        #   this callback fires every ~200ms for the whole wait.
+        'qr': _LiveQrScanner() if _LiveQrScanner is not None else None,
     }
 
     def _flush_locked():
@@ -86,6 +98,37 @@ def _make_run_command_progress_cb(task, rn, round_entry, command):
                 'toolName': round_entry.get('toolName') or 'run_command',
             })
         round_entry['_partialOutput'] = partial
+
+        # ★ Live QR recovery — the scan-to-login seam.
+        #   Runs AFTER the buffer is updated so the scanner sees the complete
+        #   art block, and emits its own event rather than riding a chunk
+        #   frame: the code becomes visible the moment it is drawable, which
+        #   is the entire point (the command is still blocking for the scan).
+        #   Descriptors are also stamped onto round_entry so a reconnect /
+        #   state-snapshot replay restores them without a re-scan.
+        scanner = state.get('qr')
+        if scanner is not None:
+            try:
+                fresh = scanner.scan(partial)
+            except Exception as e:
+                logger.warning('[code_exec] live QR scan failed (non-fatal): %s', e)
+                fresh = []
+            if fresh:
+                acc = list(round_entry.get('qrImages') or [])
+                acc.extend(fresh)
+                round_entry['qrImages'] = acc
+                append_event(task, {
+                    'type': 'tool_progress',
+                    'roundNum': rn,
+                    'toolCallId': round_entry.get('toolCallId', ''),
+                    'stream': 'stdout',
+                    'chunk': '',
+                    'toolName': round_entry.get('toolName') or 'run_command',
+                    'qrImages': acc,
+                })
+                logger.info('[code_exec] surfaced %d live QR code(s) for a '
+                            'still-running command (task=%s)',
+                            len(fresh), task.get('id', '?')[:8])
 
     def _delayed_flush():
         with state['lock']:

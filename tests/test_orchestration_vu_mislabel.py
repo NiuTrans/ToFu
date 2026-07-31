@@ -157,9 +157,10 @@ class VuConsumerTest(unittest.TestCase):
 
         class _Store:
             def load_conversation_messages(self, cid):
-                return list(persisted), 0
+                return list(persisted), 0, 0
 
-            def sync_conversation_with_search(self, cid, msgs):
+            def sync_conversation_with_search(self, cid, msgs, *,
+                                              expected_rev=None, rebuild=None):
                 captured['msgs'] = msgs
 
         import types

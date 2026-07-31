@@ -144,22 +144,33 @@ def _is_last_resort_unlocked(pk: str, siblings: list) -> bool:
     return _pick_last_resort_unlocked(siblings) == pk
 
 
-def is_key_enabled(provider_id: str, key_name: str) -> bool:
+def is_key_enabled(provider_id: str, key_name: str, model: str = '') -> bool:
     """Return True if this key should be used for new dispatches today.
 
+    Args:
+        model: when given, also honour PER-MODEL billing-stops
+            (``exhausted_models`` — see :func:`mark_key_exhausted`). A stop
+            recorded for one model does not block sibling models on the same
+            key (aggregating-gateway isolation), and a model-specific stop
+            never gets last-resort promotion — retrying a quota-dead model
+            is futile, the dispatcher should fall back to another model.
+
     Precedence (in order):
-      1. Raw check — manual override > exhausted flag > success-rate ≥
-         threshold.  If raw check is True, return True.
-      2. Explicit user override ``False`` always wins, even if this would
-         leave the provider with zero usable keys (users retain full
-         control).
-      3. Otherwise, the "last-resort" guard: if every sibling key under
+      1. Manual override wins EVERYTHING, including billing-stops — user
+         supremacy. (The Settings card surfaces the override-vs-stop
+         conflict so a stale manual ON doesn't silently defeat a fresh
+         quota error.)
+      2. Per-model stop (when *model* given) — disable for that model only.
+      3. Raw key-wide check — exhausted flag > success-rate ≥ threshold.
+      4. Explicit user override ``False`` always wins, even if this would
+         leave the provider with zero usable keys.
+      5. Otherwise, the "last-resort" guard: if every sibling key under
          the same ``provider_id`` is raw-disabled, keep exactly ONE of
          them enabled — the "healthiest" per
          :func:`_rank_for_last_resort_unlocked`, with ties broken toward
          the last configured key.  All other siblings stay disabled.
          Logs once per (day, pk) at INFO level when a key is promoted.
-      4. Otherwise return False (normal auto-disable).
+      6. Otherwise return False (normal auto-disable).
     """
     if not key_name:
         return True
@@ -175,6 +186,13 @@ def is_key_enabled(provider_id: str, key_name: str) -> bool:
 
     with _lock:
         _ensure_fresh_unlocked()
+        # Per-model billing-stop gate. Skip when an override exists — the
+        # raw check below already lets the override win, and consulting it
+        # twice would double the precedence paths.
+        if model and pk not in _cache['overrides']:
+            entry = _cache['stats'].get(pk) or {}
+            if model in (entry.get('exhausted_models') or {}):
+                return False
         if _raw_enabled_unlocked(pk):
             return True
         # Respect explicit manual-disable even when it would zero out the

@@ -20,8 +20,11 @@ ghost-classifier inference.
 FE inference-debt #2 verdict: the "backend-issued taskId→msgId bind" the epic
 asked for already EXISTS (`_taskId`). The genuine remaining debt was that the
 identical predicate was DUPLICATED at the two connect sites and could drift.
-This test locks in ONE canonical reducer (core/conversations.js) that both call
-sites use.
+This test locks in ONE canonical reducer that both call sites use. The reducer's
+defining module is RESOLVED BY SEARCH (it has already moved once —
+core/conversations.js → core/conv_reducers.js, commit 0460e64a — and the
+hardcoded path turned that move into an unreadable `substring not found`), so
+only a genuine deletion or re-duplication of the reducer fails this test.
 
 Slices the REAL shipped reducer verbatim, runs under node, drives the truth
 table + a neuter proving the stale-taskId equality is load-bearing.
@@ -40,9 +43,42 @@ pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-CONV_JS = os.path.join(ROOT, 'static', 'js', 'core', 'conversations.js')
+CORE_DIR = os.path.join(ROOT, 'static', 'js', 'core')
 SSE_JS = os.path.join(ROOT, 'static', 'js', 'ui', 'sse_pipeline.js')
 INIT_JS = os.path.join(ROOT, 'static', 'js', 'main', 'main_init_tasks.js')
+
+_REDUCER_SIG = 'function assistantTailIsPriorTurn(msg, activeTaskId) {\n'
+
+
+def _reducer_module() -> str:
+    """Locate the module that DEFINES the reducer, wherever it currently lives.
+
+    The reducer has already migrated once (core/conversations.js →
+    core/conv_reducers.js, commit 0460e64a) and that move silently broke this
+    guard for days: it read a hardcoded path, so the miss surfaced as a
+    `ValueError: substring not found` — indistinguishable from noise — rather
+    than as "the behaviour I protect is gone". Resolving the defining module by
+    SEARCHING for the definition keeps the guard anchored to the semantic unit
+    (the function), so a future re-extraction re-points itself and only a
+    genuine DELETION of the reducer fails the test.
+    """
+    hits = sorted(
+        os.path.join(CORE_DIR, name)
+        for name in os.listdir(CORE_DIR)
+        if name.endswith('.js')
+        and _REDUCER_SIG in open(os.path.join(CORE_DIR, name), encoding='utf-8').read()
+    )
+    assert hits, (
+        'assistantTailIsPriorTurn is not DEFINED in any static/js/core/*.js — '
+        'the shared prior-turn reducer was deleted, not merely relocated. The '
+        'two connect sites (sse_pipeline.js, main_init_tasks.js) call it, so '
+        'this is a real regression, not an anchor drift.'
+    )
+    assert len(hits) == 1, (
+        f'assistantTailIsPriorTurn is defined in MORE than one core module '
+        f'({hits}) — the single-source-of-truth reducer has been duplicated again.'
+    )
+    return hits[0]
 
 
 def _node_available() -> bool:
@@ -51,10 +87,14 @@ def _node_available() -> bool:
 
 def _extract_reducer(src_text: str) -> str:
     """Slice the `assistantTailIsPriorTurn` fn body (through its closing brace)."""
-    sig = 'function assistantTailIsPriorTurn(msg, activeTaskId) {\n'
-    start = src_text.index(sig)
+    start = src_text.index(_REDUCER_SIG)
     end = src_text.index("\n}\n", start) + len("\n}\n")
     return src_text[start:end]
+
+
+def _shipped_reducer() -> str:
+    with open(_reducer_module(), encoding='utf-8') as fh:
+        return _extract_reducer(fh.read())
 
 
 _HARNESS = r"""
@@ -75,11 +115,35 @@ check('current_task_empty_not_prior',
 // 2. tail owned by a DIFFERENT task → prior (push fresh)
 check('different_task_is_prior',
   f({ role: 'assistant', _taskId: 'T1', content: 'old' }, 'T2') === true);
-// 3. tail already has finishReason (completed) → prior even if same/no taskId
+// 3. tail already has finishReason (completed) but is NOT bound to this task
+//    → prior (push fresh). This is the RELOAD-SAFE arm: `_taskId` is not
+//    persisted, so a DB-loaded completed tail has none.
 check('finishreason_is_prior',
   f({ role: 'assistant', finishReason: 'stop', content: 'done' }, 'T2') === true);
-check('finishreason_same_task_is_prior',
-  f({ role: 'assistant', _taskId: 'T2', finishReason: 'stop' }, 'T2') === true);
+// 3b. ★ ROW INVERTED 2026-07-31 — IDENTITY BEATS A TERMINAL FIELD.
+//     This row used to assert `=== true`: a tail bound to THIS task was still
+//     called a prior turn whenever it carried a finishReason. That assertion
+//     WAS the duplicate-bubble bug, for two reasons:
+//
+//     (a) It contradicted its own call site. sse_pipeline.js resolves the slot
+//         bound to this taskId FIRST (_resolveAssistantByTaskId) and its
+//         comment claims that makes "a second bubble for the same task
+//         structurally impossible" — then this reducer threw that resolution
+//         away and pushed a fresh placeholder anyway.
+//     (b) `finishReason` is NOT reliably terminal on the wire. The orchestrator
+//         stamps task['finishReason'] ~111 lines before it flips
+//         task['status']='done' (lib/tasks_pkg/orchestrator/_finalize.py), and
+//         that window contains the blocking `_generate_tool_summary` LLM call.
+//         A poll landing inside it copied a terminal field onto a STILL-LIVE
+//         turn; this row then declared the live bubble a prior turn, the deltas
+//         moved to a new placeholder, and the first bubble froze mid-sentence
+//         while both rendered. Measured 2026-07-31 on conv ms8c0645hwl327: the
+//         DB held ONE assistant message while the screen showed TWO bubbles.
+//
+//     A tail explicitly bound to the task now connecting is that task's own
+//     bubble. Full chain: tests/test_duplicate_bubble_midturn_finish_reason.py.
+check('finishreason_same_task_is_not_prior',
+  f({ role: 'assistant', _taskId: 'T2', finishReason: 'stop' }, 'T2') === false);
 // 4. no _taskId, no finishReason (fresh in-flight placeholder) → NOT prior
 check('no_facts_not_prior',
   f({ role: 'assistant', content: '' }, 'T2') === false);
@@ -119,8 +183,7 @@ def _run(reducer_text: str, tag: str) -> str:
 
 @pytest.mark.skipif(not _node_available(), reason='node not installed')
 def test_prior_turn_reducer_truth_table():
-    with open(CONV_JS, encoding='utf-8') as f:
-        reducer = _extract_reducer(f.read())
+    reducer = _shipped_reducer()
     out = _run(reducer, 'real')
     fails = [ln for ln in out.splitlines() if ln.startswith('FAIL')]
     assert not fails, 'prior-turn reducer failures:\n' + out
@@ -132,8 +195,7 @@ def test_prior_turn_reducer_neuter_drops_stale_taskid():
     """NEUTER: force _staleTaskId to false → a tail owned by a DIFFERENT task is
     no longer recognized as prior. Proves the taskId equality is load-bearing
     (its removal re-introduces the old-content-replay bug)."""
-    with open(CONV_JS, encoding='utf-8') as f:
-        reducer = _extract_reducer(f.read())
+    reducer = _shipped_reducer()
     neutered = reducer.replace(
         "const _staleTaskId = !!(msg._taskId && msg._taskId !== activeTaskId);",
         "const _staleTaskId = false;", 1)
@@ -143,6 +205,33 @@ def test_prior_turn_reducer_neuter_drops_stale_taskid():
         'NC (stale-taskId disabled) should fail different_task_is_prior:\n' + out
     # finishReason path is unaffected by this neuter.
     assert 'PASS finishreason_is_prior' in out, out
+
+
+@pytest.mark.skipif(not _node_available(), reason='node not installed')
+def test_prior_turn_reducer_neuter_drops_own_task_arm():
+    """NEUTER: remove the identity-wins arm → a tail bound to THIS task that
+    carries a (possibly non-terminal) finishReason is misclassified as a prior
+    turn again. That misclassification is the duplicate-bubble bug, so this
+    proves the arm is load-bearing and not decorative.
+
+    The complement must keep passing under the same neuter: the reload-safe
+    `!!finishReason` arm is untouched, so the fix is a NARROWING rather than a
+    removal of the completed-turn decision.
+    """
+    reducer = _shipped_reducer()
+    neutered = reducer.replace(
+        '  if (msg._taskId && activeTaskId && msg._taskId === activeTaskId) return false;\n',
+        '', 1)
+    assert neutered != reducer, (
+        'neuter did not modify the reducer — the identity-wins arm is gone or '
+        'was reworded; re-derive this guard.')
+    out = _run(neutered, 'neuter_own')
+    assert 'FAIL finishreason_same_task_is_not_prior' in out, (
+        'removing the identity-wins arm no longer reproduces the '
+        'duplicate-bubble misclassification:\n' + out)
+    # The reload-safe arm must survive the neuter (different failure reason).
+    assert 'PASS finishreason_is_prior' in out, out
+    assert 'PASS different_task_is_prior' in out, out
 
 
 @pytest.mark.skipif(not _node_available(), reason='node not installed')

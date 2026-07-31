@@ -35,6 +35,7 @@ Routes (legacy snake_case path → new hyphen-case path):
   POST   /api/v1/project/board/block        — Project Brain: human flags epic blocked
   POST   /api/v1/project/board/reopen       — Project Brain: human reopens an epic
   GET    /api/v1/project/brain/summary      — Project Brain: collab-bar summary
+  GET    /api/v1/project/brain/attention    — Project Brain: everything awaiting the human
   GET    /api/v1/project/brain/peers        — Project Brain: LIVE peer/team roster
   GET    /api/v1/project/brain/influence    — Project Brain: per-conversation influence
   POST   /api/v1/project/brain/peer-message — Project Brain: human nudges a sibling conversation
@@ -553,8 +554,18 @@ def project_charter():
     if not project_path:
         return api_bad_request('path is required', field='path')
     try:
-        from lib.conversations.project_charter import read_charter
-        return api_ok(read_charter(project_path))
+        from lib.conversations.project_charter import (
+            _INJECTION_DECISION_WINDOW, read_charter)
+        rec = read_charter(project_path)
+        # Health strip data — computed HERE (backend single source), never
+        # re-derived in the frontend.
+        _decisions = rec.get('decisions') or []
+        rec['health'] = {
+            'contentSet': bool((rec.get('content') or '').strip()),
+            'decisionCount': len(_decisions),
+            'injectedCount': min(len(_decisions), _INJECTION_DECISION_WINDOW),
+        }
+        return api_ok(rec)
     except Exception as e:
         logger.error('[Project.v1] charter read failed for %s: %s',
                      project_path, e, exc_info=True)
@@ -570,8 +581,15 @@ def project_charter():
         'The human gate for the charter north star — an agent can only PROPOSE '
         '(project_charter_propose); only this route COMMITS. Body: ``{path, '
         'content?, add_decision?, expected_version?, updated_by_conv?}``. '
-        'Optimistic-locked: a stale ``expected_version`` is rejected with '
-        '``version_conflict``. On success emits a ``decided`` activity event.'),
+        '``content`` and ``add_decision`` are MUTUALLY EXCLUSIVE (400) — one '
+        'call is either an overwrite or an append, never both, which is what '
+        'lets the append be replayed safely under contention. '
+        '``expected_version`` is scoped by OPERATION: an OVERWRITE '
+        '(``content``) treats it as a hard optimistic lock and a stale value is '
+        'rejected with ``version_conflict`` (409); an APPEND (``add_decision``) '
+        'commutes with other appends, so a stale value does NOT refuse it — the '
+        'write CAS-retries instead. On success emits a ``decided`` activity '
+        'event.'),
     tags=['project'],
 )
 def project_charter_commit():
@@ -583,6 +601,25 @@ def project_charter_commit():
     add_decision = data.get('add_decision')
     if content is None and not add_decision:
         return api_bad_request('provide content and/or add_decision')
+    if content is not None and add_decision:
+        # Mirrors commit_charter's own refusal, so an external client can never
+        # reach a shape the library refuses — and "is this a pure append?"
+        # stays decidable from the body alone.
+        return api_bad_request(
+            'content and add_decision are mutually exclusive — send one call '
+            'per operation (an overwrite or an append, never both)',
+            field='add_decision')
+    # A committed decision is an INVARIANT: it MUST carry its one-line
+    # summary (the binding rule the per-turn injection renders). The agent
+    # tool path has enforced kind+summary since the kind routing landed;
+    # this closes the same gap on the human REST path so kindless entries
+    # cannot flow back in through the panel.
+    summary = (data.get('summary') or '').strip()
+    if add_decision and not summary:
+        return api_bad_request(
+            'add_decision requires summary — ONE line stating the binding '
+            'rule itself (the per-turn injection renders only this line)',
+            field='summary')
     expected_version = data.get('expected_version')
     if expected_version is not None:
         try:
@@ -594,6 +631,8 @@ def project_charter_commit():
         from lib.conversations.project_charter import commit_charter
         result = commit_charter(
             project_path, content=content, add_decision=add_decision,
+            decision_kind=('invariant' if add_decision else ''),
+            summary=summary,
             expected_version=expected_version,
             updated_by_conv=(data.get('updated_by_conv') or '').strip(),
             resolves_proposal=(data.get('resolves_proposal') or '').strip())
@@ -625,7 +664,27 @@ def project_board():
         return api_bad_request('path is required', field='path')
     try:
         from lib.conversations.project_board import read_board
-        return api_ok(read_board(project_path))
+        board = read_board(project_path)
+        # ── Backend-authoritative dispatch fact (front/back contract): the
+        #    frontend must NOT re-infer "will the brain pick this up" from
+        #    client state. Stamp `dispatchable=True` on the epics the heartbeat
+        #    would genuinely pick up on its next sweep (deps done, not on a live
+        #    cooldown, not live-claimed, has a routing target). The frontend
+        #    renders "auto-starts ~30s" purely from this flag. Best-effort:
+        #    a failure here just omits the flag (frontend shows no hint). ──
+        try:
+            from lib.conversations.project_dispatch import (
+                _dispatch_target, select_dispatchable)
+            pickable = {e['id']: _dispatch_target(e)
+                        for e in select_dispatchable(project_path)}
+            for t in board.get('tasks', []):
+                tgt = pickable.get(t.get('id'))
+                if tgt:
+                    t['dispatchable'] = True
+                    t['dispatch_target'] = tgt
+        except Exception as e:
+            logger.debug('[Project.v1] board dispatch-fact enrich skipped: %s', e)
+        return api_ok(board)
     except Exception as e:
         logger.error('[Project.v1] board read failed for %s: %s',
                      project_path, e, exc_info=True)
@@ -793,6 +852,46 @@ def project_board_reopen():
         return api_internal_error(e, source='api_v1.project.board_reopen')
 
 
+@api_v1_project_bp.route('/api/v1/project/board/answer', methods=['POST'])
+@require_auth
+@rate_limit(limit=20, per=60)
+@api_meta(
+    summary='HUMAN answers a pending block question on a board epic',
+    description=(
+        'Body: ``{path, taskId, convId, answer}``. Closes the structured human '
+        'gate: stamps ``human_answer``, clears the cooldown + question, emits '
+        'an ``answered`` feed event, and triggers an IMMEDIATE re-dispatch '
+        '(``on_epic_answered``) whose kickoff carries the answer. Only valid '
+        'while a question is pending (else ``no_pending_question`` → 400). '
+        'Audit-logged.'),
+    tags=['project'],
+)
+def project_board_answer():
+    data = parse_body()
+    project_path = (data.get('path') or '').strip()
+    if not project_path:
+        return api_bad_request('path is required', field='path')
+    task_id = (data.get('taskId') or '').strip()
+    if not task_id:
+        return api_bad_request('taskId is required', field='taskId')
+    answer = (data.get('answer') or '').strip()
+    if not answer:
+        return api_bad_request('answer is required', field='answer')
+    conv_id = _board_conv_id(data)
+    try:
+        from lib.conversations.project_board import answer_task
+        result = answer_task(project_path, conv_id, task_id, answer)
+        if not result.get('ok'):
+            return jsonify(result), 400
+        logger.info('[Project.v1] board/answer proj=%.40r task=%s',
+                    project_path, task_id)
+        return api_ok(result)
+    except Exception as e:
+        logger.error('[Project.v1] board/answer failed for %s: %s',
+                     project_path, e, exc_info=True)
+        return api_internal_error(e, source='api_v1.project.board_answer')
+
+
 @api_v1_project_bp.route('/api/v1/project/charter/pending', methods=['GET'])
 @require_auth
 @api_meta(
@@ -871,9 +970,16 @@ def _parse_expected_version(data):
     summary='HUMAN-GATED edit of one committed charter decision',
     description=(
         'Edit a single committed decision by its list ``index``. Body: '
-        '``{path, index, text, expected_version?, updated_by_conv?}``. '
+        '``{path, index, text, summary?, expected_version?, updated_by_conv?}``. '
         'Optimistic-locked: a stale ``expected_version`` is rejected with '
-        '``version_conflict`` (409); an out-of-range index → 400.'),
+        '``version_conflict`` (409); an out-of-range index → 400.\n\n'
+        '``summary`` is the ONE line the per-turn injection renders — the body is '
+        'read back on demand. So editing ``text`` alone on an entry that HAS a '
+        'summary is refused with ``summary_required`` (400): otherwise the edit '
+        'would return ok, bump the version, and leave every sibling '
+        'conversation reading the OLD rule forever. Send ``summary: ""`` to '
+        'deliberately drop it and let the headline fall back to the fresh text. '
+        'Entries that never had a summary edit without ceremony.'),
     tags=['project'],
 )
 def project_charter_decision_update():
@@ -891,10 +997,16 @@ def project_charter_decision_update():
     expected_version, err = _parse_expected_version(data)
     if err is not None:
         return err
+    # ABSENT key vs empty string are different instructions and must stay
+    # distinguishable across the wire: absent = "I said nothing about the
+    # summary" (refused when one exists), '' = "drop it deliberately".
+    from lib.conversations.project_charter import _SUMMARY_UNSET
+    summary_arg = data['summary'] if 'summary' in data else _SUMMARY_UNSET
     try:
         from lib.conversations.project_charter import update_decision
         result = update_decision(
-            project_path, index, text, expected_version=expected_version,
+            project_path, index, text, summary=summary_arg,
+            expected_version=expected_version,
             updated_by_conv=(data.get('updated_by_conv') or '').strip())
         if not result.get('ok'):
             if result.get('error') == 'version_conflict':
@@ -1015,6 +1127,38 @@ def project_brain_summary():
         return api_internal_error(e, source='api_v1.project.brain_summary')
 
 
+@api_v1_project_bp.route('/api/v1/project/brain/attention', methods=['GET'])
+@require_auth
+@api_meta(
+    summary='Everything genuinely waiting on the human, priority-ordered',
+    description=(
+        'The "needs you" SINGLE SOURCE OF TRUTH. Read-only aggregation across '
+        'the Board (epics halted on a structured question), the Charter '
+        '(pending proposals) and presence (live file-overlap advisories), '
+        'keyed strictly on the explicit ``path``. Returns ``{items, blocking, '
+        'advisory, needsYou, waiting}`` where ``items`` is priority-ordered '
+        '(``blocking`` first) and each item carries its own resolving context '
+        '+ a ``tab`` deep-link target. ``waiting`` counts epics on a '
+        'SELF-EXPIRING cooldown — reported for reassurance, deliberately NOT '
+        'listed as items, because they need no human action. ``convId`` is '
+        'optional and only marks ``mine`` on items; it never filters, because '
+        'attention is project-scoped.'),
+    tags=['project'],
+)
+def project_brain_attention():
+    project_path = _decoded_path_arg()
+    if not project_path:
+        return api_bad_request('path is required', field='path')
+    conv_id = _decoded_path_arg('convId')
+    try:
+        from lib.conversations.project_attention import build_attention_items
+        return api_ok(build_attention_items(project_path, conv_id or ''))
+    except Exception as e:
+        logger.error('[Project.v1] brain attention failed for %s: %s',
+                     project_path, e, exc_info=True)
+        return api_internal_error(e, source='api_v1.project.brain_attention')
+
+
 
 # ── Project Brain: human↔brain status lane (Pillar #7, read-only) ────
 
@@ -1128,9 +1272,13 @@ def project_brain_status_ask():
 
 # ── Project Brain: the human's WATCH lane (Pillar #7) ────────────────
 # The human authors watch items (concern|question|goal); the brain addresses
-# them on a recurring basis (append-only response trail). HUMAN-FACING ONLY —
-# the only bridge to sibling agents is /watch/promote (a human-gated charter
-# commit). All authoring is human-gated by definition (the human is the author).
+# them on a recurring basis (append-only response trail).
+#
+# A GOAL is injected into every sibling conversation's prompt just by existing
+# (lib.conversations.project_watch.render_goals_injection_block) — no promotion,
+# no charter copy. concern|question are HUMAN-FACING ONLY, and their one bridge
+# to agents is /watch/promote (a human-gated charter commit). All authoring is
+# human-gated by definition (the human is the author).
 
 @api_v1_project_bp.route('/api/v1/project/brain/watch', methods=['GET'])
 @require_auth
@@ -1141,7 +1289,18 @@ def project_brain_status_ask():
         '(``refresh=1``, the fresh-on-tab-open cadence — cheap via the per-item '
         'staleness gate) then returns every item with its append-only response '
         'trail (newest-first). Returns ``{items: [{item_id, kind, text, status, '
-        'promoted, responses:[...]}]}``.'),
+        'promotionState, divergedSide, promotedAudit, responses:[...]}], '
+        'charterVersion, charterContent}``.\n\n'
+        '``promotionState`` is the COMPUTED live verdict — ``none`` (no '
+        'promotion on record), ``active`` (this text IS the live charter text, '
+        'i.e. it really is reaching every sibling prompt) or ``diverged`` '
+        '(promoted once, but one side has since been edited; ``divergedSide`` '
+        'names which). Render THAT, never ``promotedAudit``: the stored boolean '
+        'only records that a promotion once happened and stays 1 after the '
+        'charter is deleted or the decision FIFO-evicted. '
+        '``charterVersion`` is what a goal promotion must echo back as '
+        '``expectedVersion``; ``charterContent`` is the "will be replaced" side '
+        'of the replacement preview.'),
     tags=['project'],
 )
 def project_brain_watch_list():
@@ -1256,12 +1415,22 @@ def project_brain_watch_address():
 @require_auth
 @rate_limit(limit=20, per=60)
 @api_meta(
-    summary='Promote a watch item into the charter (the ONLY bridge to agents)',
+    summary='Promote a concern/question into the charter (goals are refused)',
     description=(
-        'Body: ``{itemId, convId?, expectedVersion?}``. Bridges the item into '
-        'the charter as a committed decision via the HUMAN-GATED charter-commit '
-        'path — the only way a watch item reaches sibling agents. No new write '
-        'path, no fan-out. Returns ``{ok, version}`` or a 409 on version skew.'),
+        'Body: ``{itemId, convId?, expectedVersion?}``. Appends a ``concern`` or '
+        '``question`` to the charter as a committed decision (kind=invariant + a '
+        'one-line summary) via the HUMAN-GATED charter-commit path — the only '
+        'way one of those reaches sibling agents. Appends commute, so '
+        '``expectedVersion`` is advisory here.\n\n'
+        'A ``goal`` is REFUSED with ``400 {error: "goal_not_promotable"}``. '
+        'Goals reach agents by EXISTING: every open goal is rendered into its '
+        'own ``[PROJECT GOALS]`` prompt block on every turn, so there is nothing '
+        'to promote and copying one into the charter would recreate the '
+        'duplication this design removed. Withdraw a goal by resolving or '
+        "deleting its card; edit the charter's own north star in the Charter "
+        'panel.\n\n'
+        'Returns ``{ok, version}``, 400 on a goal / bad item, or 409 on version '
+        'skew — on 409 re-read the charter and re-present; never auto-retry.'),
     tags=['project'],
 )
 def project_brain_watch_promote():
@@ -1333,7 +1502,7 @@ def project_brain_peers():
         'the open epics it could pick up, and the decisions awaiting a human. '
         'Query: ``path`` (REQUIRED) + ``convId`` (REQUIRED). The two '
         '``injected`` flags mirror the actual system-context injection gate '
-        'exactly (computed from the SAME render_charter_block / '
+        'exactly (computed from the SAME render_charter_injection_block / '
         'render_board_block the prompt uses), so the panel can never drift '
         'from what the model really sees.'),
     tags=['project'],

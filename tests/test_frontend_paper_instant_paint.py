@@ -45,6 +45,11 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
 JS_DIR = os.path.join(ROOT, 'static', 'js')
 PAPER_JS = os.path.join(JS_DIR, 'paper-reader.js')
+# _loadPaperLibrary / _paperLibrary / _renderPaperLibrary were split out
+# of paper-reader.js into paper/library.js (2026-07). enterPaperMode still
+# lives in paper-reader.js but calls into the library layer, so BOTH files
+# must be eval'd for the paint-timing harness to resolve those symbols.
+LIBRARY_JS = os.path.join(JS_DIR, 'paper', 'library.js')
 
 
 def _node_deps_available() -> bool:
@@ -92,6 +97,7 @@ global.Api = win.Api = { paper: {
 // Skip the one-time legacy migration network path.
 localStorage.setItem('paper_library_migrated_v1', '1');
 
+eval(fs.readFileSync(process.argv[4], 'utf8'));  // paper/library.js (real, shipped)
 eval(fs.readFileSync(process.argv[2], 'utf8'));  // paper-reader.js (real, shipped)
 
 // Stub helpers that touch unrelated subsystems (kept out of scope for the
@@ -158,7 +164,7 @@ def _run_harness(paper_js: str) -> subprocess.CompletedProcess:
         f.write(_HARNESS)
     try:
         return subprocess.run(
-            ['node', harness, paper_js, ROOT],
+            ['node', harness, paper_js, ROOT, LIBRARY_JS],
             capture_output=True, text=True, timeout=60,
         )
     finally:

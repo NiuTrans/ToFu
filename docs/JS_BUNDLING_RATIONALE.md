@@ -66,7 +66,7 @@ resolution — capabilities tofu deliberately forgoes.
 The bundler was originally created to fix a Mac symptom: on a local install
 with no reverse proxy, HTTP/1.1's 6-connections-per-host limit forced ~100 JS
 files to download in serial waves (the "App initialization failed" banner — see
-`.tofu/skills/macos-mime-loadguard-compat-fixes.md`). The obvious 2026
+`.tofu/memories/macos-mime-loadguard-compat-fixes.md`). The obvious 2026
 objection is "HTTP/2 multiplexing removed that limit, so the bundle is
 obsolete." **It is not**, for two independent reasons.
 
@@ -186,9 +186,9 @@ orchestration / task-mode were since moved into the deferred bundle.)
   manifest ordering to hand-maintain** (con #2) — for a benefit that only
   appears in a deployment shape tofu does not have.
 - Prior art in this repo already rejected splitting-for-cache on the same logic:
-  `.tofu/skills/i18n-locale-split-rejected-caching-regression.md` (inlining the
+  `.tofu/memories/i18n-locale-split-rejected-caching-regression.md` (inlining the
   active locale traded a first-visit-only immutable-cached cost for a per-reload
-  no-cache cost). And `.tofu/skills/js-bundle-minify-load-perf.md` established
+  no-cache cost). And `.tofu/memories/js-bundle-minify-load-perf.md` established
   the bundle dominates **first paint**, not re-download.
 - **Cheap lever if churn ever becomes a measured problem:** add *more deferred
   sub-bundles* (group stable-vs-volatile core modules into 2-3 feature bundles),

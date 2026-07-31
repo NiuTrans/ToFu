@@ -72,6 +72,10 @@ global.conversations = [];
 global.activeStreams = new Map();
 global.activeConvId = null;
 global.renderChat = (conv) => { renderChatCalls.push(conv && conv.id); };
+/* The shipped repaint seam moved from renderChat(conv) to
+ * window.ConvView.replaceAll(convId) — stub it into the SAME counter so the
+ * 'open conv repainted' assertion keeps its original meaning. */
+global.ConvView = { replaceAll: (id) => renderChatCalls.push(id) };
 global.renderConversationList = () => { listRenderCalls++; };
 global.saveConversations = (id) => { saveCalls.push(id); };
 global._applySettingsToConv = () => {};

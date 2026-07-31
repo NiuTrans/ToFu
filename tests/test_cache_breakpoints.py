@@ -1469,6 +1469,13 @@ class TestMidHistoryAnchor:
     only on genuinely long conversations, trails the tail within the lookback
     window, and advances in quantized jumps (not every round)."""
 
+    @pytest.fixture(autouse=True)
+    def _enable_mid_anchor(self, monkeypatch):
+        """The shipped default is TOFU_CACHE_MID_MODE=drop (the live-A/B winner,
+        lib/llm/cache.py). These tests exercise the mid-anchor FEATURE, so they
+        explicitly opt into the `current` single-mid layout for the duration."""
+        monkeypatch.setenv('TOFU_CACHE_MID_MODE', 'current')
+
     def _grow(self, rounds):
         msgs = [{'role': 'system', 'content': [{'type': 'text', 'text': f'S{k}'} for k in range(3)]},
                 {'role': 'user', 'content': 'go'}]

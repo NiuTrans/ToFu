@@ -55,12 +55,41 @@ data/
 # tests/test_gitignore_covers_export_excludes.py asserts the two lists stay in
 # sync so this gap cannot silently reopen. Documented keepers stay tracked:
 #   scripts/gen_desktop_icons.py (CI icon gen), export.py, CLAUDE.md,
-#   static/provider_templates/yourprovider.json (functional internal template).
+#   static/provider_templates/yourprovider.json (functional internal template),
+#   scripts/package_extension.sh (builds the store upload zip; the SHIPPED
+#     docs/chrome-web-store/ kit tells the reader to run it, so a clean clone
+#     without it makes that instruction a dead end),
+#   scripts/install_on_server.sh (server-side installer; same shape — a
+#     documented entry point that must exist in a clean clone to be runnable).
 /benchmarks/
 /promo/
-/propaganda/
 /scripts/*
 !/scripts/gen_desktop_icons.py
+!/scripts/gen_frontend_globals.py
+!/scripts/gen_tool_inventory.py
+!/scripts/audit_tests.py
+!/scripts/package_extension.sh
+!/scripts/install_on_server.sh
+# Shared "is this release complete?" predicate. BOTH gates in
+# build-desktop.yml call it — the version gate judges an already-published
+# release, the release job judges the artifacts it just downloaded — so a
+# clean clone without it breaks the release pipeline in CI rather than
+# locally, which is the worst place to discover a missing file.
+!/scripts/release_assets.py
+# Cache-waste distribution report. The measurement discipline it encodes —
+# rates DERIVED from lib.cost rather than hand-written, non-waste classes
+# (TTL expiry / cold start) excluded from the recoverable denominator,
+# percentiles that treat 0 as a number — is the deliverable. An untracked copy
+# means the next cost audit goes back to throwaway one-liners and re-makes the
+# errors tests/test_cache_waste_report.py now pins.
+!/scripts/cache_waste_report.py
+# Second-path cache A/B probe. It is the control the gateway report is missing,
+# and it is DRY-RUN by default — the value is the encoded experiment design
+# (deterministic prefix, 4k to clear the cacheable minimum cheaply, and the
+# size-dependence caveat that stops a cheap null result being read as
+# exoneration). An untracked copy means whoever finally runs the control
+# re-derives that design and probably drops the caveat.
+!/scripts/cache_ab_probe.py
 # debug/ = standalone scratch/benchmark scripts (never imported by the app);
 # tracked *.log already ignored above, this covers the .py/.json/.png/.md/.html too.
 /debug/
@@ -129,11 +158,18 @@ static/js/bundle-*.js
 # the tracked SOURCE `feature-loader.js` (the lazy loader), the exact class of
 # bug _clean_old_bundles hit (see bundle-cleaner-must-not-delete-source).
 static/js/feature-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].js
+# Single-language i18n packs (lib/i18n_packs.py, Epic-E) — same content-hashed
+# runtime artifact family as feature- above, so the same 8-hex anchor applies:
+# NEVER a bare `i18n-*` glob, which would also match the tracked SOURCE
+# static/js/i18n.js. The `??` pins the 2-letter lang slot (zh/en), mirroring
+# lib/js_bundler._BUILT_BUNDLE_RE `i18n-(?:zh|en)-[0-9a-f]{8}`.
+static/js/i18n-??-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].js
 # Bundle build-lock + private temp files (leading dot; written by
 # lib/js_bundler during the atomic temp→rename publish). Runtime-only.
 static/js/.bundle-build.lock
 static/js/.bundle-*.js
 static/js/.feature-*.js
+static/js/.i18n-*.js
 
 # ── Minified stylesheets (auto-generated at startup by lib/css_bundler) ──
 static/styles-*.css

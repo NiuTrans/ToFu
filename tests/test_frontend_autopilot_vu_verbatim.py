@@ -4,7 +4,7 @@ frontend-reconstructed value that falls back to the local stream buffer.
 
 WHY
 ---
-Directive (2026-07-02, see .tofu/skills/separation-of-concerns-directive.md):
+Directive (2026-07-02, see .tofu/memories/separation-of-concerns-directive.md):
 a chat-inner bubble that has SETTLED must render from a single backend record,
 verbatim. The prior `autopilot_vu_done` code reconstructed the settled message:
 
@@ -141,6 +141,12 @@ for (const [name, fn] of [
   if (typeof win[name] === 'undefined') { win[name] = global[name] = fn; }
 }
 win._TOFU_CRITIC_SVG = global._TOFU_CRITIC_SVG = '<svg id="critic-avatar"></svg>';
+/* The reworked _streamingBubbleHTML resolves avatars via Icon() and
+ * _beginVuStreaming creates the bubble via ConvView.startStreaming (step-4:
+ * no fallbacks). This suite asserts the IN-MEMORY settled state, so a no-op
+ * seam stub + an Icon stub suffice — the DOM is never asserted here. */
+win.Icon = global.Icon = (n) => '<svg data-icon="' + n + '"></svg>';
+win.ConvView = global.ConvView = { startStreaming: () => {}, finalizeStreaming: () => {} };
 
 // Load ONLY the (possibly byte-reverted) streaming_render.js. streaming_ui.js
 // is deliberately NOT loaded — twUpdate is stubbed to a no-op above, so the DOM

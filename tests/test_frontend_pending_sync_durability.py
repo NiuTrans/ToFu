@@ -109,6 +109,10 @@ global.AbortSignal = { timeout: () => undefined };
 global.conversations = [];
 
 eval(fs.readFileSync(process.argv[2], 'utf8'));  // core/conversations.js
+// Extracted leaf modules (pt_3879f00e decomposition): markConvPendingSync /
+// convHasPendingSync / _flushPendingSyncs / _clearPendingSyncMarkers now live
+// in core/pending_sync.js; the persist helpers in core/conv_persist_helpers.js.
+for (const extra of process.argv.slice(3)) eval(fs.readFileSync(extra, 'utf8'));
 
 const out = [];
 function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
@@ -182,8 +186,12 @@ def _run(js_path: str, script: str, name: str):
     harness = os.path.join(HERE, name)
     with open(harness, 'w') as f:
         f.write(script)
+    extra_js = [
+        os.path.join(JS_DIR, 'core', 'pending_sync.js'),
+        os.path.join(JS_DIR, 'core', 'conv_persist_helpers.js'),
+    ]
     try:
-        return subprocess.run(['node', harness, js_path],
+        return subprocess.run(['node', harness, js_path, *extra_js],
                               capture_output=True, text=True, timeout=60)
     finally:
         try:

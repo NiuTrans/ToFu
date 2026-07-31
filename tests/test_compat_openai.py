@@ -64,12 +64,21 @@ class OpenAITranslateTest(unittest.TestCase):
         self.assertNotIn('responseFormat', cfg)
 
     def test_reasoning_effort_maps_to_thinking_depth(self):
+        """The effort rung maps 1:1 onto Tofu's depth ladder.
+
+        This assertion previously demanded high→max, encoding the one-rung-up
+        shift (low→medium, medium→high, high→max) that lib/compat/openai.py
+        used to apply. Both ladders carry the same five rungs, so the shift was
+        pure over-spend: a caller asking for `high` was billed for `max`.
+        Fixed alongside the Opus 5 inbound-thinking work; the full rung sweep
+        lives in tests/test_compat_inbound_thinking_semantics.py.
+        """
         from lib.compat.openai import translate_openai_request
         _m, cfg, _o = translate_openai_request({
             'model': 'o1', 'messages': [],
             'reasoning_effort': 'high',
         })
-        self.assertEqual(cfg['thinkingDepth'], 'max')
+        self.assertEqual(cfg['thinkingDepth'], 'high')
         self.assertTrue(cfg['thinkingEnabled'])
 
     def test_stream_flag(self):

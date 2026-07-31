@@ -233,6 +233,32 @@ _PROGRESS_RE = re.compile(
 )
 
 
+# ══════════════════════════════════════════════════════════
+#  Machine-control token strip — SINGLE ENTRY POINT
+# ══════════════════════════════════════════════════════════
+
+# Every synthetic machine-control token a model's reply may carry MUST be
+# registered here, and ``strip_machine_tokens`` is the ONLY predicate that
+# removes such tokens before a reply is persisted into conversation history
+# or fed back into model context.
+#
+# Why a registry instead of per-call-site stripping: the VU protocol had
+# exactly one hardcoded strip (``[VU: TASK_DONE]`` in autopilot) and missed
+# the second token (``[PROGRESS: ...]``) — 90 leaked lines across 52 convs,
+# after which the model started authoring the signal itself (pt_0ae59e94).
+# A third control token added to the protocol but NOT to this list is that
+# bug's next instance; tests/test_vu_machine_token_strip.py pins the
+# registry contents so the omission fails loudly instead.
+#
+# The PROGRESS pattern is the ``_PROGRESS_RE`` object ITSELF (not a copy):
+# the strip must match exactly what ``parse_progress`` matches, by
+# construction.
+_MACHINE_TOKEN_STRIP_PATTERNS = (
+    ('vu_done_sentinel', re.compile(re.escape(VU_DONE_SENTINEL))),
+    ('progress_line', _PROGRESS_RE),
+)
+
+
 def parse_progress(text: str):
     """Extract the structured ``[PROGRESS: resolved=X remaining=Y]`` line.
 
@@ -252,3 +278,44 @@ def parse_progress(text: str):
         logger.debug('[Verdict] parse_progress: non-int PROGRESS values (%s) — '
                      'failing open', e)
         return None, None
+
+
+def strip_machine_tokens(text: str, *, keep=()) -> str:
+    """Remove every registered machine-control token from ``text``.
+
+    Args:
+        text: The model reply to clean.  Returned unchanged (byte-identical)
+            when it carries no registered token, aside from outer-whitespace
+            normalisation when a strip DID occur.
+        keep: Optional iterable of registry labels to NOT strip on this call.
+            The one legitimate user is the VU budget guard path:
+            ``run_virtual_user`` strips the DONE sentinel early but KEEPS
+            ``'progress_line'`` so ``_record_vu_turn_and_check_budget`` can
+            still parse it; the persistence path strips everything.  Unknown
+            labels raise ``ValueError`` — a typo'd keep must not silently
+            strip less than the caller assumed.
+
+    Returns the cleaned text (blank husk lines left by a stripped own-line
+    token collapsed, outer whitespace stripped).  Safe on empty/None input.
+    Idempotent.
+    """
+    if not text:
+        return text
+    keep_set = frozenset(keep)
+    known = {label for label, _ in _MACHINE_TOKEN_STRIP_PATTERNS}
+    unknown = keep_set - known
+    if unknown:
+        raise ValueError(
+            f'unknown machine-token label(s) in keep=: {sorted(unknown)}')
+    out = text
+    changed = False
+    for label, rx in _MACHINE_TOKEN_STRIP_PATTERNS:
+        if label in keep_set:
+            continue
+        out, n = rx.subn('', out)
+        changed = changed or n > 0
+    if not changed:
+        return text
+    # A stripped own-line token leaves a blank husk — collapse 3+ newlines.
+    out = re.sub(r'\n{3,}', '\n\n', out)
+    return out.strip()

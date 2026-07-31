@@ -39,9 +39,13 @@ def test_quoted_dangerous_words_are_not_blocked(command):
 
 
 # ── Real dangerous command STRUCTURE is still blocked ───────────────────────
+# NOTE: no ``rm -rf`` shape belongs in this list anymore — delete commands
+# left the regex layer entirely (the blunt ``\brm\s+-rf\s+/`` false-positived
+# every absolute-path delete, e.g. ``rm -rf /tmp/wt_fill``). They are guarded
+# by the argument parser ``_is_catastrophic_delete``; the result-level pin
+# for BOTH layers lives in tests/test_run_command_rm_rf_scoped.py.
 
 @pytest.mark.parametrize('command', [
-    'rm -rf /',
     'sudo shutdown -h now',
     'reboot',
     'mkfs.ext4 /dev/sda1',

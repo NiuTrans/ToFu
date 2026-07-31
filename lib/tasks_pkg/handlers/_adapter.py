@@ -132,6 +132,7 @@ def run_batch_concurrent(
     max_workers: int,
     tag: str = 'batch',
     abort: Callable[[], bool] | None = None,
+    on_item: Callable[[int, T, R | None, bool], None] | None = None,
 ) -> list[R | None]:
     """Run *worker* over *items* concurrently, preserving input order.
 
@@ -159,6 +160,17 @@ def run_batch_concurrent(
         tail is skipped). This is what keeps a Stopped paper report from
         spraying dozens more searches. A raising predicate is treated as
         "not aborted" so it can never wedge the batch.
+    on_item
+        Optional ``(index, item, result, ok) -> None`` fired the INSTANT each
+        item settles — inside the ``as_completed`` loop, NOT after the batch
+        joins. This is what makes a batch call observable per item: a
+        ``web_search(queries=[a,b,c])`` is ONE tool round, so without this the
+        round has a single transition for N independent network calls and a
+        user watching a spinner cannot tell whether all three queries are slow
+        or just one is (pt_67ffc2b7). Fired for FAILURES too (``ok=False``) —
+        a silent failure would stall the done-counter and make an already-dead
+        query look like it is still working. A raising callback is logged and
+        swallowed: progress reporting must never fail the batch.
 
     Returns
     -------
@@ -185,11 +197,19 @@ def run_batch_concurrent(
         futures = {pool.submit(_guarded, item): i for i, item in enumerate(items)}
         for fut in as_completed(futures):
             idx = futures[fut]
+            _ok = True
             try:
                 ordered[idx] = fut.result()
             except Exception as e:
                 logger.error('[%s] batch worker failed at idx=%d: %s', tag, idx, e, exc_info=True)
                 ordered[idx] = None
+                _ok = False
+            if on_item is not None:
+                try:
+                    on_item(idx, items[idx], ordered[idx], _ok)
+                except Exception as e:
+                    logger.warning('[%s] on_item callback failed at idx=%d '
+                                   '(non-fatal): %s', tag, idx, e)
     elapsed = time.time() - t0
     logger.debug('[%s] batch of %d completed in %.1fs', tag, n, elapsed)
     return ordered

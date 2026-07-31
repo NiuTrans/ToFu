@@ -76,9 +76,28 @@ def _inject_claude_reasoning_details(messages: list, model: str) -> None:
     just the next tool-loop turn) the gateway requires that signed thinking
     block to be replayed inside ``reasoning_details`` — the flat
     ``thinking_signature`` field alone is ignored, and a thinking block with
-    no signature is rejected (HTTP 400).  So whenever an assistant message
-    carries BOTH ``reasoning_content`` and ``thinking_signature``, synthesise
-    the ``reasoning_details`` array the gateway expects.
+    no signature is rejected (HTTP 400).
+
+    Two cases, symmetric around the signature:
+
+    * ``reasoning_content`` + ``thinking_signature`` → synthesise the
+      ``reasoning_details`` array the gateway expects.
+    * ``reasoning_content`` WITHOUT a signature → the block can never be
+      verified upstream.  The gateway does not return signatures for every
+      Claude line (Opus 5 on the OpenAI-compat line streams thinking as
+      ``reasoning_content`` and NEVER sends a signature), and since
+      2026-07-25 the upstream hard-rejects the replayed unsigned block
+      (``invalid_request_error: …signature: Field required``, classified
+      non-retryable — the whole turn dies).  Anthropic's contract allows
+      omitting prior thinking blocks entirely; only a replayed block must
+      be signed.  So strip the unsigned trace from the wire and let the
+      model re-reason — losing the trace beats losing the turn.  This is
+      the single chokepoint every request passes through, so live-tail,
+      conv-replay, compaction and retry paths are covered at once; the
+      strip is content-deterministic, so live and replay stay byte-identical
+      (no prefix-cache flip).  DeepSeek's OPPOSITE rule (reasoning_content
+      MUST be replayed) lives behind
+      ``model_requires_reasoning_content_replay`` and is not Claude-gated.
 
     Only runs for Claude (the only family using this wire shape). Mutates
     messages in-place. Idempotent: skips messages that already carry a
@@ -88,25 +107,35 @@ def _inject_claude_reasoning_details(messages: list, model: str) -> None:
         return
 
     _patched = 0
+    _stripped = 0
     for msg in messages:
         if msg.get('role') != 'assistant':
             continue
         if msg.get('reasoning_details'):
             continue
         th_text = msg.get('reasoning_content') or ''
-        th_sig = msg.get('thinking_signature') or ''
-        if not (th_text and th_sig):
+        if not th_text:
             continue
-        msg['reasoning_details'] = [{
-            'type': 'thinking',
-            'thinking': th_text,
-            'signature': th_sig,
-        }]
-        _patched += 1
+        th_sig = msg.get('thinking_signature') or ''
+        if th_sig:
+            msg['reasoning_details'] = [{
+                'type': 'thinking',
+                'thinking': th_text,
+                'signature': th_sig,
+            }]
+            _patched += 1
+        else:
+            del msg['reasoning_content']
+            _stripped += 1
 
     if _patched:
         logger.info('[build_body] Rebuilt reasoning_details (signed thinking block) '
                     'on %d replayed Claude assistant turn(s)', _patched)
+    if _stripped:
+        logger.warning('[build_body] Stripped unsigned reasoning_content from %d '
+                       'Claude assistant turn(s) — upstream rejects thinking with '
+                       'no signature (HTTP 400); the model re-reasons instead',
+                       _stripped)
 
 
 # Dummy signature value recognized by Gemini to skip validation.

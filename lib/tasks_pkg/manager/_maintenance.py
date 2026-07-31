@@ -65,6 +65,22 @@ def cleanup_old_tasks():
         reap_stuck_running_tasks()
     except Exception as e:
         logger.warning('[Manager] reap_stuck_running_tasks failed: %s', e, exc_info=True)
+    # ★ Queue-lease reaper (rides the same tick, pt_4ab943fa): reclaim leases
+    #   orphaned by a crash/exception mid-dispatch and re-dispatch them, so a
+    #   queued human message is retried automatically instead of silently lost.
+    try:
+        from lib.message_queue import reap_expired_queue_leases
+        reap_expired_queue_leases()
+    except Exception as e:
+        logger.warning('[Manager] reap_expired_queue_leases failed: %s', e, exc_info=True)
+    # ★ Result-level reconciliation (DB, not registry). The reaper above can
+    #   only see tasks still IN MEMORY; a carrier that finished and left the
+    #   registry without a terminal write is invisible to it. See
+    #   find_orphan_running_results.
+    try:
+        report_orphan_running_results()
+    except Exception as e:
+        logger.warning('[Manager] report_orphan_running_results failed: %s', e, exc_info=True)
 
 
 def _malloc_trim() -> bool:
@@ -246,6 +262,110 @@ def reap_stuck_running_tasks() -> int:
         logger.warning('[Manager] reap_stuck_running_tasks force-failed %d wedged task(s)',
                        len(stuck))
     return len(stuck)
+
+
+# Age (seconds) past which a ``task_results`` row still marked
+# ``status='running'`` counts as ORPHANED. Env-tunable; 0 disables the scan.
+# Default 1 h — a live turn re-writes its row every ~5 s (checkpoint), so an
+# hour of silence on the row means no writer is left.
+def _orphan_result_max_age_secs() -> int:
+    import os
+    try:
+        return int(os.environ.get('TOFU_ORPHAN_RESULT_MAX_AGE_SECS', '') or '3600')
+    except (ValueError, TypeError) as e:
+        logger.debug('[Manager] TOFU_ORPHAN_RESULT_MAX_AGE_SECS parse failed, '
+                     'using fallback: %s', e)
+        return 3600
+
+
+def find_orphan_running_results(limit: int = 200) -> list[dict]:
+    """Return ``task_results`` rows wedged at ``status='running'`` (DB-level).
+
+    The complement to :func:`reap_stuck_running_tasks`, which scans the
+    IN-MEMORY registry and therefore *structurally cannot* see this class: a
+    carrier (autopilot VU sub-task / inline reporter) is discarded from the
+    registry the moment its synchronous run returns, and it never reaches
+    ``persist_task_result`` (``_endpoint_managed=True`` suppresses the terminal
+    write). Its last ``checkpoint_task_partial`` therefore leaves a row at
+    ``status='running'`` that no in-memory pass will ever revisit.
+
+    ⚠️ The intuitive predicate ``status='running' AND completed_at IS NOT NULL``
+    does NOT work. ``_upsert_task_row`` (``_persist.py``) stamps ``completed_at``
+    on EVERY write — the terminal one *and* the ~5 s running checkpoint — so the
+    column means "last written at", not "finished at". Measured 2026-07-26:
+    all 69 ``running`` rows had it non-NULL and 6 of those were healthy live
+    turns, i.e. that predicate flags every in-flight task. The usable signal is
+    STALENESS plus absence from the live registry:
+
+      * ``completed_at`` older than :func:`_orphan_result_max_age_secs`, and
+      * ``task_id`` absent from the in-memory registry.
+
+    Read-only by design. A carrier row legitimately *ends* at
+    ``status='running'`` — it succeeded, it simply has no terminal writer — so
+    flipping these to ``error`` would record a failure that never happened.
+    Choosing a terminal status for a finished carrier is a contract change, not
+    a reconciliation, and belongs in its own change.
+
+    Returns a list of ``{task_id, conv_id, age_secs}`` sorted oldest-first.
+    """
+    max_age = _orphan_result_max_age_secs()
+    if max_age <= 0:
+        return []
+    from lib.database import DOMAIN_CHAT, get_thread_db
+    now_ms = int(time.time() * 1000)
+    cutoff = now_ms - max_age * 1000
+    try:
+        db = get_thread_db(DOMAIN_CHAT)
+        rows = db.execute(
+            "SELECT task_id, conv_id, completed_at FROM task_results "
+            "WHERE status='running' AND completed_at IS NOT NULL "
+            "  AND completed_at < ? ORDER BY completed_at ASC LIMIT ?",
+            (cutoff, limit),
+        ).fetchall()
+    except Exception as e:
+        logger.warning('[Manager] orphan-result scan failed: %s', e, exc_info=True)
+        return []
+    if not rows:
+        return []
+    # A task still in the registry is someone's live work (or is about to be
+    # finalized) — never report it, regardless of how stale its ROW looks.
+    with tasks_lock:
+        live_ids = set(tasks.keys())
+    out = []
+    for r in rows:
+        tid = r[0]
+        if tid in live_ids:
+            continue
+        out.append({
+            'task_id': tid,
+            'conv_id': r[1] or '',
+            'age_secs': int((now_ms - (r[2] or 0)) / 1000),
+        })
+    return out
+
+
+def report_orphan_running_results() -> int:
+    """Log the orphaned-``running`` rows found by :func:`find_orphan_running_results`.
+
+    This is the state-machine self-consistency gate that replaces log-watching
+    for "a turn is wedged": the SSE layer only notices at its 7200 s ceiling and
+    reports ``status=running`` from the very state machine that is stuck, so it
+    cannot be the detector. Returns the number of orphans found.
+    """
+    orphans = find_orphan_running_results()
+    if not orphans:
+        return 0
+    oldest = orphans[0]
+    logger.warning(
+        '[Manager] ⚠️ %d task_results row(s) orphaned at status=running '
+        '(stale >%ds, absent from the live registry). Oldest: task=%s conv=%s '
+        'age=%ds. These have no terminal writer — a poll on them never '
+        'resolves. Most are finished autopilot/inline CARRIERS, which have no '
+        'terminal write path by design.',
+        len(orphans), _orphan_result_max_age_secs(),
+        oldest['task_id'][:8], (oldest['conv_id'] or '-')[:8], oldest['age_secs'],
+    )
+    return len(orphans)
 
 
 def _write_stuck_terminal_floor(task) -> None:

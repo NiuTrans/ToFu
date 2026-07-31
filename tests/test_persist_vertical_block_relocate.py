@@ -40,7 +40,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 _PERSIST_SRC = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    'lib', 'tasks_pkg', 'compaction', '_persist.py',
+    'lib', 'tasks_pkg', 'compaction', '_persist', '_splitters.py',
 )
 
 # The exact marker strings the handler (_vertical_header_for_llm) emits.

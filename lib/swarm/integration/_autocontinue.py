@@ -181,6 +181,18 @@ def _start_autocontinue_turn(conv_id: str) -> bool:
             'UPDATE conversations SET messages=?, updated_at=?, msg_count=?, '
             'search_text=? WHERE id=? AND user_id=1',
             (messages_json, now_ms, len(messages), search_text, conv_id))
+        # Phase 5 dual-write (flag-gated, inert when off): tail append.
+        # Guarded separately: the placeholder assistant turn is already
+        # committed, so a mirror failure must not reach this function's
+        # `except` and return False — that would strand the placeholder on
+        # disk with no continuation task ever spawned.
+        try:
+            from lib.database.messages_rows import mirror_write_and_commit
+            mirror_write_and_commit(db, conv_id, messages, now_ms=now_ms)
+        except Exception as _mirror_err:
+            logger.warning('[Swarm:%s] autocontinue row mirror failed '
+                           '(non-fatal, turn already durable): %s',
+                           conv_id, _mirror_err, exc_info=True)
         try:
             update_conversation_fts(db, conv_id, search_text)
         except Exception as e:
@@ -228,7 +240,10 @@ def _start_autocontinue_turn(conv_id: str) -> bool:
             # stamp doesn't clobber a concurrent tool-state / autopilot settings
             # write on the same row (reuses this thread's `db`).
             from lib.conversations import set_conversation_settings
-            set_conversation_settings(conv_id, {'activeTaskId': task_id}, db=db)
+            # notify=False: notify_conv_changed already emitted after the
+            # messages write above (no double push); gate invalidates cache.
+            set_conversation_settings(conv_id, {'activeTaskId': task_id}, db=db,
+                                      notify=False)
         except Exception as e:
             logger.debug('[Swarm:%s] autocontinue activeTaskId persist failed: %s',
                          conv_id, e)

@@ -435,6 +435,175 @@ def test_tarball_invalid_archive_aborts_untouched():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_tarball_landing_verify_passes_on_clean_overlay():
+    """A clean overlay (every landed .py byte-size >= source) must pass the
+    post-overlay landing check and result in ok=True. Sanity: the verifier
+    does not spuriously flag a healthy overlay."""
+    import lib.self_update as su
+    tmp = tempfile.mkdtemp(prefix='tofu-test-')
+    try:
+        inst = _build_install(tmp)
+        tar_path = _build_tarball(tmp)
+        _orig = (su.http_stream, su._ROOT, su._install_requirements)
+        try:
+            _patch_stream(su, tar_path)
+            su._ROOT = inst
+            su._install_requirements = lambda on_line=None: {'ok': True, 'detail': 'stubbed'}
+            res = su._apply_via_tarball('v9.9.9')
+        finally:
+            su.http_stream, su._ROOT, su._install_requirements = _orig
+
+        assert res['ok'] is True, res.get('error')
+        # server.py landed with the NEW content, not the old.
+        assert open(os.path.join(inst, 'server.py')).read().startswith('NEW server')
+        _ok('_apply_via_tarball: landing verify passes on a clean overlay')
+    finally:
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_tarball_landing_verify_aborts_on_truncated_facade():
+    """Simulate the cross-DC FUSE atomic-move race: shutil.copy2 returns
+    success but the landed file is 0 bytes (or short) on disk. The overlay
+    must be aborted LOUDLY with the offending file listed, ok=False, AND
+    the pre-overlay file restored from backup so the tree does not crash
+    at boot."""
+    import lib.self_update as su
+    import lib.self_update._apply as ap
+
+    tmp = tempfile.mkdtemp(prefix='tofu-test-')
+    try:
+        inst = _build_install(tmp)
+        tar_path = _build_tarball(tmp)
+        # `foo.py` exists in the install with "OLD foo\n" — so a backup is
+        # created for it, which the abort path must restore from.
+        assert open(os.path.join(inst, 'lib', 'foo.py')).read().startswith('OLD foo')
+
+        # Wrap shutil.copy2 inside _apply.py so that lib/foo.py ends up
+        # 0-byte on the DEST after copy (mimicking the FUSE atomic-move
+        # window). All OTHER files copy normally. copy2 still "succeeds"
+        # (returns), matching the real bug shape.
+        import shutil as _sh
+        _real_copy2 = _sh.copy2
+
+        def _flaky_copy2(src, dst, **kw):
+            r = _real_copy2(src, dst, **kw)
+            # Only sabotage the overlay copy (src under the tarball
+            # extract dir), not the pre-overlay backup copy (src under
+            # the install dir). Match by the RELATIVE tail path.
+            if str(dst).endswith(os.path.join('lib', 'foo.py')) \
+                    and 'tofu-update-' in str(src):
+                # Truncate landed file to 0 bytes — the exact FUSE-race
+                # symptom the user observed.
+                with open(dst, 'wb'):
+                    pass
+            return r
+
+        _orig = (su.http_stream, su._ROOT, su._install_requirements,
+                 ap.shutil) if hasattr(ap, 'shutil') else None
+        # `_apply_via_tarball` imports shutil locally — patch the module
+        # sys.modules entry so `import shutil` inside the fn sees our
+        # wrapper.
+        import shutil as _real_sh_mod
+        _orig_copy2_on_module = _real_sh_mod.copy2
+        _real_sh_mod.copy2 = _flaky_copy2
+
+        _orig_stream, _orig_root, _orig_deps = \
+            su.http_stream, su._ROOT, su._install_requirements
+        try:
+            _patch_stream(su, tar_path)
+            su._ROOT = inst
+            su._install_requirements = lambda on_line=None: {'ok': True, 'detail': 'stubbed'}
+            frames = []
+            res = su._apply_via_tarball(
+                'v9.9.9',
+                progress=lambda st, status, detail='', meta=None: frames.append(
+                    (st, status, detail, meta)))
+        finally:
+            _real_sh_mod.copy2 = _orig_copy2_on_module
+            su.http_stream, su._ROOT, su._install_requirements = \
+                _orig_stream, _orig_root, _orig_deps
+
+        # 1) Update reported failure LOUDLY — not silently ok=True.
+        assert res['ok'] is False, \
+            'landing verify let a truncated .py through: res=' + repr(res)
+        assert res['error'] and 'truncated' in res['error'].lower(), \
+            f'error message does not mention truncation: {res["error"]!r}'
+        # 2) The offending file is named in the detail.
+        assert 'lib/foo.py' in (res['detail'] or ''), \
+            f'offending file not surfaced in detail: {res["detail"]!r}'
+        # 3) The pre-overlay content is restored from backup so the tree
+        #    is not left in a boot-crashing 0-byte state.
+        restored = open(os.path.join(inst, 'lib', 'foo.py')).read()
+        assert restored.startswith('OLD foo'), \
+            f'truncated file not restored from backup — content={restored!r}'
+        # 4) A pull-error progress frame fires (UI shows the abort).
+        assert any(st == 'pull' and status == 'error' for st, status, _, _ in frames), \
+            f'no pull-error progress frame emitted: {frames}'
+        _ok('_apply_via_tarball: FUSE-race 0-byte landing aborts loudly + restores backup')
+    finally:
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_tarball_landing_verify_is_load_bearing_NEUTER():
+    """NEUTER guard: if _verify_landed_py_integrity is replaced with a
+    no-op that always returns ok=True, the FUSE-race scenario becomes
+    silently accepted (ok=True + a 0-byte facade on disk). Proves the
+    verify helper is what stops the bug — not something else."""
+    import lib.self_update as su
+    import lib.self_update._apply as ap
+    tmp = tempfile.mkdtemp(prefix='tofu-test-')
+    try:
+        inst = _build_install(tmp)
+        tar_path = _build_tarball(tmp)
+        assert open(os.path.join(inst, 'lib', 'foo.py')).read().startswith('OLD foo')
+
+        import shutil as _real_sh_mod
+        _real_copy2 = _real_sh_mod.copy2
+
+        def _flaky_copy2(src, dst, **kw):
+            r = _real_copy2(src, dst, **kw)
+            if str(dst).endswith(os.path.join('lib', 'foo.py')) \
+                    and 'tofu-update-' in str(src):
+                with open(dst, 'wb'):
+                    pass
+            return r
+
+        _real_sh_mod.copy2 = _flaky_copy2
+
+        # NEUTER: swap the verify helper for a no-op that always passes.
+        _orig_verify = ap._verify_landed_py_integrity
+        ap._verify_landed_py_integrity = lambda src, dest, backup_dir=None: {
+            'ok': True, 'bad': []}
+
+        _orig_stream, _orig_root, _orig_deps = \
+            su.http_stream, su._ROOT, su._install_requirements
+        try:
+            _patch_stream(su, tar_path)
+            su._ROOT = inst
+            su._install_requirements = lambda on_line=None: {'ok': True, 'detail': 'stubbed'}
+            res = su._apply_via_tarball('v9.9.9')
+        finally:
+            _real_sh_mod.copy2 = _real_copy2
+            ap._verify_landed_py_integrity = _orig_verify
+            su.http_stream, su._ROOT, su._install_requirements = \
+                _orig_stream, _orig_root, _orig_deps
+
+        # With the verify helper neutered, the update INCORRECTLY reports
+        # success AND a 0-byte facade sits on disk — exactly the pre-fix
+        # crash-at-boot state. This proves the helper is load-bearing.
+        assert res['ok'] is True, \
+            'NEUTER expected: without verify the overlay should falsely succeed'
+        landed_sz = os.path.getsize(os.path.join(inst, 'lib', 'foo.py'))
+        assert landed_sz == 0, \
+            f'NEUTER expected: 0-byte landed file, got {landed_sz}B'
+        _ok('_verify_landed_py_integrity is load-bearing (NEUTER flips test to failure state)')
+    finally:
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_check_payload_reports_update_method():
     """check_for_update must surface update_method for the UI to route on."""
     import lib.self_update as su
@@ -474,6 +643,9 @@ def main():
         test_tarball_skips_pip_when_requirements_unchanged,
         test_tarball_installs_pip_when_requirements_changed,
         test_git_checkout_flips_to_indeterminate_pull,
+        test_tarball_landing_verify_passes_on_clean_overlay,
+        test_tarball_landing_verify_aborts_on_truncated_facade,
+        test_tarball_landing_verify_is_load_bearing_NEUTER,
     ]
     for fn in tests:
         try:

@@ -16,7 +16,7 @@ import time
 
 from lib.log import get_logger
 
-from lib.cross_dc._probe import _PROBE_TIMEOUT_S, _probe_latency
+from lib.cross_dc._probe import _probe_latency
 
 logger = get_logger(__name__)
 

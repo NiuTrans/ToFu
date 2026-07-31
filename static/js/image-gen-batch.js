@@ -102,7 +102,7 @@ async function _igGenerateBatch(prompt, count) {
   conv.messages.push(assistantMsg);
 
   // ── Render user message + loading grid ──
-  renderChat(conv);
+  window.ConvView.replaceAll(conv.id);
 
   const isAllModels = _igSelectedModel === '__all__';
   const bannerText = isAllModels ? `全模型 ${count}连抽!` : `${count}连抽!`;
@@ -124,7 +124,15 @@ async function _igGenerateBatch(prompt, count) {
     </div>
   </div>`;
   if (chatDiv) {
-    chatDiv.insertAdjacentHTML('beforeend', gridHtml);
+    /* Tail insert via the shared furniture-aware primitive — a raw `beforeend`
+     * lands BELOW a bottom lazy-window sentinel. */
+    if (typeof chatInnerInsert === 'function') {
+      chatInnerInsert(chatDiv, gridHtml, {
+        position: 'tail', conv: conv, site: '_igGenerateBatch:grid',
+      });
+    } else {
+      chatDiv.insertAdjacentHTML('beforeend', gridHtml);
+    }
     chatDiv.scrollTop = chatDiv.scrollHeight;
   }
 
@@ -270,7 +278,7 @@ async function _igGenerateBatch(prompt, count) {
     : `All ${count} image generations failed`;
 
   // ── Re-render chat from messages so the batch results survive DOM wipes ──
-  if (conv.id === activeConvId) renderChat(conv, true);
+  if (conv.id === activeConvId) window.ConvView.replaceAll(conv.id, { forceScroll: true });
   saveConversations(conv.id);
   syncConversationToServer(conv);
 

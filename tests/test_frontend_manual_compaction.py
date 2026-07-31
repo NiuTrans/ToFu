@@ -94,6 +94,9 @@ global.loadConversationMessages = async () => { reloaded = true; };
 global.renderChat = () => { rendered = true; };
 global.showToast = () => {};
 
+// context-bar.js:648 closure re-renders via ConvView.replaceAll (renderChat retired).
+global.ConvView = { replaceAll: () => { rendered = true; return true; } };
+
 eval(fs.readFileSync(process.argv[2], 'utf8'));   // context-bar.js
 
 const out = [];
@@ -262,6 +265,7 @@ function _mkEl() {
     style: { setProperty(k,v){ if (k === '--ctx-arc-pct') ARC_PCT = v; } },
     setAttribute(k,v){ this.attributes[k]=v; }, getAttribute(k){ return this.attributes[k]; },
     appendChild(c){ this._children.push(c); return c; },
+    prepend(c){ this._children.unshift(c); return c; },
     removeChild(){}, remove(){},
     querySelector(){ return _mkEl(); }, querySelectorAll(){ return []; },
     addEventListener(){}, removeEventListener(){},
@@ -272,8 +276,12 @@ function _mkEl() {
   return el;
 }
 const WRAPPER = _mkEl();
+// The gauge lives IN the #convStatusStrip host since 4dee9231 — _ensureBar
+// returns null (and _doUpdate + the live-summary anchor silently no-op)
+// without it, so the strip must exist in the stub DOM.
+const STRIP = _mkEl();
 global.document = {
-  getElementById(){ return null; },
+  getElementById(sel){ return sel === 'convStatusStrip' ? STRIP : null; },
   querySelector(sel){ return sel === '.chat-wrapper' ? WRAPPER : null; },
   createElement(){ return _mkEl(); },
   body: _mkEl(),
@@ -286,6 +294,7 @@ global._contextPolicy={default_limit:LIMIT,output_reserve:8000,compaction_reserv
   summary_trigger_ratio:0.9,min_usable_ratio:0.5,per_model:{}};
 global.t=(k)=>k;
 let CONV=null; global.activeConvId='c1'; global.getConvById=(id)=>((CONV&&CONV.id===id)?CONV:null);
+global.ConvView={replaceAll:()=>true};
 eval(fs.readFileSync(process.argv[2],'utf8'));   // context-bar.js
 const out=[];
 function check(n,c){out.push((c?'PASS ':'FAIL ')+n);}
@@ -354,6 +363,7 @@ function _mkEl(tag) {
     dataset: {}, style: { setProperty(){} }, attributes: {}, _text: '', _html: '',
     setAttribute(k,v){ this.attributes[k]=v; }, getAttribute(k){ return this.attributes[k]; },
     appendChild(c){ this._children.push(c); return c; }, removeChild(){},
+    prepend(c){ this._children.unshift(c); return c; },
     querySelector(sel){
       // Only the live-summary body query returns the growable body node; every
       // other selector (the bubble's wave-group etc.) gets a full element.
@@ -374,8 +384,9 @@ function _mkEl(tag) {
   return el;
 }
 const WRAPPER = _mkEl('div');   // stands in for .chat-wrapper so _ensureBar builds
+const STRIP = _mkEl('div');    // #convStatusStrip — the gauge host; the live card anchors on _state.el
 global.document = {
-  getElementById(){ return null; },
+  getElementById(sel){ return sel === 'convStatusStrip' ? STRIP : null; },
   querySelector(sel){ return sel === '.chat-wrapper' ? WRAPPER : null; },
   createElement(){ return _mkEl('div'); },
   body: { appendChild(c){ if (c && c.id === 'ctxLiveSummary') LIVE = c; return c; } },
@@ -413,6 +424,8 @@ global.ConvCache = { remove: async () => {} };
 global.loadConversationMessages = async () => {};
 global.renderChat = () => {};
 global.showToast = () => {};
+
+global.ConvView = { replaceAll: () => true };   // context-bar.js:648 replaceAll on compaction closure
 
 eval(fs.readFileSync(process.argv[2], 'utf8'));   // context-bar.js
 
@@ -612,6 +625,8 @@ global.Api = { compactions: { compactNow: async (cid) => {
   if (global.__mode === 'ok') { return { ok: true, archiveId: 7, tokensBefore: 50000, tokensAfter: 8000, reductionPct: 84 }; }
   const e = new Error('boom'); throw e;
 }}};
+
+global.ConvView = { replaceAll: () => true };   // context-bar.js:648 replaceAll on compaction closure
 
 eval(fs.readFileSync(process.argv[2], 'utf8'));   // context-bar.js
 

@@ -8,6 +8,72 @@
    scope — no imports / exports needed.
    ═══════════════════════════════════════════════════════════════════ */
 
+// ══════════════════════════════════════════════════════
+//  Defensive fallback for isChatModel / applyCapabilityTaxonomy
+//
+//  core/model_caps.js is the SSOT for chat-vs-non-chat classification,
+//  and normally loads BEFORE this file. But if the bundle ever ships
+//  without it (stale bundler manifest, minifier regression, CDN partial
+//  fetch, _BUNDLE_FILES drift), every model picker that calls the
+//  bare identifier `isChatModel(m)` would throw ReferenceError and
+//  strand the dropdown empty. To keep the dropdown alive we install a
+//  local fallback here — a hardcoded copy of CHAT_EXCLUDED_CAPS from
+//  lib/model_info/capability_taxonomy.py, byte-identical to the
+//  literal in core/model_caps.js. When model_caps.js DID load, that
+//  file's definitions run first and this block is a no-op.
+//
+//  Kept in lock-step with the Python SSOT by
+//  tests/test_frontend_model_caps_bundled.py (parity + neuter).
+// ══════════════════════════════════════════════════════
+(function _installModelCapsFallback() {
+  if (typeof window === 'undefined') return;
+  var _FE_CHAT_EXCLUDED_FALLBACK = ['image_gen', 'embedding', 'transcription'];
+  if (typeof window.isChatModel !== 'function') {
+    var _set = new Set(_FE_CHAT_EXCLUDED_FALLBACK);
+    window.isChatModel = function _isChatModelFallback(m) {
+      if (!m) return true;
+      var caps = m.capabilities;
+      if (!caps || caps.length === 0) return true;
+      for (var i = 0; i < caps.length; i++) if (_set.has(caps[i])) return false;
+      return true;
+    };
+    // Reachable only when core/model_caps.js failed to load — the SSOT
+    // version overrides this at its own IIFE and this branch never fires.
+    try { console.warn('[Tofu] core/model_caps.js absent — using hardcoded chat-filter fallback in main_toolbar_ui.js'); } catch (_) {}
+  }
+  if (typeof window.applyCapabilityTaxonomy !== 'function') {
+    // Minimal shim so the /api/server-config ingestion path stays functional
+    // even without model_caps.js — swap in the server's chat_excluded_caps
+    // if provided. Same behavioural contract as the real one, minus the
+    // dispatcher-set bookkeeping (frontend doesn't filter with that anyway).
+    window.applyCapabilityTaxonomy = function _applyCapabilityTaxonomyFallback(payload) {
+      if (!payload || typeof payload !== 'object') return;
+      var xs = payload.chat_excluded_caps;
+      if (!Array.isArray(xs) || xs.length === 0) return;
+      var _set2 = new Set(xs);
+      window.isChatModel = function _isChatModelFallback2(m) {
+        if (!m) return true;
+        var caps = m.capabilities;
+        if (!caps || caps.length === 0) return true;
+        for (var i = 0; i < caps.length; i++) if (_set2.has(caps[i])) return false;
+        return true;
+      };
+    };
+  }
+})();
+
+/** One-shot console warning when the model-caps SSOT is missing at call time.
+ *  Kept debounced (per-page-load) so a big model list doesn't spam the console.
+ *  Referenced by the guarded filters in this file and in
+ *  static/js/settings/visibility_defaults.js. */
+var _modelCapsMissingWarned = false;
+function _warnModelCapsMissing() {
+  if (_modelCapsMissingWarned) return;
+  _modelCapsMissingWarned = true;
+  try { console.warn('[Tofu] isChatModel unavailable — showing all models unfiltered (non-chat models may appear in the picker)'); } catch (_) {}
+}
+if (typeof window !== 'undefined') window._warnModelCapsMissing = _warnModelCapsMissing;
+
 // ── Toggles ──
 function toggleThinking() {
   thinkingEnabled = !thinkingEnabled;
@@ -119,15 +185,28 @@ function setChatMode(mode) {
   if (mode === 'studio') {
     const hasProject = (typeof projectState !== 'undefined')
       && projectState && projectState.active && projectState.path;
-    if (!hasProject) {
-      // Don't flip the dial yet — wait for a real project attach. Just open
-      // the panel; onProjectAttached() promotes to studio on success.
-      if (typeof openProjectModal === 'function') openProjectModal();
-      return;
+    // The Studio segment IS the project affordance now (the standalone project
+    // button is gone), so it must ALWAYS open the project panel — otherwise a
+    // conv that is already in Studio has no way left to change its project
+    // path (clicking Studio again would be a silent no-op).
+    //
+    // Open the panel FIRST and unconditionally: the panel opening must not
+    // depend on the dial/state bookkeeping below succeeding. Previously the
+    // has-project branch ran _applyChatModeUI + _saveConvToolState BEFORE
+    // opening — if either threw synchronously the panel never opened, so an
+    // already-attached conv could never change its path (while attaching a
+    // fresh one, which skips that bookkeeping, worked). The dial bookkeeping is
+    // now best-effort and cannot block the affordance.
+    if (typeof openProjectModal === 'function') openProjectModal();
+    if (hasProject) {
+      try {
+        _applyChatModeUI('studio');
+        _saveConvToolState();
+        debugLog('Mode: Studio (project attached)', 'success');
+      } catch (err) {
+        console.warn('[setChatMode] studio dial bookkeeping failed:', err);
+      }
     }
-    _applyChatModeUI('studio');
-    _saveConvToolState();
-    debugLog('Mode: Studio (project attached)', 'success');
     return;
   }
   // chat. Switching AWAY from studio while a project is attached would be
@@ -149,16 +228,27 @@ if (typeof window !== 'undefined') window.setChatMode = setChatMode;
 
 /* Called by mpApplyFolders after a project is successfully attached — promote
  * the dial to Studio (the tier IS "a project is attached"). Kept separate from
- * setChatMode so the project path owns the promotion. */
+ * setChatMode so the project path owns the promotion. The promotion is
+ * persisted immediately — without it conv.chatMode keeps the stale tier until
+ * the next unrelated toggle, and a reload in between restores the wrong dial. */
 function onProjectAttached() {
-  if (chatMode !== 'studio') _applyChatModeUI('studio');
+  if (chatMode !== 'studio') {
+    _applyChatModeUI('studio');
+    if (typeof _saveConvToolState === 'function') _saveConvToolState();
+  }
 }
 if (typeof window !== 'undefined') window.onProjectAttached = onProjectAttached;
 
 /* Called by clearProject — a project-less chat is never Studio; fall back to
- * the everyday Chat tier. */
+ * the everyday Chat tier AND persist the fallback. Without the persist,
+ * conv.chatMode kept 'studio' with an empty projectPath, and the restore path
+ * trusting that stored tier resurrected Studio on the next reload/conv-switch
+ * even though no project was attached. */
 function onProjectCleared() {
-  if (chatMode === 'studio') _applyChatModeUI('chat');
+  if (chatMode === 'studio') {
+    _applyChatModeUI('chat');
+    if (typeof _saveConvToolState === 'function') _saveConvToolState();
+  }
 }
 if (typeof window !== 'undefined') window.onProjectCleared = onProjectCleared;
 
@@ -182,31 +272,71 @@ function _populateModelDropdown(models) {
   _registeredModels = models;
   dropdown.innerHTML = '';
 
-  /* Filter out hidden models and non-chat models (but keep current model visible) */
+  /* Filter out hidden models and non-chat models (but keep current model visible).
+   * isChatModel comes from core/model_caps.js — single source of truth for
+   * "is this model a chat model?", read from the server taxonomy at boot. */
   const visibleModels = models.filter(m => {
     if (m.model_id === config.model) return true;  // always keep current model
     if (_hiddenModels.has(m.model_id)) return false;
-    var caps = m.capabilities || [];
-    for (var i = 0; i < caps.length; i++) {
-      if (caps[i] === 'image_gen' || caps[i] === 'embedding') return false;
-    }
-    return true;
+    // Guard: if core/model_caps.js failed to load (stale bundle, minifier
+    // regression, CDN partial fetch, …), fall through to "show everything"
+    // rather than throw ReferenceError and leave the dropdown empty. An ASR
+    // model leaking into the picker is a known small annoyance; a black
+    // dropdown is a hard failure. See tests/test_frontend_model_caps_bundled.py.
+    if (typeof isChatModel !== 'function') { _warnModelCapsMissing(); return true; }
+    return isChatModel(m);
   });
 
-  /* Group models by provider (transit endpoint) */
-  const grouped = {};  // provider_id → { name, models: [] }
+  /* Group models by the SHARED brand rule (core/model_group.js) — NOT by
+   * provider_id. Grouping by provider leaks the backend's wire detail: the
+   * Meituan gateway serves openai on one face and anthropic on another
+   * (sankuai vs sankuai_anthropic), which the picker would render as TWO
+   * "Meituan" sections. The settings preset tab groups by the same brand
+   * rule, so the two lists can never disagree. Degrade to a per-provider
+   * grouping only if the shared module failed to load (stale bundle). */
+  const _hasGroup = (typeof modelGroupKey === 'function'
+                     && typeof modelGroupLabel === 'function');
+  const grouped = {};  // groupKey → { name, models: [] }
   for (const m of visibleModels) {
-    const pid = m.provider_id || 'default';
-    if (!grouped[pid]) grouped[pid] = { name: m.provider_name || pid, models: [] };
-    grouped[pid].models.push(m);
+    const _entryProvider = { brand: m.brand, name: m.provider_name };
+    const gkey = _hasGroup
+      ? modelGroupKey(_entryProvider, m)
+      : (m.provider_id || 'default');
+    const gname = _hasGroup
+      ? modelGroupLabel(gkey, m.provider_name)
+      : (m.provider_name || gkey);
+    if (!grouped[gkey]) grouped[gkey] = { name: gname, models: [] };
+    grouped[gkey].models.push(m);
   }
 
-  /* Render each provider group */
-  const providerIds = Object.keys(grouped);
-  for (const pid of providerIds) {
-    const group = grouped[pid];
-    /* Only show section headers when there are multiple providers */
-    if (providerIds.length > 1) {
+  /* Order the list the way the user READS it.
+   *
+   * Two axes, both previously unordered:
+   *   - Section order was Object.keys() insertion order, i.e. provider order in
+   *     server_config.json — arbitrary relative to anything on screen.
+   *   - Within a section, models arrived in model_id order (the Settings cold
+   *     sort writes that back), but the ROW shows _modelShortName(id). Those
+   *     differ: `yuju-claude-opus-5-evaDaily` renders as "Claude Opus 5" yet
+   *     sorted under 'y'.
+   *
+   * The comparator is the shared one from settings/branding.js, so this picker
+   * and the Settings model list can never disagree. Guarded: a stale bundle
+   * missing branding.js leaves the list unsorted rather than throwing and
+   * stranding an empty dropdown (same rationale as the isChatModel guard). */
+  const _canSort = (typeof _compareModelsByDisplayName === 'function');
+  const groupKeys = Object.keys(grouped);
+  if (_canSort) {
+    groupKeys.sort((x, y) => {
+      const nx = String((grouped[x] && grouped[x].name) || x);
+      const ny = String((grouped[y] && grouped[y].name) || y);
+      return _compareModelsByDisplayName(nx, ny);
+    });
+  }
+  for (const gkey of groupKeys) {
+    const group = grouped[gkey];
+    if (_canSort) group.models.sort(_compareModelsByDisplayName);
+    /* Only show section headers when there are multiple groups */
+    if (groupKeys.length > 1) {
       const labelDiv = document.createElement('div');
       labelDiv.className = 'ps-dd-section-label';
       labelDiv.textContent = group.name;
@@ -299,6 +429,13 @@ function _loadServerConfigAndPopulate() {
       if (data.translation && typeof data.translation === 'object') {
         window._translationPolicy = data.translation;
       }
+      /* Ingest capability taxonomy (SSOT for chat / non-chat capability
+       * classification). Applied BEFORE the model-list filters below so
+       * isChatModel(m) uses the server's shape, not the hardcoded fallback.
+       * See lib/model_info/capability_taxonomy.py + core/model_caps.js. */
+      if (data.capability_taxonomy && typeof applyCapabilityTaxonomy === 'function') {
+        applyCapabilityTaxonomy(data.capability_taxonomy);
+      }
       /* Load hidden models from server config */
       _hiddenModels = new Set(data.hidden_models || []);
       _hiddenIgModels = new Set(data.hidden_ig_models || []);
@@ -326,11 +463,8 @@ function _loadServerConfigAndPopulate() {
        * chat model — pick randomly to avoid always landing on the same one. */
       const chatModels = (models || []).filter(m => {
         if (_hiddenModels.has(m.model_id)) return false;
-        var caps = m.capabilities || [];
-        for (var i = 0; i < caps.length; i++) {
-          if (caps[i] === 'image_gen' || caps[i] === 'embedding') return false;
-        }
-        return true;
+        if (typeof isChatModel !== 'function') { _warnModelCapsMissing(); return true; }
+        return isChatModel(m);
       });
       const availableIds = new Set(chatModels.map(m => m.model_id));
       const currentModel = config.model || serverModel;
@@ -351,8 +485,11 @@ function _loadServerConfigAndPopulate() {
         }
       }
 
-      /* Re-apply model UI now that dropdown is populated */
-      _applyModelUI(config.model || serverModel);
+      /* Re-apply model UI now that dropdown is populated.
+       * Pass null when the current value is only a provisional default, so the
+       * repaint PRESERVES its provenance instead of promoting a fallback into
+       * a "user choice" that the write-back sites would then persist. */
+      _applyModelUI(config._modelIsProvisional ? null : config.model);
 
       /* ★ Auto-open settings if ?setup=1 (from bootstrap) or no API keys configured */
       _maybeAutoOpenSettings(data);
@@ -363,7 +500,8 @@ function _loadServerConfigAndPopulate() {
       _populateModelDropdown(
         serverModel ? [{ model_id: serverModel }] : []
       );
-      _applyModelUI(config.model || serverModel);
+      /* Same provenance-preserving repaint as the success path above. */
+      _applyModelUI(config._modelIsProvisional ? null : config.model);
     });
 }
 
@@ -531,6 +669,11 @@ function updateSubmenuCounts() {
   const extrasTrigger = document.querySelector("#submenuExtras .submenu-trigger");
   if (extrasTrigger) extrasTrigger.classList.toggle("has-active", extrasCount > 0);
 
+  /* Browser + desktop share ONE merged row (#localControlToggle); its summary
+   * badge counts both. Repaint here so the row reflects state restored from a
+   * conversation, not just state changed through the modal's switches. */
+  if (typeof _lcUpdateBadge === "function") _lcUpdateBadge();
+
   // Flow: standalone box — no count pill, just reflect active-state on the trigger.
   const flowTrigger = document.getElementById("flowToggle");
   if (flowTrigger) flowTrigger.classList.toggle("has-active", !!activeFlow);
@@ -582,117 +725,33 @@ function cycleSearchMode() {
   debugLog(`Search: ${searchMode}`, "success");
 }
 
+/* ── Browser bridge ──────────────────────────────────────────────
+ * The browser bridge no longer has its own toolbar row or its own setup
+ * modal. Both it and the desktop agent are reached through the single
+ * "Local Control" entry (#localControlToggle → #localControlModal, see
+ * static/js/local-control.js): from the user's side "let Tofu act on my
+ * machine" is ONE concept, and two rows + two modals + two status dots was
+ * strictly more cognitive load than one.
+ *
+ * The wire flag `browserEnabled` is unchanged and still independent of
+ * `desktopEnabled` — only the surface merged. `_applyBrowserUI` (main.js)
+ * remains the single painter and is what the merged modal's switch drives.
+ *
+ * toggleBrowser() is kept as a thin alias because callers outside the
+ * toolbar reach the bridge by name (toolset-apply.js's revert families,
+ * mobile flows). It now opens the merged modal instead of flipping blind. */
 function toggleBrowser() {
-  // If not enabled yet and clicking to enable — open setup modal instead of just toggling
-  if (!browserEnabled) {
-    openBrowserModal();
+  if (typeof openLocalControlModal === 'function') {
+    openLocalControlModal();
     return;
   }
-  // If already enabled — just toggle off
-  _applyBrowserUI(false);
-  _saveConvToolState();
-  debugLog("Browser Bridge: OFF", "success");
-}
-function toggleBrowserFromModal() {
+  // Bundle shipped without local-control.js — degrade to a plain flip rather
+  // than making the entry a dead button.
   _applyBrowserUI(!browserEnabled);
   _saveConvToolState();
-  updateSubmenuCounts();
-  debugLog(`Browser Bridge: ${browserEnabled ? "ON" : "OFF"}`, "success");
-  if (browserEnabled) closeBrowserModal();
-}
-function openBrowserModal() {
-  document.getElementById("browserModal").classList.add("open");
-  _checkBrowserStatus();
-  _updateBrowserModalBtn();
-}
-function closeBrowserModal() {
-  document.getElementById("browserModal").classList.remove("open");
-}
-function _updateBrowserModalBtn() {
-  const btn = document.getElementById("browserModalToggleBtn");
-  if (!btn) return;
-  btn.textContent = browserEnabled
-    ? "Disable Browser Bridge"
-    : "Enable Browser Bridge";
-  btn.className = browserEnabled ? "btn btn-secondary" : "btn btn-primary";
-}
-async function _checkBrowserStatus() {
-  const dot = document.querySelector(
-    "#browserStatusIndicator .browser-status-dot",
-  );
-  const txt = document.querySelector(
-    "#browserStatusIndicator .browser-status-text",
-  );
-  const badge = document.getElementById("browserBadge");
-  try {
-    const d = await Api.browser.status();
-    _applyBrowserLocalShortcut(d && d.extensionPath);
-    _applyBrowserLnaWarning(d && d.chromeMajor);
-    if (d && d.connected) {
-      dot?.classList.replace("disconnected", "connected") ||
-        dot?.classList.add("connected");
-      dot?.classList.remove("disconnected");
-      /* ★ Per-client routing: capture the first connected client's ID.
-       * This ID is sent with every task so commands are routed to the
-       * correct device's extension, not a random one. */
-      const clients = d.clients || [];
-      const clientCount = clients.length;
-      /* secondsAgo is null until the first poll lands — render a fallback
-       * instead of the literal string "nulls ago". */
-      const ago = (d.secondsAgo != null) ? `${d.secondsAgo}s ago` : "just now";
-      if (clientCount > 0) {
-        /* Use the first connected client (most recently active) */
-        const activeClient = clients[0];
-        window._browserClientId = activeClient.client_id;
-        const shortId = activeClient.client_id.substring(0, 8);
-        txt &&
-          (txt.textContent = clientCount > 1
-            ? `${clientCount} extensions connected (using ${shortId}…)`
-            : `Extension connected (${shortId}…, ${ago})`);
-      } else {
-        txt &&
-          (txt.textContent = `Extension connected (${ago})`);
-      }
-      badge?.classList.remove("disconnected");
-    } else {
-      dot?.classList.replace("connected", "disconnected") ||
-        dot?.classList.add("disconnected");
-      dot?.classList.remove("connected");
-      window._browserClientId = null;
-      txt &&
-        (txt.textContent =
-          "Extension not connected — follow setup steps below");
-      badge?.classList.add("disconnected");
-    }
-  } catch (e) {
-    dot?.classList.replace("connected", "disconnected");
-    txt && (txt.textContent = "Cannot reach server");
-  }
 }
 function downloadBrowserExtension() {
   window.open(apiUrl("/api/browser/download"), "_blank");
-}
-
-/* ★ When Tofu runs on the user's own machine the unpacked extension already
- * sits on disk — show its absolute path so they can "Load unpacked" it
- * directly with NO download/unzip. The path is click-to-copy. */
-function _applyBrowserLocalShortcut(extPath) {
-  const box = document.getElementById("browserLocalShortcut");
-  const code = document.getElementById("browserExtPath");
-  if (!box || !code) return;
-  if (!extPath) {
-    box.style.display = "none";
-    return;
-  }
-  box.style.display = "";
-  code.textContent = extPath;
-  code.onclick = function () {
-    if (typeof _safeClipboardWrite === "function") {
-      _safeClipboardWrite(extPath)
-        .then(() => code.classList.add("copied"))
-        .catch(() => {});
-    }
-  };
 }
 
 /* ★ Chrome 142+ ships "Local Network Access" prompts on by default, which fire

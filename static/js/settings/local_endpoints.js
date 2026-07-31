@@ -91,13 +91,88 @@ function _epMetricsLookup(url) {
   return _localEndpointMetrics[trimmed] || _localEndpointMetrics[stripped] || null;
 }
 
-/** Add a new local-deployment provider (structured row UI). */
+// ══════════════════════════════════════════════════════
+//  Local engine presets — vLLM / SGLang / Ollama / Custom (custom LAST)
+// ══════════════════════════════════════════════════════
+
+/**
+ * Engine presets for the local-deployment card. A preset only pre-fills
+ * cosmetic defaults (card name, brand icon, placeholder URL with the
+ * engine's default port) — probing, failover and health checks are
+ * identical for all four, and the endpoint↔model binding is always
+ * learned by probing, never assumed from the engine.
+ */
+var _LOCAL_ENGINE_PRESETS = [
+  { engine: 'vllm',   icon: 'vllm',   name: 'vLLM',
+    placeholder: 'http://10.0.0.5:8000/v1',
+    descKey: 'settings.localPresetVllmDesc' },
+  { engine: 'sglang', icon: 'sglang', name: 'SGLang',
+    placeholder: 'http://10.0.0.5:30000/v1',
+    descKey: 'settings.localPresetSglangDesc' },
+  { engine: 'ollama', icon: 'ollama', name: 'Ollama',
+    placeholder: 'http://localhost:11434/v1',
+    descKey: 'settings.localPresetOllamaDesc' },
+  // Custom comes LAST (owner-ratified 2026-07-25).
+  { engine: '',       icon: 'local',  name: '', custom: true,
+    placeholder: 'http://10.0.0.5:8000/v1',
+    descKey: 'settings.localPresetCustomDesc' },
+];
+
+function _localPresetByEngine(engine) {
+  for (var i = 0; i < _LOCAL_ENGINE_PRESETS.length; i++) {
+    if (_LOCAL_ENGINE_PRESETS[i].engine === (engine || '')) return _LOCAL_ENGINE_PRESETS[i];
+  }
+  return null;
+}
+
+/** Placeholder URL for an endpoint row, from the card's engine preset. */
+function _localEndpointPlaceholder(provIdx) {
+  var p = _stgProviders[provIdx];
+  var pr = p ? _localPresetByEngine(p.engine) : null;
+  return (pr && pr.placeholder) || 'http://10.0.0.5:8000/v1';
+}
+
+/** Entry point of the 本地部署模型 button — open the preset chooser. */
 function addLocalProvider() {
-  // Reuse the existing 'local' provider entry if there already is one — most
-  // people have a single homogeneous fleet, so accumulating duplicate cards
-  // would be confusing.
+  var id = 'stgLocalPresetModal';
+  var prev = document.getElementById(id);
+  if (prev) prev.remove();
+  var tiles = '';
+  for (var i = 0; i < _LOCAL_ENGINE_PRESETS.length; i++) {
+    var pr = _LOCAL_ENGINE_PRESETS[i];
+    var label = pr.custom ? t('settings.localPresetCustomName') : pr.name;
+    tiles += '<button class="stg-preset-tile" onclick="_pickLocalPreset(' + i + ')">' +
+      '<span class="stg-preset-icon">' + _brandSvg(pr.icon, 30) + '</span>' +
+      '<span class="stg-preset-name">' + escapeHtml(label) + '</span>' +
+      '<span class="stg-preset-desc">' + escapeHtml(t(pr.descKey)) + '</span>' +
+    '</button>';
+  }
+  var html = '<div id="' + id + '" class="stg-modal-overlay" onclick="if(event.target===this)this.remove()">' +
+    '<div class="stg-modal" style="max-width:560px;">' +
+      '<div class="stg-modal-header">' +
+        '<span class="stg-modal-title">' + escapeHtml(t('settings.localPresetTitle')) + '</span>' +
+        '<button class="stg-modal-close" onclick="document.getElementById(\'' + id + '\').remove()">✕</button>' +
+      '</div>' +
+      '<div class="stg-modal-body">' +
+        '<p class="stg-modal-desc">' + escapeHtml(t('settings.localPresetDesc')) + '</p>' +
+        '<div class="stg-preset-grid">' + tiles + '</div>' +
+      '</div>' +
+    '</div>' +
+  '</div>';
+  document.body.insertAdjacentHTML('beforeend', html);
+}
+
+/** Create (or focus) the local provider card for the chosen engine preset. */
+function _pickLocalPreset(presetIdx) {
+  var pr = _LOCAL_ENGINE_PRESETS[presetIdx];
+  if (!pr) return;
+  var modal = document.getElementById('stgLocalPresetModal');
+  if (modal) modal.remove();
+  // One card per engine: a vLLM box and an ollama box each get their own
+  // card (owner-ratified). A legacy engine-less card counts as 'custom'.
   for (var i = 0; i < _stgProviders.length; i++) {
-    if (_stgProviders[i].brand === 'local') {
+    var p = _stgProviders[i];
+    if (p && p.brand === 'local' && (p.engine || '') === pr.engine) {
       _renderProvidersTab();
       var card = document.querySelector('.stg-provider-card[data-prov-idx="' + i + '"]');
       if (card) {
@@ -109,10 +184,13 @@ function addLocalProvider() {
   }
   _stgProviders.unshift({
     id: 'local_' + Date.now().toString(36),
-    name: t('settings.epDefaultProviderName'),
+    name: pr.custom ? t('settings.epDefaultProviderName')
+                    : t('settings.localEngineProviderName', { name: pr.name }),
     brand: 'local',
+    engine: pr.engine,
     enabled: true,
     endpoints: [''],
+    endpoint_models: {},
     base_url: '',
     api_keys: [''],
     models: [],
@@ -125,6 +203,91 @@ function addLocalProvider() {
     first.scrollIntoView({ behavior: 'smooth', block: 'start' });
     var inp = first.querySelector('input[data-local-endpoint]');
     if (inp) inp.focus();
+  }
+}
+
+/** Merge discovered model entries into p.models, preserving user edits. */
+function _mergeDiscoveredModels(p, discovered) {
+  var existingById = {};
+  for (var em = 0; em < (p.models || []).length; em++) {
+    var emid = p.models[em] && p.models[em].model_id;
+    if (emid) existingById[emid] = p.models[em];
+  }
+  var seenNew = {};
+  var merged = [];
+  for (var i = 0; i < discovered.length; i++) {
+    var m = discovered[i];
+    if (!m || !m.model_id) continue;
+    seenNew[m.model_id] = true;
+    merged.push(existingById[m.model_id] || m);
+  }
+  // Keep models that existed but weren't returned this time (the only
+  // endpoint hosting them may be temporarily down).
+  Object.keys(existingById).forEach(function(mid) {
+    if (!seenNew[mid]) merged.push(existingById[mid]);
+  });
+  if (typeof _coldSortModels === 'function') _coldSortModels(merged);
+  p.models = merged;
+}
+
+var _autoProbeInflight = {};
+
+/**
+ * Probe ONE endpoint row and bind its served models (blur auto-detect).
+ * Writes p.endpoint_models[url] with the served ROOT model ids and merges
+ * the entries into the provider's model list — no manual 探测全部 click
+ * needed for the common "paste URL, see its model" flow.
+ */
+async function _autoProbeEndpoint(provIdx, epIdx) {
+  var p = _stgProviders[provIdx];
+  if (!p || !p.endpoints) return;
+  var url = (p.endpoints[epIdx] || '').trim();
+  if (!url || _autoProbeInflight[url]) return;
+  var inflightKey = url;
+  _autoProbeInflight[inflightKey] = true;
+  _localEndpointStatus[url] = { status: 'pending', ts: Date.now() };
+  _refreshLocalEndpointRow(provIdx, epIdx);
+  var apiKey = (p.api_keys && p.api_keys[0]) || '';
+  try {
+    var data = await Api.providers.probe(url, apiKey, '');
+    // The row may have been re-edited while the probe was in flight.
+    if (!p.endpoints || (p.endpoints[epIdx] || '').trim() !== url) return;
+    if (data && data.ok) {
+      var normUrl = (data.base_url || url).trim();
+      if (normUrl !== url) {
+        // Backend rescued a bare origin via the /v1 fallback — store the
+        // WORKING URL so chat calls don't 404.
+        delete _localEndpointStatus[url];
+        p.endpoints[epIdx] = normUrl;
+        _syncLocalBaseUrl(p);
+        url = normUrl;
+      }
+      p.endpoint_models = p.endpoint_models || {};
+      p.endpoint_models[url] = (data.models || [])
+        .map(function(m) { return m && m.model_id; }).filter(Boolean);
+      _mergeDiscoveredModels(p, data.models || []);
+      _localEndpointStatus[url] = {
+        ok: true, status: 'ok',
+        message: t('settings.epModelsCount', { n: (data.models || []).length }),
+        ts: Date.now(), n_models: (data.models || []).length,
+      };
+      if (data.thinking_format && !p.thinking_format) p.thinking_format = data.thinking_format;
+    } else {
+      _localEndpointStatus[url] = {
+        ok: false, status: 'error',
+        message: (data && data.error) || t('settings.epProbeFailed'),
+        ts: Date.now(),
+      };
+    }
+    _renderProvidersTab();
+  } catch (e) {
+    if (p.endpoints && (p.endpoints[epIdx] || '').trim() === url) {
+      _localEndpointStatus[url] = { ok: false, status: 'error',
+        message: t('settings.epNetworkError', { error: e.message }), ts: Date.now() };
+      _renderProvidersTab();
+    }
+  } finally {
+    delete _autoProbeInflight[inflightKey];
   }
 }
 
@@ -144,16 +307,23 @@ function _syncLocalBaseUrl(p) {
 function _onLocalEndpointEdit(provIdx, epIdx, value) {
   var p = _stgProviders[provIdx];
   if (!p || !p.endpoints) return;
+  var prevUrl = (p.endpoints[epIdx] || '').trim();
   var v = String(value || '').trim();
   // Cleared field → drop the row entirely so we don't show empty rows.
   if (!v) {
+    if (p.endpoint_models) delete p.endpoint_models[prevUrl];
     p.endpoints.splice(epIdx, 1);
     if (p.endpoints.length === 0) p.endpoints.push('');
   } else {
+    // URL changed → the old binding is about a different box; drop it.
+    if (prevUrl !== v && p.endpoint_models) delete p.endpoint_models[prevUrl];
     p.endpoints[epIdx] = v;
   }
   _syncLocalBaseUrl(p);
   _renderProvidersTab();
+  // Auto-detect the model name(s) for a freshly-entered URL — the whole
+  // point of the row is that the server tells us what it serves.
+  if (v && v !== prevUrl) _autoProbeEndpoint(provIdx, epIdx);
 }
 
 /** Append a new blank endpoint row. */
@@ -175,6 +345,8 @@ function _addLocalEndpoint(provIdx) {
 function _deleteLocalEndpoint(provIdx, epIdx) {
   var p = _stgProviders[provIdx];
   if (!p || !p.endpoints) return;
+  var goneUrl = (p.endpoints[epIdx] || '').trim();
+  if (goneUrl && p.endpoint_models) delete p.endpoint_models[goneUrl];
   p.endpoints.splice(epIdx, 1);
   if (p.endpoints.length === 0) p.endpoints.push('');
   _syncLocalBaseUrl(p);
@@ -189,6 +361,7 @@ async function _clearLocalEndpoints(provIdx) {
   if (n === 0) return;
   if (!await showConfirm(t('settings.epClearAllConfirm', { n: n }), { danger: true })) return;
   p.endpoints = [''];
+  p.endpoint_models = {};
   _syncLocalBaseUrl(p);
   _renderProvidersTab();
 }
@@ -244,6 +417,14 @@ function _applyBulkEditEndpoints(provIdx) {
     if (!seen[k]) { seen[k] = true; deduped.push(urls[i]); }
   }
   p.endpoints = deduped.length ? deduped : [''];
+  // Prune binding entries for endpoints that are no longer in the list.
+  if (p.endpoint_models) {
+    var keepSet = {};
+    for (var ki = 0; ki < p.endpoints.length; ki++) keepSet[p.endpoints[ki]] = true;
+    Object.keys(p.endpoint_models).forEach(function(k) {
+      if (!keepSet[k]) delete p.endpoint_models[k];
+    });
+  }
   _syncLocalBaseUrl(p);
   var modal = document.getElementById('stgBulkEdit_' + provIdx);
   if (modal) modal.remove();
@@ -438,15 +619,39 @@ function _fmtRelative(ts) {
   return Math.floor(diff / 86400) + ' ' + t('settings.relDayAgo');
 }
 
+/** Short host:port label for an endpoint URL (chip display). */
+function _endpointShort(url) {
+  return String(url || '').replace(/^https?:\/\//, '').replace(/\/v1\/?$/, '').replace(/\/+$/, '');
+}
+
+/** Model chips for one endpoint row (from the endpoint_models binding). */
+function _endpointModelChips(p, url) {
+  if (!p || !url) return '';
+  var binding = p.endpoint_models || {};
+  var list = binding[url] || binding[String(url).replace(/\/+$/, '')] || null;
+  if (!list || !list.length) return '';
+  var html = '<div class="stg-ep-models" title="' + escapeHtml(t('settings.epServedModelsTitle')) +
+    ': ' + escapeHtml(list.join(', ')) + '">';
+  var shown = list.slice(0, 3);
+  for (var i = 0; i < shown.length; i++) {
+    html += '<span class="stg-ep-model-chip">' + escapeHtml(shown[i]) + '</span>';
+  }
+  if (list.length > 3) {
+    html += '<span class="stg-ep-model-chip more">+' + (list.length - 3) + '</span>';
+  }
+  return html + '</div>';
+}
+
 /** Render a single endpoint row (status light + URL input + actions). */
 function _renderLocalEndpointRow(provIdx, epIdx, url) {
   var lightCls = _epLightClass(url);
   var lightTitle = _epLightTitle(url);
+  var p = _stgProviders[provIdx];
   var html = '<div class="stg-ep-item" data-ep-idx="' + epIdx + '">' +
     '<div class="stg-ep-row">' +
       '<span class="stg-ep-light ' + lightCls + '" title="' + escapeHtml(lightTitle) + '"></span>' +
       '<input type="text" data-local-endpoint value="' + escapeHtml(url || '') + '" ' +
-        'placeholder="http://10.0.0.5:8000/v1" ' +
+        'placeholder="' + escapeHtml(_localEndpointPlaceholder(provIdx)) + '" ' +
         'spellcheck="false" autocomplete="off" ' +
         'onchange="_onLocalEndpointEdit(' + provIdx + ',' + epIdx + ',this.value)">' +
       '<button class="stg-ep-btn" onclick="_probeLocalEndpoint(' + provIdx + ',' + epIdx + ')" ' +
@@ -455,15 +660,18 @@ function _renderLocalEndpointRow(provIdx, epIdx, url) {
         'title="' + escapeHtml(t('settings.deleteEndpointTitle')) + '">✕</button>' +
     '</div>' +
     '<div class="stg-ep-status">' + _epStatusInline(url) + '</div>' +
+    _endpointModelChips(p, url) +
   '</div>';
   return html;
 }
 
 /** Render the entire endpoints section for a local provider. */
 function _renderLocalEndpointsSection(provIdx, endpointList) {
+  var hintTxt = t('settings.localEndpointsHint');
   var html = '<div class="stg-field stg-ep-field">' +
     '<div class="stg-ep-header">' +
-      '<label style="margin:0;">' + escapeHtml(t('settings.endpointUrlList')) + '</label>' +
+      '<label style="margin:0;">' + escapeHtml(t('settings.endpointUrlList')) +
+        ' <span class="stg-keys-info" tabindex="0" role="tooltip" aria-label="' + escapeHtml(hintTxt) + '" title="' + escapeHtml(hintTxt) + '">i</span></label>' +
       '<div class="stg-ep-toolbar">' +
         '<button class="stg-btn-add stg-ep-tb" onclick="_addLocalEndpoint(' + provIdx + ')" ' +
           'title="' + escapeHtml(t('settings.addEndpointTitle')) + '">' + escapeHtml(t('settings.addEndpoint')) + '</button>' +
@@ -485,7 +693,6 @@ function _renderLocalEndpointsSection(provIdx, endpointList) {
   }
   html += '</div>';
 
-  html += '<span class="stg-hint">' + escapeHtml(t('settings.localEndpointsHint')) + '</span>';
   html += '</div>';
   return html;
 }
@@ -522,6 +729,7 @@ async function _discoverLocalModels(provIdx) {
     var resultsList = [];
     var liveUrls = [];
     var unionModels = {};   // model_id -> model entry (first-seen wins)
+    var freshBinding = {};  // normUrl -> [root model ids served there]
     var firstThinking = '';
     var nowTs = Date.now();
     for (var i = 0; i < (data.results || []).length; i++) {
@@ -531,6 +739,8 @@ async function _discoverLocalModels(provIdx) {
       if (r.ok) {
         liveUrls.push(normUrl);
         if (!firstThinking && r.thinking_format) firstThinking = r.thinking_format;
+        freshBinding[normUrl] = (r.models || [])
+          .map(function(m) { return m && m.model_id; }).filter(Boolean);
         for (var j = 0; j < (r.models || []).length; j++) {
           var m = r.models[j];
           if (m && m.model_id && !unionModels[m.model_id]) {
@@ -569,23 +779,22 @@ async function _discoverLocalModels(provIdx) {
     p.endpoints = newEndpoints;
     p.base_url = newEndpoints[0] || '';
 
-    // Merge model list (union across live endpoints).
-    var existingById = {};
-    for (var em = 0; em < (p.models || []).length; em++) {
-      var em_id = p.models[em] && p.models[em].model_id;
-      if (em_id) existingById[em_id] = p.models[em];
-    }
-    var merged = [];
-    Object.keys(unionModels).forEach(function(mid) {
-      merged.push(existingById[mid] || unionModels[mid]);
+    // Rebuild the endpoint↔model binding: prune keys for endpoints that
+    // left the list, keep previous entries for endpoints that FAILED this
+    // probe (transient restart must not wipe placement), overlay fresh ones.
+    var keepEp = {};
+    for (var ke = 0; ke < newEndpoints.length; ke++) keepEp[newEndpoints[ke]] = true;
+    var nb = {};
+    Object.keys(p.endpoint_models || {}).forEach(function(k) {
+      if (keepEp[k]) nb[k] = p.endpoint_models[k];
     });
-    // Keep models that existed but weren't returned by any live endpoint
-    // (could mean the only endpoint hosting them is currently down).
-    Object.keys(existingById).forEach(function(mid) {
-      if (!unionModels[mid]) merged.push(existingById[mid]);
-    });
-    if (typeof _coldSortModels === 'function') _coldSortModels(merged);
-    p.models = merged;
+    Object.keys(freshBinding).forEach(function(k) { nb[k] = freshBinding[k]; });
+    p.endpoint_models = nb;
+
+    // Merge model list (union across live endpoints; preserves user edits).
+    var discoveredList = [];
+    Object.keys(unionModels).forEach(function(mid) { discoveredList.push(unionModels[mid]); });
+    _mergeDiscoveredModels(p, discoveredList);
 
     if (firstThinking && !p.thinking_format) p.thinking_format = firstThinking;
 
@@ -613,5 +822,10 @@ async function _discoverLocalModels(provIdx) {
 // providers[]: each has { id, name, base_url, api_keys:[], enabled, models:[], extra_headers:{} }
 //   models[]: each has { model_id, aliases:[], capabilities:[], rpm, cost, thinking_default }
 let _stgProviders = [];
+// Model entries the dispatcher REFUSED to register because their wire face
+// could not be resolved safely (e.g. a Claude model on a dual-face gateway
+// whose provider declares no faces.anthropic). Populated from
+// /api/v1/server-config; rendered as a per-card banner by provider_render.js.
+let _stgFaceRefusals = [];
 let _stgPresets = {};  // kept for backward-compat save/load, but no longer used for preset→model mapping
 

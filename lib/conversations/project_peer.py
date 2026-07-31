@@ -121,9 +121,10 @@ def _refund_rate_slot(from_conv: str, to_conv: str, ts: float) -> bool:
             return False
         try:
             hist.remove(ts)
-        except ValueError:
+        except ValueError as _e:
             # The exact timestamp already aged out / was pruned — nothing to
             # refund (the window moved on, which is itself budget relief).
+            logger.debug('refund rate slot: unparseable (%s)', _e)
             return False
         if hist:
             _peer_msg_history[key] = hist
@@ -634,6 +635,28 @@ def send_peer_message(project_path: str, from_conv_id: str, to_conv_id: str,
               human=bool(human))
     logger.info('[PeerMsg] %s→%s queued=%s (%d chars)', from_conv_id[:8],
                 to_conv_id[:8], (res.get('queueId') or '?')[:8], len(text))
+
+    # ── Event-channel idle drain (no 30 s heartbeat wait) ──
+    # An IDLE target used to wait for the brain 30 s tick's
+    # drain_idle_peer_messages pass to render this note as a turn. Drain it
+    # NOW via the SAME dispatch_next_queued seam, gated on the SAME live-task
+    # predicate that pass mirrors (a conv whose only live task is aborted /
+    # winding down IS drained — the strand-closing behaviour). A LIVE target
+    # keeps the fast-path twin + completion-hook delivery above. Best-effort:
+    # a drain failure leaves delivery to the heartbeat pass — never a loss.
+    if queue_id:
+        try:
+            if not _live_drain_eligible_task(to_conv_id):
+                from lib.message_queue import dispatch_next_queued
+                _tid = dispatch_next_queued(to_conv_id)
+                if _tid:
+                    logger.info('[PeerMsg] idle target %s drained at send time '
+                                '→ task %s (no 30s heartbeat wait)',
+                                to_conv_id[:8], _tid[:8])
+        except Exception as e:
+            logger.warning('[PeerMsg] send-time idle drain failed conv=%s '
+                           '(heartbeat owns delivery): %s',
+                           to_conv_id[:8], e)
     return {'ok': True, 'queueId': res.get('queueId')}
 
 

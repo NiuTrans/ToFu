@@ -477,8 +477,12 @@
   /* ════════════════════════════════════════════════════════════════
      Watch lane — the human's standing "things I care about" list. The human
      authors items (concern|question|goal); the brain addresses each on a
-     recurring basis with an append-only response trail. Human-facing only;
-     the ONLY bridge to sibling agents is "promote to charter goal".
+     recurring basis with an append-only response trail.
+
+     A GOAL is injected into every sibling conversation's prompt just by
+     existing (backend render_goals_injection_block) — no promote step, no
+     charter copy. concern/question are human-facing only, and their one bridge
+     to agents is the explicit "Promote to charter" action.
      ════════════════════════════════════════════════════════════════ */
 
   var _WATCH_KINDS = ['concern', 'question', 'goal'];
@@ -549,8 +553,10 @@
   }
 
   /** Build one watch-item card: header (kind + status), text, latest response,
-   *  expandable response history, and the action row. Pure. */
-  function buildWatchItem(item) {
+   *  expandable response history, and the action row. Pure.
+   *  `ctx` carries the list-level charter snapshot ({charterVersion}) used by
+   *  the concern/question promote path. A GOAL ignores it entirely. */
+  function buildWatchItem(item, ctx) {
     item = item || {};
     var responses = item.responses || [];
     var card = document.createElement('div');
@@ -564,7 +570,25 @@
     kindBadge.className = 'pb-watch-kind-badge pb-watch-kind-badge-' + (item.kind || 'concern');
     kindBadge.textContent = _kindLabel(item.kind);
     head.appendChild(kindBadge);
-    if (item.promoted) {
+    // ── A GOAL reports a FACT, not a promotion: an open goal is in every
+    //    sibling conversation's prompt because it exists (server-side
+    //    render_goals_injection_block). There is no button and no state to
+    //    reconcile — that whole machinery existed only while a goal was COPIED
+    //    into the charter, and one copy needs none of it.
+    //    concern/question keep the computed charter verdict, which is never read
+    //    from item.promotedAudit: that stored boolean records a promotion once
+    //    happened and stays true after the decision is FIFO-evicted, so
+    //    rendering it would promise something already untrue.
+    if (item.kind === 'goal') {
+      if (item.injected) {
+        var inj = document.createElement('span');
+        inj.className = 'pb-watch-promoted';
+        inj.textContent = _t('projectBrain.watchGoalLive', 'every conversation reads this');
+        inj.title = _t('projectBrain.watchGoalLiveHint',
+          'Open goals are included in every conversation of this project. Resolve it to withdraw it.');
+        head.appendChild(inj);
+      }
+    } else if ((item.promotionState || 'none') === 'active') {
       var pr = document.createElement('span');
       pr.className = 'pb-watch-promoted';
       pr.textContent = _t('projectBrain.watchPromoted', 'in charter');
@@ -623,12 +647,12 @@
       card.appendChild(trail);
     }
 
-    card.appendChild(_buildWatchActions(item));
+    card.appendChild(_buildWatchActions(item, ctx));
     return card;
   }
 
-  /** Action row: refresh · promote-to-charter · resolve/reopen · delete. */
-  function _buildWatchActions(item) {
+  /** Action row: refresh · promote (concern/question only) · resolve/reopen · delete. */
+  function _buildWatchActions(item, ctx) {
     var row = document.createElement('div');
     row.className = 'pb-watch-actions';
     var api = (typeof Api !== 'undefined' && Api.project) ? Api.project : null;
@@ -656,7 +680,12 @@
       _t('projectBrain.watchRefresh', 'Re-check'),
       function () { return api.brainWatchAddress(id); }));
 
-    if (item.status !== 'resolved' && !item.promoted) {
+    // A GOAL never offers a charter-writing button: it is already in every
+    // prompt, and the charter is a separate human-owned surface. Only
+    // concern/question can be promoted into it, and only while unresolved and
+    // not already there.
+    if (item.kind !== 'goal' && item.status !== 'resolved' &&
+        (item.promotionState || 'none') !== 'active') {
       row.appendChild(_btn('pb-watch-btn-promote',
         _t('projectBrain.watchPromote', 'Promote to charter'),
         function () { return api.brainWatchPromote(id, _watchConvId()); }));
@@ -693,7 +722,12 @@
     if (items.length) {
       var list = document.createElement('div');
       list.className = 'pb-watch-list';
-      for (var i = 0; i < items.length; i++) list.appendChild(buildWatchItem(items[i]));
+      // The charter version the concern/question verdicts were computed
+      // against. charterContent is deliberately NOT threaded through any more:
+      // it existed only to render the goal replacement preview, and a goal no
+      // longer touches the charter.
+      var ctx = { charterVersion: data.charterVersion | 0 };
+      for (var i = 0; i < items.length; i++) list.appendChild(buildWatchItem(items[i], ctx));
       frag.appendChild(list);
     } else {
       var empty = document.createElement('div');

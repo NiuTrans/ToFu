@@ -24,7 +24,7 @@ from lib.text_lang._ratios import (
     guess_language,
     latin_ratio,
 )
-from lib.text_lang._fasttext import _get_ft_detector, detect_script
+from lib.text_lang._fasttext import detect_script
 from lib.text_lang._policy import (
     LANG_CONFIDENCE_THRESHOLD,
     LANG_HIGH_CONFIDENCE,
@@ -101,7 +101,8 @@ def _needs_llm_correction(res: DetectionResult, text: str,
 
 
 def detect_language(text: str, *, allow_llm: bool = False,
-                    llm_corrector=None) -> DetectionResult:
+                    llm_corrector=None,
+                    force_fasttext: bool = False) -> DetectionResult:
     """Cascade language detector — the single source of truth.
 
     Tiers, cheapest first:
@@ -121,6 +122,15 @@ def detect_language(text: str, *, allow_llm: bool = False,
     ``personal_scope`` gate — this function never enables the LLM tier on its
     own, keeping it fail-closed on headless surfaces.
 
+    ``force_fasttext`` forces Tier-1 fastText on regardless of
+    ``TOFU_LANGDETECT_BACKEND`` — for a decision path (the auto-translate
+    already-in-target-language skip gate) where the script+heuristic tier is
+    linguistically insufficient: kanji-heavy Japanese shares the CJK-ideograph
+    block with Chinese, so Tier-0 abstains (< 0.5 kana ratio) and the heuristic
+    then wrongly calls it ``zh``; only the statistical model separates them.
+    Fail-open: a box without ``fast_langdetect`` degrades to script+heuristic
+    (the accepted pure-kanji-Japanese corner case).
+
     Returns a :class:`DetectionResult` — never raises.
     """
     # Resolve the facade-patchable hooks THROUGH the package so tests/debug
@@ -136,8 +146,10 @@ def detect_language(text: str, *, allow_llm: bool = False,
     if script is not None:
         return DetectionResult(script, 1.0, 'script')
 
-    # Tier 1 — fastText (or heuristic fallback when unavailable).
-    detector = _pkg._get_ft_detector()
+    # Tier 1 — fastText (or heuristic fallback when unavailable). A
+    # force_fasttext caller builds the statistical model even when the env
+    # backend is 'script' (the translate skip-gate ja/zh case).
+    detector = _pkg._get_ft_detector(force=True) if force_fasttext else _pkg._get_ft_detector()
     if detector is None:
         # No statistical model: the heuristic is the terminal answer, EXCEPT
         # the LLM tier backstops the two cases it gets wrong (when allowed):

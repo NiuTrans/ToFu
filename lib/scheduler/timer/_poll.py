@@ -196,7 +196,7 @@ def _build_poll_tools(tools_config: dict) -> list | None:
             FETCH_URL_TOOL,
             PROJECT_TOOLS,
             READ_FILES_TOOL,
-            SEARCH_TOOL_MULTI,
+            build_search_tool,
         )
 
         tool_list = []
@@ -211,7 +211,7 @@ def _build_poll_tools(tools_config: dict) -> list | None:
         #   runs its check_command for grounding instead.
         search_mode = tools_config.get('searchMode', '')
         if search_mode:
-            tool_list.append(SEARCH_TOOL_MULTI)
+            tool_list.append(build_search_tool())
         if tools_config.get('fetchEnabled', False) or search_mode:
             tool_list.append(FETCH_URL_TOOL)
 
@@ -543,10 +543,14 @@ def poll_timer(timer_id: str) -> tuple[bool, str, int, bool, bool, str, str, lis
         result, _elapsed, _is_err = _timer_pkg._execute_poll_tool(tc, timer_id, project_path)
         # Record a timeline entry so the UI can show the poll's tool activity
         # (name + brief args + duration + ok/error), the same shape the swarm
-        # panel renders per sub-agent.
+        # panel renders per sub-agent. The brief is name-keyed (path/query/url
+        # extracted), NOT a raw repr truncation that buried the path behind
+        # whichever arg the model emitted first.
+        from lib.project_mod import format_tool_args_brief
         tool_trace.append({
             'name': _fn.get('name', '?'),
-            'argsBrief': str(_fn.get('arguments', ''))[:120],
+            'argsBrief': format_tool_args_brief(
+                _fn.get('name', '?'), _fn.get('arguments', ''), max_len=120),
             'elapsed': round(_elapsed, 2),
             'isError': bool(_is_err),
         })

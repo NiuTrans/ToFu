@@ -1,33 +1,59 @@
 /*
- * tofu-pet.js — the little KITTEN that LIVES in the project bar.
+ * tofu-pet.js — the little TOFU that LIVES in the project bar.
  *
  * The project bar (tofu theme) is a tiny living DIORAMA: a procedural
- * Impressionist scene fills the bar (tofu-scene.js) and a pixel-art CAT roams
- * left-right along its baseline — walking, pausing, sitting, grooming,
- * scratching, napping, and CHASING a little scene critter (butterfly / fish /
+ * Impressionist scene fills the bar (tofu-scene.js) and the Tofu mascot itself
+ * roams left-right along its baseline — walking, pausing, sitting, grooming,
+ * stretching, napping, and CHASING a little scene critter (butterfly / fish /
  * bird) that drifts through the background. The classic desktop-pet wander
  * model (oneko / Shimeji), but coupled to the scene so the two interact. The
- * cat passes BEHIND the opaque control pills via z-index, so it can NEVER
- * block a hit target. Each pose is a public-domain 32px sprite frame in
- * static/icons/pet/oneko/oneko-<x>.png.
+ * pet passes BEHIND the opaque control pills via z-index, so it can NEVER
+ * block a hit target. Each pose is a transparent PNG frame in
+ * static/icons/pet/tofu/tofu-<x>.png.
  *
- * CHARACTER: one cat, one look. (Earlier iterations had a swappable "pack"
- * registry with a tofu-block alternate + a switch button; per the owner we
- * keep ONLY the kitten and dropped the switcher — the wander/pose engine is
- * unchanged, it just always resolves oneko frames.)
+ * CHARACTER: one tofu, one look. The pet IS the brand mascot — a front-facing
+ * cream tofu block in the mascot's palette, same ω mouth, same blush — so
+ * the creature in the bar and the logo above it are provably the same
+ * character. (History: this bar first held a swappable "pack"
+ * registry, then a single borrowed pixel-art cat. Both the pack switcher and,
+ * later, a logo-skin picker were removed on owner instruction — mascot
+ * switching has been vetoed twice. Do NOT re-add a character registry, a
+ * picker, or a localStorage try-on: ship ONE character.)
+ *
+ * The 22 frames are AI-DESIGNED raster art (2026-07-30 revamp), not the old
+ * procedural SVG: ai/hero_v1.png was drawn with the image tool and every other
+ * pose is an img2img edit of it, then
+ * static/icons/_gen/tofu-pet/process_ai_frames.py chroma-keys the green
+ * backdrop, trims, recentres and downscales each one to tofu-<frame>.png
+ * (it has a --check CI gate). One pipeline ⇒ the character cannot drift
+ * between frames.
  *
  * MOTION is a real frame-by-frame WALK CYCLE: keyposes advanced by a frame
- * ticker on the rAF loop while walking (NOT one PNG sliding). Layers (so
+ * ticker on the rAF loop while walking (NOT one image sliding). Layers (so
  * transforms never fight): .tofu-pet owns POSITION (translateX, set by the
- * wander loop) · .tofu-pet-facing owns DIRECTION (scaleX ±1) · .tofu-pet-img
- * owns the swapped frame + idle breathe.
+ * wander loop) · .tofu-pet-img owns the per-frame LIFE animation (breathe /
+ * walk-bob) · and DIRECTION lives on the individual <img> frame elements
+ * (scaleX(var(--pet-face-flip))) — a child of the animated layer, so the
+ * mirror never fights the keyframes.
+ *
+ * WHY DIRECTION IS A WHOLE-SPRITE MIRROR AGAIN (the end of the one-sun split):
+ * the previous isometric body encoded a sun in its three faces, so mirroring
+ * was confined to a character-space subgroup (face+feet flipped, body never
+ * did). That kept the light consistent but meant the BODY's 3/4 orientation
+ * was frozen: half the time the cube's shaded depth face pointed against the
+ * direction of travel — the "walks backward / moonwalk" complaint, structural
+ * and unfixable while the body could not turn. The new character is
+ * FRONT-FACING with soft symmetric lighting, so mirroring the WHOLE frame is
+ * both safe (no baked sun to move) and complete (body, gaze and stride always
+ * agree with travel). The scene-sun coupling survives where it is
+ * art-independent: the cast shadow + the filter-based form light below.
  *
  * PET ⋈ SCENE INTERACTION (owner ask — "interaction between the pet and the
  * background"): tofu-scene.js exposes the drifting critter's position
  * (TofuScene.critterX) and a spook() hook. The wander FSM has a 'chase' state:
- * when the critter drifts near, the cat perks (alert) then pursues it; on
+ * when the critter drifts near, the pet perks (alert) then pursues it; on
  * catch it pounces (surprised) and the critter darts away (scene.spook()). The
- * scene in turn glows softly under the cat (it reads TofuPet.getState().x). Both
+ * scene in turn glows softly under the pet (it reads TofuPet.getState().x). Both
  * couplings are OPTIONAL + guarded, so each module still works entirely alone.
  *
  * Public surface `window.TofuPet`:
@@ -45,7 +71,7 @@
  *   document.dispatchEvent(new CustomEvent('tofu:decor',    {detail:'pool'}))
  *
  * Accessibility (per WCAG 2.3.3 / 2.2.2 + oneko): under prefers-reduced-motion
- * the cat does NOT roam or chase (stands still, single frame); it pauses when
+ * the pet does NOT roam or chase (stands still, single frame); it pauses when
  * the tab is hidden; and it is aria-hidden + never focus/click-stealing.
  * mood/energy are best-effort persisted to localStorage. Nothing here touches
  * the chat/streaming pipeline.
@@ -62,45 +88,76 @@
   // [data-decor="<style>"] rule + a scene-<style>.svg asset. ──
   var DECOR_STYLES = ['meadow', 'pool', 'sky', 'off'];
   // Human labels for the visible scene-switch button in the project bar.
-  var SCENE_LABELS = { meadow: 'Meadow', pool: 'Pool', sky: 'Sky', off: 'Off' };
+  // Resolved through t() at READ TIME, never cached: a cached label would
+  // freeze whatever language was active when this module first ran.
+  //
+  // The call is t('pet.scene.' + style) — a DYNAMIC prefix, which is exactly the
+  // shape lib/i18n_boot_keys.T_CALL_DYNAMIC_PREFIX_RE exists to catch
+  // (charter #18). The scanner sees the `pet.scene.` prefix and expands it to
+  // every matching key in the source dict, so the boot pack carries all four
+  // without anyone hand-copying a list. Writing a literal map here instead
+  // would put the English strings back in the JS and hide them from discovery.
+  function _sceneLabel(style) {
+    return t('pet.scene.' + style);
+  }
   var DEFAULT_DECOR = 'meadow';
   var _decor = DEFAULT_DECOR;
 
-  // ── The kitten sprite frames live under static/icons/pet/oneko/ as
-  // oneko-<frame>.png (32px public-domain Neko art; see the LICENSE there).
+  // ── The pet's art: BRAND-NATIVE tofu frames at static/icons/pet/tofu/ as
+  // tofu-<frame>.png. The character IS the Tofu mascot (a cream tofu block in
+  // the logo's palette) rather than a borrowed cat, so the thing living in the
+  // bar and the logo above it are the same creature. The art is AI-designed —
+  // static/icons/_gen/tofu-pet/process_ai_frames.py turns the raw poses into
+  // every shipped frame from one pipeline, so the character cannot
+  // desynchronise between frames. Transparent PNG + object-fit:contain: the
+  // squash/stretch poses keep their height contrast inside the fixed box.
   // URL built with BASE_PATH (from core.js) so it stays correct behind a
   // base-path / VS Code proxy. ──
-  var PET_DIR = '/static/icons/pet/oneko';
-  var PET_PREFIX = 'oneko-';
+  var PET_DIR = '/static/icons/pet/tofu';
+  var PET_PREFIX = 'tofu-';
+  var PET_EXT = '.png';
   var _base = (typeof BASE_PATH === 'string') ? BASE_PATH : '';
   function _frameUrl(frame) {
-    return _base + PET_DIR + '/' + PET_PREFIX + frame + '.png';
+    return _base + PET_DIR + '/' + PET_PREFIX + frame + PET_EXT;
   }
 
   // Resting expressions (the mood/time FSM resolves to one of these). Every
-  // name here must have an oneko-<name>.png on disk.
+  // name here must have a tofu-<name>.svg on disk.
   var EXPRESSIONS = ['idle', 'happy', 'sleepy', 'sleeping', 'thinking',
     'surprised', 'sad', 'celebrating', 'alert'];
-  // Poses that reuse another frame's art (a cat has poses, not emotions).
-  // 'curious' → the alert perk; nothing else needs remapping now.
+  // Poses that reuse another frame's art (the block has poses, not a separate
+  // drawing per mood). 'curious' → the alert perk; nothing else needs remapping.
   var FRAME_ALIAS = { curious: 'alert' };
 
-  // The WALK CYCLE: four keyposes played in order while state==='walk'.
-  var WALK_FRAMES = ['walk1', 'walk2', 'walk3', 'walk4'];
-  var WALK_FRAME_MS = 150;   // per keypose → full ~600ms stride cycle
+  // The WALK CYCLE: eight keyposes played in order while state==='walk'.
+  //
+  // EIGHT, not four, and 75ms, not 150ms — both halves of that matter:
+  //   · The old cycle reused ONE symmetric contact pose for both contact beats,
+  //     so no foot ever led and the gait read as shuffling in place / sliding
+  //     BACKWARDS. A stride only reads as walking if the leading foot
+  //     alternates, which needs a near-leads and a far-leads pose.
+  //   · 4 frames at 150ms is 6.7fps. Below roughly 12fps a cycle stops reading
+  //     as motion and starts reading as a flicker between drawings — the
+  //     "animation isn't smooth" half of the same report. 8 at 75ms is 13.3fps
+  //     over the SAME 600ms stride, so the pet's speed is unchanged.
+  var WALK_FRAMES = ['walk1', 'walk2', 'walk3', 'walk4',
+    'walk5', 'walk6', 'walk7', 'walk8'];
+  var WALK_FRAME_MS = 75;    // per keypose → full ~600ms stride cycle at 13.3fps
   var _walkIdx = 0, _walkAccum = 0;
 
-  // GROOM cycle (sit + lick paw) and WALL-SCRATCH cycle (stretch up) — the new
-  // "forms". Played frame-by-frame in their own states, same ticker as walk.
+  // GROOM cycle (a settling wobble) and STRETCH cycle (a full-body stretch) —
+  // the stationary "forms". Played frame-by-frame in their own states, same
+  // ticker as walk. A cube has no paw to lick, so grooming is a tidy-up wobble
+  // and scratching is the whole body stretching tall then settling wide.
   var GROOM_FRAMES = ['groom1', 'groom2', 'groom3'];
   var SCRATCH_FRAMES = ['scratch1', 'scratch2'];
   var POSE_FRAME_MS = 220;
   var _poseIdx = 0, _poseAccum = 0, _poseFrames = null;
 
-  // GAZE: a "sit and look around" beat — the cat stays put (alert pose, ears
-  // up) and periodically turns its head to the other side, as if watching the
-  // scene. No extra art (reuses the 'alert' frame + the facing flip). This is a
-  // distinct stationary ACTIVITY so the pet does more than pace the bar.
+  // GAZE: a "sit and look around" beat — the pet stays put (alert pose) and
+  // periodically turns to face the other side, as if watching the scene. No
+  // extra art (reuses the 'alert' frame + the facing flip). This is a distinct
+  // stationary ACTIVITY so the pet does more than pace the bar.
   var GAZE_TURN_MS = 1300;
   var _gazeAccum = 0;
   var _turnTimer = null;   // clears the transient 'pivot' pop after a facing flip
@@ -155,11 +212,11 @@
     var btns = document.querySelectorAll('.scene-switch-btn');
     for (var i = 0; i < btns.length; i++) {
       var b = btns[i];
-      var name = SCENE_LABELS[_decor] || _decor;
+      var name = _sceneLabel(_decor);
       var lbl = b.querySelector('.scene-switch-label');
       if (lbl) lbl.textContent = name;
       b.setAttribute('data-scene', _decor);
-      b.setAttribute('title', 'Scene: ' + name + ' \u00b7 click to change');
+      b.setAttribute('title', t('pet.sceneTooltip', { scene: name }));
     }
   }
   function setDecor(style) {
@@ -206,47 +263,106 @@
     return tb.expr;   // 'happy' (morning) or 'idle'
   }
 
-  var _greetWord = {
-    deepNight: 'fast asleep', earlyMorning: 'waking up', morning: 'bright and early',
-    afternoon: 'hanging out', evening: 'winding down', night: 'getting sleepy'
-  };
+  // The pet's hover tooltip. Both halves resolve through DYNAMIC t() prefixes
+  // (pet.greet. / pet.feel.), so lib/i18n_boot_keys expands each namespace into
+  // the boot pack automatically — add a time bucket or a mood tier and its key
+  // ships without touching any list. Composed via a template key rather than
+  // string concatenation, because word order differs by language.
+  function _feelTier() {
+    return S.mood >= 75 ? 'great' : S.mood >= 45 ? 'fine' : 'blue';
+  }
   function _title() {
     var tb = _timeBucket(new Date().getHours());
-    var feel = S.mood >= 75 ? 'feeling great' : S.mood >= 45 ? 'doing fine' : 'a bit blue';
-    return 'Kitty — ' + (_greetWord[tb.bucket] || 'here') + ' \u00b7 ' + feel;
+    return t('pet.title', {
+      greet: t('pet.greet.' + tb.bucket),
+      feel: t('pet.feel.' + _feelTier())
+    });
   }
 
   // ── DOM ──
   var _el = null;         // .tofu-pet (position layer)
-  var _facing = null;     // .tofu-pet-facing (direction layer)
-  var _img = null;        // <img> (frame layer)
+  var _img = null;        // .tofu-pet-img (frame layer — holds the live <svg>)
   var _bar = null;        // .project-bar
   var _revertTimer = null;
 
+  // ── FRAME ART: each frame is an <img> kept live in the DOM. The 22 frames
+  // are created once and kept; frame changes then toggle which one is VISIBLE
+  // — no node construction, nothing for the GC. Rebuilding src per frame
+  // instead would re-decode a PNG 13 times a second, which is exactly the kind
+  // of per-frame churn that shows up as stutter on a busy page. (Raster art is
+  // what makes <img> safe here: the old SVG needed inlining so CSS vars could
+  // reach into it; the front-facing raster frames take their lighting from the
+  // filter chain on the parent layer, which works across an <img> boundary.)
+  var _frameNode = Object.create(null);      // frame name → live <img> element
+  var _frameFetching = Object.create(null);  // in-flight guard (create once)
+  var _wantFrame = null;                     // last frame ASKED for
+  var _curFrame = null;                      // frame currently visible
+
+  function _paintFrame(name) {
+    var node = _frameNode[name];
+    if (!_img || !node) return;
+    if (_curFrame && _frameNode[_curFrame]) {
+      _frameNode[_curFrame].style.display = 'none';
+    }
+    node.style.display = '';
+    _curFrame = name;
+  }
+
+  function _loadFrame(name) {
+    if (_frameNode[name] || _frameFetching[name]) return;
+    _frameFetching[name] = 1;
+    var node = new Image();
+    node.draggable = false;
+    node.alt = '';
+    node.style.display = 'none';
+    node.setAttribute('data-frame', name);
+    node.onload = function () {
+      delete _frameFetching[name];
+      _frameNode[name] = node;
+      if (!_img) return;
+      _img.appendChild(node);
+      // Paint only if this is still the frame we want — a walk cycle may have
+      // advanced several times while this decode was in flight.
+      if (_wantFrame === name) _paintFrame(name);
+    };
+    node.onerror = function () {
+      delete _frameFetching[name];
+      // Same-origin static asset served by the same app that served this JS, so
+      // this is not an expected state; surface it instead of failing silently.
+      console.warn('[TofuPet] frame art unavailable:', name);
+    };
+    node.src = _frameUrl(name);
+  }
+
+  // The ONE seam every pose path goes through, so "which art is on screen" has a
+  // single writer (the old code wrote _img.src from three places).
+  function _setFrameArt(name) {
+    _wantFrame = name;
+    if (_frameNode[name]) _paintFrame(name);
+    else _loadFrame(name);
+  }
+
   function _preload() {
     var all = EXPRESSIONS.concat(WALK_FRAMES, GROOM_FRAMES, SCRATCH_FRAMES);
-    for (var i = 0; i < all.length; i++) {
-      var im = new Image();
-      im.src = _frameUrl(all[i]);
-    }
+    for (var i = 0; i < all.length; i++) _loadFrame(all[i]);
   }
 
   function _setWalkFrame(i) {
     _walkIdx = ((i % WALK_FRAMES.length) + WALK_FRAMES.length) % WALK_FRAMES.length;
-    if (_img) _img.src = _frameUrl(WALK_FRAMES[_walkIdx]);
+    _setFrameArt(WALK_FRAMES[_walkIdx]);
   }
   // Advance a generic pose cycle (groom / scratch), used by the sit/scratch
   // states. Mirrors _setWalkFrame but over the active pose frame list.
   function _setPoseFrame(i) {
     if (!_poseFrames || !_poseFrames.length) return;
     _poseIdx = ((i % _poseFrames.length) + _poseFrames.length) % _poseFrames.length;
-    if (_img) _img.src = _frameUrl(_poseFrames[_poseIdx]);
+    _setFrameArt(_poseFrames[_poseIdx]);
   }
 
   function _setFrame(expr) {
     var frame = FRAME_ALIAS[expr] || expr;
     if (EXPRESSIONS.indexOf(frame) === -1) frame = 'idle';
-    if (_img) _img.src = _frameUrl(frame);
+    _setFrameArt(frame);
   }
 
   // Show a resting expression (idle/sleepy/…): used by the wander FSM's
@@ -357,18 +473,20 @@
   // see the CSS allowlist note) so it never reserves an in-flow flex slot. ──
   var _bubble = null, _bubbleTimer = null;
   function _dayReportText() {
-    var _tt = (typeof t === 'function') ? t : null;
-    var _k = function (key, params, fb) {
-      if (_tt) { var s = _tt(key, params); if (s && s !== key) return s; }
-      return fb;
-    };
-    if (!_day) return _k('pet.dayGreeting', null, 'Hi there!');
+    // Literal t('...') calls, NOT a local alias. A wrapper like
+    // `var _k = function (key, ...) { ... t(key) ... }` reads fine but is
+    // INVISIBLE to lib/i18n_boot_keys.T_CALL_KEY_RE, which only matches a
+    // literal string as t()'s first argument — so every pet.* key silently
+    // missed the boot pack (measured: 0 discovered while 4 were in the dict).
+    // t() already falls back to the key and interpolates params, so the
+    // wrapper bought nothing and cost discoverability.
+    if (!_day) return t('pet.dayGreeting');
     var done = (_day.streams.done || 0) + (_day.todos.done || 0);
     var total = (_day.streams.total || 0) + (_day.todos.total || 0);
     var blocked = _day.streams.blocked || 0;
-    if (total === 0) return _k('pet.dayIdle', null, 'Nothing logged yet today');
-    var base = _k('pet.dayReport', { done: done, total: total }, done + '/' + total + ' done today');
-    if (blocked > 0) base += ' ' + _k('pet.dayBlocked', { n: blocked }, '\u00b7 ' + blocked + ' blocked');
+    if (total === 0) return t('pet.dayIdle');
+    var base = t('pet.dayReport', { done: done, total: total });
+    if (blocked > 0) base += ' ' + t('pet.dayBlocked', { n: blocked });
     return base;
   }
   var _BUBBLE_SVG = '<svg viewBox="0 0 120 46" preserveAspectRatio="none" aria-hidden="true" xmlns="http://www.w3.org/2000/svg"><path d="M8 2h104a6 6 0 0 1 6 6v22a6 6 0 0 1-6 6H70l-9 11-3-11H8a6 6 0 0 1-6-6V8a6 6 0 0 1 6-6z"/></svg>';
@@ -393,16 +511,25 @@
     tx.textContent = txt;
     b.appendChild(bg);
     b.appendChild(tx);
-    // Clamp the bubble's left within the bar so it never overflows the right
-    // edge (the callout is centred on the pet via translateX(-50%)).
+    _bar.appendChild(b);
+    _bubble = b;
+    _positionBubble();
+    _bubbleTimer = setTimeout(_hideBubble, 4200);
+  }
+  // The bubble is ANCHORED to the pet, not to the spot where the tap landed:
+  // a tap also STARTLES the pet into a flee dash, so a bubble positioned only
+  // once at show time was left hanging over empty floor while the pet scurried
+  // away (the "bubble doesn't follow" report). _place() calls this every frame
+  // while the bubble is alive, so it rides above the pet wherever it goes.
+  // Left is clamped inside the bar so the callout never overflows an edge (it
+  // is centred on the pet via translateX(-50%)).
+  function _positionBubble() {
+    if (!_bubble || !_bar) return;
     var petW = (_el && _el.offsetWidth) || 30;
     var barW = (_bar.getBoundingClientRect && _bar.getBoundingClientRect().width) || 0;
     var left = W.x + petW / 2;
     if (barW > 0) left = Math.max(40, Math.min(left, barW - 40));
-    b.style.left = Math.max(2, left).toFixed(1) + 'px';
-    _bar.appendChild(b);
-    _bubble = b;
-    _bubbleTimer = setTimeout(_hideBubble, 4200);
+    _bubble.style.left = Math.max(2, left).toFixed(1) + 'px';
   }
 
   // ══════════════════════════════════════════════════════════════════════
@@ -470,10 +597,17 @@
     if (pivot === undefined) pivot = true;
     var changed = (dir !== W.dir);
     W.dir = dir;
-    // The facing layer has NO transition, so the horizontal mirror is INSTANT
-    // — it never tweens scaleX(+1)->scaleX(-1) through scaleX(0), which is what
-    // made the cat look like a sheet of paper flipping on its vertical axis.
-    if (_facing) _facing.style.transform = 'scaleX(' + dir + ')';
+    // ── THE MIRROR IS THE WHOLE FRAME, ON THE <img> ELEMENTS ──
+    // --pet-face-flip is consumed by the CSS on .tofu-pet-img > img — the
+    // CHILDREN of the animated layer, so the mirror never fights the breathe/
+    // walk keyframes on the parent. Whole-sprite mirroring is SAFE here
+    // because the character is front-facing with soft symmetric shading (there
+    // is no baked sun to drag around — see the header note), and it is
+    // REQUIRED for the same reason: the body must turn with the stride or the
+    // pet moonwalks. Still a bare property write with no transition: tweening
+    // the flip would pass the face through scaleX(0) and smear it, the
+    // paper-flip the old wrapper was careful to avoid.
+    if (_el) _el.style.setProperty('--pet-face-flip', String(dir));
     // A real turn is a PIVOT, not a page-flip: overlay a brief squash-hop on the
     // sprite (CSS keyframe gated by data-turning) so the cat reads as planting
     // its feet and spinning to face the other way. Skipped under reduced-motion
@@ -489,18 +623,33 @@
   }
   function _place() {
     if (_el) _el.style.transform = 'translateX(' + W.x.toFixed(1) + 'px)';
+    _positionBubble();   // the bubble rides above the pet, wherever it moved to
     // Subtle ground parallax: the scene drifts a fraction of the pet's travel
     // (opposite direction) for depth. The ground ::after reads --bar-scene-x.
     // Static under reduced-motion (the pet doesn't move → this never updates).
-    if (_bar) _bar.style.setProperty('--bar-scene-x', (-(W.x) * 0.12).toFixed(1) + 'px');
+    //
+    // ONLY written while the SVG ground is the thing on screen. When
+    // tofu-scene.js has a live canvas it stamps data-scene-canvas="on" and the
+    // CSS sets that ::after to display:none — so this write was invalidating the
+    // whole bar's custom-property inheritance every single frame to move the
+    // background-position of a box that is not rendered. The canvas paints its
+    // own parallax; the property is still maintained for the no-JS/no-canvas
+    // fallback, which is the only reader that exists.
+    if (_bar && _bar.getAttribute('data-scene-canvas') !== 'on') {
+      _bar.style.setProperty('--bar-scene-x', (-(W.x) * 0.12).toFixed(1) + 'px');
+    }
   }
 
-  // ── LIGHTING: read the scene's live sun (TofuScene.lightInfo) and shade the
-  // sprite + point its cast shadow with the SAME source, so the pet is lit by
-  // the one sun that drifts over the diorama instead of reading as pasted on.
-  // Fully guarded: no scene / no light → reset to the neutral defaults (flat
-  // baked shading, centred shadow), so a scene-less or non-tofu pet is
-  // unchanged. Cheap: a few CSS var writes per frame, no layout.
+  // ── LIGHTING: read the scene's live sun (TofuScene.lightInfo) and point
+  // the cast shadow + the filter-based form light with the SAME source, so
+  // the pet is lit by the one sun that drifts over the diorama instead of
+  // reading as pasted on. Both channels are art-independent (the ::after
+  // shadow ellipse + a CSS drop-shadow/brightness filter on the frame layer),
+  // so they work on the raster frames exactly as they did on the SVG — the
+  // per-face recolouring the SVG gradients allowed is gone with them, which
+  // is precisely why the front-facing art keeps its own soft symmetric
+  // shading. Fully guarded: no scene / no light → neutral defaults. Cheap: a
+  // few CSS var writes per frame, no layout.
   var _lastLightK = '';
   function _applyLight() {
     if (!_el) return;
@@ -528,7 +677,8 @@
     }
     // only touch the DOM when a rounded value actually changed (avoid per-frame
     // style churn when the cat + sun are momentarily static).
-    var k = dx.toFixed(1) + '|' + scale.toFixed(2) + '|' + shade.toFixed(2) + '|' + warm.toFixed(2);
+    var k = dx.toFixed(1) + '|' + scale.toFixed(2) + '|' + shade.toFixed(2) + '|' +
+      warm.toFixed(2);
     if (k === _lastLightK) return;
     _lastLightK = k;
     var st = _el.style;
@@ -601,6 +751,13 @@
       W.until = _now() + _rand(1400, 3000);   // shorter trips — walking is one behavior among many, not the default
       S.expr = 'walk';
       _walkAccum = 0;
+      // Face the way we are ABOUT to travel. Without this the pet inherits
+      // whatever direction the previous state left behind — and 'gaze' flips
+      // facing every 1.3s on purpose — so entering a walk straight out of a
+      // glance could set off with the body facing backwards and the stride
+      // pushing the wrong way. Cheap, and it closes the last path by which the
+      // pet could appear to walk backwards.
+      _face(W.dir, false);
       if (_el) { _el.setAttribute('data-expr', 'walk'); _el.setAttribute('title', _title()); }
       _setWalkFrame(0);
     } else if (state === 'chase') {
@@ -763,11 +920,11 @@
   }
 
   // ══════════════════════════════════════════════════════════════════════
-  //  DRAG — pick the kitten up and move it along the bar. A press starts a
-  //  candidate drag; once the pointer moves past DRAG_SLOP the cat is "held"
+  //  DRAG — pick the tofu up and move it along the bar. A press starts a
+  //  candidate drag; once the pointer moves past DRAG_SLOP the pet is "held"
   //  (the wander FSM yields: _step early-returns while state==='drag', so the
   //  autonomous walk/chase never fights the finger). On release: a real drag
-  //  drops the cat where you let go (then it resumes wandering from there); a
+  //  drops it where you let go (then it resumes wandering from there); a
   //  press that never crossed the slop is treated as a plain CLICK → interact()
   //  (preserves the day-report bubble). Uses Pointer Events (mouse + touch) with
   //  capture so a fast drag that outruns the sprite still tracks. Guarded so a
@@ -840,17 +997,17 @@
     _el.id = MOUNT_ID;
     _el.setAttribute('role', 'img');
     _el.setAttribute('aria-hidden', 'true');
-    _el.setAttribute('data-pet', 'oneko');
-    _facing = document.createElement('span');
-    _facing.className = 'tofu-pet-facing';
-    _img = document.createElement('img');
+    _el.setAttribute('data-pet', 'tofu');
+    // The frame layer is a plain box that HOLDS the live <svg> (see the frame-art
+    // note above). There is no separate direction layer any more: mirroring the
+    // whole sprite is exactly the bug that dragged the block's lighting around
+    // with it, so the mirror now lives inside the sprite on the character-space
+    // group and this element owns only the per-frame life animation.
+    _img = document.createElement('span');
     _img.className = 'tofu-pet-img';
-    _img.alt = '';
     _img.setAttribute('aria-hidden', 'true');
-    _img.setAttribute('draggable', 'false');
-    _facing.appendChild(_img);
-    _el.appendChild(_facing);
-    _wireDrag();   // press = click (interact); press+move = drag the kitten
+    _el.appendChild(_img);
+    _wireDrag();   // press = click (interact); press+move = drag the pet
     _el.addEventListener('contextmenu', function (e) { e.preventDefault(); e.stopPropagation(); cycleDecor(); react('happy', 1000); });
     _el.addEventListener('mouseenter', _onHover);
     bar.insertBefore(_el, bar.firstChild);
@@ -920,7 +1077,7 @@
     },
     mount: mount,
     frameUrl: _frameUrl,
-    getFrame: function () { return _img ? _img.src : ''; },
+    getFrame: function () { return _curFrame ? _frameUrl(_curFrame) : ''; },
     WALK_FRAMES: WALK_FRAMES,
     GROOM_FRAMES: GROOM_FRAMES,
     SCRATCH_FRAMES: SCRATCH_FRAMES,
@@ -930,7 +1087,7 @@
     EXPRESSIONS: EXPRESSIONS,
     FRAME_ALIAS: FRAME_ALIAS,
     DECOR_STYLES: DECOR_STYLES,
-    SCENE_LABELS: SCENE_LABELS
+    sceneLabel: _sceneLabel
   };
 
   if (document.readyState === 'loading') {

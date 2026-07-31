@@ -44,7 +44,7 @@ function mkCtx(rec){
   return {
     canvas: { width: 400, height: 48 },
     setTransform(){}, clearRect(){}, save(){}, restore(){}, translate(){},
-    rotate(){}, beginPath(){}, fill(){}, fillRect(){ rec.fillRect++; },
+    rotate(){}, beginPath(){}, moveTo(){}, fill(){}, fillRect(){ rec.fillRect++; },
     ellipse(){ rec.ellipse++; }, drawImage(){ rec.drawImage++; },
     createLinearGradient(){ return { addColorStop(){} }; },
     createRadialGradient(){ return { addColorStop(){} }; },
@@ -107,6 +107,12 @@ global.document = {
 };
 global.cancelAnimationFrame = global.cancelAnimationFrame;
 
+// Pin the scene clock to 14:00 ('afternoon' = the neutral bucket, zero tint
+// wash) so colour-keyed assertions are deterministic whatever hour CI runs at.
+{ const _RealDate = Date;
+  global.Date = function(...a){ return a.length ? new _RealDate(...a) : new _RealDate(2026, 0, 1, 14, 0, 0); };
+  global.Date.now = _RealDate.now; global.Date.parse = _RealDate.parse; global.Date.UTC = _RealDate.UTC;
+  global.Date.prototype = _RealDate.prototype; }
 __SRC__
 const TS = window.TofuScene;
 // pump one animation frame if the loop scheduled one
@@ -194,13 +200,18 @@ def test_every_scene_paints_dabs():
 
 
 def test_NEUTER_flat_fill_is_caught():
-    """NEUTER: remove the dab-drawing call inside the layer loop → the buffer is
-    a flat gradient fill with NO brush-dabs. The 'is painterly' assertion must
-    then fail (proving it bites)."""
+    """NEUTER: make the dab emitter a no-op → the buffer is a flat gradient fill
+    with NO brush-dabs. The 'is painterly' assertion must then fail (proving it
+    bites).
+
+    This neuters the ENQUEUE step rather than one call site, because the baked
+    scene legitimately paints dabs from several places (depth planes, the impasto
+    ridge/furrow pass). Cutting one call site would leave the
+    others painting and the guard would silently stop biting."""
     src = SCENE_JS.read_text()
-    neut = src.replace("dab(b, x, y, len, wid, ang, color, alpha);",
-                       "/* neutered dab */", 1)
-    assert neut != src, "neuter did not match the buffer dab call"
+    neut = src.replace("    arr.push(x, y, len, wid, ang);",
+                       "    return;  /* neutered dab enqueue */", 1)
+    assert neut != src, "neuter did not match the dab enqueue"
     r = _run(theme="tofu", decor="meadow", src=neut)
     assert r["bufFillRect"] >= 1, "base wash should still paint"
     assert r["bufEllipse"] == 0, \
@@ -327,7 +338,7 @@ function mkCtx(rec){
   return {
     canvas: { width: 400, height: 48 },
     setTransform(){}, clearRect(){}, save(){}, restore(){}, translate(){},
-    rotate(){}, beginPath(){}, fill(){}, fillRect(){ rec.fillRect++; },
+    rotate(){}, beginPath(){}, moveTo(){}, fill(){}, fillRect(){ rec.fillRect++; },
     ellipse(){ rec.ellipse++; }, stroke(){ rec.stroke++; }, drawImage(){ rec.drawImage++; },
     createLinearGradient(){ return { addColorStop(){} }; },
     createRadialGradient(){ return { addColorStop(s,col){ rec.radialStops.push(col); } }; },
@@ -384,6 +395,12 @@ global.document = {
   },
 };
 
+// Pin the scene clock to 14:00 ('afternoon' = the neutral bucket, zero tint
+// wash) so colour-keyed assertions are deterministic whatever hour CI runs at.
+{ const _RealDate = Date;
+  global.Date = function(...a){ return a.length ? new _RealDate(...a) : new _RealDate(2026, 0, 1, 14, 0, 0); };
+  global.Date.now = _RealDate.now; global.Date.parse = _RealDate.parse; global.Date.UTC = _RealDate.UTC;
+  global.Date.prototype = _RealDate.prototype; }
 __SRC__
 
 // install a movable pet AFTER the module loaded (it reads window.TofuPet lazily)
@@ -402,7 +419,11 @@ console.log(JSON.stringify({
   scene: window.TofuScene.getScene(),
   visEllipse: visRec.ellipse,
   visStroke: visRec.stroke,
-  glowStops: visRec.radialStops,
+  // The sun glow is baked to a tile at bake time (see tofu-scene.js
+  // _bakeGlowTile), so its radial stops land on the glow-tile recorder (the 4th
+  // canvas, routed to fgRec) rather than the visible frame. Collect from all
+  // recorders so the dim assertion follows the glow wherever it is built.
+  glowStops: visRec.radialStops.concat(bufRec.radialStops, fgRec.radialStops),
   fgEllipse: fgRec.ellipse,
   fgStroke: fgRec.stroke,
 }));
@@ -529,8 +550,14 @@ function mkCtx(rec){
   return {
     canvas:{width:400,height:48},
     setTransform(){}, clearRect(){}, save(){}, restore(){},
-    translate(x,y){ rec.tr.push([Math.round(x*100)/100, Math.round(y*100)/100]); },
-    rotate(){}, beginPath(){}, fill(){}, fillRect(){}, ellipse(){}, stroke(){}, drawImage(){},
+    translate(){},
+    /* Dabs are BATCHED: geometry now lives in the ellipse() args (the module no
+       longer emits a translate/rotate per dab — that quartet was the per-frame
+       cost that was removed). Record the ellipse centre, which is the same
+       (x,y) the old translate() carried, so this harness measures exactly what
+       it always did: where each dab landed. */
+    ellipse(x,y){ rec.tr.push([Math.round(x*100)/100, Math.round(y*100)/100]); },
+    rotate(){}, beginPath(){}, moveTo(){}, fill(){}, fillRect(){}, stroke(){}, drawImage(){},
     createLinearGradient(){ return {addColorStop(){}}; },
     createRadialGradient(){ return {addColorStop(){}}; },
     set fillStyle(v){}, get fillStyle(){return '';},
@@ -560,6 +587,12 @@ global.document={ readyState:'complete', hidden:false,
   documentElement:{getAttribute(k){return k==='data-theme'?'tofu':null;}},
   addEventListener(){}, getElementById(id){return id==='projectBar'?_bar:null;},
   createElement(t){ if(t==='canvas'){_canvasN++;const rec=_canvasN===1?visRec:(_canvasN===2?bufRec:fgRec);const e=mkEl();e.getContext=function(){return mkCtx(rec);};return e;} return mkEl(); } };
+// Pin the scene clock to 14:00 ('afternoon' = the neutral bucket, zero tint
+// wash) so colour-keyed assertions are deterministic whatever hour CI runs at.
+{ const _RealDate = Date;
+  global.Date = function(...a){ return a.length ? new _RealDate(...a) : new _RealDate(2026, 0, 1, 14, 0, 0); };
+  global.Date.now = _RealDate.now; global.Date.parse = _RealDate.parse; global.Date.UTC = _RealDate.UTC;
+  global.Date.prototype = _RealDate.prototype; }
 __SRC__
 if (PET_MODE !== 'none'){
   global.window.TofuPet = { getState(){ return { x: PET_X, state: (PET_MODE==='drag'?'drag':'walk') }; } };
@@ -688,9 +721,13 @@ function mkCtx(rec){
   return {
     canvas:{width:400,height:48},
     setTransform(){}, clearRect(){}, save(){}, restore(){},
-    translate(x,y){ rec.dabs.push([rec._fill, Math.round(x*100)/100, Math.round(y*100)/100, null]); },
-    rotate(a){ const d=rec.dabs[rec.dabs.length-1]; if(d) d[3]=Math.round(a*1000)/1000; },
-    beginPath(){}, fill(){}, fillRect(){}, ellipse(){}, stroke(){}, drawImage(){},
+    translate(){},
+    rotate(){},
+    /* Batched dabs: fillStyle is set once per colour bucket, then each dab is
+       an ellipse(x,y,rx,ry,ang) subpath — so the (colour,x,y,angle) tuple this
+       harness measures now comes off the ellipse args. */
+    ellipse(x,y,rx,ry,a){ rec.dabs.push([rec._fill, Math.round(x*100)/100, Math.round(y*100)/100, Math.round((a||0)*1000)/1000]); },
+    beginPath(){}, moveTo(){}, fill(){}, fillRect(){}, stroke(){}, drawImage(){},
     createLinearGradient(){ return {addColorStop(){}}; },
     createRadialGradient(){ return {addColorStop(){}}; },
     set fillStyle(v){ rec._fill = v; }, get fillStyle(){ return rec._fill||''; },
@@ -720,6 +757,12 @@ global.document={ readyState:'complete', hidden:false,
   documentElement:{getAttribute(k){return k==='data-theme'?'tofu':null;}},
   addEventListener(){}, getElementById(id){return id==='projectBar'?_bar:null;},
   createElement(t){ if(t==='canvas'){_canvasN++;const rec=_canvasN===1?visRec:(_canvasN===2?bufRec:fgRec);const e=mkEl();e.getContext=function(){return mkCtx(rec);};return e;} return mkEl(); } };
+// Pin the scene clock to 14:00 ('afternoon' = the neutral bucket, zero tint
+// wash) so colour-keyed assertions are deterministic whatever hour CI runs at.
+{ const _RealDate = Date;
+  global.Date = function(...a){ return a.length ? new _RealDate(...a) : new _RealDate(2026, 0, 1, 14, 0, 0); };
+  global.Date.now = _RealDate.now; global.Date.parse = _RealDate.parse; global.Date.UTC = _RealDate.UTC;
+  global.Date.prototype = _RealDate.prototype; }
 __SRC__
 // NO pet — this is about the field moving on its own, not a pet interaction.
 function pump(ms){
@@ -870,9 +913,11 @@ function mkCtx(rec){
   return {
     canvas:{width:400,height:48},
     setTransform(){}, clearRect(){}, save(){}, restore(){},
-    translate(x,y){ rec.dabs.push([rec._fill, Math.round(x*100)/100, Math.round(y*100)/100, 0]); },
-    rotate(a){ const d = rec.dabs[rec.dabs.length-1]; if (d) d[3] = a; },
-    beginPath(){}, fill(){}, fillRect(){}, ellipse(){}, stroke(){}, drawImage(){},
+    translate(){},
+    rotate(){},
+    /* Batched dabs — see the motion harness: geometry rides the ellipse args. */
+    ellipse(x,y,rx,ry,a){ rec.dabs.push([rec._fill, Math.round(x*100)/100, Math.round(y*100)/100, a||0]); },
+    beginPath(){}, moveTo(){}, fill(){}, fillRect(){}, stroke(){}, drawImage(){},
     createLinearGradient(){ return {addColorStop(){}}; },
     createRadialGradient(){ return {addColorStop(){}}; },
     set fillStyle(v){ rec._fill = v; }, get fillStyle(){ return rec._fill||''; },
@@ -902,6 +947,12 @@ global.document={ readyState:'complete', hidden:false,
   documentElement:{getAttribute(k){return k==='data-theme'?'tofu':null;}},
   addEventListener(){}, getElementById(id){return id==='projectBar'?_bar:null;},
   createElement(t){ if(t==='canvas'){_canvasN++;const rec=_canvasN===1?visRec:(_canvasN===2?bufRec:fgRec);const e=mkEl();e.getContext=function(){return mkCtx(rec);};return e;} return mkEl(); } };
+// Pin the scene clock to 14:00 ('afternoon' = the neutral bucket, zero tint
+// wash) so colour-keyed assertions are deterministic whatever hour CI runs at.
+{ const _RealDate = Date;
+  global.Date = function(...a){ return a.length ? new _RealDate(...a) : new _RealDate(2026, 0, 1, 14, 0, 0); };
+  global.Date.now = _RealDate.now; global.Date.parse = _RealDate.parse; global.Date.UTC = _RealDate.UTC;
+  global.Date.prototype = _RealDate.prototype; }
 __SRC__
 // Park a pet at a fixed x (its foot centre = PET_X+16). We track the sink in
 // the near-ground field dabs in the x-window around the foot.
@@ -1113,53 +1164,54 @@ def test_NEUTER_missing_fg_canvas_css_is_caught():
         "fg-canvas rule survived the neuter — test would not bite"
 
 
-def test_bar_frame_is_irregular_hand_drawn_not_a_neat_rectangle():
-    """The tofu project bar's frame must be an IRREGULAR hand-drawn outline, not
-    a uniform rounded rectangle (owner: 'the border is too neat and rigid').
-    We assert the base .project-bar rule defines --bar-frame-radius with the
-    elliptical `h / v` form AND at least 3 distinct radius tokens (a uniform
-    `14px` or a single value would read as machine-perfect)."""
+def test_bar_frame_is_even_and_clean_not_a_wobbly_hand_drawn_outline():
+    """OWNER, 2026-07-26: the irregular hand-drawn border read as a wobbly,
+    unappealing outline. The frame must be an EVEN, single-value rounded
+    rectangle (no per-corner `h / v` elliptical form, no 3+ distinct radii).
+    We assert the base .project-bar rule defines --bar-frame-radius with NO `/`
+    and exactly ONE radius token, consumed as border-radius."""
     css = CSS.read_text()
     m = re.search(r'\[data-theme="tofu"\]\s*\.project-bar\{([^}]*)\}', css)
     assert m, "base tofu .project-bar rule not found"
     body = m.group(1)
     rm = re.search(r'--bar-frame-radius\s*:\s*([^;]+)', body)
-    assert rm, "the irregular --bar-frame-radius token is missing — frame is rigid again"
+    assert rm, "the --bar-frame-radius token is missing — the frame lost its var"
     val = rm.group(1)
-    assert '/' in val, (
-        "--bar-frame-radius must use the elliptical `h-radii / v-radii` form "
-        "(unequal horizontal/vertical radii are what bend the stroke into a "
-        f"hand-drawn wobble).\nvalue={val}")
+    assert '/' not in val, (
+        "--bar-frame-radius must be a single uniform radius — the per-corner "
+        f"`h / v` elliptical form is the wobbly hand-drawn outline the owner "
+        f"rejected.\nvalue={val}")
     tokens = set(re.findall(r'\d+px', val))
-    assert len(tokens) >= 3, (
-        f"--bar-frame-radius has too few distinct radii ({tokens}) — a uniform "
-        "corner reads as a neat rectangle, not a sketched frame.")
+    assert len(tokens) == 1, (
+        f"--bar-frame-radius must be one radius ({tokens}) — multiple distinct "
+        "radii are the wobbly hand-drawn outline the owner rejected.")
     assert 'border-radius:var(--bar-frame-radius)' in body.replace(' ', ''), \
         "the frame must consume --bar-frame-radius as its border-radius"
 
 
-def test_scene_clips_follow_the_irregular_frame():
-    """The painting must be cropped to the SAME wonky outline as the frame (not
-    a separate neat rect): the scene/fg canvases + full-body ground clips must
+def test_scene_clips_follow_the_even_frame():
+    """The painting must be cropped to the SAME rounded outline as the frame
+    (not a separate rect): the scene/fg canvases + full-body ground clips must
     reference --bar-frame-radius in their clip-path."""
     css = CSS.read_text()
     assert css.count('clip-path:inset(0 round var(--bar-frame-radius') >= 3, (
         "scene clip-paths no longer follow --bar-frame-radius — the painting "
-        "would be cropped to a neat rectangle inside the wonky frame.")
+        "would be cropped to a different outline than the frame.")
 
 
-def test_NEUTER_uniform_frame_radius_is_caught():
-    """NEUTER: collapse --bar-frame-radius to a single uniform value on a COPY →
-    the irregular-frame guard must fire, proving it is load-bearing."""
+def test_NEUTER_wobbly_frame_radius_is_caught():
+    """NEUTER: restore the wobbly per-corner `h / v` form on a COPY → the
+    even-frame guard must fire, proving it is load-bearing."""
     css = CSS.read_text()
-    poisoned = re.sub(r'(--bar-frame-radius\s*:\s*)[^;]+', r'\g<1>14px', css, count=1)
+    poisoned = re.sub(r'(--bar-frame-radius\s*:\s*)[^;]+',
+                      r'\g<1>15px 23px 16px 22px / 22px 16px 24px 15px', css, count=1)
     assert poisoned != css, "neuter did not rewrite --bar-frame-radius"
     m = re.search(r'\[data-theme="tofu"\]\s*\.project-bar\{([^}]*)\}', poisoned)
     rm = re.search(r'--bar-frame-radius\s*:\s*([^;]+)', m.group(1))
     val = rm.group(1)
-    # the guard's two irregularity checks must both fail on the uniform value
-    assert not ('/' in val and len(set(re.findall(r'\d+px', val))) >= 3), \
-        "neuter left the value still irregular — test would not bite"
+    # the guard's two evenness checks must both fail on the wobbly value
+    assert '/' in val and len(set(re.findall(r'\d+px', val))) >= 3, \
+        "neuter left the value still even — test would not bite"
 
 
 _LIGHT_HARNESS = r"""
@@ -1169,12 +1221,18 @@ let _rafCbs=[];
 global.requestAnimationFrame=function(cb){_rafCbs.push(cb);return _rafCbs.length;};
 global.cancelAnimationFrame=function(){};
 global.devicePixelRatio=1;
-function mkCtx(){return{canvas:{width:400,height:48},setTransform(){},clearRect(){},save(){},restore(){},translate(){},rotate(){},beginPath(){},fill(){},fillRect(){},ellipse(){},drawImage(){},createLinearGradient(){return{addColorStop(){}};},createRadialGradient(){return{addColorStop(){}};},set fillStyle(v){},get fillStyle(){return'';},set globalAlpha(v){},get globalAlpha(){return 1;},set globalCompositeOperation(v){},get globalCompositeOperation(){return'';}};}
+function mkCtx(){return{canvas:{width:400,height:48},setTransform(){},clearRect(){},save(){},restore(){},translate(){},rotate(){},beginPath(){},moveTo(){},fill(){},fillRect(){},ellipse(){},drawImage(){},createLinearGradient(){return{addColorStop(){}};},createRadialGradient(){return{addColorStop(){}};},set fillStyle(v){},get fillStyle(){return'';},set globalAlpha(v){},get globalAlpha(){return 1;},set globalCompositeOperation(v){},get globalCompositeOperation(){return'';}};}
 global.window={matchMedia(){return{matches:false,addEventListener(){},addListener(){}};},addEventListener(){},ResizeObserver:function(){return{observe(){},disconnect(){}};},MutationObserver:function(){return{observe(){},disconnect(){}};},devicePixelRatio:1};
 global.ResizeObserver=global.window.ResizeObserver;global.MutationObserver=global.window.MutationObserver;
 function mkEl(){return{_attrs:{},className:'',style:{},width:0,height:0,setAttribute(k,v){this._attrs[k]=v;},getAttribute(k){return this._attrs[k];},appendChild(){},insertBefore(){},querySelector(){return null;},firstChild:null,getBoundingClientRect(){return{left:0,right:400,top:0,bottom:48,width:400,height:48};}};}
 const _bar=mkEl();_bar._attrs['data-decor']=DECOR;
 global.document={readyState:'complete',hidden:false,documentElement:{getAttribute(k){return k==='data-theme'?THEME:null;}},addEventListener(){},getElementById(id){return id==='projectBar'?_bar:null;},createElement(t){const e=mkEl();if(t==='canvas')e.getContext=function(){return mkCtx();};return e;}};
+// Pin the scene clock to 14:00 ('afternoon' = the neutral bucket, zero tint
+// wash) so colour-keyed assertions are deterministic whatever hour CI runs at.
+{ const _RealDate = Date;
+  global.Date = function(...a){ return a.length ? new _RealDate(...a) : new _RealDate(2026, 0, 1, 14, 0, 0); };
+  global.Date.now = _RealDate.now; global.Date.parse = _RealDate.parse; global.Date.UTC = _RealDate.UTC;
+  global.Date.prototype = _RealDate.prototype; }
 __SRC__
 const TS=window.TofuScene;
 // pump two frames FAR apart in time so the slow sun sweep produces a different x

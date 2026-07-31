@@ -84,6 +84,10 @@ global.activeConvId = null;
 // syncConversationToServer is a large top-level `async function` in
 // conversations.js alongside many siblings. eval the WHOLE file so the REAL
 // function is defined against our stubs; the other decls are harmless here.
+// It bare-name reads _trimMsgForPersist, extracted to
+// core/conv_persist_helpers.js (pt_3879f00e) — without it the lightMsgs map
+// throws INSIDE the function's own try{} and the sync silently never PUTs.
+eval(fs.readFileSync(process.argv[2].replace(/conversations\.js$/, 'conv_persist_helpers.js'), 'utf8'));
 eval(fs.readFileSync(process.argv[2], 'utf8'));  // core/conversations.js
 
 const out = [];

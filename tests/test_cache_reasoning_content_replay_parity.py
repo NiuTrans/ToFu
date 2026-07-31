@@ -18,8 +18,12 @@ with NO ``thinkingSignature``):
 THE FIX (symmetric, model-safe): replay mirrors the live tail's INDEPENDENT
 gates — carry ``reasoning_content`` whenever thinking is present; carry
 ``thinking_signature`` only when present. Downstream, an UNSIGNED thinking block
-is dropped identically on both paths by ``_assistant_blocks`` (Anthropic) and
-``_inject_claude_reasoning_details`` (needs both), so no HTTP 400 — and
+is dropped identically on both paths by ``_assistant_blocks`` (Anthropic) and —
+since 2026-07-26 (epic pt_8ffba515096142af) — STRIPPED from the Claude wire by
+``_inject_claude_reasoning_details`` (the old "needs both, pass through" shape
+was falsified in production: the sankuai gateway hard-400s unsigned Opus 5
+thinking with ``signature: Field required``). For NON-Claude models the field
+still reaches the wire, so live↔replay parity remains load-bearing there —
 DeepSeek's ``model_requires_reasoning_content_replay`` (unsigned reasoning_content
 MUST be replayed) is preserved. Signed thinking is unchanged (both fields kept).
 
@@ -134,16 +138,38 @@ def test_nc_old_both_gate_reproduces_flip():
     """NEUTER: emulate the PRE-FIX replay (drop reasoning_content unless BOTH
     thinking and signature present) and confirm it byte-diverges from the live
     tail on the {reasoning_content} field — proving the parity fix is
-    load-bearing.  If this stops reproducing, the live tail's own gating
-    changed and the premise must be revisited."""
+    load-bearing.
+
+    ⚠️ Model choice is load-bearing (updated 2026-07-26, epic
+    pt_8ffba515096142af): this NC MUST run against a NON-Claude model.  For
+    Claude, ``_inject_claude_reasoning_details`` now STRIPS unsigned
+    reasoning_content at build_body, so BOTH shapes converge on the wire and
+    the flip can no longer fire — that is the intended upstream-400 fix, not
+    a parity regression.  On non-Claude lines (DeepSeek & co., where
+    reasoning_content MUST be replayed) the field still reaches the wire and
+    live↔replay parity is exactly what prevents the cache flip."""
     # Pre-fix replay: no reasoning_content on an unsigned turn.
     old_replay = {'role': 'assistant', 'content': 'let me check',
                   'tool_calls': [{'id': 'c1', 'type': 'function',
                                   'function': {'name': 'run_command',
                                                'arguments': '{}'}}]}
-    live = _asst_field_bytes(_live_tail_turn('internal reasoning', None), False)
-    old = _asst_field_bytes(old_replay, False)
+    nc_model = 'kimi-k3'  # non-Claude: reasoning_content still reaches the wire
+    head = [{'role': 'system', 'content': 'S' * 80},
+            {'role': 'user', 'content': 'go'}]
+
+    def _bytes(asst):
+        msgs = head + [copy.deepcopy(asst),
+                       {'role': 'tool', 'tool_call_id': 'c1', 'content': 'r'}]
+        body = build_body(nc_model, msgs, tools=copy.deepcopy(_TOOLS),
+                          max_tokens=512, thinking_enabled=True)
+        body['_task_id'] = 't'
+        add_cache_breakpoints(body, '')
+        return wire_byte_field_prefix(body['messages'])
+
+    live = _bytes(_live_tail_turn('internal reasoning', None))
+    old = _bytes(old_replay)
     shared = min(len(live), len(old))
     diff = diff_byte_field_prefix(live[:shared], old[:shared])
     assert any(c.endswith('{reasoning_content}') for c in diff), (
-        f'expected a {{reasoning_content}} flip under the old BOTH-gate, got {diff}')
+        f'expected a {{reasoning_content}} flip under the old BOTH-gate on a '
+        f'non-Claude model, got {diff}')

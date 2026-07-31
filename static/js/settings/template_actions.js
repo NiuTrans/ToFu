@@ -11,10 +11,45 @@
 async function _deleteProvider(provIdx) {
   var p = _stgProviders[provIdx];
   if (!p) return;
+  // A managed subscription provider (oauth marker) can't be removed by just
+  // dropping the card — the login token survives on disk and any re-login /
+  // token refresh re-creates it. Route to the real logout instead.
+  if (p.oauth) { return _logoutManagedProvider(provIdx); }
   if (!await showConfirm(t('settings.tplDeleteConfirm', { name: (p.name || p.id), n: (p.models || []).length }), { danger: true })) return;
   _stgProviders.splice(provIdx, 1);
   _renderProvidersTab();
   _renderPresetsTab(_serverConfig);
+}
+
+/**
+ * Remove a MANAGED subscription provider (Claude / ChatGPT OAuth) the right
+ * way: log out. Deleting the card alone leaves the OAuth token on disk, so a
+ * later login/refresh re-provisions it (the "why does it keep coming back?"
+ * bug). Logout clears the token AND deprovisions the server_config entry, so
+ * we splice the card locally to reflect that immediately.
+ */
+async function _logoutManagedProvider(provIdx) {
+  var p = _stgProviders[provIdx];
+  if (!p || !p.oauth) return;
+  var provider = p.oauth;                            // 'claude' | 'codex'
+  var brandLabel = (provider === 'codex') ? 'ChatGPT' : 'Claude';
+  if (!await showConfirm(t('settings.oauthLogoutConfirm', { provider: brandLabel }), { danger: true })) return;
+
+  try {
+    var r = await Api.oauth.logoutPost(provider);
+    if (r && (r.status === 404 || r.status === 405)) r = await Api.oauth.logoutGet(provider);
+  } catch (e) {
+    showAlert(t('settings.oauthLogoutFailed', { error: e.message }));
+    return;
+  }
+
+  // Reflect removal locally (server already deprovisioned) + refresh OAuth card.
+  _stgProviders.splice(provIdx, 1);
+  _renderProvidersTab();
+  _renderPresetsTab(_serverConfig);
+  if (typeof _updateOAuthCard === 'function') {
+    _updateOAuthCard(provider, { status: 'not_started', authenticated: false });
+  }
 }
 
 function addProvider() {
@@ -177,7 +212,10 @@ function _getPricingTiersJS(modelId, blendedCostPer1k) {
 function _normalizeModelPricingTags(m) {
   if (!m || !m.model_id) return;
   var caps = new Set(m.capabilities || []);
-  if (caps.has('image_gen') || caps.has('embedding')) return;
+  // Pricing-tier tags never apply to non-chat models. Delegate to the
+  // capability taxonomy SSOT (core/model_caps.js) so a new non-chat cap
+  // (e.g. 'tts') added server-side is honoured without a client rebuild.
+  if (typeof isChatModel === 'function' && !isChatModel(m)) return;
   var desired = new Set(_getPricingTiersJS(m.model_id, m.cost));
   var changed = false;
   _MANAGED_TIER_TAGS_JS.forEach(function(tag) {
@@ -216,7 +254,7 @@ async function addProviderFromTemplate(templateKey) {
 
   var id = tpl.key + '_' + Date.now().toString(36);
   var models = tpl.models.map(function(m) {
-    return {
+    var entry = {
       model_id: m.model_id,
       aliases: m.aliases || [],
       capabilities: (m.capabilities || ['text']).slice(),
@@ -224,6 +262,11 @@ async function addProviderFromTemplate(templateKey) {
       cost: m.cost || 0.01,
       thinking_default: (m.capabilities || []).indexOf('thinking') >= 0,
     };
+    // The wire-id pool (model-identity contract). Carried verbatim so a
+    // logical model_id keeps dispatching the gateway-accepted ids; dropping it
+    // here would silently send the logical name and 400.
+    if (m.request_ids && m.request_ids.length) entry.request_ids = m.request_ids.slice();
+    return entry;
   });
   // Defense-in-depth: re-evaluate pricing-tier tags against live pricing
   // so a stale hardcoded template can't sneak an incorrect 'cheap' tag
@@ -246,6 +289,14 @@ async function addProviderFromTemplate(templateKey) {
   }
   if (tpl.protocol) {
     newProv.protocol = tpl.protocol;
+  }
+  // The alternate wire faces (account/face separation). MUST be carried: the
+  // template's Claude entries resolve to faces.anthropic by family, so a card
+  // created without it would have every Claude model REFUSED at slot-build
+  // time (lib/llm_dispatch/provider_face.py fails loud rather than silently
+  // dispatching them over the signature-dropping OpenAI wire).
+  if (tpl.faces && Object.keys(tpl.faces).length > 0) {
+    newProv.faces = JSON.parse(JSON.stringify(tpl.faces));
   }
   _stgProviders.unshift(newProv);
   _renderProvidersTab();
@@ -305,57 +356,139 @@ async function _syncFromTemplate(provIdx) {
     showAlert(t('settings.tplNoMatch'));
     return;
   }
-  var existingIds = new Set((p.models || []).map(function(m) { return m.model_id; }));
   var added = 0;
   var updated = 0;
   var aliasesAdded = 0;
+
+  /* ── Provider-level wire faces ──
+   * Sync used to touch ONLY model entries, never provider-level fields. That
+   * was safe while every model shared one wire, but the template now carries
+   * Claude entries that resolve to faces.anthropic BY FAMILY. Adding those
+   * entries to a card with no faces{} would make every one of them refused at
+   * slot-build time (or, without the fail-loud guard, silently dispatched over
+   * the wire that drops thinking-block signatures).
+   *
+   * So a face the template declares and the provider lacks is ADDED. Existing
+   * faces are left alone — the user may have edited the URL, and this is a
+   * merge, not a reset. */
+  var facesAdded = 0;
+  if (tpl.faces && typeof tpl.faces === 'object') {
+    if (!p.faces || typeof p.faces !== 'object') p.faces = {};
+    for (var fname in tpl.faces) {
+      if (!Object.prototype.hasOwnProperty.call(tpl.faces, fname)) continue;
+      if (!p.faces[fname]) {
+        p.faces[fname] = JSON.parse(JSON.stringify(tpl.faces[fname]));
+        facesAdded++;
+      }
+    }
+  }
   // Aliases the user has on a model but which the template does NOT list.
   // These are usually hand-added and may be dead deployments — surface them
   // so the user can review and prune.
   var userOnlyAliases = [];
   var tplModels = tpl.models || [];
+
+  /* Every id an entry answers to: its model_id + its wire pool. Mirrors
+   * lib/llm_dispatch/model_entry.py::routing_group. Sync matches on this
+   * rather than on model_id alone, because the model-identity contract
+   * RENAMES entries: a provider card saved before the contract is keyed
+   * 'yuju-claude-opus-5-evaDaily', while the template now calls that entry
+   * 'claude-opus-5' with the yuju id in request_ids. Matching by model_id
+   * would treat it as brand new and leave the user with TWO cards for one
+   * model — both dispatching, double-counted in the picker. */
+  var _entryIds = function(m) {
+    var ids = m.model_id ? [m.model_id] : [];
+    var pool = (m.request_ids && m.request_ids.length)
+      ? m.request_ids
+      : [m.model_id].concat(m.aliases || []);
+    return new Set(ids.concat(pool).filter(Boolean));
+  };
+  var _findLocal = function(tm) {
+    var want = _entryIds(tm);
+    for (var k = 0; k < (p.models || []).length; k++) {
+      var mine = _entryIds(p.models[k]);
+      for (var id of want) { if (mine.has(id)) return k; }
+    }
+    return -1;
+  };
+
   for (var i = 0; i < tplModels.length; i++) {
     var tm = tplModels[i];
-    if (existingIds.has(tm.model_id)) {
-      // Update capabilities, cost, and aliases for existing model
-      for (var j = 0; j < p.models.length; j++) {
-        if (p.models[j].model_id === tm.model_id) {
-          var changed = false;
-          if (tm.capabilities && JSON.stringify(p.models[j].capabilities) !== JSON.stringify(tm.capabilities)) {
-            p.models[j].capabilities = tm.capabilities.slice();
-            changed = true;
+    var localIdx = _findLocal(tm);
+    if (localIdx >= 0) {
+      // Update capabilities, cost, and the wire pool for the existing entry
+      var mine = p.models[localIdx];
+      var changed = false;
+      if (tm.capabilities && JSON.stringify(mine.capabilities) !== JSON.stringify(tm.capabilities)) {
+        mine.capabilities = tm.capabilities.slice();
+        changed = true;
+      }
+      if (tm.cost != null && mine.cost !== tm.cost) {
+        mine.cost = tm.cost;
+        changed = true;
+      }
+      // ── Identity reconciliation ──
+      // The template is authoritative about WHICH id is logical and which are
+      // wire ids. Adopt its shape, but UNION the wire pool so a hand-added
+      // deployment the user relies on is never silently dropped (removing a
+      // working id is invisible — the remaining ones still answer).
+      if (tm.request_ids && tm.request_ids.length) {
+        var oldPool = (mine.request_ids && mine.request_ids.length)
+          ? mine.request_ids.slice()
+          : [mine.model_id].concat(mine.aliases || []).filter(Boolean);
+        var tplPool = tm.request_ids.slice();
+        var tplPoolSet = new Set(tplPool);
+        var mergedPool = tplPool.slice();
+        for (var oi = 0; oi < oldPool.length; oi++) {
+          // Keep a user-only wire id, but not the pre-contract root when the
+          // template has since demoted it to a logical name (that id is
+          // exactly what the gateway refuses).
+          if (!tplPoolSet.has(oldPool[oi]) && oldPool[oi] !== tm.model_id) {
+            mergedPool.push(oldPool[oi]);
+            userOnlyAliases.push(tm.model_id + ' → ' + oldPool[oi]);
           }
-          if (tm.cost != null && p.models[j].cost !== tm.cost) {
-            p.models[j].cost = tm.cost;
-            changed = true;
-          }
-          // ── Alias reconciliation (additive) ──
-          // Add any template aliases the user is missing. Do NOT remove
-          // user-added aliases automatically (they may be intentional),
-          // but record them in userOnlyAliases for the report so the user
-          // can review and prune dead ones.
-          var existingAliases = (p.models[j].aliases || []).slice();
-          var existingAliasSet = new Set(existingAliases);
-          var tplAliases = (tm.aliases || []);
-          var tplAliasSet = new Set(tplAliases);
-          for (var ai = 0; ai < tplAliases.length; ai++) {
-            if (!existingAliasSet.has(tplAliases[ai])) {
-              existingAliases.push(tplAliases[ai]);
-              existingAliasSet.add(tplAliases[ai]);
-              aliasesAdded++;
-              changed = true;
+        }
+        if (mine.model_id !== tm.model_id ||
+            JSON.stringify(mine.request_ids || []) !== JSON.stringify(mergedPool)) {
+          // A rename must carry the presets with it. Presets store a model_id,
+          // so leaving them on the pre-contract id would silently point at a
+          // model that no longer exists (the picker falls back to a default and
+          // the user's chosen model is gone) — same remap _saveModelEdit does.
+          if (mine.model_id && mine.model_id !== tm.model_id) {
+            for (var pk in _stgPresets) {
+              if (_stgPresets[pk] === mine.model_id) _stgPresets[pk] = tm.model_id;
             }
           }
-          p.models[j].aliases = existingAliases;
-          for (var ui = 0; ui < existingAliases.length; ui++) {
-            if (!tplAliasSet.has(existingAliases[ui])) {
-              userOnlyAliases.push(tm.model_id + ' → ' + existingAliases[ui]);
-            }
+          mine.model_id = tm.model_id;
+          mine.request_ids = mergedPool;
+          // The legacy field no longer carries routing once request_ids exists;
+          // leaving it would be a second, contradictory source of truth.
+          delete mine.aliases;
+          aliasesAdded += mergedPool.length;
+          changed = true;
+        }
+      } else {
+        // Legacy template entry: keep the additive alias reconciliation.
+        var existingAliases = (mine.aliases || []).slice();
+        var existingAliasSet = new Set(existingAliases);
+        var tplAliases = (tm.aliases || []);
+        var tplAliasSet = new Set(tplAliases);
+        for (var ai = 0; ai < tplAliases.length; ai++) {
+          if (!existingAliasSet.has(tplAliases[ai])) {
+            existingAliases.push(tplAliases[ai]);
+            existingAliasSet.add(tplAliases[ai]);
+            aliasesAdded++;
+            changed = true;
           }
-          if (changed) updated++;
-          break;
+        }
+        mine.aliases = existingAliases;
+        for (var ui = 0; ui < existingAliases.length; ui++) {
+          if (!tplAliasSet.has(existingAliases[ui])) {
+            userOnlyAliases.push(tm.model_id + ' → ' + existingAliases[ui]);
+          }
         }
       }
+      if (changed) updated++;
       continue;
     }
     var _newTplModel = {
@@ -366,6 +499,9 @@ async function _syncFromTemplate(provIdx) {
       cost: tm.cost || 0.01,
       thinking_default: (tm.capabilities || []).indexOf('thinking') >= 0,
     };
+    if (tm.request_ids && tm.request_ids.length) {
+      _newTplModel.request_ids = tm.request_ids.slice();
+    }
     if (typeof _insertModelSorted === 'function') _insertModelSorted(p.models, _newTplModel);
     else p.models.push(_newTplModel);
     added++;
@@ -381,6 +517,7 @@ async function _syncFromTemplate(provIdx) {
   if (added > 0) parts.push(t('settings.tplSyncAdded', { n: added }));
   if (updated > 0) parts.push(t('settings.tplSyncUpdated', { n: updated }));
   if (aliasesAdded > 0) parts.push(t('settings.tplSyncAliases', { n: aliasesAdded }));
+  if (facesAdded > 0) parts.push(t('settings.tplSyncFaces', { n: facesAdded }));
   msg += parts.length ? parts.join(t('settings.tplSyncJoin')) : t('settings.tplSyncNoChange');
   if (userOnlyAliases.length > 0) {
     msg += t('settings.tplSyncUserAliases', { list: userOnlyAliases.join('\n  • ') });

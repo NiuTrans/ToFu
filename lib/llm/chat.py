@@ -23,6 +23,7 @@ from lib.llm._transport import (
 from lib.llm.body import build_body
 from lib.llm.cache import add_cache_breakpoints
 from lib.llm_errors import (
+    _ERR_BODY_LIMIT,
     ContentFilterError,
     EndpointUnreachableError,
     InvalidImageError,
@@ -32,7 +33,9 @@ from lib.llm_errors import (
     StreamOnlyError,
     _RETRYABLE,
     _classify_http_error,
+    decode_error_body,
 )
+from lib.cost import canonicalize_usage_cache_keys
 from lib.log import get_logger
 from lib.model_info import (
     _learn_model_limit,
@@ -46,7 +49,7 @@ logger = get_logger(__name__)
 
 def chat(messages, model=None, *, max_tokens=4096, temperature=0,
          thinking_enabled=False, preset='low', effort=None, extra=None,
-         timeout=120, log_prefix='', api_key=None, base_url=None,
+         timeout=None, log_prefix='', api_key=None, base_url=None,
          extra_headers=None, max_retries=None, _limit_retry=False,
          thinking_format='', provider_id='', api_protocol='openai', oauth=''):
     """Non-streaming chat completion.
@@ -56,6 +59,10 @@ def chat(messages, model=None, *, max_tokens=4096, temperature=0,
         base_url:     optional base URL override.
         extra_headers: optional dict of additional headers.
         max_retries:  override retry count (default: MAX_STREAM_RETRIES).
+        timeout:      READ timeout in seconds. ``None`` (the default) means
+            no read timeout — a slow completion is waited out rather than
+            truncated. The connect phase stays bounded by CONNECT_TIMEOUT
+            so a dead host still fails over.
 
     Returns:
         (content_text: str, usage_dict: dict)
@@ -98,7 +105,7 @@ def chat(messages, model=None, *, max_tokens=4096, temperature=0,
 
     # Cache breakpoints + extended-TTL beta header
     _task_id_for_latch = body.get('_task_id', '')
-    add_cache_breakpoints(body, log_prefix)
+    add_cache_breakpoints(body, log_prefix, api_protocol=api_protocol)
     body.pop('_task_id', None)
 
     if is_claude(body.get('model', '')):
@@ -164,7 +171,7 @@ def chat(messages, model=None, *, max_tokens=4096, temperature=0,
             if resp_trace and resp_trace != trace_id:
                 logger.debug('%s resp M-TraceId=%s', log_prefix, resp_trace)
             if resp.status_code != 200:
-                err_msg = f'API HTTP {resp.status_code}: {resp.text[:500]}'
+                err_msg = f'API HTTP {resp.status_code}: {decode_error_body(resp)[:_ERR_BODY_LIMIT]}'
                 if resp.status_code == 400 and not _limit_retry:
                     _detected_limit = _parse_token_limit_from_error(err_msg, model)
                     if _detected_limit:
@@ -211,7 +218,7 @@ def chat(messages, model=None, *, max_tokens=4096, temperature=0,
     except (ValueError, json.JSONDecodeError) as e:
         raise Exception(
             f'API returned invalid JSON (HTTP {resp.status_code}): '
-            f'{resp.text[:500]}'
+            f'{decode_error_body(resp)[:_ERR_BODY_LIMIT]}'
         ) from e
     if _anthropic:
         from lib.llm.anthropic_outbound import anthropic_response_to_openai
@@ -224,6 +231,8 @@ def chat(messages, model=None, *, max_tokens=4096, temperature=0,
     msg = choices[0].get('message') or {}
     content = msg.get('content', '')
     usage = data.get('usage', {})
+    # Stamp canonical cache keys from vendor spellings (see _sse_core note).
+    canonicalize_usage_cache_keys(usage)
 
     _finish_reason = choices[0].get('finish_reason', '')
     if _finish_reason:

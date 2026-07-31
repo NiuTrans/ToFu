@@ -96,8 +96,8 @@ async function refreshMemoryList(scope, targetId) {
   try {
     const d = await Api.memory.list(scope);
     if (!d) throw new Error("empty response");
-    console.log("[Memory] Got", (d.memories || d.skills || []).length, "memories");
-    _memoryCache = d.memories || d.skills || [];
+    console.log("[Memory] Got", (d.memories || []).length, "memories");
+    _memoryCache = d.memories || [];
     _updateMemoryStats(_memoryCache);
     _renderMemoryCards(_memoryCache);
   } catch (e) {
@@ -186,15 +186,6 @@ function _buildMemoryCardEl(sk) {
   scopeBadge.className = "memory-card-scope " + sk.scope;
   scopeBadge.textContent = sk.scope === "global" ? t('memory.scopeGlobal') : t('memory.scopeProject');
   header.appendChild(scopeBadge);
-
-  // Package badge (SKILL.md directory package)
-  if (sk.is_package) {
-    const pkg = document.createElement("span");
-    pkg.className = "memory-card-pkg";
-    pkg.title = sk.package_dir || "Skill package";
-    pkg.innerHTML = '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>SKILL';
-    header.appendChild(pkg);
-  }
 
   // Actions inline in header
   const actions = document.createElement("div");

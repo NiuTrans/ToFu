@@ -171,9 +171,13 @@ def test_meta_fetch_is_bounded():
     the layer-2 backstop for any other stranding cause."""
     src = CONV_JS.read_text()
     fn = _extract_fn(src, "loadConversationsFromServer")
-    # The meta fetch must carry a signal (bounded). Match the actual call shape.
-    assert re.search(r"fetch\(\s*url\s*,\s*\{[^}]*signal", fn), \
-        "the ?meta=1 fetch must be bounded with an AbortSignal (signal: ...)"
+    # The meta fetch must carry a signal (bounded). The raw `fetch(url, …)` was
+    # refactored behind the unified Api client — the ?meta=1 sidebar load now
+    # goes through `Api.conversations.listMeta({ …, signal: _mkTimeoutSignal(…) })`
+    # (per the §3.2.0 no-raw-fetch rule). The bounded-fetch INTENT is unchanged;
+    # match the current call shape (a `signal` threaded into listMeta).
+    assert re.search(r"listMeta\(\s*\{[^}]*signal", fn), \
+        "the ?meta=1 listMeta call must be bounded with an AbortSignal (signal: ...)"
     assert "AbortSignal.timeout" in fn or "AbortController" in fn, \
         "a timeout signal source must be present in loadConversationsFromServer"
 

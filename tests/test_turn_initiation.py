@@ -150,7 +150,7 @@ def test_scheduler_seam_source_contains_stamp():
 
 
 def test_swarm_seam_source_contains_stamp():
-    src = _read('lib/swarm/integration.py')
+    src = _read('lib/swarm/integration/_autocontinue.py')
     assert 'stamp_initiator' in src and 'INITIATOR_SWARM' in src
 
 

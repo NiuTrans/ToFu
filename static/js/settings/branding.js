@@ -32,6 +32,14 @@ const _BRAND_ICONS = {
   baiducloud: '<svg viewBox="0 0 24 24"><path d="M21.715 5.61l-3.983 2.31a.903.903 0 01-.896 0L12.44 5.384a.903.903 0 00-.897 0L7.156 7.92a.903.903 0 01-.896 0L2.276 5.617 12.002 0l9.713 5.61z"/><path d="M18.641 9.467a.89.89 0 00-.438.77v5.072a.896.896 0 01-.445.77l-4.428 2.51a.884.884 0 00-.445.777v4.607l4.429-2.536 5.31-3.047V7.157l-3.983 2.31z"/><path d="M10.98 18.941a.936.936 0 00-.305-.352l-4.429-2.516a.903.903 0 01-.431-.764v-5.078a.89.89 0 00-.452-.757l-.451-.26L1.38 7.158V18.39l5.311 3.047L11.126 24v-4.608a.881.881 0 00-.146-.45z"/></svg>',
   bedrock: '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><defs><linearGradient id="lobe-icons-bedrock-grad" x1="80%" x2="20%" y1="20%" y2="80%"><stop offset="0%" stop-color="#6350FB"/><stop offset="50%" stop-color="#3D8FFF"/><stop offset="100%" stop-color="#9AD8F8"/></linearGradient></defs><path d="M13.05 15.513h3.08c.214 0 .389.177.389.394v1.82a1.704 1.704 0 011.296 1.661c0 .943-.755 1.708-1.685 1.708-.931 0-1.686-.765-1.686-1.708 0-.807.554-1.484 1.297-1.662v-1.425h-2.69v4.663a.395.395 0 01-.188.338l-2.69 1.641a.385.385 0 01-.405-.002l-4.926-3.086a.395.395 0 01-.185-.336V16.3L2.196 14.87A.395.395 0 012 14.555L2 14.528V9.406c0-.14.073-.27.192-.34l2.465-1.462V4.448c0-.129.062-.249.165-.322l.021-.014L9.77 1.058a.385.385 0 01.407 0l2.69 1.675a.395.395 0 01.185.336V7.6h3.856V5.683a1.704 1.704 0 01-1.296-1.662c0-.943.755-1.708 1.685-1.708.931 0 1.685.765 1.685 1.708 0 .807-.553 1.484-1.296 1.662v2.311a.391.391 0 01-.389.394h-4.245v1.806h6.624a1.69 1.69 0 011.64-1.313c.93 0 1.685.764 1.685 1.707 0 .943-.754 1.708-1.685 1.708a1.69 1.69 0 01-1.64-1.314H13.05v1.937h4.953l.915 1.18a1.66 1.66 0 01.84-.227c.931 0 1.685.764 1.685 1.707 0 .943-.754 1.708-1.685 1.708-.93 0-1.685-.765-1.685-1.708 0-.346.102-.668.276-.937l-.724-.935H13.05v1.806zM9.973 1.856L7.93 3.122V6.09h-.778V3.604L5.435 4.669v2.945l2.11 1.36L9.712 7.61V5.334h.778V7.83c0 .136-.07.263-.184.335L7.963 9.638v2.081l1.422 1.009-.446.646-1.406-.998-1.53 1.005-.423-.66 1.605-1.055v-1.99L5.038 8.29l-2.26 1.34v1.676l1.972-1.189.398.677-2.37 1.429V14.3l2.166 1.258 2.27-1.368.397.677-2.176 1.311V19.3l1.876 1.175 2.365-1.426.398.678-2.017 1.216 1.918 1.201 2.298-1.403v-5.78l-4.758 2.893-.4-.675 5.158-3.136V3.289L9.972 1.856zM16.13 18.47a.913.913 0 00-.908.92c0 .507.406.918.908.918a.913.913 0 00.907-.919.913.913 0 00-.907-.92zm3.63-3.81a.913.913 0 00-.908.92c0 .508.406.92.907.92a.913.913 0 00.908-.92.913.913 0 00-.908-.92zm1.555-4.99a.913.913 0 00-.908.92c0 .507.407.918.908.918a.913.913 0 00.907-.919.913.913 0 00-.907-.92zM17.296 3.1a.913.913 0 00-.907.92c0 .508.406.92.907.92a.913.913 0 00.908-.92.913.913 0 00-.908-.92z" fill="url(#lobe-icons-bedrock-grad)" fill-rule="nonzero"/></svg>',
   hunyuan: '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><g fill="none" fill-rule="evenodd"><circle cx="12" cy="12" fill="#0055E9" r="12"/><path d="M12 0c.518 0 1.028.033 1.528.096A6.188 6.188 0 0112.12 12.28l-.12.001c-2.99 0-5.242 2.179-5.554 5.11-.223 2.086.353 4.412 2.242 6.146C3.672 22.1 0 17.479 0 12 0 5.373 5.373 0 12 0z" fill="#A8DFF5"/><path d="M5.286 5a2.438 2.438 0 01.682 3.38c-3.962 5.966-3.215 10.743 2.648 15.136C3.636 22.056 0 17.452 0 12c0-1.787.39-3.482 1.09-5.006.253-.435.525-.872.817-1.311A2.438 2.438 0 015.286 5z" fill="#0055E9"/><path d="M12.98.04c.272.021.543.053.81.093.583.106 1.117.254 1.538.44 6.638 2.927 8.07 10.052 1.748 15.642a4.125 4.125 0 01-5.822-.358c-1.51-1.706-1.3-4.184.357-5.822.858-.848 3.108-1.223 4.045-2.441 1.257-1.634 2.122-6.009-2.523-7.506L12.98.039z" fill="#00BCFF"/><path d="M13.528.096A6.187 6.187 0 0112 12.281a5.75 5.75 0 00-1.71.255c.147-.905.595-1.784 1.321-2.501.858-.848 3.108-1.223 4.045-2.441 1.27-1.651 2.14-6.104-2.676-7.554.184.014.367.033.548.056z" fill="#ECECEE"/></g></svg>',
+  // Self-hosted ENGINE brands (local-deployment presets). Official marks:
+  // vLLM  — gold/blue chevron (vllm.ai brand assets, simplified to the 2 core paths)
+  // SGLang — terracotta node-graph mark (sgl-project/sglang assets/logo_square.svg,
+  //          the 10 vector paths verbatim minus the embedded shadow/bitmap layers)
+  // Ollama — llama face (ollama official mark, fill → currentColor for theming)
+  vllm: '<svg viewBox="0 0 96 96" xmlns="http://www.w3.org/2000/svg"><path fill="#fdb515" d="m42.22417 28.470434l0 55.307083l-27.653543 -55.307083z" fill-rule="evenodd"/><path fill="#30a2ff" d="m42.223038 83.77752l21.729656 0l18.653545 -70.385826l-25.574802 13.461943z" fill-rule="evenodd"/></svg>',
+  sglang: '<svg viewBox="0 0 596 683" xmlns="http://www.w3.org/2000/svg"><g transform="translate(-756 -884)"><g transform="translate(757 888)"><path d="M482.943 195.5C482.943 283.043 379.597 370.586 276.25 370.586" stroke="#A5300F" stroke-width="21" stroke-linecap="butt" stroke-linejoin="miter" stroke-miterlimit="8" stroke-opacity="1" fill="none" fill-rule="evenodd"/><path d="M195.25 316.5C262.575 316.5 329.901 417.048 329.901 517.595" stroke="#A5300F" stroke-width="21" stroke-linecap="butt" stroke-linejoin="miter" stroke-miterlimit="8" stroke-opacity="1" fill="none" fill-rule="evenodd"/><path d="M30.2499 316C30.2499 270.437 67.1864 233.5 112.75 233.5 158.313 233.5 195.25 270.437 195.25 316 195.25 361.564 158.313 398 112.75 398 67.1864 398 30.2499 361.564 30.2499 316Z" stroke="#A5300F" stroke-width="21" stroke-linecap="butt" stroke-linejoin="miter" stroke-miterlimit="8" stroke-opacity="1" fill="#FADDCD" fill-rule="evenodd"/><path d="M112.75 316C112.75 285.75 138.25 233.5 112.75 205.75 87.25 233.5 112.75 285.75 112.75 316Z" fill="#A5300F" fill-rule="evenodd"/><path d="M276.25 316C276.25 270.437 313.186 233.5 358.75 233.5 404.313 233.5 441.25 270.437 441.25 316 441.25 361.564 404.313 398 358.75 398 313.186 398 276.25 361.564 276.25 316Z" stroke="#A5300F" stroke-width="21" stroke-linecap="butt" stroke-linejoin="miter" stroke-miterlimit="8" stroke-opacity="1" fill="#FADDCD" fill-rule="evenodd"/><path d="M358.75 316C358.75 285.75 384.25 233.5 358.75 205.75 333.25 233.5 358.75 285.75 358.75 316Z" fill="#A5300F" fill-rule="evenodd"/><path d="M522.25 316C522.25 270.437 559.186 233.5 604.75 233.5 650.313 233.5 687.25 270.437 687.25 316 687.25 361.564 650.313 398 604.75 398 559.186 398 522.25 361.564 522.25 316Z" transform="translate(-82 0)" stroke="#A5300F" stroke-width="21" stroke-linecap="butt" stroke-linejoin="miter" stroke-miterlimit="8" stroke-opacity="1" fill="#FADDCD" fill-rule="evenodd"/><path d="M604.75 316C604.75 285.75 630.25 233.5 604.75 205.75 579.25 233.5 604.75 285.75 604.75 316Z" transform="translate(-82 0)" fill="#A5300F" fill-rule="evenodd"/></g></g></svg>',
+  ollama: '<svg viewBox="294 159 1405.09 1857.06" xmlns="http://www.w3.org/2000/svg"><g><path d="M599.877 159.522C582.544 162.322 561.744 171.388 547.077 182.588C502.677 216.322 468.277 287.922 453.744 377.122C448.277 410.855 444.544 457.655 444.544 493.388C444.544 535.522 449.477 589.388 456.544 626.589C458.144 634.855 458.944 642.188 458.277 642.722C457.744 643.255 451.211 648.588 443.877 654.455C418.811 674.455 390.144 705.255 370.411 733.388C332.544 787.122 308.011 848.188 297.744 914.322C293.744 940.455 292.677 993.255 295.877 1019.39C302.944 1079.66 321.077 1130.59 352.144 1177.26L362.277 1192.32L359.344 1197.26C338.544 1232.19 320.811 1282.72 312.544 1331.26C306.011 1369.66 305.211 1379.92 305.211 1431.39C305.211 1483.26 305.877 1493.52 312.011 1529.39C319.344 1572.32 334.277 1617.79 350.944 1648.06C356.411 1657.92 369.744 1678.46 371.344 1679.52C371.877 1679.79 370.277 1684.72 367.744 1690.46C348.544 1732.46 332.144 1788.32 325.344 1835.39C320.544 1867.66 319.877 1878.06 319.877 1912.06C319.877 1955.39 322.277 1976.46 331.344 2010.99L332.677 2016.06H389.744H446.944L443.211 2008.99C420.144 1966.32 418.011 1887.12 437.877 1808.06C446.944 1771.52 457.211 1744.72 476.411 1707.79L487.877 1685.39V1671.66C487.877 1658.86 487.611 1657.39 483.477 1648.99C480.277 1642.59 476.011 1637.12 468.411 1629.66C455.477 1617.12 446.144 1603.92 438.677 1587.66C405.877 1516.46 399.477 1410.72 422.544 1320.59C432.144 1282.99 448.011 1249.52 464.677 1231.26C476.011 1218.72 481.877 1204.72 481.877 1190.19C481.877 1175.12 476.544 1162.72 464.544 1149.79C430.144 1112.99 408.944 1068.19 401.344 1016.06C390.544 941.788 410.144 860.855 454.677 796.722C498.277 733.788 559.477 693.388 627.877 682.589C643.211 680.055 671.877 680.455 687.877 683.388C705.344 686.455 716.277 685.522 727.477 680.188C741.344 673.655 748.277 665.522 756.411 646.855C763.611 630.188 769.211 621.122 784.277 602.322C802.411 579.788 819.877 564.455 847.877 545.922C879.877 524.988 916.277 509.788 952.544 502.455C965.744 499.788 971.877 499.388 996.544 499.388C1021.21 499.388 1027.34 499.788 1040.54 502.455C1093.74 513.255 1146.54 540.722 1188.68 579.655C1197.74 588.055 1219.48 614.988 1226.41 626.188C1229.08 630.588 1233.74 639.922 1236.68 646.855C1244.81 665.522 1251.74 673.655 1265.61 680.188C1276.41 685.388 1287.74 686.455 1304.54 683.655C1331.08 679.122 1351.48 679.522 1377.48 684.855C1466.01 702.722 1543.08 775.655 1577.21 873.388C1606.94 959.122 1598.54 1048.86 1554.28 1117.39C1546.81 1128.99 1539.34 1138.32 1528.54 1149.79C1505.21 1174.72 1505.21 1205.66 1528.41 1231.26C1566.54 1272.99 1590.41 1375.66 1583.21 1466.19C1578.41 1525.92 1563.08 1579.39 1542.01 1609.66C1538.28 1614.99 1530.54 1624.06 1524.68 1629.66C1517.08 1637.12 1512.81 1642.59 1509.61 1648.99C1505.48 1657.39 1505.21 1658.86 1505.21 1671.66V1685.39L1516.68 1707.79C1535.88 1744.72 1546.14 1771.52 1555.21 1808.06C1574.81 1886.06 1573.08 1963.66 1550.68 2007.79C1548.81 2011.52 1547.21 2014.99 1547.21 2015.39C1547.21 2015.79 1572.68 2016.06 1603.88 2016.06H1660.41L1661.88 2010.32C1662.68 2007.26 1664.01 2002.59 1664.68 1999.92C1666.14 1994.06 1669.08 1976.72 1671.48 1960.06C1673.74 1943.26 1673.74 1881.39 1671.48 1862.72C1662.94 1794.99 1648.68 1741.26 1625.34 1690.46C1622.81 1684.72 1621.21 1679.79 1621.74 1679.52C1622.41 1679.12 1626.14 1673.79 1630.14 1667.79C1659.21 1623.79 1677.08 1568.46 1686.14 1495.39C1688.54 1475.26 1688.54 1388.72 1686.14 1369.39C1679.74 1319.52 1672.01 1285.66 1659.21 1251.39C1653.88 1237.12 1639.74 1206.99 1633.74 1197.26L1630.81 1192.32L1640.94 1177.26C1672.01 1130.59 1690.14 1079.66 1697.21 1019.39C1700.41 993.255 1699.34 940.455 1695.34 914.322C1684.94 848.055 1660.54 787.255 1622.68 733.388C1602.94 705.255 1574.28 674.455 1549.21 654.455C1541.88 648.588 1535.34 643.255 1534.81 642.722C1534.14 642.188 1534.94 634.855 1536.54 626.589C1552.68 542.455 1552.14 437.522 1535.21 355.522C1520.54 284.055 1493.88 227.255 1459.48 194.455C1432.01 168.322 1404.01 157.122 1370.41 159.255C1293.34 163.788 1231.21 252.455 1206.68 392.188C1202.68 414.722 1199.21 441.122 1199.21 448.322C1199.21 451.122 1198.68 453.388 1198.01 453.388C1197.34 453.388 1192.14 450.722 1186.54 447.388C1127.08 412.188 1060.94 393.388 996.544 393.388C932.144 393.388 866.011 412.188 806.544 447.388C800.944 450.722 795.744 453.388 795.077 453.388C794.411 453.388 793.877 451.122 793.877 448.322C793.877 440.855 790.277 413.655 786.411 392.188C764.144 266.722 713.077 183.655 645.211 162.722C635.877 159.922 609.344 158.055 599.877 159.522ZM622.544 268.055C641.744 283.255 663.077 326.722 675.344 375.388C677.611 384.188 680.011 394.322 680.677 398.055C681.211 401.655 682.677 409.788 683.877 416.055C689.077 444.322 691.477 474.855 691.744 512.055L691.877 548.722L682.677 562.322L673.477 576.055H652.011C626.944 576.055 602.011 579.255 578.144 585.655C569.611 587.788 561.344 589.922 559.744 590.322C557.211 590.855 556.811 590.055 555.344 579.122C547.477 519.788 547.877 454.055 556.544 399.388C566.144 338.455 588.544 283.255 610.411 266.988C615.611 263.122 616.544 263.255 622.544 268.055ZM1382.81 267.122C1396.01 276.855 1410.54 302.722 1421.34 335.788C1443.08 401.922 1449.21 492.722 1437.74 579.122C1436.28 590.055 1435.88 590.855 1433.34 590.322C1431.74 589.922 1423.48 587.788 1414.94 585.655C1391.08 579.255 1366.14 576.055 1341.08 576.055H1319.61L1310.41 562.322L1301.21 548.722L1301.34 512.055C1301.61 460.322 1306.41 419.922 1317.88 374.988C1330.01 326.722 1351.48 283.255 1370.54 268.055C1376.54 263.255 1377.48 263.122 1382.81 267.122Z" fill="currentColor"/><path d="M975.877 938.189C946.944 940.989 939.077 942.055 925.21 944.855C902.677 949.522 872.544 959.922 851.61 970.189C778.81 1005.79 728.677 1065.12 713.344 1133.79C710.277 1147.39 709.877 1151.92 709.877 1174.86C709.877 1197.52 710.277 1202.46 713.21 1215.39C733.61 1305.12 816.277 1371.39 923.21 1383.52C946.41 1386.06 1046.68 1386.06 1069.88 1383.52C1155.74 1373.79 1229.61 1327.26 1262.81 1261.92C1271.61 1244.46 1275.88 1233.12 1279.88 1215.39C1282.81 1202.46 1283.21 1197.52 1283.21 1174.86C1283.21 1151.92 1282.81 1147.39 1279.74 1133.79C1257.48 1034.06 1160.68 955.522 1042.01 940.589C1026.54 938.722 986.01 937.122 975.877 938.189ZM1025.74 1010.72C1065.34 1014.99 1105.21 1029.12 1137.21 1050.46C1154.41 1061.92 1178.68 1085.92 1189.08 1101.66C1201.88 1121.12 1209.21 1140.99 1212.54 1165.12C1214.01 1176.19 1213.21 1184.59 1209.21 1202.46C1202.94 1229.12 1183.48 1256.99 1157.21 1276.46C1144.94 1285.39 1119.48 1298.32 1103.88 1303.39C1074.28 1312.86 1054.94 1314.59 985.877 1314.06C940.81 1313.66 932.81 1313.26 919.877 1310.86C875.744 1302.59 840.81 1284.99 815.477 1258.19C794.944 1236.59 785.61 1216.86 780.544 1184.99C778.277 1170.19 782.544 1145.66 791.21 1124.99C801.744 1099.79 828.944 1068.46 855.877 1050.46C887.077 1029.66 928.144 1014.86 965.877 1010.86C980.41 1009.26 1011.21 1009.26 1025.74 1010.72Z" fill="currentColor"/><path d="M945.61 1108.06C935.477 1113.52 928.41 1127.39 930.543 1137.66C932.943 1148.72 942.677 1159.92 957.877 1169.12C966.01 1174.06 966.543 1174.72 966.943 1179.66C967.21 1182.59 966.143 1190.99 964.677 1198.46C963.077 1205.79 961.877 1213.52 961.877 1215.66C962.01 1221.39 967.343 1230.72 972.943 1235.26C977.877 1239.26 978.81 1239.39 992.677 1239.79C1005.34 1240.19 1008.01 1239.92 1013.08 1237.52C1026.14 1231.12 1029.48 1219.39 1024.68 1196.86C1020.68 1178.06 1021.48 1175.12 1031.48 1169.39C1042.01 1163.26 1053.21 1152.46 1056.54 1145.12C1062.94 1131.12 1057.08 1115.26 1042.94 1107.92C1039.48 1106.19 1035.21 1105.39 1028.94 1105.39C1019.21 1105.39 1012.94 1107.66 1001.48 1114.99L994.943 1119.12L990.81 1116.59C973.877 1106.59 970.81 1105.39 960.543 1105.52C953.21 1105.52 949.21 1106.19 945.61 1108.06Z" fill="currentColor"/><path d="M621.878 953.255C598.278 960.722 580.678 978.055 571.611 1002.72C567.211 1014.46 565.078 1032.99 566.945 1042.99C571.345 1066.86 590.945 1088.59 613.211 1094.59C641.211 1101.92 662.145 1097.12 680.678 1078.72C691.478 1068.19 697.345 1058.99 703.211 1044.06C707.478 1033.52 707.745 1031.66 707.745 1016.72L707.878 1000.72L702.278 989.255C693.345 971.122 677.211 957.655 658.545 952.722C648.011 950.055 631.078 950.189 621.878 953.255Z" fill="currentColor"/><path d="M1334.01 952.855C1315.74 957.789 1299.48 971.389 1290.81 989.255L1285.21 1000.72L1285.34 1016.72C1285.34 1031.66 1285.61 1033.52 1289.88 1044.06C1295.74 1058.99 1301.61 1068.19 1312.41 1078.72C1330.94 1097.12 1351.88 1101.92 1379.88 1094.59C1396.01 1090.32 1412.14 1076.72 1419.88 1060.86C1426.54 1047.39 1428.14 1037.66 1426.01 1022.32C1421.08 987.255 1400.54 961.789 1370.01 952.855C1361.08 950.189 1343.74 950.189 1334.01 952.855Z" fill="currentColor"/></g></svg>',
   // 'local' = self-hosted vLLM / SGLang / Ollama box. Stylized server stack.
   local: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="4" width="18" height="6" rx="1.5"/><rect x="3" y="14" width="18" height="6" rx="1.5"/><circle cx="6.5" cy="7" r="0.9" fill="currentColor" stroke="none"/><circle cx="6.5" cy="17" r="0.9" fill="currentColor" stroke="none"/><path d="M10 7h7M10 17h7" stroke-linecap="round"/></svg>',
   generic: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="4"/><circle cx="9" cy="10" r="1.5" fill="currentColor" stroke="none"/><circle cx="15" cy="10" r="1.5" fill="currentColor" stroke="none"/><path d="M8.5 15.5c1 1.5 6 1.5 7 0" stroke-linecap="round"/></svg>',
@@ -44,6 +52,7 @@ const _BRAND_COLORS = {
   mistral: '#F7D046', glm: '#3859FF', yourprovider: '#FFC300', tsinghua: '#82318E',
   kimi: '#ccc', openrouter: '#6566F1', mimo: '#FF6A00', baiducloud: '#2932E1',
   shubiaobiao: '#E87A7A', bedrock: '#3D8FFF', hunyuan: '#0055E9', local: '#16a34a',
+  vllm: '#30A2FF', sglang: '#A5300F', ollama: '#6B7280',
   generic: '#888',
 };
 
@@ -60,7 +69,10 @@ const _BRAND_PATTERNS = [
   // Bedrock must come before claude — Bedrock endpoints host Claude models
   // but the provider identity is AWS/Bedrock.
   [/bedrock|bedrock-runtime|amazonaws\.com\/openai|^us\.anthropic\.|^us\.amazon\.|amazon\.titan|amazon\.nova/i, 'bedrock'],
-  [/claude|anthropic|opus|sonnet|haiku/i, 'claude'],
+  // 'fable' = Anthropic Fable (Fable 5+): same Messages-API family as Claude,
+  // so it must render with the Claude brand logo + amber color (backend already
+  // treats it as Claude family — see lib/model_info/_family.is_claude).
+  [/claude|anthropic|opus|sonnet|haiku|fable/i, 'claude'],
   [/gpt|openai|o[134]-|chatgpt|dall/i,   'openai'],
   [/gemini|gemma|palm|bard/i,             'gemini'],
   [/qwen|tongyi|qwq/i,                    'qwen'],
@@ -89,6 +101,88 @@ function _modelShortName(modelId) {
     if (mp.name) return mp.name;
   }
   return modelId.replace(/^(aws\.|vertex\.)/, '').split('/').pop();
+}
+
+
+/* ★ Sort key for ordering a model list the way the user READS it.
+ *
+ * `_modelShortName` is not a pure function of model_id — it prefers
+ * `_modelPricingCache[id].name`, and that cache is only populated once
+ * /api/v1/server-config has returned `model_pricing`. Callers that run before
+ * (or without) that fetch — the `.catch` fallback in
+ * _loadServerConfigAndPopulate, a settings-close repaint on a failed load —
+ * would otherwise sort by a DIFFERENT string than the one on screen. Falling
+ * back to the same gateway-prefix-stripped id that _modelShortName itself
+ * returns on a cache miss keeps the degraded order stable and near-identical
+ * rather than arbitrary. */
+function _modelDisplaySortKey(modelId) {
+  var label = (typeof _modelShortName === 'function')
+    ? _modelShortName(modelId)
+    : String(modelId || '').replace(/^(aws\.|vertex\.)/, '').split('/').pop();
+  // Fold -, _ and / to a space BEFORE collating. The collator weights a space
+  // lower than a hyphen, so without this the SEPARATOR outranks the content and
+  // a friendly name always beats a raw id that shares its prefix:
+  // "Gemini 3.6 Flash" sorted before "gemini-3.1-flash-lite-preview", and
+  // "MiniMax M3" before "MiniMax-M2.5". Since only models WITH a
+  // MODEL_PRICING entry get a spaced label, the two spellings interleave in
+  // every real list. Folding is sort-key-only — the rendered label keeps its
+  // original punctuation, and numeric collation still sees the digit runs.
+  return String(label == null ? '' : label).replace(/[-_\/]+/g, ' ');
+}
+
+/* Numeric-aware collator: plain `<`/`>` on lowercased strings orders
+ * "Gemini 3.10" before "Gemini 3.5" and "Opus 4.10" before "Opus 4.6" —
+ * wrong the moment a minor version reaches two digits. `numeric: true` compares
+ * embedded digit runs as numbers. Built once; Intl.Collator construction is the
+ * expensive part, not the compare. */
+var _MODEL_NAME_COLLATOR = (typeof Intl !== 'undefined' && Intl.Collator)
+  ? new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' })
+  : null;
+
+/* ★ THE display-name comparator. Single source of truth for model ordering —
+ * the toolbar picker (_populateModelDropdown) and the Settings cold sort
+ * (_coldSortModels) both route through it so the two lists can never disagree.
+ * Accepts a model_id string or a {model_id} entry. */
+function _compareModelsByDisplayName(a, b) {
+  var ka = _modelDisplaySortKey((a && a.model_id !== undefined) ? a.model_id : a);
+  var kb = _modelDisplaySortKey((b && b.model_id !== undefined) ? b.model_id : b);
+  if (_MODEL_NAME_COLLATOR) return _MODEL_NAME_COLLATOR.compare(ka, kb);
+  var la = ka.toLowerCase(), lb = kb.toLowerCase();
+  return la < lb ? -1 : (la > lb ? 1 : 0);
+}
+
+
+/* Sort a list of {model_id} entries in place by display name. Thin wrapper
+ * around the comparator so callers never hand-roll one. */
+function _sortModelsByDisplayName(models) {
+  if (Array.isArray(models)) models.sort(_compareModelsByDisplayName);
+  return models;
+}
+
+/* Same, for the `{model: {model_id}, provider}` shape _getAllModels() yields. */
+function _sortModelEntriesByDisplayName(entries) {
+  if (Array.isArray(entries)) {
+    entries.sort(function(a, b) {
+      return _compareModelsByDisplayName(a && a.model, b && b.model);
+    });
+  }
+  return entries;
+}
+
+/* Order brand/provider group keys by the heading text actually rendered —
+ * the brandNames[] label when there is one, else the group's provider name,
+ * else the raw key. Callers previously used `for (var k in grouped)`, i.e.
+ * insertion order, which is provider order in server_config.json and
+ * unrelated to anything on screen. */
+function _sortedBrandKeys(grouped, brandNames) {
+  var keys = Object.keys(grouped || {});
+  keys.sort(function(x, y) {
+    var gx = grouped[x] || {}, gy = grouped[y] || {};
+    var nx = ((brandNames && brandNames[x]) || gx.name || x);
+    var ny = ((brandNames && brandNames[y]) || gy.name || y);
+    return _compareModelsByDisplayName(String(nx), String(ny));
+  });
+  return keys;
 }
 
 /* ★ Friendly provider display name for a provider_id — used by the message

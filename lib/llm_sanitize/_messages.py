@@ -88,6 +88,70 @@ def _fix_empty_user_messages(messages: list) -> list:
     return messages
 
 
+def _drop_empty_assistant_messages(messages: list) -> list:
+    """Drop assistant messages that carry NOTHING (pure ghosts).
+
+    An assistant message with empty content AND no tool/reasoning fields
+    conveys zero information to the model, and strict providers HARD-400 the
+    entire request on it — Kimi/Moonshot: ``the message at position N with
+    role 'assistant' must not be empty`` (verified in production 2026-07-25:
+    three conversations became unretryable until the wire was healed);
+    Anthropic likewise rejects empty non-trailing assistant turns.
+
+    Ghosts arise from failed tasks persisting a 0-content error-bubble row,
+    thinking-only rows whose thinking is not replayed on the wire, or
+    vision-stripping collapsing an all-image assistant turn.
+
+    Kept: any assistant with ``tool_calls``/``function_call`` (a function
+    request — required for tool adjacency) or ``reasoning_content`` /
+    ``reasoning_details`` / ``thinking_signature`` (a signed thinking block
+    the Anthropic/Gemini replay protocol needs).
+
+    Runs BEFORE ``_merge_consecutive_same_role`` so the adjacency the drop
+    creates is merged right after. Returns a new list (input untouched).
+    """
+    if not messages:
+        return list(messages)
+
+    def _is_ghost(msg: dict) -> bool:
+        if not isinstance(msg, dict) or msg.get('role') != 'assistant':
+            return False
+        if (msg.get('tool_calls') or msg.get('function_call')
+                or msg.get('reasoning_content') or msg.get('reasoning_details')
+                or msg.get('thinking_signature')):
+            return False
+        content = msg.get('content')
+        if content is None:
+            return True
+        if isinstance(content, str):
+            return not content.strip()
+        if isinstance(content, list):
+            for block in content:
+                if not isinstance(block, dict):
+                    return False
+                if block.get('type') == 'text':
+                    if (block.get('text') or '').strip():
+                        return False
+                else:
+                    return False
+            return True
+        return False
+
+    kept = []
+    dropped = 0
+    for msg in messages:
+        if _is_ghost(msg):
+            dropped += 1
+            continue
+        kept.append(msg)
+
+    if dropped:
+        logger.warning('[build_body] Dropped %d empty assistant message(s) '
+                       '(pure ghosts — strict providers HTTP 400 on them)',
+                       dropped)
+    return kept
+
+
 def _merge_consecutive_same_role(messages: list) -> list:
     """Merge consecutive messages with the same role (except system/tool).
 

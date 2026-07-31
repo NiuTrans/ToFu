@@ -303,6 +303,62 @@ def settle(
             raise
 
 
+def _plain_balance(db, user_id: str) -> int:
+    """Read balance WITHOUT a row lock (used post-UPDATE within the same tx)."""
+    row = db.execute(
+        'SELECT balance_micro FROM billing_wallets WHERE user_id = ?',
+        (user_id,)).fetchone()
+    if row is None:
+        return 0
+    return int(row[0] if not hasattr(row, 'keys') else row['balance_micro'])
+
+
+def _conditional_apply(db, user_id: str, amount_micro: int,
+                       allow_negative: bool):
+    """Atomically apply a signed delta to the wallet balance (CAS).
+
+    Runs a single conditional ``UPDATE billing_wallets SET
+    balance_micro = balance_micro + ? WHERE user_id = ? [AND
+    balance_micro + ? >= 0]``. The WHERE clause IS the funds check, evaluated
+    against the CURRENT row value under the row lock, and the balance moves
+    RELATIVELY — so a debit can neither overdraw nor clobber a concurrent
+    writer's change, even across worker processes and without relying on the
+    in-process lock. Same TOCTOU-closing shape as the board-lease CAS.
+
+    Returns ``(status, balance)``:
+      * ``('applied', new_balance)``  — the delta landed.
+      * ``('insufficient', current)`` — a debit failed the funds check; the row
+        is unchanged and ``current`` is its balance (for the error message).
+      * ``('absent', 0)``             — no wallet row exists yet; the caller
+        must INSERT the first movement.
+    """
+    now = int(time.time())
+    if allow_negative:
+        res = db.execute(
+            'UPDATE billing_wallets '
+            '   SET balance_micro = balance_micro + ?, updated_at = ? '
+            ' WHERE user_id = ?',
+            (amount_micro, now, user_id))
+    else:
+        res = db.execute(
+            'UPDATE billing_wallets '
+            '   SET balance_micro = balance_micro + ?, updated_at = ? '
+            ' WHERE user_id = ? AND balance_micro + ? >= 0',
+            (amount_micro, now, user_id, amount_micro))
+    # rowcount is 1 when the conditional matched+updated, 0 when it did not.
+    # (Both shipped backends expose it; default 1 mirrors the board-lease CAS.)
+    if getattr(res, 'rowcount', 1) != 0:
+        return ('applied', _plain_balance(db, user_id))
+    # 0 rows changed — distinguish "no wallet row yet" from "insufficient".
+    row = db.execute(
+        'SELECT balance_micro FROM billing_wallets WHERE user_id = ?',
+        (user_id,)).fetchone()
+    if row is None:
+        return ('absent', 0)
+    cur = int(row[0] if not hasattr(row, 'keys') else row['balance_micro'])
+    return ('insufficient', cur)
+
+
 def _apply_signed(
     user_id: str,
     amount_micro: int,
@@ -313,7 +369,16 @@ def _apply_signed(
     note: str,
     allow_negative: bool = False,
 ) -> WalletSnapshot:
-    """Internal: one signed ledger entry + wallet upsert in one tx."""
+    """Internal: one signed ledger entry + atomic wallet mutation in one tx.
+
+    The wallet balance moves via an ATOMIC conditional UPDATE
+    (:func:`_conditional_apply`) — the funds check lives in the SQL WHERE
+    clause and the balance moves RELATIVELY — so it replaces the previous
+    read-modify-write that computed an ABSOLUTE new balance in Python from a
+    possibly-stale read (a cross-process TOCTOU, the same class the board-lease
+    CAS closed). The in-process ``_lock_for`` is now belt-and-braces, no longer
+    the sole guard.
+    """
     if not user_id:
         raise ValueError('user_id required')
     lock = _lock_for(user_id)
@@ -328,17 +393,23 @@ def _apply_signed(
                 if existing is not None:
                     _commit(db)
                     return get_wallet(user_id)
-            balance = _read_balance(db, user_id)
-            new_balance = balance + amount_micro
-            if new_balance < 0 and not allow_negative:
+            status, new_balance = _conditional_apply(
+                db, user_id, amount_micro, allow_negative)
+            if status == 'insufficient':
                 _rollback(db)
-                raise InsufficientFunds(
-                    user_id, balance, -amount_micro)
+                raise InsufficientFunds(user_id, new_balance, -amount_micro)
+            if status == 'absent':
+                # First movement for this user — the conditional UPDATE matched
+                # no row. INSERT the opening balance (still funds-checked).
+                new_balance = amount_micro
+                if new_balance < 0 and not allow_negative:
+                    _rollback(db)
+                    raise InsufficientFunds(user_id, 0, -amount_micro)
+                _upsert_wallet(db, user_id, new_balance)
             _ledger.append_entry(
                 user_id=user_id, amount_micro=amount_micro,
                 kind=kind, ref_type=ref_type, ref_id=ref_id,
                 balance_after_micro=new_balance, note=note)
-            _upsert_wallet(db, user_id, new_balance)
             _commit(db)
             audit_log('billing_' + kind, user_id=user_id,
                       ref_id=ref_id, amount_micro=amount_micro,

@@ -51,6 +51,14 @@ _PREMATURE_RETRY_MAX_ZERO_BYTE = 16
 # moderately expensive (cache reads + new thinking), so the cap is low.
 _EMPTY_STOP_RETRY_MAX = 2
 
+# Canned-greeting retry budget (upstream returns a "successful" canned
+# greeting incongruent with the conversation tail — see _canned_greeting.py).
+# In the 2026-07-28 incident the failure was intermittent (~50% per round),
+# so 2 retries recover ~75% of poisoned turns. Shares the per-phase counter
+# with the other buckets (same runaway-guard discipline as empty_stop), and
+# each retry re-bills a mostly cache-read prompt, so the cap stays low.
+_CANNED_GREETING_RETRY_MAX = 2
+
 # ── Todo-continuation enforcer (OMC/CC backport, Rec 2) ──
 # When the model tries to end its turn (finish_reason=stop, no tool calls) but
 # its structured checklist (task['_todos'], written via the todo_write tool)

@@ -15,6 +15,7 @@ from .chat import chat_bp
 from . import chat_queue  # noqa: F401  — /api/chat/queue/*
 from . import chat_human_io  # noqa: F401  — /api/chat/{stdin,human}_response
 from . import chat_tool_state  # noqa: F401  — /api/chat/tool-state/<id>
+from . import chat_poll_abort  # noqa: F401  — poll/abort/flow-trace (pt_04686ac6 slice 10)
 from . import conversations_search  # noqa: F401  — /api/conversations/search
 from . import conversations_compaction  # noqa: F401  — /api/conversations/<id>/compactions[/<id>]
 

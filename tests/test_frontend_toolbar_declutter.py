@@ -121,6 +121,22 @@ HARNESS = textwrap.dedent("""
     global._modelShortName = (m) => m;
     global.selectModel = () => {{}};
     global.t = (k) => k;
+    // isChatModel (core/model_caps.js) + its console-warn helper are read by
+    // the shipped visibility filter. Neither is defined in this harness's
+    // eval scope, so BOTH must be stubbed: without isChatModel the filter
+    // takes its degraded branch, which then calls _warnModelCapsMissing and
+    // throws ReferenceError before a single item renders.
+    global.isChatModel = () => true;
+    global._warnModelCapsMissing = () => {{}};
+    // Shared display-name comparator (settings/branding.js). This harness only
+    // evals main_toolbar_ui.js, so the picker's sort is typeof-guarded on it —
+    // stub it so the ORDERING path is exercised here too rather than silently
+    // skipped. Ordering itself is asserted by
+    // tests/test_frontend_model_picker_order.py.
+    global._compareModelsByDisplayName = (a, b) => {{
+      const k = (x) => String((x && x.model_id !== undefined) ? x.model_id : x);
+      return k(a) < k(b) ? -1 : (k(a) > k(b) ? 1 : 0);
+    }};
 
     {populate}
     {toggle}

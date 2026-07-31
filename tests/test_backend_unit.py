@@ -197,6 +197,118 @@ class TestBuildBody:
                           thinking_enabled=True, stream=False)
         assert body.get('reasoning_effort') == 'medium'
 
+    def test_gpt5_reasoning_effort_ladder(self):
+        """GPT-5 family is a reasoning model driven by the OpenAI-native
+        ``reasoning_effort`` string. build_body maps Tofu's depth ladder onto
+        minimal/low/medium/high, and the ``ultra`` tier only survives on
+        GPT-5.6+ (older GPT-5.x clamp it to high). No thinking/enable_thinking
+        block is ever emitted for GPT."""
+        from lib.llm import build_body
+
+        # GPT-5.6 accepts the full ladder incl. ultra.
+        cases_56 = {'off': 'minimal', 'low': 'low', 'medium': 'medium',
+                    'high': 'high', 'xhigh': 'high', 'max': 'high',
+                    'ultra': 'ultra'}
+        for depth, expected in cases_56.items():
+            body = build_body('gpt-5.6', self.DUMMY_MSGS, max_tokens=4096,
+                              thinking_enabled=(depth != 'off'),
+                              thinking_depth=depth, stream=False)
+            assert body.get('reasoning_effort') == expected, (depth, body)
+            assert 'thinking' not in body
+            assert 'enable_thinking' not in body
+
+    def test_gpt5_ultra_downgrades_on_pre_56(self):
+        """``ultra`` is a GPT-5.6-only tier; on GPT-5.4 it clamps to high."""
+        from lib.llm import build_body
+        body = build_body('gpt-5.4', self.DUMMY_MSGS, max_tokens=4096,
+                          thinking_enabled=True, thinking_depth='ultra',
+                          stream=False)
+        assert body.get('reasoning_effort') == 'high'
+
+    def test_gpt5_default_effort_medium(self):
+        from lib.llm import build_body
+        body = build_body('gpt-5.6-pro', self.DUMMY_MSGS, max_tokens=4096,
+                          thinking_enabled=True, stream=False)
+        assert body.get('reasoning_effort') == 'medium'
+
+    def test_claude_ultra_maps_to_max(self):
+        """``ultra`` has no Claude tier; build_body maps it to Claude's top
+        rung (max) rather than dropping the effort."""
+        from lib.llm import build_body
+        body = build_body('claude-opus-4-8', self.DUMMY_MSGS, max_tokens=4096,
+                          thinking_enabled=True, thinking_depth='ultra',
+                          stream=False)
+        assert body.get('effort') == 'max'
+
+    def test_kimi_k3_reasoning_effort_ladder(self):
+        """Kimi K3 takes the TOP-LEVEL ``reasoning_effort`` string
+        (low/high/max, default max — official quickstart, verified live
+        against the sankuai gateway 2026-07-24). Tofu's depth ladder
+        collapses onto the three K3 rungs rounding UP; no thinking /
+        enable_thinking block may be emitted."""
+        from lib.llm import build_body
+
+        cases = {'off': 'low', 'low': 'low', 'medium': 'high',
+                 'high': 'high', 'xhigh': 'max', 'max': 'max',
+                 'ultra': 'max'}
+        for depth, expected in cases.items():
+            body = build_body('kimi-k3', self.DUMMY_MSGS, max_tokens=4096,
+                              thinking_enabled=(depth != 'off'),
+                              thinking_depth=depth, stream=False)
+            assert body.get('reasoning_effort') == expected, (depth, body)
+            assert 'thinking' not in body
+            assert 'enable_thinking' not in body
+
+    def test_kimi_k3_never_emits_temperature(self):
+        """K3 fixes temperature=1.0 — any other value is HTTP 400
+        (``invalid temperature: only 1 is allowed for this model``,
+        verified live 2026-07-24). build_body must OMIT temperature for
+        K3 in both thinking states. Regression guard for the bug where
+        depth='off' sent temperature=0.6 and every K3 request 400'd."""
+        from lib.llm import build_body
+
+        for thinking_enabled in (True, False):
+            body = build_body('kimi-k3', self.DUMMY_MSGS, max_tokens=4096,
+                              thinking_enabled=thinking_enabled,
+                              temperature=0.6, stream=False)
+            assert 'temperature' not in body, (thinking_enabled, body)
+            assert 'top_p' not in body
+            assert 'thinking' not in body
+        # thinking off degrades to the cheapest legal rung (K3 always thinks)
+        body = build_body('kimi-k3', self.DUMMY_MSGS, max_tokens=4096,
+                          thinking_enabled=False, stream=False)
+        assert body.get('reasoning_effort') == 'low'
+
+    def test_kimi_k3_default_effort_high(self):
+        from lib.llm import build_body
+        body = build_body('kimi-k3', self.DUMMY_MSGS, max_tokens=4096,
+                          thinking_enabled=True, stream=False)
+        assert body.get('reasoning_effort') == 'high'
+
+    def test_kimi_k2_shape_unchanged(self):
+        """The K3 fix must not disturb the K2 line's wire shape."""
+        from lib.llm import build_body
+
+        body = build_body('kimi-k2.6', self.DUMMY_MSGS, max_tokens=4096,
+                          thinking_enabled=True, stream=False)
+        assert body.get('thinking') == {'type': 'enabled'}
+        assert body.get('temperature') == 1.0
+        assert 'reasoning_effort' not in body
+        body = build_body('kimi-k2.6', self.DUMMY_MSGS, max_tokens=4096,
+                          thinking_enabled=False, stream=False)
+        assert body.get('thinking') == {'type': 'disabled'}
+        assert body.get('temperature') == 0.6
+        assert 'reasoning_effort' not in body
+
+    def test_fable_detected_as_claude_family(self):
+        """Anthropic Fable models take the Claude thinking shape."""
+        from lib.llm import build_body, is_claude
+        assert is_claude('fable-5')
+        body = build_body('fable-5', self.DUMMY_MSGS, max_tokens=4096,
+                          thinking_enabled=True, stream=False)
+        assert body.get('thinking', {}).get('type') == 'adaptive'
+        assert 'enable_thinking' not in body
+
     def test_tools_passed_through(self):
         from lib.llm import build_body
 
@@ -416,6 +528,56 @@ class TestThinkingFormatDetection:
         assert out, 'expected at least one model'
         assert out[0]['owned_by'] == 'sglang'
 
+    def test_fable_discovery_capabilities_and_thinking_format(self):
+        """Auto-discovery must treat Anthropic Fable as a Claude-family model
+        everywhere: _infer_capabilities gives it vision+thinking (not plain
+        text), and _detect_thinking_format gives it the Claude thinking_type
+        shape even when the brand isn't exactly 'claude' (proxy / Bedrock).
+
+        Regression guard for the discovery gap that would otherwise register a
+        freshly-probed Fable as a text-only, non-thinking, no-vision model."""
+        from lib.llm_dispatch.discovery import (
+            _detect_thinking_format, _infer_capabilities,
+        )
+        assert _infer_capabilities('fable-5') == {'text', 'vision', 'thinking'}
+        # Parity with a known-good Claude flagship.
+        assert _infer_capabilities('claude-opus-4-8') >= {'text', 'vision'}
+        # A gateway/Bedrock-hosted Fable whose brand isn't 'claude' still gets
+        # the Claude thinking shape via the name-hint vote.
+        assert _detect_thinking_format(
+            [{'model_id': 'fable-5'}], 'generic') == 'thinking_type'
+        assert _detect_thinking_format(
+            [{'model_id': 'us.anthropic.fable-5-v1:0'}],
+            'bedrock') == 'thinking_type'
+
+    def test_kimi_k3_discovery_is_multimodal_thinking(self):
+        """Auto-discovery must recognise Kimi K3 as natively multimodal
+        (text + vision + VIDEO) AND always-on thinking.
+
+        Regression guard for the discovery gap that shipped K3 as a plain
+        text-only model — the K2.5/K2.6 vision regex left K3 out, and
+        thinking wasn't inferable from the name (K3 hides its "always-on
+        thinking" behind reasoning_effort). Both are now name-hinted so a
+        freshly-probed K3 provider registers with the right caps without
+        needing the DEFAULT_SLOT_CONFIGS fallback.
+
+        Reference: platform.kimi.com/docs/guide/use-kimi-vision-model +
+        platform.kimi.ai/docs/guide/kimi-k3-quickstart ('native visual
+        understanding … always runs in thinking mode')."""
+        from lib.llm_dispatch.discovery import _infer_capabilities
+        caps = _infer_capabilities('kimi-k3')
+        assert 'text' in caps
+        assert 'vision' in caps, f"K3 vision missing: {caps}"
+        assert 'video' in caps, f"K3 video missing: {caps}"
+        assert 'thinking' in caps, f"K3 thinking missing: {caps}"
+        # K2.5/K2.6 vision baseline stays intact (parity).
+        assert 'vision' in _infer_capabilities('kimi-k2.6')
+        assert 'vision' in _infer_capabilities('kimi-k2.5')
+        # 'video' is opt-in — only kimi-k3 currently claims it via name hint.
+        assert 'video' not in _infer_capabilities('kimi-k2.6')
+        assert 'video' not in _infer_capabilities('claude-opus-4-8')
+        assert 'video' not in _infer_capabilities('gpt-5.6')
+
 
 # ═══════════════════════════════════════════════════════════
 #  7. Slot.thinking_format validation
@@ -554,6 +716,61 @@ class TestReadjustThinkingParams:
         body = {'model': 'gemini-3.5-flash', 'reasoning_effort': 'minimal'}
         _readjust_thinking_params(body, 'doubao-pro', '')
         assert body.get('thinking') == {'type': 'disabled'}
+
+    def test_swap_to_kimi_k3_emits_reasoning_effort_and_strips_temperature(self):
+        """A Qwen body (enable_thinking + temperature=0.7) re-routed to K3
+        must shed both — K3 rejects temperature != 1.0 with HTTP 400 and
+        takes only top-level reasoning_effort."""
+        from lib.llm_dispatch.api import _readjust_thinking_params
+
+        body = {'model': 'qwen3.5-plus', 'enable_thinking': True,
+                'temperature': 0.7}
+        _readjust_thinking_params(body, 'kimi-k3', '')
+        assert body.get('reasoning_effort') == 'high'
+        assert 'enable_thinking' not in body
+        assert 'thinking' not in body
+        assert 'temperature' not in body
+
+    def test_swap_to_kimi_k3_carries_effort(self):
+        from lib.llm_dispatch.api import _readjust_thinking_params
+
+        body = {'model': 'claude-sonnet-4',
+                'thinking': {'type': 'adaptive'}, 'effort': 'max',
+                'temperature': 1.0}
+        _readjust_thinking_params(body, 'kimi-k3', '')
+        assert body.get('reasoning_effort') == 'max'
+        assert 'thinking' not in body
+        assert 'effort' not in body
+        assert 'temperature' not in body
+
+    def test_swap_to_kimi_k3_thinking_off_degrades_to_low(self):
+        from lib.llm_dispatch.api import _readjust_thinking_params
+
+        body = {'model': 'qwen3.5-plus', 'enable_thinking': False,
+                'temperature': 0.7}
+        _readjust_thinking_params(body, 'kimi-k3', '')
+        assert body.get('reasoning_effort') == 'low'
+        assert 'temperature' not in body
+
+    def test_swap_from_kimi_k3_to_qwen_drops_reasoning_effort(self):
+        from lib.llm_dispatch.api import _readjust_thinking_params
+
+        body = {'model': 'kimi-k3', 'reasoning_effort': 'high'}
+        _readjust_thinking_params(body, 'qwen3.5-plus', '')
+        assert 'reasoning_effort' not in body
+        assert body.get('enable_thinking') is True
+
+    def test_swap_to_kimi_k2_keeps_thinking_type(self):
+        """K2 models re-routed via dispatch keep the thinking.type shape
+        (previously the dispatcher had NO kimi branch and silently stripped
+        thinking params on any swap to a kimi slot)."""
+        from lib.llm_dispatch.api import _readjust_thinking_params
+
+        body = {'model': 'qwen3.5-plus', 'enable_thinking': True}
+        _readjust_thinking_params(body, 'kimi-k2.6', '')
+        assert body.get('thinking') == {'type': 'enabled'}
+        assert body.get('temperature') == 1.0
+        assert 'enable_thinking' not in body
 
 
 # ═══════════════════════════════════════════════════════════

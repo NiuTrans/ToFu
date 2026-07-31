@@ -194,6 +194,7 @@ const out = [];
 function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
 
 let scheduledDelays = [];   // every setTimeout(fn, ms) delay captured
+let scheduledFns = [];      // ... and the fns themselves (lane discrimination)
 global._syncChannel = null;
 global.TAB_ID = 'tab-test';
 global.debugLog = () => {};
@@ -203,7 +204,7 @@ global._editingMsgIdx = null;
 global.activeConvId = null;
 global.addEventListener = () => {};
 global.document = { visibilityState: 'visible', addEventListener: () => {} };
-global.setTimeout = (fn, ms) => { scheduledDelays.push(ms); return scheduledDelays.length; };
+global.setTimeout = (fn, ms) => { scheduledDelays.push(ms); scheduledFns.push(fn); return scheduledDelays.length; };
 global.clearTimeout = () => {};
 global.setInterval = () => 0;
 global.clearInterval = () => {};
@@ -219,7 +220,7 @@ global.Api = { conversations: { get: async () => null } };
 const SRC = fs.readFileSync(process.argv[2], 'utf8');
 function loadModule(src) { (0, eval)(src); }
 function reset() {
-  scheduledDelays = [];
+  scheduledDelays = []; scheduledFns = [];
   global.conversations = []; global.activeStreams = new Map();
   global._editingMsgIdx = null; global.activeConvId = null; global._currentUserId = undefined;
 }
@@ -241,16 +242,22 @@ function lastVerifyDelay() { return scheduledDelays[scheduledDelays.length - 1];
   check('C1_verify_is_fast', d <= 200);   // near-immediate, not a 1s debounce
 }
 
-// ══ C2. FRESH local self-write → skipped ENTIRELY by the outer self-echo
-//        guard (no verify scheduled). This is why there is exactly ONE
-//        verify-delay regime: the local-write case never reaches the delay. ══
+// ══ C2. FRESH local self-write → the self-echo window diverts the frame to
+//        the TRANSLATION-ONLY lane (auto-translate commits land squarely in
+//        this window; skipping outright lost the 译文 until manual refresh).
+//        The FULL active verify (_verifyActiveConvFromServer) must NOT be
+//        scheduled — only the lane that cannot touch what our PUT owns. ══
 {
   reset();
   conversations = [{ id: 'c1', _serverRev: 5, messages: [{ role: 'user', content: 'q' }],
                      _localWriteAt: Date.now() - 100 }];  // fresh, within self-echo window
   activeConvId = 'c1';
   _onConvNotifyPush({ type: 'conv_changed', convId: 'c1', rev: 6, userId: 1 });
-  check('C2_fresh_localwrite_skipped_by_outer_guard', scheduledDelays.length === 0);
+  check('C2_schedules_at_most_one_timer', scheduledDelays.length <= 1);
+  const laneSrc = scheduledFns.map((f) => String(f)).join('\n');
+  check('C2_no_full_active_verify_scheduled', laneSrc.indexOf('_verifyActiveConvFromServer') === -1);
+  check('C2_only_translation_lane_may_fire',
+        scheduledDelays.length === 0 || laneSrc.indexOf('_translationOnlyVerify') !== -1);
 }
 
 // ══ C3. Single active-verify delay constant exists and is fast (<= 200ms).

@@ -91,6 +91,13 @@ const streamBufs = new Map(); const activeStreams = new Map();
 win.conversations = conversations;
 Object.defineProperty(win, 'activeConvId', { get: () => activeConvId, set: v => activeConvId = v });
 win.streamBufs = streamBufs; win.activeStreams = activeStreams;
+// Uniform streamSessions stub (streamBufs retired — phase lives in session)
+win.streamSessions = global.streamSessions = new Map();
+win.getStreamSession = global.getStreamSession = (cid) => { let s = win.streamSessions.get(cid); if (!s) { s = { phase: null }; win.streamSessions.set(cid, s); } return s; };
+win.setStreamPhase = global.setStreamPhase = (cid, p) => { if (!win.streamSessions.has(cid) && !(typeof activeStreams !== 'undefined' && activeStreams.has(cid))) return; win.getStreamSession(cid).phase = p; };
+win.clearStreamSession = global.clearStreamSession = (cid) => { win.streamSessions.delete(cid); };
+// Stub for _drBuf used in sse_pipeline delta handler (streamBufs retired)
+let _drBuf = null;
 
 const calls = {};
 function spy(name) { calls[name] = 0; return (...a) => { calls[name]++; }; }
@@ -131,7 +138,7 @@ function setup() {
   conversations.push(conv);
   activeConvId = 'c1';
   const buf = { content: '', thinking: '', toolRounds: [] };
-  streamBufs.set('c1', buf);
+  // streamBufs retired — assistantMsg is the accumulation target
   const ctx = T.makeCtx({ convId: 'c1', taskId: 't1',
     stream: { controller: { signal: { aborted: false } } }, assistantMsg: am, buf });
   return { conv, am, buf, ctx };

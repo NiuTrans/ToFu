@@ -21,6 +21,12 @@ from lib.log import get_logger
 
 logger = get_logger(__name__)
 
+# The pip-failure log is surfaced verbatim in the update dialog (with a copy
+# button) so the operator can paste the WHOLE error, not a mangled tail. Keep
+# a generous ceiling that still protects the push channel / DB from a runaway
+# multi-megabyte install log. The one-line server-log message stays short.
+_DEPS_LOG_MAX = 20000
+
 def _requirements_changed(before_sha: Optional[str],
                           after_sha: Optional[str]) -> bool:
     """True if ``requirements.txt`` differs between two commits.
@@ -127,9 +133,10 @@ def _install_requirements(on_line=None) -> dict:
             out, rc, err = '\n'.join(out_lines), proc.returncode, ''
 
     if rc != 0:
-        tail = (err or out or '')[-500:]
-        logger.error('[Update] pip install failed (exit %d): %s', rc, tail)
-        return {'ok': False, 'detail': tail}
+        full = (err or out or '')
+        # Full log to the UI (bounded); a short tail to the server log line.
+        logger.error('[Update] pip install failed (exit %d): %s', rc, full[-500:])
+        return {'ok': False, 'detail': full[-_DEPS_LOG_MAX:]}
 
     logger.info('[Update] Dependencies installed successfully')
     return {'ok': True, 'detail': (out or '')[-300:]}

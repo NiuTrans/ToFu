@@ -11,7 +11,6 @@ import sys as _sys
 from lib.log import get_logger
 
 from lib.key_stats._state import (
-    MAX_CONSECUTIVE_429,
     MIN_ATTEMPTS,
     MIN_SUCCESS_RATE,
     _cache,
@@ -91,6 +90,7 @@ def get_today_stats(provider_id: str, key_name: str) -> dict:
             'override': override,
             'enabled': enabled,
             'last_error': last_err,
+            'exhausted_models': dict(entry.get('exhausted_models') or {}),
             'day': _cache['day'],
         }
 
@@ -157,12 +157,12 @@ def get_all_stats() -> dict:
                 'override': override,
                 'enabled': enabled,
                 'last_error': str(entry.get('last_error') or ''),
+                'exhausted_models': dict(entry.get('exhausted_models') or {}),
             }
         return {
             'day': _cache['day'],
             'min_attempts': MIN_ATTEMPTS,
             'min_success_rate': MIN_SUCCESS_RATE,
-            'max_consecutive_429': MAX_CONSECUTIVE_429,
             'keys': keys_out,
         }
 
@@ -176,9 +176,10 @@ def set_key_override(provider_id: str, key_name: str, enabled: bool) -> dict:
     :func:`clear_key_override`.
 
     When a user explicitly re-enables a key (enabled=True), we also clear
-    the exhausted flag and reset consecutive_429 — otherwise the counter
-    would be full from the previous streak and the very next 429 would
-    re-trip the auto-exhaust instantly.
+    the exhausted flag, any PER-MODEL billing-stops, and reset
+    consecutive_429 — otherwise the counter would be full from the
+    previous streak and the very next 429 would re-trip the auto-exhaust
+    instantly. Re-enabling means "I topped up", for every model on the key.
     """
     pk = _pair_key(provider_id, key_name)
     with _lock:
@@ -188,6 +189,7 @@ def set_key_override(provider_id: str, key_name: str, enabled: bool) -> dict:
             entry = _cache['stats'].get(pk)
             if entry is not None:
                 entry['exhausted'] = False
+                entry['exhausted_models'] = {}
                 entry['consecutive_429'] = 0
         _save_unlocked()
     logger.info('[KeyStats] User override %s=%s (day=%s)',

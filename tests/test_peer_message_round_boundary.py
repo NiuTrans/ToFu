@@ -69,6 +69,34 @@ def _fake_live_task(conv_id, *, task_id='livetask00001x', endpoint=False,
             tasks.pop(task_id, None)
 
 
+@contextlib.contextmanager
+def _stub_spawn_chain():
+    """Stub the task-creation chain so a REAL dispatch_next_queued runs
+    (dequeue + message append + peer de-dup) WITHOUT registering a live task
+    (a registry zombie would make LATER tests' targets look busy) or starting
+    an LLM thread. Mirrors the patch set the race tests use."""
+    import unittest.mock as mock
+    import lib.conversations as convs
+    import lib.tasks_pkg as tp
+    import lib.tasks_pkg.conv_message_builder as cmb
+    patches = [
+        mock.patch.object(cmb, 'build_api_messages_from_db',
+                          lambda cid, cfg: [{'role': 'user', 'content': 'x'}]),
+        mock.patch.object(tp, 'create_task',
+                          lambda cid, msgs, cfg: {'id': 'faketask00001'}),
+        mock.patch.object(tp, 'spawn_task', lambda task: None),
+        mock.patch.object(convs, 'set_conversation_settings', lambda *a, **k: None),
+        mock.patch.object(convs, 'notify_conv_changed', lambda *a, **k: None),
+    ]
+    for p in patches:
+        p.start()
+    try:
+        yield
+    finally:
+        for p in reversed(patches):
+            p.stop()
+
+
 class PeerRoundBoundaryTest(unittest.TestCase):
 
     @classmethod
@@ -156,13 +184,23 @@ class PeerRoundBoundaryTest(unittest.TestCase):
         self.assertEqual(items[0]['fromConv'], self._sender)
         self.assertIn('watch the parser epic', items[0]['value'])
 
-    def test_idle_target_gets_only_durable_row_no_inbox(self):
+    def test_idle_target_gets_no_twin_and_delivers_at_send_time(self):
+        """EVENT-CHANNEL contract (2026-07-27): an idle target gets NO inbox
+        twin (that is the live-target fast path) — the durable row is drained
+        AT SEND TIME: appended as a fresh _peerMessage turn, queue consumed,
+        no 30 s heartbeat wait."""
         from lib import agent_inbox
         from lib.message_queue import get_queue
-        res = self._send()  # no live task registered
+        with _stub_spawn_chain():
+            res = self._send()
         self.assertTrue(res.get('ok'), res)
-        self.assertEqual(len(get_queue(self._target)), 1)
-        self.assertEqual(agent_inbox.peek(self._target), 0)
+        self.assertEqual(agent_inbox.peek(self._target), 0,
+                         'an idle target gets NO inbox twin')
+        self.assertEqual(len(get_queue(self._target)), 0,
+                         'the durable row is consumed at send time')
+        framed = [m for m in self._target_messages() if m.get('_peerMessage')]
+        self.assertEqual(len(framed), 1,
+                         'the peer note renders as a fresh turn at send time')
 
     def test_endpoint_target_now_gets_fast_path_twin(self):
         """Endpoint mode gained an iteration-boundary drain hook
@@ -194,11 +232,22 @@ class PeerRoundBoundaryTest(unittest.TestCase):
                          'the parent conv fast-path eligible')
 
     def test_aborted_task_is_not_drain_eligible(self):
+        """An aborted (winding-down) task gets NO twin (it runs no more round
+        boundaries). The send-time idle drain treats the conv as IDLE —
+        mirroring drain_idle_peer_messages' strand-closing fall-through — and
+        delivers immediately."""
         from lib import agent_inbox
+        from lib.message_queue import get_queue
         with _fake_live_task(self._target, aborted=True):
-            res = self._send()
+            with _stub_spawn_chain():
+                res = self._send()
         self.assertTrue(res.get('ok'), res)
-        self.assertEqual(agent_inbox.peek(self._target), 0)
+        self.assertEqual(agent_inbox.peek(self._target), 0,
+                         'no twin for an aborted task')
+        framed = [m for m in self._target_messages() if m.get('_peerMessage')]
+        self.assertEqual(len(framed), 1,
+                         'the send-time drain closes the aborted-task strand')
+        self.assertEqual(len(get_queue(self._target)), 0)
 
     # ═══════════════════ FORWARD race (inbox drains first) ═══════════════════
 
@@ -364,24 +413,26 @@ class PeerRoundBoundaryTest(unittest.TestCase):
                 p.stop()
 
     def test_idle_peer_row_is_drained_as_fresh_turn(self):
-        """THE Symptom-A fix: a peer message to an IDLE conv (no live task) is
-        picked up by drain_idle_peer_messages, appended to the conversation as a
-        fresh _peerMessage turn, and its durable queue row is drained."""
+        """EVENT-CHANNEL contract: a peer message to an IDLE conv is drained
+        AT SEND TIME — appended as a fresh _peerMessage turn, durable row
+        consumed. The 30 s drain_idle_peer_messages pass then finds NOTHING
+        to do (idempotent — never a double delivery)."""
         from lib.message_queue import get_queue
-        res = self._send('confirm you are not touching the parser module')
+        with _stub_spawn_chain():
+            res = self._send('confirm you are not touching the parser module')
         self.assertTrue(res.get('ok'), res)
-        self.assertEqual(len(get_queue(self._target)), 1)   # queued, undrained
-
-        spawned = self._drain_idle_peer_ctx()
-        self.assertTrue(spawned, 'idle-drain must wake the idle conv')
-        # The peer turn now lives in the conversation (fresh .peer-msg-banner
-        # turn) and the durable queue row is drained.
-        msgs = self._target_messages()
-        framed = [m for m in msgs if m.get('_peerMessage')]
+        self.assertEqual(len(get_queue(self._target)), 0,
+                         'consumed at send time (no 30 s wait)')
+        framed = [m for m in self._target_messages() if m.get('_peerMessage')]
         self.assertEqual(len(framed), 1,
-                         'the pending peer message must render as a fresh turn')
+                         'the pending peer message renders as a fresh turn')
         self.assertEqual(framed[0].get('_fromConv'), self._sender)
-        self.assertEqual(len(get_queue(self._target)), 0, 'queue must be drained')
+        # The 30 s pass is now exactly a safety net with nothing left to catch.
+        spawned = self._drain_idle_peer_ctx()
+        self.assertEqual(spawned, [],
+                         'the heartbeat pass has nothing left to drain (no double)')
+        framed2 = [m for m in self._target_messages() if m.get('_peerMessage')]
+        self.assertEqual(len(framed2), 1, 'still exactly ONE delivery')
 
     def test_idle_drain_skips_live_task_conv(self):
         """A conv with a LIVE task is NOT force-drained (its fast-path inbox
@@ -400,28 +451,30 @@ class PeerRoundBoundaryTest(unittest.TestCase):
         framed = [m for m in self._target_messages() if m.get('_peerMessage')]
         self.assertEqual(len(framed), 0)
 
-    def test_NEUTER_idle_drain_disabled_strands_peer_row(self):
-        """NEGATIVE CONTROL — neuter drain_idle_peer_messages to a no-op (the
-        pre-fix state). The peer row to an idle conv stays queued forever and
-        renders NO turn — exactly Symptom A. Proves the drain is load-bearing."""
+    def test_NEUTER_send_time_drain_disabled_heartbeat_catches(self):
+        """NEGATIVE CONTROL, repointed to the event-channel seam: with the
+        SEND-TIME drain disabled, a peer note into an idle conv stays a
+        stranded queue row (the Symptom-A shape returns) — and the REAL 30 s
+        drain_idle_peer_messages pass then catches it (the net still works)."""
         from lib.message_queue import get_queue
-        res = self._send()
-        self.assertTrue(res.get('ok'), res)
-
         import lib.message_queue as mq
-        orig = mq.drain_idle_peer_messages
-        mq.drain_idle_peer_messages = lambda *a, **k: []   # NEUTER
+        real_dispatch = mq.dispatch_next_queued
+        mq.dispatch_next_queued = lambda *a, **k: None   # NEUTER the seam
         try:
-            # Simulate the heartbeat calling the (neutered) drain.
-            mq.drain_idle_peer_messages()
+            res = self._send()
         finally:
-            mq.drain_idle_peer_messages = orig
-        # Row still stranded in the queue, no turn rendered = Symptom A.
+            mq.dispatch_next_queued = real_dispatch
+        self.assertTrue(res.get('ok'), res)
         self.assertEqual(len(get_queue(self._target)), 1,
-                         'without the idle-drain the peer row is stranded')
+                         'with the send-time drain disabled the row is stranded')
         framed = [m for m in self._target_messages() if m.get('_peerMessage')]
-        self.assertEqual(len(framed), 0,
-                         'without the idle-drain nothing renders (Symptom A)')
+        self.assertEqual(len(framed), 0, 'nothing renders at send time')
+        # The 30 s safety net still catches what the disabled seam missed.
+        spawned = self._drain_idle_peer_ctx()
+        self.assertTrue(spawned,
+                        'the heartbeat pass delivers what the seam missed')
+        framed2 = [m for m in self._target_messages() if m.get('_peerMessage')]
+        self.assertEqual(len(framed2), 1, 'delivered exactly once via the net')
 
     # ═══════════ Symptom-B: deferred delivery / never-zero ═══════════
     # The forward de-dup MUST NOT delete the durable row at inject time (when

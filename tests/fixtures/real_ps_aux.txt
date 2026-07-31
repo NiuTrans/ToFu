@@ -1,0 +1,247 @@
+USER         PID %CPU %MEM    VSZ   RSS TTY      STAT START   TIME COMMAND
+root           1  0.0  0.0  53136  4976 ?        Ss   Jul26   1:13 /usr/sbin/init
+root          37  0.0  0.0  35068  2104 ?        Ss   Jul26   0:27 /usr/lib/systemd/systemd-journald
+root          41  0.0  0.0  17784   156 ?        Ss   Jul26   0:00 /bin/sh -c /opt/yourprovider/apps/container-agent/container-entry --phase init || /hulk/opt/yourprovider/apps/container-agent/container-entry --phase init
+root          46  0.0  0.0 705036  1332 ?        Sl   Jul26   0:00 /opt/yourprovider/apps/container-agent/container-entry --phase init
+root          67  0.0  0.0 2420032 8756 ?        Sl   Jul26   0:05 /opt/yourprovider/apps/container-agent/container-agent --type common --init
+dbus         131  0.0  0.0  83584  2420 ?        Ss   Jul26   0:00 /usr/bin/dbus-daemon --system --address=systemd: --nofork --nopidfile --systemd-activation
+root         188  0.0  0.0 111376  4048 ?        Ss   Jul26   0:51 /usr/sbin/sshd -D
+root         190  0.0  0.0 174356  2612 ?        Ssl  Jul26   0:09 /usr/sbin/rsyslogd -n
+root         785  0.0  0.0  17784   276 ?        S    Jul26   0:00 /bin/sh /usr/bin/svscanboot
+root         791  0.0  0.0   4340   232 ?        S    Jul26   0:01 svscan /service
+root         792  0.0  0.0   4156    60 ?        S    Jul26   0:00 readproctitle service errors: ...: sg_agent-10.10.0-1.x86_64                                    7/7   Dependency Installed:   gperftools-devel.x86_64 0:2.6.1-1.el7   gperftools-libs.x86_64 0:2.6.1-1.el7     leveldb.x86_64 0:1.12.0-11.el7          mt-gflags.x86_64 0:2.2.2-3               snappy.x86_64 0:1.1.0-3.el7              Updated:   sg_agent.x86_64 0:10.11.0-2                                                     Complete! 
+root         795  0.0  0.0   4300    64 ?        S    Jul26   0:00 supervise plus_agent
+root         796  0.0  0.0   4168    60 ?        S    Jul26   0:00 supervise container-agent
+root         797  0.0  0.0   4168    68 ?        S    Jul26   0:00 supervise crane_agent
+root         798  0.0  0.0   4300    64 ?        S    Jul26   0:00 supervise falcon-agent
+root         802  0.0  0.0   4300    64 ?        S    Jul26   0:00 supervise cplugin
+example-corp      804  0.0  0.0 283152  1368 ?        Sl   Jul26   0:00 /opt/yourprovider/apps/crane_agent/crane_agent
+root        1017  0.0  0.0 124968 11972 ?        Ss   Jul26   0:17 /usr/bin/python /usr/bin/supervisord -c /etc/supervisor/supervisord.conf
+example-corp     1065  0.0  0.0 103852  1016 ?        Sl   Jul26   0:00 /opt/yourprovider/apps/rhino_agent/ragent
+example-corp     1066  0.0  0.0 712372  1124 ?        Sl   Jul26   0:00 /opt/yourprovider/apps/shield/go-ark
+root        1354  0.0  0.0  23728  6840 ?        Sl   Jul26   0:02 /usr/bin/one-agent
+root        1634  0.0  0.0 1384008 4260 ?        Sl   Jul26   0:00 /opt/yourprovider/apps/container-agent/container-agent --start
+root        1644  0.0  0.0  17784   152 ?        S    Jul26   0:00 bash /opt/yourprovider/nodemanager/bin/docker-run.sh
+root        1645  0.0  0.0  10420    64 ?        S    Jul26   0:00 sleep infinity
+root        3849  0.0  0.0  17904   368 ?        Ss   Jul26   0:00 /bin/bash -c set -a; . /etc/profile.d/pc_env.sh; set +a; /mlp/conda/envs/codelab/bin/python -s /mlp/conda/envs/codelab/bin/codelab-agent
+hadoop-+    3853  0.0  0.0 127880 29548 ?        Ssl  Jul26   0:02 /mlp/conda/envs/codelab/bin/python -s /mlp/conda/envs/codelab/bin/download-agent
+root        3934  0.5  0.0 725028 36296 ?        Sl   Jul26  10:41 /mlp/conda/envs/codelab/bin/python -s /mlp/conda/envs/codelab/bin/codelab-agent
+hadoop-+    4031  0.0  0.0  17916   484 ?        Ss   Jul26   0:00 /bin/bash /usr/bin/start-lab.sh
+hadoop-+    4390  0.0  0.0 715352  4376 ?        Ssl  Jul26   0:00 /workdir/cloud-ide/ide run pycharm-c --port 8411
+hadoop-+    4438  0.0  0.0  17784   152 ?        S    Jul26   0:00 /bin/sh -c export ORG_JETBRAINS_PROJECTOR_SERVER_PORT=8411;/mlp/cloud-ide-old/pycharm-community-2021.3.2/bin/run.sh 
+hadoop-+    4439  0.0  0.0  17784   292 ?        S    Jul26   0:00 /bin/bash /mlp/cloud-ide-old/pycharm-community-2021.3.2/bin/run.sh
+hadoop-+    4450  0.0  0.0  17784   316 ?        S    Jul26   0:00 bash pycharm-projector.sh
+hadoop-+    4468  0.1  0.1 12142640 431772 ?     Sl   Jul26   3:39 /mlp/cloud-ide-old/pycharm-community-2021.3.2/jbr/bin/java -classpath /mlp/cloud-ide-old/pycharm-community-2021.3.2/lib/util.jar:/mlp/cloud-ide-old/pycharm-community-2021.3.2/lib/bootstrap.jar:/mlp/cloud-ide-old/pycharm-community-2021.3.2/projector-server/lib/* -Xms128m -Xmx750m -XX:ReservedCodeCacheSize=512m -XX:+IgnoreUnrecognizedVMOptions -XX:+UseG1GC -XX:SoftRefLRUPolicyMSPerMB=50 -XX:CICompilerCount=2 -XX:+HeapDumpOnOutOfMemoryError -XX:-OmitStackTraceInFastThrow -ea -Dsun.io.useCanonCaches=false -Djdk.http.auth.tunneling.disabledSchemes="" -Djdk.attach.allowAttachSelf=true -Djdk.module.illegalAccess.silent=true -Dkotlinx.coroutines.debug=off -Dsun.tools.attach.tmp.only=true -XX:ErrorFile=/home/your-user/java_error_in_pycharm_%p.log -XX:HeapDumpPath=/home/your-user/java_error_in_pycharm_.hprof -Djb.vmOptionsFile=/mlp/cloud-ide-old/pycharm-community-2021.3.2/bin/pycharm64.vmoptions -Djava.system.class.loader=com.intellij.util.lang.PathClassLoader -Didea.vendor.name=JetBrains -Didea.paths.selector=PyCharmCE2021.3 -Didea.platform.prefix=PyCharmCore -Dsplash=true -Dorg.jetbrains.projector.server.classToLaunch=com.intellij.idea.Main org.jetbrains.projector.server.ProjectorLauncher
+hadoop-+    4518  0.0  0.0 715096  4024 ?        Ssl  Jul26   0:00 /workdir/cloud-ide/ide run vscode --port 8412 --disable-telemetry --auth password
+hadoop-+    4531  0.0  0.0 723428 55412 ?        Sl   Jul26   0:00 /mlp/cloud-ide-old/code-server/lib/node /mlp/cloud-ide-old/code-server --bind-addr 0.0.0.0:8412 --auth password --disable-telemetry
+hadoop-+    4533  0.4  0.0 323964 127948 ?       Sl   Jul26   8:00 /mlp/conda/envs/jupyterlab/bin/python /mlp/conda/envs/jupyterlab/bin/jupyter-lab --ip=0.0.0.0 --port=8410
+hadoop-+    4690 13.5  0.0 1129264 136132 ?      Sl   Jul26 269:27 /mlp/cloud-ide-old/code-server/lib/node /mlp/cloud-ide-old/code-server/out/node/entry
+hadoop-+    4954  0.0  0.0 685348 75068 ?        Sl   Jul26   1:02 /mlp/cloud-ide-old/code-server/lib/node /mlp/cloud-ide-old/code-server/lib/vscode/out/bootstrap-fork --type=ptyHost --logsPath /home/your-user/.local/share/code-server/logs/20260726T170451
+hadoop-+    5574  3.6  1.7 5121068 3924060 ?     Sl   Jul26  72:09 /mlp/cloud-ide-old/code-server/lib/node /mlp/cloud-ide-old/code-server/lib/vscode/out/bootstrap-fork --type=extensionHost --transformURIs --useHostProxy=false
+hadoop-+    5731 18.4 36.2 84678984 83646824 ?   Sl   Jul26 365:37 /mlp/cloud-ide-old/code-server/lib/node /mlp/cloud-ide-old/code-server/lib/vscode/out/bootstrap-fork --type=fileWatcher
+hadoop-+    5754  0.0  0.0  36824  1440 pts/0    Ss+  Jul26   0:00 /bin/bash --init-file /mlp/cloud-ide-old/code-server/lib/vscode/out/vs/workbench/contrib/terminal/browser/media/shellIntegration-bash.sh
+hadoop-+    6483  0.0  0.0 602376 44600 ?        Sl   Jul26   0:02 /mlp/cloud-ide-old/code-server/lib/node /mlp/cloud-ide-old/code-server/lib/vscode/extensions/json-language-features/server/dist/node/jsonServerMain --node-ipc --clientProcessId=5574
+hadoop-+    7717  0.0  0.0 779116 107608 ?       Ss   Jul26   0:27 /path/to/your/project -D /path/to/your/project
+hadoop-+    7726  0.1  0.2 779116 563364 ?       Ss   Jul26   3:30 postgres: io worker 0
+hadoop-+    7727  0.0  0.2 779116 562968 ?       Ss   Jul26   1:09 postgres: io worker 1
+hadoop-+    7728  0.0  0.2 779116 562640 ?       Ss   Jul26   0:47 postgres: io worker 2
+hadoop-+    7729  0.0  0.2 780140 559604 ?       Ss   Jul26   0:50 postgres: checkpointer 
+hadoop-+    7730  0.0  0.2 779116 556212 ?       Ss   Jul26   0:35 postgres: background writer 
+hadoop-+    7733  0.0  0.0 780140 21304 ?        Ss   Jul26   0:15 postgres: walwriter 
+hadoop-+    7734  0.0  0.0 780792  6576 ?        Ss   Jul26   0:01 postgres: autovacuum launcher 
+hadoop-+    7735  0.0  0.0 780816  5384 ?        Ss   Jul26   0:00 postgres: logical replication launcher 
+root        8757  0.0  0.0 2787640 5976 ?        Sl   Jul26   0:04 /var/lib/one/plugins/upgrader-agent/0.2.17/upgrader-agent
+root       57941  0.0  0.0 738548 18716 ?        Sl   Jul26   0:31 /opt/yourprovider/apps/direwolf/core/dw_1001 -l
+root       57942  0.0  0.0   1484   880 ?        S    Jul26   0:02 /opt/yourprovider/apps/direwolf/terminator/t_800
+root       59349  0.2  0.0 4711268 15852 ?       Sl   Jul26   5:29 ./falcon-agent
+root       60532  0.0  0.0 4911060 22032 ?       Sl   Jul26   1:21 /usr/sbin/jumper-agent
+nscd       60694  0.0  0.0 1235084 1428 ?        Ssl  Jul26   0:50 /usr/sbin/nscd
+root       60737  0.0  0.0  28800  2404 ?        Ss   Jul26   0:00 /usr/sbin/crond -n
+example-corp    61905  0.0  0.0 2879268 19568 ?       Sl   Jul26   0:07 /opt/yourprovider/apps/kms_agent/kms_agent
+root       63182  0.0  0.0   4168    60 ?        S    Jul26   0:00 supervise log_agent
+example-corp    63241  0.1  0.0 1944000 8404 ?        Sl   Jul26   3:10 ./bin/log_agent --conf=conf/log_agent_example-corp.conf --log_conf=conf/log4c.conf
+root       64205  0.0  0.0 737180 17948 ?        Ssl  Jul26   1:58 /opt/yourprovider/apps/direwolf/plugin/1002/dw_1002 -N2
+root       65063  0.0  0.0   4168    64 ?        S    Jul26   0:00 supervise log_agent_file
+example-corp    65181  0.1  0.0 670720  4624 ?        Sl   Jul26   2:56 ./bin/log_agent_file --log_conf=./conf/logconf.conf --conf=./conf/log_agent_file_example-corp.conf
+example-corp    66884  0.0  0.0 716752  6376 ?        Sl   Jul26   0:03 /opt/yourprovider/apps/deploy/agent -cpu 1 -port 5087 -apiserverNameService prod-plus-apiserver -log-path /opt/logs/logs/plus_agent/agent.log
+example-corp    67887  0.1  0.0 113460  5524 ?        Sl   Jul26   2:38 /opt/yourprovider/apps/cplugin/cplugin
+example-corp    67911  0.0  0.0 178012 18352 ?        Sl   Jul26   0:28 octo_proxy_real -c /opt/yourprovider/apps/octo_proxy/bootstrap.yaml -l info --shm-dir /opt/yourprovider/apps/octo_proxy/socket --concurrency 2 --log-path /var/example-corp/logs/octo_proxy/proxy.log --restart-epoch 1
+example-corp    67914  0.0  0.0      0     0 ?        Z    Jul26   0:00 [sh] <defunct>
+root       69178  0.0  0.0   4300    60 ?        S    Jul26   0:00 supervise sg-agent
+example-corp    71572  0.0  0.0 682260 51244 ?        Sl   Jul26   1:17 /opt/yourprovider/apps/sg_agent/sg_agent
+hadoop-+  101752 25.8  5.0 29920092 11644016 ?   Ssl  Jul27 191:57 /path/to/your/project server.py
+hadoop-+  102234  0.0  0.0      0     0 ?        Zs   Jul27   0:00 [npm exec @model] <defunct>
+hadoop-+  102275  0.0  0.0      0     0 ?        Zs   Jul27   0:00 [uv] <defunct>
+hadoop-+  102344  0.0  0.0      0     0 ?        Zs   Jul27   0:01 [hope-mcp] <defunct>
+hadoop-+  102358  0.0  0.0      0     0 ?        Zs   Jul27   0:00 [uv] <defunct>
+hadoop-+  102422  0.0  0.0      0     0 ?        Zs   Jul27   0:01 [xuecheng-mcp] <defunct>
+hadoop-+  102455  0.0  0.0      0     0 ?        Zs   Jul27   0:01 [llm-mcp] <defunct>
+hadoop-+  103257  0.0  0.0      0     0 ?        Z    Jul27   0:00 [MainThread] <defunct>
+hadoop-+  175237  1.5  0.0  45912 12372 ?        S    Jul26  30:05 find / -name libatk-1.0.so*
+hadoop-+  175238  0.0  0.0  30508   280 ?        S    Jul26   0:00 head -3
+hadoop-+  264007  0.0  0.0 1413260 49036 ?       Sl   Jul27   0:00 node /tmp/probe_echo.js
+hadoop-+  399231  1.4  0.0  46376 12624 ?        S    Jul26  27:53 find / -name libatk-1.0.so.0
+hadoop-+  399232  0.0  0.0  30508   276 ?        S    Jul26   0:00 head -5
+root      689974  0.0  0.0 2740784 25316 ?       Ssl  Jul27   0:10 /opt/yourprovider/apps/direwolf/plugin/1008/dw_1008 -N8
+root      689975  0.1  0.0 747160 16108 ?        Ssl  Jul27   0:34 /opt/yourprovider/apps/direwolf/plugin/1003/dw_1003 -N3
+hadoop-+  711149  0.0  0.0      0     0 ?        Zs   Jul27   0:00 [sh] <defunct>
+hadoop-+  719221  0.0  0.0 1731180 89680 ?       Ssl  Jul27   0:00 npm exec @modelcontextprotocol/server-github
+hadoop-+  721683  0.0  0.0 1419200 66664 ?       Sl   Jul27   0:00 node /path/to/your/project
+hadoop-+  722316  0.0  0.0 1525000 54524 ?       Ssl  Jul27   0:00 /path/to/your/project tool uvx --from /path/to/your/project github-batch-mcp
+hadoop-+  722438  0.0  0.0 311436 57216 ?        Sl   Jul27   0:01 /path/to/your/project /path/to/your/project
+hadoop-+  722474  0.0  0.0 323904 68992 ?        Ssl  Jul27   0:01 /path/to/your/project /path/to/your/project
+hadoop-+  722875  0.0  0.0 1593612 43640 ?       Ssl  Jul27   0:00 /path/to/your/project tool uvx --from overleaf-mcp-plus[compile]>=0.1.3 overleaf-mcp
+hadoop-+  722951  0.0  0.0 391708 80828 ?        Sl   Jul27   0:02 /path/to/your/project /path/to/your/project
+hadoop-+  723456  0.0  0.0 325384 73000 ?        Ssl  Jul27   0:01 /path/to/your/project /path/to/your/project
+hadoop-+  724189  0.0  0.0 317216 64824 ?        Ssl  Jul27   0:01 /path/to/your/project /path/to/your/project
+hadoop-+  743598  3.4  0.0  35380  6176 ?        S    Jul27  14:50 grep -rn _resolve_inbound_rid\|_rid_is_safe\|_RID_ALPHABET --include=*.py .
+hadoop-+  743599  0.0  0.0  33232  3480 ?        S    Jul27   0:00 grep -v \.git/
+hadoop-+ 1262356  3.1  0.0  35332  6132 ?        S    Jul27  10:56 grep -rn TOFU_MOTION_SCENE_AUTHOR --include=.env* --include=*.py --include=*.md .
+hadoop-+ 1262357  0.0  0.0  30508  3312 ?        S    Jul27   0:00 head -20
+hadoop-+ 1419964  0.0  0.0 1602216 142628 ?      Sl   Jul27   0:04 /path/to/your/project /path/to/your/project run-driver
+hadoop-+ 1420027  0.0  0.0 50793348 113292 ?     Ssl  Jul27   0:09 /home/your-user/.cache/ms-playwright/chromium_headless_shell-1223/chrome-headless-shell-linux64/chrome-headless-shell --disable-field-trial-config --disable-background-networking --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-back-forward-cache --disable-breakpad --disable-client-side-phishing-detection --disable-component-extensions-with-background-pages --disable-component-update --no-default-browser-check --disable-default-apps --disable-dev-shm-usage --disable-edgeupdater --disable-extensions --disable-features=AvoidUnnecessaryBeforeUnloadCheckSync,BoundaryEventDispatchTracksNodeRemoval,DestroyProfileOnBrowserClose,DialMediaRouteProvider,GlobalMediaControls,HttpsUpgrades,LensOverlay,MediaRouter,PaintHolding,ThirdPartyStoragePartitioning,Translate,AutoDeElevate,RenderDocument,OptimizationHints,msForceBrowserSignIn,msEdgeUpdateLaunchServicesPreferredVersion --enable-features=CDPScreenshotNewSurface --allow-pre-commit-input --disable-hang-monitor --disable-ipc-flooding-protection --disable-popup-blocking --disable-prompt-on-repost --disable-renderer-backgrounding --force-color-profile=srgb --metrics-recording-only --no-first-run --password-store=basic --use-mock-keychain --no-service-autorun --export-tagged-pdf --disable-search-engine-choice-screen --unsafely-disable-devtools-self-xss-warnings --edge-skip-compat-layer-relaunch --disable-infobars --disable-search-engine-choice-screen --disable-sync --enable-unsafe-swiftshader --headless --hide-scrollbars --mute-audio --blink-settings=primaryHoverType=2,availableHoverTypes=2,primaryPointerType=4,availablePointerTypes=4 --no-sandbox --no-sandbox --disable-dev-shm-usage --disable-gpu --disable-setuid-sandbox --user-data-dir=/tmp/playwright_chromiumdev_profile-mkYBdg --remote-debugging-pipe --no-startup-window
+hadoop-+ 1420081  0.0  0.0 50593372 41548 ?      S    Jul27   0:00 /home/your-user/.cache/ms-playwright/chromium_headless_shell-1223/chrome-headless-shell-linux64/chrome-headless-shell --type=zygote --no-zygote-sandbox --no-sandbox --headless
+hadoop-+ 1420082  0.0  0.0 50593368 42064 ?      S    Jul27   0:00 /home/your-user/.cache/ms-playwright/chromium_headless_shell-1223/chrome-headless-shell-linux64/chrome-headless-shell --type=zygote --no-sandbox --headless
+hadoop-+ 1420101  0.0  0.0 50810528 69596 ?      Sl   Jul27   0:05 /home/your-user/.cache/ms-playwright/chromium_headless_shell-1223/chrome-headless-shell-linux64/chrome-headless-shell --type=gpu-process --no-sandbox --disable-dev-shm-usage --disable-breakpad --headless --ozone-platform=headless --use-angle=swiftshader-webgl --enable-unsafe-swiftshader --gpu-preferences=UAAAAAAAAAAgAAAEAAAAAAAAAAAAAGAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAAAAAAAYAAAAAAAAABgAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAgAAAAAAAAA --shared-files --field-trial-handle=3,i,10588913367769240083,2509731045080461930,262144 --enable-features=CDPScreenshotNewSurface --disable-features=AutoDeElevate,AvoidUnnecessaryBeforeUnloadCheckSync,BoundaryEventDispatchTracksNodeRemoval,DestroyProfileOnBrowserClose,DialMediaRouteProvider,GlobalMediaControls,HttpsUpgrades,LensOverlay,MediaRouter,OptimizationHints,PaintHolding,RenderDocument,ThirdPartyStoragePartitioning,Translate,msEdgeUpdateLaunchServicesPreferredVersion,msForceBrowserSignIn --variations-seed-version --pseudonymization-salt-handle=7,i,1413440542630575573,3987000594068290143,4 --trace-process-track-uuid=3190708988185955192
+hadoop-+ 1420136  0.0  0.0 50659368 79388 ?      Sl   Jul27   0:09 /home/your-user/.cache/ms-playwright/chromium_headless_shell-1223/chrome-headless-shell-linux64/chrome-headless-shell --type=utility --utility-sub-type=network.mojom.NetworkService --lang=en-US --service-sandbox-type=none --no-sandbox --disable-dev-shm-usage --use-angle=swiftshader-webgl --use-gl=angle --mute-audio --headless=old --shared-files=v8_context_snapshot_data:100 --field-trial-handle=3,i,10588913367769240083,2509731045080461930,262144 --enable-features=CDPScreenshotNewSurface --disable-features=AutoDeElevate,AvoidUnnecessaryBeforeUnloadCheckSync,BoundaryEventDispatchTracksNodeRemoval,DestroyProfileOnBrowserClose,DialMediaRouteProvider,GlobalMediaControls,HttpsUpgrades,LensOverlay,MediaRouter,OptimizationHints,PaintHolding,RenderDocument,ThirdPartyStoragePartitioning,Translate,msEdgeUpdateLaunchServicesPreferredVersion,msForceBrowserSignIn --variations-seed-version --pseudonymization-salt-handle=7,i,1413440542630575573,3987000594068290143,4 --trace-process-track-uuid=3190708989122997041
+hadoop-+ 1420649  0.0  0.0 50639764 56044 ?      Sl   Jul27   0:00 /home/your-user/.cache/ms-playwright/chromium_headless_shell-1223/chrome-headless-shell-linux64/chrome-headless-shell --type=utility --utility-sub-type=audio.mojom.AudioService --lang=en-US --service-sandbox-type=none --no-sandbox --disable-dev-shm-usage --use-angle=swiftshader-webgl --use-gl=angle --mute-audio --headless=old --shared-files=v8_context_snapshot_data:100 --field-trial-handle=3,i,10588913367769240083,2509731045080461930,262144 --enable-features=CDPScreenshotNewSurface --disable-features=AutoDeElevate,AvoidUnnecessaryBeforeUnloadCheckSync,BoundaryEventDispatchTracksNodeRemoval,DestroyProfileOnBrowserClose,DialMediaRouteProvider,GlobalMediaControls,HttpsUpgrades,LensOverlay,MediaRouter,OptimizationHints,PaintHolding,RenderDocument,ThirdPartyStoragePartitioning,Translate,msEdgeUpdateLaunchServicesPreferredVersion,msForceBrowserSignIn --variations-seed-version --pseudonymization-salt-handle=7,i,1413440542630575573,3987000594068290143,4 --trace-process-track-uuid=3190708991934122588
+hadoop-+ 1639257  3.3  0.0  35196  5844 ?        S    Jul27   8:29 grep -rn def _epoch_ms --include=*.py .
+hadoop-+ 1639258  0.0  0.0  30508  3260 ?        S    Jul27   0:00 head
+hadoop-+ 2158839  0.0  0.0  35932  2812 ?        S    01:44   0:00 /bin/sh -c cd /path/to/your/project && CONDA_PREFIX=/path/to/your/project nohup python3 tests/_qr_login_capture.py --timeout 1800 > /tmp/qr_login.log 2>&1 & echo "relaunched pid=$!"; sleep 42 && grep -aE '^\[qr\] (qrcode|screenshot)' /tmp/qr_login.log | head -2 __tofu_rc=$? command pwd -P > /tmp/tofu_cwd_smcuecp_.txt 2>/dev/null || true exit $__tofu_rc 
+hadoop-+ 2158842  2.9  0.0 8038960 159820 ?      Sl   01:44   0:46 python3 tests/_qr_login_capture.py --timeout 1800
+hadoop-+ 2158986  0.0  0.0 1585260 125072 ?      Sl   01:44   0:01 /path/to/your/project /path/to/your/project run-driver
+hadoop-+ 2159001  0.1  0.0 50751380 103388 ?     Ssl  01:44   0:02 /home/your-user/.cache/ms-playwright/chromium_headless_shell-1223/chrome-headless-shell-linux64/chrome-headless-shell --disable-field-trial-config --disable-background-networking --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-back-forward-cache --disable-breakpad --disable-client-side-phishing-detection --disable-component-extensions-with-background-pages --disable-component-update --no-default-browser-check --disable-default-apps --disable-dev-shm-usage --disable-edgeupdater --disable-extensions --disable-features=AvoidUnnecessaryBeforeUnloadCheckSync,BoundaryEventDispatchTracksNodeRemoval,DestroyProfileOnBrowserClose,DialMediaRouteProvider,GlobalMediaControls,HttpsUpgrades,LensOverlay,MediaRouter,PaintHolding,ThirdPartyStoragePartitioning,Translate,AutoDeElevate,RenderDocument,OptimizationHints,msForceBrowserSignIn,msEdgeUpdateLaunchServicesPreferredVersion --enable-features=CDPScreenshotNewSurface --allow-pre-commit-input --disable-hang-monitor --disable-ipc-flooding-protection --disable-popup-blocking --disable-prompt-on-repost --disable-renderer-backgrounding --force-color-profile=srgb --metrics-recording-only --no-first-run --password-store=basic --use-mock-keychain --no-service-autorun --export-tagged-pdf --disable-search-engine-choice-screen --unsafely-disable-devtools-self-xss-warnings --edge-skip-compat-layer-relaunch --disable-infobars --disable-search-engine-choice-screen --disable-sync --enable-unsafe-swiftshader --headless --hide-scrollbars --mute-audio --blink-settings=primaryHoverType=2,availableHoverTypes=2,primaryPointerType=4,availablePointerTypes=4 --no-sandbox --user-data-dir=/tmp/playwright_chromiumdev_profile-ZNcSCG --remote-debugging-pipe --no-startup-window
+hadoop-+ 2159051  0.0  0.0 50589176 41288 ?      S    01:44   0:00 /home/your-user/.cache/ms-playwright/chromium_headless_shell-1223/chrome-headless-shell-linux64/chrome-headless-shell --type=zygote --no-zygote-sandbox --no-sandbox --headless
+hadoop-+ 2159052  0.0  0.0 50589172 41028 ?      S    01:44   0:00 /home/your-user/.cache/ms-playwright/chromium_headless_shell-1223/chrome-headless-shell-linux64/chrome-headless-shell --type=zygote --no-sandbox --headless
+hadoop-+ 2159068  0.0  0.0 50811452 80264 ?      Sl   01:44   0:00 /home/your-user/.cache/ms-playwright/chromium_headless_shell-1223/chrome-headless-shell-linux64/chrome-headless-shell --type=gpu-process --no-sandbox --disable-dev-shm-usage --disable-breakpad --headless --ozone-platform=headless --use-angle=swiftshader-webgl --enable-unsafe-swiftshader --gpu-preferences=UAAAAAAAAAAgAAAEAAAAAAAAAAAAAGAAAQAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAAAAAAAYAAAAAAAAABgAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAgAAAAAAAAA --use-gl=angle --shared-files --field-trial-handle=3,i,9662047576224281649,867103440722794352,262144 --enable-features=CDPScreenshotNewSurface --disable-features=AutoDeElevate,AvoidUnnecessaryBeforeUnloadCheckSync,BoundaryEventDispatchTracksNodeRemoval,DestroyProfileOnBrowserClose,DialMediaRouteProvider,GlobalMediaControls,HttpsUpgrades,LensOverlay,MediaRouter,OptimizationHints,PaintHolding,RenderDocument,ThirdPartyStoragePartitioning,Translate,msEdgeUpdateLaunchServicesPreferredVersion,msForceBrowserSignIn --variations-seed-version --pseudonymization-salt-handle=7,i,18336406003665680173,7762285228250311116,4 --trace-process-track-uuid=3190708988185955192
+hadoop-+ 2159093  0.0  0.0 50671696 77248 ?      Sl   01:44   0:00 /home/your-user/.cache/ms-playwright/chromium_headless_shell-1223/chrome-headless-shell-linux64/chrome-headless-shell --type=utility --utility-sub-type=network.mojom.NetworkService --lang=en-US --service-sandbox-type=none --no-sandbox --disable-dev-shm-usage --use-angle=swiftshader-webgl --use-gl=angle --mute-audio --headless=old --shared-files=v8_context_snapshot_data:100 --field-trial-handle=3,i,9662047576224281649,867103440722794352,262144 --enable-features=CDPScreenshotNewSurface --disable-features=AutoDeElevate,AvoidUnnecessaryBeforeUnloadCheckSync,BoundaryEventDispatchTracksNodeRemoval,DestroyProfileOnBrowserClose,DialMediaRouteProvider,GlobalMediaControls,HttpsUpgrades,LensOverlay,MediaRouter,OptimizationHints,PaintHolding,RenderDocument,ThirdPartyStoragePartitioning,Translate,msEdgeUpdateLaunchServicesPreferredVersion,msForceBrowserSignIn --variations-seed-version --pseudonymization-salt-handle=7,i,18336406003665680173,7762285228250311116,4 --trace-process-track-uuid=3190708989122997041
+hadoop-+ 2159097  0.2  0.0 1518579144 200672 ?   Sl   01:44   0:03 /home/your-user/.cache/ms-playwright/chromium_headless_shell-1223/chrome-headless-shell-linux64/chrome-headless-shell --type=renderer --headless=old --no-sandbox --disable-dev-shm-usage --disable-back-forward-cache --disable-background-timer-throttling --disable-breakpad --force-color-profile=srgb --remote-debugging-pipe --allow-pre-commit-input --blink-settings=primaryHoverType=2,availableHoverTypes=2,primaryPointerType=4,availablePointerTypes=4 --ozone-platform=headless --lang=en-US --num-raster-threads=4 --enable-main-frame-before-activation --renderer-client-id=4 --time-ticks-at-unix-epoch=-1745980185066264 --launch-time-ticks=39194084504017 --shared-files=v8_context_snapshot_data:100 --field-trial-handle=3,i,9662047576224281649,867103440722794352,262144 --enable-features=CDPScreenshotNewSurface --disable-features=AutoDeElevate,AvoidUnnecessaryBeforeUnloadCheckSync,BoundaryEventDispatchTracksNodeRemoval,DestroyProfileOnBrowserClose,DialMediaRouteProvider,GlobalMediaControls,HttpsUpgrades,LensOverlay,MediaRouter,OptimizationHints,PaintHolding,RenderDocument,ThirdPartyStoragePartitioning,Translate,msEdgeUpdateLaunchServicesPreferredVersion,msForceBrowserSignIn --variations-seed-version --pseudonymization-salt-handle=7,i,18336406003665680173,7762285228250311116,4 --trace-process-track-uuid=3190708990060038890
+hadoop-+ 2168410  0.0  0.0 883184 147712 ?       Ss   01:52   0:00 postgres: your-user tofu 127.0.0.1(40680) idle
+hadoop-+ 2169938  0.0  0.0 784200 24404 ?        Ss   01:53   0:00 postgres: your-user tofu 127.0.0.1(41594) idle
+hadoop-+ 2170362  0.0  0.0 814064 84236 ?        Ss   01:53   0:00 postgres: your-user tofu 127.0.0.1(42262) idle
+hadoop-+ 2170434  0.0  0.0 784200 24400 ?        Ss   01:53   0:00 postgres: your-user tofu 127.0.0.1(42264) idle
+hadoop-+ 2170435  0.0  0.0 784200 25512 ?        Ss   01:53   0:00 postgres: your-user tofu 127.0.0.1(42272) idle
+hadoop-+ 2170984  0.0  0.0 784716 26612 ?        Ss   01:54   0:00 postgres: your-user tofu 127.0.0.1(53098) idle
+hadoop-+ 2170986  0.0  0.0 784200 27464 ?        Ss   01:54   0:00 postgres: your-user tofu 127.0.0.1(53116) idle
+hadoop-+ 2171257  0.1  0.0 814636 132640 ?       Ss   01:54   0:01 postgres: your-user tofu 127.0.0.1(45280) idle
+hadoop-+ 2171499  0.0  0.0 782152 24256 ?        Ss   01:54   0:00 postgres: your-user tofu 127.0.0.1(42420) idle
+hadoop-+ 2171500  0.0  0.0 782152 26764 ?        Ss   01:54   0:00 postgres: your-user tofu 127.0.0.1(42432) idle
+hadoop-+ 2172067  0.0  0.0 782860 30084 ?        Ss   01:55   0:00 postgres: your-user tofu 127.0.0.1(53442) idle
+hadoop-+ 2172069  0.0  0.0 782152 25108 ?        Ss   01:55   0:00 postgres: your-user tofu 127.0.0.1(53450) idle
+hadoop-+ 2172163  0.0  0.0 782668 27340 ?        Ss   01:55   0:00 postgres: your-user tofu 127.0.0.1(41540) idle
+hadoop-+ 2172651  0.0  0.0 782152 23412 ?        Ss   01:55   0:00 postgres: your-user tofu 127.0.0.1(37116) idle
+hadoop-+ 2172652  0.0  0.0 782152 27088 ?        Ss   01:55   0:00 postgres: your-user tofu 127.0.0.1(37124) idle
+hadoop-+ 2173159  0.0  0.0 784716 26212 ?        Ss   01:56   0:00 postgres: your-user tofu 127.0.0.1(54256) idle
+hadoop-+ 2173160  0.0  0.0 782152 25104 ?        Ss   01:56   0:00 postgres: your-user tofu 127.0.0.1(54260) idle
+hadoop-+ 2173634  0.0  0.0 782152 23436 ?        Ss   01:56   0:00 postgres: your-user tofu 127.0.0.1(53746) idle
+hadoop-+ 2173635  0.0  0.0 782152 26528 ?        Ss   01:56   0:00 postgres: your-user tofu 127.0.0.1(53754) idle
+hadoop-+ 2174023  0.6  0.3 1026288 700436 ?      Ss   01:57   0:05 postgres: your-user tofu 127.0.0.1(60964) idle
+hadoop-+ 2174133  0.0  0.0 782668 25708 ?        Ss   01:57   0:00 postgres: your-user tofu 127.0.0.1(42076) idle
+hadoop-+ 2174134  0.0  0.0 782152 27052 ?        Ss   01:57   0:00 postgres: your-user tofu 127.0.0.1(42080) idle
+hadoop-+ 2174607  0.0  0.0 782152 23744 ?        Ss   01:57   0:00 postgres: your-user tofu 127.0.0.1(42138) idle
+hadoop-+ 2174608  0.0  0.0 782152 27176 ?        Ss   01:57   0:00 postgres: your-user tofu 127.0.0.1(42152) idle
+hadoop-+ 2175064  0.0  0.0 782668 27636 ?        Ss   01:58   0:00 postgres: your-user tofu 127.0.0.1(59488) idle
+hadoop-+ 2175065  0.0  0.0 782152 27224 ?        Ss   01:58   0:00 postgres: your-user tofu 127.0.0.1(59492) idle
+hadoop-+ 2175591  0.0  0.0 784200 24576 ?        Ss   01:58   0:00 postgres: your-user tofu 127.0.0.1(48168) idle
+hadoop-+ 2175593  0.0  0.0 784200 27056 ?        Ss   01:58   0:00 postgres: your-user tofu 127.0.0.1(48176) idle
+hadoop-+ 2176082  0.0  0.0 817904 92176 ?        Ss   01:59   0:00 postgres: your-user tofu 127.0.0.1(34452) idle
+hadoop-+ 2176179  0.0  0.0 784716 25592 ?        Ss   01:59   0:00 postgres: your-user tofu 127.0.0.1(34468) idle
+hadoop-+ 2176180  0.0  0.0 784200 27120 ?        Ss   01:59   0:00 postgres: your-user tofu 127.0.0.1(34480) idle
+hadoop-+ 2176640  0.0  0.0 784716 27040 ?        Ss   01:59   0:00 postgres: your-user tofu 127.0.0.1(58346) idle
+hadoop-+ 2176641  0.0  0.0 782152 26656 ?        Ss   01:59   0:00 postgres: your-user tofu 127.0.0.1(58358) idle
+hadoop-+ 2177198  0.0  0.0 782860 31588 ?        Ss   02:00   0:00 postgres: your-user tofu 127.0.0.1(36952) idle
+hadoop-+ 2179115  0.0  0.0 783896 40964 ?        Ss   02:02   0:00 postgres: your-user tofu 127.0.0.1(55106) idle in transaction
+hadoop-+ 2179306  0.0  0.0 783464 42912 ?        Ss   02:02   0:00 postgres: your-user tofu 127.0.0.1(43846) idle
+hadoop-+ 2179607  0.0  0.0 783456 42956 ?        Ss   02:02   0:00 postgres: your-user tofu 127.0.0.1(35044) idle
+hadoop-+ 2180073  0.0  0.0 783444 47500 ?        Ss   02:03   0:00 postgres: your-user tofu 127.0.0.1(52906) idle
+hadoop-+ 2180179  0.0  0.0 784200 25276 ?        Ss   02:03   0:00 postgres: your-user tofu 127.0.0.1(46252) idle
+hadoop-+ 2180600  0.2  0.0 784736 147576 ?       Ss   02:03   0:00 postgres: your-user tofu 127.0.0.1(44238) idle
+hadoop-+ 2180679  0.0  0.0 782152 24408 ?        Ss   02:03   0:00 postgres: your-user tofu 127.0.0.1(54924) idle
+hadoop-+ 2180680  0.0  0.0 782152 25096 ?        Ss   02:03   0:00 postgres: your-user tofu 127.0.0.1(54930) idle
+hadoop-+ 2181185  0.0  0.0 782152 24884 ?        Ss   02:04   0:00 postgres: your-user tofu 127.0.0.1(47098) idle
+hadoop-+ 2181186  0.0  0.0 782152 25424 ?        Ss   02:04   0:00 postgres: your-user tofu 127.0.0.1(47112) idle
+hadoop-+ 2181213  0.3  0.0 831356 136084 ?       Ss   02:04   0:01 postgres: your-user tofu 127.0.0.1(47118) idle
+hadoop-+ 2181227  0.0  0.0 789308 79832 ?        Ss   02:04   0:00 postgres: your-user tofu 127.0.0.1(47146) idle
+hadoop-+ 2181229  0.0  0.0 782668 27812 ?        Ss   02:04   0:00 postgres: your-user tofu 127.0.0.1(47158) idle
+hadoop-+ 2181552  0.3  0.0 831028 134072 ?       Ss   02:04   0:01 postgres: your-user tofu 127.0.0.1(36416) idle
+hadoop-+ 2181732  0.0  0.0 782152 25072 ?        Ss   02:04   0:00 postgres: your-user tofu 127.0.0.1(45360) idle
+hadoop-+ 2181733  0.0  0.0 782152 24956 ?        Ss   02:04   0:00 postgres: your-user tofu 127.0.0.1(45372) idle
+hadoop-+ 2182177  0.0  0.0 783504 55028 ?        Ss   02:05   0:00 postgres: your-user tofu 127.0.0.1(34690) idle
+hadoop-+ 2182345  0.0  0.0 782860 29252 ?        Ss   02:05   0:00 postgres: your-user tofu 127.0.0.1(54674) idle
+hadoop-+ 2182346  0.0  0.0 782152 24344 ?        Ss   02:05   0:00 postgres: your-user tofu 127.0.0.1(54682) idle
+hadoop-+ 2182485  0.0  0.0 785180 28728 ?        Ss   02:05   0:00 postgres: your-user tofu 127.0.0.1(43080) idle in transaction
+hadoop-+ 2182696  0.3  0.0 833108 124844 ?       Ss   02:05   0:01 postgres: your-user tofu 127.0.0.1(43100) idle
+hadoop-+ 2182877  0.0  0.0 785944 37360 ?        Ss   02:05   0:00 postgres: your-user tofu 127.0.0.1(50424) idle in transaction
+hadoop-+ 2182929  0.0  0.0 784200 24172 ?        Ss   02:05   0:00 postgres: your-user tofu 127.0.0.1(52842) idle
+hadoop-+ 2182930  0.0  0.0 784200 26404 ?        Ss   02:05   0:00 postgres: your-user tofu 127.0.0.1(52848) idle
+hadoop-+ 2182965  0.0  0.0 782832 30056 ?        Ss   02:06   0:00 postgres: your-user tofu 127.0.0.1(52856) idle
+hadoop-+ 2182967  0.0  0.0 782152 24864 ?        Ss   02:06   0:00 postgres: your-user tofu 127.0.0.1(52864) idle
+hadoop-+ 2182997  0.4  0.0 831056 124476 ?       Ss   02:06   0:01 postgres: your-user tofu 127.0.0.1(52874) idle
+hadoop-+ 2183102  0.0  0.0 783132 27496 ?        Ss   02:06   0:00 postgres: your-user tofu 127.0.0.1(38018) idle in transaction
+hadoop-+ 2183310  0.0  0.0 782748 28016 ?        Ss   02:06   0:00 postgres: your-user tofu 127.0.0.1(45302) idle in transaction
+hadoop-+ 2183449  0.0  0.0 783896 37060 ?        Ss   02:06   0:00 postgres: your-user tofu 127.0.0.1(45304) idle in transaction
+hadoop-+ 2183471  2.4  0.1 856408 278624 ?       Ss   02:06   0:05 postgres: your-user tofu 127.0.0.1(33718) idle
+hadoop-+ 2183475  0.0  0.0 782668 25548 ?        Ss   02:06   0:00 postgres: your-user tofu 127.0.0.1(33724) idle
+hadoop-+ 2183476  0.0  0.0 782152 25524 ?        Ss   02:06   0:00 postgres: your-user tofu 127.0.0.1(33734) idle
+hadoop-+ 2183614  0.0  0.0 783132 29188 ?        Ss   02:06   0:00 postgres: your-user tofu 127.0.0.1(53452) idle in transaction
+hadoop-+ 2183846  0.0  0.0 782284 26640 ?        Ss   02:06   0:00 postgres: your-user tofu 127.0.0.1(59696) idle in transaction
+hadoop-+ 2183908  0.0  0.0 783896 36380 ?        Ss   02:06   0:00 postgres: your-user tofu 127.0.0.1(59708) idle in transaction
+hadoop-+ 2184005  0.0  0.0 782152 24896 ?        Ss   02:06   0:00 postgres: your-user tofu 127.0.0.1(52628) idle
+hadoop-+ 2184006  0.0  0.0 782152 24044 ?        Ss   02:06   0:00 postgres: your-user tofu 127.0.0.1(52640) idle
+hadoop-+ 2184162  0.0  0.0 783132 28232 ?        Ss   02:07   0:00 postgres: your-user tofu 127.0.0.1(59458) idle in transaction
+hadoop-+ 2184420  0.0  0.0 782748 27956 ?        Ss   02:07   0:00 postgres: your-user tofu 127.0.0.1(60918) idle in transaction
+hadoop-+ 2184421  0.0  0.0 783896 36764 ?        Ss   02:07   0:00 postgres: your-user tofu 127.0.0.1(60922) idle in transaction
+hadoop-+ 2184431  0.0  0.0 783492 56108 ?        Ss   02:07   0:00 postgres: your-user tofu 127.0.0.1(60928) idle
+hadoop-+ 2184526  0.0  0.0 782668 25732 ?        Ss   02:07   0:00 postgres: your-user tofu 127.0.0.1(51252) idle
+hadoop-+ 2184527  0.0  0.0 782152 24460 ?        Ss   02:07   0:00 postgres: your-user tofu 127.0.0.1(51254) idle
+hadoop-+ 2184721  0.0  0.0 783132 27436 ?        Ss   02:07   0:00 postgres: your-user tofu 127.0.0.1(41864) idle in transaction
+hadoop-+ 2184792  0.0  0.0 783476 57936 ?        Ss   02:07   0:00 postgres: your-user tofu 127.0.0.1(41880) idle
+hadoop-+ 2184982  0.0  0.0 783896 36904 ?        Ss   02:07   0:00 postgres: your-user tofu 127.0.0.1(54120) idle in transaction
+hadoop-+ 2185074  0.0  0.0 782152 23208 ?        Ss   02:07   0:00 postgres: your-user tofu 127.0.0.1(43024) idle
+hadoop-+ 2185075  0.0  0.0 782152 25280 ?        Ss   02:07   0:00 postgres: your-user tofu 127.0.0.1(43034) idle
+hadoop-+ 2185149  0.0  0.0 783896 36644 ?        Ss   02:08   0:00 postgres: your-user tofu 127.0.0.1(43056) idle in transaction
+hadoop-+ 2185237  0.0  0.0 783244 49784 ?        Ss   02:08   0:00 postgres: your-user tofu 127.0.0.1(43070) idle
+hadoop-+ 2185291  0.0  0.0 783132 27436 ?        Ss   02:08   0:00 postgres: your-user tofu 127.0.0.1(36772) idle in transaction
+hadoop-+ 2185552  0.0  0.0 782748 28980 ?        Ss   02:08   0:00 postgres: your-user tofu 127.0.0.1(33380) idle in transaction
+hadoop-+ 2185701  0.0  0.0 783896 36772 ?        Ss   02:08   0:00 postgres: your-user tofu 127.0.0.1(33392) idle in transaction
+hadoop-+ 2185706  0.0  0.0 782668 27592 ?        Ss   02:08   0:00 postgres: your-user tofu 127.0.0.1(40230) idle
+hadoop-+ 2185707  0.0  0.0 782152 24480 ?        Ss   02:08   0:00 postgres: your-user tofu 127.0.0.1(40234) idle
+hadoop-+ 2185842  0.0  0.0 783132 29296 ?        Ss   02:08   0:00 postgres: your-user tofu 127.0.0.1(57730) idle in transaction
+hadoop-+ 2186013  1.4  0.0 831348 142852 ?       Ss   02:08   0:01 postgres: your-user tofu 127.0.0.1(60028) idle
+hadoop-+ 2186076  0.0  0.0 783896 36648 ?        Ss   02:08   0:00 postgres: your-user tofu 127.0.0.1(60044) idle in transaction
+hadoop-+ 2186088  0.2  0.0 789900 94608 ?        Ss   02:08   0:00 postgres: your-user tofu 127.0.0.1(60056) idle
+hadoop-+ 2186090  0.0  0.0 782152 25268 ?        Ss   02:08   0:00 postgres: your-user tofu 127.0.0.1(60060) idle
+hadoop-+ 2186189  0.0  0.0 783896 37524 ?        Ss   02:08   0:00 postgres: your-user tofu 127.0.0.1(60072) idle in transaction
+hadoop-+ 2186240  0.0  0.0 783896 36688 ?        Ss   02:08   0:00 postgres: your-user tofu 127.0.0.1(60084) idle in transaction
+hadoop-+ 2186281  0.0  0.0 782152 23640 ?        Ss   02:08   0:00 postgres: your-user tofu 127.0.0.1(37726) idle
+hadoop-+ 2186283  0.0  0.0 782152 24348 ?        Ss   02:08   0:00 postgres: your-user tofu 127.0.0.1(37736) idle
+hadoop-+ 2186307  1.2  0.0 831152 140144 ?       Ss   02:09   0:01 postgres: your-user tofu 127.0.0.1(37750) idle
+hadoop-+ 2186446  0.0  0.0 783132 27772 ?        Ss   02:09   0:00 postgres: your-user tofu 127.0.0.1(34962) idle in transaction
+hadoop-+ 2186704  0.0  0.0 782748 29048 ?        Ss   02:09   0:00 postgres: your-user tofu 127.0.0.1(48074) idle in transaction
+hadoop-+ 2186844  0.0  0.0 783896 37316 ?        Ss   02:09   0:00 postgres: your-user tofu 127.0.0.1(48102) idle in transaction
+hadoop-+ 2186864  0.2  0.0 783324 57376 ?        Ss   02:09   0:00 postgres: your-user tofu 127.0.0.1(39992) idle
+hadoop-+ 2186867  0.0  0.0 782668 27536 ?        Ss   02:09   0:00 postgres: your-user tofu 127.0.0.1(39994) idle
+hadoop-+ 2186868  0.0  0.0 782152 25664 ?        Ss   02:09   0:00 postgres: your-user tofu 127.0.0.1(40006) idle
+hadoop-+ 2187005  0.0  0.0 783132 26964 ?        Ss   02:09   0:00 postgres: your-user tofu 127.0.0.1(43310) idle in transaction
+hadoop-+ 2187266  3.4  0.0 806252 117208 ?       Ss   02:09   0:01 postgres: your-user tofu 127.0.0.1(53228) idle
+hadoop-+ 2187319  0.0  0.0 783896 37844 ?        Ss   02:09   0:00 postgres: your-user tofu 127.0.0.1(53242) idle in transaction
+hadoop-+ 2187415  0.0  0.0 782152 24712 ?        Ss   02:09   0:00 postgres: your-user tofu 127.0.0.1(59112) idle
+hadoop-+ 2187416  0.0  0.0 782152 24412 ?        Ss   02:09   0:00 postgres: your-user tofu 127.0.0.1(59120) idle
+root     2187422  0.0  0.0 117768  6396 ?        S    02:10   0:00 /usr/sbin/CROND -n
+root     2187424  0.0  0.0  17780  2944 ?        Ss   02:10   0:00 /bin/sh -c /usr/bin/python /usr/local/bin/puppet_sync >/dev/null 2>&1
+root     2187427  0.1  0.0 109560 15932 ?        S    02:10   0:00 /usr/bin/python /usr/local/bin/puppet_sync
+hadoop-+ 2187580  0.0  0.0 783132 29632 ?        Ss   02:10   0:00 postgres: your-user tofu 127.0.0.1(51670) idle in transaction
+hadoop-+ 2187616  0.0  0.0  30500  3240 ?        S    02:10   0:00 sleep 15
+hadoop-+ 2187831  0.0  0.0 785944 36096 ?        Ss   02:10   0:00 postgres: your-user tofu 127.0.0.1(51690) idle in transaction
+hadoop-+ 2187853  0.0  0.0 782748 28812 ?        Ss   02:10   0:00 postgres: your-user tofu 127.0.0.1(38556) idle in transaction
+hadoop-+ 2187855  0.0  0.0  35936  5312 ?        Ss   02:10   0:00 /bin/sh -c cd /path/to/your/project && mkdir -p tests/fixtures && ps aux > tests/fixtures/real_ps_aux.txt 2>&1 && ls -la tests/ > tests/fixtures/real_ls_la_tests.txt 2>&1 && PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 - <<'PY' import sys; sys.path.insert(0,'.') from lib.project_mod.command_analysis import _line_fingerprint as FP for name in ('real_ps_aux.txt','real_ls_la_tests.txt'):     lines=open(f'tests/fixtures/{name}').read().split('\n')     n_fp=sum(1 for l in lines if FP(l) is not None)     short=sum(1 for l in lines if l.strip() and FP(l) is None)     print(f'{name}: {len(lines)} lines, {n_fp} eligible (len>=20), {short} too-short/skipped')     # confirm at least one real fold group of n>2 exists     i=0; maxg=0     while i<len(lines):         fp=FP(lines[i])         if fp is None: i+=1; continue         j=i+1         while j<len(lines) and FP(lines[j])==fp: j+=1         maxg=max(maxg,j-i); i=j if j>i else i+1     print(f'   largest consecutive same-fingerprint group: {maxg}') PY __tofu_rc=$? command pwd -P > /tmp/tofu_cwd_gyf_qyka.txt 2>/dev/null || true exit $__tofu_rc 
+hadoop-+ 2187857  0.0  0.0  66496  5620 ?        R    02:10   0:00 ps aux
+hadoop-+ 3133182  0.0  0.0 867844 103084 ?       Sl   Jul27   0:02 /mlp/cloud-ide-old/code-server/lib/node /home/your-user/.local/share/code-server/extensions/ms-python.vscode-pylance-2023.5.21/dist/server.bundle.js --cancellationReceive=file:5df079e0a5fcd237677d3a16cdc4d8920a01c263aa --node-ipc --clientProcessId=5574
+root     3140466  0.0  0.0 727836  9468 ?        Ssl  Jul27   0:09 /opt/yourprovider/apps/direwolf/plugin/1004/dw_1004 -N4
+hadoop-+ 3183510  0.0  0.0  33944  3068 ?        Ss   Jul27   0:07 bash /path/to/your/project --loop
+hadoop-+ 3672874  0.0  0.2 4899332 502172 ?      Sl   Jul27   0:48 python -m pytest tests/test_first_byte_watchdog.py -m unit -q -k TestAsyncTransportWatchdog
+hadoop-+ 3672875  0.0  0.0  33232   284 ?        S    Jul27   0:00 grep -E passed|failed|FAILED
+hadoop-+ 3672876  0.0  0.0  30536   276 ?        S    Jul27   0:00 tail -6
+hadoop-+ 4053923  0.0  0.0  36296  1536 pts/1    Ss+  Jul27   0:00 /bin/bash --init-file /mlp/cloud-ide-old/code-server/lib/vscode/out/vs/workbench/contrib/terminal/browser/media/shellIntegration-bash.sh
+hadoop-+ 4108493  2.8  0.0  69920 36352 ?        S    Jul27  23:34 find / -name playwright_pool.py -not -path */node_modules/*
+hadoop-+ 4108494  0.0  0.0  30508   276 ?        S    Jul27   0:00 head -5

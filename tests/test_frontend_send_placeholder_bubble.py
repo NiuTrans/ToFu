@@ -130,7 +130,8 @@ global.stripNoTranslateTags = win.stripNoTranslateTags = (s) => String(s || '');
 global._streamingBubbleRole = win._streamingBubbleRole = () => 'worker';
 global._newClientMsgId = win._newClientMsgId = () => 'mid-' + Math.random().toString(36).slice(2, 8);
 global._ensureMsgId = win._ensureMsgId = (m) => { if (m && !m._msgId) m._msgId = 'mid-x'; };
-global.renderMessage = win.renderMessage = (m, i) => '<div class="message" id="msg-' + i + '"></div>';
+global.renderMessage = win.renderMessage = (m, i) =>
+  '<div class="message" id="msg-' + i + '" data-msg-id="' + (m._msgId || '') + '"></div>';
 global._forceScrollToBottom = win._forceScrollToBottom = () => {};
 // Streaming-bubble fallback (ConvView absent → insertAdjacentHTML path).
 global._streamingBubbleHTML = win._streamingBubbleHTML = (role, a, b, msgId) =>
@@ -145,8 +146,12 @@ global._buildConvSettings = win._buildConvSettings = async () => ({});
 global.syncConversationToServer = win.syncConversationToServer = async () => true;
 global._promptInjectMode = win._promptInjectMode = async () => 'queue';
 
-// ── Load the REAL renderers + the REAL sendMessage ──
+// ── Load the REAL renderers + the REAL ConvView seam + the REAL sendMessage ──
+// (Phase 3.5 step 3: the send pipeline routes its #chatInner writes through
+// ConvView.apply/removeMessage — the seam must be present, exactly as the
+// boot-time hard check guarantees in production.)
 eval(fs.readFileSync(path.join(ROOT, 'static', 'js', 'main', 'main_translating_bubble.js'), 'utf8'));
+eval(fs.readFileSync(path.join(ROOT, 'static', 'js', 'conv_view.js'), 'utf8'));
 let sendSrc = fs.readFileSync(path.join(ROOT, 'static', 'js', 'main', 'main_send_pipeline.js'), 'utf8');
 if (NEUTER === 'strip') {
   // Remove the pre-POST placeholder render from the non-translate branch.

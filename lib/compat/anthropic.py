@@ -21,6 +21,7 @@ from typing import AsyncGenerator
 
 from lib.compat._common import (
     apply_common_cfg,
+    apply_thinking_cfg,
     apply_tools_and_personal_defaults,
     short_id,
 )
@@ -77,17 +78,7 @@ def translate_anthropic_request(body: dict) -> tuple[list[dict], dict, dict]:
     if 'metadata' in body and isinstance(body['metadata'], dict):
         if body['metadata'].get('user_id'):
             cfg['user'] = body['metadata']['user_id']
-    thinking_obj = body.get('thinking') or {}
-    if isinstance(thinking_obj, dict):
-        if thinking_obj.get('type') == 'enabled':
-            cfg['thinkingEnabled'] = True
-            budget = thinking_obj.get('budget_tokens')
-            if isinstance(budget, int) and budget > 0:
-                # Map budget token bands to Tofu thinking depth.
-                cfg['thinkingDepth'] = (
-                    'medium' if budget <= 8192 else
-                    'high' if budget <= 16384 else
-                    'xhigh' if budget <= 32768 else 'max')
+    apply_thinking_cfg(cfg, body)
 
     apply_tools_and_personal_defaults(cfg, body)
 

@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import os
+import threading
+import time
 
 from lib.log import get_logger
 from lib.tasks_pkg.executor import (
@@ -17,12 +19,193 @@ from lib.tasks_pkg.handlers.code_exec import (
     _make_stdin_callback,
 )
 from lib.tasks_pkg.handlers._read_gate import (
+    _collect_target_paths,
     check_read_before_edit,
     partition_batch_edits,
 )
+from lib.tasks_pkg.handlers._write_freshness_gate import (
+    check_write_freshness,
+    partition_stale_edits,
+    record_read_paths,
+)
+from lib.desktop.remote import remote_worktree_binding
 from lib.tools import PROJECT_TOOL_NAMES, build_project_tool_meta
 
 logger = get_logger(__name__)
+
+
+# ── RWA P3:远程工作树路由(拍板 3A 同名策略) ──
+# 会话绑定 cfg['project_remote'] = {agent_id, root}(总闸
+# TOFU_REMOTE_WORKTREE)时,同名项目工具翻译为 project_<fn> 命令按
+# agent_id 寻址入队,在用户的本地机器上执行。
+_REMOTE_CMD_MAP = {
+    'list_dir': 'project_list_dir',
+    'read_files': 'project_read_files',
+    'write_file': 'project_write_file',
+    'apply_diff': 'project_apply_diff',
+    'grep_search': 'project_grep_search',
+    'find_files': 'project_find_files',
+    'run_command': 'project_run_command',
+}
+
+
+def _execute_remote_run_command(task, tc_id, fn_args, rn, round_entry,
+                                remote):
+    """Remote run_command with LIVE output (RWA P4b-2b).
+
+    The bridge stream frames (agent → poll → :func:`lib.desktop.resolve_streams`)
+    are fanned into the SAME ``tool_progress`` channel the server-side
+    run_command uses (:func:`_make_run_command_progress_cb`), so the chat's
+    terminal block renders remote output incrementally with ZERO frontend
+    changes. ``cmd_id`` is minted up front so the watcher can follow the
+    command's stream while the blocking RPC wait runs.
+    """
+    import uuid as _uuid
+
+    from lib.desktop import (
+        format_desktop_result, get_command_stream, send_desktop_command)
+    from lib.tasks_pkg.handlers.code_exec import _make_run_command_progress_cb
+
+    command = fn_args.get('command', '')
+    round_entry.setdefault('toolCallId', tc_id)
+    round_entry.setdefault('toolName', 'run_command')
+    cmd_id = _uuid.uuid4().hex
+    try:
+        bridge_timeout = min(
+            max(float(fn_args.get('timeout', 300)) + 30.0, 60.0), 3660.0)
+    except (TypeError, ValueError) as _e:
+        logger.debug('execute remote run command: unexpected type/unparseable (%s)', _e)
+        bridge_timeout = 330.0
+
+    progress_cb = _make_run_command_progress_cb(task, rn, round_entry, command)
+    seen = {'stdout': 0, 'stderr': 0}
+    stop = threading.Event()
+
+    def _drain_once():
+        stream = get_command_stream(cmd_id)
+        if not stream:
+            return False
+        for name in ('stdout', 'stderr'):
+            text = stream.get(name) or ''
+            if len(text) > seen[name]:
+                progress_cb(name, text[seen[name]:])
+                seen[name] = len(text)
+        return bool(stream.get('done'))
+
+    def _watch():
+        deadline = time.time() + bridge_timeout + 30
+        while not stop.is_set() and time.time() < deadline:
+            if _drain_once():
+                return
+            stop.wait(0.25)  # 与 tool_progress 200ms 合并节奏同量级
+
+    params = {k: v for k, v in fn_args.items() if k != 'content_ref'}
+    params['root'] = remote['root']
+    logger.info('[Remote] run_command streaming @%s:%s cmd=%s (task=%s)',
+                remote['agent_id'][:8], remote['root'], cmd_id[:8],
+                task.get('id', '?')[:8])
+    watcher = threading.Thread(target=_watch, daemon=True)
+    watcher.start()
+    result, error = send_desktop_command(
+        'project_run_command', params, timeout=bridge_timeout,
+        target_agent_id=remote['agent_id'],
+        user_id=task.get('_userId', '') or '', cmd_id=cmd_id)
+    stop.set()
+    watcher.join(timeout=5)
+    _drain_once()          # 尾帧:wait 返回后可能还有最后一批
+    progress_cb.flush()
+
+    def _finish(text, extra=None, badge=''):
+        meta = {
+            'toolName': 'run_command',
+            'command': command,
+            'output': (text or ''),
+            'source': f'Remote:{remote["agent_id"][:8]}',
+            'remoteRoot': remote['root'],
+        }
+        if badge:
+            meta['badge'] = badge
+        meta.update(extra or {})
+        _finalize_tool_round(task, rn, round_entry, [meta])
+        return tc_id, text, False
+
+    if error:
+        return _finish(f'Error: remote worktree {remote["root"]}: {error}',
+                       {'exitCode': 'error'}, badge='remote error')
+    result = result if isinstance(result, dict) else {}
+    text = format_desktop_result('project_run_command', result)
+    output = (result.get('stdout') or '')
+    if result.get('stderr'):
+        output += ('\n[stderr]\n' if output else '[stderr]\n') + result['stderr']
+    timed_out = bool(result.get('timed_out'))
+    exit_code = result.get('exit_code')
+    text_out = output.strip()
+    meta_extra = {
+        'output': text_out,
+        'exitCode': 'timeout' if timed_out
+                    else (exit_code if exit_code is not None else '?'),
+        'timedOut': timed_out,
+    }
+    return _finish(text, meta_extra)
+
+
+def _execute_remote_project_tool(task, fn_name, tc_id, fn_args, rn,
+                                 round_entry, remote):
+    """Route a project tool call to the bound agent's local root (RWA P3).
+
+    服务器侧 FS 门(read-before-edit / freshness / abs_path_guard)刻意不
+    适用 —— agent 对着自己声明的 share_roots 自守同款门(P1 约束⑤)。
+    工具名不变(拍板 3A),串行写分区 + Manual 批准门原样继承。
+    """
+    from lib.desktop import format_desktop_result, send_desktop_command
+
+    def _finish(text, badge=''):
+        meta = build_project_tool_meta(fn_name, fn_args, text)
+        meta['source'] = f'Remote:{remote["agent_id"][:8]}'
+        meta['remoteRoot'] = remote['root']
+        if badge:
+            meta['badge'] = badge
+        _finalize_tool_round(task, rn, round_entry, [meta])
+        return tc_id, text, False
+
+    if fn_name == 'run_command':
+        return _execute_remote_run_command(
+            task, tc_id, fn_args, rn, round_entry, remote)
+
+    cmd_type = _REMOTE_CMD_MAP.get(fn_name)
+    if cmd_type is None:
+        supported = ' / '.join(sorted(_REMOTE_CMD_MAP))
+        return _finish(
+            f'Error: {fn_name} is not supported on the remote worktree '
+            f'({remote["root"]}) yet. Supported: {supported}.',
+            badge='remote unsupported')
+    if fn_name == 'read_files' and fn_args.get('reads'):
+        return _finish(
+            'Error: batch read_files (reads=[...]) is not supported on the '
+            'remote worktree yet — read one path per call.',
+            badge='remote unsupported')
+
+    params = {k: v for k, v in fn_args.items() if k != 'content_ref'}
+    params['root'] = remote['root']
+    if fn_name == 'run_command':
+        try:
+            bridge_timeout = min(
+                max(float(fn_args.get('timeout', 300)) + 30.0, 60.0), 3660.0)
+        except (TypeError, ValueError) as _e:
+            logger.debug('execute remote project tool: unexpected type/unparseable (%s)', _e)
+            bridge_timeout = 330.0
+    else:
+        bridge_timeout = 60
+    logger.info('[Remote] routing %s → %s @%s:%s (task=%s)', fn_name, cmd_type,
+                remote['agent_id'][:8], remote['root'], task.get('id', '?')[:8])
+    result, error = send_desktop_command(
+        cmd_type, params, timeout=bridge_timeout,
+        target_agent_id=remote['agent_id'],
+        user_id=task.get('_userId', '') or '')
+    if error:
+        return _finish(f'Error: remote worktree {remote["root"]}: {error}',
+                       badge='remote error')
+    return _finish(format_desktop_result(cmd_type, result))
 
 
 # ── Per-feature size cap for write_file artifacts ─────────────────────
@@ -200,6 +383,7 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
                            ref, task.get('id', '?')[:8])
             meta = build_project_tool_meta(fn_name, fn_args, error_msg)
             meta['badge'] = 'ref failed'
+            meta['refusal'] = {'kind': 'content_ref'}
             _finalize_tool_round(task, rn, round_entry, [meta])
             return tc_id, error_msg, False
         fn_args['content'] = resolved
@@ -207,6 +391,14 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
                     'path=%s task=%s',
                     ref.get('tool_round'), len(resolved),
                     fn_args.get('path', '?'), task.get('id', '?')[:8])
+
+    # ── RWA remote-worktree routing (P3) ──
+    # 远程绑定的会话在此分流:同名工具 → 桥命令寻址入队。服务器 FS 门
+    # (下方 ReadGate/FreshGate/abs_path_guard)不适用 —— agent 自守。
+    _remote = remote_worktree_binding(cfg)
+    if _remote:
+        return _execute_remote_project_tool(
+            task, fn_name, tc_id, fn_args, rn, round_entry, _remote)
 
     # ── Read-before-edit gate ──
     # apply_diff / insert_content built from guessed content are the dominant
@@ -229,6 +421,8 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
         if _gate_err:
             meta = build_project_tool_meta(fn_name, fn_args, _gate_err)
             meta['badge'] = 'read first'
+            meta['refusal'] = {'kind': 'read_first',
+                               'paths': _collect_target_paths(fn_name, fn_args)}
             _finalize_tool_round(task, rn, round_entry, [meta])
             return tc_id, _gate_err, False
     elif fn_name in ('apply_diffs', 'insert_contents') and project_path:
@@ -247,6 +441,7 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
                 _gate_err = _format_refusal(fn_name, _unread_raw)
                 meta = build_project_tool_meta(fn_name, fn_args, _gate_err)
                 meta['badge'] = 'read first'
+                meta['refusal'] = {'kind': 'read_first', 'paths': list(_unread_raw)}
                 _finalize_tool_round(task, rn, round_entry, [meta])
                 logger.info('[ReadGate] Refused all %d edit(s) of %s for unread file(s) %s (task=%s)',
                             len(edits), fn_name, ', '.join(_unread_raw), task.get('id', '?')[:8])
@@ -262,6 +457,65 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
             )
             logger.info('[ReadGate] Partial %s: skipped %d/%d edit(s) for unread file(s) %s (task=%s)',
                         fn_name, len(_skip_set), len(edits), ', '.join(_unread_raw),
+                        task.get('id', '?')[:8])
+
+    # ── Write-freshness guard (shared-HEAD overwrite protection) ──
+    # The read gate above proves "you read this file at SOME point in this
+    # conversation"; this guard proves "it has not changed SINCE". A recorded
+    # read/write fingerprint that no longer matches the disk means ANOTHER
+    # conversation or process touched the file — refuse the write instead of
+    # silently clobbering their change. Same single-refusal / per-path
+    # partition shape as the read gate. See handlers/_write_freshness_gate.py.
+    _fresh_skip_note = None
+    if fn_name in ('write_file', 'apply_diff', 'insert_content') and project_path:
+        try:
+            _fresh_err = check_write_freshness(task, fn_name, fn_args, project_path)
+        except Exception as _fe:
+            logger.warning('[FreshGate] check failed for %s (allowing through): %s',
+                           fn_name, _fe, exc_info=True)
+            _fresh_err = None
+        if _fresh_err:
+            meta = build_project_tool_meta(fn_name, fn_args, _fresh_err)
+            meta['badge'] = 'stale'
+            meta['refusal'] = {'kind': 'stale',
+                               'paths': _collect_target_paths(fn_name, fn_args)}
+            _finalize_tool_round(task, rn, round_entry, [meta])
+            return tc_id, _fresh_err, False
+    elif fn_name in ('apply_diffs', 'insert_contents') and project_path:
+        try:
+            _stale_idx, _stale_raw = partition_stale_edits(task, fn_args, project_path)
+        except Exception as _fe:
+            logger.warning('[FreshGate] partition failed for %s (allowing through): %s',
+                           fn_name, _fe, exc_info=True)
+            _stale_idx, _stale_raw = [], []
+        if _stale_idx:
+            edits = fn_args.get('edits') or []
+            _stale_set = set(_stale_idx)
+            # All edits target stale files → full refusal (nothing to run).
+            if len(_stale_set) >= len(edits):
+                from lib.tasks_pkg.handlers._write_freshness_gate import (
+                    _format_stale_refusal,
+                )
+                _fresh_err = _format_stale_refusal(fn_name, _stale_raw)
+                meta = build_project_tool_meta(fn_name, fn_args, _fresh_err)
+                meta['badge'] = 'stale'
+                meta['refusal'] = {'kind': 'stale', 'paths': list(_stale_raw)}
+                _finalize_tool_round(task, rn, round_entry, [meta])
+                logger.info('[FreshGate] Refused all %d edit(s) of %s for stale file(s) %s (task=%s)',
+                            len(edits), fn_name, ', '.join(_stale_raw), task.get('id', '?')[:8])
+                return tc_id, _fresh_err, False
+            # Partial: drop the stale-target edits, keep the rest.
+            fn_args['edits'] = [e for i, e in enumerate(edits) if i not in _stale_set]
+            _fresh_skip_note = (
+                f'Write-freshness guard: skipped {len(_stale_set)} edit(s) targeting '
+                f'file(s) changed on disk since this conversation last read/wrote '
+                f'them: {", ".join(_stale_raw)}. The remaining '
+                f'{len(fn_args["edits"])} edit(s) were applied. read_files the '
+                f'skipped path(s), reconcile against the current content, then '
+                f're-issue the skipped edit(s).'
+            )
+            logger.info('[FreshGate] Partial %s: skipped %d/%d stale-target edit(s) %s (task=%s)',
+                        fn_name, len(_stale_set), len(edits), ', '.join(_stale_raw),
                         task.get('id', '?')[:8])
 
     from lib.project_mod import execute_tool
@@ -290,10 +544,16 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
         # absolute paths still work (routed inside tool_read_files via
         # lib.file_reader); project-relative paths error out helpfully.
         if fn_name in ('read_files', 'inspect_image') and not project_path:
-            tool_content = execute_tool(fn_name, fn_args, '.', conv_id=_root_conv_id, task_id=task['id'])
+            # inspect_image needs the task so an /api/images/ or att_txt_ ref can
+            # be resolved (text refs scan task['messages']).
+            _no_proj_kw = {'task': task} if fn_name == 'inspect_image' else {}
+            tool_content = execute_tool(fn_name, fn_args, '.', conv_id=_root_conv_id,
+                                        task_id=task['id'], **_no_proj_kw)
         else:
             _progress_cb = None
             _extra_kw = {}
+            if fn_name == 'inspect_image':
+                _extra_kw = {'task': task}
             if fn_name == 'run_command':
                 _cmd = fn_args.get('command', '') or ''
                 _stdin_cb = _make_stdin_callback(task, rn, round_entry, _cmd)
@@ -330,6 +590,15 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
             _svg_renders = drain_svg_render_signals()
         except Exception as e:
             logger.debug('[Project] drain_svg_render_signals failed (non-fatal): %s', e)
+
+    # ── Record write-freshness tokens for successful reads ──
+    # A read is authoritative content for THIS conversation: token it so a
+    # later write by us is refused if someone else touches the file first.
+    if fn_name in ('read_files', 'inspect_image'):
+        try:
+            record_read_paths(task, fn_args, project_path, tool_content)
+        except Exception as _fe:
+            logger.debug('[FreshGate] read-token record failed (non-fatal): %s', _fe)
 
     # read_files with absolute image paths returns a batch dict with __batch_images__
     _img_descriptors = None  # frontend-render image list (all images in a batch)
@@ -406,6 +675,16 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
 
     if _gate_skip_note:
         meta['badge'] = 'partial: read first'
+        meta['refusal'] = {'kind': 'partial_read_first',
+                           'paths': list(_unread_raw),
+                           'skipped': len(_skip_set),
+                           'proceeded': len(fn_args.get('edits') or [])}
+    if _fresh_skip_note:
+        meta['badge'] = 'partial: stale'
+        meta['refusal'] = {'kind': 'partial_stale',
+                           'paths': list(_stale_raw),
+                           'skipped': len(_stale_set),
+                           'proceeded': len(fn_args.get('edits') or [])}
 
     # ── Attach SVG inline-render descriptors (text read path) ──
     # SVG source rides the model stream as text; these data URIs let the
@@ -469,6 +748,8 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
     # Prepend the read-gate skip note so the model sees which path(s) were
     # dropped. Done AFTER meta is built so the per-edit summaries parse the
     # unmodified batch header ("Applied N/M edits").
+    if _fresh_skip_note and isinstance(tool_content, str):
+        tool_content = f'{_fresh_skip_note}\n\n{tool_content}'
     if _gate_skip_note and isinstance(tool_content, str):
         tool_content = f'{_gate_skip_note}\n\n{tool_content}'
 

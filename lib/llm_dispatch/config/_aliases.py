@@ -16,17 +16,24 @@ logger = get_logger(__name__)
 #  This benefits anyone routing Claude through multiple gateway prefixes.
 # ══════════════════════════════════════════════════════════════
 MODEL_ALIAS_GROUPS = [
-    # Claude Opus 4.8 — aws gateway + direct API + Bedrock-native IDs are interchangeable
-    {'aws.claude-opus-4.8', 'claude-opus-4-8', 'us.anthropic.claude-opus-4-8-v1:0'},
-    # Claude Opus 4.7 — aws gateway + direct API + Bedrock-native IDs are interchangeable
-    {'aws.claude-opus-4.7', 'claude-opus-4-7', 'us.anthropic.claude-opus-4-7-v1:0'},
+    # Anthropic Fable 5 — aws gateway + direct API + Bedrock-native + Meituan-gateway IDs are interchangeable
+    {'aws.fable-5', 'fable-5', 'us.anthropic.fable-5-v1:0', 'claude-fable-5'},
+    # Claude Opus 5 — logical id + the Meituan evaDaily gateway spelling
+    {'claude-opus-5', 'yuju-claude-opus-5-evaDaily'},
+    # Claude Opus 4.8 — logical id + aws gateway + direct API + Bedrock-native IDs are interchangeable
+    {'claude-opus-4.8', 'aws.claude-opus-4.8', 'claude-opus-4-8',
+     'us.anthropic.claude-opus-4-8-v1:0', 'yuju-claude-opus-4.8-evaDaily'},
+    # Claude Opus 4.7 — logical id + aws gateway + direct API + Bedrock-native IDs are interchangeable
+    {'claude-opus-4.7', 'aws.claude-opus-4.7', 'claude-opus-4-7',
+     'us.anthropic.claude-opus-4-7-v1:0', 'yuju-claude-opus-4.7-evaDaily'},
     # Claude Opus 4.6 — aws, vertex, direct API, Bedrock-native names are interchangeable
-    {'aws.claude-opus-4.6', 'aws.claude-opus-4.6-b', 'vertex.claude-opus-4.6',
+    {'claude-opus-4.6', 'aws.claude-opus-4.6', 'aws.claude-opus-4.6-b', 'vertex.claude-opus-4.6',
      'claude-opus-4-20250514', 'claude-opus-4-6-20250514', 'claude-opus-4-6',
      'us.anthropic.claude-opus-4-6-v1:0'},
     # Claude Sonnet 4.6 — aws gateway vs direct API name vs Bedrock-native
-    {'aws.claude-sonnet-4.6', 'claude-sonnet-4-20250514', 'claude-sonnet-4-6-20250514',
-     'claude-sonnet-4-6', 'us.anthropic.claude-sonnet-4-6-v1:0'},
+    {'claude-sonnet-4.6', 'aws.claude-sonnet-4.6', 'claude-sonnet-4-20250514',
+     'claude-sonnet-4-6-20250514', 'claude-sonnet-4-6',
+     'us.anthropic.claude-sonnet-4-6-v1:0'},
     # DeepSeek V3.2 — Meituan gateway mirrors across Tencent/Baidu/Huawei/Doubao clouds
     {'deepseek-v3.2-tencent', 'deepseek-v3.2-baidu', 'deepseek-v3.2-huawei', 'deepseek-v3.2-doubao'},
     # DeepSeek V4 Flash — direct DeepSeek API + Meituan gateway Huawei-cloud mirror

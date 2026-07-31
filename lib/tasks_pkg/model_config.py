@@ -155,6 +155,12 @@ def _resolve_model_config(cfg, task_id):
 
     project_path = cfg.get('projectPath', '')
     project_enabled = bool(project_path)
+    if not project_enabled:
+        # RWA: a remote-worktree binding (cfg['project_remote'], 总闸
+        # TOFU_REMOTE_WORKTREE) implies the project tool set even though no
+        # server-side projectPath exists — paths are resolved agent-side.
+        from lib.desktop.remote import remote_worktree_binding
+        project_enabled = remote_worktree_binding(cfg) is not None
     code_exec_enabled = cfg.get('codeExecEnabled', False)
     memory_enabled = cfg.get('memoryEnabled', True)
     browser_enabled = cfg.get('browserEnabled', False)

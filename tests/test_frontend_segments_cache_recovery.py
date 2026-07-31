@@ -37,12 +37,16 @@ import subprocess
 
 import pytest
 
+from tests._conv_bundle_sources import sources_defining
+
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
 JS_DIR = os.path.join(ROOT, 'static', 'js')
-CONV_JS = os.path.join(JS_DIR, 'core', 'conversations.js')
+# Located by SYMBOL: this predicate was extracted out of core/conversations.js
+# in pt_3879f00e slice 3, which is what broke the hard-coded-path version.
+CONV_JS = sources_defining('_serverHasSegmentsLocalLacks')[0]
 SSE_JS = os.path.join(JS_DIR, 'ui', 'sse_pipeline.js')
 
 

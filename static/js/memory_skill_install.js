@@ -2,8 +2,10 @@
    memory_skill_install.js — skill-package (.zip) drag/drop install
    Extracted from memory.js (2026-07). The skill-package install layer:
    _attachMemoryDropZone (OS file drag/drop) + installSkillFromFileInput +
-   _uploadSkillPackage (Api.memory.install) + _showInstallToast. A distinct
-   concern from memory-card CRUD. Plain window-scope concatenation (NOT an
+   _uploadSkillPackage (Api.skills.install) + _showInstallToast. A distinct
+   concern from memory-card CRUD. NOTE: skill packages are a different noun
+   from memories — an install from this modal lands in the Skills tab, NOT
+   in the memory list (post-split purification, 2026-07). Plain window-scope concatenation (NOT an
    IIFE) — _attachMemoryDropZone is called at runtime from openMemoryModal;
    calls back into _buildMemoryCardEl/_updateMemoryStats/_memoryCache in
    memory.js. Load order is free (both before main.js).
@@ -48,7 +50,7 @@ async function _uploadSkillPackage(file) {
   fd.append("scope", scope);
 
   try {
-    const r = await Api.memory.install(fd);
+    const r = await Api.skills.install(fd);
     const d = (r ? await r.json().catch(() => ({})) : {});
     if (!r || !r.ok) {
       const _err = d.error || (r && r.statusText) || t('memory.noResponse');
@@ -67,17 +69,9 @@ async function _uploadSkillPackage(file) {
     }
     _showInstallToast(msg);
     debugLog(msg, "success");
-
-    // Insert new card on top, no full refresh.
-    _memoryCache.unshift(mem);
-    const list = document.getElementById("memoryList");
-    if (list) {
-      if (list.querySelector('.memory-empty')) list.innerHTML = '';
-      const cardEl = _buildMemoryCardEl(mem);
-      cardEl.style.animation = 'memorySlam .3s cubic-bezier(.2,1,.3,1)';
-      list.prepend(cardEl);
-    }
-    _updateMemoryStats(_memoryCache);
+    // Skill packages live in the Settings → Skills tab (a different noun
+    // from memories) — do NOT insert a card into the memory list.
+    debugLog("Skill package installed — manage it in Settings → Skills tab");
   } catch (e) {
     _showInstallToast(t('memory.installError', { err: e.message }), true);
     debugLog("Skill install error: " + e.message, "error");

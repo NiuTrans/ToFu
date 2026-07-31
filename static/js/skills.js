@@ -3,8 +3,8 @@
    Mirrors mcp-tab patterns from settings.js.
    ═══════════════════════════════════════════════════════════ */
 
-var _skillsCatalog = [];          // entries from /api/v1/memory/catalog
-var _skillsInstalled = [];        // package memories from /api/v1/memory
+var _skillsCatalog = [];          // entries from /api/v1/skills/catalog
+var _skillsInstalled = [];        // installed packages from /api/v1/skills
 var _skillsScope = 'catalog';     // 'catalog' | 'installed'
 var _skillsActiveCategory = 'all';
 var _skillsSearchQuery = '';
@@ -17,11 +17,11 @@ var _SKILLS_PAGE_SIZE = 12;       // cards per page (grid-friendly)
 async function _populateSkillsTab() {
   try {
     var [cdata, ldata] = await Promise.all([
-      Api.memory.catalog(),
-      Api.memory.list('all'),
+      Api.skills.catalog(),
+      Api.skills.list('all'),
     ]);
     _skillsCatalog = (cdata && cdata.catalog) || [];
-    var all = (ldata && (ldata.memories || ldata.skills)) || [];
+    var all = (ldata && ldata.skills) || [];
     _skillsInstalled = all.filter(function (m) { return m.is_package; });
     _skillsRender();
     _skillsAttachDropZone();
@@ -117,6 +117,22 @@ function _skillsRenderHeader() {
   }
 }
 
+// Display PREFERENCE only — a category absent from this list still renders
+// (appended alphabetically). Mirrors settings/mcp.js::_mcpOrderedCategories:
+// a literal whitelist here would silently hide any category added to
+// lib/skills/catalog.py::CATEGORIES later, which is exactly how the MCP
+// panel lost two whole categories.
+var _SKILLS_CAT_ORDER = ['Documents', 'Coding', 'Creative', 'Infrastructure',
+                         'Productivity', 'Research', 'Other'];
+
+function _skillsOrderedCategories(cats) {
+  var known = _SKILLS_CAT_ORDER.filter(function (c) { return cats[c]; });
+  var extra = Object.keys(cats).filter(function (c) {
+    return _SKILLS_CAT_ORDER.indexOf(c) === -1;
+  }).sort();
+  return known.concat(extra);
+}
+
 function _skillsRenderCategoryBar() {
   var bar = document.getElementById('skillsCategoryBar');
   if (!bar) return;
@@ -132,10 +148,8 @@ function _skillsRenderCategoryBar() {
     cats[c] = (cats[c] || 0) + 1;
   });
   var html = '<button class="mcp-cat-pill' + (_skillsActiveCategory === 'all' ? ' active' : '') + '" onclick="_skillsSetCategory(\'all\')">' + escapeHtml(t('skills.scopeAll')) + ' <span class="mcp-cat-count">' + _skillsCatalog.length + '</span></button>';
-  var order = ['Documents', 'Coding', 'Creative', 'Infrastructure', 'Productivity', 'Research', 'Other'];
-  order.forEach(function (c) {
-    if (!cats[c]) return;
-    html += '<button class="mcp-cat-pill' + (_skillsActiveCategory === c ? ' active' : '') + '" onclick="_skillsSetCategory(\'' + c + '\')">' + escapeHtml(c) + ' <span class="mcp-cat-count">' + cats[c] + '</span></button>';
+  _skillsOrderedCategories(cats).forEach(function (c) {
+    html += '<button class="mcp-cat-pill' + (_skillsActiveCategory === c ? ' active' : '') + '" onclick="_skillsSetCategory(\'' + escapeHtml(c).replace(/'/g, "\\'") + '\')">' + escapeHtml(c) + ' <span class="mcp-cat-count">' + cats[c] + '</span></button>';
   });
   bar.innerHTML = html;
 }
@@ -190,6 +204,12 @@ function _skillsRenderCatalogCard(e) {
     html += '<div class="skill-author">' + escapeHtml(t('skills.by', { author: e.author })) + '</div>';
   }
   html += '<div class="mcp-app-desc">' + escapeHtml(e.description || '') + '</div>';
+  // Getting-started note — same previously-dead field as the MCP catalog:
+  // SkillCatalogEntry documents it as "shown under the card" but nothing
+  // rendered it.
+  if (e.install_note) {
+    html += '<div class="mcp-app-note">' + escapeHtml(e.install_note) + '</div>';
+  }
 
   // Requirements warning
   var reqs = e.requires || {};
@@ -271,7 +291,7 @@ async function _skillsCatalogInstall(skillId, btn) {
   if (btn) { btn.disabled = true; btn.textContent = t('skills.installing'); }
   _skillsToast(t('skills.downloadingInstalling', { id: skillId }));
   try {
-    var r = await Api.memory.catalogInstall(skillId, 'project');
+    var r = await Api.skills.catalogInstall(skillId, 'project');
     var d = (r ? await r.json().catch(function () { return {}; }) : {});
     if (!r || !r.ok) {
       _skillsToast(t('skills.installFailed', { err: (d.error || r.statusText) }), 'error');
@@ -293,7 +313,7 @@ async function _skillsCatalogInstall(skillId, btn) {
 async function _skillsUninstall(memoryId) {
   if (!await showConfirm(t('skills.uninstallConfirm', { id: memoryId }), { danger: true })) return;
   try {
-    var r = await Api.memory.remove(memoryId);
+    var r = await Api.skills.uninstall(memoryId);
     if (!r || !r.ok) {
       var d = (r ? await r.json().catch(function () { return {}; }) : {});
       _skillsToast(t('skills.uninstallFailed', { err: (d.error || (r && r.statusText) || t('skills.noResponse')) }), 'error');
@@ -308,7 +328,7 @@ async function _skillsUninstall(memoryId) {
 
 async function _skillsToggleEnabled(memoryId, btn) {
   try {
-    var r = await Api.memory.toggle(memoryId);
+    var r = await Api.skills.toggle(memoryId);
     if (!r || !r.ok) throw new Error('HTTP ' + (r ? r.status : 'no response'));
     await _populateSkillsTab();
   } catch (e) {
@@ -329,7 +349,7 @@ async function _skillsViewFiles(memoryId) {
   listEl.innerHTML = '';
   overlay.style.display = 'flex';
   try {
-    var d = await Api.memory.files(memoryId);
+    var d = await Api.skills.files(memoryId);
     if (!d) {
       descEl.textContent = t('skills.filesLoadFailed');
       return;

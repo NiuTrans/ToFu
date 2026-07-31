@@ -460,10 +460,18 @@ global.window = global;
 global.activeConvId = 'c1';
 global.activeStreams = new Map();
 global.streamBufs = new Map();
+global.streamSessions = new Map();
+global.getStreamSession = global.getStreamSession = (cid) => { let s = global.streamSessions.get(cid); if (!s) { s = { phase: null }; global.streamSessions.set(cid, s); } return s; };
+global.setStreamPhase = global.setStreamPhase = (cid, p) => { if (!global.streamSessions.has(cid) && !(typeof activeStreams !== "undefined" && activeStreams.has(cid))) return; global.getStreamSession(cid).phase = p; };
+global.clearStreamSession = global.clearStreamSession = (cid) => { global.streamSessions.delete(cid); };
 global._editingMsgIdx = null;
 global.debugLog = () => {};
 global.config = {};
 global.renderChat = () => {};
+/* Post-SEAM-2-fold (Phase 3.5 step 5): repaints route through ConvView;
+ * the latent fetch-fail branch reads document.getElementById. */
+global.ConvView = { replaceAll: () => {}, apply: () => true };
+global.document = { getElementById: () => null };
 global.renderConversationList = () => {};
 global.showStreamingUIForConv = () => {};
 global._restoreConvToolState = () => {};
@@ -532,6 +540,7 @@ const fs = require('fs');
 global.window = global;
 global.activeConvId = 'c1';
 global.renderChat = () => {};   // no DOM
+global.ConvView = { replaceAll: () => {}, apply: () => true };  // post-fold seam
 global.document = { getElementById: () => null };  // loadEarlier reads #chatInner
 eval(fs.readFileSync(process.argv[2], 'utf8'));  // conv_window.js (argv[2]: argv[1] is this harness)
 
@@ -617,10 +626,13 @@ _SCROLL_ANCHOR_HARNESS = r"""
 const fs = require('fs');
 global.window = global;
 global.activeConvId = 'c1';
-global.renderChat = () => {
-  // Simulate the prepend growing the scroll content: taller after render.
+global.renderChat = () => {};
+/* Post-SEAM-2-fold: loadEarlierMessages re-renders via ConvView.replaceAll —
+ * the prepend-height simulation rides THAT call now (same side effect the
+ * old renderChat stub modeled). */
+global.ConvView = { replaceAll: () => {
   chatContainer.scrollHeight = 2000;
-};
+}, apply: () => true };
 
 // Fake DOM: #chatContainer is the overflow-y:auto scroll box (mutable
 // scrollTop/scrollHeight); #chatInner is a NON-scrolling child whose scrollTop

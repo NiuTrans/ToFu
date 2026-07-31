@@ -19,6 +19,16 @@ logger = get_logger(__name__)
 
 _FM_RE = re.compile(r'^---\s*\n(.*?)\n---\s*\n', re.DOTALL)
 
+#: Keys whose value is a LIST by contract, so a bare ``a, b, c`` (no brackets)
+#: must be split rather than kept as one string.
+#:
+#: Deliberately a narrow allow-list, not "split anything containing a comma":
+#: ``description`` and ``name`` are free prose and routinely contain commas —
+#: splitting those would corrupt real content, which is far worse than the
+#: rendering bug this fixes. Add a key here only when its consumers genuinely
+#: iterate it.
+_COMMA_LIST_KEYS = frozenset({'tags', 'keywords'})
+
 
 def _parse_frontmatter(text):
     """Parse YAML-like frontmatter from markdown text. Returns (meta_dict, body).
@@ -111,6 +121,25 @@ def _parse_frontmatter(text):
             meta[key] = False
         elif val.startswith('[') and val.endswith(']'):
             meta[key] = [v.strip().strip('"\'') for v in val[1:-1].split(',') if v.strip()]
+        elif key in _COMMA_LIST_KEYS and ',' in val:
+            # Bare comma list: ``tags: a, b, c`` (no brackets). Hand-written
+            # memory files use this form freely, and _build_frontmatter only
+            # ever EMITS the bracketed form — so a file written by hand (or by
+            # an older writer) parsed to a plain STRING while the API contract
+            # and every consumer expect list[str].
+            #
+            # Measured 2026-07-28 on the real corpus: 6 of 1163 tagged memory
+            # files hit this, and each one crashed its card in the browser with
+            # `TypeError: sk.tags.forEach is not a function` (memory.js:231),
+            # rendering "memory-card-error" instead of the memory. Found by the
+            # new browser JS-error capture, not by any assertion — nothing in
+            # the suite was watching the console.
+            #
+            # Fixed HERE rather than by defensive coercion in the frontend:
+            # this is the single parse seam, so /api/v1/memory/list, injection
+            # and search all get list[str] too, instead of each growing its own
+            # workaround for the same malformed field.
+            meta[key] = [v.strip().strip('"\'') for v in val.split(',') if v.strip()]
         elif (val.startswith('"') and val.endswith('"')) or \
              (val.startswith("'") and val.endswith("'")):
             meta[key] = val[1:-1]

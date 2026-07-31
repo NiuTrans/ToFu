@@ -43,8 +43,29 @@ logger = get_logger(__name__)
 # (page refresh, network blip, proxy timeout) for a finished task.
 EVENT_TTL_MS = 6 * 3600 * 1000
 
+# ── Tiered retention (docs/DEBUG_PANEL_REDESIGN.md §10.4) ──
+# The 6h window above exists ONLY to serve SSE reconnects, and it used to
+# take the Request Inspector's data down with it: a task from two hours ago
+# already read "event log expired". Structural events (the request payloads
+# + their usage/round markers) are what the inspector renders, so they get a
+# 30-day tier. This is only affordable BECAUSE snapshots are now stored as
+# deltas (§10) — measured 31.5x smaller across 493 real rounds. Order matters:
+# never extend retention before the delta projection is in place.
+STRUCTURAL_EVENT_TYPES = (
+    'messages_snapshot', 'round_usage', 'round_start', 'round_end',
+)
+STRUCTURAL_TTL_MS = 30 * 24 * 3600 * 1000
+
 # Sample-based pruning: every ~Nth call runs a TTL sweep
 _PRUNE_PROBABILITY = 1 / 1024
+
+# Sample-based delta compaction of LEFTOVER full snapshot rows. Rarer than
+# the prune sweep because each pass rewrites rows (the prune only deletes),
+# but frequent enough that a busy server converges within an hour or two.
+_COMPACT_PROBABILITY = 1 / 4096
+# How many tasks one compaction pass may rewrite. Kept small: this runs on
+# an SSE delta's thread, so a pass must stay far below any request budget.
+_COMPACT_MAX_TASKS = 2
 
 # Batched-delete tuning. Each prune pass deletes at most
 # ``_PRUNE_BATCH_TASKS`` distinct task_ids per batch and runs at most
@@ -106,6 +127,25 @@ def append_persistent_event(task_id, event_id, event):
     etype = (event or {}).get('type', '')
     now = time.time()
 
+    # ── Snapshot delta projection (docs/DEBUG_PANEL_REDESIGN.md §10) ──
+    # messages_snapshot rows were 92.4% of this table's bytes because every
+    # round re-stored the WHOLE messages array plus a byte-identical tools
+    # array (measured: 123.2 MB for one 167-round task; 1.9 MB as deltas).
+    # We project ONLY the row that gets persisted — the ``event`` object the
+    # caller pushes to SSE subscribers is never touched, so live rendering is
+    # byte-identical. Rebuild happens server-side on read
+    # (snapshot_delta.rebuild_snapshots), so no consumer sees the delta form.
+    # Best-effort: a projection failure falls back to storing the full row.
+    row_event = event
+    if etype == 'messages_snapshot':
+        try:
+            from lib.tasks_pkg.snapshot_delta import get_projector
+            row_event = get_projector().project(task_id, event)
+        except Exception as e:
+            logger.warning('[EventLog] snapshot delta projection failed for '
+                           'task=%s (storing full row): %s', task_id[:8], e)
+            row_event = event
+
     # ON CONFLICT (task_id, event_id) DO NOTHING because the composite PK
     # guarantees idempotency on retry — but a real duplicate (caller minted
     # the same seq twice for different events) WOULD silently drop data.  We
@@ -121,7 +161,7 @@ def append_persistent_event(task_id, event_id, event):
         cur = upsert(
             db, TASK_EVENTS,
             {'task_id': task_id, 'event_id': event_id, 'ts_ms': int(now * 1000),
-             'type': etype or 'unknown', 'payload': _row_payload_to_json(event)},
+             'type': etype or 'unknown', 'payload': _row_payload_to_json(row_event)},
             conflict_cols=['task_id', 'event_id'],
             insert_cols=['task_id', 'event_id', 'ts_ms', 'type', 'payload'],
             update_cols=[],  # DO NOTHING — append-only event log
@@ -149,6 +189,30 @@ def append_persistent_event(task_id, event_id, event):
             _opportunistic_prune(db)
         except Exception as e:
             logger.debug('[EventLog] prune failed (non-fatal): %s', e)
+
+    # Read-your-writes for the Request Inspector's read cache: this task's
+    # cached event rows are now stale. The cache's TTL bounds staleness in
+    # wall-clock terms, but a live task that appends a round and is polled
+    # immediately after must see it — so drop the entry at the write.
+    try:
+        from lib.tasks_pkg.request_inspector import invalidate_task_cache
+        invalidate_task_cache(task_id)
+    except Exception as e:
+        logger.debug('[EventLog] inspector cache invalidation skipped: %s', e)
+
+    # ── Self-healing delta compaction (docs/DEBUG_PANEL_REDESIGN.md §10) ──
+    # The projection above only applies to rows THIS process writes. A
+    # deployment where an older process is still serving (no restart yet)
+    # keeps appending FULL rows, and the one-shot migration only covers the
+    # backlog that existed when it ran — measured: +519 MB accumulated
+    # between two checks. Piggy-backing on the same sampled hook means any
+    # process running this code compacts leftovers, so the table converges
+    # WITHOUT requiring a coordinated restart.
+    if random.random() < _COMPACT_PROBABILITY:
+        try:
+            _opportunistic_compact(db)
+        except Exception as e:
+            logger.debug('[EventLog] compaction failed (non-fatal): %s', e)
 
 
 def flush_pending(task_id):
@@ -209,7 +273,12 @@ def read_events(task_id, since_event_id=None, limit=10000):
             try:
                 payload = json.loads(payload_raw or '{}')
             except (TypeError, ValueError, json.JSONDecodeError) as _e_audit:
-                logger.debug('[event_log] read_events caught %s: %s', type(_e_audit).__name__, _e_audit)
+                # WARNING (was DEBUG): an unparseable payload row means cold
+                # replay silently degrades this event to {'type': ...} — a
+                # data-integrity degradation, same severity as the persist-side
+                # 'persist event failed' warning above.
+                logger.warning('[EventLog] read_events: unparseable payload row for task=%s, '
+                               'degrading to type-only: %s', task_id[:8], _e_audit)
                 payload = {'type': r['type'] if 'type' in r.keys() else r[1]}
         try:
             eid = int(r['event_id'] if 'event_id' in r.keys() else r[0])
@@ -236,6 +305,66 @@ def has_terminal_event(task_id):
         return False
 
 
+def _opportunistic_compact(db):
+    """Compact a few tasks' leftover FULL snapshot rows into delta form.
+
+    Why this exists (and is not just the one-shot migration): the write-path
+    projection in :func:`append_persistent_event` only shrinks rows that THIS
+    process writes. Until every serving process runs that code, full rows keep
+    arriving — and the offline migration is a point-in-time sweep, so the gap
+    re-opens the moment it finishes (measured: +519 MB between two checks).
+    This hook lets any process running this build heal the backlog
+    continuously, so the table converges WITHOUT a coordinated restart.
+
+    Reuses ``_migrate_snapshot_deltas.migrate_task`` VERBATIM so there is ONE
+    implementation of the verify-then-write contract (§11): project → rebuild
+    → compare byte-for-byte → write only on an exact match, else leave that
+    task untouched. Never raises.
+    """
+    try:
+        import importlib.util
+        import os
+        script = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(
+                os.path.abspath(__file__)))),
+            'tests', '_migrate_snapshot_deltas.py')
+        if not os.path.exists(script):
+            return
+        spec = importlib.util.spec_from_file_location('_snap_migrate', script)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+    except Exception as e:
+        logger.debug('[EventLog] compaction helper unavailable: %s', e)
+        return
+
+    try:
+        tasks = mod._tasks_with_full_rows(db, limit=_COMPACT_MAX_TASKS)
+    except Exception as e:
+        logger.debug('[EventLog] compaction scan failed: %s', e)
+        return
+    if not tasks:
+        return
+
+    healed = failed = 0
+    for tid in tasks:
+        try:
+            rep = mod.migrate_task(db, tid)
+        except Exception as e:
+            logger.debug('[EventLog] compaction of task=%s raised: %s',
+                         str(tid)[:8], e)
+            failed += 1
+            continue
+        if rep.get('status') == 'ok':
+            healed += 1
+        elif rep.get('status') == 'FAILED':
+            failed += 1
+            logger.warning('[EventLog] compaction REFUSED task=%s (rows left '
+                           'untouched): %s', str(tid)[:8], rep.get('reason'))
+    if healed or failed:
+        logger.info('[EventLog] Delta-compacted %d task(s) of leftover full '
+                    'snapshot rows (%d refused)', healed, failed)
+
+
 def _opportunistic_prune(db):
     """Delete stale task_events rows in two passes, both bounded by EVENT_TTL_MS.
 
@@ -259,19 +388,22 @@ def _opportunistic_prune(db):
     This also future-proofs the reaper against any new orphaned-id writer.
     """
     cutoff = int((time.time() * 1000) - EVENT_TTL_MS)
+    structural_cutoff = int((time.time() * 1000) - STRUCTURAL_TTL_MS)
+    _struct_ph = ','.join(['?'] * len(STRUCTURAL_EVENT_TYPES))
 
     # ── Pass 1: terminal tasks (JOIN task_results), deleted in bounded batches ──
-    # Each batch selects up to _PRUNE_BATCH_TASKS eligible task_ids and deletes
-    # their events, COMMITTING after every batch. A single unbounded DELETE here
-    # exceeded PG's statement_timeout on a large backlog and rolled back whole
-    # (zero progress) — batching keeps each statement short and makes progress
-    # durable. We loop until a batch frees nothing (backlog drained) or the
-    # per-invocation batch cap is hit (bounds the work done on one SSE delta).
+    # TIERED (§10.4): this pass reaps the STREAMING NOISE (delta / phase /
+    # tool_progress / …) at the 6h SSE-reconnect horizon but SPARES the
+    # structural events the Request Inspector renders; those are reaped by
+    # pass 1b at the 30-day horizon. Previously this deleted every row of an
+    # eligible task, which is why a 2-hour-old task showed "log expired".
     total = 0
     for _ in range(_PRUNE_MAX_BATCHES):
         try:
             cur = db.execute(
-                "DELETE FROM task_events WHERE task_id IN ("
+                "DELETE FROM task_events WHERE ts_ms < ? "
+                f"  AND type NOT IN ({_struct_ph}) "
+                "  AND task_id IN ("
                 "  SELECT te.task_id FROM task_events te "
                 "  JOIN task_results tr ON tr.task_id = te.task_id "
                 "  WHERE tr.status IN ('done','error','aborted','interrupted') "
@@ -280,7 +412,7 @@ def _opportunistic_prune(db):
                 "  GROUP BY te.task_id "
                 "  LIMIT ?"
                 ")",
-                (cutoff, _PRUNE_BATCH_TASKS)
+                (cutoff, *STRUCTURAL_EVENT_TYPES, cutoff, _PRUNE_BATCH_TASKS)
             )
             db.commit()
         except Exception as e:
@@ -295,7 +427,44 @@ def _opportunistic_prune(db):
         if rc == 0:
             break
     if total > 0:
-        logger.info('[EventLog] Pruned %d stale event row(s) (cutoff=%d)', total, cutoff)
+        logger.info('[EventLog] Pruned %d stale streaming event row(s) '
+                    '(cutoff=%d, structural events spared)', total, cutoff)
+
+    # ── Pass 1b: STRUCTURAL events past the 30-day tier (§10.4) ──
+    # Same batched-commit shape; only the horizon and the type filter differ.
+    total = 0
+    for _ in range(_PRUNE_MAX_BATCHES):
+        try:
+            cur = db.execute(
+                "DELETE FROM task_events WHERE ts_ms < ? "
+                f"  AND type IN ({_struct_ph}) "
+                "  AND task_id IN ("
+                "  SELECT te.task_id FROM task_events te "
+                "  JOIN task_results tr ON tr.task_id = te.task_id "
+                "  WHERE tr.status IN ('done','error','aborted','interrupted') "
+                "    AND tr.completed_at IS NOT NULL "
+                "    AND tr.completed_at < ? "
+                "  GROUP BY te.task_id "
+                "  LIMIT ?"
+                ")",
+                (structural_cutoff, *STRUCTURAL_EVENT_TYPES,
+                 structural_cutoff, _PRUNE_BATCH_TASKS)
+            )
+            db.commit()
+        except Exception as e:
+            logger.debug('[EventLog] structural prune query failed: %s', e)
+            try:
+                db.rollback()
+            except Exception as re:
+                logger.debug('[EventLog] rollback after structural prune: %s', re)
+            break
+        rc = getattr(cur, 'rowcount', 0) or 0
+        total += rc
+        if rc == 0:
+            break
+    if total > 0:
+        logger.info('[EventLog] Pruned %d structural event row(s) past the '
+                    '30-day tier (cutoff=%d)', total, structural_cutoff)
 
     # ── Pass 2: orphaned rows (no task_results row), aged out by own ts_ms ──
     # Same batched-commit strategy. Deletes by the row's own primary key
@@ -306,12 +475,15 @@ def _opportunistic_prune(db):
         try:
             rows = db.execute(
                 "SELECT task_id, event_id FROM task_events "
-                "WHERE ts_ms < ? "
+                "WHERE (( ts_ms < ? AND type NOT IN (%s) ) "
+                "    OR ( ts_ms < ? AND type IN (%s) )) "
                 "  AND NOT EXISTS ("
                 "    SELECT 1 FROM task_results tr WHERE tr.task_id = task_events.task_id"
                 "  ) "
-                "LIMIT ?",
-                (cutoff, _PRUNE_BATCH_TASKS)
+                "LIMIT ?" % (_struct_ph, _struct_ph),
+                (cutoff, *STRUCTURAL_EVENT_TYPES,
+                 structural_cutoff, *STRUCTURAL_EVENT_TYPES,
+                 _PRUNE_BATCH_TASKS)
             ).fetchall()
         except Exception as e:
             logger.debug('[EventLog] orphan prune select failed: %s', e)

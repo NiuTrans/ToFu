@@ -1,0 +1,187 @@
+"""Guard: the boot-time libstdc++ linkage forensics line.
+
+Why this exists
+---------------
+On 2026-07-31 10:33:27 a boot died with::
+
+    ImportError: /lib64/libstdc++.so.6: version `GLIBCXX_3.4.30' not found
+        (required by .../lxml/../../.././libicuuc.so.75)
+
+The system ``/lib64`` copy (2019) exports no ``GLIBCXX_3.4.30``; the conda copy
+does. So the failure is "the ``libstdc++.so.6`` soname was bound to the system
+copy before ``libicuuc`` loaded".
+
+The trigger was never identified, and could not be: the failing process died
+before anything recorded its environment, and ``ImportError`` is a clean exit so
+no core was written. Measured exclusions at the time (all clean):
+
+  * the platform's own ``LD_PRELOAD`` (dolphinfs client, from
+    ``/etc/profile.d/pc_env.sh``) — 10/10 boots fine;
+  * ``ctypes.CDLL('/lib64/libstdc++.so.6', RTLD_GLOBAL)`` then importing lxml —
+    fine, both copies map side by side;
+  * pulling the system copy in through a NEEDED chain (``libjvm.so``) — fine.
+
+Only an explicit ``LD_PRELOAD`` of the system copy reproduces it. Hence these
+tests guard the FORENSICS, not a fix: the point is that the next occurrence is
+diagnosable rather than another standing start.
+
+What is load-bearing here
+-------------------------
+1. The line exists and reports the resolved path plus both injection variables.
+2. It runs BEFORE the heavy imports — a line printed after the crash records
+   nothing. This is the property that a well-meaning refactor is most likely to
+   break by relocating the block.
+3. It DISCRIMINATES: the healthy boot and the failing shape must not produce the
+   same output, otherwise it is decoration.
+"""
+
+import os
+import subprocess
+import sys
+
+import pytest
+
+pytestmark = pytest.mark.unit
+
+_REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_SERVER = os.path.join(_REPO, 'server.py')
+_MARKER = '[boot] libstdc++ soname ->'
+_SYSTEM_STDCXX = '/lib64/libstdc++.so.6'
+
+
+def _boot_stderr(extra_env=None, timeout=90):
+    """Run ``server.py --help`` and return its stderr.
+
+    ``--help`` exits before the server binds a port, so this exercises the real
+    boot prologue (where the forensics line lives) without starting a server.
+    """
+    env = dict(os.environ)
+    env.pop('LD_PRELOAD', None)
+    if extra_env:
+        env.update(extra_env)
+    proc = subprocess.run([sys.executable, _SERVER, '--help'],
+                          cwd=_REPO, env=env, timeout=timeout,
+                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    return proc.stdout.decode('utf-8', 'replace')
+
+
+def _forensics_line(text):
+    for line in text.splitlines():
+        if _MARKER in line:
+            return line
+    return ''
+
+
+def test_forensics_line_is_emitted_with_both_injection_vars():
+    """A healthy boot records the resolved path AND both injection variables.
+
+    The path alone is not enough: when the binding is wrong we need to know what
+    caused it, and ``LD_PRELOAD`` / ``LD_LIBRARY_PATH`` are the two channels that
+    can cause it. Recording the symptom without the candidate causes would leave
+    the next investigation exactly where this one ended.
+    """
+    line = _forensics_line(_boot_stderr())
+    assert line, 'boot did not emit the libstdc++ forensics line'
+    assert 'LD_PRELOAD=' in line
+    assert 'LD_LIBRARY_PATH=' in line
+    # Unset must be rendered explicitly — an empty tail is ambiguous between
+    # "variable was empty" and "the field was dropped".
+    assert '| LD_PRELOAD=' in line and line.split('| LD_PRELOAD=')[1].strip()
+
+
+def test_forensics_line_precedes_the_heavy_imports():
+    """The line must come BEFORE the import that can die.
+
+    Ordering is the whole point. This asserts it against the REAL failure: under
+    an LD_PRELOAD of the system libstdc++ the boot raises the GLIBCXX
+    ImportError, and the forensics line has to be already out. A refactor that
+    moves the block below the import chain keeps every other assertion green
+    while making the diagnostic worthless.
+    """
+    if not os.path.exists(_SYSTEM_STDCXX):
+        pytest.skip('no system libstdc++ to preload on this host')
+    text = _boot_stderr({'LD_PRELOAD': _SYSTEM_STDCXX})
+    lines = text.splitlines()
+    marker_idx = next((i for i, l in enumerate(lines) if _MARKER in l), -1)
+    assert marker_idx >= 0, 'forensics line missing on the failing boot shape'
+    glibcxx_idx = next((i for i, l in enumerate(lines) if 'GLIBCXX_3.4.30' in l), -1)
+    if glibcxx_idx < 0:
+        # This host's loader does not reproduce the mis-binding; the ordering
+        # claim is then untestable here rather than false.
+        pytest.skip('host does not reproduce the GLIBCXX mis-binding')
+    assert marker_idx < glibcxx_idx, (
+        'forensics line appeared AFTER the ImportError — it records nothing '
+        'about the boot that actually failed')
+
+
+def _reported_path(line):
+    """Extract the resolved libstdc++ path from a forensics line.
+
+    The value carries a state prefix (``mapped=`` when the soname is already
+    bound this early, ``would-resolve=`` when nothing has claimed it yet and the
+    loader was asked which copy it would pick). Both are real answers about the
+    binding; only the state differs.
+    """
+    value = line.split('->', 1)[1].split('|', 1)[0].strip()
+    for prefix in ('mapped=', 'would-resolve='):
+        if value.startswith(prefix):
+            return value[len(prefix):].split(',')[0].strip()
+    return value
+
+
+def test_forensics_line_discriminates_healthy_from_broken_binding():
+    """Healthy and broken boots must not look the same.
+
+    A line that prints the same text either way cannot diagnose anything. Under
+    the preload the soname resolves to the system copy; without it, to the env's
+    own copy.
+    """
+    if not os.path.exists(_SYSTEM_STDCXX):
+        pytest.skip('no system libstdc++ to preload on this host')
+    healthy = _forensics_line(_boot_stderr())
+    broken = _forensics_line(_boot_stderr({'LD_PRELOAD': _SYSTEM_STDCXX}))
+    assert healthy and broken
+    healthy_path = _reported_path(healthy)
+    broken_path = _reported_path(broken)
+    if healthy_path == broken_path:
+        pytest.skip('host does not reproduce the mis-binding; nothing to discriminate')
+    assert 'lib64' in broken_path, (
+        'broken boot should report the SYSTEM libstdc++, got %r' % broken_path)
+    assert os.path.realpath(healthy_path).startswith(os.path.realpath(sys.prefix)), (
+        'healthy boot should report the interpreter env copy, got %r' % healthy_path)
+
+
+def test_forensics_reports_a_real_path_even_before_the_soname_is_bound():
+    """The line must never degrade to a vacuous placeholder.
+
+    Whether libstdc++ is already mapped this early depends on whether something
+    preloaded it — production always carries the platform preload, but a bare
+    deployment does not, and there the soname is still unbound at this point.
+    Recording only "nothing mapped yet" would make the diagnostic useless on
+    exactly the deployments that have no platform preload to explain a failure.
+    So the unbound case must still resolve which copy the loader WOULD choose.
+    """
+    line = _forensics_line(_boot_stderr({'LD_PRELOAD': ''}))
+    assert line, 'no forensics line emitted without a preload'
+    path = _reported_path(line)
+    assert path.endswith('.so.6') or '.so.6.' in path, (
+        'forensics degraded to a non-path value %r — it records nothing about '
+        'the binding' % path)
+    assert os.path.exists(path), (
+        'forensics reported %r which does not exist on disk' % path)
+
+
+def test_forensics_never_breaks_the_boot():
+    """Diagnostics must not be able to kill the process they observe.
+
+    The block is wrapped in a bare ``except`` for exactly this reason (an
+    unreadable /proc, a restricted sandbox). Asserting the guard is present stops
+    someone from "tidying" it into a narrower except that can escape during boot.
+    """
+    with open(_SERVER, 'r', encoding='utf-8') as f:
+        src = f.read()
+    start = src.index(_MARKER.replace('[boot] ', ''))
+    block = src[max(0, start - 2000):start + 2000]
+    assert 'except Exception:' in block, (
+        'the forensics block must stay exception-guarded — it is diagnostic '
+        'only and must never be able to fail a boot')

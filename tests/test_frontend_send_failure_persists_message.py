@@ -81,6 +81,10 @@ global.config = { defaultThinkingDepth: 'medium' };
 global.activeConvId = null;
 
 eval(fs.readFileSync(process.argv[2], 'utf8'));  // core/conversations.js
+// Extracted leaf modules (pt_3879f00e decomposition): the PUT path uses the
+// persist helpers (core/conv_persist_helpers.js) and the pending-sync markers
+// (core/pending_sync.js) — eval them so harness scope matches the bundle.
+for (const extra of process.argv.slice(3)) eval(fs.readFileSync(extra, 'utf8'));
 
 const out = [];
 function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
@@ -129,9 +133,13 @@ def _run_harness(js_source_path: str):
     harness = os.path.join(HERE, '_send_failure_persist_harness.js')
     with open(harness, 'w') as f:
         f.write(_HARNESS)
+    extra_js = [
+        os.path.join(JS_DIR, 'core', 'conv_persist_helpers.js'),
+        os.path.join(JS_DIR, 'core', 'pending_sync.js'),
+    ]
     try:
         proc = subprocess.run(
-            ['node', harness, js_source_path],
+            ['node', harness, js_source_path, *extra_js],
             capture_output=True, text=True, timeout=60,
         )
     finally:

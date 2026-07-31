@@ -203,27 +203,39 @@ def _find_func(tree, name):
     return None
 
 
+_DISPATCH_PY = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'lib', 'chat_dispatch.py')
+
+
 def test_source_warm_resume_builds_and_emits_full_snapshot():
-    src = open(_CHAT_PY, encoding='utf-8').read()
+    # The snapshot BUILD moved to lib/chat_dispatch.py::plan_warm_resume
+    # (slice 7); the id-less YIELD stayed in routes/chat.py::chat_stream.
+    src = open(_DISPATCH_PY, encoding='utf-8').read()
     tree = ast.parse(src)
-    fn = _find_func(tree, 'chat_stream')
-    assert fn is not None, 'chat_stream not found in routes/chat.py'
+    fn = _find_func(tree, 'plan_warm_resume')
+    assert fn is not None, 'plan_warm_resume not found in lib/chat_dispatch.py'
     scoped = ast.get_source_segment(src, fn)
 
     # The warm-resume branch must BUILD a resume_state snapshot ...
-    assert 'resume_state = build_event(' in scoped, (
-        'warm-resume branch no longer builds a resume_state snapshot — the '
+    assert '_state = build_event(' in scoped and 'resume_state=_state' in scoped, (
+        'plan_warm_resume no longer builds a resume_state snapshot — the '
         'delta-only replay would strand a placeholder-reset client at a later '
         'round (the round-10 bug).')
     # ... from the FULL in-memory toolRounds ...
-    assert "resume_state['toolRounds'] = task['toolRounds']" in scoped, (
+    assert "_state['toolRounds'] = task['toolRounds']" in scoped, (
         "resume_state must carry the COMPLETE task['toolRounds'] so "
         '_snapshotLongerRounds adopts it when the client cache is short.')
-    # ... and EMIT it (no id:) before the replay loop.
-    assert '_resume_state_payload' in scoped and 'resume_state' in scoped, (
+
+    # ... and chat_stream must EMIT it (no id:) before the replay loop.
+    chat_src = open(_CHAT_PY, encoding='utf-8').read()
+    chat_tree = ast.parse(chat_src)
+    chat_fn = _find_func(chat_tree, 'chat_stream')
+    assert chat_fn is not None, 'chat_stream not found in routes/chat.py'
+    chat_scoped = ast.get_source_segment(chat_src, chat_fn)
+    assert '_resume_state_payload' in chat_scoped and 'resume_state' in chat_scoped, (
         'the built resume_state is never yielded — snapshot emission missing.')
     # The emitted snapshot frame must NOT carry an id: (synthetic, like fresh).
-    assert "yield f'data: {_resume_state_payload}\\n\\n'" in scoped, (
+    assert "yield f'data: {_resume_state_payload}\\n\\n'" in chat_scoped, (
         'the resume_state must be yielded as an id-less data frame (like the '
         'fresh-connection snapshot) to avoid a cursor collision.')
     _ok('source: warm-resume branch builds full-toolRounds resume_state and yields it id-less')

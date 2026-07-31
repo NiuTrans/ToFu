@@ -72,6 +72,13 @@ async function _applyHistoryRewrite(convId, frameRev) {
   }
   if (!data) return;
 
+  /* Re-check the live-task guard AFTER the round-trip: a send that started
+   *   while the GET was in flight would be wiped by the wholesale replace
+   *   below (pt_3cd6cd48). The rewrite is re-offered on the next frame. */
+  if (conv.activeTaskId || (typeof activeStreams !== "undefined" && activeStreams.has(convId))) {
+    return;
+  }
+
   const serverMsgs = data.messages || [];
   const localLen = (conv.messages || []).length;
 
@@ -96,7 +103,7 @@ async function _applyHistoryRewrite(convId, frameRev) {
   try { ConvCache.put(conv); } catch (e) { console.debug("[conv-sync] cache put skipped: %s", e && e.message); }
 
   if (typeof activeConvId !== "undefined" && activeConvId === convId) {
-    if (typeof renderChat === "function") renderChat(conv, false);
+    window.ConvView.replaceAll(convId, { forceScroll: false });
     if (typeof _restoreConvToolState === "function") _restoreConvToolState(conv);
   } else if (typeof renderConversationList === "function") {
     /* Not open — the shortened count / title may affect the sidebar preview. */
@@ -109,11 +116,17 @@ async function _applyHistoryRewrite(convId, frameRev) {
 function _onConvSyncPush(frame) {
   try {
     if (!frame || frame.kind !== "history_rewrite") return;
-    /* Multi-user gate (forward-safe): drop a frame for another user. When no
-     *   user identity is established (single-user today) every frame is ours. */
-    const myUser = (typeof window._currentUserId !== "undefined" && window._currentUserId !== null)
-      ? window._currentUserId : null;
-    if (myUser !== null && frame.userId !== undefined && frame.userId !== myUser) return;
+    /* Multi-user gate (forward-safe): DELEGATES to the single implementation
+     *   in core/conv_state_reducer.js::_frameIsOurs — never re-implement the
+     *   normalization rules here. Fail-OPEN when unavailable (accepting the
+     *   frame matches today's pre-identity behaviour; fail-closed would
+     *   silently kill history_rewrite alignment), but REPORT the miss so the
+     *   degraded state is not indistinguishable from a working gate. */
+    if (typeof window._frameIsOurs === "function") {
+      if (!window._frameIsOurs(frame.userId)) return;
+    } else if (typeof window.reportIdentityGateUnavailable === "function") {
+      window.reportIdentityGateUnavailable("_onConvSyncPush");
+    }
     const convId = frame.convId || frame.taskId;   // push_event uses taskId as the conv id
     if (!convId) return;
     _applyHistoryRewrite(convId, (typeof frame.rev === "number") ? frame.rev : null);

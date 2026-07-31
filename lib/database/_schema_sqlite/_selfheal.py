@@ -44,8 +44,10 @@ _CRITICAL_COLUMNS = {
     # GET /api/v1/paper/library SELECT), so a version-current DB missing it
     # throws on every bookshelf load until re-migrated. The guarded ALTER
     # lives in _chat.py but only runs on a full DDL pass.
+    # parser_version is named in the harvest cache probe's WHERE clause (see
+    # the PG twin for the failure shape).
     'paper_library': (
-        'folder_id',
+        'folder_id', 'parser_version',
     ),
 }
 
@@ -67,6 +69,40 @@ def _missing_critical_columns(conn):
                     missing.append((table, col))
         except Exception as e:
             logger.debug('[DB] critical-column probe failed for %s: %s', table, e)
+    return missing
+
+
+def _missing_core_tables(conn):
+    """Return always-on Core table names absent from the database.
+
+    The table-shaped twin of ``_missing_critical_columns``: the version
+    fast-path trusts the stored integer as a proxy for "all DDL applied",
+    but a table added to ``_core_schema`` WITHOUT bumping ``_SCHEMA_VERSION``
+    is skipped by that proxy FOREVER — the 2026-07-25 paper_podcasts
+    incident (L3 registered the table, version stayed 41, every existing
+    deployment fast-pathed past the create DDL and 500'd UndefinedTable at
+    runtime; fresh test DBs ran full DDL, which is why CI never saw it).
+    Checked BEFORE the fast-path so the divergence forces a full
+    re-migration. The probe list derives from the Core MetaData minus
+    optional-domain tables (``core_boot_table_names``), so a NEW Core table
+    is covered automatically. Read-only; best-effort — probe errors are
+    logged at debug and skipped, never startup-fatal.
+    """
+    import lib.database._schema_sqlite as _ss
+    table_exists = getattr(_ss, '_table_exists', _table_exists)
+    try:
+        from lib.database._core_schema._helpers import core_boot_table_names
+        names = core_boot_table_names()
+    except Exception as e:
+        logger.debug('[DB] core-boot-table list unavailable: %s', e)
+        return []
+    missing = []
+    for name in names:
+        try:
+            if not table_exists(conn, name):
+                missing.append(name)
+        except Exception as e:
+            logger.debug('[DB] core-table probe failed for %s: %s', name, e)
     return missing
 
 

@@ -42,7 +42,17 @@ function _renderProvidersTab() {
     var keyCount = (p.api_keys || []).length;
     // Use explicit brand if stored (from template), else detect from hints
     var brand = p.brand || _detectBrand(p.name + ' ' + (p.base_url || ''));
+    // Managed subscription provider (auto-created from a Claude/ChatGPT OAuth
+    // login — see lib/oauth/outbound.provision_oauth_provider). It carries an
+    // `oauth` marker + a sentinel api_key; render it with the REAL underlying
+    // brand logo (Claude / OpenAI) rather than the unbranded 'oauth' box.
+    var oauthKind = p.oauth || '';               // 'claude' | 'codex' | ''
+    var isManagedOAuth = !!oauthKind;
+    if (isManagedOAuth) brand = (oauthKind === 'codex') ? 'openai' : 'claude';
     var isLocal = (brand === 'local');
+    // Local cards created from an engine preset (vLLM / SGLang / Ollama)
+    // show the ENGINE's official mark instead of the generic server stack.
+    var iconBrand = (isLocal && p.engine) ? p.engine : brand;
     var endpointList = (p.endpoints && p.endpoints.length)
       ? p.endpoints
       : (p.base_url ? [p.base_url] : []);
@@ -60,22 +70,66 @@ function _renderProvidersTab() {
 
     // ── Header ──
     html += '<div class="stg-provider-head" onclick="_toggleProviderExpand(this.parentElement)">' +
-      '<div class="stg-provider-icon">' + _brandSvg(brand, 22) + '</div>' +
+      '<div class="stg-provider-icon">' + _brandSvg(iconBrand, 22) + '</div>' +
       '<div class="stg-provider-info">' +
         '<div class="stg-provider-name">' + escapeHtml(p.name || 'Unnamed') + '</div>' +
         '<div class="stg-provider-url">' + escapeHtml(headerSubtitle) + '</div>' +
       '</div>' +
       '<div class="stg-provider-badges">' +
-        (isLocal ? _localEndpointBadge(nonEmptyEndpoints)
-                 : '<span class="stg-badge">' + keyCount + ' ' + t('settings.keys') + '</span>') +
+        (isLocal && p.engine
+          ? '<span class="stg-badge">' + escapeHtml(((typeof _localPresetByEngine === 'function' ? _localPresetByEngine(p.engine) : null) || {}).name || p.engine) + '</span>'
+          : '') +
+        (isManagedOAuth
+          ? '<span class="stg-badge stg-badge-oauth" title="' + escapeHtml(t('settings.oauthManagedTitle')) + '">' + Icon('plug', 10) + ' ' + escapeHtml(t('settings.oauthManagedBadge')) + '</span>'
+          : (isLocal ? _localEndpointBadge(nonEmptyEndpoints)
+                     : '<span class="stg-badge">' + keyCount + ' ' + t('settings.keys') + '</span>')) +
         '<span class="stg-badge">' + models.length + ' ' + t('settings.models') + '</span>' +
         (p.enabled === false ? '<span class="stg-badge off">' + t('settings.disabled') + '</span>' : '') +
       '</div>' +
       '<span class="stg-chevron">▾</span>' +
     '</div>';
 
+
+    // ── Wire-face refusals ──
+    // The dispatcher REFUSES to register a model whose wire face can't be
+    // resolved safely (a Claude model on a dual-face gateway whose provider
+    // declares no faces.anthropic). Without this banner the model would just
+    // be absent from the picker with no explanation — a silent failure. The
+    // fix is one click, so the banner says so.
+    var _refusals = (typeof _stgFaceRefusals !== 'undefined' && _stgFaceRefusals)
+      ? _stgFaceRefusals.filter(function(r) { return r && r.provider_id === p.id; })
+      : [];
+    if (_refusals.length) {
+      html += '<div class="stg-face-refusal">' +
+        '<div class="stg-face-refusal-title">' +
+          escapeHtml(t('settings.faceRefusedTitle', { n: _refusals.length })) +
+        '</div>' +
+        '<div class="stg-face-refusal-models">' +
+          escapeHtml(_refusals.map(function(r) { return r.model_id; }).join('、')) +
+        '</div>' +
+        '<div class="stg-face-refusal-hint">' +
+          escapeHtml(t('settings.faceRefusedHint')) +
+        '</div>' +
+      '</div>';
+    }
+
     // ── Expanded body ──
     html += '<div class="stg-provider-body">';
+
+    if (isManagedOAuth) {
+      // Explain WHAT this card is and how to remove it — the #1 confusion is
+      // "why does it reappear after I delete it?". The token lives on disk
+      // (data/config/oauth/<provider>.json); a re-login/refresh re-creates the
+      // card. Deleting HERE routes to logout so the token is cleared too.
+      var _brandLabel = (oauthKind === 'codex') ? 'ChatGPT' : 'Claude';
+      html += '<div class="stg-oauth-note">' +
+        '<div class="stg-oauth-note-icon">' + Icon('plug', 16) + '</div>' +
+        '<div class="stg-oauth-note-body">' +
+          '<div class="stg-oauth-note-title">' + escapeHtml(t('settings.oauthManagedNoteTitle', { name: _brandLabel })) + '</div>' +
+          '<div class="stg-oauth-note-desc">' + escapeHtml(t('settings.oauthManagedNoteDesc', { name: _brandLabel })) + '</div>' +
+        '</div>' +
+      '</div>';
+    }
 
     if (isLocal) {
       // ── Local provider: name + structured endpoint rows + optional shared key ──
@@ -117,6 +171,14 @@ function _renderProvidersTab() {
 
       // ── Extra Headers (optional, for provider-specific gateway headers) ──
       html += _renderExtraHeadersSection(pi, p.extra_headers || {});
+
+      // ── Alternate wire faces (account/face separation, charter #23) ──
+      // ONE account, N faces. Until this editor existed the only writer of
+      // faces{} was "sync from template", so a self-built dual-face gateway
+      // could only be configured by hand-editing server_config.json.
+      if (typeof _renderFacesSection === 'function') {
+        html += _renderFacesSection(pi, p.faces || {});
+      }
     } else {
       // Local providers — show probe status pane (filled by _discoverLocalModels).
       html += '<div id="stgLocalStatus_' + pi + '" class="stg-auto-status" style="display:none;font-family:ui-monospace,monospace;font-size:12px;"></div>';
@@ -139,7 +201,9 @@ function _renderProvidersTab() {
         '<label class="stg-toggle"><input type="checkbox"' + (p.enabled !== false ? ' checked' : '') + ' onchange="_onProvField(' + pi + ',\'enabled\',this.checked)">' +
         '<span class="stg-toggle-track"><span class="stg-toggle-thumb"></span></span></label>' +
       '</div>' +
-      '<button class="stg-btn-danger" onclick="_deleteProvider(' + pi + ')">' + escapeHtml(t('settings.deleteProvider')) + '</button>' +
+      (isManagedOAuth
+        ? '<button class="stg-btn-danger" onclick="_logoutManagedProvider(' + pi + ')">' + escapeHtml(t('settings.oauthLogoutRemove')) + '</button>'
+        : '<button class="stg-btn-danger" onclick="_deleteProvider(' + pi + ')">' + escapeHtml(t('settings.deleteProvider')) + '</button>') +
     '</div>';
 
     // ── Nested Model List ──
@@ -175,6 +239,9 @@ function _renderProvidersTab() {
     html += '</div>'; // /stg-provider-card
   }
   list.innerHTML = html;
+  // An open access matrix can overflow the 860px panel (3+ keys) — widen the
+  // panel when it does, shrink back when it doesn't (no-op without a matrix).
+  if (typeof _fitMatrixPanelWidth === 'function') _fitMatrixPanelWidth();
 }
 
 /** Format a $/1M-tokens price for compact display */
@@ -198,7 +265,12 @@ function _fmtPrice(val) {
 function _renderModelCard(provIdx, modelIdx, m) {
   var brand = _detectBrand(m.model_id);
   var caps = m.capabilities || [];
-  var aliases = m.aliases || [];
+  // The wire-id pool (model-identity contract, lib/llm_dispatch/model_entry.py).
+  // `request_ids` is what actually goes on the wire; a pre-contract entry has
+  // none and routes through `[model_id] + aliases`. Showing the RESOLVED pool
+  // means the card never claims an id is used when it isn't.
+  var hasPool = !!(m.request_ids && m.request_ids.length);
+  var aliases = hasPool ? m.request_ids : (m.aliases || []);
   var isDisabled = (m.enabled === false);
 
   var html = '<div class="stg-mcard' + (isDisabled ? ' disabled' : '') +
@@ -212,7 +284,8 @@ function _renderModelCard(provIdx, modelIdx, m) {
 
   // Model ID line
   html += '<div class="stg-mcard-main">' +
-    '<span class="stg-mcard-id">' + escapeHtml(m.model_id || '(unnamed)') + '</span>';
+    '<span class="stg-mcard-id">' + escapeHtml(m.model_id || '(unnamed)') + '</span>' +
+    (typeof _faceChipHTML === 'function' ? _faceChipHTML(provIdx, m) : '');
 
   html += '</div>';
 
@@ -238,10 +311,37 @@ function _renderModelCard(provIdx, modelIdx, m) {
       'title="' + escapeHtml(t('settings.disableThinkingHint')) + '">thinking</button>';
   }
   if (m.rpm) html += '<span class="stg-mcard-stat">' + Icon('timer', 11) + ' ' + m.rpm + ' rpm</span>';
+  // Local provider with probe binding → show WHICH endpoint(s) serve this
+  // model. One URL = one model is the whole point of the binding; this chip
+  // makes the placement visible.
+  var _prov = _stgProviders[provIdx] || {};
+  if (_prov.brand === 'local' && _prov.endpoint_models) {
+    var _viaEps = [];
+    Object.keys(_prov.endpoint_models).forEach(function(u) {
+      var l = _prov.endpoint_models[u];
+      if (Array.isArray(l) && l.indexOf(m.model_id) >= 0) _viaEps.push(u);
+    });
+    if (_viaEps.length) {
+      html += '<span class="stg-mcard-stat stg-mcard-via" title="' + escapeHtml(_viaEps.join('\n')) + '">' +
+        'via ' + escapeHtml(_endpointShort(_viaEps[0])) +
+        (_viaEps.length > 1 ? ' +' + (_viaEps.length - 1) : '') + '</span>';
+    }
+  }
   html += '</div>';
 
-  // Pricing row — look up real input/output from pricing cache
-  var mp = (typeof _modelPricingCache !== 'undefined' && _modelPricingCache) ? _modelPricingCache[m.model_id] : null;
+  // Pricing row — resolution order: per-model `pricing` override (user-set
+  // via the edit dialog, also registered into PROVIDER_PRICING backend-side)
+  // → discovery's input_price/output_price → the global MODEL_PRICING cache.
+  var mp = null;
+  var mpCustom = false;
+  if (m.pricing && m.pricing.input != null && m.pricing.output != null) {
+    mp = m.pricing;
+    mpCustom = true;
+  } else if (m.input_price != null && m.output_price != null) {
+    mp = { input: m.input_price, output: m.output_price };
+  } else if (typeof _modelPricingCache !== 'undefined' && _modelPricingCache) {
+    mp = _modelPricingCache[m.model_id] || null;
+  }
   if (mp && (mp.input != null || mp.output != null)) {
     var isFree = (mp.input === 0 && mp.output === 0);
     if (isFree) {
@@ -254,16 +354,27 @@ function _renderModelCard(provIdx, modelIdx, m) {
         '<span class="stg-price-label">' + escapeHtml(t('settings.output')) + '</span>' +
         '<span class="stg-price-val out">' + _fmtPrice(mp.output) + '</span>' +
         '<span class="stg-price-unit">' + escapeHtml(t('settings.perMillionTokens')) + '</span>' +
+        (mpCustom ? '<span class="stg-price-custom">' + escapeHtml(t('settings.mePriceCustomTag')) + '</span>' : '') +
       '</div>';
     }
   } else {
     html += '<div class="stg-mcard-pricing"><span class="stg-price-na">' + escapeHtml(t('settings.noPricing')) + '</span></div>';
   }
 
-  // Aliases
+  // Runtime health strip (success rate / error throttling cooldown). Filled
+  // from _modelHealthCache; refreshed in place by _refreshAllModelCardHealth
+  // so polling never disturbs an open edit form.
+  html += '<div class="stg-mcard-health ' +
+    (typeof _modelCardHealthCls === 'function' ? _modelCardHealthCls(provIdx, modelIdx) : 'muted') +
+    '" data-prov="' + provIdx + '" data-model="' + modelIdx + '">' +
+    (typeof _modelCardHealthHTML === 'function' ? _modelCardHealthHTML(provIdx, modelIdx) : '') +
+  '</div>';
+
+  // Wire-id pool (request_ids) or legacy aliases
   html += '<div class="stg-mcard-aliases">';
   if (aliases.length > 0) {
-    html += '<span class="stg-aliases-label">' + escapeHtml(t('settings.aliases')) + '</span>';
+    html += '<span class="stg-aliases-label">' +
+      escapeHtml(t(hasPool ? 'settings.requestIds' : 'settings.aliases')) + '</span>';
     for (var ai = 0; ai < aliases.length; ai++) {
       html += '<span class="stg-alias-chip">' +
         escapeHtml(aliases[ai]) +

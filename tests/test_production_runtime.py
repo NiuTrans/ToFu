@@ -1,0 +1,250 @@
+"""tests/test_production_runtime.py — ProductionRuntime + job manifest (P6).
+
+The P6 extraction, driven by the P7 measurement
+(docs/PRODUCTION_PIPELINE_DESIGN.md §9): the per-capability ``runtime.py`` was
+67% byte-identical across three samples, and the job-manifest / crash-resume
+pair was the same shape in two. Both now live in ``lib/production/``.
+
+What these tests pin:
+  * the substrate behaviours themselves (dedup liveness + pruning, stale
+    sweep keyed on updated_at, manifest round-trip, resume idempotence);
+  * that all THREE capabilities actually ride it — a capability that quietly
+    re-hand-rolls its own copy is the regression this epic exists to prevent;
+  * that the facade names every legacy call site imports still resolve to the
+    same live objects after the migration.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+
+import pytest
+
+pytestmark = pytest.mark.unit
+
+from lib.production.jobs import (MANIFEST_NAME, read_manifest,
+                                 resume_running_jobs, write_manifest)
+from lib.production.runtime import ProductionRuntime
+
+
+def _rt(kind='test-kind', prefix='tk', ttl=3600):
+    return ProductionRuntime(kind, id_prefix=prefix, ttl=ttl,
+                             push_channel=None, log_label='Test')
+
+
+# ══════════════════════════════════════════════════════════
+#  ProductionRuntime
+# ══════════════════════════════════════════════════════════
+
+def test_task_id_uses_prefix():
+    r = _rt(prefix='motion')
+    tid = r.new_task_id()
+    assert tid.startswith('motion_') and len(tid) == len('motion_') + 16
+
+
+def test_create_task_sets_shape_and_custom_fields():
+    r = _rt()
+    t = r.create_task('t1', meta={'a': 1}, fields={'topic': 'sky', 'w': 2})
+    assert t['task_id'] == 't1' and t['status'] == 'pending'
+    assert t['result'] is None and t['updated_at'] > 0
+    assert t['meta'] == {'a': 1}
+    assert t['topic'] == 'sky' and t['w'] == 2
+    assert r.get('t1') is t           # registered in the shared registry
+    assert t['kind'] == r.kind
+
+
+def test_dedup_index_returns_live_task_only():
+    r = _rt()
+    t = r.create_task('t1')
+    r.index_register(('k',), 't1')
+    assert r.index_get(('k',)) == 't1'          # pending counts as live
+    t['status'] = 'running'
+    assert r.index_get(('k',)) == 't1'
+    t['status'] = 'done'
+    assert r.index_get(('k',)) is None          # terminal → pruned
+    assert ('k',) not in r.dedup_index
+
+
+def test_dedup_index_prunes_vanished_task():
+    r = _rt()
+    r.create_task('t1')
+    r.index_register(('k',), 't1')
+    with r.lock:
+        r.tasks.pop('t1')
+    assert r.index_get(('k',)) is None
+    assert r.dedup_index == {}
+
+
+def test_append_event_touches_updated_at():
+    r = _rt()
+    t = r.create_task('t1')
+    t['updated_at'] = 0.0
+    seq = r.append_event(t, {'type': 'phase'})
+    assert seq == 0 and t['updated_at'] > 0
+
+
+def test_cleanup_stale_uses_updated_at_and_prunes_index():
+    """The sweep keys on updated_at (when the job last did something), which
+    is what the capabilities used — NOT TaskRuntime's finished_at."""
+    r = _rt(ttl=10)
+    live = r.create_task('live')
+    old = r.create_task('old')
+    old['status'] = 'done'
+    old['updated_at'] = 0.0                     # long past the TTL
+    r.index_register(('k',), 'old')
+    assert r.cleanup_stale() == 1
+    assert r.get('old') is None and r.get('live') is live
+    assert r.dedup_index == {}                  # orphan entry pruned
+
+
+def test_cleanup_keeps_recent_terminal_task():
+    r = _rt(ttl=3600)
+    t = r.create_task('t1')
+    t['status'] = 'done'
+    assert r.cleanup_stale() == 0
+    assert r.get('t1') is t
+
+
+# ══════════════════════════════════════════════════════════
+#  Job manifest + crash-resume rescan
+# ══════════════════════════════════════════════════════════
+
+def test_manifest_round_trip_and_none_skipping(tmp_path):
+    task = {'task_id': 'j1', 'topic': 'sky', 'lang': 'zh', 'absent': None}
+    assert write_manifest(str(tmp_path), task,
+                          fields=('task_id', 'topic', 'lang', 'absent'),
+                          kind='motion-video', state='running')
+    m = read_manifest(str(tmp_path))
+    assert m['task_id'] == 'j1' and m['topic'] == 'sky'
+    assert m['kind'] == 'motion-video' and m['state'] == 'running'
+    # A None field is omitted, so resume doesn't overwrite a default with null.
+    assert 'absent' not in m
+
+
+def test_manifest_missing_workdir_is_noop():
+    assert write_manifest('', {'task_id': 'x'}, fields=('task_id',),
+                          kind='k', state='running') is False
+
+
+def test_read_manifest_absent_or_malformed(tmp_path):
+    assert read_manifest(str(tmp_path)) is None
+    (tmp_path / MANIFEST_NAME).write_text('not json{')
+    assert read_manifest(str(tmp_path)) is None
+
+
+def _seed(jobs, jid, state):
+    d = jobs / jid
+    d.mkdir(parents=True)
+    (d / MANIFEST_NAME).write_text(json.dumps(
+        {'task_id': jid, 'state': state, 'kind': 'k'}))
+    return d
+
+
+def test_resume_only_respawns_running(tmp_path):
+    jobs = tmp_path / 'jobs'
+    for jid, state in (('r1', 'running'), ('d1', 'done'), ('e1', 'error')):
+        _seed(jobs, jid, state)
+    spawned = []
+    n = resume_running_jobs(str(jobs), is_live=lambda t: False,
+                            respawn=lambda t, w, m: spawned.append(t))
+    assert n == 1 and spawned == ['r1']
+
+
+def test_resume_is_idempotent_via_is_live(tmp_path):
+    """A job already in the registry must not be double-spawned."""
+    jobs = tmp_path / 'jobs'
+    _seed(jobs, 'r1', 'running')
+    spawned = []
+    n = resume_running_jobs(str(jobs), is_live=lambda t: True,
+                            respawn=lambda t, w, m: spawned.append(t))
+    assert n == 0 and spawned == []
+
+
+def test_resume_survives_one_bad_job(tmp_path):
+    """One job that fails to re-spawn must not stop the others."""
+    jobs = tmp_path / 'jobs'
+    _seed(jobs, 'bad', 'running')
+    _seed(jobs, 'good', 'running')
+
+    def respawn(tid, wd, m):
+        if tid == 'bad':
+            raise RuntimeError('cannot rebuild')
+
+    n = resume_running_jobs(str(jobs), is_live=lambda t: False,
+                            respawn=respawn)
+    assert n == 1          # 'good' still resumed
+
+
+def test_resume_missing_dir_is_zero(tmp_path):
+    assert resume_running_jobs(str(tmp_path / 'nope'),
+                               is_live=lambda t: False,
+                               respawn=lambda *a: None) == 0
+
+
+# ══════════════════════════════════════════════════════════
+#  All three capabilities actually ride the substrate
+# ══════════════════════════════════════════════════════════
+
+_CAPS = (
+    ('lib.motion_video.runtime', '_motion_runtime', 'motion-video'),
+    ('lib.paper.podcast_runtime', '_podcast_runtime', 'paper-podcast'),
+    ('lib.longform.runtime', '_longform_runtime', 'longform-report'),
+)
+
+
+@pytest.mark.parametrize('mod_path,attr,kind', _CAPS)
+def test_capability_rides_production_runtime(mod_path, attr, kind):
+    """Each capability must expose a ProductionRuntime — if one re-hand-rolls
+    its own dedup/lifecycle copy, this epic's whole point is lost."""
+    import importlib
+    mod = importlib.import_module(mod_path)
+    prod = getattr(mod, '_production')
+    assert isinstance(prod, ProductionRuntime)
+    assert prod.kind == kind
+    # The legacy name still points at the SAME underlying TaskRuntime, so the
+    # discovery registry and every existing call site keep working.
+    assert getattr(mod, attr) is prod.runtime
+
+
+@pytest.mark.parametrize('mod_path,attr,kind', _CAPS)
+def test_capability_facade_names_share_one_registry(mod_path, attr, kind):
+    """_tasks / _lock / _dedup_index must be the SAME objects the substrate
+    mutates — a copy would make dedup and cleanup silently no-op."""
+    import importlib
+    mod = importlib.import_module(mod_path)
+    prod = mod._production
+    prefix = {'motion-video': '_motion', 'paper-podcast': '_podcast',
+              'longform-report': '_longform'}[kind]
+    assert getattr(mod, f'{prefix}_tasks') is prod.tasks
+    assert getattr(mod, f'{prefix}_tasks_lock') is prod.lock
+    assert getattr(mod, f'{prefix}_dedup_index') is prod.dedup_index
+
+
+def test_substrate_stays_capability_agnostic():
+    """lib/production/ must not import any capability — otherwise the
+    'horizontal layer' claim is false and recipe #4 inherits the baggage."""
+    import ast
+    import lib.production.jobs as jobs_mod
+    import lib.production.runtime as rt_mod
+    for mod in (rt_mod, jobs_mod):
+        tree = ast.parse(open(mod.__file__, encoding='utf-8').read())
+        imported = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported += [a.name for a in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                imported.append(node.module)
+        for name in imported:
+            for banned in ('motion_video', 'longform', 'paper', 'tts'):
+                assert banned not in name, f'{mod.__name__} imports {name!r}'
+
+
+def test_deliverable_was_deliberately_not_extracted():
+    """P7 found sample 3 didn't need the binary deliverable channel, so it is
+    a video/podcast commonality, not a global one. Pin that it stayed out —
+    and that the package docstring says so, rather than leaving a later reader
+    to guess it was an oversight."""
+    import lib.production as prod
+    assert not hasattr(prod, 'deliverable')
+    assert 'deliverable' in (prod.__doc__ or '')

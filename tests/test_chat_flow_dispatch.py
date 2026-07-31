@@ -217,7 +217,8 @@ class AutopilotE2ETest(unittest.TestCase):
             class _SpyAdapter(orig_adapter):
                 def _push(self, msg):
                     captured_turns.append((msg.get('role'),
-                                           msg.get('_isEndpointReview', False)))
+                                           msg.get('_isEndpointReview', False),
+                                           msg.get('_isVirtualUser', False)))
                     return super()._push(msg)
             ad_mod.EndpointEventAdapter = _SpyAdapter
             try:
@@ -236,10 +237,13 @@ class AutopilotE2ETest(unittest.TestCase):
 
         # VU stopped the loop after the 2nd reply.
         self.assertEqual(vu['n'], 2)
-        # Turns alternate worker(assistant) → vu(user) → worker → vu.
+        # Turns alternate worker(assistant) → vu(user) → worker → vu. VU user
+        # turns are stamped ``_isVirtualUser`` (a routable lane, NO endpoint
+        # marker — see EndpointEventAdapter._mark_user_side), NOT
+        # ``_isEndpointReview`` (the endpoint critic's display-only lane).
         self.assertEqual(captured_turns,
-                         [('assistant', False), ('user', True),
-                          ('assistant', False), ('user', True)])
+                         [('assistant', False, False), ('user', False, True),
+                          ('assistant', False, False), ('user', False, True)])
         types = [e.get('type') for e in captured]
         self.assertIn('endpoint_iteration', types)   # worker (assistant) turns
         self.assertIn('endpoint_critic_msg', types)   # VU (user) turns

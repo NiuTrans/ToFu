@@ -147,7 +147,25 @@ if (NC === 'positional') {
 (0, eval)(fs.readFileSync(process.argv[4], 'utf8'));  // safe_html.js
 (0, eval)(fs.readFileSync(process.argv[3].replace('escape_html.js', 'translation_model.js'), 'utf8'));
 (0, eval)(fs.readFileSync(process.argv[3].replace('core/escape_html.js', 'ui/translation_indicator.js'), 'utf8'));
-(0, eval)(chatSrc);  // chat_render.js (real / neutered)
+// chat_render.js reads `_explicitBottomLatch`, which ui/streaming_render.js
+// `let`-declares. A `let` does NOT escape its own eval, so chat_render must be
+// concatenated WITH its declaring file into ONE eval — exactly what the bundler
+// does. Resolved by symbol (argv[7]) so a future extraction slice carries this
+// harness with it instead of killing it.
+//
+// Bringing streaming_render.js in ALSO brings its `let _lazyRenderedFrom/To/
+// _lazyConvId` — which now SHADOW the `global.*` seeds above. The product reads
+// the eval-scoped bindings, so the window must be driven through a setter
+// appended to the SAME source string; seeding the globals is silently inert.
+(0, eval)(fs.readFileSync(process.argv[7], 'utf8') + '\n;\n' + chatSrc + `
+;
+globalThis.__W = {
+  set from(v){ _lazyRenderedFrom = v; },
+  set to(v){ _lazyRenderedTo = v; },
+  set convId(v){ _lazyConvId = v; },
+};
+`);
+__W.from = 0; __W.to = Infinity; __W.convId = null;
 
 if (typeof renderChat !== 'function') { console.log('FAIL fn_exposed renderChat missing'); process.exit(0); }
 check('fn_exposed', true);
@@ -183,8 +201,9 @@ check('seed_ids_in_order',
 // window to uncapped so the bounded-window cap — a SEPARATE concern covered by
 // test_frontend_bounded_render_window.py — doesn't drop the freshly-inserted
 // tail. This test isolates the reconcile MATCHING logic, so the whole span is
-// in scope.
-win._lazyRenderedTo = global._lazyRenderedTo = Infinity;
+// in scope. Must go through __W: the product reads the eval-scoped `let`, not
+// the global of the same name.
+__W.to = Infinity;
 
 // ── 2) Stamp a survivable JS marker on the DOM nodes for c and d BEFORE the
 //       structural edit. A DOM node's expando property survives iff the node
@@ -264,6 +283,10 @@ process.exit(0);
 
 
 def _run(nc: str = '') -> str:
+    from tests._conv_bundle_sources import sources_defining
+    # The file that DECLARES _explicitBottomLatch (ui/streaming_render.js today).
+    latch_src = [p for p in sources_defining('_explicitBottomLatch')
+                 if p != CHAT_RENDER]
     harness = os.path.join(HERE, f'_id_keyed_reconcile_harness_{nc or "main"}.js')
     with open(harness, 'w') as f:
         f.write(_HARNESS)
@@ -275,6 +298,7 @@ def _run(nc: str = '') -> str:
              SAFE_HTML,     # argv[4]
              ROOT,          # argv[5]
              nc,            # argv[6]
+             *latch_src,    # argv[7]
              ],
             capture_output=True, text=True, timeout=60,
         )

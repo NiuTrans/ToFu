@@ -6,8 +6,11 @@ import re
 try:
     import pymupdf
 except ImportError:
-    pymupdf = None  # type: ignore[assignment]
-    # Warning already logged by _common.py — debug-only here to avoid noise
+    try:
+        import fitz as pymupdf  # PyMuPDF <1.24.3 legacy module name
+    except ImportError:
+        pymupdf = None  # type: ignore[assignment]
+        # Warning already logged by _common.py — debug-only here to avoid noise
 try:
     from PIL import Image as PILImage
 except ImportError:

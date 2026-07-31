@@ -67,7 +67,11 @@ def test_backend_emits_vu_start_before_running_virtual_user():
     src_path = os.path.join(ROOT, 'lib', 'tasks_pkg', 'autopilot.py')
     src = open(src_path, encoding='utf-8').read()
 
-    emit_marker = 'EventType.AUTOPILOT_VU_START'
+    # Anchor on the maybe_run_autopilot emit STATEMENT specifically —
+    # ``_install_vu_carrier_contract`` (added 2026-07-26) also emits
+    # EventType.AUTOPILOT_VU_START (the carrier-stream seed) and sits EARLIER
+    # in the file; keying on the bare enum name would measure the wrong site.
+    emit_marker = '_start_evt = build_event(EventType.AUTOPILOT_VU_START'
     call_marker = 'vu_result = run_virtual_user(task, vu_msg_id=vu_msg_id)'
     assert emit_marker in src, 'AUTOPILOT_VU_START emit not found'
     assert call_marker in src, 'run_virtual_user call not found'
@@ -107,7 +111,7 @@ global.window = win;
 global.document = win.document;
 global.console = console;
 
-const _I18N = { 'autopilot.warming': 'Autopilot 启动中…' };
+const _I18N = { 'autopilot.warming': 'Autopilot 启动中…', 'stream.phase.waiting': '等待中…' };
 win.t = global.t = (k) => (k in _I18N ? _I18N[k] : k);
 win.escapeHtml = global.escapeHtml = (s) =>
   String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -122,11 +126,30 @@ win.renderMarkdown = global.renderMarkdown = (s) => String(s == null ? '' : s);
 win.activeConvId = global.activeConvId = 'C1';
 win.conversations = global.conversations = [{ id: 'C1', messages: [] }];
 
+/* updateStreamingUI (eval'd below) reads this dep set at CALL time — stub it
+ * BEFORE any render path fires (the eager-create warmup label flows through
+ * the status zone which updateStreamingUI paints). Minimal faithful no-ops. */
+win.activeStreams = global.activeStreams = new Map();
+win.getToolRoundsFromMsg = global.getToolRoundsFromMsg = (m) => (m && m.toolRounds) || [];
+win._syncToolRoundsDOM = global._syncToolRoundsDOM = () => {};
+win._renderTurnHead = global._renderTurnHead = () => '';
+win._renderSoloRoundTag = global._renderSoloRoundTag = () => '';
+win._turnLabelText = global._turnLabelText = () => '';
+win._isRoundSwarm = global._isRoundSwarm = (r) => !!(r && r._swarm);
+win._renderUnifiedToolLine = global._renderUnifiedToolLine = () => '';
+win._buildSwarmPanelHTML = global._buildSwarmPanelHTML = () => '';
+win.getSelection = global.getSelection = () => ({ isCollapsed: true, rangeCount: 0 });
+global.requestAnimationFrame = win.requestAnimationFrame = (fn) => 0;
+
 const streamBufs = new Map();
 win.streamBufs = global.streamBufs = streamBufs;
-win.twStart = global.twStart = (cid) => { streamBufs.set(cid, { content: '', thinking: '', toolRounds: [], phase: null }); };
+win.streamSessions = global.streamSessions = new Map();
+win.getStreamSession = global.getStreamSession = (cid) => { let s = win.streamSessions.get(cid); if (!s) { s = { phase: null }; win.streamSessions.set(cid, s); } return s; };
+win.setStreamPhase = global.setStreamPhase = (cid, p) => { if (!win.streamSessions.has(cid) && !(typeof activeStreams !== "undefined" && activeStreams.has(cid))) return; win.getStreamSession(cid).phase = p; };
+win.clearStreamSession = global.clearStreamSession = (cid) => { win.streamSessions.delete(cid); };
+win.twStart = global.twStart = (cid) => { streamBufs.set(cid, { content: '', thinking: '', toolRounds: [], phase: null }); win.getStreamSession(cid); };
 win.twUpdate = global.twUpdate = () => {};
-win.twStop = global.twStop = (cid) => { streamBufs.delete(cid); };
+win.twStop = global.twStop = (cid) => { streamBufs.delete(cid); win.clearStreamSession(cid); };
 
 const _noop = () => {}; const _noopStr = () => '';
 for (const [name, fn] of [
@@ -174,10 +197,29 @@ check('bubble_created_on_start', !!entry);
 check('bubble_is_streaming_vu', !!entry && entry.msg._isVirtualUser && entry.msg._streamingVu === true);
 check('bubble_empty_content', !!entry && (entry.msg.content || '') === '');
 check('streaming_msg_in_dom', !!document.getElementById('streaming-msg'));
-// And it renders the short warm-up label (composing pulse), not a hang.
+/* The warmup placeholder is a PAINTED pulse in the status zone
+ * (updateStreamingUI seeds t('stream.phase.waiting') — 'Waiting…' — until a
+ * real frame lands); 'autopilot.warming' is the LABEL the bubble skeleton
+ * bakes for the autopilot role, visible via the doc's zones once the frame
+ * paints. Both matter: the bubble must not be blank, and the warmup text
+ * must be the SHORT label, never the long composing sentence. */
+/* The warmup affordance lives in the STATUS ZONE — which the bubble
+ * skeleton does NOT even contain (its defaultStatus is suppressed). The
+ * zone + the waiting pulse are created by _ensureStreamZones the first time
+ * the frame pipeline runs (production twStart → twUpdate drives
+ * updateStreamingUI every ~100ms during the gap). Drive that path once:
+ * the bubble gains the status zone with a painted pulse, and the warmup
+ * text is the SHORT label — never the long composing sentence. */
+updateStreamingUI({ content: '', thinking: '', toolRounds: [], phase: null });
 const body = document.getElementById('streaming-body');
 const html = body ? body.innerHTML : (document.getElementById('chatInner').innerHTML);
-check('warmup_label_shown', html.includes('Autopilot 启动中…'));
+const statusZone = body ? body.querySelector('[data-zone="status"]') : null;
+const statusHtml = statusZone ? statusZone.innerHTML : '';
+check('warmup_label_shown',
+  html.includes('Autopilot 启动中…') || statusHtml.includes('等待中…') ||
+  statusHtml.includes('Waiting'));
+check('never_long_sentence_eager',
+  !html.includes('正在生成下一条用户回复'));
 
 console.log(out.join('\n'));
 """
@@ -208,7 +250,7 @@ def test_vu_start_alone_creates_placeholder_eagerly():
     output = _run(nc=False)
     fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
     assert not fails, 'eager-vu-start failures:\n' + output
-    assert output.count('PASS') >= 7, f'expected >=7 PASS lines:\n{output}'
+    assert output.count('PASS') >= 8, f'expected >=8 PASS lines:\n{output}'
 
 
 @pytest.mark.skipif(not _node_deps_available(),

@@ -14,6 +14,7 @@ from lib.model_info._family import (
     is_claude,
     is_deepseek,
     is_gemini,
+    is_gpt_56,
 )
 
 logger = get_logger(__name__)
@@ -36,6 +37,8 @@ _GEMINI_EFFORT_MAP = {
     'low': 'low',
     'medium': 'medium',
     'high': 'high', 'xhigh': 'high', 'max': 'high',
+    # 'ultra' is a GPT-5.6-only tier — Gemini has no equivalent, clamp to high.
+    'ultra': 'high',
 }
 
 
@@ -54,6 +57,91 @@ def gemini_reasoning_effort(effort, thinking_enabled: bool = True) -> str:
     if not thinking_enabled:
         return 'minimal'
     return _GEMINI_EFFORT_MAP.get((effort or 'medium').lower(), 'medium')
+
+
+# OpenAI GPT-5 reasoning-effort ladder.
+#
+# The GPT-5 family (gpt-5, gpt-5.2, gpt-5.4, gpt-5.6, …) is controlled by the
+# OpenAI-native ``reasoning_effort`` string: minimal / low / medium / high.
+# GPT-5.6 (May 2026) introduced a fifth ``ultra`` tier above ``high`` for the
+# hardest problems. Tofu's depth ladder (off/low/medium/high/xhigh/max/ultra)
+# collapses onto these: ``xhigh`` and ``max`` are Claude-ladder rungs with no
+# GPT equivalent (clamp to ``high``), and ``ultra`` clamps to ``high`` on any
+# GPT-5 model older than 5.6.
+_GPT_EFFORT_MAP = {
+    'off': 'minimal', 'minimal': 'minimal',
+    'low': 'low',
+    'medium': 'medium',
+    'high': 'high', 'xhigh': 'high', 'max': 'high',
+    'ultra': 'ultra',
+}
+
+
+def gpt_reasoning_effort(effort, thinking_enabled: bool = True,
+                         model: str = '') -> str:
+    """Map a Tofu thinking-depth value to a GPT-5 ``reasoning_effort`` string.
+
+    Args:
+        effort: Tofu depth ladder value (off/low/medium/high/xhigh/max/ultra)
+            or None.
+        thinking_enabled: When False, force ``minimal`` (GPT-5's lowest tier).
+        model: The concrete model id, used to gate the ``ultra`` tier — only
+            GPT-5.6+ accepts it; older GPT-5.x downgrade ``ultra`` to ``high``.
+
+    Returns:
+        One of ``'minimal'`` / ``'low'`` / ``'medium'`` / ``'high'`` /
+        ``'ultra'``.
+    """
+    if not thinking_enabled:
+        return 'minimal'
+    eff = _GPT_EFFORT_MAP.get((effort or 'medium').lower(), 'medium')
+    if eff == 'ultra' and not is_gpt_56(model):
+        logger.debug('[ModelInfo] reasoning_effort=ultra not supported on %s '
+                     '— downgrading to high', model)
+        eff = 'high'
+    return eff
+
+
+# Moonshot Kimi K3 reasoning-effort ladder.
+#
+# K3 always thinks (thinking cannot be disabled) and takes the TOP-LEVEL
+# ``reasoning_effort`` string: low / high / max (default max) — per the
+# official quickstart (platform.kimi.ai/docs/guide/kimi-k3-quickstart) and
+# verified live against the sankuai gateway 2026-07-24. Sending any
+# temperature other than 1.0 earns an HTTP 400
+# (``invalid temperature: only 1 is allowed for this model``), so K3 bodies
+# must omit temperature entirely.
+#
+# Tofu's depth ladder (off/low/medium/high/xhigh/max/ultra) collapses onto
+# K3's three rungs, rounding UP so a depth never gets less reasoning than
+# asked for. ``off`` maps to ``low`` — the closest legal rung, since K3 has
+# no true off switch.
+_KIMI_K3_EFFORT_MAP = {
+    'off': 'low', 'minimal': 'low',
+    'low': 'low',
+    'medium': 'high',
+    'high': 'high',
+    'xhigh': 'max', 'max': 'max',
+    # 'ultra' is a GPT-5.6-only tier — K3's top rung is max.
+    'ultra': 'max',
+}
+
+
+def kimi_k3_reasoning_effort(effort, thinking_enabled: bool = True) -> str:
+    """Map a Tofu thinking-depth value to a Kimi K3 ``reasoning_effort``.
+
+    Args:
+        effort: Tofu depth ladder value (off/low/medium/high/xhigh/max/ultra)
+            or None.
+        thinking_enabled: When False, force ``low`` — K3 cannot truly disable
+            thinking, so ``low`` is the cheapest legal rung.
+
+    Returns:
+        One of ``'low'`` / ``'high'`` / ``'max'``.
+    """
+    if not thinking_enabled:
+        return 'low'
+    return _KIMI_K3_EFFORT_MAP.get((effort or 'medium').lower(), 'high')
 
 
 

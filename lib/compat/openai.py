@@ -20,6 +20,7 @@ from typing import AsyncGenerator
 
 from lib.compat._common import (
     apply_common_cfg,
+    apply_thinking_cfg,
     apply_tools_and_personal_defaults,
     short_id,
 )
@@ -57,14 +58,12 @@ def translate_openai_request(body: dict) -> tuple[list[dict], dict, dict]:
 
     apply_tools_and_personal_defaults(cfg, body)
 
-    # Reasoning / thinking — OpenAI's `reasoning_effort` (o-series) maps
-    # to our `thinkingDepth`.
-    eff = body.get('reasoning_effort') or body.get('reasoning', {}).get('effort')
-    if eff:
-        depth_map = {'low': 'medium', 'medium': 'high',
-                      'high': 'max', 'minimal': 'medium'}
-        cfg['thinkingDepth'] = depth_map.get(eff, eff)
-        cfg['thinkingEnabled'] = True
+    # Reasoning / thinking — the effort rung maps 1:1 onto Tofu's depth
+    # ladder (see lib/compat/_common._EFFORT_RUNGS). The old table here
+    # shifted every rung UP one (low→medium, medium→high, high→max) and had
+    # no `xhigh` at all, so a caller asking for `low` silently paid for
+    # `medium`. Shared with the Anthropic surface so both read one vocabulary.
+    apply_thinking_cfg(cfg, body)
 
     options = {
         'id': body.get('id') or '',

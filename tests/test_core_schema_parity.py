@@ -239,6 +239,7 @@ LIVE_PG_PAPER_LIBRARY = """
         arxiv_id TEXT NOT NULL DEFAULT '',
         paper_hash TEXT NOT NULL DEFAULT '',
         parsed_text TEXT NOT NULL DEFAULT '',
+        parser_version TEXT NOT NULL DEFAULT '',
         qa_history TEXT NOT NULL DEFAULT '[]',
         images TEXT NOT NULL DEFAULT '[]',
         babel_cache TEXT NOT NULL DEFAULT '{}',
@@ -259,6 +260,7 @@ LIVE_SQLITE_PAPER_LIBRARY = """
         arxiv_id TEXT NOT NULL DEFAULT '',
         paper_hash TEXT NOT NULL DEFAULT '',
         parsed_text TEXT NOT NULL DEFAULT '',
+        parser_version TEXT NOT NULL DEFAULT '',
         qa_history TEXT NOT NULL DEFAULT '[]',
         images TEXT NOT NULL DEFAULT '[]',
         babel_cache TEXT NOT NULL DEFAULT '{}',
@@ -884,7 +886,9 @@ LIVE_PG_MESSAGE_QUEUE = """
         position INTEGER NOT NULL DEFAULT 1,
         kind TEXT NOT NULL DEFAULT 'real',
         priority INTEGER NOT NULL DEFAULT 100,
-        created_at BIGINT NOT NULL
+        created_at BIGINT NOT NULL,
+        leased_until BIGINT,
+        lease_task_id TEXT NOT NULL DEFAULT ''
     )
 """
 LIVE_SQLITE_MESSAGE_QUEUE = """
@@ -896,7 +900,9 @@ LIVE_SQLITE_MESSAGE_QUEUE = """
         position INTEGER NOT NULL DEFAULT 1,
         kind TEXT NOT NULL DEFAULT 'real',
         priority INTEGER NOT NULL DEFAULT 100,
-        created_at INTEGER NOT NULL
+        created_at INTEGER NOT NULL,
+        leased_until INTEGER,
+        lease_task_id TEXT NOT NULL DEFAULT ''
     )
 """
 
@@ -1248,6 +1254,8 @@ LIVE_PG_PROJECT_TASKS = """
         wait_paths TEXT NOT NULL DEFAULT '[]',
         dispatch_target TEXT NOT NULL DEFAULT '',
         write_set TEXT NOT NULL DEFAULT '[]',
+        block_question TEXT NOT NULL DEFAULT '',
+        human_answer TEXT NOT NULL DEFAULT '',
         created_at BIGINT NOT NULL DEFAULT 0,
         updated_at BIGINT NOT NULL DEFAULT 0,
         PRIMARY KEY (id)
@@ -1271,6 +1279,8 @@ LIVE_SQLITE_PROJECT_TASKS = """
         wait_paths TEXT NOT NULL DEFAULT '[]',
         dispatch_target TEXT NOT NULL DEFAULT '',
         write_set TEXT NOT NULL DEFAULT '[]',
+        block_question TEXT NOT NULL DEFAULT '',
+        human_answer TEXT NOT NULL DEFAULT '',
         created_at INTEGER NOT NULL DEFAULT 0,
         updated_at INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (id)

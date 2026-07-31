@@ -112,10 +112,10 @@ def _tools_summary() -> list[dict]:
         from lib.tools import (
             BROWSER_TOOLS, CODE_EXEC_TOOL, FETCH_URL_TOOL,
             PROJECT_TOOLS, READ_FILES_TOOL,
-            SEARCH_TOOL_MULTI,
+            build_search_tool,
         )
         groups = {
-            'search': [SEARCH_TOOL_MULTI],
+            'search': [build_search_tool()],
             'fetch': [FETCH_URL_TOOL],
             'project': [READ_FILES_TOOL] + list(PROJECT_TOOLS),
             'code_exec': [CODE_EXEC_TOOL],
@@ -396,6 +396,7 @@ def _relay_summary() -> dict:
 def _build_capabilities() -> dict:
     """Assemble the full capabilities payload (uncached)."""
     from lib.api_keys import ALL_SCOPES
+    from lib.model_info.capability_taxonomy import taxonomy_payload
     try:
         from lib.version import __version__ as ver
     except ImportError as e:
@@ -415,6 +416,10 @@ def _build_capabilities() -> dict:
         'scopes': sorted(ALL_SCOPES),
         'config_schema': _config_schema(),
         'events': _events_contract(),
+        # Single-source-of-truth capability classification. Foreign frontends
+        # use ``chat_excluded_caps`` to filter model pickers; the dispatcher's
+        # own ``issubset`` set is exposed for parity/debugging.
+        'capability_taxonomy': taxonomy_payload(),
         'compat': {
             'openai_chat_completions': '/v1/chat/completions',
             'openai_models': '/v1/models',

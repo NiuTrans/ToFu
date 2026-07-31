@@ -63,7 +63,6 @@ declare var __sse_test__: any;           // static/js/ui/sse_pipeline.js — win
 declare var __swarmPushWired: any;       // static/js/ui/swarm_push.js — window.*
 declare var presenceRefresh: any;        // static/js/presence.js — window.presenceRefresh
 declare var projectBrainRefresh: any;    // static/js/project-brain.js — window.projectBrainRefresh
-declare var convInfluenceRefresh: any;   // static/js/project-brain.js — window.convInfluenceRefresh (conv influence bar)
 declare var openProjectBrain: any;       // static/js/project-brain.js — window.openProjectBrain (called bare in presence.js)
 declare var closeProjectBrain: any;      // static/js/project-brain.js — window.closeProjectBrain
 declare var toggleProjectBrain: any;     // static/js/project-brain.js — window.toggleProjectBrain

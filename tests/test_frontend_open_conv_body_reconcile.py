@@ -106,20 +106,36 @@ global.ConvCache = {
 // getActiveConv lives in core.js — stub it to the in-memory list.
 global.getActiveConv = () => conversations.find((c) => c.id === activeConvId) || null;
 
-// ── The re-pull counter: record every loadConversationMessages(convId). ──
+// ── The re-pull counter: record every body re-pull the merge triggers. ──
+// After the ui.js/core split, loadConversationsFromServer fetches the sidebar
+// list through Api.conversations.listMeta (not raw fetch), and routes a
+// CONTENT-ONLY append on a settled open conv through _verifyActiveConvFromServer
+// while a COUNT increase / pinned conv still uses loadConversationMessages. BOTH
+// are "the body re-pull fired" — the counter records either.
 let repullCalls = [];
 // Server meta list for the NEXT loadConversationsFromServer() call.
 let SERVER_LIST = [];
-global.fetch = async () => ({
+const _metaResp = () => ({
   status: 200, ok: true,
   headers: { get: () => null },
   json: async () => SERVER_LIST,
   clone() { return this; },
 });
+global.fetch = async () => _metaResp();
+global.Api = {
+  conversations: {
+    listMeta: async () => _metaResp(),
+  },
+};
 
 global.conversations = [];
 
 eval(fs.readFileSync(process.argv[2], 'utf8'));  // REAL core/conversations.js
+// Extracted leaf modules (pt_3879f00e decomposition): the meta-merge calls
+// _applySettingsToConv (core/conv_apply_settings.js); the persist helpers live
+// in core/conv_persist_helpers.js. Eval them so harness scope matches the
+// shipped bundle.
+for (const extra of process.argv.slice(3)) eval(fs.readFileSync(extra, 'utf8'));
 global.conversations = conversations;
 
 // Override the real loadConversationMessages with a COUNTER (late-bound global
@@ -128,6 +144,15 @@ loadConversationMessages = async (cid) => {
   repullCalls.push(cid);
   const c = conversations.find((x) => x.id === cid);
   if (c) c._needsLoad = false;
+  return c || null;
+};
+// The content-only append path (settled open conv, equal count) adopts via
+// _verifyActiveConvFromServer instead of loadConversationMessages. It lives in
+// another module (not conversations.js), so define it here as a re-pull counter.
+global._verifyActiveConvFromServer = async (cid) => {
+  repullCalls.push(cid);
+  const c = conversations.find((x) => x.id === cid);
+  if (c) { c._needsLoad = false; c._contentGrewNeedsVerify = false; }
   return c || null;
 };
 
@@ -204,9 +229,14 @@ def _run(js_path: str) -> subprocess.CompletedProcess:
     harness = os.path.join(HERE, '_open_conv_body_reconcile_harness.js')
     with open(harness, 'w') as f:
         f.write(_HARNESS)
+    extra_js = [
+        os.path.join(JS_DIR, 'core', 'conv_apply_settings.js'),
+        os.path.join(JS_DIR, 'core', 'conv_persist_helpers.js'),
+        os.path.join(JS_DIR, 'core', 'pending_sync.js'),
+    ]
     try:
         return subprocess.run(
-            ['node', harness, js_path],
+            ['node', harness, js_path, *extra_js],
             capture_output=True, text=True, timeout=60,
         )
     finally:
@@ -240,10 +270,10 @@ def test_NC_content_only_trigger_is_load_bearing(tmp_path):
     with open(conv_js, encoding='utf-8') as f:
         src = f.read()
 
-    needle = 'if (_contentStale) local._needsLoad = true;'
+    needle = 'if (_contentStale) {\n              local._needsLoad = true;'
     assert src.count(needle) == 1, 'content-only trigger fragment drifted — update the neuter target'
     # Revert to a condition that can never fire → old count-only behaviour.
-    neutered = src.replace(needle, 'if (false) local._needsLoad = true;', 1)
+    neutered = src.replace(needle, 'if (false) {\n              local._needsLoad = true;', 1)
     assert neutered != src, 'neuter produced no change'
 
     copy = tmp_path / 'conversations_neutered_trigger.js'

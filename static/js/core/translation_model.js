@@ -220,7 +220,7 @@ function isStalePartialTranslation(msg, policy) {
  * @param {object} msg
  * @param {object} conv  (unused today; kept so callers pass context and the
  *                        signature is stable if per-conv policy is added)
- * @param {{autoTranslateOn:boolean, policy?:object}} opts
+ * @param {{autoTranslateOn?:boolean, policy?:object}} opts
  * @returns {boolean}
  */
 function needsTranslation(msg, conv, opts) {

@@ -32,9 +32,11 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 
 from lib.log import get_logger
 from lib.conversations.search_index import build_search_text
+from lib.database._wrappers import json_dumps_pg
 
 logger = get_logger(__name__)
 
@@ -48,9 +50,56 @@ def _truthy(v) -> bool:
     return str(v or '').strip().lower() in ('1', 'true', 'yes', 'on')
 
 
+_flag_file_engaged_logged = False
+
+
+def _flag_file_path() -> str:
+    from lib.runtime_paths import data_root
+    return os.path.join(data_root(), 'config', 'messages_rows_write.flag')
+
+
+def _flag_file_on(path=None) -> bool:
+    """Read the persistent write-flag file (pt_59140ecd ④).
+
+    The owner-confirmed flip must survive EVERY future restart path — an
+    env-var-only flip would silently revert the next time someone relaunches
+    the server from a terminal that doesn't export TOFU_MESSAGES_ROWS, and
+    the mirror would rot undetected. The deployment-local flag file makes
+    the flip durable state, not launch-shell state. The env var stays the
+    override in BOTH directions (``=0`` is the emergency kill switch even
+    with the file present). Under pytest the default deployment path is
+    never consulted (deployment state must not leak into the suite); tests
+    exercise the file by passing an explicit ``path``.
+    """
+    if path is None:
+        if 'pytest' in sys.modules:
+            return False
+        path = _flag_file_path()
+    try:
+        with open(path, encoding='utf-8') as f:
+            return f.read().strip().lower() in ('1', 'true', 'on', 'yes')
+    except OSError as _e:
+        logger.debug('flag file on: unreadable (%s)', _e)
+        return False
+
+
 def rows_write_enabled() -> bool:
-    """Whether dual-write / backfill into conversation_messages is active."""
-    return _truthy(os.environ.get('TOFU_MESSAGES_ROWS'))
+    """Whether dual-write / backfill into conversation_messages is active.
+
+    Precedence: the env var ALWAYS wins when set (either value — ``=0`` is
+    the kill switch); otherwise the persistent flag file decides.
+    """
+    env = os.environ.get('TOFU_MESSAGES_ROWS')
+    if env is not None and str(env).strip() != '':
+        return _truthy(env)
+    on = _flag_file_on()
+    if on:
+        global _flag_file_engaged_logged
+        if not _flag_file_engaged_logged:
+            _flag_file_engaged_logged = True
+            logger.info('[messages_rows] write flag engaged via persistent '
+                        'flag file (%s)', _flag_file_path())
+    return on
 
 
 def rows_read_enabled() -> bool:
@@ -76,6 +125,15 @@ def message_to_row(conv_id: str, seq: int, msg: dict, *, now_ms: int = 0) -> dic
     The full original ``msg`` is stored verbatim under ``meta`` so
     :func:`row_to_message` can return the byte-for-byte original. The hoisted
     columns are derived views used only for search reconstruction + addressing.
+
+    ``meta`` and ``content_json`` are bound to JSONB columns, so they MUST be
+    serialized with :func:`~lib.database._wrappers.json_dumps_pg` — the same
+    serializer the authoritative blob writer uses. A bare ``json.dumps``
+    encodes ``U+0000`` as ``\\u0000``, which PostgreSQL's JSONB parser rejects
+    (``UntranslatableCharacter``); since ``dual_write_conv`` swallows write
+    errors, such a row is silently dropped and the conversation is left with
+    fewer rows than blob messages — the "partial backfill" shape that a
+    windowed read renders as a silently truncated conversation.
     """
     if not isinstance(msg, dict):
         msg = {}
@@ -84,7 +142,7 @@ def message_to_row(conv_id: str, seq: int, msg: dict, *, now_ms: int = 0) -> dic
     content_str = ''
     content_json = '[]'
     if isinstance(content, list):
-        content_json = json.dumps(content, ensure_ascii=False)
+        content_json = json_dumps_pg(content)
     elif isinstance(content, str):
         content_str = content
     thinking = msg.get('thinking', '')
@@ -102,7 +160,7 @@ def message_to_row(conv_id: str, seq: int, msg: dict, *, now_ms: int = 0) -> dic
         'content_json': content_json,
         'thinking': thinking,
         'translated_content': translated,
-        'meta': json.dumps(msg, ensure_ascii=False),
+        'meta': json_dumps_pg(msg),
         'created_at': now_ms,
         'updated_at': now_ms,
     }
@@ -166,8 +224,22 @@ def backfill_conv(db, conv_id: str, messages, *, now_ms: int = 0, commit: bool =
     from lib.database._core_schema import CONVERSATION_MESSAGES, upsert
     msgs = _parse_messages(messages)
     db.execute('DELETE FROM conversation_messages WHERE conv_id=?', (conv_id,))
+    # Real blobs can carry TWO messages sharing one _msgId (the pt_97f32163
+    # duplicate-reply incident shape — e.g. prod conv ms1uojtuhk9fze). The
+    # partial unique index idx_conv_msgs_msgid(conv_id, msg_id) rejects the
+    # second occurrence, so per conv only the FIRST keeps the SQL-side id;
+    # later duplicates are written with msg_id='' (outside the index). The
+    # original id is preserved verbatim in meta, so row_to_message stays
+    # lossless — a dup id is not uniquely addressable by definition.
+    seen_msg_ids: set = set()
     for seq, msg in enumerate(msgs):
         row = message_to_row(conv_id, seq, msg, now_ms=now_ms)
+        mid = row['msg_id']
+        if mid:
+            if mid in seen_msg_ids:
+                row['msg_id'] = ''
+            else:
+                seen_msg_ids.add(mid)
         upsert(db, CONVERSATION_MESSAGES, row,
                conflict_cols=['conv_id', 'seq'], commit=False)
     if commit:
@@ -175,8 +247,25 @@ def backfill_conv(db, conv_id: str, messages, *, now_ms: int = 0, commit: bool =
     return len(msgs)
 
 
-def dual_write_conv(db, conv_id: str, messages, *, now_ms: int = 0) -> None:
+def dual_write_conv(db, conv_id: str, messages, *, now_ms: int = 0,
+                    changed_seqs=None) -> None:
     """Mirror a JSONB ``messages`` write into conversation_messages rows.
+
+    Incremental (2026-07-27, pt_59140ecd): the previous shape delegated to
+    ``backfill_conv`` — a DELETE-all + per-row re-upsert of the WHOLE history
+    on every write, so a 1163-message conversation paid 1163 row round-trips
+    per appended message, strictly worse than the blob write being mirrored
+    (docs/MESSAGES_ROWS_WRITE_FLIP_EVIDENCE.md §4.2).
+
+    ``changed_seqs``: callers that KNOW which positions they edited in place
+    (translate commit, patch-by-id, …) pass them — only those rows are
+    re-mirrored (plus truncation repair). When ``None`` the mirror infers the
+    change from the row count: tail appends write only the new rows plus a
+    re-write of the previous tip row, which also covers the dominant
+    same-count mutation (a streaming task finalizing its LAST message).
+    A same-count edit NOT at the tip is invisible to the count heuristic —
+    edit-capable callers MUST pass ``changed_seqs`` (the fleet parity gate
+    is the backstop for anything that slips through).
 
     Best-effort: a no-op when the flag is off, and swallows every exception so
     a mirroring failure can NEVER break the authoritative JSONB write path.
@@ -184,10 +273,60 @@ def dual_write_conv(db, conv_id: str, messages, *, now_ms: int = 0) -> None:
     if not rows_write_enabled():
         return
     try:
-        backfill_conv(db, conv_id, messages, now_ms=now_ms, commit=False)
+        _mirror_conv_rows(db, conv_id, messages, now_ms=now_ms,
+                          changed_seqs=changed_seqs)
     except Exception as e:  # pragma: no cover - defensive
         logger.warning('[messages_rows] dual-write mirror failed conv=%s (non-fatal): %s',
                        (conv_id or '')[:12], e)
+
+
+def _mirror_conv_rows(db, conv_id: str, messages, *, now_ms: int = 0,
+                      changed_seqs=None) -> None:
+    """Incremental mirror of the authoritative blob into rows.
+
+    Cost per write on the dominant append path: one index-only COUNT plus
+    ≤2 row upserts (tip refresh + the new row), versus history-length
+    DELETE+reinsert before. Never commits — the caller owns the transaction
+    boundary (pt_7e4afe73).
+    """
+    from lib.database._core_schema import CONVERSATION_MESSAGES, upsert
+    msgs = _parse_messages(messages)
+    n = len(msgs)
+    if changed_seqs is not None:
+        seqs = sorted({s for s in changed_seqs if isinstance(s, int) and 0 <= s < n})
+    else:
+        cnt_row = db.execute(
+            'SELECT COUNT(*) AS n FROM conversation_messages WHERE conv_id=?',
+            (conv_id,)).fetchone()
+        old = int(cnt_row['n'] if hasattr(cnt_row, 'keys') else cnt_row[0]) if cnt_row else 0
+        # Re-write from the previous tip onward: pure appends mirror the new
+        # rows + refresh the tip (streaming writers mutate the last message
+        # in place with the count unchanged); a fresh conv (old=0) falls out
+        # as a full insert.
+        start = max(0, min(old, n) - 1)
+        seqs = list(range(start, n))
+    for seq in seqs:
+        row = message_to_row(conv_id, seq, msgs[seq], now_ms=now_ms)
+        mid = row['msg_id']
+        if mid:
+            # A DIFFERENT seq may already own this msg_id (real blobs carry
+            # duplicate _msgIds — the pt_97f32163 shape). The partial unique
+            # index would reject the write AND every later mirror for this
+            # conv; degrade the later duplicate to msg_id='' instead (the
+            # original id survives verbatim in meta). Index-only probe,
+            # skipped entirely for id-less rows.
+            owner = db.execute(
+                'SELECT seq FROM conversation_messages WHERE conv_id=? '
+                'AND msg_id=? AND seq<>? LIMIT 1', (conv_id, mid, seq)).fetchone()
+            if owner is not None:
+                row['msg_id'] = ''
+        upsert(db, CONVERSATION_MESSAGES, row,
+               conflict_cols=['conv_id', 'seq'], commit=False)
+    # Truncation repair: the blob is authoritative, so any row beyond its tail
+    # is stale (branch delete / regen). Index-range delete — cheap no-op when
+    # nothing is there.
+    db.execute('DELETE FROM conversation_messages WHERE conv_id=? AND seq>=?',
+               (conv_id, n))
 
 
 # ── Windowed read (tail window + page-up) ─────────────────────────────────
@@ -323,9 +462,58 @@ def verify_conv_parity(db, conv_id: str) -> dict:
     }
 
 
+def mirror_write_and_commit(db, conv_id: str, messages, *, now_ms: int = 0,
+                            changed_seqs=None, full: bool = False) -> None:
+    """The one-line dual-write hook for full-blob writers (pt_59140ecd ②).
+
+    Call this AFTER the authoritative ``conversations.messages`` write has
+    committed (or at the end of a function whose teardown commits): mirrors
+    into ``conversation_messages`` rows via :func:`dual_write_conv` and —
+    only when the write flag is on — commits the mirror rows immediately so
+    they never hang uncommitted on a pooled connection (the pt_7e4afe73
+    durability gap). The flag-off path is a pure no-op, byte-identical to
+    not calling at all, so fanning this out to every blob writer is
+    behaviour-neutral until the flag flips.
+
+    ``full=True`` forces a complete rebuild (DELETE + re-insert of every row)
+    — use it for REWRITE-class writers that re-sequence or surgically rewrite
+    the array (reconcile / killed-recovery), where the count heuristic and
+    seq hints cannot express the change. These paths are rare, so the
+    O(history) cost is acceptable.
+
+    ``lib/chat/persistence.py::persist_conv_messages`` keeps its annotated
+    inline version (it interleaves the commit with the rev read-back).
+
+    **NEVER RAISES.** The whole body is defended because the mirror is
+    best-effort by contract: the authoritative blob write has ALREADY
+    committed by the time callers reach this hook, so an exception escaping
+    here would abort a caller mid-way through work that is already durable.
+    That is not hypothetical — a missing ``full`` parameter made this hook
+    raise ``NameError`` on 2026-07-27 and silently killed the autopilot baton
+    hand-off, the scheduler's task spawn, and swarm auto-continue, each of
+    which had already committed its messages. Callers additionally guard the
+    call itself, because a signature-level ``TypeError`` cannot be caught from
+    inside the callee.
+    """
+    try:
+        if not rows_write_enabled():
+            return
+        if full:
+            backfill_conv(db, conv_id, messages, now_ms=now_ms, commit=False)
+        else:
+            dual_write_conv(db, conv_id, messages, now_ms=now_ms,
+                            changed_seqs=changed_seqs)
+        db.commit()
+    except Exception as e:
+        logger.warning('[messages_rows] mirror failed conv=%s (non-fatal, '
+                       'JSONB truth already durable): %s',
+                       (conv_id or '')[:12], e, exc_info=True)
+
+
 __all__ = [
     'rows_write_enabled', 'rows_read_enabled',
     'message_to_row', 'row_to_message', 'rows_to_messages',
-    'backfill_conv', 'dual_write_conv', 'load_message_window',
+    'backfill_conv', 'dual_write_conv', 'mirror_write_and_commit',
+    'load_message_window',
     'verify_search_text_parity', 'verify_conv_parity',
 ]

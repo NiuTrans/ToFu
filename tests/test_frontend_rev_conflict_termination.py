@@ -35,11 +35,12 @@ import subprocess
 
 import pytest
 
+from tests._conv_bundle_sources import source_argv
+
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS_DIR = os.path.join(ROOT, 'static', 'js')
 
 
 def _node_available() -> bool:
@@ -106,7 +107,13 @@ global.Api = {
   },
 };
 
-eval(fs.readFileSync(process.argv[2], 'utf8'));
+/* Eval every shipped file the bundle needs for syncConversationToServer +
+ * the rebase/pending-sync helpers, in production order (see
+ * tests/_conv_bundle_sources.py). A single hard-coded core/conversations.js
+ * broke when those helpers were extracted in pt_3879f00e slice 3. */
+for (let i = 2; i < process.argv.length; i++) {
+  eval(fs.readFileSync(process.argv[i], 'utf8'));
+}
 
 const out = [];
 function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
@@ -140,12 +147,13 @@ function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
 
 
 def _run(nconflicts: int):
-    conv_js = os.path.join(JS_DIR, 'core', 'conversations.js')
+    paths = source_argv('syncConversationToServer', '_rebaseUnackedTail',
+                        '_clearPendingSyncMarkers')
     harness = os.path.join(HERE, f'_term_harness_{nconflicts}.js')
     with open(harness, 'w') as f:
         f.write(_HARNESS.replace('__NCONFLICTS__', str(nconflicts)))
     try:
-        return subprocess.run(['node', harness, conv_js],
+        return subprocess.run(['node', harness, *paths],
                               capture_output=True, text=True, timeout=60)
     finally:
         try:
@@ -190,7 +198,8 @@ def test_sustained_conflict_leaves_pending_never_strands(tmp_path):
     pending-sync marker stays set and the poller re-attempts later. We assert
     the message survived in the local conv (would be re-offered next cycle) and
     the server was NEVER force-overwritten (accepts==0)."""
-    conv_js = os.path.join(JS_DIR, 'core', 'conversations.js')
+    paths = source_argv('syncConversationToServer', '_rebaseUnackedTail',
+                        '_clearPendingSyncMarkers')
     harness = tmp_path / 'sustain.js'
     # Extend the harness to also report the local conv's retained message.
     src = _HARNESS.replace('__NCONFLICTS__', '99').replace(
@@ -200,7 +209,7 @@ def test_sustained_conflict_leaves_pending_never_strands(tmp_path):
         "check('returned_false_leaves_pending', ok === false);\n"
         "console.log(out.join('\\n'));")
     harness.write_text(src, encoding='utf-8')
-    proc = subprocess.run(['node', str(harness), conv_js],
+    proc = subprocess.run(['node', str(harness), *paths],
                           capture_output=True, text=True, timeout=60)
     output = proc.stdout.strip()
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'

@@ -181,8 +181,8 @@ def _seed_raw_row(paper_id, *, pdf_filename, paper_hash='', arxiv_id='',
             'pdf_url': ('/api/paper/pdf/' + pdf_filename) if pdf_filename else '',
             'pdf_filename': pdf_filename, 'arxiv_id': arxiv_id,
             'paper_hash': paper_hash, 'parsed_text': parsed_text,
-            'qa_history': '[]', 'images': '[]', 'babel_cache': '{}',
-            'page_count': 1, 'created_at': now, 'updated_at': now,
+            'parser_version': '', 'qa_history': '[]', 'images': '[]', 'babel_cache': '{}',
+            'page_count': 1, 'folder_id': '', 'created_at': now, 'updated_at': now,
         }, retry=True)
     finally:
         _pool_put(db)
@@ -423,6 +423,49 @@ def test_ghost_row_kept_in_db_not_deleted():
     _ok('reap is non-destructive — ghost row stays in DB after listing')
 
 
+def test_reingest_preserves_existing_folder_assignment():
+    """Regression pin for the insert_cols fix (pt_f91c7b1d): the ingest
+    persist is a PARTIAL upsert that never writes folder_id — so a re-ingest
+    of a paper the user already filed into a folder must keep the folder
+    assignment (the PUT path's own preserve contract), while still updating
+    the columns it does write (title/pdf/page_count)."""
+    app = _load_app()
+    import routes.paper as rp
+    from lib.database._core import _pool_get, _pool_put
+    pid = f'paper_folderkeep_{int(time.time()*1000)}'
+
+    assert rp._persist_ingested_library_row(
+        pid, title='v1', pdf_url='/api/paper/pdf/x.pdf', pdf_filename='x.pdf',
+        arxiv_id='', paper_hash='h1', parsed_text='abc', images=[], page_count=1)
+    # The user files the paper into a folder (metadata-only PUT path).
+    db = _pool_get()
+    try:
+        db.execute(
+            'UPDATE paper_library SET folder_id=? WHERE id=? AND user_id=1',
+            ('folder-x', pid))
+        db.commit()
+    finally:
+        _pool_put(db)
+
+    # Re-ingest the same paper id (re-upload / re-fetch).
+    assert rp._persist_ingested_library_row(
+        pid, title='v2', pdf_url='/api/paper/pdf/y.pdf', pdf_filename='y.pdf',
+        arxiv_id='', paper_hash='h2', parsed_text='def', images=[], page_count=2)
+
+    db = _pool_get()
+    try:
+        row = db.execute(
+            'SELECT folder_id, title, page_count FROM paper_library'
+            ' WHERE id=? AND user_id=1', (pid,)).fetchone()
+    finally:
+        _pool_put(db)
+    assert row['folder_id'] == 'folder-x', \
+        f"re-ingest clobbered the folder assignment: {row['folder_id']!r}"
+    assert row['title'] == 'v2' and int(row['page_count']) == 2, \
+        're-ingest did not refresh the written columns'
+    _ok('re-ingest preserves folder_id (partial upsert) yet refreshes written columns')
+
+
 def test_arxiv_stream_persists_row_end_to_end_zero_client_puts():
     """END-TO-END proof that the fetch-arxiv-stream persist runs on the SSE
     GENERATOR THREAD with a working DB connection (not just that the code is
@@ -498,6 +541,7 @@ def main():
         test_ghost_row_reaped_from_listing_with_NC,
         test_saved_recommendation_row_survives_reaper_with_NC,
         test_ghost_row_kept_in_db_not_deleted,
+        test_reingest_preserves_existing_folder_assignment,
         test_arxiv_stream_persists_row_end_to_end_zero_client_puts,
     ]
     for fn in tests:

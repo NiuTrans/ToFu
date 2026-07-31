@@ -51,6 +51,75 @@ def _key(provider_id: str | None, model: str) -> str:
     return f'{pid}::{m}' if pid else m
 
 
+def _fold_absorbed_namespaces(limits: dict, meta: dict,
+                              mapping: dict) -> tuple[dict, dict, bool]:
+    """Fold ``<absorbed_ns>::model`` keys into ``<account_ns>::model``.
+
+    Pure transform — returns ``(new_limits, new_meta, changed)``. On a key
+    collision the NEWER evidence (``meta.ts``) wins; a tie keeps the
+    account entry (it is the surviving namespace — the one new learns
+    write today). Bare-model keys and namespaces the map does not know
+    pass through untouched: the fold converges what it knows, it never
+    deletes history. Keys split on the FIRST ``::`` only — provider parts
+    may themselves contain a single ':' (ephemeral:local).
+    """
+    if not mapping:
+        return limits, meta, False
+    new_limits = dict(limits)
+    new_meta = dict(meta)
+    changed = False
+    for k in list(new_limits):
+        if '::' not in k:
+            continue
+        ns, model = k.split('::', 1)
+        dst_ns = mapping.get(ns)
+        if not dst_ns or dst_ns == ns:
+            continue
+        dst_k = f'{dst_ns}::{model}'
+        src_v = new_limits.pop(k)
+        src_m = new_meta.pop(k, None)
+        if dst_k not in new_limits:
+            new_limits[dst_k] = src_v
+            if src_m is not None:
+                new_meta[dst_k] = src_m
+        else:
+            src_ts = float((src_m or {}).get('ts', 0) or 0)
+            dst_ts = float((new_meta.get(dst_k) or {}).get('ts', 0) or 0)
+            if src_ts > dst_ts:
+                new_limits[dst_k] = src_v
+                if src_m is not None:
+                    new_meta[dst_k] = src_m
+        changed = True
+    return new_limits, new_meta, changed
+
+
+def _persist_namespace_fold(cfg_path: str, mapping: dict) -> None:
+    """Write the namespace fold back to server_config.json, race-safe.
+
+    The mutate folds the file's CURRENT maps (another process may have
+    learned something between our read and this write) rather than
+    blindly overwriting with our earlier snapshot.
+    """
+    from lib.json_store import update_json_atomic
+
+    def _mutate(cfg):
+        if not isinstance(cfg, dict):
+            cfg = {}
+        limits = cfg.get('model_context_limits') or {}
+        meta = cfg.get('model_context_limits_meta') or {}
+        limits, meta, _ = _fold_absorbed_namespaces(limits, meta, mapping)
+        cfg['model_context_limits'] = limits
+        # Same contract as _persist: meta only for keys with a value.
+        cfg['model_context_limits_meta'] = {
+            k: v for k, v in meta.items() if k in limits}
+        return cfg
+
+    try:
+        update_json_atomic(cfg_path, _mutate, default={})
+    except Exception as e:
+        logger.warning('[CtxLimits] failed to persist namespace fold: %s', e)
+
+
 def _load() -> tuple[dict[str, int], dict[str, dict]]:
     """Load persisted learned limits + metadata from server_config.json."""
     try:
@@ -79,6 +148,28 @@ def _load() -> tuple[dict[str, int], dict[str, dict]]:
                         'source': str(mv.get('source', '') or ''),
                         'strikes': int(mv.get('strikes', 0) or 0),
                     }
+            # Fold learned entries recorded under absorbed FACE
+            # namespaces (the duplicate anthropic CARD era) into their
+            # ACCOUNT namespace (charter #23). Without this, the
+            # account/face merge orphans every pre-merge learning —
+            # measured 2026-07-29: sankuai_anthropic::claude-opus-5 held
+            # tonight's 1.1M expand; post-merge slots ask for
+            # sankuai::claude-opus-5 and would silently lose it. The map
+            # lives once in provider_face — never re-derived here.
+            try:
+                from lib.llm_dispatch.provider_face import (
+                    account_namespace_map)
+                mapping = account_namespace_map(cfg.get('providers') or [])
+            except Exception as e:
+                logger.debug('[CtxLimits] namespace fold map unavailable '
+                             '(non-fatal): %s', e)
+                mapping = {}
+            cleaned, meta, folded = _fold_absorbed_namespaces(
+                cleaned, meta, mapping)
+            if folded:
+                logger.info('[CtxLimits] folded absorbed face namespace(s) '
+                            'in learned limits: %s', sorted(mapping))
+                _persist_namespace_fold(cfg_path, mapping)
             if cleaned:
                 logger.info('[CtxLimits] Loaded %d auto-learned context limits '
                             '(%d with metadata)', len(cleaned), len(meta))

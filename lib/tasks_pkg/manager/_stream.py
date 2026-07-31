@@ -9,7 +9,13 @@ user-facing label.
 import time
 
 from lib.agent_core.events import EventType, build_event
+from lib.cost import normalize_usage
 from lib.llm_dispatch import dispatch_stream
+from lib.llm_dispatch.retry_i18n import (
+    GATEWAY_PREFIXES as _GATEWAY_PREFIXES,
+    display_model_name as _display_model_name,
+    retry_phase_fields,
+)
 from lib.log import get_logger
 
 from lib.tasks_pkg.manager._events import append_event
@@ -18,21 +24,18 @@ from lib.tasks_pkg.manager._sync import checkpoint_task_partial
 logger = get_logger(__name__)
 
 
-# Gateway/provider routing prefixes that are an internal dispatch detail, not
-# something the user picked. Mirrors the canonical list in
-# lib/llm_dispatch/discovery.py so the user-facing model name (e.g.
-# "claude-opus-4.8") never leaks "aws.claude-opus-4.8" into the UI.
-_GATEWAY_PREFIXES = ('aws.', 'vertex.', 'gcp.', 'azure.', 'bedrock.')
-
-
-def _display_model_name(model: str) -> str:
-    """Strip internal gateway/provider prefixes for a user-facing label."""
-    name = model or 'the model'
-    for prefix in _GATEWAY_PREFIXES:
-        if name.startswith(prefix):
-            name = name[len(prefix):]
-            break
-    return name
+# ``_GATEWAY_PREFIXES`` / ``_display_model_name`` / the retry-reason mapping
+# live in lib/llm_dispatch/retry_i18n.py (single source of truth shared with
+# the swarm emitter, pt_18ebee9c9ea64cf3) — imported above under their legacy
+# private names so this module's existing references AND the manager facade's
+# re-export (manager/__init__.py) keep working byte-identically.
+#
+# The dispatcher (lib/llm_dispatch/api.py) passes short English log tokens as
+# ``reason``; leaking them verbatim into the phase HUD showed raw English
+# jargon mid-generation ("Retrying… Endpoint unreachable (kimi-k3, attempt
+# 1)"). retry_phase_fields maps the known tokens to stable typed reasonKeys
+# so the frontend localizes the cause; unknown tokens fall back to the raw
+# reason (same ruling as an unknown detailKey).
 # ── Streaming checkpoint interval (seconds) ──
 # During LLM token streaming, we periodically persist partial content to
 # the DB so data survives server crashes even when there are no tool rounds.
@@ -77,6 +80,17 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None):
     #   orphans correctly — a round that adopted then a later round that did not
     #   must not read a stale True.
     task['_floor_retry_adopted'] = False
+    # ★ Per-round BASE for attempt-restart truncation: a transport/dispatch
+    #   retry discards an in-flight attempt whose deltas already landed in
+    #   task['content']/['thinking'] (and were checkpointed into the conv row).
+    #   Capture the round's starting text so _on_attempt_restart can truncate
+    #   back to exactly it — the re-streamed attempt then never stacks on the
+    #   abandoned one's tail (the "transport-retry 自愈后重复文本落库" latent
+    #   class, pt_6e12b1ffd95a453e). The shrink-convergent checkpoint path
+    #   then settles the row to the retried attempt's text.
+    with task['content_lock']:
+        _round_base_content = task['content']
+        _round_base_thinking = task['thinking']
     # ★ Init to 0.0 (epoch) so the FIRST content/thinking delta checkpoints
     #   immediately, then settle into the _STREAM_CHECKPOINT_INTERVAL cadence.
     #   Starting at time.time() left a pre-first-checkpoint window where a
@@ -146,6 +160,26 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None):
         append_event(task, build_event(EventType.DELTA, content=cd))
         _maybe_checkpoint_during_stream()
 
+    def _on_attempt_restart(reason=''):
+        """A transport/dispatch-level retry discarded an in-flight attempt:
+        truncate the task's text accumulators back to this round's base so the
+        re-streamed attempt doesn't stack on the abandoned one's partial tail.
+        No-op when nothing was streamed this attempt (pure cooldown waits).
+        Deliberately NOT passed to the FloorRetry resend call — during resends
+        the first attempt's text is still the fallback content and must
+        survive unless a resend is adopted."""
+        with task['content_lock']:
+            _c, _t = task['content'], task['thinking']
+            if _c == _round_base_content and _t == _round_base_thinking:
+                return
+            task['content'] = _round_base_content
+            task['thinking'] = _round_base_thinking
+        logger.info('%s conv=%s attempt-restart (%s): truncated discarded '
+                    'partial attempt text content %d→%d, thinking %d→%d chars',
+                    pfx, task.get('convId', ''), reason,
+                    len(_c), len(_round_base_content),
+                    len(_t), len(_round_base_thinking))
+
     def _on_retry(attempt, reason='', status_code=0):
         """Emit SSE phase event so user sees retry status instead of 'Waiting…'.
 
@@ -154,22 +188,133 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None):
         generic spinner.  Previously users just saw "Waiting…" for 60-120s
         during 429 cycling with no indication that the server was alive
         and actively retrying.
+
+        i18n: ships ``detailKey``/``detailArgs`` (plus a typed ``reasonKey``
+        for known dispatcher reason tokens) so the frontend HUD localizes;
+        the legacy ``detail`` string is kept byte-identical for headless /
+        non-i18n clients. ``detailArgs['model']`` uses the display label
+        (gateway prefixes stripped) — it is new wire surface, not a legacy
+        string change. The structured fields come from the SHARED helper
+        (lib/llm_dispatch/retry_i18n.retry_phase_fields) so the swarm
+        emitter can never drift from this mapping.
         """
         if status_code == 429:
             # Rate-limit: surface the model clearly and phrase it as a
             # queue wait rather than an error.
-            detail = (f'⏳ 模型 {model} 限流中，正在排队重试 '
-                      f'(第 {attempt} 次)…')
+            _legacy = (f'⏳ 模型 {model} 限流中，正在排队重试 '
+                       f'(第 {attempt} 次)…')
         elif reason:
-            detail = f'Retrying… {reason} ({model}, attempt {attempt})'
+            _legacy = f'Retrying… {reason} ({model}, attempt {attempt})'
         else:
-            detail = f'Retrying {model}… (attempt {attempt})'
+            _legacy = f'Retrying {model}… (attempt {attempt})'
+        _fields = retry_phase_fields(model=model, attempt=attempt,
+                                     reason=reason, status_code=status_code,
+                                     legacy_detail=_legacy)
         append_event(task, build_event(
             EventType.PHASE,
             phase='retrying',
-            detail=detail,
+            detail=_fields['detail'],
+            detailKey=_fields['detailKey'],
+            detailArgs=_fields['detailArgs'],
             attempt=attempt,
             statusCode=status_code,
+            model=model,
+        ))
+
+    # ★ Slot cooldown-reason → typed reasonKey for the waiting heartbeat.
+    #   Mirrors the dispatcher's honest-label ruling: a cooldown wait is
+    #   限流 ONLY when the cooling slot actually says rate_limit.
+    _WAIT_CAUSE_KEYS = {
+        'rate_limit': 'stream.retryReason.waitingForModel',
+        'quota': 'stream.retryReason.keyBalanceExhausted',
+        'upstream': 'stream.retryReason.upstreamError',
+        'error': 'stream.retryReason.waitingBackoff',
+    }
+
+    def _on_waiting(elapsed, slot=None):
+        """Heartbeat while an attempt is SILENT (no bytes yet, or a
+        mid-stream stall).
+
+        Two jobs:
+
+        1. **HUD.** Emits a transient ``retrying`` PHASE event so a slow
+           upstream shows a LIVE "still waiting + what the pool knows"
+           label instead of a static spinner. ``phase='retrying'`` is
+           deliberate and load-bearing: the frontend retrying branch keys
+           its DOM refresh on ``attempt``, so each beat (attempt=beat
+           number) actually repaints — a constant-phase heartbeat would
+           freeze on the first beat's text.
+
+        2. **Reaper liveness.** Refreshes ``_dispatch_heartbeat``. The
+           stuck-task reaper (manager/_maintenance.reap_stuck_running_tasks)
+           force-fails a task once BOTH ``_t_last_event`` AND
+           ``_dispatch_heartbeat`` are stale past 30 min. There is no read
+           timeout any more, so a genuinely long silence is no longer
+           interrupted-and-retried — without this bump the reaper would
+           become the new 30-minute timeout and kill exactly the long waits
+           we made legal, writing a "terminated as wedged" error bubble
+           into the conversation. ``append_event`` below covers
+           ``_t_last_event``; this line covers the other clock, so EITHER
+           being fresh (the reaper's own AND-gate) is guaranteed while we
+           are legitimately waiting. A truly dead worker emits no beats at
+           all, so the reaper keeps its real job.
+        """
+        task['_dispatch_heartbeat'] = time.time()
+        _secs = int(elapsed)
+        try:
+            from lib.llm._transport import IDLE_HEARTBEAT_S as _hb
+            _beat = max(1, int(elapsed // max(1, _hb)))
+        except Exception as _e:
+            logger.debug('on waiting: failed (%s)', _e)
+            _beat = max(1, int(elapsed // 20))
+        _label = _display_model_name(model)
+        _reason = ''
+        _reason_key = ''
+        if slot is not None:
+            _cr = getattr(slot, 'cooldown_reason', '') or ''
+            _cooled = (getattr(slot, 'cooldown_until', 0) or 0) > time.time()
+            if _cooled and _cr in _WAIT_CAUSE_KEYS:
+                _reason_key = _WAIT_CAUSE_KEYS[_cr]
+                _reason = _cr  # raw fallback if the key is unknown client-side
+            else:
+                _lem = getattr(slot, 'last_error_msg', '') or ''
+                if _lem:
+                    _reason = str(_lem)[:80]
+                else:
+                    _ce = getattr(slot, 'consecutive_errors', 0) or 0
+                    if _ce >= 2:
+                        _reason = f'{_ce} consecutive errors on this line'
+        # ★ Honest label: the beat now fires for TWO shapes, and calling a
+        #   mid-stream stall "no first byte yet" would be a lie the user can
+        #   see (text is already on screen). Distinguish by whether this
+        #   round has produced anything yet.
+        with task['content_lock']:
+            _started = bool(task['content'] != _round_base_content
+                            or task['thinking'] != _round_base_thinking)
+        if _started:
+            _detail_key = ('stream.phase.stalledMidStreamReason' if _reason
+                           else 'stream.phase.stalledMidStream')
+            _detail = (f'Paused {_secs}s — {_label} stopped mid-reply'
+                       + (f' ({_reason})' if _reason else '…'))
+        elif _reason:
+            _detail_key = 'stream.phase.waitingFirstByteReason'
+            _detail = (f'Waiting {_secs}s — no first byte from {_label} yet '
+                       f'({_reason})')
+        else:
+            _detail_key = 'stream.phase.waitingFirstByte'
+            _detail = f'Waiting {_secs}s — no first byte from {_label} yet…'
+        _args = {'model': _label, 'elapsed': _secs}
+        if _reason:
+            _args['reason'] = _reason
+        if _reason_key:
+            _args['reasonKey'] = _reason_key
+        append_event(task, build_event(
+            EventType.PHASE,
+            phase='retrying',
+            detail=_detail,
+            detailKey=_detail_key,
+            detailArgs=_args,
+            attempt=_beat,
             model=model,
         ))
 
@@ -199,6 +344,8 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None):
     append_event(task, build_event(
         EventType.PHASE, phase='waiting_model',
         detail=f'Sent to {_model_label}, waiting for it to start replying…',
+        detailKey='stream.phase.waitingForModel',
+        detailArgs={'model': _model_label},
         model=model))
 
     # Resolve dispatch_stream THROUGH the package facade at call time so a test's
@@ -222,6 +369,8 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None):
         strict_model=True,
         on_retry=_on_retry,
         avoid_pairs=_avoid_pairs,
+        on_attempt_restart=_on_attempt_restart,
+        on_waiting=_on_waiting,
     )
 
     # ★ Timing fallback: if the first round was tool-call-only (no content/
@@ -248,6 +397,12 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None):
     #   would silently persist the first-attempt residue (the live 3411→215
     #   loss). We converge ONCE after the loop, covering both doors.
     _fr_adopted = False
+    # ★ HONEST ACCOUNTING: every attempt the gateway processed (whether
+    #   ADOPTED or DISCARDED) was BILLED. Collect their usage dicts here
+    #   so the outer LLM-fallback loop can append them to api_rounds and
+    #   accumulate them — the "reported cost < actual gateway bill" bug
+    #   is impossible when every billed request appears once in api_rounds.
+    _fr_discarded_billing = []  # list of {'model', 'usage', 'tag'}
     try:
         from lib.tasks_pkg import floor_retry as _fr
         _conv_for_fr = task.get('convId', '') or ''
@@ -255,15 +410,20 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None):
                 and _fr.is_floor_collapse(usage)
                 and _fr.wire_prefix_stable(_conv_for_fr, usage)):
             _fr_max = _fr.floor_retry_max()
+            # The primary attempt (whose msg/usage `usage` currently holds) is
+            # the FIRST billed request; it is about to be superseded by a resend
+            # if one recovers. Preserve its usage now so it survives the
+            # `usage = _rusage` reassignments below.
+            _fr_primary_billed_usage = dict(usage) if isinstance(usage, dict) else None
             for _fr_i in range(_fr_max):
                 if task.get('aborted', False):
                     break
+                _fr_u = normalize_usage(usage)
                 logger.warning(
                     '%s conv=%s [FloorRetry] byte-stable floor-collapse '
                     '(read=%s write=%s) — resending identical body (%d/%d)',
                     pfx, _conv_for_fr,
-                    (usage or {}).get('cache_read_tokens'),
-                    (usage or {}).get('cache_creation_input_tokens'),
+                    _fr_u['cache_read'], _fr_u['cache_write'],
                     _fr_i + 1, _fr_max)
                 try:
                     # ★ Layer-1 orphan fix: a FloorRetry resend re-streams the
@@ -286,7 +446,8 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None):
                         abort_check=lambda: task.get('aborted', False),
                         prefer_model=model, log_prefix=f'{pfx}[floor-retry{_fr_i+1}]',
                         strict_model=True, on_retry=_on_retry,
-                        avoid_pairs=_avoid_pairs)
+                        avoid_pairs=_avoid_pairs,
+                        on_waiting=_on_waiting)
                 except Exception as _rerr:
                     # 503/throttle/transient — do NOT keep piling resends on an
                     # already-throttled gateway; that only deepens the throttle.
@@ -294,14 +455,28 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None):
                                    '%s: %s', pfx, _fr_i + 1,
                                    type(_rerr).__name__, str(_rerr)[:120])
                     break
+                # ★ HONEST ACCOUNTING: the CURRENT `usage` is about to be
+                #   superseded. Whatever it points to now (the primary attempt
+                #   on iter 0, or the previously-floored resend on iter >0) was
+                #   BILLED by the gateway — preserve it before overwriting.
+                if isinstance(usage, dict):
+                    _disc_tag_suffix = ('primary' if _fr_i == 0
+                                        else f'resend{_fr_i}')
+                    _fr_discarded_billing.append({
+                        'model': model,
+                        'usage': {k: v for k, v in usage.items()
+                                  if k != '_extra_billing_rounds'},
+                        'tag': f'{tag}-FLOOR-DISCARDED-{_disc_tag_suffix}'
+                        if tag else f'FLOOR-DISCARDED-{_disc_tag_suffix}',
+                    })
                 if not _fr.is_floor_collapse(_rusage):
                     # Recovered: the resend hit the now-visible cache write.
                     # Adopt its response + usage (a genuine cache read, cheaper
                     # AND the same conversation content — the body was identical).
+                    _ru = normalize_usage(_rusage)
                     logger.warning('%s conv=%s [FloorRetry] RECOVERED on resend %d '
                                    '(read=%s write=%s)', pfx, _conv_for_fr, _fr_i + 1,
-                                   (_rusage or {}).get('cache_read_tokens'),
-                                   (_rusage or {}).get('cache_creation_input_tokens'))
+                                   _ru['cache_read'], _ru['cache_write'])
                     msg, finish_reason, usage = _rmsg, _rfin, _rusage
                     _fr_adopted = True
                     break
@@ -323,8 +498,38 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None):
     #   event's committedMessage (existing mechanism), so no new visual behavior.
     if _fr_adopted:
         with task['content_lock']:
-            task['content'] = msg.get('content') or ''
-            task['thinking'] = msg.get('reasoning_content') or ''
+            _discarded_content = task['content']
+            _discarded_thinking = task['thinking']
+            # ★ Base-preserve (owner audit on pt_6e12b1f): task['content']/
+            #   ['thinking'] ACCUMULATE across ALL rounds of this turn — the
+            #   main orchestrator loop has no per-round content reset (only
+            #   the one-time contentPrefix seed at _run.py:501). The adopted
+            #   msg holds THIS round's text only, so a wholesale replace
+            #   would silently drop every prior round's prose from the
+            #   persisted answer (the R1+R2 preamble the user already read).
+            #   Keep the round base captured at stream entry and replace
+            #   only this round's tail. The residue recording below stays
+            #   the FULL pre-convergence snapshot — the checkpointed conv
+            #   row mirrors that full text and the terminal-guard exemption
+            #   byte-matches on it.
+            task['content'] = _round_base_content + (msg.get('content') or '')
+            task['thinking'] = _round_base_thinking + (msg.get('reasoning_content') or '')
+        # ★ Record the DISCARDED first-attempt text verbatim (bounded). The
+        #   ~5s streaming checkpoint mirrors task['content']/['thinking'] into
+        #   conversations.messages DURING the attempt — so after this
+        #   convergence the conv row can still hold the discarded draft while
+        #   the task holds the adopted one. Downstream guards (the terminal
+        #   content guard / CAS re-read guard in _sync.py) treat "existing >
+        #   new" as "frontend genuinely won"; an EXACT byte-match against this
+        #   recorded residue is how they tell our own discarded attempt apart
+        #   from a real frontend win and overwrite it with the authoritative
+        #   final answer (the live mrxij7q34xm070 "abrupt stop" bug: the
+        #   4344-char discarded draft survived with a stop finish-tag).
+        if _discarded_content or _discarded_thinking:
+            _residue = task.setdefault('_floor_retry_residue', [])
+            if len(_residue) < 8:
+                _residue.append({'content': _discarded_content,
+                                 'thinking': _discarded_thinking})
         # ★ Record the TRUE cause of any orphan tool round this turn produces.
         #   When a FloorRetry resend is adopted, the FIRST attempt's tool calls
         #   (announced live via on_tool_call_ready → 'searching' rounds) are NOT
@@ -339,6 +544,24 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None):
                     'resend (content=%dchars thinking=%dchars) — prevents first-'
                     'attempt residue from being persisted',
                     pfx, len(task['content']), len(task['thinking']))
+
+    # ★ HONEST ACCOUNTING: expose every discarded-but-billed FloorRetry
+    #   attempt on the returned usage dict so the LLM-fallback loop can
+    #   append them to api_rounds and accumulated_usage. The gateway billed
+    #   each of these; the cost popover / wallet / daily-report MUST see them.
+    #   Silent covering-up of billed rounds is what motivated flipping the
+    #   floor-retry default OFF — but even opt-in usage must be honest.
+    if _fr_discarded_billing and isinstance(usage, dict):
+        # dict.setdefault: never clobber a caller-provided list (defensive).
+        _bill_list = usage.setdefault('_extra_billing_rounds', [])
+        if isinstance(_bill_list, list):
+            _bill_list.extend(_fr_discarded_billing)
+        else:
+            usage['_extra_billing_rounds'] = list(_fr_discarded_billing)
+        logger.warning('%s [FloorRetry] preserved %d discarded-but-billed '
+                       'attempt(s) for honest cost accounting: tags=%s',
+                       pfx, len(_fr_discarded_billing),
+                       [b['tag'] for b in _fr_discarded_billing])
 
     # ★ Propagate provider_id from dispatch metadata into task
     _dispatch = (usage or {}).get('_dispatch', {})
@@ -380,16 +603,13 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None):
         # prompt_tokens is OpenAI-shape; Anthropic returns input_tokens.
         _prompt_tokens = 0
         if isinstance(usage, dict):
-            _prompt_tokens = int(
-                usage.get('prompt_tokens')
-                or usage.get('input_tokens')
-                or 0
-            )
+            _nu = normalize_usage(usage)
+            _prompt_tokens = _nu['input']
             # Anthropic excludes cache from input_tokens; add it back so
             # _total_prompt_tokens reflects the FULL prompt the provider
             # accepted (which is what we use for context-limit expansion).
-            _cw = int(usage.get('cache_creation_input_tokens') or 0)
-            _cr = int(usage.get('cache_read_input_tokens') or 0)
+            _cw = _nu['cache_write']
+            _cr = _nu['cache_read']
             if (_cw or _cr) and _prompt_tokens <= (_cw + _cr):
                 _total_prompt_tokens = _prompt_tokens + _cw + _cr
             else:

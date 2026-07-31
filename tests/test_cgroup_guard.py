@@ -173,5 +173,139 @@ def test_approx_body_bytes_handles_garbage(guard):
     assert guard.approx_body_bytes(42) == 0
 
 
+# ── page-cache relief (fadvise) ──
+
+def test_fadvise_real_file_returns_size(guard, tmp_path):
+    p = tmp_path / 'big.log'
+    p.write_bytes(b'x' * 100_000)
+    assert guard.fadvise_dontneed(str(p)) == 100_000
+
+
+def test_fadvise_missing_file_is_noop(guard, tmp_path):
+    assert guard.fadvise_dontneed(str(tmp_path / 'nope.log')) == 0
+
+
+def test_drop_files_cache_respects_floor(guard, tmp_path):
+    big = tmp_path / 'big.log'
+    big.write_bytes(b'x' * 100_000)
+    small = tmp_path / 'small.log'
+    small.write_bytes(b'x' * 10)
+    stats = guard.drop_files_cache([str(big), str(small)], min_bytes=1000)
+    assert stats['files'] == 1
+    assert stats['bytes'] == 100_000
+
+
+def test_drop_logs_cache_picks_log_files(guard, tmp_path):
+    """Only *.log* files above the size floor are dropped."""
+    (tmp_path / 'big.log').write_bytes(b'x' * (2 << 20))
+    (tmp_path / 'small.log').write_bytes(b'y' * 100)
+    (tmp_path / 'notalog.txt').write_bytes(b'w' * (2 << 20))
+    stats = guard.drop_logs_cache(str(tmp_path))
+    assert stats['files'] == 1 and stats['bytes'] == (2 << 20)
+
+
+def test_relieve_includes_log_page_drop(guard, monkeypatch, tmp_path):
+    """relieve_memory must call drop_logs_cache and report its bytes."""
+    _set_pressure(guard, monkeypatch, pct=93.0, swap=0)
+    monkeypatch.setattr(guard, 'malloc_trim', lambda: True)
+    called = {'n': 0}
+
+    def fake_drop(log_dir='logs'):
+        called['n'] += 1
+        return {'files': 3, 'bytes': 12_000_000}
+    monkeypatch.setattr(guard, 'drop_logs_cache', fake_drop)
+    stats = guard.relieve_memory('test')
+    assert called['n'] == 1
+    assert stats['log_pages_bytes'] == 12_000_000
+
+
+def test_relieve_neuter_without_log_drop(guard, monkeypatch):
+    """NEUTER: TOFU_CGROUP_DROP_LOGS=0 must skip the page-cache drop entirely."""
+    _set_pressure(guard, monkeypatch, pct=93.0, swap=0)
+    monkeypatch.setattr(guard, 'malloc_trim', lambda: True)
+    monkeypatch.setenv('TOFU_CGROUP_DROP_LOGS', '0')
+    monkeypatch.setattr(guard, 'drop_logs_cache',
+                        lambda log_dir='logs': 1 / 0)  # must never be called
+    stats = guard.relieve_memory('test')
+    assert stats['log_pages_bytes'] == 0
+
+
+# ── pressure journal ──
+
+def test_pressure_journal_writes_and_rings(guard, monkeypatch, tmp_path):
+    jpath = tmp_path / 'journal.log'
+    monkeypatch.setattr(guard, '_JOURNAL_PATH', str(jpath))
+    monkeypatch.setattr(guard, '_JOURNAL_MAX_BYTES', 400)
+    monkeypatch.setattr(guard, '_top_rss_processes', lambda n=3: [])
+    monkeypatch.setattr(guard, '_read_memory_stat',
+                        lambda: {'cache': 1 << 30, 'rss': 2 << 30, 'kmem': 3 << 30})
+    snap = {'pct': 50.0, 'usage': 100 << 30, 'limit': 200 << 30}
+    for _ in range(30):
+        assert guard.write_pressure_journal(snap) is True
+    import json as _json
+    lines = jpath.read_text().strip().split('\n')
+    assert len(lines) < 30                      # ring bound kept the tail only
+    rec = _json.loads(lines[-1])
+    assert rec['pct'] == 50.0
+    assert rec['cache_gib'] == 1.0 and rec['kmem_gib'] == 3.0
+    assert os.path.getsize(jpath) <= 400 + 200  # bounded (last append may exceed slightly)
+
+
+def test_pressure_journal_env_off(guard, monkeypatch, tmp_path):
+    jpath = tmp_path / 'journal.log'
+    monkeypatch.setattr(guard, '_JOURNAL_PATH', str(jpath))
+    monkeypatch.setenv('TOFU_CGROUP_JOURNAL', '0')
+    assert guard.write_pressure_journal({'pct': 99.0, 'usage': 1, 'limit': 2}) is False
+    assert not jpath.exists()
+
+
+def test_monitor_tick_journals_and_watches(guard, monkeypatch):
+    """run_monitor_once must journal + oom-watch EVERY tick (even roomy ones)."""
+    _set_pressure(guard, monkeypatch, pct=50.0, swap=0)
+    calls = {'j': 0, 'o': 0}
+    monkeypatch.setattr(guard, 'write_pressure_journal', lambda snap: calls.__setitem__('j', calls['j'] + 1) or True)
+    monkeypatch.setattr(guard, 'check_oom_kill_count', lambda: calls.__setitem__('o', calls['o'] + 1) or False)
+    assert guard.run_monitor_once() is None     # roomy → no relief
+    assert calls['j'] == 1 and calls['o'] == 1
+
+
+# ── oom_kill witness ──
+
+def test_oom_kill_watch_fires_on_increment(guard, monkeypatch, tmp_path):
+    ctl = tmp_path / 'oom_control'
+    ctl.write_text('oom_kill_disable 0\nunder_oom 0\noom_kill 2\n')
+    monkeypatch.setattr(guard, '_OOM_CONTROL_PATH', str(ctl))
+    monkeypatch.setattr(guard, '_last_oom_kill_count', 1)
+    fired = []
+    monkeypatch.setattr(guard, 'audit_log', lambda *a, **k: fired.append((a, k)))
+    assert guard.check_oom_kill_count() is True
+    assert fired  # audit_log called
+    assert guard._last_oom_kill_count == 2
+
+
+def test_oom_kill_watch_neuter_no_increment(guard, monkeypatch, tmp_path):
+    """NEUTER: unchanged counter must NOT fire (no false alarms)."""
+    ctl = tmp_path / 'oom_control'
+    ctl.write_text('oom_kill_disable 0\nunder_oom 0\noom_kill 2\n')
+    monkeypatch.setattr(guard, '_OOM_CONTROL_PATH', str(ctl))
+    monkeypatch.setattr(guard, '_last_oom_kill_count', 2)
+    monkeypatch.setattr(guard, 'audit_log',
+                        lambda *a, **k: 1 / 0)   # must never be called
+    assert guard.check_oom_kill_count() is False
+
+
+def test_oom_kill_watch_first_read_baselines(guard, monkeypatch, tmp_path):
+    """First read (prev=None) only baselines — never fires on boot."""
+    ctl = tmp_path / 'oom_control'
+    ctl.write_text('oom_kill_disable 0\nunder_oom 0\noom_kill 7\n')
+    monkeypatch.setattr(guard, '_OOM_CONTROL_PATH', str(ctl))
+    monkeypatch.setattr(guard, '_last_oom_kill_count', None)
+    monkeypatch.setattr(guard, 'audit_log', lambda *a, **k: 1 / 0)
+    assert guard.check_oom_kill_count() is False
+    assert guard._last_oom_kill_count == 7
+
+
+if __name__ == '__main__':
+    sys.exit(pytest.main([__file__, '-v']))
 if __name__ == '__main__':
     sys.exit(pytest.main([__file__, '-v']))

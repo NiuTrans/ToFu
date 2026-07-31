@@ -35,17 +35,65 @@ def http_get(*args, **kwargs):
 _DISCOVER_TIMEOUT = 10
 
 
+def _fetch_models_json(models_url: str, headers: dict, timeout: int):
+    """GET {models_url} once. Returns ``(data_dict, None)`` or ``(None, err)`.
+
+    ``err`` is one of ``'http-<status>'`` / ``'timeout'`` / ``'conn'`` /
+    ``'bad-json'`` — callers branch on the exact failure class (only a 404
+    on a bare origin justifies the /v1 fallback retry; a timeout means the
+    box is down and retrying would just double the wait).
+    """
+    logger.info('[Discovery] Fetching models from %s', models_url)
+    try:
+        resp = http_get(
+            models_url,
+            headers=headers,
+            timeout=timeout,
+        )
+    except requests.Timeout:
+        logger.warning('[Discovery] Timeout after %ds: %s', timeout, models_url)
+        return None, 'timeout'
+    except requests.RequestException as e:
+        logger.warning('[Discovery] Request failed for %s: %s', models_url, e)
+        return None, 'conn'
+
+    if not resp.ok:
+        logger.warning('[Discovery] GET %s returned HTTP %d: %.500s',
+                      models_url, resp.status_code, resp.text)
+        return None, 'http-%d' % resp.status_code
+
+    try:
+        data = resp.json()
+    except (ValueError, KeyError) as e:
+        logger.warning('[Discovery] Invalid JSON response from %s: %s', models_url, e)
+        return None, 'bad-json'
+    if not isinstance(data, dict) or not isinstance(data.get('data'), list):
+        logger.warning('[Discovery] Unexpected format from %s: data is %s, not list',
+                      models_url,
+                      type(data.get('data')).__name__ if isinstance(data, dict)
+                      else type(data).__name__)
+        return None, 'bad-json'
+    logger.info('[Discovery] Received %d models from API', len(data['data']))
+    return data, None
+
+
 # ══════════════════════════════════════════════════════
 #  Model Discovery
 # ══════════════════════════════════════════════════════
 
 def discover_models(base_url: str, api_key: str,
                     timeout: int = _DISCOVER_TIMEOUT,
-                    models_path: str = '') -> list[dict]:
+                    models_path: str = '',
+                    return_effective: bool = False):
     """Auto-discover models from an OpenAI-compatible /v1/models endpoint.
 
     Calls GET {models_url}, parses the response, infers capabilities,
     RPM, and cost for each model.
+
+    Bare-origin URLs (e.g. Ollama's habitual ``http://host:11434`` with no
+    path) that answer /models with HTTP 404 are retried once under
+    ``/v1`` — that is the single most common self-hosted mis-paste, and
+    without the retry the probe just looks broken.
 
     Args:
         base_url: Provider base URL (e.g. 'https://yeysai.com/v1').
@@ -54,13 +102,19 @@ def discover_models(base_url: str, api_key: str,
         models_path: Optional custom path for the models endpoint.
             If empty (default), appends '/models' to base_url.
             Can be absolute ('/v1/models') or relative ('models').
+        return_effective: When True, return ``(models, effective_base_url)``
+            so the caller can persist the URL that ACTUALLY worked (the
+            /v1 fallback variant) instead of the raw user input.
 
     Returns:
         List of model dicts suitable for server_config providers.models:
         ``[{'model_id': str, 'aliases': [], 'capabilities': [...],
             'rpm': int, 'cost': float, 'thinking_default': bool}, ...]``
-        Empty list on any failure.
+        Empty list on any failure. With ``return_effective=True`` a
+        ``(list, str)`` tuple instead.
     """
+    def _ret(models, effective):
+        return (models, effective) if return_effective else models
     # Normalize URL to /models endpoint
     # If the user specified a custom models_path, use it; otherwise default
     # to appending /models.  Gateways like Meituan may use non-standard
@@ -84,43 +138,39 @@ def discover_models(base_url: str, api_key: str,
         validate_egress_url(models_url)
     except EgressDenied as e:
         logger.warning('[Discovery] blocked egress to %s: %s', models_url, e)
-        return []
-
-    logger.info('[Discovery] Fetching models from %s', models_url)
+        return _ret([], base_url.rstrip('/'))
 
     headers = {'User-Agent': 'Tofu/1.0'}
     if api_key:
         headers['Authorization'] = 'Bearer %s' % api_key
 
-    try:
-        resp = http_get(
-            models_url,
-            headers=headers,
-            timeout=timeout,
-        )
-        if not resp.ok:
-            logger.warning('[Discovery] GET %s returned HTTP %d: %.500s',
-                          models_url, resp.status_code, resp.text)
-            return []
+    effective_base = base_url.rstrip('/')
+    data, err = _fetch_models_json(models_url, headers, timeout)
 
-        data = resp.json()
-        raw_models = data.get('data', [])
-        if not isinstance(raw_models, list):
-            logger.warning('[Discovery] Unexpected format: data is %s, not list',
-                          type(raw_models).__name__)
-            return []
+    # ── /v1 fallback: bare-origin URL + plain 404 → retry under /v1 ──
+    # Gated on a CUSTOM models_path being absent (an explicit path is
+    # authoritative) and on the error being a clean 404 (not a down box).
+    if data is None and err == 'http-404' and not models_path:
+        from urllib.parse import urlparse as _urlparse
+        if _urlparse(effective_base).path in ('', '/'):
+            alt_base = effective_base + '/v1'
+            alt_url = alt_base + '/models'
+            try:
+                validate_egress_url(alt_url)
+            except EgressDenied as e:
+                logger.warning('[Discovery] /v1 fallback blocked egress to %s: %s',
+                              alt_url, e)
+                alt_url = ''
+            if alt_url:
+                data, err = _fetch_models_json(alt_url, headers, timeout)
+                if data is not None:
+                    effective_base = alt_base
+                    logger.info('[Discovery] bare-origin /models 404 — '
+                                'fell back to %s', alt_url)
 
-        logger.info('[Discovery] Received %d models from API', len(raw_models))
-
-    except requests.Timeout:
-        logger.warning('[Discovery] Timeout after %ds: %s', timeout, models_url)
-        return []
-    except requests.RequestException as e:
-        logger.warning('[Discovery] Request failed for %s: %s', models_url, e)
-        return []
-    except (ValueError, KeyError) as e:
-        logger.warning('[Discovery] Invalid JSON response: %s', e)
-        return []
+    if data is None:
+        return _ret([], effective_base)
+    raw_models = data.get('data', [])
 
     # ── Parse and enrich each model ──
     result = []
@@ -175,7 +225,7 @@ def discover_models(base_url: str, api_key: str,
     logger.info('[Discovery] %d usable models: %d text (%d cheap), '
                '%d image_gen, %d embedding',
                len(result), n_text, n_cheap, n_img, n_emb)
-    return result
+    return _ret(result, effective_base)
 
 
 # ══════════════════════════════════════════════════════

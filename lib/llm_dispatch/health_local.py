@@ -227,8 +227,14 @@ def _check_ephemeral_endpoints() -> dict:
     return {'endpoints_ok': n_ok, 'cooldowns': n_cool}
 
 
-def _persist_provider_models(prov_id: str, models: list[dict]) -> bool:
-    """Update server_config.json with refreshed model list for one provider.
+def _persist_provider_models(prov_id: str, models: list[dict],
+                             endpoint_models: dict | None = None,
+                             endpoints: list | None = None) -> bool:
+    """Update server_config.json with refreshed model state for one provider.
+
+    Persists the model list and — when given — the per-endpoint
+    served-model binding (``endpoint_models``) and the (possibly
+    /v1-normalized) endpoint URL list.
 
     Uses ``update_json_atomic`` so this read-modify-write is serialised
     against the other concurrent writers of this shared file. The provider
@@ -248,6 +254,11 @@ def _persist_provider_models(prov_id: str, models: list[dict]) -> bool:
             for p in (cfg.get('providers') or []):
                 if p.get('id') == prov_id:
                     p['models'] = models
+                    if endpoint_models is not None:
+                        p['endpoint_models'] = endpoint_models
+                    if endpoints is not None:
+                        p['endpoints'] = endpoints
+                        p['base_url'] = endpoints[0] if endpoints else p.get('base_url', '')
                     found['ok'] = True
                     return cfg
             return None  # provider gone — no write
@@ -280,11 +291,17 @@ def _rebuild_dispatcher_slots():
 
 
 def _check_endpoint(endpoint_url: str, api_key: str) -> dict:
-    """Probe a single endpoint's /models. Returns ``{ok, status, served_models}``."""
+    """Probe a single endpoint's /models.
+
+    Returns ``{ok, status, served_models, effective_url}``. A bare-origin
+    URL answering /models with a plain 404 is retried once under ``/v1``
+    (the ollama ``host:11434`` habit); ``effective_url`` carries the URL
+    that actually worked so binding keys match the dispatcher's
+    normalized endpoints.
+    """
     if not endpoint_url:
         return {'ok': False, 'status': 'no-url'}
 
-    url = endpoint_url.rstrip('/') + '/models'
     headers = {'User-Agent': 'Tofu/1.0'}
     if api_key:
         headers['Authorization'] = 'Bearer %s' % api_key
@@ -293,14 +310,31 @@ def _check_endpoint(endpoint_url: str, api_key: str) -> dict:
     # corp proxies can't reach.  Make sure the host is bypassed.
     register_no_proxy_url(endpoint_url)
 
-    try:
-        resp = http_get(url, headers=headers, timeout=PROBE_TIMEOUT)
-    except requests.Timeout as _e_audit:
-        logger.debug('[health_local] _check_endpoint caught %s: %s', type(_e_audit).__name__, _e_audit)
-        return {'ok': False, 'status': 'timeout'}
-    except requests.RequestException as e:
-        logger.debug('[health_local] _check_endpoint caught %s: %s', type(e).__name__, e)
-        return {'ok': False, 'status': 'unreachable: %s' % e}
+    def _get(url):
+        """Single GET → (resp, None) or (None, status_str)."""
+        try:
+            return http_get(url, headers=headers, timeout=PROBE_TIMEOUT), None
+        except requests.Timeout as e:
+            logger.debug('[health_local] _get caught %s: %s', type(e).__name__, e)
+            return None, 'timeout'
+        except requests.RequestException as e:
+            logger.debug('[health_local] _get caught %s: %s', type(e).__name__, e)
+            return None, 'unreachable: %s' % e
+
+    base = endpoint_url.rstrip('/')
+    resp, err = _get(base + '/models')
+    if err is not None:
+        return {'ok': False, 'status': err}
+
+    effective = base
+    if not resp.ok and resp.status_code == 404:
+        from urllib.parse import urlparse
+        if urlparse(base).path in ('', '/'):
+            resp2, err2 = _get(base + '/v1/models')
+            if err2 is None and resp2.ok:
+                resp = resp2
+                effective = base + '/v1'
+                logger.info('[HealthLocal] %s /models 404 — fell back to /v1', base)
 
     if not resp.ok:
         return {'ok': False, 'status': 'http-%d' % resp.status_code}
@@ -316,7 +350,8 @@ def _check_endpoint(endpoint_url: str, api_key: str) -> dict:
         mid = (m.get('id') or '').strip()
         if mid:
             served.append(mid)
-    return {'ok': True, 'status': 'ok', 'served_models': set(served)}
+    return {'ok': True, 'status': 'ok', 'served_models': set(served),
+            'effective_url': effective}
 
 
 def check_once() -> dict:
@@ -366,6 +401,8 @@ def check_once() -> dict:
                           if m.get('model_id')}
 
         live_endpoints = []
+        per_ep_served: dict = {}
+        effective_of: dict = {}
         union_served: set = set()
         any_ok = False
 
@@ -386,8 +423,11 @@ def check_once() -> dict:
 
             any_ok = True
             n_endpoints_ok += 1
-            live_endpoints.append(endpoint)
+            ep_key = result.get('effective_url') or endpoint
+            effective_of[endpoint] = ep_key
+            live_endpoints.append(ep_key)
             served = result['served_models']
+            per_ep_served[ep_key] = served
             union_served |= served
 
             cleared = _clear_endpoint_cooldowns(prov_id, endpoint)
@@ -401,63 +441,108 @@ def check_once() -> dict:
         if not any_ok:
             continue
 
-        # Trigger re-discovery when configured-set drifts from union of
-        # served sets across all live endpoints, or once every RESYNC_EVERY
-        # successful cycles. Use the longest streak as the periodic trigger.
+        # Trigger re-discovery when the configured-set drifts from the
+        # union of served sets, when per-endpoint PLACEMENT drifts from the
+        # persisted binding (a model moved boxes — union alone can't see
+        # that), or once every RESYNC_EVERY successful cycles.
+        old_binding = {}
+        for bk, bv in (prov.get('endpoint_models') or {}).items():
+            if isinstance(bk, str) and isinstance(bv, list):
+                old_binding[normalize_base_url(bk.strip())] = sorted(
+                    x for x in bv if isinstance(x, str) and x)
+        binding_drift = any(
+            old_binding.get(ep) != sorted(per_ep_served[ep])
+            for ep in live_endpoints
+        )
         max_streak = max((_success_streak.get((prov_id, e), 0)
                           for e in live_endpoints), default=0)
         needs_resync = (
             not configured_ids
             or union_served != configured_ids
+            or binding_drift
             or (max_streak % RESYNC_EVERY == 0)
         )
         if not needs_resync:
             continue
 
-        # Rebuild model entries from the first live endpoint (model metadata
-        # is identical across a homogeneous fleet). On heterogeneous fleets,
-        # union_served still drives membership, but per-model fields come
-        # from one canonical query.
-        try:
-            new_models = discover_models(live_endpoints[0], api_key)
-        except Exception as e:
-            logger.warning('[HealthLocal] Discovery failed for %s: %s',
-                           prov_id, e, exc_info=True)
-            continue
-        if not new_models:
-            continue
+        # ── Per-endpoint re-discovery (heterogeneous-fleet safe) ──
+        # Each model's metadata comes from the endpoint that ACTUALLY
+        # serves it. The pre-binding code discovered from live_endpoints[0]
+        # alone and union-filtered, which silently dropped every model
+        # hosted on the other boxes (the picker-flap bug).
+        existing_by_id = {m.get('model_id'): m
+                          for m in (prov.get('models') or [])
+                          if m.get('model_id')}
+        new_binding: dict = {}
+        merged: dict = {}
+        order: list = []
+        for ep in live_endpoints:
+            try:
+                ep_models = discover_models(ep, api_key)
+            except Exception as e:
+                logger.warning('[HealthLocal] Discovery failed for %s: %s',
+                               ep, e, exc_info=True)
+                ep_models = []
+            if not ep_models:
+                # The health probe succeeded but full discovery failed —
+                # keep the check-derived placement + existing metadata
+                # rather than writing a spurious empty binding.
+                ids = sorted(per_ep_served.get(ep) or [])
+                for mid in ids:
+                    if mid not in merged and mid in existing_by_id:
+                        merged[mid] = existing_by_id[mid]
+                        order.append(mid)
+                new_binding[ep] = ids
+                continue
+            ids = []
+            for m in ep_models:
+                mid = m['model_id']
+                ids.append(mid)
+                if mid not in merged:
+                    merged[mid] = m
+                    order.append(mid)
+            new_binding[ep] = sorted(ids)
 
-        # Filter discovered models down to the union of served sets so a
-        # transiently-down endpoint doesn't drop its private models.
-        filtered = [m for m in new_models if m['model_id'] in union_served]
-        # If filtering removed everything (e.g. only one endpoint was live and
-        # discovered the full set), keep the discovered list as-is.
-        if not filtered:
-            filtered = new_models
+        # A transiently-DOWN endpoint keeps its previous binding and its
+        # models (restarting a box must not wipe the picker).
+        for ep in endpoints:
+            if ep in effective_of:
+                continue
+            prev = old_binding.get(ep)
+            if prev:
+                new_binding[ep] = prev
+                for mid in prev:
+                    if mid not in merged and mid in existing_by_id:
+                        merged[mid] = existing_by_id[mid]
+                        order.append(mid)
 
         # Preserve user-set per-model flags (enabled toggle, custom rpm/cost)
         # across re-discovery — discover_models() returns a fresh list with no
         # knowledge of what the user toggled in Settings.
-        existing_by_id = {m.get('model_id'): m
-                          for m in (prov.get('models') or [])
-                          if m.get('model_id')}
-        for m in filtered:
-            prev = existing_by_id.get(m.get('model_id'))
+        for mid, m in merged.items():
+            prev = existing_by_id.get(mid)
             if prev is not None and prev.get('enabled') is False:
                 m['enabled'] = False
 
-        new_ids = {m['model_id'] for m in filtered}
-        if new_ids == configured_ids:
-            continue
+        filtered = [merged[mid] for mid in order]
 
-        if _persist_provider_models(prov_id, filtered):
+        new_ids = {m['model_id'] for m in filtered}
+        new_endpoints = [effective_of.get(ep, ep) for ep in endpoints]
+        if (new_ids == configured_ids
+                and new_binding == old_binding
+                and new_endpoints == endpoints):
+            continue  # zero drift — rewriting would just churn the slot pool
+
+        if _persist_provider_models(prov_id, filtered,
+                                    endpoint_models=new_binding,
+                                    endpoints=new_endpoints):
             n_resynced += 1
             rebuilt = True
             added = sorted(new_ids - configured_ids)
             removed = sorted(configured_ids - new_ids)
-            logger.info('[HealthLocal] Provider %s model list updated '
-                        '(+%d / -%d): added=%s removed=%s',
-                        prov_id, len(added), len(removed),
+            logger.info('[HealthLocal] Provider %s model state updated '
+                        '(+%d / -%d models, %d bound endpoints): added=%s removed=%s',
+                        prov_id, len(added), len(removed), len(new_binding),
                         added[:5], removed[:5])
             audit_log('local_endpoint_models_updated', provider_id=prov_id,
                       added=added, removed=removed)

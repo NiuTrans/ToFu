@@ -22,9 +22,18 @@ autopilot only resumes once no dispatchable row remains.
 
 This replaces the frontend-only ``pendingMessageQueue`` Map that was lost
 on page refresh.
+
+Dispatch durability (pt_4ab943fa): dequeue LEASES a row
+(``leased_until``/``lease_task_id``) instead of deleting it. The delete lands
+only after ``spawn_task`` succeeds; every failure path releases the lease; a
+reaper (:func:`reap_expired_queue_leases`, riding the manager maintenance
+tick) reclaims rows whose lease expired without a live task in the registry
+and re-dispatches them. A crash or exception mid-dispatch therefore triggers
+an automatic retry instead of silently losing the queued message.
 """
 
 import json
+import os
 import threading
 import time
 import uuid
@@ -57,6 +66,31 @@ _PRIORITY_FOR_KIND = {
 
 def _priority_for_kind(kind: str) -> int:
     return _PRIORITY_FOR_KIND.get(kind, 100)
+
+
+# ── Dispatch lease (pt_4ab943fa) ──
+# How long a dequeued-but-not-yet-spawned row stays invisible to other drains.
+# Must comfortably exceed the slowest in-dispatch step (auto-translate of a
+# long queued message is an LLM call). Only a true process crash mid-dispatch
+# ever waits out the full TTL — every failure path releases the lease
+# immediately, and the success path deletes the row outright.
+_QUEUE_LEASE_MS = 120 * 1000
+
+
+def _reaper_max_dispatch_per_tick() -> int:
+    """Max stranded-drain dispatches per reaper tick (default 4).
+
+    A crash/restart can strand MANY conversations at once (each holding a
+    queued human message). Draining them all in a single tick would spawn N
+    tasks simultaneously and slam the LLM rate limit — the steady-state tick
+    drains oldest-first, K per tick; the rest retry on the next tick.
+    """
+    try:
+        return max(1, int(os.environ.get(
+            'TOFU_QUEUE_REAPER_MAX_DISPATCH_PER_TICK', '') or '4'))
+    except (ValueError, TypeError) as e:
+        logger.debug('[Queue] TOFU_QUEUE_REAPER_MAX_DISPATCH_PER_TICK parse failed: %s', e)
+        return 4
 
 
 def _ensure_table():
@@ -92,6 +126,59 @@ def _maybe_ensure_table():
         _table_ensured = True
 
 
+def _existing_board_kickoff(db, conv_id: str, message_data: dict,
+                            kind: str) -> str | None:
+    """Queue id of an EXISTING kickoff for the same ``(conv_id, boardTaskId)``,
+    or None when this row is not a duplicate (or not dedup-able at all).
+
+    The structural floor under brain-dispatch de-duplication. Producer-side
+    probes (``_epic_already_queued`` in ``sweep_dispatch`` / ``on_epic_posted``
+    / ``on_epic_completed``) each have to REMEMBER to ask; this asks once, for
+    every producer, present and future. That distinction is not theoretical:
+    on 2026-07-28 conv ms4b67gmthqc17 accumulated 11 queued rows for 4 distinct
+    epics because exactly ONE producer (``on_epic_completed``) lacked the probe
+    while its target's claim lease lapsed under an hours-long task.
+
+    Dedup-able means ALL of:
+      • ``kind == KIND_WORKFLOW`` — only brain kickoffs. A human turn or a peer
+        message is NEVER collapsed: repeating yourself is legitimate input.
+      • the payload carries a non-empty ``boardTaskId`` — the epic identity the
+        dedup is keyed on. A workflow row without one is not comparable.
+
+    Scoped to ONE conversation on purpose: ``migrate_epic`` re-enqueues the same
+    epic on a different (idle) conv, and that is a genuinely new row — a
+    cross-conv dedup would silently strand a migrated epic.
+
+    Fails OPEN: any lookup error returns None (→ insert). The accepted failure
+    mode is an occasional duplicate row (visible, and the consume-time discard
+    still stops the billed task); the unacceptable one is silently swallowing a
+    turn that no other row will deliver.
+    """
+    if kind != KIND_WORKFLOW:
+        return None
+    board_task_id = (message_data or {}).get('boardTaskId')
+    if not board_task_id:
+        return None
+    try:
+        rows = db.execute(
+            'SELECT id, payload FROM message_queue WHERE conv_id=? AND kind=?',
+            (conv_id, kind)).fetchall()
+        for r in rows:
+            try:
+                p = json.loads(r['payload']) if r['payload'] else {}
+            except (TypeError, ValueError) as e:
+                logger.debug('[Queue] dedup payload parse failed (skipping): %s', e)
+                continue
+            if p.get('boardTaskId') == board_task_id:
+                return r['id']
+        return None
+    except Exception as e:
+        logger.warning('[Queue] board-kickoff dedup probe failed conv=%s '
+                       'epic=%s (enqueuing anyway): %s',
+                       conv_id[:8] if conv_id else '?', board_task_id, e)
+        return None
+
+
 def enqueue_message(conv_id: str, message_data: dict, config: dict,
                     kind: str = KIND_REAL) -> dict:
     """Add a turn source to the server-side queue for a conversation.
@@ -108,16 +195,36 @@ def enqueue_message(conv_id: str, message_data: dict, config: dict,
               ``KIND_AUTOPILOT``.  Determines the priority bucket.
 
     Returns:
-        Dict with queueId, position, kind.
+        Dict with queueId, position, kind. On a COLLAPSED brain kickoff (a row
+        for the same ``(conv_id, boardTaskId)`` already queued) the EXISTING
+        row's id is returned with ``deduped: True`` — never a fresh uuid that
+        no row carries, so a caller storing it cannot hold a dangling id.
     """
     _maybe_ensure_table()
+
+    db = get_thread_db(DOMAIN_CHAT)
+
+    # ── Structural de-dup floor: one queued kickoff per (conv, epic) ──
+    # See _existing_board_kickoff. Applies ONLY to brain kickoffs carrying a
+    # boardTaskId; human and peer turns are never collapsed.
+    existing = _existing_board_kickoff(db, conv_id, message_data, kind)
+    if existing:
+        row = db.execute(
+            'SELECT position FROM message_queue WHERE id=?', (existing,)).fetchone()
+        position = int(row['position']) if row and row['position'] is not None else 1
+        logger.info('[Queue] collapsed duplicate %s kickoff for conv=%s epic=%s '
+                    '→ reusing queued row %s (position=%d); a second row would '
+                    'inflate the visible queue depth and, on drain, cost a '
+                    'billed task re-doing claimed work',
+                    kind, conv_id[:8], message_data.get('boardTaskId'),
+                    existing[:8], position)
+        return {'queueId': existing, 'position': position, 'kind': kind,
+                'deduped': True}
 
     queue_id = str(uuid.uuid4())
     now_ms = int(time.time() * 1000)
     timestamp = message_data.get('timestamp', now_ms)
     priority = _priority_for_kind(kind)
-
-    db = get_thread_db(DOMAIN_CHAT)
 
     # Get current queue depth for position
     row = db.execute(
@@ -138,7 +245,68 @@ def enqueue_message(conv_id: str, message_data: dict, config: dict,
                 kind, queue_id[:8], conv_id[:8], position, priority,
                 len(message_data.get('text', '')))
 
+    # Owner-ratified preemption (2026-07-25): a human's REAL message must not
+    # wait out an in-flight autopilot VU call — the deferral used to fire
+    # only AFTER run_virtual_user completed (production incident: two full
+    # VU rounds, 94s + 74s, of dead time). Abort the VU sub-task NOW; it
+    # unwinds at the next abort checkpoint (the SSE loop checks per-chunk)
+    # and the completion hook dispatches THIS row seconds later, not minutes.
+    # KIND_REAL only: a peer/workflow row keeps the cheap wait-for-completion
+    # deferral — its latency is not user-visible, so killing a paid VU call
+    # for it would be waste.
+    if kind == KIND_REAL:
+        try:
+            _preempt_vu_subtask_for_real_message(conv_id)
+        except Exception as e:
+            logger.warning('[Queue] VU preempt on real enqueue failed conv=%s: %s',
+                           conv_id[:8], e)
+
     return {'queueId': queue_id, 'position': position, 'kind': kind}
+
+
+def _preempt_vu_subtask_for_real_message(conv_id: str) -> bool:
+    """Abort the conv's live autopilot VU sub-task so a just-enqueued REAL
+    message starts generating at the next abort checkpoint instead of
+    waiting out the whole VU LLM call.
+
+    Mirrors the parent→sub-task abort-mirror pattern in
+    ``lib/tasks_pkg/autopilot.run_virtual_user``: the orchestrator polls
+    ``task['aborted']`` per round and the SSE stream loop checks its
+    abort_check PER CHUNK (lib/llm/stream.py:163-166), so the VU unwinds
+    within seconds. ``run_virtual_user`` then routes the deferral
+    (AUTOPILOT_VU_CANCEL + completion-hook dispatch of the queued row).
+
+    Best-effort: any probe failure logs and returns False (the row is
+    already enqueued — the post-call deferral still applies, so the
+    worst case is the OLD wait-for-completion behaviour, never a loss).
+
+    Returns True iff a VU sub-task was preempted.
+    """
+    try:
+        from lib.tasks_pkg.manager import tasks, tasks_lock
+        with tasks_lock:
+            vus = [t for t in tasks.values()
+                   if t.get('convId') == conv_id
+                   and t.get('_vu_subtask')
+                   and t.get('status') in ('pending', 'running')
+                   and not t.get('aborted')]
+        if not vus:
+            return False
+        from lib.log import audit_log
+        for t in vus:
+            t['aborted'] = True
+            t['_abort_timestamp'] = time.time()
+            t['_abort_reason'] = 'real_message_preempts_vu'
+            audit_log('vu_preempted_by_real_message', conv_id=conv_id,
+                      vu_task_id=t.get('id', ''))
+            logger.info('[Queue] Real message preempts autopilot VU sub-task %s '
+                        'for conv=%s — the queued turn starts at the next abort '
+                        'checkpoint instead of after the full VU call',
+                        t.get('id', '?')[:8], conv_id[:8])
+        return True
+    except Exception as e:
+        logger.warning('[Queue] VU preempt probe failed conv=%s: %s', conv_id[:8], e)
+        return False
 
 
 def arm_autopilot_marker(conv_id: str, config: dict) -> dict:
@@ -251,6 +419,162 @@ def list_orphaned_dispatchable_convs() -> list[str]:
         return []
 
 
+def reap_expired_queue_leases(force_reclaim: bool = False) -> list[str]:
+    """Reclaim stranded dispatch leases and re-dispatch them (maintenance tick).
+
+    The dispatch lease (pt_4ab943fa) makes a queued row survive its dispatch;
+    this reaper is the backstop that turns that durability into an automatic
+    retry. Per leased row:
+
+      • LIVE TASK — the lease's task is running in the registry: renew an
+        expiring lease and leave the row alone (never a double-dispatch).
+      • LOST-FINALIZE — the lease's task is TERMINAL (registry, or the durable
+        ``task_results`` floor after registry eviction): the spawn succeeded
+        but the deferred delete was lost. Finish the delete here — the row
+        must never come back as a duplicate turn.
+      • DEAD LEASE — expired lease whose task is missing/not running (crash
+        or exception mid-dispatch): release the lease so the row drains again.
+
+    Then, for every conv left with a dispatchable row and NO live task in the
+    registry (the same per-conv guard the startup orphan scan uses), dispatch
+    ONE row — the completion hook drains the rest in priority order. This is
+    the steady-state safety net that converts "silent message loss" into
+    "automatic retry on the next tick".
+
+    ``force_reclaim=True`` (startup only): treat EVERY lease as dead. Correct
+    on a fresh boot in the single-process topology — the registry is empty,
+    so every lease's owner process is definitionally gone.
+
+    Returns the list of task_ids spawned from reclaimed rows.
+    """
+    spawned: list[str] = []
+    try:
+        _maybe_ensure_table()
+        db = get_thread_db(DOMAIN_CHAT)
+        now_ms = int(time.time() * 1000)
+        rows = db.execute(
+            'SELECT id, conv_id, leased_until, lease_task_id FROM message_queue '
+            'WHERE kind!=? AND leased_until IS NOT NULL',
+            (KIND_AUTOPILOT,),
+        ).fetchall()
+    except Exception as e:
+        logger.warning('[Queue] lease-reaper scan failed: %s', e)
+        return spawned
+
+    for row in rows:
+        qid = row['id']
+        conv_id = row['conv_id']
+        lease_tid = (row['lease_task_id'] or '')
+        expired = force_reclaim or (row['leased_until'] or 0) < now_ms
+
+        if lease_tid and not force_reclaim:
+            status = None
+            try:
+                from lib.tasks_pkg.manager import tasks, tasks_lock
+                with tasks_lock:
+                    _t = tasks.get(lease_tid)
+                if _t is not None:
+                    status = 'aborted' if _t.get('aborted') else _t.get('status')
+            except Exception as e:
+                logger.debug('[Queue] lease-reaper registry probe failed for %s: %s',
+                             qid[:8], e)
+            if status is None:
+                # Registry miss — check the durable floor before calling the
+                # lease dead: a task that finished and was later evicted from
+                # the registry still proves the spawn happened, so finishing
+                # the delete (not a re-dispatch) is the correct repair.
+                try:
+                    _tr = db.execute(
+                        'SELECT status FROM task_results WHERE task_id=?',
+                        (lease_tid,),
+                    ).fetchone()
+                    if _tr is not None:
+                        status = _tr['status'] or 'done'
+                except Exception as e:
+                    logger.debug('[Queue] lease-reaper task_results probe failed: %s', e)
+            if status == 'running':
+                if expired:
+                    try:
+                        db_execute_with_retry(
+                            db,
+                            'UPDATE message_queue SET leased_until=? WHERE id=?',
+                            (now_ms + _QUEUE_LEASE_MS, qid))
+                    except Exception as e:
+                        logger.warning('[Queue] lease renew failed for %s: %s', qid[:8], e)
+                continue
+            if status in ('done', 'error', 'aborted'):
+                try:
+                    _finalize_queue_dispatch(db, conv_id, qid)
+                    logger.warning('[Queue] lease-reaper finished lost delete for %s '
+                                   '(task %s terminal=%s)', qid[:8], lease_tid[:8], status)
+                except Exception as e:
+                    logger.warning('[Queue] lease-reaper finalize failed for %s: %s',
+                                   qid[:8], e)
+                continue
+
+        if not expired:
+            # Fresh lease with no task id yet — an in-flight dispatch owns it.
+            continue
+        try:
+            db_execute_with_retry(
+                db,
+                "UPDATE message_queue SET leased_until=NULL, lease_task_id='' WHERE id=?",
+                (qid,))
+            logger.warning('[Queue] lease-reaper reclaimed dead lease %s conv=%s '
+                           '(lease_task=%s)', qid[:8], conv_id[:8],
+                           lease_tid[:8] or '—')
+        except Exception as e:
+            logger.warning('[Queue] lease-reaper release failed for %s: %s', qid[:8], e)
+
+    # Stranded drain: one dispatch per conv that has a dispatchable row and no
+    # live task. Bounded lock wait — a wedged in-flight dispatch must never
+    # wedge the maintenance tick that drives this reaper. OLDEST-ENQUEUED
+    # first, capped per tick — a mass-stranding event (restart) must not slam
+    # the LLM rate limit with N simultaneous spawns.
+    try:
+        stranded = db.execute(
+            'SELECT conv_id, MIN(created_at) AS oldest FROM message_queue '
+            'WHERE kind!=? AND (leased_until IS NULL OR leased_until < ?) '
+            'GROUP BY conv_id ORDER BY oldest ASC',
+            (KIND_AUTOPILOT, now_ms),
+        ).fetchall()
+    except Exception as e:
+        logger.warning('[Queue] lease-reaper stranded scan failed: %s', e)
+        return spawned
+
+    max_dispatch = _reaper_max_dispatch_per_tick()
+    attempts = 0
+    for srow in stranded:
+        if attempts >= max_dispatch:
+            logger.info('[Queue] lease-reaper: per-tick dispatch cap %d reached — '
+                        'remaining %d stranded conv(s) defer to the next tick',
+                        max_dispatch, len(stranded) - attempts)
+            break
+        conv_id = srow['conv_id']
+        if not conv_id or _conv_has_live_task(conv_id):
+            continue
+        attempts += 1
+        try:
+            tid = dispatch_next_queued(conv_id, _wait=5)
+        except Exception as e:
+            logger.warning('[Queue] lease-reaper dispatch failed for conv=%s: %s',
+                           conv_id[:8], e, exc_info=True)
+            continue
+        if tid:
+            spawned.append(tid)
+            try:
+                from lib.log import audit_log
+                audit_log('queue_lease_reclaim', conv_id=conv_id, task_id=tid)
+            except Exception as e:
+                logger.debug('[Queue] audit_log failed: %s', e)
+            logger.info('[Queue] lease-reaper: conv=%s → task %s', conv_id[:8], tid[:8])
+
+    if spawned:
+        logger.info('[Queue] lease-reaper spawned %d task(s) from reclaimed rows',
+                    len(spawned))
+    return spawned
+
+
 def redispatch_orphaned_queue_on_startup() -> list[str]:
     """Re-dispatch every queued turn stranded by a server restart.
 
@@ -285,6 +609,13 @@ def redispatch_orphaned_queue_on_startup() -> list[str]:
     Returns the list of task_ids spawned (one per conv that had a queued turn).
     """
     spawned: list[str] = []
+    # Crash-durable leases (pt_4ab943fa): on a fresh boot the registry is
+    # empty, so EVERY surviving lease is a dead-process artifact — reclaim
+    # them all up front (this also re-dispatches one row per affected conv).
+    try:
+        spawned.extend(reap_expired_queue_leases(force_reclaim=True))
+    except Exception as e:
+        logger.warning('[Queue] startup lease reclaim failed: %s', e, exc_info=True)
     try:
         convs = list_orphaned_dispatchable_convs()
     except Exception as e:
@@ -298,32 +629,31 @@ def redispatch_orphaned_queue_on_startup() -> list[str]:
     logger.info('[Queue] redispatch-on-startup: %d conv(s) have orphaned queued '
                 'turn(s): %s', len(convs), [c[:8] for c in convs])
 
+    # Same herd guard as the steady-state reaper: a mass-stranding restart
+    # dispatches oldest-first, K per boot — the maintenance tick drains the
+    # rest, so recovery is throttled instead of an LLM rate-limit storm.
+    max_boot = _reaper_max_dispatch_per_tick()
+    boot_attempts = len(spawned)  # the lease reclaim above already spent some
     for conv_id in convs:
+        if boot_attempts >= max_boot:
+            logger.info('[Queue] redispatch-on-startup: dispatch cap %d reached — '
+                        'remaining %d conv(s) drain on the maintenance tick',
+                        max_boot, len(convs) - boot_attempts)
+            break
         if not conv_id:
             continue
         # Defensive: never drain a conv that already has a live task (a task
-        # spawned earlier in the same boot, or a racing send). Mirrors
-        # project_dispatch._conv_has_live_task's intent without importing it.
-        try:
-            from lib.tasks_pkg.manager import tasks, tasks_lock
-            with tasks_lock:
-                _live = any(
-                    t.get('convId') == conv_id
-                    and t.get('status') == 'running'
-                    and not t.get('aborted')
-                    for t in tasks.values()
-                )
-            if _live:
-                logger.info('[Queue] redispatch-on-startup: conv=%s already has a '
-                            'live task — leaving its queue for the completion hook',
-                            conv_id[:8])
-                continue
-        except Exception as e:
-            logger.debug('[Queue] redispatch-on-startup live-task probe failed '
-                         'for conv=%s: %s', conv_id[:8], e)
+        # spawned earlier in the same boot — e.g. by the lease reclaim above —
+        # or a racing send).
+        if _conv_has_live_task(conv_id):
+            logger.info('[Queue] redispatch-on-startup: conv=%s already has a '
+                        'live task — leaving its queue for the completion hook',
+                        conv_id[:8])
+            continue
 
         # Dispatch ONE task for this conv; its completion hook drains the rest
         # of the queue (single-task-per-conv, as in steady state).
+        boot_attempts += 1
         try:
             tid = dispatch_next_queued(conv_id)
         except Exception as e:
@@ -417,13 +747,22 @@ def drain_idle_peer_messages() -> list[str]:
     for conv_id in convs:
         if not conv_id:
             continue
-        # Busy guard: never force-drain a conv with a live task (the fast-path
-        # inbox twin / completion hook owns delivery there).
+        # Busy guard: never force-drain a conv that has a FAST-PATH-ELIGIBLE
+        # live task — its inbox twin / round-boundary drain (or the completion
+        # hook) owns delivery there, so force-draining would double-dispatch.
+        # The predicate MUST mirror project_peer._live_drain_eligible_task
+        # (running + not aborted, matched on convId OR _peer_drain_key): a VU
+        # sub-task runs with convId='' and carries the parent conv in
+        # _peer_drain_key, so a bare convId==conv_id check would MISS it and let
+        # idle-drain wrongly pre-empt the VU loop's in-turn delivery. A conv
+        # whose only live task is NOT eligible (aborted / non-running) falls
+        # through and IS drained here — the intended strand-closing behaviour.
         try:
             from lib.tasks_pkg.manager import tasks, tasks_lock
             with tasks_lock:
                 _live = any(
-                    t.get('convId') == conv_id
+                    (t.get('convId') == conv_id
+                     or t.get('_peer_drain_key') == conv_id)
                     and t.get('status') == 'running'
                     and not t.get('aborted')
                     for t in tasks.values()
@@ -635,10 +974,17 @@ def dequeue_next(conv_id: str) -> dict | None:
     # Only dispatchable sources (real / workflow_step) are popped as tasks.
     # The autopilot sentinel is consulted by the end-of-turn hook, never
     # dequeued here.
+    # Lease-aware: a row carrying an UNEXPIRED lease belongs to an in-flight
+    # dispatch — never hand it to a second drainer. An EXPIRED lease is a
+    # crash/failure artifact and the row is fair game again (self-heal even
+    # before the reaper runs).
+    now_ms = int(time.time() * 1000)
     row = db.execute(
         'SELECT id, payload, config FROM message_queue '
-        'WHERE conv_id=? AND kind!=? ORDER BY priority ASC, position ASC LIMIT 1',
-        (conv_id, KIND_AUTOPILOT)
+        'WHERE conv_id=? AND kind!=? '
+        'AND (leased_until IS NULL OR leased_until < ?) '
+        'ORDER BY priority ASC, position ASC LIMIT 1',
+        (conv_id, KIND_AUTOPILOT, now_ms)
     ).fetchone()
 
     if not row:
@@ -657,11 +1003,18 @@ def dequeue_next(conv_id: str) -> dict | None:
         logger.warning('[Queue] Failed to parse config for dequeue queue_id=%s: %s', queue_id[:8], e)
         config = {}
 
-    # Remove from queue
-    db_execute_with_retry(db, 'DELETE FROM message_queue WHERE id=?', (queue_id,))
-    _renumber_positions(db, conv_id)
+    # LEASE, don't delete (pt_4ab943fa). The row stays durable until
+    # spawn_task succeeds (the delete moved to _finalize_queue_dispatch), so
+    # any failure/crash between here and the spawn leaves the message
+    # reclaimable instead of silently lost. lease_task_id='' means "dispatch
+    # in flight, task not yet created".
+    db_execute_with_retry(
+        db,
+        "UPDATE message_queue SET leased_until=?, lease_task_id='' WHERE id=?",
+        (now_ms + _QUEUE_LEASE_MS, queue_id),
+    )
 
-    logger.info('[Queue] Dequeued message %s from conv=%s, text=%d chars',
+    logger.info('[Queue] Leased queued message %s for dispatch conv=%s, text=%d chars',
                 queue_id[:8], conv_id[:8], len(payload.get('text', '')))
 
     return {
@@ -669,6 +1022,51 @@ def dequeue_next(conv_id: str) -> dict | None:
         'payload': payload,
         'config': config,
     }
+
+
+def _release_queue_lease(db, queue_id: str) -> None:
+    """Release a dispatch lease immediately (used by every failure path).
+
+    Best-effort — a failure here only delays re-dispatch until lease expiry;
+    it can never lose the row (the row is only deleted on spawn success).
+    """
+    try:
+        db_execute_with_retry(
+            db,
+            "UPDATE message_queue SET leased_until=NULL, lease_task_id='' WHERE id=?",
+            (queue_id,),
+        )
+    except Exception as e:
+        logger.warning('[Queue] lease release failed for %s: %s', queue_id[:8], e)
+
+
+def _finalize_queue_dispatch(db, conv_id: str, queue_id: str) -> None:
+    """Delete a successfully-dispatched row + renumber (the deferred delete).
+
+    This is the ONLY delete on the dispatch path now — it runs AFTER
+    spawn_task succeeded, so the durable copy outlives every failure window.
+    """
+    db_execute_with_retry(db, 'DELETE FROM message_queue WHERE id=?', (queue_id,))
+    _renumber_positions(db, conv_id)
+
+
+def _conv_has_live_task(conv_id: str) -> bool:
+    """True if the in-memory registry holds a running, non-aborted task for
+    the conv. Shared by the startup orphan scan and the lease reaper (the
+    per-conv guard that prevents double-dispatch). Best-effort False on error.
+    """
+    try:
+        from lib.tasks_pkg.manager import tasks, tasks_lock
+        with tasks_lock:
+            return any(
+                t.get('convId') == conv_id
+                and t.get('status') == 'running'
+                and not t.get('aborted')
+                for t in tasks.values()
+            )
+    except Exception as e:
+        logger.debug('[Queue] live-task probe failed for conv=%s: %s', conv_id[:8], e)
+        return False
 
 
 def _append_user_msg_with_cas(db, conv_id: str, user_msg: dict) -> bool:
@@ -718,46 +1116,130 @@ def _append_user_msg_with_cas(db, conv_id: str, user_msg: dict) -> bool:
         )
         db.commit()
         if getattr(cur, 'rowcount', None) != 0:
+            # Phase 5 dual-write (flag-gated, inert when off): tail append.
+            from lib.database.messages_rows import mirror_write_and_commit
+            mirror_write_and_commit(db, conv_id, messages, now_ms=now_ms)
             return True
         # CAS miss — a concurrent writer bumped updated_at. Re-read + retry.
         logger.debug('[Queue] append CAS miss conv=%s attempt %d/%d — re-reading',
                      conv_id[:8], attempt + 1, _MAX_CAS)
         time.sleep(0.02 * (attempt + 1))
 
-    # Exhausted retries: fall back to an unconditional write so the queued
-    # turn is NEVER dropped (correctness > the rare lost-concurrent-write). The
-    # idempotent append means we won't duplicate the message.
-    logger.warning('[Queue] append CAS exhausted for conv=%s — forcing unconditional write', conv_id[:8])
-    row = db.execute(
-        'SELECT messages FROM conversations WHERE id=? AND user_id=1',
-        (conv_id,)
-    ).fetchone()
-    if not row:
-        return False
+    # Exhausted retries. The old code fell back to an UNCONDITIONAL write here,
+    # justified as "correctness > the rare lost-concurrent-write". Measurement
+    # disproved that trade (conv ms3sfyrmn31omb, 2026-07-28): what an
+    # unconditional whole-blob write loses is not a rare metadata tweak, it is
+    # whatever row another writer appended in the meantime — five completed
+    # autopilot turns, 1665–3252 chars each, gone with no error and no red test.
+    # Dropping a queued turn is visible and recoverable; erasing a committed
+    # turn is neither. So we keep re-reading instead, with a wider budget.
+    logger.warning('[Queue] append CAS contended for conv=%s — widening the '
+                   'retry budget rather than overwriting a concurrent writer',
+                   conv_id[:8])
+    for attempt in range(_MAX_CAS, _MAX_CAS * 3):
+        row = db.execute(
+            'SELECT messages, rev FROM conversations WHERE id=? AND user_id=1',
+            (conv_id,)
+        ).fetchone()
+        if not row:
+            return False
+        try:
+            messages = json.loads(row['messages'] or '[]')
+        except (json.JSONDecodeError, TypeError) as e:
+            logger.debug('[Queue] messages JSON parse failed, using fallback: %s', e)
+            messages = []
+        cur_rev = row['rev']
+        append_user_msg_idempotent(messages, user_msg)
+        now_ms = int(time.time() * 1000)
+        cur = db.execute(
+            'UPDATE conversations SET messages=?, updated_at=?, msg_count=? '
+            'WHERE id=? AND user_id=1 AND rev=?',
+            (json_dumps_pg(messages), now_ms, len(messages), conv_id, cur_rev)
+        )
+        db.commit()
+        if getattr(cur, 'rowcount', None) != 0:
+            from lib.database.messages_rows import mirror_write_and_commit
+            mirror_write_and_commit(db, conv_id, messages, now_ms=now_ms)
+            return True
+        time.sleep(0.05 * (attempt - _MAX_CAS + 1))
+    logger.error('[Queue] append could not win the rev CAS for conv=%s after '
+                 '%d attempts — the queued turn was NOT appended (it stays '
+                 'queued for the next drain rather than clobbering the row)',
+                 conv_id[:8], _MAX_CAS * 3)
+    return False
+
+
+def _brain_kickoff_still_wanted(project_path: str | None, board_task_id: str,
+                                conv_id: str) -> bool:
+    """True iff a brain kickoff for ``board_task_id`` is still worth spawning.
+
+    Consume-time re-check for the produce/consume gap (pt_1613ab83b1934884).
+    A kickoff is dropped when its epic is no longer waiting for work:
+
+      • the epic row is GONE (deleted board entry), or
+      • its effective status is ``done`` (finished while the kickoff queued —
+        THE incident: done at 21:01:55, drained at 21:03:07), or
+      • it is effectively ``claimed`` by a DIFFERENT conversation (a sibling
+        legitimately took it over; spawning here would duplicate the work).
+
+    Fails OPEN: any lookup error returns True, so an unrelated DB hiccup can
+    never silently swallow a legitimate kickoff — the failure mode we accept is
+    "a stale kickoff occasionally slips through" (recoverable, costs one task),
+    never "brain dispatch stops working" (invisible, stalls the whole project).
+    """
+    if not project_path or not board_task_id:
+        return True
     try:
-        messages = json.loads(row['messages'] or '[]')
-    except (json.JSONDecodeError, TypeError) as e:
-        logger.debug('[Queue] messages JSON parse failed, using fallback: %s', e)
-        messages = []
-    append_user_msg_idempotent(messages, user_msg)
-    now_ms = int(time.time() * 1000)
-    db_execute_with_retry(db, 'UPDATE conversations SET messages=?, updated_at=?, msg_count=? '
-                          'WHERE id=? AND user_id=1',
-                          (json_dumps_pg(messages), now_ms, len(messages), conv_id))
-    return True
+        from lib.conversations.project_board import read_board
+        board = read_board(project_path)
+        epic = next((t for t in board.get('tasks', [])
+                     if t.get('id') == board_task_id), None)
+        if epic is None:
+            logger.info('[Queue] discarding brain kickoff conv=%s epic=%s — '
+                        'board row is gone', conv_id[:8], board_task_id)
+            return False
+        status = epic.get('status') or ''
+        if status == 'done':
+            logger.info('[Queue] discarding brain kickoff conv=%s epic=%s — '
+                        'epic already DONE (finished while the kickoff sat in '
+                        'the queue; spawning would re-verify finished work)',
+                        conv_id[:8], board_task_id)
+            return False
+        owner = epic.get('owner_conv_id') or ''
+        if status == 'claimed' and owner and owner != conv_id:
+            logger.info('[Queue] discarding brain kickoff conv=%s epic=%s — '
+                        'now live-claimed by conv=%s', conv_id[:8],
+                        board_task_id, owner[:8])
+            return False
+        return True
+    except Exception as e:
+        logger.warning('[Queue] brain-kickoff board re-check failed conv=%s '
+                       'epic=%s (dispatching anyway): %s',
+                       conv_id[:8], board_task_id, e)
+        return True
 
 
-def dispatch_next_queued(conv_id: str) -> str | None:
+def dispatch_next_queued(conv_id: str, *, _wait: float | None = None) -> str | None:
     """Dispatch the next queued message for a conversation as a new task.
 
     Called after a task completes.  If there are queued messages, the first
     one is dequeued, its user message is appended to the conversation in the
     DB, and a new task is started.
 
+    ``_wait`` bounds the dispatch-lock wait in seconds; None (default) waits
+    forever — every steady-state caller. The lease reaper passes a small bound
+    so a wedged in-flight dispatch can never wedge the maintenance tick.
+
     Returns:
         The new task_id if dispatched, None if queue was empty.
     """
-    with _dispatch_lock:
+    if _wait is None:
+        _dispatch_lock.acquire()
+    elif not _dispatch_lock.acquire(timeout=_wait):
+        logger.info('[Queue] dispatch lock busy (>%ss) conv=%s — tick skips',
+                    _wait, conv_id[:8])
+        return None
+    try:
         item = dequeue_next(conv_id)
         if not item:
             return None
@@ -765,6 +1247,36 @@ def dispatch_next_queued(conv_id: str) -> str | None:
         payload = item['payload']
         config = item['config']
         text = payload.get('text', '')
+
+        # ── Stale brain-kickoff discard (pt_1613ab83b1934884) ──
+        # A brain kickoff is PRODUCED when the board says an epic is dispatchable,
+        # but it is CONSUMED here — possibly much later. In the 2026-07-27
+        # incident the epic was marked done at 21:01:55 and this drain ran at
+        # 21:03:07, spawning an Opus-5 task that re-verified finished work
+        # (¥26, conv ms34yw0k74o2lq task 2ef5fcaa). Worse, that kickoff was
+        # itself a re-dispatch of an epic whose 30-min claim lease had expired
+        # under an 88-min task, so the board read it as open.
+        #
+        # The invariant that fixes ALL of those shapes at once: never trust the
+        # produce-time decision — re-check at consume time. It holds regardless
+        # of lease semantics, which is why lease renewal was ruled out as the
+        # fix (it would only shrink the window, not close it).
+        #
+        # Only brain-dispatched rows are gated. A human turn has no boardTaskId
+        # and must NEVER be discardable.
+        #
+        # ★ The filter itself lives in ``_row_is_dispatchable`` — the SINGLE
+        #   consume-time predicate this function shares with the autopilot
+        #   hook's yield gate. Do NOT re-inline a filter here: a filter that
+        #   only one of the two readers applies is exactly what let a queued
+        #   kickoff read as "a turn is waiting" to autopilot and as "discard
+        #   me" to this dispatcher, destroying a finished VU turn and spawning
+        #   nothing (conv ms3s8s0kjlvq18, 2026-07-28).
+        if not _row_is_dispatchable(get_thread_db(DOMAIN_CHAT), conv_id,
+                                    payload, config):
+            _finalize_queue_dispatch(get_thread_db(DOMAIN_CHAT), conv_id,
+                                     item['queueId'])
+            return None
 
         # ── Pillar #6 REVERSE-race de-dup ──
         # A live-target peer message is written to BOTH this durable row AND a
@@ -796,6 +1308,7 @@ def dispatch_next_queued(conv_id: str) -> str | None:
             #   Append it to the conversation DB under an optimistic lock so a
             #   concurrent writer can't clobber the append (see helper).
             if not _append_user_msg_with_cas(db, conv_id, pre_built_user_msg):
+                _release_queue_lease(db, item['queueId'])
                 return None
             remaining = _get_queue_depth(db, conv_id)
             logger.info('[Queue] Appended pre-built user msg to conv=%s (CAS)', conv_id[:8])
@@ -920,6 +1433,7 @@ def dispatch_next_queued(conv_id: str) -> str | None:
             # Append user message to the conversation under an optimistic lock
             # (see _append_user_msg_with_cas — re-reads + CAS internally).
             if not _append_user_msg_with_cas(db, conv_id, user_msg):
+                _release_queue_lease(db, item['queueId'])
                 return None
             remaining = _get_queue_depth(db, conv_id)
         # (Legacy _msg_persisted path removed — no longer used)
@@ -929,6 +1443,7 @@ def dispatch_next_queued(conv_id: str) -> str | None:
         api_messages = build_api_messages_from_db(conv_id, config)
         if not api_messages:
             logger.warning('[Queue] No API messages after building for conv=%s', conv_id[:8])
+            _release_queue_lease(db, item['queueId'])
             return None
 
         from lib.tasks_pkg import create_task
@@ -936,12 +1451,29 @@ def dispatch_next_queued(conv_id: str) -> str | None:
         task = create_task(conv_id, api_messages, config)
         task_id = task['id']
 
+        # Stamp the lease with the real task id (and renew it) so the reaper's
+        # registry-liveness check can tell "spawned, delete pending" from
+        # "died before create_task". Renewing also covers the reaper having
+        # cleared this row's lease a moment ago during a slow dispatch.
+        try:
+            db_execute_with_retry(
+                db,
+                'UPDATE message_queue SET lease_task_id=?, leased_until=? WHERE id=?',
+                (task_id, int(time.time() * 1000) + _QUEUE_LEASE_MS, item['queueId']),
+            )
+        except Exception as e:
+            logger.debug('[Queue] lease task-stamp failed for %s: %s',
+                         item['queueId'][:8], e)
+
         # Update conversation settings with the new activeTaskId. Serialized
         # read-merge-write (settings_store) so it doesn't clobber a concurrent
         # tool-state / autopilot settings write on the same row (reuses `db`).
         try:
             from lib.conversations import set_conversation_settings
-            set_conversation_settings(conv_id, {'activeTaskId': task_id}, db=db)
+            # notify=False: this path emits its own notify_conv_changed after
+            # spawn (no double push); the gate still invalidates the cache.
+            set_conversation_settings(conv_id, {'activeTaskId': task_id}, db=db,
+                                      notify=False)
         except Exception as e:
             logger.warning('[Queue] Failed to update activeTaskId for conv=%s: %s',
                            conv_id[:8], e, exc_info=True)
@@ -966,17 +1498,32 @@ def dispatch_next_queued(conv_id: str) -> str | None:
                 source='message-queue',
                 raw=str(_spawn_err),
             )
+            _release_queue_lease(db, item['queueId'])
             return None
+
+        # Spawn succeeded — NOW the durable row goes away (the deferred delete,
+        # moved here from dequeue time for crash durability, pt_4ab943fa).
+        try:
+            _finalize_queue_dispatch(db, conv_id, item['queueId'])
+        except Exception as e:
+            # Non-fatal: the reaper finishes the delete once the task goes
+            # terminal (and extends the lease while it runs) — the message can
+            # never be re-dispatched as a duplicate by this path.
+            logger.warning('[Queue] deferred delete failed for %s: %s',
+                           item['queueId'][:8], e)
 
         # Notify clients so the sidebar reflects the newly-dispatched task
         # without a manual refresh (metadata-scope: rev unchanged by dispatch).
         try:
             from lib.conversations import notify_conv_changed
-            notify_conv_changed(conv_id, rev=None)
+            from lib.tasks_pkg.manager._registry import task_user_id
+            notify_conv_changed(conv_id, rev=None, user_id=task_user_id(task))
         except Exception as e:
             logger.debug('[Queue] conv-changed notify failed: %s', e)
 
         return task_id
+    finally:
+        _dispatch_lock.release()
 
 
 def _get_queue_depth(db, conv_id: str) -> int:
@@ -995,6 +1542,135 @@ def _get_queue_depth(db, conv_id: str) -> int:
 
 
 def get_queue_depth(conv_id: str) -> int:
-    """Public version: dispatchable queue depth with its own DB connection."""
+    """Public version: dispatchable queue depth with its own DB connection.
+
+    ⚠️ This is a COUNT with a WEAK filter (kind only) — it deliberately does
+    NOT apply the consume-time filters that decide whether a row will really
+    become a turn. Use it for badges/telemetry, NEVER to answer "is a turn
+    about to take over?" — for that ask :func:`has_pending_human_turn` /
+    :func:`next_dispatchable_turn`, which route through the single
+    ``_row_is_dispatchable`` predicate.
+    """
     db = get_thread_db(DOMAIN_CHAT)
     return _get_queue_depth(db, conv_id)
+
+
+# ── THE single consume-time dispatchability predicate ────────────────
+#
+# Both readers of this queue MUST route through here:
+#   • ``dispatch_next_queued`` — decides whether a leased row becomes a task;
+#   • ``next_dispatchable_turn`` / ``has_pending_human_turn`` — let the
+#     autopilot hook ask "will a turn really take over from me?".
+#
+# WHY THE SEAM EXISTS (conv ms3s8s0kjlvq18, 2026-07-28): the dispatch side
+# applied the board re-check while the autopilot side counted rows with a
+# WEAKER filter (kind only). A brain kickoff whose epic had finished while it
+# sat queued therefore read as "a human is waiting" to autopilot (which threw
+# away a completed 24-round VU turn) and as "discard me" to the dispatcher
+# (which spawned nothing). Two correct-looking gates, opposite verdicts on the
+# SAME row, and the conversation died with no signal.
+#
+# Narrowing the kind check alone would have fixed that ONE instance and left
+# the cause: every future filter would again land on only one side. Adding a
+# filter HERE moves both readers at once — that is the entire point.
+
+def _row_is_dispatchable(db, conv_id: str, payload: dict,
+                         config: dict) -> bool:
+    """True iff this queued row would really be dispatched as a turn.
+
+    Args:
+        db: Open chat-domain DB handle (filters may need to read state).
+        conv_id: Owning conversation id.
+        payload: The row's decoded payload dict.
+        config: The row's decoded config dict.
+
+    Returns:
+        ``False`` only when a consume-time filter rejects the row. Fails OPEN
+        (see ``_brain_kickoff_still_wanted``): an unrelated lookup error must
+        never silently swallow a legitimate turn.
+    """
+    board_task_id = (payload or {}).get('boardTaskId')
+    if board_task_id and not _brain_kickoff_still_wanted(
+            (config or {}).get('projectPath'), board_task_id, conv_id):
+        return False
+    return True
+
+
+def _dispatchable_rows(db, conv_id: str) -> list[dict]:
+    """Queued rows that would REALLY be dispatched, in dispatch order.
+
+    Mirrors ``dequeue_next``'s row selection (non-autopilot kinds, lease-aware,
+    ``priority ASC, position ASC``) and then applies ``_row_is_dispatchable``
+    to each — but takes NO lease and mutates nothing, so it is safe to ask
+    from a decision gate.
+
+    Returns a list of ``{'queueId', 'kind', 'isHuman'}``.
+    """
+    now_ms = int(time.time() * 1000)
+    rows = db.execute(
+        'SELECT id, kind, payload, config FROM message_queue '
+        'WHERE conv_id=? AND kind!=? '
+        'AND (leased_until IS NULL OR leased_until < ?) '
+        'ORDER BY priority ASC, position ASC',
+        (conv_id, KIND_AUTOPILOT, now_ms)
+    ).fetchall()
+    out: list[dict] = []
+    for row in rows:
+        try:
+            payload = json.loads(row['payload'] or '{}')
+        except (json.JSONDecodeError, TypeError) as e:
+            logger.debug('[Queue] peek payload parse failed id=%s: %s',
+                         str(row['id'])[:8], e)
+            payload = {}
+        try:
+            config = json.loads(row['config'] or '{}')
+        except (json.JSONDecodeError, TypeError) as e:
+            logger.debug('[Queue] peek config parse failed id=%s: %s',
+                         str(row['id'])[:8], e)
+            config = {}
+        if not _row_is_dispatchable(db, conv_id, payload, config):
+            continue
+        kind = row['kind'] or KIND_REAL
+        out.append({'queueId': row['id'], 'kind': kind,
+                    'isHuman': kind == KIND_REAL})
+    return out
+
+
+def next_dispatchable_turn(conv_id: str) -> dict | None:
+    """The next queued turn that would REALLY be dispatched, or ``None``.
+
+    Returns ``{'queueId', 'kind', 'isHuman'}`` for the head of the dispatchable
+    queue. ``None`` means nothing here will become a turn — so a caller that
+    stands down for it would be standing down for nobody.
+    """
+    if not conv_id:
+        return None
+    rows = _dispatchable_rows(get_thread_db(DOMAIN_CHAT), conv_id)
+    return rows[0] if rows else None
+
+
+def has_pending_human_turn(conv_id: str) -> bool:
+    """True iff a real HUMAN turn is queued and would really be dispatched.
+
+    The autopilot yield gate. The judgement is "is there a person waiting on
+    this conversation" — NOT "is there a non-autopilot row". Machine work items
+    (``KIND_WORKFLOW`` brain kickoffs, ``KIND_PEER_MSG`` sibling messages) do
+    NOT preempt a run that is actively working: they are picked up by the
+    existing idle drain once the run ends. Only a human outranks the loop.
+
+    Scans ALL dispatchable rows rather than just the head, so the answer cannot
+    depend on ``KIND_REAL``'s priority happening to sort first.
+
+    Fails OPEN (``False``) on a probe error, matching the prior posture: a DB
+    hiccup must not wedge a healthy loop, and the follow-up spawn is still
+    guarded by the final supersede recheck.
+    """
+    if not conv_id:
+        return False
+    try:
+        rows = _dispatchable_rows(get_thread_db(DOMAIN_CHAT), conv_id)
+        return any(r['isHuman'] for r in rows)
+    except Exception as e:
+        logger.debug('[Queue] human-turn probe failed conv=%s (non-fatal): %s',
+                     conv_id[:8], e)
+        return False

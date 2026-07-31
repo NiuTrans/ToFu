@@ -65,6 +65,12 @@ win.escapeHtml = global.escapeHtml = (s) =>
   String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 win.t = global.t = (k) => String(k || '').split('.').pop();
 win._TOOL_DISPLAY = global._TOOL_DISPLAY = {};
+/* _msgFingerprint calls translationFingerprint (moved to
+   core/translation_model.js by the translation-model strangler — not loaded
+   standalone here). Stub it exactly like test_frontend_bg_refresh_scroll.py
+   so the REAL _msgFingerprint runs; the stub is a constant so it never
+   moves the fingerprint by itself. */
+win.translationFingerprint = global.translationFingerprint = () => '0:F:';
 
 // chat_render.js references a few render helpers at call time only; we only
 // invoke _msgFingerprint (a pure function), so a guarded load is enough.

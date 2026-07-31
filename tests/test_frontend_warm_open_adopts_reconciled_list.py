@@ -1,5 +1,10 @@
-"""tests/test_frontend_warm_open_adopts_reconciled_list.py — RED reproduction
-for the "empty Agent air-bubble survives a warm re-open" class.
+"""tests/test_frontend_warm_open_adopts_reconciled_list.py — the "empty
+Agent air-bubble survives a warm re-open" class: behavior guard + NEUTER.
+
+STATUS: FIXED and now guarded (the suite began as a RED TDD driver and the
+fix landed in conversations.js — see below). The two invariants the fix had
+to preserve remain pinned as controls (C/D), and the NEUTER proves the
+adoption is load-bearing.
 
 WHY (root cause, verified in static/js/core/conversations.js)
 ------------------------------------------------------------
@@ -23,14 +28,15 @@ frontend never adopts its result in the two exact windows a ghost is born:
       It never adopts a SHORTER reconciled list, so the swept-away ghost the
       server already removed lives on locally.
 
-THE FIX THIS TEST DRIVES (not yet landed — coordinated with the sibling
-conversations that own conversations.js / reconcile.py):
-  • Close the warm-open bypass so an idle re-open routes through the
-    reconciling GET (or adopts the reconciled list) rather than early-returning.
-  • On MERGE_ACTIVE_TASK with NO live stream, adopt the backend's reconciled
-    (possibly shorter) list instead of keep-longer-by-append.
+THE FIX (landed in static/js/core/conversations.js):
+  • The bypass escapes when `_openConvMayHoldOrphanGhost(conv, convId)` — a
+    warm idle re-open falls through to the reconciling GET instead of
+    early-returning (never disturbs a genuinely-live pre-token stream).
+  • On MERGE_ACTIVE_TASK with NO live stream and an orphan-ghost verdict,
+    Phase-2 adopts the backend's reconciled (possibly shorter) list FIRST,
+    before the checkpoint-upgrade block can duplicate the ghost.
 
-Both must preserve two invariants (encoded as controls):
+Both preserve two invariants (encoded as controls):
   • A LIVE stream (`activeStreams.has`) is NEVER truncated (orphans the
     connectToTask assistantMsg ref).
   • Genuine un-acked local activity (KEEP_LOCAL) is NEVER truncated.
@@ -39,11 +45,12 @@ HARNESS — drives the REAL shipped core/conversations.js under bare node.
 Stubs Api.conversations.getResponse to serve the server's reconciled list and
 records the post-load conv.messages length so we can assert the ghost is gone.
 
-CHECKS (RED until the fix lands)
+CHECKS
   A. warm idle re-open, local has orphan ghost tail, server reconciled shorter → ghost dropped
   B. lingering activeTaskId (no live stream) + ghost tail, server shorter       → ghost dropped
   C. CONTROL: live stream on the conv                                           → messages untouched
   D. CONTROL: genuine fresh local activity (KEEP_LOCAL)                         → local NOT truncated
+  NEUTER: defuse _openConvMayHoldOrphanGhost on a COPY → A and B flip FAIL
 """
 
 from __future__ import annotations
@@ -72,6 +79,10 @@ global.window = global;
 global.activeConvId = 'c1';
 global.activeStreams = new Map();
 global.streamBufs = new Map();
+global.streamSessions = new Map();
+global.getStreamSession = global.getStreamSession = (cid) => { let s = global.streamSessions.get(cid); if (!s) { s = { phase: null }; global.streamSessions.set(cid, s); } return s; };
+global.setStreamPhase = global.setStreamPhase = (cid, p) => { if (!global.streamSessions.has(cid) && !(typeof activeStreams !== "undefined" && activeStreams.has(cid))) return; global.getStreamSession(cid).phase = p; };
+global.clearStreamSession = global.clearStreamSession = (cid) => { global.streamSessions.delete(cid); };
 global._editingMsgIdx = null;
 global.debugLog = () => {};
 global.console = console;
@@ -79,9 +90,25 @@ global.config = {};
 global.serverModel = 'm';
 global.renderConversationList = () => {};
 global.renderChat = () => {};
+/* Post-SEAM-2-fold (Phase 3.5 step 5): loadConversationMessages routes
+ * repaints through ConvView.replaceAll — stub the seam. `document` is also
+ * needed for the latent fetch-fail branch's getElementById('chatInner')
+ * (previously unreached — the ConvView ReferenceError used to be caught by
+ * loadConversationMessages' own try/catch and then crashed there). */
+global.ConvView = { replaceAll: () => {}, apply: () => true };
+global.document = { getElementById: () => null };
 global.showStreamingUIForConv = () => {};
 global._restoreConvToolState = () => {};
 global._bgRefreshChat = () => {};
+// Extracted to core/pending_sync.js (be0e4076) — without the stub the load
+// throws inside its own try/catch and Phase-2 never runs. Faithful mirror of
+// the real predicate (conv._pendingSyncAt OR any message._pendingSync) — a
+// constant-false stub would defeat the KEEP_LOCAL control below.
+global.convHasPendingSync = (conv) => {
+  if (!conv) return false;
+  if (conv._pendingSyncAt) return true;
+  return !!(conv.messages && conv.messages.some((m) => m && m._pendingSync));
+};
 global.attachCompactionMarkersToConversation = undefined;
 global.Icon = () => '';
 global.AbortSignal = { timeout: () => undefined };
@@ -248,23 +275,68 @@ def _run(js_path: str) -> subprocess.CompletedProcess:
 
 
 @pytest.mark.skipif(not _node_available(), reason='node not installed')
-def test_warm_open_adopts_reconciled_list():
-    """RED until the fix lands: a warm re-open must adopt the backend's
-    reconciled (shorter) message list so an orphaned empty-assistant ghost is
-    dropped — while a live stream and genuine fresh local activity are never
-    truncated."""
+def test_warm_open_controls_hold_today():
+    """The anti-over-correction invariants must hold TODAY, independent of the
+    not-yet-landed fix: a LIVE stream is never truncated, and genuine fresh
+    local activity (KEEP_LOCAL) is never truncated. Kept out of the xfail
+    below so a control regression can never hide inside an expected failure."""
     conv_js = os.path.join(JS_DIR, 'core', 'conversations.js')
     proc = _run(conv_js)
     output = proc.stdout.strip()
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
-    # Controls must already hold today (they guard against over-correction).
     for want in ('PASS C_live_stream_not_truncated',
                  'PASS D_keep_local_fresh_not_truncated'):
         assert want in output, 'control regressed:\n' + output
-    # The two ghost-adoption checks are the RED target.
+
+
+
+@pytest.mark.skipif(not _node_available(), reason='node not installed')
+def test_warm_open_adopts_reconciled_list():
+    """A warm re-open must adopt the backend's reconciled (shorter) message
+    list so an orphaned empty-assistant ghost is dropped. SHIPPED (the
+    ghost-lineage batch): the bypass escapes on _openConvMayHoldOrphanGhost
+    and MERGE_ACTIVE_TASK adopts the shorter list when no stream is live.
+    The controls live in test_warm_open_controls_hold_today; the NEUTER
+    below proves the adoption is load-bearing."""
+    conv_js = os.path.join(JS_DIR, 'core', 'conversations.js')
+    proc = _run(conv_js)
+    output = proc.stdout.strip()
+    assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
     for want in ('PASS A_warm_idle_adopts_reconciled',
                  'PASS B_merge_active_task_adopts_reconciled'):
         assert want in output, (
-            'EXPECTED-RED: warm re-open does not yet adopt the reconciled list '
-            '(ghost survives). This is the failing test that drives the fix.\n' + output
+            'warm re-open stopped adopting the reconciled list (ghost survives)\n'
+            + output
         )
+
+
+@pytest.mark.skipif(not _node_available(), reason='node not installed')
+def test_NC_orphan_ghost_gate_is_load_bearing(tmp_path):
+    """NEUTER: defuse _openConvMayHoldOrphanGhost (always false) on a COPY →
+    the bypass early-returns and the shorter-adopt branch never gates →
+    A_warm_idle_adopts_reconciled flips FAIL (the ghost survives again).
+    Proves the orphan-ghost verdict is what drives the adoption; shipped
+    file left byte-identical."""
+    conv_js = os.path.join(JS_DIR, 'core', 'conversations.js')
+    with open(conv_js, encoding='utf-8') as f:
+        src = f.read()
+    anchor = 'function _openConvMayHoldOrphanGhost(conv, convId) {'
+    assert anchor in src, 'orphan-ghost predicate missing — update the neuter target'
+    neutered = src.replace(
+        anchor, anchor + '\n  return false;  /* NEUTERED */', 1)
+    assert neutered != src
+    copy = tmp_path / 'conversations_neutered.js'
+    copy.write_text(neutered, encoding='utf-8')
+    proc = _run(str(copy))
+    output = proc.stdout.strip()
+    assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
+    assert 'FAIL A_warm_idle_adopts_reconciled' in output, (
+        'NEUTER did not bite — with the orphan-ghost gate defused the warm '
+        're-open STILL adopted the reconciled list:\n' + output)
+    assert 'FAIL B_merge_active_task_adopts_reconciled' in output, (
+        'NEUTER did not bite for the MERGE_ACTIVE_TASK window:\n' + output)
+    # Controls must stay green even with the gate defused (no over-truncation).
+    assert 'PASS C_live_stream_not_truncated' in output
+    assert 'PASS D_keep_local_fresh_not_truncated' in output
+    with open(conv_js, encoding='utf-8') as f:
+        assert f.read() == src, 'shipped conversations.js mutated by the NC'

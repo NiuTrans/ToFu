@@ -32,7 +32,9 @@ const { setup } = require(process.env.JSDOM_HARNESS);
 const { check, report } = setup({
   root: process.argv[3],
   html: '<!DOCTYPE html><body></body>',
-  targets: [process.argv[2]],   // ui/chat_render.js
+  // argv[4]=core/translation_model.js (ships translationFingerprint, which
+  // _msgFingerprint delegates to) — loaded BEFORE the fn under test.
+  targets: [process.argv[4], process.argv[2]],   // then ui/chat_render.js
   globals: {},
 });
 
@@ -108,6 +110,7 @@ def test_seg_translation_fingerprint():
     run_harness(
         target_js=os.path.join(JS_DIR, 'ui', 'chat_render.js'),
         body_js=_BODY,
+        extra_targets=[os.path.join(JS_DIR, 'core', 'translation_model.js')],
         min_pass=6,
         label='seg-translation-fingerprint',
     )

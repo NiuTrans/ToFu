@@ -194,6 +194,12 @@ def _maybe_auto_translate_assistant(conv_id, content, msg_idx, db=None, task=Non
                                 'UPDATE conversations SET messages=?, updated_at=? WHERE id=? AND user_id=1 AND rev=?',
                                 (json_dumps_pg(messages), _now_ms, conv_id, _ua_row[0])
                             )
+                            # Phase 5 dual-write (flag-gated, inert when off):
+                            # stale-translation clear edits ONE message.
+                            from lib.database.messages_rows import mirror_write_and_commit
+                            mirror_write_and_commit(db, conv_id, messages,
+                                                    now_ms=_now_ms,
+                                                    changed_seqs=[eff_idx])
                     except Exception as ce:
                         logger.warning('%s conv=%s Failed to clear stale translation: %s',
                                        pfx, conv_id[:8], ce)

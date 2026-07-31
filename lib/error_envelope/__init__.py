@@ -16,7 +16,18 @@ this shape::
       'context':   str,              # short tag, e.g. 'fallback', 'task-fatal'
       'source':    str,              # component that minted it
       'raw':       str,              # raw exception text (≤300 chars)
+      'titleKey':  str,   # OPTIONAL — i18n key (``err.k.<kind>.title``) the
+                          # frontend resolves in the CURRENT UI language.
+                          # Absent when the caller supplied a custom
+                          # ``message`` (rendered verbatim by all clients).
+      'hintKey':   str,   # OPTIONAL — i18n key (``err.k.<kind>.hint``) for
+                          # the hint block; absent for custom hints without
+                          # an explicit key.
     }
+
+``message`` / ``hint`` are ALWAYS populated byte-identically (bilingual) for
+headless clients and as the fallback when a frontend bundle predates the
+keyed surface (2026-07-25).
 
 The `kind` enum is closed — callers must pick one of these values:
 

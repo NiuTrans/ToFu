@@ -186,6 +186,8 @@ class ResolveConvConfigTest(unittest.TestCase):
             'autoTranslate', 'langCorrectionEnabled', 'uiLang',
             'browserClientId', 'keepToolHistory',
             'activeFlow', 'flowBuiltin', 'flowId',
+            # RWA P4b:伪路径(remote:<agent>:<root>)翻译产物,默认 None。
+            'project_remote',
         }
         self.assertEqual(set(out.keys()), expected)
 

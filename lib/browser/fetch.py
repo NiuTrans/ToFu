@@ -33,6 +33,32 @@ def fetch_url_via_browser(url, max_chars=50000, timeout=25, client_id=None):
         return None
 
     if isinstance(result, dict):
+        # ── Login-wall gate: a fetch that landed on an SSO/login page is NOT
+        # content. Detect it by final URL (netloc-based), engage the cookie-
+        # capture chain (consent → login tab → store), and only when a session
+        # was captured synchronously retry once inline. Failing that, return
+        # None so the caller never mistakes wall text for page content.
+        final_url = result.get('url', '') or ''
+        if final_url:
+            from lib.browser import cookie_capture
+            if cookie_capture.looks_like_login_wall(url, final_url, result.get('title', '') or ''):
+                captured = cookie_capture.handle_login_wall(url, final_url=final_url)
+                if not captured:
+                    logger.info('[BrowserFetch] login wall for %s (final=%s) — capture '
+                                'flow engaged, failing this round', url[:80], final_url[:80])
+                    return None
+                logger.info('[BrowserFetch] session captured for %s — retrying fetch inline',
+                            url[:80])
+                result, error = send_browser_command('fetch_url', {
+                    'url': url,
+                    'maxChars': max_chars,
+                    'timeoutMs': min(timeout * 1000, 30000),
+                }, timeout=timeout, client_id=_cid)
+                if error or not isinstance(result, dict):
+                    logger.warning('[BrowserFetch] post-capture retry FAILED url=%s error=%s',
+                                   url[:100], str(error)[:200])
+                    return None
+
         # ── Prefer server-side extraction from HTML (same pipeline as fetch_page_content) ──
         html = result.get('html', '')
         if html and len(html) > 200:

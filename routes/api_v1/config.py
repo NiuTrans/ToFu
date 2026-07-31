@@ -9,6 +9,7 @@ in :mod:`routes.config`, which imports this blueprint as the alias
   GET    /api/v1/feishu/status             — Feishu bot status
   POST   /api/v1/providers/balance         — fetch upstream wallet balance
   POST   /api/v1/providers/discover-models — re-discover model list
+  POST   /api/v1/providers/resolve-faces   — resolve each model's wire face
   PUT    /api/v1/providers/templates/update — update a provider template
   POST   /api/v1/providers/probe           — single-provider probe
   POST   /api/v1/providers/probe-bulk      — bulk probe

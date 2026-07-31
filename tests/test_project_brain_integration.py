@@ -50,6 +50,19 @@ def _clear_task_registry():
         pass
 
 
+def _mark_busy(conv_id, task_id='busytask0000001'):
+    """Register a fake LIVE task so the conv reads busy — the production-real
+    shape of an agent posting an epic MID-TURN. The post-time event seam
+    (on_epic_posted) deliberately defers busy targets to the sweep/nudge, so
+    tests exercising the SWEEP path must post while busy. Clear with
+    _clear_task_registry()."""
+    from lib.tasks_pkg.manager import tasks, tasks_lock
+    with tasks_lock:
+        tasks[task_id] = {'id': task_id, 'convId': conv_id, 'status': 'running',
+                          'aborted': False, 'config': {}, 'toolRounds': []}
+    return task_id
+
+
 @pytest.fixture(scope='module', autouse=True)
 def _ensure_schema(flask_app):
     from lib.database import init_db
@@ -159,9 +172,13 @@ def test_full_autonomous_flywheel(flask_app, monkeypatch):
 
     with flask_app.app_context():
         # 1) Two epics: A (no deps) + B (depends_on A), both posted by our conv.
+        #    Busy-at-post (the production-real shape: an agent posts mid-turn)
+        #    so the post-time event seam defers to the sweep under test.
+        _mark_busy(conv)
         a_id = post_task(proj, conv, 'Epic A — foundation')['id']
         b_id = post_task(proj, conv, 'Epic B — builds on A',
                          depends_on=[a_id])['id']
+        _clear_task_registry()
 
         # 2) The HEARTBEAT (real scheduler entry) sweeps → A dispatchable,
         #    B blocked by its unfinished dependency. The sweep now SELF-DRAINS
@@ -321,7 +338,11 @@ def test_cold_start_tick_spawns_task_in_idle_conv(flask_app, monkeypatch):
                         lambda: [{'path': proj}])
 
     with flask_app.app_context():
+        # Busy at post so the post-time event seam defers to the tick (the
+        # path this test is named for).
+        _mark_busy(conv)
         epic = post_task(proj, conv, 'Cold-start epic')['id']
+        _clear_task_registry()
         # Drive the REAL tick (no due tasks → falls through to the sweep).
         mgr = sched.get_scheduler()
         mgr._check_and_run_due_tasks()
@@ -390,7 +411,11 @@ def test_sweep_reconciles_stranded_kickoff(flask_app, monkeypatch):
                         lambda: [{'path': proj}])
 
     with flask_app.app_context():
+        # Busy at post so the post-time seam defers (the strand setup needs
+        # the epic OPEN to claim+enqueue it manually).
+        _mark_busy(conv)
         epic = post_task(proj, conv, 'Stranded epic')['id']
+        _clear_task_registry()
     # Strand it: claimed + kickoff queued, conv idle, NOT drained.
     _strand_kickoff(flask_app, proj, conv, epic)
 
@@ -418,6 +443,193 @@ def test_sweep_reconciles_stranded_kickoff(flask_app, monkeypatch):
     _clear_task_registry()
 
 
+def _expire_lease(flask_app, proj, epic_id):
+    """Force the epic's soft lease to have EXPIRED.
+
+    ``_effective_status`` reclaims an expired claim AT READ TIME, so after this
+    the board reports the epic ``open`` with ``owner_conv_id`` blanked — while
+    the workflow_step kickoff is still sitting in the owner's queue. That is
+    the exact production state after a 30-minute lease lapses under a long
+    task, and it is a DIFFERENT strand from the claimed one above.
+    """
+    from lib.database import DOMAIN_CHAT, get_thread_db
+    with flask_app.app_context():
+        db = get_thread_db(DOMAIN_CHAT)
+        db.execute(
+            'UPDATE project_tasks SET lease_expires_at=? WHERE id=?',
+            (int(time.time() * 1000) - 60_000, epic_id))
+        db.commit()
+
+
+def test_sweep_reconciles_stranded_kickoff_after_lease_expiry(flask_app, monkeypatch):
+    """THE SECOND STRAND — an epic whose lease EXPIRED while its kickoff was
+    still queued. Measured in production: 7 workflow_step rows sat in 3 idle
+    conversations across hours, and nothing in the system could ever drain
+    them.
+
+    Why the claimed-strand fix above does NOT cover this. Once the 30-minute
+    lease lapses, ``_effective_status`` reports the epic ``open``, so:
+
+      * the reconcile scan — which collected only convs owning a **claimed**
+        epic — no longer sees this conv at all, and
+      * the normal dispatch loop DOES pick the epic up again, but
+        ``_epic_already_queued`` finds the still-queued kickoff and refuses to
+        re-dispatch.
+
+    Both doors shut on the same row: permanently queued, never dequeued, with
+    the user staring at "queued, nothing generating". The reconcile scan must
+    therefore be keyed on "conv holds an undrained kickoff", not on the epic's
+    momentary status — the queue row is the durable fact, the lease is not.
+    """
+    from lib.conversations.project_board import post_task, read_board
+    from lib.conversations.project_dispatch import sweep_dispatch
+    from lib.message_queue import KIND_WORKFLOW, get_queue
+
+    proj = os.path.abspath('/tmp/strand-expired')
+    conv = 'conv-strand-expired'
+    _clear_task_registry()
+    _seed_conv(flask_app, conv, proj)
+    monkeypatch.setattr('lib.project_mod.get_recent_projects',
+                        lambda: [{'path': proj}])
+
+    with flask_app.app_context():
+        _mark_busy(conv)
+        epic = post_task(proj, conv, 'Epic stranded past its lease')['id']
+        _clear_task_registry()
+    # Strand it (claim + enqueue, no drain) …
+    _strand_kickoff(flask_app, proj, conv, epic)
+    # … then let the lease lapse — the state the claimed-only scan cannot see.
+    _expire_lease(flask_app, proj, epic)
+
+    with flask_app.app_context():
+        q_before = [x for x in get_queue(conv) if x['kind'] == KIND_WORKFLOW]
+        assert len(q_before) == 1, 'setup: exactly one stranded kickoff queued'
+        # Precondition that defines this strand: the board now reads OPEN, so
+        # the claimed-only reconcile scan would skip this conv entirely.
+        row = [t for t in read_board(proj)['tasks'] if t['id'] == epic][0]
+        assert row['status'] == 'open', \
+            'setup: the expired lease must read back as open'
+        assert not row['owner_conv_id'], \
+            'setup: an expired claim blanks the owner — this is why a scan ' \
+            'keyed on owner_conv_id of claimed epics cannot find the strand'
+
+    spawned = _stub_spawn(monkeypatch)
+    with flask_app.app_context():
+        sweep_dispatch(proj)
+        q_after = [x for x in get_queue(conv) if x['kind'] == KIND_WORKFLOW]
+
+    assert len(spawned) == 1, (
+        'the sweep must re-drain a kickoff stranded by lease expiry — this is '
+        'the shape measured in production (7 rows across 3 idle convs, never '
+        'dequeued): the reconcile scan skipped it because the epic read open, '
+        'and _epic_already_queued blocked re-dispatch because the row existed')
+    assert spawned[0]['convId'] == conv
+    assert len(q_after) == 0, 'the stranded kickoff must be drained'
+    last_user = _persisted_last_user(flask_app, conv)
+    assert last_user.get('_brainDispatch') is True
+    assert last_user.get('_boardTaskId') == epic
+    _clear_task_registry()
+
+
+def test_expired_lease_strand_does_not_double_dispatch(flask_app, monkeypatch):
+    """The paired risk of widening the scan: an epic that reads OPEN is also
+    eligible for the NORMAL dispatch loop, so a naive fix could drain the
+    queued kickoff AND dispatch a fresh one in the same sweep — two billed
+    tasks for one epic. Exactly one task must be spawned, and the queue must
+    end empty (not refilled by a second kickoff)."""
+    from lib.conversations.project_board import post_task
+    from lib.conversations.project_dispatch import sweep_dispatch
+    from lib.message_queue import KIND_WORKFLOW, get_queue
+
+    proj = os.path.abspath('/tmp/strand-expired-nodup')
+    conv = 'conv-strand-nodup'
+    _clear_task_registry()
+    _seed_conv(flask_app, conv, proj)
+    monkeypatch.setattr('lib.project_mod.get_recent_projects',
+                        lambda: [{'path': proj}])
+
+    with flask_app.app_context():
+        _mark_busy(conv)
+        epic = post_task(proj, conv, 'Epic to not double-dispatch')['id']
+        _clear_task_registry()
+    _strand_kickoff(flask_app, proj, conv, epic)
+    _expire_lease(flask_app, proj, epic)
+
+    spawned = _stub_spawn(monkeypatch)
+    with flask_app.app_context():
+        sweep_dispatch(proj)
+        q_after = [x for x in get_queue(conv) if x['kind'] == KIND_WORKFLOW]
+
+    assert len(spawned) == 1, \
+        f'exactly one task per epic — got {len(spawned)} (double-dispatch)'
+    assert len(q_after) == 0, \
+        f'queue must not be refilled by a duplicate kickoff: {q_after}'
+    _clear_task_registry()
+
+
+def test_NC_expired_lease_reconcile_is_load_bearing(flask_app, monkeypatch):
+    """NC: revert the reconcile scan to claimed-epics-only → a kickoff
+    stranded by lease expiry is NEVER re-drained (the measured production
+    bug). Byte-identical restore."""
+    proj = os.path.abspath('/tmp/strand-expired-nc')
+    conv = 'conv-strand-expired-nc'
+
+    def _strand_expire_then_sweep():
+        import lib.conversations.project_dispatch as pd
+        from lib.conversations.project_board import post_task
+        from lib.database import DOMAIN_CHAT, get_thread_db
+        from lib.message_queue import KIND_WORKFLOW, get_queue
+        _clear_task_registry()
+        monkeypatch.setattr('lib.project_mod.get_recent_projects',
+                            lambda: [{'path': proj}])
+        spawned = _stub_spawn(monkeypatch)
+        _seed_conv(flask_app, conv, proj)
+        with flask_app.app_context():
+            db = get_thread_db(DOMAIN_CHAT)
+            db.execute("DELETE FROM project_tasks WHERE project_path=?", (proj,))
+            db.execute("DELETE FROM message_queue WHERE conv_id=?", (conv,))
+            db.commit()
+            _mark_busy(conv)
+            epic = post_task(proj, conv, 'Expired-lease strand')['id']
+            _clear_task_registry()
+            e = [x for x in pd.select_dispatchable(proj) if x['id'] == epic][0]
+            pd.dispatch_epic(proj, e, conv)
+        _expire_lease(flask_app, proj, epic)
+        with flask_app.app_context():
+            pd.sweep_dispatch(proj)
+            q = [x for x in get_queue(conv) if x['kind'] == KIND_WORKFLOW]
+        _clear_task_registry()
+        return len(spawned), len(q)
+
+    n_spawned, n_queued = _strand_expire_then_sweep()
+    assert n_spawned == 1 and n_queued == 0, \
+        (f'baseline: the sweep must re-drain a lease-expired strand '
+         f'(spawned={n_spawned}, queued={n_queued})')
+
+    def _wipe_conv():
+        from lib.database import DOMAIN_CHAT, get_thread_db
+        with flask_app.app_context():
+            db = get_thread_db(DOMAIN_CHAT)
+            db.execute("DELETE FROM conversations WHERE id=?", (conv,))
+            db.commit()
+    _wipe_conv()
+
+    def run():
+        n_spawned2, n_queued2 = _strand_expire_then_sweep()
+        assert n_spawned2 == 0 and n_queued2 == 1, \
+            ('NC: with the scan keyed on claimed epics only, a lease-expired '
+             'strand is never re-drained (queued forever — the measured bug)')
+
+    _patch_restore(
+        _DISPATCH_SRC,
+        "        convs = _convs_holding_undrained_kickoffs(project_path, board)",
+        "        convs = {t['owner_conv_id'] for t in board['tasks']\n"
+        "                 if t.get('status') == 'claimed' and t.get('owner_conv_id')}",
+        run,
+    )
+    _wipe_conv()
+
+
 def test_NC_reconcile_is_load_bearing(flask_app, monkeypatch):
     """NC (the self-heal core): no-op the `_reconcile_stranded_kickoffs(...)`
     call in sweep_dispatch → a stranded kickoff is NEVER re-drained (it stays
@@ -442,7 +654,9 @@ def test_NC_reconcile_is_load_bearing(flask_app, monkeypatch):
             db.execute("DELETE FROM project_tasks WHERE project_path=?", (proj,))
             db.execute("DELETE FROM message_queue WHERE conv_id=?", (conv,))
             db.commit()
+            _mark_busy(conv)
             epic = post_task(proj, conv, 'Stranded epic')['id']
+            _clear_task_registry()
             e = [x for x in pd.select_dispatchable(proj) if x['id'] == epic][0]
             pd.dispatch_epic(proj, e, conv)  # strand: claim+enqueue, no drain
             pd.sweep_dispatch(proj)          # reconcile pass runs here
@@ -510,7 +724,9 @@ def test_NC_idle_drain_is_load_bearing(flask_app, monkeypatch):
             db.execute("DELETE FROM project_tasks WHERE project_path=?", (proj,))
             db.execute("DELETE FROM message_queue WHERE conv_id=?", (conv,))
             db.commit()
+            _mark_busy(conv)
             post_task(proj, conv, 'Cold-start epic')
+            _clear_task_registry()
             sched.get_scheduler()._check_and_run_due_tasks()
         _clear_task_registry()
         return len(spawned)

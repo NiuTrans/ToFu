@@ -21,6 +21,7 @@ import re
 import time
 from typing import Any
 
+from lib.cost import normalize_usage
 from lib.log import get_logger
 
 logger = get_logger(__name__)
@@ -182,6 +183,94 @@ def _check_suspicious_completion(task, last_finish_reason, _loop_exit_reason,
     return suspicion_reasons
 
 
+# ── Suspicious-completion INTERCEPTION (act, not just warn) ───────────────
+#
+# WHY this exists (2026-07-28 09:51–10:45 incident): the sankuai gateway
+# intermittently returned a 29-char canned greeting ("Hi! How can I help you
+# today?") with ``finish_reason=stop`` for every Opus 5 request — 68 times,
+# each carrying a real M-TraceId. Tasks that had just spent N rounds doing real
+# tool work then had their TERMINAL round replaced by that greeting, and
+# finalize persisted ``task['content']`` (the last round's 29 chars) over the
+# accumulated deliverable. ``_check_suspicious_completion`` SAW it
+# (``short_content_after_tool_calls`` fired 54×) — but only logged. Nothing
+# stopped the overwrite.
+#
+# What is recoverable: ``_discard_pretool_prose`` zeroes ``task['content']``
+# after every tool round, but the prose the model streamed ALONGSIDE those
+# calls is kept verbatim on the tool round as ``assistantContent`` (see
+# tool_dispatch/_parse.py). That is the accumulated inter-round work — the
+# "已做的工作 + 阶段性结论" the user watched happen. When the terminal round is
+# a suspicious short ``stop`` (the exact shape the detector already flags), we
+# rebuild the delivered content from those snapshots instead of shipping the
+# short residue, so the user gets the real accumulated work back.
+#
+# Gates (each one is a distinct no-false-positive boundary, all pinned by
+# tests/test_suspicious_short_completion_guard.py):
+#   * finish_reason == 'stop'   — only a completed turn is an overwrite
+#     candidate (tool_use/aborted/error finishes are not "the model stopped");
+#   * tool_call_happened        — no tool rounds means nothing accumulated;
+#   * content is short (<50)    — mirrors the detector's own threshold, so the
+#     interception fires on exactly the shape the detector flags, never on a
+#     normal long answer (complement test);
+#   * recovered narration is substantial (> accumulated chars) — a genuinely
+#     short turn with no real prior prose has nothing to recover, so it is
+#     left untouched (no mangling a real "好的。");
+#   * not aborted               — a user Stop legitimately truncates the
+#     accumulator and must never be "recovered" over.
+_SHORT_CONTENT_MAX = 50
+_MIN_RECOVERED_NARRATION = 80
+
+
+def _maybe_preserve_accumulated_on_suspicion(task, last_finish_reason,
+                                             tool_call_happened) -> bool:
+    """Recover accumulated inter-round narration when the terminal round is a
+    suspicious short ``stop`` after tool work.
+
+    Returns ``True`` when the content was replaced with recovered narration,
+    ``False`` when the turn was left untouched. See the module note above for
+    the incident this closes and the gate boundaries.
+    """
+    tid = task['id'][:8]
+    if last_finish_reason != 'stop':
+        return False
+    if not tool_call_happened:
+        return False
+    if task.get('aborted'):
+        return False
+    content = task.get('content') or ''
+    if len(content) >= _SHORT_CONTENT_MAX:
+        return False
+
+    parts = [
+        (r.get('assistantContent') or '').strip()
+        for r in (task.get('toolRounds') or [])
+        if isinstance(r, dict) and (r.get('assistantContent') or '').strip()
+    ]
+    recovered = '\n\n'.join(parts)
+    if len(recovered) < _MIN_RECOVERED_NARRATION:
+        return False
+
+    task['content'] = recovered
+    logger.warning(
+        '[Orchestrator] %s conv=%s ⚠️ SUSPICIOUS SHORT COMPLETION intercepted: '
+        'terminal stop round left only %d chars (likely a canned/upstream '
+        'residue), so the delivered content was rebuilt from %d prior tool '
+        'round(s)\' accumulated narration (%d chars) instead of overwriting '
+        'the turn\'s real work. finish=%s',
+        tid, task.get('convId', ''), len(content), len(parts),
+        len(recovered), last_finish_reason)
+    try:
+        from lib.log import audit_log
+        audit_log('suspicious_short_completion_intercepted',
+                  task_id=task['id'], conv=task.get('convId', ''),
+                  residue_chars=len(content),
+                  recovered_chars=len(recovered),
+                  rounds=len(parts))
+    except Exception as _ae:
+        logger.debug('[%s] suspicious-intercept audit failed: %s', tid, _ae)
+    return True
+
+
 
 # ── JSON repair for truncated / malformed LLM tool-call arguments ──────────
 # Canonical implementation lives in lib.utils.repair_json.
@@ -189,9 +278,19 @@ def _check_suspicious_completion(task, last_finish_reason, _loop_exit_reason,
 from lib.utils import repair_json as _repair_json  # noqa: F401
 
 def _emit_tool_round_phase(task, assistant_msg, round_num):
-    """Emit a 'phase' event describing the current tool round for the frontend."""
+    """Emit a 'phase' event describing the current tool round for the frontend.
+
+    Ships a stable ``detailKey`` (+ ``detailArgs``) alongside the legacy English
+    ``detail``: modern clients pass ``detailKey`` through their i18n table so
+    the label reads in the UI language (zh by default); older / headless
+    clients that don't localize keep rendering ``detail`` unchanged.
+    """
     if round_num == 0:
-        append_event(task, build_event(EventType.PHASE, phase='llm_thinking', detail='Generating response…', roundNum=1))
+        append_event(task, build_event(
+            EventType.PHASE, phase='llm_thinking',
+            detail='Generating response…',
+            detailKey='stream.phase.generatingResponse',
+            roundNum=1))
     else:
         tool_names = [tc['function']['name'] for tc in assistant_msg.get('tool_calls', [])]
         unique_names = list(dict.fromkeys(tool_names))
@@ -200,6 +299,8 @@ def _emit_tool_round_phase(task, assistant_msg, round_num):
         append_event(task, build_event(
             EventType.PHASE, phase='llm_thinking',
             detail=f'Analyzing results and planning next step… (round {round_num+1})',
+            detailKey='stream.phase.analyzingRound',
+            detailArgs={'round': round_num + 1},
             toolContext=summary,
             roundNum=round_num + 1,
         ))
@@ -387,7 +488,41 @@ def _maybe_auto_retry_turn(task: dict[str, Any], cfg: dict[str, Any]) -> bool:
     with task['content_lock']:
         task['content'] = ''
         task['thinking'] = ''
+    # ★ HONEST ACCOUNTING — the discarded attempt was BILLED.
+    #   By the time a turn settles into abnormal_stop / premature_close, the
+    #   inner stream-anomaly loop may already have burned up to 16 attempts'
+    #   worth of tokens, all correctly folded into task['usage'] / apiRounds.
+    #   Wiping them here made the gateway's charge invisible: the re-run starts
+    #   a fresh accumulated_usage (_run.py) and the wallet settles from the
+    #   FINAL task['usage'] (lib/billing/request_flow.settle_task), so the user
+    #   paid for up to 4 attempts and was charged for one. Same failure mode as
+    #   the FloorRetry accounting bug — a real billed request hidden from the
+    #   cost report.
+    #
+    #   Fold it into the SAME carry-forward slots the continue-checkpoint path
+    #   uses; _finalize_task merges them into the terminal usage / apiRounds.
+    #   Semantically exact ("billed before this run_task invocation") and
+    #   ADDITIVE, so a task that is both resumed-from-checkpoint and
+    #   auto-retried keeps both bills, and repeated retries accumulate.
+    _spent = task.get('usage') or {}
+    if _spent:
+        from lib.cost import merge_usage_totals as _merge_usage
+        _carry = _merge_usage(task.get('_checkpointUsage'), _spent)
+        if _carry:
+            task['_checkpointUsage'] = _carry
+        _spent_rounds = task.get('apiRounds') or []
+        if _spent_rounds:
+            task['_checkpointApiRounds'] = (
+                list(task.get('_checkpointApiRounds') or []) + list(_spent_rounds))
+        logger.warning(
+            '[%s] auto-retry: carrying forward the discarded attempt\'s billed '
+            'usage (%s) so the wallet and cost popover see every request the '
+            'gateway charged for', tid,
+            {k: v for k, v in _spent.items() if isinstance(v, (int, float))})
+    # The re-run must still START clean — it accumulates its own usage from
+    # zero; the carry-forward above is merged back only at finalize.
     task['usage'] = {}
+    task['apiRounds'] = []
     task['status'] = 'running'
     task['error'] = None
     task['finishReason'] = None
@@ -572,7 +707,7 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
         fb.append({'role':'user','content':f'Here are fetched contents:\n\n{combined}\n\nProvide a comprehensive answer. Cite sources.'})
         try:
             snapshot = _strip_base64_for_snapshot(fb)
-            append_event(task, build_event(EventType.MESSAGES_SNAPSHOT, roundNum='fallback', label=f'Fallback · {len(fb)}条', messages=snapshot))
+            append_event(task, build_event(EventType.MESSAGES_SNAPSHOT, kind='state', model=model, roundNum='fallback', label=f'Fallback · {len(fb)}条', messages=snapshot))
         except Exception as e:
             logger.warning('[Task %s] messages_snapshot fallback failed, model=%s: %s', tid, model, e, exc_info=True)
         body = _o.build_body(
@@ -596,6 +731,26 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
                 api_rounds.append({'round': 'fallback', 'model': model, 'usage': dict(usg), 'tag': 'FALLBACK'})
                 from lib.tasks_pkg.llm_fallback import _emit_round_usage
                 _emit_round_usage(task, 'fallback', model, usg, tag='FALLBACK')
+                # ★ HONEST ACCOUNTING (identical seam as _call.py): the
+                #   post-loop fallback path is another consumer of the same
+                #   stream_llm_response return contract — any FloorRetry
+                #   discards it produces MUST also be billed. Without this the
+                #   post-loop fallback would re-open the very leak we just
+                #   closed in the primary/reactive/fallback branches.
+                for _bill in (usg.get('_extra_billing_rounds') or []):
+                    _bu = _bill.get('usage') or {}
+                    for k, v in _bu.items():
+                        if isinstance(v, (int, float)):
+                            accumulated_usage[k] = accumulated_usage.get(k, 0) + v
+                    api_rounds.append({
+                        'round': 'fallback',
+                        'model': _bill.get('model') or model,
+                        'usage': dict(_bu),
+                        'tag': _bill.get('tag') or 'FALLBACK-DISCARDED',
+                    })
+                    _emit_round_usage(task, 'fallback',
+                                      _bill.get('model') or model, _bu,
+                                      tag=_bill.get('tag') or 'FALLBACK-DISCARDED')
         except Exception as e:
             logger.error('[%s] ⚠️ Post-loop fallback failed: %s', tid, e, exc_info=True)
             try:
@@ -623,6 +778,33 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
         task['content'] = '⚠️ 该回复被模型安全过滤器拦截，请尝试换一种方式提问。\n\n_The response was blocked by the model\'s safety filter. Please try rephrasing your question._'
         logger.info('[%s] Injected content_filter user-facing message (finish_reason=%s, loop_exit=%s)',
                     tid, last_finish_reason, _loop_exit_reason)
+
+    # ── Strip the END_TURN control token from the delivered answer ──
+    # The intent-stall nudge TEACHES `[END_TURN: <reason>]` so a model can
+    # declare *why* it stopped instead of being mistaken for an interrupted
+    # turn. That makes it a MACHINE signal on the same channel as the prose:
+    # the classifier reads it, then it must not reach the user. Stripped HERE,
+    # at the single point where task['content'] becomes the delivered answer,
+    # rather than at each render site — the persisted row, the done event, the
+    # committedMessage projection and every reload path all read this one
+    # value, so a per-renderer strip would inevitably miss one.
+    #
+    # Runs BEFORE the sources footer so a stripped trailing token can never
+    # sit between the prose and an appended footer.
+    try:
+        from lib.tasks_pkg.stream_handler._intent_stall import (
+            strip_end_turn_marker,
+        )
+        _pre_strip = task.get('content') or ''
+        if _pre_strip:
+            _stripped = strip_end_turn_marker(_pre_strip)
+            if _stripped != _pre_strip:
+                task['content'] = _stripped
+                logger.info('[%s] stripped [END_TURN:…] control token from the '
+                            'delivered answer (%d → %d chars)',
+                            tid, len(_pre_strip), len(_stripped))
+    except Exception as _et_e:  # never let display hygiene break finalization
+        logger.warning('[%s] END_TURN strip failed: %s', tid, _et_e)
 
     # ── Deterministic source-citation backstop (web-research turns) ──
     # If the model consulted web pages but cited none of them, append a compact
@@ -675,6 +857,58 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
         logger.warning('[%s] dangling-tool-round sweep failed (non-fatal): %s',
                        tid, _sweep_err, exc_info=True)
 
+    # ── Visible outcome for an unavailable-tool dead end (pt_88791cb08cb2495c) ──
+    #   A tool the model does NOT have this turn is hard-rejected and never
+    #   runs. If the turn then ends with that rejection as its last act, the
+    #   task substantively FAILED — yet it used to settle status=done,
+    #   error=none, so the user saw only the conversation stopping mid-thought
+    #   while the API reported success. docs/INTENT_STALL_MEASUREMENT.md §4
+    #   measured 3 such tasks in 7 days (project_board_complete / code_exec);
+    #   the standing CLOSURE-PENDING note atop JOURNAL.md is a live victim —
+    #   work finished, only the impossible call missing, nobody informed.
+    #
+    #   The criterion is STRUCTURAL, deliberately not the loop-breaker's
+    #   no-suggestion gate: measurement showed `code_exec` DOES get near-miss
+    #   suggestions, so gating on their absence would have missed 2 of the 3
+    #   real cases. What makes it unrecoverable is that the tool is absent for
+    #   the whole turn AND the turn produced no tool result afterwards.
+    #
+    #   §4 classifies this as NON-RETRYABLE and excludes it from the
+    #   intent-stall nudge on purpose: re-prompting can only make the model
+    #   reach for the same absent tool again.
+    if not task.get('error'):
+        try:
+            _rej_tail = None
+            for _entry in reversed(task.get('toolRounds') or []):
+                if _entry.get('status') == 'rejected' and _entry.get('_rejected'):
+                    _rej_tail = _entry
+                    break
+                if _entry.get('status') in ('done', 'error'):
+                    # A real tool ran after the rejection — the model recovered.
+                    break
+            if _rej_tail is not None:
+                _rj = _rej_tail.get('_rejected') or {}
+                _bad = _rj.get('attempted') or _rej_tail.get('tool') or 'unknown'
+                from lib.error_envelope import make_envelope
+                task['error'] = make_envelope(
+                    'tool_not_available',
+                    detail=(f'The model tried to call `{_bad}`, which is not in '
+                            f'this turn\'s toolset, and the turn ended without '
+                            f'any tool running afterwards.'),
+                    model=model or '',
+                    context='tool-dispatch',
+                    source='orchestrator._finalize',
+                    raw=f'attempted={_bad!r}',
+                )
+                logger.warning('[%s] conv=%s Task ended on an unavailable-tool '
+                               'rejection (%r) — surfacing tool_not_available '
+                               'instead of a silent success',
+                               tid, task.get('convId', '') or '', _bad)
+        except Exception as _e_tna:
+            logger.warning('[%s] tool_not_available classification failed '
+                           '(task still settles, reason renders generic): %s',
+                           tid, _e_tna, exc_info=True)
+
     # ── Fold in compaction's OWN LLM usage ──
     # L2 smart-summary and the advanced-host summarizers (OpenCode/Hermes/
     # OpenClaw arms) call the LLM but historically discarded that usage, so
@@ -711,19 +945,12 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
             logger.warning('[Task %s] Tool summary generation failed model=%s (non-fatal): %s', task['id'][:8], model, e, exc_info=True)
 
     if not task.get('_endpoint_managed'):
-        # Latch the autopilot decision window BEFORE flipping status to 'done'.
-        # The status flip makes _task_terminal() true for the SSE generator and
-        # chat_poll; setting the marker first closes the gap where they'd
-        # observe 'done' before the autopilot hook (which can take several
-        # seconds for the VU LLM call) has a chance to set it — otherwise a
-        # late synthetic done closes the stream without the follow-up baton.
-        try:
-            from lib.tasks_pkg.autopilot import is_autopilot_enabled
-            if is_autopilot_enabled(task):
-                task['_autopilot_deciding'] = True
-        except Exception as _ap_latch_err:
-            logger.debug('[Autopilot] pre-flip decision latch skipped: %s',
-                         _ap_latch_err)
+        # Finalize-window latch: stamp BEFORE the terminal flip. From here
+        # until append_event(done) (autopilot hook + pre-emit sync in
+        # between), a LATE-done tick must hold — the successor stamp is not
+        # on the index yet, so a premature LATE done would close the stream
+        # with no successor on the wire (see lib/chat_dispatch.py branch 3).
+        task['_finalize_started_at'] = time.time()
         task['status'] = 'done'
 
     # ── Project-brain Activity Feed: 'completed' / 'aborted' pulse ──
@@ -870,6 +1097,17 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
         assistant_msg=assistant_msg,
     )
 
+    # ── ACT on the suspicious-short shape, not just warn (2026-07-28 canned
+    #    greeting incident).  When the terminal round is a short ``stop``
+    #    after real tool work, recover the accumulated narration BEFORE the
+    #    pre-emit conv sync and the done event read task['content'] — so the
+    #    committed message and the client both get the real work back, not
+    #    the 29-char residue.  Must run after the fallback/synthesis paths
+    #    above (which can legitimately fill empty content) and after the
+    #    detector has logged its shape.
+    _maybe_preserve_accumulated_on_suspicion(
+        task, last_finish_reason, tool_call_happened)
+
     # ── Build done event ──
     done_evt = build_event(EventType.DONE)
     # ★ Always expose the task ID (the whole user→assistant turn, across ALL
@@ -897,6 +1135,49 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
         _ts_diff = cfg.get('_toolsetDiff')
         if _ts_diff and (_ts_diff.get('added') or _ts_diff.get('removed')):
             done_evt['toolsetDiff'] = _ts_diff
+    # ── Turn-ctx capsule fact-card contract ────────────────────────────
+    # The per-turn note in the message gutter (static/js/info-rail.js) is
+    # captured from the LIVE toolbar at send time — model / depth / modes
+    # are a client-side SNAPSHOT that goes stale the moment the user
+    # switches a preset in the pause between send and stream-start (or
+    # when the dispatcher falls back to a different provider). Ship the
+    # server-authoritative FACT for this turn so the frontend can
+    # overwrite the capsule at done time and stop misleading the user.
+    #
+    # `actualModel` = the model the answer actually came from — the
+    # mid-turn fallback wins over the initial pick, mirroring the
+    # existing `fallbackModel` semantics one level up.
+    # `actualDepth` = the thinking depth actually applied.
+    # `actualModes` = the run-mode set that was live server-side
+    # (autopilot / endpoint / swarm / flow name), same shape the info-rail
+    # capsule renders ({label, tone:'mode'}). The frontend reconcile
+    # OVERWRITES `snap.model` / `snap.depth` / `snap.modes` from these
+    # — see info-rail.js::reconcileTurnCtxCapsule.
+    done_evt['actualModel'] = task.get('_fallback_model') or model
+    if thinking_depth:
+        done_evt['actualDepth'] = thinking_depth
+    # Anchor for the frontend turn-ctx capsule reconcile: the stable _msgId
+    # of the user turn that TRIGGERED this task, stamped by
+    # ``_start_task_for_conv`` (send/regenerate/continue) or inherited by
+    # autopilot VU sub-tasks from their parent. Frontend prefers this over
+    # "the last user in conv" — the latter is wrong under autopilot VU,
+    # concurrent conv, or a regenerate targeting a historical user turn.
+    # Empty string when a headless / external / legacy caller never stamped
+    # it → frontend falls back to the last-user heuristic (safe default).
+    if task.get('_userMsgId'):
+        done_evt['userMsgId'] = task['_userMsgId']
+    _actual_modes: list[dict[str, str]] = []
+    _flow = cfg.get('activeFlow') if isinstance(cfg.get('activeFlow'), str) else ''
+    if _flow:
+        _actual_modes.append({'label': _flow, 'tone': 'mode'})
+    else:
+        if cfg.get('endpointMode'):
+            _actual_modes.append({'label': 'Endpoint', 'tone': 'mode'})
+        if cfg.get('autopilot'):
+            _actual_modes.append({'label': 'Autopilot', 'tone': 'mode'})
+    if cfg.get('swarmEnabled'):
+        _actual_modes.append({'label': 'Swarm', 'tone': 'mode'})
+    done_evt['actualModes'] = _actual_modes
     if api_rounds:
         done_evt['apiRounds'] = api_rounds
         task['apiRounds'] = api_rounds
@@ -1077,26 +1358,10 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
             logger.warning('[Task %s] pre-emit conv sync failed: %s — '
                            'terminal event will fall back to transient buffer',
                            tid, _pre_emit_err, exc_info=True)
-    task['_autopilot_deciding'] = True
     try:
         from lib.tasks_pkg.autopilot import maybe_run_autopilot
-        ap_result = maybe_run_autopilot(task)
-        if ap_result:
-            done_evt['autopilotNextTaskId'] = ap_result['next_task_id']
-            done_evt['autopilotVuMessage'] = ap_result['vu_msg']
-            # Stash on the task dict too so the baton is transport-agnostic:
-            # the poll route surfaces the SAME handoff, so a client that fell
-            # back to /api/chat/poll (SSE stripped / timed out) still attaches
-            # to the follow-up instead of stranding it (sidebar dot / pause
-            # button / translation desync until manual refresh).
-            task['_autopilot_followup'] = ap_result
+        maybe_run_autopilot(task)
     except Exception as _ap_err:
-        # On failure the deciding window is over and no baton will arrive —
-        # clear the latch so _task_terminal() can finalize the stream.  The
-        # SUCCESS path deliberately keeps the latch set until AFTER
-        # append_event(done_evt) below, so the SSE generator never sees a
-        # terminal task before the baton-carrying done event is buffered.
-        task['_autopilot_deciding'] = False
         logger.warning('[Autopilot] hook raised: %s — continuing without '
                        'follow-up (this turn will still be persisted)',
                        _ap_err, exc_info=True)
@@ -1145,11 +1410,9 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
         _rounds = done_evt.get('apiRounds') or []
         _miss_rounds = [r.get('round') for r in _rounds
                         if isinstance(r, dict) and r.get('cacheBreak')]
-        _u = done_evt.get('usage') or {}
-        _cw = (_u.get('cache_write_tokens')
-               or _u.get('cache_creation_input_tokens') or 0)
-        _cr = (_u.get('cache_read_tokens')
-               or _u.get('cache_read_input_tokens') or 0)
+        _nu = normalize_usage(done_evt.get('usage') or {})
+        _cw = _nu['cache_write']
+        _cr = _nu['cache_read']
         _cost = (done_evt.get('cost') or {}).get('costCny')
         logger.info(
             '[Task:%s] ■ DONE conv=%s model=%s rounds=%d finish=%s '
@@ -1174,15 +1437,29 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
     if task.get('_committedMsg'):
         done_evt['committedMessage'] = task['_committedMsg']
 
+    # ── Supersede-successor stamp (pt_8dc03017 wire completion) ──
+    # Same contract as the LATE-done synthesis (lib/chat_dispatch.py): when
+    # the autopilot hook already spawned the successor (VU / follow-up), the
+    # conv→latest-task index names it HERE, before append_event — ship it so
+    # the client's attach reducer can hop transport-agnostically. Absent on
+    # the normal no-successor path (index points at this task → '').
+    try:
+        from lib.tasks_pkg.manager import _live_successor_info
+        _succ_tid, _succ_is_vu = _live_successor_info(
+            task.get('convId') or '', exclude_task_id=task.get('id', ''))
+        if _succ_tid:
+            done_evt['latestLiveTaskId'] = _succ_tid
+            if _succ_is_vu:
+                done_evt['latestLiveTaskIsVu'] = True
+    except Exception as _succ_err:
+        logger.debug('[Task:%s] successor stamp failed: %s', tid, _succ_err)
+
     append_event(task, done_evt)
-    # The baton-carrying done event is now in task['events'] — only NOW is it
-    # safe to let _task_terminal() (routes/chat.py) report the task finished.
-    # Clearing this latch earlier (the old `finally`) opened a window where
-    # status=='done' + _autopilot_deciding==False but the real done event was
-    # not yet buffered, so the SSE generator synthesized a baton-LESS done from
-    # extract_task_meta() and closed the stream → the spawned autopilot
-    # follow-up was stranded and the conversation went idle until manual regen.
-    task['_autopilot_deciding'] = False
+    # Finalize-window closed — the real done is now in the event queue, so a
+    # tick drains it as a normal event instead of needing the LATE-done
+    # synthesis. Clearing is safe even if a reader missed every event (the
+    # task is terminal and the latch is gone → LATE done resumes its role).
+    task.pop('_finalize_started_at', None)
     persist_task_result(task)
 
     _spawn_async_commit_round(task, project_enabled, project_path)

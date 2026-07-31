@@ -146,6 +146,63 @@ def aggregate_endpoint_metrics(slots: list) -> dict:
     return {'endpoints': out, 'ts': time.time()}
 
 
+def aggregate_model_health(slots: list) -> dict:
+    """Fold per-slot runtime state into per-(provider, wire-model) health rows.
+
+    Powers the Settings model-card health strip: success rate, error counts,
+    consecutive-error streaks, and ACTIVE cooldowns — the "error-rate
+    throttling" the dispatcher imposes after repeated failures. Cooldown
+    remaining is computed against ``now`` so the payload is self-contained.
+    Keyed by (provider_id, wire model id) because slots are per wire id; the
+    frontend folds a card's logical model over its request-id pool.
+
+    Returns ``{providers: {provider_id: {model: {...}}}, ts}``.
+    """
+    now = time.time()
+    providers = {}
+    for s in slots:
+        pid = s.get('provider_id') or 'default'
+        mid = s.get('model') or ''
+        if not mid:
+            continue
+        pm = providers.setdefault(pid, {})
+        e = pm.setdefault(mid, {
+            'slots': 0, 'available_slots': 0,
+            'total_requests': 0, 'total_errors': 0,
+            'contention_errors': 0,
+            'consecutive_errors': 0, 'inflight': 0,
+            'cooldown_remaining_s': 0.0, 'cooldown_reason': '',
+            'last_error_ts': 0.0, 'last_error_msg': '',
+        })
+        e['slots'] += 1
+        remaining = max(0.0, (s.get('cooldown_until') or 0) - now)
+        if remaining <= 0 and s.get('available', True):
+            e['available_slots'] += 1
+        if remaining > e['cooldown_remaining_s']:
+            e['cooldown_remaining_s'] = round(remaining, 1)
+            e['cooldown_reason'] = s.get('cooldown_reason') or ''
+        e['total_requests'] += s.get('total_requests', 0) or 0
+        e['total_errors'] += s.get('total_errors', 0) or 0
+        e['contention_errors'] += s.get('contention_errors', 0) or 0
+        e['inflight'] += s.get('inflight', 0) or 0
+        ce = s.get('consecutive_errors', 0) or 0
+        if ce > e['consecutive_errors']:
+            e['consecutive_errors'] = ce
+        ts_e = s.get('last_error_time') or 0
+        if ts_e > e['last_error_ts']:
+            e['last_error_ts'] = ts_e
+            e['last_error_msg'] = s.get('last_error_msg') or ''
+
+    # Success rate only once there's enough signal (mirrors the endpoint
+    # metrics convention): < 3 lifetime requests → None (rendered as '—').
+    for pm in providers.values():
+        for e in pm.values():
+            tr, te = e['total_requests'], e['total_errors']
+            e['success_rate'] = (round(max(0.0, 1.0 - te / tr), 3)
+                                 if tr >= 3 else None)
+    return {'providers': providers, 'ts': now}
+
+
 def group_key_stats_by_provider(snapshot: dict) -> dict:
     """Regroup a flat ``key_stats`` snapshot into ``{provider_id: {key: row}}``.
 
@@ -165,7 +222,6 @@ def group_key_stats_by_provider(snapshot: dict) -> dict:
         'day': snapshot.get('day', ''),
         'min_attempts': snapshot.get('min_attempts', 5),
         'min_success_rate': snapshot.get('min_success_rate', 0.5),
-        'max_consecutive_429': snapshot.get('max_consecutive_429', 100),
         'providers': providers,
     }
 
@@ -173,5 +229,6 @@ def group_key_stats_by_provider(snapshot: dict) -> dict:
 __all__ = [
     'aggregate_quota_by_model',
     'aggregate_endpoint_metrics',
+    'aggregate_model_health',
     'group_key_stats_by_provider',
 ]

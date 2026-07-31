@@ -13,6 +13,7 @@ import sys as _sys
 import time
 from typing import Any
 
+from lib.cost import normalize_usage, split_input_tokens
 from lib.log import audit_log as _audit_log_direct, get_logger
 from lib.tasks_pkg.cache_tracking._state import (
     _cache_lock,
@@ -21,6 +22,13 @@ from lib.tasks_pkg.cache_tracking._state import (
 )
 
 logger = get_logger(__name__)
+
+# Largest documented minimum-cacheable prompt length across the Claude tiers
+# (Opus 5 = 512, Sonnet/Opus 4.8 = 1024, Opus 4.7/Haiku 3.5 = 2048,
+# Opus 4.5/4.6 + Haiku 4.5 = 4096). Below this NO tier can cache, so a miss
+# carries no signal and logging it would be pure noise. At or above it, a miss
+# is real money and is always logged.
+_MIN_CACHEABLE_PROMPT = 4096
 
 
 def _audit_log(event, **details):
@@ -226,22 +234,36 @@ def log_round_cache_stats(
     if not usage:
         return
 
-    cache_write = (usage.get('cache_write_tokens')
-                   or usage.get('cache_creation_input_tokens')
-                   or 0)
-    cache_read = (usage.get('cache_read_tokens')
-                  or usage.get('cache_read_input_tokens')
-                  or 0)
-    prompt_tokens = (usage.get('prompt_tokens')
-                     or usage.get('input_tokens')
-                     or 0)
+    _nu = normalize_usage(usage)
+    cache_write = _nu['cache_write']
+    cache_read = _nu['cache_read']
+    _nu['input']
 
-    # Only log if there's meaningful cache activity
+    # ★ A round with NO cache activity used to return here — which silenced
+    #   exactly the most expensive rounds in the system (a full miss on a
+    #   200k-token prompt logged nothing at all, while a healthy 99% hit
+    #   logged happily). Two 20+ round Opus-5 sessions each burned a whole
+    #   context with ZERO per-round evidence because of this gate. Now only
+    #   TRIVIALLY SMALL prompts stay quiet: below the largest documented
+    #   minimum-cacheable length no Claude tier can cache at all, so their
+    #   miss is not actionable signal — everything else is logged, and a
+    #   total miss is tagged COLD so it can be grepped directly.
+    uncached, total_input = split_input_tokens(usage)
     if not cache_write and not cache_read:
-        return
+        if total_input < _MIN_CACHEABLE_PROMPT:
+            return
 
-    total_input = prompt_tokens + cache_write + cache_read
+    # ★ The hit ratio's denominator is the TOTAL prompt the provider
+    #   processed, which is convention-dependent: on the OpenAI-compat wire
+    #   prompt_tokens ALREADY INCLUDES the cached tokens, so the old
+    #   `prompt_tokens + cache_write + cache_read` counted them TWICE and
+    #   halved every reported rate — the reason the live logs cluster on a
+    #   physically impossible hit=50% (a 99.998% hit reported as 50%).
+    #   split_input_tokens is the SAME helper the cost engine uses, so the
+    #   reported hit rate and the price charged for a round can never
+    #   disagree about how big the prompt was.
     hit_pct = round(cache_read / max(total_input, 1) * 100)
+    _cold = '' if (cache_read or cache_write) else ' COLD'
 
     # Surface the SERVING KEY + retry count so a clean-round full-floor miss
     # (cache_r=0 with no compaction) can be attributed to per-round dispatch
@@ -264,10 +286,10 @@ def log_round_cache_stats(
 
     logger.info(
         '[CacheStats] %s conv=%s R%d model=%s '
-        'input=%d cache_w=%d cache_r=%d hit=%d%% key=%s retries=%d trace=%s',
+        'input=%d cache_w=%d cache_r=%d hit=%d%% key=%s retries=%d trace=%s%s',
         tid[:8] if tid else '???',
         conv_id[:8] if conv_id else '???',
         round_num + 1, model,
-        prompt_tokens, cache_write, cache_read, hit_pct, _key, _retries,
-        _trace or '-',
+        total_input, cache_write, cache_read, hit_pct, _key, _retries,
+        _trace or '-', _cold,
     )

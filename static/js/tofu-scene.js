@@ -61,13 +61,13 @@
   var PALETTES = {
     meadow: {
       seed: 1337,
-      grad: [[0, '#EEF3E2'], [0.42, '#E4EDD0'], [0.72, '#CFE0AE'], [1, '#A8C77E']],
+      grad: [[0, '#BFD9C9'], [0.42, '#DFEBCB'], [0.72, '#CFE0AE'], [1, '#A8C77E']],
       spark: '#F2F6C8',
       glow: 'rgba(255,244,196,',   // warm sun
       flow: 'sway',                 // grass sways
       layers: [
         // far hazy field — pale, low contrast, flatter strokes
-        { density: 3.4, yTop: 0.28, yBot: 0.64, ang: -1.15, jit: 0.5, lo: 1.6, hi: 3.4,
+        { density: 3.6, yTop: 0.06, yBot: 0.64, ang: -1.15, jit: 0.5, lo: 1.6, hi: 3.4,
           colors: ['#C6D8A6', '#B9CE92', '#CDDCAE', '#D7C9D8', '#BFD59E'], alpha: [0.3, 0.55] },
         // poppy + buttercup flecks (the Impressionist complementary vibration)
         { density: 0.7, yTop: 0.4, yBot: 0.82, ang: -1.4, jit: 0.95, lo: 1.1, hi: 2.4,
@@ -90,13 +90,13 @@
     },
     pool: {
       seed: 4201,
-      grad: [[0, '#EAF3F1'], [0.4, '#DDECE8'], [0.72, '#AFD2CC'], [1, '#5E948E']],
+      grad: [[0, '#BBDCD6'], [0.4, '#D6E8E3'], [0.72, '#AFD2CC'], [1, '#5E948E']],
       spark: '#EAF7F4',
       glow: 'rgba(220,246,255,',
       flow: 'drift',                // water glints drift
       layers: [
         // far shimmering surface — pale horizontal strokes
-        { density: 3.6, yTop: 0.28, yBot: 0.6, ang: 0.0, jit: 0.24, lo: 2.2, hi: 5.0,
+        { density: 3.8, yTop: 0.08, yBot: 0.6, ang: 0.0, jit: 0.24, lo: 2.2, hi: 5.0,
           colors: ['#C6E0DB', '#B4D6D0', '#D2E7E3', '#CDBFD8', '#D8EBE6'], alpha: [0.28, 0.52] },
         // lily-pad + lavender reflection flecks
         { density: 1.1, yTop: 0.44, yBot: 0.9, ang: 0.05, jit: 0.5, lo: 1.6, hi: 3.6,
@@ -118,7 +118,7 @@
     },
     sky: {
       seed: 90210,
-      grad: [[0, '#F3F0F8'], [0.4, '#F1ECF3'], [0.72, '#F6E7DA'], [1, '#F2CFB4']],
+      grad: [[0, '#C3CFE8'], [0.4, '#E6E0EE'], [0.72, '#F6E7DA'], [1, '#F2CFB4']],
       spark: '#FFF7E6',
       glow: 'rgba(255,232,196,',
       flow: 'clouds',               // clouds drift slowly
@@ -175,20 +175,340 @@
     return '#' + (((1 << 24) + (r << 16) + (g << 8) + bl).toString(16).slice(1));
   }
 
-  // One oriented brush-dab: a rotated, filled ellipse. Layering many of these
-  // with jittered colour + alpha is what reads as painterly broken colour.
+  // ── BATCHED DAB RENDERER ────────────────────────────────────────────────
+  // One oriented brush-dab is a rotated filled ellipse. Layering many of them
+  // with jittered colour + alpha is what reads as painterly broken colour — but
+  // the NAIVE way to draw one costs NINE canvas calls (save / globalAlpha /
+  // fillStyle / translate / rotate / beginPath / ellipse / fill / restore) AND
+  // its own rasterizer flush. At ~2000 dabs on a wide bar that was ~18k calls +
+  // 2000 separate fills every frame — the single dominant cost of the scene.
+  //
+  // Two changes delete almost all of it, with no change to what is painted:
+  //   1. `ellipse()` takes a ROTATION argument natively, so the
+  //      save/translate/rotate/restore quartet was pure waste — the dab is
+  //      placed and rotated by its own arguments.
+  //   2. Dabs are QUEUED into (colour, alpha-bucket) buckets and flushed as ONE
+  //      path + ONE fill per bucket, so a few thousand fills collapse into a
+  //      few dozen. Each ellipse is preceded by a moveTo to its own start point,
+  //      because arc/ellipse otherwise draws a connecting LINE from the current
+  //      point into the new subpath (a spec detail that would web the whole
+  //      field together with hairlines).
+  //
+  // ORDERING CONTRACT (why this is safe): `_bqKeys` preserves FIRST-TOUCH
+  // order, so buckets flush in the order their colour first appeared, and
+  // callers flush at every LAYER seam (see flushDabs call sites). Depth-plane
+  // order — the thing atmospheric perspective depends on — is therefore exactly
+  // preserved; only the order of same-colour, same-alpha dabs WITHIN one layer
+  // can change, which is invisible in a field of overlapping translucent dabs
+  // of the same tone.
+  var TAU = 6.283185307179586;
+  var ALPHA_STEPS = 12;         // alpha quantisation for bucketing (~0.083 apart)
+  var _bqCtx = null;            // context the queue belongs to
+  var _bq = null;               // key → flat [x,y,rx,ry,ang, ...]
+  var _bqKeys = null;           // keys in first-touch order
+
   function dab(ctx, x, y, len, wid, ang, color, alpha) {
-    ctx.save();
-    ctx.globalAlpha = alpha;
-    ctx.fillStyle = color;
-    ctx.translate(x, y);
-    ctx.rotate(ang);
-    ctx.beginPath();
-    ctx.ellipse(0, 0, len, wid, 0, 0, 6.283185);
-    ctx.fill();
-    ctx.restore();
+    if (ctx !== _bqCtx) { flushDabs(); _bqCtx = ctx; }
+    if (!(alpha > 0)) return;                       // fully transparent → free
+    var step = alpha >= 1 ? ALPHA_STEPS : ((alpha * ALPHA_STEPS + 0.5) | 0);
+    if (step <= 0) return;
+    if (!_bq) { _bq = {}; _bqKeys = []; }
+    var k = color + '|' + step;
+    var arr = _bq[k];
+    if (!arr) { arr = _bq[k] = []; _bqKeys.push(k); }
+    arr.push(x, y, len, wid, ang);
   }
 
+  // Emit everything queued so far. MUST be called before any state change the
+  // queue does not own (composite op, a gradient fillRect, a blit, restore()),
+  // and at every layer seam so depth order is preserved.
+  function flushDabs() {
+    var ctx = _bqCtx;
+    if (!ctx || !_bqKeys || !_bqKeys.length) { _bq = null; _bqKeys = null; return; }
+    for (var i = 0; i < _bqKeys.length; i++) {
+      var k = _bqKeys[i], arr = _bq[k];
+      if (!arr || !arr.length) continue;
+      var cut = k.lastIndexOf('|');
+      ctx.fillStyle = k.slice(0, cut);
+      ctx.globalAlpha = (+k.slice(cut + 1)) / ALPHA_STEPS;
+      ctx.beginPath();
+      for (var j = 0; j < arr.length; j += 5) {
+        var x = arr[j], y = arr[j + 1];
+        var rx = arr[j + 2] > 0.01 ? arr[j + 2] : 0.01;
+        var ry = arr[j + 3] > 0.01 ? arr[j + 3] : 0.01;
+        var ang = arr[j + 4];
+        // start the subpath at the ellipse's own 0-angle point, else the path
+        // draws a line here from wherever the previous ellipse ended.
+        ctx.moveTo(x + rx * Math.cos(ang), y + rx * Math.sin(ang));
+        ctx.ellipse(x, y, rx, ry, ang, 0, TAU);
+      }
+      ctx.fill();
+    }
+    // The queue owns no save/restore, so it must hand the context back at the
+    // neutral alpha it borrowed. Without this the NEXT unrelated draw on this
+    // context — the base wash on a re-bake, or the per-frame `drawImage` blit of
+    // the baked buffer — would inherit the last bucket's alpha and paint faded.
+    ctx.globalAlpha = 1;
+    _bq = null;
+    _bqKeys = null;
+  }
+
+  // ── SCENE RENDER RESOLUTION ─────────────────────────────────────────────
+  // ⚠️ DO NOT "FIX" THIS TO 2 OR 3 BECAUSE THE CANVAS "LOOKS SOFT". It is
+  // deliberate, it is the single cheapest win in the whole renderer, and the
+  // softness is the art style rather than a defect.
+  //
+  // Every pixel cost in this file scales with dpr². Rendering at the device's
+  // full ratio (2 on a Retina panel, 3 on some phones) therefore costs 4–9×,
+  // and buys NOTHING here: this scene is Monet broken colour — thousands of
+  // soft, overlapping, translucent ellipses with no hard edges and no text.
+  // There is no high-frequency detail for the extra samples to resolve.
+  //
+  // Nothing legible lives on these canvases (verified: zero fillText/strokeText
+  // in this module). The pet is a DOM <img> with its own transforms and the
+  // bar's folder/stat labels are DOM spans — all of them keep full device
+  // resolution, because this cap is scoped to the scene canvases ONLY and never
+  // touches a global.
+  //
+  // 1.5 keeps a little supersampling for the dab edges while cutting the bill
+  // ~44% against dpr=2. Pinned by
+  // tests/test_frontend_tofu_scene_perf.py::test_scene_render_dpr_is_capped.
+  var SCENE_DPR_CAP = 1.5;
+
+  // ── TIME OF DAY ─────────────────────────────────────────────────────────
+  // The pet already lives on a clock: tofu-pet.js::_timeBucket() sends it to
+  // sleep at 3am and makes it sleepy in the evening. The SCENE did not, so the
+  // cat could doze off at midnight while standing in a bright noon meadow —
+  // the pet and its world disagreed about what time it was.
+  //
+  // These bucket boundaries are a DELIBERATE MIRROR of tofu-pet.js::_timeBucket
+  // (0/5/8/12/17/21). Keep them identical: the whole point is that the light on
+  // the cat and the light in the field come from one sun. A guard test asserts
+  // both modules still agree.
+  //
+  // The tint is applied as a WASH over the scene's own palette rather than as
+  // six hand-authored palettes per scene: a wash preserves each scene's
+  // identity (a meadow at dusk is still recognisably that meadow) and it costs
+  // nothing at runtime, because it happens once at BAKE time. `sat` pulls
+  // toward grey for the low-light buckets, since colour vision genuinely
+  // desaturates at night — that reads as dusk far more than darkening alone.
+  var TIME_TINTS = {
+    deepNight:    { wash: '#26345B', amt: 0.50, sat: 0.62, glow: 'rgba(150,175,235,', spark: '#C3D4F5' },
+    earlyMorning: { wash: '#6E5A7A', amt: 0.34, sat: 0.78, glow: 'rgba(255,206,190,', spark: '#F3D9DF' },
+    morning:      { wash: '#FFF6DE', amt: 0.12, sat: 1.0,  glow: null, spark: null },
+    afternoon:    { wash: null,      amt: 0,    sat: 1.0,  glow: null, spark: null },
+    evening:      { wash: '#F0A25E', amt: 0.30, sat: 0.95, glow: 'rgba(255,196,130,', spark: '#FFE0B0' },
+    night:        { wash: '#34456F', amt: 0.42, sat: 0.68, glow: 'rgba(170,192,240,', spark: '#D2DFF8' }
+  };
+
+  /** Time bucket for an hour. MUST match tofu-pet.js::_timeBucket boundaries.
+   *  `hour` is injectable so tests never have to mock the system clock. */
+  function _sceneBucket(hour) {
+    var h = (hour == null) ? new Date().getHours() : hour;
+    if (h >= 0 && h < 5) return 'deepNight';
+    if (h < 8) return 'earlyMorning';
+    if (h < 12) return 'morning';
+    if (h < 17) return 'afternoon';
+    if (h < 21) return 'evening';
+    return 'night';
+  }
+
+  /** Desaturate toward this colour's own luma. */
+  function _desat(hex, keep) {
+    if (keep >= 1) return hex;
+    var p = parseInt(hex.slice(1), 16);
+    var r = (p >> 16) & 255, g = (p >> 8) & 255, b = p & 255;
+    var y = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    var rr = Math.round(lerp(y, r, keep)), gg = Math.round(lerp(y, g, keep)), bb = Math.round(lerp(y, b, keep));
+    return '#' + (((1 << 24) + (rr << 16) + (gg << 8) + bb).toString(16).slice(1));
+  }
+
+  /** Return `pal` washed toward the given time-of-day tint. Pure: never mutates
+   *  the PALETTES entry (which is module-level and shared across re-bakes). */
+  function _tintPalette(pal, bucket) {
+    var t = TIME_TINTS[bucket];
+    if (!t || !t.wash || t.amt <= 0) return pal;
+    function c(hex) { return _mixHex(_desat(hex, t.sat), t.wash, t.amt); }
+    var out = {
+      seed: pal.seed, flow: pal.flow,
+      grad: pal.grad.map(function (s) { return [s[0], c(s[1])]; }),
+      spark: t.spark || c(pal.spark),
+      glow: t.glow || pal.glow,
+      layers: pal.layers.map(function (L) {
+        var o = {}; for (var k in L) if (Object.prototype.hasOwnProperty.call(L, k)) o[k] = L[k];
+        o.colors = L.colors.map(c);
+        return o;
+      })
+    };
+    return out;
+  }
+
+  // ── ACTIVITY WEATHER ────────────────────────────────────────────────────
+  // The pet already reacts to what the app is doing (TofuPet.setActivity via the
+  // 'tofu:activity' event); the scene ignored it. Letting the weather carry that
+  // signal turns ambient decoration into PERIPHERAL STATUS — something you can
+  // read out of the corner of your eye without looking at it.
+  //
+  // ⚠️ THE ONE INVARIANT: every effect DECAYS TO NEUTRAL ON ITS OWN.
+  // No code path may leave the bar permanently stormy. This is not a style
+  // preference — a weather state pinned to an error becomes ambient anxiety, and
+  // errors already surface in the chat where they belong. So the entire model is
+  // ONE SCALAR PER EFFECT that only ever ramps toward a target and decays to
+  // zero; there is no "error mode" the bar can get stuck in, because there is no
+  // mode at all. `success` and `error` are one-shot IMPULSES (set to 1, decay
+  // out); only `loading` holds, and it holds a GENTLE value and is released the
+  // moment the app says anything else.
+  //
+  // The scene listens to the DOM event directly rather than having the pet
+  // forward it: the two stay decoupled, and a scene re-bake cannot lose the
+  // current weather (the scalars live outside the bake).
+  var WEATHER_ENABLED = true;        // instantly killable; see setWeather()
+  var _wx = {
+    overcast: 0,   // 0..1 — cloud shadow dims the sun while work is in flight
+    burst: 0,      // 0..1 — one-shot light-break on success
+    rain: 0        // 0..1 — one-shot rain pass on error (NEVER a held state)
+  };
+  var _wxTarget = 0;                 // overcast target (the only holding value)
+  var OVERCAST_MAX = 0.55;           // how far the sun can be dimmed (subtle)
+  var OVERCAST_RAMP = 0.6;           // per second, toward target
+  var IMPULSE_DECAY = 0.55;          // per second — a burst/rain pass self-clears
+  // WATCHDOG. `loading` is the only holding state, and it is held by an event
+  // we do not control: if the terminal signal never arrives — a crashed task, a
+  // dropped stream, a tab closed mid-request — the hold would never release and
+  // the bar would sit under cloud forever. That is precisely the "permanently
+  // stormy" failure the whole model exists to prevent, so the hold ALSO expires
+  // on its own. Long enough not to fight a genuinely slow request; short enough
+  // that a stranded bar heals itself well inside a working session.
+  var OVERCAST_MAX_HOLD_MS = 120000;   // 2 minutes
+  var _overcastSince = -1;             // ms timestamp the hold began (-1 = not held)
+
+  /** Drive the weather scalars. `dt` seconds. Pure decay: with no further
+   *  events every scalar returns to 0, which is the neutral scene. */
+  function _stepWeather(dt, ms) {
+    if (!WEATHER_ENABLED) { _wx.overcast = _wx.burst = _wx.rain = 0; return; }
+    // Watchdog: an abandoned `loading` (terminal event never arrived) must not
+    // hold the cloud forever — release it after OVERCAST_MAX_HOLD_MS.
+    if (_overcastSince >= 0 && (ms - _overcastSince) > OVERCAST_MAX_HOLD_MS) {
+      _wxTarget = 0;
+      _overcastSince = -1;
+    }
+    var d = _wxTarget - _wx.overcast;
+    var step = OVERCAST_RAMP * dt;
+    _wx.overcast += (Math.abs(d) <= step) ? d : (d > 0 ? step : -step);
+    // Impulses ONLY decay — nothing can hold them up.
+    _wx.burst = Math.max(0, _wx.burst - IMPULSE_DECAY * dt);
+    _wx.rain = Math.max(0, _wx.rain - IMPULSE_DECAY * dt);
+  }
+
+  /** Map an app activity to weather. Every branch either sets a decaying
+   *  impulse or RELEASES the hold — none of them can pin the bar. */
+  function _onActivity(kind, ms) {
+    if (!WEATHER_ENABLED) return;
+    if (kind === 'loading') {
+      _wxTarget = OVERCAST_MAX;
+      // Stamp the hold so the watchdog can expire it if no terminal signal
+      // comes. -1 means "not held": a genuine timestamp of 0 is possible (the
+      // very first frame), so 0 cannot be used as the sentinel.
+      if (_overcastSince < 0) _overcastSince = (typeof ms === 'number') ? ms : _lastMs;
+      return;
+    }
+    // Anything that is not 'loading' releases the overcast hold, so a missed or
+    // unknown terminal event can never strand the bar under cloud.
+    _wxTarget = 0;
+    _overcastSince = -1;
+    if (kind === 'success') _wx.burst = 1;
+    else if (kind === 'error') _wx.rain = 1;
+  }
+
+  // ── PER-FRAME LIVE BUDGET ───────────────────────────────────────────────
+
+  // Every element of a LIVE population (near band, flow overlay, foreground
+  // occluders) is re-resolved and re-queued EVERY frame, so its count is the
+  // per-frame cost. Seeding them by AREA — as the baked planes rightly are —
+  // made that cost grow without limit with the bar's width: a 1400px bar paid
+  // ~4x a 360px one for a painting that is only ever 48px tall.
+  //
+  // So the live populations are CAPPED, and when a cap bites, each surviving
+  // element is scaled up by sqrt(wanted/capped) — the same total painted AREA
+  // spread over fewer, slightly broader strokes. That is why a wide bar still
+  // looks like a full painting instead of a thinning one: Impressionist dabs
+  // carry the field by coverage, not by count. Detail that WOULD have gone into
+  // more live strokes is instead spent in the BAKED buffer (see BAKE_BOOST),
+  // which costs nothing per frame.
+  //
+  // The caps are set ABOVE a normal bar's natural count, so at the widths the
+  // project bar actually takes (~360–900px) nothing is thinned at all; they
+  // only engage on very wide windows.
+  var LIVE_CAP_NEAR = 300;            // live near-band elements (grass/water/cloud)
+  var LIVE_CAP_FLOW = 200;            // breathing flow-overlay dabs
+  var LIVE_CAP_FG = 190;              // foreground occluders (each = up to 4 dabs)
+  var LIVE_CAP_UNDERSTORY = 90;       // base mounds on the fg plane
+  var LIVE_CAP_SPARK = 40;            // twinkling specular dabs
+  // Baked planes are painted ONCE per resize/scene-change, so extra density
+  // there is free at runtime — this is where the "intricate" budget goes.
+  var BAKE_BOOST = 1.85;
+
+  /** Clamp a wanted live count to `cap`, returning the count plus the linear
+   *  size scale that preserves total painted area. */
+  function _budget(wanted, cap) {
+    if (wanted <= cap) return { n: wanted, scale: 1 };
+    return { n: cap, scale: Math.sqrt(wanted / cap) };
+  }
+
+  // ── FULL-BLEED PAINTING (owner, 2026-07-26) ─────────────────────────────
+  // The painting fills the WHOLE bar, edge to edge. An earlier iteration tore
+  // the canvas to a deckle (handmade-paper) outline and let the bar's cream
+  // body show through as a torn margin — the owner rejected the result ("the
+  // irregular outer border with a white background behind it is not
+  // appealing"), so the torn edge + white mount are GONE. Cropping to the
+  // rounded shell is done ONCE, in CSS, by the clip-path on the canvas
+  // elements (styles.css) — zero per-frame canvas cost, no margin, no white
+  // halo. Do not reintroduce a canvas-side cut/clip: the even-odd
+  // destination-out cut and the per-frame deckle clip were both pure overhead
+  // here, and the full-bleed look is the requirement.
+
+  // ── SUN-GLOW TILE ────────────────────────────────────────────────────────
+  // The drifting sun was a `createRadialGradient` rebuilt EVERY frame and then
+  // `fillRect`-ed across the WHOLE canvas under 'lighter'. Two separate costs
+  // hid in that one line:
+  //   * the fill touched w×h device pixels with an additive blend, ~20% of the
+  //     frame's entire pixel budget and growing linearly with the bar's width;
+  //   * yet the gradient is fully TRANSPARENT beyond its radius (h*1.6), so the
+  //     overwhelming majority of those pixels were blending a no-op.
+  // And it was all to move the sun 0.6px — the sweep travels ~18px/second.
+  //
+  // So the glow is baked ONCE into a small square tile (2R×2R) at bake time and
+  // blitted at the sun's position each frame. A blit of a ~154px tile replaces a
+  // full-width gradient fill: the per-frame glow cost becomes O(h²), constant in
+  // the bar's width.
+  var _glowTile = null, _glowR = 0;
+
+  function _bakeGlowTile(pal, h) {
+    _glowTile = null;
+    if (!(h > 0) || !pal || !pal.glow) return;
+    var R = h * 1.6;
+    var side = Math.max(2, Math.ceil(2 * R * _dpr));
+    var t, tc;
+    try {
+      t = document.createElement('canvas');
+      t.width = side; t.height = side;
+      tc = t.getContext('2d');
+    } catch (e) { return; }                    // no second context — glow degrades off
+    if (!tc) return;
+    tc.setTransform(_dpr, 0, 0, _dpr, 0, 0);
+    var g = tc.createRadialGradient(R, R, 0, R, R, R);
+    g.addColorStop(0, pal.glow + SUN_GLOW_PEAK + ')');
+    g.addColorStop(0.4, pal.glow + SUN_GLOW_MID + ')');
+    g.addColorStop(1, pal.glow + '0)');
+    tc.fillStyle = g;
+    tc.fillRect(0, 0, 2 * R, 2 * R);
+    _glowTile = t;
+    _glowR = R;
+  }
+
+
+  // ── module state ──
+  var _bar = null;
   // ── module state ──
   var _bar = null;
   var _canvas = null, _ctx = null;
@@ -198,6 +518,15 @@
   var _scene = 'meadow';
   var _raf = 0, _t0 = 0, _lastMs = 0;
   var _reduced = false, _paused = false;
+  // Frame pacing (see _loop): the scene is slow ambient weather, so it is
+  // painted on a fixed cadence rather than every vsync. rAF still drives the
+  // clock — we just skip the paint on the in-between ticks.
+  var SCENE_FPS = 30;
+  var SCENE_FRAME_MS = 1000 / SCENE_FPS - 1;   // -1 so a 30Hz-aligned tick never slips a frame
+  var _lastPaint = -1e9;
+  // True while the bar is scrolled/collapsed out of view (IntersectionObserver).
+  // An off-screen painting is invisible work, so the loop skips it entirely.
+  var _offscreen = false;
   var _sparks = [];                   // living shimmer dabs (positions seeded)
   var _flow = [];                     // living FLOW dabs (sway / drift overlay)
   var _blades = [];                   // LIVE base-anchored near-grass blades (not baked)
@@ -226,6 +555,35 @@
   var _fgCanvas = null, _fgctx = null;
   var _fgBlades = [];                 // near-foreground occluders (in front of the pet)
   var _understory = [];               // irregular dark mounds anchoring the fg base (not a solid strip)
+  // Top of the band the fg plane actually paints (CSS px). The plane is rooted
+  // at the bottom, so everything above this is permanently transparent — the
+  // per-frame clear is confined to [_fgTop, h] instead of the whole canvas.
+  // Recomputed from the seeded geometry at bake time, so it can never drift out
+  // of step with what is drawn.
+  var _fgTop = 0;
+  // Time-of-day state. `_hourOverride` is the test seam (null = read the real
+  // clock). `_bakedBucket` records which bucket the CURRENT buffer was baked
+  // in, so the boundary watcher can tell when the world needs to move on.
+  // `_livePal` is the tinted palette the baked buffer was painted with — the
+  // per-frame layers MUST read it rather than the raw PALETTES entry, or the
+  // live grass would stay noon-green on top of a dusk-washed field.
+  var _hourOverride = null;
+  var _bakedBucket = null;
+  var _livePal = null;
+  // Cross-fade state for a time-of-day change. A bucket boundary crossed while
+  // someone is looking at the bar must NOT snap the palette — a hard colour
+  // jump mid-session reads as a rendering bug, not as dusk falling. So the
+  // PREVIOUS baked buffer is kept and blended out over the new one.
+  // `_xfadeBuf` holds the outgoing painting; `_xfadeT` runs 1 → 0.
+  var _xfadeBuf = null;
+  var _xfadeT = 0;
+  var XFADE_MS = 2600;              // slow enough to read as light changing
+  var BUCKET_POLL_MS = 60000;       // check the clock once a minute; not per frame
+  var _lastBucketCheck = -1e9;
+  // Set after a re-bake (size/scene change): the torn outline itself has moved,
+  // so stale pixels can survive OUTSIDE the new clip. One full clear retires
+  // them; steady-state frames need none.
+  var _needFullClear = true;
 
   // ── Pet ⋈ scene WAKE: the pet's foot disturbs the PAINTED scene (owner ask —
   // "stepping on grass presses it down / stepping on the pool splashes"). Each
@@ -285,6 +643,12 @@
     if (_scene === 'off') { _sparks = []; _flow = []; _blades = []; _fgBlades = []; _understory = []; _critter = null; _wake = []; _petPrevX = null; _wakeAccum = 0; _disturb = []; return; }
     _wake = []; _petPrevX = null; _wakeAccum = 0;
     var pal = PALETTES[_scene] || PALETTES.meadow;
+    // Wash the scene's palette toward the current time of day, so the light on
+    // the field agrees with the light on the cat. Free at runtime: this is the
+    // bake, not the frame.
+    _bakedBucket = _sceneBucket(_hourOverride);
+    pal = _tintPalette(pal, _bakedBucket);
+    _livePal = pal;
     var b = _bctx, w = _w, h = _h;
     b.setTransform(_dpr, 0, 0, _dpr, 0, 0);
     b.clearRect(0, 0, w, h);
@@ -299,11 +663,16 @@
     _blades = [];
     for (var li = 0; li < pal.layers.length; li++) {
       var L = pal.layers[li];
-      var n = Math.max(4, Math.round(L.density * area / 1000));
+      // A BAKED plane is painted once → spend the intricacy budget here. A LIVE
+      // plane is re-queued every frame → cap it and widen the survivors so the
+      // painted area (hence the look) holds. See LIVE_CAP_* / BAKE_BOOST.
+      var want = Math.max(4, Math.round(L.density * area / 1000 * (L.live ? 1 : BAKE_BOOST)));
+      var bud = L.live ? _budget(want, LIVE_CAP_NEAR) : { n: want, scale: 1 };
+      var n = bud.n, gsc = bud.scale;
       for (var i = 0; i < n; i++) {
         var x = R() * w;
         var y = lerp(L.yTop, L.yBot, R()) * h;
-        var len = lerp(L.lo, L.hi, R());
+        var len = lerp(L.lo, L.hi, R()) * gsc;
         var wid = len * lerp(0.32, 0.6, R());
         var ang = L.ang + (R() - 0.5) * 2 * L.jit;
         var color = L.colors[(R() * L.colors.length) | 0];
@@ -321,19 +690,38 @@
                          alpha: alpha, ph: R() * 6.283185, sp: lerp(0.7, 1.5, R()) });
         } else {
           dab(b, x, y, len, wid, ang, color, alpha);
+          // IMPASTO. Real broken-colour painting is THICK — a loaded brush
+          // leaves a ridge along one side of the stroke, and that ridge catches
+          // the light while the furrow beside it holds shadow. Flat ellipses
+          // alone read as printed, not painted. So a minority of baked strokes
+          // get a paired highlight + shadow sliver offset PERPENDICULAR to the
+          // stroke (±90°), which is what makes the field read as physical paint
+          // under raking light. Baked-only and deliberately so: it triples the
+          // detail of the static planes at exactly ZERO per-frame cost, which
+          // is the whole trade this optimization bought.
+          if (R() < 0.26) {
+            var pnx = -Math.sin(ang), pny = Math.cos(ang);
+            var off = wid * 0.85;
+            dab(b, x + pnx * off, y + pny * off, len * 0.82, wid * 0.4, ang,
+                _mixHex(color, pal.spark, 0.45), alpha * 0.55);
+            dab(b, x - pnx * off, y - pny * off, len * 0.7, wid * 0.34, ang,
+                _mixHex(color, '#4A4230', 0.3), alpha * 0.3);
+          }
         }
       }
+      flushDabs();   // layer seam — keep depth-plane order exact
     }
     // pre-seed the living shimmer dabs (their positions are stable; only their
     // alpha/offset oscillate per frame in the overlay).
     _sparks = [];
-    var sn = Math.max(3, Math.round(w / 46));
+    var sbud = _budget(Math.max(3, Math.round(w / 46)), LIVE_CAP_SPARK);
+    var sn = sbud.n;
     var sang = (pal.layers[0] && pal.layers[0].ang) || 0;
     for (var si = 0; si < sn; si++) {
       _sparks.push({
         x: R() * w,
         y: lerp(0.5, 0.92, R()) * h,
-        len: lerp(1.6, 3.4, R()),
+        len: lerp(1.6, 3.4, R()) * sbud.scale,
         ph: R() * 6.283185,          // phase offset
         sp: lerp(0.6, 1.6, R()),     // twinkle speed
         ang: sang + (R() - 0.5) * 0.5
@@ -343,14 +731,15 @@
     // ride on top of the baked scene each frame, swaying (grass), drifting
     // (water glints), or gliding (clouds) per the palette's `flow` mode.
     _flow = [];
-    var fn = Math.max(12, Math.round(w / 5));
+    var fbud = _budget(Math.max(12, Math.round(w / 5)), LIVE_CAP_FLOW);
+    var fn = fbud.n;
     var nearColors = (pal.layers[pal.layers.length - 1] || {}).colors || ['#FFFFFF'];
     for (var fi = 0; fi < fn; fi++) {
       var isCloud = pal.flow === 'clouds';
       _flow.push({
         x: R() * w,
         y: (pal.flow === 'sway' ? lerp(0.5, 0.99, R()) : lerp(0.3, 0.9, R())) * h,
-        len: lerp(isCloud ? 5 : 2.2, isCloud ? 11 : 5.5, R()),
+        len: lerp(isCloud ? 5 : 2.2, isCloud ? 11 : 5.5, R()) * fbud.scale,
         wid: lerp(0.34, 0.6, R()),
         ang: (pal.flow === 'sway' ? -1.5 : 0) + (R() - 0.5) * 0.5,
         color: nearColors[(R() * nearColors.length) | 0],
@@ -374,21 +763,30 @@
     _fgBlades = [];
     var fgKind = pal.flow || 'sway';
     var fgColors = (pal.layers[pal.layers.length - 1] || {}).colors || ['#FFFFFF'];
-    // SKY (clouds): the near plane is bright WISPY HAZE, not a dense band. A
-    // packed row of occluder puffs jammed at the clipped rim pools into the
-    // owner's "large black border" no matter how warm the seed, because ~65
-    // stacked translucent ellipses SUBTRACT brightness from the luminous sky.
-    // So on clouds we seed FAR FEWER blades, scattered HIGHER (not clamped to
-    // the rim). Meadow/pool keep the dense near band.
+    // SKY (clouds): the near plane is a SUNLIT CLOUD BANK the cat wades through
+    // — broad, rounded, BRIGHT puffs whose tops arc over the rim, not a row of
+    // thin stalks. Two earlier passes tried to make it out of the scene's own
+    // warm sand tones and it was invisible for a measurable reason: mixing the
+    // near colour toward #F4C594 landed on ~#F2CAA1, and the base of the sky
+    // gradient IS #F2CFB4 — the plane was painted the same colour as the wall
+    // behind it, so there was nothing to see (and every attempt to fix it by
+    // DARKENING produced the "dirty border" the owner rejected). A near plane
+    // needs a VALUE gap, and on a luminous dawn sky the only direction with
+    // headroom is BRIGHTER: cloud tops catch the sun, so they read as a plane
+    // in front while making the band lighter, never dirtier.
     var fgAiry = (fgKind === 'clouds');
-    var fgN = fgAiry ? Math.max(10, Math.round(w / 16)) : Math.max(18, Math.round(w / 5.5));
+    var fgBud = _budget(fgAiry ? Math.max(12, Math.round(w / 13)) : Math.max(18, Math.round(w / 5.5)),
+                        LIVE_CAP_FG);
+    var fgN = fgBud.n;
     var fgBase = h + 1;                                  // rooted at the very bottom
     for (var gi2 = 0; gi2 < fgN; gi2++) {
       var gx = R() * w;
       // tall enough to reach up into the pet's paw/ankle band (pet box ~30px in
       // a ~48px bar sits with its feet ~1px off the bottom): 9–16px blades.
-      var glen = lerp(9, 16, R());
-      var gwid = lerp(1.4, 2.6, R());
+      // Cloud puffs are instead BROAD and rounded (the fg 'clouds' branch draws
+      // rx=len/2, ry=wid), so they overlap into one continuous bank.
+      var glen = fgAiry ? lerp(22, 42, R()) : lerp(9, 16, R());
+      var gwid = (fgAiry ? lerp(4.5, 8.5, R()) : lerp(1.4, 2.6, R())) * fgBud.scale;
       var gang = (fgKind === 'sway' ? -1.5 : (fgKind === 'clouds' ? 0.06 : 0.0)) + (R() - 0.5) * 0.5;
       // ATMOSPHERIC PERSPECTIVE — the near plane must read as CLOSER than the
       // hazy background: mix the source colour HARD toward a deep saturated
@@ -408,24 +806,24 @@
       // mix toward a bright warm-white so a near puff READS AS HAZE and can
       // never pool into a dark border on the luminous sky. Pool: a faint deeper
       // teal. Meadow: dark grass.
-      // Sky near haze reads by CHROMA, not luminance: the base bg is already
-      // near-white, so a brighter bloom is invisible and a darker one becomes
-      // the border. A saturated warm-peach tint (more chroma than the pale bg)
-      // gives a measurable near-plane presence while staying LIGHT.
-      var fgShade = fgDark ? '#182A0C' : (fgKind === 'drift' ? '#3E7E80' : '#F4C594');
-      var fgMix = fgDark ? 0.55 : (fgKind === 'drift' ? 0.26 : 0.5);
-      // airy (clouds) puffs sit LOW in the base band as a bright warm HAZE
-      // bloom — a near plane that reads by BRIGHTENING (lighter than the bg),
-      // never a dark row. Kept in the bottom ~10px so it registers as a base
-      // presence, not scattered mid-air specks. Meadow/pool stay rooted at rim.
-      var ghy = fgAiry ? (h - lerp(1, 9, R())) : fgBase;
+      // Sky near CLOUD BANK reads by LUMINANCE, upward: mix toward a near-white
+      // sunlit cloud top (#FFFDF6), well above the #F2CFB4 base of the sky
+      // gradient, so the bottom band measurably BRIGHTENS. That is both the
+      // depth cue and the guarantee it can never become the rejected dark
+      // border — a plane made of light cannot pool into dirt.
+      var fgShade = fgDark ? '#182A0C' : (fgKind === 'drift' ? '#3E7E80' : '#FFFDF6');
+      var fgMix = fgDark ? 0.55 : (fgKind === 'drift' ? 0.26 : 0.72);
+      // Cloud puffs sit LOW so they bank around the cat's legs, their crowns
+      // arcing over the rim; their broad radii overlap into one continuous
+      // sunlit bank rather than scattered mid-air specks.
+      var ghy = fgAiry ? (h - lerp(-1, 7, R())) : fgBase;
       _fgBlades.push({ kind: fgKind, x: gx, hy: ghy,
                        base: { x: gx - glen * Math.cos(gang), y: fgBase - glen * Math.sin(gang) },
                        rootY: fgBase, len: glen, wid: gwid, ang: gang,
                        color: _mixHex(fgColors[(R() * fgColors.length) | 0], fgShade, fgMix),
                        shade: fgShade,
                        alpha: fgDark ? lerp(0.92, 1.0, R())
-                                     : (fgAiry ? lerp(0.30, 0.48, R()) : lerp(0.42, 0.6, R())),
+                                     : (fgAiry ? lerp(0.52, 0.74, R()) : lerp(0.42, 0.6, R())),
                        ph: R() * 6.283185, sp: lerp(0.7, 1.5, R()) });
     }
     // Seed the IRREGULAR understory mounds (the base anchor, NOT a solid strip).
@@ -460,8 +858,18 @@
     var uShadeSeed = uDark ? '#28401A' : (fgKind === 'drift' ? '#3E7E80' : '#E9D9C2');
     var uMix = uDark ? 0.55 : (fgKind === 'drift' ? 0.28 : 0.18);
     var ux = -6;
+    // Like the other LIVE populations (§ LIVE_CAP_*), the mounds are re-queued
+    // every frame, so on a very wide bar we widen each mound instead of adding
+    // more: the broken, gapped SILHOUETTE that keeps this from reading as a
+    // ruled border comes from the jittered width/height/sink, which survives
+    // the widening — only the stride grows.
+    var uStride = 1;
+    if (!uSkip) {
+      var uWant = Math.round((w + 12) / 12.5);        // ~mounds at the natural stride
+      if (uWant > LIVE_CAP_UNDERSTORY) uStride = uWant / LIVE_CAP_UNDERSTORY;
+    }
     while (!uSkip && ux < w + 6) {
-      var uw = lerp(10, 22, R());                       // wide, overlapping
+      var uw = lerp(10, 22, R()) * uStride;             // wide, overlapping
       var uh = lerp(2.5, uDark ? 5.0 : 2.6, R());        // low (much lower on airy scenes)
       var uc = _mixHex(fgColors[(R() * fgColors.length) | 0], uShadeSeed, uMix);
       _understory.push({ x: ux + uw * 0.5, rx: uw * 0.6, ry: uh,
@@ -471,6 +879,22 @@
       ux += uw * lerp(0.55, 0.9, R());                   // overlap + occasional gap
     }
     _spawnCritter(R);
+    // Compute the top of the band the fg plane paints, from the SEEDED geometry
+    // (blade root minus its length/sway headroom, and the highest airy puff), so
+    // the per-frame clear can be confined to it without ever clipping a stroke.
+    // Generous headroom: blades sway, and the disturbance shove lengthens them.
+    var fgTop = h;
+    for (var ti = 0; ti < _fgBlades.length; ti++) {
+      var tb = _fgBlades[ti];
+      var anchor = (tb.hy != null ? tb.hy : tb.rootY);
+      fgTop = Math.min(fgTop, anchor - tb.len * 1.6 - 6);
+    }
+    _fgTop = Math.max(0, Math.floor(fgTop));
+    // The sun glow is baked to a tile once here, not rebuilt per frame.
+    _bakeGlowTile(pal, h);
+    // Size/scene changed → one full clear on the next frame retires any
+    // stale pixels from the previous geometry.
+    _needFullClear = true;
   }
 
   // (Re)seed the scene critter for the current scene, off-screen on a random
@@ -499,19 +923,46 @@
   // elapsed time; when static (reduced motion) it's a fixed 0.
   function _paintFrame(ms) {
     if (!_ctx || _w <= 0 || _h <= 0 || _scene === 'off') return;
-    var pal = PALETTES[_scene] || PALETTES.meadow;
+    var pal = _livePal || PALETTES[_scene] || PALETTES.meadow;
     var c = _ctx, w = _w, h = _h;
     var dt = Math.max(0, Math.min(0.08, (ms - _lastMs) / 1000));
     _lastMs = ms;
     c.setTransform(_dpr, 0, 0, _dpr, 0, 0);
-    c.clearRect(0, 0, w, h);
+    // NO full-canvas clear. The baked buffer is OPAQUE over the whole
+    // canvas (full-bleed), so blitting it already overwrites the whole of last
+    // frame's overlay. Clearing w×h was ~20% of the frame's pixel budget spent
+    // erasing pixels that were about to be overwritten anyway. A full clear is
+    // still done ONCE after any re-bake (size/scene change), where stale pixels
+    // from the previous geometry really can survive.
+    if (_needFullClear) { c.clearRect(0, 0, w, h); _needFullClear = false; }
+    c.save();
     if (_buf) c.drawImage(_buf, 0, 0, w, h);
+    // TIME OF DAY: has the clock moved into a new bucket since this buffer was
+    // baked? Checked once a minute (not per frame — the boundary moves at most
+    // six times a day). Re-baking mid-session would SNAP the palette, so the
+    // outgoing painting is kept and faded out over the incoming one.
+    if (ms - _lastBucketCheck > BUCKET_POLL_MS) {
+      _lastBucketCheck = ms;
+      if (_bakedBucket && _sceneBucket(_hourOverride) !== _bakedBucket) _beginTimeShift();
+    }
+    if (_xfadeT > 0 && _xfadeBuf) {
+      _xfadeT -= dt * (1000 / XFADE_MS);
+      if (_xfadeT <= 0) { _xfadeT = 0; _xfadeBuf = null; }
+      else {
+        c.save();
+        c.globalAlpha = _xfadeT;
+        c.drawImage(_xfadeBuf, 0, 0, w, h);
+        c.restore();
+      }
+    }
     // Track the pet's foot motion (guarded) so the flow-deform + wake marks can
     // react to WHERE and HOW FAST the cat is moving. Runs before the layers so
     // _paintFlow can press the grass under the current foot position.
     _trackPet(dt, w);
     // advance the ground-disturbance field (the pet presses it, it springs back)
     _updateDisturb(dt, w);
+    // advance the activity weather (pure decay — see _stepWeather)
+    _stepWeather(dt, ms);
     // (The old bright additive "pet-attention" halo that pooled warm light
     // under the cat was REMOVED — owner: the pet reads as floating and the
     // moving light is fake. An additive glow ring under a sprite is exactly the
@@ -520,21 +971,26 @@
     // that draws the near scene IN FRONT of it. See _paintForeground below.)
     // drifting sun glow — a soft warm radial that sweeps horizontally (DIMMED:
     // owner found the moving light too glaring; peak/mid/sweep are tuned-down
-    // named constants).
+    // named constants). Blitted from the baked tile (see _bakeGlowTile): the
+    // gradient is no longer rebuilt per frame, and the additive blend now
+    // touches only the tile's 2R×2R footprint instead of the whole bar.
     var sx = _sunX(ms, w);
     var sy = h * 0.14;
     // publish the live light direction for the pet (normalized, scene-warmth)
     _light.nx = w > 0 ? sx / w : 0.5;
     _light.ny = 0.14;
     _light.warm = SCENE_WARMTH[_scene] != null ? SCENE_WARMTH[_scene] : 0.7;
-    var rg = c.createRadialGradient(sx, sy, 0, sx, sy, h * 1.6);
-    rg.addColorStop(0, pal.glow + SUN_GLOW_PEAK + ')');
-    rg.addColorStop(0.4, pal.glow + SUN_GLOW_MID + ')');
-    rg.addColorStop(1, pal.glow + '0)');
     c.save();
     c.globalCompositeOperation = 'lighter';
-    c.fillStyle = rg;
-    c.fillRect(0, 0, w, h);
+    // ACTIVITY WEATHER, carried by the LIGHT — the cheapest possible channel:
+    // it modulates the alpha of a blit that already happens, so cloud shadow and
+    // the success light-break cost literally zero extra pixels. Overcast dims
+    // the sun while work is in flight; a success burst briefly over-brightens it.
+    var wxGlow = 1 - _wx.overcast * 0.7 + _wx.burst * 0.6;
+    if (wxGlow < 0) wxGlow = 0;
+    if (wxGlow !== 1) c.globalAlpha = wxGlow;
+    if (_glowTile) c.drawImage(_glowTile, sx - _glowR, sy - _glowR, 2 * _glowR, 2 * _glowR);
+    c.globalAlpha = 1;
     // twinkling specular dabs (the shimmer): additive so they read as glints
     for (var i = 0; i < _sparks.length; i++) {
       var s = _sparks[i];
@@ -543,20 +999,42 @@
       var dx = Math.sin(ms * 0.0007 * s.sp + s.ph) * 0.8;   // micro sway
       dab(c, s.x + dx, s.y, s.len * (0.7 + 0.5 * tw), s.len * 0.5, s.ang, pal.spark, a);
     }
+    flushDabs();          // MUST land while 'lighter' is still active
     c.restore();
+    // RAIN IMPULSE — a single brief pass, never a held state. It exists only
+    // while _wx.rain is decaying (see _stepWeather), so it self-clears within
+    // ~2s and no code path can leave the bar stormy. Bounded by the same live
+    // budget as everything else: a fixed small count, not area-seeded.
+    if (_wx.rain > 0.01) {
+      var rn = Math.round(LIVE_CAP_SPARK * 0.8 * _wx.rain);
+      var rcol = _mixHex(pal.spark, '#8FA6C8', 0.75);
+      for (var ri = 0; ri < rn; ri++) {
+        // deterministic streak positions from the index, drifting downward with
+        // the impulse so the pass reads as falling rather than flickering
+        var rx0 = ((ri * 137.5) % 100) / 100 * w;
+        var ry0 = (((ri * 61.8) % 100) / 100 + (1 - _wx.rain) * 0.8) * h;
+        if (ry0 > h) continue;
+        dab(c, rx0, ry0, 3.2, 0.5, 1.28, rcol, 0.34 * _wx.rain);
+      }
+      flushDabs();
+    }
     // the LIVE near layer — swaying/flattening grass · rippling/splashing water ·
     // drifting/shoved clouds — the near band of EVERY scene, rendered live (not
     // baked) so it moves and reacts to the pet. Drawn before the thin flow
     // overlay so the fine breathing sits on top of the live bank.
     _paintLiveLayer(c, pal, ms, w, h);
+    flushDabs();
     // the FLOW layer — swaying grass / drifting glints / gliding clouds. It now
     // also PRESSES/PARTS around the pet's foot (see _paintFlow's deform).
     _paintFlow(c, pal, ms, w, h);
+    flushDabs();
     // the PET-WAKE marks — grass kicked up / a splash ripple / a cloud puff at
     // the foot, painted ON the canvas so pet & scene read as one layer.
     _paintWake(c, pal, ms, w, h);
+    flushDabs();
     // the critter (drawn last, above the scene but below the pet at z1)
     _paintCritter(c, ms, dt, w, h);
+    c.restore();
     // FINALLY, on the SEPARATE foreground canvas (z2, IN FRONT of the pet):
     // paint the near occluder band so the cat is partly hidden by it and reads
     // as standing AMONG the scene, not on top of it (the 2.5D depth fix).
@@ -575,8 +1053,15 @@
     if (!_fgctx || !_fgBlades.length) return;
     var c = _fgctx;
     c.setTransform(_dpr, 0, 0, _dpr, 0, 0);
-    c.clearRect(0, 0, w, h);
-    var pal = PALETTES[_scene] || PALETTES.meadow;
+    // Clear only the BAND this plane actually paints. The near plane is rooted
+    // at the bottom and reaches up into the pet's ankles — measured, that is
+    // ~29% of a 48px bar — but the clear was full-height, making it (with the bg
+    // clear) the single largest line in the frame's pixel budget. The band is
+    // computed from the seeded geometry (see _fgTop), so it cannot drift out of
+    // step with what is drawn.
+    c.clearRect(0, _fgTop, w, h - _fgTop + 2);
+    c.save();
+    var pal = _livePal || PALETTES[_scene] || PALETTES.meadow;
     var px = _petGroundX();
     var gust = 1 + 0.6 * Math.sin(ms * 0.00022 + 1.3);
     // A DARK UNDERSTORY at the base — the near plane's closest, darkest mass
@@ -593,6 +1078,7 @@
       // no dab edge ever aligns with the clip line to look like a stroke.
       dab(c, uxc, h + um.sink, um.rx, um.ry, 0, um.color, um.alpha);
     }
+    flushDabs();          // the mounds sit UNDER the blades — keep that order
     for (var i = 0; i < _fgBlades.length; i++) {
       var bl = _fgBlades[i];
       var kind = bl.kind || 'sway';
@@ -660,6 +1146,36 @@
         dab(c, cxp, cyp, clen * 0.5, bl.wid, bl.ang, ccolor, calpha);
       }
     }
+    flushDabs();
+    c.restore();
+  }
+
+  /** The clock crossed a time-of-day boundary: snapshot the painting we are
+   *  leaving, re-bake in the new light, and fade the old one out over it.
+   *  Degrades to a plain re-bake if a snapshot canvas is unavailable. */
+  function _beginTimeShift() {
+    var snap = null;
+    try {
+      if (_buf && _buf.width > 0) {
+        snap = document.createElement('canvas');
+        snap.width = _buf.width; snap.height = _buf.height;
+        var sc = snap.getContext('2d');
+        if (sc && sc.drawImage) sc.drawImage(_buf, 0, 0); else snap = null;
+      }
+    } catch (e) { snap = null; }     // harmless — we just re-bake without a fade
+    // A time shift re-bakes COLOUR ONLY — the tint preserves `seed`, so every
+    // dab lands byte-identically and no stale pixels survive to retire. The
+    // full-canvas clear _paintBuffer unconditionally requests is therefore both
+    // unnecessary and actively harmful here: _paintFrame consumes that flag at
+    // the TOP of the frame while this runs BELOW it, so the clear would land a
+    // frame LATE and wipe the first cross-fade composite before re-blitting.
+    // Preserve whatever the flag was, so a genuine geometry change (resize,
+    // scene switch) still gets its clear. (Pinned by
+    // test_time_rebake_issues_no_full_canvas_clear.)
+    var _keepClear = _needFullClear;
+    _paintBuffer();                  // re-bakes with the NEW bucket's tint
+    _needFullClear = _keepClear;
+    if (snap) { _xfadeBuf = snap; _xfadeT = 1; }
   }
 
   // Advance the ground-disturbance field: PRESS a bump under the pet's ground
@@ -974,14 +1490,28 @@
       dab(c, cr.x + 2.4, y - wb * 1.4, 3.0, 0.7, 0.5 - wb * 0.4, col[1], 0.8);
       dab(c, cr.x, y, 1.2, 0.9, 0, col[2], 0.85);
     }
+    flushDabs();
     c.restore();
   }
 
   function _loop(ts) {
     _raf = 0;
     if (_paused || _reduced || !_isTofu() || _scene === 'off') return;   // loop parks
+    if (_offscreen) return;                       // bar not on screen → nothing to paint
     if (!_t0) { _t0 = ts; _lastMs = 0; }
-    _paintFrame(ts - _t0);
+    // FRAME PACING. The scene is ambient weather — grass sway, drifting glints,
+    // gliding cloud, a slow sun. None of it moves more than a fraction of a
+    // pixel per 60Hz tick, so painting it every display refresh spent half the
+    // work on frames the eye cannot separate. We paint on a ~SCENE_FPS cadence
+    // and let rAF keep supplying the vsync clock (cheap: an early return), which
+    // halves the scene's cost on a 60Hz panel and thirds it on a 120Hz one.
+    // Nothing else has to change, because every animated quantity here is a
+    // function of absolute `ms`, and `dt` is measured between PAINTED frames —
+    // so the disturbance spring-back stays frame-rate independent.
+    if (ts - _lastPaint >= SCENE_FRAME_MS) {
+      _lastPaint = ts;
+      _paintFrame(ts - _t0);
+    }
     _raf = requestAnimationFrame(_loop);
   }
 
@@ -997,15 +1527,20 @@
     if (!_ctx) return;
     var active = _isTofu() && _scene !== 'off';
     if (!active) { if (_raf) { cancelAnimationFrame(_raf); _raf = 0; } _clearForeground(); return; }
+    // Scrolled/collapsed out of view: stop the rAF chain outright. This is the
+    // one park that costs literally nothing (no ticking callback at all),
+    // unlike the paced loop which still wakes per vsync to decide.
+    if (_offscreen) { if (_raf) { cancelAnimationFrame(_raf); _raf = 0; } return; }
     if (_reduced || _paused) {
       if (_raf) { cancelAnimationFrame(_raf); _raf = 0; }
       _lastMs = 0;
       _paintFrame(0);              // one static, fully-painted frame
       return;
     }
-    if (!_raf) _raf = requestAnimationFrame(_loop);
+    // Re-arm the pace clock so a loop resumed after a park paints immediately
+    // instead of waiting out a stale interval.
+    if (!_raf) { _lastPaint = -1e9; _raf = requestAnimationFrame(_loop); }
   }
-
   // (Re)size the canvas + buffer to the bar's box at the current DPR, then
   // re-bake the static scene. Cheap-guards a zero-size (bar still display:none).
   function _resize() {
@@ -1013,7 +1548,7 @@
     var r = _bar.getBoundingClientRect();
     var w = Math.round(r.width), h = Math.round(r.height);
     if (w <= 0 || h <= 0) return;                 // bar hidden — wait for a real box
-    _dpr = Math.max(1, Math.min(3, window.devicePixelRatio || 1));
+    _dpr = Math.max(1, Math.min(SCENE_DPR_CAP, window.devicePixelRatio || 1));
     _w = w; _h = h;
     _canvas.width = Math.round(w * _dpr);
     _canvas.height = Math.round(h * _dpr);
@@ -1136,6 +1671,32 @@
     if (window.ResizeObserver && _bar) {
       try { new ResizeObserver(function () { _resize(); }).observe(_bar); } catch (e) { /* harmless */ }
     }
+    // Park the whole loop while the bar is scrolled/collapsed out of view — an
+    // invisible painting is pure waste. Guarded + optional: without
+    // IntersectionObserver the scene simply keeps its old always-on behaviour.
+    // ACTIVITY WEATHER: listen to the app's activity signal DIRECTLY rather than
+    // having the pet forward it. The two stay decoupled (neither needs to know
+    // the other exists), and the weather scalars live outside the baked buffer,
+    // so a re-bake — a resize, a scene switch, a time-of-day shift — cannot lose
+    // the current weather. Guarded: no addEventListener → the scene simply never
+    // reacts, which is the neutral behaviour it had before.
+    try {
+      document.addEventListener('tofu:activity', function (e) {
+        _onActivity(e && e.detail, _lastMs);
+      });
+    } catch (err) { /* harmless — weather just stays neutral */ }
+    if (window.IntersectionObserver && _bar) {
+      try {
+        new IntersectionObserver(function (entries) {
+          for (var i = 0; i < entries.length; i++) {
+            var vis = !!entries[i].isIntersecting;
+            if (vis === !_offscreen) continue;
+            _offscreen = !vis;
+            _ensureLoop();
+          }
+        }, { threshold: 0 }).observe(_bar);
+      } catch (e) { /* harmless — scene just never parks on scroll */ }
+    }
     window.addEventListener('resize', _resize);
     if (window.MutationObserver) {
       try {
@@ -1162,7 +1723,30 @@
     critterX: critterX,
     critterInfo: critterInfo,
     lightInfo: lightInfo,
-    spook: spook
+    spook: spook,
+    // Time-of-day seam. `setHour(h)` pins the scene's clock (null = follow the
+    // real one) so tests — and a future manual override — never have to mock
+    // Date. Setting it re-bakes through the same cross-fade a natural boundary
+    // crossing uses, so the two paths cannot drift apart.
+    setHour: function (h) {
+      _hourOverride = (typeof h === 'number') ? h : null;
+      if (_bakedBucket && _sceneBucket(_hourOverride) !== _bakedBucket) _beginTimeShift();
+      return _sceneBucket(_hourOverride);
+    },
+    getBucket: function () { return _sceneBucket(_hourOverride); },
+    // Activity-weather seam. setWeather(false) is the instant kill switch: it
+    // zeroes every scalar, so the bar returns to neutral on the next frame and
+    // stays there. weatherInfo() exposes the scalars for tests and diagnostics.
+    setWeather: function (on) {
+      WEATHER_ENABLED = (on !== false);
+      if (!WEATHER_ENABLED) { _wxTarget = 0; _overcastSince = -1; _wx.overcast = _wx.burst = _wx.rain = 0; }
+      return WEATHER_ENABLED;
+    },
+    weatherInfo: function () {
+      return { enabled: WEATHER_ENABLED, overcast: _wx.overcast,
+               burst: _wx.burst, rain: _wx.rain, target: _wxTarget };
+    },
+    TIME_BUCKETS: ['deepNight', 'earlyMorning', 'morning', 'afternoon', 'evening', 'night']
   };
 
   if (document.readyState === 'loading') {

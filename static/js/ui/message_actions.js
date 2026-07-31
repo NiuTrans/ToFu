@@ -242,6 +242,8 @@ async function _execDeleteTurn(idx, mode) {
   if (activeStreams.has(conv.id) || conv.activeTaskId) return;
 
   const convId = conv.id;
+  const msg = conv.messages[idx];
+  if (!msg) return;
   // ★ Capture the exact target objects (and, for a turn, the following
   //   assistant) BEFORE the request so we can remove them by IDENTITY after —
   //   the server may resolve a DIFFERENT index (list drift from a server-side
@@ -285,7 +287,7 @@ async function _execDeleteTurn(idx, mode) {
 
     // Re-render
     if (activeConvId === convId) {
-      renderChat(conv, false);
+      window.ConvView.replaceAll(convId, { forceScroll: false });
       buildTurnNav(conv);
     }
     renderConversationList();
@@ -328,10 +330,10 @@ async function translateMessage(idx) {
     if (el) {
       const _ct = document.getElementById('chatContainer');
       const _sv = _ct ? _ct.scrollTop : -1;
-      el.outerHTML = renderMessage(msg, idx);
+      window.ConvView.apply(conv.id, idx, msg);
       if (_sv >= 0 && _ct) _ct.scrollTop = _sv;
     } else {
-      renderChat(conv);
+      window.ConvView.replaceAll(conv.id);
     }
     return;
   }

@@ -253,8 +253,14 @@ def test_terminal_regraft_preserves_concurrent_translation():
             #   but NOT this translatedText — a whole-list overwrite would drop
             #   it exactly like translatedContent. The nested merge must backfill
             #   it by (llmRound,type,deliverable).
+            #   Shape note (pt_687b87ac): the terminal sync now RE-ASSEMBLES
+            #   segments from the task, so the backend segment for this
+            #   content-only task is the terminal text segment — keyed
+            #   (llmRound=None, 'text', True). The plant must match that key
+            #   for the merge to see it.
             _msgs[-1].setdefault('segments', [
-                {'type': 'text', 'llmRound': 0, 'deliverable': False, 'text': 'narr'},
+                {'type': 'text', 'deliverable': True, 'terminal': True,
+                 'text': 'narr'},
             ])
             _msgs[-1]['segments'][0]['translatedText'] = SEG_TRANSLATION
             real_execute(
@@ -267,12 +273,12 @@ def test_terminal_regraft_preserves_concurrent_translation():
         task = create_task(conv_id, [{'role': 'user', 'content': 'U1'}], {})
         task['content'] = 'THE FINAL ANSWER'
         task['_assistantMsgId'] = 'ma'
-        # Backend's own settled segments: same llmRound=0 text segment, but NO
-        # translatedText (the backend never produces translations). The nested
-        # merge must keep this structure AND backfill the fresh translatedText.
-        task['segments'] = [
-            {'type': 'text', 'llmRound': 0, 'deliverable': False, 'text': 'narr'},
-        ]
+        # Backend's own settled segments come from the terminal sync's
+        # RE-ASSEMBLY (pt_687b87ac): for this content-only task exactly one
+        # terminal text segment keyed (llmRound=None, 'text', deliverable=True)
+        # — same key as the interceptor's plant, but NO translatedText (the
+        # backend never produces translations). The nested merge must keep
+        # the backend structure AND backfill the fresh translatedText.
         with _conv_latest_task_lock:
             _conv_latest_task[conv_id] = task['id']
 
@@ -294,8 +300,9 @@ def test_terminal_regraft_preserves_concurrent_translation():
             'Phase-4 fix: regraft must MERGE our terminal fields onto the fresh '
             'tail, preserving backend-non-owned fields (translatedContent, '
             '_showingTranslation, segments[].translatedText, originalContent).')
-        # The backend's structural segment must win (text='narr') AND carry the
-        # concurrently-stamped translatedText (nested merge, not list overwrite).
+        # The backend's structural segment must win (the re-assembled
+        # terminal text segment) AND carry the concurrently-stamped
+        # translatedText (nested merge, not list overwrite).
         _segs = tail.get('segments') or []
         assert _segs and _segs[0].get('translatedText') == SEG_TRANSLATION, (
             'SEGMENTS REGRAFT CLOBBER: the whole-list segments overwrite dropped '

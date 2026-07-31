@@ -14,6 +14,29 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import quart as _quart
 sys.modules['flask'] = _quart
 
+import pytest as _pytest
+
+
+@_pytest.fixture(autouse=True)
+def _isolate_req_id():
+    """Clear lib.log's request-id thread-local around each test.
+
+    ``set_req_id(None)`` MINTS a fresh id rather than clearing, and route
+    middleware in unrelated test files sets one on this same thread and never
+    removes it. Left over from an earlier test in a shared batch run,
+    ``_attach_request_id`` then adds a stray ``request_id`` key to error
+    bodies and breaks the exact-dict assertions below — while the file
+    passes in isolation. ``asyncio.run`` executes on this same thread, so
+    clearing here covers the async bodies too.
+    """
+    from lib.log import _thread_ctx
+    saved = getattr(_thread_ctx, 'req_id', '')
+    _thread_ctx.req_id = ''
+    try:
+        yield
+    finally:
+        _thread_ctx.req_id = saved
+
 
 def _color(s, c): return f'\033[{c}m{s}\033[0m'
 def _ok(msg): print(' ', _color('✓', '32'), msg)

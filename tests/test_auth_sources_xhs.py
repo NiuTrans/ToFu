@@ -64,16 +64,25 @@ class TestAuthSourceParsing:
         assert A.normalize_domain('') == ''
 
     def test_parse_cookie_header_basic(self):
+        # Scope is HOST-ONLY (no leading dot). A `Cookie:` header carries no
+        # scope information at all, and stamping '.'+domain onto every entry
+        # silently broke host-only session cookies: a browser treats
+        # '.internal.example.com' as a DIFFERENT cookie from 'your-llm-gateway.example.com', so the
+        # site's auth probe never received it and the authenticated fetch landed
+        # on the login wall — while the store still reported "connected".
+        # Host-only is the narrower and therefore safer default; a parent-domain
+        # cookie must now be asked for explicitly (per-cookie `domain`).
+        # Full invariant set: tests/test_auth_sources_cookie_domain.py
         out = A.parse_cookie_header('web_session=abc; a1=xyz', 'xiaohongshu.com')
         assert out == [
-            {'name': 'web_session', 'value': 'abc', 'domain': '.xiaohongshu.com', 'path': '/'},
-            {'name': 'a1', 'value': 'xyz', 'domain': '.xiaohongshu.com', 'path': '/'},
+            {'name': 'web_session', 'value': 'abc', 'domain': 'xiaohongshu.com', 'path': '/'},
+            {'name': 'a1', 'value': 'xyz', 'domain': 'xiaohongshu.com', 'path': '/'},
         ]
 
     def test_parse_cookie_header_strips_prefix_and_blanks(self):
         out = A.parse_cookie_header('Cookie: k=v;; =noname; bad', 'x.com')
         # only the valid k=v pair survives
-        assert out == [{'name': 'k', 'value': 'v', 'domain': '.x.com', 'path': '/'}]
+        assert out == [{'name': 'k', 'value': 'v', 'domain': 'x.com', 'path': '/'}]
 
     def test_parse_cookie_header_empty(self):
         assert A.parse_cookie_header('', 'x.com') == []
@@ -158,6 +167,101 @@ class TestAuthSourceStore:
 
     def test_toggle_unknown_returns_false(self):
         assert A.set_enabled('definitely-not-a-source.example', True) is False
+
+
+# ═══════════════════════════════════════════════════════════
+#  auth_sources — structured cookie fields (the UI's write path)
+# ═══════════════════════════════════════════════════════════
+
+@pytest.mark.unit
+class TestStructuredCookieFields:
+    """The Settings UI collects ONE input per cookie instead of a single
+    free-text ``name=value; name=value`` blob. These pin the contract that
+    makes that possible: a server-declared field spec, a structured writer,
+    and a refusal to store a credential set that cannot authenticate."""
+
+    def test_spec_declares_fields_and_login_url(self):
+        spec = A.source_spec('https://www.xiaohongshu.com/explore')  # normalises
+        assert spec['login_url'].startswith('https://')
+        names = [f['name'] for f in A.source_fields('xiaohongshu.com')]
+        assert names[:2] == ['web_session', 'a1']
+        imp = {f['name']: f['importance'] for f in A.source_fields('xiaohongshu.com')}
+        assert imp['web_session'] == 'required'
+        assert imp['a1'] == 'recommended'
+        # Unknown domain → empty spec, never a crash.
+        assert A.source_spec('nope.example') == {}
+        assert A.source_fields('nope.example') == []
+
+    def test_cookies_from_fields_builds_playwright_shape(self):
+        # Host-only default — see test_parse_cookie_header_basic for why the
+        # previous '.'+domain behaviour was a defect, not a convention.
+        out = A.cookies_from_fields(
+            {'web_session': 'abc', 'a1': 'xyz'}, 'xiaohongshu.com')
+        assert out == [
+            {'name': 'web_session', 'value': 'abc', 'domain': 'xiaohongshu.com', 'path': '/'},
+            {'name': 'a1', 'value': 'xyz', 'domain': 'xiaohongshu.com', 'path': '/'},
+        ]
+
+    def test_cookies_from_fields_drops_blanks_and_garbage(self):
+        # An untouched optional input is not an instruction to store ''.
+        out = A.cookies_from_fields(
+            {'web_session': 'tok', 'a1': '', 'webId': '   '}, 'xiaohongshu.com')
+        assert [c['name'] for c in out] == ['web_session']
+        assert A.cookies_from_fields('notadict', 'x.com') == []
+        assert A.cookies_from_fields({}, 'x.com') == []
+
+    def test_cookies_from_fields_trims_pasted_whitespace(self):
+        out = A.cookies_from_fields({'web_session': '  tok  '}, 'xiaohongshu.com')
+        assert out[0]['value'] == 'tok'
+
+    def test_upsert_via_fields_connects(self):
+        A.upsert_source('xiaohongshu.com',
+                        cookie_fields={'web_session': 'tok', 'a1': 'aaa'},
+                        enabled=True)
+        src = A.get_source('xiaohongshu.com')
+        assert {c['name'] for c in src['cookies']} == {'web_session', 'a1'}
+        assert A.match_source('https://www.xiaohongshu.com/explore/1') is not None
+
+    def test_upsert_rejects_missing_required_cookie(self):
+        """The old free-text box stored a mistyped paste and then reported
+        '已连接'; the failure only surfaced later as an empty fetch."""
+        with pytest.raises(ValueError) as ei:
+            A.upsert_source('xiaohongshu.com',
+                            cookie_fields={'a1': 'aaa'}, enabled=True)
+        assert 'web_session' in str(ei.value)
+        # Nothing was stored — the source stays disconnected, not half-connected.
+        rows = {r['domain']: r for r in A.list_sources()}
+        assert rows['xiaohongshu.com']['has_cookies'] is False
+
+    def test_upsert_rejects_header_missing_required_cookie(self):
+        """Same gate on the raw-header path — validation lives in the store,
+        not in whichever caller happens to be fashionable."""
+        with pytest.raises(ValueError):
+            A.upsert_source('xiaohongshu.com', cookie_header='a1=aaa', enabled=True)
+
+    def test_unknown_domain_has_no_required_gate(self):
+        """A site with no declared spec must stay usable — the gate is driven
+        by the catalog, not by a blanket assumption about cookie names."""
+        try:
+            A.upsert_source('example.test', cookie_fields={'sid': 'x'}, enabled=True)
+            assert A.get_source('example.test')['cookies'][0]['name'] == 'sid'
+        finally:
+            A.delete_source('example.test')
+
+    def test_missing_required_fields_helper(self):
+        assert A.missing_required_fields(
+            [{'name': 'web_session', 'value': 'v'}], 'xiaohongshu.com') == []
+        # Present-but-blank counts as missing, not as satisfied.
+        assert A.missing_required_fields(
+            [{'name': 'web_session', 'value': '  '}], 'xiaohongshu.com') == ['web_session']
+        assert A.missing_required_fields([], 'nope.example') == []
+
+    def test_list_sources_carries_spec_for_the_ui(self):
+        """The UI renders its inputs from THIS payload, so a site's cookie
+        list is declared once (server-side) rather than duplicated in JS."""
+        row = {r['domain']: r for r in A.list_sources()}['xiaohongshu.com']
+        assert row['login_url'].startswith('https://')
+        assert [f['name'] for f in row['fields']][:2] == ['web_session', 'a1']
 
 
 # ═══════════════════════════════════════════════════════════

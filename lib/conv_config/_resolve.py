@@ -133,6 +133,8 @@ def resolve_conv_config(
             is_active=is_active,
         ),
         'projectPath': ov.get('projectPath') or conv.get('projectPath') or '',
+        # RWA 伪路径(remote:<agent>:<root>)在下方翻译为 project_remote。
+        'project_remote': None,
         'projectPaths': list(conv.get('projectPaths') or []),
         'readOnlyPaths': list(conv.get('readOnlyPaths') or []),
         'autoApply': _coerce_bool(ov.get('autoApply'), False),
@@ -213,6 +215,17 @@ def resolve_conv_config(
     # browserClientId is gated on the resolved browserEnabled flag.
     if out['browserEnabled']:
         out['browserClientId'] = ov.get('browserClientId') or None
+    # ── RWA remote-worktree pseudo-path (总闸 TOFU_REMOTE_WORKTREE) ──
+    # conv.projectPath = 'remote:<agent_id>:<root>' rides the existing
+    # per-conv persistence untouched; HERE it becomes the binding contract
+    # (cfg['project_remote']) and the server-side projectPath is cleared —
+    # there is no such path on the server. Master switch off → byte-identical.
+    from lib.desktop.remote import parse_remote_path, remote_worktree_enabled
+    if remote_worktree_enabled():
+        parsed = parse_remote_path(out['projectPath'])
+        if parsed:
+            out['project_remote'] = {'agent_id': parsed[0], 'root': parsed[1]}
+            out['projectPath'] = ''
     return out
 
 

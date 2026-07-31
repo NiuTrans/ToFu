@@ -36,6 +36,13 @@ pytestmark = pytest.mark.unit
 
 _CHAT_PY = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'routes', 'chat.py')
+# pt_04686ac6 slice 6: the two SSE cold-path generators (gen_done /
+# gen_persisted) MOVED to lib/chat_dispatch.py::build_cold_replay_response.
+# The 15000-incident invariant (orjson-first, never plain json.dumps on a
+# multi-MB snapshot) still applies — the tests just target the new home.
+_CHAT_DISPATCH_PY = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    'lib', 'chat_dispatch.py')
 
 
 # ── A ~10 MB conversation-state snapshot, the incident shape ──────────────
@@ -103,12 +110,14 @@ def _called_names(node):
 
 
 def test_source_fallback_generators_use_orjson_helpers():
-    src = open(_CHAT_PY, encoding='utf-8').read()
+    # pt_04686ac6 slice 6: gen_done / gen_persisted moved to
+    # lib/chat_dispatch.py::build_cold_replay_response. Target the new home.
+    src = open(_CHAT_DISPATCH_PY, encoding='utf-8').read()
     tree = ast.parse(src)
 
     for gen_name in ('gen_done', 'gen_persisted'):
         fn = _find_func(tree, gen_name)
-        assert fn is not None, f'{gen_name} not found in routes/chat.py'
+        assert fn is not None, f'{gen_name} not found in lib/chat_dispatch.py'
         calls = _called_names(fn)
         # The full-snapshot encode MUST go through _dumps_yielding.
         assert '_dumps_yielding' in calls, (
@@ -131,19 +140,21 @@ def test_source_fallback_generators_use_orjson_helpers():
 
 
 def test_source_tool_rounds_parse_uses_loads_yielding():
-    """Inside the SSE ``chat_stream`` function (the Finding #10 scope), the
-    multi-MB tool_rounds parse — both the on-loop async-body one and the
-    ``gen_persisted`` one — must go through ``_loads_yielding``, not plain
-    ``json.loads``. Scoped to ``chat_stream`` via AST so it bites exactly the
-    two SSE sites and does NOT over-claim the separate ``chat_poll`` handler."""
-    src = open(_CHAT_PY, encoding='utf-8').read()
+    """SSE cold-path tool_rounds parses (post pt_04686ac6 slice 6) live in
+    lib/chat_dispatch.build_cold_replay_response — both the on-loop async-body
+    one and the ``gen_persisted`` one must go through ``_loads_yielding``, not
+    plain ``json.loads``. Scoped to that function so it bites exactly the two
+    SSE sites and does NOT over-claim other handlers."""
+    src = open(_CHAT_DISPATCH_PY, encoding='utf-8').read()
     tree = ast.parse(src)
-    fn = _find_func(tree, 'chat_stream')
-    assert fn is not None, 'chat_stream not found in routes/chat.py'
+    fn = _find_func(tree, 'build_cold_replay_response')
+    assert fn is not None, (
+        'build_cold_replay_response not found in lib/chat_dispatch.py')
     scoped = ast.get_source_segment(src, fn)
-    # The on-loop / GIL-holding snapshot parses must be GONE from chat_stream.
+    # The on-loop / GIL-holding snapshot parses must be GONE from
+    # build_cold_replay_response.
     assert "json.loads(row['tool_rounds'])" not in scoped, (
-        "chat_stream on-loop json.loads(row['tool_rounds']) survived — must be "
+        "on-loop json.loads(row['tool_rounds']) survived — must be "
         "await asyncio.to_thread(_loads_yielding, ...)")
     assert "json.loads(row_local['tool_rounds'])" not in scoped, (
         "gen_persisted json.loads(row_local['tool_rounds']) survived — must be "
@@ -153,14 +164,16 @@ def test_source_tool_rounds_parse_uses_loads_yielding():
     # (``_loads_yielding(row_local['tool_rounds'])``) and once offloaded from
     # the async body (``asyncio.to_thread(_loads_yielding, row['tool_rounds'])``).
     assert scoped.count('_loads_yielding') >= 2, (
-        'expected both chat_stream tool_rounds parses to route through '
+        'expected both SSE tool_rounds parses to route through '
         '_loads_yielding (direct call + to_thread offload)')
     # The async-body parse MUST be offloaded to the executor (it runs on the
     # loop, unlike the sync-generator one).
     assert 'to_thread(_loads_yielding' in scoped, (
         'async-body tool_rounds parse must be offloaded via '
         'asyncio.to_thread(_loads_yielding, ...)')
-    assert '_loads_yielding' in src, '_loads_yielding helper missing'
+    # _loads_yielding is imported from routes.chat inside chat_dispatch —
+    # verify the symbol reference survives somewhere in the module.
+    assert '_loads_yielding' in src, '_loads_yielding reference missing'
 
 
 def test_source_all_tool_rounds_parses_offloaded():
@@ -170,18 +183,32 @@ def test_source_all_tool_rounds_parses_offloaded():
     ``json.loads`` of a multi-MB blob holds the GIL for the whole parse and
     stalls the loop regardless of which thread runs it (same class as the
     encode). This asserts NO plain ``json.loads(row[...]['tool_rounds'])``
-    survives anywhere in the file, and that ``chat_poll`` specifically calls
-    ``_loads_yielding``."""
-    src = open(_CHAT_PY, encoding='utf-8').read()
-    tree = ast.parse(src)
-    # Whole-file: neither the row nor row_local plain-parse form may survive.
-    assert "json.loads(row['tool_rounds'])" not in src, (
-        "a plain json.loads(row['tool_rounds']) survives somewhere — every "
-        "multi-MB tool_rounds parse must use _loads_yielding")
-    assert "json.loads(row_local['tool_rounds'])" not in src
-    # chat_poll specifically routes its parse through the helper.
-    poll_fn = _find_func(tree, 'chat_poll')
-    assert poll_fn is not None, 'chat_poll not found in routes/chat.py'
+    survives in either file, and that ``chat_poll`` specifically calls
+    ``_loads_yielding``.
+
+    pt_04686ac6 slice 10: ``chat_poll`` moved to
+    ``routes/chat_poll_abort.py`` — the guard now checks THAT file for the
+    handler, and both files for the forbidden plain-parse forms."""
+    _CHAT_POLL_ABORT_PY = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        'routes', 'chat_poll_abort.py')
+    src_chat = open(_CHAT_PY, encoding='utf-8').read()
+    src_poll = open(_CHAT_POLL_ABORT_PY, encoding='utf-8').read()
+    tree_poll = ast.parse(src_poll)
+    # Both files: neither the row nor row_local plain-parse form may survive.
+    for label, src in (('routes/chat.py', src_chat),
+                       ('routes/chat_poll_abort.py', src_poll)):
+        assert "json.loads(row['tool_rounds'])" not in src, (
+            f"a plain json.loads(row['tool_rounds']) survives in {label} — "
+            f"every multi-MB tool_rounds parse must use _loads_yielding")
+        assert "json.loads(row_local['tool_rounds'])" not in src, (
+            f"a plain json.loads(row_local['tool_rounds']) survives in {label}")
+    # chat_poll specifically routes its parse through the helper (in its
+    # new home, routes/chat_poll_abort.py).
+    poll_fn = _find_func(tree_poll, 'chat_poll')
+    assert poll_fn is not None, (
+        'chat_poll not found in routes/chat_poll_abort.py — did slice 10 '
+        'move it?')
     assert '_loads_yielding' in _called_names(poll_fn), (
         'chat_poll tool_rounds parse must call _loads_yielding')
 

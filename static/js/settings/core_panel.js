@@ -36,7 +36,13 @@ function _setVal(id, value, prop) {
 //  Model list ordering — cold sort + insertion sort
 // ══════════════════════════════════════════════════════
 //
-// Each provider's model list is kept alphabetically ordered by model_id.
+// Each provider's model list is kept ordered by the DISPLAY name the user
+// actually reads (_modelShortName), NOT the raw model_id — sorting by id put
+// `yuju-claude-opus-5-evaDaily` (label "Claude Opus 5") under 'y', far from the
+// other Claude entries. The comparator itself lives in settings/branding.js
+// (_compareModelsByDisplayName) and is shared with the toolbar model picker so
+// the two lists can never disagree about order.
+//
 // To avoid re-sorting on every render (which would make rows jump around
 // while editing), the full sort runs only ONCE per editor session — a
 // "cold sort" when the working copy is loaded (_coldSortAllProviderModels
@@ -44,18 +50,22 @@ function _setVal(id, value, prop) {
 // add / rename) keep the order via _insertModelSorted (binary-search
 // insertion). The next settings-open cold-sorts again from scratch.
 
-/** Case-insensitive sort key for a model entry. */
-function _modelSortKey(m) {
-  return ((m && m.model_id) || '').toLowerCase();
+/** Order two model entries by display name. Delegates to the shared
+ *  comparator; falls back to a raw model_id compare only if branding.js is
+ *  absent (stale bundle) so the list still renders in a stable order. */
+function _compareModelEntries(a, b) {
+  if (typeof _compareModelsByDisplayName === 'function') {
+    return _compareModelsByDisplayName(a, b);
+  }
+  var ka = ((a && a.model_id) || '').toLowerCase();
+  var kb = ((b && b.model_id) || '').toLowerCase();
+  return ka < kb ? -1 : (ka > kb ? 1 : 0);
 }
 
-/** One-time full sort of a provider's model list (in place, by model_id). */
+/** One-time full sort of a provider's model list (in place, by display name). */
 function _coldSortModels(models) {
   if (!Array.isArray(models)) return models;
-  models.sort(function(a, b) {
-    var ka = _modelSortKey(a), kb = _modelSortKey(b);
-    return ka < kb ? -1 : (ka > kb ? 1 : 0);
-  });
+  models.sort(_compareModelEntries);
   return models;
 }
 
@@ -68,16 +78,15 @@ function _coldSortAllProviderModels() {
   }
 }
 
-/** Insert one model into an already-sorted list at its alphabetical
- *  position (binary search). Cheap incremental upkeep so freshly added or
- *  renamed models land correctly without re-sorting the whole list. */
+/** Insert one model into an already-sorted list at its display-name position
+ *  (binary search). Cheap incremental upkeep so freshly added or renamed
+ *  models land correctly without re-sorting the whole list. */
 function _insertModelSorted(models, m) {
   if (!Array.isArray(models)) return;
-  var key = _modelSortKey(m);
   var lo = 0, hi = models.length;
   while (lo < hi) {
     var mid = (lo + hi) >> 1;
-    if (_modelSortKey(models[mid]) <= key) lo = mid + 1;
+    if (_compareModelEntries(models[mid], m) <= 0) lo = mid + 1;
     else hi = mid;
   }
   models.splice(lo, 0, m);
@@ -94,11 +103,17 @@ function switchSettingsTab(tabId) {
   document.querySelectorAll('.settings-tab-panel').forEach(function(p) {
     p.classList.toggle('active', p.id === 'settingsTab_' + tabId);
   });
+  // The matrix-wide panel class only makes sense on the providers tab —
+  // re-fit so switching away shrinks the panel back to 860px.
+  if (typeof _fitMatrixPanelWidth === 'function') _fitMatrixPanelWidth();
   if (tabId === 'preferences' && typeof _populatePreferencesTab === 'function') {
     _populatePreferencesTab();
   }
   if (tabId === 'speech' && typeof _refreshSttStatus === 'function') {
     _refreshSttStatus();
+  }
+  if (tabId === 'devices' && typeof _populateDevicesTab === 'function') {
+    _populateDevicesTab();
   }
 }
 
@@ -148,14 +163,12 @@ function openSettings() {
   if (langSel) langSel.value = typeof _i18nLang !== 'undefined' ? _i18nLang : 'zh';
   if (typeof _syncLangPicker === 'function') _syncLangPicker(typeof _i18nLang !== 'undefined' ? _i18nLang : 'zh');
 
-  // Trading module toggle
+  // Trading module toggle. No restart hint: the flag is enforced live by the
+  // plugin (request-time guard + per-pass check in its background workers), so
+  // a flip takes effect immediately — see tofu_trading/gate.py.
   var tradingCb = document.getElementById('settingTradingEnabled');
   if (tradingCb) {
     tradingCb.checked = !!(typeof _featureFlags !== 'undefined' && _featureFlags.trading_enabled);
-    tradingCb.onchange = function() {
-      document.getElementById('tradingRestartHint').style.display =
-        (this.checked !== !!(typeof _featureFlags !== 'undefined' && _featureFlags.trading_enabled)) ? 'block' : 'none';
-    };
   }
 
   // PPTX translate module toggle
@@ -202,6 +215,11 @@ function openSettings() {
   });
 
   switchSettingsTab('general');
+  /* Degraded-section contract: hide the controls of any block whose JS
+   * dependency is absent (stale bundle) and show its "needs restart" notice,
+   * so no section can look usable while being dead. Runs AFTER the pickers
+   * above so a block that DID render is not wrongly degraded. */
+  if (typeof applySectionRequirements === 'function') applySectionRequirements();
   document.getElementById("settingsModal").classList.add("open");
   document.getElementById('settingsStatusHint').textContent = '';
 
@@ -218,12 +236,18 @@ function openSettings() {
   var verEl = document.getElementById('settingsVersion');
   Api.health.info().then(function(d){
     if (verEl && d && d.version) verEl.textContent = 'v' + d.version;
+    // Mirror the version into the About/Update card. The "New" pill is
+    // rendered by update.js's own helper so the availability state has a
+    // single source of truth (_updateState) rather than being re-derived here.
+    var updVer = document.getElementById('settingsUpdateVersion');
+    if (updVer && d && d.version) updVer.textContent = t('settings.updateCurrent', { version: d.version });
+    if (typeof _renderSettingsUpdatePill === 'function') _renderSettingsUpdatePill();
     var mcEl = document.getElementById('settingsMobileClient');
     if (mcEl) {
       var url = d && d.mobile_client_url;
       if (url) {
         mcEl.href = url;
-        mcEl.innerHTML = '<img src="static/icons/tofu-welcome.svg" alt="Tofu" width="15" height="15"> ' + t('settings.mobileClient');
+        mcEl.innerHTML = '<img ' + brandLogoImgAttrs(15) + '> ' + t('settings.mobileClient');
         mcEl.style.display = '';
       } else {
         mcEl.style.display = 'none';
@@ -248,11 +272,13 @@ function openSettings() {
     }
     // Deep-copy providers (they include nested models now)
     _stgProviders = JSON.parse(JSON.stringify(cfg.providers || []));
+    _stgFaceRefusals = Array.isArray(cfg.face_refusals) ? cfg.face_refusals : [];
     _stgPresets = JSON.parse(JSON.stringify(cfg.presets || {}));
 
-    // One-time cold sort: order every provider's model list alphabetically
-    // by model_id. In-session additions stay ordered via _insertModelSorted,
-    // and the next settings-open cold-sorts again from scratch.
+    // One-time cold sort: order every provider's model list by the DISPLAY
+    // name (shared comparator, same one the toolbar picker uses). In-session
+    // additions stay ordered via _insertModelSorted, and the next
+    // settings-open cold-sorts again from scratch.
     _coldSortAllProviderModels();
 
     // Pre-load external templates so sync buttons appear on first render
@@ -262,6 +288,13 @@ function openSettings() {
       _startBalancePolling();
       // Fetch today's per-key success-rate stats and refresh inline badges.
       _loadKeyStats();
+      // Fetch per-model runtime health (success rate / error-throttle
+      // cooldowns) and keep it fresh while the panel is open.
+      if (typeof _startModelHealthPolling === 'function') _startModelHealthPolling();
+      // Resolve each provider's wire faces (backend resolve_face — the SAME
+      // resolver the dispatcher uses) so the model cards can show which
+      // protocol each model actually dispatches over.
+      if (typeof _refreshAllFaceResolutions === 'function') _refreshAllFaceResolutions();
       // Auto-poll per-endpoint live metrics (TTFT/latency/throughput/success)
       // so local-deployment status stays fresh without manual probing.
       _startLocalMetricsPolling();

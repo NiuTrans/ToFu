@@ -196,7 +196,8 @@ def aggregate_round_records(lines) -> dict:
         try:
             payload = line.split('[CacheRoundRecord]', 1)[1].strip()
             rec = json.loads(payload)
-        except (ValueError, IndexError):
+        except (ValueError, IndexError) as _e:
+            logger.debug('aggregate round records: unparseable/short/malformed (%s)', _e)
             continue
         b = rec.get('bucket')
         if b:

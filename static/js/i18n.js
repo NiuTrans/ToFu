@@ -10,6 +10,31 @@
  */
 var _i18nLang = localStorage.getItem('tofu_ui_lang') || 'zh';
 
+/* ── Server-visible language mirror (Epic-E sub-part 1, owner-approved) ──
+ * localStorage stays AUTHORITATIVE — this is a write-through mirror so the
+ * SERVER can pick which single-language bundle to ship. The server cannot read
+ * localStorage, and the boot dictionary must be present before _applyI18n()
+ * runs (index.html has 309 data-i18n bindings whose static fallback is not
+ * uniformly one language), so without this cookie a per-language bundle is
+ * impossible. See routes/common.py::request_ui_lang and
+ * tests/test_i18n_split_blocked_on_lang_signal.py.
+ *
+ * Written on EVERY boot, not just on change: a user who set their language
+ * before this shipped has localStorage but no cookie, and would otherwise be
+ * served the default bundle forever. SameSite=Lax keeps it off cross-site
+ * requests; it is a display preference, never an auth signal. */
+function _syncLangCookie(lang) {
+  try {
+    document.cookie = 'tofu_ui_lang=' + encodeURIComponent(lang) +
+                      ';path=/;max-age=31536000;SameSite=Lax';
+  } catch (e) {
+    /* Cookies disabled — the server falls back to the default language and the
+     * client still renders from whatever pack it received, because t() keeps
+     * its zh fallback (now observable via _reportMissingTranslation). */
+  }
+}
+_syncLangCookie(_i18nLang);
+
 /**
  * Translation dictionaries.
  * Key = translation key used in data-i18n attributes and t() calls.
@@ -65,13 +90,28 @@ var _i18n = {
   'conn.dbUnavailableTitle': { zh: '数据库不可用', en: 'Database Unavailable' },
   'conn.dbUnavailableDesc': { zh: '未运行 PostgreSQL，对话与历史将无法使用。请安装 PostgreSQL（{cmd}）后重启服务器。', en: 'PostgreSQL is not running. Conversations and history will not work. Install PostgreSQL ({cmd}) and restart the server.' },
   'conn.dismiss': { zh: '关闭', en: 'Dismiss' },
+  // ── Backend-offline GLOBAL monitor (core/backend_offline_monitor.js): the
+  //    prominent fixed banner + tab-title prefix raised when the backend is
+  //    unreachable (push socket dropped + 2 consecutive /api/health probe
+  //    failures). {t}=elapsed duration, {n}=retry interval seconds. ──
+  'conn.backendOfflineTitle': { zh: '后端服务器已离线', en: 'Backend server is offline' },
+  'conn.backendOfflineDesc': { zh: '所有进行中的回复已暂停。每 {n} 秒自动重试，恢复后会自动重连并同步结果。', en: 'All in-flight replies are paused. Retrying every {n}s — the page reconnects and resyncs automatically when the server is back.' },
+  'conn.networkOfflineTitle': { zh: '本机网络已断开', en: 'Network disconnected' },
+  'conn.networkOfflineDesc': { zh: '浏览器报告网络已断开。检查网络连接；恢复后页面会自动重连。', en: 'The browser reports no network. Check your connection — the page reconnects automatically when it is back.' },
+  'conn.backendOfflineElapsed': { zh: '已离线 {t}', en: 'offline for {t}' },
+  'conn.backendRetryNow': { zh: '立即重试', en: 'Retry now' },
+  'conn.backendSnooze': { zh: '暂时隐藏', en: 'Hide for 1 min' },
+  'conn.backendRestored': { zh: '后端已恢复', en: 'Backend is back' },
+  'conn.backendRestoredDesc': { zh: '正在重新连接并同步进行中的对话…', en: 'Reconnecting and resyncing in-flight conversations…' },
+  'conn.backendOfflineTitlePrefix': { zh: '【后端离线】', en: '[Backend offline]' },
+  'conn.networkOfflineTitlePrefix': { zh: '【网络断开】', en: '[No network]' },
   'conn.streamOfflineMsg': { zh: '服务器离线，回复可能不完整。服务器恢复后会自动重连。', en: 'Server offline — response may be incomplete. This notice will clear automatically when the server comes back.' },
   'conn.offlineToastDetail': { zh: '后端服务器无响应。已保存部分回复，连接恢复后会自动恢复。', en: 'Backend server is not responding. Your partial response has been saved. It will recover automatically when connectivity is restored.' },
   'conn.restoredTitle': { zh: '连接已恢复', en: 'Connection Restored' },
   'conn.restoredReattach': { zh: '已重连 {n} 个进行中的任务，流式已恢复。', en: 'Reconnected {n} running task(s) — streaming resumed.' },
   'conn.restoredRecovered': { zh: '已从服务器恢复 {n} 个对话，结果已更新。', en: 'Recovered {n} conversation(s) from server. Results updated.' },
   'conn.loadTimedOut': { zh: '加载超时 — 服务器可能繁忙，请重试。', en: 'Loading timed out — the server may be busy.' },
-  'convWindow.loadToolActivity': { zh: '加载工具活动（{n} 轮）', en: 'Load tool activity ({n})' },
+  'convWindow.loadToolActivity': { zh: '加载工具活动（{n} 次调用）', en: 'Load tool activity ({n} calls)' },
   // ── Recoverable connection-drop block (server_offline ONLY): a friendly,
   //    TRUTHFUL headline + recovery hint shown in the assistant error bubble
   //    instead of raw "Server offline" jargon. The key message: the drop is a
@@ -91,6 +131,99 @@ var _i18n = {
   //    NO server-side result to recover — the honest guidance is check the
   //    connection and Retry, NOT "your result may be saved". No Recover button. ──
   'err.net.hint': { zh: '无法连接到服务器——请检查你的网络或代理，然后重试。（这条请求没有开始生成，重试是安全的。）', en: "Couldn't reach the server — check your network or proxy, then Retry. (The request never started generating, so retrying is safe.)" },
+  // ── Typed error-envelope kinds (err.k.*) — per-kind chip / title / hint ──
+  //    Title + hint texts mirror lib/error_envelope/_constants.py _TITLES
+  //    BYTE-IDENTICALLY (parity locked by tests/test_error_envelope_i18n.py).
+  //    The backend ships titleKey/hintKey on the envelope and
+  //    renderErrorEnvelope resolves them here in the CURRENT UI language;
+  //    the legacy bilingual message/hint stays as the headless + old-bundle
+  //    fallback. chip = the compact category label (was English-only
+  //    ERROR_KIND_LABELS). _howToFix/_modelSuffix are shared fragments.
+  'err.k._howToFix': { zh: '解决办法：', en: 'How to fix:' },
+  'err.k._modelSuffix': { zh: '（模型：{model}）', en: ' (model: {model})' },
+  'err.k.quota.chip': { zh: '配额耗尽', en: 'Quota exhausted' },
+  'err.k.quota.title': { zh: '⚠️ API Key 余额/配额已用尽', en: 'API key quota exhausted' },
+  'err.k.quota.hint': { zh: '• 打开 「设置 → Keys / Providers」，检查是否有 Key 被自动停用（429/余额耗尽），手动重新启用或添加新 Key。\n• 或者稍等几分钟，让 API 限额窗口重置后再试。\n• 若问题持续，可在设置中切换到其他可用模型 / Provider。', en: '• Open "Settings → Keys / Providers" — check if any key was auto-disabled (429 / quota exhausted) and re-enable or add a new key.\n• Or wait a few minutes for the API rate-limit window to reset, then retry.\n• If the issue persists, switch to another available model / provider in Settings.' },
+  'err.k.ratelimit.chip': { zh: '已限频', en: 'Rate limited' },
+  'err.k.ratelimit.title': { zh: '⚠️ API 请求已达限频（429）', en: 'API rate-limited (HTTP 429)' },
+  'err.k.ratelimit.hint': { zh: '• 打开 「设置 → Keys / Providers」，检查是否有 Key 被自动停用（429/余额耗尽），手动重新启用或添加新 Key。\n• 或者稍等几分钟，让 API 限额窗口重置后再试。\n• 若问题持续，可在设置中切换到其他可用模型 / Provider。', en: '• Open "Settings → Keys / Providers" — check if any key was auto-disabled (429 / quota exhausted) and re-enable or add a new key.\n• Or wait a few minutes for the API rate-limit window to reset, then retry.\n• If the issue persists, switch to another available model / provider in Settings.' },
+  'err.k.permission.chip': { zh: '无权限', en: 'Permission denied' },
+  'err.k.permission.title': { zh: '⚠️ API Key 被拒绝（401/403，无权限或已失效）', en: 'API key rejected (401/403, invalid or lacking permission)' },
+  'err.k.permission.hint': { zh: '• 打开 「设置 → Keys」 检查该 Provider 的 Key 是否填写正确、是否被停用。\n• 若该 Key 对当前模型没有访问权限，请更换为其它模型或申请开通。', en: '• Open "Settings → Keys" and verify the key for this provider is correct and enabled.\n• If the key does not have access to this model, switch models or request access.' },
+  'err.k.no_slot.chip': { zh: '无可用 Key', en: 'No keys available' },
+  'err.k.no_slot.title': { zh: '⚠️ 当前没有可用的 API Key', en: 'No available API key slot' },
+  'err.k.no_slot.hint': { zh: '• 打开 「设置 → Keys / Providers」，检查是否有 Key 被自动停用（429/余额耗尽），手动重新启用或添加新 Key。\n• 或者稍等几分钟，让 API 限额窗口重置后再试。\n• 若问题持续，可在设置中切换到其他可用模型 / Provider。', en: '• Open "Settings → Keys / Providers" — check if any key was auto-disabled (429 / quota exhausted) and re-enable or add a new key.\n• Or wait a few minutes for the API rate-limit window to reset, then retry.\n• If the issue persists, switch to another available model / provider in Settings.' },
+  'err.k.dispatch_exhausted.chip': { zh: 'Key 已用尽', en: 'All keys exhausted' },
+  'err.k.dispatch_exhausted.title': { zh: '⚠️ 该模型所有 Key 的重试次数都已用尽', en: 'All keys for this model have been exhausted' },
+  'err.k.dispatch_exhausted.hint': { zh: '• 打开 「设置 → Keys / Providers」，检查是否有 Key 被自动停用（429/余额耗尽），手动重新启用或添加新 Key。\n• 或者稍等几分钟，让 API 限额窗口重置后再试。\n• 若问题持续，可在设置中切换到其他可用模型 / Provider。', en: '• Open "Settings → Keys / Providers" — check if any key was auto-disabled (429 / quota exhausted) and re-enable or add a new key.\n• Or wait a few minutes for the API rate-limit window to reset, then retry.\n• If the issue persists, switch to another available model / provider in Settings.' },
+  'err.k.timeout.chip': { zh: '已超时', en: 'Timed out' },
+  'err.k.timeout.title': { zh: '⚠️ 请求超时', en: 'Request timed out' },
+  'err.k.timeout.hint': { zh: '• 稍后重试。若持续超时，可在 「设置 → 模型默认」 切换到响应更快的模型。', en: '• Retry shortly. If timeouts persist, switch to a faster model in "Settings → Model defaults".' },
+  'err.k.network.chip': { zh: '网络错误', en: 'Network error' },
+  'err.k.network.title': { zh: '⚠️ 网络连接错误', en: 'Network connection error' },
+  'err.k.network.hint': { zh: '• 检查本机网络 / 代理设置，然后重试。', en: '• Check your network / proxy settings, then retry.' },
+  'err.k.endpoint_unreachable.chip': { zh: '端点不可达', en: 'Endpoint unreachable' },
+  'err.k.endpoint_unreachable.title': { zh: '⚠️ 模型服务端点无法连接', en: 'Model endpoint unreachable' },
+  'err.k.endpoint_unreachable.hint': { zh: '• 无法连接到模型服务端点（连接被拒绝或超时）——可能是本机代理/网络中断，也可能是自建/BYO 服务已宕机、端口未监听或防火墙不通。\n• 先检查本机网络/代理后重试；若确认服务可达仍失败，可在 「设置 → 模型默认」 切换到其他可用模型。', en: '• The model endpoint could not be reached (connection refused or timed out) — this can be a local proxy/network outage OR the self-hosted / BYO server being down, the port not listening, or a firewall blocking it.\n• Check your network / proxy and retry; if the server is confirmed reachable, switch to another available model in "Settings → Model defaults".' },
+  'err.k.content_filter.chip': { zh: '内容过滤', en: 'Content filter' },
+  'err.k.content_filter.title': { zh: '⚠️ 该回复被模型安全过滤器拦截', en: "Response blocked by the model's safety filter" },
+  'err.k.content_filter.hint': { zh: '• 尝试换一种方式提问，或切换到其他模型。', en: '• Try rephrasing the question or switching to another model.' },
+  'err.k.invalid_image.chip': { zh: '图片被拒', en: 'Image rejected' },
+  'err.k.invalid_image.title': { zh: '⚠️ 图像内容被拒绝', en: 'Image rejected by the API' },
+  'err.k.invalid_image.hint': { zh: '• 缩小或减少图片，再发送。', en: '• Reduce image size or count and try again.' },
+  'err.k.invalid_image.hintMany': { zh: '• 过多大图。同时发送 5 张以上图片时，每张需小于 2000×2000像素。请压缩或删除部分图片。', en: '• Too many large images. When sending 5+ images, each must be under 2000×2000 pixels. Please resize or remove some images.' },
+  'err.k.invalid_image.hintSize': { zh: '• 会话中某张图片超过了 API 大小限制。请使用更小的图片或删除过大的图片。', en: '• One or more images in this conversation exceed the API size limit. Please use a smaller image or remove the oversized image.' },
+  'err.k.prompt_too_long.chip': { zh: '上下文超长', en: 'Prompt too long' },
+  'err.k.prompt_too_long.title': { zh: '⚠️ 上下文已超过模型上限', en: "Context exceeds the model's limit" },
+  'err.k.prompt_too_long.hint': { zh: '• 已尝试自动压缩仍失败，请清理对话历史或切换到上下文更大的模型。', en: '• Auto-compaction did not free enough room — trim the history or switch to a larger-context model.' },
+  'err.k.stream_only.chip': { zh: '仅流式模型', en: 'Stream-only model' },
+  'err.k.stream_only.title': { zh: '⚠️ 该模型仅支持流式调用', en: 'Model only supports streaming' },
+  'err.k.stream_only.hint': { zh: '• 请切换到其他模型（系统已自动避开该模型）。', en: '• Switch to another model (this one is auto-excluded).' },
+  'err.k.model_limit.chip': { zh: '输出超限', en: 'Model limit' },
+  'err.k.model_limit.title': { zh: '⚠️ 输出长度超过模型上限', en: 'Output exceeds model max_tokens' },
+  'err.k.model_limit.hint': { zh: '• 系统已记住新的上限，可重试。', en: '• The new limit has been recorded — retry.' },
+  'err.k.tool_rounds_exhausted.chip': { zh: '工具轮数上限', en: 'Tool budget' },
+  'err.k.tool_rounds_exhausted.title': { zh: '⚠️ 工具调用轮数已达上限', en: 'Tool call round limit reached' },
+  'err.k.tool_rounds_exhausted.hint': { zh: '• 模型未在限定轮数内得出最终答复，可点击 Continue 续写。', en: '• The model did not finish within the per-task budget — click Continue to extend.' },
+  'err.k.tool_timeout.chip': { zh: '工具超时', en: 'Tool timeout' },
+  'err.k.tool_timeout.title': { zh: '⚠️ 工具调用连续超时', en: 'Repeated tool-execution timeouts' },
+  'err.k.tool_timeout.hint': { zh: '• 工具持续超时，建议简化任务或在 「设置 → 工具」 中调高超时时间。', en: '• The tool keeps timing out — simplify the request or raise the tool-timeout in Settings.' },
+  'err.k.premature_close.chip': { zh: '流被截断', en: 'Stream cut off' },
+  'err.k.premature_close.title': { zh: '⚠️ 网关/代理过早关闭流', en: 'Gateway closed the stream prematurely' },
+  'err.k.premature_close.hint': { zh: '• 重试已用完，回复可能不完整。可点击 Retry 重新生成。', en: '• Retries exhausted — the response may be incomplete. Click Retry to regenerate.' },
+  'err.k.abnormal_stop.chip': { zh: '异常终止', en: 'Abnormal stop' },
+  'err.k.abnormal_stop.title': { zh: '⚠️ API 流异常终止（缺失 finish 标记）', en: 'Stream ended without finish marker' },
+  'err.k.abnormal_stop.hint': { zh: '• 回复可能不完整。可点击 Retry 重新生成。', en: '• The reply may be truncated. Click Retry to regenerate.' },
+  'err.k.aborted.chip': { zh: '已停止', en: 'Stopped' },
+  'err.k.aborted.title': { zh: '⏹️ 用户已中止', en: 'Stopped by user' },
+  'err.k.aborted.hint': { zh: '', en: '' },
+  'err.k.server_offline.chip': { zh: '服务器离线', en: 'Server offline' },
+  'err.k.server_offline.title': { zh: '⚠️ 服务器离线', en: 'Server offline' },
+  'err.k.server_offline.hint': { zh: '• 等待服务器恢复后页面会自动重连，并尝试拉取已生成的内容。', en: '• When the server comes back, this page will reconnect automatically and try to recover any content that was generated.' },
+  'err.k.internal.chip': { zh: '内部错误', en: 'Internal error' },
+  'err.k.internal.title': { zh: '⚠️ 内部错误', en: 'Internal error' },
+  'err.k.internal.hint': { zh: '• 请查看服务器日志（logs/error.log）了解详情。', en: '• Check the server logs (logs/error.log) for details.' },
+  'err.k.generic.chip': { zh: '错误', en: 'Error' },
+  'err.k.generic.title': { zh: '⚠️ 模型调用失败', en: 'LLM call failed' },
+  'err.k.generic.hint': { zh: '• 展开下方错误详情查看原始原因。\n• 若反复出现，请查看服务器日志（logs/error.log）定位根因；若确认是 Key/配额问题，再前往 「设置 → Keys / Providers」 处理。', en: '• Expand the error detail below for the underlying cause.\n• If it recurs, check the server logs (logs/error.log) for the root cause; only if it proves to be a key/quota problem, go to "Settings → Keys / Providers".' },
+  'err.k.bad_request.chip': { zh: '请求无效', en: 'Bad request' },
+  'err.k.bad_request.title': { zh: '⚠️ 请求被上游 API 拒绝（HTTP 400）', en: 'Request rejected by the API (HTTP 400)' },
+  'err.k.bad_request.hint': { zh: '• 这不是 Key / 配额 / 429 问题——上游判定请求内容无效。展开下方错误详情查看具体原因。\n• 若反复出现且原因不明，请查看服务器日志（logs/error.log）。', en: '• This is NOT a key / quota / 429 problem — the API rejected the request payload itself. Expand the error detail below for the exact reason.\n• If it recurs with no clear cause, check the server logs (logs/error.log).' },
+  'err.k.content_refused.chip': { zh: '质量校验未过', en: 'Quality check failed' },
+  'err.k.content_refused.title': { zh: '⚠️ 翻译质量校验未通过', en: 'Translation rejected by quality check' },
+  'err.k.content_refused.hint': { zh: '• 模型多次输出错误语言 / 空结果 / 失控文本，系统拒绝采用并已自动重试。稍后再试通常会命中正常模型。\n• 若反复出现，可在 「设置 → 模型默认」 为翻译换一个更稳定的模型。', en: '• The models repeatedly produced wrong-language / empty / runaway output; it was rejected and retried automatically. Retrying shortly usually lands a healthy model.\n• If it recurs, switch the translation model in "Settings → Model defaults".' },
+  'err.k.upstream_error.chip': { zh: '上游故障', en: 'Upstream error' },
+  'err.k.upstream_error.title': { zh: '⚠️ 上游模型服务暂时不可用', en: 'Upstream model service temporarily unavailable' },
+  'err.k.upstream_error.hint': { zh: '• 模型厂商或网关侧故障（不是本机 Key 问题），稍后重试通常可自行恢复。\n• 若持续数分钟仍失败，可在 「设置 → 模型默认」 临时切换到其他可用模型。', en: '• The model vendor or gateway is failing (not a problem with your API keys) — retrying shortly usually recovers.\n• If it keeps failing for several minutes, temporarily switch to another available model in "Settings → Model defaults".' },
+  'err.k.worker_lost.chip': { zh: '进程丢失', en: 'Worker lost' },
+  'err.k.worker_lost.title': { zh: '⚠️ 任务工作进程丢失（长时间无进展）', en: 'Task worker lost (no progress)' },
+  'err.k.worker_lost.hint': { zh: '• 后台工作进程长时间没有产出任何进展，已被判定死亡——重新发起任务是安全的，已生成的部分内容可能丢失。\n• 若反复出现，请查看服务器日志（logs/error.log）确认进程是否被异常终止。', en: '• The background worker produced no progress for too long and was declared dead — retrying the task is safe; partial output may have been lost.\n• If it recurs, check the server logs (logs/error.log) to see whether the process was killed.' },
+  'err.k.tool_not_available.chip': { zh: '工具不可用', en: 'Tool not available' },
+  'err.k.tool_not_available.title': { zh: '⚠️ 模型调用了本轮不存在的工具，任务未完成', en: 'Model called a tool that is not available this turn' },
+  'err.k.tool_not_available.hint': { zh: '• 这不是 Key / 配额问题——模型反复调用了一个**本轮工具集里没有**的工具，该调用从未执行，任务因此停在半途。展开下方详情可看到具体工具名。\n• 常见原因：该能力在本会话未开启（如代码执行 / 浏览器 / 项目工具）。在工具栏打开对应开关后重试，或直接告诉模型改用已有的工具。', en: '• This is NOT a key / quota problem — the model repeatedly called a tool that is **not in this turn\'s toolset**, so it never executed and the task stopped part-way. Expand the detail below for the exact tool name.\n• Usually the capability is switched OFF for this conversation (e.g. code execution / browser / project tools). Enable it in the toolbar and retry, or tell the model to use a tool it actually has.' },
+  'err.k.budget_exceeded.chip': { zh: '预算已达上限', en: 'Budget exceeded' },
+  'err.k.budget_exceeded.title': { zh: '⚠️ 任务费用已达预算上限，已主动停止', en: 'Task stopped at the cost budget cap' },
+  'err.k.budget_exceeded.hint': { zh: '• 本次任务的花费达到会话设置的预算上限（maxBudgetUsd）而主动停止，已生成的内容已保留。\n• 如需继续：提高该会话的预算上限后点击 Continue，或换用更低成本的模型。', en: '• The task stopped itself when its spend reached the conversation\'s budget cap (maxBudgetUsd); generated content is preserved.\n• To continue: raise the cap for this conversation and click Continue, or switch to a cheaper model.' },
   'conn.bootReconnect': { zh: '离线，显示缓存的对话，正在重连…', en: 'Offline — showing cached conversations, reconnecting…' },
   // ── In-stream liveness HUD (header timer + in-bubble line) shown when a
   //    stream stalls / the server stops responding. {n}=silent seconds,
@@ -138,6 +271,7 @@ var _i18n = {
   'sidebar.collapseRail': { zh: '收起项目栏', en: 'Collapse projects' },
   'sidebar.expandRail': { zh: '展开项目栏', en: 'Expand projects' },
   'sidebar.allCategorized': { zh: '所有对话都已归类', en: 'All conversations are categorized' },
+  'sidebar.loadMoreEarlier': { zh: '还有 {n} 条更早的对话未加载 · 点击加载', en: '{n} earlier conversations not loaded · Load more' },
   'sidebar.folderEmpty': { zh: '文件夹是空的', en: 'Folder is empty' },
   'sidebar.newChatAppear': { zh: '新对话会出现在这里，或从文件夹中移出对话', en: 'New chats will appear here, or move conversations out of folders' },
   'sidebar.clickNewChat': { zh: '点击 New Chat 创建对话，或拖拽对话到此标签', en: 'Click New Chat to create a conversation, or drag one here' },
@@ -147,6 +281,12 @@ var _i18n = {
   'sidebar.awaitingInput': { zh: '等待你的输入', en: 'Awaiting your input' },
   'sidebar.translating': { zh: '翻译中…', en: 'Translating…' },
   'sidebar.connecting': { zh: '连接中…', en: 'Connecting…' },
+  /* Continue (resume an interrupted turn) — POST failure. Surfaced as a toast
+   * because the message document is NOT mutated on this path: the interrupted
+   * turn keeps finishReason='interrupted' and its Continue button, so the
+   * action is retryable. Stamping msg.error instead would poison an otherwise
+   * continuable turn with a transient network fault. */
+  'continue.failed': { zh: '续接失败：{err} — 可重试', en: 'Continue failed: {err} — you can retry' },
   'sidebar.queued': { zh: '排队中', en: 'Queued' },
   'sidebar.translatingTag': { zh: '翻译中', en: 'Translating' },
   'sidebar.memoryPrefetch': { zh: '筛选记忆中…', en: 'Filtering memories…' },
@@ -233,6 +373,7 @@ var _i18n = {
   'sidebar.errorState': { zh: '上次生成以错误结束', en: 'Last generation ended with an error' },
   'sidebar.incompleteTag': { zh: '未完成', en: 'Incomplete' },
   'sidebar.incompleteState': { zh: '上次生成被中断，未正常完成', en: 'Last generation was interrupted and did not finish' },
+  'sidebar.stateUnconfirmed': { zh: '实时连接中断，此状态可能不是最新的', en: 'Live connection is down — this state may be out of date' },
   'sidebar.copyConvId': { zh: '复制会话ID', en: 'Copy conversation ID' },
   'sidebar.refConv': { zh: '引用此对话', en: 'Reference this conversation' },
   'sidebar.moveToFolder': { zh: '移入文件夹', en: 'Move to folder' },
@@ -253,7 +394,6 @@ var _i18n = {
   //  Toolbar & Input
   // ══════════════════════════════════════
   'toolbar.enhance': { zh: '增强', en: 'Enhance' },
-  'toolbar.enhance': { zh: '增强', en: 'Enhance' },
   // ── Two-tier capability dial (Chat / Studio) ──
   'toolbar.modeChatTooltip': { zh: 'Chat — 全能助手（默认），代码执行/记忆/搜索全开', en: 'Chat — the everyday all-rounder (default): code, memory, search' },
   'toolbar.modeStudioTooltip': { zh: 'Studio — 绑定项目仓库，解锁项目工具', en: 'Studio — attach a project/repo to unlock project tools' },
@@ -262,6 +402,11 @@ var _i18n = {
   'mobile.capabilityMode': { zh: '能力模式', en: 'Capability mode' },
   'mobile.modeChatDesc': { zh: '全能助手，默认', en: 'All-rounder, default' },
   'mobile.modeStudioDesc': { zh: '绑定项目，最强', en: 'Attach a project' },
+  'mobile.compactUsage': { zh: '已用 {pct}%', en: '{pct}% used' },
+  'mobile.compactDesc': { zh: '压缩此对话以释放上下文空间', en: 'Compact this conversation to free context' },
+  'mobile.context': { zh: '上下文', en: 'Context' },
+  'mobile.compactHistoryDesc': { zh: '浏览此对话的压缩快照', en: 'Browse compaction snapshots for this conversation' },
+  'compactCard.rounds': { zh: '已折叠 {n} 个工具轮', en: 'folded {n} tool rounds' },
   'toolbar.aiEnhance': { zh: 'AI 增强', en: 'AI Enhance' },
   'toolbar.tools': { zh: '工具', en: 'Tools' },
   'toolbar.externalTools': { zh: '外部工具', en: 'External Tools' },
@@ -299,18 +444,57 @@ var _i18n = {
   'autopilot.sentToAgent': { zh: '作为下一条消息发送给智能体', en: 'Sent to the agent as the next message' },
   'autopilot.privateNotSent': { zh: '私有过程 · 不发送给智能体', en: 'Private · not sent to the agent' },
   'autopilot.runFold': { zh: '自动驾驶运行', en: 'Autopilot run' },
+  /* Run-tail notices — a run that ended WITHOUT answering. Each names the
+   * actual cause: a silent stop is what made the original failure invisible. */
+  'autopilot.endedYielded': {
+    zh: 'Autopilot 已让位 —— 你发了新消息，它到此停止',
+    en: 'Autopilot stood down — you sent a message, so it stopped here' },
+  'autopilot.endedAborted': {
+    zh: 'Autopilot 已停止 —— 本轮在运行中被取消',
+    en: 'Autopilot stopped — the turn was cancelled while it was working' },
+  'autopilot.endedSuperseded': {
+    zh: 'Autopilot 已让位 —— 新的一轮接管了这个对话',
+    en: 'Autopilot stood down — a newer turn took over this conversation' },
+  'autopilot.endedBudget': {
+    zh: 'Autopilot 提前停止 —— 已用尽轮次预算（需人工复核）',
+    en: 'Autopilot stopped early — it hit its turn budget (needs review)' },
+  'autopilot.endedNoProgress': {
+    zh: 'Autopilot 提前停止 —— 不再有实质进展（需人工复核）',
+    en: 'Autopilot stopped early — it stopped making progress (needs review)' },
+  'autopilot.endedStuck': {
+    zh: 'Autopilot 提前停止 —— 出现重复循环（需人工复核）',
+    en: 'Autopilot stopped early — it was repeating itself (needs review)' },
+  'autopilot.unsentReply': {
+    zh: '这条回复已写出，但从未发进对话',
+    en: 'This reply was written but never sent to the conversation' },
   'autopilot.runFoldHint': { zh: '轮交互 · 点击展开', en: 'turns — click to expand' },
+  'autopilot.label': { zh: 'Autopilot', en: 'Autopilot' },
+  'stream.role.worker': { zh: '执行者', en: 'Worker' },
+  'stream.role.planner': { zh: '规划者', en: 'Planner' },
+  'stream.role.critic': { zh: '评审', en: 'Critic' },
+  'stream.phase.preparing': { zh: '准备中…', en: 'Preparing…' },
+  'branch.collapse': { zh: '收起', en: 'Collapse' },
+  'branch.delete': { zh: '删除', en: 'Delete' },
+  'branch.deleteBranch': { zh: '删除此分支', en: 'Delete this branch' },
+  'branch.deleteConfirm': { zh: '确定删除此分支吗？此操作不可撤销。', en: 'Delete this branch? This cannot be undone.' },
+  'branch.selectionCtx': { zh: '基于选中内容：{text}', en: 'From selection: {text}' },
+  'branch.emptyHint': { zh: '分支还没有内容，在下方输入开始这一段对话', en: 'No messages in this branch yet — start it below' },
+  'branch.userTurns': { zh: '{n} 轮用户发言', en: '{n} user turns' },
+  'branch.stop': { zh: '停止', en: 'Stop' },
+  'branch.stopGen': { zh: '停止生成', en: 'Stop generating' },
+  'branch.collapseBranch': { zh: '收起分支面板', en: 'Collapse branch panel' },
+  'branch.collapseCta': { zh: '收起', en: 'Collapse' },
+  'branch.inputHint': { zh: '消息只进入此分支，不影响主线', en: 'Messages go to this branch only — the main line is untouched' },
+  'branch.inputPlaceholder': { zh: '向分支「{title}」发消息…', en: 'Message branch "{title}"…' },
+  'branch.modeBanner': { zh: '分支模式：{title}', en: 'Branch mode: {title}' },
+  'branch.exit': { zh: '退出', en: 'Exit' },
+  'branch.namePrompt': { zh: '给这个分支起个名字', en: 'Name this branch' },
+  'branch.createFailed': { zh: '创建分支失败，请重试', en: 'Failed to create the branch — please try again' },
   // ── Image upload chip: shown on the pending-image thumbnail while it is
   //    still compressing/uploading (upload.js::renderImagePreviews). Missing
   //    this key made t() return the literal "upload.processing" on the chip.
   'upload.processing': { zh: '处理中…', en: 'Processing…' },
   'tool.noContent': { zh: '无返回内容。', en: 'No content returned.' },
-  // ── Model-view affordance: the exact, verbatim text a tool returned to the
-  //    LLM (nothing omitted). Replaces the old ambiguous "Preview" wording,
-  //    which users read as a human summary rather than "what the model saw".
-  'tool.modelView': { zh: '模型原文', en: 'Model view' },
-  'tool.modelViewTip': { zh: '查看该工具返回给模型的原始文本 —— 逐字、不省略。', en: 'Show the exact text this tool returned to the model — verbatim, nothing omitted.' },
-  'tool.modelViewChip': { zh: '模型原文 · 逐字', en: "The model's view · verbatim" },
   // ── Sub-agent (swarm) update card ──
   'swarmCard.received': { zh: '收到', en: 'Received' },
   'swarmCard.updateOne': { zh: '条子智能体更新', en: 'sub-agent update' },
@@ -364,6 +548,25 @@ var _i18n = {
   'tool.hallucinated': { zh: '非真实工具', en: 'not a real tool' },
   'tool.hallucinatedTip': { zh: '模型调用了本轮不存在的工具，已被拒绝、未执行。', en: "The model called a tool that doesn't exist this turn — it was rejected and never run." },
   'tool.didYouMean': { zh: '是否想用', en: 'did you mean' },
+  // ── Write-gate refusal card (shared-worktree guards: read-before-edit +
+  //    write-freshness). Shown when a write tool call was INTERCEPTED — nothing
+  //    executed; the assistant re-reads and re-issues on its own. ──
+  'tool.gateStaleBadge': { zh: '已被外部修改', en: 'changed on disk' },
+  'tool.gateReadFirstBadge': { zh: '需先读取文件', en: 'must read first' },
+  'tool.gatePartialStaleBadge': { zh: '部分拦截·外部修改', en: 'partial · changed' },
+  'tool.gatePartialReadFirstBadge': { zh: '部分拦截·需先读取', en: 'partial · unread' },
+  'tool.gateContentRefBadge': { zh: '内容引用失败', en: 'content ref failed' },
+  'tool.gateTargetGeneric': { zh: '目标文件', en: 'The target file' },
+  'tool.gateStaleTitle': { zh: '写入被拦截：文件已被外部修改', en: 'Write blocked — file changed on disk' },
+  'tool.gateStaleText': { zh: '{paths} 在本次会话上次读取/写入之后被其他会话或进程修改。为防止静默覆盖他人的改动，本次写入没有执行 —— 助手会重新读取该文件并重发编辑，无需人工处理。', en: '{paths} was modified by another conversation or process after this conversation last read/wrote it. To avoid silently overwriting their change, this write was NOT executed — the assistant will re-read the file and re-issue the edit; no action needed from you.' },
+  'tool.gateReadFirstTitle': { zh: '编辑被拦截：本会话尚未读取该文件', en: 'Edit blocked — file not read in this conversation yet' },
+  'tool.gateReadFirstText': { zh: '按「先读后写」保护规则，编辑 {paths} 前必须先在本次会话中用 read_files 读取它，防止凭记忆或猜测打补丁。本次编辑没有执行 —— 助手会先读取再重发。', en: 'The read-before-edit guard requires reading {paths} with read_files in this conversation before patching it, so patches are never built from guessed or remembered content. This edit was NOT executed — the assistant will read the file first and re-issue.' },
+  'tool.gatePartialStaleTitle': { zh: '{skipped} 处编辑被拦截：目标文件已被外部修改', en: '{skipped} edit(s) blocked — target file(s) changed on disk' },
+  'tool.gatePartialStaleText': { zh: '{paths} 在上次读取/写入之后被其他会话或进程修改，相关 {skipped} 处编辑没有执行；其余 {proceeded} 处已照常执行。被拦截的编辑会在重新读取后重发。', en: '{paths} changed on disk after this conversation last read/wrote it, so {skipped} edit(s) targeting it were NOT executed; the other {proceeded} edit(s) ran normally. The blocked edits will be re-issued after a fresh read.' },
+  'tool.gatePartialReadFirstTitle': { zh: '{skipped} 处编辑被拦截：需先读取文件', en: '{skipped} edit(s) blocked — must read first' },
+  'tool.gatePartialReadFirstText': { zh: '{paths} 在本次会话中尚未读取过，相关 {skipped} 处编辑没有执行；其余 {proceeded} 处已照常执行。助手会先读取再重发被拦截的编辑。', en: '{paths} has not been read in this conversation, so {skipped} edit(s) targeting it were NOT executed; the other {proceeded} edit(s) ran normally. The assistant will read the file and re-issue the blocked edits.' },
+  'tool.gateContentRefTitle': { zh: '写入未执行：内容引用解析失败', en: 'Write not executed — content reference failed' },
+  'tool.gateContentRefText': { zh: 'write_file 的 content_ref 指向的前轮工具结果不存在或没有内容。助手会改为显式提供 content 重新写入。', en: 'The content_ref used by write_file points to a previous tool result that does not exist or has no content. The assistant will retry with explicit content instead.' },
   'autopilot.armedTitle': { zh: '已接管', en: 'Autopilot armed' },
   'autopilot.armedBody': { zh: '当前回复结束后，虚拟用户将自动接管对话', en: 'The virtual user will take over once the current reply finishes' },
   'autopilot.pendingTakeover': { zh: 'Autopilot 待接管（当前回复结束后）', en: 'Autopilot will take over (after the current reply)' },
@@ -763,6 +966,34 @@ var _i18n = {
   'debug.brainSummaryTitle': { zh: '本次任务向模型注入的项目大脑上下文块', en: 'Project Brain context blocks injected into the model this task' },
 
   // ══════════════════════════════════════
+  //  Request Inspector (P2 drawer)
+  // ══════════════════════════════════════
+  'ri.title': { zh: '请求检视器', en: 'Request Inspector' },
+  'ri.requests': { zh: '请求', en: 'requests' },
+  'ri.states': { zh: '状态镜像', en: 'State mirrors' },
+  'ri.stateNote': { zh: '非 LLM 请求', en: 'not LLM requests' },
+  'ri.empty': { zh: '该会话暂无任务记录', en: 'No tasks recorded for this conversation' },
+  'ri.loading': { zh: '加载中…', en: 'Loading…' },
+  'ri.expired': { zh: '事件日志已过期（>6h）或不存在', en: 'Event log expired (>6h) or missing' },
+  'ri.coveragePartial': { zh: '此任务为 endpoint 驱动：Planner/Critic 调用未纳入检视', en: 'Endpoint-driven task: Planner/Critic calls are not captured' },
+  'ri.live': { zh: '在飞', en: 'live' },
+  'ri.openTip': { zh: '在请求检视器中定位产生此回复的 LLM 请求', en: 'Locate the LLM request(s) that produced this reply in the Request Inspector' },
+  'ri.prefixFold': { zh: '与 {base} 相同的前 {k} 条已折叠 — 点击展开', en: 'Prefix of {k} message(s) identical to {base} collapsed — click to expand' },
+  'ri.turnPlanning': { zh: '规划', en: 'Planner' },
+  'ri.turnWorking': { zh: '执行', en: 'Worker' },
+  'ri.turnReviewing': { zh: '评审', en: 'Critic' },
+  'ri.coverageAmbiguous': { zh: '旧 endpoint 任务：轮次未标相位（planner/worker/critic 同号不可区分）', en: 'Legacy endpoint task: rounds carry no phase tag (planner/worker/critic rounds share numbers)' },
+  'ri.turnSwarmAgent': { zh: '子代理', en: 'sub-agent' },
+  'ri.toolAnchorTip': { zh: '调试这次工具调用（第 {round} 轮）：产生它的请求 + 执行后的消息状态', en: 'Debug this tool call (round {round}): the request that produced it, and the message state after it ran' },
+  'ri.tabRequest': { zh: '请求', en: 'Request' },
+  'ri.tabState': { zh: '结果状态', en: 'Result state' },
+  'ri.stateKindTip': { zh: '工具执行后的消息状态（已包含产生这次调用的请求内容）', en: 'Message state after the tools ran (includes the request that produced this call)' },
+  'ri.requestKindTip': { zh: '这一轮没有留下执行后状态（如子代理轮次），显示产生这次调用的请求', en: 'This round left no post-tool state (e.g. a sub-agent round) — showing the request that produced the call' },
+  'ri.stateRowTip': { zh: '点击跳到对应工具调用旁，就地查看该状态镜像', en: 'Jump to the tool call and view this state mirror inline' },
+  'ri.stateEmpty': { zh: '该状态镜像已过期（>6h）或不存在', en: 'State mirror expired (>6h) or missing' },
+  'ri.stateClose': { zh: '关闭状态检视', en: 'Close state inspector' },
+
+  // ══════════════════════════════════════
   //  Settings — Tabs
   // ══════════════════════════════════════
   'settings.title': { zh: '设置', en: 'Settings' },
@@ -772,6 +1003,30 @@ var _i18n = {
   'settings.tabDisplay': { zh: '显示', en: 'Display' },
   'settings.tabSearch': { zh: '搜索', en: 'Search' },
   'settings.tabNetwork': { zh: '网络', en: 'Network' },
+  'settings.tabDevices': { zh: '设备', en: 'Devices' },
+  'devices.agentsTitle': { zh: '在线代理', en: 'Agents' },
+  'devices.remoteGroup': { zh: '远程设备', en: 'Remote devices' },
+  'devices.agentsDesc': { zh: '运行了 desktop agent 的机器会出现在这里;项目面板可把远程共享根挂为工作树。', en: 'Machines running the desktop agent appear here; the project panel can mount a remote share root as a worktree.' },
+  'devices.tokensTitle': { zh: 'Bridge 令牌', en: 'Bridge tokens' },
+  'devices.tokensDesc': { zh: 'agent 用令牌连接本服务器(请求头 X-Bridge-Secret)。令牌只颁发给你自己,命令只投递给你的设备。', en: 'Agents connect with a token (X-Bridge-Secret header). Tokens are minted for you only; commands are delivered to your devices only.' },
+  'devices.mintNamePh': { zh: '设备备注(如 my-mac)', en: 'Device label (e.g. my-mac)' },
+  'devices.mint': { zh: '颁发新令牌', en: 'Mint token' },
+  'devices.mintedHint': { zh: '令牌只显示这一次,请立即复制保存:', en: 'The token is shown only once — copy it now:' },
+  'devices.copy': { zh: '复制', en: 'Copy' },
+  'devices.copied': { zh: '已复制', en: 'Copied' },
+  'devices.empty': { zh: '暂无设备连接。在本机运行 desktop agent 后会出现在这里。', en: 'No devices yet. Run the desktop agent on a machine and it will appear here.' },
+  'devices.noTokens': { zh: '还没有 bridge 令牌。', en: 'No bridge tokens yet.' },
+  'devices.loadFailed': { zh: '没能读取设备列表 —— 服务器未应答。这不代表你没有设备。', en: 'Could not load your devices — the server did not answer. This does NOT mean you have none.' },
+  'devices.colDevice': { zh: '设备', en: 'Device' },
+  'devices.colPlatform': { zh: '平台', en: 'Platform' },
+  'devices.colRoots': { zh: '共享根', en: 'Share roots' },
+  'devices.colStatus': { zh: '状态', en: 'Status' },
+  'devices.online': { zh: '在线', en: 'online' },
+  'devices.offline': { zh: '离线', en: 'offline' },
+  'devices.revoke': { zh: '吊销', en: 'Revoke' },
+  'devices.revoked': { zh: '已吊销', en: 'Revoked' },
+  'devices.revokeFailed': { zh: '吊销失败', en: 'Revoke failed' },
+  'devices.mintFailed': { zh: '颁发失败', en: 'Mint failed' },
   'settings.tabFeishu': { zh: '飞书', en: 'Feishu' },
   'settings.tabOAuth': { zh: '订阅登录', en: 'OAuth Login' },
   'settings.tabMCP': { zh: 'MCP', en: 'MCP' },
@@ -880,6 +1135,7 @@ var _i18n = {
   'settings.themeDark': { zh: '暗色', en: 'Dark' },
   'settings.themeLight': { zh: '亮色', en: 'Light' },
   'settings.themeTofu': { zh: '豆腐', en: 'Tofu' },
+  'settings.sectionNeedsRestart': { zh: '此功能需重启服务后生效。', en: 'This feature becomes available after restarting the server.' },
   'settings.modelParams': { zh: '模型参数', en: 'Model Parameters' },
   'settings.temperature': { zh: '温度 (Temperature)', en: 'Temperature' },
   'settings.maxTokens': { zh: '最大 Token 数', en: 'Max Tokens' },
@@ -891,6 +1147,7 @@ var _i18n = {
   'settings.thinkingHigh': { zh: 'High — 深度', en: 'High' },
   'settings.thinkingXHigh': { zh: 'xHigh — 超深度 (Claude 4.7+)', en: 'xHigh (Claude 4.7+)' },
   'settings.thinkingMax': { zh: 'Max — 最大', en: 'Max' },
+  'settings.thinkingUltra': { zh: 'Ultra — 至臻 (GPT-5.6+)', en: 'Ultra (GPT-5.6+)' },
   'settings.defaultThinkingDesc': { zh: '新对话的默认思维深度级别', en: 'Default thinking depth for new conversations' },
   'settings.systemPrompt': { zh: '系统提示词', en: 'System Prompt' },
   'settings.systemPromptPh': { zh: '输入自定义系统提示词...', en: 'Enter custom system prompt...' },
@@ -925,10 +1182,14 @@ var _i18n = {
   'settings.systemPromptPreviewChat': { zh: '预览：聊天模式', en: 'preview: chat mode' },
   'settings.featureModules': { zh: '功能模块', en: 'Feature Modules' },
   'settings.tradingModule': { zh: '交易 / 基金模块', en: 'Trading / Fund Module' },
-  'settings.tradingModuleDesc': { zh: '交易顾问、基金筛选、自动驾驶、资讯爬虫', en: 'Trading advisor, fund screening, autopilot, news crawler' },
+  'settings.tradingModuleDesc': { zh: '交易顾问、基金筛选、自动驾驶、资讯爬虫。关闭后立即生效：顶栏入口隐藏、接口停止服务，后台资讯爬虫与自动驾驶也会停止（不再产生模型调用费用）。', en: 'Trading advisor, fund screening, autopilot and news crawler. Takes effect immediately: the topbar entry is hidden, the API stops serving, and the background crawler and autopilot stop too — so they no longer run up model-call costs.' },
   'settings.pptxTranslateModule': { zh: 'PPT 翻译模块', en: 'PPTX Translation Module' },
   'settings.pptxTranslateModuleDesc': { zh: '上传 PPTX 文件进行全文翻译，保留原始格式', en: 'Upload PPTX files for full translation with formatting preserved' },
-  'settings.tradingRestart': { zh: '需要重启服务器才能生效', en: 'Server restart required to take effect' },
+  'settings.aboutUpdate': { zh: '关于与更新', en: 'About & Updates' },
+  'settings.updateTitle': { zh: '软件更新', en: 'Software Update' },
+  'settings.updateDesc': { zh: '从官方仓库拉取最新版本。更新完成后需要重启服务。', en: 'Pull the latest release from the official repository. A restart is required once the update completes.' },
+  'settings.updateCheck': { zh: '检查更新', en: 'Check for updates' },
+  'settings.updateCurrent': { zh: '当前版本 v{version}', en: 'Current version v{version}' },
   'settings.debugMode': { zh: '调试模式', en: 'Debug Mode' },
   'settings.debugModeDesc': { zh: '显示 trace_id、复制会话 ID 按钮等开发调试信息', en: 'Show trace_id, copy conv ID buttons, and other debug info' },
   'settings.optimizerModule': { zh: '每日优化器', en: 'Daily Optimizer' },
@@ -952,6 +1213,15 @@ var _i18n = {
   'settings.fromTemplate': { zh: '从模板添加', en: 'From Template' },
   'settings.syncTemplate': { zh: '同步模板', en: 'Sync Template' },
   'settings.localProvider': { zh: '本地部署模型', en: 'Local Deployment' },
+  'settings.localPresetTitle': { zh: '选择本地部署类型', en: 'Choose a local deployment type' },
+  'settings.localPresetDesc': { zh: '预设只预填默认端口与占位地址；探测、熔断、健康检查四类完全相同。', en: 'Presets only prefill the default port and placeholder URL — probing, failover and health checks are identical for all.' },
+  'settings.localPresetVllmDesc': { zh: '默认端口 8000，每个实例服务一个模型', en: 'Default port 8000, one model per instance' },
+  'settings.localPresetSglangDesc': { zh: '默认端口 30000，每个实例服务一个模型', en: 'Default port 30000, one model per instance' },
+  'settings.localPresetOllamaDesc': { zh: '默认端口 11434，单实例可服务多个模型', en: 'Default port 11434, one instance can serve many models' },
+  'settings.localPresetCustomName': { zh: '自定义', en: 'Custom' },
+  'settings.localPresetCustomDesc': { zh: '其它 OpenAI 兼容服务，完全手动配置', en: 'Any other OpenAI-compatible server, fully manual' },
+  'settings.localEngineProviderName': { zh: '{name} 本地部署', en: '{name} (local)' },
+  'settings.epServedModelsTitle': { zh: '该端点服务的模型', en: 'Models served by this endpoint' },
   'settings.customProvider': { zh: '+ 自定义服务商', en: '+ Custom Provider' },
   'settings.providersDesc': { zh: '使用「自动配置」只需填写 API 地址和密钥，系统自动发现模型、检测余额接口和定价。也可从模板添加或手动创建。', en: 'Use "Auto Setup" — just enter API URL and key, the system auto-discovers models, balance endpoint, and pricing. You can also add from templates or create manually.' },
   'settings.loadingConfig': { zh: '正在加载配置…', en: 'Loading config…' },
@@ -1027,6 +1297,15 @@ var _i18n = {
   'update.applyStarting': { zh: '正在准备更新…', en: 'Preparing update…' },
   'update.applyStartFailed': { zh: '无法启动更新，请稍后再试。', en: 'Could not start the update. Please try again.' },
   'update.applyTimeout': { zh: '更新耗时异常，请检查服务器日志。', en: 'The update is taking unusually long — check the server log.' },
+  'update.logLabel': { zh: '完整日志', en: 'Full log' },
+  'update.copyLog': { zh: '复制日志', en: 'Copy log' },
+  'update.logCopied': { zh: '已复制', en: 'Copied' },
+  'update.pendingApprovals': { zh: '待审批的服务器操作（由后台任务发起，需真人确认）', en: 'Pending server actions (initiated by background tasks — human decision required)' },
+  'update.approveExecuteRestart': { zh: '批准并重启', en: 'Approve & restart' },
+  'update.approveExecuteShutdown': { zh: '批准并关机', en: 'Approve & shut down' },
+  'update.deny': { zh: '拒绝', en: 'Deny' },
+  'update.approvalDenied': { zh: '已拒绝该请求。', en: 'Request denied.' },
+  'update.restartCooldown': { zh: '服务器刚重启过，处于冷却期（剩余 %s 秒），请稍后再试。', en: 'The server was just restarted — cooldown active (%ss left). Try again later.' },
   'settings.loadingFailed': { zh: '加载服务器配置失败。请检查服务器是否正在运行。', en: 'Failed to load server config. Please check if the server is running.' },
   'settings.noProviders': { zh: '还没有配置服务商。点击"+ 自定义服务商"开始添加。', en: 'No providers configured. Click "+ Custom Provider" to start.' },
   'settings.keys': { zh: '个密钥', en: 'keys' },
@@ -1037,16 +1316,20 @@ var _i18n = {
   'settings.apiKeys': { zh: 'API 密钥', en: 'API Keys' },
   'settings.apiKeysHint': { zh: '安全存储；点击 👁 切换可见性', en: 'Securely stored; click 👁 to toggle visibility' },
   // ── Per-key today's stats (settings/key_stats.js) ──
-  'settings.keyStatAutoDisablePolicy': { zh: '{day}: 连续 {n} 次 429 或成功率 < {pct}% 时自动停用；次日自动重置。', en: '{day}: auto-disabled after {n} consecutive 429s or success rate < {pct}%; auto-resets the next day.' },
+  'settings.keyStatAutoDisablePolicy': { zh: '{day}: 上游报告额度耗尽 (402) 或成功率 < {pct}% 时自动停用；429 限流只计数、永不停用；次日自动重置。', en: '{day}: auto-disabled on quota exhaustion (HTTP 402) or success rate < {pct}%; 429s are counted but never disable; auto-resets the next day.' },
   'settings.keyStatOverrideOff': { zh: '手动关闭', en: 'Manually off' },
   'settings.keyStatOverrideOn': { zh: '手动开启', en: 'Manually on' },
   'settings.keyStatLastResort': { zh: '保留为最后备选', en: 'Kept as last resort' },
   'settings.keyStatLastResortTip': { zh: '本应自动停用，但这是该服务商今天唯一可用的密钥 — 保留为最后备选', en: 'Would be auto-disabled, but this is the only usable key for this provider today — kept as last resort' },
-  'settings.keyStatExhausted': { zh: '自动停用 (连续 429)', en: 'Auto-disabled (consecutive 429)' },
-  'settings.keyStatExhaustedTip': { zh: '已连续返回 {n} 次 429 — 可能已欠费/额度耗尽，今日停用', en: 'Returned {n} consecutive 429s — possibly out of quota/credit; disabled for today' },
+  'settings.keyStatExhausted': { zh: '自动停用 (额度耗尽)', en: 'Auto-disabled (quota exhausted)' },
+  'settings.keyStatExhaustedTip': { zh: '上游报告额度耗尽/欠费 (402)，今日停用；充值后点「重置」恢复', en: 'Provider reported quota/credit exhaustion (HTTP 402); disabled for today — top up and press Reset' },
+  'settings.keyStatModelExhausted': { zh: '{models} 熔断', en: '{models} stopped' },
+  'settings.keyStatModelExhaustedTip': { zh: '这些模型今日被上游报告配额耗尽 — 按模型停用，不影响此 Key 的其他模型：\n{reasons}', en: 'These models reported out of quota today — stopped per-model, other models on this key are unaffected:\n{reasons}' },
+  'settings.keyStatOverrideVsExhausted': { zh: '手动开启·但有熔断', en: 'Manual ON, stop active' },
+  'settings.keyStatOverrideVsExhaustedTip': { zh: '你手动开启了此 Key，但上游今日报告了配额耗尽。手动设置优先 — 被熔断模型的请求仍会被派发并可能失败；充值后点「重置」回到自动判定。', en: 'You manually enabled this key, but the provider reported a quota/billing stop today. Your manual setting wins — requests to the stopped model(s) will still be dispatched and may fail; after topping up, hit Reset to return to automatic.' },
   'settings.keyStatAutoOff': { zh: '自动停用', en: 'Auto-disabled' },
   'settings.keyStat429Streak': { zh: '连续 429 × {n}', en: 'Consecutive 429 × {n}' },
-  'settings.keyStat429StreakTip': { zh: '连续 429 次数接近阈值 ({max})，一旦达到将自动停用', en: 'Consecutive 429 count nearing the threshold ({max}); auto-disables once reached' },
+  'settings.keyStat429StreakTip': { zh: '连续收到 429 限流；只计数不停用，上游恢复后自动回到轮换', en: 'Consecutive 429s; counted only — the key rejoins rotation once the upstream recovers' },
   'settings.keyStatLastError': { zh: '最近错误', en: 'Last error' },
   'settings.keyStatRateTip': { zh: '今日成功率 = 成功 {succ} / 调用 {total}（429 限流不计入）', en: "Today's success rate = success {succ} / calls {total} (429 rate-limits excluded)" },
   'settings.keyStatNoCallsTip': { zh: '今日尚无调用', en: 'No calls today' },
@@ -1055,7 +1338,7 @@ var _i18n = {
   'settings.keyStatFail': { zh: '失败 {n}', en: 'Failed {n}' },
   'settings.keyStatFailTip': { zh: '真正的调用失败次数（网络/5xx/解析错误等，不含 429）', en: 'Genuine call failures (network/5xx/parse errors, etc.; excluding 429)' },
   'settings.keyStat429': { zh: '限流 {n}', en: 'Limited {n}' },
-  'settings.keyStat429Tip': { zh: '今日收到的 429 限流次数（不计入成功率）；连续 {max} 次会自动停用', en: 'Number of 429 rate-limits today (excluded from success rate); {max} consecutive triggers auto-disable' },
+  'settings.keyStat429Tip': { zh: '今日收到的 429 限流次数（不计入成功率，也不会自动停用）', en: '429 rate-limits today (excluded from success rate; never auto-disables)' },
   'settings.keyStatToggleTip': { zh: '今日启用/禁用此密钥（明日自动重置）', en: 'Enable/disable this key for today (auto-resets tomorrow)' },
   'settings.keyStatClearOverrideTip': { zh: '清除手动设置，恢复自动判定', en: 'Clear the manual override and revert to automatic judgment' },
   'settings.keyStatReset': { zh: '重置', en: 'Reset' },
@@ -1086,12 +1369,18 @@ var _i18n = {
   'settings.thinkingFormatNone': { zh: '不发送思维参数', en: 'Do not send thinking parameter' },
   'settings.enabled': { zh: '启用', en: 'Enabled' },
   'settings.deleteProvider': { zh: '删除服务商', en: 'Delete Provider' },
+  'settings.oauthManagedBadge': { zh: '订阅登录', en: 'Subscription' },
+  'settings.oauthManagedTitle': { zh: '由订阅登录（OAuth）自动创建，无需 API Key', en: 'Auto-created from a subscription (OAuth) login — no API key needed' },
+  'settings.oauthManagedNoteTitle': { zh: '这是 {name} 订阅登录自动生成的服务商', en: 'This provider was auto-created from your {name} subscription login' },
+  'settings.oauthManagedNoteDesc': { zh: '它使用你登录的 {name} 订阅额度，令牌每次请求实时获取，无需填写 API Key。要移除它，请点下方「退出登录」——只删这张卡片不会清除登录凭证，下次刷新令牌时它会重新出现。', en: 'It uses your logged-in {name} subscription — the token is fetched live per request, so no API key is needed. To remove it, use “Log out” below: deleting only this card leaves the login token on disk, so it reappears on the next token refresh.' },
+  'settings.oauthLogoutRemove': { zh: '退出登录', en: 'Log out' },
   'settings.modelList': { zh: '模型列表', en: 'Model List' },
   'settings.autoDiscover': { zh: '自动发现', en: 'Auto Discover' },
   'settings.addModel': { zh: '+ 添加模型', en: '+ Add Model' },
   'settings.noModels': { zh: '还没有配置模型。点击"自动发现"自动检测可用模型，或点击"+ 添加模型"手动添加。', en: 'No models configured. Click "Auto Discover" to detect available models, or click "+ Add Model" to add manually.' },
   'settings.autoDiscoverHint': { zh: '从 /v1/models 接口自动发现模型', en: 'Auto-discover models from /v1/models endpoint' },
   'settings.aliases': { zh: '别名：', en: 'Aliases:' },
+  'settings.requestIds': { zh: '请求名：', en: 'Request IDs:' },
   'settings.addAlias': { zh: '+ 别名', en: '+ Alias' },
   'settings.apply': { zh: '应用', en: 'Apply' },
   // ── Access Matrix (per-key × per-model capability grid) ──
@@ -1117,7 +1406,7 @@ var _i18n = {
   'settings.matrixNoAlias': { zh: '无别名', en: 'no aliases' },
   // ── Access Matrix: probe & recommend ──
   'settings.matrixProbe': { zh: '探测推荐', en: 'Probe & Recommend' },
-  'settings.matrixProbeHint': { zh: '逐格发送最小请求，检测每个密钥可访问哪些模型/别名。在后台运行并持久化——关闭设置也不会中断，重开后自动恢复', en: 'Send a tiny request per cell to detect which models/aliases each key can reach. Runs in the background and is persisted — closing Settings won\'t interrupt it; it resumes on reopen' },
+  'settings.matrixProbeHint': { zh: '逐格发送最小请求，检测每个密钥可访问哪些模型/别名：聊天模型发 1-token 补全，图像模型真实生成一张小图（按 1 次生成计费，仅测 1 次），语音模型发一段空白音频，嵌入模型发一个单词。在后台运行并持久化——关闭设置也不会中断，重开后自动恢复', en: 'Send a tiny request per cell to detect which models/aliases each key can reach: chat models get a 1-token completion, image models generate one small real image (billed as one generation, single attempt), speech models get a blank audio clip, embedding models one word. Runs in the background and is persisted — closing Settings won\'t interrupt it; it resumes on reopen' },
   'settings.matrixRetest': { zh: '重新探测', en: 'Retest' },
   'settings.matrixProbing': { zh: '正在后台探测…', en: 'Probing in background…' },
   'settings.matrixProbeFailed': { zh: '探测失败', en: 'Probe failed' },
@@ -1136,11 +1425,16 @@ var _i18n = {
   'settings.matrixApplied': { zh: '已应用：禁用了 {n} 个格子', en: 'Applied: disabled {n} cell(s)' },
   'settings.matrixNothingApplied': { zh: '没有需要禁用的格子', en: 'No cells needed disabling' },
   'settings.matrixClearProbe': { zh: '清除探测结果', en: 'Clear results' },
+  'settings.matrixProbeColHint': { zh: '探测此列——检测该密钥下的全部模型（结果合并进现有探测，不影响其它列）', en: 'Probe this column — every model under this key (results merge into the existing snapshot; other columns untouched)' },
+  'settings.matrixProbeRowHint': { zh: '探测此行——检测该模型在所有密钥下的可达性（结果合并进现有探测，不影响其它行）', en: 'Probe this row — this model across all keys (results merge into the existing snapshot; other rows untouched)' },
+  'settings.matrixProbeCellHint': { zh: '重新探测此格', en: 'Re-probe this cell' },
   'settings.probeOk': { zh: '可用', en: 'Reachable' },
   'settings.probeRateLimited': { zh: '限流 (429)', en: 'Rate-limited (429)' },
   'settings.probeUnauthorized': { zh: '无权限', en: 'Unauthorized' },
   'settings.probeNotFound': { zh: '模型不存在', en: 'Model not found' },
   'settings.probeUnavailable': { zh: '不可用 / 超时', en: 'Unavailable / timeout' },
+  'settings.probeSkipped': { zh: '不适用（非聊天模型）', en: 'N/A (non-chat model)' },
+  'settings.matrixSkippedCount': { zh: '不适用', en: 'N/A' },
   'settings.probeError': { zh: '错误', en: 'Error' },
   'settings.edit': { zh: '编辑', en: 'Edit' },
   'settings.delete': { zh: '删除', en: 'Delete' },
@@ -1177,7 +1471,7 @@ var _i18n = {
   'settings.probeAllTitle': { zh: '并行探测全部端点并合并模型列表', en: 'Probe all endpoints in parallel and merge their model lists' },
   'settings.clearAll': { zh: '清空', en: 'Clear' },
   'settings.clearAllTitle': { zh: '清空全部端点', en: 'Clear all endpoints' },
-  'settings.localEndpointsHint': { zh: '调度器会在多个端点之间负载均衡，单个端点宕机会自动绕开。私网/公网 IP 都会自动加入代理白名单。', en: 'The scheduler load-balances across endpoints and routes around any that go down. Both private and public IPs are added to the proxy bypass list automatically.' },
+  'settings.localEndpointsHint': { zh: '每个端点的模型独立路由：请求只会发给它实际服务的模型；多台机服务同名模型时自动负载均衡，单机宕机自动绕开。私网/公网 IP 都会自动加入代理白名单。', en: 'Each endpoint is routed only the models it actually serves; when several boxes serve the same model the scheduler load-balances across them and routes around any that go down. Private and public IPs are added to the proxy bypass list automatically.' },
   'settings.testEndpointTitle': { zh: '立即刷新该端点的实时指标', en: 'Refresh live metrics for this endpoint now' },
   'settings.deleteEndpointTitle': { zh: '删除该端点', en: 'Delete this endpoint' },
   // Inline "thinking" toggle on model cards
@@ -1265,10 +1559,35 @@ var _i18n = {
   'settings.meCapabilities': { zh: '模型能力', en: 'Model capabilities' },
   'settings.meAliases': { zh: '别名', en: 'Aliases' },
   'settings.meAliasesHint': { zh: '（逗号分隔的替代模型 ID）', en: '(comma-separated alternate model IDs)' },
+  'settings.meRequestIds': { zh: '请求名池', en: 'Request IDs' },
+  'settings.meRequestIdsHint': { zh: '（逗号分隔；实际发给网关的模型 ID，可多个用于轮换）', en: '(comma-separated; the model IDs actually sent to the gateway — several rotate)' },
+  'settings.meRequestIdsLastWarn': { zh: '请求名池不能为空——清空后该模型不会再被路由到。如需停用请直接关闭或删除该模型。', en: 'The request-ID pool cannot be empty — the model would stop being routed entirely. Disable or delete the model instead.' },
   'settings.meThinkingDefault': { zh: '默认开启思考模式', en: 'Enable thinking mode by default' },
   'settings.meAliasPrompt': { zh: '输入别名（同一模型的替代 ID）:', en: 'Enter an alias (alternate ID for the same model):' },
   'settings.meModelIdPlaceholder': { zh: '如 gpt-4o, claude-opus-4', en: 'e.g. gpt-4o, claude-opus-4' },
   'settings.meAliasesPlaceholder': { zh: '如 model-v2-b, vertex/model-v2', en: 'e.g. model-v2-b, vertex/model-v2' },
+  'settings.meRequestIdsPlaceholder': { zh: '如 yuju-claude-opus-5-evaDaily, aws.claude-opus-5', en: 'e.g. yuju-claude-opus-5-evaDaily, aws.claude-opus-5' },
+  'settings.meRequestIdPrompt': { zh: '新增请求名（实际发给网关的模型 ID）', en: 'Add a request ID (the model ID actually sent to the gateway)' },
+  'settings.meInputPrice': { zh: '输入价格', en: 'Input price' },
+  'settings.meOutputPrice': { zh: '输出价格', en: 'Output price' },
+  'settings.mePriceHint': { zh: '（$/1M tokens，留空 = 不覆盖内置价目）', en: '($/1M tokens, blank = keep built-in pricing)' },
+  'settings.meCostDerived': { zh: '（已由输入/输出价自动折算）', en: '(auto-derived from input/output prices)' },
+  'settings.mePriceCustomTag': { zh: '自定义', en: 'custom' },
+  'settings.mePriceInvalidWarn': { zh: '输入/输出价格需同时填写，且为非负数字——本次未改动已保存的价格。', en: 'Input and output prices must both be filled with non-negative numbers — your saved pricing was left unchanged.' },
+  // ── Model card health strip (per-model runtime state, auto-polled) ──
+  'settings.mhCooldown': { zh: '冷却 {s}s', en: 'cooldown {s}s' },
+  'settings.mhReasonRateLimit': { zh: '限流', en: 'rate-limited' },
+  'settings.mhReasonUpstream': { zh: '上游故障', en: 'upstream outage' },
+  'settings.mhReasonError': { zh: '连续错误', en: 'consecutive errors' },
+  'settings.mhReasonQuota': { zh: '配额耗尽', en: 'quota exhausted' },
+  'settings.mhSuccessRate': { zh: '成功率', en: 'success' },
+  'settings.mhNoTraffic': { zh: '暂无流量', en: 'no traffic yet' },
+  'settings.mhInflight': { zh: '{n} 在途', en: '{n} inflight' },
+  'settings.mhConsecErrors': { zh: '连续 {n} 错', en: '{n} consec errors' },
+  'settings.mhContention': { zh: '争抢 {n}', en: 'contention {n}' },
+  'settings.mhReasonContention': { zh: '项目级争抢', en: 'shared contention' },
+  'settings.mhContentionTip': { zh: '项目级共享额度被其他租户打满导致的 429 次数 — 外部争抢，不计入成功率', en: '429s caused by other tenants saturating the shared project quota — external contention, excluded from the success rate' },
+  'settings.mhRequestsTip': { zh: '本进程累计 {n} 次请求', en: '{n} requests this process' },
   // ── Visibility / model defaults (settings/visibility_defaults.js) ──
   'settings.vdNoIgModels': { zh: '未找到图片生成模型。请在服务商中添加具有 <code>image_gen</code> 能力的模型。', en: 'No image-gen models found. Add a model with the <code>image_gen</code> capability under a provider.' },
   'settings.vdNoChatModels': { zh: '未配置聊天模型。请先添加服务商。', en: 'No chat models configured. Add a provider first.' },
@@ -1280,7 +1599,6 @@ var _i18n = {
   'settings.oauthTokenExchangeNoCmd': { zh: 'Token 交换失败: {reason}（且无法生成手动命令，请重新点击登录）', en: 'Token exchange failed: {reason} (and no manual command could be generated — please click Login again)' },
   'settings.oauthCurlHelp': { zh: '服务器网络无法连接 Anthropic（已被区域封锁）。请在<strong>本机终端（已开代理）</strong>运行下面的命令，再把返回的 JSON（含 <code>access_token</code>）粘贴到上方输入框后点「提交」：', en: 'The server cannot reach Anthropic (geo-blocked). Run the command below in <strong>your local terminal (with proxy on)</strong>, then paste the returned JSON (containing <code>access_token</code>) into the box above and click Submit:' },
   'settings.oauthCopyCmd': { zh: '复制命令', en: 'Copy command' },
-  'settings.oauthCopied': { zh: '已复制', en: 'Copied' },
   'settings.oauthPasteJsonPlaceholder': { zh: '粘贴 curl 返回的 JSON（含 access_token）', en: 'Paste the JSON returned by curl (containing access_token)' },
   'settings.oauthLoggedIn': { zh: '已登录', en: 'Logged in' },
   'settings.oauthGettingToken': { zh: '正在获取 Token…', en: 'Getting token…' },
@@ -1315,6 +1633,12 @@ var _i18n = {
   'settings.hideAll': { zh: '全部隐藏', en: 'Hide All' },
   'settings.igDesc': { zh: '选择在图片生成选择器中显示哪些模型。隐藏的模型仍然可用，只是不会出现在选择器中。', en: 'Choose which models appear in the image generation picker. Hidden models are still usable, just not shown in the picker.' },
   'settings.modelDropdown': { zh: '模型下拉列表', en: 'Model Dropdown' },
+  'settings.probeAllModels': { zh: '测试全部', en: 'Test All' },
+  'settings.probeAllModelsTitle': { zh: '对每个模型发送一条最小请求验证可用性(1 token/次)', en: 'Send a minimal 1-token request to each model to verify reachability' },
+  'settings.mhNeverProbed': { zh: '未测试', en: 'not tested' },
+  'settings.mhStaleTip': { zh: '结果已过期(超过 24 小时),建议重测', en: 'Result is stale (over 24h) — retest recommended' },
+  'settings.mhProbedAt': { zh: '上次测试 {t}', en: 'last tested {t}' },
+  'settings.mhProbing': { zh: '测试中…', en: 'probing…' },
   'settings.modelDropdownDesc': { zh: '选择在模型切换下拉列表中显示哪些模型。隐藏的模型仍然可用，只是不会出现在下拉列表中。', en: 'Choose which models appear in the model switcher dropdown. Hidden models are still usable.' },
   'settings.modelDefaults': { zh: '模型默认', en: 'Model Defaults' },
   'settings.modelDefaultsDesc': { zh: '配置自动回退模型和预设的默认模型。当主模型请求失败时，系统将自动切换到回退模型继续生成。预设默认模型用于快捷切换时的模型选择。留空表示禁用或使用系统默认。', en: 'Configure fallback model and default models. When the primary model fails, the system switches to the fallback model. Leave empty to disable or use system defaults.' },
@@ -1351,6 +1675,21 @@ var _i18n = {
   'settings.authSourcesDesc': { zh: '小红书等需要登录的站点。在你自己的浏览器中登录后粘贴 Cookie 即可连接；之后搜索与抓取链接将使用该会话读取内容。Cookie 仅保存在本地服务器，不会上传。', en: 'Sites that require a login (e.g. Xiaohongshu). Connect by logging in via your OWN browser and pasting the cookie; search and link fetching then use that session. Cookies are stored only on your local server and never uploaded.' },
   'settings.authSourcesEmpty': { zh: '暂无可登录的来源。', en: 'No login-required sources yet.' },
   'settings.authSourcesLoadFail': { zh: '加载失败', en: 'Failed to load' },
+
+  // Internal-host allowlist (SSRF exemption — reachability, NOT credentials)
+  'settings.privateHosts': { zh: '内网主机放行', en: 'Internal Host Allowlist' },
+  'settings.privateHostsDesc': { zh: '默认不允许抓取解析到内网地址的网址（防止 SSRF）。在此填写你确实需要访问的内网主机名，例如 your-llm-gateway.example.com。填父域名可覆盖其子域。此处只开放“能否访问”，不提供登录凭证；需要登录的站点请在上方“需要登录的来源”连接。', en: 'By default the fetcher refuses URLs whose host resolves to an internal address (SSRF protection). List the internal hostnames you do mean to reach, e.g. your-llm-gateway.example.com. A parent domain covers its subdomains. This grants REACHABILITY only, never credentials — for sites needing a login, connect them under "Login-Required Sources" above.' },
+  'settings.privateHostsEmpty': { zh: '尚未放行任何内网主机。', en: 'No internal hosts allowlisted yet.' },
+  'settings.privateHostsLoadFail': { zh: '加载失败', en: 'Failed to load' },
+  'settings.privHostAllowed': { zh: '已放行', en: 'Allowed' },
+  'settings.privHostPaused': { zh: '已停用', en: 'Disabled' },
+  'settings.privHostEnable': { zh: '启用', en: 'Enable' },
+  'settings.privHostDisable': { zh: '停用', en: 'Disable' },
+  'settings.privHostRemove': { zh: '移除', en: 'Remove' },
+  'settings.privHostAdd': { zh: '添加', en: 'Add' },
+  'settings.privHostPlaceholder': { zh: 'your-llm-gateway.example.com', en: 'your-llm-gateway.example.com' },
+  'settings.privHostNeedHost': { zh: '请输入主机名。', en: 'Enter a hostname.' },
+  'settings.privHostSaveFail': { zh: '保存失败', en: 'Failed to save' },
   'common.remove': { zh: '移除', en: 'Remove' },
   'common.saving': { zh: '保存中…', en: 'Saving…' },
   'settings.authSrcConnected': { zh: '已连接', en: 'Connected' },
@@ -1363,12 +1702,14 @@ var _i18n = {
   'settings.authSrcStep1': { zh: '在你自己的浏览器中打开该站点并登录', en: 'Open the site in YOUR browser and log in' },
   'settings.authSrcStep1Generic': { zh: '在你自己的浏览器中登录该站点', en: 'Log in to the site in your own browser' },
   'settings.authSrcOpenLogin': { zh: '打开登录页 ↗', en: 'Open login page ↗' },
-  'settings.authSrcStep2': { zh: '打开开发者工具 (F12) → Network，点任一请求，复制 Request Headers 里完整的 Cookie', en: 'Open DevTools (F12) → Network, click any request, copy the full Cookie from Request Headers' },
-  'settings.authSrcStep3': { zh: '粘贴到下方并保存', en: 'Paste it below and save' },
-  'settings.authSrcKeyCookie': { zh: '关键 Cookie：登录态由 <code>web_session</code> 携带，请确保它在内（连同 <code>a1</code> / <code>webId</code> 一起粘贴最稳妥，直接粘贴整段 Cookie 即可）。', en: 'Key cookie: the login session is carried by <code>web_session</code> — make sure it\'s included (pasting the whole Cookie string, with <code>a1</code> / <code>webId</code>, is safest).' },
-  'settings.authSrcCookiePh': { zh: 'web_session=...; a1=...', en: 'web_session=...; a1=...' },
+  'settings.authSrcStep2Fields': { zh: '打开开发者工具 (F12) → Application → Cookies，找到下面每个 Cookie，逐个复制它的 Value', en: 'Open DevTools (F12) → Application → Cookies, find each cookie below and copy its Value' },
+  'settings.authSrcStep3Fields': { zh: '分别粘贴到对应输入框并保存（只填值，不要带名字或分号）', en: 'Paste each one into its own box and save (value only — no name, no semicolons)' },
+  'settings.authSrcRequired': { zh: '必填', en: 'Required' },
+  'settings.authSrcRecommended': { zh: '建议填写', en: 'Recommended' },
+  'settings.authSrcOptional': { zh: '可选', en: 'Optional' },
+  'settings.authSrcFieldPh': { zh: '粘贴 {name} 的值', en: 'Paste the {name} value' },
+  'settings.authSrcFieldMissing': { zh: '请填写必填 Cookie：', en: 'Please fill in the required cookie(s): ' },
   'settings.authSrcProxyPh': { zh: '可选代理，例如 http://host:port', en: 'Optional proxy, e.g. http://host:port' },
-  'settings.authSrcCookieEmpty': { zh: '请粘贴 Cookie', en: 'Please paste a cookie' },
   'settings.authSrcSaveConnect': { zh: '保存并连接', en: 'Save & connect' },
   'settings.authSrcSaved': { zh: '已连接', en: 'Connected' },
   'settings.authSrcSaveFail': { zh: '保存失败: ', en: 'Save failed: ' },
@@ -1391,7 +1732,7 @@ var _i18n = {
   'settings.sttOpenaiDesc': { zh: '官方 /audio/transcriptions 端点 · 高准确率 · 需公网直连 OpenAI', en: 'Official /audio/transcriptions endpoint · high accuracy · needs direct OpenAI access' },
   'settings.sttGroqDesc': { zh: 'LPU 上的 Whisper · 极快 · 极低价 · 兼容 /audio/transcriptions', en: 'Whisper on LPUs · very fast · very cheap · /audio/transcriptions compatible' },
   'settings.sttOmniName': { zh: 'Omni 对话模型', en: 'Omni chat model' },
-  'settings.sttOmniDesc': { zh: '全模态对话模型内联识别（/chat/completions）· 适合无独立 Whisper 端点的网关（如美团 AIGC gemini-3-flash-preview / LongCat-Flash-Omni）', en: 'Omni chat model, audio sent inline (/chat/completions) · for gateways with no standalone Whisper endpoint (e.g. Meituan AIGC gemini-3-flash-preview / LongCat-Flash-Omni)' },
+  'settings.sttOmniDesc': { zh: '全模态对话模型内联识别（/chat/completions）· 适合无独立 Whisper 端点的网关（如美团 AIGC gemini-3-flash-preview / LongCat-Flash-Omni）', en: 'Omni chat model, audio sent inline (/chat/completions) · for gateways with no standalone Whisper endpoint (e.g. YourProvider AIGC gemini-3-flash-preview / LongCat-Flash-Omni)' },
   'settings.sttCustomName': { zh: '自定义端点', en: 'Custom endpoint' },
   'settings.sttCustomDesc': { zh: '任何兼容 OpenAI /audio/transcriptions 的端点（自建 faster-whisper、vLLM 等）', en: 'Any endpoint compatible with OpenAI /audio/transcriptions (self-hosted faster-whisper, vLLM, …)' },
   'settings.sttModelLabel': { zh: '模型', en: 'Model' },
@@ -1475,6 +1816,7 @@ var _i18n = {
   'pm.recentClearSearch': { zh: '清除搜索', en: 'Clear search' },
   'pm.recentNoMatch': { zh: '无匹配项目', en: 'No matching projects' },
   'pm.recentEmpty': { zh: '暂无最近项目', en: 'No recent projects' },
+  'pm.dragReorder': { zh: '拖动排序 — 最上方为主根目录', en: 'Drag to reorder — the top folder is the root' },
   'settings.accessControl': { zh: '访问控制', en: 'Access Control' },
   'settings.allowedUsers': { zh: '允许的用户', en: 'Allowed Users' },
   'settings.allowedUsersHint': { zh: '飞书 open_id，每行一个 — 留空表示允许所有人', en: 'Feishu open_id, one per line — leave empty to allow everyone' },
@@ -1583,6 +1925,25 @@ var _i18n = {
   'settings.tplSyncAdded': { zh: '新增 {n} 个模型', en: 'added {n} model(s)' },
   'settings.tplSyncUpdated': { zh: '更新 {n} 个模型', en: 'updated {n} model(s)' },
   'settings.tplSyncAliases': { zh: '补全 {n} 个别名', en: 'filled in {n} alias(es)' },
+  'settings.tplSyncFaces': { zh: '补全 {n} 个协议面', en: 'added {n} wire face(s)' },
+  'settings.faceRefusedTitle': { zh: '{n} 个模型未注册（协议面缺失）', en: '{n} model(s) not registered (missing wire face)' },
+  'settings.faceRefusedHint': { zh: '这些模型需要 Anthropic 原生协议面才能保留思考签名。点击「从模板同步」即可补全。', en: 'These models need the Anthropic-native wire face to preserve thinking signatures. Click "Sync from template" to add it.' },
+  'settings.faceChipRefused': { zh: '未注册', en: 'not registered' },
+  'settings.faceChipTitle': { zh: '协议面：{face}\n地址：{url}', en: 'Wire face: {face}\nEndpoint: {url}' },
+  'settings.faceChipPinnedTag': { zh: '已钉选', en: 'pinned' },
+  'settings.faceChipPinnedTitle': { zh: '已手动钉选，覆盖了按模型家族的自动选择', en: 'Manually pinned — overrides the automatic family rule' },
+  'settings.meFace': { zh: '协议面（wire face）', en: 'Wire face' },
+  'settings.meFaceHint': { zh: '决定这个模型走哪条协议线', en: 'which protocol this model dispatches over' },
+  'settings.meFaceAuto': { zh: '自动（按模型家族，推荐）', en: 'Automatic (by model family — recommended)' },
+  'settings.meFacePinWarn': { zh: '⚠️ 手动钉选会覆盖自动规则。把 Claude 模型钉到非 Anthropic 面会丢失思考块签名，导致多轮对话被上游拒绝。', en: '⚠️ A manual pin overrides the automatic rule. Pinning a Claude model to a non-Anthropic face drops thinking-block signatures, which upstream rejects on later turns.' },
+  'settings.wireFaces': { zh: '备用协议面', en: 'Alternate wire faces' },
+  'settings.wireFacesHint': { zh: '同一套密钥、另一条协议线；留空即单面网关', en: 'same keys, another protocol endpoint; empty = single-face gateway' },
+  'settings.addFace': { zh: '+ 协议面', en: '+ Face' },
+  'settings.addFaceTitle': { zh: '新增一条备用协议面', en: 'Add an alternate wire face' },
+  'settings.noFaces': { zh: '未声明备用协议面（单面网关）', en: 'No alternate faces declared (single-face gateway)' },
+  'settings.faceNamePlaceholder': { zh: '面名，如 anthropic', en: 'face name, e.g. anthropic' },
+  'settings.deleteFaceTitle': { zh: '删除这条协议面', en: 'Delete this wire face' },
+  'settings.faceDeleteConfirm': { zh: '删除协议面「{face}」？\n\n有 {n} 个模型正通过它路由：\n{models}\n\n删除后这些模型将无法注册（在双面网关上 Claude 会被拒绝而不是静默降级）。', en: 'Delete wire face "{face}"?\n\n{n} model(s) currently route through it:\n{models}\n\nThey will no longer be registered (on a dual-face gateway Claude is refused rather than silently downgraded).' },
   'settings.tplSyncJoin': { zh: '，', en: ', ' },
   'settings.tplSyncNoChange': { zh: '所有模型已是最新，无需更新。', en: 'All models are up to date, no update needed.' },
   'settings.tplSyncUserAliases': { zh: '\n\n⚠ 以下别名是你手动添加的（模板中没有），请确认它们在网关上确实存在；不存在的会一直返回 HTTP 400：\n  • {list}', en: '\n\n⚠ The following aliases were added by you (not in the template). Confirm they exist on the gateway; missing ones will keep returning HTTP 400:\n  • {list}' },
@@ -1606,22 +1967,43 @@ var _i18n = {
   // ══════════════════════════════════════
   //  Browser Bridge Modal
   // ══════════════════════════════════════
-  'browser.title': { zh: '浏览器桥接', en: 'Browser Bridge' },
-  'browser.desc': { zh: '通过 Chrome 扩展让 AI 读取和交互你的浏览器标签页。', en: 'Use Chrome extension to let AI read and interact with your browser tabs.' },
-  'browser.checking': { zh: '正在检查...', en: 'Checking...' },
-  'browser.downloadExtension': { zh: '下载扩展程序', en: 'Download Extension' },
-  'browser.downloadDesc': { zh: '点击下方按钮下载 ZIP 文件，然后解压。', en: 'Click the button below to download the ZIP file, then extract it.' },
-  'browser.downloadZip': { zh: '下载扩展 ZIP', en: 'Download Extension ZIP' },
-  'browser.installInChrome': { zh: '在 Chrome 中安装', en: 'Install in Chrome' },
-  'browser.installDesc': { zh: '打开 chrome://extensions/ → 启用开发者模式 → 点击加载已解压的扩展程序 → 选择解压后的 browser_extension 文件夹。', en: 'Open chrome://extensions/ → Enable Developer mode → Click Load unpacked → Select the extracted browser_extension folder.' },
-  'browser.verify': { zh: '验证连接', en: 'Verify Connection' },
-  'browser.verifyDesc': { zh: '点击工具栏中的扩展图标，应显示已连接。然后在此处开启浏览器功能。', en: 'Click the extension icon in the toolbar — it should show Connected. Then enable browser features here.' },
-  'browser.aiFeatures': { zh: '浏览器桥接的 AI 功能', en: 'Browser Bridge AI Features' },
-  'browser.listTabs': { zh: '列出所有打开的标签页（标题、URL）', en: 'List all open tabs (title, URL)' },
-  'browser.readTab': { zh: '读取任意标签页的文本内容，或使用 CSS 选择器', en: 'Read text content of any tab, or use CSS selectors' },
-  'browser.executeJs': { zh: '在任意标签页中执行 JavaScript（点击、填充表单、提取数据）', en: 'Execute JavaScript in any tab (click, fill forms, extract data)' },
   'browser.close': { zh: '关闭', en: 'Close' },
-  'browser.enable': { zh: '启用浏览器桥接', en: 'Enable Browser Bridge' },
+
+  // ══════════════════════════════════════
+  //  Local Control (merged browser bridge + desktop agent)
+  //  ONE surface for "let Tofu act on my machine". The *Setup keys below are
+  //  mutually exclusive: exactly one is rendered, chosen by detected state.
+  // ══════════════════════════════════════
+  'local.title': { zh: '本机控制', en: 'Local Control' },
+  'local.desc': { zh: '让 AI 操作你的浏览器与电脑', en: 'Let AI drive your browser and computer' },
+  'local.modalDesc': { zh: '让 AI 读取并操作你自己的设备。两项能力互相独立，可分别开启。', en: 'Let AI read and act on your own device. The two capabilities are independent — enable either on its own.' },
+  'local.browserName': { zh: '浏览器标签页', en: 'Browser tabs' },
+  'local.desktopName': { zh: '这台电脑', en: 'This computer' },
+  'local.browserAbout': { zh: '读取你已打开的标签页内容，并代你点击、填表单、切换页面。', en: 'Reads the tabs you already have open, and can click, fill forms and navigate for you.' },
+  'local.desktopAbout': { zh: '浏览与读写本机文件、截屏、打开应用、运行命令（写入与执行需单独授权）。', en: 'Browses and reads local files, takes screenshots, opens apps and runs commands (writing and running need separate permission).' },
+  'local.switchBlocked': { zh: '连接成功后才能开启 —— 现在打开，AI 也拿不到任何工具。', en: 'Available once connected — switching it on now would give the AI no tools.' },
+  'local.switchStale': { zh: '已开启，但当前未连接 —— AI 现在拿不到这项能力的任何工具。可随时关闭。', en: 'On, but nothing is connected — the AI gets no tools from this right now. You can switch it off at any time.' },
+  'local.badgeStale': { zh: '已开启，但当前未连接 —— AI 实际拿不到这些工具。', en: 'On, but not connected — the AI is not actually getting these tools.' },
+  'local.connected': { zh: '已连接', en: 'Connected' },
+  'local.connectedN': { zh: '已连接 {n} 个', en: '{n} connected' },
+  'local.notInstalled': { zh: '尚未安装', en: 'Not installed' },
+  'local.notRunning': { zh: '未运行', en: 'Not running' },
+  'local.unreachable': { zh: '无法连接服务器', en: 'Cannot reach server' },
+  'local.browserOpenPageBtn': { zh: '帮我打开扩展管理页（自动复制路径）', en: 'Open the extensions page for me (path auto-copied)' },
+  'local.browserLoadUnpacked': { zh: '剩下的三步 {browser} 不允许网页代劳：① 打开右上角「开发者模式」→ ② 点「加载已解压的扩展程序」→ ③ 粘贴路径（已自动复制）选择这个文件夹：', en: 'Three clicks remain that {browser} forbids any web page from doing for you: ① turn on Developer mode → ② click "Load unpacked" → ③ paste the path (already copied) and pick this folder:' },
+  'local.browserPageOpened': { zh: '已在你的浏览器打开扩展管理页，路径已复制 —— 剩下三步只能你来点。', en: 'The extensions page is open in your browser and the path is copied — the remaining three clicks are yours.' },
+  'local.browserPageOpenFailed': { zh: '没能替你打开 —— 请自己打开浏览器的扩展管理页，路径已复制。', en: 'Could not open it for you — open your browser\'s extensions page yourself; the path is copied.' },
+  'local.browserDownload': { zh: '下载扩展并解压，然后在 Chrome / Edge 里打开扩展管理页 → 开启「开发者模式」→「加载已解压的扩展程序」→ 选择解压出的文件夹。', en: 'Download and unzip the extension, then open the extensions page in Chrome / Edge → turn on Developer mode → "Load unpacked" → pick the unzipped folder.' },
+  'local.desktopTray': { zh: '右键点击系统托盘里的 Tofu 图标 → 勾选「Enable Computer Control」。', en: 'Right-click the Tofu icon in your system tray → tick "Enable Computer Control".' },
+  'local.desktopSource': { zh: '当前 Tofu 以源码方式运行。安装桌面版后即可在系统托盘一键开启「Enable Computer Control」。', en: 'Tofu is running from source. Install the desktop app to get the tray\'s one-click "Enable Computer Control".' },
+  'local.desktopFloor': { zh: '安装桌面版后，即可在系统托盘一键开启「Enable Computer Control」，让 AI 操作这台电脑。', en: 'Install the desktop app, then switch on "Enable Computer Control" from the system tray to let the AI drive this computer.' },
+  'local.desktopRemote': { zh: 'Tofu 运行在远程服务器上。在你自己的电脑安装桌面版，再用下面这行把它连过来：', en: 'Tofu runs on a remote server. Install the desktop app on your own machine, then connect it with the line below:' },
+  'local.desktopDownload': { zh: '下载桌面版 ↗', en: 'Download the desktop app ↗' },
+  'local.desktopDownloadFor': { zh: '下载桌面版', en: 'Download' },
+  'local.desktopDownloadAll': { zh: '查看全部下载 ↗', en: 'See all downloads ↗' },
+  'local.desktopArchAmbiguous': { zh: '浏览器没告诉我们这台 Mac 的芯片型号（Apple Silicon 也会自称 Intel）。Apple 芯片（M1/M2/M3…）选 arm64，Intel 芯片选 x86_64；在「关于本机」里可以看到。', en: 'Your browser did not reveal this Mac’s chip (Apple Silicon reports itself as Intel too). Pick arm64 for Apple chips (M1/M2/M3…) and x86_64 for Intel — see “About This Mac”.' },
+  'local.mintToken': { zh: '生成连接命令', en: 'Generate connect line' },
+  'local.permNote': { zh: '写文件、运行命令、控制鼠标键盘默认全部关闭；需要时在托盘菜单的「Permissions」里单独授予。', en: 'Writing files, running commands and mouse/keyboard control are all OFF by default — grant them individually in the tray\'s "Permissions" menu when needed.' },
 
   // ══════════════════════════════════════
   //  Memory Modal
@@ -1658,6 +2040,7 @@ var _i18n = {
   'mobile.high': { zh: '高', en: 'High' },
   'mobile.xhigh': { zh: '超高', en: 'xHigh' },
   'mobile.max': { zh: '最大', en: 'Max' },
+  'mobile.ultra': { zh: '至臻', en: 'Ultra' },
   'mobile.aiEnhance': { zh: 'AI 增强', en: 'AI Enhance' },
   'mobile.memoryInject': { zh: '记忆注入', en: 'Memory Inject' },
   'mobile.memoryInjectDesc': { zh: '注入累积经验', en: 'Inject accumulated experience' },
@@ -1737,6 +2120,46 @@ var _i18n = {
   'paper.describeLabel': { zh: '记不清标题？描述一下这篇论文', en: 'Forgot the title? Describe the paper' },
   'paper.describePlaceholder': { zh: '例如：今年 NeurIPS 有几篇关于扩散语言模型的论文拿了最佳/杰出论文，但我不记得标题了……', en: 'e.g. a few diffusion language model papers won Best/Outstanding at NeurIPS this year, but I forget the titles…' },
   'paper.describeBtn': { zh: '推荐论文', en: 'Recommend papers' },
+  // Auto-research (direction → harvest/survey/ideate). Shares the landing
+  // describe box: recommend FINDS papers, research RUNS the whole pipeline.
+  'paper.research.startBtn': { zh: '自动科研', en: 'Auto-research' },
+  'paper.research.subtitle': { zh: '爬取文献 → 综述与空白地图 → 新颖性打分', en: 'Harvest → survey + gap map → novelty-scored ideas' },
+  'paper.research.running': { zh: '正在研究…', en: 'Researching…' },
+  'paper.research.finished': { zh: '研究完成', en: 'Research complete' },
+  'paper.research.abort': { zh: '停止', en: 'Stop' },
+  'paper.research.harvest': { zh: '爬取入库', en: 'Harvest' },
+  'paper.research.survey': { zh: '综述与空白地图', en: 'Survey' },
+  'paper.research.ideate': { zh: '创新点与新颖性闸', en: 'Ideate' },
+  'paper.research.openFolder': { zh: '打开文献文件夹', en: 'Open paper folder' },
+  // The finished-panel artifact surface. The pipeline pays many LLM calls for
+  // these; before this they were fetched and then dropped by the renderer,
+  // which showed only three integers.
+  'paper.research.acceptedTitle': { zh: '通过闸的创新点', en: 'Ideas that cleared the gate' },
+  'paper.research.untitled': { zh: '(无标题)', en: '(untitled)' },
+  'paper.research.mechanism': { zh: '机理', en: 'Mechanism' },
+  'paper.research.novelty': { zh: '新颖性主张', en: 'Novelty claim' },
+  'paper.research.prediction': { zh: '可证伪预测', en: 'Falsifiable prediction' },
+  'paper.research.whyNotAB': { zh: '为何不是缝合', en: 'Why not A+B' },
+  'paper.research.noIdeas': { zh: '本次没有创新点通过闸 —— 宁缺毋滥,这是诚实的结果,不是故障。', en: 'No idea cleared the gate this run — an honest zero, not a failure.' },
+  // Collapsed by default: a 0-accepted / 6-rejected run must be legible at a
+  // glance without a wall of failures dominating the panel.
+  'paper.research.rejectedSummary': { zh: '{n} 个被淘汰(最高 {best} / 阈值 {threshold})', en: '{n} rejected (best {best} / threshold {threshold})' },
+  'paper.research.rejectReason': { zh: '淘汰理由', en: 'Reason' },
+  'paper.research.rejectStage': { zh: '淘汰于', en: 'Gate' },
+  'paper.research.surveyTitle': { zh: '综述全文', en: 'Full survey' },
+  'paper.research.gapsTitle': { zh: '空白地图', en: 'Open-gap map' },
+  // Past-research index. The persisted rows are keyed by a ONE-WAY hash of the
+  // direction, so without this list a user who forgot their exact wording
+  // could never reach their own artifacts again.
+  'paper.research.recentTitle': { zh: '最近的研究', en: 'Recent research' },
+  'paper.research.recentHint': { zh: '点击任意方向即可重新打开它的产物', en: 'Click any direction to reopen its artifacts' },
+  'paper.research.recentCounts': { zh: '{accepted} 个创新点 / {rejected} 个淘汰', en: '{accepted} ideas / {rejected} rejected' },
+  'paper.research.restoring': { zh: '正在读取已保存的研究…', en: 'Loading saved research…' },
+  'paper.research.restoreFailed': { zh: '没有找到该方向的已保存研究', en: 'No saved research found for this direction' },
+  // A degraded job keeps status='done' by design, so this banner is the ONLY
+  // honest signal that the pipeline misfired (e.g. the structural gate
+  // rejected every idea before the expensive gates ever ran).
+  'paper.research.degraded': { zh: '产物可用，但流水线有问题', en: 'Delivered, but the pipeline was degraded' },
   'paper.recommending': { zh: '正在理解你的描述并核对 arXiv…', en: 'Interpreting your description & verifying against arXiv…' },
   'paper.recommendInterpreting': { zh: '正在理解你的描述…', en: 'Interpreting your description…' },
   'paper.recommendResearching': { zh: '正在检索最新文献（第 {n} 次搜索）…', en: 'Researching current literature (search {n})…' },
@@ -1820,6 +2243,114 @@ var _i18n = {
   'paper.reviewTranslateFailed': { zh: '翻译失败', en: 'Translation failed' },
   'paper.reportNoText': { zh: '暂无论文文本，请先加载 PDF。', en: 'No paper text available. Load a PDF first.' },
   'paper.retry': { zh: '重试', en: 'Retry' },
+  // Video Abstract tab (paper video: report → narrated MG video; P3)
+  'paper.tabVideo': { zh: '视频', en: 'Video' },
+  'paper.videoHint': { zh: '把这篇论文变成一条配音 MG 动画短视频——分镜、图表与动态文字。', en: 'A short narrated motion-graphic video of this paper — beats, charts and kinetic type.' },
+  'paper.videoHeroTitle': { zh: '把这篇论文看给你', en: 'Watch this paper' },
+  'paper.videoNeedReport': { zh: '视频摘要由分析报告改编——请先生成报告。', en: 'The video abstract is adapted from the analysis report — generate the report first.' },
+  'paper.videoGoReport': { zh: '去生成报告', en: 'Go generate the report' },
+  'paper.videoGenerate': { zh: '生成视频', en: 'Generate video' },
+  'paper.videoNarration': { zh: '配音', en: 'Narration' },
+  'paper.videoBurnIn': { zh: '烧录字幕', en: 'Burn-in subtitles' },
+  'paper.videoQualityDraft': { zh: '草稿（快）', en: 'Draft (fast)' },
+  'paper.videoQualityStandard': { zh: '标准', en: 'Standard' },
+  'paper.videoQualityHigh': { zh: '高画质', en: 'High' },
+  'paper.videoStarting': { zh: '正在启动…', en: 'Starting…' },
+  'paper.videoFailed': { zh: '视频生成失败', en: 'Video generation failed' },
+  'paper.videoLookupFailed': { zh: '视频状态查询失败——请查看服务器日志。', en: 'Video status lookup failed — check the server log.' },
+  'paper.videoRetry': { zh: '重试', en: 'Retry' },
+  'paper.videoDownload': { zh: '下载视频', en: 'Download video' },
+  'paper.videoDownloadSrt': { zh: '下载字幕', en: 'Download SRT' },
+  'paper.videoSilent': { zh: '无声', en: 'silent' },
+  'paper.videoNoTts': { zh: '未配置 TTS 语音槽位——本次将生成无声视频。', en: 'No TTS voice slot is configured — this run generates a silent video.' },
+  'paper.videoScenesTitle': { zh: '分镜——预览或单独重渲', en: 'Scenes — preview or re-render one' },
+  'paper.videoRegen': { zh: '重渲', en: 'Re-render' },
+  'paper.videoRegening': { zh: '重渲中…', en: 'Re-rendering…' },
+  'paper.videoPhaseParse': { zh: '解析字幕', en: 'Parsing subtitles' },
+  'paper.videoPhaseStoryboard': { zh: '分镜中', en: 'Storyboarding' },
+  'paper.videoPhaseNarrate': { zh: '配音中', en: 'Voicing scenes' },
+  'paper.videoPhaseCompose': { zh: '合成镜头', en: 'Composing scenes' },
+  'paper.videoPhaseRender': { zh: '渲染镜头', en: 'Rendering scenes' },
+  'paper.videoPhaseConcat': { zh: '拼接镜头', en: 'Joining scenes' },
+  'paper.videoPhaseMux': { zh: '混流中', en: 'Mixing audio' },
+  'paper.videoPhaseBurnIn': { zh: '烧录字幕', en: 'Burning subtitles' },
+  'paper.videoPhaseRegen': { zh: '重渲镜头', en: 'Re-rendering scene' },
+
+  // Podcast tab (paper podcast: report → spoken script → TTS audio)
+  'paper.tabPodcast': { zh: '播客', en: 'Podcast' },
+  'paper.podcastHint': { zh: '把这篇论文变成一档单人有声精读课——适合通勤路上或睡前听。', en: 'A solo spoken deep-read of this paper — for the commute or before sleep.' },
+  'paper.podcastModeShort': { zh: '短版 · 约 5 分钟', en: 'Short · ~5 min' },
+  'paper.podcastModeFull': { zh: '完整 · 约 15 分钟', en: 'Full · ~15 min' },
+  'paper.podcastVoice': { zh: '音色（可选）', en: 'voice (optional)' },
+  'paper.podcastGenerate': { zh: '生成播客', en: 'Generate podcast' },
+  'paper.podcastRegenerate': { zh: '重新生成', en: 'Regenerate' },
+  'paper.podcastAbort': { zh: '中止', en: 'Abort' },
+  'paper.podcastScriptPhase': { zh: '正在撰写口播稿…', en: 'Writing the spoken script…' },
+  'paper.podcastAudioPhase': { zh: '正在合成语音', en: 'Synthesizing audio' },
+  'paper.podcastPhaseSource': { zh: '素材', en: 'Material' },
+  'paper.podcastPhaseScript': { zh: '剧本', en: 'Script' },
+  'paper.podcastPhaseAudio': { zh: '配音', en: 'Voice-over' },
+  'paper.podcastStepDraft': { zh: '初稿完成', en: 'draft done' },
+  'paper.podcastStepValidate': { zh: '质检中', en: 'checking quality' },
+  'paper.podcastStepRevise': { zh: '修订中', en: 'revising' },
+  'paper.podcastStepCritic': { zh: '审听编辑中', en: 'editor review' },
+  'paper.podcastStreamSegments': { zh: '小节', en: 'segment' },
+  'paper.podcastStreamChars': { zh: '字', en: 'chars' },
+  'paper.podcastLost': { zh: '任务丢失或连接已断开——生成任务的状态已无法查询。', en: 'Task lost or connection dropped — the generation task can no longer be reached.' },
+  'paper.podcastInterrupted': { zh: '上次生成被服务器重启打断。', en: 'The last generation was cut short by a server restart.' },
+  'paper.podcastRecheck': { zh: '重新查询状态', en: 'Re-check status' },
+  'paper.mediaElapsed': { zh: '已用', en: 'elapsed' },
+  'paper.mediaLastActive': { zh: '最后活动', en: 'last activity' },
+  'paper.mediaStillRunning': { zh: '仍在运行(这一步通常要几分钟)', en: 'still running (this step can take minutes)' },
+  'paper.mediaEtaPrefix': { zh: '约', en: '≈' },
+  'paper.podcastNeedReport': { zh: '播客由分析报告改编——请先生成报告。', en: 'The podcast is adapted from the analysis report — generate the report first.' },
+  'paper.podcastGoReport': { zh: '去生成报告', en: 'Go generate the report' },
+  'paper.podcastHeroTitle': { zh: '把这篇论文讲给你听', en: 'Listen to this paper' },
+  'paper.podcastStepReport': { zh: '1. 生成报告', en: '1. Generate the report' },
+  'paper.podcastStepPodcast': { zh: '2. 改编播客', en: '2. Adapt into a podcast' },
+  'paper.podcastLookupFailed': { zh: '播客状态查询失败——请查看服务器日志。', en: 'Podcast status lookup failed — check the server log.' },
+  'paper.podcastRetry': { zh: '重试', en: 'Retry' },
+  'paper.podcastNoTts': { zh: '未配置 TTS 语音合成槽位——本次仅生成剧本与逐字稿（无音频）。', en: 'No TTS voice slot is configured — this run generates the script + transcript only (no audio).' },
+  'paper.podcastLowConfidence': { zh: '质检未完全通过，部分内容可能不够精确。', en: 'QA gates did not fully pass — some content may be imprecise.' },
+  'paper.podcastDownloadAudio': { zh: '下载音频', en: 'Download audio' },
+  'paper.podcastExportScript': { zh: '导出剧本 (md)', en: 'Export script (md)' },
+  'paper.podcastSleepTimer': { zh: '睡眠定时', en: 'Sleep timer' },
+  'paper.podcastSleepOff': { zh: '关闭', en: 'Off' },
+  'paper.podcastSleepMin': { zh: '分钟', en: 'min' },
+  'paper.podcastFailed': { zh: '播客生成失败', en: 'Podcast generation failed' },
+  // ── Media studio console (podcast + video tabs, 2026-07 redesign) ──
+  'paper.podcastStudioTitle': { zh: '播客演播室', en: 'Podcast studio' },
+  'paper.videoStudioTitle': { zh: '视频制片台', en: 'Video studio' },
+  'paper.podcastMakingTitle': { zh: '播客制作中', en: 'Producing your podcast' },
+  'paper.videoMakingTitle': { zh: '视频制作中', en: 'Producing your video' },
+  'paper.mediaOptDuration': { zh: '时长', en: 'Duration' },
+  'paper.mediaOptLang': { zh: '语言', en: 'Language' },
+  'paper.mediaOptVoice': { zh: '音色', en: 'Voice' },
+  'paper.mediaOptModel': { zh: '模型', en: 'Model' },
+  'paper.mediaModelTitle': { zh: '生成所用的模型', en: 'Model used for generation' },
+  'paper.mediaOptQuality': { zh: '画质', en: 'Quality' },
+  'paper.mediaOptExtras': { zh: '选项', en: 'Options' },
+  'paper.mediaOptional': { zh: '可选', en: 'optional' },
+  'paper.podcastModeShortName': { zh: '短版速听', en: 'Quick brief' },
+  'paper.podcastModeShortSub': { zh: '约 5 分钟 · 通勤路上', en: '~5 min · for the commute' },
+  'paper.podcastModeFullName': { zh: '完整深读', en: 'Full deep-read' },
+  'paper.podcastModeFullSub': { zh: '约 15 分钟 · 睡前细听', en: '~15 min · before sleep' },
+  'paper.videoQualityDraftSub': { zh: '快速预览', en: 'fast preview' },
+  'paper.videoQualityStandardSub': { zh: '推荐', en: 'recommended' },
+  'paper.videoQualityHighSub': { zh: '更慢 · 更精细', en: 'slower, finer' },
+  'paper.videoNarrationSub': { zh: 'TTS 语音旁白', en: 'TTS voice-over' },
+  'paper.videoBurnInSub': { zh: '字幕嵌入画面', en: 'subtitles baked into the frame' },
+  // Composition tier — a SEPARATE axis from the draft/standard/high RENDER
+  // preset above (that one is bitrate/scale and says nothing about layout).
+  'paper.videoVisual': { zh: '画面构图', en: 'Composition' },
+  'paper.videoVisualAuthored': { zh: '精心设计（推荐）', en: 'Designed (recommended)' },
+  'paper.videoVisualAuthoredSub': { zh: '每个镜头单独排版', en: 'bespoke layout per scene' },
+  'paper.videoVisualTemplate': { zh: '纯文字卡', en: 'Plain cards' },
+  'paper.videoVisualTemplateSub': { zh: '最快 · 每张一行字', en: 'fastest, one line per card' },
+  // Product-quality axis: the film played, but is not what was asked for.
+  'paper.videoDegraded': { zh: '这部片子生成完成了，但没有达到所要求的画质。',
+                           en: 'This film played, but was not produced at the quality requested.' },
+  'paper.podcastTranscriptTitle': { zh: '逐字稿', en: 'Transcript' },
   // Reading-time estimate + progress bar (Report tab)
   'paper.readTimeTotal': { zh: '阅读时长约 {min}', en: '{min} read' },
   'paper.readTimeLeft': { zh: '剩余约 {min}', en: '{min} left' },
@@ -2203,7 +2734,112 @@ var _i18n = {
   'stream.phase.chars': { zh: '{n} 字符', en: '{n} chars' },
   'stream.phase.waitingModel': { zh: '已发送给模型，等待开始回复…', en: 'Sent to the model, waiting for it to start replying…' },
   'stream.phase.retrying': { zh: '正在重试…', en: 'Retrying…' },
+  // Model-fallback EARLY in-bubble banner (see llm_fallback model_fallback
+  // SSE event + streaming_ui.js data-zone="fallback"). NOT a toast.
+  'stream.fallback.banner': { zh: '主模型请求失败，已自动切换', en: 'Primary model failed — auto-switched' },
+  'stream.fallback.bannerTip': { zh: '原模型 {from} 失败，已回退到 {to}\n原因：{reason}', en: 'Original model {from} failed, fell back to {to}\nReason: {reason}' },
   'stream.phase.waiting': { zh: '等待中…', en: 'Waiting…' },
+  // Backend-emitted phase.detail localizations. Each corresponds to a
+  // `detailKey` shipped alongside a legacy English `detail` fallback so
+  // headless clients that don't localize still render sensible text.
+  'stream.phase.generatingResponse': {
+    zh: '正在生成回复…',
+    en: 'Generating response…',
+  },
+  'stream.phase.analyzingRound': {
+    zh: '正在分析结果并规划下一步…（第 {round} 轮）',
+    en: 'Analyzing results and planning next step… (round {round})',
+  },
+  'stream.phase.waitingForModel': {
+    zh: '已发送给 {model}，等待开始回复…',
+    en: 'Sent to {model}, waiting for it to start replying…',
+  },
+  // First-byte waiting heartbeat (backend on_waiting → retrying PHASE):
+  // a wedged/slow upstream shows a LIVE label instead of the static
+  // waiting_model spinner for the whole wait. {elapsed} is seconds since
+  // request send; the Reason variant carries the slot's known cause.
+  'stream.phase.waitingFirstByte': {
+    zh: '已等待 {elapsed}s：{model} 尚未返回首个字节…',
+    en: 'Waiting {elapsed}s — {model} has not sent its first byte yet…',
+  },
+  'stream.phase.waitingFirstByteReason': {
+    zh: '已等待 {elapsed}s：{model} 尚未返回首个字节（{reason}）',
+    en: 'Waiting {elapsed}s — no first byte from {model} yet ({reason})',
+  },
+  // Mid-stream stall heartbeat: the model already sent text and then went
+  // quiet. There is no read timeout, so this wait is unbounded by design —
+  // the beat is what proves the turn is still alive (and what keeps the
+  // stuck-task reaper from force-failing it). Press Stop to end it.
+  'stream.phase.stalledMidStream': {
+    zh: '已停顿 {elapsed}s：{model} 回复到一半没继续（仍在等，可随时点停止）…',
+    en: 'Paused {elapsed}s — {model} stopped mid-reply (still waiting; press Stop to end it)…',
+  },
+  'stream.phase.stalledMidStreamReason': {
+    zh: '已停顿 {elapsed}s：{model} 回复到一半没继续（{reason}）',
+    en: 'Paused {elapsed}s — {model} stopped mid-reply ({reason})',
+  },
+  // Intent-stall nudge (backend _analyse.py → intent_stall_nudge PHASE):
+  // the previous tool call did not run and the model answered with prose
+  // only, so the loop re-drives it ONCE. Transient status, not an error.
+  'stream.phase.intentStallNudge': {
+    zh: '↻ 上一个工具未执行成功，正在提示模型继续…',
+    en: '↻ Previous tool didn\'t run — nudging the model to continue…',
+  },
+  'stream.phase.compactingWindow': {
+    zh: '正在压缩早期上下文以适配窗口…',
+    en: 'Compressing earlier context to fit the window…',
+  },
+  'stream.phase.reactiveCompact': {
+    zh: '⚡ 上下文超长，已自动压缩（reactive compact {attempt}/{max}）…',
+    en: '⚡ Prompt too long — auto-compacted (reactive compact {attempt}/{max})…',
+  },
+  'stream.phase.retryRateLimited': {
+    zh: '⏳ 模型 {model} 限流中，正在排队重试（第 {attempt} 次）…',
+    en: '⏳ Model {model} is rate-limited — queued retry (attempt {attempt})…',
+  },
+  'stream.phase.retryReason': {
+    zh: '重试中…{reason}（{model}，第 {attempt} 次）',
+    en: 'Retrying… {reason} ({model}, attempt {attempt})',
+  },
+  'stream.phase.retryGeneric': {
+    zh: '正在重试 {model}…（第 {attempt} 次）',
+    en: 'Retrying {model}… (attempt {attempt})',
+  },
+  // Typed retry CAUSES (`reasonKey`): the dispatcher passes short English log
+  // tokens as `reason`; the backend maps the known ones to these stable keys
+  // so the HUD localizes the cause instead of leaking raw jargon.
+  'stream.retryReason.endpointUnreachable': {
+    zh: '连不上模型服务器（网关/网络波动，正在自动切换通道）',
+    en: 'Model endpoint unreachable (gateway/network issue — switching channel)',
+  },
+  'stream.retryReason.requestTimedOut': {
+    zh: '请求超时',
+    en: 'Request timed out',
+  },
+  'stream.retryReason.waitingForModel': {
+    zh: '等待模型（限流排队中）',
+    en: 'Waiting for model (rate-limited)',
+  },
+  'stream.retryReason.keyBalanceExhausted': {
+    zh: '密钥余额/配额已用尽',
+    en: 'Key balance exhausted',
+  },
+  'stream.retryReason.rateLimited': {
+    zh: '请求被限流 (429)',
+    en: 'Rate limited (429)',
+  },
+  'stream.retryReason.upstreamError': {
+    zh: '上游服务错误，正在换线重试',
+    en: 'Upstream error — rotating channel',
+  },
+  'stream.retryReason.waitingBackoff': {
+    zh: '等待模型（错误退避中，非限流）',
+    en: 'Waiting for model (error backoff, not rate-limit)',
+  },
+  'stream.retryReason.waitingSharedProject': {
+    zh: '等待模型（项目级共享额度争抢中，非本 key 问题）',
+    en: 'Waiting for model (shared project contention, not this key)',
+  },
   'stream.thinking.active': { zh: '思考中...', en: 'Thinking...' },
   'stream.thinking.done': { zh: '思考过程', en: 'Thinking Process' },
   'stream.roundMessages': { zh: 'Round {round} · {n}条', en: 'Round {round} · {n} msgs' },
@@ -2218,6 +2854,11 @@ var _i18n = {
   'project.hgUnanswered': { zh: '未回答', en: 'Unanswered' },
   'project.hgAnswered': { zh: '✓ 已回答', en: '✓ Answered' },
   'project.hgWaitingContinue': { zh: '等待 AI 继续…', en: 'Waiting for the AI to continue…' },
+  // ── Scannable QR recovered from terminal output (tool_rounds.js
+  //    _renderQrStrip). Shown above the code while a scan-to-login command
+  //    is still blocking for the scan. ──
+  'project.qrScan': { zh: '可扫描的二维码', en: 'Scannable QR code' },
+  'project.qrScanMulti': { zh: '个可扫描的二维码', en: 'scannable QR codes' },
   // ── Message action bar (chat_render.js .message-actions) ──
   'msgAction.copy': { zh: '复制', en: 'Copy' },
   'msgAction.copyTitle': { zh: '复制', en: 'Copy' },
@@ -2227,12 +2868,16 @@ var _i18n = {
   'msgAction.regenTitle': { zh: '从这条消息重新生成回复', en: 'Regenerate response from this message' },
   'msgAction.continue': { zh: '继续', en: 'Continue' },
   'msgAction.continueTitle': { zh: '从中断处继续生成', en: 'Continue generating from where it left off' },
+  'msgAction.continueLosslessTitle': { zh: '无损续写：接着上次的文本继续，不重写已生成内容', en: 'Lossless resume: continues the SAME text, keeping everything already generated' },
+  'msgAction.continueFromRoundTitle': { zh: '从上次工具调用检查点继续（丢弃其后的草稿文本）', en: 'Resume from the last tool-call checkpoint (discards the draft text after it)' },
+  'msgAction.regenerateTitle': { zh: '此回复无法续接，将重新生成', en: 'This response cannot be resumed — it will be regenerated' },
   'msgAction.translate': { zh: '翻译', en: 'Translate' },
   'msgAction.original': { zh: '原文', en: 'Original' },
   'msgAction.translateTitle': { zh: '翻译', en: 'Translate' },
   'msgAction.showOriginalTitle': { zh: '显示原文', en: 'Show Original' },
   'msgAction.export': { zh: '导出', en: 'Export' },
   'msgAction.exportTitle': { zh: '导出为手机屏幕图片', en: 'Export as phone-screen images' },
+  'msgAction.inspect': { zh: '检视', en: 'Inspect' },
   'msgAction.deleteTurnTitle': { zh: '删除此轮对话', en: 'Delete this turn' },
   'msgAction.deleteMsgTitle': { zh: '删除此消息', en: 'Delete this message' },
   'branch.add': { zh: '分支', en: 'Branch' },
@@ -2293,6 +2938,24 @@ var _i18n = {
   'initiator.timer': { zh: '定时器', en: 'Timer' },
   'initiator.brain': { zh: '项目大脑', en: 'Project Brain' },
   'initiator.swarm': { zh: '自动续跑', en: 'Auto-continued' },
+  // In-timeline chip (tool_rounds.js _renderStallNudgeRow) marking an
+  // intent-stall nudge: the loop re-drove a model that said what it would do
+  // and then stopped. System-authored, so the copy must read as a SYSTEM
+  // action — never as something the user said.
+  'stall.injectRowLabel': { zh: '已提示模型继续', en: 'Nudged the model to continue' },
+  'stall.reasonWithTool': {
+    zh: '`{tool}` 未执行成功，而下一轮只有文字、没有工具调用——模型说了要做，然后停下了。',
+    en: '`{tool}` did not run, and the next round was text only — the model said what it would do, then stopped.',
+  },
+  'stall.reasonGeneric': {
+    zh: '上一个工具调用未执行成功，而下一轮只有文字。',
+    en: 'The previous tool call did not run, and the next round was text only.',
+  },
+  'stall.bound': {
+    zh: '每回合最多一次——若模型再次停下，就允许它结束。',
+    en: 'At most once per turn — if the model stalls again it is allowed to stop.',
+  },
+  'stall.promptLabel': { zh: '发给模型的内容', en: 'Sent to the model' },
   // In-timeline chip (tool_rounds.js _renderPeerInjectRow) for a peer message
   // delivered at a round boundary of a LIVE turn (Pillar #6 fast-path lane) —
   // distinct from the queue-lane .peer-msg-banner user bubble.
@@ -2332,6 +2995,7 @@ var _i18n = {
   'swarm.phase.error': { zh: '错误', en: 'Error' },
   'swarm.phase.queued': { zh: '排队中', en: 'Queued' },
   'swarm.phase.running': { zh: '工作中…', en: 'Working…' },
+  'swarm.phase.retrying': { zh: '重试中…', en: 'Retrying…' },
   'swarm.phase.noResult': { zh: '无结果', en: 'No result' },
   'swarm.autoContinue': { zh: '子智能体完成后自动继续', en: 'Continued automatically after sub-agents finished' },
 
@@ -2347,6 +3011,11 @@ var _i18n = {
   'queue.cancelMsg': { zh: '取消此消息', en: 'Cancel this message' },
   'queue.imagesCount': { zh: '{n} 张图片', en: '{n} images' },
   'queue.syncedToServer': { zh: '已同步到服务器', en: 'Synced to server' },
+  // Queue bar collapse toggle + brain-dispatch attribution
+  // (main/main_send_pipeline.js renderPendingQueueUI).
+  'queue.collapse': { zh: '收起队列', en: 'Collapse queue' },
+  'queue.expand': { zh: '展开队列', en: 'Expand queue' },
+  'queue.fromWorkflow': { zh: '项目大脑派发', en: 'Brain dispatch' },
   // ── Log-noise pre-send confirm dialog (main/main_send_pipeline.js) ──
   'send.logNoiseConfirm': { zh: '检测到日志噪音，可节省 {chars} 字符（{pct}%）\n\n清理项: {ops}\n\n点击「确定」清理后发送，「取消」保持原文发送。', en: 'Log noise detected — can save {chars} characters ({pct}%)\n\nCleanup: {ops}\n\nClick "OK" to clean then send, "Cancel" to send as-is.' },
   'send.logNoiseClean': { zh: '清理并发送', en: 'Clean & send' },
@@ -2496,6 +3165,9 @@ var _i18n = {
   'mcp.fieldDesc': { zh: '描述', en: 'Description' },
   'mcp.fieldDescHint': { zh: '（可选）', en: '(optional)' },
   'mcp.saveConnect': { zh: '保存并连接', en: 'Save & Connect' },
+  'mcp.obtainKey': { zh: '去申请 Key', en: 'Get a key' },
+  'mcp.suggestTitle': { zh: '从这几个开始（都能自助完成安装）', en: 'Start with these — all installable on your own' },
+  'mcp.sharedCredential': { zh: '「{name}」已保存同一个凭证，留空即可复用，无需重新申请', en: 'Already saved by “{name}” — leave blank to reuse it; no need to apply again' },
   'mcp.installConnect': { zh: '安装并连接', en: 'Install & Connect' },
   'mcp.cancel': { zh: '取消', en: 'Cancel' },
   'mcp.reconnecting': { zh: '连接失败，自动重试中', en: 'Connection failed, auto-retrying' },
@@ -2723,20 +3395,13 @@ var _i18n = {
   //  Browser bridge modal
   // ══════════════════════════════════════
   'browser.stepDownload': { zh: '下载并解压扩展', en: 'Download & unzip the extension' },
-  'browser.stepDownloadDesc': { zh: '点击下方按钮下载 ZIP，然后<strong>务必先解压</strong>。', en: 'Click the button below to download the ZIP, then <strong>be sure to unzip it</strong>.' },
   'browser.stepDownloadBtn': { zh: '下载扩展 ZIP', en: 'Download Extension ZIP' },
-  'browser.localTitle': { zh: '在本机运行 Tofu？无需下载', en: 'Running Tofu on this machine? No download needed' },
-  'browser.localDesc': { zh: '在 <code>chrome://extensions/</code> 启用开发者模式后，点击「加载已解压的扩展程序」并直接选择下面这个文件夹：', en: 'In <code>chrome://extensions/</code>, enable Developer mode, click "Load unpacked", and select this folder directly:' },
   'browser.clickToCopy': { zh: '点击复制', en: 'Click to copy' },
   'browser.lnaTitle': { zh: 'Chrome 142+ 可能反复弹出「访问本地网络设备」', en: 'Chrome 142+ may repeatedly prompt for "local network access"' },
   'browser.lnaDesc': { zh: '从 Chrome 142 起，访问本地网络的网页会逐站弹出权限请求，多标签搜索时需反复点击。扩展无法代为授权，请用以下任一方式关闭提示：', en: 'Since Chrome 142, pages touching the local network prompt per-site, so multi-tab searches require repeated clicks. The extension cannot grant this itself — disable the prompt with either method below:' },
   'browser.lnaFlag': { zh: '<strong>方式一（最快）</strong>：打开 <code>chrome://flags/#local-network-access-check</code> → 设为 <strong>Disabled</strong> → 重启 Chrome。', en: '<strong>Option 1 (fastest)</strong>: open <code>chrome://flags/#local-network-access-check</code> → set it to <strong>Disabled</strong> → restart Chrome.' },
   'browser.lnaPolicy': { zh: '<strong>方式二（持久）</strong>：放置一个 Chrome 托管策略文件，内容为：', en: '<strong>Option 2 (persistent)</strong>: drop a Chrome managed-policy file with this content:' },
   'browser.lnaPathLabel': { zh: '放置位置：', en: 'Place it at:' },
-  'browser.stepInstall': { zh: '在 Chrome 中安装', en: 'Install in Chrome' },
-  'browser.stepVerify': { zh: '验证连接', en: 'Verify connection' },
-  'browser.stepVerifyDesc': { zh: '点击工具栏中的扩展图标，应显示 <strong>已连接</strong>。然后在此处开启浏览器功能。', en: 'Click the extension icon in the toolbar — it should show <strong>Connected</strong>. Then turn on the browser feature here.' },
-  'browser.checkingDots': { zh: '正在检查...', en: 'Checking…' },
 
   // ══════════════════════════════════════
   //  Debug / toolbar tooltips
@@ -2753,13 +3418,18 @@ var _i18n = {
   'feishu.statusDotTitle': { zh: '连接状态', en: 'Connection status' },
   'settings.loadingPricing': { zh: '正在加载价格数据...', en: 'Loading pricing data…' },
   'settings.feishuBotTitleSuffix': { zh: '飞书 (Lark) 机器人', en: 'Feishu (Lark) Bot' },
-  'browser.stepInstallDesc': { zh: '打开 <code class="copyable-url" data-tooltip="点击复制" style="cursor:pointer;position:relative;border-bottom:1px dashed var(--accent-color)" onclick="_safeClipboardWrite(\'chrome://extensions/\').then(()=>{this.classList.add(\'copied\')}).catch(()=>{})">chrome://extensions/</code> → 启用 <strong>开发者模式</strong> → 点击 <strong>加载已解压的扩展程序</strong> → 选择解压后的 <code>browser_extension</code> 文件夹。', en: 'Open <code class="copyable-url" data-tooltip="Click to copy" style="cursor:pointer;position:relative;border-bottom:1px dashed var(--accent-color)" onclick="_safeClipboardWrite(\'chrome://extensions/\').then(()=>{this.classList.add(\'copied\')}).catch(()=>{})">chrome://extensions/</code> → enable <strong>Developer mode</strong> → click <strong>Load unpacked</strong> → pick the extracted <code>browser_extension</code> folder.' },
 
   // ══════════════════════════════════════
   //  Common
   // ══════════════════════════════════════
   'common.confirm': { zh: '确定', en: 'OK' },
   'common.cancel': { zh: '取消', en: 'Cancel' },
+  // cookie-capture consent banner (cookie_capture_consent.js)
+  'cc.banner.title': { zh: '允许读取 {domain} 的登录态？', en: 'Allow reading {domain} session?' },
+  'cc.banner.body': { zh: '抓取该页面遇到登录墙。允许后 Tofu 会在你的浏览器中打开登录页，仅读取 {domain} 这一个域名的 cookies 并保存，之后的抓取将自动携带登录态。', en: 'Fetching this page hit a login wall. If you allow it, Tofu opens the login page in your browser, reads cookies for {domain} only, and stores them so later fetches carry your session.' },
+  'cc.banner.allow': { zh: '允许（记住此域名）', en: 'Allow (remember domain)' },
+  'cc.banner.deny': { zh: '拒绝', en: 'Deny' },
+  'cc.captured': { zh: '已保存 {domain} 的登录态，重试即可抓取', en: 'Session for {domain} saved — retry to fetch' },
   'common.close': { zh: '关闭', en: 'Close' },
   'common.save': { zh: '保存', en: 'Save' },
   'common.delete': { zh: '删除', en: 'Delete' },
@@ -2788,7 +3458,12 @@ var _i18n = {
   'collab.project': { zh: '项目', en: 'Project' },
   'collab.openBrain': { zh: '打开项目大脑', en: 'Open Project Brain' },
   'collab.decisionsAwaiting': { zh: '{n} 项决策待你审批', en: '{n} decisions awaiting you' },
-  'collab.epicsInProgress': { zh: '{n} 个 epic 推进中', en: '{n} epics in progress' },
+  // The attention SSOT segment. Two wordings so the bar can distinguish "work
+  // is STOPPED until you act" from "you could weigh in" — the same
+  // blocking/advisory split the Needs-you tab renders.
+  'collab.needsYouBlocking': { zh: '{n} 项需你处理', en: '{n} need you' },
+  'collab.needsYou': { zh: '{n} 项待你确认', en: '{n} awaiting you' },
+  'collab.epicsInProgress': { zh: '{n} 个任务推进中', en: '{n} epics in progress' },
   'collab.epicsOpen': { zh: '{n} 个待认领', en: '{n} open' },
   'collab.peersOnline': { zh: '{n} 个会话在线', en: '{n} conversations online' },
   'collab.peerAdvancing': { zh: '推进', en: 'advancing' },
@@ -2802,6 +3477,28 @@ var _i18n = {
   'pet.dayBlocked': { zh: '· {n} 项受阻', en: '\u00b7 {n} blocked' },
   'pet.dayIdle': { zh: '今天还没有记录', en: 'Nothing logged yet today' },
   'pet.dayGreeting': { zh: '你好呀！', en: 'Hi there!' },
+  // Scene switcher + pet tooltip. The `pet.scene.` / `pet.greet.` / `pet.feel.`
+  // namespaces are read via DYNAMIC t('prefix.' + x) calls in tofu-pet.js, so
+  // lib/i18n_boot_keys.T_CALL_DYNAMIC_PREFIX_RE discovers each prefix and
+  // expands it to every matching key here (charter #18) — adding a scene or a
+  // mood tier needs no edit to any key list.
+  'pet.scene.meadow': { zh: '草地', en: 'Meadow' },
+  'pet.scene.pool': { zh: '水池', en: 'Pool' },
+  'pet.scene.sky': { zh: '天空', en: 'Sky' },
+  'pet.scene.off': { zh: '关闭', en: 'Off' },
+  'pet.sceneTooltip': { zh: '场景：{scene} · 点击切换', en: 'Scene: {scene} \u00b7 click to change' },
+  // Composed via a template key, NOT string concatenation: word order differs
+  // by language, and a hardcoded '—' separator would strand the zh reading.
+  'pet.title': { zh: '豆腐 — {greet} · {feel}', en: 'Tofu \u2014 {greet} \u00b7 {feel}' },
+  'pet.greet.deepNight': { zh: '睡得正香', en: 'fast asleep' },
+  'pet.greet.earlyMorning': { zh: '刚睡醒', en: 'waking up' },
+  'pet.greet.morning': { zh: '精神饱满', en: 'bright and early' },
+  'pet.greet.afternoon': { zh: '悠闲发呆', en: 'hanging out' },
+  'pet.greet.evening': { zh: '准备收工', en: 'winding down' },
+  'pet.greet.night': { zh: '有点困了', en: 'getting sleepy' },
+  'pet.feel.great': { zh: '心情很好', en: 'feeling great' },
+  'pet.feel.fine': { zh: '状态还行', en: 'doing fine' },
+  'pet.feel.blue': { zh: '有点低落', en: 'a bit blue' },
 
   // ══════════════════════════════════════
   //  Project Brain — cross-conversation Activity Feed (Pillar #1)
@@ -2816,6 +3513,20 @@ var _i18n = {
   'projectBrain.previewUntitled': { zh: '未命名对话', en: 'Untitled' },
   'projectBrain.previewLoading': { zh: '加载中…', en: 'Loading…' },
   'projectBrain.charter': { zh: '章程', en: 'Charter' },
+  // ── Needs you (the attention tab) ──
+  'projectBrain.attention': { zh: '待你处理', en: 'Needs you' },
+  'projectBrain.attnBlocking': { zh: '已停摆', en: 'Stopped' },
+  'projectBrain.attnAdvisory': { zh: '可选', en: 'Advisory' },
+  'projectBrain.attnKindEpic': { zh: '任务停摆', en: 'Epic halted' },
+  'projectBrain.attnKindProposal': { zh: '提议中的决策', en: 'Proposed decision' },
+  'projectBrain.attnKindConflict': { zh: '文件冲突', en: 'File conflict' },
+  'projectBrain.attnLeadBlocking': { zh: '{n} 项停摆', en: '{n} stopped' },
+  'projectBrain.attnLeadAdvisory': { zh: '{n} 项可选', en: '{n} advisory' },
+  'projectBrain.attnOpenTeam': { zh: '去看团队', en: 'Open Team' },
+  'projectBrain.attnEmpty': { zh: '没有需要你处理的事', en: 'Nothing needs you' },
+  'projectBrain.attnEmptySub': { zh: '所有工作流都在自行推进。', en: 'Every workstream is moving on its own.' },
+  'projectBrain.attnEmptyWaiting': { zh: '{n} 项在等待自己的门禁 — 无需你动手', en: '{n} waiting on their own gates — no action needed' },
+  'projectBrain.attnWaiting': { zh: '{n} 项在等待自己的门禁 — 无需你动手', en: '{n} waiting on their own gates — no action needed' },
   'projectBrain.board': { zh: '任务板', en: 'Board' },
   'projectBrain.activity': { zh: '动态', en: 'Activity' },
   'projectBrain.team': { zh: '团队', en: 'Team' },
@@ -2856,11 +3567,39 @@ var _i18n = {
   'projectBrain.watchNotAddressed': { zh: '尚未回应', en: 'Not addressed yet' },
   'projectBrain.watchResolved': { zh: '已解决', en: 'resolved' },
   'projectBrain.watchPromoted': { zh: '已进章程', en: 'in charter' },
+  // A GOAL is injected because it EXISTS — it never travels through the charter
+  // (owner-directed 2026-07-30). So its badge states a fact, and there is no
+  // promote button, no diverged state, no replacement preview and no version
+  // gate: all of those existed only to reconcile two copies of one sentence.
+  // The keys for that machinery (watchDiverged*, watchSetAsGoal, watchReadopt,
+  // watchSetTitle, watchReplace*, watchRecompare, watchIsNorthStar) were
+  // removed with it.
+  'projectBrain.watchGoalLive': { zh: '每个会话都在读它', en: 'every conversation reads this' },
+  'projectBrain.watchGoalLiveHint': { zh: '未解决的目标会进入本项目每个会话的上下文。标记解决即可撤出。', en: 'Open goals are included in every conversation of this project. Resolve it to withdraw it.' },
+  'projectBrain.watchCancel': { zh: '取消', en: 'Cancel' },
   'projectBrain.watchRefresh': { zh: '重新评估', en: 'Re-check' },
   'projectBrain.watchPromote': { zh: '提升为章程', en: 'Promote to charter' },
   'projectBrain.watchResolveBtn': { zh: '标记解决', en: 'Resolve' },
   'projectBrain.watchReopen': { zh: '重新打开', en: 'Reopen' },
   'projectBrain.watchDelete': { zh: '删除', en: 'Delete' },
+  // ── Tool display names for the project-brain family ──
+  // These render in the tool-round header. Without them the UI showed the raw
+  // snake_case identifier (e.g. "project_charter_commit"), which is an internal
+  // symbol leaking into the product surface.
+  'tool.project_charter_read': { zh: '读取项目章程', en: 'Read project charter' },
+  'tool.project_charter_propose': { zh: '提议章程修订', en: 'Propose charter amendment' },
+  'tool.project_charter_commit': { zh: '提交章程决策（已改为人工审核）', en: 'Commit charter decision (now human-reviewed)' },
+  'tool.project_board_read': { zh: '读取协作看板', en: 'Read project board' },
+  'tool.project_board_post': { zh: '发布看板任务', en: 'Post board epic' },
+  'tool.project_board_claim': { zh: '认领看板任务', en: 'Claim board epic' },
+  'tool.project_board_complete': { zh: '标记看板任务完成', en: 'Complete board epic' },
+  'tool.project_board_block': { zh: '标记看板任务受阻', en: 'Block board epic' },
+  'tool.project_peer_status': { zh: '查看兄弟会话状态', en: 'Peer conversation status' },
+  'tool.project_feed_read': { zh: '读取项目动态', en: 'Read project activity feed' },
+  'tool.project_message': { zh: '给兄弟会话发消息', en: 'Message a peer conversation' },
+  'tool.project_intervene': { zh: '干预兄弟会话', en: 'Intervene in a peer conversation' },
+  'tool.list_conversations': { zh: '列出历史会话', en: 'List conversations' },
+  'tool.get_conversation': { zh: '读取历史会话', en: 'Read a conversation' },
   'projectBrain.peersHere': { zh: '当前在场 {n} 个', en: '{n} here now' },
   'projectBrain.peerSubAgent': { zh: '子代理 {id}', en: 'sub-agent {id}' },
   'projectBrain.peerUntitled': { zh: '会话 {id}', en: 'conversation {id}' },
@@ -2884,16 +3623,32 @@ var _i18n = {
   'projectBrain.activityEmpty': { zh: '暂无动态', en: 'No activity yet' },
   'projectBrain.charterEmpty': { zh: '尚无章程', en: 'No charter yet' },
   'projectBrain.boardEmpty': { zh: '任务板为空', en: 'Board is empty' },
+  'projectBrain.noProject': { zh: '当前会话未绑定项目 —— 绑定项目（Studio）后，项目大脑会显示在这里。', en: 'No project is attached to this conversation — attach one (Studio) to open its Brain.' },
   'projectBrain.committedDecisions': { zh: '已确认的决策', en: 'Committed decisions' },
   'projectBrain.pendingProposals': { zh: '提议中（待你审核）', en: 'Proposed (awaiting your review)' },
+  'projectBrain.healthNoGoal': { zh: '尚未设定北极星目标——以下决策仅为实现级意图，不是项目目标。', en: 'No north-star goal is set — the decisions below are implementation-level intent only.' },
+  'projectBrain.healthStats': { zh: '{n} 条决策 · 每轮注入 {m} 条', en: '{n} decisions · {m} shown per turn' },
+  'projectBrain.summaryPlaceholder': { zh: '一句话规则（必填）', en: 'One-line summary (required)' },
   'projectBrain.commit': { zh: '确认', en: 'Commit' },
   'projectBrain.committing': { zh: '确认中…', en: 'Committing…' },
   'projectBrain.reject': { zh: '驳回', en: 'Reject' },
+  'projectBrain.commitFailed': { zh: '确认失败', en: 'Commit failed' },
+  'projectBrain.rejectFailed': { zh: '驳回失败', en: 'Reject failed' },
+  'projectBrain.answerFailed': { zh: '提交回答失败', en: 'Submitting the answer failed' },
+  'projectBrain.saveFailed': { zh: '保存失败', en: 'Save failed' },
+  'projectBrain.deleteFailed': { zh: '删除失败', en: 'Delete failed' },
+  'projectBrain.boardActionFailed': { zh: '任务板操作失败', en: 'Board action failed' },
+  'projectBrain.loadFailed': { zh: '项目大脑加载失败', en: 'Loading the project brain failed' },
+  'projectBrain.previewFailed': { zh: '会话预览加载失败', en: 'Conversation preview failed' },
   'projectBrain.editNorthStar': { zh: '编辑北极星目标', en: 'Edit north star' },
   'projectBrain.editDecision': { zh: '编辑决策', en: 'Edit decision' },
   'projectBrain.deleteDecision': { zh: '删除决策', en: 'Delete decision' },
   'projectBrain.deleteCharter': { zh: '删除章程', en: 'Delete charter' },
   'projectBrain.save': { zh: '保存', en: 'Save' },
+  // The decision's summary IS the line the per-turn injection renders; the
+  // label says so, because a human editing only the body used to leave every
+  // sibling conversation reading the old rule.
+  'projectBrain.summaryLabel': { zh: '规则行（每个会话读到的就是这一行）', en: 'Rule line (this is what every conversation reads)' },
   'projectBrain.saving': { zh: '保存中…', en: 'Saving…' },
   'projectBrain.cancel': { zh: '取消', en: 'Cancel' },
   'projectBrain.confirmDelete': { zh: '确认删除？', en: 'Confirm?' },
@@ -2904,11 +3659,20 @@ var _i18n = {
   'projectBrain.laneDone': { zh: '已完成', en: 'Done' },
   'projectBrain.laneBlocked': { zh: '受阻（等待外部条件）', en: 'Blocked (waiting on a gate)' },
   'projectBrain.blockedRetry': { zh: '自动重试于', en: 'auto-retry in' },
+  'projectBrain.blockedCount': { zh: '已阻塞 %d 次', en: 'blocked %d×' },
+  'projectBrain.laneAwaiting': { zh: '需要你的回答', en: 'Awaiting your answer' },
+  'projectBrain.needsYourDecision': { zh: '需要你的决定', en: 'Your decision needed' },
+  'projectBrain.awaitingAnswerMeta': { zh: '等待你的回答', en: 'waiting for your answer' },
+  'projectBrain.answerPlaceholder': { zh: '输入你的回答（或直接点上方选项）…', en: 'Type your answer (or pick an option above)…' },
+  'projectBrain.answerSubmit': { zh: '提交回答', en: 'Submit answer' },
+  'projectBrain.yourAnswer': { zh: '你的回答', en: 'Your answer' },
+  'projectBrain.blockNoteSubmit': { zh: '标记阻塞', en: 'Mark blocked' },
+  'projectBrain.blockNoteCancel': { zh: '取消', en: 'Cancel' },
   'projectBrain.autoStart': { zh: '约 30 秒后自动拉起', en: 'auto-starts ~30s' },
-  'projectBrain.autoStartTitle': { zh: '项目大脑心跳（约 30 秒）会自动拉起这个 epic', en: 'The project brain heartbeat (~30s) will pick this up automatically' },
-  'projectBrain.newEpic': { zh: '新建 epic', en: 'New epic' },
-  'projectBrain.newEpicNoConv': { zh: '打开一个会话后才能发布 epic', en: 'Open a conversation to post an epic' },
-  'projectBrain.newEpicPrompt': { zh: 'epic 标题', en: 'New epic title' },
+  'projectBrain.autoStartTitle': { zh: '项目大脑心跳（约 30 秒）会自动拉起这个任务', en: 'The project brain heartbeat (~30s) will pick this up automatically' },
+  'projectBrain.newEpic': { zh: '新建任务', en: 'New epic' },
+  'projectBrain.newEpicNoConv': { zh: '打开一个会话后才能发布任务', en: 'Open a conversation to post an epic' },
+  'projectBrain.newEpicPrompt': { zh: '任务标题', en: 'New epic title' },
   'projectBrain.actComplete': { zh: '完成', en: 'Done' },
   'projectBrain.actBlock': { zh: '受阻', en: 'Block' },
   'projectBrain.actReopen': { zh: '重开', en: 'Reopen' },
@@ -2922,7 +3686,7 @@ var _i18n = {
   'projectBrain.boardVerb.complete': { zh: '完成', en: 'completed' },
   'projectBrain.boardVerb.block': { zh: '标记受阻', en: 'blocked' },
   'projectBrain.boardVerb.reopen': { zh: '重开', en: 'reopened' },
-  'projectBrain.boardUntitled': { zh: '（未命名 epic）', en: '(untitled epic)' },
+  'projectBrain.boardUntitled': { zh: '（未命名任务）', en: '(untitled epic)' },
   'projectBrain.boardFailed': { zh: '失败', en: 'failed' },
   // ── Transcript tool-card: activity-feed + peer-message/intervene delivery ──
   'projectBrain.thisConv': { zh: '本对话', en: 'this conversation' },
@@ -2940,6 +3704,7 @@ var _i18n = {
   'projectBrain.kind.aborted': { zh: '已中止', en: 'Aborted' },
   'projectBrain.kind.run_concluded': { zh: '自动运行收尾', en: 'Run concluded' },
   'projectBrain.kind.blocked': { zh: '受阻', en: 'Blocked' },
+  'projectBrain.kind.answered': { zh: '已回答', en: 'Answered' },
   'projectBrain.kind.decided': { zh: '决策', en: 'Decided' },
   'projectBrain.kind.proposed_decision': { zh: '提议决策', en: 'Proposed decision' },
   'projectBrain.kind.claimed': { zh: '认领', en: 'Claimed' },
@@ -3005,7 +3770,7 @@ var _i18n = {
   'convDigest.pdfs': { zh: '{n} 个 PDF', en: '{n} PDF' },
   'convDigest.noText': { zh: '（无文本）', en: '(no text)' },
   'convDigest.empty': { zh: '该会话没有消息。', en: 'This conversation has no messages.' },
-  'convDigest.truncated': { zh: '… 已省略较早的消息——展开「模型原文」查看完整记录。', en: '… earlier messages omitted — open the model view for the full transcript.' },
+  'convDigest.truncated': { zh: '… 已省略较早的消息——点工具行右侧 </> 按钮查看完整请求记录。', en: '… earlier messages omitted — use the </> button on a tool row for the full request record.' },
   'convDigest.updated': { zh: '更新于 {t}', en: 'updated {t}' },
   'convDigest.expand': { zh: '展开', en: 'expand' },
   'convDigest.omitted': { zh: '… 省略 {n} 条消息 …', en: '… {n} messages omitted …' },
@@ -3043,6 +3808,43 @@ var _i18n = {
   'projectBrain.infOpenHead': { zh: '待认领 —— 你可以接手', en: 'Open — you could claim' },
 };
 
+/* ── Missing-translation tripwire ──────────────────────────────────────
+ * Records keys that had to fall back out of the active language. One-shot
+ * per (key, lang) so a render loop cannot flood the console.
+ *
+ * Why this exists: see the comment inside t(). A language pack that omits
+ * keys currently degrades SILENTLY to Chinese. This makes the degrade
+ * audible without changing what the user sees.
+ *
+ * Exposed as window.i18nMissingKeys() so a test — or a developer switching
+ * to English — can assert the set is empty instead of eyeballing the UI.
+ */
+var _i18nMissing = Object.create(null);
+
+function _reportMissingTranslation(key, lang) {
+  var mark = lang + '\u0000' + key;
+  if (_i18nMissing[mark]) return;
+  _i18nMissing[mark] = true;
+  try {
+    if (typeof console !== 'undefined' && console.warn) {
+      console.warn('[i18n] missing "' + lang + '" for key "' + key +
+                   '" — fell back to zh. A language pack that omits this key ' +
+                   'would render Chinese in a ' + lang + ' UI.');
+    }
+  } catch (e) { /* console unavailable — the record below still stands */ }
+}
+
+/* Snapshot of every key that fell back, as ['lang:key', …]. Test seam. */
+function i18nMissingKeys() {
+  return Object.keys(_i18nMissing).map(function (m) {
+    return m.replace('\u0000', ':');
+  });
+}
+
+function resetI18nMissingKeysForTests() {
+  _i18nMissing = Object.create(null);
+}
+
 /**
  * Get translated text for a key. Falls back to the key itself if not found.
  * Supports interpolation: t('key', { count: 5 }) replaces {count} in the string.
@@ -3053,7 +3855,31 @@ var _i18n = {
  */
 function t(key, params) {
   var entry = _i18n[key];
-  var text = entry ? (entry[_i18nLang] || entry.zh || key) : key;
+  /* Missing-translation resolution — MUST stay observable.
+   *
+   * The old expression was `entry[_i18nLang] || entry.zh || key`. That silently
+   * renders Chinese whenever the active language lacks a key, with no error and
+   * no console trace. Today every key carries both languages so the branch is
+   * unreachable; the moment a single-language pack ships (Epic-E sub-part 1,
+   * measured worth 7.6% of the compressed first paint) it becomes reachable for
+   * EVERY key the pack omits — and an English UI would quietly fill with
+   * Chinese. A defect with no failure signal cannot be caught by any test or by
+   * a user who does not read the other language.
+   *
+   * So the fallback still HAPPENS (never regress the UI to a raw key), but it
+   * is now REPORTED once per key. That converts "silently wrong" into "wrong
+   * and traceable", which is the precondition for shipping language packs at
+   * all. Reporting is one-shot per key so a hot render loop cannot flood.
+   */
+  var text;
+  if (!entry) {
+    text = key;
+  } else if (entry[_i18nLang] != null) {
+    text = entry[_i18nLang];
+  } else {
+    _reportMissingTranslation(key, _i18nLang);
+    text = entry.zh != null ? entry.zh : key;
+  }
   if (params) {
     for (var k in params) {
       if (params.hasOwnProperty(k)) {
@@ -3065,13 +3891,78 @@ function t(key, params) {
 }
 
 /**
+ * Does the in-memory dictionary already carry `lang`? Checks entries until
+ * one is found (a single-language pack answers on the first entry; a dual
+ * dictionary — dev fallback / pre-split bundle — also answers immediately).
+ */
+function _i18nHasLang(lang) {
+  for (var k in _i18n) {
+    if (!_i18n.hasOwnProperty(k)) continue;
+    var e = _i18n[k];
+    if (e && typeof e === 'object') return e[lang] != null;
+  }
+  return false;
+}
+
+/* Merge a fetched pack's dictionary into _i18n. Entry shape is {key:{lang:…}}
+ * so merging is a per-entry union: the boot language's entries stay, the
+ * fetched language's entries join them. Idempotent by construction. */
+function _i18nMergeDict(packDict) {
+  for (var k in packDict) {
+    if (!packDict.hasOwnProperty(k)) continue;
+    var cur = _i18n[k];
+    if (cur && typeof cur === 'object' && typeof packDict[k] === 'object') {
+      for (var l in packDict[k]) { cur[l] = packDict[k][l]; }
+    } else {
+      _i18n[k] = packDict[k];
+    }
+  }
+}
+
+/* Fetch a language pack and merge its dictionary. Resolves true on success.
+ * The pack is a FULL per-language i18n.js: loading it re-executes module
+ * init (idempotent — same localStorage value, same cookie) and REASSIGNS the
+ * global _i18n to its single-language dict, so we save ours first and merge
+ * the pack's dict back over it. */
+function _i18nFetchPack(lang) {
+  return new Promise(function (resolve) {
+    var urls = (typeof window !== 'undefined') && window.__I18N_PACK_URLS__;
+    var url = urls && urls[lang];
+    if (!url) { resolve(false); return; }
+    var prevDict = _i18n;
+    var s = document.createElement('script');
+    s.src = url;
+    s.onload = function () {
+      var packDict = _i18n;
+      _i18n = prevDict;
+      _i18nMergeDict(packDict);
+      resolve(true);
+    };
+    s.onerror = function () { resolve(false); };
+    (document.head || document.documentElement).appendChild(s);
+  });
+}
+
+/**
  * Set the UI language and re-apply all translations.
+ * Async: when the target language is not in memory (single-language pack
+ * boot), its pack is fetched and merged first. On fetch failure the switch
+ * still proceeds — t() falls back per key to zh and the tripwire
+ * (_reportMissingTranslation) makes every miss observable. That is the
+ * designed degrade: visibly wrong-language where uncovered, never broken,
+ * never silent.
  * @param {'zh'|'en'} lang
  */
-function setLanguage(lang) {
+async function setLanguage(lang) {
   if (lang !== 'zh' && lang !== 'en') return;
+  if (!_i18nHasLang(lang)) {
+    await _i18nFetchPack(lang);
+  }
   _i18nLang = lang;
   localStorage.setItem('tofu_ui_lang', lang);
+  /* Mirror immediately so the NEXT page load is served the matching bundle.
+   * Without this the server would keep shipping the previous language's pack. */
+  _syncLangCookie(lang);
   _applyI18n();
 }
 
@@ -3114,7 +4005,10 @@ function _applyI18n() {
  * @param {'zh'|'en'} lang
  */
 function _onLanguageChange(lang) {
-  setLanguage(lang);
+  /* setLanguage is now async (may fetch the other language's pack). Everything
+   * below reads t() at REPAINT time, so it must run after the merge — chain
+   * it, or the conversation list / open chat would render one language behind. */
+  Promise.resolve(setLanguage(lang)).then(function () {
   _syncLangPicker(lang);
   // Re-render dynamic content that uses t()
   if (typeof renderConversationList === 'function') renderConversationList();
@@ -3122,9 +4016,9 @@ function _onLanguageChange(lang) {
   //   finish-info, timestamps) re-renders with the new language. The
   //   former call was to renderMessages(), which never existed — the
   //   whole-chat repaint is renderChat(conv). (caught by tsc --checkJs)
-  if (typeof renderChat === 'function' && typeof getActiveConv === 'function') {
+  if (typeof getActiveConv === 'function') {
     var _activeConv = getActiveConv();
-    if (_activeConv) renderChat(_activeConv, true);
+    if (_activeConv) window.ConvView.replaceAll(_activeConv.id, { forceScroll: true });
   }
   if (typeof _refreshOptimizerPanel === 'function') {
     try { _refreshOptimizerPanel(); } catch (e) { /* panel may not be open */ }
@@ -3227,6 +4121,7 @@ function _onLanguageChange(lang) {
   if (typeof _renderPresetsTab === 'function' && typeof _serverConfig !== 'undefined' && _serverConfig) {
     try { _renderPresetsTab(_serverConfig); } catch (e) { /* tab may not be initialised */ }
   }
+  });
 }
 
 /** Sync visual language picker cards to the given lang */

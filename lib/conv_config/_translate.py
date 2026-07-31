@@ -25,6 +25,81 @@ logger = get_logger(__name__)
 #: auto-translate fire unpredictably).
 AUTO_TRANSLATE_DEFAULT = False
 
+#: Canonical fallback target language for the OUTPUT side (assistant reply →
+#: human). Before this was configurable the whole app hard-pinned Chinese, so
+#: an unresolved/absent UI language keeps that behaviour — nothing regresses.
+TRANSLATE_TARGET_DEFAULT = 'Chinese'
+
+#: UI-language code (``_i18nLang`` / ``settings.uiLang``) → the language NAME
+#: the translate engine prompt expects (``_build_translate_prompt`` builds
+#: "Translate ... to {target}"). The UI currently ships only ``zh`` / ``en``;
+#: extra rows are here so adding a locale is a one-line change, not a code hunt.
+_UILANG_TO_TARGET = {
+    'zh': 'Chinese',
+    'zh-cn': 'Chinese',
+    'zh-tw': 'Chinese',
+    'en': 'English',
+    'ja': 'Japanese',
+    'ko': 'Korean',
+    'fr': 'French',
+    'de': 'German',
+    'es': 'Spanish',
+    'ru': 'Russian',
+}
+
+#: The full language NAME → its detector code (``detect_language().code``),
+#: used by the already-in-target-language skip gate so it compares like with
+#: like. Inverse of the coarse target mapping; only the codes the detector can
+#: emit are listed.
+_TARGET_TO_CODE = {
+    'Chinese': 'zh',
+    'English': 'en',
+    'Japanese': 'ja',
+    'Korean': 'ko',
+    'French': 'fr',
+    'German': 'de',
+    'Spanish': 'es',
+    'Russian': 'ru',
+}
+
+
+def resolve_translate_target(*sources: Optional[Mapping]) -> str:
+    """Resolve the OUTPUT-side translate target language NAME from settings.
+
+    Each ``source`` is a settings/config-shaped mapping that MAY carry a
+    ``uiLang`` key (the frontend ``_i18nLang`` piped through
+    ``_buildConvSettings`` / ``_buildConvConfig``). Sources are consulted
+    left-to-right; the first that defines ``uiLang`` wins. The code is mapped to
+    the language NAME the translate engine prompt expects. When no source
+    defines it (headless caller, old frontend, unknown code) the canonical
+    :data:`TRANSLATE_TARGET_DEFAULT` (Chinese) is returned so behaviour is
+    byte-identical to the pre-UI-lang hard-pin.
+
+    This is the OUTPUT side only (model → human). The INPUT side (human →
+    model) stays hard-pinned to English in ``lib/chat/turn_builder`` — English
+    is the model's strongest language — and is intentionally NOT resolved here.
+    """
+    for src in sources:
+        if not src:
+            continue
+        code = src.get('uiLang')
+        if code:
+            name = _UILANG_TO_TARGET.get(str(code).strip().lower())
+            if name:
+                return name
+    return TRANSLATE_TARGET_DEFAULT
+
+
+def target_lang_code(target_name: str) -> str:
+    """Map a translate target language NAME to its detector code.
+
+    Used by the already-in-target-language skip gate to compare
+    ``detect_language(content).code`` against the target. Unknown names fall
+    back to ``'zh'`` (the historical hard-pin), so a mis-mapped target can
+    never make the gate stop skipping already-target-language content.
+    """
+    return _TARGET_TO_CODE.get(target_name, 'zh')
+
 
 def resolve_auto_translate(*sources: Optional[Mapping]) -> bool:
     """Resolve the effective ``autoTranslate`` decision from one or more dicts.

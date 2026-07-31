@@ -25,6 +25,7 @@ import threading
 import time
 from collections.abc import Callable
 
+from lib.agent_core.task_runtime import _epoch_ms
 from lib.agent_inbox import consume as inbox_consume
 from lib.agent_inbox import enqueue as inbox_enqueue
 from lib.agent_inbox import format_swarm_update
@@ -132,6 +133,10 @@ def _snapshot_tool_timeline(tool_log: list):
             'toolName':  name,
             'argsBrief': e.get('args_brief') or '',
             'status':    'done',
+            # Carry the result text so a RELOADED panel shows the same tool
+            # output the live one did. Legacy rows predate this field.
+            'preview':   e.get('preview') or '',
+            'error':     e.get('error') or '',
         })
     if len(tool_calls) > _SNAPSHOT_TOOLCALLS_CAP:
         tool_calls = tool_calls[-_SNAPSHOT_TOOLCALLS_CAP:]
@@ -360,7 +365,6 @@ class MasterOrchestrator:
         swarm that was never awaited still gets real per-agent status, not the
         ``unknown`` stubs the handle-only recovery produced.
         """
-        from lib.swarm.snapshot import _PREVIEW_CHARS
 
         with self._lock:
             results = dict(self._results_by_id)
@@ -368,6 +372,11 @@ class MasterOrchestrator:
                            if self._scheduler else set())
             pending_ids = ({s.id for s in self._scheduler._pending}
                            if self._scheduler else set())
+            # Wall-clock launch instants for the agents still in flight. This
+            # is the ONLY source for a running agent's start: its result (and
+            # thus `elapsed`) does not exist yet.
+            started_at = (self._scheduler.started_at_map()
+                          if self._scheduler else {})
             specs = list(self.specs)
             terminated = self._terminated
 
@@ -394,7 +403,11 @@ class MasterOrchestrator:
                     'status':        status,
                     'elapsed':       round(result.elapsed_seconds, 1),
                     'tokens':        result.total_tokens,
-                    'preview':       (result.final_answer or '')[:_PREVIEW_CHARS],
+                    # FULL final answer — the durable snapshot is the
+                    # authoritative terminal record a reloaded panel renders
+                    # from, so slicing here would permanently destroy the tail
+                    # of every sub-agent result. The panel shows it complete.
+                    'preview':       (result.final_answer or ''),
                     'modifiedFiles': _count_file_writes(result.tool_log),
                     'tools':         _tools,
                     'toolCalls':     _tool_calls,
@@ -428,6 +441,19 @@ class MasterOrchestrator:
                     'preview':       '',
                     'modifiedFiles': 0,
                     'error':         '',
+                    # ★ The live stopwatch's anchor. The frontend renders a
+                    #   per-agent timer only while `status` is running AND it
+                    #   has a start; minting that start client-side meant a
+                    #   reload DROPPED THE TIMER NODE ENTIRELY for an agent
+                    #   that was still working (`elapsed` only exists once the
+                    #   agent finishes, so the fallback could not cover it).
+                    #   Epoch MILLISECONDS via the shared _epoch_ms seam — the
+                    #   same wire unit as every other clock in this codebase;
+                    #   seconds here would silently render a ~50-year elapsed.
+                    #   None for pending/unknown agents: not started yet, so
+                    #   there is no honest instant to report.
+                    'startedAt':     (_epoch_ms(started_at.get(spec.id))
+                                      if live == 'running' else None),
                 })
 
         # ── Monotonic version key (#2) ──
@@ -561,8 +587,16 @@ class MasterOrchestrator:
                     result.total_tokens, result.rounds_used)
         # 1) UI event (kept identical to legacy schema for the swarm panel)
         # ``objective`` is the agent-card body — full text, no truncation.
-        # ``summary`` is the per-card preview line, capped at 200 chars
-        # because that's what fits visually before the user clicks open.
+        # ``summary`` is the agent card's RESULT body. It carries the FULL
+        # final answer, for the same reason ``_build_agent_snapshot`` does:
+        # the panel is a debugging surface and CSS owns the visual bounding
+        # (``.sw-a-preview`` scrolls), not a backend slice. A cap here was the
+        # live/reload divergence users hit — the durable snapshot showed the
+        # whole answer after F5 while the LIVE panel stopped mid-sentence,
+        # which reads as "the sub-agent produced a truncated result".
+        # Wire economy does not argue for a cap: this fires ONCE per agent
+        # (unlike the per-tool-call frame, which stays bounded by
+        # ``agent._SSE_TOOL_PREVIEW_CHARS`` because it fires per call).
         modified_files = _count_file_writes(result.tool_log)
         if self.on_progress:
             self.on_progress({
@@ -575,7 +609,7 @@ class MasterOrchestrator:
                 'status':    result.status,
                 'elapsed':   round(result.elapsed_seconds, 1),
                 'tokens':    result.total_tokens,
-                'summary':   (result.final_answer or '')[:600],
+                'summary':   (result.final_answer or ''),
                 # ★ Number of file-mutating tool calls this agent made.
                 #   Surfaced in the UI so agents that edited the workspace
                 #   are flagged for closer review.

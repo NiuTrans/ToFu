@@ -1,9 +1,11 @@
 /* ════════════════════════════════════
-   upload_preview.js — attachment + tool-content preview modals
+   upload_preview.js — attachment preview modals
    Extracted from upload.js (2026-07). The preview/modal DOM layer:
    previewPendingImage/PdfText, previewMsgPdfText, openImagePreview,
-   openTextPreview, closePreview, previewToolContent + the tool-content /
-   truncation-bar click delegation. Plain window-scope concatenation (NOT an
+   openTextPreview, closePreview + the truncation-bar click delegation.
+   (The per-tool-row "model view" button + its delegations were removed on
+   2026-07-28 per owner directive — the round-scoped debug panel covers it.)
+   Plain window-scope concatenation (NOT an
    IIFE) — called at runtime from onclick handlers, main.js and chat_render.js;
    load order is free (before main.js). Uses global escapeHtml / getActiveConv /
    getToolRoundsFromMsg / _getToolDisplay / _renderToolGroupsHTML / Icon.
@@ -74,72 +76,6 @@ function closePreview() {
     document.getElementById("previewBody").innerHTML = "";
   }, 300);
 }
-
-// ── Tool Content Preview (search / fetch / project tools) ──
-function previewToolContent(roundNum, toolCallId) {
-  const conv = getActiveConv();
-  if (!conv) return;
-  // Search all assistant messages (not just last) to find the round
-  for (let i = conv.messages.length - 1; i >= 0; i--) {
-    const msg = conv.messages[i];
-    if (msg.role !== 'assistant' && msg.role !== 'optimizer') continue;
-    const rounds = msg.toolRounds || [];
-    const round = rounds.find(r => r.roundNum === roundNum && (toolCallId ? r.toolCallId === toolCallId : true));
-    if (round && round.toolContent) {
-      const td = typeof _getToolDisplay === 'function' ? _getToolDisplay(round) : { icon: '📄', label: 'Tool' };
-      // ★ openTextPreview escapes the title as TEXT, so the icon must be a
-      //   plain glyph — never a raw <svg> string. _getToolDisplay returns an
-      //   SVG markup string for most tools (MCP, project, timer, …); only a
-      //   few use emoji. Including the SVG here leaked literal "<svg …>" into
-      //   the preview header. Drop the icon from the escaped title entirely.
-      //   For MCP tools round.query already reads "server/tool — resource",
-      //   so use it alone instead of the redundant title-cased label.
-      const q = (round.query || '').slice(0, 120);
-      const isMcp = (round.toolName || '').startsWith('mcp__');
-      const title = isMcp ? (q || td.label) : `${td.label}: ${q}`;
-      const chars = round.toolContent.length;
-      const sizeStr = chars >= 1024 ? `${(chars / 1024).toFixed(1)}KB` : `${chars} chars`;
-      // ★ Prefix a "model view · verbatim" tag so the modal unambiguously reads
-      //   as "this is exactly what the LLM saw", not a human-friendly summary.
-      const _t = (typeof t === 'function') ? t : (k, d) => d;
-      const meta = `${_t('tool.modelViewChip', "The model's view · verbatim")} · ${sizeStr}`;
-      openTextPreview(title, meta, round.toolContent);
-      return;
-    }
-  }
-}
-
-// Event delegation for tool content preview buttons
-document.addEventListener('click', function(e) {
-  const btn = e.target.closest('[data-tc-preview]');
-  if (!btn) return;
-  e.stopPropagation();
-  e.preventDefault();
-  const rn = parseInt(btn.dataset.tcRn, 10);
-  const tcid = btn.dataset.tcTcid || null;
-  previewToolContent(rn, tcid);
-});
-
-// ★ Event delegation for the fallback model-view buttons (convmeta / brain
-//   rows whose verbatim source is NOT round.toolContent — see
-//   _tcModelViewBtnForText / _tcModelTextRegistry in tool_rounds.js). Ensures
-//   EVERY such row has a working "模型原文" entry even when toolContent is empty.
-document.addEventListener('click', function(e) {
-  const btn = e.target.closest('[data-tc-preview-text]');
-  if (!btn) return;
-  e.stopPropagation();
-  e.preventDefault();
-  const id = btn.dataset.tcPreviewText;
-  const reg = (typeof window !== 'undefined' && window._tcModelTextRegistry) || null;
-  const entry = reg ? reg.get(id) : null;
-  if (!entry) return;
-  const text = entry.text || '';
-  const chars = text.length;
-  const sizeStr = chars >= 1024 ? `${(chars / 1024).toFixed(1)}KB` : `${chars} chars`;
-  const _t = (typeof t === 'function') ? t : (k, d) => d;
-  const meta = `${_t('tool.modelViewChip', "The model's view · verbatim")} · ${sizeStr}`;
-  openTextPreview(entry.title || _t('tool.modelView', 'Model view'), meta, text);
-});
 
 // Event delegation for ptool-truncated "show all" bars (static render path)
 document.addEventListener('click', function(e) {

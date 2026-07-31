@@ -16,6 +16,9 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 CONV_JS = REPO / "static" / "js" / "core" / "conversations.js"
+# hydrateSidebarFromCache lives in its own leaf as of pt_3879f00e slice 6.
+# Point the fn-body extract at the leaf so the harness stays green post-split.
+HYDRATE_JS = REPO / "static" / "js" / "core" / "conv_hydrate_cache.js"
 
 
 def _extract_fn(src: str, name: str) -> str:
@@ -49,6 +52,19 @@ function _applySettingsToConv(conv, settings) {
   if (!settings) return;
   if (settings.model) conv.model = settings.model;
 }
+// _serverConvCount: the split conversations.js body now derives the shell
+// visibility count via this helper (messageCount|msgCount|msg_count) rather than
+// reading m.msgCount inline. Mirror the real precedence so msgCount>0 -> shell.
+function _serverConvCount(sc) {
+  if (!sc) return 0;
+  const v = sc.messageCount != null ? sc.messageCount
+    : (sc.msgCount != null ? sc.msgCount : sc.msg_count);
+  return v || 0;
+}
+// Pending-sync poller hooks -- only fire when a cached meta carries
+// _pendingSyncAt (the test metas do not), so stub them to avoid ReferenceError.
+function _startPendingSyncPolling() {}
+function _flushPendingSyncs() {}
 // Fake ConvCache holding two "opened" conversations.
 const ConvCache = {
   isAvailable: () => true,
@@ -91,7 +107,7 @@ def _run(fn_src: str) -> dict:
 
 def test_hydrate_paints_cached_convs():
     """REAL function: cache-only convs are painted as _fromCache shells, sorted."""
-    src = CONV_JS.read_text()
+    src = HYDRATE_JS.read_text()
     fn = _extract_fn(src, "hydrateSidebarFromCache")
     r = _run(fn)
     assert r["added"] == 2, r

@@ -33,6 +33,7 @@ from lib.tools.registry._latch import (
     is_project_ready_sticky,
     mark_multiroot_sticky,
     mark_project_ready_sticky,
+    mark_project_remote_sticky,
 )
 
 logger = get_logger(__name__)
@@ -210,6 +211,29 @@ class ToolContext:
             logger.info('[ToolLatch] conv=%s attached a project — cleared '
                         'tool-schema latch so the project tools re-freeze '
                         '(one-time cache rebuild)', self.conv_id[:8])
+        return live
+
+    @property
+    def project_remote(self) -> bool:
+        """True when this task's project is bound to a REMOTE worktree.
+
+        RWA 拍板 3A (same-name routing): tool NAMES + parameter schemas stay
+        byte-identical; only the tool descriptions gain the local-execution
+        hint (:func:`lib.tools.project.with_remote_hint`). Same one-time
+        OFF→ON latch-clear precedent as :attr:`project_ready` — binding a
+        conversation to a remote root mid-conversation must re-freeze the
+        schema snapshot ONCE, not flap every round.
+        """
+        from lib.desktop.remote import remote_worktree_binding
+        live = remote_worktree_binding(self.cfg) is not None
+        if not self.conv_id:
+            # Stateless assembly (tests / compat adapters): raw signal, no latch.
+            return live
+        if live and mark_project_remote_sticky(self.conv_id):
+            clear_tool_list_latch(self.conv_id)
+            logger.info('[ToolLatch] conv=%s bound a REMOTE worktree — cleared '
+                        'tool-schema latch so the local-execution hint '
+                        're-freezes (one-time cache rebuild)', self.conv_id[:8])
         return live
 
     @property
@@ -403,7 +427,8 @@ def _sync_one(spec: ToolSpec, registry: Any) -> None:
             return
         registry.register(
             set(names), spec.handler,
-            category=spec.category, description=spec.description)
+            category=spec.category, description=spec.description,
+            source=spec.source, plugin_name=spec.plugin_name)
         logger.info('[ToolRegistry] synced handler for %s (spec=%s)',
                     sorted(names), spec.key)
     except Exception as e:

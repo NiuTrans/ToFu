@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import importlib.util
 import os
-import sys
 import threading
 from typing import TypedDict
 
@@ -44,6 +43,17 @@ class EnvSpec(TypedDict, total=False):
     options: list       # for type=="select": [{label, value, autofill?}]
                         # where autofill maps other env keys → preset values
                         # applied when this option is chosen
+    obtain_url: str     # WHERE to get this credential — rendered as a real
+                        # "Get a key ↗" link, not prose. `hint` is a
+                        # placeholder inside the input and is REPLACED by the
+                        # "saved" notice on a reinstall, so a breadcrumb
+                        # stuffed into it vanishes exactly when the user is
+                        # rotating a key and needs it most. Keep the route
+                        # here instead.
+    obtain_steps: list  # optional ordered list of SHORT steps (strings) shown
+                        # under the link. Use when the console path is
+                        # non-obvious (e.g. Amap: create app → add key → pick
+                        # "Web service"). Omit when the link is self-evident.
 
 
 class CatalogEntry(TypedDict, total=False):
@@ -55,7 +65,16 @@ class CatalogEntry(TypedDict, total=False):
     category: str               # for grouping in the UI
     command: str                # executable (e.g. "npx")
     args: list[str]             # argv after command
-    transport: str              # "stdio" (default) or "sse"
+    transport: str              # "stdio" (default) | "sse" | "streamable-http"
+    endpoint: str               # remote transports: the MCP endpoint URL.
+                                # Distinct from ``url`` below, which is the
+                                # human docs/homepage link. When absent, the
+                                # endpoint is expected to arrive via env_specs
+                                # (e.g. Zapier's per-user ZAPIER_MCP_URL).
+    headers: dict[str, str]     # remote transports: auth header TEMPLATE with
+                                # ``${ENV_KEY}`` placeholders resolved at
+                                # connect time from the server's env block.
+                                # Never store a literal secret here.
     env_specs: list[EnvSpec]    # which env vars the user must supply
     url: str                    # homepage / docs link
     tags: list[str]             # searchable tags
@@ -83,6 +102,7 @@ CAT_DEVOPS  = 'DevOps'
 CAT_FINANCE = 'Finance'
 CAT_DESIGN  = 'Design'
 CAT_RESEARCH = 'Science & Research'
+CAT_LOCAL_CN = 'Local Life & Travel (China)'
 CAT_OTHER   = 'Other'
 # Servers configured in mcp_servers.json that have no curated catalog entry
 # are surfaced under this category by the API layer (see routes/api_v1/mcp.py).
@@ -91,7 +111,7 @@ CAT_CUSTOM  = 'Custom'
 CATEGORIES = [
     CAT_DEV, CAT_DATA, CAT_COMMS, CAT_SEARCH,
     CAT_PROD, CAT_DEVOPS, CAT_FINANCE, CAT_DESIGN, CAT_RESEARCH,
-    CAT_OTHER, CAT_CUSTOM,
+    CAT_LOCAL_CN, CAT_OTHER, CAT_CUSTOM,
 ]
 
 
@@ -865,6 +885,152 @@ CATALOG: list[CatalogEntry] = [
 
     # ── AI & Reasoning ─────────────────────────────────────
 
+    # ── Local Life & Travel (China) ─────────────────────────
+    #
+    # What Chinese users actually need an agent to DO — routing, hotels,
+    # flights, trains, tickets. Admission criterion, applied PER VENDOR:
+    # **can a normal developer obtain credentials?**
+    #
+    # DELIBERATELY ABSENT — Ctrip (携程) and YourProvider (美团). Both fail that
+    # criterion for POLICY reasons, so a card would be a dead Install button:
+    #   • Ctrip Business Travel launched an AI open platform (2026-04) that does
+    #     speak MCP — hotel/flight/train recommendation, visa policy, expense
+    #     compliance — but it is gated to CORPORATE customers via a business
+    #     onboarding process (ct.ctrip.com/contactBiz). Ctrip 问道 (wendao) is
+    #     reachable by individuals yet is NOT MCP: a bespoke HTTP API driven by
+    #     a Node CLI, with QPS/quota limits and no booking step.
+    #   • YourProvider's open platform is MERCHANT-side (group-buy voucher
+    #     redemption, delivery order management, storefront ops) and its
+    #     five-step onboarding begins with submitting company details for
+    #     business review. There is no consumer-side MCP surface at all.
+    #
+    # RESOLVED 2026-07-27 — the owner decided NOT to pursue corporate
+    # onboarding for either vendor (option C on ticket pt_6dcdc44482de4fe7,
+    # now CLOSED). Rationale on the record: the shipped set below already
+    # covers routing / hotels / flights / trains / tickets / cruises /
+    # packages, and every one of those is obtainable by an individual
+    # developer, so Ctrip and YourProvider add brand familiarity plus YourProvider's
+    # to-store & delivery scenarios — not reach. Reopen as a NEW ticket only
+    # if a concrete to-store / delivery requirement appears, or if either
+    # vendor starts issuing individual credentials (re-check per §the gate
+    # below, not by assumption). Do NOT add speculative entries meanwhile:
+    # test_no_dead_card_for_a_business_gated_vendor enforces this across BOTH
+    # catalogues.
+    #
+    # ⚠ The gate is PER-VENDOR, never market-wide. An earlier revision of this
+    # comment reasoned that Chinese OTAs would not open up because inventory is
+    # their moat — measurement refuted it: Tuniu (2026-03) and Fliggy both ship
+    # self-service, individually-obtainable credentials WITH a booking chain.
+    # Fliggy is a SKILL package so it lives in lib/skills/catalog.py; the split
+    # follows the PROTOCOL, not the vendor. Re-check each vendor on its own
+    # evidence rather than generalising from "OTAs don't open up".
+
+    {
+        'id': 'amap-maps',
+        'name': '高德地图 Amap',
+        'description': 'Routing, POI/nearby search, geocoding, weather, ride-hailing and distance for mainland China — the official Amap MCP server.',
+        'icon': '🗺️',
+        'category': CAT_LOCAL_CN,
+        'command': '',
+        'transport': 'streamable-http',
+        'args': [],
+        # Amap authenticates by QUERY PARAM, not by header. The endpoint is a
+        # template so the key still lives only in env (see lib/mcp/transport).
+        'endpoint': 'https://mcp.amap.com/mcp?key=${AMAP_MAPS_API_KEY}',
+        'env_specs': [
+            {'key': 'AMAP_MAPS_API_KEY', 'label': 'Amap API Key (Web 服务)',
+             'hint': '粘贴你的 Key',
+             'obtain_url': 'https://console.amap.com/dev/key/app',
+             'obtain_steps': ['登录高德开放平台并完成个人实名认证',
+                              '应用管理 → 创建新应用',
+                              '添加 Key，服务平台选「Web 服务」'],
+             'required': True, 'secret': True},
+        ],
+        'url': 'https://lbs.amap.com/api/mcp-server/summary',
+        'tags': ['maps', 'china', 'travel', 'routing', 'weather', 'poi',
+                 '地图', '高德', '出行'],
+        'featured': True,
+        'install_note': '需高德开放平台实名认证个人开发者账号即可申请 Key。',
+    },
+    {
+        'id': 'rollinggo-hotel',
+        'name': 'RollingGo 酒店',
+        'description': 'Hotel search with real bookable inventory and live price confirmation (2M+ hotels, 110k+ direct-contract) — free for individual developers.',
+        'icon': '🏨',
+        'category': CAT_LOCAL_CN,
+        'command': '',
+        'transport': 'streamable-http',
+        'args': [],
+        'endpoint': 'https://mcp.rollinggo.cn/mcp',
+        'headers': {'Authorization': 'Bearer ${ROLLINGGO_API_KEY}'},
+        'env_specs': [
+            {'key': 'ROLLINGGO_API_KEY', 'label': 'RollingGo API Key',
+             'hint': '粘贴你的 Key',
+             'obtain_url': 'https://rollinggo.store/apply',
+             'obtain_steps': ['填基本信息申请，自动审核（1-3 分钟）',
+                              '同一个 Key 同时用于酒店与机票两个服务'],
+             'required': True, 'secret': True},
+        ],
+        'url': 'https://rollinggo.store/',
+        'tags': ['hotel', 'travel', 'china', 'booking', '酒店', '订房', '比价'],
+        'featured': True,
+    },
+    {
+        'id': 'rollinggo-flight',
+        'name': 'RollingGo 机票',
+        'description': 'Airport lookup and flight search across 500+ airlines and 200+ countries. Shares one API key with the hotel server.',
+        'icon': '✈️',
+        'category': CAT_LOCAL_CN,
+        'command': '',
+        'transport': 'streamable-http',
+        'args': [],
+        'endpoint': 'https://mcp.rollinggo.cn/mcp/flight',
+        'headers': {'Authorization': 'Bearer ${ROLLINGGO_API_KEY}'},
+        'env_specs': [
+            {'key': 'ROLLINGGO_API_KEY', 'label': 'RollingGo API Key',
+             'hint': '粘贴你的 Key',
+             'obtain_url': 'https://rollinggo.store/apply',
+             'obtain_steps': ['与酒店服务共用同一个 Key，已申请过就不用再申请'],
+             'required': True, 'secret': True},
+        ],
+        'url': 'https://rollinggo.store/',
+        'tags': ['flight', 'travel', 'china', 'booking', '机票', '航班'],
+    },
+    {
+        'id': 'tuniu-travel',
+        'name': '途牛旅游',
+        'description': 'Hotels, flights, trains, attraction tickets, cruises and package tours with a FULL booking chain (search → detail → order → payment link). Six service domains behind one CLI.',
+        'icon': '🐮',
+        'category': CAT_LOCAL_CN,
+        'command': 'npx',
+        'args': ['-y', 'tuniu-cli@latest'],
+        'env_specs': [
+            {'key': 'TUNIU_API_KEY', 'label': '途牛开放平台 API Key',
+             'hint': '粘贴你的 Key',
+             'obtain_url': 'https://open.tuniu.com/mcp/login',
+             'obtain_steps': ['注册并登录途牛开放平台',
+                              '控制台 → API Keys → 创建应用并自助申请'],
+             'required': True, 'secret': True},
+        ],
+        'url': 'https://open.tuniu.com/mcp/docs/',
+        'tags': ['travel', 'china', 'hotel', 'flight', 'train', 'ticket',
+                 'cruise', '途牛', '酒店', '机票', '门票', '邮轮', '度假'],
+        'install_note': '个人开发者可自助注册申请 Key。品类最全(含邮轮/度假)且支持下单，下单后返回 paymentUrl 供用户完成支付。',
+    },
+    {
+        'id': '12306-train',
+        'name': '12306 火车票查询',
+        'description': 'China Railway ticket availability, transfers and station lookup. Open-source, runs locally, query-only (no booking).',
+        'icon': '🚆',
+        'category': CAT_LOCAL_CN,
+        'command': 'npx',
+        'args': ['-y', '12306-mcp'],
+        'env_specs': [],
+        'url': 'https://github.com/Joooook/12306-mcp',
+        'tags': ['train', 'travel', 'china', '12306', '火车票', '余票'],
+        'install_note': '查询能力，不支持下单；无需 API Key。',
+    },
+
     {
         'id': 'mcp-compass',
         'name': 'MCP Compass',
@@ -1020,9 +1186,11 @@ def build_server_config(server_id: str, env_values: dict[str, str] | None = None
         logger.warning('[MCP:Registry] Unknown server_id: %s', server_id)
         return None
 
-    transport = entry.get('transport', 'stdio')
+    from lib.mcp.transport import is_stdio, normalize_transport
+
+    entry.get('transport', 'stdio')
     config: dict = {
-        'transport': transport,
+        'transport': normalize_transport(entry),
         'enabled': True,
         'description': entry.get('description', entry['name']),
     }
@@ -1035,9 +1203,13 @@ def build_server_config(server_id: str, env_values: dict[str, str] | None = None
     if entry.get('timeout'):
         config['timeout'] = entry['timeout']
 
-    if transport == 'sse':
-        # SSE transport: needs a URL, no command
-        config['url'] = ''  # will be set below from env_specs
+    if not is_stdio(config):
+        # Remote transport: needs an endpoint URL, never a command. The
+        # endpoint may be baked into the catalog entry or supplied per-user
+        # through env_specs (handled in the loop below).
+        config['url'] = entry.get('endpoint', '')
+        if entry.get('headers'):
+            config['headers'] = dict(entry['headers'])
     else:
         # stdio transport: needs command + args
         config['command'] = entry['command']

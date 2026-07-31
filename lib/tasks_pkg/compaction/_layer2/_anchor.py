@@ -54,10 +54,26 @@ def _objective_anchor_index(messages: list) -> int | None:
             if content.strip():
                 return i
         elif isinstance(content, list):
-            if any(isinstance(b, dict) and b.get('type') == 'text'
-                   and (b.get('text') or '').strip() for b in content):
-                return i
-        elif content:  # non-empty non-text (e.g. image-only) — still real
+            # A turn is real if it carries ANY substantive block — non-blank
+            # text, OR a non-text block (image / document / audio). An
+            # image-only opener ("fix this" + a screenshot, or just the
+            # screenshot) IS the user's goal, and anchoring past it lets the
+            # real request be summarized away irrecoverably.
+            #
+            # This differs DELIBERATELY from autopilot_state._extract_objective,
+            # which shares the skip rules above but returns TEXT for the virtual
+            # user: an image carries no text, so skipping it there is correct.
+            # Here the return value is an INDEX whose purpose is "protect this
+            # message from summarization", so an image-only turn must qualify.
+            for b in content:
+                if not isinstance(b, dict):
+                    continue
+                if b.get('type') == 'text':
+                    if (b.get('text') or '').strip():
+                        return i
+                else:
+                    return i
+        elif content:  # non-empty scalar of some other type — still real
             return i
     return None
 

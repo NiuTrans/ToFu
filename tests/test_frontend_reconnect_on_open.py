@@ -203,15 +203,30 @@ def test_no_reconnect_without_active_task_id():
 
 @pytest.mark.skipif(not _node_available(), reason="node not installed")
 def test_neuter_strip_connect_regresses():
-    """NEUTER: strip the connectToTask call from the fn body → the running task
-    is never reconnected → the frozen-placeholder bug returns (no arm)."""
+    """NEUTER: strip the connectToTask call(s) from the fn body → the running
+    task is never reconnected → the frozen-placeholder bug returns (no arm).
+
+    The seam now attaches on EITHER of two branches: the plain worker attach
+    (``connectToTask(id, targetTid)``) and the VU-carrier fallback
+    (``connectToTask(id, _vuCarrierTid, 0, {vuCarrier:true})``). Neutering only
+    the plain one would leave the carrier branch calling connectToTask — and a
+    neuter that left ANY attach firing would not prove the reconnect is
+    load-bearing, so we strip BOTH and then assert neither fired."""
     src = _fn()
-    neutered = src.replace("connectToTask(id, conv.activeTaskId);",
-                           "/* connectToTask neutered */ void 0;", 1)
+    # Anchor on the connectToTask CALLS, not their argument expressions — the
+    # plain call resolves its tid via pickAuthoritativeTaskIdForReconnect and
+    # the carrier call passes a 3-arg (opts) form, so neither is a fixed
+    # 2-arg literal. Match any connectToTask(...) invocation regardless of
+    # arg count, but never the delegated definition elsewhere.
+    neutered, n = re.subn(r"connectToTask\(id, [^;]*\);",
+                          "/* connectToTask neutered */ void 0;", src)
+    assert n >= 1, "no connectToTask call found in _reconnectServerTaskIfIdle"
     assert neutered != src, "neuter pattern did not match connectToTask call"
     r = _run(neutered, _running_conv(), "c1", behaviour="running")
-    assert r["calls"]["connectToTask"] == [], "neutered fn should not call connectToTask"
-    assert r["calls"]["twStart"] == [], f"neutered fn should not arm a stream: {r}"
+    assert r["calls"]["connectToTask"] == [], \
+        f"neutered fn should not call connectToTask ({n} sites stripped)"
+    assert r["calls"]["twStart"] == [], \
+        f"neutered fn should not arm a stream: {r}"
 
 
 def test_source_wires_reconnect_in_both_open_branches():
@@ -226,13 +241,17 @@ def test_source_wires_reconnect_in_both_open_branches():
     call_sites = src.count("if (_reconnectServerTaskIfIdle(id))")
     assert call_sites == 2, \
         f"expected 2 if(_reconnectServerTaskIfIdle(id)) call sites (both open branches), found {call_sites}"
-    # Gate must key off the persisted, server-authoritative activeTaskId, and
-    # guard idempotency on activeStreams.
-    assert "if (!conv || !conv.activeTaskId) return false;" in src, \
-        "reconnect gate no longer keys off server-authoritative conv.activeTaskId"
+    # Gate must require a non-null reconnect target tid — resolved via
+    # pickAuthoritativeTaskIdForReconnect (union of conv.activeTaskId and the
+    # server-authoritative Set), never a bare client guess — and guard
+    # idempotency on activeStreams.
+    assert "pickAuthoritativeTaskIdForReconnect" in src, \
+        "reconnect no longer resolves its target via pickAuthoritativeTaskIdForReconnect"
+    assert re.search(r"if \(!targetTid\) return false;", src), \
+        "reconnect gate no longer requires a non-null target task id"
     assert "activeStreams.has(id)) return false;" in src, \
         "reconnect idempotency guard (skip when a stream is already live) removed"
-    assert "connectToTask(id, conv.activeTaskId);" in src, \
+    assert re.search(r"connectToTask\(id, targetTid\);", src), \
         "reconnect no longer delegates to the existing connectToTask mechanism"
 
 

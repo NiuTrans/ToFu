@@ -66,7 +66,14 @@ def probe_provider(base_url: str, api_key: str,
         logger.info('[Probe] Brand detected: %s (%s) from %s', brand, name, base_url)
 
         # ── Step 2: Discover models ──
-        models = discover_models(base_url, api_key, models_path=models_path)
+        models, effective_base = discover_models(
+            base_url, api_key, models_path=models_path, return_effective=True)
+        if effective_base != base_url:
+            # Bare-origin input (ollama habit) was rescued by the /v1
+            # fallback — persist the WORKING URL or every chat call 404s.
+            logger.info('[Probe] base_url %s → %s (/v1 fallback)',
+                        base_url, effective_base)
+            base_url = effective_base
         if not models:
             return {
                 'ok': False,

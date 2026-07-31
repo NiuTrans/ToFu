@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=1080, height=1440" />
+    <title>scene</title>
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { margin: 0; width: 1080px; height: 1440px; overflow: hidden; background: #000; }
+      body { font-family: Inter, system-ui, sans-serif; }
+      #root { position: relative; width: 1080px; height: 1440px; overflow: hidden; }
+      .bgfill { position: absolute; inset: 0; background: linear-gradient(160deg, #0b0f14 0%, #14243a 60%, #1d3a5f 100%); }
+      .clip { position: absolute; inset: 0; display: grid; place-items: center; }
+      /* scene styles here — keep text inside max-width containers */
+      .headline { font-size: 104px; font-weight: 800; color: #fff; letter-spacing: -2px; max-width: 900px; text-align: center; }
+    </style>
+  </head>
+  <body>
+    <!--
+      Scene scaffold (vertical 1080x1440). Change in this order:
+        1. data-duration on #root  = EXACT scene duration in seconds (float ok)
+        2. clips                   = your timed content (data-start / data-duration / data-track-index)
+        3. the timeline            = one paused GSAP timeline on window.__timelines['main']
+      Rules: no Date.now / Math.random / repeat:-1 / rAF; transforms + opacity only;
+      background on the .bgfill child, never on #root.
+    -->
+    <div
+      id="root"
+      data-composition-id="main"
+      data-start="0"
+      data-duration="5"
+      data-width="1080"
+      data-height="1440"
+    >
+      <div class="bgfill"></div>
+      <section id="card-1" class="clip" data-start="0" data-duration="5" data-track-index="1">
+        <h1 class="headline" id="headline">Scene headline</h1>
+      </section>
+    </div>
+    <script>
+      window.__timelines = window.__timelines || {};
+      const tl = gsap.timeline({ paused: true });
+      tl.from('#headline', { y: 56, opacity: 0, duration: 0.7, ease: 'power3.out' }, 0.2);
+      window.__timelines['main'] = tl;
+    </script>
+  </body>
+</html>

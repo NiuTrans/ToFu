@@ -7,8 +7,8 @@
 
 function _handleSwarmInboxInject(ev, c) {
   const convId = c.convId, taskId = c.taskId;
-  const assistantMsg = c.assistantMsg, buf = c.buf;
-  const _epCriticPhase = c.epCriticPhase, _epCriticMsg = c.epCriticMsg, _epCriticBuf = c.epCriticBuf;
+  const assistantMsg = c.assistantMsg;
+  const _epCriticPhase = c.epCriticPhase, _epCriticMsg = c.epCriticMsg;
       /* ── Async swarm: <swarm-update> messages were just drained from the
        *    inbox and prepended to the model's next round as user messages.
        *    Stamp a chip on the assistant bubble so the human user sees
@@ -49,7 +49,6 @@ function _handleSwarmInboxInject(ev, c) {
           inboxAgentIds: Array.isArray(ev.agentIds) ? ev.agentIds.filter(Boolean) : [],
           inboxPreviews: Array.isArray(ev.previews) ? ev.previews : [],
         }, _injRound - 1);
-        if (buf) buf.toolRounds = assistantMsg.toolRounds;
       }
       /* Reconcile the most recent swarm panel's async-running badge.
 
@@ -119,14 +118,13 @@ function _handleSwarmInboxInject(ev, c) {
           }
         }
       }
-      if (buf) buf._inboxInjects = assistantMsg._inboxInjects;
-      twUpdate(convId);
+      if (typeof twUpdate === 'function') twUpdate(convId);
 
 }
 
 function _handlePeerInboxInject(ev, c) {
   const convId = c.convId;
-  const assistantMsg = c.assistantMsg, buf = c.buf;
+  const assistantMsg = c.assistantMsg;
       /* ── Pillar #6 fast-path: a peer message from a sibling conversation was
        *    drained from the inbox and injected as a user message before this
        *    round. Unlike the queue-lane case (a persisted _peerMessage user
@@ -148,14 +146,13 @@ function _handlePeerInboxInject(ev, c) {
           peerCount:     ev.count || 0,
           peerPreviews:  Array.isArray(ev.previews) ? ev.previews : [],
         }, _pRound - 1);
-        if (buf) buf.toolRounds = assistantMsg.toolRounds;
       }
-      twUpdate(convId);
+      if (typeof twUpdate === 'function') twUpdate(convId);
 }
 
 function _handleUserSteerInject(ev, c) {
   const convId = c.convId;
-  const assistantMsg = c.assistantMsg, buf = c.buf;
+  const assistantMsg = c.assistantMsg;
       /* ── Mid-turn human steer: the operator sent a message WHILE this turn
        *    was generating (composer inject-mode = steer). The orchestrator
        *    drained it from the model-facing inbox and injected it as a user
@@ -179,7 +176,6 @@ function _handleUserSteerInject(ev, c) {
           previews: Array.isArray(ev.previews) ? ev.previews : [],
           ts:       Date.now(),
         });
-        if (buf) buf._userSteerInjects = assistantMsg._userSteerInjects;
       }
       if (!assistantMsg.toolRounds) assistantMsg.toolRounds = [];
       const _sKey = "steer:" + _steerRound;
@@ -193,15 +189,14 @@ function _handleUserSteerInject(ev, c) {
           steerCount:    ev.count || 0,
           steerPreviews: Array.isArray(ev.previews) ? ev.previews : [],
         }, _steerRound - 1);
-        if (buf) buf.toolRounds = assistantMsg.toolRounds;
       }
-      twUpdate(convId);
+      if (typeof twUpdate === 'function') twUpdate(convId);
 }
 
 function _handleMessagesSnapshot(ev, c) {
   const convId = c.convId, taskId = c.taskId;
-  const assistantMsg = c.assistantMsg, buf = c.buf;
-  const _epCriticPhase = c.epCriticPhase, _epCriticMsg = c.epCriticMsg, _epCriticBuf = c.epCriticBuf;
+  const assistantMsg = c.assistantMsg;
+  const _epCriticPhase = c.epCriticPhase, _epCriticMsg = c.epCriticMsg;
       if (typeof showMessagesInDebug === "function")
         showMessagesInDebug(
           ev.messages,
@@ -209,6 +204,11 @@ function _handleMessagesSnapshot(ev, c) {
           true,
           convId,
           ev.tools || undefined,
+          /* Request Inspector data plane (P1): forward the snapshot envelope
+           * (kind / model / params / roundNum / taskId) so the per-task round
+           * log appends this round instead of overwriting the latest. */
+          { kind: ev.kind, model: ev.model, params: ev.params,
+            roundNum: ev.roundNum, taskId: taskId, turn: ev.turn || '' },
         );
 
     /* ═══ Endpoint mode events ═══ */
@@ -216,8 +216,8 @@ function _handleMessagesSnapshot(ev, c) {
 
 function _handleSseTimeout(ev, c) {
   const convId = c.convId, taskId = c.taskId;
-  const assistantMsg = c.assistantMsg, buf = c.buf;
-  const _epCriticPhase = c.epCriticPhase, _epCriticMsg = c.epCriticMsg, _epCriticBuf = c.epCriticBuf;
+  const assistantMsg = c.assistantMsg;
+  const _epCriticPhase = c.epCriticPhase, _epCriticMsg = c.epCriticMsg;
       /* SSE connection hit max duration — backend task is STILL RUNNING.
          Show a toast and return false (not done). The stream will close,
          _trySSE will detect !streamDone and return false, triggering _pollFallback. */
@@ -238,8 +238,8 @@ function _handleSseTimeout(ev, c) {
 
 function _handleRoundCommitted(ev, c) {
   const convId = c.convId, taskId = c.taskId;
-  const assistantMsg = c.assistantMsg, buf = c.buf;
-  const _epCriticPhase = c.epCriticPhase, _epCriticMsg = c.epCriticMsg, _epCriticBuf = c.epCriticBuf;
+  const assistantMsg = c.assistantMsg;
+  const _epCriticPhase = c.epCriticPhase, _epCriticMsg = c.epCriticMsg;
       /* ★ Async shadow-git commit landed AFTER the done event was emitted.
          Backend moved commit_round out of the critical path (2026-05-07)
          so queue dispatch isn't blocked by slow FUSE git.  Wire the sha
@@ -250,6 +250,6 @@ function _handleRoundCommitted(ev, c) {
       if (typeof ev.modifiedFiles === 'number') assistantMsg.modifiedFiles = ev.modifiedFiles;
       /* Re-render the message so its footer reflects the new file list /
          undo button availability. */
-      try { if (typeof renderChat === 'function') renderChat(); } catch (_) {}
+      try { window.ConvView.replaceAll(convId); } catch (_) {}
 
 }

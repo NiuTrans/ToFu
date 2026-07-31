@@ -86,7 +86,8 @@ def panels_signature():
                 parts.append('%s:%d:%d' % (name, int(st.st_mtime), st.st_size))
             except OSError as e:
                 logger.debug('[SettingsPanels] stat %s failed: %s', name, e)
-    except OSError:
+    except OSError as _e:
+        logger.debug('panels signature: unreadable (%s)', _e)
         return ''
     return '|'.join(parts)
 

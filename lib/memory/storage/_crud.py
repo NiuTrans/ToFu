@@ -11,15 +11,16 @@ from datetime import datetime, timezone
 from lib.log import get_logger
 
 from ._dirs import (
+    LEGACY_PROJECT_MEMORY_SUBDIR,
     PROJECT_MEMORY_SUBDIR,
     MIN_DESCRIPTION_LENGTH,
     _get_global_memory_dir,
     _iter_roots,
     _lock,
-    _migrate_one_root_globals,
-    _migrated_roots,
     _server_global_memory_dir,
+    _server_global_skills_dir,
     resolve_target_dir,
+    run_storage_migrations,
 )
 from ._files import (
     _list_memories_in_dir,
@@ -43,20 +44,21 @@ def list_all_memories(project_path=None, extra_paths=None):
     memories = []
     seen_ids = set()
     with _lock:
-        # One-time idempotent migration of each root's legacy global dir into
-        # the server store, so pre-existing globals become cross-project.
-        for root in roots:
-            if root in _migrated_roots:
-                continue
-            try:
-                _migrate_one_root_globals(root)
-            except Exception as e:
-                logger.warning('[Memory] legacy global migration failed for '
-                               '%s: %s', root, e)
-            _migrated_roots.add(root)
+        # One-time idempotent storage migrations (legacy globals, pre-split
+        # flat memories, server-store packages) so the scans below see the
+        # post-split layout.
+        run_storage_migrations(project_path, extra_paths)
 
-        # Server-side global store first — canonical, scanned once regardless
-        # of project, and wins on an id collision.
+        # Server-side global stores first — canonical, scanned once regardless
+        # of project, and win on an id collision. The SKILLS store precedes
+        # the memory store so a post-migration package shadows any straggler
+        # copy left behind in the memory store.
+        for mem in _list_memories_in_dir(_server_global_skills_dir(),
+                                         scope='global'):
+            if mem['id'] in seen_ids:
+                continue
+            seen_ids.add(mem['id'])
+            memories.append(mem)
         for mem in _list_memories_in_dir(_server_global_memory_dir(),
                                          scope='global'):
             if mem['id'] in seen_ids:
@@ -69,8 +71,14 @@ def list_all_memories(project_path=None, extra_paths=None):
             global_dir = _get_global_memory_dir(root)
             scanned = (_list_memories_in_dir(global_dir, scope='global')
                        if global_dir else [])
+            # Post-split project memories dir (flat *.md).
             proj_dir = os.path.join(root, PROJECT_MEMORY_SUBDIR)
             scanned += _list_memories_in_dir(proj_dir, scope='project')
+            # Pre-split legacy dir — still the permanent home of project
+            # skill packages, plus any unmigrated straggler flat files
+            # (shadowed by id; the memories dir above wins).
+            legacy_dir = os.path.join(root, LEGACY_PROJECT_MEMORY_SUBDIR)
+            scanned += _list_memories_in_dir(legacy_dir, scope='project')
             for mem in scanned:
                 if mem['id'] in seen_ids:
                     continue
@@ -103,17 +111,40 @@ def get_enabled_memories(project_path=None, extra_paths=None):
             if s.get('enabled', True)]
 
 
-def get_eligible_memories(project_path=None, extra_paths=None):
-    """Get memories that are both enabled AND meet all runtime requirements."""
+def get_eligible_memories(project_path=None, extra_paths=None,
+                          include_packages=False):
+    """Get memories that are both enabled AND meet all runtime requirements.
+
+    SKILL PACKAGES are excluded by default: they are a different noun
+    (user-installed instruction guides) with their own channel — the
+    ``<available_skills>`` index + ``activate_skill`` — so the memory
+    prefetch/search/injection corpus stays pure MEMORY and packages stop
+    competing with experience notes for injection slots.
+    """
     return [
         s for s in get_enabled_memories(project_path, extra_paths=extra_paths)
         if s.get('eligible', True)
+        and (include_packages or not s.get('is_package'))
     ]
 
 
 # ═══════════════════════════════════════════════════════
 #  CRUD Operations
 # ═══════════════════════════════════════════════════════
+
+def _guard_not_package(target, memory_id, op):
+    """Refuse model-side CRUD against an installed SKILL PACKAGE.
+
+    Skill packages are USER-installed capability packs — install /
+    uninstall / enable-toggle are user-only actions (Settings → Skills).
+    The model's memory tools must never rewrite, merge, or delete one
+    (a skill is a different noun from a memory).
+    """
+    if target and target.get('is_package'):
+        raise ValueError(
+            f"Cannot {op} '{memory_id}': it is an installed skill package, "
+            f"not a memory. Skill packages are managed by the user in the "
+            f"Settings → Skills tab; use activate_skill to load one.")
 
 def create_memory(name, description='', body='', tags=None, scope='global', project_path=None):
     """Create a new memory file. Returns the memory dict."""
@@ -174,6 +205,7 @@ def update_memory(memory_id, updates, project_path=None, extra_paths=None):
             break
     if not target:
         return None
+    _guard_not_package(target, memory_id, 'update')
     for key in ('name', 'description', 'body', 'tags', 'enabled',
                 'requires_bins', 'requires_env'):
         if key in updates:
@@ -183,36 +215,22 @@ def update_memory(memory_id, updates, project_path=None, extra_paths=None):
 
 
 def delete_memory(memory_id, project_path=None, extra_paths=None):
-    """Delete a memory. Handles both flat ``.md`` files and package
-    directories (``<id>/SKILL.md`` + references/scripts).
+    """Delete a flat memory file.
+
+    Skill packages are NOT deletable here — they are a different noun
+    (user-installed); see :func:`_guard_not_package`. The Settings →
+    Skills tab uninstalls packages via the skills API's own path.
 
     The memory is located across the primary + extra roots.
     Returns True if deleted.
     """
-    import shutil
     all_memories = list_all_memories(project_path, extra_paths=extra_paths)
-    _roots = _iter_roots(project_path, extra_paths)
-    # Global skill packages live in the server store, not under a project
-    # root, so it must also be an allowed deletion prefix.
-    _allowed = [os.path.realpath(r) for r in _roots]
-    _allowed.append(os.path.realpath(_server_global_memory_dir()))
     for s in all_memories:
         if s['id'] != memory_id:
             continue
+        _guard_not_package(s, memory_id, 'delete')
         try:
-            if s.get('is_package') and s.get('package_dir'):
-                pkg = s['package_dir']
-                # Defence: only delete inside an allowed skills tree (project
-                # roots + the server-side global store).
-                pkg_real = os.path.realpath(pkg)
-                if _allowed and not any(
-                        pkg_real.startswith(a) for a in _allowed):
-                    logger.warning('Refusing to delete package outside project: %s', pkg)
-                    return False
-                shutil.rmtree(pkg)
-                logger.info('[Memory] Removed skill package %s (%s)', memory_id, pkg)
-            else:
-                os.remove(s['filepath'])
+            os.remove(s['filepath'])
             return True
         except OSError:
             logger.warning('Failed to delete memory %s', s['filepath'], exc_info=True)
@@ -242,6 +260,8 @@ def merge_memories(memory_ids, name, description, body, tags=None, scope='projec
     missing = [sid for sid in memory_ids if sid not in mem_map]
     if missing:
         raise ValueError(f"Memories not found: {', '.join(missing)}")
+    for sid in memory_ids:
+        _guard_not_package(mem_map[sid], sid, 'merge')
 
     if tags is None:
         merged_tags = set()
@@ -272,11 +292,18 @@ def merge_memories(memory_ids, name, description, body, tags=None, scope='projec
 
 
 def toggle_memory(memory_id, enabled=None, project_path=None, extra_paths=None):
-    """Toggle a memory's enabled state."""
+    """Toggle a memory's enabled state.
+
+    Deliberately does NOT route through :func:`update_memory`: that one is
+    package-guarded (model CRUD safety), while enable/disable is ALSO the
+    Settings → Skills enable toggle for packages — a user-only API action
+    that must keep working for skill packages.
+    """
+    mem = get_memory(memory_id, project_path, extra_paths=extra_paths)
+    if not mem:
+        return None
     if enabled is None:
-        mem = get_memory(memory_id, project_path, extra_paths=extra_paths)
-        if not mem:
-            return None
         enabled = not mem.get('enabled', True)
-    return update_memory(memory_id, {'enabled': enabled}, project_path,
-                         extra_paths=extra_paths)
+    mem['enabled'] = enabled
+    mem['updated'] = _write_memory_file(mem['filepath'], mem)
+    return mem

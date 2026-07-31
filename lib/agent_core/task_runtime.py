@@ -23,15 +23,48 @@ Standard task dict shape:
         'id':           str,        # unique task ID
         'kind':         str,        # 'paper-report', 'translate', etc.
         'status':       str,        # 'pending'|'running'|'done'|'error'|'aborted'
+        'artifact_quality': dict|None,  # PRODUCT-quality axis, orthogonal to status
         'events':       list[dict], # append-only, each gets a 'seq'
         'events_lock':  Lock,
         'abort_event':  threading.Event,
         'result':       Any,
         'error':        dict | None, # error envelope
-        'created_at':   float,
+        'created_at':   float,      # true start — surfaced by poll()
+        'updated_at':   float,      # last proof of life — surfaced by poll()
         'finished_at':  float | None,
         'meta':         dict,        # caller-supplied custom fields
     }
+
+★ TWO INDEPENDENT AXES — do not conflate them:
+
+  * ``status`` is the **lifecycle** axis: pending → running → terminal. Its
+    membership is closed and load-bearing (every ``status in (…)`` terminal
+    check in this file depends on it), so a new *quality* concern must never
+    be added to it.
+  * ``artifact_quality`` is the **product** axis: did the job deliver a GOOD
+    artifact? A pipeline can complete its lifecycle cleanly (``status='done'``)
+    while shipping an artifact produced by a sick pipeline — a research pass
+    whose structural gate wiped every idea, a video whose narration silently
+    degraded to silent, a report assembled with missing sections. Reporting
+    those as plain 'done' is what made the R3 total-wipe bug invisible.
+
+The field is ``artifact_quality`` and NOT the shorter ``quality`` because
+``quality`` is already taken on a task dict: motion-video stores its render
+preset there (``lib/motion_video/runtime.py`` — the string 'draft' /
+'standard' / 'high', also a manifest field). Reusing the name made
+``finish()`` do ``'standard'.get('degraded')`` and blew up three existing
+tests. Two different meanings of the word 'quality' must not share a key.
+
+``artifact_quality`` is tri-state on purpose:
+
+  * ``None``  — this task kind does not assess quality (chat, translate…).
+    NOT the same as "clean"; nobody looked.
+  * ``{'degraded': False, 'reason': ''}`` — assessed and healthy.
+  * ``{'degraded': True,  'reason': str}`` — valid artifact, sick pipeline.
+
+Workers opt in by passing ``degraded=`` to :meth:`TaskRuntime.finish`. New
+quality dimensions get a new KEY inside ``artifact_quality`` — never a new
+``status`` member and never another top-level task field.
 """
 
 import asyncio
@@ -46,19 +79,68 @@ logger = get_logger(__name__)
 
 
 def _make_envelope(error, *, context: str, source: str) -> Optional[dict]:
-    """Normalize error to an envelope dict (or None)."""
+    """Normalize error to an envelope dict (or None).
+
+    Every shape becomes a COMPLETE envelope (``kind`` + string ``message``)
+    because the frontend's ``isErrorEnvelope`` requires both — an incomplete
+    dict (e.g. ``{'kind': 'worker_lost', 'detail': …}``) used to fall through
+    to the renderer's unknown-shape branch and display as 'Unknown error'
+    plus a JSON blob.
+    """
     if error is None:
         return None
     if isinstance(error, dict):
-        return error
+        if isinstance(error.get('kind'), str) and isinstance(error.get('message'), str):
+            return error  # complete envelope — pass through verbatim
+        from lib.error_envelope import make_envelope as _make_env
+        return _make_env(error.get('kind') or 'generic',
+                         detail=str(error.get('detail') or '')[:300],
+                         context=context,
+                         source=error.get('source') or source,
+                         raw=str(error)[:300])
     if isinstance(error, BaseException):
         from lib.error_envelope import from_exception as _err_from_exc
         return _err_from_exc(error, context=context, source=source)
     if isinstance(error, str):
-        from lib.error_envelope import make_envelope as _make_env
+        # A string naming a REGISTERED kind (e.g. finish(error='worker_lost')
+        # — the documented stall-reap contract) builds that kind's envelope;
+        # anything else is a raw reason string shown verbatim under 'generic'.
+        from lib.error_envelope import KINDS as _KINDS, make_envelope as _make_env
+        if error in _KINDS:
+            return _make_env(error, context=context, source=source)
         return _make_env('generic', detail=error, context=context,
                          source=source, raw=error)
-    return {'kind': 'generic', 'detail': str(error), 'source': source}
+    from lib.error_envelope import make_envelope as _make_env
+    return _make_env('generic', detail=str(error)[:300], context=context,
+                     source=source, raw=str(error)[:300])
+
+
+def _epoch_ms(seconds) -> Optional[int]:
+    """Convert an internal epoch-SECONDS timestamp to wire epoch-MILLISECONDS.
+
+    The unit boundary is deliberate and load-bearing. Internally every task
+    clock is ``time.time()`` (float seconds); on the wire this project's
+    established contract is **epoch milliseconds** under camelCase names
+    (``createdAt`` — see ``lib/chat_dispatch.py`` and
+    ``routes/chat_poll_abort.py``), because that is what JS ``Date.now()``
+    speaks and what ``_seedStreamTimerStart`` consumes.
+
+    Feeding a SECONDS value into that frontend seam is not a visible failure:
+    the min-guard happily accepts it (a seconds epoch is ~1000x smaller than
+    ``Date.now()``) and the UI then renders an elapsed of ~50 years. Keeping
+    the snake_case seconds field and the camelCase millisecond field under
+    DIFFERENT names is what makes that mistake impossible to make silently.
+
+    Returns None for a missing/unset clock so the field is emitted as null
+    rather than a bogus 0 (epoch 1970).
+    """
+    if seconds is None:
+        return None
+    try:
+        return int(float(seconds) * 1000)
+    except (TypeError, ValueError) as e:
+        logger.debug('[task_runtime] non-numeric timestamp %r: %s', seconds, e)
+        return None
 
 
 class TaskRuntime:
@@ -78,7 +160,8 @@ class TaskRuntime:
 
     def __init__(self, kind: str, *, ttl: int = 3600,
                  push_channel: Optional[str] = None,
-                 error_source: str = ''):
+                 error_source: str = '',
+                 stall_timeout: float = 0):
         """
         Args:
             kind: Task kind identifier (e.g. 'chat', 'paper-report').
@@ -87,9 +170,16 @@ class TaskRuntime:
                 are also pushed via lib.agent_core.push.push_event(channel, task_id, event).
                 If None, defaults to ``kind``.
             error_source: Module identifier for error envelopes.
+            stall_timeout: Read-side stall reaping (docs/PAPER_MEDIA_UX_DESIGN.md
+                §3.2). When > 0, poll() declares a pending/running task whose
+                last event is older than this many seconds ``worker_lost``.
+                0 (default) disables reaping — only enable for runtimes whose
+                workers heartbeat every long phase, or slow-but-legit phases
+                (long tool calls) would be false-killed.
         """
         self.kind = kind
         self.ttl = ttl
+        self.stall_timeout = float(stall_timeout or 0)
         self.push_channel = push_channel if push_channel is not None else kind
         self.error_source = error_source or f'task_runtime.{kind}'
         self._tasks: dict[str, dict] = {}
@@ -106,16 +196,23 @@ class TaskRuntime:
         """Create and register a new task. Returns the task dict."""
         if not task_id:
             task_id = short_id(n=12)
+        _now = time.time()
         task = {
             'id': task_id,
             'kind': self.kind,
             'status': 'pending',
+            # Product-quality axis (see module docstring). None = unassessed;
+            # only a worker that passes degraded= to finish() populates it.
+            'artifact_quality': None,
             'events': [],
             'events_lock': threading.Lock(),
             'abort_event': threading.Event(),
             'result': None,
             'error': None,
-            'created_at': time.time(),
+            'created_at': _now,
+            # Set at creation (not only in append_event) so the liveness clock
+            # is well-defined for a task that has not emitted anything yet.
+            'updated_at': _now,
             'finished_at': None,
             'meta': meta or {},
         }
@@ -157,6 +254,8 @@ class TaskRuntime:
         task = self.get(task_id)
         if not task:
             return None
+        # The stall-reap clock: every event is proof of life.
+        task['updated_at'] = time.time()
         with task['events_lock']:
             event['seq'] = len(task['events'])
             task['events'].append(event)
@@ -185,12 +284,21 @@ class TaskRuntime:
         return seq
 
     def finish(self, task_id: str, *, result: Any = None,
-               error: Any = None, error_context: str = '') -> bool:
+               error: Any = None, error_context: str = '',
+               degraded: Optional[bool] = None,
+               degraded_reason: str = '') -> bool:
         """Mark a task as terminal (done | error | aborted).
 
         Always emits a final event with type='done' or type='error' so
         pollers/WebSocket subscribers see a guaranteed terminal frame.
         Returns True if the task was found and updated.
+
+        ``degraded`` is the PRODUCT-quality axis and is deliberately
+        orthogonal to ``status`` (module docstring). Pass it when the job
+        delivered a valid artifact from a pipeline that did not work properly;
+        ``status`` stays 'done' so every terminal check keeps its meaning and
+        the frontend reads one extra field. Leaving it None means "this kind
+        does not assess quality" — which is NOT the same as "clean".
         """
         task = self.get(task_id)
         if not task:
@@ -208,8 +316,16 @@ class TaskRuntime:
                 task['status'] = 'done'
             task['result'] = result
             task['error'] = envelope
+            if degraded is not None:
+                task['artifact_quality'] = {
+                    'degraded': bool(degraded),
+                    'reason': str(degraded_reason or ''),
+                }
             task['finished_at'] = time.time()
             final_status = task['status']
+            # .get(): legacy task dicts inserted straight into _tasks (older
+            # test code, chat's own shape) predate this key.
+            quality = task.get('artifact_quality')
 
         terminal_event = {
             'type': 'done' if final_status == 'done' else (
@@ -218,11 +334,16 @@ class TaskRuntime:
         }
         if envelope:
             terminal_event['error'] = envelope
+        if quality:
+            # Ride the guaranteed terminal frame so a live SSE/WS subscriber
+            # learns the verdict without a follow-up GET.
+            terminal_event['artifact_quality'] = quality
         if result is not None and final_status == 'done':
             terminal_event['result'] = result
         self.append_event(task_id, terminal_event)
-        logger.debug('[TaskRuntime:%s] task %s finished: %s',
-                     self.kind, task_id[:8], final_status)
+        logger.debug('[TaskRuntime:%s] task %s finished: %s%s',
+                     self.kind, task_id[:8], final_status,
+                     ' (DEGRADED)' if (quality or {}).get('degraded') else '')
         return True
 
     def abort(self, task_id: str) -> bool:
@@ -243,6 +364,42 @@ class TaskRuntime:
                     self.kind, task_id[:8])
         return True
 
+    # ── Stall reaping (read-side, opt-in via stall_timeout) ────
+
+    def reap_if_stalled(self, task: dict) -> bool:
+        """Declare a silent pending/running task ``worker_lost`` (P-UX1).
+
+        A task whose worker crashed (kill -9, process restart, thread death
+        without finish) sits at ``running`` forever and every poller spins
+        with it. There is no write-side reaper thread by design — the check
+        runs on the poll path instead (a task nobody watches needs no
+        verdict; self-healing, zero常驻 cost). The clock is ``updated_at``,
+        touched by every append_event — workers that wrap their long phases
+        in a heartbeat (lib/production/heartbeat.py) are never false-killed.
+
+        Returns True when this call reaped the task.
+        """
+        if not self.stall_timeout:
+            return False
+        if not task or task.get('status') not in ('pending', 'running'):
+            return False
+        last = task.get('updated_at') or task.get('created_at') or 0
+        if time.time() - last <= self.stall_timeout:
+            return False
+        task_id = task.get('id') or task.get('task_id') or '?'
+        logger.warning('[TaskRuntime:%s] task %s stalled (no events for %.0fs '
+                       '> %.0fs) — declaring worker_lost',
+                       self.kind, str(task_id)[:8],
+                       time.time() - last, self.stall_timeout)
+        return self.finish(
+            task_id,
+            error={'kind': 'worker_lost',
+                   'detail': 'no progress events for '
+                             f'{self.stall_timeout:.0f}s — the worker '
+                             'process is presumed dead; safe to retry',
+                   'source': self.error_source},
+            error_context=f'{self.kind}:stall')
+
     # ── Polling ────────────────────────────────────────────────
 
     def poll(self, task_id: str, cursor: int = 0) -> dict:
@@ -255,16 +412,39 @@ class TaskRuntime:
                 'next_cursor': N,
                 'status': 'pending'|'running'|'done'|'error'|'aborted',
                 'done': bool,
+                'createdAt': int,   # true job start, epoch MILLISECONDS
+                'updatedAt': int,   # last proof of life, epoch MILLISECONDS
                 'result': ... (when done),
                 'error': ... (when error),
+                'finishedAt': int (when terminal), epoch MILLISECONDS
             }
 
-        If the task doesn't exist, returns {'ok': False, 'error': 'not_found'}.
+        ★ UNIT: the clock fields are epoch **milliseconds** under camelCase
+        names, matching this project's existing task-start contract
+        (``lib/chat_dispatch.py``, ``routes/chat_poll_abort.py``). The task
+        dict's own ``created_at`` / ``updated_at`` stay float SECONDS; the
+        camelCase/snake_case split is the unit marker. Never emit the raw
+        seconds value on the wire — see :func:`_epoch_ms`.
+
+        ``createdAt`` / ``updatedAt`` exist so a client that RE-ATTACHES to
+        a running job (page refresh, tab switch, conversation switch) can
+        continue the elapsed clock from the real start instead of restarting
+        it at zero, and can render "last activity" from server truth. A client
+        minting those locally re-mints them on every refresh, which not only
+        shows a wrong elapsed but **washes an already-silent job into looking
+        healthy** — the dangerous half. Mirrors the chat stream's
+        server-authoritative rewind (``_seedStreamTimerStart``); clients MUST
+        apply the same min-guard (only ever move the start EARLIER, ignore a
+        future timestamp) so the display can never jump backward.
+
+        If the task doesn't exist, returns {'ok': False, 'error': 'not_found'}
+        with no clocks — a task that does not exist has no start time.
         """
         task = self.get(task_id)
         if not task:
             return {'ok': False, 'error': 'not_found',
                     'events': [], 'next_cursor': cursor, 'done': True}
+        self.reap_if_stalled(task)
 
         with task['events_lock']:
             new_events = task['events'][cursor:]
@@ -277,8 +457,25 @@ class TaskRuntime:
             'next_cursor': new_cursor,
             'status': task['status'],
             'done': terminal,
+            'createdAt': _epoch_ms(task.get('created_at')),
+            # Falls back to created_at so a task with no events yet still
+            # reports a liveness clock — 'now' is never a safe default here.
+            'updatedAt': _epoch_ms(task.get('updated_at')
+                                   or task.get('created_at')),
         }
+        # The making-model is part of the artifact's identity (paper podcast/
+        # video panels badge it; the backend cache/dedup keys ride it) — a
+        # live poll must be able to adopt it, not just a lookup re-attach.
+        # Emitted only when the worker named one, so kinds that have no
+        # model concept keep their frames unchanged.
+        if task.get('model'):
+            resp['model'] = task['model']
         if terminal:
+            resp['finishedAt'] = _epoch_ms(task.get('finished_at'))
+            # Product-quality axis, emitted only when the kind assessed it.
+            # A poller that reads status alone still sees 'done' — by design.
+            if task.get('artifact_quality'):
+                resp['artifact_quality'] = task['artifact_quality']
             if task['error']:
                 resp['error'] = task['error']
             elif task['result'] is not None:

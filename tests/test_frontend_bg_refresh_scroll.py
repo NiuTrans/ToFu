@@ -158,7 +158,16 @@ win._lastRenderedFingerprint = global._lastRenderedFingerprint = '';
 // deciding a repaint is the per-message data-mfp diff.
 win._convRenderFingerprint = global._convRenderFingerprint = () => 'CONVFP';
 
-let src = fs.readFileSync(process.argv[2], 'utf8');  // ui/chat_render.js
+// argv[5..] = ordered shipped sources (resolved by symbol, see
+// tests/_conv_bundle_sources.py). They are CONCATENATED into ONE eval, which
+// is exactly what the bundler does — and is load-bearing here, not stylistic:
+// `_explicitBottomLatch` is `let`-declared in ui/streaming_render.js, and a
+// `let` does NOT escape its own eval, so eval'ing the dependency separately
+// still leaves chat_render.js with a bare ReferenceError. One eval gives the
+// two files the single shared scope the concatenated bundle gives them.
+// The NEUTER rewrite is applied to the joined text.
+const SRC_PATHS = process.argv.slice(5);
+let src = SRC_PATHS.map((p) => fs.readFileSync(p, 'utf8')).join('\n;\n');
 
 // ── NEUTER injection (per-invariant double-neuter) ─────────────────────────
 if (NEUTER === 'anchor') {
@@ -288,15 +297,26 @@ console.log(out.join('\n'));
 
 
 def _run(neuter: str = 'none'):
+    # Resolve the files to eval BY SYMBOL from the production bundle manifests
+    # (never a hard-coded path — see tests/_conv_bundle_sources.py). chat_render
+    # reads `_explicitBottomLatch`, which lives in ui/streaming_render.js since
+    # the render decomposition; eval'ing chat_render alone gave a bare
+    # ReferenceError that reads like a product bug but is pure harness drift.
+    from tests._conv_bundle_sources import sources_defining
+    deps = sources_defining('_explicitBottomLatch')
+    target = os.path.join(JS_DIR, 'ui', 'chat_render.js')
+    src_paths = [p for p in deps if p != target] + [target]
+
     harness = os.path.join(HERE, '_bg_refresh_harness.js')
     with open(harness, 'w') as f:
         f.write(_HARNESS)
     try:
         proc = subprocess.run(
             ['node', harness,
-             os.path.join(JS_DIR, 'ui', 'chat_render.js'),   # argv[2]
+             target,                                          # argv[2] (legacy, unused)
              ROOT,                                            # argv[3]
              neuter,                                          # argv[4]
+             *src_paths,                                      # argv[5..]
              ],
             capture_output=True, text=True, timeout=60,
         )

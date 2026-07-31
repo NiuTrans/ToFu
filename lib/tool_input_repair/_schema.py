@@ -40,6 +40,23 @@ def _build_schema_index() -> dict[str, dict[str, Any]]:
                 candidates.extend(obj)
             elif isinstance(obj, dict) and obj.get('type') == 'function':
                 candidates.append(obj)
+            elif callable(obj) and attr.startswith('build_'):
+                # Zero-arg schema BUILDERS (e.g. build_search_tool): when a
+                # static module-level schema dict becomes runtime-built, the
+                # attr walk above goes blind and the repair for that tool
+                # silently dies (the bare-string ``queries`` coercion was lost
+                # exactly this way when SEARCH_TOOL_MULTI became a builder).
+                # Guarded: a builder that raises (or needs args) is skipped,
+                # never breaks the walk.
+                try:
+                    built = obj()
+                except Exception as e:
+                    logger.debug('[ToolRepair] builder %s() skipped: %s', attr, e)
+                    continue
+                if isinstance(built, list):
+                    candidates.extend(built)
+                elif isinstance(built, dict) and built.get('type') == 'function':
+                    candidates.append(built)
         for entry in candidates:
             if not isinstance(entry, dict):
                 continue

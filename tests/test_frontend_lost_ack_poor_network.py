@@ -30,11 +30,12 @@ import subprocess
 
 import pytest
 
+from tests._conv_bundle_sources import JS_DIR, source_argv, sources_defining
+
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS_DIR = os.path.join(ROOT, 'static', 'js')
 
 
 def _node_available() -> bool:
@@ -53,7 +54,12 @@ global.config = {};
 global.activeConvId = null;
 global.renderChat = function() {};
 
-eval(fs.readFileSync(process.argv[2], 'utf8'));  // core/conversations.js
+/* Eval every shipped file the bundle needs, in production order (resolved by
+ * tests/_conv_bundle_sources.py — helpers BEFORE conversations.js). Hard-coding
+ * the two paths here broke when the cluster moved in Epic-E slice 3. */
+for (let i = 2; i < process.argv.length; i++) {
+  eval(fs.readFileSync(process.argv[i], 'utf8'));
+}
 
 const out = [];
 function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
@@ -119,12 +125,14 @@ console.log(out.join('\n'));
 """
 
 
-def _run(js_source_path: str):
+def _run(override=None):
     harness = os.path.join(HERE, '_lost_ack_harness.js')
     with open(harness, 'w') as f:
         f.write(_HARNESS)
+    paths = source_argv('_rebaseUnackedTail', '_isErrorOnlyAssistant',
+                        override=override)
     try:
-        return subprocess.run(['node', harness, js_source_path],
+        return subprocess.run(['node', harness, *paths],
                               capture_output=True, text=True, timeout=60)
     finally:
         try:
@@ -135,8 +143,7 @@ def _run(js_source_path: str):
 
 @pytest.mark.skipif(not _node_available(), reason='node not installed')
 def test_lost_ack_no_duplicate_no_stale_error():
-    conv_js = os.path.join(JS_DIR, 'core', 'conversations.js')
-    proc = _run(conv_js)
+    proc = _run()
     output = proc.stdout.strip()
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
     fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
@@ -149,15 +156,20 @@ def test_neuter_error_drop_is_load_bearing(tmp_path):
     """NEUTER: make _isErrorOnlyAssistant always return false → the stale error
     bubble is NO LONGER dropped → error_bubble_dropped FAILS. Proves the drop
     logic is load-bearing (not incidentally passing)."""
-    conv_js = os.path.join(JS_DIR, 'core', 'conversations.js')
-    with open(conv_js, encoding='utf-8') as f:
+    # Epic-E slice 3 (b33d9d21) moved _rebaseUnackedTail + _isErrorOnlyAssistant
+    # out of conversations.js — locate the classifier by SYMBOL so a further
+    # move re-points automatically instead of leaving the neuter pointed at a
+    # file that no longer defines it (a neuter that cannot bite reads as green).
+    helpers_js = sources_defining('_isErrorOnlyAssistant')[0]
+    with open(helpers_js, encoding='utf-8') as f:
         src = f.read()
     marker = 'function _isErrorOnlyAssistant(m) {'
     assert marker in src, 'neuter target not found'
     neutered = src.replace(marker, marker + '\n  return false;  // NEUTER', 1)
-    nfile = tmp_path / 'conversations_neutered.js'
+    nfile = tmp_path / 'conv_persist_helpers_neutered.js'
     nfile.write_text(neutered, encoding='utf-8')
-    proc = _run(str(nfile))
+    rel = os.path.relpath(helpers_js, JS_DIR).replace(os.sep, '/')
+    proc = _run(override={rel: str(nfile)})
     output = proc.stdout.strip()
     assert proc.returncode == 0, f'node failed on neutered copy: {proc.stderr}\n{output}'
     lines = {ln.split(' ', 1)[1]: ln.startswith('PASS')

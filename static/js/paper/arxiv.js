@@ -52,14 +52,33 @@ async function _searchArxivPapers(query) {
 
   try {
     var data = await Api.paper.searchArxiv(query, 12);
-    var results = (data && data.ok && Array.isArray(data.results)) ? data.results : [];
+    // A reachable server that still failed (upstream arXiv outage, 5xx with
+    // a string error body) must surface HERE as an error — never fall
+    // through to the empty-list renderer, which would print "no papers
+    // found" over what was really a failure.
+    if (!data || !data.ok) {
+      var serverErr = (data && typeof data.error === 'string' && data.error)
+        || (data && data.error && data.error.message) || '';
+      throw new Error(serverErr || 'arXiv search failed');
+    }
+    var results = Array.isArray(data.results) ? data.results : [];
     _paperSearchResults = results;
     _renderArxivSearchResults(query, results);
   } catch (e) {
     console.error('[Paper] arXiv search failed:', e);
     if (viewer) {
+      // Show the REAL reason (server string error / envelope message /
+      // network failure). ApiError carries a server-sent string error on
+      // `.code`; an envelope's message is already `e.message`; a network
+      // failure's `.code` is just 'network'/'timeout' — prefer e.message
+      // for those.
+      var detail = (e && typeof e.code === 'string' &&
+                    ['network', 'timeout', 'parse'].indexOf(e.code) === -1)
+        ? e.code
+        : ((e && e.message) || String(e));
       viewer.innerHTML =
         '<div class="paper-error">' + escapeHtml(_tt('paper.searchFailed')) +
+        (detail ? '<div class="paper-error-detail">' + escapeHtml(detail) + '</div>' : '') +
         '<br><button onclick="_showPaperLanding()" class="paper-retry-btn">' +
         escapeHtml(_tt('paper.searchBack')) + '</button></div>';
     }
@@ -242,6 +261,31 @@ async function _recommendPapers(description) {
 /** Poll a streaming recommend task to completion, applying events to `s`. */
 async function _pollRecommendTask(s) {
   var POLL_MS = 600;
+
+  /* ★ Push transport (pt_f6aec3ad). `recommend_runtime` declares
+   *   push_channel='paper' and `recommend_task._on_tool_event` forwards the
+   *   interpretation agent's tool_start/tool_done into the event log — so the
+   *   backend already broadcasts each research call's completion in real time.
+   *   This view only polled, so a finished web_search kept its spinner for up
+   *   to POLL_MS. The poll stays as the FLOOR (a WS-blocked client has no push
+   *   channel at all).
+   *
+   *   Both transports carry the SAME events, so every apply routes through the
+   *   shared seq gate — without it a replayed `candidate` event would
+   *   re-persist a card and a delta-like event would double-apply. */
+  paperAttachPush(s, s.taskId, {
+    isCurrent: function () { return _recStream === s && !s.aborted; },
+    onEvent: function (ev) {
+      var dirty = paperIngestEvent(s, ev, _applyRecommendEvent);
+      if (dirty) _paintRecommendFromState();
+    },
+    // A recommend task's terminal signal arrives as a poll STATUS, not an
+    // event type, so nothing here is terminal; the finally-block below is the
+    // single release point.
+    isTerminal: function () { return false; },
+  });
+
+  try {
   while (true) {
     if (_recStream !== s || s.aborted) break;
     var resp = await Api.paper.recommendPoll(s.taskId, s.cursor);
@@ -254,7 +298,9 @@ async function _pollRecommendTask(s) {
     if (!data.ok) throw new Error((typeof data.error === 'string' ? data.error : 'Poll failed'));
 
     var events = data.events || [];
-    for (var i = 0; i < events.length; i++) _applyRecommendEvent(s, events[i]);
+    for (var i = 0; i < events.length; i++) {
+      paperIngestEvent(s, events[i], _applyRecommendEvent);
+    }
     s.cursor = data.next_cursor;
 
     if (data.status === 'done') {
@@ -281,6 +327,10 @@ async function _pollRecommendTask(s) {
     _paintRecommendFromState();
     await new Promise(function(r) { setTimeout(r, POLL_MS); });
   }
+  } finally {
+    // Release on EVERY exit path (done / error / 404 / abort / supersede).
+    paperDetachPush(s);
+  }
 }
 
 /** Apply one recommend stream event to `s`. */
@@ -303,7 +353,7 @@ function _applyRecommendEvent(s, ev) {
         status: 'searching',
         results: null,
       });
-      return;
+      return true;
     case 'tool_done': {
       var tr = null;
       for (var ti = 0; ti < s.toolRounds.length; ti++) {
@@ -318,12 +368,12 @@ function _applyRecommendEvent(s, ev) {
         if (ev.engineBreakdown) tr.engineBreakdown = ev.engineBreakdown;
         if (ev.verticals) tr.verticals = ev.verticals;
       }
-      return;
+      return true;
     }
     case 'interpret_done':
       s.interpreted = true;
       s.candidateCount = (typeof ev.candidateCount === 'number') ? ev.candidateCount : 0;
-      return;
+      return true;
     case 'candidate': {
       var idx = (typeof ev.index === 'number') ? ev.index : s.results.length;
       s.results[idx] = ev.card;
@@ -331,7 +381,7 @@ function _applyRecommendEvent(s, ev) {
       // Auto-persist the moment the card lands so it's never lost (grounded +
       // arxiv-bearing cards only; deduped whole-library).
       _persistRecommendedCard(ev.card);
-      return;
+      return true;
     }
     case 'correction':
       s.correction = ev.correction || null;
@@ -339,12 +389,12 @@ function _applyRecommendEvent(s, ev) {
       // The correction "actual winner" is exactly the paper a user comes back
       // for — save it too.
       if (_paperRecommendCorrection) _persistRecommendedCard(_paperRecommendCorrection);
-      return;
+      return true;
     case 'error':
       s.llmError = !!ev.llmError;
-      return;
+      return true;
     default:
-      return;
+      return false;
   }
 }
 
@@ -646,6 +696,7 @@ async function _fetchArxivPaper(directUrl, reuseId) {
       throw new Error(errText || ('HTTP ' + resp.status));
     }
 
+    /** @type {any} */
     var doneData = null;
     var streamErr = '';
     var curArxivId = '';

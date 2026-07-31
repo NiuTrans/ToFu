@@ -40,11 +40,12 @@ import subprocess
 
 import pytest
 
+from tests._conv_bundle_sources import JS_DIR, source_argv, sources_defining
+
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS_DIR = os.path.join(ROOT, 'static', 'js')
 
 
 def _node_available() -> bool:
@@ -101,7 +102,13 @@ global.config = { defaultThinkingDepth: 'medium' };
 global.activeConvId = null;
 global.renderChat = function() {};
 
-eval(fs.readFileSync(process.argv[2], 'utf8'));  // core/conversations.js
+/* Eval every shipped file the bundle needs for syncConversationToServer +
+ * _rebaseUnackedTail, in production bundle order (see
+ * tests/_conv_bundle_sources.py). Hard-coding core/conversations.js here broke
+ * when the rebase helper was extracted to core/conv_persist_helpers.js. */
+for (let i = 2; i < process.argv.length; i++) {
+  eval(fs.readFileSync(process.argv[i], 'utf8'));
+}
 
 const out = [];
 function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
@@ -161,13 +168,15 @@ _NEUTER_REPLACEMENT = (
 )
 
 
-def _run_harness(js_source_path: str):
+def _run_harness(js_source_paths):
+    if isinstance(js_source_paths, str):
+        js_source_paths = [js_source_paths]
     harness = os.path.join(HERE, '_rev_rebase_harness.js')
     with open(harness, 'w') as f:
         f.write(_HARNESS)
     try:
         proc = subprocess.run(
-            ['node', harness, js_source_path],
+            ['node', harness, *js_source_paths],
             capture_output=True, text=True, timeout=60,
         )
     finally:
@@ -180,8 +189,9 @@ def _run_harness(js_source_path: str):
 
 @pytest.mark.skipif(not _node_available(), reason='node not installed')
 def test_rev_conflict_rebase_preserves_both():
-    conv_js = os.path.join(JS_DIR, 'core', 'conversations.js')
-    proc = _run_harness(conv_js)
+    paths = source_argv('syncConversationToServer', '_rebaseUnackedTail',
+                        '_clearPendingSyncMarkers')
+    proc = _run_harness(paths)
     output = proc.stdout.strip()
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
     fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
@@ -189,8 +199,10 @@ def test_rev_conflict_rebase_preserves_both():
     assert output.count('PASS') >= 8, f'expected >=8 PASS, got:\n{output}'
 
     # Source-level guard: the rebase branch must exist and use append-missing-tail.
-    with open(conv_js, encoding='utf-8') as f:
-        src = f.read()
+    # Located by SYMBOL (the branch lives with syncConversationToServer), not by
+    # a hard-coded filename — that assumption is what broke this suite.
+    sync_file = sources_defining('syncConversationToServer')[0]
+    src = open(sync_file, encoding='utf-8').read()
     assert 'blocked_rev_conflict' in src and _FIXED_MARKER in src, (
         'regression: the rev-conflict rebase branch (GET + _rebaseUnackedTail + '
         're-PUT) is gone — a CAS 409 would fall through to a blind retry / no-op.')
@@ -202,16 +214,18 @@ def test_blind_reput_neuter_loses_server_message(tmp_path):
     the client's own messages) → the server's message is LOST → the
     both-present assertion fails. Proves the rebase does the work. Real file
     untouched."""
-    conv_js = os.path.join(JS_DIR, 'core', 'conversations.js')
-    with open(conv_js, encoding='utf-8') as f:
-        src = f.read()
+    sync_file = sources_defining('syncConversationToServer')[0]
+    src = open(sync_file, encoding='utf-8').read()
     assert _FIXED_MARKER in src, 'fixed rebase marker not found — update the neuter target'
     neutered_src = src.replace(_FIXED_MARKER, _NEUTER_REPLACEMENT, 1)
     assert neutered_src != src, 'neuter did not change the source'
     nfile = tmp_path / 'conversations_neutered.js'
     nfile.write_text(neutered_src, encoding='utf-8')
 
-    proc = _run_harness(str(nfile))
+    rel = os.path.relpath(sync_file, JS_DIR).replace(os.sep, '/')
+    proc = _run_harness(source_argv('syncConversationToServer', '_rebaseUnackedTail',
+                                    '_clearPendingSyncMarkers',
+                                    override={rel: str(nfile)}))
     output = proc.stdout.strip()
     assert proc.returncode == 0, f'node failed on neutered copy: {proc.stderr}\n{output}'
     lines = {ln.split(' ', 1)[1]: ln.startswith('PASS')

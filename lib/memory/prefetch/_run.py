@@ -27,7 +27,8 @@ def run_memory_prefetch(messages: list,
                         task: dict | None = None,
                         emit_event=None,
                         active_tools: list[str] | None = None,
-                        extra_paths: list[str] | None = None) -> list[dict]:
+                        extra_paths: list[str] | None = None,
+                        usage_sink=None) -> list[dict]:
     """Run the full BM25 → cheap-LLM → inject pipeline.
 
     Args:
@@ -46,6 +47,11 @@ def run_memory_prefetch(messages: list,
                       Pass None or [] when unknown.
         extra_paths:  Additional workspace roots (multi-root session) whose
                       memories are unioned in alongside the primary root's.
+        usage_sink:   Callable(usage_dict). Invoked with the rerank call's
+                      usage so the caller can bill it. Fires from INSIDE the
+                      dispatch worker, so a call the deadline abandoned is
+                      still reported — the gateway charged for it either way.
+                      Pass None to ignore accounting.
 
     Returns:
         The list of memory dicts that were injected (empty list if none).
@@ -133,6 +139,7 @@ def run_memory_prefetch(messages: list,
         current_request=current_request,
         project_path=project_path,
         active_tools=active_tools,
+        usage_sink=usage_sink,
     )
     rerank_ms = diag.get('elapsed_ms', 0)
 

@@ -32,6 +32,18 @@ byte-identical. Two controls (NC_BREAK) prove the differential can DETECT a
 divergence in each swapped region — otherwise "identical" would be vacuous.
 
 Runs the real modules under jsdom; skips cleanly without node + jsdom.
+
+EXCEPTION (2026-07 translate-error redesign): the terminal-error branch is NO
+LONGER inert by design — the extracted indicator replaced the amber pill
+(.translate-loading + inline color) with a borderless retry line
+(.translate-retry-line) AND moved the error check ahead of the
+_translateDone===false gate (the engine marks terminal errors done=true, so the
+old gate hid them entirely). The OLD reconstruction's error branch below
+therefore pins the POST-redesign markup as a golden string — a non-vacuous
+byte-compare, since slice() captures .translate-retry-line too — while every
+other branch stays a true pre-refactor reconstruction. A NEW-only pin
+(new_shows_terminal_error_after_done) locks the gate-order fix the redesign
+shipped for.
 """
 
 from __future__ import annotations
@@ -90,7 +102,9 @@ _OLD_ASST = ("  if (!isUser && msg.translatedContent && msg._showingTranslation 
              "    const _tmAsst = msg._translateModel")
 
 # ── step-3 indicator: NEW (the component call in chat_render) → OLD (the full
-#    pre-extraction inline block it replaced). Verbatim on both sides. ──
+#    pre-extraction inline block it replaced). Verbatim on both sides, EXCEPT
+#    the terminal-error branch: that pins the 2026-07 retry-line redesign as a
+#    post-redesign golden string (see docstring EXCEPTION). ──
 _NEW_IND = (
     "  if (typeof renderTranslateIndicator === 'function') {\n"
     "    body += renderTranslateIndicator(msg, idx, { segTimelineRendered: _segTimelineRendered });\n"
@@ -101,7 +115,10 @@ _OLD_IND = (
     "      && !msg.translatedContent && msg._translateDone === false) {\n"
     "    const errText = msg._translateError;\n"
     "    if (errText) {\n"
-    "      body += `<div class=\"translate-loading\" id=\"translate-loading-${idx}\" style=\"color:#f59e0b;cursor:pointer\" onclick=\"translateMessage(${idx})\">${t('translate.failed')}</div>`;\n"
+    "      const _lbl = (t('translate.failed') !== 'translate.failed') ? t('translate.failed') : 'Translation failed, click to retry';\n"
+    "      body += `<div class=\"translate-retry-line\" id=\"translate-loading-${idx}\" role=\"button\" tabindex=\"0\" onclick=\"event.stopPropagation();translateMessage(${idx})\" title=\"${escapeHtml(errText)}\">`\n"
+    "        + `<svg class=\"trl-icon\" width=\"12\" height=\"12\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M23 4v6h-6\"/><path d=\"M20.49 15a9 9 0 1 1-2.12-9.36L23 10\"/></svg>`\n"
+    "        + `<span class=\"trl-text\">${escapeHtml(_lbl)}</span></div>`;\n"
     "    } else {\n"
     "      let statusSub = '';\n"
     "      const _benignKinds = (typeof _TRANSLATE_BENIGN_STATUS_KINDS !== 'undefined')\n"
@@ -209,13 +226,16 @@ if (MODE === 'nc_ind') {
 const renderOld = (0, eval)('(function(){ ' + oldSrc + '\n; return renderMessage; })')();
 
 // Extract the primary .md-content body + any bilingual block + the whole
-// .translate-loading indicator from the rendered HTML.
+// translate indicator from the rendered HTML. The spinner/preview line is
+// .translate-loading; the 2026-07 redesign renders the terminal-error line as
+// .translate-retry-line (both keep the #translate-loading-<idx> id) — select
+// BOTH so the error shape's identity check is non-vacuous.
 function slice(html) {
   const frag = win.document.createElement('div');
   frag.innerHTML = html;
   const md = frag.querySelector('.md-content');
   const bi = Array.from(frag.querySelectorAll('.bilingual-block')).map(e => e.outerHTML).join('|');
-  const ind = Array.from(frag.querySelectorAll('.translate-loading')).map(e => e.outerHTML).join('|');
+  const ind = Array.from(frag.querySelectorAll('.translate-loading, .translate-retry-line')).map(e => e.outerHTML).join('|');
   return (md ? md.outerHTML : '<none>') + '#' + bi + '#' + ind;
 }
 
@@ -261,6 +281,17 @@ for (const [name, shape] of Object.entries(SHAPES)) {
   }
 }
 check('nc_detected_a_diff', MODE === '' ? true : anyDiff);
+
+// NEW-only behavioral pin (the redesign's gate-order fix): a terminal error on
+// a done=true message — the marker the engine's _applyTranslationError sets —
+// MUST still render the retry line. The old inline gate (_translateDone===false)
+// hid it entirely; the OLD reconstruction cannot express this shape, so this is
+// asserted on the NEW render only.
+{
+  const _doneErr = renderNew({ role:'assistant', _msgId:'p6', content:'body',
+                               _translateDone:true, _translateError:'boom' }, 1);
+  check('new_shows_terminal_error_after_done', _doneErr.indexOf('translate-retry-line') !== -1);
+}
 
 console.log(out.join('\n'));
 process.exit(0);

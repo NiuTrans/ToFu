@@ -37,30 +37,38 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.normpath(os.path.join(HERE, '..'))
 
 # ── Backend emission scan ──
-# Files that emit SSE events via append_event / emit_event with {'type': ...}.
+# Files/PACKAGES that emit SSE events via append_event / emit_event.
+#
+# ⚠️ ENTRIES MAY BE FILES *OR* DIRECTORIES. Every module that was a single file
+# here has been split into a package at least once (orchestrator, tool_dispatch,
+# executor, endpoint, manager, …). The previous form of this list named the
+# monolith .py paths and the scanner did ``if not os.path.isfile: continue`` —
+# so after each split the guard silently scanned FEWER files and still passed.
+# Measured 2026-07-27: 10 of 21 listed paths no longer existed, i.e. HALF the
+# emit surface went unverified while this test stayed green. (The comment that
+# used to live here even documented an earlier instance of the same accident
+# and only patched the two paths noticed at the time.)
+#
+# The durable fix is structural, not a longer list: name the PACKAGE, let
+# ``_resolve_scan_targets`` expand a directory to its ``*.py`` recursively, and
+# make a path that resolves to NOTHING a hard failure (see
+# ``test_scan_targets_all_resolve``). A future split then changes the file set
+# under a package without touching this list, and a genuine deletion/rename
+# turns red instead of quietly shrinking the guard's reach.
 _BACKEND_FILES = [
-    # The orchestrator + tool_dispatch are PACKAGES now (split 2026-06); the
-    # old monolith paths silently skipped the scan (os.path.isfile → False),
-    # so events emitted ONLY from the split modules (e.g. round_start/round_end
-    # in orchestrator/_run.py) went unverified in direction A. Scan the real
-    # emit modules.
-    'lib/tasks_pkg/orchestrator/_run.py',
-    'lib/tasks_pkg/orchestrator/_finalize.py',
-    'lib/tasks_pkg/orchestrator.py',
-    'lib/tasks_pkg/tool_dispatch/_pipeline.py',
-    'lib/tasks_pkg/tool_dispatch/_labels.py',
-    'lib/tasks_pkg/tool_dispatch.py',
-    'lib/tasks_pkg/executor.py',
-    'lib/tasks_pkg/executor_image.py',
-    'lib/tasks_pkg/endpoint.py',
-    'lib/tasks_pkg/llm_fallback.py',
-    'lib/tasks_pkg/stream_handler.py',
-    'lib/tasks_pkg/manager.py',
+    'lib/tasks_pkg/orchestrator',
+    'lib/tasks_pkg/tool_dispatch',
+    'lib/tasks_pkg/executor',
+    'lib/tasks_pkg/executor_image',
+    'lib/tasks_pkg/endpoint',
+    'lib/tasks_pkg/llm_fallback',
+    'lib/tasks_pkg/stream_handler',
+    'lib/tasks_pkg/manager',
     'lib/tasks_pkg/autopilot.py',
     'lib/tasks_pkg/compaction/_archive.py',
     'lib/tasks_pkg/compaction/_layer1.py',
-    'lib/memory/prefetch.py',
-    'lib/scheduler/executor.py',
+    'lib/memory/prefetch',
+    'lib/scheduler/executor',
     'lib/artifacts/events.py',
     'lib/swarm/events.py',
     'lib/presence/registry.py',
@@ -108,13 +116,37 @@ def _read(rel: str) -> str:
         return f.read()
 
 
+def _resolve_scan_targets(entries: list[str]) -> tuple[list[str], list[str]]:
+    """Expand a scan list of files AND package dirs to concrete ``*.py``/asset
+    files. Returns ``(resolved, unresolved)``.
+
+    A directory yields every ``*.py`` under it recursively, so a package split
+    cannot shrink the guard's reach. An entry that is neither an existing file
+    nor an existing directory lands in ``unresolved`` — the caller turns that
+    into a FAILURE rather than skipping it, which is the whole point: a stale
+    entry must be loud, not silently dropped.
+    """
+    resolved: list[str] = []
+    unresolved: list[str] = []
+    for rel in entries:
+        p = os.path.join(REPO, rel)
+        if os.path.isfile(p):
+            resolved.append(rel)
+        elif os.path.isdir(p):
+            for dirpath, _dirs, names in os.walk(p):
+                for nm in sorted(names):
+                    if nm.endswith('.py'):
+                        resolved.append(os.path.relpath(
+                            os.path.join(dirpath, nm), REPO))
+        else:
+            unresolved.append(rel)
+    return resolved, unresolved
+
+
 def _backend_emitted_types() -> set[str]:
     from lib.agent_core.events import EventType
     found: set[str] = set()
-    for rel in _BACKEND_FILES:
-        path = os.path.join(REPO, rel)
-        if not os.path.isfile(path):
-            continue
+    for rel in _resolve_scan_targets(_BACKEND_FILES)[0]:
         src = _read(rel)
         # Literal ``'type': 'x'`` emissions.
         for m in _TYPE_RE.finditer(src):
@@ -131,10 +163,7 @@ def _backend_emitted_types() -> set[str]:
 
 def _frontend_handled_types() -> set[str]:
     found: set[str] = set()
-    for rel in _FRONTEND_FILES:
-        path = os.path.join(REPO, rel)
-        if not os.path.isfile(path):
-            continue
+    for rel in _resolve_scan_targets(_FRONTEND_FILES)[0]:
         for m in _JS_TYPE_RE.finditer(_read(rel)):
             found.add(m.group(1))
     return found
@@ -204,6 +233,38 @@ def test_registry_has_no_orphans_vs_known_surfaces():
         'by the frontend (dead vocabulary?):\n  ' + '\n  '.join(orphans)
         + '\n\nEither wire them up, remove the EventSpec, or (if a deliberate '
         'inbound contract) add it to _INBOUND_CONTRACT_TYPES with a reason.')
+
+
+def test_scan_targets_all_resolve():
+    """META: every scan-list entry must resolve, and the scan must reach a
+    plausible number of files.
+
+    This is the guard ON the guard. Both directions above are only as strong as
+    the file set they read, and for months that set shrank silently every time a
+    module was split into a package (measured: 10 of 21 entries had ceased to
+    exist, so half the emit surface was unverified while every test here stayed
+    green). Asserting the targets RESOLVE converts that failure mode from
+    invisible to red.
+
+    The floor counts are deliberately loose — they exist to catch "the scan
+    collapsed to almost nothing", not to be re-tuned on every refactor.
+    """
+    back_ok, back_bad = _resolve_scan_targets(_BACKEND_FILES)
+    front_ok, front_bad = _resolve_scan_targets(_FRONTEND_FILES)
+    assert not back_bad, (
+        'These _BACKEND_FILES entries resolve to NOTHING — the contract scan '
+        'silently skipped them, so events emitted there are unverified:\n  '
+        + '\n  '.join(back_bad)
+        + '\n\nPoint each at the module/package that took over its role (a '
+        'directory entry is fine — it is expanded recursively).')
+    assert not front_bad, (
+        'These _FRONTEND_FILES entries resolve to NOTHING:\n  '
+        + '\n  '.join(front_bad))
+    assert len(back_ok) >= 20, (
+        f'backend emit scan collapsed to {len(back_ok)} file(s) — expected the '
+        'orchestrator/dispatch/executor/endpoint/manager packages to contribute '
+        'many more. The scan list has probably drifted off the real code.')
+    assert len(front_ok) >= 3, f'frontend scan collapsed to {len(front_ok)} file(s)'
 
 
 def test_terminal_and_interaction_specs_consistent():

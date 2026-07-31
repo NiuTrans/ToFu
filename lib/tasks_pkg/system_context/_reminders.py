@@ -85,6 +85,74 @@ def _append_to_system_message(messages, text, *, as_separate_block=False):
             messages.insert(0, {'role': 'system', 'content': text.strip()})
 
 
+def _refresh_tail_block(messages, block: str | None, marker: str) -> str:
+    """Place/refresh a volatile ``<system-reminder>`` block on the TRUE tail.
+
+    The cache-safe seam for AMBIENT-but-VOLATILE project context (the
+    cross-conversation digest, the charter, the board) — the SAME seam
+    ``_refresh_detail_block`` uses for the relevance-gated preference tier.
+
+    Why NOT the system message (the previous home, bug: prefix-cache 29298-pin):
+    these blocks change round-over-round as sibling conversations evolve (the
+    digest re-orders, the board's epics move, the charter grows on a commit).
+    On the Anthropic path ``system`` is hoisted to the top-level ``system``
+    field and is the CACHED FLOOR — rewriting it every turn re-bills the WHOLE
+    body uncached (``cache_read`` pinned at the static prompt, ~29298 tokens).
+    Riding the true tail instead keeps the static system prefix + conversation
+    history byte-stable across turns (so ``cache_read`` can grow), and confines
+    the volatile bytes to the already-volatile tail region.
+
+    Idempotency / per-turn refresh: within ONE task (endpoint Planner / Worker
+    / Critic reuse the same message list) the last user message may be visited
+    more than once, so this STRIPS any existing block carrying ``marker`` from
+    the last user message and re-appends this turn's ``block`` (or, when
+    ``block`` is None, just removes it). A PRIOR turn's block, frozen on a
+    now-historical user message, is left untouched — the same tradeoff
+    ``<relevant_memories>`` / the detail tier already make.
+
+    Args:
+        messages: message list (mutated in place).
+        block: the ``<system-reminder>``-wrapped text to place, or None to only
+            strip a stale one.
+        marker: an idempotency substring the block carries (e.g.
+            ``'[PROJECT CHARTER]'``) — used to find + strip the stale copy.
+
+    Returns one of ``'replaced'`` / ``'added'`` / ``'removed'`` / ``'noop'``.
+    """
+    target_idx = None
+    for i in range(len(messages) - 1, -1, -1):
+        if messages[i].get('role') == 'user':
+            target_idx = i
+            break
+    if target_idx is None:
+        return 'noop'
+
+    content = messages[target_idx].get('content', '')
+    if isinstance(content, str):
+        blocks = [{'type': 'text', 'text': content}]
+    elif isinstance(content, list):
+        blocks = list(content)
+    else:
+        blocks = []
+
+    def _has_marker(blk) -> bool:
+        return (isinstance(blk, dict) and blk.get('type') == 'text'
+                and marker in blk.get('text', ''))
+
+    had_old = any(_has_marker(b) for b in blocks)
+    if not had_old and block is None:
+        return 'noop'
+
+    new_blocks = [b for b in blocks if not _has_marker(b)]
+    if block is not None:
+        new_blocks.append({'type': 'text', 'text': block})
+
+    messages[target_idx]['content'] = new_blocks
+    if block is not None:
+        return 'replaced' if had_old else 'added'
+    return 'removed'
+
+
 def _system_text(messages) -> str:
     """Return the plain-text concatenation of the first system message.
 

@@ -135,18 +135,20 @@ function showStreamingUIForConv(convId) {
   }
   updateSendButton();
   if (_lastIsStreamingBubble) {
-    const buf = streamBufs.get(convId);
-    /* ★ FIX: buf?.toolRounds is [] (truthy) even when empty, preventing
-     *   fallback to getToolRoundsFromMsg(lastMsg).  Use .length check. */
-    const rounds = (buf?.toolRounds?.length ? buf.toolRounds : null)
-                   || getToolRoundsFromMsg(lastMsg);
+    /* §7: project straight from the message document; phase from the live
+     * session slice. */
+    const _sess = (typeof streamSessions !== 'undefined') ? streamSessions.get(convId) : null;
     updateStreamingUI({
-      thinking: buf?.thinking || lastMsg.thinking || "",
-      content: buf?.content || lastMsg.content || "",
-      toolRounds: rounds,
-      phase: buf?.phase || null,
-      _memoryPrefetch: buf?._memoryPrefetch || lastMsg._memoryPrefetch,
-      _mcpLoginHint: buf?._mcpLoginHint,
+      thinking: lastMsg.thinking || "",
+      content: lastMsg.content || "",
+      toolRounds: getToolRoundsFromMsg(lastMsg),
+      phase: (_sess && _sess.phase) || null,
+      _memoryPrefetch: lastMsg._memoryPrefetch,
+      _mcpLoginHint: lastMsg._mcpLoginHint,
+      fallbackModel: lastMsg.fallbackModel,
+      fallbackFrom: lastMsg.fallbackFrom,
+      fallbackReason: lastMsg.fallbackReason,
+      fallbackKind: lastMsg.fallbackKind,
     });
     /* ★ Repaint the live translation preview immediately after the bubble is
      *   rebuilt. The body's innerHTML was just replaced, destroying any
@@ -168,23 +170,24 @@ function showStreamingUIForConv(convId) {
     setTimeout(() => {
       if (activeConvId !== _deferConvId) return;           // user switched away
       if (!activeStreams.has(_deferConvId)) return;         // stream finished
-      const dBuf = streamBufs.get(_deferConvId);
-      if (!dBuf) return;
-      /* ★ FIX (stuck "等待中…" wipe): fall back to the persisted message when
-       *   the buffer field is empty, exactly like the initial render above.
-       *   A raw `dBuf.content` here re-paints updateStreamingUI({content:''})
-       *   on a freshly-seeded/empty buffer, snapping the bubble from the real
-       *   (checkpointed) English back to the "wait" branch 300ms after load.
-       *   The buffer is authoritative only once it has data; until then the
-       *   message's checkpoint content is the truth. */
+      /* §7: project straight from the message document — the single live
+       *   fact-source. Any SSE frame that landed during the connection-setup
+       *   window has already been applied to the message by the pipeline, so
+       *   re-reading it here paints that state without a second buffer. Phase
+       *   still comes from the live session slice. */
+      const _deferSess = (typeof streamSessions !== 'undefined')
+        ? streamSessions.get(_deferConvId) : null;
       updateStreamingUI({
-        thinking: dBuf.thinking || _deferLastMsg.thinking || "",
-        content: dBuf.content || _deferLastMsg.content || "",
-        toolRounds: (dBuf.toolRounds?.length ? dBuf.toolRounds : null)
-                    || getToolRoundsFromMsg(_deferLastMsg),
-        phase: dBuf.phase,
-        _memoryPrefetch: dBuf._memoryPrefetch || _deferLastMsg._memoryPrefetch,
-        _mcpLoginHint: dBuf._mcpLoginHint,
+        thinking: _deferLastMsg.thinking || "",
+        content: _deferLastMsg.content || "",
+        toolRounds: getToolRoundsFromMsg(_deferLastMsg),
+        phase: (_deferSess && _deferSess.phase) || null,
+        _memoryPrefetch: _deferLastMsg._memoryPrefetch,
+        _mcpLoginHint: _deferLastMsg._mcpLoginHint,
+        fallbackModel: _deferLastMsg.fallbackModel,
+        fallbackFrom: _deferLastMsg.fallbackFrom,
+        fallbackReason: _deferLastMsg.fallbackReason,
+        fallbackKind: _deferLastMsg.fallbackKind,
       });
     }, 300);
   }
@@ -245,8 +248,7 @@ function finishStream(convId) {
       const _verdict = _classifyGhostTailJS(lastMsg);
       if (_verdict === 'delete') {
         conv.messages.pop();
-        if (activeConvId === convId && window.ConvView
-            && typeof window.ConvView.removeMessage === 'function') {
+        if (activeConvId === convId) {
           window.ConvView.removeMessage(convId, lastMsg._msgId || conv.messages.length);
         }
         if (activeConvId === convId) {
@@ -397,7 +399,7 @@ function finishStream(convId) {
         // (SSE timed out, poll was used). Do a full re-render to show all turns.
         console.info(`[finishStream] Endpoint mode full re-render — ` +
           `conv=${convId.slice(0,8)} msgs=${conv.messages.length}`);
-        renderChat(conv);
+        window.ConvView.replaceAll(convId);
       }
       /* ★ FIX: Don't force-scroll-to-bottom after stream finishes.
        *   The user is already reading the content at their current scroll position.
@@ -492,6 +494,29 @@ function finishStream(convId) {
 }
 
 /**
+ * Stamp the supersede successor from a terminal frame (done / LATE done)
+ * onto the conv — the WRITER half of the latestLiveTaskId wire
+ * (pt_8dc03017 cutover completion). The backend ships the conv→latest-task
+ * index on terminal frames (lib/chat_dispatch.py LATE-done synthesis +
+ * orchestrator/_finalize.py real done) so the attach reducer in
+ * _runTerminalContinuation can hop to the autopilot VU / follow-up task
+ * WITHOUT a hand-carried baton. Called from the SSE done branch
+ * (sse_pipeline.js). A later frame simply overwrites — the reducer
+ * consumes the stamp on attach, so it can never re-fire stale.
+ */
+function _stampLatestLiveTask(conv, ev) {
+  if (!conv || !ev) return;
+  const tid = ev.latestLiveTaskId;
+  if (typeof tid === 'string' && tid) conv._latestLiveTaskId = tid;
+  /* ★ VU-carrier flag rides the same terminal frame (2026-07-26 contract):
+   *   when the successor is a VU sub-task the attach must delegate to the
+   *   VU connector (detached dummy, no Agent placeholder) instead of the
+   *   normal connectToTask path.  Stored alongside the id (single-use). */
+  conv._latestLiveTaskIsVu = !!ev.latestLiveTaskIsVu;
+}
+if (typeof window !== 'undefined') window._stampLatestLiveTask = _stampLatestLiveTask;
+
+/**
  * The terminal continuation funnel: after a conversation's running predicate
  * has been cleared (task done / aborted / reclaimed), resolve and attach any
  * follow-up work the backend may already have spawned — an autopilot next
@@ -547,7 +572,33 @@ function _runTerminalContinuation(convId) {
       `latestLiveTask=${_liveTaskId.slice(0,8)} (index-driven, no baton)`,
       'color:#a78bfa;font-weight:bold'
     );
-    connectToTask(convId, _liveTaskId);
+    /* ★ Consume the stamp FIRST so a later continuation can never re-attach
+     *   to this (now-aging) successor — the stamp is single-use. */
+    conv._latestLiveTaskId = null;
+    const _liveTaskIsVu = !!conv._latestLiveTaskIsVu;
+    conv._latestLiveTaskIsVu = false;
+    /* ★ Reload messages BEFORE opening the successor's stream: when the
+     *   successor is an autopilot follow-up, the VU-synthesized user turn
+     *   was already persisted by the backend hook — it must land in
+     *   conv.messages before connectToTask appends its streaming bubble
+     *   (mirrors _checkForQueuedTask's attach). On the VU-hop itself the
+     *   reload is a cheap no-op (the VU runs on _inline_messages). */
+    (async () => {
+      try {
+        conv._needsLoad = true;
+        if (typeof loadConversationMessages === 'function') {
+          await loadConversationMessages(convId);
+        }
+      } catch (e) {
+        console.warn('[Autopilot] supersede reload failed (attaching anyway):', e);
+      }
+      /* Re-check after the await: a send/stream may have started meanwhile
+       * (connectToTask re-guards on activeStreams internally too). */
+      if (activeStreams.has(convId)) return;
+      /* ★ VU successor → the VU connector (detached dummy assistant, no
+       *   Agent placeholder); worker successor → the normal path. */
+      connectToTask(convId, _liveTaskId, 0, _liveTaskIsVu ? { vuCarrier: true } : {});
+    })();
     return;
   }
   // ── ★ Autopilot in-band follow-up (FAST PATH): when the done/poll event
@@ -605,8 +656,18 @@ function _runTerminalContinuation(convId) {
       const inner = document.getElementById('chatInner');
       if (inner && !document.getElementById('streaming-msg')) {
         const _qTime = formatClockTime();
-        inner.insertAdjacentHTML('beforeend',
-          _streamingBubbleHTML('worker', 'Dispatching queued message…', _qTime));
+        const _qHtml = _streamingBubbleHTML('worker', 'Dispatching queued message…', _qTime);
+        /* Tail insert via the shared furniture-aware primitive — a raw
+         * `beforeend` lands below a bottom lazy-window sentinel. */
+        if (typeof chatInnerInsert === 'function') {
+          chatInnerInsert(inner, _qHtml, {
+            position: 'tail',
+            conv: conversations.find((c) => c.id === convId) || null,
+            site: '_runTerminalContinuation:queued-placeholder',
+          });
+        } else {
+          inner.insertAdjacentHTML('beforeend', _qHtml);
+        }
         if (isNearBottom(80)) scrollToBottom();
       }
     } catch (e) {
@@ -651,22 +712,16 @@ async function _autoTranslateHumanGuidance(convId, roundNum, question, responseT
   const round = assistantMsg.toolRounds.find(r => r.roundNum === roundNum);
   if (!round || round.status !== 'awaiting_human') return;
 
-  // ★ Helper: sync assistantMsg.toolRounds → buf.toolRounds so that the
-  //   reactive rendering pipeline (twUpdate → updateStreamingUI → _syncToolRoundsDOM)
-  //   sees translation-related flags (_hgTranslating, _translatedQuestion, etc.).
-  //   Without this, buf.toolRounds is a stale shallow copy from the
-  //   human_guidance_request handler and never gets updated.
-  function _syncHgToBuf() {
-    const buf = streamBufs.get(convId);
-    if (buf && assistantMsg.toolRounds) {
-      buf.toolRounds = assistantMsg.toolRounds;
-    }
-  }
+  // §7: no buffer to sync — the reactive pipeline (twUpdate →
+  // updateStreamingUI → _syncToolRoundsDOM) reads the message document
+  // directly, so translation flags (_hgTranslating, _translatedQuestion)
+  // are visible the moment they are stamped on assistantMsg.toolRounds.
+  function _syncHgToBuf() { /* retired mirror — kept as a no-op for the 3 call sites below */ }
 
   // Mark as translating (shows spinner in the card)
   round._hgTranslating = true;
   _syncHgToBuf();
-  twUpdate(convId);
+  if (typeof twUpdate === 'function') twUpdate(convId);
 
   // ── Build a single translation batch: question + all option labels + descriptions ──
   // Concatenate all texts with a separator to make a single API call (cheaper & faster)
@@ -725,12 +780,8 @@ async function _autoTranslateHumanGuidance(convId, roundNum, question, responseT
 
     console.log(`[HG-Translate] ✓ Translation done for guidance=${round2.guidanceId}, ` +
       `question: ${question.length}→${round2._translatedQuestion.length} chars`);
-    // ★ Sync translated properties to buf before re-render
-    const buf2 = streamBufs.get(convId);
-    if (buf2 && msg2.toolRounds) {
-      buf2.toolRounds = msg2.toolRounds;
-    }
-    twUpdate(convId);
+    // §7: translated properties already live on the document (msg2.toolRounds)
+    if (typeof twUpdate === 'function') twUpdate(convId);
   } catch (e) {
     console.warn(`[HG-Translate] Translation failed: ${e.message} — showing original`);
     // Clear translating flag, show original untranslated
@@ -740,12 +791,7 @@ async function _autoTranslateHumanGuidance(convId, roundNum, question, responseT
       const round2 = msg2?.toolRounds?.find(r => r.roundNum === roundNum);
       if (round2) {
         round2._hgTranslating = false;
-        // ★ Sync cleared flag to buf before re-render
-        const buf2 = streamBufs.get(convId);
-        if (buf2 && msg2.toolRounds) {
-          buf2.toolRounds = msg2.toolRounds;
-        }
-        twUpdate(convId);
+        if (typeof twUpdate === 'function') twUpdate(convId);
       }
     }
   }

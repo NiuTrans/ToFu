@@ -108,9 +108,10 @@ function _surgicalRerenderMsg(convId, idx) {
 
 /**
  * Push the empty VU message into conv.messages and stand up the SHARED
- * streaming substrate for it — the SAME `#streaming-msg` + `streamBufs` +
- * elapsed-timer machinery the worker turn uses (mirrors the worker→critic
- * handoff in dispatchSSEEvent).  This is what makes the autopilot reply
+ * streaming substrate for it — the SAME `#streaming-msg` + live-session
+ * (streamSessions) + elapsed-timer machinery the worker turn uses (mirrors
+ * the worker→critic handoff in dispatchSSEEvent).  This is what makes the
+ * autopilot reply
  * render *identically to the agent*: incremental markdown, thinking block,
  * tool rounds, and the live elapsed-time bar.
  *
@@ -118,7 +119,7 @@ function _surgicalRerenderMsg(convId, idx) {
  * first (its finish bar is refreshed later when the parent `done` event
  * lands — see the done handler's autopilot branch in sse_pipeline.js).
  *
- * @param {Object} [parentMessage] — the SETTLED parent worker assistant dict
+ * @param {Object} [parentMessage] - the SETTLED parent worker assistant dict
  *   (== the parent `done` event's `committedMessage`), delivered early on
  *   `autopilot_vu_start`. When present, projected onto the parent assistant
  *   BEFORE it is finalized so its finish bar (model / usage / cost /
@@ -151,7 +152,7 @@ function _beginVuStreaming(convId, conv, vuMsgId, parentMessage) {
         const m = conv.messages[i];
         if (m && m.role === "assistant" && !m._isVirtualUser) { parentAssistant = m; break; }
       }
-      if (parentAssistant && window.ConvView) {
+      if (parentAssistant) {
         /* ★ Project the parent worker's SETTLED finish metadata NOW (delivered
          * on vu_start as `parentMessage`) so its finish bar renders COMPLETE at
          * handoff — model + tokens + cost + finishReason ✓. Without this the
@@ -215,9 +216,9 @@ function _beginVuStreaming(convId, conv, vuMsgId, parentMessage) {
 }
 
 /**
- * Push the accumulated VU buffer to the shared streaming UI (worker
- * substrate).  Reads from `streamBufs.get(convId)` exactly like the
- * worker delta path so the VU bubble renders with identical layout.
+ * Push the accumulated VU state to the shared streaming UI (worker
+ * substrate).  Projects the message document exactly like the worker
+ * delta path, so the VU bubble renders with identical layout.
  */
 function _flushVuStreaming(convId) {
   if (activeConvId !== convId) return;
@@ -251,9 +252,41 @@ function _maybeAutoTranslateVu(convId, conv, entry) {
 }
 
 /**
+ * Mask the VU's machine-control sentinel lines from LIVE display.
+ *
+ * The VU's streamed reply can literally contain `[VU: TASK_DONE]` and
+ * `[PROGRESS: resolved=X remaining=Y]` — backend machine signals that
+ * decide the loop.  Persistence is already clean (the backend strips
+ * them before `_append_vu_message_to_conv`, and `autopilot_vu_done`
+ * projects the stripped copy verbatim), but the LIVE deltas would let
+ * them flicker in the bubble for seconds (conv ms1rrjchpa5pqw showed
+ * both lines sitting in the settled-looking bubble).  Owner's ruling:
+ * the sentinels are NEVER visible.  Applied to the WHOLE accumulated
+ * content on every delta (line-anchored + idempotent), so a sentinel
+ * split across delta chunks is masked the moment it completes; a
+ * partial trailing fragment survives until then (sub-second, and the
+ * vu_done projection replaces everything anyway).
+ *
+ * Mirrors the backend canonicals: `lib/agent_verdict/_handoff.py`
+ * (``VU_DONE_SENTINEL`` + ``_PROGRESS_RE``).
+ */
+function _maskVuMachineTokens(text) {
+  if (!text) return text;
+  return text
+    .split('\n')
+    .filter((line) =>
+      !/^\s*\[VU:\s*TASK_DONE\]\s*$/.test(line) &&
+      !/^\s*\[PROGRESS:\s*resolved\s*=\s*\d+\s*(?:,|;|\s)\s*remaining\s*=\s*\d+\s*\]\s*$/.test(line))
+    .join('\n');
+}
+if (typeof window !== 'undefined') window._maskVuMachineTokens = _maskVuMachineTokens;
+
+/**
+ * Handle the four autopilot_vu_* SSE event types.  See `_processSSELine`
+/**
  * Handle the four autopilot_vu_* SSE event types.  See `_processSSELine`
  * for the contract.  The VU streams through the SAME substrate as the
- * worker (`#streaming-msg` + `streamBufs` + `twUpdate`), so its reply is
+ * worker (`#streaming-msg` + live session + `twUpdate`), so its reply is
  * presented exactly like an agent turn (incremental markdown, thinking,
  * tool rounds, elapsed-time bar) — just in the user lane with the
  * Autopilot avatar/label.
@@ -276,12 +309,33 @@ function _handleAutopilotVuEvent(convId, ev) {
      * that then streams the reply live — identical to a worker turn.
      * In-memory ONLY: nothing is persisted until autopilot_vu_done.  If
      * the bubble already exists (reconnect / duplicate start) reuse it. */
-    if (_findVuMsgById(conv, vuMsgId)) return;
-    const entry = _beginVuStreaming(convId, conv, vuMsgId, ev.parentMessage);
-    console.info(
-      `[Autopilot VU] ▶ began VU streaming bubble vuMsgId=${vuMsgId.slice(0,12)} ` +
-      `at idx=${entry.idx} for conv=${convId.slice(0,8)}`
-    );
+    let entry = _findVuMsgById(conv, vuMsgId);
+    if (!entry) {
+      entry = _beginVuStreaming(convId, conv, vuMsgId, ev.parentMessage);
+      console.info(
+        `[Autopilot VU] ▶ began VU streaming bubble vuMsgId=${vuMsgId.slice(0,12)} ` +
+        `at idx=${entry.idx} for conv=${convId.slice(0,8)}`
+      );
+    }
+    /* ★ replaySnapshot (2026-07-26 carrier contract): a fresh connect to
+     * the VU carrier's own stream opens with vu_start carrying the VU's
+     * CURRENT content/thinking/toolRounds.  Apply with RESET semantics —
+     * the client that hopped from the parent stream already saw the early
+     * frames there, and the snapshot is the complete-up-to-now truth, so
+     * assignment (NOT append) dedupes the pre-hop window exactly.  The
+     * live tail then appends only NEW frames (cursor=len(events)). */
+    if (ev.replaySnapshot && typeof ev.replaySnapshot === 'object') {
+      const _rs = ev.replaySnapshot;
+      entry.msg.content = (_rs.content != null) ? _rs.content : (entry.msg.content || '');
+      entry.msg.thinking = (_rs.thinking != null) ? _rs.thinking : (entry.msg.thinking || '');
+      if (Array.isArray(_rs.toolRounds)) entry.msg.toolRounds = _rs.toolRounds;
+      _flushVuStreaming(convId);
+      console.info(
+        `[Autopilot VU] ⟳ replaySnapshot applied vuMsgId=${vuMsgId.slice(0,12)} ` +
+        `(content=${(entry.msg.content || '').length}c thinking=${(entry.msg.thinking || '').length}c ` +
+        `rounds=${(entry.msg.toolRounds || []).length}) for conv=${convId.slice(0,8)}`
+      );
+    }
     try { if (typeof ConvCache !== "undefined") ConvCache.put(conv); }
     catch (e) { /* non-fatal */ }
     return;
@@ -360,7 +414,7 @@ function _handleAutopilotVuEvent(convId, ev) {
       /* Convert the live `#streaming-msg` into the settled static bubble,
        * then tear down the buffer + elapsed timer.  finalizeStreaming now
        * accepts _isVirtualUser (see conv_view.js). */
-      if (window.ConvView) window.ConvView.finalizeStreaming(convId, entry.msg);
+      window.ConvView.finalizeStreaming(convId, entry.msg);
       if (typeof twStop === "function") twStop(convId);
     }
     if (typeof saveConversations === "function") saveConversations(convId);
@@ -411,19 +465,17 @@ function _handleAutopilotVuEvent(convId, ev) {
     );
   }
   const vuMsg = entry.msg;
-  const buf = (typeof streamBufs !== "undefined") ? streamBufs.get(convId) : null;
   if (!Array.isArray(vuMsg.toolRounds)) vuMsg.toolRounds = [];
 
   if (itype === "delta") {
-    if (inner.content) vuMsg.content = (vuMsg.content || "") + inner.content;
+    if (inner.content) vuMsg.content = _maskVuMachineTokens((vuMsg.content || "") + inner.content);
     if (inner.thinking) vuMsg.thinking = (vuMsg.thinking || "") + inner.thinking;
-    if (buf) {
-      buf.content = vuMsg.content || "";
-      buf.thinking = vuMsg.thinking || "";
-      /* Mirror the worker's phase handling: content delta clears the
-       * phase; thinking-only delta shows the reasoning indicator. */
-      if (inner.content) buf.phase = null;
-      else if (inner.thinking) buf.phase = { phase: "thinking_active" };
+    /* §7: content/thinking live on the document (vuMsg); only phase needs
+     * the session slice — mirror the worker's phase handling: content delta
+     * clears the phase; thinking-only delta shows the reasoning indicator. */
+    if (typeof setStreamPhase === 'function') {
+      if (inner.content) setStreamPhase(convId, null);
+      else if (inner.thinking) setStreamPhase(convId, { phase: "thinking_active" });
     }
   } else if (itype === "tool_start") {
     vuMsg.toolRounds.push({
@@ -437,9 +489,8 @@ function _handleAutopilotVuEvent(convId, ev) {
       llmRound: inner.llmRound != null ? inner.llmRound : null,
       _swarm: false,
     });
-    if (buf) {
-      buf.toolRounds = vuMsg.toolRounds;
-      buf.phase = { phase: "tool_exec", detail: inner.query || inner.toolName || "" };
+    if (typeof setStreamPhase === 'function') {
+      setStreamPhase(convId, { phase: "tool_exec", detail: inner.query || inner.toolName || "" });
     }
   } else if (itype === "tool_result") {
     const r = vuMsg.toolRounds.find(rr => rr.roundNum === inner.roundNum);
@@ -449,14 +500,12 @@ function _handleAutopilotVuEvent(convId, ev) {
       if (inner.searchDiag) r.searchDiag = inner.searchDiag;
       if (inner.engineBreakdown) r.engineBreakdown = inner.engineBreakdown;
     }
-    if (buf) buf.toolRounds = vuMsg.toolRounds;
   } else if (itype === "tool_progress") {
     const r = vuMsg.toolRounds.find(rr => rr.roundNum === inner.roundNum);
     if (r) {
       if (typeof r._partialOutput !== "string") r._partialOutput = "";
       r._partialOutput += (inner.chunk || "");
     }
-    if (buf) buf.toolRounds = vuMsg.toolRounds;
   } else if (itype === "tool_complete") {
     const r = vuMsg.toolRounds.find(rr =>
       rr.roundNum === inner.roundNum && rr.toolCallId === inner.toolCallId);
@@ -469,7 +518,6 @@ function _handleAutopilotVuEvent(convId, ev) {
         r.compactedToChars = inner.compactedToChars;
       }
     }
-    if (buf) buf.toolRounds = vuMsg.toolRounds;
   } else if (itype === "tool_compacted") {
     const r = vuMsg.toolRounds.find(rr => rr.toolCallId === inner.toolCallId);
     if (r) {
@@ -478,18 +526,27 @@ function _handleAutopilotVuEvent(convId, ev) {
       if (inner.compactedToChars != null) r.compactedToChars = inner.compactedToChars;
       if (inner.toolTokens != null) r.toolTokens = inner.toolTokens;
     }
-    if (buf) buf.toolRounds = vuMsg.toolRounds;
   } else if (itype === "phase") {
     /* Drive the same phase indicator the worker uses (tool_exec /
      * llm_thinking / retrying / working show in the elapsed bar). */
-    if (buf) {
-      buf.phase = {
+    if (typeof setStreamPhase === 'function') {
+      setStreamPhase(convId, {
         phase: inner.phase,
         detail: inner.detail || "",
+        /* Same whitelist contract as the worker ingress (sse_pipeline.js):
+         * detailKey/detailArgs carry the localized label (without them the
+         * VU bubble renders the raw English `detail` fallback), and
+         * attempt/statusCode/model carry the first-byte heartbeat's beat
+         * counter that the renderer keys its DOM refresh on. */
+        detailKey: inner.detailKey || "",
+        detailArgs: inner.detailArgs || null,
         tools: inner.tools || [],
         toolContext: inner.toolContext || "",
         round: inner.round || 0,
-      };
+        attempt: inner.attempt || 0,
+        statusCode: inner.statusCode || 0,
+        model: inner.model || "",
+      });
     }
   } else {
     /* stdin_request / write_approval_request / human_guidance_request etc.
@@ -552,6 +609,16 @@ function _applyAutopilotRunConcluded(conv, rec, runId) {
      * when the merged reason is task_done. */
     incomplete: (_reason !== 'task_done')
       && !!(rec.incomplete || (prior && prior.incomplete)),
+    /* ★ UNSENT — the `content` is a VU reply that was PRODUCED but never
+     * delivered into the conversation (the run yielded to a human / was
+     * superseded mid-flight). MUST survive this merge: it is the only thing
+     * that lets the UI say "this was written but never sent" instead of
+     * presenting it as a turn that happened. Dropping it here would make the
+     * backend field dead on arrival — the "declared but never rendered"
+     * failure this fix exists to end. Cleared by a clean task_done, same as
+     * `incomplete`. */
+    unsent: (_reason !== 'task_done')
+      && !!(rec.unsent || (prior && prior.unsent)),
   };
   return true;
 }
@@ -588,8 +655,8 @@ function _applyDisarmResponse(convId, resp) {
     if (typeof saveConversations === 'function') saveConversations(convId);
     try { if (typeof ConvCache !== 'undefined') ConvCache.put(conv); }
     catch (e) { /* non-fatal */ }
-    if (activeConvId === convId && typeof renderChat === 'function') {
-      renderChat(conv, true);
+    if (activeConvId === convId) {
+      window.ConvView.replaceAll(convId, { forceScroll: true });
     }
   } catch (e) {
     console.warn('[Autopilot] apply disarm response failed:', e && e.message);
@@ -619,8 +686,8 @@ function _handleAutopilotRunConcluded(convId, ev) {
   if (typeof saveConversations === "function") saveConversations(convId);
   try { if (typeof ConvCache !== "undefined") ConvCache.put(conv); }
   catch (e) { /* non-fatal */ }
-  if (activeConvId === convId && typeof renderChat === "function") {
-    renderChat(conv, true);
+  if (activeConvId === convId) {
+    window.ConvView.replaceAll(convId, { forceScroll: true });
   }
 }
 
@@ -680,8 +747,8 @@ function _streamingBubbleRole(conv, cfg) {
  * plus any leftover #streaming-msg / #translating-msg / stale endpoint bubbles.
  * Updates fingerprint and turn nav.
  *
- * Also wipes the conv's streamBufs entry when the streaming bubble is removed,
- * so a stale SSE callback can't keep accumulating into a now-detached buffer.
+ * Also clears the conv's live-stream session when the streaming bubble is
+ * removed, so a stale SSE callback can't keep projecting a detached stream.
  *
  * @param {Object} conv
  * @param {number} cutoffIdx — keep messages 0..cutoffIdx, remove cutoffIdx+1..
@@ -719,8 +786,8 @@ function _surgicalTruncateDOM(conv, cutoffIdx) {
     if (removedStreaming && typeof twStop === 'function') {
       try { twStop(conv.id); }
       catch (e) { console.warn('[SyncFix] twStop during truncate failed:', e); }
-    } else if (typeof streamBufs !== 'undefined' && streamBufs.has(conv.id)) {
-      streamBufs.delete(conv.id);
+    } else if (typeof clearStreamSession === 'function') {
+      clearStreamSession(conv.id);
     }
     _lastRenderedFingerprint = _convRenderFingerprint(conv);
     buildTurnNav(conv);
@@ -768,8 +835,8 @@ function _hardCancelActiveStream(conv) {
   if (typeof twStop === 'function') {
     try { twStop(convId); }
     catch (e) { console.warn('[SyncFix] _hardCancelActiveStream: twStop failed:', e); }
-  } else if (typeof streamBufs !== 'undefined') {
-    streamBufs.delete(convId);
+  } else if (typeof clearStreamSession === 'function') {
+    clearStreamSession(convId);
   }
   conv.activeTaskId = null;
   conv._activeTaskClearedAt = Date.now();
@@ -814,6 +881,20 @@ let _loadingNewer = false;
  * initial switch load; reset by loadConversation on a genuine switch so the
  * next open force-scrolls exactly once. */
 let _openScrollConvId = null;
+/* Explicit jump-to-bottom intent latch (set ONLY by scrollChatToBottom — the
+ * button's explicit user command). While it names the active conv, EVERY
+ * render — including the Phase-2 reconcile and background repaints landing
+ * mid-open — must re-pin to the TRUE bottom instead of the anchor-preserve /
+ * no-scroll-on-open heuristics: those exist for UNSOLICITED paints and must
+ * never outrank an explicit command. Slow sync is exactly when this bites:
+ * the user clicks during the multi-second open window, then a landing
+ * Phase-2 re-render would otherwise anchor them away from the bottom again
+ * ("pushed back to the middle by newly loaded content", second door).
+ * Cleared on: manual scroll-up input (wheel-up / touch drag-down), an
+ * explicit scrollToTurn navigation, conversation switch, and open end.
+ * Deliberately NOT cleared on reaching the bottom: mid-open that position is
+ * transient — later same-open renders must keep following the command. */
+let _explicitBottomLatch = null;
 
 function _destroyLazyObserver() {
   if (_lazyObserver) {

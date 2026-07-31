@@ -73,12 +73,17 @@ def test_NC_d1_flag_ignored_would_mask_the_serializing_fallback():
 #  D4 — user-keyed + bounded sidebar cache
 # ══════════════════════════════════════════════════════════════════════
 class _FakeCursor:
-    def __init__(self, rows, sink):
+    def __init__(self, rows, sink, count=None):
         self._rows = rows
         self._sink = sink
+        self._count = count
 
     def fetchall(self):
         return self._rows
+
+    def fetchone(self):
+        # Supports the C4 total-count query (SELECT COUNT(*) AS c ...).
+        return {'c': self._count} if self._count is not None else None
 
 
 class _FakeDB:
@@ -91,6 +96,9 @@ class _FakeDB:
         self.calls.append((sql, params))
         uid = params[0]
         rows = self.rows_by_user.get(uid, [])
+        # A COUNT(*) query returns the per-user row count via fetchone().
+        if 'COUNT(' in sql.upper():
+            return _FakeCursor([], self, count=len(rows))
         return _FakeCursor(rows, self)
 
 
@@ -149,6 +157,26 @@ def test_d4_query_is_bounded_by_limit():
         sql, params = db.calls[-1]
         assert 'LIMIT' in sql.upper(), 'sidebar query must be bounded by LIMIT'
         assert params == (1, 50), 'user_id + limit must be bound params'
+    finally:
+        os.environ.pop('TOFU_SIDEBAR_MAX', None)
+
+
+def test_d4_cached_total_captures_full_count():
+    """C4: the sidebar caches the AUTHORITATIVE global total (a COUNT(*), not
+    the bounded window size) so the frontend can show "N earlier not loaded".
+    With cap=2 and 5 convs, the total must be 5 while the list is bounded to 2.
+    get_cached_total reads it from the cache entry — no extra DB query."""
+    import lib.conversations.meta_cache as mc
+    _reset_mc()
+    os.environ['TOFU_SIDEBAR_MAX'] = '2'
+    try:
+        db = _FakeDB({1: [_row(i, 1) for i in range(5)]})
+        mc.refresh_meta_cache_if_stale(db, user_id=1)
+        assert mc.get_cached_total(user_id=1) == 5, (
+            'cached total must be the full COUNT(*), not the windowed size')
+        # The list SELECT is still bounded (last call carries LIMIT).
+        sql, _params = db.calls[-1]
+        assert 'LIMIT' in sql.upper()
     finally:
         os.environ.pop('TOFU_SIDEBAR_MAX', None)
 

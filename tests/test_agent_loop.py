@@ -302,6 +302,132 @@ def test_loop_does_not_swallow_dispatch_exception():
     _ok('loop lets a dispatch exception propagate (AbortedError reaches caller)')
 
 
+def test_before_round_hook_halts_with_reason():
+    """The before_round halt hook stops the loop with outcome.halted and a
+    custom exit_reason (swarm's timeout is the first adopter)."""
+    from lib.agent_loop import AbortSignal, run_agent_loop
+    disp = {'n': 0}
+
+    def dispatch(rnd, tools):
+        disp['n'] += 1
+        # Always ask for a tool so only the hook can stop the loop.
+        return _mk_msg([{'id': 'x', 'function': {'name': 'web_search', 'arguments': '{}'}}])
+
+    out = run_agent_loop(abort=AbortSignal.never(), max_tool_rounds=99,
+                         round_tools=['T'], dispatch=dispatch,
+                         execute_tool=lambda rnd, tc: None,
+                         before_round=lambda rnd: 'timeout' if rnd >= 2 else None)
+    assert out.halted and out.exit_reason == 'timeout', out.exit_reason
+    assert not out.aborted and not out.completed
+    assert out.rounds == 2 and disp['n'] == 2  # rnd 0,1 ran; rnd 2 halted at top
+    _ok('before_round halt hook stops the loop with custom reason (timeout seam)')
+
+
+def test_tools_terminal_round_off_offers_tools_every_round():
+    """tools_terminal_round=False: the cap round still gets the tool list
+    (swarm parity — no forced tool-less final turn)."""
+    from lib.agent_loop import AbortSignal, run_agent_loop
+    offered = []
+
+    def dispatch(rnd, tools):
+        offered.append(tools)
+        return _mk_msg([{'id': 'x', 'function': {'name': 'web_search', 'arguments': '{}'}}])
+
+    out = run_agent_loop(abort=AbortSignal.never(), max_tool_rounds=1,
+                         round_tools=['T'], dispatch=dispatch,
+                         execute_tool=lambda rnd, tc: None,
+                         tools_terminal_round=False)
+    assert offered == [['T'], ['T']], offered  # 2 rounds, tools EVERY round
+    assert out.exit_reason == 'max_rounds_exhausted' and out.rounds == 2
+    _ok('tools_terminal_round=False offers tools every round (pure ceiling)')
+
+
+def test_execute_tools_batch_hook_replaces_per_tool_loop():
+    """The batch execute_tools hook receives the round's whole tool list ONCE
+    (parallel-pool engines); per-tool execute_tool must NOT fire."""
+    from lib.agent_loop import AbortSignal, run_agent_loop
+    two = [
+        {'id': 't1', 'function': {'name': 'web_search', 'arguments': '{}'}},
+        {'id': 't2', 'function': {'name': 'fetch_url', 'arguments': '{}'}},
+    ]
+    calls = {'batch': [], 'per_tool': 0}
+    seq = iter([_mk_msg(list(two)), _mk_msg(None)])
+
+    out = run_agent_loop(abort=AbortSignal.never(), max_tool_rounds=4,
+                         round_tools=['T'],
+                         dispatch=lambda rnd, tools: next(seq),
+                         execute_tool=lambda rnd, tc: calls.__setitem__('per_tool', calls['per_tool'] + 1),
+                         execute_tools=lambda rnd, tcs: calls['batch'].append(list(tcs)))
+    assert out.completed and out.rounds == 2
+    assert calls['per_tool'] == 0, 'per-tool hook fired despite batch hook'
+    assert len(calls['batch']) == 1 and calls['batch'][0] == two
+    _ok('execute_tools batch hook fires once with the full list; per-tool skipped')
+
+
+def test_tool_timeout_breaker_halts_at_threshold():
+    """max_consecutive_tool_timeouts: consecutive timed_out batch notes halt
+    the loop with exit_reason 'tool_timeout'; a halted round fires NO
+    on_round_end (mirrors orchestrator: breaker break precedes checkpoint)."""
+    from lib.agent_loop import AbortSignal, run_agent_loop
+    disp = {'n': 0}
+    round_ends = []
+
+    def dispatch(rnd, tools):
+        disp['n'] += 1
+        return _mk_msg([{'id': 'x', 'function': {'name': 'web_search', 'arguments': '{}'}}])
+
+    out = run_agent_loop(abort=AbortSignal.never(), max_tool_rounds=99,
+                         round_tools=['T'], dispatch=dispatch,
+                         execute_tools=lambda rnd, tcs: {'timed_out': True},
+                         max_consecutive_tool_timeouts=2,
+                         on_round_end=lambda rnd: round_ends.append(rnd))
+    assert out.halted and out.exit_reason == 'tool_timeout', out.exit_reason
+    assert out.consecutive_tool_timeouts == 2
+    assert disp['n'] == 2 and out.rounds == 2
+    assert round_ends == [0], f'round-ends {round_ends} — halted round must NOT checkpoint'
+    _ok('timeout breaker: 2 consecutive timeouts halt, halted round skips on_round_end')
+
+
+def test_tool_timeout_breaker_resets_on_clean_round():
+    """A round whose batch note is falsy resets the consecutive count —
+    isolated timeouts never trip the breaker."""
+    from lib.agent_loop import AbortSignal, run_agent_loop
+    notes = iter([{'timed_out': True}, None, {'timed_out': True}, None])
+    seq = iter([
+        _mk_msg([{'id': 'a', 'function': {'name': 'web_search', 'arguments': '{}'}}]),
+        _mk_msg([{'id': 'b', 'function': {'name': 'web_search', 'arguments': '{}'}}]),
+        _mk_msg([{'id': 'c', 'function': {'name': 'web_search', 'arguments': '{}'}}]),
+        _mk_msg([{'id': 'd', 'function': {'name': 'web_search', 'arguments': '{}'}}]),
+        _mk_msg(None),
+    ])
+    out = run_agent_loop(abort=AbortSignal.never(), max_tool_rounds=9,
+                         round_tools=['T'], dispatch=lambda rnd, tools: next(seq),
+                         execute_tools=lambda rnd, tcs: next(notes),
+                         max_consecutive_tool_timeouts=2)
+    assert out.completed and out.rounds == 5, out.exit_reason
+    assert out.consecutive_tool_timeouts == 0  # final tools round note was None
+    _ok('timeout breaker: clean round resets the consecutive count')
+
+
+def test_on_round_end_fires_only_after_executed_tool_rounds():
+    """on_round_end fires once per tools-executed round — NOT on the final
+    answer round and NOT on an aborted round."""
+    from lib.agent_loop import AbortSignal, run_agent_loop
+    ends = []
+    seq = iter([
+        _mk_msg([{'id': 'a', 'function': {'name': 'web_search', 'arguments': '{}'}}]),
+        _mk_msg([{'id': 'b', 'function': {'name': 'web_search', 'arguments': '{}'}}]),
+        _mk_msg(None),
+    ])
+    out = run_agent_loop(abort=AbortSignal.never(), max_tool_rounds=9,
+                         round_tools=['T'], dispatch=lambda rnd, tools: next(seq),
+                         execute_tools=lambda rnd, tcs: None,
+                         on_round_end=lambda rnd: ends.append(rnd))
+    assert out.completed and out.rounds == 3
+    assert ends == [0, 1], ends
+    _ok('on_round_end: fires per tools round, not on the final-answer round')
+
+
 def main():
     print('\n\033[36m═══ agent_loop.py Unit Tests ═══\033[0m\n')
     tests = [
@@ -321,6 +447,12 @@ def main():
         test_retry_bonus_is_capped,
         test_retry_bonus_default_off_preserves_for_range,
         test_loop_does_not_swallow_dispatch_exception,
+        test_before_round_hook_halts_with_reason,
+        test_tools_terminal_round_off_offers_tools_every_round,
+        test_execute_tools_batch_hook_replaces_per_tool_loop,
+        test_tool_timeout_breaker_halts_at_threshold,
+        test_tool_timeout_breaker_resets_on_clean_round,
+        test_on_round_end_fires_only_after_executed_tool_rounds,
     ]
     for fn in tests:
         fn()

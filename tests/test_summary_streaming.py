@@ -89,10 +89,13 @@ class _Store:
     def __init__(self, msgs):
         self.messages = list(msgs)
         self.updated_at = 1000
+        self.rev = 0
     def load_conversation_messages(self, cid):
-        return (list(self.messages), self.updated_at)
-    def cas_sync_conversation_with_search(self, cid, m, u):
-        self.messages = list(m); return 1
+        return (list(self.messages), self.updated_at, self.rev)
+    def cas_sync_conversation_with_search(self, cid, m, expected_rev):
+        if expected_rev != self.rev:
+            return 0
+        self.messages = list(m); self.rev += 1; return 1
     def update_archive_summary(self, *a, **k): pass
     def notify_conversation_changed(self, *a, **k): pass
 

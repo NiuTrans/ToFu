@@ -61,7 +61,8 @@ class SubTaskSpec:
       depends_on    — IDs of specs that must complete first
       id            — unique identifier (auto-generated if not set)
       priority      — higher = run sooner within the same wave
-      max_rounds    — max LLM rounds for this sub-agent
+      max_rounds    — max LLM rounds for this sub-agent (0 = unlimited)
+      timeout_seconds — wall-clock ceiling, default 1800s (0 = unlimited)
       tools_hint    — preferred tools (empty = all allowed for role)
       max_retries   — auto-retry on failure (0 = no retry)
       model_override— explicit model slug, '' = auto from role hint
@@ -74,7 +75,16 @@ class SubTaskSpec:
     priority: int = 0                            # Higher = run sooner (within wave)
     max_rounds: int = 0                          # Max LLM rounds (0 = unlimited)
     tools_hint: list = field(default_factory=list)  # Preferred tools (empty = all allowed)
-    timeout_seconds: int = 0                     # Max wall-clock time (0 = unlimited)
+    timeout_seconds: int = 1800                  # Max wall-clock time (0 = unlimited)
+    """Wall-clock ceiling for one sub-agent, in seconds (30 min).
+
+    ⚠️ NOT 0. ``0`` means "unlimited", and combined with the ``max_rounds=0``
+    default that yields an agent with NO bound of any kind — the shape that
+    let one sub-agent run 26.7M rounds for 3.5h on 2026-07-27, writing 9.1 GB
+    into app.log. A caller may still pass 0 deliberately, but it must no
+    longer be what you get by accident. Pinned by
+    tests/test_swarm_runaway_guard.py.
+    """
 
     # ── Extended fields ──
     max_retries: int = 0                         # Auto-retry on failure (0 = no retry)

@@ -597,11 +597,30 @@ function _mydayShowProgressUI(dateStr, progressData) {
 function _mydayStartPolling(dateStr) {
   if (_myday._pollTimers[dateStr]) return; // already polling
   const INTERVAL = 1500; // poll every 1.5 seconds
+  const FAIL_LIMIT = 8;  // consecutive failures → stop + clear spinner (pt_3cd6cd48)
+  if (!_myday._pollFails) _myday._pollFails = {};
+
+  /* Persistent failure (server stuck 'running', network down): the old code
+   * spun the refresh button forever and leaked a 1.5s interval per date. */
+  const _fail = (why) => {
+    console.warn('[MyDay] Poll failure for', dateStr, why);
+    _myday._pollFails[dateStr] = (_myday._pollFails[dateStr] || 0) + 1;
+    if (_myday._pollFails[dateStr] >= FAIL_LIMIT) {
+      _mydayStopPolling(dateStr);
+      delete _myday._pollFails[dateStr];
+      const refreshBtn = document.getElementById('mydayRefreshBtn');
+      if (refreshBtn) refreshBtn.classList.remove('spinning');
+      if (_myday.selectedDateStr === dateStr) {
+        _mydayRenderEmpty(`${t('myday.genFailed')}: status check failed (network/server)`);
+      }
+    }
+  };
 
   const pollFn = async () => {
     try {
       const data = await Api.daily.status(dateStr);
-      if (!data) return;
+      if (!data) { _fail('empty response'); return; }
+      _myday._pollFails[dateStr] = 0;
 
       if (data.status === 'done') {
         _mydayStopPolling(dateStr);
@@ -638,7 +657,7 @@ function _mydayStartPolling(dateStr) {
         _mydayShowProgressUI(dateStr, data.progress);
       }
     } catch (e) {
-      console.warn('[MyDay] Poll error for', dateStr, e);
+      _fail(e && e.message);
     }
   };
 

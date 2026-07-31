@@ -134,7 +134,18 @@ def _handle_ask_human(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, p
         if vu_reply is None:
             user_response = None  # task aborted or VU stopped
         else:
-            user_response = vu_reply or '(no further input)'
+            # run_virtual_user returns {'text', 'rounds', 'segments'} — the
+            # ANSWER is only ['text'].  Handing the whole dict to
+            # resolve_human_guidance stringified rounds/segments metadata
+            # into the tool result (and into the human_guidance_response SSE
+            # event), and the deliberately-kept [PROGRESS:] machine line in
+            # 'text' leaked into model context via this tool-result path
+            # (pt_5355329b, sibling of pt_0ae59e94).  Strip machine tokens
+            # through the single agent_verdict predicate — unlike the budget
+            # guard, NO consumer on this path needs the raw PROGRESS line.
+            from lib.agent_verdict import strip_machine_tokens
+            user_response = strip_machine_tokens(
+                vu_reply.get('text') or '') or '(no further input)'
             # Resolve so the SSE event consumer (frontend) sees a synthetic
             # response, matching the live human-guidance event shape.
             from lib.tasks_pkg.human_guidance import resolve_human_guidance

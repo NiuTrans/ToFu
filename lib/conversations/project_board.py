@@ -97,6 +97,46 @@ def _block_cooldown_ms(block_count: int, block_class: str = 'human') -> int:
 # rides the FLAT (non-escalating) cooldown instead of the human curve.
 _SIBLING_TAG = '[sibling]'
 
+# Structured human question on a [human-gated] block (Pillar #3). Capped so a
+# pathological payload can't bloat the row; mirrors ask_human's option shape.
+_QUESTION_MAX_CHARS = 600
+_OPTION_LABEL_MAX = 120
+_OPTION_DESC_MAX = 300
+_OPTION_MAX = 6
+
+
+def _clean_block_question(question: str, options) -> str:
+    """Sanitize the optional structured human question → canonical JSON (''
+    when no question was given). Shape::
+
+        {"q": str, "options": [{"label": str, "description"?: str}]}
+
+    An empty options list means the human answers with free text. Never
+    raises; malformed entries are dropped, not repaired.
+    """
+    q = (question or '').strip()[:_QUESTION_MAX_CHARS]
+    if not q:
+        return ''
+    clean_opts = []
+    raw_opts = options if isinstance(options, (list, tuple)) else []
+    for o in raw_opts:
+        if len(clean_opts) >= _OPTION_MAX:
+            break  # cap VALID options — malformed entries never consume a slot
+        if isinstance(o, str):
+            label, desc = o.strip()[:_OPTION_LABEL_MAX], ''
+        elif isinstance(o, dict):
+            label = str(o.get('label') or '').strip()[:_OPTION_LABEL_MAX]
+            desc = str(o.get('description') or '').strip()[:_OPTION_DESC_MAX]
+        else:
+            continue
+        if not label:
+            continue
+        item = {'label': label}
+        if desc:
+            item['description'] = desc
+        clean_opts.append(item)
+    return json.dumps({'q': q, 'options': clean_opts}, ensure_ascii=False)
+
 
 _TITLE_MAX_CHARS = 2000  # epics carry multi-sentence design descriptions; a
                          # tight cap silently clipped titles mid-word (both in
@@ -168,6 +208,29 @@ def _row_to_task(r, now_ms: int) -> dict:
     except (KeyError, IndexError, TypeError) as e:
         logger.debug('[Board] block_reason field parse failed, defaulting: %s', e)
         block_reason = ''
+    # block_question / human_answer are nullable-safe: a pre-migration row (no
+    # column) reads as no-question/no-answer so it is NEVER wrongly suppressed
+    # from dispatch. Malformed question JSON also → None (fail-open).
+    try:
+        _bq_raw = r['block_question'] or ''
+    except (KeyError, IndexError, TypeError) as e:
+        logger.debug('[Board] block_question field parse failed, defaulting: %s', e)
+        _bq_raw = ''
+    block_question = None
+    if _bq_raw:
+        try:
+            _bq = json.loads(_bq_raw)
+            if isinstance(_bq, dict) and str(_bq.get('q') or '').strip():
+                _opts = _bq.get('options')
+                block_question = {'q': str(_bq['q']),
+                                  'options': _opts if isinstance(_opts, list) else []}
+        except (TypeError, ValueError) as e:
+            logger.debug('[Board] block_question JSON parse failed, defaulting: %s', e)
+    try:
+        human_answer = r['human_answer'] or ''
+    except (KeyError, IndexError, TypeError) as e:
+        logger.debug('[Board] human_answer field parse failed, defaulting: %s', e)
+        human_answer = ''
     # dispatch_target is nullable-safe: a pre-migration row (no column) reads as
     # '' -> dispatch routes to created_by_conv (unchanged).
     try:
@@ -175,6 +238,16 @@ def _row_to_task(r, now_ms: int) -> dict:
     except (KeyError, IndexError, TypeError) as e:
         logger.debug('[Board] dispatch_target field parse failed, defaulting: %s', e)
         dispatch_target = ''
+    # wait_paths is nullable-safe: a pre-migration row (no column) reads as
+    # an empty list -> nothing waited on (never stranded). Malformed JSON
+    # also -> [] (fail-open; docs/PROJECT_BRAIN_WAIT_ON_PATH.md invariant 3).
+    try:
+        wait_paths = json.loads(r['wait_paths'] or '[]')
+        if not isinstance(wait_paths, list):
+            wait_paths = []
+    except (KeyError, IndexError, TypeError, ValueError) as e:
+        logger.debug('[Board] wait_paths parse failed, defaulting: %s', e)
+        wait_paths = []
     # write_set is nullable-safe: a pre-migration row (no column) reads as an
     # empty list -> unknown footprint -> treated as non-conflicting (never
     # stranded). Malformed JSON also -> []. See select_dispatchable's
@@ -202,9 +275,17 @@ def _row_to_task(r, now_ms: int) -> dict:
         'blocked_until': blocked_until,
         'block_count': block_count,
         'block_reason': block_reason,
+        # Structured human gate: the pending question (dict | None) and the
+        # human's answer ('' while unanswered). See block_task / answer_task.
+        'block_question': block_question,
+        'human_answer': human_answer,
         # dispatch_target: mutable routing override (idle-sibling migration).
         # created_by_conv is immutable authorship; this is who runs it NEXT.
         'dispatch_target': dispatch_target,
+        # wait_paths: JSON list of paths this epic waits on — held while any is
+        # under a LIVE lease owned by a DIFFERENT conversation (inverse read of
+        # the kind='lease' rows; consumed by _originator_stuck condition 3).
+        'wait_paths': wait_paths,
         # write_set: JSON list of paths/globs/subsystem-tags this epic intends
         # to write; select_dispatchable prefers epics whose write_set is
         # disjoint from live-claimed epics' (dispatch-time collision avoidance).
@@ -262,7 +343,8 @@ def read_board(project_path: str) -> dict:
         rows = db.execute(
             'SELECT id, title, status, owner_conv_id, lease_expires_at, '
             '       created_by_conv, depends_on, dispatched, kind, '
-            '       blocked_until, block_count, block_reason, wait_paths, '
+            '       blocked_until, block_count, block_reason, block_question, '
+            '       human_answer, wait_paths, '
             '       dispatch_target, write_set, created_at, updated_at '
             'FROM project_tasks WHERE project_path=? '
             'ORDER BY created_at ASC', (project_path,)).fetchall()
@@ -284,6 +366,43 @@ def read_board(project_path: str) -> dict:
             out['blocked'] = out.get('blocked', 0) + 1
             continue
         out[t['status']] = out.get(t['status'], 0) + 1
+    return out
+
+
+def _conv_remote_token(db, conv_id: str) -> str:
+    """The conv's remote-worktree binding as a write_set TOKEN.
+
+    RWA P5 (docs/REMOTE_WORKTREE_DESIGN.md §5 P5): a conversation whose
+    project is the pseudo-path ``remote:<agent>:<root>`` writes on that
+    remote root, so its board epics must carry the token in write_set —
+    the dispatcher's overlap check then serialises two conversations bound
+    to the SAME remote root (different roots/agents never intersect: the
+    ':' separator has no prefix-containment semantics). Returns '' for a
+    server-local / missing / unreadable binding (fail-open, logged).
+    """
+    if not conv_id:
+        return ''
+    try:
+        row = db.execute('SELECT settings FROM conversations WHERE id=?',
+                         (conv_id,)).fetchone()
+        if not row:
+            return ''
+        raw = row['settings'] if 'settings' in row.keys() else row[0]
+        settings = json.loads(raw or '{}')
+        path = (settings.get('projectPath') or '') \
+            if isinstance(settings, dict) else ''
+        return path if path.startswith('remote:') else ''
+    except Exception as e:
+        logger.debug('[Board] remote binding read failed conv=%s: %s',
+                     (conv_id or '')[:8], e)
+        return ''
+
+
+def _merge_remote_token(write_set: list, token: str) -> list:
+    """Append the remote token to a write_set list (idempotent dedup)."""
+    out = [str(w) for w in (write_set or [])]
+    if token and token not in out:
+        out.append(token)
     return out
 
 
@@ -340,7 +459,10 @@ def post_task(project_path: str, conv_id: str, title: str, *,
         task_id = short_id('pt_', 16)
         ts = _now_ms()
         deps = json.dumps([str(d) for d in (depends_on or [])], ensure_ascii=False)
-        wset = json.dumps([str(w) for w in (write_set or [])], ensure_ascii=False)
+        # RWA P5:远程绑定的会话发的 epic 自动携带远程根 token。
+        merged_ws = _merge_remote_token(
+            write_set, _conv_remote_token(db, conv_id))
+        wset = json.dumps(merged_ws, ensure_ascii=False)
         db.execute(
             'INSERT INTO project_tasks '
             '(id, project_path, title, status, owner_conv_id, lease_expires_at, '
@@ -352,6 +474,16 @@ def post_task(project_path: str, conv_id: str, title: str, *,
         logger.error('[Board] post failed proj=%.40r: %s', project_path, e, exc_info=True)
         return {'ok': False, 'error': str(e)}
     audit_log('board_post', project_path=project_path, task_id=task_id, conv_id=conv_id)
+    # ── Brain dispatch trigger (event channel): an epic that can start RIGHT
+    #    NOW (deps met, routing target EXISTS and is IDLE) starts NOW — no 30 s
+    #    heartbeat wait. Every other shape (busy poster, unmet deps, dead
+    #    target) falls back to the completion nudge / sweep unchanged.
+    #    Best-effort: never raises into the post path. ──
+    try:
+        from lib.conversations.project_dispatch import on_epic_posted
+        on_epic_posted(project_path, task_id)
+    except Exception as e:
+        logger.debug('[Board] post-time dispatch trigger skipped: %s', e)
     return {'ok': True, 'id': task_id}
 
 
@@ -373,7 +505,8 @@ def claim_task(project_path: str, conv_id: str, task_id: str, *,
     try:
         db = get_thread_db(DOMAIN_CHAT)
         row = db.execute(
-            'SELECT status, owner_conv_id, lease_expires_at FROM project_tasks '
+            'SELECT status, owner_conv_id, lease_expires_at, write_set '
+            'FROM project_tasks '
             'WHERE id=? AND project_path=?', (task_id, project_path)).fetchone()
         if not row:
             return {'ok': False, 'error': 'task not found'}
@@ -401,13 +534,24 @@ def claim_task(project_path: str, conv_id: str, task_id: str, *,
         # (lease<=now) — via the OR below.
         prev_owner = owner
         prev_lease = int(row['lease_expires_at'] or 0)
+        # RWA P5:认领会话的远程绑定并入 write_set(与认领同事务)——
+        # claimed write_set 是 select_dispatchable 降级排序的输入。
+        try:
+            cur_ws = json.loads(row['write_set'] or '[]')
+        except Exception as _e:
+            logger.debug('claim task: failed (%s)', _e)
+            cur_ws = []
+        merged_ws = _merge_remote_token(
+            cur_ws if isinstance(cur_ws, list) else [],
+            _conv_remote_token(db, conv_id))
         res = db.execute(
             "UPDATE project_tasks SET status='claimed', owner_conv_id=?, "
-            'lease_expires_at=?, dispatched=?, updated_at=? '
+            'lease_expires_at=?, dispatched=?, updated_at=?, write_set=? '
             'WHERE id=? AND project_path=? '
             '  AND COALESCE(owner_conv_id,?)=? '
             '  AND COALESCE(lease_expires_at,0)=?',
             (conv_id or '', lease, 1 if dispatched else 0, now,
+             json.dumps(merged_ws, ensure_ascii=False),
              task_id, project_path, prev_owner, prev_owner, prev_lease))
         db.commit()
         if getattr(res, 'rowcount', 1) == 0:
@@ -449,7 +593,8 @@ def complete_task(project_path: str, conv_id: str, task_id: str) -> dict:
         db.execute(
             "UPDATE project_tasks SET status='done', lease_expires_at=0, "
             "dispatched=0, blocked_until=0, block_count=0, block_reason='', "
-            "wait_paths='[]', dispatch_target='', updated_at=? "
+            "wait_paths='[]', dispatch_target='', block_question='', "
+            "human_answer='', updated_at=? "
             'WHERE id=? AND project_path=?',
             (_now_ms(), task_id, project_path))
         db.commit()
@@ -471,7 +616,8 @@ def complete_task(project_path: str, conv_id: str, task_id: str) -> dict:
     return {'ok': True}
 
 
-def block_task(project_path: str, conv_id: str, task_id: str, reason: str) -> dict:
+def block_task(project_path: str, conv_id: str, task_id: str, reason: str,
+               *, question: str = '', options=None) -> dict:
     """Report an epic BLOCKED — stamp a SELF-EXPIRING escalating cooldown so it
     stops being re-dispatched while its external gate is unmet, and emit the
     ``blocked`` feed kind.
@@ -515,10 +661,16 @@ def block_task(project_path: str, conv_id: str, task_id: str, reason: str) -> di
         # untagged) rides the escalating human curve.
         block_class = 'sibling' if _SIBLING_TAG in reason.lower() else 'human'
         blocked_until = now + _block_cooldown_ms(new_count, block_class)
+        # A structured question makes this a WAIT-FOR-ANSWER block (see
+        # answer_task): a fresh block also supersedes (clears) any stale
+        # human_answer left from an earlier round.
+        question_json = _clean_block_question(question, options)
         db.execute(
             'UPDATE project_tasks SET blocked_until=?, block_count=?, '
-            'block_reason=?, updated_at=? WHERE id=? AND project_path=?',
-            (blocked_until, new_count, reason, now, task_id, project_path))
+            'block_reason=?, block_question=?, human_answer=?, updated_at=? '
+            'WHERE id=? AND project_path=?',
+            (blocked_until, new_count, reason, question_json, '', now,
+             task_id, project_path))
         db.commit()
     except Exception as e:
         logger.error('[Board] block failed proj=%.40r task=%s: %s',
@@ -529,7 +681,8 @@ def block_task(project_path: str, conv_id: str, task_id: str, reason: str) -> di
           f'Blocked: {title}' + (f' — {reason}' if reason else '')
           + f' (retry in ~{cooldown_min}m, block #{new_count})',
           payload={'taskId': task_id, 'reason': reason,
-                   'blockedUntil': blocked_until, 'blockCount': new_count})
+                   'blockedUntil': blocked_until, 'blockCount': new_count,
+                   'question': (json.loads(question_json) if question_json else None)})
     audit_log('board_block', project_path=project_path, task_id=task_id,
               conv_id=conv_id, block_count=new_count)
     return {'ok': True, 'blocked_until': blocked_until, 'block_count': new_count}
@@ -580,7 +733,8 @@ def reopen_task(project_path: str, conv_id: str, task_id: str) -> dict:
         db.execute(
             "UPDATE project_tasks SET status='open', owner_conv_id='', "
             "lease_expires_at=0, dispatched=0, blocked_until=0, block_count=0, "
-            "block_reason='', wait_paths='[]', dispatch_target='', updated_at=? "
+            "block_reason='', wait_paths='[]', dispatch_target='', "
+            "block_question='', human_answer='', updated_at=? "
             'WHERE id=? AND project_path=?',
             (_now_ms(), task_id, project_path))
         db.commit()
@@ -596,7 +750,79 @@ def reopen_task(project_path: str, conv_id: str, task_id: str) -> dict:
                    'prevOwner': prev_owner})
     audit_log('board_reopen', project_path=project_path, task_id=task_id,
               conv_id=conv_id, from_status=prev_status, prev_owner=prev_owner)
+    # ── Brain dispatch trigger (event channel): the human's revive lever is
+    #    also immediate — a reopened epic whose routing target EXISTS and is
+    #    IDLE starts NOW, not at the next 30 s sweep. Same seam, same guards
+    #    as post_task (busy/dead targets fall back to the nudge/sweep).
+    #    Best-effort: never raises into the reopen path. ──
+    try:
+        from lib.conversations.project_dispatch import on_epic_posted
+        on_epic_posted(project_path, task_id)
+    except Exception as e:
+        logger.debug('[Board] reopen-time dispatch trigger skipped: %s', e)
     return {'ok': True, 'from': prev_status}
+
+
+def answer_task(project_path: str, conv_id: str, task_id: str, answer: str) -> dict:
+    """Record the HUMAN's answer to a pending block question — the close of
+    the structured human gate.
+
+    Only meaningful while a question is PENDING (block_question set); refuses
+    otherwise (``no_pending_question``). On success it stamps ``human_answer``,
+    CLEARS the whole block state (cooldown / count / reason / question) and
+    then triggers an IMMEDIATE re-dispatch via ``on_epic_answered`` — the
+    kickoff carries the answer, so the assignee proceeds on it without waiting
+    for the heartbeat sweep. ``{'ok', 'error'?}``.
+    """
+    if not project_path or not task_id:
+        return {'ok': False, 'error': 'missing project/task'}
+    answer = (answer or '').strip()[:_TITLE_MAX_CHARS]
+    if not answer:
+        return {'ok': False, 'error': 'missing answer'}
+    from lib.conversations.project_feed import normalize_project_path
+    project_path = normalize_project_path(project_path)
+    try:
+        db = get_thread_db(DOMAIN_CHAT)
+        row = db.execute(
+            'SELECT title, block_question FROM project_tasks '
+            'WHERE id=? AND project_path=?', (task_id, project_path)).fetchone()
+        if not row:
+            return {'ok': False, 'error': 'task not found'}
+        title = row['title'] or ''
+        question_raw = row['block_question'] or ''
+        if not question_raw.strip():
+            return {'ok': False, 'error': 'no_pending_question'}
+        question_text = ''
+        try:
+            _bq = json.loads(question_raw)
+            if isinstance(_bq, dict):
+                question_text = str(_bq.get('q') or '')
+        except (TypeError, ValueError) as e:
+            logger.debug('[Board] answer: stored question JSON unparseable: %s', e)
+        db.execute(
+            'UPDATE project_tasks SET human_answer=?, blocked_until=0, '
+            "block_count=0, block_reason='', block_question='', updated_at=? "
+            'WHERE id=? AND project_path=?',
+            (answer, _now_ms(), task_id, project_path))
+        db.commit()
+    except Exception as e:
+        logger.error('[Board] answer failed proj=%.40r task=%s: %s',
+                     project_path, task_id, e, exc_info=True)
+        return {'ok': False, 'error': str(e)}
+    _emit('answered', project_path, conv_id,
+          f'Answered: {title} — {answer}',
+          payload={'taskId': task_id, 'question': question_text,
+                   'answer': answer})
+    audit_log('board_answer', project_path=project_path, task_id=task_id,
+              conv_id=conv_id, answer_len=len(answer))
+    # Immediate re-dispatch (best-effort): never raises into the answer path —
+    # a dispatch failure just leaves the epic for the next heartbeat sweep.
+    try:
+        from lib.conversations.project_dispatch import on_epic_answered
+        on_epic_answered(project_path, task_id)
+    except Exception as e:
+        logger.debug('[Board] post-answer dispatch trigger skipped: %s', e)
+    return {'ok': True}
 
 
 def set_write_set(project_path: str, conv_id: str, task_id: str,
@@ -658,13 +884,65 @@ def _emit(kind: str, project_path: str, conv_id: str, summary: str,
         logger.debug('[Board] feed emit (%s) skipped: %s', kind, e)
 
 
-def render_board_block(project_path: str, current_conv_id: str = '') -> str:
-    """Render the board for system-context injection — the AUTO-COORDINATION
-    surface. Lists open epics + a per-claimed-epic explicit "avoid duplication"
-    hint when ANOTHER conversation holds an UNEXPIRED lease (this is what makes
-    a reading conversation step aside instead of redoing the work). Returns ''
-    when the board is empty (no prompt weight for an unused board).
+# How much of an epic title the PROMPT INJECTION carries. Epics routinely hold
+# a whole spec in `title` (stored uncapped up to _TITLE_MAX_CHARS), but the
+# injection only has to answer "who is doing what, so I don't collide" — the
+# spec is needed when PICKING UP an epic, which is a deliberate tool round.
+_INJECT_TITLE_MAX_CHARS = 200
+
+
+def _abridge_title(title: str) -> str:
+    """First line of ``title``, bounded — for the per-turn injection only.
+
+    Returns the title unchanged when it is already short, so the ellipsis stays
+    a MEANINGFUL signal ("there is more behind this") rather than decoration on
+    every row. The full text always remains reachable via ``project_board_read``
+    — an abridgement the model cannot detect or undo would be the worse defect.
     """
+    head = (title or '').strip().split('\n', 1)[0].strip()
+    multiline = '\n' in (title or '').strip()
+    if len(head) <= _INJECT_TITLE_MAX_CHARS and not multiline:
+        return head
+    return head[:_INJECT_TITLE_MAX_CHARS].rstrip() + ' …'
+
+
+def render_board_injection_block(project_path: str,
+                                 current_conv_id: str = '') -> str:
+    """The board as a per-turn PROMPT INJECTION — a coordination summary.
+
+    Same lanes and the same avoid-duplication hint as the full render, but each
+    epic is reduced to id + headline + status + owner. Measured on the live
+    board this cut the per-turn cost from 16,764 chars to a small fraction,
+    with no loss of coordination signal.
+
+    Use ``render_board_block`` (the full render) for the ``project_board_read``
+    TOOL and for any human-facing surface — those are pull-based and must show
+    the complete epic text.
+    """
+    return _render_board(project_path, current_conv_id, abridged=True)
+
+
+def render_board_block(project_path: str, current_conv_id: str = '') -> str:
+    """Render the board IN FULL — the pull-based detail channel.
+
+    Backs the ``project_board_read`` agent tool and the panel/influence reads:
+    every epic's complete stored text, never abridged. The per-turn prompt
+    injection deliberately uses ``render_board_injection_block`` instead.
+    """
+    return _render_board(project_path, current_conv_id, abridged=False)
+
+
+def _render_board(project_path: str, current_conv_id: str = '',
+                  *, abridged: bool = False) -> str:
+    """Shared board renderer — ONE lane-partitioning implementation.
+
+    ``abridged`` selects the per-turn injection shape (short titles + a pointer
+    to the detail tool); everything else — lane partitioning, lease expiry,
+    the "(you)" stamp, the avoid-duplication hint — is identical, so the two
+    consumers can never disagree about WHAT is on the board, only about how
+    much of each epic they spell out.
+    """
+    _t = _abridge_title if abridged else (lambda s: s)
     board = read_board(project_path)
     tasks = board['tasks']
     if not tasks:
@@ -679,18 +957,30 @@ def render_board_block(project_path: str, current_conv_id: str = '') -> str:
     # partitioned into its own "Blocked" lane — NOT the Open lane (where it
     # would read as "claim me" and get re-dispatched). Once the cooldown lapses
     # it falls back to Open automatically (at-read-time, no reaper).
+    # An epic blocked WITH a structured human question waits for the ANSWER,
+    # not for time — its own lane REGARDLESS of cooldown state (auto-retry is
+    # paused until answered; the answer re-dispatches it immediately).
+    pending_q = [t for t in epics
+                 if t['status'] == 'open' and t.get('block_question')
+                 and not (t.get('human_answer') or '').strip()]
+    pending_ids = {t['id'] for t in pending_q}
     blocked_t = [t for t in epics
-                 if t['status'] == 'open' and int(t.get('blocked_until') or 0) > now]
+                 if t['status'] == 'open' and int(t.get('blocked_until') or 0) > now
+                 and t['id'] not in pending_ids]
     blocked_ids = {t['id'] for t in blocked_t}
-    open_t = [t for t in epics if t['status'] == 'open' and t['id'] not in blocked_ids]
+    open_t = [t for t in epics if t['status'] == 'open'
+              and t['id'] not in blocked_ids and t['id'] not in pending_ids]
     claimed_t = [t for t in epics if t['status'] == 'claimed']
     done_t = [t for t in epics if t['status'] == 'done']
-    if not (open_t or claimed_t or done_t or blocked_t):
+    if not (open_t or claimed_t or done_t or blocked_t or pending_q):
         return ''
     lines = ['[PROJECT BOARD] — shared coordination board for this project. '
              'Before starting work, CHECK it: claim an open epic so siblings '
              'know you own it, and do NOT duplicate an epic another '
-             'conversation is already advancing.']
+             'conversation is already advancing.'
+             + (' Epics are shown ABRIDGED (headline only, marked …) — call '
+                'project_board_read for an epic\'s full text before you work it.'
+                if abridged else '')]
     if claimed_t:
         lines.append('')
         lines.append('In progress (claimed by a conversation — AVOID DUPLICATING):')
@@ -699,13 +989,13 @@ def render_board_block(project_path: str, current_conv_id: str = '') -> str:
             mine = ' (you)' if current_conv_id and owner == current_conv_id else ''
             hint = '' if mine else ' — another conversation is advancing this; ' \
                    'pick a different epic or coordinate, do not redo it'
-            lines.append(f'  • [{t["id"]}] {t["title"]} — claimed by {owner}{mine}{hint}')
+            lines.append(f'  • [{t["id"]}] {_t(t["title"])} — claimed by {owner}{mine}{hint}')
     if open_t:
         lines.append('')
         lines.append('Open (unclaimed — claim one with project_board_claim before working it):')
         for t in open_t:
             dep = f' (depends on {", ".join(t["depends_on"])})' if t['depends_on'] else ''
-            lines.append(f'  • [{t["id"]}] {t["title"]}{dep}')
+            lines.append(f'  • [{t["id"]}] {_t(t["title"])}{dep}')
     if blocked_t:
         lines.append('')
         lines.append('Waiting on an external gate (auto-retries on its own after a '
@@ -715,13 +1005,22 @@ def render_board_block(project_path: str, current_conv_id: str = '') -> str:
             reason = (t.get('block_reason') or '').strip()
             why = f' — {reason}' if reason else ''
             cnt = int(t.get('block_count') or 0)
-            lines.append(f'  • [{t["id"]}] {t["title"]}{why} '
+            lines.append(f'  • [{t["id"]}] {_t(t["title"])}{why} '
                          f'(retry in ~{mins}m, blocked {cnt}×)')
+    if pending_q:
+        lines.append('')
+        lines.append("Waiting for the human's answer (auto-retry paused — the "
+                     'board panel shows a question; answering re-dispatches '
+                     'the epic immediately with the answer in context):')
+        for t in pending_q:
+            q = ((t.get('block_question') or {}).get('q') or '').strip()
+            qq = f' — Q: {q}' if q else ''
+            lines.append(f'  • [{t["id"]}] {_t(t["title"])}{qq}')
     if done_t:
         lines.append('')
         lines.append('Recently done:')
         for t in done_t[-8:]:
-            lines.append(f'  • {t["title"]}')
+            lines.append(f'  • {_t(t["title"])}')
     return '\n'.join(lines)
 
 
@@ -763,7 +1062,21 @@ def execute_board_tool(fn_name: str, fn_args: dict, *,
         if fn_name == 'project_board_block':
             res = block_task(project_path, current_conv_id,
                              fn_args.get('task_id') or '',
-                             fn_args.get('reason') or '')
+                             fn_args.get('reason') or '',
+                             question=fn_args.get('question') or '',
+                             options=fn_args.get('options'))
+            if res.get('ok') and (fn_args.get('question') or '').strip():
+                return ('Reported blocked WITH a question for the human. The '
+                        'board panel now shows your question with answer '
+                        'controls (one-click options / free text) in its '
+                        '"Needs you" surface, and the collaboration bar counts '
+                        'it as work that is STOPPED. The epic '
+                        'will NOT auto-retry — the moment the human answers, '
+                        'it is re-dispatched with the answer in the kickoff '
+                        'context. Do NOT re-block on the same gate meanwhile.\n'
+                        'While you wait: this epic is parked, but YOU are not. '
+                        'Pick up another open epic, or advance any part of this '
+                        'one that does not depend on the answer.')
             if res.get('ok'):
                 mins = _block_cooldown_ms(res.get('block_count', 1)) // 60_000
                 return ('Reported blocked. This epic is now on a self-expiring '
@@ -774,7 +1087,13 @@ def execute_board_tool(fn_name: str, fn_args: dict, *,
                         '(no human un-block needed); a human reopen resets it '
                         'for an immediate retry. Tag the reason with the block '
                         'class ([human-gated] vs [sibling]) so it is visible on '
-                        'the board.')
+                        'the board.\n'
+                        'If this gate is really a DECISION you could make '
+                        'yourself — reversible, and a matter of engineering '
+                        'judgement rather than taste, policy or credentials — '
+                        'reopen it, pick the most robust long-term option, and '
+                        'record the choice with project_charter_commit instead '
+                        'of leaving the epic parked.')
             return f'Error reporting block: {res.get("error", "unknown")}.'
         return f"Error: Unknown board tool '{fn_name}'"
     except Exception as e:
@@ -784,7 +1103,7 @@ def execute_board_tool(fn_name: str, fn_args: dict, *,
 
 __all__ = [
     'read_board', 'post_task', 'claim_task', 'complete_task', 'block_task',
-    'reopen_task',
+    'reopen_task', 'answer_task',
     'render_board_block', 'execute_board_tool',
     '_effective_status',
     'claims_by_conv', 'DEFAULT_LEASE_TTL_MS',

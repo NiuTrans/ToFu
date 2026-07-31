@@ -46,8 +46,12 @@ JS_DIR = os.path.join(PROJECT_ROOT, 'static', 'js')
 # NOT a free pass; a new orphan can only join it by also being admin-only.
 _UNBUNDLED_WHITELIST = frozenset({'relay-admin.js'})
 
-# Built bundle artifact filenames (bundle-<8hex>.js / feature-<8hex>.js).
-_BUILT_BUNDLE_RE = re.compile(r'^(?:bundle|feature)-[0-9a-f]{8}\.js$')
+# Built bundle artifact filenames (bundle-<8hex>.js / feature-<8hex>.js /
+# i18n-<lang>-<8hex>.js — the last is the single-language i18n pack emitted by
+# lib/i18n_packs.py, Epic-E sub-part 1 slice 2). Kept in lockstep with
+# lib/js_bundler.py::_BUILT_BUNDLE_RE.
+_BUILT_BUNDLE_RE = re.compile(
+    r'^(?:(?:bundle|feature)-[0-9a-f]{8}|i18n-(?:zh|en)-[0-9a-f]{8})\.js$')
 
 # compaction-viewer.js is historically absent from the audit's index.html
 # regex scope in the sibling test; here it IS in _BUNDLE_FILES so it needs no

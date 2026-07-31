@@ -45,24 +45,39 @@ def _split_tokens(usage: dict | None) -> tuple[int, int, int, int]:
         Convention: ``prompt_tokens`` already includes cached tokens.
 
     The returned ``uncached_input`` is the count we pay full input price for.
+
+    ★ The convention decision is DELEGATED to ``lib.cost.split_input_tokens``,
+      the single chokepoint that already owns it. This module used to carry a
+      third independent copy — the magnitude heuristic
+      ``if cw + cr > 0 and inp_raw > cw + cr`` — which
+      ``usage_cache_convention``'s docstring names a "latent 10x BILLING BUG"
+      and which pt_28375442 removed from the display and wallet paths.
+
+      Why it mattered most here: this function feeds ``estimate_usage_cost`` →
+      ``check_budget`` → the orchestrator's per-round budget gate, and the
+      error direction is OVER-estimation — so a cost that never happened could
+      abort a task mid-flight. Measured before the fix: a full cache hit on the
+      OpenAI wire (``prompt_tokens == cached_tokens == 82843``) needs
+      ``inp_raw > cw + cr`` to be recognised, which is False at exact equality,
+      so the whole cached prompt was billed at full input price instead of 0.
+
+      Equality is the COMMON case (a fully cached prefix), not an edge case,
+      which is why a 4-example suite that never crossed the boundary stayed
+      green over a live cliff.
     """
     if not isinstance(usage, dict):
         return 0, 0, 0, 0
 
-    from lib.cost import normalize_usage
+    from lib.cost import normalize_usage, split_input_tokens
     _u = normalize_usage(usage)
-    inp_raw = _u['input']
     cw = _u['cache_write']
     cr = _u['cache_read']
     out = _u['output']
 
-    # OpenAI convention: prompt_tokens may already include cached tokens.
-    # Heuristic: if input <= (cw+cr), Anthropic convention (input excludes
-    # cache).  Otherwise OpenAI — subtract cache from input.
-    if cw + cr > 0 and inp_raw > cw + cr:
-        uncached = max(0, inp_raw - cw - cr)
-    else:
-        uncached = inp_raw
+    # split_input_tokens returns (uncached, total); we only need the uncached
+    # half here, but it MUST come from there so this gate and the billed price
+    # can never disagree about what was actually cached.
+    uncached = split_input_tokens(usage)[0]
 
     return uncached, cw, cr, out
 

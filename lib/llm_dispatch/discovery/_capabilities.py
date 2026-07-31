@@ -27,6 +27,7 @@ _IMAGE_GEN_PAT = re.compile(r'(dall-?e|[-_]image|image[-_])', re.I)
 #   • Kimi K2-thinking variants
 #   • Qwen3-* (dual-mode by default — name doesn't reveal it)
 #   • DeepSeek V4 (dual-mode)
+#   • Anthropic Fable ("fable-5" — Claude-family reasoning model, no hint)
 # Self-hosted vLLM/SGLang deployments expose those models with their
 # raw IDs (e.g. "glm5.1-fp8") and won't pick up thinking auto-tagging
 # unless the regex covers them explicitly.
@@ -34,7 +35,9 @@ _THINKING_PAT = re.compile(
     r'(think|reason|\bo[1234]-|\bo[1234]\b|ernie-x'
     r'|glm[-_]?(?:4\.[5-9]|[5-9])'
     r'|qwen-?3'
-    r'|deepseek-?v[4-9])',
+    r'|deepseek-?v[4-9]'
+    r'|kimi-k3'                                # Kimi K3 always runs in thinking mode
+    r'|fable)',
     re.I,
 )
 
@@ -43,12 +46,24 @@ _VISION_PAT = re.compile(
     r'(vision|vl\b|vlm'
     r'|gpt-4[.o]|gpt-5'                     # GPT-4o+, GPT-5+
     r'|claude.*(opus|sonnet|haiku)'          # All Claude 3+ have vision
+    r'|fable'                                # Anthropic Fable (Claude-family, multimodal)
     r'|gemini(?!.*lite)'                     # Gemini (except flash-lite)
     r'|qwen.*(vl|max|plus)'                 # Qwen VL/Max/Plus
     r'|ernie-5\.0'                           # ERNIE 5.0 is natively multimodal
-    r'|kimi-k2\.[56]'                        # Kimi K2.5/K2.6 are natively multimodal
+    r'|kimi-(?:k2\.[56]|k3)'                 # Kimi K2.5/K2.6/K3 are natively multimodal (vision)
     r'|glm-5v'                               # GLM-5V (vision variant)
     r')',
+    re.I,
+)
+
+# Video-capable families. Distinct from vision: 'video' means the model
+# accepts a full video stream as input (not just still images). Kimi K3
+# is the currently-shipped example (per platform.kimi.com/docs/guide/
+# use-kimi-vision-model). K2.6 / K2.7-code also support video but their
+# vision baseline isn't uniformly landed here yet — expand as those slots
+# gain the 'vision' seed.
+_VIDEO_PAT = re.compile(
+    r'(kimi-k3)',
     re.I,
 )
 
@@ -104,6 +119,9 @@ def _infer_capabilities(model_id: str, model_meta: dict = None) -> set:
 
     if _VISION_PAT.search(mid_lower):
         caps.add('vision')
+
+    if _VIDEO_PAT.search(mid_lower):
+        caps.add('video')
 
     # ── Pricing-based tier tags (cheap, plus any future PRICING_TIERS rows) ──
     # Driven by a single table in lib/llm_dispatch/config.py so the same

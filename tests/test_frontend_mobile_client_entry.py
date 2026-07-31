@@ -66,6 +66,13 @@ HARNESS = textwrap.dedent("""
     global.document = dom.window.document;
     // Minimal t() stub — returns the key's tail so we can assert the label wired.
     function t(k) {{ return k === 'settings.mobileClient' ? 'Mobile client' : k; }}
+    // The mascot <img> comes from core/brand_logo.js — the single source of the
+    // cache-busted URL. Stub it the way the real module renders (no onerror:
+    // the skin fallback went away with the try-on mechanism, 2026-07-29).
+    function brandLogoImgAttrs(size) {{
+      return 'src="/static/icons/tofu-welcome.svg?v=TEST" data-brand-logo="1" alt="Tofu" '
+        + 'width="' + size + '" height="' + size + '"';
+    }}
 
     function runWith(d) {{
       // Reset the anchor to its default hidden state before each run. The
@@ -86,12 +93,16 @@ HARNESS = textwrap.dedent("""
     const hasHref = el.getAttribute('href') === 'https://github.com/x/y/releases';
     const hasLabel = el.textContent.includes('Mobile client');
     const hasSvg = el.innerHTML.includes('tofu-welcome.svg');
+    // The entry must route through the shared brand-logo helper so it picks up
+    // the cache-bust token (a hand-written path here would silently keep showing
+    // the old logo for up to 24h).
+    const usesBrandHelper = el.innerHTML.includes('data-brand-logo');
 
     // Case 2: URL absent → stays hidden.
     let el2 = runWith({{ version: '1.0' }});
     const hidden = el2.style.display === 'none';
 
-    console.log(JSON.stringify({{ shown, hasHref, hasLabel, hasSvg, hidden }}));
+    console.log(JSON.stringify({{ shown, hasHref, hasLabel, hasSvg, usesBrandHelper, hidden }}));
 """)
 
 
@@ -112,6 +123,10 @@ def test_mobile_client_entry_renders_only_when_url_present():
     assert out["hasHref"] is True, "href must be the release URL"
     assert out["hasLabel"] is True, "label must use the i18n key"
     assert out["hasSvg"] is True, "must use the tofu-welcome.svg mascot icon (no emoji, §3.4)"
+    assert out["usesBrandHelper"] is True, (
+        "must render the mascot via brandLogoImgAttrs() — the single source of the "
+        "cache-busted URL (core/brand_logo.js)"
+    )
     assert out["hidden"] is True, "must stay hidden when URL absent"
 
 

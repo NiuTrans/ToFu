@@ -157,6 +157,12 @@ def _atomic_write_bytes(path: str, data: bytes) -> None:
             f.write(data)
             f.flush()
             os.fsync(f.fileno())
+            # Backup blobs are write-once (re-read only on rewind) — drop the
+            # just-written pages from the page cache (shared-cgroup relief).
+            try:
+                os.posix_fadvise(f.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
+            except (OSError, AttributeError) as e:
+                logger.debug('[FileHistory] fadvise DONTNEED skipped: %s', e)
         os.replace(tmp, path)
     except BaseException:
         with contextlib.suppress(OSError):
@@ -241,6 +247,12 @@ def _copy_backup(abs_src: str, dst: str) -> bool:
                                    prefix='.fh-blob-', suffix='.tmp')
         os.close(fd)
         shutil.copyfile(abs_src, tmp)
+        # The copied blob is write-once — hint its pages out of the cache.
+        try:
+            from lib.cgroup_guard import fadvise_dontneed
+            fadvise_dontneed(tmp)
+        except Exception as e:
+            logger.debug('[FileHistory] fadvise on copy backup skipped: %s', e)
         os.replace(tmp, dst)
         return True
     except (FileNotFoundError, IsADirectoryError, PermissionError, OSError) as e:

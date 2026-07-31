@@ -188,8 +188,27 @@ def test_source_carries_identity_keyed_render_seam():
     assert 'startStreaming: function' in cv, \
         'ConvView.startStreaming insert seam missing from conv_view.js'
     # finalizeStreaming must sweep by identity after the swap.
-    assert '_evictByMsgId(_inner, msg._msgId, _keep)' in cv, \
-        'finalizeStreaming no longer sweeps twins by data-msg-id after the outerHTML swap'
+    #
+    # Anchored on the BEHAVIOUR, not on a local variable's spelling. The old
+    # form pinned the literal `_evictByMsgId(_inner, msg._msgId, _keep)`, which
+    # went red purely because the keep-node local was renamed when the swap
+    # moved from `outerHTML` to `replaceWith` — the sweep itself never left.
+    # Worse, that spelling ENCODED the very bug the rename fixed: `_keep` was
+    # `getElementById('msg-' + idx)`, which right after the swap can match TWO
+    # nodes (the fresh one and a stale bubble at the same slot after an index
+    # shift) and returns the FIRST — so the sweep evicted the node it had just
+    # restored. Pin what must stay true instead: the sweep runs on this msgId,
+    # and its keep-node is NOT re-found by positional id.
+    _fin = cv[cv.index('finalizeStreaming: function'):]
+    assert '_evictByMsgId(_inner, msg._msgId,' in _fin, \
+        'finalizeStreaming no longer sweeps twins by data-msg-id after the swap'
+    _i_sweep = _fin.index('_evictByMsgId(_inner, msg._msgId,')
+    assert "getElementById('msg-' + idx)" not in _fin[max(0, _i_sweep - 400):_i_sweep + 120], \
+        ("finalizeStreaming's sweep resolves its keep-node by POSITIONAL id "
+         "again — after the swap that id can match two nodes and getElementById "
+         "returns the first, so the sweep deletes the bubble it just restored "
+         "(observed: a failed Continue made the interrupted turn vanish). Hold "
+         "the new node by reference (replaceWith) instead.")
 
     sse = os.path.join(ROOT, 'static', 'js', 'ui', 'sse_pipeline.js')
     with open(sse, encoding='utf-8') as f:

@@ -312,11 +312,44 @@ class ConversationStore(Protocol):
         ...
 
     def save_conversation_messages(self, conv_id: str, messages: list) -> int:
-        """Persist ``messages`` for a conversation (non-CAS full overwrite).
+        """Persist ``messages`` for a conversation under a rev-CAS guard.
 
         Returns the new ``updated_at`` timestamp (epoch-ms) written.  Does NOT
         touch any full-text search index — callers that need FTS use the
         search-aware sync path on the host adapter.
+
+        The transcript is ONE blob, so every caller read-modify-writes it.  An
+        unconditional overwrite silently erases rows a concurrent writer
+        appended between the read and the write, so this method writes only
+        while the row's ``rev`` is unchanged and raises
+        ``ConcurrentWriteConflict`` on a lost race instead of clobbering.
+        Prefer :meth:`patch_message_fields_by_task` when you are only setting
+        fields on one message — it replays the mutation after a lost race.
+        """
+        ...
+
+    def overwrite_conversation_messages_unconditional(self, conv_id: str,
+                                                      messages: list) -> int:
+        """DANGEROUS: overwrite the transcript, ignoring concurrent writers.
+
+        Rows another thread appended after this caller's read are LOST.  Only
+        correct where the caller is provably the sole writer (boot-time crash
+        recovery, before any task or client is attached).  Named explicitly so
+        choosing it is a visible decision, never the accidental default.
+        """
+        ...
+
+    def patch_message_fields_by_task(self, conv_id: str, task_id: str,
+                                     fields: dict,
+                                     *, max_attempts: int = 5) -> bool:
+        """Set ``fields`` on the assistant message tagged ``_taskId == task_id``.
+
+        The narrow-write path for post-settle enrichment (snapshot id, learned
+        preferences): re-read, mutate the single owned message, commit under a
+        rev-CAS, retry on a lost race — so concurrent appends survive.  Returns
+        True when the patch landed; False when no message carries that task id
+        (deliberately NO positional fallback — guessing stamps one task's data
+        onto another task's turn) or the race could not be won.
         """
         ...
 

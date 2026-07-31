@@ -36,6 +36,7 @@
     run_concluded: 'rocket',
     claimed: 'package',
     blocked: 'alertTriangle',
+    answered: 'check',
     decided: 'lightbulb',
     proposed_decision: 'messageSquare',
     dismissed: 'ban',
@@ -96,6 +97,11 @@
   function _onTabSelected(name, prev) {
     if (name === 'status' && prev !== 'status') {
       _refreshStatus(_state.path || _displayedProjectPath());
+    }
+    // Same fresh-on-tab-open rule for Needs-you: switching tabs only toggles
+    // CSS, so a stale list could still show an epic a sibling just answered.
+    if (name === 'attention' && prev !== 'attention') {
+      _refreshAttention(_state.path || _displayedProjectPath());
     }
   }
 
@@ -174,8 +180,9 @@
         if (lbl) lbl.textContent = open
           ? (btn.getAttribute('data-less') || 'Show less')
           : (btn.getAttribute('data-more') || 'Show more');
-        // Lazy-on-expand: translate the now-visible long text (no-op when the
-        // content-translation overlay is off / already-target / cached).
+        // Clamps are translated eagerly on render; this expand-time re-apply
+        // is just a safety net (compare-before-swap makes it a no-op when the
+        // overlay already painted the translation).
         if (open && typeof ProjectBrainI18n !== 'undefined' &&
             ProjectBrainI18n && typeof ProjectBrainI18n.apply === 'function') {
           ProjectBrainI18n.apply(clamp);
@@ -238,6 +245,37 @@
     catch (_e) { return fallback; }
   }
 
+  /**
+   * Report a FAILED panel operation to the operator — the ONE failure surface
+   * for every Project Brain write.
+   *
+   * Every mutation here used to end in a bare `console.warn`, which makes a
+   * REFUSED write and a BROKEN listener the same observation for the user:
+   * nothing moves and nothing is said. That is not cosmetic — it is what let a
+   * Commit button that was being rejected on every click read as "dead" for as
+   * long as it did. A control that changes shared project state must never
+   * fail silently.
+   *
+   * The backend's own message is shown when there is one: it names the
+   * offending field (`summary`, `version_conflict`, …), which a generic
+   * "failed" string cannot.
+   *
+   * `quiet` is for BACKGROUND enrichment the user never asked for (a hover
+   * preview). Toasting those would train the operator to ignore the surface —
+   * the same disease as staying silent. Anything the user CLICKED, and any
+   * load that leaves the panel blank or stale, is never quiet.
+   */
+  function _reportFailure(key, fallback, err, quiet) {
+    var detail = (err && err.message) ? String(err.message) : '';
+    if (typeof console !== 'undefined') {
+      console.warn('[ProjectBrain] %s: %s', fallback, detail || err);
+    }
+    if (quiet) return;
+    if (typeof showToast === 'function') {
+      showToast(_t(key, fallback) + (detail ? ' — ' + detail : ''), 'error');
+    }
+  }
+
   function _activityListEl() { return document.getElementById('projectBrainActivityList'); }
 
   // ── Hover preview for opaque conversation IDs ────────────────────
@@ -273,7 +311,8 @@
       _convPreviewCache[convId] = rec;   // cache even null (avoid refetch storms)
       return rec;
     }).catch(function (e) {
-      if (typeof console !== 'undefined') console.warn('[ProjectBrain] conv preview failed', e);
+      _reportFailure('projectBrain.previewFailed', 'Conversation preview failed',
+                     e, true);
       _convPreviewCache[convId] = null;
       return null;
     });
@@ -474,7 +513,7 @@
     // its full self instead of a dead mid-word fragment. Short summaries have
     // no summary_full → render as-is with no clamp chrome.
     var fullText = (ev.payload && ev.payload.summary_full) || ev.summary || kindLabel;
-    summary.innerHTML = _clampBlock(_esc(fullText), fullText);
+    summary.innerHTML = _clampBlock(_mdLite(fullText), fullText);
     body.appendChild(summary);
 
     // Timestamp row — a legend without WHEN is only half a fix. Relative text
@@ -576,7 +615,7 @@
       var _al = _activityListEl();
       if (_al) _applyContentI18n(_al);
     }).catch(function (e) {
-      if (typeof console !== 'undefined') console.warn('[ProjectBrain] backfill failed', e);
+      _reportFailure('projectBrain.loadFailed', 'Loading the project brain failed', e);
       _ensureActivityEmptyState();
     });
 
@@ -638,6 +677,20 @@
     return escapeHtml(String(s == null ? '' : s));
   }
 
+  /** Markdown-LITE inline renderer for panel display text (Pillar #1 of the
+   *  unified interaction redesign). Escape FIRST, then transform — the only
+   *  XSS-safe order. Supports **bold**, `code`, [label](https://url)
+   *  (http/https only) and newlines. Deliberately tiny: no lists/tables/raw
+   *  HTML (raw markup stays visible-escaped instead of executed). */
+  function _mdLite(text) {
+    var s = _esc(text == null ? '' : String(text));
+    s = s.replace(/`([^`\n]+)`/g, '<code>$1</code>');
+    s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+    s = s.replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g,
+      '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+    return s.replace(/\n/g, '<br>');
+  }
+
   // ── Charter column ──────────────────────────────────────────────
   // Renders the north-star content + committed decisions, plus PENDING
   // proposed_decision events (pulled from the live feed state) each with a
@@ -672,10 +725,29 @@
       _setTabCount('pbTabCountCharter', 0);
       return;
     }
+    // Health strip — data comes from the BACKEND (`rec.health`, computed by
+    // the charter route), never re-derived here. A missing north star is the
+    // incident shape that once hid for days: it renders as a loud warning,
+    // not silence.
+    var health = (rec && rec.health) || null;
+    if (health && !health.contentSet) {
+      parts.push('<div class="pb-charter-health pb-charter-health-warn" data-pb-health="no-goal">' +
+        ((typeof Icon === 'function') ? Icon('alertTriangle', 12) : '') +
+        '<span>' + _esc(_t('projectBrain.healthNoGoal',
+          'No north-star goal is set — the decisions below are implementation-level intent only.')) +
+        '</span></div>');
+    } else if (health) {
+      parts.push('<div class="pb-charter-health" data-pb-health="ok">' +
+        '<span>' + _esc(_t('projectBrain.healthStats',
+          '{n} decisions · {m} shown per turn')
+          .replace('{n}', health.decisionCount)
+          .replace('{m}', health.injectedCount)) +
+        '</span></div>');
+    }
     if (content) {
       parts.push('<div class="pb-charter-northstar-row">' +
         '<div class="pb-charter-northstar" data-charter-northstar="1">' +
-        _clampBlock(_esc(content), content) + '</div>' +
+        _clampBlock(_mdLite(content), content) + '</div>' +
         '<div class="pb-charter-row-actions">' +
         _charterActBtn('pb-charter-edit-northstar', 'edit',
           'projectBrain.editNorthStar', 'Edit north star',
@@ -688,9 +760,24 @@
       parts.push('<ul class="pb-charter-decisions">');
       for (var i = 0; i < decisions.length; i++) {
         var d = decisions[i];
-        var txt = (d && typeof d === 'object') ? (d.text || '') : String(d);
+        var isObj = (d && typeof d === 'object');
+        var txt = isObj ? (d.text || '') : String(d);
+        var dKind = isObj ? (d.kind || '') : '';
+        var dSummary = isObj ? (d.summary || '') : '';
+        // Two-tier row: the one-line binding rule (summary) is the headline
+        // with its kind badge; the full evidence text stays behind the clamp.
+        var headHtml = '';
+        if (dKind || dSummary) {
+          headHtml = '<div class="pb-decision-head">' +
+            (dKind ? '<span class="pb-kind-badge pb-kind-' + _esc(dKind) +
+              '" data-pb-kind="' + _esc(dKind) + '">' + _esc(dKind) + '</span>' : '') +
+            (dSummary ? '<span class="pb-decision-summary" data-pb-src="' +
+              _esc(dSummary) + '">' + _esc(dSummary) + '</span>' : '') +
+            '</div>';
+        }
         parts.push('<li data-decision-idx="' + i + '">' +
-          '<div class="pb-decision-text">' + _clampBlock(_esc(txt), txt) + '</div>' +
+          headHtml +
+          '<div class="pb-decision-text">' + _clampBlock(_mdLite(txt), txt) + '</div>' +
           '<div class="pb-charter-row-actions">' +
           _charterActBtn('pb-decision-edit', 'edit',
             'projectBrain.editDecision', 'Edit',
@@ -714,13 +801,25 @@
         // decision from this text, so render (and commit) the full version.
         var ptext = (p.payload && p.payload.proposal) || p.summary || '';
         var pid = p.proposalId || (p.payload && p.payload.proposalId) || '';
+        // The commit route REQUIRES a one-line summary (the binding rule the
+        // per-turn injection renders) — pre-fill with the proposal's first
+        // line, editable; commit stays disabled while it is empty.
+        var firstLine = (ptext.split('\n', 1)[0] || '').trim();
+        if (firstLine.length > 200) firstLine = firstLine.slice(0, 200).trim();
         parts.push(
           '<div class="pb-proposal" data-event-id="' + _esc(p.event_id) +
           '" data-proposal-id="' + _esc(pid) + '">' +
-          '<div class="pb-proposal-text">' + _clampBlock(_esc(ptext), ptext) + '</div>' +
+          '<div class="pb-proposal-text">' + _clampBlock(_mdLite(ptext), ptext) + '</div>' +
+          '<div class="pb-proposal-summary-row">' +
+          '<input type="text" class="pb-proposal-summary" maxlength="240" ' +
+          'placeholder="' + _esc(_t('projectBrain.summaryPlaceholder',
+            'One-line summary (required)')) + '" ' +
+          'value="' + _esc(firstLine) + '">' +
+          '</div>' +
           '<div class="pb-proposal-actions">' +
           '<button type="button" class="pb-proposal-commit" data-text="' + _esc(ptext) +
-          '" data-ver="' + version + '" data-proposal-id="' + _esc(pid) + '">' +
+          '" data-ver="' + version + '" data-proposal-id="' + _esc(pid) + '"' +
+          (firstLine ? '' : ' disabled') + '>' +
           _esc(_t('projectBrain.commit', 'Commit')) + '</button>' +
           '<button type="button" class="pb-proposal-reject" data-proposal-id="' + _esc(pid) + '">' +
           _esc(_t('projectBrain.reject', 'Reject')) + '</button>' +
@@ -751,7 +850,20 @@
         var text = btn.getAttribute('data-text') || '';
         var ver = parseInt(btn.getAttribute('data-ver') || '0', 10);
         var pid = btn.getAttribute('data-proposal-id') || '';
-        _commitCharterDecision(path, text, ver, pid, btn);
+        var card = btn.closest('.pb-proposal');
+        var input = card ? card.querySelector('.pb-proposal-summary') : null;
+        var summary = input ? (input.value || '').trim() : '';
+        if (!summary) { if (input) input.focus(); return; }
+        _commitCharterDecision(path, text, ver, pid, btn, summary);
+      });
+    }
+    // Keep the commit button disabled while its summary input is empty.
+    var sumInputs = el.querySelectorAll('.pb-proposal-summary');
+    for (var si = 0; si < sumInputs.length; si++) {
+      sumInputs[si].addEventListener('input', function (ev) {
+        var card = ev.currentTarget.closest('.pb-proposal');
+        var btn = card ? card.querySelector('.pb-proposal-commit') : null;
+        if (btn) btn.disabled = !((ev.currentTarget.value || '').trim());
       });
     }
     var rejectBtns = el.querySelectorAll('.pb-proposal-reject');
@@ -778,15 +890,39 @@
   }
 
   /** Replace a charter row's body with an inline textarea editor (Save /
-   *  Cancel). `onSave(newText)` performs the backend mutation. */
-  function _openInlineEditor(rowEl, bodySelector, originalText, onSave) {
+   *  Cancel). `onSave(newText, newSummary)` performs the backend mutation.
+   *
+   *  `opts.summarySelector` + `opts.summaryValue` add a SECOND, single-line
+   *  input above the body for the decision's summary. That field is not
+   *  decoration: the summary is the only line the per-turn injection renders,
+   *  so a body-only editor let a human "fix" a rule while every sibling
+   *  conversation kept reading the old one. When omitted (legacy entries with
+   *  no summary) the editor is body-only and `newSummary` is undefined. */
+  function _openInlineEditor(rowEl, bodySelector, originalText, onSave, opts) {
     if (!rowEl || rowEl.querySelector('.pb-inline-editor')) return;
     var body = rowEl.querySelector(bodySelector);
     var actions = rowEl.querySelector('.pb-charter-row-actions');
+    var summaryNode = (opts && opts.summarySelector)
+      ? rowEl.querySelector(opts.summarySelector) : null;
     if (body) body.style.display = 'none';
     if (actions) actions.style.display = 'none';
+    if (summaryNode) summaryNode.style.display = 'none';
     var ed = document.createElement('div');
     ed.className = 'pb-inline-editor';
+    var sumIn = null;
+    if (opts && opts.summarySelector) {
+      var sumLabel = document.createElement('div');
+      sumLabel.className = 'pb-inline-editor-label';
+      sumLabel.textContent = _t('projectBrain.summaryLabel',
+        'Rule line (this is what every conversation reads)');
+      sumIn = document.createElement('input');
+      sumIn.type = 'text';
+      sumIn.className = 'pb-inline-editor-summary';
+      sumIn.maxLength = 240;
+      sumIn.value = opts.summaryValue || '';
+      ed.appendChild(sumLabel);
+      ed.appendChild(sumIn);
+    }
     var ta = document.createElement('textarea');
     ta.className = 'pb-inline-editor-input';
     ta.value = originalText;
@@ -801,23 +937,25 @@
     btnRow.appendChild(save); btnRow.appendChild(cancel);
     ed.appendChild(ta); ed.appendChild(btnRow);
     rowEl.appendChild(ed);
-    try { ta.focus(); } catch (_e) { /* jsdom */ }
+    try { (sumIn || ta).focus(); } catch (_e) { /* jsdom */ }
     function close() {
       if (ed.parentNode) ed.parentNode.removeChild(ed);
       if (body) body.style.display = '';
       if (actions) actions.style.display = '';
+      if (summaryNode) summaryNode.style.display = '';
     }
     cancel.addEventListener('click', close);
     save.addEventListener('click', function () {
       var next = (ta.value || '').trim();
       if (!next) { close(); return; }
+      var nextSummary = sumIn ? (sumIn.value || '').trim() : undefined;
       save.disabled = true; cancel.disabled = true;
       save.textContent = _t('projectBrain.saving', 'Saving…');
-      Promise.resolve(onSave(next)).then(function () {
+      Promise.resolve(onSave(next, nextSummary)).then(function () {
         // refreshCharter re-renders the whole panel from the server, which
         // removes this editor implicitly; nothing more to do here.
       }).catch(function (e) {
-        if (typeof console !== 'undefined') console.warn('[ProjectBrain] charter save failed', e);
+        _reportFailure('projectBrain.saveFailed', 'Save failed', e);
         save.disabled = false; cancel.disabled = false;
         save.textContent = _t('projectBrain.save', 'Save');
       });
@@ -844,7 +982,13 @@
         });
       });
     }
-    // Per-decision edit.
+    // Per-decision edit. Edits BOTH the summary and the body, because the
+    // summary is the ONE line the per-turn injection renders — editing the body
+    // alone rewrote the evidence while every sibling conversation kept reading
+    // the OLD rule, and the backend now refuses that (`summary_required`)
+    // instead of silently succeeding. An entry with no summary keeps the
+    // body-only editor: those render an abridged first line, so there is no
+    // second field to reconcile.
     var editBtns = el.querySelectorAll('.pb-decision-edit');
     for (var e = 0; e < editBtns.length; e++) {
       editBtns[e].addEventListener('click', function (ev) {
@@ -854,11 +998,21 @@
         var row = btn.closest('li[data-decision-idx]');
         if (!row || !api || typeof api.updateDecision !== 'function') return;
         var original = _charterSrcText(row, '.pb-decision-text');
-        _openInlineEditor(row, '.pb-decision-text', original, function (next) {
-          return Promise.resolve(api.updateDecision(path, idx, next, {
-            expected_version: ver,
-          })).then(function () { refreshCharter(path); });
-        });
+        var summaryNode = row.querySelector('.pb-decision-summary');
+        var hasSummary = !!summaryNode;
+        var originalSummary = hasSummary
+          ? _charterSrcText(row, '.pb-decision-summary') : '';
+        _openInlineEditor(row, '.pb-decision-text', original, function (next, nextSummary) {
+          var body = { expected_version: ver };
+          // Send the key ONLY when the entry has a summary: an absent key means
+          // "I said nothing about it" (refused), '' means "drop it".
+          if (hasSummary) body.summary = nextSummary;
+          return Promise.resolve(api.updateDecision(path, idx, next, body))
+            .then(function () { refreshCharter(path); });
+        }, hasSummary ? {
+          summarySelector: '.pb-decision-summary',
+          summaryValue: originalSummary,
+        } : null);
       });
     }
     // Per-decision delete (two-step inline confirm).
@@ -873,7 +1027,7 @@
           Promise.resolve(api.deleteDecision(path, idx, { expected_version: ver }))
             .then(function () { refreshCharter(path); })
             .catch(function (er) {
-              if (typeof console !== 'undefined') console.warn('[ProjectBrain] decision delete failed', er);
+              _reportFailure('projectBrain.deleteFailed', 'Delete failed', er);
             });
         });
       });
@@ -889,7 +1043,7 @@
           Promise.resolve(api.deleteCharter(path, { expected_version: ver }))
             .then(function () { refreshCharter(path); })
             .catch(function (er) {
-              if (typeof console !== 'undefined') console.warn('[ProjectBrain] charter delete failed', er);
+              _reportFailure('projectBrain.deleteFailed', 'Delete failed', er);
             });
         });
       });
@@ -921,21 +1075,30 @@
     }, 4000);
   }
 
-  function _commitCharterDecision(path, text, expectedVersion, proposalId, btn) {
+  function _commitCharterDecision(path, text, expectedVersion, proposalId, btn, summary) {
     var api = (typeof Api !== 'undefined' && Api.project) ? Api.project : null;
     if (!api || !path) return;
+    summary = (summary || '').trim();
+    if (!summary) return;   // the route rejects kindless decisions anyway
     if (btn) { btn.disabled = true; btn.textContent = _t('projectBrain.committing', 'Committing…'); }
     // Thread resolves_proposal so this commit durably resolves THIS proposal
     // → it drops out of the pending set (no over-count).
+    //
+    // Deliberately NO expected_version: committing a proposal is a pure
+    // APPEND, and appends commute. The version baked into this button at
+    // render time goes stale the moment any sibling self-commits a decision —
+    // which is constant — so pinning it made the button 409 exactly when the
+    // project was busy. Concurrent appends are kept from eating each other by
+    // the backend CAS; a version pin here would only refuse work that is safe.
     Promise.resolve(api.commitCharter(path, {
-      add_decision: text, expected_version: expectedVersion,
+      add_decision: text, summary: summary,
       resolves_proposal: proposalId || '',
     })).then(function () {
       // Re-fetch charter so the committed decision now shows under
       // "Committed decisions" and the proposal control disappears.
       refreshCharter(path);
     }).catch(function (e) {
-      if (typeof console !== 'undefined') console.warn('[ProjectBrain] commit failed', e);
+      _reportFailure('projectBrain.commitFailed', 'Commit failed', e);
       if (btn) { btn.disabled = false; btn.textContent = _t('projectBrain.commit', 'Commit'); }
     });
   }
@@ -954,7 +1117,7 @@
     Promise.resolve(api.dismissProposal(path, proposalId)).then(function () {
       refreshCharter(path);
     }).catch(function (e) {
-      if (typeof console !== 'undefined') console.warn('[ProjectBrain] dismiss failed', e);
+      _reportFailure('projectBrain.rejectFailed', 'Reject failed', e);
       if (btn) { btn.disabled = false; }
     });
   }
@@ -980,7 +1143,7 @@
         }).catch(function () { renderCharter(rec || {}, []); });
       }
     }).catch(function (e) {
-      if (typeof console !== 'undefined') console.warn('[ProjectBrain] charter load failed', e);
+      _reportFailure('projectBrain.loadFailed', 'Loading the project brain failed', e);
     });
   }
 
@@ -1020,6 +1183,19 @@
         + '">' + ((typeof Icon === 'function') ? Icon('rocket', 11) : '')
         + '<span>' + _esc(_t('projectBrain.dispatched', 'auto')) + '</span></span>'
       : '';
+    // "auto-starts" hint — the epic is genuinely pickable RIGHT NOW (deps done,
+    // not on a cooldown, not live-claimed, has a routing target). The backend
+    // stamps `dispatchable` (never inferred client-side); the frontend just
+    // renders that the ~30s heartbeat sweep will pick it up, and to which
+    // conversation. This answers "why is nothing happening — will it ever fire".
+    var pending = (t.status === 'open' && t.dispatchable)
+      ? '<span class="pb-board-badge pb-board-badge-pending" title="'
+        + _esc(_t('projectBrain.autoStartTitle',
+                  'The project brain heartbeat (~30s) will pick this up automatically'))
+        + (t.dispatch_target ? ' → ' + _esc(t.dispatch_target) : '')
+        + '">' + ((typeof Icon === 'function') ? Icon('clock', 11) : '')
+        + '<span>' + _esc(_t('projectBrain.autoStart', 'auto-starts ~30s')) + '</span></span>'
+      : '';
     // Human lifecycle controls, gated by status:
     //   • complete + block on open|claimed (live-work lifecycle)
     //   • reopen on claimed (break a stuck live claim) AND done (revive)
@@ -1033,17 +1209,26 @@
     if (t.status === 'claimed' || t.status === 'done') {
       acts.push(_boardActionBtn('reopen', 'refresh', 'projectBrain.actReopen', 'Reopen'));
     }
+    // Answered chip — the human's answer that unblocked this epic (the
+    // decision travels WITH the card so any reader sees what was decided).
+    var answered = String(t.human_answer || '').trim()
+      ? '<span class="pb-board-badge pb-board-badge-answered" title="'
+        + _esc(String(t.human_answer).slice(0, 300)) + '">'
+        + ((typeof Icon === 'function') ? Icon('check', 11) : '')
+        + '<span>' + _esc(_t('projectBrain.yourAnswer', 'Your answer')) + ': '
+        + _esc(String(t.human_answer).slice(0, 60)) + '</span></span>'
+      : '';
     var actionsRow = acts.length
       ? '<div class="pb-board-card-actions">' + acts.join('') + '</div>' : '';
     // A board epic title can be a multi-sentence design description (stored
     // full, up to 2000 chars). Render it through the clamp so a long title
     // collapses with a Show more/less toggle instead of a wall of text — the
     // full text is always the expandable source (never a clipped fragment).
-    var titleHtml = _clampBlock(_esc(t.title), t.title || '');
+    var titleHtml = _clampBlock(_mdLite(t.title), t.title || '');
     return '<div class="pb-board-card pb-board-' + _esc(t.status) + '" data-task-id="' +
       _esc(t.id) + '">' +
       '<div class="pb-board-title">' + titleHtml + '</div>' +
-      '<div class="pb-board-card-meta">' + ownerChip + badge + '</div>' +
+      '<div class="pb-board-card-meta">' + ownerChip + badge + pending + answered + '</div>' +
       actionsRow + '</div>';
   }
 
@@ -1058,7 +1243,7 @@
       ? '<button type="button" class="pb-conv-chip" data-conv-id="' + _esc(owner) + '">' +
         _esc(owner) + '</button>'
       : '';
-    var titleHtml = _clampBlock(_esc(t.title), t.title || '');
+    var titleHtml = _clampBlock(_mdLite(t.title), t.title || '');
     return '<div class="pb-board-card pb-board-held" data-task-id="' +
       _esc(t.id) + '">' +
       '<div class="pb-board-title">' + titleHtml + '</div>' +
@@ -1073,27 +1258,139 @@
    *  carries the [human-gated]/[sibling] class tag) and the approximate
    *  retry-in minutes — the answer to "why is nothing happening" that was
    *  invisible before. It still offers reopen (human forces an immediate retry,
-   *  resetting the cooldown) and complete. */
+   *  resetting the cooldown) and complete.
+   *
+   *  ONE clamp per card (Pillar #3 of the redesign): title + reason render in
+   *  a SINGLE collapsed block — the old title-clamp + reason-clamp pair was
+   *  the "several 展开全文 per epic" complaint. */
   function _blockedCard(t) {
     var mins = Math.max(0, Math.round((Number(t.blocked_until || 0) - Date.now()) / 60000));
     var reason = (t.block_reason || '').trim();
     var cnt = Number(t.block_count || 0);
     var meta = _esc(_t('projectBrain.blockedRetry', 'auto-retry in') + ' ~' + mins + 'm')
-      + (cnt ? ' · ' + _esc('' + cnt + '×') : '');
-    var reasonHtml = reason
-      ? '<div class="pb-board-block-reason">' + _clampBlock(_esc(reason), reason) + '</div>'
-      : '';
+      + (cnt ? ' · ' + _esc(_t('projectBrain.blockedCount', 'blocked %d×')
+                            .replace('%d', cnt)) : '');
+    var headText = String(t.title || '') + (reason ? '\n\n' + reason : '');
+    var headHtml = _clampBlock(_mdLite(headText), headText);
     var acts = [
       _boardActionBtn('reopen', 'refresh', 'projectBrain.actReopen', 'Reopen'),
       _boardActionBtn('complete', 'check', 'projectBrain.actComplete', 'Done'),
     ];
-    var titleHtml = _clampBlock(_esc(t.title), t.title || '');
     return '<div class="pb-board-card pb-board-blocked" data-task-id="' +
       _esc(t.id) + '">' +
-      '<div class="pb-board-title">' + titleHtml + '</div>' +
-      reasonHtml +
+      '<div class="pb-board-title">' + headHtml + '</div>' +
       '<div class="pb-board-card-meta pb-board-block-meta">' + meta + '</div>' +
       '<div class="pb-board-card-actions">' + acts.join('') + '</div></div>';
+  }
+
+  /** Render one AWAITING-ANSWER epic card (Pillar #3 — the ask_human-style
+   *  closure for board work). A [human-gated] block with a structured
+   *  question renders the QUESTION as the primary content with one-click
+   *  option chips + a free-text input; submitting calls board/answer, which
+   *  clears the gate and IMMEDIATELY re-dispatches the epic with the answer
+   *  in its kickoff. Reopen/Done stay available as secondary lifecycle
+   *  controls. ONE clamp per card (title+reason combined). */
+  function _answerCard(t) {
+    var q = (t.block_question && typeof t.block_question === 'object')
+      ? t.block_question : { q: '', options: [] };
+    var opts = Array.isArray(q.options) ? q.options : [];
+    var chips = opts.map(function (o, i) {
+      var label = (o && o.label) ? String(o.label) : '';
+      if (!label) return '';
+      var desc = (o && o.description) ? String(o.description) : '';
+      return '<button type="button" class="pb-chip pb-board-act" data-act="answerOpt"'
+        + ' data-idx="' + i + '"'
+        + (desc ? ' title="' + _esc(desc) + '"' : '')
+        + ' data-pb-src="' + _esc(label) + '">' + _mdLite(label) + '</button>';
+    }).join('');
+    var inputRow = '<div class="pb-answer-input-row">'
+      + '<input type="text" class="pb-answer-text" placeholder="'
+      + _esc(_t('projectBrain.answerPlaceholder',
+                'Type your answer (or pick an option above)…')) + '">'
+      + '<button type="button" class="pb-board-act pb-board-act-answer pb-btn-primary"'
+      + ' data-act="answerSubmit">'
+      + ((typeof Icon === 'function') ? Icon('check', 12) : '')
+      + '<span>' + _esc(_t('projectBrain.answerSubmit', 'Submit answer')) + '</span></button>'
+      + '</div>';
+    var questionBox = '<div class="pb-question">'
+      + '<div class="pb-question-label">'
+      + ((typeof Icon === 'function') ? Icon('alertTriangle', 12) : '')
+      + _esc(_t('projectBrain.needsYourDecision', 'Your decision needed')) + '</div>'
+      + '<div class="pb-question-q" data-pb-src="' + _esc(q.q || '') + '">'
+      + _mdLite(q.q || '') + '</div>'
+      + (chips ? '<div class="pb-chip-row">' + chips + '</div>' : '')
+      + inputRow + '</div>';
+    var cnt = Number(t.block_count || 0);
+    var meta = _esc(_t('projectBrain.awaitingAnswerMeta', 'waiting for your answer'))
+      + (cnt ? ' · ' + _esc(_t('projectBrain.blockedCount', 'blocked %d×')
+                            .replace('%d', cnt)) : '');
+    var reason = (t.block_reason || '').trim();
+    var headText = String(t.title || '') + (reason ? '\n\n' + reason : '');
+    var headHtml = _clampBlock(_mdLite(headText), headText);
+    var acts = [
+      _boardActionBtn('reopen', 'refresh', 'projectBrain.actReopen', 'Reopen'),
+      _boardActionBtn('complete', 'check', 'projectBrain.actComplete', 'Done'),
+    ];
+    return '<div class="pb-board-card pb-board-awaiting" data-task-id="' +
+      _esc(t.id) + '">' +
+      '<div class="pb-board-title">' + headHtml + '</div>' +
+      questionBox +
+      '<div class="pb-board-card-meta pb-board-block-meta">' + meta + '</div>' +
+      '<div class="pb-board-card-actions">' + acts.join('') + '</div></div>';
+  }
+
+  /** Look up a task on the last-rendered board snapshot (answer acts need the
+   *  structured question's option labels). */
+  function _findBoardTask(taskId) {
+    var tasks = (_state.board && _state.board.tasks) || [];
+    for (var i = 0; i < tasks.length; i++) {
+      if (tasks[i] && tasks[i].id === taskId) return tasks[i];
+    }
+    return null;
+  }
+
+  /** Inline note editor replacing window.prompt (Pillar #2 — unified
+   *  in-panel interaction). Toggles under the clicked Block button; submit
+   *  calls board/block with the note as the reason. */
+  function _openBlockNoteEditor(btn, taskId, path, convId) {
+    var card = btn && btn.closest ? btn.closest('.pb-board-card') : null;
+    if (!card) return;
+    var existing = card.querySelector('.pb-note-editor');
+    if (existing) { existing.remove(); return; }
+    var editor = document.createElement('div');
+    editor.className = 'pb-note-editor';
+    editor.innerHTML = '<input type="text" class="pb-note-text" placeholder="'
+      + _esc(_t('projectBrain.blockReasonPrompt', 'Why is this blocked?')) + '">'
+      + '<button type="button" class="pb-board-act pb-btn-primary" data-note-submit="1">'
+      + _esc(_t('projectBrain.blockNoteSubmit', 'Mark blocked')) + '</button>'
+      + '<button type="button" class="pb-board-act" data-note-cancel="1">'
+      + _esc(_t('projectBrain.blockNoteCancel', 'Cancel')) + '</button>';
+    card.appendChild(editor);
+    var input = editor.querySelector('.pb-note-text');
+    if (input && input.focus) input.focus();
+    function submit() {
+      var reason = input ? (input.value || '').trim() : '';
+      var call = Api.project.boardBlock(path, taskId, convId, reason);
+      var submitBtn = editor.querySelector('[data-note-submit]');
+      if (submitBtn) submitBtn.disabled = true;
+      Promise.resolve(call).then(function () {
+        refreshBoard(path);
+        refreshInfluence(path);
+      }).catch(function (e) {
+        _reportFailure('projectBrain.boardActionFailed', 'Board action failed', e);
+        if (submitBtn) submitBtn.disabled = false;
+      });
+    }
+    editor.querySelector('[data-note-submit]').addEventListener('click', submit);
+    editor.querySelector('[data-note-cancel]').addEventListener('click', function () {
+      editor.remove();
+    });
+    if (input) {
+      input.addEventListener('keydown', function (ev) {
+        if (ev.key === 'Enter') { ev.preventDefault(); submit(); }
+        if (ev.key === 'Escape') { editor.remove(); }
+      });
+    }
   }
 
   /** Dispatch a per-card human mutation → backend → refreshBoard (no local
@@ -1109,11 +1406,22 @@
     } else if (act === 'reopen' && typeof api.boardReopen === 'function') {
       call = api.boardReopen(path, taskId, convId);
     } else if (act === 'block' && typeof api.boardBlock === 'function') {
-      var reason = '';
-      if (typeof prompt === 'function') {
-        reason = prompt(_t('projectBrain.blockReasonPrompt', 'Why is this blocked?')) || '';
-      }
-      call = api.boardBlock(path, taskId, convId, reason);
+      _openBlockNoteEditor(btn, taskId, path, convId);
+      return;  // the inline editor owns the rest of the flow
+    } else if (act === 'answerOpt' && typeof api.boardAnswer === 'function') {
+      var task = _findBoardTask(taskId);
+      var q = (task && task.block_question) || {};
+      var opts = Array.isArray(q.options) ? q.options : [];
+      var opt = opts[Number(btn ? btn.getAttribute('data-idx') : -1)];
+      var optLabel = (opt && opt.label) ? String(opt.label).trim() : '';
+      if (!optLabel) return;
+      call = api.boardAnswer(path, taskId, convId, optLabel);
+    } else if (act === 'answerSubmit' && typeof api.boardAnswer === 'function') {
+      var cardEl = btn && btn.closest ? btn.closest('.pb-board-card') : null;
+      var input = cardEl ? cardEl.querySelector('.pb-answer-text') : null;
+      var freeText = input ? (input.value || '').trim() : '';
+      if (!freeText) { if (input && input.focus) input.focus(); return; }
+      call = api.boardAnswer(path, taskId, convId, freeText);
     }
     if (!call) return;
     if (btn) btn.disabled = true;
@@ -1121,27 +1429,56 @@
       refreshBoard(path);
       refreshInfluence(path);
     }).catch(function (e) {
-      if (typeof console !== 'undefined') console.warn('[ProjectBrain] board ' + act + ' failed', e);
+      _reportFailure('projectBrain.boardActionFailed', 'Board action failed', e);
       if (btn) btn.disabled = false;
     });
   }
 
-  /** Prompt for a title and post a new OPEN epic (created_by_conv = displayed
-   *  conv). Disabled entirely when there's no conversation context (the
-   *  backend refuses a blank convId, so the UI must not offer it). */
+  /** Post a new OPEN epic via an INLINE toolbar editor (created_by_conv =
+   *  displayed conv) — the same in-panel editor family as the block-note and
+   *  answer inputs (no window.prompt anywhere in the panel). Disabled
+   *  entirely when there's no conversation context (the backend refuses a
+   *  blank convId, so the UI must not offer it). */
   function _boardPostNew() {
     var api = (typeof Api !== 'undefined' && Api.project) ? Api.project : null;
     var path = _state.path || _displayedProjectPath();
     var convId = _boardConvId();
     if (!api || !path || !convId || typeof api.boardPost !== 'function') return;
-    var title = (typeof prompt === 'function')
-      ? (prompt(_t('projectBrain.newEpicPrompt', 'New epic title')) || '').trim() : '';
-    if (!title) return;
-    Promise.resolve(api.boardPost(path, { title: title, convId: convId })).then(function () {
-      refreshBoard(path);
-    }).catch(function (e) {
-      if (typeof console !== 'undefined') console.warn('[ProjectBrain] board post failed', e);
+    var toolbar = document.querySelector('#projectBrainBoardBody .pb-board-toolbar');
+    if (!toolbar || toolbar.querySelector('.pb-note-editor')) return;
+    var editor = document.createElement('div');
+    editor.className = 'pb-note-editor pb-new-epic-editor';
+    editor.innerHTML = '<input type="text" class="pb-note-text" placeholder="'
+      + _esc(_t('projectBrain.newEpicPrompt', 'New epic title')) + '">'
+      + '<button type="button" class="pb-board-act pb-btn-primary" data-note-submit="1">'
+      + _esc(_t('projectBrain.newEpic', 'New epic')) + '</button>'
+      + '<button type="button" class="pb-board-act" data-note-cancel="1">'
+      + _esc(_t('projectBrain.blockNoteCancel', 'Cancel')) + '</button>';
+    toolbar.appendChild(editor);
+    var input = editor.querySelector('.pb-note-text');
+    if (input && input.focus) input.focus();
+    function submit() {
+      var title = input ? (input.value || '').trim() : '';
+      if (!title) { if (input && input.focus) input.focus(); return; }
+      var submitBtn = editor.querySelector('[data-note-submit]');
+      if (submitBtn) submitBtn.disabled = true;
+      Promise.resolve(api.boardPost(path, { title: title, convId: convId }))
+        .then(function () { refreshBoard(path); })
+        .catch(function (e) {
+          _reportFailure('projectBrain.boardActionFailed', 'Board action failed', e);
+          if (submitBtn) submitBtn.disabled = false;
+        });
+    }
+    editor.querySelector('[data-note-submit]').addEventListener('click', submit);
+    editor.querySelector('[data-note-cancel]').addEventListener('click', function () {
+      editor.remove();
     });
+    if (input) {
+      input.addEventListener('keydown', function (ev) {
+        if (ev.key === 'Enter') { ev.preventDefault(); submit(); }
+        if (ev.key === 'Escape') { editor.remove(); }
+      });
+    }
   }
 
   function renderBoard(board) {
@@ -1154,7 +1491,7 @@
       _setTabCount('pbTabCountBoard', 0);
       return;
     }
-    var cols = { open: [], claimed: [], done: [], blocked: [] };
+    var cols = { open: [], claimed: [], done: [], blocked: [], awaiting: [] };
     var held = [];
     var _nowMs = Date.now();
     for (var i = 0; i < tasks.length; i++) {
@@ -1168,6 +1505,12 @@
       // — matching render_board_block's Held filter (kind=='lease' AND
       // status=='claimed').
       if (t.kind === 'lease') { if (t.status === 'claimed') held.push(t); continue; }
+      // A PENDING structured human question waits for the ANSWER, not for
+      // time — its own lane at the TOP regardless of cooldown state
+      // (auto-retry is paused backend-side until answered; answering
+      // re-dispatches the epic immediately).
+      if (t.status === 'open' && t.block_question &&
+          !String(t.human_answer || '').trim()) { cols.awaiting.push(t); continue; }
       // An epic on a LIVE block cooldown (stored status='open' but
       // blocked_until in the future) goes to its own Blocked lane — NOT the
       // Open lane (where it would read as "claim me"), mirroring the backend
@@ -1180,7 +1523,8 @@
     }
     // Board badge = live epics needing attention (open + claimed), not done,
     // blocked (waiting on a gate), or path leases.
-    _setTabCount('pbTabCountBoard', cols.open.length + cols.claimed.length);
+    _setTabCount('pbTabCountBoard',
+      cols.open.length + cols.claimed.length + cols.awaiting.length);
     function lane(key, labelKey) {
       var cards = cols[key].map(_boardCard).join('') ||
         '<div class="pb-board-lane-empty">—</div>';
@@ -1225,8 +1569,20 @@
         ' <span class="pb-board-count">' + cols.blocked.length + '</span></div>' +
         blockedCards + '</div>';
     }
+    // Awaiting-answer lane (pending human questions) — TOP of the board,
+    // the one place the operator is asked to ACT.
+    var awaitingLane = '';
+    if (cols.awaiting.length) {
+      awaitingLane = '<div class="pb-board-lane pb-board-lane-awaiting">' +
+        '<div class="pb-board-lane-head">' +
+        ((typeof Icon === 'function') ? Icon('alertTriangle', 12) : '') +
+        ' ' + _esc(_t('projectBrain.laneAwaiting', 'Awaiting your answer')) +
+        ' <span class="pb-board-count">' + cols.awaiting.length + '</span></div>' +
+        cols.awaiting.map(_answerCard).join('') + '</div>';
+    }
     el.innerHTML =
       '<div class="pb-board-toolbar">' + newBtn + '</div>' +
+      awaitingLane +
       lane('open', 'projectBrain.laneOpen') +
       lane('claimed', 'projectBrain.laneClaimed') +
       blockedLane +
@@ -1247,6 +1603,17 @@
     // "＋ New epic"
     var nb = el.querySelector('#pbBoardNewBtn');
     if (nb && !nb.disabled) nb.addEventListener('click', _boardPostNew);
+    // Answer inputs: Enter submits (same as clicking 提交回答).
+    var answerInputs = el.querySelectorAll('.pb-answer-text');
+    for (var ai = 0; ai < answerInputs.length; ai++) {
+      answerInputs[ai].addEventListener('keydown', function (/** @type {KeyboardEvent} */ ev) {
+        if (ev.key !== 'Enter') return;
+        ev.preventDefault();
+        var card = ev.currentTarget.closest ? ev.currentTarget.closest('.pb-board-card') : null;
+        var submit = card ? card.querySelector('.pb-board-act[data-act="answerSubmit"]') : null;
+        if (submit) submit.click();
+      });
+    }
     // Per-card human lifecycle actions (complete / block / reopen).
     var actBtns = el.querySelectorAll('.pb-board-act');
     for (var a = 0; a < actBtns.length; a++) {
@@ -1264,9 +1631,10 @@
     var api = (typeof Api !== 'undefined' && Api.project) ? Api.project : null;
     if (!api || !path || typeof api.board !== 'function') return;
     Promise.resolve(api.board(path)).then(function (board) {
+      _state.board = board || {};  // answer acts resolve option labels from it
       renderBoard(board || {});
     }).catch(function (e) {
-      if (typeof console !== 'undefined') console.warn('[ProjectBrain] board load failed', e);
+      _reportFailure('projectBrain.loadFailed', 'Loading the project brain failed', e);
     });
   }
 
@@ -1364,13 +1732,20 @@
         _esc(_t('projectBrain.infCharterHead', 'Bound by the charter')) + '</div>');
       if (charter.content) {
         cparts.push('<div class="pb-inf-northstar">' +
-          _clampBlock(_esc(charter.content), charter.content) + '</div>');
+          _clampBlock(_mdLite(charter.content), charter.content) + '</div>');
       }
       var decs = charter.decisions || [];
       if (decs.length) {
         cparts.push('<ul class="pb-inf-decisions">');
         for (var i = 0; i < Math.min(decs.length, 6); i++) {
-          cparts.push('<li>' + _clampBlock(_esc(decs[i]), String(decs[i])) + '</li>');
+          // decisions are STRUCTURED {text, summary, kind, …} (backend single
+          // source) — render the one-line rule, fall back to text, and keep
+          // the string shape for legacy payloads. Same value feeds the clamp
+          // raw text, or the title/expand would show [object Object].
+          var _di = decs[i];
+          var _dTxt = (_di && typeof _di === 'object')
+            ? (_di.summary || _di.text || '') : String(_di);
+          cparts.push('<li>' + _clampBlock(_mdLite(_dTxt), _dTxt) + '</li>');
         }
         cparts.push('</ul>');
       }
@@ -1434,7 +1809,7 @@
           inf.convId !== activeConvId) return;
       renderInfluence(inf || {});
     }).catch(function (e) {
-      if (typeof console !== 'undefined') console.warn('[ProjectBrain] influence load failed', e);
+      _reportFailure('projectBrain.loadFailed', 'Loading the project brain failed', e);
       if (banner) banner.hidden = true;
     });
   }
@@ -1456,6 +1831,7 @@
         refreshCharter(path);
         refreshBoard(path);
         refreshInfluence(path);
+        _refreshAttention(path);
         _refreshPeers(path);
         _refreshStatus(path);
       }, 300);
@@ -1472,7 +1848,14 @@
     _state.panelUnsub = null;
   }
 
-  function openProjectBrain() {
+  /**
+   * Open the panel. `opts.needsYou` (optional) is the attention count the
+   * CALLER already holds — the collaboration bar gets it free in its
+   * brainSummary payload — and, when non-zero, lands the operator directly on
+   * the Needs-you tab. Omitting it keeps the last-used tab (see _selectTab
+   * below), so an ordinary open never disturbs where the operator was.
+   */
+  function openProjectBrain(opts) {
     var overlay = document.getElementById('projectBrainOverlay');
     if (!overlay) return;
     // Head glyph (SVG, no emoji).
@@ -1490,16 +1873,63 @@
         typeof ProjectBrainI18n.initToggle === 'function') {
       try { ProjectBrainI18n.initToggle(); } catch (_e) { /* best-effort */ }
     }
-    _selectTab(_state.tab || 'charter');
+    // Landing tab. The panel opens on Needs-you ONLY when something is
+    // actually waiting on the human — otherwise it would greet the operator
+    // with an empty state every time, which trains them to skip past it. The
+    // caller passes the count it already has (the collab bar knows it from
+    // brainSummary); absent that we keep the last-used tab and let the
+    // attention refresh set the badge.
+    var landing = _state.tab || 'charter';
+    if (opts && opts.needsYou > 0) landing = 'attention';
+    _selectTab(landing);
     var path = _displayedProjectPath();
     if (path) {
       openFeed(path);
       refreshCharter(path);
       refreshBoard(path);
       refreshInfluence(path);
+      _refreshAttention(path);
       _refreshPeers(path);
       _refreshStatus(path);
       _subscribePanelLive(path);
+    } else {
+      // No displayed project — the panel must never open into blank or stale
+      // tabs (a stale collab bar or a project-less deep-link lands here).
+      closeFeed();
+      _unsubscribePanelLive();
+      _renderNoProject();
+    }
+  }
+
+  /** Paint an explicit "no project attached" state into every tab body. A
+   *  blank panel reads as broken and contradicts whatever surface the user
+   *  clicked to get here; an honest empty state says WHY there is nothing. */
+  function _renderNoProject() {
+    var html = '<div class="pb-no-project">' +
+      _esc(_t('projectBrain.noProject',
+        'No project is attached to this conversation — attach one (Studio) to open its Brain.')) +
+      '</div>';
+    var ids = ['projectBrainAttentionBody', 'projectBrainCharterBody',
+               'projectBrainBoardBody', 'projectBrainActivityList',
+               'projectBrainPeersBody', 'projectBrainStatusBody'];
+    for (var i = 0; i < ids.length; i++) {
+      var el = document.getElementById(ids[i]);
+      if (el) el.innerHTML = html;
+    }
+    var banner = document.getElementById('projectBrainInfluence');
+    if (banner) banner.hidden = true;
+    _setTabCount('pbTabCountAttention', 0);
+    _setTabCount('pbTabCountCharter', 0);
+    _setTabCount('pbTabCountBoard', 0);
+    _setTabCount('pbTabCountPeers', 0);
+  }
+
+  /** Drive the Needs-you tab (project-brain-attention.js) if it's loaded. */
+  function _refreshAttention(path) {
+    if (typeof window.ProjectBrainAttention !== 'undefined' &&
+        window.ProjectBrainAttention &&
+        typeof window.ProjectBrainAttention.refreshAttention === 'function') {
+      window.ProjectBrainAttention.refreshAttention(path);
     }
   }
 
@@ -1576,6 +2006,7 @@
       refreshCharter(path);
       refreshBoard(path);
       refreshInfluence(path);
+      _refreshAttention(path);
       _refreshStatus(path);
       _refreshPeers(path);
       _subscribePanelLive(path);
@@ -1586,6 +2017,7 @@
       // The peer roster also excludes the active conv server-side, so refresh
       // it too (a conv switch changes who counts as a "peer").
       refreshInfluence(path);
+      _refreshAttention(path);
       _refreshPeers(path);
     } else {
       closeFeed();
@@ -1618,6 +2050,13 @@
     _onPush: _onPush,
     _state: _state,
     _boardConvId: _boardConvId,
+    // Shared primitives the Needs-you tab (project-brain-attention.js) reuses
+    // so the panel has ONE clamp/markdown/tab-switch grammar, not two.
+    _clampBlock: _clampBlock,
+    _reportFailure: _reportFailure,
+    _mdLite: _mdLite,
+    _wireClampToggles: _wireClampToggles,
+    _selectTab: _selectTab,
   };
   window.toggleProjectBrain = toggleProjectBrain;
   window.openProjectBrain = openProjectBrain;

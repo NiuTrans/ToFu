@@ -166,6 +166,22 @@ def _extract_roles(messages: list[dict]) -> list[str]:
     return [m.get("role", "?") for m in messages]
 
 
+def _content_text(content) -> str:
+    """Flatten string|array message content to plain text.
+
+    The injected date ``<system-reminder>`` rides the TRUE TAIL (the last
+    user message), converting its string content into a block array —
+    assertions written against bare strings must flatten first.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(
+            b.get("text", "") for b in content
+            if isinstance(b, dict) and b.get("type") == "text")
+    return "" if content is None else str(content)
+
+
 def _has_consecutive_same_role(messages: list[dict], role: str) -> bool:
     """Check if there are consecutive messages with the same role."""
     roles = _extract_roles(messages)
@@ -223,6 +239,19 @@ def recorder(monkeypatch):
     # Patch dispatch_stream at the point where stream_llm_response calls it
     import lib.tasks_pkg.manager as manager_mod
     monkeypatch.setattr(manager_mod, "dispatch_stream", rec.mock_dispatch_stream)
+
+    # Test isolation: persist_task_result's heavy-state release
+    # (lib/tasks_pkg/manager/_persist.py::_HEAVY_TERMINAL_FIELDS) deliberately
+    # nulls task['_endpoint_turns'] on terminal tasks (the RSS-at-source fix,
+    # 2026-07-11 — every POST-terminal reader is expected to rebuild from the
+    # DB, but these tests never create a conversations row, so the in-memory
+    # list was the only copy and `task.get('_endpoint_turns')` came back None).
+    # The release is orthogonal to what this suite validates (endpoint-turn
+    # accumulation + message shapes) and has its own dedicated coverage, so
+    # hold it off here.
+    import lib.tasks_pkg.manager._persist as _persist_mod
+    monkeypatch.setattr(
+        _persist_mod, '_release_heavy_task_state', lambda task: 0)
 
     # Also set a valid env so model config resolution doesn't fail
     monkeypatch.setenv("LLM_MODEL", "mock-model")
@@ -437,7 +466,7 @@ class TestEndpointSingleIteration:
         last_planner_msg = planner_msgs[-1]
         assert last_planner_msg["role"] == "user", \
             f"Planner last msg should be user (plan instruction), got: {last_planner_msg['role']}"
-        assert "produce" in last_planner_msg["content"].lower() or "plan" in last_planner_msg["content"].lower(), \
+        assert "produce" in _content_text(last_planner_msg["content"]).lower() or "plan" in _content_text(last_planner_msg["content"]).lower(), \
             f"Planner last msg should ask to produce plan, got: {last_planner_msg['content'][:100]}"
 
         # NOTE: The planner call CAN have consecutive user messages because:
@@ -491,7 +520,7 @@ class TestEndpointSingleIteration:
         last_critic_msg = critic_msgs[-1]
         assert last_critic_msg["role"] == "user", \
             f"Critic last msg should be user (review instruction), got: {last_critic_msg['role']}"
-        assert "review" in last_critic_msg["content"].lower(), \
+        assert "review" in _content_text(last_critic_msg["content"]).lower(), \
             f"Critic last msg should ask to review. Got: {last_critic_msg['content'][:100]}"
 
         # No consecutive user messages in critic call
@@ -582,8 +611,8 @@ class TestEndpointMultiIteration:
         # Should contain critic feedback as a user message (between worker1 and worker2 turns)
         worker2_user_msgs = [m for m in worker2_msgs if m["role"] == "user"]
         critic_feedback_found = any(
-            "not fixed" in (m.get("content") or "").lower()
-            or "complete the fix" in (m.get("content") or "").lower()
+            "not fixed" in _content_text(m.get("content")).lower()
+            or "complete the fix" in _content_text(m.get("content")).lower()
             for m in worker2_user_msgs
         )
         assert critic_feedback_found, (

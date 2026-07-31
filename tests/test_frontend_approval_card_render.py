@@ -85,6 +85,10 @@ check('wf_no_cmd_card', !wfHtml.includes('ptool-cmd-code'));
 check('wf_approve_btn', wfHtml.includes("resolveWriteApproval('ap3',true)"));
 
 console.log(out.join('\n'));
+// Exit explicitly: tool_rounds.js / jsdom may leave a timer or listener handle
+// open, which would keep node's event loop alive past the 60s harness timeout
+// even though every assertion already ran.
+process.exit(0);
 """
 
 

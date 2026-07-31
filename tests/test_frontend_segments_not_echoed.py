@@ -50,20 +50,64 @@ pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-CONV_JS = os.path.join(ROOT, 'static', 'js', 'core', 'conversations.js')
+CORE_DIR = os.path.join(ROOT, 'static', 'js', 'core')
 IDB_JS = os.path.join(ROOT, 'static', 'js', 'idb-cache.js')
 
 
+def _locate(symbol: str) -> str:
+    """Find the ONE file under static/js/core/ defining ``function <symbol>(``.
+
+    Anchored on the SYMBOL, never a file path. This cluster migrated once
+    (conversations.js -> conv_persist_helpers.js, pt_3879f00e slice 3) and took
+    the hard-coded-path version of this guard down with it. Three separately
+    reportable states: none = implementation deleted (REAL regression);
+    many = single source of truth copied; one = auto re-point.
+    """
+    pat = re.compile(r'^function\s+' + re.escape(symbol) + r'\s*\(', re.M)
+    hits = [os.path.join(CORE_DIR, n) for n in sorted(os.listdir(CORE_DIR))
+            if n.endswith('.js')
+            and pat.search(open(os.path.join(CORE_DIR, n), encoding='utf-8').read())]
+    if not hits:
+        raise AssertionError(
+            f'{symbol}() is not defined anywhere under static/js/core/ — the '
+            f'implementation was removed. REAL regression: the belt that keeps '
+            f'backend-owned `segments` out of the client PUT is gone.')
+    if len(hits) > 1:
+        raise AssertionError(
+            f'{symbol}() defined in {len(hits)} files ({hits}) — single source '
+            f'of truth duplicated; collapse before re-pointing.')
+    return hits[0]
+
+
+def _fn_span(src: str, name: str) -> str:
+    """Full text of a top-level ``function <name>(...) {...}``, brace-balanced."""
+    m = re.search(r'^function\s+' + re.escape(name) + r'\s*\(', src, re.M)
+    assert m, f'{name}() vanished between locate and slice'
+    i = src.index('{', m.start())
+    depth = 0
+    for j in range(i, len(src)):
+        if src[j] == '{':
+            depth += 1
+        elif src[j] == '}':
+            depth -= 1
+            if depth == 0:
+                return src[m.start():j + 1]
+    raise AssertionError(f'unbalanced braces while slicing {name}()')
+
+
 def _extract_trim_fn() -> str:
-    """Pull the `_trimMsgForPersist` + `_stripUsageTransient` + the
-    `_USAGE_TRANSIENT_KEYS` const out of conversations.js so they can be
-    eval'd standalone (they're module-private, not on window)."""
-    src = open(CONV_JS, encoding='utf-8').read()
-    # Grab the const + both function definitions (contiguous in source).
-    start = src.index('const _USAGE_TRANSIENT_KEYS')
-    end = src.index('\nfunction _trimMsgForPersist(')
-    end = src.index('\n}', end) + 2  # close of _trimMsgForPersist
-    chunk = src[start:end]
+    """Splice the shipped `_USAGE_TRANSIENT_KEYS` + `_stripUsageTransient` +
+    `_trimMsgForPersist` so they eval standalone (module-private, not on
+    window). Located by symbol; never by file path."""
+    path = _locate('_trimMsgForPersist')
+    src = open(path, encoding='utf-8').read()
+    const_m = re.search(r'^const _USAGE_TRANSIENT_KEYS\s*=.*?;', src, re.M)
+    assert const_m, '_USAGE_TRANSIENT_KEYS const missing from ' + path
+    chunk = '\n'.join([
+        const_m.group(0),
+        _fn_span(src, '_stripUsageTransient'),
+        _fn_span(src, '_trimMsgForPersist'),
+    ])
     assert '_trimMsgForPersist' in chunk, 'extraction missed _trimMsgForPersist'
     return chunk
 
@@ -260,16 +304,50 @@ def test_NC_idb_cache_without_skip_segments_leaks():
         'leak without the strip:\n' + out)
 
 
-def test_source_has_segments_strip():
-    """Cheap source guard (runs even without node): both strip sites exist."""
-    src = open(CONV_JS, encoding='utf-8').read()
-    assert re.search(r"if \('segments' in m\)", src), \
-        'the segments strip block is missing from _trimMsgForPersist'
-    idb = open(IDB_JS, encoding='utf-8').read()
-    assert "_stripSegmentForCache" in idb, \
-        'the bounded segment cache-strip (_stripSegmentForCache) is missing from idb-cache.js'
-    assert re.search(r"s\.type === 'tool_use' && 'result' in s", idb), \
-        'the tool_use result-strip is missing from _stripSegmentForCache'
+@pytest.mark.skipif(not shutil.which('node'), reason='node not installed')
+def test_scan_surface_report():
+    """Print WHERE both guards are pointed before asserting anything.
+
+    charter: a source-anchored guard must show its scan surface, or it can pass
+    while pointed at nothing. The PUT-side cluster already moved file once.
+    """
+    path = _locate('_trimMsgForPersist')
+    print('_trimMsgForPersist located in:', os.path.relpath(path, ROOT))
+    chunk = _extract_trim_fn()
+    print(f'spliced PUT-side: {len(chunk)} chars / {chunk.count(chr(10)) + 1} lines')
+    cache = _extract_strip_message_fn()
+    print(f'spliced cache-side: {len(cache)} chars / {cache.count(chr(10)) + 1} lines')
+
+
+@pytest.mark.skipif(not shutil.which('node'), reason='node not installed')
+def test_both_strip_sites_hold_by_behaviour():
+    """Both belts asserted by RESULT, not by source literal.
+
+    The old version regex-matched ``if ('segments' in m)`` in a hard-coded file
+    and died on the slice-3 move — unable to distinguish drift from regression.
+    Behaviour assertions survive any reformatting of the condition while still
+    going red the moment either belt stops working.
+    """
+    put_out = _run_node(r"""
+eval(process.env.TRIM_SRC);
+const r = _trimMsgForPersist({ role: 'assistant', content: 'c', toolRounds: [],
+  segments: [{ type: 'text', text: 'y', deliverable: true }] });
+console.log((!('segments' in r) ? 'PASS ' : 'FAIL ') + 'put_side_strips_segments');
+""", _extract_trim_fn())
+    cache_out = _run_node_cache(r"""
+eval(process.env.STRIP_SRC);
+const c = _stripMessage({ role: 'assistant', content: 'x', toolRounds: [],
+  segments: [{ type: 'tool_use', id: 't', name: 'web_search', input: '{}',
+               result: { content: 'X'.repeat(5000), status: 'done' } }] });
+const tu = (c.segments || [])[0];
+console.log((Array.isArray(c.segments) && c.segments.length === 1 ? 'PASS ' : 'FAIL ')
+            + 'cache_keeps_segment_structure');
+console.log((tu && !('result' in tu) ? 'PASS ' : 'FAIL ') + 'cache_strips_tool_result');
+""", _extract_strip_message_fn())
+    out = put_out + '\n' + cache_out
+    fails = [ln for ln in out.splitlines() if ln.startswith('FAIL')]
+    assert not fails, 'a segments belt stopped working:\n' + out
+    assert out.count('PASS') == 3, f'expected 3 checks, got:\n{out}'
 
 
 if __name__ == '__main__':
@@ -279,5 +357,6 @@ if __name__ == '__main__':
         _src = _extract_trim_fn()
         print(_run_node(_HARNESS, _src))
         print(_run_node(_NC_HARNESS, _src))
-        test_source_has_segments_strip()
-        print('PASS test_source_has_segments_strip')
+        test_scan_surface_report()
+        test_both_strip_sites_hold_by_behaviour()
+        print('PASS test_both_strip_sites_hold_by_behaviour')

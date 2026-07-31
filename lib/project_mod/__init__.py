@@ -47,7 +47,7 @@ __all__ = [
     'tool_write_file', 'tool_apply_diff', 'tool_insert_content',
     'tool_create_project', 'tool_run_command',
     'execute_tool', 'execute_standalone_command',
-    'project_tool_display', 'browse_directory',
+    'project_tool_display', 'format_tool_args_brief', 'browse_directory',
     'create_directory', 'delete_directory',
     # Context
     'get_context_for_prompt',
@@ -137,6 +137,7 @@ from lib.project_mod.tools import (
     delete_directory,
     execute_standalone_command,
     execute_tool,
+    format_tool_args_brief,
     project_tool_display,
     tool_apply_diff,
     tool_create_project,

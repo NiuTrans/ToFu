@@ -50,9 +50,22 @@ def test_command_uses_env_interpreter_directly():
 
 
 def test_directory_is_project_root():
+    """``directory`` must be an ABSOLUTE path to a real Tofu checkout.
+
+    Deliberately NOT ``== _PROJ``. The conf is a DEPLOYMENT artefact: it pins
+    the absolute path of the box's live checkout, which is not the tree a test
+    happens to run in. Equality made this guard fail in every ``git worktree``
+    and in CI — i.e. exactly where it is supposed to be trustworthy — for a
+    conf that was entirely correct. What actually matters is that the value is
+    absolute and names a directory holding ``server.py``, so supervisord's cwd
+    can never be a stale/relative path.
+    """
     prog = _load()
     d = prog.get('directory', '')
-    assert d == _PROJ, f'directory must be the project root {_PROJ}: {d!r}'
+    assert d, 'directory= must be set'
+    assert os.path.isabs(d), f'directory must be absolute: {d!r}'
+    assert os.path.isfile(os.path.join(d, 'server.py')), (
+        f'directory must be a Tofu checkout (no server.py under it): {d!r}')
 
 
 def test_lifecycle_autostart_autorestart():
@@ -87,7 +100,17 @@ def test_env_pins_port_deterministically():
 
 
 def test_supervisor_log_path_under_project_logs():
+    """The log must live under the SAME checkout's ``logs/``.
+
+    Asserted as a RELATIONSHIP to ``directory`` rather than to the running
+    tree, for the same reason as test_directory_is_project_root: a deployment
+    conf legitimately carries the box's absolute path. This still catches the
+    thing that matters — a log written outside the deployment (or into another
+    checkout's logs/), where nothing collects or rotates it.
+    """
     prog = _load()
     log = prog.get('stdout_logfile', '')
-    assert log == os.path.join(_PROJ, 'logs', 'supervisor_tofu.log'), (
-        f'stdout_logfile must be logs/supervisor_tofu.log: {log!r}')
+    d = prog.get('directory', '')
+    assert log == os.path.join(d, 'logs', 'supervisor_tofu.log'), (
+        f'stdout_logfile must be <directory>/logs/supervisor_tofu.log '
+        f'(directory={d!r}): {log!r}')

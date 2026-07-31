@@ -258,6 +258,45 @@ class PushHub:
         for client in targets:
             client.enqueue(frame)
 
+    def deliver_to_socket(self, req_id: str, frame: dict) -> bool:
+        """Deliver a frame to ONE socket, identified by its ``req_id``.
+
+        The repair channel for the sync-drift probe (pt_cadaa70ffa6b468d). The
+        probe knows exactly WHICH client is stalled — it is the one that just
+        POSTed a frozen digest — so the correction must reach that socket and
+        no other.
+
+        WHY NOT ``broadcast`` / ``push_event``: both fan out to every
+        subscriber. A conv_state_snapshot is per-tenant scoped and rev-gated,
+        so a stray copy is harmless in itself, but fanning a repair to N tabs
+        because ONE is stalled turns a targeted correction into fleet-wide
+        traffic on a 60s cadence — and it would mask the very condition being
+        repaired, since a healthy tab absorbing the frame looks identical to a
+        stalled tab being fixed.
+
+        Returns True iff a matching LOCAL socket was found and enqueued.
+        Cross-replica is deliberately NOT attempted: the digest POST is an HTTP
+        request that, in a sticky-session deployment, lands on the replica
+        holding that socket; and when it does not, returning False lets the
+        caller log an honest "could not reach" rather than silently doing
+        nothing. Enqueue only — ``_sender`` stays the sole writer of the
+        WebSocket.
+        """
+        if not req_id:
+            return False
+        with self._lock:
+            targets = [c for c in self._clients
+                       if getattr(c, 'req_id', '') == req_id]
+        if not targets:
+            return False
+        loop = self._loop
+        if loop and loop.is_running():
+            loop.call_soon_threadsafe(self._deliver, set(targets), frame)
+        else:
+            for client in targets:
+                client.enqueue(frame)
+        return True
+
     def broadcast(self, channel: str, payload: dict):
         """Broadcast to ALL connected clients across the fleet.
 
@@ -277,11 +316,34 @@ class PushHub:
 
 
 class PushClient:
-    """Represents a single WebSocket connection to the push channel."""
+    """Represents a single WebSocket connection to the push channel.
 
-    def __init__(self):
+    ``user_id`` is the resolved owner of the WebSocket (from
+    ``AuthContext.user_id`` at handshake — see routes/push.py::push_ws).
+    Stashed for the connection lifetime so every subsequent frame handler
+    can consult it without re-doing auth. Empty string means "no
+    resolved user" — the single-user / personal-install / pre-auth
+    default, and also what open-mode requests without a bearer token
+    produce (see :func:`lib.api_keys.local_admin_context`). Downstream
+    readers (``build_conv_state_snapshot``, ``snapshot_running_by_conv``)
+    treat empty as "unscoped, all-registry".
+
+    ``req_id`` is this socket's correlation id, resolved at handshake from
+    the client's ``_rid`` query param (see routes/push.py::push_ws). It is
+    carried HERE, next to ``user_id``, for the same reason: the frame
+    handlers that log a socket's activity are module-level functions and
+    cannot see the handler coroutine's locals, so a per-connection field is
+    the only way for ``[Push] Client abort``-style lines to name the socket
+    they belong to. Without it those lines are unjoinable — the id would
+    cover only connect/disconnect, which are the two lines that least need
+    it.
+    """
+
+    def __init__(self, user_id: str = '', req_id: str = ''):
         self._queue: asyncio.Queue = asyncio.Queue(maxsize=1000)
         self._connected = True
+        self.user_id: str = str(user_id or '')
+        self.req_id: str = str(req_id or '')
 
     def enqueue(self, frame: dict):
         if not self._connected:
@@ -314,6 +376,86 @@ class PushClient:
 
 # Singleton hub
 hub = PushHub()
+
+
+def build_conv_state_snapshot(user_id='') -> dict:
+    """Build the ``conv_state_snapshot`` frame for a client that just
+    subscribed to ``notify:*``.
+
+    ``user_id`` is required (empty string = pre-auth / single-user
+    default) and is BOTH the scope key for the registry projection AND
+    the value stamped into the outbound frame's ``userId`` field so the
+    client's cross-user gate (``_frameIsOurs``) accepts it. Historically
+    this was hardcoded to ``1`` — that latent multi-tenant leak is what
+    pt_ab42421158214591 filed and this commit closes.
+
+    Content sourced from ONE call to
+    ``lib.tasks_pkg.manager._registry.snapshot_running_by_conv`` — the SSOT
+    for "which convs have live tasks" (carrier / aborted / empty-convId
+    filter shared with the notify_conv_changed seam so client sidebar and
+    connect-snapshot cannot disagree by construction). The registry read is
+    scoped by ``user_id`` so a snapshot built for user B never leaks user
+    A's tasks (multi-tenant SSOT invariant).
+
+    Each conv's entry independently carries a fresh
+    ``[monotonic_ns, replica_id]`` rev tuple (owner mandate: per-conv rev,
+    NOT a single frame-wide rev — a stale ``conv_changed`` for one conv
+    must not be able to override the snapshot's state for OTHER convs).
+
+    Best-effort: a registry snapshot failure returns an empty ``convs``
+    dict — the client still receives the frame and treats it as "no live
+    tasks", which is the safe default (a false negative extinguishes a
+    busy dot; a real notify frame within seconds re-lights it).
+    """
+    try:
+        # Late import — the manager package is not always importable at
+        # push module load time (e.g. tests that only exercise the hub).
+        from lib.tasks_pkg.manager._registry import snapshot_running_by_conv
+        # pt_ab42421158214591: pass user_id through so the projection is
+        # scoped to this connection's owner. Cast to str: the registry
+        # stores AuthContext.user_id (a str), while some legacy callers
+        # still pass DEFAULT_USER_ID=1 (int) — str() coerces both to a
+        # comparable form; empty string ('' == '' == unscoped) is the
+        # explicit "no filter" signal.
+        raw = snapshot_running_by_conv(user_id=str(user_id or ''))
+    except Exception as _e:
+        logger.debug('[Push] snapshot_running_by_conv failed (%s); '
+                     'sending empty snapshot', _e)
+        raw = {}
+    try:
+        from lib.conversations.meta_cache import _running_task_ids_rev
+    except Exception as _ie:
+        logger.debug('[Push] _running_task_ids_rev import failed (%s); '
+                     'sending snapshot without per-conv rev', _ie)
+        _running_task_ids_rev = lambda: [0, '']  # noqa: E731
+    convs: dict[str, dict] = {}
+    for conv_id, tids in raw.items():
+        convs[conv_id] = {
+            'runningTaskIds': list(tids),
+            'runningTaskIdsRev': _running_task_ids_rev(),
+        }
+    return {
+        'channel': 'notify',
+        'taskId': '*',
+        'type': 'conv_state_snapshot',
+        'userId': user_id,
+        'convs': convs,
+        # ── pt_781ae072d6ee4e84: frame-level rev for the CLEAR branch ──
+        # A conv ABSENT from this snapshot must have its local busy state
+        # extinguished, and the client must advance that conv's rev so a
+        # reordered older notify cannot un-clear the dot. The client used to
+        # SYNTHESIZE that value from its own wall clock — a different clock
+        # domain from the server's rev, which poisoned the strict-greater gate
+        # and left the conv permanently deaf on both transports.
+        #
+        # Shipping the rev HERE is what makes client-side minting unnecessary
+        # (and therefore forbiddable): the clear is stamped with an
+        # authoritative value on the same timeline as every other rev, so
+        # "cleared" and "busy" are totally ordered against each other.
+        # Minted AFTER the per-conv revs above so it dominates them — the
+        # snapshot is by construction the newest view of the registry.
+        'rev': _running_task_ids_rev(),
+    }
 
 
 def push_event(channel: str, task_id: str, payload: dict):

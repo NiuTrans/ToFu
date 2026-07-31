@@ -71,6 +71,7 @@ import functools
 import hashlib
 import logging
 import os
+import secrets
 from typing import Optional
 
 from flask import jsonify, redirect, request
@@ -164,10 +165,15 @@ def _remote_is_loopback() -> bool:
     """True when the request peer is the local host (127.0.0.0/8, ::1).
 
     Uses ``request.remote_addr`` — the direct socket peer, NOT any
-    ``X-Forwarded-For`` header (which a remote client can spoof). A
-    reverse proxy on the same host still presents 127.0.0.1, so a
-    loopback-only proxy deployment keeps working; a proxy on another box
-    correctly reads as non-loopback.
+    ``X-Forwarded-For`` header (which a remote client can spoof).
+
+    ⚠️ NOT a trust signal by itself. A reverse proxy on the SAME host
+    (nginx / ngrok / cloudflared → 127.0.0.1, the standard tunnel shape)
+    makes EVERY public request present as loopback, and ProxyFix is not
+    installed (pt_30d400a167df4440), so the server cannot tell them
+    apart. Bridge endpoints therefore require a CREDENTIAL and never
+    consult this — see :func:`_is_bridge_path` and
+    ``docs/UNIFIED_DEVICE_BRIDGE_DESIGN.md`` §3.2b / §3.4.
     """
     import ipaddress
     addr = (request.remote_addr or '').strip()
@@ -190,6 +196,70 @@ def _remote_is_loopback() -> bool:
     # IPv4-mapped IPv6 loopback (::ffff:127.0.0.1).
     mapped = getattr(ip, 'ipv4_mapped', None)
     return bool(mapped and mapped.is_loopback)
+
+
+# ── Bridge endpoints: credential-only, never address-based ────────────
+#
+# The browser extension and desktop agent poll these. A bridge command can
+# read the whole cookie jar, attach the DevTools debugger, write files and
+# run shell commands — strictly more dangerous than reaching the plain UI.
+# They are therefore exempt from the open-mode synthetic-admin grant: a real
+# credential is required no matter what the peer address looks like and no
+# matter how TOFU_OPEN_MODE_ALLOW_REMOTE is set.
+_BRIDGE_PATHS = frozenset({
+    '/api/browser/poll',
+    '/api/browser/commands',
+    '/api/browser/result',
+    '/api/desktop/poll',
+})
+
+# Process-local capability token for the SAME-PROCESS desktop agent the
+# packaged tray app spawns (desktop/launcher.py). Minted in memory at import,
+# NEVER written to disk and NEVER exported to the environment: persisting it
+# would downgrade "only this process knows it" into "any local user who can
+# read the file (or /proc/<pid>/environ) knows it" — the address-based trust
+# hole in a different costume (docs/UNIFIED_DEVICE_BRIDGE_DESIGN.md §3.4).
+_LOOPBACK_AGENT_TOKEN = secrets.token_urlsafe(32)
+
+
+def loopback_agent_token() -> str:
+    """Return the in-memory token an in-process local agent must present.
+
+    Handed to the tray agent by direct function argument (never a file,
+    never an env var), so no other caller can obtain it.
+    """
+    return _LOOPBACK_AGENT_TOKEN
+
+
+def _is_bridge_path(path: str) -> bool:
+    return path in _BRIDGE_PATHS
+
+
+def _bridge_credential_ok() -> bool:
+    """True when the request carries a valid bridge credential.
+
+    Accepted, in order:
+      1. the in-process loopback agent token (packaged tray app);
+      2. ``TOFU_BRIDGE_SECRET`` — the shared global secret;
+      3. an API key carrying the ``agents:bridge`` scope (per-user token).
+
+    The peer address is NOT a credential and is deliberately not consulted.
+    """
+    provided = (request.headers.get('X-Bridge-Secret') or '').strip()
+    if not provided:
+        return False
+    import hmac
+    if hmac.compare_digest(provided, _LOOPBACK_AGENT_TOKEN):
+        return True
+    expected = (os.environ.get('TOFU_BRIDGE_SECRET') or '').strip()
+    if expected and hmac.compare_digest(provided, expected):
+        return True
+    try:
+        ctx = validate_token(provided)
+    except Exception as e:
+        _auth_log.debug('Auth: bridge token validation error: %s', e)
+        return False
+    return bool(ctx is not None and ctx.has_scope('agents:bridge'))
 
 
 def _is_api_path(path: str) -> bool:
@@ -288,10 +358,42 @@ async def auth_before_request():
     g.auth_ctx = None
     g.rate_decision = None
 
-    # Static assets short-circuit before any token work \u2014 they're hit
+    # Static assets short-circuit before any token work — they're hit
     # tens of times per page load and should never touch the cache.
     if any(path.startswith(p) for p in _PUBLIC_PREFIXES):
         return None
+
+    # ── Bridge endpoints: credential-only, address-blind ────────────
+    # Placed BEFORE the open-mode short-circuit on purpose: otherwise the
+    # synthetic local-admin grant would wave a bridge poll through on peer
+    # address alone, and under a same-host reverse proxy that is the whole
+    # public internet (docs/UNIFIED_DEVICE_BRIDGE_DESIGN.md §3.2b).
+    # TOFU_OPEN_MODE_ALLOW_REMOTE cannot downgrade this (§3.4b).
+    if _is_bridge_path(path):
+        # CORS preflight carries NO credentials by spec (the browser strips
+        # them), so gating OPTIONS would make every cross-origin bridge call
+        # impossible. The preflight reveals nothing and mutates nothing; the
+        # actual POST/GET that follows is still fully gated below.
+        if request.method == 'OPTIONS':
+            return None
+        if _bridge_credential_ok():
+            g.auth_ctx = local_admin_context()
+            return None
+        try:
+            audit_log('bridge_auth_fail', kind='gate', path=path,
+                      ip=request.remote_addr,
+                      has_header=bool(request.headers.get('X-Bridge-Secret')),
+                      ua=(request.user_agent.string or '')[:120])
+        except Exception as _aerr:
+            logger.debug('[Auth] bridge audit_log failed: %s', _aerr)
+        _auth_log.warning('Auth: bridge credential required on %s (peer=%s)',
+                          path, request.remote_addr)
+        return jsonify({
+            'error': 'bridge_auth_required',
+            'hint': 'set X-Bridge-Secret to TOFU_BRIDGE_SECRET or an '
+                    'agents:bridge-scoped API key',
+        }), 401
+
     # ── Open mode short-circuit ─────────────────────────────────────
     # No credential required. Tokens are still honoured if presented
     # (so the same Bearer header / cookie keeps working when an

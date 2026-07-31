@@ -10,6 +10,8 @@
 #    make test-e2e      — Run hermetic E2E smoke (real app + browser + stub LLM)
 #    make test-frontend — Run frontend jsdom + tsc tests (needs `npm install`)
 #    make test-all      — Run all tests (unit + api + visual)
+#    make audit-tests   — Census the test suite's own health (report)
+#    make suite-health  — Gate: test-suite health must not regress (ratchet)
 #    make healthcheck   — Run project diagnostics
 #    make ci            — Full CI pipeline (lint + unit + api + healthcheck)
 #    make smoke         — Run smoke tests only
@@ -20,7 +22,7 @@
 #
 # ═══════════════════════════════════════════════════════════════
 
-.PHONY: lint test-unit test-api test-visual test-e2e test-frontend test-all test-coverage healthcheck ci smoke help desktop desktop-icons stop vendor-mcp
+.PHONY: lint test-unit test-api test-visual test-e2e test-frontend test-all test-coverage healthcheck ci smoke help desktop desktop-icons stop vendor-mcp audit-tests suite-health
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -48,6 +50,23 @@ vendor-mcp: ## Re-sync tools/<name>/ snapshots of internal MCP servers from sibl
 typecheck: ## Type-check the vanilla-JS frontend (tsc --checkJs, no build step)
 	@if [ ! -d node_modules/typescript ]; then echo '⚠️  Run `npm install` first (installs TypeScript dev-dep)'; exit 1; fi
 	npx tsc --noEmit
+
+# ── Test-suite health ────────────────────────────────────────
+#
+# The suite is ~1160 files / ~320k lines — far past the point where "review the
+# tests by reading them" is a real activity. audit-tests performs that review
+# mechanically (AST only, no imports/execution, ~6s) and reports the failure
+# modes that make a test worthless: no assertion, skip-only, laundered by a bare
+# except, a source anchor that no longer matches, a scan target that no longer
+# exists. suite-health is the CI-binding form (a one-way ratchet against
+# tests/audit_baseline.json).
+
+.PHONY: audit-tests suite-health
+audit-tests: ## Census the test suite's own health (human-readable report)
+	python3 scripts/audit_tests.py
+
+suite-health: ## Gate: test-suite health must not regress (one-way ratchet)
+	python3 -m pytest $(PYTEST_BASE) tests/test_suite_health_ratchet.py --timeout=600 --tb=short -q
 
 # ── Tests ──────────────────────────────────────────────────────
 #
@@ -103,7 +122,7 @@ healthcheck: ## Run project health diagnostics
 
 # ── CI Pipeline ────────────────────────────────────────────────
 
-ci: lint test-unit test-api healthcheck ## Full CI pipeline (lint + unit + api + healthcheck)
+ci: lint test-unit test-api suite-health healthcheck ## Full CI pipeline (lint + unit + api + suite-health + healthcheck)
 	@echo ""
 	@echo "  ✅ CI pipeline passed"
 	@echo ""

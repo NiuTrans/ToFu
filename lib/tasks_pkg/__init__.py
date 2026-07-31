@@ -12,7 +12,7 @@ Modules:
 
 __all__ = [
     # spawn (eager)
-    'spawn_task', 'set_agent_executor',
+    'spawn_task', 'set_agent_executor', 'set_serving_loop',
     # manager (eager)
     'tasks', 'tasks_lock',
     'create_task', 'discard_task', 'append_event', 'persist_task_result', 'cleanup_old_tasks',
@@ -62,6 +62,33 @@ def set_agent_executor(executor) -> None:
     _agent_executor = executor
 
 
+# The server's main event loop, registered at startup (server.py). Lets
+# spawn_task hop onto the loop + capped executor from ANY calling thread —
+# queue-dispatch / reaper callbacks run on a finishing task's WORKER thread,
+# where asyncio.get_running_loop() fails (F3).
+_serving_loop = None
+
+
+def set_serving_loop(loop) -> None:
+    """Register the server's main asyncio loop (called once at startup)."""
+    global _serving_loop
+    _serving_loop = loop
+
+
+def _executor_runner(loop, run_task, task):
+    """Coroutine body that runs run_task on the agent pool under ``loop``."""
+    async def _async_wrapper():
+        try:
+            if _agent_executor is not None:
+                await loop.run_in_executor(_agent_executor, run_task, task)
+            else:
+                await asyncio.to_thread(run_task, task)
+        except Exception as e:
+            _spawn_logger.error('[Spawn] Task %s failed: %s',
+                                task.get('id', '?')[:8], e, exc_info=True)
+    return _async_wrapper
+
+
 def spawn_task(task: dict) -> None:
     """Spawn a task using the best available mechanism.
 
@@ -87,24 +114,35 @@ def spawn_task(task: dict) -> None:
         # We're inside the Quart event loop. Run the orchestrator on the
         # dedicated agent pool (separate from the sync-route pool) so the
         # two cannot starve each other; tracked as an asyncio Task.
-        async def _async_wrapper():
-            try:
-                if _agent_executor is not None:
-                    await loop.run_in_executor(_agent_executor, run_task, task)
-                else:
-                    await asyncio.to_thread(run_task, task)
-            except Exception as e:
-                _spawn_logger.error('[Spawn] Task %s failed: %s',
-                                    task.get('id', '?')[:8], e, exc_info=True)
+        asyncio.ensure_future(_executor_runner(loop, run_task, task)())
+        return
 
-        asyncio.ensure_future(_async_wrapper())
-    else:
-        # No event loop — fall back to daemon thread
-        threading.Thread(
-            target=run_task, args=(task,),
-            name=f'run_task-{task.get("id", "?")[:8]}',
-            daemon=True,
-        ).start()
+    # No loop in the CALLING thread (queue-dispatch / reaper callbacks run on
+    # a finishing task's WORKER thread, where get_running_loop() fails). Hop
+    # onto the registered SERVING loop so the successor still lands on the
+    # capped agent executor and is tracked by the loop. The pre-F3 code
+    # silently degraded to a daemon thread here: uncapped, loop-invisible,
+    # and killed mid-finally at interpreter exit (no terminal floor → poll
+    # 404). run_coroutine_threadsafe is fire-and-forget like ensure_future.
+    sloop = _serving_loop
+    if sloop is not None:
+        try:
+            if sloop.is_running():
+                asyncio.run_coroutine_threadsafe(
+                    _executor_runner(sloop, run_task, task)(), sloop)
+                return
+        except RuntimeError as e:
+            # Loop closing mid-shutdown — fall through to the thread.
+            _spawn_logger.warning('[Spawn] serving-loop hop failed (%s) — '
+                                  'thread fallback for task %s', e,
+                                  task.get('id', '?')[:8])
+
+    # No event loop anywhere (tests, Feishu bot, CLI) — daemon thread.
+    threading.Thread(
+        target=run_task, args=(task,),
+        name=f'run_task-{task.get("id", "?")[:8]}',
+        daemon=True,
+    ).start()
 
 
 # ── Eagerly import only the lightweight manager (used by routes at import time) ──

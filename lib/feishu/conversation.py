@@ -164,6 +164,10 @@ def sync_to_db(user_id: str) -> None:
            retry=False, commit=True)
         from lib.conversations import update_conversation_fts
         update_conversation_fts(db, conv_id, search_text)
+        # Phase 5 dual-write (flag-gated, inert when off): the Feishu buffer
+        # front-trims at MAX_WEB_MESSAGES (re-sequences) → full rebuild.
+        from lib.database.messages_rows import mirror_write_and_commit
+        mirror_write_and_commit(db, conv_id, web_msgs, now_ms=now, full=True)
         logger.debug('[Feishu] Synced %d messages for user %s to DB conv %s',
                       len(web_msgs), user_id, conv_id[:12])
     except Exception as e:

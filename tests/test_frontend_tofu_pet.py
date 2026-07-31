@@ -1,14 +1,17 @@
 """Tofu pet mascot (static/js/tofu-pet.js) — behaviour + registration guards.
 
-The pet is an emoting cube-of-tofu mascot mounted into #projectBar. Each
-expression is a pre-rendered art frame (static/icons/pet/tofu-pet-<expr>.png);
-a small time-of-day / mood finite-state machine picks the frame (research-
-grounded resolution priority: activity > night-sleep > low-mood >
-low-energy/evening > recent-positive > time-default > idle).
+The pet is the Tofu brand mascot itself — the isometric cream block from
+static/icons/tofu-welcome.svg — mounted into #projectBar. Each expression is an
+SVG frame (static/icons/pet/tofu/tofu-<expr>.svg); a small time-of-day / mood
+finite-state machine picks the frame (research-grounded resolution priority:
+activity > night-sleep > low-mood > low-energy/evening > recent-positive >
+time-default > idle).
 
 These tests run the REAL shipped module under node with a minimal DOM/storage
 stub, drive its public `window.TofuPet` surface, and assert:
-  * every declared EXPRESSION resolves to an art frame that EXISTS on disk;
+  * every declared frame resolves — THROUGH THE MODULE'S OWN frameUrl() — to art
+    that EXISTS on disk (so the guard follows the shipped character, and cannot
+    become a stale second copy of the path rule);
   * the time/mood FSM resolves to the right expression at representative
     hours + moods (the core state logic);
   * loading activity wins over the clock (thinking), success celebrates;
@@ -48,7 +51,39 @@ global.requestAnimationFrame = function(){ return 0; };   // don't actually run 
 global.cancelAnimationFrame = function(){};
 global.ResizeObserver = function(){ return { observe(){}, disconnect(){} }; };
 global.localStorage = { _d:{}, getItem(k){return this._d[k]||null;}, setItem(k,v){this._d[k]=v;} };
-global.Image = function(){ return { set src(v){}, get src(){return '';} }; };
+// The engine builds each frame with new Image() and decorates it (style,
+// setAttribute, draggable, onload) — a bare src-accessor stub throws on
+// node.style. Frames never finish "loading" here (onload never fires),
+// which the behaviour tests don't mind.
+global.Image = function(){
+  return { _attrs:{}, draggable:false, alt:'', style:{},
+    setAttribute(k,v){ this._attrs[k]=v; }, getAttribute(k){ return this._attrs[k]; },
+    addEventListener(){}, appendChild(){},
+    set src(v){ this._src = v; }, get src(){ return this._src || ''; } };
+};
+global.t = function (k, p) {
+  let text = k;
+  if (p) { for (const q in p) { if (Object.prototype.hasOwnProperty.call(p, q)) text = text.split('{' + q + '}').join(p[q]); } }
+  return text;   // passthrough — mirrors the page boot stub (index.html:80)
+};
+// t() is driven by the REAL i18n dictionary, read from the path in argv[1].
+// Production ALWAYS has t() (index.html:80 boot stub + i18n.js = _BUNDLE_FILES[0]),
+// so the pet calls it bare. The dictionary is ~3000 keys, so it rides in a temp
+// FILE rather than inlined into `node -e` (argv limit). A MISSING key returns
+// the key, exactly as production does — never a fallback-inventing fake.
+const _petDict = JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8'));
+global.t = function (key, params) {
+  const e = _petDict[key];
+  let text = (e && e.zh != null) ? e.zh : key;
+  if (params) {
+    for (const k in params) {
+      if (Object.prototype.hasOwnProperty.call(params, k)) {
+        text = text.split('{' + k + '}').join(params[k]);
+      }
+    }
+  }
+  return text;
+};
 let _mounted = null;
 function _fakeEl(){ return { _attrs:{}, tagName:'', className:'', alt:'', src:'', offsetWidth:30,
   setAttribute(k,v){this._attrs[k]=v;}, getAttribute(k){return this._attrs[k];},
@@ -75,10 +110,20 @@ if (typeof _patch.activity === 'string') { TP.setActivity(_patch.activity); dele
 // an empty setState would re-resolve and clobber a transient reaction (celebrate).
 if (Object.keys(_patch).length) TP.setState(_patch);
 const _expr = TP.getState().expr;
+// Resolve EVERY declared frame through the module's own frameUrl(), so the
+// python guards can check the engine's real answers instead of re-deriving the
+// directory/prefix/extension themselves (a second copy that would silently rot).
+const _allFrames = TP.EXPRESSIONS
+  .concat(TP.WALK_FRAMES, TP.GROOM_FRAMES, TP.SCRATCH_FRAMES)
+  .concat(Object.keys(TP.FRAME_ALIAS).map(k => TP.FRAME_ALIAS[k]));
+const _frameUrls = {};
+_allFrames.forEach(function (f) { _frameUrls[f] = TP.frameUrl(f); });
 console.log(JSON.stringify({
   expr: _expr,
   expressions: TP.EXPRESSIONS,
   frameUrl: TP.frameUrl((TP.FRAME_ALIAS[_expr] || _expr)),
+  frameUrls: _frameUrls,
+  FRAME_ALIAS: TP.FRAME_ALIAS,
   decorStyles: TP.DECOR_STYLES,
   decor: TP.getDecor(),
   walkFrames: TP.WALK_FRAMES,
@@ -87,6 +132,19 @@ console.log(JSON.stringify({
 }));
 process.exit(0);   // the pet's setInterval timers keep the event loop alive
 """
+
+
+def _i18n_dict():
+    """Scrape ``static/js/i18n.js`` into ``{key: {zh, en}}`` so the harness's
+    ``t()`` resolves exactly as production does (a missing key returns the key).
+    """
+    src = (REPO / "static" / "js" / "i18n.js").read_text(encoding="utf-8")
+    pat = re.compile(
+        r"""^[ \t]*'([\w.\-]+)':\s*\{\s*zh:\s*(['"])(.*?)\2\s*,"""
+        r"""\s*en:\s*(['"])(.*?)\4""",
+        re.MULTILINE)
+    return {m.group(1): {'zh': m.group(3), 'en': m.group(5)}
+            for m in pat.finditer(src)}
 
 
 def _run(hour=14, now=0, patch=None):
@@ -98,24 +156,47 @@ def _run(hour=14, now=0, patch=None):
               .replace("__HOUR__", str(hour))
               .replace("__NOW__", str(now))
               .replace("__PATCH__", json.dumps(patch or {})))
-    out = subprocess.run(["node", "-e", script], capture_output=True, text=True,
-                         cwd=str(REPO), timeout=20)
+    import tempfile
+    with tempfile.NamedTemporaryFile('w', suffix='.json', delete=False) as fh:
+        json.dump(_i18n_dict(), fh)
+        dict_path = fh.name
+    try:
+        out = subprocess.run(["node", "-e", script, dict_path],
+                             capture_output=True, text=True,
+                             cwd=str(REPO), timeout=20)
+    finally:
+        os.unlink(dict_path)
     assert out.returncode == 0, f"node failed: {out.stderr}\n{out.stdout}"
     line = [ln for ln in out.stdout.strip().splitlines() if ln.strip().startswith("{")][-1]
     return json.loads(line)
 
 
 import json  # noqa: E402  (used inside _run)
+import os  # noqa: E402  (used inside _run)
+
+
+def _frame_path(rel_url):
+    """Map a URL the SHIPPED module produced → the file it must resolve to.
+
+    The guards below deliberately do NOT hardcode a directory, prefix or
+    extension. They used to (``static/icons/pet/oneko/oneko-<e>.png``), which
+    made them a SECOND copy of the frame-resolution rule: re-pointing the pet at
+    new art meant hand-editing four tests, and a test that names the art it
+    expects can only ever confirm the art someone remembered to type. Deriving
+    the path from ``TofuPet.frameUrl()`` means these guards follow the shipped
+    resolver wherever it points — they check that the engine's OWN answer lands
+    on a real file.
+    """
+    return REPO / rel_url.lstrip("/")
 
 
 def test_expression_frames_exist_on_disk():
-    """Every declared expression must have its kitten art frame present in
-    static/icons/pet/oneko/ (a missing frame = a broken <img> in the bar). The
-    pet is now a single public-domain oneko cat (no swappable packs)."""
+    """Every declared expression must resolve to art that EXISTS on disk (a
+    missing frame = a broken <img> in the bar). Path comes from the module's own
+    frameUrl(), so this follows the shipped character rather than naming it."""
     r = _run()
-    pet_dir = REPO / "static" / "icons" / "pet" / "oneko"
     for e in r["expressions"]:
-        f = pet_dir / f"oneko-{e}.png"
+        f = _frame_path(r["frameUrls"][e])
         assert f.exists() and f.stat().st_size > 0, f"missing/empty art frame: {f}"
     # The canonical research-grounded set must all be present as expressions.
     for e in ("idle", "happy", "sleepy", "sleeping", "thinking",
@@ -123,25 +204,24 @@ def test_expression_frames_exist_on_disk():
         assert e in r["expressions"], f"missing expression: {e}"
 
 
-def test_extra_cat_pose_frames_exist_on_disk():
-    """The 'more forms' the owner asked for: the groom + wall-scratch pose
-    cycles must exist on disk so the cat has richer idle behaviour, not just
-    walk/sit."""
+def test_extra_pose_frames_exist_on_disk():
+    """The 'more forms' the owner asked for: the groom + stretch pose cycles must
+    exist on disk so the pet has richer idle behaviour, not just walk/sit."""
     r = _run()
-    pet_dir = REPO / "static" / "icons" / "pet" / "oneko"
     poses = list(r.get("groomFrames", [])) + list(r.get("scratchFrames", []))
     assert len(poses) >= 5, f"expected >=5 extra pose frames, got {poses}"
     for p in poses:
-        f = pet_dir / f"oneko-{p}.png"
+        f = _frame_path(r["frameUrls"][p])
         assert f.exists() and f.stat().st_size > 0, f"missing/empty pose frame: {f}"
 
 
 def test_curious_alias_resolves_to_a_real_frame():
     """'curious' has no own art — it must alias to an existing frame."""
     r = _run(hour=14, patch={})
-    # frameUrl for the resolved expr always points at a real file; assert the
-    # alias target (alert) exists so curious never yields a broken image.
-    assert (REPO / "static" / "icons" / "pet" / "oneko" / "oneko-alert.png").exists()
+    target = r["FRAME_ALIAS"].get("curious", "curious")
+    f = _frame_path(r["frameUrls"][target])
+    assert f.exists() and f.stat().st_size > 0, \
+        f"'curious' aliases to {target!r}, which has no art on disk: {f}"
 
 
 def test_decor_scene_assets_exist():
@@ -293,7 +373,21 @@ global.window = { matchMedia(){ return {matches:false, addEventListener(){}, add
 global.BASE_PATH = '';
 global.ResizeObserver = function(){ return {observe(){}, disconnect(){}}; };
 global.localStorage = { _d:{}, getItem(k){return this._d[k]||null;}, setItem(k,v){this._d[k]=v;} };
-global.Image = function(){ return { set src(v){}, get src(){return '';} }; };
+// The engine builds each frame with new Image() and decorates it (style,
+// setAttribute, draggable, onload) — a bare src-accessor stub throws on
+// node.style. Frames never finish "loading" here (onload never fires),
+// which the behaviour tests don't mind.
+global.Image = function(){
+  return { _attrs:{}, draggable:false, alt:'', style:{},
+    setAttribute(k,v){ this._attrs[k]=v; }, getAttribute(k){ return this._attrs[k]; },
+    addEventListener(){}, appendChild(){},
+    set src(v){ this._src = v; }, get src(){ return this._src || ''; } };
+};
+global.t = function (k, p) {
+  let text = k;
+  if (p) { for (const q in p) { if (Object.prototype.hasOwnProperty.call(p, q)) text = text.split('{' + q + '}').join(p[q]); } }
+  return text;   // passthrough — mirrors the page boot stub (index.html:80)
+};
 // A stub scene with a critter parked mid-track that records spook() calls.
 let _spooks = 0;
 global.window.TofuScene = { critterX(){ return 150; }, spook(){ _spooks++; }, critterInfo(){ return {x:150}; } };
@@ -383,7 +477,21 @@ global.window = { PointerEvent: function(){}, matchMedia(){ return {matches:fals
 global.BASE_PATH = '';
 global.ResizeObserver = function(){ return {observe(){}, disconnect(){}}; };
 global.localStorage = { _d:{}, getItem(k){return this._d[k]||null;}, setItem(k,v){this._d[k]=v;} };
-global.Image = function(){ return { set src(v){}, get src(){return '';} }; };
+// The engine builds each frame with new Image() and decorates it (style,
+// setAttribute, draggable, onload) — a bare src-accessor stub throws on
+// node.style. Frames never finish "loading" here (onload never fires),
+// which the behaviour tests don't mind.
+global.Image = function(){
+  return { _attrs:{}, draggable:false, alt:'', style:{},
+    setAttribute(k,v){ this._attrs[k]=v; }, getAttribute(k){ return this._attrs[k]; },
+    addEventListener(){}, appendChild(){},
+    set src(v){ this._src = v; }, get src(){ return this._src || ''; } };
+};
+global.t = function (k, p) {
+  let text = k;
+  if (p) { for (const q in p) { if (Object.prototype.hasOwnProperty.call(p, q)) text = text.split('{' + q + '}').join(p[q]); } }
+  return text;   // passthrough — mirrors the page boot stub (index.html:80)
+};
 let _mounted=null; const _all=[];
 function _fakeEl(tag){ const el = { _attrs:{}, _ev:{}, tagName:tag||'', className:'', offsetWidth:30,
   set src(v){ this._src=v; }, get src(){ return this._src||''; },
@@ -462,7 +570,21 @@ global.window = { PointerEvent: function(){}, matchMedia(){ return {matches:fals
 global.BASE_PATH = '';
 global.ResizeObserver = function(){ return {observe(){}, disconnect(){}}; };
 global.localStorage = { _d:{}, getItem(k){return this._d[k]||null;}, setItem(k,v){this._d[k]=v;} };
-global.Image = function(){ return { set src(v){}, get src(){return '';} }; };
+// The engine builds each frame with new Image() and decorates it (style,
+// setAttribute, draggable, onload) — a bare src-accessor stub throws on
+// node.style. Frames never finish "loading" here (onload never fires),
+// which the behaviour tests don't mind.
+global.Image = function(){
+  return { _attrs:{}, draggable:false, alt:'', style:{},
+    setAttribute(k,v){ this._attrs[k]=v; }, getAttribute(k){ return this._attrs[k]; },
+    addEventListener(){}, appendChild(){},
+    set src(v){ this._src = v; }, get src(){ return this._src || ''; } };
+};
+global.t = function (k, p) {
+  let text = k;
+  if (p) { for (const q in p) { if (Object.prototype.hasOwnProperty.call(p, q)) text = text.split('{' + q + '}').join(p[q]); } }
+  return text;   // passthrough — mirrors the page boot stub (index.html:80)
+};
 let _mounted=null; const _all=[];
 function _fakeEl(tag){ const el = { _attrs:{}, _ev:{}, tagName:tag||'', className:'', offsetWidth:30,
   set src(v){ this._src=v; }, get src(){ return this._src||''; },
@@ -557,7 +679,21 @@ global.window = { matchMedia(){ return {matches:false, addEventListener(){}, add
 global.BASE_PATH = '';
 global.ResizeObserver = function(){ return {observe(){}, disconnect(){}}; };
 global.localStorage = { _d:{}, getItem(k){return this._d[k]||null;}, setItem(k,v){this._d[k]=v;} };
-global.Image = function(){ return { set src(v){}, get src(){return '';} }; };
+// The engine builds each frame with new Image() and decorates it (style,
+// setAttribute, draggable, onload) — a bare src-accessor stub throws on
+// node.style. Frames never finish "loading" here (onload never fires),
+// which the behaviour tests don't mind.
+global.Image = function(){
+  return { _attrs:{}, draggable:false, alt:'', style:{},
+    setAttribute(k,v){ this._attrs[k]=v; }, getAttribute(k){ return this._attrs[k]; },
+    addEventListener(){}, appendChild(){},
+    set src(v){ this._src = v; }, get src(){ return this._src || ''; } };
+};
+global.t = function (k, p) {
+  let text = k;
+  if (p) { for (const q in p) { if (Object.prototype.hasOwnProperty.call(p, q)) text = text.split('{' + q + '}').join(p[q]); } }
+  return text;   // passthrough — mirrors the page boot stub (index.html:80)
+};
 let _mounted=null;
 function _fakeEl(tag){ return { _attrs:{}, tagName:tag||'', offsetWidth:30,
   set src(v){}, get src(){return '';},
@@ -635,7 +771,21 @@ global.window = { matchMedia(){ return {matches:false, addEventListener(){}, add
 global.BASE_PATH = '';
 global.ResizeObserver = function(){ return {observe(){}, disconnect(){}}; };
 global.localStorage = { _d:{}, getItem(k){return this._d[k]||null;}, setItem(k,v){this._d[k]=v;} };
-global.Image = function(){ return { set src(v){}, get src(){return '';} }; };
+// The engine builds each frame with new Image() and decorates it (style,
+// setAttribute, draggable, onload) — a bare src-accessor stub throws on
+// node.style. Frames never finish "loading" here (onload never fires),
+// which the behaviour tests don't mind.
+global.Image = function(){
+  return { _attrs:{}, draggable:false, alt:'', style:{},
+    setAttribute(k,v){ this._attrs[k]=v; }, getAttribute(k){ return this._attrs[k]; },
+    addEventListener(){}, appendChild(){},
+    set src(v){ this._src = v; }, get src(){ return this._src || ''; } };
+};
+global.t = function (k, p) {
+  let text = k;
+  if (p) { for (const q in p) { if (Object.prototype.hasOwnProperty.call(p, q)) text = text.split('{' + q + '}').join(p[q]); } }
+  return text;   // passthrough — mirrors the page boot stub (index.html:80)
+};
 // No scene present → _critterX() returns null so chase never fires and the
 // histogram reflects the autonomous wander weights only.
 let _mounted=null;
@@ -734,7 +884,32 @@ global.requestAnimationFrame = function(){ return 0; };
 global.cancelAnimationFrame = function(){};
 global.ResizeObserver = function(){ return {observe(){}, disconnect(){}}; };
 global.localStorage = { _d:{}, getItem(k){return this._d[k]||null;}, setItem(k,v){this._d[k]=v;} };
-global.Image = function(){ return { set src(v){}, get src(){return '';} }; };
+// The engine builds each frame with new Image() and decorates it (style,
+// setAttribute, draggable, onload) — a bare src-accessor stub throws on
+// node.style. Frames never finish "loading" here (onload never fires),
+// which the behaviour tests don't mind.
+global.Image = function(){
+  return { _attrs:{}, draggable:false, alt:'', style:{},
+    setAttribute(k,v){ this._attrs[k]=v; }, getAttribute(k){ return this._attrs[k]; },
+    addEventListener(){}, appendChild(){},
+    set src(v){ this._src = v; }, get src(){ return this._src || ''; } };
+};
+const _petDict = JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8'));
+global.t = function (key, params) {
+  // This harness asserts on the TRANSLATED button label, so t() must resolve
+  // like production — a passthrough would compare a raw key against it.
+  // Missing key → the key, exactly as production does.
+  const e = _petDict[key];
+  let text = (e && e.en != null) ? e.en : key;
+  if (params) {
+    for (const q in params) {
+      if (Object.prototype.hasOwnProperty.call(params, q)) {
+        text = text.split('{' + q + '}').join(params[q]);
+      }
+    }
+  }
+  return text;
+};
 // A fake scene-switch button carrying a label span.
 const _label = { textContent: '' };
 const _btn = { _attrs:{}, setAttribute(k,v){this._attrs[k]=v;}, getAttribute(k){return this._attrs[k];},
@@ -757,13 +932,21 @@ const now = TP.cycleDecor();      // meadow -> pool
 console.log(JSON.stringify({
   now, label:_label.textContent, scene:_btn.getAttribute('data-scene'),
   title:_btn.getAttribute('title'), start,
-  expectLabel: TP.SCENE_LABELS[now]
+  expectLabel: TP.sceneLabel(now)
 }));
 process.exit(0);
 '''
         script = harness.replace("__SRC__", src_text)
-        out = subprocess.run(["node", "-e", script], capture_output=True, text=True,
-                             cwd=str(REPO), timeout=20)
+        import tempfile
+        with tempfile.NamedTemporaryFile('w', suffix='.json', delete=False) as fh:
+            json.dump(_i18n_dict(), fh)
+            dict_path = fh.name
+        try:
+            out = subprocess.run(["node", "-e", script, dict_path],
+                                 capture_output=True, text=True,
+                                 cwd=str(REPO), timeout=20)
+        finally:
+            os.unlink(dict_path)
         assert out.returncode == 0, f"node failed: {out.stderr}\n{out.stdout}"
         line = [ln for ln in out.stdout.strip().splitlines() if ln.strip().startswith("{")][-1]
         return json.loads(line)
@@ -798,13 +981,12 @@ def test_project_bar_close_button_is_svg_not_glyph():
 
 def test_walk_cycle_has_four_keypose_frames_on_disk():
     """The walk is a real multi-frame cycle (contact/down/passing/up), NOT one
-    PNG sliding. All four keypose frames must exist on disk."""
+    image sliding. All four keypose frames must exist on disk."""
     r = _run()
-    pet_dir = REPO / "static" / "icons" / "pet" / "oneko"
     walk = r["walkFrames"]
     assert len(walk) >= 4, f"walk cycle must have >=4 keyposes, got {walk}"
     for w in walk:
-        f = pet_dir / f"oneko-{w}.png"
+        f = _frame_path(r["frameUrls"][w])
         assert f.exists() and f.stat().st_size > 0, f"missing/empty walk frame: {f}"
 
 
@@ -812,8 +994,13 @@ def test_walk_cycle_ADVANCES_frames_while_walking():
     """The core of the owner's ask: while state=='walk', the frame ticker must
     ADVANCE through the walk keyposes on the rAF loop (not hold one frame). We
     run the REAL module with a controllable rAF clock + reduced-motion OFF,
-    drive several animation ticks, and assert the <img> src cycles through more
-    than one distinct walk frame. A NEUTER (remove the advance) must break it."""
+    drive several animation ticks, and assert the pet reports more than one
+    distinct walk frame. A NEUTER (remove the advance) must break it.
+
+    Re-anchored 2026-07-29: this used to sniff `<img>.src` writes; sampling
+    `TofuPet.getFrame()` tests the same thing through the engine's own public
+    seam, which survives a delivery-mechanism change (inline SVG then, <img>
+    PNG frames after the 2026-07-30 raster revamp)."""
     def frames_seen(src_text):
         harness = r'''
 'use strict';
@@ -828,31 +1015,62 @@ global.window = { matchMedia(){ return {matches:false, addEventListener(){}, add
 global.BASE_PATH = '';
 global.ResizeObserver = function(){ return {observe(){}, disconnect(){}}; };
 global.localStorage = { _d:{}, getItem(k){return this._d[k]||null;}, setItem(k,v){this._d[k]=v;} };
-global.Image = function(){ return { set src(v){}, get src(){return '';} }; };
+// Each frame is an <img> the engine creates once and keeps. The src setter
+// fires onload as a MICROTASK so a frame is available on the very next tick —
+// never firing it would leave every frame unpainted and the cycle would look
+// static, and a bare src-accessor stub throws on node.style.
+global.Image = function(){
+  const el = _fakeEl('img');
+  Object.defineProperty(el, 'src', {
+    set(v){ this._src = v; const self = this; Promise.resolve().then(function(){ if (self.onload) self.onload(); }); },
+    get(){ return this._src || ''; },
+  });
+  return el;
+};
+// The engine paints a frame from a .then() continuation, i.e. on a microtask.
+// Draining the microtask queue between rAF ticks is what lets a fetched frame
+// actually become visible; without it every frame stays pending and the cycle
+// looks static even though the ticker is advancing correctly.
+const _drain = () => new Promise(r => setImmediate(r));
+global.t = function (k, p) {
+  let text = k;
+  if (p) { for (const q in p) { if (Object.prototype.hasOwnProperty.call(p, q)) text = text.split('{' + q + '}').join(p[q]); } }
+  return text;   // passthrough — mirrors the page boot stub (index.html:80)
+};
 let _mounted=null; const _seen=[];
-function _fakeEl(tag){ return { _attrs:{}, tagName:tag||'', offsetWidth:30,
-  set src(v){ if(this.tagName==='img'){ _seen.push(v); } this._src=v; }, get src(){ return this._src||''; },
+function _fakeEl(tag){ return { _attrs:{}, tagName:tag||'', offsetWidth:30, children:[],
+  set src(v){ this._src=v; }, get src(){ return this._src||''; },
+  set innerHTML(v){ this._html=v; }, get innerHTML(){ return this._html||''; },
   setAttribute(k,v){this._attrs[k]=v;}, getAttribute(k){return this._attrs[k];},
-  addEventListener(){}, appendChild(){}, insertBefore(){}, querySelector(){return null;}, querySelectorAll(){return [];},
+  addEventListener(){}, appendChild(c){ this.children.push(c); }, insertBefore(){},
+  querySelector(sel){ return sel === 'svg' ? _fakeEl('svg') : null; }, querySelectorAll(){return [];},
   getBoundingClientRect(){ return {left:0,right:400,top:0,bottom:48,width:400,height:48}; }, firstChild:null, style:{setProperty(){}, removeProperty(){}} }; }
 global.document = { readyState:'complete', hidden:false, addEventListener(){},
   getElementById(id){ if(id==='projectBar') return _fakeEl(); return _mounted; },
-  createElement(t){ const e=_fakeEl(t); if(t!=='img') _mounted=e; return e; },
+  createElement(t){ const e=_fakeEl(t); if(t==='span' && !_mounted) _mounted=e; return e; },
   querySelectorAll(){ return _mounted?[_mounted]:[]; } };
 __SRC__
 // Force a walk state, then pump the rAF loop advancing the clock ~150ms/tick.
 const TP = window.TofuPet;
 _seen.length = 0;
-// run ~12 frames of ~150ms each = enough to cross multiple 150ms keyposes
-for (let k=0; k<12; k++){
-  _t += 160;
-  const cb = _cbs.shift();
-  if (cb) cb(_t);
-}
-const walkSeen = _seen.filter(s => /walk\d/.test(s));
-const distinct = Array.from(new Set(walkSeen));
-console.log(JSON.stringify({ distinct: distinct.length, walkSeen: walkSeen.length }));
-process.exit(0);
+// run ~12 frames of ~160ms each — comfortably more than one 75ms keypose each,
+// so a cycle that advances at all must report several distinct frames.
+(async () => {
+  await _drain();               // let the boot-time frame preloads settle
+  for (let k=0; k<12; k++){
+    _t += 160;
+    const cb = _cbs.shift();
+    if (cb) cb(_t);
+    await _drain();             // let this tick's frame fetch/paint land
+    // Sample through the engine's PUBLIC seam rather than a DOM side effect.
+    const f = TP && TP.getFrame ? TP.getFrame() : '';
+    if (f) _seen.push(f);
+  }
+  const walkSeen = _seen.filter(s => /walk\d/.test(s));
+  const distinct = Array.from(new Set(walkSeen));
+  console.log(JSON.stringify({ distinct: distinct.length, walkSeen: walkSeen.length }));
+  process.exit(0);
+})();
 '''
         script = harness.replace("__SRC__", src_text)
         out = subprocess.run(["node", "-e", script], capture_output=True, text=True,
@@ -873,6 +1091,116 @@ process.exit(0);
     broken = frames_seen(neut)
     assert broken["distinct"] <= 1, \
         f"neutered build still cycled (distinct={broken['distinct']}) — test does not bite"
+
+
+def test_bubble_follows_the_pet_every_frame():
+    """The click bubble is ANCHORED to the pet, not to the spot the tap landed.
+
+    A tap also STARTLES the pet into a flee dash, so a bubble positioned only
+    once at show time is left hanging over empty floor while the pet scurries
+    away — the owner's "the dialogue box doesn't follow the pet" report. The
+    fix: _place() re-anchors the bubble every frame while it is alive. Drive
+    the REAL module with reduced-motion OFF, interact(), pump the rAF loop and
+    assert the bubble's left tracks the pet's x tick by tick. A NEUTER that
+    drops the re-anchor call must leave the bubble behind.
+    """
+    def run(src_text):
+        harness = r'''
+'use strict';
+let _t = 0;
+const RealDate = Date;
+class FakeDate extends RealDate { static now(){ return _t; } getHours(){ return 14; } }
+global.Date = FakeDate;
+let _cbs = [];
+global.requestAnimationFrame = function(cb){ _cbs.push(cb); return _cbs.length; };
+global.cancelAnimationFrame = function(){};
+global.window = { matchMedia(){ return {matches:false, addEventListener(){}, addListener(){}}; }, addEventListener(){} };
+global.BASE_PATH = '';
+global.ResizeObserver = function(){ return {observe(){}, disconnect(){}}; };
+global.localStorage = { _d:{}, getItem(k){return this._d[k]||null;}, setItem(k,v){this._d[k]=v;} };
+global.Image = function(){
+  return { _attrs:{}, draggable:false, alt:'', style:{},
+    setAttribute(k,v){ this._attrs[k]=v; }, getAttribute(k){ return this._attrs[k]; },
+    addEventListener(){}, appendChild(){},
+    set src(v){ this._src = v; }, get src(){ return this._src || ''; } };
+};
+global.t = function (k, p) {
+  let text = k;
+  if (p) { for (const q in p) { if (Object.prototype.hasOwnProperty.call(p, q)) text = text.split('{' + q + '}').join(p[q]); } }
+  return text;
+};
+const _barChildren = [];
+function _fakeEl(tag){ return { _attrs:{}, tagName:tag||'', className:'', textContent:'', innerHTML:'',
+  offsetWidth:30, children:[], parentNode:null,
+  style:{ _p:{}, setProperty(k,v){ this._p[k]=v; }, removeProperty(k){ delete this._p[k]; } },
+  setAttribute(k,v){ this._attrs[k]=v; }, getAttribute(k){ return this._attrs[k]!==undefined?this._attrs[k]:null; },
+  addEventListener(){},
+  appendChild(c){ c.parentNode=this; this.children.push(c); return c; },
+  insertBefore(c){ c.parentNode=this; this.children.unshift(c); return c; },
+  removeChild(c){ const i=this.children.indexOf(c); if(i>=0) this.children.splice(i,1); c.parentNode=null; return c; },
+  querySelector(){ return null; }, querySelectorAll(){ return []; },
+  getBoundingClientRect(){ return {left:0,right:400,top:0,bottom:48,width:400,height:48}; },
+  firstChild:null }; }
+const _bar = _fakeEl('span');
+const _origAppend = _bar.appendChild.bind(_bar);
+_bar.appendChild = function(c){ _barChildren.push(c); return _origAppend(c); };
+const _origInsert = _bar.insertBefore.bind(_bar);
+_bar.insertBefore = function(c){ _barChildren.push(c); return _origInsert(c); };
+global.document = { readyState:'complete', hidden:false, addEventListener(){},
+  getElementById(id){ if(id==='projectBar') return _bar; return null; },
+  createElement(t){ return _fakeEl(t); },
+  querySelectorAll(){ return []; } };
+__SRC__
+const TP = window.TofuPet;
+(async () => {
+  // The tap: pops the bubble AND startles the pet into a flee dash.
+  TP.interact();
+  const bubble = _barChildren.find(c => c.className === 'tofu-pet-bubble');
+  const samples = [];
+  for (let k = 0; k < 14; k++){
+    _t += 160;
+    const cb = _cbs.shift();
+    if (cb) cb(_t);
+    await new Promise(r => setImmediate(r));
+    samples.push({ x: TP.getState().x, left: bubble ? (bubble.style.left || '') : '' });
+  }
+  console.log(JSON.stringify({ samples: samples }));
+  process.exit(0);
+})();
+'''
+        script = harness.replace("__SRC__", src_text)
+        out = subprocess.run(["node", "-e", script], capture_output=True, text=True,
+                             cwd=str(REPO), timeout=20)
+        assert out.returncode == 0, f"node failed: {out.stderr}\n{out.stdout}"
+        line = [ln for ln in out.stdout.strip().splitlines() if ln.strip().startswith("{")][-1]
+        return json.loads(line)["samples"]
+
+    src = PET_JS.read_text()
+    samples = run(src)
+    assert samples and all(s["left"] for s in samples), \
+        f"bubble never rendered or never got a left: {samples[:3]}"
+    xs = [s["x"] for s in samples]
+    lefts = [float(s["left"].replace("px", "")) for s in samples]
+    moved = max(xs) - min(xs)
+    assert moved > 15, f"the pet barely moved across 14 ticks ({moved:.1f}px) — harness broken"
+    drift = max(abs(l - (x + 15.0)) for l, x in zip(lefts, xs))
+    assert drift < 0.6, (
+        f"the bubble does NOT follow the pet: worst |bubbleLeft-(x+15)| = {drift:.1f}px "
+        f"across {len(samples)} ticks (pet moved {moved:.0f}px). "
+        "The bubble must be re-anchored every frame, not positioned once at show time.")
+
+    # NEUTER: drop the per-frame re-anchor from _place() → the bubble freezes
+    # at the tap spot while the pet runs off.
+    neut = src.replace("    _positionBubble();   // the bubble rides above the pet, wherever it moved to\n",
+                       "", 1)
+    assert neut != src, "neuter did not match the _place re-anchor call"
+    nsamples = run(neut)
+    nxs = [s["x"] for s in nsamples]
+    nlefts = [float(s["left"].replace("px", "")) for s in nsamples]
+    ndrift = max(abs(l - (x + 15.0)) for l, x in zip(nlefts, nxs))
+    assert max(nxs) - min(nxs) > 15, "neutered pet barely moved — harness broken"
+    assert ndrift > 5.0, (
+        f"neutered build still tracks the pet (drift {ndrift:.1f}px) — the guard does not bite")
 
 
 def test_wander_clamps_to_a_safe_track():
@@ -919,20 +1247,36 @@ def test_success_celebrates():
 
 
 def test_facing_layer_has_no_transition_no_paper_flip():
-    """ROOT of the 'flips like a sheet of paper on its vertical axis' bug: the
-    direction layer (.tofu-pet-facing) owns the scaleX(±1) mirror. If that layer
-    carries a `transition:transform`, flipping +1→-1 tweens THROUGH scaleX(0) —
-    the sprite collapses to a zero-width line and mirrors (the paper flip). The
-    mirror MUST be instant, so the .tofu-pet-facing rule must have no transition.
-    The natural turn motion is instead carried by the tofuPetPivot keyframe."""
+    """ROOT of the 'flips like a sheet of paper on its vertical axis' bug: if the
+    scaleX(±1) mirror carries a `transition:transform`, flipping +1→-1 tweens
+    THROUGH scaleX(0) — the sprite collapses to a zero-width line and mirrors
+    (the paper flip). The mirror MUST be instant; the natural turn motion is
+    carried by the tofuPetPivot keyframe instead.
+
+    Re-anchored 2026-07-29: the mirror moved OFF the old `.tofu-pet-facing`
+    wrapper and INTO the sprite, onto its [data-space="char"] groups via
+    --pet-face-flip. Mirroring a wrapper also mirrored the block's baked
+    shading, so the sun appeared to jump across the body on every turn while the
+    cast shadow (driven by the real scene sun) correctly stayed put. The
+    paper-flip lesson is unchanged — only where it applies moved — so this now
+    guards that neither surviving layer tweens a transform."""
     css = (REPO / "static" / "styles.css").read_text()
-    m = re.search(r"\.tofu-pet-facing\{([^}]*)\}", css)
-    assert m, "could not isolate the .tofu-pet-facing rule"
+    assert ".tofu-pet-facing" not in css, (
+        "the .tofu-pet-facing wrapper is back. Mirroring a wrapper drags the "
+        "block's lighting around with the pet — the sun teleports on every turn.")
+    m = re.search(r"\.tofu-pet \.tofu-pet-img\{([^}]*)\}", css)
+    assert m, "could not isolate the .tofu-pet-img rule"
     body = m.group(1)
     assert "transition" not in body, (
-        "the .tofu-pet-facing (direction) layer regained a transition — the "
-        "scaleX mirror will tween through 0 and re-create the paper-flip smear.\n"
-        "body=" + body)
+        "the frame layer gained a transition. Any transform tween on the layers "
+        "around the sprite risks the paper-flip smear the instant mirror avoids."
+        "\nbody=" + body)
+    # The mirror itself must stay a bare property write, never a tweened one.
+    for rule in re.findall(r"\.tofu-pet[^{]*\{([^}]*)\}", css):
+        if "--pet-face-flip" in rule and "transition" in rule:
+            raise AssertionError(
+                "a rule both sets --pet-face-flip and declares a transition; "
+                "the facing flip must be instant or the face smears through 0.")
 
 
 def test_turn_pivot_keyframe_exists_and_is_wired():
@@ -986,16 +1330,20 @@ def test_neuter_gaze_hop_scope_is_load_bearing():
 
 
 def test_neuter_facing_transition_reintroduces_paper_flip_risk():
-    """NEUTER: re-add a transform transition to .tofu-pet-facing in a COPY →
-    the no-transition guard must fire, proving it's load-bearing."""
+    """NEUTER: re-add a transform transition to the frame layer in a COPY → the
+    no-transition guard must fire, proving it's load-bearing.
+
+    Re-anchored with the guard above: the mirror now lives inside the sprite, so
+    the neuter poisons the layer that still exists (.tofu-pet-img) rather than
+    the deleted .tofu-pet-facing wrapper."""
     css = (REPO / "static" / "styles.css").read_text()
-    poisoned = css.replace(
-        ".tofu-pet-facing{display:block;width:100%;height:100%}",
-        ".tofu-pet-facing{display:block;width:100%;height:100%;transition:transform 0.15s ease}",
-        1)
-    assert poisoned != css, "neuter did not match the .tofu-pet-facing rule"
-    m = re.search(r"\.tofu-pet-facing\{([^}]*)\}", poisoned)
-    assert m and "transition" in m.group(1), "neuter did not actually add a transition"
+    anchor = ".tofu-pet .tofu-pet-img{"
+    assert anchor in css, "could not locate the .tofu-pet-img rule to poison"
+    poisoned = css.replace(anchor, anchor + "transition:transform 0.15s ease;", 1)
+    assert poisoned != css, "neuter did not match the .tofu-pet-img rule"
+    m = re.search(r"\.tofu-pet \.tofu-pet-img\{([^}]*)\}", poisoned)
+    assert m and "transition" in m.group(1), (
+        "neuter did not actually add a transition")
 
 
 def test_pet_reads_scene_light_and_drives_lighting_props():
@@ -1080,8 +1428,15 @@ def test_neuter_breaks_night_sleep():
               .replace("__HOUR__", "2")
               .replace("__NOW__", "0")
               .replace("__PATCH__", json.dumps({"mood": 80, "energy": 90})))
-    out = subprocess.run(["node", "-e", script + "\nprocess.exit(0);"],
-                         capture_output=True, text=True, cwd=str(REPO), timeout=20)
+    import tempfile
+    with tempfile.NamedTemporaryFile('w', suffix='.json', delete=False) as fh:
+        json.dump(_i18n_dict(), fh)
+        dict_path = fh.name
+    try:
+        out = subprocess.run(["node", "-e", script + "\nprocess.exit(0);", dict_path],
+                             capture_output=True, text=True, cwd=str(REPO), timeout=20)
+    finally:
+        os.unlink(dict_path)
     assert out.returncode == 0, f"node failed: {out.stderr}"
     line = [ln for ln in out.stdout.strip().splitlines() if ln.strip().startswith("{")][-1]
     expr = json.loads(line)["expr"]
@@ -1089,7 +1444,7 @@ def test_neuter_breaks_night_sleep():
 
 
 if __name__ == "__main__":
-    for fn in [test_expression_frames_exist_on_disk, test_extra_cat_pose_frames_exist_on_disk,
+    for fn in [test_expression_frames_exist_on_disk, test_extra_pose_frames_exist_on_disk,
                test_curious_alias_resolves_to_a_real_frame,
                test_decor_scene_assets_exist, test_decor_css_wires_every_scene,
                test_control_lift_is_allowlist_not_denylist,

@@ -7,16 +7,28 @@
    already see in the sidebar — with the Project Brain's coordination state:
    a plain "Project" label leads, followed by the action-ordered counts:
 
-       🧠 Project · N decisions awaiting you · M epics in progress ·
+       🧠 Project · N need you · M epics in progress ·
           K open · P conversations online
 
    The bar deliberately does NOT surface the Pillar #7 ambient status headline
    (summary.statusLine — the first sentence of the latest synthesized
    project-status snapshot): a one-line narrative truncated to fit the bar
    carries no useful signal and pushes the counts around. The full snapshot
-   lives in the Project Brain Status tab, one click away. "decisions awaiting
-   you" comes first among the counts because it is the only thing that needs
-   the human to act (the Charter human-gate). Each online peer is joined to the
+   lives in the Project Brain Status tab, one click away.
+
+   "need you" comes first among the counts because it is the only thing that
+   requires the human to act. It is the backend ATTENTION SSOT
+   (lib/conversations/project_attention.py, surfaced on summary.needsYou /
+   .blocking) — NOT the old pendingDecisions count, which tallied charter
+   proposals only. That was an inversion: agents have self-committed charter
+   decisions since the 2026-07-12 de-gating, so a pending proposal blocks
+   nothing, while an epic halted on a structured question (skipped by
+   project_dispatch on every heartbeat, so it never resolves on its own) was
+   not represented on this bar at all. The bar now counts everything awaiting
+   the human and reserves its EMPHASIS for summary.blocking — work that is
+   actually stopped.
+
+   Each online peer is joined to the
    epic it is *advancing* (summary.peerEpics: convId → epic title) so the bar
    shows "conversation X · «Refactor the parser»", not "(untitled) · generating".
 
@@ -65,9 +77,20 @@
   function _displayedRoot() {
     try {
       const conv = (typeof getActiveConv === "function") ? getActiveConv() : null;
-      if (!conv) return "";
-      const p = (typeof _getConvProjectPath === "function")
-        ? _getConvProjectPath(conv) : (conv.projectPath || "");
+      let p = "";
+      if (conv) {
+        p = (typeof _getConvProjectPath === "function")
+          ? _getConvProjectPath(conv) : (conv.projectPath || "");
+      }
+      // Fallback mirrors project-brain.js's _displayedProjectPath: a New Chat
+      // with pending input keeps the project ARMED in the active-project
+      // singleton while there is no conv to read projectPath from (and a
+      // shell-loaded conv may not carry it in-memory yet). The bar and the
+      // panel must resolve the SAME project, or one shows what the other
+      // denies.
+      if (!p && typeof projectState !== "undefined" && projectState && projectState.active) {
+        p = projectState.path || "";
+      }
       return _norm(p);
     } catch (e) { return ""; }
   }
@@ -121,10 +144,29 @@
           html: _esc(_t("collab.conflicts", { n: conflicts }, conflicts + " conflict")) });
       }
       const pend = summary.pendingDecisions || 0;
-      if (pend > 0) {
-        // The only action-needing (approval) segment → emphasised.
-        segs.push({ cls: "collab-seg-decisions",
-          html: _esc(_t("collab.decisionsAwaiting", { n: pend }, pend + " decisions awaiting you")) });
+      const needs = summary.needsYou || 0;
+      const blocking = summary.blocking || 0;
+      if (needs > 0) {
+        // The ONE attention segment, from the backend attention SSOT. It
+        // replaces the old "N decisions awaiting you" (which counted charter
+        // proposals only — and those block nothing, since agents self-commit
+        // decisions since the 2026-07-12 de-gating). `needs` counts everything
+        // waiting on the human; `blocking` — work that is STOPPED until a human
+        // acts — is what decides whether this reads urgent or calm.
+        //
+        // .collab-seg-decisions is kept as an alias so the bar's existing
+        // styling + selector contract survive the rename.
+        segs.push({ cls: 'collab-seg-decisions collab-seg-needsyou' +
+            (blocking > 0 ? ' collab-seg-blocking' : ''),
+          html: _esc(blocking > 0
+            ? _t('collab.needsYouBlocking', { n: needs }, needs + ' need you')
+            : _t('collab.needsYou', { n: needs }, needs + ' awaiting you')) });
+      } else if (pend > 0) {
+        // Fallback for a server that predates the attention SSOT (an older
+        // backend behind a fresh bundle): keep the legacy count visible rather
+        // than silently dropping the segment.
+        segs.push({ cls: 'collab-seg-decisions',
+          html: _esc(_t('collab.decisionsAwaiting', { n: pend }, pend + ' decisions awaiting you')) });
       }
       const inProg = summary.epicsClaimed || 0;
       if (inProg > 0) {
@@ -207,7 +249,15 @@
 
     // ── Coordination counts (brainSummary — decisions/epics/peers) ──
     const segs = _segments(summary, peerCount);
-    const hasDecisions = !!(summary && (summary.pendingDecisions || 0) > 0);
+    // `hasDecisions` keeps its class name (the bar's styling + test contract)
+    // but now means "something is waiting on the human" — the attention count
+    // — falling back to the legacy proposal count on an older backend.
+    const needsYou = (summary && typeof summary.needsYou === 'number')
+      ? summary.needsYou : (summary ? (summary.pendingDecisions || 0) : 0);
+    const hasDecisions = needsYou > 0;
+    // Work that is STOPPED until a human acts. This — not the raw count — is
+    // what makes the bar read urgent, so an advisory-only project stays calm.
+    const hasBlocking = !!(summary && (summary.blocking || 0) > 0);
     const hasConflicts = !!(summary && (summary.conflicts || 0) > 0);
 
     // Nothing to surface at all (solo, empty board) → hide the whole bar. The
@@ -243,6 +293,7 @@
 
     const cls = "collab-bar-inner"
       + (hasConflicts ? " collab-has-conflicts" : "")
+      + (hasBlocking ? " collab-has-blocking" : "")
       + (hasDecisions ? " collab-has-decisions" : "");
     const html =
       `<button type="button" class="${cls}" `
@@ -257,11 +308,14 @@
     el.hidden = false;
     el.classList.add("collab-bar");
 
-    // Whole bar → open the Project Brain panel.
+    // Whole bar → open the Project Brain panel. When something is waiting on
+    // the human we hand the count to the panel so it lands directly on the
+    // Needs-you tab — the bar poses the question, the tab is the answer.
+    // Otherwise the panel keeps the operator's last-used tab.
     const inner = el.querySelector(".collab-bar-inner");
     if (inner) {
       inner.addEventListener("click", () => {
-        if (typeof openProjectBrain === "function") openProjectBrain();
+        if (typeof openProjectBrain === "function") openProjectBrain({ needsYou: needsYou });
       });
     }
   }

@@ -167,6 +167,19 @@ _REPO_ROOT = os.path.dirname(_TESTS_DIR)
 _DB_WRITE_SIGNATURES = (
     'get_thread_db', 'upsert(', 'create_task', '_seed_conv',
     'persist_task_result', 'INSERT INTO', 'dispatch_next_queued',
+    # tasks_pkg.manager.append_event persists to task_events via
+    # _persist_before_push (manager/_events.py -> database/event_log.py).
+    # Tests that stub spawn_task call the REAL append_event on synthetic
+    # tasks; outside pytest (no conftest shim) that lands on the shared DB.
+    'append_event',
+    # Indirect drivers: tests may call the terminal/partial sync seams or the
+    # event-log writer DIRECTLY (bypassing persist_task_result/append_event).
+    # Today every such file is already caught by another signature or guarded
+    # (strict AST re-scan 2026-07-26: 0 unguarded, population +1); these pin
+    # the door against a FUTURE file that calls only the seam.
+    '_sync_result_to_conversation',
+    '_sync_partial_to_conversation',
+    'append_persistent_event',
 )
 
 # A file is considered SAFE if it does any one of these BEFORE it can write:
@@ -198,6 +211,22 @@ _KNOWN_EXEMPT: dict[str, str] = {
     'test_orchestration_endpoint_runner.py': (
         'pure in-memory unittest — same pattern: stubs persist_task_result to '
         'a no-op and monkeypatches the engine runner; no real DB access.'),
+    'test_task_runtime.py': (
+        'exercises the BARE TaskRuntime (lib/task_runtime) whose append_event '
+        'is in-memory only; the task_events persist hook (_persist_before_push) '
+        'is wired by tasks_pkg.manager, which this file never imports.'),
+    'test_lib_orchestrator_wire_parity.py': (
+        'append_event appears only as a monkeypatch TARGET (vus.append_event = '
+        'lambda ...) to observe call counts — the real persister never runs.'),
+    'test_paper_migration.py': (
+        "routes/paper's _append_report_event feeds an in-memory report runtime; "
+        'no append_persistent_event / before_push hook exists in routes/paper.'),
+    'test_paper_media_ux.py': (
+        '__main__ delegates to `python -m pytest <self>` — the subprocess '
+        "re-enters pytest, so conftest.py's force-sqlite shim protects it."),
+    'test_frontend_convview_apply_guards.py': (
+        'frontend source-scan (static JS / jsdom); matches upsert( only via '
+        'scanned JS symbol names — no Python DB call exists in the file.'),
 }
 
 

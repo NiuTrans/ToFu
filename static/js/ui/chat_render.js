@@ -78,6 +78,88 @@ function _apRunConcluded(conv, runId, isLast) {
  * `.autopilot-run-fold` left in the DOM (e.g. from a surgical re-render that
  * predates this change), hoisting its turns back to the flat sibling level so
  * the layout never gets stuck half-folded. */
+/* ★ Run-tail notice for a run that ENDED WITHOUT ANSWERING ────────────────
+ * A run can stop after the virtual user already produced a reply — it yielded
+ * to a human, was aborted, or was superseded mid-flight. That reply is
+ * deliberately NOT in `conv.messages` (that list is the history sent upstream;
+ * an undelivered VU reply there would read back as words the human actually
+ * said), so without this notice the transcript simply STOPS: the last thing on
+ * screen is the agent asking a question, with no indication that the loop ended
+ * or that work was done and withheld. That silence is the whole bug — the run
+ * died and the UI showed nothing at all for 2h12m.
+ *
+ * So the terminal fact is rendered from the SIDECAR record instead: why the run
+ * ended, plus the preserved-but-unsent text behind a <details> so it is
+ * recoverable without ever entering the conversation. Appended once, after the
+ * run's last stamped turn. */
+function _apRunNoticeHTML(rec) {
+  const _l = (k, fallback) => (typeof t === 'function' && t(k) !== k) ? t(k) : fallback;
+  const reason = (rec && rec.reason) || '';
+  const _REASONS = {
+    yielded_to_human: ['autopilot.endedYielded',
+      'Autopilot stood down — you sent a message, so it stopped here'],
+    aborted_mid_vu: ['autopilot.endedAborted',
+      'Autopilot stopped — the turn was cancelled while it was working'],
+    superseded: ['autopilot.endedSuperseded',
+      'Autopilot stood down — a newer turn took over this conversation'],
+    budget_exhausted: ['autopilot.endedBudget',
+      'Autopilot stopped early — it hit its turn budget (needs review)'],
+    no_progress: ['autopilot.endedNoProgress',
+      'Autopilot stopped early — it stopped making progress (needs review)'],
+    stuck: ['autopilot.endedStuck',
+      'Autopilot stopped early — it was repeating itself (needs review)'],
+  };
+  const spec = _REASONS[reason];
+  if (!spec) return '';
+  const label = _l(spec[0], spec[1]);
+  const unsent = (rec && rec.unsent && rec.content) ? String(rec.content) : '';
+  let body = '';
+  if (unsent) {
+    /* The reply is shown as PLAIN TEXT, not rendered markdown: it never became
+     * a turn, and dressing it up like one invites reading it as something the
+     * user said. The label states plainly that it was never sent. */
+    body = String(safeHtml`<details class="ap-run-notice-unsent"><summary>${
+      _l('autopilot.unsentReply',
+         'This reply was written but never sent to the conversation')
+    }</summary><pre class="ap-run-notice-text">${unsent}</pre></details>`);
+  }
+  return String(safeHtml`<div class="ap-run-notice" data-ap-notice="1"
+    data-ap-reason="${reason}"><span class="ap-run-notice-label">${label}</span>${raw(body)}</div>`);
+}
+
+/* Append the run-tail notice after the LAST stamped turn of each concluded run
+ * that ended without answering. Idempotent: an existing notice for the run is
+ * replaced, so repeated render passes never stack duplicates. */
+function _applyAutopilotRunNotices(inner, conv) {
+  if (!inner || !conv) return;
+  try {
+    const stamped = inner.querySelectorAll('[data-ap-run]');
+    const lastOf = {};
+    stamped.forEach(el => {
+      const rid = el.getAttribute('data-ap-run');
+      if (rid) lastOf[rid] = el;
+    });
+    Object.keys(lastOf).forEach(runId => {
+      const rec = _apRunRecord(conv, runId);
+      if (!rec || rec.status !== 'concluded') return;
+      const html = _apRunNoticeHTML(rec);
+      const anchor = lastOf[runId];
+      /* Drop any prior notice for this run (reason/content may have changed). */
+      const stale = inner.querySelector(`[data-ap-notice][data-ap-run-id="${runId}"]`);
+      if (stale) stale.remove();
+      if (!html) return;
+      const holder = document.createElement('div');
+      holder.innerHTML = html;
+      const node = holder.firstElementChild;
+      if (!node) return;
+      node.setAttribute('data-ap-run-id', runId);
+      anchor.parentNode.insertBefore(node, anchor.nextSibling);
+    });
+  } catch (e) {
+    console.warn('[Autopilot notice] render failed (non-fatal):', e && e.message);
+  }
+}
+
 function _applyAutopilotRunFolds(inner, conv) {
   if (!inner) return;
   try {
@@ -110,6 +192,113 @@ function _hashStr(s) {
     h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0;
   }
   return h.toString(36);
+}
+
+/* ── Conversation-level action gate (RENDER_CONTRACT Invariant 3) ─────────
+ * `renderMessage` decides the bottom action bar from CONVERSATION state, not
+ * message state: `canDelete = conv && !activeStreams.has(conv.id) &&
+ * !conv.activeTaskId`. That state is invisible to a purely message-derived
+ * fingerprint, so when a task started or finished the surgical diff read an
+ * UNCHANGED `data-mfp` and skipped every row — both directions broken:
+ *   • busy → idle: a settled turn kept NO Delete button, so a finished turn
+ *     could not be deleted at all until some unrelated full re-render.
+ *   • idle → busy: the turn kept a VISIBLE Delete button, but `deleteTurn()`
+ *     re-reads the live gate and returns immediately — a button that silently
+ *     does nothing (the reported "delete behaves very strangely").
+ * Folding the gate into the version makes the ONE surgical trigger repaint the
+ * action bar when it flips. O(1) and CONSTANT while a stream runs, so it adds
+ * no per-round churn — it moves only at the two edges of a turn. */
+function _convActionGate() {
+  const conv = (typeof getActiveConv === 'function') ? getActiveConv() : null;
+  if (!conv) return '';
+  return _convBusyAnyLane(conv) ? 'B' : 'I';
+}
+
+/* ── TWO liveness questions, TWO predicates (pt_ae8777b4eee04ef1) ──────────
+ *
+ * renderMessage used to answer "has this turn settled?" FOUR separate times,
+ * and they disagreed:
+ *     _isLiveTail     = activeStreams.has || conv.activeTaskId     (read the pin)
+ *     isLastAssistant = !activeStreams.has                         (did NOT)
+ *     canDelete       = !activeStreams.has && !conv.activeTaskId   (read the pin)
+ *     _turnFailed     = error || finishReason === 'interrupted'    (no liveness)
+ * With the SSE down but the conv still pinned to a running task — a cold attach
+ * to an autopilot VU carrier, a socket-down window, the poll-only lane — the
+ * first said IN FLIGHT (and correctly suppressed the finish bar) while the
+ * second said SETTLED, IN THE SAME RENDER PASS. The action bar and the Continue
+ * button then rendered under a turn the backend was still generating.
+ *
+ * The second half of that defect is the settlement verdict: the backend
+ * deliberately WITHHOLDS finishReason mid-stream, and computeTurnSettlement
+ * maps a MISSING reason to `interrupted` / resume:'checkpoint' (fail-open,
+ * which is right for a legacy or historical turn). So "no finishReason yet"
+ * reads as "interrupted and resumable" — correct ONLY once you know the turn
+ * has actually stopped. Liveness is that missing dimension; it can never be
+ * inferred from the absence of finishReason.
+ *
+ * ★ WHY TWO PREDICATES AND NOT ONE. The first fix collapsed all four onto
+ * `computeConvBusy`, the composer/sidebar union. That imported a semantic the
+ * render gate must NOT have: computeConvBusy ALSO scans for branch-stream keys
+ * (`conv.id + ':'` — branch_stream.js writes `convId:msgIdx:branchIdx` into
+ * activeStreams). "Is anything running in this conversation" is the right
+ * question for the sidebar dot and the Stop button; it is the WRONG question
+ * for "is this turn's tail still being written". Measured consequence: with a
+ * branch streaming, a MAIN turn that had already finished (finishReason=stop,
+ * usage present) lost its finish bar and its Delete button — the mirror of the
+ * bug being fixed. A branch stream does not write the main tail, so:
+ *
+ *   TURN level  (_isTurnInFlight)   — writers of THIS turn's tail only:
+ *       this tab's MAIN stream (exact `conv.id` key), the optimistic
+ *       `conv.activeTaskId` pin, and the server-authoritative
+ *       `_authoritativeActiveTaskIds` (which INCLUDES VU carriers behind the
+ *       `#vu` marker — the only way the poll lane sees a live autopilot turn).
+ *       Deliberately NO branch-key prefix scan.
+ *       Consumers: the finish bar, the Continue affordance, the force-reveal.
+ *
+ *   CONV level  (_convBusyAnyLane)  — delegates to computeConvBusy, so it is
+ *       byte-identical to what the Stop button reads, branch scan included.
+ *       Consumer: Delete. Deleting a message while ANY lane of this
+ *       conversation streams can pull the anchor out from under a live branch
+ *       (branch_stream.js keys its stream on convId:msgIdx:branchIdx, so a
+ *       shifting index corrupts it), and the action-gate fingerprint token —
+ *       the sidebar-facing "is this conv busy" fact.
+ *
+ * Load order is pinned: core/conv_state_reducer.js is bundled before
+ * ui/chat_render.js (lib/js_bundler.py _BUNDLE_FILES). The inline fallback in
+ * _convBusyAnyLane is a build-order canary for degenerate/partial bundles only
+ * — it must stay a strict subset of computeConvBusy, never a second opinion. */
+function _convBusyAnyLane(conv) {
+  if (!conv) return false;
+  if (typeof computeConvBusy === 'function') {
+    return !!computeConvBusy(conv, activeStreams);
+  }
+  return !!(activeStreams.has(conv.id) || conv.activeTaskId
+    || (conv._authoritativeActiveTaskIds
+        && conv._authoritativeActiveTaskIds.size > 0));
+}
+
+/* Is a writer of the MAIN turn active on this conversation? See the block
+ * above for why this deliberately does NOT scan branch-stream keys. */
+function _convMainTurnInFlight(conv) {
+  if (!conv) return false;
+  if (activeStreams.has(conv.id)) return true;          // this tab's MAIN stream
+  if (conv.activeTaskId) return true;                   // our own optimistic send
+  const _auth = conv._authoritativeActiveTaskIds;       // server truth (incl. #vu carrier)
+  return !!(_auth && typeof _auth.size === 'number' && _auth.size > 0);
+}
+
+/* Is the message at `idx` the TAIL of a turn still being written? The tail is
+ * the only message a live turn can write into, so the finish bar / Continue /
+ * force-reveal gates are all this one predicate. */
+function _isTurnInFlight(conv, idx) {
+  if (!conv || !Array.isArray(conv.messages)) return false;
+  if (idx !== conv.messages.length - 1) return false;
+  return _convMainTurnInFlight(conv);
+}
+if (typeof window !== "undefined") {
+  window._convBusyAnyLane = _convBusyAnyLane;
+  window._convMainTurnInFlight = _convMainTurnInFlight;
+  window._isTurnInFlight = _isTurnInFlight;
 }
 
 function _msgFingerprint(msg) {
@@ -234,11 +423,27 @@ function _msgFingerprint(msg) {
              + (c.tokensAfter || 0) + ';';
     }
   }
+  /* ── Terminal cost-accounting fold (RENDER_CONTRACT Invariant 3) ────────
+   * apiRounds / _taskId / usage land AFTER a message is first painted — the
+   * done event, or the MERGE_ACTIVE_TASK keep-local top-up in
+   * loadConversationMessages (a continuously-busy conv never takes the
+   * OVERWRITE branch, so that merge is the only way they arrive). The finish
+   * bar's per-round cost table (numRounds>1), the popover Task ID row, the
+   * key-tail route tag and the token tag ALL render only from these fields —
+   * a row painted before they arrived stayed rounds-less forever because
+   * nothing in this fingerprint saw them land. Cheap O(1) tokens only
+   * (count + presence — hashing the full round list would be wasted work). */
+  const _arFp = (Array.isArray(msg.apiRounds) && msg.apiRounds.length)
+    ? 'ar' + msg.apiRounds.length : '';
+  const _tidFp = msg._taskId ? 'T' : '';
+  const _usFp = msg.usage ? 'U' : '';
   return (msg.role || "") + ":" +
+    _convActionGate() + ":" +
     _hashStr(msg.content || "") + ":" +
     _hashStr(msg.thinking || "") + ":" +
     _errFp + ":" +
     (msg.finishReason || "") + ":" +
+    (_arFp || _tidFp || _usFp ? "term:" + _arFp + _tidFp + _usFp : "") + ":" +
     translationFingerprint(msg) + ":" +
     (sr ? sr.length : 0) + ":" +
     (msg._igResult ? "IG" : "") + ":" +
@@ -625,6 +830,26 @@ function renderChat(conv, forceScroll) {
     /* Anchor for insertion: the node the reconciled sequence must sit BEFORE.
      * We walk forward, placing each node right after the previous one. */
     let _prevEl = null;
+    /* HEAD anchor for the FIRST reconciled message (both _prevEl and _cursor
+     * still null). It must be the first MESSAGE node, NOT `inner.firstChild` —
+     * when a lazy window is active `firstChild` is `#_lazyLoadSentinel`, and
+     * anchoring on it inserts message #1 ABOVE the sentinel, i.e. pushes the
+     * sentinel down one slot on EVERY background repaint (→ it reaches the
+     * bottom, and `_loadOlderMessages` then splices the OLDEST messages below
+     * the newest one).
+     *
+     * The rule now lives in core/chatinner_dom.js so EVERY writer shares it.
+     * It used to be a closure right here, which is precisely why the mirror
+     * bug at the TAIL (ConvView's `beforeend` landing below the bottom
+     * sentinel) was not prevented: ConvView could not reach this closure.
+     * The local fallback is a build-order canary — the primitive is a leaf
+     * module loaded first, order pinned by
+     * tests/test_frontend_lazy_sentinel_anchor.py. */
+    const _headAnchor = () => {
+      if (typeof chatInnerHeadAnchor === 'function') return chatInnerHeadAnchor(inner);
+      const f = inner.firstChild;
+      return (f && f.id === '_lazyLoadSentinel') ? f.nextSibling : f;
+    };
     for (let i = startIdx; i < _surgTo; i++) {
       if (i === _skipIdx) continue;  // streaming message — leave #streaming-msg alone
       const msg = conv.messages[i];
@@ -646,7 +871,7 @@ function renderChat(conv, forceScroll) {
           anyChange = true;
         }
         /* Re-position into array order if it drifted out of place. */
-        const _want = _prevEl ? _prevEl.nextSibling : (_cursor ? _cursor.nextSibling : inner.firstChild);
+        const _want = _prevEl ? _prevEl.nextSibling : (_cursor ? _cursor.nextSibling : _headAnchor());
         if (el !== _want && el.parentNode === inner) {
           inner.insertBefore(el, _want);
           anyChange = true;
@@ -656,14 +881,26 @@ function renderChat(conv, forceScroll) {
         }
         _prevEl = el;
       } else {
-        /* New message — insert at the cursor position (array order), not blind append. */
-        const wrapper = document.createElement("div");
-        wrapper.innerHTML = renderMessage(msg, i);
-        const newEl = wrapper.firstElementChild;
-        if (newEl) {
-          inner.insertBefore(newEl, _prevEl ? _prevEl.nextSibling : (_cursor ? _cursor.nextSibling : null));
-          _prevEl = newEl;
+        /* New message — insert at the cursor position (array order), not blind
+         * append. Routed through the shared ordered-insert primitive with an
+         * EXPLICIT anchor: the walk above already resolved the precise sibling,
+         * and when that resolves to null the primitive falls back to a
+         * furniture-aware tail insert instead of a raw append. */
+        const _newAnchor = _prevEl ? _prevEl.nextSibling
+          : (_cursor ? _cursor.nextSibling : _headAnchor());
+        let newEl;
+        if (typeof chatInnerInsert === 'function') {
+          newEl = chatInnerInsert(inner, renderMessage(msg, i),
+                                  /** @type {any} */ (Object.assign(
+                                    _newAnchor ? { before: _newAnchor } : { position: 'tail' },
+                                    { conv: conv, site: 'renderChat:surgical-insert' })));
+        } else {
+          const wrapper = document.createElement("div");
+          wrapper.innerHTML = renderMessage(msg, i);
+          newEl = wrapper.firstElementChild;
+          if (newEl) inner.insertBefore(newEl, _newAnchor);
         }
+        if (newEl) _prevEl = newEl;
         anyChange = true;
       }
     }
@@ -703,17 +940,32 @@ function renderChat(conv, forceScroll) {
     }
     if (!activeStreams.has(conv.id)) {
       _applyAutopilotRunFolds(inner, conv);
+      _applyAutopilotRunNotices(inner, conv);
     }
     /* ★ Re-pin the anchor captured above (background repaint only) so an
      *   above-fold height change from the freshly-landed data doesn't drift a
      *   scrolled-up reader, then drop the cv-off guard. */
     if (_bgRepaint && _bgContainer) {
       void inner.scrollHeight;
-      if (_bgAnchor) _restoreScrollAnchor(_bgContainer, _bgAnchor);
+      /* ★ Explicit-bottom latch outranks the anchor re-pin here too: a
+       *   mid-open background repaint must not drag the reader off the bottom
+       *   they explicitly asked for. */
+      if (_explicitBottomLatch === conv.id && !activeStreams.has(conv.id)) {
+        _bgContainer.scrollTop = _bgContainer.scrollHeight;
+      } else if (_bgAnchor) {
+        _restoreScrollAnchor(_bgContainer, _bgAnchor);
+      }
       inner.classList.remove('cv-off');
     }
     _lastRenderedFingerprint = fp;
     _lazyConvId = conv.id;
+    /* RENDER_CONTRACT Invariant 1 tripwire (debug-mode, one-shot). Both
+     * ordering bugs — head and tail — survived because nothing ever asserted
+     * that the DOM is an ordered projection of conv.messages. A scenario test
+     * only catches the scenario someone thought of; this catches the shape. */
+    if (typeof assertChatInnerOrder === 'function') {
+      assertChatInnerOrder(inner, conv, 'renderChat:surgical');
+    }
     return;
   }
 
@@ -742,7 +994,11 @@ function renderChat(conv, forceScroll) {
    *   correctly force-scrolls + latches.) */
   const _openAlreadyPositioned = !!conv._initialSwitchLoad
     && _openScrollConvId === conv.id;
+  /* ★ Explicit-bottom latch outranks the anchor heuristic: while held, do
+   *   NOT capture an anchor — the re-pin target is the TRUE bottom, not
+   *   wherever the reader happened to be before this (unsolicited) repaint. */
   const _preSwapAnchor = (_sameConvDom && !activeStreams.has(conv.id)
+      && _explicitBottomLatch !== conv.id
       && (!_readerNearBottom || _openAlreadyPositioned))
     ? _captureScrollAnchor(container, inner)
     : null;
@@ -756,7 +1012,7 @@ function renderChat(conv, forceScroll) {
     } else {
       /* BASE_PATH is a trusted app constant (raw); the i18n subtitle is
        * escaped by default. */
-      inner.innerHTML = String(safeHtml`<div class="welcome" id="welcome"><div class="welcome-icon"><img src="${raw(BASE_PATH)}/static/icons/tofu-welcome.svg" alt="Tofu" width="64" height="64"></div><h2 class="tofu-brand"><span class="tofu-brand-t">T</span><span class="tofu-brand-o1">o</span><span class="tofu-brand-f">f</span><span class="tofu-brand-u">u</span><small>豆腐</small></h2><div class="feature-pills">${raw(_welcomePillsHtml())}</div></div>`);
+      inner.innerHTML = String(safeHtml`<div class="welcome" id="welcome"><div class="welcome-icon"><img ${raw(brandLogoImgAttrs(64))}></div><h2 class="tofu-brand"><span class="tofu-brand-t">T</span><span class="tofu-brand-o1">o</span><span class="tofu-brand-f">f</span><span class="tofu-brand-u">u</span><small>豆腐</small></h2><div class="feature-pills">${raw(_welcomePillsHtml())}</div></div>`);
     }
     _lastRenderedFingerprint = fp;
     buildTurnNav(conv);
@@ -787,6 +1043,7 @@ function renderChat(conv, forceScroll) {
   inner.innerHTML = html;
   if (!activeStreams.has(conv.id)) {
     _applyAutopilotRunFolds(inner, conv);
+    _applyAutopilotRunNotices(inner, conv);
   }
   _lastRenderedFingerprint = fp;
 
@@ -801,6 +1058,11 @@ function renderChat(conv, forceScroll) {
    * conversations.  The turn nav is not critical for the initial render. */
   requestAnimationFrame(() => buildTurnNav(conv));
 
+  /* Same Invariant-1 tripwire as the surgical path (debug-mode, one-shot). */
+  if (typeof assertChatInnerOrder === 'function') {
+    assertChatInnerOrder(inner, conv, 'renderChat:full');
+  }
+
   /* Scroll handling: if we captured a pre-swap anchor (same-conv re-render, a
    * reader parked up in history), re-pin their viewport instead of forcing to
    * the bottom — this is the direct fix for the "sudden jump to the top/bottom"
@@ -813,6 +1075,13 @@ function renderChat(conv, forceScroll) {
     void inner.scrollHeight;  // force real heights before re-pinning
     _restoreScrollAnchor(container, _preSwapAnchor);
     inner.classList.remove('cv-off');
+  } else if (_explicitBottomLatch === conv.id && !activeStreams.has(conv.id)) {
+    /* ★ Explicit jump-to-bottom latch (scrollChatToBottom): re-pin to the
+     *   TRUE bottom across EVERY render of this open — Phase-2 reconcile,
+     *   the .then fallback, background repaints. Takes precedence over BOTH
+     *   the anchor heuristic above and the no-scroll-on-open directive below:
+     *   those govern UNSOLICITED paints; an explicit click is a command. */
+    _forceScrollToBottom(container, true);
   } else if (!_sameConvDom || conv._initialSwitchLoad) {
     /* ★ No-auto-scroll-on-OPEN (owner directive). A conversation OPEN — a
      *   genuine switch (`!_sameConvDom`: the DOM currently shows a different
@@ -1000,6 +1269,10 @@ function renderMessage(msg, idx) {
   const _showTrans = !!_disp.isMarkdown && !!_tr.text && _tr.showing !== false;
   /* ★ Precise date + time for all messages */
   const messageTime = msg.timestamp ? _fmtAbsoluteDateTime(msg.timestamp) : "";
+  /* Resolve the conversation ONCE for every liveness gate in this render pass
+   * (finish bar, Continue, force-reveal). Re-resolving per gate risks two
+   * lookups straddling a conversation switch and disagreeing within one row. */
+  const _lvConvForGates = (typeof getActiveConv === 'function') ? getActiveConv() : null;
   let body = "";
   if (msg.images?.length > 0) {
     const srcMap = { clip_render: "CLIP", vector_clip: "VEC", page_render: "SCAN", embedded: "RAW", pixmap_fallback: "PIX", pymupdf4llm: "FIG", figure_page_render: "FIG" };
@@ -1192,7 +1465,14 @@ function renderMessage(msg, idx) {
    *   the user can pull the full tool activity on demand — a click hydrates the
    *   FULL conversation (heavy fields refilled by _msgId) and repaints. Only
    *   when this turn actually had tool rounds and none are currently present. */
-  if (!_segTimelineRendered && rounds.length === 0 && msg && msg._trimmed
+  /*   Count REAL rounds only: getToolRoundsFromMsg rebuilds display-only
+   *   inject rows (swarm / peer / user-steer) from the underscore sidecars
+   *   whenever `toolRounds` is empty, so a trimmed turn that also received
+   *   injects arrives here with rounds.length > 0 and no real history — the
+   *   affordance is the ONLY way back to it. */
+  const _realRounds = rounds.filter(
+    (r) => r && !r._inboxInject && !r._peerInject && !r._userSteerInject);
+  if (!_segTimelineRendered && _realRounds.length === 0 && msg && msg._trimmed
       && msg._trimmedToolRoundCount > 0) {
     const _n = msg._trimmedToolRoundCount;
     const _cid = (typeof activeConvId !== 'undefined') ? activeConvId : '';
@@ -1523,12 +1803,9 @@ function renderMessage(msg, idx) {
   if (!isUser) {
     /* Is this the still-running tail? The backend withholds finishReason/
      * usage mid-stream, so a model-only assistant message that is the last
-     * message of a conv with a live stream / active task is in progress —
-     * suppress its premature finish bar (see renderFinishInfo). */
-    const _lvConv = getActiveConv();
-    const _isLiveTail = !!(_lvConv
-      && idx === _lvConv.messages.length - 1
-      && (activeStreams.has(_lvConv.id) || _lvConv.activeTaskId));
+     * message of a conv still working is in progress — suppress its premature
+     * finish bar (see renderFinishInfo). Consumer #1 of _isTurnInFlight. */
+    const _isLiveTail = _isTurnInFlight(_lvConvForGates, idx);
     body += renderFinishInfo(msg, _isLiveTail);
   }
   const idAttr = typeof idx === "number" ? ` id="msg-${idx}"` : "";
@@ -1570,26 +1847,53 @@ function renderMessage(msg, idx) {
       ? `<button class="msg-action-btn msg-regen-btn" onclick="event.stopPropagation();regenerateFromUser(_msgElIndex(this))" title="${escapeHtml(_mt('msgAction.regenTitle', 'Regenerate response from this message'))}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg> ${escapeHtml(_mt('msgAction.regen', 'Regen'))}</button>`
       : "";
     const conv_ = getActiveConv();
-    /* ★ Continue is a RESUME affordance for an INTERRUPTED/TRUNCATED turn —
-     *   it POSTs to /api/chat/continue to pick up from the last tool-call
-     *   checkpoint. On a CLEAN finish (end_turn/stop/stop_sequence — the same
-     *   reasons that earn the green ✓ in finish_info.js) there is nothing to
-     *   resume, so showing it is meaningless and misleading. Gate it as the
-     *   exact complement of that ✓: only offer Continue when the last
-     *   assistant turn did NOT finish normally (length / max_tokens /
-     *   tool_rounds_exhausted / premature_close / aborted / interrupted / …).
-     *   A missing finishReason (legacy / unknown) still shows it, so we never
-     *   silently drop the recovery path for a genuinely-truncated old turn. */
-    const _FINISH_CLEAN = ["stop", "end_turn", "stop_sequence"];
+    /* ★ Continue is a RESUME affordance for an INTERRUPTED/TRUNCATED turn.
+     *   pt_turn_settlement: the affordance is driven by the single
+     *   backend-authoritative settlement verdict (computeTurnSettlement,
+     *   canonical JS port) via continueButtonForSettlement — NOT by a local
+     *   finishReason-name sniff. The verdict's resume.mode decides:
+     *     none       → clean finish, nothing to resume → hide the button.
+     *     prefill    → lossless resume → "Continue" (tooltip: seamless).
+     *     checkpoint → resume from the tool-call checkpoint → "Continue"
+     *                  (tooltip: drops the trailing draft).
+     *     regenerate → NO honest resume → the button is honestly labelled
+     *                  "Regenerate" (it no longer masquerades as "Continue"
+     *                  only to silently fall back to a full regeneration —
+     *                  that was the "button says Continue, actually
+     *                  regenerates" lie). The click still goes through
+     *                  continueAssistant, which re-verifies against the
+     *                  server's authoritative checkpoint scan and handles the
+     *                  fallback. A missing finishReason (legacy / unknown)
+     *                  keeps the recovery path open exactly as before.
+     *
+     *   ★ LIVENESS (pt_ae8777b4eee04ef1). The verdict answers "how could this
+     *   turn be resumed", NEVER "has it stopped" — the backend withholds
+     *   finishReason mid-stream, so a turn that is still being generated
+     *   verdicts as interrupted/checkpoint and would offer Continue. This gate
+     *   therefore requires the turn to be OUT OF FLIGHT, via the same shared
+     *   predicate _isLiveTail and canDelete use (and the same union the
+     *   composer's Stop button reads). It used to be `!activeStreams.has(id)`,
+     *   which is only THIS TAB's SSE — so a cold-attached VU carrier or a
+     *   socket-down window rendered a live turn as settled. */
     const isLastAssistant =
       !isUser &&
       conv_ &&
       idx === conv_.messages.length - 1 &&
-      !activeStreams.has(conv_.id);
-    const _turnFinishedClean = _FINISH_CLEAN.includes(msg.finishReason);
-    const continueH = (isLastAssistant && !_turnFinishedClean)
-      ? `<button class="msg-action-btn msg-continue-btn" onclick="event.stopPropagation();continueAssistant()" title="${escapeHtml(_mt('msgAction.continueTitle', 'Continue generating from where it left off'))}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg> ${escapeHtml(_mt('msgAction.continue', 'Continue'))}</button>`
-      : "";
+      !_isTurnInFlight(conv_, idx);
+    const _tsVerdict = (typeof computeTurnSettlement === 'function')
+      ? computeTurnSettlement(msg, msg.model || (typeof serverModel !== 'undefined' ? serverModel : null))
+      : null;
+    const _tsBtn = (typeof continueButtonForSettlement === 'function')
+      ? continueButtonForSettlement(_tsVerdict)
+      : { show: false };
+    let continueH = "";
+    if (isLastAssistant && _tsBtn.show) {
+      if (_tsBtn.kind === 'regenerate') {
+        continueH = `<button class="msg-action-btn msg-continue-btn" onclick="event.stopPropagation();continueAssistant()" title="${escapeHtml(_mt(_tsBtn.titleKey, 'Regenerate this response'))}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg> ${escapeHtml(_mt(_tsBtn.labelKey, 'Regen'))}</button>`;
+      } else {
+        continueH = `<button class="msg-action-btn msg-continue-btn" onclick="event.stopPropagation();continueAssistant()" title="${escapeHtml(_mt(_tsBtn.titleKey, 'Continue generating from where it left off'))}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg> ${escapeHtml(_mt(_tsBtn.labelKey, 'Continue'))}</button>`;
+      }
+    }
     const isShowingTrans = _tr.showing;
     // Show the Translate button on: (a) assistant messages, (b) endpoint
     // critic review messages (role=user + _isEndpointReview) — they
@@ -1601,7 +1905,15 @@ function renderMessage(msg, idx) {
     const exportImgH = !isUser
       ? `<button class="msg-action-btn msg-export-img-btn" onclick="event.stopPropagation();ExportImages.exportMessageWithPreview(_msgElIndex(this))" title="${escapeHtml(_mt('msgAction.exportTitle', 'Export as phone-screen images'))}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg> ${escapeHtml(_mt('msgAction.export', 'Export'))}</button>`
       : "";
-    const canDelete = conv_ && !activeStreams.has(conv_.id) && !conv_.activeTaskId;
+    /* Consumer #3 — deliberately the CONV-level predicate, not the turn-level
+     * one. Deleting shifts every later message's index, and a live BRANCH
+     * stream is keyed on `convId:msgIdx:branchIdx` (branch_stream.js), so a
+     * delete during ANY streaming lane can corrupt that key. Delete therefore
+     * stays blocked while anything in this conversation streams — the same
+     * answer the composer's Stop button gives. (The finish bar / Continue /
+     * force-reveal use the TURN-level predicate instead: a branch does not
+     * write the main tail.) */
+    const canDelete = conv_ && !_convBusyAnyLane(conv_);
     const deleteH = canDelete
       ? `<button class="msg-action-btn msg-delete-btn" onclick="event.stopPropagation();deleteTurn(_msgElIndex(this))" title="${escapeHtml(isUser ? _mt('msgAction.deleteTurnTitle', 'Delete this turn') : _mt('msgAction.deleteMsgTitle', 'Delete this message'))}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>`
       : "";
@@ -1612,7 +1924,20 @@ function renderMessage(msg, idx) {
     const branchBtnH = !isUser
       ? `<button class="msg-action-btn msg-branch-btn" onclick="event.stopPropagation();promptNewBranch(_msgElIndex(this))" title="${escapeHtml(_branchLabel)}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></svg> ${escapeHtml(_branchLabel)}</button>`
       : "";
-    actionBtns = `<div class="message-actions">${copyH}${editH}${regenH}${continueH}${translateH}${exportImgH}${branchBtnH}${deleteH}</div>`;
+    /* ★ Request Inspector anchor (debug mode only) — assistant-lane action:
+     *   jump from this bubble to the exact LLM request(s) that produced it
+     *   (docs/DEBUG_PANEL_REDESIGN.md P3). Lives in the unified action bar as
+     *   a `.msg-action-btn` (class `ri-anchor`), not in the finish meta row. */
+    const _riGate = !isUser
+      && typeof _featureFlags !== 'undefined' && _featureFlags.debug_mode
+      && msg._taskId;
+    const _riMid = _riGate
+      ? String(msg._msgId || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'")
+      : "";
+    const riH = _riGate
+      ? `<button class="msg-action-btn ri-anchor" onclick="event.stopPropagation();openRequestInspectorForMessage('${_riMid}')" title="${escapeHtml(_mt('ri.openTip', 'Locate in Request Inspector'))}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 22a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.704.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2z"/><path d="M14 2v5a1 1 0 0 0 1 1h5"/><path d="M10 12.5 8 15l2 2.5"/><path d="m14 12.5 2 2.5-2 2.5"/></svg> ${escapeHtml(_mt('msgAction.inspect', 'Inspect'))}</button>`
+      : "";
+    actionBtns = `<div class="message-actions">${copyH}${editH}${regenH}${continueH}${translateH}${exportImgH}${branchBtnH}${riH}${deleteH}</div>`;
   }
   // ★ Tofu mascot avatars: Worker gets worker tofu, Planner gets planner tofu
   let avatarContent = (typeof _TOFU_WORKER_SVG !== 'undefined') ? _TOFU_WORKER_SVG : "✦",
@@ -1728,8 +2053,26 @@ function renderMessage(msg, idx) {
    *   error envelope or a finishReason=interrupted, so the bottom-anchored
    *   Continue is always discoverable on precisely the turn that needs it.
    *   Scoped to assistant-lane turns; a settled/successful turn keeps the
-   *   quiet hover-reveal. */
-  const _turnFailed = !isUser && (!!msg.error || msg.finishReason === 'interrupted');
+   *   quiet hover-reveal.
+   *
+   *   ★ LIVENESS (pt_ae8777b4eee04ef1) — consumer #4 of _isTurnInFlight. A
+   *   turn can carry a stamped `interrupted` WHILE STILL RUNNING: the
+   *   client-side stale-pin sweep stamps it whenever its liveness source
+   *   cannot see the live task (a VU carrier is excluded from
+   *   /api/v1/chat/active by design). Without this exclusion that stamp
+   *   promotes the bar from a quiet hover-reveal to PERMANENTLY VISIBLE
+   *   underneath work the backend is still doing — which is how the reported
+   *   symptom read as "the action bar has already appeared" rather than
+   *   "appears on hover". A live turn keeps the quiet treatment; the reveal
+   *   applies once it has actually stopped.
+   *
+   *   Resolves the conv ONCE (`_lvConvForGates`, shared with the finish-bar
+   *   gate above) instead of calling getActiveConv() again here: two lookups in
+   *   one render of the same row could in principle straddle a conv switch and
+   *   disagree, and re-resolving per message is pointless work. */
+  const _turnFailed = !isUser
+    && (!!msg.error || msg.finishReason === 'interrupted')
+    && !_isTurnInFlight(_lvConvForGates, idx);
   const _failedCls = _turnFailed ? ' turn-failed' : '';
   /* Queued-pending: a cross-device queued user message that has landed in the
    *   body but is NOT yet dispatched (its turn runs after the current one

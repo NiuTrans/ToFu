@@ -30,6 +30,10 @@ class _FakeStore:
     def __init__(self, messages, updated_at=1000):
         self.messages = list(messages)
         self.updated_at = updated_at
+        # The CAS token the production store now uses. Mirrors the DB trigger:
+        # advanced by the store on every genuine messages change, never set by
+        # the caller — which is exactly why it replaced updated_at.
+        self.rev = 0
         self.archives = []          # list of (trigger, snapshot) in call order
         self.archive_summaries = {}
         self.cas_calls = []         # list of expected_updated_at seen
@@ -45,7 +49,7 @@ class _FakeStore:
         self._race_seq = 0
 
     def load_conversation_messages(self, conv_id):
-        return (list(self.messages), self.updated_at)
+        return (list(self.messages), self.updated_at, self.rev)
 
     def archive_transcript(self, conv_id, messages, *, trigger='force',
                            task_id='', round_num=0, model='',
@@ -63,32 +67,34 @@ class _FakeStore:
     def update_archive_summary(self, archive_id, summary, tokens_after, msgs_after):
         self.archive_summaries[archive_id] = (summary, tokens_after, msgs_after)
 
-    def cas_update_conversation_messages(self, conv_id, messages, expected_updated_at):
-        self.cas_calls.append(expected_updated_at)
+    def cas_update_conversation_messages(self, conv_id, messages, expected_rev):
+        self.cas_calls.append(expected_rev)
         if self._fail_cas:
             return 0
         # Burst: a sibling tail write lands just before this CAS, bumping
-        # updated_at so the caller's expected value is now stale → 0 rows. The
+        # rev so the caller's expected value is now stale → 0 rows. The
         # caller must reload and retry; each retry sees the fresher tail.
         if self._races_remaining > 0:
             self._races_remaining -= 1
             self._race_seq += 1
             self.messages.append(_u(f'BURST tail {self._race_seq}', 90000 + self._race_seq))
             self.updated_at += 1
+            self.rev += 1
             return 0
-        if expected_updated_at != self.updated_at:
+        if expected_rev != self.rev:
             return 0
         self.messages = list(messages)
         self.saved = list(messages)
         self.updated_at += 1
+        self.rev += 1
         return 1
 
-    def cas_sync_conversation_with_search(self, conv_id, messages, expected_updated_at):
+    def cas_sync_conversation_with_search(self, conv_id, messages, expected_rev):
         # CAS variant that ALSO refreshes msg_count + search_text + FTS. The
         # engine MUST use this (not the plain cas_update) because compaction
         # removes whole messages. Record that it was the path taken.
         self.search_synced = True
-        return self.cas_update_conversation_messages(conv_id, messages, expected_updated_at)
+        return self.cas_update_conversation_messages(conv_id, messages, expected_rev)
 
     def notify_conversation_changed(self, conv_id):
         self.notified = True

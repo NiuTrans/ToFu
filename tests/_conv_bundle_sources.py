@@ -1,0 +1,213 @@
+"""tests/_conv_bundle_sources.py — resolve which shipped JS files a node
+harness must eval to get a symbol defined, using the PRODUCTION bundle list.
+
+WHY THIS EXISTS
+---------------
+`static/js/core/conversations.js` has been progressively decomposed (epic
+pt_3879f00e sub-part 2: slice 3 pulled the persist/freshness/rebase helper
+cluster into `core/conv_persist_helpers.js`, slice 4 the image hydrator, slice 5
+`_applySettingsToConv`, ...). Every slice moved symbols OUT of that file while
+keeping runtime behaviour identical, because the bundler concatenates the pieces
+in a declared order.
+
+Eleven node-harness guards hard-coded `core/conversations.js` as "the file that
+defines these symbols" and eval'd it standalone. Each extraction slice therefore
+broke a batch of them at once: the harness eval'd a file that no longer contains
+the symbol, and the guard failed with a confusing shape (`typeof X !== 'function'`
+or `substring not found`) that looks like a product regression but is pure
+harness drift. That is the 8th recurrence of the "guard anchored on a path
+instead of a symbol" family in this project.
+
+THE FIX (single source of truth, not 11 copies)
+-----------------------------------------------
+`lib/js_bundler._BUNDLE_FILES` is the PRODUCTION load order — the same list the
+browser gets. So instead of guessing a filename, a harness asks:
+
+    sources_defining('_trimMsgForPersist')   -> ordered abs paths to eval
+
+which searches the bundle's core files for the definition and returns every file
+that must be eval'd, IN BUNDLE ORDER, so bare cross-file references resolve
+exactly as they do at runtime. When a future slice moves the symbol again, these
+guards follow it automatically instead of going red.
+
+Deliberately reads the bundler's own list rather than globbing the directory:
+globbing would silently pick up a file the bundle does NOT ship (a leftover, a
+vendored copy) and eval it, which is how a guard ends up testing code that never
+reaches a user.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.normpath(os.path.join(HERE, '..'))
+JS_DIR = os.path.join(ROOT, 'static', 'js')
+
+
+def bundle_files():
+    """Every shipped JS file, in the order the browser ends up executing it.
+
+    BOTH production manifests, not just the core one. `_BUNDLE_FILES` becomes
+    `bundle-<hash>.js` (eager, in the page) and `_DEFERRED_FILES` becomes
+    `feature-<hash>.js`, which `feature-loader.js` (itself IN the core bundle)
+    injects on demand. So core always precedes deferred at runtime, and
+    concatenating the two lists in that order is the real execution sequence —
+    both bundles are plain concatenated <script>s sharing one window scope, so
+    a deferred file may legitimately reference a core symbol.
+
+    Core-only was a SCAN-SURFACE BUG, not a scoping choice: 21 deferred files
+    (all of paper/*, project-brain*, orchestration*, image-gen*, task-mode)
+    were invisible, so a lookup for a symbol living in one of them fell into
+    the "not defined by any bundled file" branch and was reported as a PRODUCT
+    REGRESSION. Measured 2026-07-28: `_activeReviewLang` (paper/report.js),
+    `_loadPaperLibrary` (paper/library.js) and `_refreshAttention`
+    (project-brain.js) all produced "the implementation was REMOVED" while the
+    files were on disk and shipping to users — a precisely-worded false
+    attribution that would send the next reader off to restore code that never
+    left.
+    """
+    from lib.js_bundler import _BUNDLE_FILES, _DEFERRED_FILES
+    return list(_BUNDLE_FILES) + list(_DEFERRED_FILES)
+
+
+def _unbundled_files_defining(symbol):
+    """On-disk `static/js` files that define *symbol* but ship in NO bundle.
+
+    Only consulted to explain a miss. A file here is a real (and different)
+    product problem — the code exists but no user can reach it — so it must
+    not be silently conflated with "the implementation was removed".
+    """
+    shipped = set(bundle_files())
+    found = []
+    for dirpath, dirnames, filenames in os.walk(JS_DIR):
+        dirnames[:] = [d for d in dirnames if d not in ('node_modules', '__pycache__')]
+        for name in filenames:
+            if not name.endswith('.js'):
+                continue
+            # Build artefacts are regenerated copies of the sources above.
+            if name.startswith(('bundle-', 'feature-', 'i18n-')):
+                continue
+            abs_p = os.path.join(dirpath, name)
+            rel = os.path.relpath(abs_p, JS_DIR).replace(os.sep, '/')
+            if rel in shipped:
+                continue
+            if _defines(abs_p, symbol):
+                found.append(rel)
+    return sorted(found)
+
+
+def _defines(path, symbol):
+    """True when *path* defines ``function <symbol>(`` or ``const/let/var
+    <symbol> =`` at the top level (column 0) or as an indented module member."""
+    try:
+        src = open(path, encoding='utf-8').read()
+    except OSError:
+        return False
+    pat = re.compile(
+        r'^[ \t]*(?:async\s+)?function\s+' + re.escape(symbol) + r'\s*\('
+        r'|^[ \t]*(?:const|let|var)\s+' + re.escape(symbol) + r'\s*=',
+        re.M)
+    return bool(pat.search(src))
+
+
+def files_defining(symbol, *, subtree=''):
+    """Bundle-relative paths (in execution order) that define *symbol*.
+
+    *subtree* optionally narrows the search (e.g. ``'core/'``) when a
+    same-named local in an unrelated module would otherwise hijack the lookup.
+    It defaults to EVERYTHING shipped: a symbol's home is decided by the
+    bundler's manifests, and pre-filtering by directory is how the deferred
+    tree became invisible in the first place. Narrow only when a measured
+    collision demands it.
+    """
+    return [f for f in bundle_files()
+            if f.startswith(subtree) and _defines(os.path.join(JS_DIR, f), symbol)]
+
+
+def sources_defining(*symbols, subtree=''):
+    """Absolute paths to eval, in EXECUTION ORDER, so *symbols* all resolve.
+
+    Raises with a FOUR-STATE diagnosis (the distinction a hard-coded path
+    cannot make). The states name DIFFERENT problems and must not share a
+    message — conflating the first two sends the reader to restore code that
+    never left:
+      none, and nowhere on disk -> the implementation is GONE: a real product
+          regression; restore it before touching the guard.
+      none, but present on disk -> the file ships in NO bundle, so no user can
+          reach that code. Also a product problem, but the fix is the MANIFEST
+          (_BUNDLE_FILES / _DEFERRED_FILES), not the implementation.
+      many -> the single source of truth was copied: collapse it first.
+      one  -> resolved; the caller evals the returned files.
+    """
+    out = []
+    for sym in symbols:
+        hits = files_defining(sym, subtree=subtree)
+        if not hits:
+            stray = _unbundled_files_defining(sym)
+            if stray:
+                raise AssertionError(
+                    f'{sym} is defined by {stray} but that file is in NEITHER '
+                    f'_BUNDLE_FILES nor _DEFERRED_FILES — it is never served, so '
+                    f'no user can reach this code. The implementation is INTACT; '
+                    f'fix the bundler manifest, not the source.')
+            where = f' under {subtree!r}' if subtree else ''
+            raise AssertionError(
+                f'{sym} is not defined by any shipped file{where}, and no file '
+                f'under static/js defines it either — the implementation was '
+                f'REMOVED. This is a product regression, not harness drift: '
+                f'restore it before touching the guard.')
+        if len(hits) > 1:
+            raise AssertionError(
+                f'{sym} is defined by {len(hits)} bundled files ({hits}) — the '
+                f'single source of truth was duplicated; collapse it before '
+                f're-pointing the guard.')
+        out.append(hits[0])
+    order = bundle_files()
+    uniq = sorted(set(out), key=order.index)
+    return [os.path.join(JS_DIR, f) for f in uniq]
+
+
+def source_argv(*symbols, override=None, subtree=''):
+    """Ordered abs paths for ``node harness <paths...>``, with optional override.
+
+    *override* maps a bundle-relative path (e.g. ``'core/conversations.js'``) to
+    a substitute file — the NEUTER pattern several guards use: write a mutated
+    copy to tmp_path and eval that instead of the shipped file, leaving the real
+    tree untouched. Passing an override for a path this symbol set does not need
+    raises, so a stale neuter target is reported instead of silently ignored
+    (which would make the NEUTER "not bite" and read as a passing guard).
+    """
+    paths = sources_defining(*symbols, subtree=subtree)
+    if not override:
+        return paths
+    out = []
+    matched = set()
+    for p in paths:
+        rel = os.path.relpath(p, JS_DIR).replace(os.sep, '/')
+        if rel in override:
+            out.append(override[rel])
+            matched.add(rel)
+        else:
+            out.append(p)
+    unused = set(override) - matched
+    if unused:
+        raise AssertionError(
+            f'override targets {sorted(unused)} are not among the files needed '
+            f'for {symbols} ({[os.path.relpath(p, JS_DIR) for p in paths]}) — '
+            f'the neuter would silently NOT bite. Re-point it.')
+    return out
+
+
+def eval_prelude(*symbols, subtree=''):
+    """A node snippet that eval's every file needed to define *symbols*.
+
+    Drop-in replacement for a harness's hard-coded
+    ``eval(fs.readFileSync('core/conversations.js'))``.
+    """
+    paths = sources_defining(*symbols, subtree=subtree)
+    lines = ["const fs = require('fs');"]
+    for p in paths:
+        lines.append(f'eval(fs.readFileSync({p!r}, "utf8"));')
+    return '\n'.join(lines)

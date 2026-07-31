@@ -12,6 +12,7 @@ importing this module never hard-fails when a backend package is missing.
 from lib.log import get_logger
 
 from lib.doc_parser._plain import _binary_text_extract
+from lib.doc_parser._truncation import truncation_warning
 
 logger = get_logger(__name__)
 
@@ -61,8 +62,11 @@ def _extract_doc_legacy(file_bytes: bytes, limit: int) -> dict:
             text = re.sub(r'\n{3,}', '\n\n', text)
             text = text.strip()
             if len(text) > limit:
+                full_len = len(text)
                 text = text[:limit]
-                warnings.append(f'Text truncated at {limit:,} chars')
+                warnings.append(truncation_warning(
+                    kept=len(text), total=full_len, unit='chars',
+                    detail=f'char limit {limit:,}'))
             logger.info('[DocParser] Extracted .doc via olefile: %s chars', f'{len(text):,}')
             return {
                 'text': text,
@@ -162,7 +166,9 @@ def _extract_xls_legacy(file_bytes: bytes, limit: int) -> dict:
             rows_data.append('| ' + ' | '.join(c.replace('|', '\\|') for c in cells) + ' |')
 
         if ws.nrows > 1001:
-            warnings.append(f'Sheet "{ws.name}" truncated at 1000 rows')
+            warnings.append(truncation_warning(
+                kept=len(rows_data), total=ws.nrows, unit='rows',
+                scope=f'Sheet "{ws.name}"', detail='row cap 1,000'))
 
         if rows_data:
             header = rows_data[0]
@@ -275,8 +281,11 @@ def _extract_ppt_legacy(file_bytes: bytes, limit: int) -> dict:
             text = '\n'.join(t.strip() for t in text_parts if t.strip())
             text = re.sub(r'\n{3,}', '\n\n', text).strip()
             if len(text) > limit:
+                full_len = len(text)
                 text = text[:limit]
-                warnings.append(f'Text truncated at {limit:,} chars')
+                warnings.append(truncation_warning(
+                    kept=len(text), total=full_len, unit='chars',
+                    detail=f'char limit {limit:,}'))
             n_slides = max(1, text.count('\n\n') + 1)  # rough estimate
             logger.info('[DocParser] Extracted .ppt: ~%d text blocks, %s chars',
                         len(text_parts), f'{len(text):,}')

@@ -128,7 +128,7 @@
 </head>
 <body>
 <header>
-  <h1>🫧 Tofu Relay</h1>
+  <h1><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-3px" aria-hidden="true"><circle cx="7.5" cy="15.5" r="4.5"/><circle cx="16" cy="8" r="3.5"/><circle cx="18.5" cy="17" r="2"/></svg> Tofu Relay</h1>
   <nav class="nav">
     <a href="#wallet"  class="active" onclick="switchPane('wallet')">Wallet</a>
     <a href="#keys"    onclick="switchPane('keys')">API Keys</a>
@@ -400,12 +400,12 @@ async function doRedeem() {
     });
     document.getElementById('redeem-result').innerHTML =
       `<div style="margin-top:12px;color:var(--accent)">
-        ✓ Added ${esc(fmtCredits(r.redeemed.amount_micro))} credits.</div>`;
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg> Added ${esc(fmtCredits(r.redeemed.amount_micro))} credits.</div>`;
     document.getElementById('redeem-code').value = '';
     refreshWallet();
   } catch (e) {
     document.getElementById('redeem-result').innerHTML =
-      `<div style="margin-top:12px;color:var(--danger)">✗ ${esc(e.message)}</div>`;
+      `<div style="margin-top:12px;color:var(--danger)"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" style="vertical-align:-1px" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg> ${esc(e.message)}</div>`;
   }
 }
 
@@ -451,7 +451,7 @@ async function doCreateKey() {
     });
     document.getElementById('key-reveal').innerHTML =
       `<div class="desc" style="color: var(--accent)">
-        ✓ Key created. Copy the token now — it cannot be recovered.
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg> Key created. Copy the token now — it cannot be recovered.
        </div>
        <pre class="token-reveal">${esc(r.token)}</pre>`;
     document.getElementById('new-key-name').value = '';

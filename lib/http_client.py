@@ -39,13 +39,14 @@ from __future__ import annotations
 
 import contextlib
 import os
+import time
 from typing import Any, Optional
 
 import requests
 
 import lib as _lib
 from lib.log import get_logger
-from lib.proxy import proxies_for
+from lib.proxy import proxies_for, report_outcome as _report_outcome
 
 logger = get_logger(__name__)
 
@@ -121,12 +122,19 @@ def http_request(method: str, url: str, *,
     """
     if use_proxy and 'proxies' not in extra:
         extra['proxies'] = proxies_for(url)
-    return requests.request(
-        method, url,
-        timeout=timeout,
-        headers=_build_headers(headers),
-        **extra,
-    )
+    _t0 = time.monotonic()
+    try:
+        resp = requests.request(
+            method, url,
+            timeout=timeout,
+            headers=_build_headers(headers),
+            **extra,
+        )
+    except Exception:
+        _report_outcome(url, False)
+        raise
+    _report_outcome(url, True, (time.monotonic() - _t0) * 1000.0)
+    return resp
 
 
 def http_get(url: str, *, timeout: float = _DEFAULT_TIMEOUT,

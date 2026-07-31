@@ -9,6 +9,13 @@ deadline but with NO exception handling of dispatch failures. If the cheap
 call fails, the exception propagates to run_memory_prefetch's outer handler
 and we inject NOTHING. On deadline timeout we also inject nothing. We
 deliberately do NOT fall back to BM25 top-K.
+
+Accounting note: the deadline stops us WAITING, it does not stop the gateway
+BILLING. An abandoned worker's request is still processed and still charged
+for, so the optional ``usage_sink`` is invoked from INSIDE the worker thread
+— it fires whether or not the caller was still waiting. Without that, the
+rounds that cost money and returned nothing were exactly the ones that
+recorded nothing.
 """
 from __future__ import annotations
 
@@ -306,6 +313,7 @@ def _call_cheap_reranker(memories: list[dict],
                          current_request: str = '',
                          project_path: str | None = None,
                          active_tools: list[str] | None = None,
+                         usage_sink=None,
                          ) -> tuple[list[int], dict[str, Any]]:
     """Run the cheap-model filter.  Returns (selected_indices, diagnostics).
 
@@ -351,7 +359,7 @@ def _call_cheap_reranker(memories: list[dict],
         # No internal timeout kwarg — dispatch_chat's per-attempt timeout does
         # NOT bound total wall-clock (429 cycling runs to its full budget), so
         # the hard bound is enforced by the caller's join() below, not here.
-        return dispatch_chat(
+        _out = dispatch_chat(
             [
                 {'role': 'system', 'content': _RERANK_SYSTEM_PROMPT},
                 {'role': 'user', 'content': user_content},
@@ -361,6 +369,21 @@ def _call_cheap_reranker(memories: list[dict],
             capability='cheap',
             log_prefix='[MemPrefetch]',
         )
+        # ★ Report the bill HERE, on the worker thread, BEFORE returning.
+        #   On a deadline timeout the caller has already stopped waiting and
+        #   will discard this result — but the gateway processed and charged
+        #   for the request all the same. Reporting from inside the worker is
+        #   what makes the abandoned call visible to the cost report instead
+        #   of being silently spent.
+        if usage_sink is not None:
+            try:
+                _u = _out[1] if isinstance(_out, tuple) and len(_out) > 1 else None
+                if _u:
+                    usage_sink(dict(_u))
+            except Exception as _se:
+                # Accounting is advisory — never take the turn down with it.
+                logger.debug('[MemPrefetch] usage_sink failed: %s', _se)
+        return _out
 
     # Resolve the deadline THROUGH the package facade at call time so a test's
     # ``monkeypatch.setattr(lib.memory.prefetch, 'PREFETCH_DEADLINE_MS', …)``

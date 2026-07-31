@@ -34,7 +34,7 @@ async function regenerateFromUser(idx) {
   if (_isIgConv || _isIgMsg) {
     conv.messages = conv.messages.slice(0, idx);
     saveConversations(conv.id);
-    renderChat(conv);
+    window.ConvView.replaceAll(conv.id);
     renderConversationList();
     let prompt = msg.content || '';
     if (prompt.startsWith('🎨 ')) prompt = prompt.slice(2).trim();
@@ -146,7 +146,7 @@ async function regenerateFromUser(idx) {
       Object.assign(msg, result.userMessage);
       if (activeConvId === convId) {
         const msgEl = document.getElementById('msg-' + idx);
-        if (msgEl) msgEl.outerHTML = renderMessage(msg, idx);
+        if (msgEl) window.ConvView.apply(convId, idx, msg);
       }
     }
     if (result.title) conv.title = result.title;
@@ -210,11 +210,7 @@ async function regenerateFromUser(idx) {
       _ensureMsgId(errAssistant);
       conv.messages.push(errAssistant);
       if (activeConvId === convId) {
-        const chatInnerEl = document.getElementById('chatInner');
-        if (chatInnerEl) {
-          chatInnerEl.insertAdjacentHTML('beforeend',
-            renderMessage(errAssistant, conv.messages.length - 1));
-        }
+        window.ConvView.apply(convId, conv.messages.length - 1, errAssistant);
       }
       saveConversations(convId);
       syncConversationToServer(conv, { allowTruncate: true });
@@ -277,6 +273,12 @@ function _applyContinueCheckpoint(assistantMsg, allRounds, ckpt) {
   delete assistantMsg.finishReason;
   delete assistantMsg.toolSummary;
   delete assistantMsg.error;
+  // ★ The dead task's bind must go too: keeping `_taskId` makes
+  //   `assistantTailIsPriorTurn` (ui/sse_pipeline.js connectToTask) classify
+  //   this adopted bubble as a PRIOR turn and push a placeholder twin for
+  //   the resume task — the ms43foj3 restart double-bubble. The resume
+  //   task's stream/poll re-stamps `_taskId` from its own payloads.
+  delete assistantMsg._taskId;
 
   // Streaming-merge seed consumed by sse_pipeline.js / sse_poll_fallback.js:
   // the pre-continue rounds/prefix to merge with newly-streamed ones.
@@ -285,6 +287,101 @@ function _applyContinueCheckpoint(assistantMsg, allRounds, ckpt) {
   return keptRounds;
 }
 if (typeof window !== 'undefined') window._applyContinueCheckpoint = _applyContinueCheckpoint;
+
+/* ═══════════════════════════════════════════════════════════════════
+   ★ Continue streaming SHELL — raise / roll back.
+
+   WHY IN PLACE (and why NOT _renderTranslatingBubble):
+   The send / regenerate paths answer their own pre-POST dead zone by
+   APPENDING a `#translating-msg` placeholder at the tail. That is only sound
+   there because those paths TRUNCATE the assistant message first, so the tail
+   is free. Continue does NOT truncate — the interrupted assistant bubble IS
+   the tail and stays put — so appending would render TWO assistant bubbles
+   (the interrupted one + a fake twin) for the entire POST window. That is the
+   recurring twin-bubble defect the ms43foj3 note in _applyContinueCheckpoint
+   documents.
+
+   So the SAME node is converted in place: `msg-N` → `#streaming-msg`, header
+   gains the elapsed timer, body becomes the live zones. One data entry ⇒ one
+   DOM node, invariant intact, and the `Continuing…` pulse lands on the CLICK
+   FRAME instead of after two serial round-trips.
+
+   Height note: raising the shell is also where the bubble COLLAPSES (the tail
+   prose/tool panel are replaced by empty zones, then repainted from the
+   message document). Doing it at click time means the collapse happens while
+   the user is looking at the button, and one real-height bottom pin settles
+   it. The later checkpoint repaint only grows content BELOW the fold, which
+   never moves what the reader is looking at — so no post-hoc scroll rescue is
+   needed at all. Painting via `updateStreamingUI(assistantMsg)` immediately
+   after raising the shell keeps the pre-rollback content visible, so the
+   bubble never flashes empty.
+   ═══════════════════════════════════════════════════════════════════ */
+function _raiseContinueShell(conv, assistantMsg) {
+  const lastIdx = conv.messages.length - 1;
+  /* ★ IDENTITY-FIRST resolve (RENDER_CONTRACT Invariant 2). NOT
+   *   `getElementById('msg-' + lastIdx)`.
+   *
+   *   That positional lookup used to be safe HERE only because it ran AFTER
+   *   `ConvView.replaceAll(...)`, which had just re-stamped every `msg-N`. This
+   *   function deliberately runs BEFORE any render (that is the whole point —
+   *   feedback on the click frame), so the freshness precondition is gone: when
+   *   `conv.messages` shrank without a repaint (poll / merge / peer reconcile),
+   *   the slot `msg-{length-1}` belongs to an OLDER message, and converting it
+   *   would rewrite a HISTORICAL answer into the `Continuing…` pulse while the
+   *   genuinely-interrupted turn sat untouched — and still report success.
+   *
+   *   `ConvView.findMessageEl` is the shared identity-first seam
+   *   (`data-msg-id` → positional fallback for id-less legacy rows). Resolving
+   *   a MISS to `false` is load-bearing: the caller's "repaint, then raise"
+   *   fallback is what handles a tail evicted by the lazy window. */
+  const msgEl = (window.ConvView && typeof window.ConvView.findMessageEl === 'function')
+    ? window.ConvView.findMessageEl(assistantMsg, lastIdx)
+    : null;
+  if (!msgEl) return false;
+  msgEl.id = "streaming-msg";
+  const hdr = msgEl.querySelector(".message-header");
+  if (hdr && !hdr.querySelector("#stream-elapsed-timer")) {
+    const tmEl = document.createElement("span");
+    tmEl.id = "stream-elapsed-timer";
+    tmEl.className = "stream-elapsed-timer";
+    hdr.appendChild(tmEl);
+  }
+  const bodyEl = msgEl.querySelector(".message-body");
+  if (bodyEl) {
+    bodyEl.id = "streaming-body";
+    if (!bodyEl.querySelector('[data-zone="content"]')) {
+      bodyEl.innerHTML =
+        '<div data-zone="tool"></div><div data-zone="thinking"></div><div data-zone="content"></div><div data-zone="status"><div class="stream-status"><div class="pulse"></div> Continuing…</div></div>';
+    }
+    if (typeof updateStreamingUI === 'function') updateStreamingUI(assistantMsg);
+  }
+  /* Real-height bottom pin — NOT the bare `scrollToBottom()`, which core.js
+   * early-returns from when the reader sits >200px off the bottom, and which
+   * (single-rAF against content-visibility:auto ESTIMATES) "lands
+   * mid-history". _forceScrollToBottom flips cv-off for real heights and
+   * re-asserts across double-rAF + a 150ms timer. */
+  if (typeof _forceScrollToBottom === 'function') _forceScrollToBottom(null, true);
+  return true;
+}
+if (typeof window !== 'undefined') window._raiseContinueShell = _raiseContinueShell;
+
+/* Tear the shell back down to the settled static bubble.
+ *
+ * Load-bearing for the failure path: once the shell is raised EARLY, a POST
+ * that fails would otherwise strand the user in front of a frozen
+ * `Continuing…` pulse forever. finalizeStreaming re-renders the message
+ * document verbatim — and because the failure path never mutated that
+ * document (the checkpoint reducer runs only on success), the turn comes back
+ * with its `finishReason='interrupted'` intact, i.e. its Continue affordance
+ * still there and still clickable. */
+function _rollbackContinueShell(conv, assistantMsg) {
+  if (!document.getElementById('streaming-msg')) return false;
+  if (window.ConvView && typeof window.ConvView.finalizeStreaming === 'function') {
+    return !!window.ConvView.finalizeStreaming(conv.id, assistantMsg);
+  }
+  return false;
+}
+if (typeof window !== 'undefined') window._rollbackContinueShell = _rollbackContinueShell;
 
 // ══════════════════════════════════════════════════════
 //  ★ Continue: resume an interrupted assistant response
@@ -296,7 +393,13 @@ if (typeof window !== 'undefined') window._applyContinueCheckpoint = _applyConti
 // ══════════════════════════════════════════════════════
 async function continueAssistant() {
   const conv = getActiveConv();
-  if (!conv || activeStreams.has(conv.id) || conv.activeTaskId) return;
+  /* ★ IN-FLIGHT GATE. `conv.activeTaskId` is only assigned AFTER the POST
+   *   returns, so it cannot guard the dead zone that precedes it: a second
+   *   click during the round-trip used to replay the whole rollback + task
+   *   start. `_continueInFlight` is set BEFORE the first await and cleared in
+   *   `finally`, so the window is closed from the click frame onward. */
+  if (!conv || activeStreams.has(conv.id) || conv.activeTaskId
+      || conv._continueInFlight) return;
   const assistantMsg = conv.messages[conv.messages.length - 1];
   if (!assistantMsg || assistantMsg.role !== "assistant") return;
   // ★ Align with the backend chat_continue empty-guard, which treats a turn as
@@ -324,108 +427,149 @@ async function continueAssistant() {
   const _origModifiedFiles = assistantMsg.modifiedFiles;
   const _origModifiedFileList = (assistantMsg.modifiedFileList || []).slice();
 
-  const cfgPayload = await _buildConvConfig(conv);
-  // ★ Continue reuses the SAME assistant message (stable _msgId) so live
-  //   per-round translation frames route to the still-streaming bubble.
+  /* ★ Continue reuses the SAME assistant message (stable _msgId) so live
+   *   per-round translation frames route to the still-streaming bubble.
+   *   Synchronous — MUST stay ahead of the gate so nothing awaits before it. */
   if (typeof _ensureMsgId === 'function') _ensureMsgId(assistantMsg);
-  if (assistantMsg._msgId) cfgPayload.assistantMsgId = assistantMsg._msgId;
 
-  // ★ Sync local-only edits/attachments so the server rescans the freshest
-  //   copy, then let the server compute + persist the checkpoint.
-  await syncConversationToServer(conv);
+  /* ★ THE DEAD-ZONE FIX — raise the streaming shell on the CLICK FRAME,
+   *   BEFORE _buildConvConfig / the full-conversation sync / the POST. Those
+   *   three serial awaits used to run with ZERO visual change, so the click
+   *   read as "nothing happened". The shell is an IN-PLACE conversion of the
+   *   existing tail bubble (never an appended placeholder — see
+   *   _raiseContinueShell for why the regenerate-style append would mint a
+   *   twin here).
+   *
+   *   Gate FIRST, so even a synchronous double-click cannot get two runs into
+   *   the window; `finally` clears it on every exit. NOTHING above this line
+   *   may `await` — an await before the gate reopens the re-entry window it
+   *   exists to close (pinned by test_frontend_continue_click_feedback.py::
+   *   test_no_await_precedes_the_inflight_gate). */
+  conv._continueInFlight = true;
+  let _shellUp = false;
+  if (activeConvId === conv.id) _shellUp = _raiseContinueShell(conv, assistantMsg);
 
-  let data;
   try {
-    const res = await Api.chat.continue({ convId: conv.id, config: cfgPayload });
-    data = await res.json();
-    if (!res.ok) throw new Error(data.error || "Request failed");
-  } catch (e) {
-    debugLog("Continue failed: " + e.message, "error");
-    return;
-  }
+    const cfgPayload = await _buildConvConfig(conv);
+    if (assistantMsg._msgId) cfgPayload.assistantMsgId = assistantMsg._msgId;
 
-  // ── Fallback: server found no recoverable checkpoint / declined prefill ──
-  if (data.fallback === 'regenerate') {
+    // ★ Sync local-only edits/attachments so the server rescans the freshest
+    //   copy, then let the server compute + persist the checkpoint.
+    await syncConversationToServer(conv);
+
+    let data;
+    try {
+      const res = await Api.chat.continue({ convId: conv.id, config: cfgPayload });
+      /* ★ ok BEFORE json: a proxy 502 answers with an HTML body, so parsing
+       *   first threw INSIDE json() and the real status never surfaced. */
+      if (!res.ok) {
+        const _err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+        throw new Error(_err.error || `Server ${res.status}`);
+      }
+      data = await res.json();
+    } catch (e) {
+      /* ★ VISIBLE failure. debugLog alone only reaches the debug panel, so a
+       *   failed Continue was a total dead end — and with the shell now raised
+       *   early, staying silent would strand the user in front of a frozen
+       *   `Continuing…` pulse. Roll the bubble back to its settled form (the
+       *   message document was never mutated on this path, so the turn returns
+       *   with finishReason='interrupted' and its Continue button intact) and
+       *   say so out loud. */
+      debugLog("Continue failed: " + e.message, "error");
+      console.error('[continueAssistant] /api/chat/continue failed:', e?.name, e?.message);
+      if (_shellUp && activeConvId === conv.id) _rollbackContinueShell(conv, assistantMsg);
+      if (typeof showToast === 'function') {
+        showToast(t('continue.failed', { err: e.message || '' }), 'error');
+      }
+      return;
+    }
+
+    // ── Fallback: server found no recoverable checkpoint / declined prefill ──
+    if (data.fallback === 'regenerate') {
+      debugLog(
+        `Continue: server reports no recoverable checkpoint (${data.reason}); ` +
+        `falling back to full regeneration`, "info");
+      if (data.reason && data.reason !== 'empty_assistant') {
+        showToast("\u65e0\u6cd5\u7eed\u63a5\uff08\u65e0\u5de5\u5177\u8c03\u7528\u68c0\u67e5\u70b9\uff09\uff0c\u5c06\u91cd\u65b0\u751f\u6210\u56de\u590d", "info");
+      }
+      conv.messages.pop();
+      conv._needsLoad = false;
+      conv._serverMsgCount = conv.messages.length;
+      /* The shell was raised on the bubble we are about to pop — tear it down
+       * first so the repaint can't strand a live `#streaming-msg` husk. */
+      if (_shellUp) _rollbackContinueShell(conv, assistantMsg);
+      if (activeConvId === conv.id) {
+        window.ConvView.replaceAll(conv.id, { forceScroll: false });
+        if (typeof _forceScrollToBottom === 'function') _forceScrollToBottom(null, true);
+      }
+      await syncConversationToServer(conv, { allowTruncate: true });
+      await startAssistantResponse(conv.id);
+      return;
+    }
+
+    // ── Reduce over the authoritative checkpoint fact (pure) ──
+    const ckpt = data.checkpoint || {};
+    const taskId = data.taskId;
+    const keptRounds = _applyContinueCheckpoint(assistantMsg, allRounds, ckpt);
+
+    // Seed the remaining streaming-merge markers from the pre-continue snapshot
+    // (the reducer set _continueContentPrefix + _continueToolRounds).
+    assistantMsg._continueApiRounds = _origApiRounds;
+    if (_origUsage) assistantMsg._continueUsage = _origUsage;
+    if (_origModifiedFiles) assistantMsg._continueModifiedFiles = _origModifiedFiles;
+    if (_origModifiedFileList.length) assistantMsg._continueModifiedFileList = _origModifiedFileList;
+
+    // ── User-facing summary (counts straight from the server fact) ──
+    const _disc = ckpt.discardedRounds || 0;
+    const _discContent = ckpt.discardedContentLen || 0;
+    const _discThinking = ckpt.discardedThinking || 0;
+    if ((ckpt.resumeMode || 'checkpoint') === 'checkpoint'
+        && (_disc > 0 || _discContent > 0 || _discThinking > 0)) {
+      const preserveParts = [];
+      if ((ckpt.preservedContentLen || 0) > 0) preserveParts.push(`${ckpt.preservedContentLen} \u5b57\u7b26\u5185\u5bb9`);
+      if ((ckpt.preservedThinkingChars || 0) > 0) preserveParts.push(`${ckpt.preservedThinkingChars} \u5b57\u7b26\u601d\u8003\u5185\u5bb9`);
+      const preserveNote = preserveParts.length ? ` (\u4fdd\u7559\u4e86 ${preserveParts.join(" + ")})` : '';
+      const discardParts = [];
+      if (_discContent > 0) discardParts.push(`${_discContent} \u5b57\u7b26\u540e\u7eed\u6587\u672c`);
+      if (_discThinking > 0) discardParts.push(`${_discThinking} \u5b57\u7b26\u601d\u8003`);
+      if (_disc > 0) discardParts.push(`${_disc} \u4e2a\u672a\u5b8c\u6210\u5de5\u5177\u8c03\u7528`);
+      const discardNote = discardParts.length ? `\uff0c\u4e22\u5f03\u4e86 ${discardParts.join(" + ")}` : '';
+      showToast(`\u4ece\u7b2c ${ckpt.keptRounds || 0} \u8f6e\u5de5\u5177\u8c03\u7528\u540e\u6062\u590d${preserveNote}${discardNote}`, "info");
+    }
     debugLog(
-      `Continue: server reports no recoverable checkpoint (${data.reason}); ` +
-      `falling back to full regeneration`, "info");
-    if (data.reason && data.reason !== 'empty_assistant') {
-      showToast("无法续接（无工具调用检查点），将重新生成回复", "info");
-    }
-    conv.messages.pop();
-    conv._needsLoad = false;
-    conv._serverMsgCount = conv.messages.length;
-    if (activeConvId === conv.id) renderChat(conv, false);
-    await syncConversationToServer(conv, { allowTruncate: true });
-    await startAssistantResponse(conv.id);
-    return;
-  }
+      `Continue: server checkpoint mode=${ckpt.resumeMode || 'checkpoint'} ` +
+      `kept=${ckpt.keptRounds || 0} discarded=${_disc} ` +
+      `preservedContent=${ckpt.preservedContentLen || 0} discardedContent=${_discContent}`,
+      "info");
+    void keptRounds;
 
-  // ── Reduce over the authoritative checkpoint fact (pure) ──
-  const ckpt = data.checkpoint || {};
-  const taskId = data.taskId;
-  const keptRounds = _applyContinueCheckpoint(assistantMsg, allRounds, ckpt);
-
-  // Seed the remaining streaming-merge markers from the pre-continue snapshot
-  // (the reducer set _continueContentPrefix + _continueToolRounds).
-  assistantMsg._continueApiRounds = _origApiRounds;
-  if (_origUsage) assistantMsg._continueUsage = _origUsage;
-  if (_origModifiedFiles) assistantMsg._continueModifiedFiles = _origModifiedFiles;
-  if (_origModifiedFileList.length) assistantMsg._continueModifiedFileList = _origModifiedFileList;
-
-  // ── User-facing summary (counts straight from the server fact) ──
-  const _disc = ckpt.discardedRounds || 0;
-  const _discContent = ckpt.discardedContentLen || 0;
-  const _discThinking = ckpt.discardedThinking || 0;
-  if ((ckpt.resumeMode || 'checkpoint') === 'checkpoint'
-      && (_disc > 0 || _discContent > 0 || _discThinking > 0)) {
-    const preserveParts = [];
-    if ((ckpt.preservedContentLen || 0) > 0) preserveParts.push(`${ckpt.preservedContentLen} 字符内容`);
-    if ((ckpt.preservedThinkingChars || 0) > 0) preserveParts.push(`${ckpt.preservedThinkingChars} 字符思考内容`);
-    const preserveNote = preserveParts.length ? ` (保留了 ${preserveParts.join(" + ")})` : '';
-    const discardParts = [];
-    if (_discContent > 0) discardParts.push(`${_discContent} 字符后续文本`);
-    if (_discThinking > 0) discardParts.push(`${_discThinking} 字符思考`);
-    if (_disc > 0) discardParts.push(`${_disc} 个未完成工具调用`);
-    const discardNote = discardParts.length ? `，丢弃了 ${discardParts.join(" + ")}` : '';
-    showToast(`从第 ${ckpt.keptRounds || 0} 轮工具调用后恢复${preserveNote}${discardNote}`, "info");
-  }
-  debugLog(
-    `Continue: server checkpoint mode=${ckpt.resumeMode || 'checkpoint'} ` +
-    `kept=${ckpt.keptRounds || 0} discarded=${_disc} ` +
-    `preservedContent=${ckpt.preservedContentLen || 0} discardedContent=${_discContent}`,
-    "info");
-
-  // ── Streaming UI: reuse the existing bubble, show "Continuing…" ──
-  if (activeConvId === conv.id) {
-    renderChat(conv, false);
-    const lastIdx = conv.messages.length - 1;
-    const msgEl = document.getElementById(`msg-${lastIdx}`);
-    if (msgEl) {
-      msgEl.id = "streaming-msg";
-      const hdr = msgEl.querySelector(".message-header");
-      if (hdr && !hdr.querySelector("#stream-elapsed-timer")) {
-        const tmEl = document.createElement("span");
-        tmEl.id = "stream-elapsed-timer";
-        tmEl.className = "stream-elapsed-timer";
-        hdr.appendChild(tmEl);
-      }
-      const bodyEl = msgEl.querySelector(".message-body");
-      if (bodyEl) {
-        bodyEl.id = "streaming-body";
-        if (!bodyEl.querySelector('[data-zone="content"]')) {
-          bodyEl.innerHTML =
-            '<div data-zone="tool"></div><div data-zone="thinking"></div><div data-zone="content"></div><div data-zone="status"><div class="stream-status"><div class="pulse"></div> Continuing…</div></div>';
-        }
-        updateStreamingUI(assistantMsg);
+    // ── Streaming UI: the shell is ALREADY live (raised on the click frame).
+    //    Repaint its zones from the freshly-reduced message document. The
+    //    rollback SHRINKS this bubble, but the reader was pinned to the bottom
+    //    when the shell went up, so the shrink just re-clamps at the bottom and
+    //    the refill grows BELOW the fold — nothing the reader is looking at
+    //    moves. That is why there is no post-hoc scroll rescue here: the jump it
+    //    used to paper over cannot occur.
+    if (activeConvId === conv.id) {
+      if (document.getElementById('streaming-msg')) {
+        if (typeof updateStreamingUI === 'function') updateStreamingUI(assistantMsg);
+      } else {
+        /* Shell never went up (tail evicted by the lazy window when the reader
+         * was parked up in history). Repaint, then raise it now. */
+        window.ConvView.replaceAll(conv.id, { forceScroll: false });
+        _raiseContinueShell(conv, assistantMsg);
       }
     }
-    scrollToBottom();
-  }
 
-  conv.activeTaskId = taskId;
-  saveConversations(conv.id);
-  // No re-sync — /api/chat/continue already persisted both the rolled-back
-  // state AND activeTaskId; a second PUT would race the streaming task.
-  connectToTask(conv.id, taskId);
+    conv.activeTaskId = taskId;
+    saveConversations(conv.id);
+    // No re-sync — /api/chat/continue already persisted both the rolled-back
+    // state AND activeTaskId; a second PUT would race the streaming task.
+    connectToTask(conv.id, taskId);
+  } finally {
+    /* Gate closes on EVERY exit — success, fallback-to-regenerate, POST
+     * failure, or an unexpected throw. Leaking it would wedge Continue for
+     * this conversation until reload. */
+    delete conv._continueInFlight;
+  }
 }

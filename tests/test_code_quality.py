@@ -38,17 +38,19 @@ ROUTES_DIR = PROJECT_ROOT / 'routes'
 # - lib/__init__.py: loaded before lib.log may be ready
 # - lib/_pkg_utils.py: needs `import logging` for type hints (Logger param)
 # - lib/version.py: loaded at import-time before lib.log may exist
-# - lib/project_error_tracker.py: standalone universal module, no lib.log dependency
-# - lib/fetch/utils.py: uses `import logging as _logging` to silence urllib3
-# - lib/compat.py: platform detection, loaded very early
+#
+# An entry whose file no longer exists is DEAD WEIGHT that exempts nothing and
+# misleads the next reader — test_raw_logging_allowlist_has_no_dead_entries
+# below turns that into a visible failure. Three such entries were removed
+# (lib/compat.py → packaged as lib/compat/, lib/fetch/utils.py → moved out to
+# the tofu_search package, lib/project_error_tracker.py → deleted); they had
+# been masking nothing, but their presence implied a coverage this list did
+# not actually have.
 RAW_LOGGING_ALLOWLIST = {
     'lib/log.py',
     'lib/__init__.py',
     'lib/_pkg_utils.py',
     'lib/version.py',
-    'lib/project_error_tracker.py',
-    'lib/fetch/utils.py',
-    'lib/compat.py',
 }
 
 
@@ -382,7 +384,6 @@ class TestSilentCatches:
         #    each catches a DATA-shaped error over persisted JSON / a DB rev /
         #    an optional stat and degrades to a safe default, with the real
         #    outcome logged (or the row skipped) at the caller's boundary.
-        ('routes/chat.py', '_log_poll_task_id_mismatch', 'JSONDecodeError,TypeError'),
         ('routes/conversations.py', '_row_rev', 'TypeError,ValueError'),
         # RuntimeError = "no running event loop" in a sync context → skip spawn.
         ('routes/conversations.py', '_maybe_backfill_narration_on_open', 'RuntimeError'),
@@ -397,15 +398,12 @@ class TestSilentCatches:
          'load_message_window._seq', 'KeyError,IndexError,TypeError,ValueError'),
         ('lib/llm_dispatch/big_prefix_gate.py',
          'estimate_prefix_tokens', 'TypeError,ValueError'),
-        ('lib/self_update/_apply.py', '_apply_via_tarball._req_digest', 'Exception'),
         ('lib/shutdown_marker.py', 'record_boot', 'TypeError,ValueError'),
         ('lib/shutdown_marker.py', '_is_num', 'TypeError,ValueError'),
         ('lib/tasks_pkg/killed_recovery.py',
          'list_killed_turn_convs', 'JSONDecodeError,TypeError'),
         ('lib/tasks_pkg/killed_recovery.py',
          '_context_weight', 'TypeError,ValueError'),
-        ('lib/tasks_pkg/manager/_sync.py',
-         '_stamp_aborted_fragment_finish_reason', 'JSONDecodeError,TypeError'),
     }
 
     def test_no_silent_catches_in_lib(self):
@@ -476,8 +474,6 @@ class TestAssignmentSilentCatches:
         #    outer caller logs / skips the row. Data-shaped except only. ──
         ('lib/database/messages_rows.py',
          'load_message_window._seq', 'KeyError,IndexError,TypeError,ValueError'),
-        ('lib/tasks_pkg/autopilot.py',
-         '_resolve_run_anchor_msgid', 'JSONDecodeError,TypeError'),
         ('lib/tasks_pkg/cache_tracking/_persist.py',
          'read_persisted_boundary', 'TypeError,KeyError,IndexError'),
         ('lib/tasks_pkg/killed_recovery.py',
@@ -496,11 +492,8 @@ class TestAssignmentSilentCatches:
          'recover_stale_tasks_on_startup', 'JSONDecodeError,TypeError'),
         ('lib/tasks_pkg/manager/_sync.py',
          '_reconcile_orphan_placeholder_on_settle', 'JSONDecodeError,TypeError'),
-        ('lib/tasks_pkg/manager/_sync.py',
-         '_stamp_aborted_fragment_finish_reason', 'JSONDecodeError,TypeError'),
         ('routes/api_v1/conversations.py',
          'create_branch', 'KeyError,TypeError,IndexError'),
-        ('routes/chat.py', '_log_poll_task_id_mismatch', 'JSONDecodeError,TypeError'),
         ('routes/conversations.py', '_save_conv_blocking', 'JSONDecodeError,TypeError'),
         ('routes/conversations.py', '_persist_reconcile',
          'TypeError,ValueError,KeyError,IndexError'),
@@ -513,7 +506,6 @@ class TestAssignmentSilentCatches:
         ('lib/database/_pg_backup/__init__.py', '<module>', 'AttributeError,TypeError'),
         ('lib/translate/segment_backfill.py', '<module>', 'ValueError,TypeError'),
         ('lib/self_update/_apply.py', '_apply_via_tarball', 'TypeError,ValueError'),
-        ('lib/self_update/_apply.py', '_apply_via_tarball._req_digest', 'Exception'),
         ('lib/shutdown_marker.py', 'record_boot', 'TypeError,ValueError'),
         ('lib/shutdown_marker.py', '_is_num', 'TypeError,ValueError'),
         ('lib/llm_dispatch/big_prefix_gate.py',
@@ -663,6 +655,28 @@ class TestGuardStaysRunnable:
         sig = _finding_sig('synthetic_silent.py', f1.issues[0])
         assert sig not in TestSilentCatches.ACCEPTABLE_SIGS
         assert sig not in TestAssignmentSilentCatches.ACCEPTABLE_SIGS
+
+    def test_raw_logging_allowlist_has_no_dead_entries(self):
+        """Every RAW_LOGGING_ALLOWLIST entry must name a file that EXISTS.
+
+        This is the meta-assertion the silent-catch allowlists already had and
+        this one did not — which is why three of its entries went on naming
+        files that had been packaged away, moved to another distribution, or
+        deleted outright, with nothing to say so.
+
+        A dead exemption is not merely untidy. It states a coverage claim that
+        is no longer true, so the next reader trusts a protection that isn't
+        there; and if a NEW file ever lands at the old path it is silently
+        pre-exempted from the check. Cleaning the list without adding this
+        assertion would only reset the clock on the same rot.
+        """
+        missing = sorted(rel for rel in RAW_LOGGING_ALLOWLIST
+                         if not (PROJECT_ROOT / rel).is_file())
+        assert not missing, (
+            'RAW_LOGGING_ALLOWLIST names files that no longer exist: '
+            f'{missing}. Remove them — an exemption for a path that does not '
+            'exist protects nothing, and pre-exempts whatever lands there next.'
+        )
 
     def test_allowlists_have_no_dead_entries(self):
         """Every ACCEPTABLE_SIGS entry must still correspond to a real finding.

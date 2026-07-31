@@ -5,7 +5,8 @@ have to defend against the model wrapping it in a ```json fence, emitting
 prose around it, or truncating mid-object at the token ceiling. Before this
 module each grew its own copy:
 
-  * ``lib/optimizer/proposer.py:_strip_fences``       (fence strip)
+  * ``lib/optimizer/proposer.py``                     (fence strip; now calls
+                                                        ``extract_json`` directly)
   * ``lib/orchestration_composer.py:_strip_fences``   (byte-identical copy)
   * ``lib/orchestration_composer.py:_extract_json``   (fence + first {...})
   * ``lib/scheduler/_shared.py:parse_json_decision``  (inline fence strip)

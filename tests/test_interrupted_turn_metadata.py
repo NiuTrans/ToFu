@@ -144,8 +144,12 @@ class TestPartialSyncCarriesTerminalMeta:
 
     def _fake_conv_db(self, messages):
         """A minimal db double with the two queries _sync_partial_to_conversation
-        uses (SELECT messages+updated_at; UPDATE ... RETURNING rowcount)."""
-        state = {'messages': json.dumps(messages), 'updated_at': 111}
+        uses (SELECT messages+updated_at+rev; UPDATE ... WHERE rev=? RETURNING
+        rowcount). The row MUST carry the third ``rev`` column — the Phase-4
+        W-partial CAS (ec6a2865) reads row[2]; a 2-column row raises IndexError
+        inside the CAS retry, which is swallowed and retried 3x, so NO write is
+        ever captured (the red-baseline root cause)."""
+        state = {'messages': json.dumps(messages), 'updated_at': 111, 'rev': 7}
         captured = {}
 
         class _Cur:
@@ -156,7 +160,7 @@ class TestPartialSyncCarriesTerminalMeta:
             def execute(self, sql, params=()):
                 s = ' '.join(sql.split())
                 if s.startswith('SELECT messages, updated_at'):
-                    return _FetchRow([state['messages'], state['updated_at']])
+                    return _FetchRow([state['messages'], state['updated_at'], state['rev']])
                 if s.startswith('UPDATE conversations SET messages'):
                     captured['messages'] = params[0]
                     return _Cur(1)

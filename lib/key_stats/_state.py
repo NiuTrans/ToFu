@@ -12,6 +12,7 @@ per process.  Never duplicate this state anywhere else.
 
 The low-level helpers that read/mutate the cache under ``_lock`` also live
 here: ``_today``, ``_pair_key``, ``_list_siblings``, ``_load_unlocked``,
+``_fold_namespaces_unlocked``,
 ``_save_unlocked``, ``_ensure_fresh_unlocked``, ``_new_entry``.
 """
 
@@ -48,14 +49,11 @@ def _pkg():
 MIN_ATTEMPTS = 5
 MIN_SUCCESS_RATE = 0.5
 
-# Consecutive-429 threshold. Provider 429 bodies are cryptic and ambiguous
-# (some paid keys say the exact same thing on RPM-overrun as on balance-out).
-# A key that returns 429 this many times IN A ROW without a single success is
-# effectively dead for the day — either it's out of balance or shared quota
-# is saturated; in both cases, stop wasting requests on it.
-#
-# Any success or non-429 error resets the counter to 0.
-MAX_CONSECUTIVE_429 = 100
+# NOTE (owner policy 2026-07-29): a 429 streak NEVER auto-disables a key.
+# 429 means backpressure — the slot-local steering cooldown + RPM decay are
+# the whole answer; only an explicit billing-stop (HTTP 402 /
+# quota-exhausted) may disable a key for the day. The consecutive_429
+# counter survives as pure UI telemetry.
 
 _STATS_PATH = config_path('key_stats.json')
 _lock = threading.Lock()
@@ -164,6 +162,101 @@ def _list_siblings(provider_id: str) -> list:
     return list(by_provider.get(provider_id or 'default', []))
 
 
+def _fold_namespaces_unlocked() -> bool:
+    """Fold stats/overrides recorded under absorbed FACE namespaces into
+    their ACCOUNT namespace. Caller must hold _lock. Returns True when the
+    cache changed (the caller then persists).
+
+    Why this exists (2026-07-29 invisible-total-outage): key-health history
+    was recorded per duplicate face CARD (``sankuai_anthropic::…``) while the
+    Settings UI renders one card per ACCOUNT (``sankuai::…``, charter #23).
+    The account/face config merge stops NEW face-namespace recordings, but
+    the state already on disk — day-scoped billing-stops and PERSISTENT
+    manual overrides — would stay orphaned on a namespace nothing reads and
+    nothing renders: stops silently lost (a live 402 re-burned per model),
+    manual decisions silently inert.
+
+    The face→account mapping is computed ONCE in
+    ``lib.llm_dispatch.provider_face.account_namespace_map`` — never
+    re-derived here (a second copy of the face rule would drift).
+
+    Merge semantics:
+      * counters (success/failure/rate_limited) SUM across faces — one
+        physical key, one health history;
+      * consecutive_429 takes MAX (a streak is a point-in-time value);
+      * exhausted ORs, exhausted_models UNIONs (the account's own entries
+        win per-model conflicts — it is the surviving namespace);
+      * an empty account last_error inherits the face's;
+      * overrides MOVE only when the account has none — the account's
+        explicit user decision always wins.
+      * unknown-shape key names (not ``<ns>_key_<i>``) are left untouched:
+        the fold converges what it knows, it never deletes history.
+    """
+    try:
+        from lib import _load_server_config
+        from lib.llm_dispatch.provider_face import account_namespace_map
+        cfg = _load_server_config() or {}
+        mapping = account_namespace_map(cfg.get('providers') or [])
+    except Exception as e:
+        logger.debug('[KeyStats] namespace fold map unavailable (non-fatal): %s', e)
+        return False
+    if not mapping:
+        return False
+
+    changed = False
+
+    def _dst_pk(src_ns, dst_ns, key_name):
+        if key_name.startswith(src_ns + '_key_'):
+            return f'{dst_ns}::{dst_ns}{key_name[len(src_ns):]}'
+        return None
+
+    for src_ns, dst_ns in mapping.items():
+        if src_ns == dst_ns:
+            continue
+        for pk in [k for k in _cache['stats']
+                   if k.split('::', 1)[0] == src_ns]:
+            dst_pk = _dst_pk(src_ns, dst_ns, pk.split('::', 1)[1])
+            if dst_pk is None:
+                logger.warning('[KeyStats] namespace fold: unrecognised key '
+                               'name in %s — kept as-is', pk)
+                continue
+            src_entry = _cache['stats'].pop(pk)
+            dst_entry = _cache['stats'].get(dst_pk)
+            if dst_entry is None:
+                _cache['stats'][dst_pk] = src_entry
+            else:
+                for field in ('success', 'failure', 'rate_limited'):
+                    dst_entry[field] = (int(dst_entry.get(field) or 0)
+                                        + int(src_entry.get(field) or 0))
+                dst_entry['consecutive_429'] = max(
+                    int(dst_entry.get('consecutive_429') or 0),
+                    int(src_entry.get('consecutive_429') or 0))
+                dst_entry['exhausted'] = (bool(dst_entry.get('exhausted'))
+                                          or bool(src_entry.get('exhausted')))
+                merged_models = dict(src_entry.get('exhausted_models') or {})
+                merged_models.update(dst_entry.get('exhausted_models') or {})
+                dst_entry['exhausted_models'] = merged_models
+                if not dst_entry.get('last_error'):
+                    dst_entry['last_error'] = src_entry.get('last_error') or ''
+            changed = True
+        for pk in [k for k in _cache['overrides']
+                   if k.split('::', 1)[0] == src_ns]:
+            dst_pk = _dst_pk(src_ns, dst_ns, pk.split('::', 1)[1])
+            if dst_pk is None:
+                continue
+            if dst_pk not in _cache['overrides']:
+                _cache['overrides'][dst_pk] = _cache['overrides'][pk]
+            del _cache['overrides'][pk]
+            changed = True
+
+    if changed:
+        logger.info('[KeyStats] folded absorbed face namespace(s) into '
+                    'account namespace: %s', mapping)
+    return changed
+
+
+def _load_unlocked():
+    """Load stats from disk. Caller must hold _lock. Handles day rollover."""
 def _load_unlocked():
     """Load stats from disk. Caller must hold _lock. Handles day rollover."""
     _pk = _pkg()
@@ -207,6 +300,8 @@ def _load_unlocked():
         _cache['stats'] = data.get('stats') or {}
         _cache['overrides'] = persisted_overrides
     _cache['loaded'] = True
+    if _fold_namespaces_unlocked():
+        _save_unlocked()
 
 
 def _save_unlocked():
@@ -254,6 +349,7 @@ def _ensure_fresh_unlocked():
         _cache['stats'] = {}
         # DO NOT touch _cache['overrides'] — manual decisions persist.
         _last_resort_logged.clear()
+        _fold_namespaces_unlocked()
         _save_unlocked()
 
 
@@ -265,4 +361,11 @@ def _new_entry() -> dict:
         'consecutive_429': 0,    # current streak of 429s with no success
         'last_error': '',
         'exhausted': False,
+        # Per-model billing-stops: {model: reason}. A quota error carries a
+        # model dimension (the slot that observed it) — on an aggregating
+        # gateway one key proxies SEVERAL upstream vendors (kimi→Moonshot,
+        # qwen→Aliyun), so a billing-stop on one model says nothing about
+        # the others routed through the same key. Key-wide ``exhausted`` is
+        # reserved for callers that genuinely cannot name a model.
+        'exhausted_models': {},
     }

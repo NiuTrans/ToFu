@@ -76,19 +76,30 @@ const NEW = 1700000005000;
 global.activeConvId = 'open';
 global.activeStreams = new Map();
 global.streamBufs = new Map();
+global.streamSessions = new Map();
+global.document = { getElementById: () => null, addEventListener: () => {} };
+global.getStreamSession = global.getStreamSession = (cid) => { let s = global.streamSessions.get(cid); if (!s) { s = { phase: null }; global.streamSessions.set(cid, s); } return s; };
+global.setStreamPhase = global.setStreamPhase = (cid, p) => { if (!global.streamSessions.has(cid) && !(typeof activeStreams !== "undefined" && activeStreams.has(cid))) return; global.getStreamSession(cid).phase = p; };
+global.clearStreamSession = global.clearStreamSession = (cid) => { global.streamSessions.delete(cid); };
 global._editingMsgIdx = null;
 global.debugLog = () => {};
 global.config = {};
 
 // ── Observability: record render calls in order, tagged with what was rendered. ──
+// The render seam is ConvView.replaceAll (the RENDER_CONTRACT migration removed
+// the bare renderChat call from loadConversationMessages); resolve the conv by id.
 let renderLog = [];              // [{ when, len, contents }]
 let serverFetchResolved = false; // flips true only after the deferred server GET resolves
-global.renderChat = (conv) => {
-  renderLog.push({
-    afterServer: serverFetchResolved,
-    len: conv && conv.messages ? conv.messages.length : -1,
-    contents: conv && conv.messages ? conv.messages.map(m => m.content).join(',') : '',
-  });
+global.ConvView = {
+  replaceAll: (id) => {
+    const conv = (global.conversations || []).find(c => c.id === id);
+    renderLog.push({
+      afterServer: serverFetchResolved,
+      len: conv && conv.messages ? conv.messages.length : -1,
+      contents: conv && conv.messages ? conv.messages.map(m => m.content).join(',') : '',
+    });
+  },
+  startStreaming: () => {},
 };
 global.showStreamingUIForConv = () => {};
 global._restoreConvToolState = () => {};
@@ -154,6 +165,12 @@ global.conversations = [{
 }];
 
 eval(fs.readFileSync(process.argv[2], 'utf8'));  // REAL core/conversations.js
+// Extracted leaf modules (pt_3879f00e decomposition): the cache-paint path
+// calls _applySettingsToConv (core/conv_apply_settings.js) + _hydrateImageBase64
+// (core/conv_image_hydrate.js), and the load path calls helpers from
+// core/pending_sync.js + core/conv_persist_helpers.js — none still live in
+// conversations.js. Eval them so the harness scope matches the shipped bundle.
+for (const extra of process.argv.slice(3)) eval(fs.readFileSync(extra, 'utf8'));
 global.conversations = conversations;
 
 const out = [];
@@ -196,9 +213,15 @@ def _run(js_path: str) -> subprocess.CompletedProcess:
     harness = os.path.join(HERE, '_boot_early_active_paint_harness.js')
     with open(harness, 'w') as f:
         f.write(_HARNESS)
+    extra_js = [
+        os.path.join(JS_DIR, 'core', 'conv_apply_settings.js'),
+        os.path.join(JS_DIR, 'core', 'conv_image_hydrate.js'),
+        os.path.join(JS_DIR, 'core', 'pending_sync.js'),
+        os.path.join(JS_DIR, 'core', 'conv_persist_helpers.js'),
+    ]
     try:
         return subprocess.run(
-            ['node', harness, js_path],
+            ['node', harness, js_path, *extra_js],
             capture_output=True, text=True, timeout=60,
         )
     finally:
@@ -229,10 +252,10 @@ def test_NC_phase1_cache_render_is_load_bearing(tmp_path):
     with open(conv_js, encoding='utf-8') as f:
         src = f.read()
 
-    # The Phase-1 active-conv render is `renderChat(conv, false);` immediately
+    # The Phase-1 active-conv render is `window.ConvView.replaceAll(...)` immediately
     # followed by the _restoreConvToolState + _setCacheVerifying lines. Neuter
     # ONLY that first (cache) render by disabling it in the cache branch.
-    needle = ('          renderChat(conv, false);\n'
+    needle = ('          window.ConvView.replaceAll(conv.id, { forceScroll: false });\n'
               '          if (typeof _restoreConvToolState === "function") _restoreConvToolState(conv);\n'
               '          _setCacheVerifying(convId, _cacheKnownStale);')
     assert src.count(needle) == 1, 'Phase-1 cache-render fragment drifted — update the neuter target'

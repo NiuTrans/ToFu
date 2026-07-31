@@ -4,7 +4,7 @@
    wires toolbar UI, and boots the app.
    Feature modules live in separate files:
      image-gen.js, log-clean.js, translation.js,
-     upload.js, project.js, memory.js, scheduler.js, myday.js
+     upload.js, project.js, memory.js, myday.js
    ═══════════════════════════════════════════ */
 
 /* pendingPdfTexts → defined in upload.js */
@@ -29,9 +29,9 @@ function _purgeEmptyConvs() {
 }
 // ── Per-conversation tool state helpers ──
 /* ── Brand detection for model_id — reuse _detectBrand from settings.js ── */
-const _DEPTH_ICONS  = { off: '', medium: '', high: '', xhigh: '', max: '' };
+const _DEPTH_ICONS  = { off: '', medium: '', high: '', xhigh: '', max: '', ultra: '' };
 const _DEPTH_ICON_FALLBACK = '';
-const _DEPTH_LABELS = { off: 'Off', medium: 'Med', high: 'High', xhigh: 'xHigh', max: 'Max' };
+const _DEPTH_LABELS = { off: 'Off', medium: 'Med', high: 'High', xhigh: 'xHigh', max: 'Max', ultra: 'Ultra' };
 /* Models whose model_id indicates thinking/depth support.
  * Uses server-provided thinking_default from _registeredModels;
  * falls back to regex before server config loads. */
@@ -57,12 +57,33 @@ let _lastAppliedModelId = null;
 let _lastAppliedIsThinking = null;
 
 function _applyModelUI(modelId) {
-  if (!modelId) modelId = config.model || serverModel;
+  /* ★ SINGLE RESOLVER. This function — and ONLY this function — decides what
+   *   to paint when a conversation has no stored model. Callers MUST pass the
+   *   conversation's own value (or nothing at all); they must NOT pre-resolve
+   *   `|| serverModel` themselves.
+   *
+   *   Why it matters: the write-back sites persist `config.model`, so the
+   *   composer's value becomes the conversation's stored identity. A model id
+   *   is therefore EITHER an explicit choice (selectModel / a value restored
+   *   from the conv) OR a mere DISPLAY fallback. Only this function can tell
+   *   the two apart — and only if the fallback is applied HERE. When a caller
+   *   pre-resolved `conv.model || serverModel`, every value arrived truthy,
+   *   `_modelIsProvisional` was permanently false, and the guard below it was
+   *   dead code: the kimi-k3 default was still laundered into storage
+   *   (2026-07-27, conv ms352oniikgq10 — an Opus 5 conversation whose composer
+   *   painted the global default, which the next tool-toggle then PATCHed over
+   *   the real stored model).
+   *
+   *   Contract: falsy `modelId` => "this conversation stored nothing" => paint
+   *   the default but mark it PROVISIONAL so it is never written down. */
+  const _provisional = !modelId;
+  if (!modelId) modelId = serverModel;
   /* Legacy preset migration */
   if (typeof _LEGACY_PRESET_TO_MODEL !== 'undefined' && _LEGACY_PRESET_TO_MODEL[modelId]) {
     modelId = _LEGACY_PRESET_TO_MODEL[modelId];
   }
   config.model = modelId;
+  config._modelIsProvisional = _provisional;
   const brand = typeof _detectBrand === 'function' ? _detectBrand(modelId) : 'generic';
   const shortName = _modelShortName(modelId);
   const isThinking = _isThinkingCapable(modelId);
@@ -250,15 +271,24 @@ function _reflowToolbar() {
    * with the messages above it, instead of collapsing to the (now much
    * narrower) decluttered-toolbar content width — on a wide landscape display
    * a ~540px toolbar under an 820px message column reads as "input too narrow".
-   * Read the measure from .chat-inner so the responsive reading width (820
-   * desktop / 920 portrait-tablet) stays SINGLE-SOURCE in CSS and adapts per
-   * resolution; the measured toolbar width can still EXPAND beyond it when the
-   * content genuinely needs more room. The min(…,maxW) cap still wins on a
-   * narrow window so we never overflow the viewport. */
+   * Read `--msg-measure`, the SINGLE source of the reading measure, so the
+   * composer tracks the message column per resolution; the measured toolbar
+   * width can still EXPAND beyond it when the content genuinely needs more
+   * room. The min(…,maxW) cap still wins on a narrow window so we never
+   * overflow the viewport.
+   *
+   * ⚠️ DO NOT read `.chat-inner`'s max-width here. It used to be the measure,
+   * but .chat-inner is now a three-track grid ([text][gap][rail]) whose
+   * max-width is the measure PLUS the rail furniture — reading it floored the
+   * composer at ~1178px under an 820px message column, i.e. an input box
+   * visibly wider than the text it belongs to. Measured desync in every
+   * roomy state before this changed; guarded by the composer-alignment
+   * assertion in tests/test_turn_ctx_rail_geometry.py. */
   let readingFloor = 820;
   const chatInner = document.querySelector('.chat-inner');
   if (chatInner) {
-    const mw = parseFloat(getComputedStyle(chatInner).maxWidth);
+    const mw = parseFloat(
+      getComputedStyle(chatInner).getPropertyValue('--msg-measure'));
     if (mw && isFinite(mw)) readingFloor = mw;
   }
   w = Math.min(Math.max(w, readingFloor), maxW);
@@ -407,7 +437,10 @@ function _applyBrowserUI(enabled) {
   if (badge) {
     badge.classList.toggle("visible", browserEnabled);
   }
-  _updateBrowserModalBtn();
+  /* The browser bridge now shares ONE toolbar entry with the desktop agent
+   * (#localControlToggle). Its summary badge counts both capabilities, so it
+   * is repainted here rather than toggled per-flag. */
+  if (typeof _lcUpdateBadge === "function") _lcUpdateBadge();
 }
 function _applyMemoryUI(enabled) {
   memoryEnabled = !!enabled;
@@ -418,15 +451,6 @@ function _applyMemoryUI(enabled) {
     .getElementById("memoryBadge")
     ?.classList.toggle("visible", memoryEnabled);
   _updateMemoryModalBtn();
-}
-function _applySchedulerUI(enabled) {
-  schedulerEnabled = !!enabled;
-  document
-    .getElementById("schedulerToggle")
-    ?.classList.toggle("active", schedulerEnabled);
-  document
-    .getElementById("schedulerBadge")
-    ?.classList.toggle("visible", schedulerEnabled);
 }
 function _applyImageGenToolUI(enabled) {
   imageGenEnabled = !!enabled;
@@ -490,15 +514,40 @@ function _applyDesktopUI(enabled) {
   document
     .getElementById("desktopBadge")
     ?.classList.toggle("visible", desktopEnabled);
+  /* The desktop agent now shares ONE toolbar entry with the browser bridge
+   * (#localControlToggle). Its summary badge counts both capabilities, so it
+   * is repainted here rather than toggled per-flag. */
+  if (typeof _lcUpdateBadge === "function") _lcUpdateBadge();
 }
+/* Desktop control used to be a blind flag flip: it turned the toggle on
+ * without ever checking whether an agent was running, and
+ * lib/tools/registry/_build.py silently ships ZERO desktop tools when none
+ * is — so the user saw an enabled toggle and tools that never appeared.
+ * It now opens the merged Local Control modal, which shows live status and
+ * the ONE install step that applies to this deployment. */
 function toggleDesktop() {
+  if (typeof openLocalControlModal === "function") {
+    openLocalControlModal();
+    return;
+  }
+  // Bundle shipped without local-control.js — degrade to a plain flip rather
+  // than making the entry a dead button.
   _applyDesktopUI(!desktopEnabled);
   _saveConvToolState();
 }
 function _saveConvToolState() {
   const conv = getActiveConv();
   if (!conv) return;
-  conv.model = config.model || serverModel;
+  /* ★ NEVER launder a paint-time default into stored truth. config.model may
+   *   be a DISPLAY fallback (serverModel) chosen only because this conv had
+   *   nothing stored; persisting it would overwrite the conversation's real
+   *   model with the global default and make the next send run on the wrong
+   *   model. Only a value the user actually chose (or one restored from the
+   *   conv itself) is durable. A conv with no model simply keeps none — the
+   *   composer still renders the default, it just stops being written down. */
+  if (!config._modelIsProvisional && config.model) {
+    conv.model = config.model;
+  }
   conv.thinkingDepth = config.thinkingDepth;
   /* ★ FIX: Track the selected image gen model separately so pure image-gen
    * conversations accurately record which model was actually used, without
@@ -593,14 +642,16 @@ function _syncToolStateDebounced(conv, delayMs = 1500) {
 
 function _restoreConvToolState(conv) {
   config.thinkingDepth = conv.thinkingDepth || null;   // ← restore depth BEFORE model UI (let _applyModelUI normalize)
-  _applyModelUI(conv.model || conv.preset || conv.effort || serverModel);
+  /* Pass the conversation's OWN value only — no `|| serverModel` here. A conv
+   * that stored nothing must reach _applyModelUI as falsy so the default it
+   * paints is marked provisional and never written back. */
+  _applyModelUI(conv.model || conv.preset || conv.effort);
   _applySearchModeUI(conv.searchMode || "multi");
   _applyFetchEnabledUI(true);  // always on
   _applyCodeExecUI(!!conv.codeExecEnabled);
   _applyBrowserUI(!!conv.browserEnabled);
   _applyDesktopUI(!!conv.desktopEnabled);
   _applyMemoryUI(conv.memoryEnabled !== undefined ? !!conv.memoryEnabled : true);
-  _applySchedulerUI(!!conv.schedulerEnabled);
   _applySwarmUI(!!conv.swarmEnabled);
   _applyEndpointUI(!!conv.endpointEnabled);
   _applyAutopilotUI(!!conv.autopilotEnabled);
@@ -613,8 +664,21 @@ function _restoreConvToolState(conv) {
    * so restoring never clobbers the just-restored flags — _applyChatModeUI is
    * idempotent with the setters above. */
   if (typeof _applyChatModeUI === 'function') {
-    const _mode = conv.chatMode
+    const _storedMode = conv.chatMode
       || (typeof _deriveChatModeFromFlags === 'function' ? _deriveChatModeFromFlags(conv) : 'chat');
+    /* ★ Studio ⟺ a project is attached — the clamp is BIDIRECTIONAL.
+     * (a) A stored 'studio' tier with NO projectPath is poisoned (e.g.
+     * persisted before the project was cleared — the clear path once
+     * repainted without saving) — never restore it.
+     * (b) The mirror poison: a stored NON-studio tier WITH a projectPath
+     * (stamped by the one-way projectState→conv sync while another conv's
+     * project was globally active; the dial can never produce this on
+     * purpose — picking Chat detaches the project). A project attached IS
+     * Studio, so restore heals it upward. Both heals are paint-only, like
+     * the original one-way clamp. */
+    const _mode = (_storedMode === 'studio' && !conv.projectPath) ? 'chat'
+      : (_storedMode !== 'studio' && conv.projectPath) ? 'studio'
+      : _storedMode;
     _applyChatModeUI(_mode);
   }
   /* ★ Restore the image gen model + batch count + aspect + resolution from conv settings */
@@ -658,22 +722,25 @@ function _restoreConvToolState(conv) {
   /* ★ If the Project Brain panel is open, re-resolve its feed to the new
    *   conversation's project (two projects must never bleed into one view). */
   if (typeof projectBrainRefresh === 'function') projectBrainRefresh();
-  /* ★ The always-visible per-conversation influence bar (#convInfluenceBar)
-   *   is conv-scoped, so re-pull it on every switch. It's exposed as
-   *   window.convInfluenceRefresh but was never wired here, so it only ever
-   *   populated while the Brain panel was already open and a push frame fired
-   *   (see index.html's own "Updates on conversation switch" comment). */
-  if (typeof convInfluenceRefresh === 'function') convInfluenceRefresh();
   /* ★ Reflow toolbar after restoring conv tool state (toolbar width may differ). */
   _scheduleReflow();
 }
 function _resetToolsToDefaults() {
   config.thinkingDepth = config.defaultThinkingDepth;   // ← reset to default depth BEFORE applying model UI (let _applyModelUI normalize)
-  _applyModelUI(serverModel);
+  /* A brand-new chat has stored nothing — pass nothing, so the default is
+   * painted as provisional rather than immediately owned. */
+  _applyModelUI();
   _applySearchModeUI("multi");
   _applyFetchEnabledUI(true);
   _applyCodeExecUI(false);
   _applyBrowserUI(false);
+  /* ★ Desktop was the ONE tool flag this function never reset, so a new chat
+   * silently inherited computer control from whatever conversation came
+   * before — `_restoreConvToolState` sets it per-conv, nothing cleared it, and
+   * the merged badge then reported it as active on a conversation the user
+   * never granted it on. It is the highest-risk flag here (shell, file writes,
+   * GUI), so inheriting it by omission is the wrong default. */
+  _applyDesktopUI(false);
   _applyMemoryUI(true);
   /* ★ Swarm + Autopilot default OFF for a project-LESS chat. They are
    * auto-enabled only when the user turns Project mode on (see
@@ -765,10 +832,30 @@ function _installViewportHeightGuard() {
   // WebView zero-height guard FIRST — before any layout-dependent init, so the
   // document has a real pixel height for the flex chain to fill.
   try { _installViewportHeightGuard(); } catch (_) {}
+  /* RENDER_CONTRACT Phase 3.5 §5 step-4 precondition: ConvView is the single
+   * DOM-apply seam for #chatInner. If the bundler dropped conv_view.js (the
+   * CLAUDE.md §3.2.1 silent-no-op failure mode: the <script> tag is stripped
+   * from index.html but never added to the bundle), every ConvView call site
+   * would silently degrade. Turn that into a LOUD startup failure instead —
+   * a fixed banner + console.error at boot, before any render runs. */
+  if (typeof window.ConvView === 'undefined' || typeof window.ConvView.apply !== 'function') {
+    const _cvBootMsg = '[ConvView] MISSING at boot — the JS bundle is broken ' +
+      '(conv_view.js absent from _BUNDLE_FILES in lib/js_bundler.py?). ' +
+      'Chat rendering cannot proceed safely; do NOT ignore this banner.';
+    console.error(_cvBootMsg);
+    try {
+      const _cvBanner = document.createElement('div');
+      _cvBanner.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:99999;' +
+        'background:#7f1d1d;color:#fff;padding:10px 16px;' +
+        'font:13px/1.4 monospace;text-align:center;';
+      _cvBanner.textContent = _cvBootMsg;
+      (document.body || document.documentElement).appendChild(_cvBanner);
+    } catch (_) { /* banner is best-effort; the console.error already fired */ }
+  }
   // ── Init model toggle from config ──
   (function initModelToggle() {
     thinkingEnabled = true;
-    _applyModelUI(config.model || serverModel);
+    _applyModelUI(config.model);
     _loadServerConfigAndPopulate();
   })();
   // Apply stored input-send-mode hint text on load
@@ -900,10 +987,7 @@ function _installViewportHeightGuard() {
         e.preventDefault();
         hasImage = true;
         const f = item.getAsFile();
-        const d = await processImageFile(f);
-        pendingImages.push(d);
-        renderImagePreviews();
-        if (typeof _igUpdateGenButton === 'function') _igUpdateGenButton();
+        await _handleImageDrop(f);
       }
     }
     // Detect log noise in pasted text — server-side via /api/v1/logs/clean
@@ -1071,9 +1155,9 @@ function _installViewportHeightGuard() {
         e.preventDefault();
         return;
       }
-      const brm = document.getElementById("browserModal");
+      const brm = document.getElementById("localControlModal");
       if (brm && brm.classList.contains("open")) {
-        closeBrowserModal();
+        closeLocalControlModal();
         e.preventDefault();
         return;
       }
@@ -1184,18 +1268,46 @@ function _installViewportHeightGuard() {
     if (document.visibilityState === 'hidden') _persistLastActiveConv();
   });
 
-  /* ★ Event-driven cross-device sync: subscribe to the server's `notify`
-   *   push so a sibling device's change (new turn / rename / delete / folder)
-   *   reconciles in real time — no manual refresh, no waiting for the poll.
-   *   Wired HERE (not at cross_tab_sync.js load) because that file is bundled
-   *   before push.js, so pushSubscribe isn't defined yet at its IIFE time. */
-  if (typeof _wireConvSyncPush === 'function') _wireConvSyncPush();
+  /* ★ pt_679d064f68ac4dd6: resolve THIS tab's tenant identity BEFORE any
+   *   push subscriber is wired. The four multi-user gates
+   *   (conv_state_reducer::_frameIsOurs, cross_tab_sync::_onConvNotifyPush /
+   *   _onFoldersChangedPush, conv_sync_push::_onConvSyncPush) compare
+   *   frame.userId against window._currentUserId; a frame that arrives
+   *   before this resolves would be evaluated with no identity and accepted
+   *   unscoped. Ordering here is the contract — do NOT move the wire calls
+   *   above it. Fail-open: a probe failure resolves to '' (accept-all),
+   *   which is the personal-install default and byte-identical to the
+   *   pre-commit behaviour.
+   *
+   *   The enclosing boot scope is NOT async, so the ordering is expressed
+   *   as a promise chain rather than `await`: the subscribers are wired in
+   *   the .then(), i.e. strictly after the identity settles. initCurrentUserId
+   *   never rejects (it swallows its own errors), but .catch() is kept so a
+   *   future change there can never strand the subscribers unwired. */
+  const _identityReady = (typeof initCurrentUserId === 'function')
+    ? initCurrentUserId().catch(() => {})
+    : Promise.resolve();
 
-  /* ★ Server→client history_rewrite alignment: subscribe to the `conv` push
-   *   channel so a backend reconcile (ghost-tail delete / husk collapse) is
-   *   applied in place the instant it lands — the "must refresh to sync state"
-   *   fix. Same late-wire reason as above (pushSubscribe defined by push.js). */
-  if (typeof _wireConvHistoryRewritePush === 'function') _wireConvHistoryRewritePush();
+  _identityReady.then(() => {
+    /* ★ Event-driven cross-device sync: subscribe to the server's `notify`
+     *   push so a sibling device's change (new turn / rename / delete / folder)
+     *   reconciles in real time — no manual refresh, no waiting for the poll.
+     *   Wired HERE (not at cross_tab_sync.js load) because that file is bundled
+     *   before push.js, so pushSubscribe isn't defined yet at its IIFE time. */
+    if (typeof _wireConvSyncPush === 'function') _wireConvSyncPush();
+
+    /* ★ Server→client history_rewrite alignment: subscribe to the `conv` push
+     *   channel so a backend reconcile (ghost-tail delete / husk collapse) is
+     *   applied in place the instant it lands — the "must refresh to sync state"
+     *   fix. Same late-wire reason as above (pushSubscribe defined by push.js). */
+    if (typeof _wireConvHistoryRewritePush === 'function') _wireConvHistoryRewritePush();
+
+    /* ★ pt_conv_state_ssot P5: 60s sync-drift probe — reports the per-conv
+     *   digest (authoritative busy set + last-converged rev) so the server can
+     *   WARN on divergence (covers a dropped notify frame, which is otherwise
+     *   invisible locally). Idempotent; inert when the reducer isn't bundled. */
+    if (typeof startSyncDriftProbe === 'function') startSyncDriftProbe();
+  });
 
   /* ★ Windowed-read scroll-up loader: when a long conversation is opened with
    *   only its tail window, scrolling to the top fetches + prepends earlier

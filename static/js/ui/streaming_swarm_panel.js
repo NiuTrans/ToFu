@@ -225,6 +225,25 @@ function _recoverSwarmAgents(round, allRounds) {
          showed no tools/timeline even though the agent used them live. */
       const tools = Array.isArray(a.tools) ? a.tools : [];
       const toolCalls = Array.isArray(a.toolCalls) ? a.toolCalls : [];
+      /* ★ Restore the live stopwatch's anchor (backend `startedAt`, epoch ms
+         — see master._build_agent_snapshot). The per-agent timer renders only
+         while the agent is running AND has a `_startedAt`; that field used to
+         be minted client-side from Date.now() and was never persisted, so a
+         reload rebuilt stubs WITHOUT it and the timer node disappeared for an
+         agent that was still working. The `else if (a.elapsed)` fallback
+         cannot cover that case: `elapsed` only exists once the agent has
+         finished. Range-checked so a wrong-magnitude value (epoch seconds, or
+         a double-converted ms) is dropped rather than rendered as a ~50-year
+         / year-58000 elapsed — both fail silently, which is worse than the
+         missing timer this restores. */
+      let startedAt = 0;
+      const rawStart = Number(a.startedAt);
+      if (Number.isFinite(rawStart) && rawStart > 1e12 && rawStart <= Date.now()) {
+        startedAt = rawStart;
+      } else if (a.startedAt != null && a.startedAt !== "") {
+        console.warn("[Swarm] implausible startedAt for agent", a.id,
+          "=", a.startedAt, "— timer anchor dropped");
+      }
       return {
         id: a.id || "",
         role: a.role || "agent",
@@ -239,6 +258,7 @@ function _recoverSwarmAgents(round, allRounds) {
         error: a.error || "",
         tools,
         _toolCalls: toolCalls,
+        _startedAt: startedAt || undefined,
       };
     });
   }
@@ -303,6 +323,7 @@ function _recoverSwarmAgents(round, allRounds) {
 
 /* ★ Build the live swarm panel HTML (used during streaming) */
 function _buildSwarmPanelHTML(round, allRounds) {
+  _swEnsureTicker();
   /* Live path: `_swarmAgents` is populated from swarm_* SSE events.
      Reload path: that field is gone, so recover agents from the persisted
      handle JSON + sibling result rounds — otherwise the completed panel
@@ -455,7 +476,10 @@ function _buildSwarmPanelHTML(round, allRounds) {
       const taskNum = `#${i + 1}`;
       const objective = escapeHtml(a.objective || "");
       const phase = a.phase || a.status || "";
-      const preview = (a.preview || "").slice(0, 1200);
+      /* FULL answer — the panel is a debugging surface, so the sub-agent's
+         result is never clipped. The durable snapshot carries the complete
+         text and CSS owns the visual bounding (scroll), not a JS slice. */
+      const preview = (a.preview || "");
       /* Backend log token — matches `[Agent:%s]` in lib/swarm/agent.py
          (self.agent_id = f'agent-{role}-{spec.id}') so a user copying
          the chip can grep server logs directly. */
@@ -486,6 +510,7 @@ function _buildSwarmPanelHTML(round, allRounds) {
         searching: t("swarm.phase.searching"), coding: t("swarm.phase.coding"), analyzing: t("swarm.phase.analyzing"),
         done: t("swarm.phase.complete"), completed: t("swarm.phase.complete"), failed: t("swarm.phase.failed"), error: t("swarm.phase.error"),
         pending: t("swarm.phase.queued"), running: t("swarm.phase.running"), waiting: t("swarm.phase.queued"), queued: t("swarm.phase.queued"),
+        retrying: t("swarm.phase.retrying"),
         unknown: t("swarm.phase.noResult"),
       };
       /* Status wins for a terminated agent: if status is done/failed but the
@@ -573,13 +598,30 @@ function _buildSwarmPanelHTML(round, allRounds) {
         bodyContent += `<div class="sw-a-timeline">${rowsHTML}</div>`;
       }
 
-      // Preview — live stream with typing cursor
+      // Preview — live stream with typing cursor.
+      // Rendered as Markdown: a sub-agent's answer IS markdown (headings,
+      // tables, fenced code), and escapeHtml'ing it showed the raw source —
+      // `##`, `|---|`, backticks. Same renderer as every other card body in
+      // the tool panel (see tool_rounds.js `.sw-card-preview md-content`).
+      // `.md-content` supplies block spacing/table/code styling; the
+      // `.sw-a-preview` rules that follow it keep this card's OWN font-size
+      // and colors, so typography is unchanged.
+      // renderMarkdown sanitizes via DOMPurify; guarded for the jsdom/no-marked
+      // path, where it falls back to the escaped rendering this replaced.
+      const _mdPreview = (typeof renderMarkdown === "function")
+        ? renderMarkdown(preview)
+        : escapeHtml(preview);
       if (preview && (a.status === "running" || a.status === "thinking")) {
-        bodyContent += `<div class="sw-a-preview sw-a-preview-live">${escapeHtml(preview)}<span class="sw-typing-cursor">▍</span></div>`;
+        bodyContent += `<div class="sw-a-preview sw-a-preview-live md-content">${_mdPreview}<span class="sw-typing-cursor">▍</span></div>`;
       } else if (preview && (a.status === "done" || a.status === "completed")) {
-        bodyContent += `<div class="sw-a-preview">${escapeHtml(preview)}</div>`;
+        bodyContent += `<div class="sw-a-preview md-content">${_mdPreview}</div>`;
       } else if (preview && (a.status === "failed" || a.status === "error")) {
-        bodyContent += `<div class="sw-a-err">${escapeHtml(preview.slice(0, 200))}</div>`;
+        /* A failed agent's error is exactly the text that needs reading in
+           full — a 200-char cut hid the cause/stack. Kept as escaped
+           monospace text: an error/stack is NOT markdown, and running it
+           through the renderer would eat the `*`/`_`/`#` characters that
+           appear in real paths and messages. */
+        bodyContent += `<div class="sw-a-err">${escapeHtml(preview)}</div>`;
       }
 
       // Meta line
@@ -902,9 +944,8 @@ async function _reconcileStuckSwarmPanels() {
       }
       for (const conv of convsToRender) {
         try {
-          if (typeof activeConvId !== "undefined" && conv.id === activeConvId
-              && typeof renderChat === "function") {
-            renderChat(conv);
+          if (typeof activeConvId !== "undefined" && conv.id === activeConvId) {
+            window.ConvView.replaceAll(conv.id);
           }
           if (typeof saveConversations === "function") saveConversations(conv.id);
         } catch (e) {
@@ -928,9 +969,8 @@ async function _reconcileStuckSwarmPanels() {
       }
       for (const conv of convsToRender) {
         try {
-          if (typeof activeConvId !== "undefined" && conv.id === activeConvId
-              && typeof renderChat === "function") {
-            renderChat(conv);
+          if (typeof activeConvId !== "undefined" && conv.id === activeConvId) {
+            window.ConvView.replaceAll(conv.id);
           }
           if (typeof saveConversations === "function") saveConversations(conv.id);
         } catch (e) {
@@ -957,7 +997,16 @@ if (typeof window !== 'undefined' && !window._swReconcileTicker) {
  * place: zero re-render, single timer, ~O(N agents) per tick. */
 function _tickSwarmTimers() {
   const els = document.querySelectorAll('.sw-panel [data-sw-start]');
-  if (!els.length) return;
+  if (!els.length) {
+    /* Idle-stop: no live timers for 60s → stop the 1Hz ticker. Re-armed by
+     *   _buildSwarmPanelHTML the next time a swarm panel renders. */
+    if (++_swTickerIdleTicks >= 60 && window._swTimerTicker) {
+      clearInterval(window._swTimerTicker);
+      window._swTimerTicker = null;
+    }
+    return;
+  }
+  _swTickerIdleTicks = 0;
   const now = Date.now();
   for (const el of els) {
     const start = +el.getAttribute('data-sw-start');
@@ -972,6 +1021,13 @@ function _tickSwarmTimers() {
     if (el.textContent !== txt) el.textContent = txt;
   }
 }
-if (typeof window !== 'undefined' && !window._swTimerTicker) {
-  window._swTimerTicker = setInterval(_tickSwarmTimers, 1000);
+/* Lazy 1Hz ticker: armed by _buildSwarmPanelHTML when a swarm panel exists,
+ *   self-stops after 60 idle seconds. A booted page with no swarm activity
+ *   no longer spins 1Hz forever (pt_3cd6cd48). */
+let _swTickerIdleTicks = 0;
+function _swEnsureTicker() {
+  if (typeof window !== 'undefined' && !window._swTimerTicker) {
+    _swTickerIdleTicks = 0;
+    window._swTimerTicker = setInterval(_tickSwarmTimers, 1000);
+  }
 }

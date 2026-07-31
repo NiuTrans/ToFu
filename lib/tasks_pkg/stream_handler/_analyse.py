@@ -13,10 +13,14 @@ from lib.tasks_pkg.manager import append_event
 
 from lib.tasks_pkg.stream_handler._audit import _maybe_audit_phase_scope
 from lib.tasks_pkg.stream_handler._budget import (
+    _CANNED_GREETING_RETRY_MAX,
     _EMPTY_STOP_RETRY_MAX,
     _PREMATURE_RETRY_MAX_CLASSIC,
     _PREMATURE_RETRY_MAX_ZERO_BYTE,
     _zero_byte_backoff_seconds,
+)
+from lib.tasks_pkg.stream_handler._canned_greeting import (
+    is_canned_greeting_reply,
 )
 
 logger = get_logger(__name__)
@@ -410,6 +414,75 @@ def analyse_stream_result(
             result['action'] = 'continue'
             return result
 
+        # ── Canned-greeting upstream artifact (2026-07-28 Opus 5 incident) ──
+        # The gateway's only Opus 5 request-id (a daily eval build) began
+        # answering ANY request — including mid-tool-work continuations —
+        # with an identical canned greeting and a CLEAN finish_reason=stop
+        # (real M-TraceId, real usage). Every transport guard keys off
+        # MISSING output, so this "successful" degenerate response ended
+        # turns and was persisted over accumulated tool work (68+ events in
+        # ~5h, see _canned_greeting.py). Detect by CONTENT + INCONGRUENCE
+        # and retry like the other transient buckets — the failure was
+        # intermittent (~50%/round), so a bounded retry recovers most
+        # turns. Shares the per-phase counter (runaway-guard discipline).
+        _is_canned_greeting = is_canned_greeting_reply(round_content, messages)
+        if (_is_canned_greeting
+                and _premature_retry_count < _CANNED_GREETING_RETRY_MAX):
+            _premature_retry_count += 1
+            result['premature_retry_count'] = _premature_retry_count
+            if '_premature_retry_count_phase' in task:
+                task['_premature_retry_count_phase'] = _premature_retry_count
+            _backoff_s = 1.0 + random.uniform(0.0, 1.0)
+            logger.warning(
+                '[%s] ⚠️ CANNED GREETING detected at round %d: finish=stop '
+                'content=%dchars (%r) — a greeting opener incongruent with '
+                'the conversation tail. M-TraceId=%s elapsed=%.1fs model=%s '
+                'Retrying (%d/%d) after %.1fs backoff…',
+                tid, round_num, len(round_content), round_content[:40],
+                _trace_id, _stream_elapsed_ms / 1000, model,
+                _premature_retry_count, _CANNED_GREETING_RETRY_MAX,
+                _backoff_s,
+            )
+            append_event(task, {
+                'type': 'phase',
+                'phase': 'retrying',
+                'attempt': _premature_retry_count,
+                'max': _CANNED_GREETING_RETRY_MAX,
+                'bucket': 'canned_greeting',
+                'backoff_s': round(_backoff_s, 2),
+                'detail': (
+                    f'⚠️ 上游返回了与任务无关的模板问候（{len(round_content)}字符），'
+                    f'重试中 ({_premature_retry_count}/{_CANNED_GREETING_RETRY_MAX})…'
+                ),
+            })
+            _interruptible_sleep(_backoff_s, task)
+            result['action'] = 'continue'
+            return result
+
+        if _is_canned_greeting:
+            # Budget exhausted — ACCEPT, never fabricate an error: a greeting
+            # can be legitimate, and the persist-layer interception
+            # (_maybe_preserve_accumulated_on_suspicion) rebuilds accumulated
+            # narration when this overwrote real tool work. Loud + audited so
+            # the upstream incident stays observable.
+            logger.warning(
+                '[%s] ⚠️ CANNED GREETING retries exhausted at round %d '
+                '(%d/%d) — accepting the response. content=%r '
+                'M-TraceId=%s model=%s',
+                tid, round_num, _premature_retry_count,
+                _CANNED_GREETING_RETRY_MAX, round_content[:60],
+                _trace_id, model,
+            )
+            try:
+                from lib.log import audit_log
+                audit_log('canned_greeting_retries_exhausted',
+                          task_id=task.get('id', ''),
+                          conv=task.get('convId', ''),
+                          round=round_num, model=model,
+                          content=round_content[:60])
+            except Exception as _ae:
+                logger.debug('[%s] canned-greeting audit failed: %s', tid, _ae)
+
         # ── Stream anomaly — with or without content ──
         # If the LLM client flagged a stream anomaly (_missing_done,
         # _missing_finish_reason, _empty_stop), the response is likely
@@ -495,6 +568,75 @@ def analyse_stream_result(
                     '[%s] 📋 Todo-continuation cap reached (%d/%d) with %d '
                     'incomplete item(s) — allowing stop to avoid runaway loop',
                     tid, _nudges, _todo_max, len(_incomplete))
+
+        # ── Intent-stall nudge (epic pt_33ba079f5cea4841) ──
+        # The model's previous tool call was rejected/errored, and this round
+        # is prose-only — it said what it would do and then stopped. Ground
+        # truth: conv ms34yw0k74o2lq R18 ("Let me use explicit paths only."
+        # after a blocked run_command). The task settled normally and the user
+        # saw the conversation stop mid-thought.
+        #
+        # Four structural criteria, never wording — the ticket's A∧B pair
+        # alone measured 60% false positives over 7 days (5 hand-backs, 4 VU
+        # endings, 3 non-retryable), so C and D are load-bearing, not polish.
+        # See docs/INTENT_STALL_MEASUREMENT.md and _intent_stall.py.
+        #
+        # ONE nudge per task: the counter is checked and bumped here, so a
+        # model that stalls again after being nudged is allowed to stop (the
+        # runaway guard — same discipline as the retry caps above).
+        _stall_nudges = int(task.get('_intent_stall_nudge_count') or 0)
+        if _stall_nudges < 1:
+            from lib.tasks_pkg.stream_handler._intent_stall import (
+                NUDGE_TEXT as _stall_text,
+                should_nudge_intent_stall as _should_stall_nudge,
+            )
+            _do_nudge, _stall_reason = _should_stall_nudge(
+                task, assistant_msg, round_content)
+            if _do_nudge:
+                task['_intent_stall_nudge_count'] = _stall_nudges + 1
+                messages.append({'role': 'user', 'content': _stall_text})
+                # DISPLAY-ONLY sidecar accumulation — the in-timeline chip.
+                # Unlike the peer / steer lanes this is emitted AT INJECTION
+                # rather than deferred until the next LLM call confirms
+                # consumption: those lanes defer because an abort must re-route
+                # an undelivered HUMAN message to the durable queue (never
+                # zero, never double). A nudge has no human author and nothing
+                # to salvage — if the turn dies here the nudge is simply moot,
+                # and the fact worth showing ('the system re-drove the model')
+                # is true the moment we append it.
+                from lib.tasks_pkg.stream_handler._intent_stall import (
+                    build_stall_nudge_record as _build_stall_record,
+                )
+                try:
+                    task.setdefault('_stallNudges', []).append(
+                        _build_stall_record(task, round_num))
+                except Exception as _sn_e:  # a chip must never break the loop
+                    logger.warning('[%s] stall-nudge chip record failed: %s',
+                                   tid, _sn_e)
+                logger.info(
+                    '[%s] ↻ Intent-stall nudge at round %d: previous tool '
+                    'round failed and this round was prose-only with no tool '
+                    'calls — re-driving once. model=%s content=%dchars',
+                    tid, round_num, model, len(round_content))
+                append_event(task, {
+                    'type': 'phase',
+                    'phase': 'intent_stall_nudge',
+                    'attempt': _stall_nudges + 1,
+                    'max': 1,
+                    'detail': '↻ Previous tool call did not run — nudging the '
+                              'model to continue…',
+                    'detailKey': 'stream.phase.intentStallNudge',
+                })
+                result['action'] = 'continue'
+                return result
+            if _stall_reason not in ('prev_tool_ok', 'no_tool_rounds',
+                                     'no_content', 'has_tool_calls'):
+                # Log only the INTERESTING skips (a stop that looked like a
+                # stall but was deliberately left alone), so the criteria that
+                # do the real work are observable in production.
+                logger.debug(
+                    '[%s] intent-stall nudge skipped at round %d: %s',
+                    tid, round_num, _stall_reason)
 
         # Normal exit — model returned content without tool calls
         result['action'] = 'break'

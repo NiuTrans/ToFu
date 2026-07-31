@@ -333,56 +333,39 @@ def _run_commit_round_async(task: dict, project_path: str) -> None:
 
 
 def _patch_assistant_message_with_git(task: dict, amend_evt: dict) -> None:
-    """Update the conversation's last assistant message with gitSha + git-derived files.
+    """Stamp gitSha + git-derived files onto THIS task's assistant message.
 
     Called from the async commit thread after ``persist_task_result`` has
     already run.  Mirrors the subset of ``_sync_result_to_conversation``
     that depends on git output.
+
+    Goes through the store's field-level patch rather than rewriting the whole
+    transcript: this daemon races the autopilot's VU append (both fire within
+    the same second at turn settle), and a read-modify-write of the entire blob
+    erased the appended row — measured 13 appends vs 8 survivors on conv
+    ms3sfyrmn31omb.  The patch re-reads under a rev-CAS so a concurrent append
+    survives.
     """
     conv_id = task.get('convId') or ''
     task_id = task.get('id') or ''
     git_sha = amend_evt.get('gitSha')
     if not (conv_id and task_id and git_sha):
         return
+    fields = {
+        '_gitSha': git_sha,
+        '_snapshotId': amend_evt.get('snapshotId') or git_sha,
+    }
+    if amend_evt.get('modifiedFileList'):
+        fields['modifiedFileList'] = amend_evt['modifiedFileList']
+    if amend_evt.get('modifiedFiles'):
+        fields['modifiedFiles'] = amend_evt['modifiedFiles']
+
     from lib.agent_core.store import get_conversation_store
     store = get_conversation_store()
-    loaded = store.load_conversation_messages(conv_id)
-    if loaded is None:
-        return
-    messages, _updated_at = loaded
-    if not isinstance(messages, list) or not messages:
-        return
-
-    # Locate the assistant message for this task.  Prefer matching by
-    # _taskId (set by _sync_result_to_conversation); fall back to the
-    # last assistant message if not tagged.
-    target_idx = -1
-    for i in range(len(messages) - 1, -1, -1):
-        m = messages[i]
-        if not isinstance(m, dict):
-            continue
-        if m.get('role') != 'assistant':
-            continue
-        if m.get('_taskId') == task_id:
-            target_idx = i
-            break
-        if target_idx == -1:
-            target_idx = i  # remember last assistant as fallback
-            # Don't break — keep looking for an exact taskId match.
-    if target_idx < 0:
-        return
-    msg = messages[target_idx]
-    msg['_gitSha'] = git_sha
-    msg['_snapshotId'] = amend_evt.get('snapshotId') or git_sha
-    if amend_evt.get('modifiedFileList'):
-        msg['modifiedFileList'] = amend_evt['modifiedFileList']
-    if amend_evt.get('modifiedFiles'):
-        msg['modifiedFiles'] = amend_evt['modifiedFiles']
-
     try:
-        store.save_conversation_messages(conv_id, messages)
-        logger.info('[Task:%s] persisted gitSha=%s to conv=%s msg[%d]',
-                    task_id[:8], git_sha[:12], conv_id[:8], target_idx)
+        if store.patch_message_fields_by_task(conv_id, task_id, fields):
+            logger.info('[Task:%s] persisted gitSha=%s to conv=%s',
+                        task_id[:8], git_sha[:12], conv_id[:8])
     except Exception as _e:
         logger.warning('[Task:%s] gitSha DB write failed: %s',
                        task_id[:8], _e, exc_info=True)

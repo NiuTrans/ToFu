@@ -365,7 +365,7 @@ async def create_branch(conv_id, msg_idx):
     # refetches without a manual refresh. notify_conv_changed also invalidates
     # the sidebar meta cache, so it replaces the bare _invalidate_meta_cache().
     try:
-        from routes.common import _notify_conv_changed
+        from routes.common import _notify_conv_changed, _request_user_id
         _rev_row = await async_fetchone(
             'SELECT rev FROM conversations WHERE id=? AND user_id=?',
             (conv_id, DEFAULT_USER_ID), domain=DOMAIN_CHAT)
@@ -375,7 +375,7 @@ async def create_branch(conv_id, msg_idx):
                 _branch_rev = _rev_row['rev']
             except (KeyError, TypeError, IndexError):
                 _branch_rev = _rev_row[0]
-        _notify_conv_changed(conv_id, rev=_branch_rev)
+        _notify_conv_changed(conv_id, rev=_branch_rev, user_id=_request_user_id())
     except Exception as e:
         logger.debug('[api_v1.branches] conv-changed notify: %s', e)
 
@@ -425,6 +425,344 @@ async def apply_toolset(conv_id):
     logger.info('[api_v1.conv] toolset latch cleared (Apply now) conv=%s',
                 conv_id[:8])
     return api_ok(conv_id=conv_id)
+
+
+# ── pt_conv_state_ssot P5: sync-drift probe ────────────────────────────
+#
+# The client reports a compact digest of what IT believes (per conv: the
+# authoritative busy set + the rev it last converged to); the server compares
+# it against the two server-side SSOTs — the in-memory task registry and the
+# conversations.rev column — and WARN-logs + returns every divergence.
+# Owner constraint #4: the digest covers BOTH activeTaskIds AND conv rev; the
+# rev half closes the "notify frame dropped, _serverRev never converges" hole.
+# Probe only: this endpoint NEVER mutates either side's state.
+
+_SYNC_DIGEST_MAX = 500
+
+
+def _log_divergence(conv_id: str, kind: str, client, server) -> dict | None:
+    """Log a divergence at a severity that reflects whether it is a FAULT.
+
+    P5 logged every inequality at WARNING. On a streaming conversation the
+    client's 60s-old digest can never match a live server read, so the warning
+    fired constantly and buried the real signal. The tracker distinguishes a
+    client that is merely sampling late (moving) from one that is frozen while
+    the server advances — only the latter is the "notify frame dropped, never
+    converges" hole.
+
+    Returns the tracker's verdict dict (or None when the tracker itself
+    failed) so the caller can act on a SUSTAINED stall instead of only
+    logging it — the observation/repair split of pt_cadaa70ffa6b468d. Logging
+    remains the only side effect HERE; this function still never mutates
+    either side's state.
+    """
+    try:
+        from lib.conversations.drift_tracker import observe_divergence
+        v = observe_divergence(conv_id, kind, client, server)
+    except Exception as e:
+        # Never let the tracker suppress the underlying signal.
+        logger.debug('[SyncDrift] tracker failed conv=%s kind=%s: %s',
+                     conv_id[:8], kind, e)
+        logger.warning('[SyncDrift] conv=%s kind=%s client=%s server=%s',
+                       conv_id[:8], kind, client, server)
+        return None
+
+    if v['severity'] == 'warning':
+        logger.warning(
+            '[SyncDrift] STALLED conv=%s kind=%s client=%s server=%s '
+            'age=%.0fs observations=%d direction=%s — client value has NOT '
+            'moved while the server advanced; this conversation is not '
+            'converging on its own',
+            conv_id[:8], kind, client, server, v['age'], v['observations'],
+            v['direction'])
+    else:
+        logger.debug(
+            '[SyncDrift] conv=%s kind=%s client=%s server=%s age=%.0fs '
+            'observations=%d stalled=%s direction=%s',
+            conv_id[:8], kind, client, server, v['age'], v['observations'],
+            v['stalled'], v['direction'])
+    return v
+
+
+def _log_agreement(conv_id: str, kind: str) -> None:
+    """Record that a previously-diverged pair converged.
+
+    This is the positive evidence P6 needs: proof the channel self-heals
+    without the fallback branch. Silent in steady state — only a divergence
+    that actually closes produces a line.
+    """
+    try:
+        from lib.conversations.drift_tracker import observe_agreement
+        res = observe_agreement(conv_id, kind)
+    except Exception as e:
+        logger.debug('[SyncDrift] agreement record failed conv=%s: %s',
+                     conv_id[:8], e)
+        return
+    if res is None:
+        return
+    logger.info(
+        '[SyncDrift] CONVERGED conv=%s kind=%s after %.0fs '
+        '(%d diverged observations, was_stalled=%s)',
+        conv_id[:8], kind, res['age'], res['observations'], res['was_stalled'])
+
+
+@api_v1_conversations_bp.route('/api/v1/conversations/sync-digest',
+                                methods=['POST'])
+@require_scope('conversations')
+@api_meta(
+    summary='Compare client conv-state digests against the server SSOTs',
+    description=(
+        'pt_conv_state_ssot P5 (drift probe). Body: ``{digests: [{convId, '
+        'taskIds: [...], rev: <number|null>}]}``. For each entry the server '
+        'compares the client busy set against the task-registry snapshot and '
+        'the client rev against ``conversations.rev``; divergences are '
+        'WARN-logged and returned. Read-only probe — no state is mutated.\n\n'
+        'Optional top-level ``identityGateDegraded: true`` reports that the '
+        'client\'s multi-user identity gate fell back to accept-all (a JS '
+        'build-order regression); it is WARN-logged and may arrive with an '
+        'empty ``digests`` list.'),
+    tags=['conversations'], scope='conversations',
+    request_body={'required': True, 'content': {'application/json': {
+        'schema': {
+            'type': 'object',
+            'required': ['digests'],
+            'properties': {
+                'identityGateDegraded': {'type': 'boolean'},
+                'digests': {
+                    'type': 'array',
+                    'items': {
+                        'type': 'object',
+                        'properties': {
+                            'convId': {'type': 'string'},
+                            'taskIds': {'type': 'array',
+                                        'items': {'type': 'string'}},
+                            'rev': {'type': ['number', 'null']},
+                        },
+                    },
+                },
+            },
+        },
+    }}},
+)
+async def sync_digest():
+    body = await async_parse_body()
+
+    # ── Identity-gate fail-open telemetry ──────────────────────────────
+    # The client's multi-user identity gate (conv_state_reducer::_frameIsOurs)
+    # fails OPEN when the predicate is missing — a build-order regression makes
+    # every notify frame accepted UNSCOPED. That degrade is security-relevant
+    # and was previously visible ONLY in a browser console. It rides this
+    # existing probe so it lands in logs/app.log next to every other drift
+    # signal. Read BEFORE the digests validation: a broken-bundle page can
+    # legitimately have zero digests, and rejecting the body first would
+    # suppress the signal on exactly the page it exists to catch.
+    if body.get('identityGateDegraded'):
+        _auth_ig = current_auth()
+        logger.warning(
+            '[SyncDrift] IDENTITY GATE DEGRADED — client reports '
+            'window._frameIsOurs was unavailable, so notify frames are being '
+            'accepted UNSCOPED (multi-user isolation is off on that page). '
+            'Cause is a JS build-order regression: core/conv_state_reducer.js '
+            'must load before its consumers in lib/js_bundler.py. '
+            'key_id=%s user_id=%s digests=%s',
+            (_auth_ig.key_id if _auth_ig else ''),
+            (getattr(_auth_ig, 'user_id', '') if _auth_ig else ''),
+            (len(body.get('digests')) if isinstance(body.get('digests'), list)
+             else 0))
+
+    digests = body.get('digests')
+    if not isinstance(digests, list):
+        return api_bad_request('digests must be a list', field='digests')
+    if len(digests) > _SYNC_DIGEST_MAX:
+        return api_bad_request(
+            f'too many digests (max {_SYNC_DIGEST_MAX})', field='digests')
+
+    # Registry snapshot — the ONLY physical SSOT for "who is running".
+    # Scope by the caller's tenant when auth carries a real user_id;
+    # single-user default stays unscoped (byte-identical to P1's notify).
+    #
+    # ``_scope`` is resolved OUTSIDE the try: the repair block at the end of
+    # this function needs it to build a correctly-scoped snapshot, and a
+    # failure of the registry import must not leave it unbound (that would
+    # turn "registry unavailable" into a silent loss of the repair path — an
+    # exception swallowed by the repair block's own guard, i.e. exactly the
+    # kind of invisible degrade this whole workstream is about).
+    _auth = current_auth()
+    _uid = getattr(_auth, 'user_id', None) if _auth else None
+    _scope = '' if _uid in (None, '', 1, '1') else str(_uid)
+    try:
+        from lib.tasks_pkg.manager._registry import snapshot_running_by_conv
+        snap = snapshot_running_by_conv(user_id=_scope)
+    except Exception as e:
+        logger.warning('[SyncDrift] registry snapshot failed: %s', e)
+        snap = {}
+
+    from lib.database import DOMAIN_CHAT, async_fetchone
+    from routes.common import DEFAULT_USER_ID
+
+    divergences = []
+    verdicts = []
+    checked = 0
+    for d in digests:
+        if not isinstance(d, dict):
+            continue
+        conv_id = str(d.get('convId') or '')[:64]
+        if not conv_id:
+            continue
+        checked += 1
+
+        client_tids = d.get('taskIds')
+        client_tids = sorted({str(t) for t in client_tids
+                              if t}) if isinstance(client_tids, list) else []
+        server_tids = sorted(snap.get(conv_id, []))
+        if client_tids != server_tids:
+            divergences.append({'convId': conv_id, 'kind': 'task_ids',
+                                'client': client_tids, 'server': server_tids})
+            _v = _log_divergence(conv_id, 'task_ids', client_tids, server_tids)
+            if _v:
+                verdicts.append(_v)
+        else:
+            _log_agreement(conv_id, 'task_ids')
+
+        client_rev = d.get('rev')
+        if isinstance(client_rev, (int, float)) and not isinstance(client_rev, bool):
+            if server_tids:
+                # Busy-lag is BY DESIGN (pt_a182d5bd): the client does not
+                # advance _serverRev mid-stream — the live SSE owns the conv
+                # and the sync PUT at stream end is what converges rev. A
+                # frozen client rev against a checkpoint-climbing server rev
+                # is exactly what a HEALTHY generating conversation looks
+                # like (measured ~716 STALLED/day 2026-07-26, all on convs
+                # with running tasks — not dropped notify frames). The
+                # task_ids comparison above already covers the busy channel;
+                # the rev dimension only carries signal while the conv is
+                # IDLE. Skipping also spares the per-digest SELECT.
+                logger.debug(
+                    '[SyncDrift] conv=%s kind=rev compare skipped while busy '
+                    '(client=%s, %d running task(s))',
+                    conv_id[:8], client_rev, len(server_tids))
+                continue
+            row = await async_fetchone(
+                'SELECT rev FROM conversations WHERE id=? AND user_id=?',
+                (conv_id, DEFAULT_USER_ID), domain=DOMAIN_CHAT)
+            if row is None:
+                divergences.append({'convId': conv_id, 'kind': 'unknown_conv',
+                                    'client': client_rev, 'server': None})
+                logger.warning('[SyncDrift] conv=%s kind=unknown_conv client_rev=%s',
+                               conv_id[:8], client_rev)
+                continue
+            try:
+                server_rev = row['rev']
+            except (KeyError, TypeError, IndexError) as _e:
+                logger.debug('sync digest: missing key/unexpected type/short/malformed (%s)', _e)
+                server_rev = row[0]
+            if server_rev != client_rev:
+                divergences.append({'convId': conv_id, 'kind': 'rev',
+                                    'client': client_rev, 'server': server_rev})
+                _v = _log_divergence(conv_id, 'rev', client_rev, server_rev)
+                if _v:
+                    verdicts.append(_v)
+            else:
+                _log_agreement(conv_id, 'rev')
+
+    # ── REPAIR: a detected stall must produce a correction, not just a log ──
+    # pt_cadaa70ffa6b468d. Everything above is observation; without this block
+    # the server knew exactly which socket was frozen and left the user to
+    # discover it by pressing F5.
+    #
+    # The frame sent is the ORDINARY conv_state_snapshot — the same one a fresh
+    # connection receives, built from the same registry projection, carrying
+    # the same server-minted frame-level rev. Reusing it (rather than inventing
+    # a "repair" frame type) means the client needs NO new handling: the reducer
+    # already applies it, already rev-gates each conv, and already treats an
+    # absent conv as CLEAR. A repair is therefore indistinguishable from a
+    # reconnect, which is exactly the property that makes it safe to send.
+    #
+    # Scoped to the reporting tenant so a repair can never leak sibling tasks,
+    # and delivered to THAT socket alone (see PushHub.deliver_to_socket).
+    # Best-effort throughout: a failed repair must never turn the probe — a
+    # read-only diagnostic — into a 500.
+    # ── REPAIR: a detected stall must produce a correction, not just a log ──
+    # pt_cadaa70ffa6b468d / pt_b8dcd3b96f684296. Everything above is
+    # observation; without this block the server knew exactly which client was
+    # frozen and left the user to discover it by pressing F5.
+    #
+    # ★ THE CORRECTION RIDES THE HTTP RESPONSE, NOT THE PUSH SOCKET.
+    # The first version pushed it down the socket, which is circular: a client
+    # is judged stalled largely BECAUSE notify frames stopped arriving, so the
+    # socket is the very thing that is broken. Measured, three ways:
+    #
+    #   * HALF-OPEN SOCKET — the client stays registered and ``send`` never
+    #     throws; the queue just fills (bounded at 1000) and the peer gets
+    #     nothing. ``deliver_to_socket`` still returns True, which the caller
+    #     read as DELIVERED and used to arm a 300s cooldown. The client most in
+    #     need of repair got a false success plus five minutes of silence.
+    #   * NO SOCKET AT ALL — WebSocket blocked by a corporate proxy/tunnel:
+    #     ``deliver_to_socket`` returns False forever, so that population was
+    #     permanently unrepairable — and it is the population with no push
+    #     channel to self-heal through, i.e. the one that needs this most.
+    #   * HTTP IS PROVEN ALIVE — this stall was detected FROM a digest POST
+    #     that is, right now, returning 200. The detection channel has just
+    #     demonstrated it works, so it is the honest channel for the answer.
+    #
+    # Rule: the correction goes back on the channel the detection arrived on.
+    #
+    # The payload is the ORDINARY conv_state_snapshot — same projection, same
+    # server-minted frame-level rev — so the client applies it with the reducer
+    # it already has and a repair stays indistinguishable from a reconnect.
+    # Scoped to the reporting tenant so it can never leak sibling tasks.
+    #
+    # Best-effort: a failed repair must never turn this read-only diagnostic
+    # into a 500.
+    repaired = False
+    snapshot = None
+    try:
+        socket_id = str(body.get('pushRid') or '')[:64]
+        from lib.conversations.drift_repair import (note_repair_attempt,
+                                                    note_repair_outcome,
+                                                    should_repair)
+
+        # ── Effectiveness feedback (closes the loop) ──
+        # A repair whose outcome is never checked is indistinguishable from the
+        # mechanism silently not firing. This probe IS the observation: if the
+        # socket we repaired last round now reports no sustained divergence, the
+        # correction landed. Evaluated BEFORE this round's decision so a fresh
+        # attempt does not overwrite the pending verdict.
+        if socket_id:
+            _still_stalled = any(v.get('sustained') for v in verdicts)
+            note_repair_outcome(socket_id, converged=not _still_stalled)
+
+        # ``should_repair`` is keyed on the socket id only as an identity for
+        # rate-limiting; it does NOT require that socket to be live, because the
+        # correction no longer travels that way.
+        if should_repair(socket_id, verdicts):
+            from lib.agent_core.push import build_conv_state_snapshot, hub
+            snapshot = build_conv_state_snapshot(user_id=_scope)
+            # Delivery is the HTTP response itself: returning 200 with this body
+            # IS the delivery, so the cooldown may be armed honestly here.
+            note_repair_attempt(socket_id)
+            repaired = True
+            logger.warning(
+                '[SyncDrift] REPAIR returned in-band to socket=%s (%d sustained '
+                'divergence(s)) — corrective conv_state_snapshot covering %d '
+                'running conv(s)',
+                socket_id[:8],
+                sum(1 for v in verdicts if v.get('sustained')),
+                len(snapshot.get('convs') or {}))
+            # OPTIONAL ACCELERATOR, never the delivery proof: if the socket
+            # does happen to be live and healthy, the same frame arriving over
+            # push lands a beat sooner. Its return value is deliberately
+            # IGNORED — treating an enqueue as delivery is the bug above.
+            try:
+                hub.deliver_to_socket(socket_id, snapshot)
+            except Exception as _pe:
+                logger.debug('[SyncDrift] optional push accelerator failed '
+                             '(the in-band copy is authoritative): %s', _pe)
+    except Exception as e:
+        logger.warning('[SyncDrift] repair attempt failed: %s', e)
+
+    return api_ok(checked=checked, divergences=divergences,
+                  repaired=repaired, snapshot=snapshot)
 
 
 __all__ = ['api_v1_conversations_bp']

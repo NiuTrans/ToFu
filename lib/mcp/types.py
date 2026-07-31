@@ -16,7 +16,19 @@ MCP_CONFIG_FILENAME = 'mcp_servers.json'
 
 # ── Limits ──
 MCP_CONNECT_TIMEOUT = 30        # seconds to wait for server handshake
-MCP_CALL_TIMEOUT = 120          # seconds to wait for tool call response
+# ── Per-call read timeout: NONE by default ──
+# A tool call is a WAIT (a deep search, a big parse, a long compile on the
+# server side), not a crash, so it is not bounded by the clock — the same
+# ruling applied to the LLM transport read timeouts (lib/llm/_transport.py).
+# The user ends a long call with Stop.
+#
+# ``MCP_CONNECT_TIMEOUT`` above deliberately STAYS: a handshake that never
+# completes means the server never came up, which is a crash, not a wait.
+#
+# A per-server ``"timeout"`` in mcp_servers.json still applies when set — that
+# is a deliberate, per-server budget, and it is what keeps the degraded-breaker
+# below meaningful (see MCP_DEGRADED_TIMEOUT_STREAK).
+MCP_CALL_TIMEOUT = None         # None = no read timeout (was 120s)
 MCP_MAX_RESULT_CHARS = 200_000  # truncate tool results beyond this
 
 # ── Auto-recovery / keepalive ──
@@ -42,12 +54,20 @@ MCP_BREAKER_MAX_BACKOFF = int(os.environ.get('TOFU_MCP_BREAKER_MAX_BACKOFF', '60
 
 # ── Call-level health gating (stop paying full-timeout calls to a stalled server) ──
 # The circuit breaker above only covers RECONNECT failures. A server whose
-# transport is alive but whose calls keep timing out (e.g. a long-poll tool
-# whose own budget exceeds MCP_CALL_TIMEOUT) would otherwise be hammered with
-# back-to-back full-timeout calls forever. After this many CONSECUTIVE call
-# timeouts a server is marked 'degraded' and the next call fast-fails with an
-# actionable error instead of blocking for the full timeout again. Any single
-# successful call resets the streak. Set to 0 to disable the gate.
+# transport is alive but whose calls keep timing out would otherwise be
+# hammered with back-to-back full-timeout calls forever. After this many
+# CONSECUTIVE call timeouts a server is marked 'degraded' and the next call
+# fast-fails with an actionable error instead of blocking for the full timeout
+# again. Any single successful call resets the streak. Set to 0 to disable.
+#
+# ★ SCOPE (since MCP_CALL_TIMEOUT became None): a call timeout can now only
+#   arise for a server that declares its OWN ``"timeout"`` in
+#   mcp_servers.json. With no per-server budget there is no deadline, so no
+#   timeout, so this gate never trips — which is correct, not dead code: the
+#   gate exists to stop re-paying a KNOWN, user-declared budget, and a server
+#   with no declared budget has nothing to re-pay. The streak counter, the
+#   audit trail and the fast-fail message are all still live for the
+#   budgeted case, and a test pins that path so the branch cannot rot.
 MCP_DEGRADED_TIMEOUT_STREAK = int(os.environ.get('TOFU_MCP_DEGRADED_TIMEOUT_STREAK', '3'))
 
 # ── Credential health probe (detect expired cookies/tokens quietly) ──
@@ -68,8 +88,20 @@ class MCPServerConfig(TypedDict, total=False):
     command: str                # executable (e.g. 'npx', 'python3', 'node')
     args: list[str]             # command-line arguments
     env: dict[str, str]         # extra environment variables (merged with os.environ)
-    url: str                    # for SSE/HTTP transport (alternative to stdio)
-    transport: str              # 'stdio' (default) or 'sse'
+    url: str                    # remote transports only. Like ``headers`` this
+                                # is a TEMPLATE: a vendor that authenticates by
+                                # query parameter (Amap ``?key=<k>``) writes
+                                # ``?key=${AMAP_MAPS_API_KEY}`` here so the
+                                # secret still lives only in ``env``.
+                                # Resolved by transport.resolve_url; masked by
+                                # transport.redact_url on the way out.
+    transport: str              # 'stdio' (default) | 'sse' | 'streamable-http'
+    headers: dict[str, str]     # remote transports only. A TEMPLATE, never a
+                                # secret store: values hold ``${VAR}``
+                                # placeholders resolved from ``env`` at connect
+                                # time (lib/mcp/transport.resolve_headers).
+                                # Credentials live in ``env`` so they pass
+                                # through the one redaction path.
     enabled: bool               # whether to connect on startup (default: True)
     description: str            # human-readable description
     timeout: int                # per-call timeout override (seconds)

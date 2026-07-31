@@ -37,8 +37,8 @@ window.ChipInput = (function () {
     var placeholder = box.getAttribute('data-placeholder') || '';
     var chips = values.map(function (v, i) {
       return String(safeHtml`<span class="chip"><span class="chip-text">${v}</span>`) +
-        String(safeHtml`<button type="button" class="chip-x" title="${t('common.remove') || '移除'}"
-          onclick="ChipInput.remove('${raw(id)}', ${raw(String(i))})">×</button></span>`);
+        String(safeHtml`<button type="button" class="chip-x icon-box" title="${t('common.remove') || '移除'}"
+          onclick="ChipInput.remove('${raw(id)}', ${raw(String(i))})"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button></span>`);
     });
     box.innerHTML = chips.join('') + safeHtml`<input type="text" class="chip-add"
         placeholder="${placeholder}"

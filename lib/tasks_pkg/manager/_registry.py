@@ -32,32 +32,180 @@ from lib.tasks_pkg.manager._persist import (
 logger = get_logger(__name__)
 
 
+def task_user_id(task):
+    """Resolve the owning ``user_id`` from a task dict for the SSOT channel.
+
+    pt_abae3a85a92440fd (2026-07-25): background-thread callers of
+    ``notify_conv_changed`` (autopilot / swarm / message_queue / sync /
+    persistence_store) use this to thread request-scoped identity into the
+    outbound busy signal. c6d1bd71 already stashed ``task['_userId']`` at
+    ``create_task`` time; this helper is the canonical read.
+
+    Falls back to ``DEFAULT_USER_ID = 1`` when the task dict is missing,
+    empty, or lacks a bound user (personal-install / pre-auth / open-mode
+    default). c6d1bd71's ``notify_conv_changed`` seam then coerces that
+    default to unscoped for byte-identical single-user behaviour, so this
+    helper is safe to call unconditionally at every write-path site.
+    """
+    from routes.common import DEFAULT_USER_ID
+    if not task:
+        return DEFAULT_USER_ID
+    uid = task.get('_userId') if isinstance(task, dict) else None
+    if not uid:
+        return DEFAULT_USER_ID
+    try:
+        return int(uid) if str(uid).isdigit() else uid
+    except (TypeError, ValueError) as _e:
+        logger.debug('task user id: unexpected type/unparseable (%s)', _e)
+        return uid
+
+
 def is_carrier_task(task: dict) -> bool:
     """True if ``task`` is a non-streaming CARRIER/HOLDER, not user-visible work.
 
     Some flows use ``create_task`` purely as a message container that runs a
-    synchronous sub-turn and NEVER streams a ``done`` event of its own:
+    synchronous sub-turn and is never a plain reconnect target:
 
       * the autopilot virtual-user (VU) sub-task (``_vu_subtask``), and
       * inline reporter / summarize holders (``_inline_messages``).
 
-    These are ``status='running'`` while they execute but are invisible to the
-    frontend by design: ``GET /api/chat/active`` hides them (reconnecting an SSE
-    that never completes would birth a stuck "Waiting…" bubble), the sidebar
-    never lights a dot for them (no ``activeTaskId`` / SSE), and they are
-    discarded from the registry the moment their synchronous run returns.
+    These are ``status='running'`` while they execute. ``GET /api/chat/active``
+    hides them and they are discarded from the registry the moment their
+    synchronous run returns.
 
-    This predicate is the SINGLE SOURCE OF TRUTH for "carrier, not real running
-    work". BOTH the reconnect endpoint (``routes/chat.py`` ``/api/chat/active``)
-    AND the self-update restart guard (``list_running_tasks``) consult it, so
-    the two can never again disagree about whether a carrier counts as a
-    running conversation — the exact divergence that made the restart dialog
-    report "N conversations running" while the sidebar showed none.
+    ⚠️ CAREFUL WITH THE REASON — it is narrower than it looks. The historical
+    justification was "a carrier never streams a ``done`` of its own, so
+    reconnecting would birth a stuck 'Waiting…' bubble". For the VU carrier that
+    is NO LONGER TRUE: ``lib.chat_dispatch._live_tick`` emits
+    ``build_carrier_terminal_done(task)`` for ``_vu_subtask`` and closes the
+    stream (observed live: conv ms5j3qi7wd1g7u task da0717c8, "emitting carrier
+    done (VU sub-task terminal)"). The real constraint is narrower: a VU
+    carrier's stream carries ONLY the ``autopilot_vu_*`` contract, so binding a
+    real assistant placeholder to it renders the VU's frames as a ghost second
+    "Agent" bubble. It must not be a PLAIN reconnect target — but it IS
+    reachable through the VU connector.
+
+    So a live VU carrier is deliberately visible-as-busy and reachable:
+    ``snapshot_running_by_conv`` surfaces it as ``<tid>#vu``, and the client
+    resolves it via ``pickVuCarrierForAttach`` → ``connectToTask(...,
+    {vuCarrier: true})`` → ``_connectAutopilotKick`` (detached dummy assistant).
+    Treating "carrier" as "must stay invisible" is what left cold attach with no
+    route at all and produced 282.6s of generation the UI reported as finished.
+
+    This predicate is the SINGLE SOURCE OF TRUTH for "carrier, not a plain
+    reconnect target". BOTH the reconnect endpoint (``routes/chat.py``
+    ``/api/chat/active``) AND the self-update restart guard
+    (``list_running_tasks``) consult it, so the two can never again disagree
+    about whether a carrier counts as a running conversation — the exact
+    divergence that made the restart dialog report "N conversations running"
+    while the sidebar showed none.
 
     The autopilot-KICK carrier (``_autopilot_kick``) is deliberately NOT a
     carrier here: it is a real UI-streaming task and must stay reconnectable.
     """
     return bool(task.get('_inline_messages') or task.get('_vu_subtask'))
+
+
+def _vu_window_secs() -> float:
+    """Ceiling on the PRE-CARRIER finalize sliver only (see below).
+
+    Scope note (deliberately narrow): this bounds ONLY the window between
+    the parent's terminal flip and the moment its VU carrier is registered
+    — measured 2.5–26.7s (objective resolve + message assembly, see
+    ``autopilot_event_forwarding._emit_vu_setup_phase``). Once the carrier
+    exists, busy-ness is keyed on the CARRIER'S OWN LIVENESS and this
+    ceiling is irrelevant.
+
+    It is emphatically NOT a general "how long may a conv stay busy" timer:
+    a VU turn legitimately runs for minutes, and bounding that by wall
+    clock is exactly the bug this module fixes. 30s > the 26.7s measured
+    worst case, and mirrors the ceiling the SSE reader applies to the same
+    latch in ``lib/chat_dispatch.py``.
+    """
+    return 30.0
+
+
+def is_vu_carrier_alive_for_conv(conv_id: str) -> bool:
+    """True if ``conv_id`` has a LIVE autopilot VU carrier in the registry.
+
+    Anchored on the CARRIER ITSELF — deliberately not on any parent's
+    ``_vu_carrier_id`` back-pointer. The parent leaves the registry once
+    its finalize returns, and the VU turn outlives it by minutes, so a
+    parent-anchored lookup evaporates precisely during the window it is
+    supposed to cover (the ms34u49egqwhug incident: carrier ran 8 rounds
+    over ~7 minutes with no parent left to point at it).
+
+    The carrier carries everything needed to stand on its own:
+    ``_vu_subtask`` marks it, ``convId`` places it (the pt_8dc03017
+    cutover registers it under the REAL conv id), and its ``status`` /
+    ``aborted`` give liveness.
+    """
+    if not conv_id:
+        return False
+    with tasks_lock:
+        for _tid, t in tasks.items():
+            if (t.get('_vu_subtask')
+                    and (t.get('convId') or '') == conv_id
+                    and t.get('status') == 'running'
+                    and not t.get('aborted')):
+                return True
+    return False
+
+
+def conv_has_work_in_flight(task: dict, *, now: float | None = None) -> bool:
+    """True if ``task`` means its conversation is STILL WORKING for the user.
+
+    This answers a DIFFERENT question from ``status == 'running'``, and the
+    difference is the ms34u49egqwhug incident (2026-07-27): the orchestrator
+    flips the parent to ``status='done'`` at the terminal seam
+    (``orchestrator/_finalize.py``) and only THEN, in the same synchronous
+    call stack, runs ``maybe_run_autopilot`` — which executes an entire VU
+    turn that can take minutes. During that window ``status`` correctly means
+    "the stream body is finished", but the conversation is emphatically NOT
+    idle: an autopilot turn is mid-flight and the user must see a live
+    indicator and be able to stop it.
+
+    Historically only ONE of the three readers of that fact honoured it:
+
+      * the SSE live-tick (``lib/chat_dispatch.py``) held its LATE-done while
+        ``task['_finalize_started_at']`` was fresh — which is why the stream
+        stayed open and the transcript kept updating;
+      * the busy projection (``snapshot_running_by_conv`` → the sidebar dot
+        and the composer Send/Stop button) did not — so the UI reported
+        "generation complete" while 8 LLM rounds ran;
+      * the reconnect view (``/api/chat/active``) does not either, but that is
+        a deliberate and separate concern (reconnecting a carrier's SSE would
+        birth a stuck bubble) — discoverability, not busy-ness.
+
+    Rather than teach the busy reader a second, divergent notion of "running",
+    this predicate is the ONE place that definition lives.
+
+    Two ways a task carries work in flight:
+
+      1. ``status == 'running'`` and not aborted — the ordinary case. NOTE
+         this ALREADY covers a live VU carrier, which is a running task in
+         its own right; the projection's job is merely not to filter it out.
+      2. a FRESH ``_finalize_started_at`` latch — covers ONLY the sliver
+         between the parent's terminal flip and its carrier's registration
+         (see :func:`_vu_window_secs`). Everything after the carrier exists
+         is covered by term 1 via the carrier itself, NOT by this timer.
+
+    ``aborted`` always wins: the instant the user presses Stop (or supersede
+    fires) the conversation must read idle so the composer returns to Send.
+    """
+    if not task or task.get('aborted'):
+        return False
+    if task.get('status') == 'running':
+        return True
+    # Pre-carrier finalize sliver ONLY. Once the carrier is registered it is
+    # itself a running task and term 1 covers the conv — this branch must
+    # never be the thing keeping a long VU turn visible.
+    _fin = task.get('_finalize_started_at') or 0
+    if _fin:
+        _now = time.time() if now is None else now
+        if (_now - _fin) < _vu_window_secs():
+            return True
+    return False
 
 
 def create_task(conv_id, messages, config, *, supersede=True):
@@ -155,13 +303,57 @@ def create_task(conv_id, messages, config, *, supersede=True):
     #   tenant's user_id (populated only by login); open/private mode leave it
     #   empty → the single global profile (personal-install semantic, no
     #   migration). Best-effort: any failure (no request ctx) → '' = global.
+    #
+    # pt_ab42421158214591 (2026-07-25): also stash ``_userId`` for the
+    # SSOT conv-state channel. Same source (current_auth()), same
+    # request-thread capture rationale — the task registry's
+    # snapshot_running_by_conv uses this to scope by owner so a sibling
+    # device on a different tenant doesn't receive the wrong busy dot.
+    # Empty string is the pre-auth / single-user default and is treated
+    # as "unscoped" by every reader (back-compat with the personal
+    # install).
     try:
         from lib.memory.user_profile import resolve_profile_scope
         from routes.api_v1.auth import current_auth
-        task['_profileScope'] = resolve_profile_scope(current_auth())
+        _ctx = current_auth()
+        task['_profileScope'] = resolve_profile_scope(_ctx)
+        task['_userId'] = getattr(_ctx, 'user_id', '') or '' if _ctx else ''
     except Exception as e:
-        logger.debug('[Task %s] profile scope resolve failed: %s', task_id[:8], e)
+        logger.debug('[Task %s] identity resolve failed: %s', task_id[:8], e)
         task['_profileScope'] = ''
+        task['_userId'] = ''
+
+    # ★ Durable-at-birth: write the task_results row AT CREATION
+    #   (status='running', empty content/thinking). The running-checkpoint
+    #   writers only fire on content/thinking deltas and per-round boundaries,
+    #   so a task killed by a server restart BEFORE its first delta left NO row
+    #   at all — and the cold-replay / poll-DB / startup-recovery stale-scan
+    #   all found NOTHING (the ms43foj3 incident: resume task killed 87s in,
+    #   R1 pure tool_calls → zero content/thinking deltas →
+    #   checkpoint_task_partial's empty-guard no-op'd every time → poll and
+    #   stream returned 404 'Task not found' → the frontend minted a terminal
+    #   error bubble for what was really a transport-level task loss). With
+    #   the row existing from second 0, every one of those readers resolves
+    #   the task to its real state (running → interrupted after recovery)
+    #   instead of a 404. Best-effort: a write failure must never break task
+    #   creation; the checkpoint/persist writers upsert over it last-wins.
+    try:
+        _birth_meta = {}
+        _bcfg = config or {}
+        if _bcfg.get('model'):
+            _birth_meta['model'] = _bcfg['model']
+        if _bcfg.get('preset'):
+            _birth_meta['preset'] = _bcfg['preset']
+        if _bcfg.get('thinkingDepth'):
+            _birth_meta['thinkingDepth'] = _bcfg['thinkingDepth']
+        _upsert_task_row(
+            task, conv_id or '', content='', thinking='', status='running',
+            error_json=None, tr_json=None,
+            meta_json=(json.dumps(_birth_meta, ensure_ascii=False)
+                       if _birth_meta else None))
+    except Exception as e:
+        logger.warning('[Task %s] durable-at-birth row write failed (non-fatal): %s',
+                       task_id[:8], e)
 
     # ★ Project-brain Activity Feed: a 'started' pulse, EXCEPT for autopilot
     #   follow-up turns (config.autopilotRunId set) — a deep autopilot run is
@@ -222,6 +414,51 @@ def discard_task(task_id: str, conv_id: str | None = None) -> None:
         with _conv_latest_task_lock:
             if _conv_latest_task.get(conv_id) == task_id:
                 del _conv_latest_task[conv_id]
+
+def write_carrier_terminal_row(task, status: str) -> None:
+    """Persist a terminal ``task_results`` row for a synchronous CARRIER task.
+
+    The autopilot VU sub-task (and any future row-producing carrier) runs
+    under ``_endpoint_managed=True``, which BY DESIGN suppresses the
+    orchestrator's terminal-status flip + ``persist_task_result`` — the
+    carrier's own finalize early-returns. Its per-round
+    ``checkpoint_task_partial`` writes therefore leave the row at
+    ``status='running'`` forever (the ms2gipv5 zombie generator,
+    pt_8a491f9d): the in-memory ``discard_task`` only cleans the registry,
+    and the next startup recovery sweep collects the stale row as a
+    crash-interrupted turn.
+
+    The carrier's LIFECYCLE OWNER (``autopilot.run_virtual_user``'s
+    finally) calls this right after ``discard_task`` so the row reaches a
+    terminal state in the same breath as the registry cleanup. Idempotent,
+    last-writer-wins (keyed on task_id, same ``_upsert_task_row`` channel as
+    ``_write_aborted_terminal_floor``); best-effort — a settle failure must
+    never break the owner's finally.
+
+    ``status`` is derived by the caller from the carrier's end state:
+    'done' (turn completed — the normal path), 'aborted' (parent abort /
+    real-message preemption), 'error' (died before any finish reason).
+    """
+    if status not in ('done', 'aborted', 'error'):
+        logger.warning('[Task %s] write_carrier_terminal_row: unexpected status %r '
+                       '— defaulting to done', (task.get('id') or '?')[:8], status)
+        status = 'done'
+    try:
+        conv_id = task.get('convId', '') or ''
+        tr_json = (None if _tool_rounds_have_dedicated_home(task)
+                   else json.dumps(_merge_tool_rounds(task), ensure_ascii=False))
+        meta = build_result_meta(task)
+        meta_json = json.dumps(meta, ensure_ascii=False) if meta else None
+        error_json = _err_to_json(task['error']) if task.get('error') is not None else None
+        _upsert_task_row(task, conv_id, content=task.get('content') or '',
+                         thinking=task.get('thinking') or '', status=status,
+                         error_json=error_json, tr_json=tr_json, meta_json=meta_json)
+        logger.info('[Task %s] conv=%s Carrier terminal row settled: status=%s',
+                    task['id'][:8], conv_id[:8], status)
+    except Exception as e:
+        logger.warning('[Task %s] Failed to settle carrier terminal row: %s',
+                       (task.get('id') or '?')[:8], e, exc_info=True)
+
 
 def list_running_tasks(exclude_conv_id: str | None = None) -> list[dict]:
     """Return one entry per CONVERSATION with genuinely-live running work.
@@ -319,6 +556,106 @@ def list_running_tasks(exclude_conv_id: str | None = None) -> list[dict]:
     return [entry for _created, entry in by_key.values()]
 
 
+def snapshot_running_by_conv(user_id: str = '') -> dict[str, list[str]]:
+    """Return ``{conv_id: [task_id, ...]}`` for every non-carrier running task.
+
+    P1 of pt_conv_state_ssot: the single read the ``notify_conv_changed`` seam
+    uses to project the busy fact into the outbound frame. This is the SSOT
+    for "which conversations have live tasks", replacing the settings-derived
+    ``activeTaskId`` (single value) heuristic that made cross-device sidebars
+    disagree.
+
+    Multi-tenant scoping (pt_ab42421158214591, 2026-07-25): when ``user_id``
+    is set to a non-empty string, only tasks whose ``task['_userId']`` matches
+    are included — closes the multi-tenant leak where user B's tab would
+    otherwise receive a snapshot built from user A's registry. Empty string
+    (default) returns EVERY non-carrier running task regardless of owner —
+    this is the single-user / personal-install / pre-auth default, and also
+    the fallback for write-path callers that have no request context to
+    resolve a user from.
+
+    Semantics — deliberately DIFFERENT from ``list_running_tasks``:
+
+      * **NO activity/wedge filter.** A task whose event/heartbeat clocks have
+        gone silent is still "supposed to be running" from the sidebar's POV
+        — the reaper (~30 min) is what decides it is finally stuck, at which
+        point it writes a terminal row and this snapshot drops it naturally.
+        The restart-guard needs strict liveness ("is anyone actually working
+        right now"); the busy-dot needs the broader "is it supposed to be
+        working" so a temporarily-quiet task does not extinguish the dot and
+        then re-light it 100 ms later. Two different questions → two
+        different helpers.
+      * **Carrier filter (same as list_running_tasks).** Autopilot VU
+        sub-tasks and inline reporter carriers must not surface — they
+        have no user-visible bubble and would light a permanent phantom
+        sidebar dot.
+      * **Empty-convId tasks dropped.** A task with no ``convId`` cannot be
+        projected into any sidebar row; it stays invisible.
+      * **Aborted / non-running dropped.** Once ``t['aborted']`` flips true
+        the dot should extinguish immediately, so the client sees Send (not
+        Stop) the instant supersede fires.
+      * **Multiple tasks per conv preserved.** ``list_running_tasks`` dedups
+        to one representative per conv for the restart guard's counting; we
+        do NOT — the client needs the FULL set so ``_reconnectServerTaskIfIdle``
+        can rejoin any of them, and later drift-check equality is strict.
+
+    Read-only. Snapshot taken under ``tasks_lock``; safe to call from any
+    thread. Ordering within each conv's list is registry-iteration order
+    (approximately creation order) — deterministic per-process but not
+    guaranteed across replicas. Clients treat the list as a SET.
+    """
+    scope_user = str(user_id or '')
+    out: dict[str, list[str]] = {}
+    _now = time.time()
+    with tasks_lock:
+        for tid, t in tasks.items():
+            # ★ "Is this conv still working for the user?" — the SHARED
+            #   predicate, not a bare status read. This is what covers the
+            #   finalize/VU window in which the parent is already
+            #   status='done' while its autopilot VU turn still runs
+            #   (ms34u49egqwhug: the sidebar and composer read "generation
+            #   complete" through ~7 minutes of real backend work because
+            #   the parent had flipped terminal AND the carrier was hidden
+            #   by the carrier filter — both candidates dropped out for
+            #   DIFFERENT reasons and the busy set went empty).
+            if not conv_has_work_in_flight(t, now=_now):
+                continue
+            conv = t.get('convId') or ''
+            if not conv:
+                continue
+            if scope_user:
+                # Explicit scope: include ONLY tasks owned by this user.
+                # Pre-auth tasks with empty ``_userId`` do NOT surface into a
+                # scoped snapshot — a scoped caller is asking "what does
+                # user X see?" and X does not own a legacy-null task.
+                if str(t.get('_userId') or '') != scope_user:
+                    continue
+            # ★ Carrier split — a carrier is NOT independently reconnectable
+            #   (its SSE never completes), so its id must never be offered as
+            #   an ATTACH target — but a LIVE VU CARRIER is precisely the thing
+            #   whose existence means "this conversation is working", so it
+            #   MUST light the busy dot. Anchor the busy fact on the carrier
+            #   itself; other carriers (inline reporters / summarize holders)
+            #   genuinely have no user-visible work and still contribute
+            #   neither id nor dot.
+            #
+            #   THE WIRE SHAPE IS LOAD-BEARING: the client treats an EMPTY
+            #   runningTaskIds list as IDLE (computeConvBusy →
+            #   ``_authoritativeActiveTaskIds.size > 0``). So "busy, but the
+            #   only worker is a non-attachable VU carrier" must NOT look
+            #   identical to "idle". We therefore surface the carrier's id
+            #   with a NON-ATTACHABLE marker the reducer strips when building
+            #   the busy Set — the conv reads busy (Set non-empty) while no
+            #   dangling attach target leaks into the reconnect path.
+            ids = out.setdefault(conv, [])
+            if is_carrier_task(t):
+                if t.get('_vu_subtask'):
+                    ids.append(tid + '#vu')
+            else:
+                ids.append(tid)
+    return out
+
+
 def abort_running_tasks_for_conv(conv_id: str, exclude_task_id: str | None = None) -> int:
     """Abort all running tasks for a conversation, except the excluded one.
 
@@ -376,9 +713,32 @@ def abort_running_tasks_for_conv(conv_id: str, exclude_task_id: str | None = Non
     if aborted:
         logger.info('[Manager] conv=%s Auto-aborted %d stale task(s) before starting new task %s',
                     conv_id[:8], aborted, (exclude_task_id or '?')[:8])
+        # ── pt_conv_state_ssot P3: task lifecycle stop broadcast ──
+        # Aborting a stale task flips ``t['aborted']=True`` but nobody
+        # calls notify_conv_changed for this conv — the frame carrying
+        # the fresh runningTaskIds projection (which no longer includes
+        # the aborted tid, since snapshot_running_by_conv filters both
+        # status!=running AND aborted) never leaves the server, so a
+        # sibling device holding the busy dot for the superseded task
+        # sees it stay lit until its next poll (25/90s later). Emit ONE
+        # notify frame for the whole sweep (consolidates a multi-abort
+        # into a single frame, not one per aborted tid). Fail-open: a
+        # push transport error must never break the abort path.
+        try:
+            from lib.conversations.meta_cache import notify_conv_changed
+            # pt_abae3a85a92440fd: derive user_id from an aborted task —
+            # they all belong to the same conv → same owner. Falls back
+            # to DEFAULT_USER_ID (via task_user_id) when the task pre-dates
+            # the _userId stash (pre-c6d1bd71 legacy).
+            _abort_uid = task_user_id(_aborted_tasks[0]) if _aborted_tasks else None
+            notify_conv_changed(conv_id, rev=None,
+                                user_id=_abort_uid) if _abort_uid is not None \
+                else notify_conv_changed(conv_id, rev=None)
+        except Exception as _ne:
+            logger.warning(
+                '[Manager] conv=%s supersede-abort notify skipped: %s',
+                conv_id[:8], _ne)
     return aborted
-
-
 def quiesce_running_tasks(reason: str = 'server_shutdown') -> int:
     """Signal EVERY running task to abort — called at server shutdown.
 

@@ -18,7 +18,9 @@ logger = get_logger(__name__)
 # Model name patterns → thinking format hint
 _THINKING_FORMAT_HINTS = [
     # Doubao / Claude-style: thinking.type = "enabled"
-    (re.compile(r'claude|anthropic', re.I),       'thinking_type'),
+    # ``fable`` = Anthropic Fable (Claude-family); a proxy/Bedrock-hosted
+    # Fable whose brand isn't exactly 'claude' still needs the Claude shape.
+    (re.compile(r'claude|anthropic|fable', re.I),  'thinking_type'),
     (re.compile(r'doubao|seed.*pro', re.I),       'thinking_type'),
     # Qwen / LongCat style: enable_thinking = true
     (re.compile(r'qwen|qwq', re.I),              'enable_thinking'),

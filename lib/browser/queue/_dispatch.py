@@ -22,7 +22,7 @@ from ._state import (
     _async_waiters, _async_waiters_lock, _commands, _commands_lock, _notify,
     _get_active_client, _wake_async_waiters, POLL_WAIT_TIMEOUT,
 )
-from ._registry import mark_poll, _cleanup_stale
+from ._registry import mark_poll, _cleanup_stale, client_user_id
 
 logger = get_logger(__name__)
 
@@ -74,6 +74,10 @@ def send_browser_command(cmd_type, params=None, timeout=30, client_id=None):
         'target_client': client_id,   # None = any client can pick it up
         'timeout': timeout,           # caller's wait budget; delivery cutoff
         'cancelled': False,           # set when the caller gives up (see below)
+        # B0 user scoping: the command inherits the tenant of the client it is
+        # aimed at, so a poll authenticated as a DIFFERENT tenant can never be
+        # handed this command (see _deliverable_to). '' = unscoped.
+        'user_id': client_user_id(client_id) if client_id else '',
     }
     with _commands_lock:
         _commands[cmd_id] = cmd
@@ -117,11 +121,28 @@ def send_browser_command(cmd_type, params=None, timeout=30, client_id=None):
     return cmd['result'], None
 
 
-def get_pending_commands(client_id=None):
+def _deliverable_to(cmd, client_id, poller_user):
+    """True when ``cmd`` may be handed to this polling client.
+
+    Mirrors the desktop bridge's ``_deliverable`` (``lib/desktop/bridge.py``):
+    the USER check is the FIRST gate and is fail-closed. A browser command can
+    read the cookie jar and attach the DevTools debugger, so handing one to the
+    wrong tenant is a session-takeover primitive, not a routing nit.
+    """
+    if (cmd.get('user_id') or '') != (poller_user or ''):
+        return False
+    target = cmd.get('target_client')
+    if target and client_id and target != client_id:
+        return False
+    return True
+
+
+def get_pending_commands(client_id=None, user_id=''):
     """Return list of commands for a specific client (or unrouted commands).
 
     A command is eligible for a client if:
-      - target_client is None (unrouted — any client can pick it up), OR
+      - it belongs to the SAME bridge user as this poll (fail-closed), AND
+      - target_client is None (unrouted — any client of that user), OR
       - target_client matches the requesting client_id
     """
     now = time.time()
@@ -136,10 +157,9 @@ def get_pending_commands(client_id=None):
             # 30-60s after the model moved on, with its result silently dropped.
             if now - cmd['created_at'] > cmd.get('timeout', 30):
                 continue
-            # Per-client routing: only deliver commands targeted at this client
-            target = cmd.get('target_client')
-            if target and client_id and target != client_id:
-                continue   # This command is for a different client
+            # User scope + per-client routing (user check first, fail-closed).
+            if not _deliverable_to(cmd, client_id, user_id):
+                continue
             cmd['picked_up'] = True
             pending.append({
                 'id': cmd['id'],
@@ -149,15 +169,15 @@ def get_pending_commands(client_id=None):
     return pending
 
 
-def wait_for_commands(timeout=8, client_id=None):
+def wait_for_commands(timeout=8, client_id=None, user_id=''):
     """Block until commands are available for this client, or timeout."""
     _state._last_poll_time = time.time()
-    mark_poll(client_id)
+    mark_poll(client_id, user_id=user_id)
     _cleanup_stale()
 
     deadline = time.time() + timeout
     while time.time() < deadline:
-        pending = get_pending_commands(client_id=client_id)
+        pending = get_pending_commands(client_id=client_id, user_id=user_id)
         if pending:
             return pending
         _notify.clear()
@@ -167,7 +187,7 @@ def wait_for_commands(timeout=8, client_id=None):
     return []
 
 
-async def wait_for_commands_async(timeout=None, client_id=None):
+async def wait_for_commands_async(timeout=None, client_id=None, user_id=''):
     """Async-native variant of wait_for_commands for ``async def`` poll routes.
 
     Awaits on an asyncio.Event instead of blocking a thread on the
@@ -181,11 +201,11 @@ async def wait_for_commands_async(timeout=None, client_id=None):
     """
     if timeout is None:
         timeout = POLL_WAIT_TIMEOUT
-    mark_poll(client_id)
+    mark_poll(client_id, user_id=user_id)
     _cleanup_stale()
 
     # Fast path: something is already queued for us.
-    pending = get_pending_commands(client_id=client_id)
+    pending = get_pending_commands(client_id=client_id, user_id=user_id)
     if pending:
         return pending
 
@@ -198,7 +218,7 @@ async def wait_for_commands_async(timeout=None, client_id=None):
         deadline = time.time() + timeout
         while time.time() < deadline:
             event.clear()
-            pending = get_pending_commands(client_id=client_id)
+            pending = get_pending_commands(client_id=client_id, user_id=user_id)
             if pending:
                 return pending
             remaining = deadline - time.time()
@@ -213,7 +233,7 @@ async def wait_for_commands_async(timeout=None, client_id=None):
                 logger.debug('[Browser] async poll slice elapsed, re-checking queue: %s', e)
                 pass  # slice elapsed — loop re-checks the queue
         # Final check after the loop in case a command landed at the deadline.
-        return get_pending_commands(client_id=client_id)
+        return get_pending_commands(client_id=client_id, user_id=user_id)
     finally:
         # ALWAYS deregister — covers timeout, success, and CancelledError
         # (client disconnected mid-wait). Without this the registry leaks a

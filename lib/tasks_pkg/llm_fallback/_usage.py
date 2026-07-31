@@ -1,5 +1,6 @@
 """Per-round usage SSE emission."""
 
+from lib.cost import normalize_usage
 from lib.log import get_logger
 from lib.tasks_pkg.manager import append_event
 
@@ -38,11 +39,10 @@ def _emit_round_usage(task, round_num, model, usage, *, tag=''):
     if not usage:
         return
     try:
-        inp = usage.get('prompt_tokens') or usage.get('input_tokens') or 0
-        cw = (usage.get('cache_write_tokens')
-              or usage.get('cache_creation_input_tokens') or 0)
-        cr = (usage.get('cache_read_tokens')
-              or usage.get('cache_read_input_tokens') or 0)
+        _nu = normalize_usage(usage)
+        inp = _nu['input']
+        cw = _nu['cache_write']
+        cr = _nu['cache_read']
         # Anthropic convention: prompt_tokens excludes cache. OpenAI
         # convention: prompt_tokens already includes cache. Mirrors the
         # frontend test in ui.js:1853 / context-bar.js:_promptTokensFromUsage.
@@ -56,6 +56,9 @@ def _emit_round_usage(task, round_num, model, usage, *, tag=''):
             'roundNum': round_num,
             'model': model,
             'tag': tag,
+            # Same endpoint-phase tag as the messages_snapshot (P4) — the
+            # Request Inspector joins attempts per (turn, roundNum).
+            'turn': task.get('_endpoint_phase') or '',
             'tokensIn': int(tokens_in or 0),
             'tokensOut': int(out or 0),
             'usage': dict(usage),

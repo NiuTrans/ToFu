@@ -114,7 +114,7 @@ def micro_compact(messages: list, conv_id: str = '', task: dict | None = None,
     # rounds piggy-back on _sync_result_to_conversation when the turn ends.
     _conv_owned_ids: set[str] = set()
     _conv_messages: list | None = None
-    _conv_updated_at: int | None = None
+    _conv_rev: int | None = None
     _conv_dirty = False
 
     if task is not None:
@@ -128,7 +128,7 @@ def micro_compact(messages: list, conv_id: str = '', task: dict | None = None,
             from lib.agent_core.store import get_conversation_store
             _loaded = get_conversation_store().load_conversation_messages(conv_id)
             if _loaded is not None:
-                _conv_messages, _conv_updated_at = _loaded
+                _conv_messages, _unused_updated_at, _conv_rev = _loaded
                 if isinstance(_conv_messages, list):
                     for _m in _conv_messages:
                         if not isinstance(_m, dict):
@@ -291,15 +291,19 @@ def micro_compact(messages: list, conv_id: str = '', task: dict | None = None,
     # form messages list which is discarded after this LLM call, and
     # next turn re-reads the original 33k-char content.
     #
-    # CAS guard via updated_at: if a concurrent writer (frontend save,
-    # _sync_result_to_conversation, etc.) bumped the row, skip the write
+    # CAS guard via rev: if a concurrent writer (frontend save,
+    # _sync_result_to_conversation, etc.) changed the row, skip the write
     # — they have a fresher view; our mutation will be re-applied next
     # round when this conversation is rebuilt and L1 fires again.
+    # ``rev`` and not ``updated_at``: the latter is a value the writer itself
+    # supplies, so a clock that does not advance between two writes yields a
+    # predicate that passes while the data has already changed. ``rev`` is
+    # issued by a DB trigger in the same statement and cannot be forged.
     if _conv_dirty and _conv_messages is not None and conv_id:
         try:
             from lib.agent_core.store import get_conversation_store
             _affected = get_conversation_store().cas_update_conversation_messages(
-                conv_id, _conv_messages, _conv_updated_at)
+                conv_id, _conv_messages, _conv_rev)
             if _affected == 0:
                 logger.info('[L1-persist] conv=%s CAS skipped — row was '
                             'updated by another writer; placeholders will '

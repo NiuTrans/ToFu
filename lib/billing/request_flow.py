@@ -138,19 +138,29 @@ def settle_task(task: dict, *, user_id: str, model: str) -> Optional[dict]:
         # Pass the FULL usage shape — including cache_read / cache_write /
         # reasoning tokens — so the wallet debit matches the displayed cost.
         # Previously only input/output were forwarded, so a cache-heavy turn
-        # was silently under-debited vs the ¥ shown in the UI.
+        # was silently under-debited vs the ¥ shown in the UI. normalize_usage
+        # also maps vendor spellings (kimi cached_tokens, DeepSeek
+        # prompt_cache_hit_tokens, nested prompt_tokens_details) onto the
+        # canonical keys so those hits are billed at the read multiplier.
+        from lib.cost import normalize_usage, split_input_tokens
+        _nu = normalize_usage(u)
+        # ★ Pass the UNCACHED RESIDUAL, not normalize_usage()['input'].
+        #   compute_request_cost takes loose SCALARS and has to re-infer the
+        #   convention from them (synthesize_usage). On a HYBRID payload that
+        #   re-inference lands somewhere else than the display engine does, and
+        #   the two surfaces drift — measured 2.246x apart ($48.56 displayed vs
+        #   $21.62 debited) on a real sankuai_anthropic turn, even though both
+        #   modules' docstrings claim they "can NEVER drift". Resolving the
+        #   split HERE, at the one seam that owns the convention decision,
+        #   removes the second guess entirely.
+        _uncached, _ = split_input_tokens(u)
         cost = compute_request_cost(
             model or '',
-            input_tokens=int(u.get('input_tokens')
-                             or u.get('prompt_tokens') or 0),
-            output_tokens=int(u.get('output_tokens')
-                              or u.get('completion_tokens') or 0),
-            cache_read_tokens=int(u.get('cache_read_tokens')
-                                  or u.get('cache_read_input_tokens') or 0),
-            cache_write_tokens=int(u.get('cache_write_tokens')
-                                   or u.get('cache_creation_input_tokens') or 0),
-            reasoning_tokens=int(u.get('reasoning_tokens')
-                                 or u.get('thinking_tokens') or 0),
+            input_tokens=_uncached,
+            output_tokens=_nu['output'],
+            cache_read_tokens=_nu['cache_read'],
+            cache_write_tokens=_nu['cache_write'],
+            reasoning_tokens=_nu['thinking'],
             provider_id=task.get('provider_id') or None)
         reserved = int(task.get('_billing_reservation_micro') or 0)
         if reserved > 0:

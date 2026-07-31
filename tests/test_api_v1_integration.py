@@ -89,6 +89,7 @@ class _AppFixture:
         from routes.api_v1.desktop import api_v1_desktop_bp
         from routes.api_v1.browser import api_v1_browser_bp
         from routes.api_v1.memory import api_v1_memory_bp
+        from routes.api_v1.skills import api_v1_skills_bp
         from routes.api_v1.mcp import api_v1_mcp_bp
         from routes.api_v1.daily_report import api_v1_daily_report_bp
         from routes.api_v1.oauth import api_v1_oauth_bp
@@ -113,6 +114,7 @@ class _AppFixture:
         self.app.register_blueprint(api_v1_desktop_bp)
         self.app.register_blueprint(api_v1_browser_bp)
         self.app.register_blueprint(api_v1_memory_bp)
+        self.app.register_blueprint(api_v1_skills_bp)
         self.app.register_blueprint(api_v1_mcp_bp)
         self.app.register_blueprint(api_v1_daily_report_bp)
         self.app.register_blueprint(api_v1_oauth_bp)
@@ -577,7 +579,10 @@ class IntegrationTest(unittest.TestCase):
             self.assertEqual(r.status_code, 200)
             body = await r.get_json()
             self.assertIn('memories', body)
-            self.assertIn('skills', body)  # backward-compat alias
+            # Post-split (pt_229606ca): the memory surface is memory-only —
+            # the transient ``skills`` alias is gone; skills live at
+            # /api/v1/skills.
+            self.assertNotIn('skills', body)
         _run(go())
 
     def test_memory_get_unknown_404(self):
@@ -595,7 +600,7 @@ class IntegrationTest(unittest.TestCase):
         _row, token = create_key(name='memory-catalog', scopes=['chat'])
         async def go():
             r = await self._client().get(
-                '/api/v1/memory/catalog',
+                '/api/v1/skills/catalog',
                 headers={'Authorization': f'Bearer {token}'})
             self.assertEqual(r.status_code, 200)
             body = await r.get_json()

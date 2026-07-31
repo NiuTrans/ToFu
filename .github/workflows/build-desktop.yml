@@ -3,8 +3,30 @@
 # ═══════════════════════════════════════════════════════════════
 #
 #  Triggered on:
-#    - Push of a version tag (v*)
-#    - Manual dispatch (workflow_dispatch)
+#    - Push to main whose VERSION file names a version that has no RELEASE
+#      yet (the NORMAL path — `export.py --push` publishes main, and the
+#      version number alone decides whether an installer gets built)
+#    - Manual dispatch (workflow_dispatch), for a rebuild/re-release
+#
+#  ── Why VERSION and not a `v*` tag push ──
+#  This used to trigger ONLY on `refs/tags/v*`, which made a release depend on
+#  remembering `export.py --bump` (a plain `--push` creates no tag at all, so
+#  no installer was ever built). The VERSION file is already the project's
+#  single source of truth for the version, so it — not the operator's memory —
+#  is what gates a build. The release step creates the `v<VERSION>` tag if it
+#  does not already exist, so tags still mark every release.
+#
+#  ── Why the gate asks about the RELEASE, never about the tag ──
+#  A tag is a PRODUCT of releasing, not evidence of it, and using it as a
+#  proxy fails in both directions: measured on the remote 2026-07-29, v0.15.0
+#  and v0.15.2 are tagged with NO release behind either (the starved macOS leg
+#  skipped `release`), and on the `--bump` path the tag is pushed milliseconds
+#  after the branch — so a tag-based gate races its own trigger and refuses to
+#  build precisely on the most formal release path. See the `version` job.
+#
+#  Deliberately ONE trigger: adding `tags: v*` back would double-fire for a
+#  `--bump` push (which pushes the branch AND the tag), racing two runs to
+#  publish the same release.
 #
 #  Produces:
 #    - Windows: Tofu-Setup-x.y.z-win64.exe (Inno Setup installer)
@@ -19,8 +41,7 @@ name: Build Desktop
 
 on:
   push:
-    tags:
-      - 'v*'
+    branches: [main]
   workflow_dispatch:
     inputs:
       version_override:
@@ -30,6 +51,46 @@ on:
 
 permissions:
   contents: write   # needed for creating releases
+
+# ── Only one release run per branch at a time ──
+#
+# This became load-bearing the moment the trigger moved from `refs/tags/v*` to
+# `push: branches: [main]`. Under the tag trigger a run happened once or twice
+# a day; now EVERY push into the window where VERSION has no release starts a
+# full four-platform build. Measured on this repo's own history (2026-07-28
+# 00:00 onward, 339 commits): median gap between commits is 165 s.
+#
+# Without a group, concurrent runs collide on shared, mutable remote state:
+# each release job independently probes the tag, gets 404, and force-moves
+# v<VERSION> to ITS OWN github.sha, then each calls action-gh-release for the
+# same tag. Last writer wins the ref while an earlier run may already have
+# uploaded its assets — reintroducing exactly the binaries/source mismatch the
+# retarget step was added to eliminate, only now caused by a race instead of a
+# stale tag. `github.ref` is the right grain because the contended resource is
+# the per-branch release (tag + Release), not the individual commit.
+#
+# ── cancel-in-progress is deliberately FALSE, and this is the opposite of
+#    the usual CI default ──
+# The usual argument for cancelling ("newer commit supersedes the older") is
+# about feedback latency, where being wrong costs a re-run. Here it would cost
+# the release itself. A build takes up to 30 min/leg; in the measured history
+# only 8 of 338 gaps (2.4%) are >= 30 min. So with cancel-in-progress a build
+# would be superseded before finishing on ~97.6% of pushes and an installer
+# would only ever ship during a rare quiet spell — the SAME user-visible
+# symptom this workflow exists to fix ("version changed, nothing was built"),
+# just with a new cause. Cancellation would also be able to kill the release
+# job between the tag force-push and the asset upload, leaving a Release the
+# version gate then reads as 200 and never retries.
+#
+# Queueing gets the mutual exclusion without either hazard. With the default
+# `queue: single` at most one run is pending: a burst of N pushes collapses to
+# "one running + the newest one waiting", and the newest run's `version` job
+# then probes 200 and skips in seconds. So the storm costs one full build plus
+# some trivial ubuntu-latest jobs — the gate is what dedupes, which is what it
+# was written to do.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
   PYTHON_VERSION: "3.12"
@@ -41,12 +102,17 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.ver.outputs.version }}
+      should_release: ${{ steps.ver.outputs.should_release }}
     steps:
       - uses: actions/checkout@v4
       - id: ver
+        env:
+          VERSION_OVERRIDE: ${{ inputs.version_override }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if [ -n "${{ inputs.version_override }}" ]; then
-            VER="${{ inputs.version_override }}"
+          set -euo pipefail
+          if [ -n "${VERSION_OVERRIDE}" ]; then
+            VER="${VERSION_OVERRIDE}"
           else
             VER="$(cat VERSION | tr -d '[:space:]')"
           fi
@@ -59,11 +125,119 @@ jobs:
           echo "Resolved version: $VER"
           echo "version=$VER" >> "$GITHUB_OUTPUT"
 
+          # ── Should this run actually build + publish? ──
+          #
+          # The question is "has v$VER been RELEASED?", and the only honest
+          # answer to it is the Release itself. An earlier version of this gate
+          # asked "does the tag v$VER exist?" instead — a proxy that is wrong in
+          # both directions:
+          #
+          #   * A tag can exist with NO release. That is exactly the state this
+          #     repo was left in: measured on the remote 2026-07-29, v0.15.0
+          #     and v0.15.2 are both tagged and both return 404 from
+          #     GET /releases/tags/{tag} (the macos-13 leg starved, so
+          #     `release` was skipped; v0.15.1 never got as far as a tag).
+          #     Asking about tags declares those versions "already released"
+          #     and they can never be published — the very symptom this
+          #     workflow exists to fix.
+          #
+          #   * The tag arrives BEFORE the release, from the same push.
+          #     `export.py::_git_push` runs `_push_branch` then `_push_tag`
+          #     back-to-back in one loop, so on the `--bump` path the tag lands
+          #     on the remote within milliseconds of the branch that triggered
+          #     this run. A tag-based gate therefore loses a race against
+          #     itself: the more formal the release path, the more reliably it
+          #     refuses to build. Asking about the Release has no such race,
+          #     because the Release is created at the END of this workflow.
+          #
+          # GET /releases/tags/{tag} answers it, but the STATUS CODE ALONE does
+          # not: 200 proves a release OBJECT exists, not that a user can
+          # download an installer from it. action-gh-release creates the
+          # release first and uploads assets afterwards, so an interruption in
+          # between (cancelled run, dead runner, network blip, an internal
+          # failure in the action) leaves a release that is addressable,
+          # tagged, and EMPTY. A status-only gate then reads 200 forever and
+          # this version can NEVER rebuild — there is no self-heal path short
+          # of a human deleting the release or bumping VERSION.
+          #
+          # That is the tag defect one level down: the gate was upgraded from
+          # "does the tag exist?" to "does the Release exist?", which is the
+          # right direction but still a proxy for what a user actually needs —
+          # "can I download an installer for my platform?". Only the asset list
+          # answers that. So the verdict is:
+          #
+          #   200 + every required asset -> released, skip
+          #   200 + assets missing       -> PARTIAL release, rebuild to repair
+          #   404                        -> not released, build
+          #
+          # The expected-asset list is deliberately NOT written here. It lives
+          # once in scripts/release_assets.py, which the release job's own
+          # completeness gate also calls. Two copies would let a new platform
+          # be added to one gate and silently forgotten by the other — and
+          # both copies would keep passing on the platforms they still know
+          # about, so the drift would be invisible.
+          #
+          # `gh release view` is NOT usable here: it exits 1 for BOTH "no such
+          # release" and "the API call failed" (cli/cli#6024, and that mapping
+          # is explicitly undocumented), so it cannot express the fail-open
+          # rule below.
+          #
+          # ── Failure direction is deliberately asymmetric ──
+          # Only a definite "200 AND complete" skips. Rate limit, network blip,
+          # 5xx, unparsable body, partial assets — all build. Building once
+          # more costs four runners; NOT building is a silent non-release,
+          # which is the original defect. So uncertainty resolves toward
+          # shipping.
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+            echo "Manual dispatch — building v$VER."
+          else
+            api="${GITHUB_API_URL:-https://api.github.com}"
+            # Capture the BODY as well as the status: the asset list is the
+            # actual evidence. `|| true` because `set -e` would abort the whole
+            # step on a transport failure — and a transport failure must FALL
+            # THROUGH to the build, not kill the run.
+            body="$(mktemp)"
+            code="$(curl -sS -o "$body" -w '%{http_code}' \
+                      -H "Authorization: Bearer ${GH_TOKEN}" \
+                      -H "Accept: application/vnd.github+json" \
+                      -H "X-GitHub-Api-Version: 2022-11-28" \
+                      "${api}/repos/${GITHUB_REPOSITORY}/releases/tags/v${VER}" \
+                    || true)"
+            echo "Release probe: GET /releases/tags/v${VER} -> HTTP ${code:-<none>}"
+            if [ "$code" = "200" ]; then
+              # Exit codes: 0 complete, 1 incomplete, 2 undetermined.
+              set +e
+              python3 scripts/release_assets.py --release-json "$body" --require-checksums
+              assets_rc=$?
+              set -e
+              if [ "$assets_rc" -eq 0 ]; then
+                echo "should_release=false" >> "$GITHUB_OUTPUT"
+                echo "v$VER is already released with a complete asset set — nothing to build."
+                echo "::notice::VERSION is still $VER (already released). Bump VERSION to publish a new installer."
+              elif [ "$assets_rc" -eq 1 ]; then
+                echo "should_release=true" >> "$GITHUB_OUTPUT"
+                echo "::warning::Release v$VER exists but is INCOMPLETE (see missing assets above) — rebuilding to repair it. This happens when a previous run was interrupted between creating the release and finishing the uploads."
+              else
+                echo "should_release=true" >> "$GITHUB_OUTPUT"
+                echo "::warning::Release v$VER returned 200 but its asset list could not be read. Building anyway — a missed release is worse than a redundant build."
+              fi
+            elif [ "$code" = "404" ]; then
+              echo "should_release=true" >> "$GITHUB_OUTPUT"
+              echo "v$VER has no release yet — building."
+            else
+              echo "should_release=true" >> "$GITHUB_OUTPUT"
+              echo "::warning::Release probe for v$VER returned HTTP ${code:-<none>} (expected 200 or 404). Building anyway — a missed release is worse than a redundant build."
+            fi
+            rm -f "$body"
+          fi
+
   # ── Windows ──────────────────────────────────────────────────
   build-windows:
     name: Windows Installer
     runs-on: windows-latest
     needs: version
+    if: needs.version.outputs.should_release == 'true'
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -205,8 +379,8 @@ jobs:
 
   # ── macOS ────────────────────────────────────────────────────
   # Build a NATIVE single-arch DMG per macOS architecture via a runner matrix:
-  #   - macos-14  → Apple Silicon (arm64)
-  #   - macos-13  → Intel (x86_64)
+  #   - macos-15        → Apple Silicon (arm64)
+  #   - macos-15-intel  → Intel (x86_64)
   # We deliberately do NOT use PyInstaller target_arch='universal2': the
   # setup-python interpreter on the runners is single-arch, and several C
   # extensions we bundle (psycopg2-binary, pymupdf, lxml, cryptography) do not
@@ -215,18 +389,37 @@ jobs:
   # built with arch-matching wheels, is the reliable path. Previously only the
   # arm64 DMG shipped (runs-on: macos-latest), so Intel Macs could not install
   # Tofu at all.
+  #
+  # ── Runner labels are PERISHABLE — this matrix already died once ──
+  # The legs were macos-14 (arm64) and macos-13 (x86_64). GitHub RETIRED
+  # macos-13 on 2025-12-08 (actions/runner-images#13046). A retired label does
+  # not fail — it is simply never scheduled: the x86_64 leg sat QUEUED with no
+  # runner for exactly 24 h, GitHub auto-cancelled it, and because `release`
+  # has `needs: build-macos`, the release job was SKIPPED. Net effect: v0.15.0,
+  # v0.15.1 and v0.15.2 each built three of four platforms and published
+  # NOTHING, while the Releases page still showed v0.14.2. `timeout-minutes`
+  # does NOT protect against this — it measures execution, not queue time.
+  # macos-14 is on the same path (deprecation began 2026-07-06, unsupported
+  # 2026-11-02), so it is moved off pre-emptively rather than after it starves.
+  #
+  # tests/test_desktop_build_workflow.py pins both labels against a dated
+  # allowlist and FAILS BEFORE each one's retirement date — so the next
+  # rotation is a red test on a normal working day, not a silent non-release.
+  # macos-15-intel is the LAST Intel image (available until 2027-08); after
+  # that, x86_64 macOS must be dropped or moved off GitHub-hosted runners.
   build-macos:
     name: macOS DMG (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
     needs: version
+    if: needs.version.outputs.should_release == 'true'
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-14
+          - runner: macos-15
             arch: arm64
-          - runner: macos-13
+          - runner: macos-15-intel
             arch: x86_64
     steps:
       - uses: actions/checkout@v4
@@ -315,6 +508,7 @@ jobs:
     name: Linux Archive
     runs-on: ubuntu-latest
     needs: version
+    if: needs.version.outputs.should_release == 'true'
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -354,7 +548,7 @@ jobs:
     name: Create Release
     runs-on: ubuntu-latest
     needs: [version, build-windows, build-macos, build-linux]
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: needs.version.outputs.should_release == 'true'
     steps:
       - uses: actions/checkout@v4
 
@@ -380,28 +574,17 @@ jobs:
           # So we assert every required per-platform / per-arch asset exists;
           # missing any one fails the whole release ("all four platforms, or a
           # loud failure — never a silent partial Latest").
-          cd release-assets
-          shopt -s nullglob
-          missing=0
-          require() {
-            local label="$1"; shift
-            local hits=( $@ )
-            if [ ${#hits[@]} -eq 0 ]; then
-              echo "::error::Missing required release asset: ${label}"
-              missing=1
-            else
-              echo "OK  ${label} -> ${hits[*]}"
-            fi
-          }
-          require "macOS arm64 DMG (Tofu-*-macos-arm64.dmg)" Tofu-*-macos-arm64.dmg
-          require "macOS x86_64 DMG (Tofu-*-macos-x86_64.dmg)" Tofu-*-macos-x86_64.dmg
-          require "Windows installer (Tofu-Setup-*-win64.exe)" Tofu-Setup-*-win64.exe
-          require "Linux archive (Tofu-*-linux*.tar.gz)" Tofu-*-linux*.tar.gz
-          if [ "$missing" -ne 0 ]; then
+          #
+          # The required-asset list is NOT inlined here. scripts/release_assets.py
+          # owns it, and the `version` job's gate calls the same script to judge
+          # an ALREADY-PUBLISHED release. Keeping one list is what stops a new
+          # platform from being added to one gate and silently missed by the
+          # other. --require-checksums is deliberately omitted: SHA256SUMS is
+          # generated by the NEXT step, so it cannot exist yet.
+          python3 scripts/release_assets.py --dir release-assets || {
             echo "::error::Refusing to publish an incomplete release. See missing assets above."
             exit 1
-          fi
-          echo "All required platform/arch assets present."
+          }
 
       - name: Generate SHA256SUMS
         shell: bash
@@ -420,10 +603,142 @@ jobs:
           echo "── SHA256SUMS ──"
           cat SHA256SUMS
 
+      # ── An orphan tag must be moved to the commit we actually built ──
+      #
+      # This step exists because `target_commitish` below CANNOT do the job on
+      # its own. The GitHub REST docs say so in as many words:
+      #
+      #   target_commitish — "Specifies the commitish value that determines
+      #   where the Git tag is created from. [...] **Unused if the Git tag
+      #   already exists.**"
+      #
+      # And on this repo the tag routinely DOES already exist without a
+      # release, for two independent reasons:
+      #   * `export.py --bump` pushes the tag itself, before this workflow
+      #     reaches the release step;
+      #   * a starved runner leg skips `release`, leaving the tag behind with
+      #     nothing published on it — measured 2026-07-29: v0.15.0 and v0.15.2
+      #     are tagged on the remote and both return 404 from
+      #     GET /releases/tags/{tag}.
+      #
+      # In that state action-gh-release finds no matching release
+      # (findTagFromReleases scans RELEASES, not git refs), so it CREATES one —
+      # silently anchored to whatever commit the stale tag points at. The
+      # result is a release whose installers come from `github.sha` while its
+      # Source-code archives and generated notes come from the old commit, then
+      # `make_latest` hands that mismatch to every user. Nothing errors.
+      #
+      # ── Why forcing the tag here is safe, and where the limit is ──
+      # This mirrors `export.py::_tag_push_action`, which refuses to MOVE a
+      # published tag without an explicit human `--force` (moving one breaks
+      # every downstream pin). The same four verdicts apply — absent -> let the
+      # action create it; same commit -> nothing to do; different commit ->
+      # move only if the tag is provably an orphan; otherwise keep.
+      #
+      # The authorisation to move is NOT "should_release is true". That would
+      # be wrong: `workflow_dispatch` sets should_release=true WITHOUT probing
+      # (it is the deliberate re-release escape hatch), so a manual re-run on a
+      # shipped version reaches this step, and force-moving there would rewrite
+      # a published tag. So this step re-probes the Release API itself and only
+      # moves a tag that has NO release behind it. A tag nobody has released
+      # has no downstream pin to break; a tag with a release is left alone and
+      # the action updates that release in place.
+      #
+      # Failure direction is the opposite of the version gate's, on purpose:
+      # that gate fails open toward BUILDING because a redundant build is
+      # cheap, whereas moving a published tag is destructive and hard to undo.
+      # So an unreadable probe here declines to move and says so loudly.
+      - name: Retarget an orphan tag to the commit that was built
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VER: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          tag="v${VER}"
+
+          # Peeled ref first: an annotated tag's own object is not the commit.
+          remote_sha="$(git ls-remote --tags origin "refs/tags/${tag}^{}" 2>/dev/null | awk '{print $1}' | head -n1 || true)"
+          if [ -z "$remote_sha" ]; then
+            remote_sha="$(git ls-remote --tags origin "refs/tags/${tag}" 2>/dev/null | awk '{print $1}' | head -n1 || true)"
+          fi
+
+          if [ -z "$remote_sha" ]; then
+            echo "Tag ${tag} does not exist yet — action-gh-release will create it from ${GITHUB_SHA}."
+            exit 0
+          fi
+          if [ "$remote_sha" = "${GITHUB_SHA}" ]; then
+            echo "Tag ${tag} already points at the built commit ${GITHUB_SHA} — nothing to do."
+            exit 0
+          fi
+
+          echo "Tag ${tag} points at ${remote_sha}, but this run built ${GITHUB_SHA}."
+          api="${GITHUB_API_URL:-https://api.github.com}"
+          # Capture the BODY too: on 200 the asset list decides whether this is
+          # a published release (leave the tag alone) or a partial one this run
+          # is repairing (the tag must follow the new commit).
+          body="$(mktemp)"
+          code="$(curl -sS -o "$body" -w '%{http_code}' \
+                    -H "Authorization: Bearer ${GH_TOKEN}" \
+                    -H "Accept: application/vnd.github+json" \
+                    -H "X-GitHub-Api-Version: 2022-11-28" \
+                    "${api}/repos/${GITHUB_REPOSITORY}/releases/tags/${tag}" \
+                  || true)"
+          echo "Release probe: GET /releases/tags/${tag} -> HTTP ${code:-<none>}"
+
+          if [ "$code" = "404" ]; then
+            echo "No release behind ${tag} — it is an orphan, so no downstream pin can break."
+            git push --force origin "${GITHUB_SHA}:refs/tags/${tag}"
+            echo "Moved ${tag} -> ${GITHUB_SHA}."
+          elif [ "$code" = "200" ]; then
+            # A release EXISTS — but "exists" is not "was published". If its
+            # asset set is incomplete, this run is a repair run: the version
+            # gate only let us get here because those installers are missing.
+            # Leaving the tag on the old commit would then hand users a release
+            # whose binaries come from GITHUB_SHA while its Source-code archives
+            # and notes come from ${remote_sha} — the very mismatch this step
+            # exists to prevent, arriving through the repair path instead of the
+            # orphan path. So a partial release's tag is treated like an orphan's.
+            #
+            # This branch became REACHABLE when the version gate learned to
+            # rebuild partial releases; before that, a 200 always meant "done"
+            # and no repair run could reach this step.
+            #
+            # Exit codes: 0 complete, 1 incomplete, 2 undetermined. Only a
+            # definite 1 moves the tag — an unreadable asset list is treated
+            # exactly like an unreadable probe below, because force-moving a tag
+            # that turns out to be published is destructive and hard to undo.
+            set +e
+            python3 scripts/release_assets.py --release-json "$body" --require-checksums
+            assets_rc=$?
+            set -e
+            if [ "$assets_rc" -eq 1 ]; then
+              echo "${tag} has a release, but it is INCOMPLETE (missing assets above) — this run is repairing it, so the tag must follow the commit that produced the new assets."
+              git push --force origin "${GITHUB_SHA}:refs/tags/${tag}"
+              echo "Moved ${tag} -> ${GITHUB_SHA}."
+            elif [ "$assets_rc" -eq 0 ]; then
+              echo "::notice::${tag} already has a COMPLETE Release — leaving the published tag where it is; the existing release will be updated in place."
+            else
+              echo "::warning::${tag} has a Release but its asset list could not be read, so it cannot be shown to be incomplete. NOT moving a possibly-published tag. The release may be cut from ${remote_sha} instead of ${GITHUB_SHA} — verify the Source code archives before announcing it."
+            fi
+          else
+            echo "::warning::Could not confirm whether ${tag} has a Release (HTTP ${code:-<none>}). NOT moving a possibly-published tag. The release may be cut from ${remote_sha} instead of ${GITHUB_SHA} — verify the Source code archives before announcing it."
+          fi
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           name: Tofu v${{ needs.version.outputs.version }}
+          # The release is cut from the VERSION file on main, so it must carry
+          # its own tag: this run was triggered by a branch push, not by a tag.
+          # `target_commitish` is only honoured when the tag does NOT already
+          # exist ("Unused if the Git tag already exists" — GitHub REST docs),
+          # which is why the step above has to move an orphan tag first. Both
+          # entry paths then converge on one published release per version,
+          # anchored to the commit that produced the binaries: `--bump` pushes
+          # the tag itself, a plain `--push` lets this step create it.
+          tag_name: v${{ needs.version.outputs.version }}
+          target_commitish: ${{ github.sha }}
           # Publish immediately. This was draft:true, which required a manual
           # "Publish release" click in the GitHub UI that never happened —
           # v0.12/v0.13/v0.14 all sat as invisible drafts while users at the

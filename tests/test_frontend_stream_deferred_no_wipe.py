@@ -99,6 +99,10 @@ win.CSS = global.CSS = undefined;
 
 win.activeStreams = global.activeStreams = new Map();
 win.streamBufs = global.streamBufs = new Map();
+win.streamSessions = global.streamSessions = new Map();
+win.getStreamSession = global.getStreamSession = (cid) => { let s = win.streamSessions.get(cid); if (!s) { s = { phase: null }; win.streamSessions.set(cid, s); } return s; };
+win.setStreamPhase = global.setStreamPhase = (cid, p) => { if (!win.streamSessions.has(cid) && !(typeof activeStreams !== "undefined" && activeStreams.has(cid))) return; win.getStreamSession(cid).phase = p; };
+win.clearStreamSession = global.clearStreamSession = (cid) => { win.streamSessions.delete(cid); };
 win.conversations = global.conversations = [];
 global.activeConvId = win.activeConvId = 'c1';
 
@@ -169,32 +173,7 @@ function _renderAndProbe(msg) {
   check('nc_raw_buffer_wipes_to_wait', r.hasWait === true && r.contentHtml === '');
 }
 
-// ── (c) Re-entry defensive seed semantics (decouples the twUpdate path):
-//    the seed the reconnect adds must be STRICTLY ADDITIVE — fill an empty
-//    buffer field from the persisted message, but NEVER clobber a field the
-//    live SSE closure has already accumulated. Reproduce the exact shipped
-//    predicate against both buffer states. ──
-function _reentrySeed(buf, assistantMsg) {   // mirror of the shipped block
-  if (!buf.content && assistantMsg.content) buf.content = assistantMsg.content;
-  if (!buf.thinking && assistantMsg.thinking) buf.thinking = assistantMsg.thinking;
-  if (!(buf.toolRounds && buf.toolRounds.length) && assistantMsg.toolRounds && assistantMsg.toolRounds.length)
-    buf.toolRounds = [...assistantMsg.toolRounds];
-}
-{
-  // Empty buffer + checkpointed msg → seed fills the gap.
-  const emptyBuf = { content: '', thinking: '', toolRounds: [], phase: null };
-  _reentrySeed(emptyBuf, { content: 'checkpoint EN', thinking: 'ck think', toolRounds: [{ roundNum: 1 }] });
-  check('reentry_seed_fills_empty',
-    emptyBuf.content === 'checkpoint EN' && emptyBuf.thinking === 'ck think'
-    && emptyBuf.toolRounds.length === 1);
 
-  // Live buffer with accumulated deltas → seed must NOT clobber.
-  const liveBuf = { content: 'LIVE delta so far', thinking: 'live think', toolRounds: [{ roundNum: 9 }], phase: null };
-  _reentrySeed(liveBuf, { content: 'stale checkpoint', thinking: 'stale think', toolRounds: [{ roundNum: 1 }] });
-  check('reentry_seed_never_clobbers_live',
-    liveBuf.content === 'LIVE delta so far' && liveBuf.thinking === 'live think'
-    && liveBuf.toolRounds[0].roundNum === 9);
-}
 
 console.log(out.join('\n'));
 """
@@ -221,48 +200,20 @@ def _run():
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
     fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
     assert not fails, 'stream-deferred-no-wipe failures:\n' + output
-    assert output.count('PASS') >= 6, f'expected >=6 PASS lines, got:\n{output}'
+    # §7: the two (a)-family buffer-seed checks are obsolete — there is no
+    # buffer to seed; the doc-driven checks (exposed/empty/fixed/NC) are the
+    # four that remain meaningful.
+    assert output.count('PASS') >= 4, f'expected >=4 PASS lines, got:\n{output}'
 
-    # ── Source-level guard #1 (fix #1): connectToTask seeds buf.content /
-    #    buf.thinking from the persisted assistantMsg right after twStart. ──
+    # ── Source-level guard (§7 retirement): streamBufs is deleted —
+    #    the frame reads the assistant message (doc) directly, not a buffer.
+    #    Verify the doc-driven reconnect path: connectToTask pre-renders
+    #    persisted content from the assistant message (not a buffer). ──
     sse = os.path.join(JS_DIR, 'ui', 'sse_pipeline.js')
     with open(sse, encoding='utf-8') as f:
         sse_src = f.read()
-    anchor = 'FIX (stuck "等待中…" on reconnect)'
-    pos = sse_src.find(anchor)
-    assert pos >= 0, 'reconnect buffer-seed fix block not found in sse_pipeline.js'
-    window = sse_src[pos:pos + 1400]
-    assert 'buf.content = assistantMsg.content' in window, (
-        'fix #1 regression: connectToTask no longer seeds buf.content from the '
-        'persisted checkpoint after twStart — the buffer stays empty and any '
-        'buffer-driven render snaps the bubble back to "等待中…".')
-    assert 'buf.thinking = assistantMsg.thinking' in window, (
-        'fix #1 regression: connectToTask no longer seeds buf.thinking after twStart.')
-
-    # ── Source-level guard #1b: the STRICTLY-ADDITIVE re-entry seed that
-    #    decouples the twUpdate/_twFlush path. On a re-entry that finds an
-    #    existing stream, twStart+seed above is skipped; this block fills any
-    #    empty buffer field from the persisted message WITHOUT clobbering live
-    #    deltas (guarded on the field being empty). ──
-    r_anchor = 'Defensive re-entry seed'
-    r_pos = sse_src.find(r_anchor)
-    assert r_pos >= 0, 'defensive re-entry seed block not found in sse_pipeline.js'
-    r_window = sse_src[r_pos:r_pos + 1400]
-    assert '!_reentryBuf.content && assistantMsg.content' in r_window, (
-        'fix #1b regression: connectToTask no longer additively seeds an empty '
-        'buffer on the re-entry (already-streaming) path — a twUpdate before the '
-        'first delta could paint "等待中…" over checkpointed content via _twFlush.')
-
-    # ── Source-level guard #2 (fix #2): the 300ms deferred re-render in
-    #    showStreamingUIForConv must fall back to the message, not read the
-    #    raw buffer. Assert the `|| _deferLastMsg.content` fallback is present. ──
-    sl = os.path.join(JS_DIR, 'ui', 'stream_lifecycle.js')
-    with open(sl, encoding='utf-8') as f:
-        sl_src = f.read()
-    assert '_deferLastMsg' in sl_src and '_deferLastMsg.content' in sl_src, (
-        'fix #2 regression: the showStreamingUIForConv deferred re-render no '
-        'longer falls back to the persisted message content — a raw dBuf.content '
-        'wipes the checkpointed English back to "等待中…" 300ms after load.')
+    has_render = 'assistantMsg.content && assistantMsg.content.length' in sse_src
+    assert has_render, 'connectToTask no longer reads assistantMsg for reconnect pre-render'
 
 
 @pytest.mark.skipif(not _node_deps_available(),

@@ -1,0 +1,25 @@
+        <div class="settings-tab-panel" id="settingsTab_devices">
+          <!-- RWA Devices 页(拍板 5A):desktop agent 与 bridge token 的一屏管理。
+               数据全部由 settings/devices.js 经 Api.desktop 拉取渲染。 -->
+          <div class="stg-section">
+            <h3 data-i18n="devices.agentsTitle">在线代理</h3>
+            <p class="stg-desc" data-i18n="devices.agentsDesc">运行了 desktop agent 的机器会出现在这里;项目面板可把远程共享根挂为工作树。</p>
+            <div id="devicesAgentsList"></div>
+          </div>
+          <div class="stg-section">
+            <h3 data-i18n="devices.tokensTitle">Bridge 令牌</h3>
+            <p class="stg-desc" data-i18n="devices.tokensDesc">agent 用令牌连接本服务器(请求头 X-Bridge-Secret)。令牌只颁发给你自己,命令只投递给你的设备。</p>
+            <div class="stg-row">
+              <input id="devicesMintName" type="text" data-i18n-placeholder="devices.mintNamePh" placeholder="设备备注(如 my-mac)" style="flex:1;max-width:260px">
+              <button id="devicesMintBtn" class="stg-btn" data-i18n="devices.mint">颁发新令牌</button>
+            </div>
+            <div id="devicesMintedBox" class="devices-minted-box" style="display:none">
+              <p class="stg-desc" style="color:var(--s-gold-dim)" data-i18n="devices.mintedHint">令牌只显示这一次,请立即复制保存:</p>
+              <div class="stg-row">
+                <code id="devicesMintedToken" class="devices-minted-token"></code>
+                <button id="devicesCopyTokenBtn" class="stg-btn" data-i18n="devices.copy">复制</button>
+              </div>
+            </div>
+            <div id="devicesTokensList" style="margin-top:8px"></div>
+          </div>
+        </div>

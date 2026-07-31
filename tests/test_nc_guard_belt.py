@@ -44,7 +44,21 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
 
 _PRISTINE = "CANONICAL = 1\ndef load_bearing():\n    return 'real'\n"
-_POISONED = "CANONICAL = 1\ndef __NC_POISONED_load_bearing():\n    return 'neutered'\n"
+# ⚠️ The poisoned variant MUST carry a real ``NC-WORD`` marker.
+# ``restore_drifted_nc_sources`` heals ONLY marker-bearing drift (the marker
+# gate added in 0910e72e after the "phantom reverter" incident, where the belt
+# silently un-wrote a legitimate mid-run commit). This fixture previously used
+# a bare ``__NC_POISONED_`` prefix, which the gate's ``\bNC-[A-Z0-9]…`` pattern
+# does NOT match — no word boundary before ``NC`` inside ``__NC_``, and no
+# hyphen. So the belt correctly declined to heal it and the test went red while
+# the belt was working exactly as designed: the fixture, not the belt, had
+# fallen out of date with the contract.
+#
+# Using the SAME marker convention as the real NC writers (``# NC-STORM``,
+# ``pass  # NC-OBSERVE``, ``'nc-deny-forced'``) is what makes this test
+# exercise the production heal path rather than a shape nothing ever produces.
+_POISONED = ("CANONICAL = 1\ndef load_bearing():\n"
+             "    return 'neutered'  # NC-BELT-SIM\n")
 
 
 @contextlib.contextmanager
@@ -87,9 +101,17 @@ def test_all_guarded_sources_exist():
 
 def test_persist_and_conversation_are_guarded():
     """Regression pin: the sources whose on-disk NCs poisoned the tree (the
-    audit gap) must stay in the guarded set."""
+    audit gap) must stay in the guarded set.
+
+    ``_persist`` is named by its POST-PACKAGING path. The compaction
+    ``_persist.py`` module became a ``_persist/`` package, and the NC actually
+    writes ``_persist/_splitters.py``; this assertion kept naming the old
+    single-file path and so went red while the belt itself was fine and
+    conftest already tracked the right file. A pin that names a path nobody
+    writes any more tests the layout of a past refactor, not the protection.
+    """
     import tests.conftest as ct
-    for rel in ('lib/tasks_pkg/compaction/_persist.py',
+    for rel in ('lib/tasks_pkg/compaction/_persist/_splitters.py',
                 'lib/tools/conversation.py',
                 'lib/conversations/project_brain_influence.py'):
         assert rel in ct._NC_GUARDED_SOURCES, \

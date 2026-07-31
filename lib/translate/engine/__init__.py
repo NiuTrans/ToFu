@@ -23,6 +23,9 @@ depends on ``_engine`` within the package.
 # the module did ``from lib import translate_cache`` at top level (tests
 # monkeypatch ``engine.translate_cache.get`` / ``.put``).
 from lib import translate_cache  # noqa: F401
+# Same parity for the refusal-marker store (tests monkeypatch
+# ``engine.translate_refusal.get`` / ``.put``).
+from lib import translate_refusal  # noqa: F401
 from lib.log import get_logger
 
 # Sentence-completeness helpers (pure primitives)
@@ -33,6 +36,7 @@ from ._split import (
 
 # Engine proper: routing + retry loop + entrypoints
 from ._engine import (
+    TranslationContentRefused,
     _build_trace,
     _translate_freetext,
     _translate_one_chunk,
@@ -49,6 +53,9 @@ __all__ = [
     '_ends_midsentence',
     # provenance helper
     '_build_trace',
+    # typed content-guard refusal (REST surface maps it to 502 + envelope)
+    'TranslationContentRefused',
     # module ref re-exported for parity with the original top-level import
     'translate_cache',
+    'translate_refusal',
 ]

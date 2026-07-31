@@ -227,7 +227,7 @@ function mkVu() {
   const delBtn = frag.querySelector('.msg-delete-btn');
   check('a_delete_btn_present', !!delBtn);
   check('a_delete_btn_calls_deleteTurn',
-        delBtn && (delBtn.getAttribute('onclick') || '').indexOf('deleteTurn(3)') !== -1);
+        delBtn && (delBtn.getAttribute('onclick') || '').indexOf('deleteTurn(_msgElIndex(this))') !== -1);
   // The action bar is a direct child of message-content (hover-reachable),
   // NOT inside any collapsed <details>.
   check('a_delete_not_in_details',
@@ -242,7 +242,7 @@ function mkVu() {
   check('a3_vu_has_delete', !!frag.querySelector('.msg-delete-btn'));
   // Edit has no dedicated class; detect by its onclick handler. Edit is now
   // available on every lane (edit-in-place), so the VU row DOES carry it.
-  check('a3_vu_has_edit', html.indexOf('startEditMessage(3)') !== -1);
+  check('a3_vu_has_edit', html.indexOf('startEditMessage(_msgElIndex(this))') !== -1);
   check('a3_vu_has_regen', !!frag.querySelector('.msg-regen-btn'));
   // A VU is never the last assistant → no Continue; and Export is assistant-only.
   check('a3_vu_no_continue', !frag.querySelector('.msg-continue-btn'));
@@ -255,7 +255,7 @@ function mkVu() {
   const html = renderMessage(humanUser, 4);
   const frag = win.document.createElement('div');
   frag.innerHTML = html;
-  check('a4_human_has_edit', html.indexOf('startEditMessage(4)') !== -1);
+  check('a4_human_has_edit', html.indexOf('startEditMessage(_msgElIndex(this))') !== -1);
   check('a4_human_has_regen', !!frag.querySelector('.msg-regen-btn'));
   check('a4_human_has_copy', !!frag.querySelector('.copy-msg-btn'));
   check('a4_human_has_delete', !!frag.querySelector('.msg-delete-btn'));
@@ -267,8 +267,8 @@ function mkVu() {
   const peerUser = { role: 'user', _msgId: 'p1', content: 'note from peer',
                      _peerMessage: true, _fromConv: 'abcd1234' };
   const html = renderMessage(peerUser, 5);
-  check('a5_peer_has_edit', html.indexOf('startEditMessage(5)') !== -1);
-  check('a5_peer_has_regen', html.indexOf('regenerateFromUser(5)') !== -1);
+  check('a5_peer_has_edit', html.indexOf('startEditMessage(_msgElIndex(this))') !== -1);
+  check('a5_peer_has_regen', html.indexOf('regenerateFromUser(_msgElIndex(this))') !== -1);
 }
 
 // ══ (b) _applyAutopilotRunFolds no longer FOLDS a concluded run ══

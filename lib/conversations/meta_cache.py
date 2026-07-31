@@ -145,6 +145,96 @@ def invalidate_meta_cache(user_id: int = DEFAULT_USER_ID):
             logger.debug('[meta_cache] cross-replica invalidation publish failed: %s', e)
 
 
+# ── pt_conv_state_ssot P1 / pt_781ae072d6ee4e84: monotonic rev tuple ──
+#
+# runningTaskIdsRev on every notify frame is a two-element ``[ns, replica_id]``
+# JSON array so the client can idempotent-gate with a plain lex compare and
+# never accept a reordered stale frame:
+#
+#   * ns          — BOOT-EPOCH-ANCHORED nanoseconds: a wall-clock anchor
+#                   sampled EXACTLY ONCE at import, advanced only by a
+#                   ``time.monotonic_ns()`` delta. See _BOOT_EPOCH_NS below.
+#   * replica_id  — reuses the ``TOFU_REPLICA_ID or pid`` convention already
+#                   in ``lib.agent_core.push.PushHub._replica_id`` so we do
+#                   NOT introduce a second replica-identity source. Two
+#                   frames from DIFFERENT replicas are ordered by (ns, rid)
+#                   lex — an arbitrary but stable tiebreak.
+#
+# ⚠️  WHY NOT RAW ``time.monotonic_ns()`` (the original P1 choice, pt_781ae072)
+# ----------------------------------------------------------------------------
+# monotonic_ns counts from THIS PROCESS's start. The client compares revs with
+# ``>``, so a process-relative value is only meaningful against another value
+# from the SAME process. It produced three shipped failures, mirror images of
+# one another (all reproduced against the real reducer):
+#
+#   * RESTART → permanent FALSE-BUSY. monotonic_ns resets to ~0, so every
+#     post-restart frame compares SMALLER than what connected tabs already
+#     hold and is dropped forever. The client keeps the DEAD pre-restart task
+#     id: the Stop button never clears and click-open attaches to a 404.
+#     Measured on this host pre-fix: 3.93e16 (~455 days of uptime) — a fresh
+#     process starting at ~1e9 loses by seven orders of magnitude.
+#   * MULTI-REPLICA → starvation. A replica booted 10 days ago mints ~8.6e14;
+#     one booted an hour ago ~3.6e12, so the younger replica's frames can
+#     never land however recent they are.
+#   * Combined with the client's old wall-clock CLEAR stamp (~1.78e18) →
+#     permanent FALSE-IDLE: a conv that went busy then idle across a
+#     reconnect became deaf on BOTH transports until F5.
+#
+# The anchor fixes all three at once because it puts every rev the fleet mints
+# — across processes and hosts — into ONE comparable domain: wall time.
+#
+# REJECTED ALTERNATIVE: a persistent per-conv counter in the DB. Correct, but
+# it puts a write+read on the hot path of every notify frame (measured 135 us
+# median / 315 us p95 vs 0.19 us for the arithmetic below — ~720x) and makes
+# the DB a hard dependency of the one signal that most needs to survive
+# degraded conditions. This scheme needs no storage at all.
+
+#: Wall-clock anchor for this process, sampled ONCE at import.
+#:
+#: ``time.time_ns() - time.monotonic_ns()`` is this process's estimate of the
+#: wall-clock instant its monotonic clock read zero. Adding a later
+#: ``monotonic_ns()`` to it therefore yields "wall time now" WITHOUT re-reading
+#: the wall clock — which is what makes the result simultaneously:
+#:
+#:   * strictly increasing within the process (only the monotonic delta moves);
+#:   * immune to a wall-clock STEP during the process (NTP slew/rewind cannot
+#:     move an anchor that is never re-read) — the property raw monotonic_ns
+#:     was chosen for, and which is preserved here;
+#:   * comparable across restarts and across replicas (every process anchors
+#:     to the same wall-clock timeline, to within NTP skew).
+#:
+#: Module-level and rebindable by name so tests can simulate a restart / a
+#: second replica by re-anchoring; production never writes it.
+_BOOT_EPOCH_NS = time.time_ns() - time.monotonic_ns()
+
+
+def _replica_id() -> str:
+    """Resolve THIS replica's stable id — same rule PushHub uses."""
+    rid = os.environ.get('TOFU_REPLICA_ID')
+    if rid:
+        return rid
+    return str(os.getpid())
+
+
+def _running_task_ids_rev() -> list:
+    """Return a fresh ``[boot_anchored_ns, replica_id_str]`` tuple.
+
+    THE SINGLE MINT for every ``runningTaskIdsRev`` / frame-level ``rev`` on
+    the wire (notify frames, the push connect snapshot, and the poll
+    projection all call this). Keeping one mint is what makes the domain
+    guarantee checkable in one place — see
+    ``tests/test_conv_state_rev_clock_domain.py``, which asserts the returned
+    ns is within seconds of ``time.time_ns()`` so a future edit cannot
+    silently reintroduce a process-relative clock.
+
+    Each call yields a strictly-later ns than the previous call in the same
+    process (guaranteed by ``time.monotonic_ns()``; measured 0 non-increasing
+    pairs in 200k consecutive mints at 1 ns clock resolution). Two callers on
+    different replicas break ties by replica_id lex compare.
+    """
+    return [_BOOT_EPOCH_NS + time.monotonic_ns(), _replica_id()]
+
+
 def notify_conv_changed(conv_id, *, rev=None, deleted: bool = False,
                         user_id: int = DEFAULT_USER_ID) -> None:
     """Invalidate the sidebar cache AND push a real-time change signal to clients.
@@ -184,6 +274,39 @@ def notify_conv_changed(conv_id, *, rev=None, deleted: bool = False,
                 payload['rev'] = int(rev)
             except (TypeError, ValueError):
                 logger.debug('[meta_cache] conv=%s non-int rev=%r dropped', conv_id, rev)
+        # ── pt_conv_state_ssot P1: server-authoritative busy signal ──
+        # Every notify frame carries a fresh (monotonic_ns, replica_id) tuple
+        # so the client can idempotent-gate on strictly-increasing time. The
+        # runningTaskIds list is a SNAPSHOT projection of the task registry
+        # for THIS conv (the SSOT for "who is running"), never derived from
+        # settings.activeTaskId. Deleted frames omit the list — a gone conv
+        # has no busy concept — but keep the rev tuple so the client's gate
+        # has a uniform key across conv_changed and conv_deleted.
+        payload['runningTaskIdsRev'] = _running_task_ids_rev()
+        if not deleted:
+            try:
+                from lib.tasks_pkg.manager._registry import snapshot_running_by_conv
+                # pt_ab42421158214591: pass user_id through so a mutation
+                # in user A's namespace does not surface user B's running
+                # tasks in the projection. Only scope when the caller
+                # passed a NON-DEFAULT user_id — DEFAULT_USER_ID=1
+                # (single-user personal-install today) is coerced to
+                # empty-string = unscoped, preserving the current
+                # all-registry behaviour verbatim until auth is landed
+                # and callers start passing real per-request user_ids.
+                # A caller passing a string (AuthContext.user_id shape)
+                # or any int != DEFAULT_USER_ID is treated as a real
+                # tenant scope.
+                if isinstance(user_id, int) and user_id == DEFAULT_USER_ID:
+                    _snap_scope = ''
+                else:
+                    _snap_scope = str(user_id or '')
+                snap = snapshot_running_by_conv(user_id=_snap_scope)
+            except Exception as _re:
+                logger.debug('[meta_cache] conv=%s registry snapshot failed: %s',
+                             conv_id, _re)
+                snap = {}
+            payload['runningTaskIds'] = list(snap.get(conv_id, []))
         push_event('notify', conv_id, payload)
     except Exception as e:
         logger.debug('[meta_cache] conv-changed push skipped conv=%s: %s', conv_id, e)
@@ -199,6 +322,22 @@ def refresh_meta_cache_if_stale(db, user_id: int = DEFAULT_USER_ID):
         if e['data'] is not None and (now - e['ts']) < e['ttl']:
             return e['data'], e['etag']
 
+    # Authoritative total for the sidebar "N earlier not loaded" affordance
+    # (C4). Computed ONLY here, at cache-rebuild — the 60s poll that hits the
+    # warm cache never reaches this COUNT, so it stays off the hot path. A
+    # COUNT(*) on the indexed user_id is cheap even for a huge history. Emitted
+    # BEFORE the list SELECT so the bounded LIMIT query remains the LAST DB call
+    # (the D4 bounded-scan guard inspects db.calls[-1]).
+    total_count = None
+    try:
+        _tc = db.execute(
+            'SELECT COUNT(*) AS c FROM conversations WHERE user_id=?',
+            (user_id,)
+        ).fetchone()
+        total_count = (_tc['c'] if _tc else 0) or 0
+    except Exception as _e:
+        logger.debug('[meta_cache] total-count query failed: %s', _e)
+
     limit = _sidebar_limit()
     if limit > 0:
         rows = db.execute(
@@ -213,6 +352,8 @@ def refresh_meta_cache_if_stale(db, user_id: int = DEFAULT_USER_ID):
                FROM conversations WHERE user_id=? ORDER BY updated_at DESC''',
             (user_id,)
         ).fetchall()
+    if total_count is None:
+        total_count = len(rows)
     convs = []
     for r in rows:
         settings = _safe_json(r['settings'], default=None, label='settings')
@@ -231,7 +372,21 @@ def refresh_meta_cache_if_stale(db, user_id: int = DEFAULT_USER_ID):
         e['data'] = payload
         e['etag'] = etag
         e['ts'] = time.monotonic()
+        e['total'] = total_count
     return payload, etag
 
 
-__all__ = ['invalidate_meta_cache', 'notify_conv_changed', 'refresh_meta_cache_if_stale']
+def get_cached_total(user_id: int = DEFAULT_USER_ID):
+    """Return the authoritative conversation total captured at the last cache
+    rebuild for ``user_id``, or ``None`` if the cache hasn't been populated yet.
+
+    Read-only, lock-guarded, does NOT trigger a DB query — the route reads this
+    right after ``refresh_meta_cache_if_stale`` (which populates it), so it is
+    fresh without adding any cost to the poll path."""
+    with _meta_cache_lock:
+        e = _meta_cache_by_user.get(user_id)
+        return e.get('total') if e else None
+
+
+__all__ = ['invalidate_meta_cache', 'notify_conv_changed', 'refresh_meta_cache_if_stale',
+           'get_cached_total']

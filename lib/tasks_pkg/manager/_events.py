@@ -134,41 +134,63 @@ def append_event(task, event):
     if task.get('_suppressEvents'):
         return
 
-    # ★ Durable-before-visible ordering: the persistent task_events row MUST
-    #   commit before the frame is pushed to the client, so a cold reconnect
-    #   folding the log (event_fold.fold_cold_state_text) can never be behind
-    #   the bytes the client already holds. We hand the persist to the
-    #   runtime's before_push hook (fired after seq assignment, before push).
-    #   Best-effort: a DB blip is logged, never blocks the stream.
-    def _persist_before_push(_seq):
-        from lib.tasks_pkg.event_log import append_persistent_event
-        append_persistent_event(task['id'], _seq, event)
+    # ★ Per-task wire transform (2026-07-26, VU-carrier stream contract).
+    #   A VU carrier sub-task installs ``_vu_event_transform`` so its OWN
+    #   stream / push channel / persisted event log all carry the VU
+    #   envelope (wrapped ``autopilot_vu_event`` frames + verbatim
+    #   lifecycle frames), never the raw inner agent turn — the client that
+    #   hops onto the carrier stream after the parent's done must see the
+    #   SAME contract the parent stream carried. The transform returns the
+    #   frame to emit, or ``None`` to drop it from the stream entirely.
+    #   Facade bookkeeping below (phase tracking / liveness / done-flush)
+    #   deliberately keeps reading the RAW event, so a wrapped ``phase``
+    #   still updates task['phase'] for the poll fallback.
+    _wire = event
+    _xform = task.get('_vu_event_transform')
+    if _xform is not None:
+        try:
+            _wire = _xform(task, event)
+        except Exception as e:
+            logger.warning('[Task] _vu_event_transform failed task=%s: %s — '
+                           'emitting raw frame', task['id'][:8], e)
+            _wire = event
 
-    seq = _chat_runtime.append_event(task['id'], event,
-                                     before_push=_persist_before_push)
-    if seq is None:
-        # Task not in runtime (registered via legacy direct dict insert in
-        # tests, etc.) — fall back to direct append for backward compat.
-        # We MUST mint a seq ourselves before falling through to event_log
-        # persistence below; otherwise append_persistent_event would receive
-        # ``event_id=None`` and refuse the row, leaving cold replay with a
-        # hole that looks (to the user) like the message disappeared.
-        with task['events_lock']:
-            seq = len(task['events'])
-            event['seq'] = seq
-            task['events'].append(event)
-        # Persist BEFORE the fallback push too (same durable-before-visible
-        # ordering as the runtime path above).
-        try:
-            _persist_before_push(seq)
-        except Exception as e:
-            logger.debug('[Manager] legacy-path persist failed (non-fatal): %s', e)
-        try:
-            from lib.push import push_event
-            push_event('chat', task['id'], event)
-        except Exception as e:
-            logger.warning('[Task] push_event fallback failed task=%s: %s',
-                           task['id'][:8], e)
+    if _wire is not None:
+        # ★ Durable-before-visible ordering: the persistent task_events row MUST
+        #   commit before the frame is pushed to the client, so a cold reconnect
+        #   folding the log (event_fold.fold_cold_state_text) can never be behind
+        #   the bytes the client already holds. We hand the persist to the
+        #   runtime's before_push hook (fired after seq assignment, before push).
+        #   Best-effort: a DB blip is logged, never blocks the stream.
+        def _persist_before_push(_seq):
+            from lib.tasks_pkg.event_log import append_persistent_event
+            append_persistent_event(task['id'], _seq, _wire)
+
+        seq = _chat_runtime.append_event(task['id'], _wire,
+                                         before_push=_persist_before_push)
+        if seq is None:
+            # Task not in runtime (registered via legacy direct dict insert in
+            # tests, etc.) — fall back to direct append for backward compat.
+            # We MUST mint a seq ourselves before falling through to event_log
+            # persistence below; otherwise append_persistent_event would receive
+            # ``event_id=None`` and refuse the row, leaving cold replay with a
+            # hole that looks (to the user) like the message disappeared.
+            with task['events_lock']:
+                seq = len(task['events'])
+                _wire['seq'] = seq
+                task['events'].append(_wire)
+            # Persist BEFORE the fallback push too (same durable-before-visible
+            # ordering as the runtime path above).
+            try:
+                _persist_before_push(seq)
+            except Exception as e:
+                logger.debug('[Manager] legacy-path persist failed (non-fatal): %s', e)
+            try:
+                from lib.push import push_event
+                push_event('chat', task['id'], _wire)
+            except Exception as e:
+                logger.warning('[Task] push_event fallback failed task=%s: %s',
+                               task['id'][:8], e)
 
     # ★ Liveness clock #1 (see reap_stuck_running_tasks): every emitted event —
     #   delta / keepalive / retry / waiting_model phase — bumps _t_last_event.
@@ -182,6 +204,13 @@ def append_event(task, event):
     # ★ Track phase in task for polling fallback
     if event.get('type') == 'phase':
         p = {'phase': event['phase'], 'detail': event.get('detail', '')}
+        # ★ i18n plumb: forward the stable detailKey (+ optional detailArgs) so
+        #   the poll-fallback consumer localizes the label the same way the
+        #   live SSE consumer does. Empty/absent keys fall back to `detail`.
+        if event.get('detailKey'):
+            p['detailKey'] = event['detailKey']
+        if event.get('detailArgs'):
+            p['detailArgs'] = event['detailArgs']
         if event.get('toolContext'): p['toolContext'] = event['toolContext']
         if event.get('tools'): p['tools'] = event['tools']
         # The PHASE wire event now carries the unified canonical `roundNum`

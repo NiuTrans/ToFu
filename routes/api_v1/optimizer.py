@@ -20,7 +20,7 @@ import json
 from flask import Blueprint, request
 
 from lib.api_response import (
-    api_bad_request, api_internal_error, api_not_found, api_ok,
+    api_bad_request, api_internal_error, api_not_found, api_ok, safe_route,
 )
 from lib.log import audit_log, get_logger
 from lib.openapi import api_meta
@@ -70,21 +70,22 @@ def _decode_json_columns(row, *cols):
     ),
     tags=['optimizer'],
 )
+@safe_route
 def list_proposals():
-    """List recent optimizer proposals (filterable by status)."""
+    """List recent optimizer proposals (filterable by status).
+
+    Wrapped in @safe_route: any uncaught exception (e.g. DB blip in
+    _storage.list_proposals) is converted to a 500 envelope with the
+    function qualname as source, replacing the ad-hoc try/except that
+    duplicated api_internal_error's own logging.
+    """
     status = (request.args.get('status') or '').strip() or None
     try:
         limit = max(1, min(500, int(request.args.get('limit') or 50)))
     except (TypeError, ValueError) as e:
         logger.debug('[Optimizer.v1] bad limit arg, defaulting to 50: %s', e)
         limit = 50
-    try:
-        rows = _storage.list_proposals(status=status, limit=limit)
-    except Exception as e:
-        logger.error('[Optimizer.v1] list_proposals failed: %s', e,
-                     exc_info=True)
-        return api_internal_error(e, context='list_proposals',
-                                  source='api_v1.optimizer.list')
+    rows = _storage.list_proposals(status=status, limit=limit)
     for r in rows:
         _decode_json_columns(r, 'action_args', 'evidence')
     return api_ok({'proposals': rows})
@@ -98,15 +99,17 @@ def list_proposals():
     description='Returns the proposal plus its action log entry (if any).',
     tags=['optimizer'],
 )
+@safe_route
 def get_proposal(proposal_id):
-    """Return one proposal plus its action-log row, or 404."""
-    try:
-        prop = _storage.get_proposal(proposal_id)
-    except Exception as e:
-        logger.error('[Optimizer.v1] get_proposal failed: %s', e,
-                     exc_info=True)
-        return api_internal_error(e, context='get_proposal',
-                                  source='api_v1.optimizer.get')
+    """Return one proposal plus its action-log row, or 404.
+
+    @safe_route wraps the primary proposal lookup — any DB failure
+    surfaces as a 500 with the correct source. The action_log lookup
+    below keeps its own local try/except because it is DESIGNED to soft-
+    fail (warning + None fallback + return the proposal anyway); that
+    non-fatal path cannot be expressed via @safe_route.
+    """
+    prop = _storage.get_proposal(proposal_id)
     if not prop:
         return api_not_found('Proposal not found')
 
@@ -289,8 +292,14 @@ def revert_proposal(proposal_id):
                               'minimum': 1, 'maximum': 336,
                               'default': 24}}}}}},
 )
+@safe_route
 def run_now():
-    """Run the optimizer pipeline (analyser → proposer → applier) now (admin scope)."""
+    """Run the optimizer pipeline (analyser → proposer → applier) now (admin scope).
+
+    @safe_route: a crash in _run_once (analyser/proposer/applier) becomes
+    a 500 envelope; the ad-hoc try/except replicated api_internal_error's
+    logging so the decorator is a pure simplification.
+    """
     blocked = _disabled_response()
     if blocked is not None:
         return blocked
@@ -300,12 +309,7 @@ def run_now():
     window_hours = optional_int(body, 'window_hours', default=24,
                                  min=1, max=24 * 14)
 
-    try:
-        summary = _run_once(dry_run=dry_run, window_hours=window_hours)
-    except Exception as e:
-        logger.error('[Optimizer.v1] run_once crashed: %s', e, exc_info=True)
-        return api_internal_error(e, context='run_now',
-                                  source='api_v1.optimizer.run_now')
+    summary = _run_once(dry_run=dry_run, window_hours=window_hours)
     return api_ok({'summary': summary})
 
 

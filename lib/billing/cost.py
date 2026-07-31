@@ -106,13 +106,21 @@ def compute_request_cost(
     if margin < 0:
         margin = get_default_margin()
 
-    usage = {
-        'input_tokens': int(input_tokens or 0),
-        'output_tokens': int(output_tokens or 0),
-        'cache_read_input_tokens': int(cache_read_tokens or 0),
-        'cache_creation_input_tokens': int(cache_write_tokens or 0),
-        'reasoning_tokens': int(reasoning_tokens or 0),
-    }
+    # ★ Spell the scalars so the cost engine reads them under the RIGHT
+    #   convention. Hardcoding the Anthropic key names here used to force an
+    #   OpenAI TOTAL to be read as an uncached RESIDUAL, so the cache was
+    #   added on top of a figure that already contained it and the wallet
+    #   over-charged (gpt-4o 10000 total / 6000 cached billed 10000 uncached
+    #   instead of 4000 — 52500µ vs the displayed 37500µ). synthesize_usage
+    #   picks the spelling that preserves the scalars' meaning.
+    from lib.cost import synthesize_usage
+    usage = synthesize_usage(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cache_read_tokens=cache_read_tokens,
+        cache_write_tokens=cache_write_tokens,
+        reasoning_tokens=reasoning_tokens,
+    )
     cc = compute_cost(usage, model_id=model or '', provider_id=provider_id)
 
     if not cc:

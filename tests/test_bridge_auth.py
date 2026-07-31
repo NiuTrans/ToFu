@@ -1,15 +1,24 @@
 """Bridge auth + CORS tests for routes/browser.py and routes/desktop.py.
 
 Covers:
-  * When TOFU_BRIDGE_SECRET is unset, bridge endpoints behave as before
-    (200/204 on poll/commands/result/desktop_poll).
-  * When set, those endpoints return 401 without the matching header,
-    200 with it. Comparison is timing-safe (we exercise both wrong
-    and right values).
+  * Bridge endpoints require a CREDENTIAL, always — even with
+    TOFU_BRIDGE_SECRET unset, and regardless of how the peer address looks
+    (B0, docs/UNIFIED_DEVICE_BRIDGE_DESIGN.md §3.4). A loopback-shaped peer
+    is NOT a credential: under a same-host reverse proxy every public
+    request presents as 127.0.0.1.
+  * With the secret set, those endpoints return 401 without the matching
+    header, 200 with it. Comparison is timing-safe (both wrong and right
+    values are exercised).
+  * OPTIONS preflight is never gated (CORS strips credentials by spec).
   * Operator-facing endpoints (/api/v1/browser/status, /api/v1/browser/clients,
-    /api/v1/browser/test, /api/browser/download, /api/v1/desktop/status) are
-    NEVER gated — they're called from the same-origin frontend.
+    /api/v1/browser/test, /api/browser/download, /api/v1/desktop/status) never
+    see the bridge gate — they're called from the same-origin frontend.
   * /api/browser/* responses no longer carry CORS wildcard headers.
+
+⚠️ Bridge tests MUST pass ``scope_base={'client': (ip, port)}`` explicitly.
+The Quart in-process client otherwise reports the peer as ``'<local>'``,
+which counts as loopback and grants the open-mode exemption — any
+"no credential → 200" assertion without scope_base is a FALSE GREEN.
 
 Run:  pytest tests/test_bridge_auth.py -m api -v
 """
@@ -35,34 +44,71 @@ def _set_secret(monkeypatch, value: str | None):
 
 
 # ═══════════════════════════════════════════════════════════
-#  Default behaviour: unset env → no enforcement
+#  Default behaviour: NO credential → rejected, at ANY address
 # ═══════════════════════════════════════════════════════════
 
 @pytest.mark.api
-class TestBridgeAuthDisabledByDefault:
-    """When TOFU_BRIDGE_SECRET is unset, every bridge endpoint works without
-    the header (current LAN-only default). Regression guard."""
+class TestBridgeRequiresCredentialByDefault:
+    """Bridge endpoints require a credential even when TOFU_BRIDGE_SECRET
+    is unset — B0 (docs/UNIFIED_DEVICE_BRIDGE_DESIGN.md §3.4).
 
-    def test_browser_poll_no_header(self, flask_client, monkeypatch):
-        _set_secret(monkeypatch, None)
-        resp = flask_client.post('/api/browser/poll', json={})
-        assert resp.status_code == 200
+    This class REPLACES the former ``TestBridgeAuthDisabledByDefault``,
+    which asserted the opposite ("unset secret → 200"). That contract was
+    retired deliberately, for two measured reasons:
 
-    def test_browser_commands_no_header(self, flask_client, monkeypatch):
-        _set_secret(monkeypatch, None)
-        resp = flask_client.get('/api/browser/commands')
-        assert resp.status_code == 200
+      1. A bridge command can read the entire cookie jar, attach the
+         DevTools debugger, write files and run shell commands. Serving one
+         to an unauthenticated caller is a session-takeover primitive, so
+         "open by default" was never a safe default.
+      2. Those tests only passed because they omitted ``scope_base``: the
+         Quart in-process client reports the peer as ``'<local>'``, which
+         ``_remote_is_loopback()`` treats as loopback, handing the request
+         the open-mode synthetic-admin exemption. They therefore never
+         exercised a remote caller at all — a false green.
 
-    def test_browser_result_no_header(self, flask_client, monkeypatch):
-        _set_secret(monkeypatch, None)
-        # No id → 400 (not 401) — proves auth was skipped.
-        resp = flask_client.post('/api/browser/result', json={})
-        assert resp.status_code == 400
+    ⚠️ Every test here passes ``scope_base`` EXPLICITLY. Omitting it silently
+    re-enters the exemption path and makes these assertions meaningless.
+    """
 
-    def test_desktop_poll_no_header(self, flask_client, monkeypatch):
+    LOOPBACK = {'client': ('127.0.0.1', 5555)}
+    PUBLIC = {'client': ('203.0.113.7', 5555)}
+
+    def test_browser_poll_rejected_without_credential(self, flask_client, monkeypatch):
         _set_secret(monkeypatch, None)
-        resp = flask_client.post('/api/desktop/poll', json={})
-        assert resp.status_code == 200
+        resp = flask_client.post('/api/browser/poll', json={},
+                                 scope_base=self.PUBLIC)
+        assert resp.status_code == 401
+
+    def test_browser_poll_rejected_even_from_loopback_shaped_peer(
+            self, flask_client, monkeypatch):
+        """A loopback-LOOKING peer earns nothing without a credential.
+
+        Under a same-host reverse proxy (nginx/ngrok/cloudflared → 127.0.0.1,
+        the standard tunnel shape) this is exactly what a public attacker's
+        request looks like, and ProxyFix is not installed so the server
+        cannot tell them apart (pt_30d400a167df4440).
+        """
+        _set_secret(monkeypatch, None)
+        resp = flask_client.post('/api/browser/poll', json={},
+                                 scope_base=self.LOOPBACK)
+        assert resp.status_code == 401
+
+    def test_browser_commands_rejected_without_credential(self, flask_client, monkeypatch):
+        _set_secret(monkeypatch, None)
+        resp = flask_client.get('/api/browser/commands', scope_base=self.PUBLIC)
+        assert resp.status_code == 401
+
+    def test_browser_result_rejected_without_credential(self, flask_client, monkeypatch):
+        _set_secret(monkeypatch, None)
+        resp = flask_client.post('/api/browser/result', json={},
+                                 scope_base=self.PUBLIC)
+        assert resp.status_code == 401
+
+    def test_desktop_poll_rejected_without_credential(self, flask_client, monkeypatch):
+        _set_secret(monkeypatch, None)
+        resp = flask_client.post('/api/desktop/poll', json={},
+                                 scope_base=self.PUBLIC)
+        assert resp.status_code == 401
 
 
 # ═══════════════════════════════════════════════════════════

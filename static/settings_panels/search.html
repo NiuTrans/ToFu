@@ -55,4 +55,9 @@
           <div class="settings-section-title" data-i18n="settings.authSources">需要登录的来源</div>
           <p class="settings-desc" data-i18n="settings.authSourcesDesc">小红书等需要登录的站点。在你自己的浏览器中登录后粘贴 Cookie 即可连接；之后搜索与抓取链接将使用该会话读取内容。Cookie 仅保存在本地服务器，不会上传。</p>
           <div id="authSourcesList" class="auth-sources-list"></div>
+
+          <div class="settings-divider"></div>
+          <div class="settings-section-title" data-i18n="settings.privateHosts">内网主机放行</div>
+          <p class="settings-desc" data-i18n="settings.privateHostsDesc">默认不允许抓取解析到内网地址的网址（防止 SSRF）。在此填写你确实需要访问的内网主机名，例如 your-llm-gateway.example.com。填父域名可覆盖其子域。此处只开放“能否访问”，不提供登录凭证；需要登录的站点请在上方“需要登录的来源”连接。</p>
+          <div id="privateHostsList" class="private-hosts-list"></div>
         </div>

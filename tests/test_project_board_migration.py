@@ -65,6 +65,15 @@ def _clean(flask_app):
         db.execute('DELETE FROM message_queue')
         db.execute("DELETE FROM conversations WHERE id LIKE 'mig-%'")
         db.commit()
+    # The in-memory task registry is process-global — a drain-spawned REAL
+    # task from an earlier test (sweep/reconcile dispatch a genuine worker
+    # that retries dispatch_stream) lingers 'running' into the NEXT test and
+    # flips _conv_has_live_task, which the neutered-module NCs consult with
+    # the REAL implementation (the exec overwrites the monkeypatched seam).
+    # That made NC-age red only when run after reconcile/sweep tests.
+    from lib.tasks_pkg.manager import tasks, tasks_lock
+    with tasks_lock:
+        tasks.clear()
     yield
 
 
@@ -222,6 +231,88 @@ def test_stuck_false_when_epic_waiting_on_path(flask_app):
     with flask_app.app_context():
         stuck = _originator_stuck('/m/7', epic, [lease], now)
     assert stuck is False
+
+
+
+def test_stuck_true_when_wait_path_leased_by_target_itself(flask_app):
+    """A lease held by the epic's OWN dispatch target is not a hold — that
+    conv is the one supposed to run the work. Stuck proceeds (complement of
+    the foreign-lease hold: only OTHER-conv leases block migration)."""
+    from lib.conversations.project_board import DEFAULT_LEASE_TTL_MS
+    from lib.conversations.project_dispatch import _originator_stuck
+    import time
+    now = int(time.time() * 1000)
+    _mk_conv(flask_app, 'mig-orig', '/m/7b')
+    _queue_kickoff(flask_app, 'mig-orig', 'pt_e', created_at=now - DEFAULT_LEASE_TTL_MS - 60_000)
+    epic = _epic(created_by_conv='mig-orig', wait_paths=['lib/x.py'])
+    own_lease = {'id': 'l', 'kind': 'lease', 'title': 'lib/x.py',
+                 'owner_conv_id': 'mig-orig',  # held BY the target itself
+                 'status': 'claimed', 'lease_expires_at': now + 60_000}
+    with flask_app.app_context():
+        stuck = _originator_stuck('/m/7b', epic, [own_lease], now)
+    assert stuck is True, "the target's own lease must not count as a wait-on-path hold"
+
+
+def test_stuck_true_when_wait_path_leased_by_nobody(flask_app):
+    """Fail-open (design invariant 3): a wait_paths entry nobody leases can
+    never strand the epic — the hold requires a LIVE lease."""
+    from lib.conversations.project_board import DEFAULT_LEASE_TTL_MS
+    from lib.conversations.project_dispatch import _originator_stuck
+    import time
+    now = int(time.time() * 1000)
+    _mk_conv(flask_app, 'mig-orig', '/m/7c')
+    _queue_kickoff(flask_app, 'mig-orig', 'pt_e', created_at=now - DEFAULT_LEASE_TTL_MS - 60_000)
+    epic = _epic(created_by_conv='mig-orig', wait_paths=['lib/x.py'])
+    with flask_app.app_context():
+        stuck = _originator_stuck('/m/7c', epic, [], now)   # no lease rows at all
+    assert stuck is True, 'an unleased wait_paths entry must never strand (fail-open)'
+
+
+def test_stuck_true_when_wait_path_lease_expired(flask_app):
+    """An EXPIRED lease reads 'open' (effective status) — the hold self-expires
+    with the lease TTL, so the epic is migratable again (no reaper needed)."""
+    from lib.conversations.project_board import DEFAULT_LEASE_TTL_MS
+    from lib.conversations.project_dispatch import _originator_stuck
+    import time
+    now = int(time.time() * 1000)
+    _mk_conv(flask_app, 'mig-orig', '/m/7d')
+    _queue_kickoff(flask_app, 'mig-orig', 'pt_e', created_at=now - DEFAULT_LEASE_TTL_MS - 60_000)
+    epic = _epic(created_by_conv='mig-orig', wait_paths=['lib/x.py'])
+    expired_lease = {'id': 'l', 'kind': 'lease', 'title': 'lib/x.py',
+                     'owner_conv_id': 'cB',
+                     'status': 'open',          # effective: lease already expired
+                     'lease_expires_at': now - 1}
+    with flask_app.app_context():
+        stuck = _originator_stuck('/m/7d', epic, [expired_lease], now)
+    assert stuck is True, 'an expired lease must release the wait-on-path hold'
+
+
+def test_NC_wait_on_path_guard_is_load_bearing(flask_app):
+    """NC: strip the 3b wait-on-path check → the held epic reads STUCK again
+    (migration would override the declared hold). Proves the check bites."""
+    def run(mod):
+        from lib.conversations.project_board import DEFAULT_LEASE_TTL_MS
+        import time
+        now = int(time.time() * 1000)
+        _mk_conv(flask_app, 'mig-orig', '/ncwp')
+        _queue_kickoff(flask_app, 'mig-orig', 'pt_e',
+                       created_at=now - DEFAULT_LEASE_TTL_MS - 60_000)
+        epic = _epic(created_by_conv='mig-orig', wait_paths=['lib/x.py'])
+        lease = {'id': 'l', 'kind': 'lease', 'title': 'lib/x.py',
+                 'owner_conv_id': 'cB', 'status': 'claimed',
+                 'lease_expires_at': now + 60_000}
+        with flask_app.app_context():
+            stuck = mod._originator_stuck('/ncwp', epic, [lease], now)
+        assert stuck is True, (
+            'NC: with the 3b wait-on-path check removed, a held epic wrongly '
+            'reads STUCK — the migration would override its declared hold')
+
+    _patch_restore(
+        _DISPATCH_SRC,
+        "        if _paths_waited_but_held(epic, board_tasks):\n            return False",
+        "        if False:  # NC (3b wait-on-path check disabled)\n            return False",
+        run,
+    )
 
 
 # ════════════════════════════════════════════════════════════════════

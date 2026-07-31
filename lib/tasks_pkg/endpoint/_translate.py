@@ -54,57 +54,57 @@ def _sync_endpoint_turns_to_conversation(task, endpoint_turns):
         if loaded is None:
             logger.warning('%s conv=%s Conversation not found — cannot sync endpoint turns', pfx, conv_id)
             return None
-        messages, _updated_at = loaded
+        messages, _updated_at, load_rev = loaded
 
         if not messages:
             logger.warning('%s conv=%s Conversation has 0 messages — cannot sync', pfx, conv_id)
             return None
 
-        # Find where the original conversation ends and endpoint turns begin.
-        # A flow-path autopilot VU turn is stamped ``_isVirtualUser`` (NOT an
-        # endpoint marker) so the LLM context builder keeps it — but it is
-        # still an ENGINE-PRODUCED turn here, so it must count as part of the
-        # run's turns, not the original conversation. Omitting it would place
-        # the base/endpoint boundary AFTER the VU row and re-append it on every
-        # incremental sync (duplicated VU turns).
-        original_end = 0
-        for i, msg in enumerate(messages):
-            if (not msg.get('_epIteration') and not msg.get('_isEndpointReview')
-                    and not msg.get('_isEndpointPlanner')
-                    and not msg.get('_isVirtualUser')):
-                original_end = i + 1
+        # The base/endpoint split is expressed as a REPLAYABLE transform so a
+        # lost CAS race re-derives it against the fresher transcript instead of
+        # overwriting whatever landed meanwhile (an autopilot VU append commits
+        # on exactly this boundary). Same code path on the first attempt and on
+        # every retry — there is no second copy of the rule to drift.
+        def _rebuild(src_messages, _rev):
+            original_end = 0
+            for i, msg in enumerate(src_messages):
+                if (not msg.get('_epIteration') and not msg.get('_isEndpointReview')
+                        and not msg.get('_isEndpointPlanner')
+                        and not msg.get('_isVirtualUser')):
+                    original_end = i + 1
+            base = src_messages[:original_end]
+            # ★ FIX: Strip trailing assistant messages without endpoint markers.
+            # The frontend's startAssistantResponse() creates an empty
+            # placeholder that may persist to DB (via syncConversationToServer)
+            # before the endpoint sync runs.  In some race conditions, the
+            # placeholder may even have content (e.g., planner deltas streamed
+            # into it, or worker content copied via loadConversationMessages
+            # merge).  Any trailing assistant without _epIteration or
+            # _isEndpointPlanner is a ghost and must be removed — the
+            # endpoint_turns list has the canonical copies.
+            while (base
+                   and base[-1].get('role') == 'assistant'
+                   and not base[-1].get('_epIteration')
+                   and not base[-1].get('_isEndpointPlanner')):
+                ghost = base[-1]
+                logger.debug('%s conv=%s Removing trailing ghost assistant placeholder '
+                             'from base messages (content=%d chars, timestamp=%s)',
+                             pfx, conv_id, len(ghost.get('content', '') or ''),
+                             ghost.get('timestamp'))
+                base.pop()
+            return base + endpoint_turns
 
-        # Keep the original messages, replace all endpoint turns
-        base_messages = messages[:original_end]
+        new_messages = _rebuild(messages, load_rev)
+        base_len = len(new_messages) - len(endpoint_turns)
 
-        # ★ FIX: Strip trailing assistant messages without endpoint markers.
-        # The frontend's startAssistantResponse() creates an empty placeholder
-        # that may persist to DB (via syncConversationToServer) before the
-        # endpoint sync runs.  In some race conditions, the placeholder may
-        # even have content (e.g., planner deltas streamed into it, or worker
-        # content copied via loadConversationMessages merge).  Any trailing
-        # assistant without _epIteration or _isEndpointPlanner is a ghost
-        # and must be removed — the endpoint_turns list has the canonical copies.
-        while (base_messages
-               and base_messages[-1].get('role') == 'assistant'
-               and not base_messages[-1].get('_epIteration')
-               and not base_messages[-1].get('_isEndpointPlanner')):
-            ghost = base_messages[-1]
-            logger.debug('%s conv=%s Removing trailing ghost assistant placeholder '
-                         'from base messages (content=%d chars, timestamp=%s)',
-                         pfx, conv_id, len(ghost.get('content', '') or ''),
-                         ghost.get('timestamp'))
-            base_messages.pop()
-
-        # Append the accumulated endpoint turns
-        new_messages = base_messages + endpoint_turns
-
-        store.sync_conversation_with_search(conv_id, new_messages)
+        store.sync_conversation_with_search(conv_id, new_messages,
+                                            expected_rev=load_rev,
+                                            rebuild=_rebuild)
 
         logger.info('%s conv=%s ✅ Synced %d endpoint turns to conversation '
                     '(base=%d + endpoint=%d = %d total msgs)',
                     pfx, conv_id, len(endpoint_turns),
-                    len(base_messages), len(endpoint_turns), len(new_messages))
+                    base_len, len(endpoint_turns), len(new_messages))
         return len(new_messages) - 1
     except Exception as e:
         logger.error('%s conv=%s ❌ Failed to sync endpoint turns: %s',
@@ -254,7 +254,7 @@ def _trigger_endpoint_auto_translate(task, endpoint_turns):
             logger.warning('%s conv=%s Conversation not found — skipping auto-translate',
                            pfx, conv_id[:8])
             return
-        messages, _updated_at = loaded
+        messages, _updated_at, _rev = loaded
 
         scheduled = 0
         skipped = 0

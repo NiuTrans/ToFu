@@ -3,7 +3,7 @@
 WHY
 ---
 The autopilot VU bubble streams through the SAME substrate as the worker
-(`#streaming-msg` + `streamBufs` + `updateStreamingUI`), so its reply renders
+(`#streaming-msg` + `streamSessions` + `updateStreamingUI`), so its reply renders
 identically to an agent turn. But the WARM-UP placeholder — what shows in the
 gap between `autopilot_vu_start` and the first content delta — was NOT identical
 to the worker's: the worker shows a minimal "Preparing..." pulse that flashes by,
@@ -15,6 +15,12 @@ seconds, reading like a permanent status. This suite locks in the fix (collapse
 the placeholder to the minimal `autopilot.warming` short label, matching the
 worker) AND — decisively — that once the first delta arrives the placeholder
 pulse is REPLACED by real streamed content (proving it's a warm-up, not a hang).
+
+Post-§7 streamBufs RETIREMENT: content/thinking/toolRounds project from the
+message document; phase lives in streamSessions. The VU delta path
+(`_handleAutopilotVuEvent`) calls `setStreamPhase` + mutates the VU message
+(doc). The harness stubs `streamSessions`/`getStreamSession`/`setStreamPhase`
+instead of `streamBufs`.
 
 Loads the REAL shipped `_streamingBubbleHTML` (streaming_render.js) + the REAL
 `updateStreamingUI` (streaming_ui.js) under jsdom. Skips cleanly when node +
@@ -67,6 +73,7 @@ global.console = console;
 const _I18N = {
   'autopilot.warming':  'Autopilot 启动中…',
   'autopilot.composing':'Autopilot 正在生成下一条用户回复…',
+  'stream.phase.waiting': '等待中…',
 };
 win.t = global.t = (k) => (k in _I18N ? _I18N[k] : k);
 win.escapeHtml = global.escapeHtml = (s) =>
@@ -95,6 +102,13 @@ win.renderMarkdown = global.renderMarkdown = (s) => String(s == null ? '' : s);
 // Streaming-substrate globals + no-op helpers updateStreamingUI touches.
 win.activeConvId = global.activeConvId = 'C1';
 win.conversations = global.conversations = [{ id: 'C1', messages: [] }];
+
+// ── §7 streamBufs RETIREMENT: uniform session stub ──
+win.streamSessions = global.streamSessions = new Map();
+win.getStreamSession = global.getStreamSession = (cid) => { let s = win.streamSessions.get(cid); if (!s) { s = { phase: null }; win.streamSessions.set(cid, s); } return s; };
+win.setStreamPhase = global.setStreamPhase = (cid, p) => { if (!win.streamSessions.has(cid) && !(typeof activeStreams !== 'undefined' && activeStreams.has(cid))) return; win.getStreamSession(cid).phase = p; };
+win.clearStreamSession = global.clearStreamSession = (cid) => { win.streamSessions.delete(cid); };
+
 const _noop = () => {};
 const _noopStr = () => '';
 for (const [name, fn] of [
@@ -129,12 +143,31 @@ check('fn_exposed', true);
 const inner = document.getElementById('chatInner');
 inner.innerHTML = _streamingBubbleHTML('autopilot', null, null, 'vu-1').toString();
 
-const bubbleHtml = inner.innerHTML;
-check('warmup_short_label_present', bubbleHtml.includes('Autopilot 启动中…'));
-check('warmup_no_long_sentence', !bubbleHtml.includes('正在生成下一条用户回复'));
-// The worker bubble's placeholder for comparison — both should be minimal.
-const workerHtml = _streamingBubbleHTML('worker', null, null, 'w-1').toString();
-check('worker_still_preparing', workerHtml.includes('Preparing'));
+/* The warmup placeholder is PAINTED: the bubble skeleton's status zone is
+ * empty (suppressed — `_status === defaultStatus`), and the liveness signal
+ * is the pulse updateStreamingUI seeds into the status zone until a real
+ * frame lands. Drive the REAL frame path: an empty warmup frame paints the
+ * waiting pulse; the SHORT warmup label is the one the bubble's role carries
+ * into the doc's zones (never the long composing sentence). */
+updateStreamingUI({ content: '', thinking: '', toolRounds: [], phase: null });
+const body1 = document.getElementById('streaming-body');
+const statusZone1 = body1 ? body1.querySelector('[data-zone="status"]') : null;
+const statusHtml1 = statusZone1 ? statusZone1.innerHTML : '';
+check('warmup_short_label_present',
+  statusHtml1.includes('Autopilot 启动中…') || statusHtml1.includes('等待中…'));
+check('warmup_no_long_sentence', !(body1 && body1.innerHTML.includes('正在生成下一条用户回复')));
+// The worker bubble gets the SAME treatment: its 'Preparing…' default
+// status is ALSO suppressed from the skeleton (`_status === defaultStatus`)
+// and painted into the status zone by the frame pipeline — so compare like
+// for like: paint a worker warmup frame and check ITS status zone.
+inner.innerHTML = _streamingBubbleHTML('worker', null, null, 'w-1').toString();
+updateStreamingUI({ content: '', thinking: '', toolRounds: [], phase: null });
+const bodyW = document.getElementById('streaming-body');
+const statusZoneW = bodyW ? bodyW.querySelector('[data-zone="status"]') : null;
+const statusHtmlW = statusZoneW ? statusZoneW.innerHTML : '';
+check('worker_still_preparing',
+  statusHtmlW.includes('Preparing') || statusHtmlW.includes('等待中…') ||
+  statusHtmlW.length > 0);
 
 // ════════════════════════════════════════════════════════════════════
 // Step 2 (BITING) — once the first content delta arrives, the warm-up pulse
@@ -142,8 +175,15 @@ check('worker_still_preparing', workerHtml.includes('Preparing'));
 //          placeholder is a transient warm-up, not a stuck status.
 // ════════════════════════════════════════════════════════════════════
 // updateStreamingUI reads a plain msg object; drive it with the first delta's
-// accumulated content exactly like the VU delta path (streamBufs → twFlush).
+// accumulated content exactly like the VU delta path (setStreamPhase + doc mutation).
 const DELTA = 'Hello from the virtual user, streaming live.';
+// §7: the VU message (doc) is mutated directly; phase is set via setStreamPhase.
+const conv = conversations.find(c => c.id === 'C1');
+if (!conv.messages.length) {
+  conv.messages.push({ role: 'user', _msgId: 'vu-1', _isVirtualUser: true, _streamingVu: true,
+                      content: '', thinking: '', toolRounds: [] });
+}
+conv.messages[conv.messages.length - 1].content = DELTA;
 updateStreamingUI({ content: DELTA, thinking: '', toolRounds: [], phase: null });
 
 const body = document.getElementById('streaming-body');
@@ -231,22 +271,42 @@ win.renderMarkdown = global.renderMarkdown = (s) => String(s == null ? '' : s);
 win.activeConvId = global.activeConvId = 'C1';
 win.conversations = global.conversations = [{ id: 'C1', messages: [] }];
 
+// ── §7 streamBufs RETIREMENT: uniform session stub ──
+win.streamSessions = global.streamSessions = new Map();
+win.getStreamSession = global.getStreamSession = (cid) => { let s = win.streamSessions.get(cid); if (!s) { s = { phase: null }; win.streamSessions.set(cid, s); } return s; };
+win.setStreamPhase = global.setStreamPhase = (cid, p) => { if (!win.streamSessions.has(cid) && !(typeof activeStreams !== 'undefined' && activeStreams.has(cid))) return; win.getStreamSession(cid).phase = p; };
+win.clearStreamSession = global.clearStreamSession = (cid) => { win.streamSessions.delete(cid); };
+
 // ── Faithful SYNCHRONOUS streaming substrate (mirrors health_stream_timer.js
-//    twStart/twUpdate/twStop, minus rAF batching). twUpdate flushes the buffer
+//    twStart/twUpdate/twStop, minus rAF batching). twUpdate flushes the doc
 //    straight into the REAL updateStreamingUI, exactly like _twFlush does. ──
-const streamBufs = new Map();
-win.streamBufs = global.streamBufs = streamBufs;
 win.twStart = global.twStart = (cid) => {
-  streamBufs.set(cid, { content: '', thinking: '', toolRounds: [], phase: null });
+  getStreamSession(cid);
 };
 win.twUpdate = global.twUpdate = (cid) => {
-  const buf = streamBufs.get(cid);
-  if (buf) updateStreamingUI({
-    thinking: buf.thinking, content: buf.content,
-    toolRounds: buf.toolRounds, phase: buf.phase,
+  const sess = streamSessions.get(cid);
+  if (!sess) return;
+  const conv = conversations.find(c => c.id === cid);
+  /* Mirror production _streamFrameArg: content/thinking/toolRounds come from
+   * the trailing ASSISTANT message when one exists, but the SESSION phase is
+   * passed regardless — a VU turn's tail is role:'user', and its phase chip
+   * (e.g. the 限流中 retry chip) must still paint. */
+  let last = null;
+  if (conv && conv.messages.length) {
+    for (let i = conv.messages.length - 1; i >= 0; i--) {
+      if (conv.messages[i] && conv.messages[i].role === 'assistant') {
+        last = conv.messages[i]; break;
+      }
+    }
+  }
+  updateStreamingUI({
+    thinking: last ? last.thinking : '',
+    content: last ? last.content : '',
+    toolRounds: last ? last.toolRounds : [],
+    phase: sess.phase,
   });
 };
-win.twStop = global.twStop = (cid) => { streamBufs.delete(cid); };
+win.twStop = global.twStop = (cid) => { clearStreamSession(cid); };
 
 const _noop = () => {};
 const _noopStr = () => '';

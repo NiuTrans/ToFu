@@ -496,7 +496,7 @@ def compact_conversation_now(
     if loaded is None:
         logger.warning('[ManualCompact] conv=%s not found', log_id)
         return {'ok': False, 'error': 'not_found'}
-    raw_messages, updated_at = loaded
+    raw_messages, updated_at, _load_rev = loaded
 
     # Project the WHOLE raw conversation to api-form exactly ONCE — this is the
     # dominant CPU cost of a manual /compact on a multi-MB conversation. Reuse
@@ -620,7 +620,7 @@ def compact_conversation_now(
             logger.warning('[ManualCompact] conv=%s vanished during compaction '
                            '(archive %s kept)', log_id, archive_id)
             return {'ok': False, 'error': 'not_found', 'archiveId': archive_id}
-        cur_messages, cur_updated_at = reloaded
+        cur_messages, _cur_updated_at, cur_rev = reloaded
 
         # RECONCILE gate: the folded region MUST be byte-identical. A concurrent
         # write here means the summarized content itself changed → real conflict.
@@ -660,10 +660,20 @@ def compact_conversation_now(
                     if _folded_rounds:
                         mk['foldedToolRounds'] = _folded_rounds
 
-        # PERSIST: CAS on the CURRENT updated_at (refresh msg_count+search+FTS
+        # PERSIST: CAS on the CURRENT rev (refresh msg_count+search+FTS
         # because compaction removes whole messages).
+        #
+        # The rev-CAS and the folded-prefix fingerprint above are ORTHOGONAL and
+        # BOTH are required. The CAS proves the ROW did not move; it says nothing
+        # about WHERE it moved. The fingerprint proves that what moved was
+        # outside the region this summary consumed. Dropping the fingerprint
+        # because "the CAS covers it" would turn every legitimate tail append
+        # into a conflict, so a user pressing /compact on an active conversation
+        # would get a 409. Token is ``rev``, not ``updated_at``: the latter is
+        # supplied by the writer itself, so a clock that fails to advance lets
+        # the predicate pass while the data has already changed.
         affected = store.cas_sync_conversation_with_search(
-            conv_id, new_messages, cur_updated_at)
+            conv_id, new_messages, cur_rev)
         if affected:
             break
         # Lost the reload→CAS race to a fresh tail write. Retry against the

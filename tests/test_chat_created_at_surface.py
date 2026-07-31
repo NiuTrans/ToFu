@@ -176,18 +176,24 @@ class TestCreatedAtSurface(unittest.TestCase):
     def test_neuter_poll_emit_removes_field(self):
         """NEUTER: strip the createdAt-emit block from chat_poll's source and
         prove the field disappears — the test guards the real emit."""
-        src = open(CHAT_PY, encoding='utf-8').read()
+        # The emit moved out of routes/chat.py: the poll site now lives in
+        # routes/chat_poll_abort.py and the two SSE state snapshots in
+        # lib/chat_dispatch.py. Scan all three files.
+        poll_src = open(os.path.join(REPO, 'routes', 'chat_poll_abort.py'),
+                        encoding='utf-8').read()
+        dispatch_src = open(os.path.join(REPO, 'lib', 'chat_dispatch.py'),
+                            encoding='utf-8').read()
         # The in-memory poll emit block, matched verbatim so a real refactor
         # that renames it fails loudly rather than silently passing.
         marker = "        _created = task.get('created_at')\n"
-        self.assertIn(marker, src,
-                      'expected createdAt emit block not found in routes/chat.py '
-                      '(has the surface been renamed?)')
+        self.assertIn(marker, poll_src,
+                      'expected createdAt emit block not found in '
+                      'routes/chat_poll_abort.py (has the surface been renamed?)')
         # Count occurrences: poll + fresh-state + resume-state = 3 sites.
         self.assertGreaterEqual(
-            src.count("r['createdAt'] = int(_created * 1000)")
-            + src.count("state['createdAt'] = int(_created * 1000)")
-            + src.count("resume_state['createdAt'] = int(_created * 1000)"), 3,
+            poll_src.count("r['createdAt'] = int(_created * 1000)")
+            + dispatch_src.count("state['createdAt'] = int(_created * 1000)")
+            + dispatch_src.count("_state['createdAt'] = int(_created * 1000)"), 3,
             'expected createdAt emitted on poll + fresh-state + resume-state paths')
 
 

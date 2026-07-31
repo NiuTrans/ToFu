@@ -619,6 +619,93 @@
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
+/* Getting-started note (catalog `install_note`): how to obtain a key, what the
+ * server can/cannot do. Sits under the description; MUST declare grid-column
+ * like its sibling since .mcp-app-card is a grid. Not line-clamped — the whole
+ * point is that the user can read the instruction. */
+.mcp-app-note {
+  grid-column: 2;
+  margin-top: 4px;
+  padding: 5px 7px;
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: var(--s-ink-soft);
+  background: var(--s-bg-soft, rgba(0, 0, 0, .03));
+  border-left: 2px solid var(--s-border-strong, rgba(0, 0, 0, .12));
+  border-radius: 3px;
+}
+.mcp-install-modal-note {
+  margin-top: 6px;
+  padding: 6px 8px;
+  font-size: 11px;
+  line-height: 1.55;
+  color: var(--s-ink-soft);
+  background: var(--s-bg-soft, rgba(0, 0, 0, .03));
+  border-left: 2px solid var(--s-border-strong, rgba(0, 0, 0, .12));
+  border-radius: 3px;
+}
+/* "Where do I get this key" — a real link + optional ordered steps, rendered
+ * ABOVE the credential input. Replaces cramming a console breadcrumb into the
+ * placeholder (uncklickable, truncated, and gone as soon as the user types). */
+.mcp-obtain {
+  margin: 2px 0 5px;
+}
+.mcp-obtain-link {
+  display: inline-block;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--accent, #2563eb);
+  text-decoration: none;
+}
+.mcp-obtain-link:hover { text-decoration: underline; }
+.mcp-obtain-steps {
+  margin: 4px 0 0;
+  padding-left: 18px;
+  font-size: 10.5px;
+  line-height: 1.6;
+  color: var(--s-ink-soft);
+}
+.mcp-env-saved-note,
+.mcp-env-shared-note {
+  display: block;
+  margin-top: 4px;
+  font-size: 10.5px;
+  line-height: 1.5;
+}
+.mcp-env-shared-note { color: var(--accent, #2563eb); }
+/* Empty-state suggestion strip: shown when nothing is installed yet. Only
+ * lists servers the user can finish installing unaided, so a chip never leads
+ * to a dead end. */
+.mcp-suggest {
+  margin: 10px auto 0;
+  max-width: 560px;
+  text-align: center;
+}
+.mcp-suggest-title {
+  font-size: 11.5px;
+  color: var(--s-ink-soft);
+  margin-bottom: 8px;
+}
+.mcp-suggest-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: center;
+}
+.mcp-suggest-chip {
+  padding: 5px 10px;
+  font-size: 11.5px;
+  color: var(--s-ink);
+  background: var(--s-white);
+  border: var(--s-border);
+  border-radius: 999px;
+  cursor: pointer;
+  transition: border-color .15s, background .15s;
+}
+.mcp-suggest-chip:hover {
+  border-color: var(--accent, #2563eb);
+  background: var(--s-bg-soft, rgba(0, 0, 0, .03));
+}
 /* Card footer: repo link + action
  * Use min-height matching the .btn-xs height so the left-side text
  * (Repo) and the right-side buttons (卸载/连接/…) share a common
@@ -1142,7 +1229,45 @@
   border: 1.5px solid var(--s-ink);
   border-radius: var(--s-radius);
   box-shadow: var(--s-shadow-xs);
-  background: var(--s-white);
+  /* Scroll shadows (Lea-Verou technique): an edge shadow appears ONLY on
+     sides that can still scroll — the 'local' cover gradients hide the
+     'scroll' shadow gradients at the extremes. Cues that more key columns
+     exist off-screen even where the OS hides scrollbars. */
+  background:
+    linear-gradient(to right, var(--s-white) 30%, rgba(250, 248, 243, 0)),
+    linear-gradient(to right, rgba(250, 248, 243, 0), var(--s-white) 70%) 0 100%,
+    radial-gradient(farthest-side at 0 50%, rgba(26, 24, 20, 0.22), rgba(26, 24, 20, 0)),
+    radial-gradient(farthest-side at 100% 50%, rgba(26, 24, 20, 0.22), rgba(26, 24, 20, 0)) 0 100%;
+  background-repeat: no-repeat;
+  background-color: var(--s-white);
+  background-size: 40px 100%, 40px 100%, 12px 100%, 12px 100%;
+  background-attachment: local, local, scroll, scroll;
+  /* Always-visible horizontal scrollbar (custom scrollbars are exempt from
+     macOS 'show only while scrolling' auto-hiding) — the primary cue that
+     the grid scrolls horizontally. */
+  scrollbar-width: thin;
+  scrollbar-color: var(--s-ink) var(--s-cream);
+}
+.stg-matrix-scroll::-webkit-scrollbar { height: 10px; }
+.stg-matrix-scroll::-webkit-scrollbar-track {
+  background: var(--s-cream);
+  border-top: 1.5px solid var(--s-ink);
+  border-radius: 0 0 4px 4px;
+}
+.stg-matrix-scroll::-webkit-scrollbar-thumb {
+  background: var(--s-ink);
+  border: 2px solid var(--s-cream);
+  border-radius: 6px;
+}
+.stg-matrix-scroll::-webkit-scrollbar-thumb:hover { background: var(--s-gold); }
+
+/* Panel auto-widen: JS (_fitMatrixPanelWidth) adds .stg-matrix-wide when an
+   open matrix overflows the default 860px panel, giving 3–4 key columns a
+   chance to fit without scrolling. Desktop only — mobile keeps its own
+   full-width rule in styles.css. Guard: tests/test_frontend_matrix_scoped_probe.py */
+.settings-panel { transition: width 0.18s ease; }
+@media (min-width: 769px) {
+  .settings-panel.stg-matrix-wide { width: min(1240px, 96vw); }
 }
 .stg-matrix-table { border-collapse: collapse; width: 100%; }
 .stg-matrix-table th,
@@ -1163,9 +1288,13 @@
 }
 .stg-mx-keyhead {
   background: var(--s-cream);
-  padding: 6px 8px !important;
+  /* right padding reserves a dedicated lane for the column probe button so
+     it never overlaps the full-width key-name input (mirrors the 28px lane
+     .stg-mx-model reserves for the row probe button) */
+  padding: 6px 26px 6px 8px !important;
   min-width: 92px;
   vertical-align: bottom;
+  position: relative;
 }
 .stg-mx-keyname {
   width: 100%;
@@ -1192,7 +1321,8 @@
 }
 .stg-mx-model {
   background: var(--s-white);
-  padding: 6px 10px !important;
+  /* right padding reserves room for the row-scope probe button */
+  padding: 6px 28px 6px 10px !important;
   position: sticky; left: 0; z-index: 2;
   white-space: nowrap;
 }
@@ -1207,7 +1337,16 @@
   font-weight: 700;
   color: var(--s-ink);
   vertical-align: middle;
+  /* Long gateway ids (yuju-claude-opus-4.7-evaDaily…) would otherwise eat
+     the width the key columns need. Cap + ellipsis; the full id remains one
+     hover away via the title tooltip. */
+  display: inline-block;
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
+.stg-mx-mid.alias-id { max-width: 220px; }
 .stg-mx-row.model-off { opacity: 0.5; }
 .stg-mx-row.model-off .stg-mx-mid { text-decoration: line-through; }
 /* ── Model groups: a root model + its aliases (each a distinct upstream) ──
@@ -1337,6 +1476,7 @@
 .stg-mx-probe-pip.rate   { color: #c2410c; background: rgba(251,146,60,0.20); }
 .stg-mx-probe-pip.unauth { color: #b91c1c; background: rgba(248,113,113,0.20); }
 .stg-mx-probe-pip.nf     { color: #6b7280; background: rgba(156,163,175,0.20); }
+.stg-mx-probe-pip.skip   { color: #6b7280; background: rgba(156,163,175,0.20); }
 .stg-mx-probe-pip.down   { color: #a16207; background: rgba(250,204,21,0.20); }
 .stg-mx-probe-pip.err    { color: #b91c1c; background: rgba(248,113,113,0.20); }
 /* When a cell is flagged (non-ok pip) but still enabled, nudge attention. */
@@ -1352,6 +1492,39 @@
 }
 .stg-mx-cell:hover .stg-mx-edit { opacity: 0.85; }
 .stg-mx-edit:hover { opacity: 1 !important; color: var(--s-ink); transform: scale(1.15); }
+
+/* ── Scoped probe triggers (row / column / cell) — one shared mini bolt
+   button in the matrix's hover-reveal language (mirrors .stg-mx-edit) ── */
+.stg-mx-zap {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 18px; height: 18px; padding: 0;
+  border: 1.5px solid var(--s-ink); border-radius: 4px;
+  background: var(--s-white); color: var(--s-ink);
+  cursor: pointer;
+  transition: opacity 0.12s, transform 0.1s, background 0.12s;
+  box-sizing: border-box;
+}
+.stg-mx-zap svg { width: 10px; height: 10px; display: block; }
+.stg-mx-zap:hover { background: var(--s-gold); transform: scale(1.12); }
+.stg-mx-zap:disabled { opacity: 0.3; cursor: default; transform: none; background: var(--s-cream); }
+.stg-mx-zap.probing { pointer-events: none; opacity: 1; background: var(--s-gold); }
+.stg-mx-zap.probing svg { animation: stg-mx-spin 0.7s linear infinite; }
+/* Column scope: vertically centered in the key header's reserved right
+   lane (same centering recipe as .stg-mx-zap.row), subtle until hovered. */
+.stg-mx-zap.col { position: absolute; top: 50%; right: 4px; margin-top: -9px; opacity: 0.4; }
+.stg-mx-keyhead:hover .stg-mx-zap.col { opacity: 1; }
+/* Row scope: right edge of the (sticky) model label cell, hover-revealed. */
+.stg-mx-zap.row { position: absolute; top: 50%; right: 4px; margin-top: -9px; opacity: 0; }
+.stg-mx-model:hover .stg-mx-zap.row { opacity: 0.9; }
+.stg-mx-zap.row.probing { opacity: 1; }
+/* Cell scope: bottom-left corner, hover-revealed (only when no pip yet —
+   once a verdict exists the pip itself is the re-probe trigger). */
+.stg-mx-zap.cell { position: absolute; bottom: 2px; left: 3px; opacity: 0; }
+.stg-mx-cell:hover .stg-mx-zap.cell { opacity: 0.9; }
+.stg-mx-zap.cell.probing { opacity: 1; }
+/* The verdict pip doubles as the re-probe trigger for its own cell. */
+.stg-mx-probe-pip.clickable { cursor: pointer; transition: transform 0.1s; }
+.stg-mx-probe-pip.clickable:hover { transform: scale(1.2); }
 .stg-matrix-empty {
   padding: 16px;
   text-align: center;
@@ -1398,7 +1571,526 @@
 }
 .stg-mxe-ovrow input:disabled { opacity: 0.4; background: var(--s-cream); }
 .stg-cap-btn.stg-mxe-cap.locked { opacity: 0.35; cursor: not-allowed; }
+/* ── Cascade repair (2026-07-24): the settings shell is `.modal.settings-panel`
+   (index.html:942), so two legacy generic-modal rules in styles.css reach
+   this editor and out-specify its single-class rules:
+     .modal label{display:block;…margin-bottom:6px}        (styles.css:2959)
+     .modal input,.modal select{width:100%;padding:10px 12px;
+        margin-bottom:16px;…}                               (styles.css:2959)
+   Effect: `.stg-mxe-chk` loses inline-flex, and the checkbox input stretches
+   to width:100% of the label — Blink paints the ~13px checkbox square
+   centered in that full-width box while the label text wraps to the next
+   line, so each checkbox appears ABOVE its own label with a tall empty gap;
+   the RPM number input also picks up margin-bottom:16px and inflates its
+   row. Re-assert the editor layout at higher specificity (settings.css also
+   wins ties by load order). Guard: tests/test_frontend_matrix_editor_cascade.py */
+.settings-panel .stg-mx-editor .stg-mxe-chk {
+  display: inline-flex;
+  margin-bottom: 0;
+  font-size: 11px; font-weight: 700; color: var(--s-ink);
+  text-transform: none; letter-spacing: normal;
+}
+.settings-panel .stg-mx-editor .stg-mxe-chk input[type="checkbox"] {
+  width: auto; padding: 0; margin: 0;
+}
+.settings-panel .stg-mx-editor .stg-mxe-ovrow input[type="number"] {
+  margin-bottom: 0;
+}
 @media (max-width: 640px) {
   .stg-mx-keyhead, .stg-mx-cell { min-width: 76px; }
   .stg-mxe-chk { min-width: 100%; }
 }
+
+/* ══════════════════════════════════════
+   Batch D — search / network / advanced pages
+   (chip input + authenticated sources + two-col row layout;
+    moved from styles.css — guard: _SETTINGS_ONLY_CSS_PREFIXES)
+   ══════════════════════════════════════ */
+.settings-row.two-col > .settings-field { flex: 1; min-width: 0; }
+@media (max-width: 768px) {
+  .settings-row.two-col { flex-direction: column; gap: 4px; }
+}
+
+/* ── Chip / tag input (domain lists) — replaces cramped scrolling textareas ── */
+.chip-input {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-height: 42px;
+  padding: 7px 9px;
+  border: 1px solid var(--border, rgba(255,255,255,0.15));
+  border-radius: 9px;
+  background: var(--bg-tertiary, rgba(255,255,255,0.03));
+  cursor: text;
+  transition: border-color .15s ease, box-shadow .15s ease;
+}
+.chip-input:focus-within {
+  border-color: var(--accent, #6c8cff);
+  box-shadow: 0 0 0 3px var(--accent-subtle, rgba(108,140,255,0.14));
+}
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 5px 3px 11px;
+  font-size: 12.5px;
+  line-height: 1.4;
+  border-radius: 999px;
+  background: var(--accent-subtle, rgba(108,140,255,0.14));
+  color: var(--text-primary);
+  border: 1px solid var(--accent, #6c8cff);
+  border-color: color-mix(in srgb, var(--accent, #6c8cff) 32%, transparent);
+  max-width: 100%;
+  transition: border-color .12s ease, background .12s ease;
+}
+.chip:hover { border-color: var(--accent, #6c8cff); }
+.chip-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chip-x {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 17px;
+  height: 17px;
+  border: none;
+  background: transparent;
+  color: var(--text-tertiary);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+  border-radius: 50%;
+  transition: color .12s ease, background .12s ease;
+}
+.chip-x:hover {
+  color: var(--error-text, #e06c6c);
+  background: color-mix(in srgb, var(--error-text, #e06c6c) 16%, transparent);
+}
+.chip-add {
+  flex: 1 1 120px;
+  min-width: 100px;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 13px;
+  padding: 4px 2px;
+}
+.chip-add::placeholder { color: var(--text-tertiary); }
+
+/* ── Authenticated Sources (login-walled fetch: Xiaohongshu, …) ── */
+.auth-sources-list { display: flex; flex-direction: column; gap: 14px; }
+.auth-src-loading, .auth-src-empty {
+  color: var(--s-ink-soft);
+  font-size: 13px;
+  padding: 10px 2px;
+}
+
+/* ── Card — neo-brutalist tofu block ── */
+.auth-src-card {
+  border: var(--s-border);
+  border-radius: var(--s-radius);
+  padding: 14px 16px;
+  background: var(--s-white);
+  box-shadow: var(--s-shadow-sm);
+  transition: box-shadow .12s ease, transform .12s ease;
+}
+.auth-src-card.on  { border-left: 6px solid var(--s-done); padding-left: 12px; }
+.auth-src-card.paused { border-left: 6px solid var(--s-gold); padding-left: 12px; }
+.auth-src-row { display: flex; align-items: center; gap: 12px; }
+.auth-src-state-dot {
+  flex: none;
+  width: 12px; height: 12px;
+  border: 2px solid var(--s-ink);
+  background: var(--s-skin);
+}
+.auth-src-state-dot.on     { background: var(--s-done); }
+.auth-src-state-dot.paused { background: var(--s-gold); }
+.auth-src-state-dot.off    { background: var(--s-skin); }
+.auth-src-meta { flex: 1 1 auto; min-width: 0; }
+.auth-src-name { font-weight: 800; font-size: 14px; color: var(--s-ink); display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.auth-src-domain { color: var(--s-ink-soft); font-size: 12px; font-weight: 600; }
+.auth-src-state-text { color: var(--s-ink-soft); font-size: 12px; margin-top: 3px; font-weight: 600; }
+.auth-src-actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 14px; }
+
+.auth-src-btn {
+  padding: 7px 16px;
+  font-size: 12.5px;
+  font-weight: 700;
+  line-height: 1;
+  border-radius: var(--s-radius);
+  border: var(--s-border-sm);
+  background: var(--s-white);
+  color: var(--s-ink);
+  cursor: pointer;
+  box-shadow: var(--s-shadow-xs);
+  transition: transform .1s ease, box-shadow .1s ease, background .1s ease;
+}
+.auth-src-btn:hover  { transform: translate(-1px,-1px); box-shadow: 3px 3px 0 var(--s-ink); }
+.auth-src-btn:active { transform: translate(1px,1px); box-shadow: none; }
+.auth-src-btn.primary {
+  background: var(--s-gold);
+  color: var(--s-ink);
+}
+.auth-src-btn.ghost  { background: var(--s-cream); }
+.auth-src-btn.sm     { padding: 5px 11px; font-size: 11.5px; }
+.auth-src-btn.danger { background: var(--s-white); color: var(--s-blocked); }
+.auth-src-btn.danger:hover { background: var(--s-blocked); color: var(--s-white); }
+
+/* ── Internal-host allowlist (SSRF exemption — reachability, NOT credentials) ──
+   Deliberately flatter than .auth-src-card: an entry here is one hostname with
+   two verbs, not a multi-step connect flow, so it reads as a list row rather
+   than a card. Shares the same tokens so the two sections look related. */
+.private-hosts-list { display: flex; flex-direction: column; gap: 10px; }
+.priv-host-loading, .priv-host-empty {
+  color: var(--s-ink-soft);
+  font-size: 13px;
+  padding: 10px 2px;
+}
+.priv-host-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  border: var(--s-border-sm);
+  border-radius: var(--s-radius);
+  padding: 10px 14px;
+  background: var(--s-white);
+  box-shadow: var(--s-shadow-xs);
+}
+.priv-host-main { display: flex; align-items: center; gap: 10px; flex: 1 1 auto; min-width: 0; }
+.priv-host-dot {
+  flex: none;
+  width: 12px; height: 12px;
+  border: 2px solid var(--s-ink);
+  background: var(--s-skin);
+}
+.priv-host-dot.on  { background: var(--s-done); }
+.priv-host-dot.off { background: var(--s-skin); }
+.priv-host-name {
+  font-weight: 800;
+  font-size: 13.5px;
+  color: var(--s-ink);
+  word-break: break-all;
+}
+.priv-host-state { font-size: 12px; font-weight: 600; color: var(--s-ink-soft); }
+.priv-host-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.priv-host-btn {
+  padding: 5px 12px;
+  font-size: 11.5px;
+  font-weight: 700;
+  line-height: 1;
+  border-radius: var(--s-radius);
+  border: var(--s-border-sm);
+  background: var(--s-white);
+  color: var(--s-ink);
+  cursor: pointer;
+  box-shadow: var(--s-shadow-xs);
+  transition: transform .1s ease, box-shadow .1s ease, background .1s ease;
+}
+.priv-host-btn:hover  { transform: translate(-1px,-1px); box-shadow: 3px 3px 0 var(--s-ink); }
+.priv-host-btn:active { transform: translate(1px,1px); box-shadow: none; }
+.priv-host-btn.primary { background: var(--s-gold); color: var(--s-ink); }
+.priv-host-btn.danger  { background: var(--s-white); color: var(--s-blocked); }
+.priv-host-btn.danger:hover { background: var(--s-blocked); color: var(--s-white); }
+.priv-host-add { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 4px; }
+.priv-host-input {
+  flex: 1 1 220px;
+  min-width: 0;
+  padding: 7px 12px;
+  font-size: 13px;
+  border-radius: var(--s-radius);
+  border: var(--s-border-sm);
+  background: var(--s-white);
+  color: var(--s-ink);
+}
+.priv-host-msg { flex: 1 1 100%; font-size: 12px; font-weight: 600; color: var(--s-ink-soft); }
+.priv-host-msg.err { color: var(--s-blocked); }
+
+/* ── Toggle switch — brutalist hard-edged ── */
+.auth-src-switch { flex: none; position: relative; display: inline-block; cursor: pointer; }
+.auth-src-switch input { position: absolute; opacity: 0; width: 0; height: 0; }
+.auth-src-switch-track {
+  display: block; width: 42px; height: 24px;
+  background: var(--s-skin);
+  border: 2px solid var(--s-ink);
+  border-radius: 0;
+  transition: background .15s ease;
+}
+.auth-src-switch-thumb {
+  position: absolute; top: 3px; left: 3px;
+  width: 16px; height: 16px;
+  background: var(--s-ink);
+  transition: transform .15s ease;
+}
+.auth-src-switch input:checked + .auth-src-switch-track { background: var(--s-done); }
+.auth-src-switch input:checked + .auth-src-switch-track .auth-src-switch-thumb { transform: translateX(18px); }
+.auth-src-switch input:disabled + .auth-src-switch-track { opacity: .45; cursor: not-allowed; }
+
+/* ── Connect panel ── */
+.auth-src-panel {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: var(--s-border-sm);
+  display: flex; flex-direction: column; gap: 11px;
+}
+.auth-src-steps {
+  margin: 0; padding-left: 20px;
+  color: var(--s-ink-soft); font-size: 12.5px; line-height: 1.8; font-weight: 600;
+}
+.auth-src-steps li { margin-bottom: 3px; }
+.auth-src-step-txt { margin-right: 8px; }
+.auth-src-steps code,
+.auth-src-field-label code {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  background: var(--s-gold-glow);
+  border: 1.5px solid var(--s-gold-dim);
+  padding: 0 5px;
+  font-weight: 700;
+  color: var(--s-ink);
+}
+/* ── One labelled input per cookie ── */
+.auth-src-fields { display: flex; flex-direction: column; gap: 10px; }
+.auth-src-field { display: flex; flex-direction: column; gap: 5px; }
+.auth-src-field-label {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 12px; font-weight: 700; color: var(--s-ink);
+}
+.auth-src-field-badge {
+  font-size: 10.5px;
+  font-weight: 800;
+  letter-spacing: .3px;
+  padding: 1px 6px;
+  border: 1.5px solid var(--s-ink);
+  background: var(--s-skin);
+  color: var(--s-ink);
+}
+.auth-src-field-badge.required    { background: var(--s-gold); }
+.auth-src-field-badge.recommended { background: var(--s-cream); }
+.auth-src-field-badge.optional    { background: var(--s-white); color: var(--s-ink-soft); border-color: var(--s-ink-soft); }
+.auth-src-field-input, .auth-src-proxy {
+  width: 100%;
+  border: var(--s-border-sm);
+  border-radius: var(--s-radius);
+  background: var(--s-white);
+  color: var(--s-ink);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12px;
+  padding: 9px 11px;
+  box-sizing: border-box;
+}
+.auth-src-field-input:focus, .auth-src-proxy:focus {
+  outline: none;
+  border-color: var(--s-gold);
+  box-shadow: var(--s-shadow-xs);
+}
+.auth-src-field-input::placeholder, .auth-src-proxy::placeholder { color: var(--s-ink-soft); opacity: .55; }
+.auth-src-panel-actions { display: flex; gap: 10px; }
+.auth-src-msg { font-size: 12px; margin-top: 8px; min-height: 1em; color: var(--s-ink-soft); font-weight: 600; }
+.auth-src-msg.ok  { color: var(--s-gold-dim); }
+.auth-src-msg.err { color: var(--s-blocked); }
+
+
+/* ══════════════════════════════════════════════════════
+   Devices page — desktop agents + bridge tokens
+
+   The page-specific half of the "this panel had no styles at all" fix. The
+   shared chrome it sits on (.stg-table / .stg-row / .stg-desc / .stg-dim /
+   bare .stg-btn) lives in styles.css; everything keyed to a DEVICE state
+   lives here, per the settings.css split that
+   tests/test_settings_panels_parity.py enforces.
+
+   Design intent: a device row must answer "is it reachable RIGHT NOW" before
+   it answers anything else — an offline agent that looks identical to a live
+   one is how a user concludes their bridge works when it does not. So online
+   is the loud state (solid gold pip, full-contrast text) and offline is
+   deliberately receded, rather than the two differing only by a word.
+   ══════════════════════════════════════════════════════ */
+
+.devices-agent-row td { font-weight: 600; }
+/* Offline agents recede, but stay READABLE — a dead row the user cannot read
+ * is a dead row they cannot debug. Hence dimmed text, not a dimmed opacity on
+ * the whole row (which would also wash out the status pip they need to see). */
+.devices-agent-row.devices-offline td { color: var(--s-ink-soft); }
+.devices-agent-row.devices-offline td:first-child { text-decoration: none; }
+/* The live pip. Solid + ringed so it reads as a state light rather than a
+ * bullet character, and stays legible on the row-hover wash. */
+.devices-online-dot {
+  color: #16a34a;
+  font-size: 13px;
+  line-height: 1;
+  vertical-align: -1px;
+  text-shadow: 0 0 0 currentColor;
+}
+
+/* ── Bridge-token rows ──
+ * A token is a live credential, so its row carries the same hard-edged block
+ * treatment as a provider card — it should not read as a throwaway list item
+ * the user scrolls past. */
+.devices-token-row {
+  justify-content: space-between;
+  gap: 10px;
+  padding: 9px 12px;
+  margin-bottom: 6px;
+  border: var(--s-border-sm);
+  border-radius: var(--s-radius);
+  background: var(--s-white);
+  box-shadow: var(--s-shadow-xs);
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--s-ink);
+}
+.devices-token-row:last-child { margin-bottom: 0; }
+.devices-token-row .stg-dim { margin-left: 6px; }
+/* The revoke button carries .stg-btn-danger (red outline) already; this only
+ * tightens it for a dense list row and stops it stretching. */
+.devices-revoke-btn {
+  flex: none;
+  padding: 5px 12px;
+  font-size: 11px;
+}
+
+/* ── Load-failure state ──
+ * Distinct from the empty state ON PURPOSE. `Api.desktop.devices()` is
+ * declared {onError:'null'}, so an unreachable backend RESOLVES with null
+ * rather than rejecting — which is how "no devices yet" came to be shown to
+ * users whose agent was running fine. "We could not ask" and "you have none"
+ * are different facts and must not share a rendering. */
+.devices-load-failed {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border: var(--s-border-sm);
+  border-color: var(--s-blocked);
+  border-radius: var(--s-radius);
+  background: rgba(248, 113, 113, 0.07);
+  color: var(--s-ink);
+  font-size: 12px;
+  font-weight: 700;
+}
+.devices-load-failed-icon { flex: none; color: var(--s-blocked); font-size: 13px; }
+.devices-load-failed-detail {
+  font-weight: 600;
+  color: var(--s-ink-soft);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11px;
+  word-break: break-word;
+}
+
+/* ── Minted-token reveal ──
+ * Shown exactly once, so it must be impossible to miss and easy to select. */
+.devices-minted-box {
+  margin-top: 8px;
+  padding: 10px 12px;
+  border: var(--s-border-sm);
+  border-color: var(--s-gold-dim);
+  border-radius: var(--s-radius);
+  background: var(--s-gold-glow);
+}
+.devices-minted-token {
+  flex: 1;
+  min-width: 0;
+  word-break: break-all;
+  user-select: all;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--s-ink);
+  background: var(--s-white);
+  border: var(--s-border-sm);
+  border-radius: var(--s-radius);
+  padding: 7px 9px;
+}
+
+/* ══════════════════════════════════════════════════════
+   Remote-device picker (project folder browser)
+
+   The SAME feature's second surface: #remoteDevicesSection in index.html,
+   painted by project.js::_renderRemoteDevicesSection. Its classes were
+   unstyled for the same reason as the settings tab, so styling only the tab
+   would have left half the feature raw — the half a user meets while
+   attaching a remote worktree.
+   ══════════════════════════════════════════════════════ */
+
+.remote-devices-section {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed rgba(26, 24, 20, 0.18);
+}
+.remote-devices-title {
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--s-ink-soft);
+  margin-bottom: 6px;
+}
+.remote-agent-row {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 7px 9px;
+  margin-bottom: 6px;
+  border: var(--s-border-sm);
+  border-radius: var(--s-radius);
+  background: var(--s-white);
+  box-shadow: var(--s-shadow-xs);
+}
+/* An offline agent's roots CANNOT be added (project.js omits the + button), so
+ * the row must look inert — otherwise the user waits for a click to work. */
+.remote-agent-row.remote-agent-offline {
+  background: var(--s-cream);
+  box-shadow: none;
+  color: var(--s-ink-soft);
+}
+.remote-agent-name {
+  font-size: 12px;
+  font-weight: 800;
+  color: var(--s-ink);
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
+}
+.remote-agent-offline .remote-agent-name { color: var(--s-ink-soft); }
+.remote-root-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 3px 0 3px 14px;
+  font-size: 11.5px;
+  color: var(--s-ink);
+}
+.remote-root-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono, ui-monospace, monospace);
+}
+.remote-root-add {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  font-size: 14px;
+  font-weight: 900;
+  line-height: 1;
+  color: var(--s-ink);
+  background: var(--s-gold);
+  border: var(--s-border-sm);
+  border-radius: var(--s-radius);
+  cursor: pointer;
+  box-shadow: var(--s-shadow-xs);
+  transition: transform 0.1s, box-shadow 0.1s;
+}
+.remote-root-add:hover {
+  transform: translate(-1px, -1px);
+  box-shadow: 3px 3px 0 var(--s-ink);
+}
+.remote-root-add:active { transform: translate(1px, 1px); box-shadow: none; }

@@ -6,8 +6,8 @@ them into the registry in the canonical, prompt-cache-stable order:
 
     search → fetch → read_files → inspect_image → project|code_exec →
     browser → desktop → image_gen → conv_ref → human_guidance →
-    ⟨base/capability boundary⟩ → memory → todo → scheduler → swarm → mcp →
-    custom (always last)
+    ⟨base/capability boundary⟩ → memory → skills → todo → scheduler →
+    swarm → mcp → custom (always last)
 
 :func:`_register_builtins` is invoked once at package import (from
 ``lib/tools/registry/__init__.py``) so ``_TOOL_SPECS`` is populated as a
@@ -37,9 +37,9 @@ def _build_search(ctx: ToolContext) -> list[dict]:
     # 'single' is a retired mode kept as a legacy alias for old conversations
     # — it now behaves like 'multi' (the one-shot SEARCH_TOOL_SINGLE schema
     # was removed). Only 'off' yields no search tool.
-    from lib.tools import SEARCH_TOOL_MULTI
+    from lib.tools import build_search_tool
     if ctx.search_mode in ('single', 'multi'):
-        return [SEARCH_TOOL_MULTI]
+        return [build_search_tool()]
     return []
 
 
@@ -81,6 +81,13 @@ def _build_project_or_code_exec(ctx: ToolContext) -> list[dict]:
     # write tools even after a project is attached. See ToolContext.project_ready.
     from lib.tools import CODE_EXEC_TOOL, PROJECT_TOOLS
     if ctx.project_ready:
+        if ctx.project_remote:
+            # RWA 拍板 3A:同名 schema + 本地执行提示;远程绑定是单一根,
+            # multiroot 提示不适用(远程侧永远 root-relative)。
+            from lib.tools.project import with_remote_hint
+            logger.debug('[Task %s] 🌐 remote worktree bound — project tools '
+                         'carry the local-execution hint', ctx.tid)
+            return with_remote_hint(PROJECT_TOOLS)
         if ctx.multiroot_active:
             from lib.tools.project import with_multiroot_hint
             return with_multiroot_hint(PROJECT_TOOLS)
@@ -128,6 +135,35 @@ def _build_image_gen(ctx: ToolContext) -> list[dict]:
     return [GENERATE_IMAGE_TOOL]
 
 
+def _build_motion_video(ctx: ToolContext) -> list[dict]:
+    # Motion-video (MG animation) pipeline — gated on a project being
+    # attached (the workdir convention lives under the project's .tofu/),
+    # same gate as the project tool family.
+    if not ctx.project_ready:
+        return []
+    from lib.tools.motion_video import MOTION_VIDEO_TOOLS
+    logger.debug('[Task %s] Motion-video tools enabled (%d)',
+                 ctx.tid, len(MOTION_VIDEO_TOOLS))
+    return list(MOTION_VIDEO_TOOLS)
+
+
+def _build_produce(ctx: ToolContext) -> list[dict]:
+    # High-level "topic → finished video" tool. Deliberately NOT project-gated
+    # (owner 拍板 #2: "say one sentence and get a film" cannot require an
+    # attached project) — topic jobs render under the server data dir. Gated on
+    # web research being available, since the recipe grounds every claim in a
+    # real source URL; without search the fact-discipline gate can't be met.
+    if not (ctx.search_mode in ('single', 'multi') or ctx.search_enabled):
+        return []
+    from lib.tools.produce import (PRODUCE_REPORT_TOOL, PRODUCE_RESEARCH_TOOL,
+                                   PRODUCE_VIDEO_TOOL)
+    logger.debug('[Task %s] produce_video/produce_report/produce_research '
+                 'tools enabled', ctx.tid)
+    # Appended LAST so the existing video/report prefix stays byte-stable for
+    # the prompt cache (the ordering contract in this module's docstring).
+    return [PRODUCE_VIDEO_TOOL, PRODUCE_REPORT_TOOL, PRODUCE_RESEARCH_TOOL]
+
+
 def _build_conv_ref(ctx: ToolContext) -> list[dict]:
     # CONV_REF_TOOLS = [list_conversations, get_conversation] — BOTH are
     # read-only (discover siblings + open one). Register them in two cases:
@@ -151,7 +187,10 @@ def _build_conv_ref(ctx: ToolContext) -> list[dict]:
         tools = list(CONV_REF_TOOLS)
         # Project Charter tools (Pillar #2): the shared north star. Only in
         # project mode (a charter is per-project) — read + propose. Commit is
-        # human-gated and is NEVER exposed as an agent tool.
+        # human-gated and is NEVER exposed as an agent tool. (Until 2026-07-30
+        # this comment was FALSE: CHARTER_TOOLS shipped the commit tool too,
+        # so the code read as safe while an agent could write shared intent
+        # unreviewed. CHARTER_TOOLS is now the enforcement point.)
         if ctx.project_enabled and ctx.project_path:
             from lib.tools import BOARD_TOOLS, CHARTER_TOOLS, PEER_TOOLS
             tools += list(CHARTER_TOOLS)
@@ -191,6 +230,18 @@ def _build_memory(ctx: ToolContext) -> list[dict]:
         return []
     from lib.memory import ALL_MEMORY_TOOLS
     return list(ALL_MEMORY_TOOLS)
+
+
+def _build_skills(ctx: ToolContext) -> list[dict]:
+    # Skill activation attaches whenever ANY real tool exists — the same
+    # rule as memory (and NOT gated on memoryEnabled): the
+    # <available_skills> index in the system prompt advertises installed
+    # packages, so the model must be able to activate them. Skills have no
+    # model-side CRUD; the single tool is read-only (idempotent).
+    if ctx.lean or not ctx.has_base_tools:
+        return []
+    from lib.skills import ALL_SKILL_TOOLS
+    return list(ALL_SKILL_TOOLS)
 
 
 def _build_todo(ctx: ToolContext) -> list[dict]:
@@ -307,12 +358,88 @@ def _register_builtins() -> None:
                  }),
                  category='project', description='Project file tools / code exec'),
         ToolSpec('browser', _build_browser, phase='base',
+                 # 19 names = BROWSER_TOOLS (16) + ADVANCED_BROWSER_TOOLS (3).
+                 # Declared so the registry stays the single source of truth
+                 # for "what tools exist" — an undeclared handler is invisible
+                 # to the partition tables and to the custom-tool collision
+                 # check in lib/tools/tool_env.py.
+                 provides=frozenset({
+                     'browser_navigate', 'browser_read_tab', 'browser_list_tabs',
+                     'browser_create_tab', 'browser_close_tab',
+                     'browser_click', 'browser_hover', 'browser_keyboard',
+                     'browser_execute_js', 'browser_screenshot',
+                     'browser_get_cookies', 'browser_get_history',
+                     'browser_get_app_state', 'browser_summarize_page',
+                     'browser_get_interactive_elements', 'browser_wait',
+                     'browser_fill_form', 'browser_hover_and_click',
+                     'browser_right_click_menu',
+                 }),
+                 # These DRIVE the user's real browser session, so they belong
+                 # in the serial write partition + behind the Manual approval
+                 # gate (_pipeline.py derives needs_approval from it). Until
+                 # this was declared, browser_execute_js could run arbitrary JS
+                 # in the user's page with no prompt, from the parallel pool.
+                 # NOTE: this makes them SERIAL — a deliberate behaviour change;
+                 # concurrent clicks on one page were never actually safe.
+                 write_tools=frozenset({
+                     'browser_navigate', 'browser_click', 'browser_keyboard',
+                     'browser_execute_js', 'browser_fill_form',
+                     'browser_hover_and_click', 'browser_right_click_menu',
+                     'browser_create_tab', 'browser_close_tab',
+                 }),
+                 # Read-only observers stay parallel-safe AND cacheable within
+                 # a task. browser_read_tab/screenshot are deliberately NOT
+                 # idempotent — the page changes under us between calls.
+                 idempotent_tools=frozenset({
+                     'browser_list_tabs', 'browser_get_app_state',
+                 }),
                  category='browser', description='Browser automation tools'),
         ToolSpec('desktop', _build_desktop, phase='base',
+                 # provides = LLM 可见的 10 个(desktop_move_file 刻意不
+                 # 暴露,见 lib/desktop_tools.py;它仍列在 write_tools 里)。
+                 provides=frozenset({
+                     'desktop_list_files', 'desktop_read_file',
+                     'desktop_write_file',
+                     'desktop_open_file', 'desktop_open_app',
+                     'desktop_run_command', 'desktop_screenshot',
+                     'desktop_gui_action', 'desktop_clipboard',
+                     'desktop_system_info',
+                 }),
+                 # 约束③:desktop 写/执行工具进串行写分区 + Manual 批准门 ——
+                 # 此前未声明,既进并行派发池(竞态)又绕过批准门。
+                 # desktop_system_info 豁免(其 kill 分支由 agent 侧参数级
+                 # exec 门把守);GUI/screenshot 走 allow_gui 层,不进写分区。
+                 write_tools=frozenset({
+                     'desktop_write_file', 'desktop_move_file',
+                     'desktop_run_command', 'desktop_open_app',
+                     'desktop_open_file',
+                 }),
                  category='desktop', description='Desktop agent tools'),
         ToolSpec('image_gen', _build_image_gen, phase='base',
                  provides=frozenset({'generate_image'}),
                  category='image', description='Image generation'),
+        ToolSpec('motion_video', _build_motion_video, phase='base',
+                 provides=frozenset({
+                     'motion_video_env_check', 'motion_video_storyboard_check',
+                     'motion_video_check', 'motion_video_render',
+                     'motion_video_probe', 'motion_video_concat',
+                     'motion_video_narrate', 'motion_video_mux',
+                 }),
+                 write_tools=frozenset({
+                     'motion_video_render', 'motion_video_concat',
+                     'motion_video_narrate', 'motion_video_mux',
+                 }),
+                 idempotent_tools=frozenset({
+                     'motion_video_env_check', 'motion_video_storyboard_check',
+                     'motion_video_check', 'motion_video_probe',
+                 }),
+                 category='video',
+                 description='Motion video (MG animation) generation'),
+        ToolSpec('produce', _build_produce, phase='base',
+                 provides=frozenset({'produce_video', 'produce_report',
+                                     'produce_research'}),
+                 category='video',
+                 description='High-level topic → finished video / report / research'),
         ToolSpec('conv_ref', _build_conv_ref, phase='base',
                  provides=frozenset({'list_conversations', 'get_conversation',
                                      'project_charter_read', 'project_charter_propose',
@@ -321,6 +448,12 @@ def _register_builtins() -> None:
                                      'project_board_block',
                                      'project_peer_status', 'project_feed_read',
                                      'project_message', 'project_intervene'}),
+                 # No write_tools: every remaining tool in this family only
+                 # READS, or queues an advisory item a human/peer can drop.
+                 # project_charter_commit used to live here — it was the widest
+                 # blast radius in the family (every sibling reads a committed
+                 # decision as shared intent), and it is now human-only.
+                 write_tools=frozenset(),
                  idempotent_tools=frozenset({'list_conversations', 'get_conversation',
                                              'project_charter_read', 'project_board_read',
                                              'project_peer_status', 'project_feed_read'}),
@@ -330,20 +463,66 @@ def _register_builtins() -> None:
                  category='human', description='Ask the human for guidance'),
         # ── capability phase ──
         ToolSpec('memory', _build_memory, phase='capability',
+                 provides=frozenset({
+                     'search_memories', 'create_memory', 'update_memory',
+                     'delete_memory', 'merge_memories',
+                 }),
                  write_tools=frozenset({
                      'create_memory', 'update_memory',
                      'delete_memory', 'merge_memories',
                  }),
+                 idempotent_tools=frozenset({'search_memories'}),
                  category='memory', description='Memory CRUD tools'),
+        ToolSpec('skills', _build_skills, phase='capability',
+                 provides=frozenset({'activate_skill'}),
+                 idempotent_tools=frozenset({'activate_skill'}),
+                 category='skills',
+                 description='Skill activation (progressive disclosure)'),
         ToolSpec('todo', _build_todo, phase='capability',
                  provides=frozenset({'todo_write'}),
                  category='task', description='Structured task checklist'),
         ToolSpec('scheduler', _build_scheduler, phase='capability',
+                 provides=frozenset({
+                     'schedule_create', 'schedule_list', 'schedule_manage',
+                     'timer_create', 'timer_manage', 'await_task',
+                 }),
+                 # These persist state that OUTLIVES the turn (cron jobs,
+                 # polling watchers) and can execute shell/python on a
+                 # schedule — approval-eligible + serial. schedule_list /
+                 # await_task are pure reads and stay parallel.
+                 write_tools=frozenset({
+                     'schedule_create', 'schedule_manage',
+                     'timer_create', 'timer_manage',
+                 }),
+                 idempotent_tools=frozenset({'schedule_list'}),
                  category='scheduler', description='Scheduler / proactive agent tools'),
         ToolSpec('swarm', _build_swarm, phase='capability',
+                 # provides lists every name this family has a handler for on
+                 # the MAIN dispatch registry (@tool_registry.tool_set over
+                 # SWARM_TOOL_NAMES), which is wider than what build() puts in
+                 # the master schema:
+                 #   * spawn/await/get_agent_result — in the master schema
+                 #   * store/read/list_artifact(s)  — NOT in the master schema;
+                 #     they are injected into SUB-AGENTS only
+                 #     (SubAgent._inject_artifact_tools) and executed inside the
+                 #     sub-agent's own loop. Declared anyway because the handler
+                 #     IS reachable on the main registry, so an undeclared name
+                 #     would be invisible to the partition tables and to the
+                 #     custom-tool collision check in lib/tools/tool_env.py.
                  provides=frozenset({
                      'spawn_agents', 'await_agents', 'get_agent_result',
+                     'store_artifact', 'read_artifact', 'list_artifacts',
                  }),
+                 # store_artifact is deliberately NOT in write_tools. It writes
+                 # to an in-process, per-run ArtifactStore (thread-safe under
+                 # its own lock, TTL-expiring, lost on process exit) — it
+                 # touches no filesystem, no network, and nothing that outlives
+                 # the run. Approval-prompting it would be pure noise, and the
+                 # serial-dispatch half of the partition buys nothing over the
+                 # store's own lock. This is a deliberate departure from the
+                 # "every state-changing tool is partitioned" rule, recorded
+                 # here so it reads as a decision rather than an omission.
+                 idempotent_tools=frozenset({'list_artifacts'}),
                  category='swarm', description='Async multi-agent swarm'),
         ToolSpec('mcp', _build_mcp, phase='capability',
                  category='mcp', description='External MCP-server tools'),

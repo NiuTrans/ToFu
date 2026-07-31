@@ -53,14 +53,17 @@ import lib as _lib
 from lib.llm._transport import chat_url, headers
 from lib.llm.cache import add_cache_breakpoints
 from lib.llm.diagnostics import RawSSEDumper
+from lib.cost import canonicalize_usage_cache_keys, normalize_usage
 from lib.llm_errors import (
     ModelLimitError,
     PromptTooLongError,
     RateLimitError,
     RetryableAPIError,
+    _ERR_BODY_LIMIT,
     _GATEWAY_THROTTLE_STATUS,
     _classify_http_error,
     _is_prompt_too_long,
+    repair_mojibake,
 )
 from lib.log import get_logger
 from lib.model_info import (
@@ -229,7 +232,7 @@ def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
     # is stripped at that serialization boundary instead (see below). The
     # Anthropic path rebuilds the body from an allowlist, so it never leaks.
     _task_id_for_latch = body.get('_task_id', '')
-    add_cache_breakpoints(body, log_prefix)
+    add_cache_breakpoints(body, log_prefix, api_protocol=api_protocol)
 
     # Auto-inject extended cache TTL beta header for Claude
     if is_claude(body.get('model', '')):
@@ -453,9 +456,16 @@ def classify_status_error(status_code, err_text, *, body, log_prefix, raw_dumper
     Always raises (via ``_classify_http_error``) — never returns normally
     when ``status_code != 200``.
     """
-    err_msg = f'API HTTP {status_code}: {err_text[:800]}'
+    # _ERR_BODY_LIMIT (not 800): the 800-char cap amputated the JSON envelope
+    # mid-way, so summarize_error_body (called inside _classify_http_error)
+    # failed to parse and leaked the raw envelope into the retry HUD, and the
+    # gateway's tail diagnostics (ext.error.source/service/stage + request id)
+    # were lost from error.log. repair_mojibake is NOT applied here: both
+    # callers hand in already-decoded text (stream.py via decode_error_body,
+    # astream.py via its own repair wrap), so the repair boundary stays single.
+    err_msg = f'API HTTP {status_code}: {err_text[:_ERR_BODY_LIMIT]}'
     if raw_dumper.enabled:
-        raw_dumper.line(f'[HTTP-{status_code}] {err_text[:2000]}')
+        raw_dumper.line(f'[HTTP-{status_code}] {err_text[:_ERR_BODY_LIMIT]}')
     _classify_http_error(status_code, err_msg, body.get('model', ''),
                          log_prefix, max_tokens=body.get('max_tokens', 0))
 
@@ -506,6 +516,33 @@ class SSEAccumulator:
         self._mm_in_think = False
         self._mm_buf = ''
         self._consecutive_parse_errors = 0
+        # ── tool_calls wire-shape OBSERVATION counters (pure diagnostics) ──
+        # These exist to settle a 2026-07-27 open question: a concatenated
+        # tool name (``read_filesrun_command``) reached tool_dispatch, and two
+        # explanations were equally consistent — (a) a slot collision in the
+        # accumulator below (``index`` defaulting to 0 for two distinct
+        # calls), or (b) the model/gateway emitting the concatenated name
+        # itself. The existing raw_sse_anomaly.log could NOT decide it: its
+        # tool_calls samples are 100% ``toolu_bdrk_`` (bedrock line), zero
+        # frames from the sankuai OpenAI-compat line where the incident
+        # happened. So sample the shape here, on whatever line is live.
+        # These counters change NO behaviour.
+        self._tc_obs_index_absent = 0
+        self._tc_obs_name_reissue = 0
+        # Slot the unindexed deltas of the CURRENT call accumulate into.
+        # ``None`` = no unindexed call open yet.
+        self._tc_unindexed_slot = None
+        # Upstream ``index`` → the internal slot its deltas currently belong to.
+        # These diverge the moment an upstream reuses one index for two calls:
+        # the second call gets a fresh internal slot, and EVERY later delta
+        # bearing that upstream index — arguments included — must follow it.
+        # Routing only the NAME would leave the second call's arguments piling
+        # into the first slot, producing two dispatchable calls with swapped /
+        # missing arguments (silently wrong, unlike a fused name).
+        self._tc_index_map: dict = {}
+        # How many times a second tool name forced a new slot instead of being
+        # concatenated onto the previous one (the 2026-07-27 root cause).
+        self._tc_obs_slot_split = 0
 
     def mark_aborted(self):
         self.aborted_by_client = True
@@ -630,6 +667,14 @@ class SSEAccumulator:
     def _handle_sse_error(self, eo):
         """Classify an SSE-embedded error object; always raises."""
         err_text = eo.get('message', '') if isinstance(eo, dict) else str(eo)
+        # This text is parsed straight from the SSE error JSON — unlike the
+        # non-200 path it never passes through decode_error_body, so the
+        # UPSTREAM_VENDOR double-encoding (2026-07-26) would sail through into
+        # logs, the raised exception, AND the Chinese pattern matchers below
+        # (which would then miss '稍后重试'/'负载较高'). Repair FIRST so both
+        # display and classification see the intended text. Idempotent on
+        # already-clean CJK (repair only fires when it GAINS CJK).
+        err_text = repair_mojibake(err_text)
         _err_lower = err_text.lower()
         _model_id = self.body.get('model', '')
         _detected_limit = _parse_token_limit_from_error(err_text, _model_id)
@@ -641,7 +686,7 @@ class SSEAccumulator:
                 self.body.get('max_tokens', 0))
         if _is_prompt_too_long(err_text):
             logger.warning('%s Prompt too long detected in SSE error: %s',
-                           self.log_prefix, err_text[:300])
+                           self.log_prefix, err_text[:_ERR_BODY_LIMIT])
             raise PromptTooLongError(f'SSE error: {err_text}')
         _sse_err_type = eo.get('type', '') if isinstance(eo, dict) else ''
         _sse_http_code = str(eo.get('http_code', '')) if isinstance(eo, dict) else ''
@@ -688,7 +733,7 @@ class SSEAccumulator:
         )
         if _is_sse_quota:
             logger.warning('%s SSE rate-limit/quota detected — escalating to '
-                           'dispatch layer: %s', self.log_prefix, err_text[:300])
+                           'dispatch layer: %s', self.log_prefix, err_text[:_ERR_BODY_LIMIT])
             raise RateLimitError(
                 f'SSE error: {err_text}',
                 reason=f'HTTP 429: {err_text[:180]}')
@@ -697,12 +742,12 @@ class SSEAccumulator:
             if _sse_status in _GATEWAY_THROTTLE_STATUS:
                 logger.warning('%s SSE gateway throttle (HTTP %d) — escalating to '
                                'dispatch layer: %s', self.log_prefix, _sse_status,
-                               err_text[:300])
+                               err_text[:_ERR_BODY_LIMIT])
                 raise RateLimitError(
                     f'SSE error: {err_text}', is_gateway=True,
                     reason=f'HTTP {_sse_status}: {err_text[:180]}')
             logger.warning('%s SSE server error (retryable): %s',
-                           self.log_prefix, err_text[:300])
+                           self.log_prefix, err_text[:_ERR_BODY_LIMIT])
             raise RetryableAPIError(
                 f'SSE error: {err_text}',
                 status_code=_sse_status)
@@ -762,7 +807,41 @@ class SSEAccumulator:
         _tc_list = delta.get('tool_calls') or []
         if _tc_list:
             for tc in _tc_list:
-                idx = tc.get('index', 0)
+                # OBSERVATION: an absent ``index`` silently lands in slot 0,
+                # which would merge two distinct tool calls. Never observed on
+                # the bedrock line; unmeasured elsewhere. Log once per stream.
+                if 'index' not in tc:
+                    self._tc_obs_index_absent += 1
+                    if self._tc_obs_index_absent == 1:
+                        logger.warning(
+                            '%s [tool_calls-shape] delta without "index" field '
+                            '— defaulting to slot 0 (collision risk): '
+                            'has_id=%s name=%r model=%s trace=%s',
+                            self.log_prefix, bool(tc.get('id')),
+                            (tc.get('function') or {}).get('name'),
+                            self.body.get('model', ''), self.trace_id)
+                        self.raw_dumper.dump_anomaly(
+                            'tool_call_index_absent',
+                            model=self.body.get('model', ''),
+                            trace=self.trace_id,
+                            chunks=self.chunk_count)
+                # An absent ``index`` must NOT default to slot 0 — that merges
+                # every unindexed call in the stream into one. Give it the next
+                # free slot so distinct calls stay distinct.
+                if 'index' in tc:
+                    _upstream_idx = tc['index']
+                    idx = self._tc_index_map.get(_upstream_idx, _upstream_idx)
+                else:
+                    _upstream_idx = None
+                    idx = self._tc_unindexed_slot
+                    if idx is None or self.tool_calls_acc.get(idx, {}).get(
+                            'function', {}).get('name'):
+                        # No open unindexed slot yet, or the current one is
+                        # already named and this delta starts a new call.
+                        if (tc.get('function') or {}).get('name') or idx is None:
+                            idx = (max(self.tool_calls_acc) + 1
+                                   if self.tool_calls_acc else 0)
+                    self._tc_unindexed_slot = idx
                 if idx not in self.tool_calls_acc:
                     if self.on_tool_call_ready and idx > 0 and (idx - 1) in self.tool_calls_acc:
                         _prev = self.tool_calls_acc[idx - 1]
@@ -775,15 +854,121 @@ class SSEAccumulator:
                         'id': '', 'type': 'function',
                         'function': {'name': '', 'arguments': ''},
                     }
+                # Capture the slot's id BEFORE it is overwritten below — a
+                # differing incoming id is how a second call in this slot is
+                # told apart from an upstream re-issue of the same call, and
+                # the overwrite would erase that evidence.
+                _slot_id_before = self.tool_calls_acc[idx].get('id')
                 if tc.get('id'):
                     self.tool_calls_acc[idx]['id'] = tc['id']
                 if tc.get('extra_content'):
                     self.tool_calls_acc[idx]['extra_content'] = tc['extra_content']
                 fn = tc.get('function', {})
                 if fn.get('name'):
-                    self.tool_calls_acc[idx]['function']['name'] += fn['name']
+                    _prev_name = self.tool_calls_acc[idx]['function']['name']
+                    # A tool NAME is a one-shot identifier, not an incremental
+                    # text field. Appending it (the pre-2026-07-27 behaviour)
+                    # fused two calls that shared a slot into one
+                    # undispatchable name like ``read_filesrun_command``.
+                    #
+                    # Three shapes arrive here and only the first is a genuine
+                    # continuation:
+                    #   * fragment of the CURRENT name (``read_`` → ``files``)
+                    #     — the assembled string must stay one name;
+                    #   * the SAME full name re-sent (non-incremental upstream)
+                    #     — idempotent, keep one call;
+                    #   * a DIFFERENT full name — a second call landed in this
+                    #     slot; it gets its own slot instead of being appended.
+                    _incoming = fn['name']
+                    _new_id = bool(tc.get('id')) and bool(_slot_id_before) \
+                        and tc['id'] != _slot_id_before
+                    if not _prev_name:
+                        self.tool_calls_acc[idx]['function']['name'] = _incoming
+                    elif _prev_name == _incoming and not _new_id:
+                        # Upstream re-issued the whole name for the SAME call
+                        # (non-incremental semantics) — idempotent.
+                        pass
+                    elif not _new_id and self._tc_is_name_fragment(
+                            _prev_name, _incoming, tc, idx):
+                        self.tool_calls_acc[idx]['function']['name'] = _prev_name + _incoming
+                    else:
+                        self._tc_obs_slot_split += 1
+                        logger.warning(
+                            '%s [tool_calls-shape] second tool name in slot %s '
+                            '— opening a NEW slot instead of concatenating: '
+                            'prev=%r incoming=%r incoming_id=%r model=%s '
+                            'trace=%s chunk=%d',
+                            self.log_prefix, idx, _prev_name, _incoming,
+                            tc.get('id'), self.body.get('model', ''),
+                            self.trace_id, self.chunk_count)
+                        self.raw_dumper.dump_anomaly(
+                            'tool_call_slot_split',
+                            model=self.body.get('model', ''),
+                            trace=self.trace_id,
+                            slot=idx, prev_name=_prev_name,
+                            incoming_name=_incoming,
+                            chunks=self.chunk_count)
+                        # The overwrite above put the NEW call's id on the old
+                        # slot; give it back its own id before moving on.
+                        if _slot_id_before:
+                            self.tool_calls_acc[idx]['id'] = _slot_id_before
+                        idx = max(self.tool_calls_acc) + 1
+                        self._tc_unindexed_slot = idx
+                        if _upstream_idx is not None:
+                            # Re-point this upstream index at the new slot so
+                            # the call's own argument deltas follow it.
+                            self._tc_index_map[_upstream_idx] = idx
+                        self.tool_calls_acc[idx] = {
+                            'id': tc.get('id') or '', 'type': 'function',
+                            'function': {'name': _incoming, 'arguments': ''},
+                        }
+                        if tc.get('extra_content'):
+                            self.tool_calls_acc[idx]['extra_content'] = tc['extra_content']
                 if fn.get('arguments') is not None:
                     self.tool_calls_acc[idx]['function']['arguments'] += fn.get('arguments', '')
+
+    def _tc_is_name_fragment(self, prev_name, incoming, tc, idx):
+        """Is ``incoming`` the CONTINUATION of ``prev_name``, not a new call?
+
+        Distinguishing a streamed name fragment from a second call that landed
+        in the same slot decides whether the two strings may be joined. The
+        dispatched toolset is the oracle: joining is right only when the joined
+        string is a real tool name (or a prefix of one) while ``prev_name``
+        alone is not yet complete. A new ``id`` arriving with the delta always
+        means a new call, whatever the strings look like.
+        """
+        _slot = self.tool_calls_acc.get(idx) or {}
+        _incoming_id = tc.get('id')
+        if _incoming_id and _slot.get('id') and _incoming_id != _slot['id']:
+            return False
+        if _slot.get('function', {}).get('arguments'):
+            # Arguments already started for this call — a name arriving now
+            # cannot be part of its identifier.
+            return False
+        try:
+            _sent = set()
+            for t in (self.body.get('tools') or []):
+                if not isinstance(t, dict):
+                    continue
+                _fn = t.get('function')
+                if isinstance(_fn, dict) and _fn.get('name'):
+                    _sent.add(_fn['name'])
+                elif t.get('name'):
+                    _sent.add(t['name'])
+        except Exception as _e:
+            logger.debug('%s toolset read failed in fragment check: %s',
+                         self.log_prefix, _e)
+            _sent = set()
+        if not _sent:
+            # No oracle available. Arguments-not-started was already checked
+            # above, which is the only safe structural cue we have; treat the
+            # delta as a fragment so a genuinely chunked name still assembles.
+            return True
+        joined = prev_name + incoming
+        prev_complete = prev_name in _sent
+        joined_plausible = joined in _sent or any(
+            n.startswith(joined) for n in _sent)
+        return joined_plausible and not prev_complete
 
     def _feed_minimax(self, cd):
         """MiniMax inline ``<think>…</think>`` demux into thinking vs content."""
@@ -904,6 +1089,92 @@ class SSEAccumulator:
                 _filtered[idx] = tc_entry
             self.tool_calls_acc = _filtered
 
+        # ── OBSERVATION 3: final tool name not in the dispatched toolset ──
+        # The two per-delta observations above only fire when a name arrives
+        # into an already-named slot. A model that emits an already-concatenated
+        # name in its FIRST frame trips NEITHER of them — so their silence is
+        # indistinguishable from "this code never ran". That makes silence
+        # useless as evidence. This check gives that case a POSITIVE signature:
+        # compare the finished name against the tool whitelist we actually sent
+        # upstream, and report it together with both counters.
+        #
+        #   name_reissue>0 & identical=False → two distinct calls, one slot (our bug)
+        #   name_reissue>0 & identical=True  → upstream re-issued the name (our bug)
+        #   unknown_name  & both counters 0  → model emitted it whole (model side)
+        if self.tool_calls_acc:
+            try:
+                # Two dispatched-tool shapes exist on the wire and BOTH must be
+                # understood here, or this check silently no-ops on one line —
+                # the exact failure mode it was written to eliminate:
+                #   OpenAI-compat : {'type':'function','function':{'name':…}}
+                #   Anthropic     : {'name':…,'description':…,'input_schema':…}
+                # (see lib/llm/anthropic_outbound/_to_anthropic.py). Reading
+                # only the nested form yields an EMPTY whitelist on the
+                # Anthropic line, which would skip the loop entirely.
+                _sent_names = set()
+                for t in (self.body.get('tools') or []):
+                    if not isinstance(t, dict):
+                        continue
+                    _fn = t.get('function')
+                    if isinstance(_fn, dict) and _fn.get('name'):
+                        _sent_names.add(_fn['name'])
+                    elif t.get('name'):
+                        _sent_names.add(t['name'])
+                if _sent_names:
+                    for _idx, _tc in self.tool_calls_acc.items():
+                        _nm = _tc['function']['name']
+                        if not _nm or _nm in _sent_names:
+                            continue
+                        _args = _tc['function'].get('arguments', '') or ''
+                        try:
+                            json.loads(_args or '{}')
+                            _args_valid = True
+                        except Exception as _e:
+                            logger.debug('finalize: failed (%s)', _e)
+                            _args_valid = False
+                        logger.warning(
+                            '%s [tool_calls-shape] final tool name NOT in '
+                            'dispatched toolset: name=%r slot=%s tc_id=%r '
+                            'slots=%d args_valid_json=%s args_len=%d '
+                            'obs_name_reissue=%d obs_index_absent=%d '
+                            'tools_sent=%d model=%s trace=%s',
+                            self.log_prefix, _nm, _idx,
+                            _tc.get('id'), len(self.tool_calls_acc),
+                            _args_valid, len(_args),
+                            self._tc_obs_name_reissue,
+                            self._tc_obs_index_absent,
+                            len(_sent_names),
+                            self.body.get('model', ''), self.trace_id)
+                        self.raw_dumper.dump_anomaly(
+                            'tool_name_unknown',
+                            model=self.body.get('model', ''),
+                            trace=self.trace_id,
+                            name=_nm,
+                            slot=_idx,
+                            args_valid_json=_args_valid,
+                            obs_name_reissue=self._tc_obs_name_reissue,
+                            obs_index_absent=self._tc_obs_index_absent,
+                        )
+                else:
+                    # The model returned tool calls but we could not build a
+                    # whitelist — so this check CANNOT vet the names, and its
+                    # silence would otherwise read as "names were fine". Say so
+                    # out loud, or the observation acquires a third
+                    # indistinguishable-silence mode of its own.
+                    logger.warning(
+                        '%s [tool_calls-shape] %d tool call(s) returned but the '
+                        'dispatched toolset could not be resolved (tools field '
+                        'empty/unrecognized shape) — name check SKIPPED, not '
+                        'passed: names=%r tools_raw_len=%d model=%s trace=%s',
+                        self.log_prefix, len(self.tool_calls_acc),
+                        [t['function']['name']
+                         for t in self.tool_calls_acc.values()],
+                        len(self.body.get('tools') or []),
+                        self.body.get('model', ''), self.trace_id)
+            except Exception as _unk_err:
+                logger.debug('%s tool-name whitelist check failed: %s',
+                             self.log_prefix, _unk_err)
+
         content = self.content
         thinking_text = self.thinking_text
         tool_calls_acc = self.tool_calls_acc
@@ -923,13 +1194,18 @@ class SSEAccumulator:
         else:
             msg['content'] = content
 
-        # Log cache info
+        # Log cache info. Stamp the canonical cache keys onto the raw usage
+        # dict FIRST so every downstream raw-dict consumer (api_rounds, the
+        # SSE usage payload, persisted metadata, the frontend popover) sees
+        # cache hits regardless of the provider's spelling (kimi reports hits
+        # as cached_tokens while pinning cache_read_tokens=0). The log line
+        # itself reads via normalize_usage so unstamped paths stay covered.
         cache_info = ''
         if usage:
-            cw = usage.get('cache_write_tokens',
-                           usage.get('cache_creation_input_tokens', 0))
-            cr = usage.get('cache_read_tokens',
-                           usage.get('cache_read_input_tokens', 0))
+            canonicalize_usage_cache_keys(usage)
+            _nu = normalize_usage(usage)
+            cw = _nu['cache_write']
+            cr = _nu['cache_read']
             if cw or cr:
                 cache_info = f' cache_w={cw} cache_r={cr}'
                 if cr > 0:

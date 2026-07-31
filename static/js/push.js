@@ -31,6 +31,7 @@ const _push = (() => {
   let _everConnected = false;      // true once the FIRST onopen fired — distinguishes a genuine RECONNECT from the initial connect
   let _reconnectListeners = new Set();  // fn() called after a genuine reconnect (not the first connect)
   let _pendingSubscriptions = [];  // queued before connection established
+  let _pendingSends = [];          // control messages queued while disconnected (pt_3cd6cd48)
   // Connection must hold this long before we trust it as "healthy" and
   // reset the reconnect attempt counter. See onclose.
   const MIN_UPTIME_MS = 5000;
@@ -56,6 +57,17 @@ const _push = (() => {
     // a reconnect is scheduled but never opens, no further emit occurs and the
     // last reading would otherwise display forever as if still live.
     const reading = { ms: _latencyMs, state: _latencyState, connected: _connected, at: Date.now() };
+    /* Feed the conv-state confidence latch (pt_cadaa70ffa6b468d). This is the
+     * ONLY producer of authoritative-channel health: the reducer must not
+     * re-derive it from a second signal, or "is my view fresh" would drift
+     * from "is the socket delivering" — the same two-truth-sources mistake
+     * this subsystem keeps paying for. Rides the existing latency emit rather
+     * than registering a listener, so health and latency can never disagree.
+     * typeof-guarded: bundle order does not guarantee the reducer is loaded. */
+    if (typeof markAuthoritativeChannelHealth === 'function') {
+      try { markAuthoritativeChannelHealth(_latencyState, _connected); }
+      catch (e) { console.debug('[Push] health latch failed:', e); }
+    }
     for (const fn of _latencyListeners) {
       try { fn(reading); }
       catch (e) { console.error('[Push] latency listener error:', e); }
@@ -142,10 +154,41 @@ const _push = (() => {
 
   function _key(channel, taskId) { return `${channel}:${taskId}`; }
 
+  /* Per-socket correlation id, minted once per connect attempt.
+   *
+   * A browser `WebSocket` cannot set custom headers, so the id rides a QUERY
+   * PARAM instead of `X-Request-ID` (server.py::_resolve_inbound_rid honors
+   * both channels, so it is one id space across transports). Reconnects mint
+   * a FRESH id on purpose: each socket is its own session in the log, and
+   * reusing one id across reconnects would merge unrelated lifetimes.
+   *
+   * Shares api.js's page prefix when available so a socket groups with the
+   * HTTP requests from the same page load under one grep. */
+  let _wsRid = '';
+  let _wsRidSeq = 0;
+
+  function _mintWsRid() {
+    let page = '';
+    try {
+      if (typeof Api !== 'undefined' && Api && typeof Api.pageRequestId === 'function') {
+        page = Api.pageRequestId() || '';
+      }
+    } catch (e) { /* api.js not loaded yet — fall back to a standalone id */ }
+    if (!page) page = Math.random().toString(36).slice(2, 8);
+    return page + '-ws' + (++_wsRidSeq);
+  }
+
+  /** The correlation id of the CURRENT socket ('' when never connected).
+   *  Exposed so diagnostics can quote it alongside HTTP request ids. */
+  function socketRequestId() { return _wsRid; }
+
   function _buildUrl() {
     const loc = window.location;
     const proto = loc.protocol === 'https:' ? 'wss:' : 'ws:';
-    return `${proto}//${loc.host}${apiUrl('/api/push')}`;
+    _wsRid = _mintWsRid();
+    const base = `${proto}//${loc.host}${apiUrl('/api/push')}`;
+    return base + (base.indexOf('?') === -1 ? '?' : '&') +
+      '_rid=' + encodeURIComponent(_wsRid);
   }
 
   function connect() {
@@ -178,6 +221,11 @@ const _push = (() => {
         _ws.send(JSON.stringify(sub));
       }
       _pendingSubscriptions = [];
+      // Flush control messages queued while the socket was down.
+      for (const m of _pendingSends) {
+        _ws.send(JSON.stringify(m));
+      }
+      _pendingSends = [];
 
       // Re-subscribe all active handlers
       for (const [key] of _handlers) {
@@ -312,6 +360,16 @@ const _push = (() => {
   function send(msg) {
     if (_connected && _ws) {
       _ws.send(JSON.stringify(msg));
+    } else {
+      /* Queue instead of silently dropping: a control command (e.g. abort)
+       *   clicked inside a reconnect gap used to vanish with zero feedback —
+       *   the user saw "stop does nothing". Cap the queue; drop oldest. */
+      if (_pendingSends.length >= 50) {
+        _pendingSends.shift();
+        console.warn('[Push] send queue full — dropped oldest queued message');
+      }
+      _pendingSends.push(msg);
+      connect();   // ensure a reconnect is in flight so the queue drains
     }
   }
 
@@ -339,7 +397,7 @@ const _push = (() => {
     return () => _reconnectListeners.delete(fn);
   }
 
-  return { connect, subscribe, unsubscribe, send, isConnected, getLatency, onLatency, onReconnect };
+  return { connect, subscribe, unsubscribe, send, isConnected, getLatency, onLatency, onReconnect, socketRequestId };
 })();
 
 // Public API
@@ -351,3 +409,4 @@ function pushIsConnected() { return _push.isConnected(); }
 function pushGetLatency() { return _push.getLatency(); }
 function pushOnLatency(fn) { return _push.onLatency(fn); }
 function pushOnReconnect(fn) { return _push.onReconnect(fn); }
+function pushSocketRequestId() { return _push.socketRequestId(); }

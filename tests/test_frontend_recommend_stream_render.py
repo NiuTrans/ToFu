@@ -45,7 +45,21 @@ pytestmark = pytest.mark.unit
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
 JS_DIR = os.path.join(ROOT, 'static', 'js')
-_READER_SRC = os.path.join(JS_DIR, 'paper-reader.js')
+def _reader_src() -> str:
+    """The shipped file defining the recommend-stream seam, resolved BY SYMBOL.
+
+    These functions were extracted OUT of paper-reader.js into paper/arxiv.js
+    (a DEFERRED-bundle file). A pinned path turned that legitimate refactor into
+    'reconciler seam not exposed: applyEv undefined', which reads like the seam
+    was deleted. Resolving from the production manifests means the next
+    extraction carries this harness — and its NEUTERs, which patch a COPY of
+    whatever this returns — along with it.
+    """
+    from tests._conv_bundle_sources import sources_defining
+    return sources_defining('_applyRecommendEvent')[-1]
+
+
+_READER_SRC = _reader_src()
 
 
 def _node_deps_available():
@@ -115,6 +129,12 @@ win.Api = global.Api = { paper: {} };
 win._openRecommendResult = global._openRecommendResult = () => {};
 win._openRecommendCorrection = global._openRecommendCorrection = () => {};
 win._showPaperLanding = global._showPaperLanding = () => {};
+// Cross-file peer: _applyRecommendEvent persists each grounded card to the
+// bookshelf via _persistRecommendedCard, which lives in paper/library.js. This
+// suite is about the RECONCILER, not the library write, so stub it — the same
+// treatment the other paper/* peers above get. Without it the candidate branch
+// throws ReferenceError and every assertion dies before it runs.
+win._persistRecommendedCard = global._persistRecommendedCard = () => {};
 
 eval(fs.readFileSync(READER, 'utf8'));
 

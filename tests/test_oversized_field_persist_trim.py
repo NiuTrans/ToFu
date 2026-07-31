@@ -45,6 +45,8 @@ import subprocess
 
 import pytest
 
+from tests._conv_bundle_sources import sources_defining
+
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -204,7 +206,9 @@ console.log(JSON.stringify(res));
 
 
 def _run_put(neuter=False):
-    conv_js = os.path.join(JS_DIR, 'core', 'conversations.js')
+    # Located by SYMBOL: _trimMsgForPersist moved out of core/conversations.js in
+    # pt_3879f00e slice 3, which is what broke the hard-coded-path version.
+    conv_js = sources_defining('_trimMsgForPersist')[0]
     harness = os.path.join(HERE, '_put_trim_harness.js')
     with open(harness, 'w') as f:
         f.write(_PUT_HARNESS)

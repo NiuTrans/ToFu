@@ -174,7 +174,7 @@ def test_engine_triggers_web_search_for_external_question():
         ('The most cited follow-up is the Vision Transformer (ICLR 2021).', []),
     ])
 
-    def _fake_tool(name, args, user_question='', abort=None):
+    def _fake_tool(name, args, user_question='', abort=None, **_kw):
         tool_calls_seen.append(name)
         return ('Search results: ViT, Reformer, Performer …', [{'title': 'ViT'}], None, None, None)
 

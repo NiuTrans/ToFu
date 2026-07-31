@@ -9,6 +9,8 @@ import os
 
 from lib.log import get_logger
 
+from lib.doc_parser._truncation import truncation_warning
+
 logger = get_logger(__name__)
 
 
@@ -67,8 +69,11 @@ def _extract_plaintext(file_bytes: bytes, filename: str, limit: int) -> dict:
         warnings.append('File contains non-UTF-8 characters (lossy decode)')
 
     if len(text) > limit:
+        full_len = len(text)
         text = text[:limit]
-        warnings.append(f'Text truncated at {limit:,} chars')
+        warnings.append(truncation_warning(
+            kept=len(text), total=full_len, unit='chars',
+            detail=f'char limit {limit:,}'))
 
     ext = os.path.splitext(filename)[1].lower()
     logger.info('[DocParser] Extracted plaintext %s (%s): %s chars',

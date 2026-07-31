@@ -339,10 +339,12 @@ PROJECT_TOOL_RUN_COMMAND = {
             "Execute a shell command in the project directory and return its output "
             "(stdout + stderr). Use this for running tests, linting, building, checking "
             "git status, installing packages — anything that needs a real shell.\n\n"
-            "The command runs with the project root as working directory. A default "
-            "timeout applies (see the `timeout` param: 60s for filesystem-heavy "
-            "commands, 300s otherwise); pass `timeout=0` for a genuinely long-running "
-            "process. Avoid interactive commands that require stdin input (they will "
+            "The command runs with the project root as working directory. There is "
+            "NO default timeout — a build, test suite or install runs to completion "
+            "however long it takes, and the user ends it with Stop if they don't want "
+            "to wait. Pass an explicit `timeout` ONLY when the command itself should "
+            "be abandoned after a bound (e.g. a probe you expect to answer quickly). "
+            "Avoid interactive commands that require stdin input (they will "
             "hang).\n\n"
             "Each call runs in its own fresh subprocess — there is **no persistent "
             "shell**, so environment/shell state (exported variables, sourced "
@@ -376,7 +378,7 @@ PROJECT_TOOL_RUN_COMMAND = {
                 },
                 "timeout": {
                     "type": "integer",
-                    "description": "Timeout in seconds. Default auto-detects (60s for FS-heavy, 300s otherwise). Set to 0 for NO timeout (unlimited) — only use when user explicitly requests it."
+                    "description": "Optional timeout in seconds. OMIT IT for normal use — the default is NO timeout, so a long build/test/install is waited out rather than killed. Set a value only when the command should be abandoned after a bound; 0 also means unlimited."
                 },
                 "working_dir": {
                     "type": "string",
@@ -589,6 +591,34 @@ def with_multiroot_hint(tools):
     return out
 
 
+_REMOTE_EXEC_HINT = (
+    " Executes on the user's LOCAL machine via the desktop agent — the "
+    "project is a REMOTE worktree bound to that machine, so paths are "
+    "relative to the bound remote root and file changes happen on the "
+    "user's own disk (with a local snapshot before every write)."
+)
+
+
+def with_remote_hint(tools):
+    """Return a deep copy of *tools* carrying the remote-execution hint.
+
+    RWA 拍板 3A (same-name routing): names + parameter schemas stay
+    byte-identical; ONLY each tool's top-level description gains
+    :data:`_REMOTE_EXEC_HINT`. Called by the tool-assembly registry only
+    when the conversation is bound to a remote worktree (总闸
+    TOFU_REMOTE_WORKTREE + cfg['project_remote']).
+    """
+    out = []
+    for tool in tools:
+        t = copy.deepcopy(tool)
+        fn = t.get('function', {})
+        desc = fn.get('description', '') or ''
+        if _REMOTE_EXEC_HINT.strip() not in desc:
+            fn['description'] = desc + _REMOTE_EXEC_HINT
+        out.append(t)
+    return out
+
+
 PROJECT_TOOLS = [
     PROJECT_TOOL_LIST_DIR,
     PROJECT_TOOL_GREP, PROJECT_TOOL_FIND,
@@ -610,4 +640,5 @@ __all__ = [
     'PROJECT_TOOL_INSERT_CONTENT', 'PROJECT_TOOL_INSERT_CONTENTS',
     'PROJECT_TOOL_CREATE_PROJECT', 'PROJECT_TOOL_RUN_COMMAND',
     'PROJECT_TOOLS', 'PROJECT_TOOL_NAMES', 'with_multiroot_hint',
+    'with_remote_hint',
 ]

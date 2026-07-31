@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from lib.cost import normalize_usage
 from lib.log import get_logger
 
 logger = get_logger(__name__)
@@ -125,8 +126,8 @@ def _compute_write_breakdown(task: dict[str, Any], api_rounds: list,
         if not isinstance(_cur, dict):
             return None
         _u = _cur.get('usage') or {}
-        write = int(_u.get('cache_write_tokens')
-                    or _u.get('cache_creation_input_tokens') or 0)
+        _nu = normalize_usage(_u)
+        write = _nu['cache_write']
         if write <= 0:
             return None
 
@@ -148,8 +149,8 @@ def _compute_write_breakdown(task: dict[str, Any], api_rounds: list,
         prev_output = 0
         if len(api_rounds) >= 2 and isinstance(api_rounds[-2], dict):
             _pu = api_rounds[-2].get('usage') or {}
-            prev_output = int(_pu.get('completion_tokens') or _pu.get('output_tokens') or 0) \
-                + int(_pu.get('reasoning_tokens') or _pu.get('thinking_tokens') or 0)
+            _npu = normalize_usage(_pu)
+            prev_output = _npu['output'] + _npu['thinking']
 
         # (b2) cache_read delta vs the previous round. A DROP means part of the
         #     previously-cached prefix was not read back this round and is being
@@ -158,15 +159,13 @@ def _compute_write_breakdown(task: dict[str, Any], api_rounds: list,
         #     first-time context (read held/grew) from one that is re-cached
         #     body (read fell), WITHOUT relying on detect_cache_break's
         #     5%-relative warning gate.
-        cur_read = int(_u.get('cache_read_tokens')
-                       or _u.get('cache_read_input_tokens') or 0)
+        cur_read = _nu['cache_read']
         prev_read = 0
         _have_within_turn_prev = (len(api_rounds) >= 2
                                   and isinstance(api_rounds[-2], dict))
         if _have_within_turn_prev:
             _pru = api_rounds[-2].get('usage') or {}
-            prev_read = int(_pru.get('cache_read_tokens')
-                            or _pru.get('cache_read_input_tokens') or 0)
+            prev_read = normalize_usage(_pru)['cache_read']
         else:
             # No within-turn predecessor — this is the turn's round-1. Fall back
             # to the CROSS-TURN baseline (previous turn's final cached-prefix

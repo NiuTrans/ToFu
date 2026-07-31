@@ -53,6 +53,42 @@ SAMPLE_MULTI_DEVICE_STARTUP = """[Worker 0] Starting on cuda:0, processing 5021 
 """
 
 
+# ═══════════════════════════════════════════════════════════
+#  rg/grep 命令构建:IGNORE_DIRS 排除必须完整且确定
+#  潜伏 bug(RWA P3 批次抓获):_build_rg_cmd/_build_grep_cmd 用
+#  `list(IGNORE_DIRS)[:30]` —— IGNORE_DIRS 是无序 set,一旦超过 30 条
+#  (2026-07 已 34+),每个进程按哈希种子随机丢掉几条排除项,
+#  node_modules 等会以 ~40% 概率重新出现在 grep 结果里。
+# ═══════════════════════════════════════════════════════════
+
+@pytest.mark.unit
+class TestGrepIgnoreDirsComplete:
+    def test_rg_cmd_excludes_every_ignore_dir(self):
+        from lib.project_mod.config import IGNORE_DIRS
+        from lib.project_mod.read_tools import _build_rg_cmd
+        cmd = _build_rg_cmd('/base', '/base', 'pat', None, 0)
+        excluded = {cmd[i + 1].lstrip('!').rstrip('/')
+                    for i, a in enumerate(cmd) if a == '-g' and i + 1 < len(cmd)}
+        missing = IGNORE_DIRS - excluded
+        assert not missing, f'rg 命令丢了 {len(missing)} 条排除项: {sorted(missing)[:5]}'
+
+    def test_grep_cmd_excludes_every_ignore_dir(self):
+        from lib.project_mod.config import IGNORE_DIRS
+        from lib.project_mod.read_tools import _build_grep_cmd
+        cmd = _build_grep_cmd('/base', '/base', 'pat', None, 0)
+        excluded = {cmd[i + 1]
+                    for i, a in enumerate(cmd) if a == '--exclude-dir' and i + 1 < len(cmd)}
+        missing = IGNORE_DIRS - excluded
+        assert not missing, f'grep 命令丢了 {len(missing)} 条排除项: {sorted(missing)[:5]}'
+
+    def test_exclusion_order_deterministic(self):
+        # argv 顺序固定(sorted),日志/diff/缓存才可读。
+        from lib.project_mod.read_tools import _build_rg_cmd
+        a = _build_rg_cmd('/base', '/base', 'pat', None, 0)
+        b = _build_rg_cmd('/base', '/base', 'pat', None, 0)
+        assert a == b
+
+
 @pytest.mark.unit
 class TestCleanCommandOutput:
     def test_multi_device_progress_compresses(self):

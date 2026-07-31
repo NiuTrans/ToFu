@@ -96,6 +96,12 @@ class StreamingScheduler:
         self._lock = threading.Lock()
         self._pending: list[SubTaskSpec] = []        # specs waiting for deps
         self._running: dict[str, SubTaskSpec] = {}   # id → spec currently executing
+        #: id → WALL-CLOCK launch instant (``time.time()``, epoch seconds).
+        #: Deliberately NOT ``monotonic()``: this value is surfaced to the
+        #: browser so a reloaded swarm panel can continue each agent's live
+        #: stopwatch, and a monotonic reading is meaningless off-process.
+        #: Entries are released when the agent settles (see _run_one).
+        self._started_at: dict[str, float] = {}
         self._completed: dict[str, tuple[SubTaskSpec, SubAgentResult]] = {}
         self._all_results: list[tuple[SubTaskSpec, SubAgentResult]] = []
 
@@ -269,6 +275,18 @@ class StreamingScheduler:
         with self._lock:
             return len(self._running)
 
+    def started_at_map(self) -> dict[str, float]:
+        """Snapshot of ``agent_id → wall-clock launch instant`` (epoch seconds).
+
+        Only currently-running agents appear: a settled agent's authoritative
+        duration lives on its result's ``elapsed_seconds``. Consumed by
+        ``master._build_agent_snapshot`` so a reloaded swarm panel can keep a
+        running agent's stopwatch ticking from its REAL start instead of
+        dropping the timer entirely.
+        """
+        with self._lock:
+            return dict(self._started_at)
+
     def iter_completions(self, poll_interval: float = 0.5,
                          timeout: float = 600.0) -> Generator:
         """Yield ``(spec, result)`` one at a time as agents complete.
@@ -391,6 +409,7 @@ class StreamingScheduler:
             if self._deps_satisfied(spec):
                 self._inject_deps_locked(spec)
                 self._running[spec.id] = spec
+                self._started_at[spec.id] = time.time()
                 self._pool.submit(self._run_one, spec)
                 launched.append(spec.id)
             else:
@@ -498,6 +517,10 @@ class StreamingScheduler:
             self._all_results.append((spec, result))
             self._results_queue.put((spec, result))
             self._running.pop(spec.id, None)
+            # The agent has settled — its result now carries the authoritative
+            # elapsed, so the live start clock is no longer needed (and must
+            # not accumulate across a long-lived swarm).
+            self._started_at.pop(spec.id, None)
             logger.debug('[Scheduler] Queue state after agent=%s: pending=%d running=%s completed=%d',
                          spec.id, len(self._pending),
                          list(self._running.keys()), len(self._completed))
@@ -633,6 +656,10 @@ class AsyncStreamingScheduler:
     @property
     def running_count(self) -> int:
         return self._sync_scheduler.running_count
+
+    def started_at_map(self) -> dict[str, float]:
+        """Pass-through to the wrapped scheduler (plain dict read, no I/O)."""
+        return self._sync_scheduler.started_at_map()
 
     def shutdown(self):
         """Shutdown the underlying thread pool."""

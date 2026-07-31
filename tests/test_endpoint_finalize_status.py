@@ -16,7 +16,13 @@ import threading
 
 import pytest
 
-import lib.tasks_pkg.endpoint as ep
+# ``endpoint.py`` became the ``endpoint/`` package; ``_finalize`` and the
+# module-level names it calls (append_event / persist_task_result /
+# is_incomplete_stop / _trigger_endpoint_auto_translate) now live in the
+# ``_run`` submodule. Patch THERE so the monkeypatches steer the real call
+# sites inside ``_finalize`` (patching the package facade would neither find
+# the attribute nor reach the submodule-local binding).
+import lib.tasks_pkg.endpoint._run as ep
 
 pytestmark = pytest.mark.unit
 

@@ -159,6 +159,15 @@ class MCPBridge:
         # keepalive sweep re-probes at most once per MCP_CRED_PROBE_INTERVAL.
         self._cred_probe_ts: dict[str, float] = {}
 
+        # Per-server resolved liveness-probe method name (see
+        # ``_probe_liveness``): 'send_discover' | 'discover' | 'send_ping' |
+        # 'list_tools'. Memoised after a probe answers, so a 2026-07-28 server
+        # (whose ``ping`` is -32601) pays the fallback walk once instead of
+        # every 45s sweep. Cleared whenever the handle goes away, because the
+        # replacement peer may speak a different revision. Protected by
+        # ``self._lock``.
+        self._probe_method: dict[str, str] = {}
+
     # ── Event loop management ─────────────────────────────
 
     def _ensure_loop(self) -> asyncio.AbstractEventLoop:
@@ -197,7 +206,7 @@ class MCPBridge:
                 (connect / disconnect) that don't carry a per-server budget.
         """
         if timeout is None:
-            timeout = MCP_CALL_TIMEOUT + 10
+            timeout = (MCP_CALL_TIMEOUT + 10) if MCP_CALL_TIMEOUT else None
         loop = self._ensure_loop()
         future = asyncio.run_coroutine_threadsafe(coro, loop)
         return future.result(timeout=timeout)
@@ -256,7 +265,8 @@ class MCPBridge:
         # log-only — never writes git-tracked files by default. No-op for
         # non-vendored commands and on deploys without a sibling.
         try:
-            cmd = srv_cfg.get('command', '') if srv_cfg.get('transport', 'stdio') != 'sse' else ''
+            from lib.mcp.transport import stdio_command
+            cmd = stdio_command(srv_cfg)
             if cmd and os.sep not in cmd:
                 _pkg()._check_snapshot_staleness(cmd)
         except Exception as e:
@@ -633,16 +643,41 @@ class MCPBridge:
 
         try:
             async with AsyncExitStack() as stack:
-                transport = srv_cfg.get('transport', 'stdio')
+                from lib.mcp.transport import (
+                    SSE, STREAMABLE_HTTP, is_stdio, normalize_transport,
+                    resolve_headers, resolve_url,
+                )
+                transport = normalize_transport(srv_cfg)
 
-                if transport == 'sse':
-                    url = srv_cfg.get('url', '')
-                    if not url:
+                if not is_stdio(srv_cfg):
+                    if not srv_cfg.get('url'):
                         raise ValueError(
-                            f'MCP server {name}: SSE transport requires "url"'
+                            f'MCP server {name}: {transport} transport '
+                            f'requires "url"'
                         )
-                    from mcp.client.sse import sse_client
-                    read, write = await stack.enter_async_context(sse_client(url))
+                    # Both credential carriers are templated against the
+                    # server's env block, so the secret has ONE home: a header
+                    # (Bearer) or a query param (Amap ?key=). A missing
+                    # credential raises here naming the key instead of
+                    # becoming an opaque upstream 401. ``url`` now carries a
+                    # live secret — never log it (use scrub_text).
+                    url = resolve_url(srv_cfg, server_name=name)
+                    hdrs = resolve_headers(srv_cfg, server_name=name)
+                    if transport == STREAMABLE_HTTP:
+                        from mcp.client.streamable_http import streamablehttp_client
+                        read, write, _get_sid = await stack.enter_async_context(
+                            streamablehttp_client(url, headers=hdrs or None)
+                        )
+                    elif transport == SSE:
+                        from mcp.client.sse import sse_client
+                        read, write = await stack.enter_async_context(
+                            sse_client(url, headers=hdrs or None)
+                        )
+                    else:
+                        raise ValueError(
+                            f'MCP server {name}: unknown remote transport '
+                            f'{transport!r}'
+                        )
                 else:
                     # stdio transport (default)
                     command = srv_cfg.get('command', '')
@@ -859,6 +894,9 @@ class MCPBridge:
             # the handle goes away (a reconnect re-probes fresh on connect).
             self._cred_health.pop(name, None)
             self._cred_probe_ts.pop(name, None)
+            # The reconnected peer may speak a different protocol revision, so
+            # the resolved probe must be re-derived rather than inherited.
+            self._probe_method.pop(name, None)
         if handle is None:
             return
 
@@ -934,6 +972,7 @@ class MCPBridge:
             self._configs.clear()
             self._cred_health.clear()
             self._cred_probe_ts.clear()
+            self._probe_method.clear()
             self._started = False
 
         # Shut down the event loop
@@ -1106,9 +1145,10 @@ class MCPBridge:
             if streak >= MCP_DEGRADED_TIMEOUT_STREAK:
                 logger.warning(
                     '[MCP:Call] %s.%s SKIPPED — server degraded after %d '
-                    'consecutive call timeouts (timeout=%ds). Not retried; '
+                    'consecutive call timeouts (timeout=%s). Not retried; '
                     'reconnect or raise the per-server timeout to recover.',
-                    server_name, tool_name, streak, timeout,
+                    server_name, tool_name, streak,
+                    f'{timeout}s' if timeout else 'none',
                 )
                 audit_log('mcp_server_degraded', server=server_name,
                           tool=tool_name, consecutive_timeouts=streak,
@@ -1121,14 +1161,15 @@ class MCPBridge:
                     f'timeout; do not retry blindly.'
                 )
 
-        logger.info('[MCP:Call] %s.%s(args=%s) timeout=%ds',
-                    server_name, tool_name, str(arguments)[:200], timeout)
+        logger.info('[MCP:Call] %s.%s(args=%s) timeout=%s',
+                    server_name, tool_name, str(arguments)[:200],
+                    f'{timeout}s' if timeout else 'none')
 
         t0 = time.time()
         try:
             result = self._run_async(
                 self._async_call_tool(handle, tool_name, arguments, timeout),
-                timeout=timeout + 10,
+                timeout=(timeout + 10) if timeout else None,
             )
         except Exception as e:
             elapsed = time.time() - t0
@@ -1170,7 +1211,7 @@ class MCPBridge:
                 try:
                     result = self._run_async(
                         self._async_call_tool(new_handle, tool_name, arguments, timeout),
-                        timeout=timeout + 10,
+                        timeout=(timeout + 10) if timeout else None,
                     )
                     elapsed = time.time() - t0
                     self._reset_timeout_streak(server_name)
@@ -1217,7 +1258,10 @@ class MCPBridge:
         result = await handle.session.call_tool(
             tool_name,
             arguments=arguments,
-            read_timeout_seconds=timedelta(seconds=timeout),
+            # None = no read timeout (the default). A per-server "timeout" in
+            # mcp_servers.json still bounds that server's calls, and that is
+            # what keeps the degraded-streak breaker meaningful.
+            read_timeout_seconds=timedelta(seconds=timeout) if timeout else None,
         )
 
         # Extract text from the MCP CallToolResult
@@ -1261,14 +1305,167 @@ class MCPBridge:
         logger.info('[MCP] Keepalive loop armed (interval=%ds, ping_timeout=%ds)',
                     MCP_KEEPALIVE_INTERVAL, MCP_PING_TIMEOUT)
 
-    async def _keepalive_loop(self) -> None:
-        """Ping every connected server periodically; reconnect dead ones.
+    @staticmethod
+    def _probe_callable(session, meth: str) -> bool:
+        """True when ``session.meth`` exists and is callable with NO arguments.
 
-        Runs on the MCP event-loop thread. Pings are protocol-level
-        (``ClientSession.send_ping``); a ping that errors or times out means
-        the transport is gone, so we trigger a reconnect. The reconnect runs
-        in a worker thread (``run_in_executor``) because ``_reconnect_server``
-        is a sync method that re-enters this very loop via
+        Arity matters because the probe list spans SDK majors and the same
+        name can carry different signatures: measured on mcp 2.0.0,
+        ``discover()`` takes nothing but ``send_discover(version)`` REQUIRES a
+        protocol version. Calling the latter bare raises ``TypeError`` — and a
+        TypeError is OUR bug, not evidence about the peer, so letting it reach
+        the liveness verdict would reconnect a healthy server. That is exactly
+        the defect class this module exists to remove, so the arity is checked
+        rather than assumed.
+
+        Unintrospectable callables (C extensions, exotic mocks) are accepted:
+        being unable to read a signature is not evidence the call is wrong.
+        """
+        import inspect
+        fn = getattr(session, meth, None)
+        if not callable(fn):
+            return False
+        try:
+            sig = inspect.signature(fn)
+        except (TypeError, ValueError):
+            return True
+        for p in sig.parameters.values():
+            if p.name == 'self':
+                continue
+            if p.default is inspect.Parameter.empty and p.kind in (
+                inspect.Parameter.POSITIONAL_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.KEYWORD_ONLY,
+            ):
+                return False
+        return True
+
+    async def _probe_liveness(self, name: str, session) -> str:
+        """Ask the peer one cheap question and report whether it ANSWERED.
+
+        Returns ``'alive'`` or ``'dead'``. Never raises.
+
+        WHY THIS IS NOT ``send_ping``
+        -----------------------------
+        Protocol revision 2026-07-28 REMOVED ``ping`` from the schema outright
+        (measured: 0 occurrences in the published schema.ts — unlike
+        ``logging/setLevel``, which survives with an ``@deprecated`` tag and a
+        12-month window). Both SDK majors still expose ``send_ping`` for
+        compatibility with older servers, and the v2 low-level ``Server`` still
+        registers a default ``on_ping`` — but neither fact binds a *server*.
+        A conforming 2026-07-28 server answers ``-32601 Method not found``,
+        and the old probe read that as "transport dead" and reconnected. On a
+        45s sweep that is a reconnect every 45s, forever, against a server that
+        is working perfectly.
+
+        THE VERDICT IS "DID THE PEER ANSWER", NOT "DID THE CALL SUCCEED"
+        ---------------------------------------------------------------
+        Any JSON-RPC error response proves the round trip completed, so it
+        counts as alive (see ``_is_peer_answered_error``). Only a timeout or a
+        transport-layer failure means dead. This is what makes the check
+        correct across every protocol revision rather than for one of them.
+
+        PROBE SELECTION
+        ---------------
+        Ordered by protocol standing, resolved against what the live session
+        actually offers, and memoised per server once one works:
+
+          1. ``server/discover`` — the 2026-07-28 RPC that servers **MUST**
+             implement; semantically exactly "are you there + what can you do".
+             Only present on SDK v2 sessions.
+          2. ``send_ping`` — correct for pre-2026-07-28 servers, which is what
+             Tofu's own ``mcp<2`` pin still talks to today.
+          3. ``list_tools`` — present in every revision including 2026-07-28,
+             so it is the floor that always exists.
+
+        A ``-32601`` from a probe means "this peer does not implement THIS
+        method" (not "this peer is dead"), so we record that and try the next
+        candidate; the peer already proved it is alive by answering at all.
+        """
+        from lib.mcp.client._errors import (
+            _is_method_not_found, _is_peer_answered_error,
+        )
+
+        candidates: list[str] = []
+        preferred = self._probe_method.get(name)
+        if preferred:
+            candidates.append(preferred)
+        for meth in ('discover', 'send_discover', 'send_ping', 'list_tools'):
+            if meth not in candidates and self._probe_callable(session, meth):
+                candidates.append(meth)
+
+        if not candidates:
+            # Nothing to ask with — a session object this foreign is not
+            # something we should declare dead on; leave it to the reactive
+            # call path, which sees real traffic.
+            logger.debug('[MCP] %s: no usable liveness probe on session; '
+                         'skipping health sweep', name)
+            return 'alive'
+
+        last_exc: BaseException | None = None
+        for meth in candidates:
+            if not self._probe_callable(session, meth):
+                continue
+            fn = getattr(session, meth)
+            try:
+                await asyncio.wait_for(fn(), timeout=MCP_PING_TIMEOUT)
+                if self._probe_method.get(name) != meth:
+                    with self._lock:
+                        self._probe_method[name] = meth
+                    logger.info('[MCP] %s: health probe resolved to %s()',
+                                name, meth)
+                return 'alive'
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                last_exc = e
+                if _is_method_not_found(e):
+                    # The peer ANSWERED — it just doesn't implement this RPC.
+                    # That is a liveness proof; try the next candidate so the
+                    # memo lands on one this peer actually supports.
+                    logger.debug('[MCP] %s: %s not implemented (-32601) — '
+                                 'peer is alive, trying next probe', name, meth)
+                    with self._lock:
+                        self._probe_method.pop(name, None)
+                    continue
+                if _is_peer_answered_error(e):
+                    # Some other protocol-level error: still a completed round
+                    # trip, so the transport is up. Don't reconnect.
+                    logger.debug('[MCP] %s: %s returned a protocol error (%s) '
+                                 '— peer alive', name, meth,
+                                 _unwrap_exception_group(e))
+                    return 'alive'
+                # Timeout / dead pipe → genuinely unreachable.
+                if isinstance(_unwrap_exception_group(e), TypeError):
+                    # We called it wrong (signature drift across SDK majors).
+                    # That says nothing about the peer — skip this candidate
+                    # instead of declaring the server dead.
+                    logger.warning('[MCP] Health probe %s() on %s is not '
+                                   'zero-arg callable (%s) — skipping it',
+                                   meth, name, _unwrap_exception_group(e))
+                    with self._lock:
+                        self._probe_method.pop(name, None)
+                    continue
+                logger.warning('[MCP] Health probe %s() on %s failed (%s) — '
+                               'reconnecting', meth, name,
+                               _unwrap_exception_group(e))
+                return 'dead'
+
+        # Every candidate answered -32601: the peer is talking, it just speaks
+        # a method set we don't recognise. Alive, and NOT a reconnect trigger.
+        logger.debug('[MCP] %s: all liveness probes answered -32601 — peer '
+                     'alive but exposes no probe we know (%s)', name,
+                     _unwrap_exception_group(last_exc) if last_exc else '?')
+        return 'alive'
+
+    async def _keepalive_loop(self) -> None:
+        """Health-check every connected server periodically; reconnect dead ones.
+
+        Runs on the MCP event-loop thread. The health verdict comes from
+        ``_probe_liveness`` — "did the peer answer", NOT "did a ping succeed"
+        (see that method for why the distinction is the whole point). The
+        reconnect runs in a worker thread (``run_in_executor``) because
+        ``_reconnect_server`` is a sync method that re-enters this very loop via
         ``run_coroutine_threadsafe`` — calling it inline would deadlock.
 
         A per-server circuit breaker (``_breaker``) gates reconnects: after a
@@ -1302,26 +1499,23 @@ class MCPBridge:
                 session = handle.session if handle is not None else None
 
                 if session is not None:
-                    # Live server: health-check it. A healthy ping is the
-                    # common case → continue without touching the breaker.
-                    try:
-                        await asyncio.wait_for(session.send_ping(),
-                                               timeout=MCP_PING_TIMEOUT)
+                    verdict = await self._probe_liveness(name, session)
+                    if verdict == 'alive':
                         # Transport is alive — but the stored CREDENTIALS may
                         # have expired underneath it. Re-probe at most once per
                         # MCP_CRED_PROBE_INTERVAL (offloaded to a worker thread:
                         # _run_cred_probe drives call_tool, which re-enters this
                         # very loop and would deadlock if run inline).
+                        #
+                        # This hangs off "peer answered", NOT off a successful
+                        # ping. Under the old code the credential probe was
+                        # downstream of ping success, so a 2026-07-28 server
+                        # (whose ping is -32601) stalled it FOREVER — an expired
+                        # cookie would then never be surfaced. Measured before
+                        # the fix: 0 credential probes across 12 sweeps.
                         if self._cred_probe_due(name):
                             loop.run_in_executor(None, self._run_cred_probe, name)
                         continue
-                    except asyncio.CancelledError:
-                        raise
-                    except Exception as e:
-                        logger.warning(
-                            '[MCP] Keepalive ping to %s failed (%s) — reconnecting',
-                            name, _unwrap_exception_group(e),
-                        )
                 else:
                     # No live session but the breaker is tracking it (failed
                     # reconnect previously, backoff now elapsed) → retry.

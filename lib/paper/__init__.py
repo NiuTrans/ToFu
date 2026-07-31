@@ -13,7 +13,7 @@ layout is implementation detail.
 """
 
 # Hashing / paths
-from .hashing import BASE_DIR, PAPER_DIR, PAPER_IMG_DIR, _paper_hash, _safe_hash_dir
+from .hashing import BASE_DIR, PAPER_DIR, PAPER_IMG_DIR, _paper_hash, _safe_hash_dir, resolve_paper_hash
 
 # Prompts + tool list
 from .prompts import (
@@ -86,7 +86,16 @@ from .images import (
 )
 
 # arXiv + library
-from .arxiv import _extract_arxiv_id, fetch_arxiv_title, search_arxiv
+from .arxiv import (
+    ArxivQuerySyntaxError,
+    _extract_arxiv_id,
+    fetch_arxiv_title,
+    search_arxiv,
+    search_arxiv_explained,
+)
+from .harvest import HarvestResult, harvest_arxiv_batch, harvest_arxiv_id
+from .survey import OPEN_GAPS_SCHEMA_VERSION, build_survey, survey_lang_key
+from .ideate import IDEATE_GATE_THRESHOLD, generate_ideas, ideate_lang_key
 from .recommend_engine import iter_recommend_events, recommend_papers
 from .recommend_runtime import (
     _RECOMMEND_TASK_TTL,
@@ -165,6 +174,7 @@ from .translate_engine import _run_translate_task
 __all__ = [
     # hashing
     'BASE_DIR', 'PAPER_DIR', 'PAPER_IMG_DIR', '_paper_hash', '_safe_hash_dir',
+    'resolve_paper_hash',
     # prompts
     '_REPORT_PROMPT_EN', '_REPORT_PROMPT_ZH', '_REPORT_TOOLS', '_MAX_REPORT_TOOL_ROUNDS',
     'date_anchor_clause',
@@ -193,8 +203,15 @@ __all__ = [
     '_extract_title_from_report', '_backfill_library_title',
     '_is_placeholder_title',
     # arxiv + library
-    '_extract_arxiv_id', 'fetch_arxiv_title', 'search_arxiv', 'recommend_papers',
+    '_extract_arxiv_id', 'fetch_arxiv_title', 'search_arxiv',
+    'search_arxiv_explained', 'ArxivQuerySyntaxError', 'recommend_papers',
     'iter_recommend_events',
+    # harvest (auto-research R1 — batch crawl + parse-once ingest)
+    'harvest_arxiv_id', 'harvest_arxiv_batch', 'HarvestResult',
+    # survey (auto-research R2 — fan-in survey + library-verified open-gap map)
+    'build_survey', 'survey_lang_key', 'OPEN_GAPS_SCHEMA_VERSION',
+    # ideate (auto-research R3 — anti-A+B idea gate)
+    'generate_ideas', 'ideate_lang_key', 'IDEATE_GATE_THRESHOLD',
     '_recommend_runtime', '_recommend_tasks', '_recommend_tasks_lock',
     '_RECOMMEND_TASK_TTL', '_recommend_key', '_recommend_index_lock',
     '_recommend_latest_index', '_recommend_latest_for', '_recommend_register_latest',

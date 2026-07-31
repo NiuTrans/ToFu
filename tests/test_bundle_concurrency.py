@@ -186,6 +186,68 @@ def test_concurrent_builds_produce_one_valid_bundle(tmp_path, monkeypatch, caplo
     assert text.count('a' * 40000) == 1, 'big payload must be present and intact'
 
 
+# ── 4. Cleanup age grace: a FOREIGN keep-set (another process) can never
+#      delete a YOUNG artifact (xdist / supervisor-restart overlap), while
+#      genuinely-old artifacts are still reaped. ────────────────────────────
+
+def _plant_built(js_dir, name, age_s=0):
+    p = os.path.join(js_dir, name)
+    with open(p, 'w', encoding='utf-8') as f:
+        f.write('// built artifact\n')
+    if age_s:
+        import time as _t
+        old = _t.time() - age_s
+        os.utime(p, (old, old))
+    return p
+
+
+def test_cleanup_never_deletes_young_artifact_across_keep_sets(tmp_path, monkeypatch):
+    """The production hazard: process B's cleanup (keep-set = ITS OWN build)
+    must NOT delete the bundle/pack process A just published and is serving —
+    a stale index references the bundle (self-healed), but an i18n pack 404
+    blanks the whole UI via t()'s silent fallback. The mtime grace is the
+    only process-independent clock (the build lock never covers readers)."""
+    from lib import js_bundler
+    js_dir = str(tmp_path)
+    monkeypatch.setattr(js_bundler, 'JS_DIR', js_dir)
+    young_bundle = _plant_built(js_dir, 'bundle-aaaaaaaa.js')
+    young_pack = _plant_built(js_dir, 'i18n-zh-bbbbbbbb.js')
+    # A FOREIGN keep-set: what a second process would keep (its own artifacts
+    # only — A's files are not in it).
+    js_bundler._clean_old_bundles('bundle-cccccccc.js', 'feature-dddddddd.js',
+                                  keep_packs=('i18n-en-eeeeeeee.js',))
+    assert os.path.exists(young_bundle), 'a young bundle must survive a foreign cleanup'
+    assert os.path.exists(young_pack), 'a young i18n pack must survive a foreign cleanup'
+
+
+def test_cleanup_reaps_artifact_older_than_grace(tmp_path, monkeypatch):
+    """The grace is a TTL, not a leak: artifacts older than the window are
+    reaped as before (disk stays bounded)."""
+    from lib import js_bundler
+    js_dir = str(tmp_path)
+    monkeypatch.setattr(js_bundler, 'JS_DIR', js_dir)
+    ancient = _plant_built(js_dir, 'bundle-ffffffff.js',
+                           age_s=js_bundler._BUILT_ARTIFACT_GRACE_S + 60)
+    js_bundler._clean_old_bundles('bundle-cccccccc.js', None)
+    assert not os.path.exists(ancient), 'an artifact past the grace must be reaped'
+
+
+def test_grace_zero_restores_keep_set_only_behaviour(tmp_path, monkeypatch):
+    """NEUTER: grace=0 removes the protection entirely — a foreign keep-set
+    cleanup deletes the young artifact again (proves the mtime grace is what
+    protects the young files above, not some other filter)."""
+    from lib import js_bundler
+    js_dir = str(tmp_path)
+    monkeypatch.setattr(js_bundler, 'JS_DIR', js_dir)
+    monkeypatch.setattr(js_bundler, '_BUILT_ARTIFACT_GRACE_S', 0)
+    young = _plant_built(js_dir, 'bundle-aaaaaaaa.js')
+    js_bundler._clean_old_bundles('bundle-cccccccc.js', None)
+    assert not os.path.exists(young), (
+        'with grace=0 the foreign cleanup must delete — the grace is load-bearing')
+
+
+# ── 3. No import-time side effect: importing `server` must NOT build a bundle
+#      into the live static/js/ tree. ─────────────────────────────────────────
 # ── 3. No import-time side effect: importing `server` must NOT build a bundle
 #      into the live static/js/ tree. ─────────────────────────────────────────
 

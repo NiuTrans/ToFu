@@ -28,6 +28,11 @@ You have memory management tools to maintain a reusable knowledge base across se
 - `delete_memory` — Remove an outdated or incorrect memory.
 - `merge_memories` — Combine multiple overlapping/related memories into one consolidated memory.
 
+Installed skill packages (if any) are listed in the `<available_skills>` block —
+they are instruction GUIDES, a different thing from memories. Load one with
+`activate_skill` when the task matches its description. Memory tools cannot
+modify skill packages (they are user-managed).
+
 **When to SEARCH memories (narrow triggers):**
 - You suspect this exact project has an established convention you don't remember (style, naming, architecture).
 - You're about to redo something the user has previously corrected you on in this project.
@@ -77,6 +82,8 @@ if they ask about an external project/library use web_search. A `<relevant_memor
 already surfaces likely-relevant memories — don't re-search the same topic.
 Proactively save memories when you discover: bug patterns, project conventions,
 user preferences, complex workflows, or tool/API quirks.
+Installed skill packages live in `<available_skills>` (activate via activate_skill) —
+they are guides, not memories, and memory tools cannot modify them.
 Keep each memory focused on ONE topic; write a dense ~120-char description that
 front-loads trigger words (symptom, symbol/file, fix) — it's the primary search signal —
 and a skimmable Markdown body (e.g. Symptom/Why → Fix/What → Guardrail).
@@ -113,7 +120,7 @@ def build_memory_context(project_path=None, extra_paths=None):
     #   precise N has marginal value to the model (it has the search_memories
     #   tool + the per-turn <relevant_memories> prefetch block), so we keep the
     #   wording byte-stable across memory-CRUD turns. See
-    #   .tofu/skills/prefix-mutation-cache-miss-truncate-old-tool-results.md.
+    #   .tofu/memories/prefix-mutation-cache-miss-truncate-old-tool-results.md.
     return (
         'You have accumulated memories available. '
         'A `<relevant_memories>` block is auto-injected when prefetch finds matches; '

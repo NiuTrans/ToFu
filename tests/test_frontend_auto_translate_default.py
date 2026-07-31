@@ -36,13 +36,14 @@ def _node_available() -> bool:
     return bool(shutil.which('node'))
 
 
-# core/conversations.js is all top-level declarations (function/const/let);
-# eval'ing it bare defines convAutoTranslate with no side effects (the Api /
-# ConvCache globals it names are only touched inside OTHER function bodies).
+# core/conv_reducers.js (extracted from conversations.js 2026-07-25) is all
+# top-level declarations; eval'ing it bare defines convAutoTranslate with no
+# side effects (the Api / ConvCache globals it names are only touched inside
+# OTHER function bodies).
 _HARNESS = r"""
 const fs = require('fs');
 global.window = global;
-eval(fs.readFileSync(process.argv[2], 'utf8'));  // core/conversations.js
+eval(fs.readFileSync(process.argv[2], 'utf8'));  // core/conv_reducers.js
 
 const out = [];
 function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
@@ -98,7 +99,7 @@ def test_conv_auto_translate_default():
     try:
         proc = subprocess.run(
             ['node', harness,
-             os.path.join(JS_DIR, 'core', 'conversations.js'),  # argv[2]
+             os.path.join(JS_DIR, 'core', 'conv_reducers.js'),  # argv[2]
              ],
             capture_output=True, text=True, timeout=60,
         )

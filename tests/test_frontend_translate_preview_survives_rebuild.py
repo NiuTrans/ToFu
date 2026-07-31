@@ -36,6 +36,15 @@ This harness loads the REAL shipped JS under jsdom and locks three contracts:
 
 Runs the REAL shipped JS under jsdom; skips cleanly when node + jsdom aren't
 installed.
+
+ZONE NOTE (2026-07-07 auto-translate unification): the live Chinese-so-far's
+canonical paint target is the `translatedPrimary` zone (streaming_ui.js seeds
+it in every rebuilt body); the legacy `translatePreview` slot is still seeded
+but kept only as a degrade target for zone-less bodies (the baseline + reconnect
+paths below). Zone queries therefore go through _previewZone(): translatedPrimary
+first, translatePreview fallback — and one explicit pin
+(rebuild_paints_into_translatedPrimary) locks the modern canonical routing so
+the helper can't mask a future re-route.
 """
 
 from __future__ import annotations
@@ -133,6 +142,10 @@ win.getToolRoundsFromMsg = global.getToolRoundsFromMsg = (m) => (m && m.toolRoun
 // real concatenated bundle shares it, so showStreamingUIForConv (which reads
 // it) would throw ReferenceError. Predefine the global with the shipped value.
 global._INITIAL_RENDER = win._INITIAL_RENDER = 20;
+// `_lazyConvId` is a top-level `let` in streaming_render.js:794 — same eval
+// scoping issue: stream_lifecycle.js reads it at :39 and crashes without the
+// shared global the bundle provides. Predefine with the shipped initial value.
+global._lazyConvId = win._lazyConvId = null;
 
 // Load the REAL shipped JS in dependency order (shared window scope).
 eval(fs.readFileSync(process.argv[3], 'utf8'));  // ui/streaming_ui.js (zones + updateStreamingUI)
@@ -158,13 +171,24 @@ check('fns_exposed', true);
 const MSGID = 'tmp_d3e2c72c';
 global.activeConvId = win.activeConvId = 'c1';
 
+// Canonical-first zone lookup: the 2026-07-07 unification paints the live
+// Chinese into data-zone="translatedPrimary"; data-zone="translatePreview" is
+// the legacy degrade slot (zone-less bodies only).
+function _previewZone(root) {
+  return root.querySelector('[data-zone="translatedPrimary"] .md-content')
+      || root.querySelector('[data-zone="translatePreview"] .md-content');
+}
+
 // ── Baseline sanity: a bubble WITH matching data-msg-id paints. ──
 const inner = document.getElementById('chatInner');
 inner.innerHTML = '<div class="message" id="streaming-msg" data-msg-id="' + MSGID + '">'
   + '<div class="message-body" id="streaming-body"></div></div>';
 const basePaint = fn('c1', MSGID, 'baseline 译文');
+// Baseline pins the LEGACY degrade path: the hand-stamped bubble has no zones,
+// so fn must create + paint translatePreview.
+const _baseZone = document.querySelector('#streaming-msg [data-zone="translatePreview"] .md-content');
 check('baseline_paints', basePaint === true
-  && /baseline 译文/.test(document.querySelector('#streaming-msg [data-zone="translatePreview"] .md-content').innerHTML));
+  && !!_baseZone && /baseline 译文/.test(_baseZone.innerHTML));
 
 // ── (a)+(c): showStreamingUIForConv rebuilds the bubble; it must KEEP the
 //    msgId, and a subsequent partial frame must paint. ──
@@ -195,9 +219,14 @@ for (const role of ['worker', 'planner', 'critic']) {
 
   // After rebuild, a partial frame for this msgId must paint (the bug: it didn't).
   const painted = fn('c1', MSGID, role + ' 第N轮译文');
-  const zone = sm && sm.querySelector('[data-zone="translatePreview"] .md-content');
+  const zone = sm && _previewZone(sm);
   check('rebuild_partial_paints_' + role, painted === true
     && !!zone && new RegExp(role + ' 第N轮译文').test(zone.innerHTML));
+  // The modern canonical routing: the paint must land in translatedPrimary
+  // (the rebuilt body is zone-seeded), not the legacy translatePreview slot.
+  const primary = sm && sm.querySelector('[data-zone="translatedPrimary"] .md-content');
+  check('rebuild_paints_into_translatedPrimary_' + role, !!primary
+    && new RegExp(role + ' 第N轮译文').test(primary.innerHTML));
 }
 
 // ── (b): showStreamingUIForConv repaints the stashed _translatePartial on
@@ -212,7 +241,7 @@ for (const role of ['worker', 'planner', 'critic']) {
 
   showStreamingUIForConv('c1');   // NO fn() call afterwards — rebuild must repaint on its own
 
-  const zone = document.querySelector('#streaming-msg [data-zone="translatePreview"] .md-content');
+  const zone = _previewZone(document.getElementById('streaming-msg'));
   check('rebuild_repaints_stashed_partial', !!zone && /已翻译到这里的译文/.test(zone.innerHTML));
 }
 
@@ -244,7 +273,7 @@ for (const role of ['worker', 'planner', 'critic']) {
       && typeof _renderStreamingTranslatePreview === 'function') {
     _renderStreamingTranslatePreview('c1', assistantMsg._msgId, assistantMsg._translatePartial);
   }
-  const rzone = document.querySelector('#streaming-msg [data-zone="translatePreview"] .md-content');
+  const rzone = _previewZone(document.getElementById('streaming-msg'));
   check('recon_repaints_stashed_partial', !!rzone && /重连后已恢复的译文/.test(rzone.innerHTML));
 }
 
@@ -289,7 +318,7 @@ def _run():
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
     fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
     assert not fails, 'translate-preview-survives-rebuild failures:\n' + output
-    assert output.count('PASS') >= 12, f'expected >=12 PASS lines, got:\n{output}'
+    assert output.count('PASS') >= 15, f'expected >=15 PASS lines, got:\n{output}'
 
     # ── Source-level guard for Risk B (connectToTask reconnect, contract d) ──
     # The runtime case above reproduces the DOM sequence, but only the SHIPPED

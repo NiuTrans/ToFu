@@ -12,7 +12,9 @@ function newChat() {
   _purgeEmptyConvs();
   const prevConv = getActiveConv();
   if (prevConv) {
-    prevConv.model = config.model || serverModel;
+    /* ★ See _saveConvToolState: a provisional (fallback) paint must never be
+     *   written back as the conversation's stored model. */
+    if (!config._modelIsProvisional && config.model) prevConv.model = config.model;
     prevConv.thinkingDepth = config.thinkingDepth;
     prevConv.searchMode = searchMode || "multi";
     prevConv.fetchEnabled = !!fetchEnabled;
@@ -61,7 +63,7 @@ function newChat() {
     ? `<div class="welcome-folder-badge"><span class="welcome-folder-dot" style="color:${_newChatFolder.color || '#888'}">●</span> ${escapeHtml(_newChatFolder.name)}</div>`
     : '';
   document.getElementById("chatInner").innerHTML =
-    `<div class="welcome" id="welcome"><div class="welcome-icon"><img src="${BASE_PATH}/static/icons/tofu-welcome.svg" alt="Tofu" width="64" height="64"></div><h2 class="tofu-brand"><span class="tofu-brand-t">T</span><span class="tofu-brand-o1">o</span><span class="tofu-brand-f">f</span><span class="tofu-brand-u">u</span><small>豆腐</small></h2>${_folderBadgeHtml}<div class="feature-pills">${_welcomePillsHtml()}</div></div>`;
+    `<div class="welcome" id="welcome"><div class="welcome-icon"><img ${brandLogoImgAttrs(64)}></div><h2 class="tofu-brand"><span class="tofu-brand-t">T</span><span class="tofu-brand-o1">o</span><span class="tofu-brand-f">f</span><span class="tofu-brand-u">u</span><small>豆腐</small></h2>${_folderBadgeHtml}<div class="feature-pills">${_welcomePillsHtml()}</div></div>`;
   buildTurnNav(null);
   renderPendingQueueUI(null);
   // ★ A brand-new conversation has no latch — hide any lingering banner.
@@ -71,6 +73,9 @@ function newChat() {
     _clearProjectStateLocal();
     _resetToolsToDefaults();
   }
+  /* The Project-Brain surfaces re-resolve via the _updateProjectUI funnel
+   *   (project.js) — !hasInput reaches it through _clearProjectStateLocal,
+   *   and with pending input the project legitimately stays armed. */
   if (typeof updateContextBar === 'function') updateContextBar();
 }
 /* ★ Reconnect-on-open — the root-cause fix for "click into a conversation →
@@ -102,14 +107,69 @@ function newChat() {
 function _reconnectServerTaskIfIdle(id) {
   if (typeof activeStreams === 'undefined' || activeStreams.has(id)) return false;
   const conv = conversations.find((x) => x.id === id);
-  if (!conv || !conv.activeTaskId) return false;
+  if (!conv) return false;
+  /* pt_conv_state_ssot P2: pick the reconnect target from the UNION —
+   * conv.activeTaskId (this tab's own send) preferred, else any tid from
+   * the server-authoritative Set (sibling device's live task). The Set
+   * fixes the phone-vs-PC symptom: PC has activeTaskId=null (because
+   * loadConversationsFromServer refuses to overwrite the null preserved
+   * from initial load), yet the sidebar dot lit because the authoritative
+   * Set carried the phone-originated tid. Clicking through must now attach
+   * to that live task instead of no-op'ing. */
+  const targetTid = (typeof pickAuthoritativeTaskIdForReconnect === 'function')
+    ? pickAuthoritativeTaskIdForReconnect(conv)
+    : (conv.activeTaskId || null);
   if (typeof connectToTask !== 'function') return false;
+  /* ★ VU-carrier fallback — the cold-attach half of the autopilot hop
+   *   (owner-reported 2026-07-29, conv ms5j3qi7wd1g7u).
+   *
+   *   A live autopilot VU carrier lights the busy dot (it IS the fact that
+   *   means "this conversation is working") but is deliberately absent from
+   *   the ATTACHABLE set, so `targetTid` above is null whenever the carrier is
+   *   the only live worker. Until now that ended the story: this seam returned
+   *   false, nothing attached, and the conversation static-rendered as
+   *   FINISHED while the composer showed Stop — measured at 282.6s / 69 events
+   *   / 4 tool-using LLM rounds of completely invisible generation. Worse, the
+   *   whole autopilot chain (VU → follow-up → next VU) is discovered by hopping
+   *   from one live terminal frame to the next, so a client that missed the one
+   *   hop frame stayed blind until a manual refresh.
+   *
+   *   The carrier is not unattachable — it is attachable by a DIFFERENT
+   *   connector. `{vuCarrier:true}` routes to _connectAutopilotKick, which
+   *   binds a DETACHED dummy assistant (never a real placeholder) and lets the
+   *   VU bubble be born from the carrier's own seeded `autopilot_vu_start`;
+   *   the SSE replay from cursor 0 then re-delivers the VU's accumulated
+   *   frames, so a cold attach mid-turn paints the same bubble the hot hop
+   *   would have. This is the SAME connector + same discipline the hot hop
+   *   uses (stream_lifecycle.js `_runTerminalContinuation`) — deliberately not
+   *   a second mechanism.
+   *
+   *   Order matters: consulted ONLY when no attachable worker exists, so a
+   *   conv with a real running task never gets routed through the VU
+   *   connector (that would suppress its real assistant bubble). */
+  const _vuCarrierTid = (!targetTid &&
+                         typeof pickVuCarrierForAttach === 'function')
+    ? pickVuCarrierForAttach(conv)
+    : null;
+  if (!targetTid && _vuCarrierTid) {
+    console.info(
+      `[loadConversation] 🤖 Reconnect-on-open (VU carrier) — conv=${id.slice(0,8)} ` +
+      `carrier=${_vuCarrierTid.slice(0,8)} (autopilot is generating; attaching ` +
+      `via the VU connector so the turn is visible instead of silently running)`
+    );
+    connectToTask(id, _vuCarrierTid, 0, { vuCarrier: true });
+    if (activeStreams.has(id) && typeof showStreamingUIForConv === 'function') {
+      showStreamingUIForConv(id);
+    }
+    return true;
+  }
+  if (!targetTid) return false;
   console.info(
     `[loadConversation] 🔗 Reconnect-on-open — conv=${id.slice(0,8)} ` +
-    `activeTaskId=${conv.activeTaskId.slice(0,8)} (no live stream in this tab, ` +
+    `taskId=${targetTid.slice(0,8)} (no live stream in this tab, ` +
     `task running server-side)`
   );
-  connectToTask(id, conv.activeTaskId);
+  connectToTask(id, targetTid);
   /* connectToTask synchronously sets the activeStreams entry + arms twStart
    * (before its first await), then inserts the streaming bubble. Repaint the
    * statics + the single streaming bubble exactly like boot's _ensureNewest so
@@ -180,7 +240,10 @@ function loadConversation(id) {
   let _needsDeferredSave = false;
   if (prevConv && prevConv.id !== id) {
     delete prevConv._initialSwitchLoad;   // ★ clear stale flag from previous conv
-    prevConv.model = config.model || serverModel;
+    /* ★ See _saveConvToolState: switching AWAY from a conv must not stamp a
+     *   provisional default paint onto it. This is the exact path that turned
+     *   a mispainted composer into persisted corruption. */
+    if (!config._modelIsProvisional && config.model) prevConv.model = config.model;
     prevConv.thinkingDepth = config.thinkingDepth;
     prevConv.searchMode = searchMode || "multi";
     prevConv.fetchEnabled = !!fetchEnabled;
@@ -228,6 +291,9 @@ function loadConversation(id) {
    *   anchor-preserve branch and HOLD that position instead of re-snapping —
    *   see renderChat. */
   if (typeof _openScrollConvId !== 'undefined') _openScrollConvId = null;
+  /* ★ The explicit-bottom latch belongs to the OLD conv's open — never let
+   *   it follow the user into a different conversation. */
+  if (typeof _explicitBottomLatch !== 'undefined') _explicitBottomLatch = null;
   /* ★ If loading a conv that doesn't belong to the active folder view, exit it */
   if (typeof getActiveFolderId === 'function' && getActiveFolderId()) {
     const _loadedConv = conversations.find(c => c.id === id);
@@ -281,7 +347,7 @@ function loadConversation(id) {
            *   frozen placeholder. connectToTask + showStreamingUIForConv already
            *   painted; nothing more to do here. */
         } else if (c._needsLoad || c.messages.length === 0) {
-          renderChat(c);
+          window.ConvView.replaceAll(c.id);
           if (typeof _restoreConvToolState === "function") _restoreConvToolState(c);
         }
         /* ★ No-auto-scroll-on-OPEN (owner directive): the former trailing
@@ -292,6 +358,10 @@ function loadConversation(id) {
          *   snapping it to the bottom on open. */
       }
       delete c._initialSwitchLoad;   // ★ clear flag after initial load completes
+      /* ★ Open complete — the explicit-bottom latch has done its job (every
+       *   mid-open render re-pinned to the bottom). Release it so unsolicited
+       *   repaints return to the anchor / near-bottom heuristics. */
+      if (typeof _explicitBottomLatch !== 'undefined') _explicitBottomLatch = null;
       if (!activeStreams.has(id)) _resumePendingTranslations(id);
     });
   } else if (activeStreams.has(id)) {
@@ -302,7 +372,7 @@ function loadConversation(id) {
      *   connectToTask re-attaches (self-healing to poll/finishStream if the task
      *   already finished) instead of leaving a static, frozen placeholder. */
   } else {
-    renderChat(c);
+    window.ConvView.replaceAll(c.id);
     _resumePendingTranslations(id);
   }
 

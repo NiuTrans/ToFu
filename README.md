@@ -80,10 +80,12 @@ Click **⚙️ Settings → 🔗 Providers** and add your API keys. Tofu works w
 | Provider | Setup |
 |---|---|
 | OpenAI, Anthropic, Amazon Bedrock, Google Gemini, DeepSeek, Qwen, MiniMax, GLM, Doubao, Mistral, Grok, Baidu Qianfan, OpenRouter | Click **⚡ Add from template** — one click |
-| Ollama, vLLM, or any local model server | Add as custom provider with your local endpoint |
+| Ollama, vLLM, or any local model server | **Auto-discovered** on startup when serving on its default port (Ollama `11434`, vLLM `8000`, SGLang `30000`) — or add as custom provider with your local endpoint |
 | Azure OpenAI | Template available with deployment-specific base URL |
 
 **Multiple keys per provider** — add several API keys and Tofu automatically rotates between them when one hits rate limits. Across providers, the smart dispatcher routes requests based on real-time latency scoring and error-rate tracking.
+
+**Local engine auto-discovery** — Tofu probes the canonical loopback ports (Ollama `:11434`, vLLM `:8000`, SGLang `:30000`, plus `$OLLAMA_HOST`) shortly after startup and every 2 minutes. When an engine answers with a non-empty model list it is registered as a normal local provider automatically — health checks and the Settings card work exactly like a manually added one. Deleting an auto-added provider dismisses its port permanently (no zombie re-adding). Set `TOFU_LOCAL_AUTODISCOVER=0` to opt out.
 
 Or set environment variables for headless/Docker setups:
 ```bash
@@ -342,10 +344,14 @@ Already paying for **Claude Pro/Max** or a **ChatGPT** subscription? Log in with
 
 When you need the assistant to read pages that require login — internal dashboards, JIRA tickets, authenticated admin panels — the browser extension bridges your real browser session to Tofu.
 
+Works in **Chrome, Edge and Chromium** — they are all Chromium-family, so the same extension loads unchanged. (Firefox is not supported: it has no persistent "load unpacked" path — an `about:debugging` add-on is dropped when you restart the browser, and end users can only install add-ons Mozilla has signed.)
+
 **Setup:**
-1. Go to `chrome://extensions` → Enable Developer Mode
+1. Open your browser's extensions page — `chrome://extensions` in Chrome/Chromium, `edge://extensions` in Edge — and turn on Developer Mode
 2. Load unpacked → select the `browser_extension/` folder
 3. Click the extension icon → enter your Tofu server URL
+
+> Running Tofu on the same machine? Settings → Local Control detects which browser you have and offers a one-click button to open the right extensions page with the folder path already copied.
 
 **What it can do:**
 
@@ -374,10 +380,26 @@ When you need the assistant to interact with your local machine beyond the brows
 **Setup:**
 ```bash
 pip install pyautogui pillow psutil
-python lib/desktop_agent.py --server http://your-server:15000 --allow-write --allow-exec
+python -m lib.desktop_agent --server http://your-server:15000 --allow-write --allow-exec
 ```
 
 The agent connects to your Tofu server and exposes tools for file operations, clipboard, screenshots, GUI automation (pyautogui), and system info. All dangerous operations require explicit `--allow-write` / `--allow-exec` flags.
+
+#### Remote Worktree
+
+Let Studio **edit project code on your own machine** (Windows/macOS) — no shared filesystem; only file *intents* are routed to the local agent for execution.
+
+**Journey:**
+1. Start the agent on your machine, declaring share roots (the project directories it may touch) — repeatable, persisted to `~/.tofu/desktop_agent.json` so they survive restarts:
+   ```bash
+   python -m lib.desktop_agent --server https://your-server --allow-write --allow-exec \
+       --bridge-secret <token-from-step-2> --root myapp=~/code/myapp
+   ```
+2. Mint a bridge token under **Settings → Devices** (shown once, scoped to your account — commands only ever reach YOUR devices);
+3. In the project picker's **Remote devices** group, add a share root to the workspace (offline devices greyed out);
+4. From then on Studio's `write_file` / `apply_diff` / `run_command` land on **your local disk** — snapshot-before-write (`<project>/.tofu/file-history/`, rollback-able), external edits are refused until re-read, and `run_command` output streams live into the terminal block just like server-side runs.
+
+**Safety boundary:** root-relative paths only (symlink/`..`/absolute escapes all refused); delete-command targets must stay inside the root; remote writes default to the Manual approval gate; per-user tokens isolate command delivery on relay deployments. Master switch `TOFU_REMOTE_WORKTREE` (server side) is OFF by default. See `docs/REMOTE_WORKTREE_DESIGN.md`.
 
 ---
 
@@ -392,6 +414,7 @@ When you're reading research papers — arXiv PDFs, conference proceedings, inte
 - **Paper library** — the left sidebar shows all papers you've read, grouped by date; switch between them without losing conversation context
 - **Side-by-side reading** — scroll the PDF while chatting; the assistant sees the page you're on
 - **Notes tab** — drop your own notes alongside the paper; they persist across sessions
+- **Podcast tab** — turn the paper's analysis report into a listenable solo podcast (~5-min short or ~15-min full). Formulas are told as intuition (never read as symbols), the top figures get a three-beat walkthrough, and every number in the script is machine-traced back to the report before synthesis. Play it in the tab (click-to-seek transcript, sleep timer), download the MP3, or export the script. Requires a report first; without a configured TTS voice slot (`capabilities: ["tts"]` on an OpenAI-compatible `/audio/speech` provider) it degrades gracefully to script + transcript only. See `docs/PAPER_PODCAST_DESIGN.md`.
 
 > ⚠️ **Beta:** Paper Reader is actively being iterated on. Feedback welcome on [GitHub Issues](https://github.com/rangehow/ToFu/issues).
 
@@ -431,6 +454,28 @@ When you need visual content — illustrations, diagrams, logos, edited photos �
 Multi-model dispatch cycles across Gemini and GPT image models, automatically retrying on rate limits.
 
 ---
+Multi-model dispatch cycles across Gemini and GPT image models, automatically retrying on rate limits.
+
+---
+
+### 🎬 Motion Video (MG animation)
+
+Turn a subtitle transcript (SRT) into a vertical MG-animated video — Tofu storyboards the transcript into scenes, authors a HyperFrames HTML animation per scene, renders each scene in headless Chrome, and stitches `final.mp4`. No external agent CLIs, no video editor.
+
+**How to use:** Attach a project (Studio), paste an SRT (or a topic to narrate), and ask for a video — e.g. "turn this transcript into a vertical short video". The assistant works under `.tofu/motion_video/<slug>/` and reports the final MP4 path.
+
+- **Deterministic renders** — every frame is computed from its timestamp (seekable GSAP timeline); re-render just one scene and re-concat when a single shot looks off
+- **Zero-LLM quality gates** — storyboard timeline validation (full coverage, duration sum ±0.1s), HyperFrames lint/validate/inspect before every render, and ffprobe spec checks (resolution / fps / duration / silence) after
+- **Self-bootstrapping toolchain** — `motion_video_env_check` installs the pinned HyperFrames CLI on first use; ffmpeg comes from `imageio-ffmpeg` and ffprobe from a static build (both no-root); Chrome reuses the Playwright cache
+- **Failure classification** — render errors come back categorized (`env_missing` / `lint` / `chrome` / `timeout` / `aborted`) with upstream fix hints instead of raw logs
+- **TTS narration (音画合成)** — `motion_video_narrate` voices each scene from its subtitle text (reusing the podcast chain's TTS slots), audio-led timing extends scenes that need more room, and `motion_video_mux` finishes with loudness-normalized AAC; without a TTS slot the pipeline degrades to silent video instead of failing
+- **Headless API + parallel rendering** — `POST /api/v1/motion/videos` runs the whole pipeline server-side (zero-LLM storyboard + template compositions, bounded-parallel scene renders, dedup-join on repeat requests) and serves the result over Range-enabled `/api/v1/motion/videos/<id>/file` with an aligned sidecar SRT
+- **Single-scene regen + burn-in** — re-render just one shot and re-assemble (`POST …/scenes/<id>/regen`, stable final URL), list per-scene status (`GET …/scenes`), and optionally hard-burn subtitles (`burn_in: true`, libass, CJK fonts supported)
+- **Paper video abstract** — one call turns a paper report into a short narrated MG video (`POST /api/v1/paper/video/start`, report-gated like the podcast chain)
+- **Paper "Video" tab** — the paper reader's fifth tab: generate card (lang/quality/voice/narration/burn-in), live phase progress, an inline player, and a per-scene grid where every shot has its own preview and a re-render button
+- **Deep knowledge packs** — the 29 motion rules, 13 scene blueprints, and 20+ design frame presets from vibe-motion/auto-motion are one click away in Settings → Skills (search "hyperframes")
+
+---
 
 ### 🎨 Artifacts (live canvas)
 
@@ -444,7 +489,7 @@ When the assistant produces something you'd rather *see* than scroll past — a 
 
 When you want to connect external tool servers — GitHub, databases, custom APIs — MCP bridges them into Tofu's tool system.
 
-**How it works:** MCP servers run as subprocesses and communicate via stdio/SSE (JSON-RPC 2.0). Tofu translates their tools into OpenAI function-calling format, so the LLM can discover and invoke them alongside native tools.
+**How it works:** MCP servers run either as local subprocesses (stdio) or as remote HTTP endpoints (`streamable-http` / `sse`), all speaking JSON-RPC 2.0. Tofu translates their tools into OpenAI function-calling format, so the LLM can discover and invoke them alongside native tools.
 
 **Setup:** Go to **Settings** or configure in `data/config/mcp_servers.json`:
 ```json
@@ -457,7 +502,36 @@ When you want to connect external tool servers — GitHub, databases, custom API
 }
 ```
 
+A **remote** server that authenticates with a header or a query parameter keeps its
+secret in `env` — `headers` and `url` hold only `${VAR}` references, which are
+substituted at connect time. That way credentials live in exactly one place and
+are redacted out of every API response and log line:
+```json
+{
+  "rollinggo-hotel": {
+    "transport": "streamable-http",
+    "url": "https://mcp.rollinggo.cn/mcp",
+    "headers": { "Authorization": "Bearer ${ROLLINGGO_API_KEY}" },
+    "env": { "ROLLINGGO_API_KEY": "your-key" }
+  },
+  "amap-maps": {
+    "transport": "streamable-http",
+    "url": "https://mcp.amap.com/mcp?key=${AMAP_MAPS_API_KEY}",
+    "env": { "AMAP_MAPS_API_KEY": "your-key" }
+  }
+}
+```
+
 The assistant can then call tools like `mcp__github__create_issue`, `mcp__github__search_code`, etc. — any MCP-compatible server works.
+
+**Local life & travel (China).** The catalog ships a category of everyday-errand
+servers that individual developers can get keys for: **Amap** (routing, nearby
+search, weather), **RollingGo** hotels + flights (real bookable inventory),
+**Tuniu** (hotels/flights/trains/tickets/cruises/tours with a full booking
+chain) and **12306** (train availability, local + no key). **Fliggy** ships as a
+Skill instead of an MCP server, so you'll find it under **Settings → Skills**.
+Ctrip and Meituan are deliberately absent: their AI platforms are gated to
+corporate customers, so a one-click card could not actually work.
 
 ---
 
@@ -545,7 +619,7 @@ When you want to explore a different direction without losing the current thread
 
 ### 🐾 Tofu Pet (just for fun)
 
-Switch to the **Tofu** theme and a little animated chibi-tofu mascot moves into the project bar. It wanders through a decorative scene with a real walk cycle and moods — thinking while a task loads, celebrating on success — and leaves interactive footstep effects (grass tufts, pool ripples, sky wisps). Use the **Scene** button (Meadow / Pool / Sky / Off) and **Pet** button (Tofu / Oneko) in the bar to customize it. It respects your OS "reduce motion" setting. Purely decorative — turn it off any time.
+Switch to the **Tofu** theme and the Tofu mascot itself moves into the project bar — the same isometric cream block as the app's logo, drawn in the same palette. It wanders through a decorative scene with a real walk cycle and moods — thinking while a task loads, celebrating on success, napping at night — and disturbs the scene as it goes (grass parts, the pool ripples, clouds stir). Because it's a block of tofu rather than a creature with limbs, it acts by being SOFT: it squashes as it lands, stretches as it rises, and wobbles when it settles. Drag it along the bar, or click it for a summary of your day. Use the **Scene** button (Meadow / Pool / Sky / Off) in the bar to change its world. It respects your OS "reduce motion" setting. Purely decorative — turn it off any time.
 
 ---
 
@@ -630,7 +704,7 @@ The `.env.example` file documents all supported variables. Key ones:
 │   ├── scheduler/             Task scheduling (cron, proactive agents)
 │   ├── image_gen.py           Image generation (multi-model dispatch)
 │   ├── mt_provider.py         Machine translation providers (NiuTrans, custom)
-│   ├── desktop_agent.py       Desktop automation agent
+│   ├── desktop_agent/         Desktop automation agent (local bridge)
 │   └── ...
 │
 ├── lib/conversations/         Project Brain — charter, board, feed, peer messaging, path leases, status lane
@@ -708,6 +782,7 @@ Tofu has a tri-state auth model, persisted at `data/config/auth.json` and switch
 - No secrets in source — all credentials loaded from environment variables or Settings UI.
 - Tool execution — the assistant can run shell commands and edit files; dangerous patterns are blocked, but use with appropriate caution.
 - Desktop agent — requires explicit `--allow-write` / `--allow-exec` flags.
+- Remote worktrees — Studio can edit project code **on your own machine** (Windows/macOS) without sharing a filesystem: intents are routed to a local desktop agent over the bridge. Start the agent with `share_roots` declared, mint a bridge token under **Settings → Devices** (shown once, scoped to your account), then add a remote root from the “Remote devices” group in the project picker. From then on `write_file` / `apply_diff` / `run_command` land on your local disk — snapshot-before-write under `<project>/.tofu/file-history/`, freshness-gated against external edits, streamed command output, root-confined paths and delete-target guards, and per-user command isolation on relay deployments. Disabled by default via the `TOFU_REMOTE_WORKTREE` master switch. See `docs/REMOTE_WORKTREE_DESIGN.md`.
 - `TUNNEL_TOKEN` is a deprecated back-compat shim and prints a warning at boot — migrate to the API-keys system.
 
 ---

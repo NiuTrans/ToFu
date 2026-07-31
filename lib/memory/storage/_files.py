@@ -182,15 +182,51 @@ def _write_memory_file(filepath, mem):
 #  List / Load Memories
 # ═══════════════════════════════════════════════════════
 
+def _list_skill_packages_in_dir(dirpath, scope='global'):
+    """Enumerate skill packages (``<dirpath>/<id>/SKILL.md``) in a directory.
+
+    This is the skills-channel view: ONLY package directories are returned,
+    flat ``*.md`` memories are ignored. Sub-files (references, scripts,
+    knowledge) are NOT indexed individually — they are reachable via
+    Progressive Disclosure once the SKILL.md is in scope.
+
+    The ``global`` sub-directory is excluded when scanning a project root —
+    it is enumerated separately as scope='global'.
+    """
+    packages = []
+    if not os.path.isdir(dirpath):
+        return packages
+
+    for entry in sorted(os.listdir(dirpath)):
+        if entry.startswith('.'):
+            continue
+        full = os.path.join(dirpath, entry)
+
+        # Skip the 'global' sub-directory when listing project scope —
+        # global entries are listed via their own enumeration.
+        if scope == 'project' and entry == 'global' and os.path.isdir(full):
+            continue
+
+        if os.path.isdir(full):
+            skill_md = os.path.join(full, 'SKILL.md')
+            if os.path.isfile(skill_md):
+                mem = _memory_from_file(
+                    skill_md, scope=scope,
+                    package_dir=full,
+                    memory_id_override=entry,
+                )
+                if mem:
+                    packages.append(mem)
+    return packages
+
+
 def _list_memories_in_dir(dirpath, scope='global'):
     """List memories in a directory.
 
     Discovers two physical layouts:
       * **Flat memory**         — ``<dirpath>/<id>.md``
-      * **Skill package**       — ``<dirpath>/<id>/SKILL.md`` (Anthropic /
-        OpenClaw / mlp-skills layout).  Sub-files (references, scripts,
-        knowledge) are NOT indexed individually — they are reachable via
-        Progressive Disclosure once the SKILL.md is in scope.
+      * **Skill package**       — ``<dirpath>/<id>/SKILL.md`` (via
+        :func:`_list_skill_packages_in_dir`).
 
     The ``global`` sub-directory is excluded when scanning the project
     root — it is enumerated separately as scope='global'.
@@ -215,16 +251,7 @@ def _list_memories_in_dir(dirpath, scope='global'):
                 memories.append(mem)
             continue
 
-        if os.path.isdir(full):
-            skill_md = os.path.join(full, 'SKILL.md')
-            if os.path.isfile(skill_md):
-                mem = _memory_from_file(
-                    skill_md, scope=scope,
-                    package_dir=full,
-                    memory_id_override=entry,
-                )
-                if mem:
-                    memories.append(mem)
+    memories.extend(_list_skill_packages_in_dir(dirpath, scope=scope))
     return memories
 
 

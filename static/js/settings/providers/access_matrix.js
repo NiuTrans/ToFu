@@ -55,6 +55,15 @@ var _stgMatrixProbeAttached = {};
 /** Per-provider "attempts per cell" setting (filters false 429s). Default 3. */
 var _stgMatrixAttempts = {};
 
+/** The scope of the currently-running probe, keyed by provider index.
+ *  Shape: ``{key_idxs?: [int], model_ids?: [string]}`` — null/absent means a
+ *  full-grid probe. Drives the per-scope spinner on the row/column/cell
+ *  probe buttons. Cleared when the probe reaches a terminal state. */
+var _stgMatrixProbeScope = {};
+
+/** Shared lightning-bolt glyph for every probe trigger (toolbar + scopes). */
+var _MX_BOLT = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z"/></svg>';
+
 /** Update the attempts setting for a provider from the toolbar selector. */
 function _setMatrixAttempts(provIdx, val) {
   _stgMatrixAttempts[provIdx] = Math.max(1, Math.min(5, parseInt(val, 10) || 3));
@@ -68,6 +77,164 @@ function _providerId(provIdx) {
   var p = _stgProviders[provIdx];
   return (p && p.id) ? p.id : ('idx_' + provIdx);
 }
+
+/** True while the running probe's scope IS exactly this row / column / cell
+ *  (used to paint the spinner on the trigger the user clicked). */
+function _scopeCovers(provIdx, kind, keyIdx, modelId) {
+  var s = _stgMatrixProbeScope[provIdx];
+  var probe = _stgMatrixProbe[provIdx];
+  if (!s || !probe || probe.status !== 'running') return false;
+  var ks = s.key_idxs, ms = s.model_ids;
+  if (kind === 'cell') {
+    return !!(ks && ms && ks.length === 1 && ks[0] === keyIdx &&
+              ms.length === 1 && ms[0] === modelId);
+  }
+  if (kind === 'col') return !!(ks && !ms && ks.length === 1 && ks[0] === keyIdx);
+  if (kind === 'row') return !!(ms && !ks && ms.length === 1 && ms[0] === modelId);
+  return false;
+}
+
+/** Start a row / column / single-cell probe (merged into the saved snapshot
+ *  server-side; the rest of the grid keeps its verdicts). */
+function _probeMatrixScope(provIdx, only) {
+  var probe = _stgMatrixProbe[provIdx];
+  if (probe && probe.status === 'running') return; // one probe per provider at a time
+  _runMatrixProbe(provIdx, false, only);
+}
+
+/** Memo of the last fit: the inputs the verdict was computed from, plus the
+ *  verdict itself. Keyed on things our own width change can NOT alter:
+ *   - the scroll ELEMENT references. Matrix content only ever changes through
+ *     a full `_renderProvidersTab` rebuild, which returns a brand-new element
+ *     — so the same element reference across two fits means the content (and
+ *     its intrinsic width) is byte-identical. This is the ONLY truthful
+ *     content signal: scrollWidth saturates to the panel width once wide, so
+ *     no width reading can see a content change from inside the wide state.
+ *   - the viewport width, which a real window resize changes.
+ *   - the class state we last produced, so an external toggle re-fits.
+ *  Never keyed on scrollWidth — the class we toggle feeds back into it. */
+var _mxFitMemo = null;
+
+/** Set while _fitMatrixPanelWidth mutates the panel, so the `resize` event our
+ *  own 380px width change provokes (the overlay's scrollbar appearing or
+ *  disappearing) is not treated as user intent and bounced straight back. */
+var _mxFitApplying = false;
+var _mxFitApplyT = null;
+
+/** The current matrix scroll elements as a plain array (NodeList in the
+ *  browser, array in the node harness). */
+function _mxFitScrolls() {
+  var list = document.querySelectorAll('.stg-matrix-scroll');
+  var out = [];
+  for (var i = 0; i < list.length; i++) out.push(list[i]);
+  return out;
+}
+
+/** True when nothing the verdict depends on has changed since the last fit. */
+function _mxFitUnchanged(els, vw, wasWide) {
+  var m = _mxFitMemo;
+  if (!m || m.vw !== vw || m.wide !== wasWide || m.els.length !== els.length) return false;
+  for (var i = 0; i < els.length; i++) {
+    if (m.els[i] !== els[i]) return false;
+  }
+  return true;
+}
+
+/** Widen the settings panel when an open matrix overflows it, so 3+ keys
+ *  don't force horizontal scrolling on wide-enough screens. The class is
+ *  removed as soon as no matrix overflows (matrix closed / panel wide enough). */
+function _fitMatrixPanelWidth() {
+  if (typeof window !== 'undefined') {
+    window.__fitCount = (window.__fitCount || 0) + 1;
+  }
+  var panel = document.querySelector('.modal.settings-panel');
+  if (!panel) return;
+  var wasWide = panel.classList.contains('stg-matrix-wide');
+
+  // Idempotence gate. A re-fit whose inputs are unchanged must cost ZERO DOM
+  // writes — no class toggle, no forced reflow, no transition edit. Every
+  // periodic caller (probe poll, tab switch, the resize our own width change
+  // echoes back) therefore becomes a no-op once the layout has settled, which
+  // closes ALL re-entry paths at once rather than the one we enumerated.
+  var scrolls = _mxFitScrolls();
+  var vw = (typeof window !== 'undefined' && window.innerWidth) || 0;
+  if (_mxFitUnchanged(scrolls, vw, wasWide)) return;
+
+  if (typeof window !== 'undefined') {
+    window.__fitWork = (window.__fitWork || 0) + 1;
+  }
+  _mxFitApplying = true;
+  // The overflow verdict MUST be measured at the panel's DEFAULT width, never
+  // at the width the class itself produces: a re-fit while the panel is wide
+  // (probe-resume re-render, 1.5s probe poll, tab switch) would otherwise read
+  // "no overflow" at the widened width and shrink the panel right back —
+  // the expand→narrow flicker. transition:none makes the class removal take
+  // effect at the forced reflow below, and everything runs in one synchronous
+  // task, so no intermediate state ever paints.
+  panel.style.transition = 'none';
+  panel.classList.remove('stg-matrix-wide');
+  var wide = false;
+  for (var i = 0; i < scrolls.length; i++) {
+    // Hidden matrices (inactive settings tab / collapsed provider card) have
+    // a zero layout box — they must not widen the panel for something the
+    // user can't see.
+    if (scrolls[i].clientWidth === 0) continue;
+    if (scrolls[i].scrollWidth > scrolls[i].clientWidth + 4) { wide = true; break; }
+  }
+  if (wide && !wasWide) {
+    // Narrow→wide edge: restore the transition BEFORE the class change so the
+    // single widen still animates. Every other edge applies with the
+    // transition suspended — a change that never animates cannot flicker.
+    panel.style.transition = '';
+    panel.classList.toggle('stg-matrix-wide', true);
+  } else {
+    panel.classList.toggle('stg-matrix-wide', wide);
+    // Commit the final width WHILE the transition is still suspended. The
+    // measurement reflow above committed the panel at its DEFAULT width, so
+    // that is the value the transition engine would animate FROM: clearing
+    // the transition before this commit makes every re-fit of an
+    // already-wide panel animate default→wide. The 1.5s probe poll re-fits
+    // forever, which turned that into a continuous narrow↔wide sweep.
+    void panel.offsetWidth;
+    panel.style.transition = '';
+  }
+  // The elements are the same objects before and after our class toggle (the
+  // toggle never recreates them), so the refs captured at entry describe the
+  // settled state a later no-op re-fit will observe — making the memo hit.
+  _mxFitMemo = { els: scrolls, vw: vw, wide: wide };
+  // The flag must OUTLIVE this function. A scrollbar toggle caused by the
+  // width change is delivered as an async `resize` on a later task, so
+  // clearing synchronously here would leave the guard permanently false by
+  // the time the echo lands. Hold it past the resize handler's own debounce.
+  if (typeof setTimeout === 'function') {
+    if (_mxFitApplyT) clearTimeout(_mxFitApplyT);
+    _mxFitApplyT = setTimeout(function() { _mxFitApplying = false; }, 250);
+  } else {
+    _mxFitApplying = false;
+  }
+}
+
+// Re-fit on window resize (debounced) — a wider viewport may make the wide
+// panel unnecessary; a narrower one may need it even for 2 keys. Guarded for
+// node harnesses that eval this file without DOM event APIs.
+(function() {
+  if (typeof window.addEventListener !== 'function') return;
+  var _mxResizeT = null;
+  window.addEventListener('resize', function() {
+    window.__resizeCount = (window.__resizeCount || 0) + 1;
+    // Our own widen/narrow reflows the overlay and can toggle the modal's
+    // vertical scrollbar, which fires `resize`. Bouncing that back into a
+    // re-fit is a closed loop with no user input in it, so drop the echo.
+    if (_mxFitApplying) {
+      window.__resizeEchoDropped = (window.__resizeEchoDropped || 0) + 1;
+      return;
+    }
+    if (_mxResizeT) clearTimeout(_mxResizeT);
+    _mxResizeT = setTimeout(function() {
+      if (document.querySelector('.modal.settings-panel .stg-matrix-scroll')) _fitMatrixPanelWidth();
+    }, 180);
+  });
+})();
 
 /** Flip between the card view and the access-matrix view for a provider. */
 function _toggleMatrixView(provIdx) {
@@ -170,7 +337,10 @@ function _renderAccessMatrix(provIdx) {
     statusTxt = t('settings.matrixProbeFailed') + (probe.error ? ': ' + probe.error : '');
   } else if (hasResults) {
     statusTxt = (probe.summary.ok || 0) + ' ' + t('settings.matrixOkCount') +
-      ' · ' + recommendCount + ' ' + t('settings.matrixFlaggedCount');
+      ' · ' + recommendCount + ' ' + t('settings.matrixFlaggedCount') +
+      ((probe.summary.skipped || 0) > 0
+        ? ' · ' + probe.summary.skipped + ' ' + t('settings.matrixSkippedCount')
+        : '');
   }
 
   var html = '<div class="stg-matrix" data-prov-idx="' + provIdx + '">' +
@@ -210,6 +380,10 @@ function _renderAccessMatrix(provIdx) {
         'spellcheck="false" autocomplete="off" ' +
         'onchange="_onKeyLabelEdit(' + provIdx + ',' + ki + ',this.value)">' +
       '<span class="stg-mx-keytail">' + escapeHtml(tail) + '</span>' +
+      '<button type="button" class="stg-mx-zap col' + (_scopeCovers(provIdx, 'col', ki) ? ' probing' : '') + '"' +
+        (running ? ' disabled' : '') +
+        ' onclick="_probeMatrixScope(' + provIdx + ',{key_idxs:[' + ki + ']})" ' +
+        'title="' + escapeHtml(t('settings.matrixProbeColHint')) + '">' + _MX_BOLT + '</button>' +
     '</th>';
   }
   html += '</tr></thead><tbody>';
@@ -240,6 +414,16 @@ function _renderMatrixRow(provIdx, modelIdx, m, id, rowPos, rowCount, keys, grou
   var brand = (typeof _detectBrand === 'function') ? _detectBrand(id) : '';
   var brandSvg = (typeof _brandSvg === 'function') ? _brandSvg(brand, 14) : '';
 
+  // Row-scope probe button: probes exactly this concrete id across every key.
+  var _rowProbe = _stgMatrixProbe[provIdx] || {};
+  var _rowRunning = (_rowProbe.status === 'running');
+  var rowProbeBtn = '<button type="button" class="stg-mx-zap row' +
+      (_scopeCovers(provIdx, 'row', null, id) ? ' probing' : '') + '"' +
+    (_rowRunning ? ' disabled' : '') +
+    ' onclick="event.stopPropagation();_probeMatrixScope(' + provIdx +
+      ',{model_ids:[' + JSON.stringify(id).replace(/"/g, '&quot;') + ']})" ' +
+    'title="' + escapeHtml(t('settings.matrixProbeRowHint')) + '">' + _MX_BOLT + '</button>';
+
   var labelCell;
   if (isAlias) {
     var connector = isLastInGroup ? '└' : '├';
@@ -252,6 +436,7 @@ function _renderMatrixRow(provIdx, modelIdx, m, id, rowPos, rowCount, keys, grou
       '<span class="stg-mx-aliasidx">A' + rowPos + '</span>' +
       '<span class="stg-mx-brand">' + brandSvg + '</span>' +
       '<span class="stg-mx-mid alias-id" title="' + escapeHtml(id) + '">' + escapeHtml(id) + '</span>' +
+      rowProbeBtn +
     '</td>';
   } else {
     var aliasCount = rowCount - 1;
@@ -268,6 +453,7 @@ function _renderMatrixRow(provIdx, modelIdx, m, id, rowPos, rowCount, keys, grou
       '<span class="stg-mx-brand">' + brandSvg + '</span>' +
       '<span class="stg-mx-mid" title="' + escapeHtml(id || '') + '">' + escapeHtml(id || '(unnamed)') + '</span>' +
       countBadge +
+      rowProbeBtn +
     '</td>';
   }
 
@@ -290,6 +476,7 @@ function _probeStatusInfo(status) {
     case 'unauthorized': return { glyph: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em;vertical-align:-2px"><circle cx="12" cy="12" r="10"/><path d="M4.929 4.929 19.07 19.071"/></svg>', cls: 'unauth', label: t('settings.probeUnauthorized') };
     case 'not_found':    return { glyph: '∅', cls: 'nf',     label: t('settings.probeNotFound') };
     case 'unavailable':  return { glyph: '⚠', cls: 'down',   label: t('settings.probeUnavailable') };
+    case 'skipped':      return { glyph: 'N/A', cls: 'skip', label: t('settings.probeSkipped') };
     default:             return { glyph: '✕', cls: 'err',    label: t('settings.probeError') };
   }
 }
@@ -313,11 +500,29 @@ function _renderMatrixCell(provIdx, modelIdx, keyIdx, m, id, isAlias) {
   // Probe-status pip: exact (key, id) result — each alias is its own cell now.
   var probe = _stgMatrixProbe[provIdx] || {};
   var pcells = probe.cells || {};
+  var running = (probe.status === 'running');
   var pip = '';
+  var cellProbe = '';
+  var cellOnly = '{key_idxs:[' + keyIdx + '],model_ids:[' +
+    JSON.stringify(id).replace(/"/g, '&quot;') + ']}';
   var r = pcells[_probeCellKey(keyIdx, id)];
-  if (r) {
+  if (_scopeCovers(provIdx, 'cell', keyIdx, id)) {
+    // This cell is being probed right now — spin a bolt in place of the pip.
+    cellProbe = '<span class="stg-mx-zap cell probing" title="' +
+      escapeHtml(t('settings.matrixProbing')) + '">' + _MX_BOLT + '</span>';
+  } else if (r) {
     var info = _probeStatusInfo(r.status);
-    pip = '<span class="stg-mx-probe-pip ' + info.cls + '" title="' + escapeHtml(info.label + (r.detail ? ' — ' + r.detail : '')) + '">' + info.glyph + '</span>';
+    // The pip doubles as the re-probe trigger for its own cell.
+    pip = '<span class="stg-mx-probe-pip ' + info.cls + ' clickable" role="button" ' +
+      'title="' + escapeHtml(info.label + (r.detail ? ' — ' + r.detail : '') +
+        '\n' + t('settings.matrixProbeCellHint')) + '" ' +
+      'onclick="event.stopPropagation();_probeMatrixScope(' + provIdx + ',' + cellOnly + ')">' +
+      info.glyph + '</span>';
+  } else {
+    // Never probed — hover reveals a single-cell probe button (bottom-left).
+    cellProbe = '<button type="button" class="stg-mx-zap cell"' + (running ? ' disabled' : '') +
+      ' onclick="event.stopPropagation();_probeMatrixScope(' + provIdx + ',' + cellOnly + ')" ' +
+      'title="' + escapeHtml(t('settings.matrixProbeCellHint')) + '">' + _MX_BOLT + '</button>';
   }
 
   return '<td class="stg-mx-cell' + (on ? ' on' : ' off') + (overridden ? ' overridden' : '') +
@@ -328,6 +533,7 @@ function _renderMatrixCell(provIdx, modelIdx, keyIdx, m, id, isAlias) {
       '<span class="stg-mx-dot"></span>' +
     '</button>' +
     pip +
+    cellProbe +
     '<div class="stg-mx-badges">' + badges + '</div>' +
     (isAlias ? '' :
       '<button type="button" class="stg-mx-edit" ' +
@@ -385,7 +591,7 @@ function _editMatrixCell(provIdx, modelIdx, keyIdx) {
   var inheritRpm = (cell.rpm === undefined || cell.rpm === null || cell.rpm === '');
   var inheritCaps = !Array.isArray(cell.capabilities);
   var baseRpm = m.rpm || 30;
-  var allCaps = ['text', 'vision', 'thinking', 'cheap', 'image_gen', 'embedding', 'transcription', 'audio_chat'];
+  var allCaps = ['text', 'vision', 'video', 'thinking', 'cheap', 'image_gen', 'embedding', 'transcription', 'audio_chat'];
   var effCaps = inheritCaps ? (m.capabilities || []) : cell.capabilities;
 
   var title = escapeHtml((m.model_id || '(unnamed)')) + ' &times; ' + escapeHtml(_keyLabel(p, keyIdx));
@@ -463,6 +669,70 @@ function _rerenderMatrix(provIdx) {
 
 // ── Background probe: start / poll / resume / apply ───────────────────────
 
+/** True when the model entry has no chat surface (image_gen /
+ *  embedding / transcription). Reads the shared taxonomy helper when
+ *  available, else the same hardcoded fallback set it ships with. */
+function _matrixModelIsNonChat(m) {
+  if (!m) return false;
+  if (typeof window.isChatModel === 'function') return !window.isChatModel(m);
+  var caps = m.capabilities || [];
+  var nonChat = ['image_gen', 'embedding', 'transcription'];
+  for (var i = 0; i < caps.length; i++) if (nonChat.indexOf(caps[i]) >= 0) return true;
+  return false;
+}
+
+/** True when the cell carries a verdict from the model's OWN modality
+ *  probe (image / transcription / embedding). Cells stamped 'chat', 'none',
+ *  or carrying no stamp at all (pre-stamp snapshots) are NOT modality
+ *  verdicts — for a non-chat model those are the stale kind. */
+function _isFreshModalityVerdict(c) {
+  return !!(c && c.probe_surface && c.probe_surface !== 'chat' &&
+            c.probe_surface !== 'none');
+}
+
+/** Downgrade STALE probe cells for non-chat models to 'skipped'.
+ *
+ *  Snapshots persisted before the per-modality probes existed carry false
+ *  'unavailable' verdicts produced by a CHAT-completions probe (the gateway
+ *  deterministically 500s it for image/embedding models) with
+ *  recommend_disable=true — applying them would disable WORKING image
+ *  models. A cell is stale when its probe_surface is missing or 'chat';
+ *  a verdict stamped with the model's OWN modality surface (e.g. an
+ *  image-surface not_found) is FRESH and must reach the user untouched.
+ *  Reconciliation runs on every ingest so old disk snapshots heal without
+ *  forcing a retest; the original verdict is kept in the tooltip. */
+function _reconcileProbeNonChat(provIdx) {
+  var probe = _stgMatrixProbe[provIdx];
+  var p = _stgProviders[provIdx];
+  if (!probe || !probe.cells || !p || !p.models) return;
+  var byRoot = {};
+  for (var mi = 0; mi < p.models.length; mi++) byRoot[p.models[mi].model_id] = p.models[mi];
+  var changed = false;
+  Object.keys(probe.cells).forEach(function(k) {
+    var c = probe.cells[k];
+    if (!c || c.status === 'ok' || c.status === 'skipped') return;
+    if (_isFreshModalityVerdict(c)) return;   // real modality verdict — keep
+    var m = byRoot[c.root_model_id];
+    if (!_matrixModelIsNonChat(m)) return;
+    c.detail = 'stale chat-probe verdict discarded (non-chat model) — re-run ' +
+               'the probe to test it via its real endpoint (was ' + c.status +
+               (c.detail ? ': ' + c.detail : '') + ')';
+    c.status = 'skipped';
+    c.recommend_disable = false;
+    changed = true;
+  });
+  if (!changed) return;
+  var ok = 0, disable = 0, skipped = 0;
+  Object.keys(probe.cells).forEach(function(k) {
+    var c = probe.cells[k];
+    if (!c) return;
+    if (c.status === 'skipped') skipped++;
+    else if (c.recommend_disable) disable++;
+    else ok++;
+  });
+  probe.summary = { ok: ok, disable: disable, skipped: skipped };
+}
+
 /** Normalise a backend snapshot into the local _stgMatrixProbe entry.
  *  Returns true when the snapshot carried real probe data. */
 function _ingestProbeSnapshot(provIdx, snap) {
@@ -478,13 +748,20 @@ function _ingestProbeSnapshot(provIdx, snap) {
   };
   // Reflect the server's attempts setting in the selector on resume.
   if (snap.attempts && !_stgMatrixAttempts[provIdx]) _stgMatrixAttempts[provIdx] = snap.attempts;
+  if (_stgMatrixProbe[provIdx].status !== 'running') delete _stgMatrixProbeScope[provIdx];
+  _reconcileProbeNonChat(provIdx);
   return true;
 }
 
-/** Start (or, when not forcing, resume) a background probe for a provider. */
-function _runMatrixProbe(provIdx, force) {
+/** Start (or, when not forcing, resume) a background probe for a provider.
+ *  ``only`` (optional) scopes the run to rows/columns/cells:
+ *  ``{key_idxs?: [int], model_ids?: [string]}`` — the backend probes exactly
+ *  those cells and MERGES the verdicts into the persisted snapshot. */
+function _runMatrixProbe(provIdx, force, only) {
   var p = _stgProviders[provIdx];
   if (!p) return;
+  var existing = _stgMatrixProbe[provIdx];
+  if (existing && existing.status === 'running') return; // one probe per provider at a time
   var keys = _matrixKeys(p);
   var models = (p.models || []).filter(function(m) { return (m.model_id || '').trim(); });
   if (!keys.length || !models.length) {
@@ -492,6 +769,7 @@ function _runMatrixProbe(provIdx, force) {
     return;
   }
 
+  _stgMatrixProbeScope[provIdx] = only || null;
   _stgMatrixProbe[provIdx] = { status: 'running', cells: (force ? {} : ((_stgMatrixProbe[provIdx] || {}).cells || {})),
     summary: { ok: 0, disable: 0 }, total: 0, done_count: 0, error: null };
   _rerenderMatrix(provIdx);
@@ -502,10 +780,28 @@ function _runMatrixProbe(provIdx, force) {
     api_keys: keys,
     extra_headers: p.extra_headers || {},
     protocol: p.protocol || 'openai',
-    models: models.map(function(m) { return { model_id: m.model_id, aliases: (m.aliases || []) }; }),
+    // Alternate wire faces of this ONE account. The backend resolves each
+    // cell's face from these (same resolver the dispatcher uses), so a
+    // Claude model on a dual-face gateway is probed over the Anthropic wire
+    // instead of returning a false 'not_found' from the OpenAI one.
+    faces: p.faces || {},
+    // Subscription providers carry the 'oauth-managed' sentinel key — the
+    // backend resolves the live token per cell when oauth is set, rather
+    // than probing the sentinel (a guaranteed 401 → false recommend-disable).
+    oauth: p.oauth || '',
+    // capabilities ride along so the server probes non-chat models via
+    // their REAL endpoint (image / audio-transcription / embeddings)
+    // instead of chat-probing them into a guaranteed false verdict.
+    models: models.map(function(m) {
+      return { model_id: m.model_id, aliases: (m.aliases || []),
+               capabilities: (m.capabilities || []) };
+    }),
     attempts: _stgMatrixAttempts[provIdx] || 3,
-    force: !!force,
+    // A scoped probe always refreshes its cells server-side (the cache-return
+    // shortcut is skipped for it), so force stays a FULL-GRID-only flag.
+    force: !!force && !only,
   };
+  if (only) body.only = only;
 
   Api.providers.probeCellsStart(body).then(function(snap) {
     if (!_ingestProbeSnapshot(provIdx, snap)) {
@@ -579,6 +875,12 @@ function _applyMatrixRecommendations(provIdx) {
     var idx = byRoot[c.root_model_id];
     if (idx === undefined) return;
     var m = p.models[idx];
+    // A non-chat model may only be disabled on a verdict from its OWN
+    // modality probe (probe_surface = image/transcription/embedding) — never
+    // on a stale chat-completions verdict that cannot speak for its real
+    // endpoint. A fresh modality not_found MUST be applicable: exposing
+    // dead models is exactly what the per-modality probe exists for.
+    if (_matrixModelIsNonChat(m) && !_isFreshModalityVerdict(c)) return;
     if (_isIdEnabled(m, c.key_idx, c.model_id)) {
       var cell = _ensureCell(m, c.key_idx);
       var dis = cell.disabled_ids || [];
@@ -604,6 +906,7 @@ function _clearMatrixProbe(provIdx) {
     delete _stgMatrixProbeTimers[provIdx];
   }
   delete _stgMatrixProbe[provIdx];
+  delete _stgMatrixProbeScope[provIdx];
   _stgMatrixProbeAttached[provIdx] = true; // don't auto-reattach until reopen
   _rerenderMatrix(provIdx);
 }

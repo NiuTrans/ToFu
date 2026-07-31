@@ -17,7 +17,9 @@ gesture, so keeping it solely in `mpApplyFolders` is correct, not incomplete.
 
 This suite locks in three things:
   1. Source defaults: core.js declares both OFF; _resetToolsToDefaults applies
-     both OFF; mpApplyFolders calls _autoEnableProjectModes().
+     both OFF; mpApplyFolders does NOT call _autoEnableProjectModes() —
+     owner-directed 2026-07-19: the tier is DECOUPLED from execution strategy,
+     attaching a project only promotes the capability dial (onProjectAttached).
   2. Behavior (jsdom, real shipped `_autoEnableProjectModes`): OFF → ON on
      apply; the endpoint/flow mutual-exclusion guardrail; already-ON is left
      untouched.
@@ -65,13 +67,22 @@ def test_reset_tools_applies_swarm_autopilot_off():
         '_resetToolsToDefaults must apply autopilot OFF for a project-less chat'
 
 
-def test_mpapplyfolders_calls_auto_enable():
+def test_mpapplyfolders_retires_auto_enable():
+    """Owner-directed 2026-07-19: attaching a project is DECOUPLED from
+    execution strategy — mpApplyFolders must NOT auto-enable Swarm/Autopilot
+    (_autoEnableProjectModes is retired from this path; the function survives
+    for other callers). The apply path promotes the dial via onProjectAttached
+    instead. Re-adding the auto-enable call would silently re-couple the two
+    axes the owner split apart."""
     src = open(PROJECT_SRC, encoding='utf-8').read()
     start = src.index('async function mpApplyFolders(')
     body = src[start:src.index('\n}\n', start)]
-    assert '_autoEnableProjectModes()' in body, \
-        'mpApplyFolders must call _autoEnableProjectModes() so applying a ' \
-        'project auto-enables the project-oriented modes'
+    assert '_autoEnableProjectModes()' not in body, \
+        'mpApplyFolders must NOT call _autoEnableProjectModes() — the tier is ' \
+        'decoupled from execution strategy (owner-directed 2026-07-19); ' \
+        'Swarm/Autopilot are explicit opt-ins'
+    assert 'onProjectAttached' in body, \
+        'mpApplyFolders must promote the dial via onProjectAttached'
 
 
 def test_auto_enable_refreshes_submenu_counts():

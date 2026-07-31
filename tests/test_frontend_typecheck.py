@@ -143,14 +143,24 @@ def test_frontend_typecheck_does_not_regress():
 
 
 def test_baseline_is_tight():
-    """Soft notice: if the count dropped below BASELINE, nudge to lower it
-    so future regressions are caught at the tighter bound."""
+    """The ratchet must be TIGHT: a count below BASELINE has to fail.
+
+    This used to ``pytest.skip()`` on a loose baseline, which made it
+    structurally incapable of reporting anything — whatever it found, the
+    verdict was 'skipped', and a stale BASELINE could sit above the real count
+    indefinitely while every run looked clean. That is the mirror image of the
+    failure the charter names: a constant is a DECLARATION, only a test result
+    is a fact, so the test that reconciles the two must be able to fail.
+
+    Concretely: with BASELINE=0 this is a no-op, but if someone raises BASELINE
+    to silence errors and then the errors get fixed, this fails and forces the
+    number back down — which is the only thing keeping the ratchet one-way.
+    """
     if not _tsc_available():
         pytest.skip('tsc not available — cannot check baseline tightness.')
     count = len(_run_tsc())
-    if count < BASELINE:
-        pytest.skip(
-            f'BASELINE in tests/test_frontend_typecheck.py is loose: '
-            f'actual={count} < BASELINE={BASELINE}. Please lower BASELINE '
-            f'to {count} to lock in the improvement.'
-        )
+    assert count >= BASELINE, (
+        f'BASELINE in tests/test_frontend_typecheck.py is LOOSE: '
+        f'actual={count} < BASELINE={BASELINE}. Lower BASELINE to {count} to '
+        f'lock in the improvement — otherwise {BASELINE - count} regression(s) '
+        f'could be reintroduced without this suite noticing.')

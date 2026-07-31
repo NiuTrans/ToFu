@@ -96,16 +96,23 @@ localStorage.setItem('paper_active_id', 'paper-1');
 localStorage.setItem('paper_library_migrated_v1', '1');
 localStorage.setItem('paper_review_lang_by_id', JSON.stringify({ 'paper-1': 'zh' }));
 
-let src = fs.readFileSync(process.argv[2], 'utf8');
+const PAPER_DIR = path.join(path.dirname(process.argv[2]), 'paper');
+// _restoreReviewReadingLang/_activeReviewLang/_loadOrGenerateReport moved to
+// paper/report.js; _loadPaperLibrary to paper/library.js — eval them first
+// (window-scope concatenation, same as the shipped script tags).
+let reportSrc = fs.readFileSync(path.join(PAPER_DIR, 'report.js'), 'utf8');
 if (NC) {
   // Source-level negative control: turn the restore into a no-op. Byte-identical
   // on-disk file is untouched; only this in-memory copy is patched.
-  const before = src;
-  src = src.replace(
+  const before = reportSrc;
+  reportSrc = reportSrc.replace(
     'function _restoreReviewReadingLang(view) {',
     'function _restoreReviewReadingLang(view) {\n  return; // NC: neutered');
-  if (src === before) { console.log('FAIL nc_patch_applied'); process.exit(0); }
+  if (reportSrc === before) { console.log('FAIL nc_patch_applied'); process.exit(0); }
 }
+eval(reportSrc);  // paper/report.js (real, shipped)
+eval(fs.readFileSync(path.join(PAPER_DIR, 'library.js'), 'utf8'));  // paper/library.js
+let src = fs.readFileSync(process.argv[2], 'utf8');
 eval(src);  // paper-reader.js (real, shipped)
 
 const out = [];

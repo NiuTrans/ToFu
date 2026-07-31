@@ -52,6 +52,7 @@ function _displayedProjectPath() { return '/proj/x'; }
 function refreshCharter(p) { calls.push(['charter', p]); }
 function refreshBoard(p) { calls.push(['board', p]); }
 function refreshInfluence(p) { calls.push(['influence', p]); }
+function _refreshAttention(p) { calls.push(['attention', p]); }
 function _refreshPeers(p) { calls.push(['peers', p]); }
 function _refreshStatus(p) { calls.push(['status', p]); }
 
@@ -91,7 +92,7 @@ def test_push_frame_refreshes_status_and_all_live_columns():
     r = _run(sub, unsub)
     assert "error" not in r, r
     assert sorted(r["kinds"]) == sorted(
-        ["charter", "board", "influence", "peers", "status"]), r
+        ["charter", "board", "influence", "attention", "peers", "status"]), r
     for kind, path in r["calls"]:
         assert path == "/proj/x", r
 
@@ -106,7 +107,7 @@ def test_neuter_removing_refresh_status_goes_stale():
     assert "error" not in r, r
     assert "status" not in r["kinds"], r
     # The other columns must still refresh — we only removed Status.
-    assert sorted(r["kinds"]) == sorted(["charter", "board", "influence", "peers"]), r
+    assert sorted(r["kinds"]) == sorted(["charter", "board", "influence", "attention", "peers"]), r
 
 
 if __name__ == "__main__":

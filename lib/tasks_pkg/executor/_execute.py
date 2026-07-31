@@ -41,6 +41,18 @@ def _execute_tool_one(
         logger.info('[Executor] Skipping tool %s (tc_id=%s) — task aborted', fn_name, tc_id[:8])
         return tc_id, 'Task aborted by user.', False
 
+    # ★ Start-clock backfill (pt_67ffc2b7). Chat's rounds are stamped with
+    #   `tStart` by _build_tool_round_entry, but SECONDARY surfaces (paper
+    #   report / Q&A, swarm sub-agents, the timer poller) hand-build their round
+    #   dicts and never went through that constructor. Backfilling at THIS seam
+    #   — the one entry point every tool execution passes through — means the
+    #   duration a user sees is measured for every surface instead of silently
+    #   reading 0ms on the ones that built their own dict. Only fills a MISSING
+    #   value, so a real dispatch-time clock is never overwritten with a later one.
+    if round_entry is not None and round_entry.get('tStart') is None:
+        from lib.agent_core.events import now_ms
+        round_entry['tStart'] = now_ms()
+
     # ★ Per-client browser routing: propagate client_id to worker threads
     #   (ThreadPoolExecutor threads don't inherit the parent's thread-locals)
     _browser_cid = cfg.get('browserClientId')

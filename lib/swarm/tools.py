@@ -27,6 +27,98 @@ Removed in the async migration (no longer exist):
 
 
 # ═══════════════════════════════════════════════════════════
+#  Shared constants — MUST be defined before SPAWN_AGENTS_TOOL
+# ═══════════════════════════════════════════════════════════
+#
+# ``SPAWN_AGENTS_TOOL``'s description is built at IMPORT TIME and
+# ``format_role_catalogue()`` (lib/swarm/registry.py) reads
+# ``ARTIFACT_TOOLS`` / ``SUB_AGENT_DENYLIST`` to render each role's tool
+# list. Defining them below the master section makes the catalogue hit a
+# partially-initialized module (ImportError). Keep them on top.
+
+#: Names that MUST be stripped from sub-agents' tool lists. The master may
+#: spawn / await / inspect; sub-agents may not. ``ask_human`` is also stripped
+#: because sub-agents are not interactive.
+SUB_AGENT_DENYLIST = frozenset({
+    'spawn_agents',
+    'await_agents',
+    'get_agent_result',
+    'ask_human',
+})
+
+STORE_ARTIFACT_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "store_artifact",
+        "description": (
+            "Store data in the shared artifact store for other agents to read. "
+            "Use for intermediate results, extracted data, or analysis that "
+            "downstream agents will need."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "key": {
+                    "type": "string",
+                    "description": "Unique key for the artifact (e.g. 'file_analysis_results')",
+                },
+                "content": {
+                    "type": "string",
+                    "description": "The artifact content to store",
+                },
+                "tags": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional tags for categorization",
+                },
+            },
+            "required": ["key", "content"],
+        },
+    },
+}
+
+READ_ARTIFACT_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "read_artifact",
+        "description": (
+            "Read data from the shared artifact store. Use to access "
+            "intermediate results stored by other agents."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "key": {
+                    "type": "string",
+                    "description": "Key of the artifact to read",
+                },
+            },
+            "required": ["key"],
+        },
+    },
+}
+
+LIST_ARTIFACTS_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "list_artifacts",
+        "description": "List all available artifacts in the shared store.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "tag": {
+                    "type": "string",
+                    "description": "Optional tag to filter artifacts",
+                },
+            },
+        },
+    },
+}
+
+ARTIFACT_TOOLS = [STORE_ARTIFACT_TOOL, READ_ARTIFACT_TOOL, LIST_ARTIFACTS_TOOL]
+
+
+# ═══════════════════════════════════════════════════════════
 #  MASTER — spawn_agents (async)
 # ═══════════════════════════════════════════════════════════
 
@@ -45,8 +137,20 @@ def _build_spawn_agents_description() -> str:
         "runs in the background with its own LLM session and tool access, and "
         "completions arrive automatically on subsequent turns as `<swarm-update>` "
         "user messages.\n\n"
-        "Available roles and when to choose each:\n"
+        "Available roles, when to choose each, and the tools each one "
+        "actually receives:\n"
         f"{format_role_catalogue()}\n\n"
+        "Each role sees ONLY the tools listed for it, plus the shared "
+        "artifact tools. If the task needs a tool not listed for any "
+        "specialist role (for example reading this app's past conversations "
+        "via get_conversation), use 'general'. Sub-agents never receive the "
+        "denylisted tools and cannot ask the user anything, so objectives "
+        "must be fully self-contained.\n\n"
+        "## If a sub-agent reports a missing tool\n"
+        "- You picked the wrong role. Re-spawn the same task with "
+        "role='general' (or a role whose tool list covers the need) — do "
+        "NOT tell the sub-agent to work around a missing tool, and do not "
+        "abandon the task.\n\n"
         "## When you SHOULD spawn agents\n"
         "- The user asks a question whose answer needs **2+ independent pieces** "
         "of work (e.g. \"is this branch ready to ship?\" → git audit + test audit + "
@@ -275,82 +379,6 @@ GET_AGENT_RESULT_TOOL = {
 
 
 # ═══════════════════════════════════════════════════════════
-#  Artifact tools — shared between master and sub-agents
-# ═══════════════════════════════════════════════════════════
-
-STORE_ARTIFACT_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "store_artifact",
-        "description": (
-            "Store data in the shared artifact store for other agents to read. "
-            "Use for intermediate results, extracted data, or analysis that "
-            "downstream agents will need."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "key": {
-                    "type": "string",
-                    "description": "Unique key for the artifact (e.g. 'file_analysis_results')",
-                },
-                "content": {
-                    "type": "string",
-                    "description": "The artifact content to store",
-                },
-                "tags": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "Optional tags for categorization",
-                },
-            },
-            "required": ["key", "content"],
-        },
-    },
-}
-
-READ_ARTIFACT_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "read_artifact",
-        "description": (
-            "Read data from the shared artifact store. Use to access "
-            "intermediate results stored by other agents."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "key": {
-                    "type": "string",
-                    "description": "Key of the artifact to read",
-                },
-            },
-            "required": ["key"],
-        },
-    },
-}
-
-LIST_ARTIFACTS_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "list_artifacts",
-        "description": "List all available artifacts in the shared store.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "tag": {
-                    "type": "string",
-                    "description": "Optional tag to filter artifacts",
-                },
-            },
-        },
-    },
-}
-
-ARTIFACT_TOOLS = [STORE_ARTIFACT_TOOL, READ_ARTIFACT_TOOL, LIST_ARTIFACTS_TOOL]
-
-
-# ═══════════════════════════════════════════════════════════
 #  Bundles
 # ═══════════════════════════════════════════════════════════
 
@@ -452,14 +480,4 @@ SWARM_CONTROL_TOOL_NAMES = frozenset({
 SWARM_TOOL_NAMES = frozenset({
     'spawn_agents', 'await_agents', 'get_agent_result',
     'store_artifact', 'read_artifact', 'list_artifacts',
-})
-
-#: Names that MUST be stripped from sub-agents' tool lists. The master may
-#: spawn / await / inspect; sub-agents may not. ``ask_human`` is also stripped
-#: because sub-agents are not interactive.
-SUB_AGENT_DENYLIST = frozenset({
-    'spawn_agents',
-    'await_agents',
-    'get_agent_result',
-    'ask_human',
 })

@@ -124,9 +124,22 @@ def json_dumps_pg(obj, **kwargs):
 
     plus a post-pass that strips any residual ``\\u0000`` escape sequences
     that PostgreSQL's JSONB parser rejects.
+
+    Fast path: ``json.dumps`` escapes every U+0000 to the six-char sequence
+    ``\\u0000``, so its absence from the serialised text PROVES the payload
+    carries no null bytes and the recursive ``strip_null_bytes_deep`` walk
+    would be a no-op. Skipping that walk matters: it is pure-Python,
+    GIL-holding CPU (~0.9 s for a 93.7 MB conversation blob, measured), and
+    a 2026-07-27 hard-refresh burst parked 149 writer threads inside it
+    simultaneously, starving the event loop for 8.8 s. Only payloads that
+    actually contain null bytes pay the deep strip, which keeps the output
+    byte-identical to the historical always-strip behaviour.
     """
     import json as _json
     kwargs.setdefault('ensure_ascii', False)
+    text = _json.dumps(obj, **kwargs)
+    if '\\u0000' not in text:
+        return text
     text = _json.dumps(strip_null_bytes_deep(obj), **kwargs)
     text = _strip_json_null_escapes(text)
     if os.environ.get('DEBUG_JSON_VALIDATE'):

@@ -336,15 +336,34 @@ The **target** is the epic's `created_by_conv` (work returns to its
 originator). If unknown, the epic is left open rather than inventing a
 conversation.
 
-### Two triggers — completion and heartbeat
+### The event channel + the heartbeat safety net
 - **Completion trigger** — wired into `complete_task`: finishing one epic may
   unblock its dependents, so `on_epic_completed` dispatches each newly-pickable
   epic. This *propagates* motion already underway.
-- **Heartbeat sweep** — the piece that *starts* motion (including the cold-start
-  very-first epic, which no completion could ever trigger).
-  `sweep_all_active_projects()` runs on the **existing scheduler 30-second
-  tick** (no new thread, no new global): for each recent project it runs
-  `select_dispatchable` and dispatches each pickable epic. It is:
+- **Post trigger (event channel, 2026-07-27)** — wired into `post_task`:
+  `on_epic_posted` starts a freshly-posted epic IMMEDIATELY when it can
+  genuinely start (deps done, routing-target conversation EXISTS and is IDLE).
+  A busy target (the common case — an agent posts mid-turn) is deliberately
+  NOT claimed; a missing target conv is never claim-stranded (both keep the
+  legacy heartbeat behaviour). The human's revive lever `reopen_task` rides
+  the SAME seam (done/claimed → open starts at reopen time, not the next
+  sweep).
+- **Completion nudge (event channel)** — wired into the post-task queue-drain
+  hook (`_dispatch_queued_message` in `lib/tasks_pkg/manager/_sync.py`): when a
+  task completes with an EMPTY queue, `on_conv_idle` dispatches + drains ONE
+  open epic routed to that conversation — so work posted behind a busy turn
+  starts the moment the turn ends, and a backlog advances one epic per
+  completed turn (the same chain shape the queue drain uses).
+- **Peer send-time drain (event channel)** — a peer message into an IDLE
+  conversation is drained at SEND time (`send_peer_message`), rendered as a
+  fresh turn immediately instead of waiting for the tick.
+- **Heartbeat sweep — now the SAFETY NET, not the starter.**
+  `sweep_all_active_projects()` still runs on the **existing scheduler
+  30-second tick** (no new thread, no new global): for each recent project it
+  runs `select_dispatchable` and dispatches each pickable epic. What remains on
+  it by design: the crash / lease-expiry / stranded-kickoff recovery paths
+  (inherently time-based, 30 s granularity is noise next to a 30-min lease
+  TTL). It stays:
   - **Bounded** — capped per sweep (default 3), so one tick can't flood.
   - **Idempotent under repetition** — two guards, independently proven load-
     bearing: (1) the claim-on-dispatch (excludes the epic next sweep); (2) a
@@ -354,8 +373,9 @@ conversation.
     *safe* (on uncertainty, assume busy → never double-dispatch).
   - **Best-effort** — a sweep failure can never break the scheduler loop.
 
-With the heartbeat, an idle project's dependency-satisfied open epics self-
-start, get claimed so siblings avoid them, and run — with no human involved.
+The common flows never touch the 30 s tick: epics start at post time (idle
+target) or at the poster's turn end (busy target), dependents start at
+completion, answers at answer time, peer notes at send time.
 
 ---
 
@@ -597,7 +617,7 @@ composes without deadlocks, cross-project leaks, or thrash.
 | Activity Feed engine | `lib/conversations/project_feed.py` (`VALID_KINDS`, `emit_event`, `sha1(path)[:16]` key, retention) |
 | Charter engine | `lib/conversations/project_charter.py` (`read`/`propose`/`commit`, optimistic lock) |
 | Board engine | `lib/conversations/project_board.py` (`_effective_status`, `claim`/`complete`/`block`, `[PROJECT BOARD]` render) |
-| Dispatch + heartbeat | `lib/conversations/project_dispatch.py` (`select_dispatchable`, `dispatch_epic`, `on_epic_completed`, `sweep_all_active_projects`) |
+| Dispatch + heartbeat | `lib/conversations/project_dispatch.py` (`select_dispatchable`, `dispatch_epic`, `on_epic_posted`, `on_conv_idle`, `on_epic_completed`, `on_epic_answered`, `sweep_all_active_projects`); completion-nudge wiring in `lib/tasks_pkg/manager/_sync.py`; peer send-time drain in `lib/conversations/project_peer.py` |
 | Peer comms + intervention (Pillar #6) | `lib/conversations/project_peer.py` (`project_peer_status`, `project_message`, `project_intervene`, `_prune_and_check` rate gate, `_authorize_hard_abort`) |
 | Status lane (Pillar #7) | `lib/conversations/project_status.py` (`build_status_snapshot`, `_fingerprint`, `status_line`) |
 | Heartbeat wiring | `lib/scheduler/manager.py` (call on the 30s tick) |

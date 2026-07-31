@@ -275,6 +275,11 @@ def _get_static_context_limit(task: dict | None = None) -> int:
             'deepseek-v4-flash': 1_000_000,
             'deepseek': 128_000,
             'doubao':   128_000,
+            # kimi-k3: true 1M window (owner-confirmed 2026-07-26; also
+            # recorded in model_info/_max_output.py + pricing/_tables.py).
+            # NOTE: only the k3 generation — k2.x ships 256k and must NOT
+            # get a blanket 'kimi' key here.
+            'kimi-k3':  1_000_000,
             'minimax':  1_000_000,
         }
         for key, limit in limits.items():
@@ -318,12 +323,10 @@ def _get_context_limit(task: dict | None = None) -> int:
     if not task:
         return static_limit
     try:
-        from lib.context_limits import lookup_learned_context_limit
+        from lib.context_limits import resolve_learned_context_limit
         provider_id = task.get('provider_id') or ''
         model = (task.get('config', {}) or {}).get('model', '') or ''
-        learned = lookup_learned_context_limit(provider_id, model)
-        if learned:
-            return learned
+        return resolve_learned_context_limit(provider_id, model, static_limit)
     except Exception as e:
         logger.debug('[Compact] context_limits lookup failed: %s', e)
     return static_limit

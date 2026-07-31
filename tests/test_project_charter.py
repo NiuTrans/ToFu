@@ -82,12 +82,16 @@ def _feed_kinds(flask_app, project_path):
 def test_commit_then_read(flask_app):
     from lib.conversations.project_charter import commit_charter, read_charter
     with flask_app.app_context():
-        r = commit_charter('/p/c', content='Ship Pillar 2.',
-                           add_decision='Use soft leases.', updated_by_conv='cA')
-        assert r['ok'] and r['version'] == 1
+        # content and add_decision are mutually exclusive (one call = one
+        # operation), so the north star and the decision are two commits.
+        assert commit_charter('/p/c', content='Ship Pillar 2.',
+                              updated_by_conv='cA')['ok']
+        r = commit_charter('/p/c', add_decision='Use soft leases.',
+                           summary='Use soft leases.', updated_by_conv='cA')
+        assert r['ok'] and r['version'] == 2
         rec = read_charter('/p/c')
     assert rec['content'] == 'Ship Pillar 2.'
-    assert rec['version'] == 1
+    assert rec['version'] == 2
     assert any(d['text'] == 'Use soft leases.' for d in rec['decisions'])
     assert rec['exists'] is True
 
@@ -172,8 +176,9 @@ def test_render_block_present_and_absent(flask_app):
     from lib.conversations.project_charter import commit_charter, render_charter_block
     with flask_app.app_context():
         assert render_charter_block('/p/none') == ''
-        commit_charter('/p/has', content='North star here.',
-                       add_decision='Decision A.', updated_by_conv='cA')
+        commit_charter('/p/has', content='North star here.', updated_by_conv='cA')
+        commit_charter('/p/has', add_decision='Decision A.',
+                       summary='Decision A.', updated_by_conv='cA')
         block = render_charter_block('/p/has')
     assert '[PROJECT CHARTER]' in block
     assert 'North star here.' in block
@@ -195,7 +200,9 @@ def _run_inject(flask_app, project_path, has_charter):
     with flask_app.app_context():
         if has_charter:
             commit_charter(project_path, content='Injected north star.',
-                           add_decision='Inj decision.', updated_by_conv='cA')
+                           updated_by_conv='cA')
+            commit_charter(project_path, add_decision='Inj decision.',
+                           summary='Inj decision.', updated_by_conv='cA')
         messages = [{'role': 'user', 'content': 'hello'}]
         sc_inject._inject_system_contexts(
             messages, project_path, True,   # project_path, project_enabled
@@ -236,12 +243,18 @@ def test_injection_absent_when_no_charter(flask_app):
 def test_route_charter_read_and_commit(flask_app, flask_client):
     import json as _json
     # commit via the human-gated route
+    # One call = one operation (content and add_decision are mutually
+    # exclusive), so the north star and the decision are two requests.
+    r0 = flask_client.post('/api/v1/project/charter/commit', json={
+        'path': '/p/route-c', 'content': 'North star.'})
+    assert r0.status_code == 200, r0.get_data(as_text=True)
     r = flask_client.post('/api/v1/project/charter/commit', json={
-        'path': '/p/route-c', 'content': 'North star.',
-        'add_decision': 'Decision via route.'})
+        'path': '/p/route-c',
+        'add_decision': 'Decision via route.',
+        'summary': 'Decision via route.'})
     assert r.status_code == 200, r.get_data(as_text=True)
     body = _json.loads(r.get_data(as_text=True))
-    assert body.get('version') == 1
+    assert body.get('version') == 2
     # read it back
     r2 = flask_client.get('/api/v1/project/charter?path=/p/route-c')
     data = _json.loads(r2.get_data(as_text=True))
@@ -530,6 +543,198 @@ def test_update_decision_edits_in_place(flask_app):
     assert 'decided' in _feed_kinds(flask_app, p)
 
 
+def test_editing_a_decision_changes_what_agents_ACTUALLY_READ(flask_app):
+    """THE headline guard. Editing a decision must change the injected line.
+
+    Why the existing edit test could not see this: it asserts ``d['text']``,
+    while the per-turn injection renders ``_decision_headline``, which prefers
+    the stored ``summary``. ``update_decision`` had no ``summary`` parameter at
+    all, so a human correction rewrote the body, returned ok=True, bumped the
+    version — and left the ONE line every sibling conversation reads untouched,
+    forever. Measured on the live project: decision #0's body described the
+    shipped design while its summary still broadcast the design it replaced.
+
+    That is the same failure shape as a badge asserting something already
+    untrue: the panel shows the edit applied and the prompt is inert.
+    """
+    from lib.conversations.project_charter import (
+        commit_charter, render_charter_injection_block, update_decision,
+    )
+    p = os.path.abspath('/p/edit-headline')
+    with flask_app.app_context():
+        commit_charter(p, add_decision='OLD BODY with its evidence chain',
+                       decision_kind='invariant',
+                       summary='OLD RULE that is now wrong',
+                       updated_by_conv='cA')
+        assert 'OLD RULE that is now wrong' in render_charter_injection_block(p)
+
+        r = update_decision(p, 0, 'NEW BODY: the corrected rule',
+                            summary='NEW RULE that is correct',
+                            updated_by_conv='human')
+        assert r['ok'], r
+        block = render_charter_injection_block(p)
+
+    assert 'NEW RULE that is correct' in block, (
+        'the human edited the decision and agents still read the old rule')
+    assert 'OLD RULE that is now wrong' not in block, (
+        'the stale summary survived the edit — this is the live defect')
+
+
+def test_omitting_summary_on_an_entry_that_has_one_is_REFUSED(flask_app):
+    """Silently keeping the old summary is the one behaviour that must not remain.
+
+    A caller that rewrites the body without saying what the new rule line is has
+    almost certainly hit the stale-summary trap. Two safe answers exist (refuse,
+    or clear so the headline falls back to the fresh text); the unsafe one is to
+    keep broadcasting the old line. We REFUSE, because clearing silently
+    downgrades a curated one-liner to an abridged first line — a quiet loss the
+    human never asked for — whereas a refusal is a question they can answer.
+
+    Passing ``summary=''`` EXPLICITLY is the escape hatch: that is an intentional
+    "drop the summary, render my text" instruction, not an omission.
+    """
+    from lib.conversations.project_charter import (
+        commit_charter, read_charter, render_charter_injection_block,
+        update_decision,
+    )
+    p = os.path.abspath('/p/edit-summary-required')
+    with flask_app.app_context():
+        commit_charter(p, add_decision='BODY', decision_kind='invariant',
+                       summary='THE RULE', updated_by_conv='cA')
+        before = read_charter(p)['version']
+
+        r = update_decision(p, 0, 'NEW BODY', updated_by_conv='human')
+        assert r['ok'] is False, 'omitting summary must not silently succeed'
+        assert r['error'] == 'summary_required', r
+        rec = read_charter(p)
+
+    # A refusal must change NOTHING — not the text, not the version.
+    assert rec['decisions'][0]['text'] == 'BODY'
+    assert rec['decisions'][0].get('summary') == 'THE RULE'
+    assert rec['version'] == before, 'a refused edit must not bump the version'
+
+    with flask_app.app_context():
+        cleared = update_decision(p, 0, 'NEW BODY explicitly unsummarised',
+                                  summary='', updated_by_conv='human')
+        assert cleared['ok'], cleared
+        block = render_charter_injection_block(p)
+    assert 'THE RULE' not in block, 'summary="" must really drop the summary'
+    assert 'NEW BODY explicitly unsummarised' in block, (
+        'after clearing, the headline must fall back to the fresh text')
+
+
+def test_a_legacy_entry_without_a_summary_edits_without_ceremony(flask_app):
+    """COMPLEMENT: the refusal must not spread to entries that have no summary.
+
+    Pre-summary entries (and anything committed without one) render an abridged
+    first line. Requiring a summary to edit those would make the guard above a
+    tax on every legacy edit rather than a trap for the stale-summary case.
+    """
+    from lib.conversations.project_charter import (
+        commit_charter, render_charter_injection_block, update_decision,
+    )
+    p = os.path.abspath('/p/edit-legacy')
+    with flask_app.app_context():
+        commit_charter(p, add_decision='LEGACY first line\nand a long tail',
+                       updated_by_conv='cA')
+        r = update_decision(p, 0, 'CORRECTED first line\nand a long tail',
+                            updated_by_conv='human')
+        assert r['ok'], r
+        block = render_charter_injection_block(p)
+    assert 'CORRECTED first line' in block
+    assert 'LEGACY first line' not in block
+
+
+def test_the_REST_route_can_change_what_agents_read(flask_app, flask_client):
+    """The library fix must not stop at the library boundary.
+
+    ``update_decision`` gained a ``summary`` parameter, but the panel reaches it
+    only through ``POST /charter/decision/update``. If that route does not pass
+    the field through, the human-facing surface is exactly as broken as before
+    while the unit tests are green — the shape this project keeps re-learning.
+
+    Also pins the wire-level distinction the sentinel exists for: an ABSENT key
+    is refused (400 summary_required) while ``summary: ''`` is honoured. Those
+    two are the same value in most serialisations, so if the route collapses
+    them the refusal silently becomes a clear.
+    """
+    from lib.conversations.project_charter import (
+        commit_charter, render_charter_injection_block,
+    )
+    p = os.path.abspath('/p/route-summary')
+    with flask_app.app_context():
+        commit_charter(p, add_decision='BODY', decision_kind='invariant',
+                       summary='OLD RULE via route', updated_by_conv='cA')
+
+    # 1) Omitted key → refused, nothing changed.
+    r = flask_client.post('/api/v1/project/charter/decision/update',
+                          json={'path': p, 'index': 0, 'text': 'NEW BODY'})
+    assert r.status_code == 400, r.get_data(as_text=True)
+    import json as _json
+    assert _json.loads(r.get_data(as_text=True)).get('error') == 'summary_required'
+    with flask_app.app_context():
+        assert 'OLD RULE via route' in render_charter_injection_block(p)
+
+    # 2) Explicit summary → the injected line really changes.
+    r = flask_client.post('/api/v1/project/charter/decision/update',
+                          json={'path': p, 'index': 0, 'text': 'NEW BODY',
+                                'summary': 'NEW RULE via route'})
+    assert r.status_code == 200, r.get_data(as_text=True)
+    with flask_app.app_context():
+        block = render_charter_injection_block(p)
+    assert 'NEW RULE via route' in block
+    assert 'OLD RULE via route' not in block
+
+    # 3) Explicit empty string → cleared, headline falls back to the body.
+    r = flask_client.post('/api/v1/project/charter/decision/update',
+                          json={'path': p, 'index': 0,
+                                'text': 'BODY IS THE HEADLINE', 'summary': ''})
+    assert r.status_code == 200, r.get_data(as_text=True)
+    with flask_app.app_context():
+        block = render_charter_injection_block(p)
+    assert 'BODY IS THE HEADLINE' in block
+    assert 'NEW RULE via route' not in block
+
+
+def test_the_panel_editor_offers_a_summary_field_when_one_exists():
+    """The deepest half: the human must be able to SEE and EDIT that line.
+
+    The panel already RENDERED the summary (``.pb-decision-summary``) while its
+    inline editor edited only the body — so the human could read the line agents
+    consume and had no control that changed it. With the backend now refusing a
+    body-only edit, a body-only editor would turn a silent-wrong-rule bug into a
+    dead Save button; both halves have to move together.
+
+    Asserted over the shipped source with comments stripped (charter #24): the
+    change that adds this necessarily explains it, and a raw substring scan is
+    then satisfied by its own explanation.
+    """
+    from tests._source_scan import strip_comments
+    js = os.path.join(ROOT, 'static', 'js', 'project-brain.js')
+    with open(js, encoding='utf-8') as f:
+        src = strip_comments(f.read(), lang='js')
+
+    assert 'pb-inline-editor-summary' in src, (
+        'the inline editor has no summary input — the human cannot change the '
+        'one line agents read')
+    assert 'summarySelector' in src, 'the editor is not wired for a summary field'
+    # The update call must be able to carry it, and must send the key ONLY when
+    # the entry has a summary (absent key = refused, which is the point).
+    assert 'body.summary = nextSummary' in src, (
+        'the panel never puts the edited summary on the request body')
+    assert 'hasSummary' in src, (
+        'the panel does not distinguish entries that HAVE a summary — it would '
+        'either refuse every legacy edit or send an empty summary blindly')
+
+    # A field with no stylesheet rule is the invisible-control defect.
+    css = os.path.join(ROOT, 'static', 'styles.css')
+    with open(css, encoding='utf-8') as f:
+        css_src = f.read()
+    assert '.pb-inline-editor-summary' in css_src, (
+        'the summary input has no CSS rule — it would render unstyled')
+    assert '.pb-inline-editor-label' in css_src
+
+
 def test_update_decision_optimistic_lock(flask_app):
     from lib.conversations.project_charter import commit_charter, update_decision
     p = os.path.abspath('/p/edit-lock')
@@ -581,7 +786,8 @@ def test_delete_charter_removes_row(flask_app):
     )
     p = os.path.abspath('/p/del-all')
     with flask_app.app_context():
-        commit_charter(p, content='NS', add_decision='D', updated_by_conv='cA')
+        commit_charter(p, content='NS', updated_by_conv='cA')
+        commit_charter(p, add_decision='D', summary='D', updated_by_conv='cA')
         ver = read_charter(p)['version']
         r = delete_charter(p, expected_version=ver, updated_by_conv='human')
         assert r['ok'] and r.get('deleted') is True
@@ -610,18 +816,50 @@ def test_delete_missing_charter_is_noop_success(flask_app):
     assert r['ok'] is True and r.get('deleted') is False
 
 
+def test_route_commit_add_decision_requires_summary(flask_app, flask_client):
+    """The human-side回流缺口 (owner 2026-07-28): the tool path already
+    forces kind+summary; the REST human path must too, or kindless entries
+    flow back in through the panel's door."""
+    import json as _json
+    p = os.path.abspath('/p/route-no-summary')
+    r = flask_client.post('/api/v1/project/charter/commit',
+                          json={'path': p, 'add_decision': 'D'})
+    assert r.status_code == 400
+    assert 'summary' in r.get_data(as_text=True)
+    # Nothing was committed.
+    data = _json.loads(flask_client.get(
+        '/api/v1/project/charter?path=' + p).get_data(as_text=True))
+    assert not data.get('exists') or not data.get('decisions')
+    # content-ONLY commits (north-star edits) stay summary-free.
+    r2 = flask_client.post('/api/v1/project/charter/commit',
+                           json={'path': p, 'content': 'NS only'})
+    assert r2.status_code == 200, r2.get_data(as_text=True)
+
+
 def test_routes_charter_edit_delete_roundtrip(flask_app, flask_client):
     import json as _json
     p = os.path.abspath('/p/route-editdel')
     flask_client.post('/api/v1/project/charter/commit',
-                      json={'path': p, 'content': 'NS', 'add_decision': 'D0'})
+                      json={'path': p, 'content': 'NS'})
     flask_client.post('/api/v1/project/charter/commit',
-                      json={'path': p, 'add_decision': 'D1'})
+                      json={'path': p, 'add_decision': 'D0', 'summary': 'D0'})
+    flask_client.post('/api/v1/project/charter/commit',
+                      json={'path': p, 'add_decision': 'D1', 'summary': 'D1'})
     ver = _json.loads(flask_client.get(
         '/api/v1/project/charter?path=' + p).get_data(as_text=True))['version']
-    # Edit decision 0 via route.
-    re = flask_client.post('/api/v1/project/charter/decision/update', json={
+    # Edit decision 0 via route. REVERSED IN PLACE 2026-07-30: this used to send
+    # `text` alone against an entry committed WITH a summary ('D0') and assert
+    # 200 — i.e. it certified the stale-summary trap, because the edit landed
+    # while the injected headline kept rendering the old 'D0'. A body-only edit
+    # on a summarised entry is now refused, and the caller must say what the new
+    # rule line is.
+    refused = flask_client.post('/api/v1/project/charter/decision/update', json={
         'path': p, 'index': 0, 'text': 'D0-edited', 'expected_version': ver})
+    assert refused.status_code == 400, refused.get_data(as_text=True)
+    assert _json.loads(refused.get_data(as_text=True))['error'] == 'summary_required'
+    re = flask_client.post('/api/v1/project/charter/decision/update', json={
+        'path': p, 'index': 0, 'text': 'D0-edited', 'summary': 'D0-edited',
+        'expected_version': ver})
     assert re.status_code == 200, re.get_data(as_text=True)
     ver = _json.loads(re.get_data(as_text=True))['version']
     # Delete decision 1 via route.
@@ -644,7 +882,8 @@ def test_routes_charter_edit_delete_roundtrip(flask_app, flask_client):
 def test_routes_charter_edit_delete_version_conflict_409(flask_app, flask_client):
     p = os.path.abspath('/p/route-editdel-409')
     flask_client.post('/api/v1/project/charter/commit',
-                      json={'path': p, 'add_decision': 'D'})  # version 1
+                      json={'path': p, 'add_decision': 'D',
+                            'summary': 'D'})  # version 1
     # A stale expected_version on each mutation route → 409.
     assert flask_client.post('/api/v1/project/charter/decision/update', json={
         'path': p, 'index': 0, 'text': 'X', 'expected_version': 0}).status_code == 409
@@ -710,16 +949,32 @@ def _charter_tool(fn_name, fn_args, *, conv='cAgent', project_path):
                                 current_conv_id=conv, project_path=project_path)
 
 
+def _human_commit(project_path, decision, summary=None, **kw):
+    """Commit a decision the way the ONLY remaining writer does.
+
+    RETARGETED 2026-07-30: these storage properties (version bump, proposal
+    dequeue, rolling truncation, append-commutes) used to be driven through the
+    ``project_charter_commit`` AGENT tool. That tool was withdrawn — a charter
+    always requires human review — so the same properties are now exercised
+    through the human REST path's ``commit_charter``. The properties did not
+    change; only who is allowed to trigger them did, so the coverage is
+    retargeted rather than deleted."""
+    from lib.conversations.project_charter import commit_charter
+    return commit_charter(project_path, add_decision=decision,
+                          decision_kind='invariant',
+                          summary=(summary if summary is not None else decision),
+                          **kw)
+
+
 def test_agent_commit_appends_decision_and_bumps_version(flask_app):
-    """The agent tool commits a decision, bumps version, and it lands in the
-    charter (read + injected block) — no human in the loop."""
+    """A committed decision bumps the version and lands in the charter (read +
+    injected block). Driven through the human route — see _human_commit."""
     from lib.conversations.project_charter import read_charter, render_charter_block
     p = os.path.abspath('/p/agent-commit')
     with flask_app.app_context():
-        out = _charter_tool('project_charter_commit',
-                            {'decision': 'Adopt AST boundaries in lib/.'},
-                            project_path=p)
-        assert 'version 1' in out, out
+        res = _human_commit(p, 'Adopt AST boundaries in lib/.',
+                            updated_by_conv='human')
+        assert res['ok'] and res['version'] == 1, res
         rec = read_charter(p)
         block = render_charter_block(p)
     assert rec['version'] == 1
@@ -731,26 +986,27 @@ def test_agent_commit_appends_decision_and_bumps_version(flask_app):
 
 
 def test_agent_commit_resolves_proposal_dequeues(flask_app):
-    """An agent that first proposed can commit passing resolves_proposal, and
-    the proposal drops out of the pending-review list (no over-count)."""
+    """An agent PROPOSES; the human commit resolves it, and the proposal drops
+    out of the pending-review list (no over-count). This is now the whole
+    lifecycle: propose is the agent\'s only charter verb."""
     from lib.conversations.project_charter import pending_proposals, propose_amendment
     p = os.path.abspath('/p/agent-resolve')
     with flask_app.app_context():
         pid = propose_amendment(p, 'cAgent', 'Move logic into lib/.')['proposalId']
         assert len(pending_proposals(p)) == 1
-        out = _charter_tool('project_charter_commit',
-                            {'decision': 'Move logic into lib/.',
-                             'resolves_proposal': pid},
-                            project_path=p)
-        assert 'committed' in out.lower()
+        res = _human_commit(p, 'Move logic into lib/.',
+                            resolves_proposal=pid, updated_by_conv='human')
+        assert res['ok'], res
         pend = pending_proposals(p)
-    assert pend == [], 'the agent-committed proposal must not stay pending'
+    assert pend == [], 'a resolved proposal must not stay pending'
 
 
 def test_agent_commit_cannot_write_content_NC(flask_app):
-    """THE decisive guard: the agent commit path can NEVER edit the north-star
-    `content`. Committing a decision on an existing charter leaves `content`
-    untouched, and there is no argument by which the tool can set it."""
+    """STRENGTHENED 2026-07-30. This used to assert the agent commit tool could
+    append a decision but never touch `content`. The tool is now WITHDRAWN
+    entirely (a charter always requires human review), so the guarantee is
+    stronger and simpler: the call is refused, and NOTHING it carried — neither
+    a decision nor a smuggled `content` — reaches the charter."""
     from lib.conversations.project_charter import commit_charter, read_charter
     p = os.path.abspath('/p/agent-no-content')
     with flask_app.app_context():
@@ -758,46 +1014,72 @@ def test_agent_commit_cannot_write_content_NC(flask_app):
         commit_charter(p, content='HUMAN NORTH STAR', updated_by_conv='human')
         # The agent commits a decision AND maliciously tries to smuggle a
         # `content` arg — the tool must ignore it entirely.
-        _charter_tool('project_charter_commit',
-                      {'decision': 'agent decision',
-                       'content': 'AGENT-HIJACKED GOAL'},
-                      project_path=p)
+        out = _charter_tool('project_charter_commit',
+                            {'kind': 'invariant',
+                             'decision': 'agent decision',
+                             'summary': 'agent decision',
+                             'content': 'AGENT-HIJACKED GOAL'},
+                            project_path=p)
         rec = read_charter(p)
+    assert 'project_charter_propose' in out, out
     assert rec['content'] == 'HUMAN NORTH STAR', \
-        'the agent commit tool must NOT be able to change the north-star content'
-    assert any(d['text'] == 'agent decision' for d in rec['decisions'])
+        'the withdrawn tool must not be able to change the north-star content'
+    assert not any(d['text'] == 'agent decision' for d in rec['decisions']), \
+        'the withdrawn tool must not append a decision either'
 
 
 def test_agent_commit_source_never_passes_content():
-    """Source-level: the project_charter_commit branch of execute_charter_tool
-    must call commit_charter with add_decision and NOT pass `content=` — the
-    structural guarantee behind the behavioral NC above."""
+    """REVERSED 2026-07-30: the branch must now REFUSE, not commit.
+
+    It previously asserted the branch calls commit_charter(add_decision=...)
+    without content=. Since the tool was withdrawn, the branch must reach no
+    writer at all — and must name the route that still works, so a model with
+    the old tool in its transcript is redirected rather than stonewalled."""
     with open(_CHARTER_SRC, encoding='utf-8') as f:
         src = f.read()
     start = src.index("if fn_name == 'project_charter_commit':")
     end = src.index("return f\"Error: Unknown charter tool", start)
     branch = src[start:end]
-    assert 'add_decision=' in branch, 'agent commit must append a decision'
-    assert 'content=' not in branch, \
-        'agent commit branch must NEVER pass content= to commit_charter'
+    assert 'commit_charter(' not in branch, \
+        'the withdrawn commit branch must not reach any charter writer'
+    assert 'add_decision=' not in branch and 'content=' not in branch
+    assert 'project_charter_propose' in branch, \
+        'the refusal must point at the route that still works'
 
 
-def test_agent_commit_version_conflict_surfaced(flask_app):
-    """A stale expected_version is rejected and the tool tells the agent to
-    re-read and retry (optimistic lock preserved through the tool)."""
-    from lib.conversations.project_charter import commit_charter
+def test_agent_commit_survives_a_stale_version(flask_app):
+    """A stale expected_version must NOT refuse an agent's decision append.
+
+    Re-anchored 2026-07-29 — this test previously asserted the OPPOSITE. The
+    agent tool can only append, and appends COMMUTE: another conversation
+    committing in between is not a conflict, it is the normal state of a busy
+    project. Refusing here made the tool fail precisely when siblings were
+    active, and the same contract made the panel's Commit button 409 on a
+    version it had rendered moments earlier.
+
+    The property that actually matters is asserted on the DATA: BOTH decisions
+    are present afterwards. So this is not "the refusal was deleted" but "the
+    append landed without eating the other one". Overwrites keep their hard
+    lock — see tests/test_project_charter_concurrency.py.
+    """
+    from lib.conversations.project_charter import commit_charter, read_charter
     p = os.path.abspath('/p/agent-conflict')
     with flask_app.app_context():
-        commit_charter(p, add_decision='v1', updated_by_conv='human')  # version 1
-        out = _charter_tool('project_charter_commit',
-                            {'decision': 'stale', 'expected_version': 0},
-                            project_path=p)
-    assert 'NOT committed' in out and 'version 1' in out
+        commit_charter(p, add_decision='v1', summary='v1',
+                       updated_by_conv='human')          # version 1
+        commit_charter(p, add_decision='sibling', summary='sibling',
+                       updated_by_conv='sibB')           # version 2 — moved on
+        res = _human_commit(p, 'mine', expected_version=0,
+                            updated_by_conv='human')
+        texts = [d['text'] for d in read_charter(p)['decisions']]
+    assert res['ok'], res
+    assert texts == ['v1', 'sibling', 'mine'], \
+        f'the append must land and no sibling decision may be lost; {texts}'
 
 
 def test_agent_commit_hits_max_decisions_truncation(flask_app):
-    """No human reviews decisions after self-commit, so confirm the append path
-    hits the EXISTING _MAX_DECISIONS rolling truncation (no pagination added):
+    """The append path hits the EXISTING _MAX_DECISIONS rolling truncation
+    (no pagination added):
     committing past the cap keeps only the most-recent _MAX_DECISIONS, and the
     newest survives while the oldest is dropped."""
     import lib.conversations.project_charter as pc
@@ -806,8 +1088,7 @@ def test_agent_commit_hits_max_decisions_truncation(flask_app):
     cap = pc._MAX_DECISIONS
     with flask_app.app_context():
         for i in range(cap + 5):
-            _charter_tool('project_charter_commit',
-                          {'decision': f'decision #{i}'}, project_path=p)
+            _human_commit(p, f'decision #{i}', updated_by_conv='human')
         rec = read_charter(p)
     texts = [d['text'] for d in rec['decisions']]
     assert len(texts) == cap, 'rolling truncation must cap at _MAX_DECISIONS'
@@ -817,22 +1098,28 @@ def test_agent_commit_hits_max_decisions_truncation(flask_app):
 
 
 def test_agent_commit_requires_decision_text(flask_app):
+    """REVERSED 2026-07-30: argument validation is moot once the tool is
+    withdrawn — an empty decision is refused for the same reason a well-formed
+    one is. Asserting the refusal keeps the case covered without implying the
+    tool still validates and might therefore still write."""
     p = os.path.abspath('/p/agent-empty')
     with flask_app.app_context():
         out = _charter_tool('project_charter_commit', {'decision': '  '},
                             project_path=p)
-    assert 'required' in out.lower()
+    assert 'project_charter_propose' in out, out
 
 
 def test_promote_watch_item_still_routes_through_commit(flask_app):
-    """The watch→charter bridge unfreezes with the de-gate but is UNCHANGED: it
-    still routes through commit_charter, landing the promoted item as a
-    committed decision (the ONLY watch→agent path)."""
+    """The watch→charter bridge still routes a CONCERN through commit_charter.
+
+    RETARGETED 2026-07-30: this used a goal. Goals no longer travel to the
+    charter at all — they inject directly from the watch lane — so promoting one
+    is refused. A concern/question is what the bridge is for now."""
     from lib.conversations.project_watch import add_watch_item, promote_watch_item
     from lib.conversations.project_charter import read_charter
     p = os.path.abspath('/p/promote')
     with flask_app.app_context():
-        item = add_watch_item(p, 'goal', 'Keep the DB layer dual-backend',
+        item = add_watch_item(p, 'concern', 'Keep the DB layer dual-backend',
                               created_by_conv='human')
         assert item['ok'], item
         iid = item['item']['item_id']

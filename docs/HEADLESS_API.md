@@ -566,7 +566,7 @@ Authorization: Bearer tofu_live_…
 → {
   "object": "list",
   "data": [
-    {"id":"gpt-5","object":"model","owned_by":"openai", ...},
+    {"id":"gpt-5.6","object":"model","owned_by":"openai", ...},
     {"id":"deepseek-v4-pro@prov_a3f2c1",      // ← BYO model
      "object":"model","owned_by":"prov_a3f2c1",
      "tofu_provider_name":"deepseek-cluster-A",

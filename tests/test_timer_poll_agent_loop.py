@@ -101,7 +101,10 @@ def test_multi_round_tool_then_decision(monkeypatch):
     assert executed == ['read_files']
     assert len(tool_trace) == 1
     assert tool_trace[0] == {
-        'name': 'read_files', 'argsBrief': '{"path":"a"}',
+        # argsBrief is the name-keyed display label (format_tool_args_brief),
+        # NOT the old raw-arguments truncation — the raw JSON string is coerced
+        # and rendered through project_tool_display.
+        'name': 'read_files', 'argsBrief': 'Read 1 file: a',
         'elapsed': 0.12, 'isError': False,
     }
     assert raw_content == json.dumps({'ready': True, 'reason': 'all green'})

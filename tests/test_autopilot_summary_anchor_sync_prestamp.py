@@ -204,11 +204,19 @@ def test_task_done_prestamps_anchor_before_clearing_run_pin(monkeypatch):
         seen['prestamp_thread'] = threading.current_thread()
         return {'runId': run_id, 'status': 'concluded', 'reason': reason,
                 'anchorMsgId': 'm-boundary'}
-    monkeypatch.setattr(ap, '_store_run_record', _fake_store)
+    # Post-slice-3 (pt_00459503): _emit_run_concluded_event (invoked from
+    # maybe_run_autopilot on the TASK_DONE path) lives in the leaf module
+    # ``autopilot_run_lifecycle`` and resolves _store_run_record /
+    # _emit_run_concluded from its OWN globals. Patch the origin bindings
+    # so the fake reaches the callee inside the leaf.
+    import lib.tasks_pkg.autopilot_run_lifecycle as apl
+    monkeypatch.setattr(apl, '_store_run_record', _fake_store)
     # The report-free close-out helper reaches _store_run_record; keep its feed
     # pulse + SSE emit inert so the test observes only the store/clear order.
-    monkeypatch.setattr(ap, '_emit_run_concluded', lambda *a, **k: None)
+    monkeypatch.setattr(apl, '_emit_run_concluded', lambda *a, **k: None)
 
+    # _clear_run_id is called from maybe_run_autopilot itself (still in
+    # autopilot.py's module scope) — patch the facade attr as before.
     monkeypatch.setattr(ap, '_clear_run_id',
                         lambda cid: order.append('clear_run_id'))
     import lib.message_queue as _mq

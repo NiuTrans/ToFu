@@ -58,6 +58,11 @@ global.window.TOFU_CONV_WINDOW = 60;
 global.activeConvId = 'long';
 global.activeStreams = new Map();
 global.streamBufs = new Map();
+global.streamSessions = new Map();
+global.document = { getElementById: () => null, addEventListener: () => {} };
+global.getStreamSession = (cid) => { let s = global.streamSessions.get(cid); if (!s) { s = { phase: null }; global.streamSessions.set(cid, s); } return s; };
+global.setStreamPhase = (cid, p) => { if (!global.streamSessions.has(cid) && !(typeof activeStreams !== "undefined" && activeStreams.has(cid))) return; global.getStreamSession(cid).phase = p; };
+global.clearStreamSession = (cid) => { global.streamSessions.delete(cid); };
 global._editingMsgIdx = null;
 global.debugLog = () => {};
 global.config = {};
@@ -116,6 +121,10 @@ global.conversations = [{
 }];
 
 eval(fs.readFileSync(process.argv[2], 'utf8'));  // REAL core/conversations.js
+// Extracted leaf modules (pt_3879f00e decomposition): the load path calls
+// convHasPendingSync (core/pending_sync.js) and the persist/freshness helpers
+// (core/conv_persist_helpers.js), which no longer live in conversations.js.
+for (const extra of process.argv.slice(4)) eval(fs.readFileSync(extra, 'utf8'));
 global.conversations = conversations;
 
 const out = [];
@@ -153,9 +162,17 @@ def _run(conv_js: str) -> subprocess.CompletedProcess:
     with open(harness, 'w') as f:
         f.write(_HARNESS)
     conv_window_js = os.path.join(JS_DIR, 'conv_window.js')
+    # Symbols the load path uses that were extracted out of
+    # core/conversations.js — eval them so the harness scope matches the
+    # shipped bundle (lib/js_bundler.py concatenates them all).
+    extra_js = [
+        os.path.join(JS_DIR, 'core', 'pending_sync.js'),
+        os.path.join(JS_DIR, 'core', 'conv_persist_helpers.js'),
+        os.path.join(JS_DIR, 'core', 'conv_apply_settings.js'),
+    ]
     try:
         return subprocess.run(
-            ['node', harness, conv_js, conv_window_js],
+            ['node', harness, conv_js, conv_window_js, *extra_js],
             capture_output=True, text=True, timeout=60,
         )
     finally:

@@ -357,8 +357,24 @@ _IMAGE_TOKENS_DEFAULT = _IMAGE_TOKENS_HIGH  # conservative default
 # Tools whose results should NEVER be truncated by budget_tool_result.
 # Like Claude Code's Read tool (maxResultSizeChars = Infinity), truncating
 # read results is counterproductive — the model will just re-call the tool,
-# wasting tokens and time.  These tools already have their own internal
-# limits (MAX_READ_CHARS=100K per file, BATCH_CHAR_BUDGET=200K).
+# wasting tokens and time.
+#
+# ⚠️ THE EXEMPTION MEANS WHAT IT SAYS: ``read_files`` has NO result-size
+# ceiling on this layer.  An earlier version of this comment justified the
+# exemption with "these tools already have their own internal limits
+# (MAX_READ_CHARS=100K per file, BATCH_CHAR_BUDGET=200K)" — BOTH numbers were
+# false, and the justification they propped up was therefore fiction:
+#   * ``MAX_READ_CHARS`` is 1_000_000 (10× the claimed 100K), which is ABOVE
+#     ``MAX_FILE_SIZE`` (512 KB) — so that per-file knife can never fire.
+#   * ``read_files``' ``BATCH_CHAR_BUDGET`` is 50 MB (262× the claimed 200K).
+# The bounds that ACTUALLY constrain this tool are:
+#   1. the 512 KB per-file INPUT gate (``MAX_FILE_SIZE``), and
+#   2. ``_SINGLE_RESULT_HARD_CEILING_CHARS`` (800_000) — the tool-agnostic
+#      backstop in ``clamp_tool_result_text``, not a per-tool budget.
+# Do not re-justify this exemption with a number written in a comment; the
+# claim is pinned by an executable assertion in
+# ``tests/test_read_files_exemption_contract.py`` instead.
+#
 # micro_compact (Layer 1) will compress them later when they become cold.
 _BUDGET_EXEMPT_TOOLS = frozenset({
     'read_files',
@@ -376,6 +392,15 @@ TOOL_RESULT_MAX_CHARS: dict[str, int] = {
     'browser_get_interactive_elements': 30_000,
     'browser_execute_js': 30_000,
     'browser_get_app_state': 30_000,
+    # conv_ref bounds its OWN output at lib/conv_ref/_detail.MAX_CHARS (80k) by
+    # selecting whole messages. Its budget here must sit ABOVE that so L0 never
+    # fires on a normal read: previously the default 60k clipped conv_ref's
+    # already-80k-truncated text and persisted THAT to disk while telling the
+    # model "Full output saved to: …" — measured 0.54% of the real record on a
+    # 15.7 MB row. One layer owns the cap; L0 stays a backstop for the
+    # pathological single-huge-message case, where what it writes IS what the
+    # tool produced.
+    'get_conversation': 100_000,
 
 }
 _DEFAULT_TOOL_RESULT_MAX = 60_000

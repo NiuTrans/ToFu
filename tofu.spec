@@ -101,6 +101,20 @@ _candidate_datas = [
     # .env.example as template
     (os.path.join(ROOT, '.env.example'), '.'),
 
+    # Browser-extension source, served as a ZIP by /api/browser/download and
+    # surfaced as `extensionPath` by /api/v1/browser/status.
+    #
+    # Both read it from disk at REQUEST time — routes/browser.py builds the zip
+    # by walking ``BASE_DIR/browser_extension`` and 404s when that directory is
+    # absent. Without this entry the frozen app ships no such directory, so the
+    # Local Control modal's "Download extension ZIP" button 404s and
+    # extensionPath is permanently null: the desktop build is exactly the one
+    # where the user cannot obtain the extension, which is the population that
+    # most needs it. The dest is bare ``browser_extension`` (not ``.``) so it
+    # lands at ``_internal/browser_extension`` — the same directory those two
+    # modules derive from their own ``__file__`` when frozen.
+    (os.path.join(ROOT, 'browser_extension'), 'browser_extension'),
+
     # Provider templates (loaded at runtime by lib/llm_dispatch)
     # Bundled inside static/ already — no extra entry needed
 ]

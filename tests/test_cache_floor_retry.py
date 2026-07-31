@@ -99,18 +99,26 @@ def test_floor_retry_max_clamped_and_gate(monkeypatch):
     assert fr.floor_retry_max() == 0
 
 
-def test_default_gate_is_ON_and_max_is_2(monkeypatch):
-    """★ Failing-first guard for the DEFAULT FLIP (2026-07-20): with NO env
-    var set, the mitigation must be ON and the resend cap must be 2 (so a
-    collapse whose first resend hits a 503 still gets a second attempt).
-    NEUTER: revert the module defaults to '0'/'1' and this test goes red."""
+def test_default_gate_is_OFF_2026_07_23(monkeypatch):
+    """★ Failing-first guard for the 2026-07-23 REVERSAL: with NO env var set,
+    the mitigation must be OFF. Reason: the "0.0% floor" acceptance metric was
+    REPORT-KIND (adopted-usage-only) — the discarded first attempt was billed by
+    the gateway but never counted into apiRounds/accumulated_usage/compute_cost,
+    so the "cost minimisation" claim was manufactured by hiding the second
+    request's cost. With honest accounting now in place (extra_billing_rounds
+    propagated), a resend's expected marginal cost is strictly positive with no
+    proved TCO reduction, so default-on violates the North-Star (cost
+    minimisation). Set TOFU_CACHE_FLOOR_RETRY=1 to opt in for future controlled
+    A/B tests.
+    NEUTER: revert the module default to '1' and this test goes red."""
     from lib.tasks_pkg import floor_retry as fr
     monkeypatch.delenv('TOFU_CACHE_FLOOR_RETRY', raising=False)
     monkeypatch.delenv('TOFU_CACHE_FLOOR_RETRY_MAX', raising=False)
-    assert fr.floor_retry_enabled() is True, (
-        'the proven mitigation must be ON by default (objective: zero misses)')
+    assert fr.floor_retry_enabled() is False, (
+        'floor-retry must be OFF by default — resend is a per-request cost '
+        'loss until a real TCO A/B proves otherwise')
     assert fr.floor_retry_max() == 2, (
-        'default resend cap must be 2 to cover a 503-on-first-resend round')
+        'when opted-in, resend cap must be 2 to cover a 503-on-first-resend round')
 
 
 def test_wire_prefix_stable_true_when_prefix_matches():
@@ -427,6 +435,127 @@ def test_resend_does_not_reuse_tool_callback(monkeypatch):
     assert captured_cbs[1] is None, (
         'FloorRetry resend must pass on_tool_call_ready=None so a discarded '
         'attempt never announces an orphan tool round')
+
+
+# ── HONEST ACCOUNTING (2026-07-23 flip): discarded resends must be BILLED ──
+
+def test_recovered_resend_preserves_discarded_first_attempt_billing(monkeypatch):
+    """When a resend RECOVERS, the ADOPTED usage supersedes the primary. But
+    the gateway BILLED the primary (a full cache_creation) too — the returned
+    usage MUST carry it under `_extra_billing_rounds` so downstream cost
+    accounting can add it into api_rounds and the wallet debit.
+
+    RED before the honest-accounting fix (the primary's usage was dropped);
+    GREEN with _fr_discarded_billing preservation.
+    NEUTER: skip the primary-preservation `_fr_discarded_billing.append({...})`
+    inside the loop and this test flips red."""
+    n, usage = _run_stream(monkeypatch, enabled=True,
+                           dispatch_seq=[_FLOOR_USAGE, _HIT_USAGE])
+    assert n == 2
+    assert usage.get('cache_read_tokens') == 150000, 'adopted usage = recovered'
+    billed = usage.get('_extra_billing_rounds') or []
+    assert len(billed) == 1, (
+        f'discarded primary MUST be preserved as _extra_billing_rounds; got {billed}')
+    disc = billed[0]
+    assert disc['usage'].get('cache_creation_input_tokens') == 42000, (
+        f'discarded entry must carry the floored PRIMARY usage; got {disc}')
+    assert 'FLOOR-DISCARDED-primary' in disc['tag'], f'tag={disc["tag"]!r}'
+
+
+def test_exhausted_resends_preserve_every_billed_attempt(monkeypatch):
+    """When ALL resends stay floored (max=2), the gateway billed 3 times:
+    primary + 2 resends. The ADOPTED usage is the LAST resend's, and BOTH
+    prior attempts must appear in `_extra_billing_rounds`. Anything less is
+    silent under-billing.
+    NEUTER: revert the loop-body preservation and only 0-1 items appear."""
+    # Three consecutive floors: primary, resend1, resend2 (final adopted).
+    _FLOOR_2 = dict(_FLOOR_USAGE, cache_creation_input_tokens=41000)
+    _FLOOR_3 = dict(_FLOOR_USAGE, cache_creation_input_tokens=40500)
+    n, usage = _run_stream(monkeypatch, enabled=True,
+                           dispatch_seq=[_FLOOR_USAGE, _FLOOR_2, _FLOOR_3])
+    assert n == 3, f'primary + 2 resends when nothing recovers; dispatches={n}'
+    assert usage.get('cache_creation_input_tokens') == 40500, (
+        'adopted usage is the last resend when the loop exhausts')
+    billed = usage.get('_extra_billing_rounds') or []
+    assert len(billed) == 2, (
+        f'BOTH the primary AND the mid resend were gateway-billed and must '
+        f'appear as discarded rounds; got {billed}')
+    tags = [b['tag'] for b in billed]
+    assert any('primary' in t for t in tags), f'missing primary in {tags}'
+    assert any('resend1' in t for t in tags), f'missing resend1 in {tags}'
+
+
+def test_llm_call_with_fallback_bills_discarded_into_api_rounds(monkeypatch):
+    """End-to-end: _llm_call_with_fallback must consume `_extra_billing_rounds`
+    from the returned usage and append each entry as its own api_rounds row +
+    accumulate its numeric tokens. Without this, cost popover / accumulated
+    /wallet debit only sees the ADOPTED usage — the reported "cost
+    minimisation" is manufactured by hiding the second bill.
+
+    Failing-first: without the consumer loop in _call.py, api_rounds has ONE
+    entry (the adopted usage). With it, api_rounds has 1 primary + N discarded.
+    NEUTER: remove the `for _bill in _extra` loop and only 1 row appears."""
+    import lib.tasks_pkg.manager as _mgr
+    import lib.tasks_pkg.llm_fallback as _fb
+    monkeypatch.setenv('TOFU_CACHE_FLOOR_RETRY', '1')
+    monkeypatch.setenv('TOFU_CACHE_FLOOR_RETRY_MAX', '2')
+    conv_id = 'cfr-bill-e2e'
+    _seed_wire_fp(conv_id, [{'k': 'a'}])
+    seq = [_FLOOR_USAGE, _HIT_USAGE]
+    calls = {'n': 0}
+
+    def _fake_dispatch(body, **kwargs):
+        i = calls['n']; calls['n'] += 1
+        return ({'role': 'assistant', 'content': 'ok'}, 'stop', dict(seq[min(i, len(seq) - 1)]))
+
+    _orig = _mgr.dispatch_stream
+    _mgr.dispatch_stream = _fake_dispatch
+    try:
+        task = _task(conv_id)
+        api_rounds = []
+        accumulated = {}
+        # _llm_call_with_fallback signature — see lib/tasks_pkg/llm_fallback/_call.py
+        result = _fb._llm_call_with_fallback(
+            task, _body(), 'aws.claude-opus-4.8', 0, 4096,
+            tool_call_happened=False, tool_list=None, max_tool_rounds=10,
+            messages=_body()['messages'], preset='opus',
+            thinking_enabled=False,
+            accumulated_usage=accumulated, api_rounds=api_rounds,
+            on_tool_call_ready=None,
+        )
+    finally:
+        _mgr.dispatch_stream = _orig
+
+    assert result['_loop_action'] is None, f'primary path expected; result={result}'
+    # api_rounds MUST have: the adopted primary row + the discarded primary row.
+    assert len(api_rounds) == 2, (
+        f'api_rounds must include the DISCARDED first attempt so cost popover '
+        f'matches the gateway bill; got {len(api_rounds)}: {api_rounds}')
+    tags = [r.get('tag') for r in api_rounds]
+    assert any('FLOOR-DISCARDED' in (t or '') for t in tags), (
+        f'a DISCARDED-tagged row is required; tags={tags}')
+    # accumulated_usage MUST double-count cache_creation because the gateway
+    # charged for BOTH the primary write AND the recovered read.
+    # primary cache_creation = 42000, recovered cache_creation = 1200 → 43200
+    assert accumulated.get('cache_creation_input_tokens') == 43200, (
+        f'accumulated_usage must sum BOTH billed attempts, not just adopted; '
+        f'got cache_creation={accumulated.get("cache_creation_input_tokens")}')
+    # cache_read is 28654 (primary) + 150000 (recovered) = 178654.
+    assert accumulated.get('cache_read_tokens') == 178654, (
+        f'accumulated cache_read must include BOTH billed attempts; '
+        f'got {accumulated.get("cache_read_tokens")}')
+
+
+def test_no_extra_billing_rounds_when_gate_off(monkeypatch):
+    """When the mitigation is OFF (the 2026-07-23 default), there is no resend,
+    so there is nothing extra to bill — `_extra_billing_rounds` must be absent.
+    This is a NEUTER control for the honest-accounting path itself: the
+    accounting-preservation code must not fire when no resend happened."""
+    n, usage = _run_stream(monkeypatch, enabled=False,
+                           dispatch_seq=[_FLOOR_USAGE, _HIT_USAGE])
+    assert n == 1
+    assert '_extra_billing_rounds' not in usage, (
+        f'no resend = no extra billing rows; got {usage.get("_extra_billing_rounds")}')
 
 
 if __name__ == '__main__':

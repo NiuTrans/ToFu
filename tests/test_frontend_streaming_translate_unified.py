@@ -253,8 +253,12 @@ const g1 = body.querySelector('.ptool-turn[data-llm-round="L1"]');
 //   tool card in the panel body (located by data-seg-round), NOT nested inside
 //   .ptool-turn — the same "don't box the three together" fix as the English
 //   path. Mirrors the settled render (flat siblings of the card).
-const n0 = pbody && pbody.querySelector(':scope > .stream-seg-narration[data-seg-round="L0"]');
-const n1 = pbody && pbody.querySelector(':scope > .stream-seg-narration[data-seg-round="L1"]');
+/* Phase 3.5 step 2: the live zh twin carries the SETTLED class list
+ * (`seg-narration`, byte-identical to the cold render) and is located by
+ * EXCLUSION from the English sibling — same query as production
+ * (translation_render.js). */
+const n0 = pbody && pbody.querySelector(':scope > .seg-narration[data-seg-round="L0"]:not(.stream-seg-en-narration)');
+const n1 = pbody && pbody.querySelector(':scope > .seg-narration[data-seg-round="L1"]:not(.stream-seg-en-narration)');
 
 // ROUND-0 Chinese lands next to round-0's card (adjacency — the whole point).
 check('round0_chinese_for_group0', !!n0 && n0.innerHTML.indexOf('第零轮') >= 0);
@@ -304,7 +308,7 @@ check('blob_still_excludes_routed',
   // Call WITHOUT byRound (old backend / neutered routing).
   _renderStreamingTranslatePreview('c1', 'mLive', '第零轮的中文narration。');
   const g0n = fresh.querySelector('.ptool-turn[data-llm-round="L0"]');
-  const nNeuter = g0n && g0n.querySelector(':scope > .stream-seg-narration');
+  const nNeuter = g0n && g0n.querySelector(':scope > .seg-narration:not(.stream-seg-en-narration)');
   const blobNeuter = fresh.querySelector('[data-zone="translatedPrimary"] .md-content');
   check('NC_neuter_no_narration_in_group', !nNeuter);
   check('NC_neuter_chinese_falls_to_blob',

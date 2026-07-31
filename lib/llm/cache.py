@@ -21,13 +21,21 @@ logger = get_logger(__name__)
 # Bump this by 1 for each new cache-fix that must be confirmed deployed.
 #   gen 5 = ab161bf str↔block + 1274cee raw↔stripped + 0a9f6af prefill-skip
 #           + 8ecbbcf reasoning_content parity + 1920827 single-source builder.
-CACHE_FIX_GEN = 5
+#   gen 6 = 6fe3f9ca tool-msg marker protocol gate (OpenAI wire vendor-400:
+#           tool message unmarkable off the Anthropic protocol).
+CACHE_FIX_GEN = 6
 
 # ── Cache-marker capability matrix ──
 # Empirically probed on the sankuai gateway (2026-05-03).
 #   1. Needs markers       → claude, glm-5, qwen, deepseek
-#   2. Auto-caches         → minimax, doubao (markers harmful)
+#   2. Auto-caches         → minimax, doubao (markers harmful), kimi
 #   3. Unknown             → default NO markers
+# kimi auto-caches WITHOUT markers (probed 2026-07-24 on kimi-k3: an identical
+# re-send 3s apart read back 3328/3367 tok = 98.8% with zero cache_control
+# attached), so the default NO-markers path is CORRECT for it — but the gateway
+# reports the hit as cached_tokens / prompt_tokens_details.cached_tokens while
+# pinning cache_read_tokens=0, which is why Tofu's accounting showed 0 hits
+# until lib/cost.py::normalize_usage learned the vendor spellings (2026-07-24).
 _CACHE_MARKERS_HELP = ('glm-5', 'qwen', 'deepseek')
 
 # Anthropic's hard ceiling: at most 4 ``cache_control`` markers per request.
@@ -172,7 +180,7 @@ def _gateway_honors_cache_markers(model: str) -> bool:
     return any(k in lowered for k in _CACHE_MARKERS_HELP)
 
 
-def add_cache_breakpoints(body, log_prefix=''):
+def add_cache_breakpoints(body, log_prefix='', *, api_protocol='anthropic'):
     """Add Anthropic-style ephemeral cache breakpoints with mixed TTL.
 
     Annotates up to ``_MAX_CACHE_BP`` (4) content blocks with cache_control.
@@ -189,10 +197,27 @@ def add_cache_breakpoints(body, log_prefix=''):
     Mixed TTL strategy (when CACHE_EXTENDED_TTL is enabled):
       - System + tools: ttl="1h" — stable content
       - Conversation tail: ttl="5m" (default) — changes every round
+
+    ``api_protocol`` — the WIRE protocol the body will be sent on. On the
+    Anthropic protocol (default) a ``tool`` message MAY carry a marker on its
+    content: ``openai_body_to_anthropic`` hoists it onto the emitted
+    tool_result block itself. On any other wire the body is serialised
+    verbatim and the gateway's OpenAI→Anthropic translation carries the
+    marker INTO ``tool_result.content[*]``, which the vendor hard-rejects
+    (HTTP 400 "cache_control may not be specified within
+    `tool_result.content`" — sankuai toio gateway, yuju-claude-opus-5,
+    2026-07-25; the masked variant surfaces as a generic「请求失败」400).
+    So on non-Anthropic wires a ``tool`` message is UNMARKABLE and the
+    tail/mid scans walk past it to the assistant/user turn.
     """
     model = body.get('model', '')
     if not _gateway_honors_cache_markers(model):
         return
+
+    # Anthropic rejects cache_control nested inside tool_result.content — see
+    # the docstring. Only our own translator hoists correctly; every other
+    # wire serialises the marker into the vendor-400 shape.
+    _skip_tool_marking = api_protocol != 'anthropic'
 
     # Read the task-id NON-destructively: the streaming retry loop
     # (lib/llm/stream.py / astream.py) re-feeds the SAME body dict to
@@ -383,6 +408,8 @@ def add_cache_breakpoints(body, log_prefix=''):
             msg = messages[i]
             if msg.get('role') == 'system':
                 continue
+            if _skip_tool_marking and msg.get('role') == 'tool':
+                continue  # vendor-400 shape on OpenAI wires (see docstring)
             if _is_prefill_converted(msg):
                 continue  # volatile — its bytes flip to bare assistant next round
             content = msg.get('content', '')
@@ -418,6 +445,10 @@ def add_cache_breakpoints(body, log_prefix=''):
                 # now, bare assistant once buried). Marking it writes a cache
                 # entry the next round cannot read back — walk PAST it to the
                 # previous stable turn so the tail breakpoint still lands.
+                continue
+            if _skip_tool_marking and msg.get('role') == 'tool':
+                # Vendor-400 shape on OpenAI wires (see docstring) — walk to
+                # the assistant/user turn so the tail breakpoint still lands.
                 continue
             content = msg.get('content', '')
             if isinstance(content, str) and content:

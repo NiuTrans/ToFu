@@ -19,6 +19,8 @@ from lib.tasks_pkg.handlers import (  # noqa: F401
     mcp,
     memory,
     misc,
+    motion_video,
     project,
     search,
+    skills,
 )

@@ -168,7 +168,14 @@ for (const name of ['renderMarkdown','getToolRoundsFromMsg','renderFinishInfo',
   if (typeof win[name] === 'undefined') { win[name] = global[name] = _noop; }
 }
 
-let src = fs.readFileSync(process.argv[2], 'utf8');  // ui/chat_render.js
+// argv[5..] = ordered shipped sources (resolved BY SYMBOL from the production
+// bundle manifests — see tests/_conv_bundle_sources.py), CONCATENATED into ONE
+// eval exactly as the bundler concatenates them. That is load-bearing, not
+// stylistic: `_explicitBottomLatch` is `let`-declared in ui/streaming_render.js
+// and a `let` does NOT escape its own eval, so eval'ing the files separately
+// still leaves chat_render.js with a bare ReferenceError that reads like a
+// product bug but is pure harness drift.
+let src = process.argv.slice(5).map((p) => fs.readFileSync(p, 'utf8')).join('\n;\n');
 
 if (NEUTER === 'anchor') {
   src = src.replace('container.scrollTop += (newOffset - anchor.offset);  // re-pin the anchor',
@@ -177,12 +184,30 @@ if (NEUTER === 'anchor') {
 }
 if (NEUTER === 'capture') {
   // Force the capture to yield null → the full-render path always force-scrolls.
-  src = src.replace('  const _preSwapAnchor = (_sameConvDom && !activeStreams.has(conv.id)\n      && (!_readerNearBottom || _openAlreadyPositioned))\n    ? _captureScrollAnchor(container, inner)\n    : null;',
-                    '  const _preSwapAnchor = null;  // NEUTERED-capture');
-  if (src.indexOf('// NEUTERED-capture') < 0) { console.log('FAIL neuter_capture_not_applied'); process.exit(0); }
+  // Anchored on the SINGLE stable line that performs the capture, not on the
+  // whole multi-line condition: that condition has already grown a clause
+  // (`_explicitBottomLatch !== conv.id`) since this neuter was written, and a
+  // multi-line literal silently stops matching on any such edit — the neuter
+  // then "does not bite" and reads exactly like a passing guard.
+  const before = src;
+  src = src.replace('    ? _captureScrollAnchor(container, inner)',
+                    '    ? null  // NEUTERED-capture');
+  if (src === before) { console.log('FAIL neuter_capture_not_applied'); process.exit(0); }
 }
 
 eval(src);
+
+// Re-install the observation stubs the REAL sources just shadowed:
+// ui/streaming_render.js declares `function _forceScrollToBottom(...)` /
+// `function _ensureLazyObserver()`, and a hoisted function declaration in the
+// eval overwrites the pre-eval assignment — the counting stub would never see
+// a call, so every force-scroll assertion would read 0.
+_forceScrollToBottom = win._forceScrollToBottom = global._forceScrollToBottom = (c) => {
+  _forceScrollCalls++;
+  _scrollTop = N * MSG_H - 600;   // bottom
+};
+_ensureLazyObserver = win._ensureLazyObserver = global._ensureLazyObserver = () => {};
+_destroyLazyObserver = win._destroyLazyObserver = global._destroyLazyObserver = () => {};
 
 // Override the hoisted renderMessage with a deterministic marker version.
 renderMessage = win.renderMessage = global.renderMessage = (msg, idx) =>
@@ -245,15 +270,21 @@ console.log(out.join('\n'));
 
 
 def _run(neuter: str = 'none'):
+    from tests._conv_bundle_sources import sources_defining
+    deps = sources_defining('_explicitBottomLatch')
+    target = os.path.join(JS_DIR, 'ui', 'chat_render.js')
+    src_paths = [p for p in deps if p != target] + [target]
+
     harness = os.path.join(HERE, '_full_render_anchor_harness.js')
     with open(harness, 'w') as f:
         f.write(_HARNESS)
     try:
         proc = subprocess.run(
             ['node', harness,
-             os.path.join(JS_DIR, 'ui', 'chat_render.js'),   # argv[2]
+             target,                                          # argv[2] (legacy)
              ROOT,                                            # argv[3]
              neuter,                                          # argv[4]
+             *src_paths,                                      # argv[5..]
              ],
             capture_output=True, text=True, timeout=60,
         )

@@ -199,7 +199,8 @@ def read_last_turn_cache_read(conv_id: str) -> int:
         if row is not None:
             try:
                 raw = row['settings']
-            except (TypeError, KeyError, IndexError):
+            except (TypeError, KeyError, IndexError) as _e:
+                logger.debug('read last turn cache read: unexpected type/missing key/short/malformed (%s)', _e)
                 raw = row[0] if row else None
             settings = safe_json(raw, default={}, label='cache_last_turn_read')
             if isinstance(settings, dict):

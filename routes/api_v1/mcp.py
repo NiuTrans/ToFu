@@ -75,6 +75,7 @@ def _invalidate_tool_latches(reason: str) -> None:
 def list_servers_v1():
     from lib.mcp import get_bridge
     from lib.mcp.config import load_mcp_config
+    from lib.mcp.transport import header_env_keys, redact_config
 
     config = load_mcp_config()
     bridge = get_bridge()
@@ -105,8 +106,9 @@ def list_servers_v1():
         cred_health = bridge.get_cred_health(name)
         servers.append({
             'name': name,
-            'config': {k: v for k, v in srv_cfg.items() if k != 'env'},
+            'config': redact_config(srv_cfg),
             'has_env': bool(srv_cfg.get('env')),
+            'header_env_keys': header_env_keys(srv_cfg),
             'enabled': srv_cfg.get('enabled', True),
             'connected': is_connected,
             'tools_count': tools_count,
@@ -128,18 +130,33 @@ def list_servers_v1():
 )
 def upsert_server_v1():
     from lib.mcp.config import upsert_server as cfg_upsert
+    from lib.mcp.transport import (
+        VALID_TRANSPORTS, is_stdio, normalize_transport,
+    )
 
     data = parse_body()
     name = data.pop('name', '').strip()
     if not name:
         return api_bad_request('Server name is required', field='name')
 
-    transport = data.get('transport', 'stdio')
-    if transport == 'stdio' and not data.get('command'):
+    transport = normalize_transport(data)
+    if transport not in VALID_TRANSPORTS:
+        return api_bad_request(
+            f'Unknown transport {transport!r}. Expected one of: '
+            f'{", ".join(sorted(VALID_TRANSPORTS))}',
+            field='transport')
+    # Persist the canonical spelling so aliases ('http', 'streamable_http')
+    # never reach the bridge or a stored config.
+    data['transport'] = transport
+    if is_stdio(data) and not data.get('command'):
         return api_bad_request('command is required for stdio transport',
                                 field='command')
-    if transport == 'sse' and not data.get('url'):
-        return api_bad_request('url is required for sse transport', field='url')
+    if not is_stdio(data) and not data.get('url'):
+        return api_bad_request(f'url is required for {transport} transport',
+                               field='url')
+    headers = data.get('headers')
+    if headers is not None and not isinstance(headers, dict):
+        return api_bad_request('headers must be an object', field='headers')
 
     cfg_upsert(name, data)
     logger.info('[MCP.v1] config upserted: %s (transport=%s)', name, transport)
@@ -363,6 +380,7 @@ def get_catalog_v1():
     # settings panel. Synthesize a minimal "Custom" card from the stored
     # config. env values are NOT leaked — only their keys (as stored_env_keys).
     from lib.mcp.registry import CAT_CUSTOM
+    from lib.mcp.transport import redact_config
     for sid, srv_cfg in config.items():
         if sid in catalog_ids:
             continue
@@ -387,6 +405,7 @@ def get_catalog_v1():
             'transport': srv_cfg.get('transport', 'stdio'),
             'env_specs': env_specs,
             'url': srv_cfg.get('url', ''),
+            'headers': redact_config(srv_cfg).get('headers', {}),
             'tags': ['custom'],
             'custom': True,
             'installed': True,
@@ -421,8 +440,6 @@ def get_catalog_v1():
     tags=['mcp'],
 )
 def install_from_catalog_v1():
-    from lib.mcp import get_bridge
-    from lib.mcp.client import MCPConnectError
     from lib.mcp.config import load_mcp_config, upsert_server as cfg_upsert
     from lib.mcp.registry import build_server_config, get_catalog_entry
 
@@ -467,7 +484,8 @@ def install_from_catalog_v1():
     # install job and return `status:'installing'` immediately; the front end
     # polls /catalog/install/status, which performs the (fast) connect once
     # pip finishes. Launchers already on PATH skip straight to connect.
-    command = server_cfg.get('command', '') if server_cfg.get('transport', 'stdio') != 'sse' else ''
+    from lib.mcp.transport import stdio_command
+    command = stdio_command(server_cfg)
     if command:
         from lib.mcp.client import is_vendored_launcher, start_install_job
         if is_vendored_launcher(command):
@@ -562,8 +580,8 @@ def install_status_v1():
     if server_cfg is None:
         return api_error(f'Unknown server: {server_id}', status=404)
 
-    command = (server_cfg.get('command', '')
-               if server_cfg.get('transport', 'stdio') != 'sse' else '')
+    from lib.mcp.transport import stdio_command
+    command = stdio_command(server_cfg)
     job = get_install_job(command) if command else None
 
     # No job recorded (e.g. server restarted mid-install) — treat as unknown

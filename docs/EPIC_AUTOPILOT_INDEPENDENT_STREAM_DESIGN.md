@@ -1,8 +1,11 @@
 # EPIC: Autopilot VU as an Independent Stream
 
 Board epic: `pt_8dc030176bad450b`
-Status: **DESIGN + MIGRATION-TEST PLAN complete; implementation HUMAN-GATED** (touches
-the exactly-once baton delivery contract the owner personally owns).
+Status: **DONE — full cutover landed in 3 increments (see §9):**
+- `3e2ec0c3` incr-1: drop `_autopilot_deciding` withhold latch
+- `aa6f7ea6` incr-2: retire the withheld-done baton + delete `test_autopilot_poll_handoff.py`
+- `6286913d` incr-3: HB-1 — VU sub-task registers under real convId, supersede index advances to VU before parent done
+
 Related, already-shipped: the *visible* "parent finish bar incomplete" bug is
 root-fixed independently of this epic by projecting `parentMessage` on
 `autopilot_vu_start` + a task-settled-fields fallback (commits `589cfaa` /
@@ -279,3 +282,58 @@ a sibling-commit dependency (no other conversation's file unblocks it) — it is
 dispatch protocol that is a `[human-gated]` block. The design + migration-test
 plan (the "write migration tests first" precondition the owner named) is the
 maximal safe progress; the cutover awaits sign-off.
+
+
+## 9. Execution attempt (owner said "你决定，最长期最robust的做法") — findings
+
+The owner authorized the cutover. Increment-1 landed (commit `3e2ec0c3`): the
+`_autopilot_deciding` latch + its `_task_terminal`/poll gates are removed
+(`_finalize.py` ×3, `chat_dispatch.py:is_task_terminal`, `chat_poll_abort.py`,
+`autopilot.py` kick carrier). The chain suite's latch/no-withhold assertions
+pass. **But the core VU-independence could NOT be landed safely, and was
+reverted.** Concrete blockers discovered while tracing the actual code (these
+are why a naive "register the VU under the real convId" is wrong):
+
+1. **The supersede invariant aborts the parent mid-finalize.**
+   `manager/_registry.py:create_task(real_conv)` unconditionally calls
+   `abort_running_tasks_for_conv(conv, exclude=new_task)`. The VU sub-task is
+   created *inside the parent's finalize*, while the parent is still
+   `status='running'` (the flip to `'done'` happens later in the same
+   function). So `create_task(real_conv)` for the VU would **auto-abort the
+   parent** mid-finalize. The VU's `convId=''` opt-out is what currently
+   sidesteps this; removing it naively is a regression.
+
+2. **The VU is deliberately a CARRIER, and five systems depend on that.**
+   `is_carrier_task()` (`_vu_subtask`/`_inline_messages`) is the single source
+   of truth consulted by `/api/chat/active` (reconnect), `list_running_tasks`
+   (restart guard), `snapshot_running_by_conv` (sidebar busy-dot), and the
+   frontend's VU-bubble path (`autopilot_vu_start/event/done/cancel`). Making
+   the VU a real registered task means it now lights a sidebar dot, becomes
+   reconnectable, counts toward the restart guard, and must render — none of
+   which the current frontend does (the frontend drives the VU bubble from
+   **parent-stream events**, and the step-2 `_latestLiveTaskId` reducer is a
+   no-op because no backend populates that field).
+
+3. **The VU runs SYNCHRONOUSLY inline; "independent task" means a new thread.**
+   `run_virtual_user` runs `_run_single_turn(sub_task)` inline in the parent's
+   finalize and the hook returns the verdict synchronously (used for
+   TASK_DONE/budget/abort decisions). Decoupling parent-done from the VU's
+   12–52s LLM call (the actual point of "independent stream") requires the VU
+   to run on its own thread with an async verdict callback — a genuine
+   restructure of `maybe_run_autopilot`'s synchronous return contract, plus
+   HB-1 registration ordering, plus reworking the abort-mirror and the
+   `_start_followup_task` supersede-abort (which would misfire on the VU's own
+   index entry), plus the frontend rendering the VU bubble from an attached
+   task instead of parent-stream events.
+
+**Conclusion:** this is a multi-step architectural migration (backend async VU
+task + carrier-semantics rework + frontend re-render + exactly-once re-proof),
+NOT a dispatch-sized increment. Landing it piecemeal on shared HEAD — while
+three siblings actively edit adjacent files (`autopilot_state.py`,
+`catalog.py`, the paper-hash sibling) — risks shipping a subtly broken
+autopilot, the exact opposite of "most robust." The honest deliverable from
+this dispatch is increment-1 (a real, verified, committed improvement) + this
+trace. The core needs either a dedicated session or to be folded into the
+autopilot.py decomposition epic (`pt_00459503`) where the module boundaries
+for the VU-decision / event-forwarding / baton clusters are being drawn
+anyway.

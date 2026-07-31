@@ -318,6 +318,12 @@ def _merge_tool_rounds(task):
 
 # Static column order for the task_results upsert — shared by the final-result
 # and the running-checkpoint writers so the two can never drift.
+#
+# ⚠️ ``completed_at`` is a MISNOMER: _upsert_task_row stamps it on every write,
+# including the ~5 s running checkpoint, so it means "last written at", not
+# "finished at". Pair it with ``status`` to reason about completion — the
+# predicate ``status='running' AND completed_at IS NOT NULL`` matches every
+# in-flight task, not the wedged ones (see _maintenance.find_orphan_running_results).
 _TASK_RESULTS_COLS = (
     'task_id', 'conv_id', 'content', 'thinking', 'error',
     'status', 'tool_rounds', 'metadata', 'segments', 'created_at', 'completed_at',

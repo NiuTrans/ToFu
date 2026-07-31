@@ -74,7 +74,9 @@ def tool_history_from_segments(segments: list[dict[str, Any]]) -> list[dict[str,
 
 def resume_prefill_from_segments(segments: list[dict[str, Any]] | None,
                                  model: str,
-                                 finish_reason: str | None = None) -> str | None:
+                                 finish_reason: str | None = None,
+                                 *,
+                                 content: str | None = None) -> str | None:
     """Extract the resumable assistant-prefill string for a Continue turn.
 
     Returns the terminal deliverable text (the tail the model was mid-writing)
@@ -101,12 +103,13 @@ def resume_prefill_from_segments(segments: list[dict[str, Any]] | None,
             when the persisted segment was assembled at a partial checkpoint
             (status='running', no finishReason yet) so its ``resumable`` flag
             was not stamped. When provided and resumable, it overrides.
+        content: the message's plain ``content`` channel, used as a FALLBACK
+            prefill when no terminal deliverable segment exists (the
+            segments-missing hole — see below).
 
     Returns:
         The prefill string, or ``None`` when prefill is unavailable/unwanted.
     """
-    if not segments:
-        return None
     # Lazy import: importing lib.model_info at module-load time creates a
     # circular import (its init chain is not yet complete when the segments
     # package is first imported during boot). It is a pure capability lookup.
@@ -114,7 +117,7 @@ def resume_prefill_from_segments(segments: list[dict[str, Any]] | None,
     if not model_supports_assistant_prefill(model):
         return None  # Claude — fail closed (Messages API rejects the prefill)
     fr_resumable = (finish_reason or '') in RESUMABLE_FINISH_REASONS
-    for s in segments:
+    for s in (segments or []):
         if s.get('type') == SEG_TEXT and s.get('terminal') and s.get('deliverable'):
             text = s.get('text') or ''
             if not text:
@@ -122,4 +125,21 @@ def resume_prefill_from_segments(segments: list[dict[str, Any]] | None,
             if s.get('resumable') or fr_resumable:
                 return text
             return None
+    # ── Content fallback (the segments-missing hole) ─────────────────────
+    # No terminal deliverable segment: a legacy row persisted before the
+    # segment timeline shipped, a best-effort ``assemble_segments`` failure,
+    # a frontend-race sync, or the superseded-fragment stamp
+    # (``_stamp_aborted_fragment_finish_reason`` writes finishReason but NOT
+    # segments). Without this the turn silently fell through to a full
+    # regeneration — the "button says Continue, actually regenerates" lie.
+    # Fall back to the plain ``content`` channel, the ``deliverable_text``
+    # precedent (segments missing → content, safe not lossy): for a no-tools
+    # turn ``content`` IS the terminal deliverable (``_discard_pretool_prose``
+    # already stripped inter-round narration), and any turn WITH completed
+    # tool rounds is claimed upstream by ``scan_continue_checkpoint``, so the
+    # fallback only ever fires on a no-tools turn. Gated on the SAME
+    # resumability + capability checks, so a clean-stop / Claude message
+    # still declines (returns None).
+    if fr_resumable and content and content.strip():
+        return content
     return None

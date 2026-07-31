@@ -61,7 +61,26 @@ def _node_deps_available() -> bool:
 # ── CSS half (always runs) ────────────────────────────────────────────────
 
 def _strip_comments(css: str) -> str:
-    return re.sub(r'/\*.*?\*/', '', css, flags=re.DOTALL)
+    """Remove /* … */ CSS comments.
+
+    Delegates to the SINGLE shared implementation (charter #24).
+
+    EQUIVALENCE, MEASURED on the real 22k-line static/styles.css rather than
+    assumed: the local ``re.sub(r'/\*.*?\*/', '', css, flags=re.DOTALL)`` this
+    replaced and ``strip_comments(lang='css', inline=True)`` produce an
+    IDENTICAL selector set (6466 rules, 0 selectors unique to either side) and
+    a byte-identical whitespace-stripped content signature. They differ only in
+    LINE NUMBERING -- the shared one blanks comment lines to preserve line
+    count, the local one deleted them (20295 vs 22400 lines) -- which leaves 25
+    rule bodies differing in whitespace alone. Every assertion here is
+    whitespace-insensitive (substring / regex on a rule body), so the swap is
+    behaviour-preserving; the suite is the proof.
+
+    Keeping N copies of "what counts as a comment" is what let a fix land in one
+    copy and not its duplicate -- incident 3 in the shared module's docstring.
+    """
+    from tests._source_scan import strip_comments
+    return strip_comments(css, lang='css', inline=True)
 
 
 def test_css_reveals_failed_turn_action_bar():
@@ -165,6 +184,11 @@ check('nc_pattern_applied', _applied);
 (0, eval)(fs.readFileSync(process.argv[4], 'utf8'));  // safe_html.js
 (0, eval)(fs.readFileSync(process.argv[3].replace('escape_html.js', 'translation_model.js'), 'utf8'));
 (0, eval)(fs.readFileSync(process.argv[3].replace('core/escape_html.js', 'ui/translation_indicator.js'), 'utf8'));
+// core/turn_settlement.js — chat_render's Continue-button gate delegates to
+// computeTurnSettlement + continueButtonForSettlement (chat_render.js:~1596);
+// without this module the typeof-guard falls back to {show:false} and NO
+// continue/regenerate button is ever emitted.
+(0, eval)(fs.readFileSync(process.argv[3].replace('escape_html.js', 'turn_settlement.js'), 'utf8'));
 (0, eval)(chatSrc);
 
 if (typeof renderMessage !== 'function') {

@@ -55,7 +55,7 @@ def _truncate_old_tool_results(
     whose index is still within the previous round's cache prefix. Such a
     result is left byte-identical now and gets truncated on a LATER round once
     it has scrolled OUT of the prefix — by then it is no longer cached, so the
-    edit costs nothing. See .tofu/skills/cache-bp4-moving-tail-rebills-body and
+    edit costs nothing. See .tofu/memories/cache-bp4-moving-tail-rebills-body and
     prefix-mutation-cache-miss-truncate-old-tool-results.
 
     Returns the number of tool results truncated.

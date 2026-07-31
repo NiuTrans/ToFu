@@ -199,6 +199,12 @@ PAPER_LIBRARY = define_table(
     sa.Column('arxiv_id', sa.Text, nullable=False, server_default=''),
     sa.Column('paper_hash', sa.Text, nullable=False, server_default=''),
     sa.Column('parsed_text', sa.Text, nullable=False, server_default=''),
+    # parser_version — the extractor+version key that produced parsed_text
+    # (e.g. 'pymupdf4llm-1.27.2.3'; raw fallback 'pymupdf-raw-…'; '' = legacy/
+    # unknown). The harvest parse-once probe requires an exact match with the
+    # environment's expected version, so a parser upgrade or a degraded write
+    # invalidates naturally instead of serving stale text forever.
+    sa.Column('parser_version', sa.Text, nullable=False, server_default=''),
     sa.Column('qa_history', sa.Text, nullable=False, server_default='[]'),
     sa.Column('images', sa.Text, nullable=False, server_default='[]'),
     sa.Column('babel_cache', sa.Text, nullable=False, server_default='{}'),
@@ -223,6 +229,31 @@ PAPER_TRANSLATIONS = define_table(
     sa.Column('model', sa.Text, nullable=False, server_default=''),
     sa.Column('created_at', bigint_column(), nullable=False),
     sa.PrimaryKeyConstraint('paper_hash', 'lang'),
+)
+
+# paper_podcasts — generated paper-podcast cache; composite PK
+# (paper_hash, mode, lang, voice). script_json is the segmented spoken
+# script (JSON); file_path points at the on-disk audio under
+# uploads/papers/podcast/ (DB holds text/metadata, disk holds binaries —
+# same convention as paper PDFs/images). status: running | done |
+# script_only (no TTS slot configured — script+transcript only) | error.
+# duration_sec is REAL (0 when unknown/estimated-only).
+PAPER_PODCASTS = define_table(
+    'paper_podcasts',
+    sa.Column('paper_hash', sa.Text, nullable=False),
+    sa.Column('mode', sa.Text, nullable=False, server_default='short'),
+    sa.Column('lang', sa.Text, nullable=False, server_default='zh'),
+    sa.Column('voice', sa.Text, nullable=False, server_default=''),
+    sa.Column('status', sa.Text, nullable=False, server_default=''),
+    sa.Column('script_json', sa.Text, nullable=False, server_default=''),
+    sa.Column('file_path', sa.Text, nullable=False, server_default=''),
+    sa.Column('duration_sec', sa.Float, nullable=False, server_default=sa.text('0')),
+    sa.Column('model', sa.Text, nullable=False, server_default=''),
+    sa.Column('tts_model', sa.Text, nullable=False, server_default=''),
+    sa.Column('meta', sa.Text, nullable=False, server_default=''),
+    sa.Column('created_at', bigint_column(), nullable=False),
+    sa.Column('updated_at', bigint_column(), nullable=False),
+    sa.PrimaryKeyConstraint('paper_hash', 'mode', 'lang', 'voice'),
 )
 
 # task_results — persisted chat/task output. Single-col PK; several nullable
@@ -330,6 +361,11 @@ MESSAGE_QUEUE = define_table(
     sa.Column('kind', sa.Text, nullable=False, server_default="real"),
     sa.Column('priority', sa.Integer, nullable=False, server_default=sa.text('100')),
     sa.Column('created_at', bigint_column(), nullable=False),
+    # Dispatch lease (pt_4ab943fa): dequeue LEASES the row instead of deleting
+    # it; the delete lands only after spawn_task succeeds. NULL leased_until =
+    # not leased; '' lease_task_id = dispatch in flight, task not yet created.
+    sa.Column('leased_until', bigint_column(), nullable=True),
+    sa.Column('lease_task_id', sa.Text, nullable=False, server_default=''),
 )
 
 # scheduled_tasks — cron/agent task registry. Single TEXT PK. Mixes NOT-NULL
@@ -636,6 +672,18 @@ PROJECT_TASKS = define_table(
     # NEVER stranded. Reset to '[]' on complete/reopen. See
     # docs/PROJECT_BRAIN_WORKTREE_ISOLATION.md §4.
     sa.Column('write_set', sa.Text, nullable=False, server_default="[]"),
+    # block_question / human_answer: the STRUCTURED human gate on a block
+    # (Pillar #3). block_task may carry a question for the human (JSON
+    # {"q", "options": [{"label", "description"?}]}); an epic with a
+    # PENDING question (block_question set, human_answer empty) is EXCLUDED
+    # from select_dispatchable regardless of cooldown — re-running before
+    # the answer can only re-discover the same gate (the billed-turn loop).
+    # answer_task records the human's answer, clears the cooldown + question,
+    # and the next dispatch injects the Q&A into the kickoff. Both reset on
+    # complete/reopen; a fresh block supersedes a stale answer. See
+    # project_board.py::answer_task. Added 2026-07.
+    sa.Column('block_question', sa.Text, nullable=False, server_default=''),
+    sa.Column('human_answer', sa.Text, nullable=False, server_default=''),
     sa.Column('created_at', bigint_column(), nullable=False, server_default=sa.text('0')),
     sa.Column('updated_at', bigint_column(), nullable=False, server_default=sa.text('0')),
 )
@@ -664,8 +712,27 @@ PROJECT_STATUS_SNAPSHOTS = define_table(
 # project_watch_items — the human's standing "things I care about" list (Pillar
 # #7 watch lane). The HUMAN authors each item (kind: concern|question|goal +
 # free text); the brain addresses it on a recurring basis. Single TEXT PK
-# (item_id). status: open|resolved. `promoted` marks an item bridged into the
-# charter (the ONLY path to agent awareness — a human-gated charter commit).
+# (item_id). status: open|resolved.
+#
+# Promotion columns — AUDIT TRAIL ONLY, never the UI's source of truth:
+#   `promoted`      — a one-shot "a promotion was performed" marker for a
+#                     concern/question. It is NOT a live answer to "is this
+#                     reaching agents right now": the charter can be deleted or
+#                     a committed decision FIFO-evicted, and this boolean would
+#                     still read 1. (Measured: promoted=1 while read_charter()
+#                     reported exists=False.) The live answer is COMPUTED at
+#                     read time by project_watch.promotion_state().
+#
+#                     A GOAL has no promotion at all: every OPEN goal is
+#                     injected into every sibling conversation's prompt by
+#                     project_watch.render_goals_injection_block(), so its
+#                     presence is decided by (kind, status) and nothing else.
+#                     The former `promoted_text` / `promoted_at` receipt columns
+#                     were DROPPED with that design (2026-07-30): they existed
+#                     solely to say WHICH SIDE moved when a goal's text and the
+#                     charter's copy of it diverged, and a goal is no longer
+#                     copied anywhere, so divergence is not a reachable state.
+#
 # HUMAN-FACING ONLY — never injected into sibling agent prompts. See
 # lib/conversations/project_watch.py.
 PROJECT_WATCH_ITEMS = define_table(

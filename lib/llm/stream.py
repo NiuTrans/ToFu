@@ -11,6 +11,8 @@ shell: it opens the stream, feeds lines to the core, and keeps the
 retry/backoff wrapper.
 """
 
+import time
+
 import requests
 
 from lib.llm._sse_core import (
@@ -21,9 +23,12 @@ from lib.llm._sse_core import (
 from lib.llm._transport import (
     CONNECT_TIMEOUT,
     MAX_STREAM_RETRIES,
+    StreamIdleWatchdog,
     abortable_sleep,
+    apply_model_limit_retry,
+    attach_limit_learned,
     get_sync_session,
-    retry_wait,
+    prepare_retryable_wait,
 )
 from lib.llm_errors import (
     AbortedError,
@@ -34,9 +39,10 @@ from lib.llm_errors import (
     PromptTooLongError,
     RateLimitError,
     _RETRYABLE,
+    decode_error_body,
 )
 from lib.log import get_logger
-from lib.proxy import proxies_for
+from lib.proxy import proxies_for, report_outcome as _proxy_report_outcome
 
 logger = get_logger(__name__)
 
@@ -44,11 +50,27 @@ logger = get_logger(__name__)
 def stream_chat(body, *, on_thinking=None, on_content=None,
                 on_tool_call_ready=None,
                 abort_check=None, log_prefix='', api_key=None, base_url=None,
-                extra_headers=None, api_protocol='openai', oauth=''):
+                extra_headers=None, api_protocol='openai', oauth='',
+                on_attempt_restart=None, on_first_byte_wait=None):
     """Streaming chat completion with callbacks.
 
     Automatically retries on transient connection errors up to
     MAX_STREAM_RETRIES times.
+
+    ``on_attempt_restart`` (optional): fired with ``reason=<str>`` whenever an
+    in-flight attempt is being DISCARDED and the request is about to restart
+    from scratch. Any content/thinking already delivered via on_content /
+    on_thinking during that attempt will be re-streamed — the callee must drop
+    its partial accumulation (e.g. truncate back to the per-round base) so the
+    re-streamed text does not stack on the abandoned attempt's tail.
+
+    ``on_first_byte_wait`` (optional): fired with the current IDLE duration
+    (seconds since the last byte, or since request send when none has
+    arrived) every IDLE_HEARTBEAT_S while the attempt is silent — both
+    before the first SSE byte and during any mid-stream stall. See
+    lib/llm/_transport.StreamIdleWatchdog. There is no read timeout, so
+    this beat is the only liveness signal a long silence produces; the
+    stuck-task reaper depends on it (docstring there).
 
     Returns:
         (assistant_msg, finish_reason, usage)
@@ -57,6 +79,14 @@ def stream_chat(body, *, on_thinking=None, on_content=None,
         RateLimitError, PermissionError_, AbortedError,
         ContentFilterError, PromptTooLongError, RetryableAPIError
     """
+    def _fire_attempt_restart(reason: str) -> None:
+        if on_attempt_restart is None:
+            return
+        try:
+            on_attempt_restart(reason=reason)
+        except Exception as _oar_e:
+            logger.debug('%s on_attempt_restart raised: %s', log_prefix, _oar_e)
+
     last_err = None
     _limit_learned = None
     for attempt in range(1 + MAX_STREAM_RETRIES):
@@ -67,40 +97,29 @@ def stream_chat(body, *, on_thinking=None, on_content=None,
                 abort_check=abort_check, log_prefix=log_prefix,
                 attempt=attempt, api_key=api_key, base_url=base_url,
                 extra_headers=extra_headers, api_protocol=api_protocol,
-                oauth=oauth)
-            if _limit_learned:
-                if usage is None:
-                    usage = {}
-                usage['_model_limit_learned'] = _limit_learned
+                oauth=oauth, on_first_byte_wait=on_first_byte_wait)
+            usage = attach_limit_learned(usage, _limit_learned)
             return msg, finish_reason, usage
         except (RateLimitError, PermissionError_, AbortedError, ContentFilterError, PromptTooLongError, EndpointUnreachableError):
             # EndpointUnreachableError: the host is down — retrying it on
             # the SAME slot just burns another connect timeout. Escape to
             # the dispatch layer, which cools this slot and fails over.
+            # AbortedError: the user pressed Stop — never retry that.
             raise
         except ModelLimitError as e:
-            body['max_tokens'] = e.detected_limit
-            _limit_learned = {
-                'model': e.model,
-                'old_limit': e.requested_limit,
-                'new_limit': e.detected_limit,
-            }
-            logger.warning('%s ⚙️ Auto-learned max_tokens for %s: %d → %d, retrying…',
-                          log_prefix, e.model, e.requested_limit, e.detected_limit)
+            _limit_learned = apply_model_limit_retry(body, e, log_prefix)
+            # The clamped retry restarts from scratch — anything streamed so
+            # far belongs to a discarded attempt.
+            _fire_attempt_restart('model-limit clamp retry')
             continue
         except _RETRYABLE as e:
             last_err = e
             if attempt < MAX_STREAM_RETRIES:
-                if abort_check and abort_check():
-                    logger.debug('%s ✋ Abort detected before retry sleep, stopping.', log_prefix)
-                    raise AbortedError('User aborted before retry')
-                wait = retry_wait(attempt)
-                logger.warning('%s ⚠ Transient error (attempt %d): '
-                      '%s: %s — retrying in %.1fs …', log_prefix, attempt + 1, type(e).__name__, e, wait, exc_info=True)
-                abortable_sleep(wait, abort_check)
-            else:
-                logger.error('%s ✖ All %d attempts failed.', log_prefix, 1 + MAX_STREAM_RETRIES, exc_info=True)
-                raise
+                # Another attempt WILL run from scratch — the partial stream
+                # from this attempt is being abandoned.
+                _fire_attempt_restart('transport retry: %s' % e.__class__.__name__)
+            wait = prepare_retryable_wait(attempt, e, abort_check, log_prefix)
+            abortable_sleep(wait, abort_check)
     raise last_err
 
 
@@ -108,7 +127,8 @@ def _stream_chat_once(body, *, on_thinking=None, on_content=None,
                       on_tool_call_ready=None,
                       abort_check=None, log_prefix='', attempt=0,
                       api_key=None, base_url=None, extra_headers=None,
-                      api_protocol='openai', oauth=''):
+                      api_protocol='openai', oauth='',
+                      on_first_byte_wait=None):
     """Single attempt at a streaming chat completion (sync transport)."""
     plan = prepare_request(
         body, attempt=attempt, log_prefix=log_prefix,
@@ -120,13 +140,42 @@ def _stream_chat_once(body, *, on_thinking=None, on_content=None,
     # connect-phase re-raise below, which used to escape before the dumper was
     # closed and leaked the fd once per retry against a down endpoint.
     resp = None
+    # ── Idle watchdog ──
+    # Two jobs, neither of which bounds the request: beat while the
+    # upstream is silent (HUD + the reaper's liveness clocks), and poll
+    # ``abort_check`` so a Stop pressed during a silent stretch actually
+    # lands. The in-loop abort check below only runs when a line arrives,
+    # so without this poll a zero-byte hang would ignore Stop entirely —
+    # and with no read timeout left, nothing else would ever end it.
+    # Constants are read through the module at call time so tests /
+    # deployments can retune without a re-import.
+    import lib.llm._transport as _tp
+    _resp_holder = {}
+    _watchdog = StreamIdleWatchdog(
+        heartbeat_interval=_tp.IDLE_HEARTBEAT_S,
+        on_beat=on_first_byte_wait,
+        abort_check=abort_check,
+        on_abort=lambda: (_resp_holder.get('resp') and
+                          _resp_holder['resp'].close()))
+    _watchdog.start()
     try:
+        _conn_t0 = time.monotonic()
         try:
             resp = get_sync_session().post(
                 plan.url, headers=plan.hdrs, json=plan.body,
-                stream=True, timeout=(CONNECT_TIMEOUT, 300),
+                stream=True, timeout=(CONNECT_TIMEOUT, None),
                 proxies=proxies_for(plan.url))
+            _resp_holder['resp'] = resp
+            if _watchdog.aborted:
+                # Stop landed while we were blocked pre-headers — the flag
+                # is all we get (no socket handle to close retroactively).
+                raise AbortedError('User aborted while awaiting response headers')
+            _proxy_report_outcome(
+                plan.url, True, (time.monotonic() - _conn_t0) * 1000.0)
+        except AbortedError:
+            raise
         except requests.exceptions.ConnectionError as e:
+            _proxy_report_outcome(plan.url, False)
             # Connect-phase failure (ConnectTimeout / connection refused /
             # SYN dropped) = the endpoint is down. Convert to
             # EndpointUnreachableError so it escapes the same-key retry loop
@@ -142,7 +191,11 @@ def _stream_chat_once(body, *, on_thinking=None, on_content=None,
             logger.debug('%s resp M-TraceId=%s', log_prefix, resp_trace)
 
         if resp.status_code != 200:
-            classify_status_error(resp.status_code, resp.text, body=plan.body,
+            # decode_error_body, NOT resp.text: requests falls back to
+            # ISO-8859-1 for text/* without charset, garbling UTF-8 CJK
+            # gateway error pages into mojibake (toio 400 incident 2026-07-25).
+            classify_status_error(resp.status_code, decode_error_body(resp),
+                                  body=plan.body,
                                   log_prefix=log_prefix, raw_dumper=plan.raw_dumper)
 
         resp.encoding = 'utf-8'
@@ -154,16 +207,34 @@ def _stream_chat_once(body, *, on_thinking=None, on_content=None,
             on_tool_call_ready=on_tool_call_ready,
             anthropic_translator=plan.anthropic_translator)
 
-        for line in resp.iter_lines(decode_unicode=True):
-            if abort_check and abort_check():
-                acc.mark_aborted()
-                break
-            if acc.feed_line(line):
-                break
+        try:
+            for line in resp.iter_lines(decode_unicode=True):
+                # Any line — even a blank keep-alive — proves the upstream is
+                # alive: reset the idle clock. Deliberately NOT a disarm:
+                # with no read timeout, a stream that goes quiet again after
+                # its first byte is just as unbounded as one that never
+                # started, so beats must resume and abort must stay pollable.
+                _watchdog.notify_activity()
+                if abort_check and abort_check():
+                    acc.mark_aborted()
+                    break
+                if acc.feed_line(line):
+                    break
+        except Exception as _iter_e:
+            if _watchdog.aborted:
+                raise AbortedError(
+                    'User aborted while waiting on %s' % plan.url) from _iter_e
+            raise
+        if _watchdog.aborted:
+            # A close() can surface as a CLEAN end of iteration on some
+            # urllib3 versions — without this check an aborted attempt would
+            # finalize as a silent empty/partial "success".
+            raise AbortedError('User aborted while waiting on %s' % plan.url)
 
         acc.fire_final_tool_callback()
         return acc.finalize(resp_trace=resp_trace)
     finally:
+        _watchdog.cancel()
         try:
             if plan.raw_dumper.enabled and plan.raw_dumper._fh is not None:
                 plan.raw_dumper.finish(error=True)

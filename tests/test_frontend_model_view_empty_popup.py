@@ -1,28 +1,27 @@
-"""tests/test_frontend_model_view_empty_popup.py — the "模型原文 popup shows
+"""tests/test_frontend_model_view_empty_popup.py — the "preview popup shows
 only a single bar" fix, driven end-to-end under jsdom against the REAL shipped
-`openTextPreview` (upload_preview.js) + `_tcModelViewBtnForText` (tool_rounds.js).
+`openTextPreview` (upload_preview.js).
 
-Root cause: an inject row (autopilot / sub-agent / peer / steer — the COMMON
-case in this project, which carries no `toolContent`) resolves its verbatim
-text via `_injectVerbatimText(previews)`, which returns "" when previews are
-empty. That "" was stored verbatim in the model-text registry and handed to
-`openTextPreview`, whose `<pre>` then rendered empty → the flex panel collapsed
-to just its header, i.e. the "single bar" popup the owner saw.
+Root cause: a caller passed an empty / whitespace-only body to
+`openTextPreview`, whose `<pre>` then rendered empty → the flex panel
+collapsed to just its header, i.e. the "single bar" popup the owner saw.
 
-Row-agnostic two-layer fix (per owner directive):
+Row-agnostic fix:
   L1 (`openTextPreview`)  — empty/whitespace body → render a localized
                             `tool.noContent` placeholder, so the modal can
                             NEVER collapse to a header-only bar regardless of
                             which caller passed empty text.
-  L2 (`_tcModelViewBtnForText`) — never park an empty registry entry; fall back
-                            to the same `tool.noContent` sentinel at the source.
+
+(There used to be an L2 layer guarding `_tcModelViewBtnForText`'s registry
+sentinel; the whole "模型原文" button mechanism was removed on 2026-07-28 per
+owner directive, so L1 is the surviving layer — openTextPreview is still the
+modal every PDF / attachment preview flows through.)
 
 Asserts:
   • L1: openTextPreview('', '', '') yields a NON-empty `.preview-text-body`
         containing the placeholder text (the panel is not a bare header).
-  • L2: a button built from empty text registers a NON-empty entry.
-Two NEUTERs (revert each layer) must make the respective assertion FAIL, so
-neither guard is vacuous.
+One NEUTER (revert L1) must make the assertion FAIL, so the guard is not
+vacuous.
 
 Skips cleanly when node + jsdom aren't installed.
 """
@@ -51,7 +50,7 @@ _HARNESS = r"""
 const fs = require('fs');
 const path = require('path');
 const ROOT = process.argv[2];
-const MODE = process.argv[3] || '';   // '', 'NC_L1', 'NC_L2'
+const MODE = process.argv[3] || '';   // '', 'NC_L1'
 const { JSDOM } = require(path.join(ROOT, 'node_modules', 'jsdom'));
 const dom = new JSDOM(
   '<!DOCTYPE html><body>' +
@@ -74,14 +73,12 @@ global.t = win.t = (k, d) => (typeof d === 'string' ? d : k);
 global.renderMarkdown = win.renderMarkdown = (s) => String(s == null ? '' : s);
 global.Icon = win.Icon = (n) => '<svg data-icon="' + n + '"></svg>';
 
-eval(fs.readFileSync(path.join(ROOT, 'static', 'js', 'ui', 'tool_rounds.js'), 'utf8'));
 eval(fs.readFileSync(path.join(ROOT, 'static', 'js', 'upload_preview.js'), 'utf8'));
 
 const out = [];
 function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
 
 if (typeof openTextPreview !== 'function') { console.log('FAIL fn_exposed openTextPreview missing'); process.exit(0); }
-if (typeof _tcModelViewBtnForText !== 'function') { console.log('FAIL fn_exposed _tcModelViewBtnForText missing'); process.exit(0); }
 check('fn_exposed', true);
 
 // ── Layer 1: openTextPreview with EMPTY text must NOT collapse to a header. ──
@@ -101,25 +98,6 @@ check('l1_body_present', !!bodyEl);
 // the panel is not a bare single-bar header.
 const bodyText = bodyEl ? bodyEl.textContent.trim() : '';
 check('l1_body_nonempty', bodyText.length > 0);
-
-// ── Layer 2: a button built from empty text must register NON-empty text. ──
-const reg = win._tcModelTextRegistry;
-let btnHtml;
-if (MODE === 'NC_L2') {
-  // Pre-fix source behaviour: store the raw empty string verbatim.
-  const id = 'tcmt_nc';
-  reg.set(id, { text: String('' == null ? '' : ''), title: 'x' });
-  btnHtml = 'data-tc-preview-text="' + id + '"';
-} else {
-  btnHtml = _tcModelViewBtnForText({ roundNum: 9 }, '');
-}
-// Pull the id the button references and inspect the registry entry.
-const m = btnHtml.match(/data-tc-preview-text="([^"]+)"/);
-check('l2_btn_has_id', !!m);
-const entry = m ? reg.get(m[1]) : null;
-check('l2_entry_present', !!entry);
-// THE decisive L2 assertion: registered text is non-empty (sentinel, not "").
-check('l2_entry_nonempty', !!(entry && String(entry.text).trim().length > 0));
 
 console.log(out.join('\n'));
 process.exit(0);
@@ -159,7 +137,6 @@ def test_empty_model_view_renders_placeholder_not_single_bar():
     fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
     assert not fails, 'empty-popup fix failures:\n' + output
     assert _status(output, 'l1_body_nonempty') == 'PASS', output
-    assert _status(output, 'l2_entry_nonempty') == 'PASS', output
 
 
 @pytest.mark.skipif(not _node_deps_available(),
@@ -170,16 +147,6 @@ def test_nc_layer1_empty_body_collapses():
     output = _run('NC_L1')
     assert _status(output, 'l1_body_nonempty') == 'FAIL', \
         'NC_L1 should leave an empty popup body:\n' + output
-
-
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
-def test_nc_layer2_empty_registry_entry():
-    """NEUTER L2: pre-fix source stored the raw "" in the registry. Proves the
-    source-layer sentinel is load-bearing."""
-    output = _run('NC_L2')
-    assert _status(output, 'l2_entry_nonempty') == 'FAIL', \
-        'NC_L2 should register an empty entry:\n' + output
 
 
 if __name__ == '__main__':

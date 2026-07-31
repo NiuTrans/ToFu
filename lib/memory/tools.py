@@ -167,7 +167,9 @@ SEARCH_MEMORIES_TOOL = {
             "mentions a local file path, use read_files/list_dir; if they ask about "
             "an external project / library / product, use web_search or read its "
             "local copy. A `<relevant_memories>` block, when present, was already "
-            "prefetched for this turn — don't re-search the same topic."
+            "prefetched for this turn — don't re-search the same topic. "
+            "Installed skill packages are NOT memories and are not in this corpus — "
+            "see the <available_skills> block and use activate_skill for those."
         ),
         "parameters": {
             "type": "object",

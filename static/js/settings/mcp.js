@@ -57,7 +57,31 @@ function _mcpUpdateToolCount() {
   badge.textContent = t('mcp.toolsCount', { n: total });
 }
 
-/** Render category filter pills. */
+/**
+ * Render category filter pills.
+ *
+ * The pill set is DERIVED from the categories the catalog actually returned,
+ * never from a hand-copied list. A literal whitelist here silently swallowed
+ * every category the backend added later: `lib/mcp/registry.py::CATEGORIES`
+ * grew to 12 while this list still held 10, so 'Local Life & Travel (China)'
+ * (5 entries) and 'Science & Research' (2) had NO pill at all — their cards
+ * existed but were unreachable by filtering. `_CAT_ORDER` is a display
+ * PREFERENCE only; anything missing from it still renders, appended
+ * alphabetically after the known ones.
+ */
+var _CAT_ORDER = ['Development','Data & DB','Communication','Search & Web',
+                  'Productivity','DevOps','Finance','Design',
+                  'Science & Research','Local Life & Travel (China)',
+                  'Other','Custom'];
+
+function _mcpOrderedCategories(cats) {
+  var known = _CAT_ORDER.filter(function(c) { return cats[c]; });
+  var extra = Object.keys(cats).filter(function(c) {
+    return _CAT_ORDER.indexOf(c) === -1;
+  }).sort();
+  return known.concat(extra);
+}
+
 function _renderMcpCategoryBar() {
   var bar = document.getElementById('mcpCategoryBar');
   if (!bar) return;
@@ -67,10 +91,8 @@ function _renderMcpCategoryBar() {
     cats[c] = (cats[c] || 0) + 1;
   });
   var html = '<button class="mcp-cat-pill' + (_mcpActiveCategory === 'all' ? ' active' : '') + '" onclick="_mcpSetCategory(\'all\')">' + escapeHtml(t('mcp.scopeAll')) + ' <span class="mcp-cat-count">' + _mcpCatalog.length + '</span></button>';
-  var order = ['Development','Data & DB','Communication','Search & Web','Productivity','DevOps','Finance','Design','Other','Custom'];
-  order.forEach(function(c) {
-    if (!cats[c]) return;
-    html += '<button class="mcp-cat-pill' + (_mcpActiveCategory === c ? ' active' : '') + '" onclick="_mcpSetCategory(\'' + c + '\')">' + escapeHtml(c) + ' <span class="mcp-cat-count">' + cats[c] + '</span></button>';
+  _mcpOrderedCategories(cats).forEach(function(c) {
+    html += '<button class="mcp-cat-pill' + (_mcpActiveCategory === c ? ' active' : '') + '" onclick="_mcpSetCategory(\'' + escapeHtml(c).replace(/'/g, "\\'") + '\')">' + escapeHtml(c) + ' <span class="mcp-cat-count">' + cats[c] + '</span></button>';
   });
   bar.innerHTML = html;
 }
@@ -144,6 +166,37 @@ function _mcpBreakerCountdownSpan(breaker) {
     escapeHtml(_mcpRetryLabel(secs)) + '</span>';
 }
 
+/**
+ * Entries worth suggesting to someone who has installed nothing yet.
+ *
+ * Restricted to servers a user can provably finish installing on their own:
+ * either they need no credential at all, or every required credential
+ * declares an `obtain_url` (so the card can hand them a real link). Anything
+ * gated behind a process we cannot show a route for is EXCLUDED — recommending
+ * it would send the user down a path that dead-ends, which is worse than not
+ * recommending at all.
+ *
+ * Deliberately NOT an in-conversation intent detector: a phrase-matching
+ * trigger was measured at 60% false positives on a sibling epic
+ * (pt_33ba079f5cea4841), so suggestions stay inside the panel the user
+ * already opened.
+ */
+function _mcpSelfServeSuggestions(limit) {
+  var out = _mcpCatalog.filter(function(e) {
+    if (e.installed || e.custom) return false;
+    var specs = e.env_specs || [];
+    var required = specs.filter(function(s) { return s.required; });
+    if (required.length === 0) return true;   // nothing to obtain
+    return required.every(function(s) { return !!s.obtain_url; });
+  });
+  out.sort(function(a, b) {
+    if (a.featured && !b.featured) return -1;
+    if (!a.featured && b.featured) return 1;
+    return (a.name || '').localeCompare(b.name || '');
+  });
+  return out.slice(0, limit || 6);
+}
+
 /** Render the main catalog grid. */
 function _renderMcpCatalog() {
   var grid = document.getElementById('mcpCatalogGrid');
@@ -153,7 +206,27 @@ function _renderMcpCatalog() {
     var emptyMsg = _mcpScope === 'installed' ? t('mcp.emptyInstalled')
       : _mcpScope === 'available' ? t('mcp.emptyAvailable')
       : t('mcp.emptyNoMatch');
-    grid.innerHTML = '<p class="stg-empty">' + emptyMsg + '</p>';
+    var emptyHtml = '<p class="stg-empty">' + emptyMsg + '</p>';
+    // "Nothing installed" is the one empty state where the user has a next
+    // action rather than a failed filter — offer it instead of a dead end.
+    if (_mcpScope === 'installed') {
+      var picks = _mcpSelfServeSuggestions(6);
+      if (picks.length > 0) {
+        emptyHtml += '<div class="mcp-suggest">';
+        emptyHtml += '<div class="mcp-suggest-title">' +
+          escapeHtml(t('mcp.suggestTitle')) + '</div>';
+        emptyHtml += '<div class="mcp-suggest-row">';
+        picks.forEach(function(e) {
+          emptyHtml += '<button class="mcp-suggest-chip" onclick="_mcpSetScope(\'available\');_mcpFilterCatalog(' +
+            JSON.stringify(e.name || e.id).replace(/"/g, '&quot;') + ')" title="' +
+            escapeHtml(e.description || '') + '">' +
+            (e.icon && !/^</.test(e.icon) ? escapeHtml(e.icon) + ' ' : '') +
+            escapeHtml(e.name || e.id) + '</button>';
+        });
+        emptyHtml += '</div></div>';
+      }
+    }
+    grid.innerHTML = emptyHtml;
     return;
   }
   // Show featured first, then alphabetical
@@ -196,6 +269,13 @@ function _renderMcpCatalog() {
     }
     html += '</div>';
     html += '<div class="mcp-app-desc">' + escapeHtml(e.description || '') + '</div>';
+    // Getting-started note (how to obtain a key, what the server can/can't do).
+    // This field was authored in lib/mcp/registry.py from the start but had NO
+    // renderer anywhere in the frontend, so every note written for a user was
+    // invisible to them.
+    if (e.install_note) {
+      html += '<div class="mcp-app-note">' + escapeHtml(e.install_note) + '</div>';
+    }
     // Footer: repo link (left) + tools count / action buttons (right)
     html += '<div class="mcp-app-footer">';
     if (e.url) {
@@ -418,6 +498,71 @@ async function _mcpQuickInstall(serverId) {
   }
 }
 
+/**
+ * The placeholder for a credential input.
+ *
+ * Always the spec's own hint when it has one. Previously this returned the
+ * "already saved, leave blank to keep" notice INSTEAD of the hint whenever a
+ * value was stored — which silently removed the guidance at the one moment a
+ * user is most likely to need it (rotating an expired key). The saved notice
+ * is now rendered as its own line by the caller, so neither fact evicts the
+ * other.
+ */
+function _mcpPlaceholder(spec, hasStored) {
+  if (spec.hint) return spec.hint;
+  return hasStored ? t('mcp.savedHint') : '';
+}
+
+/**
+ * Render "where do I get this credential" as a real link (+ optional ordered
+ * steps), instead of a breadcrumb crammed into the placeholder.
+ *
+ * A placeholder cannot be clicked, is truncated by the input width, and
+ * disappears the moment the user types — so a console path written there made
+ * the user hand-transcribe a URL. Returns '' when the entry declares no
+ * route, so nothing is invented for servers that need no credential.
+ */
+function _mcpObtainBlock(spec) {
+  var url = spec.obtain_url || '';
+  var steps = Array.isArray(spec.obtain_steps) ? spec.obtain_steps : [];
+  if (!url && steps.length === 0) return '';
+  var html = '<div class="mcp-obtain">';
+  if (url) {
+    // Only http(s) — a catalog entry is server-owned, but this is the one
+    // place a URL becomes a clickable target, so reject anything that could
+    // carry a javascript: payload.
+    var safe = /^https?:\/\//i.test(url) ? url : '';
+    if (safe) {
+      html += '<a class="mcp-obtain-link" href="' + escapeHtml(safe) +
+        '" target="_blank" rel="noopener noreferrer">' +
+        escapeHtml(t('mcp.obtainKey')) + ' ↗</a>';
+    }
+  }
+  if (steps.length > 0) {
+    html += '<ol class="mcp-obtain-steps">';
+    steps.forEach(function(s) {
+      html += '<li>' + escapeHtml(String(s)) + '</li>';
+    });
+    html += '</ol>';
+  }
+  html += '</div>';
+  return html;
+}
+
+/**
+ * Catalog entries that ALREADY have a stored value for `key`, excluding
+ * `selfId`. Two cards can legitimately share one credential (RollingGo hotel
+ * + flight share ROLLINGGO_API_KEY; github + github-batch share a PAT), and
+ * without this the second install asks for a key the user already gave us —
+ * so they go re-apply for a duplicate.
+ */
+function _mcpSharedCredentialSources(key, selfId) {
+  return _mcpCatalog.filter(function(e) {
+    return e.id !== selfId
+      && (e.stored_env_keys || []).indexOf(key) !== -1;
+  });
+}
+
 function _mcpOpenInstallModal(serverId, isReinstall) {
   var entry = _mcpCatalog.find(function(e) { return e.id === serverId; });
   if (!entry) return;
@@ -438,6 +583,16 @@ function _mcpOpenInstallModal(serverId, isReinstall) {
       : escapeHtml(_icon);
   document.getElementById('mcpInstallTitle').textContent = entry.name;
   document.getElementById('mcpInstallDesc').textContent = entry.description || '';
+  var noteEl = document.getElementById('mcpInstallNote');
+  if (noteEl) {
+    if (entry.install_note) {
+      noteEl.textContent = entry.install_note;
+      noteEl.style.display = '';
+    } else {
+      noteEl.textContent = '';
+      noteEl.style.display = 'none';
+    }
+  }
   var repoLink = document.getElementById('mcpInstallRepo');
   if (repoLink) {
     if (entry.url) {
@@ -470,8 +625,27 @@ function _mcpOpenInstallModal(serverId, isReinstall) {
     if (spec.required) html += ' <span style="color:#ef4444;">*</span>';
     if (hasStored) html += ' <span style="color:#10b981;font-size:11px;">' + escapeHtml(t('mcp.savedBadge')) + '</span>';
     html += '</label>';
-    var ph = hasStored ? t('mcp.savedHint') : (spec.hint || '');
-    html += '<input type="' + inputType + '" class="mcp-env-input" data-key="' + escapeHtml(spec.key) + '" data-has-stored="' + (hasStored ? '1' : '0') + '" placeholder="' + escapeHtml(ph) + '">';
+    html += _mcpObtainBlock(spec);
+    html += '<input type="' + inputType + '" class="mcp-env-input" data-key="' + escapeHtml(spec.key) + '" data-has-stored="' + (hasStored ? '1' : '0') + '" placeholder="' + escapeHtml(_mcpPlaceholder(spec, hasStored)) + '">';
+    if (hasStored) {
+      // The "leave blank to keep" notice used to be pushed into the
+      // PLACEHOLDER, which meant it REPLACED spec.hint — so on a reinstall
+      // (exactly when someone is rotating a credential) the guidance about
+      // what to type disappeared. Both facts matter, so both are shown.
+      html += '<span class="stg-hint mcp-env-saved-note">' + escapeHtml(t('mcp.savedHint')) + '</span>';
+    } else {
+      // Not stored for THIS entry — but a sibling entry may already hold the
+      // very same credential. Say so, otherwise the user re-applies for a key
+      // they already have.
+      var shared = _mcpSharedCredentialSources(
+        spec.key, entry && entry.id);
+      if (shared.length > 0) {
+        html += '<span class="stg-hint mcp-env-shared-note">' +
+          escapeHtml(t('mcp.sharedCredential', {
+            name: shared.map(function(s) { return s.name || s.id; }).join('、'),
+          })) + '</span>';
+      }
+    }
     html += '</div>';
     return html;
   }
@@ -496,8 +670,11 @@ function _mcpOpenInstallModal(serverId, isReinstall) {
       html += '<option value="' + escapeHtml(opt.value) + '" data-autofill="' + af + '">' + escapeHtml(opt.label) + '</option>';
     });
     html += '</select>';
-    var ph = hasStored ? t('mcp.savedHint') : (spec.hint || '');
-    html += '<input type="text" class="mcp-env-input" data-key="' + escapeHtml(spec.key) + '" data-has-stored="' + (hasStored ? '1' : '0') + '" placeholder="' + escapeHtml(ph) + '" style="margin-top:6px;display:none;">';
+    html += _mcpObtainBlock(spec);
+    html += '<input type="text" class="mcp-env-input" data-key="' + escapeHtml(spec.key) + '" data-has-stored="' + (hasStored ? '1' : '0') + '" placeholder="' + escapeHtml(_mcpPlaceholder(spec, hasStored)) + '" style="margin-top:6px;display:none;">';
+    if (hasStored) {
+      html += '<span class="stg-hint mcp-env-saved-note">' + escapeHtml(t('mcp.savedHint')) + '</span>';
+    }
     html += '</div>';
     return html;
   }

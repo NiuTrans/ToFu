@@ -220,6 +220,13 @@ def _init_system_schema(conn):
     # 2026-07. See docs/PROJECT_BRAIN_WORKTREE_ISOLATION.md §4.
     if not _column_exists(conn, 'project_tasks', 'write_set'):
         cur.execute("ALTER TABLE project_tasks ADD COLUMN write_set TEXT NOT NULL DEFAULT '[]'")
+    # Migration: structured human-gate columns (Pillar #3). Pre-existing rows
+    # default to '' → no pending question → dispatchable exactly as before.
+    # Added 2026-07. See project_board.py::answer_task.
+    if not _column_exists(conn, 'project_tasks', 'block_question'):
+        cur.execute("ALTER TABLE project_tasks ADD COLUMN block_question TEXT NOT NULL DEFAULT ''")
+    if not _column_exists(conn, 'project_tasks', 'human_answer'):
+        cur.execute("ALTER TABLE project_tasks ADD COLUMN human_answer TEXT NOT NULL DEFAULT ''")
     # Migration: the shelving/park mechanism was removed (the project pushes
     # every open epic forward at full speed). Any epic left in the retired
     # 'deferred' status is revived to 'open' so it dispatches again. Idempotent.
@@ -237,6 +244,18 @@ def _init_system_schema(conn):
         PROJECT_WATCH_ITEMS, PROJECT_WATCH_RESPONSES)
     create_if_absent(conn, PROJECT_WATCH_ITEMS, table_exists=_table_exists)
     create_if_absent(conn, PROJECT_WATCH_RESPONSES, table_exists=_table_exists)
+    # NOTE (2026-07-30): the promoted_text / promoted_at columns added here in
+    # 2026-07 were DROPPED from the Core schema. They backed the three-state
+    # goal promotion verdict, and a goal is no longer copied into the charter at
+    # all (it injects directly from this lane), so divergence — the only thing
+    # those columns could diagnose — is not a reachable state.
+    #
+    # Deliberately NOT issuing a DROP COLUMN: on an already-migrated database
+    # the two columns are harmless (NOT NULL with defaults, and no code reads or
+    # writes them), whereas SQLite's DROP COLUMN is refused outright on a column
+    # that any index or view references and would turn a cosmetic tidy-up into a
+    # startup failure. Leaving them costs nothing; a future consolidating
+    # migration can reap them.
     cur.execute('CREATE INDEX IF NOT EXISTS idx_project_watch_items_path ON project_watch_items(project_path, updated_at DESC)')
     cur.execute('CREATE INDEX IF NOT EXISTS idx_project_watch_resp_item_seq ON project_watch_responses(item_id, seq DESC)')
 

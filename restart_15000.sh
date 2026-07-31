@@ -173,6 +173,45 @@ if [ -n "${LPIDS_INIT}" ]; then
   done
 fi
 
+# ── [pre/5c] HUMAN APPROVAL GATE (pt_40d00fd526e5479a, 2026-07-28) ──────────
+# A restart of a RUNNING server is a high-risk action and requires explicit
+# HUMAN approval (owner ruling after an autopilot conv curl'ed the HTTP
+# restart endpoint twice in 3 minutes, killing 23 in-flight tasks). The HTTP
+# endpoint is gated server-side; this gate stops the same bypass through the
+# shell script (the 2026-07-27 watcher incident ran this script detached).
+# Three ways through:
+#   (i)  NO live listener on :PORT → this is a recovery/relaunch of a DEAD
+#        server, not a restart of a live one — the gate does not apply.
+#   (ii) interactive TTY → the human types RESTART at the prompt (a real
+#        person at a terminal IS the approval).
+#   (iii) non-interactive (agent shell / watcher) → a server-minted,
+#        human-approved, unexpired, unconsumed token in
+#        data/lifecycle_approvals.json (approved in the UI beforehand).
+LPIDS_GATE="$(listener_pids)"
+if [ -n "${LPIDS_GATE}" ]; then
+  if [ -t 0 ]; then
+    echo "[pre/5c] LIVE server on :${PORT} (pid(s): ${LPIDS_GATE})."
+    echo "        Restarting it interrupts every in-flight task. This action"
+    echo "        requires a HUMAN decision — confirm below."
+    printf '        Type RESTART to proceed: '
+    read -r _LC_ANSWER
+    if [ "${_LC_ANSWER}" != "RESTART" ]; then
+      echo "[pre/5c] Not confirmed — aborted (no process was touched)."
+      exit 3
+    fi
+    echo "[pre/5c] Confirmed interactively."
+  else
+    echo "[pre/5c] Non-interactive run with a LIVE server on :${PORT} —"
+    echo "        checking for a human-approved restart token ..."
+    if "${PY}" -m lib.lifecycle_approval --script-gate restart; then
+      echo "[pre/5c] Human-approved token consumed — proceeding."
+    else
+      echo "[pre/5c] Aborted (no process was touched)."
+      exit 3
+    fi
+  fi
+fi
+
 # ── [pre/5b] RESTART SERIALIZATION LOCK — one restart at a time on this box. ──
 # On a shared-HEAD box, multiple sibling agents may each run this script to load
 # a commit, unaware of each other. Without a lock they BOTH reach [1/5] and kill
@@ -287,7 +326,14 @@ fi
 #   because stdout is already a file (not a tty), nohup never creates a stray
 #   `nohup.out`. (Both facts verified empirically 2026-07-16.)
 echo "[3/5] Relaunching (detached via setsid nohup): PORT=${PORT} setsid nohup ${PY} server.py > ${LOG} 2>&1 &"
-PORT="${PORT}" BIND_HOST="${BIND_HOST:-127.0.0.1}" setsid nohup "${PY}" server.py > "${LOG}" 2>&1 &
+#   9>&- (pt_2a05e161b9814bc2): fd 9 holds the [pre/5b] restart serialization
+#   flock. Without this close the relaunched server INHERITS fd 9 and keeps the
+#   flock alive for its WHOLE lifetime (measured: a relaunched pid held
+#   data/.restart.lock for 20+ min) — so every subsequent run of this script
+#   blocks 60s at [pre/5b] and then aborts doing nothing. The lock must belong
+#   to THIS script's lifetime only: it releases when this script exits. 9>&-
+#   on an unopened fd (flock unavailable path) is a silent no-op.
+PORT="${PORT}" BIND_HOST="${BIND_HOST:-127.0.0.1}" setsid nohup "${PY}" server.py > "${LOG}" 2>&1 9>&- &
 NEWPID=$!
 echo "      Launched pid ${NEWPID}; logging to ${LOG}"
 

@@ -1,48 +1,37 @@
 """Regression: the per-frame streaming render path (`_twFlush`) and the
 cross-tab visibility flush must NOT paint the "等待中…" (Waiting…) placeholder
-over already-checkpointed content when the live `streamBufs` buffer is empty.
+over already-checkpointed content.
 
-WHY
----
-Five independent audits + the code's own comments converged on one
-architectural root cause: `_twFlush` (static/js/core/health_stream_timer.js) —
-the HOTTEST per-frame render path — read `buf.content` RAW with no
-message-checkpoint fallback, unlike every OTHER render site
-(`showStreamingUIForConv` does `buf?.content || lastMsg.content`). So whenever
-anything fed `_twFlush` an empty buffer (a re-entry that skipped `twStart`'s
-seed, a field-only `twUpdate` such as an HG-translation flag flip, or a
-tab-switch flush before the seed lands) `updateStreamingUI({content:''})` hit
-its `!content && !thinking` → "等待中…" branch and WIPED the persisted English.
-That is exactly why `connectToTask` had to hand-seed the buffer in two
-"band-aid" blocks.
+WHY (post §7 streamBufs RETIREMENT)
+-----------------------------------
+The global `streamBufs` Map was DELETED. Content / thinking / toolRounds now
+project straight from the message document (the trailing streaming assistant
+message is the single source of truth). `phase` lives in the live session
+slice (`streamSessions` in static/js/ui/stream_session.js). The shared
+`_streamFrameArg(convId)` helper builds the `updateStreamingUI` payload reading
+the DOCUMENT + session.phase, and BOTH `_twFlush` and the cross-tab
+visibilitychange flush route through it.
 
-THE FIX (correct-by-construction)
----------------------------------
-A shared `_streamFrameArg(convId)` helper builds the `updateStreamingUI`
-payload applying the fallback (`buf.content || ckpt.content`, tool-rounds via
-`getToolRoundsFromMsg`), and BOTH `_twFlush` and the cross-tab visibilitychange
-flush (static/js/core/cross_tab_sync.js) route through it. The invariant — the
-buffer is authoritative ONLY once it holds data, else the trailing streaming
-message is the truth — now holds regardless of caller.
-
-SAFETY vs the reset events: `retry_reset` / `delta_reset` clear the MESSAGE and
-the buffer TOGETHER (sse_pipeline.js), so the fallback reads "" after a reset
-and never resurrects erased inter-round narration; a worker/planner turn
-rotation pushes a FRESH empty assistant message — checkpoint empty there too.
+Pre-§7 the bug was: `_twFlush` read `buf.content` RAW with no
+message-checkpoint fallback, so an empty buffer wiped the persisted English
+to "等待中…". Post-§7 the fallback IS the only path — `_streamFrameArg` reads
+the document directly, so there is no "empty buffer" case to fall back FROM;
+the document is always the source. This test now proves the paint path cannot
+paint stale/empty over checkpointed content by asserting the frame EQUALS the
+document, and that mutating the document changes the frame (the NEUTER against
+the doc source).
 
 This drives the REAL shipped `_twFlush` + `updateStreamingUI` under jsdom and
 asserts:
-  (1) `_streamFrameArg` with an empty buffer + checkpointed msg falls back to
-      the message content/thinking/toolRounds.
-  (2) The full `_twFlush` frame with an empty buffer + a checkpointed trailing
+  (1) `_streamFrameArg` with a live session + checkpointed doc projects the
+      document content/thinking/toolRounds verbatim.
+  (2) The full `_twFlush` frame with a live session + a checkpointed trailing
       assistant renders the real content and NO "等待中…" chip.
-  (3) A GENUINELY empty stream (empty buffer AND empty checkpoint — e.g. right
-      after twStart before any content) still shows "等待中…" (no false render).
-  (4) A live buffer with data is NOT overridden by a (stale) checkpoint.
-
-DOUBLE-NEUTER (proven by hand, restored byte-identical): reverting `_twFlush`
-to read `buf.content` raw makes check (2) FAIL (the 等待中… chip reappears) while
-(3) stays green — proving the test discriminates.
+  (3) A GENUINELY empty stream (empty doc — e.g. right after twStart before any
+      content) still shows "等待中…" (no false render).
+  (4) NEUTER: mutating the document changes the frame — the paint path reads
+      the doc, not a stale snapshot.
+  (5) No live session → _streamFrameArg returns null (no throw).
 
 Runs the REAL shipped JS under jsdom; skips cleanly when node + jsdom aren't
 installed.
@@ -135,9 +124,14 @@ win.ConvCache = global.ConvCache = { put: () => {} };
 win.AbortSignal = global.AbortSignal || { timeout: () => undefined };
 
 win.activeStreams = global.activeStreams = new Map();
-win.streamBufs = global.streamBufs = new Map();
 win.conversations = global.conversations = [];
 global.activeConvId = win.activeConvId = null;
+
+// ── §7 streamBufs RETIREMENT: uniform session stub ──
+win.streamSessions = global.streamSessions = new Map();
+win.getStreamSession = global.getStreamSession = (cid) => { let s = win.streamSessions.get(cid); if (!s) { s = { phase: null }; win.streamSessions.set(cid, s); } return s; };
+win.setStreamPhase = global.setStreamPhase = (cid, p) => { if (!win.streamSessions.has(cid) && !(typeof activeStreams !== 'undefined' && activeStreams.has(cid))) return; win.getStreamSession(cid).phase = p; };
+win.clearStreamSession = global.clearStreamSession = (cid) => { win.streamSessions.delete(cid); };
 
 // Load the REAL shipped render funnel, in bundle order.
 eval(fs.readFileSync(process.argv[3], 'utf8'));  // ui/streaming_ui.js  (updateStreamingUI)
@@ -166,34 +160,36 @@ function _probe() {
                 && /等待中…/.test(statusZone.innerHTML)),
   };
 }
-function _setup(convId, bufFields, msgFields) {
+// §7: seed the DOCUMENT (assistant message) as the source + create a live
+// session via getStreamSession (mirrors twStart). No streamBufs.
+function _setup(convId, msgFields) {
   conversations.length = 0;
-  streamBufs.clear();
+  streamSessions.clear();
   activeStreams.clear();
   const conv = { id: convId, activeTaskId: 't1', messages: [
     { role: 'user', content: 'go' },
     Object.assign({ role: 'assistant', content: '', thinking: '', toolRounds: [] }, msgFields || {}),
   ]};
   conversations.push(conv);
-  streamBufs.set(convId, Object.assign({ content: '', thinking: '', toolRounds: [], phase: null }, bufFields || {}));
+  getStreamSession(convId);   // create the live session (twStart's job)
   activeStreams.set(convId, { controller: { abort: () => {} }, taskId: 't1' });
   global.activeConvId = win.activeConvId = convId;
 }
 
-// ── (1) _streamFrameArg: empty buffer + checkpointed msg → falls back. ──
+// ── (1) _streamFrameArg: live session + checkpointed doc → projects the doc. ──
 {
-  _setup('c-fallback', {}, { content: 'checkpoint EN answer', thinking: 'ck think',
-                             toolRounds: [{ roundNum: 1, status: 'done' }] });
+  _setup('c-fallback', { content: 'checkpoint EN answer', thinking: 'ck think',
+                         toolRounds: [{ roundNum: 1, status: 'done' }] });
   const arg = _streamFrameArg('c-fallback');
   check('frameArg_content_fallback', arg && arg.content === 'checkpoint EN answer');
   check('frameArg_thinking_fallback', arg && arg.thinking === 'ck think');
   check('frameArg_toolRounds_fallback', arg && arg.toolRounds && arg.toolRounds.length === 1);
 }
 
-// ── (2) THE FIX: _twFlush with an empty buffer + checkpointed msg renders the
+// ── (2) THE FIX: _twFlush with a live session + checkpointed doc renders the
 //    real content and does NOT paint 等待中…. ──
 {
-  _setup('c-twflush', {}, { content: 'partial EN answer so far', thinking: '', toolRounds: [] });
+  _setup('c-twflush', { content: 'partial EN answer so far', thinking: '', toolRounds: [] });
   _freshBody();
   _twPendingConvId = 'c-twflush'; _twDirty = true;
   _twFlush();   // the REAL per-frame render path, driven directly
@@ -202,10 +198,10 @@ function _setup(convId, bufFields, msgFields) {
   check('twflush_renders_checkpoint', /partial EN answer so far/.test(r.contentHtml));
 }
 
-// ── (3) Genuinely empty stream (empty buffer AND empty checkpoint) still shows
-//    等待中… — the fallback must NOT fabricate content. ──
+// ── (3) Genuinely empty stream (empty doc) still shows 等待中… — the
+//    projection must NOT fabricate content. ──
 {
-  _setup('c-empty', {}, { content: '', thinking: '', toolRounds: [] });
+  _setup('c-empty', { content: '', thinking: '', toolRounds: [] });
   _freshBody();
   _twPendingConvId = 'c-empty'; _twDirty = true;
   _twFlush();
@@ -213,25 +209,30 @@ function _setup(convId, bufFields, msgFields) {
   check('empty_stream_still_waits', r.hasWait === true && r.contentHtml === '');
 }
 
-// ── (4) Live buffer with data is authoritative — a stale checkpoint must NOT
-//    override the accumulating delta. ──
+// ── (4) NEUTER: the paint path reads the DOCUMENT, not a stale snapshot.
+//    Mutate the doc and the frame MUST change — proving no stale buffer can
+//    override the checkpointed content. ──
 {
-  _setup('c-live', { content: 'LIVE delta so far' },
-         { content: 'stale checkpoint', thinking: '', toolRounds: [] });
-  const arg = _streamFrameArg('c-live');
-  check('live_buffer_wins', arg && arg.content === 'LIVE delta so far');
+  _setup('c-live', { content: 'first content', thinking: '', toolRounds: [] });
+  const arg1 = _streamFrameArg('c-live');
+  check('frame_reads_doc_initial', arg1 && arg1.content === 'first content');
+  // Mutate the document (the SSE delta path does this in production).
+  const conv = conversations.find(c => c.id === 'c-live');
+  conv.messages[1].content = 'LIVE delta so far';
+  const arg2 = _streamFrameArg('c-live');
+  check('frame_tracks_doc_mutation', arg2 && arg2.content === 'LIVE delta so far');
   _freshBody();
   _twPendingConvId = 'c-live'; _twDirty = true;
   _twFlush();
   const r = _probe();
-  check('twflush_live_buffer_wins', /LIVE delta so far/.test(r.contentHtml)
-        && !/stale checkpoint/.test(r.contentHtml));
+  check('twflush_renders_mutated_doc', /LIVE delta so far/.test(r.contentHtml)
+        && !/first content/.test(r.contentHtml));
 }
 
-// ── (5) No buffer at all → _streamFrameArg returns null (no throw). ──
+// ── (5) No live session → _streamFrameArg returns null (no throw). ──
 {
-  conversations.length = 0; streamBufs.clear();
-  check('no_buffer_null', _streamFrameArg('nope') === null);
+  conversations.length = 0; streamSessions.clear();
+  check('no_session_null', _streamFrameArg('nope') === null);
 }
 
 console.log(out.join('\n'));
@@ -262,16 +263,16 @@ def _run():
     assert not fails, '_twFlush message-fallback failures:\n' + output
     assert output.count('PASS') >= 10, f'expected >=10 PASS lines, got:\n{output}'
 
-    # ── Source-level guard: _twFlush must go through _streamFrameArg, not read
-    #    buf.content raw; and _streamFrameArg must apply the || ckpt fallback. ──
+    # ── Source-level guard: _twFlush must go through _streamFrameArg; and
+    #    _streamFrameArg must project content from the document (ckpt). ──
     hst = os.path.join(JS_DIR, 'core', 'health_stream_timer.js')
     with open(hst, encoding='utf-8') as f:
         hst_src = f.read()
     assert 'function _streamFrameArg' in hst_src, (
         'regression: the shared _streamFrameArg render-payload helper is gone.')
-    assert 'buf.content || (ckpt && ckpt.content)' in hst_src, (
-        'regression: _streamFrameArg no longer applies the message-checkpoint '
-        'content fallback — an empty buffer would wipe the bubble to "等待中…".')
+    assert '(ckpt && ckpt.content)' in hst_src, (
+        'regression: _streamFrameArg no longer projects content from the '
+        'message document — an empty projection would wipe the bubble to "等待中…".')
     # _twFlush body must call the helper.
     fpos = hst_src.find('function _twFlush')
     assert fpos >= 0

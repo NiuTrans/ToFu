@@ -114,7 +114,7 @@ async function _connectAutopilotKick(convId, taskId) {
   conv.activeTaskId = taskId;
   renderConversationList();
   updateSendButton();
-  twStart(convId);
+  if (typeof twStart === 'function') twStart(convId);
 
   const stream = activeStreams.get(convId);
   let sseWorked = false;
@@ -122,7 +122,7 @@ async function _connectAutopilotKick(convId, taskId) {
     sseWorked = await _trySSE(convId, taskId, stream, dummyAssistant);
   } catch (e) {
     if (e.name === 'AbortError') {
-      twStop(convId);
+      if (typeof twStop === 'function') twStop(convId);
       finishStream(convId);
       return;
     }
@@ -216,8 +216,15 @@ async function connectToTask(convId, taskId, retries = 0, opts = {}) {
    *   ghost "Agent" bubble before the VU bubble, and the carrier's empty
    *   `done` event could overwrite the prior real reply).  Delegate to a
    *   dedicated connector that uses a DETACHED dummy assistantMsg; the VU
-   *   bubble itself is created by the `autopilot_vu_start` event. */
-  if (opts && opts.autopilotKick) {
+   *   bubble itself is created by the `autopilot_vu_start` event.
+   * ★ vuCarrier (2026-07-26, conv ms1rrjchpa5pqw): the SAME constraint
+   *   applies when hopping from the parent's closed stream onto the VU
+   *   sub-task's own stream (`latestLiveTaskId` + `latestLiveTaskIsVu`) —
+   *   the carrier emits ONLY the autopilot_vu_* contract, so binding the
+   *   parent assistant (or a fresh placeholder) as the stream target would
+   *   render the VU's frames as a second "Agent" bubble. Same connector,
+   *   same detached-dummy discipline. */
+  if (opts && (opts.autopilotKick || opts.vuCarrier)) {
     return _connectAutopilotKick(convId, taskId);
   }
   /* ★ CROSS-TALK DETECTION: log full stream context at connection time */
@@ -425,14 +432,12 @@ async function connectToTask(convId, taskId, retries = 0, opts = {}) {
           ? 'Planning…'
           : (_hasPartial ? 'Resuming…' : 'Connecting…');
         const _reconTime = formatClockTime(assistantMsg.timestamp);
-        if (window.ConvView && typeof window.ConvView.startStreaming === 'function') {
-          window.ConvView.startStreaming(convId, {
-            role: _reconRole, status: _reconStatus,
-            timeStr: _reconTime, msgId: assistantMsg._msgId || null,
-          });
-        } else {
-          inner.insertAdjacentHTML('beforeend', _streamingBubbleHTML(_reconRole, _reconStatus, _reconTime, assistantMsg._msgId || null));
-        }
+        /* No raw fallback — the boot-time ConvView hard check (main.js)
+         * turns a missing seam into a loud startup failure. */
+        window.ConvView.startStreaming(convId, {
+          role: _reconRole, status: _reconStatus,
+          timeStr: _reconTime, msgId: assistantMsg._msgId || null,
+        });
         /* Pre-populate streaming-body with whatever content was already
          * persisted, so the user sees real progress before SSE arrives.
          * The first delta from _trySSE will replace .stream-status with
@@ -477,52 +482,13 @@ async function connectToTask(convId, taskId, retries = 0, opts = {}) {
         scrollToBottom();
       }
     }
-    twStart(convId);
-    const buf = streamBufs.get(convId);
-    /* ★ FIX (stuck "等待中…" on reconnect): seed the fresh stream buffer with
-     *   whatever content/thinking the server already checkpointed onto this
-     *   assistant turn.  twStart() creates an EMPTY buffer; without this the
-     *   buffer stays empty until the first NEW SSE delta arrives, so any
-     *   buffer-driven render (the 300ms deferred re-render in
-     *   showStreamingUIForConv, or a twUpdate triggered by an unrelated field)
-     *   paints updateStreamingUI({content:''}) → the "wait" branch → the bubble
-     *   snaps back to "等待中…" even though the task is mid-generation and the
-     *   English is already persisted.  Mirror assistantMsg → buf exactly like
-     *   the SSE `state`/`delta` handlers do. */
-    if (assistantMsg.content) buf.content = assistantMsg.content;
-    if (assistantMsg.thinking) buf.thinking = assistantMsg.thinking;
-    if (assistantMsg.toolRounds)
-      buf.toolRounds = [...assistantMsg.toolRounds];
-    else if (assistantMsg.searchResults)
-      buf.toolRounds = [
-        {
-          roundNum: 1,
-          query: assistantMsg.searchQuery || "search",
-          results: assistantMsg.searchResults,
-          status: "done",
-        },
-      ];
+    if (typeof twStart === 'function') twStart(convId);
+    /* §7 streamBufs fully RETIRED (the Map no longer exists): NO buffer
+     * seeding — content/thinking/rounds
+     * project straight from the message document (assistantMsg), which the
+     * checkpoint already carries; phase lives in streamSessions. */
   }
   const stream = activeStreams.get(convId);
-  /* ★ Defensive re-entry seed (strictly additive, decouples the twUpdate path):
-   *   the twStart+seed block above only runs on the FRESH-connection branch
-   *   (`!activeStreams.has(convId)`).  A re-entry that finds an existing stream
-   *   (e.g. an overlapping reconnect race, or a caller that re-invokes
-   *   connectToTask for a conv that already has a live entry) SKIPS twStart and
-   *   its seed — leaving whatever buffer existed.  `_twFlush` (health_stream_timer)
-   *   reads `buf.content` RAW with no message fallback, so an empty buffer there
-   *   would still paint the "等待中…" wait branch over already-checkpointed
-   *   content.  Fill any GAP from the persisted assistant turn — guarded on the
-   *   field being empty so this can NEVER clobber deltas the live `_trySSE`
-   *   closure has been accumulating (that buffer is authoritative once it has
-   *   data). No-op on the fresh path (the block above already seeded it). */
-  const _reentryBuf = streamBufs.get(convId);
-  if (_reentryBuf) {
-    if (!_reentryBuf.content && assistantMsg.content) _reentryBuf.content = assistantMsg.content;
-    if (!_reentryBuf.thinking && assistantMsg.thinking) _reentryBuf.thinking = assistantMsg.thinking;
-    if (!(_reentryBuf.toolRounds && _reentryBuf.toolRounds.length) && assistantMsg.toolRounds && assistantMsg.toolRounds.length)
-      _reentryBuf.toolRounds = [...assistantMsg.toolRounds];
-  }
   let sseWorked = false;
   try {
     sseWorked = await _trySSE(convId, taskId, stream, assistantMsg);
@@ -549,7 +515,7 @@ async function connectToTask(convId, taskId, retries = 0, opts = {}) {
           console.log(`[connectToTask] User abort — set finishReason='aborted' for conv=${convId.slice(0,8)}`);
         }
       }
-      twStop(convId);
+      if (typeof twStop === 'function') twStop(convId);
       finishStream(convId);
       return;
     }
@@ -582,15 +548,14 @@ async function connectToTask(convId, taskId, retries = 0, opts = {}) {
    logic; only the 7 reassigned locals were lifted to `ctx` (destructured
    on entry, written back in `finally` so every early `return` propagates).
 
-   ctx = { convId, taskId, stream, assistantMsg, buf, epCriticPhase,
-           epCriticMsg, epCriticBuf, roundThinkingLen, lastEventId,
+   ctx = { convId, taskId, stream, assistantMsg, epCriticPhase,
+           epCriticMsg, roundThinkingLen, lastEventId,
            pinnedMsgId }
    Returns truthy only for the `done` event (signals stream end). */
 function dispatchSSEEvent(line, ctx) {
-  let { assistantMsg, buf, pinnedMsgId: _pinnedMsgId } = ctx;
+  let { assistantMsg, pinnedMsgId: _pinnedMsgId } = ctx;
   let _epCriticPhase = ctx.epCriticPhase;
   let _epCriticMsg = ctx.epCriticMsg;
-  let _epCriticBuf = ctx.epCriticBuf;
   let _roundThinkingLen = ctx.roundThinkingLen;
   let _lastEventId = ctx.lastEventId;
   let _pendingEventId = ctx.pendingEventId;
@@ -620,12 +585,11 @@ function dispatchSSEEvent(line, ctx) {
   }
   /* Snapshot of the live dispatch state passed to the extracted
    * property-only handlers (ui/sse_handlers_tool.js / _swarm.js). They
-   * mutate object PROPERTIES of assistantMsg/buf/_epCritic* (same refs we
+   * mutate object PROPERTIES of assistantMsg/_epCriticMsg (same refs we
    * hold here) and never reassign the locals, so no write-back is needed. */
   function _hctx() {
-    return { convId, taskId, stream, assistantMsg, buf,
-             epCriticPhase: _epCriticPhase, epCriticMsg: _epCriticMsg,
-             epCriticBuf: _epCriticBuf };
+    return { convId, taskId, stream, assistantMsg,
+             epCriticPhase: _epCriticPhase, epCriticMsg: _epCriticMsg };
   }
     // ★ Capture id: field for Last-Event-ID reconnection.
     //   The id line PRECEDES its paired data line on the wire, so we only
@@ -652,6 +616,34 @@ function dispatchSSEEvent(line, ctx) {
       ev = JSON.parse(ds);
     } catch {
       return false;
+    }
+    /* ★ receivedAt (pt_67ffc2b7) — stamped HERE, at stream INGRESS, and only
+     * for tool frames. This is the client end of the timing contract:
+     *   execution = tEnd - tStart          (both backend clocks)
+     *   transport = receivedAt - emittedAt (backend → this line)
+     *   render    = painted  - receivedAt  (this line → pixels)
+     * Without it "the tool is slow" cannot be told apart from "the frame was
+     * slow to arrive" or "the browser dropped the paint" (health_stream_timer
+     * really does drop renders — see its [twFlush-skip] diagnostic).
+     *
+     * It is stamped at ingress rather than inside the reducer on purpose: the
+     * reducer is a PURE function whose live fold must stay byte-identical to
+     * the cold projection of the same turn, and a Date.now() in there would
+     * break that contract (and its purity guard). Scoped to tool frames so the
+     * delta hot path is untouched.
+     *
+     * NOTE the shape of the type check. Doing the typeof test directly against
+     * `ev.type` trips tests/test_event_registry.py's frontend scanner: it finds
+     * every event type this file handles by matching a strict-equality compare
+     * against the `.type` field, does NOT strip comments, and would read that
+     * form as a declaration that we handle an event type literally named after
+     * the typeof result — failing the registry drift guard. Reading the field
+     * into a local first keeps the guard honest without inventing a phantom
+     * event type. */
+    const _evType = ev && ev.type;
+    if (typeof _evType === 'string' && _evType.indexOf('tool_') === 0
+        && ev.receivedAt == null) {
+      ev.receivedAt = Date.now();
     }
     // ★ Commit the resume cursor now: the paired data event has parsed and
     //   is applied SYNCHRONOUSLY below (dispatchSSEEvent has no await between
@@ -720,11 +712,6 @@ function dispatchSSEEvent(line, ctx) {
               plannerMsg.thinking = ev.thinking || "";
               plannerMsg.toolRounds = _snapshotLongerRounds(plannerMsg.toolRounds, ev.toolRounds);
               assistantMsg = plannerMsg;
-              if (buf) {
-                buf.thinking = assistantMsg.thinking;
-                buf.content = assistantMsg.content;
-                buf.toolRounds = assistantMsg.toolRounds;
-              }
             }
             /* ★ FIX: Update the streaming-msg DOM to show Planner role/avatar
              *   in case connectToTask created it with Agent styling */
@@ -774,11 +761,6 @@ function dispatchSSEEvent(line, ctx) {
             plannerMsg.thinking = ev.thinking || "";
             plannerMsg.toolRounds = _snapshotLongerRounds(plannerMsg.toolRounds, ev.toolRounds);
             assistantMsg = plannerMsg;
-            if (buf) {
-              buf.thinking = assistantMsg.thinking;
-              buf.content = assistantMsg.content;
-              buf.toolRounds = assistantMsg.toolRounds;
-            }
           } else if (ev.endpointPhase === 'reviewing') {
             // Critic is in progress — create a critic msg and set phase
             _epCriticPhase = true;
@@ -791,12 +773,6 @@ function dispatchSSEEvent(line, ctx) {
             };
             _ensureMsgId(_epCriticMsg);
             conv.messages.push(_epCriticMsg);
-            _epCriticBuf = {
-              content: (_epCriticMsg.content || "").replace(/\[VERDICT:\s*(?:STOP|CONTINUE)\s*\]\s*$/i, "").trimEnd(),
-              thinking: _epCriticMsg.thinking, toolRounds: [],
-            };
-            streamBufs.set(convId, _epCriticBuf);
-            buf = _epCriticBuf;
             // Point assistantMsg to the last completed worker turn
             const lastWorker = [...conv.messages].reverse().find(m => m.role === "assistant");
             if (lastWorker) assistantMsg = lastWorker;
@@ -848,11 +824,6 @@ function dispatchSSEEvent(line, ctx) {
               workerMsg.thinking = ev.thinking || "";
               workerMsg.toolRounds = _snapshotLongerRounds(workerMsg.toolRounds, ev.toolRounds);
               assistantMsg = workerMsg;
-              if (buf) {
-                buf.thinking = assistantMsg.thinking;
-                buf.content = assistantMsg.content;
-                buf.toolRounds = assistantMsg.toolRounds;
-              }
             }
           }
 
@@ -862,7 +833,7 @@ function dispatchSSEEvent(line, ctx) {
 
           // Re-render if active
           if (activeConvId === convId) {
-            renderChat(conv);
+            window.ConvView.replaceAll(convId);
             /* ★ FIX: renderChat rendered ALL messages including the in-progress
              *   one.  We need to remove that last static element before creating
              *   the streaming-msg, otherwise the in-progress message shows twice:
@@ -872,17 +843,12 @@ function dispatchSSEEvent(line, ctx) {
             if (staleRenderedEl) staleRenderedEl.remove();
 
             // Re-create streaming-msg for the in-progress turn
-            const inner = document.getElementById("chatInner");
             const _reconRole = _epCriticPhase ? 'critic'
               : (ev.endpointPhase === 'planning' ? 'planner' : 'worker');
             const _reconStatus = _epCriticPhase ? 'Reviewing…'
               : (ev.endpointPhase === 'planning' ? 'Planning…' : 'Thinking…');
             /* ★ Dedup at the boundary (ConvView.startStreaming → _evictByMsgId). */
-            if (window.ConvView && typeof window.ConvView.startStreaming === 'function') {
-              window.ConvView.startStreaming(convId, { role: _reconRole, status: _reconStatus, msgId: assistantMsg._msgId || null });
-            } else if (inner) {
-              inner.insertAdjacentHTML("beforeend", _streamingBubbleHTML(_reconRole, _reconStatus, undefined, assistantMsg._msgId || null));
-            }
+            window.ConvView.startStreaming(convId, { role: _reconRole, status: _reconStatus, msgId: assistantMsg._msgId || null });
             buildTurnNav(conv);
           }
         }
@@ -891,10 +857,6 @@ function dispatchSSEEvent(line, ctx) {
         /* State snapshot during critic phase → update critic msg */
         _epCriticMsg.content = ev.content || "";  // verbatim (server fold authoritative for text)
         _epCriticMsg.thinking = ev.thinking || "";
-        if (_epCriticBuf) {
-          _epCriticBuf.content = (_epCriticMsg.content || "").replace(/\[VERDICT:\s*(?:STOP|CONTINUE)\s*\]\s*$/i, "").trimEnd();
-          _epCriticBuf.thinking = _epCriticMsg.thinking;
-        }
       } else {
         /* ★ RENDER_CONTRACT Phase 3: route the COLD state snapshot through the
          *   ONE pure reducer (projectColdSnapshot). Only the reducer-OWNED
@@ -918,8 +880,6 @@ function dispatchSSEEvent(line, ctx) {
         if (ev.error) assistantMsg.error = ev.error;
         if (ev.toolRounds) {
           assistantMsg.toolRounds = _proj.toolRounds;
-          if (buf)
-            buf.toolRounds = assistantMsg.toolRounds;
         }
         if (ev.finishReason) assistantMsg.finishReason = ev.finishReason;
         if (ev.usage) assistantMsg.usage = ev.usage;
@@ -927,16 +887,11 @@ function dispatchSSEEvent(line, ctx) {
         else if (ev.preset) assistantMsg.model = ev.preset;
         else if (ev.effort) assistantMsg.model = ev.effort;
         if (ev.thinkingDepth) assistantMsg.thinkingDepth = ev.thinkingDepth;
-        if (buf) {
-          buf.thinking = assistantMsg.thinking;
-          buf.content = assistantMsg.content;
-        }
         if (ev.usage && typeof updateContextBar === 'function') updateContextBar();
       }
       // ★ Restore memory prefetch state from snapshot (WS/SSE connect mid-prefetch)
       if (ev.memoryPrefetch) {
         assistantMsg._memoryPrefetch = ev.memoryPrefetch;
-        if (buf) buf._memoryPrefetch = ev.memoryPrefetch;
         const _mpConv = conversations.find(c => c.id === convId);
         if (_mpConv) {
           const _mpPhase = ev.memoryPrefetch.phase;
@@ -947,32 +902,26 @@ function dispatchSSEEvent(line, ctx) {
       // ★ Restore preferences-applied chip from snapshot (mid-stream reconnect)
       if (ev.preferencesApplied) {
         assistantMsg._preferencesApplied = ev.preferencesApplied;
-        if (buf) buf._preferencesApplied = ev.preferencesApplied;
       }
       if (ev.relatedConversations) {
         assistantMsg._relatedConversations = ev.relatedConversations;
-        if (buf) buf._relatedConversations = ev.relatedConversations;
       }
       if (ev.preferencesLearned) {
         assistantMsg._preferencesLearned = ev.preferencesLearned;
-        if (buf) buf._preferencesLearned = ev.preferencesLearned;
       }
       /* Inbox-inject sidecars (swarm/peer/user-steer) — restore from the
        * reconnect snapshot so the in-timeline inject chips repaint. Display
        * only; getToolRoundsFromMsg rebuilds the synthetic rows from these. */
       if (ev.inboxInjects) {
         assistantMsg._inboxInjects = ev.inboxInjects;
-        if (buf) buf._inboxInjects = ev.inboxInjects;
       }
       if (ev.peerInjects) {
         assistantMsg._peerInjects = ev.peerInjects;
-        if (buf) buf._peerInjects = ev.peerInjects;
       }
       if (ev.userSteerInjects) {
         assistantMsg._userSteerInjects = ev.userSteerInjects;
-        if (buf) buf._userSteerInjects = ev.userSteerInjects;
       }
-      twUpdate(convId);
+      if (typeof twUpdate === 'function') twUpdate(convId);
       // ★ Re-trigger HG translations on state snapshot (handles page refresh / SSE reconnect)
       if (ev.toolRounds) _retriggerHgTranslations(convId);
     } else if (ev.type === "autopilot_vu_start"
@@ -1015,17 +964,8 @@ function dispatchSSEEvent(line, ctx) {
         if (_epCriticMsg) {
           if (ev.thinking) _epCriticMsg.thinking = (_epCriticMsg.thinking || "") + ev.thinking;
           if (ev.content)  _epCriticMsg.content  = (_epCriticMsg.content  || "") + ev.content;
-          if (_epCriticBuf) {
-            _epCriticBuf.thinking = _epCriticMsg.thinking || "";
-            /* Strip [VERDICT: STOP/CONTINUE] tag during live streaming so
-               the user never sees the raw structured marker.  The backend
-               sends the fully-stripped content in endpoint_critic_msg later,
-               but stripping here avoids a flash of the raw tag. */
-            const _rawCritic = _epCriticMsg.content || "";
-            _epCriticBuf.content = _rawCritic.replace(/\[VERDICT:\s*(?:STOP|CONTINUE)\s*\]\s*$/i, "").trimEnd();
-          }
         }
-        twUpdate(convId);
+        if (typeof twUpdate === 'function') twUpdate(convId);
       } else {
         /* ★ RENDER_CONTRACT Phase 3: route the LIVE content/thinking append
          *   through the ONE pure reducer (reduceStreamState 'delta' action)
@@ -1037,25 +977,20 @@ function dispatchSSEEvent(line, ctx) {
          *   unchanged render-buffer concerns. */
         reduceStreamState(assistantMsg, { type: 'delta', content: ev.content, thinking: ev.thinking });
         if (ev.thinking) {
-          if (buf) buf.thinking = assistantMsg.thinking;
           _roundThinkingLen += ev.thinking.length;
-        }
-        if (ev.content) {
-          if (buf) buf.content = assistantMsg.content;
         }
         /* ★ Phase management during deltas:
          *   - Content delta arrived → model is producing visible output, clear phase
          *   - Thinking-only delta → model is reasoning, show thinking indicator
          *     This works on ALL rounds (even when msg.content is already non-empty
-         *     from previous tool rounds) */
-        if (buf) {
-          if (ev.content) {
-            buf.phase = null;
-          } else if (ev.thinking && !ev.content) {
-            buf.phase = { phase: "thinking_active", _thinkingLen: _roundThinkingLen };
-          }
+         *     from previous tool rounds). §7: phase lives in the live session
+         *     slice (streamSessions), never a render buffer. */
+        if (ev.content) {
+          setStreamPhase(convId, null);
+        } else if (ev.thinking && !ev.content) {
+          setStreamPhase(convId, { phase: "thinking_active", _thinkingLen: _roundThinkingLen });
         }
-        twUpdate(convId);
+        if (typeof twUpdate === 'function') twUpdate(convId);
       }
     } else if (ev.type === "retry_reset") {
       /* Turn-level auto-retry: the backend is re-running the whole turn after
@@ -1068,7 +1003,6 @@ function dispatchSSEEvent(line, ctx) {
        * Non-terminal: the task stays running; a phase:retrying frame follows. */
       _roundThinkingLen = 0;
       const _rrTarget = (_epCriticPhase && _epCriticMsg) ? _epCriticMsg : assistantMsg;
-      const _rrBuf = (_epCriticPhase && _epCriticBuf) ? _epCriticBuf : buf;
       if (_rrTarget) {
         _rrTarget.content = "";
         _rrTarget.thinking = "";
@@ -1077,13 +1011,8 @@ function dispatchSSEEvent(line, ctx) {
         _rrTarget.toolRounds = _rrTarget._continueToolRounds
           ? _rrTarget._continueToolRounds.slice() : [];
       }
-      if (_rrBuf) {
-        _rrBuf.content = "";
-        _rrBuf.thinking = "";
-        _rrBuf.toolRounds = _rrTarget ? _rrTarget.toolRounds : [];
-        _rrBuf.phase = null;
-      }
-      twUpdate(convId);
+      setStreamPhase(convId, null);
+      if (typeof twUpdate === 'function') twUpdate(convId);
     } else if (ev.type === "delta_reset") {
       /* The just-ended LLM round issued TOOL CALLS, so the prose it streamed
        * before those calls was inter-round narration ("Now let me check the
@@ -1095,7 +1024,6 @@ function dispatchSSEEvent(line, ctx) {
        * the tool calls from this turn are legitimate and keep rendering. */
       _roundThinkingLen = 0;
       const _drTarget = (_epCriticPhase && _epCriticMsg) ? _epCriticMsg : assistantMsg;
-      const _drBuf = (_epCriticPhase && _epCriticBuf) ? _epCriticBuf : buf;
       if (_drTarget) {
         /* ★ RENDER_CONTRACT Phase 3: the prose-capture + freeze-guarded clear is
          * now owned by the ONE pure reducer's delta_reset case
@@ -1112,24 +1040,17 @@ function dispatchSSEEvent(line, ctx) {
         const _hadProse = !!(_drTarget.content || _drTarget.thinking);
         reduceStreamState(_drTarget, ev);
         /* _stamped = the reducer actually captured+cleared this round's prose.
-         * Derived from the accumulators being cleared, so the buf mirror + the
+         * Derived from the accumulators being cleared, so the
          * atomic clear-and-repaint below (DOM concerns the pure reducer must NOT
-         * own) fire exactly when a stamp happened. When there was no prose to
+         * own) fires exactly when a stamp happened. When there was no prose to
          * begin with, there is nothing to wipe — the atomic repaint's whole job
          * is to wipe the content zone AS the prose moves into the panel — so
          * skipping it is correct; the trailing twUpdate still refreshes. */
         const _stamped = _hadProse && !_drTarget.content && !_drTarget.thinking;
         if (_stamped) {
-          if (_drBuf) {
-            _drBuf.content = "";
-            _drBuf.thinking = "";
-            /* Keep the buffer's toolRounds pointed at the (now prose-stamped)
-             * live list so the reactive render picks up the captured prose. The
-             * per-round prose (assistantContent/thinking length) is in the
-             * _syncToolRoundsDOM fingerprint, so the render below re-renders the
-             * group and _renderStreamRoundProse paints the captured narration. */
-            if (_drTarget && Array.isArray(_drTarget.toolRounds)) _drBuf.toolRounds = _drTarget.toolRounds;
-          }
+          /* §7: no buffer mirror — the reducer already cleared the document
+           * (_drTarget), and the reactive render reads the document's
+           * prose-stamped toolRounds directly. */
           /* ★ ATOMIC CLEAR + REPAINT (root cause of the mid-stream content
            * freeze). twUpdate is COALESCED — the empty-content frame this reset
            * produces is routinely dropped when a long-running tool (or the next
@@ -1144,16 +1065,18 @@ function dispatchSSEEvent(line, ctx) {
            * #streaming-body); background convs still coalesce via twUpdate. */
           if (typeof activeConvId !== 'undefined' && activeConvId === convId
               && typeof updateStreamingUI === 'function') {
+            const _drSess = (typeof streamSessions !== 'undefined')
+              ? streamSessions.get(convId) : null;
             updateStreamingUI({
               content: '', thinking: '',
               toolRounds: (_drTarget && _drTarget.toolRounds) || [],
-              phase: (_drBuf && _drBuf.phase) || null,
+              phase: (_drSess && _drSess.phase) || null,
               _memoryPrefetch: (_drTarget && _drTarget._memoryPrefetch),
             });
           }
         }
       }
-      twUpdate(convId);
+      if (typeof twUpdate === 'function') twUpdate(convId);
     } else if (ev.type === "round_start" || ev.type === "round_end") {
       /* ★ RENDER_CONTRACT Phase 3: explicit round boundaries. Route through the
        *   ONE pure reducer so the open-round index is tracked off a REAL
@@ -1165,7 +1088,7 @@ function dispatchSSEEvent(line, ctx) {
        *   suffices. Backend `done`/`committedMessage` stays authoritative. */
       const _rbTarget = (_epCriticPhase && _epCriticMsg) ? _epCriticMsg : assistantMsg;
       if (_rbTarget) reduceStreamState(_rbTarget, ev);
-      twUpdate(convId);
+      if (typeof twUpdate === 'function') twUpdate(convId);
     } else if (ev.type === "phase") {
       _roundThinkingLen = 0; // reset thinking counter on new phase
       /* Each new LLM round starts with a 'phase' event whose phase is
@@ -1178,21 +1101,36 @@ function dispatchSSEEvent(line, ctx) {
       if (ev.phase === 'llm_thinking' && typeof updateContextBar === 'function') {
         updateContextBar();
       }
-      if (_epCriticPhase) {
-        /* Phase events during critic review — update critic buf instead */
-        if (_epCriticBuf)
-          _epCriticBuf.phase = { phase: ev.phase, detail: ev.detail || "",
-            tools: ev.tools || [], toolContext: ev.toolContext || "", round: ev.roundNum || 0 };
-      } else if (buf) {
-        buf.phase = {
-          phase: ev.phase,
-          detail: ev.detail || "",
-          tools: ev.tools || [],
-          toolContext: ev.toolContext || "",
-          round: ev.roundNum || 0,
-        };
-      }
-      twUpdate(convId);
+      /* §7: phase lives in the live session slice — one home for worker and
+       * critic phases alike (critic phase used to swap the whole buf object;
+       * the session slice just carries the current phase). Warm reconnects
+       * re-seed it via this same handler from the replayed event log. */
+      setStreamPhase(convId, {
+        phase: ev.phase,
+        detail: ev.detail || "",
+        /* ★ i18n plumb: renderers prefer detailKey→t() over `detail`, which
+         * remains the English fallback for headless / non-i18n clients. */
+        detailKey: ev.detailKey || "",
+        detailArgs: ev.detailArgs || null,
+        /* ★ LOAD-BEARING, not telemetry (pt_1e7f6539b41c4d8f). The retry
+         * banner's repaint key is `"retry:" + (phase.attempt || 0)`
+         * (streaming_ui.js), and the status zone only swaps innerHTML when
+         * `data-phase-key` CHANGES. Drop this field and every retry beat
+         * collapses to `retry:0`, so the banner FREEZES on the first
+         * attempt's text — "attempt 2 / 3 / 4…" can never appear even though
+         * the backend emits a fresh PHASE event for each one (measured:
+         * 3 beats → 3 distinct keys with the field, 1 key without).
+         * The backend sends it TOP-LEVEL on every retry / first-byte
+         * heartbeat beat (lib/tasks_pkg/manager/_stream.py::_on_waiting,
+         * lib/tasks_pkg/stream_handler/_analyse.py). `detailArgs.attempt`
+         * carries the same number for the i18n TEXT, but the repaint key
+         * reads the top-level field — the two are not interchangeable. */
+        attempt: ev.attempt || 0,
+        tools: ev.tools || [],
+        toolContext: ev.toolContext || "",
+        round: ev.roundNum || 0,
+      });
+      if (typeof twUpdate === 'function') twUpdate(convId);
     } else if (ev.type === "tool_start") {
       _handleToolStart(ev, _hctx());
     } else if (ev.type === "human_guidance_request") {
@@ -1320,19 +1258,9 @@ function dispatchSSEEvent(line, ctx) {
 
           // 3. Create a streaming element for the critic (DOM — only if active)
           if (_isActiveConv) {
-            const inner = document.getElementById("chatInner");
             /* ★ Dedup at the boundary (ConvView.startStreaming → _evictByMsgId). */
-            if (window.ConvView && typeof window.ConvView.startStreaming === 'function') {
-              window.ConvView.startStreaming(convId, { role: 'critic', msgId: _epCriticMsg._msgId || null });
-            } else if (inner) {
-              inner.insertAdjacentHTML("beforeend", _streamingBubbleHTML('critic', undefined, undefined, _epCriticMsg._msgId || null));
-            }
+            window.ConvView.startStreaming(convId, { role: 'critic', msgId: _epCriticMsg._msgId || null });
           }
-
-          // 4. Create a separate stream buffer for the critic
-          _epCriticBuf = { content: "", thinking: "", toolRounds: [] };
-          streamBufs.set(convId, _epCriticBuf);
-          buf = _epCriticBuf;
 
           if (_isActiveConv) {
             buildTurnNav(conv);
@@ -1396,20 +1324,11 @@ function dispatchSSEEvent(line, ctx) {
             conv.messages.push(newAssistant);
             assistantMsg = newAssistant;
 
-            // Reset stream buffer for the new worker turn
-            const newBuf = { content: "", thinking: "", toolRounds: [] };
-            streamBufs.set(convId, newBuf);
-            buf = newBuf;
-
             // Create streaming element — only if this conv is active
             if (_isActiveConv) {
               const inner = document.getElementById("chatInner");
               /* ★ Dedup at the boundary (ConvView.startStreaming → _evictByMsgId). */
-              if (window.ConvView && typeof window.ConvView.startStreaming === 'function') {
-                window.ConvView.startStreaming(convId, { role: 'worker', status: 'Thinking…', msgId: assistantMsg._msgId || null });
-              } else if (inner) {
-                inner.insertAdjacentHTML("beforeend", _streamingBubbleHTML('worker', 'Thinking…', undefined, assistantMsg._msgId || null));
-              }
+              window.ConvView.startStreaming(convId, { role: 'worker', status: 'Thinking…', msgId: assistantMsg._msgId || null });
               buildTurnNav(conv);
               _forceScrollToBottom();
             }
@@ -1521,7 +1440,6 @@ function dispatchSSEEvent(line, ctx) {
 
         // Clean up critic state
         _epCriticMsg = null;
-        _epCriticBuf = null;
 
         /* ── Replan branch: Critic requested CONTINUE_PLANNER ──
          * Create a new planner placeholder message so the subsequent
@@ -1542,19 +1460,10 @@ function dispatchSSEEvent(line, ctx) {
           conv.messages.push(plannerPlaceholder);
           assistantMsg = plannerPlaceholder;
 
-          // Reset stream buffer for the planner turn
-          const newBuf = { content: "", thinking: "", toolRounds: [] };
-          streamBufs.set(convId, newBuf);
-          buf = newBuf;
-
           if (activeConvId === convId) {
             const inner = document.getElementById("chatInner");
             /* ★ Dedup at the boundary (ConvView.startStreaming → _evictByMsgId). */
-            if (window.ConvView && typeof window.ConvView.startStreaming === 'function') {
-              window.ConvView.startStreaming(convId, { role: 'planner', status: 'Replanning…', msgId: assistantMsg._msgId || null });
-            } else if (inner) {
-              inner.insertAdjacentHTML("beforeend", _streamingBubbleHTML('planner', 'Replanning…', undefined, assistantMsg._msgId || null));
-            }
+            window.ConvView.startStreaming(convId, { role: 'planner', status: 'Replanning…', msgId: assistantMsg._msgId || null });
             const banner = document.getElementById("ep-iter-banner");
             if (banner) banner.textContent = `Replanning…`;
           }
@@ -1599,20 +1508,11 @@ function dispatchSSEEvent(line, ctx) {
         conv.messages.push(newAssistant);
         assistantMsg = newAssistant;
 
-        // Reset stream buffer for the new worker turn
-        const newBuf = { content: "", thinking: "", toolRounds: [] };
-        streamBufs.set(convId, newBuf);
-        buf = newBuf;
-
         // DOM operations — only if this conv is currently viewed
         if (activeConvId === convId) {
           const inner = document.getElementById("chatInner");
           /* ★ Dedup at the boundary (ConvView.startStreaming → _evictByMsgId). */
-          if (window.ConvView && typeof window.ConvView.startStreaming === 'function') {
-            window.ConvView.startStreaming(convId, { role: 'worker', status: 'Thinking…', msgId: assistantMsg._msgId || null });
-          } else if (inner) {
-            inner.insertAdjacentHTML("beforeend", _streamingBubbleHTML('worker', 'Thinking…', undefined, assistantMsg._msgId || null));
-          }
+          window.ConvView.startStreaming(convId, { role: 'worker', status: 'Thinking…', msgId: assistantMsg._msgId || null });
 
           // Update banner & turn-nav
           const banner = document.getElementById("ep-iter-banner");
@@ -1749,31 +1649,78 @@ function dispatchSSEEvent(line, ctx) {
          cache intact — surface the "apply on next conversation" banner. */
       if (typeof onToolsetDiverged === 'function') onToolsetDiverged(!!ev.toolsetDiverged, convId, ev.toolsetDiff);
       /* The turn-ctx capsule on the triggering user turn was captured from
-         the LIVE toolbar at send time, but the latch held back this diff so
-         the turn actually ran with the FROZEN tool set. Correct that turn's
-         _ctx note in place (added=held-back-on → drop; removed=held-back-off
-         → restore) so the gutter capsule reflects what truly ran, then
-         persist + re-render. See info-rail.js::reconcileTurnCtxCapsule. */
-      if (ev.toolsetDiverged && ev.toolsetDiff
-          && typeof reconcileTurnCtxCapsule === 'function') {
-        try {
-          const _rc = conversations.find((c) => c.id === convId);
-          if (_rc && Array.isArray(_rc.messages)) {
-            let _uIdx = -1;
-            for (let i = _rc.messages.length - 1; i >= 0; i--) {
-              if (_rc.messages[i] && _rc.messages[i].role === 'user') { _uIdx = i; break; }
-            }
-            const _uMsg = _uIdx >= 0 ? _rc.messages[_uIdx] : null;
-            if (_uMsg && _uMsg._ctx && reconcileTurnCtxCapsule(_uMsg._ctx, ev.toolsetDiff)) {
-              if (typeof saveConversations === 'function') saveConversations(convId);
-              if (activeConvId === convId && window.ConvView
-                  && typeof window.ConvView.upsertMessage === 'function') {
-                window.ConvView.upsertMessage(convId, _uMsg, { idx: _uIdx });
+         the LIVE toolbar at send time. Two independent drifts settle here:
+           1. The tool-schema latch held ON/OFF toggles back to keep prompt
+              cache — corrected via `toolsetDiff = {added, removed}`.
+           2. The user may have switched preset / toggled a mode in the
+              pause between send and stream-start — corrected via the
+              server-authoritative fact card
+              `actualModel / actualDepth / actualModes` on the done frame.
+         Both are handled by info-rail.js::reconcileTurnCtxCapsule. */
+      if (typeof reconcileTurnCtxCapsule === 'function') {
+        const _hasDiff = ev.toolsetDiverged && ev.toolsetDiff
+          && ((ev.toolsetDiff.added && ev.toolsetDiff.added.length)
+              || (ev.toolsetDiff.removed && ev.toolsetDiff.removed.length));
+        const _hasFact = (typeof ev.actualModel === 'string' && ev.actualModel)
+          || Object.prototype.hasOwnProperty.call(ev, 'actualDepth')
+          || Array.isArray(ev.actualModes);
+        if (_hasDiff || _hasFact) {
+          try {
+            const _rc = conversations.find((c) => c.id === convId);
+            if (_rc && Array.isArray(_rc.messages)) {
+              /* Anchor the reconcile to the user message THIS task ran on
+                 (backend ships ev.userMsgId, stamped by _start_task_for_conv
+                 → done_evt in _finalize_and_emit_done, inherited onto VU
+                 sub-tasks from their parent). Falling back to "last user in
+                 conv" is wrong under three concrete scenarios (autopilot VU
+                 appended a newer user row; a concurrent send in the same
+                 conv; a regenerate against a historical user turn) — it
+                 either overwrites the wrong bubble or (worse) targets a msg
+                 that has no _ctx and the correction never lands. Use last-user
+                 ONLY when a legacy backend didn't ship userMsgId. */
+              let _uIdx = -1;
+              const _targetMsgId = (typeof ev.userMsgId === 'string' && ev.userMsgId)
+                ? ev.userMsgId : '';
+              if (_targetMsgId) {
+                for (let i = _rc.messages.length - 1; i >= 0; i--) {
+                  const _m = _rc.messages[i];
+                  if (_m && _m.role === 'user' && _m._msgId === _targetMsgId) {
+                    _uIdx = i;
+                    break;
+                  }
+                }
+                if (_uIdx < 0) {
+                  console.debug('[turnCtx] userMsgId=%s not found in conv=%s — ' +
+                    'the target user turn may have been truncated / not synced yet; ' +
+                    'skipping reconcile.', _targetMsgId, convId.slice(0, 8));
+                }
+              } else {
+                for (let i = _rc.messages.length - 1; i >= 0; i--) {
+                  if (_rc.messages[i] && _rc.messages[i].role === 'user') { _uIdx = i; break; }
+                }
+                console.debug('[turnCtx] done frame carries no userMsgId — ' +
+                  'legacy backend fallback to last-user in conv=%s (idx=%d)',
+                  convId.slice(0, 8), _uIdx);
+              }
+              const _uMsg = _uIdx >= 0 ? _rc.messages[_uIdx] : null;
+              if (_uMsg && _uMsg._ctx) {
+                const _fact = {
+                  toolsetDiff: _hasDiff ? ev.toolsetDiff : undefined,
+                  actualModel: ev.actualModel,
+                  actualDepth: ev.actualDepth,
+                  actualModes: ev.actualModes,
+                };
+                if (reconcileTurnCtxCapsule(_uMsg._ctx, _fact)) {
+                  if (typeof saveConversations === 'function') saveConversations(convId);
+                  if (activeConvId === convId) {
+                    window.ConvView.upsertMessage(convId, _uMsg, { idx: _uIdx });
+                  }
+                }
               }
             }
+          } catch (e) {
+            console.debug('[turnCtx] reconcile against done fact failed:', e);
           }
-        } catch (e) {
-          console.debug('[turnCtx] reconcile against toolsetDiff failed:', e);
         }
       }
       /* ★ Continue: merge modifiedFiles & modifiedFileList with existing */
@@ -1798,6 +1745,13 @@ function dispatchSSEEvent(line, ctx) {
         }
       }
       if (ev.taskId) assistantMsg._taskId = ev.taskId;
+      /* ★ latestLiveTaskId wire (pt_8dc03017 completion): the backend ships
+       *   the supersede successor (autopilot VU / follow-up / queued-dispatch
+       *   task) on terminal frames — record it so _runTerminalContinuation's
+       *   attach reducer can hop to it. Without this stamp the reducer is
+       *   dead code and a queued turn starts invisibly (the 2026-07-25
+       *   silent-queue incident). LATE done rides this same branch. */
+      if (typeof _stampLatestLiveTask === 'function') _stampLatestLiveTask(_dConv, ev);
       /* ★ git-shim: round commit sha for redo/diff references */
       if (ev.gitSha) assistantMsg._gitSha = ev.gitSha;
       /* ★ Phase 1 (parity-gap closure): when the backend shipped the EXACT
@@ -1842,12 +1796,18 @@ function dispatchSSEEvent(line, ctx) {
         }
         for (const _k of ['finishReason', 'usage', 'preset', 'toolSummary',
                           'model', 'provider_id', 'apiRounds', 'modifiedFiles',
-                          'modifiedFileList', 'cost', '_taskId',
+                          'modifiedFileList', 'cost', '_taskId', '_msgId',
                           'fallbackModel', 'fallbackFrom', 'fallbackReason',
                           'fallbackKind', 'error', 'thinkingDepth', '_gitSha',
                           '_memoryPrefetch', '_preferencesApplied',
                           '_relatedConversations', '_preferencesLearned',
                           '_inboxInjects', '_peerInjects', '_userSteerInjects']) {
+          /* ★ _msgId: adopt the server's committed id so the live bubble and
+           *   the DB row share ONE identity. With the backend now honouring the
+           *   client _assistantMsgId (manager._new_assistant_slot) they already
+           *   match; this keeps them aligned even for legacy/headless turns
+           *   where the server minted its own UUID — a reconnect / rescue-PUT
+           *   dedup then recognises the bubble and never appends a duplicate. */
           if (_cm[_k] != null) assistantMsg[_k] = _cm[_k];
         }
         assistantMsg._committedProjection = true;
@@ -1891,9 +1851,7 @@ function dispatchSSEEvent(line, ctx) {
        *   in _beginVuStreaming, so this covers BOTH the follow-up path
        *   AND the cancel path (VU bailed → bubble already removed).
        *   (Mirrors the streaming-msg-destroyed-by-renderChat fix.) */
-      if (activeConvId === convId && assistantMsg._vuTookOverBubble
-          && window.ConvView
-          && typeof window.ConvView.upsertMessage === 'function') {
+      if (activeConvId === convId && assistantMsg._vuTookOverBubble) {
         delete assistantMsg._vuTookOverBubble;
         window.ConvView.upsertMessage(convId, assistantMsg);
       }
@@ -1971,8 +1929,7 @@ function dispatchSSEEvent(line, ctx) {
         const _eIdx = _ec ? _ec.messages.indexOf(assistantMsg) : -1;
         if (_eIdx >= 0) {
           _ec.messages.splice(_eIdx, 1);
-          if (activeConvId === convId && window.ConvView
-              && typeof window.ConvView.removeMessage === 'function') {
+          if (activeConvId === convId) {
             window.ConvView.removeMessage(convId, assistantMsg._msgId || _eIdx);
           }
           /* Drop the live streaming bubble too — finishStream would otherwise
@@ -1994,10 +1951,8 @@ function dispatchSSEEvent(line, ctx) {
     return false;
   } finally {
     ctx.assistantMsg = assistantMsg;
-    ctx.buf = buf;
     ctx.epCriticPhase = _epCriticPhase;
     ctx.epCriticMsg = _epCriticMsg;
-    ctx.epCriticBuf = _epCriticBuf;
     ctx.roundThinkingLen = _roundThinkingLen;
     ctx.lastEventId = _lastEventId;
     ctx.pendingEventId = _pendingEventId;
@@ -2010,7 +1965,6 @@ async function _trySSE(convId, taskId, stream, assistantMsg) {
   let sseTimeout = setTimeout(() => {
     if (!gotData) stream.controller.abort();
   }, 30000);
-  let buf = streamBufs.get(convId);
   /* ── Stable identity capture ──
    * Pin the assistantMsg reference by its `_msgId` (minted by
    * `_ensureMsgId` / server's `_assign_message_ids`).  Phase-2
@@ -2032,10 +1986,8 @@ async function _trySSE(convId, taskId, stream, assistantMsg) {
   const ctx = {
     convId, taskId, stream,
     assistantMsg,
-    buf,
     epCriticPhase: false,
     epCriticMsg: null,
-    epCriticBuf: null,
     roundThinkingLen: 0,
     lastEventId: null,
     pendingEventId: null,
@@ -2046,7 +1998,6 @@ async function _trySSE(convId, taskId, stream, assistantMsg) {
   function _processSSELine(line) {
     const _done = dispatchSSEEvent(line, ctx);
     assistantMsg = ctx.assistantMsg;
-    buf = ctx.buf;
     _lastEventId = ctx.lastEventId;
     return _done;
   }
@@ -2147,7 +2098,7 @@ async function _trySSE(convId, taskId, stream, assistantMsg) {
       stream.controller = new AbortController();
       return false;
     }
-    twStop(convId);
+    if (typeof twStop === 'function') twStop(convId);
     finishStream(convId);
     return true;
   } catch (e) {
@@ -2190,8 +2141,7 @@ if (typeof window !== 'undefined') {
       return {
         convId: o.convId, taskId: o.taskId, stream: o.stream,
         assistantMsg: o.assistantMsg || null,
-        buf: o.buf || null,
-        epCriticPhase: false, epCriticMsg: null, epCriticBuf: null,
+        epCriticPhase: false, epCriticMsg: null,
         roundThinkingLen: 0, lastEventId: null, pendingEventId: null,
         pinnedMsgId: (o.assistantMsg && o.assistantMsg._msgId) || null,
       };

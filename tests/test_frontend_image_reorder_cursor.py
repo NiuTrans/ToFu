@@ -217,14 +217,15 @@ def test_NC_offchip_accept_is_load_bearing():
     untouched."""
     with open(_UPLOAD_SRC, encoding='utf-8') as f:
         original = f.read()
+    # Anchor on the accept pair ALONE (the two lines that make a reorder drag
+    # droppable anywhere): lines AROUND them (e.g. an inserted
+    # _imgDragGhostMove / hit lookup) are layout noise, not the invariant.
     anchor = (
         "  e.preventDefault();  // allow drop \u2192 keeps the move cursor across the whole drag\n"
-        "  if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';\n"
-        "  const hit = _imgChipFrom(e.target);\n")
+        "  if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';\n")
     assert anchor in original, 'accept-everywhere anchor not found (source changed?)'
     reverted = (
-        "  const hit = _imgChipFrom(e.target);\n"
-        "  if (!hit) return;\n"
+        "  { const _hit = _imgChipFrom(e.target); if (!_hit) return; }  // NC: off-chip bail restored\n"
         "  e.preventDefault();  // allow drop\n"
         "  if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';\n")
     patched = original.replace(anchor, reverted, 1)
@@ -258,20 +259,17 @@ def test_NC_offchip_drop_swallow_is_load_bearing():
     assertion flips. Shipped file untouched."""
     with open(_UPLOAD_SRC, encoding='utf-8') as f:
         original = f.read()
+    # Anchor on the swallow pair ALONE (preventDefault + stopPropagation):
+    # what follows them (ghost hide, from-idx bookkeeping, hit lookup) is
+    # layout noise that shifts on unrelated insertions.
     anchor = (
         "  e.preventDefault();\n"
-        "  e.stopPropagation();\n"
-        "  const from = _imgDragFromIdx;\n"
-        "  _imgDragFromIdx = null;\n"
-        "  const hit = _imgChipFrom(e.target);\n")
+        "  e.stopPropagation();\n")
     assert anchor in original, 'swallow-everywhere drop anchor not found (source changed?)'
     reverted = (
-        "  const hit = _imgChipFrom(e.target);\n"
-        "  if (!hit) return;\n"
+        "  { const _hit = _imgChipFrom(e.target); if (!_hit) return; }  // NC: off-chip bail restored\n"
         "  e.preventDefault();\n"
-        "  e.stopPropagation();\n"
-        "  const from = _imgDragFromIdx;\n"
-        "  _imgDragFromIdx = null;\n")
+        "  e.stopPropagation();\n")
     patched = original.replace(anchor, reverted, 1)
     assert patched != original, 'NC patch was a no-op'
     copy_path = os.path.join(HERE, '_img_reorder_drop_nc_copy.js')

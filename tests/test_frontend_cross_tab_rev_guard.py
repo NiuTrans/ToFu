@@ -36,11 +36,12 @@ import subprocess
 
 import pytest
 
+from tests._conv_bundle_sources import JS_DIR, source_argv, sources_defining
+
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-JS_DIR = os.path.join(ROOT, 'static', 'js')
 
 
 def _node_available() -> bool:
@@ -92,7 +93,12 @@ global.config = {};
 global.activeConvId = null;
 global.renderChat = function() {};
 
-eval(fs.readFileSync(process.argv[2], 'utf8'));  // core/conversations.js
+/* Eval every shipped file the bundle needs, in production order (see
+ * tests/_conv_bundle_sources.py). Hard-coding core/conversations.js broke when
+ * the persist/rebase cluster was extracted to core/conv_persist_helpers.js. */
+for (let i = 2; i < process.argv.length; i++) {
+  eval(fs.readFileSync(process.argv[i], 'utf8'));
+}
 
 const out = [];
 function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
@@ -142,12 +148,14 @@ _FIXED_MARKER = 'const rebased = _rebaseUnackedTail(serverMsgs, conv.messages);'
 _NEUTER_REPLACEMENT = 'const rebased = conv.messages;  // NEUTER: blind re-PUT'
 
 
-def _run_harness(js_source_path: str):
+def _run_harness(js_source_paths):
+    if isinstance(js_source_paths, str):
+        js_source_paths = [js_source_paths]
     harness = os.path.join(HERE, '_xtab_rev_harness.js')
     with open(harness, 'w') as f:
         f.write(_HARNESS)
     try:
-        return subprocess.run(['node', harness, js_source_path],
+        return subprocess.run(['node', harness, *js_source_paths],
                               capture_output=True, text=True, timeout=60)
     finally:
         try:
@@ -158,8 +166,8 @@ def _run_harness(js_source_path: str):
 
 @pytest.mark.skipif(not _node_available(), reason='node not installed')
 def test_cross_tab_stale_write_does_not_clobber():
-    conv_js = os.path.join(JS_DIR, 'core', 'conversations.js')
-    proc = _run_harness(conv_js)
+    proc = _run_harness(source_argv(
+        'syncConversationToServer', '_rebaseUnackedTail', '_clearPendingSyncMarkers'))
     output = proc.stdout.strip()
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
     fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
@@ -173,14 +181,17 @@ def test_cross_tab_neuter_restores_clobber(tmp_path):
     OVERWRITES the server with its own message set, ERASING Tab A's message →
     the not-clobbered assertion fails. Proves the rebase prevents the cross-tab
     clobber."""
-    conv_js = os.path.join(JS_DIR, 'core', 'conversations.js')
-    with open(conv_js, encoding='utf-8') as f:
+    sync_file = sources_defining('syncConversationToServer')[0]
+    with open(sync_file, encoding='utf-8') as f:
         src = f.read()
     assert _FIXED_MARKER in src, 'fixed rebase marker not found — update the neuter target'
     nfile = tmp_path / 'conversations_neutered.js'
     nfile.write_text(src.replace(_FIXED_MARKER, _NEUTER_REPLACEMENT, 1), encoding='utf-8')
 
-    proc = _run_harness(str(nfile))
+    rel = os.path.relpath(sync_file, JS_DIR).replace(os.sep, '/')
+    proc = _run_harness(source_argv(
+        'syncConversationToServer', '_rebaseUnackedTail', '_clearPendingSyncMarkers',
+        override={rel: str(nfile)}))
     output = proc.stdout.strip()
     assert proc.returncode == 0, f'node failed on neutered copy: {proc.stderr}\n{output}'
     lines = {ln.split(' ', 1)[1]: ln.startswith('PASS')

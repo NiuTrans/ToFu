@@ -34,10 +34,13 @@ Persistence
       ]
     }
 
-Cookies are stored in Playwright's cookie shape. Operators usually supply
-them either as a raw ``Cookie:`` header copied from devtools (parsed by
-:func:`parse_cookie_header`) or captured by the interactive-login flow,
-which hands us a ``storage_state`` (normalised by :func:`cookies_from_storage_state`).
+Cookies are stored in Playwright's cookie shape. Operators normally supply them
+as a ``{cookie_name: value}`` mapping — the Settings UI renders one labelled
+input per cookie declared in :data:`DEFAULT_SOURCES` (see
+:func:`cookies_from_fields`), so there is no delimiter syntax for a user to get
+wrong. Two other paths remain: a raw ``Cookie:`` header copied from devtools
+(:func:`parse_cookie_header`) and the interactive-login flow's
+``storage_state`` (:func:`cookies_from_storage_state`).
 
 Security
 --------
@@ -55,11 +58,15 @@ Public API
   set_enabled(domain, enabled)           → bool
   delete_source(domain)                  → bool
   parse_cookie_header(raw, domain)       → list[dict]
+  cookies_from_fields(mapping, domain)   → list[dict]
   cookies_from_storage_state(state, …)   → list[dict]
+  source_spec(domain) / source_fields(domain)
+  missing_required_fields(cookies, domain) → list[str]
 """
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 from typing import Optional
@@ -80,7 +87,12 @@ __all__ = [
     'delete_source',
     'parse_cookie_header',
     'cookies_from_storage_state',
+    'cookies_from_fields',
+    'source_spec',
+    'source_fields',
+    'missing_required_fields',
     'normalize_domain',
+    'invalidate_cache',
     'DEFAULT_SOURCES',
 ]
 
@@ -92,6 +104,9 @@ _MAX_COOKIES_PER_SOURCE = 256
 _lock = threading.RLock()
 _cache: list[dict] = []
 _cache_loaded = False
+# mtime of the store when _cache was filled — the cache's validity key. A
+# different mtime means another process wrote the file, so we must re-read.
+_cache_mtime = 0.0
 
 
 # ── Default catalog ─────────────────────────────────────────────────
@@ -100,10 +115,61 @@ _cache_loaded = False
 # router to treat the host as login-walled (skip the doomed anonymous
 # attempt) ONLY once enabled with cookies. A source with no cookies is
 # always treated as not-configured regardless of ``enabled``.
+# ``fields`` declares the individual cookies that carry the session, so the UI
+# can ask for each one in its OWN input instead of making the user hand-assemble
+# a ``name=value; name=value`` string (the delimiters were a reliable source of
+# silent typos). ``importance`` is a single axis:
+#   required     — refuse to store without it; the login genuinely cannot work
+#   recommended  — store, but warn: usually needed for the site's request signing
+#   optional     — nice to have
 DEFAULT_SOURCES: list[dict] = [
     {'domain': 'xiaohongshu.com', 'label': 'Xiaohongshu / RED',
-     'aliases': ['xhslink.com']},
+     'aliases': ['xhslink.com'],
+     'login_url': 'https://www.xiaohongshu.com/explore',
+     'fields': [
+         {'name': 'web_session', 'importance': 'required'},
+         {'name': 'a1', 'importance': 'recommended'},
+         {'name': 'webId', 'importance': 'optional'},
+     ]},
+    # SSO-walled internal site. Anonymous rendering reaches the SSO login page
+    # (ssosv.internal.example.com), never the content, so only a replayed logged-in
+    # session can read it. NOTE: reaching this host at all ALSO requires it to
+    # be listed in tofu-search's ``allow_private_hosts`` — it resolves to an
+    # RFC-1918 address behind a rotating internal load balancer, so the SSRF
+    # guard blocks it by default. The two gates are deliberately separate:
+    # connecting an account must never silently grant an SSRF exemption.
+    {'domain': 'example-corp.com', 'label': 'YourProvider internal (SSO)',
+     'aliases': [],
+     'login_url': 'https://api.openai.com/ml/modelPlaza/modelInfo',
+     # Cookie names below are from a MEASURED anonymous run of the SSO chain
+     # (Playwright, networkidle) — NOT guessed. What that run proves and what
+     # it cannot:
+     #   * PROVEN, pre-login: the chain sets only telemetry / device-fingerprint
+     #     / PKCE-context cookies — `_lxsdk*`, `WEBDFPID`, `logan_session_token`,
+     #     `webDeviceUuid`, `ctxId` / `ctxId-<client_id>` (httpOnly, per-login
+     #     attempt), and `com.example-corp.speechfe.sft_strategy` on the app host.
+     #     NONE of these is a session credential.
+     #   * NOT PROVEN: the post-login session cookie's name. It is only issued
+     #     AFTER a successful QR scan, so an anonymous probe cannot see it.
+     #     `ssoid` is the long-standing assumption in this repo (it is also
+     #     tests/_qr_login_capture.py's wait-for anchor) but remains UNVERIFIED
+     #     against a real logged-in session.
+     # Hence NOTHING here is marked `required`: a required field that turns out
+     # to carry the wrong name would REJECT a perfectly good credential paste
+     # at the store boundary, which is a worse failure than storing a set we
+     # then discover is incomplete. Promote to `required` once a real login has
+     # confirmed the name.
+     # NOTE: reaching this host at all ALSO requires it in tofu-search's
+     # ``allow_private_hosts`` — the two gates stay separate on purpose.
+     'fields': [
+         {'name': 'ssoid', 'importance': 'recommended'},
+         {'name': 'ssoid_example-corp', 'importance': 'optional'},
+         {'name': 'ssousername', 'importance': 'optional'},
+         {'name': 'ssosession', 'importance': 'optional'},
+     ]},
 ]
+
+_VALID_IMPORTANCE = ('required', 'recommended', 'optional')
 
 
 def normalize_domain(value: str) -> str:
@@ -124,6 +190,87 @@ def normalize_domain(value: str) -> str:
     return raw
 
 
+def source_spec(domain: str) -> dict:
+    """Return the static catalog spec for ``domain`` (``{}`` when unknown).
+
+    The spec is the SINGLE source of truth for a site's login URL and the
+    individual cookies its session is made of. Both the REST listing and the
+    Settings UI read it from here — neither keeps its own copy.
+    """
+    dom = normalize_domain(domain)
+    for d in DEFAULT_SOURCES:
+        if d['domain'] == dom:
+            return d
+    return {}
+
+
+def source_fields(domain: str) -> list[dict]:
+    """The declared cookie fields for ``domain`` (``[]`` when unknown)."""
+    fields = source_spec(domain).get('fields') or []
+    return [dict(f) for f in fields]
+
+
+def cookies_from_fields(fields: dict, domain: str) -> list[dict]:
+    """Build Playwright cookie dicts from a ``{cookie_name: value}`` mapping.
+
+    This is the structured counterpart to :func:`parse_cookie_header`: the UI
+    collects one input per cookie, so there is no delimiter for the user to get
+    wrong. Blank values are dropped (an untouched optional input is not an
+    instruction to store an empty cookie).
+
+    A value may also be a ``{'value': ..., 'domain': ..., 'path': ...}`` dict to
+    pin that ONE cookie's scope. This matters: the previous version stamped
+    EVERY cookie with ``'.' + domain``, which silently broke host-only cookies.
+    A session cookie issued for ``your-llm-gateway.example.com`` (no leading dot) became
+    ``.internal.example.com``; the browser then treats it as a DIFFERENT cookie, the
+    site's auth probe never receives it, and the fetch lands on the login wall
+    while the store still reports "connected". Host-only is therefore the
+    DEFAULT (narrower scope = the safer guess, and it is what devtools shows for
+    such cookies); a parent-domain cookie must be asked for explicitly by
+    passing a leading-dot ``domain``.
+    """
+    out: list[dict] = []
+    if not isinstance(fields, dict):
+        return out
+    dom = normalize_domain(domain)
+    for name, raw in fields.items():
+        name = str(name or '').strip()
+        if not name:
+            continue
+        # Per-cookie scope override, or a bare value.
+        if isinstance(raw, dict):
+            value = str(raw.get('value') if raw.get('value') is not None else '').strip()
+            c_dom = str(raw.get('domain') or '').strip().lower() or dom
+            c_path = str(raw.get('path') or '').strip() or '/'
+        else:
+            value = str(raw if raw is not None else '').strip()
+            c_dom = dom          # host-only default — NO leading dot
+            c_path = '/'
+        if not value:
+            continue
+        entry = {'name': name, 'value': value, 'domain': c_dom, 'path': c_path}
+        if isinstance(raw, dict) and raw.get('secure') is not None:
+            entry['secure'] = bool(raw.get('secure'))
+        out.append(entry)
+    return out[:_MAX_COOKIES_PER_SOURCE]
+
+
+def missing_required_fields(cookies: list, domain: str) -> list[str]:
+    """Names of ``required`` spec fields absent (or blank) in ``cookies``.
+
+    Without this the store happily accepted a mistyped paste and then reported
+    the source as "connected", so the failure only surfaced much later as an
+    unexplained empty fetch.
+    """
+    present = {
+        str(c.get('name', '')).strip()
+        for c in (cookies or [])
+        if isinstance(c, dict) and str(c.get('value', '')).strip()
+    }
+    return [f['name'] for f in source_fields(domain)
+            if f.get('importance') == 'required' and f['name'] not in present]
+
+
 def _host_matches(host: str, domain: str) -> bool:
     """True if ``host`` equals ``domain`` or is a sub-domain of it."""
     return host == domain or host.endswith('.' + domain)
@@ -132,16 +279,21 @@ def _host_matches(host: str, domain: str) -> bool:
 def parse_cookie_header(raw: str, domain: str) -> list[dict]:
     """Parse a raw ``Cookie:`` header string into Playwright cookie dicts.
 
-    ``"a=1; b=2"`` → ``[{name:'a', value:'1', domain:'.<domain>', path:'/'},
+    ``"a=1; b=2"`` → ``[{name:'a', value:'1', domain:'<domain>', path:'/'},
     …]``. This is the format a user copies from devtools → Network → any
     request → Request Headers → Cookie. Returns ``[]`` on empty/garbage
     input (logged at debug).
+
+    The scope is HOST-ONLY (no leading dot) for the same reason as
+    :func:`cookies_from_fields`: a ``Cookie:`` header carries no scope
+    information at all, so inventing ``.<domain>`` for every entry breaks any
+    host-only session cookie the site issued. A request to the host itself
+    matches a host-only cookie, which is exactly the case this input covers.
     """
     out: list[dict] = []
     if not raw or not raw.strip():
         return out
     dom = normalize_domain(domain)
-    cookie_domain = '.' + dom if dom else ''
     # Strip an accidental leading "Cookie:" prefix the user may have pasted.
     text = raw.strip()
     if text.lower().startswith('cookie:'):
@@ -158,7 +310,7 @@ def parse_cookie_header(raw: str, domain: str) -> list[dict]:
         out.append({
             'name': name,
             'value': value,
-            'domain': cookie_domain or dom,
+            'domain': dom,
             'path': '/',
         })
     if not out:
@@ -192,12 +344,55 @@ def cookies_from_storage_state(state, domain: Optional[str] = None) -> list[dict
     return out[:_MAX_COOKIES_PER_SOURCE]
 
 
+def _store_mtime() -> float:
+    """Store file mtime, or 0.0 when it does not exist / cannot be stat'ed."""
+    try:
+        return os.path.getmtime(_STORE_PATH)
+    except OSError:
+        return 0.0
+
+
+def invalidate_cache() -> None:
+    """Drop the in-memory cache so the next read re-loads from disk.
+
+    The cache is normally self-invalidating (see :func:`_ensure_loaded` — it
+    re-reads whenever the file's mtime moves), so callers rarely need this.
+    It exists for the cases mtime cannot cover:
+
+      * a same-second write on a coarse-mtime filesystem;
+      * a test that swaps ``_STORE_PATH`` and wants a guaranteed clean read;
+      * an operator forcing a re-read after editing the JSON by hand.
+
+    Public on purpose: reaching into ``_cache_loaded`` from outside the module
+    is what this replaces.
+    """
+    global _cache_loaded, _cache_mtime
+    with _lock:
+        _cache_loaded = False
+        _cache_mtime = 0.0
+        _cache.clear()
+    logger.debug('[AuthSrc] cache invalidated — next read re-loads from disk')
+
+
 def _ensure_loaded() -> None:
-    global _cache_loaded
-    if _cache_loaded:
+    """Load the store into the module cache, re-reading when the file changed.
+
+    The cache used to be load-once-per-process, which made a LONG-LIVED reader
+    (a scheduler / optimizer worker, or any non-server entrypoint) keep the
+    snapshot it took at startup forever: credentials connected later through
+    the Settings UI — written by a DIFFERENT process — were never picked up,
+    and the fetch path kept hitting the login wall with no way to recover short
+    of a restart. Keying the cache on the file's mtime makes it self-healing
+    across processes; :func:`invalidate_cache` remains for the cases mtime
+    cannot see.
+    """
+    global _cache_loaded, _cache_mtime
+    mtime = _store_mtime()
+    if _cache_loaded and mtime == _cache_mtime:
         return
     with _lock:
-        if _cache_loaded:
+        mtime = _store_mtime()
+        if _cache_loaded and mtime == _cache_mtime:
             return
         store = read_json(_STORE_PATH, default=None)
         rows: list[dict] = []
@@ -221,12 +416,17 @@ def _ensure_loaded() -> None:
         _cache.clear()
         _cache.extend(rows)
         _cache_loaded = True
+        _cache_mtime = mtime
         logger.info('[AuthSrc] loaded %d source(s) from %s', len(_cache), _STORE_PATH)
 
 
 def _persist() -> None:
+    global _cache_mtime
     payload = {'version': _STORE_VERSION, 'sources': list(_cache)}
     update_json_atomic(_STORE_PATH, lambda _: payload, default=payload)
+    # Our own write must not look like someone else's: record the new mtime so
+    # the next read trusts the cache we just updated in memory.
+    _cache_mtime = _store_mtime()
 
 
 def _redact(row: dict) -> dict:
@@ -248,6 +448,11 @@ def _redact(row: dict) -> dict:
     else:
         out['proxy_hint'] = ''
     out.pop('proxy', None)
+    # Catalog spec (login URL + the individual cookies that make up the
+    # session) travels with the row so the UI never hardcodes a second copy.
+    spec = source_spec(out.get('domain', ''))
+    out['login_url'] = spec.get('login_url', '')
+    out['fields'] = [dict(f) for f in (spec.get('fields') or [])]
     return out
 
 
@@ -303,20 +508,34 @@ def upsert_source(domain: str, *, label: Optional[str] = None,
                   enabled: Optional[bool] = None,
                   cookies: Optional[list] = None,
                   cookie_header: Optional[str] = None,
+                  cookie_fields: Optional[dict] = None,
                   proxy: Optional[str] = None,
                   aliases: Optional[list] = None) -> dict:
     """Create or update a source. Returns the redacted row.
 
-    Only the fields you pass are touched (None = leave unchanged), except
-    that supplying ``cookie_header`` parses + replaces ``cookies``. Raises
-    ``ValueError`` on a bad domain or when the source cap is hit.
+    Only the fields you pass are touched (None = leave unchanged), except that
+    supplying ``cookie_fields`` (a ``{cookie_name: value}`` mapping — the
+    structured path the Settings UI uses) or ``cookie_header`` (a raw devtools
+    ``Cookie:`` string) parses + replaces ``cookies``.
+
+    Raises ``ValueError`` on a bad domain, when the source cap is hit, or when
+    the supplied cookies omit a cookie the catalog marks ``required`` — storing
+    a credential set that cannot possibly authenticate only defers the failure
+    to a later, much less explainable, empty fetch.
     """
     dom = normalize_domain(domain)
     if not dom:
         raise ValueError('domain is required')
 
-    if cookie_header is not None:
+    if cookie_fields is not None:
+        cookies = cookies_from_fields(cookie_fields, dom)
+    elif cookie_header is not None:
         cookies = parse_cookie_header(cookie_header, dom)
+
+    if cookies is not None and cookies:
+        missing = missing_required_fields(cookies, dom)
+        if missing:
+            raise ValueError('missing required cookie(s): ' + ', '.join(missing))
 
     _ensure_loaded()
     with _lock:

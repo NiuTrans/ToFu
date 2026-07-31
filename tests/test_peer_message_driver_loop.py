@@ -78,7 +78,10 @@ class EndpointDriverLoopPeerTest(unittest.TestCase):
         When ``neuter`` is True, drain_peer_messages_into is replaced by a no-op
         BEFORE the loop starts — reproducing the pre-fix (no driver hook) state.
         """
-        import lib.tasks_pkg.endpoint as ep_mod
+        # The driver loop lives in lib/tasks_pkg/endpoint/_run.py — the
+        # package facade only re-exports run_endpoint_task, so patching the
+        # facade's attributes would never bite the loop's module-level names.
+        import lib.tasks_pkg.endpoint._run as ep_mod
         from lib import agent_inbox
 
         task = _build_task('epconv00000001')

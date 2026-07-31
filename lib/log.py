@@ -44,16 +44,19 @@ Log file layout:
 """
 
 import asyncio as _asyncio
+import atexit as _atexit
 import functools
 import json
 import logging
 import os
+import queue as _queue_mod
 import sys
 import time
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from threading import Lock as _Lock
+from threading import Thread as _Thread
 from threading import local as thread_local
 
 # ── Base directory and log paths ──
@@ -191,6 +194,50 @@ def _rid_prefix() -> str:
     return f'[rid:{rid}] ' if rid else ''
 
 
+# ── Inbound (client-supplied) correlation ids ──
+# A client may supply the id so its own logs join the server's. Two channels
+# exist because not every transport can set a header: `fetch` sends
+# `X-Request-ID` (static/js/api.js), while a browser `WebSocket` handshake
+# CANNOT set custom headers and must pass it as the `_rid` query param
+# (static/js/push.js). Both are honored through the ONE resolver below so the
+# id space is identical across transports and the validation cannot drift.
+#
+# Character-set check rather than a regex: this runs in before_request on EVERY
+# request, and a frozenset lookup says the same thing more cheaply.
+_RID_ALPHABET = frozenset(
+    'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-')
+_RID_MAX_LEN = 64
+
+
+def rid_is_safe(value) -> bool:
+    """True when ``value`` is a short, log-safe correlation token.
+
+    Client input reaches a log line and an ``X-Request-ID`` response header, so
+    an unvalidated value could inject newlines (forging log records) or bloat
+    every line for a request.
+    """
+    if not value or not isinstance(value, str) or len(value) > _RID_MAX_LEN:
+        return False
+    return all(ch in _RID_ALPHABET for ch in value)
+
+
+def resolve_inbound_rid(header_val=None, query_val=None) -> str:
+    """Resolve a request's correlation id: the client's, else a fresh one.
+
+    The header is the primary channel; ``query_val`` is the fallback for
+    transports that cannot set one (a browser WebSocket handshake).
+
+    An unsafe id is REJECTED in favour of a server-minted one rather than
+    sanitized: silently rewriting it would hand the client back an id it never
+    sent, so the id it quotes in a bug report would appear nowhere in the logs
+    — strictly worse than obviously ignoring it.
+    """
+    for candidate in (header_val, query_val):
+        if rid_is_safe(candidate):
+            return candidate
+    return uuid.uuid4().hex[:12]
+
+
 # ══════════════════════════════════════════
 #  Core Logger
 # ══════════════════════════════════════════
@@ -236,20 +283,92 @@ def log_exception(logger: logging.Logger, msg: str, *args, **kwargs) -> None:
 
 _audit_lock = _Lock()
 
+# ── Non-blocking audit writes ──
+# audit.log lives on a FUSE/NFS mount next to the other logs. The old
+# implementation opened/appended the file (plus a per-call os.makedirs)
+# synchronously under _audit_lock on the CALLER's thread — including async
+# handlers on the event loop, where a hung mount froze every request. The
+# caller now only serialises the entry (pure CPU) and enqueues the line; a
+# dedicated daemon writer thread performs the actual disk I/O, mirroring the
+# QueueHandler/QueueListener setup in server.py. A FUSE hang blocks only the
+# writer thread. Trade-off (owner-approved): entries still queued at a
+# SIGKILL are lost; a bounded atexit drain preserves them on clean shutdown.
+_audit_queue = None          # queue.Queue[str], created on first async write
+_audit_writer_thread = None
+
+
+def _audit_sync_writes() -> bool:
+    """Keep audit writes synchronous under pytest (mirrors server.py's
+    _LOG_UNDER_PYTEST): tests assert on file state right after the call and
+    would race a background writer."""
+    return bool(os.environ.get('PYTEST_CURRENT_TEST')) or ('pytest' in sys.modules)
+
+
+def _audit_write_line(line: str) -> None:
+    """Append one JSON line to the audit file (the actual disk I/O). Reads
+    the module-level paths at call time so tests can monkeypatch them."""
+    os.makedirs(LOG_DIR, exist_ok=True)
+    with open(AUDIT_LOG_FILE, 'a', encoding='utf-8') as f:
+        f.write(line)
+
+
+def _audit_writer_loop(q: '_queue_mod.Queue') -> None:
+    while True:
+        line = q.get()
+        try:
+            if line is None:  # shutdown sentinel
+                return
+            _audit_write_line(line)
+        except Exception:
+            logging.getLogger('audit').error(
+                'Failed to write audit log: %s', line, exc_info=True)
+        finally:
+            q.task_done()
+
+
+def _ensure_audit_writer():
+    """Lazily start the singleton audit writer thread; returns the queue."""
+    global _audit_queue, _audit_writer_thread
+    if _audit_queue is not None:
+        return _audit_queue
+    with _audit_lock:
+        if _audit_queue is None:
+            q = _queue_mod.Queue()
+            t = _Thread(target=_audit_writer_loop, args=(q,),
+                        name='audit-log-writer', daemon=True)
+            t.start()
+            _audit_queue = q
+            _audit_writer_thread = t
+    return _audit_queue
+
+
+@_atexit.register
+def _drain_audit_queue(timeout: float = 5.0) -> None:
+    """Bounded wait for queued audit lines at interpreter exit. Bounded
+    because the writer may be stuck on a hung mount — a clean exit must not
+    be held hostage by the very stall this design isolates."""
+    q = _audit_queue
+    if q is None:
+        return
+    deadline = time.monotonic() + timeout
+    while q.unfinished_tasks and time.monotonic() < deadline:
+        time.sleep(0.05)
+
+
 def audit_log(event: str, **details) -> None:
     """Write a structured JSON entry to the separate audit log file.
 
     Use this for critical events that need to be easily grep-able and
     machine-parseable: user actions, security events, config changes, etc.
 
-    Thread-safe: uses ``_audit_lock`` to serialise file writes so
-    concurrent requests never interleave partial JSON lines.
+    Non-blocking: serialises the entry and enqueues it; a dedicated writer
+    thread appends to the file, so concurrent requests never interleave
+    partial JSON lines and a slow mount never stalls the caller.
 
     Args:
         event: Event name, e.g. 'user_login', 'model_switch', 'config_change'.
         **details: Arbitrary key-value pairs to include in the audit entry.
     """
-    os.makedirs(LOG_DIR, exist_ok=True)
     rid = req_id()
     entry = {
         'timestamp': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%fZ'),
@@ -258,15 +377,19 @@ def audit_log(event: str, **details) -> None:
     }
     if rid:
         entry['request_id'] = rid
-    try:
-        with _audit_lock:
-            with open(AUDIT_LOG_FILE, 'a', encoding='utf-8') as f:
-                f.write(json.dumps(entry, ensure_ascii=False, default=str) + '\n')
-    except Exception:
-        # Fall back to standard logging if audit file write fails
-        logging.getLogger('audit').error(
-            'Failed to write audit log: %s', json.dumps(entry, default=str), exc_info=True
-        )
+    line = json.dumps(entry, ensure_ascii=False, default=str) + '\n'
+    if _audit_sync_writes():
+        try:
+            with _audit_lock:
+                _audit_write_line(line)
+        except Exception:
+            # Fall back to standard logging if audit file write fails
+            logging.getLogger('audit').error(
+                'Failed to write audit log: %s', json.dumps(entry, default=str),
+                exc_info=True
+            )
+        return
+    _ensure_audit_writer().put(line)
 
 
 # ══════════════════════════════════════════

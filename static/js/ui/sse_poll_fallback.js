@@ -10,7 +10,7 @@
    recovery.
 
    Pure window-scope: takes all live state via parameters and reads only
-   globals (streamBufs, conversations, activeConvId, Api, twUpdate/twStop,
+   globals (conversations, activeConvId, Api, twUpdate/twStop,
    finishStream, saveConversations, renderChat, showToast,
    _checkServerHealth, _startOfflineRecoveryPolling, debugLog, …). No
    closure capture from _trySSE. Concatenated by lib/js_bundler.py AFTER
@@ -56,7 +56,6 @@ if (typeof window !== 'undefined') window._connToast = _connToast;
 
 async function _pollFallback(convId, taskId, stream, assistantMsg) {
   let lastSave = Date.now();
-  const buf = streamBufs.get(convId);
   const _preExistingContent = assistantMsg.content?.length || 0;
   const _preExistingThinking = assistantMsg.thinking?.length || 0;
   /* ★ Reset the endpoint poll-turn counter at the start of every poll
@@ -87,7 +86,7 @@ async function _pollFallback(convId, taskId, stream, assistantMsg) {
   while (true) {
     if (stream.controller.signal.aborted) {
       console.warn(`[_pollFallback] ABORTED at iteration ${_pollIter} — conv=${convId.slice(0,8)}`);
-      twStop(convId);
+      if (typeof twStop === 'function') twStop(convId);
       finishStream(convId);
       return;
     }
@@ -112,12 +111,35 @@ async function _pollFallback(convId, taskId, stream, assistantMsg) {
           continue;
         }
         if (resp && resp.status === 404) {
-          console.error(`[_pollFallback] 404 NOT FOUND — taskId=${taskId.slice(0,8)} conv=${convId.slice(0,8)} ` +
-            `existingContent=${assistantMsg.content?.length||0}chars existingThinking=${assistantMsg.thinking?.length||0}chars — ` +
-            `${(assistantMsg.content || assistantMsg.thinking) ? 'PRESERVING existing accumulated data' : 'NO DATA to preserve, marking error'}`);
-          if (!assistantMsg.content && !assistantMsg.thinking)
-            assistantMsg.error = "Task not found";
-          twStop(convId);
+          /* ★ Task LOST (server restart wiped the in-memory registry before
+           *   the first checkpoint, or TTL cleanup) — a TRANSPORT-level loss,
+           *   not a task error. The conversation DB is the single source of
+           *   truth: re-sync from it (the reloaded tail shows the real state —
+           *   an interrupted turn with its Continue affordance, or already-
+           *   settled content) and NEVER mint a terminal error bubble for a
+           *   task the server simply forgot (the ms43foj3 incident: the 404
+           *   became a red "Task not found" bubble, and that ghost tail then
+           *   drove the next Continue down the pop-and-regenerate path that
+           *   appended a twin answer). */
+          console.warn(`[_pollFallback] 404 task lost — re-syncing conv from server SoT — ` +
+            `taskId=${taskId.slice(0,8)} conv=${convId.slice(0,8)}`);
+          try {
+            const _lostConv = conversations.find(c => c.id === convId);
+            if (_lostConv) {
+              _lostConv.activeTaskId = null;
+              _lostConv._needsLoad = true;   // force the server fetch, bypass the loaded cache
+              if (typeof loadConversationMessages === 'function') {
+                await loadConversationMessages(convId);
+              }
+              saveConversations(convId);
+              if (activeConvId === convId && window.ConvView) {
+                window.ConvView.replaceAll(convId);
+              }
+            }
+          } catch (_rsErr) {
+            console.warn(`[_pollFallback] post-404 SoT re-sync failed (non-fatal): ${_rsErr && _rsErr.message}`);
+          }
+          if (typeof twStop === 'function') twStop(convId);
           finishStream(convId);
           return;
         }
@@ -143,7 +165,7 @@ async function _pollFallback(convId, taskId, stream, assistantMsg) {
           const _isLastAborted = _pollConv._lastAbortedTaskId === taskId;
           if (_aborted || _superseded || _isLastAborted) {
             console.info(`[SyncFix][_pollFallback] discarding stale poll taskId=${taskId.slice(0,8)} activeTaskId=${_pollConv.activeTaskId?.slice(0,8)||'null'} aborted=${!!_aborted} superseded=${!!_superseded} isLastAborted=${!!_isLastAborted}`);
-            twStop(convId);
+            if (typeof twStop === 'function') twStop(convId);
             finishStream(convId);
             return;
           }
@@ -235,7 +257,7 @@ async function _pollFallback(convId, taskId, stream, assistantMsg) {
 
           // ★ Re-render the full conversation when new completed turns arrive
           if (newEpCount !== prevEpCount && activeConvId === convId) {
-            renderChat(conv);
+            window.ConvView.replaceAll(convId);
           }
         }
       } else {
@@ -265,7 +287,6 @@ async function _pollFallback(convId, taskId, stream, assistantMsg) {
               `oldLen=${oldLen} newLen=${newLen} msgTask=${assistantMsg._taskId?.slice(0,8)||'none'} polled=${taskId.slice(0,8)}`);
           } else if (newLen >= oldLen) {
             assistantMsg.content = data.content;
-            if (buf) buf.content = assistantMsg.content;
           } else if (oldLen > 0 && newLen < oldLen * 0.5) {
             console.warn(`[_pollFallback] CONTENT REGRESSION ignored — conv=${convId.slice(0,8)} ` +
               `oldContentLen=${oldLen} newContentLen=${newLen} — keeping longer accumulated content (delta cycle vs poll cycle race).`);
@@ -276,7 +297,6 @@ async function _pollFallback(convId, taskId, stream, assistantMsg) {
           const newThinkLen = data.thinking.length;
           if (newThinkLen >= oldThinkLen) {
             assistantMsg.thinking = data.thinking;
-            if (buf) buf.thinking = assistantMsg.thinking;
           } else if (oldThinkLen > 0 && newThinkLen < oldThinkLen * 0.5) {
             console.warn(`[_pollFallback] THINKING REGRESSION ignored — conv=${convId.slice(0,8)} ` +
               `oldThinkingLen=${oldThinkLen} newThinkingLen=${newThinkLen} — keeping longer accumulated thinking.`);
@@ -365,10 +385,9 @@ async function _pollFallback(convId, taskId, stream, assistantMsg) {
           toolRounds: existingRounds.concat(data.toolRounds),
         });
         assistantMsg.toolRounds = _pproj.toolRounds;
-        if (buf) buf.toolRounds = assistantMsg.toolRounds;
       }
-      if (buf) buf.phase = data.phase || null;
-      twUpdate(convId);
+      if (typeof setStreamPhase === 'function') setStreamPhase(convId, data.phase || null);
+      if (typeof twUpdate === 'function') twUpdate(convId);
       const now = Date.now();
       if (now - lastSave > 3000) {
         saveConversations(convId);
@@ -420,13 +439,13 @@ async function _pollFallback(convId, taskId, stream, assistantMsg) {
             `vu="${(data.autopilotVuMessage.content||'').slice(0,80)}${(data.autopilotVuMessage.content||'').length>80?'…':''}"`
           );
         }
-        twStop(convId);
+        if (typeof twStop === 'function') twStop(convId);
         finishStream(convId);
         return;
       }
     } catch (e) {
       if (e.name === "AbortError") {
-        twStop(convId);
+        if (typeof twStop === 'function') twStop(convId);
         finishStream(convId);
         return;
       }
@@ -454,7 +473,7 @@ async function _pollFallback(convId, taskId, stream, assistantMsg) {
             'Server unreachable — waiting for reconnection… Task is still running on the server.', 8000);
           while (Date.now() - _recoveryStart < _RECOVERY_WAIT_MS) {
             if (stream.controller.signal.aborted) {
-              twStop(convId);
+              if (typeof twStop === 'function') twStop(convId);
               finishStream(convId);
               return;
             }
@@ -477,7 +496,7 @@ async function _pollFallback(convId, taskId, stream, assistantMsg) {
             assistantMsg.finishReason = 'server_offline';
             assistantMsg.error = '⚠️ Server offline — response may be incomplete. This notice will clear automatically when the server comes back.';
             saveConversations(convId);
-            twStop(convId);
+            if (typeof twStop === 'function') twStop(convId);
             finishStream(convId);
             _connToast('offline', '⚠️', 'Server Offline',
               'Backend server did not reconnect within 2 minutes. Your partial response has been saved. It will recover automatically when the server comes back.',

@@ -194,7 +194,7 @@ function showAlert(message, opts) {
  * @param {Object} cfg
  * @param {string} [cfg.title]
  * @param {string} [cfg.message]
- * @param {Array<{value:string,label:string,subtitle?:string,icon?:string,accent?:boolean}>} cfg.options
+ * @param {Array<{value:string,label:string,subtitle?:string,icon?:string,accent?:boolean}>} [cfg.options]
  * @param {string} [cfg.dismissValue]  Value returned on Escape/backdrop.
  * @param {function():boolean} [cfg.liveCheck]  Polled ~4×/s; when it returns
  *        false the dialog AUTO-RESOLVES to `dismissValue` and closes — used so

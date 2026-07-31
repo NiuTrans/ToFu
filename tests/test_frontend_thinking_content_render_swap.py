@@ -121,6 +121,13 @@ const streamBufs = new Map(); const activeStreams = new Map();
 win.conversations = conversations;
 Object.defineProperty(win, 'activeConvId', { get: () => activeConvId, set: v => activeConvId = v });
 win.streamBufs = streamBufs; win.activeStreams = activeStreams;
+// Uniform streamSessions stub (streamBufs retired — phase lives in session)
+win.streamSessions = global.streamSessions = new Map();
+win.getStreamSession = global.getStreamSession = (cid) => { let s = win.streamSessions.get(cid); if (!s) { s = { phase: null }; win.streamSessions.set(cid, s); } return s; };
+win.setStreamPhase = global.setStreamPhase = (cid, p) => { if (!win.streamSessions.has(cid) && !(typeof activeStreams !== 'undefined' && activeStreams.has(cid))) return; win.getStreamSession(cid).phase = p; };
+win.clearStreamSession = global.clearStreamSession = (cid) => { win.streamSessions.delete(cid); };
+// Stub for _drBuf used in sse_pipeline delta handler (streamBufs retired)
+let _drBuf = null;
 win.twUpdate = global.twUpdate = () => {};
 win.twStart = global.twStart = () => {};
 win.twStop = global.twStop = () => {};
@@ -155,7 +162,7 @@ function _mkCtx() {
   conversations.push(conv);
   activeConvId = 'c1';
   const buf = { content: '', thinking: '', toolRounds: [], phase: null };
-  streamBufs.set('c1', buf);
+  // streamBufs retired — assistantMsg is the accumulation target
   const ctx = T.makeCtx({ convId: 'c1', taskId: 't1',
     stream: { controller: { signal: { aborted: false } } }, assistantMsg: am, buf });
   // Fresh DOM body so the zone freeze-cache starts clean per scenario.
@@ -166,9 +173,9 @@ function _mkCtx() {
   if (typeof _streamZoneCache !== 'undefined') { try { _streamZoneCache = { body: null }; } catch (_) {} }
   return { conv, am, buf, ctx };
 }
-function _frame(buf) {
-  return { thinking: buf.thinking || '', content: buf.content || '',
-           toolRounds: buf.toolRounds || [], phase: buf.phase };
+function _frame(am) {
+  return { thinking: am.thinking || '', content: am.content || '',
+           toolRounds: am.toolRounds || [], phase: null };
 }
 function _termContentText() {
   const body = document.getElementById('streaming-body');
@@ -182,9 +189,9 @@ function _termContentText() {
 // are EQUAL. Any divergence = a stale fragment leaked from a prior buffer
 // state (the reported "stale token glued to the answer" symptom). Returns a
 // diagnostic string on violation, '' when clean.
-function _contentFidelityViolation(buf) {
+function _contentFidelityViolation(am) {
   const zoneTxt = _termContentText();
-  const want = norm(buf.content);
+  const want = norm(am.content);
   const got = norm(zoneTxt);
   if (got === want) return '';
   return 'zone=' + JSON.stringify(got.slice(0, 60)) + ' want=' + JSON.stringify(want.slice(0, 60));
@@ -228,12 +235,12 @@ function _chunks(s, n) {
   let worst = '';
   for (const d of _thinkDeltas()) {
     T.dispatchSSEEvent(line({ type: 'delta', thinking: d }), ctx);
-    updateStreamingUI(_frame(buf));
+    updateStreamingUI(_frame(am));
   }
   for (const d of _chunks(TERMINAL_CONTENT, 20)) {
     T.dispatchSSEEvent(line({ type: 'delta', content: d }), ctx);
-    updateStreamingUI(_frame(buf));
-    const v = _contentFidelityViolation(buf);
+    updateStreamingUI(_frame(am));
+    const v = _contentFidelityViolation(am);
     if (v && !worst) worst = v;
   }
   check('S1_data_content_clean', am.content === TERMINAL_CONTENT);
@@ -254,14 +261,14 @@ function _chunks(s, n) {
 
   // Round 0: reasoning + a LONG narration (crosses freeze), then a tool call.
   T.dispatchSSEEvent(line({ type: 'delta', thinking: 'Round zero reasoning about the files.' }), ctx);
-  updateStreamingUI(_frame(buf));
+  updateStreamingUI(_frame(am));
   for (const d of _chunks(R0_NARRATION, 20)) {
     T.dispatchSSEEvent(line({ type: 'delta', content: d }), ctx);
-    updateStreamingUI(_frame(buf));   // freeze fires somewhere in here
+    updateStreamingUI(_frame(am));   // freeze fires somewhere in here
   }
   T.dispatchSSEEvent(line({ type: 'tool_start', roundNum: 1, toolCallId: 'tc0',
     toolName: 'read_files', llmRound: 0 }), ctx);
-  updateStreamingUI(_frame(buf));
+  updateStreamingUI(_frame(am));
 
   // delta_reset closes round 0 → zeroes buf.content. COALESCE: do NOT render
   // this frame (mirrors the rAF that never observed content==="" because the
@@ -273,8 +280,8 @@ function _chunks(s, n) {
   // stale _frozenLen/_frozenHtml from round 0 still on the zone element.
   for (const d of _chunks(TERMINAL_CONTENT, 20)) {
     T.dispatchSSEEvent(line({ type: 'delta', content: d }), ctx);
-    updateStreamingUI(_frame(buf));
-    const v = _contentFidelityViolation(buf);
+    updateStreamingUI(_frame(am));
+    const v = _contentFidelityViolation(am);
     if (v && !worst) worst = v;
   }
 
@@ -300,19 +307,19 @@ function _chunks(s, n) {
   _segFlag = true;
   let worst = '';
   T.dispatchSSEEvent(line({ type: 'delta', thinking: 'Round zero reasoning.' }), ctx);
-  updateStreamingUI(_frame(buf));
+  updateStreamingUI(_frame(am));
   for (const d of _chunks(R0_NARRATION, 20)) {
     T.dispatchSSEEvent(line({ type: 'delta', content: d }), ctx);
-    updateStreamingUI(_frame(buf));
+    updateStreamingUI(_frame(am));
   }
   T.dispatchSSEEvent(line({ type: 'tool_start', roundNum: 1, toolCallId: 'tc0',
     toolName: 'read_files', llmRound: 0 }), ctx);
-  updateStreamingUI(_frame(buf));
+  updateStreamingUI(_frame(am));
   T.dispatchSSEEvent(line({ type: 'delta_reset', roundNum: 0 }), ctx);
   for (const d of _chunks(TERMINAL_CONTENT, 20)) {
     T.dispatchSSEEvent(line({ type: 'delta', content: d }), ctx);
-    updateStreamingUI(_frame(buf));
-    const v = _contentFidelityViolation(buf);
+    updateStreamingUI(_frame(am));
+    const v = _contentFidelityViolation(am);
     if (v && !worst) worst = v;
   }
   check('S3_segtl_content_zone_no_stale_fragment', worst === '', worst);
@@ -357,15 +364,15 @@ function _translatedPrimaryText() {
   let worstThink = '';
   let worstXlate = '';
   function _renderAll(partial, byRound) {
-    updateStreamingUI(_frame(buf));
+    updateStreamingUI(_frame(am));
     if (partial) _renderStreamingTranslatePreview('c1', 'mid-worker', partial, byRound || null);
     // PER-FRAME thinking-zone fidelity: the visible thinking text must EXACTLY
     // equal the current buf.thinking — no duplication, no stale round-0
     // fragment, no content 'I' prefix. Exact equality (not indexOf) so a
     // duplicated/appended render is caught, not just a missing one.
     const tv = _thinkZoneText();
-    if (tv != null && norm(tv) !== norm(buf.thinking) && !worstThink) {
-      worstThink = 'zone=' + JSON.stringify(norm(tv).slice(0, 50)) + ' want=' + JSON.stringify(norm(buf.thinking).slice(0, 50));
+    if (tv != null && norm(tv) !== norm(am.thinking) && !worstThink) {
+      worstThink = 'zone=' + JSON.stringify(norm(tv).slice(0, 50)) + ' want=' + JSON.stringify(norm(am.thinking).slice(0, 50));
     }
   }
 

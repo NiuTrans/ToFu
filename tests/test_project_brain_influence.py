@@ -81,9 +81,18 @@ def test_influence_split_from_conv_a(flask_app):
     assert [(t['title'], t['owner']) for t in inf['board']['avoid']] == \
         [('Rewrite docs', 'convB')]
     assert [t['title'] for t in inf['board']['open']] == ['Add tests']
-    # Charter binding surfaced + injected flag mirrors render_charter_block.
+    # Charter binding surfaced + injected flag mirrors the injection block.
     assert inf['charter']['injected'] is True
-    assert inf['charter']['decisions'] == ['Use PostgreSQL']
+    # Decisions are STRUCTURED (owner 2026-07-28: the frontend is a pure
+    # renderer, never re-deriving kind/summary from raw text).
+    assert [d['text'] for d in inf['charter']['decisions']] == ['Use PostgreSQL']
+    entry = inf['charter']['decisions'][0]
+    assert set(entry) >= {'text', 'summary', 'kind', 'ts', 'by_conv'}
+    assert entry['by_conv'] == 'convA'
+    # Health signals are computed backend-side for the panel's health strip.
+    assert inf['charter']['contentSet'] is True
+    assert inf['charter']['decisionCount'] == 1
+    assert inf['charter']['injectedCount'] == 1
     assert inf['board']['injected'] is True
     # Pending proposal from convB → not mine.
     assert len(inf['pendingDecisions']) == 1

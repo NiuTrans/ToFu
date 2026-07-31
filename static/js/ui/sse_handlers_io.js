@@ -6,8 +6,8 @@
 
 function _handleHumanGuidance(ev, c) {
   const convId = c.convId, taskId = c.taskId;
-  const assistantMsg = c.assistantMsg, buf = c.buf;
-  const _epCriticPhase = c.epCriticPhase, _epCriticMsg = c.epCriticMsg, _epCriticBuf = c.epCriticBuf;
+  const assistantMsg = c.assistantMsg;
+  const _epCriticPhase = c.epCriticPhase, _epCriticMsg = c.epCriticMsg;
       /* ── Human Guidance: LLM is asking the user a question ── */
       if (assistantMsg.toolRounds) {
         const r = (ev.toolCallId
@@ -33,9 +33,7 @@ function _handleHumanGuidance(ev, c) {
           r.guidanceOptions = _ev_opts.map(o => ({...(o || {})}));
         }
       }
-      if (buf)
-        buf.toolRounds = assistantMsg.toolRounds || [];
-      twUpdate(convId);
+      if (typeof twUpdate === 'function') twUpdate(convId);
       // ★ Update sidebar to show amber blinking dot for awaiting-human state
       renderConversationList();
       // ★ Auto-translate question & options (EN→CN) when autoTranslate is ON.
@@ -50,8 +48,8 @@ function _handleHumanGuidance(ev, c) {
 
 function _handleToolProgress(ev, c) {
   const convId = c.convId, taskId = c.taskId;
-  const assistantMsg = c.assistantMsg, buf = c.buf;
-  const _epCriticPhase = c.epCriticPhase, _epCriticMsg = c.epCriticMsg, _epCriticBuf = c.epCriticBuf;
+  const assistantMsg = c.assistantMsg;
+  const _epCriticPhase = c.epCriticPhase, _epCriticMsg = c.epCriticMsg;
       /* ── Streaming run_command output: append chunk to the round's
        *    partial output buffer and re-render so the user sees it live. */
       const _trMsg = _epCriticPhase ? _epCriticMsg : assistantMsg;
@@ -65,14 +63,40 @@ function _handleToolProgress(ev, c) {
           // It's replaced wholesale by meta.output once tool_result arrives.
           if (typeof r._partialOutput !== "string") r._partialOutput = "";
           r._partialOutput += (ev.chunk || "");
+          /* ★ Batch per-item progress (pt_67ffc2b7). A batch call
+           * (web_search(queries=[…]) / fetch_url(urls=[…])) is ONE round, so
+           * its terminal tool_result is the round's only transition — a 2s
+           * query beside a 40s one is indistinguishable from three slow ones.
+           * The backend now reports each item as it settles; store the running
+           * tally so the row can render "2/3" with the item that just landed.
+           * Kept STRICTLY separate from _partialOutput above: that is
+           * run_command's terminal pane and is wiped by tool_result, so a
+           * search label routed through it would be printed in a terminal box
+           * and then silently lost. */
+          if (ev.batchTotal != null) {
+            r._batchTotal = ev.batchTotal;
+            if (ev.batchDone != null && (r._batchDone == null || ev.batchDone > r._batchDone)) {
+              r._batchDone = ev.batchDone;   // monotonic: never render backwards
+            }
+            if (ev.batchItem) {
+              if (!Array.isArray(r._batchItems)) r._batchItems = [];
+              r._batchItems.push({ item: ev.batchItem, ok: ev.batchOk !== false });
+            }
+            if (ev.batchOk === false) r._batchFailed = (r._batchFailed || 0) + 1;
+          }
+          /* ★ Live QR: the backend recovers a scannable bitmap from terminal
+           * block art WHILE the command is still running. That timing IS the
+           * feature — a scan-to-login command blocks waiting for the scan, so
+           * a code that only appears at finalize arrives after the window has
+           * closed. Store it on the round; the running-state renderer draws it
+           * above the live output pane. The event carries the full accumulated
+           * list (not just the newest), so a late reconnect gets every code. */
+          if (Array.isArray(ev.qrImages) && ev.qrImages.length) {
+            r.qrImages = ev.qrImages;
+          }
         }
       }
-      if (!_epCriticPhase && buf) {
-        buf.toolRounds = assistantMsg.toolRounds || [];
-      } else if (_epCriticPhase && _epCriticBuf && _epCriticMsg) {
-        _epCriticBuf.toolRounds = _epCriticMsg.toolRounds || [];
-      }
-      twUpdate(convId);
+      if (typeof twUpdate === 'function') twUpdate(convId);
       // Auto-scroll the live terminal box(es) to the bottom so the newest
       // output is always visible — DOM was just rerendered above.
       try {
@@ -92,8 +116,8 @@ function _handleToolProgress(ev, c) {
 
 function _handleStdinRequest(ev, c) {
   const convId = c.convId, taskId = c.taskId;
-  const assistantMsg = c.assistantMsg, buf = c.buf;
-  const _epCriticPhase = c.epCriticPhase, _epCriticMsg = c.epCriticMsg, _epCriticBuf = c.epCriticBuf;
+  const assistantMsg = c.assistantMsg;
+  const _epCriticPhase = c.epCriticPhase, _epCriticMsg = c.epCriticMsg;
       /* ── Stdin Request: subprocess is waiting for user keyboard input ── */
       if (assistantMsg.toolRounds) {
         const r = (ev.toolCallId
@@ -109,15 +133,13 @@ function _handleStdinRequest(ev, c) {
           r.stdinCommand = ev.command;
         }
       }
-      if (buf)
-        buf.toolRounds = assistantMsg.toolRounds || [];
-      twUpdate(convId);
+      if (typeof twUpdate === 'function') twUpdate(convId);
 }
 
 function _handleStdinResolved(ev, c) {
   const convId = c.convId, taskId = c.taskId;
-  const assistantMsg = c.assistantMsg, buf = c.buf;
-  const _epCriticPhase = c.epCriticPhase, _epCriticMsg = c.epCriticMsg, _epCriticBuf = c.epCriticBuf;
+  const assistantMsg = c.assistantMsg;
+  const _epCriticPhase = c.epCriticPhase, _epCriticMsg = c.epCriticMsg;
       /* ── Stdin Resolved: user input was sent, command continues ── */
       if (assistantMsg.toolRounds) {
         const r = (ev.toolCallId
@@ -132,15 +154,13 @@ function _handleStdinResolved(ev, c) {
           r.stdinPrompt = null;
         }
       }
-      if (buf)
-        buf.toolRounds = assistantMsg.toolRounds || [];
-      twUpdate(convId);
+      if (typeof twUpdate === 'function') twUpdate(convId);
 }
 
 function _handleWriteApproval(ev, c) {
   const convId = c.convId, taskId = c.taskId;
-  const assistantMsg = c.assistantMsg, buf = c.buf;
-  const _epCriticPhase = c.epCriticPhase, _epCriticMsg = c.epCriticMsg, _epCriticBuf = c.epCriticBuf;
+  const assistantMsg = c.assistantMsg;
+  const _epCriticPhase = c.epCriticPhase, _epCriticMsg = c.epCriticMsg;
       if (_epCriticPhase) { /* skip approval during critic phase */ }
       else if (assistantMsg.toolRounds) {
         const r = (ev.toolCallId
@@ -155,7 +175,5 @@ function _handleWriteApproval(ev, c) {
           r.approvalMeta = ev.meta;
         }
       }
-      if (!_epCriticPhase && buf)
-        buf.toolRounds = assistantMsg.toolRounds || [];
-      twUpdate(convId);
+      if (typeof twUpdate === 'function') twUpdate(convId);
 }
