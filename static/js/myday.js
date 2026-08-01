@@ -1144,10 +1144,27 @@ function _mydayLaunchConvFromAction(item) {
   // 1) Close the daily report modal
   closeDailyReport();
 
-  // 2) Create a new empty conversation
+  // 2) Pre-fill the composer BEFORE newChat() — ORDER IS LOAD-BEARING.
+  //    newChat() measures hasInput from the composer and, finding it EMPTY,
+  //    clears the project attachment + tool config (_clearProjectStateLocal /
+  //    _resetToolsToDefaults in main_conv_lifecycle.js). Pre-filling first
+  //    engages newChat's own "pending input keeps the project armed" rule, so
+  //    a quick action fired while a project is active (qa.projectEnabled)
+  //    stays IN that project. The old order prefilled AFTER newChat, so the
+  //    project was always cleared — and the comment that used to sit here
+  //    ("project is already active — keep it") described the OPPOSITE of what
+  //    newChat had just done. (Same fix as the project-brain createConv
+  //    launcher, 2026-08-01.)
+  const input = document.getElementById('userInput');
+  if (input) {
+    input.value = qa.prefill || item.text || '';
+  }
+
+  // 3) Create the new conversation — with the composer non-empty, newChat
+  //    keeps the project attachment and tool config.
   newChat();
 
-  // 3) Apply tool configuration from quick_action
+  // 4) Apply tool configuration from quick_action
   if (qa.searchMode && qa.searchMode !== 'off') {
     if (typeof _applySearchModeUI === 'function') _applySearchModeUI(qa.searchMode);
   } else {
@@ -1160,21 +1177,14 @@ function _mydayLaunchConvFromAction(item) {
   if (typeof _applyBrowserUI === 'function')
     _applyBrowserUI(!!qa.browserEnabled);
 
-  // Project: if the TODO suggests project mode AND we have an active project, enable it
-  if (qa.projectEnabled && typeof projectState !== 'undefined' && projectState.path) {
-    // Project is already active from the previous session — keep it
-  }
-
-  // 4) Pre-fill the user input with the detailed prompt
-  const input = document.getElementById('userInput');
+  // 5) Autosize + focus the composer
   if (input) {
-    input.value = qa.prefill || item.text || '';
     input.style.height = 'auto';
     input.style.height = input.scrollHeight + 'px';
     input.focus();
   }
 
-  // 5) Update send button state
+  // 6) Update send button state
   if (typeof updateSendButton === 'function') updateSendButton();
 }
 

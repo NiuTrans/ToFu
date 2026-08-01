@@ -259,6 +259,12 @@ function _recoverSwarmAgents(round, allRounds) {
         tools,
         _toolCalls: toolCalls,
         _startedAt: startedAt || undefined,
+        /* Stall evidence persisted by the backend (master._build_agent_snapshot)
+           — without carrying it here a reloaded stalled card loses its
+           「静默 Ns」 label and falls back to the bare phase text. */
+        stallSilentSeconds: (a.stallSilentSeconds === 0 || a.stallSilentSeconds)
+          ? a.stallSilentSeconds : undefined,
+        stallNote: a.stallNote || "",
       };
     });
   }
@@ -501,6 +507,7 @@ function _buildSwarmPanelHTML(round, allRounds) {
       let sClass;
       if (a.status === "done" || a.status === "completed") sClass = "sw-a-done";
       else if (a.status === "failed" || a.status === "error") sClass = "sw-a-failed";
+      else if (a.status === "stalled") sClass = "sw-a-stalled";
       else if (a.status === "running" || a.status === "thinking") sClass = "sw-a-running";
       else sClass = "sw-a-pending";
 
@@ -511,6 +518,7 @@ function _buildSwarmPanelHTML(round, allRounds) {
         done: t("swarm.phase.complete"), completed: t("swarm.phase.complete"), failed: t("swarm.phase.failed"), error: t("swarm.phase.error"),
         pending: t("swarm.phase.queued"), running: t("swarm.phase.running"), waiting: t("swarm.phase.queued"), queued: t("swarm.phase.queued"),
         retrying: t("swarm.phase.retrying"),
+        stalled: t("swarm.phase.stalled"),
         unknown: t("swarm.phase.noResult"),
       };
       /* Status wins for a terminated agent: if status is done/failed but the
@@ -521,6 +529,15 @@ function _buildSwarmPanelHTML(round, allRounds) {
       let phaseLabel;
       if (a.status === "done" || a.status === "completed") phaseLabel = t("swarm.phase.complete");
       else if (a.status === "failed" || a.status === "error") phaseLabel = t("swarm.phase.failed");
+      else if (a.status === "stalled") {
+        /* Verdict, not mystery: the backend judged this agent silent (see
+           master._stalled_agents). Show the measured silence so the card
+           answers "why" — the 无结果 bucket is for never-produced only. */
+        const sil = Number(a.stallSilentSeconds);
+        phaseLabel = Number.isFinite(sil) && sil > 0
+          ? t("swarm.phase.stalledSilent", { seconds: Math.round(sil) })
+          : t("swarm.phase.stalled");
+      }
       else phaseLabel = phaseMap[phase] || phase || t("swarm.phase.queued");
 
       /* ── Agent elapsed ── */
@@ -598,29 +615,14 @@ function _buildSwarmPanelHTML(round, allRounds) {
         bodyContent += `<div class="sw-a-timeline">${rowsHTML}</div>`;
       }
 
-      // Preview — live stream with typing cursor.
-      // Rendered as Markdown: a sub-agent's answer IS markdown (headings,
-      // tables, fenced code), and escapeHtml'ing it showed the raw source —
-      // `##`, `|---|`, backticks. Same renderer as every other card body in
-      // the tool panel (see tool_rounds.js `.sw-card-preview md-content`).
-      // `.md-content` supplies block spacing/table/code styling; the
-      // `.sw-a-preview` rules that follow it keep this card's OWN font-size
-      // and colors, so typography is unchanged.
-      // renderMarkdown sanitizes via DOMPurify; guarded for the jsdom/no-marked
-      // path, where it falls back to the escaped rendering this replaced.
-      const _mdPreview = (typeof renderMarkdown === "function")
-        ? renderMarkdown(preview)
-        : escapeHtml(preview);
+      // Preview — live stream with typing cursor
       if (preview && (a.status === "running" || a.status === "thinking")) {
-        bodyContent += `<div class="sw-a-preview sw-a-preview-live md-content">${_mdPreview}<span class="sw-typing-cursor">▍</span></div>`;
+        bodyContent += `<div class="sw-a-preview sw-a-preview-live">${escapeHtml(preview)}<span class="sw-typing-cursor">▍</span></div>`;
       } else if (preview && (a.status === "done" || a.status === "completed")) {
-        bodyContent += `<div class="sw-a-preview md-content">${_mdPreview}</div>`;
+        bodyContent += `<div class="sw-a-preview">${escapeHtml(preview)}</div>`;
       } else if (preview && (a.status === "failed" || a.status === "error")) {
         /* A failed agent's error is exactly the text that needs reading in
-           full — a 200-char cut hid the cause/stack. Kept as escaped
-           monospace text: an error/stack is NOT markdown, and running it
-           through the renderer would eat the `*`/`_`/`#` characters that
-           appear in real paths and messages. */
+           full — a 200-char cut hid the cause/stack. */
         bodyContent += `<div class="sw-a-err">${escapeHtml(preview)}</div>`;
       }
 

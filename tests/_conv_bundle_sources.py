@@ -30,6 +30,30 @@ that must be eval'd, IN BUNDLE ORDER, so bare cross-file references resolve
 exactly as they do at runtime. When a future slice moves the symbol again, these
 guards follow it automatically instead of going red.
 
+PROJECT CONVENTION (owner directive 2026-08-01)
+-----------------------------------------------
+NEW node harnesses that eval shipped JS MUST resolve their eval list through
+this module — never a hand-maintained extras list. Concretely:
+
+  * Driving a conversations.js top-level function
+    (loadConversationMessages / loadConversationsFromServer /
+    syncConversationToServer / hydrateSidebarFromCache / …):
+    use ``conv_family_sources()`` — conversations.js + EVERY core/conv_* leaf
+    + pending_sync.js in bundle order. The wide reference surface makes any
+    hand-picked subset a drift time-bomb (five measured stale-pin instances
+    and one zero-extras standalone harness in a single day, 2026-08-01).
+  * Driving a single subject file (paper/*, swarm, oauth, …):
+    ``sources_defining('<the_fn>')`` or ``eval_prelude('<the_fn>')``.
+  * NEUTER copies: pass them via the ``override`` map so the mutated file
+    REPLACES its shipped counterpart in the eval list (a mutated file that
+    merely JOINS the list loses to the real definition).
+
+Migrated inventory (all GREEN, NC bites intact): reconcile,
+boot_early_active_paint, conv_verify_failure_reheal,
+sidebar_shell_count_keys, windowed_no_truncate, pending_sync_durability,
+pending_sync_shell_flush, send_failure_persists_message,
+list_merge_rev_authority.
+
 Deliberately reads the bundler's own list rather than globbing the directory:
 globbing would silently pick up a file the bundle does NOT ship (a leftover, a
 vendored copy) and eval it, which is how a guard ends up testing code that never
@@ -167,6 +191,38 @@ def sources_defining(*symbols, subtree=''):
     order = bundle_files()
     uniq = sorted(set(out), key=order.index)
     return [os.path.join(JS_DIR, f) for f in uniq]
+
+
+def conv_family_sources(*, override=None):
+    """``core/conversations.js`` + EVERY shipped conv-family leaf, in bundle
+    order — the correct eval scope for a harness that drives a top-level
+    conversations.js function.
+
+    Why a family closure, not symbol pins (2026-08-01, measured): driving
+    ``loadConversationMessages`` / ``loadConversationsFromServer`` touches a
+    WIDE reference surface, and every hand-picked pin list went stale at the
+    next decomposition slice — five measured instances in one day
+    (_serverConvCount → conv_merge_shells, _setCacheVerifying →
+    conv_verify_visibility, _scheduleConvVerifyRetry → conv_verify_retry,
+    …), each discovered one whack-a-mole layer at a time. The decomposition
+    invariant is that every ``core/conv_*`` leaf shares window scope with
+    conversations.js by construction, so the family closure is the only
+    list that cannot drift: a future conv_* leaf joins automatically via
+    the bundle manifest. ``core/pending_sync.js`` is included explicitly —
+    it belongs to the persist family despite the different prefix.
+
+    *override* maps a bundle-relative path to a substitute (the NEUTER
+    pattern: eval a mutated copy INSTEAD of the shipped file).
+    """
+    family = [f for f in bundle_files()
+              if f.startswith('core/conv') or f == 'core/pending_sync.js']
+    out = []
+    for rel in family:
+        if override and rel in override:
+            out.append(override[rel])
+        else:
+            out.append(os.path.join(JS_DIR, rel))
+    return out
 
 
 def source_argv(*symbols, override=None, subtree=''):

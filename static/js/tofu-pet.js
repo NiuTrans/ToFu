@@ -129,20 +129,51 @@
   // drawing per mood). 'curious' → the alert perk; nothing else needs remapping.
   var FRAME_ALIAS = { curious: 'alert' };
 
-  // The WALK CYCLE: eight keyposes played in order while state==='walk'.
+  // The WALK CYCLE: eight slots played in order while state==='walk'. Slots
+  // 5..8 REPLAY the four authored drawings (the stride's second half-cycle is
+  // the same art), so there are 8 slots but WALK_DISTINCT=4 real keyposes.
   //
-  // EIGHT, not four, and 75ms, not 150ms — both halves of that matter:
-  //   · The old cycle reused ONE symmetric contact pose for both contact beats,
-  //     so no foot ever led and the gait read as shuffling in place / sliding
-  //     BACKWARDS. A stride only reads as walking if the leading foot
-  //     alternates, which needs a near-leads and a far-leads pose.
-  //   · 4 frames at 150ms is 6.7fps. Below roughly 12fps a cycle stops reading
-  //     as motion and starts reading as a flicker between drawings — the
-  //     "animation isn't smooth" half of the same report. 8 at 75ms is 13.3fps
-  //     over the SAME 600ms stride, so the pet's speed is unchanged.
+  // FOUR authored poses, not one symmetric contact pose reused twice: the old
+  // cycle reused ONE contact pose for both contact beats, so no foot ever led
+  // and the gait read as shuffling in place / sliding BACKWARDS. A stride only
+  // reads as walking if the leading foot alternates, which needs a near-leads
+  // AND a far-leads pose.
   var WALK_FRAMES = ['walk1', 'walk2', 'walk3', 'walk4',
     'walk5', 'walk6', 'walk7', 'walk8'];
-  var WALK_FRAME_MS = 75;    // per keypose → full ~600ms stride cycle at 13.3fps
+  var WALK_DISTINCT = 4;     // authored keyposes per gait cycle (5..8 replay 1..4)
+
+  // ── STRIDE ⋈ SPEED: THE FRAME INTERVAL IS DERIVED, NEVER A LITERAL ──
+  //
+  // STRIDE_PX is a MEASUREMENT OF THE ART: how far one foot travels from
+  // leading to trailing across a half gait cycle, in rendered px of the 30px
+  // sprite (walk1's lead foot vs walk3's trail foot). The guard in
+  // tests/test_frontend_pet_light_direction.py re-measures it from the shipped
+  // PNGs, so this number cannot silently rot away from the drawings.
+  //
+  // WHY DERIVED: a fixed WALK_FRAME_MS made the gait's cadence independent of
+  // how fast the body actually travelled, so the two silently disagreed — the
+  // feet churned 1.62× faster than the pet moved (measured 2026-07-31), the
+  // textbook foot-slip / "hummingbird legs on a sliding body" read. And ONE
+  // constant cannot be right for THREE speeds anyway: walk 41, chase 82, flee
+  // 120 px/s. So the interval is computed from the live speed:
+  //
+  //     per-keypose ms = STRIDE_PX / speed * 1000 / WALK_DISTINCT
+  //
+  // At the walk speed that lands on ~75ms (13.3fps), clearing the ~12fps floor
+  // below which a keypose cycle reads as a flicker between drawings rather than
+  // motion; a chase/flee correctly plays faster because the pet IS moving
+  // faster. Being a computation rather than two hand-tuned numbers, a future
+  // speed change cannot reintroduce slip.
+  var STRIDE_PX = 12.28;
+  var WALK_FPS_FLOOR = 12;   // below this a keypose cycle reads as flicker
+  // Fastest cadence worth painting: ~2 display frames at 60Hz. A flee at
+  // 120px/s would otherwise ask for ~26ms, finer than the rAF tick can honour,
+  // which just drops keyposes unevenly.
+  var MIN_FRAME_MS = 33;
+  function _gaitMs(speed) {
+    if (!(speed > 0)) return 1000 / WALK_FPS_FLOOR;
+    return Math.max(MIN_FRAME_MS, STRIDE_PX / speed * 1000 / WALK_DISTINCT);
+  }
   var _walkIdx = 0, _walkAccum = 0;
 
   // GROOM cycle (a settling wobble) and STRETCH cycle (a full-body stretch) —
@@ -161,6 +192,7 @@
   var GAZE_TURN_MS = 1300;
   var _gazeAccum = 0;
   var _turnTimer = null;   // clears the transient 'pivot' pop after a facing flip
+  var _landTimer = null;   // clears the landing squash after a drop
 
   // Transient expressions auto-return to the resolved state after their beat.
   var TRANSIENT = { happy: 1, celebrating: 1, surprised: 1, curious: 1, alert: 1 };
@@ -350,6 +382,20 @@
   function _setWalkFrame(i) {
     _walkIdx = ((i % WALK_FRAMES.length) + WALK_FRAMES.length) % WALK_FRAMES.length;
     _setFrameArt(WALK_FRAMES[_walkIdx]);
+  }
+  // THE ONE gait advancer, shared by walk / chase / flee. It takes the LIVE
+  // speed of the leg that is running, so the cadence is always tied to actual
+  // travel: the same drawings play faster during a chase and faster still
+  // during a flee, because the body really is covering ground faster. Three
+  // copies of this loop against one hard-coded interval is how the feet came to
+  // churn 1.62x faster than the pet moved (see _gaitMs).
+  function _advanceGait(dt, speed) {
+    var per = _gaitMs(speed);
+    _walkAccum += dt * 1000;
+    if (_walkAccum < per) return;
+    var adv = Math.floor(_walkAccum / per);
+    _walkAccum -= adv * per;
+    _setWalkFrame(_walkIdx + adv);
   }
   // Advance a generic pose cycle (groom / scratch), used by the sit/scratch
   // states. Mirrors _setWalkFrame but over the active pose frame list.
@@ -543,11 +589,20 @@
   // ══════════════════════════════════════════════════════════════════════
   var W = {
     x: 30,            // px from bar's left content edge
+    // HEIGHT above the baseline, in px (positive = lifted off the ground).
+    // The pet is normally planted (y === 0); only a DRAG lifts it. This lives
+    // on the POSITION layer next to x because .tofu-pet owns exactly ONE
+    // transform — see _place(), which writes translateX and translateY in a
+    // SINGLE declaration. Writing Y from anywhere else (or as a second
+    // transform on the same element) would silently replace the X the wander
+    // loop just wrote: `transform` is one property, not two channels.
+    y: 0,
+    vy: 0,            // px/s vertical velocity, only while state==='fall'
     dir: 1,           // +1 right, -1 left
     state: 'idle',
     until: 0,         // ms timestamp when the current state ends
     min: 8, max: 200, // safe-track bounds (recomputed from layout)
-    speed: 34,        // px/s while walking
+    speed: 41,        // px/s while walking — _gaitMs(41) lands at ~75ms/13.3fps
     chaseSpeed: 82,   // px/s while chasing the critter (a quick dash)
     fleeSpeed: 120,   // px/s while fleeing a poke (a quick startled scramble)
     fleeDir: 1,
@@ -587,6 +642,18 @@
     W.max = Math.max(W.min + 1, rightPx - petW);
     if (W.x < W.min) W.x = W.min;
     if (W.x > W.max) W.x = W.max;
+    // CEILING: how far the pet may be lifted before its top leaves the bar.
+    // The sprite already sits `bottom` px off the floor and is petH tall, so the
+    // headroom left inside the band is (barHeight - bottom - petH). Derived here
+    // rather than hard-coded so re-padding the bar or resizing the sprite cannot
+    // silently re-open an overhang. Floored at LIFT_MIN_CEIL_PX: on a bar too
+    // short to give any headroom, a lift that rounds to zero would take the
+    // owner's reported defect straight back, so a small overhang is the lesser
+    // evil there — but on the real bar the derived value is what applies.
+    var petH = (_el.offsetHeight || 30);
+    var bottomPx = 1;                       // .tofu-pet { bottom:1px }
+    LIFT_MAX_PX = Math.max(LIFT_MIN_CEIL_PX,
+                           Math.round(br.height - bottomPx - petH));
   }
 
   // pivot defaults to TRUE: a LOCOMOTION turn (wall bounce / chase / flee) is a
@@ -622,7 +689,19 @@
     }
   }
   function _place() {
-    if (_el) _el.style.transform = 'translateX(' + W.x.toFixed(1) + 'px)';
+    // ONE transform declaration carrying BOTH axes. translateY is negative
+    // because W.y is "height above the ground" and screen Y grows downward.
+    if (_el) {
+      _el.style.transform = 'translateX(' + W.x.toFixed(1) + 'px) translateY(' +
+        (-W.y).toFixed(1) + 'px)';
+      // The CAST SHADOW is what sells the lift: a raised object's shadow
+      // shrinks, softens and separates. Driven by HEIGHT rather than by a
+      // static [data-state="drag"] rule so it tracks continuously while the
+      // pointer moves AND during the release fall (which is NOT the drag
+      // state) — the old two-state version popped back to full size mid-air.
+      var lift = Math.max(0, Math.min(1, W.y / LIFT_MAX_PX));
+      _el.style.setProperty('--pet-lift', lift.toFixed(3));
+    }
     _positionBubble();   // the bubble rides above the pet, wherever it moved to
     // Subtle ground parallax: the scene drifts a fraction of the pet's travel
     // (opposite direction) for depth. The ground ::after reads --bar-scene-x.
@@ -806,6 +885,36 @@
     _setExpr(_resolve());
   }
 
+  // ── DROP: the third beat of "lift → carry → land" ──────────────────────
+  // Releasing a held pet must not teleport it to the floor: an object that
+  // vanishes from height to ground never reads as having been HELD — the same
+  // single-frame-jump problem as picking it up with no rise. So the drop is
+  // integrated under gravity in _step and ends with a landing squash, which is
+  // what makes the weight legible.
+  var FALL_GRAVITY = 520;   // px/s² — a short, snappy drop at this scale
+  function _enterFall() {
+    if (W.y <= 0.5) { W.y = 0; W.last = 0; _place(); _enter('idle'); return; }
+    W.vy = 0;
+    W.last = 0;              // don't integrate the gap since the last rAF tick
+    _enter('fall');
+  }
+  function _landed() {
+    W.y = 0; W.vy = 0;
+    _place();
+    // The squash rides the FRAME layer (data-landing) so it composites with the
+    // position layer's transform instead of overwriting it.
+    if (_el && !W.reduced) {
+      _el.setAttribute('data-landing', '1');
+      if (_landTimer) clearTimeout(_landTimer);
+      _landTimer = setTimeout(function () {
+        _landTimer = null;
+        if (_el) _el.removeAttribute('data-landing');
+      }, 240);
+    }
+    W.last = 0;
+    _enter('idle');
+  }
+
   // Chase step: dash toward the critter's live x; on catch, pounce + spook it.
   function _chaseStep(dt) {
     var cx = _critterX();
@@ -817,12 +926,7 @@
     var d = target - W.x;
     _face(d >= 0 ? 1 : -1);
     W.x += (d >= 0 ? 1 : -1) * Math.min(Math.abs(d), W.chaseSpeed * dt);
-    _walkAccum += dt * 1000;
-    if (_walkAccum >= WALK_FRAME_MS) {
-      var adv = Math.floor(_walkAccum / WALK_FRAME_MS);
-      _walkAccum -= adv * WALK_FRAME_MS;
-      _setWalkFrame(_walkIdx + adv);
-    }
+    _advanceGait(dt, W.chaseSpeed);
     _place();
     if (Math.abs(target - W.x) <= 5) {   // caught it → pounce + spook
       try { if (window.TofuScene && window.TofuScene.spook) window.TofuScene.spook(); } catch (e) { /* harmless */ }
@@ -842,26 +946,21 @@
 
     if (W.state === 'walk') {
       W.x += W.dir * W.speed * dt;
-      // Advance the walk-cycle frame in step with travel (the actual animation).
-      _walkAccum += dt * 1000;
-      if (_walkAccum >= WALK_FRAME_MS) {
-        var adv = Math.floor(_walkAccum / WALK_FRAME_MS);
-        _walkAccum -= adv * WALK_FRAME_MS;
-        _setWalkFrame(_walkIdx + adv);
-      }
+      _advanceGait(dt, W.speed);
       if (W.x <= W.min) { W.x = W.min; _enter('turn'); _face(1); }
       else if (W.x >= W.max) { W.x = W.max; _enter('turn'); _face(-1); }
       _place();
     } else if (W.state === 'chase') {
       _chaseStep(dt);
+    } else if (W.state === 'fall') {
+      // integrate the drop; land exactly on the ground plane
+      W.vy += FALL_GRAVITY * dt;
+      W.y -= W.vy * dt;
+      if (W.y <= 0) { _landed(); }
+      else { _place(); }
     } else if (W.state === 'flee') {
       W.x += W.fleeDir * W.fleeSpeed * dt;
-      _walkAccum += dt * 1000;
-      if (_walkAccum >= WALK_FRAME_MS) {
-        var fadv = Math.floor(_walkAccum / WALK_FRAME_MS);
-        _walkAccum -= fadv * WALK_FRAME_MS;
-        _setWalkFrame(_walkIdx + fadv);
-      }
+      _advanceGait(dt, W.fleeSpeed);
       if (W.x <= W.min) { W.x = W.min; W.fleeDir = 1; _face(1); }
       else if (W.x >= W.max) { W.x = W.max; W.fleeDir = -1; _face(-1); }
       _place();
@@ -884,7 +983,13 @@
         _face(-W.dir, false);   // glance only — instant mirror, no plant-and-hop
       }
     }
-    if (W.state !== 'turn' && W.state !== 'chase' && _now() >= W.until && W.state !== 'react') {
+    // 'fall' is excluded like 'turn'/'chase': it ends on a GEOMETRIC condition
+    // (touching the ground), not on a timer. _enter('fall') sets no `until`, so
+    // without this exclusion the stale `until` left by the state before the drag
+    // is already in the past and _pickNext() fires on the very first airborne
+    // frame — stranding the pet mid-air with y > 0 and no leg to bring it down.
+    if (W.state !== 'turn' && W.state !== 'chase' && W.state !== 'fall' &&
+        _now() >= W.until && W.state !== 'react') {
       _pickNext();
     } else if (W.state === 'react' && _now() >= W.until) {
       _pickNext();
@@ -929,8 +1034,32 @@
   //  (preserves the day-report bubble). Uses Pointer Events (mouse + touch) with
   //  capture so a fast drag that outruns the sprite still tracks. Guarded so a
   //  browser without PointerEvent falls back to the plain click handler. ──
-  var D = { active: false, moved: false, id: null, startX: 0, offX: 0, prevState: 'idle' };
+  var D = { active: false, moved: false, id: null, startX: 0, offX: 0,
+            startY: 0, baseY: 0, prevState: 'idle' };
   var DRAG_SLOP = 4;   // px of pointer travel before a press becomes a drag
+  // ── HOW HIGH THE PET CAN BE HELD ────────────────────────────────
+  // DERIVED from the bar's measured height, never a hand-written constant.
+  //
+  // The pet must stay inside the bar's visual band while held. It is a
+  // GRABBABLE element lifted to z-index 5, so an overhang paints over whatever
+  // sits above the bar and can cover a hit target — unlike the speech bubble,
+  // which also pokes above the rim but is `pointer-events:none` and therefore
+  // cannot steal a click. `overflow:visible` on the bar means nothing clips it,
+  // so the clamp is the ONLY thing keeping the pet in its own furniture.
+  //
+  // A literal ceiling was measured wrong exactly once: 34px against a ~46px bar
+  // with the sprite already 31px off the floor put its top ~19px ABOVE the rim.
+  // Deriving it from the live box means re-padding the bar, or resizing the
+  // sprite, cannot silently re-open that overhang.
+  var LIFT_MAX_PX = 15;      // recomputed in _measure(); this is only a floor-safe default
+  var LIFT_MIN_CEIL_PX = 10; // never clamp so hard that the lift stops reading as a lift
+  // The "snatched up" impulse applied the moment a press becomes a drag.
+  // WITHOUT it, height could only come from the pointer's own rise — so a
+  // purely SIDEWAYS drag would still skate the pet along the floor, which is
+  // exactly the reported defect. A grab is a lift even when the hand moves
+  // horizontally, so this is asserted on state entry, not derived from motion.
+  // Kept BELOW the derived ceiling so a grab alone can never clip.
+  var LIFT_GRAB_PX = 9;
 
   function _barLeft() {
     return (_bar && _bar.getBoundingClientRect) ? _bar.getBoundingClientRect().left : 0;
@@ -939,6 +1068,7 @@
     if (e.button != null && e.button !== 0) return;   // left/primary only
     D.active = true; D.moved = false; D.id = e.pointerId;
     D.startX = e.clientX;
+    D.startY = e.clientY;
     // grab offset so the cat doesn't jump its left edge to the cursor
     D.offX = e.clientX - (_barLeft() + W.x);
     D.prevState = W.state;
@@ -954,25 +1084,82 @@
       W.state = 'drag';
       if (_el) _el.setAttribute('data-state', 'drag');
       _setExpr('surprised');   // startled at being picked up
+      // SNATCH: assert an immediate lift so a purely horizontal drag still
+      // reads as carrying rather than sliding. Reduced-motion keeps it planted.
+      D.baseY = W.reduced ? 0 : LIFT_GRAB_PX;
     }
     _measure();
     var x = (e.clientX - _barLeft()) - D.offX;
     W.x = Math.max(W.min, Math.min(W.max, x));
+    // VERTICAL: follow the pointer's own rise/fall on top of the grab lift.
+    // Measured from where the press STARTED (not from the sprite's box), so the
+    // pet stays under the finger instead of jumping to it.
+    if (!W.reduced) {
+      var rise = D.startY - e.clientY;          // up is positive
+      W.y = Math.max(0, Math.min(LIFT_MAX_PX, D.baseY + rise));
+    }
     // face the direction of motion for a bit of life
     if (e.movementX) _face(e.movementX >= 0 ? 1 : -1);
     _place();
     if (e.cancelable) e.preventDefault();
   }
-  function _onPointerUp(e) {
-    if (!D.active) return;
+  // ── THE ONE TERMINATION PATH ──────────────────────────────────
+  // Every way a drag can END routes through here. There are THREE of them and
+  // only one used to do the right thing:
+  //   · pointerup            — the normal release
+  //   · pointercancel        — NOT an error path: the browser fires it on
+  //     touch-scroll, on window blur / alt-tab mid-drag, and whenever the OS
+  //     takes over the gesture. On a touch device it is a ROUTINE way for a
+  //     drag to end. It used to reset only D.active/D.moved, leaving the pet at
+  //     its held height in state 'drag' — and because _step early-returns on
+  //     'drag', nothing could ever bring it down again: frozen in mid-air, with
+  //     the whole wander loop dead, until a page reload.
+  //   · lostpointercapture   — was not wired at all. setPointerCapture is inside
+  //     a try/catch, so when capture is refused or lost, a pointerup landing
+  //     outside the element never reaches us and the drag hangs the same way.
+  //
+  // Measured before this fix — settled state after each terminator:
+  //   pointerup          ty=0    lift=0      idle    OK
+  //   pointercancel      ty=-12  lift=0.353  drag    STUCK
+  //   lostpointercapture ty=-12  lift=0.353  drag    STUCK (no handler)
+  //
+  // Hence ONE function rather than a `W.y = 0` bolted onto the cancel handler:
+  // with three entry points and one implementation, a fourth cannot drift.
+  // `settled` distinguishes a deliberate release (mood credit, day interaction)
+  // from an interruption — the pet still has to LAND either way, because
+  // landing is about not stranding it, not about rewarding the user.
+  function _endDrag(settled) {
+    // NOT load-bearing, and measured as such: with this line removed, both
+    // "pointerup then pointercancel" and "press then cancel twice" behave
+    // identically (mood unchanged, pet lands, state idle), because settled=false
+    // already withholds the tap credit and _enterFall() is a no-op once y is 0.
+    // Kept as a cheap explicit statement that re-entry is expected — browsers do
+    // emit both terminators in some gesture hand-offs — rather than leaving the
+    // next reader to re-derive that it happens to be harmless.
+    if (!D.active && !D.moved) return;
+    var wasDrag = D.moved;
     D.active = false;
-    try { if (_el.releasePointerCapture && D.id != null) _el.releasePointerCapture(D.id); } catch (_e) { /* harmless */ }
-    if (!D.moved) { interact(); return; }             // never crossed slop → a click
-    // dropped after a real drag → settle here, resume autonomous life
-    S.lastInteraction = Date.now();
-    S.mood = Math.min(100, S.mood + 3); _save();
-    if (W.reduced) { _enter('idle'); _setExpr(_resolve()); _place(); }
-    else { W.last = 0; _enter('idle'); }              // idle a beat, then _pickNext resumes
+    D.moved = false;
+    try {
+      if (_el && _el.releasePointerCapture && D.id != null) _el.releasePointerCapture(D.id);
+    } catch (_e) { /* capture already gone — harmless */ }
+    D.id = null;
+    if (!wasDrag) {
+      // never crossed the slop → a plain click, but ONLY when the user actually
+      // let go. An interrupted press is not a tap and must not pop the bubble.
+      if (settled) interact();
+      return;
+    }
+    if (settled) {
+      S.lastInteraction = Date.now();
+      S.mood = Math.min(100, S.mood + 3); _save();
+    }
+    if (W.reduced) { W.y = 0; _place(); _enter('idle'); _setExpr(_resolve()); }
+    else { _enterFall(); }   // fall back to the ground, land, THEN resume
+  }
+
+  function _onPointerUp(e) {
+    _endDrag(true);
   }
   function _wireDrag() {
     if (!_el) return;
@@ -980,7 +1167,11 @@
       _el.addEventListener('pointerdown', _onPointerDown);
       _el.addEventListener('pointermove', _onPointerMove);
       _el.addEventListener('pointerup', _onPointerUp);
-      _el.addEventListener('pointercancel', function () { D.active = false; D.moved = false; });
+      // Both interruption paths land the pet too — see _endDrag. Passing
+      // settled=false marks them as "the gesture was taken away" rather than
+      // "the user let go", so they land without crediting a tap.
+      _el.addEventListener('pointercancel', function () { _endDrag(false); });
+      _el.addEventListener('lostpointercapture', function () { _endDrag(false); });
     } else {
       // no Pointer Events (very old browser) → plain click keeps the bubble.
       _el.addEventListener('click', function (e) { e.stopPropagation(); interact(); });

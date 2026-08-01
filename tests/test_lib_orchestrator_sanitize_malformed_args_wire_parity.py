@@ -38,6 +38,14 @@ RUN_PY = ROOT / 'lib' / 'tasks_pkg' / 'orchestrator' / '_run.py'
 LEAF_PY = (
     ROOT / 'lib' / 'tasks_pkg' / 'orchestrator' /
     '_sanitize_tool_call_args.py')
+# Slice 22 (2026-07-31) moved the sanitize call site out of _run.py
+# into the tool-dispatch cluster leaf: parse → sanitize → emit →
+# execute now lives in _tool_dispatch_round.run_tool_dispatch, and
+# _run.py delegates the whole cluster. The two wiring guards below
+# therefore assert on the dispatch leaf, not _run.py.
+DISPATCH_PY = (
+    ROOT / 'lib' / 'tasks_pkg' / 'orchestrator' /
+    '_tool_dispatch_round.py')
 
 
 # ---------------------------------------------------------------------------
@@ -78,25 +86,27 @@ def test_helper_signature_is_keyword_only():
 # 3. _run.py imports and delegates to the extracted helper
 # ---------------------------------------------------------------------------
 def test_run_py_imports_helper():
-    """_run.py imports sanitize_malformed_tool_call_args at module scope."""
-    src = RUN_PY.read_text()
+    """The dispatch-round leaf imports sanitize_malformed_tool_call_args
+    at module scope. (Was _run.py before slice 22 moved the cluster.)"""
+    src = DISPATCH_PY.read_text()
     assert (
         'from lib.tasks_pkg.orchestrator._sanitize_tool_call_args import'
         in src), (
-        '_run.py must import the extracted sanitizer helper — '
-        'expected an `from lib.tasks_pkg.orchestrator.'
+        '_tool_dispatch_round.py must import the extracted sanitizer '
+        'helper — expected an `from lib.tasks_pkg.orchestrator.'
         '_sanitize_tool_call_args import ...` line at module scope')
     assert 'sanitize_malformed_tool_call_args' in src
 
 
 def test_run_task_delegates_to_helper():
-    """The stream loop's sanitize cluster must be a single call to
+    """The dispatch cluster must call
     ``sanitize_malformed_tool_call_args(parsed_tcs, messages, ...)`` —
-    no inline body left behind."""
-    src = RUN_PY.read_text()
+    no inline body left behind. (Call site moved from _run.py's run_task
+    to _tool_dispatch_round.run_tool_dispatch in slice 22.)"""
+    src = DISPATCH_PY.read_text()
     assert 'sanitize_malformed_tool_call_args(' in src, (
-        '_run.py must call sanitize_malformed_tool_call_args in the '
-        'stream loop')
+        '_tool_dispatch_round.py must call sanitize_malformed_tool_call_args '
+        'in the dispatch cluster')
 
 
 # ---------------------------------------------------------------------------

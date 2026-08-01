@@ -570,6 +570,159 @@ def test_referenced_i18n_keys_all_exist():
     assert not missing, 'provider_faces.js uses undefined i18n keys: %s' % missing
 
 
+# ═══════════════════════════════════════════════════════════
+#  5. ★ The third protocol ('responses') must SURVIVE the UI
+#
+#  Measured 2026-07-31 (epic pt_b7a29ea7 S3): the face editor hard-coded
+#  ['anthropic', 'openai'], so a face configured protocol='responses'
+#  rendered with the select showing 'anthropic' — and the next save wrote
+#  'anthropic' back, silently flipping a working Responses provider onto
+#  /messages. Two root fixes are pinned here:
+#    (a) the select must OFFER 'responses' — and must PRESERVE any value
+#        it doesn't know (a future fourth protocol can never be mangled
+#        the same way again);
+#    (b) the collect fallback must preserve the row's ORIGINAL protocol
+#        (data-orig-protocol) instead of collapsing to a hard-coded one.
+# ═══════════════════════════════════════════════════════════
+
+def _node_eval_faces(js_body):
+    """Shortcut over _node_eval for the faces-editor tests below."""
+    return _node_eval(js_body)
+
+
+def test_face_row_offers_responses_and_preserves_unknown_protocols():
+    """(a) The select offers openai/anthropic/responses with the STORED
+    value selected; (b) a value the UI doesn't know is APPENDED as an
+    option (selected), never silently flipped — the exact mangling shape
+    that destroyed responses faces before this fix."""
+    out = _node_eval_faces('''
+const r1 = _renderFaceRow(0, 0, 'deepseek-resp', 'https://api.deepseek.com', 'responses');
+const r2 = _renderFaceRow(0, 1, 'legacy', 'https://x/v1', 'anthropic');
+const r3 = _renderFaceRow(0, 2, 'future', 'https://x/v2', 'proto_2099');
+console.log(JSON.stringify({ r1: r1, r2: r2, r3: r3 }));
+''')
+    got = json.loads(out.strip().splitlines()[-1])
+    assert '<option value="responses" selected>' in got['r1'], (
+        "a stored protocol='responses' face must render with responses "
+        'SELECTED — before the fix it rendered anthropic and the next save '
+        'rewrote the config')
+    for opt in ('openai', 'anthropic', 'responses'):
+        assert f'<option value="{opt}"' in got['r1'], (
+            f'the face protocol select must offer {opt}')
+    assert '<option value="anthropic" selected>' in got['r2']
+    assert '<option value="proto_2099" selected>' in got['r3'], (
+        'an UNKNOWN stored protocol must be preserved as an appended '
+        'option — otherwise the NEXT protocol addition re-opens the same '
+        'silent-rewrite hole')
+
+
+def test_collect_faces_never_rewrites_the_stored_protocol():
+    """The save leg: _collectFacesFromDom must return the select's value
+    verbatim, and when a row's select is unreadable it must fall back to
+    the row's ORIGINAL protocol (data-orig-protocol) — not to a hard-coded
+    default that rewrites the config."""
+    out = _node_eval_faces('''
+function _el(v) { return { value: v }; }
+function _row(name, url, proto, selProto) {
+  return { querySelector: function(sel) {
+    if (sel.indexOf('"name"]') >= 0) return _el(name);
+    if (sel.indexOf('"base_url"]') >= 0) return _el(url);
+    if (sel.indexOf('"protocol"]') >= 0) return _el(selProto === undefined ? proto : selProto);
+    return null;
+  }, getAttribute: function(n) {
+    return n === 'data-orig-protocol' ? proto : null;
+  } };
+}
+var _rows = [
+  _row('deepseek-resp', 'https://api.deepseek.com', 'responses'),
+  _row('gw-anth', 'https://gw/v1/anthropic', 'anthropic'),
+  /* select reports '' (DOM half-rebuilt) — the fallback must preserve the
+   * row's ORIGINAL protocol, not collapse to a hard-coded default. */
+  _row('weak-dom', 'https://api.deepseek.com', 'responses', ''),
+];
+document = {
+  querySelector: function(sel) {
+    if (sel.indexOf('stg-provider-card') >= 0) return {
+      querySelector: function(s2) {
+        if (s2.indexOf('stg-faces-field') >= 0) return {
+          querySelectorAll: function() { return _rows; } };
+        return null;
+      } };
+    return null;
+  },
+  querySelectorAll: function() { return []; }
+};
+console.log(JSON.stringify(_collectFacesFromDom(0)));
+''')
+    got = json.loads(out.strip().splitlines()[-1])
+    assert got['deepseek-resp']['protocol'] == 'responses', (
+        "collect must keep 'responses' — the pre-fix fallback collapsed "
+        "every unrecognised value to 'anthropic'")
+    assert got['gw-anth']['protocol'] == 'anthropic'
+    assert got['weak-dom']['protocol'] == 'responses', (
+        "an unreadable select must fall back to the row's ORIGINAL protocol "
+        "(data-orig-protocol) — the pre-fix `|| 'anthropic'` rewrote the "
+        'config here too')
+
+
+def test_render_face_row_stamps_orig_protocol_for_the_fallback():
+    """The (b) fallback can only preserve what the row CARRIES: the row
+    must stamp data-orig-protocol so a select that reports '' (no matching
+    option, DOM partially rebuilt) still yields the true stored value."""
+    out = _node_eval_faces('''
+console.log(JSON.stringify(_renderFaceRow(0, 0, 'f', 'https://x', 'responses')));
+''')
+    html = json.loads(out.strip().splitlines()[-1])
+    assert 'data-orig-protocol="responses"' in html, (
+        'the row must carry its original protocol for the collect fallback')
+
+
+def test_provider_card_exposes_a_protocol_select_with_responses():
+    """Provider-level (default-face) protocol: before S3 it was writable
+    only by templates / hand-edited JSON — a DeepSeek responses-default
+    provider was inexpressible in the UI."""
+    src = _src(_RENDER_JS, lang='js')
+    assert re.search(r"_onProvField\([^)]*protocol", src), (
+        'the provider editor must wire a protocol select through '
+        '_onProvField (the wholesale-save seam)')
+    assert "'responses'" in src, (
+        "the provider protocol select must offer 'responses'")
+
+
+def test_responses_chip_style_and_i18n_keys():
+    """The pill must visually distinguish a responses wire (it previously
+    rendered as a default openai chip), and the new i18n keys must exist
+    in both languages."""
+    with open(os.path.join(_ROOT, 'static', 'styles.css'), encoding='utf-8') as f:
+        css = f.read()
+    assert '.stg-face-chip.responses' in css, (
+        'missing CSS for .stg-face-chip.responses — a responses face is '
+        'indistinguishable from openai')
+    with open(_I18N, encoding='utf-8') as f:
+        i18n = f.read()
+    for k in ('settings.protocol', 'settings.protocolHint'):
+        m = re.search(r"^\s*'%s':\s*\{.*$" % re.escape(k), i18n, re.M)
+        assert m and 'zh:' in m.group(0) and 'en:' in m.group(0), (
+            f'i18n key {k} incomplete')
+
+
+def test_chip_assigns_the_responses_class():
+    """_faceChipHTML must tag a responses resolution with the dedicated
+    class (not the openai default look)."""
+    out = _node_eval_faces('''
+_stgProviders = [{ id: 'p', faces: { resp: {} }, models: [] }];
+_stgFaceResolutions[0] = { byModel: {
+  live: { model_id: 'live', ok: true, face: 'resp', protocol: 'responses',
+          base_url: 'https://api.deepseek.com', forced: false, error: '' },
+}, faces: ['default', 'resp'], dualFaceHost: false };
+console.log(JSON.stringify(_faceChipHTML(0, { model_id: 'live' })));
+''')
+    chip = json.loads(out.strip().splitlines()[-1])
+    assert 'stg-face-chip responses' in chip, (
+        'a responses-resolution chip must carry the responses class')
+    assert '>responses<' in chip or 'responses ' in chip
+
+
 def test_chip_and_warning_styles_exist():
     """A chip with no CSS class definition renders as unstyled text."""
     with open(os.path.join(_ROOT, 'static', 'styles.css'), encoding='utf-8') as f:

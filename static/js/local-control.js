@@ -552,6 +552,14 @@ function _lcOpenExtensionsPage(path) {
   });
 }
 
+/* Human-readable size for a download label (bytes → '115 MB'). */
+function _lcFmtSize(bytes) {
+  var n = Number(bytes);
+  if (!isFinite(n) || n <= 0) return '';
+  var mb = n / 1048576;
+  return (mb >= 100 ? Math.round(mb) : Math.round(mb * 10) / 10) + ' MB';
+}
+
 /* The download instruction — authored ONCE for both install branches.
  *
  * ── Why per-platform links instead of the releases page ──
@@ -583,12 +591,21 @@ function _lcDownloadLinks(d) {
       var p = picks[i] || {};
       if (!p.url) continue;
       // The label names the CHIP, not just the OS — the whole point of the
-      // two-DMG case is telling the user which one is theirs.
+      // two-DMG case is telling the user which one is theirs. Size goes in
+      // the label: a 100+ MB installer with no size shown is a bad surprise.
       html += '<a class="lc-dl-link lc-dl-direct" href="' + _lcEsc(p.url) +
         '" target="_blank" rel="noopener noreferrer" title="' +
         _lcEsc(p.filename || '') + '">' +
         _lcEsc(_lcT('local.desktopDownloadFor', '下载桌面版') + ' · ' +
-               (p.label || p.arch || '')) + '</a>';
+               (p.label || p.arch || '') +
+               (p.size ? ' · ' + _lcFmtSize(p.size) : '')) + '</a>' +
+        // Provenance: an artifact served by THIS server (not the public
+        // GitHub network) is the fast/reliable path — say so, or the user
+        // cannot tell why this link is preferable to the releases page.
+        (p.hosted === 'server'
+          ? '<span class="lc-dl-hosted">' +
+            _lcEsc(_lcT('local.desktopHosted', '服务器直连')) + '</span>'
+          : '');
     }
     html += '</p>';
     if (picks.length > 1) {

@@ -245,58 +245,79 @@ async function _execDeleteTurn(idx, mode) {
   const msg = conv.messages[idx];
   if (!msg) return;
   // ★ Capture the exact target objects (and, for a turn, the following
-  //   assistant) BEFORE the request so we can remove them by IDENTITY after —
-  //   the server may resolve a DIFFERENT index (list drift from a server-side
-  //   reconcile), so its returned deletedIndices are SERVER indices that need
-  //   not match this local array. Removing by object reference is drift-proof.
+  //   assistant) BEFORE mutating anything — removal below is by IDENTITY, so
+  //   a server-side reconcile that drifted indices cannot make us delete (or
+  //   roll back) the wrong messages.
   const _targets = [conv.messages[idx]];
   if (mode === 'turn' && msg.role === 'user'
       && conv.messages[idx + 1] && conv.messages[idx + 1].role === 'assistant') {
     _targets.push(conv.messages[idx + 1]);
   }
+  const _positions = _targets.map((tgt) => conv.messages.indexOf(tgt));
+
+  /* ★ INSTANT-UI CONTRACT (owner directive 2026-07-31, pt_0b444c0be11a4048):
+   *   the click takes visible effect in the SAME task — the message(s) leave
+   *   the model AND the chat container BEFORE any network await, so a slow
+   *   link can never make the delete look dead. The server DELETE runs in the
+   *   background below; on failure the targets are re-inserted at their
+   *   original positions (rollback). Previously this awaited the DELETE
+   *   first, so the message just sat there for the whole round-trip. */
+  for (const tgt of _targets) {
+    const li = conv.messages.indexOf(tgt);
+    if (li >= 0) conv.messages.splice(li, 1);
+  }
+  conv._serverMsgCount = conv.messages.length;
+  conv._needsLoad = false;
+
+  // Update IndexedDB cache
+  if (typeof ConvCache !== 'undefined') ConvCache.put(conv);
+
+  // Re-render NOW
+  if (activeConvId === convId) {
+    window.ConvView.replaceAll(convId, { forceScroll: false });
+    buildTurnNav(conv);
+  }
+  renderConversationList();
+
+  if (typeof showToast === 'function') {
+    showToast(_targets.length > 1 ? 'Turn deleted' : 'Message deleted', 'success');
+  }
+
+  /* ── Background: persist the deletion. The stable _msgId is sent so the
+   *   server resolves any index drift by identity. On ANY failure (network
+   *   null, non-OK, throw) roll back the local removal so the user never
+   *   loses messages the server still holds. */
   try {
-    // ★ Send the stable _msgId so the server corrects any index drift.
     const resp = await Api.conversations.deleteMessage(convId, idx, mode, { msgId: msg._msgId });
     if (!resp || !resp.ok) {
       const err = resp ? await resp.json().catch(() => ({ error: `HTTP ${resp.status}` })) : { error: 'no response' };
-      console.error('[deleteTurn] Server error:', err);
-      if (typeof showToast === 'function') showToast('Delete failed', 'error');
-      return;
-    }
-    const result = await resp.json();
-    const deletedIndices = result.deletedIndices || [idx];
-
-    // Update local state: remove the captured target objects by identity.
-    // Fall back to the server's deletedIndices only for any target that
-    // isn't found by reference (defensive — shouldn't happen).
-    let _removed = 0;
-    for (const tgt of _targets) {
-      const li = conv.messages.indexOf(tgt);
-      if (li >= 0) { conv.messages.splice(li, 1); _removed++; }
-    }
-    if (_removed === 0) {
-      for (const i of [...deletedIndices].sort((a, b) => b - a)) {
-        if (i >= 0 && i < conv.messages.length) conv.messages.splice(i, 1);
-      }
-    }
-    conv._serverMsgCount = conv.messages.length;
-    conv._needsLoad = false;
-
-    // Update IndexedDB cache
-    if (typeof ConvCache !== 'undefined') ConvCache.put(conv);
-
-    // Re-render
-    if (activeConvId === convId) {
-      window.ConvView.replaceAll(convId, { forceScroll: false });
-      buildTurnNav(conv);
-    }
-    renderConversationList();
-
-    if (typeof showToast === 'function') {
-      showToast(deletedIndices.length > 1 ? 'Turn deleted' : 'Message deleted', 'success');
+      throw new Error((err && err.error) || `HTTP ${resp && resp.status}`);
     }
   } catch (e) {
     console.error('[deleteTurn] Failed:', e);
+    /* ★ ROLLBACK: re-insert each captured target at its ORIGINAL position,
+     *   identity-checked (a target already re-present is skipped), in
+     *   ascending position order so earlier splices don't shift later ones. */
+    let _restored = 0;
+    _targets.forEach((tgt, k) => {
+      if (conv.messages.indexOf(tgt) < 0) {
+        const pos = Math.min(_positions[k], conv.messages.length);
+        conv.messages.splice(pos, 0, tgt);
+        _restored++;
+      }
+    });
+    if (_restored > 0) {
+      conv._serverMsgCount = conv.messages.length;
+      if (typeof ConvCache !== 'undefined') ConvCache.put(conv);
+      /* A stream may have started since the click — never wipe the live
+       *   streaming bubble with a full replaceAll; the data is restored and
+       *   the next natural render paints it. */
+      if (activeConvId === convId && !activeStreams.has(convId)) {
+        window.ConvView.replaceAll(convId, { forceScroll: false });
+        buildTurnNav(conv);
+      }
+      renderConversationList();
+    }
     if (typeof showToast === 'function') showToast('Delete failed', 'error');
   }
 }
@@ -345,6 +366,16 @@ async function translateMessage(idx) {
   msg._translateDone = false;
   const text = msg.content || "";
   if (!text.trim()) return;
+  /* ★ INSTANT-UI (owner directive 2026-07-31, pt_77ba3f17dedf4b65): paint the
+   *   "翻译中…" indicator on the CLICK FRAME. _isAlreadyChinese below is a
+   *   server round-trip and nothing re-rendered the message until the
+   *   pipeline started after it, so the click read as dead for a whole RTT.
+   *   `_translateDone === false` + no 译文 yet is exactly the state
+   *   translation_indicator.js keys on. */
+  if (activeConvId === conv.id) {
+    const _tmEl = document.getElementById(`msg-${idx}`);
+    if (_tmEl) window.ConvView.apply(conv.id, idx, msg);
+  }
   // Detect target language server-side: if the source is already
   // predominantly Chinese → translate to English, otherwise → Chinese.
   // The CJK-ratio threshold is backend policy (lib/text_lang.py

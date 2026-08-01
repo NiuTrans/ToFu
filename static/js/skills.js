@@ -312,26 +312,66 @@ async function _skillsCatalogInstall(skillId, btn) {
 
 async function _skillsUninstall(memoryId) {
   if (!await showConfirm(t('skills.uninstallConfirm', { id: memoryId }), { danger: true })) return;
+  /* ★ INSTANT-UI (owner directive 2026-07-31, pt_77ba3f17dedf4b65): the card
+   *   leaves the model AND the grid re-renders the moment the confirm closes —
+   *   the old code awaited the DELETE and then a FULL tab repopulate, so the
+   *   card sat static for two serial RTTs. The DELETE now runs in the
+   *   background; on failure the card is restored at its original index. */
+  var instIdx = _skillsInstalled.findIndex(function (m) { return m.id === memoryId; });
+  var removed = instIdx >= 0 ? _skillsInstalled[instIdx] : null;
+  var catEntry = null;
+  for (var i = 0; i < _skillsCatalog.length; i++) {
+    var e = _skillsCatalog[i];
+    if ((e.installed_memory_id || e.id) === memoryId) { catEntry = e; break; }
+  }
+  if (removed) _skillsInstalled = _skillsInstalled.filter(function (m) { return m.id !== memoryId; });
+  if (catEntry) { catEntry.installed = false; delete catEntry.installed_memory_id; }
+  _skillsRender();
   try {
     var r = await Api.skills.uninstall(memoryId);
     if (!r || !r.ok) {
       var d = (r ? await r.json().catch(function () { return {}; }) : {});
-      _skillsToast(t('skills.uninstallFailed', { err: (d.error || (r && r.statusText) || t('skills.noResponse')) }), 'error');
-      return;
+      throw new Error(d.error || (r && r.statusText) || t('skills.noResponse'));
     }
     _skillsToast(t('skills.uninstalledToast', { id: memoryId }), 'success');
     await _populateSkillsTab();
-  } catch (e) {
-    _skillsToast(t('skills.uninstallError', { err: e.message }), 'error');
+  } catch (e2) {
+    /* Rollback: restore the card (and the catalog entry's installed marker)
+     * so the panel returns to its pre-click shape. */
+    if (removed) {
+      _skillsInstalled = _skillsInstalled.slice();
+      _skillsInstalled.splice(Math.min(instIdx, _skillsInstalled.length), 0, removed);
+    }
+    if (catEntry) { catEntry.installed = true; catEntry.installed_memory_id = memoryId; }
+    _skillsRender();
+    _skillsToast(t('skills.uninstallFailed', { err: e2.message }), 'error');
   }
 }
 
 async function _skillsToggleEnabled(memoryId, btn) {
+  /* ★ INSTANT-UI (owner directive 2026-07-31, pt_77ba3f17dedf4b65): flip the
+   *   status pill in place on the CLICK (mirrors toggleMemoryEnabled) — the
+   *   old code awaited the POST and then a FULL tab repopulate, so the pill
+   *   did nothing for two serial RTTs. Background reconcile; rollback on
+   *   failure. */
+  var item = null;
+  for (var i = 0; i < _skillsInstalled.length; i++) {
+    if (_skillsInstalled[i].id === memoryId) { item = _skillsInstalled[i]; break; }
+  }
+  var prev = item ? item.enabled : null;
+  if (item) {
+    item.enabled = !item.enabled;
+    _skillsRender();
+  }
   try {
     var r = await Api.skills.toggle(memoryId);
     if (!r || !r.ok) throw new Error('HTTP ' + (r ? r.status : 'no response'));
     await _populateSkillsTab();
   } catch (e) {
+    if (item && prev !== null) {
+      item.enabled = prev;
+      _skillsRender();
+    }
     _skillsToast(t('skills.toggleFailed', { err: e.message }), 'error');
   }
 }

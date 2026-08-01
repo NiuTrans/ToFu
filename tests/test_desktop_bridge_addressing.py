@@ -399,7 +399,8 @@ class TestAgentSide:
         assert frame['name']
         assert frame['platform']
         assert frame['capabilities'] == {
-            'write': True, 'exec': False, 'gui': False, 'notification': True}
+            'write': True, 'exec': False, 'gui': False, 'notification': True,
+            'egress': False}
 
     def test_agent_id_stable_across_restarts(self, monkeypatch, tmp_path):
         first, second = {}, {}

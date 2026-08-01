@@ -10,34 +10,46 @@ the `Api.chat.send(...)` fetch. That flag tells `syncConversationToServer`
 SUCCESS path the backend's `_chat_send` is the sole owner of the first-turn
 persist, and a racing PUT would plant a duplicate untranslated row.
 
-But `_sendInFlight` was only cleared in the `finally` block, which runs AFTER
-the `catch`. So when the fetch FAILED (timeout / network drop — exactly the
-poor-network case), the catch block's `syncConversationToServer(conv)` call ran
-while `_sendInFlight` was STILL `true` → the guard skipped the PUT → the
-message lived ONLY in the in-memory array. On refresh, `loadConversationMessages`
-reads the server copy (which never got the message) and the OVERWRITE branch
-wipes it. Net effect: **the message the user sent disappears after refresh**,
-which is the reported bug.
+So every FAILED-send path must (a) clear `_sendInFlight` BEFORE its rescue
+sync (otherwise the guard skips the PUT) and (b) mark the turn pending-sync
+when that rescue PUT also fails (otherwise a poor-network refresh still loses
+the message).
 
-The guard's duplicate concern is VOID in the catch path: `chat_send` threw, so
-there is no concurrent backend persist to collide with. The fix is to clear
-`_sendInFlight = false` BEFORE the rescue `syncConversationToServer(conv)` in
-both catch branches (user-clicked-stop + generic error), and `await` it.
+SHAPES THIS GUARD PINS (updated 2026-08-01, verdict: TEST DRIFT not product
+bug — pt_ca1b3b2f53874ec8)
+--------------------------------------------------------------------------------
+There are TWO persisting catch branches, and since the startup-stop refactor
+(pt_fa32a235) they carry the rescue pair in TWO different shapes:
 
-TWO checks
-----------
+  1. user-clicked-stop: `conv._sendInFlight = false;` then
+     `await _userStopDuringStartup(conv, convId, { …, rescue: true })` — the
+     branch's rescue pair MOVED into the shared helper
+     (static/js/ui/send_button.js::_userStopDuringStartup), which awaits the
+     sync and calls `markConvPendingSync` on failure when `opts.rescue` is
+     set. Semantics preserved; only the inline shape changed. (This is why
+     the retired count==2 exact-fragment assertion went red: it counted one
+     inline shape and missed the helper shape entirely.)
+  2. generic error: `conv._sendInFlight = false;` then the INLINE pair
+     `const _synced = await syncConversationToServer(conv);` +
+     `if (!_synced) markConvPendingSync(conv);` — unchanged.
+
+CHECKS
+------
 (1) MECHANISM (drives the REAL shipped `syncConversationToServer`): with
     `_sendInFlight = true` the PUT is SKIPPED; with `_sendInFlight = false`
-    the PUT FIRES. This is the exact behaviour the fix relies on.
-(2) FIX ORDERING (source-level on main_send_pipeline.js): in each catch branch
-    that persists, `conv._sendInFlight = false` must appear BEFORE the
-    `syncConversationToServer(conv)` call — otherwise the rescue sync is a
-    no-op.
-
-DOUBLE-NEUTER (below): for (1) removing the guard's early-return would make the
-`_sendInFlight=true` case ALSO fire a PUT — proving the mechanism check
-discriminates. For (2) reverting the ordering (clear AFTER the sync) makes the
-ordering assertion FAIL — proving the fix is load-bearing.
+    the PUT FIRES.
+(2) BRANCH SHAPES (source-level): the generic branch's inline pair appears
+    exactly once, preceded by the clear; the user-stop branch calls the
+    helper with `rescue: true`, preceded by the clear; the helper itself
+    carries the gated rescue pair.
+(3) HELPER BEHAVIOUR (drives the REAL `_userStopDuringStartup` under node):
+    rescue:true + failed sync → pending-sync marked; rescue:true + ok sync →
+    not marked; no rescue + failed sync → best-effort (not marked); the
+    backend abort-hunt (`Api.chat.abortConv`) always fires; syncOpts pass
+    through.
+(4) TRIPLE NEUTER: (a) removing the inline pair drops its count to 0;
+    (b) gating off the helper's rescue arm makes (3)'s pending check go RED;
+    (c) dropping `rescue: true` from the call breaks the wiring assertion.
 
 Runs the REAL shipped JS under node; skips cleanly when node isn't installed.
 """
@@ -48,6 +60,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 
 import pytest
 
@@ -56,10 +69,27 @@ pytestmark = pytest.mark.unit
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
 JS_DIR = os.path.join(ROOT, 'static', 'js')
+SEND_JS = os.path.join(JS_DIR, 'main', 'main_send_pipeline.js')
+SEND_BTN_JS = os.path.join(JS_DIR, 'ui', 'send_button.js')
 
 
 def _node_available() -> bool:
     return bool(shutil.which('node'))
+
+
+def _extract_fn(src: str, name: str) -> str:
+    m = re.search(r'function %s\s*\(' % re.escape(name), src)
+    assert m, f'{name} not found in source'
+    i = src.index('{', m.start())
+    depth = 0
+    for j in range(i, len(src)):
+        if src[j] == '{':
+            depth += 1
+        elif src[j] == '}':
+            depth -= 1
+            if depth == 0:
+                return src[m.start():j + 1]
+    raise AssertionError(f'unbalanced braces extracting {name}')
 
 
 # ── (1) MECHANISM harness: drive the REAL syncConversationToServer and prove
@@ -80,11 +110,7 @@ global.debugLog = function() {};
 global.config = { defaultThinkingDepth: 'medium' };
 global.activeConvId = null;
 
-eval(fs.readFileSync(process.argv[2], 'utf8'));  // core/conversations.js
-// Extracted leaf modules (pt_3879f00e decomposition): the PUT path uses the
-// persist helpers (core/conv_persist_helpers.js) and the pending-sync markers
-// (core/pending_sync.js) — eval them so harness scope matches the bundle.
-for (const extra of process.argv.slice(3)) eval(fs.readFileSync(extra, 'utf8'));
+for (const f of process.argv.slice(2)) eval(fs.readFileSync(f, 'utf8'));  // bundle-order conv family via _conv_bundle_sources.conv_family_sources
 
 const out = [];
 function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
@@ -133,13 +159,14 @@ def _run_harness(js_source_path: str):
     harness = os.path.join(HERE, '_send_failure_persist_harness.js')
     with open(harness, 'w') as f:
         f.write(_HARNESS)
-    extra_js = [
-        os.path.join(JS_DIR, 'core', 'conv_persist_helpers.js'),
-        os.path.join(JS_DIR, 'core', 'pending_sync.js'),
-    ]
+    # Eval the WHOLE conv family via the drift-proof closure (see
+    # _conv_bundle_sources.conv_family_sources).
+    sys.path.insert(0, HERE)
+    from _conv_bundle_sources import conv_family_sources
+    extra_js = conv_family_sources()
     try:
         proc = subprocess.run(
-            ['node', harness, js_source_path, *extra_js],
+            ['node', harness, *extra_js],
             capture_output=True, text=True, timeout=60,
         )
     finally:
@@ -150,13 +177,82 @@ def _run_harness(js_source_path: str):
     return proc
 
 
-# The two persisting catch branches of sendMessage each carry the fix's
-# durable rescue pair: capture the sync result and mark the turn pending-sync
-# when it fails. Keying on this exact fragment is precise (the success-path /
-# startAssistantResponse syncs don't capture the result into `_synced`).
+# ── (3) HELPER-BEHAVIOUR harness: drive the REAL _userStopDuringStartup. ──
+_HELPER_HARNESS = r"""
+'use strict';
+const out = [];
+function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
+const calls = { sync: [], pending: [], abortConv: [] };
+
+let activeConvId = 'SOMEWHERE_ELSE';
+const document = { getElementById: () => null };
+const window = globalThis;
+function _removeTranslatingBubble() {}
+function saveConversations() {}
+function buildTurnNav() {}
+function markConvPendingSync(conv) { calls.pending.push(conv.id); }
+const Api = { chat: { abortConv: (id) => { calls.abortConv.push(id); return Promise.resolve(); } } };
+let _syncResult = true;
+let _syncThrow = false;
+function syncConversationToServer(conv, opts) {
+  calls.sync.push({ id: conv.id, opts: opts || null });
+  if (_syncThrow) return Promise.reject(new Error('sync blew up'));
+  return Promise.resolve(_syncResult);
+}
+
+/* The REAL send_button.js (defines updateSendButton + the helper). */
+__SEND_BTN_SRC__
+
+(async () => {
+  const conv = { id: 'c1', messages: [] };
+
+  /* rescue:true + sync FAILS → the turn MUST be marked pending-sync (the
+   * poor-network durability the whole guard exists for). */
+  _syncResult = false;
+  await _userStopDuringStartup(conv, 'c1', { rescue: true });
+  check('rescue_failure_marks_pending', calls.pending.length === 1 && calls.pending[0] === 'c1');
+  check('abortConv_hunts_backend_task', calls.abortConv.length === 1 && calls.abortConv[0] === 'c1');
+
+  /* rescue:true + sync OK → nothing to retry. */
+  calls.pending.length = 0; _syncResult = true;
+  await _userStopDuringStartup(conv, 'c1', { rescue: true });
+  check('rescue_success_no_pending', calls.pending.length === 0);
+
+  /* no rescue (regen/edit shape) + sync FAILS → best-effort, no pending
+   * mark — and the rejection must NOT escape (the `_syncP.catch(() => {})`
+   * arm keeps the rollback path total). */
+  calls.pending.length = 0;
+  _syncResult = false; _syncThrow = false;
+  await _userStopDuringStartup(conv, 'c1', { syncOpts: { allowTruncate: true } });
+  check('no_rescue_no_pending', calls.pending.length === 0);
+  check('syncopts_passthrough',
+        calls.sync[calls.sync.length - 1].opts
+        && calls.sync[calls.sync.length - 1].opts.allowTruncate === true);
+
+  /* best-effort arm swallows a THROWING sync (never an unhandled rejection). */
+  _syncThrow = true;
+  await _userStopDuringStartup(conv, 'c1', {});
+  check('besteffort_swallows_sync_throw', true);
+
+  console.log(out.join('\n'));
+})().catch(e => { console.log('HARNESS-ERROR ' + (e && e.stack || e)); });
+"""
+
+
+def _run_helper_harness(send_btn_src: str) -> str:
+    script = _HELPER_HARNESS.replace('__SEND_BTN_SRC__', send_btn_src)
+    proc = subprocess.run(['node', '-e', script], capture_output=True,
+                          text=True, timeout=60, cwd=ROOT)
+    assert proc.returncode == 0, f'node failed: {proc.stderr}\n{proc.stdout}'
+    return proc.stdout.strip()
+
+
+# The generic-error branch's INLINE durable rescue pair (exact — the
+# success-path / startAssistantResponse syncs don't capture into `_synced`).
 _SYNC_FRAGMENT = 'const _synced = await syncConversationToServer(conv);\n      if (!_synced) markConvPendingSync(conv);'
-# The `_sendInFlight` clear must still precede the rescue sync in each branch
-# (otherwise the guard skips the PUT). Checked separately below.
+# The user-stop branch delegates the SAME semantics to the shared startup-stop
+# helper with rescue:true (the shape the retired count==2 assertion missed).
+_USERSTOP_CALL = '_userStopDuringStartup(conv, convId, { userMsg, userMsgIdx, rescue: true })'
 _CLEAR_TOKEN = 'conv._sendInFlight = false;'
 
 
@@ -171,40 +267,85 @@ def test_send_failure_guard_mechanism():
     assert output.count('PASS') >= 4, f'expected >=4 PASS lines, got:\n{output}'
 
 
-def test_catch_path_clears_inflight_before_rescue_sync():
-    """Source-level: both persisting catch branches of sendMessage must (a)
-    carry the durable rescue pair (capture `_synced`, mark pending-sync on
-    failure) and (b) clear `_sendInFlight` BEFORE that rescue sync (otherwise
-    the guard skips the PUT)."""
-    send_js = os.path.join(JS_DIR, 'main', 'main_send_pipeline.js')
-    with open(send_js, encoding='utf-8') as f:
+def test_catch_branch_rescue_shapes():
+    """Source-level: BOTH persisting catch branches carry the durable rescue
+    semantics in their CURRENT shapes, each preceded by the `_sendInFlight`
+    clear; the shared helper carries the gated rescue pair."""
+    with open(SEND_JS, encoding='utf-8') as f:
         src = f.read()
+
+    # (a) generic-error branch: the inline pair exactly once, preceded by clear.
     count = src.count(_SYNC_FRAGMENT)
-    assert count == 2, (
-        'regression: expected the durable rescue pair '
-        '(`const _synced = await syncConversationToServer(conv);` then '
-        '`if (!_synced) markConvPendingSync(conv);`) in BOTH persisting catch '
-        f'branches of sendMessage, found {count}. Without it a failed rescue '
+    assert count == 1, (
+        'regression: the generic-error branch must carry the inline durable '
+        f'rescue pair exactly once, found {count}. Without it a failed rescue '
         'PUT leaves the message non-durable → lost on refresh.')
-    # The clear must precede each rescue sync within the same branch window.
     for m in re.finditer(re.escape(_SYNC_FRAGMENT), src):
         window = src[max(0, m.start() - 500):m.start()]
         assert _CLEAR_TOKEN in window, (
-            'regression: a catch-branch rescue sync is NOT preceded by '
-            '`conv._sendInFlight = false;` — the guard skips the PUT and the '
-            'message is lost on refresh (poor-network data-loss).')
+            'regression: the generic-branch rescue sync is NOT preceded by '
+            '`conv._sendInFlight = false;` — the guard skips the PUT.')
+
+    # (b) user-stop branch: routes through the helper with rescue:true,
+    #     preceded by the clear.
+    assert _USERSTOP_CALL in src, (
+        'regression: the user-stop catch branch no longer calls '
+        '_userStopDuringStartup with rescue:true — a user-stopped send on a '
+        'poor network loses the pending-sync retry mark (message lost on '
+        'refresh if the rescue PUT also fails).')
+    call_at = src.index(_USERSTOP_CALL)
+    assert _CLEAR_TOKEN in src[max(0, call_at - 500):call_at], (
+        'regression: the user-stop rescue is NOT preceded by '
+        '`conv._sendInFlight = false;` — the guard skips the PUT.')
+
+    # (c) the helper itself: gated rescue pair present.
+    with open(SEND_BTN_JS, encoding='utf-8') as f:
+        btn_src = f.read()
+    assert 'if (opts.rescue)' in btn_src, (
+        'regression: _userStopDuringStartup lost its opts.rescue gate')
+    assert 'const _synced = await _syncP;' in btn_src, (
+        'regression: _userStopDuringStartup no longer awaits the rescue sync '
+        'in its rescue arm')
+    assert 'markConvPendingSync(conv);' in btn_src, (
+        'regression: _userStopDuringStartup lost the pending-sync mark — the '
+        'user-stop branch has no failed-PUT durability')
 
 
-def test_catch_path_ordering_double_neuter():
-    """DOUBLE-NEUTER: removing the durable rescue pair drops its count to 0,
-    proving the source assertion discriminates the fix. In-memory copy; the
-    real file is untouched."""
-    send_js = os.path.join(JS_DIR, 'main', 'main_send_pipeline.js')
-    with open(send_js, encoding='utf-8') as f:
+@pytest.mark.skipif(not _node_available(), reason='node not installed')
+def test_user_stop_helper_rescue_behavior():
+    """Behavioural: the REAL _userStopDuringStartup marks pending-sync exactly
+    when rescue:true AND the sync fails; swallows best-effort failures; passes
+    syncOpts through; always hunts the backend task."""
+    output = _run_helper_harness(open(SEND_BTN_JS, encoding='utf-8').read())
+    fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
+    assert not fails, 'user-stop helper behaviour failures:\n' + output
+
+
+@pytest.mark.skipif(not _node_available(), reason='node not installed')
+def test_rescue_triple_neuter():
+    """TRIPLE-NEUTER: proves each pin discriminates.
+    (a) inline pair removed → count drops to 0;
+    (b) helper rescue arm gated off → the behavioural pending check goes RED;
+    (c) rescue:true dropped from the call → the wiring assertion goes RED."""
+    with open(SEND_JS, encoding='utf-8') as f:
         src = f.read()
-    assert src.count(_SYNC_FRAGMENT) == 2, 'sync fragment drifted — update the neuter target'
-    neutered_src = src.replace(_SYNC_FRAGMENT, 'await syncConversationToServer(conv);')
-    assert neutered_src != src, 'neuter did not change the source'
-    assert neutered_src.count(_SYNC_FRAGMENT) == 0, (
-        'DOUBLE-NEUTER did not bite: the durable rescue pair survived the '
-        'neuter — the test does not discriminate the fix.')
+    # (a)
+    assert src.count(_SYNC_FRAGMENT) == 1, 'inline fragment drifted — update the neuter target'
+    neutered_a = src.replace(_SYNC_FRAGMENT, 'await syncConversationToServer(conv);')
+    assert neutered_a.count(_SYNC_FRAGMENT) == 0, (
+        'NEUTER-a did not bite: the inline rescue pair survived removal')
+    # (c)
+    neutered_c = src.replace(_USERSTOP_CALL,
+                             '_userStopDuringStartup(conv, convId, { userMsg, userMsgIdx })')
+    assert neutered_c != src and _USERSTOP_CALL not in neutered_c, (
+        'NEUTER-c did not bite: rescue:true survived removal from the call')
+    # (b)
+    btn_src = open(SEND_BTN_JS, encoding='utf-8').read()
+    neutered_b = btn_src.replace('if (opts.rescue) {', 'if (false && opts.rescue) {')
+    assert neutered_b != btn_src, 'NEUTER-b replacement did not land'
+    output = _run_helper_harness(neutered_b)
+    assert 'FAIL rescue_failure_marks_pending' in output, (
+        'NEUTER-b did not bite: pending-sync still marked with the rescue arm '
+        'gated off — the behavioural harness does not discriminate:\n' + output)
+    # …while the best-effort arm keeps working under the same neuter (anchor):
+    assert 'PASS no_rescue_no_pending' in output, output

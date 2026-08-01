@@ -31,8 +31,10 @@ _THINKING_FORMAT_HINTS = [
     (re.compile(r'glm', re.I),                    'thinking_type'),
     # DeepSeek V4 (Apr 2026) uses thinking.type = "enabled" (dual-mode API).
     (re.compile(r'deepseek-v4', re.I),            'thinking_type'),
-    # DeepSeek V3 reasoner was a separate model — no thinking param needed.
-    (re.compile(r'deepseek-reasoner', re.I),      'none'),
+    # NOTE: the V3-era 'deepseek-reasoner' → 'none' hint was removed
+    # 2026-07-31 — the alias was RETIRED by DeepSeek on 2026-07-24 and had
+    # already been re-pointed at v4-flash-thinking in Apr, so 'none' was
+    # doubly wrong. Unknown deepseek names fall through to auto-detect.
 ]
 
 

@@ -818,16 +818,35 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
     # ── Determine final finish reason ──
     if task['aborted']:
         _pre_abort_finish = last_finish_reason
-        last_finish_reason = 'aborted'
-        if _abort_detected_phase:
-            logger.debug('[%s] Abort was detected INSIDE loop at: %s model=%s '
-                         '(original finish_reason was "%s")',
-                         tid, _abort_detected_phase, model, _pre_abort_finish)
+        if task.get('_abort_reason') == 'stuck_no_progress':
+            # ★ SYSTEM REAP, not a user Stop (pt_bf93496e98b9441e). The
+            #   stuck-task reaper already settled this task's verdict —
+            #   finishReason='error' + a worker_lost envelope — BEFORE the
+            #   wedged worker thread unwound and reached this finalize. The
+            #   unconditional 'aborted' collapse did two kinds of harm: it
+            #   rendered a server-side kill as "已停止" (user Stop), hiding
+            #   the one event that needs investigation; and because the
+            #   reaper's own conv sync had already written 'error', the two
+            #   terminal writers RACED — measured 4 'error' / 2 'aborted' on
+            #   6 same-path reaps, the winner decided purely by timing.
+            #   Converge on the reaper's verdict so BOTH writers land the
+            #   same terminal state regardless of ordering.
+            last_finish_reason = 'error'
+            logger.warning('[%s] REAPED task reached finalize (system kill, '
+                           '_abort_reason=stuck_no_progress) — settling '
+                           'finishReason=error, NOT aborted. Loop exit was '
+                           '"%s" model=%s.', tid, _loop_exit_reason, model)
         else:
-            logger.warning('[%s] LATE ABORT: loop exited normally (%s) model=%s '
-                           'but task["aborted"] is True. Original finish_reason was "%s". '
-                           'The user likely clicked Stop AFTER the model finished but BEFORE the response was fully rendered.',
-                           tid, _loop_exit_reason, model, _pre_abort_finish)
+            last_finish_reason = 'aborted'
+            if _abort_detected_phase:
+                logger.debug('[%s] Abort was detected INSIDE loop at: %s model=%s '
+                             '(original finish_reason was "%s")',
+                             tid, _abort_detected_phase, model, _pre_abort_finish)
+            else:
+                logger.warning('[%s] LATE ABORT: loop exited normally (%s) model=%s '
+                               'but task["aborted"] is True. Original finish_reason was "%s". '
+                               'The user likely clicked Stop AFTER the model finished but BEFORE the response was fully rendered.',
+                               tid, _loop_exit_reason, model, _pre_abort_finish)
     elif last_finish_reason in ('tool_use', 'tool_calls') and not task.get('error'):
         last_finish_reason = 'error'
         from lib.error_envelope import make_envelope as _make_env
@@ -1358,6 +1377,21 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
             logger.warning('[Task %s] pre-emit conv sync failed: %s — '
                            'terminal event will fall back to transient buffer',
                            tid, _pre_emit_err, exc_info=True)
+    # ── Persist the parent's TERMINAL record BEFORE the autopilot hook ──
+    #   (pt_5f0262fc). The VU sub-task runs INLINE inside maybe_run_autopilot
+    #   (_run_single_turn on THIS thread) and can hang on ANYTHING — a wedged
+    #   tool, a stalled LLM. Measured 2026-07-31: task 752273db finished at
+    #   20:38:27 (message committed fr=stop, status='done' since line ~973)
+    #   but its task_results row stayed 'running' for 2h57m because the VU
+    #   sub-task sat in a run_command crawling a FUSE parent dir — the
+    #   persist below the hook never ran. Everything the parent owes the
+    #   world (terminal row, conv sync, queue drain, proactive status) must
+    #   land BEFORE the VU can hang. The baton's own assumption comment
+    #   ("persist_task_result runs _dispatch_queued_message before our hook
+    #   fires") already expected this order — the code disagreed. The
+    #   heavy-state release is deferred past the hook (the VU inherits
+    #   task['messages']); it runs below, right after append_event(done_evt).
+    persist_task_result(task, _defer_heavy_release=True)
     try:
         from lib.tasks_pkg.autopilot import maybe_run_autopilot
         maybe_run_autopilot(task)
@@ -1460,7 +1494,12 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
     # synthesis. Clearing is safe even if a reader missed every event (the
     # task is terminal and the latch is gone → LATE done resumes its role).
     task.pop('_finalize_started_at', None)
-    persist_task_result(task)
+    # persist_task_result already ran BEFORE the autopilot hook (see above);
+    # the heavy-state release was deferred because the VU inherits
+    # task['messages'] — release it here, at the same point the old trailing
+    # persist would have released.
+    from lib.tasks_pkg.manager._persist import _release_heavy_task_state
+    _release_heavy_task_state(task)
 
     _spawn_async_commit_round(task, project_enabled, project_path)
 

@@ -25,6 +25,10 @@ DEFAULT_SLOT_CONFIGS = {
     # Meituan-gateway name for Fable 5 (Jul 2026 marketplace) — pricier tier
     # than the public API (¥72/¥360 per 1M ≈ $9.94/$49.72).
     'claude-fable-5':                {'caps': {'text', 'vision', 'thinking'},      'rpm': 30,  'latency': 5000, 'cost': 0.030},
+    # ── Claude (Anthropic — 5th gen: Sonnet 5, Jun 2026) ──
+    # Promo price $2/$10 until 2026-08-31, then $3/$15 — at $3 input the
+    # derived 'cheap' tag no longer applies; drop it when the price row moves.
+    'claude-sonnet-5':               {'caps': {'text', 'vision', 'thinking', 'cheap'}, 'rpm': 50,  'latency': 2000, 'cost': 0.009},
     # ── Claude (Anthropic — current gen: 4.8 flagship, May 2026) ──
     'claude-opus-4-8':               {'caps': {'text', 'vision', 'thinking'},      'rpm': 30,  'latency': 5000, 'cost': 0.015},
     # ── Claude (Anthropic — 4.7 family, Apr 2026) ──
@@ -107,13 +111,15 @@ DEFAULT_SLOT_CONFIGS = {
     'deepseek-v4-pro':               {'caps': {'text', 'thinking', 'cheap'},      'rpm': 30,  'latency': 3000, 'cost': 0.001},
     'deepseek-v4-flash':             {'caps': {'text', 'thinking', 'cheap'},      'rpm': 60,  'latency': 2000, 'cost': 0.0002},
     'deepseek-v4-flash-huawei':      {'caps': {'text', 'thinking', 'cheap'},      'rpm': 60,  'latency': 2000, 'cost': 0.0002},
-    'deepseek-chat':                 {'caps': {'text', 'cheap'},                  'rpm': 60,  'latency': 2000, 'cost': 0.001},
+    # RETIRED 2026-07-24 15:59 UTC (api-docs.deepseek.com/updates): the legacy
+    # aliases 'deepseek-chat' and 'deepseek-reasoner' now ERROR on the official
+    # API — their rows were removed. Successors: deepseek-v4-flash (chat →
+    # non-thinking, reasoner → thinking) / deepseek-v4-pro. Do NOT re-add.
     'deepseek-v3.2':                 {'caps': {'text', 'cheap'},                  'rpm': 60,  'latency': 2000, 'cost': 0.001},
     'deepseek-v3.2-tencent':         {'caps': {'text', 'cheap'},                  'rpm': 60,  'latency': 2000, 'cost': 0.001},
     'deepseek-v3.2-baidu':           {'caps': {'text', 'cheap'},                  'rpm': 60,  'latency': 2000, 'cost': 0.001},
     'deepseek-v3.2-huawei':          {'caps': {'text', 'cheap'},                  'rpm': 60,  'latency': 2000, 'cost': 0.001},
     'deepseek-v3.2-doubao':          {'caps': {'text', 'cheap'},                  'rpm': 60,  'latency': 2000, 'cost': 0.001},
-    'deepseek-reasoner':             {'caps': {'text', 'thinking', 'cheap'},      'rpm': 30,  'latency': 3000, 'cost': 0.002, 'stream_only': True},
 
     # ── Gemini ──
     'gemini-2.5-pro':                {'caps': {'text', 'vision', 'thinking', 'cheap'}, 'rpm': 100, 'latency': 2000, 'cost': 0.005},

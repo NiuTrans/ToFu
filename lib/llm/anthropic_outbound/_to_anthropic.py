@@ -102,9 +102,20 @@ def _strip_cc(blocks) -> list:
 
 
 def _convert_content_blocks(content) -> list:
-    """OpenAI message content (str | list) → Anthropic content blocks."""
+    """OpenAI message content (str | list) → Anthropic content blocks.
+
+    NEVER emits an empty/whitespace-only text block: Anthropic (and every
+    strict Anthropic-shape validator — Moonshot's "text content is empty",
+    the 2026-07-31 kimi-k3 incident class) hard-400s the whole request on
+    one. A phantom block carries zero information, so dropping it AT THE
+    EMISSION SEAM keeps this boundary self-consistent regardless of which
+    caller fed it — this is the Anthropic-side counterpart of
+    ``lib.llm_sanitize._strip_empty_text_blocks`` (which guards the OpenAI
+    wire inside build_body; callers that bypass build_body get the same
+    guarantee here).
+    """
     if isinstance(content, str):
-        return [{'type': 'text', 'text': content}] if content else []
+        return [{'type': 'text', 'text': content}] if content.strip() else []
     if not isinstance(content, list):
         return []
     out = []
@@ -114,7 +125,10 @@ def _convert_content_blocks(content) -> list:
         btype = block.get('type')
         cc = block.get('cache_control')
         if btype == 'text':
-            nb = {'type': 'text', 'text': block.get('text', '')}
+            text = block.get('text') or ''
+            if not text.strip():
+                continue  # phantom empty text block — hard-400 upstream
+            nb = {'type': 'text', 'text': text}
             if cc:
                 nb['cache_control'] = cc
             out.append(nb)
@@ -252,12 +266,26 @@ def openai_body_to_anthropic(body: dict) -> dict:
         elif role == 'assistant':
             blocks = _assistant_blocks(msg)
             if not blocks:
-                blocks = [{'type': 'text', 'text': ''}]
+                # Ghost assistant (no signed thinking, no content, no
+                # tool_calls) — a caller bypassed build_body's
+                # _drop_empty_assistant_messages. A phantom '' text block
+                # hard-400s upstream; a placeholder keeps the turn AND the
+                # user/assistant alternation (dropping the message would
+                # make two same-role turns adjacent — also a 400).
+                logger.warning('[AnthropicOut] Ghost assistant reached the '
+                               'boundary with no blocks — emitting placeholder '
+                               '(upstream healer bypassed)')
+                blocks = [{'type': 'text', 'text': '[empty response]'}]
             messages.append({'role': 'assistant', 'content': blocks})
         elif role == 'user':
             blocks = _convert_content_blocks(msg.get('content') or '')
             if not blocks:
-                blocks = [{'type': 'text', 'text': ''}]
+                # Same class on the user side; placeholder vocabulary matches
+                # _fix_empty_user_messages on the OpenAI wire.
+                logger.warning('[AnthropicOut] User message reached the '
+                               'boundary with no content — emitting placeholder '
+                               '(upstream healer bypassed)')
+                blocks = [{'type': 'text', 'text': '[empty message]'}]
             messages.append({'role': 'user', 'content': blocks})
 
     if system_blocks:

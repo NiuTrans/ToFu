@@ -1,26 +1,29 @@
-"""tests/test_mcp_install_nonblocking.py — slow install must not freeze the loop.
+"""tests/test_mcp_install_nonblocking.py — install flow over the ISOLATED env.
 
-Regression guard for the "installing llm-mcp times out" bug. The first-connect
-auto-install runs a BLOCKING ``subprocess.run`` (pip, up to 300s). It used to
-be called inline inside the ``_server_owner`` coroutine, on the single shared
-MCP event loop — so a cold install froze EVERY other server's keepalive /
-tool-calls / connects, and the front-end's 30s fetch aborted with a useless
-"timeout".
+Regression guard for the "installing llm-mcp times out" bug lineage. The
+original bug: a BLOCKING ``pip install`` ran inline on the single shared MCP
+event loop, freezing every other server. The architecture has since changed
+twice:
 
-The fix offloads ``_try_autoinstall_launcher`` to a worker thread via
-``loop.run_in_executor`` (mirroring ``_reconnect_server``). These tests prove:
+  1. pip install offloaded to a worker thread (the fix that suite pinned);
+  2. pip-into-shared-interpreter REMOVED entirely (pt_9345a80f417d43ca) —
+     vendored servers now launch isolated via
+     ``uv run --no-project --with-editable <src>``. There is no longer any
+     blocking install call inside the bridge: launch-arg resolution is pure
+     path stat'ing, and the dependency resolve happens INSIDE the spawned
+     child process (async) or in ``prewarm_vendored_launcher`` (worker
+     thread).
 
-  1. While a SLOW fake pip is "installing", a concurrent coroutine on the same
-     loop keeps making progress (the loop is not blocked).
-  2. The new ``prewarm_vendored_launcher`` helper (run by the install route in
-     a Flask worker thread) installs a vendored launcher and reports failure
-     reasons faithfully.
+These tests pin the CURRENT contract:
+
+  * the bridge performs no blocking subprocess/pip call before spawn;
+  * prewarm runs the uv warm and surfaces success / failure faithfully;
+  * start_install_job stays async, pollable, and idempotent.
 
 Run:  pytest tests/test_mcp_install_nonblocking.py -m unit
 """
 from __future__ import annotations
 
-import asyncio
 import shutil
 import threading
 import time
@@ -33,7 +36,7 @@ from lib.mcp.client import MCPBridge, prewarm_vendored_launcher
 pytestmark = pytest.mark.unit
 
 
-def _register_fake_vendor(tmp_path, monkeypatch, command='slow-mcp', layout='sibling'):
+def _register_fake_vendor(tmp_path, monkeypatch, command='fake-mcp', layout='sibling'):
     """Register a vendored launcher backed by a real (empty) source dir."""
     repo = tmp_path / 'repo'
     repo.mkdir(exist_ok=True)
@@ -47,179 +50,116 @@ def _register_fake_vendor(tmp_path, monkeypatch, command='slow-mcp', layout='sib
     (src / 'pyproject.toml').write_text('[project]\nname="x"\n')
     monkeypatch.setattr(mc, '_repo_root', lambda: str(repo))
     monkeypatch.setitem(mc._VENDORED_LAUNCHERS, command, {'sources': [rel]})
-    monkeypatch.setattr(mc, '_install_attempted', set())
     monkeypatch.setattr(mc, '_install_last_error', {})
-    monkeypatch.setattr(mc, '_install_cmd_locks', {})
     monkeypatch.setattr(mc, '_install_jobs', {})
     monkeypatch.setattr(mc, '_vendored_mtime', float('inf'))
     return str(src), str(repo)
 
 
-def test_slow_install_does_not_block_event_loop(tmp_path, monkeypatch):
-    """A slow auto-install inside _server_owner must run off the loop.
+def test_server_owner_performs_no_blocking_subprocess_before_spawn():
+    """The owner task must not run a BLOCKING subprocess before spawning.
 
-    We drive ``_async_start_owner`` for a vendored command that is NOT on PATH,
-    with ``_try_autoinstall_launcher`` monkeypatched to BLOCK (time.sleep) like
-    a cold pip. Concurrently we run a 'heartbeat' coroutine that increments a
-    counter every 10ms. If the install were inline on the loop, the heartbeat
-    would freeze for the whole sleep; with the run_in_executor offload it keeps
-    ticking.
+    The original freeze came from a blocking pip inside ``_server_owner`` on
+    the shared event loop. After the isolation migration there is no install
+    step in the owner at all — pin that structurally so a future "just call
+    the installer here" convenience reintroduces the freeze loudly.
     """
-    _register_fake_vendor(tmp_path, monkeypatch, 'slow-mcp')
+    import inspect
 
-    INSTALL_SECS = 0.6
-    install_started = threading.Event()
+    from lib.mcp.client._bridge import MCPBridge
 
-    def _slow_pip(command):
-        install_started.set()
-        time.sleep(INSTALL_SECS)        # blocking, like a real pip
-        return None                     # pretend install failed → connect raises
-
-    monkeypatch.setattr(mc, '_try_autoinstall_launcher', _slow_pip)
-    # Force the "not on PATH / not resolvable" branch so the owner reaches the
-    # auto-install fallback. client.py does a local `import shutil`, so patch
-    # the real module's `which`.
-    monkeypatch.setattr(shutil, 'which', lambda c: None)
-    monkeypatch.setattr(mc, '_resolve_launcher', lambda c: None)
-
-    async def _drive():
-        loop = asyncio.get_running_loop()
-        bridge = MCPBridge()
-
-        ticks = {'n': 0}
-
-        async def _heartbeat():
-            # Keep ticking until the connect attempt resolves.
-            while True:
-                ticks['n'] += 1
-                await asyncio.sleep(0.01)
-
-        hb = loop.create_task(_heartbeat())
-
-        cfg = {'transport': 'stdio', 'command': 'slow-mcp', 'args': []}
-        t0 = time.monotonic()
-        with pytest.raises(Exception):
-            # Install fails (returns None) → owner raises MCPConnectError /
-            # FileNotFoundError. We only care that the loop stayed alive.
-            await bridge._async_start_owner('slow-mcp', cfg)
-        elapsed = time.monotonic() - t0
-
-        hb.cancel()
-        return ticks['n'], elapsed
-
-    ticks, elapsed = asyncio.run(_drive())
-
-    # The install blocked for ~INSTALL_SECS; the heartbeat fires every 10ms.
-    # If the loop were frozen, ticks would be ~0. With the offload it should
-    # tick many times during the install window.
-    assert elapsed >= INSTALL_SECS, (
-        f'install returned too fast ({elapsed:.2f}s) — slow path not exercised')
-    assert ticks >= 10, (
-        f'event loop appears blocked during install: only {ticks} heartbeat '
-        f'ticks in {elapsed:.2f}s (expected many)')
+    src = inspect.getsource(MCPBridge._server_owner)
+    assert 'subprocess.run' not in src, (
+        '_server_owner gained a blocking subprocess.run — that is the '
+        'event-loop freeze this suite exists to prevent'
+    )
+    assert '_try_autoinstall_launcher' not in src, (
+        'the deleted pip auto-install path is referenced again'
+    )
 
 
-def test_prewarm_installs_vendored_and_reports_failure(tmp_path, monkeypatch):
-    """prewarm_vendored_launcher runs pip and surfaces success / failure."""
-    _register_fake_vendor(tmp_path, monkeypatch, 'warm-mcp', layout='vendored')
-    monkeypatch.setattr(shutil, 'which', lambda c: None)
-    monkeypatch.setattr(mc, '_resolve_launcher', lambda c: None)
+def test_bridge_translates_vendored_command_to_uv(tmp_path, monkeypatch):
+    """A vendored bare command must become the isolated uv argv before spawn."""
+    src, _repo = _register_fake_vendor(tmp_path, monkeypatch, 'fake-mcp')
 
-    # Success path: pip "succeeds" and the launcher resolves afterwards.
+    argv = mc.vendored_launch_argv('fake-mcp')
+    assert argv is not None, 'registered vendored command did not translate'
+    assert argv[:4] == ['uv', 'run', '--no-project', '--with-editable']
+    assert argv[4] == src, (
+        f'translation must point at the registered source {src}, got {argv[4]}'
+    )
+    assert argv[-1] == 'fake-mcp'
+
+    # And a command with NO source stays untranslated (connect will surface
+    # the install hint instead of launching anything).
+    monkeypatch.setattr(mc, '_find_vendored_source', lambda c: None)
+    assert mc.vendored_launch_argv('fake-mcp') is None
+
+
+def test_prewarm_runs_uv_warm_and_reports_failure(tmp_path, monkeypatch):
+    """prewarm_vendored_launcher runs the uv warm and surfaces rc/stderr."""
+    src, _repo = _register_fake_vendor(tmp_path, monkeypatch, 'warm-mcp', layout='vendored')
+
     calls = {'n': 0}
+    seen = {}
 
-    def _fake_install(command):
+    class _R:
+        returncode = 0
+        stdout = 'ok'
+        stderr = ''
+
+    def _fake_run(args, **kw):
         calls['n'] += 1
-        return f'/env/bin/{command}'
+        seen['args'] = args
+        return _R()
 
-    monkeypatch.setattr(mc, '_try_autoinstall_launcher', _fake_install)
+    monkeypatch.setattr(mc.subprocess, 'run', _fake_run)
     ready, detail = prewarm_vendored_launcher('warm-mcp')
     assert ready is True
-    assert detail == '/env/bin/warm-mcp'
     assert calls['n'] == 1
+    warm = seen['args']
+    assert warm[:4] == ['uv', 'run', '--no-project', '--with-editable']
+    assert warm[4] == src
+    assert warm[-3:] == ['python', '-c', 'import warm_mcp'], (
+        f'the warm must import the server package, got {warm[-3:]}'
+    )
+    assert 'uv run' in detail
 
-    # Failure path: pip fails → reason is propagated from _install_last_error.
-    def _fail_install(command):
-        with mc._install_lock:
-            mc._install_last_error[command] = 'pip exited 1: boom'
-        return None
+    # Failure path: non-zero rc → reason propagated + stored.
+    class _F:
+        returncode = 1
+        stdout = ''
+        stderr = 'ResolutionImpossible: boom'
 
-    monkeypatch.setattr(mc, '_try_autoinstall_launcher', _fail_install)
+    monkeypatch.setattr(mc.subprocess, 'run', lambda *a, **k: _F())
     ready, detail = prewarm_vendored_launcher('warm-mcp')
     assert ready is False
     assert 'boom' in detail
+    assert mc._install_last_error.get('warm-mcp'), (
+        'failure reason must be stored for the connect-error hint'
+    )
 
 
-def test_prewarm_noop_when_already_resolvable(tmp_path, monkeypatch):
-    """If the launcher already resolves, prewarm does NOT call pip."""
-    _register_fake_vendor(tmp_path, monkeypatch, 'have-mcp', layout='vendored')
-    monkeypatch.setattr(shutil, 'which', lambda c: None)
-    monkeypatch.setattr(mc, '_resolve_launcher', lambda c: f'/env/bin/{c}')
-
-    def _must_not_run(command):
-        raise AssertionError('pip should not run when launcher already resolves')
-
-    monkeypatch.setattr(mc, '_try_autoinstall_launcher', _must_not_run)
-    ready, detail = prewarm_vendored_launcher('have-mcp')
+def test_prewarm_noop_for_non_vendored():
+    """Non-vendored commands are a no-op — nothing to warm."""
+    ready, detail = prewarm_vendored_launcher('definitely-not-vendored')
     assert ready is True
-    assert detail == '/env/bin/have-mcp'
-
-
-
-def test_concurrent_autoinstall_runs_pip_once(tmp_path, monkeypatch):
-    """Two concurrent installs of the SAME command must run pip exactly once.
-
-    Guards the TOCTOU gap: the per-command lock must serialize callers so the
-    second sees ``_install_attempted`` and re-resolves instead of launching a
-    second simultaneous ``pip install`` of the same source (startup pre-warm
-    racing a user click).
-    """
-    _register_fake_vendor(tmp_path, monkeypatch, 'race-mcp', layout='vendored')
-    monkeypatch.setattr(shutil, 'which', lambda c: None)
-
-    pip_runs = {'n': 0}
-    run_lock = threading.Lock()
-
-    def _fake_run(args, **kw):
-        with run_lock:
-            pip_runs['n'] += 1
-        time.sleep(0.3)  # hold the lock long enough for the racer to queue
-        class R:
-            returncode = 0
-            stdout = 'ok'
-            stderr = ''
-        return R()
-
-    monkeypatch.setattr(mc.subprocess, 'run', _fake_run)
-    # After "pip", the launcher resolves.
-    monkeypatch.setattr(mc, '_resolve_launcher', lambda c: f'/env/bin/{c}')
-
-    results = {}
-
-    def _call(tag):
-        results[tag] = mc._try_autoinstall_launcher('race-mcp')
-
-    t1 = threading.Thread(target=_call, args=('a',))
-    t2 = threading.Thread(target=_call, args=('b',))
-    t1.start(); t2.start()
-    t1.join(); t2.join()
-
-    assert pip_runs['n'] == 1, f'pip ran {pip_runs["n"]}x — per-command lock missing'
-    assert results['a'] == '/env/bin/race-mcp'
-    assert results['b'] == '/env/bin/race-mcp'
+    assert detail == ''
+    ready, detail = prewarm_vendored_launcher('/abs/path/to/thing')
+    assert ready is True
+    assert detail == ''
 
 
 def test_start_install_job_async_and_pollable(tmp_path, monkeypatch):
-    """start_install_job returns immediately while pip runs in the background."""
+    """start_install_job returns immediately while the warm runs in background."""
     _register_fake_vendor(tmp_path, monkeypatch, 'job-mcp', layout='vendored')
     monkeypatch.setattr(shutil, 'which', lambda c: None)
-    monkeypatch.setattr(mc, '_resolve_launcher', lambda c: None)
 
     release = threading.Event()
 
     def _slow_prewarm(command):
         release.wait(timeout=5)
-        return True, f'/env/bin/{command}'
+        return True, f'uv run --with-editable /x {command}'
 
     monkeypatch.setattr(mc, 'prewarm_vendored_launcher', _slow_prewarm)
 
@@ -227,12 +167,15 @@ def test_start_install_job_async_and_pollable(tmp_path, monkeypatch):
     job = mc.start_install_job('job-mcp')
     elapsed = time.monotonic() - t0
 
-    # Returned without waiting for the (blocked) install.
     assert elapsed < 0.5
     assert job['state'] == 'installing'
     assert mc.get_install_job('job-mcp')['state'] == 'installing'
 
-    # Let the fake pip finish; the job must flip to ready.
+    # A second click while installing re-attaches instead of spawning a
+    # second warm (the job-state dedup replaces the old per-command pip lock).
+    again = mc.start_install_job('job-mcp')
+    assert again['state'] == 'installing'
+
     release.set()
     for _ in range(50):
         if mc.get_install_job('job-mcp')['state'] != 'installing':
@@ -240,18 +183,45 @@ def test_start_install_job_async_and_pollable(tmp_path, monkeypatch):
         time.sleep(0.05)
     final = mc.get_install_job('job-mcp')
     assert final['state'] == 'ready'
-    assert final['detail'] == '/env/bin/job-mcp'
+    assert 'uv run' in final['detail']
 
 
-def test_start_install_job_ready_fast_path(tmp_path, monkeypatch):
-    """If the launcher already resolves, no job/thread is started."""
-    _register_fake_vendor(tmp_path, monkeypatch, 'fast-mcp', layout='vendored')
-    monkeypatch.setattr(shutil, 'which', lambda c: None)
-    monkeypatch.setattr(mc, '_resolve_launcher', lambda c: f'/env/bin/{c}')
+def test_start_install_job_ready_fast_path_for_non_vendored(tmp_path, monkeypatch):
+    """A NON-vendored launcher already on PATH short-circuits to ready."""
+    monkeypatch.setattr(shutil, 'which', lambda c: f'/usr/bin/{c}')
 
     def _must_not_run(command):
-        raise AssertionError('prewarm should not run on the ready fast path')
+        raise AssertionError('prewarm should not run for a non-vendored on-PATH command')
 
     monkeypatch.setattr(mc, 'prewarm_vendored_launcher', _must_not_run)
-    job = mc.start_install_job('fast-mcp')
+    job = mc.start_install_job('some-foreign-tool')
     assert job['state'] == 'ready'
+
+
+def test_start_install_job_warms_vendored_even_when_on_path(tmp_path, monkeypatch):
+    """A VENDORED command on PATH must STILL warm — that copy may be the stale
+    coupled pip-era install, and the bridge launches the isolated env anyway.
+    """
+    _register_fake_vendor(tmp_path, monkeypatch, 'fast-mcp', layout='vendored')
+    monkeypatch.setattr(shutil, 'which', lambda c: f'/usr/bin/{c}')
+
+    calls = {'n': 0}
+    release = threading.Event()
+
+    def _quick_prewarm(command):
+        calls['n'] += 1
+        release.wait(timeout=5)
+        return True, 'uv run --with-editable /x fast-mcp'
+
+    monkeypatch.setattr(mc, 'prewarm_vendored_launcher', _quick_prewarm)
+    job = mc.start_install_job('fast-mcp')
+    assert job['state'] == 'installing', (
+        'an on-PATH vendored command must NOT skip the uv warm'
+    )
+    release.set()
+    for _ in range(50):
+        if mc.get_install_job('fast-mcp')['state'] != 'installing':
+            break
+        time.sleep(0.05)
+    assert mc.get_install_job('fast-mcp')['state'] == 'ready'
+    assert calls['n'] == 1

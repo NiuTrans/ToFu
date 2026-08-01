@@ -33,6 +33,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 
 import pytest
 
@@ -78,8 +79,9 @@ global._retriggerHgTranslations = () => {};
 global.apiUrl = (p) => p;
 global._convSorter = (a, b) => 0;
 
-// The real windowed client half — provides recordWindowState + convWindowParam.
-eval(fs.readFileSync(process.argv[3], 'utf8'));  // conv_window.js
+// conv_window.js (argv[2]) first — the real windowed client half providing
+// recordWindowState + convWindowParam — then the conv family in bundle order.
+for (const f of process.argv.slice(2)) eval(fs.readFileSync(f, 'utf8'));
 
 // No cache → Phase 1 is skipped, Phase 2 fetch is authoritative.
 global.ConvCache = {
@@ -120,11 +122,6 @@ global.conversations = [{
   createdAt: 1, updatedAt: 1, activeTaskId: null,
 }];
 
-eval(fs.readFileSync(process.argv[2], 'utf8'));  // REAL core/conversations.js
-// Extracted leaf modules (pt_3879f00e decomposition): the load path calls
-// convHasPendingSync (core/pending_sync.js) and the persist/freshness helpers
-// (core/conv_persist_helpers.js), which no longer live in conversations.js.
-for (const extra of process.argv.slice(4)) eval(fs.readFileSync(extra, 'utf8'));
 global.conversations = conversations;
 
 const out = [];
@@ -162,17 +159,19 @@ def _run(conv_js: str) -> subprocess.CompletedProcess:
     with open(harness, 'w') as f:
         f.write(_HARNESS)
     conv_window_js = os.path.join(JS_DIR, 'conv_window.js')
-    # Symbols the load path uses that were extracted out of
-    # core/conversations.js — eval them so the harness scope matches the
-    # shipped bundle (lib/js_bundler.py concatenates them all).
-    extra_js = [
-        os.path.join(JS_DIR, 'core', 'pending_sync.js'),
-        os.path.join(JS_DIR, 'core', 'conv_persist_helpers.js'),
-        os.path.join(JS_DIR, 'core', 'conv_apply_settings.js'),
-    ]
+    # conv_window.js first (windowed client half), then the WHOLE conv
+    # family via the drift-proof closure (see
+    # _conv_bundle_sources.conv_family_sources); NEUTER copies ride the
+    # override (the mutated file REPLACES conversations.js).
+    sys.path.insert(0, HERE)
+    from _conv_bundle_sources import conv_family_sources
+    override = None
+    if os.path.basename(conv_js) != 'conversations.js':
+        override = {'core/conversations.js': conv_js}
+    extra_js = [conv_window_js] + conv_family_sources(override=override)
     try:
         return subprocess.run(
-            ['node', harness, conv_js, conv_window_js, *extra_js],
+            ['node', harness, *extra_js],
             capture_output=True, text=True, timeout=60,
         )
     finally:

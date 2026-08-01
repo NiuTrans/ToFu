@@ -164,6 +164,18 @@
         .replace('%d', item.blockCount));
     }
     if (item.reason) meta.push(item.reason);
+    // "Create conversation" — open a fresh chat about this epic (delegates to
+    // project-brain.js's launcher). Rendered ONLY when that shared launcher
+    // is actually loaded: a button whose handler is absent is a dead button.
+    var convBtn = (window.ProjectBrain &&
+        typeof window.ProjectBrain._openEpicConversation === 'function')
+      ? '<button type="button" class="pb-attn-act pb-attn-act-conv"' +
+        ' data-act="createConv" title="' +
+        _esc(_t('projectBrain.actCreateConv', 'New chat')) + '">' +
+        ((typeof Icon === 'function') ? Icon('messagePlus', 12) : '') +
+        '<span>' + _esc(_t('projectBrain.actCreateConv', 'New chat')) +
+        '</span></button>'
+      : '';
     return _card(item,
       '<div class="pb-attn-head">' + _sevPill(item.severity) +
         '<span class="pb-attn-kind">' +
@@ -181,7 +193,8 @@
         '<span>' + _esc(_t('projectBrain.answerSubmit', 'Submit answer')) +
         '</span></button>' +
       '</div>' +
-      (meta.length ? '<div class="pb-attn-meta">' + _esc(meta.join(' · ')) + '</div>' : ''));
+      (meta.length ? '<div class="pb-attn-meta">' + _esc(meta.join(' · ')) + '</div>' : '') +
+      (convBtn ? '<div class="pb-attn-actions">' + convBtn + '</div>' : ''));
   }
 
   /** A pending charter proposal — commit / reject inline (same routes the
@@ -252,6 +265,35 @@
       '<div class="pb-attn-empty-sub">' + _esc(sub) + '</div></div>';
   }
 
+  // ── Pending-focus channel (Board deep-link) ─────────────────────
+  // The Board's compact awaiting card deep-links HERE with a specific epic
+  // id. This tab's data loads ASYNC (refreshAttention → brainAttention →
+  // renderAttention), so the focus request must survive until the card
+  // exists: focusItem stores the id, _applyFocus honors it now if the card
+  // is already rendered, and renderAttention retries it after every render.
+  var _pendingFocusId = '';
+
+  /** Scroll + flash the card for `id` (Board "go answer" deep-link). */
+  function focusItem(id) {
+    _pendingFocusId = String(id || '');
+    _applyFocus();
+  }
+
+  function _applyFocus() {
+    if (!_pendingFocusId) return;
+    var el = _bodyEl();
+    if (!el) return;
+    var card = el.querySelector('.pb-attn-card[data-attn-id="' +
+      _pendingFocusId.replace(/"/g, '') + '"]');
+    if (!card) return;   // not rendered yet — renderAttention will retry
+    _pendingFocusId = '';
+    try { card.scrollIntoView({ block: 'center', behavior: 'smooth' }); }
+    catch (_e) { /* jsdom / older browsers: best-effort */ }
+    card.classList.remove('pb-attn-flash');
+    void card.offsetWidth;   // reflow so re-adding re-triggers the animation
+    card.classList.add('pb-attn-flash');
+  }
+
   /**
    * Render the tab from the backend verdict. Pure renderer — `res` is the
    * brainAttention payload; the order of `res.items` is the server's and is
@@ -315,6 +357,9 @@
       try { ProjectBrainI18n.apply(el); } catch (_e) { /* best-effort */ }
     }
     _wireActions(el);
+    // A Board deep-link may have asked for a specific card BEFORE this render
+    // resolved — honor it now that the card exists.
+    _applyFocus();
   }
 
   /** Tab badge. `blocking` drives the alarm class so an advisory-only project
@@ -411,6 +456,21 @@
       if (text) _submitAnswer(api, path, id, convId, text, btn);
       return;
     }
+    if (act === 'createConv') {
+      var launcher = window.ProjectBrain &&
+        window.ProjectBrain._openEpicConversation;
+      if (typeof launcher !== 'function') return;
+      // The ORIGINAL title (data-pb-src), never the translation overlay — the
+      // same source-of-truth rule the commit path holds.
+      var titleEl = card.querySelector('.pb-attn-title [data-pb-src]') ||
+                    card.querySelector('.pb-attn-title');
+      var ttl = titleEl
+        ? (titleEl.getAttribute('data-pb-src') != null
+            ? titleEl.getAttribute('data-pb-src') : (titleEl.textContent || ''))
+        : '';
+      launcher(id, ttl);
+      return;
+    }
     if (act === 'commit') {
       var body = card.querySelector('.pb-attn-body [data-pb-src]') ||
                  card.querySelector('.pb-attn-body');
@@ -496,6 +556,7 @@
   window.ProjectBrainAttention = {
     renderAttention: renderAttention,
     refreshAttention: refreshAttention,
+    focusItem: focusItem,
     _card: _card,
     _sevPill: _sevPill,
     _setBadge: _setBadge,

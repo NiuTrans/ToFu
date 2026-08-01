@@ -13,6 +13,7 @@ imports _MODEL_MAX_OUTPUT + _DEFAULT_UNKNOWN_MAX_OUTPUT from here.
 from lib.log import get_logger
 from lib.model_info._family import (
     is_claude,
+    is_deepseek,
     is_doubao,
     is_ernie,
     is_gemini,
@@ -115,6 +116,27 @@ def _ernie_max_output(model: str) -> int:
     return 16384
 
 
+def _deepseek_max_output(model: str) -> int:
+    """Return the max output token limit for a specific DeepSeek model.
+
+    Per api-docs.deepseek.com/quick_start/pricing (verified 2026-07-31):
+      - deepseek-v4-pro / deepseek-v4-flash:  384,000  (1M context)
+      - deepseek-reasoner (R1/V3 thinking):    65,536
+      - deepseek-chat / v3.x snapshots:         8,192
+
+    The chat/reasoner aliases were retired upstream 2026-07-24 but gateway
+    mirrors (deepseek-v3.2-*, deepseek-r1-0528) remain in service, so the
+    legacy tiers stay. Before this entry existed the whole family fell to
+    _DEFAULT_UNKNOWN_MAX_OUTPUT (16,384) — 23x below V4's real ceiling.
+    """
+    m = model.lower()
+    if 'v4' in m:
+        return 384000
+    if 'reasoner' in m or 'r1' in m:
+        return 65536
+    return 8192
+
+
 def _kimi_max_output(model: str) -> int:
     """Return the max output token limit for a specific Kimi model.
 
@@ -146,6 +168,7 @@ _MODEL_MAX_OUTPUT = {
     'ernie':   (is_ernie,   _ernie_max_output),   # per-model lookup
     'gpt':     (is_gpt,     32768),
     'glm':     (is_glm,     131072),
+    'deepseek': (is_deepseek, _deepseek_max_output),  # per-model lookup
     # Claude: 128000 output limit — matches build_body's default. Listed
     # EXPLICITLY (rather than relying on no-clamp passthrough) so Claude is
     # NOT swept into the conservative unknown-family default below — long-form

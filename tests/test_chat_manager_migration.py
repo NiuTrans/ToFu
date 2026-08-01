@@ -110,7 +110,9 @@ def test_append_event_phase_tracking():
     task = create_task('cv-phase', [{'role': 'user', 'content': 'q'}], {})
     append_event(task, {
         'type': 'phase', 'phase': 'searching',
-        'detail': 'web search', 'tools': ['web_search'], 'round': 1,
+        # Canonical wire key (Phase 3 §5 round-key unification): the retired
+        # `round` alias is intentionally NOT read by append_event.
+        'detail': 'web search', 'tools': ['web_search'], 'roundNum': 1,
     })
     assert task['phase'] == {
         'phase': 'searching', 'detail': 'web search',

@@ -717,6 +717,21 @@ function renderFinishInfo(msg, isLiveTail) {
   // (build_result_meta → _sync_result_to_conversation). The mid-stream
   // checkpoint (_sync_partial_to_conversation) deliberately writes `model`
   // but WITHHOLDS finishReason/usage until completion.
+  //
+  // ★ That withholding is ENFORCED, not merely conventional (2026-07-31).
+  //   It used to be a one-sided assumption: the orchestrator stamps
+  //   task['finishReason'] ~111 lines before it flips task['status']='done'
+  //   (lib/tasks_pkg/orchestrator/_finalize.py, the span containing the
+  //   blocking _generate_tool_summary call), and every snapshot transport —
+  //   /chat/poll (both branches) and the SSE `state` event (both branches) —
+  //   copied metadata with a bare truthiness check. So a reconnect landing in
+  //   that window received {status:'running', finishReason:'stop'} and this
+  //   function painted a settled finish bar on a STILL-GENERATING turn.
+  //   All four snapshot builders now route their metadata through
+  //   lib/chat/terminal_gate.py::filtered_snapshot_meta, keyed on the status
+  //   that same snapshot reports, so a non-terminal snapshot structurally
+  //   cannot carry finishReason/usage/preset. `done` events are deliberately
+  //   ungated — they ARE the terminal signal.
   const _terminal = msg.finishReason || msg.usage;
   if (!_terminal && !msg.model && !msg.preset && !msg.effort) return "";
   // ★ Premature-finish-bar guard. `model`/`preset`/`effort` alone are set

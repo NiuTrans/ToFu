@@ -671,26 +671,56 @@ def test_NEUTER_drag_deform_uses_foot_anchor_is_caught():
 def test_css_pet_has_contact_shadow_that_detaches_on_drag():
     """OWNER ASK — the pet must read as PLANTED on the ground, not floating on
     top. A contact shadow lives on the POSITION layer (.tofu-pet::after) so it
-    stays on the ground while the sprite bobs; when the cat is picked up
-    ([data-state=drag]) it shrinks + fades (object rises, shadow detaches)."""
+    stays on the ground while the sprite bobs; when the cat is lifted it shrinks
+    + fades (object rises, shadow detaches).
+
+    REVERSED IN PLACE (2026-07-31), not deleted. This used to require a literal
+    ``.tofu-pet[data-state="drag"]::after`` override. That MECHANISM was replaced
+    by a continuous height-driven one (``--pet-lift``, written every frame by
+    _place()), for a reason the old assertion could not express: a state-gated
+    rule stops applying the instant the pointer is released — but the pet is
+    still airborne then, it is FALLING — so the shadow snapped back to full size
+    under a sprite that had not landed. Keeping the old wording would mean the
+    test could only be satisfied by re-introducing that defect.
+
+    The PROPERTY is unchanged and is what is asserted now: being lifted must
+    visibly detach the shadow. Either mechanism satisfies it; NEITHER is the
+    failure, because that leaves a full-size ground shadow under a held pet.
+    """
     css = CSS.read_text()
-    m = re.search(r"\.tofu-pet::after\{[^}]*\}", css)
-    assert m, "no .tofu-pet::after contact-shadow rule"
-    block = m.group(0)
-    assert "position:absolute" in block, "shadow must be absolutely positioned on the ground"
-    assert "z-index:-1" in block, "shadow must sit BEHIND the sprite (z-index:-1)"
-    assert "radial-gradient" in block or "background" in block, "shadow needs a soft fill"
-    # picking the cat up must visibly detach the shadow (shrink/fade)
-    d = re.search(r'\.tofu-pet\[data-state="drag"\]::after\{[^}]*\}', css)
-    assert d, "no drag-state override — the shadow wouldn't detach when the cat is lifted"
+    blocks = re.findall(r"\.tofu-pet::after\{[^}]*\}", css)
+    assert blocks, "no .tofu-pet::after contact-shadow rule"
+    joined = "\n".join(blocks)
+    assert "position:absolute" in joined, "shadow must be absolutely positioned on the ground"
+    assert "z-index:-1" in joined, "shadow must sit BEHIND the sprite (z-index:-1)"
+    assert "radial-gradient" in joined or "background" in joined, "shadow needs a soft fill"
+
+    height_driven = "var(--pet-lift" in css
+    state_driven = bool(re.search(r'\.tofu-pet\[data-state="drag"\]::after\{[^}]*\}', css))
+    assert height_driven or state_driven, (
+        "nothing shrinks the contact shadow when the pet is lifted — a held pet "
+        "would drag a full-size ground shadow around with it")
+    if height_driven:
+        lift_block = next((b for b in blocks if "var(--pet-lift" in b), None)
+        assert lift_block, "--pet-lift exists but no ::after rule consumes it"
+        assert "width" in lift_block and "opacity" in lift_block, (
+            "the height-driven shadow must change BOTH size and opacity — one "
+            "alone reads as a scaling sticker rather than a detaching shadow")
 
 
 def test_NEUTER_missing_contact_shadow_is_caught():
     """NEUTER: strip the .tofu-pet::after shadow rule → the contact-shadow
     assertion must fail (proving the grounding is guaranteed by CSS, not
-    assumed)."""
+    assumed).
+
+    Strips ALL matching blocks, not just the first. The shadow is now declared
+    across TWO ::after rules (the base ground ellipse + the height-driven
+    size/opacity), so a count=1 substitution left the second one standing and
+    the neuter reported a false pass — it proved only that *a* rule could be
+    removed, not that the shadow depends on it.
+    """
     css = CSS.read_text()
-    neut = re.sub(r"\.tofu-pet::after\{[^}]*\}", "", css, count=1)
+    neut = re.sub(r"\.tofu-pet::after\{[^}]*\}", "", css)
     assert neut != css, "neuter did not remove the contact-shadow rule"
     present = bool(re.search(r"\.tofu-pet::after\{[^}]*\}", neut))
     assert present is False, "shadow rule survived the neuter — test would not bite"

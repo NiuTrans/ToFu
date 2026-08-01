@@ -88,6 +88,79 @@ def _fix_empty_user_messages(messages: list) -> list:
     return messages
 
 
+def _strip_empty_text_blocks(messages: list) -> list:
+    """Remove empty/whitespace-only text blocks from list-form message content.
+
+    A ``{'type': 'text', 'text': ''}`` block carries zero information, but
+    strict providers HARD-400 the whole request on it — Kimi/Moonshot:
+    ``Invalid request: text content is empty`` (verified in production
+    2026-07-31, tasks 93b60577/76d686cb: a virtual-user turn whose user row
+    had ``content=''`` was wrapped into ``[{text:''}]`` by the volatile-tail
+    reminder seams, then reminder blocks appended — ``_fix_empty_user_messages``
+    only fires when EVERY block is empty, so the phantom block sailed through
+    and 4,337 retries burned on a deterministic rejection).
+
+    Producers are the context-injection wrap seams (``_refresh_tail_block``,
+    ``_refresh_detail_block``, ``_append_user_profile_block``, memory
+    ``inject_relevant_memories``) which wrap ``content`` into
+    ``[{text: content}]`` unconditionally, plus any frontend-sent multimodal
+    message with an empty caption block. This is the single chokepoint that
+    heals EVERY producer, present and future.
+
+    When stripping leaves a list empty:
+      * a message carrying ``tool_calls`` → drop the content key entirely
+        (the proven-accepted no-content shape
+        ``build_assistant_tool_call_message`` already emits);
+      * anything else → collapse to ``''`` so the whole-content healers
+        (``_fix_empty_user_messages`` / ``_drop_empty_assistant_messages``)
+        claim it downstream.
+
+    Runs BEFORE those healers in build_body. Mutates in place; returns the
+    same list for chaining.
+    """
+    if not messages:
+        return messages
+
+    stripped = 0
+    locations = []
+    for i, msg in enumerate(messages):
+        role = msg.get('role')
+        content = msg.get('content')
+        if not isinstance(content, list) or not content:
+            continue
+        kept = []
+        for j, block in enumerate(content):
+            if (isinstance(block, dict) and block.get('type') == 'text'
+                    and not (block.get('text') or '').strip()):
+                stripped += 1
+                # §2 logging discipline: name WHERE each phantom block lived
+                # (message index + role + block index) so the next producer is
+                # one grep away, not a guessing session (task 76d686cb's
+                # producer was never directly proven — no wire snapshot).
+                if len(locations) < 8:
+                    locations.append(f'#{i}/{role}/block{j}')
+                continue
+            kept.append(block)
+        if len(kept) == len(content):
+            continue
+        if kept:
+            msg['content'] = kept
+        elif msg.get('tool_calls'):
+            # assistant(tool_calls) with nothing else — the proven no-content
+            # shape, never send content='' or content=[].
+            msg.pop('content', None)
+        else:
+            msg['content'] = ''
+
+    if stripped:
+        logger.warning('[build_body] Stripped %d empty text block(s) from '
+                       'message content at %s%s — strict providers HTTP 400 '
+                       'on them (Kimi: "text content is empty")',
+                       stripped, ', '.join(locations),
+                       ' …' if stripped > len(locations) else '')
+    return messages
+
+
 def _drop_empty_assistant_messages(messages: list) -> list:
     """Drop assistant messages that carry NOTHING (pure ghosts).
 

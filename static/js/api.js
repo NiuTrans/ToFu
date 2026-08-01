@@ -1074,6 +1074,8 @@
       // a structured object.
       request('/api/oauth/callback' + (queryString ? '?' + queryString : ''),
               { method: 'GET', parse: 'response', onError: 'null' }),
+    egressAgentGet: ()              => get('/api/v1/oauth/egress-agent', { onError: 'null' }),
+    egressAgentSet: (agentId)       => post('/api/v1/oauth/egress-agent', { agent_id: agentId }, { onError: 'null', parse: 'response' }),
   };
 
   // mcp (Model Context Protocol — server registry + connect) -------

@@ -214,6 +214,57 @@ function reduceStreamState(state, ev) {
       }
       return state;
     }
+    case 'tool_progress': {
+      /* ★ The in-flight frame (pt_1a82ffb3). Until this branch existed
+       *   `tool_progress` was the ONE tool frame with no reducer action: it was
+       *   applied only by the live pipeline handler, so everything it carries
+       *   was invisible to `projectColdSnapshot`. That is a PERSISTENCE hole,
+       *   not a cosmetic one — switch conversations mid-command and the live
+       *   terminal buffer, the batch tally and the execution deadline all
+       *   vanished, so a countdown would restart from nothing.
+       *
+       *   Everything here is an in-place field update on an EXISTING round; a
+       *   progress frame never creates one (an unlocatable frame is a no-op,
+       *   same discipline as tool_result). Status is deliberately untouched:
+       *   progress says "still going", never "settled". */
+      const r = locateRound(state.toolRounds, ev);
+      if (r) {
+        /* Terminal buffer. APPEND (the frame carries a delta, not the whole
+         * text) — the one field here that is not idempotent under replay,
+         * which is why the pipeline must delegate rather than double-apply. */
+        if (ev.chunk) {
+          r._partialOutput = (typeof r._partialOutput === 'string' ? r._partialOutput : '') + ev.chunk;
+        }
+        /* Execution clocks. `execStartTs` is when the subprocess was SPAWNED —
+         * distinct from `tStart` (round ANNOUNCE), which a write-approval gate
+         * can precede by minutes. `deadlineTs` is ABSOLUTE epoch ms, computed
+         * by the backend from the EFFECTIVE budget (post cross-DC multiplier,
+         * post clamp), so the client only ever subtracts and never re-derives
+         * a policy it would get wrong. */
+        if (ev.execStartTs != null) r.execStartTs = ev.execStartTs;
+        if (ev.deadlineTs != null) r.deadlineTs = ev.deadlineTs;
+        if (ev.tStart != null) r.tStart = ev.tStart;
+        if (ev.emittedAt != null) r.emittedAt = ev.emittedAt;
+        if (ev.receivedAt != null) r.receivedAt = ev.receivedAt;
+        /* Batch tally — monotonic: a replayed/out-of-order frame must never
+         * render the counter backwards. */
+        if (ev.batchTotal != null) {
+          r._batchTotal = ev.batchTotal;
+          if (ev.batchDone != null && (r._batchDone == null || ev.batchDone > r._batchDone)) {
+            r._batchDone = ev.batchDone;
+          }
+          if (ev.batchItem) {
+            if (!Array.isArray(r._batchItems)) r._batchItems = [];
+            r._batchItems.push({ item: ev.batchItem, ok: ev.batchOk !== false });
+          }
+          if (ev.batchOk === false) r._batchFailed = (r._batchFailed || 0) + 1;
+        }
+        /* Live QR carries the FULL accumulated list, so assignment (not
+         * append) is correct and makes a late reconnect self-healing. */
+        if (Array.isArray(ev.qrImages) && ev.qrImages.length) r.qrImages = ev.qrImages;
+      }
+      return state;
+    }
     case 'tool_done':
     case 'tool_complete': {
       const r = locateRound(state.toolRounds, ev);

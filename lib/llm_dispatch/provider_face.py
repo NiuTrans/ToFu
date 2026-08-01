@@ -95,7 +95,7 @@ class FaceResolution:
     Attributes:
         ok: False when the entry must NOT be dispatched (see ``error``).
         base_url: the URL to send to.
-        protocol: '' / 'openai' / 'anthropic'.
+        protocol: '' / 'openai' / 'anthropic' / 'responses'.
         face_name: which declared face was chosen ('default' or a key of
             ``provider['faces']``).
         forced: True when an explicit ``model['face']`` pin overrode the

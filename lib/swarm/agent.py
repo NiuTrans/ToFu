@@ -29,6 +29,7 @@ from lib.llm_dispatch.retry_i18n import retry_phase_fields
 from lib.log import audit_log, get_logger
 from lib.project_mod import format_tool_args_brief
 from lib.protocols import BodyBuilder
+from lib.swarm.liveness import ProgressBeacon, thread_progress_sink
 from lib.swarm.protocol import (
     ArtifactStore,
     SubAgentResult,
@@ -253,6 +254,12 @@ class SubAgent:
         # server restart can rehydrate and resume it mid-conversation. Empty
         # in unit tests / standalone use → all checkpoint writes are no-ops.
         self.swarm_key = ''
+
+        #: Shared liveness record (lib/swarm/liveness.py), injected by the
+        #: master's ``_make_agent``. Every progress point below touches it, so
+        #: "is this agent still working?" is answered by OUTPUT rather than by
+        #: elapsed time. A private fallback keeps standalone/unit use working.
+        self.progress_beacon = ProgressBeacon()
 
         # ── Debug: log agent initialization details ──
         tool_names = []
@@ -522,6 +529,21 @@ class SubAgent:
                     return e['path'].strip()
         return ''
 
+    def _touch_progress(self, note: str = '') -> None:
+        """Record a sign of life on the shared beacon (never raises).
+
+        Called from every point that proves forward motion: round start, token
+        deltas, tool dispatch, tool return. This is what makes an agent blocked
+        inside a long-but-live tool distinguishable from a wedged one — the
+        distinction the round-top wall clock structurally could not make,
+        because an agent stuck in a tool never reaches the top of a round.
+        """
+        try:
+            self.progress_beacon.touch(self.spec.id, note)
+        except Exception as e:
+            logger.debug('[Agent:%s] beacon touch failed (non-fatal): %s',
+                         self.agent_id, e)
+
     def run(self) -> SubAgentResult:
         """Execute the sub-agent synchronously. Returns SubAgentResult."""
         start_time = time.time()
@@ -694,8 +716,23 @@ class SubAgent:
             """Sentinel: the dispatch hook already ran the LLM-error path."""
 
         def _before_round(rnd):
-            # Wall-clock timeout as a chassis halt (was an inline round-top
-            # check, same placement).
+            # Liveness guard (replaces the wall-clock budget that used to sit
+            # here). The old check was ``elapsed > timeout_seconds``, which had
+            # two defects: it punished agents for taking long even while they
+            # were producing, and — because ``before_round`` only runs at the
+            # TOP of a round — it was structurally UNREACHABLE for an agent
+            # blocked inside a tool. That is the shape that actually hangs:
+            # one agent sat in a ``pytest`` child for over an hour and never
+            # tripped the 1800s guard, because it never started another round.
+            #
+            # Now: a round may always begin while the agent is producing; it is
+            # halted only after genuine silence. Tool-level stalls are caught by
+            # the beacon (tools heartbeat on subprocess output), not here.
+            self._touch_progress('round_start')
+            if not self.progress_beacon.is_making_progress(self.spec.id):
+                return 'stalled'
+            # An explicit per-spec ceiling remains honoured when a caller sets
+            # one deliberately; it is no longer a silent default.
             if timeout_seconds and (time.time() - start_time) > timeout_seconds:
                 return 'timeout'
             return None
@@ -768,6 +805,12 @@ class SubAgent:
                 _log_buffer.clear()
 
             def _beat_on_stream():
+                # ★ Liveness: EVERY token proves the agent is working, so the
+                #   beacon is touched unthrottled (a dict write under a short
+                #   lock). The presence heartbeat below stays throttled at ~5s
+                #   because it does real work; conflating the two would let a
+                #   fast-token agent read as silent for up to 5s at a time.
+                self._touch_progress('token')
                 # ★ Presence heartbeat (throttled, ~5s — mirrors the
                 #   conversation path's checkpoint-throttle). Token flow IS
                 #   work, so a long single-LLM sub-agent generation with no
@@ -984,14 +1027,38 @@ class SubAgent:
                 f'Agent cancelled at round {outcome.rounds}')
             return
 
+        if outcome.halted and outcome.exit_reason == 'stalled':
+            _silent = self.progress_beacon.seconds_since_activity(self.spec.id)
+            logger.warning(
+                '[%s] Stalled: no progress signal for %.0fs (stall_at=%.0fs) '
+                'at round %d — halting a silent agent',
+                self.agent_id, _silent,
+                self.progress_beacon.stall_timeout, outcome.rounds + 1)
+            audit_log('agent_stalled',
+                      agent_id=self.agent_id, role=self.spec.role,
+                      model=self.model, rounds=outcome.rounds,
+                      silent_seconds=round(_silent),
+                      objective=(self.spec.objective or '')[:200])
+            self.result.status = SubAgentStatus.COMPLETED.value
+            self._finalize_with_wrapup(
+                f'no activity for {_silent:.0f}s (stopped at round '
+                f'{outcome.rounds})')
+            self._emit_event(
+                'progress',
+                f'⏸️ [{self.spec.role}] Stopped: silent for {_silent:.0f}s',
+                status='running', phase='stalled',
+                round_num=outcome.rounds + 1,
+            )
+            return
+
         if outcome.halted and outcome.exit_reason == 'timeout':
             logger.warning(
                 '[%s] Timeout after %ss at round %d',
                 self.agent_id, timeout_seconds, outcome.rounds + 1,
             )
             self.result.status = SubAgentStatus.COMPLETED.value
-            self._extract_partial_answer(
-                f'Agent timed out after {timeout_seconds}s '
+            self._finalize_with_wrapup(
+                f'timed out after the explicit {timeout_seconds}s ceiling '
                 f'(completed {outcome.rounds} rounds)')
             self._emit_event(
                 'timeout',
@@ -1022,10 +1089,12 @@ class SubAgent:
                       consecutive_identical=outcome.consecutive_no_progress_rounds,
                       objective=(self.spec.objective or '')[:200])
             self.result.status = SubAgentStatus.COMPLETED.value
-            self._extract_partial_answer(
-                f'Agent made no progress for '
+            self._finalize_with_wrapup(
+                f'no progress for '
                 f'{outcome.consecutive_no_progress_rounds} consecutive rounds '
-                f'(stopped at round {outcome.rounds})')
+                f'(stopped at round {outcome.rounds})',
+                guidance=('You were repeating the same tool call. Do not '
+                          'retry it; report what you already learned.'))
             self._emit_event(
                 'progress',
                 f'🛑 [{self.spec.role}] Stopped: no progress for '
@@ -1037,12 +1106,92 @@ class SubAgent:
 
         # outcome.exit_reason == 'max_rounds_exhausted'
         logger.info('[%s] Exhausted %d rounds', self.agent_id, self.max_rounds)
-        self._extract_partial_answer(f'Max rounds ({self.max_rounds}) reached')
+        self._finalize_with_wrapup(f'max rounds ({self.max_rounds}) reached')
         self.result.status = SubAgentStatus.COMPLETED.value
 
     # ─────────────────────────────────────────────────
     #  Answer extraction helpers
     # ─────────────────────────────────────────────────
+
+    def _finalize_with_wrapup(self, reason: str, *, guidance: str = '') -> None:
+        """Ask the agent to WRITE UP its work, instead of scraping history.
+
+        ``_extract_partial_answer`` walks backwards for the last assistant text
+        and staples ``[Partial — …]`` on the front. For a halted agent that is
+        a bad trade: the measured case had 16 rounds and 1,091,830 tokens of
+        real investigation reduced to whatever intermediate sentence happened
+        to be last — the findings were paid for and then discarded.
+
+        So give it one final, TOOL-LESS turn to summarize what it already
+        knows. The work is already bought; a single short completion is a
+        rounding error against it, and turns a truncated fragment into a
+        usable report.
+
+        Falls back to ``_extract_partial_answer`` when the wrap-up cannot run
+        (no history, dispatch failure) — degradation must never be worse than
+        the behaviour it replaces.
+        """
+        if self.result.final_answer:
+            return
+
+        has_history = any(m.get('role') == 'assistant' for m in self.messages)
+        if not has_history:
+            self._extract_partial_answer(reason)
+            return
+
+        self._emit_stream_phase(
+            'writing', 'Stopping — writing up findings so far…')
+        try:
+            wrap_msgs = list(self.messages) + [{
+                'role': 'user',
+                'content': (
+                    f'STOP: {reason}. Do not call any more tools.\n\n'
+                    'Write your FINAL ANSWER now from what you have already '
+                    'established. Report the findings you actually confirmed, '
+                    'and state plainly which parts of your objective you did '
+                    'not get to — an honest partial report is useful, an '
+                    'invented complete one is not.'
+                    + (f'\n\n{guidance}' if guidance else '')
+                ),
+            }]
+            body = self._build_body(
+                model=self.model,
+                messages=wrap_msgs,
+                tools=None,          # tool-less: this turn must produce prose
+                max_tokens=8000,
+                thinking_enabled=False,
+                temperature=1.0,
+            )
+            body['_task_id'] = self.agent_id
+            parts: list[str] = []
+            msg, _stop, usage = self._dispatch_stream(
+                body,
+                on_content=parts.append,
+                on_thinking=lambda _c: None,
+                abort_check=self.abort_check,
+                prefer_model=body.get('model', ''),
+                log_prefix=f'[{self.agent_id}:wrapup]',
+            )
+            if usage:
+                self.result.prompt_tokens += usage.get('prompt_tokens', 0)
+                self.result.completion_tokens += usage.get('completion_tokens', 0)
+                self.result.total_tokens += usage.get('total_tokens', 0)
+            content = (msg.get('content') if isinstance(msg, dict) else '') \
+                or ''.join(parts)
+            content = (content or '').strip()
+            if len(content) > 20:
+                self.result.final_answer = f'[Stopped — {reason}]\n\n{content}'
+                logger.info('[Agent:%s] Wrap-up produced %d chars after: %s',
+                            self.agent_id, len(content), reason)
+                return
+            logger.warning('[Agent:%s] Wrap-up returned too little (%d chars) '
+                           '— falling back to history extraction',
+                           self.agent_id, len(content))
+        except Exception as e:
+            logger.warning('[Agent:%s] Wrap-up turn failed (%s) — falling back '
+                           'to history extraction', self.agent_id, e)
+
+        self._extract_partial_answer(reason)
 
     def _extract_partial_answer(self, reason: str = ''):
         """Extract the best available answer from message history.
@@ -1079,27 +1228,55 @@ class SubAgent:
             result = self._execute_single_tool(tc, round_num)
             self.messages.append({
                 'role': 'tool',
-                'tool_call_id': tc.get('id', str(uuid.uuid4())[:8]),
+                # ``or``, NOT ``get('id', default)``: the SSE accumulator always
+                # SETS the key (to ''), so a default-arg fallback is
+                # unreachable and a blank id would reach the wire verbatim — a
+                # malformed turn the gateway cannot match to its tool_call.
+                'tool_call_id': tc.get('id') or str(uuid.uuid4())[:8],
                 'content': result,
             })
         else:
-            # Multiple tool calls — run in parallel
-            results = {}
+            # Multiple tool calls — run in parallel.
+            #
+            # Results are keyed by the tool call's POSITION, never by its id.
+            # Keying by ``tc.get('id', uuid4())`` was silently lossy, because
+            # the SSE accumulator creates every tool-call slot with
+            # ``'id': ''`` (lib/llm/_sse_core.py:854/922) — the KEY always
+            # exists, so the uuid fallback never fires and cannot de-collide
+            # anything:
+            #   * two parallel calls that both kept ``id=''`` collapse onto ONE
+            #     dict key, so the first tool is fed the SECOND tool's output —
+            #     silently, with no error anywhere (verified);
+            #   * had the fallback ever fired it would mint a DIFFERENT uuid at
+            #     execution and at lookup, yielding the literal string
+            #     ``(no result)`` as that tool's content.
+            # Position is intrinsic to the batch and cannot collide, so the
+            # mapping is total by construction.
+            results: dict[int, str] = {}
             max_workers = min(len(tool_calls), MAX_PARALLEL_TOOLS)
             with ThreadPoolExecutor(
                 max_workers=max_workers,
                 thread_name_prefix=f'{self.agent_id}-tools',
             ) as pool:
                 futures = {}
-                for tc in tool_calls:
+                for idx, tc in enumerate(tool_calls):
                     future = pool.submit(self._execute_single_tool, tc, round_num)
-                    futures[future] = tc
+                    futures[future] = idx
 
                 for future in as_completed(futures):
-                    tc = futures[future]
-                    tc_id = tc.get('id', str(uuid.uuid4())[:8])
+                    idx = futures[future]
+                    tc = tool_calls[idx]
                     try:
-                        result = future.result(timeout=300)
+                        # NO timeout. ``as_completed`` only ever yields futures
+                        # that are ALREADY done (measured: done=True at every
+                        # yield, including a 2.0s task read with timeout=0.01),
+                        # so the former ``result(timeout=300)`` could not fire —
+                        # it was unreachable, not a live 300s cap. Keeping a
+                        # number there implied a bound that did not exist; a
+                        # genuinely slow tool is bounded by the liveness beacon,
+                        # which asks whether output is still arriving rather
+                        # than how long the work has taken.
+                        result = future.result()
                     except Exception as e:
                         fn_name = tc.get('function', {}).get('name', '?')
                         logger.warning(
@@ -1108,15 +1285,26 @@ class SubAgent:
                             exc_info=True)
 
                         result = f'Tool execution error ({fn_name}): {type(e).__name__}: {e}'
-                    results[tc_id] = result
+                    results[idx] = result
 
-            # Append results in original order (important for reproducibility)
-            for tc in tool_calls:
-                tc_id = tc.get('id', str(uuid.uuid4())[:8])
+            # Append results in original order (important for reproducibility).
+            # ``tool_call_id`` still carries the wire id the model sent (that is
+            # what the gateway matches on) — only the internal RESULT lookup is
+            # position-keyed. A blank id is repaired here too: two tool results
+            # sharing '' is a malformed turn on the wire. A missing position
+            # would be a real internal bug, so it is logged loudly instead of
+            # quietly degrading to '(no result)'.
+            for idx, tc in enumerate(tool_calls):
+                if idx not in results:
+                    logger.error(
+                        '[%s] Round %d: no result recorded for tool %s at '
+                        'position %d — internal bookkeeping bug, not a tool '
+                        'failure', self.agent_id, round_num,
+                        tc.get('function', {}).get('name', '?'), idx)
                 self.messages.append({
                     'role': 'tool',
-                    'tool_call_id': tc_id,
-                    'content': results.get(tc_id, '(no result)'),
+                    'tool_call_id': tc.get('id') or str(uuid.uuid4())[:8],
+                    'content': results.get(idx, '(no result)'),
                 })
 
     def _known_tool_names(self) -> set[str]:
@@ -1187,6 +1375,11 @@ class SubAgent:
         # the live and recovered panels identical.
         args_brief = format_tool_args_brief(fn_name, fn_args)
 
+        # Dispatching a tool is forward motion, and so is its return. Touching
+        # BOTH ends means a long tool that produces no intermediate output
+        # still bookends its own execution window.
+        self._touch_progress(f'tool_start:{fn_name}')
+
         # Log the tool call
         self.result.tool_log.append({
             'round': round_num,
@@ -1213,6 +1406,9 @@ class SubAgent:
         )
 
         def _emit_finish(status: str, *, preview: str = '', error: str = ''):
+            # The other end of the tool window — a returning tool is proof of
+            # forward motion even when it emitted nothing while it ran.
+            self._touch_progress(f'tool_done:{fn_name}')
             _full_len = len(preview or '')
             _sent = (preview or '')[:_SSE_TOOL_PREVIEW_CHARS]
             # Persist the preview onto the tool_log row this call already
@@ -1255,10 +1451,16 @@ class SubAgent:
                 raise
 
         # ── Dispatch to real tools via executor ──
+        # Bind the thread-scoped progress sink for the WHOLE dispatch: a long
+        # tool (``run_command`` on a build/test run) heartbeats from inside,
+        # so the stall check can tell "subprocess is printing" from "wedged".
+        # Without this the beacon goes quiet the instant a tool is entered —
+        # exactly the >1h pytest hang that no guard could see.
         try:
             logger.debug('[Agent:%s] Dispatching tool %s args=%s',
                          self.agent_id, fn_name, str(fn_args)[:200])
-            result = self._dispatch_tool(tool_call, fn_name, fn_args, round_num)
+            with thread_progress_sink(self.progress_beacon, self.spec.id):
+                result = self._dispatch_tool(tool_call, fn_name, fn_args, round_num)
             truncated = self._truncate_tool_result(result)
             tool_elapsed = time.time() - tool_start
             logger.debug('[Agent:%s] Tool %s completed in %.2fs result_len=%d',
@@ -1386,7 +1588,7 @@ class SubAgent:
             '_tool_env': self.parent_task.get('_tool_env'),
         }
 
-        tc_id = tool_call.get('id', str(uuid.uuid4())[:8])
+        tc_id = tool_call.get('id') or str(uuid.uuid4())[:8]
 
         # Build a round_entry stub (executor expects this for side-effects)
         round_entry = {

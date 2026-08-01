@@ -21,6 +21,20 @@ var _mcpInstallTarget = null;  // CatalogEntry being installed
 var _mcpInstallIsReinstall = false;  // true = editing existing (stored env will be honoured)
 var _mcpBreakerRefreshTimer = null;  // single-shot re-fetch while a breaker is counting down
 var _mcpBreakerTickTimer = null;     // 1s interval that ticks the live "retry in N" countdowns
+/* ★ In-flight per-card operations (pt_2bf8e5c85d8f4b2e): serverId →
+ *   'connecting' | 'uninstalling' | 'installing'. Consulted by
+ *   _renderMcpCatalog, so the busy state SURVIVES any concurrent repopulate
+ *   (the breaker-refresh timer fires _populateMcpTab mid-operation) — a
+ *   one-off DOM patch would be silently reverted by that re-render. */
+var _mcpPending = {};
+
+function _mcpSetPending(serverId, kind) {
+  _mcpPending[serverId] = kind;
+  _renderMcpCatalog();
+}
+function _mcpClearPending(serverId, skipRender) {
+  if (delete _mcpPending[serverId] && !skipRender) _renderMcpCatalog();
+}
 
 /**
  * Load MCP tab data — fetch catalog with install/connect status.
@@ -248,13 +262,23 @@ function _renderMcpCatalog() {
     // real tool call fails. Only surface it while connected — a disconnected
     // card already tells its own story via breaker / idle state.
     var credExpired = connected && e.cred_health && e.cred_health.status === 'expired';
+    /* ★ An in-flight click operation outranks every derived state — the
+     *   card paints the busy label + NO action buttons until the handler
+     *   clears it (success → repopulate; failure → restore). */
+    var pending = _mcpPending[e.id] || null;
     var stateClass = connected ? (credExpired ? ' connected cred-expired' : ' connected')
       : breaker ? ' installed reconnecting'
       : installed ? ' installed' : '';
+    if (pending) stateClass += ' mcp-pending';
     html += '<div class="mcp-app-card' + stateClass + '">';
     html += '<div class="mcp-app-icon">' + (e.icon || Icon('plug', 26)) + '</div>';
     html += '<div class="mcp-app-name"><span class="mcp-app-name-text">' + escapeHtml(e.name) + '</span>';
-    if (credExpired) {
+    if (pending) {
+      html += '<span class="mcp-app-status pending">' + escapeHtml(
+        pending === 'connecting' ? t('mcp.connecting')
+        : pending === 'installing' ? t('mcp.installing')
+        : t('mcp.uninstalling')) + '</span>';
+    } else if (credExpired) {
       html += '<span class="mcp-app-status cred-expired" title="' +
         escapeHtml(t('mcp.credExpiredTitle')) + '">' +
         Icon('alertTriangle', 12) + ' ' + escapeHtml(t('mcp.credExpired')) + '</span>';
@@ -284,7 +308,12 @@ function _renderMcpCatalog() {
       html += '<span></span>';
     }
     html += '<div class="mcp-app-action">';
-    if (connected) {
+    if (pending) {
+      html += '<span class="mcp-app-pending-note">' + escapeHtml(
+        pending === 'connecting' ? t('mcp.connecting')
+        : pending === 'installing' ? t('mcp.installing')
+        : t('mcp.uninstalling')) + '</span>';
+    } else if (connected) {
       if (credExpired) {
         // The subprocess is live but the stored cookie/token no longer
         // authenticates. Offer a one-click path to re-enter credentials —
@@ -471,6 +500,10 @@ function _mcpErrDetail(e) {
 async function _mcpQuickInstall(serverId) {
   var entry = _mcpCatalog.find(function(e) { return e.id === serverId; });
   if (!entry) return;
+  /* ★ INSTANT-UI (pt_2bf8e5c85d8f4b2e): the card shows 安装中… on the CLICK
+   *   frame — the old code only wrote to the debug panel and the card sat
+   *   static until the install + poll finished. */
+  _mcpSetPending(serverId, 'installing');
   debugLog('[MCP] Quick-installing ' + serverId + ' (no required env)…', 'info');
   try {
     var data = await Api.mcp.catalogInstall(serverId, {});
@@ -480,17 +513,20 @@ async function _mcpQuickInstall(serverId) {
     }
     if (data && data.ok && data.status !== 'error') {
       debugLog('[MCP] Installed ' + serverId + ': ' + (data.tools_count || 0) + ' tools', 'success');
+      _mcpClearPending(serverId, true);   // repopulate renders the fresh state
       await _populateMcpTab();
     } else {
       // Installation failed — fall back to opening the modal so the user
       // can inspect the default values and/or override them. This is the
       // safety net for "hope binary not on PATH" kinds of errors.
+      _mcpClearPending(serverId);         // restore the card first
       var _err = (data && data.error) || t('mcp.unknownErrorNoConn');
       debugLog('[MCP] Quick install failed (' + _err + '); opening install modal for ' + serverId, 'warning');
       showAlert(t('mcp.quickInstallFailed', { err: _err }));
       _mcpOpenInstallModal(serverId);
     }
   } catch (e) {
+    _mcpClearPending(serverId);           // restore the card first
     var _detail = _mcpErrDetail(e);
     debugLog('[MCP] Quick install error for ' + serverId + ': ' + _detail, 'error');
     showAlert(t('mcp.quickInstallFailed', { err: _detail }));
@@ -831,12 +867,17 @@ async function _mcpUninstall(serverId) {
   var name = entry ? entry.name : serverId;
   if (!await showConfirm(t('mcp.uninstallConfirm', { name: name }))) return;
 
+  /* ★ INSTANT-UI (pt_2bf8e5c85d8f4b2e): the card shows 卸载中… the moment
+   *   the confirm closes — the old code sat static for the whole DELETE RTT. */
+  _mcpSetPending(serverId, 'uninstalling');
   try {
     var data = await Api.mcp.catalogUninstall(serverId, false);
-    if (!data || !data.ok) { showAlert(t('mcp.uninstallFailed', { err: ((data && data.error) || t('mcp.unknownError')) })); return; }
+    if (!data || !data.ok) { _mcpClearPending(serverId); showAlert(t('mcp.uninstallFailed', { err: ((data && data.error) || t('mcp.unknownError')) })); return; }
     debugLog('[MCP] Uninstalled ' + serverId + (data.purged ? ' (purged)' : ' (soft, env kept)'), 'info');
+    _mcpClearPending(serverId, true);     // repopulate renders the fresh state
     await _populateMcpTab();
   } catch (e) {
+    _mcpClearPending(serverId);
     showAlert(t('mcp.uninstallFailed', { err: e.message }));
   }
 }
@@ -847,12 +888,16 @@ async function _mcpPurge(serverId) {
   var name = entry ? entry.name : serverId;
   if (!await showConfirm(t('mcp.purgeConfirm', { name: name }), { danger: true })) return;
 
+  /* ★ INSTANT-UI (pt_2bf8e5c85d8f4b2e): same pending shape as uninstall. */
+  _mcpSetPending(serverId, 'uninstalling');
   try {
     var data = await Api.mcp.catalogUninstall(serverId, true);
-    if (!data || !data.ok) { showAlert(t('mcp.purgeFailed', { err: ((data && data.error) || t('mcp.unknownError')) })); return; }
+    if (!data || !data.ok) { _mcpClearPending(serverId); showAlert(t('mcp.purgeFailed', { err: ((data && data.error) || t('mcp.unknownError')) })); return; }
     debugLog('[MCP] Purged ' + serverId, 'info');
+    _mcpClearPending(serverId, true);     // repopulate renders the fresh state
     await _populateMcpTab();
   } catch (e) {
+    _mcpClearPending(serverId);
     showAlert(t('mcp.purgeFailed', { err: e.message }));
   }
 }
@@ -875,12 +920,18 @@ async function _mcpConnectAll() {
 }
 
 async function _mcpReconnect(serverId) {
+  /* ★ INSTANT-UI (pt_2bf8e5c85d8f4b2e): the card shows 连接中… on the CLICK
+   *   frame — MCP cold start is measured at 27-55s (JOURNAL), the longest
+   *   dead window in the app. */
+  _mcpSetPending(serverId, 'connecting');
   try {
     var data = await Api.mcp.connectOne(serverId);
-    if (!data || !data.ok) { showAlert(t('mcp.connectFailed', { err: ((data && data.error) || t('mcp.unknownError')) })); return; }
+    if (!data || !data.ok) { _mcpClearPending(serverId); showAlert(t('mcp.connectFailed', { err: ((data && data.error) || t('mcp.unknownError')) })); return; }
     debugLog('[MCP] Reconnected ' + serverId + ': ' + (data.tools_count || 0) + ' tools', 'success');
+    _mcpClearPending(serverId, true);     // repopulate renders the fresh state
     await _populateMcpTab();
   } catch (e) {
+    _mcpClearPending(serverId);
     showAlert(t('mcp.connectFailed', { err: e.message }));
   }
 }

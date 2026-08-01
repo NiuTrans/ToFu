@@ -780,8 +780,8 @@ def test_build_fresh_state_snapshot_carries_full_task_state():
       * state['content'], state['thinking'], state['status'] set from task
       * state['createdAt'] = task['created_at'] * 1000 when present
       * state['toolRounds'] emitted only when truthy
-      * meta fields (finishReason / usage / model / thinkingDepth) copied
-        from _extract_task_meta into state when truthy
+      * meta fields (model / thinkingDepth) copied from _extract_task_meta
+        into state when truthy
       * state['preset'] / memoryPrefetch / preferencesApplied /
         relatedConversations / preferencesLearned / inboxInjects /
         peerInjects / userSteerInjects — each copied only when present
@@ -789,7 +789,28 @@ def test_build_fresh_state_snapshot_carries_full_task_state():
         endpointTurns / endpointStopReason
       * cursor == len(task['events'])
 
-    Byte-parity against the ~55-line inline block.
+    ★ TERMINAL-FIELD ASSERTIONS REVERSED 2026-07-31 (duplicate-bubble root fix).
+      This test's fixture is `status='running'` WITH `finishReason='stop'` +
+      `usage` + `preset`, and it used to assert those three appear in the
+      `state` event — i.e. it certified the self-contradictory wire shape
+      {status:'running', finishReason:'stop'} as correct byte-parity.
+
+      That shape is the DEFECT. The orchestrator stamps task['finishReason']
+      ~111 lines before it flips task['status']='done'
+      (lib/tasks_pkg/orchestrator/_finalize.py — the span holding the blocking
+      _generate_tool_summary call), so this reconnect path (whose whole job is
+      attaching to a task that is STILL RUNNING) emitted a terminal claim about
+      a live turn. The frontend acts on it two independent ways:
+      `renderFinishInfo` paints a settled finish bar on a generating turn
+      (`msg.finishReason || msg.usage`), and `assistantTailIsPriorTurn`
+      misfiles the live bubble as a prior turn → a second, duplicate bubble.
+
+      Byte-parity with the pre-slice inline loop is preserved for every field
+      that is NOT a settlement claim; the three terminal fields are now gated
+      by lib/chat/terminal_gate.py, keyed on the status this snapshot reports.
+      A terminal-status complement is asserted below so the gate cannot be
+      satisfied by withholding them always.
+      Full chain: tests/test_duplicate_bubble_midturn_finish_reason.py.
     """
     import lib.chat_dispatch as cd
     import threading
@@ -821,11 +842,19 @@ def test_build_fresh_state_snapshot_carries_full_task_state():
     assert state['status'] == 'running'
     assert state['createdAt'] == int(1_700_000_000.5 * 1000)
     assert state['toolRounds'] == [{'name': 'read_files'}]
-    assert state['finishReason'] == 'stop'
-    assert state['usage'] == {'prompt': 10}
+    # ★ REVERSED: a RUNNING snapshot must not claim the turn has settled.
+    assert 'finishReason' not in state, (
+        'a status=running `state` snapshot must not carry finishReason — '
+        'the frontend reads it as a settled turn and mints a duplicate bubble')
+    assert 'usage' not in state, (
+        'finish_info.js treats `usage` as a terminal signal too '
+        '(`msg.finishReason || msg.usage`)')
+    assert 'preset' not in state, (
+        '`preset` is stamped in the same _finalize.py block as '
+        'finishReason/usage and shares their gate')
+    # Non-terminal identity/progress fields keep their byte-parity behaviour.
     assert state['model'] == 'gpt-4'
     assert state['thinkingDepth'] == 3
-    assert state['preset'] == 'default'
     assert state['memoryPrefetch'] == [{'m': 1}]
     assert state['preferencesApplied'] == ['pref1']
     assert state['endpointMode'] is True
@@ -834,10 +863,23 @@ def test_build_fresh_state_snapshot_carries_full_task_state():
     assert state['endpointTurns'] == [{'t': 1}]
     assert state['endpointStopReason'] == 'critic_approved'
     assert cursor == 3  # len(events)
-    # meta must carry the raw dict extract_task_meta produced (chat_stream
-    # uses this for the fresh-terminal done event).
+    # meta must carry the raw dict extract_task_meta produced, UNGATED —
+    # chat_stream reuses it to synthesize the fresh-terminal `done` event,
+    # which MUST carry the terminal fields. This is why the gate lives at the
+    # snapshot boundary and not inside extract_task_meta.
     assert meta.get('finishReason') == 'stop'
     assert meta.get('model') == 'gpt-4'
+
+    # ── Complement: once the task is terminal the same builder MUST emit the
+    #    terminal fields, or a reconnect to a finished turn shows a
+    #    permanently empty finish bar (a worse bug than the one fixed).
+    task_done = dict(task, status='done')
+    task_done['events_lock'] = threading.Lock()
+    state_done, _meta_done, _c = cd.build_fresh_state_snapshot(task_done)
+    assert state_done['status'] == 'done'
+    assert state_done['finishReason'] == 'stop'
+    assert state_done['usage'] == {'prompt': 10}
+    assert state_done['preset'] == 'default'
 
 
 # ── Slice 8: chat_stream LIVE-path tick planner → lib/chat_dispatch.next_live_tick ─

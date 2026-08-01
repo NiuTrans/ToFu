@@ -60,6 +60,14 @@ psutil>=5.9
 # tofu-search does not crash, it just never reaches the browser on shell outcomes
 # (the your-llm-gateway.example.com failure shape). Deployed-package acceptance:
 # tests/_acceptance_fetch_identity_fallback.py.
+# >=0.5.3: `allow_private_hosts` — the hostname-anchored SSRF exemption.
+# HARD floor, same shape as 0.5.0: lib/search_bridge.py::sync_search_config
+# passes `allow_private_hosts` (and `block_private_addresses` /
+# `allow_insecure_ssl_fallback`) to tofu_search.configure() UNCONDITIONALLY,
+# and server.py calls install_search_bridge() at boot with no guard, so an
+# older configure() raises TypeError on the unknown kwarg and the server
+# dies at startup. Do not lower this floor without first making the bridge
+# pass the security-posture kwargs defensively.
 tofu-search>=0.5.3
 trafilatura>=1.6
 # playwright is optional — powers the JS-rendered fallback in tofu_search.fetch.
@@ -103,23 +111,38 @@ python-docx>=1.0
 openpyxl>=3.1
 xlrd>=2.0
 olefile>=0.46
-# MCP Python SDK. THE UPPER BOUND IS LOAD-BEARING: `pip install mcp` now
-# resolves to 2.x, a breaking rework that lib/mcp/client/_bridge.py cannot
-# speak — `streamablehttp_client` was RENAMED to `streamable_http_client`
-# (ImportError) and yields a 2-tuple where we unpack 3 (ValueError), and model
-# fields moved to snake_case (isError → is_error, inputSchema → input_schema).
+# MCP Python SDK, client side: v2 line. The 2026-07-28 protocol revision is
+# only spoken by mcp>=2 (v1's protocol constants stop at 2025-11-25), and the
+# client bridge (lib/mcp/client/_bridge.py) was migrated to the v2 API
+# (streamable_http_client + 2-tuple transport, snake_case model fields).
 #
-# This bound BUYS TIME FOR A MIGRATION; it is not a resting place. Measured:
-# the v1 line does NOT speak the 2026-07-28 protocol revision (1.29.0's
-# protocol constants stop at 2025-11-25 / 2025-03-26), v1 is a maintenance
-# line, and HTTP+SSE is already inside a 12-month deprecation window. Staying
-# on <2 forever means third-party servers that ship 2026-07-28-only will
-# eventually be unreachable.
+# Why this is SAFE for servers that still run v1: a 2x2 wire-interop matrix
+# (v1/v2 client x v1/v2 server, real stdio handshakes) negotiates 2025-11-25
+# in ALL four quadrants — SDK major version is not a wire boundary. And why
+# no server's pin can break this client anymore: vendored internal servers
+# launch isolated via `uv run --with-editable` (lib/mcp/client/_vendor), each
+# resolving its own mcp into its own env.
 #
-# The FLOOR stays at the version actually deployed (1.27.2 satisfies >=1.0):
-# raising it to 1.28/1.29 would force an unverified upgrade that fixes nothing
-# about this failure mode. Enforced by tests/test_mcp_sdk_pin_bounded.py.
-mcp>=1.0,<2
+# The bound stays major-bounded (<3) because the next rework is unknowable.
+# Enforced by tests/test_mcp_sdk_pin_bounded.py.
+#
+# INSTALL-CHANNEL NOTE (measured 2026-07-31): mcp 2.x pulls mcp-types /
+# httpx2 / httpcore2, which the internal pip mirror does NOT carry (404).
+# The deploy paths are unaffected — bootstrap.py and install.sh install this
+# dep via conda-forge, which solves the full tree (verified by dry-run:
+# mcp 2.0.0 + mcp-types 2.0.0 + httpx2 2.9.1 + httpcore2 2.9.1). Only a
+# manual `pip install -r requirements.txt` against the internal mirror fails;
+# use `pip install --index-url https://pypi.org/simple -r requirements.txt`.
+mcp>=2,<3
+# httpx — the async HTTP client the LLM transport imports UNCONDITIONALLY at
+# module top (lib/llm/_transport.py, plus lib/llm/astream.py and the guarded
+# async branch of lib/http_client.py). Undeclared for months because this env
+# happened to carry it transitively; the desktop_dist builder's clean venv
+# proved the gap: PyInstaller packed a binary whose boot smoke dies on
+# ModuleNotFoundError: httpx (2026-08-01, desktop build attempt 4). NOTE the
+# name: mcp 2.x pulls the httpx2 FORK, which does NOT provide the `httpx`
+# module — the two are different distributions.
+httpx>=0.28
 # orjson — fast C JSON encoder. REQUIRED (not optional): routes/chat.py's SSE
 # state snapshot serializes the ENTIRE conversation (content+thinking+toolRounds,
 # 10+ MB for long convs). Plain json.dumps holds the GIL for the whole call, so

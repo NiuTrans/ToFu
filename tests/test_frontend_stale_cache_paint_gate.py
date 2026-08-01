@@ -35,6 +35,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 
 import pytest
 
@@ -126,7 +127,7 @@ global.AbortSignal = { timeout: () => undefined };
 global.conversations = [];
 global._convSorter = (a, b) => (b.updatedAt || 0) - (a.updatedAt || 0);
 
-eval(fs.readFileSync(process.argv[2], 'utf8'));  // REAL core/conversations.js
+for (const f of process.argv.slice(2)) eval(fs.readFileSync(f, 'utf8'));  // bundle-order conv family via _conv_bundle_sources.conv_family_sources
 global.conversations = conversations;
 
 const out = [];
@@ -166,9 +167,21 @@ def _run(js_path: str, stale: bool = True) -> subprocess.CompletedProcess:
         f.write(_HARNESS)
     env = dict(os.environ)
     env['STALE'] = '1' if stale else '0'
+    # Eval the WHOLE conv family via the drift-proof closure (see
+    # _conv_bundle_sources.conv_family_sources) — this harness drove
+    # conversations.js STANDALONE, so the Phase-2 failure exits'
+    # _setCacheVerifying / _scheduleConvVerifyRetry (conv_verify_visibility
+    # / conv_verify_retry leaves) threw (2026-08-01, 3 RED). NEUTER copies
+    # ride the override.
+    sys.path.insert(0, HERE)
+    from _conv_bundle_sources import conv_family_sources
+    override = None
+    if os.path.basename(js_path) != 'conversations.js':
+        override = {'core/conversations.js': js_path}
+    extra_js = conv_family_sources(override=override)
     try:
         return subprocess.run(
-            ['node', harness, js_path],
+            ['node', harness, *extra_js],
             capture_output=True, text=True, timeout=60, env=env,
         )
     finally:

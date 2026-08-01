@@ -162,6 +162,32 @@
   margin: 4px 0 10px;
   line-height: 1.5;
 }
+.oauth-provider-desc {
+  font-size: 12px;
+  color: var(--s-muted);
+  margin: 4px 0 10px;
+  line-height: 1.5;
+}
+/* Desktop-egress status line (S4) */
+.oauth-egress-line {
+  font-size: 12px;
+  margin: 2px 0 8px;
+  line-height: 1.5;
+}
+.oauth-egress-ok { color: #1e7e34; }
+.oauth-egress-warn { color: #b8860b; }
+.oauth-egress-bad { color: #b02a37; }
+.oauth-egress-pending { color: var(--s-muted); }
+.oauth-egress-pin {
+  margin-left: 6px;
+  font-size: 12px;
+  padding: 1px 4px;
+  border: var(--s-border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--s-ink);
+  max-width: 180px;
+}
 .oauth-provider-info {
   font-size: 12px;
   color: var(--s-ink);
@@ -208,6 +234,13 @@
 .oauth-manual-fallback .btn-small:not(.btn-primary):not(.btn-danger) {
   background: var(--s-white);
   color: var(--s-ink);
+}
+/* Active shell tab in the curl helper: without a visible "current" marker the
+   user can copy a command meant for a shell they did not intend. Equal
+   specificity to the plain-button rule above — must stay BELOW it to win. */
+.oauth-manual-fallback .btn-small.oauth-curl-shell.active {
+  background: var(--s-ink);
+  color: var(--s-white);
 }
 .oauth-notes {
   font-size: 12px;
@@ -1367,6 +1400,38 @@
   text-transform: uppercase; letter-spacing: 0.03em;
   padding: 2px 7px; border-radius: 999px;
   border: 1.5px solid var(--s-ink); background: var(--s-cream); color: var(--s-ink);
+  vertical-align: 1px;
+}
+/* ── Logical header row (model-identity contract): the preset-facing model_id
+   of an explicit request_ids pool. It is never a wire id, so its per-key
+   cells are intentionally empty (nothing to grant/deny/probe). ── */
+.stg-mx-row.is-logical .stg-mx-model.root {
+  background: linear-gradient(90deg, rgba(0,0,0,0.035), transparent 55%);
+}
+.stg-mx-cell.logical {
+  background: rgba(0,0,0,0.03);
+  box-shadow: inset 0 0 0 1px rgba(0,0,0,0.04);
+}
+/* ── Not-routed cell: the row's wire id exists (some key routes it) but THIS
+   key's pool doesn't — the dispatcher can never send that pair. No toggle,
+   no probe; a faint hollow dot keeps the grid aligned. ── */
+.stg-mx-cell.noroute {
+  background: repeating-linear-gradient(45deg, transparent, transparent 6px, rgba(0,0,0,0.025) 6px, rgba(0,0,0,0.025) 12px);
+}
+.stg-mx-cell.noroute::after {
+  content: '';
+  display: inline-block;
+  width: 8px; height: 8px; border-radius: 50%;
+  border: 1.5px dashed var(--s-ink-soft);
+  opacity: 0.45;
+}
+.stg-mx-preset {
+  margin-left: 6px;
+  font-size: 8px; font-weight: 800; line-height: 1;
+  text-transform: uppercase; letter-spacing: 0.04em;
+  padding: 1px 5px; border-radius: 3px;
+  border: 1.5px dashed var(--s-ink-soft); color: var(--s-ink-soft);
+  background: none;
   vertical-align: 1px;
 }
 /* ── Alias rows: a concrete id mapping to a distinct upstream model ── */

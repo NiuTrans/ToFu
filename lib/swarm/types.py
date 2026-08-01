@@ -75,15 +75,28 @@ class SubTaskSpec:
     priority: int = 0                            # Higher = run sooner (within wave)
     max_rounds: int = 0                          # Max LLM rounds (0 = unlimited)
     tools_hint: list = field(default_factory=list)  # Preferred tools (empty = all allowed)
-    timeout_seconds: int = 1800                  # Max wall-clock time (0 = unlimited)
-    """Wall-clock ceiling for one sub-agent, in seconds (30 min).
+    timeout_seconds: int = 0                     # explicit ceiling (0 = liveness-governed)
+    """OPTIONAL hard wall-clock ceiling. ``0`` (default) = governed by liveness.
 
-    ⚠️ NOT 0. ``0`` means "unlimited", and combined with the ``max_rounds=0``
-    default that yields an agent with NO bound of any kind — the shape that
-    let one sub-agent run 26.7M rounds for 3.5h on 2026-07-27, writing 9.1 GB
-    into app.log. A caller may still pass 0 deliberately, but it must no
-    longer be what you get by accident. Pinned by
-    tests/test_swarm_runaway_guard.py.
+    This was 1800, added after the 2026-07-27 runaway. It did not work as
+    intended, for two measured reasons:
+
+      * it is evaluated only in ``before_round``, so an agent blocked INSIDE a
+        tool never reaches it — one sat in a ``pytest`` child for over an hour
+        without tripping it. It could not catch the hang it was added for;
+      * against agents that DO keep looping it fires on total runtime, so it
+        reaps productive long jobs. Measured legitimate runs: 1809s, 1846s,
+        1903s — all of which this value would have truncated.
+
+    The runaway it was meant to stop is now covered precisely by two guards
+    that key on BEHAVIOUR rather than duration: the chassis' no-progress
+    breaker (N identical tool-call rounds) and the ProgressBeacon stall check
+    (total silence). Both catch a wedged agent in bounded time while leaving a
+    working one alone — which is the property a wall clock cannot have.
+
+    A caller may still set a deliberate ceiling; it is simply no longer
+    something you get by accident. Pinned by tests/test_swarm_runaway_guard.py
+    and tests/test_swarm_liveness.py.
     """
 
     # ── Extended fields ──

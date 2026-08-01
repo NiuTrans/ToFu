@@ -40,6 +40,9 @@ from lib.pricing._provider import (  # noqa: E402,F401
     set_provider_pricing,
 )
 
+# ── Peak/off-peak price schedules ──
+from lib.pricing._peak import peak_multiplier  # noqa: E402,F401
+
 # ── Online refresh / exchange-rate fetchers + live pricing state ──
 from lib.pricing._refresh import (  # noqa: E402,F401
     _do_update_pricing,
@@ -64,6 +67,8 @@ __all__ = [
     'clear_provider_pricing',
     'lookup_pricing',
     'get_provider_pricing_snapshot',
+    # peak schedules
+    'peak_multiplier',
     # refresh
     'get_pricing_data',
     'refresh_pricing_async',

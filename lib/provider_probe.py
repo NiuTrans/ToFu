@@ -1,9 +1,13 @@
 """Access-matrix cell-probe engine — server-owned background reachability test.
 
 Moved out of ``routes/config.py`` (2026-06). Sends a 1-token completion to
-every (key × concrete-model-id) cell of a provider to learn which pairs the
-gateway actually routes. Because each alias on a gateway can route to a
-genuinely DIFFERENT upstream model, every alias is probed independently.
+every (key × wire-id) SLOT of a provider to learn which pairs the gateway
+actually routes. The probed (key, id) set is the dispatcher's own slot set
+each key's pool resolved through ``resolve_request_ids`` (an explicit
+``request_ids`` pool, possibly replaced per key by ``key_access``, else
+``[model_id] + aliases``) — because each wire id on a gateway can route to
+a genuinely DIFFERENT upstream model, and a (key, id) pair the dispatcher
+never routes is not worth a verdict.
 
 The probe is a long-running fan-out: it runs in a background thread and its
 progress is persisted to disk (``data/config/probe_cache/``) as a secret-free
@@ -62,8 +66,9 @@ def probe_one_cell(base_url, api_key, model_id, extra_headers, timeout,
 
     ``protocol='anthropic'`` probes the Anthropic Messages API
     (``POST /v1/messages`` with ``x-api-key`` + ``anthropic-version``)
-    instead of OpenAI Chat Completions. The status→verdict table is
-    identical for both protocols.
+    instead of OpenAI Chat Completions. ``protocol='responses'`` probes the
+    Responses API (``POST …/responses``). The status→verdict table is
+    identical for all protocols.
 
     ``oauth`` (``'claude'``/``'codex'``) marks a SUBSCRIPTION provider whose
     configured api_key is the 'oauth-managed' SENTINEL — probing with it
@@ -80,10 +85,60 @@ def probe_one_cell(base_url, api_key, model_id, extra_headers, timeout,
     # ── Subscription (OAuth) providers ──────────────────────────────────
     if oauth:
         if oauth == 'codex':
-            # Codex is Responses-API STREAMING only; the app's translator has
-            # no non-stream path, so a non-stream probe would be a guaranteed
-            # false negative. Skipping is the honest verdict.
-            return SKIPPED, 'codex subscription is stream-only — no non-stream probe'
+            # S4: the desktop-egress stream makes a REAL codex probe possible
+            # (1-token Responses API request, classified by status). Before
+            # S3 there was no streaming path, so this returned SKIPPED.
+            from lib.oauth.codex import (
+                codex_get_valid_token, codex_translate_request)
+            from lib.oauth.token_store import load_token
+            token = codex_get_valid_token()
+            if not token:
+                return 'not_logged_in', ('Codex subscription not logged in '
+                                         '(no valid OAuth token)')
+            stored = load_token('codex') or {}
+            account_id = stored.get('account_id', '')
+            import uuid as _uuid
+            hdrs = {
+                'Content-Type': 'application/json',
+                'Authorization': f'Bearer {token}',
+                'OpenAI-Beta': 'responses=experimental',
+                'originator': 'codex_cli_rs',
+                'User-Agent': 'codex_cli_rs/0.20.0 (external; Tofu)',
+                'session_id': _uuid.uuid4().hex,
+            }
+            if account_id:
+                hdrs['chatgpt-account-id'] = account_id
+            body = codex_translate_request({
+                'model': model_id,
+                'messages': [{'role': 'user', 'content': '.'}],
+                'stream': True,
+            })
+            url = f'{base_url.rstrip("/")}/responses'
+            import json as _json
+            from lib.desktop import egress as _eg
+            try:
+                route = _eg.route_request(url, user_id='')
+                if route == 'direct':
+                    resp = http_post(url, json=body, headers=hdrs,
+                                     timeout=timeout)
+                    code = resp.status_code
+                    try:
+                        resp_body = resp.text[:400]
+                    except (UnicodeDecodeError, ValueError, OSError):
+                        resp_body = ''
+                else:
+                    reader = _eg.open_stream(url, method='POST', headers=hdrs,
+                                             body=_json.dumps(body).encode(),
+                                             agent_id=route)
+                    code = reader.status_code
+                    resp_body = reader.read_all_text()[:400]
+            except _eg.EgressUnavailable as e:
+                return 'unavailable', str(e)[:160]
+            except Exception as e:
+                logger.warning('[CellProbe] codex %s network error: %s',
+                               model_id, e)
+                return 'unavailable', 'network: %s' % str(e)[:120]
+            return _classify_status(code, resp_body)
         from lib.llm.anthropic_outbound import anthropic_messages_url
         from lib.oauth.outbound import claude_oauth_url, resolve_oauth_request
         payload = {
@@ -109,8 +164,22 @@ def probe_one_cell(base_url, api_key, model_id, extra_headers, timeout,
         headers.pop('Authorization', None)  # subscription tokens ride x-api-key
         headers['x-api-key'] = token
         payload = body                      # resolve prepends the identity block
+        import json as _json
+        from lib.desktop import egress as _eg
         try:
-            resp = http_post(url, json=payload, headers=headers, timeout=timeout)
+            route = _eg.route_request(url, user_id='')
+        except _eg.EgressUnavailable as e:
+            return 'unavailable', str(e)[:160]
+        try:
+            if route == 'direct':
+                resp = http_post(url, json=payload, headers=headers,
+                                 timeout=timeout)
+            else:
+                resp = _eg.egress_http(url, method='POST', headers=headers,
+                                       body=_json.dumps(payload).encode(),
+                                       timeout=timeout, user_id='')
+        except _eg.EgressUnavailable as e:
+            return 'unavailable', str(e)[:160]
         except Exception as e:
             logger.warning('[CellProbe] %s @ %s network error: %s',
                            model_id, base_url, e)
@@ -127,7 +196,22 @@ def probe_one_cell(base_url, api_key, model_id, extra_headers, timeout,
     # ``max_tokens: 1`` is the floor — the probe only needs to learn whether
     # the gateway accepts the (key, model) routing, never the completion
     # itself, so output cost is held to a single token per attempt.
-    if protocol == 'anthropic':
+    if protocol == 'responses':
+        # Responses API providers (DeepSeek …) — minimal stateless payload.
+        # 400 still classifies ok (routing proven, shape rejected).
+        from lib.llm.responses_outbound import (
+            openai_body_to_responses, responses_url,
+        )
+        url = responses_url(base_url)
+        headers = {'Authorization': 'Bearer %s' % api_key} if api_key else {}
+        if extra_headers:
+            headers.update(extra_headers)
+        payload, _rev = openai_body_to_responses(
+            {'model': model_id,
+             'messages': [{'role': 'user', 'content': 'hi'}],
+             'max_tokens': 16},
+            profile='default', stream=False)
+    elif protocol == 'anthropic':
         from lib.llm.anthropic_outbound import (
             anthropic_headers, anthropic_messages_url,
         )
@@ -476,10 +560,26 @@ _PROBE_DISABLE_STATUSES = {'rate_limited', 'unauthorized', 'not_found', 'unavail
 
 
 def build_probe_work(provider: dict, models: list, api_keys: list) -> list:
-    """Build the probe work list: one item per (key × concrete id).
+    """Build the probe work list: one item per (key × wire id) SLOT —
+    exactly the pairs the dispatcher can route.
 
     Each item is ``(key_idx, api_key, root_id, wire_id, caps, base_url,
-    protocol)``. The last two are resolved PER MODEL via
+    protocol)``. ``root_id`` is the LOGICAL model id (row grouping +
+    recommend-disable attribution); ``wire_id`` is what actually goes on
+    the wire for THAT key, resolved per key through the dispatcher's own
+    contract (:func:`lib.llm_dispatch.model_entry.resolve_request_ids`)
+    — never re-derived here, so the probe can never test a different id
+    set than the dispatcher sends:
+
+      * an explicit ``request_ids`` pool wins (a ``key_access`` cell
+        REPLACES the pool for its key), so the logical ``model_id`` of an
+        explicit-pool entry — a preset-facing identity no real request
+        carries — is never probed;
+      * ``disabled_ids`` is popped before resolving: a disabled id still
+        routes the moment the user re-enables it, so it keeps its verdict
+        (the matrix shows the pip on its toggleable row).
+
+    The last two tuple items are resolved PER MODEL via
     :func:`lib.llm_dispatch.provider_face.resolve_face`, because one account
     can expose several wire faces — probing a Claude cell on the OpenAI face
     of a dual-face gateway returns a false ``not_found`` and the matrix then
@@ -493,6 +593,7 @@ def build_probe_work(provider: dict, models: list, api_keys: list) -> list:
     still gets probed on the provider default: the matrix reports
     reachability, and the refusal itself is surfaced by the dispatcher.
     """
+    from lib.llm_dispatch.model_entry import resolve_request_ids
     from lib.llm_dispatch.provider_face import resolve_face
 
     base_url = provider.get('base_url') or ''
@@ -507,7 +608,11 @@ def build_probe_work(provider: dict, models: list, api_keys: list) -> list:
             face = resolve_face(provider, m)
             cell_url = face.base_url if (face.ok and face.base_url) else base_url
             cell_proto = (face.protocol if face.ok else protocol) or 'openai'
-            for mid in [root] + [a for a in (m.get('aliases') or []) if a]:
+            cell = (m.get('key_access') or {}).get(str(key_idx))
+            probe_cell = dict(cell) if isinstance(cell, dict) else None
+            if probe_cell:
+                probe_cell.pop('disabled_ids', None)
+            for mid in resolve_request_ids(m, probe_cell):
                 work.append((key_idx, api_key, root, mid, caps,
                              cell_url, cell_proto))
     return work

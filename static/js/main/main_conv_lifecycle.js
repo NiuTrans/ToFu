@@ -416,134 +416,94 @@ function loadConversation(id) {
 }
 async function deleteConversation(id, e) {
   if (e && e.stopPropagation) e.stopPropagation();
-  let conv = conversations.find((c) => c.id === id);
+  const conv = conversations.find((c) => c.id === id);
   if (!conv) return;
 
-  /* ★ CRITICAL: undo re-creates the server row from a client-side snapshot, so
-   *   that snapshot MUST hold the conversation's COMPLETE message history. Two
-   *   ways it can be incomplete in memory:
-   *     • a sidebar SHELL (`_needsLoad:true` / `messages:[]`) — history lives
-   *       only on the server;
-   *     • a WINDOWED open (`recordWindowState` loaded only the tail N and set
-   *       `_serverMsgCount = totalCount`), so `messages.length < _serverMsgCount`
-   *       — the oldest messages are absent locally.
-   *   In BOTH cases snapshotting as-is and later restoring would re-create a
-   *   conv missing its head — silent data loss. The single yardstick is
-   *   "do we hold every message the server has?": `messages.length >=
-   *   _serverMsgCount`. When we don't, materialise the full body BEFORE
-   *   snapshotting, exactly like duplicateConversation. */
-  const _serverTotal = () => (conv._serverMsgCount || 0);
-  /* Local snapshot is missing history iff the server has messages we don't
-   *   hold locally (covers both the empty-shell and windowed-tail cases). */
-  const _snapshotIncomplete = () => _serverTotal() > 0 && conv.messages.length < _serverTotal();
-  const _needsHydrate = !!conv._needsLoad || _snapshotIncomplete();
-  /* When true, we could NOT capture a COMPLETE local snapshot (hydration failed
-   *   on a flaky link, or a windowed body couldn't be completed), so the undo
-   *   affordance can't faithfully restore history — the delete still proceeds
-   *   (the server row is authoritative), but WITHOUT an undo toast, after
-   *   explicit user consent below. */
-  let _undoUnavailable = false;
-  if (_needsHydrate) {
-    try {
-      await loadConversationMessages(id);
-    } catch (err) {
-      debugLog(`[deleteConv] hydrate-before-delete failed: ${err && err.message}`, 'warn');
-    }
-    /* Re-read: the conv may have been removed/replaced during the await. */
-    conv = conversations.find((c) => c.id === id);
-    if (!conv) return;
-    /* ★ WINDOWED-TAIL COMPLETION: loadConversationMessages honours the default
-     *   window (60), so on a long conv it leaves only the tail — `messages.length
-     *   < _serverMsgCount`. Snapshotting that would let undo re-create a conv
-     *   missing its oldest messages. Force a FULL (window=0) fetch to complete
-     *   the body before we snapshot. (No-op when the standard load already
-     *   returned everything, e.g. a short conv or a genuine empty-shell where
-     *   the windowed fetch also came back empty.) */
-    if (conv.messages.length > 0 && _snapshotIncomplete()) {
-      try {
-        const _full = await Api.conversations.get(id, { query: { window: '0' } });
-        conv = conversations.find((c) => c.id === id);
-        if (!conv) return;
-        if (_full && Array.isArray(_full.messages) &&
-            _full.messages.length >= conv.messages.length) {
-          conv.messages = _full.messages;
-          conv._serverMsgCount = _full.messages.length;
-          /* The full array supersedes the windowed view — clear pagination
-           *   state so the snapshot (and any subsequent render) treats it as
-           *   the complete history, not a tail with more-above. */
-          conv._windowed = false;
-          conv._hasMoreEarlier = false;
-          conv._trimmed = false;
-          debugLog(`[deleteConv] completed windowed body for conv ${id.slice(0,8)} ` +
-            `→ ${conv.messages.length} msgs before snapshot`, 'info');
-        }
-      } catch (err) {
-        debugLog(`[deleteConv] full-body fetch before snapshot failed: ${err && err.message}`, 'warn');
-      }
-    }
-    /* ★ SNAPSHOT STILL INCOMPLETE (server unreachable / load timed out → 0 msgs,
-     *   OR a windowed tail we couldn't complete → messages.length < total). The
-     *   DELETE itself is always safe — the server row is authoritative and needs
-     *   no local body. What we'd lose is only a FAITHFUL undo snapshot.
-     *   Historically we hard-refused the delete here, but that PERMANENTLY
-     *   BLOCKS deleting a shell/long conv whenever the tunnel is slow (the
-     *   reported "delete always fails" bug: windowed reads on + hundreds of
-     *   shell convs → hydration frequently times out). Instead, ask for explicit
-     *   consent, then delete WITHOUT the undo toast — fail-open-with-consent,
-     *   not fail-closed. */
-    if (_snapshotIncomplete()) {
-      debugLog(`[deleteConv] incomplete snapshot for conv ${id.slice(0,8)} ` +
-        `(${conv._serverMsgCount} server msgs, ${conv.messages.length} local); ` +
-        `confirming delete-without-undo`, 'warn');
-      const _confirmed = (typeof showConfirm === 'function')
-        ? await showConfirm(t('sidebar.deleteNoUndoBody'), {
-            title: t('sidebar.deleteNoUndoTitle'),
-            okText: t('sidebar.deleteAnyway'),
-            cancelText: t('folder.cancel'),
-            danger: true,
-          })
-        : true;  /* no dialog available (headless/legacy) → proceed */
-      if (!_confirmed) return;
-      /* Re-read again: the user may have deliberated for a while and the conv
-       *   could have been removed/replaced during the confirm await. */
-      conv = conversations.find((c) => c.id === id);
-      if (!conv) return;
-      _undoUnavailable = true;
-    }
-  }
+  /* ★ INSTANT-UI CONTRACT (owner directive 2026-07-31, pt_0b444c0be11a4048):
+   *   the click takes visible effect in the SAME task — the conv leaves the
+   *   sidebar (and the chat view, if active) BEFORE any network await, so a
+   *   slow tunnel can never make the delete look dead or invite repeated
+   *   clicks. Everything after the removal below is BACKGROUND work: hydrate
+   *   the undo snapshot, fire the DELETE, show the toast.
+   *
+   *   This REPLACES the old hydrate-then-confirm flow, which blocked the
+   *   click on (a) loadConversationMessages for shell/windowed convs and
+   *   (b) a "delete without undo?" consent dialog when hydration failed —
+   *   the reported "no response for seconds" shape. The undo snapshot still
+   *   gets its COMPLETE history: hydration happens while the server row
+   *   still exists (the DELETE only fires AFTER it), so the snapshot is
+   *   upgraded in the background before it can be consumed by a restore. */
 
+  /* Kill live work first — the user must SEE generation stop immediately. */
   const s = activeStreams.get(id);
   if (s) {
     s.controller.abort();
     activeStreams.delete(id);
   }
-
-  /* ★ Snapshot AFTER hydration so it carries full messages → undo can re-create
-   * the server row.  We capture a deep clone + the sidebar position + whether
-   * it was active, so restore re-inserts it exactly where it was. */
-  const snapshot = JSON.parse(JSON.stringify(conv));
-  const origIndex = conversations.indexOf(conv);
-  const wasActive = (activeConvId === id);
-
   if (conv.activeTaskId)
     Api.chat.abortTask(conv.activeTaskId)
       .catch(e => debugLog(`[deleteConv] abort failed: ${e.message}`, 'warn'));
-  /* Server DELETE only AFTER the snapshot is complete. */
-  Api.conversations.remove(id)
-    .catch(e => debugLog(`[deleteConv] delete failed: ${e.message}`, 'warn'));
+
+  /* ★ Snapshot what we hold NOW. A fully-loaded conv is already complete; a
+   *   sidebar SHELL (`_needsLoad:true`) or a WINDOWED tail (`messages.length
+   *   < _serverMsgCount`) is upgraded by the background hydration below. The
+   *   single yardstick for "undo can faithfully restore" stays: we hold every
+   *   message the server has (`messages.length >= _serverMsgCount`). */
+  const snapshot = JSON.parse(JSON.stringify(conv));
+  const origIndex = conversations.indexOf(conv);
+  const wasActive = (activeConvId === id);
+  const _needsHydrate = !!conv._needsLoad
+    || (snapshot._serverMsgCount || 0) > snapshot.messages.length;
+
+  conversations = conversations.filter((c) => c.id !== id);
   /* ★ Remove from IndexedDB cache */
   ConvCache.remove(id);
-  conversations = conversations.filter((c) => c.id !== id);
-  _broadcastToTabs("conv_deleted", { convId: id });
-  if (activeConvId === id) {
+  /* cross_tab_sync.js is DEFERRED (Epic-E sub-part 3 slice A) — typeof-guard
+   * so a delete in the pre-load window can't ReferenceError. */
+  if (typeof _broadcastToTabs === 'function') _broadcastToTabs("conv_deleted", { convId: id });
+  if (wasActive) {
     if (conversations.length > 0) loadConversation(conversations[0].id);
     else newChat();
   } else renderConversationList();
 
-  /* Only offer undo when we captured a restorable snapshot. When hydration
-   *   failed (shell conv on a flaky link, user consented to delete-without-undo
-   *   above), the snapshot is hollow — restoring it would re-create an EMPTY
-   *   server row, so surface a plain "deleted" toast instead of a false undo. */
+  /* ── Background from here on ───────────────────────────────────────────
+   * Hydrate the snapshot via ONE full (window=0) GET while the server row
+   *   still exists — the DELETE must NOT fire before this await or the GET
+   *   would 404. One fetch covers BOTH the empty-shell and windowed-tail
+   *   cases; loadConversationMessages is the VIEWING path (it writes into a
+   *   conv that stays in the list, which this one no longer does). */
+  if (_needsHydrate) {
+    try {
+      const _full = await Api.conversations.get(id, { query: { window: '0' } });
+      if (_full && Array.isArray(_full.messages)
+          && _full.messages.length >= snapshot.messages.length) {
+        snapshot.messages = _full.messages;
+        snapshot._serverMsgCount = _full.messages.length;
+        /* The full array supersedes any windowed view — clear pagination
+         *   state so a restore treats it as the complete history, not a
+         *   tail with more-above. */
+        snapshot._needsLoad = false;
+        snapshot._windowed = false;
+        snapshot._hasMoreEarlier = false;
+        snapshot._trimmed = false;
+        debugLog(`[deleteConv] hydrated snapshot for conv ${id.slice(0,8)} ` +
+          `→ ${snapshot.messages.length} msgs`, 'info');
+      }
+    } catch (err) {
+      debugLog(`[deleteConv] background hydrate failed: ${err && err.message}`, 'warn');
+    }
+  }
+  /* Only offer undo when the snapshot can faithfully restore history. A
+   *   hollow snapshot (hydration failed on a flaky link) would re-create an
+   *   EMPTY/partial server row, so surface a plain "deleted" toast instead
+   *   of a false undo — fail-open WITHOUT the retired blocking consent. */
+  const _undoUnavailable =
+    (snapshot._serverMsgCount || 0) > snapshot.messages.length;
+  /* Server DELETE only AFTER the snapshot is complete. Fire-and-forget: the
+   *   server row is authoritative and the UI no longer depends on it. */
+  Api.conversations.remove(id)
+    .catch(e => debugLog(`[deleteConv] delete failed: ${e.message}`, 'warn'));
+
   if (_undoUnavailable) {
     if (typeof showToast === "function") showToast(t('sidebar.convDeleted'), 'success');
   } else {
@@ -588,7 +548,9 @@ function _restoreDeletedConversation(snapshot, origIndex, wasActive) {
     syncConversationToServer(restored).catch(err =>
       debugLog(`[deleteConv] restore sync failed: ${err && err.message}`, 'warn'));
   }
-  _broadcastToTabs("conv_restored", { convId: restored.id });
+  /* cross_tab_sync.js is DEFERRED (Epic-E sub-part 3 slice A) — typeof-guard
+   * so a restore in the pre-load window can't ReferenceError. */
+  if (typeof _broadcastToTabs === 'function') _broadcastToTabs("conv_restored", { convId: restored.id });
   if (wasActive) loadConversation(restored.id);
   else renderConversationList();
   if (typeof showToast === "function") showToast(t('sidebar.convRestored'), 'success');

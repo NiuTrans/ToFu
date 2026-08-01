@@ -83,6 +83,55 @@ def test_non_claude_cells_keep_the_default_wire():
         assert item[6] == 'openai', item
 
 
+def test_logical_id_never_probed_for_explicit_pool():
+    """The whole point of the fix: an explicit ``request_ids`` pool replaces
+    ``[model_id] + aliases`` — the logical name is a preset identity, not a
+    wire id, so probing it would test a (key, id) pair no real request ever
+    carries (and its verdict fed a false recommend-disable)."""
+    work = _build_work(MODELS, MERGED_FACES)
+    probed_ids = {w[3] for w in work}
+    assert 'claude-opus-5' not in probed_ids, (
+        'logical-only model_id was probed as if it were a wire id: %r'
+        % sorted(probed_ids))
+    assert 'yuju-claude-opus-5-evaDaily' in probed_ids
+
+
+def test_legacy_entry_keeps_root_plus_aliases():
+    """Regression: a pre-contract entry (no request_ids) still probes
+    ``[model_id] + aliases`` — the root id MUST stay in the pool."""
+    work = _build_work(
+        [{'model_id': 'gpt-4.1-mini', 'aliases': ['gpt-4.1-mini-mirror'],
+          'capabilities': ['text']}],
+        faces={}, base_url='https://api.openai.com/v1')
+    probed = {w[3] for w in work}
+    assert probed == {'gpt-4.1-mini', 'gpt-4.1-mini-mirror'}, probed
+
+
+def test_cell_request_ids_union_into_pool():
+    """A key_access cell may narrow/replace the pool for one key. The probe
+    covers EVERY key's own resolved pool (the dispatcher's slots): key#0
+    keeps the entry pool ``m-a``, key#1's cell replaces it with ``m-b``.
+    The matrix renders the UNION of those pools as rows so a key-restricted
+    deployment still has a row — and cells outside a key's own pool render
+    as not-routed instead of faking a toggleable (key × id) pair."""
+    work = _build_work(
+        [{'model_id': 'm', 'capabilities': ['text'],
+          'request_ids': ['m-a'],
+          'key_access': {'1': {'request_ids': ['m-b'],
+                               'disabled_ids': ['m-a']}}}],
+        faces={}, base_url='https://gw.example.com/v1',
+        api_keys=('k1', 'k2'))
+    probed = {w[3] for w in work}
+    assert probed == {'m-a', 'm-b'}, probed
+    # Per-key slot truth: key#0 probes the entry pool, key#1 probes its
+    # REPLACED pool — never the cross product of union × keys, and never
+    # the disabled id on the key that replaced it away.
+    by_key = {}
+    for w in work:
+        by_key.setdefault(w[0], set()).add(w[3])
+    assert by_key == {0: {'m-a'}, 1: {'m-b'}}, by_key
+
+
 def test_a_provider_without_faces_is_unchanged():
     """Regression: every existing single-face provider must probe exactly as
     it did before."""
@@ -126,11 +175,12 @@ def test_worker_honours_the_per_cell_face():
         pp.persist_probe_task = orig_persist
 
     by_model = {s['model_id']: s for s in seen}
-    # The work list probes ``[model_id] + aliases`` — i.e. the LOGICAL id for
-    # a model-identity-contract entry (whose wire ids live in request_ids).
-    # That is pre-existing probe behaviour and orthogonal to the wire face;
-    # what matters here is WHICH WIRE the cell was asked on.
-    claude = by_model.get('claude-opus-5')
+    # The work list probes the WIRE pool (resolve_request_ids): for a
+    # model-identity-contract entry those are the request_ids, NOT the
+    # logical model_id — probing the logical name would test a (key, id)
+    # pair no real request ever carries. What this suite pins is WHICH WIRE
+    # each pool id was asked on.
+    claude = by_model.get('yuju-claude-opus-5-evaDaily')
     assert claude is not None, sorted(by_model)
     assert claude['protocol'] == 'anthropic', claude
     assert claude['base_url'] == ANTHROPIC_URL, claude

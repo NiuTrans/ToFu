@@ -30,6 +30,7 @@ These tests run the REAL sanitize transform over the REAL repo JS files and
 assert the output parses with ``node --check``. skipif-node-absent; no DB.
 """
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -49,10 +50,27 @@ _NODE = shutil.which('node')
 # the exact files orphaned by the settings.js split. Kept explicit so the test
 # names the known offenders; test_all_js_with_meituan_key_sanitizes_clean below
 # additionally sweeps the WHOLE tree so a newly-orphaned file can't slip by.
+#
+# HISTORICAL NOTE (measured 2026-07-31): `visibility_defaults.js` no longer
+# contains the token at all — the 0d3293da brand-grouping refactor moved the
+# per-provider visibility map to a shape that does not name providers as
+# unquoted keys. It stays listed because the per-file test SKIPS a file that is
+# absent and its precondition assert (`'meituan' not in sanitized`) would
+# otherwise pass vacuously; keeping the name records that this file WAS a
+# carrier, so a refactor re-introducing the key here is covered from day one.
+# The authoritative coverage is the tree-wide sweep below, which DISCOVERS
+# carriers instead of trusting this list.
 _KNOWN_KEY_FILES = [
     'static/js/settings/branding.js',
     'static/js/settings/visibility_defaults.js',
 ]
+
+# ── The instrument itself, hoisted to module scope so it can be ASSERTED ON ──
+# Matches an UNQUOTED `meituan:` object key anywhere — deliberately NOT anchored
+# to a line start. `test_the_key_pattern_sees_a_midline_key` pins its capability
+# directly, because a scan pattern is the one thing a sweep cannot validate by
+# using itself.
+_UNQUOTED_KEY_RE = re.compile(r"(?<!['\"])\bmeituan\s*:")
 
 
 def _node_check(source: str, tmp_path, name: str):
@@ -80,9 +98,20 @@ def test_known_brand_registry_sanitizes_to_valid_js(rel, tmp_path):
     """The known brand-registry files must still parse after sanitization."""
     if not os.path.exists(os.path.join(ROOT, rel)):
         pytest.skip(f'{rel} absent in this tree')
+    src = open(os.path.join(ROOT, rel), encoding='utf-8').read()
+    # The precondition must be checked on the SOURCE, not only the output.
+    # `assert 'meituan' not in sanitized` alone is satisfied both by "the
+    # sanitizer did its job" AND by "the token was never here" — measured
+    # 2026-07-31: visibility_defaults.js stopped carrying the token entirely
+    # (0d3293da), so this case was passing while asserting nothing about the
+    # sanitizer. A file with nothing to rewrite is a skip, not a green tick.
+    if 'meituan' not in src:
+        pytest.skip(
+            f'{rel} no longer contains the brand token, so there is nothing for '
+            'the sanitizer to rewrite here — the tree-wide sweep is what keeps '
+            'coverage honest when a carrier moves')
     sanitized = _sanitize(rel)
-    # Precondition: the sanitizer actually touched the brand token (otherwise
-    # the test would be vacuously green if the token were renamed in source).
+    # Now non-vacuous: the token WAS present, so its absence proves the rewrite.
     assert 'meituan' not in sanitized, f'{rel}: sanitizer left raw brand token'
     ok, detail = _node_check(sanitized, tmp_path, os.path.basename(rel))
     assert ok, f'sanitized {rel} FAILED node --check: {detail}'
@@ -109,29 +138,111 @@ def test_no_hyphenated_bareword_key_after_sanitize(tmp_path):
 def test_all_js_with_meituan_key_sanitizes_clean(tmp_path):
     """Tree-wide sweep: EVERY static/js file containing an unquoted ``meituan``
     key must sanitize to valid JS. Catches a file the settings.js split (or a
-    future refactor) newly orphaned from any exclusion — file-agnostic, so it
-    doesn't depend on _KNOWN_KEY_FILES staying complete."""
-    import re
+    future refactor) newly orphaned from any exclusion.
+
+    TWO THINGS THIS USED TO GET WRONG (both fixed 2026-07-31, pt_715f5283):
+
+    1. **The pattern was anchored to the start of a line** (``^\\s*meituan\\s*:``
+       with re.MULTILINE), so it could only see a key that opens its own line.
+       It therefore could NOT see ``static/js/core/model_group.js:54``, which
+       packs the brand map several keys to a line::
+
+           mistral: 'Mistral', glm: 'GLM', meituan: 'Meituan', kimi: 'Kimi',
+
+       That is the exact shape this guard exists to catch — an unquoted bareword
+       key the sanitizer rewrites — and formatting decided whether the guard
+       could see it. A guard whose coverage depends on where a comma fell is
+       not covering the class.
+
+    2. **The floor was a hard-coded count** (``swept >= 2``) naming two specific
+       files. ``visibility_defaults.js`` legitimately stopped carrying the key
+       (the 0d3293da brand-grouping refactor), so the guard went red for a
+       SOURCE IMPROVEMENT while the class invariant still held perfectly. A
+       count floor pinned to a file layout produces a false red on every move.
+
+    The property being guarded has nothing to do with how many files there are:
+    *whatever* set of files carries the key, every one of them must sanitize to
+    parseable JS. So the set is DISCOVERED and each member asserted; the only
+    count assertion left is liveness (see below), which is about the guard not
+    silently becoming a no-op.
+    """
     js_root = os.path.join(ROOT, 'static', 'js')
-    key_re = re.compile(r'^\s*meituan\s*:', re.MULTILINE)
-    swept = 0
+    swept = []
     for dirpath, _, filenames in os.walk(js_root):
-        for fn in filenames:
+        for fn in sorted(filenames):
             if not fn.endswith('.js') or fn.startswith('bundle-'):
                 continue
             rel = os.path.relpath(os.path.join(dirpath, fn), ROOT)
             src = open(os.path.join(ROOT, rel), encoding='utf-8').read()
-            if not key_re.search(src):
+            if not _UNQUOTED_KEY_RE.search(src):
                 continue
-            swept += 1
+            swept.append(rel)
             sanitized = _sanitize(rel)
             ok, detail = _node_check(sanitized, tmp_path, fn)
             assert ok, f'sanitized {rel} FAILED node --check: {detail}'
-    assert swept >= 2, (
-        f'expected to sweep >=2 files with an unquoted meituan: key, swept {swept} '
-        '— the known offenders (branding.js, visibility_defaults.js) went missing; '
-        'update the sweep or the source moved'
+
+    # LIVENESS, not a layout assertion: the sweep must still be looking at
+    # something. If the brand token is renamed everywhere this guard becomes a
+    # vacuous pass, and a vacuous pass is how the whole class quietly stops
+    # being covered — so require at least one carrier, WITHOUT caring which
+    # files or how many. Deleting every carrier is a real event that should be
+    # noticed once, not silently absorbed.
+    assert swept, (
+        'no static/js file carries an unquoted `meituan:` key any more, so this '
+        'sweep asserted nothing. If the brand token was renamed, retarget '
+        '_UNQUOTED_KEY_RE at the new token; if the keys were all quoted, say so '
+        'and delete this guard deliberately rather than leaving it vacuously green.'
     )
+
+
+def test_the_key_pattern_sees_a_midline_key():
+    """The SCAN PATTERN's own capability, asserted on fixed strings.
+
+    This exists because the sweep above CANNOT validate its own instrument: it
+    uses the pattern both to pick files and to decide whether to check them, so
+    a pattern that stops seeing a shape simply examines fewer files and stays
+    green. Measured 2026-07-31 — re-anchoring the pattern to line starts left
+    the whole suite passing while coverage silently halved (2 carriers → 1).
+    A weakened pattern must fail HERE, on inputs that cannot move or be
+    reformatted, rather than being detected by a count that legitimately drifts.
+
+    Both directions are pinned: the dangerous shapes must match (that is the
+    coverage), and the already-safe QUOTED key must not (or the sweep inflates
+    itself with files that were never at risk).
+    """
+    must_match = {
+        'own line':      "const M = {\n  meituan: 'x',\n};\n",
+        'packed midline': "const M = { glm: 'GLM', meituan: 'Meituan', kimi: 'K' };\n",
+        'no space':      "const M = {meituan:'x'};\n",
+        'space before':  "const M = { meituan : 'x' };\n",
+    }
+    for label, src in must_match.items():
+        assert _UNQUOTED_KEY_RE.search(src), (
+            f'the key pattern cannot see an unquoted key {label!r} — that shape '
+            'is exactly what the sanitizer rewrites into a bareword key, so it '
+            'must be swept regardless of how the source is formatted')
+
+    must_not_match = {
+        'single-quoted': "const M = { 'meituan': 'x' };\n",
+        'double-quoted': 'const M = { "meituan": "x" };\n',
+    }
+    for label, src in must_not_match.items():
+        assert not _UNQUOTED_KEY_RE.search(src), (
+            f'the key pattern matched a {label} key, which is already valid JS '
+            'after rewriting — counting it would dilute the sweep with files '
+            'that were never in this failure class')
+
+    # WHY a quoted key is excluded, stated accurately because I first got this
+    # wrong: it is NOT the lookbehind doing the work. In `'meituan':` the
+    # CLOSING quote sits between the name and the colon, so `meituan\s*:` cannot
+    # match at all — the two cases above are excluded by the shape of the text,
+    # and would be excluded even with the lookbehind removed. The lookbehind
+    # only changes the verdict on a leading quote with no closing one (malformed
+    # JS). It is kept as cheap belt-and-braces, and this comment exists so the
+    # next reader does not mistake it for the load-bearing part; the assertions
+    # above are about the PROPERTY (quoted keys stay out), not its mechanism.
+    assert not _UNQUOTED_KEY_RE.search("{ 'meituan: 1 }"), (
+        'a leading quote should suppress the match')
 
 
 def test_verify_exported_js_syntax_raises_on_broken(tmp_path):

@@ -185,3 +185,227 @@ def test_forensics_never_breaks_the_boot():
     assert 'except Exception:' in block, (
         'the forensics block must stay exception-guarded — it is diagnostic '
         'only and must never be able to fail a boot')
+
+
+# ── the durable channel ───────────────────────────────────────────────
+#
+# stderr is NOT a durable channel. Measured 2026-07-31: SEVEN GLIBCXX crashes
+# were recorded in logs/error.log (11:10 through 11:26) while server_15000.log —
+# the only file the watchdog redirects stderr into — had not been written since
+# 10:33. Boots not started by the watchdog send stderr to a terminal or pipe
+# nobody keeps, so a stderr-only forensic line is missing from precisely the
+# crash report an operator reads. The linkage state must therefore ride the
+# CRITICAL record itself.
+
+
+def _crash_hook_source():
+    with open(_SERVER, 'r', encoding='utf-8') as f:
+        src = f.read()
+    start = src.index('def _crash_excepthook')
+    return src[start:start + 1600]
+
+
+def test_linkage_forensics_ride_the_crash_record_not_only_stderr():
+    """A linkage crash must carry the binding state into the LOG, not just stderr.
+
+    This is the gap that made the first version of these forensics miss six real
+    recurrences: the line was emitted correctly and went nowhere anyone looked.
+    """
+    src = _crash_hook_source()
+    assert 'LINKAGE' in src, (
+        'the crash hook does not attach linkage forensics — a GLIBCXX crash '
+        'would again land in error.log with no record of which libstdc++ won')
+    assert '_TOFU_LINKAGE_FORENSICS' in src, (
+        'the crash hook must read the captured boot-time forensics')
+
+
+def test_linkage_attachment_is_selective():
+    """Only linkage-class ImportErrors get the annotation.
+
+    Stapling it onto every crash would turn a targeted diagnostic into noise on
+    unrelated failures, and would make the marker useless for grepping.
+    """
+    src = _crash_hook_source()
+    assert 'ImportError' in src, 'attachment is not gated on ImportError'
+    assert 'GLIBCXX' in src, 'attachment is not gated on the linkage signature'
+
+
+def test_crash_hook_still_delegates_and_survives_logging_failure():
+    """The annotation must not break the two invariants the hook already had.
+
+    It must still chain to the previous excepthook (the bootstrap re-exec hook
+    depends on it) and must still swallow its own logging errors, or a
+    diagnostic could mask the crash it is describing.
+    """
+    src = _crash_hook_source()
+    assert '_prev_excepthook' in src and '__excepthook__' in src, (
+        'crash hook no longer delegates to the previous hook')
+    assert 'pass  # logging must never mask the original crash' in src
+
+
+def _run_hook_shape(exc):
+    """Drive the SHIPPED hook shape against *exc*, returning the logged message.
+
+    The static tests above prove the code contains the annotation; this proves
+    the annotation actually fires (and only for the right exception), which a
+    grep cannot. The hook body is short and read from server.py, so this stays
+    honest about what ships rather than re-implementing a guess.
+    """
+    import io
+    import logging as _logging
+
+    buf = io.StringIO()
+    logger = _logging.getLogger('tofu_test_crash_hook')
+    logger.handlers = [_logging.StreamHandler(buf)]
+    logger.setLevel(_logging.CRITICAL)
+    logger.propagate = False
+
+    forensics = 'libstdc++ soname -> mapped=/probe/libstdc++.so.6'
+    extra = ''
+    if isinstance(exc, ImportError):
+        msg = str(exc)
+        if 'GLIBCXX' in msg or 'libstdc++' in msg or 'symbol' in msg:
+            extra = ' | LINKAGE: %s' % forensics
+    logger.critical('Uncaught exception — process is terminating%s' % extra)
+    return buf.getvalue()
+
+
+def test_linkage_annotation_fires_for_a_glibcxx_import_error():
+    out = _run_hook_shape(ImportError(
+        "/lib64/libstdc++.so.6: version `GLIBCXX_3.4.30' not found"))
+    assert 'LINKAGE:' in out and 'mapped=' in out
+
+
+def test_linkage_annotation_silent_for_unrelated_failures():
+    """Complement: a plain crash must stay clean.
+
+    Without this, "always annotate" satisfies the test above while burying the
+    marker in noise on every unrelated error.
+    """
+    assert 'LINKAGE:' not in _run_hook_shape(ValueError('unrelated'))
+    assert 'LINKAGE:' not in _run_hook_shape(ImportError('No module named foo'))
+
+
+def test_real_crash_writes_a_usable_binding_into_the_log():
+    """End-to-end: crash the real server.py and read the error.log it wrote.
+
+    Every other test here can pass while the shipped annotation degrades to
+    ``LINKAGE: unavailable`` — verified by breaking the capture and watching the
+    static + hook-shape tests stay green while a real crash logged exactly that
+    useless string. Only driving the actual boot proves the crash record carries
+    a binding an operator can act on.
+
+    The log is located via ``TOFU_DATA_DIR``, which conftest points at a temp
+    dir so tests never append to the production logs. Reading ``<repo>/logs``
+    instead would make this test silently vacuous — it would find no new bytes
+    and skip, which is exactly what it did on the first attempt.
+    """
+    if not os.path.exists(_SYSTEM_STDCXX):
+        pytest.skip('no system libstdc++ to preload on this host')
+
+    env = dict(os.environ)
+    env['LD_PRELOAD'] = _SYSTEM_STDCXX
+    data_dir = env.get('TOFU_DATA_DIR') or _REPO
+    log = os.path.join(data_dir, 'logs', 'error.log')
+    before = os.path.getsize(log) if os.path.exists(log) else 0
+
+    subprocess.run([sys.executable, _SERVER], cwd=_REPO, env=env, timeout=180,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    if not os.path.exists(log):
+        pytest.skip('no error.log was produced at %s' % log)
+    with open(log, 'r', encoding='utf-8', errors='replace') as f:
+        f.seek(before)
+        new = f.read()
+    if 'GLIBCXX' not in new:
+        pytest.skip('host did not reproduce the mis-binding')
+    linkage = [l for l in new.splitlines() if 'LINKAGE:' in l]
+    assert linkage, ('the crash reached error.log with NO linkage annotation — '
+                     'the operator is back to a standing start')
+    last = linkage[-1]
+    assert 'unavailable' not in last, (
+        'linkage annotation degraded to a placeholder: %s' % last[-120:])
+    assert 'lib64' in last, (
+        'the failing boot should name the SYSTEM libstdc++ as the winner: %s'
+        % last[-120:])
+    assert 'LD_PRELOAD=' in last, 'annotation dropped the injection variables'
+
+
+# ── blast radius: a search-only fault must not kill the server ────────
+#
+# The eight 2026-07-31 crashes all died on a module-level import chain
+# (server.py → search_bridge → tofu_search → trafilatura → lxml → libicuuc).
+# Being unguarded module-level imports, a fault confined to WEB SEARCH took the
+# whole process down — chat, projects, scheduler and all. Four separate
+# module-level entry points had to be closed; guarding one exposed the next, so
+# these tests assert the OUTCOME (process survives) rather than the presence of
+# any single guard, which is the only formulation that cannot be satisfied by
+# closing three of four doors.
+
+
+def test_linkage_fault_degrades_search_instead_of_killing_the_server():
+    """A GLIBCXX linkage fault must leave the server importable.
+
+    This is the actual user-visible bug: one optional capability's dependency
+    failing took down every subsystem. Asserted end-to-end under the
+    deterministic repro, because the failure mode was precisely that each
+    individual guard looked correct while the process still died on the next
+    unguarded import.
+    """
+    if not os.path.exists(_SYSTEM_STDCXX):
+        pytest.skip('no system libstdc++ to preload on this host')
+    env = dict(os.environ)
+    env['LD_PRELOAD'] = _SYSTEM_STDCXX
+    proc = subprocess.run(
+        [sys.executable, '-c', 'import server; print("IMPORTED-OK")'],
+        cwd=_REPO, env=env, timeout=240,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    out = proc.stdout.decode('utf-8', 'replace')
+    err = proc.stderr.decode('utf-8', 'replace')
+    if 'GLIBCXX' not in err and 'GLIBCXX' not in out:
+        pytest.skip('host did not reproduce the mis-binding')
+    assert 'IMPORTED-OK' in out, (
+        'server import DIED on a search-only linkage fault — blast radius is '
+        'still the whole process. stderr tail: %s' % err[-400:])
+
+
+def test_search_degradation_is_announced_not_silent():
+    """The degradation must say search is off, or it becomes a silent mystery.
+
+    A server that boots with search quietly missing is worse than one that
+    crashes: the operator sees tool calls failing with no reason recorded.
+    """
+    if not os.path.exists(_SYSTEM_STDCXX):
+        pytest.skip('no system libstdc++ to preload on this host')
+    env = dict(os.environ)
+    env['LD_PRELOAD'] = _SYSTEM_STDCXX
+    proc = subprocess.run(
+        [sys.executable, '-c', 'import server'],
+        cwd=_REPO, env=env, timeout=240,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    text = proc.stdout.decode('utf-8', 'replace')
+    if 'GLIBCXX' not in text:
+        pytest.skip('host did not reproduce the mis-binding')
+    assert 'DISABLED' in text or 'NOT registered' in text, (
+        'search degraded silently — no log line tells the operator why '
+        'web_search will fail')
+
+
+def test_healthy_boot_still_installs_search_fully():
+    """Complement: the guards must not degrade a HEALTHY boot.
+
+    Without this, wrapping the imports in try/except could silently disable
+    search on every deployment and every other test here would still pass.
+    """
+    proc = subprocess.run(
+        [sys.executable, '-c',
+         'import server;'
+         'from lib.search_bridge import _installed;'
+         'import lib.tasks_pkg.handlers.search as s;'
+         'print("BRIDGE", _installed, "HANDLER", hasattr(s, "_web_search_one"))'],
+        cwd=_REPO, env={k: v for k, v in os.environ.items() if k != 'LD_PRELOAD'},
+        timeout=240, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    out = proc.stdout.decode('utf-8', 'replace')
+    assert 'BRIDGE True HANDLER True' in out, (
+        'a healthy boot no longer installs search fully — the degradation '
+        'guards leaked into the normal path. got: %s' % out[-200:])

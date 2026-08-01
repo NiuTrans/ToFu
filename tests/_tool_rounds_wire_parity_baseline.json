@@ -14,7 +14,7 @@
  {
   "i": 2,
   "name": "cmd-running",
-  "html": "<div class=\"ptool-cmd-block ptool-cmd-running\">\n           <div class=\"ptool-cmd-header\">\n             <span class=\"ptool-cmd-icon\"><svg width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"><polyline points=\"4 17 10 11 4 5\"/><line x1=\"12\" y1=\"19\" x2=\"20\" y2=\"19\"/></svg></span>\n             \n             <span class=\"ptool-cmd-desc-inline\" title=\"run tests\">run tests</span>\n             <span class=\"ptool-cmd-label\">Running...</span>\n             <span class=\"ptool-spinner\"></span>\n           </div>\n           <pre class=\"ptool-cmd-code\"><code>$ npm test</code></pre>\n           <pre class=\"ptool-cmd-output ptool-cmd-output-live\"><code>line1\nline2</code></pre>\n         </div>",
+  "html": "<div class=\"ptool-cmd-block ptool-cmd-running\">\n           <div class=\"ptool-cmd-header\">\n             <span class=\"ptool-cmd-icon\"><svg width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"><polyline points=\"4 17 10 11 4 5\"/><line x1=\"12\" y1=\"19\" x2=\"20\" y2=\"19\"/></svg></span>\n             \n             <span class=\"ptool-cmd-desc-inline\" title=\"run tests\">run tests</span>\n             <span class=\"ptool-cmd-label\">Running...</span>\n             \n             <span class=\"ptool-spinner\"></span>\n           </div>\n           <pre class=\"ptool-cmd-code\"><code>$ npm test</code></pre>\n           <pre class=\"ptool-cmd-output ptool-cmd-output-live\"><code>line1\nline2</code></pre>\n         </div>",
   "err": null
  },
  {

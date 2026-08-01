@@ -32,6 +32,15 @@ from lib.tool_input_repair._schema import RepairLog, _schemas
 logger = get_logger(__name__)
 
 
+# Canary payloads of known UPSTREAM canned probes — fixed byte-identical
+# blobs the gateway / Anthropic-native layer injects into the tool-call
+# stream (measured: ``print('HELLO_CHECK')`` on Opus-5 wire ids, 2026-07,
+# 21 sightings across 9 unrelated tasks in 2 days). They always hit the
+# drop guard (empty/artefact name); recognising them there turns silent
+# pollution into a greppable count. Adding the next canary is a one-liner.
+_UPSTREAM_PROBE_MARKERS = ('HELLO_CHECK',)
+
+
 # Names to DROP outright (never a real tool call): proxy artefacts like
 # ``antml:thinking`` / ``__internal`` and XML-corrupted names. Mirrors the
 # guards at the top of ``parse_tool_calls``. A dropped call must be skipped by
@@ -171,6 +180,21 @@ def ingest_tool_call(
     # ── Stage 1: drop guard ──
     drop = _tool_name_drop_reason(raw_name)
     if drop:
+        # Upstream canned probes land here (they carry an empty/artefact
+        # name). Count each sighting LOUDLY — an upstream health-check blob
+        # inside a user turn is pollution, not traffic (pt_914bb730).
+        _args_blob = fn_obj.get('arguments') or ''
+        if isinstance(_args_blob, str):
+            _probe = next((m for m in _UPSTREAM_PROBE_MARKERS
+                           if m in _args_blob), None)
+            if _probe:
+                logger.warning('[ToolRepair] Upstream probe tool call '
+                               'sighted (marker=%s, drop_reason=%s) '
+                               'model=%s conv=%s',
+                               _probe, drop, model, conv_id)
+                if emit_audit:
+                    audit_log('upstream_tool_probe', marker=_probe,
+                              drop_reason=drop, model=model, conv_id=conv_id)
         return IngestedToolCall(raw_name=raw_name, fn_name=raw_name,
                                 drop_reason=drop)
 

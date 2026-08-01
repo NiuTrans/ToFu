@@ -1,5 +1,45 @@
 # Extension store submission kit — Tofu Browser Bridge
 
+> ## ⛔ STATUS: NOT SUBMITTING — decided 2026-07-31 by the project owner
+>
+> **We are staying on "load unpacked". Do not start a submission from this kit
+> without a fresh decision from the owner.**
+>
+> This is a recorded PRODUCT decision, not an unfinished task and not a gap
+> waiting to be filled. Everything mechanical here is already done and
+> verified — the trimmed manifest is correct, the zip builds, the parity guard
+> is green (see "Kit readiness" below). What stopped it was the trade-off in
+> `REVIEW_RISKS.md` §"Decision to make NOW": the only realistic path to
+> acceptance is shipping a **reduced build** with `browser_execute_js` and
+> `debugger` removed, which is a code change that narrows what the extension
+> can do. The owner chose to keep the full-capability extension and the
+> three-step manual install instead.
+>
+> **What this means for the "one exe installs everything" idea:** it stays
+> closed, and not for want of trying. Chrome permits no other route —
+> `update_url` must point at the Web Store on Windows/macOS (local CRX paths
+> are Linux-only), non-store `force_installed` requires an AD-domain-joined
+> machine, and `--load-extension` was removed in Chrome 137
+> (`--disable-extensions-except` in 139). Requesting admin rights does not
+> change any of that. Users install the extension in three steps; the
+> remaining friction worth attacking is the copy-paste of the bridge secret,
+> which `docs/UNIFIED_DEVICE_BRIDGE_DESIGN.md` §B3 (pairing code) addresses
+> INDEPENDENTLY of this kit.
+>
+> **Kit readiness, measured 2026-07-31** — so a future submitter starts from
+> facts rather than re-deriving them:
+> - `manifest.store.json` = 10 permissions, version 4.5.0, matching the
+>   shipped manifest; `downloads` present, `activeTab` absent.
+> - `bash scripts/package_extension.sh --store` produces a valid
+>   `tofu-browser-bridge-4.5.0-store.zip` (7 files, `<all_urls>`).
+> - `tests/test_chrome_store_manifest_parity.py` — 20/20, and it DERIVES the
+>   required permissions from the extension's real `chrome.*` calls, so it
+>   keeps this kit honest while it sits idle.
+>
+> If the decision is revisited, the only open question is the one in
+> `REVIEW_RISKS.md`: ship the reduced build, or submit full-capability and
+> accept likely rejection from both Chromium stores.
+
 Everything needed to publish the **Tofu Browser Bridge** extension to the two
 Chromium extension stores. It does **not** automate submission — that needs
 your own account and identity verification, which cannot be done from code.

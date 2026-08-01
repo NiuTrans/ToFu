@@ -16,64 +16,16 @@
    the bare names still resolve at runtime.
    ═══════════════════════════════════════════════════════════════════ */
 
-function saveConversations(changedConvId) {
-  const now = Date.now();
-  if (changedConvId) {
-    const c = conversations.find((x) => x.id === changedConvId);
-    /* ── Don't bump updatedAt during periodic streaming saves ──
-     * When multiple conversations stream simultaneously, each calls
-     * saveConversations every ~3s.  Bumping updatedAt each time makes
-     * them compete for the top sort position, causing the sidebar to
-     * flicker as conversations constantly swap order.
-     * Fix: only bump updatedAt when the conversation is NOT actively
-     * streaming.  The timestamp is already set when the user sends a
-     * message (before streaming starts) and again in finishStream()
-     * (after activeStreams.delete, so the guard passes). */
-    if (c && !activeStreams.has(changedConvId)) c.updatedAt = now;
-  }
-  /* ★ DB-first: in-memory array is truth for this tab, DB across tabs/sessions. */
-  conversations.sort(_convSorter);
-  _broadcastToTabs("conv_saved", { convId: changedConvId });
-
-  /* ── Throttled sidebar refresh during streaming ──
-   * During active streaming, saveConversations is called every ~3s but
-   * renderConversationList was NEVER called — so the sidebar sort order
-   * and streaming dot were stale until the stream finished or user clicked
-   * another conversation.  We now refresh the sidebar on a 2s throttle
-   * so users see the active conversation bubble to the top promptly. */
-  if (changedConvId && activeStreams.size > 0) {
-    const _now = Date.now();
-    const _sc = /** @type {any} */ (saveConversations);
-    if (!_sc._lastSidebarRefresh || _now - _sc._lastSidebarRefresh > 2000) {
-      _sc._lastSidebarRefresh = _now;
-      requestAnimationFrame(() => {
-        if (typeof renderConversationList === 'function') renderConversationList();
-      });
-    }
-  }
-}
-
+/* saveConversations + syncConversationToServerDebounced + the debounce-timer
+ * map extracted 2026-07-31 to core/conv_save.js (pt_3879f00e sub-part 2
+ * slice 13). The leaf loads BEFORE this file via _BUNDLE_FILES; every call
+ * site resolves via bundle-level window scope. */
 
 /* _hydrateImageBase64 extracted 2026-07-26 to core/conv_image_hydrate.js
    (pt_3879f00e sub-part 2 slice 4). Loaded via _BUNDLE_FILES BEFORE this
    file so the two remaining CALL sites (loadConversationMessages
    initial-hydration branch, and its post-refresh path) still resolve the
    bare name at runtime via bundle-level window scope. */
-
-
-// ── Debounced sync: coalesces rapid settings toggles into one request ──
-// finishStream() calls syncConversationToServer() directly (immediate).
-// Settings/toggle changes call syncConversationToServerDebounced() which
-// waits 1.5s for additional changes before firing.
-const _syncDebounceTimers = new Map();  // convId → timeoutId
-function syncConversationToServerDebounced(conv, delayMs = 1500) {
-  const existing = _syncDebounceTimers.get(conv.id);
-  if (existing) clearTimeout(existing);
-  _syncDebounceTimers.set(conv.id, setTimeout(() => {
-    _syncDebounceTimers.delete(conv.id);
-    syncConversationToServer(conv);
-  }, delayMs));
-}
 
 /* ═══════════════════════════════════════════════════════════════════
    Persist helpers (_stripUsageTransient / _trimMsgForPersist /
@@ -181,55 +133,10 @@ async function syncConversationToServer(conv, { allowTruncate = false } = {}) {
     console.info(`[syncToServer] conv=${conv.id.slice(0,8)} msgs=${conv.messages.length} lastRole=${lastMsg?.role} ` +
       `contentLen=${lastMsg?.content?.length||0} thinkingLen=${lastMsg?.thinking?.length||0} hasError=${!!lastMsg?.error} ` +
       `activeTaskId=${_convTaskId?.slice(0,8)||'null'} foreignMsgCount=${_foreignMsgCount}`);
-    const lightMsgs = conv.messages.map((m) => {
-      let r = m;
-      if (m.images?.length > 0)
-        r = {
-          ...r,
-          images: m.images.map((img) => {
-            const o = { mediaType: img.mediaType, sizeKB: img.sizeKB };
-            if (img.url) {
-              // Persist the canonical '/api/images/<f>' url unchanged, but the
-              // preview is a render src — prefix with apiUrl() so it resolves
-              // through the reverse-proxy base path.
-              o.url = img.url;
-              o.preview = (img.url.charAt(0) === "/" && typeof apiUrl === "function")
-                ? apiUrl(img.url) : img.url;
-            } else {
-              o.preview = (img.preview || "").slice(0, 200) + "...";
-            }
-            if (img.pdfPage) o.pdfPage = img.pdfPage;
-            if (img.pdfTotal) o.pdfTotal = img.pdfTotal;
-            if (img.pdfName) o.pdfName = img.pdfName;
-            if (img.caption) o.caption = img.caption;
-            return o;
-          }),
-        };
-      if (m.pdfTexts?.length > 0)
-        r = {
-          ...r,
-          pdfTexts: m.pdfTexts.map((p) => ({
-            name: p.name,
-            pages: p.pages,
-            textLength: p.textLength,
-            isScanned: p.isScanned,
-            method: p.method,
-            text: p.text || "",
-          })),
-        };
-      /* ★ `_pendingSync` is a CLIENT-ONLY durability marker (set when a send
-       *   failed on a poor network so a refresh keeps the message and a retry
-       *   re-attempts the PUT). It must NEVER be persisted to the server —
-       *   otherwise it echoes back on the next load and could wrongly trigger
-       *   the KEEP_LOCAL reconcile. Clone-and-strip (don't mutate the live
-       *   message — the local marker stays until this PUT actually succeeds). */
-      if (r._pendingSync) { r = { ...r }; delete r._pendingSync; }
-      /* ★ Drop transient bloat (usage._wire_fp diagnostics, done-round
-       *   _partialOutput) so a client PUT never re-inflates the DB payload
-       *   the server-side sanitizer just trimmed. See _trimMsgForPersist. */
-      r = _trimMsgForPersist(r);
-      return r;
-    });
+    /* Per-message WIRE reducer _lightMessageForSync extracted 2026-07-31
+     * (pt_3879f00e sub-part 2 slice 14) to core/conv_persist_helpers.js — same
+     * file that owns _trimMsgForPersist. Resolves via bundle-level window scope. */
+    const lightMsgs = conv.messages.map(_lightMessageForSync);
     const settings = {
       preset: conv.model || conv.preset,
       model: conv.model || conv.preset,
@@ -797,42 +704,12 @@ async function loadConversationsFromServer(prefetchId) {
  *   (adopt-on-change only, no cache repaint, no scroll reset). Bounded: once
  *   the delays are exhausted we leave _needsLoad=true + the verifying dim,
  *   and the next manual open re-verifies. */
-const _CONV_VERIFY_RETRY_DELAYS_DEFAULT = [4000, 12000];
-const _convVerifyRetryTimers = {};
-
-function _convVerifyRetryDelays() {
-  /* Test seam: a harness may shorten the backoff via a window override. */
-  const d = (typeof window !== 'undefined') ? window._CONV_VERIFY_RETRY_DELAYS : null;
-  return (Array.isArray(d) && d.length) ? d : _CONV_VERIFY_RETRY_DELAYS_DEFAULT;
-}
-
-function _scheduleConvVerifyRetry(convId) {
-  if (convId !== activeConvId) return;   /* only the OPEN conv self-heals in place */
-  if (typeof _verifyActiveConvFromServer !== 'function') return;
-  const conv = conversations.find((c) => c.id === convId);
-  if (!conv) return;
-  const delays = _convVerifyRetryDelays();
-  const attempt = conv._verifyRetryCount || 0;
-  if (attempt >= delays.length) return;
-  clearTimeout(_convVerifyRetryTimers[convId]);
-  _convVerifyRetryTimers[convId] = setTimeout(() => {
-    delete _convVerifyRetryTimers[convId];
-    const c = conversations.find((x) => x.id === convId);
-    if (!c || convId !== activeConvId) return;
-    if (activeStreams.has(convId) || _editingMsgIdx !== null || c.activeTaskId) return;
-    c._verifyRetryCount = attempt + 1;
-    Promise.resolve(_verifyActiveConvFromServer(convId)).then((adopted) => {
-      if (adopted !== null && adopted !== undefined) {
-        /* Verify landed (with or without changes) — the paint is server-true. */
-        c._verifyRetryCount = 0;
-        delete c._cacheKnownStale;
-        _setCacheVerifying(convId, false);
-      } else {
-        _scheduleConvVerifyRetry(convId);
-      }
-    }).catch(() => _scheduleConvVerifyRetry(convId));
-  }, delays[attempt]);
-}
+/* ── cache-verify self-heal retry cluster: extracted 2026-07-31 to
+ *   core/conv_verify_retry.js (pt_3879f00e sub-part 2 slice 11).
+ *   _convVerifyRetryDelays + _scheduleConvVerifyRetry + the retry-schedule
+ *   const + the active-timer map all live there; the three call sites
+ *   inside loadConversationMessages / _finishLoadFromServer resolve via
+ *   bundle-level window scope at call time. */
 
 /* ── _rescuableLocalTail: extracted 2026-07-29 to core/conv_rescue_tail.js
  *   (pt_3879f00e sub-part 2 slice 8). The one call site inside
@@ -1148,24 +1025,11 @@ async function loadConversationMessages(convId) {
      *   server has the Chinese ready.  Matches by index + role identity +
      *   content equality to avoid resurrecting stale translations.
      */
-    /* Delegates the per-message field work to the SHARED reducer
-     * core/conv_reducers.js::_mergeTranslationFields — the same one the
-     * event-driven notify path (_verifyActiveConvFromServer) uses. The field
-     * list (deliverable translatedContent + display flags, per-round
-     * segments[].translatedText, the _translatePartialByRound sidecar) and the
-     * same-turn identity guard live there ONCE, so the on-open lane and the
-     * no-refresh lane can never drift apart the way the terminal-metadata list
-     * did before _mergeTerminalTurnFields. This wrapper keeps the array-level
-     * alignment + the merged count for the log line below. */
-    const _mergeServerTranslations = (sourceMsgs, destMsgs) => {
-      if (!Array.isArray(sourceMsgs) || !Array.isArray(destMsgs)) return 0;
-      const overlap = Math.min(sourceMsgs.length, destMsgs.length);
-      let merged = 0;
-      for (let i = 0; i < overlap; i++) {
-        merged += _mergeTranslationFields(destMsgs[i], sourceMsgs[i]);
-      }
-      return merged;
-    };
+    /* Array-level wrapper _mergeServerTranslations was extracted 2026-07-31
+     * to core/conv_reducers.js (pt_3879f00e sub-part 2 slice 12) — same file
+     * that owns the per-message primitive _mergeTranslationFields. The three
+     * surviving call sites below resolve at CALL time via bundle-level window
+     * scope. */
 
     if (localHasUnsynced) {
       console.warn(`[loadConvMsgs] ⚠️ KEPT local data for conv=${convId.slice(0,8)} — ` +
@@ -1455,8 +1319,7 @@ async function loadConversationMessages(convId) {
       conv._needsLoad = false;
       /* ★ Verify landed — cancel any pending self-heal retry for this conv. */
       conv._verifyRetryCount = 0;
-      clearTimeout(_convVerifyRetryTimers[convId]);
-      delete _convVerifyRetryTimers[convId];
+      _clearConvVerifyRetryTimer(convId);
       /* ★ Windowed-read truncation guard: when the server served only the tail
        *   window (N msgs) of a longer conversation, stamp the sync baseline
        *   from the AUTHORITATIVE full count (data.totalCount), NOT the window

@@ -56,6 +56,30 @@ CLAUDE_OAUTH_CONFIG = {
 _TOKEN_REFRESH_BUFFER = 300  # 5 minutes
 
 
+def _oauth_http_post(url: str, payload: dict, *, timeout: float = 30,
+                     user_id: str = ''):
+    """Token-endpoint POST — direct when reachable, desktop egress otherwise.
+
+    route_request probes the host (cached): 'direct' → the normal
+    ``http_post`` path unchanged; anything else → the request rides the
+    caller's desktop agent (``egress_http``), which returns a
+    Response-shaped object. Raises ``EgressUnavailable`` when direct is
+    blocked AND no suitable agent is online.
+    """
+    from lib.desktop import egress as _eg
+    route = _eg.route_request(url, user_id=user_id)
+    if route == 'direct':
+        return http_post(
+            url, json=payload,
+            headers={'Content-Type': 'application/json'},
+            timeout=timeout)
+    return _eg.egress_http(
+        url, method='POST',
+        headers={'Content-Type': 'application/json'},
+        body=json.dumps(payload).encode(),
+        timeout=timeout, user_id=user_id)
+
+
 def claude_build_auth_url() -> dict:
     """Build the Claude OAuth authorization URL with PKCE.
 
@@ -103,7 +127,8 @@ def claude_build_auth_url() -> dict:
     }
 
 
-def claude_exchange_code(code: str, pkce_verifier: str, state: str = '') -> dict | None:
+def claude_exchange_code(code: str, pkce_verifier: str, state: str = '',
+                          user_id: str = '') -> dict | None:
     """Exchange authorization code for tokens.
 
     Args:
@@ -126,12 +151,8 @@ def claude_exchange_code(code: str, pkce_verifier: str, state: str = '') -> dict
 
     try:
         token_url = CLAUDE_OAUTH_CONFIG['token_url']
-        resp = http_post(
-            token_url,
-            json=payload,
-            headers={'Content-Type': 'application/json'},
-            timeout=30,
-        )
+        resp = _oauth_http_post(token_url, payload, timeout=30,
+                                user_id=user_id)
 
         if resp.status_code != 200:
             logger.error('[Claude OAuth] Token exchange failed (HTTP %d): %.500s',
@@ -171,6 +192,10 @@ def claude_exchange_code(code: str, pkce_verifier: str, state: str = '') -> dict
     except OAuthExchangeError:
         raise
     except Exception as e:
+        from lib.desktop.egress import EgressUnavailable
+        if isinstance(e, EgressUnavailable):
+            logger.error('[Claude OAuth] egress unavailable: %s', e)
+            raise OAuthExchangeError(str(e), status_code=0) from e
         logger.error('[Claude OAuth] Token exchange error: %s', e, exc_info=True)
         raise OAuthExchangeError(
             'Network error reaching Anthropic: %s' % e, status_code=0) from e
@@ -215,11 +240,13 @@ def claude_store_token(data: dict) -> dict:
     return token_data
 
 
-def claude_refresh_token(refresh_tok: str = None) -> dict | None:
+def claude_refresh_token(refresh_tok: str = None,
+                          user_id: str = '') -> dict | None:
     """Refresh the Claude access token using the refresh token.
 
     Args:
         refresh_tok: Refresh token string. If None, loads from stored token.
+        user_id: caller's tenant for egress routing (desktop agent selection).
 
     Returns:
         Updated token dict, or None on failure.
@@ -235,6 +262,18 @@ def claude_refresh_token(refresh_tok: str = None) -> dict | None:
         logger.warning('[Claude OAuth] No refresh token available')
         return None
 
+    # Singleflight: concurrent refreshes of the SAME refresh token merge
+    # into one upstream call (refresh tokens are single-use; a second call
+    # burns the first's result). See token_store.refresh_singleflight.
+    from lib.oauth.token_store import refresh_singleflight
+    return refresh_singleflight(
+        'claude', refresh_tok,
+        lambda rt: _claude_refresh_upstream(rt, user_id=user_id),
+        load=lambda: load_token('claude'))
+
+
+def _claude_refresh_upstream(refresh_tok: str, *, user_id: str = '') -> dict | None:
+    """The actual upstream refresh (called under the singleflight lock)."""
     payload = {
         'grant_type': 'refresh_token',
         'refresh_token': refresh_tok,
@@ -244,12 +283,8 @@ def claude_refresh_token(refresh_tok: str = None) -> dict | None:
     for attempt in range(3):
         try:
             token_url = CLAUDE_OAUTH_CONFIG['token_url']
-            resp = http_post(
-                token_url,
-                json=payload,
-                headers={'Content-Type': 'application/json'},
-                timeout=30,
-            )
+            resp = _oauth_http_post(token_url, payload, timeout=30,
+                                    user_id=user_id)
 
             if resp.status_code != 200:
                 logger.warning('[Claude OAuth] Refresh failed (HTTP %d, attempt %d): %.300s',
@@ -282,6 +317,10 @@ def claude_refresh_token(refresh_tok: str = None) -> dict | None:
             return stored
 
         except Exception as e:
+            from lib.desktop.egress import EgressUnavailable
+            if isinstance(e, EgressUnavailable):
+                logger.warning('[Claude OAuth] refresh egress unavailable: %s', e)
+                return None
             logger.warning('[Claude OAuth] Refresh error (attempt %d): %s',
                            attempt + 1, e)
             if attempt < 2:
@@ -290,7 +329,7 @@ def claude_refresh_token(refresh_tok: str = None) -> dict | None:
     return None
 
 
-def claude_get_valid_token() -> str | None:
+def claude_get_valid_token(user_id: str = '') -> str | None:
     """Get a valid Claude access token, refreshing if needed.
 
     Returns:
@@ -309,7 +348,8 @@ def claude_get_valid_token() -> str | None:
     # Check if token needs refresh
     if time.time() > expire - _TOKEN_REFRESH_BUFFER:
         logger.info('[Claude OAuth] Token expiring soon, refreshing…')
-        refreshed = claude_refresh_token(stored.get('refresh_token', ''))
+        refreshed = claude_refresh_token(stored.get('refresh_token', ''),
+                                         user_id=user_id)
         if refreshed:
             return refreshed.get('access_token')
         logger.warning('[Claude OAuth] Refresh failed, using potentially expired token')

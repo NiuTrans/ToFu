@@ -104,6 +104,49 @@ _OPTION_LABEL_MAX = 120
 _OPTION_DESC_MAX = 300
 _OPTION_MAX = 6
 
+# Prose patterns that ASSERT a structured question card already exists. A
+# ``block_reason`` matching one of these while ``question`` is empty is the
+# measured 2026-07-31 defect (epic pt_d689f2016ecf4311): two epics sat parked
+# ~19 h behind a "4-option question card" that was never created, because the
+# author wrote the question into the free-text reason instead of passing
+# ``question=``. That state is invisible BOTH ways — ``project_attention``
+# builds its "Needs you" card from the ``block_question`` column, and
+# ``select_dispatchable`` only honours that same column — so the epic neither
+# reached the human nor genuinely stopped.
+#
+# Matched against a CASEFOLDED reason. Deliberately narrow: each phrase names
+# an *interactive control the owner is expected to operate*, which is exactly
+# the claim only ``question=`` can make true. A plain "[human-gated] needs infra
+# sign-off" asserts no such control and stays legal without a question.
+#
+# NOT included, on measured evidence: a bare "awaiting owner". The over-firing
+# complement in tests caught it firing on the legitimate
+# ``[sibling] path=lib/x.py awaiting the owner of that file`` — there "owner"
+# means the owner of a FILE, not a human decision-maker. A phrase that also
+# describes ordinary sibling coordination cannot carry this refusal.
+_QUESTION_CLAIM_PHRASES = (
+    'question card',
+    'one-click',
+    'one click',
+    'awaiting your answer',
+    'answer the question',
+)
+
+
+def _claims_a_question_card(reason: str) -> bool:
+    """True iff ``reason`` asserts that a structured human question is pending.
+
+    Used to refuse a block whose prose promises a card the caller never
+    registered. Pure + side-effect-free so the refusal can be evaluated BEFORE
+    any mutation.
+    """
+    low = (reason or '').casefold()
+    # A [sibling] block auto-resolves on a peer's commit — it has no human
+    # question by construction, so it can never be making this claim.
+    if _SIBLING_TAG in low:
+        return False
+    return any(p in low for p in _QUESTION_CLAIM_PHRASES)
+
 
 def _clean_block_question(question: str, options) -> str:
     """Sanitize the optional structured human question → canonical JSON (''
@@ -638,11 +681,38 @@ def block_task(project_path: str, conv_id: str, task_id: str, reason: str,
     long interval fast) vs ``[sibling] …`` (will auto-resolve when a sibling
     commits — retry-after-cooldown is right). The escalation itself is
     class-agnostic; the tag is surfaced on the board card, not branched on.
+
+    CONSISTENCY GATE: if ``reason`` asserts that a structured question card is
+    awaiting the owner (see ``_claims_a_question_card``) but no ``question`` is
+    given, the call is REFUSED with ``error='question_required'`` and NOTHING is
+    mutated. Silently accepting it produced the measured 19 h silent park: the
+    prose promised a card, the ``block_question`` column stayed empty, so the
+    epic was absent from "Needs you" *and* still dispatchable. Refusing loudly
+    is strictly better than parking work behind a control that does not exist
+    (the same argument as ``update_decision``'s ``summary_required``).
     Returns ``{'ok', 'blocked_until'?, 'block_count'?, 'error'?}``.
     """
     if not project_path or not task_id:
         return {'ok': False, 'error': 'missing project/task'}
-    reason = (reason or '').strip()[:_TITLE_MAX_CHARS]
+    reason = (reason or '').strip()
+    # Refuse BEFORE any mutation — a rejected block must not half-apply.
+    if _claims_a_question_card(reason) and not (question or '').strip():
+        logger.warning(
+            '[Board] block refused proj=%.40r task=%s: reason claims a pending '
+            'question card but no question= was given (would park the epic '
+            'behind a card that does not exist)', project_path, task_id)
+        return {'ok': False, 'error': 'question_required'}
+    if len(reason) > _TITLE_MAX_CHARS:
+        # LOUD truncation: both measured reasons were cut mid-word with the
+        # author's enumerated options in the discarded tail, and nothing
+        # recorded it — turning "I wrote the options" into "the options do not
+        # exist" with no trace to diagnose from.
+        logger.warning(
+            '[Board] block reason truncated proj=%.40r task=%s: %d → %d chars; '
+            'the discarded tail is NOT stored (pass structured question=/options= '
+            'rather than enumerating them in prose)',
+            project_path, task_id, len(reason), _TITLE_MAX_CHARS)
+        reason = reason[:_TITLE_MAX_CHARS]
     from lib.conversations.project_feed import normalize_project_path
     project_path = normalize_project_path(project_path)
     try:

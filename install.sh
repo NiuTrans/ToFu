@@ -1056,7 +1056,17 @@ CONDA_PKGS=(
     "openpyxl>=3.1"
     "xlrd>=2.0"
     "olefile>=0.46"
-    "mcp>=1.0"
+    # Bounded on both sides: Tofu's client was migrated to the mcp v2 API
+    # (>=2,<3). Vendored servers carry their own pins in isolated envs.
+    # Enforced by tests/test_mcp_sdk_pin_bounded.py.
+    "mcp>=2,<3"
+    # httpx — lib/llm/_transport.py imports it UNCONDITIONALLY at module top
+    # (the LLM async transport). NOTE the name: mcp 2.x pulls the httpx2
+    # FORK, which does NOT provide the `httpx` module — they are different
+    # distributions, and httpx2's presence must not satisfy this entry.
+    # Declared in requirements.txt after the desktop_dist clean-venv build
+    # proved the gap (boot smoke: ModuleNotFoundError httpx, 2026-08-01).
+    "httpx>=0.28"
     # orjson — fast JSON encoder; imported by routes/chat.py for chat
     # snapshot serialisation. Hard dep: the server won't boot without it.
     "orjson>=3.9"
@@ -1476,14 +1486,18 @@ fi
 
 # ── Optional: bundled internal MCP servers (hope-mcp, xuecheng-mcp, llm-mcp) ──
 # These private servers aren't on PyPI, so the MCP tab's "Install" button
-# (which spawns `<name>-mcp` on PATH) can't fetch them — we must pip-install
-# the source here. Sources, in priority order:
+# can't fetch them — but they are NOT pip-installed into this env anymore.
+# Each launches ISOLATED via `uv run --no-project --with-editable <source>`
+# (lib/mcp/client/_vendor.vendored_launch_argv): the server's dependency tree
+# — its own `mcp` included — must never share Tofu's interpreter, or one
+# server's SDK requirement can break the Tofu client (measured 2026-07-31).
+# All this step does is locate the sources and pre-warm the isolated envs so
+# the first connect is a fast handshake instead of a cold resolve.
+# Sources, in priority order:
 #   1. vendor/<name>/   — personal/internal EXPORTS bundle the source here.
 #   2. ../<name>/        — a DEV checkout: sibling repos next to this one.
-# Covering the sibling case means a developer clone (no vendor/) also gets the
-# launchers on PATH, so click-to-install is a fast handshake, not a cold pip.
 # Skipped silently if neither source exists (opensource exports).
-step "Installing bundled internal MCP servers"
+step "Warming bundled internal MCP servers (isolated envs)"
 _BUNDLED_MCPS=()
 for _mcp in hope-mcp xuecheng-mcp llm-mcp; do
     _vendor_path="${INSTALL_DIR}/vendor/${_mcp}"
@@ -1496,17 +1510,21 @@ for _mcp in hope-mcp xuecheng-mcp llm-mcp; do
 done
 if [[ ${#_BUNDLED_MCPS[@]} -eq 0 ]]; then
     info "No bundled MCP repos (vendor/ or sibling checkout) — skipping"
-elif ! python -c "import pip" 2>/dev/null; then
-    warn "pip not available — cannot install bundled MCP servers"
-    warn "Manual recovery later: pip install ${_BUNDLED_MCPS[*]}"
+elif ! command -v uv >/dev/null 2>&1; then
+    warn "uv not available — cannot pre-warm bundled MCP servers"
+    warn "The MCP tab Install buttons will still work, but first connects will be slow."
 else
-    info "Installing: ${_BUNDLED_MCPS[*]}"
-    if _safe_pip_install --upgrade "${_BUNDLED_MCPS[@]}"; then
-        ok "Bundled MCP servers installed (hope-mcp / xuecheng-mcp / llm-mcp now on PATH)"
-    else
-        warn "Bundled MCP install failed — Settings → MCP install buttons may fail"
-        warn "Retry manually: pip install ${_BUNDLED_MCPS[*]}"
-    fi
+    for _src in "${_BUNDLED_MCPS[@]}"; do
+        _name="$(basename "$_src")"
+        _pkg="${_name//-/_}"
+        info "Warming: ${_name} (${_src})"
+        if uv run --no-project --with-editable "$_src" python -c "import ${_pkg}"; then
+            ok "Bundled MCP ${_name} ready (isolated env warm)"
+        else
+            warn "Bundled MCP ${_name} warm failed — its Install button may be slow"
+            warn "Retry manually: uv run --no-project --with-editable ${_src} python -c 'import ${_pkg}'"
+        fi
+    done
 fi
 
 # ── Optional: Docling (layout-aware PDF parsing) ──

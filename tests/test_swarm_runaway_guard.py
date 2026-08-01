@@ -98,21 +98,65 @@ class TestSubAgentRunawayGuard(unittest.TestCase):
                         'loop must be bounded by the no-progress breaker')
 
     def test_defaults_cannot_be_unlimited_and_untimed(self):
-        """`unlimited rounds + no wall clock` must not be constructible."""
+        """Defaults must never yield an agent NOTHING can stop.
+
+        The original form of this test required ``timeout_seconds != 0``, i.e.
+        it demanded a WALL CLOCK specifically. That mechanism was measured to
+        fail in both directions and has been replaced, so the assertion is now
+        written against the PROPERTY the incident actually needs — "a default
+        agent is bounded" — rather than against one particular implementation
+        of it:
+
+          * the wall clock could not catch the hang it was added for: it is
+            evaluated only in ``before_round``, so an agent blocked inside a
+            tool never reaches it (measured: >1h in a ``pytest`` child, never
+            tripped);
+          * and it DID cut down healthy long agents, because it keys on total
+            runtime (measured legitimate runs: 1809s / 1846s / 1903s).
+
+        The bounds that replace it key on BEHAVIOUR, so they bite the wedged
+        shape without touching a productive one. Both must stay wired:
+        ``test_wedged_subagent_halts`` above is the live proof that a
+        DEFAULT-constructed agent still halts.
+        """
+        from lib.swarm.agent import SubAgent
+        from lib.swarm.liveness import ProgressBeacon
         from lib.swarm.types import SubTaskSpec
         spec = SubTaskSpec(role='researcher', objective='x')
-        self.assertFalse(
-            spec.max_rounds == 0 and spec.timeout_seconds == 0,
-            'SubTaskSpec defaults still allow an unbounded agent '
-            '(max_rounds=0 AND timeout_seconds=0) — the 2026-07-27 shape')
+
+        # Bound #1 — the chassis no-progress breaker is wired, not left at 0.
+        self.assertGreater(SubAgent._MAX_CONSECUTIVE_NO_PROGRESS_ROUNDS, 0,
+                           'no-progress breaker disabled — a wedged agent '
+                           'would spin exactly as in the 2026-07-27 incident')
+        # Bound #2 — a stall check exists and is finite.
+        beacon = ProgressBeacon()
+        self.assertGreater(beacon.stall_timeout, 0,
+                           'stall timeout disabled — total silence would '
+                           'never halt the agent')
+        self.assertLess(beacon.stall_timeout, float('inf'))
+        # An explicit wall clock remains OPTIONAL, and must not be resurrected
+        # as a silent default (that is the reaping bug, not a safety net).
+        self.assertEqual(spec.timeout_seconds, 0,
+                         'a default wall-clock ceiling is back — it reaps '
+                         'productive long agents and cannot see tool hangs')
 
     def test_explicit_max_rounds_still_honoured(self):
-        """The breaker must not disturb an explicit round budget."""
+        """The breaker must not disturb an explicit round budget.
+
+        ``counter`` sees max_rounds + 1 dispatches: the 3 LOOP rounds, plus the
+        single tool-less WRAP-UP turn a halted agent now gets so its findings
+        are written up instead of scraped out of history. ``rounds_used`` is
+        the load-bearing number and stays at exactly 3 — a round-budget
+        regression still shows up there.
+        """
         from lib.swarm.types import SubAgentStatus
         counter = {'n': 0}
         agent = _mk_agent(_wedged_dispatch(counter), max_rounds=3)
         agent._run_loop(time.time())
-        self.assertEqual(counter['n'], 3)
+        self.assertEqual(agent.result.rounds_used, 3,
+                         'explicit round budget must be honoured exactly')
+        self.assertEqual(counter['n'], 4,
+                         '3 loop rounds + 1 wrap-up turn')
         self.assertEqual(agent.result.status, SubAgentStatus.COMPLETED.value)
 
     def test_productive_agent_unaffected(self):

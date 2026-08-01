@@ -39,7 +39,10 @@ class TestClaudeExchangeErrors(unittest.TestCase):
     def test_403_is_geo_block_not_expired(self):
         from lib.oauth.claude import claude_exchange_code
         resp = _FakeResp(403, '{"error":{"type":"forbidden","message":"Request not allowed"}}')
-        with mock.patch('lib.oauth.claude.http_post', return_value=resp):
+        # 路由层打 direct 桩：本组测试钉的是「403 → geo 解释」的解释层，
+        # 探测/选 agent 归 tests/test_desktop_egress.py 管。
+        with mock.patch('lib.oauth.claude.http_post', return_value=resp), \
+             mock.patch('lib.desktop.egress.route_request', return_value='direct'):
             with self.assertRaises(OAuthExchangeError) as ctx:
                 claude_exchange_code('code', 'verifier', state='st')
         e = ctx.exception
@@ -50,7 +53,8 @@ class TestClaudeExchangeErrors(unittest.TestCase):
     def test_400_is_invalid_grant(self):
         from lib.oauth.claude import claude_exchange_code
         resp = _FakeResp(400, '{"error":"invalid_grant","error_description":"bad code"}')
-        with mock.patch('lib.oauth.claude.http_post', return_value=resp):
+        with mock.patch('lib.oauth.claude.http_post', return_value=resp), \
+             mock.patch('lib.desktop.egress.route_request', return_value='direct'):
             with self.assertRaises(OAuthExchangeError) as ctx:
                 claude_exchange_code('code', 'verifier', state='st')
         self.assertEqual(ctx.exception.status_code, 400)
@@ -69,7 +73,8 @@ class TestManagerSurfacesRealReason(unittest.TestCase):
     def test_manager_returns_status_and_reason(self):
         _seed_flow('claude')
         resp = _FakeResp(403, '{"error":{"message":"Request not allowed"}}')
-        with mock.patch('lib.oauth.claude.http_post', return_value=resp):
+        with mock.patch('lib.oauth.claude.http_post', return_value=resp), \
+             mock.patch('lib.desktop.egress.route_request', return_value='direct'):
             res = mgr.exchange_code('claude', 'code', state='st')
         self.assertEqual(res.get('status_code'), 403)
         self.assertIn('not an expired code', res['error'])
@@ -80,7 +85,8 @@ class TestManagerSurfacesRealReason(unittest.TestCase):
     def test_codex_403_region_block(self):
         _seed_flow('codex')
         resp = _FakeResp(403, '{"error":"unsupported_country_region_territory"}')
-        with mock.patch('lib.oauth.codex.http_post', return_value=resp):
+        with mock.patch('lib.oauth.codex.http_post', return_value=resp), \
+             mock.patch('lib.desktop.egress.route_request', return_value='direct'):
             res = mgr.exchange_code('codex', 'code', state='st')
         self.assertEqual(res.get('status_code'), 403)
         self.assertIn('region block', res['error'])

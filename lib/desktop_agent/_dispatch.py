@@ -10,6 +10,7 @@ are constructed.
 
 import traceback
 
+from lib.desktop_agent._egress import cmd_egress_http
 from lib.desktop_agent._exec import cmd_run_local
 from lib.desktop_agent._files import (
     cmd_list_files,
@@ -63,6 +64,9 @@ COMMANDS = {
     # System
     'desktop_system_info':   cmd_system_info,
 
+    # Egress (subscription traffic via the user's own network — S2)
+    'egress_http':           cmd_egress_http,
+
     # Project (RWA P1 — share-root worktree commands; wire type = full name)
     'project_list_dir':      cmd_project_list_dir,
     'project_read_files':    cmd_project_read_files,
@@ -79,6 +83,7 @@ WRITE_COMMANDS = {'desktop_write_file', 'desktop_move_file',
 EXEC_COMMANDS = {'desktop_run_command', 'desktop_open_file', 'desktop_open_app',
                  'project_run_command'}
 GUI_COMMANDS = {'desktop_gui_action', 'desktop_screenshot'}
+EGRESS_COMMANDS = {'egress_http'}
 
 
 def dispatch_command(cmd_type, params, permissions):
@@ -93,6 +98,8 @@ def dispatch_command(cmd_type, params, permissions):
         return {'error': f'Command {cmd_type} requires --allow-exec flag'}
     if cmd_type in GUI_COMMANDS and not permissions.get('allow_gui'):
         return {'error': f'Command {cmd_type} requires --allow-gui flag'}
+    if cmd_type in EGRESS_COMMANDS and not permissions.get('allow_egress'):
+        return {'error': f'Command {cmd_type} requires --allow-egress flag'}
     # Param-aware gate: desktop_system_info is read-only EXCEPT type=kill, which
     # terminates a process — that is a destructive/exec-tier action and must NOT
     # be reachable from the read-only default. (overview / processes stay open.)

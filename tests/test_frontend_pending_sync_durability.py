@@ -50,6 +50,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 
 import pytest
 
@@ -108,11 +109,7 @@ global.AbortSignal = { timeout: () => undefined };
 // conversations[] is read by _flushPendingSyncs.
 global.conversations = [];
 
-eval(fs.readFileSync(process.argv[2], 'utf8'));  // core/conversations.js
-// Extracted leaf modules (pt_3879f00e decomposition): markConvPendingSync /
-// convHasPendingSync / _flushPendingSyncs / _clearPendingSyncMarkers now live
-// in core/pending_sync.js; the persist helpers in core/conv_persist_helpers.js.
-for (const extra of process.argv.slice(3)) eval(fs.readFileSync(extra, 'utf8'));
+for (const f of process.argv.slice(2)) eval(fs.readFileSync(f, 'utf8'));  // bundle-order conv family via _conv_bundle_sources.conv_family_sources
 
 const out = [];
 function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
@@ -182,16 +179,27 @@ function _mkConv(id) {
 """
 
 
-def _run(js_path: str, script: str, name: str):
+def _run(js_path: str, script: str, name: str, *, family: bool = False):
     harness = os.path.join(HERE, name)
     with open(harness, 'w') as f:
         f.write(script)
-    extra_js = [
-        os.path.join(JS_DIR, 'core', 'pending_sync.js'),
-        os.path.join(JS_DIR, 'core', 'conv_persist_helpers.js'),
-    ]
+    if family:
+        # Durability harness drives conversations.js's sync path — eval the
+        # WHOLE conv family via the drift-proof closure (see
+        # _conv_bundle_sources.conv_family_sources).
+        sys.path.insert(0, HERE)
+        from _conv_bundle_sources import conv_family_sources
+        extra_js = conv_family_sources()
+    else:
+        # Non-conv harnesses (e.g. idb-cache) keep the minimal extras —
+        # harmless function-only evals, unchanged from before.
+        extra_js = [
+            os.path.join(JS_DIR, 'core', 'pending_sync.js'),
+            os.path.join(JS_DIR, 'core', 'conv_persist_helpers.js'),
+        ]
     try:
-        return subprocess.run(['node', harness, js_path, *extra_js],
+        return subprocess.run(['node', harness, *extra_js] if family
+                              else ['node', harness, js_path, *extra_js],
                               capture_output=True, text=True, timeout=60)
     finally:
         try:
@@ -203,7 +211,7 @@ def _run(js_path: str, script: str, name: str):
 @pytest.mark.skipif(not _node_available(), reason='node not installed')
 def test_pending_sync_durability_end_to_end():
     conv_js = os.path.join(JS_DIR, 'core', 'conversations.js')
-    proc = _run(conv_js, _HARNESS, '_pending_sync_harness.js')
+    proc = _run(conv_js, _HARNESS, '_pending_sync_harness.js', family=True)
     output = proc.stdout.strip()
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
     fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
@@ -285,9 +293,14 @@ def test_reconcile_pending_term_double_neuter():
 
 def test_put_body_strips_pending_sync_marker():
     """The lightMsgs mapper must strip `_pendingSync` before the PUT so the
-    client-only marker never echoes to the server."""
-    conv_js = os.path.join(JS_DIR, 'core', 'conversations.js')
-    with open(conv_js, encoding='utf-8') as f:
+    client-only marker never echoes to the server.
+
+    NOTE: the mapper moved OUT of conversations.js in slice 14
+    (pt_3879f00e sub-part 2) into core/conv_persist_helpers.js
+    (_lightMessageForSync) — the assertion anchors on the leaf, and the
+    end-to-end check (B) in the durability harness pins the behavior."""
+    leaf_js = os.path.join(JS_DIR, 'core', 'conv_persist_helpers.js')
+    with open(leaf_js, encoding='utf-8') as f:
         src = f.read()
     assert re.search(r'if \(r\._pendingSync\)\s*\{\s*r = \{ \.\.\.r \};\s*delete r\._pendingSync;', src), (
         'regression: the PUT-body mapper no longer strips _pendingSync — the '

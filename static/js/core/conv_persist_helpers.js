@@ -274,9 +274,89 @@ function _rebaseUnackedTail(serverMsgs, localMsgs) {
 }
 
 
+/* ═══════════════════════════════════════════════════════════════════
+   _lightMessageForSync(m) — per-message WIRE-shape reducer used to
+   build the outbound PUT payload in syncConversationToServer.
+
+   Extracted 2026-07-31 (pt_3879f00e sub-part 2 slice 14) from a nested
+   arrow closure inside conversations.js::syncConversationToServer (~L136).
+   The closure had drifted into a private helper of a 364L function
+   while its per-message primitive (_trimMsgForPersist, above) lived
+   here in the persist-helper family — this promotion completes the
+   family and gives the WIRE reducer one reusable home instead of a
+   50-line inline arrow that could shard if a second consumer emerges.
+
+   Behaviour is byte-identical to the original closure:
+     * m.images[] → { url (verbatim), preview (apiUrl(url) for
+       server-canonical urls, else truncated at 200 chars + '...'),
+       mediaType, sizeKB, optional pdfPage/pdfTotal/pdfName/caption }.
+     * m.pdfTexts[] → flat { name, pages, textLength, isScanned,
+       method, text } (drops any extra decorators).
+     * _pendingSync — CLONE-and-STRIP: this is a CLIENT-ONLY
+       durability marker (set when a send failed on a poor network so
+       a refresh keeps the message and a retry re-attempts the PUT).
+       It must NEVER be persisted to the server — otherwise it echoes
+       back on the next load and could wrongly trigger the KEEP_LOCAL
+       reconcile. Clone-and-strip preserves the local marker until the
+       PUT actually succeeds.
+     * Final _trimMsgForPersist pass — the SIBLING primitive that
+       strips transient-bloat (usage._wire_fp, _partialOutput on done
+       rounds, inbox-inject synthetic toolRounds).
+
+   Pure reducer over one message dict; reads `apiUrl` (typeof-guarded)
+   and delegates to `_trimMsgForPersist` (bundle-window scope). No
+   DOM, no globals, load-order-safe.
+   ═══════════════════════════════════════════════════════════════════ */
+function _lightMessageForSync(m) {
+  let r = m;
+  if (m.images?.length > 0)
+    r = {
+      ...r,
+      images: m.images.map((img) => {
+        const o = { mediaType: img.mediaType, sizeKB: img.sizeKB };
+        if (img.url) {
+          // Persist the canonical '/api/images/<f>' url unchanged, but the
+          // preview is a render src — prefix with apiUrl() so it resolves
+          // through the reverse-proxy base path.
+          o.url = img.url;
+          o.preview = (img.url.charAt(0) === "/" && typeof apiUrl === "function")
+            ? apiUrl(img.url) : img.url;
+        } else {
+          o.preview = (img.preview || "").slice(0, 200) + "...";
+        }
+        if (img.pdfPage) o.pdfPage = img.pdfPage;
+        if (img.pdfTotal) o.pdfTotal = img.pdfTotal;
+        if (img.pdfName) o.pdfName = img.pdfName;
+        if (img.caption) o.caption = img.caption;
+        return o;
+      }),
+    };
+  if (m.pdfTexts?.length > 0)
+    r = {
+      ...r,
+      pdfTexts: m.pdfTexts.map((p) => ({
+        name: p.name,
+        pages: p.pages,
+        textLength: p.textLength,
+        isScanned: p.isScanned,
+        method: p.method,
+        text: p.text || "",
+      })),
+    };
+  /* ★ `_pendingSync` is a CLIENT-ONLY durability marker (see docstring). */
+  if (r._pendingSync) { r = { ...r }; delete r._pendingSync; }
+  /* ★ Drop transient bloat (usage._wire_fp diagnostics, done-round
+   *   _partialOutput) so a client PUT never re-inflates the DB payload
+   *   the server-side sanitizer just trimmed. See _trimMsgForPersist. */
+  r = _trimMsgForPersist(r);
+  return r;
+}
+
+
 if (typeof window !== 'undefined') {
   window._stripUsageTransient = _stripUsageTransient;
   window._trimMsgForPersist = _trimMsgForPersist;
+  window._lightMessageForSync = _lightMessageForSync;
   window._isErrorOnlyAssistant = _isErrorOnlyAssistant;
   window._rebaseUnackedTail = _rebaseUnackedTail;
   // _serverHasSegmentsLocalLacks and _serverHasTranslationLocalLacks are

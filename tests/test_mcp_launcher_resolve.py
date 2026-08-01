@@ -1,11 +1,14 @@
 """tests/test_mcp_launcher_resolve.py — MCP launcher self-heal.
 
 Covers the auto-recovery for the most common "launcher X is not on PATH"
-report: a pip-installed console script (e.g. ``hope-mcp``) that lives next
-to the running interpreter but whose ``bin/`` dir isn't on the spawned
-subprocess's ``$PATH``. Tofu should resolve it (and propagate the env's
-``bin/`` to the child) instead of telling the user to install something
-that's already installed.
+report: a console script that lives next to the running interpreter but
+whose ``bin/`` dir isn't on the spawned subprocess's ``$PATH``.
+
+Since pt_9345a80f417d43ca the vendored-server half of this flow is ISOLATION:
+``vendored_launch_argv`` maps a bare vendored name to
+``uv run --no-project --with-editable <src>`` instead of pip-installing into
+the shared interpreter. The pip-era auto-install tests were replaced by the
+uniform-launch contract below (and by tests/test_mcp_vendored_isolation.py).
 
 Run:  pytest tests/test_mcp_launcher_resolve.py -m unit
 """
@@ -23,7 +26,7 @@ from lib.mcp.client import (
     _launcher_install_hint,
     _prepend_interpreter_bin_to_path,
     _resolve_launcher,
-    _try_autoinstall_launcher,
+    vendored_launch_argv,
 )
 
 pytestmark = pytest.mark.unit
@@ -148,8 +151,7 @@ def _register_fake_vendor(tmp_path, monkeypatch, command='fake-mcp', layout='ven
     (src / 'pyproject.toml').write_text('[project]\nname="x"\n')
     monkeypatch.setattr(mc, '_repo_root', lambda: str(repo))
     monkeypatch.setitem(mc._VENDORED_LAUNCHERS, command, {'sources': [rel]})
-    # Fresh install-guard state for each test.
-    monkeypatch.setattr(mc, '_install_attempted', set())
+    # Fresh install-error state for each test.
     monkeypatch.setattr(mc, '_install_last_error', {})
     # Freeze the hot-reload baseline far in the future so _reload_vendored_if_changed
     # early-returns: monkeypatched entries must NOT be clobbered by a real
@@ -164,7 +166,6 @@ def test_find_vendored_source_skips_missing(tmp_path, monkeypatch):
     monkeypatch.setattr(mc, '_repo_root', lambda: str(repo))
     monkeypatch.setitem(mc._VENDORED_LAUNCHERS, 'gone-mcp',
                         {'sources': ['tools/gone-mcp']})
-    monkeypatch.setattr(mc, '_install_attempted', set())
     assert _find_vendored_source('gone-mcp') is None
     assert _find_vendored_source('not-registered') is None
 
@@ -191,156 +192,75 @@ def test_find_vendored_source_prefers_sibling_editable(tmp_path, monkeypatch):
     monkeypatch.setattr(mc, '_repo_root', lambda: str(repo))
     monkeypatch.setitem(mc._VENDORED_LAUNCHERS, 'dual-mcp',
                         {'sources': ['../dual-mcp', 'tools/dual-mcp']})
-    monkeypatch.setattr(mc, '_install_attempted', set())
     assert _find_vendored_source('dual-mcp') == (str(sib), True)
 
 
-def test_autoinstall_vendored_is_non_editable(tmp_path, monkeypatch):
-    src, repo = _register_fake_vendor(tmp_path, monkeypatch, layout='vendored')
+def test_launch_argv_is_uniform_editable_for_any_source_layout(tmp_path, monkeypatch):
+    """Sibling AND tools/ sources both launch with --with-editable.
 
-    captured = {}
+    The pip era distinguished editable (sibling) from non-editable (tools/)
+    because a cached copy was acceptable for a snapshot. Measured 2026-07-31:
+    uv's cached local-dir builds serve STALE content (a file added to the
+    source was missing from the installed package even with --refresh), so a
+    non-editable snapshot silently runs old code after `make vendor-mcp`.
+    The launch is therefore uniformly editable; pin it so nobody reintroduces
+    a cached-build "optimization" for tools/.
+    """
+    src_v, _ = _register_fake_vendor(tmp_path, monkeypatch, 'vend-mcp', 'vendored')
+    argv = vendored_launch_argv('vend-mcp')
+    assert argv is not None
+    assert argv[:4] == ['uv', 'run', '--no-project', '--with-editable']
+    assert argv[4] == src_v and argv[-1] == 'vend-mcp'
 
-    def _fake_run(args, **kw):
-        captured['args'] = args
-        captured['env'] = kw.get('env', {})
-        class R:
-            returncode = 0
-            stdout = 'ok'
-            stderr = ''
-        return R()
-
-    monkeypatch.setattr(mc.subprocess, 'run', _fake_run)
-    monkeypatch.setattr(mc, '_resolve_launcher', lambda c: f'/env/bin/{c}')
-
-    out = _try_autoinstall_launcher('fake-mcp')
-    assert out == '/env/bin/fake-mcp'
-    assert captured['args'][:5] == [sys.executable, '-m', 'pip', 'install', '--no-input']
-    # Vendored snapshot → NON-editable.
-    assert '-e' not in captured['args']
-    assert src in captured['args']
-    assert captured['env'].get('PIP_REQUIRE_VIRTUALENV') == 'false'
+    src_s, _ = _register_fake_vendor(tmp_path, monkeypatch, 'sib-mcp', 'sibling')
+    argv = vendored_launch_argv('sib-mcp')
+    assert argv is not None
+    assert argv[:4] == ['uv', 'run', '--no-project', '--with-editable']
+    assert argv[4] == src_s and argv[-1] == 'sib-mcp'
 
 
-def test_autoinstall_sibling_is_editable(tmp_path, monkeypatch):
-    src, repo = _register_fake_vendor(tmp_path, monkeypatch, layout='sibling')
-
-    captured = {}
-
-    def _fake_run(args, **kw):
-        captured['args'] = args
-        class R:
-            returncode = 0
-            stdout = 'ok'
-            stderr = ''
-        return R()
-
-    monkeypatch.setattr(mc.subprocess, 'run', _fake_run)
-    monkeypatch.setattr(mc, '_resolve_launcher', lambda c: f'/env/bin/{c}')
-
-    out = _try_autoinstall_launcher('fake-mcp')
-    assert out == '/env/bin/fake-mcp'
-    # Sibling dev checkout → editable.
-    assert '-e' in captured['args']
-    assert src in captured['args']
+def test_launch_argv_unregistered_is_none(tmp_path, monkeypatch):
+    monkeypatch.setattr(mc, '_vendored_mtime', float('inf'))
+    assert vendored_launch_argv('totally-unknown-mcp') is None
 
 
-def test_autoinstall_failure_returns_none(tmp_path, monkeypatch):
-    _register_fake_vendor(tmp_path, monkeypatch)
+def test_prewarm_failure_is_retryable_not_wedged(tmp_path, monkeypatch):
+    """A failed warm must NOT poison the command for the process lifetime.
 
-    def _fail_run(args, **kw):
-        class R:
-            returncode = 1
-            stdout = ''
-            stderr = 'boom'
-        return R()
-
-    monkeypatch.setattr(mc.subprocess, 'run', _fail_run)
-    monkeypatch.setattr(mc, '_resolve_launcher', lambda c: None)
-    assert _try_autoinstall_launcher('fake-mcp') is None
-
-
-def test_autoinstall_attempted_at_most_once(tmp_path, monkeypatch):
+    The pip era needed an explicit one-attempt guard because a wedged command
+    meant "install always fails until restart". The uv-warm era keeps the
+    retryable half of that contract: a transient failure records the reason
+    and a later call may try again.
+    """
     _register_fake_vendor(tmp_path, monkeypatch)
     calls = {'n': 0}
 
-    def _count_run(args, **kw):
+    def _fail_run(args, **kw):
         calls['n'] += 1
         class R:
             returncode = 1
             stdout = ''
-            stderr = 'boom'
-        return R()
-
-    monkeypatch.setattr(mc.subprocess, 'run', _count_run)
-    monkeypatch.setattr(mc, '_resolve_launcher', lambda c: None)
-
-    _try_autoinstall_launcher('fake-mcp')
-    _try_autoinstall_launcher('fake-mcp')      # second call must NOT re-pip
-    assert calls['n'] == 1
-
-
-def test_autoinstall_unregistered_is_noop(tmp_path, monkeypatch):
-    monkeypatch.setattr(mc, '_install_attempted', set())
-    ran = {'n': 0}
-    monkeypatch.setattr(mc.subprocess, 'run',
-                        lambda *a, **k: ran.__setitem__('n', ran['n'] + 1))
-    assert _try_autoinstall_launcher('totally-unknown-mcp') is None
-    assert ran['n'] == 0                        # never even invoked pip
-
-
-def test_autoinstall_prepip_error_is_retryable(tmp_path, monkeypatch):
-    # A failure BEFORE pip produces a result (timeout / OSError) must NOT set
-    # the one-shot guard, so a later retry (or the Reinstall button) can try
-    # again. This is the root-cause fix for "install always fails until
-    # restart": previously the guard was set before pip ran, so one transient
-    # error wedged the command permanently.
-    _register_fake_vendor(tmp_path, monkeypatch)
-    calls = {'n': 0}
-
-    def _raise_run(args, **kw):
-        calls['n'] += 1
-        raise OSError('simulated transient exec failure')
-
-    monkeypatch.setattr(mc.subprocess, 'run', _raise_run)
-    monkeypatch.setattr(mc, '_resolve_launcher', lambda c: None)
-
-    assert _try_autoinstall_launcher('fake-mcp') is None
-    assert 'fake-mcp' not in mc._install_attempted   # NOT poisoned
-    assert 'fake-mcp' in mc._install_last_error       # reason captured
-    # A second call is allowed to re-run pip (no permanent wedge).
-    assert _try_autoinstall_launcher('fake-mcp') is None
-    assert calls['n'] == 2
-
-
-def test_autoinstall_ran_failure_is_sticky(tmp_path, monkeypatch):
-    # When pip DID run and exited non-zero, the guard IS set (one pip per
-    # process) and the failure reason is recorded for the hint.
-    _register_fake_vendor(tmp_path, monkeypatch)
-
-    def _fail_run(args, **kw):
-        class R:
-            returncode = 1
-            stdout = ''
-            stderr = 'dependency conflict'
+            stderr = 'network unreachable'
         return R()
 
     monkeypatch.setattr(mc.subprocess, 'run', _fail_run)
-    monkeypatch.setattr(mc, '_resolve_launcher', lambda c: None)
-
-    assert _try_autoinstall_launcher('fake-mcp') is None
-    assert 'fake-mcp' in mc._install_attempted        # guard set after pip ran
-    assert 'dependency conflict' in mc._install_last_error['fake-mcp']
+    ready, detail = mc.prewarm_vendored_launcher('fake-mcp')
+    assert ready is False
+    assert 'network unreachable' in mc._install_last_error['fake-mcp']
+    ready, detail = mc.prewarm_vendored_launcher('fake-mcp')
+    assert ready is False
+    assert calls['n'] == 2, 'a second attempt must be allowed to retry'
 
 
 def test_launcher_hint_vendored_surfaces_reason(tmp_path, monkeypatch):
     # The hint for a registered-but-failed vendored server must name the real
-    # reason + the exact pip command, NOT the generic "package manager" line.
+    # reason + the exact warm command, NOT the generic "package manager" line.
     src, _ = _register_fake_vendor(tmp_path, monkeypatch, 'sib-mcp', 'sibling')
-    mc._install_last_error['sib-mcp'] = 'pip exited 1: boom'
+    mc._install_last_error['sib-mcp'] = 'uv warm exited 1: boom'
 
     hint = _launcher_install_hint('sib-mcp')
     assert 'boom' in hint
-    assert 'pip install' in hint
+    assert 'uv run' in hint and '--with-editable' in hint
     assert src in hint
     assert 'package manager' not in hint
 

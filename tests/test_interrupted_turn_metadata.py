@@ -19,7 +19,12 @@ Covered here (backend):
   P1a   ``_sync_partial_to_conversation`` carries the computed terminal metadata
         (finishReason/usage/apiRounds) onto the trailing assistant message, not
         just the 15-char content — so a partial DB sync that survives a crash
-        already has a populated finish-bar.
+        already has a populated finish-bar. GATED (2026-07-31) on finalize being
+        genuinely underway (terminal status, or the ``_finalize_started_at``
+        latch): carrying the verdict inside the L843→L954 finalize window marked
+        a still-generating turn as settled and minted a duplicate agent bubble.
+        When carried, ``_taskId`` lands WITH it (a terminal field without its
+        identity anchor cannot be recognised as its own completed turn).
   NEUTER P1a: with the finishReason-carry stripped, the partial sync leaves the
         message finishReason empty (proving the carry is load-bearing).
 
@@ -31,6 +36,7 @@ import json
 import logging
 import os
 import sys
+import time
 
 import pytest
 
@@ -179,6 +185,26 @@ class TestPartialSyncCarriesTerminalMeta:
         return _DB(), captured
 
     def test_partial_sync_writes_finish_metadata(self, monkeypatch):
+        """★ FIXTURE CORRECTED 2026-07-31 (duplicate-bubble root fix).
+
+        This test used to drive `_sample_task()` verbatim — `status='running'`
+        WITH `finishReason='stop'` and NO `_finalize_started_at` — and assert
+        the verdict was persisted onto the conversation message. That input is
+        precisely the ~110-line window in `orchestrator/_finalize.py` where the
+        verdict is stamped (L843) but the terminal flip has not happened
+        (L954), a span holding the BLOCKING `_generate_tool_summary` call.
+        Persisting there marks a STILL-GENERATING turn as settled, and the
+        frontend answers that with a duplicate assistant bubble that survives a
+        reload (the row is in the DB). So the old fixture certified the defect
+        as correct behaviour.
+
+        P1a's actual purpose — a checkpoint that outlives a FAILED terminal
+        persist must still leave a populated finish-bar — is unchanged, and is
+        what this test now pins: the `_finalize_started_at` latch (stamped at
+        L953, one line before the terminal flip) marks finalize genuinely
+        underway. The withholding half is pinned by the complement below and by
+        tests/test_partial_checkpoint_terminal_identity.py.
+        """
         import lib.tasks_pkg.manager._sync as S
 
         messages = [
@@ -192,6 +218,9 @@ class TestPartialSyncCarriesTerminalMeta:
 
         task = _sample_task()
         task['content'] = 'partial'
+        # Finalize is genuinely underway — the latch the orchestrator stamps
+        # immediately before flipping status to 'done'.
+        task['_finalize_started_at'] = time.time()
         S._sync_partial_to_conversation(task)
 
         assert 'messages' in captured, 'partial sync should have written the messages column'
@@ -200,6 +229,35 @@ class TestPartialSyncCarriesTerminalMeta:
         assert am['finishReason'] == 'stop', 'finishReason must be carried onto the message'
         assert am.get('usage'), 'usage must be carried onto the message'
         assert am.get('apiRounds'), 'apiRounds must be carried onto the message'
+        assert am.get('_taskId'), (
+            'the identity anchor must land WITH the verdict — a terminal field '
+            'without _taskId is a row that cannot be recognised as its own '
+            'completed turn, so a reload mints a duplicate assistant bubble')
+
+    def test_partial_sync_withholds_verdict_inside_the_finalize_window(self, monkeypatch):
+        """Complement of the test above, kept adjacent so the pair reads as one
+        contract: the SAME task WITHOUT the finalize latch (still inside the
+        L843→L954 window) must NOT have its verdict persisted."""
+        import lib.tasks_pkg.manager._sync as S
+
+        messages = [
+            {'role': 'user', 'content': 'q'},
+            {'role': 'assistant', 'content': '', 'thinking': ''},
+        ]
+        db, captured = self._fake_conv_db(messages)
+        monkeypatch.setattr(S, 'get_thread_db', lambda *a, **k: db)
+        monkeypatch.setattr(S, '_latest_task_for_conv', lambda cid: None, raising=False)
+
+        task = _sample_task()          # status='running', finishReason='stop'
+        task['content'] = 'partial'
+        task.pop('_finalize_started_at', None)
+        S._sync_partial_to_conversation(task)
+
+        if 'messages' in captured:
+            am = json.loads(captured['messages'])[-1]
+            assert not am.get('finishReason'), (
+                'the verdict was persisted while the turn was still generating '
+                f'(status=running, finalize not started): {am}')
 
     def test_neuter_finishreason_carry_is_load_bearing(self, monkeypatch):
         """Prove the finishReason carry is what populates the finish-bar: with a

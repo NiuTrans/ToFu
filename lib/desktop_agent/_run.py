@@ -67,6 +67,53 @@ def _start_project_run_streamed(cmd_id, cmd_params, permissions,
             result_queue.append({'id': cmd_id, 'result': None, 'error': err})
 
 
+def _start_egress_stream_streamed(cmd_id, cmd_params, permissions,
+                                    result_queue, stream_outbox, io_lock):
+    """S3: run egress_http_stream OFF the poll loop, streaming frames.
+
+    Mirrors _start_project_run_streamed: the stream executor emits
+    {cmd_id, seq, stream, data, done} frames into stream_outbox (meta →
+    body → done), and the final stats land in result_queue — while the
+    poll loop keeps heartbeating (a 30-min LLM stream must not make the
+    server declare this agent dead).
+    """
+    if not permissions.get('allow_egress'):
+        with io_lock:
+            result_queue.append({
+                'id': cmd_id, 'result': None,
+                'error': 'Command egress_http_stream requires --allow-egress flag',
+            })
+        return
+    from lib.desktop_agent._egress import start_egress_stream
+    seq = itertools.count(1)
+
+    def on_chunk(frame_seq, stream, data):
+        with io_lock:
+            stream_outbox.append({'cmd_id': cmd_id, 'seq': next(seq),
+                                  'stream': stream, 'data': data,
+                                  'done': False})
+
+    def on_exit(outcome):
+        with io_lock:
+            stream_outbox.append({'cmd_id': cmd_id, 'seq': next(seq),
+                                  'stream': 'meta', 'data': '', 'done': True})
+            result_queue.append({'id': cmd_id, 'result': outcome,
+                                 'error': outcome.get('error')
+                                 if isinstance(outcome, dict) else None})
+        logger.info('     ✅ egress_http_stream done (status=%s)',
+                    outcome.get('status') if isinstance(outcome, dict) else '?')
+
+    err = None
+    try:
+        start_egress_stream(cmd_params, on_chunk, on_exit)
+    except Exception as e:
+        err = f'{type(e).__name__}: {e}'
+    if err:
+        logger.warning('     ❌ egress_http_stream failed to start: %s', err)
+        with io_lock:
+            result_queue.append({'id': cmd_id, 'result': None, 'error': err})
+
+
 def _ensure_agent_id():
     """Return this machine's stable agent_id, generating + persisting it
     on first run.
@@ -100,6 +147,7 @@ def _build_agent_frame(agent_id, permissions, share_roots=None):
             'exec': bool(permissions.get('allow_exec')),
             'gui': bool(permissions.get('allow_gui')),
             'notification': bool(permissions.get('allow_notification')),
+            'egress': bool(permissions.get('allow_egress')),
         },
         'share_roots': list(share_roots or []),
     }
@@ -206,6 +254,20 @@ def run_agent(server_url, permissions, poll_interval=1.0, bridge_secret='',
                                                 io_lock)
                     continue
 
+                if cmd_type == 'egress_http_stream':
+                    # S3: streamed, off the poll loop — a 30-min LLM stream
+                    # must not stall heartbeats past the 15s window.
+                    _start_egress_stream_streamed(cmd_id, cmd_params, permissions,
+                                                  result_queue, stream_outbox,
+                                                  io_lock)
+                    continue
+
+                if cmd_type == 'egress_cancel':
+                    # S3: fire-and-forget abort of an in-flight stream.
+                    from lib.desktop_agent._egress import cancel_inflight
+                    cancel_inflight(str(cmd_params.get('cmd_id') or ''))
+                    continue
+
                 result = dispatch_command(cmd_type, cmd_params, permissions)
 
                 # Truncate large results for transport
@@ -276,6 +338,10 @@ Examples:
     parser.add_argument('--allow-write', action='store_true', help='Allow file write/move operations')
     parser.add_argument('--allow-exec', action='store_true', help='Allow running commands and opening apps')
     parser.add_argument('--allow-gui', action='store_true', help='Allow GUI automation (mouse, keyboard, screenshot)')
+    parser.add_argument('--allow-egress', action='store_true',
+                        help='Allow relaying whitelisted subscription API requests '
+                             '(anthropic.com/openai.com/chatgpt.com) through this '
+                             'machine\'s network')
     parser.add_argument('--allow-all', action='store_true', help='Enable all permissions')
     parser.add_argument('--poll-interval', type=float, default=1.0, help='Polling interval in seconds')
     parser.add_argument('--bridge-secret', default='',
@@ -295,6 +361,7 @@ Examples:
         allow_write=args.allow_write,
         allow_exec=args.allow_exec,
         allow_gui=args.allow_gui,
+        allow_egress=args.allow_egress,
         allow_all=args.allow_all,
     )
 

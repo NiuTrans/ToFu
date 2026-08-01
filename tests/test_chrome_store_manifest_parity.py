@@ -508,3 +508,108 @@ def test_the_store_manifest_is_tracked_by_git():
         f"{STORE_MANIFEST.relative_to(ROOT)} is not tracked by git, so these "
         f"guards would pass vacuously on a clean checkout and the store build "
         f"would have no manifest to swap in.")
+
+
+# ══════════════════════════════════════════════════════════
+#  6. The PAUSED decision must stay recorded
+# ══════════════════════════════════════════════════════════
+#
+# 2026-07-31 the owner decided NOT to submit: stay on "load unpacked". The
+# blocker was never the paperwork — every mechanical precondition in this file
+# is green — it was the trade-off in REVIEW_RISKS.md ("Decision to make NOW"):
+# the only realistic route to acceptance is a REDUCED build with
+# browser_execute_js and debugger removed, which narrows what the extension can
+# do.
+#
+# A kit that reads "here is how to submit" with no record of a decision NOT to
+# is an open invitation to redo the whole investigation. The guards below keep
+# the decision attached to the artifact it governs — the same reason the
+# activeTab reasoning is pinned above rather than left in a commit message.
+
+
+def test_the_kit_entry_point_records_the_do_not_submit_decision():
+    """The reader must meet the decision before the instructions.
+
+    Placement is asserted, not just presence: a note further down the page is
+    reached only by someone already following the checklist.
+    """
+    txt = (STORE_DIR / 'README.md').read_text(encoding='utf-8')
+    head = txt[:2500]
+    assert re.search(r'NOT SUBMITTING|不上架|do not submit', head, re.I), (
+        'docs/chrome-web-store/README.md no longer states up front that the '
+        'owner decided against submitting. Without it the kit reads as an '
+        'open task and the next reader re-runs a closed investigation. If the '
+        'decision was REVERSED, delete this guard in the same commit that '
+        'starts the submission — do not quietly soften the note.')
+    assert '2026-07-31' in head, (
+        'the do-not-submit note carries no date, so a reader cannot tell '
+        'whether it predates their own information.')
+
+
+def test_the_paused_decision_names_the_tradeoff_that_caused_it():
+    """"We decided no" without the WHY decays into folklore.
+
+    The reason is specific and load-bearing: acceptance realistically requires
+    dropping browser_execute_js + debugger. Anyone revisiting this needs that
+    to be the first thing they see, because it is a CODE change, not a
+    paperwork one.
+
+    Scoped to the NOTE BLOCK, not the whole file. A first version searched the
+    entire README and stayed green after the note was deleted outright,
+    because `browser_execute_js` and `debugger` both appear in the honest
+    expectation-setting paragraph further down — a guard that passes while the
+    thing it guards is gone.
+    """
+    txt = (STORE_DIR / 'README.md').read_text(encoding='utf-8')
+    if 'NOT SUBMITTING' not in txt:
+        pytest.fail(
+            'no do-not-submit note to check — see the sibling guard, which '
+            'owns that failure')
+    start = txt.index('NOT SUBMITTING')
+    note = txt[start:txt.index('Everything needed to publish', start)]
+    for needle, why in (
+            ('browser_execute_js', 'the remote-code capability at stake'),
+            ('debugger', 'the second permission a reduced build would drop'),
+            ('REVIEW_RISKS.md', 'where the full trade-off is written up'),
+    ):
+        assert needle in note, (
+            f'the do-not-submit note never mentions {needle} — {why}. Without '
+            f'it the decision looks arbitrary and will be re-litigated from '
+            f'scratch.')
+
+
+def test_the_paused_kit_still_claims_only_what_is_measurably_true():
+    """The readiness facts in the note must match the actual artifacts.
+
+    A parked kit is exactly where stale claims survive unnoticed, because
+    nobody exercises it. These are re-derived from the manifests rather than
+    trusted as prose, so the note cannot drift into telling a future submitter
+    something false about the state they are inheriting.
+    """
+    txt = (STORE_DIR / 'README.md').read_text(encoding='utf-8')
+    if 'Kit readiness' not in txt:
+        pytest.skip('the note no longer makes readiness claims')
+    store = _json(STORE_MANIFEST)
+    n = len(store.get('permissions', []))
+    assert f'{n} permissions' in txt, (
+        f'the readiness note does not state the real permission count '
+        f'({n}). A parked kit with a wrong count is how the next submitter '
+        f'starts from a false premise.')
+    assert store.get('version') in txt, (
+        f"the readiness note does not name the current store-manifest version "
+        f"({store.get('version')!r}), so it cannot be trusted as a snapshot.")
+
+
+def test_the_note_does_not_contradict_the_closed_install_routes():
+    """The 'one exe installs the extension' idea stays closed on FACTS.
+
+    Those facts are what make the manual three-step install non-negotiable, so
+    the note must carry them: if they are lost, someone re-proposes an
+    installer-driven extension install and burns the same investigation again.
+    """
+    txt = (STORE_DIR / 'README.md').read_text(encoding='utf-8')
+    for needle in ('update_url', 'force_installed', '--load-extension'):
+        assert needle in txt, (
+            f'the note omits {needle!r}, one of the three measured reasons an '
+            f'installer cannot place the extension. All three belong together '
+            f'— each alone leaves an apparent loophole.')

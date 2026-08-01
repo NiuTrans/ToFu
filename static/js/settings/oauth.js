@@ -109,10 +109,13 @@ function _storeBrowserToken(provider, tokenJson) {
     .then(function(r) { return r.json(); });
 }
 
-// ── Server-side token exchange (fallback path) ──
+// ── Server-side token exchange (primary path, S2) ──
 // POSTs the raw code to /api/oauth/callback so the SERVER does the exchange.
-// Used when browser-side exchange isn't possible or fails for a non-auth
-// reason (e.g. the server's egress isn't geo-blocked). Returns parsed JSON.
+// The server auto-routes direct OR through an egress-capable desktop agent,
+// so this path works even when the server's own egress is geo-blocked.
+// Rejection Error carries `_statusCode` from the server's error body
+// (403 geo-block / 0 network-or-egress-unavailable / 400-401 auth rejection)
+// so _completeLogin can classify whether a browser retry makes sense.
 function _serverExchange(provider, code, state) {
   var body = { provider: provider, code: code };
   if (state) body.state = state;
@@ -129,18 +132,25 @@ function _serverExchange(provider, code, state) {
     .then(function(r) {
       if (!r.ok) return r.text().then(function(t) {
         var j; try { j = JSON.parse(t); } catch (e) { j = null; }
-        throw new Error((j && j.error) || t.slice(0, 200));
+        var err = new Error((j && j.error) || t.slice(0, 200));
+        if (j && typeof j.status_code !== 'undefined') err._statusCode = j.status_code;
+        throw err;
       });
       return r.json();
     });
 }
 
-// ── Complete a login given an auth code: browser-first, server fallback ──
-// 1. Try the browser-side exchange (uses the user's VPN — bypasses the
-//    server's geo-blocked egress). On success, store via the server.
-// 2. If browser exchange can't run (no params) or fails with a NETWORK/CORS
-//    error (not a real auth rejection), fall back to the server exchange.
-//    A genuine auth rejection (4xx with an error body) is reported as-is.
+// ── Complete a login given an auth code: server → browser → curl ──
+// Order (owner 2026-07-31, desktop-egress era):
+// 1. Server exchange — auto-routes direct OR through an egress-capable
+//    desktop agent (S2), so it now works even when the server's own egress
+//    is geo-blocked, and has no CORS exposure. A genuine auth rejection
+//    (400/401: code expired/used) is surfaced as-is — the code is burned,
+//    retrying it anywhere else just fails again.
+// 2. Browser exchange (B1) — only when the server failed with a geo-block
+//    (403) / network error / egress-unavailable (status_code 0), i.e. the
+//    code is provably still unconsumed.
+// 3. curl helper (B2) — the user's own terminal as the last network.
 function _completeLogin(provider, code, state) {
   var capProvider = provider === 'codex' ? 'Codex' : 'Claude';
   _updateOAuthCard(provider, { status: 'exchanging' });
@@ -158,36 +168,39 @@ function _completeLogin(provider, code, state) {
     showAlert(t('settings.oauthTokenExchangeFailed', { msg: msg }));
   }
 
-  // Step 1: browser-side exchange → store via server.
-  _browserExchange(provider, code, state)
-    .then(function(tokenJson) {
-      console.log('[OAuth] Browser-side exchange succeeded for', provider);
-      return _storeBrowserToken(provider, tokenJson).then(function(data) {
-        if (!data || data.error) { _onError((data && data.error) || 'store failed'); return; }
-        _onSuccess(data);
-      });
-    })
-    .catch(function(e) {
-      // Browser exchange failed. If it was a genuine auth rejection from the
-      // provider (4xx with a body), surface it — retrying server-side won't
-      // help and would just hit the geo-block. Otherwise (CORS/network/no
-      // params), fall back to the server-side exchange.
-      var st = e && e._upstreamStatus;
-      if (st === 400 || st === 401) {
-        _onError(e.message.replace(/^exchange-failed: /, ''));
-        return;
-      }
-      console.warn('[OAuth] Browser exchange unavailable (%s) — falling back to server', e && e.message);
-      _serverExchange(provider, code, state)
-        .then(function(data) {
+  function _tryBrowser(reason) {
+    console.warn('[OAuth] Server exchange unavailable (%s) — trying browser exchange', reason);
+    _browserExchange(provider, code, state)
+      .then(function(tokenJson) {
+        console.log('[OAuth] Browser-side exchange succeeded for', provider);
+        return _storeBrowserToken(provider, tokenJson).then(function(data) {
           if (!data || data.error) {
-            // Both browser (CORS) and server (geo-block) failed → curl helper.
-            _showCurlHelper(provider, code, state, (data && data.error) || '');
+            _showCurlHelper(provider, code, state, (data && data.error) || 'store failed');
             return;
           }
           _onSuccess(data);
-        })
-        .catch(function(e2) { _showCurlHelper(provider, code, state, e2.message); });
+        });
+      })
+      .catch(function(e2) { _showCurlHelper(provider, code, state, (e2 && e2.message) || ''); });
+  }
+
+  _serverExchange(provider, code, state)
+    .then(function(data) {
+      if (!data || data.error) { _tryBrowser((data && data.error) || 'empty result'); return; }
+      _onSuccess(data);
+    })
+    .catch(function(e) {
+      var sc = e && e._statusCode;
+      if (sc === 400 || sc === 401) {
+        // Genuine auth rejection — the code is consumed/expired; don't burn
+        // it a second time from the browser.
+        _onError(e.message);
+        return;
+      }
+      // 403 geo-block / 0 network-or-egress-unavailable / unknown — the code
+      // was rejected at the edge BEFORE grant processing, so it is still
+      // redeemable from the browser's own network.
+      _tryBrowser(e.message);
     });
 }
 
@@ -196,9 +209,57 @@ function _completeLogin(provider, code, state) {
 // fetch is preflight-blocked; and the server's egress is geo-blocked. The
 // one network that CAN reach them is the user's own terminal (with VPN), so
 // we hand them the exact curl and accept the token JSON they paste back.
-function _buildCurlCommand(provider, code, state) {
+// The command is rendered for a CHOSEN shell, and all renderings are offered
+// rather than one being sniffed. The reason is not that sniffing is fragile
+// (though it is — navigator.platform is deprecated and userAgentData is
+// Chromium-only): it is that the browser's platform is not evidence of the
+// TARGET shell. This path exists because neither the browser nor the server
+// can reach the token endpoint, so the terminal the user pastes into is
+// routinely on a different machine than this page (self-hosted server +
+// remote browser, VS Code tunnel, WSL). A sniff would hand those users a
+// command that cannot run, with no way to switch. The sniff below therefore
+// only decides which variant is shown FIRST.
+var _CURL_SHELLS = ['bash', 'powershell', 'cmd'];
+var _CURL_SHELL_LABELS = { bash: 'bash / zsh', powershell: 'PowerShell', cmd: 'CMD' };
+
+function _curlDefaultShell() {
+  var ua = '';
+  try { ua = (navigator && navigator.userAgent) || ''; } catch (e) { ua = ''; }
+  return /Windows/i.test(ua) ? 'powershell' : 'bash';
+}
+
+// Render one curl invocation with the quoting + continuation rules of `shell`.
+function _renderCurl(shell, url, contentType, body) {
+  if (shell === 'cmd') {
+    // CMD groups arguments with double quotes ONLY, and has no line
+    // continuation that survives a quoted payload — hence one long line.
+    // Inner characters follow the MSVCRT rules curl.exe itself parses with,
+    // and those rules are precise about backslashes: a backslash is LITERAL
+    // unless it sits in a run immediately before a quote. So doubling every
+    // backslash is WRONG (a payload `\` would arrive as `\\`) — only a run
+    // that precedes a quote, or the end of the payload (the wrapper quote
+    // follows it), may double. Quotes themselves escape as `\"`.
+    var cmdBody = body.replace(/\\+(?="|$)/g, function (m) { return m + m; })
+                      .replace(/"/g, '\\"');
+    return 'curl "' + url + '" -H "Content-Type: ' + contentType + '" --data-raw "' + cmdBody + '"';
+  }
+  if (shell === 'powershell') {
+    // `curl` is an ALIAS for Invoke-WebRequest in PowerShell, which does not
+    // accept -H / --data-raw — the real binary must be named explicitly.
+    // Backtick is the continuation character; single-quoted strings are
+    // literal (no interpolation), with `'` escaped by doubling.
+    var psBody = body.replace(/'/g, "''");
+    return "curl.exe '" + url + "' `\n  -H 'Content-Type: " + contentType + "' `\n  --data-raw '" + psBody + "'";
+  }
+  // POSIX shells: single-quoted literal, closed/re-opened around any quote.
+  var shBody = body.replace(/'/g, "'\\''");
+  return "curl '" + url + "' \\\n  -H 'Content-Type: " + contentType + "' \\\n  --data-raw '" + shBody + "'";
+}
+
+function _buildCurlCommand(provider, code, state, shell) {
   var ex = _oauthExchangeParams[provider];
   if (!ex || !ex.token_url || !ex.code_verifier) return '';
+  var contentType, body;
   if (ex.style === 'form') {
     var p = new URLSearchParams();
     p.set('grant_type', 'authorization_code');
@@ -206,18 +267,23 @@ function _buildCurlCommand(provider, code, state) {
     p.set('redirect_uri', ex.redirect_uri);
     p.set('client_id', ex.client_id);
     p.set('code_verifier', ex.code_verifier);
-    return "curl '" + ex.token_url + "' \\\n  -H 'Content-Type: application/x-www-form-urlencoded' \\\n  --data-raw '" + p.toString() + "'";
+    contentType = 'application/x-www-form-urlencoded';
+    body = p.toString();
+  } else {
+    contentType = 'application/json';
+    body = JSON.stringify({
+      grant_type: 'authorization_code', code: code, state: state || ex.state || '',
+      redirect_uri: ex.redirect_uri, client_id: ex.client_id, code_verifier: ex.code_verifier,
+    });
   }
-  var body = JSON.stringify({
-    grant_type: 'authorization_code', code: code, state: state || ex.state || '',
-    redirect_uri: ex.redirect_uri, client_id: ex.client_id, code_verifier: ex.code_verifier,
-  });
-  return "curl '" + ex.token_url + "' \\\n  -H 'Content-Type: application/json' \\\n  --data-raw '" + body + "'";
+  var use = _CURL_SHELLS.indexOf(shell) >= 0 ? shell : _curlDefaultShell();
+  return _renderCurl(use, ex.token_url, contentType, body);
 }
 
 function _showCurlHelper(provider, code, state, reason) {
   var capP = provider === 'codex' ? 'Codex' : 'Claude';
-  var curl = _buildCurlCommand(provider, code, state);
+  var shell = _curlDefaultShell();
+  var curl = _buildCurlCommand(provider, code, state, shell);
   if (!curl) {
     _updateOAuthCard(provider, { status: 'error' });
     showAlert(t('settings.oauthTokenExchangeNoCmd', { reason: (reason || '') }));
@@ -236,14 +302,31 @@ function _showCurlHelper(provider, code, state, reason) {
     helper.style.marginTop = '10px';
     if (manualDiv) manualDiv.appendChild(helper);
   }
+  var tabs = _CURL_SHELLS.map(function(s) {
+    return '<button class="btn-small oauth-curl-shell' + (s === shell ? ' active' : '') +
+      '" data-shell="' + s + '" style="margin-right:4px">' +
+      escapeHtml(_CURL_SHELL_LABELS[s]) + '</button>';
+  }).join('');
   helper.innerHTML =
     '<p class="oauth-manual-hint" style="color:#e0a030">' +
     t('settings.oauthCurlHelp') + '</p>' +
+    '<div style="margin-bottom:6px">' + tabs + '</div>' +
     '<textarea readonly class="oauth-manual-input" id="oauth' + capP + 'Curl" ' +
     'style="width:100%;height:104px;font-family:monospace;font-size:11px;white-space:pre"></textarea>' +
     '<button class="btn-small" id="oauth' + capP + 'CurlCopy" style="margin-top:6px">' + escapeHtml(t('settings.oauthCopyCmd')) + '</button>';
   var ta = document.getElementById('oauth' + capP + 'Curl');
   if (ta) ta.value = curl;
+  // Re-render into the SAME textarea on switch, so the copy button below
+  // always carries whatever variant is currently displayed.
+  helper.querySelectorAll('.oauth-curl-shell').forEach(function(btn) {
+    btn.onclick = function() {
+      var s = this.getAttribute('data-shell');
+      if (ta) ta.value = _buildCurlCommand(provider, code, state, s);
+      helper.querySelectorAll('.oauth-curl-shell').forEach(function(b) {
+        b.classList.toggle('active', b === btn);
+      });
+    };
+  });
   var copyBtn = document.getElementById('oauth' + capP + 'CurlCopy');
   if (copyBtn) {
     copyBtn.onclick = function() {
@@ -277,9 +360,65 @@ function _loadOAuthStatus() {
     });
 }
 
+// ── Desktop-egress status line + pin selector (S4) ──
+// Renders the server-computed egress state per card. NEVER probes inline —
+// the server's status payload carries a cached verdict only.
+function _renderEgressLine(provider, egress) {
+  var capProvider = provider === 'codex' ? 'Codex' : 'Claude';
+  var el = document.getElementById('oauth' + capProvider + 'Egress');
+  if (!el) return;
+  if (!egress || !egress.state) { el.style.display = 'none'; el.innerHTML = ''; return; }
+  el.style.display = '';
+  var agents = egress.agents || [];
+  var html = '';
+  var cls = 'oauth-egress-line';
+  switch (egress.state) {
+    case 'direct':
+      html = '<span class="oauth-egress-ok">' + t('settings.egressDirect') + '</span>';
+      break;
+    case 'agent':
+      html = '<span class="oauth-egress-ok">' + t('settings.egressViaAgent', { name: (agents[0] && agents[0].name) || agents[0].agent_id }) + '</span>';
+      break;
+    case 'agent_no_capability':
+      cls += ' oauth-egress-warn';
+      html = '<span class="oauth-egress-warn">' + t('settings.egressAgentNoCap') + '</span>';
+      break;
+    case 'unavailable':
+      cls += ' oauth-egress-bad';
+      html = '<span class="oauth-egress-bad">' + t('settings.egressUnavailable') + '</span>';
+      break;
+    default: // unknown — 探测已在后台触发
+      html = '<span class="oauth-egress-pending">' + t('settings.egressProbing') + '</span>';
+  }
+  // Pin selector when several egress-capable agents are online.
+  if (agents.length > 1 && egress.state === 'agent') {
+    html += ' <select class="oauth-egress-pin" id="oauth' + capProvider + 'EgressPin">';
+    agents.forEach(function(a) {
+      html += '<option value="' + escapeHtml(a.agent_id) + '">' +
+              escapeHtml(a.name || a.agent_id) + '</option>';
+    });
+    html += '</select>';
+  }
+  el.className = cls;
+  el.innerHTML = html;
+  var sel = document.getElementById('oauth' + capProvider + 'EgressPin');
+  if (sel) {
+    sel.onchange = function() {
+      Api.oauth.egressAgentSet(this.value).then(function() {
+        _loadOAuthStatus();
+      });
+    };
+    // Pre-select the currently pinned agent.
+    Api.oauth.egressAgentGet().then(function(d) {
+      if (d && d.pinned) sel.value = d.pinned;
+    });
+  }
+}
+
 function _updateOAuthCard(provider, status) {
   if (!status) return;
   var capProvider = provider === 'codex' ? 'Codex' : 'Claude';
+  _renderEgressLine(provider, status.egress);
   var badge = document.getElementById('oauth' + capProvider + 'Status');
   var info = document.getElementById('oauth' + capProvider + 'Info');
   var email = document.getElementById('oauth' + capProvider + 'Email');

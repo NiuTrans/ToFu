@@ -366,7 +366,7 @@ capability 集合,派发按 capability 路由;**能力不在线时诚实报错**
 | **B0**(本轮) | **浏览器桥补 user 作用域 + 认证默认强制 + 版本帧**。注册表加 `user_id`;投递首闸镜像 `bridge.py:268`;非回环强制认证;每用户 token 复用 `agents:bridge`;扩展加 `protocol_version` | `lib/browser/queue/_registry.py`、`_dispatch.py`、`_state.py`、`routes/browser.py`、`browser_extension/background.js` | 跨租户投递不可能(NEUTER:摘掉 user 闸 → 必红);非回环无凭据 401;回环仍通;`test_browser_async_poll.py` / `test_browser_queue_ttl.py` 保持绿 |
 | **B1** | 抽出共享队列底盘(TTL / 寻址 / 长轮询 / user-scope),两条桥骑上去 | 新 `lib/device_bridge/` | 两桥 wire 逐字节不变;重复实现收敛成一份 |
 | **B2** | 统一设备注册表:一个 `device_id`,多 capability;Settings→Devices 一行一台机器 | `lib/device_bridge/registry.py`、`settings/devices.js` | 一台机器两个执行器显示为一行三个能力灯 |
-| **B3** | `launcher.py` 配置面(server URL / token / share roots)+ 同机自动把 token 交给扩展(配对码) | `desktop/launcher.py`、`browser_extension/` | 打包 app 能连远端服务器;同机配对零复制粘贴 |
+| **B3** | `launcher.py` 配置面(server URL / token / share roots)。~~同机自动把 token 交给扩展(配对码)~~ —— **配对码半已于 2026-07-31 由 owner 取消(D-关票),理由见 §7 #3**;配置面半仍开放 | `desktop/launcher.py` | 打包 app 能连远端服务器 |
 | **B4** | 一份 canonical 安装页并入 `docs/INSTALL.md`;重写 `docs/README_EXTENSION.md`;收窄默认安装权限至 10 项 | `docs/INSTALL.md`、`docs/README_EXTENSION.md`、`manifest.store.json` | 用户从零到两条桥都在线,只看一页 |
 
 **B0 是 B1–B4 的前置**,原因见 §3:在洞开着的时候做合并与安装引导,等于把更多
@@ -381,10 +381,24 @@ capability 集合,派发按 capability 路由;**能力不在线时诚实报错**
    `bridge.py:268`。回环可保留有文档记录的豁免,非回环必须认证。
 2. **前缀:扩展改用完整工具名。** RWA §3.1 是真实事故产物,不加第二层映射。
    `protocol_version` 同批次落地,版本协商**先于**任何合并。
-3. **做配对码。** 复制粘贴一次性密钥正是用户把密钥贴到不安全处的成因。同机托盘
-   直写 `chrome.storage.local`;远程发短时效一次性码。**本条取代 2026-07-26
-   `REMOTE_WORKTREE_DESIGN.md:415` 的「仅 Devices 页」选择** —— 那次选择做出时
+3. **~~做配对码~~ —— 已于 2026-07-31 被 owner 推翻(D-关票,`pt_ea4dda44ec0e485a` 关闭)。**
+   原决定:复制粘贴一次性密钥正是用户把密钥贴到不安全处的成因。同机托盘
+   直写 `chrome.storage.local`;远程发短时效一次性码。本条取代 2026-07-26
+   `REMOTE_WORKTREE_DESIGN.md:415` 的「仅 Devices 页」选择 —— 那次选择做出时
    托盘根本连不上远端服务器(§2.3),前提已变。
+   **推翻理由(2026-07-31 实测):**
+   ①「同机托盘直写 `chrome.storage.local`」**机制证伪** —— Chrome 对扩展外部
+   只开两条通道(`externally_connectable` 声明的扩展/网页经 runtime.sendMessage;
+   `nativeMessaging` 经注册的 native host),**不存在外部进程直写扩展存储的机制**;
+   托盘是本机 Python 进程,两者都不是。
+   ② 两个替代通道对本部署形态也不可达:`externally_connectable` 需固定扩展 ID
+   (load-unpacked 每次安装 ID 随机)且 matches 无法预先枚举自建部署地址;
+   `nativeMessaging` 需按平台注册 native host,源码运行用户不可用。
+   ③ 现状已达「一次粘贴、永久生效」:B0 落地后(`tests/test_browser_user_scope.py`
+   12/12)每用户 token 由 `POST /api/v1/desktop/token` 一键 mint(scope
+   `agents:bridge`),`autoDetectServer()` 自动发现 serverUrl,粘贴一次即持久化。
+   owner 判定:为一次性步骤建配对码基础设施不划算。**不要再以本拍板为由
+   重新发起配对码调查;若未来要重启,须先解决 ① 的通道问题。**
 4. **能力模型是主干**:一台设备、登记能力(`fs`/`shell`/`browser`)、两个执行器。
    **不合并执行器。**
 

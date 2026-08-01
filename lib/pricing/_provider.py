@@ -23,6 +23,7 @@ import threading
 
 from lib.log import get_logger
 
+from lib.pricing._peak import peak_multiplier
 from lib.pricing._tables import MODEL_PRICING
 
 logger = get_logger(__name__)
@@ -63,7 +64,7 @@ def clear_provider_pricing(provider_id):
         PROVIDER_PRICING.pop(provider_id, None)
 
 
-def lookup_pricing(model_id, provider_id=None):
+def lookup_pricing(model_id, provider_id=None, at=None):
     """Resolve pricing for a (model, provider) pair.
 
     Resolution order:
@@ -71,15 +72,35 @@ def lookup_pricing(model_id, provider_id=None):
       2. ``MODEL_PRICING[model_id]`` global fallback.
       3. ``None`` if neither knows about the model.
 
+    Peak-hour schedules (``lib/pricing/_peak.py``): when the resolved row
+    carries an ACTIVE ``peak`` block and *at* falls inside a peak window,
+    the returned ``input``/``output`` unit prices are scaled by the peak
+    multiplier (cache muls are relative to input, so all four billing
+    items scale together) and a ``peakMul`` key is stamped on the copy.
+    ``at`` defaults to now; historical recomputation (daily_report) must
+    pass the message's own timestamp.
+
     Returns a *copy* of the dict so callers can mutate freely.
     """
+    info = None
     if provider_id:
         with _provider_pricing_lock:
             prov = PROVIDER_PRICING.get(provider_id)
             if prov and model_id in prov:
-                return dict(prov[model_id])
-    info = MODEL_PRICING.get(model_id)
-    return dict(info) if info else None
+                info = dict(prov[model_id])
+    if info is None:
+        row = MODEL_PRICING.get(model_id)
+        info = dict(row) if row else None
+    if info is None:
+        return None
+    mult = peak_multiplier(info, at=at)
+    if mult != 1.0:
+        info['input'] = float(info.get('input') or 0) * mult
+        info['output'] = float(info.get('output') or 0) * mult
+        info['peakMul'] = mult
+        logger.debug('[Pricing] peak x%s applied for %s (provider=%s)',
+                     mult, model_id, provider_id or '-')
+    return info
 
 
 def get_provider_pricing_snapshot():

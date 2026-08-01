@@ -16,8 +16,10 @@ compatibility.
 from lib.desktop.bridge import (
     command_queue,
     command_queue_lock,
+    enqueue_desktop_command,
     format_desktop_result,
     get_command_stream,
+    get_frames,
     is_desktop_agent_connected,
     last_poll_time,
     list_agents,
@@ -36,8 +38,10 @@ from lib.desktop.bridge import (
 __all__ = [
     'command_queue',
     'command_queue_lock',
+    'enqueue_desktop_command',
     'format_desktop_result',
     'get_command_stream',
+    'get_frames',
     'is_desktop_agent_connected',
     'last_poll_time',
     'list_agents',

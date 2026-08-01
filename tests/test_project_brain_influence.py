@@ -60,8 +60,11 @@ def _seed(flask_app, p):
     from lib.conversations.project_charter import (
         commit_charter, propose_amendment,
     )
-    commit_charter(p, content='North star: ship it.',
-                   add_decision='Use PostgreSQL', updated_by_conv='convA')
+    # content and add_decision are mutually exclusive (commit_charter refuses
+    # the combination outright — a partial application is worse than none), so
+    # the north star and the decision are two separate commits.
+    commit_charter(p, content='North star: ship it.', updated_by_conv='convA')
+    commit_charter(p, add_decision='Use PostgreSQL', updated_by_conv='convA')
     ta = post_task(p, 'convA', 'Refactor parser')['id']
     claim_task(p, 'convA', ta)
     tb = post_task(p, 'convB', 'Rewrite docs')['id']
@@ -206,5 +209,218 @@ def test_NC_ownership_split_is_load_bearing(flask_app):
         _INFL_SRC,
         "if status == 'claimed' and owner and conv_id and owner == conv_id:",
         "if status == 'claimed' and owner and conv_id and owner == '__never__':",
+        run,
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  The two CHANNELS: injected-into-the-prompt vs. reachable-via-a-tool
+#
+#  The lens is titled "how this conversation is influenced". Measured on the
+#  live project 2026-07-31, it was answering that question wrongly in two
+#  independent ways, and BOTH were invisible because the surface reported a
+#  healthy-looking verdict either way:
+#    • the GOALS lane did not exist here, while _inject.py ★4.455 was shipping
+#      a [PROJECT GOALS] block every single turn;
+#    • `board.injected` was read off render_board_block — the pull-based TOOL
+#      renderer — not render_board_injection_block, the one the prompt uses.
+#  Both are "a message asserting something that is not true", so both get a
+#  guard keyed on the PROPERTY (which renderer / which lane), not on prose.
+# ══════════════════════════════════════════════════════════════════════
+
+def _seed_goal(flask_app, p, text='Ship it cheaply and correctly.'):
+    from lib.conversations.project_watch import add_watch_item
+    return add_watch_item(p, 'goal', text)['item']['item_id']
+
+
+def test_goals_lane_present_and_mirrors_the_injected_block(flask_app):
+    """A goal set in Status & Focus MUST appear in the influence verdict, and
+    its `chars` must equal the REAL [PROJECT GOALS] block the prompt ships."""
+    from lib.conversations.project_brain_influence import build_conv_influence
+    from lib.conversations.project_watch import render_goals_injection_block
+    p = os.path.abspath('/tmp/infl-goals')
+    with flask_app.app_context():
+        _seed_goal(flask_app, p, 'Long-term extensibility over quick patches.')
+        inf = build_conv_influence(p, 'convA')
+        block = render_goals_injection_block(p)
+    assert inf['goals']['injected'] is True
+    assert [g['text'] for g in inf['goals']['items']] == \
+        ['Long-term extensibility over quick patches.']
+    # The count is the MEASURED size of the real block — not an estimate.
+    assert inf['goals']['chars'] == len(block) > 0
+
+
+def test_goals_lane_withdraws_when_resolved(flask_app):
+    """Resolving a goal is the human's lever to stop injecting it. The lens
+    must follow the SAME rule the renderer uses, or it keeps showing a goal as
+    steering the model after it stopped."""
+    from lib.conversations.project_brain_influence import build_conv_influence
+    from lib.conversations.project_watch import set_watch_status
+    p = os.path.abspath('/tmp/infl-goals-resolved')
+    with flask_app.app_context():
+        gid = _seed_goal(flask_app, p)
+        set_watch_status(gid, 'resolved')
+        inf = build_conv_influence(p, 'convA')
+    assert inf['goals']['injected'] is False
+    assert inf['goals']['items'] == []
+    assert inf['goals']['chars'] == 0
+
+
+def test_board_injected_uses_the_PROMPT_renderer_not_the_tool_renderer(flask_app):
+    """`board.chars` must equal render_board_INJECTION_block — the abridged
+    block the prompt ships — and NOT render_board_block, the full pull-based
+    TOOL render. Measured live: 8,845 vs 18,178 chars for the same board.
+
+    A boolean alone cannot catch this (both renderers are non-empty on a live
+    board, so the flag agreed by coincidence for the whole time the wrong call
+    site was there); comparing the SIZE is what makes the two distinguishable.
+    """
+    from lib.conversations.project_board import (
+        render_board_block, render_board_injection_block,
+    )
+    from lib.conversations.project_brain_influence import build_conv_influence
+    p = os.path.abspath('/tmp/infl-renderer')
+    with flask_app.app_context():
+        # A long epic title is what makes the two renderers diverge at all —
+        # abridgement only bites past _INJECT_TITLE_MAX_CHARS.
+        from lib.conversations.project_board import post_task
+        post_task(p, 'convB', 'X' * 900)
+        inf = build_conv_influence(p, 'convA')
+        prompt_block = render_board_injection_block(p, current_conv_id='convA')
+        tool_block = render_board_block(p, current_conv_id='convA')
+    assert len(tool_block) > len(prompt_block), \
+        'fixture is inert: the two renderers must differ for this to test anything'
+    assert inf['board']['chars'] == len(prompt_block)
+    assert inf['board']['chars'] != len(tool_block)
+
+
+def test_board_reports_prompt_side_abridgement(flask_app):
+    """The panel shows each epic's FULL stored title while the prompt ships an
+    abridged headline. `abridgedInPrompt` says so; without it the human reads
+    a 900-char epic here and assumes the model received all of it."""
+    from lib.conversations.project_board import post_task
+    from lib.conversations.project_brain_influence import build_conv_influence
+    p_long = os.path.abspath('/tmp/infl-abridged')
+    p_short = os.path.abspath('/tmp/infl-not-abridged')
+    with flask_app.app_context():
+        post_task(p_long, 'convB', 'Y' * 900)
+        inf_long = build_conv_influence(p_long, 'convA')
+        post_task(p_short, 'convB', 'Short epic')
+        inf_short = build_conv_influence(p_short, 'convA')
+    assert inf_long['board']['abridgedInPrompt'] is True
+    # A board of short epics is NOT abridged — the flag must discriminate,
+    # otherwise it is decoration that always fires.
+    assert inf_short['board']['abridgedInPrompt'] is False
+
+
+def test_charter_chars_is_the_injection_block_size(flask_app):
+    from lib.conversations.project_brain_influence import build_conv_influence
+    from lib.conversations.project_charter import (
+        render_charter_injection_block,
+    )
+    p = os.path.abspath('/tmp/infl-charter-chars')
+    with flask_app.app_context():
+        _seed(flask_app, p)
+        inf = build_conv_influence(p, 'convA')
+        block = render_charter_injection_block(p)
+    assert inf['charter']['chars'] == len(block) > 0
+
+
+def test_tool_visible_lane_names_only_real_tools(flask_app):
+    """The pull-only channel must name tools that ACTUALLY exist in the
+    registry — a panel advertising a phantom tool is the same defect class as
+    a digest header naming tools the model cannot call."""
+    from lib.conversations.project_brain_influence import build_conv_influence
+    from lib.tools.conversation import (
+        BOARD_TOOL_NAMES, CHARTER_TOOL_NAMES, PEER_TOOL_NAMES,
+    )
+    known = BOARD_TOOL_NAMES | CHARTER_TOOL_NAMES | PEER_TOOL_NAMES
+    with flask_app.app_context():
+        inf = build_conv_influence(os.path.abspath('/tmp/infl-tools'), 'convA')
+    names = [t['tool'] for t in inf['toolVisible']]
+    assert names, 'the tool-visible channel must not be empty'
+    for n in names:
+        assert n in known, f'{n} is not a registered project-brain tool'
+    # Every entry carries an i18n label key so the panel never prints a bare
+    # function name at the human.
+    assert all(t.get('labelKey') for t in inf['toolVisible'])
+
+
+def test_empty_shape_carries_the_new_lanes(flask_app):
+    """A falsy project path returns the SAME shape — a consumer must never get
+    `undefined` for goals/toolVisible and silently render nothing."""
+    from lib.conversations.project_brain_influence import build_conv_influence
+    inf = build_conv_influence('', 'convA')
+    assert inf['goals'] == {'injected': False, 'chars': 0, 'items': []}
+    assert [t['tool'] for t in inf['toolVisible']]
+    assert inf['board']['chars'] == 0
+    assert inf['board']['abridgedInPrompt'] is False
+
+
+def test_NC_goals_lane_is_load_bearing(flask_app):
+    """NC: neuter the goals renderer call so the lane always reads empty →
+    a project WITH an open goal reports goals.injected False → FAILS."""
+    def run():
+        import lib.conversations.project_brain_influence as infl
+        p = os.path.abspath('/tmp/infl-nc-goals')
+        with flask_app.app_context():
+            _seed_goal(flask_app, p)
+            inf = infl.build_conv_influence(p, 'convA')
+        assert inf['goals']['injected'] is False, \
+            'NC: emptying the goals block must make the lane report not-injected'
+
+    _patch_restore(
+        _INFL_SRC,
+        "_goals_block = render_goals_injection_block(project_path)",
+        "_goals_block = ''",
+        run,
+    )
+
+
+def test_NC_board_prompt_renderer_is_load_bearing(flask_app):
+    """NC: put the TOOL renderer back where the PROMPT renderer belongs — the
+    exact 2026-07-31 defect — → board.chars stops matching the injected block
+    → FAILS. This is the guard that would have caught the original bug."""
+    def run():
+        import lib.conversations.project_brain_influence as infl
+        from lib.conversations.project_board import (
+            post_task, render_board_injection_block,
+        )
+        p = os.path.abspath('/tmp/infl-nc-renderer')
+        with flask_app.app_context():
+            post_task(p, 'convB', 'Z' * 900)
+            inf = infl.build_conv_influence(p, 'convA')
+            prompt_block = render_board_injection_block(p, current_conv_id='convA')
+        assert inf['board']['chars'] != len(prompt_block), \
+            'NC: sourcing the flag from the tool renderer must break the match'
+
+    _patch_restore(
+        _INFL_SRC,
+        "        _board_block = render_board_injection_block(\n"
+        "            project_path, current_conv_id=conv_id)",
+        "        from lib.conversations.project_board import render_board_block\n"
+        "        _board_block = render_board_block(\n"
+        "            project_path, current_conv_id=conv_id)",
+        run,
+    )
+
+
+def test_NC_abridged_flag_discriminates(flask_app):
+    """NC: hard-wire abridgedInPrompt True → the short-epic board wrongly
+    claims abridgement → the discriminating assertion FAILS."""
+    def run():
+        import lib.conversations.project_brain_influence as infl
+        from lib.conversations.project_board import post_task
+        p = os.path.abspath('/tmp/infl-nc-abridge')
+        with flask_app.app_context():
+            post_task(p, 'convB', 'Short epic')
+            inf = infl.build_conv_influence(p, 'convA')
+        assert inf['board']['abridgedInPrompt'] is True, \
+            'NC: hard-wiring the flag must make a short board claim abridgement'
+
+    _patch_restore(
+        _INFL_SRC,
+        "        out['board']['abridgedInPrompt'] = bool(_board_block) and any(",
+        "        out['board']['abridgedInPrompt'] = bool(_board_block) or any(",
         run,
     )

@@ -2248,6 +2248,77 @@ function _renderAbortedRow(round, ctx) {
        </div>`;
 }
 
+/* ── Live run_command timer (pt_1a82ffb3) ────────────────────────────────
+ * A long command showed `Running...` + a spinner and nothing else, so there
+ * was no way to tell a 3-second command from a 30-minute one, nor how much of
+ * an explicit `timeout` budget was left.
+ *
+ * Both clocks come from the SERVER and ride the round, which is what makes the
+ * display survive a conversation switch / reload: `execStartTs` (subprocess
+ * spawn) and `deadlineTs` (absolute kill time, already adjusted for the
+ * cross-DC multiplier and the MAX_COMMAND_TIMEOUT clamp). We only ever
+ * SUBTRACT from them. A client-side stopwatch cannot do this — it re-mints on
+ * every paint and every reconnect, so a 20-minute-old command would render as
+ * freshly started, which is precisely the bug this feature must not ship.
+ *
+ * `execStartTs` is preferred over `tStart` because tStart is the round ANNOUNCE
+ * time: a write-approval gate can sit minutes before the process actually
+ * starts, and counting that as execution would over-report. tStart is the
+ * fallback for a round that predates this contract. */
+function _cmdTimerAnchor(round) {
+  if (!round) return null;
+  const v = (round.execStartTs != null) ? round.execStartTs : round.tStart;
+  return (typeof v === 'number' && v > 0) ? v : null;
+}
+
+/* Compact duration: 45s / 3m12s / 1h04m. */
+function _fmtDur(ms) {
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return s + 's';
+  const m = Math.floor(s / 60), rs = s % 60;
+  if (m < 60) return m + 'm' + String(rs).padStart(2, '0') + 's';
+  return Math.floor(m / 60) + 'h' + String(m % 60).padStart(2, '0') + 'm';
+}
+
+/* The chip's text + urgency class for a given wall clock. Shared by the first
+ * paint and the 1 Hz ticker so the two can never disagree. */
+function _cmdTimerState(round, nowMs) {
+  const anchor = _cmdTimerAnchor(round);
+  const deadline = (typeof round.deadlineTs === 'number' && round.deadlineTs > 0)
+    ? round.deadlineTs : null;
+  const _tf = (typeof t === 'function') ? t : (k, d) => d;
+  if (deadline != null) {
+    const left = deadline - nowMs;
+    /* Past the deadline we do NOT show a negative number: the backend is
+     * SIGKILLing the process tree and the terminal frame is on its way. Say
+     * that, rather than counting into the negative or freezing at 0s. */
+    if (left <= 0) {
+      return { txt: _tf('toolTimer.terminating', 'terminating…'), cls: ' ptool-cmd-timer-over' };
+    }
+    return {
+      txt: _tf('toolTimer.countdown', '{n} left').replace('{n}', _fmtDur(left)),
+      cls: left <= 10000 ? ' ptool-cmd-timer-soon' : '',
+    };
+  }
+  /* No deadline — the DEFAULT for run_command (no ceiling). Count UP, which is
+   * the common case and the one that answers "how long has this been going?". */
+  if (anchor == null) return null;
+  return { txt: _fmtDur(nowMs - anchor), cls: '' };
+}
+
+function _renderCmdTimerChip(round) {
+  const st = _cmdTimerState(round, Date.now());
+  if (!st) return '';
+  const anchor = _cmdTimerAnchor(round);
+  const dl = (typeof round.deadlineTs === 'number' && round.deadlineTs > 0) ? round.deadlineTs : '';
+  /* The data-* attributes are what the ticker updates in place — no re-render,
+   * so the fingerprint gate in _syncToolRoundsDOM (which correctly skips when
+   * no SSE event landed) cannot freeze the value. */
+  return `<span class="ptool-cmd-timer${st.cls}" data-cmd-timer="1"`
+    + ` data-cmd-anchor="${anchor == null ? '' : anchor}"`
+    + ` data-cmd-deadline="${dl}">${escapeHtml(st.txt)}</span>`;
+}
+
 // In-flight ("searching") states: running command with live output, search
 // orbit animation, or the generic active row.
 function _renderSearchingRow(round, ctx) {
@@ -2292,6 +2363,7 @@ function _renderSearchingRow(round, ctx) {
              ${cmdRootPill}
              ${descInlineHtml}
              <span class="ptool-cmd-label">Running...</span>
+             ${_renderCmdTimerChip(round)}
              <span class="ptool-spinner"></span>
            </div>
            <pre class="ptool-cmd-code"><code>$ ${cmdText}</code></pre>
@@ -4506,6 +4578,44 @@ if (typeof window !== 'undefined' && !window._timerCountdownTicker) {
     try {
       if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
       _tickTimerCountdowns();
+    } catch (e) { /* swallowed — countdown ticker is best-effort */ }
+  }, 1000);
+}
+
+/* ── 1 Hz wall-clock ticker for the run_command countdown / elapsed chip ──
+ * Third instance of the same pattern as _tickTimerCountdowns and
+ * _tickSwarmTimers: the text changes every second even when no SSE event
+ * landed, and the fingerprint gate in _syncToolRoundsDOM (correctly) skips
+ * re-renders when nothing changed — so without a ticker the chip would freeze
+ * at whatever value it was first painted with.
+ *
+ * Updates [data-cmd-timer] elements IN PLACE: zero re-render, one timer,
+ * O(N running commands) per tick. Reads only server clocks off the DOM
+ * attributes, so it stays truthful across a reconnect. */
+function _tickCmdTimers() {
+  const els = document.querySelectorAll('.ptool-cmd-timer[data-cmd-timer]');
+  if (!els.length) return;
+  const now = Date.now();
+  for (const el of els) {
+    const a = el.getAttribute('data-cmd-anchor');
+    const d = el.getAttribute('data-cmd-deadline');
+    const st = _cmdTimerState({
+      execStartTs: a ? +a : null,
+      deadlineTs: d ? +d : null,
+    }, now);
+    if (!st) continue;
+    if (el.textContent !== st.txt) el.textContent = st.txt;
+    const over = st.cls.indexOf('over') >= 0;
+    const soon = st.cls.indexOf('soon') >= 0;
+    if (el.classList.contains('ptool-cmd-timer-over') !== over) el.classList.toggle('ptool-cmd-timer-over', over);
+    if (el.classList.contains('ptool-cmd-timer-soon') !== soon) el.classList.toggle('ptool-cmd-timer-soon', soon);
+  }
+}
+if (typeof window !== 'undefined' && !window._cmdTimerTicker) {
+  window._cmdTimerTicker = setInterval(() => {
+    try {
+      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
+      _tickCmdTimers();
     } catch (e) { /* swallowed — countdown ticker is best-effort */ }
   }, 1000);
 }

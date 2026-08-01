@@ -86,9 +86,10 @@ def _qs(path_value):
 
 @pytest.fixture()
 def _seed_brain(flask_app):
-    """Seed one board epic + a feed event + a charter under the STRIPPED path,
-    then clean up. Yields nothing — the rows live in the shared DB the live
-    server reads from."""
+    """Seed one board epic + a charter (north star + one decision) under the
+    STRIPPED path, then clean up. The charter DECISION commit is what emits
+    the feed event the /feed assertions rely on (post_task deliberately emits
+    nothing — posting is not a lifecycle pulse)."""
     from lib.conversations.project_board import post_task
     from lib.conversations.project_charter import commit_charter
     from lib.database import DOMAIN_CHAT, get_thread_db
@@ -102,9 +103,25 @@ def _seed_brain(flask_app):
         db.execute('DELETE FROM project_events WHERE project_path=?', (_PROJ,))
         db.execute('DELETE FROM project_charter WHERE project_path=?', (_PROJ,))
         db.commit()
-        post_task(_PROJ, 'cLIVE', 'LIVE BRAIN EPIC')
-        commit_charter(_PROJ, content='LIVE NORTH STAR',
-                       add_decision='live decision', updated_by_conv='cLIVE')
+        res_post = post_task(_PROJ, 'cLIVE', 'LIVE BRAIN EPIC')
+        # commit_charter's two operations are MUTUALLY EXCLUSIVE by design
+        # (the CAS-split: an overwrite does not commute, an append does), so
+        # the north star and the decision are TWO commits. The append emits
+        # the 'decided' feed event.
+        res_content = commit_charter(_PROJ, content='LIVE NORTH STAR',
+                                     updated_by_conv='cLIVE')
+        res_append = commit_charter(_PROJ, add_decision='live decision',
+                                    summary='live rule',
+                                    updated_by_conv='cLIVE')
+        # A refused seed must fail HERE, loudly — not downstream as a
+        # misleading "the live route returned empty". That is exactly how this
+        # test rotted: the mutual-exclusion rule landed, the seed's mixed call
+        # started being refused, and the failure blamed the route.
+        assert res_post.get('ok'), f'board seed refused: {res_post}'
+        assert res_content.get('ok'), \
+            f'charter content seed refused: {res_content}'
+        assert res_append.get('ok'), \
+            f'charter decision seed refused: {res_append}'
     try:
         yield
     finally:

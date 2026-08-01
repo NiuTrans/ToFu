@@ -202,10 +202,10 @@ async function _pollFallback(convId, taskId, stream, assistantMsg) {
           try {
             _sseTookOver = await _trySSE(convId, taskId, stream, assistantMsg);
           } catch (e) {
-            if (e && e.name === 'AbortError') { twStop(convId); finishStream(convId); return; }
+            if (e && e.name === 'AbortError') { if (typeof twStop === 'function') twStop(convId); finishStream(convId); return; }
             console.warn(`[_pollFallback] reconnect SSE re-open threw: ${e && e.message} — resuming poll`);
           }
-          if (stream.controller.signal.aborted) { twStop(convId); finishStream(convId); return; }
+          if (stream.controller.signal.aborted) { if (typeof twStop === 'function') twStop(convId); finishStream(convId); return; }
           if (_sseTookOver) {
             /* SSE re-attached and ran to completion on the owning replica; it
              *   owns finishStream/twStop. Nothing left to poll. */

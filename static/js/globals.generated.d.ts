@@ -44,7 +44,9 @@ declare var ProjectBrainStatus: any;   // static/js/project-brain-status.js
 declare var TofuPet: any;   // static/js/tofu-pet.js
 declare var TofuScene: any;   // static/js/tofu-scene.js
 declare var Voice: any;   // static/js/voice.js
+declare var _CLIENT_LOCAL_ROUND_KEYS: any;   // static/js/ui/stream_reducer.js
 declare var _ROUND_KEY_ORDER: any;   // static/js/ui/stream_reducer.js
+declare var _TERMINAL_ROUND_STATUS: any;   // static/js/ui/stream_reducer.js
 declare var __RELAY_BILLING_ENABLED: any;   // static/js/relay-admin.js
 declare var __RELAY_MODEL_ENABLED: any;   // static/js/relay-admin.js
 declare var __fitCount: any;   // static/js/settings/providers/access_matrix.js
@@ -61,6 +63,7 @@ declare var _bootLoadInFlight: any;   // static/js/core/cross_tab_sync.js
 declare var _bootReconnectStarted: any;   // static/js/main.js
 declare var _browserClientId: any;   // static/js/local-control.js
 declare var _canonRound: any;   // static/js/ui/stream_reducer.js
+declare var _cmdTimerTicker: any;   // static/js/ui/tool_rounds.js
 declare var _connToastState: any;   // static/js/ui/sse_poll_fallback.js
 declare var _contextPolicy: any;   // static/js/main/main_toolbar_ui.js
 declare var _currentUserId: any;   // static/js/core/current_user.js
@@ -113,6 +116,9 @@ declare var openMobileOptimizer: any;   // static/js/mobile_panels.js
 declare var openMobileTimer: any;   // static/js/mobile_panels.js
 declare var openProjectBrain: any;   // static/js/project-brain.js
 declare var openProjectBrainInfluence: any;   // static/js/project-brain.js
+declare var paperAttachPush: any;   // static/js/paper/push_transport.js
+declare var paperDetachPush: any;   // static/js/paper/push_transport.js
+declare var paperIngestEvent: any;   // static/js/paper/push_transport.js
 declare var presenceRefresh: any;   // static/js/presence.js
 declare var projectBrainRefresh: any;   // static/js/project-brain.js
 declare var projectColdSnapshot: any;   // static/js/ui/stream_reducer.js
@@ -200,6 +206,7 @@ interface Window {
   _checkForQueuedTask: any;
   _classifyGhostTailJS: any;
   _clearPendingSyncMarkers: any;
+  _cmdTimerTicker: any;
   _collapseToolNames: any;
   _connToast: any;
   _connToastState: any;
@@ -223,9 +230,11 @@ interface Window {
   _lcBrowserDownload: any;
   _lcBrowserSetupState: any;
   _lcConnectLine: any;
+  _lcDownloadLinks: any;
   _lcPaintFloor: any;
   _lcRenderBrowser: any;
   _lcRenderDesktop: any;
+  _lcResolveArch: any;
   _lcSetAbout: any;
   _lcUpdateBadge: any;
   _loadFeatureBundle: any;
@@ -233,6 +242,7 @@ interface Window {
   _maskVuMachineTokens: any;
   _maybeArmAutopilot: any;
   _maybeAutoGenerateTitle: any;
+  _mergeServerTranslations: any;
   _mergeTerminalTurnFields: any;
   _mergeTranslationFields: any;
   _mobileCompactNow: any;

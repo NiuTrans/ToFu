@@ -1002,6 +1002,23 @@ function _streamFrameArg(convId) {
   if (conv && conv.messages.length) {
     const last = conv.messages[conv.messages.length - 1];
     if (last && (last.role === 'assistant' || last._isEndpointReview)) ckpt = last;
+    /* ★ Identity-first (pt_44e985ec): the SSE/poll lanes write the message the
+     *   stream entry is BOUND to (_msgId/_taskId) — which may NOT be the array
+     *   tail when a duplicate placeholder raced ahead of it. Projecting the
+     *   tail then renders an EMPTY bubble whose status pill still advances
+     *   (phase is session-global) — the 等待中…↔推理中 N字符 flip-flop. Project
+     *   the bound message instead. An endpoint-review tail (the critic lane)
+     *   keeps the projection — it legitimately owns it while the critic runs. */
+    const _entry = (typeof activeStreams !== 'undefined') ? activeStreams.get(convId) : null;
+    const _bound = _entry && _entry.assistantMsg;
+    if (_bound && _bound !== ckpt && !(last && last._isEndpointReview)) {
+      let _live = null;
+      if (_bound._msgId && typeof _resolveAssistantById === 'function') {
+        _live = _resolveAssistantById(conv, _bound._msgId, null);
+      }
+      if (!_live && conv.messages.indexOf(_bound) >= 0) _live = _bound;
+      if (_live && _live.role === 'assistant') ckpt = _live;
+    }
   }
   const rounds = (ckpt && typeof getToolRoundsFromMsg === 'function')
     ? getToolRoundsFromMsg(ckpt) : [];

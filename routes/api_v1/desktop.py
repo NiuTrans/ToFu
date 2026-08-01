@@ -18,7 +18,6 @@ from flask import Blueprint, jsonify
 
 from lib.log import audit_log, get_logger
 from lib.openapi import api_meta
-from lib.ttl_cache import TTLCache
 
 from .auth import require_auth
 
@@ -66,319 +65,51 @@ def _setup_state(connected: bool) -> str:
     return 'remote'
 
 
-def _desktop_download_url() -> str:
-    """Releases page for the desktop app, derived from the ONE repo constant.
-
-    ``lib.self_update._config.UPDATE_REPO`` is already the project's canonical,
-    env-overridable source slug (``TOFU_UPDATE_REPO``), so a fork or mirror
-    gets a correct link for free. Deriving beats hardcoding: ``desktop/
-    launcher.py`` holds its own copy of this URL for the tray's update check,
-    and typing the slug a third time here would make a fork silently send its
-    users to upstream. That module is NOT importable from a web route anyway —
-    importing it creates directories, mutates ``sys.path`` and sets env vars at
-    import time.
-
-    This stays as the FALLBACK for a platform we cannot identify (and as the
-    "see all downloads" escape hatch). The per-platform direct links are built
-    by :func:`_match_platform_assets`.
-    """
-    repo = _update_repo()
-    return f'https://github.com/{repo}/releases/latest' if repo else ''
-
-
-def _update_repo() -> str:
-    """The ``owner/name`` slug releases are published under, or ''."""
-    try:
-        from lib.self_update import UPDATE_REPO
-    except Exception as e:
-        logger.debug('[Desktop] UPDATE_REPO unavailable, omitting '
-                     'download url: %s', e)
-        return ''
-    return UPDATE_REPO
-
-
-def _platform_assets():
-    """The (os, arch, label, glob) table from ``scripts/release_assets.py``.
-
-    That module is the SINGLE source of truth for which files a release must
-    contain — both build-desktop.yml gates already shell out to it, and
-    ``tests/test_desktop_build_workflow.py`` asserts the globs appear in no
-    other file. So this route reads them rather than owning a sixth copy:
-    a hand-typed list here would keep working today and silently miss the next
-    platform added, with nothing going red (the release gates only check the
-    platforms still on their own list).
-
-    ``scripts/`` is not a package, so it is loaded by path. Failure is
-    non-fatal: the caller degrades to the releases page, which is exactly the
-    behaviour that shipped before direct links existed.
-    """
-    import importlib.util
-    from pathlib import Path
-
-    global _PLATFORM_ASSETS_CACHE
-    if _PLATFORM_ASSETS_CACHE is not None:
-        return _PLATFORM_ASSETS_CACHE
-    script = Path(__file__).resolve().parents[2] / 'scripts' / 'release_assets.py'
-    try:
-        spec = importlib.util.spec_from_file_location(
-            '_tofu_release_assets_route', script)
-        if not spec or not spec.loader:
-            raise ImportError(f'cannot load {script}')
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        _PLATFORM_ASSETS_CACHE = tuple(mod.PLATFORM_ASSETS)
-    except Exception as e:
-        logger.warning('[Desktop] release_assets.py unreadable, falling back '
-                       'to the releases page: %s', e)
-        _PLATFORM_ASSETS_CACHE = ()
-    return _PLATFORM_ASSETS_CACHE
-
-
-_PLATFORM_ASSETS_CACHE = None
-
-# Published asset names change only when a release is cut, so a long TTL is
-# right — but it must EXPIRE, or a server that happened to probe during a
-# GitHub blip would offer no direct link until restarted.
-_RELEASE_ASSET_CACHE = TTLCache(ttl=900, max_size=4)
-
-
-def _detect_os(user_agent: str) -> str:
-    """Map a UA string to one of our three OS keys, or '' when unsure.
-
-    Deliberately narrow. An unrecognised UA (a phone, a BSD, a bot) returns ''
-    and the caller offers no direct link — sending an iPhone user a Windows
-    installer is worse than showing them the releases page.
-
-    Order matters: 'Android' contains 'Linux', and Windows UAs on ARM still
-    say 'Windows NT', so the mobile checks come first.
-    """
-    ua = (user_agent or '').lower()
-    if not ua:
-        return ''
-    # Mobile / non-desktop first — several of these embed a desktop OS token.
-    if any(tok in ua for tok in ('android', 'iphone', 'ipad', 'ipod')):
-        return ''
-    if 'windows' in ua:
-        return 'windows'
-    if 'mac os x' in ua or 'macintosh' in ua:
-        return 'macos'
-    if 'linux' in ua or 'x11' in ua:
-        return 'linux'
-    return ''
-
-
-def _detect_arch(user_agent: str, arch_hint: str) -> str:
-    """Best-effort architecture, or '' when it genuinely cannot be known.
-
-    ``arch_hint`` is the ``Sec-CH-UA-Arch`` request header. It is the ONLY
-    honest source of this fact on macOS: an Apple Silicon Mac reports
-    ``Intel Mac OS X`` in its UA — Chrome and Safari both do — so the UA can
-    never distinguish the two DMGs. Chromium sends the hint only after an
-    ``Accept-CH`` opt-in and Safari never sends it, so '' is a NORMAL outcome
-    and the caller must handle it by offering both rather than guessing.
-
-    The header is a structured-header string, i.e. quoted: ``"arm"``.
-    """
-    hint = (arch_hint or '').strip().strip('"').lower()
-    if hint:
-        if hint in ('arm', 'arm64', 'aarch64'):
-            return 'arm64'
-        if hint in ('x86', 'x86_64', 'amd64', 'x64'):
-            return 'x86_64'
-    ua = (user_agent or '').lower()
-    # On Windows/Linux the UA does carry a usable token. Note 'arm64' must be
-    # tested before the x86 tokens: a Windows-on-ARM UA contains BOTH
-    # ('Windows NT 10.0; Win64; x64; ARM64'), and the ARM one is the truth.
-    if 'arm64' in ua or 'aarch64' in ua:
-        return 'arm64'
-    if 'x86_64' in ua or 'win64' in ua or 'x64' in ua or 'amd64' in ua:
-        return 'x86_64'
-    return ''
-
-
-def _assets_from_release_payload(doc, repo: str) -> list[dict]:
-    """Turn a GitHub release payload into ``[{name, url}, …]``.
-
-    ── The URL travels WITH the name, and that is the whole point ──
-    Both facts are read out of ONE payload, so they describe one release by
-    construction. The previous shape returned names only and the caller
-    rebuilt a URL as ``/releases/latest/download/<name>`` — gluing a
-    probe-time filename to a click-time release. Measured on the real repo:
-    that URL is 200 while the cached name happens to be in ``latest`` and
-    **404** the moment a new release publishes, because the new release does
-    not contain the old filename. Returning the pair makes the mismatch
-    inexpressible rather than merely unlikely.
-
-    Preference order:
-      1. ``browser_download_url`` — GitHub's own pinned-tag URL for this exact
-         asset. Authoritative; nothing to assemble.
-      2. ``/releases/download/<tag_name>/<name>`` built from the SAME payload.
-         Used only if the field is absent, and still pinned — a fallback that
-         reached for ``latest`` would reintroduce the defect.
-      3. Nothing: the asset is dropped. With neither a URL nor a tag there is
-         no honest link to offer, and a guessed one would 404 while looking
-         authoritative — the caller degrades to the releases page instead.
-    """
-    if not isinstance(doc, dict):
-        return []
-    tag = doc.get('tag_name')
-    tag = tag.strip() if isinstance(tag, str) else ''
-    out: list[dict] = []
-    for a in doc.get('assets') or []:
-        if not isinstance(a, dict):
-            continue
-        name = a.get('name')
-        if not isinstance(name, str) or not name:
-            continue
-        url = a.get('browser_download_url')
-        url = url.strip() if isinstance(url, str) else ''
-        if not url and tag and repo:
-            url = (f'https://github.com/{repo}/releases/download/'
-                   f'{tag}/{name}')
-        if not url:
-            logger.warning('[Desktop] asset %s has no browser_download_url '
-                           'and the payload carries no tag_name — dropping it '
-                           'rather than guessing a URL', name)
-            continue
-        out.append({'name': name, 'url': url})
-    return out
-
-
-def _latest_release_assets() -> list[dict]:
-    """The newest published release's assets as ``[{name, url}, …]``, or [].
-
-    ── Why this network call is unavoidable ──
-    ``PLATFORM_ASSETS`` holds GLOBS because the version is a ``*``, and the
-    release gates only ever need to ask "does something matching this exist?".
-    A download link cannot use a glob, and the two ways to avoid asking are
-    both wrong:
-
-      * read the local ``VERSION`` file — that is the version THIS server runs,
-        which on a source checkout is routinely ahead of the newest published
-        installer (measured: VERSION 0.15.2 vs latest release v0.14.2), so the
-        link would 404 exactly while a release is in flight;
-      * hardcode a version — stale by construction.
-
-    So we ask the API and cache the answer. The name and its URL are cached
-    TOGETHER — caching the name alone is what let a stale name pair with a live
-    ``latest``. Failure is non-fatal and degrades to the releases page: an
-    unreachable api.github.com must not break the settings panel.
-    """
-    cached = _RELEASE_ASSET_CACHE.get('assets')
-    if cached is not None:
-        return cached
-    repo = _update_repo()
-    if not repo:
-        return []
-    rows: list[dict] = []
-    try:
-        from lib.http_client import http_get
-        resp = http_get(
-            f'https://api.github.com/repos/{repo}/releases/latest',
-            timeout=6,
-            headers={'Accept': 'application/vnd.github+json',
-                     'X-GitHub-Api-Version': '2022-11-28'})
-        if resp.status_code == 200:
-            rows = _assets_from_release_payload(resp.json(), repo)
-        else:
-            logger.warning('[Desktop] latest-release probe returned HTTP %s '
-                           'for %s — falling back to the releases page',
-                           resp.status_code, repo)
-    except Exception as e:
-        logger.warning('[Desktop] latest-release probe failed (%s) — falling '
-                       'back to the releases page', e)
-    # Cache even an empty result, so a flaky API cannot turn one settings-page
-    # open into a request storm. The TTL is what retries it.
-    _RELEASE_ASSET_CACHE.set('assets', rows)
-    return rows
-
-
-def _match_platform_assets(user_agent: str, arch_hint: str = '',
-                           published: list | None = None) -> list[dict]:
-    """The installers THIS visitor's machine can actually run.
-
-    Returns a list because ambiguity is a real state, not an error: when the
-    architecture is unknown on macOS both DMGs are returned so the user picks
-    between two clearly-labelled files. Guessing one would hand roughly half of
-    Mac users a download that will not open, which is strictly worse than
-    asking — see :func:`_detect_arch`.
-
-    Returns ``[]`` for an unrecognised platform, an unreachable release API, or
-    a release that genuinely lacks this platform's asset; the caller then shows
-    the releases page, which is what shipped before direct links existed.
-
-    Each entry: ``{os, arch, label, filename, url}``. ``filename`` and ``url``
-    are copied from the SAME published-asset record, never recombined here —
-    see :func:`_assets_from_release_payload` for why that is the invariant.
-
-    ``published`` injects the release's assets (``[{name, url}, …]``) instead of
-    probing GitHub. Tests pass it so the platform logic is verified WITHOUT a
-    network call — otherwise the guard would silently depend on api.github.com
-    being reachable and would pass or fail for reasons unrelated to the code
-    under test.
-    """
-    import fnmatch
-
-    repo = _update_repo()
-    assets = _platform_assets()
-    if not repo or not assets:
-        return []
-    os_key = _detect_os(user_agent)
-    if not os_key:
-        return []
-    if published is None:
-        published = _latest_release_assets()
-    else:
-        published = [p for p in published
-                     if isinstance(p, dict) and p.get('name') and p.get('url')]
-    if not published:
-        return []
-    arch = _detect_arch(user_agent, arch_hint)
-    rows = [a for a in assets if a[0] == os_key]
-    if arch:
-        narrowed = [a for a in rows if a[1] == arch]
-        # Only narrow when the detected arch actually has a build. An arm64
-        # Windows visitor has no arm64 installer, and offering nothing would be
-        # worse than offering the x86_64 one it runs fine under emulation.
-        if narrowed:
-            rows = narrowed
-    out = []
-    for _os, _arch, label, pattern in rows:
-        hit = next((a for a in published
-                    if fnmatch.fnmatch(a['name'], pattern)), None)
-        if not hit:
-            # The release is missing this platform. Silently omitting it is
-            # right: the completeness gate already treats that as a broken
-            # release, and a link to a file that is not there helps nobody.
-            logger.debug('[Desktop] no published asset matches %s', pattern)
-            continue
-        out.append({
-            'os': _os,
-            'arch': _arch,
-            'label': label,
-            # Both fields come from ONE record, so they cannot name different
-            # releases — the drift this function used to create.
-            'filename': hit['name'],
-            'url': hit['url'],
-        })
-    return out
+# ── Platform/release knowledge: extracted to lib/desktop_dist/platforms ──
+# (2026-07, pt_a859c11e75d142d1). The route previously OWNED these helpers;
+# the background mirror (lib/desktop_dist/mirror.py) would have been a
+# second copy of the same rules. Re-exported here so existing callers and
+# guard suites that import them from the route see no drift.
+from lib.desktop_dist.platforms import (  # noqa: F401
+    _PLATFORM_ASSETS_CACHE,
+    _RELEASE_ASSET_CACHE,
+    _assets_from_release_payload,
+    _desktop_download_url,
+    _detect_arch,
+    _detect_os,
+    _latest_release_assets,
+    _match_platform_assets,
+    _platform_assets,
+    _update_repo,
+)
+from lib.desktop_dist import mirror as _dist_mirror
+from lib.desktop_dist import store as _dist_store
 
 
 def _request_platform_downloads(arch_override: str = '') -> list[dict]:
     """Per-platform direct links for the CURRENT request's visitor.
 
-    ``arch_override`` is the architecture the CLIENT resolved for itself via
-    ``navigator.userAgentData.getHighEntropyValues(['architecture'])`` and
-    passed explicitly. That JS API is the practical source of this fact:
-    the ``Sec-CH-UA-Arch`` request header is only sent after the server has
-    already answered once with an ``Accept-CH`` opt-in, so relying on the
-    header alone would leave the very first page load — the one that renders
-    the download button — permanently arch-blind.
+    ── Zero network in the request path ──
+    This used to resolve against ``api.github.com`` SYNCHRONOUSLY (TTL-cached,
+    up to a 6 s timeout) inside an async route: every cache expiry stalled the
+    event loop, which is the measured reason the Local Control modal's desktop
+    row "always takes much longer". The answer now comes from the LOCAL
+    artifact store (lib/desktop_dist): the background mirror keeps the
+    published installers on this server's disk, so the client's download
+    itself no longer depends on its route to the public GitHub network either.
 
-    The header is still consulted as a fallback for callers that cannot run the
-    JS (curl, the OpenAPI probe). When neither yields an answer the result is
-    ambiguous ON PURPOSE — see :func:`_match_platform_assets`.
+    When the store cannot serve this platform yet (first boot, refresh in
+    flight), the row is omitted and the mirror is kicked — the releases-page
+    escape hatch stays, and the modal's 3 s poll pops the direct link in once
+    the file lands. URLs are ABSOLUTE, built from the request's own host — an
+    address the user demonstrably reaches (see _agent_server_url).
+
+    ``arch_override`` is the architecture the CLIENT resolved for itself via
+    ``navigator.userAgentData.getHighEntropyValues(['architecture'])`` — the
+    only practical source on macOS, where the UA always says Intel.
     """
+    from urllib.parse import quote
+
     from flask import request
     try:
         ua = request.user_agent.string or ''
@@ -386,7 +117,41 @@ def _request_platform_downloads(arch_override: str = '') -> list[dict]:
         ua = ''
     hint = (arch_override or '').strip() \
         or request.headers.get('Sec-CH-UA-Arch', '')
-    return _match_platform_assets(ua, arch_hint=hint)
+    os_key = _detect_os(ua)
+    if not os_key:
+        return []
+    rows = _dist_store.find_for_platform(os_key, _detect_arch(ua, hint))
+    # Kick the mirror whether or not the store served: an empty store needs
+    # filling, a stale one needs refreshing. Non-blocking and single-flight.
+    _dist_mirror.ensure_fresh()
+    # Opt-in autobuild: a Linux visitor with no locally-BUILT artifact can
+    # kick a native build (this server's own platform is the only one it can
+    # truly build). Off by default — a build is minutes of CPU, so it happens
+    # only where the operator asked for it, never implicitly for everyone.
+    if (os_key == 'linux'
+            and not any(e.get('source') == 'built' for e in rows)):
+        import os as _os
+        if _os.environ.get('TOFU_DESKTOP_DIST_AUTOBUILD') == '1':
+            from lib.desktop_dist import builder as _dist_builder
+            if not _dist_builder.is_running():
+                _dist_builder.start(reason='autobuild')
+    base = (request.host_url or '').rstrip('/')
+    out = []
+    for e in rows:
+        name = e.get('filename') or ''
+        if not name:
+            continue
+        out.append({
+            'os': e.get('os'),
+            'arch': e.get('arch'),
+            'label': e.get('label'),
+            'filename': name,
+            'url': base + '/api/v1/desktop/download/' + quote(name),
+            'hosted': 'server',
+            'size': e.get('size') or 0,
+            'source': e.get('source') or 'mirrored',
+        })
+    return out
 
 
 def _agent_server_url() -> str:
@@ -415,8 +180,11 @@ def _agent_server_url() -> str:
         'case render a real download link and a complete, copy-paste-ready '
         'connect line instead of a bare secret. ``downloads`` is the list of '
         'installers THIS visitor can run, each ``{os, arch, label, filename, '
-        'url}`` with a direct-download url resolved against the newest '
-        'release — so the user clicks one file instead of choosing among five. '
+        'url, hosted, size, source}`` served SAME-ORIGIN from this server '
+        '(``/api/v1/desktop/download/<filename>``, ``hosted == "server"``) '
+        'out of the local artifact store — the request path performs no '
+        'network, and the client download no longer depends on the public '
+        'GitHub network. '
         'It carries BOTH macOS DMGs when the architecture is unknown (an '
         'Apple Silicon Mac reports "Intel Mac OS X" in its UA, so guessing '
         'would hand half of Mac users a download that cannot open); pass '
@@ -456,6 +224,58 @@ async def desktop_status():
         'downloads': _request_platform_downloads(_arch),
         'server_url': _agent_server_url(),
     })
+
+
+@api_v1_desktop_bp.route('/api/v1/desktop/build', methods=['GET', 'POST'])
+@require_auth
+@api_meta(
+    summary='Inspect (GET) or kick (POST) a native on-server desktop build',
+    description=(
+        'POST starts a single-flight background build of the desktop app '
+        'from the COMMITTED tree (git archive HEAD → PyInstaller → boot '
+        'smoke → tar), recorded in the artifact store with '
+        '``source == "built"``. Only the server\'s own platform can be built '
+        'natively (PyInstaller cannot cross-compile); Windows/macOS are '
+        'served by the mirror. GET returns the persisted build state.'
+    ),
+    tags=['capabilities'],
+)
+async def desktop_build():
+    from flask import request
+    from lib.desktop_dist import builder as _dist_builder
+    if request.method == 'POST':
+        st = _dist_builder.start(reason='api')
+        audit_log('desktop_build_kicked', state=st.get('state'),
+                  version=st.get('version'))
+        return jsonify(st), 202
+    return jsonify(_dist_builder.state())
+
+
+@api_v1_desktop_bp.route('/api/v1/desktop/download/<path:filename>',
+                         methods=['GET'])
+@require_auth
+@api_meta(
+    summary='Download a server-hosted desktop installer',
+    description=(
+        'Serves an installer from the local artifact store '
+        '(lib/desktop_dist) as an attachment, with Range support '
+        '(``conditional=True``) so a 100+ MB download is resumable. '
+        '``filename`` must exactly match a manifest entry — no path material '
+        'is accepted, so traversal is structurally impossible.'
+    ),
+    tags=['capabilities'],
+)
+def desktop_download(filename):
+    """SYNC on purpose: pure file serving via the sync-safe send_file shim
+    (same carve-out as serve_motion_file) — a 135 MB stream must not sit on
+    the event loop."""
+    from quart import send_file
+    path = _dist_store.resolve_file(filename)
+    if path is None:
+        return jsonify({'error': 'not_found',
+                        'message': 'no such artifact'}), 404
+    return send_file(path, as_attachment=True,
+                     attachment_filename=filename, conditional=True)
 
 
 @api_v1_desktop_bp.route('/api/v1/desktop/streams/<cmd_id>', methods=['GET'])

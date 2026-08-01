@@ -11,6 +11,7 @@ shell: it opens the stream, feeds lines to the core, and keeps the
 retry/backoff wrapper.
 """
 
+import json
 import time
 
 import requests
@@ -161,10 +162,29 @@ def _stream_chat_once(body, *, on_thinking=None, on_content=None,
     try:
         _conn_t0 = time.monotonic()
         try:
-            resp = get_sync_session().post(
-                plan.url, headers=plan.hdrs, json=plan.body,
-                stream=True, timeout=(CONNECT_TIMEOUT, None),
-                proxies=proxies_for(plan.url))
+            # ── Desktop-egress branch (S3): when the server's own egress to
+            # this host is geo-blocked / dead, open the stream through the
+            # user's desktop agent instead. Probe is per-host cached (300s).
+            from lib.desktop import egress as _eg
+            try:
+                _egress_route = _eg.route_request(plan.url, user_id='')
+            except _eg.EgressUnavailable as e:
+                _proxy_report_outcome(plan.url, False)
+                raise EndpointUnreachableError(str(e), base_url=plan.url) from e
+            if _egress_route != 'direct':
+                try:
+                    resp = _eg.open_stream(
+                        plan.url, method='POST', headers=plan.hdrs,
+                        body=json.dumps(plan.body).encode(),
+                        agent_id=_egress_route, log_prefix=log_prefix)
+                except _eg.EgressUnavailable as e:
+                    _proxy_report_outcome(plan.url, False)
+                    raise EndpointUnreachableError(str(e), base_url=plan.url) from e
+            else:
+                resp = get_sync_session().post(
+                    plan.url, headers=plan.hdrs, json=plan.body,
+                    stream=True, timeout=(CONNECT_TIMEOUT, None),
+                    proxies=proxies_for(plan.url))
             _resp_holder['resp'] = resp
             if _watchdog.aborted:
                 # Stop landed while we were blocked pre-headers — the flag
@@ -194,18 +214,26 @@ def _stream_chat_once(body, *, on_thinking=None, on_content=None,
             # decode_error_body, NOT resp.text: requests falls back to
             # ISO-8859-1 for text/* without charset, garbling UTF-8 CJK
             # gateway error pages into mojibake (toio 400 incident 2026-07-25).
-            classify_status_error(resp.status_code, decode_error_body(resp),
+            # Egress readers have no .content — drain their text instead.
+            if hasattr(resp, 'read_all_text'):
+                from lib.desktop.egress import EgressUnavailable as _EU
+                try:
+                    err_body = resp.read_all_text()
+                except _EU as e:
+                    raise EndpointUnreachableError(str(e), base_url=plan.url) from e
+            else:
+                err_body = decode_error_body(resp)
+            classify_status_error(resp.status_code, err_body,
                                   body=plan.body,
                                   log_prefix=log_prefix, raw_dumper=plan.raw_dumper)
 
         resp.encoding = 'utf-8'
 
         acc = SSEAccumulator(
-            plan.body, plan.trace_id, plan.raw_dumper, plan.codex_translator,
+            plan.body, plan.trace_id, plan.raw_dumper, plan.wire_translator,
             plan.t0, url=plan.url, log_prefix=log_prefix,
             on_thinking=on_thinking, on_content=on_content,
-            on_tool_call_ready=on_tool_call_ready,
-            anthropic_translator=plan.anthropic_translator)
+            on_tool_call_ready=on_tool_call_ready)
 
         try:
             for line in resp.iter_lines(decode_unicode=True):
@@ -224,6 +252,12 @@ def _stream_chat_once(body, *, on_thinking=None, on_content=None,
             if _watchdog.aborted:
                 raise AbortedError(
                     'User aborted while waiting on %s' % plan.url) from _iter_e
+            from lib.desktop.egress import EgressUnavailable as _EU
+            if isinstance(_iter_e, _EU):
+                # Agent died / stream vanished mid-flight — fail over
+                # (provider-down semantics), never a silent partial success.
+                raise EndpointUnreachableError(
+                    str(_iter_e), base_url=plan.url) from _iter_e
             raise
         if _watchdog.aborted:
             # A close() can surface as a CLEAN end of iteration on some

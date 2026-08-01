@@ -7,8 +7,6 @@ import json
 from typing import Any
 
 import lib as _lib  # module ref for hot-reload
-from tofu_search import extract_urls_from_text, fetch_urls
-from tofu_search.fetch.content_filter import filter_web_contents_batch
 
 from lib.agent_core.events import EventType, build_event
 from lib.log import get_logger
@@ -104,6 +102,15 @@ def _prefetch_user_urls(
     list[tuple[str, str]]
         List of ``(url, fetched_content)`` pairs for successfully fetched URLs.
     """
+    # tofu_search is imported HERE, not at module level, so a failure inside it
+    # (it pulls trafilatura → lxml → libicuuc, which on 2026-07-31 raised a
+    # GLIBCXX linkage ImportError eight times) degrades URL prefetch instead of
+    # killing the whole server. This module sits on the boot chain via
+    # routes/paper.py → lib/paper → handlers → executor, so a module-level
+    # import here is a whole-process hazard for one optional capability.
+    from tofu_search import extract_urls_from_text, fetch_urls
+    from tofu_search.fetch.content_filter import filter_web_contents_batch
+
     last_text = ''
     for msg in reversed(messages):
         if msg.get('role') != 'user': continue

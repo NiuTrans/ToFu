@@ -423,6 +423,16 @@ def _node_available():
     return bool(shutil.which('node'))
 
 
+def _conv_family():
+    """The drift-proof conv-family eval list (see
+    tests/_conv_bundle_sources.conv_family_sources) — this suite's
+    initial-open harness drives conversations.js, whose leaf references
+    (_setCacheVerifying & co) need the whole family, not a two-file
+    inline list (2026-08-01 RED)."""
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from _conv_bundle_sources import conv_family_sources
+    return conv_family_sources()
+
 @pytest.mark.skipif(not _node_available(), reason='node not installed')
 def test_frontend_default_window_param_active(tmp_path):
     harness = tmp_path / '_win_param_harness.js'
@@ -444,8 +454,8 @@ def test_initial_open_sends_window_param(tmp_path):
     harness.write_text(_INITIAL_OPEN_HARNESS, encoding='utf-8')
     proc = subprocess.run(
         ['node', str(harness),
-         os.path.join(JS_DIR, 'core', 'conversations.js'),
-         os.path.join(JS_DIR, 'conv_window.js')],
+         os.path.join(JS_DIR, 'conv_window.js'),
+         *_conv_family()],
         capture_output=True, text=True, timeout=60)
     out = proc.stdout.strip()
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{out}'
@@ -484,7 +494,7 @@ global._retriggerHgTranslations = () => {};
 global.apiUrl = (p) => p;
 global._convSorter = () => 0;
 
-eval(fs.readFileSync(process.argv[3], 'utf8'));  // conv_window.js
+for (const f of process.argv.slice(2)) eval(fs.readFileSync(f, 'utf8'));  // conv_window.js first, then the conv family in bundle order
 
 global.ConvCache = {
   isAvailable: () => true, get: () => Promise.resolve(null),
@@ -516,7 +526,6 @@ global.conversations = [{
   _needsLoad: true, createdAt: 1, updatedAt: 1, activeTaskId: null,
 }];
 
-eval(fs.readFileSync(process.argv[2], 'utf8'));  // REAL core/conversations.js
 global.conversations = conversations;
 
 (async () => {

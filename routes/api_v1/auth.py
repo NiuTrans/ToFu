@@ -244,22 +244,29 @@ def _bridge_credential_ok() -> bool:
       3. an API key carrying the ``agents:bridge`` scope (per-user token).
 
     The peer address is NOT a credential and is deliberately not consulted.
+
+    The chain itself is the single shared implementation in
+    ``lib.bridge_auth.resolve_bridge_credential`` — the same one the browser
+    and desktop routes consume (via ``routes/_bridge_caller``), so gate and
+    routes can never again disagree on what a valid bridge credential is
+    (pt_3ba97339b4024fb4). Two deliberate refinements fell out of the
+    convergence:
+
+      * the scope check is now LITERAL membership (a bare ``admin`` key
+        without ``agents:bridge`` no longer passes this gate — it was always
+        rejected one layer later at the route, so the observable outcome is
+        unchanged);
+      * the ``CHATUI_BRIDGE_SECRET`` legacy alias is honoured here too (the
+        routes already did via ``getenv_compat``; the documented alias
+        promise now holds at every layer).
     """
     provided = (request.headers.get('X-Bridge-Secret') or '').strip()
     if not provided:
         return False
-    import hmac
-    if hmac.compare_digest(provided, _LOOPBACK_AGENT_TOKEN):
-        return True
-    expected = (os.environ.get('TOFU_BRIDGE_SECRET') or '').strip()
-    if expected and hmac.compare_digest(provided, expected):
-        return True
-    try:
-        ctx = validate_token(provided)
-    except Exception as e:
-        _auth_log.debug('Auth: bridge token validation error: %s', e)
-        return False
-    return bool(ctx is not None and ctx.has_scope('agents:bridge'))
+    from lib.bridge_auth import resolve_bridge_credential
+    ok, _user_id, _key_id = resolve_bridge_credential(
+        provided, loopback_token=_LOOPBACK_AGENT_TOKEN)
+    return ok
 
 
 def _is_api_path(path: str) -> bool:

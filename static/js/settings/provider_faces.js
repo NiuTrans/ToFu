@@ -196,7 +196,8 @@ function _faceChipHTML(provIdx, m) {
   if (r.face === 'default' && !hasAlternates) return '';
 
   var label = r.protocol || 'openai';
-  var cls = (r.protocol === 'anthropic') ? ' anthropic' : '';
+  var cls = (r.protocol === 'anthropic') ? ' anthropic'
+    : (r.protocol === 'responses') ? ' responses' : '';
   var title = t('settings.faceChipTitle', { face: r.face, url: r.base_url });
   if (r.forced) {
     return '<span class="stg-face-chip pinned' + cls + '" title="' +
@@ -252,7 +253,13 @@ function _renderFacesSection(provIdx, facesObj) {
 
 /** One face row: name + base_url + protocol select + delete. */
 function _renderFaceRow(provIdx, idx, name, baseUrl, protocol) {
-  var protoOpts = ['anthropic', 'openai'];
+  var protoOpts = ['openai', 'anthropic', 'responses'];
+  /* PRESERVE a stored value this build doesn't know (a future protocol):
+   * append it as an option. Without this the select reports the FIRST
+   * entry for an unrecognised value, and the next save writes THAT back —
+   * measured 2026-07-31: a 'responses' face silently came back 'anthropic'
+   * and the provider was flipped onto /messages (epic pt_b7a29ea7 S3). */
+  if (protocol && protoOpts.indexOf(protocol) < 0) protoOpts.push(protocol);
   var sel = '<select class="stg-face-proto" data-face-field="protocol" ' +
     'onchange="_onFaceRowEdit(' + provIdx + ')">';
   for (var i = 0; i < protoOpts.length; i++) {
@@ -261,7 +268,8 @@ function _renderFaceRow(provIdx, idx, name, baseUrl, protocol) {
   }
   sel += '</select>';
 
-  return '<div class="stg-face-row" data-face-idx="' + idx + '">' +
+  return '<div class="stg-face-row" data-face-idx="' + idx + '" ' +
+    'data-orig-protocol="' + escapeHtml(protocol || '') + '">' +
     '<input type="text" class="stg-face-name" data-face-field="name" ' +
       'placeholder="' + escapeHtml(t('settings.faceNamePlaceholder')) + '" ' +
       'spellcheck="false" autocomplete="off" ' +
@@ -298,7 +306,11 @@ function _collectFacesFromDom(provIdx) {
     if (!n || n === 'default') continue;
     out[n] = {
       base_url: (urlEl && urlEl.value || '').trim(),
-      protocol: (protoEl && protoEl.value || 'anthropic'),
+      /* Never collapse an unreadable select to a hard-coded protocol: keep
+       * the value the row was RENDERED with (data-orig-protocol). 'openai'
+       * is only the no-information default for a brand-new row. */
+      protocol: (protoEl && protoEl.value) ||
+        rows[i].getAttribute('data-orig-protocol') || 'openai',
     };
   }
   return out;

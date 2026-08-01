@@ -3,8 +3,10 @@
 Tokens are stored in data/config/oauth/<provider>.json.
 """
 
+import hashlib
 import json
 import os
+import threading
 import time
 
 from lib.config_dir import config_path as _config_path
@@ -13,7 +15,52 @@ from lib.log import get_logger
 logger = get_logger(__name__)
 
 __all__ = ['load_token', 'save_token', 'delete_token', 'token_path',
-           'OAuthExchangeError']
+           'OAuthExchangeError', 'refresh_singleflight']
+
+
+# ══════════════════════════════════════════════════════════
+#  Refresh singleflight (S2 — CLIProxyAPI codexRefreshGroup parity)
+# ══════════════════════════════════════════════════════════
+# Provider refresh tokens are SINGLE-USE. Two concurrent callers that both
+# see "token expiring" and both refresh will have the SECOND refresh burn
+# the FIRST refresh's freshly-issued refresh_token → refresh_token_reused →
+# the subscription is force-logged-out. Desktop-egress latency (1-2s agent
+# RTT vs ~300ms direct) widens that race window 4-6×, so concurrent
+# refreshes of the SAME refresh token are merged here: the winner calls
+# upstream, the waiters reuse its result.
+_sf_locks: dict = {}
+_sf_guard = threading.Lock()
+
+
+def _sf_lock(provider: str, refresh_tok: str) -> threading.Lock:
+    fp = hashlib.sha256(f'{provider}:{refresh_tok}'.encode()).hexdigest()[:16]
+    with _sf_guard:
+        return _sf_locks.setdefault(fp, threading.Lock())
+
+
+def refresh_singleflight(provider: str, refresh_tok: str, fn, load=None):
+    """Serialize + merge concurrent refreshes of one refresh token.
+
+    ``fn(refresh_tok)`` performs the actual upstream refresh (and persists).
+    ``load()`` re-reads the stored token; when a concurrent refresh has
+    already replaced ``refresh_tok`` with a fresh, unexpired token, the
+    waiter returns THAT instead of firing a second upstream call.
+    """
+    lock = _sf_lock(provider, refresh_tok)
+    with lock:
+        if load is not None:
+            try:
+                current = load() or {}
+            except Exception as e:
+                logger.debug('[TokenStore] singleflight reload failed: %s', e)
+                current = {}
+            cur_rt = current.get('refresh_token') or ''
+            if (cur_rt and cur_rt != refresh_tok
+                    and (current.get('expire') or 0) > time.time() + 60):
+                logger.info('[TokenStore] %s refresh merged — reusing '
+                            'concurrent result', provider)
+                return current
+        return fn(refresh_tok)
 
 
 class OAuthExchangeError(Exception):

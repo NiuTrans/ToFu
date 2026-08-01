@@ -125,12 +125,19 @@ def _run_sync(lines, model='gpt-4', status=200):
 
     orig = smod.get_sync_session
     smod.get_sync_session = lambda: _FakeSession()
+    # 传输壳与出口路由分层：本套件测 SSE 壳行为，路由层（探测/选 agent）
+    # 归 tests/test_desktop_egress*.py 管 —— 钉住为直连，否则在 conftest 的
+    # api.openai.com 默认 URL 下会真探测并拒绝。
+    import lib.desktop.egress as _egmod
+    orig_route = _egmod.route_request
+    _egmod.route_request = lambda url, **kw: 'direct'
     try:
         body = {'model': model, 'messages': [{'role': 'user', 'content': 'hi'}],
                 'max_tokens': 100}
         return smod._stream_chat_once(body, log_prefix='[test]')
     finally:
         smod.get_sync_session = orig
+        _egmod.route_request = orig_route
 
 
 # ── Fake async transport (httpx.AsyncClient.stream) ──

@@ -88,6 +88,10 @@ win.ProjectBrain = global.ProjectBrain = {
   _state: { path: '/proj/real' },
   _selectTab: (n) => { _selectedTab = n; },
   _wireClampToggles: () => {},
+  // The shared epic→conversation launcher (the REAL one lives in
+  // project-brain.js, bundled before this module). The stub records the
+  // delegation so the test can assert id + ORIGINAL title are handed over.
+  _openEpicConversation: (id, title) => { _calls.push(['createConv', id, title]); },
 };
 // Record every API call so the tests can assert WHICH backend route a control
 // hits (the "one contract per action" invariant — no reimplementation).
@@ -166,6 +170,30 @@ if (reject) reject.click();
 // ── The deep-link must switch the panel tab ──
 const goto = body.querySelector('.pb-attn-goto[data-goto-tab="peers"]');
 if (goto) goto.click();
+// ── "New chat" on the halted-epic card delegates to the shared launcher ──
+const convBtn = cards[0] ? cards[0].querySelector('.pb-attn-act[data-act="createConv"]') : null;
+check('createconv_btn_on_epic', !!convBtn);
+check('createconv_absent_on_proposal',
+      cards[1] && !cards[1].querySelector('[data-act="createConv"]'));
+check('createconv_absent_on_conflict',
+      cards[2] && !cards[2].querySelector('[data-act="createConv"]'));
+if (convBtn) convBtn.click();
+
+// ── Focus channel (Board "go answer" deep-link): scroll + flash the card ──
+PBA.focusItem('pt_halted');
+check('focus_flashes_card',
+      !!(cards[0] && cards[0].classList.contains('pb-attn-flash')));
+// An id whose card is NOT rendered yet stays pending and is honored by the
+// NEXT render (the tab's data loads async — the deep-link must survive that).
+PBA.focusItem('pt_future');
+check('focus_not_flashed_before_render',
+      !body.querySelector('.pb-attn-card[data-attn-id="pt_future"].pb-attn-flash'));
+PBA.renderAttention({ blocking: 1, advisory: 0, needsYou: 1, waiting: 0,
+  items: [{ type: 'board_question', severity: 'blocking', id: 'pt_future',
+            title: 'A later epic', question: 'Which default?',
+            options: [], reason: '', blockCount: 1, tab: 'board' }] });
+check('focus_pending_honored_after_render',
+      !!body.querySelector('.pb-attn-card[data-attn-id="pt_future"].pb-attn-flash'));
 
 setTimeout(() => {
   const answered = _calls.find(c => c[0] === 'boardAnswer');
@@ -174,6 +202,10 @@ setTimeout(() => {
   const dismissed = _calls.find(c => c[0] === 'dismissProposal');
   check('reject_hits_dismissProposal', !!dismissed && dismissed[1] === 'prop_1');
   check('deeplink_switches_tab', _selectedTab === 'peers');
+  const launched = _calls.find(c => c[0] === 'createConv');
+  check('createconv_delegates', !!launched && launched[1] === 'pt_halted');
+  check('createconv_sends_original_title',
+        !!launched && launched[2] === 'Migrate the schema');
 
   // ── Empty state: a POSITIVE statement + the reassurance count ──
   PBA.renderAttention({ blocking: 0, advisory: 0, needsYou: 0, waiting: 3, items: [] });
@@ -234,6 +266,11 @@ def test_attention_tab_renders_and_resolves_inline():
                  'PASS waiting_not_a_card', 'PASS badge_blocking_class',
                  'PASS answer_hits_boardAnswer', 'PASS answer_sends_option_label',
                  'PASS reject_hits_dismissProposal', 'PASS deeplink_switches_tab',
+                 'PASS createconv_btn_on_epic', 'PASS createconv_absent_on_proposal',
+                 'PASS createconv_absent_on_conflict', 'PASS createconv_delegates',
+                 'PASS createconv_sends_original_title',
+                 'PASS focus_flashes_card', 'PASS focus_not_flashed_before_render',
+                 'PASS focus_pending_honored_after_render',
                  'PASS empty_state', 'PASS empty_mentions_waiting',
                  'PASS advisory_badge_calm'):
         assert must in output, output
@@ -275,6 +312,67 @@ def test_NC_server_order_is_preserved():
         assert 'FAIL blocking_card_first' in output, \
             ('NC: a client-side re-sort must break the server-order '
              'contract:\n' + output)
+    finally:
+        try:
+            os.remove(copy_path)
+        except OSError:
+            pass
+    with open(_ATTN_SRC, encoding='utf-8') as f:
+        assert f.read() == original, 'shipped project-brain-attention.js must be byte-identical'
+
+
+@pytest.mark.skipif(not _node_deps_available(),
+                    reason='node + jsdom dev-deps not installed (run npm install)')
+def test_NC_createconv_delegation_is_load_bearing():
+    """NC: strip the launcher call in a COPY → the button renders but hands
+    nothing over → createconv_delegates FAILS. A rendered-but-inert action is
+    the same dead-button disease on the new surface."""
+    with open(_ATTN_SRC, encoding='utf-8') as f:
+        original = f.read()
+    anchor = '      launcher(id, ttl);'
+    assert anchor in original, 'createConv anchor not found (source changed?)'
+    patched = original.replace(
+        anchor, '      if (false) launcher(id, ttl);  // NC', 1)
+    copy_path = os.path.join(HERE, '_attn_nc_createconv.js')
+    try:
+        with open(copy_path, 'w', encoding='utf-8') as f:
+            f.write(patched)
+        output = _write_and_run(_HARNESS, copy_path, 'nccreateconv')
+        assert 'FAIL createconv_delegates' in output, \
+            ('NC: without the delegation, "New chat" must hand nothing to the '
+             'launcher:\n' + output)
+    finally:
+        try:
+            os.remove(copy_path)
+        except OSError:
+            pass
+    with open(_ATTN_SRC, encoding='utf-8') as f:
+        assert f.read() == original, 'shipped project-brain-attention.js must be byte-identical'
+
+
+@pytest.mark.skipif(not _node_deps_available(),
+                    reason='node + jsdom dev-deps not installed (run npm install)')
+def test_NC_focus_pending_is_honored_by_render():
+    """NC: strip the render-time _applyFocus() in a COPY → a pending focus id
+    is never honored when the card arrives → focus_pending_honored_after_render
+    FAILS. Without the render hook the deep-link only works when the attention
+    data happens to be warm — an async race masquerading as a feature."""
+    with open(_ATTN_SRC, encoding='utf-8') as f:
+        original = f.read()
+    anchor = ('    // A Board deep-link may have asked for a specific card BEFORE this render\n'
+              '    // resolved — honor it now that the card exists.\n'
+              '    _applyFocus();')
+    assert anchor in original, 'render-focus anchor not found (source changed?)'
+    patched = original.replace(
+        anchor, '    // NC (render-time focus honor stripped)', 1)
+    copy_path = os.path.join(HERE, '_attn_nc_focus.js')
+    try:
+        with open(copy_path, 'w', encoding='utf-8') as f:
+            f.write(patched)
+        output = _write_and_run(_HARNESS, copy_path, 'ncfocus')
+        assert 'FAIL focus_pending_honored_after_render' in output, \
+            ('NC: without the render hook, a pending focus must never be '
+             'honored:\n' + output)
     finally:
         try:
             os.remove(copy_path)

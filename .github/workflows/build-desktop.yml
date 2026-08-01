@@ -232,6 +232,66 @@ jobs:
             rm -f "$body"
           fi
 
+      # ── Is this version DOCUMENTED? ──
+      #
+      # Every other release invariant here was long ago moved out of a human's
+      # memory and into a gate: the tag is not trusted, the Release object is
+      # not trusted, the asset list is checked, the asset SIZES are checked.
+      # "Remember to write the CHANGELOG" was the one that stayed in memory,
+      # and it drifted for NINE consecutive versions — measured 2026-07-31,
+      # CHANGELOG.md's newest heading was [0.10.0] while VERSION said 0.15.2,
+      # with 91 lines stranded under [Unreleased] — without a single failure
+      # anywhere, because NOTHING in the repo referenced CHANGELOG.md
+      # (`grep -rl CHANGELOG tests/ scripts/` returned nothing).
+      #
+      # That is worse than ordinary doc drift because releasing here is a
+      # TRIGGER, not a deliberate act: this workflow fires on any push to main
+      # whose VERSION lacks a complete release, and the release step sets
+      # make_latest=true. So an undocumented version does not wait for anyone
+      # to decide to ship it — it becomes the release users SEE, on the next
+      # push by anyone, and retracting a published Latest is far more
+      # expensive than the one commit that would have documented it.
+      #
+      # Gated on should_release so an already-published version is never
+      # re-litigated. The rule itself lives in scripts/changelog_gate.py, NOT
+      # inline here, for exactly the reason release_assets.py exists: two
+      # copies of a release rule drift, and both keep passing on the cases they
+      # still know about.
+      - name: Require a CHANGELOG entry for this version
+        id: changelog_gate
+        if: steps.ver.outputs.should_release == 'true'
+        run: |
+          set -euo pipefail
+          python3 scripts/changelog_gate.py --version "${{ steps.ver.outputs.version }}"
+
+      # ── Did that gate actually RUN? ──
+      #
+      # A skipped step is SILENT: GitHub renders it grey next to the green ones
+      # and the job still succeeds. So a gate whose `if:` stops matching — a
+      # renamed output, a refactor of this job, an inverted condition — decays
+      # into nothing without a single red mark, and the release publishes
+      # undocumented exactly as before while the run log looks fine.
+      #
+      # The acceptance checklist for this gate originally said "a human
+      # confirms in the run log that the step is success, not skipped". That is
+      # the same shape as the defect the gate itself exists to fix: an
+      # invariant kept in someone's memory instead of in a check. So the
+      # workflow asserts it on its own.
+      #
+      # Scoped to the SAME condition as the gate: a checker with a narrower
+      # domain than the thing it checks would leave release runs where the gate
+      # could skip unobserved.
+      - name: Assert the CHANGELOG gate actually ran
+        if: steps.ver.outputs.should_release == 'true'
+        run: |
+          set -euo pipefail
+          outcome="${{ steps.changelog_gate.outcome }}"
+          echo "changelog gate outcome: ${outcome:-<empty>}"
+          if [ "$outcome" = "skipped" ] || [ -z "$outcome" ]; then
+            echo "::error::The CHANGELOG gate did NOT run on a release build (outcome=${outcome:-<empty>}). A skipped gate is indistinguishable from no gate — refusing to publish. Check the step's if: condition against steps.ver.outputs.should_release."
+            exit 1
+          fi
+
   # ── Windows ──────────────────────────────────────────────────
   build-windows:
     name: Windows Installer
@@ -247,8 +307,37 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
 
+      # ── shell: bash is LOAD-BEARING on Windows, not a style choice ──
+      #
+      # Measured on run 30601806258: this step reported SUCCESS while
+      # `pip install -r requirements.txt` had FAILED. Windows runners default to
+      # pwsh, which does not abort a multi-line `run:` when a native command
+      # exits non-zero — only the LAST command's exit code becomes the step
+      # result. So line 1 failed (tofu-search>=0.5.3 is unsatisfiable on public
+      # PyPI), line 2 succeeded, and the step went green.
+      #
+      # The build then continued with the project's dependencies MISSING and
+      # still produced an installer: 48,960,018 bytes, against 115,342,167 for
+      # the last good v0.14.2 build. A 49 MB "Tofu installer" containing
+      # essentially none of Tofu was uploaded as a release artifact. Linux and
+      # macOS use bash (`set -e` semantics), which is why they failed honestly
+      # in 2 seconds while Windows shipped a hollow binary.
+      #
+      # This is strictly worse than the missing package: an unsatisfiable pin is
+      # loud everywhere except here, where it became a silent corrupt artifact.
       - name: Install dependencies
+        shell: bash
         run: |
+          set -euo pipefail
+          # tofu-search FIRST from the bundled wheel: the requirements floor
+          # (>=0.5.3) is on no public index (PyPI tops at 0.5.1), so the
+          # export bundles the verified wheel under vendor/. Installing it
+          # first lets pip see the floor as already satisfied. If the wheel
+          # is absent AND the index lacks the floor, the requirements
+          # install below fails LOUD — never a hollow build (run 30601806258).
+          if ls vendor/tofu_search-*.whl >/dev/null 2>&1; then
+            pip install --no-deps vendor/tofu_search-*.whl
+          fi
           pip install -r requirements.txt
           pip install pyinstaller pystray pillow psycopg2-binary pyautogui pyperclip psutil
 
@@ -278,6 +367,56 @@ jobs:
             exit 1
           }
           echo "Built: $(ls -l dist/Tofu/Tofu.exe)"
+
+      # ── Smoke: the binary must actually START, not merely exist ──
+      #
+      # The gates above prove the artifact exists and (at release time) is of a
+      # plausible size. Neither can see a MISSING HIDDEN IMPORT: tofu.spec
+      # declares 48 of them, and dropping one changes no byte count and no
+      # PyInstaller exit code — it fails at the instant a user double-clicks,
+      # with a ModuleNotFoundError nobody is there to read. Size is sensitive
+      # to a whole missing dependency TREE (measured: 49 MB hollow vs 115 MB
+      # healthy) and blind to one absent module.
+      #
+      # TOFU_SMOKE=1 makes the launcher import `server` — which builds the
+      # Quart app and runs routes.register_all() at module level — then exit.
+      # One import therefore exercises the blueprint tree and the transitive
+      # graph the hiddenimports exist to preserve.
+      #
+      # THE VERDICT IS THE EXIT CODE PLUS THE ABSENCE OF A TRACEBACK. "The
+      # process stayed up for N seconds" would be a green light by construction
+      # here: the build is console=False, so a windowed binary detaches and
+      # lingers whether or not anything imported. Asserting on liveness would
+      # measure the wrong thing entirely.
+      #
+      # It is NOT "stderr is empty" either, and that was MEASURED rather than
+      # assumed: a healthy boot writes diagnostics to fd 2 on purpose (the
+      # mlockall notice, the `[boot]` progress lines, and the libstdc++ soname
+      # forensics line that another epic added precisely so a crash is
+      # diagnosable). Demanding empty stderr would fail every healthy build —
+      # a permanently-red gate, which is how a suite gets muted.
+      - name: Smoke test the built binary
+        shell: bash
+        env:
+          TOFU_SMOKE: '1'
+        run: |
+          set -uo pipefail
+          rc=0
+          ./dist/Tofu/Tofu.exe > /tmp/smoke.out 2> /tmp/smoke.err || rc=$?
+          echo "── stdout ──"; cat /tmp/smoke.out || true
+          echo "── stderr ──"; cat /tmp/smoke.err || true
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::The built Tofu.exe failed to start (exit $rc). A user double-clicking this installer would get the same failure."
+            exit 1
+          fi
+          if grep -qE 'Traceback \(most recent call last\)|ModuleNotFoundError|ImportError' /tmp/smoke.err; then
+            echo "::error::Tofu.exe exited 0 but its stderr carries a traceback — something failed and was swallowed."
+            exit 1
+          fi
+          grep -q 'TOFU_SMOKE_OK' /tmp/smoke.out || {
+            echo "::error::Tofu.exe exited 0 without emitting TOFU_SMOKE_OK — the smoke branch did not run, so this proved nothing."
+            exit 1
+          }
 
       - name: Create Inno Setup script
         shell: bash
@@ -429,8 +568,25 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
 
+      # shell pinned for the same reason as the Windows leg: `runs-on` here is
+      # `${{ matrix.runner }}`, so the shell this step gets is decided by a
+      # matrix value rather than by anything visible at this line. Today both
+      # legs are macOS (bash), but the matrix is the part of this workflow that
+      # has already been re-pointed once, and a Windows leg added later would
+      # silently inherit pwsh's discard-earlier-failures semantics.
       - name: Install dependencies
+        shell: bash
         run: |
+          set -euo pipefail
+          # tofu-search FIRST from the bundled wheel: the requirements floor
+          # (>=0.5.3) is on no public index (PyPI tops at 0.5.1), so the
+          # export bundles the verified wheel under vendor/. Installing it
+          # first lets pip see the floor as already satisfied. If the wheel
+          # is absent AND the index lacks the floor, the requirements
+          # install below fails LOUD — never a hollow build (run 30601806258).
+          if ls vendor/tofu_search-*.whl >/dev/null 2>&1; then
+            pip install --no-deps vendor/tofu_search-*.whl
+          fi
           pip install -r requirements.txt
           pip install pyinstaller pystray pillow psycopg2-binary pyautogui pyperclip psutil
 
@@ -465,10 +621,14 @@ jobs:
       #     echo "signing configured"
 
       - name: Create DMG
+        shell: bash
         env:
           APP_VERSION: ${{ needs.version.outputs.version }}
           ARCH: ${{ matrix.arch }}
         run: |
+          # No `set -e` here on purpose: the create-dmg invocation below is
+          # deliberately paired with a `|| { ... }` zip fallback, and the whole
+          # point is that its failure is HANDLED rather than fatal.
           brew install create-dmg || true
           create-dmg \
             --volname "Tofu" \
@@ -520,6 +680,15 @@ jobs:
 
       - name: Install dependencies
         run: |
+          # tofu-search FIRST from the bundled wheel: the requirements floor
+          # (>=0.5.3) is on no public index (PyPI tops at 0.5.1), so the
+          # export bundles the verified wheel under vendor/. Installing it
+          # first lets pip see the floor as already satisfied. If the wheel
+          # is absent AND the index lacks the floor, the requirements
+          # install below fails LOUD — never a hollow build (run 30601806258).
+          if ls vendor/tofu_search-*.whl >/dev/null 2>&1; then
+            pip install --no-deps vendor/tofu_search-*.whl
+          fi
           pip install -r requirements.txt
           pip install pyinstaller pystray pillow psycopg2-binary pyautogui pyperclip psutil
 
@@ -528,6 +697,33 @@ jobs:
 
       - name: Build with PyInstaller
         run: pyinstaller tofu.spec
+
+      # Same contract as the Windows leg — see the comment there for why the
+      # verdict is exit-code + no-traceback (never liveness, and never "stderr
+      # is empty": a healthy boot writes diagnostics to fd 2 by design). Runs
+      # BEFORE the archive step so a bundle that cannot boot is never packaged.
+      - name: Smoke test the built binary
+        shell: bash
+        env:
+          TOFU_SMOKE: '1'
+        run: |
+          set -uo pipefail
+          rc=0
+          ./dist/Tofu/Tofu > /tmp/smoke.out 2> /tmp/smoke.err || rc=$?
+          echo "── stdout ──"; cat /tmp/smoke.out || true
+          echo "── stderr ──"; cat /tmp/smoke.err || true
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::The built Tofu binary failed to start (exit $rc)."
+            exit 1
+          fi
+          if grep -qE 'Traceback \(most recent call last\)|ModuleNotFoundError|ImportError' /tmp/smoke.err; then
+            echo "::error::Tofu exited 0 but its stderr carries a traceback — something failed and was swallowed."
+            exit 1
+          fi
+          grep -q 'TOFU_SMOKE_OK' /tmp/smoke.out || {
+            echo "::error::Tofu exited 0 without emitting TOFU_SMOKE_OK — the smoke branch did not run, so this proved nothing."
+            exit 1
+          }
 
       - name: Create archive
         env:

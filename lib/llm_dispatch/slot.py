@@ -100,6 +100,7 @@ class Slot:
     protocol: str = ''              # per-provider wire protocol:
                                     # '' / 'openai' = OpenAI Chat Completions (default)
                                     # 'anthropic' = Anthropic Messages API (POST /v1/messages)
+                                    # 'responses' = OpenAI Responses API (POST …/responses)
     oauth: str = ''                 # subscription-OAuth provider for this slot:
                                     # '' = normal api_key auth (default)
                                     # 'claude' / 'codex' = resolve a live token +

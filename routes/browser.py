@@ -1,17 +1,19 @@
 """routes/browser.py — Browser Extension Bridge API."""
 
-import hmac
 import io
 import os
-import threading
 import zipfile
 
 from flask import Blueprint, jsonify, request, send_file
 
-from lib.env_compat import getenv_compat
-from lib.log import audit_log, get_logger
+from lib.log import get_logger
 from lib.api_response import api_bad_request, api_not_found, api_ok
 from lib.request_parser import async_parse_body, parse_body
+from routes._bridge_caller import (
+    bridge_unauthorized as _bridge_unauthorized,
+    check_bridge_auth as _check_bridge_auth,
+    resolve_bridge_caller as _resolve_bridge_caller,
+)
 
 logger = get_logger(__name__)
 
@@ -19,81 +21,20 @@ browser_bp = Blueprint('browser', __name__)
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-
-# ── One-time startup audit when bridge auth is configured ──
-# Emits a single audit_log entry the first time enforcement runs, so
-# operators have a trace that the §10.4-gated change is in effect.
-_AUDIT_LOCK = threading.Lock()
-_AUDIT_LOGGED = False
-
-
-def _maybe_audit_enforcement_on() -> None:
-    global _AUDIT_LOGGED
-    if _AUDIT_LOGGED:
-        return
-    with _AUDIT_LOCK:
-        if _AUDIT_LOGGED:
-            return
-        _AUDIT_LOGGED = True
-        try:
-            audit_log('config_change',
-                      param='bridge_auth_enforcement',
-                      old='permissive (Phase A)',
-                      new='enforcing (Phase C)',
-                      reason='TOFU_BRIDGE_SECRET configured — bridge endpoints '
-                             'now reject requests without a matching X-Bridge-Secret',
-                      approved_by='user')
-        except Exception as e:
-            logger.debug('[Browser] startup audit_log failed: %s', e)
-
-
-def _check_bridge_auth(kind: str = 'browser') -> bool:
-    """Verify the optional X-Bridge-Secret header.
-
-    Behaviour:
-      * If TOFU_BRIDGE_SECRET is unset →
-        return True (auth disabled, current LAN-only default).
-      * If set and the header matches (timing-safe compare) → return True.
-      * If set and the header is missing or wrong → emit an audit entry
-        and return False. Callers must abort(401) when this returns False.
-
-    Reads the env var at call time rather than module load so Settings UI
-    hot-reload works the same way as proxy / model config.
-    """
-    expected = (getenv_compat('TOFU_BRIDGE_SECRET') or '').strip()
-    if not expected:
-        return True
-    _maybe_audit_enforcement_on()
-    provided = request.headers.get('X-Bridge-Secret', '')
-    if provided and hmac.compare_digest(provided, expected):
-        return True
-    try:
-        audit_log('bridge_auth_fail',
-                  kind=kind,
-                  path=request.path,
-                  ip=request.remote_addr,
-                  has_header=bool(provided),
-                  ua=(request.user_agent.string or '')[:120])
-    except Exception as _aerr:
-        logger.debug('[Browser] audit_log bridge_auth_fail failed: %s', _aerr)
-    logger.warning('[Browser] bridge auth rejected from %s on %s (header=%s)',
-                   request.remote_addr, request.path, 'present' if provided else 'missing')
-    return False
-
-
-def _bridge_unauthorized():
-    """Return a uniform 401 JSON envelope for bridge auth failures."""
-    return jsonify({
-        'error': 'bridge_auth_required',
-        'hint': 'set X-Bridge-Secret header to match TOFU_BRIDGE_SECRET',
-    }), 401
+# Bridge authentication lives in routes/_bridge_caller.py, shared with the
+# desktop bridge so the two identity layers are literally the same object
+# (B0 §5.3): the resolver returns (ok, user_id, key_id) — a per-user
+# agents:bridge token is accepted AND its identity is threaded into the
+# queue (mark_poll / wait_for_commands_async), which is what makes the
+# fail-closed cross-tenant delivery gate reachable from this HTTP entry.
 
 
 @browser_bp.route('/api/browser/poll', methods=['POST', 'OPTIONS'])
 async def browser_poll():
     if request.method == 'OPTIONS':
         return '', 204
-    if not _check_bridge_auth('browser'):
+    _auth_ok, _bridge_user, _bridge_key = _resolve_bridge_caller('browser')
+    if not _auth_ok:
         return _bridge_unauthorized()
     from lib.browser import mark_poll, resolve_batch, wait_for_commands_async
     data = await async_parse_body()
@@ -104,7 +45,7 @@ async def browser_poll():
         logger.debug('[Browser] non-numeric chromeMajor from client=%s: %s',
                      (client_id or 'anon')[:12], e)
         chrome_major = 0
-    mark_poll(client_id, chrome_major=chrome_major)
+    mark_poll(client_id, chrome_major=chrome_major, user_id=_bridge_user)
     results = data.get('results', [])
     if results:
         logger.info('[Browser] poll received %d result(s) from client=%s: cmd_ids=%s',
@@ -114,7 +55,7 @@ async def browser_poll():
     # Async-native wait: releases the worker thread for the whole long-poll
     # window instead of pinning it on a threading.Event (see
     # lib.browser.queue.wait_for_commands_async).
-    commands = await wait_for_commands_async(client_id=client_id)
+    commands = await wait_for_commands_async(client_id=client_id, user_id=_bridge_user)
     if commands:
         logger.info('[Browser] poll returning %d command(s) to client=%s: %s',
                     len(commands), (client_id or 'anon')[:12],
@@ -129,12 +70,13 @@ async def browser_get_commands():
     """Legacy GET commands endpoint."""
     if request.method == 'OPTIONS':
         return '', 204
-    if not _check_bridge_auth('browser'):
+    _auth_ok, _bridge_user, _bridge_key = _resolve_bridge_caller('browser')
+    if not _auth_ok:
         return _bridge_unauthorized()
     from lib.browser import mark_poll, wait_for_commands_async
     client_id = request.args.get('clientId') or None
-    mark_poll(client_id)
-    commands = await wait_for_commands_async(client_id=client_id)
+    mark_poll(client_id, user_id=_bridge_user)
+    commands = await wait_for_commands_async(client_id=client_id, user_id=_bridge_user)
     return jsonify({'commands': commands})
 
 

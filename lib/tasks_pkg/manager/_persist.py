@@ -434,7 +434,17 @@ def _release_heavy_task_state(task) -> int:
         return 0
 
 
-def persist_task_result(task):
+def persist_task_result(task, *, _defer_heavy_release: bool = False):
+    """Terminal result persist. Keyword-only ``_defer_heavy_release``:
+
+    When True, SKIP the trailing ``_release_heavy_task_state`` (the caller
+    releases later). Used by ``_finalize_and_emit_done``, which must persist
+    the terminal row BEFORE the autopilot hook — a VU sub-task runs INLINE
+    inside that hook and can hang indefinitely (measured 2026-07-31: task
+    752273db's row stayed 'running' 2h57m while its VU sub-task sat in a
+    wedged run_command), so anything the parent owes the world must land
+    first. But the VU also reads ``task['messages']`` — so the heavy-state
+    release moves to AFTER the hook instead of riding this call."""
     content_len = len(task.get('content') or '')
     thinking_len = len(task.get('thinking') or '')
     error = task.get('error')
@@ -566,6 +576,11 @@ def persist_task_result(task):
     #   run. This is the RSS-at-source fix for the shared-cgroup OOM: a
     #   finished task no longer pins a whole conversation's message context for
     #   the retention window. Last statement in the function on purpose.
+    #   SKIPPED when _defer_heavy_release — the autopilot hook still needs
+    #   task['messages'] (the VU inherits the parent's context); the caller
+    #   releases after the hook returns.
+    if _defer_heavy_release:
+        return
     _released = _release_heavy_task_state(task)
     if _released:
         logger.debug('[Task %s] released %d heavy terminal field(s) to bound RSS',

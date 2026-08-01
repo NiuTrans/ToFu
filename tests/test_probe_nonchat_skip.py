@@ -107,7 +107,8 @@ class BackendSkipTest(_ProbeRedirect):
         calls = []
 
         def fake_multi(base_url, api_key, model_id, extra_headers, timeout,
-                       attempts=3, retry_delay=0.8, protocol='openai', probe_fn=None):
+                       attempts=3, retry_delay=0.8, protocol='openai', probe_fn=None,
+                       oauth=''):
             calls.append({'mid': model_id, 'attempts': attempts,
                           'timeout': timeout, 'probe_fn': probe_fn})
             return 'ok', 'HTTP 200'
@@ -192,7 +193,8 @@ class BackendSkipTest(_ProbeRedirect):
         probed = []
 
         def fake_multi(base_url, api_key, model_id, extra_headers, timeout,
-                       attempts=3, retry_delay=0.8, protocol='openai', probe_fn=None):
+                       attempts=3, retry_delay=0.8, protocol='openai', probe_fn=None,
+                       oauth=''):
             probed.append((model_id, probe_fn))
             return 'ok', 'HTTP 200'
 
@@ -365,7 +367,8 @@ class BackendNeuterCostGuardTest(_ProbeRedirect):
         calls = []
 
         def fake_multi(base_url, api_key, model_id, extra_headers, timeout,
-                       attempts=3, retry_delay=0.8, protocol='openai', probe_fn=None):
+                       attempts=3, retry_delay=0.8, protocol='openai', probe_fn=None,
+                       oauth=''):
             calls.append(attempts)
             return 'ok', 'HTTP 200'
 
@@ -476,7 +479,9 @@ class RouteCapsFlowTest(unittest.TestCase):
         self.assertEqual(len(work), 6)
         by_mid = {}
         for item in work:
-            self.assertEqual(len(item), 5, 'work item must be a 5-tuple with caps')
+            # 7-tuple since the per-cell face feature: (key_idx, api_key,
+            # root, wire_id, caps, base_url, protocol).
+            self.assertEqual(len(item), 7, 'work item must be a 7-tuple with caps + face')
             by_mid.setdefault(item[3], item[4])
         self.assertEqual(by_mid['chat-x'], ['text', 'thinking'])
         self.assertEqual(by_mid['img-1'], ['image_gen'])

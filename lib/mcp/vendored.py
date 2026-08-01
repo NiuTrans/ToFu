@@ -9,19 +9,26 @@ module means the script can read the registry without importing the heavy
 
 Internal MCP servers (hope-mcp, …) are private and not on PyPI, so a fresh
 Tofu checkout cannot obtain them — the user just sees "launcher X is not on
-PATH". We ship the source in-repo and pip-install it into Tofu's own
-interpreter on first connect.
+PATH". We ship the source next to the repo and launch it ISOLATED via
+``uv run --no-project --with-editable <source>``: each server resolves its own
+dependency tree (including its own ``mcp``) into its OWN environment, never
+Tofu's interpreter. That decoupling is what lets the Tofu client and any
+individual server move SDK versions independently (measured 2026-07-31: a v1
+client and a v2 server interoperate on the wire, so the only thing that ever
+made SDK versions couple was the shared interpreter).
+
+``--with-editable`` (not ``uvx --from``) is deliberate: uv caches local-dir
+wheel builds aggressively, and even ``--refresh`` / ``--reinstall`` were
+measured to serve a STALE build (a file created in the source was absent from
+the installed package). Editable links the source tree, so dev edits and
+re-vendored snapshots are live on the next connect.
 
 Registry shape — command → spec. ``sources`` is an ordered list of candidate
-dirs (relative paths resolved lazily against :func:`repo_root`). The in-repo
-vendored snapshot lives under ``tools/<name>`` (always present on a fresh
-checkout); a sibling dev checkout (``../<name>``) is preferred when present.
-
-Editable-ness is decided PER SOURCE, not per command (see
-``client._find_vendored_source``): the sibling dev checkout is installed
-editable so live edits are tracked on a developer box, while the vendored
-snapshot under ``tools/`` is installed NON-editable so a deploy gets a
-hermetic copy that doesn't depend on the source tree staying in place.
+dirs (relative paths resolved lazily against :func:`repo_root`), tried in
+order: a sibling dev checkout (``../<name>``, live edits — the developer
+box), then an export-bundled copy (``vendor/<name>``), then the in-repo
+vendored snapshot (``tools/<name>``, hermetic fallback). The first dir with a
+``pyproject.toml`` wins.
 
 To add a server: add one row here (and make sure either a sibling checkout or
 a ``tools/<name>`` snapshot exists; ``make vendor-mcp`` populates the latter).
@@ -37,9 +44,12 @@ def repo_root() -> str:
 
 VENDORED_LAUNCHERS: dict[str, dict[str, list[str]]] = {
     'hope-mcp': {
-        'sources': ['../hope-mcp', 'tools/hope-mcp'],
+        'sources': ['../hope-mcp', 'vendor/hope-mcp', 'tools/hope-mcp'],
     },
     'llm-mcp': {
-        'sources': ['../llm-mcp', 'tools/llm-mcp'],
+        'sources': ['../llm-mcp', 'vendor/llm-mcp', 'tools/llm-mcp'],
+    },
+    'xuecheng-mcp': {
+        'sources': ['../xuecheng-mcp', 'vendor/xuecheng-mcp', 'tools/xuecheng-mcp'],
     },
 }

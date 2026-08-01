@@ -28,6 +28,44 @@ def is_claude(model: str) -> bool:
     return 'claude' in m or 'anthropic' in m or 'fable' in m
 
 
+def claude_line_version(model: str, line: str) -> tuple[int, int] | None:
+    """Extract ``(major, minor)`` for ONE Claude model line ('opus', 'sonnet',
+    'haiku', 'fable').
+
+    THE single version parser for every "Claude generation ≥ N" decision —
+    the thinking-generation gate (:func:`is_claude_opus_47`) and the
+    compaction 1M-context table (``tasks_pkg/compaction/_tokens``) both ride
+    it, so a new bare alias (e.g. ``claude-sonnet-6``) can never again be
+    visible to one consumer and invisible to the other.
+
+    Minor-OPTIONAL and date-aware:
+
+      claude-sonnet-5                     → (5, 0)   bare-major alias
+      claude-sonnet-5-20250630            → (5, 0)   date suffix ≠ minor
+      aws.claude-opus-4.7                 → (4, 7)
+      us.anthropic.claude-opus-4-7-v1:0   → (4, 7)   gateway prefix + build tag
+      yuju-claude-opus-5-evaDaily         → (5, 0)
+      claude-opus-4-20250514              → (4, 0)   Opus 4.0 snapshot
+      claude-3-opus-20240229              → None     gen-3 shape (version
+                                                     BEFORE the line name)
+      gpt-4o / deepseek-v4-flash          → None     not Claude family
+
+    Version groups are capped at two digits with a digit-boundary lookahead,
+    so an 8-digit YYYYMMDD snapshot suffix can never be misread as a version
+    (the bug that let ``claude-opus-4-20250514`` pass as ≥ 4.7).
+    """
+    if not is_claude(model):
+        return None
+    m = model.lower()
+    match = re.search(line + r'[-_.]?(\d{1,2})(?!\d)(?:[-_.](\d{1,2})(?!\d))?',
+                      m)
+    if not match:
+        return None
+    major = int(match.group(1))
+    minor = int(match.group(2)) if match.group(2) else 0
+    return (major, minor)
+
+
 def is_claude_opus_47(model: str) -> bool:
     """Claude Opus 4.7+ (AWS-gateway / Bedrock / direct-API aliases).
 
@@ -38,25 +76,12 @@ def is_claude_opus_47(model: str) -> bool:
         thinking.display='summarized' to surface the reasoning trace.
       • New 'xhigh' effort level between 'high' and 'max'.
 
-    Detects these id variants:
-      - claude-opus-4-7
-      - aws.claude-opus-4.7
-      - us.anthropic.claude-opus-4-7-v1:0
-      - (future) claude-opus-4-8, etc.
+    Version parsing rides :func:`claude_line_version`, so dated snapshots
+    (``claude-opus-4-20250514`` → (4,0)) and gen-3 shapes
+    (``claude-3-opus-20240229`` → None) can no longer masquerade as 4.7+.
     """
-    m = model.lower()
-    if 'claude' not in m and 'anthropic' not in m:
-        return False
-    # Extract (major, minor) from "opus-X-Y" or "opus-X.Y" — returns True iff
-    # (major, minor) >= (4, 7).  Handles opus-4-7, opus-4.8, opus-5-0, etc.
-    # The minor digit is OPTIONAL: bare-major gateway aliases
-    # (yuju-claude-opus-5-evaDaily, claude-opus-5) parse as (major, 0).
-    match = re.search(r'opus[-_.]?(\d+)(?:[-_.](\d+))?', m)
-    if not match:
-        return False
-    major = int(match.group(1))
-    minor = int(match.group(2)) if match.group(2) else 0
-    return (major, minor) >= (4, 7)
+    v = claude_line_version(model, 'opus')
+    return v is not None and v >= (4, 7)
 
 
 def is_longcat(model: str) -> bool:

@@ -135,6 +135,28 @@
     return inner.lastElementChild;
   }
 
+  /* Ship a ConvView forensic line to the server over the EXISTING
+   * client-error beacon (Api.clientError.report → POST /api/client-error →
+   * app.log) — the same channel chatinner_dom.js's order-violation report
+   * rides. A bare console line is invisible to the user and lost on reload;
+   * the live-task twin guard's whole point is that the NEXT recurrence
+   * names its writer in the server log. Fire-and-forget; a transport
+   * failure leaves the console line as the last resort. Never throws. */
+  function _beaconConvView(msg, extra) {
+    try {
+      if (typeof Api === 'undefined' || !Api.clientError ||
+          typeof Api.clientError.report !== 'function') return false;
+      Api.clientError.report({
+        message: String(msg).slice(0, 2000),
+        url: (typeof location !== 'undefined' && location.href) || '',
+        extra: extra || {},
+      });
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
   /* ── Public API ──────────────────────────────────────────────────── */
 
   const ConvView = {
@@ -221,6 +243,62 @@
       } else if (opts.append === false) {
         return false;
       } else {
+        /* ★ LIVE-TASK TWIN GUARD (2026-07-31, conv ms8nqhwgur07jm): the msgId
+         * keyed guard above only fires when `_findMsgEl` RESOLVES this
+         * message's _msgId to the live #streaming-msg. If the id DRIFTED
+         * (re-minted / server-adopted copy / bubble stamped before the id
+         * existed), resolution misses and the append below lands a STATIC
+         * renderMessage node — the exact "empty provenance-strip + model-pill
+         * bubble alongside the live bubble" duplicate observed in production
+         * on a zero-token retry-storm turn. A message OBJECT that the live
+         * stream is actively accumulating into (object identity, not id
+         * equality) must NEVER gain a static twin: its DOM is the live
+         * bubble, full stop. Refuse loudly with a stack so the caller is
+         * named — the next recurrence identifies its trigger instead of
+         * silently twinning. Only the APPEND branch is gated (a resolved
+         * replace-in-place above is always the correct write). */
+        if (typeof activeStreams !== 'undefined') {
+          const _stream = activeStreams.get(convId);
+          if (_stream && _stream.assistantMsg
+              && document.getElementById('streaming-msg')) {
+            if (msg === _stream.assistantMsg) {
+              const _refuseMsg = '[ConvView] apply REFUSED (live-task twin) — the ' +
+                'message being statically appended IS the object the live ' +
+                'stream is bound to (msgId=' + (msg._msgId || '').slice(0, 12) +
+                ' idx=' + idx + ' conv=' + String(convId).slice(0, 8) + '). ' +
+                'A static twin of the live bubble must never be appended; ' +
+                'route live-turn updates through updateStreamingUI / ' +
+                'startStreaming / finalizeStreaming.\n' +
+                (new Error('live-task twin trace')).stack;
+              console.error(_refuseMsg);
+              _beaconConvView(_refuseMsg, {
+                site: 'ConvView.apply', kind: 'live-task-twin-refused',
+                convId: String(convId), taskId: String(_stream.taskId || ''),
+                msgId: String(msg._msgId || ''), idx: idx,
+              });
+              return false;
+            }
+            if (msg._taskId && _stream.taskId && msg._taskId === _stream.taskId) {
+              /* Same task, DIFFERENT object (server-adopted copy / splice
+               * survivor): appending it alongside the live bubble twins the
+               * turn. Not refused (endpoint/VU lanes legitimately re-apply
+               * settled messages of the live task) — but logged with a stack
+               * so the drift is diagnosable from the client-error report. */
+              const _driftMsg = '[ConvView] apply appending a NON-bound object of ' +
+                'the LIVE task (msgId=' + (msg._msgId || '').slice(0, 12) +
+                ' taskId=' + String(msg._taskId).slice(0, 8) + ' conv=' +
+                String(convId).slice(0, 8) + ') — twin risk; if a duplicate ' +
+                'bubble appears, this trace names the writer.\n' +
+                (new Error('same-task drift trace')).stack;
+              console.warn(_driftMsg);
+              _beaconConvView(_driftMsg, {
+                site: 'ConvView.apply', kind: 'same-task-drift-warn',
+                convId: String(convId), taskId: String(msg._taskId || ''),
+                msgId: String(msg._msgId || ''), idx: idx,
+              });
+            }
+          }
+        }
         /* ★ ORDER-INVARIANT LOUD WARN (step 3 ③a): appending a message that
          * is NOT the tail means its DOM node could not be found at its
          * position — index drift. The append lands at the tail and the DOM

@@ -29,6 +29,21 @@ MCP_CONNECT_TIMEOUT = 30        # seconds to wait for server handshake
 # is a deliberate, per-server budget, and it is what keeps the degraded-breaker
 # below meaningful (see MCP_DEGRADED_TIMEOUT_STREAK).
 MCP_CALL_TIMEOUT = None         # None = no read timeout (was 120s)
+
+# ── Cold dependency-install budget (a WAIT, not a crash) ──
+# Applies ONLY when Tofu itself just evicted a launcher's dependency tree (a
+# stale supply cutoff — see lib/mcp/client/_vendor.reconcile_for_connect), so
+# a full download provably has to finish before the server can speak a single
+# byte. Measured 2026-07-31: an npx rebuild takes 27–65s (a clean-cache cold
+# start 55.4s) while a warm start is 4–8s, so the ordinary 65s readiness
+# ceiling turned that migration into a coin flip — 58.6s / 65.0s / 63.8s over
+# three trials, the losing side surfacing as BrokenResourceError, which is
+# indistinguishable from a server that genuinely crashed.
+#
+# This does NOT relax MCP_CONNECT_TIMEOUT: an unidentified stall is still a
+# crash and still fails fast. The wider budget is granted only for the state we
+# can positively identify as "a download is pending because we deleted it".
+MCP_COLD_INSTALL_TIMEOUT = int(os.environ.get('TOFU_MCP_COLD_INSTALL_TIMEOUT', '300'))
 MCP_MAX_RESULT_CHARS = 200_000  # truncate tool results beyond this
 
 # ── Auto-recovery / keepalive ──

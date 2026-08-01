@@ -242,18 +242,19 @@ def _get_static_context_limit(task: dict | None = None) -> int:
         model = model_raw.lower()
 
         try:
-            from lib.model_info import is_claude_opus_47
-            if is_claude_opus_47(model_raw):
-                return 1_000_000
+            # 1M window: Opus & Sonnet ≥ 4.6 (including the 5-series bare
+            # aliases), Fable ≥ 5. ONE parser (claude_line_version) — a
+            # bare-major alias like claude-sonnet-5 can no longer slip
+            # through while dated snapshots (claude-opus-4-20250514)
+            # correctly stay at 200K.
+            from lib.model_info import claude_line_version
+            for line, floor in (('opus', (4, 6)), ('sonnet', (4, 6)),
+                                ('fable', (5, 0))):
+                v = claude_line_version(model_raw, line)
+                if v is not None and v >= floor:
+                    return 1_000_000
         except Exception as e:
-            logger.debug('[Compact] is_claude_opus_47 probe failed: %s', e)
-
-        m = re.search(r'(?:claude|anthropic).*sonnet[-_.]?(\d+)[-_.](\d+)', model)
-        if m and (int(m.group(1)), int(m.group(2))) >= (4, 6):
-            return 1_000_000
-        m = re.search(r'(?:claude|anthropic).*opus[-_.]?(\d+)[-_.](\d+)', model)
-        if m and (int(m.group(1)), int(m.group(2))) >= (4, 6):
-            return 1_000_000
+            logger.debug('[Compact] claude_line_version probe failed: %s', e)
 
         limits = {
             'claude-opus-4.6':   1_000_000,

@@ -2,16 +2,23 @@
 
 A single blocking tool (a slow web_search on dead hosts, a hung MCP call, a
 stalled browser action) emits NO delta while it runs. Without a heartbeat the
-SSE stream goes silent — a buffering proxy idle-times-out AND both reaper
-liveness clocks (``_t_last_event`` / ``_dispatch_heartbeat``) go stale, so the
-generalized reaper would FALSE-REAP a tool that is genuinely alive but slow.
+SSE stream goes silent — a buffering proxy idle-times-out AND the reaper
+liveness clocks go stale.
 
-``_emit_tool_heartbeat`` (lib/tasks_pkg/tool_dispatch.py) fixes that: while the
-parallel-tool wait blocks, a daemon ticker calls it every
-``TOOL_HEARTBEAT_INTERVAL`` seconds. Each tick (a) refreshes
-``_dispatch_heartbeat`` and (b) emits a ``tool_progress`` per still-in-flight
-round — which bumps ``_t_last_event`` via ``append_event`` and keeps the stream
-non-silent so the UI shows "Searching… (Ns)".
+``_emit_tool_heartbeat`` (lib/tasks_pkg/tool_dispatch/_heartbeat.py) fixes the
+transport half: while the tool wait blocks, a daemon ticker calls it every
+``TOOL_HEARTBEAT_INTERVAL`` seconds, emitting a ``tool_progress`` per
+still-in-flight round so the UI shows "Searching… (Ns)".
+
+★ CONTRACT CHANGE (2026-07-31, pt_8524e0ec): the liveness half is now GRADED.
+Before, every tick refreshed ``_dispatch_heartbeat`` and bumped
+``_t_last_event`` — a self-generated tick that made ANY hung tool
+reap-immune (measured: run_command zombie 96c56840, 2.5h, zero output).
+Now only ratified human-wait tools (``_SERIAL_BLOCKING_TOOLS``: ask_human /
+await_task(action=wait) / timer_create) get the clock refresh; ordinary
+tools get ticks marked ``_selfTick: True`` (transport only, no liveness).
+The full grading contract + reaper e2e in BOTH directions lives in
+tests/test_tool_heartbeat_liveness_grading.py.
 
 These tests drive the module-level tick helper directly against a synthetic
 task + parallel_items, capturing emitted events via a stubbed ``append_event``.
@@ -62,9 +69,12 @@ def captured_events(monkeypatch):
 
 
 def test_heartbeat_emits_progress_and_refreshes_clocks(captured_events):
+    """EXEMPT class (ratified human-wait immunity, 2026-07-25): a tick for a
+    human-wait tool emits progress AND refreshes the reaper dispatch clock,
+    and its event stays UNMARKED (keeps bumping _t_last_event)."""
     from lib.tasks_pkg.tool_dispatch import _emit_tool_heartbeat
     task = _mk_task()
-    items = _mk_items(status='searching')
+    items = _mk_items(status='searching', fn='ask_human')
     t0 = time.time() - 12  # pretend the tool has been running 12s
 
     n = _emit_tool_heartbeat(task, items, t0)
@@ -76,8 +86,30 @@ def test_heartbeat_emits_progress_and_refreshes_clocks(captured_events):
     assert ev['toolCallId'] == 'tc-1'
     assert ev['elapsed'] >= 12
     assert '(' in ev['detail'] and 's)' in ev['detail']  # "Searching… (12s)"
+    assert ev.get('_selfTick') is not True, 'exempt human-wait ticks stay unmarked'
     # The positive-liveness clock was refreshed to ~now.
     assert task['_dispatch_heartbeat'] >= t0 + 10
+
+
+def test_heartbeat_nonexempt_tick_is_transport_only(captured_events):
+    """ORDINARY tools (pt_8524e0ec): the tick still carries the UI countdown
+    (transport), but is marked ``_selfTick`` and must NOT refresh the reaper
+    dispatch clock — a hung ordinary tool is reaped at 30min of silence."""
+    from lib.tasks_pkg.tool_dispatch import _emit_tool_heartbeat
+    task = _mk_task()
+    items = _mk_items(status='searching', fn='web_search')
+    t0 = time.time() - 12
+
+    n = _emit_tool_heartbeat(task, items, t0)
+
+    assert n == 1
+    ev = captured_events[0]
+    assert ev['type'] == 'tool_progress'
+    assert ev['elapsed'] >= 12
+    assert ev.get('_selfTick') is True, 'non-exempt tick must declare itself a self-tick'
+    assert task['_dispatch_heartbeat'] == 0.0, (
+        'a non-exempt heartbeat refreshed the reaper clock — the zombie '
+        'immunity measured on task 96c56840')
 
 
 def test_heartbeat_skips_settled_round(captured_events):

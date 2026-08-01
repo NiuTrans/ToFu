@@ -33,6 +33,13 @@ import pathlib
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 RUN_PY = ROOT / 'lib' / 'tasks_pkg' / 'orchestrator' / '_run.py'
 LEAF_PY = ROOT / 'lib' / 'tasks_pkg' / 'orchestrator' / '_deferred_inbox_flush.py'
+# Slice 26 (2026-07-31) moved the flush call site out of _run.py into
+# the LLM-round-call leaf: the flush runs right after the LLM call
+# returns, and the whole LLM-call block now lives in
+# _llm_round_call.run_llm_call_with_fallback — _run.py delegates the
+# whole block. The two wiring guards below therefore assert on the
+# LLM-call leaf, not _run.py.
+LLM_CALL_PY = ROOT / 'lib' / 'tasks_pkg' / 'orchestrator' / '_llm_round_call.py'
 
 
 # ---------------------------------------------------------------------------
@@ -74,24 +81,27 @@ def test_flush_helper_signature_is_keyword_only():
 # 3. _run.py imports and delegates to the extracted helper
 # ---------------------------------------------------------------------------
 def test_run_py_imports_flush_helper():
-    """_run.py imports flush_deferred_peer_and_steer at module scope."""
-    src = RUN_PY.read_text()
+    """The LLM-round-call leaf imports flush_deferred_peer_and_steer at
+    module scope. (Was _run.py before slice 26 moved the LLM-call block.)"""
+    src = LLM_CALL_PY.read_text()
     assert 'from lib.tasks_pkg.orchestrator._deferred_inbox_flush import' in src, (
-        '_run.py must import the extracted flush helper — expected an '
+        '_llm_round_call.py must import the extracted flush helper — expected an '
         '`from lib.tasks_pkg.orchestrator._deferred_inbox_flush import ...` '
         'line at module scope')
     assert 'flush_deferred_peer_and_steer' in src, (
-        '_run.py must reference flush_deferred_peer_and_steer (either in the '
+        '_llm_round_call.py must reference flush_deferred_peer_and_steer (either in the '
         'import or in the call site)')
 
 
 def test_run_task_delegates_to_flush_helper():
-    """The stream loop's post-LLM peer+steer flush must be a single
+    """The post-LLM peer+steer flush must be a single
     call to ``flush_deferred_peer_and_steer(task, round_num=..., tid=...)``
-    — no inline body left behind."""
-    src = RUN_PY.read_text()
+    — no inline body left behind. (Call site moved from _run.py's run_task
+    to _llm_round_call.run_llm_call_with_fallback in slice 26.)"""
+    src = LLM_CALL_PY.read_text()
     assert 'flush_deferred_peer_and_steer(' in src, (
-        '_run.py must call flush_deferred_peer_and_steer in the stream loop')
+        '_llm_round_call.py must call flush_deferred_peer_and_steer after the '
+        'LLM call returns')
 
 
 # ---------------------------------------------------------------------------

@@ -68,6 +68,7 @@ from lib.llm_sanitize._messages import (  # noqa: E402,F401
     _drop_empty_assistant_messages,
     _fix_empty_user_messages,
     _merge_consecutive_same_role,
+    _strip_empty_text_blocks,
 )
 
 
@@ -83,4 +84,5 @@ __all__ = [
     '_fix_empty_user_messages',
     '_drop_empty_assistant_messages',
     '_merge_consecutive_same_role',
+    '_strip_empty_text_blocks',
 ]

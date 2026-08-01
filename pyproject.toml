@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tofu"
-version = "0.13.0"
+version = "0.16.0"
 description = "Tofu (豆腐) — Self-hosted AI assistant with Flask backend and vanilla JS frontend"
 readme = "README.md"
 requires-python = ">=3.10"

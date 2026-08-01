@@ -622,6 +622,32 @@ def reconcile_conversation_messages(
                         '(started but produced no token). Remaining=%d', len(out))
         elif verdict == 'interrupt':
             # Stamp in place on a shallow copy so we don't mutate the caller's dict.
+            #
+            # ★ NO IDENTITY ANCHOR HERE — deliberate, and it depends on WHO CALLS
+            #   THIS (2026-07-31 audit of the duplicate-agent-bubble bug class).
+            #   Every other writer of a terminal field onto a conversation
+            #   message must land `_taskId` atomically with it: a row carrying
+            #   `finishReason` but no `_taskId` is read back by the frontend
+            #   reducer `assistantTailIsPriorTurn` as somebody ELSE's finished
+            #   turn — even when it is the live turn's own bubble — which mints a
+            #   duplicate assistant bubble (see the P1a block in
+            #   lib/tasks_pkg/manager/_sync.py, gated via lib/chat/terminal_gate.py).
+            #
+            #   This branch is exempt because the tail it stamps is NEVER a live
+            #   turn's own bubble: the GET/warm-open caller returns early on
+            #   `_conv_has_live_task`, the settle caller runs from the TERMINAL
+            #   sync behind a latest-task gate, and the startup caller only sees
+            #   turns whose process is already gone. `interrupted` is then the
+            #   turn's TRUE terminal state, and there is no live task to confuse
+            #   it with.
+            #
+            #   The predicate itself is NOT self-guarding — `classify_ghost_tail`
+            #   returns 'interrupt' for a live thinking-phase tail (measured). So
+            #   the safety is CALLER-SIDE, and moving this onto a hot path (a
+            #   mid-stream self-heal / checkpoint-time sweep) reintroduces the
+            #   bug in its most durable form. That premise is pinned by
+            #   tests/test_partial_checkpoint_terminal_identity.py::
+            #   test_reconcile_interrupt_branch_is_never_reached_on_a_live_turn.
             tail = dict(out[-1])
             tail['finishReason'] = 'interrupted'
             out = out[:-1] + [tail]

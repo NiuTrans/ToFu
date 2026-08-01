@@ -45,7 +45,14 @@ function updateSendButton() {
   //   stop-cascade below still keys off _branchStreams for the abort priorities.)
   const mainStreaming = convIsBusy(conv);
   const translating = conv && conv._translating;
-  const streaming = branchStreaming || mainStreaming || anyBranchStreaming || translating;
+  /* ★ Generation-STARTUP window (pt_fa32a2351b3840ad): a send / regenerate /
+   *   edit-resend POST is in flight (the '连接中…' placeholder is up) but no
+   *   task is registered yet, so every predicate above is false. Without this
+   *   the composer showed a SEND-shaped button that dead-clicked on the empty
+   *   composer — the user could not cancel the startup on exactly the slow
+   *   seconds they most want to. */
+  const startupConnecting = !!(conv && conv._genStartCtrl);
+  const streaming = branchStreaming || mainStreaming || anyBranchStreaming || translating || startupConnecting;
 
   if (streaming) {
     /* Count only DISPATCHABLE queued messages — the autopilot armed-marker
@@ -67,6 +74,24 @@ function updateSendButton() {
           conv._translateAbortCtrl.abort();
           conv._translateAbortCtrl = null;
         }
+        updateSendButton();
+        renderConversationList();
+        return;
+      }
+      // ── Priority 0.5: stop generation STARTUP (send/regenerate/edit POST window) ──
+      if (startupConnecting && conv) {
+        console.log(`[stopBtn] Aborting generation startup — conv=${conv.id.slice(0,8)}`);
+        const _gsCtrl = conv._genStartCtrl;
+        /* ★ Owner-tag the flag WITH the controller: the pipeline's catch
+         *   matches `conv._genStartStop === <its own ctrl>`, so a newer send
+         *   racing this pipeline's finally can never be mistaken for the
+         *   stopped one. Nulling the marker flips the button back on THIS
+         *   frame; the aborted fetch drives the shared rollback
+         *   (_userStopDuringStartup) in the pipeline's catch. */
+        conv._genStartStop = _gsCtrl;
+        conv._genStartCtrl = null;
+        try { _gsCtrl.abort(); }
+        catch (_e) { console.warn('[stopBtn] startup abort threw:', _e); }
         updateSendButton();
         renderConversationList();
         return;
@@ -152,7 +177,7 @@ function updateSendButton() {
         //   buffer — a late delta event arriving between abort() and the
         //   AbortError propagation would otherwise accumulate into a dead
         //   buffer. twStop is idempotent and safe to call twice.
-        try { twStop(activeConvId); }
+        try { if (typeof twStop === 'function') twStop(activeConvId); }
         catch (_e) { console.warn('[stopBtn] twStop threw:', _e); }
       } else if (conv && conv.activeTaskId) {
         // ★ Record aborted task ID
@@ -175,3 +200,41 @@ function updateSendButton() {
     btn.onclick = sendMessage;
   }
 }
+
+/* ═══════════════════════════════════════════════════════════════════
+   ★ Shared rollback for a USER-STOP during the generation-STARTUP window
+   (send / regenerate / edit-resend POST in flight, no task registered yet).
+
+   Generalizes the translation-stop branch (it is NOT a new semantic):
+   tear the '连接中…' placeholder down, re-render the user message so it
+   stays EDITABLE in the list, persist locally, and tell the backend to
+   abort anything that snuck through before the abort landed. NO task is
+   ever started here.
+
+   opts:
+     userMsg / userMsgIdx — re-render this message after the teardown (send
+                            path only; regen/edit truncated instead);
+     syncOpts             — forwarded to syncConversationToServer (e.g.
+                            { allowTruncate: true } for regen/edit);
+     rescue               — await the sync and markConvPendingSync on
+                            failure (send path's poor-network durability).
+   ═══════════════════════════════════════════════════════════════════ */
+async function _userStopDuringStartup(conv, convId, opts) {
+  opts = opts || {};
+  _removeTranslatingBubble();
+  if (activeConvId === convId && opts.userMsg && opts.userMsgIdx != null) {
+    const _mEl = document.getElementById('msg-' + opts.userMsgIdx);
+    if (_mEl) window.ConvView.apply(convId, opts.userMsgIdx, opts.userMsg);
+  }
+  saveConversations(convId);
+  const _syncP = syncConversationToServer(conv, opts.syncOpts);
+  if (opts.rescue) {
+    const _synced = await _syncP;
+    if (!_synced && typeof markConvPendingSync === 'function') markConvPendingSync(conv);
+  } else {
+    _syncP.catch(() => {});
+  }
+  buildTurnNav(conv);
+  Api.chat.abortConv(convId);
+}
+if (typeof window !== 'undefined') window._userStopDuringStartup = _userStopDuringStartup;

@@ -136,7 +136,15 @@ def _handle_spawn_agents(fn_args: dict, *,
             objective=agent_def.get('objective', ''),
             context=agent_def.get('context', ''),
             depends_on=agent_def.get('depends_on', []),
-            id=agent_def.get('id', str(uuid.uuid4())[:8]),
+            # ``or``, NOT ``get('id', default)``. These ids come from the MODEL,
+            # and an explicit ``"id": ""`` SETS the key — so a default-arg
+            # fallback never fires and two such agents collapse onto ONE key in
+            # ``master._results_by_id``. Measured: the first agent's entry then
+            # holds the SECOND agent's result, and its own id can never be
+            # resolved, so ``await_agents`` reports it as an agent that never
+            # produced a result — the "no result" card, from a second root
+            # cause independent of the parallel-tool one.
+            id=agent_def.get('id') or str(uuid.uuid4())[:8],
             max_retries=agent_def.get('max_retries', 1),
             model_override=agent_def.get('model_override', ''),
         )

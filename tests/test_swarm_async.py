@@ -918,8 +918,22 @@ class TestSessionTTLLiveness(unittest.TestCase):
 
     def _force_stale(self):
         """Push the session's timestamp past the TTL and reset the cleanup
-        throttle so the next cleanup pass would evict it."""
+        throttle so the next cleanup pass would evict it.
+
+        Also WAIT for the swarm to actually settle first. Eviction is no longer
+        decided by the session's age alone: a session whose agents are still
+        producing is exempt (that age-only rule aborted 105 live swarms). The
+        fake agent sleeps ~10ms, so without this wait the sweep can land while
+        the agent is genuinely mid-flight — the assertion would then be racing
+        real work rather than testing TTL. Age is forced as before; only the
+        race is removed.
+        """
         import lib.swarm.integration as integ
+        sess = integ.get_active_session(self.task_id)
+        if sess is not None:
+            deadline = time.time() + 5.0
+            while not sess.is_terminated and time.time() < deadline:
+                time.sleep(0.02)
         with integ._sessions_lock:
             integ._session_timestamps[self.task_id] = (
                 time.time() - integ.SESSION_TTL_SECONDS - 10)

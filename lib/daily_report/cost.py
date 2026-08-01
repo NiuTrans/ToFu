@@ -60,7 +60,7 @@ def _qwen_cny(tokens, tok_type, model_id=''):
     return 0.0
 
 
-def _calc_msg_cost_cny(usage, model_or_preset='', provider_id=''):
+def _calc_msg_cost_cny(usage, model_or_preset='', provider_id='', at=None):
     """Calculate cost in CNY for a single message's usage dict.
 
     This is a faithful Python port of the frontend ``calcCostCny()``
@@ -73,6 +73,9 @@ def _calc_msg_cost_cny(usage, model_or_preset='', provider_id=''):
             provider-scoped override in ``PROVIDER_PRICING`` (registered
             from the provider template's per-model ``pricing`` field) is
             preferred over the global ``MODEL_PRICING`` table.
+        at: UTC epoch seconds of the MESSAGE — peak schedules are evaluated
+            at the message's own time so a historical rescan never bills a
+            past day at today's peak status. Defaults to now.
 
     Returns:
         Cost in CNY (float), or 0.0 if no tokens.
@@ -114,7 +117,7 @@ def _calc_msg_cost_cny(usage, model_or_preset='', provider_id=''):
     cw_mul = 1.25
     cr_mul = 0.10
 
-    mp = lookup_pricing(model_id, provider_id=provider_id)
+    mp = lookup_pricing(model_id, provider_id=provider_id, at=at)
     if mp:
         base_in = mp.get('input', 0)
         out_p = mp.get('output', 0)
@@ -233,7 +236,8 @@ def _scan_costs_in_range(ms_start, ms_end, year=None, month=None):
                          or msg.get('effort') or conv_model)
             msg_provider = msg.get('provider_id') or msg.get('providerId') or ''
 
-            cost_cny = _calc_msg_cost_cny(usage, msg_model, msg_provider)
+            cost_cny = _calc_msg_cost_cny(usage, msg_model, msg_provider,
+                                          at=ts / 1000 if ts else None)
             if cost_cny <= 0:
                 continue
 

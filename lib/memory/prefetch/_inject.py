@@ -92,10 +92,10 @@ def inject_relevant_memories(messages: list,
             continue
         content = messages[i].get('content', '')
         if isinstance(content, str):
-            messages[i]['content'] = [
-                {'type': 'text', 'text': content},
-                {'type': 'text', 'text': reminder},
-            ]
+            # Never fabricate a phantom empty text block (Kimi 400 "text content is empty").
+            _blocks = ([{'type': 'text', 'text': content}] if content.strip() else [])
+            _blocks.append({'type': 'text', 'text': reminder})
+            messages[i]['content'] = _blocks
         elif isinstance(content, list):
             messages[i]['content'] = list(content) + [
                 {'type': 'text', 'text': reminder},

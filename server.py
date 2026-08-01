@@ -738,6 +738,22 @@ except Exception:
     # Forensics must never be able to break a boot it only observes.
     pass
 
+# Retained so the crash hook can attach it to the CRITICAL record. stderr alone
+# is NOT enough: measured 2026-07-31, seven GLIBCXX crashes landed in
+# logs/error.log (written by the logging handlers) while server_15000.log — the
+# only file the watchdog redirects stderr into — had not been touched since
+# 10:33. Boots started by anything other than the watchdog send stderr to a
+# terminal or pipe that nobody keeps, so a stderr-only forensic line is absent
+# from precisely the crash reports an operator actually reads.
+try:
+    _TOFU_LINKAGE_FORENSICS = (
+        'libstdc++ soname -> %s | LD_PRELOAD=%s | LD_LIBRARY_PATH=%s' % (
+            _stdcxx_state,
+            (os.environ.get('LD_PRELOAD') or '<unset>'),
+            (os.environ.get('LD_LIBRARY_PATH') or '<unset>')))
+except Exception:
+    _TOFU_LINKAGE_FORENSICS = 'libstdc++ soname -> unavailable'
+
 # ── Auto-activate conda env (reuse server.py logic) ──
 # This must happen before any third-party imports.
 _PROJ_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -1339,8 +1355,19 @@ def _crash_excepthook(exc_type, exc_value, exc_tb):
     # Ctrl-C is a normal shutdown path, not a crash — don't scream about it.
     if not issubclass(exc_type, KeyboardInterrupt):
         try:
+            # A dynamic-linker failure is unreadable without knowing WHICH copy
+            # of the library won the soname and what injected it. The boot-time
+            # forensics went to stderr, which is discarded on any boot the
+            # watchdog did not start — so attach it to the crash record itself,
+            # where it lands in logs/error.log next to the traceback.
+            _extra = ''
+            if issubclass(exc_type, ImportError):
+                _msg = str(exc_value)
+                if 'GLIBCXX' in _msg or 'libstdc++' in _msg or 'symbol' in _msg:
+                    _extra = ' | LINKAGE: %s' % (
+                        globals().get('_TOFU_LINKAGE_FORENSICS', 'unavailable'),)
             logging.getLogger('server').critical(
-                'Uncaught exception — process is terminating',
+                'Uncaught exception — process is terminating%s' % _extra,
                 exc_info=(exc_type, exc_value, exc_tb))
         except Exception:
             pass  # logging must never mask the original crash
@@ -1763,8 +1790,48 @@ app.teardown_appcontext(close_db)
 
 # ── Install the tofu-search bridge (LLM + browser + auth seams) ──
 # Must run before any search/fetch call; idempotent, re-synced on config reload.
-from lib.search_bridge import install_search_bridge
-install_search_bridge()
+#
+# DEGRADE, don't die. This import pulls in tofu_search → trafilatura → lxml →
+# libicuuc, and on 2026-07-31 that chain raised
+#   ImportError: /lib64/libstdc++.so.6: version `GLIBCXX_3.4.30' not found
+# eight times. Being a bare module-level import, it took the WHOLE SERVER down
+# each time — chat, projects, the scheduler and every other subsystem died for
+# a fault confined to web search. That blast radius is wrong regardless of what
+# triggers the linkage fault: search is one optional capability, not a boot
+# prerequisite.
+#
+# Scope check before narrowing this: three modules import tofu_search at module
+# level (here, lib/paper/tools.py, lib/tasks_pkg/executor/_summary.py) and all
+# three are on the boot chain, but THIS one is reached first — measured, it is
+# the frame that actually raises. The other ten consumers import lazily inside
+# functions and already fail per-call. So guarding here removes the only
+# whole-process kill; if a future refactor removes this import, the next
+# module-level one inherits the hazard (tests/test_startup_stdcxx_forensics.py
+# asserts the guard stays).
+#
+# The bridge only INSTALLS seams (LLM/browser/auth) into tofu_search; without it
+# the search tools still import fine and fail per-call instead, which is the
+# degradation we want. The linkage forensics captured at boot are logged with
+# the failure so the cause is diagnosable rather than a mystery.
+try:
+    from lib.search_bridge import install_search_bridge
+    install_search_bridge()
+except ImportError as _sb_err:
+    _sb_msg = str(_sb_err)
+    _sb_linkage = ''
+    if 'GLIBCXX' in _sb_msg or 'libstdc++' in _sb_msg or 'symbol' in _sb_msg:
+        _sb_linkage = ' | LINKAGE: %s' % (
+            globals().get('_TOFU_LINKAGE_FORENSICS', 'unavailable'),)
+    logging.getLogger('server').error(
+        'Web search/fetch is DISABLED for this process — the tofu-search bridge '
+        'could not be imported: %s%s. Every other subsystem is unaffected; '
+        'search tools will fail per-call instead of taking down the server.',
+        _sb_msg, _sb_linkage, exc_info=True)
+except Exception as _sb_err:
+    logging.getLogger('server').error(
+        'Web search/fetch is DISABLED for this process — the tofu-search bridge '
+        'failed to install: %s. Every other subsystem is unaffected.',
+        _sb_err, exc_info=True)
 
 # ── Register all Blueprints ──
 from routes import register_all

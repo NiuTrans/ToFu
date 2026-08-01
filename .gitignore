@@ -76,6 +76,13 @@ data/
 # clean clone without it breaks the release pipeline in CI rather than
 # locally, which is the worst place to discover a missing file.
 !/scripts/release_assets.py
+# Shared "is this VERSION documented?" predicate. The version gate in
+# build-desktop.yml calls it BEFORE any build, so a clean clone without it
+# fails the release pipeline in CI — the same worst-place-to-discover argument
+# as release_assets.py above. It is also the reason nine versions (0.11.0
+# through 0.15.2) shipped with no changelog entry: nothing in the repo
+# referenced CHANGELOG.md, so no check could observe the drift.
+!/scripts/changelog_gate.py
 # Cache-waste distribution report. The measurement discipline it encodes —
 # rates DERIVED from lib.cost rather than hand-written, non-waste classes
 # (TTL expiry / cold start) excluded from the recoverable denominator,

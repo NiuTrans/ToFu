@@ -32,6 +32,7 @@ logger = get_logger(__name__)
 
 # ── Family detection helpers ──
 from lib.model_info._family import (  # noqa: E402,F401
+    claude_line_version,
     is_claude,
     is_claude_opus_47,
     is_deepseek,
@@ -88,6 +89,7 @@ from lib.model_info._limits import (  # noqa: E402,F401
 
 __all__ = [
     # family detection
+    'claude_line_version',
     'is_claude', 'is_claude_opus_47', 'is_deepseek', 'is_doubao', 'is_ernie',
     'is_gemini', 'is_glm', 'is_gpt', 'is_gpt5', 'is_gpt_56', 'is_kimi',
     'is_kimi_k3', 'is_longcat', 'is_minimax', 'is_qwen',

@@ -251,6 +251,9 @@ html[data-rail] .folder-quickadd{display:none}
 .conv-status-tag{font-size:9px;font-weight:600;padding:1px 5px;border-radius:6px;line-height:14px;margin-left:4px;white-space:nowrap;animation:statusTagFadeIn .3s ease}
 .conv-status-translating{color:#14b8a6;background:rgba(20,184,166,0.12)}
 .conv-status-memprefetch{color:#eab308;background:rgba(234,179,8,0.12)}
+/* Rate-limit — the SAME amber the in-bubble "限流中" chip / memprefetch uses;
+ * a live retry-state the user should notice, not an error. */
+.conv-status-ratelimit{color:#eab308;background:rgba(234,179,8,0.12)}
 .conv-status-streaming{color:var(--accent);background:var(--accent-subtle)}
 .conv-status-error{color:#ef4444;background:rgba(239,68,68,0.12)}
 .conv-status-incomplete{color:#f59e0b;background:rgba(245,158,11,0.12)}
@@ -275,6 +278,10 @@ html[data-rail] .folder-quickadd{display:none}
 /* ── Memory-prefetch dot — amber pulsing; matches the in-bubble chip color ── */
 .conv-memprefetch-dot{width:8px;height:8px;border-radius:50%;background:#eab308;flex-shrink:0;animation:memPrefetchDotPulse 1.2s ease-in-out infinite;box-shadow:0 0 5px rgba(234,179,8,0.4)}
 @keyframes memPrefetchDotPulse{0%,100%{opacity:1;transform:scale(1);box-shadow:0 0 5px rgba(234,179,8,0.4)}50%{opacity:0.5;transform:scale(0.8);box-shadow:0 0 2px rgba(234,179,8,0.2)}}
+/* ── Rate-limit dot — recolors the base streaming dot amber while the turn is
+ *   queued on a 429 (mirrors the in-bubble 限流中 chip). Kept as a modifier on
+ *   .conv-streaming-dot so it stays inside the existing DOM-reconcile selector. ── */
+.conv-streaming-dot.conv-ratelimit-dot{background:#eab308;box-shadow:0 0 5px rgba(234,179,8,0.4)}
 /* ── Awaiting-human dot — amber blinking, more prominent than streaming ── */
 .conv-awaiting-human-dot{width:9px;height:9px;border-radius:50%;background:#f59e0b;flex-shrink:0;animation:hgDotBlink 1s ease-in-out infinite;box-shadow:0 0 6px rgba(245,158,11,0.5)}
 @keyframes hgDotBlink{0%,100%{opacity:1;box-shadow:0 0 6px rgba(245,158,11,0.5)}50%{opacity:0.3;box-shadow:0 0 2px rgba(245,158,11,0.2)}}
@@ -6326,6 +6333,11 @@ input.settings-mono {
 .sw-agent.sw-a-running{border-color:rgba(96,165,250,0.45);background:linear-gradient(135deg,rgba(96,165,250,0.10),rgba(96,165,250,0.04)),var(--bg-tertiary)}
 .sw-agent.sw-a-done,.sw-agent.sw-a-completed{border-color:rgba(74,222,128,0.40);background:var(--bg-tertiary)}
 .sw-agent.sw-a-failed,.sw-agent.sw-a-error{border-color:rgba(248,113,113,0.45);background:linear-gradient(135deg,rgba(248,113,113,0.08),rgba(248,113,113,0.03)),var(--bg-tertiary)}
+/* Stalled: judged silent by the liveness beacon — amber (distinct from
+   failed-red: the agent may still come back, and did in the smoke test). */
+.sw-agent.sw-a-stalled{border-color:rgba(251,191,36,0.45);background:linear-gradient(135deg,rgba(251,191,36,0.08),rgba(251,191,36,0.03)),var(--bg-tertiary)}
+.sw-a-stalled .sw-a-status-icon{color:#fbbf24}
+.sw-a-stalled .sw-a-role-tag{background:rgba(251,191,36,0.10);border-color:rgba(251,191,36,0.25);color:#fcd34d}
 .sw-agent.sw-a-pending{opacity:0.5}
 /* Agent card header (always visible) */
 .sw-a-header{display:flex;align-items:center;gap:8px;padding:10px 12px;cursor:pointer;user-select:none}
@@ -7893,6 +7905,32 @@ html:not([data-theme="tofu"]) .scene-switch-btn{display:none}
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+/* ── Live run_command timer chip (countdown when the call declared a
+ *   `timeout`, elapsed count-up otherwise). Tabular numerals so the width
+ *   does not jitter as the digits change once per second, and flex-shrink:0
+ *   so the description (which owns flex:1) truncates before the timer does —
+ *   the timer is the one thing on this row that must stay readable. */
+.ptool-cmd-timer {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.4;
+  font-variant-numeric: tabular-nums;
+  font-family: var(--mono, ui-monospace, monospace);
+  color: var(--text-secondary);
+  opacity: 0.75;
+  white-space: nowrap;
+}
+/* Under 10s left — the command is about to be killed, so stop being quiet. */
+.ptool-cmd-timer-soon {
+  color: #d97706;
+  opacity: 1;
+}
+/* Past the deadline: the backend is SIGKILLing the process tree. */
+.ptool-cmd-timer-over {
+  color: #dc2626;
+  opacity: 1;
 }
 .ptool-cmd-code {
   margin: 0;
@@ -11536,6 +11574,10 @@ html:not([data-theme="tofu"]) .scene-switch-btn{display:none}
   width:8px;height:8px;
   box-shadow:0 0 6px rgba(245,158,11,0.45)
 }
+[data-theme="tofu"] .conv-streaming-dot.conv-ratelimit-dot{
+  background:#eab308;
+  box-shadow:0 0 5px rgba(234,179,8,0.35)
+}
 
 /* ── Welcome screen — pixel tofu block ── */
 [data-theme="tofu"] .welcome-icon{
@@ -11898,6 +11940,34 @@ html:not([data-theme="tofu"]) .scene-switch-btn{display:none}
 [data-theme="tofu"] .stream-phase-text{
   opacity:1
 }
+[data-theme="tofu"] .stream-phase-text{
+  opacity:1
+}
+/* ── Stall-watch banner (pt_e0ea29f2) — amber, distinct from retrying:
+ *   the tool has produced NOTHING for Ns (heartbeat self-ticks only).
+ *   Announces the wedge and carries a Stop affordance; self-heals off. */
+[data-theme="tofu"] .stream-phase-stalled{
+  background:rgba(196,120,40,0.12);
+  border-color:rgba(196,120,40,0.38);
+  color:#9A5A10;
+  display:inline-flex;
+  align-items:center;
+  gap:8px
+}
+[data-theme="tofu"] .stream-stalled-stop{
+  font:inherit;
+  font-size:10.5px;
+  font-weight:600;
+  color:#9A5A10;
+  background:rgba(196,120,40,0.16);
+  border:1px solid rgba(196,120,40,0.45);
+  border-radius:8px;
+  padding:1px 10px;
+  cursor:pointer
+}
+[data-theme="tofu"] .stream-stalled-stop:hover{
+  background:rgba(196,120,40,0.28)
+}
 
 /* ── Log clean banner — readable on ivory ── */
 [data-theme="tofu"] .log-clean-banner{
@@ -12078,11 +12148,9 @@ html:not([data-theme="tofu"]) .scene-switch-btn{display:none}
    face through scaleX(0) and smear it, the "flips like a sheet of paper" bug
    the old wrapper avoided. The turn's motion is carried by the data-turning
    pivot pop below. */
-/* A turn is a PIVOT, not a page-flip: tofu-pet.js stamps data-turning="1" for
-   ~260ms whenever the facing flips, and this brief squash-hop makes the pet
-   plant + spin. It composites over the breathe/walk anim (they own translate/
-   scale on the img; this owns a tiny lift + settle). */
-.tofu-pet[data-turning] .tofu-pet-img{animation:tofuPetPivot .26s ease-out 1, tofuPetBreathe 3.8s ease-in-out infinite}
+/* A turn is a PIVOT, not a page-flip — see the .tofu-pet[data-turning] rule
+   BELOW the walk/turn animation rule. It must come after it (and out-specify
+   it) or the pivot never plays; the history is documented there. */
 .tofu-pet .tofu-pet-img{
   display:block;
   position:relative;
@@ -12135,6 +12203,28 @@ html:not([data-theme="tofu"]) .scene-switch-btn{display:none}
    bob (two bounces per full cycle), so the two don't fight. */
 .tofu-pet[data-state="walk"] .tofu-pet-img,
 .tofu-pet[data-state="turn"] .tofu-pet-img{animation:tofuPetWalk .3s ease-in-out infinite}
+/* ★ THE PIVOT MUST OUT-RANK THE WALK ANIMATION (cascade fix, 2026-07-31).
+   tofu-pet.js stamps data-turning="1" for ~260ms whenever the facing flips, and
+   this brief squash-hop is what makes the pet read as PLANTING its feet and
+   spinning rather than flipping like a sheet of paper.
+   It previously sat ABOVE the walk rule at EQUAL specificity (0,2,0 each), so
+   the later walk rule won — and because a facing flip only ever happens while
+   walking/turning/chasing, the pivot NEVER played in ANY reachable state. Now it
+   comes AFTER the walk rule and adds `:not(:root)` on the pet to reach (0,3,0)
+   without depending on any DATA ATTRIBUTE being present. That distinction is
+   load-bearing: `[data-turning][data-state]` would also out-specify the walk
+   rule, but mount() does NOT set an initial data-state (only _enter does), and
+   _startle() → _face() can fire a pivot before the first _enter — so an
+   attribute-based bump would silently miss exactly the flip a user just poked.
+   `:not(:root)` is always true for the pet and adds specificity structurally.
+   `animation` is a SHORTHAND: the winning rule replaces the entire list, so the
+   pivot cannot "merge" with the walk bob — it restates the breathe it
+   composites over, and the travel bob is deliberately suspended for those
+   260ms, which is the correct read: the pet PLANTS and spins instead of
+   continuing to bob along. ONE rule only, deliberately — two overlapping
+   pivot rules at different specificities is how this broke in the first place.
+   No !important: specificity + order, so a future rule can still win cleanly. */
+.tofu-pet:not(:root)[data-turning] .tofu-pet-img{animation:tofuPetPivot .26s ease-out 1, tofuPetBreathe 3.8s ease-in-out infinite}
 /* Reaction accents (the art carries the sparkles/Zzz/etc.). */
 .tofu-pet[data-expr="celebrating"] .tofu-pet-img{animation:tofuPetHop .5s cubic-bezier(0.34,1.56,0.64,1) 3, tofuPetBreathe 3.8s ease-in-out infinite}
 .tofu-pet[data-expr="surprised"] .tofu-pet-img{animation:tofuPetJolt .42s ease-out 1, tofuPetBreathe 3.8s ease-in-out infinite}
@@ -12167,12 +12257,22 @@ html:not([data-theme="tofu"]) .scene-switch-btn{display:none}
   z-index:-1;                /* behind the sprite, on the ground */
   transition:width .18s ease, height .18s ease, opacity .18s ease;
 }
-/* Lifted: the shadow pulls in tight + faint under the raised cat. */
-.tofu-pet[data-state="drag"]::after{
-  width:12px;
-  height:3px;
-  opacity:0.55;
-  transform:translateX(-50%) translateY(2px);
+/* Lifted: the shadow pulls in tight + faint under the raised cat.
+   ★ CONTINUOUS, driven by --pet-lift (0..1, written every frame by _place()
+   from the pet's HEIGHT) instead of by [data-state="drag"]. Two reasons the
+   state selector was wrong: (a) it snapped between two fixed sizes the instant
+   you grabbed, carrying no information about HOW high the pet was; (b) it
+   stopped applying the moment the pointer was released — but the pet is still
+   airborne then, it is FALLING — so the shadow popped back to full size under a
+   sprite that had not landed.
+   The sun-direction transform is deliberately NOT overridden here:
+   --pet-shadow-dx/scale must keep steering the shadow while the pet is held, or
+   the lift would silently undo the scene-light coupling. Height changes the
+   shadow's SIZE and OPACITY only; direction stays the sun's job. */
+.tofu-pet::after{
+  width:calc(22px - 13px * var(--pet-lift, 0));
+  height:calc(5px - 3px * var(--pet-lift, 0));
+  opacity:calc(1 - 0.5 * var(--pet-lift, 0));
 }
 
 /* ── Click-to-report speech bubble (tofu-pet.js _showBubble). A tap on the pet
@@ -12229,6 +12329,15 @@ html:not([data-theme="tofu"]) .scene-switch-btn{display:none}
    → settle. NO horizontal scale here (the facing layer owns the instant mirror),
    so it can never re-create the paper-flip smear. */
 @keyframes tofuPetPivot{0%{transform:translateY(0) scaleY(1)}30%{transform:translateY(1px) scaleY(0.9)}60%{transform:translateY(-2.5px) scaleY(1.04)}100%{transform:translateY(0) scaleY(1)}}
+/* LANDING squash — the third beat of lift → carry → land. A dropped object that
+   simply stops at the floor reads as teleporting; the brief compress-and-recover
+   is what gives it mass. Lives on the FRAME layer (like the pivot) so it
+   composites over .tofu-pet's translateX/translateY rather than replacing them:
+   an animation on the POSITION layer always beats an inline transform, so it
+   would fight the drop integration in _step and the pet would visibly jump.
+   Gated by data-landing, which tofu-pet.js stamps for 240ms on touchdown. */
+.tofu-pet[data-landing] .tofu-pet-img{animation:tofuPetLand .24s cubic-bezier(0.22,0.9,0.3,1.1) 1, tofuPetBreathe 3.8s ease-in-out infinite}
+@keyframes tofuPetLand{0%{transform:scale(1.06,0.9) translateY(1.5px)}55%{transform:scale(0.97,1.03) translateY(-1px)}100%{transform:scale(1) translateY(0)}}
 
 /* ── The bar as a tiny SCENE (a living diorama). A low ground strip (grass
    lawn / pool lane) tiles seamlessly across the full width along the BOTTOM;
@@ -15174,6 +15283,11 @@ html:not([data-theme="tofu"]) .tofu-pet{display:none}
 .lc-dl-direct:hover{background:rgba(168,85,247,0.20);border-color:#c084fc;border-bottom-color:#c084fc}
 [data-theme="light"] .lc-dl-direct{border-color:rgba(126,34,206,0.4);border-bottom-color:rgba(126,34,206,0.4);background:rgba(126,34,206,0.08)}
 [data-theme="light"] .lc-dl-direct:hover{background:rgba(126,34,206,0.16);border-color:#6b21a8;border-bottom-color:#6b21a8}
+/* Provenance badge: marks an artifact served by THIS server (mirrored or
+   built on-box) rather than fetched from the public GitHub network — the
+   fast/reliable path, so it gets the success hue, not the accent one. */
+.lc-dl-hosted{display:inline-flex;align-items:center;padding:3px 8px;font-size:10.5px;font-weight:600;border-radius:999px;white-space:nowrap;color:#15803d;border:1px solid rgba(22,163,74,0.35);background:rgba(22,163,74,0.08)}
+[data-theme="light"] .lc-dl-hosted{color:#166534;border-color:rgba(21,128,61,0.4);background:rgba(21,128,61,0.10)}
 
 [data-theme="light"] .lc-cap{border-color:rgba(0,0,0,0.09);background:rgba(0,0,0,0.012)}
 [data-theme="light"] .lc-cap-icon{background:rgba(126,34,206,0.1);color:#7e22ce}
@@ -21660,33 +21774,42 @@ html:not([data-theme="light"]):not([data-theme="tofu"]) .pb-watch-diverged{color
 .pb-board-act.pb-btn-primary{background:var(--accent);color:#fff;border-color:var(--accent)}
 .pb-board-act.pb-btn-primary:hover{background:var(--accent-hover);color:#fff;border-color:var(--accent-hover)}
 .pb-board-act:focus-visible{outline:2px solid color-mix(in srgb,var(--accent) 60%,transparent);outline-offset:1px}
-/* Awaiting-answer lane + card — the ONE place the operator must act. */
+/* Awaiting-answer lane + card — COMPACT (2026-07-31 consolidation): the
+   question UI lives only in the Needs-you tab, so this card keeps the gated
+   state visible (accent rail + a whisper of accent wash) and deep-links. */
 .pb-board-lane-awaiting .pb-board-lane-head{color:var(--accent)}
 .pb-board-lane-awaiting .pb-board-count{color:var(--accent);border-color:color-mix(in srgb,var(--accent) 34%,transparent);background:color-mix(in srgb,var(--accent) 12%,transparent)}
-.pb-board-card.pb-board-awaiting{border-left:3px solid var(--accent)}
-/* Structured question panel — the decision is the primary content, not a
-   blob buried under a wall of English reason text. */
-.pb-question{margin-top:10px;padding:10px 12px;border:1px solid color-mix(in srgb,var(--accent) 30%,transparent);border-radius:var(--pb-radius-sm);background:color-mix(in srgb,var(--accent) 6%,transparent)}
-.pb-question-label{display:flex;align-items:center;gap:5px;font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;color:var(--accent);margin-bottom:6px}
-.pb-question-label svg{display:block}
-.pb-question-q{font-size:12.5px;line-height:1.6;color:var(--text-primary);overflow-wrap:anywhere;word-break:break-word}
-.pb-question-q code{font-family:var(--font-mono,monospace);font-size:11.5px;background:var(--bg-tertiary);padding:1px 5px;border-radius:4px}
+.pb-board-card.pb-board-awaiting{border-left:3px solid var(--accent);background:color-mix(in srgb,var(--accent) 4%,var(--pb-card-bg))}
+.pb-board-card.pb-board-awaiting:hover{background:color-mix(in srgb,var(--accent) 7%,var(--pb-card-hover));--pb-fade-to:color-mix(in srgb,var(--accent) 7%,var(--pb-card-hover))}
+.pb-board-badge-awaiting{background:color-mix(in srgb,var(--accent) 12%,transparent);color:var(--accent);border:1px solid color-mix(in srgb,var(--accent) 34%,transparent)}
+.pb-board-badge-awaiting svg{width:11px;height:11px}
+.pb-board-awaiting-meta{font-size:10.5px;color:var(--text-tertiary)}
+/* Forward actions on a board card — deep-link to the answering surface, or
+   open a fresh chat about the epic. Accent family so the eye separates them
+   from the neutral lifecycle controls (complete/block/reopen). */
+.pb-board-act.pb-board-act-goto{color:var(--accent);border-color:color-mix(in srgb,var(--accent) 34%,transparent);background:var(--accent-subtle)}
+.pb-board-act.pb-board-act-goto:hover{color:var(--accent-hover);border-color:color-mix(in srgb,var(--accent) 50%,transparent);background:color-mix(in srgb,var(--accent) 16%,transparent)}
+.pb-board-act.pb-board-act-createConv{color:var(--accent);border-color:color-mix(in srgb,var(--accent) 34%,transparent);background:transparent}
+.pb-board-act.pb-board-act-createConv:hover{color:var(--accent-hover);border-color:color-mix(in srgb,var(--accent) 50%,transparent);background:var(--accent-subtle)}
 .pb-chip-row{display:flex;flex-wrap:wrap;gap:7px;margin-top:9px}
 .pb-chip{display:inline-flex;align-items:center;gap:4px;background:var(--bg-secondary);color:var(--text-primary);border:1px solid var(--border-light);border-radius:var(--pb-radius-chip);padding:5px 12px;font-size:12px;font-weight:600;font-family:inherit;cursor:pointer;transition:background var(--transition),border-color var(--transition),transform 0.1s ease}
 .pb-chip:hover{background:var(--bg-hover);border-color:var(--accent)}
 .pb-chip:active{transform:scale(0.97)}
 .pb-chip:disabled{opacity:0.55;cursor:default}
-.pb-answer-input-row{display:flex;gap:7px;margin-top:9px}
-.pb-answer-text{flex:1;min-width:0;background:var(--bg-primary);border:1px solid var(--border);border-radius:var(--pb-radius-sm);padding:6px 10px;font-size:12px;color:var(--text-primary);font-family:inherit}
-.pb-answer-text:focus{outline:none;border-color:var(--accent)}
-/* Inline note editor (replaces window.prompt for Block) — same family as the
-   answer input row so every in-panel prompt looks + behaves identically. */
+/* Inline note editor (replaces window.prompt for Block) — the in-panel
+   prompt family shared with the Needs-you tab's answer input. */
 .pb-note-editor{display:flex;gap:7px;margin-top:9px;padding-top:9px;border-top:1px dashed var(--border)}
 .pb-note-text{flex:1;min-width:0;background:var(--bg-primary);border:1px solid var(--border);border-radius:var(--pb-radius-sm);padding:6px 10px;font-size:12px;color:var(--text-primary);font-family:inherit}
 .pb-note-text:focus{outline:none;border-color:var(--accent)}
 /* Answered badge — the human's decision travels with the unblocked epic. */
 .pb-board-badge-answered{background:color-mix(in srgb,var(--pb-green,#3fb950) 12%,transparent);color:var(--pb-green,#3fb950);border:1px solid color-mix(in srgb,var(--pb-green,#3fb950) 30%,transparent)}
 .pb-board-badge-answered svg{width:11px;height:11px}
+
+/* Focus flash: a Board deep-link ("go answer") lands the operator on THIS
+   attention card, not the tab top — a brief one-shot accent pulse so the eye
+   follows (finite animation, no reduced-motion concern). */
+.pb-attn-card.pb-attn-flash{animation:pbAttnFlash 1.4s ease}
+@keyframes pbAttnFlash{0%{border-color:var(--accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 26%,transparent)}100%{box-shadow:0 0 0 0 transparent}}
 
 /* collab-bar conflict styling (shares this block's ownership). */
 .collab-seg-conflict{color:var(--pb-red);font-weight:600}
@@ -21715,8 +21838,8 @@ html:not([data-theme="light"]):not([data-theme="tofu"]) .pb-watch-diverged{color
 .pb-attn-title{font-size:13.5px;font-weight:600;line-height:1.5;color:var(--text-primary);overflow-wrap:anywhere;word-break:break-word}
 .pb-attn-body{font-size:12.5px;line-height:1.6;color:var(--text-secondary);overflow-wrap:anywhere;word-break:break-word}
 .pb-attn-meta{font-size:11.5px;color:var(--text-tertiary);margin-top:8px;overflow-wrap:anywhere}
-/* The question IS the content on a halted epic — same treatment as the Board's
-   .pb-question so answering feels identical in both places. */
+/* The question IS the content on a halted epic — and after the 2026-07-31
+   consolidation this is the ONLY place it renders (the Board deep-links here). */
 .pb-attn-q{margin-top:9px;padding:10px 12px;border:1px solid color-mix(in srgb,var(--pb-red) 26%,transparent);border-radius:var(--pb-radius-sm);background:color-mix(in srgb,var(--pb-red) 6%,transparent);font-size:12.5px;line-height:1.6;color:var(--text-primary);overflow-wrap:anywhere;word-break:break-word}
 .pb-attn-input-row{display:flex;gap:7px;margin-top:9px}
 .pb-attn-answer{flex:1;min-width:0;background:var(--bg-primary);border:1px solid var(--border);border-radius:var(--pb-radius-sm);padding:6px 10px;font-size:12px;color:var(--text-primary);font-family:inherit}
@@ -21729,6 +21852,10 @@ html:not([data-theme="light"]):not([data-theme="tofu"]) .pb-watch-diverged{color
 .pb-attn-act:disabled{opacity:0.55;cursor:default}
 .pb-attn-act.pb-btn-primary{background:var(--accent);color:#fff;border-color:var(--accent)}
 .pb-attn-act.pb-btn-primary:hover{background:var(--accent-hover);color:#fff;border-color:var(--accent-hover)}
+/* Create-conversation on a halted-epic card — accent outline, same family as
+   the Board's createConv/goto forward actions (one vocabulary panel-wide). */
+.pb-attn-act.pb-attn-act-conv{color:var(--accent);border-color:color-mix(in srgb,var(--accent) 34%,transparent);background:transparent}
+.pb-attn-act.pb-attn-act-conv:hover{color:var(--accent-hover);border-color:color-mix(in srgb,var(--accent) 50%,transparent);background:var(--accent-subtle)}
 .pb-attn-goto{display:inline-flex;align-items:center;gap:5px;background:transparent;color:var(--accent);border:1px solid color-mix(in srgb,var(--accent) 30%,transparent);border-radius:var(--pb-radius-sm);padding:5px 10px;font-size:11.5px;font-weight:600;font-family:inherit;cursor:pointer;transition:background var(--transition)}
 .pb-attn-goto:hover{background:var(--accent-subtle)}
 .pb-attn-goto svg{display:block}
@@ -21791,6 +21918,25 @@ html:not([data-theme="light"]):not([data-theme="tofu"]) .pb-watch-diverged{color
 .pb-inf-epic.pb-inf-mine{border-left:3px solid var(--pb-green)}
 .pb-inf-epic.pb-inf-avoid{border-left:3px solid var(--pb-red)}
 .pb-inf-epic.pb-inf-open{border-left:3px solid var(--text-tertiary)}
+/* ── The two channels ──
+   "already spliced into the prompt" and "reachable only by spending a tool
+   round" are different facts; rendering them as one list silently upgrades
+   the second into the first. Injected is accented, tool-visible is muted. */
+.pb-inf-channel{display:flex;flex-direction:column;gap:11px;padding:11px 12px;border-radius:var(--pb-radius);border:1px solid var(--border)}
+.pb-inf-channel-injected{background:color-mix(in srgb,var(--accent) 6%,transparent);border-color:color-mix(in srgb,var(--accent) 26%,transparent)}
+.pb-inf-channel-tools{background:var(--bg-tertiary)}
+.pb-inf-channel-head{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;color:var(--text-secondary)}
+.pb-inf-channel-injected .pb-inf-channel-head{color:var(--accent)}
+.pb-inf-group-goals .pb-inf-group-head{color:var(--pb-amber)}
+.pb-inf-group-goals .pb-inf-decisions li{border-left-color:var(--pb-amber)}
+.pb-inf-chip-goals{background:color-mix(in srgb,var(--pb-amber) 14%,transparent);border-color:color-mix(in srgb,var(--pb-amber) 36%,transparent);color:var(--pb-amber)}
+/* Measured size of the lane's REAL injected block — a claim the human can check. */
+.pb-inf-cost{font-weight:600;font-size:9.5px;letter-spacing:0.02em;text-transform:none;color:var(--text-tertiary);margin-left:6px}
+.pb-inf-tool{display:flex;align-items:center;gap:9px;font-size:12px;color:var(--text-secondary);padding:6px 9px;background:var(--pb-card-bg);border:1px solid var(--border);border-radius:var(--pb-radius-sm)}
+.pb-inf-tool code{font-size:11px;font-family:var(--font-mono,ui-monospace,monospace);color:var(--text-primary);background:var(--bg-tertiary);padding:2px 6px;border-radius:4px;flex-shrink:0}
+.pb-inf-note{font-size:11.5px;line-height:1.5;color:var(--text-tertiary);padding:7px 10px;background:var(--bg-tertiary);border-radius:var(--pb-radius-sm)}
+.pb-inf-epic.pb-inf-pending{border-left:3px solid var(--pb-amber)}
+.pb-inf-group-pending .pb-inf-group-head{color:var(--pb-amber)}
 
 /* ── Collaboration bar: the single PROJECT cluster ──
    The bar (#presenceStrip → .collab-bar-inner) hosts ONE project-scoped
@@ -22310,6 +22456,11 @@ html:not([data-theme="light"]):not([data-theme="tofu"]) .pb-watch-diverged{color
   background:rgba(198,120,72,0.12);
   color:#a8552b;
 }
+.stg-face-chip.responses{
+  border-color:rgba(14,116,144,0.5);
+  background:rgba(14,116,144,0.12);
+  color:#0e7490;
+}
 .stg-face-chip.pinned{
   border-style:dashed;
   border-width:1.5px;
@@ -22330,6 +22481,12 @@ html:not([data-theme="light"]):not([data-theme="tofu"]) .stg-face-chip.anthropic
   border-color:rgba(214,150,110,0.55);
   background:rgba(214,150,110,0.16);
   color:#e0a882;
+}
+[data-theme="dark"] .stg-face-chip.responses,
+html:not([data-theme="light"]):not([data-theme="tofu"]) .stg-face-chip.responses{
+  border-color:rgba(94,196,220,0.5);
+  background:rgba(94,196,220,0.15);
+  color:#7fd4e8;
 }
 [data-theme="dark"] .stg-face-chip.refused,
 html:not([data-theme="light"]):not([data-theme="tofu"]) .stg-face-chip.refused{

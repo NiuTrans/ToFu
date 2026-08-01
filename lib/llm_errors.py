@@ -305,7 +305,13 @@ def _is_upstream_vendor_transient(err_msg: str) -> bool:
     (key, model) pair as auth, and never feed the consecutive-error lockout.
 
     Detection layers, in order:
-      1. Encoding-stable marker: the gateway's own fault attribution
+      1. Message phrases on the raw text (properly decoded bodies).
+      2. Message phrases on the mojibake-REPAIRED text, for double-encoded
+         bodies whose ext tail was truncated before the marker.
+         ``repair_mojibake`` is conservative by design and refuses mixed-
+         encoding strings — which is exactly why the marker layer must not
+         rely on it.
+      3. Encoding-stable marker: the gateway's own fault attribution
          ``"source":"UPSTREAM_VENDOR"`` in the ext tail. Pure ASCII, so it
          survives ANY mojibake / double-encoding of the human-readable
          message — the 2026-07-26 10:21 incident (task f8045792, round 41):
@@ -316,17 +322,24 @@ def _is_upstream_vendor_transient(err_msg: str) -> bool:
          sat intact in the same body. ``toio_api_error`` alone is NOT
          sufficient — it is the gateway's generic error type and a genuine
          auth 403 carries it too.
-      2. Message phrases on the raw text (properly decoded bodies).
-      3. Message phrases on the mojibake-REPAIRED text, for double-encoded
-         bodies whose ext tail was truncated before the marker.
-         ``repair_mojibake`` is conservative by design and refuses mixed-
-         encoding strings — which is exactly why layer 1 must not rely on it.
+
+    The marker only says WHERE the error came from, not THAT it is
+    transient. Two deterministic vetoes demote it (checked BEFORE the
+    marker wins):
+      * the ext tail carries the upstream's own status and it is a
+        non-retryable 4xx — the vendor examined the PAYLOAD and rejected it
+        on merits, so rotating OUR keys changes nothing (2026-07-31 kimi-k3
+        incident, tasks 93b60577/76d686cb: "Invalid request: text content
+        is empty", upstreamStatus 400 — a deterministic shape rejection
+        spun as a "transient" through 4,337 retries over 4+ hours);
+      * the vendor's own error type is ``invalid_request_error`` — its
+        vocabulary for "your request is invalid", never "try again later".
+    Transient upstream statuses (408/429/5xx) keep rotating as before.
     """
     if not err_msg:
         return False
     lower = err_msg.lower()
-    if '"source":"upstream_vendor"' in lower.replace(' ', ''):
-        return True
+    squashed = lower.replace(' ', '')
     if any(p in lower for p in _UPSTREAM_TRANSIENT_PATTERNS):
         return True
     if any(p in lower for p in _GATEWAY_ROUTING_TRANSIENT_PATTERNS):
@@ -335,8 +348,19 @@ def _is_upstream_vendor_transient(err_msg: str) -> bool:
         return True
     repaired = repair_mojibake(err_msg)
     if repaired is not err_msg:
-        return any(p in repaired.lower() for p in _UPSTREAM_TRANSIENT_PATTERNS)
-    return False
+        if any(p in repaired.lower() for p in _UPSTREAM_TRANSIENT_PATTERNS):
+            return True
+    if '"source":"upstream_vendor"' not in squashed:
+        return False
+    # Deterministic vetoes — a payload rejection wearing the vendor marker.
+    _m = re.search(r'"upstreamstatus":(\d{3})', squashed)
+    if _m:
+        _up = int(_m.group(1))
+        if _up < 500 and _up not in (408, 429):
+            return False
+    if '"type":"invalid_request_error"' in squashed:
+        return False
+    return True
 
 
 # ══════════════════════════════════════════════════════════

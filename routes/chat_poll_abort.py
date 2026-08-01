@@ -62,8 +62,16 @@ logger = get_logger(__name__)
 # Everything else on the wire (content / thinking / toolRounds / phase /
 # progress chips) is explicitly still shipped while running — this withholds
 # only the fields that MEAN "finished".
-_TERMINAL_STATUSES = frozenset({'done', 'error', 'aborted', 'interrupted'})
-_TERMINAL_ONLY_KEYS = frozenset({'finishReason', 'usage', 'preset'})
+#
+# ★ The RULE ITSELF lives in lib/chat/terminal_gate.py — ONE implementation
+#   shared with the SSE `state` snapshot (lib/chat_dispatch.py). It was briefly
+#   defined locally here, which would have been the fourth hand-maintained copy
+#   of a metadata field policy; `extract_task_meta`'s docstring records what
+#   that asymmetry has already cost this project.
+from lib.chat.terminal_gate import (  # noqa: E402
+    TERMINAL_ONLY_KEYS as _TERMINAL_ONLY_KEYS,
+    is_terminal_status as _is_terminal_status,
+)
 
 
 @api_v1_chat_bp.route('/api/v1/chat/abort-conv/<conv_id>', methods=['POST'], endpoint='ui_chat_abort_conv')
@@ -191,7 +199,7 @@ def chat_poll(task_id):
         #   `finishReason` — the contradiction that minted duplicate bubbles.
         #   Keyed on `_reported_status` (the value actually shipped) so the
         #   status and the terminal fields cannot disagree.
-        _terminal_ok = _reported_status in _TERMINAL_STATUSES
+        _terminal_ok = _is_terminal_status(_reported_status)
         for key in ('error', 'toolRounds', 'finishReason', 'usage', 'preset',
                      'toolSummary', 'phase', 'modifiedFiles', 'modifiedFileList',
                      'model', 'provider_id', 'thinkingDepth', 'apiRounds',
@@ -355,7 +363,7 @@ def chat_poll(task_id):
         #   reconnect verdict `effective_status` stays 'running' while the
         #   persisted meta may already carry a finishReason, so gating only the
         #   other branch would leave the identical contradiction reachable here.
-        _db_terminal_ok = effective_status in _TERMINAL_STATUSES
+        _db_terminal_ok = _is_terminal_status(effective_status)
         for key in ('finishReason', 'usage', 'preset', 'toolSummary',
                      'model', 'provider_id', 'thinkingDepth', 'apiRounds',
                      'modifiedFiles', 'modifiedFileList'):

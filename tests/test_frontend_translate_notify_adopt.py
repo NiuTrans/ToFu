@@ -369,13 +369,28 @@ def test_NEUTER_reducer_call_is_load_bearing_in_notify_path(tmp_path):
 def test_on_open_lane_delegates_to_shared_reducer():
     """The on-open translation merge must DELEGATE, not re-implement: a second
     hand-written field list is exactly how the terminal-metadata list drifted
-    across three call sites before ``_mergeTerminalTurnFields``."""
+    across three call sites before ``_mergeTerminalTurnFields``.
+
+    NOTE: ``_mergeServerTranslations`` moved OUT of conversations.js in
+    slice 12 (pt_3879f00e sub-part 2) into core/conv_reducers.js — the
+    delegation assertion anchors on the LEAF (its new home), while the
+    no-inline assertion stays on conversations.js, and a third pin proves
+    the on-open lane still routes through the wrapper."""
+    # (1) The array wrapper lives in conv_reducers.js and delegates to the
+    #     shared per-message primitive.
+    with open(os.path.join(JS_DIR, 'core', 'conv_reducers.js'), encoding='utf-8') as f:
+        leaf = f.read()
+    assert '_mergeTranslationFields(destMsgs[i], sourceMsgs[i])' in leaf, (
+        'conv_reducers.js::_mergeServerTranslations no longer delegates to '
+        'the shared per-message reducer')
+    # (2) conversations.js keeps NO inline implementation of the field list.
     with open(os.path.join(JS_DIR, 'core', 'conversations.js'), encoding='utf-8') as f:
         src = f.read()
-    assert '_mergeTranslationFields(destMsgs[i], sourceMsgs[i])' in src, (
-        '_mergeServerTranslations no longer delegates to the shared reducer')
-    # The old inline implementation's tell-tale lines must be gone, so the
-    # field list exists in exactly ONE place.
     assert "lm._showingTranslation = sm._showingTranslation !== false;" not in src, (
         'inline translation field list still present in conversations.js — '
         'the shared reducer is now the single source of truth')
+    # (3) The on-open lane still routes through the (now-resident-in-leaf)
+    #     wrapper, not a re-implementation.
+    assert '_mergeServerTranslations(' in src, (
+        'conversations.js no longer calls _mergeServerTranslations — the '
+        'on-open lane lost its route to the shared wrapper')

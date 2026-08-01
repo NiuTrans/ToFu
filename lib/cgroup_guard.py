@@ -36,8 +36,29 @@ Env vars (all optional):
   TOFU_CGROUP_REQUEST_GUARD      default 1   — ③ set 0 to log-only (never raise)
   TOFU_CGROUP_DROP_LOGS          default 1   — relief also fadvise-drops logs/*.log*
   TOFU_CGROUP_LOGDROP_MIN_BYTES  default 1 MiB — size floor for the log drop
+  TOFU_CGROUP_MATERIAL_PCT       default 0.1 — % of the cgroup limit a reclaim
+                                               must reach to count as effective
+                                               relief (below it, the streak
+                                               towards the ineffective-relief
+                                               CRITICAL keeps counting)
   TOFU_CGROUP_JOURNAL            default 1   — rolling pressure journal to
                                                logs/cgroup_pressure.log
+
+What relief can and cannot do (measured 2026-07-31, do not re-litigate)
+----------------------------------------------------------------------
+Defense ② can only free what THIS process owns: its heap caches and the page
+cache of its own log files. On the shared cgroup that is noise. Over 406 real
+reliefs, cgroup usage fell 18.3 GiB in total while 367 of them moved it by
+exactly 0.0%, and the breakdown (12037 journal samples) was kmem 45–126 GiB
+plus cache 55–156 GiB against a tofu RSS of only 0.16–9.9 GiB. The rest belongs
+to sibling processes and FUSE slab, which we cannot reach.
+
+So relief is a best-effort courtesy, NOT a mitigation, and the logging must not
+imply otherwise: the relief line reports the MEASURED usage delta, and a run of
+immaterial reclaims escalates once to CRITICAL saying the squeeze is external.
+The old line printed the summed apparent size of the files advised, which
+overstated the reclaim by 234x and made 341 consecutive near-OOM ticks read as
+though they were being handled.
 """
 
 from __future__ import annotations
@@ -182,26 +203,54 @@ def fadvise_dontneed(path: str) -> int:
         return 0
 
 
-def drop_files_cache(paths, min_bytes: int = 0) -> dict:
+# Files already advised, keyed path -> (mtime_ns, size). Re-advising a file
+# whose bytes have not changed is a guaranteed no-op: its clean pages were
+# already dropped, so the kernel has nothing left to reclaim. Measured
+# 2026-07-31 — re-advising the same 57 logs moved cgroup usage by +0.01 GiB
+# (i.e. zero) while costing 57 syscalls every 30s, and, worse, kept reporting
+# their full apparent size as though that were a fresh reclaim.
+_advised_state: dict = {}
+_ADVISED_MAX = 4096
+
+
+def drop_files_cache(paths, min_bytes: int = 0, skip_unchanged: bool = True) -> dict:
     """fadvise-DONTNEED every file in *paths* at least *min_bytes* large.
 
-    Returns ``{'files': n, 'bytes': b}`` — files touched and total size
-    advised (an upper bound on what the kernel may reclaim).
+    Returns ``{'files': n, 'bytes': b, 'skipped': s}`` — files actually advised,
+    their total size, and how many were skipped as unchanged since the last
+    advise.
+
+    ``bytes`` is the size ADVISED, which is an upper bound on what the kernel
+    may reclaim — NOT a measurement of reclaimed memory. Callers that want to
+    report a reclaim figure must measure cgroup usage before/after instead; see
+    :func:`relieve_memory`.
+
+    Set ``skip_unchanged=False`` to force a re-advise (useful when the caller
+    knows the page cache was repopulated by something other than a write).
     """
     files = 0
     total = 0
+    skipped = 0
     for p in paths:
         try:
-            if min_bytes and os.path.getsize(p) < min_bytes:
-                continue
+            st = os.stat(p)
         except OSError as _e:
             logger.debug('drop files cache: unreadable (%s)', _e)
+            continue
+        if min_bytes and st.st_size < min_bytes:
+            continue
+        key = (st.st_mtime_ns, st.st_size)
+        if skip_unchanged and _advised_state.get(p) == key:
+            skipped += 1
             continue
         n = fadvise_dontneed(p)
         if n > 0:
             files += 1
             total += n
-    return {'files': files, 'bytes': total}
+            if len(_advised_state) >= _ADVISED_MAX:
+                _advised_state.clear()
+            _advised_state[p] = key
+    return {'files': files, 'bytes': total, 'skipped': skipped}
 
 
 def drop_logs_cache(log_dir: str = 'logs') -> dict:
@@ -239,11 +288,58 @@ def malloc_trim() -> bool:
         return False
 
 
+# Consecutive reliefs that failed to move cgroup usage down. Relief works on
+# OUR OWN reclaimable bytes; on a SHARED cgroup the usage can be dominated by
+# sibling processes and FUSE slab, which we structurally cannot reach. When
+# that is the case, repeating the same WARNING every 30s misrepresents an
+# unmitigated squeeze as a handled one — so escalate ONCE and say plainly that
+# the pressure originates outside this process.
+#
+# "Ineffective" is a MATERIALITY test, not ``reclaimed > 0``. On a live shared
+# cgroup the usage counter jitters constantly, so a strict >0 test sees an
+# occasional noise-sized reclaim and resets the streak — measured on the real
+# cgroup, reliefs returned 39MB / 344KB / 180KB / 0 / 0 / 180KB…, which kept
+# the streak below the limit forever and made the alarm STRUCTURALLY unable to
+# fire. That is the same class of defect as the one this epic is about (an
+# instrument that cannot report the condition it exists to report), so the bar
+# is a fraction of the cgroup limit: a reclaim too small to change even the
+# printed usage percentage is not relief.
+_ineffective_reliefs = 0
+_ineffective_escalated = False
+_INEFFECTIVE_LIMIT = 5
+
+
+def _material_reclaim_bytes(limit: Optional[int]) -> float:
+    """Smallest reclaim worth calling effective, in bytes.
+
+    Defaults to 0.1% of the cgroup limit (≈225 MB on a 220 GiB cgroup) — just
+    above the 0.05% that would round away in the ``usage %.1f%%`` we log.
+    """
+    try:
+        pct = float(os.environ.get('TOFU_CGROUP_MATERIAL_PCT', '0.1'))
+    except (ValueError, TypeError) as _e:
+        logger.debug('material reclaim: unparseable (%s)', _e)
+        pct = 0.1
+    if not limit or limit <= 0:
+        return 0.0
+    return limit * pct / 100.0
+
+
 def relieve_memory(reason: str) -> dict:
     """Drop our own reclaimable caches + trim heap. Logs usage% before/after.
 
+    The log line reports the MEASURED reclaim (cgroup usage before minus after),
+    never the apparent size of the files advised. Those two numbers differ by
+    orders of magnitude: measured live 2026-07-31, 406 reliefs reported a
+    cumulative 4272 GB of "log_pages" while cgroup usage fell by 18.3 GiB in
+    total — a 234x overstatement, and 367 of those reliefs moved usage by
+    exactly 0.0%. An instrument that reports a large reclaim while reclaiming
+    nothing is worse than no instrument: it made 341 consecutive near-OOM
+    ticks look like they were being handled.
+
     Returns a small stats dict. Safe to call anywhere; never raises.
     """
+    global _ineffective_reliefs, _ineffective_escalated
     before = pressure()
     before_pct = before['pct'] if before else None
     dropped = 0
@@ -253,10 +349,9 @@ def relieve_memory(reason: str) -> dict:
     except Exception as e:
         logger.warning('[cgroup] cache clear during relief failed: %s', e)
     trimmed = malloc_trim()
-    # Page-cache relief: drop OUR one-shot log files' clean pages. This is the
-    # lever that actually moves cgroup usage — heap caches are ~2 GiB while
-    # cached logs/snapshots can be tens of GiB. Env-off switch for debugging.
-    logs_dropped = {'files': 0, 'bytes': 0}
+    # Page-cache relief: drop OUR one-shot log files' clean pages. Env-off
+    # switch for debugging.
+    logs_dropped = {'files': 0, 'bytes': 0, 'skipped': 0}
     if os.environ.get('TOFU_CGROUP_DROP_LOGS', '1') != '0':
         try:
             logs_dropped = drop_logs_cache()
@@ -264,14 +359,53 @@ def relieve_memory(reason: str) -> dict:
             logger.warning('[cgroup] log page-cache drop failed: %s', e)
     after = pressure()
     after_pct = after['pct'] if after else None
+    # MEASURED reclaim — the only honest number available. Negative means usage
+    # grew during the relief (siblings allocating faster than we free), which is
+    # reported as 0 reclaimed rather than hidden.
+    reclaimed_bytes = None
+    if before is not None and after is not None:
+        reclaimed_bytes = max(0, before['usage'] - after['usage'])
     logger.warning('[cgroup] relief (%s): dropped %d cache entries, malloc_trim=%s, '
-                   'log_pages=%d files/%.1fMB, usage %.1f%% -> %.1f%%',
+                   'advised %d files (%d unchanged/skipped), '
+                   'RECLAIMED %s, usage %.1f%% -> %.1f%%',
                    reason, dropped, trimmed,
-                   logs_dropped['files'], logs_dropped['bytes'] / 1e6,
+                   logs_dropped.get('files', 0), logs_dropped.get('skipped', 0),
+                   ('%.1fMB' % (reclaimed_bytes / 1e6)) if reclaimed_bytes is not None
+                   else 'unknown',
                    before_pct if before_pct is not None else -1.0,
                    after_pct if after_pct is not None else -1.0)
+
+    # Escalate a structurally-ineffective relief exactly once.
+    if reclaimed_bytes is not None:
+        _material = _material_reclaim_bytes((before or {}).get('limit'))
+        if reclaimed_bytes < _material:
+            _ineffective_reliefs += 1
+        else:
+            _ineffective_reliefs = 0
+            _ineffective_escalated = False
+        if (_ineffective_reliefs >= _INEFFECTIVE_LIMIT
+                and not _ineffective_escalated):
+            _ineffective_escalated = True
+            logger.critical(
+                '[cgroup] RELIEF IS INEFFECTIVE: %d consecutive reliefs reclaimed '
+                '0 bytes while usage sits at %.1f%%. This process cannot relieve '
+                'this pressure — what we can drop (our heap caches + our own log '
+                'page cache) is noise against the total. On a SHARED cgroup the '
+                'usage is dominated by sibling processes and FUSE slab, which we '
+                'structurally cannot reach. Treat this as an unmitigated '
+                'environment squeeze: an OOM SIGKILL is possible at any time and '
+                'no in-process action will prevent it.',
+                _ineffective_reliefs,
+                after_pct if after_pct is not None else -1.0)
+            audit_log('cgroup_relief_ineffective',
+                      consecutive=_ineffective_reliefs,
+                      usage_pct=round(after_pct, 1) if after_pct is not None else None)
+
     return {'reason': reason, 'dropped': dropped, 'trimmed': trimmed,
-            'log_pages_bytes': logs_dropped['bytes'],
+            'log_pages_bytes': logs_dropped.get('bytes', 0),
+            'advised_files': logs_dropped.get('files', 0),
+            'skipped_unchanged': logs_dropped.get('skipped', 0),
+            'reclaimed_bytes': reclaimed_bytes,
             'pct_before': before_pct, 'pct_after': after_pct}
 
 

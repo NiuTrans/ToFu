@@ -29,6 +29,10 @@ class AnthropicSSETranslator:
 
     def __init__(self, model: str = ''):
         self.model = model
+        # Per-request reverse map for cloaked (TitleCase) tool names — set by
+        # the pre-flight when the OAuth cloak renamed request tools; only
+        # names THIS request renamed are restored (lib/oauth/outbound).
+        self.tool_name_reverse: dict = {}
         # content-block index → 'text' | 'tool_use' | 'thinking'
         self._block_types: dict = {}
         # Running RAW Anthropic usage, merged across message_start (carries
@@ -66,11 +70,14 @@ class AnthropicSSETranslator:
             btype = block.get('type')
             self._block_types[idx] = btype
             if btype == 'tool_use':
+                _name = block.get('name', '')
+                if self.tool_name_reverse:
+                    _name = self.tool_name_reverse.get(_name, _name)
                 return [{'choices': [{'delta': {'tool_calls': [{
                     'index': idx,
                     'id': block.get('id', ''),
                     'type': 'function',
-                    'function': {'name': block.get('name', ''), 'arguments': ''},
+                    'function': {'name': _name, 'arguments': ''},
                 }]}}]}]
             return []
 

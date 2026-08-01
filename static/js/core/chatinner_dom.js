@@ -184,19 +184,34 @@ function assertChatInnerOrder(inner, conv, site) {
       const mid = el.getAttribute && el.getAttribute('data-msg-id');
       if (mid) order.push({ furniture: false, id: mid });
     }
-    /* Index each rendered message against the array. */
+    /* Index each rendered message against the array. DUPLICATE-ID TOLERANCE
+     * (pt_e0ea29f2): a conv can carry two entries sharing one _msgId (an
+     * aborted residue + its retry — measured on conv ms8bx7089s3268). A bare
+     * last-wins map made the FIRST dup bubble resolve to the SECOND's index,
+     * so a FAITHFUL render of a dup-id conv violated this very assertion.
+     * Map id → ordered index list; the k-th DOM node with an id consumes the
+     * k-th array occurrence — a faithful dup render passes, a genuinely
+     * displaced dup (one bubble rendered after a later index) still trips. */
     const pos = Object.create(null);
     for (let i = 0; i < conv.messages.length; i++) {
       const m = conv.messages[i];
-      if (m && m._msgId) pos[m._msgId] = i;
+      if (m && m._msgId) (pos[m._msgId] || (pos[m._msgId] = [])).push(i);
     }
+    const consumed = Object.create(null);
     let prevIdx = -1;
     let prevWasMsg = false;
     let pendingFurniture = false;
     let problem = '';
     for (const entry of order) {
       if (entry.furniture) { pendingFurniture = true; continue; }
-      const idx = pos[entry.id];
+      const _occList = pos[entry.id];
+      let idx;
+      if (_occList === undefined) { idx = undefined; }
+      else {
+        const _k = consumed[entry.id] || 0;
+        consumed[entry.id] = _k + 1;
+        idx = _occList[Math.min(_k, _occList.length - 1)];
+      }
       if (idx === undefined) { prevWasMsg = false; pendingFurniture = false; continue; }
       if (prevIdx >= 0 && idx <= prevIdx) {
         problem = 'OUT OF ORDER: ' + entry.id + ' (array idx ' + idx +

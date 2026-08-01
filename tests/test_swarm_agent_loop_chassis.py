@@ -155,12 +155,19 @@ class TestSwarmOnChassis(unittest.TestCase):
         agent = _mk_agent(dispatch_fn=dispatch, max_rounds=2)
         agent._run_loop(time.time())
         self.assertEqual(agent.result.status, SubAgentStatus.COMPLETED.value)
-        self.assertEqual(disp['n'], 2, 'must run EXACTLY max_rounds rounds — '
-                         'a tools_terminal_round=True regression adds a 3rd')
-        self.assertEqual(agent.result.rounds_used, 2)
-        self.assertTrue(agent.result.final_answer.startswith('[Partial'),
+        # 2 LOOP rounds + 1 tool-less WRAP-UP turn. The wrap-up is the
+        # deliberate replacement for scraping the last assistant line out of
+        # history: a halted agent now WRITES UP what it established, so the
+        # rounds it already paid for are not discarded. ``rounds_used`` still
+        # counts loop rounds only, so a tools_terminal_round=True regression
+        # (which would add a real 3rd LOOP round) still bites there.
+        self.assertEqual(disp['n'], 3, '2 loop rounds + 1 wrap-up turn')
+        self.assertEqual(agent.result.rounds_used, 2,
+                         'must run EXACTLY max_rounds LOOP rounds — a '
+                         'tools_terminal_round=True regression adds a 3rd')
+        self.assertTrue(agent.result.final_answer.startswith('[Stopped'),
                         agent.result.final_answer[:80])
-        self.assertIn('Max rounds (2) reached', agent.result.final_answer)
+        self.assertIn('max rounds (2) reached', agent.result.final_answer)
         self.assertEqual(len(agent._tool_batches), 2)
 
     def test_abort_after_tool_round_cancels(self):

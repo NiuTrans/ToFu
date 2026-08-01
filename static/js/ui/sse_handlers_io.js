@@ -50,51 +50,23 @@ function _handleToolProgress(ev, c) {
   const convId = c.convId, taskId = c.taskId;
   const assistantMsg = c.assistantMsg;
   const _epCriticPhase = c.epCriticPhase, _epCriticMsg = c.epCriticMsg;
-      /* ── Streaming run_command output: append chunk to the round's
-       *    partial output buffer and re-render so the user sees it live. */
+      /* ── Streaming run_command output + in-flight round state ──
+       *    ★ RENDER_CONTRACT Phase 3 (pt_1a82ffb3): applied through the ONE
+       *    pure reducer (reduceStreamState 'tool_progress' action) instead of
+       *    the inline field-by-field mutation this handler used to carry. That
+       *    inline copy was the LAST tool frame not folded through the reducer,
+       *    which meant everything it wrote (_partialOutput, the batch tally,
+       *    qrImages, and now the execution deadline) existed ONLY on the live
+       *    path and was absent from projectColdSnapshot — so switching
+       *    conversations mid-command lost it. Delegating makes the live and
+       *    cold projections the same fixed point by construction.
+       *
+       *    The reducer owns round-state writes; the DOM concerns below
+       *    (twUpdate, terminal auto-scroll) stay here — the purity guard
+       *    forbids them inside the reducer. */
       const _trMsg = _epCriticPhase ? _epCriticMsg : assistantMsg;
       if (_trMsg && _trMsg.toolRounds) {
-        const r = (ev.toolCallId
-          ? _trMsg.toolRounds.find(rr => rr.toolCallId === ev.toolCallId)
-          : null
-        ) || _trMsg.toolRounds.find(rr => rr.roundNum === ev.roundNum);
-        if (r) {
-          // _partialOutput is the live, growing terminal buffer.
-          // It's replaced wholesale by meta.output once tool_result arrives.
-          if (typeof r._partialOutput !== "string") r._partialOutput = "";
-          r._partialOutput += (ev.chunk || "");
-          /* ★ Batch per-item progress (pt_67ffc2b7). A batch call
-           * (web_search(queries=[…]) / fetch_url(urls=[…])) is ONE round, so
-           * its terminal tool_result is the round's only transition — a 2s
-           * query beside a 40s one is indistinguishable from three slow ones.
-           * The backend now reports each item as it settles; store the running
-           * tally so the row can render "2/3" with the item that just landed.
-           * Kept STRICTLY separate from _partialOutput above: that is
-           * run_command's terminal pane and is wiped by tool_result, so a
-           * search label routed through it would be printed in a terminal box
-           * and then silently lost. */
-          if (ev.batchTotal != null) {
-            r._batchTotal = ev.batchTotal;
-            if (ev.batchDone != null && (r._batchDone == null || ev.batchDone > r._batchDone)) {
-              r._batchDone = ev.batchDone;   // monotonic: never render backwards
-            }
-            if (ev.batchItem) {
-              if (!Array.isArray(r._batchItems)) r._batchItems = [];
-              r._batchItems.push({ item: ev.batchItem, ok: ev.batchOk !== false });
-            }
-            if (ev.batchOk === false) r._batchFailed = (r._batchFailed || 0) + 1;
-          }
-          /* ★ Live QR: the backend recovers a scannable bitmap from terminal
-           * block art WHILE the command is still running. That timing IS the
-           * feature — a scan-to-login command blocks waiting for the scan, so
-           * a code that only appears at finalize arrives after the window has
-           * closed. Store it on the round; the running-state renderer draws it
-           * above the live output pane. The event carries the full accumulated
-           * list (not just the newest), so a late reconnect gets every code. */
-          if (Array.isArray(ev.qrImages) && ev.qrImages.length) {
-            r.qrImages = ev.qrImages;
-          }
-        }
+        reduceStreamState(_trMsg, ev);
       }
       if (typeof twUpdate === 'function') twUpdate(convId);
       // Auto-scroll the live terminal box(es) to the bottom so the newest

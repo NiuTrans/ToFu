@@ -93,6 +93,11 @@ async function regenerateFromUser(idx) {
     _regenAbortReason = 'timeout';
     _regenAbortCtrl.abort();
   }, 90000);
+  /* ★ Startup-stop affordance (pt_fa32a2351b3840ad): the connecting POST
+   *   window shows a STOP button; a click owner-tags conv._genStartStop with
+   *   THIS controller and aborts it — the catch below matches that tag. */
+  conv._genStartCtrl = _regenAbortCtrl;
+  conv._genStartStop = null;
   const _regenText = msg.content || '';
   const _regenWillTranslate = _regenConfig.autoTranslate && /[\u4e00-\u9fff\u3400-\u4dbf]/.test(_regenText);
   if (_regenWillTranslate) {
@@ -107,6 +112,8 @@ async function regenerateFromUser(idx) {
      *   assistant side is not blank during the synchronous /api/chat/regenerate
      *   POST. Upgraded in place to the streaming bubble on taskId. */
     _renderTranslatingBubble(t('sidebar.connecting'));
+    /* ★ Flip the composer to a STOP button for the connecting window. */
+    updateSendButton();
   }
 
   try {
@@ -154,16 +161,42 @@ async function regenerateFromUser(idx) {
 
     // Push assistant msg + connect to task
     const taskId = result.taskId;
-    const assistantMsg = {
+    const _mintedPlaceholder = {
       role: "assistant", content: "", thinking: "",
       timestamp: Date.now(), toolRounds: [],
       model: _regenConfig.model || serverModel,
       _msgId: _regenAssistantMsgId,
     };
     // ★ Endpoint mode: mark as planner so SSE reconnection identifies it correctly
-    if (_regenConfig.endpointMode) assistantMsg._isEndpointPlanner = true;
-    _ensureMsgId(assistantMsg);  // no-op when _msgId already set
-    conv.messages.push(assistantMsg);
+    if (_regenConfig.endpointMode) _mintedPlaceholder._isEndpointPlanner = true;
+    /* ★ Dedupe (pt_44e985ec): an early attach during the POST window may
+     *   already have created + bound this task's placeholder — adopt it
+     *   instead of pushing a duplicate (the 等待中…↔推理中 flip-flop class). */
+    const _ph = (typeof _adoptTaskPlaceholder === 'function')
+      ? _adoptTaskPlaceholder(conv, taskId, _mintedPlaceholder)
+      : { msg: _mintedPlaceholder, adopted: false };
+    const assistantMsg = _ph.msg;
+    if (_ph.adopted) {
+      console.warn(
+        `[regenerateFromUser] ♻ adopted existing placeholder bound to task=${taskId.slice(0,8)} ` +
+        `(canonical msgId re-stamped) — no duplicate push for conv=${convId.slice(0,8)}`
+      );
+      if (typeof _reportClientError === 'function') {
+        _reportClientError(
+          `[regenerateFromUser] adopted existing task placeholder instead of pushing a duplicate ` +
+          `conv=${convId.slice(0,8)} task=${taskId.slice(0,8)}`);
+      }
+      if (_regenConfig.endpointMode) assistantMsg._isEndpointPlanner = true;
+      /* The adopted placeholder was minted by the early attach under a
+       * different _msgId (the helper just re-stamped the canonical one) —
+       * re-key the live streaming bubble so identity resolution + translation
+       * frames keep landing on the SAME message. */
+      const _smEl = (activeConvId === convId) ? document.getElementById('streaming-msg') : null;
+      if (_smEl && _regenAssistantMsgId) _smEl.setAttribute('data-msg-id', _regenAssistantMsgId);
+    } else {
+      _ensureMsgId(assistantMsg);  // no-op when _msgId already set
+      conv.messages.push(assistantMsg);
+    }
     conv.activeTaskId = taskId;
     saveConversations(convId);
 
@@ -173,14 +206,11 @@ async function regenerateFromUser(idx) {
     connectToTask(convId, taskId);
 
   } catch (e) {
-    const _userClickedStop = !!conv._translateAborted;
-    if (e.name === 'AbortError' && _regenWillTranslate && _userClickedStop) {
-      console.log('%c[regenerateFromUser] ✗ Aborted during translation by user', 'color:#f59e0b;font-weight:bold');
-      _removeTranslatingBubble();
-      saveConversations(convId);
-      syncConversationToServer(conv, { allowTruncate: true });
-      buildTurnNav(conv);
-      Api.chat.abortConv(convId);
+    const _userClickedStop = !!conv._translateAborted
+      || conv._genStartStop === _regenAbortCtrl;
+    if (e.name === 'AbortError' && _userClickedStop) {
+      console.log('%c[regenerateFromUser] ✗ Aborted during startup by user', 'color:#f59e0b;font-weight:bold');
+      await _userStopDuringStartup(conv, convId, { syncOpts: { allowTruncate: true } });
     } else if (e.name === 'AbortError' && _regenAbortReason === 'timeout'
                && typeof _recoverTimedOutChatTask === 'function'
                && await _recoverTimedOutChatTask(convId, { endpointMode: _regenConfig.endpointMode })) {
@@ -218,6 +248,11 @@ async function regenerateFromUser(idx) {
     }
   } finally {
     clearTimeout(_regenTimeout);
+    /* ★ Identity-guarded startup-marker cleanup (only OURS). */
+    if (conv._genStartCtrl === _regenAbortCtrl || conv._genStartStop === _regenAbortCtrl) {
+      conv._genStartCtrl = null;
+      conv._genStartStop = null;
+    }
     // ★ Fix ①: teardown the pre-POST placeholder unconditionally (it is now
     //   rendered whether or not we translated). Idempotent once the success
     //   path swapped it for the streaming bubble.
@@ -226,9 +261,12 @@ async function regenerateFromUser(idx) {
       conv._translating = false;
       conv._translateAborted = false;
       conv._translateAbortCtrl = null;
-      updateSendButton();
       renderConversationList();
     }
+    /* ★ Unconditional re-eval (startup-stop affordance): the connecting
+     *   window paints a STOP button; generic-error exits must not strand it. */
+    updateSendButton();
+    if (_regenWillTranslate) renderConversationList();
   }
 }
 

@@ -566,17 +566,28 @@ function _bgRefreshChat(conv) {
  * streaming boundary, is the documented root of twin bubbles. Keying on the
  * stable id lets the reconcile REUSE the drifted node (re-stamping its
  * positional `id`/index in place) instead of tearing it down. */
-function _reconcileFindEl(inner, msg, i) {
+function _reconcileFindEl(inner, msg, i, occurrence) {
   if (msg && msg._msgId && inner) {
     /* Has a stable id → match by it ONLY. A miss means this message is NEW to
      * the DOM (or its node lives elsewhere); we must NOT fall back to the
      * positional `msg-${i}` handle, because after an index shift that slot
      * belongs to a DIFFERENT message — grabbing it would reuse the wrong node
      * (and strand the real one). The caller treats null as "insert". */
-    if (typeof CSS !== 'undefined' && CSS.escape) {
-      return inner.querySelector('[data-msg-id="' + CSS.escape(msg._msgId) + '"]');
-    }
-    return inner.querySelector('[data-msg-id="' + msg._msgId + '"]');
+    const sel = (typeof CSS !== 'undefined' && CSS.escape)
+      ? '[data-msg-id="' + CSS.escape(msg._msgId) + '"]'
+      : '[data-msg-id="' + msg._msgId + '"]';
+    const nodes = inner.querySelectorAll(sel);
+    if (!nodes || !nodes.length) return null;
+    /* ★ Duplicate-id tolerance (pt_e0ea29f2): a conversation can carry TWO
+     * array entries sharing one _msgId (an aborted streaming residue + its
+     * retry, measured on conv ms8bx7089s3268 — idx1/idx2 both tmp_196fedef).
+     * A bare querySelector returns the FIRST node for BOTH entries, so the
+     * reconcile would pour the second entry's content into the first bubble
+     * and leave the second unrendered. Key by OCCURRENCE instead: the k-th
+     * array entry with this id maps to the k-th DOM node carrying it; an
+     * occurrence with no node is an INSERT, never a wrong reuse. */
+    const k = occurrence || 0;
+    return (k < nodes.length) ? nodes[k] : null;
   }
   /* Legacy id-less message: the positional handle is the only key available. */
   return document.getElementById('msg-' + i);
@@ -605,10 +616,25 @@ function _msgElIndex(el) {
   const conv = (typeof getActiveConv === 'function') ? getActiveConv() : null;
   const mid = node.getAttribute && node.getAttribute('data-msg-id');
   if (mid && conv && Array.isArray(conv.messages)) {
-    for (let i = 0; i < conv.messages.length; i++) {
-      if (conv.messages[i] && conv.messages[i]._msgId === mid) return i;
+    /* ★ Duplicate-id tolerance (pt_e0ea29f2): with two array entries sharing
+     * one _msgId, a bare first-match lookup would point the SECOND bubble's
+     * action buttons at the FIRST turn. Resolve the node's ORDINAL among
+     * same-id DOM siblings, then take that array occurrence — the k-th
+     * bubble acts on the k-th entry. */
+    let ordinal = 0;
+    if (node.parentNode) {
+      const sel = '[data-msg-id="' + ((typeof CSS !== 'undefined' && CSS.escape) ? CSS.escape(mid) : mid) + '"]';
+      const same = node.parentNode.querySelectorAll(sel);
+      for (let k = 0; k < same.length; k++) {
+        if (same[k] === node) { ordinal = k; break; }
+      }
     }
-    return -1;  // stable id present but no longer in the list → no-op
+    const idxs = [];
+    for (let i = 0; i < conv.messages.length; i++) {
+      if (conv.messages[i] && conv.messages[i]._msgId === mid) idxs.push(i);
+    }
+    if (!idxs.length) return -1;  // stable id present but no longer in the list → no-op
+    return idxs[Math.min(ordinal, idxs.length - 1)];
   }
   /* Legacy id-less node: fall back to the positional `id="msg-N"` handle. */
   const m = node.id && node.id.match(/^msg-(\d+)$/);
@@ -830,6 +856,13 @@ function renderChat(conv, forceScroll) {
     /* Anchor for insertion: the node the reconciled sequence must sit BEFORE.
      * We walk forward, placing each node right after the previous one. */
     let _prevEl = null;
+    /* Duplicate-id occurrence counter (pt_e0ea29f2): counts occurrences of a
+     * _msgId WITHIN this rendered pass (from startIdx), so the k-th rendered
+     * array entry with a duplicated id maps to the k-th matching DOM node —
+     * see _reconcileFindEl's occurrence parameter. A dup pair split by the
+     * lazy window renders only the in-window occurrence as k=0, which still
+     * maps to the only in-DOM node — correct. */
+    const _idOccurrence = Object.create(null);
     /* HEAD anchor for the FIRST reconciled message (both _prevEl and _cursor
      * still null). It must be the first MESSAGE node, NOT `inner.firstChild` —
      * when a lazy window is active `firstChild` is `#_lazyLoadSentinel`, and
@@ -853,7 +886,12 @@ function renderChat(conv, forceScroll) {
     for (let i = startIdx; i < _surgTo; i++) {
       if (i === _skipIdx) continue;  // streaming message — leave #streaming-msg alone
       const msg = conv.messages[i];
-      const el = _reconcileFindEl(inner, msg, i);
+      let _occ = 0;
+      if (msg && msg._msgId) {
+        _occ = _idOccurrence[msg._msgId] || 0;
+        _idOccurrence[msg._msgId] = _occ + 1;
+      }
+      const el = _reconcileFindEl(inner, msg, i, _occ);
       if (el) {
         /* Element exists (matched by _msgId or legacy index) — check if content
          * changed. A drifted node keeps its live DOM state; we only re-stamp its

@@ -22,32 +22,20 @@ from lib.oauth import outbound
 
 class TestClaudeResolve(unittest.TestCase):
 
-    def test_prepends_identity_block_and_headers(self):
+    def test_resolves_headers_without_mutating_messages(self):
+        # Since S1 (2026 cloaking port) the system structure is owned by
+        # apply_claude_cloak at the Anthropic-body boundary — resolve only
+        # swaps in the live token + the identity HEADER suite.
         body = {'messages': [{'role': 'user', 'content': 'hi'}]}
         with mock.patch('lib.oauth.claude.claude_get_valid_token',
                         return_value='sk-ant-oat01-AAA'):
             key, hdrs, out = outbound.resolve_oauth_request('claude', body, None)
         self.assertEqual(key, 'sk-ant-oat01-AAA')
-        # Identity is its OWN first system block (not concatenated).
-        first = out['messages'][0]
-        self.assertEqual(first['role'], 'system')
-        self.assertTrue(first['content'].startswith(outbound.CLAUDE_CODE_IDENTITY))
-        self.assertEqual(out['messages'][1]['content'], 'hi')
+        self.assertEqual(out['messages'], [{'role': 'user', 'content': 'hi'}])
         self.assertIn('claude-code-20250219', hdrs['anthropic-beta'])
         self.assertIn('oauth-2025-04-20', hdrs['anthropic-beta'])
         self.assertEqual(hdrs['x-app'], 'cli')
         self.assertTrue(hdrs['User-Agent'].startswith('claude-cli/'))
-
-    def test_does_not_double_prepend_identity(self):
-        body = {'messages': [
-            {'role': 'system', 'content': outbound.CLAUDE_CODE_IDENTITY},
-            {'role': 'user', 'content': 'hi'},
-        ]}
-        with mock.patch('lib.oauth.claude.claude_get_valid_token',
-                        return_value='t'):
-            _key, _hdrs, out = outbound.resolve_oauth_request('claude', body, None)
-        self.assertEqual(sum(1 for m in out['messages']
-                             if m['content'].startswith(outbound.CLAUDE_CODE_IDENTITY)), 1)
 
     def test_merge_betas_leads_with_mandatory(self):
         body = {'messages': []}
@@ -159,15 +147,22 @@ class TestProvisioning(unittest.TestCase):
         # Guards the preset model lists against silently drifting stale — the
         # managed providers must ship the current flagship IDs.
         self._run(outbound.provision_oauth_provider, 'claude')
-        self._run(outbound.provision_oauth_provider, 'codex')
+        # Codex provision reads plan_type from the stored token — stub it out
+        # so the test never touches the real data/config token file.
+        with mock.patch('lib.oauth.token_store.load_token', return_value=None):
+            self._run(outbound.provision_oauth_provider, 'codex')
         cfg = self._load()
         claude = next(p for p in cfg['providers'] if p['id'] == 'oauth_claude')
         codex = next(p for p in cfg['providers'] if p['id'] == 'oauth_codex')
         claude_ids = [m['model_id'] for m in claude['models']]
         codex_ids = [m['model_id'] for m in codex['models']]
-        # Latest verified GA flagships (Anthropic 2025-11-24 / OpenAI Codex).
+        # Latest verified flagships (Anthropic 2025-11-24 / CLIProxyAPI v7
+        # codex registry, synced 2026-07-31). Unknown plan → full pro table.
         self.assertIn('claude-opus-4-5-20251101', claude_ids)
-        self.assertIn('gpt-5.2-codex', codex_ids)
+        self.assertIn('gpt-5.4', codex_ids)
+        self.assertIn('gpt-5.3-codex-spark', codex_ids)
+        # The retired pre-S1 list must stay retired.
+        self.assertNotIn('gpt-5.2-codex', codex_ids)
         # Claude models must keep the thinking capability.
         self.assertTrue(all('thinking' in m['capabilities'] for m in claude['models']))
 

@@ -18,18 +18,19 @@ starting the agent:
   * ``PERMISSION_KEYS`` — the canonical tier names.
 """
 
-PERMISSION_KEYS = ('allow_write', 'allow_exec', 'allow_gui')
+PERMISSION_KEYS = ('allow_write', 'allow_exec', 'allow_gui', 'allow_egress')
 
 # Deny-by-default: enabling the agent alone grants ONLY read-only tools.
 SAFE_DEFAULT = {
     'allow_write': False,
     'allow_exec': False,
     'allow_gui': False,
+    'allow_egress': False,
 }
 
 
 def build_permissions(allow_write=False, allow_exec=False,
-                      allow_gui=False, allow_all=False) -> dict:
+                      allow_gui=False, allow_egress=False, allow_all=False) -> dict:
     """Return a normalised permissions dict.
 
     ``allow_all`` is a master override that turns on every tier. Each
@@ -41,6 +42,7 @@ def build_permissions(allow_write=False, allow_exec=False,
         'allow_write': master or bool(allow_write),
         'allow_exec': master or bool(allow_exec),
         'allow_gui': master or bool(allow_gui),
+        'allow_egress': master or bool(allow_egress),
     }
 
 

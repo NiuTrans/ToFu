@@ -92,10 +92,18 @@ window._loadFeatureBundle = _loadFeatureBundle;
  * would otherwise recurse) by checking identity. Zero-arg entry points are
  * the norm (all are onclick= handlers), but args are forwarded for safety. */
 function _installFeatureStub(name) {
-  /* If the real function is ALREADY present (dev fallback: the feature
-   * files loaded as individual <script> tags in the core set), do not
-   * clobber it with a stub. */
+  /* If the real function is ALREADY present, do not clobber it with a
+   * stub. Two cases:
+   *   1. dev fallback (individual <script> tags): no __FEATURE_BUNDLE_SRC__,
+   *      the real feature functions are already on the page;
+   *   2. MIXED-SHAPE transition (2026-08-01 conv-sync incident): a core
+   *      bundle built from a manifest that still INLINES the module
+   *      (real fn defined) served together with a feature-loader whose
+   *      stub list already names it. Clobbering the real fn here kills
+   *      its wiring the moment the feature bundle 404s or lacks the
+   *      not-yet-deferred module. Skip — the real fn wins. */
   if (!window.__FEATURE_BUNDLE_SRC__) return;
+  if (typeof window[name] === 'function') return;
   const stub = function () {
     const args = arguments;
     _loadFeatureBundle().then((loaded) => {
@@ -129,6 +137,11 @@ const _DEFERRED_ENTRY_POINTS = [
   // openers — projectBrainRefresh (conv-switch) + closeProjectBrain (overlay
   // onclick) are intentionally NOT here so conv-switch never loads the bundle.
   'openProjectBrain', 'toggleProjectBrain', 'openProjectBrainInfluence',
+  // Cross-tab sync boot wiring (deferred 2026-07-31, Epic-E sub-part 3
+  // slice A). main.js calls _wireConvSyncPush typeof-guarded at boot —
+  // this stub loads the feature bundle and dispatches to the real fn, so
+  // the conv-sync push subscription still wires right after boot.
+  '_wireConvSyncPush',
 ];
 _DEFERRED_ENTRY_POINTS.forEach(_installFeatureStub);
 window._DEFERRED_ENTRY_POINTS = _DEFERRED_ENTRY_POINTS;

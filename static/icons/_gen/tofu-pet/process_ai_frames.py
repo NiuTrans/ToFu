@@ -6,22 +6,72 @@ PIPELINE (raw 1024² chroma-green PNG → shipped transparent PNG)
 The raw poses live beside this script at ai/raw_<pose>.png (generated with the
 image tool, one img2img edit per pose off ai/hero_v1.png — see JOURNAL
 2026-07-30). Each raw file is a cream tofu cube on a near-pure green backdrop.
+
+★ ONE GLOBAL SCALE, ONE SHARED ANCHOR (2026-07-31 rewrite — read this before
+  touching any step). The previous pipeline trimmed EACH frame to its OWN alpha
+  bbox and scaled it so ITS OWN longest side hit MAX_SIDE. That makes the scale
+  factor a FUNCTION OF THE POSE, which broke the character in three separate
+  ways, all measured on the shipped frames:
+
+    · SIZE WOBBLE. Scale spanned 0.1837–0.2319 (26%). A rigid facial feature
+      (blush cheek-to-cheek span) therefore varied 16.5% across the frames that
+      share the character's stance, and 9.7% within walk1..4 alone — i.e. the
+      character breathed a tenth of its own width 13 times a second while
+      walking. Read as "glitching". (Same-stance is the population that matters:
+      scratch1/scratch2 are deliberate stretch/squash extremes whose size SHOULD
+      differ. Over all 22 frames the figure was 73.8% before / 50.0% after, but
+      most of that is pose amplitude the artist drew, not wobble — see the
+      scale-fidelity note below.)
+    · LATERAL TELEPORT. Re-centring on the INK bbox means asymmetric FX (the
+      thinking bubble, alert/celebrating sparkles) shove the BODY sideways: the
+      body centre sat −2.20..+0.06 px off sprite centre, an 8%-of-width jump
+      fired by a mere MOOD change, with nothing actually moving.
+    · FX PAY FOR THEMSELVES IN BODY SIZE. A pose whose FX enlarged the ink box
+      got scaled DOWN to fit, shrinking the body to make room for its sparkles.
+
+  The raw masters are NOT at fault and must not be redrawn: body width across
+  walk1..4 varies only 1.2% in the raws vs 6.4% shipped. The defect was 100%
+  downstream, so the fix is here.
+
+  THE CORRECTNESS CRITERION IS SCALE FIDELITY, NOT SIZE EQUALITY. Poses are
+  allowed to differ in size — the artist drew scratch1 turned/compressed and
+  scratch2 squashed wide. What must hold is that every shipped frame is its
+  master times the SAME constant: measured shipped/master body-width ratio is
+  0.17113..0.17288 against S=0.171674 (max 0.70% deviation), and the two
+  extreme poses deviate +0.10% / -0.31% — LESS than the ordinary frames — so
+  their 0.56 and 1.56 aspect ratios are handled correctly rather than being
+  mangled. Any size difference that survives this check is the drawings'.
+
+  Both fixes are one idea: measure the CHARACTER, not the ink. For every frame
+  we locate the BODY (the largest opaque connected component — the tofu cube,
+  which excludes detached FX) and derive two anchors from it: the body's centre
+  X and the ink's foot line Y. Then ONE scale, computed once from the extremes
+  across ALL frames, maps every raw into an IDENTICAL canvas with those anchors
+  at fixed coordinates. Size constancy and registration are then STRUCTURAL —
+  properties of the layout, not a coincidence that holds until someone adds a
+  pose with bigger sparkles.
+
 For every ENGINE frame name in FRAME_SOURCES we:
 
   1. CHROMA-KEY the green out. Distance in "greenness" space
      (g - max(r, b)) with a soft ramp, so the dark outline keeps its edge
      instead of being eaten, then DESPILL (clamp g to max(r, b)) so the cream
      body doesn't carry a green fringe.
-  2. TRIM to the alpha bounding box — NO padding. The engine's CSS
-     (object-fit:contain) bottom-aligns the art in the pet's box, so the feet
-     of every frame share one baseline and squash/stretch poses keep their
-     height contrast. Horizontal centring is what the facing mirror flips
-     about, so the trim is re-centred, not left where the raw put it.
-  3. DOWNSCALE so the longest side is ≤ MAX_SIDE (the pet ships at 30px; 3×
-     that plus headroom for CSS filters).
+  2. MEASURE the anchors: body centre X (largest opaque component, so FX are
+     excluded) and foot line Y (bottom of ALL ink — the feet are the lowest
+     thing drawn, and a cast shadow would key out with the backdrop).
+  3. COMPOSITE onto the SHARED canvas at ONE global scale, with body centre on
+     the canvas midline and the foot line on the canvas bottom. No per-frame
+     trim, no per-frame normalisation. The canvas is symmetric about the body
+     centre so the CSS facing mirror (scaleX) pivots on the body, not on
+     wherever this pose's FX happened to land.
   4. DERIVED frames: walk5..8 replay walk1..4 (the stride's second half-cycle
      is the same four drawings), groom1/3 are ±6° rotations of groom2 (the
      wobble the pose ticker plays).
+
+Because every frame now shares one canvas, `object-fit:contain` in the CSS is a
+NO-OP scale (all frames identical size) rather than a per-frame renormalisation
+— which is precisely why the wobble is gone rather than merely reduced.
 
 USAGE
 ─────
@@ -46,8 +96,12 @@ REPO = Path(__file__).resolve().parents[4]
 RAW_DIR = Path(__file__).resolve().parent / '_candidates' / 'ai'
 OUT_DIR = REPO / 'static' / 'icons' / 'pet' / 'tofu'
 
-MAX_SIDE = 160          # px cap on a frame's longest edge
+MAX_SIDE = 160          # px cap on the SHARED canvas's longest edge
 KEY_T0, KEY_T1 = 28, 78  # greenness ramp: <=T0 opaque, >=T1 transparent
+# Opacity above which a pixel counts as "the character" when measuring anchors.
+# Deliberately well above the keyer's soft-ramp tail so a halo of half-keyed
+# green fringe cannot drag the body centre or the foot line.
+INK_A = 60
 
 # engine frame name → (raw pose file, rotate_deg)
 FRAME_SOURCES = {
@@ -90,7 +144,13 @@ def _key_out_green(im):
     return Image.fromarray(out, 'RGBA')
 
 
-def _process(src_path, rotate_deg):
+def _keyed(src_path, rotate_deg):
+    """Keyed + rotated RGBA for one raw pose, cropped to its ink (no scaling).
+
+    The crop is a pure translation — it removes empty backdrop only, so it
+    cannot change the character's size. All sizing happens once, globally, in
+    _layout(); this function must never scale.
+    """
     im = _key_out_green(Image.open(src_path))
     bbox = im.getbbox()
     if not bbox:
@@ -101,17 +161,86 @@ def _process(src_path, rotate_deg):
         bbox = im.getbbox()
         if bbox:
             im = im.crop(bbox)
-    if max(im.size) > MAX_SIDE:
-        s = MAX_SIDE / max(im.size)
-        im = im.resize((max(1, round(im.width * s)), max(1, round(im.height * s))),
-                       Image.LANCZOS)
     return im
 
 
+def _anchors(im):
+    """(body_cx, foot_y, ink_left, ink_right, ink_top) in this image's own px.
+
+    body_cx is the horizontal centre of the BODY — the largest opaque connected
+    component — NOT of the ink. That distinction is the whole point: the ink box
+    includes detached FX (the thinking bubble, alert/celebrating sparkles) which
+    sit off to one side, so centring on ink shifts the body by a pose-dependent
+    amount and the pet appears to jump sideways when its mood changes.
+
+    foot_y is the bottom of ALL ink: the feet are the lowest thing drawn, and
+    the raws carry no cast shadow (it keys out with the backdrop), so the ink
+    bottom IS the foot line. Anchoring it puts every pose's feet on one ground
+    line, which is what makes a squash pose settle instead of hover.
+    """
+    import numpy as np
+    from scipy import ndimage
+
+    a = np.asarray(im)
+    solid = a[..., 3] > INK_A
+    if not solid.any():
+        raise SystemExit('ERROR: frame has no opaque ink — keyer thresholds off?')
+    labels, n = ndimage.label(solid)
+    if n < 1:
+        raise SystemExit('ERROR: no connected component found in frame')
+    # largest component by pixel count (label 0 is background)
+    sizes = ndimage.sum(solid, labels, range(1, n + 1))
+    body = labels == (int(np.argmax(sizes)) + 1)
+    bys, bxs = np.nonzero(body)
+    iys, ixs = np.nonzero(solid)
+    return ((bxs.min() + bxs.max()) / 2.0,
+            float(iys.max()), float(ixs.min()), float(ixs.max()), float(iys.min()))
+
+
+def _layout(keyed):
+    """One global scale + one canvas size for ALL frames.
+
+    Derived from the extremes across every frame so nothing is ever clipped:
+    the canvas must reach the furthest ink LEFT and RIGHT of any body centre,
+    and the furthest ink ABOVE any foot line. It is made SYMMETRIC about the
+    body centre (half-width = max of the two reaches) because the CSS facing
+    flip is scaleX on the whole frame: on an asymmetric canvas that mirror
+    would pivot on the canvas midline rather than on the body, translating the
+    character sideways every time it turns.
+
+    Returns (scale, canvas_w, canvas_h, half_w_raw).
+    """
+    reach_l = max(bcx - ix0 for bcx, _fy, ix0, _ix1, _iy0 in keyed.values())
+    reach_r = max(ix1 - bcx for bcx, _fy, _ix0, ix1, _iy0 in keyed.values())
+    height = max(fy - iy0 for _bcx, fy, _ix0, _ix1, iy0 in keyed.values())
+    half = max(reach_l, reach_r)
+    scale = MAX_SIDE / max(2.0 * half, height)
+    return scale, round(2.0 * half * scale), round(height * scale), half
+
+
 def _render_all():
-    out = {}
+    """Two passes: measure every frame's anchors, then composite them all onto
+    the ONE canvas the measurements imply. Two passes are required — the global
+    scale cannot be known until every frame has been measured."""
+    keyed, metrics = {}, {}
     for name, (raw, deg) in FRAME_SOURCES.items():
-        out[name] = _process(RAW_DIR / f'{raw}.png', deg)
+        im = _keyed(RAW_DIR / f'{raw}.png', deg)
+        keyed[name] = im
+        metrics[name] = _anchors(im)
+
+    scale, cw, ch, half = _layout(metrics)
+
+    out = {}
+    for name, im in keyed.items():
+        bcx, foot_y, _ix0, _ix1, _iy0 = metrics[name]
+        scaled = im.resize((max(1, round(im.width * scale)),
+                            max(1, round(im.height * scale))), Image.LANCZOS)
+        canvas = Image.new('RGBA', (cw, ch), (0, 0, 0, 0))
+        # body centre → canvas midline; foot line → canvas bottom row.
+        dx = round(cw / 2.0 - bcx * scale)
+        dy = round(ch - foot_y * scale)
+        canvas.alpha_composite(scaled, (dx, dy))
+        out[name] = canvas
     return out
 
 

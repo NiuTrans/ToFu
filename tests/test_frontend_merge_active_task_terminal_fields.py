@@ -47,6 +47,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 
 import pytest
 
@@ -60,6 +61,17 @@ ROOT = os.path.normpath(os.path.join(HERE, '..'))
 
 def _node_available() -> bool:
     return bool(shutil.which('node'))
+
+
+def _conv_family(*, override=None):
+    """The drift-proof conv-family eval list (see
+    tests/_conv_bundle_sources.conv_family_sources). Harness A drives
+    loadConversationMessages, whose Phase-2 failure exits call
+    _setCacheVerifying (core/conv_verify_visibility.js) — a leaf the old
+    two-file inline list never loaded (2026-08-01 RED)."""
+    sys.path.insert(0, HERE)
+    from _conv_bundle_sources import conv_family_sources
+    return conv_family_sources(override=override)
 
 
 def _run_harness(name: str, body: str, *js_paths: str) -> str:
@@ -147,8 +159,7 @@ global.Api = {
 };
 
 global.conversations = [];
-eval(fs.readFileSync(process.argv[2], 'utf8'));  // REAL core/conv_reducers.js
-eval(fs.readFileSync(process.argv[3], 'utf8'));  // REAL core/conversations.js
+for (const f of process.argv.slice(2)) eval(fs.readFileSync(f, 'utf8'));  // bundle-order conv family via _conv_bundle_sources.conv_family_sources
 
 const out = [];
 function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
@@ -270,8 +281,7 @@ function seedConv(localAssistant) {
 def test_merge_active_task_fills_terminal_fields():
     output = _run_harness(
         'a', _HARNESS_A,
-        os.path.join(JS_DIR, 'core', 'conv_reducers.js'),
-        os.path.join(JS_DIR, 'core', 'conversations.js'))
+        *_conv_family())
     fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
     assert not fails, 'MERGE_ACTIVE_TASK terminal-field merge failures:\n' + output
     assert output.count('PASS') >= 18, f'expected >=18 PASS, got:\n{output}'
@@ -300,8 +310,7 @@ def test_NC_helper_call_is_load_bearing_in_conversations(tmp_path):
 
     output = _run_harness(
         'a_nc', _HARNESS_A,
-        os.path.join(JS_DIR, 'core', 'conv_reducers.js'),
-        str(copy))
+        *_conv_family(override={'core/conversations.js': str(copy)}))
     assert 'FAIL A_apiRounds_merged' in output, (
         'NEUTER did not bite: apiRounds still merged without the helper call.\n'
         + output)

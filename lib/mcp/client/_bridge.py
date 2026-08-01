@@ -6,7 +6,7 @@ function-calling format, dispatches calls, and runs the keepalive /
 credential-health background sweeps.
 
 Facade-routing: the launcher/install/staleness functions that tests
-monkeypatch (``_resolve_launcher`` / ``_try_autoinstall_launcher`` /
+monkeypatch (``_resolve_launcher`` / ``vendored_launch_argv`` /
 ``_launcher_install_hint`` / ``_check_snapshot_staleness``) are resolved
 through ``_pkg()`` at call time so a patch on ``lib.mcp.client`` is honoured.
 """
@@ -27,6 +27,7 @@ from lib.mcp.types import (
     MCP_BREAKER_MAX_BACKOFF,
     MCP_CALL_TIMEOUT,
     MCP_CONNECT_TIMEOUT,
+    MCP_COLD_INSTALL_TIMEOUT,
     MCP_CRED_PROBE_INTERVAL,
     MCP_DEGRADED_TIMEOUT_STREAK,
     MCP_KEEPALIVE_INTERVAL,
@@ -76,6 +77,7 @@ class _MCPServerHandle:
         '_closed_future',    # asyncio.Future[None] — resolved when owner task exits
         '_owner_task',       # asyncio.Task — the owner coroutine handle
         '_stderr_file',      # tempfile.SpooledTemporaryFile capturing child stderr (stdio transport only)
+        '_cold_install',     # True when connect_server just evicted this launcher's dep tree
     )
 
     def __init__(self, name: str, config: dict):
@@ -90,6 +92,7 @@ class _MCPServerHandle:
         self._closed_future = None
         self._owner_task = None
         self._stderr_file = None
+        self._cold_install = False
 
 
 class MCPBridge:
@@ -272,6 +275,20 @@ class MCPBridge:
         except Exception as e:
             logger.debug('[MCP] snapshot staleness check skipped: %s', e)
 
+        # Migrate npx cache slots resolved under a previous supply cutoff.
+        # Deliberately BEFORE the readiness timer: npm aborts with
+        # ECOMPROMISED against a pre-cutoff lock, so the eviction is required,
+        # but the rebuild it forces was measured at 58.6-65.0s against a 65s
+        # readiness ceiling -- a coin flip whose losing side looks exactly like
+        # a crashed server. Doing it here means the download is not racing the
+        # handshake, and `evicted` tells _async_start_owner that a cold
+        # dependency fetch is now unavoidable for THIS connect.
+        evicted = 0
+        try:
+            evicted = _pkg().reconcile_for_connect()
+        except Exception as e:
+            logger.debug('[MCP] npx cache reconcile skipped: %s', e)
+
         # Tear down any existing server with the same name BEFORE taking
         # the lock for the new registration. The disconnect itself hits
         # the async loop; holding self._lock across it would freeze every
@@ -289,7 +306,8 @@ class MCPBridge:
                 logger.warning('[MCP] Error disconnecting old %s: %s', name, e)
 
         with log_context(f'mcp_connect:{name}', logger=logger):
-            handle, tools = self._run_async(self._async_start_owner(name, srv_cfg))
+            handle, tools = self._run_async(
+                self._async_start_owner(name, srv_cfg, cold_install=bool(evicted)))
 
         with self._lock:
             self._servers[name] = handle
@@ -301,7 +319,7 @@ class MCPBridge:
                     tool_name=tool.name,
                     namespaced_name=ns_name,
                     description=tool.description or '',
-                    input_schema=tool.inputSchema or {'type': 'object', 'properties': {}},
+                    input_schema=tool.input_schema or {'type': 'object', 'properties': {}},
                     openai_def=self._tool_to_openai(name, tool),
                     read_only_hint=_extract_read_only_hint(tool),
                 )
@@ -580,15 +598,26 @@ class MCPBridge:
             with self._lock:
                 return self._servers[name]
 
-    async def _async_start_owner(self, name: str, srv_cfg: dict):
+    async def _async_start_owner(self, name: str, srv_cfg: dict,
+                                 cold_install: bool = False):
         """Async: spawn the owner task for a server and await readiness.
 
         The owner task holds the ``AsyncExitStack`` open for the lifetime
         of the server (see ``_server_owner``). We return only after the
         session is initialized and the tool list has been fetched.
+
+        ``cold_install`` widens the readiness budget for the ONE case we can
+        positively identify: the caller just evicted this launcher's dependency
+        tree (stale supply cutoff), so a full download must finish before the
+        server can even speak. Measured: an npx rebuild takes 27-65s while a
+        warm start is 4-8s, so the ordinary ceiling turns that migration into a
+        coin flip. The default ceiling is deliberately NOT raised -- a server
+        that never comes up must still fail fast (lib/mcp/types.py:18-25:
+        a handshake that never completes is a crash, not a wait).
         """
         loop = asyncio.get_running_loop()
         handle = _MCPServerHandle(name, srv_cfg)
+        handle._cold_install = cold_install
         handle._shutdown_event = asyncio.Event()
         handle._ready_future = loop.create_future()
         handle._closed_future = loop.create_future()
@@ -602,12 +631,20 @@ class MCPBridge:
         # ``asyncio.shield`` prevents our wait_for timeout from cancelling
         # the owner task itself — if readiness hangs, we still want the
         # owner to complete its own cleanup cycle.
+        # Readiness ceiling: connect handshake + list_tools each have their
+        # own MCP_CONNECT_TIMEOUT inside the owner. When a dependency tree was
+        # just evicted, the download is serialized ahead of the handshake, so
+        # the budget is widened for that identified case only.
+        ready_budget = (MCP_COLD_INSTALL_TIMEOUT if cold_install
+                        else MCP_CONNECT_TIMEOUT * 2 + 5)
+        if cold_install:
+            logger.info('[MCP] %s: dependency tree was just migrated — '
+                        'allowing %ds for the cold download instead of %ds',
+                        name, ready_budget, MCP_CONNECT_TIMEOUT * 2 + 5)
         try:
             tools = await asyncio.wait_for(
                 asyncio.shield(handle._ready_future),
-                # Generous readiness ceiling: connect handshake + list_tools
-                # each have their own MCP_CONNECT_TIMEOUT inside the owner.
-                timeout=MCP_CONNECT_TIMEOUT * 2 + 5,
+                timeout=ready_budget,
             )
         except asyncio.TimeoutError:
             # Readiness stalled — tell the owner to shut down and re-raise
@@ -619,7 +656,7 @@ class MCPBridge:
                 name,
                 TimeoutError(
                     f'connection handshake did not complete within '
-                    f'{MCP_CONNECT_TIMEOUT * 2 + 5}s'
+                    f'{ready_budget}s'
                 ),
                 stderr_tail,
             )
@@ -664,9 +701,19 @@ class MCPBridge:
                     url = resolve_url(srv_cfg, server_name=name)
                     hdrs = resolve_headers(srv_cfg, server_name=name)
                     if transport == STREAMABLE_HTTP:
-                        from mcp.client.streamable_http import streamablehttp_client
-                        read, write, _get_sid = await stack.enter_async_context(
-                            streamablehttp_client(url, headers=hdrs or None)
+                        # v2 signature: headers no longer go to the transport
+                        # directly — they ride on an httpx2.AsyncClient built
+                        # by the SDK's own factory. We provide the client (so
+                        # the transport will NOT close it) and enter it into
+                        # OUR stack so its lifecycle matches the session's.
+                        from mcp.client.streamable_http import (
+                            create_mcp_http_client,
+                            streamable_http_client,
+                        )
+                        http_client = create_mcp_http_client(headers=hdrs or None)
+                        await stack.enter_async_context(http_client)
+                        read, write = await stack.enter_async_context(
+                            streamable_http_client(url, http_client=http_client)
                         )
                     elif transport == SSE:
                         from mcp.client.sse import sse_client
@@ -689,33 +736,31 @@ class MCPBridge:
 
                     # Pre-flight: verify the launcher is resolvable. Without
                     # this we get a cryptic FileNotFoundError deep inside
-                    # mcp.client.stdio. If it's not on PATH, try to self-heal
-                    # by resolving a pip-installed console script that lives
-                    # next to the running interpreter (the common "installed
-                    # but not on the subprocess PATH" case) before giving up.
+                    # mcp.client.stdio.
+                    #
+                    # Vendored internal servers are translated FIRST: a bare
+                    # name like ``hope-mcp`` becomes
+                    # ``uv run --no-project --with-editable <src> hope-mcp``,
+                    # so the server resolves its own dependency tree into its
+                    # OWN environment and its ``mcp`` never couples to Tofu's
+                    # interpreter. This must happen before the PATH checks —
+                    # a stale pip-installed console script in the shared env
+                    # is precisely what we must NOT launch.
+                    launch_argv = _pkg().vendored_launch_argv(command)
+                    if launch_argv is not None:
+                        logger.info(
+                            '[MCP] %s: launching vendored server isolated: %s',
+                            name, ' '.join(launch_argv))
+                        command = launch_argv[0]
+                        args = launch_argv[1:] + list(args)
+
                     import shutil as _shutil
                     if not _shutil.which(command):
+                        # Not on PATH: try resolving a console script that
+                        # lives next to the running interpreter (the common
+                        # "installed but not on the subprocess PATH" case)
+                        # before giving up.
                         resolved = _pkg()._resolve_launcher(command)
-                        if not resolved:
-                            # Last resort: if this is a vendored internal
-                            # server, pip-install it into Tofu's own env now
-                            # so onboarding is zero-touch (no PATH edits, no
-                            # manual install). One attempt per process.
-                            #
-                            # CRITICAL: ``_try_autoinstall_launcher`` runs a
-                            # BLOCKING ``subprocess.run`` (pip, up to 300s). We
-                            # are on the shared MCP event loop here, so calling
-                            # it inline would freeze EVERY other server's
-                            # keepalive / tool-calls / connects for the whole
-                            # install. Offload to a worker thread (mirrors
-                            # ``_reconnect_server``'s ``run_in_executor``) so a
-                            # cold install never stalls the loop. Normally this
-                            # path isn't even reached — the install ROUTE
-                            # pre-warms the launcher in a Flask worker thread
-                            # first (see ``prewarm_vendored_launcher``).
-                            owner_loop = asyncio.get_running_loop()
-                            resolved = await owner_loop.run_in_executor(
-                                None, _pkg()._try_autoinstall_launcher, command)
                         if resolved:
                             command = resolved
                         else:
@@ -785,15 +830,25 @@ class MCPBridge:
                 session = await stack.enter_async_context(
                     ClientSession(read, write)
                 )
+                # Handshake budget. When this launcher's dependency tree was
+                # just evicted, npx must finish DOWNLOADING before the spawned
+                # process answers a single JSON-RPC byte — so the wait lands
+                # here, on initialize(), not on process spawn. Measured: the
+                # outer readiness budget alone was NOT sufficient (a trial
+                # still failed at 67.5s with 300s granted outside), because
+                # this inner 30s timer fired first.
+                handshake_budget = (MCP_COLD_INSTALL_TIMEOUT
+                                    if getattr(handle, '_cold_install', False)
+                                    else MCP_CONNECT_TIMEOUT)
                 init_result = await asyncio.wait_for(
-                    session.initialize(), timeout=MCP_CONNECT_TIMEOUT
+                    session.initialize(), timeout=handshake_budget
                 )
                 # Harvest serverInfo.name / serverInfo.version so the UI
                 # can surface the upstream MCP server's own version (not
                 # Tofu's or the launcher's). This comes from the MCP
                 # handshake — see mcp.types.Implementation.
                 try:
-                    srv_info = getattr(init_result, 'serverInfo', None)
+                    srv_info = getattr(init_result, 'server_info', None)
                     if srv_info is not None:
                         handle.server_name = str(getattr(srv_info, 'name', '') or '')
                         handle.server_version = str(getattr(srv_info, 'version', '') or '')
@@ -807,7 +862,7 @@ class MCPBridge:
 
                 # Discover tools
                 response = await asyncio.wait_for(
-                    session.list_tools(), timeout=MCP_CONNECT_TIMEOUT
+                    session.list_tools(), timeout=handshake_budget
                 )
 
                 handle.session = session
@@ -1004,7 +1059,7 @@ class MCPBridge:
         # Prefix description with server name for disambiguation
         tagged_desc = f'[MCP:{server_name}] {desc}'
         # Clean up the input schema: ensure it has required fields
-        schema = dict(tool.inputSchema) if tool.inputSchema else {'type': 'object', 'properties': {}}
+        schema = dict(tool.input_schema) if tool.input_schema else {'type': 'object', 'properties': {}}
         if 'type' not in schema:
             schema['type'] = 'object'
 
@@ -1265,7 +1320,7 @@ class MCPBridge:
         )
 
         # Extract text from the MCP CallToolResult
-        if result.isError:
+        if result.is_error:
             # MCP reports an error from the tool
             error_text = self._extract_text(result)
             return f'MCP Error: {error_text}'

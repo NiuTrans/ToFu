@@ -246,6 +246,190 @@ def test_chat_poll_still_ships_finish_reason_when_terminal():
     assert body.get('usage'), f'a DONE task must still ship usage: {body}'
 
 
+def _stream_the_real_endpoint(task_fields: dict) -> dict:
+    """Build the `state` frame through the REAL production builder
+    (`lib.chat_dispatch.build_fresh_state_snapshot`) — the exact function the
+    SSE endpoint calls to compose its fresh-connection snapshot.
+
+    WHY NOT AN HTTP ROUND-TRIP (as the poll tests use): measured — for a task
+    whose status is 'running', `/api/chat/stream/<id>` deliberately HOLDS THE
+    CONNECTION OPEN for `_MAX_SSE_DURATION = 7200` seconds (routes/chat.py) to
+    keep streaming deltas. A test client cannot read the body until the stream
+    ends, so the request simply times out (first attempt: 299.3s, zero frames
+    parsed) — and the running case is precisely the one under test. Registering
+    the task as 'done' to make the endpoint return would destroy the scenario.
+
+    So this drives the real builder at its function boundary: still the shipped
+    code path composing the real event dict (NOT a source-text assertion — the
+    NEUTER below proves it bites), just entered below the transport that cannot
+    terminate for a live task.
+    """
+    import sys
+    import threading
+
+    sys.path.insert(0, ROOT)
+    os.environ.setdefault('TOFU_DB_BACKEND', 'sqlite')
+    os.environ.setdefault('TOFU_DB_PATH', '/tmp/dup_bubble_sse_gate.db')
+
+    from lib.chat_dispatch import build_fresh_state_snapshot
+
+    task = {
+        'id': 'tk-dupbubble-sse', 'convId': 'cv-dupbubble-sse',
+        'content': 'partial answer…', 'thinking': '', 'error': None,
+        'toolRounds': [], 'created_at': 1_700_000_000.0,
+        'events': [], 'events_lock': threading.Lock(),
+    }
+    task.update(task_fields)
+    state, _meta, _cursor = build_fresh_state_snapshot(task)
+    return state
+
+
+def test_sse_state_snapshot_withholds_finish_reason_while_running():
+    """THE SECOND TRANSPORT — the one the poll gate does NOT cover.
+
+    `lib/chat_dispatch.py::build_fresh_state_snapshot` copied
+    `extract_task_meta` into the `state` event with a bare `if meta.get(key)`
+    and no status gate. Since this path exists to attach to a RUNNING task, it
+    reliably emitted {status:'running', finishReason:'stop'} inside the
+    finalize window.
+
+    The frontend reducer cannot save this: `renderFinishInfo`
+    (static/js/ui/finish_info.js) reads `msg.finishReason || msg.usage` as the
+    terminal signal directly, never passing through
+    `assistantTailIsPriorTurn` — so a still-generating turn got a settled
+    finish bar. Fixing only the poll transport left this open, which is why
+    the bug class kept coming back.
+    """
+    state = _stream_the_real_endpoint({
+        'status': 'running', 'finishReason': 'stop',
+        'usage': {'input_tokens': 10}, 'preset': 'max', 'model': 'claude-opus-5',
+    })
+    assert state.get('status') == 'running', state
+    assert 'finishReason' not in state, (
+        'the SSE `state` snapshot shipped finishReason=%r on a status=running '
+        'task — finish_info.js paints a settled finish bar from it and '
+        'connectToTask misfiles the live bubble as a prior turn.'
+        % state.get('finishReason'))
+    assert 'usage' not in state, (
+        'the SSE `state` snapshot shipped `usage` on a running task; '
+        'finish_info.js treats `usage` as a terminal signal too '
+        '(`msg.finishReason || msg.usage`).')
+    assert 'preset' not in state, (
+        '`preset` is stamped in the same _finalize.py block as '
+        'finishReason/usage and must share their gate.')
+    # Live progress + the model tag MUST still flow.
+    assert state.get('content') == 'partial answer…', (
+        f'the gate suppressed live content: {state}')
+    assert state.get('model') == 'claude-opus-5', (
+        'the gate must NOT withhold `model` — it is set at task birth and the '
+        f'live bubble renders its tag from it: {state}')
+
+
+def test_sse_state_snapshot_still_ships_terminal_fields_when_done():
+    """COMPLEMENT: a terminal `state` snapshot must carry the terminal fields,
+    otherwise a reconnect to a finished turn shows a permanently empty finish
+    bar — worse than the bug being fixed."""
+    state = _stream_the_real_endpoint({
+        'status': 'done', 'finishReason': 'stop',
+        'usage': {'input_tokens': 10}, 'preset': 'max', 'model': 'claude-opus-5',
+    })
+    assert state.get('status') == 'done', state
+    assert state.get('finishReason') == 'stop', (
+        f'a DONE state snapshot must still ship finishReason: {state}')
+    assert state.get('usage'), f'a DONE state snapshot must still ship usage: {state}'
+
+
+def test_terminal_gate_is_a_single_shared_implementation():
+    """The rule must exist ONCE. `extract_task_meta`'s docstring records what
+    four hand-maintained copies of a metadata field policy already cost this
+    project — so both transports import the same module rather than each
+    carrying its own constant set."""
+    gate = os.path.join(ROOT, 'lib', 'chat', 'terminal_gate.py')
+    assert os.path.exists(gate), 'the shared terminal gate module is missing'
+    poll_src = open(POLL, encoding='utf-8').read()
+    disp_src = open(os.path.join(ROOT, 'lib', 'chat_dispatch.py'),
+                    encoding='utf-8').read()
+    assert 'from lib.chat.terminal_gate import' in poll_src, (
+        'chat_poll no longer imports the shared gate — it has re-grown its own '
+        'copy of the terminal-field policy.')
+    assert 'lib.chat.terminal_gate' in disp_src, (
+        'chat_dispatch no longer imports the shared gate — the SSE state '
+        'snapshot has drifted off the shared rule.')
+    # Neither consumer may hand-roll the status set again.
+    for label, src in (('routes/chat_poll_abort.py', poll_src),
+                       ('lib/chat_dispatch.py', disp_src)):
+        assert "frozenset({'done', 'error', 'aborted', 'interrupted'})" not in src, (
+            f'{label} re-defines the terminal-status set locally — it must come '
+            f'from lib/chat/terminal_gate.py')
+
+
+def test_terminal_gate_does_not_strip_terminal_done_events():
+    """The gate must NOT be pushed down into `extract_task_meta`.
+
+    That function's output also builds genuinely TERMINAL `done` events (the
+    late/synthetic done in chat_dispatch.py and routes/chat.py). Gating there
+    would strip the terminal fields from the very events whose job is to
+    deliver them — so `extract_task_meta` stays status-blind by design and the
+    gate lives at the snapshot boundary.
+    """
+    from lib.chat.persistence import extract_task_meta
+    meta = extract_task_meta({
+        'status': 'running', 'finishReason': 'stop',
+        'usage': {'input_tokens': 5}, 'model': 'm',
+    })
+    assert meta.get('finishReason') == 'stop', (
+        'extract_task_meta became status-aware — that breaks late/synthetic '
+        '`done` events, which MUST carry the terminal fields. The gate belongs '
+        'at the snapshot boundary (lib/chat/terminal_gate.py), not here.')
+
+
+def _db_row_state_meta(status: str, meta: dict) -> dict:
+    """Apply the gate exactly as the SSE DB-ROW state branch does.
+
+    That branch (`lib/chat_dispatch.py`, the "DB snapshot path") serves a
+    reconnect whose task is no longer in memory. It reads `status` from the
+    persisted `task_results` row and `meta` from that row's metadata JSON —
+    and those two are written by DIFFERENT writers at different times, so the
+    row can legitimately hold `status='running'` alongside a finishReason
+    persisted inside the finalize window.
+
+    The branch is `async` and sits behind a DB fetch, so the assertion is made
+    against the same shared gate call it performs, extracted here verbatim.
+    The `test_terminal_gate_is_a_single_shared_implementation` test above pins
+    that the branch actually routes through this gate rather than hand-rolling
+    its own copy.
+    """
+    from lib.chat.terminal_gate import filtered_snapshot_meta
+    return filtered_snapshot_meta(meta, status)
+
+
+def test_sse_db_row_state_branch_withholds_terminal_fields_while_running():
+    """The SSE DB-row reconnect branch must obey the same gate.
+
+    Reachable whenever a client reconnects to a task that has been evicted
+    from memory (TTL / restart) while its persisted row still says 'running' —
+    the sharded-backend reconnect verdict keeps exactly that state. Leaving
+    this branch ungated would let the identical contradiction back onto the
+    wire through the other half of the same endpoint.
+    """
+    persisted = {'finishReason': 'stop', 'usage': {'input_tokens': 7},
+                 'preset': 'max', 'model': 'claude-opus-5',
+                 'apiRounds': [{'r': 1}]}
+    running = _db_row_state_meta('running', persisted)
+    assert 'finishReason' not in running, (
+        f'the SSE DB-row state branch shipped a terminal field on a running '
+        f'row: {running}')
+    assert 'usage' not in running, running
+    assert running.get('model') == 'claude-opus-5', (
+        f'live/identity fields must survive the gate: {running}')
+    assert running.get('apiRounds'), (
+        f'apiRounds is progress, not a settlement claim — it must survive: {running}')
+    # Complement: an evicted-but-FINISHED task still hands over its finish bar.
+    done = _db_row_state_meta('done', persisted)
+    assert done.get('finishReason') == 'stop', done
+    assert done.get('usage'), done
+
+
 def test_chat_poll_gate_covers_the_db_branch_too():
     """The DB branch must apply the same gate.
 
@@ -259,7 +443,7 @@ def test_chat_poll_gate_covers_the_db_branch_too():
     the branch that 100% of this deployment's traffic actually hits.
     """
     src = open(POLL, encoding='utf-8').read()
-    assert re.search(r'_db_terminal_ok\s*=\s*effective_status\s+in\s+_TERMINAL_STATUSES',
+    assert re.search(r'_db_terminal_ok\s*=\s*_is_terminal_status\(effective_status\)',
                      src), (
         'the DB branch of chat_poll has no terminal-field gate — under the '
         'sharded reconnect verdict it can still ship a finishReason on a '

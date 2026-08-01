@@ -430,6 +430,11 @@ async function saveEditAndResend(idx) {
     _editAbortReason = 'timeout';
     _editAbortCtrl.abort();
   }, 90000);
+  /* ★ Startup-stop affordance (pt_fa32a2351b3840ad): the connecting POST
+   *   window shows a STOP button; a click owner-tags conv._genStartStop with
+   *   THIS controller and aborts it — the catch below matches that tag. */
+  conv._genStartCtrl = _editAbortCtrl;
+  conv._genStartStop = null;
   const _editWillTranslate = _regenConfig.autoTranslate && /[\u4e00-\u9fff\u3400-\u4dbf]/.test(t);
   if (_editWillTranslate) {
     conv._translating = true;
@@ -445,6 +450,8 @@ async function saveEditAndResend(idx) {
      *   NOTE: `t` is shadowed here by the edited text (const t = ta.value.trim);
      *   use the global i18n helper via window.t. */
     _renderTranslatingBubble(window.t('sidebar.connecting'));
+    /* ★ Flip the composer to a STOP button for the connecting window. */
+    updateSendButton();
   }
 
   try {
@@ -487,16 +494,38 @@ async function saveEditAndResend(idx) {
 
     // Push assistant msg + connect to task
     const taskId = result.taskId;
-    const assistantMsg = {
+    const _mintedPlaceholder = {
       role: "assistant", content: "", thinking: "",
       timestamp: Date.now(), toolRounds: [],
       model: _regenConfig.model || serverModel,
       _msgId: _editAssistantMsgId,
     };
     // ★ Endpoint mode: mark as planner so SSE reconnection identifies it correctly
-    if (_regenConfig.endpointMode) assistantMsg._isEndpointPlanner = true;
-    _ensureMsgId(assistantMsg);  // no-op when _msgId already set
-    conv.messages.push(assistantMsg);
+    if (_regenConfig.endpointMode) _mintedPlaceholder._isEndpointPlanner = true;
+    /* ★ Dedupe (pt_44e985ec): an early attach during the POST window may
+     *   already have created + bound this task's placeholder — adopt it
+     *   instead of pushing a duplicate (the 等待中…↔推理中 flip-flop class). */
+    const _ph = (typeof _adoptTaskPlaceholder === 'function')
+      ? _adoptTaskPlaceholder(conv, taskId, _mintedPlaceholder)
+      : { msg: _mintedPlaceholder, adopted: false };
+    const assistantMsg = _ph.msg;
+    if (_ph.adopted) {
+      console.warn(
+        `[saveEditAndResend] ♻ adopted existing placeholder bound to task=${taskId.slice(0,8)} ` +
+        `(canonical msgId re-stamped) — no duplicate push for conv=${convId.slice(0,8)}`
+      );
+      if (typeof _reportClientError === 'function') {
+        _reportClientError(
+          `[saveEditAndResend] adopted existing task placeholder instead of pushing a duplicate ` +
+          `conv=${convId.slice(0,8)} task=${taskId.slice(0,8)}`);
+      }
+      if (_regenConfig.endpointMode) assistantMsg._isEndpointPlanner = true;
+      const _smEl = (activeConvId === convId) ? document.getElementById('streaming-msg') : null;
+      if (_smEl && _editAssistantMsgId) _smEl.setAttribute('data-msg-id', _editAssistantMsgId);
+    } else {
+      _ensureMsgId(assistantMsg);  // no-op when _msgId already set
+      conv.messages.push(assistantMsg);
+    }
     conv.activeTaskId = taskId;
     saveConversations(convId);
 
@@ -506,14 +535,11 @@ async function saveEditAndResend(idx) {
     connectToTask(convId, taskId);
 
   } catch (e) {
-    const _userClickedStop = !!conv._translateAborted;
-    if (e.name === 'AbortError' && _editWillTranslate && _userClickedStop) {
-      console.log('%c[saveEditAndResend] ✗ Aborted during translation by user', 'color:#f59e0b;font-weight:bold');
-      _removeTranslatingBubble();
-      saveConversations(convId);
-      syncConversationToServer(conv, { allowTruncate: true });
-      buildTurnNav(conv);
-      Api.chat.abortConv(convId);
+    const _userClickedStop = !!conv._translateAborted
+      || conv._genStartStop === _editAbortCtrl;
+    if (e.name === 'AbortError' && _userClickedStop) {
+      console.log('%c[saveEditAndResend] ✗ Aborted during startup by user', 'color:#f59e0b;font-weight:bold');
+      await _userStopDuringStartup(conv, convId, { syncOpts: { allowTruncate: true } });
     } else if (e.name === 'AbortError' && _editAbortReason === 'timeout'
                && typeof _recoverTimedOutChatTask === 'function'
                && await _recoverTimedOutChatTask(convId, { endpointMode: _regenConfig.endpointMode })) {
@@ -551,6 +577,11 @@ async function saveEditAndResend(idx) {
     }
   } finally {
     clearTimeout(_editTimeout);
+    /* ★ Identity-guarded startup-marker cleanup (only OURS). */
+    if (conv._genStartCtrl === _editAbortCtrl || conv._genStartStop === _editAbortCtrl) {
+      conv._genStartCtrl = null;
+      conv._genStartStop = null;
+    }
     // ★ Fix ①: teardown the pre-POST placeholder unconditionally (rendered
     //   whether or not we translated). Idempotent once the success path
     //   swapped it for the streaming bubble.
@@ -559,9 +590,12 @@ async function saveEditAndResend(idx) {
       conv._translating = false;
       conv._translateAborted = false;
       conv._translateAbortCtrl = null;
-      updateSendButton();
       renderConversationList();
     }
+    /* ★ Unconditional re-eval (startup-stop affordance): the connecting
+     *   window paints a STOP button; generic-error exits must not strand it. */
+    updateSendButton();
+    if (_editWillTranslate) renderConversationList();
   }
 }
 

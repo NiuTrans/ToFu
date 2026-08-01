@@ -33,6 +33,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 
 import pytest
 
@@ -102,7 +103,7 @@ global.apiUrl = (p) => p;
 global.AbortSignal = { timeout: () => ({}) };
 global.AbortController = function(){ this.signal={}; this.abort=function(){}; };
 
-eval(fs.readFileSync(process.argv[2], 'utf8'));  // core/conversations.js
+for (const f of process.argv.slice(2)) eval(fs.readFileSync(f, 'utf8'));  // bundle-order conv family via _conv_bundle_sources.conv_family_sources
 
 const out = [];
 function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
@@ -233,8 +234,20 @@ def _run(js_path: str):
     harness = os.path.join(HERE, '_list_merge_rev_harness.js')
     with open(harness, 'w') as f:
         f.write(_HARNESS)
+    # This harness used to eval conversations.js STANDALONE (zero extras) —
+    # the worst variant of the decomposition-drift class: every leaf
+    # reference (_serverConvCount & co) threw inside the loader's own
+    # try/catch and the merge silently degraded (6 RED, 2026-08-01).
+    # The drift-proof family closure is the permanent fix; NEUTER copies
+    # ride the override (the mutated file REPLACES conversations.js).
+    sys.path.insert(0, HERE)
+    from _conv_bundle_sources import conv_family_sources
+    override = None
+    if os.path.basename(js_path) != 'conversations.js':
+        override = {'core/conversations.js': js_path}
+    extra_js = conv_family_sources(override=override)
     try:
-        return subprocess.run(['node', harness, js_path],
+        return subprocess.run(['node', harness, *extra_js],
                               capture_output=True, text=True, timeout=60)
     finally:
         try:

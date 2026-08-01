@@ -53,21 +53,13 @@ from lib.mcp.vendored import VENDORED_LAUNCHERS as _VENDORED_LAUNCHERS  # noqa: 
 from lib.mcp.vendored import repo_root as _repo_root  # noqa: E402,F401
 
 
-# ── First-connect auto-install guard/registry ────────────
+# ── Install-error registry ─────────────────────────────
 #
-# Guard so a failing install is attempted at most once per process per
-# command — otherwise every reconnect sweep would re-run pip. Protected by
+# Last install/warm failure reason per command, surfaced in the connect error
+# so the user sees WHY the isolated env could not be resolved (uv stderr / no
+# source / timeout) instead of a generic "not on PATH" dead-end. Set under
 # ``_install_lock``.
-_install_attempted: set[str] = set()
 _install_lock = threading.Lock()
-# Per-command serialization so two concurrent callers (e.g. the startup
-# pre-warm racing a user "Install" click) never run ``pip install`` of the
-# SAME source at once — the second waits, then sees ``_install_attempted`` and
-# just re-resolves. The registry dict itself is guarded by ``_install_lock``.
-_install_cmd_locks: dict[str, threading.Lock] = {}
-# Last auto-install failure reason per command, surfaced in the connect error
-# so the user sees WHY zero-touch install failed (pip stderr / no source /
-# timeout) instead of a generic "not on PATH" dead-end. Set under _install_lock.
 _install_last_error: dict[str, str] = {}
 
 

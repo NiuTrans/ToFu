@@ -304,6 +304,53 @@ if [ "${freed}" != "1" ]; then
   echo "      Port :${PORT} freed after SIGKILL."
 fi
 
+# ── [2b/5] Wait for the OLD server PROCESS to actually exit — port-free is
+#   NOT process-dead (pt_0c1d75f7eb824467, measured 2026-07-31 18:10): the old
+#   server's graceful shutdown (~285 threads) kept the single-instance flock
+#   on data/.server.lock alive ~10s AFTER the listener disappeared, so a
+#   relaunch gated only on the port died on the instance lock
+#   ('[Lock] instance lock held by a LIVE local server', new pid 3243972
+#   exited at 18:10:19) — and the script did not retry. A ZOMBIE counts as
+#   exited: the flock dies with the process, only a LIVE holder blocks us.
+if [ -n "${LPIDS}${KPIDS:-}" ]; then
+  echo "[2b/5] Waiting for old server process(es) to exit (flock release) ..."
+  all_gone=0
+  for i in $(seq 1 30); do
+    alive=0
+    for lp in ${LPIDS} ${KPIDS:-}; do
+      st="$(ps -o stat= -p "${lp}" 2>/dev/null | tr -d ' ')"
+      [ -n "${st}" ] && case "${st}" in Z*) : ;; *) alive=1 ;; esac
+    done
+    if [ "${alive}" = "0" ]; then
+      all_gone=1
+      echo "      Old process(es) exited (${i}s past port-free)."
+      break
+    fi
+    sleep 1
+  done
+  if [ "${all_gone}" != "1" ]; then
+    echo "      WARNING: old process still alive 30s after port-free — SIGKILL."
+    for lp in ${LPIDS} ${KPIDS:-}; do kill -9 "${lp}" 2>/dev/null && echo "      SIGKILL -> ${lp}"; done
+    sleep 2
+  fi
+fi
+# The EXACT precondition the new instance needs: the instance flock must be
+# acquirable. server.py uses fcntl.flock(LOCK_EX|LOCK_NB) — the same lock
+# namespace as the flock CLI (verified by tests/test_restart_lock_race.py).
+# Bounded probe; on exhaustion the [3/5] lock-retry below is the backstop.
+ILOCK="${PROJ}/data/.server.lock"
+if [ -e "${ILOCK}" ] && command -v flock >/dev/null 2>&1; then
+  for i in $(seq 1 10); do
+    if flock -n "${ILOCK}" -c true 2>/dev/null; then
+      [ "${i}" -gt 1 ] && echo "      Instance lock free (after ${i}s)."
+      break
+    fi
+    [ "${i}" = "10" ] && echo "      WARNING: instance lock still held after 10s —"\
+ && echo "             relying on the [3/5] lock-conflict retry."
+    sleep 1
+  done
+fi
+
 # ── [3/5] Relaunch EXACTLY as the process is really started (no --port). ──
 #   Port comes from $PORT (server.py default 15000). We export it explicitly so
 #   the bind is deterministic and never drifts via _find_free_port.
@@ -333,22 +380,55 @@ echo "[3/5] Relaunching (detached via setsid nohup): PORT=${PORT} setsid nohup $
 #   blocks 60s at [pre/5b] and then aborts doing nothing. The lock must belong
 #   to THIS script's lifetime only: it releases when this script exits. 9>&-
 #   on an unopened fd (flock unavailable path) is a silent no-op.
-PORT="${PORT}" BIND_HOST="${BIND_HOST:-127.0.0.1}" setsid nohup "${PY}" server.py > "${LOG}" 2>&1 9>&- &
-NEWPID=$!
-echo "      Launched pid ${NEWPID}; logging to ${LOG}"
-
-# ── [4/5] Wait for the server to accept connections (up to ~40s; boot does PG
-#          bootstrap + blueprint registration). ──
-echo "[4/5] Waiting for the server to come up on :${PORT} ..."
+# ── [3/5]+[4/5] Relaunch + health wait, with a BOUNDED retry on the
+#   instance-lock race (pt_0c1d75f7eb824467). [2b/5] prevents the common case,
+#   but a shutdown that outlives it must not be a silent one-shot failure: a
+#   launch that dies with the lock signature in its log gets up to 3 attempts
+#   with a 10s cooldown. Any OTHER death fails fast exactly as before — the
+#   retry is for the lock race only, never a universal mask.
 BASE="http://127.0.0.1:${PORT}"
-up_ok=0
-for i in $(seq 1 40); do
-  if curl -s --max-time 2 "${BASE}/api/health" >/dev/null 2>&1; then
-    up_ok=1
-    echo "      Server responding (after ${i}s)."
+launch_ok=0
+for attempt in 1 2 3; do
+  if [ "${attempt}" -gt 1 ]; then
+    echo "[3/5] Retry attempt ${attempt}/3 (lock-conflict backoff) ..."
+    sleep 10
+  fi
+  PORT="${PORT}" BIND_HOST="${BIND_HOST:-127.0.0.1}" setsid nohup "${PY}" server.py > "${LOG}" 2>&1 9>&- &
+  NEWPID=$!
+  echo "      Launched pid ${NEWPID}; logging to ${LOG}"
+
+  echo "[4/5] Waiting for the server to come up on :${PORT} ..."
+  up_ok=0
+  lock_death=0
+  for i in $(seq 1 40); do
+    if curl -s --max-time 2 "${BASE}/api/health" >/dev/null 2>&1; then
+      up_ok=1
+      echo "      Server responding (after ${i}s)."
+      break
+    fi
+    # If the launched process already died, distinguish the lock race
+    # (retryable) from every other startup death (fail fast).
+    if ! kill -0 "${NEWPID}" 2>/dev/null; then
+      if grep -q "instance lock held by a LIVE local server\|Another server instance is already running" "${LOG}" 2>/dev/null; then
+        lock_death=1
+      fi
+      break
+    fi
+    sleep 1
+  done
+
+  if [ "${up_ok}" = "1" ]; then
+    launch_ok=1
     break
   fi
-  # If the launched process already died (e.g. lock abort), fail fast.
+
+  if [ "${lock_death}" = "1" ] && [ "${attempt}" -lt 3 ]; then
+    echo "      Attempt ${attempt}: launched pid ${NEWPID} died on the instance"
+    echo "      lock — the old server was still shutting down. Retrying after"
+    echo "      a 10s cooldown (this is the pt_0c1d75f7eb824467 race)."
+    continue
+  fi
+
   if ! kill -0 "${NEWPID}" 2>/dev/null; then
     echo "      ERROR: launched pid ${NEWPID} exited during startup. Tail of ${LOG}:"
     tail -n 30 "${LOG}" 2>/dev/null
@@ -356,10 +436,13 @@ for i in $(seq 1 40); do
     echo "         PORT=${PORT} TOFU_SKIP_LOCK=1 nohup ${PY} server.py > ${LOG} 2>&1 &"
     exit 4
   fi
-  sleep 1
-done
-if [ "${up_ok}" != "1" ]; then
+
   echo "      ERROR: server did not respond within 40s. Tail of ${LOG}:"
+  tail -n 30 "${LOG}" 2>/dev/null
+  exit 4
+done
+if [ "${launch_ok}" != "1" ]; then
+  echo "      ERROR: server did not come up after 3 attempts. Tail of ${LOG}:"
   tail -n 30 "${LOG}" 2>/dev/null
   exit 4
 fi

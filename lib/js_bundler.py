@@ -18,6 +18,7 @@ unchanged, so a bare ``python server.py`` (e.g. a Mac with no node) is byte-for
 script-mode esbuild never renames the top-level globals index.html's inline
 ``onclick=`` handlers depend on, and never tree-shakes a top-level definition).
 """
+import ast
 import contextlib
 import hashlib
 import os
@@ -500,7 +501,17 @@ _BUNDLE_FILES = [
     # BOTH consumers so the bare-name call resolves via bundle-level
     # window scope. Pure helper: reads settings, writes onto conv.
     'core/conv_apply_settings.js',
-    'core/cross_tab_sync.js',
+    # core/cross_tab_sync.js — MOVED to _DEFERRED_FILES 2026-07-31 (Epic-E
+    # pt_3879f00e sub-part 3 slice A, 53KB out of the render-blocking core).
+    # Its core prerequisites (conv_apply_settings / conv_state_reducer /
+    # async_pool / current_user) all stay here and therefore always load
+    # first; its window-exposed entry point _wireConvSyncPush is stubbed by
+    # feature-loader.js (see _DEFERRED_ENTRY_POINTS) so main.js's
+    # typeof-guarded boot call still wires the conv-sync push subscription.
+    # The 3 hot-path _broadcastToTabs call sites (conv_save.js,
+    # main_conv_lifecycle.js ×2) are typeof-guarded at their call sites.
+    # Option A relocation (BroadcastChannel listener owned by the module
+    # itself) landed earlier — test_frontend_cross_tab_sync_deferrable.py.
     # Pure conversation reducers extracted 2026-07-25 from
     # core/conversations.js (pt_3879f00e sub-part 2, slice 1):
     # convAutoTranslate / assistantTailIsPriorTurn /
@@ -509,6 +520,17 @@ _BUNDLE_FILES = [
     # state); load BEFORE core/conversations.js so downstream reads
     # inside its heavier functions still resolve the bare names.
     'core/conv_reducers.js',
+    # Local-persistence primitives extracted 2026-07-31 from
+    # core/conversations.js (pt_3879f00e sub-part 2, slice 13):
+    # saveConversations (with the LOAD-BEARING flicker guard against
+    # active streams + 2s sidebar-refresh throttle) +
+    # syncConversationToServerDebounced (rapid-toggle coalescer) +
+    # the private _syncDebounceTimers map. Reads conversations /
+    # activeStreams / _convSorter / _broadcastToTabs /
+    # renderConversationList / syncConversationToServer at CALL time
+    # via bundle-level window scope. Load BEFORE core/conversations.js
+    # so its heavier functions can call these bare names at runtime.
+    'core/conv_save.js',
     # Pending-sync retry cluster extracted 2026-07-25 from
     # core/conversations.js (pt_3879f00e sub-part 2, slice 2):
     # markConvPendingSync / _clearPendingSyncMarkers / convHasPendingSync
@@ -591,6 +613,16 @@ _BUNDLE_FILES = [
     # remains in conversations.js — it calls into the still-unextracted
     # _verifyActiveConvFromServer path.
     'core/conv_verify_visibility.js',
+    # ── conv_verify_retry.js: bounded self-heal retry cluster
+    # (_CONV_VERIFY_RETRY_DELAYS_DEFAULT + _convVerifyRetryTimers +
+    # _convVerifyRetryDelays + _scheduleConvVerifyRetry).  Load BEFORE
+    # conversations.js so its three surviving call sites inside
+    # loadConversationMessages resolve via bundle-level window scope
+    # (pt_3879f00e slice 11).  The cluster REACHES BACK into
+    # conversations.js's `_verifyActiveConvFromServer` at CALL time via
+    # bundle-level window scope — the typeof guard makes the reference
+    # safe when hot-reloaded out of order.
+    'core/conv_verify_retry.js',
     'core/conversations.js',
     # Shared SSE fetch-response read/decode/buffer loop (readSSEStream) —
     # extracted 2026-07-11 from branch.js / paper-reader.js / ui/sse_pipeline.js.
@@ -607,7 +639,18 @@ _BUNDLE_FILES = [
     'core/translation_model.js',
     'core/cache_stats.js',
     'core/markdown.js',
-    'core/health_stream_timer.js',
+    # core/health_stream_timer.js — MOVED to _DEFERRED_FILES 2026-08-01
+    # (Epic-E pt_3879f00e sub-part 3 slice B, 62KB out of the render-
+    # blocking core; see docs/EPIC_E_SIZE_LEDGER.md). Every external
+    # consumer is typeof-guarded: twUpdate/twStart call sites across the
+    # SSE handlers (60 guarded, census 2026-08-01), the 5 compound-line
+    # twStop abort-path sites gated in the same commit, streamHealth*
+    # (net-latency.js), _probeAllStuckStreamsOnWake (backend_offline_
+    # monitor.js), _seedStreamTimerStart (sse_poll_fallback.js). NO
+    # feature-loader stub by design: there is no one-time boot wiring to
+    # miss (unlike _wireConvSyncPush) — the module self-initializes per
+    # stream on first twStart, the idle prefetch lands it ~2s after boot,
+    # and the gates degrade to "no elapsed badge until then".
     'core/toast.js',
     'core/dialog.js',  # themed confirm/alert/prompt — after toast (same window scope)
     # Unified API client — owns every backend HTTP call. Depends on
@@ -681,6 +724,13 @@ _BUNDLE_FILES = [
     # thinking,toolRounds} projection all four apply paths fold through. Pure
     # (no DOM/globals); load BEFORE the handlers + pipeline that consume it.
     'ui/stream_reducer.js',
+    # Stall watch (pt_e0ea29f2): grades heartbeat self-ticks vs real progress
+    # and drives the "no unannounced freeze" banner. Leaf module (document/
+    # window only); load BEFORE the pipeline (feed seam) + streaming_ui
+    # (render seam) that consume it. NOTE: streaming_ui.js sits ABOVE this
+    # list — the render seam resolves stallWatchState lazily at runtime via
+    # window.*, so load order is intent-only, not a hard dependency.
+    'ui/stall_watch.js',
     # Property-only SSE handlers extracted from dispatchSSEEvent (2026-06).
     # Plain hoisted functions taking (ev, ctx-snapshot); the dispatcher in
     # sse_pipeline.js calls them. Load BEFORE sse_pipeline.js for clear intent.
@@ -977,6 +1027,23 @@ _DEFERRED_FILES = [
     'project-brain-peers.js',
     'project-brain-status.js',
     'project-brain-i18n.js',
+    # Cross-tab/cross-device sync (53KB) — deferred 2026-07-31 (Epic-E
+    # pt_3879f00e sub-part 3 slice A). Boot wiring survives via the
+    # _wireConvSyncPush feature-loader stub (main.js calls it
+    # typeof-guarded at boot); the module's own load-time side effects
+    # (BroadcastChannel creation + listener, _scheduleNextReconcile()
+    # self-start, window exposes) only touch browser globals / window,
+    # and every core symbol it reads (conversations, ConvCache,
+    # loadConversationsFromServer, pushSubscribe, …) is in the core
+    # bundle which always loads first. See the _BUNDLE_FILES moved-note.
+    'core/cross_tab_sync.js',
+    # Stream health/elapsed timers (62KB) — deferred 2026-08-01 (Epic-E
+    # sub-part 3 slice B). Gates + idle prefetch only (no stub — see the
+    # _BUNDLE_FILES moved-note for the no-one-time-wiring argument). Its
+    # load-time side effects (visibilitychange/pageshow listeners, window
+    # exposes) touch only browser globals; every core symbol it reads is
+    # in the core bundle which always loads first.
+    'core/health_stream_timer.js',
 ]
 
 # The entry-point functions the feature bundle DEFINES. feature-loader.js
@@ -999,7 +1066,105 @@ _DEFERRED_ENTRY_POINTS = (
     # conv-switch, negating the deferral. They are typeof-guarded at their call
     # sites and safely no-op until the panel is first opened.
     'openProjectBrain', 'toggleProjectBrain', 'openProjectBrainInfluence',
+    # Cross-tab sync boot wiring (deferred 2026-07-31, Epic-E sub-part 3
+    # slice A). main.js calls _wireConvSyncPush typeof-guarded at boot;
+    # the stub loads the feature bundle and dispatches to the real fn, so
+    # the conv-sync push subscription wires right after boot instead of
+    # never. Keep in sync with feature-loader.js's _DEFERRED_ENTRY_POINTS.
+    '_wireConvSyncPush',
 )
+
+# ── Bundle-manifest freshness (2026-07-24 / 2026-07-31 incident class) ──
+# The four manifests above are bound ONCE at import. A long-running server
+# whose manifest file changes AFTER process start (a deploy, a sibling edit)
+# used to keep rebuilding from that import-time-frozen binding: the rebuild
+# gate (_source_max_mtime stats THIS file) correctly fired, but the build
+# then assembled the OLD list — silently dropping every newly-added file
+# from the shipped bundle (2026-07-24 core/model_caps.js → every model
+# picker threw ReferenceError; 2026-07-31 core/conv_save.js → ReferenceError
+# at 108 call sites, with core/conv_verify_retry.js missing from the same
+# artifact). The fix: build_bundle() re-reads the manifests from DISK via
+# _refresh_manifest() below, so the build can never lag the file. Keep the
+# four assignments PLAIN module-level literals: _extract_manifest_from_source
+# parses them with ast.literal_eval, and a smarter expression (concat /
+# comprehension / conditional import) makes the refresh fail LOUDLY (ERROR
+# log + last-known-good kept), never silently. Guarded by
+# tests/test_bundle_manifest_freshness.py.
+def _extract_manifest_from_source(path):
+    """Re-parse the four bundle manifests from this module's on-disk source.
+
+    Uses ast (never exec), so refreshing can never re-run module-level side
+    effects. Returns ``(bundle_files, deferred_files, entry_points,
+    critical_files)`` as fresh container objects. Raises (loudly) when any
+    of the four is not a plain literal assignment.
+    """
+    with open(path, encoding='utf-8') as f:
+        tree = ast.parse(f.read(), filename=path)
+    wanted = ('_BUNDLE_FILES', '_DEFERRED_FILES', '_DEFERRED_ENTRY_POINTS',
+              '_CRITICAL_FILES')
+    found = {}
+    for node in tree.body:
+        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+            continue
+        target = node.targets[0]
+        if not isinstance(target, ast.Name) or target.id not in wanted:
+            continue
+        value = node.value
+        if target.id == '_CRITICAL_FILES':
+            # frozenset({...}) — peel the call, literal-eval the set body.
+            if (not isinstance(value, ast.Call)
+                    or not isinstance(value.func, ast.Name)
+                    or value.func.id != 'frozenset' or len(value.args) != 1):
+                raise ValueError(
+                    '_CRITICAL_FILES must stay a plain frozenset({...}) literal')
+            found[target.id] = frozenset(ast.literal_eval(value.args[0]))
+        else:
+            found[target.id] = ast.literal_eval(value)
+    missing = [w for w in wanted if w not in found]
+    if missing:
+        raise ValueError(
+            f'{path}: manifest assignment(s) missing or no longer plain '
+            f'module-level literals: {missing}')
+    return (list(found['_BUNDLE_FILES']), list(found['_DEFERRED_FILES']),
+            tuple(found['_DEFERRED_ENTRY_POINTS']), found['_CRITICAL_FILES'])
+
+
+try:
+    _manifest_source_mtime = os.path.getmtime(__file__)
+except OSError:  # module file unreadable at import — refresh keeps retrying
+    _manifest_source_mtime = 0.0
+
+
+def _refresh_manifest():
+    """Re-bind the four manifests from disk when this file changed.
+
+    mtime-gated: a no-op when nothing changed, so callers on hot paths pay
+    one stat. Fail-safe: any read/parse error keeps the last-known-good
+    lists (a stale-but-working bundle beats no bundle) and logs ERROR.
+    Returns True when the manifests were actually re-read.
+    """
+    global _BUNDLE_FILES, _DEFERRED_FILES, _DEFERRED_ENTRY_POINTS, _CRITICAL_FILES
+    global _manifest_source_mtime
+    try:
+        current = os.path.getmtime(__file__)
+    except OSError as e:
+        logger.warning('[Bundle] cannot stat %s (%s) — keeping last-known-good manifest',
+                       __file__, e)
+        return False
+    if current <= _manifest_source_mtime:
+        return False
+    try:
+        fresh = _extract_manifest_from_source(__file__)
+    except Exception as e:
+        logger.error('[Bundle] manifest re-parse failed: %s — keeping last-known-good manifest',
+                     e, exc_info=True)
+        return False
+    _BUNDLE_FILES, _DEFERRED_FILES, _DEFERRED_ENTRY_POINTS, _CRITICAL_FILES = fresh
+    _manifest_source_mtime = current
+    logger.info('[Bundle] bundle manifests re-read from disk: %d core + %d deferred files, %d entry points',
+                len(fresh[0]), len(fresh[1]), len(fresh[2]))
+    return True
+
 
 # Global state
 _bundle_filename = None    # e.g. 'bundle-a3f8b2c1.js'  (core)
@@ -1328,6 +1493,14 @@ def build_bundle():
     t0 = time.time()
 
     with _build_lock():
+        # Re-read the manifest from disk BEFORE anything in this build can
+        # consume it (pack extraction below reads _BUNDLE_FILES per call via
+        # lib/i18n_boot_keys). Without this, a long-running process whose
+        # module was imported before the last manifest edit assembles the
+        # import-time-frozen list — the rebuild gate fires, yet the shipped
+        # bundle silently lacks every file added since process start.
+        _refresh_manifest()
+
         # i18n single-language packs (Epic-E sub-part 1 slice 2) — emit FIRST,
         # before assembling the core bundle, so the bundle's shape (with vs
         # without i18n.js) can be decided by whether packs exist. FAIL-OPEN:

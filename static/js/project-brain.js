@@ -1201,7 +1201,11 @@
     //   • reopen on claimed (break a stuck live claim) AND done (revive)
     // (There is no park/shelve control — the project pushes every open epic
     //  forward at full speed rather than holding work pending a human decision.)
-    var acts = [];
+    // "Create conversation" leads every card's action row — opening a fresh
+    // chat about the epic is the human's forward action; the lifecycle
+    // controls follow it.
+    var acts = [_boardActionBtn('createConv', 'messagePlus',
+      'projectBrain.actCreateConv', 'New chat')];
     if (t.status === 'open' || t.status === 'claimed') {
       acts.push(_boardActionBtn('complete', 'check', 'projectBrain.actComplete', 'Done'));
       acts.push(_boardActionBtn('block', 'ban', 'projectBrain.actBlock', 'Block'));
@@ -1273,6 +1277,8 @@
     var headText = String(t.title || '') + (reason ? '\n\n' + reason : '');
     var headHtml = _clampBlock(_mdLite(headText), headText);
     var acts = [
+      _boardActionBtn('createConv', 'messagePlus',
+        'projectBrain.actCreateConv', 'New chat'),
       _boardActionBtn('reopen', 'refresh', 'projectBrain.actReopen', 'Reopen'),
       _boardActionBtn('complete', 'check', 'projectBrain.actComplete', 'Done'),
     ];
@@ -1283,64 +1289,97 @@
       '<div class="pb-board-card-actions">' + acts.join('') + '</div></div>';
   }
 
-  /** Render one AWAITING-ANSWER epic card (Pillar #3 — the ask_human-style
-   *  closure for board work). A [human-gated] block with a structured
-   *  question renders the QUESTION as the primary content with one-click
-   *  option chips + a free-text input; submitting calls board/answer, which
-   *  clears the gate and IMMEDIATELY re-dispatches the epic with the answer
-   *  in its kickoff. Reopen/Done stay available as secondary lifecycle
-   *  controls. ONE clamp per card (title+reason combined). */
-  function _answerCard(t) {
-    var q = (t.block_question && typeof t.block_question === 'object')
-      ? t.block_question : { q: '', options: [] };
-    var opts = Array.isArray(q.options) ? q.options : [];
-    var chips = opts.map(function (o, i) {
-      var label = (o && o.label) ? String(o.label) : '';
-      if (!label) return '';
-      var desc = (o && o.description) ? String(o.description) : '';
-      return '<button type="button" class="pb-chip pb-board-act" data-act="answerOpt"'
-        + ' data-idx="' + i + '"'
-        + (desc ? ' title="' + _esc(desc) + '"' : '')
-        + ' data-pb-src="' + _esc(label) + '">' + _mdLite(label) + '</button>';
-    }).join('');
-    var inputRow = '<div class="pb-answer-input-row">'
-      + '<input type="text" class="pb-answer-text" placeholder="'
-      + _esc(_t('projectBrain.answerPlaceholder',
-                'Type your answer (or pick an option above)…')) + '">'
-      + '<button type="button" class="pb-board-act pb-board-act-answer pb-btn-primary"'
-      + ' data-act="answerSubmit">'
-      + ((typeof Icon === 'function') ? Icon('check', 12) : '')
-      + '<span>' + _esc(_t('projectBrain.answerSubmit', 'Submit answer')) + '</span></button>'
-      + '</div>';
-    var questionBox = '<div class="pb-question">'
-      + '<div class="pb-question-label">'
-      + ((typeof Icon === 'function') ? Icon('alertTriangle', 12) : '')
-      + _esc(_t('projectBrain.needsYourDecision', 'Your decision needed')) + '</div>'
-      + '<div class="pb-question-q" data-pb-src="' + _esc(q.q || '') + '">'
-      + _mdLite(q.q || '') + '</div>'
-      + (chips ? '<div class="pb-chip-row">' + chips + '</div>' : '')
-      + inputRow + '</div>';
-    var cnt = Number(t.block_count || 0);
-    var meta = _esc(_t('projectBrain.awaitingAnswerMeta', 'waiting for your answer'))
-      + (cnt ? ' · ' + _esc(_t('projectBrain.blockedCount', 'blocked %d×')
-                            .replace('%d', cnt)) : '');
+  /** Render one AWAITING-ANSWER epic card — COMPACT (2026-07-31
+   *  consolidation). The answering UI (question, option chips, free-text
+   *  input) lives ONLY in the Needs-you tab: the same epic rendered in BOTH
+   *  places made the operator meet the identical question twice. This card
+   *  keeps the board honest — the epic is visibly gated, never "claim me" —
+   *  and DEEP-LINKS into the attention tab, the single surface where answers
+   *  are given (redesign §D6: deep-link, don't duplicate). Reopen/Done stay
+   *  available as secondary lifecycle controls. ONE clamp per card. */
+  function _awaitingCard(t) {
     var reason = (t.block_reason || '').trim();
     var headText = String(t.title || '') + (reason ? '\n\n' + reason : '');
     var headHtml = _clampBlock(_mdLite(headText), headText);
+    var cnt = Number(t.block_count || 0);
+    var meta = '<span class="pb-board-badge pb-board-badge-awaiting">' +
+      ((typeof Icon === 'function') ? Icon('alertTriangle', 11) : '') +
+      '<span>' + _esc(_t('projectBrain.laneAwaiting', 'Awaiting your answer')) +
+      '</span></span>' +
+      '<span class="pb-board-awaiting-meta">' +
+      _esc(_t('projectBrain.awaitingAnswerMeta', 'waiting for your answer')) +
+      (cnt ? ' · ' + _esc(_t('projectBrain.blockedCount', 'blocked %d×')
+                          .replace('%d', cnt)) : '') + '</span>';
     var acts = [
+      '<button type="button" class="pb-board-act pb-board-act-goto"' +
+        ' data-act="gotoAttention" title="' +
+        _esc(_t('projectBrain.actGoAnswer', 'Answer in Needs you')) + '">' +
+        ((typeof Icon === 'function') ? Icon('arrowRight', 12) : '') +
+        '<span>' + _esc(_t('projectBrain.actGoAnswer', 'Answer in Needs you')) +
+        '</span></button>',
+      _boardActionBtn('createConv', 'messagePlus',
+        'projectBrain.actCreateConv', 'New chat'),
       _boardActionBtn('reopen', 'refresh', 'projectBrain.actReopen', 'Reopen'),
       _boardActionBtn('complete', 'check', 'projectBrain.actComplete', 'Done'),
     ];
     return '<div class="pb-board-card pb-board-awaiting" data-task-id="' +
       _esc(t.id) + '">' +
       '<div class="pb-board-title">' + headHtml + '</div>' +
-      questionBox +
       '<div class="pb-board-card-meta pb-board-block-meta">' + meta + '</div>' +
       '<div class="pb-board-card-actions">' + acts.join('') + '</div></div>';
   }
 
-  /** Look up a task on the last-rendered board snapshot (answer acts need the
-   *  structured question's option labels). */
+  /**
+   * "Create conversation" for a board epic: close the panel, open a fresh
+   *  chat and pre-fill the composer with a kickoff naming the epic id + title
+   *  + project path. NEVER auto-sends — the human reviews and edits before
+   *  the first token is spent.
+   *
+   * ORDER IS LOAD-BEARING: the composer is pre-filled BEFORE newChat()
+   * runs. newChat measures hasInput from the composer and, finding it EMPTY,
+   * clears the project attachment + tool config (_clearProjectStateLocal /
+   * _resetToolsToDefaults) — which is exactly the project the kickoff's
+   * project_board_read / project_board_claim resolve their path from. With
+   * the pre-fill already in place, newChat's own "pending input keeps the
+   * project armed" rule preserves it instead. (myday's quick-action has the
+   * same inverted order — tracked separately.)
+   */
+  function _openEpicConversation(taskId, title) {
+    if (!taskId) return;
+    // Capture the project path FIRST: closeProjectBrain → closeFeed wipes
+    // _state.path.
+    var path = _state.path || _displayedProjectPath();
+    closeProjectBrain();
+    var input = document.getElementById('userInput');
+    if (input) {
+      var short = String(title || '').replace(/\s+/g, ' ').trim().slice(0, 400);
+      input.value = _t('projectBrain.epicChatPrompt',
+        'Claim and advance this board epic: {id}\n{title}\nProject: {path}\n\n' +
+        'Read the full text with project_board_read, claim it with ' +
+        'project_board_claim, then start.')
+        .replace('{id}', taskId).replace('{title}', short)
+        .replace('{path}', path);
+    }
+    if (typeof newChat === 'function') {
+      try { newChat(); } catch (e) {
+        _reportFailure('projectBrain.convCreateFailed',
+          'Could not open a new chat', e);
+      }
+    }
+    if (input) {
+      try {
+        input.style.height = 'auto';
+        input.style.height = input.scrollHeight + 'px';
+        input.focus();
+      } catch (_e) { /* jsdom / detached */ }
+    }
+    if (typeof updateSendButton === 'function') {
+      try { updateSendButton(); } catch (_e) { /* best-effort */ }
+    }
+  }
+
+  /** Look up a task on the last-rendered board snapshot (the create-conv
+   *  action resolves the epic's full title from it). */
   function _findBoardTask(taskId) {
     var tasks = (_state.board && _state.board.tasks) || [];
     for (var i = 0; i < tasks.length; i++) {
@@ -1408,20 +1447,23 @@
     } else if (act === 'block' && typeof api.boardBlock === 'function') {
       _openBlockNoteEditor(btn, taskId, path, convId);
       return;  // the inline editor owns the rest of the flow
-    } else if (act === 'answerOpt' && typeof api.boardAnswer === 'function') {
+    } else if (act === 'gotoAttention') {
+      // Deep-link: answering happens ONLY in the Needs-you tab (§D6). Focus
+      // THIS epic's card there — with several waiting items, landing on the
+      // tab top made the operator hunt for the card they clicked. The tab
+      // renders async, so the id travels through the attention module's
+      // pending-focus channel and is honored after render.
+      _selectTab('attention');
+      if (typeof window.ProjectBrainAttention !== 'undefined' &&
+          window.ProjectBrainAttention &&
+          typeof window.ProjectBrainAttention.focusItem === 'function') {
+        window.ProjectBrainAttention.focusItem(taskId);
+      }
+      return;
+    } else if (act === 'createConv') {
       var task = _findBoardTask(taskId);
-      var q = (task && task.block_question) || {};
-      var opts = Array.isArray(q.options) ? q.options : [];
-      var opt = opts[Number(btn ? btn.getAttribute('data-idx') : -1)];
-      var optLabel = (opt && opt.label) ? String(opt.label).trim() : '';
-      if (!optLabel) return;
-      call = api.boardAnswer(path, taskId, convId, optLabel);
-    } else if (act === 'answerSubmit' && typeof api.boardAnswer === 'function') {
-      var cardEl = btn && btn.closest ? btn.closest('.pb-board-card') : null;
-      var input = cardEl ? cardEl.querySelector('.pb-answer-text') : null;
-      var freeText = input ? (input.value || '').trim() : '';
-      if (!freeText) { if (input && input.focus) input.focus(); return; }
-      call = api.boardAnswer(path, taskId, convId, freeText);
+      if (task) _openEpicConversation(task.id, task.title);
+      return;
     }
     if (!call) return;
     if (btn) btn.disabled = true;
@@ -1521,8 +1563,8 @@
       }
       (cols[t.status] || cols.open).push(t);
     }
-    // Board badge = live epics needing attention (open + claimed), not done,
-    // blocked (waiting on a gate), or path leases.
+    // Board badge = live epics needing attention (open + claimed +
+    // awaiting-answer), not done, blocked (waiting on a gate), or path leases.
     _setTabCount('pbTabCountBoard',
       cols.open.length + cols.claimed.length + cols.awaiting.length);
     function lane(key, labelKey) {
@@ -1570,7 +1612,8 @@
         blockedCards + '</div>';
     }
     // Awaiting-answer lane (pending human questions) — TOP of the board,
-    // the one place the operator is asked to ACT.
+    // COMPACT: each card deep-links into the Needs-you tab, the single
+    // answering surface (the question UI itself is no longer duplicated here).
     var awaitingLane = '';
     if (cols.awaiting.length) {
       awaitingLane = '<div class="pb-board-lane pb-board-lane-awaiting">' +
@@ -1578,7 +1621,7 @@
         ((typeof Icon === 'function') ? Icon('alertTriangle', 12) : '') +
         ' ' + _esc(_t('projectBrain.laneAwaiting', 'Awaiting your answer')) +
         ' <span class="pb-board-count">' + cols.awaiting.length + '</span></div>' +
-        cols.awaiting.map(_answerCard).join('') + '</div>';
+        cols.awaiting.map(_awaitingCard).join('') + '</div>';
     }
     el.innerHTML =
       '<div class="pb-board-toolbar">' + newBtn + '</div>' +
@@ -1603,18 +1646,7 @@
     // "＋ New epic"
     var nb = el.querySelector('#pbBoardNewBtn');
     if (nb && !nb.disabled) nb.addEventListener('click', _boardPostNew);
-    // Answer inputs: Enter submits (same as clicking 提交回答).
-    var answerInputs = el.querySelectorAll('.pb-answer-text');
-    for (var ai = 0; ai < answerInputs.length; ai++) {
-      answerInputs[ai].addEventListener('keydown', function (/** @type {KeyboardEvent} */ ev) {
-        if (ev.key !== 'Enter') return;
-        ev.preventDefault();
-        var card = ev.currentTarget.closest ? ev.currentTarget.closest('.pb-board-card') : null;
-        var submit = card ? card.querySelector('.pb-board-act[data-act="answerSubmit"]') : null;
-        if (submit) submit.click();
-      });
-    }
-    // Per-card human lifecycle actions (complete / block / reopen).
+    // Per-card human actions (create-conversation / lifecycle / goto-answer).
     var actBtns = el.querySelectorAll('.pb-board-act');
     for (var a = 0; a < actBtns.length; a++) {
       actBtns[a].addEventListener('click', function (ev) {
@@ -1631,7 +1663,7 @@
     var api = (typeof Api !== 'undefined' && Api.project) ? Api.project : null;
     if (!api || !path || typeof api.board !== 'function') return;
     Promise.resolve(api.board(path)).then(function (board) {
-      _state.board = board || {};  // answer acts resolve option labels from it
+      _state.board = board || {};  // create-conv resolves epic titles from it
       renderBoard(board || {});
     }).catch(function (e) {
       _reportFailure('projectBrain.loadFailed', 'Loading the project brain failed', e);
@@ -1655,22 +1687,53 @@
       '<span>' + _esc(label) + '</span></span>';
   }
 
-  /** Render one board epic row inside an influence group. */
+  /** Render one board epic row inside an influence group.
+   *  The title goes through _clampBlock for the SAME reason the board column
+   *  does: an epic title is stored in full (measured up to 1.6k chars on the
+   *  live board) and rendering it raw made the lens a wall of text with no way
+   *  to see the rows below it. The full text stays the expandable source. */
   function _influenceEpicRow(t, cls) {
     var owner = t.owner
       ? '<button type="button" class="pb-conv-chip" data-conv-id="' + _esc(t.owner) + '">' +
         _esc(t.owner) + '</button>'
       : '';
+    var raw = t.title || t.id || '';
     return '<div class="pb-inf-epic ' + (cls || '') + '">' +
-      '<span class="pb-inf-epic-title">' + _esc(t.title || t.id) + '</span>' +
+      '<span class="pb-inf-epic-title">' + _clampBlock(_mdLite(raw), raw) + '</span>' +
       owner + '</div>';
+  }
+
+  /** One lane header for the INJECTED channel: name + measured prompt cost.
+   *  The char count is the backend's measurement of the REAL block, never a
+   *  frontend estimate — "in your context" without a size is a claim the
+   *  human cannot check. */
+  function _injLaneHead(labelKey, fallback, chars, cls) {
+    var size = chars
+      ? ' <span class="pb-inf-cost">' +
+        _esc(_t('projectBrain.infChars', '{n} chars')
+          .replace('{n}', String(chars))) + '</span>'
+      : '';
+    return '<div class="pb-inf-group-head ' + (cls || '') + '">' +
+      _esc(_t('projectBrain.' + labelKey, fallback)) + size + '</div>';
   }
 
   /**
    * Render the per-conversation influence lens from the backend verdict.
-   * `inf` is the build_conv_influence dict. Renders NOTHING (hides the banner)
-   * when the brain has no effect on this conversation (no charter + empty
-   * board + no pending) — so a solo/empty project adds no visual noise.
+   * `inf` is the build_conv_influence dict.
+   *
+   * The body is split into TWO CHANNELS, because "the model has already read
+   * this" and "the model could go look this up" are different facts and a
+   * merged list silently upgrades the second into the first:
+   *   ① INJECTED — charter headlines, open goals, the abridged board. Each
+   *     lane shows the backend's MEASURED block size, so the prompt cost is
+   *     reported rather than implied.
+   *   ② TOOL-VISIBLE — reachable only if the model spends a tool round; costs
+   *     zero context until then.
+   * Pending proposals sit outside both: they reach agents only once a HUMAN
+   * commits them (charter #0).
+   *
+   * Renders NOTHING (hides the banner) when the brain has no effect on this
+   * conversation — a solo/empty project adds no visual noise.
    */
   function renderInfluence(inf) {
     var banner = document.getElementById('projectBrainInfluence');
@@ -1679,17 +1742,21 @@
     if (!banner || !body) return;
     inf = inf || {};
     var charter = inf.charter || {};
+    var goals = inf.goals || {};
     var board = inf.board || {};
     var mine = board.mine || [];
     var avoid = board.avoid || [];
     var open = board.open || [];
     var pending = inf.pendingDecisions || [];
+    var toolVisible = inf.toolVisible || [];
+    var goalItems = goals.items || [];
     var charterActive = !!charter.injected &&
       (!!charter.content || (charter.decisions || []).length);
+    var goalsActive = !!goals.injected && goalItems.length > 0;
 
     // Nothing influences this conversation → hide the banner entirely.
-    if (!charterActive && !mine.length && !avoid.length && !open.length &&
-        !pending.length) {
+    if (!charterActive && !goalsActive && !mine.length && !avoid.length &&
+        !open.length && !pending.length) {
       banner.hidden = true;
       body.innerHTML = '';
       if (convEl) convEl.textContent = '';
@@ -1714,6 +1781,8 @@
         (charter.decisions || []).length || 1, 'infCharterBound',
         'bound by charter', 'pb-inf-chip-charter');
     }
+    chips += _influenceChip('compass', goalItems.length, 'infGoals',
+      '{n} owner goal(s)', 'pb-inf-chip-goals');
     chips += _influenceChip('package', mine.length, 'infOwns',
       '{n} owned by you', 'pb-inf-chip-mine');
     chips += _influenceChip('alertTriangle', avoid.length, 'infAvoid',
@@ -1724,12 +1793,29 @@
     var parts = [];
     if (chips) parts.push('<div class="pb-inf-chips">' + chips + '</div>');
 
+    // ══ Channel ①: what is SPLICED INTO THIS TURN'S PROMPT ══
+    var inj = [];
+
+    // Goals first: it is the human's own directive, and the reported bug was
+    // that this lane did not appear at all.
+    if (goalsActive) {
+      var gparts = ['<div class="pb-inf-group pb-inf-group-goals">'];
+      gparts.push(_injLaneHead('infGoalsHead', 'Owner goals', goals.chars));
+      gparts.push('<ul class="pb-inf-decisions">');
+      for (var g = 0; g < goalItems.length; g++) {
+        var _gTxt = (goalItems[g] && goalItems[g].text) || '';
+        gparts.push('<li>' + _clampBlock(_mdLite(_gTxt), _gTxt) + '</li>');
+      }
+      gparts.push('</ul></div>');
+      inj.push(gparts.join(''));
+    }
+
     // Charter this conversation is bound by (the shared north star + the
     // committed decisions the prompt actually injects).
     if (charterActive) {
       var cparts = ['<div class="pb-inf-group pb-inf-group-charter">'];
-      cparts.push('<div class="pb-inf-group-head">' +
-        _esc(_t('projectBrain.infCharterHead', 'Bound by the charter')) + '</div>');
+      cparts.push(_injLaneHead('infCharterHead', 'Bound by the charter',
+        charter.chars));
       if (charter.content) {
         cparts.push('<div class="pb-inf-northstar">' +
           _clampBlock(_mdLite(charter.content), charter.content) + '</div>');
@@ -1750,34 +1836,81 @@
         cparts.push('</ul>');
       }
       cparts.push('</div>');
-      parts.push(cparts.join(''));
+      inj.push(cparts.join(''));
     }
 
-    // Board influence — what THIS conv owns vs. must not redo.
+    // Board influence — what THIS conv owns vs. must not redo. The board is
+    // injected ABRIDGED, so the rows below show more than the model got; say
+    // so once for the whole board rather than per row.
+    var boardChars = board.injected ? board.chars : 0;
     if (mine.length) {
-      parts.push('<div class="pb-inf-group pb-inf-group-mine">' +
-        '<div class="pb-inf-group-head">' +
-        _esc(_t('projectBrain.infMineHead', 'Epics you are advancing')) + '</div>' +
+      inj.push('<div class="pb-inf-group pb-inf-group-mine">' +
+        _injLaneHead('infMineHead', 'Epics you are advancing', boardChars) +
         mine.map(function (t) { return _influenceEpicRow(t, 'pb-inf-mine'); }).join('') +
         '</div>');
+      boardChars = 0;  // cost belongs to the board block, counted once
     }
     if (avoid.length) {
-      parts.push('<div class="pb-inf-group pb-inf-group-avoid">' +
-        '<div class="pb-inf-group-head">' +
-        _esc(_t('projectBrain.infAvoidHead',
-          'Avoid duplicating — advanced by a sibling')) + '</div>' +
+      inj.push('<div class="pb-inf-group pb-inf-group-avoid">' +
+        _injLaneHead('infAvoidHead',
+          'Avoid duplicating — advanced by a sibling', boardChars) +
         avoid.map(function (t) { return _influenceEpicRow(t, 'pb-inf-avoid'); }).join('') +
         '</div>');
+      boardChars = 0;
     }
     if (open.length) {
-      parts.push('<div class="pb-inf-group pb-inf-group-open">' +
-        '<div class="pb-inf-group-head">' +
-        _esc(_t('projectBrain.infOpenHead', 'Open — you could claim')) + '</div>' +
+      inj.push('<div class="pb-inf-group pb-inf-group-open">' +
+        _injLaneHead('infOpenHead', 'Open — you could claim', boardChars) +
         open.slice(0, 6).map(function (t) {
           return _influenceEpicRow(t, 'pb-inf-open');
         }).join('') +
         '</div>');
     }
+    if (board.abridgedInPrompt && (mine.length || avoid.length || open.length)) {
+      inj.push('<div class="pb-inf-note">' +
+        _esc(_t('projectBrain.infAbridgedNote',
+          'Epics ship to the model abridged (headline only) — the full text ' +
+          'shown here is reachable via project_board_read.')) + '</div>');
+    }
+
+    if (inj.length) {
+      parts.push('<div class="pb-inf-channel pb-inf-channel-injected">' +
+        '<div class="pb-inf-channel-head">' +
+        _esc(_t('projectBrain.infChannelInjected',
+          'Injected into this turn\u2019s context')) + '</div>' +
+        inj.join('') + '</div>');
+    }
+
+    // ══ Channel ②: reachable ONLY by spending a tool round ══
+    if (toolVisible.length) {
+      var tRows = toolVisible.map(function (tv) {
+        return '<div class="pb-inf-tool"><code>' + _esc(tv.tool) + '</code>' +
+          '<span>' + _esc(_t('projectBrain.' + tv.labelKey, tv.tool)) +
+          '</span></div>';
+      }).join('');
+      parts.push('<div class="pb-inf-channel pb-inf-channel-tools">' +
+        '<div class="pb-inf-channel-head">' +
+        _esc(_t('projectBrain.infChannelTools',
+          'Not in context — the model must call a tool')) + '</div>' +
+        tRows + '</div>');
+    }
+
+    // Pending proposals: neither channel — they reach agents only after a
+    // HUMAN commits them, so showing them as "influence" would be false.
+    if (pending.length) {
+      parts.push('<div class="pb-inf-group pb-inf-group-pending">' +
+        '<div class="pb-inf-group-head">' +
+        _esc(_t('projectBrain.infPendingHead',
+          'Awaiting you — not reaching agents until committed')) + '</div>' +
+        pending.map(function (p) {
+          var txt = p.summary || p.title || p.proposalId || '';
+          return '<div class="pb-inf-epic pb-inf-pending">' +
+            '<span class="pb-inf-epic-title">' +
+            _clampBlock(_mdLite(txt), txt) + '</span></div>';
+        }).join('') +
+        '</div>');
+    }
+
     body.innerHTML = parts.join('');
     _wireClampToggles(body);
     _applyContentI18n(body);
@@ -2050,6 +2183,7 @@
     _onPush: _onPush,
     _state: _state,
     _boardConvId: _boardConvId,
+    _openEpicConversation: _openEpicConversation,
     // Shared primitives the Needs-you tab (project-brain-attention.js) reuses
     // so the panel has ONE clamp/markdown/tab-switch grammar, not two.
     _clampBlock: _clampBlock,

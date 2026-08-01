@@ -73,7 +73,11 @@ def chat(messages, model=None, *, max_tokens=4096, temperature=0,
     """
     model = model or _lib.LLM_MODEL
     _anthropic = (api_protocol == 'anthropic')
-    if _anthropic:
+    _responses = (api_protocol == 'responses')
+    if _responses:
+        from lib.llm.responses_outbound import responses_url
+        url = responses_url(base_url)
+    elif _anthropic:
         from lib.llm.anthropic_outbound import anthropic_messages_url
         url = anthropic_messages_url(base_url)
         if oauth == 'claude':
@@ -127,12 +131,31 @@ def chat(messages, model=None, *, max_tokens=4096, temperature=0,
                 else:
                     extra_headers['anthropic-beta'] = _ttl_beta
 
-    if _anthropic:
+    _cloak_reverse = None
+    _resp_reverse = None
+    if _responses:
+        from lib.llm.responses_outbound import openai_body_to_responses
+        body, _resp_reverse = openai_body_to_responses(
+            body, profile='codex' if oauth == 'codex' else 'default',
+            stream=False)
+    elif _anthropic:
         from lib.llm.anthropic_outbound import openai_body_to_anthropic
         body = openai_body_to_anthropic(body)
+        if oauth == 'claude':
+            from lib.oauth.outbound import apply_claude_cloak
+            body, _cloak_reverse = apply_claude_cloak(body)
 
     if log_prefix:
         logger.debug('%s POST %s model=%s msgs=%d', log_prefix, url, model, len(messages))
+
+    # Desktop-egress routing (S3): whitelisted hosts go through the user's
+    # desktop agent when the server's own egress is blocked (cached probe).
+    _egress_route = None
+    from lib.desktop import egress as _eg
+    try:
+        _egress_route = _eg.route_request(url, user_id='')
+    except _eg.EgressUnavailable as e:
+        raise EndpointUnreachableError(str(e), base_url=url) from e
 
     retries = MAX_STREAM_RETRIES if max_retries is None else max_retries
     resp = None
@@ -156,7 +179,17 @@ def chat(messages, model=None, *, max_tokens=4096, temperature=0,
             if log_prefix:
                 logger.debug('%s M-TraceId=%s', log_prefix, trace_id)
             try:
-                resp = http_post(url, headers=hdrs, json=body,
+                if _egress_route and _egress_route != 'direct':
+                    try:
+                        resp = _eg.egress_http(
+                            url, method='POST', headers=hdrs,
+                            body=json.dumps(body).encode(),
+                            timeout=min(timeout or 60, 60), user_id='')
+                    except _eg.EgressUnavailable as e:
+                        raise EndpointUnreachableError(
+                            str(e), base_url=url) from e
+                else:
+                    resp = http_post(url, headers=hdrs, json=body,
                                      timeout=(CONNECT_TIMEOUT, timeout))
             except requests.exceptions.ConnectionError as ce:
                 # Connect-phase failure = endpoint down. Escape to the
@@ -220,9 +253,23 @@ def chat(messages, model=None, *, max_tokens=4096, temperature=0,
             f'API returned invalid JSON (HTTP {resp.status_code}): '
             f'{decode_error_body(resp)[:_ERR_BODY_LIMIT]}'
         ) from e
-    if _anthropic:
+    if _responses:
+        from lib.llm.responses_outbound import responses_response_to_openai
+        data = responses_response_to_openai(
+            data, tool_name_reverse=_resp_reverse)
+        if 'error' in data:
+            # status:'failed' — classify through the same HTTP-error ladder
+            # (500 → RetryableAPIError) instead of manufacturing an empty turn.
+            _classify_http_error(500, data['error'].get('message', ''),
+                                 model, log_prefix, max_tokens=max_tokens)
+    elif _anthropic:
         from lib.llm.anthropic_outbound import anthropic_response_to_openai
         data = anthropic_response_to_openai(data)
+        if _cloak_reverse:
+            from lib.oauth.outbound import restore_claude_tool_names
+            for _ch in data.get('choices') or []:
+                restore_claude_tool_names(
+                    (_ch.get('message') or {}).get('tool_calls'), _cloak_reverse)
     choices = data.get('choices') or []
     if not choices:
         raise Exception(

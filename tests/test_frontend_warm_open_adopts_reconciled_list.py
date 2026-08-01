@@ -58,6 +58,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 
 import pytest
 
@@ -141,7 +142,7 @@ global.Api = {
 };
 
 global.conversations = [];
-eval(fs.readFileSync(process.argv[2], 'utf8'));  // REAL core/conversations.js
+for (const f of process.argv.slice(2)) eval(fs.readFileSync(f, 'utf8'));  // bundle-order conv family via _conv_bundle_sources.conv_family_sources
 global.conversations = conversations;
 
 const out = [];
@@ -258,13 +259,25 @@ function seed({ activeTaskId = null } = {}) {
 """
 
 
-def _run(js_path: str) -> subprocess.CompletedProcess:
+def _run(js_path: str, override_extra: dict | None = None) -> subprocess.CompletedProcess:
     harness = os.path.join(HERE, '_warm_open_adopts_reconciled_harness.js')
     with open(harness, 'w') as f:
         f.write(_HARNESS)
+    # Eval the WHOLE conv family via the drift-proof closure (see
+    # _conv_bundle_sources.conv_family_sources) — this harness drove
+    # conversations.js STANDALONE, so the orphan-ghost predicate
+    # _openConvMayHoldOrphanGhost (conv_verify_visibility.js) threw
+    # (2026-08-01, 3 RED). override_extra swaps a mutated LEAF (the
+    # neuter targets conv_verify_visibility.js, not conversations.js).
+    sys.path.insert(0, HERE)
+    from _conv_bundle_sources import conv_family_sources
+    override = dict(override_extra or {})
+    if os.path.basename(js_path) != 'conversations.js':
+        override['core/conversations.js'] = js_path
+    extra_js = conv_family_sources(override=override or None)
     try:
         return subprocess.run(
-            ['node', harness, js_path],
+            ['node', harness, *extra_js],
             capture_output=True, text=True, timeout=60,
         )
     finally:
@@ -317,17 +330,18 @@ def test_NC_orphan_ghost_gate_is_load_bearing(tmp_path):
     A_warm_idle_adopts_reconciled flips FAIL (the ghost survives again).
     Proves the orphan-ghost verdict is what drives the adoption; shipped
     file left byte-identical."""
-    conv_js = os.path.join(JS_DIR, 'core', 'conversations.js')
-    with open(conv_js, encoding='utf-8') as f:
+    pred_js = os.path.join(JS_DIR, 'core', 'conv_verify_visibility.js')
+    with open(pred_js, encoding='utf-8') as f:
         src = f.read()
     anchor = 'function _openConvMayHoldOrphanGhost(conv, convId) {'
     assert anchor in src, 'orphan-ghost predicate missing — update the neuter target'
     neutered = src.replace(
         anchor, anchor + '\n  return false;  /* NEUTERED */', 1)
     assert neutered != src
-    copy = tmp_path / 'conversations_neutered.js'
+    copy = tmp_path / 'conv_verify_visibility_neutered.js'
     copy.write_text(neutered, encoding='utf-8')
-    proc = _run(str(copy))
+    proc = _run(os.path.join(JS_DIR, 'core', 'conversations.js'),
+                override_extra={'core/conv_verify_visibility.js': str(copy)})
     output = proc.stdout.strip()
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
     assert 'FAIL A_warm_idle_adopts_reconciled' in output, (
@@ -338,5 +352,5 @@ def test_NC_orphan_ghost_gate_is_load_bearing(tmp_path):
     # Controls must stay green even with the gate defused (no over-truncation).
     assert 'PASS C_live_stream_not_truncated' in output
     assert 'PASS D_keep_local_fresh_not_truncated' in output
-    with open(conv_js, encoding='utf-8') as f:
-        assert f.read() == src, 'shipped conversations.js mutated by the NC'
+    with open(pred_js, encoding='utf-8') as f:
+        assert f.read() == src, 'shipped conv_verify_visibility.js mutated by the NC'

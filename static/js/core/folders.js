@@ -77,27 +77,74 @@ async function createFolder(name, color) {
 }
 
 async function updateFolder(folderId, updates) {
-  const updated = await Api.folders.update(folderId, updates);
-  if (updated) {
-    const idx = _folders.findIndex(f => f.id === folderId);
-    if (idx >= 0) Object.assign(_folders[idx], updated);
-  }
-  return updated;
+  /* ★ INSTANT-UI (owner directive 2026-07-31, pt_77ba3f17dedf4b65): apply the
+   *   rename/color change locally on the CLICK — the old code awaited the
+   *   PATCH first, so the dialog stayed open and the tab kept its old name
+   *   for a whole RTT. The PATCH then runs in the background; on failure the
+   *   previous fields are restored and an error toast surfaces. */
+  const idx = _folders.findIndex(f => f.id === folderId);
+  if (idx < 0) return null;
+  const prev = { ..._folders[idx] };
+  Object.assign(_folders[idx], updates);
+  if (typeof renderConversationList === 'function') renderConversationList();
+  Api.folders.update(folderId, updates)
+    .then(updated => {
+      if (!updated) throw new Error('no response');
+      const i = _folders.findIndex(f => f.id === folderId);
+      if (i >= 0) Object.assign(_folders[i], updated);
+      if (typeof renderConversationList === 'function') renderConversationList();
+    })
+    .catch(e => {
+      console.warn('[updateFolder] PATCH failed — rolling back:', e && e.message);
+      const i = _folders.findIndex(f => f.id === folderId);
+      if (i >= 0) Object.assign(_folders[i], prev);
+      if (typeof renderConversationList === 'function') renderConversationList();
+      if (typeof showToast === 'function') showToast(t('folder.renameFailed'), 'error');
+    });
+  return _folders[idx];
 }
 
 async function deleteFolder(folderId) {
-  const ok = await Api.folders.remove(folderId);
-  if (!ok) return false;
+  /* ★ INSTANT-UI (owner directive 2026-07-31, pt_77ba3f17dedf4b65): remove the
+   *   folder tab AND unassign its conversations locally on the CLICK — the old
+   *   code awaited the DELETE first, so the tab sat there for a whole RTT. The
+   *   DELETE then runs in the background; the per-conversation server syncs
+   *   only fire on success, and on failure the folder + every assignment is
+   *   restored and an error toast surfaces. */
+  const idx = _folders.findIndex(f => f.id === folderId);
+  if (idx < 0) return false;
+  const removed = _folders[idx];
+  const unassigned = [];
   _folders = _folders.filter(f => f.id !== folderId);
-  // Unassign conversations from deleted folder
+  // Unassign conversations from the deleted folder — locally, NOW.
   for (const c of conversations) {
     if (c.folderId === folderId) {
       c.folderId = null;
-      syncConversationToServer(c).catch(() => {});
+      unassigned.push(c);
       // Also write-through to IDB so a refresh doesn't replay the stale folderId
       ConvCache.put(c);
     }
   }
+  if (typeof renderConversationList === 'function') renderConversationList();
+  Api.folders.remove(folderId)
+    .then(ok => {
+      if (!ok) throw new Error('delete rejected');
+      for (const c of unassigned) syncConversationToServer(c).catch(() => {});
+    })
+    .catch(e => {
+      console.warn('[deleteFolder] DELETE failed — rolling back:', e && e.message);
+      /* Restore the folder at its original index (clamped) and every
+       * conversation's assignment, so the sidebar returns to its pre-click
+       * shape instead of silently losing the folder the server still has. */
+      const at = Math.min(idx, _folders.length);
+      _folders = [..._folders.slice(0, at), removed, ..._folders.slice(at)];
+      for (const c of unassigned) {
+        c.folderId = folderId;
+        ConvCache.put(c);
+      }
+      if (typeof renderConversationList === 'function') renderConversationList();
+      if (typeof showToast === 'function') showToast(t('folder.deleteFailed'), 'error');
+    });
   return true;
 }
 

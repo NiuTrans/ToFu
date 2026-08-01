@@ -135,7 +135,7 @@ async function _connectAutopilotKick(convId, taskId) {
     try {
       sseWorked = await _resumeSSEWithRetry(convId, taskId, stream, dummyAssistant);
     } catch (e) {
-      if (e.name === 'AbortError') { twStop(convId); finishStream(convId); return; }
+      if (e.name === 'AbortError') { if (typeof twStop === 'function') twStop(convId); finishStream(convId); return; }
       debugLog(`Autopilot kick SSE resume-retry failed: ${e.message}`, 'warn');
     }
   }
@@ -227,6 +227,26 @@ async function connectToTask(convId, taskId, retries = 0, opts = {}) {
   if (opts && (opts.autopilotKick || opts.vuCarrier)) {
     return _connectAutopilotKick(convId, taskId);
   }
+  /* ★ Duplicate-connect guard (pt_44e985ec): a second connectToTask for the
+   *   SAME conv+task must not open a second SSE reader — the server supersedes
+   *   the first, whose connect then surrenders to the poll fallback, leaving
+   *   the poll lane and the surviving SSE lane racing the same bubble (the
+   *   等待中…↔推理中 N字符 flip-flop). Reported server-side: the caller that
+   *   double-fired is exactly the forensic signal for this class. */
+  const _dupStream = activeStreams.get(convId);
+  if (_dupStream && _dupStream.taskId === taskId
+      && _dupStream.controller && !_dupStream.controller.signal.aborted) {
+    console.info(
+      `[connectToTask] ⏭ stream already active for conv=${convId.slice(0,8)} ` +
+      `task=${taskId.slice(0,8)} — skipping duplicate connect`
+    );
+    if (typeof _reportClientError === 'function') {
+      _reportClientError(
+        `[connectToTask] duplicate connect suppressed (stream already active) ` +
+        `conv=${convId.slice(0,8)} task=${taskId.slice(0,8)}`);
+    }
+    return;
+  }
   /* ★ CROSS-TALK DETECTION: log full stream context at connection time */
   console.info(
     `[connectToTask] 🔗 Connecting — conv=${convId.slice(0,8)} task=${taskId.slice(0,8)} ` +
@@ -300,6 +320,12 @@ async function connectToTask(convId, taskId, retries = 0, opts = {}) {
         `finishReason=${assistantMsg.finishReason || 'none'}) — pushing fresh placeholder ` +
         `for conv=${convId.slice(0,8)} so SSE doesn't replay old content into it`
       );
+      if (typeof _reportClientError === 'function') {
+        _reportClientError(
+          `[connectToTask] pushed placeholder (prior-turn guard) conv=${convId.slice(0,8)} ` +
+          `task=${taskId.slice(0,8)} tailTask=${assistantMsg._taskId?.slice(0,8) || 'none'} ` +
+          `finishReason=${assistantMsg.finishReason || 'none'}`);
+      }
       assistantMsg = {
         role: 'assistant',
         content: '',
@@ -365,6 +391,11 @@ async function connectToTask(convId, taskId, retries = 0, opts = {}) {
       `[connectToTask] ⚠️ Last msg is ${assistantMsg?.role || 'missing'}, not assistant — ` +
       `pushing recovery assistant msg for conv=${convId.slice(0,8)} task=${taskId.slice(0,8)}`
     );
+    if (typeof _reportClientError === 'function') {
+      _reportClientError(
+        `[connectToTask] pushed recovery placeholder (tail=${assistantMsg?.role || 'missing'}) ` +
+        `conv=${convId.slice(0,8)} task=${taskId.slice(0,8)}`);
+    }
     assistantMsg = {
       role: "assistant",
       content: "",
@@ -529,7 +560,7 @@ async function connectToTask(convId, taskId, retries = 0, opts = {}) {
     try {
       sseWorked = await _resumeSSEWithRetry(convId, taskId, stream, assistantMsg);
     } catch (e) {
-      if (e.name === "AbortError") { twStop(convId); finishStream(convId); return; }
+      if (e.name === "AbortError") { if (typeof twStop === 'function') twStop(convId); finishStream(convId); return; }
       debugLog(`SSE resume-retry failed: ${e.message}`, "warn");
     }
   }
@@ -644,6 +675,16 @@ function dispatchSSEEvent(line, ctx) {
     if (typeof _evType === 'string' && _evType.indexOf('tool_') === 0
         && ev.receivedAt == null) {
       ev.receivedAt = Date.now();
+    }
+    /* ★ Stall watch feed (pt_e0ea29f2): EVERY dispatched event — live or
+     * Last-Event-ID replay — flows through this ONE seam, so the "no
+     * unannounced freeze" detector in ui/stall_watch.js sees the same
+     * evidence the user does. Self-tick heartbeat frames are graded there
+     * (they prove the dispatcher, not the tool). Best-effort: a watch
+     * failure must never take the stream down. */
+    if (typeof stallWatchFeed === 'function') {
+      try { stallWatchFeed(convId, taskId, ev); }
+      catch (_swErr) { console.debug('[stall-watch] feed failed: %s', _swErr); }
     }
     // ★ Commit the resume cursor now: the paired data event has parsed and
     //   is applied SYNCHRONOUSLY below (dispatchSSEEvent has no await between

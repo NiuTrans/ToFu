@@ -600,11 +600,23 @@ def execute_tool_pipeline(
             _inject_fn = _serial_cfg.get('inject')
             if _inject_fn:
                 fn_args.update(_inject_fn(task, rn))
-            tc_id_ret, tool_content, is_search = _execute_tool_one(
-                task, tc, fn_name, tc_id, fn_args, rn, round_entry,
-                cfg, project_path, project_enabled,
-                all_tools=tool_list,
-            )
+            # ★ Heartbeat this lane too (pt_9f5a51ba). These tools block for
+            #   MINUTES by design and emit no delta, so without a ticker both
+            #   reaper liveness clocks go stale and the task is force-failed
+            #   at TOFU_STUCK_TASK_MAX_SILENT_SECS. ``ask_human`` self-bumps
+            #   (human_guidance.py) and ``timer_create`` emits per poll, but
+            #   ``await_task`` does NEITHER and its own wait caps at 3600s —
+            #   double the reap threshold. The module comment in _heartbeat.py
+            #   claimed this lane was already covered; it was not.
+            _hb_stop, _hb_thread = _start_tool_heartbeat(task, [item], tid)
+            try:
+                tc_id_ret, tool_content, is_search = _execute_tool_one(
+                    task, tc, fn_name, tc_id, fn_args, rn, round_entry,
+                    cfg, project_path, project_enabled,
+                    all_tools=tool_list,
+                )
+            finally:
+                _hb_stop.set()
             tool_results[tc_id_ret] = (tool_content, is_search)
             logger.info('[Task %s] %s serial dispatch completed at round %d '
                         '(result_len=%d)', tid, fn_name, round_num, len(str(tool_content)))
@@ -714,11 +726,32 @@ def execute_tool_pipeline(
                 terminal_status='aborted')
             continue
         logger.debug('[Task %s] Serial write dispatch: %s at round %d', tid, fn_name, round_num)
-        tc_id_ret, tool_content, is_search = _execute_tool_one(
-            task, tc, fn_name, tc_id, fn_args, rn, round_entry,
-            cfg, project_path, project_enabled,
-            all_tools=tool_list,
-        )
+        # ★ Heartbeat this lane (pt_9f5a51ba). ``run_command`` resolves
+        #   timeout=None BY DESIGN (no ceiling, pinned by
+        #   tests/test_no_backend_timeouts.py) and every non-readOnly MCP tool
+        #   lands in this same write partition. Running them bare left BOTH
+        #   reaper clocks silent, so the reaper's 1800s became an invisible,
+        #   unconfigurable ceiling that killed the WHOLE task — measured
+        #   2026-07-31: tasks 38562f78 and 31d08c82, each 1846s in
+        #   run_command, process group killed, ¥22.95 + ¥12.01 of completed
+        #   rounds discarded. Aliveness is proven by BEATING, never by
+        #   not-timing-out.
+        # ★ EVIDENCE GRADING (pt_8524e0ec, same day, same incident family):
+        #   the beat must be EVIDENCE, not self-rescue. For ordinary tools
+        #   this tick is marked ``_selfTick`` and keeps ONLY the transport
+        #   alive; the reaper clocks are fed by real stdout chunks instead
+        #   (a producing command never goes stale). A command silent >30min
+        #   IS reaped now — wedged by definition; the ratified human-wait
+        #   exemption covers only ask_human / await_task(wait) / timer_create.
+        _hb_stop, _hb_thread = _start_tool_heartbeat(task, [item], tid)
+        try:
+            tc_id_ret, tool_content, is_search = _execute_tool_one(
+                task, tc, fn_name, tc_id, fn_args, rn, round_entry,
+                cfg, project_path, project_enabled,
+                all_tools=tool_list,
+            )
+        finally:
+            _hb_stop.set()
         tool_results[tc_id_ret] = (tool_content, is_search)
         _invalidate_project_cache(_cache, trigger=fn_name)
         # ★ Settle at THIS tool's own completion (pt_67ffc2b7) — a serial write
@@ -760,15 +793,16 @@ def execute_tool_pipeline(
         # ── Item 3: long-tool heartbeat ──────────────────────────────────
         # A single blocking tool (a slow web_search on dead hosts, a hung MCP
         # call, a stalled browser action) emits NO delta while it runs, so the
-        # SSE stream goes silent — a buffering proxy idle-times-out, and BOTH
-        # reaper liveness clocks would go stale, risking a false reap of a
-        # genuinely-alive-but-slow tool. This daemon ticker fires every
-        # TOOL_HEARTBEAT_INTERVAL seconds while the pool wait blocks: it (a)
-        # refreshes ``_dispatch_heartbeat`` (positive-liveness clock) and (b)
-        # emits a ``tool_progress`` for each still-active round — which bumps
-        # ``_t_last_event`` via append_event AND keeps the stream non-silent so
-        # the UI shows "Searching… (Ns)". Fast tools finish before the first
-        # tick, so they never emit a heartbeat.
+        # SSE stream goes silent — a buffering proxy idle-times-out. This
+        # daemon ticker fires every TOOL_HEARTBEAT_INTERVAL seconds while the
+        # pool wait blocks, emitting a ``tool_progress`` per still-active
+        # round so the UI shows "Searching… (Ns)". Fast tools finish before
+        # the first tick, so they never emit a heartbeat.
+        # ★ EVIDENCE GRADING (pt_8524e0ec): for ordinary tools these ticks are
+        #   marked ``_selfTick`` and do NOT feed the reaper liveness clocks —
+        #   liveness must come from REAL output (stdout chunks / results).
+        #   Only ratified human-wait tools (ask_human / await_task(wait) /
+        #   timer_create) keep the reaper exemption. See _heartbeat.py.
         _hb_stop, _hb_thread = _start_tool_heartbeat(task, parallel_items, tid)
         try:
             futures = {

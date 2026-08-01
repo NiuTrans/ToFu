@@ -161,6 +161,67 @@ def _make_run_command_progress_cb(task, rn, round_entry, command):
     return _on_chunk
 
 
+def _make_run_command_spawn_cb(task, rn, round_entry):
+    """Build an ``on_spawn(exec_start_ms, deadline_ms)`` callback.
+
+    Fires ONCE, the instant the subprocess is spawned. Does two things that
+    must happen together, and neither of which any existing seam does:
+
+    1. **Publishes the deadline.** The countdown cannot be derived on the
+       client: the effective budget is the requested ``timeout`` AFTER the
+       cross-DC multiplier and the ``MAX_COMMAND_TIMEOUT`` clamp, and the
+       round's ``tStart`` is the ANNOUNCE time, not the spawn time (a write
+       approval can sit minutes in between). Both clocks are therefore
+       stamped by the backend and shipped verbatim.
+
+    2. **Forces a checkpoint.** ``deadlineTs`` only exists AFTER the round was
+       announced, so it can never ride the ``tool_start`` frame. And during a
+       long command NEITHER periodic checkpoint fires — the orchestrator's runs
+       after a round completes, the stream's on a content delta — so whether a
+       running round reached the DB was a race. Without this write, switching
+       conversations mid-command would find no round to project and the
+       countdown would restart from nothing, which is exactly the failure this
+       feature exists to prevent.
+
+    Best-effort throughout: telemetry must never abort a running command.
+    """
+    fired = {'done': False}
+
+    def _on_spawn(exec_start_ms, deadline_ms):
+        if fired['done']:
+            return
+        fired['done'] = True
+        round_entry['execStartTs'] = exec_start_ms
+        if deadline_ms is not None:
+            round_entry['deadlineTs'] = deadline_ms
+        ev = {
+            'type': 'tool_progress',
+            'roundNum': rn,
+            'toolCallId': round_entry.get('toolCallId', ''),
+            'toolName': round_entry.get('toolName') or 'run_command',
+            'stream': 'stdout',
+            'chunk': '',
+            'execStartTs': exec_start_ms,
+        }
+        if deadline_ms is not None:
+            ev['deadlineTs'] = deadline_ms
+        append_event(task, ev)
+        # ★ Durability. See the docstring: this is the ONLY write that puts a
+        #   still-running round + its deadline into the DB, so a conversation
+        #   switch / reload mid-command can project a live countdown instead of
+        #   restarting it. Deliberately NOT throttled — it happens once per
+        #   command, not per output chunk.
+        try:
+            from lib.tasks_pkg.manager import checkpoint_task_partial
+            checkpoint_task_partial(task, force=True)
+        except Exception as e:
+            logger.warning('[code_exec] spawn checkpoint failed (non-fatal) '
+                           'task=%s round=%s: %s',
+                           (task.get('id') or '?')[:8], rn, e)
+
+    return _on_spawn
+
+
 def _make_stdin_callback(task, rn, round_entry, command):
     """Create a callback that pauses execution and asks the user for stdin input.
 
@@ -217,10 +278,12 @@ def _handle_code_exec(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, p
     cmd = fn_args.get('command', '')
     cb = _make_stdin_callback(task, rn, round_entry, cmd)
     progress_cb = _make_run_command_progress_cb(task, rn, round_entry, cmd)
+    spawn_cb = _make_run_command_spawn_cb(task, rn, round_entry)
     try:
         tool_content = execute_standalone_command(fn_name, fn_args,
                                                   stdin_callback=cb,
-                                                  on_chunk=progress_cb)
+                                                  on_chunk=progress_cb,
+                                                  on_spawn=spawn_cb)
     finally:
         # Flush any buffered tail that didn't reach the coalescing threshold.
         try:

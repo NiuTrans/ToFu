@@ -4,9 +4,9 @@
 > `docs/architecture.html` (visual diagram) and whenever an AI assistant
 > needs a birds-eye view.
 >
-> **Last re-scanned:** 2026-07-18 against `lib/`, `routes/`, `static/js/`,
+> **Last re-scanned:** 2026-07-31 against `lib/`, `routes/`, `static/js/`,
 > `server.py`, `routes/__init__.py`.
-> **VERSION:** 0.13.0
+> **VERSION:** 0.16.0
 
 ---
 
@@ -229,12 +229,12 @@ Grounded against the current filesystem (2026-07-06).
 | `trading.html` | Legacy trading SPA shell (core trading code now lives in the external `tofu-trading` plugin) |
 | `healthcheck.py` · `install.{py,sh,ps1}` | Install / health helpers |
 
-### 3.2 `lib/` — core libraries (52 top-level sub-packages + top-level modules)
+### 3.2 `lib/` — core libraries (59 top-level sub-packages + top-level modules)
 
-**Sub-packages** (52 directories under `lib/` carrying an `__init__.py`,
+**Sub-packages** (59 directories under `lib/` carrying an `__init__.py`,
 excluding the `tests/` test package). The `tasks_pkg/handlers/` row below is a
 *nested* sub-package of `tasks_pkg/`, listed for convenience — it is NOT counted
-in the 52.
+in the 59.
 
 > **Note (2026-07-18 re-scan):** many former loose `lib/*.py` modules have been
 > promoted to facade **packages** (`image_gen/`, `pricing/`, `model_info/`,
@@ -259,15 +259,20 @@ in the 52.
 | `desktop/` | Desktop-agent server-side support (pairs with the top-level `desktop_agent.py` / `desktop_tools.py`) |
 | `feishu/` | `_state` · conversation · messaging · pipeline · commands · events · startup |
 | `file_history/` | api · store — per-file copy-backup undo |
-| `llm/` | `body` · `chat` · `stream` · `astream` · `_sse_core` · `cache` · `anthropic_outbound` · `diagnostics` · `_transport` (split from the former `llm_client.py`) |
+| `llm/` | `body` · `chat` · `stream` · `astream` · `_sse_core` · `cache` · `anthropic_outbound` · `responses_outbound` · `diagnostics` · `_transport` (split from the former `llm_client.py`) |
 | `llm_dispatch/` | api · config · discovery · dispatcher · factory · slot (multi-key × multi-model) |
+| `longform/` | Long-form research reports — recipe (research → outline → sections×N → assemble) · engine · runtime. Rides `production/`'s stage graph; the stage list is DATA-dependent (one per outline section) |
 | `mcp/` | client · registry · config · project_names · types |
 | `memory/` | storage · tools · injection · relevance · prefetch |
+| `motion_video/` | Motion-graphics video pipeline — `_recipe` (topic → researched script → TTS-timed storyboard) · `_scene_author` (per-scene composition author, degrades to `_template`) · `_render` · `_concat` · `_audio` · engine · runtime |
+| `production/` | **Production Substrate** — `runtime.py` (ProductionRuntime over TaskRuntime) · `jobs.py` (manifest + crash-resume rescan) · `stages.py` (checkpointed stage graph; capability-agnostic by guard test) |
 | `oauth/` | claude · codex · manager · pkce · token_store · outbound |
 | `optimizer/` | analyzer · proposer · applier · storage · actions/ (**nightly self-tuning**; REST surface at `routes/api_v1/optimizer.py`) |
 | `paper/` | Reading-Mode engine: report_engine · translate_engine · prompts · images · arxiv · tools |
 | `pdf_parser/` | core · text · images · math · vlm · postprocess · _common |
 | `presence/` | Cross-conversation live presence ("who is working here now") — the Project-Brain peer-status registry alongside the push hub |
+| `research/` | Auto-research pipeline — harvest recent literature into a reusable corpus · survey what exists · propose ideas screened against that corpus for novelty |
+| `skills/` | **User-installed skill packages** (AgentSkills format) — registry · injection (`<available_skills>` index) · activate (progressive-disclosure loader) · installer · catalog. A DIFFERENT noun from `memory/`; the model channel is read-only |
 | `project_mod/` | `tools` (execute_tool registry) · `run_command` · `read_tools` · `write_tools` · scanner · indexer · modifications · config |
 | `scheduler/` | manager · executor · cron · timer · proactive · tool_defs · _shared |
 | `swarm/` (16 modules) | master · agent · scheduler · planner · registry · rate_limiter · artifact_store · integration · events · tools · types · messages · result_format · protocol · persistence · snapshot — *(`review`/`synthesis` from earlier revisions no longer exist on disk)* |
@@ -276,6 +281,7 @@ in the 52.
 | `token_counter/` | Context-window token accounting / budget |
 | `tools/` | **Definitions**: project · search · browser · meta · human_guidance · image_gen · code_exec · conversation |
 | `translate/` | Translation engine + cache + provider plumbing |
+| `tts/` | Text-to-speech / narration synthesis (drives motion-video + podcast narration) |
 | `agent_inbox/` | Per-task model-facing inbox for async swarm updates |
 | `agent_verdict/` | Shared STOP/CONTINUE verdict + loop-control heuristics (facade pkg; see CLAUDE.md §4) |
 | `api_keys/` | Bearer-token API-key auth — single source for scopes / minting (see CLAUDE.md §15) |
@@ -362,12 +368,13 @@ plugins (e.g. `tofu-trading`) mount via `routes/plugin_registry.py`
 `translate`, `upload`, `artifacts`, `paper`, `push`,
 `compat_openai`, `compat_anthropic`, `api_docs`, `metrics`, `legacy_redirects`.
 
-**`routes/api_v1/` — headless surface (37 modules):**
-`agents`, `agent_run`, `artifacts`, `auth`, `auth_mode`, `auth_sources`,
+**`routes/api_v1/` — headless surface (43 modules):**
+`agents`, `agent_run`, `artifacts`, `audio`, `auth`, `auth_mode`, `auth_sources`,
 `billing`, `browser`, `capabilities`, `chat`, `chat_direct`, `common`,
 `config`, `conversations`, `daily_report`, `desktop`, `endpoint`, `folders`,
-`keys`, `logs`, `mcp`, `memory`, `oauth`, `optimizer`, `orchestrations`,
-`paper`, `project`, `providers`, `scheduler`, `swarm`, `tasks`, `translate`,
+`keys`, `logs`, `mcp`, `memory`, `motion`, `oauth`, `optimizer`,
+`orchestrations`, `paper`, `paper_folders`, `private_hosts`, `project`,
+`providers`, `research`, `scheduler`, `skills`, `swarm`, `tasks`, `translate`,
 `update`, `uploads`, `usage`, `users`, `webhooks`.
 
 > **Trading routes are gone from core** — extracted to the standalone

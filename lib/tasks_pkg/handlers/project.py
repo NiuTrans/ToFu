@@ -16,6 +16,7 @@ from lib.tasks_pkg.executor import (
 )
 from lib.tasks_pkg.handlers.code_exec import (
     _make_run_command_progress_cb,
+    _make_run_command_spawn_cb,
     _make_stdin_callback,
 )
 from lib.tasks_pkg.handlers._read_gate import (
@@ -76,6 +77,20 @@ def _execute_remote_run_command(task, tc_id, fn_args, rn, round_entry,
     except (TypeError, ValueError) as _e:
         logger.debug('execute remote run command: unexpected type/unparseable (%s)', _e)
         bridge_timeout = 330.0
+
+    # ★ No `deadlineTs` on the REMOTE path — deliberately (pt_1a82ffb3 follow-up).
+    #   ``bridge_timeout`` bounds how long THIS server waits for a result
+    #   (send_desktop_command's event.wait); the subprocess itself runs on the
+    #   user's machine and the server has NO kill handle on it — timing out the
+    #   wait abandons the result, it does not stop the process. Publishing a
+    #   deadline here would render a countdown to an event that never happens.
+    #   The countdown contract is "the backend will SIGKILL at this instant",
+    #   which only holds where _safe_on_spawn actually fires.
+    #
+    #   The honest display for a remote command is the elapsed COUNT-UP, and it
+    #   needs no code: the timer chip anchors on execStartTs and falls back to
+    #   tStart (the round-announce clock, already on the wire), so a remote
+    #   run_command renders "how long has this been going" out of the box.
 
     progress_cb = _make_run_command_progress_cb(task, rn, round_entry, command)
     seen = {'stdout': 0, 'stderr': 0}
@@ -561,6 +576,13 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
                 _extra_kw = {
                     'stdin_callback': _stdin_cb,
                     'on_chunk': _progress_cb,
+                    # ★ The spawn clock (pt_1a82ffb3). Without this the project
+                    # mode — the COMMON case — published no deadlineTs and
+                    # forced no checkpoint, so the countdown silently never
+                    # appeared exactly where it mattered most. The same factory
+                    # _handle_code_exec uses, so both entry points share ONE
+                    # implementation (the lesson of the entrance-count drift).
+                    'on_spawn': _make_run_command_spawn_cb(task, rn, round_entry),
                     'task': task,  # enable cooperative abort of subprocesses
                 }
             try:

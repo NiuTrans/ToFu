@@ -182,17 +182,23 @@ def reap_stuck_running_tasks() -> int:
     produced-then-wedged zombie fell straight through. The generalized
     discriminator uses TWO liveness clocks that must BOTH be stale to reap:
 
-      • ``_t_last_event``      — bumped by every emitted event (deltas /
-                                 keepalive / retry / waiting_model phase). A
-                                 rate-limited-but-alive turn keeps emitting
-                                 retry phases → stays fresh.
+      • ``_t_last_event``      — bumped by REAL progress events (deltas /
+                                 tool results / tool stdout chunks / retry
+                                 phases). A rate-limited-but-alive turn keeps
+                                 emitting retry phases → stays fresh. Events
+                                 marked ``_selfTick`` (the tool-heartbeat
+                                 pinging itself, pt_8524e0ec) deliberately do
+                                 NOT bump this clock: they prove the
+                                 dispatcher is alive, not the tool.
       • ``_dispatch_heartbeat`` — refreshed while a dispatch / cooldown-wait /
-                                 tool call is genuinely in-flight, AND while
-                                 blocking on human input (ask_user / approval /
-                                 stdin poll loop). A turn stuck in a live socket
-                                 read emits no event but IS heartbeating → never
-                                 reaped; a human-waiting task likewise stays
-                                 fresh via its poll loop.
+                                 model wait is in-flight, and while blocking
+                                 on ratified human-wait tools (ask_human /
+                                 await_task(wait) / timer_create — the
+                                 2026-07-25 exemption). A turn stuck in a live
+                                 socket read emits no delta but IS heartbeating
+                                 → never reaped; a hung ordinary tool (silent
+                                 >30min, e.g. run_command producing nothing)
+                                 gets NO such refresh → reaped.
 
     Requiring BOTH stale is exactly the signal a client-side poll CANNOT recover
     (poll only sees ``status='running'``, indistinguishable from a slow turn),
@@ -241,8 +247,17 @@ def reap_stuck_running_tasks() -> int:
             t['status'] = 'error'
             t['_reap_had_output'] = had_output
             from lib.error_envelope import make_envelope as _make_env
+            # ★ worker_lost, NOT internal (pt_9f5a51ba). 'internal' is
+            #   retryable=False and its entire hint is "go read
+            #   logs/error.log" — for an event the user did not cause, cannot
+            #   diagnose, and whose only correct recovery (re-run) that
+            #   envelope actively HIDES by suppressing the retry affordance.
+            #   'worker_lost' is the kind this exact situation was registered
+            #   for (TaskRuntime.reap_if_stalled already uses it): warning
+            #   severity, retryable=True, and a hint that leads with "re-running
+            #   is safe; partial output may be lost".
             t['error'] = _make_env(
-                'internal',
+                'worker_lost',
                 detail=('Task made no progress for %d seconds and was '
                         'terminated as wedged.' % int(min(event_silent, dispatch_silent))),
                 model=(t.get('config') or {}).get('model', '') or '',

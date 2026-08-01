@@ -91,6 +91,100 @@ class BodyTranslationTest(unittest.TestCase):
         self.assertEqual(a['system'][0]['cache_control'], {'type': 'ephemeral'})
 
 
+class PhantomEmptyBlockTest(unittest.TestCase):
+    """The Anthropic boundary must NEVER emit an empty/whitespace text block.
+
+    Strict Anthropic-shape validators hard-400 the whole request on one
+    (Moonshot: "text content is empty" — the 2026-07-31 kimi-k3 incident
+    class on the OpenAI wire; same rejection shape on the Anthropic side).
+    Covers the two ``not blocks`` fallbacks (ghost assistant / ghost user)
+    and the emission guard in ``_convert_content_blocks`` — the boundary
+    stays self-consistent even when a caller bypasses build_body's healers.
+    """
+
+    def test_ghost_assistant_gets_placeholder_not_empty_text(self):
+        body = {'model': 'm', 'max_tokens': 8, 'messages': [
+            {'role': 'user', 'content': 'q'},
+            # ghost: no signed thinking, empty content, no tool_calls
+            {'role': 'assistant', 'content': ''},
+            {'role': 'user', 'content': 'next'},
+        ]}
+        a = openai_body_to_anthropic(body)
+        asst = a['messages'][1]
+        self.assertEqual(asst['role'], 'assistant')
+        self.assertTrue(asst['content'])
+        for b in asst['content']:
+            if b['type'] == 'text':
+                self.assertTrue(b['text'].strip(),
+                                f'phantom empty text block: {b}')
+
+    def test_ghost_user_gets_placeholder_not_empty_text(self):
+        body = {'model': 'm', 'max_tokens': 8,
+                'messages': [{'role': 'user', 'content': ''}]}
+        a = openai_body_to_anthropic(body)
+        u = a['messages'][0]
+        self.assertTrue(u['content'])
+        self.assertTrue(all(b['text'].strip() for b in u['content']
+                            if b['type'] == 'text'))
+
+    def test_empty_text_blocks_in_list_skipped_at_emission(self):
+        """THE VU shape: a wrap seam produced [{text:''}, {text:'reminder'}]
+        upstream of a caller that bypasses build_body — the boundary itself
+        must not re-emit the phantom."""
+        body = {'model': 'm', 'max_tokens': 8, 'messages': [
+            {'role': 'user', 'content': [
+                {'type': 'text', 'text': ''},
+                {'type': 'text', 'text': '<system-reminder>\nx\n</system-reminder>'}]}]}
+        a = openai_body_to_anthropic(body)
+        texts = [b['text'] for b in a['messages'][0]['content']
+                 if b['type'] == 'text']
+        self.assertEqual(texts, ['<system-reminder>\nx\n</system-reminder>'])
+
+    def test_whitespace_only_blocks_and_strings_skipped(self):
+        body = {'model': 'm', 'max_tokens': 8, 'messages': [
+            {'role': 'system', 'content': [
+                {'type': 'text', 'text': 'sys'},
+                {'type': 'text', 'text': '   '}]},
+            {'role': 'user', 'content': [
+                {'type': 'text', 'text': '\n '},
+                {'type': 'text', 'text': 'hi'}]}]}
+        a = openai_body_to_anthropic(body)
+        self.assertEqual(a['system'], 'sys')
+        self.assertEqual([b['text'] for b in a['messages'][0]['content']],
+                         ['hi'])
+
+    def test_assistant_tool_calls_only_no_phantom_text(self):
+        """content='' + tool_calls → only tool_use blocks (existing contract)."""
+        body = {'model': 'm', 'max_tokens': 8, 'messages': [
+            {'role': 'user', 'content': 'go'},
+            {'role': 'assistant', 'content': '',
+             'tool_calls': [{'id': 't1', 'type': 'function',
+                             'function': {'name': 'f', 'arguments': '{}'}}]},
+            {'role': 'tool', 'tool_call_id': 't1', 'content': 'r'}]}
+        a = openai_body_to_anthropic(body)
+        self.assertEqual([b['type'] for b in a['messages'][1]['content']],
+                         ['tool_use'])
+
+    def test_tool_phantom_text_block_skipped_but_result_kept(self):
+        """A tool result carrying [{text:''}, image] keeps the image, drops
+        the phantom — multimodal tool results are the live producer shape."""
+        body = {'model': 'm', 'max_tokens': 8, 'messages': [
+            {'role': 'user', 'content': 'go'},
+            {'role': 'assistant', 'content': '',
+             'tool_calls': [{'id': 't1', 'type': 'function',
+                             'function': {'name': 'f', 'arguments': '{}'}}]},
+            {'role': 'tool', 'tool_call_id': 't1', 'content': [
+                {'type': 'text', 'text': ''},
+                {'type': 'image_url',
+                 'image_url': {'url': 'https://x/y.png'}}]}]}
+        a = openai_body_to_anthropic(body)
+        tr = a['messages'][2]['content'][0]
+        self.assertEqual(tr['type'], 'tool_result')
+        kinds = [b['type'] for b in tr['content']]
+        self.assertNotIn('text', kinds)
+        self.assertIn('image', kinds)
+
+
 class ResponseTranslationTest(unittest.TestCase):
     def test_text_and_tool_use_and_usage(self):
         resp = {'id': 'msg_1', 'model': 'claude-opus-4-7', 'stop_reason': 'tool_use',

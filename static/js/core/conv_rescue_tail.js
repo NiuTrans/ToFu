@@ -34,10 +34,21 @@
  * optimistic draft has no id, so it is NOT rescuable and the normal overwrite
  * proceeds — otherwise "keep everything" would strand drafts the server has
  * legitimately never seen.
+ *
+ * ★ Duplicate-id guard (pt_93ff22bd, measured conv ms8bx7089s3268): a rescued
+ *   tail row whose _msgId already EXISTS anywhere in the server array is not
+ *   "missing" — it is a duplicate. Pushing it back persists a same-id twin
+ *   into the DB (the aborted-fragment + settled-answer pair that later fired
+ *   RENDER ORDER VIOLATION). A genuinely lost row's id is by definition NOT
+ *   on the server, so the dedup only narrows duplicates away, never real
+ *   rescues.
  */
 function _rescuableLocalTail(localMsgs, serverMsgs) {
   if (!Array.isArray(localMsgs) || !Array.isArray(serverMsgs)) return [];
   if (localMsgs.length <= serverMsgs.length) return [];
+  const serverIds = new Set();
+  for (const m of serverMsgs) { if (m && m._msgId) serverIds.add(m._msgId); }
   return localMsgs.slice(serverMsgs.length)
-    .filter(m => m && (m._msgId || m._isVirtualUser));
+    .filter(m => m && (m._msgId || m._isVirtualUser))
+    .filter(m => !m._msgId || !serverIds.has(m._msgId));
 }

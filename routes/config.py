@@ -960,7 +960,8 @@ def probe_provider_cells_start():
     """Start (or resume) a background per-(key × id) reachability probe.
 
     Body: ``{provider_id, base_url, api_keys: [str], extra_headers?: {},
-    models: [{model_id, aliases?: [str]}], timeout?: int, attempts?: int,
+    models: [{model_id, aliases?: [str], request_ids?: [str],
+    key_access?: {}, capabilities?: [str]}], timeout?: int, attempts?: int,
     force?: bool}``. ``attempts`` (default 3, clamped 1..5) re-probes a
     transiently-failing cell to filter out FALSE 429s.
 
@@ -971,7 +972,11 @@ def probe_provider_cells_start():
         → return that (resume after Settings was closed / server restarted).
       * Else start a fresh background probe and return its initial snapshot.
 
-    Each alias is probed as its own cell (aliases are distinct models).
+    Every wire id of a model's pool (``request_ids``, or ``[model_id] +
+    aliases`` for a legacy entry) is probed as its own cell — wire ids are
+    distinct upstream deployments. The logical ``model_id`` of an
+    explicit-pool entry is NEVER probed: it is a preset-facing identity
+    that no real request carries.
     """
     data = parse_body()
     provider_id = (data.get('provider_id') or '').strip()
@@ -1032,8 +1037,9 @@ def probe_provider_cells_start():
                         provider_id, len(cached['cells']), cached.get('status'))
             return api_ok(cached)
 
-    # Build the work list: one cell per (key_idx, concrete id). Every alias
-    # is its own cell because aliases can be different upstream models.
+    # Build the work list: one cell per (key_idx, wire id) — the same pool
+    # the dispatcher resolves (resolve_request_ids), because wire ids can be
+    # different upstream deployments.
     # Capabilities ride along so the probe can SKIP non-chat models
     # (image_gen / embedding / transcription) instead of chat-probing them
     # into a guaranteed false 'unavailable' verdict.

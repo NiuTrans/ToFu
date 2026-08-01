@@ -22,6 +22,7 @@ remaining error a genuine type defect rather than symbol-resolution noise.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 
@@ -83,6 +84,49 @@ def test_generated_file_is_marked_do_not_edit():
     assert 'AUTO-GENERATED' in head and 'DO NOT EDIT' in head, (
         'the generated .d.ts must carry an AUTO-GENERATED / DO NOT EDIT banner '
         'naming the generator, or an edit to it will be silently overwritten.'
+    )
+
+
+@pytest.mark.unit
+def test_ambient_dom_widening_stays_scoped_not_blanket():
+    """The hand-written DOM widening must list PROPERTIES, never open the door.
+
+    ``globals.d.ts`` legitimately widens a few lib.dom interfaces (Element /
+    EventTarget / Navigator / …) because tsc cannot narrow an untyped
+    ``getElementById()`` result, and a Chromium-only API like
+    ``navigator.userAgentData`` is not in the configured ``lib`` at all. That
+    loosening is only defensible while it stays an EXPLICIT property list.
+
+    An index signature — ``[key: string]: any`` — would end the ratchet as a
+    bug-finder in one line: every property typo on every widened interface
+    would type-check clean, and the file would still look like a careful
+    declaration. It is the same failure this module's docstring describes for
+    hand-written ``declare var``, one level down: the contract degrades into a
+    comment, silently, while the suite stays green.
+
+    So the shape is guarded, not the contents: adding a named property is
+    ordinary maintenance and needs no test change; reaching for a blanket
+    signature fails here and has to be argued for.
+    """
+    path = os.path.join(ROOT, 'static', 'js', 'globals.d.ts')
+    with open(path, encoding='utf-8') as fh:
+        src = fh.read()
+    # Comments are stripped first: this file EXPLAINS the rule in prose, and a
+    # guard a comment can trip is a false alarm that trains people to ignore it
+    # (tests/_source_scan.py module docstring, incident family 1-3).
+    from tests._source_scan import strip_comments
+    live = strip_comments(src, lang='js', inline=True)
+    offenders = [
+        ln.strip() for ln in live.splitlines()
+        if re.search(r'\[\s*\w+\s*:\s*string\s*\]\s*:', ln)
+    ]
+    assert not offenders, (
+        'globals.d.ts declares a blanket index signature:\n  '
+        + '\n  '.join(offenders)
+        + '\nThat makes EVERY property name valid on the widened interface, so '
+          'a typo like `navigator.userAgentDataX` would no longer be reported '
+          'and the tsc ratchet would stop catching the bug class it exists '
+          'for. Widen with an explicit property list instead.'
     )
 
 

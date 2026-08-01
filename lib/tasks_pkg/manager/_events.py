@@ -31,12 +31,34 @@ def _assign_message_ids(messages):
     if not isinstance(messages, list):
         return False
     changed = False
-    for m in messages:
+    seen: dict = {}
+    for i, m in enumerate(messages):
         if not isinstance(m, dict):
             continue
         if not m.get('_msgId'):
             m['_msgId'] = str(uuid.uuid4())
             changed = True
+        mid = m['_msgId']
+        # ★ Duplicate-id heal (pt_e0ea29f2): a conv can end up with TWO array
+        #   entries sharing one _msgId (an aborted streaming residue persisted
+        #   with the client-minted id, then its retry committing with the SAME
+        #   id — measured on conv ms8bx7089s3268: idx1 fr=aborted + idx2
+        #   fr=stop, both tmp_196fedef). Every id-keyed consumer (frontend
+        #   surgical reconcile / order assertion, PATCH /messages/by-id)
+        #   collapses onto the FIRST match. On a duplicate, the EARLIER
+        #   (stale, no-longer-live) occurrence is re-minted; the LATEST keeps
+        #   the id — the newest occurrence is the live/committed turn the
+        #   client reconciles by id (rescue-PUT rebase, translation frames).
+        if mid in seen:
+            prev = seen[mid]
+            logger.warning(
+                '[MsgIds] duplicate _msgId %.16s at idx %d and %d — re-minting '
+                'the earlier (stale) occurrence; the latest keeps the id',
+                mid, prev, i)
+            messages[prev]['_msgId'] = str(uuid.uuid4())
+            seen[messages[prev]['_msgId']] = prev
+            changed = True
+        seen[mid] = i
     return changed
 
 
@@ -192,14 +214,24 @@ def append_event(task, event):
                 logger.warning('[Task] push_event fallback failed task=%s: %s',
                                task['id'][:8], e)
 
-    # ★ Liveness clock #1 (see reap_stuck_running_tasks): every emitted event —
-    #   delta / keepalive / retry / waiting_model phase — bumps _t_last_event.
-    #   A rate-limited-but-alive turn keeps emitting retry phases, so this stays
-    #   fresh and the reaper never mistakes it for wedged. (Clock #2,
-    #   _dispatch_heartbeat, is refreshed around live dispatch / tool / human
-    #   waits.) A wedged thread emits NOTHING → this clock goes stale.
+    # ★ Liveness clock #1 (see reap_stuck_running_tasks): REAL progress events
+    #   — deltas / tool results / tool stdout chunks / retry & waiting phases —
+    #   bump _t_last_event. A rate-limited-but-alive turn keeps emitting retry
+    #   phases, so this stays fresh and the reaper never mistakes it for wedged.
+    #   (Clock #2, _dispatch_heartbeat, is refreshed around live dispatch /
+    #   model waits / ratified human-wait tools.)
+    #
+    # ★ EVIDENCE GRADING (owner ruling 2026-07-31, pt_8524e0ec): an event
+    #   carrying ``_selfTick`` is the tool-heartbeat pinging ITSELF — it keeps
+    #   the SSE transport non-silent but proves NOTHING about the tool being
+    #   alive, so it must NOT bump this clock. Before the grading, a hung
+    #   run_command (2.5h of zero output, task 96c56840) was kept
+    #   reap-immune by its own heartbeat ticks. Human-wait serial tools
+    #   (ask_human / await_task(wait) / timer_create) emit UNMARKED ticks —
+    #   their ratified exemption is preserved byte-for-byte.
     import time
-    task['_t_last_event'] = time.time()
+    if not event.get('_selfTick'):
+        task['_t_last_event'] = time.time()
 
     # ★ Track phase in task for polling fallback
     if event.get('type') == 'phase':

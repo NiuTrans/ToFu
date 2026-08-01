@@ -273,9 +273,76 @@ function _ensureCell(m, keyIdx) {
   return m.key_access[String(keyIdx)];
 }
 
-/** The concrete ids of a model entry: root + each non-empty alias. */
+/** De-duplicated list of trimmed non-empty strings, order stable. */
+function _mxDedupe(list) {
+  var seen = {}, out = [];
+  for (var i = 0; i < (list || []).length; i++) {
+    var v = (typeof list[i] === 'string') ? list[i].trim() : '';
+    if (v && !seen[v]) { seen[v] = true; out.push(v); }
+  }
+  return out;
+}
+
+/** The wire-id pool ONE key routes for a model entry — the JS mirror of
+ *  the dispatcher's ``resolve_request_ids(entry, cell)``
+ *  (lib/llm_dispatch/model_entry.py), with ``disabled_ids`` deliberately NOT
+ *  subtracted (a disabled id still gets a row so the user can re-enable it;
+ *  the backend probe pops ``disabled_ids`` the same way before resolving):
+ *   * an explicit ``request_ids`` wins — the cell's pool first, else the
+ *     entry's (a cell REPLACES the pool for its key, it does not extend it);
+ *   * otherwise the legacy shape ``[model_id] + aliases`` where the alias
+ *     list is the cell's when the cell declares one, else the entry's.
+ *  Pass keyIdx = null for the entry-level pool.
+ *
+ *  THE LOGICAL-ID RULE: under the model-identity contract ``model_id`` is a
+ *  preset-facing identity that never goes on the wire when the entry
+ *  declares ``request_ids`` — so it is NOT a row id of its own (it gets a
+ *  header row without toggles instead). Rendering/probing it would test a
+ *  (key × model) pair that can never occur in production, and its verdict
+ *  fed a false recommend-disable. */
+function _modelKeyPool(m, keyIdx) {
+  var cell = (keyIdx === null || keyIdx === undefined) ? {} : _getCell(m, keyIdx);
+  var explicit = _mxDedupe(cell.request_ids || []);
+  if (!explicit.length) explicit = _mxDedupe(m.request_ids || []);
+  if (explicit.length) return explicit;
+  var aliases = ('aliases' in cell) ? _mxDedupe(cell.aliases) : _mxDedupe(m.aliases || []);
+  var base = m.model_id ? [m.model_id] : [];
+  return _mxDedupe(base.concat(aliases));
+}
+
+/** Every wire id the matrix renders a row for: the UNION of all per-key
+ *  pools (mirroring the dispatcher's ``routing_group`` minus the logical
+ *  model_id of an explicit-pool entry). An id restricted to one key's cell
+ *  pool still needs its row; the cells of keys that don't route it render
+ *  as not-routed (see _renderMatrixCell). */
 function _modelRowIds(m) {
-  return [m.model_id].concat((m.aliases || []).filter(function(a) { return a; }));
+  var union = _modelKeyPool(m, null);
+  var cells = m.key_access || {};
+  Object.keys(cells).forEach(function(k) {
+    var idx = parseInt(k, 10);
+    if (isNaN(idx)) return;
+    union = union.concat(_modelKeyPool(m, idx));
+  });
+  return _mxDedupe(union);
+}
+
+/** THE single judgment behind the logical-header rendering: ``model_id`` is
+ *  a PURE preset identity only when NO pool routes it — it appears in
+ *  neither the entry's wire pool nor any key's cell pool. Only then does it
+ *  get a header row (global toggle + count, no per-key cells): rendering a
+ *  toggle/probe for it would fake a (key × id) pair that cannot occur.
+ *
+ *  When ``model_id`` IS in a pool — the common ``request_ids: [model_id,
+ *  ...deployments]`` shape (deepseek-v4-flash), or a cell pool that adds it
+ *  back — it is a genuine wire id and MUST render as the root wire row
+ *  (legacy shape, with cells). A `request_ids`-nonempty check is NOT
+ *  equivalent: it used to render BOTH a header and a wire row with the same
+ *  data-id for exactly that shape.
+ *
+ *  Consumed by BOTH the render loop (header vs legacy row set) and
+ *  _renderMatrixRow (wire-row numbering) — keep it the only copy. */
+function _modelIsPureLogical(m) {
+  return _modelRowIds(m).indexOf(((m && m.model_id) || '').trim()) < 0;
 }
 
 /** True when this key currently serves this concrete id. */
@@ -391,33 +458,57 @@ function _renderAccessMatrix(provIdx) {
   for (var mi = 0; mi < models.length; mi++) {
     var m = models[mi];
     var ids = _modelRowIds(m);
-    var groupOpen = ids.length > 1; // only bracket models that HAVE aliases
-    for (var ri = 0; ri < ids.length; ri++) {
-      html += _renderMatrixRow(provIdx, mi, m, ids[ri], ri, ids.length, keys, groupOpen);
+    var groupOpen = ids.length > 1; // only bracket models that HAVE a pool
+    // Model-identity contract: a model_id no pool routes is a pure
+    // logical/preset name — it gets a header row (global toggle + count,
+    // no per-key cells) ABOVE the wire-id rows. When it IS in a pool it is
+    // a genuine wire id and renders as the root wire row like any legacy
+    // entry — one row per data-id, never two.
+    var logicalHead = _modelIsPureLogical(m);
+    if (logicalHead) {
+      html += _renderMatrixRow(provIdx, mi, m, m.model_id, -1, ids.length, keys, groupOpen);
+      for (var li = 0; li < ids.length; li++) {
+        html += _renderMatrixRow(provIdx, mi, m, ids[li], li + 1, ids.length, keys, groupOpen);
+      }
+    } else {
+      for (var ri = 0; ri < ids.length; ri++) {
+        html += _renderMatrixRow(provIdx, mi, m, ids[ri], ri, ids.length, keys, groupOpen);
+      }
     }
   }
   html += '</tbody></table></div></div>';
   return html;
 }
 
-/** Render one matrix row: a single concrete id (root or alias) across keys.
+/** Render one matrix row. Two kinds:
+ *   - LOGICAL HEADER (``rowPos === -1``): the preset-facing model_id of an
+ *     explicit-pool entry. It carries the global model toggle and the wire-id
+ *     count, but NO per-key cells — the id is never sent on the wire, so
+ *     there is no (key × id) pair to grant, deny, or probe.
+ *   - WIRE ROW (``rowPos >= 0``): one concrete wire id across keys. ``rowPos``
+ *     is the 1-based index under a logical header, or 0 = root for a legacy
+ *     entry (``[model_id] + aliases`` shape, where model_id IS a wire id).
  *
- *  ``rowPos`` is the id's index within the model group (0 = root), ``rowCount``
- *  the group size. Aliases are visually distinguished from the root AND from
- *  each other: a tree connector (├ / └), the FULL id in monospace (they're
- *  genuinely different upstream models, so the exact id matters), each id's
- *  own brand icon, and a colored per-alias index chip (A1, A2, …). */
+ *  Wire rows under a header are visually distinguished like aliases: a tree
+ *  connector (├ / └), the FULL id in monospace (they're genuinely different
+ *  upstream deployments, so the exact id matters), each id's own brand icon,
+ *  and a colored index chip. */
 function _renderMatrixRow(provIdx, modelIdx, m, id, rowPos, rowCount, keys, grouped) {
+  var isLogicalHead = (rowPos === -1);
   var isAlias = rowPos > 0;
-  var isLastInGroup = (rowPos === rowCount - 1);
+  // Under a logical header wire rows are numbered 1..rowCount; otherwise
+  // (legacy entry, or a model_id that IS in its pool) rows are numbered
+  // 0..rowCount-1 with the first pool id as the root row.
+  var underHead = _modelIsPureLogical(m);
+  var isLastInGroup = underHead ? (rowPos === rowCount) : (rowPos === rowCount - 1);
   var globallyOff = (m.enabled === false);
   var brand = (typeof _detectBrand === 'function') ? _detectBrand(id) : '';
   var brandSvg = (typeof _brandSvg === 'function') ? _brandSvg(brand, 14) : '';
 
-  // Row-scope probe button: probes exactly this concrete id across every key.
+  // Row-scope probe button: probes exactly this wire id across every key.
   var _rowProbe = _stgMatrixProbe[provIdx] || {};
   var _rowRunning = (_rowProbe.status === 'running');
-  var rowProbeBtn = '<button type="button" class="stg-mx-zap row' +
+  var rowProbeBtn = isLogicalHead ? '' : '<button type="button" class="stg-mx-zap row' +
       (_scopeCovers(provIdx, 'row', null, id) ? ' probing' : '') + '"' +
     (_rowRunning ? ' disabled' : '') +
     ' onclick="event.stopPropagation();_probeMatrixScope(' + provIdx +
@@ -427,24 +518,28 @@ function _renderMatrixRow(provIdx, modelIdx, m, id, rowPos, rowCount, keys, grou
   var labelCell;
   if (isAlias) {
     var connector = isLastInGroup ? '└' : '├';
-    // A distinct accent color per alias index, cycled, so two aliases of the
+    // A distinct accent color per wire-id index, cycled, so two ids of the
     // same model never look alike at a glance.
     var hue = (modelIdx * 47 + rowPos * 71) % 360;
     labelCell = '<td class="stg-mx-model alias' + (globallyOff ? ' model-off' : '') +
         (isLastInGroup ? ' last' : '') + '" style="--alias-hue:' + hue + '">' +
       '<span class="stg-mx-tree">' + connector + '</span>' +
-      '<span class="stg-mx-aliasidx">A' + rowPos + '</span>' +
+      '<span class="stg-mx-aliasidx">' + rowPos + '</span>' +
       '<span class="stg-mx-brand">' + brandSvg + '</span>' +
       '<span class="stg-mx-mid alias-id" title="' + escapeHtml(id) + '">' + escapeHtml(id) + '</span>' +
       rowProbeBtn +
     '</td>';
   } else {
-    var aliasCount = rowCount - 1;
-    var countBadge = aliasCount > 0
+    var countBadge = rowCount > 0
       ? '<span class="stg-mx-aliascount" title="' + escapeHtml(t('settings.matrixAliasCountHint')) + '">' +
-          aliasCount + ' ' + escapeHtml(aliasCount === 1 ? t('settings.matrixAliasOne') : t('settings.matrixAliasMany')) + '</span>'
+          rowCount + ' ' + escapeHtml(rowCount === 1 ? t('settings.matrixIdOne') : t('settings.matrixIdMany')) + '</span>'
       : '';
-    labelCell = '<td class="stg-mx-model root' + (globallyOff ? ' model-off' : '') + '">' +
+    var presetBadge = isLogicalHead
+      ? '<span class="stg-mx-preset" title="' + escapeHtml(t('settings.matrixPresetHint')) + '">' +
+          escapeHtml(t('settings.matrixPresetBadge')) + '</span>'
+      : '';
+    labelCell = '<td class="stg-mx-model root' + (isLogicalHead ? ' logical' : '') +
+        (globallyOff ? ' model-off' : '') + '">' +
       '<label class="stg-toggle stg-mx-gtoggle" title="' + escapeHtml(t('settings.matrixGlobalToggle')) + '" onclick="event.stopPropagation();">' +
         '<input type="checkbox"' + (globallyOff ? '' : ' checked') +
           ' onchange="_toggleModelEnabled(' + provIdx + ',' + modelIdx + ')">' +
@@ -452,17 +547,24 @@ function _renderMatrixRow(provIdx, modelIdx, m, id, rowPos, rowCount, keys, grou
       '</label>' +
       '<span class="stg-mx-brand">' + brandSvg + '</span>' +
       '<span class="stg-mx-mid" title="' + escapeHtml(id || '') + '">' + escapeHtml(id || '(unnamed)') + '</span>' +
+      presetBadge +
       countBadge +
       rowProbeBtn +
     '</td>';
   }
 
   var cls = 'stg-mx-row' + (globallyOff ? ' model-off' : '') +
-    (isAlias ? ' is-alias' : ' is-root') +
+    (isAlias ? ' is-alias' : ' is-root') + (isLogicalHead ? ' is-logical' : '') +
     (grouped ? ' grouped' : '') + (isLastInGroup && grouped ? ' group-end' : '');
   var row = '<tr class="' + cls + '" data-model="' + modelIdx + '" data-id="' + escapeHtml(id) + '">' + labelCell;
-  for (var k = 0; k < keys.length; k++) {
-    row += _renderMatrixCell(provIdx, modelIdx, k, m, id, isAlias);
+  if (isLogicalHead) {
+    for (var hk = 0; hk < keys.length; hk++) {
+      row += '<td class="stg-mx-cell logical"></td>';
+    }
+  } else {
+    for (var k = 0; k < keys.length; k++) {
+      row += _renderMatrixCell(provIdx, modelIdx, k, m, id, isAlias);
+    }
   }
   row += '</tr>';
   return row;
@@ -481,15 +583,36 @@ function _probeStatusInfo(status) {
   }
 }
 
-/** Render one matrix cell (a single (key, id) access control). */
+/** Render one matrix cell (a single (key, wire-id) access control).
+ *
+ *  A cell whose id is outside ITS OWN key's pool (a cell-level
+ *  ``request_ids`` replaced the pool for that key, so the dispatcher never
+ *  routes this id through it) renders as NOT-ROUTED: no toggle (disabling
+ *  what is never routed is a no-op), no probe pip (probing tests a pair
+ *  that cannot occur in production). The ✎ override editor stays reachable
+ *  on the first wire row — it is the only way to EDIT that key's pool. */
 function _renderMatrixCell(provIdx, modelIdx, keyIdx, m, id, isAlias) {
   var on = _isIdEnabled(m, keyIdx, id);
   var cell = _getCell(m, keyIdx);
   var hasRpm = (cell.rpm !== undefined && cell.rpm !== null && cell.rpm !== '');
   var hasCaps = Array.isArray(cell.capabilities);
-  // RPM/caps overrides live at the (key × model-entry) level → only annotate
-  // the root row so we don't double-paint the badge on every alias row.
-  var overridden = !isAlias && (hasRpm || hasCaps);
+  // RPM/caps overrides live at the (key × model-entry) level → annotate only
+  // the entry's FIRST wire row so we don't double-paint the badge on every
+  // pool row (under a logical header the first wire row carries it).
+  var firstWire = (_modelRowIds(m)[0] === id);
+  var overridden = firstWire && (hasRpm || hasCaps);
+
+  if (_modelKeyPool(m, keyIdx).indexOf(id) < 0) {
+    return '<td class="stg-mx-cell noroute" data-model="' + modelIdx +
+        '" data-key-idx="' + keyIdx + '" data-id="' + escapeHtml(id) + '" ' +
+      'title="' + escapeHtml(t('settings.matrixNotRoutedHint')) + '">' +
+      (firstWire
+        ? '<button type="button" class="stg-mx-edit" ' +
+          'onclick="_editMatrixCell(' + provIdx + ',' + modelIdx + ',' + keyIdx + ')" ' +
+          'title="' + escapeHtml(t('settings.matrixEditCell')) + '">✎</button>'
+        : '') +
+    '</td>';
+  }
 
   var badges = '';
   if (overridden) {
@@ -497,7 +620,7 @@ function _renderMatrixCell(provIdx, modelIdx, keyIdx, m, id, isAlias) {
     if (hasCaps) badges += '<span class="stg-mx-badge caps" title="capabilities">✦' + cell.capabilities.length + '</span>';
   }
 
-  // Probe-status pip: exact (key, id) result — each alias is its own cell now.
+  // Probe-status pip: exact (key, wire-id) result — each pool id is its own cell.
   var probe = _stgMatrixProbe[provIdx] || {};
   var pcells = probe.cells || {};
   var running = (probe.status === 'running');
@@ -535,7 +658,7 @@ function _renderMatrixCell(provIdx, modelIdx, keyIdx, m, id, isAlias) {
     pip +
     cellProbe +
     '<div class="stg-mx-badges">' + badges + '</div>' +
-    (isAlias ? '' :
+    (!firstWire ? '' :
       '<button type="button" class="stg-mx-edit" ' +
         'onclick="_editMatrixCell(' + provIdx + ',' + modelIdx + ',' + keyIdx + ')" ' +
         'title="' + escapeHtml(t('settings.matrixEditCell')) + '">✎</button>') +
@@ -721,7 +844,13 @@ function _reconcileProbeNonChat(provIdx) {
     c.recommend_disable = false;
     changed = true;
   });
-  if (!changed) return;
+  if (changed) _mxRecountSummary(probe);
+}
+
+/** Recompute probe.summary over ALL current cells (mirrors the backend's
+ *  ``_recount_summary``): shared by the non-chat reconcile and the
+ *  stale-cell prune, which must never drift apart. */
+function _mxRecountSummary(probe) {
   var ok = 0, disable = 0, skipped = 0;
   Object.keys(probe.cells).forEach(function(k) {
     var c = probe.cells[k];
@@ -731,6 +860,36 @@ function _reconcileProbeNonChat(provIdx) {
     else ok++;
   });
   probe.summary = { ok: ok, disable: disable, skipped: skipped };
+}
+
+/** Drop probe cells whose (key × wire id) no longer exists in the provider's
+ *  CURRENT grid. A persisted snapshot outlives the config it measured: the
+ *  pre-wire-pool snapshots carry verdicts for logical-only model_ids that
+ *  were never wire ids, and a deleted model/key/renamed pool leaves cells
+ *  with no row at all. Rendering such a ghost is how a 'reachable ✓' for an
+ *  id the gateway never routes looks like real coverage. Mirrors the
+ *  backend's seed prune (routes/config.py scoped probe), which the disk
+ *  snapshot path never passes through. */
+function _pruneProbeCellsToGrid(provIdx) {
+  var probe = _stgMatrixProbe[provIdx];
+  var p = _stgProviders[provIdx];
+  if (!probe || !probe.cells || !p || !p.models) return;
+  var valid = {};
+  var keys = _matrixKeys(p);
+  if (!keys.length) return; // no keys → no grid; nothing to validate against
+  for (var ki = 0; ki < keys.length; ki++) {
+    for (var mi = 0; mi < p.models.length; mi++) {
+      // Per-key pools — the same set the backend's build_probe_work probes,
+      // so a cell is kept iff the pair is still probeable today.
+      var ids = _modelKeyPool(p.models[mi], ki);
+      for (var ri = 0; ri < ids.length; ri++) valid[_probeCellKey(ki, ids[ri])] = true;
+    }
+  }
+  var changed = false;
+  Object.keys(probe.cells).forEach(function(k) {
+    if (!valid[k]) { delete probe.cells[k]; changed = true; }
+  });
+  if (changed) _mxRecountSummary(probe);
 }
 
 /** Normalise a backend snapshot into the local _stgMatrixProbe entry.
@@ -749,6 +908,7 @@ function _ingestProbeSnapshot(provIdx, snap) {
   // Reflect the server's attempts setting in the selector on resume.
   if (snap.attempts && !_stgMatrixAttempts[provIdx]) _stgMatrixAttempts[provIdx] = snap.attempts;
   if (_stgMatrixProbe[provIdx].status !== 'running') delete _stgMatrixProbeScope[provIdx];
+  _pruneProbeCellsToGrid(provIdx);
   _reconcileProbeNonChat(provIdx);
   return true;
 }
@@ -792,9 +952,16 @@ function _runMatrixProbe(provIdx, force, only) {
     // capabilities ride along so the server probes non-chat models via
     // their REAL endpoint (image / audio-transcription / embeddings)
     // instead of chat-probing them into a guaranteed false verdict.
+    // request_ids + key_access ride along so the server resolves the SAME
+    // wire-id pool the dispatcher does (resolve_request_ids) — without them
+    // the probe falls back to [model_id] + aliases and tests ids no real
+    // request ever carries.
     models: models.map(function(m) {
-      return { model_id: m.model_id, aliases: (m.aliases || []),
-               capabilities: (m.capabilities || []) };
+      var entry = { model_id: m.model_id, aliases: (m.aliases || []),
+                    capabilities: (m.capabilities || []) };
+      if (m.request_ids && m.request_ids.length) entry.request_ids = m.request_ids.slice();
+      if (m.key_access) entry.key_access = m.key_access;
+      return entry;
     }),
     attempts: _stgMatrixAttempts[provIdx] || 3,
     // A scoped probe always refreshes its cells server-side (the cache-return

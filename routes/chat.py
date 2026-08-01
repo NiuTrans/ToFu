@@ -944,6 +944,22 @@ async def chat_stream(task_id):
 
     _stream_start = time.time()
     _events_sent = 0
+    # ★ Set when the live-tick driver closes this reader because a NEWER
+    #   reader for the same task took over. A deliberate handover, NOT a
+    #   client drop — see the teardown logger in
+    #   generate_with_disconnect_log().
+    _superseded = False
+    #
+    # ⚠ FORENSIC NOTE (2026-07-31, epic pt_8a2f741ee4634cdc): SSE requests do
+    #   NOT appear in logs/access.log while they are alive. That log is written
+    #   by ``hypercorn.access``, which emits on response COMPLETION, and an SSE
+    #   response is held open for up to _MAX_SSE_DURATION (7200s). Measured: the
+    #   substring 'chat/stream' appears ZERO times in every access log ever
+    #   rotated, even in windows where this handler demonstrably ran and logged
+    #   its own disconnects. So "access.log shows 0 stream hits" means ONLY
+    #   "no stream has closed and been logged" — it is NOT evidence that the
+    #   client failed to send the request. Use THIS module's own log lines
+    #   (and lib/chat_dispatch.py's) as the source of truth for SSE liveness.
     # pt_04686ac6 slice 8: the two closures below (``_task_terminal``,
     # ``_apply_autopilot_baton``) moved to lib.chat_dispatch as
     # module-level helpers so warm-resume / fresh-terminal / LIVE-tick
@@ -959,7 +975,7 @@ async def chat_stream(task_id):
         return _apply_autopilot_baton_lib(task, evt)
 
     async def generate():
-        nonlocal _events_sent
+        nonlocal _events_sent, _superseded
         for _ in range(4):
             yield ':' + ' ' * 2048 + '\n\n'
 
@@ -1026,6 +1042,17 @@ async def chat_stream(task_id):
             #   free the loop for accept()/other connections.
             _state_payload = await asyncio.to_thread(_dumps_yielding, state)
             yield f'data: {_state_payload}\n\n'
+            # ★ COUNT IT. This frame carries the whole accumulated
+            #   content/thinking/toolRounds — on a reconnect it is the single
+            #   most valuable thing on the wire. It used to be yielded WITHOUT
+            #   touching the counter (while the warm-resume path incremented
+            #   for its equivalent frame), so a connection that had delivered a
+            #   complete snapshot still reported "0 events sent" and was logged
+            #   as a premature-disconnect FAILURE. That false signal is what
+            #   epic pt_8a2f741ee4634cdc was filed on — "every SSE dies in
+            #   0.1s with 0 events" — when the transport was in fact healthy
+            #   (the same tasks later streamed for 600-3300s).
+            _events_sent += 1
 
             if _task_terminal():
                 done_evt = build_event(EventType.DONE)
@@ -1079,6 +1106,11 @@ async def chat_stream(task_id):
                        f'data: {json.dumps(_tick.late_done_evt, ensure_ascii=False)}\n\n')
                 return
             if _tick.kind == 'superseded':
+                # ★ A NEWER READER for this task took over (reconnect / second
+                #   tab). Closing this reader is the supersede design WORKING,
+                #   not a failure — record it so the teardown logger does not
+                #   report a deliberate handover as "client may lose data".
+                _superseded = True
                 return
             if _tick.kind == 'keepalive':
                 yield ': keepalive\n\n'
@@ -1109,11 +1141,26 @@ async def chat_stream(task_id):
             _provider = task.get('provider_id') or '?'
             _err = task.get('error')
             if not done_sent:
+                # ★ SUPERSEDED — a newer reader for this task owns the stream
+                #   now, so this reader closing is the design working. It used
+                #   to fall into the zero-event branch below and be reported at
+                #   WARNING with "Client may lose data if poll fallback fails!",
+                #   which is both alarming and untrue: the successor delivers
+                #   everything. Measured on 2026-07-31, 11 of the 12 "0 events
+                #   sent in 0.1s" alarms were exactly this — the false evidence
+                #   epic pt_8a2f741ee4634cdc was filed on.
+                if _superseded:
+                    logger.info('[Chat] SSE stream %s handed over to a newer reader '
+                                '— %d events sent in %.1fs, task status=%s. '
+                                'Not a disconnect: the successor reader owns this '
+                                'stream and continues delivery.',
+                                task_id[:8], _events_sent, elapsed,
+                                task.get('status', '?'))
                 # Severity-aware: zero-events = real problem (SSE opened
                 # but nothing delivered); events>0 = normal client-side
                 # tab-close / network-retry — client poll fallback will
                 # pick up the rest.
-                if _events_sent == 0:
+                elif _events_sent == 0:
                     logger.warning('[Chat] SSE stream %s DISCONNECTED PREMATURELY — '
                                  '%d events sent in %.1fs, task status=%s, content=%dchars, '
                                  'finishReason=%s model=%s provider=%s error=%s. '

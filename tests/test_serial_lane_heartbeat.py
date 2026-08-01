@@ -1,0 +1,472 @@
+"""tests/test_serial_lane_heartbeat.py — pt_9f5a51ba45bd423c.
+
+THE DEFECT
+----------
+``_start_tool_heartbeat`` was wired into ONE of the three dispatch lanes of
+``execute_tool_pipeline``: the parallel read-only pool. The two SERIAL lanes
+ran ``_execute_tool_one`` bare, so a tool blocking there emitted nothing at
+all — and the stuck-task reaper's discriminator is exactly "both liveness
+clocks silent past ``TOFU_STUCK_TASK_MAX_SILENT_SECS`` (1800s)".
+
+Measured in production 2026-07-31 (logs/app.log), two tasks, same shape:
+
+  task 38562f78 (conv ms8bx708)  run_command @10:46:54 → reaped 11:17:40
+  task 31d08c82 (conv ms8c54p5)  run_command @        → reaped 11:18:41
+
+both ``no event/dispatch progress for 1846s``, both ``finish=aborted`` with the
+process group killed, ¥22.95 + ¥12.01 of completed rounds discarded. The user
+saw a bubble reading "内部错误 / Internal error — 请查看服务器日志".
+
+Three properties are pinned here, each independently NEUTER-able:
+
+1. **Serial WRITE lane heartbeats** (``run_command``, ``write_file``, every
+   non-readOnly MCP tool — ``_task_partitions`` puts them all in the write
+   partition). This is the lane that produced both production casualties.
+
+2. **Long-blocking serial lane heartbeats** (``_SERIAL_BLOCKING_TOOLS``).
+   ``_heartbeat.py``'s own comment asserts these are reaper-immune because
+   "the heartbeat below keeps refreshing ``_dispatch_heartbeat``" — MEASURED
+   FALSE for ``await_task``: ``lib/scheduler/executor/_await.py`` contains
+   zero ``_dispatch_heartbeat`` writes and zero ``append_event`` calls, and
+   its own wait is capped at 3600s, i.e. twice the reap threshold. Only
+   ``ask_human`` (self-bumps in ``lib/tasks_pkg/human_guidance.py``) and
+   ``timer_create`` (emits ``append_event`` per poll) were genuinely covered.
+   So the comment documented a protection that did not exist for one of its
+   three members.
+
+3. **The reaper's error envelope is ``worker_lost``, not ``internal``.**
+   ``internal`` is ``retryable=False`` and its hint is "go read
+   logs/error.log" — for an event the user can neither diagnose nor act on.
+   ``worker_lost`` already exists in ``KINDS`` / ``_RETRYABLE_KINDS`` /
+   ``_WARNING_KINDS`` / ``_TITLES`` with a frontend chip and both i18n keys,
+   and its hint states the one true recovery: re-running is safe.
+
+WHY A HEARTBEAT AND NOT A TIMEOUT
+---------------------------------
+Capping the wait was considered and is FORBIDDEN by a ratified decision
+recorded at ``lib/tasks_pkg/tool_dispatch/_heartbeat.py`` (2026-07-25, epic
+pt_1acd0bcdb2174566 F4, option A): "Do NOT 'fix' this by capping the
+heartbeat; the cap question was decided as status-quo." ``run_command``
+likewise resolves ``timeout=None`` by design and is pinned by
+``tests/test_no_backend_timeouts.py``. Aliveness is proven by BEATING.
+
+Run: PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest \
+        tests/test_serial_lane_heartbeat.py -v
+"""
+
+from __future__ import annotations
+
+import ast
+import inspect
+import os
+import textwrap
+import threading
+import time
+
+import pytest
+
+pytestmark = pytest.mark.unit
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  Harness — drive the REAL execute_tool_pipeline with a slow fake tool
+# ═══════════════════════════════════════════════════════════════════
+
+def _mk_task(**over):
+    t = {
+        'id': 'serial-hb-1',
+        'convId': 'cv-serial-hb',
+        'status': 'running',
+        'aborted': False,
+        'model': 'test-model',
+        'events': [],
+        'events_lock': threading.Lock(),
+        # Both liveness clocks start STALE (epoch 0) — exactly the state the
+        # reaper reads. A lane that never beats leaves them at 0.
+        '_dispatch_heartbeat': 0.0,
+        '_t_last_event': 0.0,
+        '_attended': False,
+    }
+    t.update(over)
+    return t
+
+
+def _mk_tc(tc_id: str, fn_name: str, seq: int, args=None):
+    """Build a parsed_tcs 7-tuple through the REAL round constructor."""
+    from lib.tasks_pkg.tool_display import _build_tool_round_entry
+    _n, round_entry, _ev = _build_tool_round_entry(
+        fn_name, args or {}, tc_id, '{}', seq, False)
+    tc = {'id': tc_id, 'type': 'function',
+          'function': {'name': fn_name, 'arguments': '{}'}}
+    return (tc, fn_name, tc_id, dict(args or {}), round_entry['roundNum'],
+            round_entry, None)
+
+
+class _Recorder:
+    def __init__(self):
+        self.events: list[dict] = []
+        self._lock = threading.Lock()
+
+    def __call__(self, task, event):
+        with self._lock:
+            self.events.append(dict(event))
+        # Mirror the REAL append_event side effect the reaper depends on:
+        # every emitted event bumps liveness clock #1. Without this the
+        # fixture would under-report what production actually does.
+        task['_t_last_event'] = time.time()
+
+    def of_type(self, etype: str):
+        return [e for e in self.events if e.get('type') == etype]
+
+
+@pytest.fixture()
+def rec(monkeypatch):
+    r = _Recorder()
+    from lib.tasks_pkg import tool_dispatch as facade
+    from lib.tasks_pkg.executor import _finalize as exec_finalize
+    from lib.tasks_pkg.tool_dispatch import _heartbeat, _pipeline
+    monkeypatch.setattr(_pipeline, 'append_event', r, raising=False)
+    monkeypatch.setattr(facade, 'append_event', r, raising=False)
+    monkeypatch.setattr(_heartbeat, 'append_event', r, raising=False)
+    monkeypatch.setattr(exec_finalize, 'append_event', r, raising=False)
+    return r
+
+
+@pytest.fixture()
+def slow_tools(monkeypatch):
+    """Scripted executor: {fn_name: sleep_seconds}. Records the clock values
+    observed by the tool WHILE it is still blocking, which is the only moment
+    the reaper's verdict would be taken in production."""
+    script: dict[str, float] = {}
+    observed: dict[str, dict] = {}
+
+    def _fake(task, tc, fn_name, tc_id, fn_args, rn, round_entry,
+              cfg, project_path, project_enabled, all_tools=None):
+        sleep_s = script.get(fn_name, 0.0)
+        if sleep_s:
+            time.sleep(sleep_s)
+        # Snapshot the clocks at the LAST instant of the blocking window.
+        # ★ The verdict must be taken HERE, not after the pipeline returns:
+        #   once the tool completes, tool_result/tool_complete bump
+        #   _t_last_event and every task looks alive. The reaper fires while
+        #   the tool is STILL BLOCKING, so that is the only honest sample
+        #   point. (A post-hoc check passes even against the unfixed code.)
+        observed[fn_name] = {
+            'dispatch': task.get('_dispatch_heartbeat', 0.0),
+            'event': task.get('_t_last_event', 0.0),
+            'reap_now': _reap_verdict(task),
+        }
+        from lib.tasks_pkg.executor._finalize import _finalize_tool_round
+        _finalize_tool_round(
+            task, rn, round_entry,
+            [{'toolName': fn_name, 'title': fn_name, 'snippet': 'ok',
+              'source': 'Test', 'fetched': True, 'fetchedChars': 2}])
+        return tc_id, 'ok', False
+
+    from lib.tasks_pkg.tool_dispatch import _heartbeat, _pipeline
+    monkeypatch.setattr(_heartbeat, '_execute_tool_one', _fake, raising=False)
+    monkeypatch.setattr(_pipeline, '_execute_tool_one', _fake, raising=False)
+    return script, observed
+
+
+@pytest.fixture(autouse=True)
+def _fast_heartbeat(monkeypatch):
+    """Clamped floor is 2s; keep every test in the low seconds."""
+    monkeypatch.setenv('TOOL_HEARTBEAT_INTERVAL', '2')
+
+
+def _run(task, tcs, cfg=None):
+    from lib.tasks_pkg.tool_dispatch import execute_tool_pipeline
+    messages: list = []
+    execute_tool_pipeline(
+        task, tcs, cfg=cfg or {'autoApply': True}, project_path=None,
+        project_enabled=False, tool_list=[], messages=messages,
+        all_search_results_text=[], round_num=0, model='test-model')
+    return messages
+
+
+def _reap_verdict(task) -> bool:
+    """Apply the REAL reaper predicate to this task.
+
+    Imported from the production module rather than restated, so a change to
+    the discriminator is reflected here instead of drifting.
+    """
+    from lib.tasks_pkg.manager._maintenance import _stuck_task_max_silent_secs
+    max_silent = _stuck_task_max_silent_secs()
+    now = time.time()
+    created = task.get('created_at', now)
+    last_event = task.get('_t_last_event', created)
+    heartbeat = task.get('_dispatch_heartbeat', created)
+    return (now - last_event) >= max_silent and (now - heartbeat) >= max_silent
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  Face 1 — the serial WRITE lane (the production casualty)
+# ═══════════════════════════════════════════════════════════════════
+
+def test_serial_write_lane_beats_while_the_tool_blocks(rec, slow_tools):
+    """``run_command`` blocking past a heartbeat interval MUST refresh the
+    positive-liveness clock while it is still running.
+
+    Pre-fix this is RED: the serial write loop calls ``_execute_tool_one``
+    bare, so ``_dispatch_heartbeat`` is still 0.0 when the tool returns —
+    which is precisely the state that got task 38562f78 killed at 1846s.
+    """
+    script, observed = slow_tools
+    script['run_command'] = 5.0          # > 2s interval → at least 2 ticks
+    task = _mk_task()
+
+    _run(task, [_mk_tc('tc-rc', 'run_command', 0)])
+
+    seen = observed['run_command']
+    assert seen['dispatch'] > 0.0, (
+        'the serial WRITE lane never refreshed _dispatch_heartbeat while '
+        'run_command blocked for 5s — both reaper clocks stay at epoch, so a '
+        'command running past TOFU_STUCK_TASK_MAX_SILENT_SECS is force-failed '
+        'and its whole task aborted (measured: task 38562f78, 1846s, ¥22.95 '
+        'discarded)')
+    assert time.time() - seen['dispatch'] < 4.0, (
+        'the clock was set but is already stale mid-tool — the ticker is not '
+        'running for the DURATION of the blocking call')
+
+
+def test_serial_write_lane_emits_tool_progress_while_blocking(rec, slow_tools):
+    """The beat must also reach the WIRE, not just the in-memory clock.
+
+    ``tool_progress`` is what (a) bumps ``_t_last_event`` through the real
+    ``append_event``, (b) keeps the SSE stream non-silent so a buffering proxy
+    does not idle-close, and (c) gives the UI its "run_command… (Ns)" ticker.
+    A fix that only set the dict field would satisfy the reaper while leaving
+    the user staring at a frozen spinner.
+    """
+    script, _obs = slow_tools
+    script['run_command'] = 5.0
+    task = _mk_task()
+
+    _run(task, [_mk_tc('tc-rc', 'run_command', 0)])
+
+    progress = [e for e in rec.of_type('tool_progress')
+                if e.get('toolCallId') == 'tc-rc']
+    assert progress, (
+        'no tool_progress emitted for a 5s serial-write run_command — the SSE '
+        'stream is silent for the whole command and _t_last_event never moves')
+    assert any(e.get('elapsed', 0) >= 2 for e in progress), (
+        'tool_progress carries no advancing elapsed — the UI cannot show how '
+        'long the command has been running: %r' % (progress,))
+
+
+def test_a_long_serial_write_is_not_reaped(rec, slow_tools):
+    """End-to-end on the REAL predicate: with the threshold squeezed below the
+    tool's runtime, a beating tool must still be judged ALIVE.
+
+    This is the property the two production casualties violated. Driving the
+    real ``reap_stuck_running_tasks`` discriminator (not a restatement) means
+    a change to the discriminator cannot silently un-protect this lane.
+
+    The verdict is sampled INSIDE the blocking window (see ``slow_tools``) —
+    sampling it after the pipeline returns would pass even unfixed, because
+    the tool's own completion events refresh the clocks on the way out.
+    """
+    script, observed = slow_tools
+    script['run_command'] = 5.0
+    task = _mk_task(created_at=time.time())
+    # Squeeze the reap threshold to 3s: shorter than the 5s tool, so a lane
+    # that does not beat is unambiguously reap-eligible.
+    os.environ['TOFU_STUCK_TASK_MAX_SILENT_SECS'] = '3'
+    try:
+        _run(task, [_mk_tc('tc-rc', 'run_command', 0)])
+        assert not observed['run_command']['reap_now'], (
+            'MID-FLIGHT the reaper would force-fail this task: a 5s '
+            'run_command under a 3s silence threshold left both clocks '
+            'stale. In production the numbers are 1846s under 1800s — same '
+            'inequality, same outcome (task 38562f78 / 31d08c82)')
+    finally:
+        os.environ.pop('TOFU_STUCK_TASK_MAX_SILENT_SECS', None)
+
+
+def test_heartbeat_stops_when_the_serial_tool_finishes(rec, slow_tools):
+    """The ticker must not outlive its tool.
+
+    A leaked daemon ticker would keep a DEAD task's clocks warm forever,
+    disabling the reaper for that task permanently — turning a false-kill bug
+    into a never-kill bug.
+    """
+    script, _obs = slow_tools
+    script['run_command'] = 3.0
+    task = _mk_task()
+
+    _run(task, [_mk_tc('tc-rc', 'run_command', 0)])
+
+    live = [t for t in threading.enumerate()
+            if t.name.startswith('tool-hb-') and t.is_alive()]
+    assert not live, (
+        'heartbeat ticker thread(s) still alive after the pipeline returned: '
+        '%r — the stop event is not set in a finally' % ([t.name for t in live],))
+
+    settled = task['_dispatch_heartbeat']
+    time.sleep(2.5)  # longer than one interval
+    assert task['_dispatch_heartbeat'] == settled, (
+        'the clock kept advancing after the tool finished — a leaked ticker '
+        'makes this task permanently un-reapable')
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  Face 2 — the long-blocking serial lane (_SERIAL_BLOCKING_TOOLS)
+# ═══════════════════════════════════════════════════════════════════
+
+def test_long_blocking_serial_lane_beats(rec, slow_tools, monkeypatch):
+    """``await_task`` is in ``_SERIAL_BLOCKING_TOOLS`` and its handler
+    (``lib/scheduler/executor/_await.py``) contains NO ``_dispatch_heartbeat``
+    write and NO ``append_event`` — measured. Its own wait is capped at 3600s,
+    i.e. double the reap threshold, so a legitimate long wait is reap-eligible
+    while the module comment claims the opposite.
+    """
+    script, observed = slow_tools
+    script['await_task'] = 5.0
+    task = _mk_task()
+
+    _run(task, [_mk_tc('tc-aw', 'await_task', 0, args={'action': 'wait'})])
+
+    seen = observed['await_task']
+    assert seen['dispatch'] > 0.0, (
+        'the long-blocking serial lane never beat while await_task blocked — '
+        "_heartbeat.py's comment asserts these tools are reaper-immune "
+        'because "the heartbeat below keeps refreshing _dispatch_heartbeat", '
+        'but no lane ever starts that ticker for them')
+
+
+def test_await_task_handler_still_has_no_heartbeat_of_its_own():
+    """Pin the PREMISE of the test above.
+
+    If ``_await.py`` ever grows its own heartbeat, the lane-level guard could
+    pass for the wrong reason (the handler beating, not the lane). This makes
+    that change announce itself instead of silently hollowing out the sibling
+    assertion.
+    """
+    import lib.scheduler.executor._await as await_mod
+    src = inspect.getsource(await_mod)
+    assert '_dispatch_heartbeat' not in src, (
+        '_await.py now self-heartbeats — re-evaluate whether the lane-level '
+        'ticker is still what protects await_task, and update the sibling '
+        'test that relies on this premise')
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  Face 3 — every serial lane is covered (enumerate, don't hand-list)
+# ═══════════════════════════════════════════════════════════════════
+
+def test_no_bare_execute_tool_one_call_survives_in_the_pipeline():
+    """★ Enumerate rather than trust a list.
+
+    The originating diagnosis named ONE uncovered lane (serial write); an AST
+    walk found a second (long-blocking serial). This asserts the structural
+    property directly: inside ``execute_tool_pipeline`` every
+    ``_execute_tool_one`` call must sit under a ``try`` whose ``finally``
+    stops a heartbeat — so a THIRD lane added later cannot quietly reintroduce
+    the defect.
+    """
+    from lib.tasks_pkg.tool_dispatch import _pipeline
+
+    src = textwrap.dedent(inspect.getsource(_pipeline.execute_tool_pipeline))
+    tree = ast.parse(src)
+    fn = tree.body[0]
+
+    parent = {}
+    for p in ast.walk(fn):
+        for c in ast.iter_child_nodes(p):
+            parent[c] = p
+
+    def _is_exec_call(node):
+        f = node.func
+        return isinstance(f, ast.Name) and f.id == '_execute_tool_one'
+
+    calls = [n for n in ast.walk(fn)
+             if isinstance(n, ast.Call) and _is_exec_call(n)]
+    assert calls, ('no _execute_tool_one call found — the pipeline was '
+                   'restructured; re-target this guard')
+
+    unguarded = []
+    for call in calls:
+        node, guarded = call, False
+        while node in parent:
+            node = parent[node]
+            if isinstance(node, ast.Try) and node.finalbody:
+                fin = ast.unparse(ast.Module(body=node.finalbody,
+                                             type_ignores=[]))
+                if '_hb_stop' in fin:
+                    guarded = True
+                    break
+        if not guarded:
+            unguarded.append(ast.unparse(call)[:80])
+
+    assert not unguarded, (
+        'these _execute_tool_one call sites run with NO heartbeat ticker '
+        'around them, so a tool blocking there goes silent on BOTH reaper '
+        'clocks and gets the whole task force-failed at '
+        'TOFU_STUCK_TASK_MAX_SILENT_SECS: %r' % (unguarded,))
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  Face 4 — the reaper tells the truth about what happened
+# ═══════════════════════════════════════════════════════════════════
+
+def test_reaper_envelope_is_worker_lost_and_retryable(monkeypatch):
+    """A reaped task must carry ``worker_lost``, not ``internal``.
+
+    ``internal`` is retryable=False with the hint "go read logs/error.log" —
+    it tells the user nothing they can act on and actively suppresses the
+    frontend's retry affordance. ``worker_lost`` is already fully registered
+    (KINDS / _RETRYABLE_KINDS / _WARNING_KINDS / _TITLES + frontend chip +
+    both i18n keys) and its hint names the one correct recovery.
+    """
+    from lib.tasks_pkg.manager import _maintenance
+
+    now = time.time()
+    stale = now - 4000
+    task = {
+        'id': 'reap-me-1', 'convId': 'cv-reap-1', 'status': 'running',
+        'aborted': False, 'content': 'partial output', 'thinking': '',
+        'config': {'model': 'claude-opus-5'},
+        'created_at': stale, '_t_last_event': stale,
+        '_dispatch_heartbeat': stale,
+        'events': [], 'events_lock': threading.Lock(),
+    }
+
+    finalized = []
+    monkeypatch.setattr(_maintenance, '_finalize_reaped_stuck_task',
+                        lambda t: finalized.append(t))
+    monkeypatch.setattr(_maintenance, 'tasks', {task['id']: task})
+    monkeypatch.setattr(_maintenance, 'tasks_lock', threading.Lock())
+
+    n = _maintenance.reap_stuck_running_tasks()
+    assert n == 1, 'the synthetic wedged task should have been reaped'
+
+    env = task['error']
+    assert env['kind'] == 'worker_lost', (
+        "the reaper stamps kind=%r. 'internal' renders as a bare '内部错误' "
+        'with the hint "go read logs/error.log" — for an event the user did '
+        'not cause, cannot diagnose, and whose only correct recovery '
+        '(re-run) the envelope actively hides by being retryable=False'
+        % (env['kind'],))
+    assert env['retryable'] is True, (
+        'a reaped task is retryable by construction — the worker is gone, so '
+        're-running is the designed recovery')
+    # The measured fact must survive into the envelope, not just the log.
+    assert 'no progress' in env['detail'].lower()
+    assert env['context'] == 'stuck-task-reaper'
+
+
+def test_worker_lost_hint_does_not_send_the_user_to_the_logs_only(monkeypatch):
+    """The user-facing text must state the ACTION, not delegate to a logfile.
+
+    Charter-adjacent: this project has already ruled that an error hint whose
+    only content is "look somewhere else" is a non-hint (the Settings→Keys
+    misdirection case). Pin that the shipped worker_lost hint leads with the
+    recovery.
+    """
+    from lib.error_envelope import make_envelope
+    env = make_envelope('worker_lost', detail='x', context='stuck-task-reaper')
+    hint = env['hint']
+    assert '重新发起任务是安全的' in hint or 'retrying the task is safe' in hint, (
+        'the worker_lost hint no longer leads with the recovery action: %r'
+        % (hint,))

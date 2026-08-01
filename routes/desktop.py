@@ -6,99 +6,26 @@ Mirrors the architecture of routes/browser.py:
   - Desktop Agent polls /api/desktop/poll → picks up commands, returns results
 """
 
-import hmac
-import threading
+from flask import Blueprint, jsonify
 
-from flask import Blueprint, jsonify, request
-
-from lib.env_compat import getenv_compat
-from lib.log import audit_log, get_logger
+from lib.log import get_logger
 from lib.request_parser import async_parse_body
+from routes._bridge_caller import (
+    bridge_unauthorized as _bridge_unauthorized,
+    check_bridge_auth as _check_bridge_auth,
+    resolve_bridge_caller as _resolve_bridge_caller,
+)
 
 logger = get_logger(__name__)
 
 desktop_bp = Blueprint('desktop', __name__)
 
-
-# ── One-time startup audit when bridge auth is configured ──
-_AUDIT_LOCK = threading.Lock()
-_AUDIT_LOGGED = False
-
-
-def _maybe_audit_enforcement_on() -> None:
-    global _AUDIT_LOGGED
-    if _AUDIT_LOGGED:
-        return
-    with _AUDIT_LOCK:
-        if _AUDIT_LOGGED:
-            return
-        _AUDIT_LOGGED = True
-        try:
-            audit_log('config_change',
-                      param='bridge_auth_enforcement',
-                      old='permissive (Phase A)',
-                      new='enforcing (Phase C)',
-                      reason='TOFU_BRIDGE_SECRET configured — desktop bridge '
-                             'now rejects requests without a matching X-Bridge-Secret',
-                      approved_by='user')
-        except Exception as e:
-            logger.debug('[Desktop] startup audit_log failed: %s', e)
-
-
-def _resolve_bridge_caller(kind: str = 'desktop'):
-    """Resolve the poll caller → ``(ok, user_id, key_id)``.
-
-    Auth order (RWA P4a 约束②第三条):
-      * TOFU_BRIDGE_SECRET unset → open legacy ``(True, '', '')``;
-      * header matches the global secret → legacy super-user
-        ``(True, '', '')``;
-      * else the header is tried as a per-user API key carrying the
-        ``agents:bridge`` scope → ``(True, user_id, key_id)`` — the
-        agent's commands are then scoped to that user;
-      * otherwise rejected (callers must 401).
-    """
-    expected = (getenv_compat('TOFU_BRIDGE_SECRET') or '').strip()
-    if not expected:
-        return True, '', ''
-    _maybe_audit_enforcement_on()
-    provided = request.headers.get('X-Bridge-Secret', '')
-    if provided and hmac.compare_digest(provided, expected):
-        return True, '', ''
-    if provided:
-        try:
-            from lib.api_keys import validate_token
-            ctx = validate_token(provided)
-        except Exception as e:
-            logger.debug('[Desktop] bridge token validation failed: %s', e)
-            ctx = None
-        if ctx is not None and 'agents:bridge' in getattr(ctx, 'scopes', ()): 
-            return True, (getattr(ctx, 'user_id', '') or ''), ctx.key_id
-    try:
-        audit_log('bridge_auth_fail',
-                  kind=kind,
-                  path=request.path,
-                  ip=request.remote_addr,
-                  has_header=bool(provided),
-                  ua=(request.user_agent.string or '')[:120])
-    except Exception as _aerr:
-        logger.debug('[Desktop] audit_log bridge_auth_fail failed: %s', _aerr)
-    logger.warning('[Desktop] bridge auth rejected from %s on %s (header=%s)',
-                   request.remote_addr, request.path, 'present' if provided else 'missing')
-    return False, '', ''
-
-
-def _check_bridge_auth(kind: str = 'desktop') -> bool:
-    """Back-compat wrapper — see :func:`_resolve_bridge_caller`."""
-    ok, _uid, _kid = _resolve_bridge_caller(kind)
-    return ok
-
-
-def _bridge_unauthorized():
-    """Return a uniform 401 JSON envelope for bridge auth failures."""
-    return jsonify({
-        'error': 'bridge_auth_required',
-        'hint': 'set X-Bridge-Secret header to match TOFU_BRIDGE_SECRET',
-    }), 401
+# Bridge caller resolution lives in routes/_bridge_caller.py, shared with
+# the browser bridge so the two identity layers are literally the same
+# object (B0 §5.3 / pt_3ba97339b4024fb4). Auth order (RWA P4a 约束②第三条):
+# TOFU_BRIDGE_SECRET unset → open legacy (True, '', ''); global-secret match
+# → legacy super-user (True, '', ''); per-user agents:bridge token →
+# (True, user_id, key_id) with commands scoped to that user; else 401.
 
 # ══════════════════════════════════════════════════════════
 #  Command Queue (moved to lib/desktop/bridge.py, 2026-06)

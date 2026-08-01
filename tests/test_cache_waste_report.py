@@ -34,6 +34,23 @@ pytestmark = pytest.mark.unit
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _MOD_PATH = os.path.join(_HERE, '..', 'scripts', 'cache_waste_report.py')
 
+# The script under test lives in scripts/, which export.py strips from the
+# OPENSOURCE build (OPENSOURCE_EXTRA_EXCLUDE_DIRS) and which _OPENSOURCE_KEEP_FILES
+# deliberately does NOT restore: it is an internal cost-audit tool, not something
+# the public build runs. tests/ IS exported, so in that tree this module has a
+# subject that does not exist.
+#
+# Loading it at import time therefore raised FileNotFoundError during COLLECTION,
+# which pytest reports as `Interrupted: 1 error during collection` — the whole
+# file contributes zero tests and, depending on the runner, can abort the session.
+# A missing internal tool must degrade to a skip, not take the suite down: the
+# guard has nothing to assert when its subject was intentionally not shipped.
+if not os.path.isfile(_MOD_PATH):
+    pytest.skip(
+        'scripts/cache_waste_report.py not present (opensource export strips '
+        'scripts/ and does not restore this internal audit tool) — nothing to guard',
+        allow_module_level=True)
+
 
 def _load():
     spec = importlib.util.spec_from_file_location('cache_waste_report', _MOD_PATH)

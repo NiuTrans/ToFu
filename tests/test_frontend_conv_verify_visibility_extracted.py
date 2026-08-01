@@ -148,8 +148,15 @@ def test_conversations_js_still_calls_the_pair():
     stripped = re.sub(r'//[^\n]*', '', stripped)
     n_set = len(re.findall(r'_setCacheVerifying\s*\(', stripped))
     n_ghost = len(re.findall(r'_openConvMayHoldOrphanGhost\s*\(', stripped))
-    assert n_set >= 8, (
-        f'conversations.js must still call _setCacheVerifying at ~9 sites '
+    # Threshold lowered from 8 to 7 by slice 11 (2026-07-31): the
+    # cache-verify self-heal retry cluster (_scheduleConvVerifyRetry +
+    # friends) was extracted into core/conv_verify_retry.js, and its
+    # ONE call to _setCacheVerifying(convId, false) went with it. The
+    # cross-file resolution still works via bundle-level window scope,
+    # so the visibility feature is intact — the count just reflects
+    # what LIVES in conversations.js after this move.
+    assert n_set >= 7, (
+        f'conversations.js must still call _setCacheVerifying at ~8 sites '
         f'(found {n_set}) — extraction is a move, callers are not removed')
     assert n_ghost >= 2, (
         f'conversations.js must still call _openConvMayHoldOrphanGhost at '

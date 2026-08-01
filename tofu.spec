@@ -139,6 +139,16 @@ excludes = [
     'IPython', 'notebook', 'jupyter',
     'torch', 'tensorflow', 'transformers',
     'pytest', 'ruff',
+    # onnxruntime is bundled only because lib/onnx_thread_guard.py imports it
+    # behind a try/ImportError — but its own hard dep (numpy) is excluded
+    # above, so the frozen wheel is broken BY CONSTRUCTION: any path that
+    # reaches it dies on ModuleNotFoundError: numpy (measured 2026-08-01 in
+    # the desktop_dist clean-venv build's boot-smoke child). The OCR/layout
+    # stack it would serve (pymupdf_layout) is not bundled either, and
+    # lib/pdf_parser/text.py deliberately uses the classic rag path, so the
+    # wheel is dead weight either way. Excluding it makes the guard's import
+    # fail cleanly (caught) instead of shipping a landmine.
+    'onnxruntime', 'onnx',
     # NOTE: playwright Python package IS bundled (~5MB) so that
     # `python -m playwright install chromium` works post-install.
     # The Chromium browser binary (~150MB) is NOT bundled — it's

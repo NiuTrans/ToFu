@@ -988,6 +988,159 @@ def _is_catastrophic_delete(command, cwd=None):
     return None
 
 
+# ── Unbounded recursive-scan guard (pt_8524e0ec B2) ─────────────────
+# Measured incident (2026-07-31, task 96c56840): the model ended a long
+# verification script with ``grep -rn "mcp>=1.0.0" ../ --include=pyproject.toml``
+# — a recursive scan of the workspace PARENT, a FUSE mount holding 8GB+ of
+# dumps, a PG data dir, 7392 swarm dirs and every sibling repo. The pipeline
+# ran 2.5h with zero output; the task wedged; no timeout existed to end it.
+#
+# The rule (owner ruling 2026-07-31): a recursive scanner whose target is
+#   (a) an ANCESTOR of the workspace cwd (scanning it includes the whole
+#       workspace + its data trees), or
+#   (b) a shallow FUSE-mount path (≤3 components under /mnt),
+# is refused when the run_command call carries NO explicit timeout and the
+# scan segment is not itself wrapped in coreutils ``timeout``. In-workspace
+# scans (``.``, subdirs), sibling dirs (``../other-repo`` — not an ancestor,
+# not a mount root), deep specific paths, and bounded scans all stay legal.
+
+# grep-family flags that consume the NEXT token as their argument (so the
+# pattern/target positionals are not miscounted).
+_GREP_ARG_FLAGS = frozenset({
+    '-e', '-f', '-m', '-A', '-B', '-C',
+    '--max-count', '--after-context', '--before-context', '--context',
+    '--include', '--exclude', '--exclude-dir', '--binary-files',
+    '--directories', '--label', '--threads', '--regexp', '--file',
+})
+
+# Scanners that recurse only behind a flag.
+_FLAGGED_RECURSIVE = frozenset({'grep', 'egrep', 'fgrep'})
+# Scanners recursive-by-nature over a target dir (locate excluded: it reads a
+# prebuilt index, it does not crawl).
+_INHERENT_RECURSIVE = frozenset({
+    'find', 'rg', 'ag', 'ack', 'fd', 'fdfind', 'tree', 'du', 'ncdu', 'cloc',
+})
+
+_TIMEOUT_WRAPPER_RE = re.compile(r'^timeout\b')
+
+
+def _strip_quotes(tok):
+    if len(tok) >= 2 and tok[0] in '"\'' and tok[-1] == tok[0]:
+        return tok[1:-1]
+    return tok
+
+
+def _scan_targets_for_segment(parts, recursive_flagged):
+    """Extract scan-target candidates from one command segment's tokens.
+
+    Returns (is_scanner, targets): targets are the positional args that may
+    be scan roots (pattern positional already dropped for grep-family when
+    no -e/-f is present). Best-effort parsing — a missed exotic shape fails
+    OPEN (allowed), the guard only refuses shapes it can prove.
+    """
+    positionals = []
+    saw_pattern_flag = False
+    i = 1
+    while i < len(parts):
+        tok = parts[i]
+        if tok.startswith('--'):
+            name = tok.split('=', 1)[0]
+            if name in _GREP_ARG_FLAGS and '=' not in tok:
+                if name in ('--regexp', '--file'):
+                    saw_pattern_flag = True
+                i += 2
+                continue
+            i += 1
+            continue
+        if tok.startswith('-') and tok != '-':
+            if tok in _GREP_ARG_FLAGS:
+                if tok in ('-e', '-f'):
+                    saw_pattern_flag = True
+                i += 2
+                continue
+            i += 1
+            continue
+        positionals.append(tok)
+        i += 1
+    if recursive_flagged and not saw_pattern_flag and positionals:
+        # First positional is the PATTERN, not a target.
+        positionals = positionals[1:]
+    return True, positionals
+
+
+def _unbounded_recursive_scan_target(command, cwd=None):
+    """Return the offending target when *command* is an unbounded recursive
+    scan of a workspace ancestor or a FUSE-mount root — else None.
+
+    "Unbounded" is judged by the CALLER (this function only answers "is this
+    target pathological"); a scan wrapped in coreutils ``timeout`` is
+    reported safe here because the segment is self-bounding.
+    """
+    if not command or not command.strip():
+        return None
+    cwd_real = os.path.realpath(cwd) if cwd else None
+    for seg in _split_pipeline(command):
+        seg = seg.strip()
+        if not seg:
+            continue
+        while _re.match(r'^\w+=\S*\s', seg):
+            seg = _re.sub(r'^\w+=\S*\s+', '', seg, count=1)
+        parts = _unwrap_command_parts(seg.split())
+        if not parts:
+            continue
+        base_cmd = parts[0].split('/')[-1]
+        if _TIMEOUT_WRAPPER_RE.match(base_cmd):
+            # coreutils timeout wraps this segment's scan — self-bounding.
+            continue
+        if base_cmd in _FLAGGED_RECURSIVE:
+            # Recursive only behind -r/-R/--recursive (clusters included).
+            flags = [t for t in parts[1:] if t.startswith('-') and t != '-']
+            recursive = any(
+                f == '--recursive'
+                or (not f.startswith('--') and ('r' in f[1:] or 'R' in f[1:]))
+                for f in flags)
+            if not recursive:
+                continue
+            _, targets = _scan_targets_for_segment(parts, recursive_flagged=True)
+        elif base_cmd in _INHERENT_RECURSIVE:
+            _, targets = _scan_targets_for_segment(parts, recursive_flagged=False)
+        else:
+            continue
+        if not targets:
+            # No target → the tool scans its cwd (inside the workspace).
+            continue
+        for raw in targets:
+            tok = _strip_quotes(raw)
+            if not tok or tok == '-':
+                continue
+            if not (tok.startswith('/') or tok.startswith('..')
+                    or tok.startswith('~') or tok.startswith('.')
+                    or '/' in tok):
+                # A bare word ('src') — relative, inside the workspace.
+                continue
+            expanded = os.path.expanduser(os.path.expandvars(tok))
+            if not expanded:
+                continue
+            if not expanded.startswith('/'):
+                if not cwd_real:
+                    continue
+                resolved = os.path.realpath(os.path.join(cwd_real, expanded))
+            else:
+                resolved = os.path.realpath(expanded)
+            if cwd_real:
+                if resolved == cwd_real or resolved.startswith(cwd_real + os.sep):
+                    continue  # inside the workspace — the normal case
+                if (cwd_real + os.sep).startswith(resolved + os.sep) \
+                        or cwd_real == resolved:
+                    return raw  # ancestor of the workspace — the incident shape
+            depth = len([c for c in resolved.split('/') if c])
+            if (resolved == '/mnt' or resolved.startswith('/mnt/')) \
+                    and depth <= 3:
+                return raw  # FUSE mount root zone
+    return None
+
+
+# ── grep-hardening shell-metachar detection ─────────────────────────
 # ── grep-hardening shell-metachar detection ─────────────────────────
 def _has_unquoted_shell_metachars(cmd):
     in_single = False

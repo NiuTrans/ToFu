@@ -4,6 +4,23 @@
 
 let _timerPanelOpen = false;
 let _timerPollInterval = null;
+/* ★ In-flight row operations (pt_2bf8e5c85d8f4b2e): timerId →
+ *   'cancelling' | 'triggering'. Consulted by _renderTimerList so the busy
+ *   state SURVIVES the panel's 30s auto-refresh — a one-off DOM patch would
+ *   be silently reverted by it. _timerLastTimers caches the last fetched rows
+ *   so the pending re-render is synchronous (no refetch on the click frame). */
+let _timerPending = {};
+let _timerLastTimers = null;
+
+function _timerSetPending(timerId, kind) {
+  _timerPending[timerId] = kind;
+  if (_timerLastTimers) _renderTimerList(_timerLastTimers);
+}
+function _timerClearPending(timerId, skipRender) {
+  if (delete _timerPending[timerId] && !skipRender && _timerLastTimers) {
+    _renderTimerList(_timerLastTimers);
+  }
+}
 
 // ── Toggle panel visibility ──
 function toggleTimerPanel(e) {
@@ -46,15 +63,30 @@ async function _refreshTimerPanel() {
     }
 
     if (!content) return;
+    _timerLastTimers = timers;
+    _renderTimerList(timers);
+  } catch (e) {
+    console.warn("[Timer] Panel refresh failed:", e);
+  }
+}
 
-    if (timers.length === 0) {
-      content.innerHTML = '<div class="timer-panel-empty">' + t('timer.empty') + '</div>';
-      return;
-    }
+/* Render the panel rows from a timer list (extracted seam — the refresh
+   path AND the pending re-render both ride it). Rows with an in-flight
+   operation paint the busy label INSTEAD of their action buttons. */
+function _renderTimerList(timers) {
+  const content = document.getElementById("timerPanelContent");
+  if (!content) return;
 
-    const _jumpHint = t('timer.jumpHint');
-    let html = "";
-    for (const t of timers) {
+  if (timers.length === 0) {
+    content.innerHTML = '<div class="timer-panel-empty">' + t('timer.empty') + '</div>';
+    return;
+  }
+
+  const _jumpHint = t('timer.jumpHint');
+  const _cancellingLabel = t('timer.cancelling');
+  const _triggeringLabel = t('timer.triggering');
+  let html = "";
+  for (const t of timers) {
       const statusIcon = { active: IconDot('green'), triggered: Icon('alarm', 12), cancelled: IconDot('red'), exhausted: IconDot('grey') }[t.status] || IconDot('grey');
       const statusClass = t.status;
       const pollAt = t.last_poll_at ? new Date(t.last_poll_at).toLocaleTimeString() : "never";
@@ -84,43 +116,57 @@ async function _refreshTimerPanel() {
         html += `<div class="tpi-triggered">${Icon('alarm', 12)} Triggered: ${new Date(t.triggered_at).toLocaleString()}</div>`;
       }
 
-      // Action buttons (only for active timers)
-      html += `<div class="tpi-actions">
+      // Action buttons — replaced by the busy label while an operation
+      // on THIS row is in flight (click frame → background completion).
+      const _pending = _timerPending[t.id];
+      if (_pending) {
+        html += `<div class="tpi-actions"><span class="tpi-pending">${escapeHtml(_pending === 'cancelling' ? _cancellingLabel : _triggeringLabel)}</span></div></div>`;
+      } else {
+        html += `<div class="tpi-actions">
           <button onclick="_viewTimerLog('${t.id}')" class="tpi-btn tpi-btn-log" title="View poll log">${Icon('clipboard', 11)} Log</button>`;
-      if (t.status === "active") {
-        html += `
+        if (t.status === "active") {
+          html += `
           <button onclick="_triggerTimer('${t.id}')" class="tpi-btn tpi-btn-trigger" title="Force trigger now">▶ Trigger</button>
           <button onclick="_cancelTimer('${t.id}')" class="tpi-btn tpi-btn-cancel" title="Cancel timer">✖ Cancel</button>`;
+        }
+        html += `</div></div>`;
       }
-      html += `</div></div>`;
     }
     content.innerHTML = html;
-  } catch (e) {
-    console.warn("[Timer] Panel refresh failed:", e);
-  }
 }
 
 // ── Actions ──
 async function _triggerTimer(timerId) {
+  /* ★ INSTANT-UI (pt_2bf8e5c85d8f4b2e): the row shows 触发中… on the CLICK
+   *   frame; the POST + refresh run in the background. */
+  _timerSetPending(timerId, 'triggering');
   try {
     const data = await Api.timer.trigger(timerId);
+    _timerClearPending(timerId, true);   // the refresh renders the fresh state
     if (data && data.ok) {
       debugLog(`⏱️ Timer ${timerId} triggered! Execution: ${data.execution_task_id}`, "success");
       _refreshTimerPanel();
     } else {
+      _timerClearPending(timerId);       // restore the row
       debugLog(`⏱️ Trigger failed: ${data && data.error}`, "error");
     }
   } catch (e) {
+    _timerClearPending(timerId);         // restore the row
     debugLog(`⏱️ Trigger error: ${e.message}`, "error");
   }
 }
 
 async function _cancelTimer(timerId) {
+  /* ★ INSTANT-UI (pt_2bf8e5c85d8f4b2e): the row shows 取消中… on the CLICK
+   *   frame; the POST + refresh run in the background. */
+  _timerSetPending(timerId, 'cancelling');
   try {
     await Api.timer.cancel(timerId);
+    _timerClearPending(timerId, true);   // the refresh renders the fresh state
     debugLog(`⏱️ Timer ${timerId} cancelled.`, "info");
     _refreshTimerPanel();
   } catch (e) {
+    _timerClearPending(timerId);         // restore the row
     debugLog(`⏱️ Cancel error: ${e.message}`, "error");
   }
 }

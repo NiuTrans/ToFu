@@ -206,6 +206,15 @@ function mkTimerRound(nextTsMs, pollCount) {
 }
 
 console.log(out.join('\n'));
+// tool_rounds.js installs REAL setInterval tickers on load, and an un-cleared
+// interval keeps node's event loop alive forever (the harness then dies on the
+// 60s subprocess timeout instead of reporting its results). The clearInterval
+// above only covers the ONE handle this test knows by name, so it silently
+// stopped being sufficient the moment a second ticker shipped in the same file
+// (measured: adding window._cmdTimerTicker hung this harness for the full 60s).
+// Exiting explicitly is name-independent, and is the same discipline
+// tests/_tool_rounds_wire_parity_harness.js already documents.
+process.exit(0);
 """
 
 

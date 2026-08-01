@@ -37,6 +37,20 @@ __all__ = [
 ]
 
 
+def _oauth_wire_protocol(provider: dict) -> str:
+    """The wire protocol a subscription backend ACTUALLY speaks.
+
+    The Codex backend accepts ONLY the Responses API, so an oauth='codex'
+    provider's effective protocol is 'responses' regardless of what a
+    stored config says (entries written before epic pt_b7a29ea7 carry
+    'openai', a lie the old URL-sniff gate papered over). Returns '' for
+    non-codex providers — no coercion.
+    """
+    if isinstance(provider, dict) and (provider.get('oauth') or '') == 'codex':
+        return 'responses'
+    return ''
+
+
 class LLMDispatcher:
     """Manages a pool of (key, model) slots and picks the best one per request."""
 
@@ -339,8 +353,19 @@ class LLMDispatcher:
             api_keys = provider.get('api_keys', [])
             prov_extra_headers = provider.get('extra_headers') or {}
             prov_thinking_format = provider.get('thinking_format', '')
-            provider.get('protocol', '')
             prov_oauth = provider.get('oauth', '')
+
+            # A subscription backend's wire protocol is a fact of the
+            # backend, not a user setting: the Codex backend speaks ONLY
+            # Responses. Stored configs from the URL-sniff era carry
+            # protocol:'openai' — coerce IN MEMORY (not persisted) so the
+            # single api_protocol gate in lib/llm/_sse_core.py is always
+            # fed the truth. New provisions write 'responses' outright
+            # (lib/oauth/outbound.py _MANAGED_SPECS).
+            _forced_proto = _oauth_wire_protocol(provider)
+            if _forced_proto and (provider.get('protocol') or '') != _forced_proto:
+                provider = dict(provider, protocol=_forced_proto)
+            provider.get('protocol', '')
 
             # ── Multi-endpoint expansion for local providers ──
             # Backwards-compatible: when 'endpoints' is absent we fall back

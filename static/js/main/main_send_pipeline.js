@@ -552,6 +552,12 @@ async function sendMessage() {
     _sendAbortReason = 'timeout';
     _sendAbortCtrl.abort();
   }, 90000);
+  /* ★ Startup-stop affordance (pt_fa32a2351b3840ad): the connecting POST
+   *   window now shows a STOP button (updateSendButton predicates on
+   *   conv._genStartCtrl); a click owner-tags conv._genStartStop with THIS
+   *   controller and aborts it — the catch below matches that tag. */
+  conv._genStartCtrl = _sendAbortCtrl;
+  conv._genStartStop = null;
   const _willTranslate = _sendConfig.autoTranslate && /[\u4e00-\u9fff\u3400-\u4dbf]/.test(finalText);
   if (_willTranslate) {
     conv._translating = true;
@@ -568,6 +574,9 @@ async function sendMessage() {
      *   then upgrade it in place to the streaming bubble once the POST returns
      *   the taskId. This closes the send-side "dead-zone" (fix ①). */
     _renderTranslatingBubble(t('sidebar.connecting'));
+    /* ★ Flip the composer to a STOP button for the connecting window —
+     *   without this the user could not cancel the startup (dead click). */
+    updateSendButton();
   }
 
   try {
@@ -700,7 +709,7 @@ async function sendMessage() {
 
     // Push empty assistant msg + connect to task SSE
     const taskId = result.taskId;
-    const assistantMsg = {
+    const _mintedPlaceholder = {
       role: "assistant", content: "", thinking: "",
       timestamp: Date.now(), toolRounds: [],
       model: _sendConfig.model || serverModel,
@@ -710,9 +719,37 @@ async function sendMessage() {
       _msgId: _assistantMsgId,
     };
     // ★ Endpoint mode: mark as planner so SSE reconnection identifies it correctly
-    if (_sendConfig.endpointMode) assistantMsg._isEndpointPlanner = true;
-    _ensureMsgId(assistantMsg);  // no-op when _msgId already set
-    conv.messages.push(assistantMsg);
+    if (_sendConfig.endpointMode) _mintedPlaceholder._isEndpointPlanner = true;
+    /* ★ Dedupe (pt_44e985ec): an early attach during the POST window may
+     *   already have created + bound this task's placeholder — pushing a
+     *   second one splits the lanes (they write the bound message) from the
+     *   render projection (which reads the tail): the 等待中…↔推理中 flip-flop.
+     *   Adopt + re-stamp the canonical id instead of pushing a duplicate. */
+    const _ph = (typeof _adoptTaskPlaceholder === 'function')
+      ? _adoptTaskPlaceholder(conv, taskId, _mintedPlaceholder)
+      : { msg: _mintedPlaceholder, adopted: false };
+    const assistantMsg = _ph.msg;
+    if (_ph.adopted) {
+      console.warn(
+        `[sendMessage] ♻ adopted existing placeholder bound to task=${taskId.slice(0,8)} ` +
+        `(canonical msgId re-stamped) — no duplicate push for conv=${convId.slice(0,8)}`
+      );
+      if (typeof _reportClientError === 'function') {
+        _reportClientError(
+          `[sendMessage] adopted existing task placeholder instead of pushing a duplicate ` +
+          `conv=${convId.slice(0,8)} task=${taskId.slice(0,8)}`);
+      }
+      if (_sendConfig.endpointMode) assistantMsg._isEndpointPlanner = true;
+      /* The adopted placeholder was minted by the early attach under a
+       * different _msgId (the helper just re-stamped the canonical one) —
+       * re-key the live streaming bubble so identity resolution + translation
+       * frames keep landing on the SAME message. */
+      const _smEl = (activeConvId === convId) ? document.getElementById('streaming-msg') : null;
+      if (_smEl && _assistantMsgId) _smEl.setAttribute('data-msg-id', _assistantMsgId);
+    } else {
+      _ensureMsgId(assistantMsg);  // no-op when _msgId already set
+      conv.messages.push(assistantMsg);
+    }
     conv.activeTaskId = taskId;
     saveConversations(convId);
 
@@ -736,19 +773,18 @@ async function sendMessage() {
     connectToTask(convId, taskId);
 
   } catch (e) {
-    const _userClickedStop = !!conv._translateAborted;
-    // ★ User-clicked-Stop during translation: keep message for editing,
+    /* ★ User-stop covers BOTH the translation window (conv._translateAborted,
+     *   stop priority 0) and the connecting window (conv._genStartStop,
+     *   priority 0.5 — owner-tagged with THIS send's controller so a newer
+     *   send's flag can never be mistaken for ours). */
+    const _userClickedStop = !!conv._translateAborted
+      || conv._genStartStop === _sendAbortCtrl;
+    // ★ User-clicked-Stop during startup: keep message for editing,
     //   no error bubble. Timer-fired abort or any other failure: surface
     //   a visible error so the chat doesn't silently get stuck (the bug
     //   captured in the screenshot — spinner removed, no reply, no error).
-    if (e.name === 'AbortError' && _willTranslate && _userClickedStop) {
-      console.log('%c[sendMessage] ✗ Aborted during translation by user — keeping message for editing', 'color:#f59e0b;font-weight:bold');
-      _removeTranslatingBubble();
-      if (activeConvId === convId) {
-        const msgEl = document.getElementById('msg-' + userMsgIdx);
-        if (msgEl) window.ConvView.apply(convId, userMsgIdx, userMsg);
-      }
-      saveConversations(convId);
+    if (e.name === 'AbortError' && _userClickedStop) {
+      console.log('%c[sendMessage] ✗ Aborted during startup by user — keeping message for editing', 'color:#f59e0b;font-weight:bold');
       /* ★ The send fetch failed/aborted, so the backend's _chat_send did NOT
        *   persist this turn — clear the in-flight marker BEFORE the rescue
        *   sync so it is not silently skipped by syncConversationToServer's
@@ -758,14 +794,7 @@ async function sendMessage() {
        *   duplicate the guard protects against cannot happen here: chat_send
        *   threw, so there is no concurrent backend persist. */
       conv._sendInFlight = false;
-      /* ★ Durability: if the rescue PUT fails (the same poor network that
-       *   failed the send), mark the turn _pendingSync + persist to
-       *   IndexedDB and start the retry poller so the message survives a
-       *   reload and is re-synced on reconnect. */
-      const _synced = await syncConversationToServer(conv);
-      if (!_synced) markConvPendingSync(conv);
-      buildTurnNav(conv);
-      Api.chat.abortConv(convId);
+      await _userStopDuringStartup(conv, convId, { userMsg, userMsgIdx, rescue: true });
     } else if (e.name === 'AbortError' && _sendAbortReason === 'timeout'
                && await _recoverTimedOutChatTask(convId, { endpointMode: _sendConfig.endpointMode })) {
       // ★ Client safety timer fired, but the server had already started the
@@ -820,6 +849,13 @@ async function sendMessage() {
     //   bubble locally (catch path, error fallback already syncs).  Either
     //   way the rescue PUT path is now safe to run again.
     conv._sendInFlight = false;
+    /* ★ Identity-guarded startup-marker cleanup: only clear when they still
+     *   belong to THIS send — a newer send's markers (different controller)
+     *   must survive our finally. */
+    if (conv._genStartCtrl === _sendAbortCtrl || conv._genStartStop === _sendAbortCtrl) {
+      conv._genStartCtrl = null;
+      conv._genStartStop = null;
+    }
     // ★ Unconditional teardown: the pre-POST placeholder (#translating-msg)
     //   is now rendered whether or not we translated (fix ①), so the '连接中…'
     //   variant must be removed here too — otherwise a generic-error exit
@@ -832,9 +868,13 @@ async function sendMessage() {
       conv._translating = false;
       conv._translateAborted = false;
       conv._translateAbortCtrl = null;
-      updateSendButton();
       renderConversationList();
     }
+    /* ★ Unconditional re-eval: the startup marker painted a STOP button for
+     *   the connecting window; on generic-error exits nothing else re-renders
+     *   the button and it would strand as a dead stop. Idempotent. */
+    updateSendButton();
+    if (_willTranslate) renderConversationList();
   }
 }
 
@@ -944,15 +984,25 @@ function _attachAutopilotFollowup(convId, payload) {
   }
 
   /* Empty assistant placeholder for the new task to stream into. */
-  const assistantMsg = {
+  const _mintedPlaceholder = {
     role: 'assistant',
     content: '',
     thinking: '',
     timestamp: Date.now(),
     toolRounds: [],
   };
-  _ensureMsgId(assistantMsg);
-  conv.messages.push(assistantMsg);
+  /* ★ Dedupe (pt_44e985ec): a conv-state attach lane may have discovered the
+   *   backend-spawned follow-up before this baton path ran and already created
+   *   its placeholder — adopt, never duplicate. No canonical id on this path
+   *   → no re-stamp (candidate carries no _msgId). */
+  const _ph = (typeof _adoptTaskPlaceholder === 'function')
+    ? _adoptTaskPlaceholder(conv, nextTaskId, _mintedPlaceholder)
+    : { msg: _mintedPlaceholder, adopted: false };
+  const assistantMsg = _ph.msg;
+  if (!_ph.adopted) {
+    _ensureMsgId(assistantMsg);
+    conv.messages.push(assistantMsg);
+  }
   conv.activeTaskId = nextTaskId;
   conv._needsLoad = false;
 
@@ -1467,13 +1517,30 @@ async function _recoverTimedOutChatTask(convId, opts = {}) {
     // been established in the meantime.
     if (activeStreams.has(convId)) return true;
 
-    const assistantMsg = {
+    const _mintedPlaceholder = {
       role: 'assistant', content: '', thinking: '',
       timestamp: Date.now(), toolRounds: [],
     };
-    if (opts.endpointMode) assistantMsg._isEndpointPlanner = true;
-    _ensureMsgId(assistantMsg);
-    conv.messages.push(assistantMsg);
+    if (opts.endpointMode) _mintedPlaceholder._isEndpointPlanner = true;
+    /* ★ Dedupe (pt_44e985ec): the original send attempt's own placeholder may
+     *   already be bound to this task — adopt it. NO id re-stamp on this
+     *   path: the canonical assistantMsgId was minted by the original (timed-
+     *   out) send and is unknowable here, so the candidate carries no _msgId
+     *   and the existing message's identity is preserved. */
+    const _ph = (typeof _adoptTaskPlaceholder === 'function')
+      ? _adoptTaskPlaceholder(conv, task.id, _mintedPlaceholder)
+      : { msg: _mintedPlaceholder, adopted: false };
+    const assistantMsg = _ph.msg;
+    if (_ph.adopted) {
+      console.info(
+        `[Recover] ♻ adopted existing placeholder bound to task=${task.id.slice(0,8)} ` +
+        `— no duplicate push for conv=${convId.slice(0,8)}`
+      );
+      if (opts.endpointMode) assistantMsg._isEndpointPlanner = true;
+    } else {
+      _ensureMsgId(assistantMsg);
+      conv.messages.push(assistantMsg);
+    }
     conv.activeTaskId = task.id;
     conv._needsLoad = false;
     if (activeConvId === convId) window.ConvView.replaceAll(convId);
@@ -1619,15 +1686,25 @@ async function _checkForQueuedTask(convId, _retryCount = 0) {
     await loadConversationMessages(convId);
 
     // Create the empty assistant message placeholder
-    const assistantMsg = {
+    const _mintedPlaceholder = {
       role: 'assistant',
       content: '',
       thinking: '',
       timestamp: Date.now(),
       toolRounds: [],
     };
-    _ensureMsgId(assistantMsg);
-    conv.messages.push(assistantMsg);
+    /* ★ Dedupe (pt_44e985ec): a conv-state attach lane may have discovered
+     *   the same auto-dispatched task during the reload await above and
+     *   already created its placeholder — adopt, never duplicate. No canonical
+     *   id exists on this path → no re-stamp (candidate carries no _msgId). */
+    const _ph = (typeof _adoptTaskPlaceholder === 'function')
+      ? _adoptTaskPlaceholder(conv, newTask.id, _mintedPlaceholder)
+      : { msg: _mintedPlaceholder, adopted: false };
+    const assistantMsg = _ph.msg;
+    if (!_ph.adopted) {
+      _ensureMsgId(assistantMsg);
+      conv.messages.push(assistantMsg);
+    }
     conv.activeTaskId = newTask.id;
     conv._needsLoad = false;
 

@@ -658,6 +658,53 @@ def main():
             sys.exit(1)
         return
 
+    # ── Smoke mode (CI: prove the frozen bundle can actually START) ──
+    # The release gates check that an artifact EXISTS and is of a plausible
+    # SIZE. Neither can see a missing hidden import: tofu.spec declares 48 of
+    # them, and dropping one changes no byte count and no PyInstaller exit
+    # code — it fails at the moment the user double-clicks, with a
+    # ModuleNotFoundError nobody is around to read.
+    #
+    # So CI runs the built binary once with TOFU_SMOKE=1. This imports
+    # `server`, which at MODULE level constructs the Quart app and calls
+    # routes.register_all(app) — so a single import exercises the whole
+    # blueprint tree and the transitive dependency graph the spec's
+    # hiddenimports exist to preserve. Then it exits.
+    #
+    # ── The verdict is the EXIT CODE, deliberately, and this is the trap ──
+    # "the process stayed alive for N seconds" is NOT a usable signal for this
+    # build: `console=False` means a windowed binary detaches and lingers
+    # regardless of whether anything imported, so a liveness check is green by
+    # construction — a guard measuring the wrong thing. An exit code cannot be
+    # faked that way: 0 only happens if every import resolved.
+    #
+    # No socket is bound and no server is served: binding would make the check
+    # sensitive to port contention on shared CI runners, which is noise about
+    # the environment rather than evidence about the bundle.
+    if os.environ.get('TOFU_SMOKE') == '1':
+        try:
+            import server as _server
+            app = getattr(_server, 'app', None)
+            if app is None:
+                raise RuntimeError('server module exposes no `app` object')
+            # register_all() ran at import; an empty blueprint map would mean
+            # the app booted hollow, which an import-only check would
+            # otherwise call success.
+            n = len(getattr(app, 'blueprints', {}) or {})
+            if n == 0:
+                raise RuntimeError('no blueprints registered on the app')
+            sys.stdout.write('TOFU_SMOKE_OK version=%s blueprints=%d\n'
+                             % (_local_version() or 'unknown', n))
+            sys.stdout.flush()
+        except BaseException:
+            # Print the real traceback to stderr and fail loudly. CI asserts
+            # BOTH exit==0 and an empty stderr, so a degraded-but-surviving
+            # import cannot pass as healthy.
+            import traceback
+            traceback.print_exc()
+            sys.exit(1)
+        return
+
     # ── GUI process: crisp rendering before any window is created ──
     _enable_dpi_awareness()
 

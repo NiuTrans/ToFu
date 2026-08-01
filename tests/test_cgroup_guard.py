@@ -195,6 +195,40 @@ def test_drop_files_cache_respects_floor(guard, tmp_path):
     assert stats['bytes'] == 100_000
 
 
+def test_drop_files_cache_skips_unchanged_files(guard, tmp_path, monkeypatch):
+    """Re-advising a byte-identical file is a guaranteed no-op — skip it.
+
+    Its clean pages were dropped by the first advise, so the kernel has nothing
+    left to reclaim. Measured live: re-advising the same 57 logs every 30s moved
+    cgroup usage by +0.01 GiB (zero) while burning 57 syscalls a tick.
+    """
+    monkeypatch.setattr(guard, '_advised_state', {})
+    p = tmp_path / 'big.log'
+    p.write_bytes(b'x' * 100_000)
+    first = guard.drop_files_cache([str(p)], min_bytes=1000)
+    assert first['files'] == 1 and first['skipped'] == 0
+    second = guard.drop_files_cache([str(p)], min_bytes=1000)
+    assert second['files'] == 0 and second['skipped'] == 1
+    assert second['bytes'] == 0
+
+
+def test_drop_files_cache_readvises_after_the_file_grows(guard, tmp_path, monkeypatch):
+    """Complement: a file that CHANGED has new cached pages and must be advised.
+
+    Without this, "skip everything after the first pass" would satisfy the skip
+    test while disabling the relief entirely — exactly the failure mode a live
+    log file (appended to continuously) would hit.
+    """
+    monkeypatch.setattr(guard, '_advised_state', {})
+    p = tmp_path / 'big.log'
+    p.write_bytes(b'x' * 100_000)
+    assert guard.drop_files_cache([str(p)], min_bytes=1000)['files'] == 1
+    p.write_bytes(b'y' * 200_000)          # changed size + mtime
+    again = guard.drop_files_cache([str(p)], min_bytes=1000)
+    assert again['files'] == 1 and again['skipped'] == 0
+    assert again['bytes'] == 200_000
+
+
 def test_drop_logs_cache_picks_log_files(guard, tmp_path):
     """Only *.log* files above the size floor are dropped."""
     (tmp_path / 'big.log').write_bytes(b'x' * (2 << 20))
@@ -204,19 +238,199 @@ def test_drop_logs_cache_picks_log_files(guard, tmp_path):
     assert stats['files'] == 1 and stats['bytes'] == (2 << 20)
 
 
-def test_relieve_includes_log_page_drop(guard, monkeypatch, tmp_path):
-    """relieve_memory must call drop_logs_cache and report its bytes."""
+def test_relieve_reports_measured_reclaim_not_apparent_size(guard, monkeypatch):
+    """The reported reclaim must be MEASURED cgroup delta, not bytes advised.
+
+    This test previously asserted ``log_pages_bytes == 12_000_000`` and passed
+    while the guard was lying: that field is the APPARENT SIZE of the files
+    fadvise was called on, i.e. an upper bound on what the kernel *might*
+    reclaim, and it was printed in the log as though it were the amount freed.
+    Measured live 2026-07-31: 406 reliefs reported a cumulative 4272 GB while
+    cgroup usage fell 18.3 GiB in total (234x overstatement), and 367 of them
+    moved usage by exactly 0.0%.
+
+    So the load-bearing property is that a relief which frees NOTHING reports
+    nothing, no matter how many bytes it advised.
+    """
+    limit = 200 * _GIB
+    usage = int(limit * 0.93)
+    # Usage identical before and after → nothing was actually reclaimed.
+    monkeypatch.setattr(guard, 'mem_limit_bytes', lambda: limit)
+    monkeypatch.setattr(guard, 'mem_usage_bytes', lambda: usage)
+    monkeypatch.setattr(guard, 'swap_total_bytes', lambda: 0)
+    monkeypatch.setattr(guard, 'malloc_trim', lambda: True)
+    monkeypatch.setattr(guard, 'drop_logs_cache',
+                        lambda log_dir='logs': {'files': 57, 'bytes': 10_775_600_000,
+                                                'skipped': 0})
+    stats = guard.relieve_memory('test')
+    assert stats['reclaimed_bytes'] == 0, (
+        'relief freed nothing but reported %r reclaimed' % stats['reclaimed_bytes'])
+
+
+def test_relieve_reports_real_reclaim_when_usage_actually_drops(guard, monkeypatch):
+    """Complement: when usage genuinely falls, the measured delta is reported.
+
+    Without this, "always report 0" would satisfy the test above — the guard
+    would swap one lie for another.
+    """
+    limit = 200 * _GIB
+    seq = iter([int(limit * 0.93), int(limit * 0.90)])
+    monkeypatch.setattr(guard, 'mem_limit_bytes', lambda: limit)
+    monkeypatch.setattr(guard, 'mem_usage_bytes', lambda: next(seq))
+    monkeypatch.setattr(guard, 'swap_total_bytes', lambda: 0)
+    monkeypatch.setattr(guard, 'malloc_trim', lambda: True)
+    monkeypatch.setattr(guard, 'drop_logs_cache',
+                        lambda log_dir='logs': {'files': 1, 'bytes': 100,
+                                                'skipped': 0})
+    stats = guard.relieve_memory('test')
+    expected = int(limit * 0.93) - int(limit * 0.90)
+    assert stats['reclaimed_bytes'] == expected
+
+
+def test_relieve_still_invokes_the_log_page_drop(guard, monkeypatch):
+    """relieve_memory must still call drop_logs_cache (the action, not the claim)."""
     _set_pressure(guard, monkeypatch, pct=93.0, swap=0)
     monkeypatch.setattr(guard, 'malloc_trim', lambda: True)
     called = {'n': 0}
 
     def fake_drop(log_dir='logs'):
         called['n'] += 1
-        return {'files': 3, 'bytes': 12_000_000}
+        return {'files': 3, 'bytes': 12_000_000, 'skipped': 0}
     monkeypatch.setattr(guard, 'drop_logs_cache', fake_drop)
-    stats = guard.relieve_memory('test')
+    guard.relieve_memory('test')
     assert called['n'] == 1
-    assert stats['log_pages_bytes'] == 12_000_000
+
+
+def _pin_usage(guard, monkeypatch, pct):
+    """Freeze cgroup usage so every relief measures a zero reclaim."""
+    limit = 200 * _GIB
+    monkeypatch.setattr(guard, 'mem_limit_bytes', lambda: limit)
+    monkeypatch.setattr(guard, 'mem_usage_bytes', lambda: int(limit * pct / 100.0))
+    monkeypatch.setattr(guard, 'swap_total_bytes', lambda: 0)
+    monkeypatch.setattr(guard, 'malloc_trim', lambda: True)
+    monkeypatch.setattr(guard, 'drop_logs_cache',
+                        lambda log_dir='logs': {'files': 57, 'bytes': 10_775_600_000,
+                                                'skipped': 0})
+    monkeypatch.setattr(guard, '_ineffective_reliefs', 0)
+    monkeypatch.setattr(guard, '_ineffective_escalated', False)
+
+
+def test_persistently_ineffective_relief_escalates_once(guard, monkeypatch):
+    """N consecutive zero-reclaim reliefs must escalate to CRITICAL exactly once.
+
+    The observed failure was 341 reliefs emitting the SAME warning while usage
+    climbed 92.1% -> 99.9%. Repeating a warning that says "relief ran" makes an
+    unmitigated squeeze look handled; the operator needs to be told once, in
+    different words, that no in-process action can fix it.
+
+    Once, not every tick: an alert that repeats forever is the noise this epic
+    is about.
+    """
+    _pin_usage(guard, monkeypatch, pct=99.9)
+    fired = []
+    monkeypatch.setattr(guard, 'audit_log',
+                        lambda *a, **k: fired.append((a, k)))
+    for _ in range(guard._INEFFECTIVE_LIMIT):
+        guard.relieve_memory('monitor')
+    assert len(fired) == 1, 'expected exactly one escalation, got %d' % len(fired)
+    for _ in range(10):                      # keeps failing → still silent
+        guard.relieve_memory('monitor')
+    assert len(fired) == 1, 'escalation repeated — it must fire once'
+
+
+def test_effective_relief_never_escalates(guard, monkeypatch):
+    """NEUTER complement: when relief actually frees memory, no CRITICAL fires.
+
+    Guards against "escalate unconditionally", which would pass the test above
+    while crying wolf on a perfectly healthy system.
+    """
+    limit = 200 * _GIB
+    pcts = iter([93.0, 90.0] * 40)
+    monkeypatch.setattr(guard, 'mem_limit_bytes', lambda: limit)
+    monkeypatch.setattr(guard, 'mem_usage_bytes',
+                        lambda: int(limit * next(pcts) / 100.0))
+    monkeypatch.setattr(guard, 'swap_total_bytes', lambda: 0)
+    monkeypatch.setattr(guard, 'malloc_trim', lambda: True)
+    monkeypatch.setattr(guard, 'drop_logs_cache',
+                        lambda log_dir='logs': {'files': 1, 'bytes': 100, 'skipped': 0})
+    monkeypatch.setattr(guard, '_ineffective_reliefs', 0)
+    monkeypatch.setattr(guard, '_ineffective_escalated', False)
+    monkeypatch.setattr(guard, 'audit_log', lambda *a, **k: 1 / 0)  # must not fire
+    for _ in range(guard._INEFFECTIVE_LIMIT * 2):
+        guard.relieve_memory('monitor')
+
+
+def test_noise_sized_reclaim_does_not_rearm_the_escalation(guard, monkeypatch):
+    """A reclaim too small to matter must NOT count as effective relief.
+
+    Found by running the real thing end-to-end, not by review: on the live
+    shared cgroup the usage counter jitters, so reliefs returned
+    39MB / 344KB / 180KB / 0 / 0 / 180KB… A strict ``reclaimed > 0`` test treats
+    each of those crumbs as success and resets the streak, so the escalation
+    could NEVER reach its limit — the alarm was structurally unable to fire on
+    the exact system it was written for. That is the same defect class this epic
+    exists to fix: an instrument that cannot report the condition it monitors.
+
+    Materiality is therefore a fraction of the cgroup limit, not zero.
+    """
+    limit = 200 * _GIB
+    # Alternate 0 and a 200KB crumb — under the 0.1% (=200MB) materiality bar.
+    crumb = 200 * 1024
+    usages = []
+    for i in range(guard._INEFFECTIVE_LIMIT * 2):
+        base = int(limit * 0.99)
+        usages.append(base)
+        usages.append(base - (crumb if i % 2 else 0))
+    seq = iter(usages)
+    monkeypatch.setattr(guard, 'mem_limit_bytes', lambda: limit)
+    monkeypatch.setattr(guard, 'mem_usage_bytes', lambda: next(seq))
+    monkeypatch.setattr(guard, 'swap_total_bytes', lambda: 0)
+    monkeypatch.setattr(guard, 'malloc_trim', lambda: True)
+    monkeypatch.setattr(guard, 'drop_logs_cache',
+                        lambda log_dir='logs': {'files': 1, 'bytes': 1, 'skipped': 0})
+    monkeypatch.setattr(guard, '_ineffective_reliefs', 0)
+    monkeypatch.setattr(guard, '_ineffective_escalated', False)
+    fired = []
+    monkeypatch.setattr(guard, 'audit_log', lambda *a, **k: fired.append(k))
+    for _ in range(guard._INEFFECTIVE_LIMIT * 2):
+        guard.relieve_memory('monitor')
+    assert fired, ('noise-sized reclaims kept resetting the streak — the '
+                   'escalation can never fire under real cgroup jitter')
+
+
+def test_a_single_effective_relief_rearms_the_escalation(guard, monkeypatch):
+    """A recovery resets the streak, so a LATER squeeze can escalate again.
+
+    Otherwise the one-shot latch would permanently silence the alarm after the
+    first episode, and the second real squeeze would be invisible.
+    """
+    limit = 200 * _GIB
+    state = {'usage': int(limit * 0.999)}
+    monkeypatch.setattr(guard, 'mem_limit_bytes', lambda: limit)
+    monkeypatch.setattr(guard, 'mem_usage_bytes', lambda: state['usage'])
+    monkeypatch.setattr(guard, 'swap_total_bytes', lambda: 0)
+    monkeypatch.setattr(guard, 'malloc_trim', lambda: True)
+    monkeypatch.setattr(guard, 'drop_logs_cache',
+                        lambda log_dir='logs': {'files': 1, 'bytes': 1, 'skipped': 0})
+    monkeypatch.setattr(guard, '_ineffective_reliefs', 0)
+    monkeypatch.setattr(guard, '_ineffective_escalated', False)
+    fired = []
+    monkeypatch.setattr(guard, 'audit_log', lambda *a, **k: fired.append(k))
+    for _ in range(guard._INEFFECTIVE_LIMIT):
+        guard.relieve_memory('monitor')
+    assert len(fired) == 1
+
+    # One genuinely effective relief: usage drops during the call.
+    seq = iter([int(limit * 0.999), int(limit * 0.80)])
+    monkeypatch.setattr(guard, 'mem_usage_bytes', lambda: next(seq))
+    guard.relieve_memory('monitor')
+
+    # Squeeze returns and stays stuck → must be allowed to escalate again.
+    state['usage'] = int(limit * 0.999)
+    monkeypatch.setattr(guard, 'mem_usage_bytes', lambda: state['usage'])
+    for _ in range(guard._INEFFECTIVE_LIMIT):
+        guard.relieve_memory('monitor')
+    assert len(fired) == 2, 'escalation did not re-arm after a recovery'
 
 
 def test_relieve_neuter_without_log_drop(guard, monkeypatch):

@@ -100,8 +100,15 @@ def _addressing_enabled() -> bool:
 
 
 def _sweep_streams_locked(now):
-    stale = [cid for cid, e in _streams.items()
-             if now - e['updated_at'] > _COMMAND_TTL_S]
+    # Per-command TTL: an egress stream (ttl=1800s) must survive a long
+    # upstream silence (LLM thinking blocks produce NO frames for minutes);
+    # default commands keep the 90s window. The command row carries the ttl.
+    stale = []
+    for cid, e in _streams.items():
+        cmd = command_queue.get(cid)
+        ttl = (cmd or {}).get('ttl') or _COMMAND_TTL_S
+        if now - e['updated_at'] > ttl:
+            stale.append(cid)
     for cid in stale:
         del _streams[cid]
 
@@ -137,11 +144,14 @@ def resolve_streams(frames) -> int:
     return count
 
 
-def get_command_stream(cmd_id, since_seq=0):
-    """Reassembled stream for one command, or None when unknown/expired.
+def get_frames(cmd_id, since_seq=0):
+    """Ordered RAW frames for one streamed command (S3 desktop-egress).
 
-    Returns ``{'stdout', 'stderr', 'done', 'last_seq'}`` — pass
-    ``since_seq=last_seq`` for an incremental read.
+    Returns ``(frames, done)`` where frames is ``[(seq, stream, data), …]``
+    ascending by seq (only seq > ``since_seq``), or ``None`` when the entry
+    is unknown/expired — callers MUST treat None-before-done as an aborted
+    stream (design §4.3: never wait forever for a swept entry).
+    ``get_command_stream`` keeps its stdout/stderr contract on top of this.
     """
     now = time.time()
     with command_queue_lock:
@@ -151,16 +161,31 @@ def get_command_stream(cmd_id, since_seq=0):
             return None
         ordered = sorted((s, v) for s, v in entry['chunks'].items()
                          if s > since_seq)
-        text = {'stdout': [], 'stderr': []}
-        for _seq, (stream, data) in ordered:
-            if stream in text:
-                text[stream].append(data)
-        return {
-            'stdout': ''.join(text['stdout']),
-            'stderr': ''.join(text['stderr']),
-            'done': entry['done'],
-            'last_seq': ordered[-1][0] if ordered else 0,
-        }
+        return ([(s, st, d) for s, (st, d) in ordered], entry['done'])
+
+
+def get_command_stream(cmd_id, since_seq=0):
+    """Reassembled stream for one command, or None when unknown/expired.
+
+    Returns ``{'stdout', 'stderr', 'done', 'last_seq'}`` — pass
+    ``since_seq=last_seq`` for an incremental read.
+    """
+    got = get_frames(cmd_id, since_seq)
+    if got is None:
+        return None
+    frames, done = got
+    text = {'stdout': [], 'stderr': []}
+    last_seq = 0
+    for seq, stream, data in frames:
+        if stream in text:
+            text[stream].append(data)
+        last_seq = max(last_seq, seq)
+    return {
+        'stdout': ''.join(text['stdout']),
+        'stderr': ''.join(text['stderr']),
+        'done': done,
+        'last_seq': last_seq,
+    }
 
 
 def register_agent(agent_id, meta=None, user_id='', key_id='') -> None:
@@ -307,7 +332,7 @@ def _addressing_enqueue_error(target_agent_id, user_id=''):
 
 
 def send_desktop_command(cmd_type, params=None, timeout=30, target_agent_id=None,
-                         user_id='', cmd_id=None):
+                         user_id='', cmd_id=None, ttl=None):
     """Queue a command for the desktop agent. Blocks until result or timeout.
 
     ``target_agent_id`` (RWA P0) routes the command to one registered
@@ -315,7 +340,8 @@ def send_desktop_command(cmd_type, params=None, timeout=30, target_agent_id=None
     several agents online the command is REFUSED up front — never
     delivered to a lucky poller. ``user_id`` (RWA P4a) scopes the command
     to agents registered by the same bridge user; it stays INTERNAL (never
-    projected onto the wire).
+    projected onto the wire). ``ttl`` overrides the default 90s pickup
+    expiry (egress streams run far longer than 90s — design §4.3).
     """
     if _addressing_enabled():
         err = _addressing_enqueue_error(target_agent_id, user_id=user_id)
@@ -340,6 +366,8 @@ def send_desktop_command(cmd_type, params=None, timeout=30, target_agent_id=None
         cmd['target_agent_id'] = target_agent_id
     if user_id:
         cmd['user_id'] = str(user_id)
+    if ttl:
+        cmd['ttl'] = float(ttl)
 
     with command_queue_lock:
         command_queue[cmd_id] = cmd
@@ -354,6 +382,46 @@ def send_desktop_command(cmd_type, params=None, timeout=30, target_agent_id=None
         return None, 'Desktop agent timeout — is the agent running?'
 
     return cmd.get('result'), cmd.get('error')
+
+
+def enqueue_desktop_command(cmd_type, params=None, target_agent_id=None,
+                            user_id='', cmd_id=None, ttl=None):
+    """Non-blocking enqueue: queue a command and return its id IMMEDIATELY.
+
+    ``send_desktop_command`` blocks for the final result; streamed commands
+    (egress_http_stream) and fire-and-forget cancels (egress_cancel) need
+    the command on the wire NOW, with the caller consuming stream frames /
+    ignoring the result instead of waiting. Returns ``(cmd_id, error)`` —
+    error is the addressing refusal (same rules as send_desktop_command).
+    """
+    if _addressing_enabled():
+        err = _addressing_enqueue_error(target_agent_id, user_id=user_id)
+        if err:
+            logger.warning('[Desktop] refusing %s: %s', cmd_type, err)
+            return None, err
+    elif target_agent_id:
+        return None, ('desktop addressing disabled '
+                      '(TOFU_DESKTOP_ADDRESSING=0) — cannot target an agent')
+    cmd_id = cmd_id or str(uuid.uuid4())
+    cmd = {
+        'id': cmd_id,
+        'type': cmd_type,
+        'params': params or {},
+        'created_at': time.time(),
+        'event': threading.Event(),
+        'result': None,
+        'error': None,
+    }
+    if target_agent_id:
+        cmd['target_agent_id'] = target_agent_id
+    if user_id:
+        cmd['user_id'] = str(user_id)
+    if ttl:
+        cmd['ttl'] = float(ttl)
+    with command_queue_lock:
+        command_queue[cmd_id] = cmd
+    _wake_async_waiters()
+    return cmd_id, None
 
 
 def resolve_results(results) -> int:
@@ -391,7 +459,7 @@ def take_pending_commands(agent_id=None, v1=True, user_id='') -> list:
         for cmd_id, cmd in list(command_queue.items()):
             if cmd['event'].is_set():
                 continue  # already resolved
-            if now - cmd['created_at'] > _COMMAND_TTL_S:
+            if now - cmd['created_at'] > (cmd.get('ttl') or _COMMAND_TTL_S):
                 cmd['error'] = 'Command expired (stale cleanup)'
                 cmd['event'].set()
                 continue

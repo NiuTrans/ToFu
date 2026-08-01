@@ -515,6 +515,24 @@ function updateStreamingUI(msg) {
     _phaseKey = "none";
     _phaseHtml = "";
   }
+  /* ★ Stall banner (pt_e0ea29f2 — the "no unannounced freeze" watch). When
+   *   the ONLY frames arriving are heartbeat self-ticks past the threshold,
+   *   stall_watch.js flags the task and THIS seam paints the announcement —
+   *   it takes precedence over every other phase (a frozen tool's phase row
+   *   is blank by design, which is exactly the dead zone the user reported).
+   *   Read on EVERY repaint so a late real event flips it back off
+   *   (self-healing, same as the swarm stalled-card). */
+  const _swTaskId = (function () {
+    if (typeof conversations === 'undefined' || typeof activeConvId === 'undefined') return null;
+    const _c = conversations.find(x => x.id === activeConvId);
+    return (_c && _c.activeTaskId) || null;
+  })();
+  const _st = (_swTaskId && typeof stallWatchState === 'function')
+    ? stallWatchState(_swTaskId) : null;
+  if (_st && _st.stalled) {
+    _phaseKey = "stalled";
+    _phaseHtml = `<div class="stream-phase stream-phase-stalled"><span class="stream-phase-icon">⚠</span><span class="stream-phase-text stream-stalled-text" data-stall-task="${_swTaskId}">${escapeHtml(t('stream.stalled.banner', { n: _st.silentSecs }))}</span><button type="button" class="stream-stalled-stop" onclick="stallWatchStop(activeConvId,'${_swTaskId}')">${escapeHtml(t('stream.stalled.stop'))}</button></div>`;
+  }
   if (statusZone.getAttribute("data-phase-key") !== _phaseKey) {
     statusZone.setAttribute("data-phase-key", _phaseKey);
     statusZone.innerHTML = _phaseHtml;

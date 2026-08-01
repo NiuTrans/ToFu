@@ -56,6 +56,13 @@ def _execute_tool_one_pooled(*args, **kwargs):
 # socket inside await_task/timer_create) is equally immune to the reaper —
 # a phantom "running" that clears only on abort/restart. Do NOT "fix" this
 # by capping the heartbeat; the cap question was decided as status-quo.
+#
+# ★ SCOPE (owner ruling 2026-07-31, pt_8524e0ec): the exemption covers ONLY
+#   the tools in THIS table. The heartbeat used to refresh the reaper clocks
+#   for EVERY tool — including run_command, which is why a hung
+#   ``grep -rn … ../`` (2.5h, zero output, task 96c56840) was never reaped:
+#   the tick proved "the dispatcher thread is alive", not "the tool is
+#   producing". Non-exempt tools now get graded ticks (see _emit_tool_heartbeat).
 _SERIAL_BLOCKING_TOOLS: dict[str, dict] = {
     'ask_human': {
         'match': lambda _args: True,
@@ -74,19 +81,49 @@ _SERIAL_BLOCKING_TOOLS: dict[str, dict] = {
 }
 
 
+def _is_exempt_wait(fn_name: str, fn_args: dict) -> bool:
+    """True when (fn_name, fn_args) is a ratified human-wait exemption.
+
+    Delegates to the SAME table the serial dispatcher consults, so the
+    heartbeat's immunity set and the pipeline's serial set can never drift
+    (await_task is exempt only when action='wait'; a status/list call is an
+    ordinary tool and gets graded ticks like everything else).
+    """
+    cfg = _SERIAL_BLOCKING_TOOLS.get(fn_name)
+    if not cfg:
+        return False
+    try:
+        return bool(cfg['match'](fn_args or {}))
+    except Exception as e:
+        logger.debug('[tool_dispatch] exempt-wait match failed for %s: %s', fn_name, e)
+        return False
+
+
 def _emit_tool_heartbeat(task: dict, parallel_items: list, t0: float) -> int:
     """Emit ONE heartbeat tick for the still-in-flight tools of this round.
 
-    Refreshes the ``_dispatch_heartbeat`` positive-liveness clock and emits a
-    ``tool_progress`` for each round still ``searching``/``executing`` — which
-    also bumps ``_t_last_event`` (via ``append_event``) and keeps the SSE stream
-    non-silent (so a buffering proxy doesn't idle-time-out and the UI shows
-    "Searching… (Ns)"). Returns the number of progress events emitted (0 when
-    the task is aborted or every round already settled).
+    Two jobs, and since 2026-07-31 (pt_8524e0ec) they are GRADED by whether
+    the in-flight tool is a ratified human-wait exemption:
+
+      1. TRANSPORT (every tool): emit a ``tool_progress`` per still-in-flight
+         round so the SSE stream stays non-silent (a buffering proxy doesn't
+         idle-time-out) and the UI shows "Searching… (Ns)".
+      2. REAPER LIVENESS (exempt human-wait tools ONLY): refresh
+         ``_dispatch_heartbeat`` and let the tick bump ``_t_last_event``.
+         For every other tool the tick is marked ``_selfTick: True`` — it
+         keeps the transport alive but is NOT evidence of tool life, so a
+         genuinely-hung ordinary tool (zero output >30min) is reaped.
+         Real liveness for ordinary tools comes from real events: stdout
+         chunks, tool results, deltas, retry phases.
+
+    A round containing a LIVE human-wait tool stays alive on that member's
+    unmarked ticks (the round's fate belongs to the human wait). Returns the
+    number of progress events emitted (0 when the task is aborted or every
+    round already settled).
 
     Module-level + side-effect-contained so it is directly unit-testable
-    (see tests/test_tool_heartbeat.py) — the reaper false-reap protection for a
-    slow-but-alive tool hinges on this refreshing both clocks.
+    (see tests/test_tool_heartbeat.py +
+    tests/test_tool_heartbeat_liveness_grading.py).
     """
     # Resolve ``append_event`` through the FACADE so a test that patches
     # ``tool_dispatch.append_event`` on the package is honoured at call time
@@ -97,7 +134,17 @@ def _emit_tool_heartbeat(task: dict, parallel_items: list, t0: float) -> int:
     except Exception as e:
         logger.debug('[tool_dispatch] facade append_event resolve failed, using local: %s', e)
         _append_event = append_event
-    task['_dispatch_heartbeat'] = time.time()
+    in_flight = [
+        _it for _it in parallel_items
+        if _it[5] and _it[5].get('status') in ('searching', 'executing', None)
+    ]
+    all_exempt = bool(in_flight) and all(
+        _is_exempt_wait(_it[1], _it[3]) for _it in in_flight)
+    if all_exempt:
+        # Ratified human-wait immunity: a pure human-wait round may sit for
+        # days with zero output by design — keep the reaper's positive-
+        # liveness clock warm (owner ruling 2026-07-25, scope 2026-07-31).
+        task['_dispatch_heartbeat'] = time.time()
     if task.get('aborted'):
         return 0
     elapsed = int(time.time() - t0)
@@ -110,14 +157,21 @@ def _emit_tool_heartbeat(task: dict, parallel_items: list, t0: float) -> int:
         # Only ping rounds still in-flight (not yet finalized).
         if round_entry.get('status') not in ('searching', 'executing', None):
             continue
-        _append_event(task, build_event(
+        ev = build_event(
             EventType.TOOL_PROGRESS,
             roundNum=_item[4],
             toolCallId=round_entry.get('toolCallId', ''),
             toolName=round_entry.get('toolName') or fn_name,
             detail='%s… (%ds)' % (tool_label(fn_name), elapsed),
             elapsed=elapsed,
-        ))
+        )
+        if not _is_exempt_wait(fn_name, _item[3]):
+            # Self-tick: transport keepalive, NOT evidence the tool is alive.
+            # append_event skips the _t_last_event bump for marked events;
+            # the frontend stalled-card reads the same marker to tell
+            # "system pinging itself" apart from "tool actually producing".
+            ev['_selfTick'] = True
+        _append_event(task, ev)
         emitted += 1
     return emitted
 

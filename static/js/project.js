@@ -1460,19 +1460,35 @@ async function browseDirectory(path) {
     _browseState.path = data.path;
     _browseState.dirs = data.dirs || [];
     _browseState.parent = data.parent;
+    _browseState.filesCount = data.filesCount || 0;
 
     _renderBreadcrumb(data.path);
     document.getElementById("browseBackBtn").disabled = !data.parent;
 
-    if (_browseState.dirs.length === 0) {
-      listEl.innerHTML =
-        '<div class="fb-state"><span>No subdirectories' +
-        (data.filesCount ? " · " + data.filesCount + " files" : "") +
-        "</span></div>";
-      return;
-    }
+    _renderBrowseList();
+  } catch (e) {
+    listEl.innerHTML =
+      '<div class="fb-state fb-state-error"><span>' +
+      escapeHtml(e.message) +
+      "</span></div>";
+  }
+}
 
-    listEl.innerHTML = _browseState.dirs
+/* Render the browser's directory rows from _browseState (extracted seam —
+   the fetch path AND the optimistic delete-row repaint both ride it, so the
+   row HTML exists exactly once). */
+function _renderBrowseList() {
+  const listEl = document.getElementById("browseList");
+  if (!listEl) return;
+  if (_browseState.dirs.length === 0) {
+    listEl.innerHTML =
+      '<div class="fb-state"><span>No subdirectories' +
+      (_browseState.filesCount ? " · " + _browseState.filesCount + " files" : "") +
+      "</span></div>";
+    return;
+  }
+
+  listEl.innerHTML = _browseState.dirs
       .map(function (d) {
         var badge = d.hasCode
           ? '<span class="folder-code-badge">code</span>'
@@ -1508,12 +1524,6 @@ async function browseDirectory(path) {
         );
       })
       .join("");
-  } catch (e) {
-    listEl.innerHTML =
-      '<div class="fb-state fb-state-error"><span>' +
-      escapeHtml(e.message) +
-      "</span></div>";
-  }
 }
 
 /* Render a clickable breadcrumb trail (VS Code style) for the current path.
@@ -1663,20 +1673,38 @@ async function mpDeleteFolder(path, name) {
     t('folder.deleteDirConfirm', { name: name || path }) + '\n' +
     t('folder.deleteDirHint'),
     { danger: true, title: t('folder.deleteTitle') })) return;
+  /* ★ INSTANT-UI (owner directive 2026-07-31, pt_e8a166d6a4b64123): the row
+   *   leaves the browser list AND the staged workspace tag disappears in the
+   *   SAME task as the confirm — the old code awaited the rmdir RTT first.
+   *   The deletion lands in .tofu_trash (recoverable by design), so the
+   *   optimistic removal is the safest in the app: on failure we re-fetch
+   *   the directory (server truth restores the row) and re-stage the tag. */
+  const _rowIdx = _browseState.dirs.findIndex((d) => d.path === path);
+  if (_rowIdx >= 0) {
+    _browseState.dirs.splice(_rowIdx, 1);
+    _renderBrowseList();
+  }
+  const _stagedIdx = _mpFolders.indexOf(path);
+  const _wasStaged = _stagedIdx !== -1;
+  if (_wasStaged) { _mpFolders.splice(_stagedIdx, 1); _mpRenderTags(); }
   try {
     const resp = await Api.project.rmdir(path);
     const data = resp ? await resp.json().catch(() => ({})) : {};
     if (resp && resp.ok && data.ok) {
       if (typeof showToast === 'function') showToast(t('folder.deleted'), 'success');
-      // Drop it from the workspace list too, if it was staged there.
-      const idx = _mpFolders.indexOf(path);
-      if (idx !== -1) { _mpFolders.splice(idx, 1); _mpReadOnly.delete(path); _mpRenderTags(); }
+      _mpReadOnly.delete(path);
       browseDirectory(_browseState.path);
     } else {
-      await showAlert((data && data.error) || t('folder.deleteFailed'),
-        { title: t('folder.deleteFailed') });
+      throw new Error((data && data.error) || t('folder.deleteFailed'));
     }
   } catch (e) {
+    /* ★ Rollback: re-stage the workspace tag at its original index, then
+     *   re-fetch the list so the row comes back from server truth. */
+    if (_wasStaged) {
+      _mpFolders.splice(Math.min(_stagedIdx, _mpFolders.length), 0, path);
+      _mpRenderTags();
+    }
+    browseDirectory(_browseState.path);
     await showAlert(e.message || t('folder.deleteFailed'),
       { title: t('folder.deleteFailed') });
   }

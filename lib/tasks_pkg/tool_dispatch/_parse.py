@@ -23,6 +23,39 @@ from lib.tasks_pkg.tool_dispatch._repair import _apply_repair_to_round, _build_r
 logger = get_logger(__name__)
 
 
+def _reject_undispatched(tc, display_name, tc_id, receipt_msg, rejected_meta,
+                         task, tool_round_num, round_num, project_enabled):
+    """Give an UNDELIVERABLE tool call a rejected round + a model-facing receipt.
+
+    Rides the exact lane hallucinated tools already use: a ``status='rejected'``
+    round the UI renders + a ``parse_error`` the pipeline returns to the model
+    as a ``role:'tool'`` message in original tool-call order. The alternative —
+    the old ``continue`` — left the model with an unexplained hole that the
+    orphan-stripper then erased from the wire, and it INVENTED an explanation
+    (``tool-call limit reached`` spam, pt_914bb730).
+
+    Deliberately does NOT consume the round's prose tag (``_ac_tagged``): a
+    junk artefact is not model content, so the round's narration belongs with
+    the first REAL entry.
+
+    Returns ``(parsed_tuple, tool_round_num)``.
+    """
+    tool_round_num, round_entry, event_payload = _build_tool_round_entry(
+        display_name, {}, tc_id, '{}', tool_round_num, project_enabled,
+        conv_id=task.get('convId') or task.get('id'))
+    rn = round_entry['roundNum']
+    round_entry['llmRound'] = round_num
+    event_payload['llmRound'] = round_num
+    round_entry['status'] = 'rejected'
+    round_entry['_rejected'] = rejected_meta
+    event_payload['status'] = 'rejected'
+    event_payload['_rejected'] = rejected_meta
+    task['toolRounds'].append(round_entry)
+    append_event(task, event_payload)
+    return ((tc, display_name, tc_id, {}, rn, round_entry, receipt_msg),
+            tool_round_num)
+
+
 def parse_tool_calls(
     assistant_msg: dict[str, Any],
     task: dict[str, Any],
@@ -96,20 +129,12 @@ def parse_tool_calls(
     for tc in assistant_msg['tool_calls']:
         fn_obj = tc.get('function') or {}
         fn_name = fn_obj.get('name', '')
-        if not fn_name:
-            logger.warning('[Task %s] Skipping tool call with missing function name: %s', tid, tc)
-            continue
-        # Guard against spurious internal tool names that leaked through streaming
-        # (e.g. 'antml:thinking' from Anthropic proxy artifacts)
-        if ':' in fn_name or fn_name.startswith('__'):
-            logger.warning('[Task %s] Skipping spurious/internal tool call name: %s', tid, fn_name)
-            continue
-        # Guard against corrupted tool names with XML/HTML artifacts
-        # (e.g. MiniMax emitting 'list_dir">.</parameter>\n</invoke>\n<invoke name="grep_search'
-        #  when it hallucinates raw XML in its tool call output)
-        if not fn_name.replace('_', '').replace('-', '').isalnum():
-            logger.warning('[Task %s] Skipping malformed tool name (non-alphanumeric): %.80s', tid, fn_name)
-            continue
+        # NOTE: the name-drop guards (missing / internal-artefact / malformed)
+        # are NOT duplicated here anymore — ``ingest_tool_call``'s stage-1 drop
+        # guard is the single classifier, and the dropped branch below re-emits
+        # the per-reason WARNINGs verbatim for grep parity. (They used to be
+        # three hand-copied ``continue`` guards that ALSO silently dropped the
+        # call — the bug this module now fixes by conversion to a receipt.)
         # ── Unified tool-call ingestion ──
         # ONE seam does name-drop guard → name-alias (read_file→read_files,
         # WebFetch→fetch_url, …) → JSON decode+repair → schema/param repair →
@@ -126,9 +151,14 @@ def parse_tool_calls(
             model=task.get('model', '') or '',
             conv_id=task.get('convId', '') or '',
         )
-        # Drop guard: streaming artefacts (antml:thinking, XML-corrupted names)
-        # — skip entirely (not executed, not rejected). Preserves the prior
-        # per-reason WARNING for grep parity.
+        # Drop guard: streaming artefacts (antml:thinking, XML-corrupted
+        # names, EMPTY names — e.g. the upstream HELLO_CHECK probe). Not
+        # executed — but NOT silent either (pt_914bb730): a bare ``continue``
+        # used to leave the model with an orphan that the wire-stripper then
+        # erased, and the model INVENTED an explanation for the hole
+        # ("tool-call limit reached" — a limit that does not exist) and
+        # repeated it once per round. Every discard now leaves a rejected
+        # round + a receipt the pipeline returns as a role:'tool' message.
         if _ingested.dropped:
             if _ingested.drop_reason == 'internal_artifact':
                 logger.warning('[Task %s] Skipping spurious/internal tool call name: %s', tid, fn_name)
@@ -136,6 +166,39 @@ def parse_tool_calls(
                 logger.warning('[Task %s] Skipping malformed tool name (non-alphanumeric): %.80s', tid, fn_name)
             else:
                 logger.warning('[Task %s] Skipping tool call with missing function name: %s', tid, tc)
+            tc_id = tc.get('id') or f'call_{uuid.uuid4().hex[:12]}'
+            if not tc.get('id'):
+                # The wire assistant message shares this dict — write the mint
+                # back so the synthetic tool_result pairs with the tool_use
+                # instead of becoming a second, differently-keyed orphan.
+                tc['id'] = tc_id
+            _drop_reason = _ingested.drop_reason or 'missing'
+            if _drop_reason == 'internal_artifact':
+                _why = (f'its function name {fn_name!r} is an internal/proxy '
+                        'artefact (contains ":" or starts with "__"), not a '
+                        'real tool')
+            elif _drop_reason == 'malformed':
+                _why = (f'its function name {fn_name!r} was corrupted in '
+                        'transit (not alphanumeric — typically XML/HTML '
+                        'fragments from a broken stream)')
+            else:
+                _why = ('its function name was EMPTY — a malformed streaming '
+                        'artefact, not a call you actually made')
+            _drop_msg = (
+                '[SYSTEM: TOOL CALL DID NOT RUN]\n'
+                f'A tool call in your previous message was discarded without '
+                f'being executed: {_why} (tool_call id={tc_id}). No result '
+                'exists for it. This is NOT a tool-call limit — this harness '
+                'has no per-turn tool-call cap, so do not stop or ask the '
+                'user to re-prompt on that assumption. If you intended to '
+                'call a tool, re-issue it now with an explicit name from the '
+                'available tool list.')
+            _receipt, tool_round_num = _reject_undispatched(
+                tc, fn_name or '(unnamed tool call)', tc_id, _drop_msg,
+                {'kind': 'dropped_artifact', 'attempted': fn_name or '',
+                 'suggestions': [], 'drop_reason': _drop_reason},
+                task, tool_round_num, round_num, project_enabled)
+            parsed_tcs.append(_receipt)
             continue
         _tool_name_aliased = _ingested.raw_name if _ingested.alias_kind else None
         if _ingested.alias_kind:
@@ -164,6 +227,26 @@ def parse_tool_calls(
                            'with empty arguments — duplicate of another %s call '
                            'with real args',
                            tid, fn_name, tc.get('id', '?')[:12], fn_name)
+            # Same no-silent-discard contract as the drop guard above: the
+            # empty duplicate is rejected WITH a receipt, so the model never
+            # has to guess why one of its two calls produced no result.
+            tc_id = tc.get('id') or f'call_{uuid.uuid4().hex[:12]}'
+            if not tc.get('id'):
+                tc['id'] = tc_id
+            _phantom_msg = (
+                '[SYSTEM: TOOL CALL DID NOT RUN]\n'
+                f'Your tool call for `{fn_name}` (tool_call id={tc_id}) had '
+                f'EMPTY arguments and duplicated another `{fn_name}` call in '
+                f'the same message that carried real arguments. The empty '
+                'duplicate was discarded and never executed; the sibling '
+                'call proceeds normally. Do not re-issue the empty call — '
+                'this is NOT a tool-call limit.')
+            _receipt, tool_round_num = _reject_undispatched(
+                tc, fn_name, tc_id, _phantom_msg,
+                {'kind': 'phantom_empty_args', 'attempted': fn_name,
+                 'suggestions': [], 'drop_reason': 'phantom_empty_args'},
+                task, tool_round_num, round_num, project_enabled)
+            parsed_tcs.append(_receipt)
             continue
         tc_id = tc.get('id') or f'call_{uuid.uuid4().hex[:12]}'
         # Harness self-repair tracking — surfaced to the UI so the user knows

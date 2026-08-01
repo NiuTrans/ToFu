@@ -27,14 +27,12 @@ import json
 
 from lib.log import get_logger
 from lib.tasks_pkg.handlers._adapter import run_batch_concurrent
-from lib.tasks_pkg.handlers.search import (
-    _fetch_url_one,
-    _format_fetch_display,
-    _format_search_display_for_results,
-    _vertical_header_for_llm,
-    _vertical_to_sse_payload,
-    _web_search_one,
-)
+# NOTE: handlers.search is imported LAZILY inside _execute_report_tool, not
+# here. It re-exports tofu_search symbols at module level, and importing it
+# from THIS module bypasses the degradable guard in handlers/__init__.py —
+# lib/paper is on the boot chain (routes/paper.py → lib/paper/__init__), so a
+# module-level import would resurrect the whole-process kill that guard exists
+# to prevent (2026-07-31 GLIBCXX linkage ImportError, 8 occurrences).
 # Reuse chat's canonical seams — DON'T reimplement them here:
 #   • parse_and_repair_tool_args → JSON-decode + schema repair (the
 #     bare-string-`queries` → single-element-array fix lives in ONE place,
@@ -44,9 +42,52 @@ from lib.tasks_pkg.handlers.search import (
 from lib.tasks_pkg.tool_display import _short_url
 from lib.tasks_pkg.tool_display import tool_round_label as display_query_for  # noqa: F401 — re-exported for the report/QA engines
 from lib.tool_input_repair import parse_and_repair_tool_args  # noqa: F401 — re-exported for the report/QA engines
-from tofu_search.search import format_search_for_tool_response
+# NOTE: tofu_search is imported LAZILY at its single use site below, not here.
+# This module is on the boot chain (routes/paper.py → lib/paper/__init__), and
+# tofu_search pulls trafilatura → lxml → libicuuc — which on 2026-07-31 raised a
+# GLIBCXX linkage ImportError eight times. A module-level import would make that
+# failure kill the whole server for a fault confined to web search.
 
 logger = get_logger(__name__)
+
+# ── Lazy (PEP 562) re-export of chat's search seams ──────────────────────────
+# These six helpers live in lib.tasks_pkg.handlers.search, which re-exports
+# tofu_search symbols at MODULE level. lib/paper is on the boot chain
+# (routes/paper.py → lib/paper/__init__), so importing them eagerly here put
+# tofu_search → trafilatura → lxml → libicuuc on the boot path — and on
+# 2026-07-31 that chain's GLIBCXX linkage ImportError killed the WHOLE server
+# eight times for a fault confined to web search.
+#
+# A local import inside _execute_report_tool would fix the boot path but BREAK
+# the test seam: the paper suites monkeypatch ``lib.paper.tools._web_search_one``
+# (measured — 6 tests fail with AttributeError), and a function-local name is
+# invisible to that patch. Module ``__getattr__`` satisfies both: the import is
+# deferred to first ATTRIBUTE ACCESS, while the names still resolve through this
+# module's namespace, so monkeypatch.setattr keeps steering them. Same PEP 562
+# pattern lib/agent_core/__init__.py uses.
+_SEARCH_SEAM_MEMBERS = frozenset({
+    '_fetch_url_one',
+    '_format_fetch_display',
+    '_format_search_display_for_results',
+    '_vertical_header_for_llm',
+    '_vertical_to_sse_payload',
+    '_web_search_one',
+})
+_TOFU_SEARCH_MEMBERS = frozenset({'format_search_for_tool_response'})
+
+
+def __getattr__(name):
+    """Resolve chat's search seams on first access (PEP 562 lazy re-export)."""
+    if name in _SEARCH_SEAM_MEMBERS:
+        from lib.tasks_pkg.handlers import search as _search
+        return getattr(_search, name)
+    if name in _TOFU_SEARCH_MEMBERS:
+        # NOTE: ``from tofu_search import search`` yields the search FUNCTION —
+        # the package binds that name over its own submodule. Reach the module
+        # explicitly or the attribute lookup lands on a function object.
+        import importlib
+        return getattr(importlib.import_module('tofu_search.search'), name)
+    raise AttributeError('module %r has no attribute %r' % (__name__, name))
 
 # Re-exported canonical helpers (chat's seams) the paper engines import from
 # this module. Listed here so the re-export is intentional, not dead code.
@@ -302,6 +343,15 @@ def _execute_report_tool(name, args_str, user_question='', abort=None,
         single = len(query_specs) == 1
 
         def _search_one(spec):
+            # Resolved through THIS module (not a bare global) so the PEP 562
+            # lazy re-export applies AND a test's monkeypatch.setattr on
+            # lib.paper.tools._web_search_one still steers the call.
+            import sys as _sys
+            _self = _sys.modules[__name__]
+            _web_search_one = _self._web_search_one
+            _vertical_header_for_llm = _self._vertical_header_for_llm
+            _format_search_display_for_results = _self._format_search_display_for_results
+            format_search_for_tool_response = _self.format_search_for_tool_response
             q, f, v = spec
             logger.info('[Paper:Report:Tool] web_search query=%r', q[:100])
             # Reuse chat's helper so vertical search runs CONCURRENTLY (zero
@@ -321,6 +371,8 @@ def _execute_report_tool(name, args_str, user_question='', abort=None,
         all_verticals = []
         last_diag = None
         engine_breakdown_out = None
+        import sys as _sys
+        _vertical_to_sse_payload = _sys.modules[__name__]._vertical_to_sse_payload
         for idx, item in enumerate(ordered):
             q = query_list[idx]
             if item is None:
@@ -382,6 +434,8 @@ def _execute_report_tool(name, args_str, user_question='', abort=None,
             return 'Error: no valid url provided', [], None, None, None
 
         def _fetch_one(u):
+            import sys as _sys
+            _fetch_url_one = _sys.modules[__name__]._fetch_url_one
             logger.info('[Paper:Report:Tool] fetch_url url=%.100s', u)
             # Reuse chat's helper so binary-asset staging, content filtering,
             # rejected-scheme handling and filtered-vs-raw char counts all
@@ -392,6 +446,8 @@ def _execute_report_tool(name, args_str, user_question='', abort=None,
 
         all_parts = []
         all_display = []
+        import sys as _sys
+        _format_fetch_display = _sys.modules[__name__]._format_fetch_display
         for idx, item in enumerate(ordered):
             u = url_list[idx]
             if item is None:

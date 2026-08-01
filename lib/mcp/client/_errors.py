@@ -24,6 +24,21 @@ _MCP_STDERR_TAIL_BYTES = 8192
 _MCP_ERROR_TYPES: tuple[type, ...] | None = None
 
 
+def _safe_text(exc: BaseException) -> str:
+    """``str(exc)`` with a guard — classifiers must never raise.
+
+    v2 ``MCPError.__str__`` dereferences ``self.error``; a malformed or
+    wrongly-initialised subclass instance raises AttributeError from inside
+    ``str()``, which would crash the classification path and mask the real
+    error. Fall back to the constructor args, where the message lives for a
+    normally-raised exception.
+    """
+    try:
+        return str(exc) or ''
+    except Exception:
+        return ' '.join(str(a) for a in getattr(exc, 'args', ()))
+
+
 def _unwrap_exception_group(exc: BaseException) -> BaseException:
     """Return the deepest non-group leaf exception in a (possibly nested)
     ``BaseExceptionGroup`` chain.
@@ -74,7 +89,7 @@ def _is_transport_dead_error(exc: BaseException) -> bool:
         'BrokenPipeError', 'ConnectionResetError', 'ConnectionError',
     ):
         return True
-    text = (str(leaf) or '').lower()
+    text = _safe_text(leaf).lower()
     needles = (
         'connection closed', 'broken pipe', 'closed resource',
         'connection reset', 'end of stream', 'transport closed',
@@ -147,7 +162,7 @@ def _is_call_timeout_error(exc: BaseException) -> bool:
     # the isinstance above when it comes from a different module object.
     is_protocol_err = (isinstance(leaf, sdk_types) if sdk_types else False)
     if is_protocol_err or type(leaf).__name__ in ('TimeoutError', 'McpError', 'MCPError'):
-        text = (str(leaf) or '').lower()
+        text = _safe_text(leaf).lower()
         if 'timed out while waiting' in text or 'timeout' in text:
             return True
     return False
@@ -227,7 +242,7 @@ def _is_method_not_found(exc: BaseException) -> bool:
     leaf = _unwrap_exception_group(exc)
     if not _is_peer_answered_error(leaf):
         return False
-    return 'method not found' in (str(leaf) or '').lower()
+    return 'method not found' in _safe_text(leaf).lower()
 
 
 def _read_stderr_tail(f, max_bytes: int = _MCP_STDERR_TAIL_BYTES) -> str:

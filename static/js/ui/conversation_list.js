@@ -992,6 +992,15 @@ function _convStatusFlags(c) {
   const translating = !!c._translating;
   const memoryPrefetching = !!c._memoryPrefetching;
   const streaming = convIsBusy(c);
+  /* ★ Rate-limit mirror (owner feature) — derived from the ONE live phase
+   *   slice (ui/stream_session.js) via its module-owned read predicate, so it
+   *   can never drift from the in-bubble "限流中" chip and needs no separate
+   *   clearing hook. `streamSessions` is deliberately NOT touched directly —
+   *   that would widen the pinned read-surface; convRateLimitPhase is the
+   *   exported seam. typeof-guarded so this file's unit harnesses / a partial
+   *   bundle simply report not-rate-limited. Only meaningful while streaming. */
+  const rateLimited = !!(streaming && typeof convRateLimitPhase === 'function'
+                         && convRateLimitPhase(c.id));
   // ★ Awaiting human input — scan back to the most recent assistant message
   //   with toolRounds (breaks early; typically inspects only the tail).
   let awaitingHuman = false;
@@ -1080,7 +1089,7 @@ function _convStatusFlags(c) {
       unconfirmed = computeConvStateConfidence(c, activeStreams) !== 'confirmed';
     } catch (e) { unconfirmed = false; }
   }
-  return { streaming, translating, memoryPrefetching, awaitingHuman, errored, incomplete, unconfirmed };
+  return { streaming, translating, memoryPrefetching, awaitingHuman, errored, incomplete, unconfirmed, rateLimited };
 }
 
 /**
@@ -1099,7 +1108,9 @@ function _convStatusHtml(f) {
   } else if (f.streaming) {
     dotHtml = f.unconfirmed
       ? `<div class="conv-streaming-dot conv-state-unconfirmed" title="${t('sidebar.stateUnconfirmed')}"></div>`
-      : '<div class="conv-streaming-dot"></div>';
+      : f.rateLimited
+        ? `<div class="conv-streaming-dot conv-ratelimit-dot" title="${t('sidebar.rateLimited')}"></div>`
+        : '<div class="conv-streaming-dot"></div>';
   } else if (f.errored) {
     dotHtml = `<div class="conv-error-dot" title="${t('sidebar.errorState')}"></div>`;
   } else if (f.incomplete) {
@@ -1113,7 +1124,9 @@ function _convStatusHtml(f) {
   } else if (f.streaming) {
     statusTag = f.unconfirmed
       ? `<span class="conv-status-tag conv-status-streaming conv-state-unconfirmed" title="${t('sidebar.stateUnconfirmed')}">${t('sidebar.answering')}?</span>`
-      : `<span class="conv-status-tag conv-status-streaming">${t('sidebar.answering')}</span>`;
+      : f.rateLimited
+        ? `<span class="conv-status-tag conv-status-ratelimit" title="${t('sidebar.rateLimited')}">${t('sidebar.rateLimitedTag')}</span>`
+        : `<span class="conv-status-tag conv-status-streaming">${t('sidebar.answering')}</span>`;
   } else if (f.errored) {
     statusTag = `<span class="conv-status-tag conv-status-error" title="${t('sidebar.errorState')}">${t('sidebar.errorTag')}</span>`;
   } else if (f.incomplete) {

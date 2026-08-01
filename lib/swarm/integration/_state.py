@@ -107,6 +107,62 @@ def _key_is_live(swarm_key: str) -> bool:
         return False
 
 
+def _session_is_producing(swarm_key: str) -> bool:
+    """True while this session's agents are still emitting progress.
+
+    THE second shield for TTL eviction, and the one that was missing.
+    ``_session_timestamps[key]`` is written exactly once — in ``_set_session``
+    at spawn — and never refreshed, so ``now - ts`` measures the session's AGE,
+    not its idleness. A swarm working hard for 40 minutes therefore looked
+    identical to one abandoned 40 minutes ago, and the sweep called
+    ``session.abort()`` on it (105 occurrences in this deployment's logs).
+
+    ``_key_is_live`` did not cover the gap: it searches the chat-task registry
+    for a non-terminal task in the conversation, which a fire-and-forget swarm
+    — whose spawning turn has already finished, the exact case TTL is supposed
+    to serve — does not have.
+
+    So consult the same ``ProgressBeacon`` the driver and the per-agent guard
+    read (``lib/swarm/liveness.py``): a session whose agents are still
+    producing is NOT stale at any age. Failure is treated as "producing"
+    because wrongly aborting live work costs far more than reaping late.
+    """
+    try:
+        session = _active_sessions.get(swarm_key)
+        if session is None:
+            return False
+        # A TERMINATED swarm is BY DEFINITION not producing — check this FIRST.
+        # Without it, a beacon entry left behind by an agent that never reached
+        # the scheduler's ``forget`` (a crash, or a settle racing this sweep)
+        # would keep a finished session alive forever: a memory leak traded for
+        # the premature-abort bug. Termination is an authoritative fact and
+        # outranks the liveness heuristic.
+        if getattr(session, 'is_terminated', False):
+            return False
+        beacon = getattr(session, 'progress_beacon', None)
+        if beacon is None:
+            return False
+        # An EMPTY beacon must NOT read as "producing". ``is_making_progress``
+        # deliberately fails OPEN on an unknown/absent agent so the driver is
+        # never tricked into quitting during the launch window before the first
+        # token — but "no agents are tracked" is a different question, and for
+        # TTL it means every agent has settled or died. Answering it with the
+        # fail-open default would make a genuinely dead session immortal, i.e.
+        # trade a premature-abort bug for a leak. Require real tracked agents.
+        tracked = beacon.tracked_agents()
+        if not tracked:
+            return False
+        if beacon.is_making_progress():
+            logger.info('[Swarm:%s] past TTL but still producing (%s, agents=%s) '
+                        '— not reaping', swarm_key, beacon.describe(), tracked)
+            return True
+        return False
+    except Exception as e:
+        logger.warning('[Swarm:%s] liveness probe failed during TTL sweep '
+                       '(keeping session): %s', swarm_key, e)
+        return True
+
+
 def _cleanup_stale_sessions():
     """Drop sessions past TTL or above MAX_SESSIONS. Caller must hold lock."""
     global _last_cleanup
@@ -129,7 +185,9 @@ def _cleanup_stale_sessions():
 
     stale_ids = [
         key for key, ts in _session_timestamps.items()
-        if now - ts > SESSION_TTL_SECONDS and not _key_is_live(key)
+        if now - ts > SESSION_TTL_SECONDS
+        and not _key_is_live(key)
+        and not _session_is_producing(key)
     ]
     for key in stale_ids:
         session = _active_sessions.pop(key, None)

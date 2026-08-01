@@ -493,11 +493,18 @@ async def build_cold_replay_response(task_id: str, last_event_id_header: str):
         meta = _extract_db_meta(row)
         # Field lists MUST stay aligned with _extract_task_meta and the
         # chat_poll DB-path loop. See _extract_task_meta docstring.
+        # ★ Same terminal-signal gate as the in-memory snapshot: a persisted row
+        #   can carry a finishReason while its status column still reads
+        #   'running' (the checkpoint is written inside the finalize window), so
+        #   the `state` event must be gated on the status IT reports. `done_evt`
+        #   below is deliberately UNGATED — it is the terminal event.
+        from lib.chat.terminal_gate import filtered_snapshot_meta as _fsm
+        _state_meta = _fsm(meta, row['status'])
         for key in ('finishReason', 'usage', 'preset', 'model',
                     'provider_id', 'thinkingDepth',
                     'apiRounds', 'modifiedFiles', 'modifiedFileList'):
-            if meta.get(key):
-                state[key] = meta[key]
+            if _state_meta.get(key):
+                state[key] = _state_meta[key]
         done_evt = build_event(EventType.DONE)
         for key in ('finishReason', 'usage', 'preset', 'toolSummary',
                     'model', 'provider_id', 'thinkingDepth',
@@ -692,6 +699,10 @@ def build_fresh_state_snapshot(task: dict[str, Any]):
     """
     from lib.agent_core.events import EventType, build_event
     from lib.chat.persistence import extract_task_meta as _extract_task_meta
+    from lib.chat.terminal_gate import (
+        filtered_snapshot_meta as _filtered_snapshot_meta,
+        is_terminal_status as _is_terminal_status,
+    )
 
     with task['events_lock']:
         state = build_event(
@@ -706,10 +717,24 @@ def build_fresh_state_snapshot(task: dict[str, Any]):
         if task['toolRounds']:
             state['toolRounds'] = task['toolRounds']
         meta = _extract_task_meta(task)
+        # ★ TERMINAL-SIGNAL GATE (lib/chat/terminal_gate.py) — a `state` snapshot
+        #   reporting a NON-terminal status must not advertise finishReason /
+        #   usage / preset. The orchestrator stamps task['finishReason'] ~111
+        #   lines before it flips task['status']='done' (_finalize.py), and that
+        #   window contains the blocking `_generate_tool_summary` LLM call — so
+        #   this reconnect path (whose whole purpose is attaching to a task that
+        #   is STILL RUNNING) would otherwise emit {status:'running',
+        #   finishReason:'stop'}. The frontend reads either field as "settled":
+        #   finish_info.js paints a settled finish bar on a live turn, and
+        #   assistantTailIsPriorTurn misfiles the live bubble as a prior turn —
+        #   the duplicate-bubble bug. Keyed on the status THIS snapshot reports.
+        #   `meta` itself is returned UNFILTERED (below) because the caller
+        #   reuses it to synthesize a genuinely terminal `done` event.
+        _gated = _filtered_snapshot_meta(meta, task['status'])
         for key in ('finishReason', 'usage', 'model', 'thinkingDepth'):
-            if meta.get(key):
-                state[key] = meta[key]
-        if task.get('preset'):
+            if _gated.get(key):
+                state[key] = _gated[key]
+        if task.get('preset') and _is_terminal_status(task['status']):
             state['preset'] = task['preset']
         if task.get('_memoryPrefetch'):
             state['memoryPrefetch'] = task['_memoryPrefetch']

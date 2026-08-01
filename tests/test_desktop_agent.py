@@ -367,7 +367,8 @@ def test_run_agent_stop_event_terminates_loop():
 def test_safe_default_is_read_only():
     """Enabling the agent alone must grant NO write/exec/gui tier."""
     from lib.desktop_agent._permissions import SAFE_DEFAULT
-    assert SAFE_DEFAULT == {'allow_write': False, 'allow_exec': False, 'allow_gui': False}
+    assert SAFE_DEFAULT == {'allow_write': False, 'allow_exec': False,
+                            'allow_gui': False, 'allow_egress': False}
     assert not any(SAFE_DEFAULT.values())
 
 
@@ -382,19 +383,22 @@ def test_safe_default_returns_fresh_mutable_copy():
 
 def test_build_permissions_defaults_deny_all():
     from lib.desktop_agent._permissions import build_permissions
-    assert build_permissions() == {'allow_write': False, 'allow_exec': False, 'allow_gui': False}
+    assert build_permissions() == {'allow_write': False, 'allow_exec': False,
+                                   'allow_gui': False, 'allow_egress': False}
 
 
 def test_build_permissions_individual_tiers():
     from lib.desktop_agent._permissions import build_permissions
     p = build_permissions(allow_write=True, allow_gui=1)  # truthy coerced to bool
-    assert p == {'allow_write': True, 'allow_exec': False, 'allow_gui': True}
+    assert p == {'allow_write': True, 'allow_exec': False,
+                 'allow_gui': True, 'allow_egress': False}
 
 
 def test_build_permissions_allow_all_overrides_every_tier():
     from lib.desktop_agent._permissions import build_permissions
     p = build_permissions(allow_all=True)
-    assert p == {'allow_write': True, 'allow_exec': True, 'allow_gui': True}
+    assert p == {'allow_write': True, 'allow_exec': True,
+                 'allow_gui': True, 'allow_egress': True}
 
 
 # ══════════════════════════════════════════════════════════

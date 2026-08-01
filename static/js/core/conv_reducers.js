@@ -349,3 +349,75 @@ function _mergeTranslationFields(lm, sm) {
   return n;
 }
 if (typeof window !== 'undefined') window._mergeTranslationFields = _mergeTranslationFields;
+
+/* ═══════════════════════════════════════════════════════════════════
+   _mergeServerTranslations(sourceMsgs, destMsgs) — array-level wrapper
+   over _mergeTranslationFields.
+
+   Extracted 2026-07-31 (pt_3879f00e sub-part 2 slice 12) from a nested
+   closure inside conversations.js::loadConversationMessages (~L1130).
+   The closure had drifted into a private helper of a 754L function
+   while its per-message primitive (_mergeTranslationFields, above)
+   lived here in the reducer family — this promotion completes the
+   family and gives the array-level wrapper one reusable home instead
+   of a closure that could shard if a fourth consumer emerges.
+
+   Behaviour is byte-identical to the original closure: iterate only
+   over the OVERLAP of the two arrays (a longer local tail is preserved
+   unchanged — the extra local messages have no server counterpart to
+   merge from), delegate every per-message merge to
+   _mergeTranslationFields, and return the total field count merged so
+   callers can gate their log line / repaint flag.
+
+   Pure reducer over two arrays; no DOM, no globals, load-order-safe.
+   ═══════════════════════════════════════════════════════════════════ */
+function _mergeServerTranslations(sourceMsgs, destMsgs) {
+  if (!Array.isArray(sourceMsgs) || !Array.isArray(destMsgs)) return 0;
+  const overlap = Math.min(sourceMsgs.length, destMsgs.length);
+  let merged = 0;
+  for (let i = 0; i < overlap; i++) {
+    merged += _mergeTranslationFields(destMsgs[i], sourceMsgs[i]);
+  }
+  return merged;
+}
+if (typeof window !== 'undefined') window._mergeServerTranslations = _mergeServerTranslations;
+
+/* ═══════════════════════════════════════════════════════════════════
+ * _adoptTaskPlaceholder(conv, taskId, candidate) — send-path placeholder
+ * dedupe (pt_44e985ec).
+ *
+ * The send pipeline mints its assistant placeholder AFTER the /api/chat/send
+ * POST returns. In that window an early attach (a conv-state/push-driven
+ * reconnect, a recovery path) may already have created AND bound this task's
+ * placeholder — the backend announces the task before the POST response
+ * lands. Pushing the candidate anyway leaves TWO empty assistant messages:
+ * the lanes write the one the stream entry is bound to while the render
+ * projection reads the array tail — the 等待中…↔推理中 N字符 flip-flop.
+ *
+ * Rule: if a message is already bound to THIS task (`_taskId` — the bind
+ * stamped at stream-bind time), ADOPT it and re-stamp the canonical
+ * client-minted `_msgId` onto it, so the client mint (config.assistantMsgId),
+ * the backend's DB slot (_new_assistant_slot adopts the same id) and the
+ * live translation routing keep ONE identity. A message bound to a DIFFERENT
+ * task is never adopted. The scan is a self-contained tail-up walk (mirrors
+ * conversation_list._resolveAssistantByTaskId — inlined so the helper stays
+ * load-order-free for headless harnesses).
+ *
+ * Pure reducer over the conv's messages (mutates only the adopted message's
+ * _msgId); returns { msg, adopted } — the caller pushes only when
+ * adopted === false.
+ * ═══════════════════════════════════════════════════════════════════ */
+function _adoptTaskPlaceholder(conv, taskId, candidate) {
+  let existing = null;
+  const msgs = (conv && Array.isArray(conv.messages)) ? conv.messages : [];
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    const m = msgs[i];
+    if (m && m.role === 'assistant' && m._taskId === taskId) { existing = m; break; }
+  }
+  if (existing) {
+    if (candidate && candidate._msgId) existing._msgId = candidate._msgId;
+    return { msg: existing, adopted: true };
+  }
+  return { msg: candidate, adopted: false };
+}
+if (typeof window !== 'undefined') window._adoptTaskPlaceholder = _adoptTaskPlaceholder;

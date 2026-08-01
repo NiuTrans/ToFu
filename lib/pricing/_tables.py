@@ -42,6 +42,9 @@ MODEL_PRICING = {
     # row: cost keys on the WIRE id, the picker's display name on the LOGICAL
     # one — see lib/llm_dispatch/model_entry.py.
     'claude-opus-5':             {'input': 5.0,   'output': 25.0,  'cacheWriteMul': 1.25, 'cacheReadMul': 0.10, 'name': 'Claude Opus 5'},
+    # Sonnet 5 (2026-06-30, 1M ctx native): PROMO $2/$10 until 2026-08-31,
+    # then $3.0/$15.0 — update this row on 09-01.
+    'claude-sonnet-5':           {'input': 2.0,   'output': 10.0,  'cacheWriteMul': 1.25, 'cacheReadMul': 0.10, 'name': 'Claude Sonnet 5'},
     'claude-opus-4.8':           {'input': 5.0,   'output': 25.0,  'cacheWriteMul': 1.25, 'cacheReadMul': 0.10, 'name': 'Claude Opus 4.8'},
     'claude-opus-4.7':           {'input': 5.0,   'output': 25.0,  'cacheWriteMul': 1.25, 'cacheReadMul': 0.10, 'name': 'Claude Opus 4.7'},
     'claude-opus-4.6':           {'input': 5.0,   'output': 25.0,  'cacheWriteMul': 1.25, 'cacheReadMul': 0.10, 'name': 'Claude Opus 4.6'},
@@ -79,12 +82,21 @@ MODEL_PRICING = {
     'gpt-4o':                    {'input': 2.5,   'output': 10.0,  'cacheWriteMul': 1.00, 'cacheReadMul': 0.50, 'name': 'GPT-4o'},
     'gpt-4o-mini':               {'input': 0.15,  'output': 0.6,   'cacheWriteMul': 1.00, 'cacheReadMul': 0.50, 'name': 'GPT-4o Mini'},
     'gpt-4-turbo':               {'input': 10.0,  'output': 30.0,  'cacheWriteMul': 1.00, 'cacheReadMul': 0.50, 'name': 'GPT-4 Turbo'},
-    'deepseek-chat':             {'input': 0.27,  'output': 1.10,  'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'DeepSeek V3'},
+    # RETIRED 2026-07-24 15:59 UTC (api-docs.deepseek.com/updates, 2026-04-24):
+    # the legacy aliases 'deepseek-chat' (V3 non-thinking) and 'deepseek-reasoner'
+    # (V3 thinking) now ERROR on the official API — their rows were removed.
+    # Successors: deepseek-v4-flash / deepseek-v4-pro below. Do NOT re-add.
     # DeepSeek V4 (2026-04-24) — both models have 1M ctx, dual Thinking / Non-Thinking modes.
     # Pro: 75% price cut made permanent 2026-05-22 ($1.74/$3.48 → $0.435/$0.87); cached input $0.003625 → cacheReadMul ≈ 0.0083.
     # Flash cacheReadMul from disclosed cache-hit pricing: $0.028 / $0.14 = 0.20.
-    'deepseek-v4-pro':           {'input': 0.435, 'output': 0.87,  'cacheWriteMul': 1.00, 'cacheReadMul': 0.0083, 'name': 'DeepSeek V4 Pro'},
-    'deepseek-v4-flash':         {'input': 0.14,  'output': 0.28,  'cacheWriteMul': 1.00, 'cacheReadMul': 0.20,  'name': 'DeepSeek V4 Flash'},
+    # 'peak' (official API rows ONLY — not the gateway mirrors): DeepSeek announced
+    # 2x pricing on ALL billing items during 09:00-12:00 + 14:00-18:00 Beijing time,
+    # effective date TBA (pricing page, 2026-07-31). Ships INERT: set
+    # effective_from (UTC epoch) when the date is announced. See lib/pricing/_peak.py.
+    'deepseek-v4-pro':           {'input': 0.435, 'output': 0.87,  'cacheWriteMul': 1.00, 'cacheReadMul': 0.0083, 'name': 'DeepSeek V4 Pro',
+                                  'peak': {'mul': 2.0, 'windows': [(9, 12), (14, 18)], 'tz_offset': 8, 'effective_from': None}},
+    'deepseek-v4-flash':         {'input': 0.14,  'output': 0.28,  'cacheWriteMul': 1.00, 'cacheReadMul': 0.20,  'name': 'DeepSeek V4 Flash',
+                                  'peak': {'mul': 2.0, 'windows': [(9, 12), (14, 18)], 'tz_offset': 8, 'effective_from': None}},
     # Meituan gateway Huawei-cloud mirror for DeepSeek V4 Flash — same pricing.
     'deepseek-v4-flash-huawei':  {'input': 0.14,  'output': 0.28,  'cacheWriteMul': 1.00, 'cacheReadMul': 0.20,  'name': 'DeepSeek V4 Flash (Huawei)'},
     'deepseek-v3.2':             {'input': 0.28,  'output': 0.41,  'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'DeepSeek V3.2'},  # ¥2/¥3 per 1M
@@ -93,7 +105,6 @@ MODEL_PRICING = {
     'deepseek-v3.2-baidu':       {'input': 0.28,  'output': 0.55,  'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'DeepSeek V3.2 (Baidu)'},    # ¥2/¥4 per 1M ≤32K
     'deepseek-v3.2-huawei':      {'input': 0.28,  'output': 0.55,  'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'DeepSeek V3.2 (Huawei)'},   # ¥2/¥4 per 1M ≤32K
     'deepseek-v3.2-doubao':      {'input': 0.28,  'output': 0.55,  'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'DeepSeek V3.2 (Doubao)'},   # ¥2/¥4 per 1M ≤32K
-    'deepseek-reasoner':         {'input': 0.55,  'output': 2.21,  'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'DeepSeek R1'},
     'LongCat-Flash-Thinking-2601': {'input': 0.0, 'output': 0.0,  'cacheWriteMul': 0,    'cacheReadMul': 0,    'name': 'LongCat Flash'},
     'LongCat-Flash-Chat-2603':      {'input': 0.28,'output': 1.10, 'cacheWriteMul': 0,    'cacheReadMul': 0,    'name': 'LongCat Flash Chat'},  # ¥2/¥8 per 1M
     # ── Qwen (DashScope) — converted from CNY at 7.24 ──

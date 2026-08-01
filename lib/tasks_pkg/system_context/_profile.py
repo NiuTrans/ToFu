@@ -116,10 +116,10 @@ def _append_user_profile_block(messages, block: str,
 
     content = messages[target_idx].get('content', '')
     if isinstance(content, str):
-        messages[target_idx]['content'] = [
-            {'type': 'text', 'text': content},
-            {'type': 'text', 'text': block},
-        ]
+        # Never fabricate a phantom empty text block (Kimi 400 "text content is empty").
+        _blocks = ([{'type': 'text', 'text': content}] if content.strip() else [])
+        _blocks.append({'type': 'text', 'text': block})
+        messages[target_idx]['content'] = _blocks
     elif isinstance(content, list):
         messages[target_idx]['content'] = list(content) + [
             {'type': 'text', 'text': block},
@@ -174,8 +174,9 @@ def _refresh_detail_block(messages, block: str | None,
 
     content = messages[target_idx].get('content', '')
     # Normalise to a list of blocks so we can surgically drop the stale one.
+    # Never fabricate a phantom empty text block (Kimi 400 "text content is empty").
     if isinstance(content, str):
-        blocks = [{'type': 'text', 'text': content}]
+        blocks = [{'type': 'text', 'text': content}] if content.strip() else []
     elif isinstance(content, list):
         blocks = list(content)
     else:

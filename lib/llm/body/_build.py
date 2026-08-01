@@ -13,6 +13,7 @@ from lib.llm_sanitize import (
     _fix_orphaned_tool_calls,
     _merge_consecutive_same_role,
     _sanitize_messages,
+    _strip_empty_text_blocks,
     _strip_non_api_fields,
 )
 from lib.log import get_logger
@@ -109,6 +110,10 @@ def build_body(model, messages, *, max_tokens=128000, temperature=1.0,
     if _pid.startswith('example-corp') or (not _pid and 'example-corp' in _lib.LLM_BASE_URL):
         _sanitize_messages(clean_messages)
 
+    # Strip phantom empty text blocks BEFORE the whole-content healers so a
+    # list left empty by the strip is claimed by them (Kimi 400 "text content
+    # is empty" — see _strip_empty_text_blocks).
+    _strip_empty_text_blocks(clean_messages)
     clean_messages = _fix_orphaned_tool_calls(clean_messages)
     clean_messages = _drop_empty_assistant_messages(clean_messages)
     clean_messages = _merge_consecutive_same_role(clean_messages)

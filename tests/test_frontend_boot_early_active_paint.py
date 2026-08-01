@@ -45,6 +45,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 
 import pytest
 
@@ -164,13 +165,7 @@ global.conversations = [{
   createdAt: OLD, updatedAt: OLD, activeTaskId: null, _fromCache: true,
 }];
 
-eval(fs.readFileSync(process.argv[2], 'utf8'));  // REAL core/conversations.js
-// Extracted leaf modules (pt_3879f00e decomposition): the cache-paint path
-// calls _applySettingsToConv (core/conv_apply_settings.js) + _hydrateImageBase64
-// (core/conv_image_hydrate.js), and the load path calls helpers from
-// core/pending_sync.js + core/conv_persist_helpers.js — none still live in
-// conversations.js. Eval them so the harness scope matches the shipped bundle.
-for (const extra of process.argv.slice(3)) eval(fs.readFileSync(extra, 'utf8'));
+for (const f of process.argv.slice(2)) eval(fs.readFileSync(f, 'utf8'));  // bundle-order sources via _conv_bundle_sources (incl. REAL core/conversations.js + every leaf it references)
 global.conversations = conversations;
 
 const out = [];
@@ -213,15 +208,19 @@ def _run(js_path: str) -> subprocess.CompletedProcess:
     harness = os.path.join(HERE, '_boot_early_active_paint_harness.js')
     with open(harness, 'w') as f:
         f.write(_HARNESS)
-    extra_js = [
-        os.path.join(JS_DIR, 'core', 'conv_apply_settings.js'),
-        os.path.join(JS_DIR, 'core', 'conv_image_hydrate.js'),
-        os.path.join(JS_DIR, 'core', 'pending_sync.js'),
-        os.path.join(JS_DIR, 'core', 'conv_persist_helpers.js'),
-    ]
+    # Eval the WHOLE conv family (conversations.js + every core/conv_* leaf
+    # + pending_sync) via the drift-proof family closure — hand-picked pin
+    # lists went stale at every slice (5 measured instances in one day:
+    # _serverConvCount, _setCacheVerifying, _scheduleConvVerifyRetry, …).
+    sys.path.insert(0, HERE)
+    from _conv_bundle_sources import conv_family_sources
+    override = None
+    if os.path.basename(js_path) != 'conversations.js':
+        override = {'core/conversations.js': js_path}
+    extra_js = conv_family_sources(override=override)
     try:
         return subprocess.run(
-            ['node', harness, js_path, *extra_js],
+            ['node', harness, *extra_js],
             capture_output=True, text=True, timeout=60,
         )
     finally:

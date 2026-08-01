@@ -860,6 +860,7 @@ def _exec_run_command(fn_args, base_path, conv_id, task_id, kwargs):
                               stdin_callback=kwargs.get('stdin_callback'),
                               task=kwargs.get('task'),
                               on_chunk=kwargs.get('on_chunk'),
+                              on_spawn=kwargs.get('on_spawn'),
                               cwd_sink=cwd_sink)
 
     # ★ Diff snapshot after command (only if we took one)
@@ -926,14 +927,15 @@ def execute_tool(fn_name, fn_args, base_path, conv_id=None, task_id=None, **kwar
 
 
 def execute_standalone_command(fn_name, fn_args, working_dir=None, stdin_callback=None,
-                               on_chunk=None):
+                               on_chunk=None, on_spawn=None):
     """Execute run_command without requiring a project path."""
     if fn_name == 'run_command':
         return tool_run_command(working_dir,
                                 fn_args.get('command', ''),
                                 fn_args.get('timeout', None),
                                 stdin_callback=stdin_callback,
-                                on_chunk=on_chunk)
+                                on_chunk=on_chunk,
+                                on_spawn=on_spawn)
     return f'Unknown tool: {fn_name}'
 
 

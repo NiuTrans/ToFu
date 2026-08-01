@@ -152,6 +152,21 @@ def _merge_segments_preserving_translations(fresh_segs, backend_segs):
     return backend_segs
 
 
+def _find_own_assistant_slot(messages, task_id):
+    """Last assistant message OWNED by ``task_id`` (provenance scan), else None.
+
+    Used when the tail no longer belongs to this task: the slot must be
+    located by WHO produced it, never by position (pt_bf93496e98b9441e).
+    """
+    if not task_id:
+        return None
+    for _m in reversed(messages):
+        if (isinstance(_m, dict) and _m.get('role') == 'assistant'
+                and _m.get('_taskId') == task_id):
+            return _m
+    return None
+
+
 def _merge_terminal_fields(fresh_tail, terminal_msg):
     """Graft the backend-OWNED terminal fields from ``terminal_msg`` onto the
     fresh DB tail IN PLACE (RENDER_CONTRACT Phase 4 §2.2).
@@ -168,6 +183,13 @@ def _merge_terminal_fields(fresh_tail, terminal_msg):
     for _f in _TERMINAL_OWNED_FIELDS:
         if _f in terminal_msg:
             fresh_tail[_f] = terminal_msg[_f]
+    # 'error' is OWNED, so its ABSENCE in ``terminal_msg`` is itself the
+    # verdict (the turn settled clean): a stale error on ``fresh_tail`` must
+    # converge to the verdict rather than survive the graft
+    # (pt_bf93496e98b9441e — a clean answer measured wearing another task's
+    # reaper error).
+    if 'error' not in terminal_msg:
+        fresh_tail.pop('error', None)
     if 'segments' in _TERMINAL_MERGE_EXCLUDED and 'segments' in terminal_msg:
         fresh_tail['segments'] = _merge_segments_preserving_translations(
             fresh_tail.get('segments'), terminal_msg.get('segments'))
@@ -709,9 +731,21 @@ def _sync_result_to_conversation(task, meta):
             if _by_id is not None and _by_id.get('role') == 'assistant':
                 last_msg = _by_id
         if last_msg is None:
-            last_msg = messages[-1]
+            # ★ PROVENANCE GUARD (pt_bf93496e98b9441e): a tail bubble carrying
+            #   a DIFFERENT task's _taskId belongs to that task — filling it
+            #   grafts THIS task's terminal state onto the other task's
+            #   tombstone. Measured live: a reaped task's error bubble
+            #   (appended one turn late) was adopted by the NEXT task's
+            #   successful sync, which inherited the stale error onto its
+            #   clean 'stop' answer. A client-minted placeholder carries NO
+            #   _taskId, so the legacy fill path is unaffected.
+            _tail = messages[-1]
+            if (_tail.get('role') == 'assistant'
+                    and not (_tail.get('_taskId')
+                             and _tail.get('_taskId') != task['id'])):
+                last_msg = _tail
 
-        if last_msg.get('role') != 'assistant':
+        if last_msg is None:
             # ── Guard: an aborted/superseded task must NOT append a new
             #   assistant slot ──
             # When the user clicks Stop → Regenerate, the regen handler
@@ -724,34 +758,58 @@ def _sync_result_to_conversation(task, meta):
             # doubled-context bug. Aborted tasks may only FILL an existing
             # trailing assistant slot, never create one.
             _abort_reason = task.get('_abort_reason', '')
-            if (task.get('aborted') or _abort_reason) and _abort_reason != 'stuck_no_progress':
+            if _abort_reason == 'stuck_no_progress':
+                # ── EXCEPTION: a reaper-wedged task OWNS its trailing user
+                #   turn ONLY while that turn is still the tail. If the conv
+                #   has moved on (a newer turn's prompt landed after the reap
+                #   but before this sync), appending here lands the error
+                #   bubble on the WRONG turn — and the next task's sync then
+                #   adopts the foreign bubble (pt_bf93496e98b9441e, the
+                #   ce514dce → ae7bbe38 error copy). Prefer this task's OWN
+                #   settled slot (an earlier sync of the same reap may already
+                #   have written it); append ONLY when the trailing user
+                #   message is still this task's own prompt; otherwise DROP —
+                #   the task_results terminal floor still resolves polls, and
+                #   no bubble beats a bubble on the wrong turn. The narrow
+                #   'stuck_no_progress' scope is asserted by
+                #   test_NC_reaped_task_guard_still_blocks_regenerate_truncation.
+                last_msg = _find_own_assistant_slot(messages, task['id'])
+                if last_msg is None:
+                    _imc = task.get('_initial_msg_count')
+                    if (messages[-1].get('role') == 'user'
+                            and (not isinstance(_imc, int)
+                                 or len(messages) == _imc)):
+                        logger.info('%s conv=%s reaped wedged task — appending '
+                                    'assistant error bubble for the unanswered '
+                                    'trailing turn', pfx, conv_id)
+                        last_msg = _new_assistant_slot(task)
+                        messages.append(last_msg)
+                    else:
+                        logger.warning('%s conv=%s reaped wedged task\'s trailing '
+                                       'turn is no longer the tail (msgs=%d, '
+                                       'initial=%s) — NOT appending the error '
+                                       'bubble onto a newer turn; the '
+                                       'task_results terminal floor still '
+                                       'resolves polls',
+                                       pfx, conv_id, len(messages), _imc)
+                        return
+            elif task.get('aborted') or _abort_reason:
                 logger.info('%s conv=%s Last message is role=%s and this task is '
                             'aborted (reason=%s) — dropping stale write instead of '
                             'appending a new assistant (prevents truncated-turn '
                             'resurrection)',
-                            pfx, conv_id, last_msg.get('role'),
+                            pfx, conv_id, messages[-1].get('role'),
                             _abort_reason or 'aborted')
                 return
-            # ── EXCEPTION: a reaper-wedged task (reason='stuck_no_progress')
-            #   OWNS its trailing user turn (it never got a reply) and is still
-            #   this conv's latest task (freshness guard above passed). This is
-            #   NOT a Stop→Regenerate truncation, so it MUST be allowed to
-            #   append an assistant error bubble answering that turn — otherwise
-            #   the conv shows a perpetual "waiting" with no error. The narrow
-            #   'stuck_no_progress' scope is asserted by
-            #   test_NC_reaped_task_guard_still_blocks_regenerate_truncation.
-            if _abort_reason == 'stuck_no_progress':
-                logger.info('%s conv=%s reaped wedged task — appending assistant '
-                            'error bubble for the unanswered trailing turn',
-                            pfx, conv_id)
-            # No trailing assistant message — append one. Build the slot via
-            # _new_assistant_slot so it ADOPTS the client-shipped
-            # _assistantMsgId as its _msgId (divergent-id duplicate-bubble
-            # root fix — see RENDER_CONTRACT §2.3 identity alignment).
-            logger.info('%s conv=%s Last message is role=%s, appending new assistant message',
-                       pfx, conv_id, last_msg.get('role'))
-            last_msg = _new_assistant_slot(task)
-            messages.append(last_msg)
+            else:
+                # No trailing assistant message — append one. Build the slot via
+                # _new_assistant_slot so it ADOPTS the client-shipped
+                # _assistantMsgId as its _msgId (divergent-id duplicate-bubble
+                # root fix — see RENDER_CONTRACT §2.3 identity alignment).
+                logger.info('%s conv=%s Last message is role=%s, appending new assistant message',
+                           pfx, conv_id, messages[-1].get('role'))
+                last_msg = _new_assistant_slot(task)
+                messages.append(last_msg)
 
         # ── Guard: don't overwrite with LESS content ──
         # The frontend may have already synced a fuller version via PUT
@@ -851,6 +909,14 @@ def _sync_result_to_conversation(task, meta):
                 last_msg['thinking'] = thinking
             if error:
                 last_msg['error'] = error
+            else:
+                # ★ A task settling with NO error must not leave a stale error
+                #   on its own message (pt_bf93496e98b9441e): the slot can
+                #   carry a transient mid-stream envelope, or — measured —
+                #   ANOTHER task's verdict that rode in via a shared bubble.
+                #   Terminal state is backend-authoritative: absence of an
+                #   error IS the verdict.
+                last_msg.pop('error', None)
 
         # Copy metadata fields that the frontend would normally set.
         # Terminal metadata is backend-authoritative — once the task reaches
@@ -1066,6 +1132,22 @@ def _sync_result_to_conversation(task, meta):
         _cas_succeeded = False
         search_text = build_search_text(messages)
         for _cas_attempt in range(MAX_TERMINAL_CAS):
+            # Stop→Regenerate self-heal: a superseded content-bearing fragment
+            # (no terminal reason) adjacent to this settle's answer must be
+            # stamped finishReason='aborted' here — not only on the next GET —
+            # or the aborted partial renders in completed chrome. Runs per
+            # attempt because a CAS-miss graft REPLACES `messages` with the
+            # fresh row, which needs the same mark. Mark-only (no delete /
+            # reindex), so it is cache-prefix-neutral.
+            if len(messages) >= 2:
+                from lib.conversations.reconcile import (
+                    mark_superseded_incomplete_fragments,
+                )
+                messages, _frags_marked = mark_superseded_incomplete_fragments(messages)
+                if _frags_marked:
+                    logger.info('%s conv=%s Marked %d superseded incomplete fragment(s) '
+                                'finishReason=aborted at terminal sync',
+                                pfx, conv_id, _frags_marked)
             messages_json = json_dumps_pg(messages)
             search_text = build_search_text(messages)
             now_ms = int(time.time() * 1000)
@@ -1108,7 +1190,14 @@ def _sync_result_to_conversation(task, meta):
             if not _fresh_messages:
                 break
             _fresh_tail = _fresh_messages[-1]
-            if (_fresh_tail.get('role') == 'assistant'
+            # ★ PROVENANCE (pt_bf93496e98b9441e): a fresh tail carrying a
+            #   DIFFERENT task's _taskId is that task's bubble — it is
+            #   neither a "frontend won" for THIS task nor a legal graft
+            #   target (grafting would graft this task's verdict onto the
+            #   other task's tombstone).
+            _fresh_tail_foreign = bool(_fresh_tail.get('_taskId')) \
+                and _fresh_tail.get('_taskId') != task['id']
+            if (_fresh_tail.get('role') == 'assistant' and not _fresh_tail_foreign
                     and len(_fresh_tail.get('content') or '') >= new_content_len
                     and len(_fresh_tail.get('thinking') or '') >= new_thinking_len
                     and not _is_floor_retry_residue(task, _fresh_tail)):
@@ -1123,13 +1212,31 @@ def _sync_result_to_conversation(task, meta):
                             pfx, conv_id, _cas_attempt + 1, MAX_TERMINAL_CAS)
                 break
             # Flaky-network case: updated_at moved but content did NOT win —
-            # graft our assembled assistant onto the fresh tail and retry.
-            # MERGE (not whole-dict replace): copy only the backend-OWNED
+            # graft our assembled assistant onto OUR slot in the fresh row and
+            # retry. MERGE (not whole-dict replace): copy only the backend-OWNED
             # terminal fields so a translation (translatedContent /
             # segments[].translatedText) committed onto the fresh tail in our
             # read→write window survives (RENDER_CONTRACT Phase 4 §2.2).
-            if _fresh_tail.get('role') == 'assistant':
-                _merge_terminal_fields(_fresh_tail, last_msg)
+            _graft = None
+            if _fresh_tail.get('role') == 'assistant' and not _fresh_tail_foreign:
+                _graft = _fresh_tail
+            elif _amid:
+                from lib.tasks_pkg.manager._events import find_message_by_id as _fmid
+                _gi, _gm = _fmid(_fresh_messages, _amid)
+                if _gm is not None and _gm.get('role') == 'assistant':
+                    _graft = _gm
+            if _graft is None:
+                _graft = _find_own_assistant_slot(_fresh_messages, task['id'])
+            if _graft is not None:
+                _merge_terminal_fields(_graft, last_msg)
+            elif task.get('_abort_reason') == 'stuck_no_progress':
+                # A reaped task whose own slot vanished between retries must
+                # NOT append its error bubble onto a moved-on tail (the same
+                # wrong-turn defect the first pass guards).
+                logger.warning('%s conv=%s reaped task found no own slot in the '
+                               'fresh row — not grafting/appending onto a '
+                               'foreign tail', pfx, conv_id)
+                break
             else:
                 _fresh_messages.append(last_msg)
             messages = _fresh_messages
@@ -1223,7 +1330,7 @@ def _sync_result_to_conversation(task, meta):
                               f'{pfx} conv={conv_id} ❌ Failed to sync result to conversation')
 
 
-def checkpoint_task_partial(task):
+def checkpoint_task_partial(task, force=False):
     """Persist the current in-flight task state to DB so it survives a server crash.
 
     Called after each tool-execution round in the orchestrator loop.
@@ -1232,14 +1339,24 @@ def checkpoint_task_partial(task):
 
     Uses status='running' so the frontend can distinguish a partial checkpoint
     from a final result (status='done'|'error').
+
+    ``force`` bypasses the "nothing meaningful yet" early return below. That
+    guard assumes prose is the only thing worth persisting, which is false for
+    a TOOL-ONLY round: a turn whose first act is a long ``run_command`` has
+    empty content AND empty thinking, so the guard would drop the very write
+    that makes the running round (and its deadline) recoverable after a
+    conversation switch. Callers pass force=True only when the round itself
+    carries state worth durably storing.
     """
     content_len = len(task.get('content') or '')
     thinking_len = len(task.get('thinking') or '')
     task_id_short = task['id'][:8]
     conv_id = task.get('convId', '')
 
-    # Don't bother checkpointing if there's nothing meaningful yet
-    if content_len == 0 and thinking_len == 0:
+    # Don't bother checkpointing if there's nothing meaningful yet.
+    # `force` (or a still-in-flight tool round) makes a tool-only turn
+    # checkpointable — see the docstring and `_has_inflight_round`.
+    if content_len == 0 and thinking_len == 0 and not force and not _has_inflight_round(task):
         return
 
     # ★ Merge checkpoint toolRounds for continue flow
@@ -1325,6 +1442,29 @@ def checkpoint_task_partial(task):
         )
 
 
+def _has_inflight_round(task) -> bool:
+    """True when the task holds at least one tool round that is STILL RUNNING.
+
+    The complement of ``lib.conversations.reconcile.has_real_round``, which
+    answers "is there a SETTLED round?". Both are needed and they must stay
+    distinct: a checkpoint has to preserve a round that has NOT settled yet
+    (that is the whole point of a checkpoint), while the ghost sweep must keep
+    treating an unsettled bodyless bubble as clutter.
+
+    Live statuses are the ones the executor assigns before a verdict exists:
+    the announce state, the execution state, and the three WAITING states
+    (approval / human guidance / stdin) — a command blocked on a human gate is
+    emphatically still in flight, and is exactly the case that runs longest.
+    """
+    rounds = (task.get('_checkpointToolRounds') or []) + (task.get('toolRounds') or [])
+    for r in rounds:
+        if isinstance(r, dict) and r.get('status') in (
+                'searching', 'executing', 'pending_approval',
+                'awaiting_human', 'awaiting_stdin'):
+            return True
+    return False
+
+
 def _sync_partial_to_conversation(task):
     """Write partial streaming state into the conversation's last assistant message.
 
@@ -1335,16 +1475,42 @@ def _sync_partial_to_conversation(task):
     object, the activeTaskId stash, or poll fallback.
 
     Terminal-only fields (finishReason, usage, toolSummary, cost) are withheld
-    while the turn is mid-stream, but ARE carried once the orchestrator has
-    computed the finish verdict (``task['finishReason']`` present) — so a
-    checkpoint that outlives a failed terminal persist (e.g. task_results write
-    threw under pool exhaustion) still leaves the message with a populated
-    finish-bar instead of the empty "model name only" bar. See the P1a block.
+    while the turn is mid-stream — INCLUDING the ~110-line window in
+    ``orchestrator/_finalize.py`` where ``task['finishReason']`` is already
+    stamped but ``task['status']`` is still ``'running'`` (the span holding the
+    blocking ``_generate_tool_summary`` call). Persisting a verdict there marks
+    a still-generating turn as settled, and the frontend answers that with a
+    duplicate assistant bubble.
+
+    They ARE carried once finalize is REALLY underway — the task reports a
+    terminal status (``lib/chat/terminal_gate.is_terminal_status``, the same
+    rule the poll + SSE snapshot transports use) or the
+    ``_finalize_started_at`` latch is set — so a checkpoint that outlives a
+    failed terminal persist still leaves a populated finish-bar instead of the
+    empty "model name only" bar. When the verdict is carried, ``_taskId`` is
+    written with it: a terminal field without its identity anchor is a row that
+    cannot be recognised as its own completed turn. See the P1a block.
     """
     conv_id = task.get('convId', '')
     content = task.get('content') or ''
     thinking = task.get('thinking') or ''
-    if not content and not thinking:
+    # ── Empty-turn skip ──
+    # Prose is NOT the only thing worth checkpointing. A turn whose first act is
+    # a long-running tool (a `run_command` build/test) has empty content AND
+    # empty thinking for its whole duration, yet its round carries live state —
+    # status, tStart, the execution deadline — that a mid-command reload or
+    # conversation switch must be able to project. For a conv-backed task this
+    # message row is the ONLY durable home for that round (task_results leaves
+    # tool_rounds NULL by design — see _tool_rounds_have_dedicated_home), so
+    # returning here dropped it on the floor entirely.
+    #
+    # NOTE the predicate is `has_inflight_round`, NOT the project-wide
+    # `has_real_round`: the latter means "SETTLED round" (status=='done' /
+    # results present) and returns False for the still-running round we are
+    # trying to preserve — using it here would be a vacuous guard that changes
+    # nothing. `has_real_round` must KEEP that strict meaning: the ghost sweep
+    # and tail classifier rely on it to decide a bodyless bubble is clutter.
+    if not content and not thinking and not _has_inflight_round(task):
         return
 
     # ── CARRIER GUARD (must mirror the terminal sync exactly) ──
@@ -1534,18 +1700,56 @@ def _sync_partial_to_conversation(task):
                 last_msg['_gitSha'] = git_sha
                 mutated = True
 
-            # ── P1a: carry the terminal finish verdict when it EXISTS ──
+            # ── P1a: carry the terminal finish verdict when finalize is REALLY underway ──
             # This sync normally withholds finishReason/usage/toolSummary
             # because they aren't final until the turn completes. But once the
-            # orchestrator HAS computed the verdict (task['finishReason'] is
-            # set), a checkpoint that fires before — or INSTEAD of — the
-            # terminal persist (e.g. the terminal persist's task_results write
-            # threw under pool exhaustion) is the only durable trace of it.
-            # Carrying it here means a crash-recovered partial already renders a
-            # populated finish-bar (finishReason + usage + cost) instead of the
-            # empty "model name only" bar. Guarded on presence, so a mid-stream
-            # checkpoint (no verdict yet) is byte-identical to before.
-            if task.get('finishReason'):
+            # orchestrator is genuinely finalizing, a checkpoint that fires
+            # before — or INSTEAD of — the terminal persist (e.g. the terminal
+            # persist's task_results write threw under pool exhaustion) is the
+            # only durable trace of the verdict. Carrying it means a
+            # crash-recovered partial renders a populated finish-bar
+            # (finishReason + usage + cost) instead of the empty
+            # "model name only" bar.
+            #
+            # ★ THE TRIGGER IS NOT `task.get('finishReason')` (2026-07-31).
+            #   orchestrator/_finalize.py stamps task['finishReason'] at L843
+            #   but flips task['status']='done' only at L954 — a 110-line
+            #   window holding the BLOCKING _generate_tool_summary LLM call.
+            #   The 5s checkpoint timer lands inside it routinely, so a
+            #   presence-only trigger PERSISTED a terminal verdict onto a turn
+            #   that was still generating. The frontend reads finishReason as
+            #   "this turn settled": assistantTailIsPriorTurn then classifies
+            #   the live bubble as a prior turn and connectToTask mints a
+            #   SECOND assistant bubble — and because this row is in the DB, a
+            #   reload reproduces it instead of clearing it.
+            #
+            #   `_finalize_started_at` is stamped at L953 — AFTER that window
+            #   and one line before the terminal flip — so it admits exactly
+            #   the "finalize is really underway" case this block was written
+            #   for, and excludes the window that mints the contradiction.
+            #   The terminal-status test comes from lib/chat/terminal_gate.py
+            #   (the same rule the poll + SSE snapshot transports consume)
+            #   rather than a third hand-written copy of the timing assumption.
+            from lib.chat.terminal_gate import is_terminal_status as _is_terminal
+            _verdict_is_final = bool(
+                _is_terminal(task.get('status'))
+                or task.get('_finalize_started_at'))
+            if task.get('finishReason') and _verdict_is_final:
+                if last_msg.get('finishReason') != task['finishReason']:
+                    last_msg['finishReason'] = task['finishReason']
+                    mutated = True
+                # ★ ATOMIC IDENTITY ANCHOR. A terminal verdict without
+                #   `_taskId` is a row that cannot be recognised as its OWN
+                #   completed turn: the frontend reducer's identity arm needs
+                #   _taskId to fire, so `{finishReason, no _taskId}` reads as
+                #   somebody else's finished turn and mints a duplicate bubble.
+                #   Historically ONLY the terminal sync
+                #   (_sync_result_to_conversation) stamped it, so every row
+                #   this block wrote was anchor-less. The two must land
+                #   together or not at all.
+                if task.get('id') and not last_msg.get('_taskId'):
+                    last_msg['_taskId'] = task['id']
+                    mutated = True
                 if last_msg.get('finishReason') != task['finishReason']:
                     last_msg['finishReason'] = task['finishReason']
                     mutated = True

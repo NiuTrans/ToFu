@@ -520,8 +520,7 @@ class TestAnthropicSignatureCapture:
         body = {'model': 'aws.claude-opus-4.8', 'messages': []}
         acc = SSEAccumulator(
             body, 'trace', RawSSEDumper('aws.claude-opus-4.8', 'trace', body),
-            None, _time.time(),
-            anthropic_translator=AnthropicSSETranslator(model='aws.claude-opus-4.8'))
+            AnthropicSSETranslator(model='aws.claude-opus-4.8'), _time.time())
         lines = [
             {'type': 'content_block_start', 'index': 0,
              'content_block': {'type': 'thinking', 'thinking': ''}},

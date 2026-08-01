@@ -19,7 +19,7 @@ Public surface
 --------------
   - ``prepare_request(body, *, attempt, log_prefix, api_key, base_url,
     extra_headers) -> RequestPlan`` — the identical pre-flight (cache
-    breakpoints, extended-TTL header, Codex translation, header build,
+    breakpoints, extended-TTL header, wire-protocol translation, header build,
     URL resolution, RawSSEDumper start).
   - ``classify_status_error(status_code, err_text, *, body, log_prefix,
     raw_dumper)`` — shared non-200 handling (delegates to
@@ -209,9 +209,8 @@ class RequestPlan:
     body: dict
     trace_id: str
     raw_dumper: RawSSEDumper
-    codex_translator: Any
+    wire_translator: Any
     t0: float
-    anthropic_translator: Any = None
 
 
 def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
@@ -219,8 +218,9 @@ def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
                     api_protocol='openai', oauth='') -> RequestPlan:
     """Identical pre-flight for both transports.
 
-    Mutates ``body`` in place (cache breakpoints, ``_task_id`` pop, Codex
-    translation) exactly as the inline code did, then returns the plan.
+    Mutates ``body`` in place (cache breakpoints, ``_task_id`` pop,
+    wire-protocol translation) exactly as the inline code did, then returns
+    the plan.
     """
     # Read the latch key NON-destructively and keep it on the body for the
     # WHOLE task life. The streaming retry loop re-feeds the SAME body dict to
@@ -259,15 +259,31 @@ def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
         from lib.oauth.outbound import resolve_oauth_request
         api_key, extra_headers, body = resolve_oauth_request(oauth, body, extra_headers)
 
-    # Codex OAuth translation
-    codex_translator = None
-    anthropic_translator = None
-    if base_url and 'codex' in base_url and 'chatgpt.com' in base_url:
-        from lib.oauth.codex import codex_translate_request, CodexSSETranslator
-        body = codex_translate_request(body)
-        codex_translator = CodexSSETranslator(model=body.get('model', ''))
-        url = f'{base_url.rstrip("/")}/responses'
-        logger.debug('%s [Codex] Translated request for Responses API', log_prefix)
+    # Wire-protocol translation at the HTTP boundary. SINGLE GATE:
+    # ``api_protocol`` (provider config; the dispatcher coerces
+    # oauth='codex' slots to 'responses' — the Codex backend speaks ONLY
+    # Responses). The canonical OpenAI body is converted per protocol and
+    # a stateful translator rides the plan to convert the SSE stream back.
+    wire_translator = None
+    if api_protocol == 'responses':
+        from lib.llm.responses_outbound import (
+            ResponsesSSETranslator,
+            openai_body_to_responses,
+            responses_url,
+        )
+        # oauth='codex' selects the Codex dialect (instructions/include/
+        # dropped sampling params); every other Responses provider gets
+        # the generic profile.
+        _profile = 'codex' if oauth == 'codex' else 'default'
+        body, _resp_reverse = openai_body_to_responses(
+            body, profile=_profile, stream=True)
+        wire_translator = ResponsesSSETranslator(model=body.get('model', ''))
+        # Truncated (64-char) tool names echo back from the model — the
+        # per-request reverse map restores them before tool dispatch.
+        wire_translator.tool_name_reverse = _resp_reverse
+        url = responses_url(base_url)
+        logger.debug('%s [Responses] Translated request for Responses API '
+                     '(profile=%s)', log_prefix, _profile)
     elif api_protocol == 'anthropic':
         from lib.llm.anthropic_outbound import (
             AnthropicSSETranslator, anthropic_messages_url,
@@ -275,18 +291,24 @@ def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
         )
         _model_name = body.get('model', '')
         body = openai_body_to_anthropic(body)
-        anthropic_translator = AnthropicSSETranslator(model=_model_name)
+        wire_translator = AnthropicSSETranslator(model=_model_name)
         url = anthropic_messages_url(base_url)
         if oauth == 'claude':
-            from lib.oauth.outbound import claude_oauth_url
+            from lib.oauth.outbound import apply_claude_cloak, claude_oauth_url
             url = claude_oauth_url(url)
+            # 2026 cloaking (billing header / static prompt / tool rename) at
+            # the Anthropic-body boundary; the per-request reverse map rides
+            # the translator so response tool names are restored.
+            body, _cloak_reverse = apply_claude_cloak(body)
+            wire_translator.tool_name_reverse = _cloak_reverse
         logger.debug('%s [Anthropic] Translated request for Messages API', log_prefix)
     else:
         # OpenAI path serialises `body` verbatim (session.post(json=body)), so
         # the internal latch key must be removed HERE — the single serialization
         # boundary — rather than popped early (which broke the retry-stable
-        # latch, see above). The Anthropic/Codex branches rebuilt `body` from an
-        # allowlist that never included _task_id, so this only matters here.
+        # latch, see above). The Anthropic/Responses branches rebuild `body`
+        # from an allowlist that never included _task_id, so this only
+        # matters here.
         body.pop('_task_id', None)
         url = f'{base_url.rstrip("/")}/chat/completions' if base_url else chat_url()
 
@@ -296,7 +318,7 @@ def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
                      len(body.get('messages', [])), 'yes' if body.get('tools') else 'no')
 
     trace_id = uuid.uuid4().hex
-    if anthropic_translator is not None:
+    if api_protocol == 'anthropic':
         from lib.llm.anthropic_outbound import anthropic_headers
         hdrs = anthropic_headers(api_key, extra_headers)
         if oauth == 'claude':
@@ -446,8 +468,8 @@ def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
     _maybe_dump_cache_probe(body, _task_id_for_latch, log_prefix, routing=_routing)
 
     return RequestPlan(url=url, hdrs=hdrs, body=body, trace_id=trace_id,
-                       raw_dumper=raw_dumper, codex_translator=codex_translator,
-                       t0=t0, anthropic_translator=anthropic_translator)
+                       raw_dumper=raw_dumper, wire_translator=wire_translator,
+                       t0=t0)
 
 
 def classify_status_error(status_code, err_text, *, body, log_prefix, raw_dumper):
@@ -475,7 +497,7 @@ class SSEAccumulator:
 
     Usage::
 
-        acc = SSEAccumulator(body, trace_id, raw_dumper, codex_translator,
+        acc = SSEAccumulator(body, trace_id, raw_dumper, wire_translator,
                              t0, log_prefix=..., on_thinking=..., ...)
         for raw_line in transport_lines():
             if abort_check and abort_check():
@@ -486,14 +508,13 @@ class SSEAccumulator:
         msg, finish_reason, usage = acc.finalize(resp_trace=...)
     """
 
-    def __init__(self, body, trace_id, raw_dumper, codex_translator, t0, *,
+    def __init__(self, body, trace_id, raw_dumper, wire_translator, t0, *,
                  url='', log_prefix='', on_thinking=None, on_content=None,
-                 on_tool_call_ready=None, anthropic_translator=None):
+                 on_tool_call_ready=None):
         self.body = body
         self.trace_id = trace_id
         self.raw_dumper = raw_dumper
-        self.codex_translator = codex_translator
-        self.anthropic_translator = anthropic_translator
+        self.wire_translator = wire_translator
         self.t0 = t0
         self.url = url
         self.log_prefix = log_prefix
@@ -567,13 +588,10 @@ class SSEAccumulator:
             return False
         self.chunk_count += 1
 
-        # Codex SSE translation
-        if self.codex_translator is not None:
-            return self._feed_codex(data_str)
-
-        # Anthropic SSE translation → OpenAI chunks
-        if self.anthropic_translator is not None:
-            return self._feed_anthropic(data_str)
+        # Non-OpenAI wire protocols (responses / anthropic) — translate
+        # the payload into OpenAI chunks first, then accumulate sharedly.
+        if self.wire_translator is not None:
+            return self._feed_translated(data_str)
 
         try:
             chunk = json.loads(data_str)
@@ -623,45 +641,35 @@ class SSEAccumulator:
 
         self._handle_delta(delta)
 
-    def _feed_anthropic(self, data_str) -> bool:
-        """Translate one Anthropic SSE payload into OpenAI chunks + accumulate.
+    def _feed_translated(self, data_str) -> bool:
+        """Translate one non-OpenAI SSE payload via the wire translator.
+
+        Handles both dict-emitting translators (ResponsesSSETranslator,
+        AnthropicSSETranslator) and legacy JSON-string emitters, routing
+        every translated chunk through the SAME ``_process_openai_chunk``
+        path the main OpenAI path uses. Sharing that one accumulator keeps
+        content / thinking / tool-call-delta accumulation,
+        ``on_tool_call_ready`` firing, and ``usage`` handling byte-identical
+        across every provider — the Codex path previously re-implemented
+        the accumulation and, in doing so, (1) never fired
+        ``on_tool_call_ready`` (no incremental multi-tool prefetch) and
+        (2) gated content/thinking *accumulation* on the callback being
+        present (``if _c and self.on_content``), silently dropping the
+        whole response for a caller with no streaming callback.
 
         Returns True when the translator emits the ``[DONE]`` sentinel.
         """
-        for chunk in self.anthropic_translator.translate(data_str):
-            if chunk == '[DONE]':
+        for item in self.wire_translator.translate(data_str):
+            if item == '[DONE]':
                 self.saw_done = True
                 return True
-            self._process_openai_chunk(chunk)
-        return False
-
-    def _feed_codex(self, data_str) -> bool:
-        """Translate a Codex Responses-API SSE payload and accumulate.
-
-        The Codex translator emits OpenAI-shaped ``chat.completion.chunk``
-        JSON strings, so route them through the SAME ``_process_openai_chunk``
-        path the main OpenAI and Anthropic (``_feed_anthropic``) paths use.
-        Sharing that one accumulator keeps content / thinking / tool-call-delta
-        accumulation, ``on_tool_call_ready`` firing, and ``usage`` handling
-        byte-identical across every provider — the Codex path previously
-        re-implemented the accumulation and, in doing so, (1) never fired
-        ``on_tool_call_ready`` (no incremental multi-tool prefetch) and
-        (2) gated content/thinking *accumulation* on the callback being present
-        (``if _c and self.on_content``), silently dropping the whole response
-        for a caller with no streaming callback.
-
-        Returns True when ``[DONE]`` was seen inside the translation.
-        """
-        for t_str in self.codex_translator.translate(data_str):
-            if t_str == '[DONE]':
-                self.saw_done = True
-                return True
-            try:
-                t_chunk = json.loads(t_str)
-            except Exception as e:
-                logger.debug('[LLM] Codex SSE chunk parse failed: %s', e)
-                continue
-            self._process_openai_chunk(t_chunk)
+            if isinstance(item, str):
+                try:
+                    item = json.loads(item)
+                except Exception as e:
+                    logger.debug('[LLM] translated SSE chunk parse failed: %s', e)
+                    continue
+            self._process_openai_chunk(item)
         return False
 
     def _handle_sse_error(self, eo):

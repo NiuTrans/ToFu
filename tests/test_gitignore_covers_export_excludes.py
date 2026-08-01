@@ -68,7 +68,46 @@ _EXTRA_KEEPERS = {
     # export-excluded (uploads/ is an ALWAYS_EXCLUDE dir) yet legitimately
     # tracked — the canonical keep-the-dir/drop-its-contents pattern.
     'uploads/images/.gitkeep',
+    # ── Internal cost-audit tools (scripts/ is opensource-excluded) ──────────
+    # These are NOT in export._OPENSOURCE_KEEP_FILES on purpose: that set means
+    # "restore into the PUBLIC build", and neither tool is something the public
+    # build runs — they read our own rotated logs and quote our own gateway.
+    # They ARE deliberately tracked, with the reasoning recorded in .gitignore
+    # right beside their `!/scripts/…` negations: the measurement DISCIPLINE
+    # each one encodes is the deliverable, and an untracked copy means the next
+    # cost audit goes back to throwaway one-liners and re-makes the errors that
+    # took two passes to find. So: tracked, private, and registered here.
+    'scripts/cache_waste_report.py',   # cache-waste distribution; pinned by
+                                       # tests/test_cache_waste_report.py
+    'scripts/cache_ab_probe.py',       # second-path A/B control; names our own
+                                       # gateway + an internal report doc
 }
+
+# ── The pet's RAW MASTER ART: tracked on purpose, never published ────────────
+# static/icons/_gen/tofu-pet/_candidates/ai/*.png — the 1024² AI-generated poses
+# that process_ai_frames.py turns into the 22 shipped frames.
+#
+# WHY THEY MUST STAY TRACKED (the constraint that rules out `git rm --cached`):
+# they are the pipeline's ONLY input. The 2026-07-31 size-constancy fix works by
+# deriving ONE global scale + a shared body/foot anchor from measurements taken
+# across ALL masters — so the invariant is only reproducible while they exist.
+# Untrack them and the pipeline cannot be re-run from a clean clone: nobody can
+# regenerate a frame, verify `--check`, or re-derive the scale, and the guards in
+# tests/test_frontend_pet_light_direction.py lose their subject permanently
+# rather than skipping in one tree.
+#
+# WHY THEY MUST NOT BE PUBLISHED: 5.7MB of review-only master art (export.py
+# lists `_candidates` in ALWAYS_EXCLUDE_DIRS for exactly this reason). The public
+# build ships the finished frames; it has no use for the raws.
+#
+# Both constraints hold at once, which is precisely what this keeper list is for.
+# Registered as a PREFIX rather than 16 hand-copied paths: adding or re-rendering
+# a pose must not require editing this file, and every path under the prefix
+# carries the identical justification. The prefix is anchored to the one subtree
+# (not a bare `_candidates` glob), so it cannot silently absorb an unrelated dir.
+_KEEPER_PREFIXES = (
+    'static/icons/_gen/tofu-pet/_candidates/',
+)
 
 
 def _tracked_files():
@@ -110,10 +149,22 @@ def _opensource_excluded(export, rel):
     return False
 
 
+def _is_keeper(export, rel):
+    """True if ``rel`` is a sanctioned tracked-but-export-excluded file.
+
+    Exact paths come from ``_EXTRA_KEEPERS`` + ``export._OPENSOURCE_KEEP_FILES``;
+    ``_KEEPER_PREFIXES`` covers whole subtrees whose members all share one
+    justification (see the pet-master note). Prefixes are matched on the '/'-
+    terminated form so 'a/b/' can never match a sibling file named 'a/bc'.
+    """
+    if rel in _keeper_set(export):
+        return True
+    return any(rel.startswith(p) for p in _KEEPER_PREFIXES)
+
+
 def _offenders(export, tracked):
-    keepers = _keeper_set(export)
     return [f for f in tracked
-            if f not in keepers and _opensource_excluded(export, f)]
+            if not _is_keeper(export, f) and _opensource_excluded(export, f)]
 
 
 def _require_git_repo():
@@ -164,17 +215,54 @@ def test_keepers_are_actually_tracked_and_excluded():
         '\n  '.join(f'{k}: {why}' for k, why in stale))
 
 
+def test_keeper_prefixes_are_live_and_narrow():
+    """A keeper PREFIX must still cover real tracked-and-excluded files.
+
+    A prefix is a blanket permission, so it needs the same staleness discipline
+    as an exact path — otherwise a subtree that was deleted (or that export.py
+    stopped excluding) leaves behind a rule that would silently absorb anything
+    later dropped at that path. Asserting both halves keeps it honest: the
+    prefix must match at least one tracked file, and every file it matches must
+    genuinely be export-excluded (i.e. the prefix is not over-reaching into
+    shippable territory).
+    """
+    _require_git_repo()
+    export = pytest.importorskip('export', reason='export.py not shipped')
+    tracked = _tracked_files()
+    for p in _KEEPER_PREFIXES:
+        assert p.endswith('/'), (
+            f'keeper prefix {p!r} must end with "/" — an unterminated prefix '
+            'also matches sibling paths that merely start with the same text')
+        covered = [f for f in tracked if f.startswith(p)]
+        assert covered, (
+            f'keeper prefix {p!r} covers no tracked file — dead blanket '
+            'permission; remove it rather than leaving it to absorb whatever '
+            'lands at that path next')
+        shippable = [f for f in covered if not _opensource_excluded(export, f)]
+        assert not shippable, (
+            f'keeper prefix {p!r} covers files that are NOT export-excluded, so '
+            f'it is granting permission it does not need: {shippable[:5]}')
+
+
 def test_neuter_guard_has_teeth():
     """Poison the keeper set to EMPTY → the guard must fail (export.py + CLAUDE.md
     are genuinely tracked-and-excluded). Proves the assertion cross-checks the
-    real index against real export rules, not a tautology that always passes."""
+    real index against real export rules, not a tautology that always passes.
+
+    The prefix list is emptied TOO. Leaving it populated would let the neuter
+    pass while the guard was in fact still consulting a live blanket permission
+    — i.e. the neuter would prove less than it claims, which is how a poisoned
+    run comes back green for the wrong reason.
+    """
     _require_git_repo()
     export = pytest.importorskip('export', reason='export.py not shipped')
     tracked = _tracked_files()
 
     real_extra = _EXTRA_KEEPERS.copy()
     real_keep = set(export._OPENSOURCE_KEEP_FILES)
+    real_prefixes = tuple(_KEEPER_PREFIXES)
     globals()['_EXTRA_KEEPERS'] = set()
+    globals()['_KEEPER_PREFIXES'] = ()
     export._OPENSOURCE_KEEP_FILES = set()
     try:
         offenders = _offenders(export, tracked)
@@ -184,8 +272,36 @@ def test_neuter_guard_has_teeth():
             'no longer excludes export.py/CLAUDE.md).')
     finally:
         globals()['_EXTRA_KEEPERS'] = real_extra
+        globals()['_KEEPER_PREFIXES'] = real_prefixes
         export._OPENSOURCE_KEEP_FILES = real_keep
     # Restored: real run is clean again.
+    assert not _offenders(export, tracked)
+
+
+def test_neuter_keeper_prefix_is_load_bearing():
+    """Empty ONLY the prefix list → the pet masters must resurface as offenders.
+
+    Distinct from the neuter above, which empties everything at once and so
+    cannot tell WHICH mechanism did the work. This proves the prefix specifically
+    is what covers the 16 raw masters, so a future edit that drops it fails here
+    with a pointed message instead of silently re-opening the drift.
+    """
+    _require_git_repo()
+    export = pytest.importorskip('export', reason='export.py not shipped')
+    tracked = _tracked_files()
+
+    real_prefixes = tuple(_KEEPER_PREFIXES)
+    globals()['_KEEPER_PREFIXES'] = ()
+    try:
+        offenders = _offenders(export, tracked)
+        assert offenders, (
+            'emptying the keeper PREFIX list produced no offenders — the prefix '
+            'mechanism is not load-bearing (are the masters still tracked?)')
+        assert all('_candidates/' in o for o in offenders), (
+            'the prefix should cover exactly the master-art subtree; other '
+            f'offenders appeared, so the exact-path keepers have drifted: {offenders[:5]}')
+    finally:
+        globals()['_KEEPER_PREFIXES'] = real_prefixes
     assert not _offenders(export, tracked)
 
 
@@ -193,7 +309,9 @@ def main():
     print('\n═══ export-exclude drift-guard ═══\n')
     for fn in (test_no_tracked_file_is_opensource_excluded,
                test_keepers_are_actually_tracked_and_excluded,
-               test_neuter_guard_has_teeth):
+               test_keeper_prefixes_are_live_and_narrow,
+               test_neuter_guard_has_teeth,
+               test_neuter_keeper_prefix_is_load_bearing):
         try:
             fn()
             print('  \033[32m✓\033[0m', fn.__name__)

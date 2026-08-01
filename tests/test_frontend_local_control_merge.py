@@ -126,6 +126,11 @@ _SHIPPED_SYMBOLS = (
     # (the pre-detection floor, a failed status call, the detected `download`
     # state), so the renderers cannot be evaluated without it.
     "_lcBrowserDownload", "_lcPaintFloor",
+    # The desktop download LINKS are likewise authored once and reached from
+    # both install branches (local_source / remote) via the renderers — this
+    # splice drifted when the helper was extracted and the whole suite went
+    # red on ReferenceError, which is exactly the drift it exists to catch.
+    "_lcDownloadLinks", "_lcFmtSize",
 )
 
 
@@ -218,21 +223,32 @@ HARNESS = textwrap.dedent("""
     // alongside setup_state (routes/api_v1/desktop.py).
     const DL = 'https://github.com/rangehow/ToFu/releases/latest';
     const SRV = 'https://tofu.example.com';
+    // What the backend's `downloads` looks like once the server hosts the
+    // artifact itself: an ABSOLUTE same-origin URL (built from the request's
+    // own host), plus size + a hosted marker the UI turns into a badge.
+    const DLS = [{{ os: 'windows', arch: 'x86_64', label: 'Windows installer',
+                   filename: 'Tofu-Setup-0.15.2-win64.exe',
+                   url: SRV + '/api/v1/desktop/download/Tofu-Setup-0.15.2-win64.exe',
+                   hosted: 'server', size: 115822886 }}];
     const desktopStates = ['connected', 'tray', 'local_source', 'remote'];
     const desktop = {{}};
     for (const st of desktopStates) {{
       document.getElementById('lcDesktopSetup').innerHTML = '';
       _lcRenderDesktop({{ connected: st === 'connected', setup_state: st,
-                         download_url: DL, server_url: SRV }});
+                         download_url: DL, server_url: SRV, downloads: DLS }});
       const el = document.getElementById('lcDesktopSetup');
       const dlA = el.querySelector('a[href]');
       const dsw = document.getElementById('lcDesktopSwitch');
+      const hostedEl = el.querySelector('.lc-dl-hosted');
       desktop[st] = {{
         steps: el.querySelectorAll('.lc-step').length,
         text: el.textContent.trim(),
         hasMintButton: !!el.querySelector('#lcMintBtn'),
         // A real, clickable link the user can follow — not prose.
         downloadHref: dlA ? dlA.getAttribute('href') : '',
+        // The per-platform direct links (vs the releases-page escape hatch).
+        directCount: el.querySelectorAll('a.lc-dl-direct').length,
+        hostedText: hostedEl ? hostedEl.textContent.trim() : '',
         dotConnected: !!document.querySelector(
           '#lcDesktopStatus .browser-status-dot.connected'),
         // Can the user flip this on right now, and does the row explain
@@ -588,25 +604,51 @@ def test_the_minted_line_carries_the_server_address():
 
 
 @pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
+def test_a_server_hosted_entry_shows_where_the_file_comes_from():
+    """A download served by THIS server must say so, and name its size.
+
+    Server-hosting exists so the install does not depend on the public
+    GitHub network. Silently rendering it identically to a GitHub link
+    would hide the one fact that explains why it is fast and reliable —
+    and a 115 MB installer with no size shown is its own bad surprise.
+    """
+    out = _run(_shipped())["desktop"]
+    assert out["remote"]["directCount"] >= 1, (
+        "a downloads payload must render per-platform direct links")
+    assert out["remote"]["hostedText"], (
+        "a server-hosted artifact renders no provenance badge — the user "
+        "cannot tell it downloads from this server rather than GitHub")
+    assert "MB" in out["remote"]["text"], (
+        "the artifact size must appear next to the download")
+
+
+@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
 def test_NEUTER_stripping_the_download_link_is_caught():
-    """Drop the anchor → the remote user is told to install with no link."""
+    """No links helper output → told to install with no way to get the app."""
     out = _run(_shipped(
-        lambda s: s.replace("? '<p class=\"lc-substep\"><a class=\"lc-dl-link\"",
-                            "? '<p class=\"lc-substep\"><span class=\"lc-dl-link\"")
+        lambda s: s.replace("function _lcDownloadLinks(d) {\n  var page",
+                            "function _lcDownloadLinks(d) {\n  return '';\n  var page")
     ))["desktop"]
     assert out["remote"]["downloadHref"] == "", (
         "NEUTER did not remove the followable link")
 
 
 @pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
-def test_NEUTER_hiding_the_local_source_link_is_caught():
-    """Strip the local_source anchor → the dead sentence is back."""
+def test_NEUTER_dropping_the_platform_matched_links_is_caught():
+    """Lose the direct row → only the five-asset releases page remains.
+
+    The whole point of `downloads` is one click on the file THIS machine
+    takes; a regression that empties the row while keeping the page anchor
+    must not pass silently — the UI would still LOOK like it offers help.
+    """
     out = _run(_shipped(
-        lambda s: s.replace('id="lcDesktopDownloadSrc" href="',
-                            'id="lcDesktopDownloadSrc" data-href="')
+        lambda s: s.replace("if (picks.length) {", "if (false && picks.length) {")
     ))["desktop"]
-    assert out["local_source"]["downloadHref"] == "", (
-        "NEUTER did not remove the local_source link")
+    assert out["local_source"]["directCount"] == 0, (
+        "NEUTER did not remove the platform-matched direct links")
+    assert out["local_source"]["downloadHref"].startswith(("http://", "https://")), (
+        "the escape-hatch page link must survive — the NEUTER targets the "
+        "direct row, not the whole instruction")
 
 
 @pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")

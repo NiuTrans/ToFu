@@ -30,6 +30,31 @@ logger = get_logger(__name__)
 api_v1_oauth_bp = Blueprint('api_v1_oauth', __name__)
 
 
+# provider → the API host its subscription traffic targets (egress probe key)
+_PROVIDER_EGRESS_HOST = {
+    'claude': 'api.anthropic.com',
+    'codex': 'chatgpt.com',
+}
+
+
+def _with_egress_state(status: dict, provider: str, user_id: str) -> dict:
+    """Attach the desktop-egress state to one provider's status payload.
+
+    NEVER probes inline (page-load path, design §6.2 A4) — egress_status
+    reads the 300s probe cache only and fires a background warm-up.
+    """
+    host = _PROVIDER_EGRESS_HOST.get(provider)
+    if not host:
+        return status
+    try:
+        from lib.desktop.egress import egress_status
+        status = dict(status)
+        status['egress'] = egress_status(host, user_id=user_id)
+    except Exception as e:
+        logger.debug('[OAuth.v1] egress status failed for %s: %s', provider, e)
+    return status
+
+
 @api_v1_oauth_bp.route('/api/v1/oauth/status', methods=['GET'])
 @require_auth
 @api_meta(
@@ -45,13 +70,20 @@ api_v1_oauth_bp = Blueprint('api_v1_oauth', __name__)
 def oauth_status():
     try:
         from lib.oauth.manager import get_all_oauth_status, get_oauth_status
+        from .auth import current_auth
+        _auth = current_auth()
+        _uid = (_auth.user_id
+                if _auth and getattr(_auth, 'user_id', '') else '')
 
         provider = request.args.get('provider', '')
         if provider:
             if provider not in ('claude', 'codex'):
                 return api_bad_request('Invalid provider', field='provider')
-            return jsonify(get_oauth_status(provider))
-        return jsonify(get_all_oauth_status())
+            return jsonify(_with_egress_state(
+                get_oauth_status(provider), provider, _uid))
+        all_status = get_all_oauth_status()
+        return jsonify({p: _with_egress_state(s, p, _uid)
+                        for p, s in all_status.items()})
     except Exception as e:
         logger.error('[OAuth.v1] status check failed: %s', e, exc_info=True)
         return api_internal_error(e, source='api_v1.oauth.status')
@@ -108,6 +140,91 @@ def oauth_test():
                 'blocked': True, 'detail': str(e)[:200],
             }
     return jsonify(results)
+
+
+# ── Egress agent pin selector (multi-agent deployments) ─────────────
+
+
+def _pins_path() -> str:
+    from lib.config_dir import config_path
+    return config_path('oauth_egress_agents.json')
+
+
+@api_v1_oauth_bp.route('/api/v1/oauth/egress-agent', methods=['GET'])
+@require_auth
+@api_meta(
+    summary='Egress agent pin state + online agents',
+    description=(
+        'Returns ``{pinned, agents}`` — the caller\'s pinned desktop egress '
+        'agent and the online agents (with capabilities) eligible for '
+        'subscription egress routing.'
+    ),
+    tags=['capabilities'],
+)
+def oauth_egress_agent_get():
+    try:
+        from lib.desktop import list_agents
+        from lib.desktop.egress import _pinned_agent
+        from lib.json_store import read_json
+        from .auth import current_auth
+        auth = current_auth()
+        uid = (auth.user_id if auth and getattr(auth, 'user_id', '') else '')
+        pinned = _pinned_agent(uid)
+        agents = [
+            {'agent_id': a.get('agent_id'), 'name': a.get('name'),
+             'platform': a.get('platform'),
+             'capabilities': a.get('capabilities') or {},
+             'online': a.get('online', False)}
+            for a in list_agents(user_id=uid or None)
+        ]
+        return jsonify({'pinned': pinned, 'agents': agents})
+    except Exception as e:
+        logger.error('[OAuth.v1] egress-agent GET failed: %s', e, exc_info=True)
+        return api_internal_error(e, source='api_v1.oauth.egress_agent')
+
+
+@api_v1_oauth_bp.route('/api/v1/oauth/egress-agent', methods=['POST'])
+@require_auth
+@api_meta(
+    summary='Pin the desktop egress agent for this user',
+    description=(
+        'Body ``{agent_id}`` — pins the caller\'s subscription egress to one '
+        'online agent. Empty agent_id clears the pin. Persisted to '
+        '``data/config/oauth_egress_agents.json`` keyed by user.'
+    ),
+    tags=['capabilities'],
+)
+def oauth_egress_agent_set():
+    try:
+        from flask import request as _req
+        from lib.json_store import update_json_atomic
+        from .auth import current_auth
+        auth = current_auth()
+        uid = (auth.user_id if auth and getattr(auth, 'user_id', '') else '')
+        body = _req.get_json(silent=True) or {}
+        agent_id = str(body.get('agent_id') or '').strip()
+        if agent_id:
+            from lib.desktop import list_agents
+            known = {a.get('agent_id') for a in list_agents(user_id=uid or None)}
+            if agent_id not in known:
+                return api_bad_request('unknown agent_id')
+
+        def _mutate(data):
+            data = dict(data or {})
+            if agent_id:
+                data[uid] = agent_id
+            else:
+                data.pop(uid, None)
+            return data
+
+        update_json_atomic(_pins_path(), _mutate, default={})
+        from lib.log import audit_log
+        audit_log('oauth_egress_agent_pinned', user_id=uid,
+                  agent_id=agent_id or '(cleared)')
+        return jsonify({'ok': True, 'pinned': agent_id})
+    except Exception as e:
+        logger.error('[OAuth.v1] egress-agent POST failed: %s', e, exc_info=True)
+        return api_internal_error(e, source='api_v1.oauth.egress_agent')
 
 
 __all__ = ['api_v1_oauth_bp']

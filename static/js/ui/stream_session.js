@@ -32,6 +32,16 @@
  *   - stream_lifecycle.js    :140  reconnect re-render
  *   (2 paint readers in health_stream_timer + 3 frame-projection reads)
  *
+ * DERIVED CONSUMER (module-owned, NOT a direct reader — the read-surface
+ * guard stays at the 3-file allowlist): ui/conversation_list.js mirrors the
+ * in-answer "限流中" (rate-limit) phase chip into the sidebar dot/tag via
+ * convRateLimitPhase(), the module's exported read-only predicate over the
+ * live phase. setStreamPhase/clearStreamSession repaint the sidebar
+ * (renderConversationList, typeof-guarded) only when the rate-limit VERDICT
+ * flips, so the mirror can never drift from the phase truth and needs no
+ * per-lane clearing hooks (finishStream / twStop / conv-switch all call
+ * clearStreamSession, which flips the verdict back off → one repaint).
+ *
  * Presence semantics: an entry EXISTS only while its TURN is live —
  * clearStreamSession() is called by every stop/teardown path (twStop,
  * streaming-bubble removal). Note "turn", not "this tab's SSE": the two come
@@ -61,6 +71,52 @@ function getStreamSession(convId) {
     streamSessions.set(convId, s);
   }
   return s;
+}
+
+/* ── Rate-limit sidebar mirror (derived consumer, owner feature) ─────────
+ * "Rate-limited" is true exactly when the live phase is a `retrying` phase
+ * whose cause is a 429 / rate-limit cooldown — the SAME honest-label ruling
+ * the in-answer retry banner (streaming_ui.js) renders:
+ *   • detailKey 'stream.phase.retryRateLimited' — _on_retry(429) AND an
+ *     all-slots rate-limit cooldown wait (lib/llm_dispatch/retry_i18n.py:
+ *     retry_phase_fields fed by cooldown_wait_label);
+ *   • detailArgs.reasonKey 'stream.retryReason.waitingForModel' or
+ *     'stream.retryReason.rateLimited' — a typed 限流 cause riding a
+ *     generic retry frame (e.g. the first-byte heartbeat while the picked
+ *     slot is parked for rate_limit, manager/_stream.py::_on_waiting).
+ * Quota / backoff / upstream / shared-project-contention waits do NOT
+ * qualify — labelling those 限流 is exactly the lie the backend's
+ * honest-label ruling (retry_i18n.py) exists to prevent. */
+function _phaseRateLimited(p) {
+  if (!p || p.phase !== 'retrying') return false;
+  if (p.detailKey === 'stream.phase.retryRateLimited') return true;
+  const a = p.detailArgs;
+  return !!(a && (a.reasonKey === 'stream.retryReason.waitingForModel'
+               || a.reasonKey === 'stream.retryReason.rateLimited'));
+}
+
+/** Derived read for the sidebar: {model, attempt} while the conv's live
+ *  phase is a rate-limit wait, else null. The phase shape stays module-
+ *  owned — consumers never touch streamSessions directly, so the read-
+ *  surface guard (test_frontend_convview_apply_guards.py) is untouched. */
+function convRateLimitPhase(convId) {
+  const s = streamSessions.get(convId);
+  const p = s && s.phase;
+  if (!_phaseRateLimited(p)) return null;
+  const a = p.detailArgs || {};
+  return { model: a.model || '', attempt: p.attempt || 0 };
+}
+
+/** Repaint the sidebar ONLY when the rate-limit verdict flipped. Beats that
+ *  keep the same verdict (attempt 1→2→3, waiting heartbeats) carry no new
+ *  sidebar-visible information, so repainting them would be pure churn (the
+ *  heartbeat fires every ~5s; rendering it each time would jitter the
+ *  sidebar). typeof-guarded: degenerate/partial bundles (JSDOM harnesses)
+ *  simply skip the mirror. */
+function _mirrorRateLimitFlip(wasRl, afterPhase) {
+  const isRl = !!_phaseRateLimited(afterPhase);
+  if (wasRl === isRl) return;
+  if (typeof renderConversationList === 'function') renderConversationList();
 }
 
 /** Write the phase for a turn that is STILL IN PROGRESS.
@@ -101,7 +157,10 @@ function getStreamSession(convId) {
  */
 function setStreamPhase(convId, phase) {
   if (!streamSessions.has(convId) && !_phaseTurnStillRunning(convId)) return;
-  getStreamSession(convId).phase = phase;
+  const _s = getStreamSession(convId);
+  const _wasRl = !!_phaseRateLimited(_s.phase);
+  _s.phase = phase;
+  _mirrorRateLimitFlip(_wasRl, phase);
 }
 
 /** Resolve "is this turn still in flight" for a convId.
@@ -121,5 +180,10 @@ function _phaseTurnStillRunning(convId) {
 
 /** Drop the session slice (stream stop / teardown / bubble removal). */
 function clearStreamSession(convId) {
+  const _s = streamSessions.get(convId);
+  const _wasRl = !!(_s && _phaseRateLimited(_s.phase));
   streamSessions.delete(convId);
+  /* Turn ended → the rate-limit verdict flips back off; repaint once so the
+   * sidebar dot/tag clears even if no further PHASE event arrives. */
+  _mirrorRateLimitFlip(_wasRl, null);
 }

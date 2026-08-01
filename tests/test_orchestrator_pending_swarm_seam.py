@@ -28,9 +28,13 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
 # The orchestrator was split into a facade-preserving package
 # (``lib/tasks_pkg/orchestrator/``).  ``run_task`` — and the pending-swarm
-# guard block this test byte-couples to — now lives in ``_run.py``.  Fall
-# back to the legacy monolith path for older checkouts.
-ORCH = os.path.join(ROOT, 'lib', 'tasks_pkg', 'orchestrator', '_run.py')
+# guard block this test byte-couples to — moved to ``_run.py``, then to
+# ``_tool_assembly_prep.py`` (pt_03f4cdf1 slice 29, 2026-07-31).  Fall
+# back through the older locations for older checkouts.
+ORCH = os.path.join(ROOT, 'lib', 'tasks_pkg', 'orchestrator',
+                    '_tool_assembly_prep.py')
+if not os.path.exists(ORCH):
+    ORCH = os.path.join(ROOT, 'lib', 'tasks_pkg', 'orchestrator', '_run.py')
 if not os.path.exists(ORCH):
     ORCH = os.path.join(ROOT, 'lib', 'tasks_pkg', 'orchestrator.py')
 
@@ -38,15 +42,19 @@ _SWARM_NAMES = {'spawn_agents', 'await_agents', 'get_agent_result'}
 
 
 def _extract_guard_block() -> str:
-    """Pull the guard block from orchestrator.py source.
+    """Pull the guard block from the orchestrator source.
 
     Delimited by the sentinel comment the fix introduced and the
     ``task['_tool_schema'] = tool_list`` assignment that follows it. Returns
     the source text of the ``if not swarm_enabled:`` guard only.
+    Indent-agnostic: the block lived at 8-space indent inside run_task
+    and now lives at 4-space indent inside
+    ``_tool_assembly_prep.assemble_round_tools`` (slice 29) — the regex
+    tolerates both, and textwrap.dedent normalises.
     """
     src = open(ORCH, encoding='utf-8').read()
     m = re.search(
-        r'(        if not swarm_enabled:\n.*?)\n\n        # Stash the assembled',
+        r'( +if not swarm_enabled:\n.*?)\n\n +# Stash the assembled',
         src, re.DOTALL)
     if not m:
         return ''

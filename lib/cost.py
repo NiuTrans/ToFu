@@ -517,11 +517,13 @@ def compute_cost(
 
     # ── Generic USD pricing — provider override beats global ──
     mp = lookup_pricing(model_id, provider_id) if model_id else None
+    peak_mul = None
     if mp:
         base_in = float(mp.get('input') or 0)
         out_p = float(mp.get('output') or 0)
         cw_mul = float(mp.get('cacheWriteMul', 1.25))
         cr_mul = float(mp.get('cacheReadMul', 0.10))
+        peak_mul = mp.get('peakMul')  # stamped by lookup_pricing at peak hours
     else:
         base_in = float(pricing_data.get('inputPrice') or 0)
         out_p = float(pricing_data.get('outputPrice') or 0)
@@ -578,6 +580,10 @@ def compute_cost(
             cache_savings_usd * rate if cache_savings_usd > 0 else 0, 6),
         'cacheSavingsUsd': _round(
             cache_savings_usd if cache_savings_usd > 0 else 0, 6),
+        # Present ONLY when the resolved pricing was peak-scaled (all four
+        # components already carry the multiplier) — transparency for
+        # "why did this round cost 2x" without re-deriving the schedule.
+        **({'peakMultiplier': peak_mul} if peak_mul else {}),
     }
 
 

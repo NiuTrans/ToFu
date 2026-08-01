@@ -55,6 +55,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 
 import pytest
 
@@ -180,13 +181,7 @@ global.conversations = [{
   activeTaskId: null, _fromCache: true,
 }];
 
-eval(fs.readFileSync(process.argv[2], 'utf8'));  // REAL core/conversations.js
-// Extracted leaf modules (pt_3879f00e decomposition): the cache-paint path
-// calls _applySettingsToConv (core/conv_apply_settings.js) and the load path
-// calls helpers from core/pending_sync.js + core/conv_persist_helpers.js,
-// none of which still live in conversations.js. Eval them so the harness
-// scope matches the shipped bundle (lib/js_bundler.py concatenates them all).
-for (const extra of process.argv.slice(3)) eval(fs.readFileSync(extra, 'utf8'));
+for (const f of process.argv.slice(2)) eval(fs.readFileSync(f, 'utf8'));  // bundle-order conv family via _conv_bundle_sources.conv_family_sources
 global.conversations = conversations;
 
 const out = [];
@@ -251,19 +246,25 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 """
 
 
-def _run(js_path: str) -> subprocess.CompletedProcess:
+def _run(js_path: str, override_extra: dict | None = None) -> subprocess.CompletedProcess:
     harness = os.path.join(HERE, '_conv_verify_reheal_harness.js')
     with open(harness, 'w') as f:
         f.write(_HARNESS)
-    extra_js = [
-        os.path.join(JS_DIR, 'core', 'conv_apply_settings.js'),
-        os.path.join(JS_DIR, 'core', 'conv_image_hydrate.js'),
-        os.path.join(JS_DIR, 'core', 'pending_sync.js'),
-        os.path.join(JS_DIR, 'core', 'conv_persist_helpers.js'),
-    ]
+    # Eval the WHOLE conv family via the drift-proof closure (see
+    # _conv_bundle_sources.conv_family_sources); NEUTER copies ride the
+    # override (the mutated file REPLACES its shipped counterpart —
+    # conversations.js for the main neuters, the named leaf for
+    # override_extra, e.g. conv_verify_retry.js whose scheduler moved
+    # out of conversations.js in slice 11).
+    sys.path.insert(0, HERE)
+    from _conv_bundle_sources import conv_family_sources
+    override = dict(override_extra or {})
+    if os.path.basename(js_path) != 'conversations.js':
+        override['core/conversations.js'] = js_path
+    extra_js = conv_family_sources(override=override or None)
     try:
         return subprocess.run(
-            ['node', harness, js_path, *extra_js],
+            ['node', harness, *extra_js],
             capture_output=True, text=True, timeout=60,
         )
     finally:
@@ -329,9 +330,13 @@ def test_NC_needsLoad_restore_is_load_bearing(tmp_path):
 def test_NC_self_heal_scheduler_is_load_bearing(tmp_path):
     """NEUTER 2: make `_scheduleConvVerifyRetry` a no-op on a COPY → check D
     FAILS (nothing heals the open conv; the stale paint survives until some
-    unrelated push). Real file untouched."""
-    conv_js = os.path.join(JS_DIR, 'core', 'conversations.js')
-    with open(conv_js, encoding='utf-8') as f:
+    unrelated push). Real file untouched.
+
+    NOTE: the scheduler moved OUT of conversations.js in slice 11
+    (pt_3879f00e sub-part 2) into core/conv_verify_retry.js — the neuter
+    targets THAT file and the harness override swaps it in."""
+    sched_js = os.path.join(JS_DIR, 'core', 'conv_verify_retry.js')
+    with open(sched_js, encoding='utf-8') as f:
         src = f.read()
 
     needle = '  if (attempt >= delays.length) return;\n  clearTimeout('
@@ -342,15 +347,17 @@ def test_NC_self_heal_scheduler_is_load_bearing(tmp_path):
         '  if (attempt >= delays.length) return;\n  clearTimeout(', 1)
     assert neutered != src, 'neuter produced no change'
 
-    copy = tmp_path / 'conversations_neutered_scheduler.js'
+    copy = tmp_path / 'conv_verify_retry_neutered_scheduler.js'
     copy.write_text(neutered, encoding='utf-8')
 
-    proc = _run(str(copy))
+    # Override the scheduler leaf, not conversations.js.
+    proc = _run(os.path.join(JS_DIR, 'core', 'conversations.js'),
+                override_extra={'core/conv_verify_retry.js': str(copy)})
     output = proc.stdout.strip()
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
     assert 'FAIL self_heal_retry_called' in output, (
         'NEUTER did not bite: self-heal retry still fired with the scheduler '
         'disabled.\n' + output)
 
-    with open(conv_js, encoding='utf-8') as f:
-        assert f.read() == src, 'harness mutated the shipped conversations.js'
+    with open(sched_js, encoding='utf-8') as f:
+        assert f.read() == src, 'harness mutated the shipped conv_verify_retry.js'

@@ -75,7 +75,12 @@ const win = dom.window;
 global.window = win; global.document = win.document; global.console = console;
 
 win.Icon = global.Icon = (name) => '<svg data-icon="' + name + '"></svg>';
-win.t = global.t = (k) => k;
+// The real t() returns a TEMPLATE ('{n} chars') that the caller substitutes
+// into. A stub returning the bare key makes every {n} interpolation invisible,
+// which would silently pass a cost badge that never printed a number — so the
+// stub mirrors the real contract for the keys under test.
+const _T = { 'projectBrain.infChars': '{n} chars' };
+win.t = global.t = (k) => (_T[k] !== undefined ? _T[k] : k);
 win.escapeHtml = global.escapeHtml = (s) => String(s == null ? '' : s);
 win.loadConversation = global.loadConversation = () => {};
 // This conversation is convA on /proj/real.
@@ -90,14 +95,20 @@ win.pushUnsubscribe = global.pushUnsubscribe = () => {};
 // convB); "Add tests" is open; one pending proposal raised by convB.
 const INFLUENCE = {
   projectPath: '/proj/real', convId: 'convA',
-  charter: { exists: true, injected: true, version: 3,
+  charter: { exists: true, injected: true, version: 3, chars: 512,
              content: 'NORTH STAR TEXT', decisions: ['Use PostgreSQL'] },
-  board: { exists: true, injected: true,
+  goals: { injected: true, chars: 308,
+           items: [{ text: 'OWNER GOAL TEXT' }] },
+  board: { exists: true, injected: true, chars: 8845, abridgedInPrompt: true,
     mine: [{ id: 'pt_a', title: 'Refactor parser', owner: 'convA', dispatched: false, dependsOn: [] }],
-    avoid: [{ id: 'pt_b', title: 'Rewrite docs', owner: 'convB', dispatched: false, dependsOn: [] }],
+    avoid: [{ id: 'pt_b', title: 'Rewrite docs ' + 'X'.repeat(400), owner: 'convB', dispatched: false, dependsOn: [] }],
     open: [{ id: 'pt_c', title: 'Add tests', owner: '', dispatched: false, dependsOn: [] }] },
   pendingDecisions: [
     { proposalId: 'prop_1', summary: 'Adopt trunk-based dev', convId: 'convB', title: 'Conv B', ts: 1, mine: false },
+  ],
+  toolVisible: [
+    { tool: 'project_board_read', labelKey: 'infToolBoardFull' },
+    { tool: 'project_feed_read', labelKey: 'infToolFeed' },
   ],
 };
 
@@ -158,6 +169,43 @@ Promise.resolve().then(()=>{}).then(()=>{}).then(()=>{}).then(() => {
   check('chip_avoid', !!body.querySelector('.pb-inf-chip-avoid'));
   check('chip_charter', !!body.querySelector('.pb-inf-chip-charter'));
 
+  // ══ The TWO CHANNELS ══
+  // "already in the prompt" and "reachable only via a tool round" are
+  // different facts; a merged list silently upgrades the second into the
+  // first. Both containers must exist and must not be the same node.
+  const injCh = body.querySelector('.pb-inf-channel-injected');
+  const toolCh = body.querySelector('.pb-inf-channel-tools');
+  check('channel_injected_present', !!injCh);
+  check('channel_tools_present', !!toolCh);
+
+  // GOALS — the human's own directive. The reported bug was that this lane
+  // did not render AT ALL while the prompt was shipping it every turn.
+  const goalsEl = body.querySelector('.pb-inf-group-goals');
+  check('goals_group_present', !!goalsEl);
+  check('goals_text_rendered', goalsEl && goalsEl.innerHTML.indexOf('OWNER GOAL TEXT') !== -1);
+  check('chip_goals', !!body.querySelector('.pb-inf-chip-goals'));
+
+  // The DECISIVE placement assertion: every injected lane lives INSIDE the
+  // injected channel, and the tool list does NOT.
+  check('goals_inside_injected_channel', !!(injCh && injCh.querySelector('.pb-inf-group-goals')));
+  check('mine_inside_injected_channel', !!(injCh && injCh.querySelector('.pb-inf-group-mine')));
+  check('tools_not_inside_injected_channel',
+        !!injCh && injCh.querySelector('.pb-inf-tool') === null);
+  check('tool_row_named', toolCh && toolCh.innerHTML.indexOf('project_board_read') !== -1);
+
+  // Measured prompt cost is rendered — "in your context" without a size is a
+  // claim the human cannot check.
+  check('cost_badge_present', !!body.querySelector('.pb-inf-cost'));
+  check('goals_cost_is_backend_number',
+        goalsEl && goalsEl.innerHTML.indexOf('308') !== -1);
+
+  // The board ships ABRIDGED while these rows show the full text — say so.
+  check('abridged_note_present', !!body.querySelector('.pb-inf-note'));
+
+  // A long epic title must be CLAMPED, not dumped raw (the cut-off symptom:
+  // a 900-char epic pushed every following row off the panel).
+  check('long_epic_clamped', !!body.querySelector('.pb-inf-epic .pb-clamp'));
+
   console.log(out.join('\n'));
 });
 """
@@ -188,9 +236,14 @@ win.pushUnsubscribe = global.pushUnsubscribe = () => {};
 // A no-influence verdict: no charter injected, empty board, no pending.
 const EMPTY_INF = {
   projectPath: '/proj/solo', convId: 'convSolo',
-  charter: { exists: false, injected: false, version: 0, content: '', decisions: [] },
-  board: { exists: false, injected: false, mine: [], avoid: [], open: [] },
+  charter: { exists: false, injected: false, version: 0, chars: 0, content: '', decisions: [] },
+  goals: { injected: false, chars: 0, items: [] },
+  board: { exists: false, injected: false, chars: 0, abridgedInPrompt: false, mine: [], avoid: [], open: [] },
   pendingDecisions: [],
+  // The tool lane is STATIC (always non-empty) — it must NOT by itself keep
+  // the banner open on a project the brain does not influence, or every solo
+  // project grows a permanent banner saying "you could call these tools".
+  toolVisible: [{ tool: 'project_board_read', labelKey: 'infToolBoardFull' }],
 };
 win.Api = global.Api = { project: {
   feed: (p) => Promise.resolve({ maxSeq: 0, events: [] }),
@@ -253,7 +306,16 @@ def test_influence_lens_renders_split_into_real_fragment():
                  'PASS mine_has_refactor', 'PASS avoid_has_docs',
                  'PASS docs_not_in_mine', 'PASS avoid_owner_chip_convB',
                  'PASS open_has_addtests', 'PASS chip_mine',
-                 'PASS chip_avoid', 'PASS chip_charter'):
+                 'PASS chip_avoid', 'PASS chip_charter',
+                 # The two-channel split + the lanes it was missing.
+                 'PASS channel_injected_present', 'PASS channel_tools_present',
+                 'PASS goals_group_present', 'PASS goals_text_rendered',
+                 'PASS chip_goals', 'PASS goals_inside_injected_channel',
+                 'PASS mine_inside_injected_channel',
+                 'PASS tools_not_inside_injected_channel',
+                 'PASS tool_row_named', 'PASS cost_badge_present',
+                 'PASS goals_cost_is_backend_number',
+                 'PASS abridged_note_present', 'PASS long_epic_clamped'):
         assert must in output, output
 
 
@@ -310,6 +372,78 @@ def test_NC_mine_avoid_split_is_load_bearing():
 # (re-pull-on-switch / conv-cluster empty-hide) was removed with that path;
 # the bar's own single-cluster + status-headline behaviour is covered by
 # tests/test_frontend_collab_bar.py.
+
+
+def _nc(anchor: str, replacement: str, harness: str, must_fail: str,
+        copy_name: str):
+    """Shared frontend NC: patch a COPY of the shipped project-brain.js, run the
+    jsdom harness against it, assert the named check FLIPS to FAIL, then assert
+    the shipped file is byte-identical."""
+    with open(_BRAIN_SRC, encoding='utf-8') as f:
+        original = f.read()
+    assert anchor in original, f'NC anchor not found: {anchor[:70]!r}'
+    patched = original.replace(anchor, replacement, 1)
+    assert patched != original, 'NC replacement was a no-op'
+    copy_path = os.path.join(HERE, copy_name)
+    try:
+        with open(copy_path, 'w', encoding='utf-8') as f:
+            f.write(patched)
+        output = _run(harness, copy_path)
+        assert must_fail in output, \
+            f'NC did not bite — expected {must_fail!r}:\n{output}'
+    finally:
+        try:
+            os.remove(copy_path)
+        except OSError:
+            pass
+    with open(_BRAIN_SRC, encoding='utf-8') as f:
+        assert f.read() == original, 'shipped project-brain.js must be byte-identical'
+
+
+@pytest.mark.skipif(not _node_deps_available(),
+                    reason='node + jsdom dev-deps not installed (run npm install)')
+def test_NC_goals_lane_is_load_bearing():
+    """Frontend NC: suppress the goals lane (the EXACT pre-2026-07-31 state —
+    the panel simply had no goals group) → the human's own directive vanishes
+    from a lens titled "how this conversation is influenced" → FAILS."""
+    _nc('var goalsActive = !!goals.injected && goalItems.length > 0;',
+        'var goalsActive = false;',
+        _HARNESS, 'FAIL goals_group_present', '_pb_infl_nc_goals.js')
+
+
+@pytest.mark.skipif(not _node_deps_available(),
+                    reason='node + jsdom dev-deps not installed (run npm install)')
+def test_NC_channel_separation_is_load_bearing():
+    """Frontend NC: render the tool rows INSIDE the injected channel — the
+    misleading merged state this work removed → tools_not_inside_injected_channel
+    FAILS.
+
+    This is the decisive guard: without the separation the panel tells the
+    human the model has already read things it would in fact have to fetch.
+
+    NOTE the mutation must genuinely MERGE. A first attempt merely renamed the
+    separate tools container to the injected class; `querySelector` then still
+    returned the REAL injected channel (which held no tool rows) and the check
+    stayed green — a formal perturbation of a symbol, not a simulation of the
+    defect. Splicing the rows into the injected channel's own body is what
+    reproduces it."""
+    _nc("        inj.join('') + '</div>');",
+        "        inj.join('') + toolVisible.map(function (tv) {\n"
+        "          return '<div class=\"pb-inf-tool\"><code>' + _esc(tv.tool) +\n"
+        "            '</code></div>'; }).join('') + '</div>');",
+        _HARNESS, 'FAIL tools_not_inside_injected_channel',
+        '_pb_infl_nc_channel.js')
+
+
+@pytest.mark.skipif(not _node_deps_available(),
+                    reason='node + jsdom dev-deps not installed (run npm install)')
+def test_NC_epic_title_clamp_is_load_bearing():
+    """Frontend NC: dump the raw epic title instead of clamping it — the
+    reported "isn't it cut off here?" symptom, where one 900-char epic pushes
+    every following row out of the 40vh banner → long_epic_clamped FAILS."""
+    _nc("'<span class=\"pb-inf-epic-title\">' + _clampBlock(_mdLite(raw), raw) + '</span>' +",
+        "'<span class=\"pb-inf-epic-title\">' + _esc(raw) + '</span>' +",
+        _HARNESS, 'FAIL long_epic_clamped', '_pb_infl_nc_clamp.js')
 
 
 @pytest.mark.skipif(not _node_deps_available(),

@@ -53,6 +53,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 
 import pytest
 
@@ -147,12 +148,7 @@ global.document = { getElementById: () => null };
 global.conversations = [];
 global._convSorter = (a, b) => (b.updatedAt || 0) - (a.updatedAt || 0);
 
-eval(fs.readFileSync(process.argv[2], 'utf8'));  // REAL core/conversations.js
-// Extracted leaf modules (pt_3879f00e decomposition): convHasPendingSync /
-// _flushPendingSyncs live in core/pending_sync.js; the hydrate path also calls
-// _applySettingsToConv (core/conv_apply_settings.js) + the persist helpers
-// (core/conv_persist_helpers.js). Eval them so harness scope matches the bundle.
-for (const extra of process.argv.slice(3)) eval(fs.readFileSync(extra, 'utf8'));
+for (const f of process.argv.slice(2)) eval(fs.readFileSync(f, 'utf8'));  // bundle-order conv family via _conv_bundle_sources.conv_family_sources
 global.conversations = conversations;   // rebind to the module-scoped array
 
 const out = [];
@@ -231,16 +227,19 @@ def _run(js_path: str, hydratable: bool = True, p2fail: bool = False,
     env = dict(os.environ)
     env['HYDRATABLE'] = '1' if hydratable else '0'
     env['P2FAIL'] = '1' if p2fail else '0'
-    extra_js = [
-        pending_sync_path or os.path.join(JS_DIR, 'core', 'pending_sync.js'),
-        os.path.join(JS_DIR, 'core', 'conv_apply_settings.js'),
-        os.path.join(JS_DIR, 'core', 'conv_persist_helpers.js'),
-        os.path.join(JS_DIR, 'core', 'conv_merge_shells.js'),
-        os.path.join(JS_DIR, 'core', 'conv_hydrate_cache.js'),
-    ]
+    # Eval the WHOLE conv family via the drift-proof closure (see
+    # _conv_bundle_sources.conv_family_sources). The triple-neuter's mutated
+    # pending_sync.js REPLACES the shipped leaf via the override (that leaf
+    # now owns _flushPendingSyncs + the hydrate-before-sync step).
+    sys.path.insert(0, HERE)
+    from _conv_bundle_sources import conv_family_sources
+    override = None
+    if pending_sync_path:
+        override = {'core/pending_sync.js': pending_sync_path}
+    extra_js = conv_family_sources(override=override)
     try:
         return subprocess.run(
-            ['node', harness, js_path, *extra_js],
+            ['node', harness, *extra_js],
             capture_output=True, text=True, timeout=60, env=env,
         )
     finally:

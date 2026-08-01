@@ -715,7 +715,7 @@ def test_every_lane_leaves_a_self_describing_round(rec, slow_tools, monkeypatch)
     monkeypatch.setattr(_heartbeat, '_execute_tool_one', _shot, raising=False)
     monkeypatch.setattr(_pipeline, '_execute_tool_one', _shot, raising=False)
     for label, model in (('screenshot-vision', 'gpt-4o'),
-                         ('screenshot-no-vision', 'deepseek-chat')):
+                         ('screenshot-no-vision', 'deepseek-v3.2')):
         t5 = _mk_task(model=model)
         sh = _mk_tc('tc-sh', 'browser_screenshot', 1)
         from lib.tasks_pkg.tool_dispatch import execute_tool_pipeline
@@ -840,9 +840,10 @@ def test_screenshot_lane_settles_immediately(rec, monkeypatch):
     # NOTE the model names: `model_supports_vision` defaults UNKNOWN names to
     # True (permissive), so an invented "text-only-model" would silently take
     # the vision branch and this face would assert nothing about the no-vision
-    # path. `deepseek-chat` is a real entry the capability table reports as
-    # text-only — measured, not assumed.
-    for model in ('gpt-4o', 'deepseek-chat'):
+    # path. `deepseek-v3.2` is a real entry the capability table reports as
+    # text-only — measured, not assumed. (Was `deepseek-chat` until that
+    # alias was retired upstream on 2026-07-24 and its row removed.)
+    for model in ('gpt-4o', 'deepseek-v3.2'):
         rec.events.clear()
         task = _mk_task(model=model)
         tcs = [_mk_tc('tc-sh', 'browser_screenshot', 1),

@@ -252,6 +252,8 @@ var _i18n = {
   'timer.empty': { zh: '暂无定时器。AI 可在任务中通过 timer_create 创建。', en: 'No timers. The AI can create one with timer_create during a task.' },
   'timer.jumpHint': { zh: '点击跳转到该定时器所在对话', en: 'Click to open this timer\'s conversation' },
   'timer.convMissing': { zh: '该定时器对应的对话不在本地列表中', en: 'This timer\'s conversation is not in your local list' },
+  'timer.cancelling': { zh: '取消中…', en: 'Cancelling…' },
+  'timer.triggering': { zh: '触发中…', en: 'Triggering…' },
   'timer.logTitle': { zh: '轮询日志', en: 'Poll Log' },
   'timer.logEmpty': { zh: '暂无轮询日志记录。', en: 'No poll log entries yet.' },
   'timer.logError': { zh: '获取轮询日志失败', en: 'Failed to load poll log' },
@@ -291,6 +293,10 @@ var _i18n = {
   'sidebar.translatingTag': { zh: '翻译中', en: 'Translating' },
   'sidebar.memoryPrefetch': { zh: '筛选记忆中…', en: 'Filtering memories…' },
   'sidebar.memoryPrefetchTag': { zh: '筛选记忆', en: 'Filtering' },
+  /* Rate-limit sidebar mirror — derived from the live phase (ui/stream_session.js),
+   * matches the in-bubble "限流中" phase chip (stream.phase.retryRateLimited). */
+  'sidebar.rateLimited': { zh: '模型限流中，正在排队重试…', en: 'Model rate-limited — queued retry…' },
+  'sidebar.rateLimitedTag': { zh: '限流中', en: 'Rate-limited' },
   'memPrefetch.surfacing': { zh: '正在检索相关记忆…', en: 'Surfacing relevant memories…' },
   'memPrefetch.totalN': { zh: '共 {n} 条', en: '{n} total' },
   'memPrefetch.filtering': { zh: '用轻量模型筛选 {n} 条候选…', en: 'Filtering {n} candidates with cheap model…' },
@@ -510,6 +516,12 @@ var _i18n = {
   'timerBlock.waitingFirstPoll': { zh: '等待首次检查…', en: 'waiting for first check…' },
   'timerBlock.nextCheckIn': { zh: '约 {n}s 后进行下次检查…', en: 'Next check in ~{n}s…' },
   'timerBlock.nextCheckNow': { zh: '即将进行下次检查…', en: 'Next check due now…' },
+  // ── Live run_command timer chip (tool_rounds.js _cmdTimerState) ──
+  //    {n} is a PREFORMATTED duration (45s / 3m12s / 1h04m) substituted by the
+  //    caller's .replace(), so keep the placeholder verbatim. There is no key
+  //    for the count-up case: it renders the bare duration in every language.
+  'toolTimer.countdown': { zh: '剩余 {n}', en: '{n} left' },
+  'toolTimer.terminating': { zh: '已超时，正在终止…', en: 'timed out, terminating…' },
   'timerBlock.headTriggered': { zh: '经过 {n} 次检查后触发', en: 'Triggered after {n} poll{s}' },
   'timerBlock.headOrphaned': { zh: '任务已中断（{n} 次检查，定时器仍在后台运行）', en: 'Task interrupted ({n} poll{s}, timer still active in background)' },
   'timerBlock.headSkipSuffix': { zh: '，跳过 {n} 次', en: ', {n} skipped' },
@@ -1374,6 +1386,11 @@ var _i18n = {
   'settings.oauthManagedNoteTitle': { zh: '这是 {name} 订阅登录自动生成的服务商', en: 'This provider was auto-created from your {name} subscription login' },
   'settings.oauthManagedNoteDesc': { zh: '它使用你登录的 {name} 订阅额度，令牌每次请求实时获取，无需填写 API Key。要移除它，请点下方「退出登录」——只删这张卡片不会清除登录凭证，下次刷新令牌时它会重新出现。', en: 'It uses your logged-in {name} subscription — the token is fetched live per request, so no API key is needed. To remove it, use “Log out” below: deleting only this card leaves the login token on disk, so it reappears on the next token refresh.' },
   'settings.oauthLogoutRemove': { zh: '退出登录', en: 'Log out' },
+  'settings.egressDirect': { zh: '出口：服务器直连', en: 'Egress: direct from server' },
+  'settings.egressViaAgent': { zh: '出口：经桌面代理（{name}）', en: 'Egress: via desktop agent ({name})' },
+  'settings.egressAgentNoCap': { zh: '桌面代理在线但未开启 --allow-egress，请重启代理并加上该参数', en: 'Desktop agent online but --allow-egress is off — restart the agent with that flag' },
+  'settings.egressUnavailable': { zh: '出口不可用：服务器被封锁且无可用桌面代理', en: 'Egress unavailable: server blocked and no desktop agent online' },
+  'settings.egressProbing': { zh: '出口检测中…', en: 'Probing egress…' },
   'settings.modelList': { zh: '模型列表', en: 'Model List' },
   'settings.autoDiscover': { zh: '自动发现', en: 'Auto Discover' },
   'settings.addModel': { zh: '+ 添加模型', en: '+ Add Model' },
@@ -1419,7 +1436,12 @@ var _i18n = {
   'settings.matrixEditorSub': { zh: '限速与能力作用于整行模型；别名的开关请直接点击别名行的格子。', en: 'RPM & capabilities apply to the whole model entry; toggle an alias on/off by clicking its own row\'s cells.' },
   'settings.matrixAliasOne': { zh: '别名', en: 'alias' },
   'settings.matrixAliasMany': { zh: '别名', en: 'aliases' },
-  'settings.matrixAliasCountHint': { zh: '该模型的别名各自路由到不同的上游模型，可逐个开关', en: 'Each alias routes to a different upstream model and can be toggled independently' },
+  'settings.matrixAliasCountHint': { zh: '该模型的每个线上 ID 各自路由到不同的上游部署，可逐个开关', en: 'Each wire id of this model routes to a different upstream deployment and can be toggled independently' },
+  'settings.matrixIdOne': { zh: '线上 ID', en: 'wire id' },
+  'settings.matrixIdMany': { zh: '线上 ID', en: 'wire ids' },
+  'settings.matrixPresetBadge': { zh: '预设', en: 'preset' },
+  'settings.matrixPresetHint': { zh: '逻辑名：仅供预设/模型选择器使用，从不在线上发出；每个线上 ID 都有自己的行', en: 'Logical name: used by presets and the model picker only, never sent on the wire; each wire id has its own row' },
+  'settings.matrixNotRoutedHint': { zh: '此密钥的请求池不含该 ID（调度器从不经此密钥路由它），点击首行的 ✎ 可编辑该密钥的请求池', en: 'This key\'s request pool does not include this id (the dispatcher never routes it through this key); use ✎ on the first wire row to edit the key\'s pool' },
   'settings.matrixAttempts': { zh: '探测次数', en: 'Attempts' },
   'settings.matrixAttemptsHint': { zh: '每个格子探测多次以过滤偶发的假 429；任一次成功即视为可用', en: 'Probe each cell several times to filter out false 429s; a single success counts as reachable' },
   'settings.matrixApplied': { zh: '已应用：禁用了 {n} 个格子', en: 'Applied: disabled {n} cell(s)' },
@@ -1937,6 +1959,8 @@ var _i18n = {
   'settings.meFaceAuto': { zh: '自动（按模型家族，推荐）', en: 'Automatic (by model family — recommended)' },
   'settings.meFacePinWarn': { zh: '⚠️ 手动钉选会覆盖自动规则。把 Claude 模型钉到非 Anthropic 面会丢失思考块签名，导致多轮对话被上游拒绝。', en: '⚠️ A manual pin overrides the automatic rule. Pinning a Claude model to a non-Anthropic face drops thinking-block signatures, which upstream rejects on later turns.' },
   'settings.wireFaces': { zh: '备用协议面', en: 'Alternate wire faces' },
+  'settings.protocol': { zh: '协议', en: 'Protocol' },
+  'settings.protocolHint': { zh: '默认面线路协议；responses 用于 Responses API 端点（DeepSeek-V4-Flash / Codex）', en: 'Default-face wire protocol; use responses for Responses API endpoints (DeepSeek-V4-Flash, Codex)' },
   'settings.wireFacesHint': { zh: '同一套密钥、另一条协议线；留空即单面网关', en: 'same keys, another protocol endpoint; empty = single-face gateway' },
   'settings.addFace': { zh: '+ 协议面', en: '+ Face' },
   'settings.addFaceTitle': { zh: '新增一条备用协议面', en: 'Add an alternate wire face' },
@@ -2000,6 +2024,7 @@ var _i18n = {
   'local.desktopRemote': { zh: 'Tofu 运行在远程服务器上。在你自己的电脑安装桌面版，再用下面这行把它连过来：', en: 'Tofu runs on a remote server. Install the desktop app on your own machine, then connect it with the line below:' },
   'local.desktopDownload': { zh: '下载桌面版 ↗', en: 'Download the desktop app ↗' },
   'local.desktopDownloadFor': { zh: '下载桌面版', en: 'Download' },
+  'local.desktopHosted': { zh: '服务器直连', en: 'server-hosted' },
   'local.desktopDownloadAll': { zh: '查看全部下载 ↗', en: 'See all downloads ↗' },
   'local.desktopArchAmbiguous': { zh: '浏览器没告诉我们这台 Mac 的芯片型号（Apple Silicon 也会自称 Intel）。Apple 芯片（M1/M2/M3…）选 arm64，Intel 芯片选 x86_64；在「关于本机」里可以看到。', en: 'Your browser did not reveal this Mac’s chip (Apple Silicon reports itself as Intel too). Pick arm64 for Apple chips (M1/M2/M3…) and x86_64 for Intel — see “About This Mac”.' },
   'local.mintToken': { zh: '生成连接命令', en: 'Generate connect line' },
@@ -2506,6 +2531,7 @@ var _i18n = {
   'folderDrop.addRootConfirm': { zh: '「{dir}」尚未加入工作区。要将其添加为项目文件夹并保存到这里吗？', en: '“{dir}” isn’t in your workspace yet. Add it as a project folder and save here?' },
   'folderDrop.addAndSave': { zh: '添加并保存', en: 'Add & save' },
   'folder.renameTitle': { zh: '重命名文件夹', en: 'Rename Folder' },
+  'folder.renameFailed': { zh: '重命名失败，已恢复原名称', en: 'Rename failed — restored' },
   'folder.ok': { zh: '确定', en: 'OK' },
   'folder.deleteTitle': { zh: '删除文件夹', en: 'Delete Folder' },
   'folder.deleteConfirm': { zh: '确定删除文件夹', en: 'Delete folder' },
@@ -2766,6 +2792,18 @@ var _i18n = {
     zh: '已等待 {elapsed}s：{model} 尚未返回首个字节（{reason}）',
     en: 'Waiting {elapsed}s — no first byte from {model} yet ({reason})',
   },
+  // Stall-watch banner (pt_e0ea29f2): the ONLY frames arriving are
+  // heartbeat self-ticks — the tool has produced nothing for {n}s. This is
+  // the "no unannounced freeze" card: it announces the wedge (amber) and
+  // offers Stop; a real output event flips it back off by itself.
+  'stream.stalled.banner': {
+    zh: '已停滞 · 静默 {n}s — 期间仅有心跳，无新产出',
+    en: 'Stalled · silent {n}s — heartbeats only, no new output',
+  },
+  'stream.stalled.stop': {
+    zh: '停止',
+    en: 'Stop',
+  },
   // Mid-stream stall heartbeat: the model already sent text and then went
   // quiet. There is no read timeout, so this wait is unbounded by design —
   // the beat is what proves the turn is still alive (and what keeps the
@@ -2997,6 +3035,8 @@ var _i18n = {
   'swarm.phase.running': { zh: '工作中…', en: 'Working…' },
   'swarm.phase.retrying': { zh: '重试中…', en: 'Retrying…' },
   'swarm.phase.noResult': { zh: '无结果', en: 'No result' },
+  'swarm.phase.stalled': { zh: '已停滞', en: 'Stalled' },
+  'swarm.phase.stalledSilent': { zh: '已停滞 · 静默 {seconds}s', en: 'Stalled · silent {seconds}s' },
   'swarm.autoContinue': { zh: '子智能体完成后自动继续', en: 'Continued automatically after sub-agents finished' },
 
   // ══════════════════════════════════════
@@ -3230,6 +3270,7 @@ var _i18n = {
   'mcp.purgeFailed': { zh: '清除失败: {err}', en: 'Clear failed: {err}' },
   // Connect / reconnect
   'mcp.connecting': { zh: '连接中…', en: 'Connecting…' },
+  'mcp.uninstalling': { zh: '卸载中…', en: 'Uninstalling…' },
   'mcp.connectFailed': { zh: '连接失败: {err}', en: 'Connect failed: {err}' },
   // Save custom server
   'mcp.needName': { zh: '请输入服务器名称', en: 'Please enter a server name' },
@@ -3661,8 +3702,15 @@ var _i18n = {
   'projectBrain.blockedRetry': { zh: '自动重试于', en: 'auto-retry in' },
   'projectBrain.blockedCount': { zh: '已阻塞 %d 次', en: 'blocked %d×' },
   'projectBrain.laneAwaiting': { zh: '需要你的回答', en: 'Awaiting your answer' },
-  'projectBrain.needsYourDecision': { zh: '需要你的决定', en: 'Your decision needed' },
   'projectBrain.awaitingAnswerMeta': { zh: '等待你的回答', en: 'waiting for your answer' },
+  'projectBrain.actGoAnswer': { zh: '去回答', en: 'Go answer' },
+  'projectBrain.actCreateConv': { zh: '新建对话', en: 'New chat' },
+  // The composer pre-fill for a task's "New chat" action. {id}/{title}/{path}
+  // are substituted at click time; the kickoff names the read/claim tools so
+  // the agent's first move is grounded in the board, and the project path so
+  // it can re-attach even if the conversation's project link is ever lost.
+  'projectBrain.epicChatPrompt': { zh: '请认领并推进任务板上的这个 epic：{id}\n{title}\n项目：{path}\n\n先 project_board_read 读取完整描述，再 project_board_claim 认领后开始工作。', en: 'Claim and advance this board epic: {id}\n{title}\nProject: {path}\n\nRead the full text with project_board_read, claim it with project_board_claim, then start.' },
+  'projectBrain.convCreateFailed': { zh: '无法打开新对话', en: 'Could not open a new chat' },
   'projectBrain.answerPlaceholder': { zh: '输入你的回答（或直接点上方选项）…', en: 'Type your answer (or pick an option above)…' },
   'projectBrain.answerSubmit': { zh: '提交回答', en: 'Submit answer' },
   'projectBrain.yourAnswer': { zh: '你的回答', en: 'Your answer' },
@@ -3806,6 +3854,18 @@ var _i18n = {
   'projectBrain.infMineHead': { zh: '你正在推进的任务', en: 'Epics you are advancing' },
   'projectBrain.infAvoidHead': { zh: '避免重复 —— 其他对话正在推进', en: 'Avoid duplicating — advanced by a sibling' },
   'projectBrain.infOpenHead': { zh: '待认领 —— 你可以接手', en: 'Open — you could claim' },
+  // The two channels: what is really in the prompt vs. what needs a tool call.
+  'projectBrain.infChannelInjected': { zh: '已注入本轮上下文 —— 模型必定读到', en: 'Injected into this turn’s context' },
+  'projectBrain.infChannelTools': { zh: '不在上下文 —— 模型需要主动调用工具', en: 'Not in context — the model must call a tool' },
+  'projectBrain.infChars': { zh: '{n} 字符', en: '{n} chars' },
+  'projectBrain.infGoals': { zh: '{n} 项目标', en: '{n} owner goal(s)' },
+  'projectBrain.infGoalsHead': { zh: '负责人目标（状态与关注）', en: 'Owner goals (Status & Focus)' },
+  'projectBrain.infPendingHead': { zh: '待你决策 —— 未提交前不会到达任何智能体', en: 'Awaiting you — not reaching agents until committed' },
+  'projectBrain.infAbridgedNote': { zh: '任务板条目以缩略形式（仅标题）进入上下文；这里显示的完整正文需模型调用 project_board_read 才能读到。', en: 'Epics ship to the model abridged (headline only) — the full text shown here is reachable via project_board_read.' },
+  'projectBrain.infToolBoardFull': { zh: '任务板每条 epic 的完整正文', en: 'Each epic’s full text' },
+  'projectBrain.infToolCharterFull': { zh: '章程决策的完整正文（上下文里只有摘要行）', en: 'A decision’s full text (context has headlines only)' },
+  'projectBrain.infToolFeed': { zh: '跨对话动态流', en: 'Cross-conversation activity feed' },
+  'projectBrain.infToolPeer': { zh: '兄弟对话的实时状态', en: 'Live sibling-conversation status' },
 };
 
 /* ── Missing-translation tripwire ──────────────────────────────────────

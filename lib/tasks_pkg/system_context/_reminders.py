@@ -129,7 +129,9 @@ def _refresh_tail_block(messages, block: str | None, marker: str) -> str:
 
     content = messages[target_idx].get('content', '')
     if isinstance(content, str):
-        blocks = [{'type': 'text', 'text': content}]
+        # Never fabricate a phantom empty text block (content == '') — strict
+        # providers hard-400 the request on it (Kimi: "text content is empty").
+        blocks = [{'type': 'text', 'text': content}] if content.strip() else []
     elif isinstance(content, list):
         blocks = list(content)
     else:

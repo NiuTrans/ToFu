@@ -56,6 +56,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 
 import pytest
 
@@ -130,12 +131,7 @@ global.Api = {
 
 global.conversations = [];
 
-eval(fs.readFileSync(process.argv[2], 'utf8'));  // REAL core/conversations.js
-// Extracted leaf modules (pt_3879f00e decomposition): the meta-merge calls
-// _applySettingsToConv (core/conv_apply_settings.js); the persist helpers live
-// in core/conv_persist_helpers.js. Eval them so harness scope matches the
-// shipped bundle.
-for (const extra of process.argv.slice(3)) eval(fs.readFileSync(extra, 'utf8'));
+for (const f of process.argv.slice(2)) eval(fs.readFileSync(f, 'utf8'));  // bundle-order sources (incl. REAL core/conversations.js + every leaf it references)
 global.conversations = conversations;
 
 // Override the real loadConversationMessages with a COUNTER (late-bound global
@@ -229,14 +225,29 @@ def _run(js_path: str) -> subprocess.CompletedProcess:
     harness = os.path.join(HERE, '_open_conv_body_reconcile_harness.js')
     with open(harness, 'w') as f:
         f.write(_HARNESS)
-    extra_js = [
-        os.path.join(JS_DIR, 'core', 'conv_apply_settings.js'),
-        os.path.join(JS_DIR, 'core', 'conv_persist_helpers.js'),
-        os.path.join(JS_DIR, 'core', 'pending_sync.js'),
-    ]
+    # Resolve the eval list from the PRODUCTION bundle manifests instead of
+    # a hand-maintained extras list — the resolver is the project's answer
+    # to this exact incident class (a slice moves a symbol out of
+    # conversations.js; a hard-coded harness list silently loses it and the
+    # guard goes red looking like a product regression). Slice 7 moved
+    # _serverConvCount to conv_merge_shells.js (7c67c870); the inline list
+    # never followed and the merge loop died inside its own try/catch
+    # (merged=false, repull=0). The symbols below pin the four leaves the
+    # merge path needs; future slices re-home them automatically.
+    sys.path.insert(0, HERE)
+    from _conv_bundle_sources import source_argv
+    override = None
+    if os.path.basename(js_path) != 'conversations.js':
+        # NEUTER runs pass a mutated copy — the resolver's override maps it
+        # onto the real entry so the mutated file replaces (not joins) it.
+        override = {'core/conversations.js': js_path}
+    extra_js = source_argv(
+        'loadConversationsFromServer', '_serverConvCount',
+        '_applySettingsToConv', '_trimMsgForPersist', 'markConvPendingSync',
+        override=override)
     try:
         return subprocess.run(
-            ['node', harness, js_path, *extra_js],
+            ['node', harness, *extra_js],
             capture_output=True, text=True, timeout=60,
         )
     finally:

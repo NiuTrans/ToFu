@@ -96,12 +96,18 @@ def test_oauth_no_token_maps_to_not_logged_in_never_disable(monkeypatch):
         'not_logged_in must never recommend disabling a subscription model'
 
 
-def test_codex_is_stream_only_skipped(monkeypatch):
-    """codex has no non-stream translator — probe returns SKIPPED."""
+def test_codex_probe_no_token_is_not_logged_in_never_disable(monkeypatch):
+    """S4 changed the codex probe from SKIPPED to a REAL /responses probe.
+    The sentinel key must still never be sent: the probe resolves the live
+    token first, and with NO token the verdict is the NEUTRAL
+    'not_logged_in' — never recommend-disable. (Hermetic: token resolution
+    is mocked empty so no real network happens.)"""
+    monkeypatch.setattr('lib.oauth.codex.codex_get_valid_token',
+                        lambda: None)
     status, detail = pp.probe_one_cell(
         'https://chatgpt.com/backend-api/codex', 'oauth-managed', 'gpt-5-codex',
         {}, 5, protocol='openai', oauth='codex')
-    assert status == pp.SKIPPED
+    assert status == 'not_logged_in'
     assert status not in pp._PROBE_DISABLE_STATUSES
 
 

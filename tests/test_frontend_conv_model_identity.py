@@ -60,6 +60,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 
 import pytest
 
@@ -72,6 +73,19 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 def _node_available() -> bool:
     return bool(shutil.which('node'))
+
+
+def _conv_family(*, override=None):
+    """The drift-proof conv-family eval list (see
+    tests/_conv_bundle_sources.conv_family_sources). Harness A drives
+    loadConversationMessages, whose OVERWRITE path calls
+    _rescuableLocalTail (core/conv_rescue_tail.js) — a leaf the old
+    three-file inline list never loaded, so the branch threw inside the
+    loader's own try/catch and the settings call never fired (A3 RED,
+    2026-08-01)."""
+    sys.path.insert(0, HERE)
+    from _conv_bundle_sources import conv_family_sources
+    return conv_family_sources(override=override)
 
 
 def _run_harness(name: str, body: str, *js_paths: str) -> str:
@@ -153,9 +167,7 @@ global.Api = {
 };
 
 global.conversations = [];
-eval(fs.readFileSync(process.argv[2], 'utf8'));  // REAL core/conv_reducers.js
-eval(fs.readFileSync(process.argv[3], 'utf8'));  // REAL core/conv_apply_settings.js
-eval(fs.readFileSync(process.argv[4], 'utf8'));  // REAL core/conversations.js
+for (const f of process.argv.slice(2)) eval(fs.readFileSync(f, 'utf8'));  // bundle-order conv family via _conv_bundle_sources.conv_family_sources
 
 const out = [];
 function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
@@ -245,9 +257,7 @@ def test_merge_active_task_adopts_server_model():
     """INVARIANT A — the reported bug's exact branch."""
     output = _run_harness(
         'a', _HARNESS_A,
-        os.path.join(JS_DIR, 'core', 'conv_reducers.js'),
-        os.path.join(JS_DIR, 'core', 'conv_apply_settings.js'),
-        os.path.join(JS_DIR, 'core', 'conversations.js'))
+        *_conv_family())
     fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
     assert not fails, (
         'a pinned (active-task) conversation lost its stored model:\n' + output)
@@ -569,9 +579,7 @@ def test_NC_merge_active_task_settings_call_is_load_bearing(tmp_path):
 
     output = _run_harness(
         'a_nc', _HARNESS_A,
-        os.path.join(JS_DIR, 'core', 'conv_reducers.js'),
-        os.path.join(JS_DIR, 'core', 'conv_apply_settings.js'),
-        str(copy))
+        *_conv_family(override={'core/conversations.js': str(copy)}))
     assert 'FAIL A1_model_adopted_from_server_settings' in output, (
         'NEUTER did not bite: model still adopted without the settings call.\n'
         + output)

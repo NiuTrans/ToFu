@@ -221,11 +221,31 @@ def test_a_plain_push_to_main_can_trigger_the_build():
 def test_the_version_file_is_what_decides_a_release():
     """VERSION is the single source of truth — not an operator-remembered flag."""
     ver_job = _workflow()['jobs']['version']
-    body = ver_job['steps'][-1]['run']
+    body = _version_gate_script()
     assert 'cat VERSION' in body, 'version job must read the VERSION file'
     assert 'should_release' in ver_job.get('outputs', {}), (
         'version job must publish a should_release output'
     )
+
+
+def _version_gate_script() -> str:
+    """The ``version`` job's release-probe shell, resolved by step ``id``.
+
+    Deliberately NOT ``steps[-1]``. That positional shorthand encoded "the
+    probe is the last step of the job", which was true only until a second
+    step was appended after it — adding the CHANGELOG gate broke six tests at
+    once, none of which were about step ordering. The step carries ``id: ver``
+    (the job's own outputs already reference ``steps.ver.outputs.*``), so that
+    id is the stable handle the workflow itself relies on.
+    """
+    steps = _workflow()['jobs']['version']['steps']
+    for s in steps:
+        if s.get('id') == 'ver':
+            return s['run']
+    raise AssertionError(
+        "the version job has no step with id 'ver' — the job's own outputs "
+        'reference steps.ver.outputs.*, so that id must exist. Steps: '
+        f'{[s.get("name") or s.get("id") or s.get("uses") for s in steps]}')
 
 
 def _run_version_gate(*, http_code: str | None, event: str = 'push',
@@ -248,7 +268,7 @@ def _run_version_gate(*, http_code: str | None, event: str = 'push',
     Returns:
         The parsed ``key=value`` pairs the step wrote to ``$GITHUB_OUTPUT``.
     """
-    body = _workflow()['jobs']['version']['steps'][-1]['run']
+    body = _version_gate_script()
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
         (tmp / 'VERSION').write_text(version + '\n', encoding='utf-8')
@@ -388,7 +408,7 @@ def test_the_gate_asks_the_release_api_not_the_tag_list():
     documentation that prevents the regression — and, worse, could be silenced
     by deleting that explanation.
     """
-    body = _workflow()['jobs']['version']['steps'][-1]['run']
+    body = _version_gate_script()
     code = '\n'.join(
         line for line in body.splitlines()
         if not line.lstrip().startswith('#')
@@ -986,7 +1006,7 @@ def _run_version_gate_body(*, http_code, body_text, event='push',
     The gate now has to read the asset list, so the older helper (which only
     stubs a status code) cannot exercise this path at all.
     """
-    gate = _workflow()['jobs']['version']['steps'][-1]['run']
+    gate = _version_gate_script()
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
         (tmp / 'VERSION').write_text(version + '\n', encoding='utf-8')
@@ -1226,7 +1246,7 @@ def test_an_unreadable_asset_list_does_not_move_the_tag():
 # ── both gates must actually call the shared script ───────────────
 
 @pytest.mark.parametrize('job,step_finder', [
-    ('version', lambda wf: wf['jobs']['version']['steps'][-1]['run']),
+    ('version', lambda wf: _version_gate_script()),
     ('release', lambda wf: next(
         s['run'] for s in wf['jobs']['release']['steps']
         if 'Assert all platform assets' in str(s.get('name', '')))),

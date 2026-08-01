@@ -139,11 +139,28 @@ function _renderProvidersTab() {
       html += _renderLocalEndpointsSection(pi, endpointList);
     } else {
       // Provider fields (cloud)
+      /* Wire protocol for the DEFAULT face (alternates live in faces{}).
+       * Preserve an unknown stored value the same way _renderFaceRow does
+       * — the save is wholesale, so a select reporting a wrong first
+       * option would silently rewrite the provider's wire. */
+      var _provProto = p.protocol || 'openai';
+      var _protoOpts = ['openai', 'anthropic', 'responses'];
+      if (_provProto && _protoOpts.indexOf(_provProto) < 0) _protoOpts.push(_provProto);
+      var _protoSel = '<select onchange="_onProvField(' + pi + ',\'protocol\',this.value)">';
+      for (var _poi = 0; _poi < _protoOpts.length; _poi++) {
+        _protoSel += '<option value="' + _protoOpts[_poi] + '"' +
+          (_provProto === _protoOpts[_poi] ? ' selected' : '') + '>' +
+          _protoOpts[_poi] + '</option>';
+      }
+      _protoSel += '</select>';
       html += '<div class="stg-field-grid">' +
         '<div class="stg-field"><label>' + escapeHtml(t('settings.displayName')) + '</label>' +
           '<input type="text" value="' + escapeHtml(p.name || '') + '" onchange="_onProvField(' + pi + ',\'name\',this.value)"></div>' +
         '<div class="stg-field"><label>' + escapeHtml(t('settings.baseUrl')) + '</label>' +
           '<input type="text" value="' + escapeHtml(p.base_url || '') + '" placeholder="https://api.openai.com/v1" onchange="_onProvField(' + pi + ',\'base_url\',this.value)"></div>' +
+        '<div class="stg-field"><label>' + escapeHtml(t('settings.protocol')) +
+          ' <span class="stg-hint">（' + escapeHtml(t('settings.protocolHint')) + '）</span></label>' +
+          _protoSel + '</div>' +
       '</div>';
     }
 

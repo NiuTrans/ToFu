@@ -137,6 +137,18 @@ interface GlobalEventHandlers {
 // Drag events read e.dataTransfer off the base Event type in delegated handlers.
 // tofu-pet.js / tofu-scene.js read e.detail off CustomEvents typed as base Event.
 interface Event { dataTransfer: any; detail: any; }
+// User-Agent Client Hints. `navigator.userAgentData` is Chromium-only and is
+// not in the tsconfig `lib`, so tsc reports TS2551 ("did you mean userAgent?")
+// on a correct feature detection. local-control.js:_lcResolveArch reads it to
+// learn the CPU architecture — the ONLY practical source of that fact, since
+// an Apple Silicon Mac reports "Intel Mac OS X" in its UA string.
+//
+// Declared OPTIONAL on purpose: the whole point of that call site is that the
+// API may be absent (Safari, Firefox, older Chrome), and it already guards
+// with `if (!uad || typeof uad.getHighEntropyValues !== 'function')`. A
+// non-optional declaration would type away exactly the absence the code
+// handles, inviting a future caller to drop the guard.
+interface Navigator { userAgentData?: any; }
 // ResizeObserver entry: app reads contentBoxSize[0].inlineSize off the union.
 interface ResizeObserverSize { inlineSize: any; blockSize: any; }
 // app-specific expando stashed on toast <div>s + finish-info anchor ref + paper-reader tracking
