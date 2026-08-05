@@ -18,7 +18,7 @@ import os
 
 import pytest
 
-from tests._jsdom import JS_DIR, ROOT, run_harness
+from tests._jsdom import JS_DIR, ROOT, node_deps_available, run_harness, skip_or_fail
 
 pytestmark = pytest.mark.unit
 
@@ -174,6 +174,11 @@ def test_remote_picker_behaviour_jsdom():
 def test_NEUTER_strip_shortcircuit_calls_setPaths():
     """NEUTER:摘掉 _restoreConvProject 的伪路径短路 → setPaths 拿着
     'remote:…' 直奔服务器(400/误清的真实 bug 形态)= 短路承重。"""
+    # 手写 node 子进程(绕过 run_harness 因为要断言 FAIL 输出),所以共享 dep
+    # guard 也必须手写一遍 —— 无 jsdom 的 lane(公共 CI test-unit)要响亮地
+    # SKIP,而不是拿空 stdout 断言失败。
+    if not node_deps_available():
+        skip_or_fail('node + jsdom dev-deps not installed (run `npm install`)')
     import subprocess
     import tempfile
     src = _read(_PROJECT_STATE_JS)

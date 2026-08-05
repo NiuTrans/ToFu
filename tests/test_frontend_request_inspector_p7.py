@@ -32,7 +32,9 @@ The panel mounted by the `</> R{n}` entry next to a tool row.
 Kept contract (the P7 baseline):
   • The panel mounts INLINE right after the tool slot, fetches payloads with
     kind='state', and renders through the SHARED debug renderer
-    (renderDebugBlocksInto / updateDebugToolsBlock).
+    (renderDebugBlocksInto; since 2026-08-05 with the STRUCTURED body view —
+    parsed tool-call arguments, readable text — and WITHOUT the tools-schema
+    block, which the owner called meaningless noise on every tool result).
   • At most one panel; a different round replaces, the same round toggles.
   • Live accelerator: an SSE-recorded state mirror needs NO network fetch.
   • Fallback: no tool slot in the DOM → drawer detail (kind=state).

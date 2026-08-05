@@ -135,18 +135,29 @@ global.modelGroupBrandNames = window.modelGroupBrandNames;
  *
  * (2026-07-28, pt_464f2baf) The picker now groups by BRAND (core/model_group)
  * not provider_id, so the section key is the detected brand: the two
- * dated-id models detect as 'claude', the rest as 'meituan'. */
+ * dated-id models detect as 'claude', the rest as 'meituan'.
+ *
+ * The fixture pins `brand` EXPLICITLY rather than relying on _detectBrand
+ * matching the provider NAME: the opensource export (export.py rule 11/15)
+ * deliberately rewrites the internal org's detect pattern in branding.js
+ * ('meituan' → 'yourprovider') while model_group.js's label table and this
+ * file ship verbatim — so a name-detection fixture groups 'Meituan' models
+ * by their model_ids in the public tree (claude/gemini/kimi sections) and
+ * every section assertion goes red there. An explicit brand is also the
+ * PRODUCTION shape (server_config providers carry brand), so nothing is
+ * lost: the oauth pair still exercises the detect fall-through (brand
+ * 'oauth' → _detectBrand on the model_id → 'claude'). */
 const MODELS = [
-  { model_id: 'aws.claude-opus-4.6', provider_id: 'sankuai', provider_name: 'Meituan', capabilities: ['text'] },
-  { model_id: 'aws.claude-opus-4.8', provider_id: 'sankuai', provider_name: 'Meituan', capabilities: ['text'] },
-  { model_id: 'claude-fable-5', provider_id: 'sankuai', provider_name: 'Meituan', capabilities: ['text'] },
-  { model_id: 'gemini-3.5-flash', provider_id: 'sankuai', provider_name: 'Meituan', capabilities: ['text'] },
-  { model_id: 'gemini-3.6-flash', provider_id: 'sankuai', provider_name: 'Meituan', capabilities: ['text'] },
-  { model_id: 'hy3-preview', provider_id: 'sankuai', provider_name: 'Meituan', capabilities: ['text'] },
-  { model_id: 'kimi-k3', provider_id: 'sankuai', provider_name: 'Meituan', capabilities: ['text'] },
-  { model_id: 'yuju-claude-opus-5-evaDaily', provider_id: 'sankuai', provider_name: 'Meituan', capabilities: ['text'] },
-  { model_id: 'claude-opus-4-1-20250805', provider_id: 'oauth_claude', provider_name: 'Zzz Subscription', capabilities: ['text'] },
-  { model_id: 'claude-sonnet-4-5-20250929', provider_id: 'oauth_claude', provider_name: 'Zzz Subscription', capabilities: ['text'] },
+  { model_id: 'aws.claude-opus-4.6', provider_id: 'sankuai', provider_name: 'Meituan', brand: 'meituan', capabilities: ['text'] },
+  { model_id: 'aws.claude-opus-4.8', provider_id: 'sankuai', provider_name: 'Meituan', brand: 'meituan', capabilities: ['text'] },
+  { model_id: 'claude-fable-5', provider_id: 'sankuai', provider_name: 'Meituan', brand: 'meituan', capabilities: ['text'] },
+  { model_id: 'gemini-3.5-flash', provider_id: 'sankuai', provider_name: 'Meituan', brand: 'meituan', capabilities: ['text'] },
+  { model_id: 'gemini-3.6-flash', provider_id: 'sankuai', provider_name: 'Meituan', brand: 'meituan', capabilities: ['text'] },
+  { model_id: 'hy3-preview', provider_id: 'sankuai', provider_name: 'Meituan', brand: 'meituan', capabilities: ['text'] },
+  { model_id: 'kimi-k3', provider_id: 'sankuai', provider_name: 'Meituan', brand: 'meituan', capabilities: ['text'] },
+  { model_id: 'yuju-claude-opus-5-evaDaily', provider_id: 'sankuai', provider_name: 'Meituan', brand: 'meituan', capabilities: ['text'] },
+  { model_id: 'claude-opus-4-1-20250805', provider_id: 'oauth_claude', provider_name: 'Zzz Subscription', brand: 'oauth', capabilities: ['text'] },
+  { model_id: 'claude-sonnet-4-5-20250929', provider_id: 'oauth_claude', provider_name: 'Zzz Subscription', brand: 'oauth', capabilities: ['text'] },
 ];
 
 function labels() {

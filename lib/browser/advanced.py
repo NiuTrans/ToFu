@@ -516,7 +516,9 @@ ADVANCED_BROWSER_TOOL_MENU_CLICK = {
             "target_selector; the item is clicked by visible-text match "
             "(item_text, case-insensitive substring). submenu_text handles "
             "nested menus. If the item is not found, the available menu items "
-            "are returned so you can retry with the right text."
+            "are returned so you can retry with the right text. If the item "
+            "opens a new tab, the result says so and that tab becomes the "
+            "working tab."
         ),
         "parameters": {
             "type": "object",
@@ -551,7 +553,8 @@ ADVANCED_BROWSER_TOOL_FILL_FORM = {
             "instead of concatenating.\n"
             "Fields format: [{selector|text, value, type}, ...] where type is 'type', 'click', or 'select'. "
             "A field may be targeted by text (its placeholder/label, fuzzy-matched) instead of selector.\n"
-            "Automatically handles focusing, typing delays, and dropdown interactions."
+            "Automatically handles focusing, typing delays, and dropdown interactions. "
+            "A new tab opened by the submit is reported and becomes the working tab."
         ),
         "parameters": {
             "type": "object",

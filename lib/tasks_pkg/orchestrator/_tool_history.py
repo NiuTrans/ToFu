@@ -32,7 +32,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from lib.agent_core.events import EventType, build_event
+from lib.agent_core.events import Phase, build_phase
 from lib.log import get_logger
 from lib.tasks_pkg.manager import append_event
 from lib.tasks_pkg.server_message_store import (
@@ -101,9 +101,8 @@ def restore_tool_history(
         messages = rebuilt
         original_messages = list(messages)
         # Emit a diagnostic event for the debug panel
-        append_event(task, build_event(
-            EventType.PHASE,
-            phase='tool_history_restored',
+        append_event(task, build_phase(
+            Phase.TOOL_HISTORY_RESTORED,
             detail=f'Restored {_rebuild_stats["tool_msgs_restored"]} tool messages from server store',
             stats=_rebuild_stats,
             overhead=_oh,

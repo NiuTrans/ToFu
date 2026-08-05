@@ -124,7 +124,7 @@ class TestBackendEmittersShipDetailKey(unittest.TestCase):
         # is enough here — the emit is inside `force_compact_if_needed` which
         # only runs during a real overflow, awkward to drive in a unit test.
         m = re.search(
-            r"phase='compacting'.*?"
+            r"(?:phase='compacting'|Phase\.COMPACTING).*?"
             r"detailKey='stream\.phase\.compactingWindow'",
             src, re.DOTALL)
         self.assertTrue(m, 'compacting phase must ship detailKey')
@@ -135,7 +135,9 @@ class TestBackendEmittersShipDetailKey(unittest.TestCase):
             ROOT, 'lib', 'tasks_pkg', 'llm_fallback', '_call.py')
         with open(src_path, encoding='utf-8') as f:
             src = f.read()
-        self.assertIn("'detailKey': 'stream.phase.reactiveCompact'", src)
+        # The emit constructs via build_phase (the typed chokepoint), so the
+        # key is a kwarg — accept either spelling (EVENTS.md §4).
+        self.assertIn("detailKey='stream.phase.reactiveCompact'", src)
         self.assertIn("'attempt': _attempts + 1", src)
         self.assertIn("'max': _REACTIVE_COMPACT_MAX_RETRIES", src)
 

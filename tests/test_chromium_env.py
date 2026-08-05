@@ -367,7 +367,41 @@ requires_tofu_search = pytest.mark.skipif(
     reason='tofu_search not installed — nothing to guard here')
 
 
+def _gui_lib_dirs_without_env_leak():
+    """chromium_lib_dirs() as the SCRUBBED probe subprocess sees it (no
+    CONDA_PREFIX / CHROMIUM_EXTRA_LIB_DIRS — the self-heal reads the same
+    prefixes the probe does)."""
+    saved = {k: os.environ.pop(k, None)
+             for k in ('CONDA_PREFIX', 'CHROMIUM_EXTRA_LIB_DIRS')}
+    try:
+        return chromium_env.chromium_lib_dirs()
+    finally:
+        os.environ.update({k: v for k, v in saved.items() if v is not None})
+
+
+#: The pool self-heal adds GUI-lib dirs that EXIST under a prefix. A box with
+#: no libatk/libnss/libgbm anywhere under sys.prefix (e.g. public CI's stock
+#: hostedtoolcache Python) gives the self-heal nothing to add — the honest
+#: outcome there is an empty LD_LIBRARY_PATH, not a defect.
+requires_prefix_gui_libs = pytest.mark.skipif(
+    not _gui_lib_dirs_without_env_leak(),
+    reason='no prefix on this host carries Chromium GUI libs '
+           '(libatk/libnss/libgbm) — the pool self-heal has nothing to add, '
+           'so LD_LIBRARY_PATH staying empty is correct here')
+
+#: The interactive-login degradation path is only reachable when NO
+#: headed-capable browser exists. ubuntu CI runners ship google-chrome
+#: system-wide, so availability is honestly True there and the degradation
+#: branch cannot fire.
+requires_no_headed_browser = pytest.mark.skipif(
+    bool(chromium_env.headed_chromium_executable()),
+    reason='a headed-capable browser exists on this host (e.g. CI runners '
+           'ship google-chrome) — the headed_unavailable degradation path '
+           'this test pins is unreachable here')
+
+
 @requires_tofu_search
+@requires_prefix_gui_libs
 def test_tofu_search_pool_resolves_from_sys_prefix_not_conda_prefix():
     """The pool's self-heal must survive an un-activated shell.
 
@@ -392,6 +426,7 @@ def test_tofu_search_pool_resolves_from_sys_prefix_not_conda_prefix():
 
 
 @requires_tofu_search
+@requires_prefix_gui_libs
 def test_tofu_search_pool_fallback_works_without_the_host_module():
     """tofu_search must NOT hard-depend on the Tofu app to self-heal.
 
@@ -500,6 +535,7 @@ def test_headed_executable_excludes_shell_only_installs(tmp_path, monkeypatch):
 
 
 @requires_tofu_search
+@requires_no_headed_browser
 def test_interactive_login_degrades_with_an_actionable_reason():
     """The headed feature must say WHAT is wrong and WHICH command fixes it.
 

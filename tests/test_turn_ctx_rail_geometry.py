@@ -36,9 +36,13 @@ WHAT THIS ASSERTS (charter: assert the RESULT, not the threshold)
 2. **The complement** — in roomy states the rail is actually PRESENT and
    NON-EMPTY. Without this, "hide it everywhere" would satisfy (1) and stay
    green forever.
-3. **The height bound** — a one-line user turn must not be inflated by the
-   rail beyond a fixed multiple of its own content. Not clipping but adding
-   100px of whitespace per turn would trade "overflow" for "ugly".
+3. **The height invariant** — the rail is OUT OF FLOW (absolutely
+   positioned into its track's box), so a turn's height is its content's
+   height in EVERY state, collapsed or expanded. The in-flow rail this
+   replaced let a one-line user turn be stretched by the rail's own height
+   (~200px+ of dead space under the bubble when many MCP servers were
+   connected — the 2026-08-05 owner report that motivated the redesign).
+   Re-admitting an in-flow rail turns this red in every short-turn state.
 4. **No context is lost** — where the rail has no track (narrow pane / drawer
    open), the compact `.tctx-fold` summary is shown instead — measured by its
    rendered BOX, not just `display`, after a zero-width fold once passed the
@@ -394,10 +398,13 @@ _COLLAPSE = """() => {
     });
 }"""
 
-#: A rail must not inflate a turn without bound. The probe bubble is a few
-#: lines of prose (~110px); 2.5× still catches "the rail is now 400px tall"
-#: while tolerating the legitimate head+tools+workspace stack.
-_MAX_HEIGHT_RATIO = 2.5
+#: The rail is out of flow (styles.css `.turn-ctx` is absolutely
+#: positioned into the track's box, `max-height:100%`), so it contributes
+#: NOTHING to the row's height — collapsed or expanded. The probe bubble is
+#: a few lines of prose (~110px), so `msg == body` to within borders and
+#: grid rounding; 8px of slack catches an in-flow rail being re-admitted
+#: (which would add 60–300px) without flaking on sub-pixel rounding.
+_MAX_RAIL_INFLATION_PX = 8
 
 #: Upper bound on the RUNNING TEXT column. The point of reclaiming dead space
 #: is breathing room, NOT a longer line: an earlier version let the text column
@@ -504,13 +511,14 @@ def test_rail_never_clipped_in_any_pane_state(page):
     roomy = [r for r in rows if r['paneWidth'] >= _RAIL_MIN_PANE]
     missing = [r for r in roomy if not r['railShown'] or r['railText'] < 10]
 
-    # ── 3. Height bound: a one-line turn must not balloon. Scoped to the
-    #      COLLAPSED rail: expanding is an explicit user request to see more,
-    #      so growth there is the feature, not the defect. ──
+    # ── 3. Height invariant: the rail never inflates a turn — in ANY
+    #      state, expanded included. The old carve-out ("expanding is an
+    #      explicit request, so growth there is the feature") died with the
+    #      in-flow rail: expansion now reveals the hidden chips inside the
+    #      SAME message-bounded box, which scrolls. ──
     too_tall = [r for r in rows
-                if not r['expanded']
-                and r['bodyHeight'] > 0
-                and r['msgHeight'] > r['bodyHeight'] * _MAX_HEIGHT_RATIO]
+                if r['bodyHeight'] > 0
+                and r['msgHeight'] > r['bodyHeight'] + _MAX_RAIL_INFLATION_PX]
 
     # ── 4. No context lost: no rail track → the fold summary stands in —
     #      VISIBLY. display:flex is not enough: the fold once auto-placed
@@ -618,7 +626,7 @@ def test_rail_never_clipped_in_any_pane_state(page):
           f'({len(_THEMES)} themes \u00d7 {len(pane_states)} pane states \u00d7 2 = {len(rows)} rows)')
     print(f'  rail CLIPPED              : {len(clipped)}')
     print(f'  roomy states w/o rail     : {len(missing)} (of {len(roomy)} roomy rows)')
-    print(f'  turns inflated > {_MAX_HEIGHT_RATIO}×      : {len(too_tall)}')
+    print(f'  turns inflated > +{_MAX_RAIL_INFLATION_PX}px       : {len(too_tall)}')
     print(f'  no rail AND no fold       : {len(lost)}')
     if rows:
         _mw = max(r['measure'] for r in rows)
@@ -676,9 +684,11 @@ def test_rail_never_clipped_in_any_pane_state(page):
             for r in missing[:12]))
 
     assert not too_tall, (
-        'the rail inflates a one-line turn past %.1f× its own content height '
-        'in %d state(s) — not clipping is not enough, it must also look '
-        'right:\n  ' % (_MAX_HEIGHT_RATIO, len(too_tall))
+        'the rail inflates a turn past its own content height (+%dpx) in %d '
+        'state(s) — the rail is out of flow and must contribute NOTHING to '
+        'the row\'s height, expanded or not; an in-flow rail is the '
+        '2026-08-05 "huge gap between bubbles" bug:\n  '
+        % (_MAX_RAIL_INFLATION_PX, len(too_tall))
         + '\n  '.join(
             'drawer=%s sidebar=%-14s vw=%-5d expanded=%-5s msg=%.0f body=%.0f'
             % (r['drawer'], r['sidebar'], r['vw'], r['expanded'],

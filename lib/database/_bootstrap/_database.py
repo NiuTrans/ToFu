@@ -20,6 +20,61 @@ from lib.database._bootstrap._verify import _verify_pg_data_directory
 
 logger = get_logger(__name__)
 
+# Only the dump's globals PREAMBLE is filtered (first 8 MB); the per-database
+# data sections stream through unfiltered. Role statements never appear there,
+# and head-only filtering makes a false-positive inside COPY data impossible.
+_HEAD_FILTER_BYTES = 8 * 1024 * 1024
+
+
+def _role_noise_candidates(pg_user: str) -> set:
+    """The exact single-line statements that MUST NOT reach psql on replay.
+
+    A ``pg_dumpall --clean --if-exists`` dump's globals preamble contains::
+
+        DROP ROLE IF EXISTS "<user>";   -- replaying as <user>: FATAL
+                                        -- "current user cannot be dropped"
+        CREATE ROLE "<user>";          -- would then FATAL "already exists"
+
+    Everything else in the preamble (DROP DATABASE / ALTER ROLE … WITH /
+    passwords / configs) replays cleanly as the bootstrap superuser, so the
+    filter is deliberately scoped to the current role's DROP+CREATE lines.
+    Quoted and unquoted forms are both covered (pg_dumpall quotes roles whose
+    names need it, e.g. hyphenated ones).
+    """
+    if not pg_user:
+        return set()
+    q = f'"{pg_user}"'
+    return {
+        f'DROP ROLE IF EXISTS {q};', f'DROP ROLE IF EXISTS {pg_user};',
+        f'CREATE ROLE {q};', f'CREATE ROLE {pg_user};',
+    }
+
+
+def _filter_dump_head(head: bytes, pg_user: str):
+    """Drop the current-role noise lines from the dump head.
+
+    Returns (filtered_bytes, n_dropped). Only COMPLETE lines are examined; a
+    trailing partial line (head boundary mid-line) is passed through verbatim
+    so the raw splice behind it stays byte-aligned.
+    """
+    candidates = _role_noise_candidates(pg_user)
+    if not head:
+        return head, 0
+    last_nl = head.rfind(b'\n')
+    if last_nl < 0:
+        return head, 0
+    body, partial = head[:last_nl + 1], head[last_nl + 1:]
+    dropped = 0
+    out = []
+    for line in body.split(b'\n'):
+        # Exact full-line match only (stripped) — never a substring, so data
+        # lines merely CONTAINING such text can never be eaten.
+        if candidates and line.strip().decode('utf-8', 'replace') in candidates:
+            dropped += 1
+            continue
+        out.append(line)
+    return b'\n'.join(out) + partial, dropped
+
 
 def _ensure_database_exists(host, port, pg_dbname, pg_user, pgdata):
     """Run ``createdb`` if the target database doesn't exist yet."""
@@ -150,20 +205,60 @@ def _restore_from_sql_dump_if_present(base_dir, pg_port, pg_user, pg_dbname):
 
     logger.info('[DB] Restoring data from %s (%.1f MB) — this may take a moment…',
                 dump_path, size / (1024 * 1024))
+    proc = None
     try:
         # Connect to the postgres admin DB; pg_dumpall --clean expects
         # to be able to DROP the target databases before recreating them.
         # -v ON_ERROR_STOP=1 makes a partial restore fail loudly instead
         # of leaving a half-restored DB.
-        result = subprocess.run(
+        #
+        # The dump is fed through STDIN (not -f) so its globals preamble can
+        # be filtered first: pg_dumpall --clean emits `DROP ROLE IF EXISTS
+        # "<current user>";` which is a guaranteed FATAL ("current user cannot
+        # be dropped") on every same-user replay — under ON_ERROR_STOP that
+        # aborted the ENTIRE restore at line ~28 (measured 2026-08-05 on the
+        # 46 GB local-primary seed: restore died, verify read convs=None,
+        # quarantine — deterministic on every attempt). The head filter drops
+        # exactly the current role's DROP/CREATE lines; ON_ERROR_STOP stays
+        # armed for every real error.
+        proc = subprocess.Popen(
             [psql_bin, '-h', '127.0.0.1', '-p', str(pg_port), '-U', pg_user,
-             '-d', 'postgres', '-v', 'ON_ERROR_STOP=1', '-q', '-f', dump_path],
-            capture_output=True, text=True,
+             '-d', 'postgres', '-v', 'ON_ERROR_STOP=1', '-q', '-f', '-'],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             env={**os.environ, 'PGCONNECT_TIMEOUT': '10', 'PGGSSENCMODE': 'disable'},
-            # No timeout — large dumps can take minutes on FUSE.
         )
+        with open(dump_path, 'rb') as fh:
+            head = fh.read(_HEAD_FILTER_BYTES)
+            filtered_head, dropped = _filter_dump_head(head, pg_user)
+            if dropped:
+                logger.info('[DB] Filtered %d current-role statement(s) (%s) from '
+                            'the dump preamble — they are a guaranteed replay '
+                            'fatal on a same-user restore', dropped, pg_user)
+            proc.stdin.write(filtered_head)
+            shutil.copyfileobj(fh, proc.stdin, 1024 * 1024)
+        proc.stdin.close()
+        proc.stdin = None  # communicate() must not flush an already-closed stdin
+        _out, _err = proc.communicate()
+        class _Result:
+            pass
+        result = _Result()
+        result.returncode = proc.returncode
+        result.stderr = (_err or b'').decode('utf-8', 'replace')
     except Exception as e:
         logger.error('[DB] psql restore invocation failed: %s', e, exc_info=True)
+        if proc is not None:
+            if proc.poll() is None:
+                try:
+                    proc.kill()
+                except OSError:
+                    pass
+            try:
+                _err = proc.stderr.read() if proc.stderr else b''
+                if _err:
+                    logger.error('[DB] psql stderr before failure: %.500s',
+                                 _err.decode('utf-8', 'replace'))
+            except Exception:
+                pass
         return
 
     if result.returncode != 0:

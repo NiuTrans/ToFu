@@ -689,5 +689,26 @@
   "_partialOutput": "line1\nline2",
   "results": [],
   "roundNum": 45
+ },
+ {
+  "_name": "browser-click-done",
+  "status": "done",
+  "toolName": "browser_click",
+  "query": "Click current tab: 登录",
+  "results": [
+   {
+    "badge": "clicked"
+   }
+  ],
+  "roundNum": 46
+ },
+ {
+  "_name": "browser-type-searching",
+  "_isSearching": true,
+  "status": "searching",
+  "toolName": "browser_type",
+  "query": "Type into current tab: 搜索",
+  "results": [],
+  "roundNum": 47
  }
 ]

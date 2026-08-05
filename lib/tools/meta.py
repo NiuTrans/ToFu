@@ -190,7 +190,7 @@ def _build_find_files(meta, fn_name, fn_args, tool_content, path):
 def _build_write_file(meta, fn_name, fn_args, tool_content, path):
     desc = fn_args.get('description', '')
     # Success lines start with "File created:" / "File updated:";
-    # failures start with "Write failed:" or "write_file:" (bad path).
+    # failures start with "Write failed:" (the ONLY failure prefix — read-gate contract).
     low = tool_content.lower()
     ok = low.startswith('file created') or low.startswith('file updated')
     meta['snippet'] = f'{path}' + (f'  {desc}' if desc else '')

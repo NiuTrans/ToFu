@@ -163,7 +163,8 @@ def test_the_nudge_phase_label_is_translatable():
 
     analyse = (_ROOT / 'lib/tasks_pkg/stream_handler/_analyse.py').read_text(
         encoding='utf-8')
-    assert f"'detailKey': '{key}'" in analyse, (
+    # Emitted via emit_phase (the typed chokepoint) → kwarg spelling.
+    assert f"detailKey='{key}'" in analyse, (
         'the intent_stall_nudge phase event must carry the i18n detailKey'
     )
 
@@ -181,8 +182,10 @@ def test_the_nudge_phase_detail_fallback_is_not_chinese_only():
     """
     analyse = (_ROOT / 'lib/tasks_pkg/stream_handler/_analyse.py').read_text(
         encoding='utf-8')
-    block = analyse.split("'phase': 'intent_stall_nudge'", 1)[1][:600]
-    detail = re.search(r"'detail':\s*\(?\s*'((?:[^'\\]|\\.)*)'", block)
+    # Anchored on the typed Phase reference (emit_phase(Phase.INTENT_STALL_NUDGE,
+    # …)) — the string literal no longer appears at the construction site.
+    block = analyse.split('Phase.INTENT_STALL_NUDGE', 1)[1][:600]
+    detail = re.search(r"detail\s*=\s*\(?\s*'((?:[^'\\]|\\.)*)'", block)
     assert detail, 'the nudge phase event must carry a `detail` fallback'
     assert not re.search(r'[\u4e00-\u9fff]', detail.group(1)), (
         'the `detail` fallback is rendered verbatim by non-i18n clients, so it '

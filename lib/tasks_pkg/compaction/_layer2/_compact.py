@@ -443,10 +443,10 @@ def force_compact_if_needed(messages: list, task: dict | None = None,
     #   is busy compressing context rather than hung.
     if task is not None:
         try:
-            from lib.agent_core.events import EventType, build_event
+            from lib.agent_core.events import Phase, build_phase
             from lib.tasks_pkg.manager import append_event
-            append_event(task, build_event(
-                EventType.PHASE, phase='compacting',
+            append_event(task, build_phase(
+                Phase.COMPACTING,
                 detail='Compressing earlier context to fit the window…',
                 detailKey='stream.phase.compactingWindow'))
         except Exception as _ph_e:

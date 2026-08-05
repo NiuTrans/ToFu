@@ -1472,6 +1472,50 @@ def project_brain_watch_promote():
         return api_internal_error(e, source='api_v1.project.brain_watch_promote')
 
 
+@api_v1_project_bp.route('/api/v1/project/brain/watch/follow_up', methods=['POST'])
+@require_auth
+@rate_limit(limit=30, per=60)
+@api_meta(
+    summary="Answer the human's follow-up anchored to ONE watch response",
+    description=(
+        'Body: ``{itemId, question, seq?}``. The per-response thread the watch '
+        'lane was missing: the brain answers the follow-up grounded in LIVE '
+        'pillar state + the item text + the anchor response (``seq`` selects '
+        'it, latest when omitted), and the answer is appended to the SAME '
+        'trail with ``trigger=\'follow_up\'`` (the question rides the evidence '
+        'JSON as ``followUpQuestion``/``anchorSeq``). Stays inside the '
+        'human↔brain lane — it never marks the recurring cadence fresh (the '
+        'item fingerprint is untouched) and synthesized responses never reach '
+        'the prompt-injection path. Returns ``{ok, response}``; 400 on a '
+        'missing item / empty question / synthesis failure.'),
+    tags=['project'],
+)
+def project_brain_watch_follow_up():
+    data = parse_body()
+    item_id = (data.get('itemId') or '').strip()
+    question = (data.get('question') or '').strip()
+    if not item_id:
+        return api_bad_request('itemId is required', field='itemId')
+    if not question:
+        return api_bad_request('question is required', field='question')
+    seq = data.get('seq')
+    try:
+        seq = int(seq) if seq else None
+    except (ValueError, TypeError) as e:
+        logger.debug('[Project] bad follow-up seq arg, using latest: %s', e)
+        seq = None
+    try:
+        from lib.conversations.project_watch import answer_follow_up
+        res = answer_follow_up(item_id, question, response_seq=seq)
+        if not res.get('ok'):
+            return api_payload(res, 400)
+        return api_ok(res)
+    except Exception as e:
+        logger.error('[Project.v1] watch follow-up failed item=%s: %s',
+                     item_id, e, exc_info=True)
+        return api_internal_error(e, source='api_v1.project.brain_watch_follow_up')
+
+
 @api_v1_project_bp.route('/api/v1/project/brain/peers', methods=['GET'])
 @require_auth
 @api_meta(

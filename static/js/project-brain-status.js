@@ -81,6 +81,7 @@
       blocked: _t('projectBrain.statusTrigBlocked', 'work blocked'),
       on_open: _t('projectBrain.statusTrigOpen', 'refreshed'),
       manual: _t('projectBrain.statusTrigManual', 'manual'),
+      follow_up: _t('projectBrain.statusTrigFollowUp', 'follow-up'),
     };
     return map[trig] || trig || '';
   }
@@ -613,13 +614,13 @@
     var resp = document.createElement('div');
     resp.className = 'pb-watch-response';
     if (latest && latest.response) {
-      resp.textContent = latest.response;
-      resp.setAttribute('data-pb-src', latest.response);
+      _fillResponseBody(resp, latest);
       var rmeta = document.createElement('div');
       rmeta.className = 'pb-watch-response-meta';
       var rel = _relTime(latest.ts);
       rmeta.textContent = (rel ? rel + ' · ' : '') + _triggerLabel(latest.trigger);
       resp.appendChild(rmeta);
+      resp.appendChild(_buildRespActions(item, latest));
     } else {
       resp.className = 'pb-watch-response pb-watch-response-pending';
       resp.textContent = _t('projectBrain.watchNotAddressed', 'Not addressed yet');
@@ -637,10 +638,10 @@
         when.className = 'pb-watch-trail-when';
         when.textContent = _relTime(responses[i].ts);
         row.appendChild(when);
-        var body = document.createElement('span');
+        var body = document.createElement('div');
         body.className = 'pb-watch-trail-text';
-        body.textContent = responses[i].response || '';
-        if (responses[i].response) body.setAttribute('data-pb-src', responses[i].response);
+        _fillResponseBody(body, responses[i]);
+        body.appendChild(_buildRespActions(item, responses[i]));
         row.appendChild(body);
         trail.appendChild(row);
       }
@@ -649,6 +650,216 @@
 
     card.appendChild(_buildWatchActions(item, ctx));
     return card;
+  }
+
+  /* ── Per-response interaction (Increment 2 slice) ─────────────────────
+     Every brain response carries two doors:
+       • Follow up — an inline composer; the brain's answer lands in the SAME
+         append-only trail as a trigger='follow_up' entry (human↔brain lane);
+       • Request fix — an inline epic-draft editor pre-filled from the
+         response; submitting posts through the EXISTING human-gated
+         board-post path, so the brain dispatches the fix to a conversation
+         the human can open from the Board tab. No new write channel. */
+
+  /**
+   * Fill a response container: the human's follow-up question (when the entry
+   * is a follow_up answer) as a labelled line, then the response text in its
+   * own div. The text living in a child div (not host.textContent) is what
+   * lets the question line and the per-response actions coexist with it.
+   */
+  function _fillResponseBody(host, entry) {
+    var ps = (entry && entry.pillar_state) || {};
+    if (ps.followUpQuestion) {
+      var q = document.createElement('div');
+      q.className = 'pb-watch-followup-q';
+      q.textContent = _t('projectBrain.watchFollowUpQ', 'Follow-up') + ' · ' +
+        ps.followUpQuestion;
+      q.setAttribute('data-pb-src', ps.followUpQuestion);
+      host.appendChild(q);
+    }
+    var body = document.createElement('div');
+    body.className = 'pb-watch-response-text';
+    body.textContent = (entry && entry.response) || '';
+    if (entry && entry.response) body.setAttribute('data-pb-src', entry.response);
+    host.appendChild(body);
+  }
+
+  /** The two per-response doors + the slot an inline editor opens into. */
+  function _buildRespActions(item, entry) {
+    var wrap = document.createElement('div');
+    wrap.className = 'pb-watch-resp-tools';
+    var btns = document.createElement('div');
+    btns.className = 'pb-watch-resp-actions';
+    var fu = document.createElement('button');
+    fu.type = 'button';
+    fu.className = 'pb-watch-resp-act pb-watch-resp-followup';
+    fu.textContent = _t('projectBrain.watchFollowUp', 'Follow up');
+    fu.addEventListener('click', function () {
+      _toggleRespEditor(wrap, 'followup', function () {
+        return _buildFollowUpEditor(item, entry);
+      });
+    });
+    btns.appendChild(fu);
+    var fx = document.createElement('button');
+    fx.type = 'button';
+    fx.className = 'pb-watch-resp-act pb-watch-resp-fix';
+    fx.textContent = _t('projectBrain.watchRequestFix', 'Request fix');
+    fx.addEventListener('click', function () {
+      _toggleRespEditor(wrap, 'fix', function () {
+        return _buildFixEditor(item, entry);
+      });
+    });
+    btns.appendChild(fx);
+    wrap.appendChild(btns);
+    return wrap;
+  }
+
+  /** Toggle an inline editor under a response (one at a time; same-kind
+   *  re-click closes). */
+  function _toggleRespEditor(wrap, kind, build) {
+    var existing = wrap.querySelector('.pb-watch-resp-editor');
+    var sameOpen = existing &&
+      existing.getAttribute('data-editor-kind') === kind;
+    if (existing) existing.parentNode.removeChild(existing);
+    if (sameOpen) return;
+    var ed = build();
+    ed.setAttribute('data-editor-kind', kind);
+    wrap.appendChild(ed);
+    var input = ed.querySelector('.pb-status-ask-input');
+    if (input && input.focus) input.focus();
+  }
+
+  function _respEditorShell() {
+    var ed = document.createElement('div');
+    ed.className = 'pb-watch-resp-editor';
+    var actions = document.createElement('div');
+    actions.className = 'pb-status-ask-actions';
+    var status = document.createElement('span');
+    status.className = 'pb-status-ask-status';
+    actions.appendChild(status);
+    var cancel = document.createElement('button');
+    cancel.type = 'button';
+    cancel.className = 'pb-watch-resp-act';
+    cancel.textContent = _t('projectBrain.blockNoteCancel', 'Cancel');
+    cancel.addEventListener('click', function () {
+      if (ed.parentNode) ed.parentNode.removeChild(ed);
+    });
+    return { ed: ed, actions: actions, status: status, cancel: cancel };
+  }
+
+  /** The follow-up composer: question → brainWatchFollowUp → trail refresh. */
+  function _buildFollowUpEditor(item, entry) {
+    var sh = _respEditorShell();
+    var ta = document.createElement('textarea');
+    ta.className = 'pb-status-ask-input';
+    ta.rows = 2;
+    ta.placeholder = _t('projectBrain.watchFollowUpPlaceholder',
+      'Ask a follow-up about this answer…');
+    sh.ed.appendChild(ta);
+    var send = document.createElement('button');
+    send.type = 'button';
+    send.className = 'pb-status-ask-btn';
+    send.textContent = _t('projectBrain.watchFollowUpSend', 'Send');
+    sh.actions.appendChild(send);
+    sh.actions.appendChild(sh.cancel);
+    sh.ed.appendChild(sh.actions);
+
+    function submit() {
+      var q = (ta.value || '').trim();
+      if (!q) { if (ta.focus) ta.focus(); return; }
+      var api = (typeof Api !== 'undefined' && Api.project) ? Api.project : null;
+      if (!api || typeof api.brainWatchFollowUp !== 'function') return;
+      send.disabled = true;
+      Promise.resolve(api.brainWatchFollowUp(item.item_id || '', q,
+                                             entry && entry.seq))
+        .then(function () { _refreshWatch(_displayedStatusPath(), false); })
+        .catch(function (e) {
+          sh.status.textContent = _t('projectBrain.watchFollowUpFailed',
+            'Follow-up failed');
+          send.disabled = false;
+          if (typeof console !== 'undefined') {
+            console.warn('[ProjectBrain] follow-up failed', e);
+          }
+        });
+    }
+    send.addEventListener('click', submit);
+    ta.addEventListener('keydown', function (e) {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+        e.preventDefault(); submit();
+      }
+      if (e.key === 'Escape' && sh.ed.parentNode) {
+        sh.ed.parentNode.removeChild(sh.ed);
+      }
+    });
+    return sh.ed;
+  }
+
+  /** Draft an epic title from a response: first sentence-ish chunk, capped —
+   *  the human edits before posting. */
+  function _draftFixTitle(entry) {
+    var t = ((entry && entry.response) || '').replace(/\s+/g, ' ').trim();
+    if (!t) return '';
+    var segs = t.split(/[。！？.!?]/);
+    var first = '';
+    for (var i = 0; i < segs.length; i++) {
+      if (segs[i].trim()) { first = segs[i].trim(); break; }
+    }
+    var title = first || t;
+    return title.length > 90 ? title.slice(0, 90).trim() + '…' : title;
+  }
+
+  /** The request-fix editor: pre-filled epic title → the EXISTING human-gated
+   *  board-post (created_by_conv = displayed conv → dispatch target). */
+  function _buildFixEditor(item, entry) {
+    var sh = _respEditorShell();
+    var input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'pb-status-ask-input pb-watch-fix-title';
+    input.value = _draftFixTitle(entry);
+    sh.ed.appendChild(input);
+    var send = document.createElement('button');
+    send.type = 'button';
+    send.className = 'pb-status-ask-btn';
+    send.textContent = _t('projectBrain.watchFixSend', 'Post to board');
+    sh.actions.appendChild(send);
+    sh.actions.appendChild(sh.cancel);
+    sh.ed.appendChild(sh.actions);
+
+    function submit() {
+      var title = (input.value || '').trim();
+      if (!title) { if (input.focus) input.focus(); return; }
+      var api = (typeof Api !== 'undefined' && Api.project) ? Api.project : null;
+      var path = _displayedStatusPath();
+      var convId = _watchConvId();
+      if (!api || typeof api.boardPost !== 'function' || !path || !convId) {
+        sh.status.textContent = _t('projectBrain.watchFixFailed',
+          'Could not post');
+        return;
+      }
+      send.disabled = true;
+      Promise.resolve(api.boardPost(path, { title: title, convId: convId }))
+        .then(function () {
+          input.disabled = true;
+          sh.status.textContent = _t('projectBrain.watchFixPosted',
+            'Posted to the board');
+        })
+        .catch(function (e) {
+          sh.status.textContent = _t('projectBrain.watchFixFailed',
+            'Could not post');
+          send.disabled = false;
+          if (typeof console !== 'undefined') {
+            console.warn('[ProjectBrain] request-fix post failed', e);
+          }
+        });
+    }
+    send.addEventListener('click', submit);
+    input.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') { e.preventDefault(); submit(); }
+      if (e.key === 'Escape' && sh.ed.parentNode) {
+        sh.ed.parentNode.removeChild(sh.ed);
+      }
+    });
+    return sh.ed;
   }
 
   /** Action row: refresh · promote (concern/question only) · resolve/reopen · delete. */

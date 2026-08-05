@@ -60,8 +60,9 @@ BROWSER_TOOL_READ_PAGE = {
             "it automatically attaches a structural summary (framework, forms, "
             "canvas count) with concrete next steps — no diagnosis needed on your part.\n"
             "mode='text' forces DOM text (optionally scoped by selector). "
-            "mode='elements' lists interactive elements (buttons/links/inputs with "
-            "selectors) — rarely needed since browser_click/browser_type accept text=. "
+            "mode='elements' lists interactive elements (buttons/links/inputs and "
+            "cursor-pointer card regions, with selectors) — rarely needed since "
+            "browser_click/browser_type accept text=. "
             "mode='app_state' extracts Vue/React state and chart data (G6/ECharts)."
         ),
         "parameters": {
@@ -276,8 +277,9 @@ BROWSER_TOOL_CLICK = {
             "text='登录' fuzzy-matches a button/link by visible text or aria-label "
             "(preferred); selector='#id' is the explicit fallback. "
             "The element is automatically awaited and scrolled into view, and the result "
-            "reports whether the page changed (URL/title) — you usually do NOT need a "
-            "separate verification read afterwards.\n"
+            "reports whether the page changed (URL/title) — and when the click opens a "
+            "NEW TAB, that tab is reported and becomes the working tab automatically "
+            "(tab #, title, URL), so you usually do NOT need a separate verification read.\n"
             "For hover/right-click menus use browser_menu_click. For typing into fields "
             "use browser_type; for 2+ fields use ONE browser_fill_form call. "
             "On ambiguity the closest candidates are returned — retry with more specific text."

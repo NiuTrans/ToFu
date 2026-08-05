@@ -23,6 +23,7 @@ import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from lib.agent_core.events import Phase
 from lib.llm import build_body as _default_build_body
 from lib.llm_dispatch import dispatch_stream as _default_dispatch_stream
 from lib.llm_dispatch.retry_i18n import retry_phase_fields
@@ -856,7 +857,7 @@ class SubAgent:
             # cooldown (rate-limited strict_model) — the exact 5-minute
             # first-token stall the user saw as a "hang". Phase, not delta:
             # transient UI, never pollutes the assistant content.
-            self._emit_stream_phase('waiting_model',
+            self._emit_stream_phase(Phase.WAITING_MODEL,
                                     'Sent to the model, waiting for it to '
                                     'start replying…')
 
@@ -870,7 +871,7 @@ class SubAgent:
                 # so the frontend HUD localizes the cause.
                 _d, _meta = _build_dispatch_retry_phase(
                     attempt, reason, status_code, self.model)
-                self._emit_stream_phase('retrying', _d, **_meta)
+                self._emit_stream_phase(Phase.RETRYING, _d, **_meta)
 
             try:
                 msg, stop_reason, usage = self._dispatch_stream(

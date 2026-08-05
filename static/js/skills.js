@@ -12,6 +12,15 @@ var _skillsDropAttached = false;
 var _skillsDragDepth = 0;
 var _skillsPage = 1;              // 1-based page index
 var _SKILLS_PAGE_SIZE = 12;       // cards per page (grid-friendly)
+var _skillsEnvStatus = {};        // skill_id → [{name, declared, configured, hint}]
+
+// Where NEW installs land. External capability packs are cross-project by
+// nature, so the header selector defaults to 全局 (global) — a
+// project-scoped install is invisible in project-less chat mode.
+function _skillsInstallScope() {
+  var sel = document.getElementById('skillsInstallScope');
+  return (sel && sel.value === 'project') ? 'project' : 'global';
+}
 
 // ── Population (called from openSettings → _populateSkillsTab) ──
 async function _populateSkillsTab() {
@@ -23,6 +32,16 @@ async function _populateSkillsTab() {
     _skillsCatalog = (cdata && cdata.catalog) || [];
     var all = (ldata && ldata.skills) || [];
     _skillsInstalled = all.filter(function (m) { return m.is_package; });
+    // Env/key status per installed skill (declared via requires_env). The
+    // rows are redacted (hint only) — a value never crosses the wire.
+    _skillsEnvStatus = {};
+    await Promise.all(_skillsInstalled.map(async function (m) {
+      if (!Array.isArray(m.requires_env) || !m.requires_env.length) return;
+      try {
+        var d = await Api.skills.envStatus(m.id);
+        if (d && Array.isArray(d.env)) _skillsEnvStatus[m.id] = d.env;
+      } catch (_) { /* status column just stays empty */ }
+    }));
     _skillsRender();
     _skillsAttachDropZone();
   } catch (e) {
@@ -278,8 +297,10 @@ function _skillsRenderInstalled() {
     if (ineligible && Array.isArray(m.ineligible_reasons) && m.ineligible_reasons.length) {
       html2 += '<div class="skill-badge-warn">⚠ ' + escapeHtml(m.ineligible_reasons.join(' · ')) + '</div>';
     }
+    html2 += _skillsRenderEnvSection(m);
     html2 += '<div class="skill-card-footer"><span></span><div class="skill-card-actions">';
     html2 += '<button class="btn btn-secondary btn-xs" onclick="_skillsViewFiles(\'' + escapeHtml(m.id) + '\')">' + escapeHtml(t('skills.viewFiles')) + '</button>';
+    html2 += '<button class="btn btn-secondary btn-xs" onclick="_skillsMoveScope(\'' + escapeHtml(m.id) + '\', \'' + (m.scope === 'global' ? 'project' : 'global') + '\', this)">' + escapeHtml(m.scope === 'global' ? t('skills.moveToProject') : t('skills.moveToGlobal')) + '</button>';
     html2 += '<button class="btn btn-secondary btn-xs" onclick="_skillsToggleEnabled(\'' + escapeHtml(m.id) + '\', this)">' + escapeHtml(m.enabled ? t('skills.disable') : t('skills.enable')) + '</button>';
     html2 += '<button class="btn btn-secondary btn-xs" onclick="_skillsUninstall(\'' + escapeHtml(m.id) + '\')">' + escapeHtml(t('skills.uninstallBtn')) + '</button>';
     html2 += '</div></div></div>';
@@ -288,13 +309,99 @@ function _skillsRenderInstalled() {
   grid.innerHTML = html + _skillsRenderPagination(total, _SKILLS_PAGE_SIZE);
 }
 
+// ── Env / key bindings (credential-vault backed) ─────────────
+
+function _skillsRenderEnvSection(m) {
+  var rows = _skillsEnvStatus[m.id];
+  if (!rows || !rows.length) return '';
+  var html = '<div class="skill-env-section">';
+  rows.forEach(function (r) {
+    html += '<div class="skill-env-row">';
+    html += '<code class="skill-env-name">' + escapeHtml(r.name) + '</code>';
+    if (r.configured) {
+      html += '<span class="skill-env-state is-ok">' + escapeHtml(t('skills.envConfigured')) + (r.hint ? ' · ' + escapeHtml(r.hint) : '') + '</span>';
+    } else {
+      html += '<span class="skill-env-state is-missing">' + escapeHtml(t('skills.envMissing')) + '</span>';
+    }
+    html += '<button class="btn btn-secondary btn-xs" onclick="_skillsEnvToggleEditor(\'' + escapeHtml(m.id) + '\', \'' + escapeHtml(r.name) + '\')">' + escapeHtml(t(r.configured ? 'skills.envUpdate' : 'skills.envSet')) + '</button>';
+    if (r.configured) {
+      html += '<button class="btn btn-secondary btn-xs" onclick="_skillsEnvDelete(\'' + escapeHtml(m.id) + '\', \'' + escapeHtml(r.name) + '\')">' + escapeHtml(t('skills.envDelete')) + '</button>';
+    }
+    html += '</div>';
+    html += '<div class="skill-env-editor" id="skillEnvEditor_' + escapeHtml(m.id) + '_' + escapeHtml(r.name) + '" style="display:none">' +
+      '<input type="password" class="skill-env-input" id="skillEnvInput_' + escapeHtml(m.id) + '_' + escapeHtml(r.name) + '" placeholder="' + escapeHtml(t('skills.envPlaceholder')) + '" autocomplete="off">' +
+      '<button class="btn btn-primary btn-xs" onclick="_skillsEnvSave(\'' + escapeHtml(m.id) + '\', \'' + escapeHtml(r.name) + '\')">' + escapeHtml(t('skills.envSave')) + '</button>' +
+      '</div>';
+  });
+  html += '</div>';
+  return html;
+}
+
+function _skillsEnvToggleEditor(skillId, envName) {
+  var el = document.getElementById('skillEnvEditor_' + skillId + '_' + envName);
+  if (!el) return;
+  el.style.display = (el.style.display === 'none') ? 'flex' : 'none';
+  if (el.style.display !== 'none') {
+    var input = document.getElementById('skillEnvInput_' + skillId + '_' + envName);
+    if (input) input.focus();
+  }
+}
+
+async function _skillsEnvSave(skillId, envName) {
+  var input = document.getElementById('skillEnvInput_' + skillId + '_' + envName);
+  var value = input ? input.value.trim() : '';
+  if (!value) {
+    _skillsToast(t('skills.envEmpty'), 'error');
+    return;
+  }
+  try {
+    var r = await Api.skills.envSet(skillId, envName, value);
+    var d = (r ? await r.json().catch(function () { return {}; }) : {});
+    if (!r || !r.ok) throw new Error(d.error || (r && r.statusText) || t('skills.noResponse'));
+    _skillsToast(t('skills.envSaved', { name: envName }), 'success');
+    await _populateSkillsTab();
+  } catch (e) {
+    _skillsToast(t('skills.envSaveFailed', { err: e.message }), 'error');
+  }
+}
+
+async function _skillsEnvDelete(skillId, envName) {
+  if (!await showConfirm(t('skills.envDeleteConfirm', { name: envName }), { danger: true })) return;
+  try {
+    var r = await Api.skills.envDelete(skillId, envName);
+    if (!r || !r.ok) {
+      var d = (r ? await r.json().catch(function () { return {}; }) : {});
+      throw new Error(d.error || (r && r.statusText) || t('skills.noResponse'));
+    }
+    _skillsToast(t('skills.envDeleted', { name: envName }), 'success');
+    await _populateSkillsTab();
+  } catch (e) {
+    _skillsToast(t('skills.envDeleteFailed', { err: e.message }), 'error');
+  }
+}
+
+async function _skillsMoveScope(skillId, targetScope, btn) {
+  if (btn) btn.disabled = true;
+  try {
+    var r = await Api.skills.setScope(skillId, targetScope);
+    var d = (r ? await r.json().catch(function () { return {}; }) : {});
+    if (!r || !r.ok) throw new Error(d.error || (r && r.statusText) || t('skills.noResponse'));
+    _skillsToast(t('skills.scopeMoved', { id: skillId }), 'success');
+    await _populateSkillsTab();
+  } catch (e) {
+    _skillsToast(t('skills.scopeMoveFailed', { err: e.message }), 'error');
+    if (btn) btn.disabled = false;
+  }
+}
+
+// ── Actions ───────────────────────────────────────────────────
 // ── Actions ───────────────────────────────────────────────────
 
 async function _skillsCatalogInstall(skillId, btn) {
   if (btn) { btn.disabled = true; btn.textContent = t('skills.installing'); }
   _skillsToast(t('skills.downloadingInstalling', { id: skillId }));
   try {
-    var r = await Api.skills.catalogInstall(skillId, 'project');
+    var r = await Api.skills.catalogInstall(skillId, _skillsInstallScope());
     var d = (r ? await r.json().catch(function () { return {}; }) : {});
     if (!r || !r.ok) {
       _skillsToast(t('skills.installFailed', { err: (d.error || r.statusText) }), 'error');
@@ -314,7 +421,12 @@ async function _skillsCatalogInstall(skillId, btn) {
 }
 
 async function _skillsUninstall(memoryId) {
-  if (!await showConfirm(t('skills.uninstallConfirm', { id: memoryId }), { danger: true })) return;
+  var confirmText = t('skills.uninstallConfirm', { id: memoryId });
+  var envRows = _skillsEnvStatus[memoryId] || [];
+  if (envRows.some(function (r) { return r.configured; })) {
+    confirmText += '\n' + t('skills.uninstallConfirmEnv');
+  }
+  if (!await showConfirm(confirmText, { danger: true })) return;
   /* ★ INSTANT-UI (owner directive 2026-07-31, pt_77ba3f17dedf4b65): the card
    *   leaves the model AND the grid re-renders the moment the confirm closes —
    *   the old code awaited the DELETE and then a FULL tab repopulate, so the

@@ -32,6 +32,10 @@ test = [
     # push bus (Epics B/C/D) against a REAL redis-py client without a live
     # server. Test-only; the runtime `redis` dep it pulls is NOT core.
     "fakeredis>=2.20",
+    # Tiny pure-python CSS parser used by tests/test_frontend_icon_box_alignment.py
+    # (parses styles.css rules instead of regex). Without it that module died at
+    # COLLECTION with ModuleNotFoundError in every CI lane (2026-08-05).
+    "tinycss2>=1.2",
 ]
 dev = [
     # Superset of `test` plus the linter — the local contributor extra.

@@ -268,5 +268,17 @@
   "name": "cmd-running-long-collapsed",
   "html": "<div class=\"ptool-cmd-block ptool-cmd-running\" data-cmd-key=\"call-long-run-1\">\n           <div class=\"ptool-cmd-header\">\n             <span class=\"ptool-cmd-icon\"><svg width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"><polyline points=\"4 17 10 11 4 5\"/><line x1=\"12\" y1=\"19\" x2=\"20\" y2=\"19\"/></svg></span>\n             \n             <span class=\"ptool-cmd-desc-inline ptool-cmd-desc-toggle\" title=\"sleep via heredoc\" onclick=\"_cmdBodyToggle(this,event)\">sleep via heredoc</span>\n             <span class=\"ptool-cmd-label\">Running...</span>\n             \n             <span class=\"ptool-spinner\"></span>\n           </div>\n           <pre class=\"ptool-cmd-code ptool-cmd-collapsible\"><code>$ python3 - &lt;&lt;&#39;EOF&#39;\nimport time\ntime.sleep(9)\nEOF</code></pre>\n           <pre class=\"ptool-cmd-output ptool-cmd-output-live\"><code>line1\nline2</code></pre>\n         </div>",
   "err": null
+ },
+ {
+  "i": 45,
+  "name": "browser-click-done",
+  "html": "<div class=\"ptool-line\">\n       <span class=\"ptool-icon\"><svg width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M4 4l7.07 16.97 2.51-7.39 7.39-2.51L4 4z\"/><path d=\"M13.5 13.5 19 19\"/></svg></span>\n       \n       \n       <span class=\"ptool-text\">Click current tab: 登录</span>\n       \n       <span class=\"ptool-badge ptool-badge-info\">clicked</span>\n       <span class=\"ptool-row-ctl\"></span>\n     </div>",
+  "err": null
+ },
+ {
+  "i": 46,
+  "name": "browser-type-searching",
+  "html": "<div class=\"ptool-line ptool-active\">\n         <span class=\"ptool-icon\"><svg width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><polyline points=\"4 7 4 4 20 4 20 7\"/><line x1=\"9\" y1=\"20\" x2=\"15\" y2=\"20\"/><line x1=\"12\" y1=\"4\" x2=\"12\" y2=\"20\"/></svg></span>\n         \n         <span class=\"ptool-text\">Type into current tab: 搜索</span>\n         \n         <span class=\"ptool-spinner\"></span>\n       </div>",
+  "err": null
  }
 ]

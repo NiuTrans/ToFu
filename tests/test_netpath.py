@@ -32,6 +32,14 @@ def _clean_netpath(monkeypatch, tmp_path):
     # spawns the prober in test processes; these tests exercise netpath
     # itself, so turn the switch back on for this module only.
     monkeypatch.setenv('TOFU_NETPATH', 'on')
+    # Pin the proxy configuration EXPLICITLY: the scorer's proxy path only
+    # exists when an env proxy is set (``netpath._proxy_url()``), and several
+    # tests assert 'proxy' wins / is the effective default. The dev box has
+    # ambient http_proxy/https_proxy; CI has none — without this pin the
+    # whole module is env-dependent ('assert direct == proxy' on CI).
+    # Tests that exercise the no-proxy deployment delete these themselves.
+    for var in PROXY_ENV_VARS:
+        monkeypatch.setenv(var, 'http://netpath-test-proxy.invalid:3128')
     # report_outcome() saves learned state unthrottled on the first call —
     # redirect the store so test hosts never reach the production
     # data/config/netpath.json the server loads at boot.

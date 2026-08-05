@@ -30,6 +30,7 @@ charter #24) + PIL pixel proofs on the shipped PNGs.
 """
 from __future__ import annotations
 
+import importlib.util
 import re
 import subprocess
 import sys
@@ -46,6 +47,15 @@ PET_JS = REPO / "static" / "js" / "tofu-pet.js"
 CSS = REPO / "static" / "styles.css"
 
 WALK_FRAMES = ["walk1", "walk2", "walk3", "walk4", "walk5", "walk6", "walk7", "walk8"]
+
+#: The pixel-morphology proofs (connected-component body masks) need
+#: scipy.ndimage — an optional imaging dep that is NOT part of the public CI
+#: footprint. Skip those tests loudly where it is absent; every pure
+#: source-contract guard in this file still runs everywhere.
+_requires_scipy = pytest.mark.skipif(
+    importlib.util.find_spec('scipy') is None,
+    reason='scipy not installed — the ndimage body-mask pixel proofs require '
+           'it (optional imaging dep, absent on public CI)')
 
 
 def _js_code() -> str:
@@ -530,6 +540,7 @@ def test_every_frame_shares_one_canvas():
     )
 
 
+@_requires_scipy
 def test_the_character_is_the_same_size_in_every_frame():
     """A rigid feature (the BODY's width) must be constant across every frame
     that shares the character's stance.
@@ -570,6 +581,7 @@ def test_the_character_is_the_same_size_in_every_frame():
     )
 
 
+@_requires_scipy
 def test_the_pipeline_scales_every_frame_by_the_SAME_factor():
     """THE LOAD-BEARING GUARD: shipped size must be the master's size × ONE
     constant, for every frame.
@@ -620,6 +632,7 @@ def test_the_pipeline_scales_every_frame_by_the_SAME_factor():
     )
 
 
+@_requires_scipy
 def test_every_frame_registers_on_the_body_centre_and_foot_line():
     """The two anchors must hold on every shipped frame.
 
@@ -744,6 +757,7 @@ def test_the_turn_pivot_actually_wins_the_cascade():
 
 # ── NEUTER proofs for section 4: each must bite its OWN test, and only its own ──
 
+@_requires_scipy
 def test_NEUTER_per_frame_normalisation_is_caught(tmp_path):
     """Reintroduce the ORIGINAL defect — trim each frame to its own bbox and
     scale it so its own longest side hits MAX_SIDE — and the size-constancy
@@ -782,6 +796,7 @@ def test_NEUTER_per_frame_normalisation_is_caught(tmp_path):
     )
 
 
+@_requires_scipy
 def test_NEUTER_ink_centred_frames_are_caught(tmp_path):
     """Anchor on the INK centre instead of the BODY centre (the original
     registration bug) and the lateral-teleport guard must fail. The frames with

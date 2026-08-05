@@ -13,6 +13,10 @@
               <button class="skills-scope-tab active" data-scope="catalog" onclick="_skillsSetScope('catalog')" data-i18n="skills.tabCatalog">市场</button>
               <button class="skills-scope-tab" data-scope="installed" onclick="_skillsSetScope('installed')" data-i18n="skills.tabInstalled">已安装</button>
             </div>
+            <select class="skills-install-scope mcp-env-select" id="skillsInstallScope" title="新安装的技能包放到哪里" data-i18n-title="skills.installScopeTitle">
+              <option value="global" selected data-i18n="skills.scopeGlobal">安装到全局</option>
+              <option value="project" data-i18n="skills.scopeProject">安装到本项目</option>
+            </select>
             <button class="btn btn-secondary btn-xs skills-newmem-btn" onclick="openMemoryCreateForm()" title="手动创建一条记忆" data-i18n-title="skills.newMemoryTitle">
               <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" style="vertical-align:-1px"><path d="M12 5v14M5 12h14"/></svg>
               <span data-i18n="skills.newMemory">新建记忆</span>

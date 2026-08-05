@@ -18,7 +18,12 @@ half of the v2 surface):
    model-supplied selector. It never blocks the action; it annotates.
 4. **Action receipts** — after a click/type/navigation, one cheap
    ``list_tabs`` tells the model whether the page changed (URL/title),
-   so verification no longer costs a whole extra LLM round.
+   so verification no longer costs a whole extra LLM round. v3
+   (2026-08-05): the receipt also diffs the tab-ID SET, so a click that
+   opened a NEW TAB (target=_blank card UIs — the 钱管家 incident, conv
+   msft42tqheea8x) is reported and auto-followed instead of looking like
+   "nothing happened". Entirely server-side: works with every extension
+   version, no extension update required.
 
 All functions take an optional ``send`` callable (the bridge command
 dispatcher) so callers keep their own monkeypatch contract — handlers pass
@@ -35,7 +40,7 @@ logger = get_logger(__name__)
 
 __all__ = [
     'remember_work_tab', 'forget_work_tab', 'resolve_work_tab',
-    'resolve_element', 'auto_wait', 'action_receipt',
+    'current_work_tab', 'resolve_element', 'auto_wait', 'action_receipt',
 ]
 
 
@@ -76,6 +81,16 @@ def forget_work_tab(tab_id):
     with _work_tab_lock:
         if _work_tab['id'] == tab_id:
             _work_tab['id'] = None
+
+
+def current_work_tab():
+    """Return the remembered working-tab id (int) or None — no bridge call.
+
+    Display-layer consumers (lib/browser/display.py) use this to NAME the
+    tab a ``tab_id``-omitted call will land on.
+    """
+    with _work_tab_lock:
+        return _work_tab['id']
 
 
 def resolve_work_tab(fn_args, send=None):
@@ -149,7 +164,11 @@ def _score_element(el, query, kinds):
     else:
         fields = ((el.get('text'), 0), (el.get('ariaLabel'), -5),
                   (el.get('title'), -5))
-        boost = 15 if (tag in _CLICK_TAGS or role in _CLICK_ROLES) else 0
+        # extension >= 4.8.0 flags cursor:pointer roots (React/Vue card UIs
+        # expose no semantic tell at all) with pointer=True — rank them just
+        # below real buttons/links, above plain divs.
+        boost = (15 if (tag in _CLICK_TAGS or role in _CLICK_ROLES)
+                 else (10 if el.get('pointer') else 0))
     best = 0
     for value, penalty in fields:
         v = _norm(value)
@@ -237,9 +256,58 @@ def auto_wait(tab_id, selector, send=None, timeout_ms=3000):
 #  4. Action receipts — post-action page-state delta
 # ══════════════════════════════════════════════════════════
 
-def tab_snapshot(tab_id):
-    """(title, url) currently cached for the tab, pre-action."""
-    return get_tab_title(tab_id), get_tab_url(tab_id)
+def tab_snapshot(tab_id, send=None):
+    """Pre-action snapshot: ``(title, url, tab-id set)``.
+
+    The id set is what lets :func:`action_receipt` spot a tab the ACTION
+    opened — a click on a target=_blank card creates a new tab WITHOUT
+    touching the old one, so comparing only the old tab's URL reports
+    "nothing happened" while the result page sits open next door. Costs one
+    cheap list_tabs; on any failure the id set is None and the receipt
+    degrades to the pre-v3 title/URL-only comparison.
+    """
+    title, url = get_tab_title(tab_id), get_tab_url(tab_id)
+    send = send or _default_send()
+    try:
+        result, error = send('list_tabs', timeout=8)
+    except Exception as e:
+        logger.debug('tab_snapshot list_tabs raised (tab=%s): %s', tab_id, e)
+        return title, url, None
+    if error or not isinstance(result, list):
+        return title, url, None
+    for t in result:
+        if t.get('id') is not None and str(t.get('id')) == str(tab_id):
+            title = t.get('title') or title
+            url = t.get('url') or url
+            break
+    ids = {t.get('id') for t in result if t.get('id') is not None}
+    return title, url, ids
+
+
+def _settle(seconds):
+    """Sleep seam for the new-tab settle retry (tests patch this)."""
+    import time
+    time.sleep(seconds)
+
+
+def _unsettled(tab):
+    """A tab just born via target=_blank still shows an empty/placeholder
+    URL — its real destination arrives moments later."""
+    url = (tab.get('url') or '').strip()
+    return not url or url == 'about:blank' or url.startswith('chrome://')
+
+
+def _pick_new_tabs(before_ids, tabs):
+    """(chosen, extra_count) among tabs whose ids are not in before_ids.
+
+    Prefers the browser-focused new tab (target=_blank opens active), else
+    the most recently created (highest id)."""
+    new = [t for t in tabs
+           if t.get('id') is not None and t.get('id') not in before_ids]
+    if not new:
+        return None, 0
+    chosen = next((t for t in new if t.get('active')), new[-1])
+    return chosen, len(new) - 1
 
 
 def action_receipt(tab_id, before, send=None):
@@ -247,9 +315,22 @@ def action_receipt(tab_id, before, send=None):
 
     Compares the tab's title/URL after the action against the ``before``
     snapshot (from :func:`tab_snapshot`, captured pre-action), so the model
-    learns "the click navigated / submitted / did nothing visible" WITHOUT
-    spending another LLM round on a verification read. Costs one cheap
-    list_tabs bridge call; degrades to '' on any failure.
+    learns "the click navigated / submitted / opened a new tab / did
+    nothing visible" WITHOUT spending another LLM round on a verification
+    read. Costs one cheap list_tabs bridge call; degrades to '' on any
+    failure.
+
+    New-tab path (v3): when the tab-id set grew, the action opened a tab.
+    The new tab becomes the working tab (that is where a human's attention
+    goes — Chrome focuses it too) and the receipt says so explicitly, so
+    the next tab_id-less call lands on the NEW page. ``before`` may be a
+    legacy 2-tuple (title, url) — then only the title/URL comparison runs.
+
+    Known limit: an ASYNC window.open — one fired from an XHR callback
+    hundreds of ms after the click returns — can slip the diff window (the
+    receipt list_tabs runs before the tab exists). The synchronous
+    target=_blank case that motivated v3 is covered; a delayed open is
+    still discoverable via browser_list_tabs / the next action's receipt.
     """
     send = send or _default_send()
     try:
@@ -259,22 +340,58 @@ def action_receipt(tab_id, before, send=None):
         return ''
     if error or not isinstance(result, list):
         return ''
+    before_title, before_url = before[0], before[1]
+    before_ids = before[2] if len(before) > 2 else None
+
+    parts = []
+    if before_ids is not None:
+        chosen, extras = _pick_new_tabs(before_ids, result)
+        if chosen is not None and _unsettled(chosen):
+            # One bounded settle retry so the receipt names the REAL
+            # destination instead of 'about:blank'.
+            _settle(1.2)
+            try:
+                again, err2 = send('list_tabs', timeout=8)
+            except Exception as e:
+                logger.debug('action_receipt settle re-list raised: %s', e)
+                again, err2 = None, 'settle re-list raised'
+            if not err2 and isinstance(again, list):
+                refresh = next((t for t in again
+                                if t.get('id') == chosen.get('id')), None)
+                if refresh is not None:
+                    chosen = refresh
+        if chosen is not None:
+            new_id = chosen.get('id')
+            new_title, new_url = chosen.get('title', ''), chosen.get('url', '')
+            update_tab_title(new_id, new_title, url=new_url)
+            remember_work_tab(new_id)
+            where = f' — {new_title} ({new_url})' if (new_title or new_url) else ''
+            more = f' (+{extras} more new tabs)' if extras else ''
+            parts.append(
+                f'→ the action opened a NEW TAB #{new_id}{where}{more}. '
+                f'It is now the working tab; tab #{tab_id} stays open.')
+
     current = None
     for t in result:
         if t.get('id') is not None and str(t.get('id')) == str(tab_id):
             current = t
             break
     if current is None:
-        return '\n→ note: the tab no longer exists (closed or crashed)'
+        parts.append('→ note: the tab no longer exists (closed or crashed)')
+        return '\n' + '\n'.join(parts)
     title, url = current.get('title', ''), current.get('url', '')
     update_tab_title(tab_id, title, url=url)
-    before_title, before_url = before
     if before_url and url and url != before_url:
-        return f'\n→ page navigated: {title} ({url})'
-    if before_url and url == before_url:
+        parts.append(f'→ page navigated: {title} ({url})')
+    elif before_url and url == before_url:
         if title and before_title and title != before_title:
-            return f'\n→ same URL, new title: {title}'
-        return '\n→ same page (URL unchanged)'
-    if url:
-        return f'\n→ now on: {title} ({url})'
-    return ''
+            parts.append(f'→ same URL, new title: {title}')
+        elif not parts:
+            # 'same page' is only worth saying when nothing ELSE happened —
+            # next to a NEW TAB line it is noise.
+            parts.append('→ same page (URL unchanged)')
+    elif url:
+        parts.append(f'→ now on: {title} ({url})')
+    # Handlers append the receipt straight onto the result line — the
+    # leading newline is the historical separator contract.
+    return ('\n' + '\n'.join(parts)) if parts else ''

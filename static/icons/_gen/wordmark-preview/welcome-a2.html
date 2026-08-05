@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="zh" data-theme="tofu">
+<head>
+<meta charset="utf-8">
+<title>候选 A 精修 · 桌面 + 移动</title>
+<link rel="stylesheet" href="../../../vendor/google-fonts-local.css">
+<link rel="stylesheet" href="../../../styles.css">
+<style>
+  body{margin:0;background:#E4E0D6;font-family:var(--sans-body)}
+  .gal{display:flex;flex-wrap:wrap;gap:18px;padding:20px;align-items:flex-start}
+  .cand{background:var(--bg-primary);border:1px solid var(--border);border-radius:16px;overflow:hidden;flex:0 0 auto}
+  .cap{font:11.5px/1.5 ui-monospace,monospace;color:#8a8272;background:#F1EDE3;
+       padding:8px 14px;border-bottom:1px solid var(--border)}
+  .cap b{font-family:var(--sans-body);font-size:12.5px;color:#5b5344}
+  .welcome{min-height:0;padding:30px 0 26px}
+  .w-desk{width:520px}
+  /* 移动面:.narrow 里把主标压到 20px(等于生产 max-width:768px 断点值),
+     验「印章在小字号下不糊、不出界」。用 class 而非真 media,便于同页并列。 */
+  .w-mob{width:330px}
+  [data-theme="tofu"] .w-mob .welcome h2.tofu-brand{font-size:20px}
+
+  /* ══ A · 首版(对照) ══ */
+  [data-theme="tofu"] .cA .welcome-icon{position:relative}
+  [data-theme="tofu"] .cA .welcome-icon::before{
+    content:"";position:absolute;left:50%;bottom:-2px;transform:translateX(-50%);
+    width:78%;height:13px;border-radius:50%;display:block;
+    background:radial-gradient(ellipse at 50% 50%,rgba(169,101,54,.20),rgba(169,101,54,0) 72%)}
+  [data-theme="tofu"] .cA .welcome h2.tofu-brand small{
+    font-family:var(--sans-body);font-size:12.5px;font-weight:700;
+    letter-spacing:.16em;line-height:1;
+    color:#FBF6EA;-webkit-text-fill-color:#FBF6EA;
+    background:linear-gradient(150deg,#C1794B,#A96536);
+    padding:5px 8px 5px 9px;border-radius:7px;
+    margin-left:14px;transform:translateY(-9px) rotate(-3deg);
+    box-shadow:0 1px 3px rgba(92,72,44,.28)}
+
+  /* ══ A2 · 精修:印章尺寸/位置全部改用 em(随字号缩放,移动端不糊);
+       字距补偿右内边距(letter-spacing 会在最后一字后多出空隙,视觉右重);
+       落影更贴、二层高光让它像压在纸上的实体印 ══ */
+  [data-theme="tofu"] .cA2 .welcome-icon{position:relative}
+  [data-theme="tofu"] .cA2 .welcome-icon::before{
+    content:"";position:absolute;left:50%;bottom:1px;transform:translateX(-50%);
+    width:72%;height:11px;border-radius:50%;display:block;
+    background:radial-gradient(ellipse at 50% 50%,rgba(140,100,52,.24),rgba(140,100,52,0) 70%)}
+  [data-theme="tofu"] .cA2 .welcome h2.tofu-brand small{
+    font-family:var(--sans-body);font-size:.30em;font-weight:700;
+    letter-spacing:.14em;line-height:1;
+    color:#FCF8EE;-webkit-text-fill-color:#FCF8EE;
+    background:linear-gradient(150deg,#C8814F 0%,#A55F31 100%);
+    /* 右内边距 = 左 + 字距,抵掉 letter-spacing 在末字后留的空隙 */
+    padding:.42em .50em .42em .64em;
+    border-radius:.52em;
+    margin-left:.36em;
+    transform:translateY(-.62em) rotate(-3.2deg);
+    box-shadow:0 .06em .16em rgba(92,72,44,.30),
+               inset 0 .06em 0 rgba(255,247,232,.30)}
+  /* ══ A3 · 二次精修:A2 的移动面暴露 em 纯缩放的下限问题——.30em 在 20px 主标下
+       只有 6px,中文两字糊成一团;A 首版反过来在 20px 下印章几乎与主标同高。
+       解法:字号用 clamp(下限 10.5px 保可读 / 理想 .30em 保比例 / 上限 13px 防桌面过大),
+       几何仍走 em 随之缩放;并把 margin-left 从 .36em 提到 .52em(A2 实拍贴住了 u)。 ══ */
+  [data-theme="tofu"] .cA3 .welcome-icon{position:relative}
+  [data-theme="tofu"] .cA3 .welcome-icon::before{
+    content:"";position:absolute;left:50%;bottom:1px;transform:translateX(-50%);
+    width:72%;height:11px;border-radius:50%;display:block;
+    background:radial-gradient(ellipse at 50% 50%,rgba(140,100,52,.24),rgba(140,100,52,0) 70%)}
+  [data-theme="tofu"] .cA3 .welcome h2.tofu-brand small{
+    font-family:var(--sans-body);
+    font-size:clamp(10.5px,.30em,13px);
+    font-weight:700;
+    letter-spacing:.14em;line-height:1;
+    color:#FCF8EE;-webkit-text-fill-color:#FCF8EE;
+    background:linear-gradient(150deg,#C8814F 0%,#A55F31 100%);
+    padding:.42em .50em .42em .64em;
+    border-radius:.52em;
+    margin-left:.52em;
+    transform:translateY(-.62em) rotate(-3.2deg);
+    box-shadow:0 .06em .16em rgba(92,72,44,.30),
+               inset 0 .06em 0 rgba(255,247,232,.30)}
+</style>
+</head>
+<body>
+<div class="gal">
+
+  <div class="cand cA w-desk">
+    <div class="cap"><b>A 首版</b> — 印章用 px(12.5px 固定)</div>
+    <div class="welcome">
+      <div class="welcome-icon"><img src="../../tofu-welcome.svg" alt="Tofu" width="64" height="64"></div>
+      <h2 class="tofu-brand"><span class="tofu-brand-t">T</span><span class="tofu-brand-o1">o</span><span class="tofu-brand-f">f</span><span class="tofu-brand-u">u</span><small>豆腐</small></h2>
+      <div class="feature-pills"><span class="feature-pill">深度思考</span><span class="feature-pill">搜索</span><span class="feature-pill">URL 抓取</span><span class="feature-pill">图片输入</span></div>
+    </div>
+  </div>
+
+  <div class="cand cA2 w-desk">
+    <div class="cap"><b>A2 精修</b> — 印章全 em(随字号缩放)+ 字距补偿 + 二层高光</div>
+    <div class="welcome">
+      <div class="welcome-icon"><img src="../../tofu-welcome.svg" alt="Tofu" width="64" height="64"></div>
+      <h2 class="tofu-brand"><span class="tofu-brand-t">T</span><span class="tofu-brand-o1">o</span><span class="tofu-brand-f">f</span><span class="tofu-brand-u">u</span><small>豆腐</small></h2>
+      <div class="feature-pills"><span class="feature-pill">深度思考</span><span class="feature-pill">搜索</span><span class="feature-pill">URL 抓取</span><span class="feature-pill">图片输入</span></div>
+    </div>
+  </div>
+
+  <div class="cand cA3 w-desk">
+    <div class="cap"><b>A3 二次精修</b> — clamp 字号下限 + 间距 .52em</div>
+    <div class="welcome">
+      <div class="welcome-icon"><img src="../../tofu-welcome.svg" alt="Tofu" width="64" height="64"></div>
+      <h2 class="tofu-brand"><span class="tofu-brand-t">T</span><span class="tofu-brand-o1">o</span><span class="tofu-brand-f">f</span><span class="tofu-brand-u">u</span><small>豆腐</small></h2>
+      <div class="feature-pills"><span class="feature-pill">深度思考</span><span class="feature-pill">搜索</span><span class="feature-pill">URL 抓取</span><span class="feature-pill">图片输入</span></div>
+    </div>
+  </div>
+
+  <div class="cand cA w-mob">
+    <div class="cap"><b>A 首版 · 移动 20px</b></div>
+    <div class="welcome">
+      <div class="welcome-icon"><img src="../../tofu-welcome.svg" alt="Tofu" width="64" height="64"></div>
+      <h2 class="tofu-brand"><span class="tofu-brand-t">T</span><span class="tofu-brand-o1">o</span><span class="tofu-brand-f">f</span><span class="tofu-brand-u">u</span><small>豆腐</small></h2>
+    </div>
+  </div>
+
+  <div class="cand cA2 w-mob">
+    <div class="cap"><b>A2 精修 · 移动 20px</b></div>
+    <div class="welcome">
+      <div class="welcome-icon"><img src="../../tofu-welcome.svg" alt="Tofu" width="64" height="64"></div>
+      <h2 class="tofu-brand"><span class="tofu-brand-t">T</span><span class="tofu-brand-o1">o</span><span class="tofu-brand-f">f</span><span class="tofu-brand-u">u</span><small>豆腐</small></h2>
+    </div>
+  </div>
+
+  <div class="cand cA3 w-mob">
+    <div class="cap"><b>A3 二次精修 · 移动 20px</b></div>
+    <div class="welcome">
+      <div class="welcome-icon"><img src="../../tofu-welcome.svg" alt="Tofu" width="64" height="64"></div>
+      <h2 class="tofu-brand"><span class="tofu-brand-t">T</span><span class="tofu-brand-o1">o</span><span class="tofu-brand-f">f</span><span class="tofu-brand-u">u</span><small>豆腐</small></h2>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>

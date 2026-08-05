@@ -56,10 +56,29 @@ _BARE_TW_CALL_RE = re.compile(
 )
 
 
+# Built bundle outputs (lib/js_bundler._BUILT_BUNDLE_RE): bundle-<8hex>.js,
+# feature-<8hex>.js, i18n-(zh|en)-<8hex>.js. These are runtime-assembled
+# CONCATENATIONS of the very sources this test scans — including
+# health_stream_timer.js itself, whose three INTERNAL twStop() calls are
+# (correctly) name-skipped at the source path. Whether a built artifact
+# trips the line-anchored regex depends on the minifier: with esbuild the
+# bundle is one line (no match); without node_modules (public CI test-unit
+# lane) the pure-python _minify_js keeps newlines and the internal calls
+# match — a false positive for a contract about SOURCE call sites.
+_BUILT_ARTIFACT_RE = re.compile(
+    r'^(?:(?:bundle|feature)-[0-9a-f]{8}|i18n-(?:zh|en)-[0-9a-f]{8})\.js$'
+)
+
+
 def _iter_js_files():
     for dirpath, _dirnames, filenames in os.walk(_STATIC_JS):
         for name in filenames:
             if not name.endswith('.js'):
+                continue
+            # Skip BUILT artifacts — they duplicate the sources (modulo
+            # minification) and are gitignored/rebuilt at startup; only
+            # source call sites are this test's contract.
+            if _BUILT_ARTIFACT_RE.match(name):
                 continue
             # Skip the health_stream_timer.js module ITSELF — it defines
             # the functions and calls them internally (obviously guarded

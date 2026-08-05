@@ -23,6 +23,7 @@ Public API::
 from lib.skills.registry import (
     get_skill,
     list_skills,
+    set_skill_scope,
     uninstall_skill,
 )
 from lib.skills.injection import (
@@ -47,7 +48,7 @@ from lib.skills.catalog import (
 )
 
 __all__ = [
-    'list_skills', 'get_skill', 'uninstall_skill',
+    'list_skills', 'get_skill', 'uninstall_skill', 'set_skill_scope',
     'build_skills_index',
     'activate_skill', 'list_skill_files',
     'ACTIVATE_SKILL_TOOL', 'ALL_SKILL_TOOLS', 'SKILL_TOOL_NAMES',

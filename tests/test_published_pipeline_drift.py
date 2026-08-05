@@ -193,6 +193,16 @@ def _load_export():
     return mod
 
 
+#: TRAP-4: export.py itself is NOT shipped in the opensource export — the
+#: published tree cannot contain the transform chain that produces it. Tests
+#: that drive the export transforms only have a subject in the SOURCE tree.
+_requires_export_py = pytest.mark.skipif(
+    not (_ROOT / 'export.py').is_file(),
+    reason='export.py is not shipped in the opensource export (TRAP-4) — the '
+           'transform chain these tests drive does not exist in this tree')
+
+
+@_requires_export_py
 def test_guarded_paths_survive_the_whole_export_transform_chain():
     """Byte-equality above is only valid for files the export does not rewrite.
 
@@ -267,6 +277,7 @@ def test_guarded_paths_survive_the_whole_export_transform_chain():
         )
 
 
+@_requires_export_py
 def test_guarded_paths_are_actually_published_by_the_export():
     """A guarded file that the export never ships is a guard that can only fail.
 

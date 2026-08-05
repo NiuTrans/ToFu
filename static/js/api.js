@@ -464,7 +464,12 @@
     files:          (id)        => get(`/api/v1/skills/${encodeURIComponent(id)}/files`),
     install:        (formData)  => request('/api/v1/skills/install', { method: 'POST', body: formData, parse: 'response' }),
     catalog:        ()          => get('/api/v1/skills/catalog'),
-    catalogInstall: (skillId, scope) => post('/api/v1/skills/catalog/install', { skill_id: skillId, scope: scope || 'project' }, { parse: 'response' }),
+    catalogInstall: (skillId, scope) => post('/api/v1/skills/catalog/install', { skill_id: skillId, scope: scope || 'global' }, { parse: 'response' }),
+    // Per-skill env/key bindings (credential-vault backed; redacted status only)
+    envStatus:      (id)        => get(`/api/v1/skills/${encodeURIComponent(id)}/env`),
+    envSet:         (id, name, value) => put(`/api/v1/skills/${encodeURIComponent(id)}/env`, { name, value }, { parse: 'response' }),
+    envDelete:      (id, name)  => del(`/api/v1/skills/${encodeURIComponent(id)}/env/${encodeURIComponent(name)}`, { parse: 'response' }),
+    setScope:       (id, scope) => post(`/api/v1/skills/${encodeURIComponent(id)}/scope`, { scope }, { parse: 'response' }),
   };
 
   // profile (personal-preference profile) ---------------------------
@@ -1488,6 +1493,11 @@
     brainWatchPromote: (itemId, convId, expectedVersion) =>
       post('/api/v1/project/brain/watch/promote',
            { itemId, convId: convId || '', expectedVersion: expectedVersion }),
+    // Follow-up Q&A anchored to ONE trail response (human↔brain lane; the
+    // answer appends to the same trail with trigger='follow_up').
+    brainWatchFollowUp: (itemId, question, seq) =>
+      post('/api/v1/project/brain/watch/follow_up',
+           { itemId, question, seq: seq || 0 }),
     // Per-conversation brain INFLUENCE — how THIS conv is affected by the
     // brain (charter bound by, epics owned vs avoided, decisions awaiting).
     brainInfluence: (path, convId) =>

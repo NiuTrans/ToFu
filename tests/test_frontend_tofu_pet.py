@@ -1111,6 +1111,17 @@ let _t = 0;
 const RealDate = Date;
 class FakeDate extends RealDate { static now(){ return _t; } getHours(){ return 14; } }
 global.Date = FakeDate;
+// Deterministic RNG: the tap startles the pet into a flee dash whose
+// direction/speed draw on Math.random. An unseeded draw made this test
+// flaky in CI (2026-08-05 frontend lane, Node 20): one run fled the pet
+// into the bubble's left-edge clamp and the 15.9px clamp offset read as
+// "bubble does not follow". Same sequence on every Node version now.
+let _rngState = 0x2f6e2b1;
+Math.random = function () {
+  _rngState ^= _rngState << 13; _rngState >>>= 0;
+  _rngState ^= _rngState >> 17; _rngState ^= _rngState << 5; _rngState >>>= 0;
+  return _rngState / 4294967296;
+};
 let _cbs = [];
 global.requestAnimationFrame = function(cb){ _cbs.push(cb); return _cbs.length; };
 global.cancelAnimationFrame = function(){};
@@ -1183,9 +1194,20 @@ const TP = window.TofuPet;
     lefts = [float(s["left"].replace("px", "")) for s in samples]
     moved = max(xs) - min(xs)
     assert moved > 15, f"the pet barely moved across 14 ticks ({moved:.1f}px) — harness broken"
-    drift = max(abs(l - (x + 15.0)) for l, x in zip(lefts, xs))
+
+    # _positionBubble() anchors at W.x + petW/2 but CLAMPS the result inside
+    # the bar: left = max(40, min(x + petW/2, barW - 40)), floored at 2. The
+    # harness fakes petW=30 (_fakeEl offsetWidth) and barW=400
+    # (getBoundingClientRect), so a flee that pins the pet against the left
+    # track edge (x < 25) parks the bubble at 40px — the shipped clamp
+    # working as designed, NOT a tracking failure. Mirror the clamp here or
+    # the assertion flakes whenever the seeded flee hugs an edge.
+    def _expected_left(x):
+        return max(2.0, max(40.0, min(x + 15.0, 400.0 - 40.0)))
+
+    drift = max(abs(l - _expected_left(x)) for l, x in zip(lefts, xs))
     assert drift < 0.6, (
-        f"the bubble does NOT follow the pet: worst |bubbleLeft-(x+15)| = {drift:.1f}px "
+        f"the bubble does NOT follow the pet: worst |bubbleLeft-clamp(x+15)| = {drift:.1f}px "
         f"across {len(samples)} ticks (pet moved {moved:.0f}px). "
         "The bubble must be re-anchored every frame, not positioned once at show time.")
 
@@ -1197,7 +1219,7 @@ const TP = window.TofuPet;
     nsamples = run(neut)
     nxs = [s["x"] for s in nsamples]
     nlefts = [float(s["left"].replace("px", "")) for s in nsamples]
-    ndrift = max(abs(l - (x + 15.0)) for l, x in zip(nlefts, nxs))
+    ndrift = max(abs(l - _expected_left(x)) for l, x in zip(nlefts, nxs))
     assert max(nxs) - min(nxs) > 15, "neutered pet barely moved — harness broken"
     assert ndrift > 5.0, (
         f"neutered build still tracks the pet (drift {ndrift:.1f}px) — the guard does not bite")

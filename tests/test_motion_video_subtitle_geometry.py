@@ -338,6 +338,11 @@ def test_burn_stages_an_ass_document(monkeypatch, tmp_path):
             f.write(b'mp4')
         return {'rc': 0, 'category': '', 'elapsed': 0.1, 'err': ''}
 
+    # Pure wiring test: _run_ffmpeg is faked, so any non-empty ffmpeg path
+    # satisfies burn_in_subtitles' env gate — no real binary needed (public
+    # CI has none).
+    monkeypatch.setattr('lib.motion_video._env.ffmpeg_bin',
+                        lambda: '/fake/ffmpeg')
     monkeypatch.setattr(MC, '_run_ffmpeg', fake_run)
     monkeypatch.setattr('lib.motion_video._gates.probe_video',
                         lambda p, **kw: {'width': 1080, 'height': 1440,
@@ -372,6 +377,9 @@ def test_geometry_comes_from_the_video_not_the_caller(monkeypatch, tmp_path):
             f.write(b'mp4')
         return {'rc': 0, 'category': '', 'elapsed': 0.1, 'err': ''}
 
+    # Same as above: fake runner ⇒ a stand-in ffmpeg path is enough.
+    monkeypatch.setattr('lib.motion_video._env.ffmpeg_bin',
+                        lambda: '/fake/ffmpeg')
     monkeypatch.setattr(MC, '_run_ffmpeg', fake_run)
     # A DELIBERATELY unusual frame — if geometry were hardcoded this stays 1080
     monkeypatch.setattr('lib.motion_video._gates.probe_video',

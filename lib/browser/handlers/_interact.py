@@ -75,6 +75,7 @@ def _handle_get_interactive_elements(fn_args):
             if el.get('ariaLabel'): extra_parts.append(f'aria-label="{el["ariaLabel"]}"')
             if el.get('title'): extra_parts.append(f'title="{el["title"]}"')
             if el.get('placeholder'): extra_parts.append(f'placeholder="{el["placeholder"]}"')
+            if el.get('pointer'): extra_parts.append('cursor-pointer')
             if el.get('disabled'): extra_parts.append('DISABLED')
             extra = f' ({", ".join(extra_parts)})' if extra_parts else ''
             display_text = f' "{text[:60]}"' if text else ''
@@ -119,7 +120,7 @@ def _handle_click(fn_args):
     # ones came from a live enumeration milliseconds ago.
     wait_note = '' if text_query else auto_wait(
         tab_id, selector, send_browser_command)
-    before = tab_snapshot(tab_id)
+    before = tab_snapshot(tab_id, send_browser_command)
     params = {
         'tabId': int(tab_id),
         'selector': selector,
@@ -176,7 +177,7 @@ def _handle_type(fn_args):
             return '\n'.join(lines)
         selector = el.get('selector', '')
         matched_note = f' [matched "{text_query}"]'
-    before = tab_snapshot(tab_id)
+    before = tab_snapshot(tab_id, send_browser_command)
     clear_first = fn_args.get('clearFirst', True)
     result, error = send_browser_command('type_text', {
         'tabId': int(tab_id),
@@ -207,7 +208,7 @@ def _handle_press_key(fn_args):
     keys = fn_args.get('keys', '')
     if not keys:
         return 'Error: keys is required.'
-    before = tab_snapshot(tab_id)
+    before = tab_snapshot(tab_id, send_browser_command)
     params = {
         'tabId': int(tab_id),
         'keys': keys,

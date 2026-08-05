@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="zh" data-theme="tofu">
+<head>
+<meta charset="utf-8">
+<title>欢迎屏品牌区 · 创意候选</title>
+<link rel="stylesheet" href="../../../vendor/google-fonts-local.css">
+<link rel="stylesheet" href="../../../styles.css">
+<style>
+  /* 只做画廊排版;每个候选的品牌区样式写在自己的 .cand-X 作用域里,
+     便于挑中后原样搬进 styles.css。生产 CSS 已加载,候选只做增量。 */
+  body{margin:0;background:#E4E0D6;font-family:var(--sans-body)}
+  .gal{display:flex;flex-direction:column;gap:20px;padding:22px}
+  .cand{background:var(--bg-primary);border:1px solid var(--border);border-radius:16px;overflow:hidden}
+  .cap{font:11.5px/1.5 ui-monospace,monospace;color:#8a8272;background:#F1EDE3;
+       padding:9px 16px;border-bottom:1px solid var(--border)}
+  .cap b{font-family:var(--sans-body);font-size:12.5px;color:#5b5344}
+  .welcome{min-height:0;padding:34px 0 30px}
+
+  /* ══════════ 候选 0 · 现状(对照组,零覆盖) ══════════ */
+
+  /* ══════════ 候选 A ·「落款印」 ══════════
+     豆腐 从飘在右侧的稀疏小字 → 一枚陶土落款印(圆角方章),呼应奶油纸底的
+     编辑气质与中文渊源;吉祥物下方加一片暖椭圆,把它从纸上「托」起来而不是浮着。 */
+  [data-theme="tofu"] .cand-A .welcome-icon{position:relative}
+  [data-theme="tofu"] .cand-A .welcome-icon::before{
+    content:"";position:absolute;left:50%;bottom:-2px;transform:translateX(-50%);
+    width:78%;height:13px;border-radius:50%;
+    background:radial-gradient(ellipse at 50% 50%,rgba(169,101,54,.20),rgba(169,101,54,0) 72%);
+    display:block
+  }
+  [data-theme="tofu"] .cand-A .welcome h2.tofu-brand small{
+    font-family:var(--sans-body);font-size:12.5px;font-weight:700;
+    letter-spacing:.16em;line-height:1;
+    color:#FBF6EA;-webkit-text-fill-color:#FBF6EA;
+    background:linear-gradient(150deg,#C1794B,#A96536);
+    padding:5px 8px 5px 9px;border-radius:7px;
+    margin-left:14px;transform:translateY(-9px) rotate(-3deg);
+    box-shadow:0 1px 3px rgba(92,72,44,.28)
+  }
+
+  /* ══════════ 候选 B ·「盖章竖排」 ══════════
+     豆腐 竖排两字紧贴在 u 右侧,像书脊/竖匾;整组字标下方一道陶土细规线收口,
+     让品牌区有明确的「底」,不再散着。 */
+  [data-theme="tofu"] .cand-B .welcome h2.tofu-brand{position:relative;padding-bottom:12px}
+  [data-theme="tofu"] .cand-B .welcome h2.tofu-brand::after{
+    content:"";position:absolute;left:6%;right:6%;bottom:2px;height:2px;
+    border-radius:2px;
+    background:linear-gradient(90deg,rgba(169,101,54,0),#C1794B 42%,rgba(169,101,54,0))
+  }
+  [data-theme="tofu"] .cand-B .welcome h2.tofu-brand small{
+    writing-mode:vertical-rl;text-orientation:upright;
+    font-family:var(--sans-body);font-size:11.5px;font-weight:700;
+    letter-spacing:.08em;line-height:1.05;
+    color:var(--accent);-webkit-text-fill-color:var(--accent);
+    margin-left:11px;transform:translateY(-4px);
+    align-self:center
+  }
+
+  /* ══════════ 候选 C ·「暖光纸笺」 ══════════
+     整个品牌区放到一张比纸底更亮的暖卡上(极轻描边 + 柔影),吉祥物背后一圈
+     奶油光晕;豆腐 做成低调的胶囊标签。品牌区从「一堆居中元素」变成一个物件。 */
+  [data-theme="tofu"] .cand-C .welcome{
+    padding:30px 44px 26px;margin:0 auto;max-width:460px;
+    background:linear-gradient(168deg,#FFFDF7,#F7F1E4);
+    border:1px solid #EADFC9;border-radius:22px;
+    box-shadow:0 1px 2px rgba(92,72,44,.05),0 14px 34px -12px rgba(92,72,44,.18)
+  }
+  [data-theme="tofu"] .cand-C .welcome-icon{position:relative}
+  [data-theme="tofu"] .cand-C .welcome-icon::before{
+    content:"";position:absolute;left:50%;top:48%;transform:translate(-50%,-50%);
+    width:150%;height:150%;border-radius:50%;z-index:-1;display:block;
+    background:radial-gradient(circle,rgba(240,214,166,.55),rgba(240,214,166,0) 66%)
+  }
+  [data-theme="tofu"] .cand-C .welcome h2.tofu-brand small{
+    font-family:var(--sans-body);font-size:11.5px;font-weight:700;
+    letter-spacing:.2em;line-height:1;
+    color:#8A7350;-webkit-text-fill-color:#8A7350;
+    background:rgba(193,121,75,.11);
+    border:1px solid rgba(193,121,75,.22);
+    padding:4px 9px;border-radius:999px;
+    margin-left:14px;transform:translateY(-8px)
+  }
+</style>
+</head>
+<body>
+<div class="gal">
+
+  <div class="cand cand-0">
+    <div class="cap"><b>候选 0 · 现状(对照组)</b> — 吉祥物浮在纸上 + 居中字标 + 稀疏小字「豆腐」飘在右侧</div>
+    <div class="welcome">
+      <div class="welcome-icon"><img src="../../tofu-welcome.svg" alt="Tofu" width="64" height="64"></div>
+      <h2 class="tofu-brand"><span class="tofu-brand-t">T</span><span class="tofu-brand-o1">o</span><span class="tofu-brand-f">f</span><span class="tofu-brand-u">u</span><small>豆腐</small></h2>
+      <div class="feature-pills"><span class="feature-pill">深度思考</span><span class="feature-pill">搜索</span><span class="feature-pill">URL 抓取</span><span class="feature-pill">图片输入</span><span class="feature-pill">副驾驶</span><span class="feature-pill">浏览器</span></div>
+    </div>
+  </div>
+
+  <div class="cand cand-A">
+    <div class="cap"><b>候选 A ·「落款印」</b> — 豆腐 → 陶土圆角印章(微斜 -3°);吉祥物脚下暖椭圆把它托在纸上</div>
+    <div class="welcome">
+      <div class="welcome-icon"><img src="../../tofu-welcome.svg" alt="Tofu" width="64" height="64"></div>
+      <h2 class="tofu-brand"><span class="tofu-brand-t">T</span><span class="tofu-brand-o1">o</span><span class="tofu-brand-f">f</span><span class="tofu-brand-u">u</span><small>豆腐</small></h2>
+      <div class="feature-pills"><span class="feature-pill">深度思考</span><span class="feature-pill">搜索</span><span class="feature-pill">URL 抓取</span><span class="feature-pill">图片输入</span><span class="feature-pill">副驾驶</span><span class="feature-pill">浏览器</span></div>
+    </div>
+  </div>
+
+  <div class="cand cand-B">
+    <div class="cap"><b>候选 B ·「竖匾细规」</b> — 豆腐 竖排贴在 u 右侧;字标下一道陶土细规线收口</div>
+    <div class="welcome">
+      <div class="welcome-icon"><img src="../../tofu-welcome.svg" alt="Tofu" width="64" height="64"></div>
+      <h2 class="tofu-brand"><span class="tofu-brand-t">T</span><span class="tofu-brand-o1">o</span><span class="tofu-brand-f">f</span><span class="tofu-brand-u">u</span><small>豆腐</small></h2>
+      <div class="feature-pills"><span class="feature-pill">深度思考</span><span class="feature-pill">搜索</span><span class="feature-pill">URL 抓取</span><span class="feature-pill">图片输入</span><span class="feature-pill">副驾驶</span><span class="feature-pill">浏览器</span></div>
+    </div>
+  </div>
+
+  <div class="cand cand-C">
+    <div class="cap"><b>候选 C ·「暖光纸笺」</b> — 品牌区成为一张暖卡;吉祥物背后奶油光晕;豆腐 做低调胶囊</div>
+    <div class="welcome">
+      <div class="welcome-icon"><img src="../../tofu-welcome.svg" alt="Tofu" width="64" height="64"></div>
+      <h2 class="tofu-brand"><span class="tofu-brand-t">T</span><span class="tofu-brand-o1">o</span><span class="tofu-brand-f">f</span><span class="tofu-brand-u">u</span><small>豆腐</small></h2>
+      <div class="feature-pills"><span class="feature-pill">深度思考</span><span class="feature-pill">搜索</span><span class="feature-pill">URL 抓取</span><span class="feature-pill">图片输入</span><span class="feature-pill">副驾驶</span><span class="feature-pill">浏览器</span></div>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>

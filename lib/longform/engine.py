@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 
+from lib.agent_core.events import Phase, build_phase
 from lib.log import get_logger
 
 logger = get_logger(__name__)
@@ -52,8 +53,8 @@ def run_longform_task(task: dict) -> None:
     try:
         _write_manifest(task, 'running')
         task['status'] = 'running'
-        _emit(task, {'type': 'phase', 'phase': 'start',
-                     'topic': task.get('topic', '')})
+        _emit(task, build_phase(Phase.START,
+                                topic=task.get('topic', '')))
         result = build_report_from_topic(
             task['topic'], task['workdir'], lang=task.get('lang') or 'zh',
             depth=task.get('depth') or 'standard',

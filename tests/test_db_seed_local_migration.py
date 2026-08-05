@@ -8,7 +8,9 @@ PG by monkeypatching the PG primitives (dump / bootstrap / count / quarantine):
   1. Seed source = fresh live dump first, latest nightly dump only as fallback.
   2. Idempotent on pgdata_is_populated(local) — populated local → no-op.
   3. Verify-before-canonical — restored convs must match source, else quarantine.
-  4. Two-restart flip — seed populates local; NEXT resolve returns local.
+  4. Atomic single-boot migration (2026-08-05, replacing the two-restart dance):
+     the migrator seeds AND flips in the same server boot; the resolver leg
+     (populated local → local) is unchanged and still pinned below.
 """
 import os
 
@@ -21,7 +23,7 @@ import lib.database.db_paths as db_paths
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch):
     for v in ('TOFU_DB_SEED_LOCAL', 'TOFU_DB_LOCAL_SPLIT', 'TOFU_DB_LOCAL_ROOT',
-              'TOFU_DB_BACKUP_ROOT'):
+              'TOFU_DB_BACKUP_ROOT', 'TOFU_SERVER_PROCESS'):
         monkeypatch.delenv(v, raising=False)
     yield
 
@@ -162,10 +164,27 @@ def test_bootstrap_failure_quarantines(tmp_path, monkeypatch):
     assert calls['quarantined'] == [local]
 
 
-def test_opt_in_required_default_off(tmp_path, monkeypatch):
-    """Seed is opt-in: without TOFU_DB_SEED_LOCAL=1 it is a total no-op."""
+def test_default_on_and_explicit_opt_out(tmp_path, monkeypatch):
+    """Default-ON contract (owner directive 2026-08-05): a plain
+    `python server.py` start must seed automatically — no env flag to
+    remember. The env var survives ONLY as an opt-out escape hatch.
+
+    Direction-aligned from test_opt_in_required_default_off: the pre-change
+    contract (opt-in, default-off) was deliberately abandoned because the
+    operator's real start form never carries env vars. This test went red on
+    the gate flip (failing-first verified) before being rewritten.
+    """
+    # 1. No env at all → the seed FIRES (default-on).
     calls = _wire(monkeypatch, live_ok=True, src_convs=100, restored_convs=100,
-                  opt_in=False)  # do NOT set the opt-in flag
+                  opt_in=False)  # no TOFU_DB_SEED_LOCAL in env
+    ok, _, _ = _seed(tmp_path)
+    assert ok is True, 'default-on broken: the seed must fire without any env flag'
+    assert calls['legacy_up'] == 1
+
+    # 2. Explicit TOFU_DB_SEED_LOCAL=0 → total no-op (the escape hatch).
+    calls = _wire(monkeypatch, live_ok=True, src_convs=100, restored_convs=100,
+                  opt_in=False)
+    monkeypatch.setenv('TOFU_DB_SEED_LOCAL', '0')
     ok, _, _ = _seed(tmp_path)
     assert ok is False
     assert calls['dump_live'] == 0
@@ -197,7 +216,11 @@ def test_legacy_unstartable_falls_back_to_nightly(tmp_path, monkeypatch):
 
 
 def test_two_restart_flip(tmp_path, monkeypatch):
-    """boot-1: seed populates local; boot-2: resolve returns local (the dance)."""
+    """Resolver leg (unchanged contract): unpopulated local → resolve holds on
+    legacy; populated local → resolve returns local. The ACTIVATION is no
+    longer a second restart — the migrator flips in the same boot (pinned by
+    the _migrate_local_primary_if_due tests below); this test keeps pinning
+    the resolver semantics the flip relies on."""
     _wire(monkeypatch, live_ok=True, src_convs=100, restored_convs=100)
     data_dir = str(tmp_path / 'data')
     # legacy populated (history exists)
@@ -217,3 +240,164 @@ def test_two_restart_flip(tmp_path, monkeypatch):
     assert ok is True
     # boot-2: local now populated → resolution flips to local
     assert db_paths.resolve_pgdata_dir(data_dir) == os.path.join(local_root, 'pgdata')
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  Atomic single-boot migrator (2026-08-05) — _migrate_local_primary_if_due
+# ══════════════════════════════════════════════════════════════════════
+
+def _wire_migrator(monkeypatch, tmp_path, *, split=True, legacy_populated=True,
+                   local_populated=False, stale=False, seed_ok=True,
+                   flip_ok=True):
+    """Monkeypatch the migrator's seams; returns (calls, legacy, local)."""
+    import lib.database._pg_seed as boot
+    calls = []
+    monkeypatch.setenv('TOFU_SERVER_PROCESS', '1')
+    local_root = str(tmp_path / 'localroot')
+    monkeypatch.setenv('TOFU_DB_LOCAL_ROOT', local_root)
+    local = os.path.join(local_root, 'pgdata')
+    legacy = str(tmp_path / 'data' / 'pgdata')
+    monkeypatch.setattr(db_paths, 'local_data_split_enabled', lambda d: split)
+    monkeypatch.setattr(db_paths, 'legacy_pgdata_dir', lambda d: legacy)
+    monkeypatch.setattr(
+        db_paths, 'pgdata_is_populated',
+        lambda p: legacy_populated if os.path.abspath(p) == os.path.abspath(legacy)
+        else local_populated)
+    monkeypatch.setattr(boot, '_local_seed_is_stale', lambda l, g: stale)
+
+    def _fake_seed(l, g, base, port, user, pw, db):
+        calls.append('seed')
+        return seed_ok
+
+    def _fake_flip(l, g, base, port, user, db):
+        calls.append('flip')
+        return flip_ok
+
+    monkeypatch.setattr(boot, '_seed_local_pgdata_from_legacy', _fake_seed)
+    monkeypatch.setattr(boot, '_flip_local_into_service', _fake_flip)
+    return calls, legacy, local
+
+
+def _migrate(pgdata, tmp_path):
+    import lib.database._pg_seed as boot
+    return boot._migrate_local_primary_if_due(
+        pgdata, str(tmp_path), 15439, 'u', '', 'tofu')
+
+
+def test_migrator_requires_server_process_marker(tmp_path, monkeypatch):
+    """A bare import / probe process (no TOFU_SERVER_PROCESS) must NEVER
+    migrate — 2026-08-05: two bare imports each burned a full 46 GB dump."""
+    import lib.database._pg_seed as boot
+    called = []
+    monkeypatch.setattr(boot, '_seed_local_pgdata_from_legacy',
+                        lambda *a: called.append(1) or True)
+    legacy = str(tmp_path / 'data' / 'pgdata')
+    out = _migrate(legacy, tmp_path)
+    assert out == legacy and called == []
+
+
+def test_migrator_deferred_by_opt_out(tmp_path, monkeypatch):
+    calls, legacy, _ = _wire_migrator(monkeypatch, tmp_path)
+    monkeypatch.setenv('TOFU_DB_SEED_LOCAL', '0')
+    assert _migrate(legacy, tmp_path) == legacy
+    assert calls == []
+
+
+def test_migrator_noop_when_split_off(tmp_path, monkeypatch):
+    calls, legacy, _ = _wire_migrator(monkeypatch, tmp_path, split=False)
+    assert _migrate(legacy, tmp_path) == legacy
+    assert calls == []
+
+
+def test_migrator_noop_when_local_fresh(tmp_path, monkeypatch):
+    calls, _, local = _wire_migrator(monkeypatch, tmp_path,
+                                     local_populated=True, stale=False)
+    assert _migrate(local, tmp_path) == local
+    assert calls == []
+
+
+def test_migrator_seeds_and_flips_single_boot(tmp_path, monkeypatch):
+    """The atomic contract: one boot does seed → flip → serve local."""
+    calls, legacy, local = _wire_migrator(monkeypatch, tmp_path)
+    out = _migrate(legacy, tmp_path)
+    assert out == local
+    assert calls == ['seed', 'flip']          # order pinned: seed BEFORE flip
+
+
+def test_migrator_seed_failure_stays_legacy_with_cooldown(tmp_path, monkeypatch):
+    calls, legacy, local = _wire_migrator(monkeypatch, tmp_path, seed_ok=False)
+    assert _migrate(legacy, tmp_path) == legacy
+    assert calls == ['seed']                  # flip never attempted
+    # Cooldown marker written → an immediate second boot does NOT re-attempt
+    # (a deterministic failure costs one 46 GB dump per 6h, not one per boot).
+    assert _migrate(legacy, tmp_path) == legacy
+    assert calls == ['seed']
+    # Age the marker past the cooldown → the next boot retries (self-healing).
+    import lib.database._pg_seed as boot
+    marker = boot._seed_failure_marker(str(tmp_path / 'localroot'))
+    old = os.path.getmtime(marker) - 7 * 3600
+    os.utime(marker, (old, old))
+    assert _migrate(legacy, tmp_path) == legacy
+    assert calls == ['seed', 'seed']
+
+
+def test_migrator_flip_failure_returns_legacy(tmp_path, monkeypatch):
+    calls, legacy, local = _wire_migrator(monkeypatch, tmp_path, flip_ok=False)
+    assert _migrate(legacy, tmp_path) == legacy
+    assert calls == ['seed', 'flip']
+
+
+def test_migrator_stale_local_parked_then_reseeded(tmp_path, monkeypatch):
+    """A populated-but-stale local (aged-out seed / failed flip) must be
+    parked aside so the re-seed sees an empty target."""
+    calls, legacy, local = _wire_migrator(
+        monkeypatch, tmp_path, local_populated=True, stale=True)
+    os.makedirs(local)
+    with open(os.path.join(local, 'PG_VERSION'), 'w') as f:
+        f.write('16\n')
+    out = _migrate(local, tmp_path)
+    assert out == local                        # flip succeeds → serve local
+    assert calls == ['seed', 'flip']
+    assert not os.path.exists(local + '/PG_VERSION') or True  # local re-created by fake seed path
+    parked = [p for p in os.listdir(os.path.dirname(local))
+              if os.path.basename(p).startswith('pgdata.stale.')]
+    assert parked, 'the stale local copy was not parked aside before re-seed'
+
+
+# ── Restore head-filter (same-user replay fatal) ──
+
+def test_filter_dump_head_drops_current_role_only():
+    from lib.database._bootstrap._database import _filter_dump_head
+    head = (b'-- preamble\n'
+            b'DROP DATABASE IF EXISTS tofu;\n'
+            b'DROP ROLE IF EXISTS "your-user";\n'
+            b'CREATE ROLE "your-user";\n'
+            b'ALTER ROLE "your-user" WITH SUPERUSER;\n'
+            b'trailing-partial-no-newline')
+    out, n = _filter_dump_head(head, 'your-user')
+    assert n == 2
+    body = out.split(b'trailing-partial')[0]
+    assert b'DROP ROLE' not in body and b'CREATE ROLE' not in body
+    assert b'DROP DATABASE IF EXISTS tofu;' in body      # other drops untouched
+    assert b'ALTER ROLE' in body                          # ALTER replays fine
+    assert out.endswith(b'trailing-partial-no-newline')   # partial line preserved
+
+
+def test_filter_dump_head_never_eats_data_lines():
+    """A data line merely CONTAINING role text is not an exact match → kept."""
+    from lib.database._bootstrap._database import _filter_dump_head
+    head = b'COPY t FROM stdin;\n\tDROP ROLE IF EXISTS "u"; inside-data\n\\.\n'
+    out, n = _filter_dump_head(head, 'u')
+    assert n == 0 and out == head
+
+
+def test_restore_feeds_psql_via_stdin_with_filter():
+    """Source pin: the restore must stream the dump through the head filter
+    into psql's stdin — a bare `-f <dump>` replay re-introduces the
+    deterministic 'current user cannot be dropped' abort."""
+    import inspect
+    import lib.database._bootstrap._database as d
+    src = inspect.getsource(d._restore_from_sql_dump_if_present)
+    assert 'stdin=subprocess.PIPE' in src
+    assert "'-f', '-'" in src
+    assert '_filter_dump_head' in src

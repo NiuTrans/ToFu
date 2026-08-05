@@ -681,7 +681,9 @@ def _exec_write_file(fn_args, base_path, conv_id, task_id, kwargs):
         bp, rp = _rb(base_path, fn_args.get('path', ''))
     except ValueError as _rve:
         logger.debug('[tools] execute_tool caught %s: %s', type(_rve).__name__, _rve)
-        return f"write_file: {_rve}"
+        # Keep the 'Write failed' prefix — _read_gate._result_indicates_success
+        # and tools/meta.py pattern-match it to tell failure from success.
+        return f"Write failed: {_rve}"
     result = tool_write_file(bp, rp,
                              fn_args.get('content', ''),
                              fn_args.get('description', ''),
@@ -701,7 +703,7 @@ def _exec_apply_diff(fn_args, base_path, conv_id, task_id, kwargs):
         bp, rp = _rb(base_path, fn_args.get('path', ''))
     except ValueError as _rve:
         logger.debug('[tools] execute_tool caught %s: %s', type(_rve).__name__, _rve)
-        return f"apply_diff: {_rve}"
+        return f"Diff failed: {_rve}"  # 'Diff failed' prefix — read-gate contract
     result = tool_apply_diff(bp, rp,
                              fn_args.get('search', ''),
                              fn_args.get('replace', ''),
@@ -734,7 +736,7 @@ def _exec_insert_content(fn_args, base_path, conv_id, task_id, kwargs):
         bp, rp = _rb(base_path, fn_args.get('path', ''))
     except ValueError as _rve:
         logger.debug('[tools] execute_tool caught %s: %s', type(_rve).__name__, _rve)
-        return f"insert_content: {_rve}"
+        return f"Insert failed: {_rve}"  # 'Insert failed' prefix — read-gate contract
     result = tool_insert_content(bp, rp,
                                  fn_args.get('anchor', ''),
                                  fn_args.get('content', ''),

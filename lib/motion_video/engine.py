@@ -23,6 +23,7 @@ import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from lib.agent_core.events import Phase, build_phase
 from lib.log import get_logger
 from lib.production.heartbeat import heartbeat
 
@@ -474,7 +475,7 @@ def run_motion_task(task: dict) -> None:
                 and not (task.get('srt_path') and os.path.isfile(task['srt_path'])):
             from lib.motion_video._recipe import build_scenes_from_topic
             _phase_started(task, phases, 'research')
-            _emit(task, {'type': 'phase', 'phase': 'research', 'topic': topic})
+            _emit(task, build_phase(Phase.RESEARCH, topic=topic))
             with heartbeat(task, lambda t, ev: _emit(t, ev), 'research'):
                 tl = build_scenes_from_topic(
                     topic, workdir, lang=task.get('lang') or 'zh',
@@ -486,9 +487,9 @@ def run_motion_task(task: dict) -> None:
                     emit=lambda ev: _emit(task, {'type': 'recipe', **ev}))
             scenes_path = tl['scenes_path']
             task['scenes_path'] = scenes_path
-            _emit(task, {'type': 'phase', 'phase': 'script_done',
-                         'scenes': tl['scenes'],
-                         'timed_from_audio': tl['timed_from_audio']})
+            _emit(task, build_phase(Phase.SCRIPT_DONE,
+                                    scenes=tl['scenes'],
+                                    timed_from_audio=tl['timed_from_audio']))
         if _aborted(task):
             _motion_runtime.finish(task_id)
             return
@@ -504,9 +505,9 @@ def run_motion_task(task: dict) -> None:
             if not entries:
                 raise ValueError('SRT parsed to zero cues')
             span = mv.total_span(entries)
-            _emit(task, {'type': 'phase', 'phase': 'parse',
-                         'cues': len(entries),
-                         'span_s': [round(s, 3) for s in span]})
+            _emit(task, build_phase(Phase.PARSE,
+                                    cues=len(entries),
+                                    span_s=[round(s, 3) for s in span]))
         elif not (scenes_path and os.path.isfile(scenes_path)):
             raise ValueError('neither srt_path nor scenes_path available')
         if _aborted(task):
@@ -534,8 +535,7 @@ def run_motion_task(task: dict) -> None:
         _write(os.path.join(workdir, 'scenes.json'),
                json.dumps(scenes, ensure_ascii=False, indent=1))
         _phase_started(task, phases, 'storyboard')
-        _emit(task, {'type': 'phase', 'phase': 'storyboard',
-                     'scenes': len(scenes)})
+        _emit(task, build_phase(Phase.STORYBOARD, scenes=len(scenes)))
 
         # ── 3. narration (optional) ──
         narration = bool(task.get('narration'))
@@ -548,13 +548,13 @@ def run_motion_task(task: dict) -> None:
             # never double-synthesize, and a resumed job skips narration too.
             manifest = _reusable_manifest(audio_dir, scenes) or {}
             if manifest.get('ok'):
-                _emit(task, {'type': 'phase', 'phase': 'narrate',
-                             'degraded': False, 'reused': True,
-                             'scenes': [{'scene_id': e['scene_id'],
-                                         'audio_s': e['audio_duration'],
-                                         'target_s': e['target_duration'],
-                                         'overflow_s': e['overflow']}
-                                        for e in manifest['scenes']]})
+                _emit(task, build_phase(
+                    Phase.NARRATE, degraded=False, reused=True,
+                    scenes=[{'scene_id': e['scene_id'],
+                             'audio_s': e['audio_duration'],
+                             'target_s': e['target_duration'],
+                             'overflow_s': e['overflow']}
+                            for e in manifest['scenes']]))
             else:
                 _phase_started(task, phases, 'narrate')
                 try:
@@ -575,20 +575,20 @@ def run_motion_task(task: dict) -> None:
                 if not manifest.get('ok'):
                     narration = False
                     degraded_narration = True
-                    _emit(task, {'type': 'phase', 'phase': 'narrate',
-                                 'degraded': True,
-                                 'detail': manifest.get('detail', '')})
+                    _emit(task, build_phase(
+                        Phase.NARRATE, degraded=True,
+                        detail=manifest.get('detail', '')))
                     logger.warning('[MotionVideo] narration degraded: %s',
                                    manifest.get('detail'))
                 else:
-                    _emit(task, {'type': 'phase', 'phase': 'narrate',
-                                 'degraded': False,
-                                 'scenes': [
-                                     {'scene_id': e['scene_id'],
-                                      'audio_s': e['audio_duration'],
-                                      'target_s': e['target_duration'],
-                                      'overflow_s': e['overflow']}
-                                     for e in manifest['scenes']]})
+                    _emit(task, build_phase(
+                        Phase.NARRATE, degraded=False,
+                        scenes=[
+                            {'scene_id': e['scene_id'],
+                             'audio_s': e['audio_duration'],
+                             'target_s': e['target_duration'],
+                             'overflow_s': e['overflow']}
+                            for e in manifest['scenes']]))
         if _aborted(task):
             _motion_runtime.finish(task_id)
             return
@@ -731,10 +731,10 @@ def run_motion_task(task: dict) -> None:
             if _aborted(task):
                 _motion_runtime.finish(task_id)
                 return
-        _emit(task, {'type': 'phase', 'phase': 'compose', 'scenes': total,
-                     'authored': authored,
-                     'templated': total - authored,
-                     'gate_failed_scenes': sorted(scene_gate_issues)})
+        _emit(task, build_phase(Phase.COMPOSE, scenes=total,
+                                authored=authored,
+                                templated=total - authored,
+                                gate_failed_scenes=sorted(scene_gate_issues)))
         if _aborted(task):
             _motion_runtime.finish(task_id)
             return
@@ -805,8 +805,9 @@ def run_motion_task(task: dict) -> None:
                                  abort_event=task.get('abort_event'))
         if not res.get('ok'):
             raise RuntimeError('concat failed: ' + res.get('detail', ''))
-        _emit(task, {'type': 'phase', 'phase': 'concat',
-                     'duration_s': res.get('duration'), 'mode': res.get('mode')})
+        _emit(task, build_phase(Phase.CONCAT,
+                                duration_s=res.get('duration'),
+                                mode=res.get('mode')))
 
         # ── 7. sidecar SRT (loose-adjusted timeline when narrated) ──
         sidecar = os.path.join(workdir, 'final.srt')
@@ -843,9 +844,9 @@ def run_motion_task(task: dict) -> None:
             if not br.get('ok'):
                 raise RuntimeError('burn-in failed: ' + br.get('detail', ''))
             video_final = burned
-            _emit(task, {'type': 'phase', 'phase': 'burn_in',
-                         'duration_s': br.get('duration'),
-                         'auto': bool(degraded_narration)})
+            _emit(task, build_phase(Phase.BURN_IN,
+                                    duration_s=br.get('duration'),
+                                    auto=bool(degraded_narration)))
 
         # ── 8. mux (optional) ──
         final_path = os.path.join(workdir, 'final.mp4')
@@ -862,8 +863,8 @@ def run_motion_task(task: dict) -> None:
                                         abort_event=task.get('abort_event'))
             if not mx.get('ok'):
                 raise RuntimeError('mux failed: ' + mx.get('detail', ''))
-            _emit(task, {'type': 'phase', 'phase': 'mux',
-                         'duration_s': mx.get('duration')})
+            _emit(task, build_phase(Phase.MUX,
+                                    duration_s=mx.get('duration')))
         else:
             os.replace(video_final, final_path)
 
@@ -1093,8 +1094,9 @@ def run_scene_regen_task(task: dict) -> None:
                        open(index_html, encoding='utf-8').read())
         expect_dur = float(m.group(1)) if m else (
             float(target['end']) - float(target['start']))
-        _emit(task, {'type': 'phase', 'phase': 'regen',
-                     'scene_id': scene_id, 'regen_of': task.get('regen_of')})
+        _emit(task, build_phase(Phase.REGEN,
+                                scene_id=scene_id,
+                                regen_of=task.get('regen_of')))
         if _aborted(task):
             _motion_runtime.finish(task_id)
             return

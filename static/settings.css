@@ -1218,6 +1218,18 @@
 .mcp-app-card .skill-author{grid-column:2;font-size:10.5px;color:var(--s-ink-soft);opacity:.8;margin-top:1px}
 .mcp-app-card .skill-card-footer{grid-column:1 / -1;display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:8px;padding-top:8px;min-height:30px;border-top:1px dashed rgba(26,24,20,.18)}
 .mcp-app-card .skill-card-actions{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
+.mcp-app-card .skill-card-actions{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
+/* Per-skill env/key bindings (credential-vault backed). One row per variable:
+ * name chip + state + actions; the editor unfolds under the row. */
+.skill-env-section{grid-column:1 / -1;display:flex;flex-direction:column;gap:4px;margin-top:6px;padding-top:6px;border-top:1px dashed rgba(26,24,20,.18)}
+.skill-env-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.skill-env-name{font-size:10.5px;font-weight:700;padding:1px 7px;border:1px solid rgba(26,24,20,.25);border-radius:var(--s-radius);background:var(--s-cream);color:var(--s-ink)}
+.skill-env-state{font-size:10px;font-weight:700;letter-spacing:.02em}
+.skill-env-state.is-ok{color:var(--s-gold-dim)}
+.skill-env-state.is-missing{color:#b3462e}
+.skill-env-editor{display:flex;gap:6px;align-items:center;padding:4px 0 2px}
+.skill-env-input{flex:1;min-width:0;padding:5px 8px;font-size:11px;border:var(--s-border-sm);border-radius:var(--s-radius);background:var(--s-white);color:var(--s-ink)}
+.skill-env-input:focus{outline:2px solid var(--s-ink);outline-offset:-1px}
 /* Installed state — same gold language as .mcp-app-card.connected: the
  * card reads 'already yours' without the old green wash. */
 .mcp-app-card.is-installed{background:linear-gradient(180deg,rgba(201,153,63,.06) 0%,var(--s-white) 60%);box-shadow:2px 2px 0 var(--s-gold),var(--s-shadow-xs)}

@@ -32,7 +32,7 @@ from lib.database._pg_ownership import (
     _fix_unix_socket_conf,
 )
 from lib.database._pg_seed import (
-    _pgdata_major_compatible, _seed_local_pgdata_from_legacy,
+    _pgdata_major_compatible,
 )
 from lib.database._pg_backup import _try_self_heal_corrupt_pg
 
@@ -319,33 +319,20 @@ def _ensure_pg_running(pgdata, base_dir, pg_host, pg_port, pg_user, pg_password,
             dsn += f" password={pg_password}"
         return dsn
 
-    # ── Step -1: One-time local-primary seed migration ──
-    # When the local-primary split is engaged but `pgdata` here is the LEGACY
-    # FUSE path (the gate held because local is not yet populated), attempt the
-    # one-time seed of the empty local cluster from this legacy one. On success
-    # the local dir becomes a verified populated cluster and the NEXT boot's
-    # resolve_pgdata_dir flips to it (the two-restart dance). On skip/failure
-    # legacy stays canonical — we proceed to start THIS legacy cluster below,
-    # so serving is never blocked. The seed itself is idempotent + verify-gated.
+    # ── Step -1: local-primary migration (seed + atomic same-boot flip) ──
+    # Server-boot only (the migrator gates on TOFU_SERVER_PROCESS): when the
+    # local-primary split is engaged and the local pgdata is unpopulated or
+    # stale, this seeds it from legacy and flips THIS boot to serve local —
+    # no two-restart window. On skip/failure the returned pgdata is unchanged
+    # (legacy stays canonical) and serving continues below. Idempotent +
+    # verify-gated + cooldown-marked; see _pg_seed._migrate_local_primary_if_due.
     try:
-        from lib.database.db_paths import (
-            local_data_split_enabled, legacy_pgdata_dir, pgdata_is_populated,
-        )
-        _data_dir = os.path.join(base_dir, 'data')
-        _legacy = legacy_pgdata_dir(_data_dir)
-        # Only when split is on AND we were handed the legacy path (gate held).
-        if (local_data_split_enabled(_data_dir)
-                and os.path.abspath(pgdata) == os.path.abspath(_legacy)):
-            _local_root = getenv_compat('TOFU_DB_LOCAL_ROOT', default='').strip() \
-                or '/tmp/tofu'
-            _local_pgdata = os.path.join(os.path.abspath(_local_root), 'pgdata')
-            if not pgdata_is_populated(_local_pgdata):
-                _seed_local_pgdata_from_legacy(
-                    _local_pgdata, _legacy, base_dir, pg_port,
-                    pg_user, pg_password, pg_dbname)
+        from lib.database._pg_seed import _migrate_local_primary_if_due
+        pgdata = _migrate_local_primary_if_due(
+            pgdata, base_dir, pg_port, pg_user, pg_password, pg_dbname)
     except Exception as _se:
-        logger.error('[DB-Seed] seed hook raised (continuing on legacy): %s',
-                     _se, exc_info=True)
+        logger.error('[DB-Seed] migration hook raised (continuing on %s): %s',
+                     pgdata, _se, exc_info=True)
 
     # ── Step 0: Early bail if PG binaries are simply not installed ──
     # Unless the user has explicitly set TOFU_PG_HOST to a remote, there's

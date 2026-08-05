@@ -374,10 +374,12 @@ def _patch_probe(monkeypatch, duration=4.0, uniform=True):
 
 def _fake_ffmpeg(tmp_path):
     marker = tmp_path / 'ffmpeg_args.txt'
+    # NOTE: keep this script POSIX-sh clean — the shebang is /bin/sh, which is
+    # DASH on ubuntu (public CI), and dash rejects bashisms like ${@: -1}
+    # with "Bad substitution". The for loop below already yields the last arg.
     cli = _make_exe(str(tmp_path), 'ffmpeg', f"""#!/bin/sh
 echo "$@" > "{marker}"
 # write something to the output path (last arg)
-out="${{@: -1}}"
 for a in "$@"; do out="$a"; done
 printf 'video' > "$out"
 exit 0

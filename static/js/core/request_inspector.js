@@ -471,10 +471,10 @@ async function openRequestInspectorForToolRound(taskId, roundNum) {
  * chip can name the axis instead of silently mislabelling it.
  *
  * Mounts right after the tool round's [data-prn] slot and renders through
- * the SAME renderer as the drawer detail (renderDebugBlocksInto /
- * updateDebugToolsBlock — no second JSON renderer). When the tool row is
- * not in the DOM (unloaded/old conversation), degrades to the drawer so the
- * click always lands somewhere meaningful.
+ * the SAME renderer as the drawer detail (renderDebugBlocksInto — no second
+ * JSON renderer). When the tool row is not in the DOM (unloaded/old
+ * conversation), degrades to the drawer so the click always lands somewhere
+ * meaningful.
  *
  * ROUND-SCOPED (owner, 2026-07-28): renders ONLY what that round appended —
  * the increment over the previous round's same-kind payload — never the full
@@ -613,8 +613,19 @@ async function _riRenderToolPanel(panel, taskId, roundNum) {
     (payload.label || ('R' + roundNum)) + ' · +' + shown.length + ' msgs';
   if (body) {
     renderDebugBlocksInto(body, shown, null);
-    if (payload.tools && payload.tools.length)
-      updateDebugToolsBlock(body, payload.tools);
+    /* 2026-08-05 owner: NO tools-schema block here — it is identical on
+     * every round and pure noise next to one round's increment (the drawer
+     * detail keeps it: there it is part of the request payload). Small
+     * increments auto-expand so the panel answers at a glance; large
+     * payloads stay collapsed and render on click. */
+    let total = 0;
+    for (const m of shown)
+      total += (typeof _debugMsgChars === 'function') ? _debugMsgChars(m) : 0;
+    if (shown.length <= 6 && total <= 300 * 1024 &&
+        typeof _debugOpenBlock === 'function') {
+      body.querySelectorAll('.debug-msg-block').forEach(
+        (b) => _debugOpenBlock(b));
+    }
   }
 }
 

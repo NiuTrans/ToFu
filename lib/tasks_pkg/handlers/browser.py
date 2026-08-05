@@ -32,9 +32,18 @@ def _badge_ok_or_error(label_ok, label_fail='error'):
     renders the per-tool SVG icon and colors the badge by ok/fail class.
     """
     def _handler(meta, fn_name, display_text, chars, is_screenshot):
-        # Tool results no longer include emoji prefixes; error strings
-        # start with 'Error:' or contain ' error:' / ' failed:'.
-        ok = not display_text.startswith('Error')
+        # Failure envelopes seen across the browser handlers:
+        #   'Error …'                       (bridge/validation errors)
+        #   '<fn_name> failed: …'           (advanced tools, dispatch.py)
+        #   '<fn_name> error: …'            (advanced tools, dispatch.py)
+        #   'Click failed: …' / 'No clear match …' / 'Timeout: …' (v2 actions)
+        # Success envelopes ('Clicked …', 'Typed …', '… succeeded (N steps)',
+        # arbitrary execute_js JSON) never START with those words, so the
+        # anchor on the head keeps arbitrary result text from false-failing.
+        head = display_text[:80]
+        ok = not re.match(
+            r'(?i)\s*(error\b|no clear match\b|timeout\b|[\w .]*\bfailed\b|[\w .]*\berror\b)',
+            head)
         meta['badge'] = label_ok if ok else label_fail
     return _handler
 
@@ -59,6 +68,7 @@ _BROWSER_BADGE_DISPATCH = {
     'browser_type':                     _badge_ok_or_error('typed', 'failed'),
     'browser_press_key':                _badge_ok_or_error('sent', 'failed'),
     'browser_menu_click':               _badge_ok_or_error('clicked', 'failed'),
+    'browser_fill_form':                _badge_ok_or_error('filled', 'failed'),
     'browser_get_cookies':              _badge_regex_count(r'(\d+) cookies?', 'cookies'),
     'browser_get_history':              _badge_regex_count(r'(\d+) results?', 'results'),
     'browser_create_tab':               _badge_ok_or_error('opened', 'failed'),

@@ -43,7 +43,6 @@ from __future__ import annotations
 
 import os
 import re
-import shutil
 import subprocess
 
 import pytest
@@ -56,7 +55,15 @@ SRC = os.path.join(ROOT, 'static', 'js', 'ui', 'streaming_render.js')
 
 
 def _node_available() -> bool:
-    return bool(shutil.which('node'))
+    """node binary AND node_modules/jsdom — the harness below does
+    ``require(path.join(ROOT, 'node_modules', 'jsdom'))``, so a lane with a
+    bare node but no npm ci (public CI test-unit job) must skip, not fail
+    with 'Cannot find module .../node_modules/jsdom'."""
+    try:
+        from tests._jsdom import node_deps_available
+    except ImportError:
+        from _jsdom import node_deps_available
+    return node_deps_available()
 
 
 def _extract_helper(src_text: str) -> str:

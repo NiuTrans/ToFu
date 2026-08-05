@@ -394,6 +394,8 @@ cd clients/typescript && npm install
 | `browser_get_interactive_elements` | 发现可点击/可输入的元素 |
 | `browser_get_app_state` | 访问 Vue/React 内部状态 |
 
+点击不只是点击：`text=` 模糊匹配也能命中纯 JS 框架的「卡片式」按钮（cursor:pointer 区域）；点击若打开了新标签页，结果会明确告知（新页编号、标题、URL）并自动把新页设为当前工作页——无需再手动翻标签页列表。
+
 **页面使用 Canvas/SVG 渲染（图表、DAG 图等）？** DOM 文本提取会返回空内容。用 `browser_screenshot` 做视觉分析，`browser_get_app_state` 获取数据，或 `browser_execute_js` 自定义提取。
 
 **多个浏览器**可以同时连接，拥有独立的命令队列 —— 适合你有工作和个人不同浏览器配置文件的场景。
@@ -605,7 +607,7 @@ Tofu 会默默观察自己的表现，并提议一些小改进 —— 每一处�
 
 当助手发现了有用的东西 —— 一个 Bug 模式、一个项目规范、你偏好的编码风格 —— 它可以把这些知识保存为**记忆**，供未来的会话使用。
 
-**工作原理：** 项目级记忆以 Markdown 文件形式存储在项目内的 `.tofu/skills/`；全局记忆（跨项目共享）存放在服务端存储 `data/memories/global/`。助手会主动创建记忆，你也可以要求它创建。在之后的对话中，相关的记忆会自动加载到上下文中。
+**工作原理：** 项目级记忆以 Markdown 文件形式存储在项目内的 `.tofu/memories/`；全局记忆（跨项目共享）存放在服务端存储 `data/memories/global/`。助手会主动创建记忆，你也可以要求它创建。在之后的对话中，相关的记忆会自动加载到上下文中。
 
 **工具：** `create_memory`、`update_memory`、`delete_memory`、`merge_memories` —— 助手跨会话管理自己的知识库。
 
@@ -617,7 +619,9 @@ Tofu 会默默观察自己的表现，并提议一些小改进 —— 每一处�
 
 当你想给助手一套可复用的、打包好的专项本领 —— 针对某类任务的说明加辅助脚本 —— 安装一个**技能（Skill）**。
 
-**工作原理：** 技能遵循开放的 Claude / OpenClaw / AgentSkills 格式（一个 `SKILL.md` 加可选的参考文件与脚本）。打开 **设置 → Skills**，浏览推荐技能的**目录（Catalog）**（如 Anthropic 的 docx / xlsx / pdf / skill-creator）并**一键安装**，或**拖拽本地 `.zip`** 进来。已安装的技能出现在**已安装（Installed）**页签，可查看或卸载。附带的 `install.sh` 脚本只作为提示展示 —— 绝不会自动执行。
+**工作原理：** 技能遵循开放的 Claude / OpenClaw / AgentSkills 格式（一个 `SKILL.md` 加可选的参考文件与脚本）。打开 **设置 → Skills**，浏览推荐技能的**目录（Catalog）**（如 Anthropic 的 docx / xlsx / pdf / skill-creator）并**一键安装**，或**拖拽本地 `.zip`** 进来。新安装默认放在**全局**（所有对话可用，也可在头部切换为仅本项目）；已安装的技能出现在**已安装（Installed）**页签，可查看文件、在全局/本项目之间移动、或卸载。附带的 `install.sh` 脚本只作为提示展示 —— 绝不会自动执行。
+
+**密钥配置：** 需要 API Key 的技能（如飞猪 FlyAI）会在卡片上列出所需的环境变量，点「配置」填入即可——值加密存放在**凭证保管库**（`data/config/`，600 权限，永不进仓、永不导出），执行工具调用时自动注入子进程环境，无需重启服务，也无需把密钥贴进聊天。卸载技能会一并删除它在保管库里的密钥。
 
 ---
 

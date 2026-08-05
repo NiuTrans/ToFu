@@ -8,7 +8,7 @@ tool execution.
 
 import random
 
-from lib.agent_core.events import EventType, build_event
+from lib.agent_core.events import EventType, Phase, build_event, emit_phase
 from lib.log import get_logger
 from lib.tasks_pkg.manager import append_event
 
@@ -323,15 +323,12 @@ def analyse_stream_result(
                     f'⚠️ 网络中断（代理超时），正在自动重试 '
                     f'({_premature_retry_count}/{_retry_cap})…'
                 )
-            append_event(task, {
-                'type': 'phase',
-                'phase': 'retrying',
-                'attempt': _premature_retry_count,
-                'max': _retry_cap,
-                'bucket': _retry_bucket,
-                'backoff_s': round(_backoff_s, 2),
-                'detail': _phase_detail,
-            })
+            emit_phase(task, Phase.RETRYING,
+                       attempt=_premature_retry_count,
+                       max=_retry_cap,
+                       bucket=_retry_bucket,
+                       backoff_s=round(_backoff_s, 2),
+                       detail=_phase_detail)
             if _backoff_s > 0:
                 _interruptible_sleep(_backoff_s, task)
             result['action'] = 'continue'
@@ -399,18 +396,15 @@ def analyse_stream_result(
                 _trace_id, _stream_elapsed_ms / 1000, model,
                 _premature_retry_count, _EMPTY_STOP_RETRY_MAX, _backoff_s,
             )
-            append_event(task, {
-                'type': 'phase',
-                'phase': 'retrying',
-                'attempt': _premature_retry_count,
-                'max': _EMPTY_STOP_RETRY_MAX,
-                'bucket': 'empty_stop',
-                'backoff_s': round(_backoff_s, 2),
-                'detail': (
-                    f'⚠️ 模型空回复（{len(round_thinking)}字符思考但无正文），'
-                    f'重试中 ({_premature_retry_count}/{_EMPTY_STOP_RETRY_MAX})…'
-                ),
-            })
+            emit_phase(task, Phase.RETRYING,
+                       attempt=_premature_retry_count,
+                       max=_EMPTY_STOP_RETRY_MAX,
+                       bucket='empty_stop',
+                       backoff_s=round(_backoff_s, 2),
+                       detail=(
+                           f'⚠️ 模型空回复（{len(round_thinking)}字符思考但无正文），'
+                           f'重试中 ({_premature_retry_count}/{_EMPTY_STOP_RETRY_MAX})…'
+                       ))
             _interruptible_sleep(_backoff_s, task)
             result['action'] = 'continue'
             return result
@@ -458,18 +452,15 @@ def analyse_stream_result(
                 task['thinking'] = ''
             append_event(task, build_event(
                 EventType.DELTA_RESET, roundNum=round_num, discard=True))
-            append_event(task, {
-                'type': 'phase',
-                'phase': 'retrying',
-                'attempt': _premature_retry_count,
-                'max': _CANNED_GREETING_RETRY_MAX,
-                'bucket': 'canned_greeting',
-                'backoff_s': round(_backoff_s, 2),
-                'detail': (
-                    f'⚠️ 上游返回了与任务无关的模板问候（{len(round_content)}字符），'
-                    f'重试中 ({_premature_retry_count}/{_CANNED_GREETING_RETRY_MAX})…'
-                ),
-            })
+            emit_phase(task, Phase.RETRYING,
+                       attempt=_premature_retry_count,
+                       max=_CANNED_GREETING_RETRY_MAX,
+                       bucket='canned_greeting',
+                       backoff_s=round(_backoff_s, 2),
+                       detail=(
+                           f'⚠️ 上游返回了与任务无关的模板问候（{len(round_content)}字符），'
+                           f'重试中 ({_premature_retry_count}/{_CANNED_GREETING_RETRY_MAX})…'
+                       ))
             _interruptible_sleep(_backoff_s, task)
             result['action'] = 'continue'
             return result
@@ -567,15 +558,12 @@ def analyse_stream_result(
                     '[%s] 📋 Todo-continuation enforcer: %d incomplete item(s) '
                     'at stop — re-driving loop (nudge %d/%d) round=%d',
                     tid, len(_incomplete), _nudges + 1, _todo_max, round_num)
-                append_event(task, {
-                    'type': 'phase',
-                    'phase': 'todo_continuation',
-                    'attempt': _nudges + 1,
-                    'max': _todo_max,
-                    'incomplete': len(_incomplete),
-                    'detail': (f'📋 检测到 {len(_incomplete)} 项待办未完成，'
-                               f'继续执行 ({_nudges + 1}/{_todo_max})…'),
-                })
+                emit_phase(task, Phase.TODO_CONTINUATION,
+                           attempt=_nudges + 1,
+                           max=_todo_max,
+                           incomplete=len(_incomplete),
+                           detail=(f'📋 检测到 {len(_incomplete)} 项待办未完成，'
+                                   f'继续执行 ({_nudges + 1}/{_todo_max})…'))
                 result['action'] = 'continue'
                 return result
             if _incomplete and _nudges >= _todo_max:
@@ -633,15 +621,12 @@ def analyse_stream_result(
                     'round failed and this round was prose-only with no tool '
                     'calls — re-driving once. model=%s content=%dchars',
                     tid, round_num, model, len(round_content))
-                append_event(task, {
-                    'type': 'phase',
-                    'phase': 'intent_stall_nudge',
-                    'attempt': _stall_nudges + 1,
-                    'max': 1,
-                    'detail': '↻ Previous tool call did not run — nudging the '
-                              'model to continue…',
-                    'detailKey': 'stream.phase.intentStallNudge',
-                })
+                emit_phase(task, Phase.INTENT_STALL_NUDGE,
+                           attempt=_stall_nudges + 1,
+                           max=1,
+                           detail='↻ Previous tool call did not run — nudging the '
+                                  'model to continue…',
+                           detailKey='stream.phase.intentStallNudge')
                 result['action'] = 'continue'
                 return result
             if _stall_reason not in ('prev_tool_ok', 'no_tool_rounds',

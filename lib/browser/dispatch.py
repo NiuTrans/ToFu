@@ -72,12 +72,25 @@ def normalize_browser_args(fn_args):
 
 
 def _handle_advanced_tool(fn_name, fn_args):
-    """Handler for advanced browser tools (menu click, fill form + legacies)."""
+    """Handler for advanced browser tools (menu click, fill form + legacies).
+
+    v3 receipt seam (2026-08-05, owner review of pt_4ef0583e3ad44278): the
+    four advanced flows call click_element DIRECTLY — and a menu item or a
+    form SUBMIT are the two highest-frequency new-tab openers — so without
+    this seam they bypass the base handlers' action receipt and the
+    "clicked but nothing perceived" incident recurs. Snapshot the tab set
+    before the flow, diff after it HERE: one seam covers all four flows
+    without touching their internals. Patch points for tests: THIS module's
+    send_browser_command serves the snapshot/receipt list_tabs calls;
+    lib.browser.advanced's own module-level name serves the flow commands.
+    """
     from lib.browser.advanced import (
         fill_form_sequential, hover_and_click, menu_click,
         right_click_menu_select,
     )
-    from lib.browser._resolve import resolve_work_tab
+    from lib.browser._resolve import (
+        action_receipt, resolve_work_tab, tab_snapshot,
+    )
     try:
         # v2: tab_id optional on the shipped advanced tools — resolve the
         # working tab once here. Legacy names keep their explicit-id contract
@@ -89,6 +102,8 @@ def _handle_advanced_tool(fn_name, fn_args):
                         'browser_list_tabs / browser_navigate first.')
         else:
             tab_id = fn_args.get('tabId')
+        # Pre-flow snapshot: the receipt diffs against this AFTER the flow.
+        before = tab_snapshot(tab_id, send_browser_command) if tab_id is not None else None
         if fn_name == 'browser_menu_click':
             result = menu_click(
                 tab_id=tab_id,
@@ -127,6 +142,11 @@ def _handle_advanced_tool(fn_name, fn_args):
             )
         else:
             return f'Error: Unknown advanced browser tool: {fn_name}'
+        # Post-flow receipt: fires on success AND failure (a flow can open a
+        # tab and still report failure, e.g. submenu item missing).
+        receipt = ''
+        if before is not None:
+            receipt = action_receipt(tab_id, before, send_browser_command)
         # Format result dict
         if isinstance(result, dict):
             if result.get('success'):
@@ -135,10 +155,10 @@ def _handle_advanced_tool(fn_name, fn_args):
                 parts = [f'{fn_name} succeeded ({steps} steps)']
                 if details:
                     parts.append(json.dumps(details, ensure_ascii=False, indent=2))
-                return '\n'.join(parts)
+                return '\n'.join(parts) + receipt
             else:
-                return f'{fn_name} failed: {result.get("error", "unknown error")} (completed {result.get("steps_completed", 0)} steps)'
-        return str(result)
+                return f'{fn_name} failed: {result.get("error", "unknown error")} (completed {result.get("steps_completed", 0)} steps)' + receipt
+        return str(result) + receipt
     except Exception as e:
         logger.warning("Browser tool %s error: %s", fn_name, e, exc_info=True)
         return f'{fn_name} error: {e}'

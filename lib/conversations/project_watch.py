@@ -615,6 +615,105 @@ def _address_open_items_blocking(project_path: str, trigger: str) -> None:
 
 
 # ══════════════════════════════════════════════════════════════════════
+#  Follow-up Q&A — the human's thread ON one response (Increment 2 slice)
+# ══════════════════════════════════════════════════════════════════════
+
+_FOLLOW_UP_SYSTEM = (
+    'You are the project brain. The human owner is asking a FOLLOW-UP about '
+    'ONE earlier response you gave on a {kind} they are tracking. Answer the '
+    'follow-up directly and concretely using ONLY the project state provided. '
+    'Stay consistent with the earlier response unless the state has moved — '
+    'if it moved, say what changed. If the state does not contain the answer, '
+    'say so plainly — do NOT invent facts.')
+
+
+def answer_follow_up(item_id: str, question: str, *,
+                     response_seq: int | None = None) -> dict:
+    """Answer the human's follow-up anchored to ONE trail response.
+
+    The one interaction the watch lane was missing: a response the human wants
+    to dig into becomes a THREAD. The answer is grounded in LIVE pillar state
+    + the item text + the anchor response, and is persisted into the SAME
+    append-only trail with ``trigger='follow_up'``; the question rides the
+    evidence JSON (``followUpQuestion`` / ``anchorSeq``) so the trail shows
+    what was asked. Stays strictly inside the human↔brain lane — synthesized
+    responses never reach the prompt-injection path (the goals renderer ships
+    item TEXT only, guarded by tests).
+
+    Deliberately does NOT touch the item's ``response_fingerprint``: a Q&A
+    turn is not a fresh assessment and must not mark the recurring cadence
+    as fresh. Resolved items may still be followed up (the human asked
+    explicitly). Returns ``{'ok', 'response'?}`` / ``{'ok': False, 'error'}``;
+    never raises.
+    """
+    question = (question or '').strip()
+    if not item_id:
+        return {'ok': False, 'error': 'no item'}
+    if not question:
+        return {'ok': False, 'error': 'empty question'}
+    try:
+        db = get_thread_db(DOMAIN_CHAT)
+        row = _get_item_row(db, item_id)
+        if not row:
+            return {'ok': False, 'error': 'not found'}
+        if response_seq:
+            anchor = db.execute(
+                'SELECT seq, response FROM project_watch_responses '
+                'WHERE item_id=? AND seq=?', (item_id, int(response_seq))).fetchone()
+        else:
+            anchor = db.execute(
+                'SELECT seq, response FROM project_watch_responses '
+                'WHERE item_id=? ORDER BY seq DESC LIMIT 1', (item_id,)).fetchone()
+    except Exception as e:
+        logger.warning('[Watch] follow-up read failed item=%s: %s', item_id, e)
+        return {'ok': False, 'error': str(e)}
+
+    kind = row['kind'] or 'concern'
+    anchor_text = (anchor['response'] or '') if anchor else ''
+    anchor_seq = int(anchor['seq']) if anchor else 0
+
+    from lib.conversations.project_status import (
+        _build_synthesis_source, collect_pillar_state)
+    project_path = row['project_path']
+    pillar_state = collect_pillar_state(project_path)
+    source = _build_synthesis_source(pillar_state)
+    system = _FOLLOW_UP_SYSTEM.format(kind=kind) + _COMMON_SUFFIX
+    user = (
+        f'Project state:\n\n{source}\n\n'
+        f'The {kind} I am tracking: {row["text"] or ""}\n\n'
+        f'Your earlier response (the one I am following up on): '
+        f'{anchor_text or "(none yet)"}\n\n'
+        f'My follow-up: {question}\n\nAnswer:')
+    started = time.time()
+    try:
+        from lib.llm_dispatch import dispatch_chat
+        content, _usage = dispatch_chat(
+            [{'role': 'system', 'content': system},
+             {'role': 'user', 'content': user}],
+            max_tokens=700, temperature=0.3, capability='cheap',
+            log_prefix='[Watch]',
+        )
+    except Exception as e:
+        logger.warning('[Watch] follow-up synthesis failed after %.1fs: %s',
+                       time.time() - started, e)
+        return {'ok': False, 'error': str(e)}
+    text = (content or '').strip()
+    if not text:
+        return {'ok': False, 'error': 'empty response'}
+    if len(text) > _RESPONSE_MAX_CHARS:
+        text = text[:_RESPONSE_MAX_CHARS].rstrip() + '…'
+
+    evidence = dict(pillar_state) if isinstance(pillar_state, dict) else {}
+    evidence['followUpQuestion'] = question
+    evidence['anchorSeq'] = anchor_seq
+    snap = _persist_response(db, item_id, project_path, text, evidence,
+                             'follow_up')
+    if not snap:
+        return {'ok': False, 'error': 'persist failed'}
+    return {'ok': True, 'response': snap}
+
+
+# ══════════════════════════════════════════════════════════════════════
 #  Promote-to-charter — concern/question ONLY (a goal never travels here)
 # ══════════════════════════════════════════════════════════════════════
 
@@ -699,7 +798,7 @@ __all__ = [
     'add_watch_item', 'edit_watch_item', 'set_watch_status', 'delete_watch_item',
     'list_watch_items', 'generate_item_response', 'address_watch_item',
     'address_open_items', 'promote_watch_item', 'promotion_state',
-    'render_goals_injection_block',
+    'answer_follow_up', 'render_goals_injection_block',
     'VALID_KINDS', 'VALID_STATUSES', 'PROMOTION_NONE', 'PROMOTION_ACTIVE',
     '_RESPONSES_KEEP',
 ]

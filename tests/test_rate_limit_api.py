@@ -3,16 +3,31 @@
 import time
 import unittest
 
+import lib.rate_limit_api as rate_limit_api
 from lib.api_keys import AuthContext
 from lib.rate_limit_api import (
-    RateDecision, _state, apply_headers, check_request, record_tokens,
+    RateDecision, apply_headers, check_request, record_tokens,
 )
+
+
+def _buckets() -> dict:
+    """The CURRENT module-level bucket dict.
+
+    Must be dereferenced through the module object: ``test_epic_a_backpressure``
+    deliberately ``importlib.reload()``s ``lib.rate_limit_api`` (to re-read its
+    env knobs), and a reload RE-BINDS the module-global ``_state`` to a fresh
+    dict. A ``from ... import _state`` here would keep pointing at the OLD
+    dict — ``setUp`` would clear a dict nobody reads, and per-test isolation
+    would silently depend on which files the xdist worker ran first (the
+    CI-only ``'rpm' != 'tpd'`` / ``False is not true`` failures).
+    """
+    return rate_limit_api._state
 
 
 class RateLimitTest(unittest.TestCase):
 
     def setUp(self):
-        _state.clear()
+        _buckets().clear()
 
     def _ctx(self, *, rpm=60, tpd=0, key_id='k_test'):
         return AuthContext(key_id=key_id, name='test',
@@ -49,12 +64,12 @@ class RateLimitTest(unittest.TestCase):
     def test_rpm_refill(self):
         ctx = self._ctx(rpm=60)  # 1 token/sec
         # Drain the bucket.
-        bucket = _state.get(ctx.key_id) or {}
+        bucket = _buckets().get(ctx.key_id) or {}
         for _ in range(60):
             self.assertTrue(check_request(ctx).allowed)
         self.assertFalse(check_request(ctx).allowed)
         # Manually advance the bucket time.
-        _state[ctx.key_id]['rpm'].last_refill -= 5
+        _buckets()[ctx.key_id]['rpm'].last_refill -= 5
         # 5 seconds at 1 token/sec → 5 fresh tokens available.
         for _ in range(5):
             self.assertTrue(check_request(ctx).allowed)

@@ -18,6 +18,7 @@ import json
 import os
 import time
 
+from lib.agent_core.events import Phase, build_phase
 from lib.log import audit_log, get_logger
 
 from lib.paper.podcast_engine._audio import (  # noqa: F401
@@ -267,7 +268,7 @@ def _run_podcast_task(task):
 
         # ── Stage 1: script (1–3 min of LLM rounds — heartbeat + sub-steps) ──
         _phase_started('script')
-        _append_podcast_event(task, {'type': 'phase', 'phase': 'script'})
+        _append_podcast_event(task, build_phase(Phase.SCRIPT))
         with heartbeat(task, _append_podcast_event, 'script'):
             script, script_meta = generate_script(
                 source_text=source_text, lang=lang, mode=mode, title=title,
@@ -298,8 +299,9 @@ def _run_podcast_task(task):
             return
 
         _phase_started('audio')
-        _append_podcast_event(task, {'type': 'phase', 'phase': 'audio',
-                                     'total': len(script.get('segments') or [])})
+        _append_podcast_event(
+            task, build_phase(Phase.AUDIO,
+                              total=len(script.get('segments') or [])))
         audio = synthesize_script_audio(
             script, voice=voice or _tts.default_voice(),
             abort_check=_aborted,

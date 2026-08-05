@@ -48,6 +48,25 @@ def _fail(msg): print(' ', _color('✗', '31'), msg); sys.exit(1)
 
 # ─── Layer 1: fetch_arxiv_title robustness ───────────────────────
 
+
+def _fresh_arxiv_module():
+    """Return lib.paper.arxiv with module attributes reset to source values.
+
+    These three tests exercise the REAL fetch_arxiv_title with only its
+    http_get seam faked. Another suite (test_paper_harvest._patch_harvest)
+    replaces ``lib.paper.arxiv.fetch_arxiv_title`` process-wide and restores
+    it in a finally — which a pytest-timeout kill (thread-method timeouts
+    abandon the test thread) never runs, so the stub ('Title of <id>') leaks
+    into whatever runs afterwards in that worker (measured on public CI
+    2026-08-05: a 300s timeout in test_paper_harvest left the stub installed
+    and all three tests below read it). Reloading the module undoes foreign
+    attribute replacement so this file does not depend on other suites'
+    cleanup discipline.
+    """
+    import importlib
+    import lib.paper.arxiv as ax
+    return importlib.reload(ax)
+
 ABS_PAGE_HTML = (
     '<!DOCTYPE html><html><head>'
     '<title>[1706.03762] Attention Is All You Need</title>'
@@ -66,7 +85,7 @@ class _FakeResp:
 
 def test_fetch_title_recovers_via_abs_page():
     """API throttled → title recovered from the abs HTML page."""
-    import lib.paper.arxiv as ax
+    ax = _fresh_arxiv_module()
     orig_get = ax.http_get
     orig_sleep = ax.time.sleep
     calls = {'api': 0, 'abs': 0}
@@ -96,7 +115,7 @@ def test_fetch_title_recovers_via_abs_page():
 
 def test_fetch_title_api_success_no_fallback():
     """API succeeds on first try → no abs-page fallback needed."""
-    import lib.paper.arxiv as ax
+    ax = _fresh_arxiv_module()
     orig_get = ax.http_get
     calls = {'api': 0, 'abs': 0}
     atom = (
@@ -125,7 +144,7 @@ def test_fetch_title_api_success_no_fallback():
 
 def test_fetch_title_all_sources_fail_returns_empty():
     """Every source down → '' (caller falls back to arXiv:<id>)."""
-    import lib.paper.arxiv as ax
+    ax = _fresh_arxiv_module()
     orig_get, orig_sleep = ax.http_get, ax.time.sleep
 
     def _fake_get(url, **kw):

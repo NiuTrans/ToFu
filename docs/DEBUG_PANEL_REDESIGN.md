@@ -279,3 +279,36 @@ SSE `messages_snapshot` **追加**进轮次表(不再整体覆盖);`_debugCache`
    - `SELECT SUM(pg_column_size(payload)) … WHERE type='messages_snapshot'` 总字节**下降 ≥ 20×**;
    - 随机 3 个历史任务逐轮调 `/requests/<round>`,与迁移前报文**逐字节一致**;
    - 无法精确重建的轮次有**诚实标注**。
+
+---
+
+## 12. 消息体结构化渲染(P7,owner 2026-08-05 拍板)
+
+> 起因(owner 截图内联状态面板):「debug 面板里的 JSON 没有格式化——`arguments`
+> 本身就是一个复杂 JSON 字符串,不渲染看得很困难;这个面板要好好再设计一下;
+> 不要给每个工具调用的结果显示 TOOLS 大列表了,没意义。」
+
+三条拍板,全部落在**共享渲染器**(`debug_panel.js::_renderMsgBodyHtml`,
+抽屉详情与内联面板同一条路径,不造第二渲染器):
+
+1. **arguments 解析渲染,不再裸转义**:`tool_calls[].function.arguments` 是
+   JSON **字符串**,旧视图整包 colorJson 时它是一行带 `\n` 转义的超长引号串。
+   新视图 `_debugTryParseJson` 解析后按 key 分块:长/多行字符串渲染为
+   **真实换行的可读文本块**(`.debug-arg-val`,max-height 320px 滚动),
+   嵌套对象/数组与「内容本身是 JSON 的字符串」渲染为语法着色 JSON,
+   短标量留在行内。reasoning_content / content 同理进可读 `<pre class="debug-text">`
+   (tool 结果若是 JSON 文本则解析渲染)。**原始信封不丢**:每块尾部
+   `原始 JSON` <details> 保留完整 colorJson dump(复制路径与对账的 ground truth)。
+2. **内联面板不再渲染 TOOLS schema 大列表**:每轮都相同的工具清单对一个
+   「这一轮调用」面板是纯噪声(`_riRenderToolPanel` 不再调
+   `updateDebugToolsBlock`)。**抽屉详情保留**——那里 tools 是请求 payload
+   的组成部分,检视请求时它是有意义的。
+3. **小增量自动展开**:内联面板渲染的消息数 ≤6 且总字符 ≤300KB 时
+   `_debugOpenBlock` 全部展开——面板存在是为了「一眼回答这一轮」,
+   不让用户逐条点开;大 payload 保持折叠按需渲染。
+
+守卫:`tests/test_frontend_debug_structured_body.py`(jsdom:参数分块/真实换行/
+无 TOOLS 块/自动展开/原始 JSON 保真 + 双 NEUTER;静态钉:内联面板永不回长
+TOOLS 块)。`test_debug_panel_contrast` 的配色语义不变——结构化视图的
+语法色沿用同一套已测 hex 调色板(`.debug-struct .debug-key` 等,
+dark/light/tofu 三主题同值)。

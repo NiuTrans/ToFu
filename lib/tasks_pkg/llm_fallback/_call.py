@@ -14,6 +14,7 @@ The reactive-compaction retry state (``_reactive_compact_attempts`` /
 ``._state`` — there is exactly one such dict in the process.
 """
 
+from lib.agent_core.events import Phase, build_phase
 from lib.llm import build_body
 from lib.llm_error_format import format_llm_error_for_user
 from lib.llm_errors import _ERR_BODY_LIMIT
@@ -115,12 +116,11 @@ def _attempt_pool_rescue(task, body, round_num, max_tokens, tool_list,
         logger.debug('[%s] pool-rescue cause classify failed: %s', tid, _ce)
         _rk_kind, _rk_detail = 'generic', str(cause_exc)[:200]
 
-    append_event(task, {
-        'type': 'phase',
-        'phase': 'retrying',
-        'detail': (f'⚠️ {original_model} 及其回退模型均不可用（{_rk_kind}）— '
-                   f'正在尝试池中其它可用模型…'),
-    })
+    append_event(task, build_phase(
+        Phase.RETRYING,
+        detail=(f'⚠️ {original_model} 及其回退模型均不可用（{_rk_kind}）— '
+                f'正在尝试池中其它可用模型…'),
+    ))
 
     _tools_this = tool_list if (tool_list and round_num < max_tool_rounds) else None
     _rescue_body = dict(body)
@@ -399,16 +399,15 @@ def _llm_call_with_fallback(task, body, model, round_num, max_tokens,
                     stated_max=_stated_max,
                 )
                 if _learned_info:
-                    append_event(task, {
-                        'type': 'phase',
-                        'phase': 'retrying',
-                        'detail': (
+                    append_event(task, build_phase(
+                        Phase.RETRYING,
+                        detail=(
                             f'⚙️ Auto-detected smaller context window for '
                             f'{model}: '
                             f'{_learned_info["new_limit"]:,} tokens '
                             f'(was {_learned_info["old_limit"]:,})'
                         ),
-                    })
+                    ))
             except Exception as _learn_e:
                 logger.debug('[%s] context_limits shrink-learn failed: %s',
                              tid, _learn_e)
@@ -449,16 +448,15 @@ def _llm_call_with_fallback(task, body, model, round_num, max_tokens,
 
                 # Notify frontend (phase event = transient UI status,
                 # does NOT pollute assistantMsg.content)
-                append_event(task, {
-                    'type': 'phase',
-                    'phase': 'retrying',
-                    'detail': f'⚡ 上下文超长，已自动压缩 (reactive compact {_attempts + 1}/{_REACTIVE_COMPACT_MAX_RETRIES})…',
-                    'detailKey': 'stream.phase.reactiveCompact',
-                    'detailArgs': {
+                append_event(task, build_phase(
+                    Phase.RETRYING,
+                    detail=f'⚡ 上下文超长，已自动压缩 (reactive compact {_attempts + 1}/{_REACTIVE_COMPACT_MAX_RETRIES})…',
+                    detailKey='stream.phase.reactiveCompact',
+                    detailArgs={
                         'attempt': _attempts + 1,
                         'max': _REACTIVE_COMPACT_MAX_RETRIES,
                     },
-                })
+                ))
 
                 # Retry the LLM call with compacted messages
                 try:
@@ -636,12 +634,11 @@ def _llm_call_with_fallback(task, body, model, round_num, max_tokens,
         # Notify via phase event (transient UI status, does NOT pollute
         # assistantMsg.content).  The done event already carries
         # fallbackModel / fallbackFrom / fallbackReason for the persistent badge.
-        append_event(task, {
-            'type': 'phase',
-            'phase': 'retrying',
-            'detail': (f'⚠️ 模型 {original_model} 请求失败（{_fb_kind}）：'
-                       f'{_fb_detail[:120]} — 已自动回退到 {_FALLBACK_MODEL} 继续生成…'),
-        })
+        append_event(task, build_phase(
+            Phase.RETRYING,
+            detail=(f'⚠️ 模型 {original_model} 请求失败（{_fb_kind}）：'
+                    f'{_fb_detail[:120]} — 已自动回退到 {_FALLBACK_MODEL} 继续生成…'),
+        ))
         # ★ EARLY notification, at the DECISION MOMENT — before the fallback
         #   stream starts. A fallback generation can run for minutes; the
         #   transient phase line is cleared the moment fallback content

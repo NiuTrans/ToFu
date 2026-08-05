@@ -1,5 +1,5 @@
 /**
- * Tofu Browser Bridge — Background Service Worker (v4.7)
+ * Tofu Browser Bridge — Background Service Worker (v4.8)
  *
  * Single-endpoint architecture:
  *   Every poll is a POST to /api/browser/poll with:
@@ -1158,56 +1158,53 @@ function _getInteractiveElements(maxElements, viewportOnly) {
   const allEls = document.querySelectorAll(selectors.join(','));
   const elements = [];
   const selectorMap = {};  // index → selector (for server-side caching)
-  const seen = new Set();
+  const seen = new Set();      // selector-string dedup
+  const seenEls = new Set();   // element-identity dedup across both passes
   let index = 1;  // 1-based index
 
-  for (const el of allEls) {
-    if (elements.length >= maxElements) break;
-    // Skip hidden elements
+  const _isVisible = (el) => {
+    if (el.offsetWidth === 0 && el.offsetHeight === 0) return false;
     const style = window.getComputedStyle(el);
-    if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') continue;
-    if (el.offsetWidth === 0 && el.offsetHeight === 0) continue;
+    return !(style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0');
+  };
+  const _inViewport = (el) => {
+    const rect = el.getBoundingClientRect();
+    return !(rect.bottom < 0 || rect.top > window.innerHeight ||
+             rect.right < 0 || rect.left > window.innerWidth);
+  };
 
-    // Viewport filter
-    if (viewportOnly) {
-      const rect = el.getBoundingClientRect();
-      if (rect.bottom < 0 || rect.top > window.innerHeight ||
-          rect.right < 0 || rect.left > window.innerWidth) continue;
-    }
-
-    // Build a concise CSS selector for this element
-    let selector = '';
-    if (el.id) {
-      selector = `#${CSS.escape(el.id)}`;
-    } else {
-      const tag = el.tagName.toLowerCase();
-      const classes = Array.from(el.classList).slice(0, 3).map(c => `.${CSS.escape(c)}`).join('');
-      const nthType = (() => {
-        if (el.id) return '';
-        const siblings = el.parentElement ? Array.from(el.parentElement.children).filter(s => s.tagName === el.tagName) : [];
-        if (siblings.length <= 1) return '';
-        const idx = siblings.indexOf(el) + 1;
-        return `:nth-of-type(${idx})`;
-      })();
-      selector = tag + classes + nthType;
-      // Make it more specific by prepending parent
-      if (el.parentElement && el.parentElement !== document.body && el.parentElement !== document.documentElement) {
-        const parent = el.parentElement;
-        if (parent.id) {
-          selector = `#${CSS.escape(parent.id)} > ${selector}`;
-        } else {
-          const ptag = parent.tagName.toLowerCase();
-          const pcls = Array.from(parent.classList).slice(0, 2).map(c => `.${CSS.escape(c)}`).join('');
-          selector = ptag + pcls + ' > ' + selector;
-        }
+  // Build a concise CSS selector for an element
+  const _conciseSelector = (el) => {
+    if (el.id) return `#${CSS.escape(el.id)}`;
+    const tag = el.tagName.toLowerCase();
+    const classes = Array.from(el.classList).slice(0, 3).map(c => `.${CSS.escape(c)}`).join('');
+    const nthType = (() => {
+      const siblings = el.parentElement ? Array.from(el.parentElement.children).filter(s => s.tagName === el.tagName) : [];
+      if (siblings.length <= 1) return '';
+      const idx = siblings.indexOf(el) + 1;
+      return `:nth-of-type(${idx})`;
+    })();
+    let selector = tag + classes + nthType;
+    // Make it more specific by prepending parent
+    if (el.parentElement && el.parentElement !== document.body && el.parentElement !== document.documentElement) {
+      const parent = el.parentElement;
+      if (parent.id) {
+        selector = `#${CSS.escape(parent.id)} > ${selector}`;
+      } else {
+        const ptag = parent.tagName.toLowerCase();
+        const pcls = Array.from(parent.classList).slice(0, 2).map(c => `.${CSS.escape(c)}`).join('');
+        selector = ptag + pcls + ' > ' + selector;
       }
     }
+    return selector;
+  };
 
-    // Dedup
-    if (seen.has(selector)) continue;
+  // Gather useful info + push (shared by both passes). Returns true when added.
+  const _pushElement = (el, extra) => {
+    const selector = _conciseSelector(el);
+    if (seen.has(selector)) return false;
     seen.add(selector);
-
-    // Gather useful info — ★ include index
+    seenEls.add(el);
     const text = (el.innerText || el.textContent || '').trim().substring(0, 100);
     const tag = el.tagName.toLowerCase();
     const info = { index, selector, tag, text };
@@ -1224,6 +1221,7 @@ function _getInteractiveElements(maxElements, viewportOnly) {
     if (el.selectedIndex !== undefined && tag === 'select') {
       info.selectedOption = el.options[el.selectedIndex]?.text?.substring(0, 50) || '';
     }
+    if (extra) Object.assign(info, extra);
 
     // Position info (viewport-relative coordinates)
     const rect = el.getBoundingClientRect();
@@ -1236,6 +1234,54 @@ function _getInteractiveElements(maxElements, viewportOnly) {
     selectorMap[index] = selector;
     elements.push(info);
     index++;
+    return true;
+  };
+
+  for (const el of allEls) {
+    if (elements.length >= maxElements) break;
+    if (!_isVisible(el)) continue;
+    if (viewportOnly && !_inViewport(el)) continue;
+    _pushElement(el);
+  }
+
+  // ── cursor:pointer sweep (v4.8) ─────────────────────────────────────
+  // SPA frameworks (React/Vue/Angular) attach listeners at the ROOT, so a
+  // clickable CARD is a plain <div> whose ONLY tell is the computed cursor.
+  // Without this sweep such a page enumerates ZERO elements, text= clicks
+  // can never resolve, and the model burns rounds on JS DOM archaeology
+  // (the 2026-08-05 钱管家 card incident, conv msft42tqheea8x).
+  const POINTER_SCAN_BUDGET = 8000;  // worst-case nodes to style-scan
+  const cursorMemo = new Map();      // element → computed cursor (shared ancestors)
+  const _cursorOf = (n) => {
+    let c = cursorMemo.get(n);
+    if (c === undefined) {
+      c = window.getComputedStyle(n).cursor;
+      cursorMemo.set(n, c);
+    }
+    return c;
+  };
+  let scanned = 0;
+  let pointerAdded = 0;
+  const descendants = document.body ? document.body.querySelectorAll('*') : [];
+  for (const el of descendants) {
+    if (elements.length >= maxElements || scanned >= POINTER_SCAN_BUDGET) break;
+    scanned++;
+    if (seenEls.has(el)) continue;
+    if (el.offsetWidth === 0 && el.offsetHeight === 0) continue;
+    const style = window.getComputedStyle(el);
+    if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') continue;
+    if (style.cursor !== 'pointer') continue;
+    cursorMemo.set(el, 'pointer');
+    // cursor INHERITS: every descendant of a clickable card also reports
+    // pointer — keep only the OUTERMOST one (the card itself), or every
+    // card would flood the list with its own children.
+    let nested = false;
+    for (let p = el.parentElement; p && p !== document.documentElement; p = p.parentElement) {
+      if (_cursorOf(p) === 'pointer') { nested = true; break; }
+    }
+    if (nested) continue;
+    if (viewportOnly && !_inViewport(el)) continue;
+    if (_pushElement(el, { pointer: true })) pointerAdded++;
   }
 
   // Canvas detection
@@ -1244,7 +1290,8 @@ function _getInteractiveElements(maxElements, viewportOnly) {
   const canvasDetected = canvases.length > 0 && elements.length < 10;
 
   // ★ Return selectorMap for server-side caching
-  const result = { elements, total: allEls.length, selectorMap };
+  const result = { elements, total: allEls.length + pointerAdded, selectorMap };
+  if (pointerAdded) result.pointerSweep = { scanned, added: pointerAdded };
 
   // ★ Page scroll info
   result.scroll = {

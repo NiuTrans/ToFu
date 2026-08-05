@@ -140,6 +140,93 @@ def skill_files_v1(skill_id):
     })
 
 
+@api_v1_skills_bp.route('/api/v1/skills/<skill_id>/env', methods=['GET'])
+@require_auth
+@api_meta(
+    summary='Skill env bindings status (redacted)',
+    description='Returns ``{env: [{name, declared, configured, hint}]}`` — '
+                'values never cross the wire.',
+    tags=['skills'],
+)
+def skill_env_status_v1(skill_id):
+    from lib.skills import get_skill
+    from lib.skills.env import skill_env_status
+    skill = get_skill(skill_id, project_path=_project_path())
+    if not skill:
+        return api_not_found('Skill package not found')
+    return api_ok({'skill_id': skill_id, 'env': skill_env_status(skill)})
+
+
+@api_v1_skills_bp.route('/api/v1/skills/<skill_id>/env', methods=['PUT'])
+@require_auth
+@api_meta(
+    summary='Set a skill env binding (vault-backed)',
+    description='Body: ``{name, value}``. Stored Fernet-encrypted in the '
+                'credential vault; subprocess execution picks it up '
+                'automatically. The response echoes only redacted metadata.',
+    tags=['skills'],
+)
+def skill_env_set_v1(skill_id):
+    from lib.skills import get_skill
+    from lib.skills.env import set_skill_env
+    skill = get_skill(skill_id, project_path=_project_path())
+    if not skill:
+        return api_not_found('Skill package not found')
+    data = parse_body()
+    name = (data.get('name') or '').strip()
+    value = (data.get('value') or '').strip()
+    if not name:
+        return api_bad_request('name is required', field='name')
+    if not value:
+        return api_bad_request('value is required', field='value')
+    try:
+        meta = set_skill_env(skill_id, name, value)
+    except ValueError as e:
+        return api_bad_request(str(e), field='name')
+    return api_ok({'binding': meta})
+
+
+@api_v1_skills_bp.route('/api/v1/skills/<skill_id>/env/<env_name>',
+                        methods=['DELETE'])
+@require_auth
+@api_meta(summary='Delete a skill env binding', tags=['skills'])
+def skill_env_delete_v1(skill_id, env_name):
+    from lib.skills import get_skill
+    from lib.skills.env import delete_skill_env
+    skill = get_skill(skill_id, project_path=_project_path())
+    if not skill:
+        return api_not_found('Skill package not found')
+    if not delete_skill_env(skill_id, env_name):
+        return api_not_found(f'No binding for {env_name}')
+    return api_ok({'name': env_name})
+
+
+@api_v1_skills_bp.route('/api/v1/skills/<skill_id>/scope', methods=['POST'])
+@require_auth
+@api_meta(
+    summary='Move a skill between project and global scope',
+    description='Body: ``{scope: "project"|"global"}``. Global skills are '
+                'visible in project-less chat mode too.',
+    tags=['skills'],
+)
+def skill_scope_v1(skill_id):
+    from lib.skills import set_skill_scope
+    data = parse_body()
+    scope = (data.get('scope') or '').strip().lower()
+    if scope not in ('project', 'global'):
+        return api_bad_request(f'Invalid scope: {scope}', field='scope')
+    try:
+        skill = set_skill_scope(skill_id, scope,
+                                project_path=_project_path())
+    except ValueError as e:
+        return api_bad_request(str(e))
+    if not skill:
+        return api_not_found('Skill package not found')
+    skill.pop('filepath', None)
+    skill.pop('package_dir', None)
+    return api_ok({'skill': skill})
+
+
 # ── Skill-package install (drag-and-drop zip) ────────────────────────
 
 @api_v1_skills_bp.route('/api/v1/skills/install', methods=['POST'])
@@ -167,7 +254,7 @@ def install_skill_package_v1():
             return api_bad_request('No file uploaded')
         f = request.files['file']
         fname = f.filename or 'upload.zip'
-        scope = (request.form.get('scope') or 'project').strip().lower()
+        scope = (request.form.get('scope') or 'global').strip().lower()
         overwrite = request.form.get('overwrite', '').lower() in ('1', 'true', 'yes')
         data = f.read(_INSTALL_MAX_BYTES + 1)
         if len(data) > _INSTALL_MAX_BYTES:
@@ -177,7 +264,7 @@ def install_skill_package_v1():
         source = bytes(data)
     else:
         body = parse_body()
-        scope = (body.get('scope') or 'project').strip().lower()
+        scope = (body.get('scope') or 'global').strip().lower()
         overwrite = bool(body.get('overwrite'))
         path = body.get('path') or ''
         if not path or not os.path.exists(path):
@@ -257,7 +344,10 @@ def skill_catalog_install_v1():
 
     data = parse_body()
     skill_id = (data.get('skill_id') or '').strip()
-    scope = (data.get('scope') or 'project').strip().lower()
+    # Default GLOBAL (owner directive 2026-08-05): external capability packs
+    # are cross-project by nature; project-scoped installs were invisible in
+    # project-less chat mode (memory skills-chat-mode-project-scope-invisibility).
+    scope = (data.get('scope') or 'global').strip().lower()
     overwrite = bool(data.get('overwrite'))
 
     if not skill_id:

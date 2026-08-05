@@ -32,7 +32,7 @@ import threading
 from typing import Any
 
 from lib.log import get_logger
-from lib.agent_core.events import EventType, build_event
+from lib.agent_core.events import EventType, Phase, build_event, build_phase
 from lib.tasks_pkg.manager import append_event
 
 logger = get_logger(__name__)
@@ -63,8 +63,7 @@ def _vu_phase(task: dict[str, Any], detail: str, *, vu_startup: bool) -> None:
     if not vu_startup:
         return
     try:
-        append_event(task, build_event(
-            EventType.PHASE, phase='working', detail=detail))
+        append_event(task, build_phase(Phase.WORKING, detail=detail))
     except Exception as _e:
         _tid = (task.get('id') or '')[:8]
         logger.debug('[Task %s] vu startup phase emit failed: %s', _tid, _e)

@@ -43,7 +43,14 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[test]"
       - name: Run unit tests (parallel)
-        run: pytest -m unit -n auto --dist worksteal --timeout=300 -ra -q
+        # `-n auto` on a 4-vCPU runner = 4 workers, and each worker spawns
+        # node/jsdom subprocesses + ML-lib thread pools on top — measured
+        # 2026-08-05 (f0a930e): the oversubscription starved timing- and
+        # DB-writer-sensitive suites into sqlite-locked / 300s-timeout reds
+        # that never reproduce on a fast box. `-n 2` halves the pressure;
+        # `--dist loadscope` keeps each module's tests on one worker so
+        # per-file fixtures can't interleave across workers.
+        run: pytest -m unit -n 2 --dist loadscope --timeout=300 -ra -q
 
   # ── API integration tier (needs a DB; smaller, ~140 tests) ──
   # These boot the real app + hit routes. Run parallel too, but on a single

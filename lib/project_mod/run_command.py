@@ -106,6 +106,16 @@ def _get_cmd_env(cwd=None):
     if os.name != 'nt':
         env.setdefault('TERM', 'dumb')
 
+    # Skill credential overlay: vault-configured per-skill env vars (set in
+    # Settings → Skills) ride every subprocess, so a skill's documented
+    # os.environ['SOME_KEY'] lookup works without restarting the server.
+    # Never raises (degrades to {}); the child env is never logged.
+    try:
+        from lib.skills.env import exec_env_overlay
+        env.update(exec_env_overlay(project_path=cwd))
+    except Exception as _env_e:
+        logger.debug('[run_command] skill env overlay skipped: %s', _env_e)
+
     # ── Block user-site-packages (~/.local/) writes & reads ──
     env['PYTHONNOUSERSITE'] = '1'
     env['PIP_USER'] = '0'

@@ -102,6 +102,17 @@ def get_tab_hostname(tab_id):
     return host or None
 
 
+def _current_work_tab_id():
+    """The remembered working-tab id, or None (lazy import — _resolve
+    imports this module at top level, so a top-level import would cycle)."""
+    try:
+        from lib.browser._resolve import current_work_tab
+        return current_work_tab()
+    except Exception as e:
+        logger.debug('[Display] work-tab lookup failed: %s', e)
+        return None
+
+
 def _tab_label(tab_id):
     """Return a human-friendly label for a tab: the cached title (quoted,
     in full) if known, else the page hostname, else a generic word. The
@@ -110,9 +121,23 @@ def _tab_label(tab_id):
 
     We deliberately NEVER surface the raw numeric tab ID — it is meaningless
     to a human reading the timeline (who knows what "12165686" is?).
+
+    ``tab_id=None`` is the v2 DEFAULT, not missing data: the call lands on
+    the working tab (the one last acted on, else the browser's active tab).
+    Name that tab when the work-tab memory + title cache know it, otherwise
+    say 'current tab' — a bare '?' reads as a broken render (the 2026-08-05
+    'Read ?' incident).
     """
     if tab_id is None:
-        return '?'
+        wid = _current_work_tab_id()
+        if wid is not None:
+            title = get_tab_title(wid)
+            if title:
+                return f'"{title}"'
+            host = get_tab_hostname(wid)
+            if host:
+                return host
+        return 'current tab'
     # Non-numeric IDs like 'active' are themselves descriptive — keep them.
     try:
         int(tab_id)
@@ -148,10 +173,28 @@ _DISPLAY_HANDLERS = {
     'browser_get_cookies': lambda fn_args: f'Get cookies [{(fn_args.get("domain") or fn_args.get("url", "all"))}]',
     'browser_get_history': lambda fn_args: f'Search history [{fn_args.get("query", "") or "all"}]',
     'browser_create_tab': lambda fn_args: f'New tab: {fn_args.get("url", "")}',
-    'browser_close_tab': lambda fn_args: f'Close tab {_tab_label(fn_args.get("tabId", fn_args.get("tabIds", "?")))}',
-    'browser_navigate': lambda fn_args: f'Navigate {_tab_label(fn_args.get("tabId"))} → {fn_args.get("url", "")}',
+    'browser_close_tab': lambda fn_args: (
+        f'Close {_tab_label(fn_args["tabId"])}' if fn_args.get('tabId') is not None
+        # Raw id lists are meaningless on a timeline ('Close [12, 87]') — count them.
+        else (f'Close {len(fn_args["tabIds"])} tabs'
+              if isinstance(fn_args.get('tabIds'), list) and fn_args['tabIds']
+              else f'Close {_tab_label(None)}')
+    ),
+    'browser_navigate': lambda fn_args: (
+        # v2: new_tab=true opens a NEW tab (the old tab is untouched) —
+        # 'Navigate <tab> → url' would misdescribe that as reusing one.
+        f'Open new tab → {fn_args.get("url", "")}' if fn_args.get('newTab')
+        else f'Navigate {_tab_label(fn_args.get("tabId"))} → {fn_args.get("url", "")}'
+    ),
     'browser_get_interactive_elements': lambda fn_args: f'Get interactive elements {_tab_label(fn_args.get("tabId"))}',
-    'browser_click': lambda fn_args: f'{"Right-click" if fn_args.get("rightClick") else "Click"} {_tab_label(fn_args.get("tabId"))}: {fn_args.get("selector", "")}',
+    'browser_click': lambda fn_args: (
+        f'{"Right-click" if fn_args.get("rightClick") else "Click"} {_tab_label(fn_args.get("tabId"))}'
+        # v2: text= (fuzzy, preferred) names the target; selector= is the
+        # explicit fallback. Omit the colon entirely when neither is present
+        # — 'Click tab: ' with a dangling colon reads as a broken render.
+        + (f': {fn_args.get("text") or fn_args.get("selector")}'
+           if (fn_args.get('text') or fn_args.get('selector')) else '')
+    ),
     'browser_keyboard': lambda fn_args: f'Keyboard {_tab_label(fn_args.get("tabId"))}: {fn_args.get("keys", "")}',
     'browser_hover': lambda fn_args: f'Hover {_tab_label(fn_args.get("tabId"))}: {fn_args.get("selector", "")}',
     'browser_wait': lambda fn_args: (
@@ -165,7 +208,10 @@ _DISPLAY_HANDLERS = {
     'browser_get_app_state': lambda fn_args: f'Get app state ({_tab_label(fn_args.get("tabId"))})',
     'browser_right_click_menu': lambda fn_args: f'Right-click menu ({_tab_label(fn_args.get("tabId"))}): {fn_args.get("menu_item_text", "")}',
     'browser_hover_and_click': lambda fn_args: f'Hover & click ({_tab_label(fn_args.get("tabId"))})',
-    'browser_fill_form': lambda fn_args: f'Fill form ({_tab_label(fn_args.get("tabId"))}), {len(fn_args.get("fields", []))} fields)',
+    'browser_fill_form': lambda fn_args: (
+        f'Fill form {_tab_label(fn_args.get("tabId"))}: '
+        f'{len(fn_args.get("fields", []))} fields'
+    ),
     # ── v2 surface (pt_869e5648403e4745) — legacy formatters above stay for
     # history rendering even though those tools are no longer shipped.
     'browser_read_page': lambda fn_args: (
@@ -173,12 +219,14 @@ _DISPLAY_HANDLERS = {
         + (f' [{fn_args.get("mode")}]' if fn_args.get('mode') not in (None, 'auto') else '')
     ),
     'browser_type': lambda fn_args: (
-        f'Type into {_tab_label(fn_args.get("tabId"))}: '
-        f'{fn_args.get("text") or fn_args.get("selector", "")}'
+        f'Type into {_tab_label(fn_args.get("tabId"))}'
+        + (f': {fn_args.get("text") or fn_args.get("selector")}'
+           if (fn_args.get('text') or fn_args.get('selector')) else '')
     ),
     'browser_press_key': lambda fn_args: f'Press {fn_args.get("keys", "")} ({_tab_label(fn_args.get("tabId"))})',
     'browser_menu_click': lambda fn_args: (
-        f'Menu click ({_tab_label(fn_args.get("tabId"))}): {fn_args.get("item_text", "")}'
+        f'Menu click ({_tab_label(fn_args.get("tabId"))})'
+        + (f': {fn_args["item_text"]}' if fn_args.get('item_text') else '')
     ),
     'browser_preview_page': lambda fn_args: (
         f'Render page preview: {fn_args.get("path") or fn_args.get("url", "")}'

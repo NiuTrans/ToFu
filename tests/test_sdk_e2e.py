@@ -84,6 +84,7 @@ def _boot_real_server():
         append_event(task, {'type': 'done', 'finishReason': 'stop',
                              'usage': task['usage']})
 
+    _STATE['orig_spawn'] = getattr(pkg, 'spawn_task', None)
     pkg.spawn_task = _fake_spawn
 
     from lib.api_keys import create_key
@@ -151,6 +152,15 @@ def _shutdown_real_server():
             pass
     _STATE['thread'].join(timeout=3)
     _STATE['app'] = None
+    # Restore the real spawn_task: the stub above is a RAW global assignment
+    # (not a monkeypatch), so without this it leaks into every other test the
+    # xdist worker runs afterwards (tests/test_spawn_serving_loop.py saw the
+    # stub → KeyError 'events_lock' on its minimal fake task — CI-only,
+    # because co-scheduling differs from a local run).
+    if _STATE.get('orig_spawn') is not None:
+        import lib.tasks_pkg as _pkg
+        _pkg.spawn_task = _STATE['orig_spawn']
+        _STATE['orig_spawn'] = None
     if _STATE['tmp'] is not None:
         _STATE['tmp'].cleanup()
         _STATE['tmp'] = None

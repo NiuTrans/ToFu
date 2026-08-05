@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 
+from lib.agent_core.events import Phase, build_phase
 from lib.log import get_logger
 
 logger = get_logger(__name__)
@@ -53,8 +54,8 @@ def run_research_task(task: dict) -> None:
     try:
         _write_manifest(task, 'running')
         task['status'] = 'running'
-        _emit(task, {'type': 'phase', 'phase': 'start',
-                     'direction': task.get('direction', '')})
+        _emit(task, build_phase(Phase.START,
+                                direction=task.get('direction', '')))
         result = build_research_from_direction(
             task['direction'], task['workdir'], lang=task.get('lang') or 'en',
             user_id=task.get('user_id', 1), n_ideas=task.get('n_ideas') or 6,

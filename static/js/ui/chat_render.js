@@ -2217,8 +2217,9 @@ function renderMessage(msg, idx) {
   // ── Per-turn context note — TWO surfaces with different DOM homes ──
   // Frozen snapshot of the workspace/tools/model active when this turn was
   // sent (msg._ctx, captured in the send pipeline). The RAIL (`.turn-ctx`)
-  // is a direct child of `.message` — it occupies the third grid track the
-  // pane owns (see info-rail.js / styles.css `.chat-inner`). The FOLD
+  // is a direct child of `.message` — absolutely positioned into the third
+  // track the pane owns, OUT OF FLOW so it never stretches the row (see
+  // info-rail.js / styles.css `.chat-inner` / `.turn-ctx`). The FOLD
   // (`.tctx-fold`, the one-line fallback shown when the pane grants no rail
   // track) goes INSIDE `.message-content` between header and body: as a
   // direct `.message` child it auto-placed into the ZERO-WIDTH rail track

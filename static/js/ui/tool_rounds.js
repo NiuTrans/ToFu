@@ -39,20 +39,46 @@ function _isRoundProject(round) {
     "run_command",
   ].includes(round.toolName);
 }
+/* ★ The browser tool FAMILY — the single frontend list, kept in exact
+ * parity with the backend sets (BROWSER_TOOL_NAMES |
+ * LEGACY_BROWSER_TOOL_NAMES | ADVANCED_BROWSER_TOOL_NAMES |
+ * PAGE_PREVIEW_TOOL_NAMES; guard: tests/test_browser_display_labels.py).
+ * The v2 consolidation (pt_869e5648403e4745) added click/type/press_key/
+ * menu_click/fill_form to the shipped surface but this list was never
+ * updated — those rounds fell through to the generic lightning icon, a
+ * name-mangled label and a spurious "✓ done" badge. Legacy names stay:
+ * old conversations must keep rendering their browser cards. */
+const _BROWSER_TOOL_FAMILY = [
+  // v2 shipped surface
+  "browser_list_tabs",
+  "browser_read_page",
+  "browser_execute_js",
+  "browser_screenshot",
+  "browser_click",
+  "browser_type",
+  "browser_press_key",
+  "browser_navigate",
+  "browser_close_tab",
+  "browser_get_cookies",
+  "browser_get_history",
+  "browser_menu_click",
+  "browser_fill_form",
+  // Server-side preview (browser family, not extension-routed)
+  "browser_preview_page",
+  // Legacy names (removed from the model surface; history rendering)
+  "browser_read_tab",
+  "browser_get_interactive_elements",
+  "browser_summarize_page",
+  "browser_get_app_state",
+  "browser_wait",
+  "browser_hover",
+  "browser_keyboard",
+  "browser_create_tab",
+  "browser_hover_and_click",
+  "browser_right_click_menu",
+];
 function _isRoundBrowser(round) {
-  return [
-    "browser_list_tabs",
-    "browser_read_tab",
-    "browser_read_page",
-    "browser_execute_js",
-    "browser_screenshot",
-    "browser_get_cookies",
-    "browser_get_history",
-    "browser_create_tab",
-    "browser_close_tab",
-    "browser_navigate",
-    "browser_preview_page",
-  ].includes(round.toolName);
+  return _BROWSER_TOOL_FAMILY.includes(round.toolName);
 }
 function _isRoundImageGen(round) {
   return round.toolName === "generate_image";
@@ -162,6 +188,19 @@ function _getRoundIcon(round) {
       browser_close_tab: "close",
       browser_navigate: "navigate",
       browser_preview_page: "screenshot",
+      browser_click: "click",
+      browser_type: "type",
+      browser_press_key: "key",
+      browser_menu_click: "menu",
+      browser_fill_form: "form",
+      browser_get_interactive_elements: "elements",
+      browser_summarize_page: "read",
+      browser_get_app_state: "js",
+      browser_wait: "wait",
+      browser_hover: "click",
+      browser_keyboard: "key",
+      browser_hover_and_click: "click",
+      browser_right_click_menu: "menu",
     };
     return m[round.toolName] || "tabs";
   }
@@ -253,6 +292,20 @@ const _browserToolSvg = {
     '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="9" x2="15" y2="15"/><line x1="15" y1="9" x2="9" y2="15"/></svg>',
   navigate:
     '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polygon points="16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76"/></svg>',
+  click:
+    '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4l7.07 16.97 2.51-7.39 7.39-2.51L4 4z"/><path d="M13.5 13.5 19 19"/></svg>',
+  type:
+    '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 7 4 4 20 4 20 7"/><line x1="9" y1="20" x2="15" y2="20"/><line x1="12" y1="4" x2="12" y2="20"/></svg>',
+  key:
+    '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M6 10h.01"/><path d="M10 10h.01"/><path d="M14 10h.01"/><path d="M18 10h.01"/><path d="M7 14h10"/></svg>',
+  menu:
+    '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg>',
+  form:
+    '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="3" width="14" height="18" rx="2"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="9" y1="12" x2="15" y2="12"/><line x1="9" y1="16" x2="13" y2="16"/></svg>',
+  elements:
+    '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>',
+  wait:
+    '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 22h14"/><path d="M5 2h14"/><path d="M17 22v-4.172a2 2 0 0 0-.586-1.414L12 12l-4.414 4.414A2 2 0 0 0 7 17.828V22"/><path d="M7 2v4.172a2 2 0 0 0 .586 1.414L12 12l4.414-4.414A2 2 0 0 0 17 6.172V2"/></svg>',
 };
 // ── Web/Fetch/Generic Tools — SVG Icons ──
 const _webToolSvg = {

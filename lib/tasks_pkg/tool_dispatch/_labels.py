@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from lib.agent_core.events import EventType, build_event
+from lib.agent_core.events import Phase, build_phase
 from lib.log import get_logger
 from lib.protocols import TaskEventSink
 from lib.tasks_pkg.executor import tool_registry
@@ -143,9 +143,8 @@ def emit_tool_exec_phase(
         detail = f'Executing {n} tools: {", ".join(labeled)}'
 
     _append = event_sink.append_event if event_sink is not None else append_event
-    _append(task, build_event(
-        EventType.PHASE,
-        phase='tool_exec',
+    _append(task, build_phase(
+        Phase.TOOL_EXEC,
         detail=detail,
         tools=tool_names_list,
     ))

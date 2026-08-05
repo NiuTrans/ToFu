@@ -38,7 +38,8 @@ async function _skillsUploadZip(file) {
   _skillsToast(t('skills.installingFile', { name: file.name }));
   var fd = new FormData();
   fd.append('file', file);
-  fd.append('scope', 'project');
+  // Header selector (默认全局); falls back to global when the panel is absent.
+  fd.append('scope', (typeof _skillsInstallScope === 'function') ? _skillsInstallScope() : 'global');
   try {
     var r = await Api.skills.install(fd);
     var d = (r ? await r.json().catch(function () { return {}; }) : {});

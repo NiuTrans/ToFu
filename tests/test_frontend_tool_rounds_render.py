@@ -283,6 +283,39 @@ check('empty_rounds_blank', renderToolRoundsHTML([], false) === '' &&
   check('middle_is_swarm', slots[1].getAttribute('data-prn-kind') === 'swarm');
 }
 
+// ── 11. browser family classification (2026-08-05 'Read ?' incident) ──
+// The v2 action tools were missing from _isRoundBrowser: they fell to the
+// generic lightning icon, a name-mangled label, and a spurious "✓ done"
+// badge. Pin the whole family + the family glyph + the badge carve-out.
+{
+  const v2 = ['browser_click', 'browser_type', 'browser_press_key',
+    'browser_menu_click', 'browser_fill_form'];
+  check('browser_family_v2_actions',
+    v2.every((n) => _isRoundBrowser({ toolName: n })));
+  const legacy = ['browser_read_tab', 'browser_keyboard', 'browser_hover',
+    'browser_wait', 'browser_summarize_page', 'browser_get_app_state',
+    'browser_get_interactive_elements', 'browser_hover_and_click',
+    'browser_right_click_menu'];
+  check('browser_family_legacy_kept',
+    legacy.every((n) => _isRoundBrowser({ toolName: n })));
+
+  // A done browser_click renders the CLICK glyph, not the generic lightning.
+  const clickHtml = renderToolRoundsHTML([
+    { roundNum: 1, toolName: 'browser_click', status: 'done',
+      query: 'Click current tab: 登录', results: [] },
+  ], false);
+  check('browser_click_glyph', clickHtml.includes('M4 4l7.07 16.97'));
+  check('browser_click_not_generic_glyph', !clickHtml.includes('l9.9-10.2'));
+  // Browser family is excluded from the generic "✓ done" fallback badge.
+  check('browser_click_no_spurious_done_badge', !clickHtml.includes('✓ done'));
+  // browser_press_key renders the keyboard glyph.
+  const keyHtml = renderToolRoundsHTML([
+    { roundNum: 1, toolName: 'browser_press_key', status: 'done',
+      query: 'Press Enter (current tab)', results: [] },
+  ], false);
+  check('browser_press_key_glyph', keyHtml.includes('width="20" height="12"'));
+}
+
 report();
 """
 
@@ -292,6 +325,6 @@ def test_tool_rounds_render_characterization():
         target_js=os.path.join(JS_DIR, 'ui', 'tool_rounds.js'),
         body_js=_BODY,
         extra_targets=[os.path.join(JS_DIR, 'ui', 'streaming_swarm_panel.js')],
-        min_pass=44,
+        min_pass=51,
         label='tool_rounds render',
     )

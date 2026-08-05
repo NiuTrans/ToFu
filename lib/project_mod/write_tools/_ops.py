@@ -9,6 +9,8 @@ resolves + attributes through the ``_paths`` core and matches through the
 """
 
 import os
+import tempfile
+import time
 
 from lib.log import get_logger
 from lib.project_mod.modifications import _record_modification
@@ -131,6 +133,135 @@ def _note_write_set_advisory(conv_id, base, target):
 
 
 # ═══════════════════════════════════════════════════════
+#  Failed-write payload salvage + path-shape guards
+# ═══════════════════════════════════════════════════════
+# 2026-08-05 incident: a model emitted write_file WITHOUT the required
+# ``path`` argument. The empty path flowed through _safe_path and resolved to
+# the project ROOT DIRECTORY itself; the atomic write staged its temp file in
+# the root's PARENT directory and died with a bare EISDIR ("Is a directory").
+# The model's whole payload was thrown away, and the error named neither the
+# mistake nor a recovery — a blind retry just re-failed the same way.
+#
+# Two mechanisms fix the class, not the instance:
+#   1. PATH-SHAPE GUARDS in tool_write_file refuse an empty/missing path and
+#      any path resolving to an existing directory BEFORE any file I/O — the
+#      .tofu_atomic_* temp file never even gets created next to a directory
+#      target, so EISDIR can no longer occur here at all.
+#   2. SALVAGE: any failed write with a non-empty payload stages the content
+#      to <tmp>/tofu_write_salvage/ and the error message carries the staged
+#      path + an exact run_command mv recovery, so the model recovers WITHOUT
+#      re-emitting (possibly tens of KB of) tokens.
+#
+# Salvage lives in the OS temp dir, NOT inside the workspace: the workspace
+# filesystem may itself be the failure cause (FUSE stalls), and the staged
+# copy must stay reachable exactly then. Owner-only perms — staged content
+# can hold secrets. /tmp vanishing on reboot is fine: the recovery window is
+# the next tool rounds, not days.
+#
+# CONTRACT: errors produced here are surfaced as "Write failed: <err>" by
+# _exec_write_file. That 'Write failed' PREFIX is load-bearing —
+# lib/tasks_pkg/handlers/_read_gate.py::_result_indicates_success and
+# lib/tools/meta.py::_build_write_file pattern-match it. The enrichment below
+# always goes AFTER the cause sentence, never before.
+
+_SALVAGE_MAX_BYTES = 8 * 1024 * 1024   # LLM text payloads are ≪1 MB; cap abuse
+_SALVAGE_TTL_SEC = 24 * 3600           # recovery window is the next few rounds
+_SALVAGE_MAX_FILES = 100               # bound a tight failure loop
+
+
+def _salvage_root():
+    """Directory holding staged payloads of failed writes (owner-only)."""
+    return os.path.join(tempfile.gettempdir(), 'tofu_write_salvage')
+
+
+def _sweep_salvage_dir(root):
+    """Bound the salvage dir by TTL and file count. Never raises."""
+    try:
+        now = time.time()
+        survivors = []
+        for entry in os.scandir(root):
+            try:
+                if not entry.is_file():
+                    continue
+                mtime = entry.stat().st_mtime
+            except OSError as e:
+                logger.debug('[WriteTools] salvage sweep stat failed for %s: %s',
+                             entry.path, e)
+                continue
+            if now - mtime > _SALVAGE_TTL_SEC:
+                try:
+                    os.unlink(entry.path)
+                except OSError as e:
+                    logger.debug('[WriteTools] salvage sweep unlink failed for %s: %s',
+                                 entry.path, e)
+            else:
+                survivors.append((mtime, entry.path))
+        if len(survivors) > _SALVAGE_MAX_FILES:
+            survivors.sort()
+            for _mtime, path in survivors[:len(survivors) - _SALVAGE_MAX_FILES]:
+                try:
+                    os.unlink(path)
+                except OSError as e:
+                    logger.debug('[WriteTools] salvage sweep unlink failed for %s: %s',
+                                 path, e)
+    except OSError as e:
+        logger.debug('[WriteTools] salvage sweep failed for %s: %s', root, e)
+
+
+def _salvage_failed_content(content, rel_path):
+    """Stage the payload of a FAILED write; return the staged path or ''.
+
+    Never raises — the original write error is what the caller must report;
+    the salvage is a best-effort bonus on top of it.
+    """
+    if not isinstance(content, str) or not content:
+        return ''
+    data = content.encode('utf-8', errors='replace')
+    if len(data) > _SALVAGE_MAX_BYTES:
+        logger.warning('[WriteTools] payload too large to salvage (%d bytes) for %s',
+                       len(data), rel_path)
+        return ''
+    try:
+        root = _salvage_root()
+        os.makedirs(root, exist_ok=True)
+        os.chmod(root, 0o700)
+        hint = ''.join(c if (c.isalnum() or c in '._-') else '_'
+                       for c in (os.path.basename(rel_path or '') or 'payload'))[:30]
+        ts = time.strftime('%Y%m%d-%H%M%S', time.gmtime())
+        fd, staged = tempfile.mkstemp(prefix=f'{ts}-{hint}-', suffix='.tmp', dir=root)
+        try:
+            with os.fdopen(fd, 'wb') as f:
+                f.write(data)
+            os.chmod(staged, 0o600)
+        except BaseException:
+            try:
+                os.unlink(staged)
+            except OSError as e:
+                logger.debug('[WriteTools] salvage tmp cleanup failed for %s: %s',
+                             staged, e)
+            raise
+        logger.info('[WriteTools] salvaged failed-write payload (%d bytes) → %s',
+                    len(data), staged)
+        _sweep_salvage_dir(root)
+        return staged
+    except Exception as e:
+        logger.debug('[WriteTools] salvage staging failed for %s: %s', rel_path, e)
+        return ''
+
+
+def _salvage_note(content, rel_path):
+    """The recovery sentence appended to a write_file error ('' when no salvage)."""
+    staged = _salvage_failed_content(content, rel_path)
+    if not staged:
+        return ''
+    size = len(content.encode('utf-8', errors='replace'))
+    return (f" Your content ({size} bytes) was NOT lost — it was staged to "
+            f"'{staged}'. Recover it WITHOUT re-generating: "
+            f"run_command(command=\"mv '{staged}' '<intended-target-file>'\"). "
+            f"Or retry write_file with a corrected path and the full content.")
+
+
+# ═══════════════════════════════════════════════════════
 #  write_file
 # ═══════════════════════════════════════════════════════
 
@@ -142,11 +273,33 @@ def tool_write_file(base, rel_path, content, description='', conv_id=None, task_
       * absolute paths that resolve under a registered workspace root —
         useful for writing into directories created by ``create_project``.
     """
+    # Path-shape guards (see the salvage section above): refuse BEFORE any
+    # file I/O. A missing/empty path used to flow through _safe_path and
+    # resolve to the project ROOT DIRECTORY itself, dying EISDIR inside the
+    # atomic write with the payload lost and no actionable error.
+    if not isinstance(rel_path, str) or not rel_path.strip():
+        logger.debug('[Tools] write_file refused: path missing/empty (base=%s)', base)
+        return {'ok': False, 'action': 'write_file', 'path': rel_path,
+                'error': ("path is required (it was missing or empty) — without a "
+                          "file path, write_file would target the project root "
+                          f"directory itself ({base}), which cannot work. Pass a "
+                          "FILE path, e.g. path='docs/README.md'."
+                          + _salvage_note(content, rel_path))}
     try:
         target = _resolve_write_path(base, rel_path, conv_id=conv_id)
     except ValueError as e:
         logger.debug('[Tools] write_file path rejected %s: %s', rel_path, e, exc_info=True)
-        return {'ok': False, 'error': str(e), 'action': 'write_file', 'path': rel_path}
+        return {'ok': False, 'error': str(e) + _salvage_note(content, rel_path),
+                'action': 'write_file', 'path': rel_path}
+
+    if os.path.isdir(target):
+        logger.debug('[Tools] write_file refused: %s resolves to directory %s',
+                     rel_path, target)
+        return {'ok': False, 'action': 'write_file', 'path': rel_path,
+                'error': (f"path '{rel_path}' resolves to a directory ('{target}') — "
+                          "write_file creates/overwrites FILES; choose a file path "
+                          f"inside it, e.g. '{rel_path.rstrip('/')}/<filename>'."
+                          + _salvage_note(content, rel_path))}
 
     existed = os.path.isfile(target)
     old_lines = 0
@@ -165,8 +318,9 @@ def tool_write_file(base, rel_path, content, description='', conv_id=None, task_
             os.makedirs(parent, exist_ok=True)
         except Exception as e:
             logger.warning('[Tools] makedirs failed for parent of %s: %s', rel_path, e, exc_info=True)
-            return {'ok': False, 'error': f'Cannot create directory: {e}',
-                    'action': 'write_file', 'path': rel_path}
+            return {'ok': False, 'action': 'write_file', 'path': rel_path,
+                    'error': (f'Cannot create directory: {e}'
+                              + _salvage_note(content, rel_path))}
 
     original_content = old_content if existed else None
 
@@ -194,7 +348,8 @@ def tool_write_file(base, rel_path, content, description='', conv_id=None, task_
         return result
     except Exception as e:
         logger.error('[Tools] write_file failed for %s: %s', rel_path, e, exc_info=True)
-        return {'ok': False, 'error': str(e), 'action': 'write_file', 'path': rel_path}
+        return {'ok': False, 'action': 'write_file', 'path': rel_path,
+                'error': str(e) + _salvage_note(content, rel_path)}
 
 
 # ═══════════════════════════════════════════════════════

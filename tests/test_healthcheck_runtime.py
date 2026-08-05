@@ -99,9 +99,37 @@ def _run_runtime(*args, timeout=90):
         capture_output=True, text=True, timeout=timeout, cwd=ROOT)
 
 
+def _playwright_chromium_installed() -> bool:
+    """True when a Playwright-MANAGED Chromium binary is actually on disk.
+
+    The --runtime probe's final check LAUNCHES the Playwright Chromium build.
+    ``import playwright`` alone is not evidence it can (public CI ships the
+    Python package but no browser build), and a system-wide google-chrome
+    does not count either — the probe launches Playwright's own build. On a
+    box without it, the probe CORRECTLY reports the browser engine as
+    unavailable and exits 1, so the healthy-server happy path these tests
+    assert has no reachable subject.
+    """
+    try:
+        sys.path.insert(0, ROOT)
+        import chromium_env
+        return bool(chromium_env.chromium_binaries(include_system=False))
+    except Exception:
+        return False
+
+
+_requires_chromium_build = pytest.mark.skipif(
+    not _playwright_chromium_installed(),
+    reason='no Playwright-managed Chromium build on this host — healthcheck '
+           '--runtime correctly fails its browser-engine check here, so the '
+           'all-green verdict is unreachable (run: python -m playwright '
+           'install --only-shell chromium)')
+
+
 # ── Behavioural (failing-first: pre-change, --runtime ran the dev lint and
 #    never printed these lines) ────────────────────────────────────────
 
+@_requires_chromium_build
 def test_runtime_healthy_server_passes():
     srv, port = _serve()
     try:
@@ -121,6 +149,7 @@ def test_runtime_dead_port_fails_fast():
     assert 'not answering' in r.stdout
 
 
+@_requires_chromium_build
 def test_runtime_wait_polls_until_server_boots():
     # Server only starts answering 0.5s in; --wait must ride over that.
     srv, port = _serve(start_delay=0.5)

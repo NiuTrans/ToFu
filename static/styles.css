@@ -839,6 +839,49 @@ html[data-rail] .folder-quickadd{display:none}
    and token counts — the numbers the panel is opened to read. */
 .debug-msg-summary{color:var(--text-secondary);font-weight:400;margin-left:auto;font-size:10px}
 .debug-tool-calls{color:#ffd54f;font-size:10px;padding:2px 8px 4px}
+/* ── Structured message body (2026-08-05 panel redesign) ─────────────────
+ * The readable view: tool-call arguments parsed into per-key blocks with
+ * real newlines, reasoning/content as prose, raw envelope one click away.
+ * Syntax colours mirror the pre-scoped palette above (same measured hex
+ * values per theme) so inline keys/strings grade identically. */
+.debug-struct{padding:2px 8px 4px}
+.debug-sec{margin:3px 0 7px}
+.debug-sec>summary{display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none;font-size:10px;font-weight:600;color:var(--text-tertiary);letter-spacing:.3px;list-style:none;padding:1px 0}
+.debug-sec>summary::-webkit-details-marker{display:none}
+.debug-sec>summary::before{content:'\25B8';font-size:9px;transition:transform .15s}
+.debug-sec[open]>summary::before{transform:rotate(90deg)}
+.debug-sec-body{margin:4px 0 2px}
+.debug-msg-body pre.debug-text{margin:0;padding:6px 8px;white-space:pre-wrap;word-break:break-word;color:var(--text-secondary);background:rgba(128,128,160,0.07);border:1px solid var(--border);border-radius:4px}
+.debug-text.debug-long{max-height:320px;overflow-y:auto}
+.debug-json{margin:2px 0;padding:6px 8px;white-space:pre-wrap;word-break:break-all;background:rgba(128,128,160,0.05);border:1px solid var(--border);border-radius:4px;max-height:360px;overflow-y:auto}
+.debug-tc-card{margin:4px 0;border:1px solid var(--border);border-radius:5px;overflow:hidden;background:rgba(128,128,160,0.05)}
+.debug-tc-head{display:flex;align-items:center;gap:8px;padding:4px 8px;background:rgba(128,128,160,0.09);border-bottom:1px solid var(--border)}
+.debug-tc-name{font-weight:700;color:#ffd54f;font-size:11px}
+.debug-tc-id{margin-left:auto;color:var(--text-tertiary);font-size:9.5px;font-weight:400;word-break:break-all}
+.debug-tc-args{padding:5px 8px}
+.debug-arg{margin:3px 0}
+.debug-kv{margin:2px 0;word-break:break-word}
+.debug-arg-val{margin:2px 0 0;max-height:320px;overflow-y:auto}
+.debug-img-chip{display:inline-block;margin:2px 0;padding:2px 8px;font-size:10px;color:var(--text-secondary);background:rgba(128,128,160,0.10);border:1px solid var(--border);border-radius:3px}
+.debug-raw{margin:2px 8px 6px;border-top:1px dashed var(--border);padding-top:4px}
+.debug-raw>summary{cursor:pointer;user-select:none;font-size:10px;color:var(--text-tertiary);list-style:none}
+.debug-raw>summary::-webkit-details-marker{display:none}
+.debug-raw>summary::before{content:'\25B8';font-size:9px;margin-right:4px}
+.debug-raw[open]>summary::before{content:'\25BE'}
+.debug-struct .debug-key,.debug-struct .debug-arg-key{color:#82aaff;font-weight:600}
+.debug-struct .debug-str{color:#c3e88d}
+.debug-struct .debug-num{color:#f78c6c}
+.debug-struct .debug-null{color:#89ddff;font-style:italic}
+[data-theme="light"] .debug-struct .debug-key,[data-theme="light"] .debug-struct .debug-arg-key{color:#0b4f9e}
+[data-theme="light"] .debug-struct .debug-str{color:#1b5e20}
+[data-theme="light"] .debug-struct .debug-num{color:#9c3200}
+[data-theme="light"] .debug-struct .debug-null{color:#00606b}
+[data-theme="light"] .debug-tc-name{color:#8a4b00}
+[data-theme="tofu"] .debug-struct .debug-key,[data-theme="tofu"] .debug-struct .debug-arg-key{color:#2F5A72}
+[data-theme="tofu"] .debug-struct .debug-str{color:#3D5C33}
+[data-theme="tofu"] .debug-struct .debug-num{color:#8A5A1E}
+[data-theme="tofu"] .debug-struct .debug-null{color:#5A4A80}
+[data-theme="tofu"] .debug-tc-name{color:#8A5A1E}
 .debug-compact-badge{display:inline-flex;align-items:center;gap:2px;padding:1px 6px;font-size:9.5px;font-weight:600;line-height:1.4;color:#ffb74d;background:rgba(255,183,77,0.12);border:1px solid rgba(255,183,77,0.35);border-radius:3px;letter-spacing:0.2px;cursor:help}
 .debug-loading{padding:16px 8px;color:var(--text-tertiary);font-size:11px;font-style:italic;text-align:center;opacity:0.8}
 .debug-approx-chip{margin:6px 8px 8px;padding:6px 9px;background:rgba(255,183,77,0.10);border:1px solid rgba(255,183,77,0.35);border-radius:5px;font-size:10px;line-height:1.45}
@@ -20608,8 +20651,8 @@ html:not([data-theme="light"]):not([data-theme="tofu"]) .ctx-health-bar[data-zon
    ACTUALLY ran with: model + depth + run-mode + the tools that fired +
    the workspace roots.
 
-   ── Why this is IN-FLOW furniture and not a floating capsule ──
-   The previous design anchored it at `left:calc(100% + 24px)` off the
+   ── Why the WIDTH is a grid track the pane owns ──
+   The first design anchored it at `left:calc(100% + 24px)` off the
    centered reading column and hid it under `@media (max-width:1280px)`.
    That predicate asks about the WINDOW, but the space the note lands in is
    `viewport − sidebar − drawer`: the sidebar has four widths (0/280/332/430)
@@ -20617,9 +20660,25 @@ html:not([data-theme="light"]):not([data-theme="tofu"]) .ctx-health-bar[data-zon
    all 64 combinations in a real browser, 35 of them clipped the note while
    the media query said "show it", and NONE were hidden while having room —
    i.e. no viewport threshold can be correct, because the predicate is blind
-   to two of the three variables. The rail now occupies a real grid track
-   that the pane OWNS (see `.chat-inner`), so overflow is impossible by
-   construction rather than by tuning.
+   to two of the three variables. The rail's WIDTH now comes from a real
+   grid track that the pane OWNS (see `.chat-inner`), so horizontal overflow
+   is impossible by construction rather than by tuning.
+
+   ── Why the HEIGHT is OUT OF FLOW (2026-08-05 redesign) ──
+   The rail used to be an in-flow grid item, so a rail taller than its
+   bubble STRETCHED the message row: a one-line user turn with many MCP
+   servers connected showed ~200px of dead space under the bubble before
+   the Agent reply (owner report, conv msftgnt3ezhmtt). The rail is
+   metadata marginalia — it has no business sizing the prose row. It is
+   now `position:absolute` inside `.message` (already `position:relative`):
+   it keeps the track's box (right edge, top aligned) but contributes
+   NOTHING to track sizing, so the row height is `max(avatar, content)`
+   and the bubble-to-bubble rhythm is the content's own. The rail's box
+   is bounded by the message box itself (`max-height:100%` resolves
+   against the abspos containing block) and SCROLLS when the facts
+   outgrow the turn — taller turns simply show more of their rail.
+   Being inside the message box, it can never spill over the NEXT
+   message either, so no paint-containment carve-out is needed.
 
    ── Why there is no hover overlay ──
    `.message` carries `content-visibility:auto`, which applies PAINT
@@ -20639,9 +20698,14 @@ html:not([data-theme="light"]):not([data-theme="tofu"]) .ctx-health-bar[data-zon
    under the message header. The information is never silently lost.
    ═══════════════════════════════════════════════════════════════════ */
 .turn-ctx{
-  grid-column:3;
-  grid-row:1;
-  align-self:start;
+  /* Out of flow: keeps the third track's BOX (right edge, top-aligned)
+   * but never contributes to the row's height — see the block comment. */
+  position:absolute;
+  top:0;
+  right:0;
+  width:var(--rail-w);
+  max-height:100%;
+  box-sizing:border-box;
   min-width:0;
   font-size:10.5px;
   font-weight:600;
@@ -20677,19 +20741,17 @@ html:not([data-theme="light"]):not([data-theme="tofu"]) .ctx-health-bar[data-zon
      * the "+N" click) — a typical card renders COMPLETE, which the removed
      * 132px `overflow:hidden` guillotine never allowed (it clipped ordinary
      * cards mid-WORKSPACE with no way to reach the facts — the 2026-07-28
-     * complaint). (2) This pixel BACKSTOP covers the genuinely fat card:
-     * unlike the guillotine it SCROLLS, so nothing is ever unreachable, and
-     * clicking "+N" lifts it entirely (expansion is the explicit ask).
-     * The backstop makes the turn-height bound hold by CONSTRUCTION in
-     * every theme/font — guarded by the height-ratio assertion in
-     * tests/test_turn_ctx_rail_geometry.py. */
-    max-height:200px;
+     * complaint). (2) The rail's box is bounded by the MESSAGE's own
+     * height (max-height:100% in the base rule) and SCROLLS, so nothing
+     * is ever unreachable and — unlike the pre-2026-08-05 in-flow rail —
+     * the turn's height is never driven by the rail, expanded or not
+     * (guarded by the no-inflation assertion in
+     * tests/test_turn_ctx_rail_geometry.py). */
     overflow-x:hidden;
     overflow-y:auto;
     overscroll-behavior:contain;
     scrollbar-width:thin;
   }
-  .turn-ctx:has(.tctx-overflow:not([hidden])){ max-height:none; }
 }
 .turn-ctx .tctx-head{ display:flex; align-items:center; flex-wrap:wrap; gap:4px 6px; }
 .turn-ctx .tctx-logo{ display:inline-flex; flex:0 0 auto; align-items:center; }
@@ -22095,6 +22157,13 @@ html:not([data-theme="light"]):not([data-theme="tofu"]) .pb-watch-diverged{color
 .pb-watch-trail-row{display:flex;gap:8px;font-size:11.5px;line-height:1.45;color:var(--text-secondary)}
 .pb-watch-trail-when{flex-shrink:0;color:var(--text-tertiary)}
 .pb-watch-trail-text{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}
+.pb-watch-followup-q{font-size:11px;font-weight:600;color:var(--accent);margin-bottom:3px;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}
+.pb-watch-resp-tools{margin-top:5px}
+.pb-watch-resp-actions{display:flex;gap:4px}
+.pb-watch-resp-act{background:none;border:none;padding:2px 4px;font:inherit;font-size:11px;font-weight:600;color:var(--text-tertiary);cursor:pointer;border-radius:var(--pb-radius-sm)}
+.pb-watch-resp-act:hover{color:var(--accent);background:color-mix(in srgb,var(--accent) 10%,transparent)}
+.pb-watch-resp-editor{margin-top:6px;display:flex;flex-direction:column;gap:6px}
+.pb-watch-fix-title{font-size:12px}
 .pb-watch-actions{display:flex;flex-wrap:wrap;gap:6px;margin-top:2px}
 .pb-watch-btn{padding:3px 10px;font-size:11px;font-weight:600;color:var(--text-secondary);background:transparent;border:1px solid var(--border);border-radius:var(--pb-radius-sm);cursor:pointer;transition:opacity var(--transition),border-color var(--transition),color var(--transition)}
 .pb-watch-btn:hover{color:var(--text-primary);border-color:var(--text-tertiary)}

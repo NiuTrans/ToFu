@@ -219,8 +219,8 @@ CATALOG += [
         'tags': ['travel', 'china', 'flight', 'hotel', 'train', '机票', '酒店',
                  '火车票', '门票', '飞猪', '出行'],
         'featured': True,
-        'requires': {'bins': ['node']},
-        'install_note': '八个搜索命令零配置即可用；如需更完整结果，在飞猪 AI 开放平台登录后自助领取 API Key(个人可申请，无需企业认证)并设置 FLYAI_API_KEY。',
+        'requires': {'bins': ['node'], 'env': ['FLYAI_API_KEY']},
+        'install_note': '八个搜索命令零配置即可用；如需更完整结果，在飞猪 AI 开放平台登录后自助领取 API Key(个人可申请，无需企业认证)，安装后在卡片上点「配置」填入。',
     },
 ]
 
@@ -313,6 +313,7 @@ CATALOG += [
         'subdir': f'{_HYPERFRAMES_SKILLS_PREFIX}/image-gen',
         'author': 'vibe-motion',
         'tags': ['image', 'generation', 'minimax', 'assets'],
+        'requires': {'env': ['MINIMAX_API_KEY']},
         'install_note': 'The SKILL.md-derived install id is "image-gen" (upstream name); this catalog entry tracks it via the .catalog_id marker.',
     },
 ]

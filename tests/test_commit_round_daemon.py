@@ -151,6 +151,15 @@ def fh_env(monkeypatch):
         return real_import(name, *a, **kw)
 
     monkeypatch.setitem(sys.modules, 'lib.file_history', fake_fh)
+    # The daemon body resolves `from lib import file_history as fh`, which
+    # binds via getattr(lib, 'file_history') FIRST — if ANY earlier import in
+    # this worker already set the package attribute to the REAL module (test
+    # order / xdist distribution dependent — this exact divergence red-filed
+    # public CI while every local run was green), the sys.modules stub is
+    # ignored and the real make_snapshot fires on '/proj'. Pin the attribute
+    # too so both resolution paths yield the fake.
+    import lib as _lib_pkg
+    monkeypatch.setattr(_lib_pkg, 'file_history', fake_fh, raising=False)
     monkeypatch.setitem(sys.modules, 'lib.file_history.store', fake_store)
     monkeypatch.setitem(sys.modules, 'lib.project_mod',
                         types.SimpleNamespace(
@@ -316,12 +325,14 @@ def test_daemon_body_never_raises_on_internal_failure(fh_env, monkeypatch):
     """The body runs in a daemon thread: an escaping exception is invisible to
     the round and would silently lose the snapshot. It must log, not raise."""
     import types
-    monkeypatch.setitem(sys.modules, 'lib.file_history',
-                        types.SimpleNamespace(
-                            is_enabled=lambda: True,
-                            get_last_snapshot_id=lambda p: (_ for _ in ()).throw(
-                                RuntimeError('store corrupt')),
-                        ))
+    override = types.SimpleNamespace(
+        is_enabled=lambda: True,
+        get_last_snapshot_id=lambda p: (_ for _ in ()).throw(
+            RuntimeError('store corrupt')),
+    )
+    monkeypatch.setitem(sys.modules, 'lib.file_history', override)
+    import lib as _lib_pkg
+    monkeypatch.setattr(_lib_pkg, 'file_history', override, raising=False)
     task = _task()
     commit_mod._run_commit_round_async(task, '/proj')   # must not raise
     assert fh_env['events'] == [], 'a corrupt store must not emit round_committed'
@@ -330,8 +341,10 @@ def test_daemon_body_never_raises_on_internal_failure(fh_env, monkeypatch):
 
 def test_disabled_file_history_is_a_clean_noop(fh_env, monkeypatch):
     import types
-    monkeypatch.setitem(sys.modules, 'lib.file_history',
-                        types.SimpleNamespace(is_enabled=lambda: False))
+    override = types.SimpleNamespace(is_enabled=lambda: False)
+    monkeypatch.setitem(sys.modules, 'lib.file_history', override)
+    import lib as _lib_pkg
+    monkeypatch.setattr(_lib_pkg, 'file_history', override, raising=False)
     task = _task()
     events = _run(task, fh_env)
     assert events == [] and 'snapshotId' not in task

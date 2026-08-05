@@ -59,6 +59,11 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _conv_bundle_sources import source_argv  # noqa: E402
 
+try:
+    from tests._jsdom import node_deps_available, skip_or_fail  # noqa: E402
+except ImportError:  # tests/ on sys.path but repo root isn't (direct run)
+    from _jsdom import node_deps_available, skip_or_fail  # noqa: E402
+
 pytestmark = pytest.mark.unit
 
 ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
@@ -82,6 +87,12 @@ def _run(dom, summaries, *, override=None):
 
     Returns ``{'order': [...ids...], 'notice': {...}|None, 'messages': [...]}``.
     """
+    # Shared dep guard (P0-1): this harness shells `node -e` + require('jsdom')
+    # directly, bypassing run_harness — without this, a node-but-no-jsdom lane
+    # (public CI test-unit job) hard-fails all 7 tests with 'Cannot find
+    # module jsdom' instead of skipping loudly.
+    if not node_deps_available():
+        skip_or_fail('node + jsdom dev-deps not installed (run `npm install`)')
     argv = source_argv('_applyAutopilotRunNotices', override=override)
     harness = r"""
 const fs = require('fs');

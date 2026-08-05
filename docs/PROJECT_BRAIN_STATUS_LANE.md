@@ -180,6 +180,39 @@ cares about, that the brain addresses on a recurring basis.
   ordering + staleness gate; edit-forces-readdress; promote calls charter
   commit (not the agent path) + propagates version conflict; the source guard.
 
+## 8c. Increment 2 slice 1 — per-response interaction (SHIPPED 2026-08-05)
+
+The owner's ask: *"each brain answer should be a conversation — click in to
+keep asking, or request a fix."* Every response on a watch item now carries
+two doors, both inside the existing invariants (no new write channel, no
+fan-out, lane stays human-facing-only):
+
+- **继续追问 (Follow up)** — an inline composer under every response (latest
+  + trail rows). `answer_follow_up(item_id, question, response_seq=…)` in
+  `lib/conversations/project_watch.py` answers grounded in LIVE pillar state
+  + the item text + the ANCHOR response, and appends the answer to the SAME
+  trail with `trigger='follow_up'`; the question rides the evidence JSON
+  (`followUpQuestion` / `anchorSeq`) and renders as a labelled line above the
+  answer, so the thread reads without expanding anything. It deliberately
+  does NOT touch the item's `response_fingerprint` — a Q&A turn is not a
+  fresh assessment and must not mark the recurring cadence fresh. Synthesized
+  responses still never reach the injection path (the goals renderer ships
+  item TEXT only; the §8b source guard is unchanged).
+- **请求修复 (Request fix)** — an inline epic-draft editor pre-filled from
+  the anchor response (first sentence, 90-char cap, human-editable).
+  Submitting rides the EXISTING human-gated `POST /api/v1/project/board/post`
+  (`created_by_conv` = displayed conv → dispatch target): the brain dispatches
+  the fix to a conversation the human opens from the Board tab — the
+  propose-actions route §2 reserved for exactly this.
+- **REST:** `POST /api/v1/project/brain/watch/follow_up`
+  (`{itemId, question, seq?}`) — envelope + rate-limited like the other watch
+  routes; 400 on missing item / empty question / synthesis failure.
+- **Tests:** `tests/test_project_watch_lane.py` +5 (anchor+grounding+persist,
+  explicit-seq anchor, cadence-untouched, validation/no-raise, no-anchor) and
+  `tests/test_frontend_watch_follow_up.py` (6 jsdom pins: both doors on every
+  response, question line, anchor seq, toggle-close, board-post channel,
+  trigger label).
+
 ## 9. Schema placement
 
 `project_status_snapshots` is defined ONCE in

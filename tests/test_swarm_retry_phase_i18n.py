@@ -150,7 +150,9 @@ class TestSwarmEmitterSeam(unittest.TestCase):
         with open(src_path, encoding='utf-8') as f:
             src = f.read()
         self.assertIn('_d, _meta = _build_dispatch_retry_phase(', src)
-        self.assertIn("self._emit_stream_phase('retrying', _d, **_meta)", src)
+        # The phase value rides the typed Phase constant (EVENTS.md §4 —
+        # the static pin widens to the typed form; wire output unchanged).
+        self.assertIn("self._emit_stream_phase(Phase.RETRYING, _d, **_meta)", src)
 
 
 class TestEndpointAdapterForwarding(unittest.TestCase):

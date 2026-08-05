@@ -41,6 +41,7 @@ import time
 import uuid
 from collections.abc import Callable
 
+from lib.agent_core.events import Phase, build_phase
 from lib.log import get_logger
 
 logger = get_logger(__name__)
@@ -173,8 +174,8 @@ class EndpointEventAdapter:
         emits = ev.get('emits') or self._derive_emits(ev.get('role') or '')
         if emits == 'user':
             return
-        out = {'type': 'phase', 'phase': ev.get('phase') or 'working',
-               'detail': ev.get('detail') or ''}
+        out = build_phase(ev.get('phase') or Phase.WORKING,
+                          detail=ev.get('detail') or '')
         if ev.get('attempt'):
             out['attempt'] = ev.get('attempt')
         if ev.get('status_code'):

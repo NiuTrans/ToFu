@@ -55,8 +55,19 @@ def _check_memory_eligible(mem):
 
     required_env = _coerce_str_list(mem.get('requires_env'))
     for var in required_env:
-        if not os.environ.get(var):
-            reasons.append(f'env var `{var}` not set')
+        if os.environ.get(var):
+            continue
+        # Skill packages get a second source: the credential vault, where the
+        # user configures per-skill keys in Settings → Skills. A configured
+        # key satisfies the gate exactly like a process env var.
+        if mem.get('is_package') and mem.get('id'):
+            try:
+                from lib.skills.env import vault_has_env
+                if vault_has_env(mem['id'], var):
+                    continue
+            except Exception as e:
+                logger.debug('vault env probe failed for %s: %s', var, e)
+        reasons.append(f'env var `{var}` not set')
 
     required_os = _coerce_str_list(mem.get('requires_os'))
     if required_os:

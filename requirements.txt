@@ -202,6 +202,11 @@ pymupdf4llm==1.27.2.3
 # (routes/paper.py:export_report). Frontend still uses marked.js for live
 # rendering; this dep is only used for downloadable .html exports.
 markdown>=3.5
+# markdown-it-py — CommonMark renderer for markdown-ARTIFACT export
+# (lib/artifacts/pdf_export.py). Its docstring always assumed it was a project
+# dep, but it was only ever present TRANSITIVELY — a clean env (public CI)
+# silently degrades exports to <pre>plaintext. Declared explicitly 2026-08-05.
+markdown-it-py>=3.0
 # PyYAML — serves the YAML variant of the OpenAPI spec
 # (routes/api_docs.py::openapi_yaml). The route degrades to JSON on
 # ImportError, so this is a soft feature dep; declared explicitly because it

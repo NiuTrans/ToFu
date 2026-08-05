@@ -413,7 +413,33 @@ def test_guard_forces_sqlite_in_subprocess_under_ambient_pg():
     assert _probe_backend_subprocess(run_guard=True) == 'sqlite'
 
 
+def _pg_backend_resolvable_here() -> bool:
+    """True when THIS host can actually resolve a PG backend at import time.
+
+    The double-neuter probe asserts that an ambient ``TOFU_DB_BACKEND=postgres``
+    (no guard) freezes ``_BACKEND='pg'``. That only happens when the DB
+    layer's PG bootstrap genuinely succeeds — which requires psycopg2 AND
+    local PostgreSQL server binaries (pg_ctl/initdb). On a host without them
+    (public CI), the honest resolution is the SQLite fallback and there is no
+    'pg' to freeze onto — the assertion's precondition does not exist there.
+    """
+    try:
+        import psycopg2  # noqa: F401
+    except Exception:
+        return False
+    try:
+        from lib.database._bootstrap import _pg_binaries_present
+        return bool(_pg_binaries_present())
+    except Exception:
+        return False
+
+
 @pytest.mark.slow
+@pytest.mark.skipif(not _pg_backend_resolvable_here(),
+                    reason='no psycopg2 / PostgreSQL server binaries on this '
+                           'host — the ambient-postgres resolution path this '
+                           'double-neuter asserts is unreachable (the DB layer '
+                           'honestly falls back to sqlite here)')
 def test_double_neuter_without_guard_resolves_pg():
     """DOUBLE-NEUTER: the SAME child process WITHOUT the guard call freezes
     _BACKEND onto the ambient postgres — proving the guard is load-bearing (it

@@ -30,13 +30,19 @@ pytestmark = pytest.mark.unit
 
 def _fake_send(script, calls=None):
     """Build a fake send_browser_command driven by a {cmd: (result, error)}
-    script; records calls as (cmd, params) when `calls` list is given."""
+    script; records calls as (cmd, params) when `calls` list is given.
+    A list entry POPS responses in order (last one repeats when exhausted)
+    — for pre-action snapshot / post-action receipt list_tabs pairs."""
     def fake(cmd, params=None, timeout=None):
         if calls is not None:
             calls.append((cmd, params))
         entry = script.get(cmd, ({}, None))
         if callable(entry):
             return entry(params)
+        if isinstance(entry, list):
+            if len(entry) > 1:
+                return entry.pop(0)
+            return entry[0]
         return entry
     return fake
 
@@ -224,7 +230,12 @@ def test_click_by_text_resolves_and_reports_receipt(monkeypatch):
     _patch_facade_send(monkeypatch, {
         'get_interactive_elements': ({'elements': _ELEMENTS}, None),
         'click_element': ({'clicked': True, 'tag': 'button', 'text': 'Login'}, None),
-        'list_tabs': ([{'id': 1, 'url': 'http://after', 'title': 'T'}], None),
+        # v3: tab_snapshot reads list_tabs LIVE pre-action (a stale cache
+        # must not produce phantom navigations), the receipt post-action.
+        'list_tabs': [
+            ([{'id': 1, 'url': 'http://before', 'title': 'T'}], None),
+            ([{'id': 1, 'url': 'http://after', 'title': 'T'}], None),
+        ],
     }, calls)
     from lib.browser.display import update_tab_title
     update_tab_title(1, 'T', url='http://before')
@@ -271,9 +282,10 @@ def test_type_uses_type_text_clear_first(monkeypatch):
     from lib.browser.handlers import _handle_type
     out = _handle_type({'tabId': 1, 'selector': '#q', 'value': 'hello'})
     assert 'Typed 5 chars' in out
-    cmd, params = calls[0]
-    assert cmd == 'type_text'
-    assert params['clearFirst'] is True and params['text'] == 'hello'
+    # v3: a snapshot list_tabs runs before the action — find the type call.
+    tcalls = [p for c, p in calls if c == 'type_text']
+    assert tcalls and tcalls[0]['clearFirst'] is True
+    assert tcalls[0]['text'] == 'hello'
 
 
 def test_press_key_sends_keyboard_input(monkeypatch):
@@ -285,7 +297,8 @@ def test_press_key_sends_keyboard_input(monkeypatch):
     from lib.browser.handlers import _handle_press_key
     out = _handle_press_key({'tabId': 1, 'keys': 'Enter'})
     assert 'Sent keys "Enter"' in out
-    assert calls[0][0] == 'keyboard_input'
+    # v3: a snapshot list_tabs precedes the action.
+    assert any(c == 'keyboard_input' for c, _ in calls)
 
 
 def test_navigate_new_tab_uses_create_tab_and_remembers(monkeypatch):

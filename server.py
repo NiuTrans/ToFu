@@ -24,6 +24,14 @@ import signal
 import threading
 import faulthandler
 
+# Internal process marker (NOT a user knob — the owner directive 2026-08-05:
+# plain `python server.py` carries everything). lib.database's local-primary
+# migration gates on this: only the server's own boot may stop/start clusters
+# and flip the primary. A side process that merely imports lib.database (agent
+# probes, tooling) must never fire it — measured 2026-08-05: two bare imports
+# each burned a full 46 GB dump+restore attempt. Must precede lib imports.
+os.environ.setdefault('TOFU_SERVER_PROCESS', '1')
+
 # ── Capture C-level fatal signals (SIGSEGV / SIGABRT / SIGFPE / SIGILL / SIGBUS) ──
 # These fire on heap corruption (e.g. `munmap_chunk(): invalid pointer`) from
 # native extensions like urllib3's response decompressor. Without this the
@@ -1235,9 +1243,18 @@ class _BizOnly(logging.Filter):
 class _VendorOnly(logging.Filter):
     def filter(self, record):
         return (not record.name.startswith(_BIZ_PREFIXES)
+                and not record.name.startswith('frontend')
                 and record.name != 'werkzeug'
                 and record.name != 'hypercorn'
                 and not record.name.startswith('hypercorn.'))
+
+class _FrontendOnly(logging.Filter):
+    """The browser-console relay (/api/v1/logs/client → logger 'frontend').
+    Owns its own file: the full client stream (INFO included) is far too
+    chatty for app.log, and client warnings must not cry wolf in error.log."""
+    def filter(self, record):
+        return (record.name == 'frontend'
+                or record.name.startswith('frontend.'))
 
 class _BizAndServerOnly(logging.Filter):
     def filter(self, record):
@@ -1286,6 +1303,13 @@ _vendor_handler.setFormatter(_formatter)
 _vendor_handler.setLevel(logging.WARNING)
 _vendor_handler.addFilter(_VendorOnly())
 
+_frontend_handler = TimedRotatingFileHandler(
+    os.path.join(LOG_DIR, 'frontend.log'),
+    when='midnight', backupCount=14, encoding='utf-8')
+_frontend_handler.setFormatter(_formatter)
+_frontend_handler.setLevel(logging.INFO)
+_frontend_handler.addFilter(_FrontendOnly())
+
 _console_handler = logging.StreamHandler(sys.stderr)
 _console_handler.setFormatter(_formatter)
 _console_handler.setLevel(logging.WARNING)
@@ -1313,7 +1337,7 @@ import queue as _queue_mod
 from logging.handlers import QueueHandler, QueueListener
 
 _real_log_handlers = [_app_handler, _access_handler, _error_handler,
-                      _vendor_handler, _console_handler]
+                      _vendor_handler, _frontend_handler, _console_handler]
 
 # Under pytest, keep logging SYNCHRONOUS: caplog and the tests that assert a
 # log line landed in a file handler (e.g. test_log_pytest_sink_isolation) read

@@ -31,6 +31,19 @@ What it is / is NOT
   emitted in core is registered here, and (b) every type the frontend handles
   is registered.  That is the analog of ``test_core_tool_isolation.py``.
 
+The PHASE sub-vocabulary
+------------------------
+The ``phase`` event is the stream's *status text* channel ("Retrying…",
+"Sent to kimi-k3…", "Compressing context…") — the highest-frequency
+human-readable pushes a turn produces.  Its ``phase`` field has its own
+registry here (:class:`Phase` constants + :class:`PhaseSpec` catalogue +
+:func:`build_phase` / :func:`emit_phase` constructors), so the full set of
+status pushes is perceivable in ONE place instead of being reverse-engineered
+from scattered ``phase='...'`` call sites, and uniformly optimisable at the
+single construction chokepoint.  ``tests/test_phase_registry.py`` drift-guards
+it both directions (emitted values ⊆ registry; frontend-handled values ⊆
+registry; zero raw ``{'type': 'phase'`` literals outside this module).
+
 Versioning
 ----------
 ``EVENT_CONTRACT_VERSION`` is bumped on any *breaking* change to an existing
@@ -102,13 +115,53 @@ class EventSpec:
     since: int = 1
 
 
+@dataclass(frozen=True)
+class PhaseSpec:
+    """Describes one ``phase`` value of the :data:`EventType.PHASE` event.
+
+    The PHASE event is the stream's status-text channel; this is the
+    catalogue of every status push the runtime can emit.  Mirrors
+    :class:`EventSpec` one level down (type → phase).
+
+    Parameters
+    ----------
+    phase:
+        The wire ``phase`` string.
+    domains:
+        Which stream(s) emit it: ``'chat'`` for the main agent task stream
+        (the shared frontend contract), or a production channel name
+        (``'motion_video'`` / ``'podcast'`` / ``'research'`` / ``'longform'``)
+        for the per-capability TaskRuntime streams.  Production phases ride
+        the same ``phase`` event type and are catalogued here so the whole
+        system's status pushes are perceivable in one place; their private
+        event *types* (``phase_started`` / ``progress`` / …) stay
+        unregistered per the docs/EVENTS.md §1 scope ruling.
+    purpose:
+        One-line human description.
+    fields:
+        Map of payload field name → short description (``type`` / ``phase``
+        are implicit and omitted).
+    since:
+        Contract version in which the phase was introduced.
+    """
+
+    phase: str
+    domains: tuple[str, ...]
+    purpose: str
+    fields: dict[str, str] = field(default_factory=dict)
+    since: int = 1
+
+
 class EventType:
     """Canonical event ``type`` string constants.
 
     Reference these instead of bare strings in emission code, via the typed
     constructor — never a raw ``{'type': ...}`` dict literal::
 
-        append_event(task, build_event(EventType.PHASE, phase='working'))
+        emit_phase(task, Phase.WORKING, detail='…')
+
+    (``Phase``/``build_phase``/``emit_phase`` below are the typed pair for the
+    PHASE event's ``phase`` field — use them for status pushes.)
 
     See ``docs/EVENTS.md`` for the full emit discipline.
     """
@@ -181,6 +234,48 @@ class EventType:
     PING = 'ping'
 
 
+class Phase:
+    """Canonical ``phase`` values for the :data:`EventType.PHASE` event.
+
+    Reference these instead of bare strings in emission code, via the typed
+    constructor — never a raw ``phase='...'`` literal::
+
+        emit_phase(task, Phase.RETRYING, detail='…', attempt=1)
+
+    Adding a NEW phase = add the constant here + a :class:`PhaseSpec` in
+    ``_PHASE_SPECS`` below (the drift test enforces the pair).  Frontend-local
+    phase states the client derives itself (e.g. ``thinking_active``) are NOT
+    pushed and deliberately NOT registered here.
+    """
+
+    # ── chat turn (the streaming status row — shared frontend contract) ──
+    LLM_THINKING = 'llm_thinking'
+    TOOL_EXEC = 'tool_exec'
+    RETRYING = 'retrying'
+    WAITING_MODEL = 'waiting_model'
+    WORKING = 'working'
+    COMPACTING = 'compacting'
+    TODO_CONTINUATION = 'todo_continuation'
+    INTENT_STALL_NUDGE = 'intent_stall_nudge'
+    TOOL_HISTORY_RESTORED = 'tool_history_restored'
+    # ── motion_video channel ──
+    RESEARCH = 'research'
+    SCRIPT_DONE = 'script_done'
+    PARSE = 'parse'
+    STORYBOARD = 'storyboard'
+    NARRATE = 'narrate'
+    COMPOSE = 'compose'
+    CONCAT = 'concat'
+    BURN_IN = 'burn_in'
+    MUX = 'mux'
+    REGEN = 'regen'
+    # ── podcast channel ──
+    SCRIPT = 'script'
+    AUDIO = 'audio'
+    # ── research / longform channels (shared value) ──
+    START = 'start'
+
+
 # ── Tool-lifecycle timing contract ──────────────────────────────────
 # Every tool event carries backend clocks so a slow turn is ATTRIBUTABLE. Three
 # segments are derivable per tool row, and without them they are indivisible:
@@ -225,7 +320,11 @@ _SPECS: tuple[EventSpec, ...] = (
                       'usage': '(optional) token usage', 'model': '(optional) model id'}),
     EventSpec(EventType.PHASE, _C.LIFECYCLE,
               'Progress / status hint for the current turn.',
-              fields={'phase': "phase key (llm_thinking|tool_exec|retrying|working|…)",
+              fields={'phase': 'phase key — the declared vocabulary lives in '
+                                 'the Phase registry below (phase_values() / '
+                                 'the capabilities `phases` block); the chat '
+                                 'domain is the streaming status row, the '
+                                 'rest are production-channel stage pushes',
                       'detail': 'human-readable detail (English fallback; '
                                 'headless / non-i18n clients render this verbatim)',
                       'detailKey': '(optional) stable i18n key the client resolves '
@@ -649,6 +748,143 @@ _SPECS: tuple[EventSpec, ...] = (
 # Indexes
 _BY_TYPE: dict[str, EventSpec] = {s.type: s for s in _SPECS}
 
+
+# ── The phase registry: every status push the runtime can emit ──
+# One level below the event registry: EventType.PHASE is the type, these are
+# its declared `phase` values. Grouped by domain — 'chat' is the streaming
+# status row (shared frontend contract); the production domains are the
+# per-capability TaskRuntime channels (private producer↔consumer pairs whose
+# phase events still ride the same wire type, catalogued here so the whole
+# system's status pushes are perceivable in one place).
+_CHAT = 'chat'
+_PHASE_SPECS: tuple[PhaseSpec, ...] = (
+    # ───────────────────────── chat turn ─────────────────────────
+    PhaseSpec(Phase.LLM_THINKING, (_CHAT,),
+              'An LLM round opened — the model is generating (the pre-token '
+              'window and the inter-round "analyzing tool results" beat).',
+              fields={'detail': 'English fallback label',
+                      'detailKey': 'i18n key', 'detailArgs': 'interpolation args',
+                      'roundNum': 'round index',
+                      'toolContext': 'pre-joined English label of the previous '
+                                     "round's tools (headless fallback)",
+                      'toolContextTools': 'structured raw tool names behind '
+                                          'toolContext (i18n clients compose '
+                                          'from these)'}),
+    PhaseSpec(Phase.TOOL_EXEC, (_CHAT,),
+              'A tool batch is about to execute.',
+              fields={'detail': 'English fallback label',
+                      'tools': 'raw tool-name list of this dispatch (i18n '
+                               'clients compose the localized label)'}),
+    PhaseSpec(Phase.RETRYING, (_CHAT,),
+              'Transient retry / wait / self-tuning notice: dispatcher 429/'
+              'cooldown cycles, first-byte and mid-stream stall heartbeats, '
+              'stream-anomaly retries (zero-byte / premature-close / '
+              'empty-stop / canned-greeting), turn-level auto-retry, reactive '
+              'compact, model fallback, pool rescue, auto-learned model/'
+              'context limits.',
+              fields={'detail': 'human-readable fallback (may be zh)',
+                      'detailKey': '(optional) i18n key',
+                      'detailArgs': '(optional) interpolation args '
+                                    '(model/attempt/elapsed/reason/reasonKey)',
+                      'attempt': '(optional) retry/beat counter — the frontend '
+                                 'keys its repaint on it',
+                      'max': '(optional) retry budget',
+                      'bucket': '(optional) retry signature bucket '
+                                '(zero_byte|classic|empty_stop|canned_greeting|'
+                                'turn)',
+                      'backoff_s': '(optional) backoff before the retry',
+                      'statusCode': '(optional) HTTP status that triggered the cycle',
+                      'model': '(optional) raw model id'}),
+    PhaseSpec(Phase.WAITING_MODEL, (_CHAT,),
+              'Request dispatched, first token not yet arrived (the TTFT '
+              'window); cleared by the first delta or a tool_start.',
+              fields={'detail': 'English fallback label',
+                      'detailKey': 'i18n key', 'detailArgs': 'model label',
+                      'model': 'raw model id'}),
+    PhaseSpec(Phase.WORKING, (_CHAT,),
+              'Generic working status: VU sub-task startup steps, endpoint/'
+              'flow producer step_phase forwards, external CLI backends.',
+              fields={'detail': 'status text (rendered verbatim by the '
+                                'fallback branch)',
+                      'detailKey': '(optional) i18n key',
+                      'detailArgs': '(optional) interpolation args',
+                      'attempt': '(optional) retry counter (forwarded '
+                                 'step_phase meta)',
+                      'statusCode': '(optional) HTTP status (forwarded '
+                                    'step_phase meta)'}),
+    PhaseSpec(Phase.COMPACTING, (_CHAT,),
+              'Proactive context-window compaction is running.',
+              fields={'detail': 'English fallback label',
+                      'detailKey': 'i18n key'}),
+    PhaseSpec(Phase.TODO_CONTINUATION, (_CHAT,),
+              'A checklist-incomplete stop was re-driven by the '
+              'todo-continuation enforcer.',
+              fields={'attempt': 'nudge counter', 'max': 'nudge budget',
+                      'incomplete': 'incomplete item count',
+                      'detail': 'fallback label (zh)'}),
+    PhaseSpec(Phase.INTENT_STALL_NUDGE, (_CHAT,),
+              'A prose-only stop right after a failed/rejected tool round was '
+              'nudged once (the intent-stall guard).',
+              fields={'attempt': 'nudge counter', 'max': 'nudge budget (1)',
+                      'detail': 'English fallback label',
+                      'detailKey': 'i18n key'}),
+    PhaseSpec(Phase.TOOL_HISTORY_RESTORED, (_CHAT,),
+              'Tool messages were rebuilt from the server-side store after a '
+              'reload/compaction (diagnostic).',
+              fields={'detail': 'summary text', 'stats': 'rebuild stats',
+                      'overhead': 'estimated token overhead of the rebuild'}),
+    # ───────────────────── motion_video channel ─────────────────────
+    PhaseSpec(Phase.RESEARCH, ('motion_video',),
+              'Topic → recipe research is running.',
+              fields={'topic': 'the job topic'}),
+    PhaseSpec(Phase.SCRIPT_DONE, ('motion_video',),
+              'The recipe produced scenes.json + the SRT timeline.',
+              fields={'scenes': 'scene list', 'timed_from_audio': 'bool'}),
+    PhaseSpec(Phase.PARSE, ('motion_video',),
+              'The SRT was parsed into cues.',
+              fields={'cues': 'cue count', 'span_s': '[start, end] seconds'}),
+    PhaseSpec(Phase.STORYBOARD, ('motion_video',),
+              'The storyboard was validated/built.',
+              fields={'scenes': 'scene count'}),
+    PhaseSpec(Phase.NARRATE, ('motion_video',),
+              'Per-scene TTS narration finished (or degraded to silent).',
+              fields={'degraded': 'bool', 'reused': '(optional) manifest reuse',
+                      'scenes': '(optional) per-scene audio/target/overflow',
+                      'detail': '(optional) degrade reason'}),
+    PhaseSpec(Phase.COMPOSE, ('motion_video',),
+              'Scene compositions authored (scene-author or template floor).',
+              fields={'scenes': 'total scenes', 'authored': 'agent-authored count',
+                      'templated': 'template-fallback count',
+                      'gate_failed_scenes': 'scene ids with advisory gate findings'}),
+    PhaseSpec(Phase.CONCAT, ('motion_video',),
+              'Scene clips concatenated into the silent final.',
+              fields={'duration_s': 'seconds', 'mode': 'concat mode'}),
+    PhaseSpec(Phase.BURN_IN, ('motion_video',),
+              'Sidecar subtitles burned in.',
+              fields={'duration_s': 'seconds',
+                      'auto': 'true when auto-triggered by degraded narration'}),
+    PhaseSpec(Phase.MUX, ('motion_video',),
+              'Narration muxed into the final video.',
+              fields={'duration_s': 'seconds'}),
+    PhaseSpec(Phase.REGEN, ('motion_video',),
+              'A single-scene regeneration job started.',
+              fields={'scene_id': 'scene being regenerated',
+                      'regen_of': 'source job id'}),
+    # ─────────────────────── podcast channel ───────────────────────
+    PhaseSpec(Phase.SCRIPT, ('podcast',),
+              'Spoken-script generation is running.', fields={}),
+    PhaseSpec(Phase.AUDIO, ('podcast',),
+              'TTS audio synthesis is running.',
+              fields={'total': 'segment count'}),
+    # ───────────────── research / longform channels ─────────────────
+    PhaseSpec(Phase.START, ('research', 'longform'),
+              'The job started (research: idea mining; longform: report).',
+              fields={'direction': '(research) the mined direction',
+                      'topic': '(longform) the report topic'}),
+)
+
+_PHASE_BY_VALUE: dict[str, PhaseSpec] = {s.phase: s for s in _PHASE_SPECS}
+
 # Types that are stream-internal / transport and are NOT expected to be
 # handled by an application frontend's event switch (the drift test exempts
 # these from the "frontend must handle every type" direction).
@@ -729,6 +965,41 @@ def emit(task: Any, type_: str, **fields: Any) -> Any:
     return append_event(task, event)
 
 
+def build_phase(phase: str, /, **fields: Any) -> dict[str, Any]:
+    """The ONE construction site for :data:`EventType.PHASE` events.
+
+    ``build_phase(Phase.RETRYING, detail='…', attempt=1)`` is byte-for-byte
+    identical to the old ``{'type': 'phase', 'phase': 'retrying', ...}``
+    literal (the ``phase`` field always lands second, right after ``type``).
+
+    The unified interface for the stream's status-text pushes: every emitter
+    — chat orchestrator, dispatcher retry hooks, compaction, endpoint/swarm
+    adapters, production engines — constructs through here (delivering via
+    their own append seam when it isn't ``manager.append_event``), so a
+    cross-cutting change (a new envelope field, a dedup rule, an i18n
+    convention) lands at ONE chokepoint instead of ~30 call sites.
+
+    Unregistered phases are allowed (forward-compatible) but log a debug
+    line — ``tests/test_phase_registry.py`` enforces registration at CI time.
+    """
+    if phase not in _PHASE_BY_VALUE:
+        logger.debug('[events] build_phase for unregistered phase=%r '
+                     '(add a Phase constant + PhaseSpec to '
+                     'lib/agent_core/events.py)', phase)
+    return build_event(EventType.PHASE, phase=phase, **fields)
+
+
+def emit_phase(task: Any, phase: str, /, **fields: Any) -> Any:
+    """Build a phase event and deliver it through the task event chokepoint.
+
+    The one-liner form of ``append_event(task, build_phase(...))`` — the same
+    lazy-import delivery contract as :func:`emit`.
+    """
+    event = build_phase(phase, **fields)
+    from lib.tasks_pkg.manager import append_event
+    return append_event(task, event)
+
+
 def all_event_specs() -> tuple[EventSpec, ...]:
     """Return every registered :class:`EventSpec`."""
     return _SPECS
@@ -747,6 +1018,26 @@ def get_event_spec(type_: str) -> EventSpec | None:
 def is_registered(type_: str) -> bool:
     """True if *type_* is a known event type."""
     return type_ in _BY_TYPE
+
+
+def all_phase_specs() -> tuple[PhaseSpec, ...]:
+    """Return every registered :class:`PhaseSpec`."""
+    return _PHASE_SPECS
+
+
+def phase_values() -> frozenset[str]:
+    """Return the set of all registered ``phase`` value strings."""
+    return frozenset(_PHASE_BY_VALUE)
+
+
+def get_phase_spec(phase: str) -> PhaseSpec | None:
+    """Return the :class:`PhaseSpec` for *phase*, or ``None`` if unregistered."""
+    return _PHASE_BY_VALUE.get(phase)
+
+
+def is_registered_phase(phase: str) -> bool:
+    """True if *phase* is a known ``phase`` value."""
+    return phase in _PHASE_BY_VALUE
 
 
 def terminal_types() -> frozenset[str]:
@@ -776,6 +1067,15 @@ def to_capabilities_dict() -> dict[str, Any]:
             'fields': s.fields,
             'since': s.since,
         })
+    by_domain: dict[str, list[dict]] = {}
+    for p in _PHASE_SPECS:
+        for d in p.domains:
+            by_domain.setdefault(d, []).append({
+                'phase': p.phase,
+                'purpose': p.purpose,
+                'fields': p.fields,
+                'since': p.since,
+            })
     return {
         'contract_version': EVENT_CONTRACT_VERSION,
         'transports': {
@@ -786,6 +1086,11 @@ def to_capabilities_dict() -> dict[str, Any]:
         'terminal_types': sorted(terminal_types()),
         'interaction_types': sorted(interaction_types()),
         'categories': by_category,
+        # The PHASE event's declared `phase` vocabulary, grouped by emitting
+        # stream ('chat' = the shared status row; the rest are production
+        # channels). A foreign frontend learns every status push it can see
+        # without reading our source.
+        'phases': by_domain,
     }
 
 
@@ -794,13 +1099,21 @@ __all__ = [
     'EventCategory',
     'EventSpec',
     'EventType',
+    'Phase',
+    'PhaseSpec',
     'TRANSPORT_TYPES',
     'build_event',
+    'build_phase',
     'emit',
+    'emit_phase',
     'all_event_specs',
+    'all_phase_specs',
     'event_types',
+    'phase_values',
     'get_event_spec',
+    'get_phase_spec',
     'is_registered',
+    'is_registered_phase',
     'terminal_types',
     'interaction_types',
     'to_capabilities_dict',

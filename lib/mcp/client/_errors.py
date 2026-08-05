@@ -44,6 +44,23 @@ def _safe_text(exc: BaseException) -> str:
         return ' '.join(str(a) for a in getattr(exc, 'args', ()))
 
 
+# ``BaseExceptionGroup`` is a builtin only on Python ≥ 3.11. Bind it at
+# module scope — via the ``exceptiongroup`` backport (an anyio dependency,
+# always present on 3.10) when the builtin is missing — so the unwrapping
+# below behaves the same on every supported interpreter AND the name is
+# statically resolvable (tests/test_undefined_name_guard.py scans with the
+# RUNNING interpreter's builtins, so a bare in-function reference is flagged
+# on the 3.10 leg). The () fallback keeps isinstance(...) simply-false when
+# no group type exists at all.
+try:
+    _EXCEPTION_GROUP = BaseExceptionGroup  # type: ignore[name-defined]  # noqa: F821
+except NameError:  # Python < 3.11
+    try:
+        from exceptiongroup import BaseExceptionGroup as _EXCEPTION_GROUP
+    except ImportError:  # pragma: no cover — backport always present w/ anyio
+        _EXCEPTION_GROUP = ()
+
+
 def _unwrap_exception_group(exc: BaseException) -> BaseException:
     """Return the deepest non-group leaf exception in a (possibly nested)
     ``BaseExceptionGroup`` chain.
@@ -54,9 +71,9 @@ def _unwrap_exception_group(exc: BaseException) -> BaseException:
     first concrete leaf and return it. If no leaf is found (degenerate
     case), the original exception is returned unchanged.
     """
-    try:
-        Group = BaseExceptionGroup  # type: ignore[name-defined]
-    except NameError:  # pragma: no cover — Python < 3.11
+    Group = _EXCEPTION_GROUP
+    if not isinstance(Group, type):
+        # No group type on this interpreter — nothing to unwrap.
         return exc
 
     seen: set[int] = set()

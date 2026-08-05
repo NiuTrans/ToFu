@@ -262,7 +262,9 @@ def _seed_local_pgdata_from_legacy(local_pgdata, legacy_pgdata, base_dir,
          this runs at Step -1 (before the normal start path), the legacy cluster
          is first STARTED if it is down (via _ensure_legacy_up_for_seed); the
          nightly dump is used ONLY when legacy genuinely cannot be started — NOT
-         merely because it wasn't up yet. Opt-in via TOFU_DB_SEED_LOCAL=1.
+         merely because it wasn't up yet. Default-on since 2026-08-05 (owner
+         directive — plain `python server.py` must Just Work);
+         TOFU_DB_SEED_LOCAL=0 defers.
       2. Idempotent on ``pgdata_is_populated(local)`` — if local already looks
          initialized, skip entirely (never re-restore over newer local data).
       3. Verify-before-canonical — after restoring into local, confirm the
@@ -276,15 +278,18 @@ def _seed_local_pgdata_from_legacy(local_pgdata, legacy_pgdata, base_dir,
     """
     from lib.database.db_paths import pgdata_is_populated
 
-    # OPT-IN: the seed is a heavy, operator-visible event (a full pg_dumpall +
-    # restore, potentially many GB, running BEFORE the server serves). It must
-    # NOT fire unexpectedly on a routine restart. Default OFF; the operator sets
-    # TOFU_DB_SEED_LOCAL=1 to deliberately trigger the one-time migration. The
-    # gate keeps resolution on the intact legacy cluster until then, so nothing
-    # regresses by requiring an explicit opt-in.
-    if getenv_compat('TOFU_DB_SEED_LOCAL', default='0').lower() not in ('1', 'true', 'yes'):
-        logger.debug('[DB-Seed] not opted in (TOFU_DB_SEED_LOCAL!=1) — skipping '
-                     'one-time local seed; staying on legacy')
+    # DEFAULT-ON (owner directive 2026-08-05): the seed fires automatically on
+    # any plain `python server.py` start when local is unpopulated — operators
+    # must NOT need to remember an env flag for a migration that is idempotent,
+    # verify-gated and quarantine-on-failure. The env var survives only as an
+    # opt-OUT escape hatch (TOFU_DB_SEED_LOCAL=0) for deliberately deferring
+    # the heavy event (full dump+restore before serving). On failure the local
+    # half-restore is quarantined and legacy stays canonical, so the next boot
+    # simply retries — self-healing once the transient cause (disk full, FUSE
+    # wobble) clears; the failure is loud (CRITICAL + audit_log) every boot.
+    if getenv_compat('TOFU_DB_SEED_LOCAL', default='1').lower() in ('0', 'false', 'no'):
+        logger.warning('[DB-Seed] opted out (TOFU_DB_SEED_LOCAL=0) — deferring '
+                       'one-time local seed; staying on legacy FUSE pgdata')
         return False
 
     # ── Property 2: idempotent — never touch an already-populated local ──
@@ -406,3 +411,202 @@ def _seed_local_pgdata_from_legacy(local_pgdata, legacy_pgdata, base_dir,
     # with this boot's legacy cluster on the same DSN.
     _boot_stop_pg_quietly(local_pgdata)
     return True
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  Atomic single-boot migration (seed → verify → flip) — 2026-08-05
+# ══════════════════════════════════════════════════════════════════════
+
+def _local_seed_is_stale(local_pgdata, legacy_pgdata) -> bool:
+    """True when the legacy cluster was written MORE RECENTLY than the local
+    seed — i.e. the local copy is behind and must be re-seeded before it may
+    serve. Compares ``global/pg_control`` mtimes (a running or cleanly-stopped
+    cluster checkpoints it; free, no cluster start needed). Unreadable/missing
+    files → not stale (the populated-ness gates handle those cases).
+    """
+    try:
+        lm = os.path.getmtime(os.path.join(local_pgdata, 'global', 'pg_control'))
+        gm = os.path.getmtime(os.path.join(legacy_pgdata, 'global', 'pg_control'))
+    except OSError:
+        return False
+    return gm > lm
+
+
+def _set_pgdata_port(pgdata, port) -> None:
+    """Rewrite the ``port = N`` line in postgresql.conf (append if absent)."""
+    conf = os.path.join(pgdata, 'postgresql.conf')
+    with open(conf) as f:
+        lines = f.readlines()
+    wrote = False
+    with open(conf, 'w') as f:
+        for line in lines:
+            s = line.strip()
+            if not wrote and s.startswith('port') and '=' in s and not s.startswith('#'):
+                f.write(f'port = {port}\n')
+                wrote = True
+            else:
+                f.write(line)
+    if not wrote:
+        with open(conf, 'a') as f:
+            f.write(f'\nport = {port}\n')
+
+
+def _start_pg_cluster(pgdata, base_dir):
+    """``pg_ctl start`` a cluster; returns the CompletedProcess."""
+    log_path = os.path.join(base_dir, 'logs', 'postgresql.log')
+    return subprocess.run(
+        [_find_pg_binary('pg_ctl'), '-D', pgdata, '-l', log_path,
+         'start', '-w', '-t', '60'],
+        capture_output=True, text=True, timeout=90)
+
+
+def _flip_local_into_service(local_pgdata, legacy_pgdata, base_dir,
+                             pinned_port, pg_user, pg_dbname) -> bool:
+    """Swap the serving cluster: stop legacy, start the verified local seed on
+    the pinned port. Legacy's DATA is never touched (dump-source only).
+
+    The port swap is required because the deployment pins the PG port in the
+    server env (TOFU_PG_PORT) — an explicit port makes the bootstrap treat
+    :pinned as the managed target, so the local cluster must answer THERE or
+    the flip would silently keep serving legacy (mechanism gap found
+    2026-08-05). Legacy is stopped only AFTER the seed passed verification,
+    keeping the no-service window to seconds. On any failure legacy is
+    restarted and stays canonical.
+    """
+    from lib.log import audit_log
+    logger.warning('[DB-Flip] stopping legacy cluster (%s) to free :%d for the '
+                   'local primary', legacy_pgdata, pinned_port)
+    _boot_stop_pg_quietly(legacy_pgdata)
+    try:
+        _set_pgdata_port(local_pgdata, pinned_port)
+    except Exception as e:
+        logger.error('[DB-Flip] retarget local port to :%d failed: %s — '
+                     'restarting legacy', pinned_port, e)
+        _start_pg_cluster(legacy_pgdata, base_dir)
+        return False
+    start = _start_pg_cluster(local_pgdata, base_dir)
+    ok = (getattr(start, 'returncode', 1) == 0
+          and _verify_pg_after_start(pinned_port, local_pgdata, pg_user,
+                                     total_wait_s=15))
+    if not ok:
+        logger.critical('[DB-Flip] local primary failed to start on :%d — '
+                        'restarting legacy; migration aborted (legacy canonical)',
+                        pinned_port)
+        audit_log('db_seed_flip_failed', port=pinned_port)
+        _boot_stop_pg_quietly(local_pgdata)
+        _start_pg_cluster(legacy_pgdata, base_dir)
+        return False
+    logger.warning('[DB-Flip] SUCCESS — local primary serving on :%d; legacy '
+                   'stopped and PRESERVED at %s', pinned_port, legacy_pgdata)
+    audit_log('db_seed_flip_success', port=pinned_port)
+    return True
+
+
+def _seed_failure_marker(local_root):
+    return os.path.join(local_root, '.seed_failed')
+
+
+def _mark_seed_failure(local_root) -> None:
+    """Stamp the failure cooldown marker (creating the root dir if needed —
+    on a failed first seed the local root may not exist yet)."""
+    try:
+        os.makedirs(local_root, exist_ok=True)
+        with open(_seed_failure_marker(local_root), 'w') as fh:
+            fh.write(str(time.time()))
+    except OSError as e:
+        logger.debug('[DB-Migrate] could not write failure marker: %s', e)
+
+
+def _seed_failure_fresh(local_root, cooldown_s=6 * 3600) -> bool:
+    """True when a previous migration failed within the cooldown — bounds the
+    cost of a DETERMINISTIC failure to one dump+restore attempt per cooldown
+    instead of one per boot (measured 2026-08-05: one attempt = a 46 GB dump)."""
+    try:
+        age = time.time() - os.path.getmtime(_seed_failure_marker(local_root))
+        return age < cooldown_s
+    except OSError:
+        return False
+
+
+def _migrate_local_primary_if_due(pgdata, base_dir, pg_port, pg_user,
+                                  pg_password, pg_dbname):
+    """Server-boot migration driver: seed the local primary and flip ATOMICALLY
+    in the same boot. Returns the pgdata the boot should proceed with.
+
+    Gates (all must hold):
+      * ``TOFU_SERVER_PROCESS=1`` — only the server's own boot may migrate:
+        the flip stops/starts clusters. A side process (probe, tooling, a bare
+        ``import lib.database``) must never fire this — measured 2026-08-05:
+        two bare imports each burned a full 46 GB dump cycle. The marker is
+        set in-process by server.py at its top; it is NOT a user-facing knob.
+      * split engaged AND legacy populated (a fresh install has nothing to
+        migrate) AND (local unpopulated OR stale vs legacy).
+      * ``TOFU_DB_SEED_LOCAL=0`` defers (the opt-out escape hatch).
+
+    Atomicity: the flip happens in the SAME boot as a verified seed. The old
+    two-restart dance left an unbounded staleness window (writes between the
+    seeding boot and the flipping boot would be absent from local) — fatal
+    under the default-on directive, where the two boots can be days apart.
+
+    Failure semantics: any failure leaves legacy canonical (restarted if it
+    was stopped) and drops a cooldown marker so a deterministic failure costs
+    one attempt per 6 h, not one per boot.
+    """
+    from lib.database.db_paths import (
+        local_data_split_enabled, legacy_pgdata_dir, pgdata_is_populated)
+
+    if getenv_compat('TOFU_SERVER_PROCESS', default='') != '1':
+        return pgdata
+    data_dir = os.path.join(base_dir, 'data')
+    legacy = legacy_pgdata_dir(data_dir)
+    if not local_data_split_enabled(data_dir):
+        return pgdata
+    if not pgdata_is_populated(legacy):
+        return pgdata
+    local_root = getenv_compat('TOFU_DB_LOCAL_ROOT', default='').strip() \
+        or '/tmp/tofu'
+    local = os.path.join(os.path.abspath(local_root), 'pgdata')
+    if getenv_compat('TOFU_DB_SEED_LOCAL', default='1').lower() in ('0', 'false', 'no'):
+        logger.warning('[DB-Migrate] deferred by TOFU_DB_SEED_LOCAL=0 — '
+                       'staying on the resolved pgdata')
+        return pgdata
+    if pgdata_is_populated(local) and not _local_seed_is_stale(local, legacy):
+        return pgdata  # already migrated and fresh — normal post-flip boot
+    if _seed_failure_fresh(local_root):
+        logger.warning('[DB-Migrate] last migration attempt failed recently — '
+                       'cooling down (one attempt per 6h); staying on legacy')
+        return pgdata
+
+    # Stale local: park it aside so the seed sees an empty target (initdb
+    # refuses a non-empty dir, and the stale copy must never serve anyway).
+    if pgdata_is_populated(local):
+        parked = '%s.stale.%s' % (local, time.strftime('%Y%m%d_%H%M%S'))
+        try:
+            os.rename(local, parked)
+            logger.warning('[DB-Migrate] local seed is stale vs legacy — parked '
+                           'aside at %s for a fresh re-seed', parked)
+        except OSError as e:
+            logger.error('[DB-Migrate] could not park stale local %s: %s — '
+                         'staying on the resolved pgdata', local, e)
+            return pgdata
+
+    try:
+        pinned = int((getenv_compat('TOFU_PG_PORT', default='') or '').strip()
+                     or pg_port)
+    except (TypeError, ValueError):
+        pinned = pg_port
+
+    ok = _seed_local_pgdata_from_legacy(
+        local, legacy, base_dir, pinned, pg_user, pg_password, pg_dbname)
+    if not ok:
+        _mark_seed_failure(local_root)
+        return legacy
+    if not _flip_local_into_service(local, legacy, base_dir, pinned,
+                                    pg_user, pg_dbname):
+        _mark_seed_failure(local_root)
+        return legacy
+    try:
+        os.remove(_seed_failure_marker(local_root))
+    except OSError:
+        pass
+    return local

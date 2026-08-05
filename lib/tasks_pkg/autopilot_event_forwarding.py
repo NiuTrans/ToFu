@@ -45,7 +45,7 @@ dropped from the carrier stream entirely.
 
 from __future__ import annotations
 
-from lib.agent_core.events import EventType, build_event
+from lib.agent_core.events import EventType, Phase, build_event, build_phase
 from lib.log import get_logger
 
 logger = get_logger(__name__)
@@ -155,7 +155,7 @@ def _emit_vu_setup_phase(task: dict, vu_msg_id: str | None, detail: str) -> None
         append_event(task, build_event(
             EventType.AUTOPILOT_VU_EVENT,
             vuMsgId=vu_msg_id,
-            inner={'type': 'phase', 'phase': 'working', 'detail': detail},
+            inner=build_phase(Phase.WORKING, detail=detail),
         ))
     except Exception as e:
         logger.debug('[Autopilot] vu setup-phase emit failed (non-fatal): %s', e)

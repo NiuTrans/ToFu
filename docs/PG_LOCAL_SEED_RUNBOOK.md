@@ -3,13 +3,17 @@
 > 触发背景（2026-08-01 error.log 审计）：PG 数据目录 21GB 跑在 DolphinFS FUSE
 > 上（`data/pgdata`），是当日 118 次慢 DELETE（2.5–3.6s）、171 条慢查询、
 > 2 次 `PG appears dead: timeout expired`、`GET /api/v1/timer/list` 500 的
-> 共同温床。本地盘主备分离已 ENGAGED 但种子从未播种——每次启动
-> `logs/error.log` 都会念 `[db_paths] Split engaged but local pgdata=… not
-> yet populated`。本 runbook 是一次性播种的唯一执行路径。
+> 共同温床。
 >
-> 机制源码：`lib/database/_pg_seed.py::_seed_local_pgdata_from_legacy`
-> （opt-in `TOFU_DB_SEED_LOCAL=1`，幂等，verify-before-canonical，失败自动
-> quarantine 本地半成品、legacy 保持权威）。
+> **2026-08-05 起播种改为 DEFAULT-ON（owner 指令「别设计开关，用户只会
+> `python server.py`」）：任何一次普通启动在本地 pgdata 未播种时自动执行，
+> 无需带任何环境变量。** `TOFU_DB_SEED_LOCAL=0` 仅作推迟用的逃生门。
+>
+> 机制源码：`lib/database/_pg_seed.py::_migrate_local_primary_if_due`
+> （幂等，verify-before-canonical，失败自动 quarantine 本地半成品、legacy
+> 保持权威；失败进 6h 冷却标记，过窗自动重试——自愈）。**2026-08-05 起为
+> 单启动原子迁移：播种+校验+翻转同一次启动完成**，只有 server 进程
+> （`TOFU_SERVER_PROCESS` 标记）会触发；探针/工具进程只挂载不迁移。
 
 ## 0. 前置事实（2026-08-01 实测）
 
@@ -20,7 +24,7 @@
 | /tmp 可用空间 | 5.8 TB（需 ~21 GB，充足） | `df -h /tmp` |
 | conversations 行数（验收基线） | 4394 | 实测 `SELECT count(*)` |
 | 种子 dump 暂存 | `data/pg_backup.sql`（FUSE，数 GB） | `_pg_seed.py` `staged` |
-| dump 超时 | 1800s（`TOFU_DB_SEED_DUMP_TIMEOUT` 可调） | `_pg_seed.py:162` |
+| dump 超时 | 1800s（`TOFU_DB_SEED_DUMP_TIMEOUT` 可调） | `_pg_seed.py` |
 
 ## 1. 预检（全部必须通过）
 
@@ -36,28 +40,28 @@ PGGSSENCMODE=disable psql -h 127.0.0.1 -p 15439 -U "$USER" -d tofu -tAc \
 curl -s http://127.0.0.1:15000/api/health
 ```
 
-## 2. 执行（一条命令；必须走 shell 重启）
+## 2. 执行（DEFAULT-ON：一次普通重启全完成）
 
 ```bash
-TOFU_DB_SEED_LOCAL=1 ./restart_15000.sh
+python server.py        # 或 ./restart_15000.sh —— 任何形式的重启都行，无需 env
 ```
 
-- **必须 shell 重启**：UI 重启按钮走 `os.execv`，继承旧进程环境，注不进
-  `TOFU_DB_SEED_LOCAL`（2026-08-01 egress 实测教训）。
-- 变量经调用 shell 环境传入脚本，子进程 python 自然继承（restart_15000.sh:396
-  的 env-prefix 只追加 PORT/BIND_HOST，不屏蔽其余环境）。
-- 启动序列：停止旧服务 → DB bootstrap Step -1 触发种子 → legacy 在运行则直接
-  复用做 `pg_dumpall`（fresh dump，**一致快照、零丢失窗口**；起不来才回退
-  nightly dump 并 WARN）→ initdb+restore 进 `/tmp/tofu/pgdata` → 启动本地
-  集群并校验 `conversations` 行数与源一致 → 通过才声明 local 为权威。
-- 时长预估：dump+restore 21 GB，分钟级（FUSE 读 + 本地写）。期间服务不可用。
+- 启动序列（单启动原子）：DB bootstrap Step -1 触发迁移 → legacy 在运行则直接
+  复用做 `pg_dumpall`（fresh dump，**一致快照、零丢失窗口**）→ initdb+restore
+  进 `/tmp/tofu/pgdata` → 校验 `conversations` 行数与源一致 → **同一启动内**停
+  legacy、把 local 切到钉死端口（15439）启动 → 本次启动即伺服 local。
+- **本次启动会多花 10–20 分钟**（dump+restore ~46GB，FUSE 读 + 本地写），日志
+  持续输出 `[DB-Seed]`/`[DB-Flip]` 进度——这是一次性成本，不是卡死。
+- 失败语义：任一步失败自动 quarantine 半成品 + legacy 保持权威 + 写 6h 冷却
+  标记（`/tmp/tofu/.seed_failed`）；修好根因后删标记或等过窗，下次启动自动
+  重试。
 
-## 3. 验收（三条全过才算成）
+## 3. 验收（三条全过才算成——同一次启动后即可查）
 
 ```bash
-# ① 启动日志出现成功标记（行数必须等于预检基线）
+# ① 播种+翻转双成功日志（行数必须等于预检基线）
 grep -a 'DB-Seed] SUCCESS' logs/app.log | tail -1
-grep -a 'Local-primary split ENGAGED' logs/app.log | tail -1
+grep -a 'DB-Flip] SUCCESS' logs/app.log | tail -1
 # ② 活库的数据目录已切到本地
 PGGSSENCMODE=disable psql -h 127.0.0.1 -p 15439 -U "$USER" -d tofu -tAc \
   'SHOW data_directory'   # 期望 /tmp/tofu/pgdata
@@ -71,13 +75,16 @@ curl -s http://127.0.0.1:15000/api/health
 
 | 情形 | 自动行为 | 操作 |
 |---|---|---|
-| dump 失败 / restore 失败 / 校验行数不符 | 半成品 `/tmp/tofu/pgdata` 被 **quarantine**（改名隔离，永不过 gate），legacy 保持权威，CRITICAL 日志 | 直接 `TOFU_DB_SEED_LOCAL=1 ./restart_15000.sh` 重跑（幂等）；查 error.log `[DB-Seed]` 段定位 |
-| 播种成功后才发现异常 | local 已是权威 | 停服 → `mv /tmp/tofu/pgdata /tmp/tofu/pgdata.bad-$(date +%s)` → 正常重启（gate 检测 local 未播种 + legacy 可恢复 ⇒ 自动回落 legacy） |
+| dump 失败 / restore 失败 / 校验行数不符 | 半成品 `/tmp/tofu/pgdata` 被 **quarantine**（改名隔离，永不过 gate），legacy 保持权威，CRITICAL 日志 | 什么都不用做——下次启动**自动重试**（自愈设计）；先查 error.log `[DB-Seed]` 段排掉根因（如 /tmp 满） |
+| 想推迟某次启动的播种 | — | `TOFU_DB_SEED_LOCAL=0 python server.py`（仅本次推迟） |
+| 播种成功后才发现异常 | local 已是权威 | 停服 → `mv /tmp/tofu/pgdata /tmp/tofu/pgdata.bad-$(date +%s)` → `TOFU_DB_LOCAL_SPLIT=0` 重启（split 关闭时播种不触发，解析直接回 legacy） |
 
 - **legacy `data/pgdata` 不要删**：种子成功日志也明说 PRESERVED。稳定运行
   数日 + owner 签字后才谈退役（届时本地主 + FUSE 备份的双层格局已生效）。
-- 后续重启**不需要**再带 `TOFU_DB_SEED_LOCAL`（幂等：local 已播种即跳过）；
-  带着也无害。
+- 已知边缘（预先声明，非本批范围）：若 local 播种**成功之后** /tmp 被清空
+  （节点重建等），自动播种会从冻结的 legacy 再播一份——数据回到播种时点，
+  会有 CRITICAL/WARN 日志但属「陈旧复活」。这与现行的 legacy 回退行为同级，
+  真要修需要 FUSE 侧的持久标记，另行立案。
 
 ## 5. 播种后的世界
 

@@ -31,7 +31,31 @@ from __future__ import annotations
 import os
 
 import pytest
-import tinycss2
+
+try:
+    import tinycss2
+except ModuleNotFoundError:
+    # tinycss2 is a declared TEST dep (pyproject `[test]` extra), so every CI
+    # lane that ran `pip install -e ".[test]"` has it; a bare contributor
+    # checkout may not. Skip loudly there — and under TOFU_REQUIRE_FRONTEND=1
+    # (the lane that PROMISES these suites run) fail instead of silently
+    # dropping the module from collection (tests/_jsdom.frontend_required).
+    tinycss2 = None
+
+if tinycss2 is None:
+    try:
+        from tests._jsdom import frontend_required
+    except ImportError:
+        import sys
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from _jsdom import frontend_required
+    if frontend_required():
+        pytest.fail(
+            'TOFU_REQUIRE_FRONTEND=1 but tinycss2 is not installed '
+            '(pip install -e ".[test]")', pytrace=False)
+    pytest.skip(
+        'tinycss2 not installed (pip install -e ".[test]")',
+        allow_module_level=True)
 
 pytestmark = pytest.mark.unit
 

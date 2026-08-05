@@ -668,3 +668,105 @@ def test_the_withdrawn_commit_tool_is_refused_with_a_reason(db):
     assert 'project_charter_propose' in out, (
         'the refusal must name the route that still works')
     assert 'human' in out.lower()
+
+
+# ════════════════════════════════════════════════════════════════════
+#  Follow-up Q&A — the human's thread on ONE response (Increment 2 slice)
+# ════════════════════════════════════════════════════════════════════
+
+def test_follow_up_is_anchored_grounded_and_persisted(db, monkeypatch):
+    """The follow-up answers with the anchor response + LIVE pillar state in
+    the prompt, and lands in the SAME append-only trail with the question
+    recorded in the evidence JSON."""
+    _wire_pillars(monkeypatch)
+    spy = _DispatchSpy(answer='First assessment.')
+    _wire_llm(monkeypatch, spy)
+    item_id = pw.add_watch_item('/proj/x', 'goal', 'Ship the lane')['item']['item_id']
+    anchor = pw.address_watch_item(item_id, force=True)
+    assert anchor['seq'] == 1
+
+    spy.answer = 'Follow-up answer.'
+    res = pw.answer_follow_up(item_id, 'What about the blocked epics?')
+    assert res['ok'], res
+    snap = res['response']
+    assert snap['seq'] == 2 and snap['trigger'] == 'follow_up'
+    assert snap['pillar_state']['followUpQuestion'] == 'What about the blocked epics?'
+    assert snap['pillar_state']['anchorSeq'] == 1
+
+    prompt = spy.calls[-1][-1]['content']
+    assert 'First assessment.' in prompt, 'the anchor response must ride the prompt'
+    assert 'What about the blocked epics?' in prompt
+    assert 'Ship the lane' in prompt
+    assert _NORTH_STAR in prompt, 'a follow-up must still read LIVE pillar state'
+
+
+def test_follow_up_explicit_seq_anchors_that_response(db, monkeypatch):
+    """``response_seq`` picks the anchor — not silently the latest."""
+    _wire_pillars(monkeypatch)
+    spy = _DispatchSpy(answer='EARLIEST-ANSWER')
+    _wire_llm(monkeypatch, spy)
+    item_id = pw.add_watch_item('/proj/x', 'concern', 'c')['item']['item_id']
+    pw.address_watch_item(item_id, force=True)
+    spy.answer = 'LATER-ANSWER'
+    pw.address_watch_item(item_id, trigger='epic_completed', force=True)
+
+    spy.answer = 'A3'
+    res = pw.answer_follow_up(item_id, 'dig into the first one', response_seq=1)
+    assert res['ok'] and res['response']['pillar_state']['anchorSeq'] == 1
+    prompt = spy.calls[-1][-1]['content']
+    assert 'EARLIEST-ANSWER' in prompt
+    assert 'LATER-ANSWER' not in prompt
+
+
+def test_follow_up_does_not_mark_the_recurring_cadence_fresh(db, monkeypatch):
+    """A Q&A turn is NOT an assessment: the item fingerprint must be untouched,
+    so the next pillar-state change still re-addresses the item itself."""
+    _wire_pillars(monkeypatch, done=5)
+    spy = _DispatchSpy()
+    _wire_llm(monkeypatch, spy)
+    item_id = pw.add_watch_item('/proj/x', 'concern', 'Drift watch')['item']['item_id']
+    pw.address_watch_item(item_id)
+
+    def _fp():
+        return db.execute(
+            'SELECT response_fingerprint FROM project_watch_items '
+            'WHERE item_id=?', (item_id,)).fetchone()['response_fingerprint']
+
+    before = _fp()
+    pw.answer_follow_up(item_id, 'why?')
+    assert _fp() == before, 'a Q&A turn must not mark the cadence fresh'
+
+    _wire_pillars(monkeypatch, done=6)
+    pw.address_watch_item(item_id, trigger='epic_completed')
+    kinds = [(t['seq'], t['trigger']) for t in
+             pw.list_watch_items('/proj/x')['items'][0]['responses']]
+    assert kinds[0] == (3, 'epic_completed'), kinds
+    assert kinds[1] == (2, 'follow_up') and kinds[2] == (1, 'manual')
+
+
+def test_follow_up_validates_and_never_raises(db, monkeypatch):
+    assert pw.answer_follow_up('', 'q?')['ok'] is False
+    assert pw.answer_follow_up('missing', 'q?')['error'] == 'not found'
+    item_id = pw.add_watch_item('/proj/x', 'question', 'Q?')['item']['item_id']
+    assert pw.answer_follow_up(item_id, '   ')['error'] == 'empty question'
+    _wire_pillars(monkeypatch)
+
+    def _boom(*a, **k):
+        raise RuntimeError('llm down')
+
+    import lib.llm_dispatch as ld
+    monkeypatch.setattr(ld, 'dispatch_chat', _boom)
+    assert pw.answer_follow_up(item_id, 'q?')['ok'] is False
+    assert pw.list_watch_items('/proj/x')['items'][0]['responses'] == [], (
+        'a failed synthesis must not write the trail')
+
+
+def test_follow_up_with_no_prior_response_still_answers(db, monkeypatch):
+    """No anchor yet → the prompt says so honestly, anchorSeq=0."""
+    _wire_pillars(monkeypatch)
+    spy = _DispatchSpy()
+    _wire_llm(monkeypatch, spy)
+    item_id = pw.add_watch_item('/proj/x', 'concern', 'c')['item']['item_id']
+    res = pw.answer_follow_up(item_id, 'first contact?')
+    assert res['ok'] and res['response']['pillar_state']['anchorSeq'] == 0
+    assert '(none yet)' in spy.calls[-1][-1]['content']

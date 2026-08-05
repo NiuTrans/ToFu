@@ -183,6 +183,13 @@ def test_burn_in_font_failure_detected(tmp_path, monkeypatch):
                 'err': ('[Parsed_subtitles_0] fontselect: failed to find any '
                         'fallback with glyph 0x6D4B for font: (Arial, 400, 0)')}
 
+    # Pure unit test: _run_ffmpeg is faked, so any non-empty ffmpeg path
+    # satisfies the env gate (a box without ffmpeg — e.g. public CI — must
+    # still exercise the font-failure classifier, not die at env_missing).
+    monkeypatch.setattr('lib.motion_video._env.ffmpeg_bin',
+                        lambda: '/fake/ffmpeg')
+    monkeypatch.setattr('lib.motion_video._gates.probe_video',
+                        lambda p, **kw: None)
     monkeypatch.setattr(MC, '_run_ffmpeg', fake_run)
     res = mv.burn_in_subtitles(str(video), str(srt), str(tmp_path / 'o.mp4'))
     assert res['ok'] is False
@@ -208,6 +215,10 @@ def test_burn_in_font_detection_NEUTER(tmp_path, monkeypatch):
         return {'rc': 0, 'category': '', 'elapsed': 0.1,
                 'err': 'fontselect: failed to find any fallback with glyph 0x0'}
 
+    # See the companion test: the fake _run_ffmpeg makes any non-empty
+    # ffmpeg path sufficient — no real binary required on CI boxes.
+    monkeypatch.setattr('lib.motion_video._env.ffmpeg_bin',
+                        lambda: '/fake/ffmpeg')
     monkeypatch.setattr(MC, '_run_ffmpeg', fake_run)
     monkeypatch.setattr(MC, '_font_burn_failed', lambda err: False)
     monkeypatch.setattr('lib.motion_video._gates.probe_video',
@@ -230,18 +241,34 @@ def test_build_render_env_fontconfig_fallback(monkeypatch):
     monkeypatch.setattr(EN, '_conda_gui_lib_dir', lambda: '')
     monkeypatch.delenv('FONTCONFIG_FILE', raising=False)
 
-    # case 1: only the conda config exists → injected
+    # chromium_env.fontconfig_paths() gates on ``os.path.isdir('/etc/fonts')``,
+    # NOT on isfile of the .conf — so BOTH path probes must be scripted or the
+    # case split depends on the host (rootless dev box: no /etc/fonts; ubuntu
+    # CI: /etc/fonts present). Drive isdir explicitly so each case means the
+    # same thing on every box.
+    real_isdir = os.path.isdir
+
+    def _isdir_without_system_fonts(p):
+        return False if p == '/etc/fonts' else real_isdir(p)
+
+    def _isdir_with_system_fonts(p):
+        return True if p == '/etc/fonts' else real_isdir(p)
+
+    # case 1: no system fontconfig dir, only the conda config exists → injected
+    monkeypatch.setattr(os.path, 'isdir', _isdir_without_system_fonts)
     monkeypatch.setattr(os.path, 'isfile', lambda p: p == conda_conf)
     env = EN.build_render_env(base={})
     assert env.get('FONTCONFIG_FILE') == conda_conf
 
-    # case 2: system config exists → no injection
+    # case 2: system config present → no injection
+    monkeypatch.setattr(os.path, 'isdir', _isdir_with_system_fonts)
     monkeypatch.setattr(os.path, 'isfile',
                         lambda p: p == '/etc/fonts/fonts.conf')
     env = EN.build_render_env(base={})
     assert 'FONTCONFIG_FILE' not in env
 
     # case 3: operator override wins even when the fallback would apply
+    monkeypatch.setattr(os.path, 'isdir', _isdir_without_system_fonts)
     monkeypatch.setattr(os.path, 'isfile', lambda p: p == conda_conf)
     env = EN.build_render_env(base={'FONTCONFIG_FILE': '/custom/fonts.conf'})
     assert env['FONTCONFIG_FILE'] == '/custom/fonts.conf'

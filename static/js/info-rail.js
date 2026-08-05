@@ -201,24 +201,26 @@
 
   /** Max tool chips rendered up-front; the rest collapse behind a "+N"
    * CLICK toggle. This cap — together with `_MAX_VISIBLE_PATHS` — decides
-   * what a card shows up-front so a TYPICAL card renders complete (the old
-   * 132px `overflow:hidden` guillotine clipped ordinary cards mid-WORKSPACE
-   * with no way to reach the facts). Genuinely fat cards are then bounded
-   * by the scrollable pixel backstop in styles.css. WHY a bound at all:
-   * the rail is permanent furniture in a grid track, so its height adds to
-   * the turn's height — and `_collectTools()` emits one chip per connected
-   * MCP server, which can be dozens. 9 keeps a typical setup (a few feature
-   * toggles + a few MCP servers) fully visible while the geometry guard's
-   * 10-tool probe stays gated. Expansion is a click (not hover) because a
-   * hover overlay would have to escape `.message`'s content-visibility
-   * paint containment — exactly the carve-out this redesign deleted. */
+   * what a card shows up-front so a TYPICAL card renders complete without
+   * scrolling (the old 132px `overflow:hidden` guillotine clipped ordinary
+   * cards mid-WORKSPACE with no way to reach the facts). WHY a bound at
+   * all: `_collectTools()` emits one chip per connected MCP server, which
+   * can be dozens. The rail's box is bounded by the message's own height
+   * (styles.css `.turn-ctx` is out of flow, `max-height:100%`) and
+   * SCROLLS, so the cap is about glanceability, not geometry — 9 keeps a
+   * typical setup (a few feature toggles + a few MCP servers) fully
+   * visible while the geometry guard's 10-tool probe stays gated.
+   * Expansion is a click (not hover) because a hover overlay would have
+   * to escape `.message`'s content-visibility paint containment — exactly
+   * the carve-out this redesign deleted. */
   const _MAX_VISIBLE_CHIPS = 9;
 
   /** Max workspace paths rendered up-front; extra roots collapse behind
    * the same "+N" toggle as chips (the delegated click handler only asks
    * for a `.tctx-overflow` sibling, so the mechanism is shared verbatim).
    * Roots were previously unbounded — the same defect family as chips:
-   * rail height driven by how many roots the workspace happens to have. */
+   * the rail's scroll length driven by how many roots the workspace
+   * happens to have. */
   const _MAX_VISIBLE_PATHS = 3;
 
   /**
@@ -226,11 +228,13 @@
    *
    * Two surfaces, both in normal flow — there is NO hover overlay. They have
    * DIFFERENT DOM homes, which is why this returns them separately:
-   *   • `rail` (`.turn-ctx`) — lives in the third grid track that
-   *     `.chat-inner` owns, a DIRECT CHILD of `.message`, so it can never
-   *     overflow the viewport. Shows model + depth + mode badges + tool
-   *     chips + workspace paths permanently. Visible only when the container
-   *     query grants the track.
+   *   • `rail` (`.turn-ctx`) — a DIRECT CHILD of `.message`, absolutely
+   *     positioned into the third track the pane owns (`.chat-inner`), so
+   *     it can never overflow the viewport AND — being out of flow —
+   *     never inflates the turn's height; its box is bounded by the
+   *     message box and scrolls. Shows model + depth + mode badges + tool
+   *     chips + workspace paths permanently. Visible only when the
+   *     container query grants the track.
    *   • `fold` (`.tctx-fold`) — the same facts compressed to ONE line,
    *     spliced INSIDE `.message-content` between the header and the body
    *     (in-flow — its `margin-bottom` is meaningless anywhere else). Shown

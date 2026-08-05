@@ -389,6 +389,165 @@ function colorJson(obj, depth) {
   }
   return String(obj);
 }
+/* ── Structured message-body renderer (2026-08-05 panel redesign) ─────────
+ * colorJson dumps the message ENVELOPE as one JSON blob — but the values a
+ * human opens the panel to read (tool-call arguments, reasoning, content)
+ * are JSON strings with escaped \n inside that blob, i.e. unreadable at any
+ * size. The structured view renders those fields as real text: arguments
+ * parsed into per-key blocks with real newlines, reasoning/content as
+ * readable prose, and the raw envelope stays one click away in the
+ * 原始 JSON <details> (which is also what the copy-path needs). */
+function _debugTryParseJson(s) {
+  if (typeof s !== "string") return null;
+  const tr = s.trim();
+  if (!tr || (tr[0] !== "{" && tr[0] !== "[")) return null;
+  try {
+    const v = JSON.parse(tr);
+    return v && typeof v === "object" ? v : null;
+  } catch (_) { return null; }
+}
+/* One argument/field value: nested JSON strings parsed, long/multi-line
+ * strings as readable text blocks, scalars inline. */
+function _debugArgValHtml(v) {
+  if (typeof v === "string") {
+    const nested = _debugTryParseJson(v);
+    if (nested) return '<pre class="debug-json">' + colorJson(nested, 0) + "</pre>";
+    if (v.length > 80 || v.indexOf("\n") !== -1)
+      return '<pre class="debug-text debug-arg-val">' + escapeHtml(v) + "</pre>";
+    return '<span class="debug-str">"' + escapeHtml(v) + '"</span>';
+  }
+  if (typeof v === "number" || typeof v === "boolean")
+    return '<span class="debug-num">' + String(v) + "</span>";
+  if (v === null || v === undefined)
+    return '<span class="debug-null">null</span>';
+  return '<pre class="debug-json">' + colorJson(v, 0) + "</pre>";
+}
+function _debugToolCallHtml(tc) {
+  const fn = (tc && tc.function) || {};
+  const name = fn.name || (tc && tc.name) || "?";
+  const id = (tc && tc.id) || "";
+  const raw = fn.arguments !== undefined ? fn.arguments
+    : (tc ? tc.arguments : undefined);
+  /* arguments is a JSON STRING on the wire — parse it so a write_file
+   * content arg reads as a text block instead of one escaped line. */
+  const parsed = typeof raw === "string" ? _debugTryParseJson(raw)
+    : (raw && typeof raw === "object" ? raw : null);
+  let argsHtml;
+  if (parsed) {
+    const keys = Object.keys(parsed);
+    argsHtml = keys.length ? keys.map((k) => {
+      const v = parsed[k];
+      const blocky = (typeof v === "string" &&
+          (v.length > 80 || v.indexOf("\n") !== -1)) ||
+        (v && typeof v === "object");
+      return blocky
+        ? '<div class="debug-arg"><div class="debug-arg-key">' + escapeHtml(k) +
+          "</div>" + _debugArgValHtml(v) + "</div>"
+        : '<div class="debug-kv"><span class="debug-arg-key">' + escapeHtml(k) +
+          "</span>: " + _debugArgValHtml(v) + "</div>";
+    }).join("") : '<span class="debug-null">{}</span>';
+  } else if (typeof raw === "string" && raw) {
+    /* Unparseable (e.g. a truncated stream) — show the raw string as text
+     * rather than as one quoted JSON line. */
+    argsHtml = '<pre class="debug-text debug-arg-val">' + escapeHtml(raw) + "</pre>";
+  } else {
+    argsHtml = '<span class="debug-null">—</span>';
+  }
+  return '<div class="debug-tc-card">' +
+    '<div class="debug-tc-head"><span class="debug-tc-name">' + escapeHtml(name) +
+    "</span>" +
+    (id ? '<span class="debug-tc-id">' + escapeHtml(id) + "</span>" : "") +
+    '</div><div class="debug-tc-args">' + argsHtml + "</div></div>";
+}
+function _debugSecHtml(label, inner, open) {
+  return '<details class="debug-sec"' + (open ? " open" : "") + "><summary>" +
+    escapeHtml(label) + '</summary><div class="debug-sec-body">' + inner +
+    "</div></details>";
+}
+function _renderMsgBodyHtml(msg) {
+  if (!msg || typeof msg !== "object") return "";
+  const parts = [];
+  const reasoning = typeof msg.reasoning_content === "string"
+    ? msg.reasoning_content
+    : (typeof msg.reasoning === "string" ? msg.reasoning : "");
+  if (reasoning) {
+    parts.push(_debugSecHtml(
+      t("debug.structReasoning") + " · " + _fmtKB(reasoning.length),
+      '<pre class="debug-text' + (reasoning.length > 2000 ? " debug-long" : "") +
+        '">' + escapeHtml(reasoning) + "</pre>",
+      reasoning.length <= 500));
+  }
+  if (typeof msg.content === "string" && msg.content) {
+    /* Tool results are often JSON text — render them parsed, not quoted. */
+    const asJson = msg.role === "tool" ? _debugTryParseJson(msg.content) : null;
+    const inner = asJson
+      ? '<pre class="debug-json">' + colorJson(asJson, 0) + "</pre>"
+      : '<pre class="debug-text' +
+        (msg.content.length > 2000 ? " debug-long" : "") + '">' +
+        escapeHtml(msg.content) + "</pre>";
+    parts.push(_debugSecHtml(
+      (msg.role === "tool" ? t("debug.structToolResult")
+        : t("debug.structContent")) + " · " + _fmtKB(msg.content.length),
+      inner, msg.content.length <= 1200));
+  } else if (Array.isArray(msg.content)) {
+    const inner = msg.content.map((b) => {
+      if (b && typeof b === "object") {
+        if (b.type === "text")
+          return '<pre class="debug-text' +
+            ((b.text || "").length > 2000 ? " debug-long" : "") + '">' +
+            escapeHtml(b.text || "") + "</pre>";
+        if (b.type === "thinking" && typeof b.thinking === "string")
+          return '<pre class="debug-text">' + escapeHtml(b.thinking) + "</pre>";
+        if (b.type === "image_url") {
+          const url = (b.image_url && b.image_url.url) || "";
+          return '<div class="debug-img-chip" title="' +
+            escapeHtml(url.slice(0, 120)) + '">' +
+            escapeHtml(t("debug.structImage")) + " · " + _fmtKB(url.length) +
+            "</div>";
+        }
+      }
+      return '<pre class="debug-json">' + colorJson(b, 0) + "</pre>";
+    }).join("");
+    parts.push(_debugSecHtml(t("debug.structContent"), inner, true));
+  }
+  if (Array.isArray(msg.tool_calls) && msg.tool_calls.length) {
+    parts.push(_debugSecHtml(
+      t("debug.structToolCalls") + " · " + msg.tool_calls.length,
+      msg.tool_calls.map((tc) => _debugToolCallHtml(tc)).join(""), true));
+  }
+  /* Everything not rendered above (name / tool_call_id / internal markers). */
+  const skip = { role: 1, content: 1, tool_calls: 1, reasoning_content: 1,
+    reasoning: 1 };
+  const extra = {};
+  for (const k of Object.keys(msg)) if (!skip[k]) extra[k] = msg[k];
+  if (Object.keys(extra).length) {
+    parts.push(_debugSecHtml(t("debug.structFields"),
+      '<pre class="debug-json">' + colorJson(extra, 0) + "</pre>", false));
+  }
+  return parts.join("");
+}
+/* Render one message body: the structured view + the raw JSON <details>.
+ * The raw <pre> is filled EAGERLY (not on details-open) — the copy path and
+ * the open-state restore both expect `.debug-msg-body pre` populated once
+ * body.dataset.rendered is set. */
+function _debugRenderBody(body, msg) {
+  if (!body) return;
+  body.dataset.rendered = "1";
+  const struct = body.querySelector(".debug-struct");
+  if (struct) struct.innerHTML = _renderMsgBodyHtml(msg);
+  const pre = body.querySelector(".debug-raw pre");
+  if (pre) pre.innerHTML = colorJson(msg, 0);
+}
+/* Open one block (header arrow + lazy body render) — shared by the
+ * open-state restore and the inline panel's auto-expand. */
+function _debugOpenBlock(block) {
+  if (!block || block.classList.contains("open")) return;
+  block.classList.add("open");
+  const arrow = block.querySelector(".debug-msg-header span:last-child");
+  if (arrow) arrow.style.transform = "rotate(90deg)";
+  const body = block.querySelector(".debug-msg-body");
+  if (body && !body.dataset.rendered) _debugRenderBody(body, block._msgRef);
+}
 // Build summary text for a message
 function msgSummary(msg, i) {
   const parts = ["#" + (i + 1)];
@@ -466,9 +625,7 @@ function createBlock(msg, i) {
     // (updated by the incremental path), never a stale closure capture.
     const body = block.querySelector(".debug-msg-body");
     if (isOpen && body && !body.dataset.rendered) {
-      body.dataset.rendered = "1";
-      const pre = body.querySelector("pre");
-      if (pre) pre.innerHTML = colorJson(block._msgRef, 0);
+      _debugRenderBody(body, block._msgRef);
     }
   };
   block.appendChild(header);
@@ -483,11 +640,19 @@ function createBlock(msg, i) {
         .join(", "));
     block.appendChild(tcDiv);
   }
-  // Body (collapsed, lazy-rendered)
+  // Body (collapsed, lazy-rendered): structured view + raw JSON details.
   const body = document.createElement("div");
   body.className = "debug-msg-body";
-  const pre = document.createElement("pre");
-  body.appendChild(pre);
+  const struct = document.createElement("div");
+  struct.className = "debug-struct";
+  body.appendChild(struct);
+  const raw = document.createElement("details");
+  raw.className = "debug-raw";
+  const rawSummary = document.createElement("summary");
+  rawSummary.textContent = t("debug.structRawJson");
+  raw.appendChild(rawSummary);
+  raw.appendChild(document.createElement("pre"));
+  body.appendChild(raw);
   block.appendChild(body);
   return block;
 }
@@ -811,9 +976,7 @@ function showMessagesInDebug(messages, label, isUpdate, forConvId, tools, approx
           body.dataset.rendered = "";
           // Re-render if currently open
           if (existing[i].classList.contains("open")) {
-            body.dataset.rendered = "1";
-            const pre = body.querySelector("pre");
-            if (pre) pre.innerHTML = colorJson(messages[i], 0);
+            _debugRenderBody(body, messages[i]);
           }
         }
         // Update stored msg ref for lazy render
@@ -865,16 +1028,7 @@ function showMessagesInDebug(messages, label, isUpdate, forConvId, tools, approx
     if (_openMids.size) {
       p.querySelectorAll(".debug-msg-block").forEach((b) => {
         if (!b.dataset.mid || !_openMids.has(b.dataset.mid)) return;
-        if (b.classList.contains("open")) return;
-        b.classList.add("open");
-        const arrow = b.querySelector(".debug-msg-header span:last-child");
-        if (arrow) arrow.style.transform = "rotate(90deg)";
-        const body = b.querySelector(".debug-msg-body");
-        if (body && !body.dataset.rendered) {
-          body.dataset.rendered = "1";
-          const pre = body.querySelector("pre");
-          if (pre) pre.innerHTML = colorJson(b._msgRef, 0);
-        }
+        _debugOpenBlock(b);
       });
     }
     // Only snap to top on a genuine first render — preserve the user's scroll

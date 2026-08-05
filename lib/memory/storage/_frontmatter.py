@@ -94,6 +94,40 @@ def _parse_frontmatter(text):
             i = j
             continue
 
+        # ── Case A2: nested YAML block (``key:`` + indented lines) ─────
+        # Real OpenClaw packages write metadata as nested YAML:
+        #     metadata:
+        #       openclaw:
+        #         requires:
+        #           env: [FLYAI_API_KEY]
+        # The hand-rolled cases below can't represent that, so the block
+        # used to collapse to '' and the requires gates went blind
+        # (documented in memory skills-chat-mode-project-scope-invisibility).
+        # Route it through PyYAML (a hard dependency) — only for this
+        # "empty value + indented continuation" shape, so every existing
+        # parse result stays byte-identical.
+        if not val:
+            buf = []
+            j = i + 1
+            while j < len(raw_lines):
+                nxt = raw_lines[j]
+                if nxt.strip() and not nxt.startswith((' ', '\t')):
+                    break
+                if nxt.strip():
+                    buf.append(nxt)
+                j += 1
+            if buf:
+                try:
+                    import yaml
+                    parsed = yaml.safe_load('\n'.join(buf))
+                    meta[key] = parsed
+                except Exception as e:
+                    logger.debug('Frontmatter nested-YAML parse failed for '
+                                 'key=%s: %s', key, e)
+                    meta[key] = ''
+                i = j
+                continue
+
         # ── Case B: JSON object (single- or multi-line) ────────────────
         if val.startswith('{'):
             buf = [val]

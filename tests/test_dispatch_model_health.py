@@ -53,8 +53,6 @@ from lib.llm_dispatch.slot import Slot
 
 pytestmark = pytest.mark.unit
 
-NOW = time.time()
-
 
 def _slot_dict(**kw):
     base = {
@@ -101,10 +99,17 @@ def test_providers_and_models_keyed_separately():
 
 
 def test_cooldown_max_remaining_and_reason():
+    # Fresh clock, NOT the module-level NOW: that one is captured at IMPORT
+    # (collection) time, and under `pytest -n auto --dist worksteal` the gap
+    # to execution routinely exceeds the 44s window — the cooldown expires
+    # before the assert runs (CI flake 'assert 0.0 > 40', also seen locally
+    # under parallel load). A per-test `now` makes the window deterministic;
+    # the >40 assertion itself is unchanged.
+    now = time.time()
     out = aggregate_model_health([
-        _slot_dict(cooldown_until=NOW + 12, cooldown_reason='rate_limit'),
-        _slot_dict(cooldown_until=NOW + 44, cooldown_reason='error',
-                   consecutive_errors=3, last_error_time=NOW - 1,
+        _slot_dict(cooldown_until=now + 12, cooldown_reason='rate_limit'),
+        _slot_dict(cooldown_until=now + 44, cooldown_reason='error',
+                   consecutive_errors=3, last_error_time=now - 1,
                    last_error_msg='boom'),
     ])
     e = out['providers']['prov1']['wire-a']
@@ -118,7 +123,7 @@ def test_cooldown_max_remaining_and_reason():
 
 def test_expired_cooldown_not_counted():
     out = aggregate_model_health([
-        _slot_dict(cooldown_until=NOW - 5, cooldown_reason='error'),
+        _slot_dict(cooldown_until=time.time() - 5, cooldown_reason='error'),
     ])
     e = out['providers']['prov1']['wire-a']
     assert e['cooldown_remaining_s'] == 0

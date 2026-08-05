@@ -192,13 +192,25 @@ def _stub_prestart_helpers(b, monkeypatch):
     """
     monkeypatch.delenv('TOFU_PG_HOST', raising=False)
     monkeypatch.delenv('TOFU_PG_PORT', raising=False)
-    monkeypatch.setattr(b, '_pg_binaries_present', lambda: True)
-    monkeypatch.setattr(b, '_try_explicit_pg_target', lambda *a, **k: (False, None))
-    monkeypatch.setattr(b, '_read_our_pg_port', lambda pgdata: None)
-    monkeypatch.setattr(b, '_scan_for_our_pg', lambda *a, **k: None)
-    monkeypatch.setattr(b, '_pg_already_running_on_another_machine',
-                        lambda *a, **k: (False, None))
-    monkeypatch.setattr(b, '_pgdata_major_compatible', lambda pgdata: True)
+
+    # _ensure_pg_running lives in lib.database._bootstrap._orchestrate, which
+    # binds every helper with a top-level ``from ... import ...``. Patching the
+    # facade package alone therefore does NOT reach the call sites — it only
+    # worked on hosts where the REAL helpers happened to behave like the stubs
+    # (a dev box with PG binaries passes the Step-0 `_pg_binaries_present`
+    # gate; a CI box without any bails to SQLite before the initdb gate).
+    # Patch BOTH namespaces so the test is hermetic on every host.
+    from lib.database._bootstrap import _orchestrate as orch
+    for target in (b, orch):
+        monkeypatch.setattr(target, '_pg_binaries_present', lambda: True)
+        monkeypatch.setattr(target, '_try_explicit_pg_target',
+                            lambda *a, **k: (False, None))
+        monkeypatch.setattr(target, '_read_our_pg_port', lambda pgdata: None)
+        monkeypatch.setattr(target, '_scan_for_our_pg', lambda *a, **k: None)
+        monkeypatch.setattr(target, '_pg_already_running_on_another_machine',
+                            lambda *a, **k: (False, None))
+        monkeypatch.setattr(target, '_pgdata_major_compatible',
+                            lambda pgdata: True)
 
     # The real _verify_flock_support_or_warn → _probe_flock_enforced does
     # os.makedirs(pgdata); reproduce that side effect (create the dir) and
@@ -207,6 +219,7 @@ def _stub_prestart_helpers(b, monkeypatch):
         os.makedirs(pgdata, exist_ok=True)
         return True
     monkeypatch.setattr(b, '_verify_flock_support_or_warn', _flock_creates_dir)
+    monkeypatch.setattr(orch, '_verify_flock_support_or_warn', _flock_creates_dir)
 
 
 def test_empty_pgdata_dir_still_triggers_bootstrap(tmp_path, monkeypatch):

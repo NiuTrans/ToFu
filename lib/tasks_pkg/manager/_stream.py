@@ -8,7 +8,7 @@ user-facing label.
 
 import time
 
-from lib.agent_core.events import EventType, build_event
+from lib.agent_core.events import EventType, Phase, build_event, build_phase
 from lib.cost import normalize_usage
 from lib.llm_dispatch import dispatch_stream
 from lib.llm_dispatch.retry_i18n import (
@@ -221,9 +221,8 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None,
         _fields = retry_phase_fields(model=model, attempt=attempt,
                                      reason=reason, status_code=status_code,
                                      legacy_detail=_legacy)
-        append_event(task, build_event(
-            EventType.PHASE,
-            phase='retrying',
+        append_event(task, build_phase(
+            Phase.RETRYING,
             detail=_fields['detail'],
             detailKey=_fields['detailKey'],
             detailArgs=_fields['detailArgs'],
@@ -319,9 +318,8 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None,
             _args['reason'] = _reason
         if _reason_key:
             _args['reasonKey'] = _reason_key
-        append_event(task, build_event(
-            EventType.PHASE,
-            phase='retrying',
+        append_event(task, build_phase(
+            Phase.RETRYING,
             detail=_detail,
             detailKey=_detail_key,
             detailArgs=_args,
@@ -352,8 +350,8 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None,
     #   Cleared automatically by the first content/thinking delta, or by
     #   tool_start (hasActiveSearch) on the frontend.
     _model_label = _display_model_name(model)
-    append_event(task, build_event(
-        EventType.PHASE, phase='waiting_model',
+    append_event(task, build_phase(
+        Phase.WAITING_MODEL,
         detail=f'Sent to {_model_label}, waiting for it to start replying…',
         detailKey='stream.phase.waitingForModel',
         detailArgs={'model': _model_label},
@@ -599,9 +597,8 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None,
     if _limit_info:
         # Notify via phase event (transient UI status, does NOT pollute
         # assistantMsg.content).  The limit is persisted automatically.
-        append_event(task, build_event(
-            EventType.PHASE,
-            phase='retrying',
+        append_event(task, build_phase(
+            Phase.RETRYING,
             detail=(f'⚙️ Auto-detected model limit: {_limit_info["model"]} '
                     f'max_tokens={_limit_info["new_limit"]:,} '
                     f'(was {_limit_info["old_limit"]:,})'),
@@ -681,9 +678,8 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None,
                 preset_limit=_prior_limit,
             )
             if _expand_info:
-                append_event(task, build_event(
-                    EventType.PHASE,
-                    phase='retrying',
+                append_event(task, build_phase(
+                    Phase.RETRYING,
                     detail=(
                         f'⚙️ Auto-detected larger context window for '
                         f'{model}: '

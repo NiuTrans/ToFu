@@ -72,7 +72,20 @@ def _patch_sequence(monkeypatch, replies):
         return replies[i], {'finish_reason': 'stop',
                             '_dispatch': {'model': f'm{i}', 'key': 'k1'}}
 
+    # The engine resolves smart_chat via ``from lib.llm_dispatch import
+    # smart_chat`` INSIDE _translate_one_chunk, so patching the facade package
+    # attr is sufficient — here. Bind the fake into EVERY namespace it could
+    # resolve from (facade, api submodule, the engine module itself in case
+    # the import was hoisted to module scope by the export transform chain),
+    # or a tree where the lazy-import assumption fails silently makes REAL
+    # provider calls (measured 2026-08-05 on public CI: the chunk burned 32s
+    # of 401 retries against the conftest placeholder key instead of using
+    # this fake).
     monkeypatch.setattr('lib.llm_dispatch.smart_chat', _fake_smart_chat)
+    monkeypatch.setattr('lib.llm_dispatch.api.smart_chat', _fake_smart_chat,
+                        raising=False)
+    monkeypatch.setattr('lib.translate.engine._engine.smart_chat',
+                        _fake_smart_chat, raising=False)
     return state
 
 

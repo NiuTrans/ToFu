@@ -32,7 +32,7 @@ from lib.tasks_pkg.cache_tracking import (
     get_session_cache_stats,
     release_ttl_latch,
 )
-from lib.agent_core.events import EventType, build_event
+from lib.agent_core.events import EventType, Phase, build_event, build_phase
 from lib.tasks_pkg.executor import (
     _finalize_tool_round,
     _generate_tool_summary,
@@ -286,8 +286,8 @@ def _emit_tool_round_phase(task, assistant_msg, round_num):
     clients that don't localize keep rendering ``detail`` unchanged.
     """
     if round_num == 0:
-        append_event(task, build_event(
-            EventType.PHASE, phase='llm_thinking',
+        append_event(task, build_phase(
+            Phase.LLM_THINKING,
             detail='Generating response…',
             detailKey='stream.phase.generatingResponse',
             roundNum=1))
@@ -296,8 +296,8 @@ def _emit_tool_round_phase(task, assistant_msg, round_num):
         unique_names = list(dict.fromkeys(tool_names))
         labeled = [tool_label(n) for n in unique_names]
         summary = ', '.join(labeled)
-        append_event(task, build_event(
-            EventType.PHASE, phase='llm_thinking',
+        append_event(task, build_phase(
+            Phase.LLM_THINKING,
             detail=f'Analyzing results and planning next step… (round {round_num+1})',
             detailKey='stream.phase.analyzingRound',
             detailArgs={'round': round_num + 1},
@@ -461,8 +461,8 @@ def _maybe_auto_retry_turn(task: dict[str, Any], cfg: dict[str, Any]) -> bool:
         append_event(task, build_event(
             EventType.RETRY_RESET, attempt=_next, max=_cap, kind=_kind))
         # (2) transient status bar (same contract as inner stream retries)
-        append_event(task, build_event(
-            EventType.PHASE, phase='retrying', detail=_detail,
+        append_event(task, build_phase(
+            Phase.RETRYING, detail=_detail,
             attempt=_next, max=_cap, bucket='turn'))
     except Exception as _ev_err:
         logger.debug('[%s] auto-retry event emit failed (non-fatal): %s',

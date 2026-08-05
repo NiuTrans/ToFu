@@ -28,6 +28,7 @@ double-neuter proving the assertion is load-bearing.
 """
 from __future__ import annotations
 
+import importlib
 import os
 import sys
 from unittest.mock import patch
@@ -35,6 +36,21 @@ from unittest.mock import patch
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+def _tofu_search_mod():
+    """The ``tofu_search.search`` MODULE — never the package-level function.
+
+    ``tofu_search/__init__.py`` defines a public *function* named ``search``
+    that shadows the ``search`` subpackage attribute once the package init
+    has run. ``patch('tofu_search.search.format_...')`` resolves its target
+    by ``getattr`` and, on Python < 3.12, lands on that FUNCTION (mock only
+    gained submodule-aware fallback later) → ``AttributeError: <function
+    search ...> does not have the attribute ...`` on the 3.10 CI leg.
+    ``importlib.import_module`` goes through ``sys.modules`` and is immune
+    to attribute shadowing on every version.
+    """
+    return importlib.import_module('tofu_search.search')
 
 
 def _make_task(tid='stream-search-test'):
@@ -70,8 +86,8 @@ class TestStreamingWebSearchDelegation:
         fake_ret = (_results('https://a.com'), None, breakdown, None)
         with patch('lib.tasks_pkg.handlers.search._web_search_one',
                    return_value=fake_ret) as m, \
-             patch('tofu_search.search.format_search_for_tool_response',
-                   return_value='FORMATTED-LLM-TEXT') as fmt:
+             patch.object(_tofu_search_mod(), 'format_search_for_tool_response',
+                          return_value='FORMATTED-LLM-TEXT') as fmt:
             out = acc._execute_one('web_search', {'query': 'tofu', 'vertical': 'auto'})
 
         # Delegation happened with the serial arg contract:
@@ -98,8 +114,8 @@ class TestStreamingWebSearchDelegation:
         diag = {'reason': 'no_matches', 'engine_ok': ['bing']}
         fake_ret = ([], diag, None, None)
         with patch('lib.tasks_pkg.handlers.search._web_search_one', return_value=fake_ret), \
-             patch('tofu_search.search.format_search_for_tool_response',
-                   return_value='no results text'):
+             patch.object(_tofu_search_mod(), 'format_search_for_tool_response',
+                          return_value='no results text'):
             out = acc._execute_one('web_search', {'query': 'zzz'})
         assert out.display_results == []
         assert out.search_diag == diag
@@ -113,8 +129,8 @@ class TestStreamingWebSearchDelegation:
                    'content': '# Paper header'}
         fake_ret = (_results('https://a.com'), None, None, vresult)
         with patch('lib.tasks_pkg.handlers.search._web_search_one', return_value=fake_ret), \
-             patch('tofu_search.search.format_search_for_tool_response',
-                   return_value='body'):
+             patch.object(_tofu_search_mod(), 'format_search_for_tool_response',
+                          return_value='body'):
             out = acc._execute_one('web_search', {'query': 'mamba', 'vertical': 'academic'})
         # Single-query vertical → singular dict carrier (NOT {'batch': …}).
         assert isinstance(out.vertical, dict)
@@ -138,8 +154,8 @@ class TestStreamingWebSearchDelegation:
             return (_results('https://a.com'), None, None, None)
 
         with patch('lib.tasks_pkg.handlers.search._web_search_one', side_effect=fake) as m, \
-             patch('tofu_search.search.format_search_for_tool_response',
-                   return_value='FMT'):
+             patch.object(_tofu_search_mod(), 'format_search_for_tool_response',
+                          return_value='FMT'):
             out = acc._execute_one('web_search', {'queries': ['q1', 'q2']})
 
         assert m.call_count == 2

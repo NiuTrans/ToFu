@@ -505,7 +505,16 @@ def main() -> int:
             print(f'MISSING: {OUTPUT_PATH} — run scripts/gen_tool_inventory.py',
                   file=sys.stderr)
             return 1
-        if current != rendered:
+        # Compare only the CHECKED portion. The trailing plugin section is
+        # documented as diagnostic-only ("--check ignores it"), but the naive
+        # whole-file compare DID include it — so a host with a third-party
+        # plugin (liantong_resume on the dev box) and a host without (public
+        # CI) rendered different files and the gate red-filed CI on
+        # 2026-08-05 despite a perfectly in-sync built-in table.
+        _DIAG = '\n## Plugin tools'
+        current_checked = current.split(_DIAG)[0]
+        rendered_checked = rendered.split(_DIAG)[0]
+        if current_checked != rendered_checked:
             print(f'STALE: {OUTPUT_PATH} does not match the live registry. '
                   f'Run: python3 scripts/gen_tool_inventory.py', file=sys.stderr)
             return 1

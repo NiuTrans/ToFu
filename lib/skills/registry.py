@@ -31,7 +31,8 @@ from lib.log import get_logger
 
 logger = get_logger(__name__)
 
-__all__ = ['list_skills', 'get_skill', 'uninstall_skill']
+__all__ = ['list_skills', 'get_skill', 'uninstall_skill',
+           'set_skill_scope']
 
 
 def list_skills(project_path: str | None = None,
@@ -131,5 +132,58 @@ def uninstall_skill(skill_id: str,
         return False
 
     shutil.rmtree(pkg)
+    # No orphan secrets: the skill's vault bindings go with it.
+    try:
+        from lib.skills.env import clear_skill_env
+        clear_skill_env(skill_id)
+    except Exception as e:
+        logger.warning('[Skills] vault cleanup for %s failed: %s',
+                       skill_id, e)
     logger.info('[Skills] uninstalled skill package %s (%s)', skill_id, pkg)
     return True
+
+
+def set_skill_scope(skill_id: str, scope: str,
+                    project_path: str | None = None,
+                    extra_paths: list[str] | None = None) -> dict | None:
+    """Move an installed skill package between project and global scope.
+
+    Skill packages are external capability packs — the right home for most
+    is the GLOBAL store so they work in project-less chat too; project
+    scope is for packs that only make sense inside one workspace. The vault
+    bindings (``skill.<id>.*``) are scope-independent and need no move.
+
+    Returns the updated skill dict, or None when the skill was not found.
+    Raises ValueError on an invalid scope or a destination collision.
+    """
+    import shutil
+
+    from lib.memory.storage import (
+        _memory_from_file,
+        resolve_skills_dir,
+    )
+
+    if scope not in ('project', 'global'):
+        raise ValueError(f'Invalid scope: {scope!r}')
+    skill = get_skill(skill_id, project_path, extra_paths=extra_paths)
+    if not skill:
+        return None
+    if skill.get('scope') == scope:
+        return skill
+
+    src = skill.get('package_dir')
+    if not src or not os.path.isdir(src):
+        raise ValueError(f'package dir missing for {skill_id}')
+
+    dst_root = resolve_skills_dir(scope, project_path)
+    os.makedirs(dst_root, exist_ok=True)
+    dst = os.path.join(dst_root, skill_id)
+    if os.path.exists(dst):
+        raise ValueError(f'{skill_id} already exists in {scope} scope')
+
+    shutil.move(src, dst)
+    logger.info('[Skills] moved %s: %s → %s scope', skill_id,
+                skill.get('scope'), scope)
+    return _memory_from_file(
+        os.path.join(dst, 'SKILL.md'), scope=scope,
+        package_dir=dst, memory_id_override=skill_id)

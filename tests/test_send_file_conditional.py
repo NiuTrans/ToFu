@@ -75,12 +75,20 @@ def test_a_plain_get_is_untouched(seeded, flask_client):
 @pytest.mark.api
 def test_a_single_byte_range_probe_never_500s(seeded, flask_client):
     """The measured landmine: quart+werkzeug 500 on bytes=0-0; the seam
-    answers a spec-legal full-body 200 instead."""
+    answers a spec-legal full-body 200 instead.
+
+    Version-aware: newer quart/werkzeug pairs (public CI's fresh resolve,
+    measured 2026-08-05) FIXED the upstream bug, so the raw path answers a
+    correct 206 and the seam passes it through untouched. The invariant that
+    must hold under EVERY library pair: never a 500, and the body is either
+    the full content (200 degradation) or exactly the probed byte (206)."""
     r = _get(flask_client, 'bytes=0-0')
-    assert r.status_code == 200, (
-        f'the single-byte probe must degrade to a full-body 200, '
-        f'got {r.status_code}')
-    assert r.data == _CONTENT
+    assert r.status_code in (200, 206), (
+        f'the single-byte probe must never 500, got {r.status_code}')
+    if r.status_code == 200:
+        assert r.data == _CONTENT
+    else:
+        assert r.data == _CONTENT[:1]
 
 
 @pytest.mark.api
@@ -116,7 +124,14 @@ def test_NEUTER_without_the_catch_the_probe_500s(seeded, flask_client,
 
     monkeypatch.setattr('lib.file_serving.send_file_conditional', _pre_seam)
     r = _get(flask_client, 'bytes=0-0')
-    assert r.status_code == 500, (
-        'the raw quart path must still exhibit the measured 500 — if it '
-        'does not, the library pair got fixed upstream and this seam '
-        'should be re-reviewed, not kept on autopilot')
+    if r.status_code != 500:
+        # Upstream fixed (public CI's newer quart/werkzeug, measured
+        # 2026-08-05): the raw path answers a correct single-byte 206, the
+        # seam is a pass-through by design, and the neuter re-pins THAT — a
+        # future regression of the raw path must still be caught here.
+        assert r.status_code == 206 and r.data == _CONTENT[:1], (
+            f'with the upstream bug fixed the raw path must answer a correct '
+            f'206 single-byte body, got {r.status_code}')
+        return
+    # Buggy library pair: the 500 is exactly what the seam catches.
+    assert r.status_code == 500

@@ -407,6 +407,8 @@ Works in **Chrome, Edge and Chromium** — they are all Chromium-family, so the 
 | `browser_get_interactive_elements` | Discover clickable/typeable elements |
 | `browser_get_app_state` | Access Vue/React internal state |
 
+Clicks do more than click: `text=` fuzzy-matching also hits framework "card" buttons (cursor:pointer regions), and when a click opens a NEW tab the result says so (new tab's id, title, URL) and makes it the working tab automatically — no tab-list round trip needed.
+
 **When the page uses Canvas/SVG rendering** (charts, DAG diagrams) — DOM text extraction returns nothing. Use `browser_screenshot` for visual analysis, `browser_get_app_state` for data, or `browser_execute_js` for custom extraction.
 
 **Multiple browsers** can connect simultaneously with independent command queues — useful if you have work and personal browser profiles.
@@ -628,7 +630,7 @@ When your team communicates in Feishu and you want AI assistance directly in gro
 
 When the assistant discovers something useful — a bug pattern, a project convention, your preferred coding style — it can save that knowledge as a **memory** for future sessions.
 
-**How it works:** Project-scoped memories are Markdown files stored in `.tofu/skills/` inside your project; global memories (shared across all projects) live in the server-side store `data/memories/global/`. The assistant creates them proactively or when you ask. In future conversations, relevant memories are automatically loaded into context.
+**How it works:** Project-scoped memories are Markdown files stored in `.tofu/memories/` inside your project; global memories (shared across all projects) live in the server-side store `data/memories/global/`. The assistant creates them proactively or when you ask. In future conversations, relevant memories are automatically loaded into context.
 
 **Tools:** `create_memory`, `update_memory`, `delete_memory`, `merge_memories` — the assistant manages its own knowledge base across sessions.
 
@@ -640,7 +642,9 @@ When the assistant discovers something useful — a bug pattern, a project conve
 
 When you want to give the assistant reusable, packaged know-how — a set of instructions and helper scripts for a specific task — install a **Skill**.
 
-**How it works:** Skills follow the open Claude / OpenClaw / AgentSkills format (a `SKILL.md` plus optional reference files and scripts). Go to **Settings → Skills** to browse a **Catalog** of recommended packs (e.g. Anthropic's docx / xlsx / pdf / skill-creator skills) and **install with one click**, or **drag-and-drop a local `.zip`**. Installed skills appear under the **Installed** tab, where you can view or uninstall them. Bundled `install.sh` scripts are surfaced as hints — never auto-executed.
+**How it works:** Skills follow the open Claude / OpenClaw / AgentSkills format (a `SKILL.md` plus optional reference files and scripts). Go to **Settings → Skills** to browse a **Catalog** of recommended packs (e.g. Anthropic's docx / xlsx / pdf / skill-creator skills) and **install with one click**, or **drag-and-drop a local `.zip`**. New installs land in the **global** scope by default (usable in every conversation; the header selector can target the current project instead). Installed skills appear under the **Installed** tab, where you can view files, move them between global/project scope, or uninstall. Bundled `install.sh` scripts are surfaced as hints — never auto-executed.
+
+**Key configuration:** A skill that needs an API key (e.g. FlyAI travel) lists the required env vars on its card — click **Set**, paste the value, done. Values live encrypted in the **credential vault** (`data/config/`, chmod 600, never committed, never exported) and are injected into tool subprocesses automatically — no server restart, no pasting keys into chat. Uninstalling a skill removes its vault keys too.
 
 ---
 

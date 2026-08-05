@@ -59,6 +59,39 @@ chokepoint:
   explicit two-step is fine where the surrounding code already holds
   `append_event`.
 
+### The PHASE event has its own typed pair — use it
+
+The `phase` event is the stream's **status-text channel** ("Retrying…",
+"Sent to kimi-k3…", "Compressing context…") — the pushes a user actually
+reads while a turn runs. Its `phase` field is a declared sub-vocabulary with
+its own registry (the `Phase` constants + `PhaseSpec` catalogue in
+`lib/agent_core/events.py`) and its own constructors:
+
+```python
+from lib.agent_core.events import Phase, emit_phase
+
+# ✅ CORRECT — one interface, registered value
+emit_phase(task, Phase.RETRYING, detail='…', detailKey='stream.phase.retryGeneric',
+           detailArgs={'model': label, 'attempt': n}, attempt=n)
+
+# ❌ FORBIDDEN — a raw literal bypasses the registry (the drift test fails)
+append_event(task, {'type': 'phase', 'phase': 'retrying', 'detail': '…'})
+```
+
+* `emit_phase(task, Phase.X, **fields)` = `build_phase(Phase.X, **fields)` +
+  `append_event` — byte-identical to the old literal, same as `build_event`.
+* Delivering through a NON-manager append seam (a production channel's
+  `_append_*_event`, the endpoint adapter's `_stream`, an `inner=` envelope)?
+  Construct with `build_phase(Phase.X, ...)` and pass the dict to your seam.
+* **Adding a NEW phase** = add the `Phase` constant + its `PhaseSpec`
+  (domain, one-line purpose, payload-field docs) — it becomes
+  machine-discoverable via `/api/v1/capabilities` (`phases` block, grouped
+  by domain: `chat` = the shared status row; production channels are
+  catalogued for perceivability, their private event *types* stay
+  unregistered per the §1 scope ruling). Then emit it via `emit_phase`.
+* Frontend-local phase states the client derives itself (e.g.
+  `thinking_active`) are NOT pushes — they are deliberately unregistered.
+
 ### Events built up conditionally
 
 When fields are added based on runtime conditions, construct the typed base and
@@ -108,6 +141,7 @@ unknown event types and unknown fields, so additive changes are always safe.
 |------|----------|
 | `tests/test_event_registry.py` | Every event the backend emits — whether written as a `'type': 'x'` literal **or** `EventType.X` — is registered. Every `ev.type === "..."` the frontend handles is registered. No orphan specs. |
 | `tests/test_event_emit.py` | `build_event` is byte-identical to the literal (incl. key order); `emit` delivers through `append_event`; a real converted orchestrator helper still emits the exact pre-conversion dict. |
+| `tests/test_phase_registry.py` | The PHASE sub-vocabulary: every `phase='x'` in `lib/` is registered (or a documented out-of-channel carve-out), every `.phase === "x"` the frontend branches on is registered, **zero raw `{'type': 'phase'` literals** outside the registry module (the unified-interface ratchet), no dead phase vocabulary, and `build_phase` byte-identity. |
 
 If you add an emitter in a NEW file, add its path to `_BACKEND_FILES` in
 `tests/test_event_registry.py` so the new call sites are scanned.
