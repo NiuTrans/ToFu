@@ -117,6 +117,30 @@ def _seed_report(paper_hash, lang, report):
         _pool_put(db)
 
 
+def _diag(paper_hash):
+    """CI-only-404 diagnostics (ad9a7b1): the handler 404s a committed seed
+    row ONLY in the full CI lane, never locally — report the DB identity and
+    a fresh-connection read-back so the next CI log says WHICH side moved."""
+    import lib.database._core as core
+    out = [f'DB_PATH={core.DB_PATH!r}',
+           f'BACKEND={core._BACKEND!r}',
+           f'env TOFU_DB_PATH={os.environ.get("TOFU_DB_PATH")!r}',
+           f'server module={id(sys.modules.get("server")):x}']
+    try:
+        from lib.database._core import _new_connection
+        c = _new_connection()
+        try:
+            rows = c.execute(
+                'SELECT lang, LENGTH(report) FROM paper_reports WHERE paper_hash=?',
+                (paper_hash,)).fetchall()
+            out.append(f'fresh-conn rows={[(r[0], r[1]) for r in rows]!r}')
+        finally:
+            c.close()
+    except Exception as e:
+        out.append(f'fresh-conn read failed: {type(e).__name__}: {e}')
+    return '; '.join(out)
+
+
 def test_double_encoded_review_lang_exports_ok():
     """The core fix: a proxy-double-encoded composite review key resolves to
     the stored row (200), same as the single-encoded and raw-colon forms. A
@@ -140,7 +164,7 @@ def test_double_encoded_review_lang_exports_ok():
             for name, langq, want in cases:
                 r = await client.get(base + langq)
                 assert r.status_code == want, \
-                    f'{name}: expected {want}, got {r.status_code}'
+                    f'{name}: expected {want}, got {r.status_code} | {_diag(_PHASH)}'
                 if want == 200:
                     body = (await r.get_data()).decode('utf-8', 'replace')
                     assert body, f'{name}: empty export body'
@@ -174,7 +198,7 @@ def test_double_encode_NC_reproduces_404():
             # so the 404 above is purely the decoding gap, not a missing row.
             r_ok = await client.get(base + 'review:neurips:en')
             assert r_ok.status_code == 200, \
-                f'NC sanity: raw-colon key should still resolve, got {r_ok.status_code}'
+                f'NC sanity: raw-colon key should still resolve, got {r_ok.status_code} | {_diag(_PHASH)}'
 
     try:
         asyncio.run(_t())
