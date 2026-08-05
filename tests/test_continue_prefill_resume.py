@@ -198,6 +198,11 @@ def _run_continue_task(conv_id, cfg_payload):
     return task
 
 
+# ci_serial: these drive REAL run_task + DB writes through the shared pool;
+# under the CI parallel lane's write storms they blocked past the busy timeout
+# into the 300s test timeout (9b73ba6 3.12 leg). The pure-reader class above
+# stays in the parallel lane.
+@pytest.mark.ci_serial
 class TestPrefillGroundTruth:
 
     def _prep_case3_conv(self, conv_id, tail, finish_reason='interrupted', model='gpt-4o'):

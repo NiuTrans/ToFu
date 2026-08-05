@@ -29,15 +29,6 @@ jobs:
   # vanishingly unlikely between two green endpoints).
   test-unit:
     runs-on: ubuntu-latest
-    # The shared per-worker SQLite file takes burst writes from dozens of
-    # thread-spawning suites; on a 4-vCPU runner a writer thread can be
-    # CPU-starved mid-transaction for tens of seconds, so the default 30s
-    # busy timeout surfaces as 'database is locked' in a DIFFERENT suite
-    # every run (de81786/158a3b7 legs — a whack-a-mole no per-suite fix can
-    # close). 120s rides out the starvation window without touching a single
-    # assertion — this is environmental tolerance, not a weaker gate.
-    env:
-      TOFU_SQLITE_BUSY_TIMEOUT_MS: "120000"
     strategy:
       fail-fast: false
       matrix:
