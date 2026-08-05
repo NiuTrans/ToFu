@@ -22,6 +22,11 @@ import threading
 
 import pytest
 
+# ci_serial: the CRUD round-trips write through the shared sqlite pool; under
+# the CI parallel lane's contention the writes exceeded the 30s busy timeout
+# ('database is locked', 276a5bb unit leg) while passing in ~2s uncontended.
+pytestmark = [pytest.mark.unit, pytest.mark.ci_serial]
+
 
 # ─── Helpers ──────────────────────────────────────────────────────────
 

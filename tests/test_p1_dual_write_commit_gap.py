@@ -144,11 +144,14 @@ def _unit(fn):
     """Attach @pytest.mark.unit when pytest is available (project convention).
 
     Kept as a helper (not a bare decorator at each test) so the file still
-    imports cleanly in the pytest-less standalone run.
+    imports cleanly in the pytest-less standalone run. Also carries
+    ci_serial: these tests hold explicit cross-connection transactions, and
+    under the CI parallel lane's contention the writes hit 'database is
+    locked' (276a5bb unit leg) while passing uncontended.
     """
     if pytest is None:
         return fn
-    return pytest.mark.unit(fn)
+    return pytest.mark.unit(pytest.mark.ci_serial(fn))
 
 
 @_unit
