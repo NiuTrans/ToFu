@@ -34,7 +34,8 @@ def _make_task(tid):
     # the dispatcher's cooldown cycle never exits → 600s timeout (233daa6).
     return _new_report_task(tid, 'phashabort00000000000000000000000', 'en', None,
                             client_title='Test Paper',
-                            config={'paperInsightEnabled': False})
+                            config={'paperInsightEnabled': False,
+                                      'paperCheckpointsEnabled': False})
 
 
 REPORT_BODY = '## ⚡ TL;DR\nPartial content so far.\n'

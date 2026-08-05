@@ -37,7 +37,8 @@ def _make_task(tid='rpt_dedup_test'):
     # the insight second pass dispatch a real LLM (CI 401 → endless cooldown).
     return _new_report_task(tid, 'phashdedup0000000000000000000000', 'en', None,
                             client_title='Test Paper',
-                            config={'paperInsightEnabled': False})
+                            config={'paperInsightEnabled': False,
+                                      'paperCheckpointsEnabled': False})
 
 
 def _patch_dispatch(monkeyplan):

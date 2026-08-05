@@ -111,13 +111,15 @@ def _patch_dispatch(monkeyplan):
 
 def _make_task(tid):
     from lib.paper import _new_report_task
-    # paperInsightEnabled=False: the gated second pass (rubric → synthesize)
-    # dispatches a REAL LLM — offline here by contract, and on CI (placeholder
-    # key → 401) the dispatcher's cooldown cycle never exits → 600s timeout
-    # (233daa6 unit leg). The citation audit under test runs in the report pass.
+    # Insight+checkpoints OFF: BOTH gated second passes (rubric/synthesize and
+    # the checkpoint cards) dispatch a REAL LLM — offline here by contract, and
+    # on CI (placeholder key → 401) the dispatcher's cooldown cycle never exits
+    # → 600s timeout (233daa6 insight, 565ebc1 checkpoints). The citation audit
+    # under test runs in the report pass.
     return _new_report_task(tid, 'phashaudit000000000000000000000', 'en', None,
                             client_title='Attention Is All You Need',
-                            config={'paperInsightEnabled': False})
+                            config={'paperInsightEnabled': False,
+                                      'paperCheckpointsEnabled': False})
 
 
 def _run(tid):

@@ -310,7 +310,8 @@ def test_report_engine_full_loop_executes_read_files(tmp_path):
                                 # offline suite — the insight second pass must
                                 # not dispatch a real LLM (CI 401 → endless
                                 # cooldown cycle → 600s timeout, 233daa6)
-                                config={'paperInsightEnabled': False})
+                                config={'paperInsightEnabled': False,
+                                'paperCheckpointsEnabled': False})
         re_mod._run_report_task(task, [
             {'role': 'system', 'content': 'sys'},
             {'role': 'user', 'content': 'paper text'},
