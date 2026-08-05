@@ -50,6 +50,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+# ci_serial: the reaper-clock assertions measure heartbeat vs wall-clock
+# deltas with <5s budgets — under the CI parallel lane's CPU starvation the
+# measured gap blew past 30s (7a4c727 unit leg) while passing everywhere
+# uncontended. The serial lane runs it alone with a 600s timeout.
+# (Module-level mark is additive to the per-class unit marks.)
+pytestmark = [pytest.mark.unit, pytest.mark.ci_serial]
+
 
 # ═════════════════════════════════════════════════════════════════════
 #  A. No timeout constants / no time-based kill remain

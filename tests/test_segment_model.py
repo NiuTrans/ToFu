@@ -514,6 +514,10 @@ def _cleanup_conv(conv_id):
         pass
 
 
+@pytest.mark.ci_serial  # real run_task writes through the shared pool;
+# under the CI parallel lane's contention the writes hit 'database is locked'
+# (7a4c727 unit leg) while passing on any uncontended box. The in-memory
+# golden classes above stay in the parallel lane.
 class TestGroundTruthRealRunTask:
     """Assert the derivation over a task dict PRODUCED by real run_task."""
 
@@ -736,6 +740,7 @@ class TestThinRehydrateRoundTrip:
 #  STEP 2 — DB round-trip: re-READ segments from the persisted row
 # ═══════════════════════════════════════════════════════════
 
+@pytest.mark.ci_serial  # same contention reason as TestGroundTruthRealRunTask
 class TestSegmentsDBRoundTrip:
     """Drive real run_task, then re-READ the persisted segments from BOTH the
     task_results.segments column AND the conversation messages dict — proving

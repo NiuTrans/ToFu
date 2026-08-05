@@ -1042,7 +1042,14 @@ def _new_sqlite_connection():
     # Reduce WAL checkpoint frequency — fewer I/O stalls under write-heavy load
     conn.execute('PRAGMA wal_autocheckpoint=1000')
 
-    return _SqliteConnectionWrapper(conn)
+    w = _SqliteConnectionWrapper(conn)
+    # Stamp the path this connection was opened for. The pool below is a
+    # flat list and DB_PATH can be rebound at runtime (tests do it
+    # constantly); without the stamp, _pool_get happily hands out a live
+    # connection to a DIFFERENT file and the caller writes/reads the wrong
+    # database (CI-only 404 on a committed row, 2026-08-05).
+    w._pool_path = os.path.abspath(DB_PATH)
+    return w
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -1332,9 +1339,19 @@ def _pool_get():
                     logger.debug('[DB] Error closing dead pooled PG connection: %s', e)
     else:
         # SQLite pool
+        _want_path = os.path.abspath(DB_PATH)
         with _sqlite_pool_lock:
             while _sqlite_pool:
                 conn = _sqlite_pool.pop()
+                # A pooled connection bound to a DIFFERENT file (DB_PATH was
+                # rebound since it was opened) must never be handed out —
+                # close it and keep looking.
+                if getattr(conn, '_pool_path', None) != _want_path:
+                    try:
+                        conn.close()
+                    except Exception as e:
+                        logger.debug('[DB] Error closing stale-path pooled SQLite connection: %s', e)
+                    continue
                 if _test_connection(conn):
                     conn._dirty = False
                     return conn

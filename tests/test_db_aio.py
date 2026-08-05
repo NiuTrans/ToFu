@@ -246,6 +246,36 @@ class TestLeakSafety:
         assert after >= min(before, 1)
         assert after <= core._SQLITE_POOL_MAX + 1 if core._BACKEND != 'pg' else True
 
+    def test_pooled_connection_never_crosses_db_path(self, tmp_path, monkeypatch):
+        """A connection pooled under DB_PATH=A must NOT be handed out after
+        DB_PATH is rebound to B. The flat sqlite pool is otherwise path-blind:
+        any suite that rebinds DB_PATH and returns its connection poisons the
+        pool, and a later caller writes/commits to file A while its reader
+        draws file B — the CI-only 'report not found' 404 on a committed
+        paper_reports row (2026-08-05)."""
+        import lib.database._core as core
+        if core._BACKEND == 'pg':
+            pytest.skip('sqlite-pool specific')
+
+        a = str(tmp_path / 'a.db')
+        b = str(tmp_path / 'b.db')
+        monkeypatch.setattr(core, 'DB_PATH', a)
+        conn = core._pool_get()
+        conn.execute('CREATE TABLE pool_path_probe (x INTEGER)')
+        conn.execute('INSERT INTO pool_path_probe VALUES (1)')
+        conn.commit()
+        core._pool_put(conn)
+
+        monkeypatch.setattr(core, 'DB_PATH', b)
+        conn2 = core._pool_get()
+        try:
+            assert getattr(conn2, '_pool_path', None) == os.path.abspath(b), (
+                'pool handed out a connection bound to a different DB file')
+            with pytest.raises(Exception):
+                conn2.execute('SELECT * FROM pool_path_probe').fetchall()
+        finally:
+            core._pool_put(conn2)
+
     def test_executor_is_bounded(self):
         from lib.database._core import _CONN_POOL_MAX, _MAX_TOTAL_CONNS
         from lib.database.aio import _get_executor
