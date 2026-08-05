@@ -108,13 +108,14 @@
       } catch (e) { /* fall through to fetch */ }
     }
     flushing = true;
-    fetch(_relayUrl(), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: payload,
-      credentials: 'same-origin',
-      keepalive: true,
-    }).catch(function () {
+    // Route through the ONE frontend→backend seam (the api.js isolation rule,
+    // tests/test_frontend_api_isolation.py): Api.logs.clientRelay carries
+    // keepalive + silent-drop itself. Api absent = the bundle has not finished
+    // evaluating (early pagehide) — drop the batch rather than hand-roll a
+    // second channel (the never-amplify doctrine).
+    var api = (typeof Api !== 'undefined' && Api.logs) || null;
+    if (!api || typeof api.clientRelay !== 'function') { flushing = false; return; }
+    Promise.resolve(api.clientRelay(payload)).catch(function () {
       /* drop the batch — a down server must not be amplified by its own
        * telemetry; the next flush carries whatever is new. */
     }).then(function () { flushing = false; });

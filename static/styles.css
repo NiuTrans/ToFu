@@ -22318,6 +22318,7 @@ html:not([data-theme="light"]):not([data-theme="tofu"]) .pb-watch-diverged{color
 .pb-board-act{display:inline-flex;align-items:center;gap:4px;background:var(--bg-secondary);color:var(--text-secondary);border:1px solid var(--border);border-radius:var(--pb-radius-sm);padding:4px 9px;font-size:11px;font-weight:600;font-family:inherit;cursor:pointer;transition:color var(--transition),border-color var(--transition),background var(--transition)}
 .pb-board-act:hover{color:var(--text-primary);border-color:var(--border-light)}
 .pb-board-act:disabled{opacity:0.55;cursor:default}
+.pb-board-act-delete:hover{color:var(--danger,#c0392b);border-color:var(--danger,#c0392b)}
 /* ── Unified board interaction primitives (Pillar #2 of the panel redesign) ── */
 /* Primary CTA (submit answer / mark blocked) — same family as .pb-board-act,
    one accent fill so the eye lands on the single forward action. */

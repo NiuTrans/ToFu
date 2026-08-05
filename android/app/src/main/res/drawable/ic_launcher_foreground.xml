@@ -1,0 +1,86 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Tofu mascot — isometric tofu block (the brand silhouette from the web
+     welcome icon) with a redrawn, cleaner face: round catch-lit eyes that sit
+     on the front face, a clearly visible smile, and tidy cheeks. Drawn in the
+     source 180-space and scaled into the adaptive-icon safe zone by the
+     enclosing <group>. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <group
+        android:scaleX="0.5"
+        android:scaleY="0.5"
+        android:translateX="8.75"
+        android:translateY="9.25">
+
+        <!-- top face -->
+        <path android:pathData="M86,26 L36,54 L91,90 L147,59 Z">
+            <aapt:attr name="android:fillColor">
+                <gradient android:type="linear"
+                    android:startX="36" android:startY="26"
+                    android:endX="91.5" android:endY="90">
+                    <item android:offset="0" android:color="#FFFEF8EC"/>
+                    <item android:offset="1" android:color="#FFFDF2D7"/>
+                </gradient>
+            </aapt:attr>
+        </path>
+
+        <!-- front-left face (carries the face) -->
+        <path android:pathData="M36,54 L34,119 L97,153 L91,90 Z">
+            <aapt:attr name="android:fillColor">
+                <gradient android:type="linear"
+                    android:startX="34" android:startY="54"
+                    android:endX="46.6" android:endY="153">
+                    <item android:offset="0" android:color="#FFFDF4DC"/>
+                    <item android:offset="1" android:color="#FFF5E8C8"/>
+                </gradient>
+            </aapt:attr>
+        </path>
+
+        <!-- right face -->
+        <path android:pathData="M91,90 L97,153 L145,125 L147,59 Z">
+            <aapt:attr name="android:fillColor">
+                <gradient android:type="linear"
+                    android:startX="91" android:startY="59"
+                    android:endX="147" android:endY="124.8">
+                    <item android:offset="0" android:color="#FFECDCC0"/>
+                    <item android:offset="1" android:color="#FFDCC8A4"/>
+                </gradient>
+            </aapt:attr>
+        </path>
+
+        <!-- block outline -->
+        <path android:pathData="M86,26 L36,54 L34,119 L97,153 L145,125 L147,59 Z"
+            android:strokeColor="#FF1A1520"
+            android:strokeWidth="3.2"
+            android:strokeLineJoin="round"/>
+
+        <!-- cheeks (under the eyes, following the face slope) -->
+        <path android:pathData="M39,103 a6,4 0 1,0 12,0 a6,4 0 1,0 -12,0 Z"
+            android:fillColor="#FFFFAAA2" android:fillAlpha="0.55"/>
+        <path android:pathData="M76,118 a6,4 0 1,0 12,0 a6,4 0 1,0 -12,0 Z"
+            android:fillColor="#FFFEACA5" android:fillAlpha="0.55"/>
+
+        <!-- left eye -->
+        <path android:pathData="M42.5,90 a7.5,7.5 0 1,0 15,0 a7.5,7.5 0 1,0 -15,0 Z"
+            android:fillColor="#FF1A1520"/>
+        <path android:pathData="M46.5,86 a2.4,2.4 0 1,0 4.8,0 a2.4,2.4 0 1,0 -4.8,0 Z"
+            android:fillColor="#FFFFFFFF" android:fillAlpha="0.95"/>
+
+        <!-- right eye (offset down-right to sit level on the isometric face) -->
+        <path android:pathData="M65.5,101 a7.5,7.5 0 1,0 15,0 a7.5,7.5 0 1,0 -15,0 Z"
+            android:fillColor="#FF1A1520"/>
+        <path android:pathData="M69.5,97 a2.4,2.4 0 1,0 4.8,0 a2.4,2.4 0 1,0 -4.8,0 Z"
+            android:fillColor="#FFFFFFFF" android:fillAlpha="0.95"/>
+
+        <!-- smile -->
+        <path android:pathData="M50,111 Q60,121 71,114"
+            android:strokeColor="#FF1A1520"
+            android:strokeWidth="3"
+            android:strokeLineCap="round"/>
+    </group>
+</vector>

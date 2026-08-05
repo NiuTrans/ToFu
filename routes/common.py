@@ -89,12 +89,14 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_USER_ID = 1
 
 # ── Native mobile client (Android APK) download ──
-# The Android client lives in its OWN repo (github.com/rangehow/tofu-android),
-# so its CI publishes release APKs to that repo's /releases — NOT the backend's
-# rangehow/ToFu repo. The filename here MUST equal the asset that repo's CI
-# workflow publishes (.github/workflows/build-apk.yml). That two-repo coupling
-# is guarded by tests/test_mobile_client_apk_url.py so it can't silently drift
-# into a permanent 404.
+# The Android client's SOURCE lives in-tree at android/ (merged 2026-08-05),
+# but its CI (.github/workflows/build-android-apk.yml) publishes release APKs
+# to the SEPARATE github.com/rangehow/tofu-android repo's /releases — NOT this
+# repo. That is deliberate: /releases/latest/download/<asset> resolves to the
+# NEWEST release, and on this repo any newer desktop-only release (v0.14.x,
+# no APK asset) would shadow the deep link into a permanent 404. The filename
+# here MUST equal the asset that workflow publishes. The coupling is guarded
+# by tests/test_mobile_client_apk_url.py so it can't silently drift into a 404.
 MOBILE_CLIENT_APK_ASSET = 'tofu-android.apk'
 # Direct-download DEEP LINK, not the releases HTML page. GitHub's
 # /releases/latest/download/<asset> is a stable redirect that always serves the

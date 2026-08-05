@@ -3201,6 +3201,22 @@ if __name__ == '__main__':
             '      Saved to data/config/.first_run_token (chmod 0600)')
         _banner_lines.append(
             '      (auto-cleared when this bootstrap key is revoked)')
+    # Loopback bind behind a cloud-IDE proxy (measured 2026-08-05): the SSO
+    # edge 401s every cookieless /api/* call, and the loopback bind kills
+    # the direct-LAN route too — so a desktop agent on another machine has
+    # NO path in at all. The banner must say so: the failure is otherwise
+    # invisible (zero agent requests ever reach the access log).
+    if host in ('127.0.0.1', 'localhost', '::1') and (
+            os.environ.get('VSCODE_PROXY_URI') or '').strip():
+        _banner_lines.append(
+            '  ⚠️   Bound to loopback behind a cloud-IDE proxy: remote '
+            'desktop agents can NEVER reach this server')
+        _banner_lines.append(
+            '      (the SSO edge rejects cookieless clients). Unset '
+            'BIND_HOST / use --host 0.0.0.0 and restart to allow')
+        _banner_lines.append(
+            '      direct LAN attach, or rely on the agent-side ssh '
+            'self-tunnel.')
     _banner_lines.append('  ⏱  Boot time: %.1fs' % (time.time() - _BOOT_T0))
     _banner_lines.append('=' * 56)
     _banner = '\n'.join(_banner_lines)

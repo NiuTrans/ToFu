@@ -90,7 +90,9 @@ class LibTokenCensusRatchetTest(unittest.TestCase):
     red naming the orphan, instead of a Chinese user reading
    「dns_poisoned」in their dialog."""
 
-    _DIALOG_HANDLED = {'invalid_code', 'rate_limited'}
+    # The pair dialog's handled tokens (invalid_code / rate_limited)
+    # left with exchange_pair_code in 2026-08-05's pairing retirement.
+    _DIALOG_HANDLED: set = set()
     _TOKEN_RE = re.compile(r"return\s+False,\s*'([a-z_0-9%]+)'")
 
     def _lib_tokens(self, rel):
@@ -221,8 +223,10 @@ class ComposedCopyTest(unittest.TestCase):
 
     def test_unreachable_composes_without_doubled_wording(self):
         theme = _theme()
-        for shell_key in ('desktop.connect.verifyFailed',
-                          'desktop.pair.failed'):
+        # The pair dialog's shell (desktop.pair.failed) left with the
+        # dialog itself (2026-08-05 retirement); the connect-line shell
+        # remains the live seam.
+        for shell_key in ('desktop.connect.verifyFailed',):
             en = theme.t(shell_key, 'en').replace(
                 '{reason}', theme.reason_text('unreachable', 'en'))
             zh = theme.t(shell_key, 'zh').replace(
@@ -270,8 +274,6 @@ class SurfaceWiringRatchetTest(unittest.TestCase):
         src = _src('desktop/connect_ui.py')
         self.assertIn('theme.reason_text(reason, lang)', src,
                       'verifyFailed fills {reason} with a raw token')
-        self.assertIn('theme.reason_text(val, lang)', src,
-                      'pair.failed fills {reason} with a raw token')
 
     def test_post_install_has_no_install_prose_left(self):
         """NEUTER target: restore any of these literals — the progress view

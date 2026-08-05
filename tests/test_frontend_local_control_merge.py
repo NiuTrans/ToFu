@@ -142,13 +142,13 @@ _SHIPPED_SYMBOLS = (
     # decide whether a repaint is warranted at all.
     "_lcDesktopSignature",
     # The awaiting-agent hint is prepended in both attach branches, and
-    # the pair block / connect-line details / wiring are authored once and
-    # reached from both — the splice needs all of them or every test goes
-    # ReferenceError. (2026-08-04 owner decree: the proxy-SSH warning was
-    # DELETED — pairing codes are address-free, so no branch may send the
-    # user to open a tunnel by hand.)
-    "_lcAwaitingAgentHtml", "_lcPairBlockHtml", "_lcConnectDetailsHtml",
-    "_lcWireAttach", "_lcPairCode",
+    # the bundle block / connect-line details / wiring are authored once
+    # and reached from both — the splice needs all of them or every test
+    # goes ReferenceError. (2026-08-05 owner decree: the pairing-code UX
+    # is RETIRED — the credential rides the per-download bundle ZIP, so
+    # no branch may ask the user to type anything.)
+    "_lcAwaitingAgentHtml", "_lcAgentAttachBlockHtml", "_lcAgentBundleUrl",
+    "_lcBindWarnHtml", "_lcConnectDetailsHtml", "_lcWireAttach",
     # The download button is authored once and shared by the install /
     # upgrade-nudge / stranded-rescue branches (2026-08-04 fleet tri-state);
     # the browser renderer calls both, so the splice needs them.
@@ -270,10 +270,13 @@ HARNESS = textwrap.dedent("""
         // The connect line survives ONLY inside the collapsed advanced
         // details — never as a top-level action (2026-08-04 decree).
         mintInsideDetails: !!el.querySelector('.lc-details #lcMintBtn'),
-        // Pairing is the ONE primary attach action in every branch that
-        // attaches anything; the ids are branch-unique (lcPairBtn).
+        // The bundle ZIP is the ONE primary attach action in every branch
+        // that attaches anything (2026-08-05 decree — the pairing code is
+        // retired; the credential rides the download). lcPairBtn must
+        // NEVER come back.
+        hasBundleButton: !!el.querySelector('#lcAgentBundleBtn'),
+        bundleInAgentRole: !!el.querySelector('.lc-role #lcAgentBundleBtn'),
         hasPairButton: !!el.querySelector('#lcPairBtn'),
-        pairInAgentRole: !!el.querySelector('.lc-role #lcPairBtn'),
         // Owner decree 2026-08-04: no surface may send the user to open an
         // ssh tunnel by hand.
         mentionsManualTunnel: /隧道地址|ssh 隧道|ssh-tunnel/i.test(el.textContent),
@@ -296,7 +299,35 @@ HARNESS = textwrap.dedent("""
       }};
     }}
 
-    // Drive the REAL mint handler and read what actually lands in the box.
+    // The bundle-primary capture (2026-08-05 owner decree): with a built
+    // agent artifact AND a bundle-ready store, the attach action is the
+    // credential-carrying ZIP — never a typed pairing code. Kept SEPARATE
+    // from the bare-payload capture above so the fallback-branch pins keep
+    // their pre-bundle meaning.
+    const AGENT_DLS = [{{ os: 'windows', arch: 'x86_64',
+                         label: 'Windows agent installer',
+                         filename: 'TofuAgent-Setup-0.15.2-win64.exe',
+                         url: SRV + '/api/v1/desktop/download/TofuAgent-Setup-0.15.2-win64.exe',
+                         hosted: 'server', size: 53000000,
+                         kind: 'agent' }}];
+    const desktopBundle = {{}};
+    for (const st of ['local_source', 'remote']) {{
+      document.getElementById('lcDesktopSetup').innerHTML = '';
+      _lcRenderDesktop({{ connected: false, setup_state: st,
+                         download_url: DL, server_url: SRV, downloads: DLS,
+                         agent_downloads: AGENT_DLS,
+                         agent_bundle_ready: true }});
+      const el = document.getElementById('lcDesktopSetup');
+      const bundleA = el.querySelector('#lcAgentBundleBtn');
+      desktopBundle[st] = {{
+        hasBundleButton: !!bundleA,
+        bundleInAgentRole: !!el.querySelector('.lc-role #lcAgentBundleBtn'),
+        bundleHref: bundleA ? bundleA.getAttribute('href') : '',
+        mintInsideDetails: !!el.querySelector('.lc-details #lcMintBtn'),
+        hasPairButton: !!el.querySelector('#lcPairBtn'),
+        mentionsManualTunnel: /隧道地址|ssh 隧道|ssh-tunnel/i.test(el.textContent),
+      }};
+    }}
     // A bare secret is unusable: the line must carry the server address too.
     document.getElementById('lcDesktopSetup').innerHTML = '';
     _lcRenderDesktop({{ connected: false, setup_state: 'remote',
@@ -363,7 +394,7 @@ HARNESS = textwrap.dedent("""
       note: (document.getElementById('lcExtOpenNote') || {{textContent: ''}}).textContent,
     }}), 0));
 
-    console.log(JSON.stringify({{ desktop, browser, mintedLine, openClick }}));
+    console.log(JSON.stringify({{ desktop, browser, mintedLine, openClick, desktopBundle }}));
     }})();
 """)
 
@@ -468,33 +499,42 @@ def test_the_three_states_give_three_different_instructions():
 
 
 @pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
-def test_pairing_is_the_primary_attach_in_every_branch():
-    """2026-08-04 owner decree: the pairing code is the ONE primary attach
-    action wherever a machine can be attached — it carries NO address, so
-    it works from every reachability class (the agent discovers the route
-    itself, building its own tunnel when needed). The minted connect line
-    is demoted to the collapsed advanced details, and NO branch may send
-    the user to open an ssh tunnel by hand."""
-    out = _run(_shipped())["desktop"]
+def test_bundle_is_the_primary_attach_in_every_branch():
+    """2026-08-05 owner decree: the pairing code is RETIRED — the ONE
+    primary attach action is the per-download bundle ZIP (credential +
+    route candidates baked at the click, zero user input). The minted
+    connect line survives only inside the collapsed advanced details
+    (fallback for the bare exe), and NO surface may resurrect the pair
+    button or send the user to open an ssh tunnel by hand."""
+    res = _run(_shipped())
+    out = res["desktopBundle"]
     for st in ("local_source", "remote"):
-        assert out[st]["hasPairButton"] is True, (
-            f"setup_state={st} lost its pairing button — the only "
-            f"address-free attach path")
+        assert out[st]["hasBundleButton"] is True, (
+            f"setup_state={st} lost its bundle button — the only "
+            f"zero-config attach path")
+        assert '/api/v1/desktop/agent-bundle' in out[st]["bundleHref"], (
+            f"setup_state={st}: the bundle button must point at the "
+            f"agent-bundle endpoint; got {out[st]['bundleHref']!r}")
         assert out[st]["mintInsideDetails"] is True, (
             f"setup_state={st}: the connect line must live inside the "
             f"collapsed advanced details, never as a top-level action")
-    for st in ("connected", "tray"):
         assert out[st]["hasPairButton"] is False, (
-            f"setup_state={st} attaches nothing — no pair button allowed")
-    # The documented tunnel blind spot (ssh -L presents as loopback):
-    # local_source's AGENT role block carries the pair action visibly.
-    assert out["local_source"]["pairInAgentRole"] is True, (
-        "the agent role block lost its pairing button — the office-machine "
-        "case has no connect flow again")
-    for st in ("tray", "local_source", "remote"):
+            f"setup_state={st}: the pairing-code button is RETIRED — "
+            f"it must never come back")
         assert out[st]["mentionsManualTunnel"] is False, (
             f"setup_state={st} still instructs a manual ssh tunnel — the "
             f"2026-08-04 decree forbids it on every surface")
+    # The documented tunnel blind spot (ssh -L presents as loopback):
+    # local_source's AGENT role block carries the bundle action visibly.
+    assert out["local_source"]["bundleInAgentRole"] is True, (
+        "the agent role block lost its bundle button — the office-machine "
+        "case has no zero-config flow again")
+    # The pair button is dead in the bare-payload branches too.
+    bare = res["desktop"]
+    for st, info in bare.items():
+        assert info["hasPairButton"] is False, (
+            f"setup_state={st}: lcPairBtn resurrected in the fallback "
+            f"branch")
 
 
 @pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")

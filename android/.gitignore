@@ -1,0 +1,17 @@
+*.iml
+.gradle/
+/local.properties
+/.idea/
+.DS_Store
+/build/
+/app/build/
+/captures/
+.externalNativeBuild/
+.cxx/
+*.apk
+*.keystore
+# …but DO commit the fixed debug keystore (not a secret; needed for stable
+# debug-build signatures so test installs upgrade cleanly across CI builds).
+!app/debug.keystore
+/.testharness/
+.tofu*

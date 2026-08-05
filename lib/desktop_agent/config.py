@@ -23,6 +23,11 @@ _DEFAULT_CONFIG = {
     # server", which is the packaged app's default and must stay that way —
     # a tray user never touches this.
     'remote_server': {},
+    # Route candidates persisted from the imported attach bundle
+    # (desktop/connect_ui.py::import_attach_bundle): resume_attachment
+    # re-walks them when the saved address dies, before the discovery
+    # ladder.
+    'attach_candidates': [],
     # Tray-persisted computer-control state: {enabled: bool, perms: {...}}.
     # ABSENT (empty dict) = the user never chose = fresh-install default
     # OFF — deny-by-default is preserved; only an explicit user choice is

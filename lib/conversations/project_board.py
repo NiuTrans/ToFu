@@ -845,6 +845,74 @@ def reopen_task(project_path: str, conv_id: str, task_id: str) -> dict:
     return {'ok': True, 'from': prev_status}
 
 
+def delete_task(project_path: str, conv_id: str, task_id: str) -> dict:
+    """Delete an epic OUTRIGHT (human lever — junk/duplicate/mistake removal).
+
+    Unlike ``complete_task`` (keeps the row as done history), delete REMOVES
+    the row. Permitted from ANY status: the claim lease is advisory and a
+    deleting human outranks a live claim — the claiming conversation is not
+    interrupted mid-turn; its next claim/complete on the id simply misses,
+    which those paths already tolerate ('task not found'). The deletion is
+    OBSERVABLE, never a silent yank: a feed ``note`` records the title plus
+    the previous status/owner, and the audit log carries the same.
+
+    CONSISTENCY GATE: refuses (``error='has_dependents'``) when another
+    ACTIVE (non-done) epic lists this one in ``depends_on`` — a deleted dep
+    can never reach ``done``, so ``select_dispatchable`` would keep the
+    dependent undispatchable forever with no visible reason. The refusal
+    names the dependents so the human can complete/delete them first.
+    Returns ``{'ok', 'error'?, 'dependents'?}``.
+    """
+    if not project_path or not task_id:
+        return {'ok': False, 'error': 'missing project/task'}
+    from lib.conversations.project_feed import normalize_project_path
+    project_path = normalize_project_path(project_path)
+    try:
+        db = get_thread_db(DOMAIN_CHAT)
+        row = db.execute(
+            'SELECT title, status, owner_conv_id FROM project_tasks '
+            'WHERE id=? AND project_path=?', (task_id, project_path)).fetchone()
+        if not row:
+            return {'ok': False, 'error': 'task not found'}
+        title = row['title'] or ''
+        prev_status = row['status'] or 'open'
+        prev_owner = row['owner_conv_id'] or ''
+        dependents = []
+        for r in db.execute(
+                "SELECT title, depends_on FROM project_tasks "
+                "WHERE project_path=? AND status!='done' AND id!=?",
+                (project_path, task_id)).fetchall():
+            try:
+                deps = json.loads(r['depends_on']) if r['depends_on'] else []
+            except (TypeError, ValueError) as e:
+                logger.debug('[Board] dependent depends_on parse failed: %s', e)
+                deps = []
+            if isinstance(deps, list) and task_id in deps:
+                dependents.append((r['title'] or '')[:80])
+        if dependents:
+            logger.info('[Board] delete refused proj=%.40r task=%s: %d active '
+                        'dependents', project_path, task_id, len(dependents))
+            return {'ok': False, 'error': 'has_dependents',
+                    'dependents': dependents}
+        db.execute('DELETE FROM project_tasks WHERE id=? AND project_path=?',
+                   (task_id, project_path))
+        db.commit()
+    except Exception as e:
+        logger.error('[Board] delete failed proj=%.40r task=%s: %s',
+                     project_path, task_id, e, exc_info=True)
+        return {'ok': False, 'error': str(e)}
+    summary = f'Deleted: {title} (was {prev_status}'
+    if prev_owner:
+        summary += f', claimed by {prev_owner}'
+    summary += ')'
+    _emit('note', project_path, conv_id, summary,
+          payload={'taskId': task_id, 'deleted': True, 'from': prev_status,
+                   'prevOwner': prev_owner})
+    audit_log('board_delete', project_path=project_path, task_id=task_id,
+              conv_id=conv_id, from_status=prev_status, prev_owner=prev_owner)
+    return {'ok': True}
+
+
 def answer_task(project_path: str, conv_id: str, task_id: str, answer: str) -> dict:
     """Record the HUMAN's answer to a pending block question — the close of
     the structured human gate.

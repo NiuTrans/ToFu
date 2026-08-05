@@ -60,7 +60,7 @@ os.environ.setdefault('TOFU_DB_PATH', '/tmp/recov_seg_unittest.db')
 
 import pytest
 
-pytestmark = pytest.mark.unit
+pytestmark = [pytest.mark.unit, pytest.mark.ci_serial]
 
 
 # The realistic interrupted shape: ONE complete tool batch (llmRound 0) plus a

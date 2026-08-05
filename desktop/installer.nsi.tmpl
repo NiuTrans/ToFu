@@ -219,6 +219,13 @@ Var FontBody
 !macro TOFU_PAGE_ART bitmap
   ${NSD_CreateBitmap} 0 0 100% 100% ""
   Pop $BmpCtl
+  ; The art is the page BACKGROUND — pin it to the bottom of the
+  ; Z-order EXPLICITLY (HWND_BOTTOM=1, SWP_NOMOVE|SWP_NOSIZE|
+  ; SWP_NOACTIVATE=0x13). Creation order alone is an invisible
+  ; assumption: if the art ever ends up above a control, that control
+  ; receives NO WM_PAINT at all — the 2026-08-05 blank-wizard failure
+  ; class (band+cards render, every label/edit/button silently dead).
+  System::Call 'user32::SetWindowPos(p $BmpCtl, i 1, i 0, i 0, i 0, i 0, i 0x13)'
   ${NSD_SetStretchedImage} $BmpCtl "$PLUGINSDIR\${bitmap}" $R0
 !macroend
 !macro TOFU_LABEL x y w h text font
@@ -239,6 +246,15 @@ Function DoInstall
   ; when the build pre-seeded one (see desktop/launcher.py's first-run
   ; import; the file lives NEXT TO the exe by contract).
   File /r "@PAYLOAD_DIR@/*"
+
+  ; Zero-config attach bundle (owner decree 2026-08-05): the per-download
+  ; ZIP carries tofu-agent-attach.json NEXT TO this installer — adopt it
+  ; into the install dir so the agent's first run imports {route
+  ; candidates, bridge token} with zero user input. Absent = no-op (a
+  ; bare-exe install keeps the discovery ladder + connect-line path).
+  ${If} ${FileExists} "$EXEDIR\tofu-agent-attach.json"
+    CopyFiles "$EXEDIR\tofu-agent-attach.json" "$INSTDIR\tofu-agent-attach.json"
+  ${EndIf}
 
   ${If} $StatusCtl <> ""
     ${NSD_SetText} $StatusCtl "$(TOFU_PROG_SHORTCUTS)"

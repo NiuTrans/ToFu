@@ -158,6 +158,7 @@
   //   timeout       ms (default 0 = none; a probe passes its own budget)
   //   parse         'json' (default) | 'text' | 'blob' | 'response' | 'none'
   //   signal        AbortSignal
+  //   keepalive     true — the request may outlive the page (unload flushes)
   //   onError       'throw' (default) | 'null' — null returns null on failure
   async function request(path, opts) {
     opts = opts || {};
@@ -180,6 +181,7 @@
     }
     const init = { method, headers };
     if (body !== undefined) init.body = body;
+    if (opts.keepalive) init.keepalive = true;
 
     // Timeout via AbortController unless caller provided a signal
     const userSignal = opts.signal;
@@ -983,6 +985,13 @@
   // compress() throws ApiError on non-OK so the caller's catch shows retry.
   const logs = {
     clean:    (text) => post('/api/v1/logs/clean', { text }, { onError: 'null' }),
+    // Browser-console relay batch (core/client_log_relay.js). keepalive lets
+    // the pagehide flush outlive the page; onError:'null' matches the relay's
+    // never-amplify doctrine (a down server drops the batch silently).
+    clientRelay: (payload) => request('/api/v1/logs/client',
+      { method: 'POST', body: payload, keepalive: true,
+        headers: { 'Content-Type': 'application/json' },
+        parse: 'none', onError: 'null' }),
     compress: async (text) => {
       const resp = await request('/api/v1/logs/compress',
                                  { method: 'POST', json: { text }, parse: 'response' });
@@ -1051,11 +1060,6 @@
                               { onError: 'null', query: arch ? { arch: arch } : {} }),
     devices:     () => get('/api/v1/desktop/devices', { onError: 'null' }),
     mintToken:   (name) => post('/api/v1/desktop/token', { name: name || '' }),
-    /* Pairing-code mint (P2, docs/DESKTOP_AGENT_DIST_DESIGN.md §11): a
-     * 6-digit one-time code (300 s TTL, one-shot) the agent exchanges for
-     * a bridge token. The agent needs NO bearer — the code IS the
-     * credential. */
-    mintPairCode: () => post('/api/v1/desktop/pair-code'),
     revokeToken: (keyId) => del(`/api/v1/desktop/token/${encodeURIComponent(keyId)}`),
   };
 
@@ -1436,6 +1440,8 @@
            { path, taskId, convId: convId || '', reason: reason || '' }),
     boardReopen:   (path, taskId, convId) =>
       post('/api/v1/project/board/reopen', { path, taskId, convId: convId || '' }),
+    boardDelete:   (path, taskId, convId) =>
+      post('/api/v1/project/board/delete', { path, taskId, convId: convId || '' }),
     // HUMAN answer to a pending block question — closes the structured gate
     // (stamps human_answer, clears the cooldown, immediate re-dispatch whose
     // kickoff carries the answer).

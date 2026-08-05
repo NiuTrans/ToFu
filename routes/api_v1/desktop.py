@@ -14,6 +14,7 @@ authenticated long-poll between server and agent, not a JSON REST verb.
 
 from __future__ import annotations
 
+import os
 import sys
 import time
 
@@ -305,6 +306,137 @@ def _caller_bridge_token_count(uid: str) -> int:
 _BRIDGE_SCOPE = 'agents:bridge'
 
 
+# ── Zero-config agent bundle (owner decree 2026-08-05) ──────────────
+# The pairing-code UX is RETIRED: the panel's agent download is now a
+# per-download ZIP = the generic agent exe + tofu-agent-attach.json
+# carrying {route candidates, a fresh agents:bridge token}. Install =
+# auto-attach with zero user input. The measured failure this kills:
+# an agent handed a browser-reachable proxy URL (missing scheme /
+# /proxy/<port> prefix, then SSO-401 for a cookieless client) polls a
+# wall forever — access.log showed ZERO agent requests while the panel
+# waited for a pairing code that could never be redeemed.
+
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__))))
+
+_LOOPBACK_HOSTS = frozenset({'127.0.0.1', 'localhost', '::1'})
+
+
+def _server_bind_class() -> str:
+    """'all' | 'loopback' | 'specific' — how off-machine-reachable we are.
+
+    Reads the bind the RUNNING server actually took (``_TOFU_RUNTIME_HOST``,
+    recorded by server.py at boot). A loopback bind means NO desktop agent
+    on another machine can ever reach this server directly — the panel
+    surfaces that as an operator warning instead of letting the attach
+    flow fail silently (owner incident 2026-08-05: a platform-injected
+    BIND_HOST=127.0.0.1 quietly overrode the 0.0.0.0 default).
+    """
+    host = (os.environ.get('_TOFU_RUNTIME_HOST')
+            or os.environ.get('BIND_HOST') or '0.0.0.0').strip().lower()
+    if host in _LOOPBACK_HOSTS:
+        return 'loopback'
+    if host in ('', '0.0.0.0', '::'):
+        return 'all'
+    return 'specific'
+
+
+def _direct_lan_candidate() -> str:
+    """``http://<lan-ip>:<port>`` when the bind makes it reachable, else ''.
+
+    Same honesty guard as the LAN discovery responder (lib/desktop/
+    pairing.py): advertising an address the server cannot be reached at
+    sends every discovering agent to a dead route.
+    """
+    if _server_bind_class() == 'loopback':
+        return ''
+    from lib.desktop.pairing import lan_ip
+    ip = lan_ip()
+    if not ip:
+        return ''
+    try:
+        port = int(os.environ.get('_TOFU_RUNTIME_PORT') or '15000')
+    except (TypeError, ValueError) as e:
+        logger.debug('[Desktop] bad _TOFU_RUNTIME_PORT: %s', e)
+        port = 15000
+    return 'http://%s:%d' % (ip, port)
+
+
+_GIT_CACHE = {'at': 0.0, 'fix': '', 'verdicts': {}}
+
+
+def _attach_flow_sha() -> str:
+    """The newest commit that introduced the attach-import code.
+
+    Self-adjusting (symbol-content lookup, not a hardcoded sha — those rot
+    on the next rebase): the artifact must contain THIS code or it
+    silently ignores the bundled attach file. '' when the repo is
+    unreadable (packaged server) — the caller then serves optimistically.
+    """
+    now = time.time()
+    if now - _GIT_CACHE['at'] < 60:
+        return _GIT_CACHE['fix']
+    fix = ''
+    try:
+        import subprocess
+        out = subprocess.run(
+            ['git', 'log', '-S', 'import_attach_bundle', '--format=%H',
+             '-1', '--', 'desktop/connect_ui.py'],
+            cwd=_REPO_ROOT, capture_output=True, timeout=15)
+        if out.returncode == 0:
+            fix = out.stdout.decode('utf-8', 'replace').strip()
+    except Exception as e:
+        logger.debug('[Desktop] attach-flow sha lookup failed: %s', e)
+    _GIT_CACHE['at'] = now
+    _GIT_CACHE['fix'] = fix
+    _GIT_CACHE['verdicts'] = {}
+    return fix
+
+
+def _contains_fix(fix: str, artifact_sha: str) -> bool:
+    """``fix`` is an ancestor of (or equals) ``artifact_sha`` — i.e. the
+    artifact was built from a tree that CARRIES the attach flow.
+
+    Ancestry, not equality: on this shared tree sibling commits keep
+    landing on top of the fix, so equality would flap the panel's
+    readiness note on every unrelated commit (measured during the v5
+    rollout — the rebuild ran at 1a5e4bd5 over the fix's 514ba38b).
+    """
+    if artifact_sha == fix:
+        return True
+    verdicts = _GIT_CACHE['verdicts']
+    if artifact_sha in verdicts:
+        return verdicts[artifact_sha]
+    ok = False
+    try:
+        import subprocess
+        out = subprocess.run(
+            ['git', 'merge-base', '--is-ancestor', fix, artifact_sha],
+            cwd=_REPO_ROOT, capture_output=True, timeout=15)
+        ok = out.returncode == 0
+    except Exception as e:
+        logger.debug('[Desktop] merge-base probe failed: %s', e)
+    verdicts[artifact_sha] = ok
+    return ok
+
+
+def _agent_bundle_ready(entry: dict | None) -> bool:
+    """Whether the store's agent artifact carries the attach-import code."""
+    if not entry:
+        return False
+    sha = str((entry or {}).get('git_sha') or '').strip()
+    if not sha:
+        return False  # unknown lineage — cannot prove the attach flow ships
+    fix = _attach_flow_sha()
+    return (not fix) or _contains_fix(fix, sha)
+
+
+def _agent_store_entry() -> dict | None:
+    """The newest servable WINDOWS agent artifact (the only agent target)."""
+    rows = _dist_store.find_for_platform('windows', 'x86_64', kind='agent')
+    return rows[0] if rows else None
+
+
 @api_v1_desktop_bp.route('/api/v1/desktop/status', methods=['GET'])
 @require_auth
 @api_meta(
@@ -352,6 +484,12 @@ async def desktop_status():
         'bridge_tokens_issued': _caller_bridge_token_count(_uid),
         'bridge_token_required': bool(
             (getenv_compat('TOFU_BRIDGE_SECRET') or '').strip()),
+        # Zero-config bundle surface (2026-08-05): the bind class lets the
+        # panel WARN when a loopback bind makes remote agents unreachable
+        # by construction; bundle readiness flips the agent download from
+        # the bare exe to the credential-carrying ZIP.
+        'server_bind': _server_bind_class(),
+        'agent_bundle_ready': _agent_bundle_ready(_agent_store_entry()),
     })
 
 
@@ -429,6 +567,121 @@ def desktop_download(filename):
     from lib.file_serving import send_file_conditional
     return send_file_conditional(path, as_attachment=True,
                                  attachment_filename=filename)
+
+
+@api_v1_desktop_bp.route('/api/v1/desktop/agent-bundle', methods=['GET'])
+@require_auth
+@api_meta(
+    summary='Download the zero-config agent bundle (ZIP)',
+    description=(
+        'The agent installer PLUS ``tofu-agent-attach.json`` — an ordered '
+        'route-candidate list and a fresh per-user agents:bridge token '
+        'minted at download time. The NSIS installer adopts the JSON into '
+        'the install dir; the agent\'s first run imports it and attaches '
+        'with zero user input. ``?base=`` (the panel\'s live origin + '
+        'prefix, host-pinned) becomes the LAST-RESORT candidate — behind '
+        'an SSO edge it is a measured dead end for a cookieless agent, so '
+        'direct-LAN and the agent-side tunnel rungs come first. 409 when '
+        'the stored installer predates the attach flow (a rebuild is '
+        'kicked automatically).'
+    ),
+    tags=['capabilities'],
+)
+def desktop_agent_bundle():
+    """SYNC on purpose: streams a ~50 MB ZIP (same carve-out as
+    desktop_download / browser_download)."""
+    import io
+    import json as _json
+    import zipfile
+
+    from flask import send_file
+
+    from .auth import current_auth
+
+    entry = _agent_store_entry()
+    if entry is None:
+        return api_not_found(
+            'not_found',
+            message='no agent installer in the store yet — a build is '
+                    'likely in flight; watch /api/v1/desktop/build')
+    if not _agent_bundle_ready(entry):
+        # A stale exe would ignore the attach file entirely (the import
+        # code is not in its payload) — serving the bundle would be a
+        # lie. Kick the rebuild and say so honestly.
+        try:
+            from lib.desktop_dist import winbuilder as _win_builder
+            if not _win_builder.is_running():
+                _win_builder.start_installer(reason='bundle-stale',
+                                             target='agent')
+        except Exception as e:
+            logger.warning('[Desktop] bundle-stale rebuild kick failed: %s', e)
+        return api_error('agent_installer_stale', status=409,
+                         message='the agent installer predates the '
+                                 'zero-config attach flow — a rebuild was '
+                                 'just kicked; retry in a few minutes')
+    path = _dist_store.resolve_file(entry['filename'])
+    if path is None:
+        return api_not_found('not_found',
+                             message='agent artifact missing on disk')
+
+    # Download-time credential (fail-open — an open bridge polls fine
+    # without one; the extension zip follows the same rule).
+    token = ''
+    try:
+        from lib.api_keys import create_key
+        auth = current_auth()
+        uid = (auth.user_id if auth and getattr(auth, 'user_id', '')
+               else '') or ''
+        row, token = create_key(
+            'agent-attach-%s' % time.strftime('%Y%m%d-%H%M%S'),
+            scopes=[_BRIDGE_SCOPE], user_id=uid)
+        audit_log('desktop_agent_bundle_minted', key_id=row.get('id'),
+                  user_id=uid)
+    except Exception as e:
+        logger.warning('[Desktop] bundle token mint failed (serving '
+                       'without one): %s', e)
+
+    candidates = []
+    direct = _direct_lan_candidate()
+    if direct:
+        candidates.append(direct)
+    fallbacks = []
+    try:
+        from routes.browser import _external_base_url
+        live = (_external_base_url() or '').rstrip('/')
+        if live and live != direct:
+            fallbacks.append(live)
+    except Exception as e:
+        logger.warning('[Desktop] live-base resolution failed: %s', e)
+
+    attach = {
+        'v': 1,
+        'kind': 'tofu-agent-attach',
+        'minted_at': time.time(),
+        'token': token,
+        # Probe order the agent walks: direct LAN first (no SSO between),
+        # then its own ladder (loopback → LAN broadcast → ssh self-tunnel),
+        # the browser-reachable base LAST (SSO-edge risk, measured
+        # 2026-08-03).
+        'candidates': candidates,
+        'fallback_candidates': fallbacks,
+    }
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, 'w') as zf:
+        # The exe is already LZMA-compressed NSIS — store it verbatim
+        # (re-deflating 50 MB buys nothing and costs seconds).
+        zf.write(path, arcname=entry['filename'],
+                 compress_type=zipfile.ZIP_STORED)
+        zf.writestr('tofu-agent-attach.json', _json.dumps(attach))
+    buf.seek(0)
+    zip_name = (entry['filename'][:-4] + '.zip'
+                if entry['filename'].lower().endswith('.exe')
+                else entry['filename'] + '.zip')
+    logger.info('[Desktop] agent bundle downloaded (%s, candidates=%s, '
+                'token=%s)', zip_name, candidates + fallbacks,
+                'minted' if token else 'none')
+    return send_file(buf, mimetype='application/zip', as_attachment=True,
+                     download_name=zip_name)
 
 
 @api_v1_desktop_bp.route('/api/v1/desktop/streams/<cmd_id>', methods=['GET'])

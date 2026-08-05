@@ -1,0 +1,126 @@
+name: Build Android APK
+
+# Builds the Android WebView client (android/) on every push/PR that touches
+# it (so the build can never silently rot), and on an `android-v*` version tag
+# ALSO assembles the release APK and publishes it as a GitHub Release asset
+# ON THE rangehow/tofu-android REPO — which is what the Tofu web UI's
+# "Mobile client" download link points at.
+#
+# ── Why `android-v*` and not `v*` ──
+# This monorepo's desktop releases also use `v<VERSION>` tags (v0.14.x,
+# created by build-desktop.yml's release step and by operator `export.py
+# --bump` pushes). A bare `v*` trigger here would fire an APK build on every
+# desktop release. The android-v* prefix keeps the two namespaces disjoint.
+#
+# ── Why the release lands on a DIFFERENT repo ──
+# The download deep link is …/releases/latest/download/tofu-android.apk, and
+# /releases/latest resolves to the CHRONOLOGICALLY NEWEST release in a repo.
+# Publishing the APK here (ToFu) would let any newer desktop-only release
+# shadow the link into a permanent 404. rangehow/tofu-android has no
+# competing release stream, so the link can never be shadowed. That cross-repo
+# publish needs a PAT (secrets.TOFU_ANDROID_RELEASE_PAT) with contents:write
+# on rangehow/tofu-android; a missing PAT fails the release LOUDLY (below),
+# never silently skips it.
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'android/**'
+      - '.github/workflows/build-android-apk.yml'
+    tags: ['android-v*']
+  pull_request:
+    paths:
+      - 'android/**'
+      - '.github/workflows/build-android-apk.yml'
+
+permissions:
+  contents: write   # release publishing (cross-repo uses the PAT, not GITHUB_TOKEN)
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: android
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ hashFiles('android/**/*.gradle.kts', 'android/gradle/wrapper/gradle-wrapper.properties') }}
+
+      - name: Run unit tests
+        run: ./gradlew test --stacktrace
+
+      - name: Assemble debug APK
+        run: ./gradlew assembleDebug --stacktrace
+
+      - name: Upload debug APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tofu-debug-apk
+          path: android/app/build/outputs/apk/debug/*.apk
+
+      # ── Release path (android-v* tag builds only) ──
+      - name: "Guard: release PAT must exist"
+        if: startsWith(github.ref, 'refs/tags/android-v')
+        env:
+          RELEASE_PAT: ${{ secrets.TOFU_ANDROID_RELEASE_PAT }}
+        run: |
+          if [ -z "$RELEASE_PAT" ]; then
+            echo "::error::secrets.TOFU_ANDROID_RELEASE_PAT is not set. The APK release publishes CROSS-REPO to rangehow/tofu-android (see workflow header); without a PAT with contents:write on that repo the release cannot happen. Set the secret and re-run."
+            exit 1
+          fi
+
+      - name: Assemble release APK
+        if: startsWith(github.ref, 'refs/tags/android-v')
+        run: ./gradlew assembleRelease --stacktrace
+
+      # Pin the published asset to the EXACT name the Tofu backend's default
+      # download URL points at (DEFAULT_MOBILE_CLIENT_URL → …/download/
+      # tofu-android.apk). Gradle emits app-release[-unsigned].apk, which would
+      # NOT match the deep link and give a permanent 404 — so we rename to the
+      # canonical asset name here. Kept in lockstep with the backend constant by
+      # tests/test_mobile_client_apk_url.py (asset name = 'tofu-android.apk').
+      - name: Rename release APK to canonical asset name
+        if: startsWith(github.ref, 'refs/tags/android-v')
+        run: |
+          set -euo pipefail
+          src="$(ls app/build/outputs/apk/release/*.apk | head -1)"
+          cp "$src" "app/build/outputs/apk/release/tofu-android.apk"
+          echo "Published asset will be: tofu-android.apk (from $src)"
+
+      # The release APK is ALREADY signed: android/app/build.gradle.kts binds
+      # the release buildType to a FIXED, committed debug keystore
+      # (android/app/debug.keystore), so assembleRelease produces a
+      # directly-installable, update-compatible APK with NO repo-secret setup.
+      # (Signing with the debug KEY does not make the build debuggable —
+      # release stays isDebuggable=false.) Switch to a secret-backed
+      # signingConfigs.release only before any Play Store submission.
+      # See android/README.md "Release / cutting a version".
+      - name: Publish APK to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/android-v')
+        uses: softprops/action-gh-release@v2
+        with:
+          # CROSS-REPO on purpose — see the header. github.ref_name is the
+          # android-vX.Y.Z tag; the action creates it in the target repo.
+          repository: rangehow/tofu-android
+          token: ${{ secrets.TOFU_ANDROID_RELEASE_PAT }}
+          tag_name: ${{ github.ref_name }}
+          files: |
+            app/build/outputs/apk/release/tofu-android.apk
+          fail_on_unmatched_files: true

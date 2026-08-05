@@ -1,6 +1,6 @@
 # Server-Built AGENT-ONLY Installers — Design
 
-> Status: DRAFT v4 (2026-08-03), epic `pt_59b62951aad2463e`.
+> Status: DRAFT v5 (2026-08-05), epic `pt_59b62951aad2463e`.
 > v2 folds in the three distribution-surface decisions (§5): the Local
 > Control display matrix, the full-client direction policy, and the
 > GitHub Releases contents. v3 folds in the owner's three review
@@ -9,7 +9,11 @@
 > the interactive-session boundary (§6). v4 supersedes the pairing UX
 > (§11, owner directive "minimize shell — why doesn't Codex have this
 > problem"): SSH auto-tunnel + one-time pairing code replace the
-> address-carrying connect line as the primary flow.
+> address-carrying connect line as the primary flow. **v5 RETIRES the
+> pairing code (§12, owner decree "no pairing codes, zero configuration
+> burden"): the per-download attach bundle (ZIP = exe + baked
+> {token, route candidates}) IS the pairing — install = auto-attach,
+> zero input.**
 > Splits the fused "one installer, two roles" distribution into TWO
 > components: the controlled-machine **agent** (no frontend, no server
 > stack) and the full desktop app (this machine = server + client).
@@ -674,3 +678,92 @@ v1.
 - **P5** (deferred, post-v1): extension-relay prototype + a measured
   comparison against the SSH tunnel on headless-capability, setup
   cost, and session-boundedness.
+
+## 12. Pairing retired — the zero-config attach bundle (v5, 2026-08-05)
+
+> **Owner decree (2026-08-05): "do not design any pairing code; either
+> hardcode it directly into the installation package, or do not design
+> it at all. We do not allow adding these configuration burdens to
+> users."** §11's pairing-code UX is RETIRED. This section is the
+> replacement contract.
+
+### 12.1 The measured failure that killed §11
+
+Real-machine acceptance (owner, 2026-08-05): the agent installed and
+showed "controlled by a Tofu server", yet the panel sat on 未运行
+forever. The evidence chain, all server-side:
+
+* `POST /api/desktop/poll` arrivals in access.log: **0** on the day; the
+  agent NEVER reached Tofu — not a wrong code, a dead route.
+* The agent's saved address was the vscode proxy URL with BOTH the
+  https scheme and the `/proxy/<port>` prefix stripped (minted from
+  `request.host_url`, which structurally cannot see the prefix) — the
+  same bug class as the 2026-08-04 extension "HTTP 405" incident.
+* Even the CORRECTED proxy URL is a dead end for the agent: the SSO
+  edge answers every cookieless `/api/*` with 401 before Tofu ever sees
+  it (measured 2026-08-03, `_host_reachability`'s own docstring). The
+  browser sails through on SSO cookies; the agent has none.
+* And a platform-injected `BIND_HOST=127.0.0.1` env quietly overrode
+  the 0.0.0.0 default, killing the direct-LAN route too.
+
+A pairing code typed into a dialog could never have fixed ANY of these
+— the code was redeemable only through the address that was already
+dead. The code was a configuration burden AND not the blocker.
+
+### 12.2 The v5 flow — download IS the pairing
+
+1. The panel's ONE action is 「下载受控端 ZIP」 →
+   `GET /api/v1/desktop/agent-bundle` (authenticated):
+   * mints a fresh per-user `agents:bridge` token AT THE CLICK (fail-open
+     when the keystore is down — an open bridge polls tokenless);
+   * builds the ordered route candidates: direct `http://<lan-ip>:<port>`
+     FIRST (only when the running bind is not loopback — the same honesty
+     guard as the LAN discovery responder), the panel's live
+     `origin + BASE_PATH` (host-pinned `?base=`) LAST;
+   * streams `TofuAgent-Setup-<ver>-win64.zip` = the generic exe (stored,
+     not re-deflated) + `tofu-agent-attach.json {token, candidates,
+     fallback_candidates}`.
+   * 409 + an automatic rebuild kick when the store's exe predates the
+     attach flow (`git_sha != HEAD`) — serving a bundle an old payload
+     would silently ignore is a lie; `agent_bundle_ready` on the status
+     payload lets the panel render the honest "rebuilding" note instead
+     of a dead button.
+2. The NSIS installer adopts `$EXEDIR\tofu-agent-attach.json` into the
+   install dir (no-op when absent — bare-exe installs keep working).
+3. The agent's first run (`import_attach_bundle`): probes candidates →
+   the discovery ladder (loopback → LAN broadcast → ssh self-tunnel) →
+   fallbacks; first live `/api/health` wins; token + full route set are
+   persisted (`attach_candidates`) so `resume_attachment` re-points a
+   dead route by itself. NOTHING answers → the first candidate is saved
+   optimistically (the server may simply be off; the poll loop retries).
+   One-shot: the token-carrying file is deleted after any attempt.
+4. The role window shows the tray's live link verdict (connected /
+   unreachable / proxy-blocked / auth-failed / unconfigured), refreshed
+   every 3 s — a window that says "controlled by…" while never
+   connecting was the 2026-08-05 lie.
+
+### 12.3 What retired, what stays
+
+Retired: the panel's 「配对这台电脑」 button + 6-digit code UX
+(`_lcPairBlockHtml` / `_lcPairCode` / `local.pair*` keys), the agent's
+first-run pairing dialog (`prompt_attach` / `prompt_attachment_flow`),
+the agent-side exchange client (`exchange_pair_code`). Stays: the
+server-side `/api/desktop/pair` + `/api/v1/desktop/pair-code` endpoints
+and the code store — SHIPPED-installer compat only (the 0.16.0 in the
+field embeds that path); no UI may mint or collect codes again. The
+connect line stays as the collapsed advanced fallback (bare-exe repair
+path). `preseed_server.json` stays as the build-time, URL-only default.
+
+Also v5: `server.py` boots with a loud banner when bound loopback
+behind a cloud-IDE proxy (`VSCODE_PROXY_URI` set) — remote agents can
+never attach in that state, and it previously failed silently.
+
+### 12.4 Acceptance (supersedes §11.5 P4)
+
+Fresh panel download → unzip → run installer → **zero input** → the
+panel's 这台电脑 row turns green within a minute (a `POST
+/api/desktop/poll` arrival appears in access.log); day-2 reboot
+auto-reconnects (resume walks `attach_candidates` → ladder, token kept).
+The run-from-inside-the-zip trap (Windows extracts only the exe to a
+temp dir) degrades honestly: no bundle file → discovery ladder →
+unattached role window with the link line, never a silent lie.

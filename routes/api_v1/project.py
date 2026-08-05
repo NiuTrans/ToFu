@@ -34,6 +34,7 @@ Routes (legacy snake_case path → new hyphen-case path):
   POST   /api/v1/project/board/complete     — Project Brain: human marks epic done
   POST   /api/v1/project/board/block        — Project Brain: human flags epic blocked
   POST   /api/v1/project/board/reopen       — Project Brain: human reopens an epic
+  POST   /api/v1/project/board/delete       — Project Brain: human deletes an epic outright
   GET    /api/v1/project/brain/summary      — Project Brain: collab-bar summary
   GET    /api/v1/project/brain/attention    — Project Brain: everything awaiting the human
   GET    /api/v1/project/brain/peers        — Project Brain: LIVE peer/team roster
@@ -864,6 +865,45 @@ def project_board_reopen():
         logger.error('[Project.v1] board/reopen failed for %s: %s',
                      project_path, e, exc_info=True)
         return api_internal_error(e, source='api_v1.project.board_reopen')
+
+
+@api_v1_project_bp.route('/api/v1/project/board/delete', methods=['POST'])
+@require_auth
+@rate_limit(limit=20, per=60)
+@api_meta(
+    summary='HUMAN deletes a board epic outright',
+    description=(
+        'Body: ``{path, taskId, convId}``. Removes the row entirely (unlike '
+        'complete, which keeps done history) — the junk/duplicate lever. '
+        'Permitted from any status (the claim lease is advisory; a deleting '
+        'human outranks a live claim, and the claimant is never interrupted '
+        'mid-turn). REFUSED with ``has_dependents`` while another ACTIVE epic '
+        'depends on it (a deleted dep can never complete, which would strand '
+        'the dependent invisibly); the refusal names the dependents. Emits a '
+        '``note`` feed event + audit record so the removal is observable.'),
+    tags=['project'],
+)
+def project_board_delete():
+    data = parse_body()
+    project_path = (data.get('path') or '').strip()
+    if not project_path:
+        return api_bad_request('path is required', field='path')
+    task_id = (data.get('taskId') or '').strip()
+    if not task_id:
+        return api_bad_request('taskId is required', field='taskId')
+    conv_id = _board_conv_id(data)
+    try:
+        from lib.conversations.project_board import delete_task
+        result = delete_task(project_path, conv_id, task_id)
+        if not result.get('ok'):
+            return api_payload(result, 400)
+        logger.info('[Project.v1] board/delete proj=%.40r task=%s',
+                    project_path, task_id)
+        return api_ok(result)
+    except Exception as e:
+        logger.error('[Project.v1] board/delete failed for %s: %s',
+                     project_path, e, exc_info=True)
+        return api_internal_error(e, source='api_v1.project.board_delete')
 
 
 @api_v1_project_bp.route('/api/v1/project/board/answer', methods=['POST'])

@@ -123,12 +123,15 @@ def role_state_full(port, cc_state, attached_url, show_flag=True,
 
 
 def role_state_agent(url, perms, autostart, show_flag=True,
-                     lang=None) -> dict:
+                     lang=None, link_text='') -> dict:
     """Display facts for the AGENT app's role window (the client side).
 
     ``autostart=None`` means the platform does not support the toggle
     (non-Windows v1) and the renderer hides the row — three-state, never
-    a silent False.
+    a silent False. ``link_text`` is the tray's live link verdict (owner
+    2026-08-05: a window that says "controlled by…" while the poll never
+    reaches the server is a lie — the same verdict the tray carries now
+    shows here too, refreshed live).
     """
     from desktop import _tk_theme as theme
     lang = lang or theme.detect_lang()
@@ -138,6 +141,7 @@ def role_state_agent(url, perms, autostart, show_flag=True,
         'role': theme.t('desktop.role.agentTitle', lang),
         'server_url': url or '',
         'attached': bool(url),
+        'link_text': str(link_text or ''),
         'perms': {k: bool(v) for k, v in (perms or {}).items()},
         'tiers': ['allow_write', 'allow_exec', 'allow_gui', 'allow_egress'],
         'autostart': autostart,
@@ -404,9 +408,39 @@ def show_role_window(kind, state_fn, actions, log=_noop_log) -> None:
         for key, var in tier_vars.items():
             var.set(bool(st['perms'].get(key)))
 
+    # ── Live link verdict (agent only) — the tray's on_status truth, on
+    # the window. The 2026-08-05 incident: this window said "controlled by
+    # a Tofu server" while the poll NEVER reached one (dead proxy route).
+    # The row lives OUTSIDE `body` (which _refresh rebuilds on every
+    # action), and a 3s tick re-pulls state_fn so a connecting/dropping
+    # link shows within one beat.
+    link_lbl = None
+    if state['kind'] == 'agent':
+        link_lbl = ttk.Label(frame, style='Tofu.Sub.TLabel',
+                             wraplength=440, justify='left')
+        link_lbl.grid(row=2, column=0, sticky='w', pady=(14, 0))
+
+    def _tick_link():
+        if link_lbl is None or _OPEN.get('root') is not root:
+            return
+        try:
+            st = state_fn()
+            link_lbl.config(
+                text=theme.t('desktop.tray.linkState',
+                             st.get('lang') or lang)
+                .replace('{status}', st.get('link_text') or '…'))
+        except tk.TclError:
+            return  # window already gone
+        except Exception as e:
+            log('Link tick failed: %s' % e)
+        try:
+            root.after(3000, _tick_link)
+        except tk.TclError:
+            pass
+
     # ── Bottom bar: startup gate + the dismiss action ──
     bottom = ttk.Frame(frame, style='Tofu.TFrame')
-    bottom.grid(row=2, column=0, sticky='we', pady=(16, 0))
+    bottom.grid(row=3, column=0, sticky='we', pady=(16, 0))
     ttk.Checkbutton(bottom,
                     text=theme.t('desktop.role.showAtStartup', lang),
                     style='Bg.TCheckbutton',
@@ -418,6 +452,8 @@ def show_role_window(kind, state_fn, actions, log=_noop_log) -> None:
 
     _OPEN['refresh'] = _refresh
     _refresh()
+    if link_lbl is not None:
+        _tick_link()
     theme.center_on_screen(root, width=500)
     if parent is not None:
         # Host-backed: the tray is already running — the title-bar

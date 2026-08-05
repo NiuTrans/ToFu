@@ -1097,9 +1097,12 @@ win.pushUnsubscribe = global.pushUnsubscribe = () => {};
 win.activeConvId = global.activeConvId = 'cDISPLAYED';
 // Silence the block-reason prompt (not exercised here).
 win.prompt = global.prompt = () => '';
+// The delete confirm dialog — flip confirmNext to drive the reject path.
+let confirmNext = true;
+win.confirm = global.confirm = () => confirmNext;
 
 // Capture board mutation calls.
-const calls = { reopen: [], complete: [], block: [], post: [] };
+const calls = { reopen: [], complete: [], block: [], post: [], delete: [] };
 win.Api = global.Api = { project: {
   feed: (p) => Promise.resolve({ maxSeq: 0, events: [] }),
   charter: (p) => Promise.resolve({ exists: false, version: 0, content: '', decisions: [] }),
@@ -1112,6 +1115,7 @@ win.Api = global.Api = { project: {
     ] }),
   boardReopen: (p, taskId, convId) => { calls.reopen.push({ p, taskId, convId }); return Promise.resolve({ ok: true, from: 'claimed' }); },
   boardComplete: (p, taskId, convId) => { calls.complete.push({ p, taskId, convId }); return Promise.resolve({ ok: true }); },
+  boardDelete: (p, taskId, convId) => { calls.delete.push({ p, taskId, convId }); return Promise.resolve({ ok: true }); },
   boardBlock: (p, taskId, convId, reason) => { calls.block.push({ p, taskId, convId, reason }); return Promise.resolve({ ok: true }); },
   boardPost: (p, body) => { calls.post.push({ p, body }); return Promise.resolve({ ok: true, id: 'pt_new' }); },
   brainInfluence: (p, c) => Promise.resolve({ convId: c, charter: {}, board: {}, pendingDecisions: [] }),
@@ -1144,6 +1148,22 @@ check('reopen_on_done', !!reopenBtn('pt_done1'));
 check('no_reopen_on_open', !reopenBtn('pt_open1'));
 check('complete_on_open', !!cardOf('pt_open1').querySelector('.pb-board-act-complete'));
 check('block_on_open', !!cardOf('pt_open1').querySelector('.pb-board-act-block'));
+// Delete renders on EVERY status card — the junk/duplicate lever.
+function delBtn(id) { var c = cardOf(id); return c ? c.querySelector('.pb-board-act-delete') : null; }
+check('delete_on_open', !!delBtn('pt_open1'));
+check('delete_on_claimed', !!delBtn('pt_cl1'));
+check('delete_on_done', !!delBtn('pt_done1'));
+// Confirm gate: rejecting the dialog must NOT touch the API…
+confirmNext = false;
+delBtn('pt_done1').click();
+check('delete_confirm_rejected_no_call', calls.delete.length === 0);
+// …and accepting posts boardDelete(path, taskId, convId).
+confirmNext = true;
+delBtn('pt_open1').click();
+check('delete_called', calls.delete.length === 1);
+check('delete_task_id', calls.delete.length && calls.delete[0].taskId === 'pt_open1');
+check('delete_path', calls.delete.length && calls.delete[0].p === '/proj/real');
+check('delete_carries_conv', calls.delete.length && calls.delete[0].convId === 'cDISPLAYED');
 // "New epic" affordance present + enabled (there IS a displayed conv).
 const newBtn = board.querySelector('#pbBoardNewBtn');
 check('new_epic_present', !!newBtn);
@@ -1203,7 +1223,11 @@ def test_board_human_actions_render_and_reopen_calls_api():
                  'PASS block_on_open', 'PASS new_epic_present',
                  'PASS new_epic_enabled', 'PASS reopen_called',
                  'PASS reopen_task_id', 'PASS reopen_path',
-                 'PASS reopen_carries_conv'):
+                 'PASS reopen_carries_conv',
+                 'PASS delete_on_open', 'PASS delete_on_claimed',
+                 'PASS delete_on_done', 'PASS delete_confirm_rejected_no_call',
+                 'PASS delete_called', 'PASS delete_task_id', 'PASS delete_path',
+                 'PASS delete_carries_conv'):
         assert must in output, output
 
 

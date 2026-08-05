@@ -154,6 +154,47 @@ def test_every_control_sits_on_a_card():
                     'patches (the 2000s look the redesign killed)')
 
 
+# ═══════════════════════════════════════════════════════════════════
+#  The Z-order contract: the art is the BACKGROUND
+# ═══════════════════════════════════════════════════════════════════
+# The 2026-08-05 blank-wizard failure class (owner's real-machine
+# acceptance of the 2026-08-04 redesign): the band+cards rendered (the
+# baked bitmap) while EVERY live control — labels, the path edit, the
+# browse button, the checkboxes — stayed invisible. A full-page art
+# control that sits ABOVE a sibling in Z-order starves that sibling of
+# WM_PAINT entirely, so "the art is the bottom-most control" must be an
+# EXPLICIT runtime invariant, not an implicit creation-order assumption.
+
+def test_page_art_macro_pins_bitmap_to_z_bottom():
+    tmpl = (_ROOT / 'desktop' / 'installer.nsi.tmpl').read_text(
+        encoding='utf-8')
+    macro = tmpl.split('!macro TOFU_PAGE_ART')[1].split('!macroend')[0]
+    assert 'SetWindowPos' in macro, (
+        'TOFU_PAGE_ART lost its HWND_BOTTOM SetWindowPos — the art must '
+        'be pinned to the bottom of the Z-order explicitly; creation '
+        'order alone is an assumption nobody can see (2026-08-05 blank '
+        'wizard: band+cards visible, every control dead)')
+
+
+def test_art_is_created_before_any_control_on_every_page():
+    """Companion belt to the HWND_BOTTOM pin: the creation order stays
+    art-first too, so the background invariant holds on two levels."""
+    for script, target in ((_FULL, 'full'), (_AGENT, 'agent')):
+        for page in _PAGE_CARDS:
+            body = script.split(f'Function {page}')[1] \
+                         .split('FunctionEnd')[0]
+            art_at = body.find('!insertmacro TOFU_PAGE_ART')
+            assert art_at != -1, (target, page)
+            first_ctl = min(
+                (i for i in (body.find('${NSD_Create'),
+                             body.find('!insertmacro TOFU_LABEL'))
+                 if i != -1),
+                default=-1)
+            assert first_ctl == -1 or art_at < first_ctl, (
+                f'{target} {page}: a control is created BEFORE the page '
+                'art — the art would sit above it in Z-order and hide it')
+
+
 def test_page_du_matches_the_art_space():
     """The template's du coordinates only align with the bitmaps if both
     sides assume the SAME page size (266×130 — the exehead's inner page)."""

@@ -1,14 +1,21 @@
 #!/usr/bin/env python3
-"""desktop/connect_ui.py — the shared connect-line dialog + preseed import.
+"""desktop/connect_ui.py — the shared connect-line dialog + attach imports.
 
 BOTH packaged components (the full desktop app and the agent-only build)
-attach a machine to a Tofu server the SAME way: the user pastes one
-connect line, or the installer baked a ``preseed_server.json`` next to
-the exe. These two functions lived in ``desktop/launcher.py`` until the
+attach a machine to a Tofu server the SAME way: a download-baked
+``tofu-agent-attach.json`` (zero-config: route candidates + a fresh
+bridge token), or the installer-baked ``preseed_server.json`` next to
+the exe, or — as the always-available manual repair path — ONE pasted
+connect line. These functions lived in ``desktop/launcher.py`` until the
 agent build needed them too; they moved here so there is ONE authoring —
 two copies of the dialog or the preseed contract would drift, and the
 dialog's parser (``lib.desktop_agent.config.parse_connect_line``) is the
 single owner of the wire format.
+
+The 6-digit PAIRING-CODE dialog was removed 2026-08-05 (owner decree:
+zero configuration burden — the credential rides the download, never the
+user's keyboard). The server-side pair endpoints stay for
+shipped-installer compat; no UI may mint or collect codes again.
 
 ``desktop/launcher.py`` keeps thin delegating wrappers under its old
 names — its call sites and test patch points are byte-identical.
@@ -151,160 +158,111 @@ def prompt_connect_line(current_url: str = '', log=_noop_log):
     return result['value']
 
 
-# Sentinel returned by prompt_attach when the user picks the advanced
-# connect-line path — the caller then opens prompt_connect_line.
-PREFER_CONNECT_LINE = '__prefer_connect_line__'
+def import_attach_bundle(exe_dir: str, log=_noop_log) -> bool:
+    """Import a download-baked ``tofu-agent-attach.json`` (zero-config).
 
+    The per-download ZIP (``/api/v1/desktop/agent-bundle``) carries this
+    file NEXT TO the installer; the NSIS script adopts it next to the
+    installed exe. It carries EVERYTHING the agent needs — an ordered
+    route-candidate list plus the bridge token minted at download time —
+    so first run attaches with zero user input (owner decree 2026-08-05:
+    no pairing codes, no pasted lines).
 
-def prompt_attach(server_url: str = '', log=_noop_log):
-    """The pairing-first attach dialog: server address + 6-digit code.
+    Probe order: the bundle's direct candidates first (a LAN address has
+    no SSO edge in between), then the discovery ladder (loopback → LAN
+    broadcast → ssh self-tunnel), the browser-reachable fallback LAST —
+    a cloud-IDE proxy URL is a measured dead end for a cookieless agent
+    (it 401s every /api/* at the edge; access.log showed zero agent
+    requests, 2026-08-05). When NOTHING answers, the first candidate is
+    still saved: the server may simply be off, the poll loop retries by
+    itself, and the tray link line says 'unreachable' honestly.
 
-    This is the agent's half of the pairing-code UX (§11): the panel
-    mints the code, this dialog collects it (plus the address, pre-filled
-    by the discovery ladder and still editable) and exchanges it for a
-    bridge token — no connect line, no SSH command the user has to run
-    themselves. Returns:
+    Discipline (mirrors import_preseed):
+      * ONE-SHOT — the file carries a bearer token, so it is deleted
+        after ANY attempt, success or failure;
+      * NEVER overrides an existing attachment;
+      * the whole route set persists as ``attach_candidates`` so
+        resume_attachment can re-point a dead saved route by itself.
 
-      * ``(url, secret)`` — paired and verified;
-      * ``PREFER_CONNECT_LINE`` — the user picked the advanced path
-        (paste a minted connect line instead);
-      * ``None`` — cancelled.
-
-    A failed exchange keeps the dialog open with the precise reason
-    (invalid/expired code vs rate-limited vs unreachable address — three
-    different fixes, so they are three different messages).
+    Returns True when an attachment (probed or optimistic) was written.
     """
-    from lib.desktop_agent._pair import exchange_pair_code
+    path = os.path.join(exe_dir, 'tofu-agent-attach.json')
+    if not os.path.isfile(path):
+        return False
     try:
-        import tkinter as tk
-        from tkinter import ttk
-    except ImportError as e:
-        log('Pair dialog unavailable (no tkinter): %s' % e)
-        logger.warning('Pair dialog unavailable (no tkinter): %s', e)
-        return None
-    from desktop import _tk_theme as theme
-    from desktop import _tk_host as host
+        import json
+        with open(path, encoding='utf-8') as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            raise ValueError('attach bundle is not an object')
+        token = str(data.get('token') or '').strip()
 
-    lang = theme.detect_lang()
-    result = {'value': None}
-    parent = host.parent_or_none()
-    root = tk.Toplevel(parent) if parent is not None else tk.Tk()
-    theme.apply_theme(root)
-    root.title(theme.t('desktop.pair.title', lang))
-    root.resizable(False, False)
-    theme.set_window_icon(root)
-    frame = ttk.Frame(root, style='Tofu.TFrame', padding=20)
-    frame.grid(sticky='nsew')
+        def _urls(key):
+            out = []
+            for u in data.get(key) or []:
+                u = str(u or '').strip().rstrip('/')
+                if u.startswith(('http://', 'https://')) and u not in out:
+                    out.append(u)
+            return out
 
-    header = ttk.Frame(frame, style='Tofu.TFrame')
-    header.grid(row=0, column=0, columnspan=2, sticky='w')
-    photo = theme.load_logo_photo(root, size=40)
-    if photo is not None:
-        ttk.Label(header, image=photo, style='Tofu.TLabel').grid(
-            row=0, column=0, padx=(0, 10))
-    ttk.Label(header, text=theme.t('desktop.pair.heading', lang),
-              style='Tofu.Title.TLabel').grid(row=0, column=1, sticky='w')
-    ttk.Label(frame, wraplength=430, justify='left', style='Tofu.Sub.TLabel',
-              text=theme.t('desktop.pair.instructions', lang)
-              ).grid(row=1, column=0, columnspan=2, sticky='w', pady=(8, 12))
-
-    ttk.Label(frame, style='Tofu.TLabel',
-              text=theme.t('desktop.pair.serverLabel', lang)
-              ).grid(row=2, column=0, sticky='w')
-    addr = ttk.Entry(frame, width=40, style='Tofu.TEntry')
-    addr.grid(row=2, column=1, sticky='we', pady=(0, 6))
-    if server_url:
-        addr.insert(0, server_url)
-
-    ttk.Label(frame, style='Tofu.TLabel',
-              text=theme.t('desktop.pair.codeLabel', lang)
-              ).grid(row=3, column=0, sticky='w')
-    code_entry = ttk.Entry(frame, width=14, style='Tofu.TEntry')
-    code_entry.grid(row=3, column=1, sticky='w')
-
-    err = ttk.Label(frame, style='Tofu.Err.TLabel', wraplength=430,
-                    justify='left')
-    err.grid(row=4, column=0, columnspan=2, sticky='w', pady=(8, 0))
-
-    def _ok(*_a):
-        url = addr.get().strip().rstrip('/')
-        code = code_entry.get().strip()
-        if not url.startswith(('http://', 'https://')):
-            err.config(text=theme.t('desktop.pair.badAddress', lang))
-            return
-        if not (code.isdigit() and 4 <= len(code) <= 8):
-            err.config(text=theme.t('desktop.pair.badCode', lang))
-            return
-        err.config(text=theme.t('desktop.pair.verifying', lang))
-        root.update()
-        ok, val = exchange_pair_code(url, code)
-        if ok:
-            result['value'] = (url, val)
-            root.destroy()
-            return
-        if val == 'invalid_code':
-            err.config(text=theme.t('desktop.pair.invalidCode', lang))
-        elif val == 'rate_limited':
-            err.config(text=theme.t('desktop.pair.rateLimited', lang))
-        else:
-            err.config(text=theme.t('desktop.pair.failed', lang)
-                       .replace('{reason}', theme.reason_text(val, lang)))
-
-    def _use_line(*_a):
-        result['value'] = PREFER_CONNECT_LINE
-        root.destroy()
-
-    def _cancel(*_a):
-        result['value'] = None
-        root.destroy()
-
-    btns = ttk.Frame(frame, style='Tofu.TFrame')
-    btns.grid(row=5, column=0, columnspan=2, sticky='we', pady=(14, 0))
-    ttk.Button(btns, text=theme.t('desktop.pair.useLine', lang),
-               style='Tofu.TButton', command=_use_line).grid(
-        row=0, column=0, sticky='w')
-    ttk.Button(btns, text=theme.t('desktop.pair.cancel', lang),
-               style='Tofu.TButton', command=_cancel).grid(
-        row=0, column=1, sticky='e', padx=(0, 8))
-    ttk.Button(btns, text=theme.t('desktop.pair.connect', lang),
-               style='Tofu.Accent.TButton', command=_ok).grid(
-        row=0, column=2, sticky='e')
-    btns.columnconfigure(0, weight=1)
-    code_entry.bind('<Return>', _ok)
-    root.bind('<Escape>', _cancel)
-    (code_entry if server_url else addr).focus_set()
-    theme.center_on_screen(root, width=520)
-
-    if parent is not None:
-        root.transient(parent)
-        root.grab_set()
+        candidates = _urls('candidates')
+        fallbacks = [u for u in _urls('fallback_candidates')
+                     if u not in candidates]
+        from lib.desktop_agent.config import (load_config, remote_server,
+                                              save_config,
+                                              save_remote_server)
+        existing, _secret = remote_server()
+        if existing:
+            log('Attach bundle ignored (already attached to %s)' % existing)
+            return False
+        if not candidates and not fallbacks:
+            log('Attach bundle carried no addresses — ignored')
+            return False
+        from lib.desktop_agent._probe import probe_server
+        winner = ''
+        for url in candidates:
+            ok, reason = probe_server(url, timeout=2.5)
+            if ok:
+                winner = url
+                break
+            log('Attach candidate %s not reachable: %s' % (url, reason))
+        if not winner:
+            from lib.desktop_agent._pair import discover
+            winner = discover(log=log)
+        if not winner:
+            for url in fallbacks:
+                ok, reason = probe_server(url, timeout=2.5)
+                if ok:
+                    winner = url
+                    break
+                log('Attach fallback %s not reachable: %s' % (url, reason))
+        chosen = winner or (candidates[0] if candidates else fallbacks[0])
+        save_remote_server(chosen, token)
         try:
-            parent.wait_window(root)
-        except tk.TclError:
-            pass
-        return result['value']
-    try:
-        root.mainloop()
+            cfg = load_config()
+            cfg['attach_candidates'] = candidates + fallbacks
+            save_config(cfg)
+        except Exception as e:
+            log('Could not persist attach candidates: %s' % e)
+            logger.warning('Could not persist attach candidates: %s', e)
+        if winner:
+            log('Attach bundle imported: polling %s (probed alive)' % chosen)
+        else:
+            log('Attach bundle imported: no address answered yet — polling '
+                '%s optimistically; the poll loop retries by itself' % chosen)
+        return True
     except Exception as e:
-        log('Pair dialog failed: %s' % e)
-        logger.warning('Pair dialog failed: %s', e)
-        return None
-    return result['value']
-
-
-def prompt_attachment_flow(current_url: str = '', log=_noop_log):
-    """Pairing-first, connect-line fallback — the ONE attach flow.
-
-    Both first run (agent_launcher.main) and the tray's "Connect to a
-    different Tofu…" call this so the two surfaces can never drift:
-    pairing dialog first; if the user picks the advanced path, the
-    legacy connect-line dialog opens instead. Returns ``(url, secret)``
-    or ``None``.
-    """
-    parsed = prompt_attach(current_url, log=log)
-    if parsed == PREFER_CONNECT_LINE:
-        parsed = prompt_connect_line(current_url, log=log)
-    return parsed
+        log('Attach bundle import failed (ignored): %s' % e)
+        logger.warning('Attach bundle import failed (ignored): %s', e)
+        return False
+    finally:
+        # One-shot ALWAYS: the file carries a bearer token and must not
+        # linger next to the exe (same discipline as import_preseed).
+        try:
+            os.remove(path)
+        except OSError as e:
+            log('Could not remove attach bundle %s: %s' % (path, e))
+            logger.debug('Could not remove attach bundle %s: %s', path, e)
 
 
 def import_preseed(exe_dir: str, log=_noop_log) -> None:

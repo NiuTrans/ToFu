@@ -35,7 +35,7 @@ sys.modules['flask'] = _quart
 
 import pytest
 
-pytestmark = pytest.mark.unit
+pytestmark = [pytest.mark.unit, pytest.mark.ci_serial]
 
 
 @pytest.fixture(scope='module', autouse=True)

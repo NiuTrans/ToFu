@@ -1,19 +1,22 @@
 #!/usr/bin/env python3
-"""lib/desktop_agent/_pair.py — agent-side pairing-code exchange + the
-first-run server-discovery ladder (docs/DESKTOP_AGENT_DIST_DESIGN.md §11.2.1).
-
-Two pieces:
-
-* ``exchange_pair_code(url, code)`` — the wire client for
-  ``POST /api/desktop/pair``. The 6-digit code IS the credential (no
-  bearer); a successful exchange returns a fresh ``agents:bridge`` token
-  the caller saves as its remote attachment.
+"""lib/desktop_agent/_pair.py — the agent-side attach-route machinery:
+the zero-question server-discovery ladder + probe-first resume.
 
 * ``discover()`` — the zero-question ladder: loopback → LAN broadcast →
   ``~/.ssh/config`` self-tunnels. Each rung is cheap and silent; the first
   reachable Tofu wins and is returned as a base URL for the caller to
   pre-fill into the pairing dialog. Only when EVERY rung misses does the
   user get asked — and then exactly once.
+
+* ``resume_attachment(url, secret)`` — probe-first resume for a SAVED
+  attachment: a dead saved route re-walks the attach bundle's candidate
+  list, then the ladder, KEEPING the token (a bearer credential does not
+  care which address reaches the server).
+
+The PAIRING-CODE exchange client that used to live here was removed
+2026-08-05 (owner decree: no user-typed codes, zero configuration
+burden — the per-download attach bundle carries the credential). The
+server-side endpoints stay for shipped-installer compat only.
 
 The SSH rung spawns REAL ``ssh -N -L`` processes. A tunnel that wins is
 kept alive in ``_ACTIVE_TUNNELS`` for the process lifetime (the agent
@@ -52,73 +55,6 @@ _MAX_SSH_CANDIDATES = 3
 
 def _noop_log(_msg: str) -> None:
     pass
-
-
-# ═══════════════════════════════════════════════════════════════════
-#  Pairing-code exchange (POST /api/desktop/pair)
-# ═══════════════════════════════════════════════════════════════════
-
-def exchange_pair_code(url: str, code: str, name: str = '',
-                       platform: str = '', timeout: float = 10.0):
-    """Exchange a 6-digit pairing code for a bridge token.
-
-    Returns ``(True, token)`` on success, else ``(False, reason)`` where
-    reason is one of:
-
-      * ``invalid_code`` — wrong / expired / already-used code (server 409);
-      * ``rate_limited`` — too many failed attempts from this address
-        (server 429; wait a few minutes and mint a fresh code);
-      * ``unreachable`` / ``timeout`` / ``error`` — transport failures;
-      * ``http_<n>`` — any other HTTP status (a proxy's refusal lands
-        here, e.g. an SSO edge 401 — the ADDRESS is wrong, not the code);
-      * ``bad_response`` — a 2xx that does not carry a token.
-    """
-    import socket as _socket
-
-    import requests
-    base = (url or '').strip().rstrip('/')
-    code = (code or '').strip()
-    if not base.startswith(('http://', 'https://')):
-        return False, 'unreachable'
-    if not code:
-        return False, 'invalid_code'
-    if not name:
-        try:
-            name = _socket.gethostname()
-        except Exception as e:
-            logger.debug('[Agent] hostname unavailable: %s', e)
-            name = ''
-    payload = {'code': code,
-               'name': name or 'paired-agent',
-               'platform': platform or sys.platform}
-    try:
-        resp = requests.post(base + '/api/desktop/pair', json=payload,
-                             timeout=timeout,
-                             proxies={'no_proxy': '*'})
-    except requests.exceptions.ConnectTimeout as e:
-        logger.debug('[Agent] pair exchange timed out: %s', e)
-        return False, 'timeout'
-    except requests.exceptions.ConnectionError as e:
-        logger.debug('[Agent] pair exchange unreachable: %s', e)
-        return False, 'unreachable'
-    except requests.RequestException as e:
-        logger.debug('[Agent] pair exchange failed: %s', e)
-        return False, 'error'
-    if resp.status_code == 409:
-        return False, 'invalid_code'
-    if resp.status_code == 429:
-        return False, 'rate_limited'
-    if resp.status_code not in (200, 201):
-        return False, 'http_%d' % resp.status_code
-    try:
-        body = resp.json()
-    except ValueError as e:
-        logger.debug('[Agent] pair response not JSON: %s', e)
-        return False, 'bad_response'
-    token = (body.get('token') or '') if isinstance(body, dict) else ''
-    if not token:
-        return False, 'bad_response'
-    return True, token
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -349,6 +285,29 @@ def try_ssh_tunnel(host: str, local_port: int = _DEFAULT_PORT,
     return ''
 
 
+def _attach_candidates(saved_url: str) -> list:
+    """The route candidates the attach bundle baked (config-persisted).
+
+    Read at RESUME time so a downloaded-elsewhere bundle can re-point an
+    install whose saved route died (the measured 2026-08-05 case: an
+    SSO-edge URL that never forwarded a single byte). The saved URL
+    itself is excluded — it was already probed dead by the caller.
+    """
+    try:
+        from lib.desktop_agent.config import load_config
+        raw = load_config().get('attach_candidates')
+    except Exception as e:
+        logger.debug('[Agent] attach candidates unreadable: %s', e)
+        return []
+    out = []
+    for u in raw or []:
+        u = str(u or '').strip().rstrip('/')
+        if (u.startswith(('http://', 'https://')) and u != saved_url
+                and u not in out):
+            out.append(u)
+    return out
+
+
 def resume_attachment(url: str, secret: str, log=_noop_log):
     """Probe-first resume for a SAVED attachment. Returns ``(url, secret)``.
 
@@ -361,11 +320,12 @@ def resume_attachment(url: str, secret: str, log=_noop_log):
 
     Contract:
       * saved address answers → return it unchanged (zero action);
-      * saved address dead → re-run the ladder; when it finds the server,
+      * saved address dead → walk the attach bundle's persisted route
+        candidates, then re-run the ladder; when a live route turns up,
         KEEP THE TOKEN (a bridge token is a bearer credential — it does not
         care which address reaches the server) and persist the re-pointed
         address only when it actually changed;
-      * ladder finds nothing → return the saved pair UNCHANGED. The server
+      * nothing answers → return the saved pair UNCHANGED. The server
         may simply be off right now; the poll loop keeps retrying and the
         tray link line says 'unreachable' honestly. Never bounce the user
         into a first-run dialog over a transient outage.
@@ -374,7 +334,16 @@ def resume_attachment(url: str, secret: str, log=_noop_log):
     if ok:
         return url, secret
     log('Saved attachment %s is not answering — re-running discovery' % url)
-    found = discover(log=log)
+    found = ''
+    for cand in _attach_candidates(url):
+        ok, reason = probe_server(cand, timeout=2.5)
+        if ok:
+            found = cand
+            log('Attach candidate %s answers — re-pointing' % cand)
+            break
+        log('Attach candidate %s not reachable: %s' % (cand, reason))
+    if not found:
+        found = discover(log=log)
     if not found:
         return url, secret
     if found != url:
@@ -409,6 +378,6 @@ def discover(log=_noop_log, lan: bool = True, ssh: bool = True) -> str:
     return ''
 
 
-__all__ = ['exchange_pair_code', 'loopback_probe', 'lan_probe',
+__all__ = ['loopback_probe', 'lan_probe',
            'ssh_config_hosts', 'try_ssh_tunnel', 'discover',
            'resume_attachment', '_ACTIVE_TUNNELS']

@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
-"""tests/test_desktop_pair_agent.py — agent-side pairing + discovery (P3).
+"""tests/test_desktop_pair_agent.py — agent-side discovery + resume.
 
-Covers the pure logic of lib/desktop_agent/_pair.py: the pair-exchange
-wire client (success / invalid / rate-limited / transport failures), the
-LAN broadcast probe (magic out, verified URLs back), the ssh-config
-parser, the self-tunnel lifecycle (kept on success, killed on failure),
-and the ladder's rung order + short-circuit. The tk dialog itself is
-deliberately untested (no display on CI), consistent with
-prompt_connect_line's existing coverage.
+Covers the pure logic of lib/desktop_agent/_pair.py: the LAN broadcast
+probe (magic out, verified URLs back), the ssh-config parser, the
+self-tunnel lifecycle (kept on success, killed on failure), the ladder's
+rung order + short-circuit, and the probe-first resume (attach-bundle
+candidates → discovery ladder, token kept).
+
+The pairing-code exchange client (exchange_pair_code) and the first-run
+pairing dialog were REMOVED 2026-08-05 (owner decree: zero configuration
+burden — the credential rides the per-download attach bundle). Their
+coverage left with them; the server-side pair endpoints stay pinned by
+tests/test_desktop_pairing.py for shipped-installer compat.
 """
 
 import socket as _socket
@@ -27,17 +31,6 @@ pytestmark = pytest.mark.unit
 
 
 # ── Fakes ────────────────────────────────────────────────────────────────
-
-class _Resp:
-    def __init__(self, status, body=None, raise_json=False):
-        self.status_code = status
-        self._body = body
-        self._raise_json = raise_json
-
-    def json(self):
-        if self._raise_json:
-            raise ValueError('not json')
-        return self._body
 
 
 class _FakeSock:
@@ -81,78 +74,6 @@ class _FakePopen:
 
     def kill(self):
         self.killed = True
-
-
-# ── exchange_pair_code ───────────────────────────────────────────────────
-
-def _patch_post(monkeypatch, handler):
-    import requests
-    monkeypatch.setattr(requests, 'post', handler)
-
-
-def test_exchange_success_returns_token(monkeypatch):
-    seen = {}
-
-    def fake_post(url, json=None, timeout=None, proxies=None):
-        seen['url'] = url
-        seen['json'] = json
-        return _Resp(201, {'ok': True, 'token': 'tok-123', 'id': 'k1'})
-
-    _patch_post(monkeypatch, fake_post)
-    ok, val = _pair.exchange_pair_code('http://srv:15000/', '482916',
-                                       name='box', platform='win32')
-    assert ok is True and val == 'tok-123'
-    assert seen['url'] == 'http://srv:15000/api/desktop/pair'
-    assert seen['json']['code'] == '482916'
-    assert seen['json']['name'] == 'box'
-    assert seen['json']['platform'] == 'win32'
-
-
-def test_exchange_invalid_code_is_409(monkeypatch):
-    _patch_post(monkeypatch, lambda *a, **k: _Resp(409, {'ok': False}))
-    ok, val = _pair.exchange_pair_code('http://srv', '000000')
-    assert (ok, val) == (False, 'invalid_code')
-
-
-def test_exchange_rate_limited_is_429(monkeypatch):
-    _patch_post(monkeypatch, lambda *a, **k: _Resp(429, {'ok': False}))
-    ok, val = _pair.exchange_pair_code('http://srv', '000000')
-    assert (ok, val) == (False, 'rate_limited')
-
-
-def test_exchange_other_http_status(monkeypatch):
-    # A proxy/SSO edge answering 401: the ADDRESS is wrong, not the code —
-    # it must surface as http_401, never as invalid_code.
-    _patch_post(monkeypatch, lambda *a, **k: _Resp(401, {'error': 'x'}))
-    ok, val = _pair.exchange_pair_code('http://proxy', '000000')
-    assert (ok, val) == (False, 'http_401')
-
-
-def test_exchange_unreachable_and_timeout(monkeypatch):
-    import requests
-
-    def raise_conn(*a, **k):
-        raise requests.exceptions.ConnectionError()
-
-    def raise_to(*a, **k):
-        raise requests.exceptions.ConnectTimeout()
-
-    _patch_post(monkeypatch, raise_conn)
-    assert _pair.exchange_pair_code('http://srv', '1') == (False, 'unreachable')
-    _patch_post(monkeypatch, raise_to)
-    assert _pair.exchange_pair_code('http://srv', '1') == (False, 'timeout')
-
-
-def test_exchange_bad_response_shapes(monkeypatch):
-    _patch_post(monkeypatch, lambda *a, **k: _Resp(201, {'ok': True}))  # no token
-    assert _pair.exchange_pair_code('http://srv', '1') == (False, 'bad_response')
-    _patch_post(monkeypatch, lambda *a, **k: _Resp(201, raise_json=True))
-    assert _pair.exchange_pair_code('http://srv', '1') == (False, 'bad_response')
-
-
-def test_exchange_rejects_bad_inputs():
-    assert _pair.exchange_pair_code('not-a-url', '123456')[0] is False
-    assert _pair.exchange_pair_code('http://srv', '')[0] is False
 
 
 # ── lan_probe ────────────────────────────────────────────────────────────
@@ -322,29 +243,6 @@ def test_discover_ssh_rung_capped(monkeypatch):
                         lambda h, log=None: tried.append(h) or '')
     assert _pair.discover() == ''
     assert len(tried) == _pair._MAX_SSH_CANDIDATES
-
-
-# ── the attach flow's sentinel plumbing (no UI) ─────────────────────────
-
-def test_attachment_flow_falls_back_to_connect_line(monkeypatch):
-    import desktop.connect_ui as cui
-    called = []
-    monkeypatch.setattr(cui, 'prompt_attach',
-                        lambda url, log=None: cui.PREFER_CONNECT_LINE)
-    monkeypatch.setattr(cui, 'prompt_connect_line',
-                        lambda url, log=None: called.append(url) or
-                        ('http://srv', 'tok'))
-    assert cui.prompt_attachment_flow('http://pre', log=None) == ('http://srv', 'tok')
-    assert called == ['http://pre']
-
-
-def test_attachment_flow_cancel_stays_cancel(monkeypatch):
-    import desktop.connect_ui as cui
-    monkeypatch.setattr(cui, 'prompt_attach', lambda url, log=None: None)
-    monkeypatch.setattr(
-        cui, 'prompt_connect_line',
-        lambda url, log=None: pytest.fail('cancel must not open the line dialog'))
-    assert cui.prompt_attachment_flow('', log=None) is None
 
 
 # ── resume_attachment: probe-first resume (owner review landmine) ────────

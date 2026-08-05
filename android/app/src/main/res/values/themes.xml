@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- A Compose app draws its own Material3 surfaces via MaterialTheme, so the
+         Activity only needs a bare no-action-bar, no-title host theme. We extend
+         a stock android: DeviceDefault base to avoid depending on the
+         com.google.android.material XML theme library (we use Compose
+         Material3, not the View-system Material Components). -->
+    <style name="Theme.TofuClient" parent="@android:style/Theme.DeviceDefault.Light.NoActionBar">
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowActionBar">false</item>
+    </style>
+</resources>

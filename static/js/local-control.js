@@ -81,54 +81,89 @@ function _lcDesktopSignature(d) {
   return [d.setup_state, !!d.connected, d.server_url || '',
           d.bridge_token_required, fp(d.downloads),
           fp(d.agent_downloads), lang,
-          d.server_url_reachability || '', d.bridge_tokens_issued || 0
+          d.server_url_reachability || '', d.bridge_tokens_issued || 0,
+          d.server_bind || '', d.agent_bundle_ready === true
          ].join('~');
 }
 
-/* Paired-but-nothing-arrived: bridge tokens exist yet no agent polls.
- *
- * Recovery belongs to the AGENT, not the user (owner decree 2026-08-04 —
- * no UI may send anyone to open an ssh tunnel by hand): the agent's resume
- * path re-probes its saved address and re-runs the discovery ladder
- * (loopback → LAN → ssh-config candidates → self-built tunnel) keeping the
- * ORIGINAL token, so a dead route heals itself. This line says exactly
- * that, plus the ONE fallback that always works: re-pair from the tray
- * with a fresh code. Its predecessor told the user to mint a second
- * connect line from a tunnel address — measured dead-end advice. */
+/* Credentials-issued-but-nothing-arrived: bridge tokens exist yet no
+ * agent polls. Recovery belongs to the AGENT, not the user (owner decree
+ * 2026-08-04 — no UI may send anyone to open an ssh tunnel by hand): the
+ * bundle's route candidates + resume ladder re-probe and re-point by
+ * themselves, keeping the ORIGINAL token. This line says exactly that,
+ * plus where the agent tells the truth (its tray Link line). */
 function _lcAwaitingAgentHtml(d) {
   if (!d || d.connected || !(d.bridge_tokens_issued > 0)) return '';
   return '<p class="lc-step lc-await">' + _lcEsc(_lcT('local.awaitingAgent',
-    '已发出配对凭证，等待受控端连入……它会自己寻找服务器并自动重试（本机 → 局域网 → 自动隧道），一般一分钟内变绿；迟迟未连上时，在受控端托盘选「连接到另一个 Tofu…」用新配对码重配一次。')) + '</p>';
+    '受控端凭证已随安装包内置，等待它首次连入……它会自己寻找服务器并自动重试（直连内网 → 局域网广播 → 自动隧道），一般一分钟内变绿；迟迟未变绿时，看受控端托盘菜单的「链路」一行——它会明说：连不上 / 被代理拦截 / 鉴权失败。')) + '</p>';
 }
 
-/* The pairing block — the ONE primary attach action in BOTH install
- * branches (docs/DESKTOP_AGENT_DIST_DESIGN.md §11). Authored ONCE so the
- * branches cannot drift (a drifted copy is a wrong instruction shown
- * first). The ids are fixed (lcPairBtn / lcPairBox): exactly one branch
- * is on screen at a time, so they never collide. `withStep` prefixes the
- * numbered ② line for the remote branch's ①②③ flow; the role-labeled
- * branch and the stale-while-build fallback already name the flow, so
- * they render the bare block. */
-function _lcPairBlockHtml(withStep) {
-  return (withStep
-      ? '<p class="lc-step">' + _lcEsc(_lcT('local.agentStepPair',
-        '② 点「配对这台电脑」（6 位码，可复制），填进受控端首次启动：')) + '</p>'
-      : '') +
-    '<button type="button" class="btn btn-primary btn-sm" id="lcPairBtn">' +
-      _lcEsc(_lcT('local.pairBtn', '配对这台电脑')) + '</button>' +
-    '<div id="lcPairBox" style="display:none"></div>';
+/* The ONE primary attach action (owner decree 2026-08-05 — no pairing
+ * codes, zero configuration burden): the per-download bundle ZIP. The
+ * server mints a fresh agents:bridge token AT THE CLICK and packs it with
+ * the ordered route candidates next to the generic exe; the NSIS
+ * installer adopts the JSON, the agent's first run imports it. The bare
+ * exe stays as the repair path (connect line below it).
+ *
+ * The `base` query carries the browser's live origin + BASE_PATH (e.g.
+ * /proxy/15000 behind a cloud-IDE gateway) — the backend cannot see the
+ * prefix (the proxy strips it), and baking request.host_url produced the
+ * dead-address class that stranded the fleet (extension "HTTP 405",
+ * 2026-08-04). The backend pins the param to the request's Host. */
+function _lcAgentBundleUrl() {
+  var u = '/api/v1/desktop/agent-bundle';
+  if (typeof apiUrl === 'function') u = apiUrl(u);
+  var base = '';
+  try {
+    var origin = (window.location && window.location.origin) || '';
+    // 'null' (file://, opaque origins) must never become a query value.
+    if (/^https?:\/\//.test(origin)) {
+      base = origin + ((typeof BASE_PATH === 'string') ? BASE_PATH : '');
+    }
+  } catch (e) { base = ''; }
+  return u + (base ? ('?base=' + encodeURIComponent(base)) : '');
+}
+
+function _lcAgentAttachBlockHtml(d) {
+  if (d && d.agent_bundle_ready) {
+    return '<a class="btn btn-primary btn-sm" id="lcAgentBundleBtn" href="' +
+      _lcEsc(_lcAgentBundleUrl()) + '">' +
+      _lcEsc(_lcT('local.agentBundleBtn',
+        '下载受控端 ZIP（已内置配对凭证）')) + '</a>' +
+      '<p class="lc-substep">' + _lcEsc(_lcT('local.agentBundleNote',
+        '解压 ZIP 后运行安装程序（两个文件要在一起）——装完启动即自动连上，全程无需输入。')) + '</p>';
+  }
+  // Not ready: the stored exe predates the attach flow — a rebuild was
+  // kicked server-side. Offer the bare installer + connect line meanwhile
+  // (a degraded but honest path, never a dead button).
+  return '<p class="lc-substep">' + _lcEsc(_lcT('local.bundleRebuilding',
+      '受控端安装包正在后台重建（携带零配置配对的新版本）——几分钟后此处可用；急用可先下载裸安装包 + 连接行手动配对。')) + '</p>' +
+    _lcDownloadLinks(d, 'agent', true);
+}
+
+/* A loopback-bound server behind a proxy is a STRUCTURAL dead end for a
+ * remote agent (direct LAN refuses; the SSO edge 401s cookieless calls).
+ * Measured 2026-08-05: a platform-injected BIND_HOST=127.0.0.1 quietly
+ * overrode the 0.0.0.0 default and the whole attach flow failed silently.
+ * The panel says so out loud — the one operator action that actually
+ * unblocks direct attach. */
+function _lcBindWarnHtml(d) {
+  if (!d || d.server_bind !== 'loopback') return '';
+  if (d.setup_state !== 'remote' && d.setup_state !== 'local_source') return '';
+  return '<p class="lc-step lc-await">' + _lcEsc(_lcT('local.bindLoopbackWarn',
+    '⚠️ 服务器当前只监听本机回环（BIND_HOST=127.0.0.1）——受控端无法直连内网地址，只能靠自动隧道；去掉该环境变量并重启后，受控端可直连，更快更稳。')) + '</p>';
 }
 
 /* The demoted connect-line fallback. Suppressed ENTIRELY when the panel is
  * reached through a public host: there the line's address half is an SSO
  * edge the agent can never cross (owner incident 2026-08-03), so offering
- * it is offering a measured dead end — the pairing code above covers every
- * case the line could, because the agent discovers the route itself. */
+ * it is offering a measured dead end — the bundle above covers every case
+ * the line could, because the agent discovers the route itself. */
 function _lcConnectDetailsHtml(reachability) {
   if (reachability === 'public') return '';
   return '<details class="lc-details"><summary>' +
       _lcEsc(_lcT('local.connectLineToggle',
-        '高级：连接行（配对码不可用时兜底）')) + '</summary>' +
+        '高级：连接行（自动配对不可用时兜底）')) + '</summary>' +
     '<button type="button" class="btn btn-primary btn-sm" id="lcMintBtn">' +
       _lcEsc(_lcT('local.mintToken', '生成连接行')) + '</button>' +
     '<code class="lc-copy" id="lcTokenBox" style="display:none"></code>' +
@@ -137,8 +172,6 @@ function _lcConnectDetailsHtml(reachability) {
 
 /* Bind the attach actions a branch just rendered (ids are branch-unique). */
 function _lcWireAttach(serverUrl) {
-  var pair = document.getElementById('lcPairBtn');
-  if (pair) pair.onclick = function () { _lcPairCode(); };
   var mint = document.getElementById('lcMintBtn');
   if (mint) mint.onclick = function () { _lcMintToken(serverUrl); };
 }
@@ -604,12 +637,12 @@ function _lcRenderDesktop(d, err) {
       var srvSrc = (d.server_url || '').trim();
       var agentSrc = Array.isArray(d.agent_downloads)
         ? d.agent_downloads : [];
-      // Pairing-code primary here too (owner decree 2026-08-04): the code
-      // carries NO address, so it works from every reachability class —
-      // the agent discovers the route itself. The connect line survives
-      // only as the demoted details fallback (never under a public host).
-      var pairSrc = _lcPairBlockHtml(false) +
-        _lcConnectDetailsHtml(d.server_url_reachability);
+      // Zero-config primary here too (owner decree 2026-08-05): the
+      // bundle ZIP carries credential + route candidates, so it works
+      // from every reachability class — the agent discovers the route
+      // itself. The connect line survives only as the demoted details
+      // fallback (never under a public host).
+      var attachSrc = _lcConnectDetailsHtml(d.server_url_reachability);
       var htmlSrc = '<p class="lc-step">' + _lcEsc(_lcT('local.roleChoose',
           '当前 Tofu 以源码方式运行 —— 按这台电脑的角色选装：')) + '</p>';
       if (agentSrc.length) {
@@ -619,8 +652,8 @@ function _lcRenderDesktop(d, err) {
               _lcEsc(_lcT('local.agentRoleHead', '受控端 · 轻量')) +
               '<span class="lc-role-note">' + _lcEsc(_lcT('local.agentRoleNote',
                 '—— 从另一台电脑访问（如 ssh 转发）选它：只让服务器操作那台电脑')) + '</span></p>' +
-            _lcDownloadLinks(d, 'agent', true) +
-            pairSrc +
+            _lcAgentAttachBlockHtml(d) +
+            attachSrc +
           '</div>' +
           '<div class="lc-role">' +
             '<p class="lc-role-head">' +
@@ -641,10 +674,10 @@ function _lcRenderDesktop(d, err) {
               '<span class="lc-role-note">' + _lcEsc(_lcT('local.fullRoleNote',
                 '—— 这台电脑就是服务器本机：装它，托盘一键开启')) + '</span></p>' +
             _lcDownloadLinks(d, 'full') +
-            pairSrc +
+            attachSrc +
           '</div>';
       }
-      setup.innerHTML = _lcAwaitingAgentHtml(d) + htmlSrc;
+      setup.innerHTML = _lcBindWarnHtml(d) + _lcAwaitingAgentHtml(d) + htmlSrc;
       _lcWireAttach(srvSrc);
       return;
     }
@@ -653,62 +686,49 @@ function _lcRenderDesktop(d, err) {
       // Remote server — the machine in front of the user is NOT this
       // machine, so this is the only case that can need a token. Its role
       // in this dialog is to be CONTROLLED (the A3 branch matrix): the
-      // agent installer (lightweight, no frontend) is the PRIMARY offer;
+      // agent bundle (lightweight, no frontend) is the PRIMARY offer;
       // the full desktop app is a one-line COLLAPSED secondary. When no
       // agent artifact exists yet (a build is in flight), the full
       // installer takes the primary slot with the historical instruction —
       // stale-while-build, never a dead end.
       //
-      // The agent flow is numbered like the browser row's (①②③), because
-      // an un-ordered "install … then pair" asked the user to discover
-      // the sequence from the layout. Two shapes:
-      //   * 3-step (default): download → pair with the 6-digit code →
-      //     green status (the agent discovers the route itself);
-      //   * 2-step (zero-touch): the artifact carries a usable preseed
-      //     (backend already filtered loopback) AND the bridge needs no
-      //     token — install and it connects by itself. bridge_token_required
-      //     absent ⇒ treated as REQUIRED: the 3-step flow also works on an
-      //     open bridge, so that is the fail-safe direction.
+      // The agent flow is TWO steps (owner decree 2026-08-05 — pairing
+      // codes retired, zero configuration burden):
+      //   ① download the bundle ZIP (credentials baked at the click) →
+      //   ② install and launch — it finds the server and attaches itself.
       var dl = (d.download_url || '').trim();
       var srv = (d.server_url || '').trim();
       var agentPicks = Array.isArray(d.agent_downloads)
         ? d.agent_downloads : [];
       var html;
       if (agentPicks.length) {
-        var autoConnect = (d.bridge_token_required === false) &&
-          agentPicks.some(function (p) { return p && p.preseed_url; });
         html =
           '<p class="lc-step">' + _lcEsc(_lcT('local.desktopRemoteAgent',
             'Tofu 运行在远程服务器上 —— 让 AI 操作这台电脑：')) + '</p>' +
           '<p class="lc-step">' + _lcEsc(_lcT('local.agentStep1',
             '① 下载并安装受控端（只让服务器操作这台电脑 —— 轻量 · 无界面 · 托盘配置）：')) + '</p>' +
-          _lcDownloadLinks(d, 'agent', true) +
-          (autoConnect
-            ? '<p class="lc-step">' + _lcEsc(_lcT('local.agentStepAuto',
-              '② 装完启动即可 —— 安装包已带服务器地址，会自动连上；此处状态变绿就是成功。')) + '</p>'
-            : _lcPairBlockHtml(true) +
-              '<p class="lc-step">' + _lcEsc(_lcT('local.agentStep3',
-              '③ 连上后此处状态变绿 —— 之后它常驻托盘，无需再操作。')) + '</p>') +
+          _lcAgentAttachBlockHtml(d) +
+          '<p class="lc-step">' + _lcEsc(_lcT('local.agentStepAuto',
+            '② 装完启动即可 —— 安装包已内置服务器通路与配对凭证，会自动连上；此处状态变绿就是成功。')) + '</p>' +
           '<details class="lc-details"><summary>' +
             _lcEsc(_lcT('local.fullVersionToggle',
             '这台电脑也想跑 Tofu 本体（服务器+界面）？下载完整桌面版')) +
             '</summary>' +
             _lcDownloadLinks(d, 'full') +
           '</details>' +
-          (autoConnect ? '' : _lcConnectDetailsHtml(d.server_url_reachability));
+          _lcConnectDetailsHtml(d.server_url_reachability);
       } else {
         // Stale-while-build: no agent artifact yet — the full installer
         // doubles as the controlled endpoint, and the attach flow is the
-        // SAME pairing code, never a bare minted line (its address half
-        // is the measured dead end under an SSO edge).
+        // demoted connect line (its address half is a measured dead end
+        // under an SSO edge, so it stays collapsed / suppressed there).
         html =
           '<p class="lc-step">' + _lcEsc(_lcT('local.desktopRemote',
-            'Tofu 运行在远程服务器上。在你自己的电脑安装桌面版，再把 6 位配对码填进它的首次启动：')) + '</p>' +
+            'Tofu 运行在远程服务器上。在你自己的电脑安装桌面版，再用下方生成的连接行完成连接：')) + '</p>' +
           _lcDownloadLinks(d) +
-          _lcPairBlockHtml(false) +
           _lcConnectDetailsHtml(d.server_url_reachability);
       }
-      setup.innerHTML = _lcAwaitingAgentHtml(d) + html;
+      setup.innerHTML = _lcBindWarnHtml(d) + _lcAwaitingAgentHtml(d) + html;
       _lcWireAttach(srv);
       return;
     }
@@ -763,85 +783,6 @@ function _lcMintToken(serverUrl, btnId, boxId) {
           })
           .catch(function () {});
       }
-    })
-    .catch(function () {
-      if (btn) btn.disabled = false;
-      if (typeof showToast === 'function') showToast(_lcT('devices.mintFailed', '生成失败'));
-    });
-}
-
-/* Mint a PAIRING CODE (P2, docs/DESKTOP_AGENT_DIST_DESIGN.md §11) and render
- * it BIG with a copy button + countdown — the ONE primary action of the
- * remote branch. The user types 6 digits into the agent's first-run dialog;
- * the agent exchanges the code for a bridge token (no bearer, no address,
- * no SSH command). This replaces the mint-connect-line flow as the primary
- * path because the connect line's address half is necessarily wrong under
- * an SSO proxy (owner incident 2026-08-03); the code carries no address at
- * all — the agent discovers the server itself (§11.2.1 ladder).
- *
- * The code is shown EXACTLY once (it is one-shot + 5-minute TTL); the
- * countdown keeps the TTL honest so a code that quietly expired is never
- * pasted. Reuses POST /api/v1/desktop/pair-code. */
-function _lcPairCode(btnId, boxId) {
-  var btn = document.getElementById(btnId || 'lcPairBtn');
-  var box = document.getElementById(boxId || 'lcPairBox');
-  if (btn) btn.disabled = true;
-  Promise.resolve(Api.desktop.mintPairCode())
-    .then(function (r) {
-      if (btn) btn.disabled = false;
-      if (!r || !r.code) {
-        if (typeof showToast === 'function') showToast(_lcT('devices.mintFailed', '生成失败'));
-        return;
-      }
-      if (!box) return;
-      var code = String(r.code);
-      var expiresAt = Number(r.expires_at || 0);
-      box.style.display = '';
-      box.innerHTML =
-        '<div class="lc-pair-code">' +
-          '<span class="lc-pair-digits">' + _lcEsc(code) + '</span>' +
-          '<button type="button" class="btn btn-primary btn-sm" id="lcPairCopy">' +
-            _lcEsc(_lcT('browser.clickToCopy', '点击复制')) + '</button>' +
-        '</div>' +
-        '<p class="lc-substep" id="lcPairCountdown">' +
-          _lcEsc(_lcT('local.pairHint',
-            '把这 6 位数字填进受控端首次启动 —— 它自己找服务器并完成配对（无需地址、无需隧道）。')) +
-        '</p>';
-      var copyBtn = document.getElementById('lcPairCopy');
-      if (copyBtn) {
-        copyBtn.onclick = function () {
-          if (typeof _safeClipboardWrite === 'function') {
-            _safeClipboardWrite(code)
-              .then(function () {
-                copyBtn.textContent = _lcT('local.copied', '已复制');
-                if (typeof showToast === 'function') {
-                  showToast(_lcT('local.pairCopied',
-                    '配对码已复制 —— 粘贴到受控端首次启动'));
-                }
-              })
-              .catch(function () {});
-          }
-        };
-      }
-      // Countdown: keep the TTL honest. Refresh once a second until expiry;
-      // past-zero the box greys out and offers to re-mint (the button
-      // stays — clicking it again just mints a fresh code).
-      var cd = document.getElementById('lcPairCountdown');
-      var started = Date.now();
-      var iv = setInterval(function () {
-        var left = Math.max(0, Math.round(expiresAt - Date.now() / 1000));
-        var m = Math.floor(left / 60), s = left % 60;
-        if (cd) {
-          cd.textContent = _lcT('local.pairExpires',
-            '配对码 {mm}:{ss} 后过期').replace('{mm}', m)
-            .replace('{ss}', (s < 10 ? '0' : '') + s);
-        }
-        if (left <= 0) {
-          clearInterval(iv);
-          if (cd) cd.textContent = _lcT('local.pairExpired',
-            '配对码已过期 —— 再点一次生成新码');
-        }
-      }, 1000);
     })
     .catch(function () {
       if (btn) btn.disabled = false;

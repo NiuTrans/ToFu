@@ -50,7 +50,13 @@ jobs:
         # that never reproduce on a fast box. `-n 2` halves the pressure;
         # `--dist loadscope` keeps each module's tests on one worker so
         # per-file fixtures can't interleave across workers.
-        run: pytest -m unit -n 2 --dist loadscope --timeout=300 -ra -q
+        run: pytest -m "unit and not ci_serial" -n 2 --dist loadscope --timeout=300 -ra -q
+      - name: Run timing-sensitive unit tests (serial)
+        # Suites marked ci_serial assert locking / CAS / heartbeat-window
+        # behaviour — even modest CPU contention flips them (they pass
+        # reliably on any non-starved box). They run SERIALLY here, with a
+        # longer timeout, after the parallel bulk.
+        run: pytest -m "unit and ci_serial" --timeout=600 -ra -q
 
   # ── API integration tier (needs a DB; smaller, ~140 tests) ──
   # These boot the real app + hit routes. Run parallel too, but on a single

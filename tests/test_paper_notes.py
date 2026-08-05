@@ -24,6 +24,32 @@ import uuid
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault('TRADING_ENABLED', '0')
 
+import pytest  # noqa: E402
+
+pytestmark = [pytest.mark.unit, pytest.mark.ci_serial]
+
+
+@pytest.fixture(scope='module', autouse=True)
+def _isolated_db_pytest():
+    """Run this module against a PRIVATE SQLite file, then restore the session
+    DB. The standalone __main__ path already does this (its own
+    _bootstrap_isolated_db); the pytest path used to share the session DB —
+    and measured 2026-08-05, running after test_paper_citation_audit in one
+    process, a lingering writer on the session DB held the write lock past the
+    30s busy timeout → sqlite3.OperationalError: database is locked. A private
+    file makes this suite immune to any cross-suite writer, present or future.
+    """
+    import shutil
+    import tempfile
+
+    import lib.database._core as _core
+    prev = _core.DB_PATH
+    tmp = tempfile.mkdtemp(prefix='paper-notes-pytest-')
+    _core.reset_sqlite_for_tests(os.path.join(tmp, 'notes.db'))
+    yield tmp
+    _core.reset_sqlite_for_tests(prev)
+    shutil.rmtree(tmp, ignore_errors=True)
+
 
 def _color(s, c): return f'\033[{c}m{s}\033[0m'
 def _ok(msg): print(' ', _color('✓', '32'), msg)

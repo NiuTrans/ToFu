@@ -94,6 +94,78 @@ def test_complete(flask_app):
     assert 'completed' in _feed_kinds(flask_app, '/b/c')
 
 
+# ════════════════════════════════════════════════════════════════════
+#  delete (human lever — outright removal, unlike complete's done-history)
+# ════════════════════════════════════════════════════════════════════
+
+def test_delete_open_epic(flask_app):
+    from lib.conversations.project_board import delete_task, post_task, read_board
+    with flask_app.app_context():
+        tid = post_task('/b/del', 'cA', 'junk praise epic')['id']
+        assert delete_task('/b/del', 'cA', tid)['ok']
+        board = read_board('/b/del')
+    assert board['tasks'] == []
+    assert 'note' in _feed_kinds(flask_app, '/b/del')
+
+
+def test_delete_done_epic_removes_history(flask_app):
+    """Done epics are history — but a JUNK done epic (e.g. an epic whose
+    title was praise, not work) must be removable too."""
+    from lib.conversations.project_board import (
+        complete_task, delete_task, post_task, read_board,
+    )
+    with flask_app.app_context():
+        tid = post_task('/b/deldone', 'cA', 'praise, not work')['id']
+        assert complete_task('/b/deldone', 'cA', tid)['ok']
+        assert delete_task('/b/deldone', 'cA', tid)['ok']
+        assert read_board('/b/deldone')['tasks'] == []
+
+
+def test_delete_missing_task(flask_app):
+    from lib.conversations.project_board import delete_task
+    with flask_app.app_context():
+        res = delete_task('/b/delnone', 'cA', 'pt_nope')
+    assert not res['ok'] and 'not found' in res['error']
+
+
+def test_delete_refused_while_active_dependent(flask_app):
+    """CONSISTENCY GATE: a deleted dep can never reach done, so deleting an
+    epic that an ACTIVE epic depends on would strand the dependent forever.
+    The refusal names the dependent; completing it first unblocks the delete."""
+    from lib.conversations.project_board import (
+        complete_task, delete_task, post_task, read_board,
+    )
+    with flask_app.app_context():
+        a = post_task('/b/deldep', 'cA', 'dep epic')['id']
+        post_task('/b/deldep', 'cA', 'waiting epic', depends_on=[a])
+        res = delete_task('/b/deldep', 'cA', a)
+        assert not res['ok'] and res['error'] == 'has_dependents'
+        assert any('waiting epic' in d for d in res['dependents'])
+        # The refused delete removed NOTHING.
+        assert len(read_board('/b/deldep')['tasks']) == 2
+        # Dependent completed → the gate opens.
+        b = [t['id'] for t in read_board('/b/deldep')['tasks']
+             if t['title'] == 'waiting epic'][0]
+        assert complete_task('/b/deldep', 'cA', b)['ok']
+        assert delete_task('/b/deldep', 'cA', a)['ok']
+        assert [t['title'] for t in read_board('/b/deldep')['tasks']] == \
+            ['waiting epic']
+
+
+def test_delete_live_claim_allowed(flask_app):
+    """The claim lease is advisory — a deleting HUMAN outranks a live claim
+    (the claimant is not interrupted mid-turn; its later completion simply
+    misses the row, which that path already tolerates)."""
+    from lib.conversations.project_board import (
+        claim_task, delete_task, post_task, read_board,
+    )
+    with flask_app.app_context():
+        tid = post_task('/b/delclaim', 'cA', 'claimed junk')['id']
+        assert claim_task('/b/delclaim', 'cB', tid)['ok']
+        assert delete_task('/b/delclaim', 'cA', tid)['ok']
+        assert read_board('/b/delclaim')['tasks'] == []
+
+
 def test_done_epics_do_not_count_toward_admission_cap(flask_app):
     """A board full of COMPLETED epics must still accept a new post — the
     reported "board full indefinitely" bug. The active-only admission counts

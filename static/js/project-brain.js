@@ -1213,6 +1213,10 @@
     if (t.status === 'claimed' || t.status === 'done') {
       acts.push(_boardActionBtn('reopen', 'refresh', 'projectBrain.actReopen', 'Reopen'));
     }
+    // Delete on EVERY status — the junk/duplicate lever (owner 2026-08-05:
+    // "why is there no delete button on the board?"). Confirm-gated in
+    // _boardMutate; the backend refuses while ACTIVE dependents exist.
+    acts.push(_boardActionBtn('delete', 'trash', 'projectBrain.actDelete', 'Delete'));
     // Answered chip — the human's answer that unblocked this epic (the
     // decision travels WITH the card so any reader sees what was decided).
     var answered = String(t.human_answer || '').trim()
@@ -1281,6 +1285,7 @@
         'projectBrain.actCreateConv', 'New chat'),
       _boardActionBtn('reopen', 'refresh', 'projectBrain.actReopen', 'Reopen'),
       _boardActionBtn('complete', 'check', 'projectBrain.actComplete', 'Done'),
+      _boardActionBtn('delete', 'trash', 'projectBrain.actDelete', 'Delete'),
     ];
     return '<div class="pb-board-card pb-board-blocked" data-task-id="' +
       _esc(t.id) + '">' +
@@ -1321,6 +1326,7 @@
         'projectBrain.actCreateConv', 'New chat'),
       _boardActionBtn('reopen', 'refresh', 'projectBrain.actReopen', 'Reopen'),
       _boardActionBtn('complete', 'check', 'projectBrain.actComplete', 'Done'),
+      _boardActionBtn('delete', 'trash', 'projectBrain.actDelete', 'Delete'),
     ];
     return '<div class="pb-board-card pb-board-awaiting" data-task-id="' +
       _esc(t.id) + '">' +
@@ -1447,6 +1453,16 @@
     } else if (act === 'block' && typeof api.boardBlock === 'function') {
       _openBlockNoteEditor(btn, taskId, path, convId);
       return;  // the inline editor owns the rest of the flow
+    } else if (act === 'delete' && typeof api.boardDelete === 'function') {
+      // Destructive — confirm first (the ONLY board action that removes the
+      // record entirely; complete keeps done history).
+      var confirmMsg = _t('projectBrain.actDeleteConfirm',
+        'Delete this epic permanently? This removes it from the board.');
+      if (typeof window !== 'undefined' &&
+          typeof window.confirm === 'function' && !window.confirm(confirmMsg)) {
+        return;
+      }
+      call = api.boardDelete(path, taskId, convId);
     } else if (act === 'gotoAttention') {
       // Deep-link: answering happens ONLY in the Needs-you tab (§D6). Focus
       // THIS epic's card there — with several waiting items, landing on the

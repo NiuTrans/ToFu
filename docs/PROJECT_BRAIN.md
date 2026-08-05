@@ -211,8 +211,8 @@ This is the heart of "shared intent that advances without a human in the loop":
 > agent-autonomous. The **human retains only optional corrective levers** (NOT
 > required for normal progress): editing the north-star `content`,
 > `update_decision` / `delete_decision` / `delete_charter`, and board
-> `reopen_task` (override a stuck/wrong claim) — all reachable only through the
-> REST routes. The human defines the goal and can veto/correct a decision; it
+> `reopen_task` (override a stuck/wrong claim) / `delete_task` (remove a junk
+> epic outright) — all reachable only through the REST routes. The human defines the goal and can veto/correct a decision; it
 > need not approve each one.
 >
 > This does **not** widen the write surface: `commit_charter` already existed
@@ -279,7 +279,12 @@ global and a new failure mode; read-time evaluation cannot deadlock.
 caller already owns it (lease refresh); it gives an *advisory* refusal
 (`already_claimed`) only if a **different** conversation holds an **unexpired**
 lease. `complete_task` marks `done`; `block_task` emits a `blocked` feed event
-(a signal, not a status change).
+(a signal, not a status change). `delete_task` is the **human-only** outright
+removal (no agent tool, REST-only): allowed from any status — the advisory
+lease never outranks a deleting human — but REFUSED (`has_dependents`) while
+another ACTIVE epic depends on it, because a deleted dep can never reach
+`done` and the dependent would be stranded invisibly. The removal emits a
+`note` feed event + audit record, never a silent yank.
 
 ### The auto-avoidance injection — the actual coordination mechanism
 Prompt assembly injects a `[PROJECT BOARD]` block (only when the board is non-

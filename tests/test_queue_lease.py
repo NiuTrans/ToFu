@@ -35,7 +35,7 @@ import pytest
 
 import lib.message_queue as mq
 
-pytestmark = pytest.mark.unit
+pytestmark = [pytest.mark.unit, pytest.mark.ci_serial]
 
 
 def _cid():

@@ -104,5 +104,6 @@ markers = [
     "api: API integration tests (requires PostgreSQL)",
     "visual: Visual E2E tests (requires live server + Chromium)",
     "slow: Long-running tests (opt-in)",
+    "ci_serial: Timing/concurrency-sensitive suites that assert locking or race behavior — public CI runs them in a dedicated SERIAL step (no xdist) because an oversubscribed runner starves their writer/heartbeat windows into false 'database is locked' / timeout reds (measured f0a930e→e65e14f). Locally they run in the normal parallel lanes.",
     "live_llm: Hits the real LLM API (costs money, needs creds). Manual-only; gated by TOFU_PARITY_LIVE=1.",
 ]

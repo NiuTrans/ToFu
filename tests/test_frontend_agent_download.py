@@ -1,34 +1,37 @@
 """tests/test_frontend_agent_download.py — Local Control's two-component
-download matrix (A3, docs/DESKTOP_AGENT_DIST_DESIGN.md §4.7).
+download matrix (A3, docs/DESKTOP_AGENT_DIST_DESIGN.md §4.7), 2026-08-05
+re-pinned for the ZERO-CONFIG bundle flow (owner decree: pairing codes
+retired — the credential rides the per-download ZIP, never the user's
+keyboard).
 
-The remote branch of ``_lcRenderDesktop`` must offer the AGENT installer
-as the PRIMARY action (受控端·轻量 — the machine's role in that branch is
-to be controlled) inside a NUMBERED three-step flow, with the full desktop
-app collapsed into a one-line <details> secondary — and must degrade to
-the historical full-installer rendering when no agent artifact exists yet
+The remote branch of ``_lcRenderDesktop`` must offer the agent BUNDLE
+(exe + baked attach.json) as the PRIMARY action in a numbered TWO-step
+flow, with the full desktop app collapsed into a one-line <details>
+secondary and the connect line demoted to an advanced details — and must
+degrade to the full-installer rendering when no agent artifact exists
 (stale-while-build, never a dead end). Pinned:
 
-  1. agent artifact present ⇒ numbered steps (①②③), agent link first
-     (受控端·轻量 + 服务器直连 + size), the PAIRING button as primary
-     attach action (2026-08-04 decree) with the connect line demoted to
-     a collapsed details, full link inside a COLLAPSED details, escape
-     hatch once;
-  1b. preseeded artifact + open bridge ⇒ ZERO-TOUCH: no mint button, the
-     auto-connect copy instead; a required bridge token forces the
-     3-step flow back even with a preseed;
-  2. no agent_downloads ⇒ full-installer fallback with the SAME pairing
-     block, no agent vocabulary (never an empty primary slot);
-  3. local_source ⇒ BOTH installs visible, role-labeled, agent block
-     FIRST with the pairing button, connect line only inside the
-     advanced details, exactly one lc-step heading;
+  1. agent artifact + agent_bundle_ready ⇒ ①② steps, the BUNDLE button
+     (href=/api/v1/desktop/agent-bundle) first, the auto-connect copy,
+     NO ③ and NO pair button anywhere, full link inside a COLLAPSED
+     details, connect line in its own details, escape hatch once;
+  1b. artifact present but bundle NOT ready (stale exe predating the
+     attach flow) ⇒ rebuilding note + the bare exe as the repair path,
+     never a dead button;
+  2. no agent_downloads ⇒ full-installer fallback with the connect-line
+     details, no bundle button, no pair vocabulary;
+  3. local_source ⇒ BOTH installs role-labeled, the bundle button inside
+     the AGENT role card, connect line only inside the advanced details,
+     exactly one lc-step heading;
   4. an unchanged poll beat PRESERVES user interaction state (the minted
      connect line, an expanded section) — the 3s repaint must not blow
      the DOM away; a changed payload still re-renders;
-  6. public host ⇒ the connect line VANISHES (its address half is a
-     measured SSO dead end) and pairing carries everything; NO surface
-     instructs a manual ssh tunnel (2026-08-04 owner decree, superseding
-     the 2026-08-03 proxy warning);
-  7. NEUTER ×2: severing the agent branch fails the remote checks;
+  6. public host ⇒ the bundle button STILL renders (it carries its own
+     route candidates) but the connect line VANISHES (its address half
+     is a measured SSO dead end); NO surface instructs a manual ssh
+     tunnel or a pairing code;
+  7. a loopback-bound server surfaces the operator-facing bind warning;
+  8. NEUTER ×2: severing the agent branch fails the remote checks;
      severing the signature gate fails the preservation check.
 
 Loads the REAL shipped local-control.js under jsdom; skips when
@@ -103,87 +106,78 @@ const AGENT = { os: 'windows', arch: 'x86_64',
   url: 'https://h/api/v1/desktop/download/TofuAgent-Setup-0.16.0-win64.exe',
   hosted: 'server', size: 53000000, source: 'built', kind: 'agent' };
 
-// ── 1. remote + agent artifact ⇒ agent PRIMARY in a numbered flow ──
+// ── 1. remote + artifact + bundle ready ⇒ bundle PRIMARY, 2 steps ──
 _lcRenderDesktop({ connected: false, setup_state: 'remote',
   download_url: 'https://github.com/x/y/releases/latest',
   server_url: 'https://tofu.example.com/',
+  agent_bundle_ready: true,
   downloads: [FULL], agent_downloads: [AGENT] }, null);
 const html1 = document.getElementById('lcDesktopSetup').innerHTML;
-check('remote_agent_link_present', html1.includes('TofuAgent-Setup-0.16.0-win64.exe'));
-check('remote_agent_label', html1.includes('受控端·轻量'));
+check('remote_bundle_button_primary', html1.includes('lcAgentBundleBtn'));
+check('remote_bundle_href', html1.includes('/api/v1/desktop/agent-bundle'));
+check('remote_bundle_note', html1.includes('解压 ZIP'));
 check('remote_step1_numbered', html1.includes('① 下载并安装受控端'));
-check('remote_steps_numbered', html1.includes('②') && html1.includes('③'));
+check('remote_step2_auto', html1.includes('② 装完启动即可'));
+check('remote_no_third_step', !html1.includes('③'));
+check('remote_no_pair_button', !html1.includes('lcPairBtn'));
 check('remote_full_secondary_toggle', html1.includes('下载完整桌面版'));
 check('remote_full_collapsed',
   html1.includes('<details class="lc-details"><summary>') &&
   !html1.includes('<details class="lc-details" open'));
 check('remote_full_link_present', html1.includes('Tofu-Setup-0.16.0-win64.exe'));
-check('remote_agent_before_full',
-  html1.indexOf('TofuAgent-Setup') < html1.indexOf('Tofu-Setup'));
-check('remote_pair_button_primary', html1.includes('lcPairBtn'));
-check('remote_mint_button', html1.includes('lcMintBtn'));
-check('remote_mint_label', html1.includes('生成连接行'));
-check('remote_mint_demoted_to_details', html1.includes('高级：连接行')); 
-check('remote_hosted_chip_twice',
-  (html1.match(/服务器直连/g) || []).length === 2);
+check('remote_bundle_before_full',
+  html1.indexOf('lcAgentBundleBtn') < html1.indexOf('Tofu-Setup'));
+check('remote_mint_demoted_to_details', html1.includes('lcMintBtn') &&
+  html1.includes('高级：连接行'));
 check('remote_escape_hatch_once',
   (html1.match(/查看全部下载/g) || []).length === 1);
-check('remote_agent_size_shown', html1.includes('50.5 MB') || html1.includes('50.4 MB'));
+check('remote_no_pairing_vocabulary', !html1.includes('配对码'));
 
-// ── 1b. preseeded artifact + open bridge ⇒ ZERO-TOUCH (2 steps) ──
-const AGENT_PRE = Object.assign({}, AGENT,
-  { preseed_url: 'https://tofu.example.com' });
+// ── 1b. artifact present but bundle NOT ready ⇒ honest degraded path ──
 _lcRenderDesktop({ connected: false, setup_state: 'remote',
   download_url: 'https://github.com/x/y/releases/latest',
   server_url: 'https://tofu.example.com/',
-  bridge_token_required: false,
-  downloads: [FULL], agent_downloads: [AGENT_PRE] }, null);
+  agent_bundle_ready: false,
+  downloads: [FULL], agent_downloads: [AGENT] }, null);
 const html1b = document.getElementById('lcDesktopSetup').innerHTML;
-check('autoconnect_hides_mint', !html1b.includes('lcMintBtn'));
-check('autoconnect_copy', html1b.includes('会自动连上'));
-// …but a REQUIRED bridge token forces the mint-and-paste flow back even
-// with a usable preseed (the agent still needs a credential).
-_lcRenderDesktop({ connected: false, setup_state: 'remote',
-  download_url: 'https://github.com/x/y/releases/latest',
-  server_url: 'https://tofu.example.com/',
-  bridge_token_required: true,
-  downloads: [FULL], agent_downloads: [AGENT_PRE] }, null);
-const html1c = document.getElementById('lcDesktopSetup').innerHTML;
-check('token_required_keeps_mint', html1c.includes('lcMintBtn'));
-check('token_required_no_autoconnect', !html1c.includes('会自动连上'));
+check('stale_rebuilding_note', html1b.includes('后台重建'));
+check('stale_bare_exe_kept', html1b.includes('TofuAgent-Setup-0.16.0-win64.exe'));
+check('stale_no_bundle_button', !html1b.includes('lcAgentBundleBtn'));
+check('stale_connect_line_kept', html1b.includes('lcMintBtn'));
 
-// ── 2. remote WITHOUT agent artifact ⇒ historical fallback, no dead end ──
+// ── 2. remote WITHOUT agent artifact ⇒ full fallback, no dead end ──
 _lcRenderDesktop({ connected: false, setup_state: 'remote',
   download_url: 'https://github.com/x/y/releases/latest',
   server_url: 'https://tofu.example.com/',
   downloads: [FULL], agent_downloads: [] }, null);
 const html2 = document.getElementById('lcDesktopSetup').innerHTML;
 check('fallback_full_link_primary', html2.includes('Tofu-Setup-0.16.0-win64.exe'));
-check('fallback_no_agent_step', !html2.includes('① 下载并安装受控端'));
-check('fallback_historical_text', html2.includes('安装桌面版'));
-check('fallback_pair_kept', html2.includes('lcPairBtn'));
-check('fallback_mint_in_details', html2.includes('lcMintBtn') && html2.includes('高级：连接行'));
+check('fallback_no_bundle_button', !html2.includes('lcAgentBundleBtn'));
+check('fallback_no_pair_button', !html2.includes('lcPairBtn'));
+check('fallback_connect_line_in_details', html2.includes('lcMintBtn') &&
+  html2.includes('高级：连接行'));
+check('fallback_no_pairing_copy', !html2.includes('配对码'));
 
-// ── 3. local_source ⇒ BOTH installs visible, role-labeled, no collapse ──
+// ── 3. local_source ⇒ BOTH installs role-labeled, bundle in agent card ──
 const LOCAL_SRC = { connected: false, setup_state: 'local_source',
   download_url: 'https://github.com/x/y/releases/latest',
   server_url: 'http://127.0.0.1:15000/',
+  agent_bundle_ready: true,
   downloads: [FULL], agent_downloads: [AGENT] };
 _lcRenderDesktop(LOCAL_SRC, null);
 const html3 = document.getElementById('lcDesktopSetup').innerHTML;
 check('local_source_full_link', html3.includes('Tofu-Setup-0.16.0-win64.exe'));
-check('local_source_agent_link', html3.includes('TofuAgent-Setup-0.16.0-win64.exe'));
-check('local_source_pair_button', html3.includes('lcPairBtn'));
+check('local_source_bundle_button', html3.includes('lcAgentBundleBtn'));
+check('local_source_bundle_in_agent_role',
+  html3.indexOf('lcAgentBundleBtn') < html3.indexOf('完整桌面版'));
+check('local_source_no_pair_button', !html3.includes('lcPairBtn'));
 check('local_source_connect_line_in_details',
   html3.includes('lcMintBtn') && html3.includes('高级：连接行'));
-check('local_source_agent_first',
-  html3.indexOf('TofuAgent-Setup') < html3.indexOf('Tofu-Setup'));
 check('local_source_primary_accent', html3.includes('lc-role-primary'));
 check('local_source_role_notes',
   html3.includes('另一台电脑访问') && html3.includes('服务器本机'));
 check('local_source_one_step',
   (html3.match(/lc-step/g) || []).length === 1);
-check('local_source_no_agent_step', !html3.includes('① 下载并安装受控端'));
 
 // ── 4. unchanged poll beat PRESERVES user interaction state ──
 // (The 2026-08-03 auto-collapse: every 3s repaint rewrote innerHTML,
@@ -202,58 +196,67 @@ _lcRenderDesktop({ connected: true, setup_state: 'connected',
 check('state_change_still_rerenders',
   document.getElementById('lcDesktopSetup').innerHTML === '');
 
-// ── 6. public host ⇒ connect line VANISHES, pairing carries all ──
-// (2026-08-04 owner decree, superseding the 2026-08-03 proxy warning:
-// that warning sent the user to reopen this panel via an ssh-tunnel
-// address — a MANUAL tunnel instruction, now forbidden on every surface.
-// The pairing code is address-free — the agent discovers the route
-// itself — so a public host leans on pairing entirely and stops offering
-// the measured-dead-end line.)
+// ── 6. public host ⇒ bundle stays (carries its own routes), line dies ──
 const PROXIED = { connected: false, setup_state: 'remote',
   download_url: 'https://github.com/x/y/releases/latest',
   server_url: 'https://5665bc99-vscode-zw05.mlp.internal.example.com/',
   server_url_reachability: 'public',
+  agent_bundle_ready: true,
   downloads: [FULL], agent_downloads: [AGENT] };
 _lcRenderDesktop(PROXIED, null);
 const html6 = document.getElementById('lcDesktopSetup').innerHTML;
-check('public_host_keeps_pairing', html6.includes('lcPairBtn'));
+check('public_host_keeps_bundle', html6.includes('lcAgentBundleBtn'));
 check('public_host_hides_connect_line', !html6.includes('lcMintBtn'));
+check('public_host_no_pair_button', !html6.includes('lcPairBtn'));
 check('public_host_never_teaches_manual_tunnel',
   !/隧道地址|ssh 隧道|ssh-tunnel/.test(html6));
 // private/loopback hosts keep the demoted connect-line fallback.
 _lcRenderDesktop({ connected: false, setup_state: 'remote',
   download_url: '', server_url: 'http://192.168.1.10:15000/',
   server_url_reachability: 'private',
+  agent_bundle_ready: true,
   downloads: [FULL], agent_downloads: [AGENT] }, null);
 const html6p = document.getElementById('lcDesktopSetup').innerHTML;
 check('private_host_keeps_connect_line_in_details',
   html6p.includes('lcMintBtn') && html6p.includes('高级：连接行'));
-// paired-but-nothing-arrived: self-heal semantics, never manual ssh.
+// credentials-issued-but-nothing-arrived: points at the agent's own
+// link-state line, never at a manual tunnel or a re-pair.
 _lcRenderDesktop({ connected: false, setup_state: 'remote',
   download_url: '', server_url: 'http://192.168.1.10:15000/',
   server_url_reachability: 'private', bridge_tokens_issued: 2,
+  agent_bundle_ready: true,
   downloads: [FULL], agent_downloads: [AGENT] }, null);
 const html6b = document.getElementById('lcDesktopSetup').innerHTML;
 check('awaiting_hint_when_tokens_but_no_agent',
-  html6b.includes('等待受控端连入'));
-check('awaiting_hint_is_self_heal_not_manual_ssh',
-  html6b.includes('自动') && !/隧道地址|换.*隧道/.test(html6b));
+  html6b.includes('首次连入'));
+check('awaiting_hint_points_at_link_line', html6b.includes('链路'));
+check('awaiting_hint_no_pairing_code', !html6b.includes('配对码'));
 // …but never cry wolf once connected, or before any token exists.
 _lcRenderDesktop({ connected: true, setup_state: 'connected',
   bridge_tokens_issued: 2,
+  agent_bundle_ready: true,
   downloads: [FULL], agent_downloads: [AGENT] }, null);
 check('no_awaiting_hint_when_connected',
-  !document.getElementById('lcDesktopSetup').innerHTML.includes('等待受控端连入'));
+  !document.getElementById('lcDesktopSetup').innerHTML.includes('首次连入'));
 _lcRenderDesktop({ connected: false, setup_state: 'remote',
   download_url: '', server_url: 'http://192.168.1.10:15000/',
   server_url_reachability: 'private', bridge_tokens_issued: 0,
+  agent_bundle_ready: true,
   downloads: [FULL], agent_downloads: [AGENT] }, null);
 check('no_awaiting_hint_without_tokens',
-  !document.getElementById('lcDesktopSetup').innerHTML.includes('等待受控端连入'));
-// absent fields (an older server) render NO awaiting hint at all.
-_lcRenderDesktop(LOCAL_SRC, null);
-check('absent_fields_render_no_awaiting_hint',
-  !document.getElementById('lcDesktopSetup').innerHTML.includes('等待受控端连入')); 
+  !document.getElementById('lcDesktopSetup').innerHTML.includes('首次连入'));
+
+// ── 7. loopback bind ⇒ the operator-facing warning surfaces ──
+_lcRenderDesktop({ connected: false, setup_state: 'remote',
+  download_url: '', server_url: 'http://192.168.1.10:15000/',
+  server_url_reachability: 'private', server_bind: 'loopback',
+  agent_bundle_ready: true,
+  downloads: [FULL], agent_downloads: [AGENT] }, null);
+const html7 = document.getElementById('lcDesktopSetup').innerHTML;
+check('loopback_bind_warns', html7.includes('BIND_HOST=127.0.0.1'));
+// …and a healthy bind never cries wolf.
+const html7b = html6p;
+check('healthy_bind_no_warning', !html7b.includes('BIND_HOST=127.0.0.1'));
 
 console.log(out.join('\n'));
 process.exit(0);
@@ -296,9 +299,9 @@ def test_agent_download_matrix():
 def test_NEUTER_severing_the_agent_branch_is_caught():
     output = _run_harness('neuter')
     fails = [ln for ln in output.splitlines()
-             if ln.startswith('FAIL remote_agent')]
+             if ln.startswith('FAIL remote_bundle')]
     assert len(fails) >= 3, (
-        'the agent-branch neuter should fail the primary-agent checks — '
+        'the agent-branch neuter should fail the primary-bundle checks — '
         'the suite cannot tell the matrix from the fallback:\n' + output)
 
 

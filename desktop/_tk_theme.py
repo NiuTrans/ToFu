@@ -334,76 +334,13 @@ STRINGS = {
         'zh': '正在验证服务器地址…',
     },
     'desktop.connect.verifyFailed': {
-        'en': 'Cannot reach Tofu there: {reason}. An agent cannot use a '
-              'proxy/SSO address — prefer the pairing code (the agent '
-              'discovers the route itself). Press Connect again to save '
-              'anyway.',
-        'zh': '连不上服务器：{reason}。代理/SSO 地址受控端用不了——建议改用'
-              '配对码（通路由受控端自己发现）；再点一次「连接」强制保存。',
-    },
-    'desktop.pair.title': {
-        'en': 'Pair this computer',
-        'zh': '配对这台电脑',
-    },
-    'desktop.pair.heading': {
-        'en': 'Pair this computer with Tofu',
-        'zh': '将这台电脑与 Tofu 配对',
-    },
-    'desktop.pair.instructions': {
-        'en': 'In Tofu, open Local Control → This computer and press '
-              '"Pair this computer", then type the 6-digit code below. '
-              'The server address is pre-filled — edit it only if it is '
-              'wrong.',
-        'zh': '在 Tofu 面板「本机控制 → 这台电脑」点「配对这台电脑」，'
-              '把 6 位配对码填到下面。服务器地址已自动填好，不对再改。',
-    },
-    'desktop.pair.serverLabel': {
-        'en': 'Server address',
-        'zh': '服务器地址',
-    },
-    'desktop.pair.codeLabel': {
-        'en': 'Pairing code',
-        'zh': '配对码',
-    },
-    'desktop.pair.connect': {
-        'en': 'Pair and connect',
-        'zh': '配对并连接',
-    },
-    'desktop.pair.useLine': {
-        'en': 'Use a connect line instead…',
-        'zh': '改用连接行…',
-    },
-    'desktop.pair.cancel': {
-        'en': 'Cancel',
-        'zh': '取消',
-    },
-    'desktop.pair.verifying': {
-        'en': 'Pairing…',
-        'zh': '正在配对…',
-    },
-    'desktop.pair.badAddress': {
-        'en': 'The server address must start with http:// or https://.',
-        'zh': '服务器地址必须以 http:// 或 https:// 开头。',
-    },
-    'desktop.pair.badCode': {
-        'en': 'The pairing code is the 6-digit number shown in the panel.',
-        'zh': '配对码是面板生成的 6 位数字。',
-    },
-    'desktop.pair.invalidCode': {
-        'en': 'This code is invalid, expired or already used — mint a '
-              'fresh one in the panel.',
-        'zh': '配对码无效、过期或已被使用——请回面板重新生成。',
-    },
-    'desktop.pair.rateLimited': {
-        'en': 'Too many failed attempts from this address. Wait a few '
-              'minutes and try again with a fresh code.',
-        'zh': '此地址失败次数过多——请等几分钟，用新配对码重试。',
-    },
-    'desktop.pair.failed': {
-        'en': 'Could not pair at that address: {reason}. Check the '
-              'server address (a proxy/SSO gateway cannot be used).',
-        'zh': '无法在该地址完成配对：{reason}。请检查服务器地址'
-              '（代理/SSO 地址不可用）。',
+        'en': 'Cannot reach Tofu there: {reason}. A proxy/SSO address is '
+              'unusable for the agent — the attach-bundle installer is '
+              'the reliable path (it carries working routes itself). '
+              'Press Connect again to save anyway.',
+        'zh': '连不上服务器：{reason}。代理/SSO 地址受控端用不了——建议重新'
+              '下载受控端安装包（安装包自己带可用通路）；再点一次「连接」'
+              '强制保存。',
     },
     'desktop.comp.postgresql.name': {
         'en': 'PostgreSQL Database',
@@ -529,6 +466,12 @@ STRINGS = {
     'desktop.tray.stStarting': {
         'en': 'connecting…',
         'zh': '连接中…',
+    },
+    'desktop.tray.stUnattached': {
+        'en': 'not configured — reinstall the attach-bundle installer '
+              '(zero input), or use "Connect to a different Tofu…"',
+        'zh': '未配置服务器——重新下载受控端安装包（零输入自动配对），'
+              '或在托盘选「连接到另一个 Tofu…」',
     },
     # ── Startup role window (desktop/role_window.py) ──
     # Both launchers show this window at startup so the machine's ROLE is

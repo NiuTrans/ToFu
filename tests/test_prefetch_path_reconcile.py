@@ -50,6 +50,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import quart as _quart  # noqa: E402
 sys.modules['flask'] = _quart
 
+import pytest  # noqa: E402
+
+pytestmark = [pytest.mark.unit, pytest.mark.ci_serial]
+
 _THIS = os.path.abspath(__file__)
 _ROOT = os.path.dirname(os.path.dirname(_THIS))
 _TARGET = os.path.join(_ROOT, 'routes', 'conversations.py')

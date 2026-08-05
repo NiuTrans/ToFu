@@ -244,10 +244,18 @@ def _smoke_main() -> None:
 # ═══════════════════════════════════════════════════════════════════
 def _start_agent(state: dict, perms: dict) -> None:
     """Start the polling agent in a daemon thread (the tray stays main)."""
+    url, secret = state['url'], state['secret']
+    if not url:
+        # Unattached (no bundle, nothing discovered): stay IDLE, not dead —
+        # the link line says 'unconfigured' and a later Connect starts us.
+        state['last_status'] = {'state': 'unconfigured'}
+        state['stop'] = None
+        state['thread'] = None
+        _log('No server attachment — agent idle until Connect…')
+        return
     from lib.desktop_agent import run_agent
     stop = threading.Event()
     state['stop'] = stop
-    url, secret = state['url'], state['secret']
 
     def _on_status(st: dict) -> None:
         state['last_status'] = st
@@ -292,6 +300,8 @@ def _link_status_text(state: dict) -> str:
     code = st.get('state')
     if not code:
         return theme.t('desktop.tray.stStarting', lang)
+    if code == 'unconfigured':
+        return theme.t('desktop.tray.stUnattached', lang)
     if code == 'ok':
         return theme.t('desktop.tray.stOk', lang)
     if code == 'auth':
@@ -313,7 +323,7 @@ def _link_status_text(state: dict) -> str:
 
 def _run_tray(state: dict, perms: dict) -> None:
     """The minimal tray: the whole configuration surface of this component."""
-    from desktop.connect_ui import prompt_attachment_flow
+    from desktop.connect_ui import prompt_connect_line
     from lib.desktop_agent.config import save_remote_server, \
         save_computer_control
 
@@ -339,7 +349,7 @@ def _run_tray(state: dict, perms: dict) -> None:
         # host is down or the caller is already on it (role-window path).
         from desktop import _tk_host
         parsed = _tk_host.call(
-            lambda: prompt_attachment_flow(state.get('url') or '', log=_log))
+            lambda: prompt_connect_line(state.get('url') or '', log=_log))
         if parsed is None:
             return
         url, secret = parsed
@@ -419,7 +429,8 @@ def _run_tray(state: dict, perms: dict) -> None:
         autostart = (_autostart_get() if _autostart_supported() else None)
         return role_window.role_state_agent(
             state.get('url') or '', perms, autostart,
-            show_flag=role_window.should_show_at_startup())
+            show_flag=role_window.should_show_at_startup(),
+            link_text=_link_status_text(state))
 
     _role_actions = {
         'toggle_perm': lambda key: _toggle_perm(key)(_NULL_ICON, None),
@@ -495,14 +506,21 @@ def main():
 
     _enable_dpi_awareness()
 
-    # ── 1. Preseed (installer-baked server address; one-shot, non-secret) ──
-    from desktop.connect_ui import import_preseed, prompt_attachment_flow
+    # ── 1. Attach imports (zero-config first, legacy preseed second) ──
+    # The download-baked bundle carries the credential AND the route
+    # candidates — strictly superior to the build-time URL-only preseed,
+    # so it imports FIRST (a written attachment makes the preseed a no-op).
+    from desktop.connect_ui import import_attach_bundle, import_preseed
+    try:
+        import_attach_bundle(_EXE_DIR, _log)
+    except Exception as e:
+        _log('Attach bundle import skipped: %s' % e)
     try:
         import_preseed(_EXE_DIR, _log)
     except Exception as e:
         _log('Preseed import skipped: %s' % e)
 
-    # ── 2. Attachment (discovery ladder, then asked ONCE, then persisted) ──
+    # ── 2. Attachment (discovery ladder, then persisted) ──
     from lib.desktop_agent.config import remote_server, save_remote_server
     try:
         url, secret = remote_server()
@@ -514,9 +532,9 @@ def main():
         # reachable through an SSH tunnel that died with the last process
         # (atexit _reap_tunnels) — trusting it blindly polled a dead port on
         # every boot after the first, and autostart-on-install made that the
-        # NORMAL case. Probe first, trust second: the ladder re-runs only
-        # when the saved address is dead, and the token rides along (bearer,
-        # address-independent).
+        # NORMAL case. Probe first, trust second: the attach candidates and
+        # the ladder re-run only when the saved address is dead, and the
+        # token rides along (bearer, address-independent).
         try:
             from lib.desktop_agent._pair import resume_attachment
             url, secret = resume_attachment(url, secret, log=_log)
@@ -524,24 +542,31 @@ def main():
             _log('Attachment resume probe skipped: %s' % e)
     if not url:
         # Zero-question ladder (§11.2.1): loopback → LAN broadcast →
-        # ~/.ssh/config self-tunnels. Whatever it finds pre-fills the
-        # pairing dialog's address field; a miss just leaves it editable.
+        # ~/.ssh/config self-tunnels. A hit attaches SILENTLY — the open
+        # bridge needs no credential, and a gated one reports 'auth' on
+        # the link line (never a dialog the user must decipher).
         discovered = ''
         try:
             from lib.desktop_agent._pair import discover
             discovered = discover(log=_log)
         except Exception as e:
             _log('Server discovery skipped: %s' % e)
-        parsed = prompt_attachment_flow(discovered, log=_log)
-        if parsed is None:
-            _log('No server attachment configured — nothing to poll, exiting')
-            return
-        url, secret = parsed
-        try:
-            save_remote_server(url, secret)
-        except Exception as e:
-            _log('Could not save attachment: %s' % e)
-            logger.warning('Could not save attachment: %s', e)
+        if discovered:
+            url, secret = discovered, ''
+            try:
+                save_remote_server(url, secret)
+            except Exception as e:
+                _log('Could not save attachment: %s' % e)
+                logger.warning('Could not save attachment: %s', e)
+        else:
+            # Owner decree 2026-08-05: NO first-run dialog (the pairing
+            # code is dead; typing anything is the burden we removed).
+            # Start idle — the role window shows the unattached state with
+            # the honest link line, and the tray's connect-line item stays
+            # as the manual repair path.
+            _log('No attach bundle and no server discovered — starting '
+                 'unattached; the control panel shows the link state and '
+                 'the tray Connect item remains the manual path')
 
     # ── 3. Permission floor: persisted tiers over deny-all ──
     from lib.desktop_agent._permissions import safe_default

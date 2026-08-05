@@ -58,7 +58,7 @@ import pytest
 
 from lib.swarm.protocol import SubAgentResult, SubAgentStatus
 
-pytestmark = pytest.mark.unit
+pytestmark = [pytest.mark.unit, pytest.mark.ci_serial]
 
 
 # ── Canned sub-agent (no LLM) — mirrors tests/test_swarm_async.py ──
@@ -209,6 +209,17 @@ class TestSwarmSnapshotPersist(unittest.TestCase):
         self.assertTrue(
             _wait_until(lambda: (_read_spawn_round(self.conv_id) or {}).get('_swarmSnapshot')),
             'spawn round never got a _swarmSnapshot')
+
+        # The first CAS write may be an INCREMENTAL (unsettled) snapshot; the
+        # settle write follows it (same pattern as the contention test below).
+        # The invariant is unchanged — the settled snapshot MUST land — we just
+        # wait for the async write instead of sampling mid-flight.
+        self.assertTrue(
+            _wait_until(
+                lambda: ((_read_spawn_round(self.conv_id) or {})
+                         .get('_swarmSnapshot') or {}).get('settled') is True,
+                timeout=8.0),
+            'settled snapshot never landed on the spawn round')
 
         rnd = _read_spawn_round(self.conv_id)
         snap = rnd['_swarmSnapshot']
