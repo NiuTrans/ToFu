@@ -41,6 +41,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -54,8 +55,11 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.input.KeyboardType
 import com.tofu.client.data.AuthType
 import com.tofu.client.data.Profile
+import com.tofu.client.session.HealthProbe
 import com.tofu.client.session.ProfileForm
 import com.tofu.client.session.ServerUrl
+import com.tofu.client.session.TofuProbe
+import kotlinx.coroutines.launch
 
 /**
  * Add / edit a server.
@@ -169,6 +173,11 @@ fun AddEditScreen(
                         error = validation.errors["baseUrl"],
                         helper = "Paste the full address, including /proxy/15000/.",
                         keyboardType = KeyboardType.Uri,
+                    )
+                    ConnectionTest(
+                        url = url,
+                        auth = auth,
+                        hasSecret = secret.isNotBlank() || canOmitSecret,
                     )
                 }
 
@@ -360,6 +369,53 @@ private fun TofuField(
                 Modifier.padding(start = 14.dp, top = 5.dp),
                 style = MaterialTheme.typography.bodySmall,
                 color = if (error != null) MaterialTheme.colorScheme.error
+                else MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+/**
+ * Paste-time reachability check — the one-price-upfront version of the desktop
+ * agent's lesson (lib/desktop_agent/_probe.py): a bad URL must be caught HERE,
+ * not after hours of silent retrying. The probe asks {url}/api/health WITH the
+ * session cookie — behind a VS Code port-forwarding proxy the edge 401s every
+ * cookie-less request, so an uncookied probe would measure the GATE, not the
+ * server — and the verdict renders through [TofuProbe]'s Tofu↔gateway
+ * discrimination, in the error colour only when the user must act.
+ *
+ * The verdict is discarded the moment the URL changes (a stale "correct" next
+ * to an edited URL is worse than none).
+ */
+@Composable
+private fun ConnectionTest(url: String, auth: AuthType, hasSecret: Boolean) {
+    val scope = rememberCoroutineScope()
+    var testing by remember { mutableStateOf(false) }
+    var outcome by remember { mutableStateOf<HealthProbe.Outcome?>(null) }
+    LaunchedEffect(url) { outcome = null }
+    Column {
+        TextButton(
+            enabled = !testing && ServerUrl.parse(url) != null,
+            onClick = {
+                scope.launch {
+                    testing = true
+                    outcome = try {
+                        HealthProbe().probe(url.trim())
+                    } finally {
+                        testing = false
+                    }
+                }
+            },
+        ) {
+            Text(if (testing) "Testing…" else "Test connection")
+        }
+        outcome?.let { o ->
+            val problem = TofuProbe.isProblem(o.verdict, auth, hasSecret)
+            Text(
+                TofuProbe.guidance(o.verdict, auth, hasSecret),
+                Modifier.padding(start = 14.dp, top = 2.dp),
+                style = MaterialTheme.typography.bodySmall,
+                color = if (problem) MaterialTheme.colorScheme.error
                 else MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }

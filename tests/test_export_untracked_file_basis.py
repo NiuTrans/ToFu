@@ -126,3 +126,37 @@ def test_dry_run_preview_consults_the_same_set():
     assert '_untracked_nested_files' in window, (
         'the dry-run preview no longer consults the untracked-file set — '
         'preview and real copy would diverge again')
+
+
+# ── The root-anchored 'data' contract (2026-08-05, android Room incident) ──
+# 'data' is excluded ROOT-ANCHORED ONLY (ALWAYS_EXCLUDE_ROOT_ONLY_DIRS,
+# sibling commit 2e751b38): android/app/src/main/java/com/tofu/client/data/
+# — a TRACKED Room package — must SHIP, while root data/ (databases,
+# configs, runtime state) stays excluded. The gitignore drift guard covers
+# the same invariant at full-tree scale; these pins name the contract AT
+# the seam so a future regression names itself.
+
+def test_data_exclusion_is_root_anchored_in_should_exclude():
+    import export as exp
+    for mode in ('internal', 'opensource'):
+        assert exp._should_exclude('data/config/x.json', 'x.json', mode), (
+            f'{mode}: root data/ must stay excluded (databases, configs, '
+            'runtime state)')
+        nested = 'android/app/src/main/java/com/tofu/client/data/Profile.kt'
+        assert exp._should_exclude(nested, 'Profile.kt', mode) is None, (
+            f'{mode}: a nested data/ package must SHIP — the 2026-08-05 '
+            'android Room incident stripped 3 tracked Kotlin files')
+
+
+def test_tar_excludes_anchor_root_data_without_the_nested_form(
+        fake_repo, monkeypatch):
+    exp, repo = fake_repo
+    monkeypatch.setattr(exp, 'ROOT', repo)
+    for mode in ('internal', 'opensource'):
+        excludes, _p = exp._build_tar_excludes_for_mode(mode, repo / 'dest')
+        assert '--exclude=./data' in excludes, (
+            mode, 'the root-anchored data exclusion is lost')
+        assert '--exclude=data' not in excludes, (
+            mode, 'the UNANCHORED --exclude=data form is back — tar strips '
+            'nested data/ packages wherever they live (the android Room '
+            'incident class)')

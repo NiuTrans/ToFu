@@ -85,7 +85,12 @@ import uuid
 
 import pytest
 
-pytestmark = pytest.mark.unit
+# ci_serial: these boot TWO real app instances sharing one SQLite file and
+# poll for running checkpoints with 120s ceilings — under the CI parallel
+# lane's CPU contention the polls starve and the suite 120s-times-out (six
+# reds on e5adbfa's unit leg) while passing in 48s on an uncontended box.
+# The serial lane runs it alone with a 600s timeout.
+pytestmark = [pytest.mark.unit, pytest.mark.ci_serial]
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))

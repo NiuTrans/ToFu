@@ -234,7 +234,7 @@ def _export_excluded_dirs():
         os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'export.py'))
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
-    return set(mod.ALWAYS_EXCLUDE_DIRS)
+    return set(mod.ALWAYS_EXCLUDE_DIRS) | set(mod.ALWAYS_EXCLUDE_ROOT_ONLY_DIRS)
 
 
 @pytest.mark.skipif(is_opensource_build(),

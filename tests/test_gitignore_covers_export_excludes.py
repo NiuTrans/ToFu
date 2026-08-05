@@ -134,6 +134,8 @@ def _opensource_excluded(export, rel):
     from fnmatch import fnmatch
     parts = rel.split('/')
     filename = parts[-1]
+    if parts[0] in export.ALWAYS_EXCLUDE_ROOT_ONLY_DIRS:
+        return True
     for part in parts:
         if part in export.ALWAYS_EXCLUDE_DIRS:
             return True

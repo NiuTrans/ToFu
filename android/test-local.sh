@@ -62,6 +62,7 @@ echo "== TIER 1: pure-JVM =="
   "$SRC/main/java/com/tofu/client/session/SupervisorUrl.kt" \
   "$SRC/main/java/com/tofu/client/session/InteractiveSso.kt" \
   "$SRC/main/java/com/tofu/client/session/ServerLifecycle.kt" \
+  "$SRC/main/java/com/tofu/client/session/TofuProbe.kt" \
   "$SRC/main/java/com/tofu/client/data/Profile.kt" \
   "$OUT/stub/CookieBridgeStub.kt" \
   "$SRC/test/java/com/tofu/client/session/ServerUrlTest.kt" \
@@ -74,7 +75,8 @@ echo "== TIER 1: pure-JVM =="
   "$SRC/test/java/com/tofu/client/session/SupervisorUrlTest.kt" \
   "$SRC/test/java/com/tofu/client/session/InteractiveSsoTest.kt" \
   "$SRC/test/java/com/tofu/client/session/SessionManagerInteractiveSsoTest.kt" \
-  "$SRC/test/java/com/tofu/client/session/ServerLifecycleTest.kt"
+  "$SRC/test/java/com/tofu/client/session/ServerLifecycleTest.kt" \
+  "$SRC/test/java/com/tofu/client/session/TofuProbeTest.kt"
 
 "$JAVA_HOME/bin/java" -cp "$CP:$KRT:$OUT" org.junit.runner.JUnitCore \
   com.tofu.client.session.ServerUrlTest \
@@ -87,7 +89,8 @@ echo "== TIER 1: pure-JVM =="
   com.tofu.client.session.SupervisorUrlTest \
   com.tofu.client.session.InteractiveSsoTest \
   com.tofu.client.session.SessionManagerInteractiveSsoTest \
-  com.tofu.client.session.ServerLifecycleTest
+  com.tofu.client.session.ServerLifecycleTest \
+  com.tofu.client.session.TofuProbeTest
 
 # ── TIER 2: Robolectric (optional — needs the instrumented android-all jar) ──
 INSTRUMENTED="$(ls "$LIBS"/android-all-instrumented-*.jar 2>/dev/null | head -1 || true)"
@@ -106,6 +109,9 @@ ROBO_CP="$(ls "$LIBS"/*.jar | grep -vE 'kotlin-compiler|kotlin-daemon|kotlin-scr
   "$SRC/main/java/com/tofu/client/session/CookieHeaders.kt" \
   "$SRC/main/java/com/tofu/client/session/CookieBridge.kt" \
   "$SRC/main/java/com/tofu/client/session/ReauthWebViewClient.kt" \
+  "$SRC/main/java/com/tofu/client/session/TofuProbe.kt" \
+  "$SRC/main/java/com/tofu/client/session/ServerUrl.kt" \
+  "$SRC/main/java/com/tofu/client/session/HealthProbe.kt" \
   "$SRC/main/java/com/tofu/client/data/Profile.kt" \
   "$SRC/test/java/com/tofu/client/session/CookieBridgeRobolectricTest.kt"
 

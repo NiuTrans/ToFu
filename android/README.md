@@ -58,6 +58,11 @@ session/
   LoginForm.kt        pure <form action> resolver (Gap-1)
   ProfileForm.kt      pure add/edit validation (alias/URL/secret rules)
   CookieBridge.kt     OkHttp cookie → WebView jar; Max-Age upgrade + flush; purgeHost
+  TofuProbe.kt        pure Tofu↔gateway 401 discrimination + paste-time verdicts
+                      (mirror of lib/desktop_agent/_probe.py: {"ok":false,"error":{…}}
+                      vs {"error":"Unauthorized"}; 200+bootId is the Tofu signal)
+  HealthProbe.kt      GET {base}/api/health WITH the session cookie — a cookie-less
+                      probe would measure the gate, not the server
   SessionManager.kt   headless login, URL-change purge+relogin, profile update path
   SessionController.kt orchestrates add/edit/delete/activate over DAO+vault+manager
                        (rename moves the alias-keyed secret; delete removes it;
@@ -212,9 +217,10 @@ The canonical target is `./gradlew test` (needs the Android SDK). For a fast
 proof without the SDK, `./test-local.sh` runs two tiers on a plain JDK 17 +
 `kotlinc`:
 
-- **Pure-JVM tier** (107 tests: `ServerUrl`, `LoginForm`, `CookieHeaders`,
+- **Pure-JVM tier** (116 tests: `ServerUrl`, `LoginForm`, `CookieHeaders`,
   `ProfileForm`, `SessionManager` + `SessionController` via the `CookieSink` /
-  `SecretVault` seams, `InteractiveSso`, `ServerLifecycle`, `SupervisorUrl`) —
+  `SecretVault` seams, `InteractiveSso`, `ServerLifecycle`, `SupervisorUrl`,
+  `TofuProbe`) —
   no Android runtime. `SupervisorRunner` stays Gradle-tier (it needs
   `SupervisorClient` → `android.webkit` + `org.json`, absent from the pure
   classpath).
@@ -232,7 +238,7 @@ export JAVA_HOME=/path/to/jdk17            # e.g. Temurin 17
 export KOTLINC=/path/to/kotlinc/bin/kotlinc  # kotlinc 1.9.24
 
 ./fetch-test-deps.sh /tmp/tofu-libs        # populate a LIBS dir from Maven
-LIBS=/tmp/tofu-libs ./test-local.sh        # → 107 pure-JVM + 3 Robolectric green
+LIBS=/tmp/tofu-libs ./test-local.sh        # → 116 pure-JVM + 3 Robolectric green
 ```
 
 (A JDK 17 + `kotlinc` on PATH are the only prerequisites the script does not
@@ -260,6 +266,11 @@ mechanism is removed):**
   (neuter: drop the move → the credential is orphaned and the rename test fails).
 - `SessionController.deleteProfile` removes both the secret and the row (never
   orphans a credential).
+- `TofuProbe.classify` splits a 401 on the envelope — Tofu's
+  `{"ok":false,"error":{…}}` (error OBJECT) → `TOFU_AUTH`, the gateway's
+  `{"error":"Unauthorized"}` (error STRING) → `GATEWAY` — and only 200 with a
+  `bootId` counts as Tofu (neuter: drop the envelope check → `TofuProbeTest`'s
+  discrimination case flips to `GATEWAY`).
 
 
 ## Release / cutting a version

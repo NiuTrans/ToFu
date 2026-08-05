@@ -358,6 +358,11 @@ def test_reopen_path_merges_translations_through_shared_reducer():
         'reopen merge no longer routes through the shared array-level reducer '
         '(_mergeServerTranslations internally calls _mergeTranslationFields)')
     # And the wholesale-overwrite branches take the server array (translations
-    # included by construction).
-    assert src.count('conv.messages = serverMsgs') >= 2, src[:0] or (
+    # included by construction). Two adoption forms count (pt_cfdfd30c8699407b):
+    # the direct assignment AND the _withPendingQueuedTail wrapper — the latter
+    # still adopts the server body wholesale (translations ride along), it only
+    # re-appends local queued rows the server legitimately lacks.
+    wholesale = (src.count('conv.messages = serverMsgs')
+                 + src.count('_withPendingQueuedTail(conv.messages, serverMsgs)'))
+    assert wholesale >= 2, src[:0] or (
         'wholesale reconcile branches no longer adopt the server messages')

@@ -277,7 +277,7 @@ def test_data_dir_is_export_excluded():
     spec = importlib.util.spec_from_file_location('_export_probe', root / 'export.py')
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
-    assert 'data' in set(mod.ALWAYS_EXCLUDE_DIRS)
+    assert 'data' in set(mod.ALWAYS_EXCLUDE_ROOT_ONLY_DIRS)
 
 
 # ── 7. export.py resolves through the vault ──

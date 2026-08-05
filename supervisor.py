@@ -8,7 +8,7 @@ daemon breaks that chicken-and-egg: it is a tiny, ALWAYS-ON process whose only
 job is to spawn / kill ``server.py`` for an allow-listed project path, so the
 app can start and stop Tofu remotely.
 
-Design (see docs/SUPERVISOR_DESIGN.md in the tofu-android repo):
+Design (see android/docs/SUPERVISOR_DESIGN.md, in this repo):
 
   * Runs on a fixed port (default 15001), exposed behind the SAME code-server
     that proxies Tofu (``…/proxy/15001/``), so it inherits the code-server

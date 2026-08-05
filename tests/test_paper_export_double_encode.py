@@ -51,9 +51,27 @@ _APP = None
 
 def _load_app():
     """Boot the real ``server.app`` against a temp SQLite DB with a fully
-    bootstrapped schema. Cached across tests."""
+    bootstrapped schema. Cached across tests.
+
+    Under pytest, conftest has ALREADY imported ``server`` with the
+    per-worker isolated DB — re-executing server.py here would double-run
+    the async bootstrap in-process, and its background stages can flip DB
+    state mid-test (CI-only 404s on a committed seed row). Reuse the live
+    module; the standalone path (``python tests/...``) keeps the explicit
+    boot below.
+    """
     global _APP
     if _APP is not None:
+        return _APP
+    existing = sys.modules.get('server')
+    if existing is not None and getattr(existing, 'app', None) is not None:
+        try:
+            from lib.database import init_db
+            init_db()  # idempotent — guarantees the schema even when no
+            # flask_app-fixtured suite ran first in this worker
+        except Exception as e:
+            print(f'[paper_export_test] init_db: {e}')
+        _APP = existing.app
         return _APP
     import tempfile
     os.environ['TOFU_DB_BACKEND'] = 'sqlite'

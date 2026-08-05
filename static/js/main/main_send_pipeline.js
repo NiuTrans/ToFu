@@ -1479,8 +1479,10 @@ function clearPendingQueue(convId) {
       if (m && m._pendingQueued) { _convC.messages.splice(i, 1); _swept++; }
     }
     if (_swept > 0) {
-      if (typeof activeConvId !== 'undefined' && activeConvId === convId
-          && window.ConvView && typeof window.ConvView.replaceAll === 'function') {
+      // No typeof-guard on window.ConvView — the boot hard check guarantees
+      // the seam; a guard here would hide a bundler slip as a silent no-op
+      // (test_no_convview_missing_raw_fallbacks).
+      if (typeof activeConvId !== 'undefined' && activeConvId === convId) {
         window.ConvView.replaceAll(convId, { forceScroll: false });
         if (typeof buildTurnNav === 'function') buildTurnNav(_convC);
       }

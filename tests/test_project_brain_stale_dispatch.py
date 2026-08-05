@@ -64,8 +64,22 @@ def _ensure_schema(flask_app):
 
 
 @pytest.fixture(autouse=True)
-def _clean_registry():
+def _clean_registry(monkeypatch):
     _clear_task_registry()
+    # post_task auto-claims + enqueues + DRAINS a kickoff through
+    # on_epic_posted → project_dispatch._drain_idle_target. That drain runs
+    # BEFORE each test's own create_task/spawn_task stubs land, so it spawns
+    # a REAL task (live LLM attempt), whose lingering 'running' registry
+    # entry then trips dispatch_next_queued's per-conv double-dispatch guard
+    # (81f515e0) when the test drains manually — deterministic red. Tests in
+    # this module always drive the drain themselves (or block it with a busy
+    # fake), so neutralize the automatic one — same discipline as the
+    # registry wipe above. test_completion_trigger_still_dispatches_to_idle_
+    # target re-patches the same seam with its own recorder (applied after
+    # this fixture, so it wins).
+    monkeypatch.setattr(
+        'lib.conversations.project_dispatch._drain_idle_target',
+        lambda *a, **k: None, raising=False)
     yield
     _clear_task_registry()
 

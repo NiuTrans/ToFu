@@ -164,8 +164,9 @@ def test_export_covers_registry_internal_opensource():
     # The dir set that internal/opensource _should_exclude keys on. bundle-*
     # is a GLOB (ALWAYS_EXCLUDE_GLOBS), so dir membership is the right check
     # only for the trailing-'/' entries.
-    internal_dirs = export.ALWAYS_EXCLUDE_DIRS
-    opensource_dirs = export.ALWAYS_EXCLUDE_DIRS | export.OPENSOURCE_EXTRA_EXCLUDE_DIRS
+    internal_dirs = export.ALWAYS_EXCLUDE_DIRS | export.ALWAYS_EXCLUDE_ROOT_ONLY_DIRS
+    opensource_dirs = (export.ALWAYS_EXCLUDE_DIRS | export.ALWAYS_EXCLUDE_ROOT_ONLY_DIRS
+                       | export.OPENSOURCE_EXTRA_EXCLUDE_DIRS)
     missing = []
     for d in _registry_dir_prefixes():
         # export.py prunes by path-COMPONENT membership (``part in

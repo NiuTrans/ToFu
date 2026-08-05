@@ -121,6 +121,17 @@ def heal_engine_tail_adjacencies(*, dry_run: bool = True,
                 continue
             stats['written'] += 1
             try:
+                # Dual-write hook (pt_59140ecd ②): the heal INSERTS tombstones
+                # mid-array, re-sequencing every later message — the count
+                # heuristic cannot express that, so mirror full. Flag-off is a
+                # byte-identical no-op; the blob write above stays truth.
+                from lib.database.messages_rows import mirror_write_and_commit
+                mirror_write_and_commit(db, conv_id, healed,
+                                        now_ms=now_ms, full=True)
+            except Exception as e:
+                logger.warning('[EngineTailHeal] conv=%s row mirror failed '
+                               '(blob authoritative): %s', conv_id[:8], e)
+            try:
                 new_rev = db.execute(
                     'SELECT rev FROM conversations WHERE id=?',
                     (conv_id,)).fetchone()['rev']

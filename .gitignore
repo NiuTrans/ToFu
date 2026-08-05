@@ -28,7 +28,15 @@ __pycache__/
 
 
 # ── Runtime data (auto-created, contains databases, configs, temp files) ──
-data/
+# ROOT-ANCHORED on purpose: a bare `data/` matches a nested `data` dir at ANY
+# depth, and it silently swallowed NEW untracked files under
+# android/app/src/.../client/data/ (the android Room package — the 3 existing
+# files survive only because they are tracked). Anchored to the repo root, the
+# runtime dir stays ignored without hiding legitimate nested `data` packages.
+/data/
+# Runtime scratch under lib/ (tmp/, tool-results/) — rode the old unanchored
+# rule; kept ignored explicitly.
+/lib/data/
 # ── Database ──
 *.db
 

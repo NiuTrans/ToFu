@@ -2017,7 +2017,10 @@
 <script defer src="static/js/idb-cache.js?v=0.16.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <script defer src="static/js/core.js?v=0.16.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <!-- core/ subpackage (split 2026-05-28 from monolithic core.js — see lib/js_bundler.py).
-     These MUST load AFTER core.js so the slim shell's `let`/`const` decls run first. -->
+     These MUST load AFTER core.js so the slim shell's `let`/`const` decls run first.
+     client_log_relay.js rides right after the shell (its console tee must exist
+     before any later module logs) — same order as _BUNDLE_FILES. -->
+<script defer src="static/js/core/client_log_relay.js?v=0.16.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <script defer src="static/js/core/folders.js?v=0.16.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <script defer src="static/js/core/cost.js?v=0.16.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <script defer src="static/js/core/debug_panel.js?v=0.16.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
