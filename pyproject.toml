@@ -70,7 +70,15 @@ testpaths = ["tests"]
 python_files = "test_*.py"
 python_classes = "Test*"
 python_functions = "test_*"
-addopts = "-v --tb=short --strict-markers -p pytest_timeout"
+# `-p no:timeout` MUST precede/accompany the explicit load: with entry-point
+# autoload ON (a bare `pytest`, exactly what public CI runs) pytest-timeout's
+# entrypoint registers the module as 'timeout', and the explicit
+# `-p pytest_timeout` then re-registers the same module under a second name →
+# ValueError: Plugin already registered under a different name (bitten
+# 2026-08-05 on the first push carrying this addopts — every CI test leg died
+# at startup). Blocking the 'timeout' name keeps exactly one registration in
+# both worlds (autoload on OR PYTEST_DISABLE_PLUGIN_AUTOLOAD=1).
+addopts = "-v --tb=short --strict-markers -p no:timeout -p pytest_timeout"
 # Per-test hang guard. pytest-timeout has been an installed, DECLARED dep for
 # a while, but with no default configured it never fired — measured
 # 2026-07-27: a sleep(600) test ran until an EXTERNAL kill stopped the shell,
