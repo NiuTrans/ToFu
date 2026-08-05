@@ -119,8 +119,9 @@ def _seed_report(paper_hash, lang, report):
 
 def _diag(paper_hash):
     """CI-only-404 diagnostics (ad9a7b1): the handler 404s a committed seed
-    row ONLY in the full CI lane, never locally — report the DB identity and
-    a fresh-connection read-back so the next CI log says WHICH side moved."""
+    row ONLY in the full CI lane, never locally — report the DB identity, a
+    fresh-connection read-back, AND the same query through the aio facade the
+    handler uses, so the next CI log says WHICH side moved."""
     import lib.database._core as core
     out = [f'DB_PATH={core.DB_PATH!r}',
            f'BACKEND={core._BACKEND!r}',
@@ -138,6 +139,18 @@ def _diag(paper_hash):
             c.close()
     except Exception as e:
         out.append(f'fresh-conn read failed: {type(e).__name__}: {e}')
+    try:
+        from lib.database import DOMAIN_CHAT, async_fetchone
+        import asyncio as _aio
+
+        async def _q():
+            return await async_fetchone(
+                'SELECT lang FROM paper_reports WHERE paper_hash=? AND lang=?',
+                (paper_hash, 'review:neurips:en'), domain=DOMAIN_CHAT)
+        row = _aio.new_event_loop().run_until_complete(_q())
+        out.append(f'aio-path row={row!r}')
+    except Exception as e:
+        out.append(f'aio-path read failed: {type(e).__name__}: {e}')
     return '; '.join(out)
 
 
@@ -164,7 +177,8 @@ def test_double_encoded_review_lang_exports_ok():
             for name, langq, want in cases:
                 r = await client.get(base + langq)
                 assert r.status_code == want, \
-                    f'{name}: expected {want}, got {r.status_code} | {_diag(_PHASH)}'
+                    f'{name}: expected {want}, got {r.status_code} ' \
+                    f'body={(await r.get_data())[:120]!r} | {_diag(_PHASH)}'
                 if want == 200:
                     body = (await r.get_data()).decode('utf-8', 'replace')
                     assert body, f'{name}: empty export body'
@@ -198,7 +212,8 @@ def test_double_encode_NC_reproduces_404():
             # so the 404 above is purely the decoding gap, not a missing row.
             r_ok = await client.get(base + 'review:neurips:en')
             assert r_ok.status_code == 200, \
-                f'NC sanity: raw-colon key should still resolve, got {r_ok.status_code} | {_diag(_PHASH)}'
+                f'NC sanity: raw-colon key should still resolve, got {r_ok.status_code} ' \
+                f'body={(await r_ok.get_data())[:120]!r} | {_diag(_PHASH)}'
 
     try:
         asyncio.run(_t())
