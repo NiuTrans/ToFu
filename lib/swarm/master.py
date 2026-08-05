@@ -272,7 +272,11 @@ class MasterOrchestrator:
         # blob is coalesced to at most once per interval — EXCEPT the settle
         # write, which is always forced (it carries final truth, so any
         # throttled-out incremental is covered by it). See _persist_agent_snapshot.
-        self._last_snapshot_cas = 0.0
+        # -inf, not 0.0: time.monotonic() counts from BOOT, so 0.0 means
+        # "written at boot" and a swarm started within the first interval
+        # after a machine boot (CI runners start jobs at uptime <1000s —
+        # 70479ac unit leg) would wrongly have its FIRST write throttled out.
+        self._last_snapshot_cas = float('-inf')
         self._snapshot_cas_lock = threading.Lock()
 
         # Listeners woken when ANY agent completes (used by await_agents).
