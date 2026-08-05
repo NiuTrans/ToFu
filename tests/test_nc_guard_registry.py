@@ -277,15 +277,19 @@ def test_every_inplace_shipped_source_writer_is_registered():
     guarded = set(_load_guarded_registry())
     writers = _discover_inplace_shipped_writers()
 
-    # Sanity: the scanner must find the known population (peer NC + tofu-scene),
-    # else the AST heuristic silently regressed and this test passes vacuously.
+    # Sanity: the scanner must find the known population (tofu-scene frontend
+    # writer + the orphan-classifier reconcile.py writer), else the AST
+    # heuristic silently regressed and this test passes vacuously. The
+    # project_peer.py legacy writer that used to anchor this pin was migrated
+    # to the in-memory harness (158a3b7), so its absence here is BY DESIGN.
     all_targets = {t for hits in writers.values() for t in hits}
     assert 'static/js/tofu-scene.js' in all_targets, (
         'scanner did not detect the tofu-scene in-place writer — the AST '
         f'heuristic regressed. Detected writers: {writers}')
-    assert 'lib/conversations/project_peer.py' in all_targets, (
-        'scanner did not detect the project_peer legacy on-disk NC writer — '
-        f'heuristic regressed. Detected: {writers}')
+    assert 'lib/conversations/reconcile.py' in all_targets, (
+        'scanner did not detect the reconcile.py in-place writer '
+        '(test_orphan_resumable_classifier) — heuristic regressed. '
+        f'Detected: {writers}')
 
     unregistered = []
     for test_file, targets in sorted(writers.items()):

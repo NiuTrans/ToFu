@@ -348,7 +348,13 @@ class RedisRuntimeStateStore:
                         p.execute()
                         return True
                 except WatchError:
-                    continue  # a concurrent racer touched the set — re-read
+                    # A concurrent racer touched the set — re-read and retry.
+                    # Bounded by the 64-attempt loop; logged so the code-quality
+                    # silent-catch guard sees the intent (and operators can
+                    # count real contention storms).
+                    logger.debug('[RuntimeStateStore] acquire_slot WATCH retry '
+                                 'for %s (attempt %d)', slot_key, _attempt)
+                    continue
             # Far past any real burst; fail-open like a backend error rather
             # than refuse a legitimate caller forever.
             logger.warning('[RuntimeStateStore] acquire_slot watch retries '
