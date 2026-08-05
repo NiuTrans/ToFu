@@ -58,7 +58,11 @@ os.environ.setdefault('TOFU_DB_PATH', '/tmp/abort_dangling_unittest.db')
 
 import pytest
 
-pytestmark = pytest.mark.unit
+# ci_serial: these drive real subprocess workers + thread-crossing DB writes
+# through the shared pool; under the CI parallel lane's contention the writes
+# exceeded the 30s busy timeout ('database is locked', 98408cb 3.12 leg)
+# while passing in seconds on an uncontended box.
+pytestmark = [pytest.mark.unit, pytest.mark.ci_serial]
 
 
 # ── DB helpers (mirror tests/test_swarm_snapshot_persist.py) ──────────
