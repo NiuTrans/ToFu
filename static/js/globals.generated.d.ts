@@ -236,6 +236,11 @@ interface Window {
   _contextPolicy: any;
   _convBusyAnyLane: any;
   _convMainTurnInFlight: any;
+  _credentialAdd: any;
+  _credentialCopy: any;
+  _credentialHide: any;
+  _credentialRemove: any;
+  _credentialReveal: any;
   _currentUserId: any;
   _cvOnLanguageChange: any;
   _deepenReportHeadings: any;
@@ -324,6 +329,7 @@ interface Window {
   _rehydrateInjectRows: any;
   _releaseBootLoad: any;
   _removeStreamingVuBubbleIfTail: any;
+  _renderCredentialsVault: any;
   _renderMsgInPlace: any;
   _renderPrivateHosts: any;
   _renderStreamingTranslatePreview: any;

@@ -1221,6 +1221,7 @@ _DEFERRED_FILES = [
     'settings/speech.js',
     'settings/auth_sources.js',
     'settings/private_hosts.js',
+    'settings/credentials_vault.js',
     'settings/save_export.js',
     'settings/system_prompt_editor.js',
     'settings/oauth.js',

@@ -135,6 +135,8 @@ Everything you can do in the UI is also exposed as a documented HTTP API, so you
 
 **Manage keys** in **Settings → 🔑 API Keys**: mint, scope (`chat`/`admin`/etc.), set per-key RPM and TPD limits, revoke, view a 30-day usage chart per key. Idempotency-Key is supported on POSTs (24-hour cache, salted by principal). Standard rate-limit headers (`X-RateLimit-*`, `Retry-After`) are returned on every response.
 
+**Credential vault** in **Settings → ⚙️ Advanced**: machine/release credentials (GitHub PAT, PyPI token, …) live in one place — Fernet-encrypted under `data/config/` (separate chmod-600 key file), never committed, never shipped by an export. The list shows only a masked hint (`ghp_…3V8`); plaintext leaves the vault only via an explicit, audited reveal and auto-hides after 30 s.
+
 **Client SDKs** ship in [`clients/`](clients/):
 
 ```bash

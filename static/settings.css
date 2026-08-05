@@ -2128,6 +2128,36 @@
 .priv-host-msg { flex: 1 1 100%; font-size: 12px; font-weight: 600; color: var(--s-ink-soft); }
 .priv-host-msg.err { color: var(--s-blocked); }
 
+/* ── Credential vault (「凭证保管库」) — reuses the priv-host row/btn/input
+   chrome; only the hint/note/revealed-value pieces are new. Same tofu
+   cream/gold tokens, same flat list-row language. ── */
+.cred-vault-hint {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  color: var(--s-ink-soft);
+}
+.cred-vault-note { font-size: 12px; color: var(--s-muted); }
+.cred-vault-value {
+  flex: 1 1 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+  padding: 8px 10px;
+  background: var(--s-cream);
+  border: 1px dashed var(--s-gold);
+  border-radius: var(--s-radius);
+}
+.cred-vault-secret {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  color: var(--s-ink);
+}
+
 /* ── Search tab: backend status strip + pipeline preview ──
    The strip answers "what will the backend actually do" (live badges);
    the card says it in one sentence with the current knob values plugged in. */

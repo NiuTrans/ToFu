@@ -349,6 +349,7 @@ function _populateAdvancedTab(cfg) {
   }
   /* ★ Populate IndexedDB cache stats */
   _refreshCacheStatsUI();
+  if (typeof _renderCredentialsVault === 'function') _renderCredentialsVault();
 }
 
 /** Refresh the cache statistics display in Settings > Advanced */

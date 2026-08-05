@@ -122,6 +122,8 @@ UI 里能做的事情同样以有文档的 HTTP API 形式暴露，你可以从�
 
 在 **设置 → 🔑 API Keys** 中**管理密钥**：创建、划分作用域（`chat`/`admin` 等）、设置每密钥的 RPM 和 TPD 限额、吊销、查看每密钥 30 天使用量图表。POST 请求支持 Idempotency-Key（24 小时缓存，按身份加盐）。所有响应都会返回标准的限速头（`X-RateLimit-*`、`Retry-After`）。
 
+**凭证保管库** 在 **设置 → ⚙️ 高级**：GitHub PAT、PyPI token 这类机器/发布凭证集中存放——Fernet 加密落盘在本机 `data/config/`（密钥独立文件、600 权限），永不进代码仓、永不随导出外发；列表只显示掩码提示（如 `ghp_…3V8`），明文只有点「查看」才出库（全程审计），30 秒自动隐藏。
+
 **客户端 SDK** 在 [`clients/`](clients/) 下：
 
 ```bash

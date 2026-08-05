@@ -1267,6 +1267,16 @@
     remove: (host)       => del(`/api/v1/private-hosts/${encodeURIComponent(host)}`, { parse: 'response', onError: 'null' }),
   };
 
+  // credentials (encrypted credential vault) ----------------------------
+  // Values NEVER appear in list() — only {name, hint, note, timestamps}.
+  // reveal() is the ONLY plaintext egress, fired explicitly by the user.
+  const credentials = {
+    list:   ()       => get('/api/v1/credentials', { onError: 'null' }),
+    upsert: (body)   => post('/api/v1/credentials', body),
+    reveal: (name)   => post(`/api/v1/credentials/${encodeURIComponent(name)}/reveal`, {}),
+    remove: (name)   => del(`/api/v1/credentials/${encodeURIComponent(name)}`, { parse: 'response', onError: 'null' }),
+  };
+
   // trading (AI investment assistant SPA — trading.html) ------------
   // The trading page is a standalone SPA that loads api.js directly. All
   // its endpoints live under /api/v1/trading. `call()` preserves the exact
@@ -1815,7 +1825,7 @@
     health, pricing, clientError, serverConfig, browser, project, daily, paper,
     desktop,
     features, providers, dispatch, oauth, mcp, update, trading, authSources,
-    privateHosts,
+    privateHosts, credentials,
     swarm, endpoint, logs, motion, tasks, users, research,
   };
 
