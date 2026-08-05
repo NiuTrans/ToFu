@@ -72,12 +72,24 @@ def server_module(deps_available):
     )
     mod = importlib.util.module_from_spec(spec)
     mod.__name__ = 'server'  # keeps the __main__ block dormant
+    # Save + restore the prior registration: an unrestored re-exec POISONS
+    # sys.modules['server'] for every later suite in the worker — their
+    # monkeypatches land on THIS module while the session flask_app keeps
+    # serving the original one (d820520 unit leg: test_static_route_offload's
+    # 503/206 patches never bit → got 200s).
+    prev = sys.modules.get('server')
     sys.modules['server'] = mod
     try:
         spec.loader.exec_module(mod)
     except SystemExit as e:
+        sys.modules.pop('server', None)
+        if prev is not None:
+            sys.modules['server'] = prev
         pytest.skip(f'server.py exited at import: {e}')
-    return mod
+    yield mod
+    sys.modules.pop('server', None)
+    if prev is not None:
+        sys.modules['server'] = prev
 
 
 @pytest.fixture(scope='module')

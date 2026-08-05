@@ -85,6 +85,8 @@ def _setup_once():
 
 
 def _teardown_once():
+    _uninstall_chat_stub()  # before the early return: a half-failed setup
+    # must never strand the global spawn_task stub either
     if _STATE['app'] is None:
         return
     from lib import api_keys, usage_tracker
@@ -116,16 +118,18 @@ def _hdr(token, extra=None):
 # ── Stub the LLM pipeline once so chat completions don't hit real models ──
 
 _STUB_INSTALLED = False
+_ORIG_SPAWN = None
 
 
 def _install_chat_stub():
     """Replace ``spawn_task`` with a synchronous stub that fills in a
     fake assistant response immediately. Idempotent."""
-    global _STUB_INSTALLED
+    global _STUB_INSTALLED, _ORIG_SPAWN
     if _STUB_INSTALLED:
         return
     import lib.tasks_pkg as pkg
     from lib.tasks_pkg.manager import append_event
+    _ORIG_SPAWN = pkg.spawn_task
 
     def _fake_spawn(task):
         # Echo the last user message in the stub response so we can
@@ -158,6 +162,19 @@ def _install_chat_stub():
 
     pkg.spawn_task = _fake_spawn
     _STUB_INSTALLED = True
+
+
+def _uninstall_chat_stub():
+    """Restore the real ``spawn_task``. Without this the stub LEAKS to every
+    later suite in the same xdist worker — measured 2026-08-05 (d820520 unit
+    leg): test_spawn_serving_loop's ``tp.spawn_task`` resolved to this fake
+    and died on KeyError('events_lock')."""
+    global _STUB_INSTALLED
+    if not _STUB_INSTALLED:
+        return
+    import lib.tasks_pkg as pkg
+    pkg.spawn_task = _ORIG_SPAWN
+    _STUB_INSTALLED = False
 
 
 # ── Test class ──────────────────────────────────────────────────────

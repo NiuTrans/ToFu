@@ -67,12 +67,21 @@ def server_module():
     )
     mod = importlib.util.module_from_spec(spec)
     mod.__name__ = 'server'
+    # Save + restore — see test_restart_smoke for why an unrestored
+    # sys.modules['server'] swap silently breaks later suites' monkeypatches.
+    prev = sys.modules.get('server')
     sys.modules['server'] = mod
     try:
         spec.loader.exec_module(mod)
     except SystemExit as e:
+        sys.modules.pop('server', None)
+        if prev is not None:
+            sys.modules['server'] = prev
         pytest.skip(f'server.py exited at import: {e}')
-    return mod
+    yield mod
+    sys.modules.pop('server', None)
+    if prev is not None:
+        sys.modules['server'] = prev
 
 
 @pytest.fixture
