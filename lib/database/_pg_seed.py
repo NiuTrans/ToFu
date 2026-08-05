@@ -427,7 +427,8 @@ def _local_seed_is_stale(local_pgdata, legacy_pgdata) -> bool:
     try:
         lm = os.path.getmtime(os.path.join(local_pgdata, 'global', 'pg_control'))
         gm = os.path.getmtime(os.path.join(legacy_pgdata, 'global', 'pg_control'))
-    except OSError:
+    except OSError as e:
+        logger.debug('[DB-Migrate] pg_control mtime unreadable (treated as not stale): %s', e)
         return False
     return gm > lm
 
@@ -524,7 +525,8 @@ def _seed_failure_fresh(local_root, cooldown_s=6 * 3600) -> bool:
     try:
         age = time.time() - os.path.getmtime(_seed_failure_marker(local_root))
         return age < cooldown_s
-    except OSError:
+    except OSError as e:
+        logger.debug('[DB-Migrate] no failure marker readable (no cooldown): %s', e)
         return False
 
 
@@ -593,7 +595,9 @@ def _migrate_local_primary_if_due(pgdata, base_dir, pg_port, pg_user,
     try:
         pinned = int((getenv_compat('TOFU_PG_PORT', default='') or '').strip()
                      or pg_port)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError) as e:
+        logger.debug('[DB-Migrate] TOFU_PG_PORT unparsable, using default port %s: %s',
+                     pg_port, e)
         pinned = pg_port
 
     ok = _seed_local_pgdata_from_legacy(
@@ -607,6 +611,6 @@ def _migrate_local_primary_if_due(pgdata, base_dir, pg_port, pg_user,
         return legacy
     try:
         os.remove(_seed_failure_marker(local_root))
-    except OSError:
-        pass
+    except OSError as e:
+        logger.debug('[DB-Migrate] could not clear failure marker (harmless): %s', e)
     return local

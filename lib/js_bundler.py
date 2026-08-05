@@ -418,6 +418,11 @@ _BUNDLE_FILES = [
     'core/icons.js',   # Icon()/IconDot() SVG registry — used by many modules; load early
     'idb-cache.js',
     'core.js',
+    # Browser console → logs/frontend.log relay (pt_cfdfd30c8699407b).
+    # Native fetch/localStorage only; loads right after the core.js shell so
+    # every later module's console lines are captured. apiUrl resolved at
+    # call time.
+    'core/client_log_relay.js',
     # ── core/ subpackage (split 2026-05-28 from monolithic core.js) ──
     # 11 files extracted from core.js (3877 LOC). The slim core.js shell
     # above declares foundational module state (apiUrl, BASE_PATH, TAB_ID,

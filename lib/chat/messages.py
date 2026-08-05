@@ -48,6 +48,75 @@ def resolve_conv_refs(conv_refs):
     return results
 
 
+# Engine-minted user-row flags whose turn can end WITHOUT a persisted
+# assistant reply (an empty-'done' task — measured 2026-08-04, conv
+# msco7vqmkf8yb2: task 17582690 done in 5s with content_len=0 — an abort, a
+# crash). When the NEXT user row lands directly on such a tail, the DB holds
+# a persisted user,user adjacency — exactly what the llm_sanitize same-role
+# merge kept WARNING-flagging (1,203 hits in ~2.5 days, 100% dispatch-family
+# pairs). The merge layer heals the WIRE; this settle heals the STORE.
+_ENGINE_USER_FLAGS = ('_brainDispatch', '_isVirtualUser', '_isVuDirective',
+                      '_peerMessage')
+
+
+def is_engine_user_msg(msg) -> bool:
+    """The shared predicate: a user-role row minted by an engine seam (brain
+    kickoff / VU / peer / workflow), whose turn can end without a persisted
+    assistant reply. SINGLE SOURCE — the settle path and the one-time heal
+    migration (lib/conversations/engine_tail_heal.py) both ride it."""
+    return (isinstance(msg, dict) and msg.get('role') == 'user'
+            and any(msg.get(f) for f in _ENGINE_USER_FLAGS))
+
+
+def build_engine_no_reply_tombstone(now_ms) -> dict:
+    """The shared tombstone row for an engine turn that ended with no reply.
+    NON-empty content is load-bearing: ``_drop_empty_assistant_messages``
+    drops empty assistant rows at wire-build, which would recreate the
+    same-role adjacency the tombstone exists to break."""
+    return {
+        'role': 'assistant',
+        'content': '*(该引擎轮未产生回复 — 任务在生成输出前终止 / '
+                   'the engine turn ended before producing a reply)*',
+        'timestamp': now_ms,
+        'finishReason': 'engine_no_output',
+        '_engineNoReply': True,
+    }
+
+
+def settle_unanswered_engine_tail(messages, now_ms=None):
+    """Append a tombstone assistant row when the tail is an unanswered
+    ENGINE-minted user row (brain kickoff / VU / peer / workflow).
+
+    Fires only inside ``append_user_msg_idempotent`` right before a genuinely
+    new append (the twin-reconcile branch returns earlier), whose callers run
+    only when NO live task can still answer the tail — the queue drain runs
+    post-completion, and the /api/chat/send immediate-start branch runs only
+    when no task is active. So an engine-flagged user tail here is by
+    construction an orphaned turn.
+
+    The tombstone is deliberately NON-empty: ``_drop_empty_assistant_messages``
+    at wire-build time would drop an empty row and recreate the adjacency on
+    the wire. Human tails are NOT settled: a human question going unanswered
+    is a real incident that must stay loud (the merge WARNING), never be
+    papered over.
+
+    Returns True iff a tombstone was appended.
+    """
+    if not messages:
+        return False
+    tail = messages[-1]
+    if not is_engine_user_msg(tail):
+        return False
+    if now_ms is None:
+        import time as _time
+        now_ms = int(_time.time() * 1000)
+    messages.append(build_engine_no_reply_tombstone(now_ms))
+    logger.warning('[Send] Settled an unanswered engine user tail with a '
+                   'tombstone assistant row (ts=%s) — prevents a persisted '
+                   'user,user adjacency', tail.get('timestamp'))
+    return True
+
+
 def append_user_msg_idempotent(messages, user_msg):
     """Append ``user_msg`` to ``messages`` unless the tail is already it.
 
@@ -90,8 +159,11 @@ def append_user_msg_idempotent(messages, user_msg):
             logger.info('[Send] Reconciled duplicate optimistic user msg in place '
                         '(ts=%s) — prevented duplicate row', user_msg.get('timestamp'))
             return False
+    settle_unanswered_engine_tail(messages)
     messages.append(user_msg)
     return True
 
 
-__all__ = ['resolve_conv_refs', 'append_user_msg_idempotent']
+__all__ = ['resolve_conv_refs', 'append_user_msg_idempotent',
+           'settle_unanswered_engine_tail', 'is_engine_user_msg',
+           'build_engine_no_reply_tombstone']

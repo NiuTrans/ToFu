@@ -445,6 +445,36 @@ def _prune_stale_fault_dumps(directory='/dev/shm', keep_basename='',
     return removed
 
 
+def _stall_pressure_context():
+    """Best-effort host-pressure snapshot for a LoopWatch stall line.
+
+    Returns a compact string like ``load1=7.20 cgmem=91.4%`` (either part may
+    be absent) or ``''``. Why it exists: the stall top-frame can only say WHAT
+    the loop was doing; the dominant stall class is the loop idle in
+    ``select()`` because the HOST is starved (cgroup memory pressure relief,
+    a sibling's 46 GB dump, a 300 MB JSON parse on a shared box). Without the
+    pressure reading IN the stall line, classifying a stall means hand-
+    correlating two log files (the 2026-08-05 audit did exactly that). Cheap
+    local reads only (cgroupfs + /proc) — NEVER FUSE: the watcher fires
+    precisely when the loop may be wedged on a syscall, so the probe itself
+    must be syscall-cheap. Never raises.
+    """
+    parts = []
+    try:
+        with open('/proc/loadavg') as _f:
+            parts.append('load1=%s' % _f.read().split()[0])
+    except Exception:
+        pass
+    try:
+        from lib.cgroup_guard import pressure as _cg_pressure
+        _p = _cg_pressure()
+        if _p:
+            parts.append('cgmem=%.1f%%' % _p['pct'])
+    except Exception:
+        pass
+    return ' '.join(parts)
+
+
 def _loop_stall_decide(age, threshold, already_dumped):
     """Pure decision for the loop-stall watchdog.
 
@@ -3592,17 +3622,19 @@ if __name__ == '__main__':
                     _top_frame = _extract_loop_top_frame(_frames.get(_loop_tid))
                 except Exception as _tf_err:
                     _server_log.debug('[LoopWatch] top-frame extract failed: %s', _tf_err)
+                _pressure = _stall_pressure_context()
                 try:
                     from lib.log import audit_log as _audit_log
                     _audit_log('event_loop_stall', duration=round(age, 1),
                                threshold=_stall_threshold, top_frame=_top_frame,
-                               pid=os.getpid())
+                               pressure=_pressure, pid=os.getpid())
                 except Exception as _al_err:
                     _server_log.debug('[LoopWatch] audit_log failed: %s', _al_err)
                 _server_log.error(
-                    '[LoopWatch] event loop STALLED ~%.1fs (threshold=%.1fs) at %s — '
+                    '[LoopWatch] event loop STALLED ~%.1fs (threshold=%.1fs) at %s%s — '
                     'dumping all-thread stacks to faulthandler sinks',
-                    age, _stall_threshold, _top_frame or '?')
+                    age, _stall_threshold, _top_frame or '?',
+                    (' [' + _pressure + ']') if _pressure else '')
                 for _sink in (_fault_shm_log, _fault_log):
                     if _sink is None:
                         continue

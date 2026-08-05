@@ -125,13 +125,13 @@ function _credVaultRelTime(ts) {
   var mins = Math.floor(diff / 60000);
   if (mins < 1) return t('settings.credVaultJustNow') || '刚刚更新';
   if (mins < 60) {
-    return (t('settings.credVaultMinutesAgo') || '{n} 分钟前更新').replace('{n}', mins);
+    return (t('settings.credVaultMinutesAgo') || '{n} 分钟前更新').replace('{n}', String(mins));
   }
   var hours = Math.floor(mins / 60);
   if (hours < 24) {
-    return (t('settings.credVaultHoursAgo') || '{n} 小时前更新').replace('{n}', hours);
+    return (t('settings.credVaultHoursAgo') || '{n} 小时前更新').replace('{n}', String(hours));
   }
-  return (t('settings.credVaultDaysAgo') || '{n} 天前更新').replace('{n}', Math.floor(hours / 24));
+  return (t('settings.credVaultDaysAgo') || '{n} 天前更新').replace('{n}', String(Math.floor(hours / 24)));
 }
 
 function _credentialAdd() {
@@ -200,7 +200,7 @@ function _credentialCopy(name) {
   // bare reference falls through to NODE'S OWN global navigator (Node ≥21 has
   // one — with no clipboard), silently skipping the copy. window.navigator is
   // identical in a real browser and testable in a harness.
-  var nav = window.navigator || {};
+  var nav = /** @type {any} */ (window.navigator || {});
   if (nav.clipboard && nav.clipboard.writeText) {
     nav.clipboard.writeText(value).then(function () {
       _credVaultSetMsg(t('settings.credVaultCopied') || '已复制', '');

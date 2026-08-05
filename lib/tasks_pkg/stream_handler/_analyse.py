@@ -492,15 +492,38 @@ def analyse_stream_result(
         # ── Stream anomaly — with or without content ──
         # If the LLM client flagged a stream anomaly (_missing_done,
         # _missing_finish_reason, _empty_stop), the response is likely
-        # truncated even if some content was produced.  Expose the
-        # anomaly so the user knows the reply may be incomplete.
+        # truncated even if some content was produced.
         if _stream_anomaly:
+            _has_content = bool(round_content.strip())
+            if _has_content:
+                # ★ Soft landing (owner directive 2026-08-05): when the stream
+                #   died but a partial answer exists, do NOT fail the turn —
+                #   an error card only offers Retry/Continue anyway, and the
+                #   whole-turn auto-retry would wipe text the user may already
+                #   be reading. Settle as premature_close instead: the
+                #   settlement vocabulary maps that to interrupted/gateway
+                #   (Continue stays available, no error state, no auto-retry),
+                #   and the finish tag renders the persistent visible notice
+                #   ("网关中断 · 内容可能不完整"). The failure stays visible;
+                #   the turn is not interrupted.
+                result['action'] = 'break'
+                result['last_finish_reason'] = 'premature_close'
+                result['loop_exit_reason'] = (
+                    f'stream_anomaly_partial_soft_round_{round_num}'
+                )
+                logger.warning(
+                    '[%s] ⚠️ Stream anomaly at round %d with partial content '
+                    '(%dchars) — soft-landing as premature_close (no error '
+                    'envelope; partial reply kept). stream_anomaly=%s '
+                    'empty_stop=%s M-TraceId=%s model=%s',
+                    tid, round_num, len(round_content),
+                    _stream_anomaly, _empty_stop, _trace_id, model,
+                )
+                return result
             result['action'] = 'break'
             result['last_finish_reason'] = 'abnormal_stop'
-            _has_content = bool(round_content.strip())
             result['loop_exit_reason'] = (
-                f'stream_anomaly_{"partial" if _has_content else "empty"}'
-                f'_round_{round_num}'
+                f'stream_anomaly_empty_round_{round_num}'
             )
             from lib.error_envelope import make_envelope as _make_env
             task['error'] = _make_env(
@@ -509,17 +532,16 @@ def analyse_stream_result(
                 model=model,
                 context=f'round-{round_num}',
                 source='llm-stream',
-                raw=(f'has_content={_has_content} content={len(round_content)}chars '
+                raw=(f'has_content=False '
                      f'stream_anomaly={_stream_anomaly} empty_stop={_empty_stop} '
                      f'M-TraceId={_trace_id}'),
             )
             logger.warning(
-                '[%s] ⚠️ Stream anomaly at round %d '
-                '(has_content=%s, content=%dchars). '
+                '[%s] ⚠️ Stream anomaly at round %d (no content). '
                 'stream_anomaly=%s empty_stop=%s '
                 'M-TraceId=%s model=%s accumulated_content=%dchars '
                 'Setting finishReason=abnormal_stop.',
-                tid, round_num, _has_content, len(round_content),
+                tid, round_num,
                 _stream_anomaly, _empty_stop,
                 _trace_id, model, len(task.get('content') or ''),
             )
@@ -663,6 +685,105 @@ def analyse_stream_result(
             len(task.get('content') or ''),
         )
         return result
+
+    # assistant_msg has tool_calls → but a premature close may have cut the
+    # stream MID-ARGUMENTS, leaving tool calls whose accumulated JSON cannot
+    # parse. Executing those would run tools on corrupt arguments (or on the
+    # sanitizer's '{}' substitution). Validate BEFORE proceeding: unparseable
+    # → retry the round transparently (classic-bucket budget), never execute.
+    # A cut that left every arguments string parseable lost only the terminal
+    # frames (JSON is self-delimiting) — proceeding is then provably safe.
+    if (usage or {}).get('_missing_done'):
+        from lib.agent_loop import unparseable_tool_calls
+        _bad_tcs = unparseable_tool_calls(assistant_msg)
+        if _bad_tcs:
+            _trace_id = (usage or {}).get('trace_id', 'N/A')
+            _bad_names = [(tc.get('function') or {}).get('name', '?')
+                          for tc in _bad_tcs]
+            if _premature_retry_count < _PREMATURE_RETRY_MAX_CLASSIC:
+                _premature_retry_count += 1
+                result['premature_retry_count'] = _premature_retry_count
+                if '_premature_retry_count_phase' in task:
+                    task['_premature_retry_count_phase'] = _premature_retry_count
+                _backoff_s = _zero_byte_backoff_seconds(_premature_retry_count)
+                logger.warning(
+                    '[%s] ⚠️ TRUNCATED TOOL CALL at round %d: stream lost '
+                    '[DONE] and %d tool call(s) have unparseable arguments '
+                    '(%s) — the cut landed mid-arguments. Retrying (%d/%d) '
+                    'after %.1fs backoff instead of executing corrupt calls. '
+                    'M-TraceId=%s model=%s',
+                    tid, round_num, len(_bad_tcs), _bad_names,
+                    _premature_retry_count, _PREMATURE_RETRY_MAX_CLASSIC,
+                    _backoff_s, _trace_id, model,
+                )
+                # Reset this round's partial text to the round base stamped by
+                # stream_llm_response so the re-streamed attempt never stacks
+                # on the poisoned one's tail. Record the discarded snapshot in
+                # the FloorRetry residue list so the shrink-convergent
+                # checkpoint/settle guards recognise it as our own discard
+                # (exact byte-match) and allow the overwrite.
+                with task['content_lock']:
+                    _discarded_c = task['content']
+                    _discarded_t = task['thinking']
+                    _bc = task.get('_round_base_content')
+                    _bt = task.get('_round_base_thinking')
+                    if _bc is not None:
+                        task['content'] = _bc
+                    if _bt is not None:
+                        task['thinking'] = _bt
+                    _shrunk = (task['content'] != _discarded_c
+                               or task['thinking'] != _discarded_t)
+                if _shrunk:
+                    _residue = task.setdefault('_floor_retry_residue', [])
+                    if len(_residue) < 8:
+                        _residue.append({'content': _discarded_c,
+                                         'thinking': _discarded_t})
+                append_event(task, build_event(
+                    EventType.DELTA_RESET, roundNum=round_num, discard=True))
+                emit_phase(task, Phase.RETRYING,
+                           attempt=_premature_retry_count,
+                           max=_PREMATURE_RETRY_MAX_CLASSIC,
+                           bucket='truncated_tool_args',
+                           backoff_s=round(_backoff_s, 2),
+                           detail=(
+                               f'⚠️ 网关断流截断了工具参数（{len(_bad_tcs)} 个调用），'
+                               f'退避 {_backoff_s:.1f}s 后重试 '
+                               f'({_premature_retry_count}/{_PREMATURE_RETRY_MAX_CLASSIC})…'
+                           ))
+                _interruptible_sleep(_backoff_s, task)
+                result['action'] = 'continue'
+                return result
+            # Budget exhausted — honest terminal error (same shape as the
+            # classic premature-close exhaustion: the turn-level auto-retry
+            # may still re-run the whole turn from pristine input).
+            result['action'] = 'break'
+            result['last_finish_reason'] = 'premature_close'
+            result['loop_exit_reason'] = (
+                f'truncated_tool_args_retries_exhausted_round_{round_num}'
+            )
+            from lib.error_envelope import make_envelope as _make_env
+            task['error'] = _make_env(
+                'premature_close',
+                detail=(f'Stream repeatedly cut mid-tool-arguments '
+                        f'({len(_bad_tcs)} corrupt call(s): {_bad_names}); '
+                        f'retries exhausted '
+                        f'({_premature_retry_count}/{_PREMATURE_RETRY_MAX_CLASSIC}). '
+                        f'M-TraceId={_trace_id}'),
+                model=model,
+                context=f'round-{round_num}',
+                source='llm-stream',
+                raw=(f'bucket=truncated_tool_args bad_calls={_bad_names} '
+                     f'attempts={_premature_retry_count}/'
+                     f'{_PREMATURE_RETRY_MAX_CLASSIC} M-TraceId={_trace_id}'),
+            )
+            logger.error(
+                '[%s] ⚠️ TRUNCATED TOOL CALL retries exhausted at round %d '
+                '(%d/%d). bad_calls=%s M-TraceId=%s model=%s — settling '
+                'finishReason=premature_close with error envelope.',
+                tid, round_num, _premature_retry_count,
+                _PREMATURE_RETRY_MAX_CLASSIC, _bad_names, _trace_id, model,
+            )
+            return result
 
     # assistant_msg has tool_calls → proceed to tool execution (or check budget)
     return result

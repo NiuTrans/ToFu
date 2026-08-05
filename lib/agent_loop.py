@@ -44,13 +44,47 @@ breaker) and ``on_round_end`` (crash-checkpoint placement).
 
 from __future__ import annotations
 
+import json
 from typing import Any, Callable
 
 from lib.log import get_logger
 
 logger = get_logger(__name__)
 
-__all__ = ['AbortSignal', 'LoopOutcome', 'run_agent_loop']
+__all__ = ['AbortSignal', 'LoopOutcome', 'run_agent_loop',
+           'unparseable_tool_calls']
+
+
+def unparseable_tool_calls(msg: dict) -> list:
+    """Return the tool calls whose ``function.arguments`` is not valid JSON.
+
+    A premature SSE close (``usage['_missing_done']``) can sever the stream
+    MID-ARGUMENTS: the accumulated tool call then holds truncated JSON that
+    no executor can parse — running it would execute a tool on corrupt
+    arguments, or on the sanitizer's ``{}`` substitution (the "tool ran with
+    empty arguments" class). JSON is self-delimiting, so a cut that still
+    parses is byte-complete in practice; an unparseable arguments string is
+    therefore a reliable truncation signature.
+
+    Both agent-loop consumers gate on this BEFORE a round's tool calls run:
+    the chat orchestrator (``stream_handler.analyse_stream_result``) retries
+    the round transparently, and the swarm SubAgent does the same via the
+    chassis ``retry_bonus``.
+    """
+    if not isinstance(msg, dict):
+        return []
+    bad = []
+    for tc in msg.get('tool_calls') or []:
+        if not isinstance(tc, dict):
+            continue
+        args = (tc.get('function') or {}).get('arguments', '')
+        if isinstance(args, dict):
+            continue  # already-decoded shape — nothing to parse
+        try:
+            json.loads(args or '{}')
+        except (json.JSONDecodeError, TypeError, ValueError):
+            bad.append(tc)
+    return bad
 
 
 class AbortSignal:

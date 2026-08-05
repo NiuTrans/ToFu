@@ -38,6 +38,7 @@ __all__ = [
     'get_bypass_domains', 'set_bypass_domains',
     'get_proxy_config', 'set_proxy_config',
     'register_no_proxy_host', 'register_no_proxy_url',
+    'async_proxy_for',
 ]
 
 
@@ -294,9 +295,38 @@ def proxies_for(url: str) -> dict:
     return {}
 
 
-# ═══════════════════════════════════════════════════════
-#  Registered No-Proxy Hosts (literal exact-match)
-# ═══════════════════════════════════════════════════════
+def async_proxy_for(url: str) -> 'str | None':
+    """Proxy decision for httpx-style clients that take an explicit ``proxy=``.
+
+    httpx does NOT honour the ``no_proxy`` environment variable once an
+    explicit proxy URL is handed in, so the async path cannot defer to the
+    environment the way ``requests`` does when :func:`proxies_for` returns
+    ``{}`` — before this helper, async LLM calls to an internal gateway
+    (e.g. your-llm-gateway.example.com, bypassed via env ``no_proxy`` for the sync path)
+    silently hairpinned through the corporate proxy.  The async decision is
+    made identical to the sync one BY CONSTRUCTION: bypass when
+    ``proxies_for()`` says so (explicit rules / registered hosts / learned
+    direct pins), or when the SAME predicate ``requests`` itself uses
+    (``should_bypass_proxies`` over the live env ``no_proxy``, kept in sync
+    by ``_sync_no_proxy``) matches — otherwise return the env proxy URL.
+
+    Returns ``None`` for a direct connection.
+    """
+    if proxies_for(url):
+        return None
+    try:
+        from requests.utils import should_bypass_proxies
+        if should_bypass_proxies(url, no_proxy=None):
+            return None
+    except Exception as e:
+        # A broken bypass probe must not break the request — fall through to
+        # the env proxy (the pre-fix behaviour), never raise here.
+        logger.debug('[Proxy] env no_proxy check failed for %s: %s', url, e)
+    return (os.environ.get('https_proxy')
+            or os.environ.get('HTTPS_PROXY')
+            or os.environ.get('http_proxy')
+            or os.environ.get('HTTP_PROXY')
+            or None)
 
 # Hosts (typically raw IPs of self-hosted LLM endpoints) that must bypass the
 # proxy. Populated at runtime by the dispatcher / probe paths so we don't have

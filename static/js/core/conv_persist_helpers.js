@@ -399,6 +399,11 @@ function _lightMessageForSync(m) {
     };
   /* ★ `_pendingSync` is a CLIENT-ONLY durability marker (see docstring). */
   if (r._pendingSync) { r = { ...r }; delete r._pendingSync; }
+  /* ★ `_queueId` is session bookkeeping for the queued-bubble cancel path
+   *   (pt_cfdfd30c8699407b) — the backend queue row owns that linkage, so it
+   *   must never ride the PUT wire. `_pendingQueued` itself STAYS: it is the
+   *   display marker the backend's own mirror row carries too. */
+  if (r._queueId) { r = { ...r }; delete r._queueId; }
   /* ★ Drop transient bloat (usage._wire_fp diagnostics, done-round
    *   _partialOutput) so a client PUT never re-inflates the DB payload
    *   the server-side sanitizer just trimmed. See _trimMsgForPersist. */

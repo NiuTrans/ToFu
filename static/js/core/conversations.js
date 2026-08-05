@@ -1080,6 +1080,15 @@ async function loadConversationMessages(convId) {
         console.info(`[loadConvMsgs] 🈯 Merged ${_mergedHU} server translation(s) ` +
           `into local-unsynced conv=${convId.slice(0,8)}`);
       }
+      /* ★ Queued-bubble marker flip (pt_cfdfd30c8699407b): a dispatched
+       *   queued turn loses its server-side _pendingQueued marker — mirror
+       *   that here so the local bubble flips back to normal without a
+       *   reload. The bubble itself stays either way (root fix). */
+      const _qFlipsHU = (typeof _reconcileQueuedMarkers === 'function')
+        ? _reconcileQueuedMarkers(serverMsgs, conv.messages) : 0;
+      if (_qFlipsHU > 0 && convId === activeConvId && window.ConvView) {
+        window.ConvView.replaceAll(convId, { forceScroll: false });
+      }
       /* ★ FIX: settle load-state like every other branch (MERGE_ACTIVE_TASK /
        *   OVERWRITE both do this). Without it, a KEEP_LOCAL reconcile leaves
        *   _needsLoad truthy and _serverMsgCount stale, so a later refocus /
@@ -1105,7 +1114,11 @@ async function loadConversationMessages(convId) {
        *   Narrowly gated on the pre-mutation orphan-ghost verdict; live-stream
        *   and KEEP_LOCAL are unreachable here, so no connectToTask ref is
        *   orphaned. */
-      conv.messages = serverMsgs;
+      /* Preserve still-queued local rows across the wholesale adopt — the
+       * server body legitimately lacks them (backend mirrors only the FIRST
+       * queued message; pt_cfdfd30c8699407b). */
+      conv.messages = (typeof _withPendingQueuedTail === 'function')
+        ? _withPendingQueuedTail(conv.messages, serverMsgs) : serverMsgs;
       console.info(`[loadConvMsgs] 🧹 MERGE_ACTIVE_TASK adopted reconciled server list ` +
         `(${serverMsgs.length} msgs) for conv=${convId.slice(0,8)} — swept an orphaned ` +
         `empty-assistant ghost tail.`);
@@ -1356,9 +1369,11 @@ async function loadConversationMessages(convId) {
          * written (this is the common endpoint-mode case).  Merge those
          * translations in-place so the user sees Chinese immediately. */
         const _mergedFresh = _mergeServerTranslations(serverMsgs, conv.messages);
-        if (_mergedFresh > 0) {
+        const _qFlipsFresh = (typeof _reconcileQueuedMarkers === 'function')
+          ? _reconcileQueuedMarkers(serverMsgs, conv.messages) : 0;
+        if (_mergedFresh > 0 || _qFlipsFresh > 0) {
           console.info(`[loadConvMsgs] 🈯 Cache FRESH but merged ${_mergedFresh} ` +
-            `server translation(s) — conv=${convId.slice(0,8)}`);
+            `server translation(s) + ${_qFlipsFresh} queued-marker flip(s) — conv=${convId.slice(0,8)}`);
           // Trigger re-render so Chinese appears now rather than on next action
           if (convId === activeConvId) {
             const _active = conversations.find(c => c.id === convId);

@@ -38,7 +38,6 @@ Out of scope (NOT migrated)
 from __future__ import annotations
 
 import contextlib
-import os
 import time
 from typing import Any, Optional
 
@@ -46,6 +45,7 @@ import requests
 
 import lib as _lib
 from lib.log import get_logger
+from lib.proxy import async_proxy_for
 from lib.proxy import proxies_for, report_outcome as _report_outcome
 
 logger = get_logger(__name__)
@@ -65,19 +65,11 @@ def _build_headers(extra: Optional[dict]) -> dict:
 
 
 def _httpx_proxy_url(url: str) -> Optional[str]:
-    """Convert ``proxies_for(url)`` (requests-style) → single httpx proxy URL.
-
-    httpx accepts a single proxy URL via ``proxy=``, not a dict.
-    Returns None when the URL should bypass the proxy.
-    """
-    pf = proxies_for(url)
-    if pf:  # {'no_proxy': '*'} — bypass
-        return None
-    return (os.environ.get('https_proxy')
-            or os.environ.get('HTTPS_PROXY')
-            or os.environ.get('http_proxy')
-            or os.environ.get('HTTP_PROXY')
-            or None)
+    """Proxy URL for the httpx async client — delegates to
+    ``lib.proxy.async_proxy_for`` so the async transport honours env
+    ``no_proxy`` exactly like the sync one (httpx alone ignores it once an
+    explicit ``proxy=`` is set)."""
+    return async_proxy_for(url)
 
 
 # ══════════════════════════════════════════════════════════════════

@@ -691,14 +691,21 @@ async function sendMessage() {
         `%c[Queue] ✚ Server queued message %c#${result.position}%c for conv=${convId.slice(0,8)} queueId=${result.queueId?.slice(0,8)}`,
         'color:#a78bfa;font-weight:bold', 'color:#fbbf24;font-weight:bold', 'color:#a78bfa'
       );
-      // ★ Remove the optimistic user message from conv.messages and DOM —
-      //   queued messages should only appear in the queue bar, not in chatInner.
-      //   The backend did NOT persist this message to the conversation DB.
-      if (conv.messages[userMsgIdx] === userMsg) {
-        conv.messages.splice(userMsgIdx, 1);
-        if (activeConvId === convId) {
-          window.ConvView.removeMessage(convId, userMsg);
-        }
+      /* ★ ROOT FIX (2026-08-05, epic pt_cfdfd30c8699407b): keep the bubble in
+       *   the timeline as a first-class QUEUED projection — do NOT splice it
+       *   out. The old "queue bar only" splice is what made the user's own
+       *   message vanish mid-generation and reappear only on a post-finish
+       *   refresh. The renderer already paints `_pendingQueued` rows greyed
+       *   with a clock badge (chat_render.js), the backend mirrors the row
+       *   into the conversation body under the SAME _msgId
+       *   (append_pending_user_msg), dispatch_next_queued clears the marker
+       *   when the turn starts, and a cancel removes the row (see
+       *   removePendingQueueItem). `_queueId` is session bookkeeping for the
+       *   cancel path and is stripped from the PUT wire (_lightMessageForSync). */
+      userMsg._pendingQueued = true;
+      if (result.queueId) userMsg._queueId = result.queueId;
+      if (activeConvId === convId && conv.messages[userMsgIdx] === userMsg) {
+        window.ConvView.apply(convId, userMsgIdx, userMsg);
       }
       // Sync queue state from server for accurate UI
       _refreshServerQueue(convId);
@@ -1420,6 +1427,23 @@ function removePendingQueueItem(convId, idx) {
   if (queue.length === 0) pendingMessageQueue.delete(convId);
   renderPendingQueueUI(convId);
   updateSendButton();
+  /* ★ The queued bubble is a live timeline row now (root fix 2026-08-05) —
+   *   a cancel must remove it from the conversation too, or the greyed
+   *   bubble would sit there forever for a message that will never run. */
+  const _convQ = (typeof conversations !== 'undefined')
+    ? conversations.find((c) => c && c.id === convId) : null;
+  if (_convQ && queueId) {
+    const _qi = _convQ.messages.findIndex((m) => m && m._queueId === queueId);
+    if (_qi >= 0) {
+      const _qm = _convQ.messages[_qi];
+      _convQ.messages.splice(_qi, 1);
+      if (typeof activeConvId !== 'undefined' && activeConvId === convId) {
+        window.ConvView.removeMessage(convId, _qm);
+        if (typeof buildTurnNav === 'function') buildTurnNav(_convQ);
+      }
+      saveConversations(convId);
+    }
+  }
   debugLog(`已取消排队消息 #${idx + 1}`, 'info');
 
   // Server removal
@@ -1444,6 +1468,25 @@ function clearPendingQueue(convId) {
   pendingMessageQueue.delete(convId);
   renderPendingQueueUI(convId);
   updateSendButton();
+  /* ★ Same timeline-row sweep as the single-cancel path (root fix
+   *   2026-08-05): every local row still carrying a queue marker goes. */
+  const _convC = (typeof conversations !== 'undefined')
+    ? conversations.find((c) => c && c.id === convId) : null;
+  if (_convC) {
+    let _swept = 0;
+    for (let i = _convC.messages.length - 1; i >= 0; i--) {
+      const m = _convC.messages[i];
+      if (m && m._pendingQueued) { _convC.messages.splice(i, 1); _swept++; }
+    }
+    if (_swept > 0) {
+      if (typeof activeConvId !== 'undefined' && activeConvId === convId
+          && window.ConvView && typeof window.ConvView.replaceAll === 'function') {
+        window.ConvView.replaceAll(convId, { forceScroll: false });
+        if (typeof buildTurnNav === 'function') buildTurnNav(_convC);
+      }
+      saveConversations(convId);
+    }
+  }
   debugLog(`已清空全部 ${count} 条排队消息`, 'info');
 
   // Server clear
@@ -1808,6 +1851,24 @@ async function _refreshServerQueue(convId) {
       pendingMessageQueue.set(convId, localQueue);
     } else {
       pendingMessageQueue.delete(convId);
+    }
+    /* ★ Re-stamp `_queueId` onto surviving `_pendingQueued` timeline rows
+     *   (root fix 2026-08-05): a reload adopts the server mirror row — same
+     *   timestamp, but no session `_queueId` — so the queue-bar cancel could
+     *   no longer find the local row. The queue row's created_at IS the user
+     *   message's timestamp (enqueue_message), making this join exact. */
+    const _convQ = (typeof conversations !== 'undefined')
+      ? conversations.find((c) => c && c.id === convId) : null;
+    if (_convQ && Array.isArray(_convQ.messages) && serverQueue.length > 0) {
+      const _qidByTs = new Map();
+      for (const item of serverQueue) {
+        if (item && item.queueId && item.timestamp != null) _qidByTs.set(item.timestamp, item.queueId);
+      }
+      for (const m of _convQ.messages) {
+        if (m && m._pendingQueued && !m._queueId && _qidByTs.has(m.timestamp)) {
+          m._queueId = _qidByTs.get(m.timestamp);
+        }
+      }
     }
     renderPendingQueueUI(convId);
     updateSendButton();

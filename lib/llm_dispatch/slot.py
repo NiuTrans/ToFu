@@ -5,6 +5,7 @@ count) and computes a composite score used by the dispatcher to pick the
 best available target for each request.
 """
 
+import collections
 import math
 import random
 import threading
@@ -34,6 +35,17 @@ THINKING_FORMATS = frozenset({
     '', 'enable_thinking', 'thinking_type', 'reasoning_effort',
     'chat_template_kwargs', 'none',
 })
+
+# ── Truncation cooldown window (record_truncation) ──
+# ``consecutive_errors`` is zeroed by every interleaved record_success, so an
+# INTERMITTENTLY-truncating upstream (success, truncate, success, truncate —
+# the measured premature-close pattern: 19 closes on 2026-08-05, every one
+# followed by a success that reset the streak) never reached the old
+# ``>= 3 consecutive`` cooldown gate and the slot kept being picked. A rolling
+# time window survives successes: ≥ _TRUNCATION_WINDOW_MIN truncations inside
+# _TRUNCATION_WINDOW_S seconds cools the slot regardless of the streak.
+_TRUNCATION_WINDOW_S = 600.0
+_TRUNCATION_WINDOW_MIN = 3
 
 
 def _is_valid_thinking_format(value: str) -> bool:
@@ -162,6 +174,11 @@ class Slot:
     gateway_errors: int = 0
     last_error_time: float = 0.0
     last_error_msg: str = ''
+    # Rolling timestamps of record_truncation events (pruned to
+    # _TRUNCATION_WINDOW_S). Survives record_success — the intermittent-rot
+    # cooldown evidence the consecutive-error streak cannot hold.
+    _truncation_events: 'collections.deque' = field(
+        default_factory=collections.deque, repr=False, compare=False)
 
     # ── Inflight tracking ──
     inflight: int = 0               # currently executing requests
@@ -331,16 +348,29 @@ class Slot:
             self.consecutive_errors += 1
             self.total_errors += 1
             self.last_error_time = time.time()
+            _now = self.last_error_time
+            self._truncation_events.append(_now)
+            while (self._truncation_events
+                   and _now - self._truncation_events[0] > _TRUNCATION_WINDOW_S):
+                self._truncation_events.popleft()
             if error:
                 self.last_error_msg = ('[truncation] ' + str(error))[:200]
-            if self.consecutive_errors >= 3:
-                cooldown = min(300, 5 * (2 ** (self.consecutive_errors - 3)))
+            # Cool when EITHER the consecutive streak OR the rolling window
+            # says this upstream keeps truncating — the window is what catches
+            # intermittent rot (streak resets on every success; the window
+            # does not). The escalation exponent takes the stronger signal.
+            _window_hits = len(self._truncation_events)
+            _strikes = max(self.consecutive_errors, _window_hits)
+            if _strikes >= 3:
+                cooldown = min(300, 5 * (2 ** (_strikes - 3)))
                 self.cooldown_until = time.time() + cooldown
                 self.cooldown_reason = 'error'
                 logger.warning('  ⚠️ Slot %s:%s cooled down %ds '
-                               'after %d consecutive truncations/empty outputs',
-                               self.key_name, self.model, cooldown,
-                               self.consecutive_errors)
+                               'after %d truncations/empty outputs '
+                               '(consecutive=%d, %dmin-window=%d)',
+                               self.key_name, self.model, cooldown, _strikes,
+                               self.consecutive_errors,
+                               int(_TRUNCATION_WINDOW_S // 60), _window_hits)
 
     def record_error(self, is_rate_limit=False, error: str = '',
                      is_quota_exhausted: bool = False, is_gateway: bool = False,

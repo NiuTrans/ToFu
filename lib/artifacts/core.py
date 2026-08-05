@@ -194,6 +194,13 @@ def _find_previous_version_by_path(db, conv_id: str, path: str) -> Any:
     # another), the behavior is "incorrect parent linkage" which is
     # cosmetic only — the new row is still inserted correctly.
     json_substr = '%"path": "' + path.replace('%', r'\%').replace('_', r'\_') + '"%'
+    # Tiebreak on `version`: created_at is millisecond-granular, so two
+    # versions created in the same ms order AMBIGUOUSLY under a bare
+    # `created_at DESC` and the new row then links the WRONG parent (v3
+    # stamped version=2 — measured failing 2026-08-05 in CI and locally; the
+    # same collision class as the delete-idempotency incident below).
+    # `version` is monotone within a path's chain → correct deterministic
+    # tiebreak, and backend-agnostic (unlike rowid/ctid).
     return db.execute(
         '''SELECT id, conv_id, task_id, msg_id, source, source_ref,
                   format, title, content, content_sha256, size_bytes,
@@ -201,7 +208,7 @@ def _find_previous_version_by_path(db, conv_id: str, path: str) -> Any:
            FROM chat_artifacts
            WHERE conv_id=? AND deleted_at=0
                  AND CAST(source_ref AS TEXT) LIKE ? ESCAPE '\\'
-           ORDER BY created_at DESC LIMIT 1''',
+           ORDER BY created_at DESC, version DESC LIMIT 1''',
         (conv_id, json_substr)
     ).fetchone()
 

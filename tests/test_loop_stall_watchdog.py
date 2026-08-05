@@ -156,6 +156,42 @@ class TestShouldArmCtimer:
             f.close()
 
 
+class TestStallPressureContext:
+    """The stall line must carry the host-pressure reading (2026-08-05 audit:
+    classifying a stall meant hand-correlating error.log against
+    cgroup_pressure.log — 7/19 stalls within 120s of a pressure event, the
+    rest host-quiet. With the reading inline, the classification is free)."""
+
+    def test_real_loadavg_present(self):
+        out = server._stall_pressure_context()
+        assert 'load1=' in out  # /proc/loadavg is always readable on Linux
+
+    def test_cgroup_part_when_pressure_readable(self, monkeypatch):
+        import lib.cgroup_guard as cg
+        monkeypatch.setattr(cg, 'pressure',
+                            lambda: {'limit': 1, 'usage': 1, 'pct': 91.42,
+                                     'swap': None})
+        assert 'cgmem=91.4%' in server._stall_pressure_context()
+
+    def test_cgroup_part_absent_when_unreadable(self, monkeypatch):
+        import lib.cgroup_guard as cg
+        monkeypatch.setattr(cg, 'pressure', lambda: None)
+        out = server._stall_pressure_context()
+        assert 'cgmem' not in out and 'load1=' in out
+
+    def test_stall_line_carries_pressure_suffix(self):
+        """Source pin: the STALLED log call must append the context."""
+        import inspect
+        src = inspect.getsource(server._loop_stall_watch) \
+            if hasattr(server, '_loop_stall_watch') else ''
+        # _loop_stall_watch is a closure inside _serve; pin via the module src.
+        with open(server.__file__, encoding='utf-8') as f:
+            mod_src = f.read()
+        assert '_pressure = _stall_pressure_context()' in mod_src
+        assert "(' [' + _pressure + ']') if _pressure else ''" in mod_src
+        assert 'pressure=_pressure' in mod_src
+
+
 class TestGilHeldCapture:
     """The load-bearing demonstration: the C-timer path captures a stall that
     HOLDS THE GIL — the exact case a Python-thread dumper is blind to.

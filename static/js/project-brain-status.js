@@ -794,27 +794,28 @@
     return sh.ed;
   }
 
-  /** Draft an epic title from a response: first sentence-ish chunk, capped —
-   *  the human edits before posting. */
+  /** Draft the epic body from a response: the FULL diagnosis, whitespace-
+   *  normalized. The board's title field carries up to _TITLE_MAX_CHARS
+   *  (2000) by design (multi-sentence design descriptions), so the first
+   *  sentence is NOT a summary — in a status diagnosis it is usually the
+   *  praise paragraph and the actual problem lives in later sentences.
+   *  Cap mirrors the backend limit; the human edits before posting. */
+  var _FIX_PREFILL_MAX = 2000;
   function _draftFixTitle(entry) {
     var t = ((entry && entry.response) || '').replace(/\s+/g, ' ').trim();
-    if (!t) return '';
-    var segs = t.split(/[。！？.!?]/);
-    var first = '';
-    for (var i = 0; i < segs.length; i++) {
-      if (segs[i].trim()) { first = segs[i].trim(); break; }
-    }
-    var title = first || t;
-    return title.length > 90 ? title.slice(0, 90).trim() + '…' : title;
+    return t.length > _FIX_PREFILL_MAX
+      ? t.slice(0, _FIX_PREFILL_MAX).trim() + '…' : t;
   }
 
-  /** The request-fix editor: pre-filled epic title → the EXISTING human-gated
-   *  board-post (created_by_conv = displayed conv → dispatch target). */
+  /** The request-fix editor: pre-filled with the FULL response → the
+   *  EXISTING human-gated board-post (created_by_conv = displayed conv →
+   *  dispatch target). Multi-line so the whole diagnosis stays visible and
+   *  editable before posting. */
   function _buildFixEditor(item, entry) {
     var sh = _respEditorShell();
-    var input = document.createElement('input');
-    input.type = 'text';
+    var input = document.createElement('textarea');
     input.className = 'pb-status-ask-input pb-watch-fix-title';
+    input.rows = 4;
     input.value = _draftFixTitle(entry);
     sh.ed.appendChild(input);
     var send = document.createElement('button');
@@ -854,7 +855,9 @@
     }
     send.addEventListener('click', submit);
     input.addEventListener('keydown', function (e) {
-      if (e.key === 'Enter') { e.preventDefault(); submit(); }
+      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+        e.preventDefault(); submit();
+      }
       if (e.key === 'Escape' && sh.ed.parentNode) {
         sh.ed.parentNode.removeChild(sh.ed);
       }

@@ -11,7 +11,6 @@ Public API:
 """
 
 import asyncio
-import os
 import time
 
 import httpx
@@ -42,21 +41,18 @@ from lib.llm_errors import (
     repair_mojibake,
 )
 from lib.log import get_logger
-from lib.proxy import proxies_for, report_outcome as _proxy_report_outcome
+from lib.proxy import async_proxy_for as _async_proxy_for
+from lib.proxy import report_outcome as _proxy_report_outcome
 
 logger = get_logger(__name__)
 
 
 def _httpx_proxy_url(url: str):
-    """Convert requests-style proxies_for() result to httpx proxy URL."""
-    pf = proxies_for(url)
-    if pf:
-        return None
-    return (os.environ.get('https_proxy')
-            or os.environ.get('HTTPS_PROXY')
-            or os.environ.get('http_proxy')
-            or os.environ.get('HTTP_PROXY')
-            or None)
+    """Proxy URL for the httpx async client — delegates to
+    ``lib.proxy.async_proxy_for`` so the async transport honours env
+    ``no_proxy`` exactly like the sync one (httpx alone ignores it once an
+    explicit ``proxy=`` is set)."""
+    return _async_proxy_for(url)
 
 
 async def async_stream_chat(body, *, on_thinking=None, on_content=None,

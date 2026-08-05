@@ -542,3 +542,79 @@ function _adoptInjectedSettledPrefix(conv, serverMsgs, liveEntry) {
   return candidates.length;
 }
 if (typeof window !== 'undefined') window._adoptInjectedSettledPrefix = _adoptInjectedSettledPrefix;
+
+
+/* ═══════════════════════════════════════════════════════════════════
+ * Queued-bubble lifecycle reducers (epic pt_cfdfd30c8699407b, 2026-08-05).
+ *
+ * A queued user message is a FIRST-CLASS timeline row: the send pipeline
+ * keeps the optimistic bubble and tags it `_pendingQueued` (+ session
+ * `_queueId`) instead of splicing it out — the bubble never leaves the
+ * transcript. The backend mirrors it into the conversation body under the
+ * SAME `_msgId` (lib/chat/persistence.py::append_pending_user_msg) and
+ * `dispatch_next_queued` clears the marker when the turn starts. These two
+ * reducers are the frontend half of that lifecycle:
+ *
+ *   _mergeQueuedMarkerOff(lm, sm)  — per-message: the server twin (same
+ *       _msgId) no longer carries `_pendingQueued` ⇒ the turn DISPATCHED;
+ *       clear the local marker (+ the session `_queueId`) so the bubble
+ *       flips from the greyed "queued" state to a normal user bubble
+ *       WITHOUT waiting for a reload.
+ *
+ *   _reconcileQueuedMarkers(serverMsgs, localMsgs) — array wrapper, keyed
+ *       by _msgId (index alignment is meaningless across windows /
+ *       insertions). Returns the number of flips so callers can gate a
+ *       repaint.
+ *
+ *   _withPendingQueuedTail(localMsgs, serverMsgs) — wholesale-replace
+ *       preservation: a lane that assigns `conv.messages = serverMsgs`
+ *       verbatim would drop a still-queued local row the server body
+ *       legitimately lacks (the backend only mirrors the FIRST queued
+ *       message; a PUT has not landed it yet). Re-append the missing
+ *       queued rows (in original order — they belong at the tail, right
+ *       after the running turn). Rows the server DOES carry (same _msgId)
+ *       are NOT re-appended — the server copy wins, marker state included.
+ *
+ * Pure reducers (no DOM, no globals) — load-order-safe.
+ * ═══════════════════════════════════════════════════════════════════ */
+function _mergeQueuedMarkerOff(lm, sm) {
+  if (!lm || !sm || typeof lm !== 'object' || typeof sm !== 'object') return 0;
+  if (!lm._pendingQueued) return 0;
+  if (sm._pendingQueued) return 0;
+  delete lm._pendingQueued;
+  delete lm._queueId;
+  return 1;
+}
+if (typeof window !== 'undefined') window._mergeQueuedMarkerOff = _mergeQueuedMarkerOff;
+
+function _reconcileQueuedMarkers(serverMsgs, localMsgs) {
+  if (!Array.isArray(serverMsgs) || !Array.isArray(localMsgs)) return 0;
+  const localById = new Map();
+  for (const lm of localMsgs) {
+    if (lm && lm._pendingQueued && lm._msgId) localById.set(lm._msgId, lm);
+  }
+  if (!localById.size) return 0;
+  let flips = 0;
+  for (const sm of serverMsgs) {
+    if (!sm || !sm._msgId) continue;
+    const lm = localById.get(sm._msgId);
+    if (lm) flips += _mergeQueuedMarkerOff(lm, sm);
+  }
+  return flips;
+}
+if (typeof window !== 'undefined') window._reconcileQueuedMarkers = _reconcileQueuedMarkers;
+
+function _withPendingQueuedTail(localMsgs, serverMsgs) {
+  const out = Array.isArray(serverMsgs) ? serverMsgs : [];
+  if (!Array.isArray(localMsgs)) return out;
+  const serverIds = new Set();
+  for (const sm of out) { if (sm && sm._msgId) serverIds.add(sm._msgId); }
+  for (const lm of localMsgs) {
+    if (!lm || !lm._pendingQueued) continue;
+    if (lm._msgId && serverIds.has(lm._msgId)) continue;
+    out.push(lm);
+    if (lm._msgId) serverIds.add(lm._msgId);
+  }
+  return out;
+}
+if (typeof window !== 'undefined') window._withPendingQueuedTail = _withPendingQueuedTail;

@@ -51,6 +51,7 @@ declare var _TERMINAL_ROUND_STATUS: any;   // static/js/ui/stream_reducer.js
 declare var _TICK_FLOW_WINDOW_S: any;   // static/js/ui/stall_watch.js
 declare var __RELAY_BILLING_ENABLED: any;   // static/js/relay-admin.js
 declare var __RELAY_MODEL_ENABLED: any;   // static/js/relay-admin.js
+declare var __clientLogRelay: any;   // static/js/core/client_log_relay.js
 declare var __fitCount: any;   // static/js/settings/providers/access_matrix.js
 declare var __fitWork: any;   // static/js/settings/providers/access_matrix.js
 declare var __presenceWired: any;   // static/js/presence.js
@@ -204,6 +205,7 @@ interface Window {
   _DEFERRED_ENTRY_POINTS: any;
   __RELAY_BILLING_ENABLED: any;
   __RELAY_MODEL_ENABLED: any;
+  __clientLogRelay: any;
   __fitCount: any;
   __fitWork: any;
   __presenceWired: any;
@@ -273,6 +275,7 @@ interface Window {
   _maskVuMachineTokens: any;
   _maybeArmAutopilot: any;
   _maybeAutoGenerateTitle: any;
+  _mergeQueuedMarkerOff: any;
   _mergeServerTranslations: any;
   _mergeTerminalTurnFields: any;
   _mergeTranslationFields: any;
@@ -325,6 +328,7 @@ interface Window {
   _readerFontStep: any;
   _readerWidthCycle: any;
   _rebaseUnackedTail: any;
+  _reconcileQueuedMarkers: any;
   _refreshSystemPromptSummary: any;
   _rehydrateInjectRows: any;
   _releaseBootLoad: any;
@@ -371,6 +375,7 @@ interface Window {
   _wireConvHistoryRewritePush: any;
   _wireConvSyncPush: any;
   _withInstantScroll: any;
+  _withPendingQueuedTail: any;
   aiCompressLog: any;
   applyCapabilityTaxonomy: any;
   applyConvStateSnapshot: any;

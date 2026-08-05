@@ -250,15 +250,16 @@ def _restore_from_sql_dump_if_present(base_dir, pg_port, pg_user, pg_dbname):
             if proc.poll() is None:
                 try:
                     proc.kill()
-                except OSError:
-                    pass
+                except OSError as _ke:
+                    logger.debug('[DB] psql kill after failed restore raced the '
+                                 'process exit (harmless): %s', _ke)
             try:
                 _err = proc.stderr.read() if proc.stderr else b''
                 if _err:
                     logger.error('[DB] psql stderr before failure: %.500s',
                                  _err.decode('utf-8', 'replace'))
-            except Exception:
-                pass
+            except Exception as _se:
+                logger.debug('[DB] could not read psql stderr after failure: %s', _se)
         return
 
     if result.returncode != 0:

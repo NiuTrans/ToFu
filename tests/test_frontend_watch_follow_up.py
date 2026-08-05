@@ -135,8 +135,9 @@ _ITEM = json.dumps({
          'ts': 2000,
          'pillar_state': {'followUpQuestion': 'Why is seq1 worried?',
                           'anchorSeq': 1}},
-        {'seq': 1, 'response': 'First assessment.', 'trigger': 'manual',
-         'ts': 1000, 'pillar_state': {}},
+        {'seq': 1, 'response': 'First assessment. PG seeding is stalled and '
+                                'the release pipeline lags!',
+         'trigger': 'manual', 'ts': 1000, 'pillar_state': {}},
     ]})
 
 
@@ -225,8 +226,11 @@ def test_follow_up_door_toggles_closed_on_second_click():
 
 
 def test_request_fix_posts_a_prefilled_epic_via_the_board_channel():
-    """The fix door drafts the epic title FROM the anchor response and posts
-    through the existing human-gated board-post — never a new write path."""
+    """The fix door pre-fills the FULL response — NOT just the first
+    sentence (in a status diagnosis the praise leads and the actual problem
+    lives in later sentences; owner 2026-08-05: 'why is only the first
+    sentence posted as the task??') — in a multi-line editor, posted through
+    the existing human-gated board-post channel, never a new write path."""
     out = _run(f"""
       const card = __probe.PBS.buildWatchItem({_ITEM}, {_CTX});
       const findBtns = (n, acc) => {{
@@ -235,17 +239,21 @@ def test_request_fix_posts_a_prefilled_epic_via_the_board_channel():
         (n.children || []).forEach(c => findBtns(c, acc));
         return acc;
       }};
-      findBtns(card)[1].click();   // the trail-row door (seq 1, 'First assessment.')
+      findBtns(card)[1].click();   // the trail-row door (seq 1)
       const ed = card.querySelector('.pb-watch-resp-editor');
       const input = ed.querySelector('.pb-watch-fix-title');
       const prefill = input.value;
+      const tag = input.tagName;
       ed.querySelector('.pb-status-ask-btn').click();
-      console.log(JSON.stringify({{ prefill, board: global.__boardCalls }}));
+      console.log(JSON.stringify({{ prefill, tag, board: global.__boardCalls }}));
     """)
-    assert out['prefill'] == 'First assessment', out['prefill']
+    full = ('First assessment. PG seeding is stalled and the release '
+            'pipeline lags!')
+    assert out['prefill'] == full, out['prefill']
+    assert out['tag'] == 'TEXTAREA', 'multi-line editor, not a one-line input'
     assert len(out['board']) == 1
     _path, opts = out['board'][0]
-    assert opts['title'] == 'First assessment'
+    assert opts['title'] == full
     assert opts['convId'] == 'convH', 'dispatch target = the displayed conv'
 
 

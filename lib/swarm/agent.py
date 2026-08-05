@@ -703,7 +703,11 @@ class SubAgent:
         stream phases, request snapshots, the parallel tool pool, round
         checkpoints, partial-answer extraction — stays in the hooks below.
         """
-        from lib.agent_loop import AbortSignal, run_agent_loop
+        from lib.agent_loop import (
+            AbortSignal,
+            run_agent_loop,
+            unparseable_tool_calls,
+        )
 
         timeout_seconds = getattr(self.spec, 'timeout_seconds', None)
         abort = AbortSignal.from_callback(self.abort_check)
@@ -920,6 +924,54 @@ class SubAgent:
                     ''.join(thinking_parts)[:2000]
                 )
 
+            # ── Premature-close poison guard ──
+            # The gateway can sever the SSE stream without its terminal
+            # frames (``usage['_missing_done']``). Two poison shapes must NOT
+            # flow on:
+            #   (a) tool calls whose arguments JSON was cut mid-stream —
+            #       executing them would run tools on corrupt arguments (or
+            #       the sanitizer's '{}' substitution);
+            #   (b) an empty, tool-less "answer" — accepting it would
+            #       silently finalize the sub-agent with nothing.
+            # Both are retried through the chassis' retry_bonus (bounded by
+            # max_retry_bonus below; ``self._poison_strikes`` mirrors that
+            # budget so this hook knows whether the chassis will grant the
+            # retry). On exhaustion the corrupt calls are stripped and the
+            # round degrades to whatever valid calls / content survive —
+            # never executed raw.
+            if isinstance(usage, dict) and usage.get('_missing_done'):
+                _bad_tcs = unparseable_tool_calls(msg)
+                _empty_close = (not msg.get('tool_calls')
+                                and not (msg.get('content') or '').strip())
+                if _bad_tcs or _empty_close:
+                    _strikes = getattr(self, '_poison_strikes', 0)
+                    if _strikes < 2:  # == max_retry_bonus on the call below
+                        self._poison_strikes = _strikes + 1
+                        _why = ('truncated tool args: ' + ', '.join(
+                            (tc.get('function') or {}).get('name', '?')
+                            for tc in _bad_tcs)) if _bad_tcs else 'empty stream'
+                        logger.warning(
+                            '[Agent:%s] Round %d: premature close (%s) — '
+                            'transparent retry %d/2 (round discarded before '
+                            'history append)', self.agent_id, round_num,
+                            _why, self._poison_strikes)
+                        self._emit_stream_phase(
+                            Phase.RETRYING,
+                            f'⚠️ 上游断流（{_why}），正在自动重试 '
+                            f'({self._poison_strikes}/2)…')
+                        _flush_log()
+                        return msg, stop_reason, usage  # unappended → retry
+                    if _bad_tcs:
+                        msg['tool_calls'] = [
+                            tc for tc in (msg.get('tool_calls') or [])
+                            if tc not in _bad_tcs]
+                        logger.warning(
+                            '[Agent:%s] Round %d: premature-close retry budget '
+                            'exhausted — stripped %d corrupt tool call(s), '
+                            'proceeding with %d valid one(s)',
+                            self.agent_id, round_num, len(_bad_tcs),
+                            len(msg['tool_calls']))
+
             # Append assistant message
             self.messages.append(msg)
 
@@ -1006,6 +1058,19 @@ class SubAgent:
                 # content_len==0 — that is just a pure tool-calling turn).
                 max_consecutive_no_progress_rounds=(
                     self._MAX_CONSECUTIVE_NO_PROGRESS_ROUNDS),
+                # Premature-close retry: a severed stream (missing [DONE])
+                # with truncated tool args / no usable output earns ONE bonus
+                # round per poison, capped — the dispatch hook above discards
+                # the poisoned round from history, so the retry is a clean
+                # re-issue of the same context.
+                retry_bonus=lambda rnd, msg, finish, usage: (
+                    isinstance(usage, dict) and bool(usage.get('_missing_done'))
+                    and (bool(unparseable_tool_calls(msg))
+                         or (isinstance(msg, dict)
+                             and not msg.get('tool_calls')
+                             and not (msg.get('content') or '').strip()))
+                ),
+                max_retry_bonus=2,
                 tools_terminal_round=False,
                 # Round-boundary checkpoint lives on the chassis'
                 # on_round_end seam (NOT inside the batch hook) so the

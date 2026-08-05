@@ -198,8 +198,12 @@ fan-out, lane stays human-facing-only):
   fresh assessment and must not mark the recurring cadence fresh. Synthesized
   responses still never reach the injection path (the goals renderer ships
   item TEXT only; the §8b source guard is unchanged).
-- **请求修复 (Request fix)** — an inline epic-draft editor pre-filled from
-  the anchor response (first sentence, 90-char cap, human-editable).
+- **请求修复 (Request fix)** — an inline epic-draft editor (multi-line)
+  pre-filled with the FULL anchor response (whitespace-normalized, capped at
+  the board's 2000-char title limit, human-editable). The whole diagnosis
+  rides along because in a status narrative the praise leads and the actual
+  problem lives in later sentences — first-sentence drafting posted epics
+  that said the opposite of what needed fixing (owner catch 2026-08-05).
   Submitting rides the EXISTING human-gated `POST /api/v1/project/board/post`
   (`created_by_conv` = displayed conv → dispatch target): the brain dispatches
   the fix to a conversation the human opens from the Board tab — the

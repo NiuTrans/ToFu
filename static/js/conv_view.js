@@ -361,6 +361,18 @@
       return ConvView.apply(convId, idx, msg, { append: !!opts.append });
     },
 
+    /** Alias the notify/verify lanes already call
+     *  (cross_tab_sync.js::_translationOnlyVerify / _streamActiveVerify) but
+     *  which NEVER EXISTED — the typeof guard made every per-message repaint
+     *  a silent no-op, so field-level merges (translations, terminal
+     *  metadata, queued-marker flips) only painted on the next full rebuild.
+     *  Semantics = replace-in-place only (append:false). */
+    applyMessage: function (convId, msg, opts) {
+      opts = opts || {};
+      return ConvView.apply(convId,
+        (typeof opts.idx === 'number') ? opts.idx : -1, msg, { append: false });
+    },
+
     /** Remove a single message's DOM element by msg id or index.
      *  Does NOT touch conv.messages — caller is responsible for
      *  the model-side mutation. */

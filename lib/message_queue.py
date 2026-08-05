@@ -881,14 +881,36 @@ def remove_from_queue(conv_id: str, queue_id: str) -> bool:
     """
     db = get_thread_db(DOMAIN_CHAT)
     row = db.execute(
-        'SELECT id FROM message_queue WHERE id=? AND conv_id=?',
+        'SELECT id, payload FROM message_queue WHERE id=? AND conv_id=?',
         (queue_id, conv_id)
     ).fetchone()
     if not row:
         return False
 
+    # Resolve the pending-mirror timestamp BEFORE deleting the queue row —
+    # the conversation body may hold a display-only ``_pendingQueued`` twin
+    # (append_pending_user_msg) that must be swept with the cancel, or a
+    # greyed "queued" bubble for a message that will never run strands on
+    # every device. Matched by the same timestamp the dispatch reconcile uses.
+    _pending_ts = None
+    try:
+        _p = json.loads(row['payload']) if row['payload'] else {}
+        _pending_ts = (_p.get('_user_msg') or {}).get('timestamp')
+    except (json.JSONDecodeError, TypeError, AttributeError) as e:
+        logger.debug('[Queue] payload parse for pending sweep failed (queueId=%s): %s',
+                     queue_id[:8], e)
+
     db_execute_with_retry(db, 'DELETE FROM message_queue WHERE id=?', (queue_id,))
     _renumber_positions(db, conv_id)
+
+    if _pending_ts is not None:
+        try:
+            from lib.chat.persistence import remove_pending_user_msgs
+            remove_pending_user_msgs(db, conv_id, [_pending_ts])
+        except Exception as e:
+            logger.warning('[Queue] pending-mirror sweep failed conv=%s '
+                           '(queue row already removed; mirror may strand '
+                           'until reload): %s', conv_id[:8], e)
 
     logger.info('[Queue] Removed message %s from conv=%s', queue_id[:8], conv_id[:8])
     return True
@@ -944,6 +966,14 @@ def clear_queue(conv_id: str) -> int:
     if count > 0:
         db_execute_with_retry(db, 'DELETE FROM message_queue WHERE conv_id=?', (conv_id,))
         logger.info('[Queue] Cleared %d messages from conv=%s', count, conv_id[:8])
+        # Sweep every display-only ``_pendingQueued`` mirror row (timestamps
+        # unknown here — clear semantics cover them all).
+        try:
+            from lib.chat.persistence import remove_pending_user_msgs
+            remove_pending_user_msgs(db, conv_id, None)
+        except Exception as e:
+            logger.warning('[Queue] pending-mirror sweep on clear failed conv=%s '
+                           '(queue already cleared): %s', conv_id[:8], e)
 
     return count
 
@@ -1240,6 +1270,21 @@ def dispatch_next_queued(conv_id: str, *, _wait: float | None = None) -> str | N
                     _wait, conv_id[:8])
         return None
     try:
+        # ── Per-conv double-dispatch guard ──
+        # A dispatched task keeps running ASYNC after this function returns,
+        # so a second dispatch entering the lock milliseconds later would
+        # dequeue + append + spawn AGAIN. Measured 2026-08-04 (conv
+        # msco7vqmkf8yb2): two kickoffs appended 463 ms apart, tasks
+        # 17582690/cebd5669 overlapping ~5 s — the first ended empty-'done',
+        # leaving the persisted user,user adjacency behind the llm_sanitize
+        # merge-warning storm. Every legitimate caller drains only when no
+        # task is live (the completing task is already terminal by the time
+        # its completion hook runs this), so a live task here always means a
+        # premature caller — leave the row queued for the completion hook.
+        if _conv_has_live_task(conv_id):
+            logger.info('[Queue] conv=%s already has a live task — dispatch '
+                        'refused; the completion hook will drain', conv_id[:8])
+            return None
         item = dequeue_next(conv_id)
         if not item:
             return None

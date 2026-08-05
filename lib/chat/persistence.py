@@ -408,6 +408,101 @@ def append_pending_user_msg(db, conv_id, user_msg, valid_assistant_ids=None):
     return False, None
 
 
+def remove_pending_user_msgs(db, conv_id, timestamps=None):
+    """Remove display-only ``_pendingQueued`` mirror rows from a conversation
+    body — the cancel/clear companion of :func:`append_pending_user_msg`.
+
+    The mirror row made a queued message visible cross-device the moment it
+    was queued. Cancelling the queue entry (``message_queue.remove_from_queue
+    ``/``clear_queue``) used to delete ONLY the queue row, stranding the
+    mirror forever: a greyed "queued" bubble for a message that will never
+    run, on every device, until someone hand-edited the history. This sweep
+    removes those rows.
+
+    Matching is by the queued user message's ``timestamp`` — the same
+    identity ``append_user_msg_idempotent`` reconciles on dispatch — and
+    restricted to rows STILL carrying ``_pendingQueued`` (a dispatched turn's
+    row lost the marker and is a real turn; never touched).
+
+    Args:
+        db: thread db handle.
+        conv_id: conversation id.
+        timestamps: iterable of queued ``user_msg.timestamp`` values to
+            sweep; ``None`` sweeps every pending row of the conv (the
+            clear_queue semantics). An empty iterable is a no-op.
+
+    Returns ``(removed_count, new_rev_or_None)``. CAS-guarded on ``rev`` like
+    the append twin so a concurrent checkpoint is never clobbered; a CAS
+    loss simply retries against the fresh row.
+    """
+    if timestamps is not None:
+        timestamps = {t for t in timestamps if t is not None}
+        if not timestamps:
+            return 0, None
+    _MAX_CAS = 4
+    for attempt in range(_MAX_CAS):
+        row = db.execute(
+            'SELECT messages, rev FROM conversations WHERE id=? AND user_id=?',
+            (conv_id, DEFAULT_USER_ID)).fetchone()
+        if not row:
+            return 0, None
+        try:
+            messages = json.loads(row['messages'] or '[]')
+        except (json.JSONDecodeError, TypeError) as e:
+            logger.warning('[Queue] pending-mirror sweep: bad messages JSON conv=%s: %s',
+                           conv_id[:8], e)
+            return 0, None
+        cur_rev = row['rev']
+        kept = []
+        removed = 0
+        for m in messages:
+            if (isinstance(m, dict) and m.get('_pendingQueued')
+                    and m.get('role') == 'user'
+                    and (timestamps is None or m.get('timestamp') in timestamps)):
+                removed += 1
+                continue
+            kept.append(m)
+        if not removed:
+            return 0, None
+        now_ms = int(time.time() * 1000)
+        cur = db.execute(
+            'UPDATE conversations SET messages=?, updated_at=?, msg_count=? '
+            'WHERE id=? AND user_id=? AND rev=?',
+            (json_dumps_pg(kept), now_ms, len(kept), conv_id,
+             DEFAULT_USER_ID, cur_rev))
+        db.commit()
+        if getattr(cur, 'rowcount', None) != 0:
+            from lib.database.messages_rows import mirror_write_and_commit
+            mirror_write_and_commit(db, conv_id, kept, now_ms=now_ms)
+            try:
+                rev_row = db.execute(
+                    'SELECT rev FROM conversations WHERE id=? AND user_id=?',
+                    (conv_id, DEFAULT_USER_ID)).fetchone()
+                rev = (rev_row[0] if not isinstance(rev_row, dict)
+                       else rev_row.get('rev')) if rev_row is not None else None
+            except Exception as e:
+                logger.debug('[Queue] pending-mirror sweep rev read-back failed: %s', e)
+                rev = None
+            logger.info('[Queue] swept %d pending mirror row(s) conv=%s (rev=%s)',
+                        removed, conv_id[:8], rev)
+            return removed, rev
+        logger.debug('[Queue] pending-mirror sweep CAS miss conv=%s attempt %d/%d',
+                     conv_id[:8], attempt + 1, _MAX_CAS)
+        time.sleep(0.02 * (attempt + 1))
+    logger.warning('[Queue] pending-mirror sweep CAS exhausted conv=%s — '
+                   'mirror row left for the next reload reconcile', conv_id[:8])
+    return 0, None
+
+
+__all__ = [
+    'extract_db_meta',
+    'extract_task_meta',
+    'load_or_create_conv',
+    'persist_conv_messages',
+    'append_pending_user_msg',
+    'remove_pending_user_msgs',
+    'settled_turn_facts',
+]
 __all__ = [
     'extract_db_meta',
     'extract_task_meta',

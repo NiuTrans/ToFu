@@ -82,8 +82,11 @@ async function _applyHistoryRewrite(convId, frameRev) {
   const serverMsgs = data.messages || [];
   const localLen = (conv.messages || []).length;
 
-  /* Adopt the authoritative (possibly shorter) message list. */
-  conv.messages = serverMsgs;
+  /* Adopt the authoritative (possibly shorter) message list — preserving
+   * any still-queued local rows the body legitimately lacks (queued-bubble
+   * root fix, pt_cfdfd30c8699407b). */
+  conv.messages = (typeof _withPendingQueuedTail === 'function')
+    ? _withPendingQueuedTail(conv.messages, serverMsgs) : serverMsgs;
   conv.title = data.title || conv.title;
   conv.updatedAt = data.updatedAt || data.updated_at || conv.updatedAt;
   conv._serverMsgCount = serverMsgs.length;

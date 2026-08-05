@@ -16,6 +16,9 @@ exactly the same heuristic / extraction logic.
 
 from __future__ import annotations
 
+import logging
+import os
+
 from flask import Blueprint
 
 from lib.api_response import api_bad_request, api_ok
@@ -347,4 +350,72 @@ def message_cost_batch():
     return api_ok(costs=costs)
 
 
+@api_v1_logs_bp.route('/api/v1/logs/client', methods=['POST'])
+@require_scope('chat')
+@api_meta(
+    summary='Relay browser console lines into logs/frontend.log',
+    description=(
+        'Batch sink for the client-side log relay '
+        '(static/js/core/client_log_relay.js): the browser patches '
+        'console.{log,info,warn,error} into a bounded ring buffer and '
+        'POSTs it here every 15 s (sendBeacon on pagehide), closing the '
+        'gap where live-view diagnostics (console.info breadcrumbs) never '
+        'reached the server.\n\n'
+        'Body: ``{session, url, entries: [{t, lv, msg, n?}]}`` — capped '
+        'at 200 entries × 1000 chars; consecutive-duplicate folds arrive '
+        'as ``n``. Lines land on the ``frontend`` logger → '
+        'logs/frontend.log (daily rotation). Set '
+        '``TOFU_CLIENT_LOG_RELAY=0`` to drop everything server-side.'),
+    tags=['logs'],
+    scope='chat',
+    request_body={'required': True, 'content': {'application/json': {
+        'schema': {
+            'type': 'object',
+            'required': ['entries'],
+            'properties': {
+                'session': {'type': 'string'},
+                'url': {'type': 'string'},
+                'entries': {'type': 'array',
+                             'items': {'type': 'object'}},
+            },
+        },
+    }}},
+    responses={'200': {'description': 'OK'}},
+)
+def client_logs_relay():
+    if os.environ.get('TOFU_CLIENT_LOG_RELAY', '1').strip().lower() in (
+            '0', 'false', 'no', 'off'):
+        return api_ok(relayed=0, disabled=True)
+    body = parse_body()
+    try:
+        entries = require_list(body, 'entries', max_len=200)
+    except BadRequest as e:
+        return api_bad_request(str(e), field=e.field or 'entries')
+    session = (optional_str(body, 'session', default='', max_len=64) or '')[:16]
+    fe = logging.getLogger('frontend')
+    relayed = 0
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        lv = str(e.get('lv') or 'info').lower()
+        # A client-supplied line must never forge a log record — collapse
+        # CR/LF so one entry is always one physical line.
+        msg = str(e.get('msg') or '')[:1000].replace('\r', ' ').replace('\n', ' ⏎ ')
+        if not msg:
+            continue
+        n = e.get('n')
+        if isinstance(n, int) and n > 1:
+            msg = '%s (×%d)' % (msg, min(n, 100000))
+        line = '[client:%s] %s' % (session or '?', msg)
+        if lv == 'error':
+            fe.error('%s', line)
+        elif lv == 'warn':
+            fe.warning('%s', line)
+        else:
+            fe.info('%s', line)
+        relayed += 1
+    return api_ok(relayed=relayed)
+
+
+__all__ = ['api_v1_logs_bp']
 __all__ = ['api_v1_logs_bp']

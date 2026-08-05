@@ -102,6 +102,11 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None,
     with task['content_lock']:
         _round_base_content = task['content']
         _round_base_thinking = task['thinking']
+    # ★ Stamp the round base on the task so analyse_stream_result's
+    #   truncated-tool-call guard can reset THIS round's poisoned partial text
+    #   (and only this round's) before the transparent retry re-streams.
+    task['_round_base_content'] = _round_base_content
+    task['_round_base_thinking'] = _round_base_thinking
     # ★ Init to 0.0 (epoch) so the FIRST content/thinking delta checkpoints
     #   immediately, then settle into the _STREAM_CHECKPOINT_INTERVAL cadence.
     #   Starting at time.time() left a pre-first-checkpoint window where a

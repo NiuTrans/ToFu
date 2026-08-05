@@ -103,6 +103,10 @@ def test_sdk_e2e_boot_refuses_production_db(monkeypatch):
     # Fresh state so the early-return guard (``_STATE['app'] is not None``)
     # doesn't short-circuit before the DB check.
     monkeypatch.setitem(sdk_e2e._STATE, 'app', None)
+    # Also reset 'tmp': a co-scheduled earlier test may have run the boot
+    # successfully and left a real TemporaryDirectory in _STATE — reading it
+    # here would judge a leftover, not this call's behavior (CI red 2026-08-05).
+    monkeypatch.setitem(sdk_e2e._STATE, 'tmp', None)
     with pytest.raises(pytest.UsageError):
         sdk_e2e._boot_real_server()
     # The guard must fire BEFORE any server import / TemporaryDirectory.
@@ -119,6 +123,7 @@ def test_sdk_parity_setup_refuses_production_db(monkeypatch):
     import importlib
     parity = importlib.import_module('tests.test_sdk_parity_e2e')
     monkeypatch.setitem(parity._STATE, 'app', None)
+    monkeypatch.setitem(parity._STATE, 'tmp', None)
     with pytest.raises(pytest.UsageError):
         parity._setup_once()
     assert parity._STATE['tmp'] is None
@@ -134,6 +139,7 @@ def test_headless_api_setup_refuses_production_db(monkeypatch):
     import importlib
     headless = importlib.import_module('tests.test_e2e_headless_api')
     monkeypatch.setitem(headless._STATE, 'app', None)
+    monkeypatch.setitem(headless._STATE, 'tmp', None)
     with pytest.raises(pytest.UsageError):
         headless._setup_once()
     assert headless._STATE['tmp'] is None

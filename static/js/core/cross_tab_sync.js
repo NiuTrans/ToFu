@@ -346,6 +346,10 @@ async function _streamActiveVerify(convId) {
     if (typeof _mergeTranslationFields === "function") {
       ch += _mergeTranslationFields(lm, sm);
     }
+    /* Queued-bubble marker flip (dispatched ⇒ server drops the marker). */
+    if (typeof _mergeQueuedMarkerOff === "function") {
+      ch += _mergeQueuedMarkerOff(lm, sm);
+    }
     if (ch > 0) touchedIdx.push(li);
   }
 
@@ -566,9 +570,18 @@ function _adoptVerifiedServerConv(conv, data) {
     }
   }
 
+  /* ★ Queued-bubble marker flip (pt_cfdfd30c8699407b) — server truth:
+   *   a dispatched turn's row no longer carries _pendingQueued. */
+  if (typeof _reconcileQueuedMarkers === 'function'
+      && _reconcileQueuedMarkers(serverMsgs, localMsgs) > 0) {
+    changed = true;
+  }
+
   if (serverMsgs.length > localMsgs.length) {
-    /* Case 1: server has new messages — adopt the full set. */
-    conv.messages = serverMsgs;
+    /* Case 1: server has new messages — adopt the full set, preserving any
+     * still-queued local rows the body legitimately lacks. */
+    conv.messages = (typeof _withPendingQueuedTail === 'function')
+      ? _withPendingQueuedTail(localMsgs, serverMsgs) : serverMsgs;
     conv.title = data.title || conv.title;
     conv.updatedAt = data.updatedAt || data.updated_at || conv.updatedAt;
     conv._serverMsgCount = serverMsgs.length;

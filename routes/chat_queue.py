@@ -54,6 +54,19 @@ def chat_queue_remove(conv_id, queue_id):
     removed = remove_from_queue(conv_id, queue_id)
     if not removed:
         return api_not_found('Not found')
+    # The cancel may have swept a ``_pendingQueued`` mirror row out of the
+    # conversation body — push the fresh rev so sibling devices drop the
+    # greyed bubble too, not just the cancelling tab.
+    try:
+        from routes.common import _notify_conv_changed, _request_user_id
+        from lib.database import DOMAIN_CHAT, get_thread_db
+        _rev_row = get_thread_db(DOMAIN_CHAT).execute(
+            'SELECT rev FROM conversations WHERE id=?', (conv_id,)).fetchone()
+        _notify_conv_changed(conv_id,
+                             rev=(_rev_row[0] if _rev_row else None),
+                             user_id=_request_user_id())
+    except Exception as e:
+        logger.debug('[chat_queue_remove] post-cancel notify failed (non-fatal): %s', e)
     return api_ok()
 @api_v1_chat_bp.route('/api/v1/chat/queue/<conv_id>', methods=['DELETE'], endpoint='ui_chat_queue_clear')
 @require_scope('chat')
@@ -61,6 +74,17 @@ def chat_queue_clear(conv_id):
     """Clear all queued messages for a conversation."""
     from lib.message_queue import clear_queue
     count = clear_queue(conv_id)
+    if count > 0:
+        try:
+            from routes.common import _notify_conv_changed, _request_user_id
+            from lib.database import DOMAIN_CHAT, get_thread_db
+            _rev_row = get_thread_db(DOMAIN_CHAT).execute(
+                'SELECT rev FROM conversations WHERE id=?', (conv_id,)).fetchone()
+            _notify_conv_changed(conv_id,
+                                 rev=(_rev_row[0] if _rev_row else None),
+                                 user_id=_request_user_id())
+        except Exception as e:
+            logger.debug('[chat_queue_clear] post-clear notify failed (non-fatal): %s', e)
     return api_ok({'cleared': count})
 
 

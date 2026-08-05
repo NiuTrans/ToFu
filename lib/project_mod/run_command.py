@@ -640,8 +640,9 @@ def tool_run_command(base, command, timeout=None, stdin_callback=None, task=None
     if timeout is None and os.environ.get('TOFU_RUN_SCAN_GUARD', '1') != '0':
         _scan = _unbounded_recursive_scan_target(command, base)
         if _scan is not None:
-            logger.error('[run_command] BLOCKED unbounded recursive scan '
-                         'target=%r (cwd=%s): %.200s', _scan, base, command)
+            # WARNING, not ERROR — a policy nudge, not an application failure.
+            logger.warning('[run_command] BLOCKED unbounded recursive scan '
+                           'target=%r (cwd=%s): %.200s', _scan, base, command)
             return (f"Error: Command blocked for safety: unbounded recursive "
                     f"scan of '{_scan}'. Recursive scans of a workspace "
                     f"ancestor or a FUSE mount root can crawl for hours on "
@@ -663,8 +664,11 @@ def tool_run_command(base, command, timeout=None, stdin_callback=None, task=None
     if os.environ.get('TOFU_RUN_GREP_GUARD', '1') != '0':
         _gseg = _grep_filesystem_segment(command)
         if _gseg is not None:
-            logger.error('[run_command] BLOCKED filesystem grep (cwd=%s): %.200s',
-                         base, command)
+            # WARNING, not ERROR (owner 2026-08-05): a policy nudge for the
+            # agent to re-route, not an application failure — 127 ERRORs in
+            # 2.5 days was pure teaching-loop noise burying real errors.
+            logger.warning('[run_command] BLOCKED filesystem grep (cwd=%s): %.200s',
+                           base, command)
             return (
                 'Error: Command intercepted: this `grep` reads the filesystem, '
                 'which belongs to the dedicated `grep_search` tool, not '
