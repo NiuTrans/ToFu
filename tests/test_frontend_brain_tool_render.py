@@ -12,17 +12,24 @@ that dump, driven off the backend-attached structured meta
   • ``project_peer_status``     → live peer cards (conv id + status + round + epic).
   • ``project_charter_propose`` → the proposal text + a "pending human review" affordance.
 
-Loads the REAL shipped ``ui/tool_rounds.js`` under jsdom and calls the REAL
-``_renderUnifiedToolLine`` (the same entry the transcript uses), so a broken
-route / missing branch fails here. Each renderer ships a double-neuter NC:
-patch a COPY to disable the structured branch, assert the structured markup is
-GONE (falls back to the prose dump), restore byte-identical.
+Loads the REAL shipped ``ui/tool_rounds.js`` + ``ui/tool_rounds_rich.js``
+under jsdom (in bundle order — core first, then the deferred rich module,
+mirroring the window-scope sibling contract in tool_rounds_rich.js's header)
+and calls the REAL ``_renderUnifiedToolLine`` (the same entry the transcript
+uses), so a broken route / missing branch fails here. The structured conv-meta
+renderers (``_renderBoardSnapshot`` / ``_renderPeerDelivery`` / …) moved to
+``tool_rounds_rich.js`` in the 2026-08-01 Epic-E split (fcddc420) while
+``_CONV_META_TOOLS`` / ``_webToolSvg`` / the dispatch stayed in core — each
+renderer ships a double-neuter NC that patches a COPY of WHICHEVER file holds
+the anchor, asserts the structured markup is GONE (falls back to the prose
+dump), and restores byte-identical.
 
 Skips cleanly when node + jsdom aren't installed.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -35,6 +42,12 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
 JS_DIR = os.path.join(ROOT, 'static', 'js')
 _TR_SRC = os.path.join(JS_DIR, 'ui', 'tool_rounds.js')
+# The conv-meta structured renderers live in the DEFERRED rich module since
+# the 2026-08-01 Epic-E split (fcddc420); core keeps the dispatch + the
+# _CONV_META_TOOLS set + the glyph map. The suite exercises BOTH so a drift in
+# either file is caught.
+_TR_RICH_SRC = os.path.join(JS_DIR, 'ui', 'tool_rounds_rich.js')
+_TR_ALL_SRCS = [_TR_SRC, _TR_RICH_SRC]
 
 
 def _node_deps_available() -> bool:
@@ -78,7 +91,15 @@ global.convTitleById = function (cid) {
   return hit ? hit.title : 'Untitled chat';
 };
 
-eval(fs.readFileSync(process.argv[2], 'utf8'));  // ui/tool_rounds.js
+// argv[2] = JSON list of source paths (core first, then the deferred rich
+// module — bundle order). Concatenated into ONE eval: in the browser both
+// files share the global (lexical) scope — tool_rounds_rich.js reads core's
+// top-level consts (_CONV_META_TOOLS) and functions at call time — and a
+// single eval reproduces that shared scope exactly (per-file evals would trap
+// core's const declarations in a discarded lexical environment).
+eval(JSON.parse(process.argv[2])
+  .map((p) => fs.readFileSync(p, 'utf8'))
+  .join('\n;\n'));
 
 const out = [];
 function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
@@ -449,21 +470,22 @@ const digestRaw = {
 check('digest_raw_falls_back', _renderUnifiedToolLine(digestRaw, false).includes('MD-DUMP:RAW JSON DUMP PROSE'));
 
 console.log(out.join('\n'));
-// tool_rounds.js installs a 1Hz countdown setInterval (window._timerCountdownTicker)
-// that keeps node's event loop alive → the subprocess would hang until the
-// pytest timeout. Clear it and exit explicitly. (Documented harness trap.)
+// tool_rounds_rich.js installs a 1Hz countdown setInterval
+// (window._timerCountdownTicker) that keeps node's event loop alive → the
+// subprocess would hang until the pytest timeout. Clear it and exit
+// explicitly. (Documented harness trap.)
 try { if (global.window && global.window._timerCountdownTicker) clearInterval(global.window._timerCountdownTicker); } catch (_e) {}
 process.exit(0);
 """
 
 
-def _run(src_path):
+def _run(src_paths):
     harness = os.path.join(HERE, '_brain_tool_render_harness.js')
     with open(harness, 'w') as f:
         f.write(_HARNESS)
     try:
         proc = subprocess.run(
-            ['node', harness, src_path, ROOT],
+            ['node', harness, json.dumps(list(src_paths)), ROOT],
             capture_output=True, text=True, timeout=60)
     finally:
         try:
@@ -478,7 +500,7 @@ def _run(src_path):
 @pytest.mark.skipif(not _node_deps_available(),
                     reason='node + jsdom dev-deps not installed (run npm install)')
 def test_structured_brain_tool_renderers():
-    output = _run(_TR_SRC)
+    output = _run(_TR_ALL_SRCS)
     fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
     assert not fails, 'structured brain-tool render failures:\n' + output
     for must in (
@@ -540,19 +562,29 @@ def test_structured_brain_tool_renderers():
 
 
 def _nc(anchor, replacement, must_fail, must_still_pass):
-    """Double-neuter helper: patch a COPY, run, assert the target checks flip to
-    FAIL while a control check stays PASS, then assert the shipped file is
-    byte-identical (never touched — we only ran a copy)."""
-    with open(_TR_SRC, encoding='utf-8') as f:
-        original = f.read()
-    assert anchor in original, f'NC anchor not found: {anchor[:60]!r}'
-    patched = original.replace(anchor, replacement, 1)
-    assert patched != original, 'NC replacement was a no-op'
+    """Double-neuter helper: find which shipped file holds the anchor (core
+    tool_rounds.js vs the deferred tool_rounds_rich.js — NC anchors span both
+    since the 2026-08-01 split), patch a COPY, run BOTH files with the copy
+    substituted, assert the target checks flip to FAIL while a control check
+    stays PASS, then assert BOTH shipped files are byte-identical (never
+    touched — we only ran a copy)."""
+    originals = {}
+    owner = None
+    for src in _TR_ALL_SRCS:
+        with open(src, encoding='utf-8') as f:
+            originals[src] = f.read()
+        if anchor in originals[src]:
+            assert owner is None, f'NC anchor present in BOTH files: {anchor[:60]!r}'
+            owner = src
+    assert owner is not None, f'NC anchor not found in either file: {anchor[:60]!r}'
+    patched = originals[owner].replace(anchor, replacement, 1)
+    assert patched != originals[owner], 'NC replacement was a no-op'
     copy_path = os.path.join(HERE, '_brain_tool_render_nc_copy.js')
     try:
         with open(copy_path, 'w', encoding='utf-8') as f:
             f.write(patched)
-        output = _run(copy_path)
+        run_list = [copy_path if s == owner else s for s in _TR_ALL_SRCS]
+        output = _run(run_list)
         for m in must_fail:
             assert ('FAIL ' + m) in output, \
                 f'NC: expected {m} to FAIL with branch disabled:\n{output}'
@@ -564,8 +596,9 @@ def _nc(anchor, replacement, must_fail, must_still_pass):
             os.remove(copy_path)
         except OSError:
             pass
-    with open(_TR_SRC, encoding='utf-8') as f:
-        assert f.read() == original, 'shipped tool_rounds.js must be byte-identical'
+    for src, text in originals.items():
+        with open(src, encoding='utf-8') as f:
+            assert f.read() == text, f'shipped {os.path.basename(src)} must be byte-identical'
 
 
 @pytest.mark.skipif(not _node_deps_available(),

@@ -20,23 +20,29 @@ logger = get_logger(__name__)
 
 
 # ── Human-readable labels for tool-execution phase events ──────────────
+# NO emoji (owner directive 2026-08-03): the frontend phase row renders its
+# own SVG iconography, so an emoji in the label is a second, inconsistent
+# icon source. Labels are the ENGLISH fallback for headless / non-i18n
+# clients — i18n clients compose the localized label from the structured
+# tool names shipped alongside (phase.tools / phase.toolContextTools).
+# Name the act the tool actually performs: apply_diff PATCHES files.
 _TOOL_EXEC_LABELS = {
-    'web_search':   '🔍 Searching the web',
-    'fetch_url':    '🌐 Fetching pages',
-    'read_files':   '📖 Reading files',
-    'list_dir':     '📂 Listing directory',
-    'grep_search':  '🔎 Searching code',
-    'find_files':   '🔎 Finding files',
-    'write_file':   '✏️ Writing files',
-    'apply_diff':   '✏️ Applying changes',
-    'apply_diffs':  '✏️ Applying changes',
-    'insert_content':'📥 Inserting content',
-    'insert_contents':'📥 Inserting content',
-    'code_exec':    '▶️ Running code',
-    'bash_exec':    '▶️ Running command',
-    'create_memory': '💡 Saving memory',
-    'activate_skill': '📦 Loading skill',
-    'ask_human': '🙋 Asking for your input',
+    'web_search':   'Searching the web',
+    'fetch_url':    'Fetching pages',
+    'read_files':   'Reading files',
+    'list_dir':     'Listing directory',
+    'grep_search':  'Searching code',
+    'find_files':   'Finding files',
+    'write_file':   'Writing files',
+    'apply_diff':   'Patching files',
+    'apply_diffs':  'Patching files',
+    'insert_content':'Inserting content',
+    'insert_contents':'Inserting content',
+    'code_exec':    'Running code',
+    'bash_exec':    'Running command',
+    'create_memory': 'Saving memory',
+    'activate_skill': 'Loading skill',
+    'ask_human': 'Asking for your input',
 }
 
 
@@ -53,7 +59,7 @@ def tool_label(tn: str) -> str:
     if tn.startswith(MCP_TOOL_PREFIX):
         parsed = parse_namespaced_name(tn)
         if parsed:
-            return f'🔌 {parsed[0]}/{parsed[1]}'
+            return f'{parsed[0]}/{parsed[1]}'
     return tn
 
 

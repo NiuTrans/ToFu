@@ -46,12 +46,13 @@ pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-# NOTE: convTitleById is NOT looked up by a hard-coded path. It started life in
-# core/conversations.js and moved to core/conv_reducers.js in the decomposition;
-# a pinned path turns that legitimate refactor into `convTitleById not found`,
-# which reads like the seam was deleted. Resolve it by SYMBOL from the
-# production bundle manifests so the next slice carries this guard with it.
-TR_JS = os.path.join(ROOT, 'static', 'js', 'ui', 'tool_rounds.js')
+# NOTE: convTitleById / _renderPeerDelivery are NOT looked up by hard-coded
+# paths. convTitleById started in core/conversations.js and moved to
+# core/conv_reducers.js; _renderPeerDelivery started in ui/tool_rounds.js and
+# moved to ui/tool_rounds_rich.js (Epic-E splits). A pinned path turns those
+# legitimate refactors into `<sym> not found`, which reads like the seam was
+# deleted. Resolve both by SYMBOL from the production bundle manifests so the
+# next slice carries this guard with it.
 SEND_JS = os.path.join(ROOT, 'static', 'js', 'main', 'main_send_pipeline.js')
 
 
@@ -196,23 +197,28 @@ def _run(harness: str) -> str:
 
 
 def _extracted(*, poison: bool = False) -> str:
-    """The real convTitleById + _renderPeerDelivery + renderPendingQueueUI."""
+    """The real convTitleById (+ its _convFindById dependency) +
+    _renderPeerDelivery + renderPendingQueueUI."""
     conv_src = _read(_src_defining('convTitleById'))
-    tr_src = _read(TR_JS)
     send_src = _read(SEND_JS)
     fn_title = _extract_fn(conv_src, 'convTitleById')
     if poison:
-        # Neuter the lookup: force the fallback branch by making the match
-        # loop see no conversations. This must strip the real title from BOTH
-        # consumers → they show the localized fallback instead.
+        # Neuter the lookup: the resolver must see NO hit, so both consumers
+        # show the localized fallback instead of the real title. Target the
+        # lookup LINE (not a body shape) — the resolver's internals have been
+        # reshaped by the conv_reducers decomposition once already.
         neutered = fn_title.replace(
-            'if (typeof conversations !== \'undefined\' && Array.isArray(conversations)) {',
-            'if (false) {')
+            'const hit = _convFindById(cid);', 'const hit = null;')
         assert neutered != fn_title, 'NC poison did not apply to convTitleById'
         fn_title = neutered
-    fn_delivery = _extract_fn(tr_src, '_renderPeerDelivery')
+    # convTitleById delegates the match to _convFindById (same file) — the
+    # harness would ReferenceError without it. In the poisoned variant the
+    # delegate is never called, but the binding must still EXIST for eval.
+    fn_find = _extract_fn(conv_src, '_convFindById')
+    fn_delivery = _extract_fn(
+        _read(_src_defining('_renderPeerDelivery')), '_renderPeerDelivery')
     fn_queue = _extract_queue_block(send_src)
-    return '\n'.join([fn_title, fn_delivery, fn_queue])
+    return '\n'.join([fn_find, fn_title, fn_delivery, fn_queue])
 
 
 # ─────────────────────── delivery card resolves title ───────────────────────

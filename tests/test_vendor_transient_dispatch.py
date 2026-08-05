@@ -8,8 +8,14 @@ pinned FIXED here:
 
   1. A transient 4xx re-classified as RateLimitError(is_gateway=True) must
      NOT feed the consecutive-429 auto-exhaust streak in key_stats (a sick
-     upstream auto-disabling HEALTHY keys for the day) — but MUST still
-     land in record_outcome (the dead-key safety net: daily failure stats).
+     upstream auto-disabling HEALTHY keys for the day) — and, since
+     2026-08-03 (epic pt_473805ad518b4ac4), must NOT feed record_outcome
+     either: a gateway-wide 502 storm hit ALL keys uniformly and the daily
+     failure stats auto-disabled 2 of 3 healthy keys. Gateway-class
+     failures now ride their OWN ``gateway_errors`` counter. The dead-key
+     safety net is NOT diluted — it lives on the unchanged genuine-death
+     classes (401/403 auth death, endpoint-unreachable), which still
+     record failures.
   2. A deterministic HTTP 400 (BadRequestError) is PAYLOAD-level: dispatch
      releases the slot (no consecutive_errors → no 300s lockout) and only
      pair-excludes, so sibling keys each get one try.
@@ -43,13 +49,15 @@ def _make_slot(model='qwen-plus', key='k0'):
 @pytest.fixture
 def key_stats_recorders(monkeypatch):
     """Capture key_stats calls; the real ones persist to disk."""
-    rec = {'rate_limit': [], 'outcome': [], 'exhausted': []}
+    rec = {'rate_limit': [], 'outcome': [], 'exhausted': [], 'gateway': []}
     monkeypatch.setattr('lib.key_stats.record_rate_limit',
                         lambda p, k, reason='': rec['rate_limit'].append((p, k, reason)) or False)
     monkeypatch.setattr('lib.key_stats.record_outcome',
                         lambda p, k, success, error='': rec['outcome'].append((p, k, success, error)))
     monkeypatch.setattr('lib.key_stats.mark_key_exhausted',
                         lambda p, k, reason='', model='': rec['exhausted'].append((p, k, reason, model)))
+    monkeypatch.setattr('lib.key_stats.record_gateway_error',
+                        lambda p, k, reason='': rec['gateway'].append((p, k, reason)) or False)
     return rec
 
 
@@ -60,7 +68,7 @@ def key_stats_recorders(monkeypatch):
 @pytest.mark.unit
 class TestSlotGatewayAccounting:
 
-    def test_gateway_error_skips_429_streak_but_keeps_failure_stats(
+    def test_gateway_error_feeds_only_the_gateway_counter(
             self, key_stats_recorders):
         slot = _make_slot()
         slot.record_request()
@@ -69,9 +77,17 @@ class TestSlotGatewayAccounting:
         assert key_stats_recorders['rate_limit'] == [], (
             'a sick upstream must NOT feed the consecutive-429 auto-exhaust '
             'streak — that auto-disabled HEALTHY keys for the day')
-        assert len(key_stats_recorders['outcome']) == 1, (
-            'the dead-key safety net (daily failure stats) must keep working')
-        assert key_stats_recorders['outcome'][0][2] is False
+        assert key_stats_recorders['outcome'] == [], (
+            'nor the daily failure stats — the 2026-08-03 gateway-wide 502 '
+            'storm auto-disabled 2 of 3 healthy keys via that column. The '
+            'dead-key safety net lives on the unchanged genuine-death '
+            'classes (401/403, endpoint-unreachable)')
+        assert len(key_stats_recorders['gateway']) == 1, (
+            'the volume stays visible on its own counter')
+        assert slot.gateway_errors == 1
+        assert slot.total_errors == 0
+        assert slot.total_requests == 0, (
+            'the attempt is compensated out of total_requests')
         assert slot.cooldown_reason == 'upstream'
         assert 0 < slot.cooldown_until - time.time() <= 1.0, (
             'gateway-class cooldown stays the 0.5s slot-rotation nudge')
@@ -273,9 +289,11 @@ class TestDispatchStreamVendorStorm:
         assert not any(r.get('status_code') == 429 for r in retries)
         assert key_stats_recorders['rate_limit'] == []
         _failures = [c for c in key_stats_recorders['outcome'] if not c[2]]
-        assert len(_failures) == 1 and _failures[0][1] == 'k1', (
-            'the upstream outage still lands in the daily failure stats '
-            '(dead-key safety net); the k2 success is unrelated')
+        assert _failures == [], (
+            'an upstream outage must NOT land in the daily failure stats '
+            '(2026-08-03 contract change); the k2 success is unrelated')
+        assert len(key_stats_recorders['gateway']) == 1, (
+            'it rides the gateway_errors counter instead')
 
     def test_plain_429_still_reports_rate_limited(
             self, monkeypatch, key_stats_recorders):

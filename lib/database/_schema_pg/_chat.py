@@ -349,6 +349,12 @@ def _init_chat_schema(conn):
     from lib.database._core_schema import PAPER_PODCASTS, create_if_absent
     create_if_absent(conn, PAPER_PODCASTS, table_exists=_table_exists)
 
+    # ── Paper notes: reader margin notes (reading-xp P4). Core-defined;
+    # guarded create is a no-op on existing DBs.
+    from lib.database._core_schema import PAPER_NOTES
+    create_if_absent(conn, PAPER_NOTES, table_exists=_table_exists)
+    cur.execute('CREATE INDEX IF NOT EXISTS idx_paper_notes_hash ON paper_notes(paper_hash, lang)')
+
     # Seed default user
     cur.execute("""
         INSERT INTO users (id, username, display_name, password_hash)

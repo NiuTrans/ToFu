@@ -23,7 +23,31 @@ _DEFAULT_CONFIG = {
     # server", which is the packaged app's default and must stay that way —
     # a tray user never touches this.
     'remote_server': {},
+    # Tray-persisted computer-control state: {enabled: bool, perms: {...}}.
+    # ABSENT (empty dict) = the user never chose = fresh-install default
+    # OFF — deny-by-default is preserved; only an explicit user choice is
+    # ever restored.
+    'computer_control': {},
 }
+
+
+class ConnectLineError(ValueError):
+    """A parse_connect_line refusal, CODED for the UI boundary.
+
+    The desktop dialog maps ``code`` to a bilingual message
+    (``desktop._tk_theme.connect_error_text``) — a lib module must not own
+    user-facing prose, and an English-only sentence in a Chinese dialog is
+    exactly the leak the 2026-08-04 i18n sweep was ordered to kill. str()
+    stays a non-empty, secret-free token (``connect_line:<code>[:<detail>]``)
+    so refusals remain greppable in logs and the contract suite's「refusal
+    carries a message / never echoes the secret」pins keep holding.
+    """
+
+    def __init__(self, code, detail=''):
+        self.code = code
+        self.detail = detail
+        super().__init__('connect_line:%s%s'
+                         % (code, (':' + detail) if detail else ''))
 
 
 def parse_connect_line(line):
@@ -44,23 +68,18 @@ def parse_connect_line(line):
     are also normalised, since both are common paste artefacts.
 
     Raises:
-        ValueError: with a message safe to show in a dialog, when either half
-            is missing or the URL is not http(s). Never echoes the secret.
+        ConnectLineError: coded refusal (``missing_parts`` /
+            ``too_many_parts`` / ``bad_url``) — the dialog localises it;
+            ``detail`` carries at most the URL half, never the secret.
     """
     parts = (line or '').split()
     if len(parts) < 2:
-        raise ValueError(
-            'Paste the whole line from Tofu — it must contain the server '
-            'address AND the token, separated by a space.')
+        raise ConnectLineError('missing_parts')
     if len(parts) > 2:
-        raise ValueError(
-            'That looks like more than one server address and token. Paste '
-            'exactly the line Tofu showed you.')
+        raise ConnectLineError('too_many_parts')
     url, secret = parts[0].strip(), parts[1].strip()
     if not url.startswith(('http://', 'https://')):
-        raise ValueError(
-            'The server address must start with http:// or https:// — got '
-            f'{url[:40]!r}.')
+        raise ConnectLineError('bad_url', detail=url[:40])
     return url.rstrip('/'), secret
 
 
@@ -94,6 +113,44 @@ def save_remote_server(url, secret):
         cfg['remote_server'] = {}
     save_config(cfg)
     return cfg['remote_server']
+
+
+def load_computer_control():
+    """Return ``(enabled, perms)`` for the tray's launch-time restore.
+
+    ``(False, {})`` when the user never toggled anything (or the blob is
+    malformed) — a fresh install must come up deny-by-default. ``perms``
+    carries only the canonical tier keys that were actually persisted;
+    the caller merges it over its own deny-all baseline so tiers added
+    later still default OFF for old config files.
+    """
+    cfg = load_config()
+    cc = cfg.get('computer_control')
+    if not isinstance(cc, dict):
+        return False, {}
+    raw = cc.get('perms')
+    perms = {}
+    if isinstance(raw, dict):
+        from lib.desktop_agent._permissions import PERMISSION_KEYS
+        perms = {k: bool(raw[k]) for k in PERMISSION_KEYS if k in raw}
+    return bool(cc.get('enabled')), perms
+
+
+def save_computer_control(enabled, perms):
+    """Persist the tray's computer-control state so it survives restarts.
+
+    Lives in the same agent config file as ``agent_id`` / ``remote_server``.
+    Only ever called from an explicit user action (the tray enable toggle
+    or a permission-tier click) — never from startup/quit paths, so a
+    crash or a normal Quit cannot erase the user's choice.
+    """
+    cfg = load_config()
+    cfg['computer_control'] = {
+        'enabled': bool(enabled),
+        'perms': {str(k): bool(v) for k, v in (perms or {}).items()},
+    }
+    save_config(cfg)
+    return cfg['computer_control']
 
 
 def config_path():

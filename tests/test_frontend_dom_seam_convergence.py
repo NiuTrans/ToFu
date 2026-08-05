@@ -216,13 +216,21 @@ _RAW_PATS = [
 # the step-4 SEAM-2 fold — its raw writes are the projection implementation).
 # turn_nav.js / finish_info.js are exempt per plan §2.15 (sidebar +
 # detached-builder / zero #chatInner writes — census-verified).
+# Rebalance 2026-07-28 (fallback-banner commit): streaming_ui.js 50 → 52 —
+# the two new ops are STRUCT-ONLY zone writes, the §7-sanctioned pattern:
+# ``body.insertAdjacentHTML('afterbegin', '<div data-zone="fallback"></div>')``
+# (one fixed zone container, created once) + the fingerprint-gated zone paint
+# ``fbZone.innerHTML = renderModelFallbackBannerHtml(msg)`` (zone-inner only,
+# never a message-CONTENT reconcile). Per the ratchet rule, another file was
+# lowered instead: health_stream_timer.js 10 → 8 (its actual count after the
+# step-2 census join — the slack was measured, not assumed). Sum stays 158.
 _RATCHET_BASELINE = {
-    'static/js/ui/streaming_ui.js': 50,
+    'static/js/ui/streaming_ui.js': 52,
     'static/js/ui/streaming_render.js': 20,
     'static/js/ui/translation_render.js': 14,
     'static/js/image-gen.js': 13,
     'static/js/main/main_send_pipeline.js': 12,
-    'static/js/core/health_stream_timer.js': 10,
+    'static/js/core/health_stream_timer.js': 8,
     'static/js/main/main_conv_lifecycle.js': 10,
     'static/js/ui/sse_pipeline.js': 10,
     'static/js/ui/stream_lifecycle.js': 5,

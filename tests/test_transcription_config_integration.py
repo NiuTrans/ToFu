@@ -27,7 +27,19 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 
+from lib.mcp.registry import is_opensource_build
+
 pytestmark = [pytest.mark.auth_mode('open'), pytest.mark.unit]
+
+# The two Doubao-ASR guards drive the REAL shipped internal provider template
+# (static/provider_templates/meituan.json), which is NOT exported to
+# opensource builds — they would fail there on a missing file, not on the
+# invariant they pin.
+_REQUIRES_INTERNAL_TEMPLATE = pytest.mark.skipif(
+    is_opensource_build(),
+    reason='drives the internal provider template '
+           '(static/provider_templates/meituan.json) — not shipped in '
+           'opensource builds')
 
 
 @pytest.fixture
@@ -172,6 +184,7 @@ def _load_meituan_template_as_provider():
     }]
 
 
+@_REQUIRES_INTERNAL_TEMPLATE
 def test_doubao_asr_slot_built_from_real_meituan_template(monkeypatch):
     """Doubao-Seed-ASR-2.0 in the SHIPPED meituan template builds a slot that
     actually carries the 'transcription' cap and makes STT available.
@@ -197,6 +210,7 @@ def test_doubao_asr_slot_built_from_real_meituan_template(monkeypatch):
             'mode': 'endpoint'} in tr.list_transcription_models()
 
 
+@_REQUIRES_INTERNAL_TEMPLATE
 def test_doubao_asr_is_non_chat_and_distinct_from_doubao_chat(monkeypatch):
     """The ASR slot is never chat-picked and never carries cache markers, and it
     does not collide with the existing Doubao-Seed-2.0-pro chat entry.

@@ -169,7 +169,7 @@ def aggregate_model_health(slots: list) -> dict:
         e = pm.setdefault(mid, {
             'slots': 0, 'available_slots': 0,
             'total_requests': 0, 'total_errors': 0,
-            'contention_errors': 0,
+            'contention_errors': 0, 'gateway_errors': 0,
             'consecutive_errors': 0, 'inflight': 0,
             'cooldown_remaining_s': 0.0, 'cooldown_reason': '',
             'last_error_ts': 0.0, 'last_error_msg': '',
@@ -184,6 +184,7 @@ def aggregate_model_health(slots: list) -> dict:
         e['total_requests'] += s.get('total_requests', 0) or 0
         e['total_errors'] += s.get('total_errors', 0) or 0
         e['contention_errors'] += s.get('contention_errors', 0) or 0
+        e['gateway_errors'] += s.get('gateway_errors', 0) or 0
         e['inflight'] += s.get('inflight', 0) or 0
         ce = s.get('consecutive_errors', 0) or 0
         if ce > e['consecutive_errors']:

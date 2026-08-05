@@ -112,6 +112,55 @@
 /* ══════════════════════════════════════════════════════
    OAuth Subscription Login Tab
    ══════════════════════════════════════════════════════ */
+/* ── OAuth tab: 3-step flow strip (the whole flow in one glance) ── */
+.oauth-steps {
+  display: flex;
+  align-items: stretch;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 10px 0 12px;
+}
+.oauth-step {
+  flex: 1;
+  min-width: 150px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  background: var(--s-white);
+  border: var(--s-border);
+  border-radius: var(--s-radius);
+  box-shadow: var(--s-shadow-xs);
+}
+.oauth-step-num {
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--s-ink);
+  color: var(--s-white);
+  font-weight: 800;
+  font-size: 12px;
+  border-radius: 50%;
+}
+.oauth-step-title { font-size: 12.5px; font-weight: 800; color: var(--s-ink); }
+.oauth-step-sub { font-size: 11.5px; color: var(--s-muted); margin-top: 1px; line-height: 1.4; }
+.oauth-step-arrow { align-self: center; color: var(--s-muted); font-weight: 800; }
+
+/* China-access banner — same amber language as .stg-oauth-note */
+.oauth-china-note {
+  margin: 0 0 14px;
+  padding: 10px 12px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: #8a5a00;
+  background: rgba(245, 158, 11, 0.08);
+  border: 1.5px solid rgba(245, 158, 11, 0.4);
+  border-radius: var(--s-radius);
+}
+
 .oauth-provider-card {
   border: var(--s-border);
   border-radius: var(--s-radius);
@@ -188,6 +237,135 @@
   color: var(--s-ink);
   max-width: 180px;
 }
+/* Unavailable verdict → action-first callout: installing the agent is the
+   ONLY way out, so the prompt leads with that and the button is the most
+   prominent element on the card. Amber = "do this", not red = "broken". */
+.oauth-egress-callout {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px 12px;
+  margin: 6px 0 10px;
+  padding: 10px 12px;
+  background: rgba(245, 158, 11, 0.08);
+  border: 1.5px solid rgba(245, 158, 11, 0.4);
+  border-radius: var(--s-radius);
+}
+.oauth-egress-callout-text { flex: 1; min-width: 200px; }
+.oauth-egress-callout-title {
+  display: block;
+  font-size: 12.5px;
+  font-weight: 800;
+  color: #b45309;
+}
+.oauth-egress-callout-sub {
+  display: block;
+  font-size: 11.5px;
+  color: var(--s-muted);
+  line-height: 1.5;
+  margin-top: 2px;
+}
+.oauth-egress-callout .oauth-egress-agent-btn {
+  flex-shrink: 0;
+  white-space: nowrap;
+  padding: 7px 16px;
+  font-size: 12px;
+  font-weight: 700;
+  background: var(--s-ink);
+  color: var(--s-white);
+  border: var(--s-border);
+  border-radius: var(--s-radius);
+  cursor: pointer;
+  box-shadow: var(--s-shadow-xs);
+  transition: transform 0.1s, box-shadow 0.1s;
+}
+.oauth-egress-callout .oauth-egress-agent-btn:hover {
+  transform: translate(1px, 1px);
+  box-shadow: 1px 1px 0 var(--s-ink);
+}
+/* ── Subscription-adapter card (CLIProxyAPI) — tofu cream/gold language ── */
+.adapter-empty {
+  font-size: 12px;
+  line-height: 1.6;
+  color: #8a5a00;
+  background: rgba(245, 158, 11, 0.08);
+  border: 1.5px solid rgba(245, 158, 11, 0.4);
+  border-radius: var(--s-radius);
+  padding: 10px 12px;
+  margin: 6px 0 10px;
+}
+.adapter-info-line {
+  font-size: 11.5px;
+  color: var(--s-muted);
+  line-height: 1.5;
+  margin: 8px 0 0;
+  border-top: 1px dashed var(--s-border-color, #ddd);
+  padding-top: 8px;
+}
+.adapter-agent-row {
+  border: var(--s-border);
+  border-radius: var(--s-radius);
+  background: var(--s-cream);
+  padding: 10px 12px;
+  margin-bottom: 8px;
+}
+.adapter-agent-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.adapter-agent-name {
+  flex: 1;
+  font-weight: 700;
+  font-size: 13px;
+  color: var(--s-ink);
+}
+.adapter-agent-meta {
+  font-size: 11.5px;
+  color: var(--s-muted);
+  margin: 4px 0 6px;
+}
+.adapter-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: #856404;
+  background: #fff3cd;
+  border: 1px solid #ffc107;
+  border-radius: var(--s-radius);
+  padding: 6px 10px;
+  margin: 4px 0 8px;
+}
+.adapter-spinner {
+  flex-shrink: 0;
+  width: 12px;
+  height: 12px;
+  border: 2px solid rgba(133, 100, 4, 0.3);
+  border-top-color: #856404;
+  border-radius: 50%;
+  animation: adapter-spin 0.9s linear infinite;
+}
+@keyframes adapter-spin { to { transform: rotate(360deg); } }
+.adapter-ready-line {
+  font-size: 12px;
+  color: #155724;
+  background: #d4edda;
+  border: 1px solid #28a745;
+  border-radius: var(--s-radius);
+  padding: 6px 10px;
+  margin: 4px 0 8px;
+}
+.adapter-error-line {
+  font-size: 12px;
+  color: #721c24;
+  background: #f8d7da;
+  border: 1px solid #dc3545;
+  border-radius: var(--s-radius);
+  padding: 6px 10px;
+  margin: 4px 0 8px;
+  word-break: break-all;
+}
 .oauth-provider-info {
   font-size: 12px;
   color: var(--s-ink);
@@ -242,14 +420,6 @@
   background: var(--s-ink);
   color: var(--s-white);
 }
-.oauth-notes {
-  font-size: 12px;
-  color: var(--s-muted);
-  line-height: 1.8;
-  padding-left: 20px;
-  margin: 8px 0;
-}
-.oauth-notes li { margin-bottom: 2px; }
 .oauth-manual-fallback {
   margin-top: 10px;
   padding: 10px;
@@ -487,36 +657,42 @@
   justify-content: space-between;
   gap: 8px;
   margin-top: 6px;
-  padding: 6px 2px 2px;
-  border-top: 1px solid var(--border, rgba(255,255,255,.08));
+  padding: 8px 2px 2px;
+  border-top: 1px dashed rgba(26, 24, 20, 0.18);
   font-size: 11px;
-  opacity: .85;
+  color: var(--s-ink-soft);
 }
-.skills-page-info { opacity: .7; }
-.skills-page-ctrls { display: flex; align-items: center; gap: 2px; }
+.skills-page-info { opacity: .75; font-weight: 600; }
+.skills-page-ctrls { display: flex; align-items: center; gap: 3px; }
 .skills-page-btn {
-  min-width: 24px;
-  height: 24px;
-  padding: 0 6px;
-  border: 1px solid var(--border, rgba(255,255,255,.12));
-  background: transparent;
-  color: inherit;
-  border-radius: 4px;
+  min-width: 26px;
+  height: 26px;
+  padding: 0 7px;
+  border: 1.5px solid rgba(26, 24, 20, 0.25);
+  background: var(--s-white);
+  color: var(--s-ink-soft);
+  border-radius: var(--s-radius);
   cursor: pointer;
   font-size: 11px;
+  font-weight: 800;
   line-height: 1;
+  font-family: inherit;
+  transition: transform 0.1s, box-shadow 0.1s, border-color 0.1s, color 0.1s;
 }
 .skills-page-btn:hover:not([disabled]):not(.is-active) {
-  background: var(--hover-bg, rgba(255,255,255,.06));
+  border-color: var(--s-ink);
+  color: var(--s-ink);
+  transform: translate(-1px, -1px);
+  box-shadow: 2px 2px 0 var(--s-ink);
 }
 .skills-page-btn.is-active {
-  background: var(--accent, #b38b5d);
-  color: #fff;
-  border-color: var(--accent, #b38b5d);
+  background: var(--s-ink);
+  color: var(--s-gold);
+  border-color: var(--s-ink);
   cursor: default;
 }
-.skills-page-btn[disabled] { opacity: .4; cursor: not-allowed; }
-.skills-page-ellipsis { opacity: .6; padding: 0 2px; }
+.skills-page-btn[disabled] { opacity: .35; cursor: not-allowed; }
+.skills-page-ellipsis { opacity: .5; padding: 0 2px; }
 /* ── App card ── */
 .mcp-app-card {
   position: relative;
@@ -778,6 +954,50 @@
   opacity: 0.7;
   line-height: 1;
 }
+/* Per-tool toggle (pt_53065dbe86bb4286): the tools badge is a BUTTON that
+ * expands the per-tool checkbox panel — reset button chrome, keep the badge
+ * look, signal clickability on hover. */
+.mcp-tools-toggle {
+  border: 1px solid transparent;
+  background: none;
+  padding: 2px 4px;
+  border-radius: var(--s-radius);
+  cursor: pointer;
+}
+.mcp-tools-toggle:hover {
+  opacity: 1;
+  border-color: rgba(26, 24, 20, 0.18);
+  background: rgba(201, 153, 63, 0.08);
+}
+.mcp-tool-panel {
+  grid-column: 1 / -1;
+  margin-top: 4px;
+  max-height: 220px;
+  overflow-y: auto;
+  border: 1px dashed rgba(26, 24, 20, 0.18);
+  border-radius: var(--s-radius);
+  padding: 6px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.mcp-tool-panel-head {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--s-ink-soft);
+  margin-bottom: 2px;
+}
+.mcp-tool-loading { font-size: 11px; color: var(--s-ink-soft); padding: 6px 2px; }
+.mcp-tool-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  line-height: 1.5;
+  cursor: pointer;
+}
+.mcp-tool-row input { margin: 0; accent-color: #c9993f; }
+.mcp-tool-name { font-family: 'JetBrains Mono', monospace; font-size: 10.5px; }
 /* Version badge: server-reported upstream version (InitializeResult.serverInfo.version) */
 .mcp-app-version {
   font-size: 10px;
@@ -960,14 +1180,29 @@
   color: var(--s-ink);
 }
 .mcp-env-select:focus { outline: 2px solid var(--s-ink); outline-offset: -1px; }
-/* ── Skills Settings tab ── App-Store layout ── */
-.skills-scope-tabs{display:inline-flex;gap:4px;margin-right:10px;padding:2px;background:var(--bg-tertiary,#1a1a1a);border:1px solid var(--border-color,#333);border-radius:6px}
-.skills-scope-tab{padding:3px 12px;border:none;background:transparent;color:var(--text-secondary,#aaa);font-size:12px;border-radius:4px;cursor:pointer;transition:all .15s ease}
-.skills-scope-tab:hover{color:var(--text-primary,#fff)}
-.skills-scope-tab.active{background:var(--bg-secondary,#2a2a2a);color:var(--text-primary,#fff);box-shadow:0 1px 3px rgba(0,0,0,.2)}
-.skills-drop-zone{display:flex;align-items:center;justify-content:center;gap:10px;padding:14px 18px;margin:8px 0 14px;border:1.5px dashed var(--border-color,#444);border-radius:8px;color:var(--text-secondary,#888);font-size:12.5px;cursor:pointer;transition:all .2s ease;background:transparent}
-.skills-drop-zone:hover{border-color:var(--accent,#6c64e6);color:var(--text-primary,#ccc);background:rgba(108,100,230,.05)}
-.skills-drop-zone.is-dragging{border-color:var(--accent,#6c64e6);border-style:solid;background:rgba(108,100,230,.12);color:var(--text-primary,#fff);transform:scale(1.005)}
+/* ── Skills Settings tab ── App-Store layout (brutalist tofu) ── */
+/* Header count badges — tofu stamp chips. Same markup lives in the MCP tab
+ * header, so both store tabs get the same chip language here. (The shared
+ * .stg-badge indigo/green pair in styles.css is for provider cards; the
+ * store header overrides it — settings.css loads after styles.css.) */
+.mcp-store-header-title .stg-badge{border:var(--s-border-sm);background:var(--s-white);color:var(--s-ink-soft);box-shadow:none;border-radius:var(--s-radius);text-transform:none;letter-spacing:.02em}
+/* Scope segmented control — cream track + ink active block with the gold
+ * offset shadow, echoing .mcp-cat-pill.active (one 'active' language per
+ * panel). Shared with the MCP tab's scope control (same classes). */
+.skills-scope-tabs{display:inline-flex;gap:3px;padding:3px;background:var(--s-cream);border:var(--s-border-sm);border-radius:var(--s-radius);box-shadow:var(--s-shadow-xs);align-items:center}
+.skills-scope-tab{padding:5px 14px;border:1.5px solid transparent;background:transparent;color:var(--s-ink-soft);font-size:11px;font-weight:800;letter-spacing:.03em;border-radius:var(--s-radius);cursor:pointer;transition:background .1s,color .1s,box-shadow .1s;font-family:inherit;line-height:1.2}
+.skills-scope-tab:hover{color:var(--s-ink);background:var(--s-skin)}
+.skills-scope-tab.active{background:var(--s-ink);color:var(--s-white);border-color:var(--s-ink);box-shadow:2px 2px 0 var(--s-gold)}
+/* Cross-link to memory creation — a quiet secondary action, visually
+ * separated from the scope control it used to masquerade as. */
+.skills-newmem-btn{display:inline-flex;align-items:center;gap:5px;flex-shrink:0}
+.skills-intro{margin:2px 0 10px}
+/* Local .zip install drop zone — dashed ink hairline on white, cream hover
+ * lift, gold fill while a file is held over it. */
+.skills-drop-zone{display:flex;align-items:center;justify-content:center;gap:10px;padding:13px 18px;margin:2px 0 14px;border:1.5px dashed rgba(26,24,20,.35);border-radius:var(--s-radius);color:var(--s-ink-soft);font-size:12.5px;font-weight:600;cursor:pointer;transition:all .15s ease;background:var(--s-white)}
+.skills-drop-zone svg{color:var(--s-gold-dim);flex-shrink:0}
+.skills-drop-zone:hover{border-color:var(--s-ink);color:var(--s-ink);background:var(--s-cream);transform:translate(-1px,-1px);box-shadow:var(--s-shadow-xs)}
+.skills-drop-zone.is-dragging{border-style:solid;border-color:var(--s-gold-dim);background:var(--s-gold-glow);color:var(--s-ink);transform:none;box-shadow:var(--s-shadow-xs)}
 .skills-drop-zone-text{pointer-events:none}
 /* Skill card uses mcp-app-card as base; add skill-specific accents.
  * The base .mcp-app-card is a 2-col grid (44px icon | 1fr content). The
@@ -975,28 +1210,34 @@
  * pinned to the content column / full width — otherwise the grid
  * auto-places them in column 1 under the icon and the card looks broken. */
 .mcp-app-card.skill-card .mcp-app-icon{filter:saturate(1.1)}
-.mcp-app-card .skill-badge-official{display:inline-flex;align-items:center;gap:3px;padding:1px 6px;margin-left:6px;border:1px solid currentColor;border-radius:10px;background:transparent;color:#d97706;font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;vertical-align:middle}
-.mcp-app-card .skill-badge-warn{grid-column:2;justify-self:start;display:inline-flex;align-items:center;gap:3px;padding:1px 6px;margin-top:4px;border:1px solid rgba(234,179,8,.4);border-radius:3px;background:rgba(234,179,8,.1);color:#d4a518;font-size:10px;font-weight:500}
-.mcp-app-card .skill-author{grid-column:2;font-size:10px;opacity:.55;margin-top:2px}
-.mcp-app-card .skill-card-footer{grid-column:1 / -1;display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:8px;padding-top:8px;min-height:30px;border-top:1px solid var(--border-color,#333)}
-.mcp-app-card .skill-card-actions{display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end}
-.mcp-app-card.is-installed{background:rgba(34,197,94,.05);border-color:rgba(34,197,94,.25)}
-.mcp-app-card .skill-installed-tag{display:inline-flex;align-items:center;gap:3px;padding:1px 7px;border-radius:10px;background:rgba(34,197,94,.15);color:#15803d;font-size:9px;font-weight:800;text-transform:uppercase;letter-spacing:.04em;align-self:center}
+/* Featured tag — the catalog sorts featured entries first; the solid gold
+ * stamp makes that ranking visible instead of silent. */
+.mcp-app-card .skill-badge-featured{display:inline-flex;align-items:center;gap:3px;padding:1px 6px;border:1px solid var(--s-gold-dim);border-radius:var(--s-radius);background:var(--s-gold);color:var(--s-ink);font-size:9px;font-weight:800;text-transform:uppercase;letter-spacing:.05em;flex-shrink:0}
+.mcp-app-card .skill-badge-official{display:inline-flex;align-items:center;gap:3px;padding:1px 6px;border:1px solid rgba(168,125,46,.55);border-radius:var(--s-radius);background:rgba(201,153,63,.1);color:var(--s-gold-dim);font-size:9px;font-weight:800;text-transform:uppercase;letter-spacing:.05em;flex-shrink:0}
+.mcp-app-card .skill-badge-warn{grid-column:2;justify-self:start;display:inline-flex;align-items:center;gap:3px;padding:2px 7px;margin-top:4px;border:1px solid rgba(168,125,46,.45);border-radius:var(--s-radius);background:rgba(201,153,63,.12);color:var(--s-gold-dim);font-size:10px;font-weight:700}
+.mcp-app-card .skill-author{grid-column:2;font-size:10.5px;color:var(--s-ink-soft);opacity:.8;margin-top:1px}
+.mcp-app-card .skill-card-footer{grid-column:1 / -1;display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:8px;padding-top:8px;min-height:30px;border-top:1px dashed rgba(26,24,20,.18)}
+.mcp-app-card .skill-card-actions{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
+/* Installed state — same gold language as .mcp-app-card.connected: the
+ * card reads 'already yours' without the old green wash. */
+.mcp-app-card.is-installed{background:linear-gradient(180deg,rgba(201,153,63,.06) 0%,var(--s-white) 60%);box-shadow:2px 2px 0 var(--s-gold),var(--s-shadow-xs)}
+.mcp-app-card.is-installed:hover{box-shadow:3px 3px 0 var(--s-gold),4px 4px 0 var(--s-ink)}
+.mcp-app-card .skill-installed-tag{display:inline-flex;align-items:center;gap:3px;padding:2px 7px;border-radius:var(--s-radius);background:var(--s-ink);color:var(--s-gold);font-size:9px;font-weight:800;text-transform:uppercase;letter-spacing:.04em;align-self:center;font-family:'JetBrains Mono',monospace}
 /* Skills file browser list */
 .skills-files-modal{max-width:640px;max-height:80vh;max-height:calc(var(--vh100,100vh)*0.8);display:flex;flex-direction:column}
-.skills-files-list{flex:1;overflow-y:auto;margin:12px 0;padding:8px 0;border:1px solid var(--border-color,#333);border-radius:6px;background:var(--bg-tertiary,#161616);max-height:50vh;max-height:calc(var(--vh100,100vh)*0.5)}
-.skills-file-row{display:flex;align-items:center;gap:10px;padding:6px 12px;font-size:12.5px;color:var(--text-primary,#ddd);border-bottom:1px solid rgba(255,255,255,.03)}
+.skills-files-list{flex:1;overflow-y:auto;margin:12px 0;padding:6px 0;border:var(--s-border-sm);border-radius:var(--s-radius);background:var(--s-white);max-height:50vh;max-height:calc(var(--vh100,100vh)*0.5)}
+.skills-file-row{display:flex;align-items:center;gap:10px;padding:6px 12px;font-size:12.5px;color:var(--s-ink);border-bottom:1px solid rgba(26,24,20,.07)}
 .skills-file-row:last-child{border-bottom:none}
-.skills-file-row:hover{background:rgba(255,255,255,.03)}
-.skills-file-kind{flex:0 0 16px;font-size:14px;text-align:center}
+.skills-file-row:hover{background:var(--s-cream)}
+.skills-file-kind{flex:0 0 16px;font-size:14px;text-align:center;color:var(--s-ink-soft)}
 .skills-file-kind svg{width:14px;height:14px;vertical-align:middle}
-.skills-file-path{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--font-mono,monospace);font-size:11.5px}
-.skills-file-size{flex:0 0 auto;font-size:10px;opacity:.55;font-variant-numeric:tabular-nums}
-.skills-file-row.is-skill{background:rgba(108,100,230,.08);font-weight:500}
+.skills-file-path{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--font-mono,monospace);font-size:11.5px;color:var(--s-ink)}
+.skills-file-size{flex:0 0 auto;font-size:10px;color:var(--s-ink-soft);opacity:.7;font-variant-numeric:tabular-nums}
+.skills-file-row.is-skill{background:rgba(201,153,63,.12);font-weight:600}
 /* Toast used by catalog install */
-.skills-toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);padding:10px 18px;background:var(--bg-secondary,#1e1e1e);color:var(--text-primary,#fff);border:1px solid var(--border-color,#333);border-radius:6px;font-size:13px;box-shadow:0 4px 12px rgba(0,0,0,.3);z-index:10020;animation:skillsToastIn .25s cubic-bezier(.2,1,.3,1)}
-.skills-toast.is-error{border-color:rgba(239,68,68,.5);color:#fca5a5}
-.skills-toast.is-success{border-color:rgba(34,197,94,.5)}
+.skills-toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);padding:10px 18px;background:var(--s-white);color:var(--s-ink);border:var(--s-border);border-radius:var(--s-radius);font-size:12.5px;font-weight:700;box-shadow:var(--s-shadow-sm);z-index:10020;animation:skillsToastIn .25s cubic-bezier(.2,1,.3,1)}
+.skills-toast.is-error{border-color:var(--s-blocked);background:rgba(248,113,113,.1);color:#b91c1c}
+.skills-toast.is-success{border-color:var(--s-gold-dim);background:rgba(201,153,63,.08)}
 
 
 /* ══ api(access-matrix) / general(system-prompt) / preset(visibility) settings pages (moved from styles.css 2026-07-18) ══ */
@@ -1776,6 +2017,21 @@
 .auth-src-name { font-weight: 800; font-size: 14px; color: var(--s-ink); display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
 .auth-src-domain { color: var(--s-ink-soft); font-size: 12px; font-weight: 600; }
 .auth-src-state-text { color: var(--s-ink-soft); font-size: 12px; margin-top: 3px; font-weight: 600; }
+/* Per-site account-risk note (e.g. XHS 风控提醒) — shown on the card and
+   atop the connect panel. Gold tint matches the neo-brutalist palette's
+   warning register (same role as the paused state). */
+.auth-src-risk-note {
+  margin-top: 6px;
+  padding: 7px 10px;
+  border: var(--s-border-sm);
+  border-radius: var(--s-radius);
+  background: color-mix(in srgb, var(--s-gold) 18%, var(--s-white));
+  color: var(--s-ink);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.5;
+}
+.auth-src-panel .auth-src-risk-note { margin: 0 0 10px; }
 .auth-src-actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 14px; }
 
 .auth-src-btn {
@@ -1872,6 +2128,68 @@
 .priv-host-msg { flex: 1 1 100%; font-size: 12px; font-weight: 600; color: var(--s-ink-soft); }
 .priv-host-msg.err { color: var(--s-blocked); }
 
+/* ── Search tab: backend status strip + pipeline preview ──
+   The strip answers "what will the backend actually do" (live badges);
+   the card says it in one sentence with the current knob values plugged in. */
+.search-status-strip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 4px 0 14px;
+}
+.search-status-label { font-size: 12px; font-weight: 800; color: var(--s-ink-soft); }
+.search-status-badge {
+  font-size: 11.5px;
+  font-weight: 700;
+  padding: 3px 9px;
+  border: var(--s-border-sm);
+  border-radius: var(--s-radius);
+  background: var(--s-white);
+  color: var(--s-ink);
+  box-shadow: var(--s-shadow-xs);
+}
+.search-status-badge.on  { background: color-mix(in srgb, var(--s-done) 22%, var(--s-white)); }
+.search-status-badge.off { background: var(--s-cream); color: var(--s-ink-soft); border-style: dashed; }
+.search-pipeline-card {
+  border: var(--s-border);
+  border-radius: var(--s-radius);
+  background: var(--s-white);
+  box-shadow: var(--s-shadow-sm);
+  padding: 12px 16px;
+  margin-bottom: 14px;
+}
+.search-pipeline-title { font-weight: 800; font-size: 13px; color: var(--s-ink); }
+.search-pipeline-flow {
+  margin-top: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--s-ink);
+  line-height: 1.6;
+}
+.search-pipeline-flow.filter-off { color: var(--s-ink-soft); }
+.search-pipeline-hint { margin-top: 6px; font-size: 11.5px; color: var(--s-ink-soft); font-weight: 600; }
+.search-primary-knobs .search-knob-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.search-primary-knobs .search-knob-row input { width: 90px; }
+.settings-field-hint { font-size: 11.5px; color: var(--s-ink-soft); font-weight: 600; }
+.search-advanced { margin-bottom: 6px; }
+.search-advanced > summary {
+  cursor: pointer;
+  font-weight: 800;
+  font-size: 13px;
+  color: var(--s-ink);
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 8px 0;
+  list-style: none;
+  user-select: none;
+}
+.search-advanced > summary::-webkit-details-marker { display: none; }
+.search-advanced > summary::before { content: '▸'; color: var(--s-ink-soft); }
+.search-advanced[open] > summary::before { content: '▾'; }
+.search-advanced-sub { font-size: 11.5px; font-weight: 600; color: var(--s-ink-soft); }
+
 /* ── Toggle switch — brutalist hard-edged ── */
 .auth-src-switch { flex: none; position: relative; display: inline-block; cursor: pointer; }
 .auth-src-switch input { position: absolute; opacity: 0; width: 0; height: 0; }
@@ -1929,6 +2247,32 @@
   border: 1.5px solid var(--s-ink);
   background: var(--s-skin);
   color: var(--s-ink);
+}
+/* ── Registry badges (Site Knowledge Layer P2): strategy + knowledge ── */
+.auth-src-badges { display: flex; gap: 6px; margin-top: 4px; flex-wrap: wrap; }
+.auth-src-meta-badge {
+  font-size: 10.5px;
+  font-weight: 800;
+  letter-spacing: .3px;
+  padding: 1px 6px;
+  border: 1.5px solid var(--s-ink-soft);
+  background: var(--s-white);
+  color: var(--s-ink-soft);
+}
+.auth-src-meta-badge.strategy  { border-color: var(--s-ink); color: var(--s-ink); background: var(--s-cream); }
+.auth-src-meta-badge.knowledge { border-color: var(--s-ink); color: var(--s-ink); background: var(--s-gold); }
+.auth-src-meta-badge.live.on   { border-color: var(--s-ink); color: var(--s-ink); background: var(--s-cream); }
+.auth-src-meta-badge.live.off  { border-style: dashed; }
+.auth-src-live-hint {
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  border: var(--s-border-sm);
+  border-radius: var(--s-radius);
+  background: var(--s-cream);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--s-ink);
+  line-height: 1.55;
 }
 .auth-src-field-badge.required    { background: var(--s-gold); }
 .auth-src-field-badge.recommended { background: var(--s-cream); }

@@ -891,6 +891,9 @@ if (typeof _pmPick !== 'function') {
       ? btn.parentNode.querySelectorAll('[data-sel="' + selId + '"]') : [];
     for (var i = 0; i < sibs.length; i++) sibs[i].classList.remove('is-selected');
     btn.classList.add('is-selected');
+    /* Podcast persists (mode, lang) for reload-grade re-attach; the hook
+     * is a no-op for video's selects (its lookup is paper_hash-only). */
+    if (typeof _pcPickPersist === 'function') _pcPickPersist(selId, sel.value);
   };
 }
 

@@ -91,7 +91,7 @@ function enOf(gkey) {
   return pbody.querySelector(':scope > .stream-seg-en-narration[data-seg-round="' + gkey + '"]');
 }
 function zhOf(gkey) {
-  return pbody.querySelector(':scope > .stream-seg-narration[data-seg-round="' + gkey + '"]');
+  return pbody.querySelector(':scope > .seg-narration[data-seg-round="' + gkey + '"]:not(.stream-seg-en-narration)');
 }
 
 // ── Before any translation: BOTH rounds' English present + VISIBLE (no hide). ──
@@ -211,7 +211,7 @@ for (const el of pbody.querySelectorAll('.stream-seg-en-narration')) {
 check('NC_round1_english_hidden_by_global_rule',
   !!en1 && en1.classList.contains('xlate-hidden'));
 // And there is no Chinese twin for round 1 either → the round shows NOTHING.
-const zh1 = pbody.querySelector(':scope > .stream-seg-narration[data-seg-round="L1"]');
+const zh1 = pbody.querySelector(':scope > .seg-narration[data-seg-round="L1"]:not(.stream-seg-en-narration)');
 check('NC_round1_has_no_chinese_twin', !zh1);
 check('NC_round1_would_be_invisible',
   !!en1 && en1.classList.contains('xlate-hidden') && !zh1);

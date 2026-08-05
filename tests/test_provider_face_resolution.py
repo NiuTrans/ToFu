@@ -8,7 +8,7 @@ WHY THIS EXISTS
 Slot). That made "one gateway, two wire protocols" INEXPRESSIBLE, so the
 your-llm-gateway.example.com gateway — one account, one set of API keys, two URL paths —
 had to be duplicated into TWO provider cards (``example-corp`` +
-``example-corp_anthropic``) and TWO template files. The duplication was never a
+``example_corp_anthropic``) and TWO template files. The duplication was never a
 design choice; it was the only writable shape.
 
 The split conflated two independent concepts:
@@ -56,15 +56,21 @@ from __future__ import annotations
 
 import os
 import sys
+from urllib.parse import urlparse
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 
+from lib.mcp.registry import is_opensource_build
+
 pytestmark = [pytest.mark.auth_mode('open'), pytest.mark.unit]
 
-GW = 'your-llm-gateway.example.com'
 OPENAI_URL = 'https://api.openai.com/v1'
+# Derived, not spelled out: export.py rewrites the URL's endpoint form and
+# the bare-host form differently, so a hardcoded GW would split from the
+# card's host in the exported tree. Deriving keeps them equal in BOTH builds.
+GW = urlparse(OPENAI_URL).hostname
 ANTHROPIC_URL = 'https://api.openai.com/v1/anthropic'
 
 # The merged provider card: ONE account, TWO faces.
@@ -89,7 +95,7 @@ MERGED = {
 # The dangerous shape: same gateway host, but NO faces declared (an old card,
 # or one a template sync never upgraded).
 FACELESS = {
-    'id': 'example-corp_old',
+    'id': 'example_corp_old',
     'base_url': OPENAI_URL,
     'api_keys': ['k1'],
     'models': [{'model_id': 'claude-opus-5'}, {'model_id': 'kimi-k3'}],
@@ -213,6 +219,10 @@ def test_explicit_pin_to_the_default_face_overrides_the_refusal():
 #  3. Dual-face host discovery — derived, never hand-copied
 # ═══════════════════════════════════════════════════════════
 
+@pytest.mark.skipif(is_opensource_build(),
+                    reason='the internal dual-face gateway template is not '
+                           'shipped in opensource builds, so its host is '
+                           'legitimately absent from the derived set')
 def test_dual_face_hosts_are_derived_from_shipped_templates():
     """The host set must come from data (the shipped templates), not a
     hardcoded list that drifts the moment a template changes."""

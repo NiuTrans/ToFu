@@ -16,9 +16,16 @@ The fix (lib/js_bundler.py):
      bundle → one bad file degrades to "that module absent", not "app dead".
   2. A ``\\n;\\n`` boundary guard between files so an unterminated tail can't
      glue onto the next file's first token.
-  3. ``_node_syntax_ok`` — a best-effort ``node --check`` gate that refuses to
-     serve a bundle that somehow still fails to parse (falls back to the
-     individual <script> tags, a slower but WORKING page).
+  3. ``_node_syntax_ok`` — a best-effort ``node --check`` gate on the
+     concatenated bundle.
+  4. ``_find_syntax_broken_sources`` (2026-08-04 sidebar incident) — when the
+     whole-bundle gate fails on a SCANNER-CLEAN tree (a brace-unbalanced file
+     left by an interrupted edit), this per-file bisect attributes the
+     breakage and the bundle is re-assembled WITHOUT the broken non-critical
+     source(s): degrade to "module absent" instead of refusing the bundle and
+     pushing every user onto the dev-fallback, which serves the same broken
+     file raw. Fatal only when a CRITICAL file is broken or the re-assembled
+     bundle still fails.
 
 These tests bite: neutering the scanner (making it always return None) makes
 the corrupt-file cases fail.
@@ -240,25 +247,95 @@ def test_corrupt_noncritical_file_still_builds(tmp_path, monkeypatch):
 
 
 @pytest.mark.skipif(shutil.which('node') is None, reason='node not installed')
-def test_node_gate_rejects_broken_bundle(tmp_path, monkeypatch):
-    """When node IS available, a bundle that still fails to parse (e.g. the
-    scanner is bypassed) must be rejected (build returns None → dev fallback)
-    rather than shipped."""
+def test_syntax_broken_noncritical_source_is_excluded_not_fatal(tmp_path, monkeypatch):
+    """2026-08-04 sidebar incident contract: a source file that fails
+    ``node --check`` WITHOUT any scanner-visible marker (an interrupted agent
+    edit left a duplicated ``function renderMessage(`` line in chat_render.js
+    → brace imbalance → EOF mid-construct) must NOT refuse the whole bundle.
+    The build bisects per-file, EXCLUDES the broken source, and ships a
+    degraded bundle — blast radius = the broken module, not the app. (The old
+    contract — refuse the whole bundle, serve the dev-fallback — pushed every
+    user onto a slower page that served the SAME broken file raw.)"""
     from lib import js_bundler
 
     files = {
         'a.js': 'window.A = 1;\n',
-        'bad.js': 'window.B = -;\n',   # syntactically invalid, no conflict marker
+        'bad.js': 'window.B = -;\n',   # syntactically invalid, scanner-clean
     }
     js_dir = _make_js_tree(tmp_path, files)
     _reset_state(monkeypatch, js_dir, files)
-    # Bypass the source scanner so the invalid file reaches the concatenation;
-    # the node gate is the last line of defense.
-    monkeypatch.setattr(js_bundler, '_scan_source_corruption', lambda name, content: None)
+
+    name = js_bundler.build_bundle()
+    assert name and name.startswith('bundle-'), (
+        'one syntax-broken NON-critical file must degrade to module-absent, '
+        'not refuse the whole bundle'
+    )
+    bundle_text = (tmp_path / 'js' / name).read_text(encoding='utf-8')
+    assert 'window.B' not in bundle_text, 'the broken file must be EXCLUDED'
+    assert 'window.A = 1;' in bundle_text, 'the healthy file must survive'
+    # The shipped degraded bundle must itself parse.
+    ok, detail = js_bundler._node_syntax_ok(str(tmp_path / 'js' / name))
+    assert ok, detail
+
+
+@pytest.mark.skipif(shutil.which('node') is None, reason='node not installed')
+def test_syntax_broken_critical_source_is_fatal(tmp_path, monkeypatch):
+    """The flip side: when the syntax-broken file is CRITICAL, the build must
+    still refuse (dev-fallback + load guard banner) — degradation must never
+    ship a silently-crippled core."""
+    from lib import js_bundler
+
+    files = {
+        'i18n.js': 'window.t = function(k){ return k; };\nfunction broken( {\n',
+        'main.js': 'window.M = 1;\n',
+    }
+    js_dir = _make_js_tree(tmp_path, files)
+    _reset_state(monkeypatch, js_dir, files)
+    monkeypatch.setattr(js_bundler, '_CRITICAL_FILES', frozenset({'i18n.js'}))
 
     assert js_bundler.build_bundle() is None, (
-        'node gate must refuse a syntactically broken bundle'
+        'a syntax-broken CRITICAL file must be fatal (dev-fallback surfaces it)'
     )
-    # And it must not leave the broken bundle on disk.
     leftovers = [f for f in os.listdir(js_dir) if f.startswith('bundle-')]
-    assert not leftovers, 'broken bundle file must be removed'
+    assert not leftovers, 'the refused bundle must not stay on disk'
+
+
+@pytest.mark.skipif(shutil.which('node') is None, reason='node not installed')
+def test_neutered_bisect_makes_syntax_breakage_fatal(tmp_path, monkeypatch):
+    """NC bite: with _find_syntax_broken_sources neutered (the gate failure
+    can no longer be attributed to its file), a syntax-broken source is FATAL
+    again — proving the bisect is exactly what turns this incident class from
+    app-wide refusal into per-module degradation."""
+    from lib import js_bundler
+
+    files = {
+        'a.js': 'window.A = 1;\n',
+        'bad.js': 'window.B = -;\n',
+    }
+    js_dir = _make_js_tree(tmp_path, files)
+    _reset_state(monkeypatch, js_dir, files)
+    monkeypatch.setattr(js_bundler, '_find_syntax_broken_sources', lambda names: [])
+
+    assert js_bundler.build_bundle() is None
+
+
+@pytest.mark.skipif(shutil.which('node') is None, reason='node not installed')
+def test_gate_still_failing_after_exclusion_refuses(tmp_path, monkeypatch):
+    """If the re-assembled bundle STILL fails the gate after the broken source
+    was excluded (a cross-file gluing bug, not a bad module), the build must
+    refuse rather than serve it."""
+    from lib import js_bundler
+
+    files = {
+        'a.js': 'window.A = 1;\n',
+        'bad.js': 'window.B = -;\n',
+    }
+    js_dir = _make_js_tree(tmp_path, files)
+    _reset_state(monkeypatch, js_dir, files)
+    # Force the whole-bundle gate to fail on BOTH attempts; the real bisect
+    # still runs and correctly excludes bad.js, but attempt 2 must refuse.
+    monkeypatch.setattr(js_bundler, '_node_syntax_ok', lambda path: (False, 'forced failure'))
+
+    assert js_bundler.build_bundle() is None
+    leftovers = [f for f in os.listdir(js_dir) if f.startswith('bundle-')]
+    assert not leftovers, 'a twice-failing bundle must not stay on disk'

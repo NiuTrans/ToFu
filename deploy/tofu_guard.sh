@@ -37,6 +37,22 @@
 # restart_15000.sh) — two lifecycle owners must never fight. Also stands
 # down when data/.tofu_guard_disabled exists (manual off switch).
 #
+# 2026-08-03 INCIDENT HARDENING
+# ----------------------------
+#   • serve-mode replay: server.py records the protocol it ACTUALLY
+#     serves in data/.last_serve_mode; relaunch replays it via
+#     TOFU_TLS=0/1. A cron-env relaunch otherwise re-runs proxy
+#     detection blind and came up TLS behind a plain-HTTP proxy —
+#     "socket hang up" for every client.
+#   • protocol-aware healthy(): probe the recorded scheme first, then
+#     the other — an http-only probe reported a READY TLS server as
+#     dead for 60s.
+#   • heartbeat wedge arbitration: a frozen event loop keeps its
+#     listener BOUND and its process alive for hours (measured 6.5h),
+#     so "listener present" no longer means alive. Stale loop-heartbeat
+#     + dead HTTP, sustained over a streak window, = wedged → kill +
+#     relaunch. Fresh heartbeat = busy, never killed.
+#
 # USAGE
 # -----
 #   deploy/tofu_guard.sh --install     # write the 2 crontab lines (idempotent)
@@ -69,6 +85,20 @@ MAX_CONSECUTIVE_DEATHS=5
 STORM_WINDOW=600
 BOOT_GRACE=180          # seconds a young server.py may boot before we judge it dead
 
+# Probe-command seams (unit tests + debugging): override the binaries
+# the guard shells out to. Defaults are the real system tools.
+SS_CMD="${TOFU_GUARD_SS:-ss}"
+CURL_CMD="${TOFU_GUARD_CURL:-curl}"
+# The protocol the last boot ACTUALLY served (written by server.py).
+SERVE_MODE_FILE="${TOFU_SERVE_MODE_FILE:-${PROJ}/data/.last_serve_mode}"
+# Wedge arbitration thresholds: heartbeat older than STALE proves the
+# loop is wedged; the wedge must then persist for STREAK seconds
+# (continuously observed) before we kill — hysteresis against
+# transient FUSE stalls.
+WEDGE_STALE_SECS="${TOFU_GUARD_WEDGE_STALE:-180}"
+WEDGE_STREAK_SECS="${TOFU_GUARD_WEDGE_STREAK:-120}"
+WEDGE_STATE="${PROJ}/data/.tofu_guard_wedge"
+
 cd "${PROJ}" || { echo "FATAL: cannot cd ${PROJ}"; exit 1; }
 mkdir -p "${PROJ}/data" "${PROJ}/logs"
 
@@ -85,13 +115,39 @@ detect_python() {
 PY="$(detect_python)"
 
 listener_pids() {
-  ss -ltnp 2>/dev/null \
+  "${SS_CMD}" -ltnp 2>/dev/null \
     | awk -v pat=":${PORT}\$" '$4 ~ pat {print}' \
     | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u
 }
 
+_serve_mode() {
+  # The protocol the LAST boot actually served. Empty when unknown —
+  # never invent a decision for the relaunch to replay: a wrong replay
+  # is worse than none.
+  local m=''
+  [ -f "${SERVE_MODE_FILE}" ] && read -r m < "${SERVE_MODE_FILE}"
+  case "${m}" in http|https) printf '%s' "${m}" ;; esac
+}
+
+_guard_tls_env() {
+  case "$1" in
+    https) printf 'TOFU_TLS=1' ;;
+    http)  printf 'TOFU_TLS=0' ;;
+  esac
+}
+
 healthy() {
-  curl -s --max-time 2 "http://127.0.0.1:${PORT}/api/health" >/dev/null 2>&1
+  # Protocol-aware (2026-08-03): probing ONLY http:// misreported a
+  # READY TLS server as dead for 60s. Try the recorded scheme first,
+  # then the other — either answering means alive.
+  if [ "$(_serve_mode)" = 'https' ]; then
+    "${CURL_CMD}" -s -k --max-time 2 "https://127.0.0.1:${PORT}/api/health" >/dev/null 2>&1 && return 0
+    "${CURL_CMD}" -s    --max-time 2 "http://127.0.0.1:${PORT}/api/health"  >/dev/null 2>&1 && return 0
+  else
+    "${CURL_CMD}" -s    --max-time 2 "http://127.0.0.1:${PORT}/api/health"  >/dev/null 2>&1 && return 0
+    "${CURL_CMD}" -s -k --max-time 2 "https://127.0.0.1:${PORT}/api/health" >/dev/null 2>&1 && return 0
+  fi
+  return 1
 }
 
 log() {
@@ -129,6 +185,79 @@ record_death_evidence() {
   } >> "${WLOG}" 2>/dev/null
 }
 
+_heartbeat_file() {
+  # Mirror server.py's _heartbeat_dir(): TOFU_HEARTBEAT_DIR, else
+  # <TOFU_DB_LOCAL_ROOT or /tmp/tofu>/heartbeat/server.heartbeat — a
+  # local-disk sidecar, never FUSE.
+  if [ -n "${TOFU_HEARTBEAT_DIR:-}" ]; then
+    printf '%s/server.heartbeat' "${TOFU_HEARTBEAT_DIR}"
+  else
+    printf '%s/heartbeat/server.heartbeat' "${TOFU_DB_LOCAL_ROOT:-/tmp/tofu}"
+  fi
+}
+
+_lock_recorded_pid() {
+  local ilock="${PROJ}/data/.server.lock"
+  [ -f "${ilock}" ] || return 0
+  head -n1 "${ilock}" 2>/dev/null | cut -d@ -f1 | tr -dc '0-9'
+}
+
+_wedge_proof_age() {
+  # Print the heartbeat AGE iff the sidecar PROVES pid $1's loop is
+  # wedged (heartbeat belongs to $1 AND is older than WEDGE_STALE_SECS).
+  # Mirrors server.py's _holder_wedge_age: every ambiguous case —
+  # missing / unparsable / pid mismatch / fresh — is NOT proof.
+  local want="$1" hb hb_pid hb_ts age
+  hb="$(_heartbeat_file)"
+  [ -f "${hb}" ] || return 1
+  hb_pid="$(sed -n 's/.*"pid"[^0-9]*\([0-9][0-9]*\).*/\1/p' "${hb}" | head -n1)"
+  hb_ts="$(sed -n 's/.*"ts"[^0-9]*\([0-9][0-9]*\).*/\1/p' "${hb}" | head -n1)"
+  [ -n "${hb_pid}" ] && [ -n "${hb_ts}" ] || return 1
+  [ "${hb_pid}" = "${want}" ] || return 1
+  age=$(( $(date +%s) - hb_ts ))
+  [ "${age}" -gt "${WEDGE_STALE_SECS}" ] || return 1
+  printf '%s\n' "${age}"
+  return 0
+}
+
+_wedge_note()  { [ -f "${WEDGE_STATE}" ] || date +%s > "${WEDGE_STATE}"; }
+_wedge_clear() { rm -f "${WEDGE_STATE}" 2>/dev/null || true; }
+_wedge_streak_ok() {
+  local first
+  first="$(cat "${WEDGE_STATE}" 2>/dev/null)" || return 1
+  [ -n "${first}" ] || return 1
+  [ $(( $(date +%s) - first )) -ge "${WEDGE_STREAK_SECS}" ]
+}
+
+_wedge_act() {
+  # $1 = stale age (evidence), $2 = space-separated pids to kill
+  # (wedged lock holder + any listener pids, usually identical).
+  log "[guard] WEDGED server confirmed: loop heartbeat stale $1s, HTTP dead, streak >= ${WEDGE_STREAK_SECS}s — killing: $2"
+  local p i any
+  for p in $2; do kill "${p}" 2>/dev/null || true; done
+  for i in $(seq 1 10); do
+    any=0
+    for p in $2; do kill -0 "${p}" 2>/dev/null && any=1; done
+    [ "${any}" = 0 ] && break
+    sleep 1
+  done
+  for p in $2; do
+    if kill -0 "${p}" 2>/dev/null; then
+      log "[guard] wedged pid ${p} survived SIGTERM — SIGKILL"
+      kill -9 "${p}" 2>/dev/null || true
+    fi
+  done
+  sleep 1
+  _wedge_clear
+  record_death_evidence
+  if ! storm_check "$(date +%s)"; then
+    log "[guard] CRASH STORM: >${MAX_CONSECUTIVE_DEATHS} deaths in ${STORM_WINDOW}s —" \
+        "NOT relaunching. Fix the build, then: rm ${STATE}"
+    return 1
+  fi
+  relaunch
+}
+
 storm_check() {
   # $1 = now epoch. Returns 0 OK to relaunch, 1 = storm, stop relaunching.
   local now="$1" first deaths
@@ -147,12 +276,15 @@ storm_check() {
 }
 
 relaunch() {
-  log "[guard] relaunching: PORT=${PORT} setsid nohup ${PY} server.py >> ${SLOG}"
+  local mode tls_env
+  mode="$(_serve_mode)"
+  tls_env="$(_guard_tls_env "${mode}")"
+  log "[guard] relaunching (serve-mode=${mode:-auto}${tls_env:+ ${tls_env}}): PORT=${PORT} setsid nohup ${PY} server.py >> ${SLOG}"
   {
     echo ""
-    echo "════════════════ $(date '+%F %T') — launched by tofu_guard ════════════════"
+    echo "════════════════ $(date '+%F %T') — launched by tofu_guard (serve-mode=${mode:-auto}) ════════════════"
   } >> "${SLOG}" 2>/dev/null
-  PORT="${PORT}" BIND_HOST="${BIND_HOST:-127.0.0.1}" \
+  PORT="${PORT}" BIND_HOST="${BIND_HOST:-0.0.0.0}" ${tls_env} \
     setsid nohup "${PY}" server.py >> "${SLOG}" 2>&1 &
   local newpid=$!
   # persist launch epoch (state line 3) for check_once's boot grace
@@ -219,10 +351,34 @@ check_once() {
   # (c) the positive proofs of life. TWO independent signals, because the
   # first alone once lied: cron's minimal PATH has no `ss`, so an empty
   # listener_pids meant "ss missing", NOT "server dead" (2026-07-27).
-  if [ -n "$(listener_pids)" ]; then
+  local _lp _holder _wage
+  _lp="$(listener_pids)"
+  if [ -n "${_lp}" ]; then
+    if healthy; then
+      _wedge_clear
+      return 0
+    fi
+    # Listener present but HTTP dead. Busy ≠ wedged — a loaded server
+    # can answer slowly; only the loop heartbeat arbitrates. 2026-08-03:
+    # the loop froze 04:40→11:14 with the socket BOUND the whole time,
+    # and the old guard kept silent because it saw "listener present".
+    _holder="$(_lock_recorded_pid)"
+    [ -z "${_holder}" ] && _holder="$(printf '%s\n' "${_lp}" | head -n1)"
+    _wage="$(_wedge_proof_age "${_holder}" || true)"
+    if [ -z "${_wage}" ]; then
+      log "[guard] listener present but HTTP unhealthy; heartbeat not stale — busy, not wedged (standing down)"
+      return 0
+    fi
+    _wedge_note
+    if _wedge_streak_ok; then
+      _wedge_act "${_wage}" "${_holder} ${_lp}"
+      return $?
+    fi
+    log "[guard] possible wedge: heartbeat stale ${_wage}s — watching (${WEDGE_STREAK_SECS}s streak before action)"
     return 0
   fi
   if healthy; then
+    _wedge_clear
     return 0   # no socket visible, but HTTP answers — alive; never phantom-relaunch
   fi
   # (b2) boot-in-progress via the instance lock (pt_aa3cd224b3b346e7): no
@@ -242,6 +398,22 @@ check_once() {
     il_pid="$(head -n1 "${ilock}" 2>/dev/null | cut -d@ -f1 | tr -dc '0-9')"
     if [ -n "${il_pid}" ] && kill -0 "${il_pid}" 2>/dev/null \
        && tr '\0' ' ' < "/proc/${il_pid}/cmdline" 2>/dev/null | grep -q 'server\.py'; then
+      # Wedge tie-break BEFORE the yield: the old code yielded here
+      # WITHOUT a TTL — including to a server whose serve task died
+      # hours ago (the 2026-08-03 11:14 state). A stale heartbeat
+      # proving a wedged loop overrides the yield; anything ambiguous
+      # (boot in progress writes no heartbeat yet) keeps the safe yield.
+      local _wage
+      _wage="$(_wedge_proof_age "${il_pid}" || true)"
+      if [ -n "${_wage}" ]; then
+        _wedge_note
+        if _wedge_streak_ok; then
+          _wedge_act "${_wage}" "${il_pid}"
+          return $?
+        fi
+        log "[guard] possible wedge (no listener): heartbeat stale ${_wage}s — watching"
+        return 0
+      fi
       local il_age
       il_age="$(ps -o etimes= -p "${il_pid}" 2>/dev/null | tr -d ' ')"
       if [ -n "${il_age}" ] && [ "${il_age}" -gt 600 ]; then
@@ -321,6 +493,9 @@ uninstall_cron() {
   echo "        kill it with: pkill -f 'tofu_guard.sh --loop')"
 }
 
+# Sourcing seam for unit tests: with TOFU_GUARD_SOURCE_ONLY=1 the
+# functions load but nothing runs (no --ensure side effects).
+if [ -z "${TOFU_GUARD_SOURCE_ONLY:-}" ]; then
 case "${1:---ensure}" in
   --install)   install_cron ;;
   --uninstall) uninstall_cron ;;
@@ -337,3 +512,4 @@ case "${1:---ensure}" in
     ;;
   *) echo "usage: $0 [--install|--uninstall|--ensure|--once|--stop|--start|--status]" >&2; exit 2 ;;
 esac
+fi

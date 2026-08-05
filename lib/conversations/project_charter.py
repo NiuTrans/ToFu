@@ -1034,7 +1034,9 @@ def execute_charter_tool(fn_name: str, fn_args: dict, *,
                 # the evidence chain costs one entry, not the whole charter.
                 try:
                     i = int(idx)
-                except (TypeError, ValueError):
+                except (TypeError, ValueError) as e:
+                    logger.debug('[Charter] charter-read index %r not an '
+                                 'integer: %s', idx, e)
                     return f'Error: index must be an integer, got {idx!r}.'
                 decisions = rec['decisions']
                 if i < 0:

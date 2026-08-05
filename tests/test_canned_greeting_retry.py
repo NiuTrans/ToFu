@@ -165,6 +165,7 @@ def _fresh_task(phase_counter: int = 0) -> dict:
         'error': None,
         'events': [],
         'events_lock': threading.Lock(),
+        'content_lock': threading.Lock(),
         '_premature_retry_count_phase': phase_counter,
     }
 
@@ -284,6 +285,81 @@ def test_short_non_greeting_stop_not_retried():
     )
     assert decision['action'] == 'break'
     assert decision['premature_retry_count'] == 0
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 2b) The 2026-08-02 deepseek-v4-flash shape: the per-turn tail injection
+#     (_refresh_tail_block — date / digest / charter / board) appends
+#     <system-reminder> blocks onto the LAST user message before the round,
+#     so the production wire form of "你好" is a blocks list carrying a
+#     reminder. The small-talk complement must judge the USER'S OWN WORDS,
+#     not the system-injected padding — otherwise every laconic greeting
+#     reply is misclassified as the upstream artifact and burned 2 retries.
+# ─────────────────────────────────────────────────────────────────────
+
+_DATE_REMINDER = '<system-reminder>\nCurrent date: 2026-08-02\n</system-reminder>'
+
+
+def test_tail_reminder_block_form_smalltalk_complement():
+    """Production wire shape: '你好' + appended date reminder block → the
+    user's own words are still pure small-talk → greeting stays legitimate."""
+    msgs = [{'role': 'user', 'content': [
+        {'type': 'text', 'text': '你好'},
+        {'type': 'text', 'text': _DATE_REMINDER},
+    ]}]
+    assert last_user_is_smalltalk(msgs) is True
+    assert is_canned_greeting_reply('你好！有什么可以帮你的吗？', msgs) is False
+
+
+def test_tail_reminder_string_form_smalltalk_complement():
+    """Same protection when the reminder rode a string-form user message."""
+    msgs = [{'role': 'user', 'content': '你好\n\n' + _DATE_REMINDER}]
+    assert last_user_is_smalltalk(msgs) is True
+
+
+def test_congruent_greeting_with_tail_reminder_never_retried():
+    """Analyse-level replay of the incident: user said 你好 (tail-mutated),
+    model answered a laconic greeting → NOT a canned artifact, no retry."""
+    task = _fresh_task(phase_counter=0)
+    decision = analyse_stream_result(
+        assistant_msg={'role': 'assistant',
+                       'content': '你好！有什么可以帮你的吗？',
+                       'reasoning_content': ''},
+        last_finish_reason='stop',
+        task=task, tid='canned', model='deepseek-v4-flash',
+        round_num=0, _premature_retry_count=0,
+        messages=[{'role': 'user', 'content': [
+            {'type': 'text', 'text': '你好'},
+            {'type': 'text', 'text': _DATE_REMINDER},
+        ]}], usage=_usage(),
+    )
+    assert decision['action'] == 'break'
+    assert decision['premature_retry_count'] == 0
+    assert all(e.get('bucket') != 'canned_greeting'
+               for e in task['events'] if isinstance(e, dict))
+
+
+def test_canned_greeting_retry_resets_round_text():
+    """The canned bucket is the ONLY retry bucket whose discarded round HAS
+    content — the retry MUST drop the poisoned text (backend accumulators +
+    a client delta_reset marked discard) or each attempt's greeting
+    concatenates onto the last (the 2026-08-02 triple-greeting bug)."""
+    task = _fresh_task(phase_counter=0)
+    task['content'] = '你好！有什么可以帮你的吗？'
+    task['thinking'] = '一点思考'
+    decision = analyse_stream_result(
+        assistant_msg=_greeting_msg(),
+        last_finish_reason='stop',
+        task=task, tid='canned', model='claude-opus-5',
+        round_num=1, _premature_retry_count=0,
+        messages=list(_WORK_TAIL), usage=_usage(),
+    )
+    assert decision['action'] == 'continue'
+    assert task['content'] == '', task['content']
+    assert task['thinking'] == '', task['thinking']
+    resets = [e for e in task['events']
+              if isinstance(e, dict) and e.get('type') == 'delta_reset']
+    assert resets and resets[-1].get('discard') is True, task['events']
 
 
 # ─────────────────────────────────────────────────────────────────────

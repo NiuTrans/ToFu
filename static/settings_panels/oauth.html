@@ -1,6 +1,35 @@
         <div class="settings-tab-panel" id="settingsTab_oauth">
           <div class="settings-section-title" data-i18n="settings.oauthTitle">订阅登录</div>
-          <p class="settings-desc"><span data-i18n="settings.oauthPageDesc">使用 ChatGPT Plus / Claude Pro 订阅账号登录，无需 API Key，直接使用订阅额度。</span><br><span style="color:#f0ad4e;font-size:12px" data-i18n-html="settings.oauthChinaNote">⚠️ 中国用户需要全程代理（Clash/VPN），授权弹窗和服务器换 token 都需要能访问外网。建议在<strong>本地浏览器无痕窗口</strong>中完成授权。</span></p>
+          <p class="settings-desc" data-i18n="settings.oauthPageDesc">使用 ChatGPT Plus / Claude Pro 订阅账号登录，无需 API Key，直接使用订阅额度。</p>
+
+          <!-- The whole flow in one glance — this is ALL most users need -->
+          <div class="oauth-steps">
+            <div class="oauth-step">
+              <span class="oauth-step-num">1</span>
+              <div class="oauth-step-text">
+                <div class="oauth-step-title" data-i18n="settings.oauthStep1">点击登录</div>
+                <div class="oauth-step-sub" data-i18n="settings.oauthStep1Sub">弹窗打开官方授权页</div>
+              </div>
+            </div>
+            <span class="oauth-step-arrow">→</span>
+            <div class="oauth-step">
+              <span class="oauth-step-num">2</span>
+              <div class="oauth-step-text">
+                <div class="oauth-step-title" data-i18n="settings.oauthStep2">完成授权</div>
+                <div class="oauth-step-sub" data-i18n="settings.oauthStep2Sub">用订阅账号登录并授权</div>
+              </div>
+            </div>
+            <span class="oauth-step-arrow">→</span>
+            <div class="oauth-step">
+              <span class="oauth-step-num">3</span>
+              <div class="oauth-step-text">
+                <div class="oauth-step-title" data-i18n="settings.oauthStep3">自动完成</div>
+                <div class="oauth-step-sub" data-i18n="settings.oauthStep3Sub">Token 过期自动刷新</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="oauth-china-note" data-i18n-html="settings.oauthChinaNote">⚠️ 中国用户：授权全程需要代理（Clash/VPN），建议在<strong>本地浏览器无痕窗口</strong>中完成。若服务器无法访问外网，卡片内会提示你安装受控端（装在自己电脑上即可）。</div>
 
           <!-- Claude Pro -->
           <div class="oauth-provider-card" id="oauthClaudeCard">
@@ -24,10 +53,14 @@
                 <input type="text" class="oauth-manual-input" id="oauthClaudeAuthUrl" readonly style="color:#888;font-size:12px">
                 <button class="btn-small" onclick="var u=document.getElementById('oauthClaudeAuthUrl');u.select();document.execCommand('copy');this.textContent=t('settings.oauthCopied');setTimeout(function(){this.textContent=t('settings.oauthCopyLink')}.bind(this),1500)" style="white-space:nowrap" data-i18n="settings.oauthCopyLink">复制链接</button>
               </div>
-              <p class="oauth-manual-hint" data-i18n-html="settings.oauthClaudeCodeHint">授权成功后页面显示授权码，复制 <strong>code#state</strong> 粘贴到下方：</p>
-              <div style="display:flex;gap:8px">
+              <p class="oauth-manual-hint" id="oauthClaudeCodeHint" data-i18n-html="settings.oauthClaudeCodeHint">授权成功后页面显示授权码，复制 <strong>code#state</strong> 粘贴到下方：</p>
+              <div style="display:flex;gap:8px" id="oauthClaudePasteRow">
                 <input type="text" class="oauth-manual-input" id="oauthClaudeManualUrl" placeholder="粘贴 code#state（或完整回调 URL）" data-i18n-placeholder="settings.oauthClaudePh">
                 <button class="btn-small btn-primary" onclick="_oauthManualSubmit('claude')" data-i18n="settings.oauthSubmit">提交</button>
+              </div>
+              <p class="oauth-manual-hint" id="oauthClaudeLoopbackNote" style="display:none" data-i18n="settings.oauthLoopbackNote">本机会自动接收授权码，无需复制粘贴。授权完成后本页会自动登录。</p>
+              <div id="oauthClaudeConsoleFallbackRow" style="display:none;margin-top:8px">
+                <button type="button" class="btn-small" id="oauthClaudeConsoleFallbackBtn" data-i18n="settings.oauthUseConsole">登录卡住了？改用手工粘贴</button>
               </div>
             </div>
           </div>
@@ -62,11 +95,4 @@
             </div>
           </div>
 
-          <div class="settings-section-title" style="margin-top:20px" data-i18n="settings.oauthInstructions">使用说明</div>
-          <ul class="oauth-notes">
-            <li data-i18n="settings.oauthNote1">点击登录 → 弹窗打开官方授权页 → 用订阅账号登录并授权</li>
-            <li data-i18n-html="settings.oauthNote2">授权后 Claude 显示 <code>code#state</code>、ChatGPT 自动回调，按提示操作即可</li>
-            <li data-i18n-html="settings.oauthNote3">如弹窗被拦截，点击「复制链接」到<strong>本地浏览器无痕窗口</strong>中打开（避免登录态冲突）</li>
-            <li data-i18n="settings.oauthNote4">Token 过期后自动刷新，无需重新登录</li>
-          </ul>
         </div>

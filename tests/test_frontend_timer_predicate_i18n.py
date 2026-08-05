@@ -49,15 +49,20 @@ def _node_deps_available() -> bool:
     return os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom'))
 
 
-# argv: [node, harness, tool_rounds.js, i18n.js, ROOT, mode]
+# argv: [node, harness, tool_rounds.js, tool_rounds_rich.js, i18n.js, ROOT, mode]
 #   mode = live | neuter_reason | neuter_kind
+# The timer watcher block (predicate render) moved to the DEFERRED
+# tool_rounds_rich.js (Epic-E split 2026-08-01); tool_rounds.js keeps the
+# _renderUnifiedToolLine dispatcher. Concatenated in ONE eval so top-level
+# consts the rich block closes over stay in scope.
 _HARNESS = r"""
 const fs = require('fs');
 const path = require('path');
 const TR = process.argv[2];
-const I18N = process.argv[3];
-const ROOT = process.argv[4];
-const MODE = process.argv[5] || 'live';
+const RICH = process.argv[3];
+const I18N = process.argv[4];
+const ROOT = process.argv[5];
+const MODE = process.argv[6] || 'live';
 const { JSDOM } = require(path.join(ROOT, 'node_modules', 'jsdom'));
 const dom = new JSDOM('<!DOCTYPE html><body></body>', { url: 'http://localhost/' });
 const win = dom.window;
@@ -82,27 +87,28 @@ win._isRoundSwarm = global._isRoundSwarm = () => false;
 win.getActiveConv = global.getActiveConv = () => null;
 
 let trSrc = fs.readFileSync(TR, 'utf8');
+let richSrc = fs.readFileSync(RICH, 'utf8');
 
 if (MODE === 'neuter_reason') {
   // Restore the OLD behaviour: display the raw reason verbatim (drop the
   // normalizer) — proving the normalizer is what removes the dev-English note.
-  const before = trSrc;
-  trSrc = trSrc.replace(
+  const before = richSrc;
+  richSrc = richSrc.replace(
     'const fullReason = _timerPollReasonText(p, _t);',
     'const fullReason = p.reason || "";');
-  if (trSrc === before) { console.log('FAIL neuter_reason_regex_drift'); }
+  if (richSrc === before) { console.log('FAIL neuter_reason_regex_drift'); }
 }
 if (MODE === 'neuter_kind') {
   // Force isCodeTimer false regardless of _timerConditionKind — proving the
   // kind-badge assertion is driven by the promoted kind, not something else.
-  const before = trSrc;
-  trSrc = trSrc.replace(
+  const before = richSrc;
+  richSrc = richSrc.replace(
     'const isCodeTimer = condKind === "code";',
     'const isCodeTimer = false;');
-  if (trSrc === before) { console.log('FAIL neuter_kind_regex_drift'); }
+  if (richSrc === before) { console.log('FAIL neuter_kind_regex_drift'); }
 }
 
-eval(trSrc);
+eval(trSrc + '\n' + richSrc);
 if (win._timerCountdownTicker) { clearInterval(win._timerCountdownTicker); }
 
 const out = [];
@@ -170,10 +176,11 @@ def _run(mode: str):
     try:
         proc = subprocess.run(
             ['node', harness,
-             os.path.join(JS_DIR, 'ui', 'tool_rounds.js'),  # argv[2]
-             os.path.join(JS_DIR, 'i18n.js'),               # argv[3]
-             ROOT,                                          # argv[4]
-             mode,                                          # argv[5]
+             os.path.join(JS_DIR, 'ui', 'tool_rounds.js'),       # argv[2]
+             os.path.join(JS_DIR, 'ui', 'tool_rounds_rich.js'),  # argv[3]
+             os.path.join(JS_DIR, 'i18n.js'),                    # argv[4]
+             ROOT,                                               # argv[5]
+             mode,                                               # argv[6]
              ],
             capture_output=True, text=True, timeout=60,
         )

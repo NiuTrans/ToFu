@@ -147,8 +147,14 @@ def test_an_unidentified_local_draft_is_not_rescued():
 
 @pytest.mark.skipif(not _node_available(), reason='node not installed')
 def test_the_shipped_gate_actually_calls_the_seam():
-    """A seam nothing calls is dead code, and a guard on it proves nothing."""
-    src = open(_seam_source(), encoding='utf-8').read()
+    """A seam nothing calls is dead code, and a guard on it proves nothing.
+
+    The seam was extracted to ``core/conv_rescue_tail.js`` (the pure verdict),
+    while the CALL lives at the gate — ``loadConversationMessages`` in
+    ``core/conversations.js`` (:1270). Resolve the gate's file BY SYMBOL, same
+    as the seam's, so a future decomposition re-points both halves.
+    """
+    src = open(sources_defining(_GATE)[0], encoding='utf-8').read()
     assert f'{_SEAM}(conv.messages, serverMsgs)' in src, (
         f'the shipped {_GATE} no longer routes its adoption decision through '
         f'{_SEAM} — this guard would still pass while the product overwrites.')
@@ -164,11 +170,18 @@ def test_the_identity_filter_is_load_bearing_neuter(tmp_path):
     """
     path = _seam_source()
     src = open(path, encoding='utf-8').read()
+    # The seam now chains TWO filters: the identity filter under test, then a
+    # same-id dedup. The neuter drops ONLY the identity filter (the dedup must
+    # stay, or the no-identity draft case would pass for the wrong reason).
     marker = """  return localMsgs.slice(serverMsgs.length)
-    .filter(m => m && (m._msgId || m._isVirtualUser));"""
+    .filter(m => m && (m._msgId || m._isVirtualUser))
+    .filter(m => !m._msgId || !serverIds.has(m._msgId));"""
     assert marker in src, ('the identity filter anchor drifted — the neuter '
                            'would not bite. Re-point it before trusting this.')
-    neutered = src.replace(marker, '  return localMsgs.slice(serverMsgs.length);', 1)
+    neutered = src.replace(
+        marker,
+        '  return localMsgs.slice(serverMsgs.length)\n'
+        '    .filter(m => !m._msgId || !serverIds.has(m._msgId));', 1)
     assert neutered != src, 'neuter changed nothing'
 
     copy = tmp_path / 'conversations_neutered.js'

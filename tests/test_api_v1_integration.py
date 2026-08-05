@@ -306,7 +306,11 @@ class IntegrationTest(unittest.TestCase):
                 # 0. Empty list at start.
                 r = await cli.get('/api/v1/folders', headers=hdrs)
                 self.assertEqual(r.status_code, 200)
-                self.assertEqual(await r.get_json(), [])
+                # api-contract §4 (batch 19): the bare array moved under the
+                # api_ok envelope's ``items`` key.
+                body = await r.get_json()
+                self.assertTrue(body['ok'])
+                self.assertEqual(body['items'], [])
 
                 # 1. Create.
                 r = await cli.post('/api/v1/folders', headers=hdrs,
@@ -344,7 +348,7 @@ class IntegrationTest(unittest.TestCase):
                                    json={'order': [second, fid]})
                 self.assertEqual(r.status_code, 200)
                 r = await cli.get('/api/v1/folders', headers=hdrs)
-                lst = await r.get_json()
+                lst = (await r.get_json())['items']
                 order_map = {f['id']: f['order'] for f in lst}
                 self.assertEqual(order_map[second], 0)
                 self.assertEqual(order_map[fid], 1)

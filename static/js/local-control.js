@@ -63,10 +63,91 @@ var _lcPollTimer = null;
  * by the badge. */
 var _lcReach = { browser: null, desktop: null };
 
+/* Signature of the last desktop-setup render (see the gate in
+ * _lcRenderDesktop). `null` forces a render; openLocalControlModal resets
+ * it so a reopened modal never inherits a stale skip. */
+var _lcDesktopSigLast = null;
+
+/* The render inputs that justify a setup-box rewrite. Anything NOT in here
+ * changing is not a reason to touch the DOM the user is interacting with. */
+function _lcDesktopSignature(d) {
+  function fp(rows) {
+    return (Array.isArray(rows) ? rows : []).map(function (p) {
+      return [(p && p.filename) || '', (p && p.size) || 0,
+              (p && p.preseed_url) || ''].join(':');
+    }).join('|');
+  }
+  var lang = (typeof _i18nLang !== 'undefined') ? _i18nLang : '';
+  return [d.setup_state, !!d.connected, d.server_url || '',
+          d.bridge_token_required, fp(d.downloads),
+          fp(d.agent_downloads), lang,
+          d.server_url_reachability || '', d.bridge_tokens_issued || 0
+         ].join('~');
+}
+
+/* Paired-but-nothing-arrived: bridge tokens exist yet no agent polls.
+ *
+ * Recovery belongs to the AGENT, not the user (owner decree 2026-08-04 —
+ * no UI may send anyone to open an ssh tunnel by hand): the agent's resume
+ * path re-probes its saved address and re-runs the discovery ladder
+ * (loopback → LAN → ssh-config candidates → self-built tunnel) keeping the
+ * ORIGINAL token, so a dead route heals itself. This line says exactly
+ * that, plus the ONE fallback that always works: re-pair from the tray
+ * with a fresh code. Its predecessor told the user to mint a second
+ * connect line from a tunnel address — measured dead-end advice. */
+function _lcAwaitingAgentHtml(d) {
+  if (!d || d.connected || !(d.bridge_tokens_issued > 0)) return '';
+  return '<p class="lc-step lc-await">' + _lcEsc(_lcT('local.awaitingAgent',
+    '已发出配对凭证，等待受控端连入……它会自己寻找服务器并自动重试（本机 → 局域网 → 自动隧道），一般一分钟内变绿；迟迟未连上时，在受控端托盘选「连接到另一个 Tofu…」用新配对码重配一次。')) + '</p>';
+}
+
+/* The pairing block — the ONE primary attach action in BOTH install
+ * branches (docs/DESKTOP_AGENT_DIST_DESIGN.md §11). Authored ONCE so the
+ * branches cannot drift (a drifted copy is a wrong instruction shown
+ * first). The ids are fixed (lcPairBtn / lcPairBox): exactly one branch
+ * is on screen at a time, so they never collide. `withStep` prefixes the
+ * numbered ② line for the remote branch's ①②③ flow; the role-labeled
+ * branch and the stale-while-build fallback already name the flow, so
+ * they render the bare block. */
+function _lcPairBlockHtml(withStep) {
+  return (withStep
+      ? '<p class="lc-step">' + _lcEsc(_lcT('local.agentStepPair',
+        '② 点「配对这台电脑」（6 位码，可复制），填进受控端首次启动：')) + '</p>'
+      : '') +
+    '<button type="button" class="btn btn-primary btn-sm" id="lcPairBtn">' +
+      _lcEsc(_lcT('local.pairBtn', '配对这台电脑')) + '</button>' +
+    '<div id="lcPairBox" style="display:none"></div>';
+}
+
+/* The demoted connect-line fallback. Suppressed ENTIRELY when the panel is
+ * reached through a public host: there the line's address half is an SSO
+ * edge the agent can never cross (owner incident 2026-08-03), so offering
+ * it is offering a measured dead end — the pairing code above covers every
+ * case the line could, because the agent discovers the route itself. */
+function _lcConnectDetailsHtml(reachability) {
+  if (reachability === 'public') return '';
+  return '<details class="lc-details"><summary>' +
+      _lcEsc(_lcT('local.connectLineToggle',
+        '高级：连接行（配对码不可用时兜底）')) + '</summary>' +
+    '<button type="button" class="btn btn-primary btn-sm" id="lcMintBtn">' +
+      _lcEsc(_lcT('local.mintToken', '生成连接行')) + '</button>' +
+    '<code class="lc-copy" id="lcTokenBox" style="display:none"></code>' +
+  '</details>';
+}
+
+/* Bind the attach actions a branch just rendered (ids are branch-unique). */
+function _lcWireAttach(serverUrl) {
+  var pair = document.getElementById('lcPairBtn');
+  if (pair) pair.onclick = function () { _lcPairCode(); };
+  var mint = document.getElementById('lcMintBtn');
+  if (mint) mint.onclick = function () { _lcMintToken(serverUrl); };
+}
+
 function openLocalControlModal() {
   var el = document.getElementById('localControlModal');
   if (!el) return;
   el.classList.add('open');
+  _lcDesktopSigLast = null;
   _lcPaintFloor();
   _lcRefresh();
   if (_lcPollTimer) clearInterval(_lcPollTimer);
@@ -284,6 +365,24 @@ function _lcRenderBrowser(d, err) {
   }
 
   var clients = d.clients || [];
+  /* Fleet tri-state (2026-08-04, stranded-fleet fix): the server reports
+   * the version a fresh download would carry (servedExtVersion) and the
+   * clients whose polls DIED at the bridge gate (lockedOutClients). A
+   * stale-but-connected extension still works — the dot stays green and
+   * the upgrade is a one-click nudge. A locked-out extension cannot poll
+   * at all, so calling it "尚未安装" would be a lie: it is installed,
+   * broken, and unable to heal itself — the row must say so and offer
+   * the preseeded re-download (zero-config cure). */
+  var servedVer = ((d && d.servedExtVersion) || '').trim();
+  var staleFrom = '';
+  if (connected && servedVer) {
+    for (var _ci = 0; _ci < clients.length; _ci++) {
+      var _cv = ((clients[_ci] && clients[_ci].ext_version) || '').trim();
+      if (_cv && _cv !== servedVer) { staleFrom = _cv; break; }
+    }
+  }
+  var lockedOut = (!connected && d && Array.isArray(d.lockedOutClients))
+    ? d.lockedOutClients : [];
   if (connected) {
     var ago = (d.secondsAgo != null) ? d.secondsAgo + 's' : '';
     if (clients.length > 0) {
@@ -295,7 +394,10 @@ function _lcRenderBrowser(d, err) {
         : _lcT('local.connected', '已连接') + (ago ? ' · ' + ago : ''));
   } else {
     window._browserClientId = null;
-    _lcSetStatus('lcBrowserStatus', false, _lcT('local.notInstalled', '尚未安装'));
+    _lcSetStatus('lcBrowserStatus', false,
+      lockedOut.length
+        ? _lcT('local.extDead', '已安装但凭证已失效')
+        : _lcT('local.notInstalled', '尚未安装'));
   }
 
   _lcReach.browser = connected;
@@ -312,7 +414,34 @@ function _lcRenderBrowser(d, err) {
 
   if (!setup) return;
   var state = _lcBrowserSetupState(d);
-  if (state === 'connected') { setup.innerHTML = ''; return; }
+  if (state === 'connected') {
+    if (staleFrom) {
+      // Outdated but WORKING: nothing is broken, so this is a nudge, not
+      // an alarm — one click on the preseeded zip upgrades in place.
+      setup.innerHTML =
+        '<p class="lc-step">' + _lcEsc(_lcT('local.browserExtOutdated',
+          '扩展有新版本（{old} → {new}）——重新下载 ZIP 覆盖加载即可升级（已自动配对，零配置）：')
+          .replace('{old}', staleFrom).replace('{new}', servedVer)) + '</p>' +
+        _lcExtDownloadAction();
+      _lcWireExtDownload();
+    } else {
+      setup.innerHTML = '';
+    }
+    return;
+  }
+
+  if (lockedOut.length) {
+    // Stranded: an installed extension is knocking with a dead credential.
+    // This takes precedence over the load_unpacked/download guidance —
+    // the user's problem is not getting the folder, it is replacing a
+    // broken install with the self-pairing one.
+    setup.innerHTML =
+      '<p class="lc-step">' + _lcEsc(_lcT('local.browserExtStranded',
+        '检测到旧版扩展因凭证失效连不上（它自己无法恢复）——重新下载扩展 ZIP（已自动配对、零配置），加载即恢复：')) + '</p>' +
+      _lcExtDownloadAction();
+    _lcWireExtDownload();
+    return;
+  }
 
   if (state === 'load_unpacked') {
     // Tofu runs on this machine, this machine HAS a browser we can drive, and
@@ -374,20 +503,31 @@ function _lcRenderBrowser(d, err) {
  * floor, a failed status call, and the detected `download` state. It needs no
  * payload (downloadBrowserExtension is a pure frontend call), which is exactly
  * what makes it usable as the floor. */
-function _lcBrowserDownload() {
-  var setup = document.getElementById('lcBrowserSetup');
-  if (!setup) return;
-  setup.innerHTML =
-    '<p class="lc-step">' + _lcEsc(_lcT('local.browserDownload',
-      '下载扩展并解压，然后在 Chrome / Edge 里打开扩展管理页 → 开启「开发者模式」→「加载已解压的扩展程序」→ 选择解压出的文件夹。')) + '</p>' +
-    '<button type="button" class="btn btn-primary btn-sm" id="lcExtDownloadBtn">' +
-      _lcEsc(_lcT('browser.stepDownloadBtn', '下载扩展 ZIP')) + '</button>';
+/* The download BUTTON — authored once, shared by the plain install
+ * instruction, the upgrade nudge and the stranded-rescue branch (three
+ * copies of a button would drift; a drifted button is a dead one). */
+function _lcExtDownloadAction() {
+  return '<button type="button" class="btn btn-primary btn-sm" id="lcExtDownloadBtn">' +
+    _lcEsc(_lcT('browser.stepDownloadBtn', '下载扩展 ZIP')) + '</button>';
+}
+
+function _lcWireExtDownload() {
   var btn = document.getElementById('lcExtDownloadBtn');
   if (btn) {
     btn.onclick = function () {
       if (typeof downloadBrowserExtension === 'function') downloadBrowserExtension();
     };
   }
+}
+
+function _lcBrowserDownload() {
+  var setup = document.getElementById('lcBrowserSetup');
+  if (!setup) return;
+  setup.innerHTML =
+    '<p class="lc-step">' + _lcEsc(_lcT('local.browserDownload',
+      '下载扩展并解压，然后在 Chrome / Edge 里打开扩展管理页 → 开启「开发者模式」→「加载已解压的扩展程序」→ 选择解压出的文件夹。')) + '</p>' +
+    _lcExtDownloadAction();
+  _lcWireExtDownload();
 }
 
 // ══════════════════════════════════════════════════════
@@ -426,6 +566,17 @@ function _lcRenderDesktop(d, err) {
 
   if (!setup) return;
 
+  /* ── Poll-signature gate (owner-measured 2026-08-03) ──
+   * _lcRefresh repaints every 3s so a freshly-connected agent flips the
+   * dot — but rewriting setup.innerHTML on every beat also blew away the
+   * USER's interaction state: an expanded <details> collapsed seconds
+   * after opening, a minted connect line vanished mid-copy. Rewrite only
+   * when the render INPUTS changed; the dot/text/switch above still
+   * update every beat, so a connecting agent is never delayed. */
+  var sig = _lcDesktopSignature(d);
+  if (sig === _lcDesktopSigLast) return;
+  _lcDesktopSigLast = sig;
+
   // The backend chose the state — see routes/api_v1/desktop.py::_setup_state.
   // Reading it (rather than re-deriving from the URL) is what keeps the
   // packaged-app case distinguishable from a reverse-proxied remote one.
@@ -442,36 +593,125 @@ function _lcRenderDesktop(d, err) {
       return;
 
     case 'local_source': {
-      // Tofu is running from source on this same machine. The desktop app is
-      // still the one-click tray path — but "install the desktop app" with no
-      // way to GET it is a dead sentence, and download_url is already in the
-      // payload (derived from the ONE UPDATE_REPO constant), so render the
-      // same followable link the remote case offers.
-      var dlSrc = (d.download_url || '').trim();
-      setup.innerHTML = '<p class="lc-step">' + _lcEsc(_lcT('local.desktopSource',
-        '当前 Tofu 以源码方式运行。安装桌面版后即可在系统托盘一键开启「Enable Computer Control」。')) + '</p>' +
-        _lcDownloadLinks(d);
+      // Tofu runs from source on this machine. Two audiences land here and
+      // the server CANNOT tell them apart (a same-host proxy and an ssh -L
+      // tunnel both present as loopback — see _setup_state's docstring), so
+      // BOTH installs are shown, role-labeled, nothing collapsed
+      // (owner 2026-08-03: the collapsed tunnel hatch was missed entirely,
+      // and the prose wall made the one needed action unfindable). The
+      // agent block renders only when a built artifact exists; without one
+      // the full desktop app is the sole — and sufficient — offer.
+      var srvSrc = (d.server_url || '').trim();
+      var agentSrc = Array.isArray(d.agent_downloads)
+        ? d.agent_downloads : [];
+      // Pairing-code primary here too (owner decree 2026-08-04): the code
+      // carries NO address, so it works from every reachability class —
+      // the agent discovers the route itself. The connect line survives
+      // only as the demoted details fallback (never under a public host).
+      var pairSrc = _lcPairBlockHtml(false) +
+        _lcConnectDetailsHtml(d.server_url_reachability);
+      var htmlSrc = '<p class="lc-step">' + _lcEsc(_lcT('local.roleChoose',
+          '当前 Tofu 以源码方式运行 —— 按这台电脑的角色选装：')) + '</p>';
+      if (agentSrc.length) {
+        htmlSrc +=
+          '<div class="lc-role lc-role-primary">' +
+            '<p class="lc-role-head">' +
+              _lcEsc(_lcT('local.agentRoleHead', '受控端 · 轻量')) +
+              '<span class="lc-role-note">' + _lcEsc(_lcT('local.agentRoleNote',
+                '—— 从另一台电脑访问（如 ssh 转发）选它：只让服务器操作那台电脑')) + '</span></p>' +
+            _lcDownloadLinks(d, 'agent', true) +
+            pairSrc +
+          '</div>' +
+          '<div class="lc-role">' +
+            '<p class="lc-role-head">' +
+              _lcEsc(_lcT('local.fullRoleHead', '完整桌面版')) +
+              '<span class="lc-role-note">' + _lcEsc(_lcT('local.fullRoleNote',
+                '—— 这台电脑就是服务器本机：装它，托盘一键开启')) + '</span></p>' +
+            _lcDownloadLinks(d, 'full') +
+          '</div>';
+      } else {
+        // Stale-while-build: no agent artifact yet — the full installer
+        // doubles as the controlled endpoint (tray → Connect to remote),
+        // so the attach flow must stay reachable, not vanish with the
+        // agent block.
+        htmlSrc +=
+          '<div class="lc-role">' +
+            '<p class="lc-role-head">' +
+              _lcEsc(_lcT('local.fullRoleHead', '完整桌面版')) +
+              '<span class="lc-role-note">' + _lcEsc(_lcT('local.fullRoleNote',
+                '—— 这台电脑就是服务器本机：装它，托盘一键开启')) + '</span></p>' +
+            _lcDownloadLinks(d, 'full') +
+            pairSrc +
+          '</div>';
+      }
+      setup.innerHTML = _lcAwaitingAgentHtml(d) + htmlSrc;
+      _lcWireAttach(srvSrc);
       return;
     }
 
-    default:
-      // Remote server — the user's machine is NOT this machine, so this is
-      // the only case that needs a token. Three things must be present or the
-      // instruction is not actionable: WHERE to get the app, HOW to connect
-      // it, and WHAT address to point it at. A bare token would leave the
-      // user holding a secret with nowhere to put it.
+    default: {
+      // Remote server — the machine in front of the user is NOT this
+      // machine, so this is the only case that can need a token. Its role
+      // in this dialog is to be CONTROLLED (the A3 branch matrix): the
+      // agent installer (lightweight, no frontend) is the PRIMARY offer;
+      // the full desktop app is a one-line COLLAPSED secondary. When no
+      // agent artifact exists yet (a build is in flight), the full
+      // installer takes the primary slot with the historical instruction —
+      // stale-while-build, never a dead end.
+      //
+      // The agent flow is numbered like the browser row's (①②③), because
+      // an un-ordered "install … then pair" asked the user to discover
+      // the sequence from the layout. Two shapes:
+      //   * 3-step (default): download → pair with the 6-digit code →
+      //     green status (the agent discovers the route itself);
+      //   * 2-step (zero-touch): the artifact carries a usable preseed
+      //     (backend already filtered loopback) AND the bridge needs no
+      //     token — install and it connects by itself. bridge_token_required
+      //     absent ⇒ treated as REQUIRED: the 3-step flow also works on an
+      //     open bridge, so that is the fail-safe direction.
       var dl = (d.download_url || '').trim();
       var srv = (d.server_url || '').trim();
-      setup.innerHTML =
-        '<p class="lc-step">' + _lcEsc(_lcT('local.desktopRemote',
-          'Tofu 运行在远程服务器上。在你自己的电脑安装桌面版，再用下面这行把它连过来：')) + '</p>' +
-        _lcDownloadLinks(d) +
-        '<button type="button" class="btn btn-primary btn-sm" id="lcMintBtn">' +
-          _lcEsc(_lcT('local.mintToken', '生成连接命令')) + '</button>' +
-        '<code class="lc-copy" id="lcTokenBox" style="display:none"></code>';
-      var mint = document.getElementById('lcMintBtn');
-      if (mint) mint.onclick = function () { _lcMintToken(srv); };
+      var agentPicks = Array.isArray(d.agent_downloads)
+        ? d.agent_downloads : [];
+      var html;
+      if (agentPicks.length) {
+        var autoConnect = (d.bridge_token_required === false) &&
+          agentPicks.some(function (p) { return p && p.preseed_url; });
+        html =
+          '<p class="lc-step">' + _lcEsc(_lcT('local.desktopRemoteAgent',
+            'Tofu 运行在远程服务器上 —— 让 AI 操作这台电脑：')) + '</p>' +
+          '<p class="lc-step">' + _lcEsc(_lcT('local.agentStep1',
+            '① 下载并安装受控端（只让服务器操作这台电脑 —— 轻量 · 无界面 · 托盘配置）：')) + '</p>' +
+          _lcDownloadLinks(d, 'agent', true) +
+          (autoConnect
+            ? '<p class="lc-step">' + _lcEsc(_lcT('local.agentStepAuto',
+              '② 装完启动即可 —— 安装包已带服务器地址，会自动连上；此处状态变绿就是成功。')) + '</p>'
+            : _lcPairBlockHtml(true) +
+              '<p class="lc-step">' + _lcEsc(_lcT('local.agentStep3',
+              '③ 连上后此处状态变绿 —— 之后它常驻托盘，无需再操作。')) + '</p>') +
+          '<details class="lc-details"><summary>' +
+            _lcEsc(_lcT('local.fullVersionToggle',
+            '这台电脑也想跑 Tofu 本体（服务器+界面）？下载完整桌面版')) +
+            '</summary>' +
+            _lcDownloadLinks(d, 'full') +
+          '</details>' +
+          (autoConnect ? '' : _lcConnectDetailsHtml(d.server_url_reachability));
+      } else {
+        // Stale-while-build: no agent artifact yet — the full installer
+        // doubles as the controlled endpoint, and the attach flow is the
+        // SAME pairing code, never a bare minted line (its address half
+        // is the measured dead end under an SSO edge).
+        html =
+          '<p class="lc-step">' + _lcEsc(_lcT('local.desktopRemote',
+            'Tofu 运行在远程服务器上。在你自己的电脑安装桌面版，再把 6 位配对码填进它的首次启动：')) + '</p>' +
+          _lcDownloadLinks(d) +
+          _lcPairBlockHtml(false) +
+          _lcConnectDetailsHtml(d.server_url_reachability);
+      }
+      setup.innerHTML = _lcAwaitingAgentHtml(d) + html;
+      _lcWireAttach(srv);
       return;
+    }
   }
 }
 
@@ -484,9 +724,9 @@ function _lcRenderDesktop(d, err) {
  * address the user demonstrably reaches this server on), so one copy carries
  * everything. Reuses POST /api/v1/desktop/token — the raw secret is returned
  * exactly once, so it is rendered here and never re-fetched. */
-function _lcMintToken(serverUrl) {
-  var btn = document.getElementById('lcMintBtn');
-  var box = document.getElementById('lcTokenBox');
+function _lcMintToken(serverUrl, btnId, boxId) {
+  var btn = document.getElementById(btnId || 'lcMintBtn');
+  var box = document.getElementById(boxId || 'lcTokenBox');
   if (btn) btn.disabled = true;
   Promise.resolve(Api.desktop.mintToken('local-control'))
     .then(function (r) {
@@ -508,6 +748,100 @@ function _lcMintToken(serverUrl) {
         }
       };
       if (btn) btn.style.display = 'none';
+      /* The line exists to be pasted ONCE — don't make the user discover
+       * the click-to-copy affordance. Runs inside the button's click
+       * gesture, so the clipboard is allowed; a refusal falls back to the
+       * visible box, which still copies on click. */
+      if (typeof _safeClipboardWrite === 'function') {
+        _safeClipboardWrite(line)
+          .then(function () {
+            box.classList.add('copied');
+            if (typeof showToast === 'function') {
+              showToast(_lcT('local.mintCopied',
+                '连接行已复制 —— 粘贴到受控端的连接框即可'));
+            }
+          })
+          .catch(function () {});
+      }
+    })
+    .catch(function () {
+      if (btn) btn.disabled = false;
+      if (typeof showToast === 'function') showToast(_lcT('devices.mintFailed', '生成失败'));
+    });
+}
+
+/* Mint a PAIRING CODE (P2, docs/DESKTOP_AGENT_DIST_DESIGN.md §11) and render
+ * it BIG with a copy button + countdown — the ONE primary action of the
+ * remote branch. The user types 6 digits into the agent's first-run dialog;
+ * the agent exchanges the code for a bridge token (no bearer, no address,
+ * no SSH command). This replaces the mint-connect-line flow as the primary
+ * path because the connect line's address half is necessarily wrong under
+ * an SSO proxy (owner incident 2026-08-03); the code carries no address at
+ * all — the agent discovers the server itself (§11.2.1 ladder).
+ *
+ * The code is shown EXACTLY once (it is one-shot + 5-minute TTL); the
+ * countdown keeps the TTL honest so a code that quietly expired is never
+ * pasted. Reuses POST /api/v1/desktop/pair-code. */
+function _lcPairCode(btnId, boxId) {
+  var btn = document.getElementById(btnId || 'lcPairBtn');
+  var box = document.getElementById(boxId || 'lcPairBox');
+  if (btn) btn.disabled = true;
+  Promise.resolve(Api.desktop.mintPairCode())
+    .then(function (r) {
+      if (btn) btn.disabled = false;
+      if (!r || !r.code) {
+        if (typeof showToast === 'function') showToast(_lcT('devices.mintFailed', '生成失败'));
+        return;
+      }
+      if (!box) return;
+      var code = String(r.code);
+      var expiresAt = Number(r.expires_at || 0);
+      box.style.display = '';
+      box.innerHTML =
+        '<div class="lc-pair-code">' +
+          '<span class="lc-pair-digits">' + _lcEsc(code) + '</span>' +
+          '<button type="button" class="btn btn-primary btn-sm" id="lcPairCopy">' +
+            _lcEsc(_lcT('browser.clickToCopy', '点击复制')) + '</button>' +
+        '</div>' +
+        '<p class="lc-substep" id="lcPairCountdown">' +
+          _lcEsc(_lcT('local.pairHint',
+            '把这 6 位数字填进受控端首次启动 —— 它自己找服务器并完成配对（无需地址、无需隧道）。')) +
+        '</p>';
+      var copyBtn = document.getElementById('lcPairCopy');
+      if (copyBtn) {
+        copyBtn.onclick = function () {
+          if (typeof _safeClipboardWrite === 'function') {
+            _safeClipboardWrite(code)
+              .then(function () {
+                copyBtn.textContent = _lcT('local.copied', '已复制');
+                if (typeof showToast === 'function') {
+                  showToast(_lcT('local.pairCopied',
+                    '配对码已复制 —— 粘贴到受控端首次启动'));
+                }
+              })
+              .catch(function () {});
+          }
+        };
+      }
+      // Countdown: keep the TTL honest. Refresh once a second until expiry;
+      // past-zero the box greys out and offers to re-mint (the button
+      // stays — clicking it again just mints a fresh code).
+      var cd = document.getElementById('lcPairCountdown');
+      var started = Date.now();
+      var iv = setInterval(function () {
+        var left = Math.max(0, Math.round(expiresAt - Date.now() / 1000));
+        var m = Math.floor(left / 60), s = left % 60;
+        if (cd) {
+          cd.textContent = _lcT('local.pairExpires',
+            '配对码 {mm}:{ss} 后过期').replace('{mm}', m)
+            .replace('{ss}', (s < 10 ? '0' : '') + s);
+        }
+        if (left <= 0) {
+          clearInterval(iv);
+          if (cd) cd.textContent = _lcT('local.pairExpired',
+            '配对码已过期 —— 再点一次生成新码');
+        }
+      }, 1000);
     })
     .catch(function () {
       if (btn) btn.disabled = false;
@@ -560,6 +894,25 @@ function _lcFmtSize(bytes) {
   return (mb >= 100 ? Math.round(mb) : Math.round(mb * 10) / 10) + ' MB';
 }
 
+/* Re-base a server-built same-origin URL onto the CURRENT proxy base path.
+ *
+ * `downloads[].url` is built by the backend from request.host_url — which
+ * under a path-prefixed cloud-IDE proxy (…/proxy/15000/) is the origin
+ * WITHOUT the prefix: the proxy strips the prefix before forwarding, so the
+ * backend structurally cannot see it. Clicking such a link hits the
+ * gateway's default route and returns "not found" without the request ever
+ * reaching Tofu (the access log shows zero /desktop/download hits). Same
+ * failure class as the paper PDF URL (pdf_viewer.js _resolvePaperPdfUrl):
+ * strip back to the canonical /api/... tail and re-apply the LIVE base path
+ * via apiUrl(). URLs with no /api/ marker (the releases-page escape hatch)
+ * pass through untouched, and so does everything when apiUrl is absent. */
+function _lcResolveDlUrl(url) {
+  if (!url || typeof apiUrl !== 'function') return url;
+  var i = url.indexOf('/api/');
+  if (i < 0) return url;
+  return apiUrl(url.slice(i));
+}
+
 /* The download instruction — authored ONCE for both install branches.
  *
  * ── Why per-platform links instead of the releases page ──
@@ -581,9 +934,15 @@ function _lcFmtSize(bytes) {
  * Always keeps the releases-page link as a secondary "all downloads" escape
  * hatch: it is the only thing that still works for an unrecognised platform, a
  * release missing an asset, or an unreachable GitHub API. */
-function _lcDownloadLinks(d) {
+function _lcDownloadLinks(d, kind, suppressPage) {
+  kind = kind || 'full';
   var page = ((d && d.download_url) || '').trim();
-  var picks = (d && Array.isArray(d.downloads)) ? d.downloads : [];
+  var raw = (kind === 'agent')
+    ? (d && d.agent_downloads) : (d && d.downloads);
+  var picks = Array.isArray(raw) ? raw : [];
+  var labelKey = (kind === 'agent')
+    ? 'local.agentDownloadFor' : 'local.desktopDownloadFor';
+  var labelFb = (kind === 'agent') ? '受控端·轻量' : '下载桌面版';
   var html = '';
   if (picks.length) {
     html += '<p class="lc-dl-row">';
@@ -593,10 +952,11 @@ function _lcDownloadLinks(d) {
       // The label names the CHIP, not just the OS — the whole point of the
       // two-DMG case is telling the user which one is theirs. Size goes in
       // the label: a 100+ MB installer with no size shown is a bad surprise.
-      html += '<a class="lc-dl-link lc-dl-direct" href="' + _lcEsc(p.url) +
+      html += '<a class="lc-dl-link lc-dl-direct" href="' +
+        _lcEsc(_lcResolveDlUrl(p.url)) +
         '" target="_blank" rel="noopener noreferrer" title="' +
         _lcEsc(p.filename || '') + '">' +
-        _lcEsc(_lcT('local.desktopDownloadFor', '下载桌面版') + ' · ' +
+        _lcEsc(_lcT(labelKey, labelFb) + ' · ' +
                (p.label || p.arch || '') +
                (p.size ? ' · ' + _lcFmtSize(p.size) : '')) + '</a>' +
         // Provenance: an artifact served by THIS server (not the public
@@ -616,7 +976,7 @@ function _lcDownloadLinks(d) {
         '在「关于本机」里可以看到。')) + '</p>';
     }
   }
-  if (page) {
+  if (page && !suppressPage) {
     html += '<p class="lc-substep"><a class="lc-dl-link" id="lcDesktopDownload" href="' +
       _lcEsc(page) + '" target="_blank" rel="noopener noreferrer">' +
       _lcEsc(picks.length

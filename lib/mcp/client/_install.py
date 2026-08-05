@@ -24,7 +24,6 @@ import time
 
 from lib.log import get_logger
 from lib.mcp.client._state import _pkg
-from lib.mcp.client._vendor import _ensure_writable_caches
 
 logger = get_logger(__name__)
 

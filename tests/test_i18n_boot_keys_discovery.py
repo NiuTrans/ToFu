@@ -114,11 +114,18 @@ def test_every_discovered_key_exists_in_source_dictionary():
 
 
 def test_dynamic_prefixes_detected_for_known_call_sites():
-    """The four documented dynamic call sites (net.state.<state>,
-    update.phase.<key>, finishInfo.cb.<k>, finishInfo.cbState.<state>)
-    MUST appear in the dynamic_prefixes list. If one drops out, either
-    the file was moved OUT of the core bundle (fine — reflect that) or
-    the regex drifted (regression).
+    """The documented BOOT-critical dynamic call sites (net.state.<state>,
+    finishInfo.cb.<k>, tool.label.<name>) MUST appear in the dynamic_prefixes
+    list. If one drops out, either the file was moved OUT of the core bundle
+    (fine — reflect that) or the regex drifted (regression).
+
+    History: finishInfo.cbState.<state> used to be pinned here too, but its
+    call site moved to DEFERRED ui/finish_info_rich.js (Epic-E sub-8, commit
+    48c1651f — the cost popover builds lazily) and is therefore correctly
+    ABSENT from the boot-critical set; the deferred rest pack carries it.
+    tool.label. joined the boot set 2026-08-03 (streaming_ui.js phase-row
+    tool labels) — a dynamic t('tool.label.' + name) written INLINE, since
+    the scan cannot see t(identifier).
     """
     from lib.i18n_boot_keys import discover_boot_keys
     result = discover_boot_keys(str(ROOT))
@@ -127,9 +134,13 @@ def test_dynamic_prefixes_detected_for_known_call_sites():
     assert 'net.state.' in prefixes, (
         'net-latency.js\'s t("net.state." + state) call site is boot-critical '
         '— dynamic-prefix regex must catch it')
-    # finishInfo.cb. + finishInfo.cbState. are in ui/finish_info.js (core).
+    # finishInfo.cb. is in ui/finish_info.js (core, slimmed in Epic-E sub-8).
     assert 'finishInfo.cb.' in prefixes
-    assert 'finishInfo.cbState.' in prefixes
+    # streaming_ui.js's inline t('tool.label.' + name) (phase-row tool labels).
+    assert 'tool.label.' in prefixes, (
+        'streaming_ui.js\'s inline t("tool.label." + name) call site is '
+        'boot-critical (streaming phase rows) — the dynamic-prefix regex '
+        'must catch it; t(identifier) is invisible to the scan')
 
 
 def test_dynamic_prefix_expansion_bounded_by_source_dict():

@@ -108,6 +108,7 @@ function _renderKeyCardStatsHTML(provIdx, keyIdx) {
   var succ = row ? (row.success || 0) : 0;
   var fail = row ? (row.failure || 0) : 0;
   var rl429 = row ? (row.rate_limited || 0) : 0;
+  var gw = row ? (row.gateway_errors || 0) : 0;
   var cons429 = row ? (row.consecutive_429 || 0) : 0;
   var srTxt = row ? _fmtSuccessRate(row.success_rate) : '—';
   var enabled = row ? !!row.enabled : true;
@@ -167,6 +168,7 @@ function _renderKeyCardStatsHTML(provIdx, keyIdx) {
       countChip +
       (fail > 0 ? '<span class="stg-keystat-fail" title="' + escapeHtml(t('settings.keyStatFailTip')) + '">' + t('settings.keyStatFail', { n: fail }) + '</span>' : '') +
       (rl429 > 0 ? '<span class="stg-keystat-429" title="' + escapeHtml(t('settings.keyStat429Tip')) + '">' + t('settings.keyStat429', { n: rl429 }) + '</span>' : '') +
+      (gw > 0 ? '<span class="stg-keystat-gateway" title="' + escapeHtml(t('settings.keyStatGatewayTip')) + '">' + t('settings.keyStatGateway', { n: gw }) + '</span>' : '') +
     '</span>' +
     streakBadge + emBadge + conflictBadge + badge + lastErr +
     '<span class="stg-keystat-actions">' +
@@ -318,7 +320,7 @@ function _modelCardHealthRow(provIdx, modelIdx) {
     if (!r) continue;
     if (!agg) {
       agg = { slots: 0, available_slots: 0, total_requests: 0, total_errors: 0,
-              contention_errors: 0, consecutive_errors: 0, inflight: 0,
+              contention_errors: 0, gateway_errors: 0, consecutive_errors: 0, inflight: 0,
               cooldown_remaining_s: 0, cooldown_reason: '',
               last_error_msg: '', last_error_ts: 0, success_rate: null,
               verdict: /** @type {any} */ (null) };
@@ -328,6 +330,7 @@ function _modelCardHealthRow(provIdx, modelIdx) {
     agg.total_requests += r.total_requests || 0;
     agg.total_errors += r.total_errors || 0;
     agg.contention_errors += r.contention_errors || 0;
+    agg.gateway_errors += r.gateway_errors || 0;
     agg.inflight += r.inflight || 0;
     if ((r.consecutive_errors || 0) > agg.consecutive_errors) {
       agg.consecutive_errors = r.consecutive_errors;
@@ -417,6 +420,14 @@ function _modelCardHealthHTML(provIdx, modelIdx) {
     html += '<span class="stg-mh-chip muted" title="' +
       escapeHtml(t('settings.mhContentionTip')) + '">' +
       escapeHtml(t('settings.mhContention', { n: agg.contention_errors })) + '</span>';
+  }
+  // Gateway/upstream outages — also rendered SEPARATELY: the upstream was
+  // sick, not this model (2026-08-03: a 2h 502 storm crushed every key
+  // card's success rate before this counter existed).
+  if (agg.gateway_errors > 0) {
+    html += '<span class="stg-mh-chip muted" title="' +
+      escapeHtml(t('settings.mhGatewayTip')) + '">' +
+      escapeHtml(t('settings.mhGateway', { n: agg.gateway_errors })) + '</span>';
   }
   if (agg.cooldown_remaining_s <= 0 && agg.consecutive_errors > 0) {
     html += '<span class="stg-mh-chip warn" title="' + escapeHtml(agg.last_error_msg || '') + '">' +

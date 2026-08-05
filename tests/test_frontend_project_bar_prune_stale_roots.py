@@ -36,7 +36,21 @@ pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
+# Epic-E sub-7 (2026-08-01): _restoreConvProject / loadProjectStatus moved
+# to project_state.js (core state subset); project.js is now the deferred
+# panel. Read state-first with a panel fallback — loud when in neither.
+PROJECT_STATE_SRC = os.path.join(ROOT, 'static', 'js', 'project_state.js')
 PROJECT_SRC = os.path.join(ROOT, 'static', 'js', 'project.js')
+
+
+def _state_or_panel_src(header: str) -> str:
+    for path in (PROJECT_STATE_SRC, PROJECT_SRC):
+        src = open(path, encoding='utf-8').read()
+        if header in src:
+            return src
+    raise AssertionError(
+        f'{header} not found in project_state.js or project.js — the '
+        'sub-7 split moved it; update this harness')
 
 
 def _fn_body(src: str, header: str) -> str:
@@ -48,7 +62,7 @@ def _fn_body(src: str, header: str) -> str:
 
 
 def test_restore_conv_project_uses_pruning_setpaths_only():
-    src = open(PROJECT_SRC, encoding='utf-8').read()
+    src = _state_or_panel_src('async function _restoreConvProject(')
     body = _fn_body(src, 'async function _restoreConvProject(')
     assert 'Api.project.setPaths(' in body, \
         '_restoreConvProject must reconcile via the pruning setPaths endpoint'
@@ -59,7 +73,7 @@ def test_restore_conv_project_uses_pruning_setpaths_only():
 
 
 def test_load_project_status_uses_pruning_setpaths_only():
-    src = open(PROJECT_SRC, encoding='utf-8').read()
+    src = _state_or_panel_src('async function loadProjectStatus(')
     body = _fn_body(src, 'async function loadProjectStatus(')
     assert 'Api.project.setPaths(' in body, \
         'loadProjectStatus restore branch must reconcile via setPaths'
@@ -73,7 +87,7 @@ def test_load_project_status_prunes_extras_even_with_zero_saved_extras():
     the conversation never saved — i.e. the ``!extrasMatch`` guard must NOT be
     gated behind ``savedExtras.length > 0`` (that gate is exactly what let a
     stale global extra survive on a conv that saved no extras)."""
-    src = open(PROJECT_SRC, encoding='utf-8').read()
+    src = _state_or_panel_src('async function loadProjectStatus(')
     body = _fn_body(src, 'async function loadProjectStatus(')
     assert not re.search(r'!extrasMatch\s*&&\s*savedExtras\.length\s*>\s*0', body), \
         ('loadProjectStatus must trigger re-hydration on extras mismatch even '

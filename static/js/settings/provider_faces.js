@@ -128,6 +128,10 @@ async function _refreshFaceResolutions(provIdx) {
    * the pills in place; a later structural render picks them up anyway
    * because _renderModelCard reads the same cache. */
   _repaintFaceChips(provIdx);
+  /* An open edit form's 'automatic' note answers the same question from
+   * the same cache — patch it too, or it would sit on 'resolving…'
+   * forever while the pill next to it already knows the verdict. */
+  if (typeof _repaintFaceAutoNote === 'function') _repaintFaceAutoNote(provIdx);
 }
 
 /** Replace the face pill of every rendered model card of one provider.

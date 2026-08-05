@@ -8,7 +8,7 @@ from lib.log import get_logger
 logger = get_logger(__name__)
 
 __all__ = ['browser_tool_display', 'update_tab_title', 'get_tab_title',
-           'get_tab_hostname']
+           'get_tab_url', 'get_tab_hostname']
 
 # ── Lightweight tab metadata cache ────────────────────────────────────
 # Populated by handlers.py when list_tabs / read_tab / navigate etc.
@@ -64,6 +64,19 @@ def get_tab_title(tab_id):
         return None
     with _tab_titles_lock:
         return _tab_titles.get(key)
+
+
+def get_tab_url(tab_id):
+    """Return the cached full URL for a tab ID, or None if unknown."""
+    if tab_id is None:
+        return None
+    try:
+        key = int(tab_id)
+    except (ValueError, TypeError):
+        logger.debug('[Display] Non-numeric tab_id in get_tab_url: %s', tab_id)
+        return None
+    with _tab_titles_lock:
+        return _tab_urls.get(key)
 
 
 def get_tab_hostname(tab_id):
@@ -153,6 +166,23 @@ _DISPLAY_HANDLERS = {
     'browser_right_click_menu': lambda fn_args: f'Right-click menu ({_tab_label(fn_args.get("tabId"))}): {fn_args.get("menu_item_text", "")}',
     'browser_hover_and_click': lambda fn_args: f'Hover & click ({_tab_label(fn_args.get("tabId"))})',
     'browser_fill_form': lambda fn_args: f'Fill form ({_tab_label(fn_args.get("tabId"))}), {len(fn_args.get("fields", []))} fields)',
+    # ── v2 surface (pt_869e5648403e4745) — legacy formatters above stay for
+    # history rendering even though those tools are no longer shipped.
+    'browser_read_page': lambda fn_args: (
+        f'Read {_tab_label(fn_args.get("tabId"))}'
+        + (f' [{fn_args.get("mode")}]' if fn_args.get('mode') not in (None, 'auto') else '')
+    ),
+    'browser_type': lambda fn_args: (
+        f'Type into {_tab_label(fn_args.get("tabId"))}: '
+        f'{fn_args.get("text") or fn_args.get("selector", "")}'
+    ),
+    'browser_press_key': lambda fn_args: f'Press {fn_args.get("keys", "")} ({_tab_label(fn_args.get("tabId"))})',
+    'browser_menu_click': lambda fn_args: (
+        f'Menu click ({_tab_label(fn_args.get("tabId"))}): {fn_args.get("item_text", "")}'
+    ),
+    'browser_preview_page': lambda fn_args: (
+        f'Render page preview: {fn_args.get("path") or fn_args.get("url", "")}'
+    ),
 }
 
 

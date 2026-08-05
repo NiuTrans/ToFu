@@ -1140,6 +1140,140 @@ def _unbounded_recursive_scan_target(command, cwd=None):
     return None
 
 
+# ── Filesystem-grep redirect guard (2026-08-04) ─────────────────────
+# The run_command tool description has advised grep_search-over-grep for
+# months, yet grep-via-run_command kept recurring — measured 2026-08-04:
+# ``grep -n 'cream\|…' static/styles.css | head -30; echo ---; grep -rn
+# 'cream' static/*.css 2>/dev/null | head -20`` sat RUNNING for 17m04s in a
+# FUSE bad window with zero output and no timeout to end it. Advice is not
+# enforcement; this guard is the enforcement.
+#
+# The rule: a grep-family segment (grep / egrep / fgrep, sudo seen through)
+# that reads the FILESYSTEM — explicit file/dir operands, or a recursive
+# flag (an implicit walk of the cwd) — is refused with a message that
+# translates the call to grep_search. A grep that filters a STREAM (no
+# operands, stdin fed by a pipe: ``pytest 2>&1 | grep PASS``, ``ps aux |
+# grep python``) stays legal — grep_search cannot replace it. ``rg`` and
+# ``git grep`` are already the fast path and stay legal; a coreutils
+# ``timeout`` wrapper is not unwrapped (bounded scans stay legal, matching
+# the scan guard's philosophy above). Best-effort: exotic shapes (heredocs,
+# xargs, command substitution) fail OPEN, consistent with every other guard
+# in this module. Kill switch: TOFU_RUN_GREP_GUARD=0.
+
+_GREP_REDIRECT_BINARIES = frozenset({'grep', 'egrep', 'fgrep'})
+
+# Short grep flags that consume an argument (rest-of-cluster, or the next
+# token when last in the cluster): -e -f -m -A -B -C -d -D.
+_GREP_SHORT_ARG_CHARS = frozenset('efmABCdD')
+
+# Shell redirections: fused (``2>/dev/null``, ``>out``, ``2>&1``, ``<in``)
+# vs bare operator whose target is the NEXT token (``> out``, ``2> err``).
+_REDIR_FUSED_RE = re.compile(r'^\d*(?:>>?|<|&>|>&)\S')
+_REDIR_BARE_RE = re.compile(r'^\d*(?:>>?|<|&>|>&)$')
+
+
+def _strip_redirection_tokens(tokens):
+    """Drop shell redirection tokens (operator + its target) from *tokens*.
+
+    Without this, ``ps aux | grep -v x 2>/dev/null`` would look like it has
+    a file operand (``2>/dev/null``) and be misrefused — it is a pure stream
+    filter and must stay legal.
+    """
+    out = []
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if _REDIR_BARE_RE.match(tok):
+            i += 2  # bare operator consumes the next token as its target
+            continue
+        if _REDIR_FUSED_RE.match(tok):
+            i += 1
+            continue
+        out.append(tok)
+        i += 1
+    return out
+
+
+def _grep_segment_reads_filesystem(parts):
+    """True when a grep-family segment reads files: explicit file/dir
+    operands, or a recursive walk (``-r``/``-R``, target optional — grep
+    then scans the cwd). *parts* is redirection-stripped, parts[0] is the
+    binary. A grep with only a pattern (stdin filter) returns False.
+    """
+    positionals = []
+    saw_pattern_flag = False
+    recursive = False
+    i = 1
+    while i < len(parts):
+        tok = parts[i]
+        if tok == '--':
+            positionals.extend(parts[i + 1:])
+            break
+        if tok.startswith('--'):
+            name = tok.split('=', 1)[0]
+            if name in ('--recursive', '--dereference-recursive'):
+                recursive = True
+            elif name in ('--regexp', '--file'):
+                saw_pattern_flag = True
+            if name in _GREP_ARG_FLAGS and '=' not in tok:
+                i += 2      # long flag consumes the next token as its arg
+                continue
+            i += 1
+            continue
+        if tok.startswith('-') and tok != '-':
+            cluster = tok[1:]
+            takes_next = False
+            for j, ch in enumerate(cluster):
+                if ch in 'rR':
+                    recursive = True
+                elif ch in _GREP_SHORT_ARG_CHARS:
+                    if ch in 'ef':
+                        saw_pattern_flag = True
+                    # Rest of the cluster is this flag's argument; when the
+                    # flag is the last char, the NEXT token is the argument.
+                    takes_next = (j == len(cluster) - 1)
+                    break
+            i += 2 if takes_next else 1
+            continue
+        positionals.append(tok)
+        i += 1
+    if recursive:
+        return True
+    if not saw_pattern_flag and positionals:
+        positionals = positionals[1:]   # first positional is the PATTERN
+    return any(t != '-' for t in positionals)   # '-' alone means stdin
+
+
+def _grep_filesystem_segment(command):
+    """Return the offending segment when *command* aims a grep-family binary
+    at the FILESYSTEM (file/dir operands or a recursive walk) — else None.
+
+    See the block comment above for the rule. Stream filters, ``rg`` /
+    ``git grep`` and ``timeout``-wrapped shapes all return None.
+    """
+    if not command or not command.strip():
+        return None
+    for seg in _split_pipeline(command):
+        seg = seg.strip()
+        if not seg:
+            continue
+        while _re.match(r'^\w+=\S*\s', seg):
+            seg = _re.sub(r'^\w+=\S*\s+', '', seg, count=1)
+        parts = _unwrap_command_parts(seg.split())
+        if not parts:
+            continue
+        if any(t.startswith('<<') for t in parts):
+            # Heredoc / herestring — operand-looking tokens are DATA, not
+            # paths; fail open rather than misparse a stream filter.
+            continue
+        if parts[0].split('/')[-1] not in _GREP_REDIRECT_BINARIES:
+            continue
+        stripped = [parts[0]] + _strip_redirection_tokens(parts[1:])
+        if _grep_segment_reads_filesystem(stripped):
+            return seg
+    return None
+
+
 # ── grep-hardening shell-metachar detection ─────────────────────────
 # ── grep-hardening shell-metachar detection ─────────────────────────
 def _has_unquoted_shell_metachars(cmd):

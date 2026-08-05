@@ -8,7 +8,6 @@ as a markdown artifact.
 from __future__ import annotations
 
 import os
-import time
 
 from lib.log import get_logger
 

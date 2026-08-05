@@ -1,3 +1,5 @@
+# Incident anchor: born in commit 51fe025b — refactor(orchestrator): pt_03f4cdf1 slice 19 — extract abort-before-t...
+# (funeral audit pt_c565a36b3e8f42e6, docs/RATCHET_AUDIT.md)
 """Slice 19 wire-parity: _abort_before_tools.py extraction from _run.py."""
 
 import inspect

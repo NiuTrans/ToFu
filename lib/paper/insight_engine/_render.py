@@ -73,11 +73,19 @@ def render_insight_markdown(insight, ui_lang='en'):
             out.append(f"- {o['text'].strip()}{_ref_md(o.get('grounded_by'))}")
         out.append('')
 
-    provs = [p for p in (insight.get('provocations') or []) if isinstance(p, str) and p.strip()]
+    # Provocations tolerate both the legacy plain-string schema and the v2
+    # {'text', 'anchor'} object schema (the anchor is consumed by the reader,
+    # not rendered here).
+    provs = []
+    for p in (insight.get('provocations') or []):
+        if isinstance(p, str) and p.strip():
+            provs.append(p.strip())
+        elif isinstance(p, dict) and (p.get('text') or '').strip():
+            provs.append(p['text'].strip())
     if provs:
         out += [h['prov'], '']
         for p in provs:
-            out.append(f"- {p.strip()}")
+            out.append(f"- {p}")
         out.append('')
 
     return '\n'.join(out).rstrip() + '\n'

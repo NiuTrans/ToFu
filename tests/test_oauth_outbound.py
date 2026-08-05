@@ -73,8 +73,8 @@ class TestCodexResolve(unittest.TestCase):
                         return_value={'account_id': 'acc-xyz'}):
             key, hdrs, _out = outbound.resolve_oauth_request('codex', {'messages': []}, None)
         self.assertEqual(key, 'access-tok')
-        self.assertEqual(hdrs['originator'], 'codex_cli_rs')
-        self.assertTrue(hdrs['User-Agent'].startswith('codex_cli_rs'))
+        self.assertEqual(hdrs['originator'], 'codex-tui')
+        self.assertTrue(hdrs['User-Agent'].startswith('codex-tui/0.146.0'))
         self.assertEqual(hdrs['OpenAI-Beta'], 'responses=experimental')
         self.assertEqual(hdrs['chatgpt-account-id'], 'acc-xyz')
 

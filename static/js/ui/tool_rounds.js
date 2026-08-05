@@ -43,6 +43,7 @@ function _isRoundBrowser(round) {
   return [
     "browser_list_tabs",
     "browser_read_tab",
+    "browser_read_page",
     "browser_execute_js",
     "browser_screenshot",
     "browser_get_cookies",
@@ -50,6 +51,7 @@ function _isRoundBrowser(round) {
     "browser_create_tab",
     "browser_close_tab",
     "browser_navigate",
+    "browser_preview_page",
   ].includes(round.toolName);
 }
 function _isRoundImageGen(round) {
@@ -151,6 +153,7 @@ function _getRoundIcon(round) {
     const m = {
       browser_list_tabs: "tabs",
       browser_read_tab: "read",
+      browser_read_page: "read",
       browser_execute_js: "js",
       browser_screenshot: "screenshot",
       browser_get_cookies: "cookie",
@@ -158,6 +161,7 @@ function _getRoundIcon(round) {
       browser_create_tab: "newtab",
       browser_close_tab: "close",
       browser_navigate: "navigate",
+      browser_preview_page: "screenshot",
     };
     return m[round.toolName] || "tabs";
   }
@@ -679,16 +683,22 @@ function _peerFromBubbleGroup(previews, max) {
 
 /* A small "who sent this" bubble: resolves a sibling conversation id to its
  * human-readable TITLE via the shared `convTitleById` seam (never a bare id —
- * falls back to a localized label), with the raw id in the tooltip. Used in the
- * peer-inject row header so the user sees a conversation title, not `mrnaj25i`. */
+ * falls back to a localized label). Rendered as a BUTTON carrying
+ * `data-conv-jump` — clicking jumps to the source conversation (delegated
+ * handler below resolves the full id via `convFullIdById` and calls
+ * `loadConversation`). The tooltip carries the FULL title (the visible label
+ * ellipsizes) + the raw id + the jump hint. */
 function _peerFromBubble(cid) {
   const id = String(cid || "");
   if (!id) return "";
+  const _t = (typeof t === "function") ? t : (k, d) => d;
   const title = (typeof convTitleById === "function")
     ? (convTitleById(id) || id)
     : id;
   const icon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>';
-  return `<span class="sw-peer-from-bubble" title="conv ${escapeHtml(id)}">${icon}<span>${escapeHtml(title)}</span></span>`;
+  const jumpIcon = '<svg class="sw-peer-jump" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:.85em;height:.85em"><path d="M7 17 17 7"/><path d="M8 7h9v9"/></svg>';
+  const tip = title + " · conv " + id + " — " + _t("peer.jumpToConv", "Open conversation");
+  return `<button type="button" class="sw-peer-from-bubble" data-conv-jump="${escapeHtml(id)}" title="${escapeHtml(tip)}">${icon}<span>${escapeHtml(title)}</span>${jumpIcon}</button>`;
 }
 
 function _renderInboxInjectRow(round) {
@@ -750,13 +760,21 @@ function _renderPeerInjectRow(round) {
   const label = typeof t === "function" ? t("peer.injectRowLabel") : "Received";
   const badge = typeof t === "function" ? t("peer.injectRowBadge") : "injected → context";
   const _t = (typeof t === "function") ? t : (k, d) => d;
+  /* Sender attribution dedup: the row header ALREADY carries one title bubble
+   * per distinct sender, so when every preview came from the SAME conversation
+   * (the common case) the body cards must NOT repeat the identical bubble —
+   * that repetition read as a rendering bug. Per-card attribution is kept only
+   * for a genuinely multi-sender injection. */
+  const _distinctSenders = new Set(
+    previews.map(p => (p && p.fromConv) ? String(p.fromConv) : "").filter(Boolean));
+  const _perCardAttribution = _distinctSenders.size > 1;
   const bodyHtml = previews.length
     ? previews.map(p => {
         const text = String(p.text == null ? "" : p.text);
         // Attribution reads as a conversation-title bubble (via convTitleById),
         // NOT a raw id — users care who sent it. Peer messages are plain prose,
         // rendered as Markdown for the human view.
-        const fromBubble = p.fromConv ? _peerFromBubble(p.fromConv) : "";
+        const fromBubble = (_perCardAttribution && p.fromConv) ? _peerFromBubble(p.fromConv) : "";
         const bodyMd = text.trim()
           ? `<div class="sw-card-preview md-content">${(typeof renderMarkdown === "function") ? renderMarkdown(text) : escapeHtml(text)}</div>`
           : "";
@@ -1053,414 +1071,7 @@ function _renderTodoBlock(round, svg, q, badgeHtml) {
      </details>`;
 }
 
-/* ★ Project-brain / conversation-meta block — a collapsible card that renders
-   the tool's full prose output (board listing, charter text, conversation
-   digest, peer status) as Markdown. These tools return their real payload in
-   `round.toolContent`; the previous generic renderer showed only a name +
-   badge, so the user saw NOTHING of the content. This block surfaces it.
-
-   Header: family SVG icon + label + a source chip (Board / Charter /
-   Conversations / Peer) + the action badge (read/post/…). Body: the full
-   `toolContent` rendered as Markdown, falling back to the meta snippet when
-   toolContent hasn't landed yet (e.g. mid-stream before tool_complete). */
-/* ★ Per-tool DISPLAY metadata for the collapsed conv-meta header. The backend
-   display string (`round.query`) is an English, LLM-oriented label ("Live peer
-   status", "Read the project board"); on a non-English UI it reads as raw
-   jargon, and — the user's core complaint — it never says WHY the tool ran or
-   WHAT the result means. `_convMetaHeadLabel` returns a localized title and
-   `_convMetaPurpose` a one-line plain-language caption explaining the tool's
-   role in the shared "conversations-as-a-team" coordination surface (the
-   Project Brain). Both are i18n keys with an English fallback for the jsdom
-   harness; unknown tools fall back to the raw display string. */
-function _convMetaHeadLabel(round, tFn) {
-  const _t = (typeof tFn === "function") ? tFn : (k, d) => d;
-  const tn = round.toolName || "";
-  const raw = round.query || tn;
-  const M = {
-    project_board_read: ["brainHead.boardRead", "Checked the team board"],
-    project_charter_read: ["brainHead.charterRead", "Read the project charter"],
-    project_charter_propose: ["brainHead.charterPropose", "Proposed a charter decision"],
-    project_peer_status: ["brainHead.peerStatus", "Checked who else is working now"],
-    project_feed_read: ["brainHead.feedRead", "Reviewed recent team activity"],
-    project_message: ["brainHead.message", "Sent a note to another conversation"],
-    project_intervene: ["brainHead.intervene", "Flagged an overlap to another conversation"],
-    list_conversations: ["brainHead.listConvs", "Searched past conversations"],
-    get_conversation: ["brainHead.getConv", "Opened a past conversation"],
-    project_claim_path: ["brainHead.claimPath", "Reserved files for editing"],
-    project_release_path: ["brainHead.releasePath", "Released a file reservation"],
-    project_commit: ["brainHead.commit", "Committed this conversation's work"],
-  };
-  if (tn.startsWith("project_board_") && !M[tn]) {
-    return _t("brainHead.boardMutate", "Updated the team board");
-  }
-  const entry = M[tn];
-  return entry ? _t(entry[0], entry[1]) : raw;
-}
-/* One-line "why this ran / what it means" caption. Keyed on tool name; empty
-   string ⇒ no caption row (the structured card body already speaks for itself). */
-function _convMetaPurpose(round, tFn) {
-  const _t = (typeof tFn === "function") ? tFn : (k, d) => d;
-  const tn = round.toolName || "";
-  const P = {
-    project_peer_status: ["brainWhy.peerStatus",
-      "Sibling conversations of this project that are running right now — used to avoid duplicating work already in progress."],
-    project_board_read: ["brainWhy.boardRead",
-      "The shared to-do board across all conversations of this project — who is doing what, so work isn't duplicated."],
-    project_feed_read: ["brainWhy.feedRead",
-      "A recent timeline of what other conversations of this project have been doing."],
-    project_charter_read: ["brainWhy.charterRead",
-      "The project's shared goal and committed decisions that every conversation aligns to."],
-    project_charter_propose: ["brainWhy.charterPropose",
-      "Proposes a decision for the human to commit as shared project-wide intent — advisory until approved."],
-    project_message: ["brainWhy.message",
-      "An advisory note to a sibling conversation, delivered on its next turn — it never interrupts a running turn."],
-    project_intervene: ["brainWhy.intervene",
-      "Nudges a sibling conversation to re-check the board (advisory); a hard stop needs explicit human approval."],
-    project_claim_path: ["brainWhy.claimPath",
-      "Reserves specific files/paths on the shared board so sibling conversations hold off editing them while this conversation works — a durational, auto-expiring advisory lease, not a hard lock."],
-    project_release_path: ["brainWhy.releasePath",
-      "Clears a previously-held file/path reservation so sibling conversations may edit those paths again."],
-    project_commit: ["brainWhy.commit",
-      "Commits ONLY the files this conversation provably authored (byte-identical to its own last edit); files also carrying a sibling's uncommitted changes are held back, never swept in."],
-    get_conversation: ["brainWhy.getConv",
-      "Opens the full transcript of another past conversation — its messages, tool calls, and results — so the agent can reuse decisions or context from earlier work."],
-    list_conversations: ["brainWhy.listConvs",
-      "Searches your other conversations by title and content to find a relevant past discussion to reference."],
-  };
-  if (tn.startsWith("project_board_") && !P[tn]) {
-    return _t("brainWhy.boardMutate",
-      "Updates the shared to-do board so sibling conversations see this claim / change.");
-  }
-  const entry = P[tn];
-  return entry ? _t(entry[0], entry[1]) : "";
-}
-/* ── Structured per-tool renderers (Phase 3) ──────────────────────────
-   Each renders off the STRUCTURED meta the backend attaches (boardSnapshot /
-   boardTransition / peerStatus / charterProposal) — NOT re-parsed prose. They
-   return an inner-HTML string (the body of the convmeta card), or '' to fall
-   back to the generic Markdown dump. */
-
-/** Conversation digest for get_conversation: a clean, scannable transcript
- *  card (title + preset + message count meta row, then one row per message with
- *  a role chip, text preview, and tool/attachment hints) — the HUMAN view that
- *  replaces the raw `═══` / `── User Message #` ASCII dump. The verbatim
- *  transcript the model read stays available via the row's "model view" button. */
-function _renderConvDigest(cd) {
-  if (!cd) return "";
-  const _t = (typeof t === "function") ? t : (k, d) => d;
-  const roleLabel = (r) => {
-    if (r === "user") return _t("convDigest.roleUser", "User");
-    if (r === "assistant") return _t("convDigest.roleAssistant", "Assistant");
-    if (r === "system") return _t("convDigest.roleSystem", "System");
-    return escapeHtml(r || "");
-  };
-  // ── Meta row: preset + message count + last-updated time. ──
-  const metaBits = [];
-  if (cd.preset) {
-    metaBits.push(`<span class="ptool-convdigest-preset">${escapeHtml(cd.preset)}</span>`);
-  }
-  const nMsg = (cd.msgCount != null) ? cd.msgCount : (cd.messages || []).length;
-  metaBits.push(`<span class="ptool-convdigest-msgcount">${escapeHtml(
-    _t("convDigest.msgCount", "{n} messages").replace("{n}", nMsg))}</span>`);
-  const updRel = _convMetaRelTime(cd.updatedAt);
-  if (updRel) {
-    metaBits.push(`<span class="ptool-convdigest-time" title="${escapeHtml(
-      _convMetaAbsTime(cd.updatedAt))}">${escapeHtml(
-      _t("convDigest.updated", "updated {t}").replace("{t}", updRel))}</span>`);
-  }
-  // ── RAW/debug badge: only for a get_conversation(raw=true) read. Marks the
-  //    card as the debug view (per-message low-level metadata chips below) so
-  //    a raw read is visibly RICHER than a normal read — inline SVG per §3.4
-  //    (no emoji/glyph). A `rev` is appended when present. ──
-  const isRaw = !!cd.raw;
-  if (isRaw) {
-    const revTxt = (cd.rev != null)
-      ? " · " + _t("convDigest.rev", "rev") + " " + cd.rev : "";
-    const bugSvg = '<svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:block"><path d="m8 2 1.88 1.88"/><path d="M14.12 3.88 16 2"/><path d="M9 7.13v-1a3.003 3.003 0 1 1 6 0v1"/><path d="M12 20c-3.3 0-6-2.7-6-6v-3a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v3c0 3.3-2.7 6-6 6"/><path d="M12 20v-9"/><path d="M6.53 9C4.6 8.8 3 7.1 3 5"/><path d="M6 13H2"/><path d="M3 21c0-2.1 1.7-3.9 3.8-4"/><path d="M20.97 5c0 2.1-1.6 3.8-3.5 4"/><path d="M22 13h-4"/><path d="M17.2 17c2.1.1 3.8 1.9 3.8 4"/></svg>';
-    metaBits.push(`<span class="ptool-convdigest-rawbadge icon-box" title="${escapeHtml(
-      _t("convDigest.rawTip", "Raw debug read — shows per-message low-level metadata (model, tokens, finish reason, id)."))}">` +
-      bugSvg + `<span class="ptool-convdigest-rawbadge-lbl">${escapeHtml(
-        _t("convDigest.raw", "RAW · debug"))}${escapeHtml(revTxt)}</span></span>`);
-  }
-  let html = `<div class="ptool-convdigest">` +
-    `<div class="ptool-convdigest-meta">${metaBits.join("")}</div>` +
-    `<div class="ptool-convdigest-msgs">`;
-  const msgs = cd.messages || [];
-  if (!msgs.length) {
-    html += `<div class="ptool-convdigest-empty">${escapeHtml(
-      _t("convDigest.empty", "This conversation has no messages."))}</div>`;
-  }
-  for (const m of msgs) {
-    // Omission marker row (head/tail seam).
-    if (m && m.omitted != null) {
-      html += `<div class="ptool-convdigest-omitted">${escapeHtml(
-        _t("convDigest.omitted", "… {n} messages omitted …").replace("{n}", m.omitted))}</div>`;
-      continue;
-    }
-    const roleCls = (m.role === "user" || m.role === "assistant" || m.role === "system")
-      ? m.role : "other";
-    const hints = [];
-    if (Array.isArray(m.tools) && m.tools.length) {
-      const shown = m.tools.slice(0, 6);
-      const chips = shown.map(function (tl) {
-        // Tools may be a rich descriptor {name, arg, status} (new) or a bare
-        // string (legacy). Render name + primary arg, with a failed-status cue.
-        const isObj = tl && typeof tl === "object";
-        const name = isObj ? (tl.name || "") : String(tl || "");
-        const arg = isObj ? (tl.arg || "") : "";
-        const st = isObj ? (tl.status || "") : "";
-        const failed = /error|fail|reject|abort/i.test(st);
-        return `<span class="ptool-convdigest-tool${failed ? " ptool-convdigest-tool-failed" : ""}">` +
-          `<span class="ptool-convdigest-tool-name">${escapeHtml(name)}</span>` +
-          (arg ? `<span class="ptool-convdigest-tool-arg">${escapeHtml(arg)}</span>` : "") +
-          `</span>`;
-      }).join("");
-      hints.push(`<span class="ptool-convdigest-tools">${(typeof Icon === "function") ? Icon("wrench", 10) : ""}` +
-        chips + `${m.tools.length > 6 ? `<span class="ptool-convdigest-tool-more">+${m.tools.length - 6}</span>` : ""}</span>`);
-    }
-    if (m.images) {
-      hints.push(`<span class="ptool-convdigest-att">${escapeHtml(
-        _t("convDigest.images", "{n} image").replace("{n}", m.images))}</span>`);
-    }
-    if (m.pdfs) {
-      hints.push(`<span class="ptool-convdigest-att">${escapeHtml(
-        _t("convDigest.pdfs", "{n} PDF").replace("{n}", m.pdfs))}</span>`);
-    }
-    // ── RAW-mode per-message metadata chips (model / tokens / finishReason /
-    //    msgId). Rendered ONLY when the digest is a raw read AND the field is
-    //    present — a few compact chips, never the whole message. This is the
-    //    visible difference between a raw and a normal card. ──
-    if (isRaw) {
-      if (m.model) {
-        hints.push(`<span class="ptool-convdigest-metachip ptool-convdigest-meta-model" title="${escapeHtml(
-          _t("convDigest.metaModel", "model"))}">${escapeHtml(String(m.model))}</span>`);
-      }
-      if (m.usage && (m.usage.in != null || m.usage.out != null)) {
-        const inT = (m.usage.in != null) ? m.usage.in : "?";
-        const outT = (m.usage.out != null) ? m.usage.out : "?";
-        hints.push(`<span class="ptool-convdigest-metachip ptool-convdigest-meta-tok" title="${escapeHtml(
-          _t("convDigest.metaTokens", "tokens in/out"))}">${escapeHtml(
-          "tok " + inT + "/" + outT)}</span>`);
-      }
-      if (m.finishReason) {
-        hints.push(`<span class="ptool-convdigest-metachip ptool-convdigest-meta-fr" title="${escapeHtml(
-          _t("convDigest.metaFinish", "finish reason"))}">${escapeHtml(String(m.finishReason))}</span>`);
-      }
-      if (m.msgId) {
-        hints.push(`<span class="ptool-convdigest-metachip ptool-convdigest-meta-id" title="${escapeHtml(
-          _t("convDigest.metaId", "message id"))}">${escapeHtml(String(m.msgId))}</span>`);
-      }
-    }
-    const text = (m.text || "").trim();
-    // Per-message expand: when a capped `full` text exists and differs from the
-    // preview, render a <details> so the user can open THIS message in place
-    // instead of jumping to the model view.
-    const full = (typeof m.full === "string") ? m.full.trim() : "";
-    // `textFallback` marks a row whose text is a thinking/tool SUMMARY (the
-    // message's own content was empty — a tool-only round), so we style it as
-    // a muted summary with a label, never passing it off as real prose.
-    const isFallback = !!m.textFallback;
-    const fallbackCls = isFallback ? " ptool-convdigest-summary" : "";
-    const fallbackTag = isFallback
-      ? `<span class="ptool-convdigest-summary-tag">${escapeHtml(
-        _t("convDigest.summary", "summary"))}</span>`
-      : "";
-    let textHtml;
-    if (text && full && full !== text) {
-      textHtml = `<details class="ptool-convdigest-expand">` +
-        `<summary class="ptool-convdigest-text${fallbackCls}">${fallbackTag}${escapeHtml(text)}` +
-        `<span class="ptool-convdigest-expand-hint">${escapeHtml(
-          _t("convDigest.expand", "expand"))}</span></summary>` +
-        `<div class="ptool-convdigest-full">${escapeHtml(full)}</div></details>`;
-    } else {
-      textHtml = text
-        ? `<div class="ptool-convdigest-text${fallbackCls}">${fallbackTag}${escapeHtml(text)}</div>`
-        : (hints.length ? "" : `<div class="ptool-convdigest-text ptool-convdigest-notext">${escapeHtml(
-          _t("convDigest.noText", "(no text)"))}</div>`);
-    }
-    const msgRel = _convMetaRelTime(m.ts);
-    const idxHtml = `<span class="ptool-convdigest-idx">#${escapeHtml(String(m.index || ""))}</span>`;
-    const tsHtml = msgRel
-      ? `<span class="ptool-convdigest-msgtime" title="${escapeHtml(
-        _convMetaAbsTime(m.ts))}">${escapeHtml(msgRel)}</span>`
-      : "";
-    html += `<div class="ptool-convdigest-msg ptool-convdigest-${escapeHtml(roleCls)}">` +
-      `<div class="ptool-convdigest-gutter">` +
-      `<span class="ptool-convdigest-role">${escapeHtml(roleLabel(m.role))}</span>` +
-      idxHtml + `</div>` +
-      `<div class="ptool-convdigest-msgbody">${textHtml}` +
-      ((hints.length || tsHtml) ? `<div class="ptool-convdigest-hints">${hints.join("")}${tsHtml}</div>` : "") +
-      `</div></div>`;
-  }
-  html += `</div>`;
-  if (cd.truncated && !(cd.omitted > 0)) {
-    // Fallback marker when a truncation happened without an inline seam.
-    html += `<div class="ptool-convdigest-more">${escapeHtml(
-      _t("convDigest.truncated", "… earlier messages omitted — use the </> button on a tool row for the full request record."))}</div>`;
-  }
-  html += `</div>`;
-  return html;
-}
-
-/* Absolute-time formatter (locale string) for the digest tooltips. */
-function _convMetaAbsTime(ts) {
-  const n = Number(ts) || 0;
-  if (!n) return "";
-  try {
-    return new Date(n).toLocaleString();
-  } catch (e) {
-    return String(n);
-  }
-}
-
-/** Mini-kanban for project_board_read: counts + per-lane epic titles. */
-function _renderBoardSnapshot(snap) {
-  if (!snap) return "";
-  const _t = (typeof t === "function") ? t : (k, d) => d;
-  const lanes = snap.lanes || {};
-  const laneDef = [
-    ["open", _t("projectBrain.laneOpen", "Open")],
-    ["claimed", _t("projectBrain.laneClaimed", "In progress")],
-    ["done", _t("projectBrain.laneDone", "Done")],
-  ];
-  let html = '<div class="ptool-board-mini">';
-  for (const [key, label] of laneDef) {
-    const epics = lanes[key] || [];
-    const count = (snap[key] != null) ? snap[key] : epics.length;
-    let cards = epics.map(function (e) {
-      const owner = e.owner
-        ? `<span class="ptool-board-mini-owner">${escapeHtml(String(e.owner).slice(0, 8))}</span>` : "";
-      const disp = e.dispatched
-        ? `<span class="ptool-board-mini-auto" title="${escapeHtml(_t("projectBrain.dispatchedTitle", "Started autonomously by the project brain"))}">${(typeof Icon === "function") ? Icon("rocket", 10) : ""}</span>` : "";
-      return `<div class="ptool-board-mini-card ptool-board-mini-${escapeHtml(key)}"><span class="ptool-board-mini-title">${escapeHtml(e.title || e.id || "")}</span>${owner}${disp}</div>`;
-    }).join("");
-    if (!cards) cards = '<div class="ptool-board-mini-empty">—</div>';
-    html += `<div class="ptool-board-mini-lane"><div class="ptool-board-mini-head">${escapeHtml(label)} <span class="ptool-board-mini-count">${count}</span></div>${cards}</div>`;
-  }
-  html += "</div>";
-  return html;
-}
-
-/* Un-escape the backend's minimal XML/HTML escaping (&amp; &lt; &gt;) so a
- * title stored as `rebuttal:&lt;venue&gt;` renders as `rebuttal:<venue>`
- * instead of showing the literal entities. Safe to pipe into _tpInlineMd,
- * which re-escapes for XSS before applying inline emphasis. */
-function _unescapeEntities(s) {
-  return String(s == null ? "" : s)
-    .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
-}
-
-/** Explicit transition line for a board mutation (verb + epic + new status).
- *  The epic title is rendered as light inline Markdown (bold/italic/code) with
- *  entities un-escaped, so `**x**` and `<venue>` display correctly. The epic
- *  TITLE is the whole point of this card ("what was posted/claimed/…"), so it
- *  gets its own prominent row; the short epic id is a monospace traceability
- *  chip. When the backend couldn't resolve a title we degrade to a labelled
- *  placeholder rather than rendering a bare verb badge with nothing after it
- *  (the reported "shows nothing" card). */
-function _renderBoardTransition(tr) {
-  if (!tr || !tr.verb) return "";
-  const _t = (typeof t === "function") ? t : (k, d) => d;
-  // A mutation can FAIL by returning an error (board full, already-claimed,
-  // task-not-found). The backend now carries `ok:false` + `error` so we render
-  // an explicit failed card instead of a green "posted → open" that lies about
-  // what happened (the reported bug: no visible failure, only in the raw text).
-  const failed = tr.ok === false;
-  const verbLabel = _t("projectBrain.boardVerb." + tr.verb, tr.verb);
-  const rawTitle = (tr.title || "").trim();
-  const titleHtml = rawTitle
-    ? ((typeof _tpInlineMd === "function")
-        ? _tpInlineMd(_unescapeEntities(rawTitle))
-        : escapeHtml(rawTitle))
-    : `<span class="ptool-board-tr-untitled">${escapeHtml(
-        _t("projectBrain.boardUntitled", "(untitled epic)"))}</span>`;
-  const idChip = tr.taskId
-    ? `<span class="ptool-board-tr-id" title="${escapeHtml(tr.taskId)}">${escapeHtml(tr.taskId)}</span>`
-    : "";
-  const statusLabel = tr.status
-    ? `<span class="ptool-board-tr-status ptool-board-mini-${escapeHtml(tr.status)}">${escapeHtml(_t("projectBrain.lane" + tr.status.charAt(0).toUpperCase() + tr.status.slice(1), tr.status))}</span>`
-    : "";
-  // On failure the "→ status" chip is replaced by a FAILED badge; the error
-  // message gets its own prominent row so the user sees WHY without opening
-  // the raw model text.
-  const failBadge = failed
-    ? `<span class="ptool-board-tr-failed">${(typeof Icon === "function") ? Icon("alertTriangle", 12) : ""}<span>${escapeHtml(_t("projectBrain.boardFailed", "failed"))}</span></span>`
-    : "";
-  const headRow = `<div class="ptool-board-tr-head">` +
-    `<span class="ptool-board-tr-verb">${escapeHtml(verbLabel)}</span>` +
-    (failed
-      ? failBadge
-      : (tr.status ? `<span class="ptool-board-tr-arrow">${(typeof Icon === "function") ? Icon("chevronDown", 12) : "→"}</span>${statusLabel}` : "")) +
-    `</div>`;
-  const titleRow = `<div class="ptool-board-tr-titlerow">` +
-    `<span class="ptool-board-tr-title">${titleHtml}</span>${idChip}` +
-    `</div>`;
-  const errRow = (failed && (tr.error || "").trim())
-    ? `<div class="ptool-board-tr-error">${escapeHtml((tr.error || "").trim())}</div>`
-    : "";
-  const cls = failed ? "ptool-board-transition ptool-board-transition-failed" : "ptool-board-transition";
-  return `<div class="${cls}">${headRow}${titleRow}${errRow}</div>`;
-}
-
-/* Localize the small known set of backend statusLabel tokens ("generating" /
-   "working" / "idle" and "editing X" / "working (phase)") so the peer card
-   reads in the UI language; unknown labels pass through verbatim. */
-function _localizePeerStatusLabel(sl, tFn) {
-  const _t = (typeof tFn === "function") ? tFn : (k, d) => d;
-  const s = String(sl || "").trim();
-  if (!s) return "";
-  if (s === "generating") return _t("projectBrain.stGenerating", "generating");
-  if (s === "working") return _t("projectBrain.stWorking", "working");
-  if (s === "idle") return _t("projectBrain.stIdle", "idle");
-  let m;
-  if ((m = s.match(/^editing\s+(.+)$/)))
-    return _t("projectBrain.peerEditing", "editing {file}").replace("{file}", m[1]);
-  if ((m = s.match(/^working\s+\((.+)\)$/)))
-    return _t("projectBrain.stWorkingPhase", "working ({phase})").replace("{phase}", m[1]);
-  return s;
-}
-
-/** Live peer cards for project_peer_status: conv id + status + round + epic. */
-function _renderPeerStatus(ps) {
-  if (!ps) return "";
-  const _t = (typeof t === "function") ? t : (k, d) => d;
-  const peers = ps.peers || [];
-  if (!peers.length) {
-    return `<div class="ptool-peer-empty">${escapeHtml(_t("projectBrain.peerNone", "No active peers right now."))}</div>`;
-  }
-  let html = '<div class="ptool-peer-list">';
-  for (const p of peers) {
-    const who = p.title || ("conv " + String(p.convId || "").slice(0, 8));
-    const sub = p.agentId ? `<span class="ptool-peer-agent">${escapeHtml("sub-agent " + p.agentId)}</span>` : "";
-    const bits = [];
-    if (p.statusLabel) bits.push(escapeHtml(_localizePeerStatusLabel(p.statusLabel, _t)));
-    if (p.round) bits.push(_t("projectBrain.peerRound", "round {n}").replace("{n}", p.round));
-    if (p.currentFile) bits.push(escapeHtml(p.currentFile));
-    const epic = p.claimedEpic
-      ? `<div class="ptool-peer-epic">${(typeof Icon === "function") ? Icon("package", 11) : ""}<span>${escapeHtml(p.claimedEpic)}</span></div>` : "";
-    html += `<div class="ptool-peer-card">` +
-      `<div class="ptool-peer-who">${(typeof Icon === "function") ? Icon("messageCircle", 12) : ""}<span>${escapeHtml(who)}</span>${sub}</div>` +
-      (bits.length ? `<div class="ptool-peer-detail">${bits.join(" · ")}</div>` : "") +
-      epic + `</div>`;
-  }
-  html += "</div>";
-  return html;
-}
-
-/** Charter proposal card: the proposed text + a "pending human review" affordance. */
-function _renderCharterProposal(cp) {
-  if (!cp || !cp.proposal) return "";
-  const _t = (typeof t === "function") ? t : (k, d) => d;
-  const titleLine = cp.title
-    ? `<div class="ptool-charter-prop-title">${escapeHtml(cp.title)}</div>` : "";
-  return `<div class="ptool-charter-proposal">` +
-    titleLine +
-    `<div class="ptool-charter-prop-text">${escapeHtml(cp.proposal)}</div>` +
-    `<div class="ptool-charter-prop-pending">` +
-    `${(typeof Icon === "function") ? Icon("hourglass", 11) : ""}` +
-    `<span>${escapeHtml(_t("projectBrain.proposalPending", "Awaiting human review — commit or reject in the Project Brain panel"))}</span>` +
-    `</div></div>`;
-}
+/* ── MOVED to ui/tool_rounds_rich.js (_DEFERRED_FILES, Epic-E pt_3879f00e sub-4, 2026-08-01) — rich conv-meta + timer-watcher renderers; core dispatch is typeof-guarded and degrades to the generic ptool-line until the feature bundle lands. ── */
 
 /* Localize the inspect_image ops chip. The backend (lib/file_reader.py) builds
    an English, LLM-facing op string like "cropped, zoom 2×" / "rotated 90°,
@@ -1486,303 +1097,6 @@ function _localizeInspectOps(tFn, ops, mode) {
       return _t("inspect.fitTo", "fit to {size}").replace("{size}", m[1]);
     return s;  // unknown token — pass through verbatim
   }).join(_t("inspect.opsSep", ", "));
-}
-
-/* Relative-time formatter for a ms epoch (mirrors project-brain.js `_relTime`
-   so the transcript feed reads the same as the panel). */
-function _convMetaRelTime(ts) {
-  const _t = (typeof t === "function") ? t : (k, d) => d;
-  const n = Number(ts) || 0;
-  if (!n) return "";
-  const secs = Math.max(0, Math.floor((Date.now() - n) / 1000));
-  const mins = Math.floor(secs / 60);
-  if (mins < 1) return _t("projectBrain.justNow", "just now");
-  if (mins < 60) return _t("projectBrain.minutesAgo", "{n}m ago").replace("{n}", mins);
-  const hrs = Math.floor(mins / 60);
-  if (hrs < 24) return _t("projectBrain.hoursAgo", "{n}h ago").replace("{n}", hrs);
-  const days = Math.floor(hrs / 24);
-  return _t("projectBrain.daysAgo", "{n}d ago").replace("{n}", days);
-}
-
-/** Chronological activity list for project_feed_read (kind chip + who + summary
-    + relative time). Reuses the feed-kind i18n labels the panel uses. */
-function _renderFeedActivity(fa) {
-  if (!fa) return "";
-  const _t = (typeof t === "function") ? t : (k, d) => d;
-  const events = fa.events || [];
-  if (!events.length) {
-    return `<div class="ptool-feed-empty">${escapeHtml(_t("projectBrain.activityEmpty", "No activity yet"))}</div>`;
-  }
-  let html = '<div class="ptool-feed-list">';
-  for (const ev of events) {
-    const kind = ev.kind || "note";
-    const kindLabel = _t("projectBrain.kind." + kind, kind);
-    // Prefer the (backend-backfilled) title; else resolve the id to a title
-    // via convTitleById — a raw `conv <id>` is meaningless to the user. Only
-    // fall back to a short id when nothing resolves (conversation not loaded).
-    const who = ev.title
-      || (ev.convId && typeof convTitleById === "function"
-        ? convTitleById(ev.convId)
-        : (ev.convId ? "conv " + String(ev.convId).slice(0, 8) : ""));
-    const mine = ev.mine
-      ? `<span class="ptool-feed-mine">${escapeHtml(_t("projectBrain.thisConv", "this conversation"))}</span>` : "";
-    const when = _convMetaRelTime(ev.ts);
-    const summary = (ev.summary || "").trim();
-    html += `<div class="ptool-feed-row ptool-feed-${escapeHtml(kind)}">` +
-      `<span class="ptool-feed-kind">${escapeHtml(kindLabel)}</span>` +
-      `<div class="ptool-feed-body">` +
-      `<div class="ptool-feed-head">` +
-      (who ? `<span class="ptool-feed-who">${escapeHtml(who)}</span>` : "") + mine +
-      (when ? `<span class="ptool-feed-when">${escapeHtml(when)}</span>` : "") +
-      `</div>` +
-      (summary ? `<div class="ptool-feed-summary">${escapeHtml(summary)}</div>` : "") +
-      `</div></div>`;
-  }
-  html += "</div>";
-  return html;
-}
-
-/** Delivery card for project_message / project_intervene: the target conv, the
-    message body, and a delivery-outcome chip (delivered / rate-limited / denied). */
-function _renderPeerDelivery(pd) {
-  if (!pd || !pd.toConv) return "";
-  const _t = (typeof t === "function") ? t : (k, d) => d;
-  const isIntervene = pd.tool === "project_intervene";
-  const verb = isIntervene
-    ? (pd.hardAbort ? _t("projectBrain.pdHardIntervene", "Hard intervention") : _t("projectBrain.pdIntervene", "Advisory intervention"))
-    : _t("projectBrain.pdMessage", "Message");
-  const outcomeLabel = _t("projectBrain.pdOutcome." + (pd.outcome || "delivered"),
-    pd.outcome || "delivered");
-  const arrow = (typeof Icon === "function") ? Icon("chevronDown", 12) : "→";
-  const body = (pd.text || "").trim();
-  // Show the TARGET conversation by its human-readable title, not a raw id
-  // (a bare `conv mradmzmd` is meaningless to the user). Falls back to a
-  // localized "Untitled chat" via convTitleById; a short id still resolves by
-  // unique prefix against the loaded conversation list.
-  const _target = (typeof convTitleById === "function" && pd.toConv)
-    ? convTitleById(pd.toConv)
-    : ("conv " + String(pd.toConv || "").slice(0, 8));
-  return `<div class="ptool-peermsg ptool-peermsg-${escapeHtml(pd.outcome || "delivered")}">` +
-    `<div class="ptool-peermsg-head">` +
-    `<span class="ptool-peermsg-verb">${escapeHtml(verb)}</span>` +
-    `<span class="ptool-peermsg-arrow">${arrow}</span>` +
-    `<span class="ptool-peermsg-target" title="${escapeHtml(String(pd.toConv || ""))}">${escapeHtml(_target)}</span>` +
-    `<span class="ptool-peermsg-outcome ptool-peermsg-outcome-${escapeHtml(pd.outcome || "delivered")}">${escapeHtml(outcomeLabel)}</span>` +
-    `</div>` +
-    (body ? `<div class="ptool-peermsg-text">${escapeHtml(body)}</div>` : "") +
-    `</div>`;
-}
-
-/** Commit result card for project_commit: the mode (planned vs committed), the
-    files that were / would be committed, the files held back with the reason
-    each was excluded, and the resulting sha + verify state. Renders off the
-    STRUCTURED meta.commitResult the backend attaches — never re-parsed prose. */
-function _renderCommitResult(cr) {
-  if (!cr) return "";
-  const _t = (typeof t === "function") ? t : (k, d) => d;
-  const isPlan = cr.mode === "plan";
-  const committed = cr.committed || [];
-  const clean = cr.clean || [];
-  const excluded = cr.excluded || [];
-  // The "positive" set: committed files (real commit) or would-commit files (plan).
-  const posFiles = (!isPlan && cr.ok) ? committed : clean;
-
-  // ── Outcome chip: the single most important signal (committed / planned /
-  //    failed / verify-mismatch). ──
-  let outcome, outClass;
-  if (!cr.ok) {
-    outcome = _t("commitCard.outFailed", "not committed");
-    outClass = "failed";
-  } else if (isPlan) {
-    outcome = _t("commitCard.outPlanned", "plan only");
-    outClass = "planned";
-  } else if (cr.verified === false) {
-    outcome = _t("commitCard.outVerifyMismatch", "verify mismatch");
-    outClass = "warn";
-  } else {
-    outcome = _t("commitCard.outCommitted", "committed");
-    outClass = "committed";
-  }
-  const shaHtml = (cr.commitSha && !isPlan && cr.ok)
-    ? `<span class="ptool-commit-sha" title="${escapeHtml(_t("commitCard.shaTitle", "commit hash"))}">${escapeHtml(String(cr.commitSha).slice(0, 12))}</span>`
-    : "";
-
-  let html = `<div class="ptool-commit ptool-commit-${escapeHtml(outClass)}">`;
-  html += `<div class="ptool-commit-head">` +
-    `<span class="ptool-commit-outcome ptool-commit-outcome-${escapeHtml(outClass)}">${escapeHtml(outcome)}</span>` +
-    shaHtml + `</div>`;
-
-  if (!cr.ok && cr.error) {
-    html += `<div class="ptool-commit-err">${escapeHtml(cr.error)}</div>`;
-  }
-
-  // ── The clean / committed set. ──
-  if (posFiles.length) {
-    const headKey = (!isPlan && cr.ok) ? "commitCard.committedHead" : "commitCard.wouldCommitHead";
-    const headDef = (!isPlan && cr.ok)
-      ? "Committed ({n}) — provably yours"
-      : "Would commit ({n}) — provably yours";
-    html += `<div class="ptool-commit-group">` +
-      `<div class="ptool-commit-grouphead ptool-commit-grouphead-clean">` +
-      `${(typeof Icon === "function") ? Icon("check", 11) : ""}` +
-      `<span>${escapeHtml(_t(headKey, headDef).replace("{n}", posFiles.length))}</span></div>` +
-      `<div class="ptool-commit-files">` +
-      posFiles.map((p) => `<div class="ptool-commit-file">${escapeHtml(p)}</div>`).join("") +
-      `</div></div>`;
-  } else if (cr.ok) {
-    html += `<div class="ptool-commit-empty">${escapeHtml(_t("commitCard.noneClean", "No files were provably attributable to this conversation."))}</div>`;
-  }
-
-  // ── The held-back / excluded set (each with its reason). ──
-  if (excluded.length) {
-    html += `<div class="ptool-commit-group">` +
-      `<div class="ptool-commit-grouphead ptool-commit-grouphead-held">` +
-      `${(typeof Icon === "function") ? Icon("hourglass", 11) : ""}` +
-      `<span>${escapeHtml(_t("commitCard.heldHead", "Held back ({n}) — not committed").replace("{n}", excluded.length))}</span></div>` +
-      `<div class="ptool-commit-files">` +
-      excluded.map(function (e) {
-        const ns = e.numstat
-          ? `<span class="ptool-commit-numstat">${escapeHtml(e.numstat)}</span>` : "";
-        const reason = e.reason
-          ? `<span class="ptool-commit-reason">${escapeHtml(e.reason)}</span>` : "";
-        return `<div class="ptool-commit-file ptool-commit-file-held">` +
-          `<span class="ptool-commit-fpath">${escapeHtml(e.path || "")}</span>${ns}${reason}</div>`;
-      }).join("") +
-      `</div></div>`;
-  }
-
-  html += "</div>";
-  return html;
-}
-
-/* ★ Default-open policy for conv-meta cards. ROUTINE COORDINATION READS
-   (peer_status / board_read / feed_read / charter_read / list_conversations /
-   get_conversation) the agent fires constantly and that usually need no user
-   action are default-COLLAPSED — the localized header + one-line purpose
-   caption stay in the summary, the multi-row body tucks away until clicked, so
-   the transcript isn't dominated by low-signal noise. MUTATING / DECISION cards
-   (project_message / project_intervene / project_charter_propose / board
-   mutations) represent an action the agent TOOK and stay OPEN. */
-const _CONV_META_ROUTINE_READS = new Set([
-  "project_peer_status", "project_board_read", "project_feed_read",
-  "project_charter_read", "list_conversations",
-]);
-function _convMetaDefaultOpen(round) {
-  const tn = round.toolName || "";
-  // Board MUTATIONS (post/claim/complete/block) are actions → open.
-  if (tn.startsWith("project_board_") && tn !== "project_board_read") return true;
-  // get_conversation is the PRIMARY viewing product of the "View Conversation"
-  // tool — its digest card is the main deliverable, so it stays OPEN (default
-  // expanded) rather than hiding the transcript behind a click.
-  return !_CONV_META_ROUTINE_READS.has(tn);
-}
-
-/* At-a-glance count chip for a COLLAPSED routine-read summary, so the user sees
-   "3 peers active" / "5 open" without expanding. Empty ⇒ no chip. Driven off
-   the same structured meta the body renders (never re-parsed prose). */
-function _convMetaSummaryChip(round, meta, tFn) {
-  const _t = (typeof tFn === "function") ? tFn : (k, d) => d;
-  const tn = round.toolName || "";
-  let n = null, label = "";
-  if (tn === "project_peer_status" && meta.peerStatus) {
-    n = (meta.peerStatus.peers || []).length;
-    label = _t("brainChip.peers", "{n} active").replace("{n}", n);
-  } else if (tn === "project_board_read" && meta.boardSnapshot) {
-    const snap = meta.boardSnapshot;
-    n = (snap.open != null) ? snap.open : (snap.lanes && snap.lanes.open ? snap.lanes.open.length : 0);
-    label = _t("brainChip.openEpics", "{n} open").replace("{n}", n);
-  } else if (tn === "project_feed_read" && meta.feedActivity) {
-    n = (meta.feedActivity.events || []).length;
-    label = _t("brainChip.events", "{n} events").replace("{n}", n);
-  } else if (tn === "get_conversation" && meta.convDigest) {
-    n = (meta.convDigest.msgCount != null)
-      ? meta.convDigest.msgCount : (meta.convDigest.messages || []).length;
-    label = _t("brainChip.msgs", "{n} messages").replace("{n}", n);
-  } else {
-    return "";
-  }
-  if (n == null) return "";
-  return `<span class="ptool-convmeta-count">${escapeHtml(label)}</span>`;
-}
-
-/** Pick the structured body for a conv-meta round, or '' to fall back. */
-function _structuredConvMetaBody(round, meta) {
-  if (meta.boardSnapshot) return _renderBoardSnapshot(meta.boardSnapshot);
-  if (meta.boardTransition) return _renderBoardTransition(meta.boardTransition);
-  if (meta.peerStatus) return _renderPeerStatus(meta.peerStatus);
-  if (meta.feedActivity) return _renderFeedActivity(meta.feedActivity);
-  if (meta.peerDelivery) return _renderPeerDelivery(meta.peerDelivery);
-  if (meta.charterProposal) return _renderCharterProposal(meta.charterProposal);
-  if (meta.commitResult) return _renderCommitResult(meta.commitResult);
-  if (meta.convDigest) return _renderConvDigest(meta.convDigest);
-  return "";
-}
-
-/* Localized source chip label (Board / Charter / Conversations / Peer). The
-   backend `meta.source` is an English family tag; translate it for the chip. */
-const _CONV_META_SOURCE_I18N = {
-  Board: ["brainSrc.board", "Team board"],
-  Charter: ["brainSrc.charter", "Charter"],
-  Conversations: ["brainSrc.conversations", "Conversations"],
-  ConvRef: ["brainSrc.conversations", "Conversations"],
-  Peer: ["brainSrc.peer", "Team"],
-  Git: ["brainSrc.git", "Git"],
-};
-
-function _renderConvMetaBlock(round, svg, q, badgeHtml) {
-  const meta = (round.results || [])[0] || {};
-  const _t = (typeof t === "function") ? t : (k, d) => d;
-  // project_commit is routed through the Board handler (source==="Board") but
-  // it is a git operation, not a board action — give it its own source chip.
-  const source = (round.toolName === "project_commit") ? "Git" : (meta.source || "");
-  const srcEntry = _CONV_META_SOURCE_I18N[source];
-  const sourceLabel = srcEntry ? _t(srcEntry[0], srcEntry[1]) : (source || "");
-  const sourceChip = sourceLabel
-    ? `<span class="ptool-convmeta-src">${escapeHtml(sourceLabel)}</span>`
-    : "";
-  // ★ Localized, plain-language header + a "why this ran / what it means"
-  //   caption. Replaces the raw English backend display string (round.query)
-  //   that the user found meaningless.
-  const headLabel = _convMetaHeadLabel(round, _t);
-  const purpose = _convMetaPurpose(round, _t);
-  const purposeHtml = purpose
-    ? `<div class="ptool-convmeta-why">${escapeHtml(purpose)}</div>`
-    : "";
-  // ★ Structured renderer first (driven off backend meta, not re-parsed prose).
-  //   When a structured body is available it replaces the raw Markdown dump;
-  //   otherwise we fall back to the full toolContent (charter_read text,
-  //   conversation digests, peer message/intervene results, etc.).
-  const structured = _structuredConvMetaBody(round, meta);
-  let bodyHtml;
-  if (structured) {
-    bodyHtml = `<div class="ptool-convmeta-structured">${structured}</div>`;
-  } else {
-    // Full content preferred; snippet is the mid-stream / pre-complete fallback.
-    const content = (typeof round.toolContent === "string" && round.toolContent.trim())
-      ? round.toolContent
-      : (typeof meta.snippet === "string" ? meta.snippet : "");
-    bodyHtml = content.trim()
-      ? `<div class="ptool-convmeta-content md-content">${renderMarkdown(content)}</div>`
-      : `<div class="ptool-convmeta-empty">${escapeHtml(_t("tool.noContent", "No content returned."))}</div>`;
-  }
-  // ★ Default-collapse routine coordination READS (low-signal, fired
-  //   constantly); keep MUTATING / DECISION cards open (they show an action
-  //   the agent took). A collapsed read still carries an at-a-glance count
-  //   chip in its summary ("3 peers active" / "5 open") so the user gets the
-  //   signal without expanding.
-  const isOpen = _convMetaDefaultOpen(round);
-  const openAttr = isOpen ? " open" : "";
-  const countChip = isOpen ? "" : _convMetaSummaryChip(round, meta, _t);
-  return `<details class="ptool-convmeta-block"${openAttr} data-rn="${round.roundNum}">
-       <summary class="ptool-line ptool-convmeta-header">
-         <span class="ptool-icon">${svg}</span>
-         <span class="ptool-text">${escapeHtml(headLabel)}</span>
-         ${countChip}
-         ${sourceChip}
-         ${badgeHtml}
-       </summary>
-       <div class="ptool-convmeta-body">${purposeHtml}${bodyHtml}</div>
-     </details>`;
 }
 
 /* ── MCP resource linkifier ───────────────────────────────────────────
@@ -1909,8 +1223,11 @@ function _renderUnifiedToolLine(round, isSearching) {
   const approvalHtml = _renderPendingApprovalBlock(round, ctx);
   if (approvalHtml) return approvalHtml;
 
-  // ★ Timer Watcher: render collapsible poll checks
-  if ((round._timerPolls && round._timerPolls.length > 0) || round._timerSkipCount) {
+  // ★ Timer Watcher: render collapsible poll checks (rich renderer lives in
+  //   DEFERRED ui/tool_rounds_rich.js — absence falls through to the generic
+  //   line until the feature bundle lands; Epic-E sub-4)
+  if (((round._timerPolls && round._timerPolls.length > 0) || round._timerSkipCount)
+      && typeof _renderTimerWatcherBlock === 'function') {
     return _renderTimerWatcherBlock(round, svg);
   }
   // Timer tool with "searching" status but no polls yet — show initial waiting
@@ -2003,7 +1320,10 @@ function _renderUnifiedToolLine(round, isSearching) {
   //   the in-flight "searching…" state is handled by the generic active
   //   branch above.
   if (_isRoundConvMeta(round) && round.status !== "rejected") {
-    const convMetaHtml = _renderConvMetaBlock(round, svg, q, badgeHtml);
+    // typeof-guard: the rich renderer is DEFERRED (ui/tool_rounds_rich.js,
+    // Epic-E sub-4); while it is in flight degrade to the generic line.
+    const convMetaHtml = (typeof _renderConvMetaBlock === 'function')
+      ? _renderConvMetaBlock(round, svg, q, badgeHtml) : "";
     if (convMetaHtml) return convMetaHtml;
   }
 
@@ -2319,6 +1639,56 @@ function _renderCmdTimerChip(round) {
     + ` data-cmd-deadline="${dl}">${escapeHtml(st.txt)}</span>`;
 }
 
+/* ── Per-command interrupt button (pt_232244fb) ──────────────────────────
+ * The whole-task Stop button kills the TURN; this kills only the command.
+ * The server plants task._cmd_interrupt, the run_command read loop consumes
+ * it within ~0.2s, kills the process tree, and the partial output + the
+ * interruption marker go back to the model as an ordinary tool result — the
+ * turn CONTINUES. Rendered only while the round is searching (a settled
+ * round has nothing to interrupt) and only when we can name the task — an
+ * interrupt that cannot resolve its taskId is worse than no button. */
+function _renderCmdInterruptBtn(round) {
+  /* run_command AND code_exec: since pt_0bde0fd8 the standalone code_exec
+   * path forwards task= into tool_run_command, so the subprocess registers
+   * and the interrupt endpoint works for it identically. */
+  if (!round || (round.toolName !== 'run_command' && round.toolName !== 'code_exec')) return '';
+  const taskId = round._taskId || (typeof _riTaskIdForRound === 'function'
+    ? _riTaskIdForRound(round) : '');
+  if (!taskId) return '';
+  const _tf = (typeof t === 'function') ? t : (k, d) => d;
+  return `<button type="button" class="ptool-cmd-interrupt"`
+    + ` data-cmd-task="${escapeHtml(String(taskId))}"`
+    + ` title="${escapeHtml(_tf('toolCmd.interruptTip', 'Stop this command only — the task continues with the partial output'))}"`
+    + ` onclick="_cmdInterruptClick(this,event)">${escapeHtml(_tf('toolCmd.interrupt', 'Interrupt'))}</button>`;
+}
+
+/* Click → POST the interrupt, optimistically paint "interrupting…". The row
+ * settles itself when the tool_result SSE lands (the same event that would
+ * have landed on a natural exit), so the success path leaves the button
+ * disabled — the re-render removes it. Only a refusal (nothing to interrupt)
+ * or a network failure restores it. */
+async function _cmdInterruptClick(btn, ev) {
+  if (ev && typeof ev.stopPropagation === 'function') ev.stopPropagation();
+  if (!btn || btn.disabled) return;
+  const taskId = btn.getAttribute('data-cmd-task') || '';
+  if (!taskId) return;
+  const _tf = (typeof t === 'function') ? t : (k, d) => d;
+  btn.disabled = true;
+  btn.textContent = _tf('toolCmd.interrupting', 'Interrupting…');
+  let r = null;
+  try {
+    r = (typeof Api !== 'undefined' && Api.chat)
+      ? await Api.chat.interruptCommand(taskId) : null;
+  } catch (_e) { r = null; }
+  if (r && r.interrupted === true) return;   /* terminal frame on its way */
+  btn.disabled = false;
+  btn.textContent = _tf('toolCmd.interrupt', 'Interrupt');
+  if (typeof showToast === 'function') {
+    showToast(_tf('toolCmd.interruptNone',
+      'Nothing to interrupt — the command already finished'));
+  }
+}
+
 // In-flight ("searching") states: running command with live output, search
 // orbit animation, or the generic active row.
 function _renderSearchingRow(round, ctx) {
@@ -2328,15 +1698,17 @@ function _renderSearchingRow(round, ctx) {
   //   If streaming output has started arriving via tool_progress events,
   //   render it live inside the block so the user can follow along.
   if (round.toolName === "run_command" || round.toolName === "code_exec") {
-    const cmdText = escapeHtml(round.query || "");
+    const cmdRaw = round.query || "";
+    const cmdText = escapeHtml(cmdRaw);
     let _cmdDesc = "";
     try {
       const _a = typeof round.toolArgs === "string" ? JSON.parse(round.toolArgs) : (round.toolArgs || {});
       _cmdDesc = (_a && _a.description) || "";
     } catch (_e) { /* malformed toolArgs — skip description */ }
-    const descInlineHtml = _cmdDesc
-      ? `<span class="ptool-cmd-desc-inline" title="${escapeHtml(_cmdDesc)}">${escapeHtml(_cmdDesc)}</span>`
-      : "";
+    const cmdCollapsible = _cmdCollapsible(_cmdDesc, cmdRaw);
+    const cmdKey = cmdCollapsible ? _cmdBodyKey(round) : '';
+    const cmdOpen = cmdCollapsible && cmdKey && _cmdBodyExpanded.has(cmdKey);
+    const descInlineHtml = _cmdDescInline(_cmdDesc, cmdCollapsible);
     const partial = typeof round._partialOutput === "string" ? round._partialOutput : "";
     let liveOutHtml = "";
     if (partial) {
@@ -2357,16 +1729,16 @@ function _renderSearchingRow(round, ctx) {
      * round is in flight the descriptors live on the round itself (there is
      * no `results` entry until tool_result lands). */
     const liveQrHtml = _renderQrStrip(round);
-    return `<div class="ptool-cmd-block ptool-cmd-running">
+    return `<div class="ptool-cmd-block ptool-cmd-running${cmdOpen ? ' cmd-open' : ''}"${cmdCollapsible ? ` data-cmd-key="${escapeHtml(cmdKey)}"` : ''}>
            <div class="ptool-cmd-header">
              <span class="ptool-cmd-icon">${svg}</span>
              ${cmdRootPill}
              ${descInlineHtml}
              <span class="ptool-cmd-label">Running...</span>
-             ${_renderCmdTimerChip(round)}
+             ${_renderCmdTimerChip(round)}${_renderCmdInterruptBtn(round)}
              <span class="ptool-spinner"></span>
            </div>
-           <pre class="ptool-cmd-code"><code>$ ${cmdText}</code></pre>
+           <pre class="ptool-cmd-code${cmdCollapsible ? ' ptool-cmd-collapsible' : ''}"><code>$ ${cmdText}</code></pre>
            ${liveQrHtml}${liveOutHtml}
          </div>`;  }
   // ★ Web search: show orbit animation
@@ -2443,14 +1815,60 @@ function _renderQrStrip(meta) {
          </div>`;
 }
 
+/* ── Collapsible command body (done + running states) ────────────────────
+ * The one-line DESCRIPTION is what users read; the exact shell string is
+ * reference detail. When a description exists AND the command is long enough
+ * to be visual noise (multi-line or > 100 chars), the `$ command` <pre>
+ * starts COLLAPSED and the description itself becomes the toggle (expands
+ * in place — no chevron glyph, owner call 2026-08-02). Short one-liners
+ * (npm test) and description-
+ * less commands stay visible: collapsing the first saves nothing, collapsing
+ * the second would anonymize the card. Expansion state lives in
+ * _cmdBodyExpanded keyed by toolCallId, so a mid-run expand survives the
+ * per-progress re-renders and a done card survives a timeline sync. */
+const _cmdBodyExpanded = new Set();
+
+function _cmdBodyKey(round) {
+  return (round && round.toolCallId) ? String(round.toolCallId) : '';
+}
+
+function _cmdCollapsible(desc, cmdRaw) {
+  if (!desc || !cmdRaw) return false;
+  return cmdRaw.length > 100 || cmdRaw.indexOf('\n') !== -1;
+}
+
+function _cmdDescInline(desc, collapsible) {
+  if (!desc) return '';
+  const esc = escapeHtml(desc);
+  if (!collapsible) {
+    return `<span class="ptool-cmd-desc-inline" title="${esc}">${esc}</span>`;
+  }
+  return `<span class="ptool-cmd-desc-inline ptool-cmd-desc-toggle" title="${esc}" onclick="_cmdBodyToggle(this,event)">${esc}</span>`;
+}
+
+function _cmdBodyToggle(el, ev) {
+  if (ev && typeof ev.stopPropagation === 'function') ev.stopPropagation();
+  const block = el && el.closest ? el.closest('.ptool-cmd-block') : null;
+  if (!block) return;
+  const open = !block.classList.contains('cmd-open');
+  block.classList.toggle('cmd-open', open);
+  const key = block.getAttribute('data-cmd-key') || '';
+  if (key) {
+    if (open) _cmdBodyExpanded.add(key);
+    else _cmdBodyExpanded.delete(key);
+  }
+}
+
 // ★ run_command / code_exec: render as inline terminal block with collapsible output
 function _renderCmdDoneBlock(round, ctx) {
   const { svg, meta, cmdRootPill } = ctx;
   if (!((round.toolName === "run_command" || round.toolName === "code_exec") && (meta.command != null || meta.output != null))) return "";
-  const cmd = escapeHtml(meta.command || round.query || "");
-  const descInlineHtml = meta.description
-    ? `<span class="ptool-cmd-desc-inline" title="${escapeHtml(meta.description)}">${escapeHtml(meta.description)}</span>`
-    : "";
+  const cmdRaw = meta.command || round.query || "";
+  const cmd = escapeHtml(cmdRaw);
+  const cmdCollapsible = _cmdCollapsible(meta.description, cmdRaw);
+  const cmdKey = cmdCollapsible ? _cmdBodyKey(round) : '';
+  const cmdOpen = cmdCollapsible && cmdKey && _cmdBodyExpanded.has(cmdKey);
+  const descInlineHtml = _cmdDescInline(meta.description, cmdCollapsible);
   const output = meta.output || "";
   const exitCode = meta.exitCode ?? "?";
   const timedOut = meta.timedOut || false;
@@ -2459,22 +1877,31 @@ function _renderCmdDoneBlock(round, ctx) {
   //   There is no real exit code — show the cause, never the cryptic "exit ?".
   const notRun = meta.notRun === true || exitCode === "not-run";
   const isOk = !notRun && (exitCode === "0" || exitCode === 0);
+  /* ★ Per-command interrupt (pt_232244fb): the command was killed by the
+   * user button / stall watchdog but the task CONTINUED — an amber neutral
+   * stop (like not-run), never the red "✗ exit -1" error frame. */
+  const interrupted = meta.interrupted === true;
   const statusCls = notRun
     ? "ptool-cmd-notrun"
-    : timedOut
-      ? "ptool-cmd-timeout"
-      : isOk
-        ? "ptool-cmd-ok"
-        : "ptool-cmd-err";
+    : interrupted
+      ? "ptool-cmd-interrupted"
+      : timedOut
+        ? "ptool-cmd-timeout"
+        : isOk
+          ? "ptool-cmd-ok"
+          : "ptool-cmd-err";
   const notRunBadge = meta.badge && meta.badge !== `exit ${exitCode}`
     ? meta.badge : "not run";
+  const _tfCmd = (typeof t === 'function') ? t : (k, d) => d;
   const statusLabel = notRun
     ? `⊘ ${escapeHtml(notRunBadge)}`
-    : timedOut
-      ? "timeout"
-      : isOk
-        ? "✓ done"
-        : `✗ exit ${exitCode}`;
+    : interrupted
+      ? escapeHtml(_tfCmd('toolCmd.interruptedBadge', '⏸ interrupted'))
+      : timedOut
+        ? "timeout"
+        : isOk
+          ? "✓ done"
+          : `✗ exit ${exitCode}`;
   // For a not-run command the reason IS the message — surface it inline
   // (not hidden behind a collapse toggle) so the user sees why immediately.
   const reason = notRun ? (meta.reason || output || "") : "";
@@ -2488,7 +1915,7 @@ function _renderCmdDoneBlock(round, ctx) {
            <pre class="ptool-cmd-output"><code>${escapeHtml(output)}</code></pre>
          </div>`;
   }
-  return `<div class="ptool-cmd-block ${statusCls}" data-rn="${round.roundNum}">
+  return `<div class="ptool-cmd-block ${statusCls}${cmdOpen ? ' cmd-open' : ''}" data-rn="${round.roundNum}"${cmdCollapsible ? ` data-cmd-key="${escapeHtml(cmdKey)}"` : ''}>
          <div class="ptool-cmd-header">
            <span class="ptool-cmd-icon">${svg}</span>
            ${cmdRootPill}
@@ -2496,7 +1923,7 @@ function _renderCmdDoneBlock(round, ctx) {
            <span class="ptool-cmd-status">${statusLabel}</span>
            ${_rowRightControls(round)}
          </div>
-         <pre class="ptool-cmd-code"><code>$ ${cmd}</code></pre>
+         <pre class="ptool-cmd-code${cmdCollapsible ? ' ptool-cmd-collapsible' : ''}"><code>$ ${cmd}</code></pre>
          ${qrStripHtml}${outputHtml}
        </div>`;
 }
@@ -2712,14 +2139,15 @@ function _renderSearchRows(round, ctx) {
   return "";
 }
 
-// ★ read_files / inspect_image image(s): render inline thumbnails when the
-//   backend attached data URIs (meta.imageDataUris). Each descriptor carries
-//   a full data: URL the browser can render directly. inspect_image is the
-//   zoom/rotate/crop viewer — it gets a distinct accent + an "ops" chip
-//   describing the transform (e.g. "crop, 2×").
+// ★ read_files / inspect_image / browser screenshot+preview image(s): render
+//   inline thumbnails when the backend attached data URIs (meta.imageDataUris).
+//   Each descriptor carries a full data: URL the browser can render directly.
+//   inspect_image is the zoom/rotate/crop viewer — it gets a distinct accent +
+//   an "ops" chip describing the transform (e.g. "crop, 2×").
 function _renderReadImagesBlock(round, ctx) {
   const { svg, q, meta } = ctx;
-  if (!((round.toolName === "read_files" || round.toolName === "inspect_image" || round.toolName === "browser_screenshot") &&
+  if (!((round.toolName === "read_files" || round.toolName === "inspect_image" ||
+        round.toolName === "browser_screenshot" || round.toolName === "browser_preview_page") &&
       Array.isArray(meta.imageDataUris) && meta.imageDataUris.length)) return "";
   const imgs = meta.imageDataUris.filter((d) => d && d.uri);
   if (!imgs.length) return "";
@@ -3267,315 +2695,6 @@ async function _recoverTimerPolls(round) {
   }
 }
 
-/* ── Timer Watcher Block ──
-   Renders the timer_create tool call as a collapsible panel showing
-   each poll check (wait/ready/error) with timestamps and reasons.
-   While polling, shows a live "watching…" header; after trigger, shows "✓ triggered". */
-/* Countdown text for the "Next check in Ns" hint. Kept in one place so the
- * initial render and the 1 Hz ticker below produce identical strings. */
-function _timerNextPollText(nextTs) {
-  const _tf = (typeof t === "function") ? t : (k, d) => d;
-  const secs = Math.max(0, Math.round((nextTs - Date.now()) / 1000));
-  return secs > 0
-    ? _tf("timerBlock.nextCheckIn", "Next check in ~{n}s…").replace("{n}", secs)
-    : _tf("timerBlock.nextCheckNow", "Next check due now…");
-}
-
-/* Turn a raw backend poll `reason` into a plain, translated verdict for the
- * poll line. The code/hybrid reconcile primitive (lib/scheduler/_shared.py)
- * emits developer-English notes like "predicate no match (exit=1)" /
- * "predicate matched (exit=0)" that leaked verbatim into the (otherwise
- * localized) timer card. Recognize those shapes and render a human, i18n'd
- * verdict; leave a genuine LLM/free-form reason untouched. Returns the string
- * to display (already NOT html-escaped — caller escapes). */
-function _timerPollReasonText(p, _t) {
-  const raw = p && p.reason ? String(p.reason) : "";
-  // "predicate no match (exit=1)" / "predicate matched (exit=0)" — the pure
-  // code/predicate verdict. Map to a plain ready/not-ready line + exit code.
-  const m = raw.match(/^predicate (matched|no match) \(exit=(-?\d+)\)$/);
-  if (m) {
-    const isMatch = m[1] === "matched";
-    const code = m[2];
-    return isMatch
-      ? _t("timerBlock.predicateReady", "Condition met (command exit {code})").replace("{code}", code)
-      : _t("timerBlock.predicateWait", "Not met yet (command exit {code})").replace("{code}", code);
-  }
-  if (/^predicate ambiguous/.test(raw)) {
-    return _t("timerBlock.predicateAmbiguous", "Command result inconclusive — still waiting");
-  }
-  return raw;
-}
-
-function _renderTimerWatcherBlock(round, svg) {
-  const polls = round._timerPolls || [];
-  const isActive = round.status === "searching";
-  const triggered = round._timerTriggered;
-  const timerId = round._timerTimerId || "";
-  const totalPolls = polls.filter(p => p.decision !== "started").length;
-  const timerIdShort = timerId ? timerId.slice(0, 12) : "";
-  // Was the most recent poll a parse/LLM error? Surface it in the header so
-  // a stuck verification (LLM not returning a usable decision) is obvious.
-  const realPolls = polls.filter(p => p.decision !== "started");
-  const lastPoll = realPolls.length ? realPolls[realPolls.length - 1] : null;
-  const lastWasError = lastPoll && (lastPoll.decision === "error" || lastPoll.decision === "parse_error" || lastPoll.parseError);
-  // Condition tier (backend `condition_kind`): a pure-code timer decides by a
-  // shell predicate and NEVER calls an LLM — so it gets a distinct identity and
-  // no "Verifier model" row. LLM/hybrid timers resolve a cheap model AT EACH
-  // POLL, and that model can differ per poll (it shows on each poll line), so
-  // we deliberately don't pin a single model in the header/meta.
-  const _t = (typeof t === "function") ? t : (k, d) => d;
-  const condKind = round._timerConditionKind
-    || (round._timerCheckInstruction ? "llm"
-        : (round._timerConditionCommand ? "code" : "llm"));
-  const isCodeTimer = condKind === "code";
-
-  // Header — the timer id is surfaced as a dedicated copyable chip (rendered
-  // separately below), so the label text no longer embeds the raw id.
-  let headerLabel, headerCls;
-  const _idTxt = escapeHtml(timerIdShort);
-  const _s = (n) => (n !== 1 ? "s" : "");
-  if (triggered) {
-    headerLabel = _t("timerBlock.headTriggered", "Timer — triggered after {n} poll{s}")
-      .replace("{n}", totalPolls).replace("{s}", _s(totalPolls));
-    headerCls = "timer-watcher-triggered";
-  } else if (round._timerOrphaned) {
-    headerLabel = _t("timerBlock.headOrphaned", "Timer — task interrupted ({n} poll{s}, timer still active in background)")
-      .replace("{n}", totalPolls).replace("{s}", _s(totalPolls));
-    headerCls = "timer-watcher-orphaned";
-  } else if (isActive) {
-    const skipN = round._timerSkipCount || 0;
-    const skipSuffix = skipN > 0 ? _t("timerBlock.headSkipSuffix", ", {n} skipped").replace("{n}", skipN) : "";
-    const errSuffix = lastWasError ? _t("timerBlock.headErrSuffix", ", last check errored") : "";
-    headerLabel = _t("timerBlock.headWatching", "Timer — watching… ({n} poll{s}{skip}{err})")
-      .replace("{n}", totalPolls).replace("{s}", _s(totalPolls))
-      .replace("{skip}", skipSuffix).replace("{err}", errSuffix);
-    headerCls = lastWasError ? "timer-watcher-active timer-watcher-warn" : "timer-watcher-active";
-  } else {
-    headerLabel = _t("timerBlock.headDone", "Timer — {status} ({n} poll{s})")
-      .replace("{status}", escapeHtml(round.status || "done"))
-      .replace("{n}", totalPolls).replace("{s}", _s(totalPolls));
-    headerCls = "";
-  }
-  // Dedicated copyable id chip — clicking it copies the FULL timer id to the
-  // clipboard (handled by document delegation on `.timer-id-chip`), so the
-  // long identifier is extracted out of the label into one prominent token.
-  const idChip = timerId
-    ? `<button class="timer-id-chip" data-timer-id="${escapeHtml(timerId)}" title="${escapeHtml(_t("timerBlock.idChipTitle", "Timer id — click to copy"))}"><span class="timer-id-txt">${_idTxt}</span>${Icon("clipboard", 10)}</button>`
-    : "";
-  // Distinct identity chip: a pure command-based (zero-LLM) timer vs a hybrid.
-  const kindBadge = isCodeTimer
-    ? `<span class="timer-kind-badge timer-kind-code" title="${escapeHtml(_t("timerBlock.kindCodeTip", "Decided by a shell command — no model is called"))}">${escapeHtml(_t("timerBlock.kindCode", "command-based"))}</span>`
-    : (condKind === "hybrid"
-        ? `<span class="timer-kind-badge timer-kind-hybrid" title="${escapeHtml(_t("timerBlock.kindHybridTip", "Model decides; a shell command runs alongside and takes over once it consistently agrees"))}">${escapeHtml(_t("timerBlock.kindHybrid", "hybrid"))}</span>`
-        : "");
-
-  // ── What is being verified — show the check instruction + command so the
-  //    user understands the timer's job, who runs it, and how often. ──
-  //    The instruction can be long; render it expandable instead of clipping
-  //    mid-sentence (the old slice(0,400) cut "report st…").
-  let metaHtml = "";
-  const instr = round._timerCheckInstruction || "";
-  const cmd = round._timerCheckCommand || round._timerConditionCommand || "";
-  const interval = round._timerPollInterval || 0;
-  const maxPolls = round._timerMaxPolls || 0;
-  if (instr || cmd || interval) {
-    const cadence = interval
-      ? (maxPolls
-          ? _t("timerBlock.cadenceMax", "Checks every {n}s · up to {m} times").replace("{n}", interval).replace("{m}", maxPolls)
-          : _t("timerBlock.cadence", "Checks every {n}s").replace("{n}", interval))
-      : "";
-
-    // Expandable instruction, rendered as Markdown (the model writes it in
-    // Markdown). A collapsed max-height clamp reveals the full text on click —
-    // the backend now ships the whole instruction, so "show more" shows all.
-    let instrHtml = "";
-    if (instr) {
-      const LONG = instr.length > 160;
-      const valId = "tw-instr-" + round.roundNum;
-      const bodyHtml = (typeof renderMarkdown === "function")
-        ? renderMarkdown(instr)
-        : escapeHtml(instr);
-      const moreTxt = _t("timerBlock.showMore", "show more");
-      const lessTxt = _t("timerBlock.showLess", "show less");
-      const toggle = LONG
-        ? ` onclick="event.stopPropagation();var v=document.getElementById('${valId}');v.classList.toggle('expanded');this.querySelector('.timer-meta-more').textContent=v.classList.contains('expanded')?this.querySelector('.timer-meta-more').getAttribute('data-less'):this.querySelector('.timer-meta-more').getAttribute('data-more');"`
-        : "";
-      const moreLink = LONG
-        ? `<span class="timer-meta-more" data-more="${escapeHtml(moreTxt)}" data-less="${escapeHtml(lessTxt)}">${escapeHtml(moreTxt)}</span>` : "";
-      instrHtml = `<div class="timer-meta-row timer-meta-row-instr"${toggle}>
-        <span class="timer-meta-label">${escapeHtml(_t("timerBlock.verifying", "Verifying"))}</span>
-        <span class="timer-meta-val timer-meta-md md-content${LONG ? " timer-meta-clamp" : ""}" id="${valId}">${bodyHtml}</span>
-        ${moreLink}
-      </div>`;
-    }
-
-    // Who decides the trigger. For a pure command-based (code) timer there is
-    // NO model — the shell predicate decides. For LLM/hybrid the deciding model
-    // is resolved AT EACH POLL and can differ between polls, so we describe the
-    // tier here and let each poll line carry its own model chip (no misleading
-    // single pinned model in the header).
-    const deciderRow = isCodeTimer
-      ? `<div class="timer-meta-row"><span class="timer-meta-label">${escapeHtml(_t("timerBlock.decidedBy", "Decided by"))}</span><span class="timer-meta-val">${escapeHtml(_t("timerBlock.deciderCode", "Shell command exit code — no model"))}</span></div>`
-      : `<div class="timer-meta-row"><span class="timer-meta-label">${escapeHtml(_t("timerBlock.verifier", "Verifier"))}</span><span class="timer-meta-val">${escapeHtml(_t("timerBlock.verifierLLM", "Cheap LLM · resolved per poll (see each check below)"))}</span></div>`;
-
-    const cmdLabel = isCodeTimer
-      ? _t("timerBlock.predicate", "Predicate")
-      : _t("timerBlock.command", "Command");
-
-    metaHtml = `<div class="timer-watcher-meta">
-      ${instrHtml}
-      ${cmd ? `<div class="timer-meta-row"><span class="timer-meta-label">${escapeHtml(cmdLabel)}</span><code class="timer-meta-cmd">${escapeHtml(cmd.slice(0, 300))}</code></div>` : ""}
-      ${deciderRow}
-      ${cadence ? `<div class="timer-meta-row"><span class="timer-meta-label">${escapeHtml(_t("timerBlock.cadenceLabel", "Cadence"))}</span><span class="timer-meta-val">${escapeHtml(cadence)}</span></div>` : ""}
-    </div>`;
-  }
-
-  // ── "Next check in Ns" hint while active ──
-  // The countdown text is refreshed in place every second by the 1 Hz
-  // ticker at the bottom of this module (keyed on [data-timer-next]), so it
-  // stays live without churning the fingerprint gate — mirrors the swarm
-  // panel's [data-sw-start] approach.
-  let nextPollHtml = "";
-  if (isActive && round._timerNextPollTs) {
-    nextPollHtml = `<div class="timer-next-poll" data-timer-next="${round._timerNextPollTs}">${Icon('hourglass', 12)} <span class="timer-next-poll-txt">${_timerNextPollText(round._timerNextPollTs)}</span></div>`;
-  }
-
-  // Build poll lines (most recent first for readability)
-  const reversed = [...polls].reverse();
-  const MAX_VISIBLE = 5;
-  const visible = reversed.slice(0, MAX_VISIBLE);
-  const hidden = reversed.length - MAX_VISIBLE;
-
-  let pollLines = "";
-  for (const p of visible) {
-    let icon, cls, label;
-    const isParseErr = p.decision === "parse_error" || p.parseError;
-    if (p.decision === "started") {
-      icon = Icon('bell', 13); cls = "timer-poll-started"; label = "";
-    } else if (p.decision === "ready") {
-      icon = Icon('save', 13); cls = "timer-poll-ready"; label = `#${p.pollNum}`;
-    } else if (p.decision === "error") {
-      icon = Icon('ban', 13); cls = "timer-poll-error"; label = `#${p.pollNum}`;
-    } else if (isParseErr) {
-      icon = Icon('zap', 13); cls = "timer-poll-error timer-poll-parse-err"; label = `#${p.pollNum}`;
-    } else {
-      icon = Icon('hourglass', 13); cls = "timer-poll-wait"; label = `#${p.pollNum}`;
-    }
-    const ts = p.ts ? new Date(p.ts).toLocaleTimeString() : "";
-    // Plain, translated verdict for the visible line — a raw predicate note
-    // ("predicate no match (exit=1)") becomes "Not met yet (command exit 1)".
-    // A genuine LLM reason passes through unchanged.
-    const fullReason = _timerPollReasonText(p, _t);
-    const reason = escapeHtml(fullReason.slice(0, 120));
-    const tokens = p.tokensUsed ? ` · ${p.tokensUsed} tok` : "";
-    // The raw LLM output — only meaningful (and only sent/persisted) when the
-    // decision could not be parsed. This is the evidence that explains WHY the
-    // poll failed, so it is the centerpiece of an errored poll's detail.
-    const rawContent = (isParseErr && p.rawContent) ? String(p.rawContent) : "";
-    // Per-poll model chip — which LLM made this decision.
-    const modelChip = p.model
-      ? `<span class="timer-poll-model" title="${escapeHtml(_t("timerBlock.verifiedByTitle", "Verified by {model}").replace("{model}", p.model))}">${escapeHtml(p.model)}</span>` : "";
-    // Stable per-poll id (e.g. tmr_84bd4fb3.p36) — lets the user correlate this
-    // exact check with the app.log line and the DB poll_log row.
-    const pollIdChip = p.pollId
-      ? `<span class="timer-poll-id" title="${escapeHtml(_t("timerBlock.pollIdTitle", "Poll id — search app.log for this"))}">${escapeHtml(p.pollId)}</span>` : "";
-    // Per-poll tool-call timeline — reuse the swarm panel's .sw-tl-* look so
-    // the timer's tool activity reads identically to a sub-agent's.
-    const trace = Array.isArray(p.toolTrace) ? p.toolTrace : [];
-
-    // Expandable detail: full reason + raw LLM output + tool-call timeline + check_command output.
-    const hasDetail = (fullReason.length > 120) || rawContent.length > 0 || trace.length > 0 || (p.cmdOutput && p.cmdOutput.length > 0);
-    let detailHtml = "";
-    if (hasDetail) {
-      const fullReasonHtml = fullReason.length > 120
-        ? `<div class="timer-poll-detail-reason">${escapeHtml(fullReason)}</div>` : "";
-      // Raw LLM output — what the model actually returned when its decision
-      // could not be parsed as JSON. Shown verbatim so the failure is diagnosable.
-      const rawHtml = rawContent.length > 0
-        ? `<div class="timer-poll-detail-label">${escapeHtml(_t("timerBlock.rawOutput", "Raw LLM output (unparseable decision):"))}</div>` +
-          `<pre class="timer-poll-detail-output timer-poll-raw"><code>${escapeHtml(rawContent)}</code></pre>`
-        : "";
-      let traceHtml = "";
-      if (trace.length > 0) {
-        const rows = trace.map(tc => {
-          const td = (typeof _TOOL_DISPLAY !== "undefined") ? _TOOL_DISPLAY[tc.name] : null;
-          const ticon = (td && td.icon) ? td.icon : _TD_SVG('<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.106-3.105c.32-.322.863-.22.983.218a6 6 0 0 1-8.259 7.057l-7.91 7.91a1 1 0 0 1-2.999-3l7.91-7.91a6 6 0 0 1 7.057-8.259c.438.12.54.662.219.984z"/>');
-          const dot = tc.isError
-            ? `<span class="sw-tl-dot sw-tl-failed">✕</span>`
-            : `<span class="sw-tl-dot sw-tl-done">✓</span>`;
-          const el = (typeof tc.elapsed === "number") ? `${tc.elapsed.toFixed(1)}s` : "";
-          return `<div class="sw-tl-row sw-tl-${tc.isError ? "failed" : "done"}">
-            <div class="sw-tl-line">${dot}<span class="sw-tl-icon">${ticon}</span>` +
-            `<span class="sw-tl-name">${escapeHtml(tc.name || "?")}</span>` +
-            (tc.argsBrief ? `<span class="sw-tl-args" title="${escapeHtml(tc.argsBrief)}">${escapeHtml(tc.argsBrief)}</span>` : "") +
-            (el ? `<span class="sw-tl-elapsed">${el}</span>` : "") +
-          `</div></div>`;
-        }).join("");
-        traceHtml = `<div class="timer-poll-detail-label">${escapeHtml(_t("timerBlock.toolsCalled", "Tools called this poll:"))}</div>` +
-          `<div class="sw-a-timeline timer-poll-trace">${rows}</div>`;
-      }
-      const cmdOutHtml = (p.cmdOutput && p.cmdOutput.length > 0)
-        ? `<div class="timer-poll-detail-label">${escapeHtml(_t("timerBlock.checkOutput", "Check output (evidence):"))}</div><pre class="timer-poll-detail-output"><code>${escapeHtml(p.cmdOutput)}</code></pre>`
-        : "";
-      detailHtml = `<div class="timer-poll-detail">${fullReasonHtml}${rawHtml}${traceHtml}${cmdOutHtml}</div>`;
-    }
-    const toggleAttr = hasDetail
-      ? ` onclick="event.stopPropagation();var d=this.nextElementSibling;if(d){d.classList.toggle('expanded');this.classList.toggle('expanded');}"`
-      : "";
-    const caret = hasDetail ? `<span class="timer-poll-caret">▸</span>` : `<span class="timer-poll-caret-spacer"></span>`;
-    const toolBadge = trace.length > 0
-      ? `<span class="timer-poll-toolcount" title="${escapeHtml(_t("timerBlock.toolCallsTitle", "{n} tool call(s) this poll").replace("{n}", trace.length))}">${Icon('wrench', 11)} ${trace.length}</span>` : "";
-    pollLines += `<div class="timer-poll-line ${cls}${hasDetail ? " timer-poll-has-detail" : ""}"${toggleAttr}>
-      ${caret}
-      <span class="timer-poll-icon">${icon}</span>
-      <span class="timer-poll-num">${label}</span>
-      <span class="timer-poll-reason">${reason}</span>
-      ${toolBadge}${pollIdChip}${modelChip}
-      <span class="timer-poll-meta">${ts}${tokens}</span>
-    </div>${detailHtml}`;
-  }
-
-  let hiddenHtml = "";
-  if (hidden > 0) {
-    hiddenHtml = `<div class="timer-poll-hidden">${escapeHtml(_t("timerBlock.hiddenChecks", "{n} earlier check{s} hidden").replace("{n}", hidden).replace("{s}", hidden !== 1 ? "s" : ""))}</div>`;
-  }
-
-  // ★ Skip heartbeat trailer — shows "N polls skipped (output unchanged)"
-  //   so the user knows the timer is still alive even when the LLM isn't
-  //   being called. Without this, long runs of identical check_command
-  //   output look like the timer is frozen.
-  let skipTrailer = "";
-  if (round._timerSkipCount && isActive) {
-    const skipTs = round._timerLastSkipTs
-      ? new Date(round._timerLastSkipTs).toLocaleTimeString()
-      : "";
-    const lastPollNum = round._timerLastSkipPollNum || 0;
-    skipTrailer = `<div class="timer-poll-line timer-poll-skipped">
-      <span class="timer-poll-icon">${Icon('clock', 13)}</span>
-      <span class="timer-poll-num">${lastPollNum ? `#${lastPollNum}` : ""}</span>
-      <span class="timer-poll-reason">${escapeHtml(_t("timerBlock.skipped", "{n} poll{s} skipped — check_command output unchanged").replace("{n}", round._timerSkipCount).replace("{s}", round._timerSkipCount !== 1 ? "s" : ""))}</span>
-      <span class="timer-poll-meta">${skipTs}</span>
-    </div>`;
-  }
-
-  const uid = "tmr-r" + round.roundNum;
-  const expandedByDefault = isActive;  // auto-expand while active
-  return `<div class="timer-watcher-block ${headerCls}" data-rn="${round.roundNum}">
-       <div class="timer-watcher-header" onclick="if(event.target.closest('.timer-id-chip,.ri-tool-anchor'))return;event.stopPropagation();var w=document.getElementById('${uid}-wrap');w.classList.toggle('expanded');var t=this.querySelector('.timer-toggle');if(t)t.textContent=w.classList.contains('expanded')?'▾':'▸';">
-         <span class="timer-watcher-icon icon-box">${Icon('timer', 13)}</span>
-         ${idChip}
-         <span class="timer-watcher-label">${headerLabel}</span>
-         ${kindBadge}
-         ${isActive ? '<span class="ptool-spinner"></span>' : ''}
-         ${_rowRightControls(round)}
-         <span class="timer-toggle">${expandedByDefault ? '▾' : '▸'}</span>
-       </div>
-       <div class="timer-watcher-body${expandedByDefault ? ' expanded' : ''}" id="${uid}-wrap">
-         ${metaHtml}${pollLines}${hiddenHtml}${skipTrailer}${nextPollHtml}
-       </div>
-     </div>`;
-}
-
 /* ── Parallel-batch grouping ──────────────────────────────────────────
  * A single LLM turn (one assistant message) can carry several tool_calls
  * that the harness runs together. The backend tags every such round with
@@ -3674,9 +2793,9 @@ function _renderTurnHead(size, rno) {
  * — and only they — still get a standalone entry appended after the panel. */
 function _renderToolSlot(r, allRounds) {
   const isSwarm = _isRoundSwarm(r);
-  const inner = isSwarm
+  const inner = (isSwarm && typeof _buildSwarmPanelHTML === 'function')
     ? _buildSwarmPanelHTML(r, allRounds)
-    : _renderUnifiedToolLine(r, r.status === "searching");
+    : _renderUnifiedToolLine(r, r.status === "searching");  // panel DEFERRED: generic line (Epic-E sub-5B)
   const swarmAttr = isSwarm ? ' data-prn-kind="swarm"' : '';
   const trailing = isSwarm ? _renderStandaloneDebugEntry(r) : '';
   return `<div data-prn="${r.roundNum}"${swarmAttr}>${inner}${trailing}</div>`;
@@ -4073,6 +3192,31 @@ document.addEventListener("click", function (e) {
   const collapsed = turn.classList.toggle("collapsed");
   const chev = head.querySelector(".ptool-turn-chev");
   if (chev) chev.textContent = collapsed ? "▸" : "▾";
+});
+
+/* Peer-sender bubble → jump to the source conversation. Delegated at the
+ * document level so it survives re-renders; preventDefault/stopPropagation
+ * keep the surrounding <details>/<summary> from toggling on the same click.
+ * The id may be the 8-char display form — resolved to the full id through the
+ * shared convFullIdById seam; an unresolved id (conversation not in the loaded
+ * sidebar list) gets a toast instead of a silent no-op. */
+document.addEventListener("click", function (e) {
+  const bubble = e.target.closest(".sw-peer-from-bubble[data-conv-jump]");
+  if (!bubble) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const cid = bubble.getAttribute("data-conv-jump") || "";
+  if (!cid) return;
+  const fullId = (typeof convFullIdById === "function") ? convFullIdById(cid) : "";
+  if (fullId && typeof loadConversation === "function") {
+    loadConversation(fullId);
+    return;
+  }
+  if (typeof showToast === "function") {
+    const _t = (typeof t === "function") ? t : (k, d) => d;
+    showToast("", _t("peer.convNotFoundTitle", "Conversation not found"),
+              _t("peer.convNotFound", "It may have been deleted, or it is not in the current list."), 4000);
+  }
 });
 
 // ★ Timer-id chip → copy the full timer id to the clipboard. Delegated at the
@@ -4552,34 +3696,6 @@ function renderToolRoundsHTML(rounds, isStreaming, segments) {
    *   NOT clump its narration into one tail block when the segment-timeline
    *   toggle is OFF (or the timeline path fell back to grouped). */
   return _renderUnifiedGroup(rounds, segments);
-}
-
-/* ── 1 Hz wall-clock ticker for the timer "Next check in Ns" countdown ──
- * Like the swarm panel's elapsed timers, the countdown text changes every
- * second even when no SSE event landed. The fingerprint gate in
- * _syncToolRoundsDOM (correctly) skips re-renders when nothing changed, so
- * without this the hint froze at whatever value it was first painted with.
- * We update [data-timer-next] elements in place: zero re-render, single
- * timer, O(N active timers) per tick — mirrors _tickSwarmTimers. */
-function _tickTimerCountdowns() {
-  const els = document.querySelectorAll('.timer-next-poll[data-timer-next]');
-  if (!els.length) return;
-  for (const el of els) {
-    const nextTs = +el.getAttribute('data-timer-next');
-    if (!nextTs) continue;
-    const span = el.querySelector('.timer-next-poll-txt');
-    if (!span) continue;
-    const txt = _timerNextPollText(nextTs);
-    if (span.textContent !== txt) span.textContent = txt;
-  }
-}
-if (typeof window !== 'undefined' && !window._timerCountdownTicker) {
-  window._timerCountdownTicker = setInterval(() => {
-    try {
-      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
-      _tickTimerCountdowns();
-    } catch (e) { /* swallowed — countdown ticker is best-effort */ }
-  }, 1000);
 }
 
 /* ── 1 Hz wall-clock ticker for the run_command countdown / elapsed chip ──

@@ -150,13 +150,31 @@ def _parse_json_obj(text: str) -> dict:
     return obj if isinstance(obj, dict) else {}
 
 
-def _generate_definitions(report_text, gap_terms, ui_lang, model, dispatch) -> dict:
+def _collect_usage(usage_sink, usage):
+    """Append a normalized usage dict to the optional sink (design §3.3)."""
+    if usage_sink is None or not isinstance(usage, dict):
+        return
+    try:
+        from lib.cost import normalize_usage as _nu
+        _n = _nu(usage)
+        usage_sink.append({'prompt_tokens': _n['input'],
+                           'completion_tokens': _n['output'],
+                           'cache_read_tokens': _n['cache_read'],
+                           'cache_write_tokens': _n['cache_write'],
+                           'reasoning_tokens': _n['thinking']})
+    except Exception as e:
+        logger.debug('[Paper:TermFill] usage collect failed (non-fatal): %s', e)
+
+
+def _generate_definitions(report_text, gap_terms, ui_lang, model, dispatch,
+                          usage_sink=None) -> dict:
     """Call the LLM once (temp 0.45) + one repair-reask (temp 0) → {term: def}."""
     messages = _backfill_prompt(report_text, gap_terms, ui_lang)
     try:
         content, _usage = dispatch(messages, max_tokens=1500, temperature=0.45,
                                    prefer_model=model, strict_model=bool(model),
                                    log_prefix='[Paper:TermFill]')
+        _collect_usage(usage_sink, _usage)
     except Exception as e:
         logger.warning('[Paper:TermFill] dispatch failed: %s', e)
         return {}
@@ -164,13 +182,14 @@ def _generate_definitions(report_text, gap_terms, ui_lang, model, dispatch) -> d
     if not obj:
         # One repair re-ask at temp 0 (mirrors the insight pass).
         try:
-            content2, _ = dispatch(
+            content2, _usage2 = dispatch(
                 messages + [{'role': 'assistant', 'content': content or ''},
                             {'role': 'user', 'content':
                              'Your reply was not valid JSON. Reply with ONLY the '
                              'JSON object {"TERM": "definition", ...}.'}],
                 max_tokens=1500, temperature=0, prefer_model=model,
                 strict_model=bool(model), log_prefix='[Paper:TermFill:repair]')
+            _collect_usage(usage_sink, _usage2)
             obj = _parse_json_obj(content2)
         except Exception as e:
             logger.warning('[Paper:TermFill] repair re-ask failed: %s', e)
@@ -254,7 +273,7 @@ def _render_addendum(rows: dict, ui_lang: str) -> str:
 
 
 def build_backfill_addendum(report_text, audit, ui_lang='en', *,
-                            model=None, dispatch=None) -> str:
+                            model=None, dispatch=None, usage_sink=None) -> str:
     """Generate a gap-closing glossary addendum, or ``''`` if none provably closes.
 
     Args:
@@ -299,7 +318,8 @@ def build_backfill_addendum(report_text, audit, ui_lang='en', *,
     offered = {}
     for i in range(0, len(want), _MAX_TERMS_PER_CALL):
         chunk = want[i:i + _MAX_TERMS_PER_CALL]
-        got = _generate_definitions(report_text, chunk, ui_lang, model, dispatch)
+        got = _generate_definitions(report_text, chunk, ui_lang, model, dispatch,
+                                    usage_sink=usage_sink)
         if got:
             offered.update(got)
     if not offered:
@@ -326,16 +346,23 @@ def run_report_termfill(report_md, ui_lang='en', *, phash='', model=None,
     persists it under the SEPARATE ``termfill:<ui>`` key via the production
     write-path ``upsert(db, PAPER_REPORTS, …)`` — never overwriting the report.
 
-    Returns ``{'markdown': str|'' , 'closed': bool}``.
+    Returns ``{'markdown': str|'' , 'closed': bool, 'usage': dict|None}``.
     """
-    result = {'markdown': '', 'closed': False}
+    result = {'markdown': '', 'closed': False, 'usage': None}
     try:
         if audit is None:
             audit = build_terminology_audit(report_md)
         if not audit:
             return result
+        usage_sink = []
         addendum = build_backfill_addendum(report_md, audit, ui_lang,
-                                           model=model, dispatch=dispatch)
+                                           model=model, dispatch=dispatch,
+                                           usage_sink=usage_sink)
+        if usage_sink:
+            keys = ('prompt_tokens', 'completion_tokens', 'cache_read_tokens',
+                    'cache_write_tokens', 'reasoning_tokens')
+            result['usage'] = {k: sum(int(u.get(k, 0)) for u in usage_sink)
+                               for k in keys}
         if not addendum:
             return result
         result['markdown'] = addendum

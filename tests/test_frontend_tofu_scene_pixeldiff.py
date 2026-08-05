@@ -39,18 +39,20 @@ Env gate: requires `node` on PATH + `cairocffi` importable; skipped otherwise
 """
 import json
 import math
-import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
 
+from tests._jsdom import frontend_module_guard
+
 REPO = Path(__file__).resolve().parent.parent
 HARNESS = REPO / "tests" / "_scene_pixeldiff.js"
 
 cairocffi = pytest.importorskip("cairocffi", reason="cairo rasterizer not available")
-if shutil.which("node") is None:
-    pytest.skip("node not on PATH", allow_module_level=True)
+# P0-1: node absent → clean skip normally, collection-red under
+# TOFU_REQUIRE_FRONTEND=1 (docs/TESTING_STRATEGY.md §4).
+frontend_module_guard()
 
 W, H = 360, 48
 FOOT_X = 180.0            # pet foot-centre px (bar centre)

@@ -629,6 +629,7 @@ def test_chromium_env_survives_the_export():
     """
     sys.path.insert(0, ROOT)
     import importlib
+    pytest.importorskip('export', reason='export.py not shipped in opensource')
     export = importlib.import_module('export')
 
     target = 'chromium_env.py'

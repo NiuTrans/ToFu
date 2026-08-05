@@ -52,7 +52,7 @@ def stream_chat(body, *, on_thinking=None, on_content=None,
                 on_tool_call_ready=None,
                 abort_check=None, log_prefix='', api_key=None, base_url=None,
                 extra_headers=None, api_protocol='openai', oauth='',
-                on_attempt_restart=None, on_first_byte_wait=None):
+                adapter=None, on_attempt_restart=None, on_first_byte_wait=None):
     """Streaming chat completion with callbacks.
 
     Automatically retries on transient connection errors up to
@@ -98,7 +98,7 @@ def stream_chat(body, *, on_thinking=None, on_content=None,
                 abort_check=abort_check, log_prefix=log_prefix,
                 attempt=attempt, api_key=api_key, base_url=base_url,
                 extra_headers=extra_headers, api_protocol=api_protocol,
-                oauth=oauth, on_first_byte_wait=on_first_byte_wait)
+                oauth=oauth, adapter=adapter, on_first_byte_wait=on_first_byte_wait)
             usage = attach_limit_learned(usage, _limit_learned)
             return msg, finish_reason, usage
         except (RateLimitError, PermissionError_, AbortedError, ContentFilterError, PromptTooLongError, EndpointUnreachableError):
@@ -128,7 +128,7 @@ def _stream_chat_once(body, *, on_thinking=None, on_content=None,
                       on_tool_call_ready=None,
                       abort_check=None, log_prefix='', attempt=0,
                       api_key=None, base_url=None, extra_headers=None,
-                      api_protocol='openai', oauth='',
+                      api_protocol='openai', oauth='', adapter=None,
                       on_first_byte_wait=None):
     """Single attempt at a streaming chat completion (sync transport)."""
     plan = prepare_request(
@@ -166,32 +166,60 @@ def _stream_chat_once(body, *, on_thinking=None, on_content=None,
             # this host is geo-blocked / dead, open the stream through the
             # user's desktop agent instead. Probe is per-host cached (300s).
             from lib.desktop import egress as _eg
-            try:
-                _egress_route = _eg.route_request(plan.url, user_id='')
-            except _eg.EgressUnavailable as e:
-                _proxy_report_outcome(plan.url, False)
-                raise EndpointUnreachableError(str(e), base_url=plan.url) from e
-            if _egress_route != 'direct':
+            if adapter:
+                # ── Subscription-adapter branch (E4): the provider IS a
+                # CLIProxyAPI sidecar on the user's desktop agent; its
+                # base_url is loopback-ON-THE-AGENT, which the server can
+                # NEVER reach directly. Ride the bridge loopback relay — no
+                # route_request, no direct fallback. Error mapping mirrors
+                # the egress branch (EgressUnavailable → unreachable).
+                from urllib.parse import urlparse as _urlparse
+                from lib.desktop import adapter as _ad
+                _pu = _urlparse(plan.url)
+                _relay_path = _pu.path + (('?' + _pu.query) if _pu.query else '')
                 try:
-                    resp = _eg.open_stream(
-                        plan.url, method='POST', headers=plan.hdrs,
+                    resp = _ad.relay_stream(
+                        adapter.get('agent_id', ''),
+                        int(adapter.get('port') or 0),
+                        _relay_path, headers=plan.hdrs,
                         body=json.dumps(plan.body).encode(),
-                        agent_id=_egress_route, log_prefix=log_prefix)
+                        log_prefix=log_prefix)
+                except _eg.EgressUnavailable as e:
+                    _proxy_report_outcome(plan.url, False)
+                    raise EndpointUnreachableError(
+                        str(e), base_url=plan.url) from e
+                _resp_holder['resp'] = resp
+                if _watchdog.aborted:
+                    raise AbortedError('User aborted while awaiting response headers')
+                _proxy_report_outcome(
+                    plan.url, True, (time.monotonic() - _conn_t0) * 1000.0)
+            else:
+                try:
+                    _egress_route = _eg.route_request(plan.url, user_id='')
                 except _eg.EgressUnavailable as e:
                     _proxy_report_outcome(plan.url, False)
                     raise EndpointUnreachableError(str(e), base_url=plan.url) from e
-            else:
-                resp = get_sync_session().post(
-                    plan.url, headers=plan.hdrs, json=plan.body,
-                    stream=True, timeout=(CONNECT_TIMEOUT, None),
-                    proxies=proxies_for(plan.url))
-            _resp_holder['resp'] = resp
-            if _watchdog.aborted:
-                # Stop landed while we were blocked pre-headers — the flag
-                # is all we get (no socket handle to close retroactively).
-                raise AbortedError('User aborted while awaiting response headers')
-            _proxy_report_outcome(
-                plan.url, True, (time.monotonic() - _conn_t0) * 1000.0)
+                if _egress_route != 'direct':
+                    try:
+                        resp = _eg.open_stream(
+                            plan.url, method='POST', headers=plan.hdrs,
+                            body=json.dumps(plan.body).encode(),
+                            agent_id=_egress_route, log_prefix=log_prefix)
+                    except _eg.EgressUnavailable as e:
+                        _proxy_report_outcome(plan.url, False)
+                        raise EndpointUnreachableError(str(e), base_url=plan.url) from e
+                else:
+                    resp = get_sync_session().post(
+                        plan.url, headers=plan.hdrs, json=plan.body,
+                        stream=True, timeout=(CONNECT_TIMEOUT, None),
+                        proxies=proxies_for(plan.url))
+                _resp_holder['resp'] = resp
+                if _watchdog.aborted:
+                    # Stop landed while we were blocked pre-headers — the flag
+                    # is all we get (no socket handle to close retroactively).
+                    raise AbortedError('User aborted while awaiting response headers')
+                _proxy_report_outcome(
+                    plan.url, True, (time.monotonic() - _conn_t0) * 1000.0)
         except AbortedError:
             raise
         except requests.exceptions.ConnectionError as e:

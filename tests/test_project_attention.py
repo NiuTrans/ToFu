@@ -15,6 +15,9 @@ semantics:
     2026-07-12 de-gating — nothing stops while one is pending);
   • a COOLDOWN block is NOT an item at all (it self-expires; listing it would
     train the operator to ignore the surface) but IS counted in ``waiting``;
+  • a file CONFLICT is NOT an item either (notify-only, self-clearing, no
+    resolving control — 2026-08-01 owner directive); it stays in the collab
+    bar's live detail lines and the Team tab;
   • blocking items sort ahead of advisory ones.
 
 Plus a source-level negative control: no-op the severity sort → the
@@ -24,6 +27,7 @@ Plus a source-level negative control: no-op the severity sort → the
 from __future__ import annotations
 
 import os
+import time
 
 import pytest
 
@@ -34,6 +38,7 @@ pytestmark = pytest.mark.unit
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
 _ATTN_SRC = os.path.join(ROOT, 'lib', 'conversations', 'project_attention.py')
+_BOARD_SRC = os.path.join(ROOT, 'lib', 'conversations', 'project_board.py')
 
 
 @pytest.fixture(scope='module', autouse=True)
@@ -178,12 +183,18 @@ def test_blocking_sorts_ahead_of_advisory(flask_app):
     assert [i['severity'] for i in a['items'][1:]] == ['advisory', 'advisory']
 
 
-# ── Conflicts ──
+# ── Conflicts: NOT attention items (2026-08-01 owner directive) ──
 
-def test_conflict_overlap_is_an_advisory_item(flask_app):
-    """Recomputed from the SAME detect_overlaps the live broadcast uses — the
-    message is rendered verbatim, and the conv halves of the peer keys are
-    projected so the UI can mark 'this involves the conv you're viewing'."""
+def test_conflict_overlap_is_not_an_attention_item(flask_app):
+    """A file overlap is notify-only and SELF-CLEARING (it recomputes from the
+    presence registry and vanishes when a peer goes idle), and it has no
+    resolving control — the system deliberately never locks, the operator
+    decides whether to intervene. An item that needs NOTHING from the human
+    must not occupy the "needs you" surface (owner directive 2026-08-01: "since
+    you don't need me to handle it, don't display it here"). The overlap stays
+    visible where LIVE STATUS belongs: the summary's conflictMessages (collab
+    bar detail lines — pinned by test_summary_conflicts_from_file_overlap) and
+    the Team tab."""
     from lib.conversations.project_attention import build_attention_items
     p = os.path.abspath('/tmp/attn-conflict')
     with flask_app.app_context():
@@ -192,12 +203,9 @@ def test_conflict_overlap_is_an_advisory_item(flask_app):
         reg.record_files(p, 'convA', [{'path': 'src/shared.py', 'action': 'edit'}])
         reg.record_files(p, 'convB', [{'path': 'src/shared.py', 'action': 'edit'}])
         a = build_attention_items(p)
-    conflicts = [i for i in a['items'] if i['type'] == 'conflict']
-    assert len(conflicts) == 1
-    assert conflicts[0]['severity'] == 'advisory'
-    assert conflicts[0]['path'] == 'src/shared.py'
-    assert 'shared.py' in conflicts[0]['text']
-    assert set(conflicts[0]['convIds']) == {'convA', 'convB'}
+    assert a['items'] == [], \
+        'a live conflict must never be an attention item'
+    assert a['needsYou'] == 0 and a['advisory'] == 0
 
 
 # ── conv_id marks ownership without changing membership ──
@@ -312,10 +320,10 @@ from tests._nc_harness import patch_restore as _patch_restore  # noqa: E402
 #  The proposal `text` is COMMITTABLE, not display-only
 #
 #  The Needs-you tab commits the durable charter decision from this exact
-#  field. It was capped at _TEXT_MAX (600) like the display-only conflict
-#  message, so committing a longer proposal from that tab silently stored a
-#  decision cut mid-sentence — and a charter decision is prompt-injected
-#  shared intent, so a truncated one misleads every sibling conversation.
+#  field. It was capped at _TEXT_MAX (600) like a display-only string, so
+#  committing a longer proposal from that tab silently stored a decision cut
+#  mid-sentence — and a charter decision is prompt-injected shared intent,
+#  so a truncated one misleads every sibling conversation.
 # ════════════════════════════════════════════════════════════════════
 
 def test_proposal_text_is_not_capped_at_the_display_max(flask_app):
@@ -332,34 +340,6 @@ def test_proposal_text_is_not_capped_at_the_display_max(flask_app):
     assert item['text'] == long_proposal, (
         'the committable proposal text must not be truncated — the Needs-you '
         'tab commits THIS string as the durable decision')
-
-
-def test_conflict_text_is_still_capped(flask_app):
-    """The complement: a conflict message IS display-only, so it keeps the cap.
-    Without this, "stop truncating" could be over-applied to every field and
-    one pathological advisory could dominate the panel."""
-    import lib.conversations.project_attention as attn
-    p = os.path.abspath('/tmp/attn-longconflict')
-
-    def _one_huge(peers):
-        return [{'path': 'src/x.py', 'peers': ['cA', 'cB'],
-                 'message': 'X' * (attn._TEXT_MAX * 3)}]
-
-    reg.announce(p, 'cA', task_id='tA', title='A')
-    monkey = attn._conflicts
-    assert monkey is not None
-    import lib.presence.conflict as confl
-    _orig = confl.detect_overlaps
-    confl.detect_overlaps = _one_huge
-    try:
-        with flask_app.app_context():
-            items = attn.build_attention_items(p)['items']
-    finally:
-        confl.detect_overlaps = _orig
-    conflicts = [i for i in items if i['type'] == 'conflict']
-    assert len(conflicts) == 1
-    assert len(conflicts[0]['text']) == attn._TEXT_MAX, \
-        'a display-only conflict message must stay capped'
 
 
 def test_proposal_text_commits_whole_through_the_real_route(flask_app):
@@ -390,8 +370,6 @@ def test_proposal_text_commits_whole_through_the_real_route(flask_app):
 
 
 # ── Source-level NEGATIVE CONTROL ──
-
-from tests._nc_harness import patch_restore as _patch_restore  # noqa: E402
 
 
 def test_NC_severity_rank_is_load_bearing(flask_app):
@@ -437,10 +415,9 @@ def test_NC_proposal_text_cap_would_truncate_a_committed_decision(flask_app):
     """NC: re-apply the display cap to the proposal `text` → the panel's
     committable string is a 600-char slice → the whole-commit assertion FAILS.
 
-    This is the shipped bug, reproduced: `_TEXT_MAX` is right for the conflict
-    message (pure display) and wrong for this field, because a resolving control
-    submits it back. The NC keeps the CONFLICT cap intact, so it isolates the
-    one field under test rather than proving "some cap exists somewhere".
+    This is the shipped bug, reproduced: `_TEXT_MAX` is right for a purely
+    display-only string and wrong for this field, because a resolving control
+    submits it back.
     """
     def run():
         import lib.conversations.project_attention as attn
@@ -458,5 +435,135 @@ def test_NC_proposal_text_cap_would_truncate_a_committed_decision(flask_app):
         _ATTN_SRC,
         "        'text': p.get('summary') or '',",
         "        'text': (p.get('summary') or '')[:_TEXT_MAX],  # NC (cap restored)",
+        run,
+    )
+
+
+# ════════════════════════════════════════════════════════════════════
+#  Provenance + background on a halted-epic card (2026-08 owner complaint:
+#  "I can't tell which conversation asked me this, and the background is
+#  incomplete"). Before blocked_by, the asker existed only in the feed /
+#  audit trail — owner_conv_id projects '' for a blocked epic because it
+#  is not claimed.
+# ════════════════════════════════════════════════════════════════════
+
+def _insert_conv(db, conv_id, title):
+    """Minimal conversations row so the title lookup resolves for real."""
+    now = int(time.time() * 1000)
+    db.execute(
+        'INSERT INTO conversations (id, user_id, title, messages, created_at, '
+        'updated_at, settings, msg_count, search_text, rev) '
+        'VALUES (?, 1, ?, ?, ?, ?, ?, 0, ?, ?)',
+        (conv_id, title, '[]', now, now, '{}', '', 1))
+    db.commit()
+
+
+def test_blocked_by_is_surfaced_with_title_and_mine(flask_app):
+    """The card must answer 'which conversation asked me this?' from the ROW:
+    blocked_by → askedByConvId + the resolved title, and the same id drives
+    `mine` marking exactly like a proposal's author."""
+    from lib.conversations.project_attention import build_attention_items
+    from lib.conversations.project_board import post_task
+    from lib.database import DOMAIN_CHAT, get_thread_db
+    p = os.path.abspath('/tmp/attn-provenance')
+    with flask_app.app_context():
+        db = get_thread_db(DOMAIN_CHAT)
+        _insert_conv(db, 'attn-asker-1', 'Egress 出口调研')
+        t = post_task(p, 'cA', 'Halted epic')['id']
+        _block_with_question(p, 'attn-asker-1', t, 'Which way?')
+        a = build_attention_items(p, 'attn-asker-1')
+    item = a['items'][0]
+    assert item['askedByConvId'] == 'attn-asker-1', item
+    assert item['askedByTitle'] == 'Egress 出口调研', item
+    assert item.get('mine') is True, 'the asker id must drive mine marking'
+
+
+def test_blocked_by_falls_back_to_created_by_conv(flask_app):
+    """Rows blocked BEFORE the column existed (blocked_by='') still get a
+    provenance chip — from the epic's poster, never nothing."""
+    from lib.conversations.project_attention import build_attention_items
+    from lib.conversations.project_board import post_task
+    from lib.database import DOMAIN_CHAT, get_thread_db
+    p = os.path.abspath('/tmp/attn-legacy-block')
+    with flask_app.app_context():
+        t = post_task(p, 'cA', 'Halted epic')['id']
+        _block_with_question(p, 'cB', t, 'Which way?')
+        db = get_thread_db(DOMAIN_CHAT)
+        db.execute("UPDATE project_tasks SET blocked_by='' WHERE id=?", (t,))
+        db.commit()
+        item = build_attention_items(p)['items'][0]
+    assert item['askedByConvId'] == 'cA', item
+    assert item['askedByTitle'] == '', 'no conv row → id-only chip, never blank id'
+
+
+def test_reason_uses_the_background_allowance(flask_app):
+    """The reason is the card's BACKGROUND section — it must arrive WHOLE
+    past the display-only 600-char cap (the 'incomplete background'
+    complaint), bounded only by _REASON_MAX (= the storage cap)."""
+    from lib.conversations.project_attention import _TEXT_MAX, build_attention_items
+    from lib.conversations.project_board import block_task, post_task
+    p = os.path.abspath('/tmp/attn-longreason')
+    # (block_task .strip()s the reason — build the fixture without a tail space)
+    reason = ('[human-gated] needs a call. ' + ('evidence ' * 90)).strip()
+    assert _TEXT_MAX < len(reason) <= 2000, 'fixture must exceed the display cap'
+    with flask_app.app_context():
+        t = post_task(p, 'cA', 'Halted epic')['id']
+        block_task(p, 'cA', t, reason, question='Which way?')
+        item = build_attention_items(p)['items'][0]
+    assert item['reason'] == reason, \
+        'the background must not be truncated at the display-only cap'
+
+
+def test_proposal_carries_author_provenance(flask_app):
+    """The charter-proposal card is a decision awaiting the human too — it
+    must wear the SAME askedBy* provenance as the halted-epic card: the
+    author's conv id + the resolved conversation title."""
+    from lib.conversations.project_attention import build_attention_items
+    from lib.conversations.project_charter import propose_amendment
+    from lib.database import DOMAIN_CHAT, get_thread_db
+    p = os.path.abspath('/tmp/attn-prop-prov')
+    with flask_app.app_context():
+        db = get_thread_db(DOMAIN_CHAT)
+        _insert_conv(db, 'attn-proposer-1', '架构决策讨论')
+        propose_amendment(p, 'attn-proposer-1', 'Adopt the new parser')
+        item = build_attention_items(p)['items'][0]
+    assert item['type'] == 'charter_proposal', item
+    assert item['askedByConvId'] == 'attn-proposer-1', item
+    assert item['askedByTitle'] == '架构决策讨论', item
+
+
+def test_NC_blocked_by_write_is_load_bearing(flask_app):
+    """NC: strip the blocked_by=? write from block_task → the asker is LOST
+    (the chip falls back to the epic's poster) → the provenance assertions
+    FAIL. Proves the column write, not some incidental read, carries the
+    answer to 'who asked me this?'."""
+    def run(mod):
+        p = os.path.abspath('/tmp/attn-nc-prov')
+        with flask_app.app_context():
+            from lib.database import DOMAIN_CHAT, get_thread_db
+            db = get_thread_db(DOMAIN_CHAT)
+            db.execute('DELETE FROM project_tasks WHERE project_path=?', (p,))
+            db.commit()
+            t = mod.post_task(p, 'cA', 'Halted epic')['id']
+            mod.block_task(p, 'attn-asker-2', t, '[human-gated] needs a call',
+                           question='Which way?')
+            from lib.conversations.project_attention import build_attention_items
+            item = build_attention_items(p)['items'][0]
+        assert item['askedByConvId'] != 'attn-asker-2', \
+            'NC: with the blocked_by write neutered the asker must be lost'
+        assert item['askedByConvId'] == 'cA', \
+            'NC: the fallback to the poster is what remains'
+
+    _patch_restore(
+        _BOARD_SRC,
+        "            'block_reason=?, block_question=?, human_answer=?, blocked_by=?, '\n"
+        "            'updated_at=? '\n"
+        "            'WHERE id=? AND project_path=?',\n"
+        "            (blocked_until, new_count, reason, question_json, '', conv_id,\n"
+        "             now, task_id, project_path))",
+        "            'block_reason=?, block_question=?, human_answer=?, updated_at=? '\n"
+        "            'WHERE id=? AND project_path=?',\n"
+        "            (blocked_until, new_count, reason, question_json, '', now,\n"
+        "             task_id, project_path))  # NC (blocked_by write stripped)",
         run,
     )

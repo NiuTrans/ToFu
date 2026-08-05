@@ -113,7 +113,9 @@ class TestCleanCommandOutput:
     def test_multi_device_startup_collapsed(self):
         result = _clean_command_output(SAMPLE_MULTI_DEVICE_STARTUP)
         lines = result.strip().split('\n')
-        assert len(lines) <= 3, f'Expected <= 3 lines, got {len(lines)}'
+        # ≤4: first line + fold marker + the deliberate summary footer
+        # ([output folded: N of M lines omitted …]) the renderer now appends.
+        assert len(lines) <= 4, f'Expected <= 4 lines, got {len(lines)}'
         assert 'cuda:0-7' in result
 
 

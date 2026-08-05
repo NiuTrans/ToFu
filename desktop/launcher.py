@@ -106,33 +106,12 @@ def _log(msg: str) -> None:
 def _enable_dpi_awareness() -> None:
     """Mark the process per-monitor DPI-aware so HiDPI rendering is crisp.
 
-    Must run before any window is created. No-op off Windows. Tries the
-    newest API first and degrades gracefully on older Windows versions.
+    Must run before any window is created. No-op off Windows. The 3-level
+    fallback lives in desktop._tk_theme (single theme source) — this used to
+    be one of TWO private copies and the post_install one lacked the v2 level.
     """
-    if not sys.platform.startswith('win'):
-        return
-    try:
-        import ctypes
-    except Exception as e:  # pragma: no cover - ctypes always present on win
-        _log('DPI awareness unavailable: %s' % e)
-        return
-    # Per-Monitor v2 (Windows 10 1703+): DPI_AWARENESS_CONTEXT = -4
-    try:
-        if ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4)):
-            return
-    except Exception:
-        pass
-    # PROCESS_PER_MONITOR_DPI_AWARE = 2 (Windows 8.1+)
-    try:
-        ctypes.windll.shcore.SetProcessDpiAwareness(2)
-        return
-    except Exception:
-        pass
-    # System-DPI aware (Vista+) — last resort, still far better than none.
-    try:
-        ctypes.windll.user32.SetProcessDPIAware()
-    except Exception as e:
-        _log('Could not set DPI awareness: %s' % e)
+    from desktop import _tk_theme as theme
+    theme.ensure_dpi_awareness(_log)
 
 
 def _find_free_port(preferred: int = DEFAULT_PORT) -> int:
@@ -359,77 +338,13 @@ def _start_computer_control(port: int, state: dict) -> None:
 def _prompt_connect_line(current_url: str = ''):
     """Ask for ONE pasted connect line; return (url, secret) or None.
 
-    The web UI (Local Control → "This computer", remote case) renders a single
-    click-to-copy line carrying BOTH the server address and the token. This
-    dialog therefore takes ONE field: the user pastes what they copied and is
-    done. Two separate fields would make them split the string by hand, which
-    is the cognitive load the merged surface exists to remove.
-
-    Parsing is delegated to lib.desktop_agent.config.parse_connect_line — the
-    single owner of the format — so this dialog can never drift from what the
-    web side emits. Returns None when the user cancels.
+    The implementation lives in desktop/connect_ui.py (shared with the
+    agent-only build — ONE authoring, never two copies). This wrapper
+    keeps the historical name: tray call sites and the connect-line
+    contract suite reference it here.
     """
-    from lib.desktop_agent.config import parse_connect_line
-    try:
-        import tkinter as tk
-        from tkinter import ttk
-    except ImportError as e:
-        _log('Connect dialog unavailable (no tkinter): %s' % e)
-        return None
-
-    result = {'value': None}
-    root = tk.Tk()
-    root.title('Connect to remote Tofu')
-    root.resizable(False, False)
-    frame = ttk.Frame(root, padding=16)
-    frame.grid(sticky='nsew')
-
-    ttk.Label(frame, text='Connect this computer to a remote Tofu',
-              font=('', 11, 'bold')).grid(row=0, column=0, columnspan=2,
-                                          sticky='w')
-    ttk.Label(frame, wraplength=430, justify='left',
-              text=('In Tofu, open Local Control \u2192 This computer and press '
-                    '"Generate connect line". Paste the whole line here.')
-              ).grid(row=1, column=0, columnspan=2, sticky='w', pady=(6, 10))
-
-    entry = ttk.Entry(frame, width=58)
-    entry.grid(row=2, column=0, columnspan=2, sticky='we')
-    if current_url:
-        ttk.Label(frame, foreground='#666',
-                  text='Currently attached to: %s' % current_url
-                  ).grid(row=3, column=0, columnspan=2, sticky='w', pady=(6, 0))
-    err = ttk.Label(frame, foreground='#b00', wraplength=430, justify='left')
-    err.grid(row=4, column=0, columnspan=2, sticky='w', pady=(6, 0))
-
-    def _ok(*_a):
-        try:
-            result['value'] = parse_connect_line(entry.get())
-        except ValueError as ve:
-            # Keep the dialog open with a specific reason — silently closing
-            # would leave the user unable to tell what was wrong.
-            err.config(text=str(ve))
-            return
-        root.destroy()
-
-    def _cancel(*_a):
-        result['value'] = None
-        root.destroy()
-
-    btns = ttk.Frame(frame)
-    btns.grid(row=5, column=0, columnspan=2, sticky='e', pady=(12, 0))
-    ttk.Button(btns, text='Cancel', command=_cancel).grid(row=0, column=0,
-                                                          padx=(0, 8))
-    ttk.Button(btns, text='Connect', command=_ok).grid(row=0, column=1)
-    entry.bind('<Return>', _ok)
-    root.bind('<Escape>', _cancel)
-    entry.focus_set()
-
-    try:
-        root.mainloop()
-    except Exception as e:
-        _log('Connect dialog failed: %s' % e)
-        return None
-    return result['value']
+    from desktop.connect_ui import prompt_connect_line
+    return prompt_connect_line(current_url, log=_log)
 
 
 def _stop_computer_control(state: dict) -> None:
@@ -441,6 +356,48 @@ def _stop_computer_control(state: dict) -> None:
     _log('Computer control DISABLED')
 
 
+def _persist_cc_state(state: dict) -> None:
+    """Write the tray's computer-control state to the agent config.
+
+    Called ONLY from explicit user clicks (the enable toggle, a permission
+    tier) — never from quit/startup paths, so a crash or a normal Quit
+    cannot erase what the user chose. Failures are logged, never fatal:
+    a read-only config dir must not break the toggle itself.
+    """
+    try:
+        from lib.desktop_agent.config import save_computer_control
+        save_computer_control(bool(state.get('enabled')),
+                              state.get('perms') or {})
+    except Exception as e:
+        _log('Could not persist computer-control state: %s' % e)
+
+
+def _restore_cc_state(state: dict) -> bool:
+    """Load the persisted computer-control state into *state*.
+
+    Returns whether the agent should be auto-started. A fresh install (or
+    a malformed blob) yields False and leaves *state* untouched —
+    deny-by-default is the floor this restore never lowers. Saved perms
+    are merged over the deny-all baseline so a tier added by a future
+    version still defaults OFF for old config files.
+    """
+    try:
+        from lib.desktop_agent.config import load_computer_control
+        enabled, saved_perms = load_computer_control()
+    except Exception as e:
+        _log('Could not read computer-control state: %s' % e)
+        return False
+    if saved_perms:
+        try:
+            from lib.desktop_agent._permissions import safe_default
+            perms = safe_default()
+            perms.update(saved_perms)
+            state['perms'] = perms
+        except Exception as e:
+            _log('Could not merge saved permissions: %s' % e)
+    return enabled
+
+
 def _run_tray(port: int, proc: subprocess.Popen):
     """Run the system tray icon (blocks on the main thread)."""
     url = f'http://127.0.0.1:{port}'
@@ -449,6 +406,12 @@ def _run_tray(port: int, proc: subprocess.Popen):
     # agent loop; the per-tier toggles mutate it in place.
     _cc_state: dict = {'enabled': False, 'thread': None, 'stop': None,
                        'error': None, 'perms': None}
+
+    # Restore the user's persisted choice: an agent they explicitly enabled
+    # comes back up on every launch; a fresh install stays OFF.
+    if _restore_cc_state(_cc_state):
+        _log('Computer control was enabled at last exit — restoring')
+        _start_computer_control(port, _cc_state)
 
     def _shutdown():
         if proc.poll() is None:
@@ -487,22 +450,23 @@ def _run_tray(port: int, proc: subprocess.Popen):
         webbrowser.open(_RELEASES_PAGE)
 
     def on_components(icon, item):
-        """Launch the component installer dialog."""
+        """Launch the component manager (select + progress-visible install)."""
         try:
-            from desktop.post_install import (OPTIONAL_COMPONENTS, _prompt_gui,
-                                              _install_components)
+            from desktop.post_install import OPTIONAL_COMPONENTS, _prompt_gui
         except Exception as e:
             _log('Component installer unavailable: %s' % e)
             return
         not_installed = [c for c in OPTIONAL_COMPONENTS if not c.is_installed()]
         if not not_installed:
             return
-        selected = _prompt_gui(not_installed)
-        if selected:
-            def _bg():
-                for name, success, msg in _install_components(selected):
-                    _log('%s %s: %s' % ('OK' if success else 'FAIL', name, msg))
-            threading.Thread(target=_bg, daemon=True).start()
+        # The dialog hosts the install itself (progress rows + bar) and
+        # returns the results; nothing downloads invisibly anymore. The
+        # DIALOG rides the tk host thread (tray-first topology); the rest
+        # of this handler stays on the tray thread.
+        from desktop import _tk_host
+        results = _tk_host.call(lambda: _prompt_gui(not_installed))
+        for name, success, msg in results:
+            _log('%s %s: %s' % ('OK' if success else 'FAIL', name, msg))
 
     def _attached_url() -> str:
         """The remote server this app is attached to, or '' when local-only."""
@@ -515,7 +479,10 @@ def _run_tray(port: int, proc: subprocess.Popen):
 
     def on_connect_remote(icon, item):
         """Paste a connect line to attach this computer to a remote Tofu."""
-        parsed = _prompt_connect_line(_attached_url())
+        # Only the DIALOG rides the tk host thread; the save/restart/menu
+        # refresh stay here on the tray thread.
+        from desktop import _tk_host
+        parsed = _tk_host.call(lambda: _prompt_connect_line(_attached_url()))
         if parsed is None:
             return
         url, secret = parsed
@@ -543,6 +510,7 @@ def _run_tray(port: int, proc: subprocess.Popen):
             _stop_computer_control(_cc_state)
         else:
             _start_computer_control(port, _cc_state)
+        _persist_cc_state(_cc_state)
         try:
             icon.update_menu()
         except Exception as e:
@@ -557,6 +525,7 @@ def _run_tray(port: int, proc: subprocess.Popen):
                 return
             perms[key] = not perms.get(key)
             _log('Computer control tier %s -> %s' % (key, perms[key]))
+            _persist_cc_state(_cc_state)
             try:
                 icon.update_menu()
             except Exception as e:
@@ -576,36 +545,93 @@ def _run_tray(port: int, proc: subprocess.Popen):
         _shutdown()
         os._exit(0)
 
+    # Tray strings are bilingual (desktop.tray.* in _tk_theme) — the AST
+    # ratchet in tests/test_desktop_tray_i18n.py refuses a hardcoded literal.
+    from desktop import _tk_theme as theme
+    _lang = theme.detect_lang()
+
+    def _tt(key: str, **fill) -> str:
+        text = theme.t(key, _lang)
+        for ph, val in fill.items():
+            text = text.replace('{%s}' % ph, str(val))
+        return text
+
+    # ── Role window / control panel (desktop/role_window.py) ──
+    # The window delegates every mutation to the SAME handlers the tray
+    # uses (a second VIEW over _cc_state, not a new state path), so the
+    # two surfaces can never disagree. Tray callbacks expect an icon
+    # with update_menu(); window-driven actions have no tray to
+    # refresh, hence the null shim.
+    class _NullIcon:
+        @staticmethod
+        def update_menu():
+            pass
+
+    _NULL_ICON = _NullIcon()
+
+    def _role_state_fn():
+        from desktop import role_window
+        return role_window.role_state_full(
+            port, _cc_state, _attached_url(),
+            show_flag=role_window.should_show_at_startup())
+
+    _role_actions = {
+        'open': lambda: webbrowser.open(url),
+        'toggle_cc': lambda: on_toggle_computer_control(_NULL_ICON, None),
+        'toggle_perm': lambda key: _toggle_perm(key)(_NULL_ICON, None),
+        'connect': lambda: on_connect_remote(_NULL_ICON, None),
+    }
+
+    def on_control_panel(icon, item):
+        from desktop import _tk_host, role_window
+        _tk_host.post_or_call(lambda: role_window.show_role_window(
+            'full', _role_state_fn, _role_actions, log=_log))
+
     # Dynamic "update available" item: its text is computed at menu-open time
     # and it is hidden entirely until the background check finds a newer tag.
     menu = pystray.Menu(
-        MenuItem('Open Tofu', on_open, default=True),
-        MenuItem(lambda item: f'Download update ({_update["tag"]})',
+        MenuItem(_tt('desktop.tray.open'), on_open, default=True),
+        MenuItem(_tt('desktop.tray.controlPanel'), on_control_panel),
+        MenuItem(lambda item: _tt('desktop.tray.downloadUpdate',
+                                  tag=_update['tag']),
                  on_update,
                  visible=lambda item: bool(_update['tag'])),
         pystray.Menu.SEPARATOR,
-        MenuItem('Enable Computer Control', on_toggle_computer_control,
+        MenuItem(_tt('desktop.tray.enableCC'), on_toggle_computer_control,
                  checked=lambda item: bool(_cc_state.get('enabled'))),
-        MenuItem('Permissions', pystray.Menu(
-            MenuItem('Allow file writes', _toggle_perm('allow_write'),
+        MenuItem(_tt('desktop.tray.permissions'), pystray.Menu(
+            MenuItem(_tt('desktop.tray.permWrite'), _toggle_perm('allow_write'),
                      checked=_perm_checked('allow_write'), enabled=_perm_enabled),
-            MenuItem('Allow run commands / open apps', _toggle_perm('allow_exec'),
+            MenuItem(_tt('desktop.tray.permExec'), _toggle_perm('allow_exec'),
                      checked=_perm_checked('allow_exec'), enabled=_perm_enabled),
-            MenuItem('Allow mouse / keyboard / screenshot', _toggle_perm('allow_gui'),
+            MenuItem(_tt('desktop.tray.permGui'), _toggle_perm('allow_gui'),
                      checked=_perm_checked('allow_gui'), enabled=_perm_enabled),
         )),
-        MenuItem('Connect to remote Tofu…', on_connect_remote),
-        MenuItem('Install Components...', on_components),
+        MenuItem(_tt('desktop.tray.connectRemote'), on_connect_remote),
+        MenuItem(_tt('desktop.tray.installComponents'), on_components),
         # Which server the agent talks to. Silence here was a real gap: after
         # pasting a connect line the user had no way to tell it took effect.
-        MenuItem(lambda item: ('Server: %s' % (_attached_url() or
-                                               f'this computer (port {port})')),
+        MenuItem(lambda item: _tt('desktop.tray.serverLabel',
+                                  url=_attached_url() or
+                                  _tt('desktop.tray.serverLocal', port=port)),
                  None, enabled=False),
         pystray.Menu.SEPARATOR,
-        MenuItem('Quit', on_quit),
+        MenuItem(_tt('desktop.tray.quit'), on_quit),
     )
 
     icon = pystray.Icon('tofu', icon_image, 'Tofu', menu)
+
+    # Startup role declaration (owner directive 2026-08-03), now TRAY-FIRST
+    # (owner report 2026-08-04): the tray must exist BEFORE the window can
+    # ever hide, or "minimize to tray" strands the app with no surface. The
+    # tk host thread owns the window; the main thread reaches icon.run()
+    # immediately. Off win32 host.start() returns False and post_or_call
+    # inlines — the legacy window-then-tray sequence stands there.
+    from desktop import _tk_host, role_window
+    _tk_host.start(log=_log)
+    if role_window.should_show_at_startup():
+        _tk_host.post_or_call(lambda: role_window.show_role_window(
+            'full', _role_state_fn, _role_actions, log=_log))
 
     # Kick off the update check off the main thread so it never delays the
     # tray appearing. When it finds a newer version it flips the holder and
@@ -625,6 +651,17 @@ def _run_tray(port: int, proc: subprocess.Popen):
     icon.run()
     # Tray stopped (e.g. Quit) — make sure the server goes down too.
     _shutdown()
+
+
+def _import_preseed() -> None:
+    """Import a server-baked ``preseed_server.json`` into the attachment.
+
+    The implementation lives in desktop/connect_ui.py (shared with the
+    agent-only build). ``_EXE_DIR`` is read at CALL time — the preseed
+    suite monkeypatches it to an isolated dir.
+    """
+    from desktop.connect_ui import import_preseed
+    import_preseed(_EXE_DIR, _log)
 
 
 def main():
@@ -731,7 +768,14 @@ def main():
     threading.Thread(target=_open_when_ready, daemon=True,
                      name='tofu-open-browser').start()
 
-    # ── First-launch: offer optional component downloads ──
+    # ── First-launch: import a server-baked preseed (if any), then offer
+    #    optional component downloads. Preseed first: it decides WHICH
+    #    server this machine attaches to, and the component prompt is
+    #    unrelated to it.
+    try:
+        _import_preseed()
+    except Exception as e:
+        _log('Preseed import skipped: %s' % e)
     try:
         from desktop.post_install import is_first_launch, run_first_launch_prompt
         if is_first_launch():

@@ -5,8 +5,6 @@ The handlers register on the same ``chat_bp`` Blueprint (imported here)
 to keep the public URLs unchanged.
 """
 
-from flask import jsonify
-
 from lib.log import audit_log, get_logger
 from lib.api_response import api_not_found, api_ok
 from lib.request_parser import parse_body
@@ -42,8 +40,10 @@ def chat_queue_get(conv_id):
     except Exception as e:
         logger.warning('[chat_queue_get] get_queue failed for conv=%s: %s — returning empty list',
                        conv_id, e)
-        return jsonify([])
-    return jsonify(queue)
+        return api_ok({'items': []})
+    # Coordinated bare-array migration (batch 21): the queue array moves
+    # under ``items``; Api.chat.queueGet unwraps with a fallback.
+    return api_ok({'items': queue})
 
 
 @api_v1_chat_bp.route('/api/v1/chat/queue/<conv_id>/<queue_id>', methods=['DELETE'], endpoint='ui_chat_queue_remove')
@@ -61,7 +61,7 @@ def chat_queue_clear(conv_id):
     """Clear all queued messages for a conversation."""
     from lib.message_queue import clear_queue
     count = clear_queue(conv_id)
-    return jsonify({'cleared': count})
+    return api_ok({'cleared': count})
 
 
 @api_v1_chat_bp.route('/api/v1/chat/autopilot/arm', methods=['POST'], endpoint='ui_chat_autopilot_arm')

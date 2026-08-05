@@ -305,6 +305,30 @@ def has_terminal_event(task_id):
         return False
 
 
+
+def latest_event_ts(task_id):
+    """MAX(ts_ms) across a task's persisted events, or None.
+
+    Liveness oracle for the poll layer (pt_a21cd6eb ③-2): a task whose event
+    log is STILL GROWING has a live worker somewhere, even when the in-memory
+    registry lost it (the 2026-08-01 evaporation family) — the stale-
+    checkpoint "absent = crashed" flip must not fire on fresh events.
+    """
+    if not task_id:
+        return None
+    try:
+        db = get_thread_db(DOMAIN_CHAT)
+        row = db.execute(
+            'SELECT MAX(ts_ms) AS mx FROM task_events WHERE task_id=?',
+            (task_id,)
+        ).fetchone()
+        mx = row['mx'] if row else None
+        return int(mx) if mx else None
+    except Exception as e:
+        logger.debug('[EventLog] latest_event_ts failed for task=%s: %s', task_id[:8], e)
+        return None
+
+
 def _opportunistic_compact(db):
     """Compact a few tasks' leftover FULL snapshot rows into delta form.
 

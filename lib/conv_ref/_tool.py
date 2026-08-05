@@ -37,6 +37,38 @@ def raw_requested(fn_args):
     return bool(val)
 
 
+def _paging_int(value, name):
+    """Coerce a paging arg to a positive int; ``(value, error)``.
+
+    Models emit JSON numbers as strings, so ``'40'`` is honoured like ``40``.
+    Everything unusable (``'abc'``, ``0``, ``-5``, booleans, floats with a
+    fraction) returns an ``Error:`` string — silently ignoring it would hand
+    back the default window indistinguishably.
+    """
+    if value is None:
+        return None, None
+    bad = (f'Error: {name} must be a positive integer, got {value!r}. '
+           f'Omit {name} for the default window.')
+    if isinstance(value, bool):
+        return None, bad
+    if isinstance(value, int):
+        n = value
+    elif isinstance(value, float):
+        if not value.is_integer():
+            return None, bad
+        n = int(value)
+    elif isinstance(value, str):
+        s = value.strip()
+        if not s.isdigit():
+            return None, bad
+        n = int(s)
+    else:
+        return None, bad
+    if n < 1:
+        return None, bad
+    return n, None
+
+
 def execute_conv_ref_tool(fn_name, fn_args, current_conv_id=None,
                           project_path=None, user_id=None):
     """Execute a conversation reference tool and return the result string.
@@ -72,12 +104,24 @@ def execute_conv_ref_tool(fn_name, fn_args, current_conv_id=None,
                 return "Error: conversation_id is required."
             include_details = fn_args.get('include_tool_details', True)
             raw = raw_requested(fn_args)
+            # Paging args are VALIDATED before forwarding: the schema exposes
+            # them, so a bad value must be reported, not silently ignored —
+            # an ignored cursor hands back the same window and the caller
+            # cannot tell why (the original defect the contract pins).
+            limit, err = _paging_int(fn_args.get('limit'), 'limit')
+            if err:
+                return err
+            before, err = _paging_int(fn_args.get('before'), 'before')
+            if err:
+                return err
             return get_conversation(
                 conversation_id=conv_id,
                 include_tool_details=include_details,
                 current_conv_id=current_conv_id,
                 raw=raw,
                 user_id=user_id,
+                limit=limit,
+                before=before,
             )
 
         else:

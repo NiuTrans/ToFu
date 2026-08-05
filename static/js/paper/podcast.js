@@ -46,6 +46,42 @@ var _podcast = {
   _segFirstTick: 0,        // wall-clock of the first segment_done (ETA)
   etaSec: 0,
 };
+/* Mode/lang persist like the model pick (paperPodcastModel): a full page
+ * reload must re-issue the SAME (mode, lang) the run was started with —
+ * the backend re-attach scan matches (paper_hash, mode, lang) exactly, so
+ * a 'full' run was invisible to a panel that had reset to 'short'. Values
+ * are validated on read; anything unexpected keeps the in-state default. */
+function _pcSeedOptions() {
+  var mode = '', lang = '';
+  try {
+    mode = localStorage.getItem('paperPodcastMode') || '';
+    lang = localStorage.getItem('paperPodcastLang') || '';
+  } catch (e) {}
+  if (mode === 'short' || mode === 'full') _podcast.mode = mode;
+  if (lang === 'zh' || lang === 'en') _podcast.lang = lang;
+}
+
+function _pcPersistOptions() {
+  try {
+    localStorage.setItem('paperPodcastMode', _podcast.mode);
+    localStorage.setItem('paperPodcastLang', _podcast.lang);
+  } catch (e) {}
+}
+
+/* _pmPick hook (called from the shared card picker): sync a podcast option
+ * card into state + storage at PICK time, not only at generate time. A
+ * no-op for video's selects — its lookup is paper_hash-only. */
+function _pcPickPersist(selId, value) {
+  if (selId === 'podcastModeSel' && (value === 'short' || value === 'full')) {
+    _podcast.mode = value;
+  } else if (selId === 'podcastLangSel' && (value === 'zh' || value === 'en')) {
+    _podcast.lang = value;
+  } else {
+    return;
+  }
+  _pcPersistOptions();
+}
+
 // Poll cadence — a var (not const) so the JSDOM harness can shrink it.
 var _PODCAST_POLL_MS = 1200;
 // Consecutive poll failures before the honest 'lost' terminal state (拍板 A).
@@ -465,6 +501,7 @@ async function _initPodcastTab(force) {
     return;
   }
   _pmSeedModel('podcast');
+  _pcSeedOptions();
   _podcast.status = 'loading';
   _pcRender();   // skeleton while the lookup round-trips
   try {
@@ -661,6 +698,7 @@ async function _podcastGenerate(force) {
   _podcast.mode = modeSel ? modeSel.value : _podcast.mode;
   _podcast.lang = langSel ? langSel.value : _podcast.lang;
   _podcast.voice = voiceInp ? voiceInp.value.trim() : _podcast.voice;
+  _pcPersistOptions();
   _pmSeedModel('podcast');
   /* The run just started WILL be made with the current pick — the done
    * card's badge may say so (the poll's done frame confirms it). */
@@ -829,6 +867,9 @@ if (typeof _pmPick !== 'function') {
       ? btn.parentNode.querySelectorAll('[data-sel="' + selId + '"]') : [];
     for (var i = 0; i < sibs.length; i++) sibs[i].classList.remove('is-selected');
     btn.classList.add('is-selected');
+    /* Podcast persists (mode, lang) for reload-grade re-attach; the hook
+     * is a no-op for video's selects (its lookup is paper_hash-only). */
+    if (typeof _pcPickPersist === 'function') _pcPickPersist(selId, sel.value);
   };
 }
 

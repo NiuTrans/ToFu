@@ -474,15 +474,30 @@ def test_disarm_calls_conclude_run_via_module_scope_binding(
     # markers's bound name PRE-patch — asserted after patch by re-import).
     import importlib
     importlib.reload(ap_markers)
-    import lib.tasks_pkg.autopilot as ap
-    import lib.tasks_pkg.autopilot_run_lifecycle as leaf
-    assert ap_markers.conclude_run is leaf.conclude_run, (
-        'autopilot_markers.conclude_run must be identity-bound to the '
-        'leaf module after a fresh reload — otherwise the top-level '
-        'import wiring is wrong.')
-    assert ap.conclude_run is leaf.conclude_run, (
-        'autopilot.conclude_run facade attr must be identity-bound to '
-        'the leaf module.')
+    try:
+        import lib.tasks_pkg.autopilot as ap
+        import lib.tasks_pkg.autopilot_run_lifecycle as leaf
+        assert ap_markers.conclude_run is leaf.conclude_run, (
+            'autopilot_markers.conclude_run must be identity-bound to the '
+            'leaf module after a fresh reload — otherwise the top-level '
+            'import wiring is wrong.')
+        assert ap.conclude_run is leaf.conclude_run, (
+            'autopilot.conclude_run facade attr must be identity-bound to '
+            'the leaf module.')
+    finally:
+        # reload() rebound ap_markers' OWN defs (arm_autopilot /
+        # disarm_autopilot / _marker_exists) to NEW objects, but the
+        # facade's from-imports (lib/tasks_pkg/autopilot.py) still point at
+        # the PRE-reload ones — leaving the process with a broken
+        # facade↔markers identity that the NEXT suite in a ring
+        # (test_autopilot_markers_extraction_wire_parity) reads as a
+        # contract violation. Re-sync the facade bindings so the state we
+        # leave behind is coherent. Only re-sync when the facade is
+        # already imported — never force-import it from here.
+        _facade = sys.modules.get('lib.tasks_pkg.autopilot')
+        if _facade is not None:
+            for _n in ('arm_autopilot', 'disarm_autopilot', '_marker_exists'):
+                setattr(_facade, _n, getattr(ap_markers, _n))
 
 
 # ══════════════════════════════════════════════════════════

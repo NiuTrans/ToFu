@@ -114,6 +114,7 @@ from lib.key_stats._state import (
 # ── Hot-path recording ──
 from lib.key_stats._record import (
     mark_key_exhausted,
+    record_gateway_error,
     record_outcome,
     record_rate_limit,
 )
@@ -142,6 +143,7 @@ logger = get_logger(__name__)
 __all__ = [
     'record_outcome',
     'record_rate_limit',
+    'record_gateway_error',
     'mark_key_exhausted',
     'get_today_stats',
     'get_all_stats',

@@ -1,3 +1,5 @@
+# Incident anchor: born in commit c9b47ecf — refactor(orchestrator): pt_03f4cdf1 slice 25 — extract post-stream an...
+# (funeral audit pt_c565a36b3e8f42e6, docs/RATCHET_AUDIT.md)
 """Slice 25 wire-parity: _stream_decision.py extraction from _run.py."""
 
 import inspect

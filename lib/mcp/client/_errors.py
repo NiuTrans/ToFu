@@ -35,7 +35,12 @@ def _safe_text(exc: BaseException) -> str:
     """
     try:
         return str(exc) or ''
-    except Exception:
+    except Exception as e:
+        # str(exc) itself raised (e.g. a malformed MCPError subclass whose
+        # __str__ dereferences a missing .error) — fall back to the args;
+        # classification diagnostics must never raise, but never silently.
+        logger.debug('[MCP] str(exc) raised during error classification, '
+                     'falling back to exc.args: %s', e)
         return ' '.join(str(a) for a in getattr(exc, 'args', ()))
 
 

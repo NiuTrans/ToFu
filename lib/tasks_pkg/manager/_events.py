@@ -244,6 +244,8 @@ def append_event(task, event):
         if event.get('detailArgs'):
             p['detailArgs'] = event['detailArgs']
         if event.get('toolContext'): p['toolContext'] = event['toolContext']
+        if event.get('toolContextTools'):
+            p['toolContextTools'] = event['toolContextTools']
         if event.get('tools'): p['tools'] = event['tools']
         # The PHASE wire event now carries the unified canonical `roundNum`
         # (Phase 3 §5); the poll-fallback phase dict keeps its local `round`
@@ -252,6 +254,23 @@ def append_event(task, event):
         task['phase'] = p
     elif event.get('type') == 'delta':
         task['phase'] = None  # Clear phase when LLM starts producing tokens
+    elif event.get('type') in ('done', 'error', 'aborted'):
+        # ★ Terminal events retire the phase snapshot. Previously ONLY deltas
+        #   cleared it, so a task that ended while its last phase was still up
+        #   (killed mid-compaction-summary, error right after a retrying beat)
+        #   kept serving that live-looking phase to the poll lane / cold replay
+        #   FOREVER — the multi-hour stale "compressing context…" HUD
+        #   (measured 2026-08-01: 20:10's compacting phase still on a bubble
+        #   at 22:22, epic pt_f222e9ed). A finished task has no current phase.
+        task['phase'] = None
+    elif (event.get('type') == 'compaction_done'
+          and isinstance(task.get('phase'), dict)
+          and task['phase'].get('phase') == 'compacting'):
+        # The compacting phase's OWN terminal: fold it the moment the
+        # compaction lands rather than leaving it up until the next round's
+        # phase event (or forever, if the task dies in between). Only fold a
+        # phase that IS compacting — never clobber an unrelated live phase.
+        task['phase'] = None
 
     # ★ Persistence now happens in _persist_before_push (durable-before-visible
     #   ordering, above) — the row is committed BEFORE the client push, not

@@ -446,10 +446,17 @@ def test_the_shared_list_carries_a_machine_readable_platform_key():
     assert ("windows", "x86_64") in seen and ("linux", "x86_64") in seen, seen
     # The release gates consume the 2-tuple shape. It must be DERIVED from the
     # list above, never maintained beside it — two hand-kept lists is the exact
-    # drift scripts/release_assets.py exists to prevent.
+    # drift scripts/release_assets.py exists to prevent. Since A2b
+    # (2026-08-02) the derivation spans BOTH component tables: a release
+    # missing an agent asset is exactly as incomplete as one missing a
+    # platform (build-desktop.yml's agent legs landed atomically with the
+    # join — legs without the join would publish hollow, the join without
+    # the legs would fail every publish).
     assert mod.REQUIRED_PLATFORM_ASSETS == tuple(
-        (label, glob) for _o, _a, label, glob, _min in mod.PLATFORM_ASSETS), (
-        "REQUIRED_PLATFORM_ASSETS is not derived from PLATFORM_ASSETS")
+        (label, glob) for _o, _a, label, glob, _min in (
+            mod.PLATFORM_ASSETS + mod.AGENT_PLATFORM_ASSETS)), (
+        "REQUIRED_PLATFORM_ASSETS is not derived from "
+        "PLATFORM_ASSETS + AGENT_PLATFORM_ASSETS")
 
 
 # A realistic published-asset list, DERIVED from the shared globs rather than

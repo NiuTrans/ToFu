@@ -851,6 +851,12 @@ def _finalize(task, accumulated_content, total_usage, iteration,
             task['_fallback_kind'] = fallback_kind
     append_event(task, done_evt)
     persist_task_result(task)
+    # Terminal busy-state broadcast (pt_3ea0e045) — endpoint holds no
+    # finalize latch, so the projection is truthful the moment the status
+    # flipped above. Keeps the sidebar/composer from reading "generating"
+    # past the settled endpoint turn until the next incidental write.
+    from lib.tasks_pkg.manager._registry import notify_terminal_busy_state
+    notify_terminal_busy_state(task)
 
     # ── Server-side auto-translate safety net (endpoint mode) ──
     # persist_task_result deliberately skips _sync_result_to_conversation

@@ -186,13 +186,25 @@ def _run(neuter=False):
     # too or the function throws ReferenceError before ever reaching the grow.
     xlate_fn = _extract_fn((REPO / "static" / "js" / "core" / "conv_reducers.js").read_text(),
                            "_mergeTranslationFields")
+    # d3f9078e (windowed tail reads) extracted the verify body into
+    # _adoptVerifiedServerConv (legacy full-array path — the one this scenario
+    # drives, since convWindowParam is absent here so no ?window= is requested)
+    # and _adoptTailGrowthFromServer (the shared trailing-turn adoption).
+    # Splice BOTH: the standalone extraction references them by bare name and
+    # the poll path swallows the ReferenceError inside its resilience
+    # try/catch, so a missing splice degrades to a silent no-adopt instead of
+    # a loud crash (the exact drift this comment now guards).
+    cts_src = (REPO / "static" / "js" / "core" / "cross_tab_sync.js").read_text()
+    adopt_fn = _extract_fn(cts_src, "_adoptVerifiedServerConv")
+    tail_fn = _extract_fn(cts_src, "_adoptTailGrowthFromServer")
     if neuter:
         # NEUTER: strip the routing flag the fix sets, so the tail can never
         # take the keep-longer verify branch and falls back to the
         # count-plus-clock loadConversationMessages path (which drops the grow).
         load_fn = load_fn.replace("local._contentGrewNeedsVerify = true;",
                                   "local._contentGrewNeedsVerify = false;")
-    script = (_fetch_stub() + helper_fn + "\n" + xlate_fn + "\n" + _HARNESS
+    script = (_fetch_stub() + helper_fn + "\n" + xlate_fn + "\n"
+              + adopt_fn + "\n" + tail_fn + "\n" + _HARNESS
               .replace("__VERIFY_FN__", verify_fn)
               .replace("__LOAD_FN__", load_fn))
     out = subprocess.run(["node", "-e", script], capture_output=True, text=True, cwd=str(REPO))

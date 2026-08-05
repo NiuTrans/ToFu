@@ -196,6 +196,9 @@ function _skillsRenderCatalogCard(e) {
   var html = '<div class="mcp-app-card skill-card' + stateClass + '">';
   html += '<div class="mcp-app-icon">' + iconHtml + '</div>';
   html += '<div class="mcp-app-name"><span class="mcp-app-name-text">' + escapeHtml(e.name) + '</span>';
+  if (e.featured) {
+    html += '<span class="skill-badge-featured">' + escapeHtml(t('skills.featured')) + '</span>';
+  }
   if (e.author && /anthropic/i.test(e.author)) {
     html += '<span class="skill-badge-official">' + escapeHtml(t('skills.official')) + '</span>';
   }

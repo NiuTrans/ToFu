@@ -14,11 +14,15 @@
 
      * REAL progress (deltas / tool results / stdout chunks / retry
        phases / unmarked progress) refreshes ``lastReal``.
-     * A ``_selfTick`` frame refreshes NOTHING — it only proves the
-       dispatcher thread is alive.
+     * A ``_selfTick`` frame never refreshes ``lastReal`` — it proves
+       the dispatcher thread is alive, not that the tool is producing.
+       It DOES stamp ``lastTick`` (the heartbeat-flow marker): while
+       ticks flow, a tool is verifiably executing and no banner shows
+       (regime split below).
      * When ``now - lastReal`` exceeds the threshold while the stream is
-       still attached, the render seam in streaming_ui.js paints an amber
-       banner ("已停滞 · 静默 {n}s") with a Stop button. A REAL event
+       still attached AND NOT EVEN self-ticks are arriving, the render
+       seam in streaming_ui.js paints an amber banner ("已停滞 · 静默
+       {n}s") with a Stop button. A REAL event (or heartbeats resuming)
        flips it back off (self-healing — a late-finishing tool recovers
        the card exactly like the swarm stalled-card does).
 
@@ -26,16 +30,38 @@
    seam, and replayed frames carry the backend ``emittedAt`` clock — so
    the stall base survives a reload instead of restarting from zero.
 
+   ★★ REGIME SPLIT (owner ruling 2026-08-04): the banner is reserved for
+   the TRUE freeze — NO frames at all, not even a heartbeat self-tick,
+   past the threshold. While self-ticks ARE flowing a tool is verifiably
+   EXECUTING (the backend ticker only runs while a tool blocks), and
+   silence there is NORMAL — a find/grep over the FUSE mount legitimately
+   runs minutes with zero output, and the tool row already counts
+   "Running command… (Ns)" live. A genuinely wedged tool is the BACKEND
+   reaper's job (silent >30min ⇒ killed with an explicit error event,
+   pt_8524e0ec); duplicating that alarm at 5min in the frontend was pure
+   noise — self-ticks only EXIST while a tool is in flight, so the old
+   300s banner fired exclusively during healthy command execution.
+
    Load order: leaf module (document/window only) — load BEFORE
    sse_pipeline.js (the feed seam) and streaming_ui.js (the render seam).
    ═══════════════════════════════════════════════════════════════════ */
 
-/* Threshold (seconds) of "nothing but self-ticks" before the banner
- * shows. Generous on purpose: the card is informational, never a kill —
- * the user's own judgement ends the turn. Override in tests. */
+/* Threshold (seconds) of "NOTHING arrived — not even a self-tick"
+ * before the banner shows. Generous on purpose: the card is
+ * informational, never a kill — the user's own judgement ends the turn.
+ * Override in tests. */
 const _STALL_THRESHOLD_S = (typeof window !== 'undefined' && window._STALL_WATCH_THRESHOLD_S) || 300;
 
-/* taskId → { lastReal: ms-epoch, shown: bool, convId: string } */
+/* A self-tick younger than this means the tool heartbeat is FLOWING — a
+ * tool is verifiably in flight, so silence is execution, not a freeze
+ * (regime split, owner ruling 2026-08-04). 4× the backend's 15s default
+ * TOOL_HEARTBEAT_INTERVAL; if that env is ever raised toward ~60s this
+ * window must rise with it. Override in tests (0 = every tick counts as
+ * instantly stopped, which neuters the gate). */
+const _TICK_FLOW_WINDOW_S = (typeof window !== 'undefined' && window._STALL_WATCH_TICK_WINDOW_S != null)
+  ? window._STALL_WATCH_TICK_WINDOW_S : 60;
+
+/* taskId → { lastReal: ms-epoch, lastTick: ms-epoch, shown: bool, convId: string } */
 const _stallWatches = Object.create(null);
 
 function _evClock(ev) {
@@ -61,18 +87,28 @@ function stallWatchFeed(convId, taskId, ev) {
      * grading rule. Two jobs though: (a) it IS the natural metronome —
      * check the threshold on every beat; (b) the FIRST frame we ever see
      * seeds the evidence floor (a replay that starts mid-stream can only
-     * claim a stall as old as the oldest frame it holds — honest, and it
-     * keeps the banner reachable for a stream that has produced nothing
-     * but self-ticks since we attached). */
+     * claim a silence as old as the oldest frame it holds — honest; if
+     * the tick stream then dies too, the frozen attach reaches the
+     * banner with the full measured silence). */
     const w0 = (_stallWatches[taskId] ||
-                (_stallWatches[taskId] = { lastReal: 0, shown: false, convId: convId || '' }));
+                (_stallWatches[taskId] = { lastReal: 0, lastTick: 0, shown: false, convId: convId || '' }));
     if (convId && !w0.convId) w0.convId = convId;
     if (!w0.lastReal) w0.lastReal = _evClock(ev);
+    /* The heartbeat IS flowing → a tool is verifiably executing (the
+     * backend ticker only runs while a tool blocks), so the banner must
+     * stay OFF (owner ruling 2026-08-04). And if it was somehow up — the
+     * tick stream had genuinely paused past the window — heal it now:
+     * heartbeats resuming is the same self-heal as real output. */
+    w0.lastTick = Date.now();
+    if (w0.shown) {
+      w0.shown = false;
+      if (typeof twUpdate === 'function' && w0.convId) twUpdate(w0.convId);
+    }
     _stallWatchTick();
     return;
   }
   const w = (_stallWatches[taskId] ||
-             (_stallWatches[taskId] = { lastReal: 0, shown: false, convId: convId || '' }));
+             (_stallWatches[taskId] = { lastReal: 0, lastTick: 0, shown: false, convId: convId || '' }));
   if (convId && !w.convId) w.convId = convId;
   w.lastReal = _evClock(ev);
   if (w.shown) {
@@ -90,10 +126,17 @@ function stallWatchState(taskId) {
   if (!w || !w.lastReal) return { stalled: false, silentSecs: 0 };
   const silentSecs = Math.max(0, Math.floor((Date.now() - w.lastReal) / 1000));
   return {
-    stalled: !!w.shown && silentSecs >= _STALL_THRESHOLD_S,
+    stalled: !!w.shown && silentSecs >= _STALL_THRESHOLD_S && !_ticksFlowing(w),
     silentSecs: silentSecs,
     convId: w.convId || '',
   };
+}
+
+/* Is the tool heartbeat CURRENTLY flowing? A tick younger than the flow
+ * window means a tool is verifiably in flight — the regime where silence
+ * is normal execution, never a stall (owner ruling 2026-08-04). */
+function _ticksFlowing(w) {
+  return !!(w.lastTick && (Date.now() - w.lastTick) / 1000 < _TICK_FLOW_WINDOW_S);
 }
 
 /* The metronome: called by the feed on every self-tick AND by a light
@@ -104,6 +147,11 @@ function _stallWatchTick() {
   for (const taskId of Object.keys(_stallWatches)) {
     const w = _stallWatches[taskId];
     if (!w || w.shown || !w.lastReal) continue;
+    /* Heartbeats flowing = tool executing: silence here is NORMAL (a
+     * quiet find over FUSE, a build). No banner — the tool row already
+     * counts the seconds, and the backend reaper owns the genuinely
+     * wedged case (silent >30min ⇒ explicit error, pt_8524e0ec). */
+    if (_ticksFlowing(w)) continue;
     if ((Date.now() - w.lastReal) / 1000 >= _STALL_THRESHOLD_S) {
       w.shown = true;
       if (typeof twUpdate === 'function' && w.convId) twUpdate(w.convId);
@@ -111,6 +159,11 @@ function _stallWatchTick() {
   }
 }
 
+/* DOM setInterval returns number; under node (the jsdom harnesses) it
+ * returns a Timeout with .unref(), which _ensureStallTimer feature-detects
+ * so a harness run never hangs the process on the metronome. The dual
+ * shape is real, so the handle is typed `any` rather than lying either way. */
+/** @type {any} */
 let _stallTimer = null;
 function _ensureStallTimer() {
   if (_stallTimer || typeof setInterval !== 'function') return;

@@ -1,3 +1,5 @@
+# Incident anchor: born in commit a586787c — fix(ux): one debug entry per tool row, in the row's flow — and the pr...
+# (funeral audit pt_c565a36b3e8f42e6, docs/RATCHET_AUDIT.md)
 """The content-guard sync path must still carry `_taskId` (provenance).
 
 ## Symptom

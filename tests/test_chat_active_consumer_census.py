@@ -37,6 +37,8 @@ satisfied, and a ban that the comment explaining the ban triggered.
 
 import os
 import re
+import subprocess
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -84,31 +86,76 @@ _FRONTEND_CONSUMERS = {
 }
 
 
-def _py_call_sites(pattern):
-    """Files under lib/ + routes/ that CALL ``pattern`` (comments stripped)."""
-    hits = set()
+def _py_source_paths():
+    """Candidate .py files under lib/ + routes/.
+
+    Enumerated via the git INDEX (tracked + untracked-not-ignored): on this
+    FUSE mount a serial os.walk pays ~300s of directory-enumeration RPCs in
+    bad weather (tripping the 300s pytest timeout) while `git ls-files`
+    answers in ~0.2s (measured). The git view is also the more CORRECT
+    census scope — the raw walk descended into `.tofu_trash/` recovery
+    snapshots, where a DELETED consumer would score as a live call site.
+    Falls back to a walk (pruning __pycache__/.tofu_trash) when git is
+    unavailable.
+    """
+    try:
+        out = subprocess.run(
+            ['git', 'ls-files', '-co', '--exclude-standard', '--',
+             'lib/*.py', 'routes/*.py'],
+            capture_output=True, text=True, cwd=ROOT, timeout=30)
+        if out.returncode == 0:
+            return [os.path.join(ROOT, ln) for ln in out.stdout.splitlines()
+                    if ln.strip()]
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    paths = []
     for sub in ('lib', 'routes'):
-        for dirpath, _dirs, files in os.walk(os.path.join(ROOT, sub)):
+        for dirpath, dirnames, files in os.walk(os.path.join(ROOT, sub),
+                                                topdown=True):
+            dirnames[:] = [d for d in dirnames
+                           if d != '__pycache__' and d != '.tofu_trash']
             for fn in files:
-                if not fn.endswith('.py'):
-                    continue
-                path = os.path.join(dirpath, fn)
-                rel = os.path.relpath(path, ROOT)
-                try:
-                    with open(path, encoding='utf-8') as fh:
-                        src = fh.read()
-                except OSError:
-                    continue
-                body = strip_comments(src, lang='py')
-                # Calls only — never the def, never a re-export in __all__.
-                for m in re.finditer(re.escape(pattern) + r'\s*\(', body):
-                    line_start = body.rfind('\n', 0, m.start()) + 1
-                    line = body[line_start:m.start()]
-                    if line.strip().startswith('def '):
-                        continue
-                    hits.add(rel)
-                    break
+                if fn.endswith('.py'):
+                    paths.append(os.path.join(dirpath, fn))
+    return paths
+
+
+def _py_call_sites(pattern):
+    """Files under lib/ + routes/ that CALL ``pattern`` (comments stripped).
+
+    Reads are threaded (FUSE latency); enumeration is the git index — see
+    _py_source_paths. Semantics unchanged: first non-def call wins,
+    unreadable files skipped.
+    """
+    def _scan(path):
+        try:
+            with open(path, encoding='utf-8') as fh:
+                src = fh.read()
+        except OSError:
+            return None
+        body = strip_comments(src, lang='py')
+        # Calls only — never the def, never a re-export in __all__.
+        for m in re.finditer(re.escape(pattern) + r'\s*\(', body):
+            line_start = body.rfind('\n', 0, m.start()) + 1
+            line = body[line_start:m.start()]
+            if line.strip().startswith('def '):
+                continue
+            return os.path.relpath(path, ROOT)
+        return None
+
+    hits = set()
+    with ThreadPoolExecutor(max_workers=16) as pool:
+        for rel in pool.map(_scan, _py_source_paths()):
+            if rel is not None:
+                hits.add(rel)
     return hits
+
+
+# Built bundle artifacts duplicate the scanned sources, so they can never
+# be "consumers" of their own — skip them by the SAME hash-anchored shape
+# js_bundler's stale-cleaner uses (bundle-<8hex>.js / feature-<8hex>.js),
+# which deliberately does NOT match a source file like feature-loader.js.
+_BUILT_BUNDLE_RE = re.compile(r'^(bundle|feature)-[0-9a-f]{8}\.js$')
 
 
 def _js_call_sites(pattern):
@@ -117,7 +164,7 @@ def _js_call_sites(pattern):
     js_dir = os.path.join(ROOT, 'static', 'js')
     for dirpath, _dirs, files in os.walk(js_dir):
         for fn in files:
-            if not fn.endswith('.js') or fn.startswith('bundle-'):
+            if not fn.endswith('.js') or fn.startswith('bundle-') or _BUILT_BUNDLE_RE.match(fn):
                 continue
             path = os.path.join(dirpath, fn)
             rel = os.path.relpath(path, ROOT)
@@ -160,6 +207,16 @@ def test_frontend_active_endpoint_consumers_are_enumerated():
         'carriers, pair it with Api.chat.convState() as cross_tab_sync.js and '
         'main_send_pipeline.js do.'
     )
+
+
+def test_built_bundle_skip_is_hash_anchored():
+    """The artifact skip must match the bundler's content-hashed outputs and
+    NOTHING else — a bare-prefix skip would stop scanning feature-loader.js,
+    a real source file, silently shrinking the census."""
+    assert _BUILT_BUNDLE_RE.match('feature-4a9d4def.js')
+    assert _BUILT_BUNDLE_RE.match('bundle-1f319574.js')
+    assert not _BUILT_BUNDLE_RE.match('feature-loader.js')
+    assert not _BUILT_BUNDLE_RE.match('feature-4a9d4def.js.bak')
 
 
 def test_restart_guard_shares_the_predicate_with_the_reconnect_view():

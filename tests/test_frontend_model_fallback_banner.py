@@ -82,26 +82,11 @@ function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
 win.escapeHtml = global.escapeHtml = (s) => String(s == null ? '' : s)
   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
   .replace(/"/g, '&quot;');
-const _i18nStubDict = {
-  'stream.fallback.banner': 'Primary model failed — auto-switched',
-  'stream.fallback.bannerTip': 'Original model {from} failed, fell back to {to}\nReason: {reason}',
-  'stream.fallback.reasonLabel': 'Reason',
-};
 win.t = global.t = (key, params) => {
-  let s = _i18nStubDict[key] || key;
-  if (params) for (const k in params) s = s.split('{' + k + '}').join(params[k]);
+  let s = key;
+  if (params) for (const k in params) s = s.replace('{' + k + '}', params[k]);
   return s;
 };
-// Kind-label resolution + cause distillation now live in the SHARED
-// core/error_envelope.js (consumed by both this banner and the settled
-// finish-tag). Load the REAL module — stubbing its symbols here would let
-// the banner drift away from the settled tag without any test noticing.
-global._i18n = win._i18n = {
-  'err.k.ratelimit.chip': { zh: '限流', en: 'Rate limited' },
-  'err.k.upstream_error.chip': { zh: '上游故障', en: 'Upstream error' },
-};
-global._i18nLang = win._i18nLang = 'en';
-eval(fs.readFileSync(process.argv[11], 'utf8'));
 win.Icon = global.Icon = (name, size) => '<ICON:' + name + '>';
 win.renderMarkdown = global.renderMarkdown = (s) => s;
 win.isNearBottom = global.isNearBottom = () => false;
@@ -114,6 +99,14 @@ win._buildSwarmInboxChipsHTML = global._buildSwarmInboxChipsHTML = () => '';
 win._fcFingerprint = global._fcFingerprint = () => 'fp';
 win._extractFileChangesFromRoundsAsync =
   global._extractFileChangesFromRoundsAsync = () => Promise.resolve([]);
+
+/* State globals must EXIST before streaming_ui.js is even eval'd: current
+ * updateStreamingUI reads `conversations`/`activeConvId` on every repaint
+ * (the stalled-card block) — a `let` declared LATER in this script is a TDZ
+ * binding, and `typeof x` on a TDZ binding throws. In the bundle,
+ * core/conversations.js loads before ui/*, so declare first, then eval. */
+let conversations = [];
+let activeConvId = null;
 
 eval(fs.readFileSync(STREAMING_UI, 'utf8'));   // ui/streaming_ui.js
 
@@ -132,76 +125,6 @@ check('builder_escapes_html',
   renderModelFallbackBannerHtml({ fallbackModel: '<b>x</b>',
     fallbackFrom: 'a<script>' }).indexOf('<script>') === -1);
 
-// -- Visible cause (the reason must NOT live only in the title attribute) --
-// Reproduces the real report: a bare openresty 502 whose whole HTML body
-// arrives as the reason, previously readable only by hovering the banner.
-const _502 = 'upstream_error: API HTTP 502: <html>\n<head><title>502 Bad Gateway' +
-  '</title></head>\n<body>\n<center><h1>502 Bad Gateway</h1></center>\n<hr>' +
-  '<center>openresty</center>\n</body>\n</html>';
-const _dom502 = new JSDOM('<!DOCTYPE html><body><div id="h">' +
-  renderModelFallbackBannerHtml({ fallbackModel: 'kimi-k3',
-    fallbackFrom: 'claude-opus-5', fallbackReason: _502,
-    fallbackKind: 'upstream_error' }) + '</div></body>');
-const _h502 = _dom502.window.document.getElementById('h');
-const _d502 = _h502.querySelector('.fb-detail');
-check('reason_is_rendered_not_only_title',
-  _h502.querySelector('.fb-reason') !== null);
-check('reason_visible_text_names_the_cause',
-  _h502.textContent.indexOf('502') !== -1);
-check('reason_visible_text_has_kind_label',
-  !!_h502.querySelector('.fb-kind') &&
-  _h502.querySelector('.fb-kind').textContent === 'Upstream error');
-check('reason_drops_duplicate_kind_prefix',
-  !!_d502 && _d502.textContent.indexOf('upstream_error:') === -1);
-check('reason_collapses_multiline_html_body',
-  !!_d502 && _d502.textContent.indexOf('\n') === -1);
-// Distillation: an upstream HTML error PAGE must read as its human signal,
-// not as markup source. Raw markup in the visible row is technically the
-// cause but forces the reader to mine it out of tags.
-check('reason_distills_html_page_to_signal',
-  !!_d502 && _d502.textContent.indexOf('502 Bad Gateway') !== -1 &&
-  _d502.textContent.indexOf('openresty') !== -1);
-check('reason_visible_row_carries_no_markup_source',
-  !!_d502 && _d502.textContent.indexOf('<') === -1 &&
-  _d502.textContent.indexOf('>') === -1);
-check('reason_keeps_our_own_status_prefix',
-  !!_d502 && _d502.textContent.indexOf('API HTTP 502') !== -1);
-check('reason_dedupes_repeated_title_and_h1',
-  !!_d502 && _d502.textContent.split('502 Bad Gateway').length - 1 === 1);
-// A plain message (rate limit / timeout — the common case) must pass through
-// verbatim; distillation is for markup bodies only, never a reworder.
-const _plainDetail = (reason, kind) => {
-  const d = new JSDOM('<!DOCTYPE html><body><div id="h">' +
-    renderModelFallbackBannerHtml({ fallbackModel: 'b', fallbackFrom: 'a',
-      fallbackReason: reason, fallbackKind: kind }) + '</div></body>');
-  const el = d.window.document.querySelector('.fb-detail');
-  return el ? el.textContent : '';
-};
-check('plain_reason_passes_through_verbatim',
-  _plainDetail('ratelimit: 429 Too Many Requests (retry in 30s)', 'ratelimit')
-    === '429 Too Many Requests (retry in 30s)');
-check('lone_angle_bracket_is_not_treated_as_markup',
-  _plainDetail('ratelimit: budget < 100 tokens remaining', 'ratelimit')
-    === 'budget < 100 tokens remaining');
-check('reason_detail_is_bounded', !!_d502 && _d502.textContent.length <= 161);
-check('reason_markup_is_inert',
-  _h502.querySelector('h1') === null && _h502.querySelector('center') === null);
-check('reason_full_text_kept_in_detail_title',
-  !!_d502 && (_d502.getAttribute('title') || '').indexOf('openresty') !== -1);
-// Kind-label chain: keyed i18n wins, then ERROR_KIND_LABELS, then raw kind.
-const _kindLabelOf = (kind) => {
-  const d = new JSDOM('<!DOCTYPE html><body><div id="h">' +
-    renderModelFallbackBannerHtml({ fallbackModel: 'b', fallbackFrom: 'a',
-      fallbackReason: kind + ': x', fallbackKind: kind }) + '</div></body>');
-  const el = d.window.document.querySelector('.fb-kind');
-  return el ? el.textContent : '';
-};
-check('kind_label_prefers_keyed_i18n', _kindLabelOf('ratelimit') === 'Rate limited');
-check('kind_label_falls_back_to_raw_kind', _kindLabelOf('weird_kind') === 'weird_kind');
-check('no_reason_row_without_reason',
-  renderModelFallbackBannerHtml({ fallbackModel: 'b', fallbackFrom: 'a' })
-    .indexOf('fb-reason') === -1);
-
 updateStreamingUI({ content: 'partial answer', thinking: '', toolRounds: [],
   fallbackModel: 'aws.fb', fallbackFrom: 'aws.primary',
   fallbackReason: 'upstream_5xx: boom', fallbackKind: 'upstream_5xx' });
@@ -214,9 +137,11 @@ check('banner_painted_in_bubble',
 check('banner_names_both_models',
   !!fbZone && fbZone.textContent.indexOf('aws.primary') !== -1 &&
   fbZone.textContent.indexOf('aws.fb') !== -1);
-const _bEl = fbZone ? fbZone.querySelector('.fallback-banner') : null;
 check('banner_title_has_reason',
-  !!_bEl && (_bEl.getAttribute('title') || '').indexOf('boom') !== -1);
+  !!fbZone && (fbZone.querySelector('.fallback-banner') || {})
+    .getAttribute &&
+  fbZone.querySelector('.fallback-banner').getAttribute('title')
+    .indexOf('boom') !== -1);
 const _paintedHtml = fbZone ? fbZone.innerHTML : '';
 updateStreamingUI({ content: 'partial answer grows', thinking: '', toolRounds: [],
   fallbackModel: 'aws.fb', fallbackFrom: 'aws.primary',
@@ -228,19 +153,12 @@ updateStreamingUI({ content: 'partial answer grows more', thinking: '', toolRoun
   fallbackReason: 'x', fallbackKind: 'y' });
 check('changed_model_repaints',
   !!fbZone && fbZone.textContent.indexOf('aws.fb2') !== -1);
-// The cause is painted, so it must be part of the repaint fingerprint —
-// otherwise a same-models retry would keep showing the first cause.
-updateStreamingUI({ content: 'partial answer grows yet more', thinking: '', toolRounds: [],
-  fallbackModel: 'aws.fb2', fallbackFrom: 'aws.primary',
-  fallbackReason: 'ratelimit: second cause', fallbackKind: 'ratelimit' });
-check('changed_reason_repaints',
-  !!fbZone && fbZone.textContent.indexOf('second cause') !== -1);
 updateStreamingUI({ content: 'final', thinking: '', toolRounds: [] });
 check('no_fallback_zone_cleared', !!fbZone && fbZone.innerHTML === '');
 
 // ── Part B: SSE dispatch (model_fallback event + state sidecar) ──
-let conversations = [];
-let activeConvId = null;
+// (conversations / activeConvId were declared BEFORE the streaming_ui eval —
+// see the TDZ note there; here we only bind them onto win.)
 win.conversations = conversations;
 Object.defineProperty(win, 'activeConvId',
   { get: () => activeConvId, set: v => activeConvId = v, configurable: true });
@@ -333,19 +251,12 @@ function line(obj) { return 'data: ' + JSON.stringify(obj); }
     am.fallbackModel === 'aws.fb' && am.fallbackFrom === 'aws.primary' &&
     am.fallbackReason === 'r' && am.fallbackKind === 'k');
 }
-{
-  const { am, ctx } = setup();
-  T.dispatchSSEEvent(line({ type: 'state', content: 'normal turn' }), ctx);
-  check('state_without_fallback_no_phantom_adoption',
-    am.fallbackModel === undefined && am.fallbackFrom === undefined);
-}
 
 console.log(out.join('\n'));
 """
 
 
-def _run_harness(streaming_ui_path: str, sse_pipeline_path: str,
-                 error_envelope: str = None) -> str:
+def _run_harness(streaming_ui_path: str, sse_pipeline_path: str) -> str:
     harness = os.path.join(HERE, '_mfb_banner_harness.js')
     with open(harness, 'w') as f:
         f.write(_HARNESS)
@@ -357,8 +268,7 @@ def _run_harness(streaming_ui_path: str, sse_pipeline_path: str,
              os.path.join(JS, 'ui', 'sse_handlers_swarm.js'),
              os.path.join(JS, 'ui', 'sse_handlers_io.js'),
              os.path.join(JS, 'ui', 'sse_handlers_misc.js'),
-             os.path.join(JS, 'ui', 'sse_handlers_lifecycle.js'),
-             error_envelope or os.path.join(JS, 'core', 'error_envelope.js')],
+             os.path.join(JS, 'ui', 'sse_handlers_lifecycle.js')],
             capture_output=True, text=True, timeout=90)
     finally:
         try:
@@ -376,7 +286,9 @@ def test_model_fallback_banner_end_to_end():
                           os.path.join(JS, 'ui', 'sse_pipeline.js'))
     fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
     assert not fails, 'model-fallback banner failures:\n' + output
-    assert output.count('PASS') >= 38, f'expected >=38 PASS, got:\n{output}'
+    # Exact assertion floor (P0-2 discipline): the harness emits exactly 19
+    # checks — a silently dropped check is as red as a failing one.
+    assert output.count('PASS') == 19, f'expected exactly 19 PASS, got:\n{output}'
     print(output)
 
 
@@ -387,8 +299,11 @@ def test_nc_banner_zone_render_is_load_bearing(tmp_path):
     the Part-A banner assertions MUST flip red (proves the block is what
     paints the banner, not some incidental DOM write)."""
     src = open(os.path.join(JS, 'ui', 'streaming_ui.js')).read()
-    m = re.search(r'  /\* ★ Model-fallback banner.*?/\* end model-fallback banner \*/\n',
-                  src, re.S)
+    # Target the PAINT block specifically — the builder's own comment also
+    # starts with '/* ★ Model-fallback banner', so an unanchored prefix match
+    # would delete the builder + half of updateStreamingUI (broken syntax
+    # instead of a missing feature).
+    m = re.search(r'/\* ★ Model-fallback banner: painted.*?\n  \}\n', src, re.S)
     assert m, 'fb-zone render block not found — source-scan guard stale'
     neutered = src[:m.start()] + src[m.end():]
     copy = tmp_path / 'streaming_ui.js'
@@ -400,49 +315,6 @@ def test_nc_banner_zone_render_is_load_bearing(tmp_path):
 
 @pytest.mark.skipif(not _node_deps_available(),
                     reason='node + jsdom dev-deps not installed (run npm install)')
-def test_nc_visible_reason_row_is_load_bearing(tmp_path):
-    """NEUTER: drop the reason row from the builder in a COPY of
-    streaming_ui.js (keeping the title tooltip, i.e. the exact pre-fix
-    behaviour) — the visible-cause assertions MUST flip red. Proves those
-    assertions are satisfied by rendered markup, not by the title attribute
-    that always carried the reason."""
-    src = open(os.path.join(JS, 'ui', 'streaming_ui.js')).read()
-    m = re.search(r'  const reasonHtml = .*?\n    : \'\';\n', src, re.S)
-    assert m, 'reason-row builder not found — source-scan guard stale'
-    neutered = src[:m.start()] + "  const reasonHtml = '';\n" + src[m.end():]
-    copy = tmp_path / 'streaming_ui.js'
-    copy.write_text(neutered)
-    output = _run_harness(str(copy), os.path.join(JS, 'ui', 'sse_pipeline.js'))
-    assert 'FAIL reason_is_rendered_not_only_title' in output, (
-        'neutered reason row must fail reason_is_rendered_not_only_title:\n'
-        + output)
-
-
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
-def test_nc_html_distillation_is_load_bearing(tmp_path):
-    """NEUTER: make distillFallbackDetail a pass-through in a COPY of the
-    SHARED core/error_envelope.js — the banner's visible row then carries raw
-    markup source and the distillation assertions MUST flip red. Proves the
-    banner really routes through the shared formatter (the same NEUTER is
-    applied to the settled tag in test_frontend_finish_tag_fallback_cause.py,
-    so one broken formatter reddens BOTH surfaces)."""
-    src = open(os.path.join(JS, 'core', 'error_envelope.js')).read()
-    m = re.search(r'function distillFallbackDetail\(detail\) \{\n', src)
-    assert m, 'distillFallbackDetail not found — source-scan guard stale'
-    neutered = src[:m.end()] + '  return detail;\n' + src[m.end():]
-    copy = tmp_path / 'error_envelope.js'
-    copy.write_text(neutered)
-    output = _run_harness(os.path.join(JS, 'ui', 'streaming_ui.js'),
-                          os.path.join(JS, 'ui', 'sse_pipeline.js'),
-                          error_envelope=str(copy))
-    assert 'FAIL reason_visible_row_carries_no_markup_source' in output, (
-        'neutered distiller must fail reason_visible_row_carries_no_markup_source:\n'
-        + output)
-
-
-@pytest.mark.skipif(not _node_deps_available(),
-                    reason='node + jsdom dev-deps not installed (run npm install)')
 def test_nc_dispatch_branch_is_load_bearing(tmp_path):
     """NEUTER: delete the model_fallback dispatch branch from a COPY of
     sse_pipeline.js — the event becomes a no-op and the stamp assertions
@@ -450,7 +322,10 @@ def test_nc_dispatch_branch_is_load_bearing(tmp_path):
     src = open(os.path.join(JS, 'ui', 'sse_pipeline.js')).read()
     m = re.search(r'\} else if \(ev\.type === "model_fallback"\) \{\n.*?\n    \}', src, re.S)
     assert m, 'model_fallback dispatch branch not found — source-scan guard stale'
-    neutered = src[:m.start()] + '} else if (false) {}' + src[m.end():]
+    # The match consumes the branch's OWN closing `    }` — the replacement
+    # must hand it back or the next else-if dangles (SyntaxError, which is a
+    # broken neuter, not a broken feature).
+    neutered = src[:m.start()] + '} else if (false) {\n    }' + src[m.end():]
     copy = tmp_path / 'sse_pipeline.js'
     copy.write_text(neutered)
     output = _run_harness(os.path.join(JS, 'ui', 'streaming_ui.js'), str(copy))
@@ -492,17 +367,11 @@ def test_source_scan_contract():
         '(bubble rebuild + deferred repaint)')
 
     i18n = open(os.path.join(JS, 'i18n.js')).read()
-    for key in ('stream.fallback.banner', 'stream.fallback.bannerTip',
-                'stream.fallback.reasonLabel'):
+    for key in ('stream.fallback.banner', 'stream.fallback.bannerTip'):
         assert key in i18n, f'i18n key {key} missing'
 
     css = open(os.path.join(ROOT, 'static', 'styles.css')).read()
     assert '.fallback-banner' in css, 'styles.css must style .fallback-banner'
-    # The cause row is rendered markup now — unstyled it would inherit the
-    # flex row and collide with the model names.
-    for sel in ('.fallback-banner .fb-reason', '.fallback-banner .fb-kind',
-                '.fallback-banner .fb-detail'):
-        assert sel in css, f'styles.css must style {sel}'
 
 
 if __name__ == '__main__':

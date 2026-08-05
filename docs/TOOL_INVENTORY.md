@@ -8,22 +8,20 @@ registry + the per-facet tables — nothing here is hand-maintained.
 Third-party plugin tools vary per deployment and are listed in the
 diagnostic section at the end, which `--check` ignores.
 
-Built-in tools: **89**
+Built-in tools: **84**
 
 ## Gaps
 
 | gap | count | meaning |
 |---|---|---|
 | write tool with no approval enricher | 0 | the approval dialog renders a bare tool name — the user approves blind, which the approval module itself calls "worse than not prompting at all" |
-| no UI label | 75 | the raw tool name is shown in the activity line |
+| no UI label | 70 | the raw tool name is shown in the activity line |
 | no reachable handler | 0 | schema advertised to the model but nothing executes it |
-| description cannot disambiguate | 6 | the model cannot tell this tool apart from its neighbours and picks the wrong one |
-| confusable tool pairs | 3 | two same-category tools open with near-identical sentences, so the model picks the wrong one |
+| description cannot disambiguate | 4 | the model cannot tell this tool apart from its neighbours and picks the wrong one |
+| confusable tool pairs | 2 | two same-category tools open with near-identical sentences, so the model picks the wrong one |
 
 Tools whose description cannot disambiguate:
 
-- `browser_create_tab` — first sentence near-duplicates a same-category sibling
-- `browser_navigate` — first sentence near-duplicates a same-category sibling
 - `desktop_read_file` — first sentence near-duplicates a same-category sibling
 - `desktop_write_file` — first sentence near-duplicates a same-category sibling
 - `read_artifact` — first sentence near-duplicates a same-category sibling
@@ -32,7 +30,6 @@ Tools whose description cannot disambiguate:
 Confusable same-category tool pairs (first-sentence overlap >= 0.5):
 
 - [swarm] `read_artifact` vs `store_artifact` — overlap 0.83, shared: artifact, data, read, shared, store
-- [browser] `browser_create_tab` vs `browser_navigate` — overlap 0.57, shared: browser, new, tab, url
 - [desktop] `desktop_read_file` vs `desktop_write_file` — overlap 0.57, shared: computer, file, local, user
 
 
@@ -42,23 +39,18 @@ Confusable same-category tool pairs (first-sentence overlap >= 0.5):
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | browser_click | browser | browser | SET | ✓ |  |  | ✓ |  |  |  |  |  | ✓ |
 | browser_close_tab | browser | browser | SET | ✓ |  |  | ✓ |  |  |  |  |  | ✓ |
-| browser_create_tab | browser | browser | SET | ✓ |  |  | ✓ |  |  |  |  |  |  |
 | browser_execute_js | browser | browser | SET | ✓ |  |  | ✓ |  |  |  |  |  | ✓ |
 | browser_fill_form | browser | browser | SET | ✓ |  |  | ✓ |  |  |  |  |  | ✓ |
-| browser_get_app_state | browser | browser | SET |  | ✓ |  |  |  |  |  |  |  | ✓ |
 | browser_get_cookies | browser | browser | SET |  | ✓ |  |  |  |  |  |  |  | ✓ |
 | browser_get_history | browser | browser | SET |  | ✓ |  |  |  |  |  |  |  | ✓ |
-| browser_get_interactive_elements | browser | browser | SET |  | ✓ |  |  |  |  |  |  |  | ✓ |
-| browser_hover | browser | browser | SET |  |  |  |  |  |  |  |  |  | ✓ |
-| browser_hover_and_click | browser | browser | SET | ✓ |  |  | ✓ |  |  |  |  |  | ✓ |
-| browser_keyboard | browser | browser | SET | ✓ |  |  | ✓ |  |  |  |  |  | ✓ |
 | browser_list_tabs | browser | browser | SET |  | ✓ |  |  |  |  |  |  |  | ✓ |
-| browser_navigate | browser | browser | SET | ✓ |  |  | ✓ |  |  |  |  |  |  |
-| browser_read_tab | browser | browser | SET |  | ✓ |  |  |  |  |  |  |  | ✓ |
-| browser_right_click_menu | browser | browser | SET | ✓ |  |  | ✓ |  |  |  |  |  | ✓ |
+| browser_menu_click | browser | browser | SET | ✓ |  |  | ✓ |  |  |  |  |  | ✓ |
+| browser_navigate | browser | browser | SET | ✓ |  |  | ✓ |  |  |  |  |  | ✓ |
+| browser_press_key | browser | browser | SET | ✓ |  |  | ✓ |  |  |  |  |  | ✓ |
+| browser_preview_page | browser | page_preview | SET |  |  |  |  |  |  |  |  |  | ✓ |
+| browser_read_page | browser | browser | SET |  | ✓ |  |  |  |  |  |  |  | ✓ |
 | browser_screenshot | browser | browser | SET |  |  |  |  |  |  |  |  |  | ✓ |
-| browser_summarize_page | browser | browser | SET |  | ✓ |  |  |  |  |  |  |  | ✓ |
-| browser_wait | browser | browser | SET |  |  |  |  |  |  |  |  |  | ✓ |
+| browser_type | browser | browser | SET | ✓ |  |  | ✓ |  |  |  |  |  | ✓ |
 | get_conversation | conversation | conv_ref | SET |  | ✓ |  |  |  |  |  |  |  | ✓ |
 | list_conversations | conversation | conv_ref | SET |  | ✓ |  |  |  |  |  |  |  | ✓ |
 | project_board_block | conversation | conv_ref | SET |  |  |  |  |  |  |  |  |  | ✓ |
@@ -66,7 +58,6 @@ Confusable same-category tool pairs (first-sentence overlap >= 0.5):
 | project_board_complete | conversation | conv_ref | SET |  |  |  |  |  |  |  |  |  | ✓ |
 | project_board_post | conversation | conv_ref | SET |  |  |  |  |  |  |  |  |  | ✓ |
 | project_board_read | conversation | conv_ref | SET |  | ✓ |  |  |  |  |  |  |  | ✓ |
-| project_charter_commit | conversation | conv_ref | SET | ✓ |  |  | ✓ |  |  |  |  |  | ✓ |
 | project_charter_propose | conversation | conv_ref | SET |  |  |  |  |  |  |  |  |  | ✓ |
 | project_charter_read | conversation | conv_ref | SET |  | ✓ |  |  |  |  |  |  |  | ✓ |
 | project_feed_read | conversation | conv_ref | SET |  | ✓ |  |  |  |  |  |  |  | ✓ |
@@ -109,6 +100,7 @@ Confusable same-category tool pairs (first-sentence overlap >= 0.5):
 | timer_create | scheduler | scheduler | SET | ✓ |  |  | ✓ | ✓ |  |  |  |  | ✓ |
 | timer_manage | scheduler | scheduler | SET | ✓ |  |  | ✓ |  |  |  |  |  | ✓ |
 | fetch_url | search | fetch | EXACT |  | ✓ | ✓ |  |  |  |  | ✓ | ✓ | ✓ |
+| update_search_settings | search | search_settings | EXACT | ✓ |  |  | ✓ |  |  |  |  |  | ✓ |
 | web_search | search | search | EXACT |  | ✓ | ✓ |  |  |  |  | ✓ |  | ✓ |
 | activate_skill | skills | skills | SET |  | ✓ | ✓ |  |  |  |  |  |  | ✓ |
 | await_agents | swarm | swarm | SET |  |  |  |  |  |  |  |  |  | ✓ |

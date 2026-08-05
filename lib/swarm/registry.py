@@ -222,7 +222,7 @@ AGENT_ROLES: dict[str, dict[str, Any]] = {
             'Use web_search and fetch_url tools effectively. '
             'Cite sources and highlight confidence levels.'
         ),
-        'tools_hint': ['web_search', 'fetch_url', 'browser_read_tab',
+        'tools_hint': ['web_search', 'fetch_url', 'browser_read_page',
                        'browser_list_tabs'],
         'model_hint': 'standard',
     },
@@ -271,14 +271,15 @@ AGENT_ROLES: dict[str, dict[str, Any]] = {
         'system_prompt_suffix': (
             'You are a browser automation specialist. Use browser tools '
             'to navigate, read, click, and extract information from web pages. '
-            'Use browser_list_tabs to find relevant tabs, browser_read_tab '
-            'to extract content, and browser_execute_js for complex interactions.'
+            'Use browser_read_page to extract content, browser_click / '
+            'browser_type with text= to interact, and browser_execute_js for '
+            'complex interactions.'
         ),
-        'tools_hint': ['browser_list_tabs', 'browser_read_tab',
+        'tools_hint': ['browser_list_tabs', 'browser_read_page',
                        'browser_execute_js', 'browser_screenshot',
-                       'browser_click', 'browser_navigate',
-                       'browser_get_interactive_elements',
-                       'browser_create_tab', 'browser_close_tab',
+                       'browser_click', 'browser_type', 'browser_press_key',
+                       'browser_menu_click', 'browser_fill_form',
+                       'browser_navigate', 'browser_close_tab',
                        'fetch_url'],
         'model_hint': 'standard',
     },

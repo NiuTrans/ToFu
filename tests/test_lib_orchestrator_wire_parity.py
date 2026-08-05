@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Incident anchor: born in commit 70334b04 — test(orchestrator): pt_03f4cdf1 slice 1 — wire-parity baseline for fu...
+# (funeral audit pt_c565a36b3e8f42e6, docs/RATCHET_AUDIT.md)
 """Wire-parity baseline for the lib/tasks_pkg/orchestrator/_run.py split
 (board epic ``pt_03f4cdf1``).
 

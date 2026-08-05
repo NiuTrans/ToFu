@@ -87,6 +87,12 @@ from lib.model_info._limits import (  # noqa: E402,F401
     _parse_token_limit_from_error,
 )
 
+# ── Video-frame budget (send-time clamp) ──
+from lib.model_info._video import (  # noqa: E402,F401
+    aggregate_image_cap,
+    video_frame_budget,
+)
+
 __all__ = [
     # family detection
     'claude_line_version',
@@ -108,4 +114,6 @@ __all__ = [
     # learned limits / clamp
     '_clamp_max_tokens', '_learn_model_limit', '_load_learned_limits',
     '_parse_token_limit_from_error', '_LEARNED_MODEL_LIMITS', '_limits_lock',
+    # video frame budget
+    'video_frame_budget', 'aggregate_image_cap',
 ]

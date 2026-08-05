@@ -61,10 +61,21 @@
     }
     // Stub critical handlers that users can trigger immediately
     var stubs = ['handleKeyDown','sendMessage','newChat','togglePresetDropdown',
-      'cycleTheme','toggleDebug','closeDebug','toggleSidebar','openSettings','toggleCodeExec',
-      'toggleBrowser','toggleMemory','toggleSwarm','toggleAutoTranslate',
+      'cycleTheme','toggleDebug','closeDebug','toggleSidebar','toggleCodeExec',
+      /* 'toggleMemory' REMOVED 2026-08-01 (Epic-E sub-9): memory.js is
+         DEFERRED — a LoadGuard _notReady stub here makes feature-loader's
+         _installFeatureStub skip the lazy stub (it refuses to clobber an
+         existing function), leaving the toolbar button dead until the
+         bundle lands. Deferred entry points never belong in this list. */
+      /* 'openSettings' REMOVED 2026-08-02 (Epic-E sub-10): the settings
+         family is DEFERRED — same trap, same fix. */
+      'toggleBrowser','toggleSwarm','toggleAutoTranslate',
       'toggleAutoApply','selectThinkingDepth','cycleSearchMode','enterImageGenMode',
       'toggleSidebarSearch','closeSidebarSearch','togglePaperMode',
+      /* 'openDailyReport' REMOVED 2026-08-02 (pt_248c41b0): deferred in
+         sub-6 — the LoadGuard _notReady stub makes feature-loader skip
+         the lazy stub, so the My Day button toasted "please wait" and
+         never loaded the bundle before the prefetch landed. */
       'openOrchestration','openTaskMode'];
     for (var i = 0; i < stubs.length; i++) {
       (function(name) {
@@ -330,6 +341,11 @@
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 21c3 0 7-1 7-8V5c0-1.25-.756-2.017-2-2H4c-1.25 0-2 .75-2 1.972V11c0 1.25.75 2 2 2 1 0 1 0 1 1v1c0 1-1 2-2 2s-1 .008-1 1.031V21z"/><path d="M15 21c3 0 7-1 7-8V5c0-1.25-.757-2.017-2-2h-4c-1.25 0-2 .75-2 1.972V11c0 1.25.75 2 2 2h.75c0 2.25.25 4-2.75 4v3c0 1 0 1 1 1z"/></svg>
             Quote
           </button>
+          <div class="paper-sel-divider"></div>
+          <button class="paper-sel-btn" onclick="_paperNoteFromSelection()" data-i18n-title="paper.noteFromSelection" title="Save a margin note on this selection">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+            <span data-i18n="paper.noteBtn">Note</span>
+          </button>
         </div>
         <div class="paper-tabs">
           <button class="paper-tab-btn active" data-tab="qa" onclick="_switchPaperTab('qa')">
@@ -403,6 +419,17 @@
               <button type="button" class="paper-reader-set-btn paper-reader-set-width" onclick="_readerWidthCycle()" data-i18n-title="paper.readerWidth" title="Reading width" aria-label="Cycle reading width">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="7 8 3 12 7 16"/><polyline points="17 8 21 12 17 16"/><line x1="3" y1="12" x2="21" y2="12"/></svg>
                 <span class="paper-reader-width-label" data-i18n="paper.readerWidthComfortable">Comfortable</span>
+              </button>
+              <!-- Skim mode (reading-xp P2): collapse each section to its first
+                   paragraph + callouts; the xp tutor cards stay visible. -->
+              <button type="button" class="paper-reader-set-btn paper-skim-btn" onclick="_paperXpSkimToggle()" data-i18n-title="paper.xpSkimTitle" title="Skim read" aria-pressed="false">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M3 12h12"/><path d="M3 18h7"/></svg>
+                <span class="paper-skim-label" data-i18n="paper.xpSkim">Skim</span>
+              </button>
+              <!-- Focus mode (reading-xp P4): one-paragraph spotlight, j/k nav. -->
+              <button type="button" class="paper-reader-set-btn paper-focus-btn" onclick="_paperFocusModeToggle()" data-i18n-title="paper.focusTitle" title="Focus mode" aria-pressed="false">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></svg>
+                <span data-i18n="paper.focusBtn">Focus</span>
               </button>
             </div>
             <div class="paper-report-lang-toggle" id="reportLangToggle" data-i18n-title="paper.reportLangTitle" title="Report language">
@@ -766,16 +793,20 @@
       </div>
     </div>
     <div class="input-area">
-      <!-- Conversation-status strip: the CONVERSATION-scoped chrome (context
-           gauge + turn-nav dots), in-flow directly above the composer.
-           The gauge is prepended here by context-bar.js (_ensureBar).
-           Being inside .input-area means --input-area-h (main.js) already
-           includes it, so the scroll-to-bottom button stays anchored above
-           the whole band. -->
-      <div class="conv-status-strip" id="convStatusStrip">
-        <div class="turn-nav" id="turnNav"></div>
-      </div>
       <div class="input-inner">
+        <!-- Conversation-status strip: the CONVERSATION-scoped chrome (context
+             gauge + turn-nav dots), in-flow directly above the composer.
+             The gauge is prepended here by context-bar.js (_ensureBar).
+             Living INSIDE .input-inner puts the strip on the composer's own
+             width track (--toolbar-w): the gauge's left edge and the dots'
+             right edge ARE the input box's edges at every viewport — one
+             width source, nothing to drift (2026-08-03 owner report).
+             Still inside .input-area, so --input-area-h (main.js) already
+             includes it and the scroll-to-bottom button stays anchored
+             above the whole band. -->
+        <div class="conv-status-strip" id="convStatusStrip">
+          <div class="turn-nav" id="turnNav"></div>
+        </div>
         <div class="project-bar" id="projectBar" style="display:none">
           <span class="project-bar-icon" onclick="openProjectModal()" style="cursor:pointer" title="Manage folders"></span>
           <span class="project-bar-folders" id="projectBarFolders" onclick="openProjectModal()" style="cursor:pointer" title="Click to manage folders"></span>
@@ -828,7 +859,7 @@
                     data-i18n-title="toolset.dismissDesc" data-i18n="toolset.restore">恢复工具</button>
           </div>
         </div>
-        <input type="file" id="fileInput" accept="image/*,.pdf,application/pdf,.docx,.doc,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.pptx,application/vnd.openxmlformats-officedocument.presentationml.presentation,.xlsx,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,.ppt,application/vnd.ms-powerpoint,.txt,.md,.csv,.json,.xml,.html,.yaml,.yml,.toml,.py,.js,.ts,.java,.c,.cpp,.go,.rs,.rb,.sh,.sql,.tex,.log,.rst,.ini,.cfg" multiple onchange="handleFileUpload(event)" style="display:none">
+        <input type="file" id="fileInput" accept="image/*,video/*,.pdf,application/pdf,.docx,.doc,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.pptx,application/vnd.openxmlformats-officedocument.presentationml.presentation,.xlsx,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,.ppt,application/vnd.ms-powerpoint,.txt,.md,.csv,.json,.xml,.html,.yaml,.yml,.toml,.py,.js,.ts,.java,.c,.cpp,.go,.rs,.rb,.sh,.sql,.tex,.log,.rst,.ini,.cfg" multiple onchange="handleFileUpload(event)" style="display:none">
         <div class="input-box">
           <div class="input-row">
             <textarea id="userInput" placeholder="Type your message..." rows="1" onkeydown="handleKeyDown(event)"></textarea>
@@ -1074,14 +1105,22 @@
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
           <span data-i18n="settings.tabGeneral">通用</span>
         </button>
-        <button class="settings-tab" data-tab="api" onclick="switchSettingsTab('api')">
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 007.54.54l3-3a5 5 0 00-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 00-7.54-.54l-3 3a5 5 0 007.07 7.07l1.71-1.71"/></svg>
-          <span data-i18n="settings.tabProviders">服务商</span>
-        </button>
         <button class="settings-tab" data-tab="preset" onclick="switchSettingsTab('preset')">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 00-1-1.73l-7-4a2 2 0 00-2 0l-7 4A2 2 0 003 8v8a2 2 0 001 1.73l7 4a2 2 0 002 0l7-4A2 2 0 0021 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>
           <span data-i18n="settings.tabDisplay">显示</span>
         </button>
+
+        <div class="settings-tab-group" data-i18n="settings.groupModels">模型接入</div>
+        <button class="settings-tab" data-tab="api" onclick="switchSettingsTab('api')">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 007.54.54l3-3a5 5 0 00-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 00-7.54-.54l-3 3a5 5 0 007.07 7.07l1.71-1.71"/></svg>
+          <span data-i18n="settings.tabProviders">服务商</span>
+        </button>
+        <button class="settings-tab" data-tab="oauth" onclick="switchSettingsTab('oauth')">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 3h4a2 2 0 012 2v14a2 2 0 01-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/></svg>
+          <span data-i18n="settings.tabOAuth">订阅登录</span>
+        </button>
+
+        <div class="settings-tab-group" data-i18n="settings.groupFeatures">能力</div>
         <button class="settings-tab" data-tab="search" onclick="switchSettingsTab('search')">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
           <span data-i18n="settings.tabSearch">搜索</span>
@@ -1094,6 +1133,7 @@
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/></svg>
           <span data-i18n="settings.tabSpeech">语音识别</span>
         </button>
+        <div class="settings-tab-group" data-i18n="settings.groupConnections">连接</div>
         <button class="settings-tab" data-tab="network" onclick="switchSettingsTab('network')">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z"/></svg>
           <span data-i18n="settings.tabNetwork">网络</span>
@@ -1103,14 +1143,9 @@
           <span data-i18n="settings.tabDevices">设备</span>
         </button>
         <button class="settings-tab" data-tab="feishu" onclick="switchSettingsTab('feishu')">
-          <svg width="15" height="15" viewBox="62.16 94.5 407.87 324.19"><path d="M274.18 264.785q.515-.517 1.03-1.027c.685-.688 1.372-1.258 2.056-1.945l1.37-1.372 4.118-4.113 5.598-5.601 4.8-4.797 4.575-4.457 4.796-4.688 4.344-4.344 6.059-6.054c1.14-1.145 2.285-2.29 3.543-3.317 2.168-2.054 4.457-4 6.855-5.828 2.172-1.715 4.344-3.312 6.516-4.914 3.082-2.172 6.398-4.344 9.71-6.285 3.204-1.941 6.63-3.656 10.06-5.371 3.199-1.602 6.515-2.973 9.827-4.23 1.829-.684 3.774-1.372 5.602-2.055.914-.344 1.941-.688 2.856-.914-8.57-33.715-24.227-64.575-45.258-90.86-4.114-5.14-10.399-8.113-17.028-8.113H130.754c-3.203 0-4.457 4-1.945 5.941 59.543 43.66 109.144 99.887 145.03 164.801 0-.226.227-.34.34-.457" fill="#00d6b9"/><path d="M204.79 418.691c90.288 0 169.03-49.828 210.058-123.543 1.488-2.628 2.859-5.257 4.23-7.882q-3.087 6-6.86 11.312l-2.741 3.77c-1.141 1.488-2.399 2.972-3.657 4.457-1.03 1.144-2.058 2.285-3.086 3.316-2.058 2.172-4.343 4.227-6.629 6.172a53 53 0 0 1-3.886 3.2c-1.598 1.144-3.086 2.284-4.684 3.429-1.031.683-2.058 1.371-3.086 1.941-1.144.684-2.172 1.258-3.316 1.942a131 131 0 0 1-6.969 3.543c-2.059.918-4.117 1.828-6.289 2.515-2.285.801-4.57 1.602-6.969 2.285-3.543.914-7.086 1.715-10.742 2.286-2.629.457-5.258.687-8 .914-2.86.23-5.601.23-8.457.23-3.086 0-6.289-.23-9.488-.57a83 83 0 0 1-7.086-1.031c-2.055-.34-4.113-.801-6.168-1.258-1.031-.227-2.176-.57-3.203-.797-2.973-.8-6.055-1.602-9.028-2.516-1.488-.457-2.972-.914-4.457-1.258-2.172-.683-4.457-1.37-6.629-2.058-1.828-.57-3.656-1.14-5.37-1.711q-2.573-.86-5.145-1.715c-1.14-.344-2.285-.8-3.543-1.144-1.371-.457-2.856-1.028-4.227-1.485-1.027-.344-2.058-.687-2.972-1.027-1.942-.688-4-1.488-5.942-2.172-1.144-.457-2.285-.914-3.43-1.258-1.484-.57-3.085-1.144-4.57-1.828-1.601-.687-3.203-1.258-4.8-1.945-1.028-.457-2.06-.797-3.087-1.258-1.257-.57-2.628-1.027-3.886-1.598-1.028-.457-1.942-.8-2.969-1.258l-3.086-1.37c-.914-.344-1.832-.801-2.746-1.145a44 44 0 0 1-2.512-1.14c-.8-.345-1.715-.802-2.515-1.145-.914-.344-1.715-.801-2.512-1.141-1.031-.457-2.172-1.031-3.203-1.484-1.14-.575-2.285-1.032-3.426-1.602-1.258-.574-2.402-1.144-3.66-1.715-1.027-.457-2.055-1.027-3.082-1.484-54.172-26.973-102.172-63.086-143.09-106.746-2.055-2.172-5.71-.684-5.71 2.289l.112 154.398v12.57c0 7.317 3.543 14.06 9.598 18.172 38.172 24.801 83.773 39.543 132.914 39.543" fill="#3370ff"/><path d="M414.84 295.188c0 .113-.113.113-.113.226l.8-1.489c-.343.457-.574 1.028-.8 1.488m3.793-7.05.226-.457.114-.23q-.17.513-.34.687" fill="#133c9a"/><path d="M470.035 201.121c-18.285-9.031-38.86-14.059-60.687-14.059-12.914 0-25.485 1.829-37.371 5.141-1.372.344-2.743.8-4.114 1.258-.914.344-1.941.574-2.855.914-1.945.688-3.774 1.375-5.602 2.059-3.316 1.257-6.629 2.742-9.828 4.23-3.43 1.598-6.742 3.426-10.058 5.371a128 128 0 0 0-9.715 6.285c-2.285 1.602-4.457 3.2-6.512 4.914a154 154 0 0 0-6.86 5.828c-1.14 1.141-2.398 2.172-3.542 3.313l-6.055 6.059-4.344 4.343-4.8 4.684-4.57 4.46-4.802 4.798-11.086 11.086c-.687.687-1.37 1.37-2.058 1.945l-1.028 1.027c-.457.457-1.027 1.028-1.601 1.485-.57.57-1.14 1.031-1.711 1.601a244.4 244.4 0 0 1-49.828 35.313c1.027.457 2.168 1.027 3.199 1.488.8.34 1.715.797 2.512 1.14.8.344 1.715.801 2.515 1.145.801.344 1.602.684 2.516 1.14.914.345 1.828.802 2.742 1.145l3.086 1.371c1.027.457 1.942.801 2.969 1.258 1.258.57 2.629 1.028 3.887 1.598 1.03.46 2.058.8 3.086 1.258 1.601.687 3.199 1.258 4.8 1.945 1.485.57 3.086 1.14 4.57 1.828 1.145.457 2.286.914 3.43 1.258 1.946.684 4 1.484 5.946 2.172a81 81 0 0 1 2.968 1.027c1.371.457 2.856 1.028 4.23 1.485 1.141.343 2.286.8 3.544 1.14q2.567.86 5.14 1.719c1.829.57 3.657 1.14 5.372 1.71 2.171.688 4.457 1.376 6.628 2.06 1.489.457 2.973.914 4.457 1.257 2.973.914 5.942 1.715 9.032 2.512 1.027.344 2.168.574 3.199.8 2.055.458 4.113.915 6.172 1.259 2.398.457 4.683.8 7.082 1.03 3.203.34 6.402.571 9.488.571 2.856 0 5.715 0 8.457-.23 2.63-.227 5.371-.457 8-.914 3.656-.57 7.2-1.371 10.742-2.286 2.399-.683 4.688-1.37 6.973-2.285 2.172-.8 4.227-1.601 6.285-2.515 2.399-1.028 4.684-2.285 6.973-3.543 1.14-.57 2.168-1.258 3.312-1.942 1.028-.687 2.059-1.257 3.086-1.945 1.602-1.027 3.2-2.168 4.684-3.426a52 52 0 0 0 3.887-3.203c2.289-1.941 4.457-4 6.628-6.168 1.032-1.031 2.06-2.172 3.086-3.316 1.258-1.485 2.516-2.969 3.657-4.457.918-1.258 1.828-2.512 2.742-3.77 2.515-3.543 4.8-7.316 6.86-11.199l2.284-4.688 21.145-42.171v.113c6.742-14.742 16.226-28.113 27.656-39.426" fill="#133c9a"/></svg>
+          <svg class="tab-logo" width="15" height="15" viewBox="62.16 94.5 407.87 324.19"><path d="M274.18 264.785q.515-.517 1.03-1.027c.685-.688 1.372-1.258 2.056-1.945l1.37-1.372 4.118-4.113 5.598-5.601 4.8-4.797 4.575-4.457 4.796-4.688 4.344-4.344 6.059-6.054c1.14-1.145 2.285-2.29 3.543-3.317 2.168-2.054 4.457-4 6.855-5.828 2.172-1.715 4.344-3.312 6.516-4.914 3.082-2.172 6.398-4.344 9.71-6.285 3.204-1.941 6.63-3.656 10.06-5.371 3.199-1.602 6.515-2.973 9.827-4.23 1.829-.684 3.774-1.372 5.602-2.055.914-.344 1.941-.688 2.856-.914-8.57-33.715-24.227-64.575-45.258-90.86-4.114-5.14-10.399-8.113-17.028-8.113H130.754c-3.203 0-4.457 4-1.945 5.941 59.543 43.66 109.144 99.887 145.03 164.801 0-.226.227-.34.34-.457" fill="#00d6b9"/><path d="M204.79 418.691c90.288 0 169.03-49.828 210.058-123.543 1.488-2.628 2.859-5.257 4.23-7.882q-3.087 6-6.86 11.312l-2.741 3.77c-1.141 1.488-2.399 2.972-3.657 4.457-1.03 1.144-2.058 2.285-3.086 3.316-2.058 2.172-4.343 4.227-6.629 6.172a53 53 0 0 1-3.886 3.2c-1.598 1.144-3.086 2.284-4.684 3.429-1.031.683-2.058 1.371-3.086 1.941-1.144.684-2.172 1.258-3.316 1.942a131 131 0 0 1-6.969 3.543c-2.059.918-4.117 1.828-6.289 2.515-2.285.801-4.57 1.602-6.969 2.285-3.543.914-7.086 1.715-10.742 2.286-2.629.457-5.258.687-8 .914-2.86.23-5.601.23-8.457.23-3.086 0-6.289-.23-9.488-.57a83 83 0 0 1-7.086-1.031c-2.055-.34-4.113-.801-6.168-1.258-1.031-.227-2.176-.57-3.203-.797-2.973-.8-6.055-1.602-9.028-2.516-1.488-.457-2.972-.914-4.457-1.258-2.172-.683-4.457-1.37-6.629-2.058-1.828-.57-3.656-1.14-5.37-1.711q-2.573-.86-5.145-1.715c-1.14-.344-2.285-.8-3.543-1.144-1.371-.457-2.856-1.028-4.227-1.485-1.027-.344-2.058-.687-2.972-1.027-1.942-.688-4-1.488-5.942-2.172-1.144-.457-2.285-.914-3.43-1.258-1.484-.57-3.085-1.144-4.57-1.828-1.601-.687-3.203-1.258-4.8-1.945-1.028-.457-2.06-.797-3.087-1.258-1.257-.57-2.628-1.027-3.886-1.598-1.028-.457-1.942-.8-2.969-1.258l-3.086-1.37c-.914-.344-1.832-.801-2.746-1.145a44 44 0 0 1-2.512-1.14c-.8-.345-1.715-.802-2.515-1.145-.914-.344-1.715-.801-2.512-1.141-1.031-.457-2.172-1.031-3.203-1.484-1.14-.575-2.285-1.032-3.426-1.602-1.258-.574-2.402-1.144-3.66-1.715-1.027-.457-2.055-1.027-3.082-1.484-54.172-26.973-102.172-63.086-143.09-106.746-2.055-2.172-5.71-.684-5.71 2.289l.112 154.398v12.57c0 7.317 3.543 14.06 9.598 18.172 38.172 24.801 83.773 39.543 132.914 39.543" fill="#3370ff"/><path d="M414.84 295.188c0 .113-.113.113-.113.226l.8-1.489c-.343.457-.574 1.028-.8 1.488m3.793-7.05.226-.457.114-.23q-.17.513-.34.687" fill="#133c9a"/><path d="M470.035 201.121c-18.285-9.031-38.86-14.059-60.687-14.059-12.914 0-25.485 1.829-37.371 5.141-1.372.344-2.743.8-4.114 1.258-.914.344-1.941.574-2.855.914-1.945.688-3.774 1.375-5.602 2.059-3.316 1.257-6.629 2.742-9.828 4.23-3.43 1.598-6.742 3.426-10.058 5.371a128 128 0 0 0-9.715 6.285c-2.285 1.602-4.457 3.2-6.512 4.914a154 154 0 0 0-6.86 5.828c-1.14 1.141-2.398 2.172-3.542 3.313l-6.055 6.059-4.344 4.343-4.8 4.684-4.57 4.46-4.802 4.798-11.086 11.086c-.687.687-1.37 1.37-2.058 1.945l-1.028 1.027c-.457.457-1.027 1.028-1.601 1.485-.57.57-1.14 1.031-1.711 1.601a244.4 244.4 0 0 1-49.828 35.313c1.027.457 2.168 1.027 3.199 1.488.8.34 1.715.797 2.512 1.14.8.344 1.715.801 2.515 1.145.801.344 1.602.684 2.516 1.14.914.345 1.828.802 2.742 1.145l3.086 1.371c1.027.457 1.942.801 2.969 1.258 1.258.57 2.629 1.028 3.887 1.598 1.03.46 2.058.8 3.086 1.258 1.601.687 3.199 1.258 4.8 1.945 1.485.57 3.086 1.14 4.57 1.828 1.145.457 2.286.914 3.43 1.258 1.946.684 4 1.484 5.946 2.172a81 81 0 0 1 2.968 1.027c1.371.457 2.856 1.028 4.23 1.485 1.141.343 2.286.8 3.544 1.14q2.567.86 5.14 1.719c1.829.57 3.657 1.14 5.372 1.71 2.171.688 4.457 1.376 6.628 2.06 1.489.457 2.973.914 4.457 1.257 2.973.914 5.942 1.715 9.032 2.512 1.027.344 2.168.574 3.199.8 2.055.458 4.113.915 6.172 1.259 2.398.457 4.683.8 7.082 1.03 3.203.34 6.402.571 9.488.571 2.856 0 5.715 0 8.457-.23 2.63-.227 5.371-.457 8-.914 3.656-.57 7.2-1.371 10.742-2.286 2.399-.683 4.688-1.37 6.973-2.285 2.172-.8 4.227-1.601 6.285-2.515 2.399-1.028 4.684-2.285 6.973-3.543 1.14-.57 2.168-1.258 3.312-1.942 1.028-.687 2.059-1.257 3.086-1.945 1.602-1.027 3.2-2.168 4.684-3.426a52 52 0 0 0 3.887-3.203c2.289-1.941 4.457-4 6.628-6.168 1.032-1.031 2.06-2.172 3.086-3.316 1.258-1.485 2.516-2.969 3.657-4.457.918-1.258 1.828-2.512 2.742-3.77 2.515-3.543 4.8-7.316 6.86-11.199l2.284-4.688 21.145-42.171v.113c6.742-14.742 16.226-28.113 27.656-39.426" fill="#133c9a"/></svg>
           <span data-i18n="settings.tabFeishu">飞书</span>
         </button>
-        <button class="settings-tab" data-tab="oauth" onclick="switchSettingsTab('oauth')">
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 3h4a2 2 0 012 2v14a2 2 0 01-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/></svg>
-          <span data-i18n="settings.tabOAuth">订阅登录</span>
-        </button>
-
         <button class="settings-tab" data-tab="mcp" onclick="switchSettingsTab('mcp')">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v4m0 12v4M2 12h4m12 0h4"/><circle cx="12" cy="12" r="3"/><path d="M12 8V6m0 12v-2M8 12H6m12 0h-2"/></svg>
           <span>MCP</span>
@@ -1119,6 +1154,7 @@
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>
           <span data-i18n="settings.tabSkills">Skills</span>
         </button>
+        <div class="settings-tab-group" data-i18n="settings.groupSystem">系统</div>
         <button class="settings-tab" data-tab="preferences" onclick="switchSettingsTab('preferences')">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
           <span data-i18n="settings.tabPreferences">记忆与偏好</span>
@@ -2047,14 +2083,17 @@
 <script defer src="static/js/ui/translation_render.js?v=0.16.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <script defer src="static/js/ui/popups.js?v=0.16.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <script defer src="static/js/ui/finish_info.js?v=0.16.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<!-- ui/finish_info_rich.js — deferred cost-popover family (registered in lib/js_bundler.py:_DEFERRED_FILES; loaded via feature bundle or this tag in dev-fallback). -->
+<script defer src="static/js/ui/finish_info_rich.js?v=0.16.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <script defer src="static/js/ui/tool_rounds.js?v=0.16.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<!-- ui/tool_rounds_rich.js — deferred rich tool-round renderers (registered in lib/js_bundler.py:_DEFERRED_FILES; loaded via feature bundle or this tag in dev-fallback). -->
+<script defer src="static/js/ui/tool_rounds_rich.js?v=0.16.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <script defer src="static/js/ui/message_actions.js?v=0.16.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <script defer src="static/js/ui/edit_message.js?v=0.16.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <script defer src="static/js/ui/turn_nav.js?v=0.16.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <script defer src="static/js/ui/streaming_swarm_panel.js?v=0.16.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <script defer src="static/js/ui/streaming_ui.js?v=0.16.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <script defer src="static/js/ui/stream_session.js?v=0.16.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/ui/stream_reducer.js?v=0.16.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <script defer src="static/js/ui/stream_reducer.js?v=0.16.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <script defer src="static/js/ui/stall_watch.js?v=0.16.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <script defer src="static/js/ui/sse_handlers_tool.js?v=0.16.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
@@ -2085,12 +2124,20 @@
 <script defer src="static/js/paper/pdf_viewer.js?v=0.16.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <script defer src="static/js/paper/pdf_responsive.js?v=0.16.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <script defer src="static/js/paper/report.js?v=0.16.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<!-- reading-experience rail (P2–P4): seams INTO report.js → AFTER report.js,
+     BEFORE babel/paper-reader (mirrors _DEFERRED_FILES order). -->
+<script defer src="static/js/paper/reading_xp.js?v=0.16.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/paper/deepen.js?v=0.16.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/paper/notes.js?v=0.16.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/paper/focus_mode.js?v=0.16.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <script defer src="static/js/paper/babel.js?v=0.16.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <script defer src="static/js/paper/library.js?v=0.16.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <script defer src="static/js/paper/podcast.js?v=0.16.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <script defer src="static/js/paper/video.js?v=0.16.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <script defer src="static/js/paper/research.js?v=0.16.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <script defer src="static/js/paper-reader.js?v=0.16.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/project_state.js?v=0.16.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<!-- project.js — the DEFERRED project panel (registered in lib/js_bundler.py:_DEFERRED_FILES; its STATE subset is project_state.js, loaded directly above). -->
 <script defer src="static/js/project.js?v=0.16.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <script defer src="static/js/memory.js?v=0.16.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <script defer src="static/js/memory_skill_install.js?v=0.16.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
@@ -2158,6 +2205,9 @@
      MUST load after main.js / main_toolbar_ui.js — it drives _applyBrowserUI /
      _applyDesktopUI / _saveConvToolState and reads the toolbar globals. -->
 <script defer src="static/js/local-control.js?v=0.16.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<!-- onboarding.js — first-run setup wizard (registered in lib/js_bundler.py:_BUNDLE_FILES).
+     Entered from _maybeAutoOpenSettings; drives the settings/oauth surfaces at runtime only. -->
+<script defer src="static/js/onboarding.js?v=0.16.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <!-- mobile_panels.js — mobile portaling of timer/optimizer panels + mobile flow picker (registered in lib/js_bundler.py:_BUNDLE_FILES). -->
 <script defer src="static/js/mobile_panels.js?v=0.16.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <!-- presence.js — cross-conversation live-presence strip (registered in lib/js_bundler.py:_BUNDLE_FILES). -->
@@ -2299,7 +2349,13 @@ var _loadBearingCaps = [
   { fn: 't', label: 'translations (i18n.js)' },
   { fn: 'apiUrl', label: 'core runtime (core.js)' },
   { fn: 'pushSubscribe', label: 'live updates & notifications (push.js)' },
-  { fn: 'loadConversation', label: 'app boot (main.js)' }
+  { fn: 'loadConversation', label: 'app boot (main.js)' },
+  /* 2026-08-04 incident: chat_render.js failed to parse, yet every guard
+     passed — scripts "loaded", main.js booted, all four caps present — and
+     the user got a SILENT cripple: sidebar painted, clicks threw
+     "renderMessage is not defined". Message rendering is as load-bearing as
+     the four above; its absence must raise the banner, not dead clicks. */
+  { fn: 'renderMessage', label: 'message rendering (chat_render.js)' }
 ];
 var _capabilityChecks = 0;
 function _capabilityCheck() {

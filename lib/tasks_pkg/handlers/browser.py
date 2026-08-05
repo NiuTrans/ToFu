@@ -10,7 +10,7 @@ from lib.browser.advanced import ADVANCED_BROWSER_TOOL_NAMES
 from lib.log import get_logger
 from lib.tasks_pkg.executor import _finalize_tool_round, tool_registry
 from lib.tasks_pkg.manager import append_event
-from lib.tools import BROWSER_TOOL_NAMES, IMAGE_GEN_TOOL_NAMES
+from lib.tools import BROWSER_TOOL_NAMES, IMAGE_GEN_TOOL_NAMES, PAGE_PREVIEW_TOOL_NAMES
 
 logger = get_logger(__name__)
 
@@ -51,33 +51,51 @@ def _badge_regex_count(pattern, unit, fallback='done'):
 _BROWSER_BADGE_DISPATCH = {
     'browser_list_tabs':                _badge_list_tabs,
     'browser_read_tab':                 _badge_read_tab,
+    'browser_read_page':                _badge_read_tab,
     'browser_execute_js':               _badge_ok_or_error('ok', 'error'),
     'browser_screenshot':               _badge_screenshot,
     'browser_get_interactive_elements': _badge_regex_count(r'(\d+) shown', 'elements'),
     'browser_click':                    _badge_ok_or_error('clicked', 'failed'),
+    'browser_type':                     _badge_ok_or_error('typed', 'failed'),
+    'browser_press_key':                _badge_ok_or_error('sent', 'failed'),
+    'browser_menu_click':               _badge_ok_or_error('clicked', 'failed'),
     'browser_get_cookies':              _badge_regex_count(r'(\d+) cookies?', 'cookies'),
     'browser_get_history':              _badge_regex_count(r'(\d+) results?', 'results'),
     'browser_create_tab':               _badge_ok_or_error('opened', 'failed'),
     'browser_close_tab':                _badge_ok_or_error('closed', 'failed'),
     'browser_navigate':                 _badge_ok_or_error('done', 'failed'),
+    'browser_preview_page':             _badge_screenshot,
 }
 
 
-@tool_registry.tool_set(BROWSER_TOOL_NAMES | ADVANCED_BROWSER_TOOL_NAMES, category='browser',
+@tool_registry.tool_set(BROWSER_TOOL_NAMES | ADVANCED_BROWSER_TOOL_NAMES | PAGE_PREVIEW_TOOL_NAMES, category='browser',
                         description='Execute a browser automation tool')
 def _handle_browser_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, project_path, project_enabled, all_tools=None):
     from lib.browser import execute_browser_tool
     browser_client_id = cfg.get('browserClientId') or None
+    if fn_name in PAGE_PREVIEW_TOOL_NAMES:
+        # Server-side render — never touches the extension queue, but needs
+        # the workspace root to resolve a project-relative path. Handlers on
+        # the BROWSER_HANDLERS table receive fn_args only, so it travels as
+        # an internal (underscore-prefixed) arg.
+        fn_args = dict(fn_args or {})
+        fn_args['_projectPath'] = project_path
     tool_content = execute_browser_tool(fn_name, fn_args, client_id=browser_client_id)
 
     is_screenshot = isinstance(tool_content, dict) and tool_content.get('__screenshot__')
     if is_screenshot:
-        display_text = f'Screenshot captured ({tool_content.get("format", "png")})'
+        display_text = (f'Page preview rendered ({tool_content.get("format", "jpeg")})'
+                        if fn_name in PAGE_PREVIEW_TOOL_NAMES
+                        else f'Screenshot captured ({tool_content.get("format", "png")})')
     else:
         display_text = tool_content if isinstance(tool_content, str) else json.dumps(tool_content, ensure_ascii=False)
 
-    # browser_read_tab: apply LLM content filter
-    is_read_tab = (fn_name == 'browser_read_tab'
+    # browser_read_tab / browser_read_page (text-bearing modes): apply the
+    # LLM content filter. elements/app_state modes return structured lists,
+    # not page prose — filtering those would mangle them.
+    is_read_tab = ((fn_name == 'browser_read_tab'
+                    or (fn_name == 'browser_read_page'
+                        and (fn_args or {}).get('mode', 'auto') in ('auto', 'text')))
                    and isinstance(tool_content, str)
                    and not tool_content.startswith('Error'))
     if is_read_tab and len(display_text) > 1500:

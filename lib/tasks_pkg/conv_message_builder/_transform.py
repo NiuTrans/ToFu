@@ -44,6 +44,22 @@ def _transform_messages(
     if sys_prompt:
         messages.append({'role': 'system', 'content': sys_prompt})
 
+    # Video-frame clamping is MODEL-AWARE (owner ruling 2026-08-04): the send
+    # target decides how many durable frames of each attached video ride this
+    # request. Two layers: per-video budget (vision gate / family cap / context
+    # share / wire bytes — lib.model_info.video_frame_budget) and an AGGREGATE
+    # image-count ceiling across the whole request (Claude's 100-images API
+    # limit) accounted here as a running balance.
+    model = (config.get('model') or '') if isinstance(config, dict) else ''
+    from lib.model_info import aggregate_image_cap
+    _agg_cap = aggregate_image_cap(model) if model else None
+    _images_used = 0
+
+    def _remaining_budget() -> int | None:
+        if _agg_cap is None:
+            return None
+        return max(0, _agg_cap - _images_used)
+
     # Determine source slice — exclude last message if requested
     src = raw_messages[:-1] if (exclude_last and raw_messages) else raw_messages
     # For normal flow: exclude the trailing assistant message (it's the one being generated)
@@ -101,12 +117,18 @@ def _transform_messages(
         role = msg.get('role', '')
 
         if role == 'user':
-            messages.append(_build_user_message(msg))
+            built_user = _build_user_message(msg, model=model,
+                                             image_budget=_remaining_budget())
+            messages.append(built_user)
+            _images_used += _count_image_blocks(built_user)
 
         elif role == 'assistant':
             # May expand to multiple messages: assistant(tool_calls) +
             # tool(result) per round — see _build_assistant_messages.
-            messages.extend(_build_assistant_messages(msg))
+            built_asst = _build_assistant_messages(msg)
+            messages.extend(built_asst)
+            for _m in built_asst:
+                _images_used += _count_image_blocks(_m)
 
         # Skip other roles (system messages in the middle, etc.)
 
@@ -116,8 +138,106 @@ def _transform_messages(
     return messages
 
 
-def _build_user_message(msg: dict) -> dict:
-    """Build a single user message for the API."""
+def _count_image_blocks(msg: dict) -> int:
+    """Count image_url blocks in one built message (0 for string content)."""
+    content = msg.get('content')
+    if not isinstance(content, list):
+        return 0
+    return sum(1 for b in content
+               if isinstance(b, dict) and b.get('type') == 'image_url')
+
+
+# Single definition lives in lib.video_analysis._frames (the storyboard
+# generator uses the same thinning/timestamp rules); re-exported here so
+# existing imports (tests included) keep working.
+from lib.video_analysis._frames import _fmt_video_ts, _thin_frames  # noqa: E402,F401
+
+
+def _append_video_blocks(content_blocks: list, videos: list, *, model: str,
+                         image_budget: int | None) -> int:
+    """Expand stored ``videos[]`` attachments into frame image blocks +
+    transcript text. Returns the number of image blocks added (for the
+    aggregate ceiling accounting in _transform_messages).
+
+    Cache-friendly ordering: frames and transcript form a STABLE prefix —
+    they are byte-identical across follow-up turns, and the per-frame text
+    label (``[Video 1 frame at 02:35]``) is the research-validated timestamp
+    injection (VideoLLaMA3 / InternVL pattern). Unlike user-uploaded images,
+    frames carry NO ``[image ref:]`` hint — 64 identical inspect_image
+    invitations are prompt noise, and zooming a sampled frame is a deep-tail
+    need the original file serves better.
+    """
+    added = 0
+    for vi, vid in enumerate(videos, 1):
+        if not isinstance(vid, dict):
+            continue
+        frames = [f for f in (vid.get('frames') or [])
+                  if isinstance(f, dict) and f.get('url')]
+        name = vid.get('name') or 'video'
+        duration = vid.get('duration_s') or 0
+        transcript = (vid.get('transcript') or '').strip()
+        storyboard = (vid.get('storyboard') or '').strip()
+
+        from lib.model_info import video_frame_budget
+        budget = video_frame_budget(
+            model, avg_frame_bytes=int(vid.get('avg_frame_bytes') or 0))
+        if image_budget is not None:
+            budget = min(budget, max(0, image_budget - added))
+        kept = _thin_frames(frames, budget)
+
+        tr_status = vid.get('transcript_status') or ('ok' if transcript else 'none')
+        header = f'[Video {vi}: "{name}" — {duration:.0f}s'
+        if frames and kept:
+            header += (f', {len(kept)} frames sampled'
+                       + (f' (of {len(frames)} extracted)'
+                          if len(kept) < len(frames) else ''))
+        elif frames and budget == 0 and storyboard:
+            header += (', frames narrated as a visual storyboard by '
+                       + (vid.get('storyboard_model') or 'a vision model')
+                       + ' (chat model has no vision)')
+        elif frames:
+            header += (', frames omitted (model has no vision capability)'
+                       if budget == 0
+                       else ', frames omitted (per-request image budget exhausted)')
+        else:
+            header += ', frames unavailable'
+        header += f', audio transcript: {tr_status}]'
+        content_blocks.append({'type': 'text', 'text': header})
+
+        for fr in kept:
+            content_blocks.append({
+                'type': 'image_url',
+                'image_url': {'url': fr['url']},
+            })
+            content_blocks.append({
+                'type': 'text',
+                'text': f'[Video {vi} frame at {_fmt_video_ts(fr.get("t") or 0)}]',
+            })
+            added += 1
+        # Storyboard only rides when the raw frames were suppressed by the
+        # vision gate — a vision-capable chat model gets the frames directly
+        # and the storyboard would be redundant noise.
+        if storyboard and frames and not kept:
+            content_blocks.append({
+                'type': 'text',
+                'text': (f'[Video {vi} visual storyboard]\n{storyboard}'),
+            })
+        if transcript:
+            content_blocks.append({
+                'type': 'text',
+                'text': f'[Video {vi} audio transcript]\n{transcript}',
+            })
+    return added
+
+
+def _build_user_message(msg: dict, *, model: str = '',
+                        image_budget: int | None = None) -> dict:
+    """Build a single user message for the API.
+
+    ``model`` / ``image_budget`` drive the model-aware video-frame clamp
+    (see _transform_messages); both default to legacy behavior for direct
+    callers/tests that predate video attachments.
+    """
     text_content = msg.get('content') or ''
 
     # 3. Strip <notranslate>/<nt> wrapper tags
@@ -192,8 +312,11 @@ def _build_user_message(msg: dict) -> dict:
     # 7. Build multimodal image blocks
     images = msg.get('images') or []
     has_images = any(img.get('base64') or img.get('url') for img in images)
+    videos = msg.get('videos') or []
+    has_videos = any(isinstance(v, dict) and (v.get('frames') or v.get('transcript'))
+                     for v in videos)
 
-    if has_images:
+    if has_images or has_videos:
         content_blocks = []
         for img in images:
             img_url = ''
@@ -264,6 +387,19 @@ def _build_user_message(msg: dict) -> dict:
                         'type': 'text',
                         'text': f'[PDF page {img["pdfPage"]}/{img.get("pdfTotal", "?")}]',
                     })
+
+        # 7b. Video attachments: durable frames + transcript, expanded AFTER
+        # the user's own images and BEFORE the text (stable cache prefix).
+        # The aggregate image budget is spent by the images above first.
+        if has_videos:
+            _own_images = sum(1 for b in content_blocks
+                              if b.get('type') == 'image_url')
+            _remaining = (None if image_budget is None
+                          else max(0, image_budget - _own_images))
+            _added = _append_video_blocks(content_blocks, videos, model=model,
+                                          image_budget=_remaining)
+            logger.debug('[Context] inject block=videos count=%d frames=%d',
+                         len(videos), _added)
 
         if text_content:
             content_blocks.append({'type': 'text', 'text': text_content})

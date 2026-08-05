@@ -29,6 +29,8 @@ infrastructure that v1 explicitly delegates to (cf. `routes/api_v1/auth.py`
 | `/api/pdf/parse`, `/api/pdf/vlm-parse`, `/api/doc/parse`, `/api/images/upload`, `/api/images/<filename>` | Multipart upload + static image serving. |
 | `/api/translate/pptx`, `/api/translate/pptx/download/<filename>` | Multipart PPTX upload + binary download. |
 | `/api/browser/poll`, `/api/browser/commands`, `/api/browser/result`, `/api/browser/download`, `/api/desktop/poll` | Long-poll RPC channels for the Chrome extension + desktop agent. |
+| `/api/desktop/pair` | Pairing-code exchange (RWA P4a): the 6-digit one-time code IS the credential; the shipped TofuAgent 0.16.0 installer embeds this exact path — migrating would break in-field agents. |
+| `/api/videos/<filename>` | Static video-bytes serving (playback / re-download) — static-asset family like `/api/images/<filename>`. |
 | `/api/artifacts/<id>/raw`, `/api/artifacts/<id>/view`, `/api/artifacts/<id>/export` | Static asset serving. |
 | `/metrics` | Prometheus exposition. Already non-`/api/`; mentioned for completeness. |
 | `/`, `/trading.html`, `/login`, `/signup`, `/dashboard`, `/favicon.*`, `/static/*` | HTML pages + static assets. |

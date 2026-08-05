@@ -197,8 +197,9 @@ def test_nc_dropped_culprit_regex_fails():
 #    state badge + named culprit actually appear in the popover HTML. ──
 _RENDER_HARNESS = r"""
 const fs = require('fs');
-const src = fs.readFileSync(process.argv[2], 'utf8');
-const NC = process.argv[3] || '';
+const src = fs.readFileSync(process.argv[2], 'utf8')
+  + '\n;\n' + fs.readFileSync(process.argv[3], 'utf8');
+const NC = process.argv[4] || '';
 
 let _i18nLang = 'zh';
 global.escapeHtml = (s) => String(s == null ? '' : s)
@@ -289,7 +290,8 @@ def _run_render() -> str:
         f.write(_RENDER_HARNESS)
     try:
         proc = subprocess.run(
-            ['node', harness, os.path.join(JS_DIR, 'ui', 'finish_info.js')],
+            ['node', harness, os.path.join(JS_DIR, 'ui', 'finish_info.js'),
+             os.path.join(JS_DIR, 'ui', 'finish_info_rich.js')],
             capture_output=True, text=True, timeout=60,
         )
     finally:

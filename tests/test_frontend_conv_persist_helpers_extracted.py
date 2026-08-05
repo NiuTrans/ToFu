@@ -11,21 +11,24 @@ Scope: move the 6-function pure-helper cluster out of core/conversations.js
   * _isErrorOnlyAssistant(m)                         — error-only-tail probe for rebase drop
   * _rebaseUnackedTail(serverMsgs, localMsgs)        — 409 CAS rebase
 
+A SEVENTH helper joined the family later (2026-08-04, image-strip recovery):
+
+  * _serverHasImagesLocalLacks(serverMsgs, local)    — image-strip freshness signal
+    (the IDB cache strips imageDataUris[].uri; without this signal a
+    cache-fresh reload silently degraded every image round to badge-only)
+
 Plus the module-local constant:
   * const _USAGE_TRANSIENT_KEYS = ['_wire_fp', '_wire_static']
 
-All 6 helpers are PURE reducers over their arguments — zero runtime state,
+All helpers are PURE reducers over their arguments — zero runtime state,
 zero IIFE-load side effects. Consumers are exclusively inside conversations.js
-(bare-name reads at call time inside function bodies: _trimMsgForPersist at
-L517, _stripUsageTransient at L202/L209, _rebaseUnackedTail at L643,
-_serverHasSegmentsLocalLacks at L1919, _serverHasTranslationLocalLacks at
-L1929, _isErrorOnlyAssistant at L342/L366). Bundle-ordering (leaf BEFORE
-conversations.js) is sufficient.
+(bare-name reads at call time inside function bodies; bundle-ordering (leaf
+BEFORE conversations.js) is sufficient for the window-exposed reads.
 
 Failing-first — 3 assertions (RED before extraction, GREEN after):
 
-  1. static/js/core/conv_persist_helpers.js exists AND declares all 6
-     helpers via `function <name>(` AND exposes each on window.*.
+  1. static/js/core/conv_persist_helpers.js exists AND declares every
+     family helper via `function <name>(` AND exposes each on window.*.
   2. static/js/core/conversations.js NO LONGER declares any of the 6.
   3. lib/js_bundler.py::_BUNDLE_FILES lists 'core/conv_persist_helpers.js'
      BEFORE 'core/conversations.js'.
@@ -60,6 +63,7 @@ _HELPERS = (
     '_trimMsgForPersist',
     '_serverHasSegmentsLocalLacks',
     '_serverHasTranslationLocalLacks',
+    '_serverHasImagesLocalLacks',
     '_isErrorOnlyAssistant',
     '_rebaseUnackedTail',
 )
@@ -71,9 +75,9 @@ def _read(rel_path: str) -> str:
 
 
 @_unit
-def test_conv_persist_helpers_leaf_module_exists_and_declares_six():
+def test_conv_persist_helpers_leaf_module_exists_and_declares_family():
     """Slice 3: static/js/core/conv_persist_helpers.js exists and defines
-    all 6 helpers via `function <name>(` AND exposes each on window.*."""
+    every family helper via `function <name>(` AND exposes each on window.*."""
     src = _read('static/js/core/conv_persist_helpers.js')
     for name in _HELPERS:
         assert re.search(rf'\bfunction\s+{re.escape(name)}\s*\(', src), (
@@ -139,7 +143,7 @@ def test_bundle_manifest_loads_persist_helpers_before_conversations():
 
 if __name__ == '__main__':
     for fn in [
-        test_conv_persist_helpers_leaf_module_exists_and_declares_six,
+        test_conv_persist_helpers_leaf_module_exists_and_declares_family,
         test_conversations_js_no_longer_declares_persist_helpers,
         test_bundle_manifest_loads_persist_helpers_before_conversations,
     ]:

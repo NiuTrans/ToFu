@@ -51,6 +51,9 @@ _IDEMPOTENT_TOOLS_BASE = frozenset({
     'browser_get_history', 'browser_get_cookies',
     'browser_summarize_page', 'browser_get_app_state',
     'browser_get_interactive_elements',
+    # v2 unified perception entry (pt_869e5648403e4745) — same cacheability
+    # as the read_tab it absorbed.
+    'browser_read_page',
     'list_conversations', 'get_conversation',
     'project_charter_read', 'project_board_read',
     'project_peer_status',

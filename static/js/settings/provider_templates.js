@@ -567,9 +567,9 @@ async function _loadExternalProviderTemplates() {
   if (_externalTemplatesLoaded) return;
   _externalTemplatesLoaded = true;
   try {
-    var r = await Api.providers.templates();
-    if (!r || !r.ok) return;
-    var templates = await r.json();
+    // Api.providers.templates unwraps the {ok, items} envelope and
+    // returns the array directly (batch-10 coordination).
+    var templates = await Api.providers.templates();
     if (!Array.isArray(templates)) return;
     var existingKeys = new Set(_PROVIDER_TEMPLATES.map(function(t) { return t.key; }));
     for (var i = 0; i < templates.length; i++) {

@@ -78,6 +78,17 @@ function emptyStreamState() {
  *    clears once the prose is GUARANTEED preserved on a round (else keep it
  *    — the "frozen at a half word" freeze guard). ── */
 function _stampDeltaReset(state, ev) {
+  /* discard:true — the canned-greeting retry reset. The discarded round
+   * issued NO tool calls, so there is no llmRound batch to stamp its prose
+   * onto and the freeze guard below would keep the poisoned text forever
+   * (2026-08-02 triple-greeting bug). The backend has already reset its
+   * accumulators; clear unconditionally here too — still KEEPING toolRounds
+   * (earlier rounds of this turn did legitimate tool work). */
+  if (ev && ev.discard === true) {
+    state.content = '';
+    state.thinking = '';
+    return state;
+  }
   const trs = Array.isArray(state.toolRounds) ? state.toolRounds : null;
   let stamped = false;
   if (trs && trs.length) {

@@ -20,7 +20,11 @@ No network. Uses a tiny fake slot object. Run standalone
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from lib.mcp.registry import is_opensource_build
 
 
 def _color(s, c): return f'\033[{c}m{s}\033[0m'
@@ -59,6 +63,10 @@ def test_internal_helpers_reachable():
     _ok('internal helpers reachable on the package facade')
 
 
+@pytest.mark.skipif(
+    is_opensource_build(),
+    reason="'friday' is an internal provider whose gateway host is sanitized "
+           'away in opensource builds — there is nothing to detect there')
 def test_friday_provider_detection():
     import lib.image_gen as ig
     assert ig._is_friday_provider(_FakeSlot('https://api.openai.com/v1')) is True

@@ -54,7 +54,17 @@ import sys
 
 import pytest
 
+from lib.mcp.registry import is_opensource_build
+
 pytestmark = pytest.mark.unit
+
+# The audit baseline (tests/audit_baseline.json) is a census of the SOURCE
+# tree. The opensource export is structurally different — it deliberately
+# strips files the suite legitimately references (scripts/cache_waste_report.py
+# et al, see tests/test_gitignore_covers_export_excludes.py), which shows up
+# as phantom F-category growth against a baseline those files were counted in.
+# The two baseline-comparison guards therefore self-skip on a public build.
+_OPENSOURCE = is_opensource_build()
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
@@ -93,6 +103,7 @@ def test_audit_tool_is_runnable():
         f"census only found {census['tests']} test functions — scan collapsed")
 
 
+@pytest.mark.skipif(_OPENSOURCE, reason='audit baseline is source-tree-specific; the export deliberately strips referenced files')
 def test_no_category_regressed():
     """One-way ratchet over every gated failure mode."""
     with open(BASELINE_PATH, encoding='utf-8') as f:
@@ -121,6 +132,7 @@ def test_no_category_regressed():
               'findings were fixed.')
 
 
+@pytest.mark.skipif(_OPENSOURCE, reason='audit baseline is source-tree-specific; the export deliberately strips referenced files')
 def test_baseline_is_not_loose():
     """The baseline must track reality DOWNWARD too.
 

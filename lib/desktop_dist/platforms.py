@@ -47,7 +47,7 @@ def _desktop_download_url() -> str:
     return f'https://github.com/{repo}/releases/latest' if repo else ''
 
 
-def _platform_assets():
+def _platform_assets(kind: str = 'full'):
     """The (os, arch, label, glob, min_bytes) table from ``scripts/release_assets.py``.
 
     That module is the SINGLE source of truth for which files a release must
@@ -55,14 +55,19 @@ def _platform_assets():
     ``tests/test_desktop_build_workflow.py`` asserts the globs appear in no
     other file. So consumers read it rather than owning another copy.
 
-    ``scripts/`` is not a package, so it is loaded by path. Failure is
-    non-fatal: the caller degrades to the releases page.
+    ``kind`` selects the component table: 'full' → PLATFORM_ASSETS (the
+    historical behavior), 'agent' → AGENT_PLATFORM_ASSETS. ``scripts/`` is
+    not a package, so it is loaded by path. Failure is non-fatal: the
+    caller degrades to the releases page.
     """
     import importlib.util
     from pathlib import Path
 
-    global _PLATFORM_ASSETS_CACHE
-    if _PLATFORM_ASSETS_CACHE is not None:
+    global _PLATFORM_ASSETS_CACHE, _AGENT_ASSETS_CACHE
+    if kind == 'agent':
+        if _AGENT_ASSETS_CACHE is not None:
+            return _AGENT_ASSETS_CACHE
+    elif _PLATFORM_ASSETS_CACHE is not None:
         return _PLATFORM_ASSETS_CACHE
     script = Path(__file__).resolve().parents[2] / 'scripts' / 'release_assets.py'
     try:
@@ -72,15 +77,23 @@ def _platform_assets():
             raise ImportError(f'cannot load {script}')
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
+        if kind == 'agent':
+            _AGENT_ASSETS_CACHE = tuple(
+                getattr(mod, 'AGENT_PLATFORM_ASSETS', ()))
+            return _AGENT_ASSETS_CACHE
         _PLATFORM_ASSETS_CACHE = tuple(mod.PLATFORM_ASSETS)
     except Exception as e:
         logger.warning('[DesktopDist] release_assets.py unreadable, falling '
                        'back to the releases page: %s', e)
+        if kind == 'agent':
+            _AGENT_ASSETS_CACHE = ()
+            return _AGENT_ASSETS_CACHE
         _PLATFORM_ASSETS_CACHE = ()
     return _PLATFORM_ASSETS_CACHE
 
 
 _PLATFORM_ASSETS_CACHE = None
+_AGENT_ASSETS_CACHE = None
 
 # Published asset names change only when a release is cut, so a long TTL is
 # right — but it must EXPIRE, or a server that happened to probe during a
@@ -141,19 +154,22 @@ def _detect_arch(user_agent: str, arch_hint: str) -> str:
     return ''
 
 
-def _platform_rows_for(os_key: str, arch: str = '') -> list:
-    """The PLATFORM_ASSETS rows this visitor can run, arch-narrowed.
+def _platform_rows_for(os_key: str, arch: str = '',
+                       kind: str = 'full') -> list:
+    """The platform rows this visitor can run, arch-narrowed.
 
     The ONE narrowing rule, shared by ``_match_platform_assets`` (GitHub-URL
     mode) and ``store.find_for_platform`` (server-hosted mode) so the two
     supply paths can never disagree about what "the right installer" means.
+    ``kind`` selects the component table ('full' is the historical
+    behavior).
 
     Narrowing is deliberately LOSSY-tolerant: when the detected arch has no
     build (an arm64 Windows visitor — there is no arm64 installer), the full
     OS row set is returned, because the x86_64 build runs fine under
     emulation and offering nothing is worse.
     """
-    rows = [a for a in _platform_assets() if a[0] == os_key]
+    rows = [a for a in _platform_assets(kind) if a[0] == os_key]
     if arch:
         narrowed = [a for a in rows if a[1] == arch]
         if narrowed:

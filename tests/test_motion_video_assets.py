@@ -246,6 +246,26 @@ def test_undeclared_family_is_reported():
     assert F.undeclared_font_families(html) == ['PingFang SC']
 
 
+def test_quoted_families_are_seen_and_attributes_still_terminate():
+    """Both directions of the use-site regex (2026-08-02 root fix).
+
+    Direction 1 (the measured fail-open): a value STARTING with a quote —
+    the most common CSS style — captured NOTHING after the 2026-07-29
+    regex excluded quote chars, so ghost families quoted that way sailed
+    through. Multi-quoted lists must be read atom by atom.
+    Direction 2 (the original trap): an inline attribute's closing quote
+    must still TERMINATE the value — a regression here re-creates the
+    bogus runaway family that swallows the document tail.
+    """
+    assert F.undeclared_font_families(
+        "<style>p{font-family:'Noto Sans','PingFang SC', serif}</style>"
+    ) == ['PingFang SC']
+    html = '<h1 style="font-family: Inter, sans-serif">扩散语言模型</h1>'
+    assert F.undeclared_font_families(html) == [], (
+        'the attribute closing quote must terminate the value — a bogus '
+        'family means the 2026-07-29 runaway is back')
+
+
 def test_renderer_resolvable_families_are_accepted():
     """guide/MOTION_CRAFT.md lists the families the renderer resolves itself;
     flagging those would be a false alarm."""

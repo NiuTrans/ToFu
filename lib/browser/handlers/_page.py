@@ -75,6 +75,72 @@ def _handle_summarize_page(fn_args):
     return json.dumps(result, ensure_ascii=False, indent=2)
 
 
+#: Below this extracted-text length the auto mode considers a page "sparse"
+#: (Canvas/SVG/SPA-rendered) and attaches the structural summary so the model
+#: is never asked to diagnose the rendering technology itself.
+_AUTO_SPARSE_CHARS = 400
+
+
+def _handle_read_page(fn_args):
+    """browser_read_page — the ONE perception entry (v2, pt_869e5648403e4745).
+
+    Merges read_tab / summarize_page / get_interactive_elements /
+    get_app_state. mode='auto' reads the text optimistically and only pays
+    for a structural summary when the text proves sparse — the canvas/SPA
+    routing the old descriptions taught the model to do by hand.
+    """
+    from lib.browser._resolve import resolve_work_tab
+    tab_id = resolve_work_tab(fn_args, send_browser_command)
+    if tab_id is None:
+        return ('Error: no tab to read. Pass tab_id, or call '
+                'browser_list_tabs / browser_navigate first.')
+    mode = str(fn_args.get('mode') or 'auto').lower()
+    pkg = _facade()
+    if mode == 'text':
+        return pkg._handle_read_tab({
+            'tabId': tab_id,
+            'selector': fn_args.get('selector'),
+            'maxChars': fn_args.get('maxChars', 50000),
+        })
+    if mode == 'elements':
+        return pkg._handle_get_interactive_elements({
+            'tabId': tab_id,
+            'viewport': fn_args.get('viewport', False),
+            'maxElements': fn_args.get('maxElements', 200),
+        })
+    if mode == 'app_state':
+        return _handle_get_app_state({'tabId': tab_id, 'depth': fn_args.get('depth')})
+    if mode != 'auto':
+        return (f"Error: unknown mode '{mode}' — use auto (default), text, "
+                f"elements, or app_state.")
+    # ── auto: optimistic text read; diagnose only on sparsity ──
+    result, error = send_browser_command('read_tab', {
+        'tabId': int(tab_id), 'selector': fn_args.get('selector'),
+        'maxChars': fn_args.get('maxChars', 30000),
+    }, timeout=30)
+    if error:
+        return f'Error reading tab {tab_id}: {error}'
+    if isinstance(result, dict) and not result.get('error') and not result.get('elements'):
+        text, _method = pkg._extract_best_text(result)
+        if len((text or '').strip()) >= _AUTO_SPARSE_CHARS:
+            return pkg._render_read_result(result, tab_id)
+        # Sparse: the page is likely Canvas/SVG/SPA — attach the structural
+        # summary (framework, forms, canvas count) so the model gets the
+        # diagnosis instead of having to make it.
+        summary = _handle_summarize_page({'tabId': tab_id})
+        body = pkg._render_read_result(result, tab_id)
+        return (
+            f'Text extraction is sparse ({len((text or "").strip())} chars) — '
+            f'the page is likely Canvas/SVG/SPA-rendered.\n'
+            f'Next steps: browser_screenshot to SEE the layout, '
+            f'mode="app_state" for framework/chart data, or browser_execute_js '
+            f'for custom extraction.\n\n'
+            f'--- Structural summary ---\n{summary}\n\n'
+            f'--- Extracted text (sparse) ---\n{body}'
+        )
+    return pkg._render_read_result(result, tab_id)
+
+
 def _handle_get_app_state(fn_args):
     tab_id = fn_args.get('tabId')
     if tab_id is None:

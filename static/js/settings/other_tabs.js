@@ -21,10 +21,109 @@ function _populateSearchTab(cfg) {
   _setVal('settingMaxCharsSearch', s.max_chars_search || 60000);
   _setVal('settingMaxCharsDirect', s.max_chars_direct || 200000);
   _setVal('settingMaxCharsPdf', s.max_chars_pdf || 0);
-  _setVal('settingMaxBytes', s.max_bytes || 20971520);
+  // Max download size is stored in BYTES but displayed in MB — humans do not
+  // think in 20971520. Save converts back (save_export.js).
+  _setVal('settingMaxBytesMB', _bytesToMB(s.max_bytes || 20971520));
   if (typeof ChipInput !== 'undefined') ChipInput.init('settingSkipDomains', s.skip_domains || []);
+  _renderSearchBackendStatus(cfg.search_status);
+  _wireSearchPipelinePreview();
   if (typeof _renderAuthSources === 'function') _renderAuthSources();
   if (typeof _renderPrivateHosts === 'function') _renderPrivateHosts();
+}
+
+/** bytes → MB for display (round to 1 decimal, trim trailing .0). */
+function _bytesToMB(bytes) {
+  var mb = (parseInt(bytes, 10) || 0) / 1048576;
+  var rounded = Math.round(mb * 10) / 10;
+  return (rounded === Math.floor(rounded)) ? Math.floor(rounded) : rounded;
+}
+
+/** Render the live backend status strip (tofu-search version, engines,
+ *  extension reachability, filter mode/model, deadlines). This is the piece
+ *  that tells the user these knobs drive a SERVER pipeline, not UI cosmetics. */
+function _renderSearchBackendStatus(st) {
+  var box = document.getElementById('searchBackendStatus');
+  if (!box) return;
+  if (!st || !st.ok) {
+    box.innerHTML = String(safeHtml`<span class="search-status-badge off">${t('settings.searchStatusUnavailable') || '后端状态不可用'}</span>`);
+    return;
+  }
+  var extBadge = st.extension_connected
+    ? safeHtml`<span class="search-status-badge on">${t('settings.searchStatusExtOn') || '浏览器扩展在线'}</span>`
+    : safeHtml`<span class="search-status-badge off">${t('settings.searchStatusExtOff') || '扩展离线（浏览器兜底不可用）'}</span>`;
+  box.innerHTML = String(safeHtml`
+    <span class="search-status-label">${t('settings.searchBackendLive') || '后端实况'}</span>
+    ${extBadge}
+    <span class="search-status-badge">tofu-search v${st.tofu_search_version || '?'}</span>
+    <span class="search-status-badge">SearXNG ×${st.searxng_instances || 0}</span>
+    <span class="search-status-badge">${(t('settings.searchStatusFilter') || '过滤 {mode} · {model}').replace('{mode}', st.filter_mode || '?').replace('{model}', st.filter_model || '?')}</span>
+    <span class="search-status-badge">${(t('settings.searchStatusDeadline') || '限时 整轮 {call}s · 单页 {url}s').replace('{call}', st.search_deadline_secs || 0).replace('{url}', st.fetch_url_deadline_secs || 0)}</span>
+  `);
+}
+
+/** The pipeline preview says in one sentence what the backend WILL DO with
+ *  the current knob values — the frontend↔backend bridge. Live-updates as
+ *  the user edits the inputs (wired once). */
+function _refreshSearchPipelinePreview() {
+  var el = document.getElementById('searchPipelinePreview');
+  if (!el) return;
+  var _v = function (id, dflt) {
+    var n = parseInt((document.getElementById(id) || {}).value, 10);
+    return (isNaN(n) ? dflt : n);
+  };
+  var n = _v('settingFetchTopN', 6);
+  var timeout = _v('settingFetchTimeout', 15);
+  var chars = _v('settingMaxCharsSearch', 60000);
+  var filterCb = document.getElementById('settingLlmContentFilter');
+  var filterOn = filterCb ? filterCb.checked : true;
+  var filterTxt = filterOn
+    ? (t('settings.searchFilterOnTpl') || 'LLM 过滤杂质')
+    : (t('settings.searchFilterOffTpl') || '跳过过滤（原文直送）');
+  el.textContent = (t('settings.searchPipelineTpl') ||
+    '搜索引擎返回结果 → 抓取前 {n} 个网页（每页 ≤{chars} 字符 · 超时 {timeout}s）→ {filter} → 注入对话')
+    .replace('{n}', n).replace('{chars}', (chars || 0).toLocaleString('en-US'))
+    .replace('{timeout}', timeout).replace('{filter}', filterTxt);
+  el.classList.toggle('filter-off', !filterOn);
+}
+
+function _wireSearchPipelinePreview() {
+  _refreshSearchPipelinePreview();
+  if (/** @type {any} */ (_wireSearchPipelinePreview)._done) return;
+  /** @type {any} */ (_wireSearchPipelinePreview)._done = true;
+  ['settingFetchTopN', 'settingFetchTimeout', 'settingMaxCharsSearch',
+   'settingLlmContentFilter'].forEach(function (id) {
+    var el = document.getElementById(id);
+    if (el) {
+      el.addEventListener('input', _refreshSearchPipelinePreview);
+      el.addEventListener('change', _refreshSearchPipelinePreview);
+    }
+  });
+}
+
+// ══════════════════════════════════════════════════════
+//  Paper reading-experience toggles (General tab → 功能模块)
+// ══════════════════════════════════════════════════════
+
+/** Populate the paper reading-experience toggles from cfg.paper. Values are
+ *  the EFFECTIVE resolution (server_config → env → default ON), so the
+ *  checkboxes reflect what the reader will actually do; saving writes the
+ *  explicit server_config section. */
+function _populatePaperXpTab(cfg) {
+  var rx = (cfg && cfg.paper && cfg.paper.reading_experience) || {};
+  var insCb = document.getElementById('settingPaperInsightEnabled');
+  if (insCb) insCb.checked = (rx.insight !== false);   // default ON
+  var cpCb = document.getElementById('settingPaperCheckpointsEnabled');
+  if (cpCb) cpCb.checked = (rx.checkpoints !== false); // default ON
+}
+
+/** Collect the toggle states into the save payload (merged server-side). */
+function _collectPaperXpConfig() {
+  var insCb = document.getElementById('settingPaperInsightEnabled');
+  var cpCb = document.getElementById('settingPaperCheckpointsEnabled');
+  return { reading_experience: {
+    insight: insCb ? insCb.checked : true,
+    checkpoints: cpCb ? cpCb.checked : true,
+  } };
 }
 
 // ══════════════════════════════════════════════════════

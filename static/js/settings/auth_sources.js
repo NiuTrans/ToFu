@@ -39,6 +39,7 @@ function _renderAuthSources() {
       return;
     }
     box.innerHTML = sources.map(_authSourceCardHtml).join('');
+    _authSourceProbeLiveSessions(sources);
   }).catch(function (e) {
     console.warn('[AuthSrc] list failed', e);
     box.innerHTML = String(safeHtml`<div class="auth-src-empty">${t('settings.authSourcesLoadFail') || '加载失败'}</div>`);
@@ -50,6 +51,11 @@ function _authSourceCardHtml(src) {
   var enabled = !!src.enabled;
   var dom = src.domain || '';
   var id = _domId(dom);
+  var strategy = src.access_strategy || 'browser_first';
+  // The toggle's credential gate: replay needs stored cookies, but a
+  // browser_first / public row's credential is the user's LIVE browser
+  // session — no cookie paste required (OpenCLI parity).
+  var toggleAllowed = connected || strategy !== 'cookies_replay';
 
   var stateClass, stateText;
   if (connected && enabled) {
@@ -79,9 +85,11 @@ function _authSourceCardHtml(src) {
         <div class="auth-src-meta">
           <div class="auth-src-name">${src.label || dom}<span class="auth-src-domain">${dom}</span></div>
           <div class="auth-src-state-text">${stateText}</div>
+          ${raw(_authSourceRegistryBadges(src))}
+          ${raw(_authSourceRiskNote(src))}
         </div>
         <label class="auth-src-switch" title="${t('settings.authSrcToggle') || '启用 / 停用'}">
-          <input type="checkbox" ${raw(enabled ? 'checked' : '')} ${raw(connected ? '' : 'disabled')}
+          <input type="checkbox" ${raw(enabled ? 'checked' : '')} ${raw(toggleAllowed ? '' : 'disabled')}
                  onchange="_authSourceToggle('${raw(dom)}', this.checked)">
           <span class="auth-src-switch-track"><span class="auth-src-switch-thumb"></span></span>
         </label>
@@ -134,12 +142,22 @@ function _authSourceConnectPanel(src, dom, id) {
       </li>`
     : safeHtml`<li><span class="auth-src-step-txt">${t('settings.authSrcStep1Generic') || '在你自己的浏览器中登录该站点'}</span></li>`;
 
+  var isBrowserFirst = ((src && src.access_strategy) || 'browser_first') === 'browser_first';
+  var browserFirstHint = isBrowserFirst
+    ? safeHtml`<div class="auth-src-live-hint">${t('settings.authSrcBrowserFirstHint') || '通常无需粘贴 Cookie：在你自己的浏览器里登录该站即可——检测到浏览器会话后直接启用，搜索与抓取就走你的活会话。下面粘贴 Cookie 只是浏览器不在线时的离线兜底。'}</div>`
+    : '';
+  var fieldsSteps = isBrowserFirst
+    ? safeHtml`<li>${t('settings.authSrcStep2FieldsFallback') || '（离线兜底，可选）浏览器不在线时才需要：F12 → Application → Cookies，逐个复制 Cookie 值粘贴到下面'}</li>`
+    : safeHtml`<li>${t('settings.authSrcStep2Fields') || '打开开发者工具 (F12) → Application → Cookies，找到下面每个 Cookie，逐个复制它的 Value'}</li>
+           <li>${t('settings.authSrcStep3Fields') || '分别粘贴到对应输入框并保存（只填值，不要带名字或分号）'}</li>`;
+
   return safeHtml`
     <div class="auth-src-panel" id="authSrcPanel_${raw(id)}" style="display:none">
+      ${raw(_authSourceRiskNote(src))}
+      ${raw(browserFirstHint)}
       <ol class="auth-src-steps">
         ${raw(step1)}
-        <li>${t('settings.authSrcStep2Fields') || '打开开发者工具 (F12) → Application → Cookies，找到下面每个 Cookie，逐个复制它的 Value'}</li>
-        <li>${t('settings.authSrcStep3Fields') || '分别粘贴到对应输入框并保存（只填值，不要带名字或分号）'}</li>
+        ${raw(fieldsSteps)}
       </ol>
       <div class="auth-src-fields">
         ${raw(_authSourceFieldRows(src, id))}
@@ -155,6 +173,64 @@ function _authSourceConnectPanel(src, dom, id) {
         </button>
       </div>
     </div>`;
+}
+
+/** Registry badges (Site Knowledge Layer P2): the access STRATEGY (who
+ *  opens the door — browser_first / cookies_replay / public) and the
+ *  KNOWLEDGE state (a site-doctor-pinned extractor = 已内化 vN, else
+ *  仅凭据). Both are projected server-side on each row; the JS hardcodes
+ *  no per-site facts — internalizing a site is appending a registry row. */
+function _authSourceRegistryBadges(src) {
+  var strategy = (src && src.access_strategy) || 'browser_first';
+  var strategyKey = {
+    browser_first: 'settings.authSrcStrategyBrowserFirst',
+    cookies_replay: 'settings.authSrcStrategyCookiesReplay',
+    'public': 'settings.authSrcStrategyPublic'
+  }[strategy] || 'settings.authSrcStrategyBrowserFirst';
+  var k = (src && src.knowledge) || {};
+  var knowledgeHtml = k.pinned
+    ? safeHtml`<span class="auth-src-meta-badge knowledge">${(t('settings.authSrcKnowledgePinned') || '已内化 v{v}').replace('{v}', String(k.version || '?'))}</span>`
+    : (src.has_cookies
+      ? safeHtml`<span class="auth-src-meta-badge">${t('settings.authSrcKnowledgeCredentials') || '仅凭据'}</span>`
+      : '');
+  return String(safeHtml`<div class="auth-src-badges">
+    <span class="auth-src-meta-badge strategy">${t(strategyKey)}</span>${knowledgeHtml}<span id="authSrcLive_${raw(_domId((src && src.domain) || ''))}"></span>
+  </div>`);
+}
+
+/** Lazy live-session probe for browser_first rows: the credential is the
+ *  user's own browser login, so SAY whether it is there instead of asking
+ *  for a cookie paste blindly. */
+function _authSourceProbeLiveSessions(sources) {
+  (sources || []).forEach(function (src) {
+    if ((src.access_strategy || 'browser_first') !== 'browser_first') return;
+    var dom = src.domain || '';
+    Api.authSources.liveSession(dom).then(function (st) {
+      var el = document.getElementById('authSrcLive_' + _domId(dom));
+      if (!el || !st) return;
+      var html;
+      if (!st.extension) {
+        html = safeHtml`<span class="auth-src-meta-badge live off">${t('settings.authSrcLiveOffline') || '扩展离线'}</span>`;
+      } else if (st.live_session) {
+        html = safeHtml`<span class="auth-src-meta-badge live on">${t('settings.authSrcLiveOn') || '浏览器会话已检测'}</span>`;
+      } else {
+        html = safeHtml`<span class="auth-src-meta-badge live">${t('settings.authSrcLiveNone') || '未检测到浏览器登录'}</span>`;
+      }
+      el.innerHTML = String(html);
+    });
+  });
+}
+
+/** Per-site account-risk note (e.g. XHS 风控). The SITE KNOWLEDGE lives
+ *  server-side (``risk_note_key`` on the catalog row, projected by
+ *  lib/auth_sources.py); this renders whatever i18n key the server names —
+ *  the JS still hardcodes no per-site text of its own. Shown on the card
+ *  (always visible) AND atop the connect panel, because the moment that
+ *  matters is BEFORE the user logs in with their main account. */
+function _authSourceRiskNote(src) {
+  var key = (src && src.risk_note_key) || '';
+  if (!key) return '';
+  return String(safeHtml`<div class="auth-src-risk-note">${t(key)}</div>`);
 }
 
 /** DOM-id-safe version of a domain (non-alnum → underscore). */

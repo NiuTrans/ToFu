@@ -96,6 +96,26 @@ def _stub_stream_llm_response_factory():
                     'tool_calls',
                     {'prompt_tokens': 10, 'completion_tokens': 2, 'total_tokens': 12})
 
+        # Slow-stream scenario for the ABORT journey: 60 words at 50ms each,
+        # checking task['aborted'] every word — a mid-stream abort click lands
+        # deterministically and the loop honours the same abort flag the real
+        # stream checks.
+        if '__e2e_slow__' in last and not task.get('_e2e_slow_done'):
+            task['_e2e_slow_done'] = True
+            words = [f'slow{i:02d}' for i in range(60)]
+            for w in words:
+                if task.get('aborted'):
+                    break
+                cd = w + ' '
+                with task['content_lock']:
+                    task['content'] += cd
+                mgr.append_event(task, mgr.build_event(mgr.EventType.DELTA, content=cd))
+                time.sleep(0.05)
+            return ({'role': 'assistant', 'content': task['content'], 'tool_calls': []},
+                    'stop',
+                    {'prompt_tokens': 10, 'completion_tokens': len(words),
+                     'total_tokens': 10 + len(words)})
+
         # Plain text: stream word-by-word as real DELTA events, then return
         # the full content in the msg dict.
         words = _STREAM_TEXT.split()

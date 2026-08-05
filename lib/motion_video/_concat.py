@@ -379,6 +379,7 @@ def burn_in_subtitles(video_path: str, srt_path: str, output: str, *,
             with open(srt_path, encoding='utf-8') as f:
                 cues = [(e.start, e.end, e.text) for e in parse_srt(f.read())]
         except OSError as e:
+            logger.debug('[MotionVideo] cannot read srt %s: %s', srt_path, e)
             return {'ok': False, 'category': 'io',
                     'detail': f'cannot read srt: {e}'}
         if cues:

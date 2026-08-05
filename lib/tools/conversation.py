@@ -399,7 +399,16 @@ BOARD_BLOCK_TOOL = {
             "question answerable in one word: state the concrete trade-off, give "
             "enumerated options with what each implies, and say which you would "
             "pick if forced — a question that requires an essay is another way of "
-            "stalling."
+            "stalling.\n\n"
+            "WHO READS WHAT: the `reason` renders VERBATIM as the card's "
+            "'Why it stopped' background section, addressed to the OPERATOR — "
+            "a busy human who was not in your conversation. Write it "
+            "self-contained: what you were doing, what evidence forced the "
+            "stop, what happens after each choice. Plain language, no "
+            "file:line archaeology (that belongs in JOURNAL.md). Each "
+            "option's `description` renders ON the card next to its label — "
+            "spend it on the consequence of choosing that option, not on "
+            "restating the label."
         ),
         "parameters": {
             "type": "object",

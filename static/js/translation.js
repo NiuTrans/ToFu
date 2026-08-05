@@ -342,6 +342,19 @@ async function _tryRecoverFromServer(convId, idx, msg, field) {
         'translatedContent');
       return true;
     }
+    /* ★ pt_3ea0e045: adopt the server's persisted no-op settle marker too.
+     *   When the safety net judged the deliverable already-target it stamps
+     *   _translateDone:true (no translatedContent) on the row — the dropped-
+     *   frame case self-heals HERE, on the watchdog's own probe, so the loop
+     *   clears on its FIRST tick instead of burning the full 90s budget. */
+    if (field === 'translatedContent' && dbMsg._translateDone === true) {
+      msg._translateDone = true;
+      delete msg._translateStatus;
+      delete msg._translateStatusKind;
+      delete msg._translatePartial;
+      if (typeof emitMessageChanged === 'function') emitMessageChanged(convId, idx, msg, { kind: 'full' });
+      return true;
+    }
     if (field === 'content' && dbMsg.content && msg.originalContent &&
         dbMsg.content !== msg.originalContent) {
       _applyTranslationDone(convId, idx, msg,
@@ -908,12 +921,14 @@ async function _resumePendingTranslations(convId) {
       if (!frame) return;
       const _isRunning = frame.status === 'running' || frame.type === 'running';
       const _isError = frame.status === 'error' || frame.type === 'error';
-      // Accept running, done-with-translation, AND error frames. The
-      // server-driven auto-translate has no client poll loop, so its terminal
-      // 'error' frame (worker _do_translate pushes it when retries are
-      // exhausted) is the ONLY signal the live view gets — dropping it left a
-      // failed translation completely invisible (bare English, no annotation).
-      if (!_isRunning && !_isError && (frame.status !== 'done' || !frame.translated)) return;
+      // Accept running, done-with-translation, error, AND no-op verdict
+      // frames. The server-driven auto-translate has no client poll loop, so
+      // its terminal frames (worker _do_translate's error / the safety net's
+      // already-target no-op) are the ONLY signals the live view gets —
+      // dropping them leaves the pending state lit forever and keeps the
+      // DB-polling watchdog burning full-conv GETs for a translation that
+      // will never exist (pt_3ea0e045).
+      if (!_isRunning && !_isError && (frame.status !== 'done' || (!frame.translated && frame.noop !== true))) return;
       const convId = frame.convId;
       if (!convId) return;
       const conv = (typeof conversations !== 'undefined')
@@ -942,6 +957,25 @@ async function _resumePendingTranslations(convId) {
       // The poll loop is the authoritative path for client-initiated tasks;
       // skip when it's still running so we don't race with it.
       if (msg._translateTaskId && !msg._translateDone) return;
+
+      // ── No-op terminal verdict (pt_3ea0e045): the server-side safety net
+      //    judged the deliverable ALREADY in the target language — no
+      //    translatedContent will ever exist for it. Settle the message
+      //    (_translateDone=true, the canonical "settled, show original"
+      //    tri-state) so the "translating…" indicator and the auto-translate
+      //    watchdog stand down for good — including on the next click-open
+      //    (finishStream's translatable-tail finder skips settled messages).
+      if (frame.noop === true) {
+        if (field !== 'translatedContent') return;
+        msg._translateDone = true;
+        delete msg._translateStatus;
+        delete msg._translateStatusKind;
+        delete msg._translatePartial;
+        delete msg._translatePartialByRound;
+        try { if (typeof ConvCache !== 'undefined') ConvCache.put(conv); } catch (_e) { /* best-effort */ }
+        emitMessageChanged(convId, idx, msg, { kind: 'full' });
+        return;
+      }
 
       // ── Running frame: surface the live "translating…" indicator + the
       //    streaming partial preview for the SERVER-driven auto-translate

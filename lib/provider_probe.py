@@ -54,7 +54,7 @@ logger = get_logger(__name__)
 
 
 def probe_one_cell(base_url, api_key, model_id, extra_headers, timeout,
-                   protocol='openai', oauth=''):
+                   protocol='openai', oauth='', adapter=None):
     """Send a minimal completion to test one (key, model) pair.
 
     Returns one of: 'ok', 'rate_limited', 'unauthorized', 'not_found',
@@ -63,6 +63,8 @@ def probe_one_cell(base_url, api_key, model_id, extra_headers, timeout,
     A 200 OR an HTTP 400 both count as ``ok`` — a 400 means the gateway
     accepted the (key, model) routing and only rejected the (deliberately
     tiny) request shape, which still proves the pair is reachable.
+    Exception: a body carrying a routing-rejection marker (see
+    ``_ROUTE_MISSING_MARKERS``) is ``not_found`` on ANY status.
 
     ``protocol='anthropic'`` probes the Anthropic Messages API
     (``POST /v1/messages`` with ``x-api-key`` + ``anthropic-version``)
@@ -81,6 +83,50 @@ def probe_one_cell(base_url, api_key, model_id, extra_headers, timeout,
     recommend-disable.
     """
     from lib.http_client import http_post
+
+    # ── Subscription-ADAPTER providers (E4) ─────────────────────────────
+    # The provider IS a CLIProxyAPI sidecar on the user's desktop agent;
+    # its base_url is loopback-ON-THE-AGENT. Probe the cell through the
+    # bridge relay with the provider's api_key (the adapter key, minted
+    # server-side) and classify the status exactly like a direct probe.
+    if adapter:
+        import json as _json
+        from urllib.parse import urlparse as _urlparse
+        from lib.desktop import adapter as _ad
+        from lib.desktop.egress import EgressUnavailable as _EU
+        url = base_url.rstrip('/') + '/chat/completions'
+        _pu = _urlparse(url)
+        path = _pu.path + (('?' + _pu.query) if _pu.query else '')
+        headers = {'Authorization': 'Bearer %s' % api_key} if api_key else {}
+        if extra_headers:
+            headers.update(extra_headers)
+        payload = {
+            'model': model_id,
+            'messages': [{'role': 'user', 'content': 'hi'}],
+            'max_tokens': 1,
+            'stream': False,
+        }
+        try:
+            resp = _ad.relay_http(
+                adapter.get('agent_id', ''), int(adapter.get('port') or 0),
+                path, method='POST', headers=headers,
+                body=_json.dumps(payload).encode(), timeout=timeout)
+        except _EU as e:
+            logger.debug('[CellProbe] %s @ %s desktop egress unavailable: %s',
+                         model_id, base_url, e)
+            return 'unavailable', str(e)[:160]
+        except Exception as e:
+            logger.warning('[CellProbe] %s @ %s adapter relay error: %s',
+                           model_id, base_url, e)
+            return 'unavailable', 'network: %s' % str(e)[:120]
+        code = resp.status_code
+        try:
+            body = resp.text[:400]
+        except (UnicodeDecodeError, ValueError, OSError, AttributeError) as e:
+            logger.debug('[CellProbe] %s @ %s: could not read response body: %s',
+                         model_id, base_url, e)
+            body = ''
+        return _classify_status(code, body)
 
     # ── Subscription (OAuth) providers ──────────────────────────────────
     if oauth:
@@ -102,8 +148,10 @@ def probe_one_cell(base_url, api_key, model_id, extra_headers, timeout,
                 'Content-Type': 'application/json',
                 'Authorization': f'Bearer {token}',
                 'OpenAI-Beta': 'responses=experimental',
-                'originator': 'codex_cli_rs',
-                'User-Agent': 'codex_cli_rs/0.20.0 (external; Tofu)',
+                'originator': 'codex-tui',
+                # Single line on purpose: the drift guard
+                # (test_oauth_cloaking_drift) greps this literal verbatim.
+                'User-Agent': 'codex-tui/0.146.0 (Mac OS 26.5.0; arm64) iTerm.app/3.6.10 (codex-tui; 0.146.0)',
                 'session_id': _uuid.uuid4().hex,
             }
             if account_id:
@@ -124,7 +172,9 @@ def probe_one_cell(base_url, api_key, model_id, extra_headers, timeout,
                     code = resp.status_code
                     try:
                         resp_body = resp.text[:400]
-                    except (UnicodeDecodeError, ValueError, OSError):
+                    except (UnicodeDecodeError, ValueError, OSError) as e:
+                        logger.debug('[CellProbe] codex %s: could not read response body: %s',
+                                     model_id, e)
                         resp_body = ''
                 else:
                     reader = _eg.open_stream(url, method='POST', headers=hdrs,
@@ -133,6 +183,8 @@ def probe_one_cell(base_url, api_key, model_id, extra_headers, timeout,
                     code = reader.status_code
                     resp_body = reader.read_all_text()[:400]
             except _eg.EgressUnavailable as e:
+                logger.debug('[CellProbe] codex %s desktop egress unavailable: %s',
+                             model_id, e)
                 return 'unavailable', str(e)[:160]
             except Exception as e:
                 logger.warning('[CellProbe] codex %s network error: %s',
@@ -169,6 +221,8 @@ def probe_one_cell(base_url, api_key, model_id, extra_headers, timeout,
         try:
             route = _eg.route_request(url, user_id='')
         except _eg.EgressUnavailable as e:
+            logger.debug('[CellProbe] %s @ %s egress route unavailable: %s',
+                         model_id, base_url, e)
             return 'unavailable', str(e)[:160]
         try:
             if route == 'direct':
@@ -179,6 +233,8 @@ def probe_one_cell(base_url, api_key, model_id, extra_headers, timeout,
                                        body=_json.dumps(payload).encode(),
                                        timeout=timeout, user_id='')
         except _eg.EgressUnavailable as e:
+            logger.debug('[CellProbe] %s @ %s desktop egress unavailable: %s',
+                         model_id, base_url, e)
             return 'unavailable', str(e)[:160]
         except Exception as e:
             logger.warning('[CellProbe] %s @ %s network error: %s',
@@ -249,21 +305,37 @@ def probe_one_cell(base_url, api_key, model_id, extra_headers, timeout,
     return _classify_status(code, body)
 
 
+# Body markers that mean "this gateway has NO route for the model" — as
+# opposed to "route exists but the tiny probe shape was rejected". They ride
+# any status: the Meituan AIGC gateway answers a missing route with HTTP 400
+# stage=validation and a CHINESE message ("不支持的模型类型(model=…)"), which
+# the status ladder alone misreads as reachable (2026-08-04 opus-5 incident —
+# vertex./aws. cells showed green while every real chat call 400'd).
+_ROUTE_MISSING_MARKERS = (
+    'model_not_found', 'does not exist', 'no such model',
+    'unsupported model', 'unsupported_model', 'model not supported',
+    '不支持的模型类型',
+)
+
+
 def _classify_status(code: int, body: str):
     """Map an HTTP status (+body excerpt) to a (verdict, detail) pair.
 
     A 200 OR a 400 both count as ``ok`` — a 400 means the gateway accepted
     the (key, model) routing and only rejected the (deliberately tiny)
-    request shape, which still proves the pair is reachable.
+    request shape, which still proves the pair is reachable. The routing-
+    rejection body sniff runs FIRST: a missing route must never read as ok.
     """
     lower = body.lower()
+    if any(m in lower for m in _ROUTE_MISSING_MARKERS):
+        return 'not_found', 'HTTP %d %.120s' % (code, body)
     if code == 200 or code == 400:
         return 'ok', 'HTTP %d' % code
     if code == 429 or code == 402:
         return 'rate_limited', 'HTTP %d %.120s' % (code, body)
     if code in (401, 403):
         return 'unauthorized', 'HTTP %d %.120s' % (code, body)
-    if code == 404 or 'model_not_found' in lower or 'does not exist' in lower or 'no such model' in lower:
+    if code == 404:
         return 'not_found', 'HTTP %d %.120s' % (code, body)
     if code in (500, 502, 503, 504, 529):
         return 'unavailable', 'HTTP %d %.120s' % (code, body)
@@ -519,7 +591,7 @@ _PROBE_DEFINITIVE = {'unauthorized', 'not_found'}
 
 def probe_cell_multi(base_url, api_key, model_id, extra_headers, timeout,
                      attempts=3, retry_delay=0.8, protocol='openai',
-                     probe_fn=None, oauth=''):
+                     probe_fn=None, oauth='', adapter=None):
     """Probe a cell up to ``attempts`` times to filter out FALSE 429s.
 
     ``probe_fn`` defaults to :func:`probe_one_cell` (chat surface); the
@@ -534,7 +606,8 @@ def probe_cell_multi(base_url, api_key, model_id, extra_headers, timeout,
         # Call through the module global so tests can patch probe_one_cell.
         if probe_fn is None:
             status, detail = fn(base_url, api_key, model_id, extra_headers,
-                                timeout, protocol, oauth=oauth)
+                                timeout, protocol, oauth=oauth,
+                                **({'adapter': adapter} if adapter else {}))
         else:
             status, detail = fn(base_url, api_key, model_id, extra_headers,
                                 timeout, protocol)
@@ -675,6 +748,20 @@ def run_cell_probe_task(task: dict, work: list, timeout: int):
     extra_headers = task['_extra_headers']
     protocol = task.get('_protocol', 'openai')
     oauth = task.get('_oauth', '')
+    adapter = task.get('_adapter') or {}
+    if not adapter:
+        # Fallback: derive the marker from the stored provider card (the
+        # probe route predates the marker and only threads '_oauth').
+        try:
+            from lib import _load_server_config
+            from lib.desktop.adapter import is_adapter_provider
+            for _p in (_load_server_config().get('providers') or []):
+                if _p.get('id') == provider_id:
+                    adapter = is_adapter_provider(_p)
+                    break
+        except Exception as _ae:
+            logger.debug('[CellProbe] adapter marker lookup failed: %s', _ae)
+            adapter = {}
     attempts = task.get('attempts', 3)
     if task['cells']:
         _recount_summary(task)
@@ -723,7 +810,8 @@ def run_cell_probe_task(task: dict, work: list, timeout: int):
                                           extra_headers,
                                           cell_timeout, attempts=cell_attempts,
                                           protocol=cell_protocol, probe_fn=probe_fn,
-                                          oauth=oauth)
+                                          oauth=oauth,
+                                          **({'adapter': adapter} if adapter else {}))
         return {
             'key_idx': key_idx,
             'model_id': mid,

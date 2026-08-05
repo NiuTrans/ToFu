@@ -65,7 +65,11 @@ def test_unregister():
     sr.unregister_schema_initializer('trading')
 
 
-def test_discover_is_fail_soft_with_no_plugins():
-    # No tofu.schema entry points installed in the test env → returns 0,
-    # never raises.
+def test_discover_is_fail_soft_with_no_plugins(monkeypatch):
+    # With no tofu.schema entry points → returns 0, never raises. Isolate
+    # from the AMBIENT environment: this host has the real tofu_trading
+    # plugin installed, which would otherwise leak into the discovery.
+    import importlib.metadata
+    monkeypatch.setattr(importlib.metadata, 'entry_points',
+                        lambda *a, **k: [])
     assert sr.discover_schema_plugins() == 0

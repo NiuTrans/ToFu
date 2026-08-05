@@ -21,9 +21,11 @@ HTML with custom Content-Disposition + CSP headers — not v1 envelope shape).
 
 from __future__ import annotations
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, request
 
-from lib.api_response import api_bad_request, api_internal_error, api_not_found
+from lib.api_response import (
+    api_bad_request, api_internal_error, api_not_found, api_ok,
+)
 from lib.artifacts import (
     ArtifactNotFoundError, delete_artifact, get_artifact_meta,
     list_artifacts, list_pinned_or_recent, list_versions, public_meta,
@@ -64,7 +66,7 @@ async def list_artifacts_v1():
     conv = (request.args.get('conv') or '').strip()
     if conv:
         items = list_artifacts(conv)
-        return jsonify({
+        return api_ok({
             'conv_id': conv,
             'count': len(items),
             'artifacts': [_strip_meta(m) for m in items],
@@ -77,8 +79,8 @@ async def list_artifacts_v1():
         limit = 50
     limit = max(1, min(limit, 200))
     items = list_pinned_or_recent(limit=limit)
-    return jsonify({'count': len(items),
-                    'artifacts': [_strip_meta(m) for m in items]})
+    return api_ok({'count': len(items),
+                   'artifacts': [_strip_meta(m) for m in items]})
 
 
 @api_v1_artifacts_bp.route('/api/v1/artifacts/<artifact_id>', methods=['GET'])
@@ -89,7 +91,7 @@ async def get_artifact_v1(artifact_id):
         meta = get_artifact_meta(artifact_id)
     except ArtifactNotFoundError:
         return api_not_found('not_found')
-    return jsonify(_strip_meta(meta))
+    return api_ok(_strip_meta(meta))
 
 
 @api_v1_artifacts_bp.route('/api/v1/artifacts/<artifact_id>/versions',
@@ -104,8 +106,8 @@ async def list_versions_v1(artifact_id):
     chain = list_versions(artifact_id)
     if not chain:
         return api_not_found('not_found')
-    return jsonify({'count': len(chain),
-                    'versions': [_strip_meta(m) for m in chain]})
+    return api_ok({'count': len(chain),
+                   'versions': [_strip_meta(m) for m in chain]})
 
 
 @api_v1_artifacts_bp.route('/api/v1/artifacts/<artifact_id>/pin',
@@ -125,7 +127,7 @@ async def toggle_pin_v1(artifact_id):
         meta = get_artifact_meta(artifact_id)
     except ArtifactNotFoundError:
         return api_not_found('not_found')
-    return jsonify(_strip_meta(meta))
+    return api_ok(_strip_meta(meta))
 
 
 @api_v1_artifacts_bp.route('/api/v1/artifacts/<artifact_id>',
@@ -140,7 +142,7 @@ async def delete_artifact_v1(artifact_id):
                   ip=request.remote_addr)
     except Exception as e:
         logger.debug('[Artifacts.v1] audit_log failed: %s', e)
-    return jsonify({'deleted': True})
+    return api_ok({'deleted': True})
 
 
 @api_v1_artifacts_bp.route('/api/v1/artifacts/scan', methods=['POST'])
@@ -203,7 +205,7 @@ async def scan_conv_v1():
 
     logger.info('[Artifacts.v1:scan] backfill conv=%s scanned=%d created=%d',
                 conv_id[:8], scanned, len(created_meta))
-    return jsonify({
+    return api_ok({
         'conv_id': conv_id,
         'scanned': scanned,
         'created': len(created_meta),

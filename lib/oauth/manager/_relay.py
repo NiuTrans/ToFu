@@ -185,7 +185,53 @@ class _RelayHandler(BaseHTTPRequestHandler):
         pass
 
 
-def _run_relay_server(provider: str, port: int, state: str, timeout: int = 300):
+def _close_previous(provider: str) -> None:
+    """Shut down any relay still bound for this provider (re-login case)."""
+    with _servers_lock:
+        old = _active_servers.pop(provider, None)
+    if old:
+        try:
+            old.server_close()
+            logger.info('[OAuth Relay] Closed previous %s relay server', provider)
+        except Exception as e:
+            logger.debug('[OAuth Relay] Error closing old server: %s', e)
+        time.sleep(0.3)
+
+
+def _bind_relay(provider: str, port: int, state: str):
+    """Bind the relay socket NOW; return the bound server, or None if taken.
+
+    The bind is SYNCHRONOUS — done before the caller builds the
+    authorization URL — because for Claude the bind result is what decides
+    whether a loopback ``redirect_uri`` is safe to advertise at all.
+    Discovering ``EADDRINUSE`` later, on the relay thread and after the
+    popup has already navigated to the provider, would strand the user on a
+    connection-refused page holding an authorization code that no surface
+    can accept: the relay page is what renders the manual-paste fallback,
+    so a failed bind destroys the fallback as well as the happy path.
+    Binding first keeps the two outcomes separable — loopback when the port
+    is ours, console + manual paste when it is not.
+    """
+    _close_previous(provider)
+    handler_class = type('Handler', (_RelayHandler,), {
+        'provider': provider,
+        'expected_state': state,
+        'on_served': None,  # bound by _run_relay_server once it owns the server
+    })
+    try:
+        server = HTTPServer(('127.0.0.1', port), handler_class)
+    except OSError as e:
+        logger.warning('[OAuth Relay] Could not bind :%d for %s: %s',
+                       port, provider, e)
+        return None
+    server.timeout = 2  # poll interval
+    with _servers_lock:
+        _active_servers[provider] = server
+    return server
+
+
+def _run_relay_server(provider: str, port: int, state: str, timeout: int = 300,
+                      server=None):
     """Run relay HTTP server on the registered callback port.
 
     This server has ONE job: serve the relay HTML page when the OAuth
@@ -197,32 +243,30 @@ def _run_relay_server(provider: str, port: int, state: str, timeout: int = 300):
         port: Registered callback port (54545 for Claude, 1455 for Codex).
         state: Expected OAuth state parameter.
         timeout: Max seconds to wait.
+        server: An already-bound server from :func:`_bind_relay`. When None
+            this binds here, preserving the original single-step behaviour.
     """
     served = threading.Event()
 
-    handler_class = type('Handler', (_RelayHandler,), {
-        'provider': provider,
-        'expected_state': state,
-        'on_served': staticmethod(lambda: served.set()),
-    })
-
-    # Shut down any previous relay server for this provider
-    with _servers_lock:
-        old = _active_servers.pop(provider, None)
-    if old:
-        try:
-            old.server_close()
-            logger.info('[OAuth Relay] Closed previous %s relay server', provider)
-        except Exception as e:
-            logger.debug('[OAuth Relay] Error closing old server: %s', e)
-        time.sleep(0.3)
+    if server is None:
+        handler_class = type('Handler', (_RelayHandler,), {
+            'provider': provider,
+            'expected_state': state,
+            'on_served': staticmethod(lambda: served.set()),
+        })
+        _close_previous(provider)
 
     try:
-        server = HTTPServer(('127.0.0.1', port), handler_class)
-        server.timeout = 2  # poll interval
-
-        with _servers_lock:
-            _active_servers[provider] = server
+        if server is None:
+            server = HTTPServer(('127.0.0.1', port), handler_class)
+            server.timeout = 2  # poll interval
+            with _servers_lock:
+                _active_servers[provider] = server
+        else:
+            # Pre-bound by _bind_relay, which could not yet see this call's
+            # `served` event — wire it up now that we own the server.
+            server.RequestHandlerClass.on_served = staticmethod(
+                lambda: served.set())
 
         logger.info('[OAuth Relay] Listening on :%d for %s callback (timeout=%ds)',
                      port, provider, timeout)

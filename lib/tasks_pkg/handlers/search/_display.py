@@ -91,16 +91,30 @@ def _vertical_to_sse_payload(vertical_result) -> dict | None:
         }
     sub_type = vertical_result.get('type', '')
     source = vertical_result.get('source', sub_type)
+    # A type-level handler MAY return rich rows of its own (travel flight/hotel
+    # records carry bookable items) — pass them through. Collapsing them into
+    # one synthesized headline would silently drop everything but the LLM text.
+    # Mirrors registry._structured_items_from_record.
     items = []
-    head = vertical_result.get('content', '').splitlines()[:1]
-    title = head[0].lstrip('# ').strip() if head else source or sub_type or 'Result'
-    items.append({
-        'title': title,
-        'snippet': '',
-        'url': '',
-        'type': sub_type,
-        'source': source,
-    })
+    raw_items = vertical_result.get('items')
+    if isinstance(raw_items, list):
+        for it in raw_items:
+            if not isinstance(it, dict):
+                continue
+            it = dict(it)
+            it.setdefault('type', sub_type)
+            it.setdefault('source', source)
+            items.append(it)
+    if not items:
+        head = vertical_result.get('content', '').splitlines()[:1]
+        title = head[0].lstrip('# ').strip() if head else source or sub_type or 'Result'
+        items.append({
+            'title': title,
+            'snippet': '',
+            'url': '',
+            'type': sub_type,
+            'source': source,
+        })
     return {
         'domain': domain,
         'sources': [{'type': sub_type, 'source': source,

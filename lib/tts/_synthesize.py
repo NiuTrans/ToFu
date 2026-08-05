@@ -15,13 +15,7 @@ from dataclasses import dataclass
 from lib.http_client import http_post
 from lib.log import audit_log, get_logger
 
-from lib.tts._config import (
-    TTS_CAP,
-    default_format,
-    default_speed,
-    default_voice,
-    _tts_slots,
-)
+from lib.tts._config import TTS_CAP
 
 logger = get_logger(__name__)
 

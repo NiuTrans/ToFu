@@ -47,7 +47,7 @@ import time
 from urllib.parse import unquote
 
 import requests as _requests
-from flask import Blueprint, Response, jsonify, request, send_file
+from flask import Blueprint, Response, request
 
 from lib.api_response import (
     api_bad_request,
@@ -55,6 +55,7 @@ from lib.api_response import (
     api_internal_error,
     api_not_found,
     api_ok,
+    api_payload,
     safe_route,
 )
 from lib.database import (
@@ -121,6 +122,7 @@ from lib.paper import (  # noqa: F401  — back-compat re-exports
     _qa_latest_for,
     _qa_runtime,
     _run_qa_task,
+    _deepen_runtime,
     build_qa_messages,
     _paper_hash,
     resolve_paper_hash,
@@ -183,6 +185,77 @@ def _parse_report_meta(row):
 
 
 
+def _parse_insight_row_meta(row):
+    """Decode an insight row's meta JSON; None when absent/legacy/malformed."""
+    raw = row.get('meta') if hasattr(row, 'get') else None
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, TypeError) as e:
+        logger.debug('[Paper:Report] Bad insight meta JSON: %s', e)
+        return None
+
+
+async def _load_cached_insight_payload(phash, lang):
+    """Load the STRUCTURED insight payload for a v2 row, else None.
+
+    v2 rows (meta carries grounded ``items`` with resolved ``anchor_idx``) are
+    served as a separate payload so the reader can distribute anchored cards
+    (design §3.2) — their markdown is NOT merged into the report body. v1
+    rows (legacy, meta without items) return None here and keep the merged
+    read path in ``_append_cached_insight``.
+    """
+    if is_review_lang(lang):
+        return None
+    ui_lang = parse_report_lang(lang)['ui_lang']
+    try:
+        from lib.paper.insight_engine import insight_lang_key
+        ins_row = await async_fetchone(
+            "SELECT report, meta FROM paper_reports WHERE paper_hash = ? AND lang = ?",
+            (phash, insight_lang_key(ui_lang)), domain=DOMAIN_CHAT,
+        )
+    except Exception as e:
+        logger.warning('[Paper:Report] Cached-insight payload lookup failed hash=%s: %s',
+                       phash, e)
+        return None
+    if not ins_row or not ins_row['report']:
+        return None
+    meta = _parse_insight_row_meta(ins_row)
+    if not isinstance(meta, dict) or not isinstance(meta.get('items'), dict):
+        return None
+    return {'items': meta['items'],
+            'baseline': meta.get('baseline'),
+            'usage': meta.get('usage'),
+            'markdown': ins_row['report'],
+            'lang': ui_lang}
+
+
+async def _load_cached_checkpoints_payload(phash, lang):
+    """Load the persisted checkpoint items for this paper+lang, else None.
+
+    Read-path only — never regenerates. The frontend distributes flip cards
+    from the structured items; nothing merges into the report body.
+    """
+    if is_review_lang(lang):
+        return None
+    ui_lang = parse_report_lang(lang)['ui_lang']
+    try:
+        from lib.paper.checkpoint_engine import checkpoints_lang_key
+        row = await async_fetchone(
+            "SELECT meta FROM paper_reports WHERE paper_hash = ? AND lang = ?",
+            (phash, checkpoints_lang_key(ui_lang)), domain=DOMAIN_CHAT,
+        )
+    except Exception as e:
+        logger.warning('[Paper:Report] Cached-checkpoints lookup failed hash=%s: %s',
+                       phash, e)
+        return None
+    meta = _parse_insight_row_meta(row) if row else None
+    if not isinstance(meta, dict) or not isinstance(meta.get('items'), list):
+        return None
+    return {'items': meta['items'], 'lang': ui_lang}
+
+
 async def _append_cached_insight(body, phash, lang):
     """Merge the sibling persisted ``insight:<ui>`` row into a cached report body.
 
@@ -196,7 +269,10 @@ async def _append_cached_insight(body, phash, lang):
       * skips Review Mode entirely (insight is only produced for plain reports);
       * no-op when no insight row exists / it is empty;
       * never double-appends if ``body`` already contains the section (a cache
-        row that was persisted with the insight baked in, or a re-entry).
+        row that was persisted with the insight baked in, or a re-entry);
+      * v2 rows (structured items in meta) are NOT merged — the reader gets
+        them via ``_load_cached_insight_payload`` and distributes anchored
+        cards client-side.
     """
     if is_review_lang(lang):
         return body
@@ -205,7 +281,7 @@ async def _append_cached_insight(body, phash, lang):
     try:
         from lib.paper.insight_engine import insight_lang_key
         ins_row = await async_fetchone(
-            "SELECT report FROM paper_reports WHERE paper_hash = ? AND lang = ?",
+            "SELECT report, meta FROM paper_reports WHERE paper_hash = ? AND lang = ?",
             (phash, insight_lang_key(ui_lang)), domain=DOMAIN_CHAT,
         )
     except Exception as e:
@@ -213,14 +289,21 @@ async def _append_cached_insight(body, phash, lang):
         return body
     if not ins_row or not ins_row['report']:
         return body
+    # v2 row → served as structured payload, never merged (see above).
+    _meta = _parse_insight_row_meta(ins_row)
+    if isinstance(_meta, dict) and isinstance(_meta.get('items'), dict):
+        return body
     section = ins_row['report'].strip()
     if not section:
         return body
-    # Idempotency: the insight section header is a stable marker. If the body
-    # already carries it (baked-in cache row / prior append), do not duplicate.
-    marker = '## 💡'
+    # Idempotency: if the body already carries the section (baked-in cache row
+    # / prior append), do not duplicate. Match the section's exact HEADER LINE —
+    # NOT a bare '## 💡' substring: real reports legitimately contain '## 💡
+    # Method — How It Works', which the old bare-marker clause mistook for an
+    # already-merged insight section, silently suppressing the merge for any
+    # report with a 💡 Method heading (caught by the P0 suite's v1-merge case).
     header_line = section.splitlines()[0].strip() if section else ''
-    if (header_line and header_line in body) or (marker in body and marker in section):
+    if header_line and header_line in body:
         return body
     logger.info('[Paper:Report] Merged cached insight into reopened report — '
                 'hash=%s key=%s (+%d chars)', phash, insight_lang_key(ui_lang), len(section))
@@ -325,7 +408,7 @@ async def openreview_autofill():
         silent success) when the bridge is not connected, the tab is not an
         OpenReview page, or no review exists yet.
     """
-    from lib.browser import is_extension_connected, send_browser_command as _send_cmd
+    from lib.browser import is_extension_connected
     from lib.browser.queue import _get_active_client
     from lib.paper import (autofill_openreview_review, extract_review_values,
                            make_review_lang)
@@ -390,7 +473,7 @@ async def openreview_autofill():
                 phash, report.get('ok'), report.get('stage'),
                 len(report.get('filled', [])), report.get('submit_controls_detected', 0))
     status = 200 if report.get('ok') else 409
-    return jsonify(report), status
+    return api_payload(report, status)
 
 
 @api_v1_paper_bp.route('/api/v1/paper/extract-images', methods=['POST'])
@@ -459,7 +542,8 @@ def serve_paper_image(phash, filename):
     if not os.path.isfile(filepath):
         return api_not_found('Image not found')
     mt = 'image/jpeg' if filename.lower().endswith(('.jpg', '.jpeg')) else 'image/png'
-    return send_file(filepath, mimetype=mt, conditional=True)
+    from lib.file_serving import send_file_conditional
+    return send_file_conditional(filepath, mimetype=mt)
 
 
 @api_v1_paper_bp.route('/api/v1/paper/report/start', methods=['POST'])
@@ -527,6 +611,9 @@ async def start_report_task():
                     appendix=not is_review_family(lang),
                     allow_images=not is_review_family(lang))
                 enriched = _ensure_title_heading(enriched, phash)
+                # Structured insight payload (v2 rows) — the reader distributes
+                # anchored cards from it. Legacy rows merge into the body below.
+                _insight_payload = await _load_cached_insight_payload(phash, lang)
                 # Merge the sibling persisted insight section so a reopened
                 # paper shows it (read-only; never regenerates).
                 enriched = await _append_cached_insight(enriched, phash, lang)
@@ -547,12 +634,18 @@ async def start_report_task():
                     except Exception as e:
                         logger.warning('[Paper:Report] Cache-path title backfill failed '
                                        'hash=%s: %s', phash, e)
-                return jsonify({
-                    'ok': True, 'cached': True,
+                _resp = {
+                    'cached': True,
                     'report': enriched, 'paper_hash': phash,
                     'meta': _cached_meta,
                     'resolvedTitle': resolved_title,
-                })
+                }
+                if _insight_payload:
+                    _resp['insight'] = _insight_payload
+                _cp_payload = await _load_cached_checkpoints_payload(phash, lang)
+                if _cp_payload:
+                    _resp['checkpoints'] = _cp_payload
+                return api_ok(_resp)
         except Exception as e:
             logger.warning('[Paper:Report] DB cache lookup failed (will start task): %s', e)
 
@@ -561,8 +654,8 @@ async def start_report_task():
     if existing and not force and existing['status'] in ('pending', 'running', 'done'):
         logger.info('[Paper:Report] Joining existing task %s (status=%s) — hash=%s lang=%s',
                     existing['task_id'], existing['status'], phash, lang)
-        return jsonify({
-            'ok': True, 'task_id': existing['task_id'], 'paper_hash': phash,
+        return api_ok({
+            'task_id': existing['task_id'], 'paper_hash': phash,
             'running': existing['status'] in ('pending', 'running'), 'existed': True,
         })
 
@@ -683,8 +776,8 @@ async def start_report_task():
                     'rebuttal_len=%d hash=%s', task_id, parsed['venue'], model, ui_lang,
                     len(author_rebuttal), phash)
         _report_runtime.spawn(task_id, _run_report_task, task, messages, images)
-        return jsonify({
-            'ok': True, 'task_id': task_id, 'paper_hash': phash,
+        return api_ok({
+            'task_id': task_id, 'paper_hash': phash,
             'running': True, 'existed': False,
         })
 
@@ -710,8 +803,8 @@ async def start_report_task():
                     'text_len=%d hash=%s', task_id, parsed['venue'], model, ui_lang,
                     len(paper_text), phash)
         _report_runtime.spawn(task_id, _run_report_task, task, messages, images)
-        return jsonify({
-            'ok': True, 'task_id': task_id, 'paper_hash': phash,
+        return api_ok({
+            'task_id': task_id, 'paper_hash': phash,
             'running': True, 'existed': False,
         })
 
@@ -774,8 +867,8 @@ async def start_report_task():
                 task_id, model, lang, len(paper_text), phash)
     _report_runtime.spawn(task_id, _run_report_task, task, messages, images)
 
-    return jsonify({
-        'ok': True, 'task_id': task_id, 'paper_hash': phash,
+    return api_ok({
+        'task_id': task_id, 'paper_hash': phash,
         'running': True, 'existed': False,
     })
 
@@ -844,7 +937,7 @@ async def poll_report_task():
         resp['partial'] = task.get('full_text', '')
     if task['status'] == 'error':
         resp['error'] = task.get('error', '')
-    return jsonify(resp)
+    return api_payload(resp, 200)
 
 
 @api_v1_paper_bp.route('/api/v1/paper/review/venues', methods=['GET'])
@@ -855,7 +948,7 @@ async def list_review_venues():
     frontend uses this to populate the venue dropdown; the single source of
     truth is ``REVIEW_VENUES`` in ``lib/paper/review.py``.
     """
-    return jsonify({'ok': True, 'venues': list_venues()})
+    return api_ok({'venues': list_venues()})
 
 
 @api_v1_paper_bp.route('/api/v1/paper/report/lookup', methods=['POST'])
@@ -876,13 +969,12 @@ async def lookup_report_task():
         return api_bad_request('paper_hash required')
     task = _report_index_get(phash, lang)
     if task:
-        return jsonify({
-            'ok': True,
+        return api_ok({
             'task_id': task['task_id'],
             'status': task['status'],
             'paper_hash': phash,
         })
-    return jsonify({'ok': False})
+    return api_payload({'ok': False}, 200)
 
 
 @api_v1_paper_bp.route('/api/v1/paper/report/export', methods=['GET'])
@@ -1175,16 +1267,23 @@ async def get_report_cache():
                                                   appendix=not is_review_family(lang),
                                                   allow_images=not is_review_family(lang))
             enriched = _ensure_title_heading(enriched, phash)
+            _insight_payload = await _load_cached_insight_payload(phash, lang)
             enriched = await _append_cached_insight(enriched, phash, lang)
             _cache_meta = _parse_report_meta(row)
             enriched, _cache_meta = await _merge_cached_termfill(
                 enriched, _cache_meta, phash, lang)
-            return api_ok({'report': enriched, 'paper_hash': phash,
-                           'meta': _cache_meta})
+            _resp = {'report': enriched, 'paper_hash': phash,
+                     'meta': _cache_meta}
+            if _insight_payload:
+                _resp['insight'] = _insight_payload
+            _cp_payload = await _load_cached_checkpoints_payload(phash, lang)
+            if _cp_payload:
+                _resp['checkpoints'] = _cp_payload
+            return api_ok(_resp)
     except Exception as e:
         logger.warning('[Paper:Report:Cache] Lookup failed: %s', e)
 
-    return jsonify({'ok': False})
+    return api_payload({'ok': False}, 200)
 
 
 # ══════════════════════════════════════════════════════
@@ -1262,8 +1361,8 @@ async def start_qa_task():
                 diag['n_sections_total'], diag['report_present'], question)
     _qa_runtime.spawn(task_id, _run_qa_task, task, messages)
 
-    return jsonify({
-        'ok': True, 'task_id': task_id, 'paper_hash': phash,
+    return api_ok({
+        'task_id': task_id, 'paper_hash': phash,
         'running': True, 'reportPresent': diag['report_present'],
     })
 
@@ -1305,7 +1404,7 @@ async def poll_qa_task():
         resp['answer'] = task.get('full_text', '')
     if task['status'] == 'error':
         resp['error'] = task.get('error', '')
-    return jsonify(resp)
+    return api_payload(resp, 200)
 
 
 @api_v1_paper_bp.route('/api/v1/paper/translate/start', methods=['POST'])
@@ -1405,7 +1504,7 @@ async def poll_translate_task():
         resp['text'] = task.get('full_text', '')
     if task['status'] == 'error':
         resp['error'] = task.get('error', '')
-    return jsonify(resp)
+    return api_payload(resp, 200)
 
 
 @api_v1_paper_bp.route('/api/v1/paper/translate/lookup', methods=['POST'])
@@ -1419,7 +1518,7 @@ async def lookup_translate_task():
     if task:
         return api_ok({'task_id': task['task_id'],
                         'status': task['status'], 'paper_hash': phash})
-    return jsonify({'ok': False})
+    return api_payload({'ok': False}, 200)
 
 
 @api_v1_paper_bp.route('/api/v1/paper/translate/cache', methods=['POST'])
@@ -1443,7 +1542,7 @@ async def get_translate_cache():
             return api_ok({'text': row['text'], 'paper_hash': phash})
     except Exception as e:
         logger.warning('[Paper:Translate:Cache] Lookup failed: %s', e)
-    return jsonify({'ok': False})
+    return api_payload({'ok': False}, 200)
 
 
 @api_v1_paper_bp.route('/api/v1/paper/search-arxiv', methods=['POST'])
@@ -1560,7 +1659,7 @@ async def start_recommend_task():
                 task_id, max_results, description)
     _recommend_runtime.spawn(task_id, _run_recommend_task, task)
 
-    return jsonify({'ok': True, 'task_id': task_id, 'running': True})
+    return api_ok({'task_id': task_id, 'running': True})
 
 
 @api_v1_paper_bp.route('/api/v1/paper/recommend/poll', methods=['GET'])
@@ -1602,7 +1701,7 @@ async def poll_recommend_task():
     if task['status'] == 'error':
         resp['error'] = task.get('error', '')
         resp['llmError'] = bool(task.get('llmError'))
-    return jsonify(resp)
+    return api_payload(resp, 200)
 
 
 @api_v1_paper_bp.route('/api/v1/paper/recommend/abort', methods=['POST'])
@@ -1648,8 +1747,7 @@ async def fetch_arxiv():
     if os.path.exists(filepath) and os.path.getsize(filepath) > 1000:
         file_size = os.path.getsize(filepath)
         logger.info('[Paper:arXiv] Cache hit for %s — %d bytes at %s', arxiv_id, file_size, filepath)
-        return jsonify({
-            'ok': True,
+        return api_ok({
             'pdf_url': f'/api/paper/pdf/{filename}',
             'arxiv_id': arxiv_id,
             'cached': True,
@@ -1692,8 +1790,7 @@ async def fetch_arxiv():
 
     try:
         file_size = await asyncio.to_thread(_download)
-        return jsonify({
-            'ok': True,
+        return api_ok({
             'pdf_url': f'/api/paper/pdf/{filename}',
             'arxiv_id': arxiv_id,
             'file_size': file_size,
@@ -2085,7 +2182,8 @@ def serve_paper_pdf(filename):
     # send_file always returns 200 + the whole file (tens of MB); a buffering
     # cloud-IDE proxy can truncate/time-out that single response, which pdf.js
     # surfaces as "Missing PDF" or per-page "failed to render".
-    resp = send_file(filepath, mimetype='application/pdf', conditional=True)
+    from lib.file_serving import send_file_conditional
+    resp = send_file_conditional(filepath, mimetype='application/pdf')
     # Advertise ranged capability on the INITIAL (non-Range) 200 too. pdf.js's
     # validateRangeRequestCapabilities only switches to ranged loading when the
     # FIRST response carries ``Accept-Ranges: bytes`` — Quart's make_conditional
@@ -2144,8 +2242,7 @@ async def reparse_paper():
 
     try:
         text, total_pages, text_length = await asyncio.to_thread(_reparse)
-        return jsonify({
-            'ok': True,
+        return api_ok({
             'text': text,
             'total_pages': total_pages,
             'text_length': text_length,
@@ -2456,7 +2553,7 @@ def upload_paper():
     }
     if parse_error:
         resp['parse_error'] = parse_error
-    return jsonify(resp)
+    return api_payload(resp, 200)
 
 
 # ══════════════════════════════════════════════════════
@@ -2773,12 +2870,11 @@ from lib.paper.podcast_engine import (
 
 
 @api_v1_paper_bp.route('/api/v1/paper/podcast/status', methods=['GET'])
-def podcast_status():
+async def podcast_status():
     """Feature status: is a TTS slot configured, which models, mode bands."""
     from lib import tts as _tts
     available = _tts.tts_available()
-    return jsonify({
-        'ok': True,
+    return api_ok({
         'tts_available': available,
         'models': _tts.list_tts_models() if available else [],
         'default_voice': _tts.default_voice() if available else '',
@@ -2798,15 +2894,15 @@ def _resolve_podcast_request(data):
         phash = _paper_hash(paper_text)
     if not phash:
         return None, None, None, None, None, None, (
-            jsonify({'ok': False, 'error': 'paper_hash or paper_text required'}), 400)
+            api_bad_request('paper_hash or paper_text required'))
     mode = (data.get('mode') or 'short').strip() or 'short'
     lang = (data.get('lang') or 'zh').strip() or 'zh'
     if mode not in PODCAST_MODES:
         return None, None, None, None, None, None, (
-            jsonify({'ok': False, 'error': f'unknown mode: {mode}'}), 400)
+            api_bad_request(f'unknown mode: {mode}'))
     if lang not in ('zh', 'en'):
         return None, None, None, None, None, None, (
-            jsonify({'ok': False, 'error': f'unsupported lang: {lang}'}), 400)
+            api_bad_request(f'unsupported lang: {lang}'))
     voice = (data.get('voice') or '').strip()
     model = (data.get('model') or '').strip() or None
     force = bool(data.get('force'))
@@ -2829,16 +2925,16 @@ async def start_podcast_task():
     if err:
         return err
     if not has_report(phash):
-        return jsonify({'ok': False, 'report_required': True,
+        return api_payload({'ok': False, 'report_required': True,
                         'report_lang': lang,
                         'error': 'a report is required before a podcast can '
-                                 'be generated'})
+                                 'be generated'}, 200)
     from lib import tts as _tts
     eff_voice = voice or _tts.default_voice()
 
     tid = _podcast_index_get(phash, mode, lang, eff_voice, model)
     if tid:
-        return jsonify({'ok': True, 'task_id': tid, 'reused': True})
+        return api_ok({'task_id': tid, 'reused': True})
 
     cached = load_cached_podcast(phash, mode, lang, eff_voice)
     # The cache row is ONE slot per (paper_hash, mode, lang, voice) — and
@@ -2851,8 +2947,8 @@ async def start_podcast_task():
     if (cached and not force
             and not (model and (cached.get('model') or '') != model)):
         status = cached.get('status') or ''
-        return jsonify({
-            'ok': True, 'cached': True, 'status': status,
+        return api_ok({
+            'cached': True, 'status': status,
             'script': cached.get('script_json') or {},
             'meta': cached.get('meta') or {},
             'scriptOnly': status == 'script_only',
@@ -2866,7 +2962,7 @@ async def start_podcast_task():
     _podcast_index_register(phash, mode, lang, eff_voice, model, task_id)
     task = _new_podcast_task(task_id, phash, mode, lang, eff_voice, model)
     _podcast_runtime.spawn(task_id, _run_podcast_task, task)
-    return jsonify({'ok': True, 'task_id': task_id})
+    return api_ok({'task_id': task_id})
 
 
 @api_v1_paper_bp.route('/api/v1/paper/video/start', methods=['POST'])
@@ -2912,7 +3008,13 @@ async def start_video_abstract_task():
     scene_author = data.get('scene_author')
     if scene_author is not None:
         scene_author = bool(scene_author)
-    res = start_video_abstract(
+    # Off-loop: start_video_abstract is a fully sync pipeline (PG report
+    # probe → FUSE source-file reads → a blocking LLM beat-writing call,
+    # tens of seconds). Run inline it froze the event loop for the whole
+    # request (2026-08-01: 39.6s stall → LoopWatch trip at
+    # lib/http_client.py — every SSE/WS connection dropped).
+    res = await asyncio.to_thread(
+        start_video_abstract,
         phash, lang=lang, voice=(data.get('voice') or '').strip(),
         speed=data.get('speed'), alignment=alignment,
         narration=bool(data.get('narration', True)),
@@ -2922,14 +3024,14 @@ async def start_video_abstract_task():
         model=(data.get('model') or '').strip() or None,
         force=bool(data.get('force', False)))
     if not res.get('ok'):
-        return jsonify({'ok': False, 'report_required':
+        return api_payload({'ok': False, 'report_required':
                         res.get('reason') == 'report_required',
-                        'error': res.get('reason')})
-    return jsonify(res)
+                        'error': res.get('reason')}, 200)
+    return api_payload(res, 200)
 
 
 @api_v1_paper_bp.route('/api/v1/paper/video/lookup', methods=['GET'])
-def lookup_video_abstract():
+async def lookup_video_abstract():
     """Re-attach a paper's video-abstract task on tab open.
 
     Scans the motion runtime for the newest task tagged with this
@@ -2948,7 +3050,9 @@ def lookup_video_abstract():
             if t.get('paper_hash') == phash:
                 if best is None or t.get('created_at', 0) > best.get('created_at', 0):
                     best = t
-    resp = {'ok': True, 'report_available': has_report(phash)}
+    # Off-loop: has_report is a sync PG probe (get_thread_db).
+    resp = {'ok': True,
+            'report_available': await asyncio.to_thread(has_report, phash)}
     if best:
         from lib.agent_core.task_runtime import _epoch_ms
         resp.update({
@@ -2974,7 +3078,7 @@ def lookup_video_abstract():
         # identically.
         if best.get('artifact_quality'):
             resp['artifact_quality'] = best['artifact_quality']
-        return jsonify(resp)
+        return api_payload(resp, 200)
 
     # P-UX4: memory missed — fall back to the on-disk job manifests so a
     # finished video survives a server restart (and an interrupted one is
@@ -2984,7 +3088,7 @@ def lookup_video_abstract():
         resp.update(disk)
     else:
         resp['found'] = False
-    return jsonify(resp)
+    return api_payload(resp, 200)
 
 
 def _lookup_paper_video_on_disk(phash: str) -> dict | None:
@@ -3088,7 +3192,7 @@ def _lookup_paper_video_on_disk(phash: str) -> dict | None:
 
 
 @api_v1_paper_bp.route('/api/v1/paper/podcast/poll', methods=['GET'])
-def poll_podcast_task():
+async def poll_podcast_task():
     """Poll podcast events. Same cursor protocol as the report poll; on done
     the response flattens script / audioUrl / durationSec / scriptOnly."""
     task_id = request.args.get('task_id', '')
@@ -3100,7 +3204,7 @@ def poll_podcast_task():
     with _podcast_tasks_lock:
         t = _podcast_tasks.get(task_id)
     if not t:
-        return jsonify({'ok': False, 'error': 'Task not found'}), 404
+        return api_not_found('Task not found')
     # ★ Go through the shared throat rather than re-deriving the reply here.
     #   runtime.poll() owns the stall reap AND the server-authoritative clocks
     #   (createdAt / updatedAt, epoch ms) that let a refreshed client continue
@@ -3140,7 +3244,7 @@ def poll_podcast_task():
                 if ev.get('reason'):
                     resp['reason'] = ev['reason']
                 break
-    return jsonify(resp)
+    return api_payload(resp, 200)
 
 
 @api_v1_paper_bp.route('/api/v1/paper/podcast/lookup', methods=['POST'])
@@ -3153,13 +3257,34 @@ async def lookup_podcast():
     from lib import tts as _tts
     eff_voice = voice or _tts.default_voice()
     tid = _podcast_index_get(phash, mode, lang, eff_voice, _model)
+    if not tid:
+        # Re-attach fallback: a LOOKUP caller cannot name the model/voice the
+        # RUNNING task was started with — discovering them is the lookup's
+        # job (the panel adopts the returned model). START dedup stays
+        # exact-key (a model-B start must never join model-A's task), but on
+        # an exact-key miss the lookup scans live tasks for (paper_hash,
+        # mode, lang), newest wins — the video-abstract lookup's semantics.
+        # Without it a run started with any concrete model was invisible to
+        # the re-attach and the tab regressed to the idle card mid-run.
+        best = None
+        with _podcast_tasks_lock:
+            for _t in _podcast_tasks.values():
+                if (_t.get('status') in ('pending', 'running')
+                        and _t.get('paper_hash') == phash
+                        and _t.get('mode') == mode
+                        and _t.get('lang') == lang
+                        and (best is None or _t.get('created_at', 0)
+                             > best.get('created_at', 0))):
+                    best = _t
+        if best is not None:
+            tid = best['task_id']
     if tid:
         # ★ The re-attach frame lands BEFORE the first poll, so it must carry
         #   the start clock too — otherwise a refreshed panel paints 0:00 for
         #   one frame before the first poll corrects it (a visible flash).
         from lib.agent_core.task_runtime import _epoch_ms
         _lt = _podcast_runtime.get(tid) or {}
-        return jsonify({'ok': True, 'found': True, 'running': True,
+        return api_ok({'found': True, 'running': True,
                         'task_id': tid, 'model': _lt.get('model') or '',
                         'createdAt': _epoch_ms(_lt.get('created_at')),
                         'updatedAt': _epoch_ms(_lt.get('updated_at')
@@ -3167,8 +3292,8 @@ async def lookup_podcast():
     cached = load_cached_podcast(phash, mode, lang, eff_voice)
     if cached:
         status = cached.get('status') or ''
-        return jsonify({
-            'ok': True, 'found': True, 'cached': True, 'status': status,
+        return api_ok({
+            'found': True, 'cached': True, 'status': status,
             'script': cached.get('script_json') or {},
             'meta': cached.get('meta') or {},
             'scriptOnly': status == 'script_only',
@@ -3181,29 +3306,30 @@ async def lookup_podcast():
     # was cut by a server restart. Surface it honestly (regenerate button).
     from lib.paper.podcast_engine import load_interrupted_podcast
     if load_interrupted_podcast(phash, mode, lang, eff_voice):
-        return jsonify({'ok': True, 'found': True, 'interrupted': True,
+        return api_ok({'found': True, 'interrupted': True,
                         'report_available': has_report(phash)})
-    return jsonify({'ok': True, 'found': False,
+    return api_ok({'found': False,
                     'tts_available': _tts.tts_available(),
                     'report_available': has_report(phash)})
 
 
 @api_v1_paper_bp.route('/api/v1/paper/podcast/script', methods=['GET'])
-def get_podcast_script():
+async def get_podcast_script():
     """Return the cached spoken script + meta (transcript tab, md export)."""
     phash = (request.args.get('paper_hash') or '').strip()
     mode = (request.args.get('mode') or 'short').strip() or 'short'
     lang = (request.args.get('lang') or 'zh').strip() or 'zh'
     voice = (request.args.get('voice') or '').strip()
     if not phash or not _safe_hash_dir(phash):
-        return jsonify({'ok': False, 'error': 'paper_hash required'}), 400
+        return api_bad_request('paper_hash required')
     from lib import tts as _tts
     eff_voice = voice or _tts.default_voice()
-    cached = load_cached_podcast(phash, mode, lang, eff_voice)
+    # Off-loop: load_cached_podcast is a sync PG read (get_thread_db).
+    cached = await asyncio.to_thread(
+        load_cached_podcast, phash, mode, lang, eff_voice)
     if not cached:
-        return jsonify({'ok': False, 'error': 'Podcast not found'}), 404
-    return jsonify({
-        'ok': True,
+        return api_not_found('Podcast not found')
+    return api_ok({
         'script': cached.get('script_json') or {},
         'meta': cached.get('meta') or {},
         'scriptOnly': (cached.get('status') or '') == 'script_only',
@@ -3215,7 +3341,7 @@ def get_podcast_script():
 
 @api_v1_paper_bp.route('/api/v1/paper/podcast/audio/<paper_hash>/<mode>/<lang>/<voice>',
                        methods=['GET'])
-def serve_podcast_audio(paper_hash, mode, lang, voice):
+async def serve_podcast_audio(paper_hash, mode, lang, voice):
     """Stream the podcast audio with HTTP Range support (seekable player).
 
     Path containment mirrors _safe_paper_file: the persisted file_path must
@@ -3228,23 +3354,26 @@ def serve_podcast_audio(paper_hash, mode, lang, voice):
     from lib.paper.hashing import PAPER_DIR as _PAPER_DIR
 
     if not _safe_hash_dir(paper_hash):
-        return jsonify({'ok': False, 'error': 'invalid paper_hash'}), 400
+        return api_bad_request('invalid paper_hash')
     voice = unquote(voice or '')
     if voice == '-':
         voice = ''
-    cached = load_cached_podcast(paper_hash, mode, lang, voice)
+    # Off-loop: sync PG read; the streaming body itself is a sync generator,
+    # which Quart iterates via run_sync_iterable (executor) either way.
+    cached = await asyncio.to_thread(
+        load_cached_podcast, paper_hash, mode, lang, voice)
     fpath = (cached or {}).get('file_path') or ''
     if not cached or not fpath:
-        return jsonify({'ok': False, 'error': 'Podcast audio not found'}), 404
+        return api_not_found('Podcast audio not found')
     root = _os.path.abspath(_os.path.join(_PAPER_DIR, 'podcast', paper_hash))
     real = _os.path.abspath(fpath)
     if not real.startswith(root + _os.sep):
         logger.warning('[Paper:Podcast] audio path escapes podcast dir: %s', fpath)
-        return jsonify({'ok': False, 'error': 'Podcast audio not found'}), 404
+        return api_not_found('Podcast audio not found')
     if not _os.path.exists(real):
         logger.warning('[Paper:Podcast] audio file missing on disk (stale row): '
                        '%s', real)
-        return jsonify({'ok': False, 'error': 'Podcast audio file missing'}), 404
+        return api_not_found('Podcast audio file missing')
     ext = real.rsplit('.', 1)[-1].lower() if '.' in real else ''
     mime = {'mp3': 'audio/mpeg', 'wav': 'audio/wav',
             'bin': 'application/octet-stream'}.get(ext, 'application/octet-stream')
@@ -3283,3 +3412,196 @@ register_task_routes(api_v1_paper_bp, _translate_runtime,
                      url_prefix='/api/v1/paper/translate', enable_poll=False)
 register_task_routes(api_v1_paper_bp, _podcast_runtime,
                      url_prefix='/api/v1/paper/podcast', enable_poll=False)
+
+
+# ── Deepen (on-demand section depth, reading-xp P3) ──
+# POLL + ABORT both ride the generic factory — a first for the paper family:
+# the deepen drawer replays the event log and takes the content from the
+# `done` event, so no engine-specific poll keys are needed (the report/QA
+# polls stay custom for their legacy keys).
+register_task_routes(api_v1_paper_bp, _deepen_runtime,
+                     url_prefix='/api/v1/paper/deepen', enable_poll=True)
+
+
+@api_v1_paper_bp.route('/api/v1/paper/deepen/start', methods=['POST'])
+async def start_deepen_task():
+    """Start (or join) an on-demand section-deepening task.
+
+    Body JSON:
+        paper_hash: str (required)
+        section_idx: int (required) — h2/h3 index in the stored report body
+        mode: 'deeper' | 'derive' | 'eli5' (required)
+        lang: str (optional, default 'en') — the report's language key
+        paper_text: str (optional) — parsed paper text for context
+        model: str (optional)
+
+    Returns {ok, cached, content} on a fresh cache hit (never re-bills), or
+    {ok, task_id, running} for a live task to poll via the generic
+    /api/v1/paper/deepen/poll/<task_id>.
+    """
+    from lib.paper.deepen_engine import start_deepen
+
+    data = await async_parse_body()
+    phash = (data.get('paper_hash') or '').strip()
+    mode = (data.get('mode') or '').strip()
+    lang = (data.get('lang') or 'en').strip() or 'en'
+    paper_text = data.get('paper_text') or ''
+    model = (data.get('model') or '').strip() or None
+    try:
+        section_idx = int(data.get('section_idx'))
+    except (TypeError, ValueError) as e:
+        logger.debug('[Paper] bad section_idx %r — defaulting to -1: %s',
+                     data.get('section_idx'), e)
+        section_idx = -1
+    if not phash:
+        return api_bad_request('No paper_hash provided')
+    if not mode:
+        return api_bad_request('No mode provided')
+
+    ui_lang = parse_report_lang(lang)['ui_lang']
+    result = await asyncio.to_thread(
+        start_deepen, phash, lang, mode, section_idx, paper_text,
+        model=model, ui_lang=ui_lang)
+
+    if 'error' in result:
+        msg, status = result['error']
+        logger.info('[Paper:Deepen] start rejected — hash=%s mode=%s sec=%s: %s',
+                    phash, mode, section_idx, msg)
+        return api_error(msg, status=status)
+    if result.get('cached'):
+        logger.info('[Paper:Deepen] cache hit — hash=%s mode=%s sec=%d',
+                    phash, mode, section_idx)
+        return api_ok({
+            'cached': True,
+            'content': result['content'],
+            'usage': result.get('usage'),
+            'section': result.get('section'),
+            'mode': mode, 'sectionIdx': section_idx,
+        })
+    task = result.get('joined') or result.get('task')
+    return api_ok({
+        'task_id': task['task_id'], 'paper_hash': phash,
+        'running': task['status'] in ('pending', 'running'),
+        'existed': bool(result.get('joined')),
+        'mode': mode, 'sectionIdx': section_idx,
+    })
+
+
+# ══════════════════════════════════════════════════════
+#  Reader margin notes (reading-xp P4)
+# ══════════════════════════════════════════════════════
+
+def _note_row_to_dict(row):
+    try:
+        anchor = json.loads(row['anchor'] or '{}')
+    except (json.JSONDecodeError, TypeError) as e:
+        logger.debug('[Paper] note anchor JSON unreadable, using {}: %s', e)
+        anchor = {}
+    return {
+        'id': row['id'],
+        'paper_hash': row['paper_hash'],
+        'lang': row['lang'],
+        'anchor': anchor,
+        'note': row['note'],
+        'created_at': row['created_at'],
+        'updated_at': row['updated_at'],
+    }
+
+
+@api_v1_paper_bp.route('/api/v1/paper/notes', methods=['GET'])
+async def list_paper_notes():
+    """List the reader's margin notes for one paper+language (oldest first)."""
+    phash = (request.args.get('paper_hash') or '').strip()
+    lang = (request.args.get('lang') or '').strip()
+    if not phash:
+        return api_bad_request('No paper_hash provided')
+    try:
+        rows = await async_fetchall(
+            "SELECT id, paper_hash, lang, anchor, note, created_at, updated_at "
+            "FROM paper_notes WHERE paper_hash = ? AND lang = ? ORDER BY created_at ASC",
+            (phash, lang), domain=DOMAIN_CHAT,
+        )
+    except Exception as e:
+        logger.warning('[Paper:Notes] list failed hash=%s: %s', phash, e)
+        return api_internal_error('failed to load notes')
+    return api_ok({'notes': [_note_row_to_dict(r) for r in (rows or [])]})
+
+
+@api_v1_paper_bp.route('/api/v1/paper/notes', methods=['POST'])
+async def create_paper_note():
+    """Create a margin note. Body: {paper_hash, lang, anchor{…}, note}."""
+    import uuid
+    data = await async_parse_body()
+    phash = (data.get('paper_hash') or '').strip()
+    lang = (data.get('lang') or '').strip()
+    note_text = (data.get('note') or '').strip()
+    anchor = data.get('anchor') if isinstance(data.get('anchor'), dict) else {}
+    if not phash:
+        return api_bad_request('No paper_hash provided')
+    if not note_text:
+        return api_bad_request('Empty note')
+    # Bound the anchor payload: only the three addressing fields, quote capped.
+    safe_anchor = {
+        'heading_idx': anchor.get('heading_idx'),
+        'char_offset': anchor.get('char_offset'),
+        'quote': str(anchor.get('quote') or '')[:400],
+    }
+    note_id = f'pn_{uuid.uuid4().hex[:16]}'
+    now = int(time.time())
+    try:
+        from lib.database import async_execute
+        await async_execute(
+            "INSERT INTO paper_notes (id, paper_hash, lang, anchor, note, "
+            "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (note_id, phash, lang, json.dumps(safe_anchor, ensure_ascii=False),
+             note_text, now, now),
+            domain=DOMAIN_CHAT,
+        )
+    except Exception as e:
+        logger.error('[Paper:Notes] create failed hash=%s: %s', phash, e, exc_info=True)
+        return api_internal_error('failed to save note')
+    logger.info('[Paper:Notes] created %s — hash=%s lang=%s %d chars',
+                note_id, phash, lang, len(note_text))
+    return api_ok({'note': {
+        'id': note_id, 'paper_hash': phash, 'lang': lang,
+        'anchor': safe_anchor, 'note': note_text,
+        'created_at': now, 'updated_at': now,
+    }})
+
+
+@api_v1_paper_bp.route('/api/v1/paper/notes/<note_id>', methods=['PATCH'])
+async def update_paper_note(note_id):
+    """Edit a note's text (the anchor never moves)."""
+    data = await async_parse_body()
+    note_text = (data.get('note') or '').strip()
+    if not note_text:
+        return api_bad_request('Empty note')
+    try:
+        from lib.database import async_execute
+        cur = await async_execute(
+            "UPDATE paper_notes SET note = ?, updated_at = ? WHERE id = ?",
+            (note_text, int(time.time()), note_id),
+            domain=DOMAIN_CHAT,
+        )
+        if getattr(cur, 'rowcount', 0) == 0:
+            return api_not_found('note not found')
+    except Exception as e:
+        logger.error('[Paper:Notes] update failed %s: %s', note_id, e, exc_info=True)
+        return api_internal_error('failed to update note')
+    return api_ok({'id': note_id, 'note': note_text})
+
+
+@api_v1_paper_bp.route('/api/v1/paper/notes/<note_id>', methods=['DELETE'])
+async def delete_paper_note(note_id):
+    """Delete a note (idempotent — deleting a missing id still returns ok)."""
+    try:
+        from lib.database import async_execute
+        await async_execute(
+            "DELETE FROM paper_notes WHERE id = ?", (note_id,),
+            domain=DOMAIN_CHAT,
+        )
+    except Exception as e:
+        logger.error('[Paper:Notes] delete failed %s: %s', note_id, e, exc_info=True)
+        return api_internal_error('failed to delete note')
+    logger.info('[Paper:Notes] deleted %s', note_id)
+    return api_ok({'deleted': note_id})

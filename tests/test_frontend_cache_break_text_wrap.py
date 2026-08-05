@@ -36,7 +36,13 @@ pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
+# Epic-E sub-8 (2026-08-01): _buildCostPopover moved to
+# ui/finish_info_rich.js (deferred); the phrase family it calls
+# (_cacheBreakReason/_translateCacheCause/…) STAYS in ui/finish_info.js.
+# Eval BOTH in one script scope — mirrors production's shared global
+# lexical environment across the two bundles.
 JS_PATH = os.path.join(ROOT, 'static', 'js', 'ui', 'finish_info.js')
+JS_RICH_PATH = os.path.join(ROOT, 'static', 'js', 'ui', 'finish_info_rich.js')
 CSS_PATH = os.path.join(ROOT, 'static', 'styles.css')
 
 
@@ -47,7 +53,8 @@ def _node_available() -> bool:
 # ── JS half: drive the REAL _buildCostPopover and inspect the break line ──
 _RENDER_HARNESS = r"""
 const fs = require('fs');
-const src = fs.readFileSync(process.argv[2], 'utf8');
+const src = fs.readFileSync(process.argv[2], 'utf8')
+  + '\n;\n' + fs.readFileSync(process.argv[3], 'utf8');
 
 let _i18nLang = 'zh';
 global.escapeHtml = (s) => String(s == null ? '' : s)
@@ -109,7 +116,7 @@ def test_break_reason_is_wrapped_flex_item_not_bare_text():
         f.write(_RENDER_HARNESS)
     try:
         proc = subprocess.run(
-            ['node', harness, JS_PATH],
+            ['node', harness, JS_PATH, JS_RICH_PATH],
             capture_output=True, text=True, timeout=60,
         )
     finally:

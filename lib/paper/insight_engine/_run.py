@@ -60,7 +60,8 @@ def generate_insight(paper_text, report_md, ui_lang='en', *, phash='',
     import lib.paper.insight_engine as _pkg
 
     out = {'insight': None, 'markdown': '', 'grounded': 0, 'dropped': 0,
-           'selfref': 0, 'llmError': False}
+           'selfref': 0, 'llmError': False, 'usage': None,
+           'anchors': {'nominated': 0, 'resolved': 0}}
     if not (report_md or '').strip() and not (paper_text or '').strip():
         logger.warning('[Paper:Insight] Nothing to synthesize (empty report + paper)')
         return out
@@ -90,19 +91,34 @@ def generate_insight(paper_text, report_md, ui_lang='en', *, phash='',
         logger.warning('[Paper:Insight] No usable insight JSON for hash=%s', phash)
         return out
 
+    # Pop the private usage accumulator BEFORE grounding/render — it is cost
+    # plumbing (design §3.3), not insight content, and must never leak into
+    # the persisted items or the rendered markdown.
+    synthesis_usage = insight.pop('_usage', None)
+    out['usage'] = synthesis_usage
+
     self_aid, self_ttl = _pkg._self_identity(phash, report_md, self_arxiv_id, self_title)
     grounded, dropped, selfref = _pkg._ground_insight(insight, self_aid=self_aid, self_title=self_ttl)
+    # Deterministic anchor resolution (design §3.2): the model NOMINATED an
+    # `anchor` heading per connection/provocation; resolve each against the
+    # report's ACTUAL h2/h3 sequence. Runs AFTER grounding so dropped self-ref
+    # connections never get anchored. Resolved indices persist with the row.
+    anchor_stats = _pkg.resolve_insight_anchors(insight, report_md)
+    out['anchors'] = anchor_stats
     out['insight'] = insight
     out['grounded'] = grounded
     out['dropped'] = dropped
     out['selfref'] = selfref
     out['markdown'] = _pkg.render_insight_markdown(insight, ui_lang)
-    logger.info('[Paper:Insight] hash=%s — %d grounded / %d dropped / %d self-ref dropped, %d chars',
-                phash, grounded, dropped, selfref, len(out['markdown']))
+    logger.info('[Paper:Insight] hash=%s — %d grounded / %d dropped / %d self-ref dropped, '
+                'anchors %d/%d, %d chars',
+                phash, grounded, dropped, selfref,
+                anchor_stats['resolved'], anchor_stats['nominated'], len(out['markdown']))
     return out
 
 
-def _persist_insight(phash, ui_lang, markdown, model):
+def _persist_insight(phash, ui_lang, markdown, model, *, items=None,
+                     usage=None, baseline=None):
     """Persist an insight section under the ``insight:<ui_lang>`` key.
 
     Reuses the report engine's EXACT write-path (``upsert(db, PAPER_REPORTS,
@@ -110,7 +126,22 @@ def _persist_insight(phash, ui_lang, markdown, model):
     schema, upsert semantics, and PG/SQLite bridge as every other paper_reports
     row. The composite lang key keeps it a SEPARATE row from the plain report,
     so it never overwrites the fidelity report.
+
+    v2 meta (design §3.2/§3.3): when ``items`` (the grounded insight dict,
+    with resolved ``anchor_idx`` per item) is given, it rides the row's meta
+    alongside the baseline + synthesis usage — the read path then serves the
+    STRUCTURED payload so the reader can distribute anchored cards instead of
+    one end-of-report block. Legacy rows (``{'kind':'insight'}`` only) keep
+    the v1 read behaviour (markdown merged at the end) unchanged.
     """
+    meta = {'kind': 'insight'}
+    if items is not None:
+        meta['v'] = 2
+        meta['items'] = items
+        if baseline is not None:
+            meta['baseline'] = baseline
+        if usage:
+            meta['usage'] = usage
     try:
         from lib.database import get_thread_db
         from lib.database._core_schema import PAPER_REPORTS, upsert
@@ -120,11 +151,12 @@ def _persist_insight(phash, ui_lang, markdown, model):
             'lang': insight_lang_key(ui_lang),
             'report': markdown,
             'model': model or '',
-            'meta': json.dumps({'kind': 'insight'}, ensure_ascii=False),
+            'meta': json.dumps(meta, ensure_ascii=False),
             'created_at': int(time.time()),
         }, retry=True)
-        logger.info('[Paper:Insight] Persisted insight — hash=%s key=%s %d chars',
-                    phash, insight_lang_key(ui_lang), len(markdown))
+        logger.info('[Paper:Insight] Persisted insight — hash=%s key=%s %d chars (v%s)',
+                    phash, insight_lang_key(ui_lang), len(markdown),
+                    meta.get('v', 1))
         return True
     except Exception as e:
         logger.warning('[Paper:Insight] Failed to persist insight hash=%s: %s', phash, e)
@@ -161,12 +193,15 @@ def run_report_insight(paper_text, report_md, ui_lang='en', *, phash='',
 
     out = {'fired': False, 'baseline': None, 'insight': None, 'markdown': '',
            'grounded': 0, 'dropped': 0, 'selfref': 0, 'persisted': False,
-           'llmError': False}
+           'llmError': False, 'usage': None,
+           'anchors': {'nominated': 0, 'resolved': 0}}
 
     baseline = None
+    rubric_usage = None
     verdict = _pkg.score_report_rubric(report_md, model=model, abort=abort)
     if verdict:
         baseline = verdict['overall']
+        rubric_usage = verdict.get('usage')
     out['baseline'] = baseline
 
     if not insight_gate_fires(baseline):
@@ -187,8 +222,22 @@ def run_report_insight(paper_text, report_md, ui_lang='en', *, phash='',
         allow_personal_context=allow_personal_context)
 
     out.update({k: gen[k] for k in ('insight', 'markdown', 'grounded', 'dropped',
-                                    'selfref', 'llmError')})
+                                    'selfref', 'llmError', 'usage', 'anchors')})
+
+    # Fold the rubric scoring cost into the pass's total usage (design §3.3 —
+    # the reader should see EVERYTHING this pass billed, not just the
+    # synthesis). Token fields sum; absent sides count as zero.
+    def _sum_usage(a, b):
+        if not a and not b:
+            return None
+        keys = ('prompt_tokens', 'completion_tokens', 'cache_read_tokens',
+                'cache_write_tokens', 'reasoning_tokens')
+        return {k: int((a or {}).get(k, 0)) + int((b or {}).get(k, 0)) for k in keys}
+
+    out['usage'] = _sum_usage(rubric_usage, gen.get('usage'))
 
     if persist and gen.get('markdown') and gen.get('insight'):
-        out['persisted'] = _pkg._persist_insight(phash, ui_lang, gen['markdown'], model)
+        out['persisted'] = _pkg._persist_insight(
+            phash, ui_lang, gen['markdown'], model,
+            items=gen.get('insight'), usage=out['usage'], baseline=baseline)
     return out

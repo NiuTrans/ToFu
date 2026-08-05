@@ -1,3 +1,5 @@
+# Incident anchor: born in commit ed744645 — refactor(orchestrator): pt_03f4cdf1 slice 17 — extract per-round budg...
+# (funeral audit pt_c565a36b3e8f42e6, docs/RATCHET_AUDIT.md)
 """Slice 17 wire-parity: _round_gates.py extraction from _run.py.
 
 Failing-first: these tests FAIL before the extraction module exists

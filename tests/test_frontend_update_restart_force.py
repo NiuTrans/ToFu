@@ -94,6 +94,7 @@ global.clearInterval = () => {};
 global.setTimeout = () => 0;
 global.clearTimeout = () => {};
 global.addEventListener = () => {};
+global._onReady = () => {};   // feature-loader.js deferred-ready hook (Epic-E sub-9)
 global.location = { reload: () => {} };
 
 // ── Instrumented Api + showConfirm (rebound per scenario) ──

@@ -1,3 +1,5 @@
+# Incident anchor: born in commit 3cde053e — tests: pin TOFU_NETPATH=off under pytest — keep netpath prober out of...
+# (funeral audit pt_c565a36b3e8f42e6, docs/RATCHET_AUDIT.md)
 """Regression guard: the netpath prober must never start in a pytest process,
 and the production netpath store must stay free of test/doc ghost hosts.
 
@@ -27,6 +29,7 @@ from pathlib import Path
 import pytest
 
 import lib.netpath as netpath
+from lib.mcp.registry import is_opensource_build
 
 _PROD_STORE = Path(__file__).resolve().parents[1] / 'data' / 'config' / 'netpath.json'
 
@@ -75,7 +78,13 @@ def test_ghost_hosts_are_detected(host):
 
 @pytest.mark.unit
 @pytest.mark.parametrize('host', [
-    'your-llm-gateway.example.com', 'api.openai.com', 'latest', 'contest.org',
+    # The export sanitizer rewrites this internal host to a doc placeholder
+    # (your-llm-gateway.example.com), which IS a ghost suffix by design — so
+    # this parameter is only meaningful in the internal tree.
+    pytest.param('your-llm-gateway.example.com', marks=pytest.mark.skipif(
+        is_opensource_build(),
+        reason='export sanitizes this internal host to a doc placeholder')),
+    'api.openai.com', 'latest', 'contest.org',
 ])
 def test_real_hosts_are_not_ghosts(host):
     assert not _is_ghost_host(host)

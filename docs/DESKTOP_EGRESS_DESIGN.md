@@ -421,3 +421,80 @@ token 只在请求的 headers 里由服务器注入）。
 4. cloaking 后的 Claude 请求形状与 CLIProxyAPI 对拍一致（计费头、beta、
    system 三段、工具名）。
 5. 全量守卫套件绿，含失败先行与 NEUTER 记录。
+
+---
+
+## 11. 部署接线（2026-08-01 实测定案——agent 到底怎么到达服务器）
+
+真机验收暴露的物理层事实（证据见 JOURNAL 2026-08-01「egress 鉴权层定案」
+「续·已重启+网段通+agent 已起三项只成立一项」与当日末条）：
+
+1. **401 签发者 = MLP/VS Code 平台代理的 SSO 闸，不是 tofu**。证据：
+   `/api/health`（应用层公开路径）经代理也 401；代理 401 为 HTTP/2、无
+   hypercorn server 头、CORS 仅 mlp.internal.example.com；本机直连同路径 200；
+   **带合法 tofu admin Bearer 打代理照样 401**——平台闸对 tofu 凭证完全失明。
+   `*.mlp.internal.example.com/proxy/<port>` 是交互浏览器专用通道（SSO cookie），
+   **任何程序化客户端（curl/agent）都过不去，不是凭证问题，不要尝试**。
+2. **bridge poll 是「仅凭证、地址盲」端点**（`routes/api_v1/auth.py::_BRIDGE_PATHS`）：
+   `X-Bridge-Secret` 三选一——进程内 loopback token（托盘 app 专用）、
+   全局 `TOFU_BRIDGE_SECRET`（本部署未设）、**`agents:bridge` scope API key**。
+   agent 侧 `--bridge-secret` 即发此头（`_run.py:181`）。
+3. **本部署的 key 必须 `user_id=''`**：auth 模式 open ⇒ 浏览器合成 admin ctx
+   （`user_id=''`）；`lib/llm/stream.py` egress 路由硬编码 `user_id=''` ⇒
+   命令带 `''`；bridge `_deliverable` 对（命令 user_id, agent user_id）
+   fail-closed 相等匹配——key 带真实租户 id 则命令**永不可投递**。
+4. **铸 key 必须走运行中服务器的 API（`POST /api/v1/keys`）**：`_ensure_loaded`
+   每进程只加载一次 key 文件（`lib/api_keys/_store.py:62`），进程外铸 key 对
+   运行中服务器**不可见**（重启才生效）；经 API 铸则缓存+落盘同进程生效，
+   且覆盖落盘时自动逐出进程外孤儿 key。在册：`k_d1adfa20`（egress-agent-office）
+   与 `k_2a687bc6`（egress-bridge-office），均 agents:bridge + user_id=''，
+   两把等价可用；现行明文落 `data/config/.egress_bridge_key`（0600）。
+5. **服务器绑定与到达路径（两条，已定案主备）**：
+   - **主路径（直绑，早前定案；2026-08-04 起 0.0.0.0 已成为默认绑定，
+     无需再传 env）**：`./restart_15000.sh` 重启即全接口绑定，办公机直连
+     `http://10.128.175.30:15000`。暴露面已评估：open 模式对非 loopback
+     拒发合成 admin，bridge 恒要凭证，可接受。（历史注：BIND_HOST 曾必须
+     走 shell 脚本注入——UI 重启按钮是 os.execv，继承旧进程 env，
+     2026-08-01 实测。）
+   - **备选路径（端口转发，免重启，今天就能用）**：办公机
+     `ssh -L 15000:127.0.0.1:15000 <codelab-ssh-地址>`（或 VS Code 端口面板
+     转发 15000），agent 连 `http://127.0.0.1:15000`，对 tofu 呈现 loopback。
+   两条路径的 agent 侧凭证相同（第 2/3 条的 key）。
+6. **agent 出口代理 = 环境变量**：`proxy_mode='env'`（默认）按
+   `HTTPS_PROXY/https_proxy/HTTP_PROXY/http_proxy` 发现（`_egress.py:131`）。
+   办公机如需客户端代理（Clash 等）访问 Anthropic/OpenAI，起 agent 前
+   `set HTTPS_PROXY=http://127.0.0.1:7890`（按实际端口）。
+
+**已实测验证（容器内全链，2026-08-01）**：poll 三态（对 key 200 `{"commands":[]}` /
+错 key 401 / 无 key 401）；容器内真实 agent `--allow-egress --bridge-secret`
+注册上线、`capabilities.egress=true`；`GET /api/v1/oauth/status` 五态机首查
+`unknown`（后台探测，设计行为）→ 复核 `state=agent` + `verdict=geo_blocked`
++ agent 在列（**S4 状态面真机首验**）。自测 agent 已停（避免与办公机 agent
+双在线触发 route_request 多 agent 拒绝）。
+
+## 11.1 办公机真机 runbook（修正版，替换此前一切口头命令）
+
+```bat
+:: ① 到达路径（二选一）
+::    主：等 BIND_HOST=0.0.0.0 重启后直连 http://10.128.175.30:15000
+::    备（免重启）：ssh -L 15000:127.0.0.1:15000 <codelab-ssh-地址>
+::                 然后一律用 http://127.0.0.1:15000
+
+:: ② 办公机装受控端（正式路径，2026-08-02 起；此前的「拷贝 chatui 仓库
+::    + pip install requests」临时路径退役）
+::    本地控制 →「这台电脑」→ 受控端·轻量（TofuAgent-Setup-x.y.z-win64.exe，
+::    服务器直连下载，约 53 MB）。首次启动粘贴连接行（本地控制一键生成，
+::    含地址+token），托盘勾选「允许中继订阅流量」（= --allow-egress）；
+::    无人值守机器务必再勾「Start with Windows」（重启不断桥）
+
+:: ③ 起 agent（key 在服务器 data/config/.egress_bridge_key，0600）
+::    —— 用安装包时跳过本步：TofuAgent 随登录会话常驻（托盘可见状态），
+::    以下命令行路径仅供开发机调试
+set TOFU_BRIDGE_KEY=<文件内容>
+python -m lib.desktop_agent --server http://127.0.0.1:15000 --allow-egress --bridge-secret %TOFU_BRIDGE_KEY%
+:: 如需客户端代理：先 set HTTPS_PROXY=http://127.0.0.1:7890
+```
+
+验证顺序：agent 控制台无 `Cannot reach server` →
+`GET /api/v1/oauth/egress-agent` 出现办公机 agent 且 `egress=true` →
+OAuth 卡片出口行显示「经桌面代理」→ Claude 登录 → 流式聊天 → Codex O3 定案。

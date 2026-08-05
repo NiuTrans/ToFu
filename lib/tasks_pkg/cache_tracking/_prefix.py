@@ -14,6 +14,7 @@ from typing import Any
 
 from lib.log import get_logger
 from lib.tasks_pkg.cache_tracking._state import (
+    COLD_STREAK_GUARD_OPEN,
     _cache_lock,
     _cache_states,
     _state_key,
@@ -152,10 +153,22 @@ def get_cache_prefix_count(conv_id: str, current_msg_count: int | None = None) -
     so the prior turn's boundary is a valid prefix of the current turn.
     """
     def _boundary(st) -> int:
-        if st and (st.last_cache_read_tokens > 1000
-                   or st.last_cache_write_tokens > 1000):
-            # Cache was active — protect the prefix. Keep the last
-            # EDITABLE_TAIL_COUNT messages editable (single-sourced bound).
+        # Hysteresis (2026-08-01): protect the last-sent prefix whenever this
+        # thread HAS a sent prefix and the cache is not VERIFIABLY cold.
+        # The old gate (last_cache_read > 1000 or last_cache_write > 1000)
+        # collapsed on a SINGLE zero round — but a zero round does not prove
+        # the prefix is uncached (Anthropic write-visibility race, gateway
+        # stochastic miss, namespace flip, kimi's never-reported cache_write).
+        # With the guard down, micro_compact rewrote messages that had just
+        # been on the wire → the next round missed → the guard stayed down →
+        # a self-feeding re-bill loop (measured on conv ms9ow2tt calls 3→6).
+        # Only COLD_STREAK_GUARD_OPEN CONSECUTIVE verifiably-cold rounds open
+        # the guard; a single warm-ish round (read or write over the floor)
+        # resets the streak in detect_cache_break. Keep the last
+        # EDITABLE_TAIL_COUNT messages editable (single-sourced bound).
+        if st and st.cold_streak < COLD_STREAK_GUARD_OPEN:
+            # (message_count is 0 until this thread's first call completes, so
+            # a never-called state yields 0 without a separate call_count gate.)
             return max(0, st.message_count - EDITABLE_TAIL_COUNT)
         return 0
 

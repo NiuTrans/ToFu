@@ -68,7 +68,30 @@ psutil>=5.9
 # older configure() raises TypeError on the unknown kwarg and the server
 # dies at startup. Do not lower this floor without first making the bridge
 # pass the security-posture kwargs defensively.
-tofu-search>=0.5.3
+# >=0.6.0: verdict-only `gate` filter mode + filter result cache — the fix for
+# "LLM filter makes search practically unusable" (step-5 was 30-120s: the
+# pre-0.6 filter regenerated each whole page, min_chars=0 dragged short pages
+# in, timeout was 300s, nothing cached). HARD floor, same shape as 0.5.0: the
+# bridge passes `filter_mode` to configure() UNCONDITIONALLY, so an older
+# configure() raises TypeError at startup. Do not lower this floor without
+# first making the bridge pass filter_mode defensively.
+# >=0.6.1: PlaywrightPool.register_task_kind — the generic task-kind registry on
+# the shared pool worker. chatui's browser_preview_page (lib/browser/preview.py)
+# renders page previews THROUGH the pool instead of launching a second Chromium.
+# SOFT floor: the caller guards with _register_once() and converts a missing
+# registry into a model-visible error string, so an older tofu-search degrades
+# the preview feature at call time rather than crashing anything at startup.
+# >=0.7.3: replay no-ops when the matched row holds no cookies (browser_first
+# rows match cookie-less — the live session IS the credential), on top of
+# 0.7.2's access_strategy consumption. SOFT floor: older libraries just waste
+# one anonymous pool load in that fallback — inert, no crash.
+# >=0.8.0: travel vertical chain — RollingGo (keyed) → FlyAI (Fliggy
+# anonymous), hotel type usable key-free for the first time. SOFT floor: the
+# bridge passes no 0.8.0-only kwargs, an older library just lacks the travel
+# chain. Also the first version actually PUBLISHED to public PyPI past 0.5.3
+# (0.7.2/0.7.3 were cut but never uploaded), so the floor moves to the
+# artifact CI can resolve.
+tofu-search>=0.8.0
 trafilatura>=1.6
 # playwright is optional — powers the JS-rendered fallback in tofu_search.fetch.
 # On Linux, Chromium needs X11/GTK shared libs (libatk, libgbm, libXcomposite, …).

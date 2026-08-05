@@ -41,6 +41,14 @@ pytestmark = pytest.mark.unit
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _MOD_PATH = os.path.join(_HERE, '..', 'scripts', 'cache_waste_report.py')
 
+# cache_waste_report.py is a private analysis script (tracked but deliberately
+# export-excluded — see tests/test_gitignore_covers_export_excludes.py), so the
+# opensource tree cannot load it. Skip loudly there instead of dying at
+# collection with a FileNotFoundError.
+if not os.path.isfile(_MOD_PATH):
+    pytest.skip('scripts/cache_waste_report.py not shipped in opensource',
+                allow_module_level=True)
+
 
 def _load_report_mod():
     spec = importlib.util.spec_from_file_location('cache_waste_report', _MOD_PATH)

@@ -24,6 +24,13 @@ import pytest
 pytestmark = pytest.mark.unit
 
 
+# Referenced ONLY through this constant: export.py rewrites the literal
+# 'https://api.openai.com/...' endpoint form and the bare 'your-llm-gateway.example.com'
+# host form DIFFERENTLY, so a URL built from the constant stays consistent
+# with the registered source domain in both the source and the exported tree.
+_HOST = 'your-llm-gateway.example.com'
+
+
 @pytest.fixture(autouse=True)
 def _isolated_store():
     import lib.auth_sources as A
@@ -81,12 +88,12 @@ def test_mixed_scopes_each_keep_their_own(_isolated_store):
 def test_stored_domain_survives_match_source_verbatim(_isolated_store):
     """THE end-to-end invariant: what goes in is what comes back out."""
     A = _isolated_store
-    A.upsert_source('example-corp.com', enabled=True, cookie_fields={
+    A.upsert_source(_HOST, enabled=True, cookie_fields={
         '12d702aa62_ssoid': {'value': 'A', 'domain': 'your-llm-gateway.example.com'},
         'venusToken': {'value': 'B', 'domain': '.internal.example.com'},
     })
     A.invalidate_cache()
-    src = A.match_source('https://api.openai.com/ml/modelPlaza/modelInfo')
+    src = A.match_source(f'https://{_HOST}/ml/modelPlaza/modelInfo')
     assert src is not None
     got = {c['name']: c['domain'] for c in src['cookies']}
     assert got['12d702aa62_ssoid'] == 'your-llm-gateway.example.com', (
@@ -97,11 +104,11 @@ def test_stored_domain_survives_match_source_verbatim(_isolated_store):
 def test_explicit_cookie_list_is_not_rewritten(_isolated_store):
     """Passing `cookies=` directly must also be left alone."""
     A = _isolated_store
-    A.upsert_source('example-corp.com', enabled=True, cookies=[
+    A.upsert_source(_HOST, enabled=True, cookies=[
         {'name': 'sid', 'value': 'A', 'domain': 'your-llm-gateway.example.com', 'path': '/'},
     ])
     A.invalidate_cache()
-    src = A.match_source('https://api.openai.com/x')
+    src = A.match_source(f'https://{_HOST}/x')
     assert src['cookies'][0]['domain'] == 'your-llm-gateway.example.com'
 
 
@@ -146,8 +153,8 @@ def test_blank_values_are_still_dropped(_isolated_store):
 def test_match_source_still_matches_a_host_only_cookie(_isolated_store):
     """Scope fidelity must not cost us the match: the source still resolves."""
     A = _isolated_store
-    A.upsert_source('example-corp.com', enabled=True, cookie_fields={
+    A.upsert_source(_HOST, enabled=True, cookie_fields={
         'sid': {'value': 'A', 'domain': 'your-llm-gateway.example.com'}})
     A.invalidate_cache()
-    assert A.match_source('https://api.openai.com/x') is not None
+    assert A.match_source(f'https://{_HOST}/x') is not None
     assert A.match_source('https://other.example.com/x') is None

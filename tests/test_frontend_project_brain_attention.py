@@ -88,6 +88,8 @@ win.ProjectBrain = global.ProjectBrain = {
   _state: { path: '/proj/real' },
   _selectTab: (n) => { _selectedTab = n; },
   _wireClampToggles: () => {},
+  // The shared relative-time grammar (the REAL one lives in project-brain.js).
+  _relTime: (ts) => (ts ? '2h ago' : ''),
   // The shared epic→conversation launcher (the REAL one lives in
   // project-brain.js, bundled before this module). The stub records the
   // delegation so the test can assert id + ORIGINAL title are handed over.
@@ -96,6 +98,8 @@ win.ProjectBrain = global.ProjectBrain = {
 // Record every API call so the tests can assert WHICH backend route a control
 // hits (the "one contract per action" invariant — no reimplementation).
 const _calls = [];
+// The provenance chip deep-links into the originating conversation.
+win.loadConversation = global.loadConversation = (id) => { _calls.push(['loadConversation', id]); };
 win.Api = global.Api = { project: {
   boardAnswer: (p, id, conv, ans) => { _calls.push(['boardAnswer', id, ans]); return Promise.resolve({}); },
   commitCharter: (p, body) => { _calls.push(['commitCharter', body.resolves_proposal, body.add_decision]); return Promise.resolve({}); },
@@ -113,52 +117,73 @@ check('module_exposed', !!(PBA && typeof PBA.renderAttention === 'function'));
 const body = win.document.getElementById('projectBrainAttentionBody');
 check('real_panel_element_exists', !!body);
 
-// ── Scenario: one blocking epic + one advisory proposal + one conflict,
-//    in the SERVER's priority order (blocking first), plus 2 on cooldown. ──
+// ── Scenario: one blocking epic + one advisory proposal, in the SERVER's
+//    priority order (blocking first), plus 2 on cooldown. (A live file
+//    conflict is deliberately NOT an attention item — 2026-08-01 owner
+//    directive — so none appears in this fixture.) ──
 PBA.renderAttention({
-  blocking: 1, advisory: 2, needsYou: 3, waiting: 2,
+  blocking: 1, advisory: 1, needsYou: 2, waiting: 2,
   items: [
     { type: 'board_question', severity: 'blocking', id: 'pt_halted',
       title: 'Migrate the schema', question: 'Postgres or SQLite?',
-      options: [{ label: 'Postgres' }, { label: 'SQLite' }],
-      reason: '[human-gated] needs a call', blockCount: 3, tab: 'board' },
+      options: [{ label: 'Postgres', description: 'full power, more ops' },
+                { label: 'SQLite', description: 'zero ops, single box' }],
+      reason: '[human-gated] needs a call', blockCount: 3, tab: 'board',
+      askedByConvId: 'conv-asker', askedByTitle: 'Egress 调研', ts: 1754000000000 },
     { type: 'charter_proposal', severity: 'advisory', id: 'prop_1',
-      text: 'Adopt the new parser', tab: 'charter' },
-    { type: 'conflict', severity: 'advisory', id: 'src/shared.py',
-      path: 'src/shared.py',
-      text: 'conv A and conv B are concurrently editing src/shared.py',
-      tab: 'peers' },
+      text: 'Adopt the new parser', tab: 'charter',
+      convId: 'conv-proposer', askedByConvId: 'conv-proposer',
+      askedByTitle: '架构决策讨论' },
   ],
 });
 
 const html = body.innerHTML;
 const cards = body.querySelectorAll('.pb-attn-card');
-check('three_cards', cards.length === 3);
+check('two_cards', cards.length === 2);
 // SERVER ORDER PRESERVED — the blocking card is first. The module must not
 // re-sort; the backend already ordered it (that is the SSOT contract).
 check('blocking_card_first', cards[0] && cards[0].classList.contains('pb-attn-blocking'));
 check('blocking_is_the_epic', cards[0] && cards[0].getAttribute('data-attn-type') === 'board_question');
-check('advisory_cards_follow',
-  cards[1] && cards[1].classList.contains('pb-attn-advisory') &&
-  cards[2] && cards[2].classList.contains('pb-attn-advisory'));
+check('advisory_card_follows',
+  cards[1] && cards[1].classList.contains('pb-attn-advisory') && !cards[2]);
 // The halted epic renders its question + INLINE resolving controls.
 check('question_rendered', html.indexOf('Postgres or SQLite?') !== -1);
 check('option_chips', body.querySelectorAll('.pb-attn-act[data-act="answerOpt"]').length === 2);
 check('answer_input', !!body.querySelector('.pb-attn-answer'));
 check('answer_submit', !!body.querySelector('.pb-attn-act[data-act="answerSubmit"]'));
+// ── Provenance + background (2026-08 owner complaint): WHO asked, WHY it
+//    stopped, WHEN, and what each option MEANS — all ON the card. ──
+const fromChip = cards[0] ? cards[0].querySelector('.pb-attn-from[data-conv-id="conv-asker"]') : null;
+check('from_chip_rendered', !!fromChip && fromChip.textContent.indexOf('Egress 调研') !== -1);
+check('reason_section', !!cards[0].querySelector('.pb-attn-reason') &&
+      cards[0].querySelector('.pb-attn-reason').textContent.indexOf('[human-gated] needs a call') !== -1);
+check('yourcall_label', html.indexOf('projectBrain.attnYourCall') !== -1 ||
+      html.indexOf('Your call') !== -1);
+const chipRowText = (cards[0].querySelector('.pb-chip-row') || {}).textContent || '';
+check('option_desc_visible', cards[0].querySelectorAll('.pb-attn-opt-desc').length === 2 &&
+      chipRowText.indexOf('zero ops') !== -1 && chipRowText.indexOf('full power') !== -1);
+check('rel_time_rendered', !!cards[0].querySelector('.pb-attn-meta') &&
+      cards[0].querySelector('.pb-attn-meta').textContent.indexOf('2h ago') !== -1);
+if (fromChip) fromChip.click();
+check('from_chip_loads_conv',
+      !!_calls.find(c => c[0] === 'loadConversation' && c[1] === 'conv-asker'));
+// The SAME provenance chip on the proposal card — every decision the panel
+// shows must carry its author, not only the blocking one.
+const propChip = cards[1] ? cards[1].querySelector('.pb-attn-from[data-conv-id="conv-proposer"]') : null;
+check('proposal_from_chip', !!propChip && propChip.textContent.indexOf('架构决策讨论') !== -1);
+if (propChip) propChip.click();
+check('proposal_from_loads_conv',
+      !!_calls.find(c => c[0] === 'loadConversation' && c[1] === 'conv-proposer'));
 // The proposal renders commit + reject inline.
 check('commit_btn', !!body.querySelector('.pb-attn-act[data-act="commit"]'));
 check('reject_btn', !!body.querySelector('.pb-attn-act[data-act="reject"]'));
-// The conflict is NOT resolvable by a button — it deep-links into Team.
-check('conflict_deeplink', !!body.querySelector('.pb-attn-goto[data-goto-tab="peers"]'));
-check('conflict_text_verbatim', html.indexOf('src/shared.py') !== -1);
 // Cooldown epics are a muted reassurance FOOTNOTE, never cards (they need
 // nothing from the human — listing them would devalue the surface).
 check('waiting_footnote', !!body.querySelector('.pb-attn-waiting'));
-check('waiting_not_a_card', cards.length === 3);
+check('waiting_not_a_card', cards.length === 2);
 // Tab badge reflects the count AND the blocking alarm.
 const badge = win.document.getElementById('pbTabCountAttention');
-check('badge_count', badge && badge.textContent === '3' && badge.hidden === false);
+check('badge_count', badge && badge.textContent === '2' && badge.hidden === false);
 check('badge_blocking_class', badge && badge.classList.contains('pb-tab-count-blocking'));
 
 // ── Clicking an option chip must call boardAnswer with the option label ──
@@ -167,16 +192,11 @@ if (chip) chip.click();
 // ── Reject must call dismissProposal with the proposal id ──
 const reject = body.querySelector('.pb-attn-act[data-act="reject"]');
 if (reject) reject.click();
-// ── The deep-link must switch the panel tab ──
-const goto = body.querySelector('.pb-attn-goto[data-goto-tab="peers"]');
-if (goto) goto.click();
 // ── "New chat" on the halted-epic card delegates to the shared launcher ──
 const convBtn = cards[0] ? cards[0].querySelector('.pb-attn-act[data-act="createConv"]') : null;
 check('createconv_btn_on_epic', !!convBtn);
 check('createconv_absent_on_proposal',
       cards[1] && !cards[1].querySelector('[data-act="createConv"]'));
-check('createconv_absent_on_conflict',
-      cards[2] && !cards[2].querySelector('[data-act="createConv"]'));
 if (convBtn) convBtn.click();
 
 // ── Focus channel (Board "go answer" deep-link): scroll + flash the card ──
@@ -201,7 +221,6 @@ setTimeout(() => {
   check('answer_sends_option_label', !!answered && answered[2] === 'SQLite');
   const dismissed = _calls.find(c => c[0] === 'dismissProposal');
   check('reject_hits_dismissProposal', !!dismissed && dismissed[1] === 'prop_1');
-  check('deeplink_switches_tab', _selectedTab === 'peers');
   const launched = _calls.find(c => c[0] === 'createConv');
   check('createconv_delegates', !!launched && launched[1] === 'pt_halted');
   check('createconv_sends_original_title',
@@ -258,16 +277,20 @@ def test_attention_tab_renders_and_resolves_inline():
     output = _write_and_run(_HARNESS, _ATTN_SRC, 'main')
     fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
     assert not fails, 'attention-tab failures:\n' + output
-    for must in ('PASS three_cards', 'PASS blocking_card_first',
+    for must in ('PASS two_cards', 'PASS blocking_card_first',
                  'PASS blocking_is_the_epic', 'PASS question_rendered',
                  'PASS option_chips', 'PASS answer_submit',
+                 'PASS from_chip_rendered', 'PASS from_chip_loads_conv',
+                 'PASS proposal_from_chip', 'PASS proposal_from_loads_conv',
+                 'PASS reason_section', 'PASS yourcall_label',
+                 'PASS option_desc_visible', 'PASS rel_time_rendered',
                  'PASS commit_btn', 'PASS reject_btn',
-                 'PASS conflict_deeplink', 'PASS waiting_footnote',
+                 'PASS waiting_footnote',
                  'PASS waiting_not_a_card', 'PASS badge_blocking_class',
                  'PASS answer_hits_boardAnswer', 'PASS answer_sends_option_label',
-                 'PASS reject_hits_dismissProposal', 'PASS deeplink_switches_tab',
+                 'PASS reject_hits_dismissProposal',
                  'PASS createconv_btn_on_epic', 'PASS createconv_absent_on_proposal',
-                 'PASS createconv_absent_on_conflict', 'PASS createconv_delegates',
+                 'PASS createconv_delegates',
                  'PASS createconv_sends_original_title',
                  'PASS focus_flashes_card', 'PASS focus_not_flashed_before_render',
                  'PASS focus_pending_honored_after_render',
@@ -312,6 +335,43 @@ def test_NC_server_order_is_preserved():
         assert 'FAIL blocking_card_first' in output, \
             ('NC: a client-side re-sort must break the server-order '
              'contract:\n' + output)
+    finally:
+        try:
+            os.remove(copy_path)
+        except OSError:
+            pass
+    with open(_ATTN_SRC, encoding='utf-8') as f:
+        assert f.read() == original, 'shipped project-brain-attention.js must be byte-identical'
+
+
+@pytest.mark.skipif(not _node_deps_available(),
+                    reason='node + jsdom dev-deps not installed (run npm install)')
+def test_NC_provenance_chip_is_load_bearing():
+    """NC: drop the provenance lookup in a COPY → BOTH decision cards render
+    without the from-chip → from_chip_rendered AND proposal_from_chip FAIL.
+
+    The 2026-08 owner complaint was precisely "no indication of which
+    conversation sent this". The shared `_fromChip` builder is what makes
+    the chip impossible to lose on ONE card while keeping the other — this
+    neuter proves both cards draw it from the SAME wiring, not from two
+    hand-copies that could drift apart."""
+    with open(_ATTN_SRC, encoding='utf-8') as f:
+        original = f.read()
+    anchor = "    var fromId = item.askedByConvId || item.convId || '';"
+    assert anchor in original, 'fromId anchor not found (source changed?)'
+    patched = original.replace(
+        anchor, "    var fromId = '';  // NC (provenance dropped)", 1)
+    copy_path = os.path.join(HERE, '_attn_nc_from.js')
+    try:
+        with open(copy_path, 'w', encoding='utf-8') as f:
+            f.write(patched)
+        output = _write_and_run(_HARNESS, copy_path, 'ncfrom')
+        assert 'FAIL from_chip_rendered' in output, \
+            ('NC: dropping the provenance lookup must remove the from-chip '
+             'from the halted-epic card:\n' + output)
+        assert 'FAIL proposal_from_chip' in output, \
+            ('NC: the SAME neuter must remove it from the proposal card too '
+             '— one builder, not two copies:\n' + output)
     finally:
         try:
             os.remove(copy_path)

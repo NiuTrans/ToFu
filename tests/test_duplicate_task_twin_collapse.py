@@ -180,16 +180,37 @@ def test_rows_spanning_a_user_turn_are_never_collapsed():
 
 
 def test_twin_carrying_a_terminal_fact_the_keeper_lacks_is_never_collapsed():
-    """The twin holds an `error` the keeper does not — dropping it hides a
-    real terminal outcome."""
+    """CONTRACT EVOLUTION (2026-08-03, same-task error-twin fold): this pair
+    used to be KEPT — "dropping the twin hides a real terminal outcome". The
+    fold now answers that intent MORE precisely: a terminal fact is never
+    dropped WITH the twin, it is FOLDED ONTO the keeper (pinned by
+    tests/test_same_task_error_twin_fold.py::
+    test_error_envelope_folds_onto_unfinished_keeper).
+
+    THIS scenario is the complement: the keeper already holds the terminal
+    authority (finishReason='stop', a clean finish). The twin's error
+    envelope contradicting that clean finish is a mid-stream transient —
+    the exact verdict the normal sync path already makes by popping stale
+    errors ("absence of an error IS the verdict"). So the twin IS collapsed
+    and the error is NOT glued onto the clean row: the terminal outcome
+    ('stop') stays visible on the single surviving bubble, never hidden."""
     msgs = [
         _user(_msgId='u1'),
         _asst('task-A', 'ANSWER', _msgId='a1'),
         _asst('task-A', 'ANSWER', _msgId='a2',
               error={'kind': 'server_offline', 'message': 'x'}),
     ]
-    out, _ = _rc(msgs)
-    assert len(out) == 3, 'a twin bearing an unmatched terminal fact was dropped'
+    out, changed = _rc(msgs)
+    assert changed, 'the transient-error twin was not folded'
+    assert len(out) == 2, (
+        'a twin whose terminal fact contradicts the keeper\'s clean finish '
+        'must be collapsed (the keeper\'s verdict is the authority)')
+    kept = out[-1]
+    assert kept['_msgId'] == 'a1'
+    assert kept.get('finishReason') == 'stop'
+    assert not kept.get('error'), (
+        'an error envelope must never be folded onto a clean-finished row — '
+        'that would render a succeeded turn as failed')
 
 
 def test_endpoint_rows_sharing_a_task_id_are_never_collapsed():

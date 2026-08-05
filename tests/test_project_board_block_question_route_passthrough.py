@@ -119,11 +119,13 @@ def test_route_surfaces_question_required_refusal(monkeypatch):
 
     seen = {}
 
-    def _fake_jsonify(payload):
+    # routes.api_v1.project no longer imports jsonify (envelope migration);
+    # the refusal surfaces through api_payload(result, 400).
+    def _fake_api_payload(payload, status=200):
         seen['payload'] = payload
-        return payload
+        return payload, status
 
-    monkeypatch.setattr(proj, 'jsonify', _fake_jsonify)
+    monkeypatch.setattr(proj, 'api_payload', _fake_api_payload)
     monkeypatch.setattr(proj, 'api_ok', lambda r: pytest.fail(
         'a refused block must NOT be reported as success'))
 

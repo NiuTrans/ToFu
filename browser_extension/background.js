@@ -1,5 +1,5 @@
 /**
- * Tofu Browser Bridge — Background Service Worker (v4.5)
+ * Tofu Browser Bridge — Background Service Worker (v4.7)
  *
  * Single-endpoint architecture:
  *   Every poll is a POST to /api/browser/poll with:
@@ -18,10 +18,26 @@ const FETCH_TIMEOUT    = 12000;   // Abort fetch after 12s (server long-polls 8s
 const POLL_INTERVAL    = 100;     // ms between polls (server blocks, so no busy-loop)
 const POLL_RETRY_DELAY = 3000;    // ms to wait after an error before retrying
 const COMMAND_TIMEOUT  = 25000;   // Per-command execution timeout
+// 401 handling: a wrong/missing bridge secret will NEVER succeed, so retrying
+// at a fixed cadence just floods the server's auth log (measured ~400 401s per
+// hour on 2026-08-01 from this very loop). Back off exponentially and park at a
+// slow probe — the parked probe keeps self-healing alive for the case where the
+// secret is fixed server-side, without the log spam.
+const AUTH_RETRY_BASE_DELAY = 9000;    // first 401 retry (~POLL_RETRY_DELAY × 3)
+const AUTH_RETRY_MAX_DELAY  = 300000;  // parked probe cadence (5 min)
+const AUTH_GIVE_UP_AFTER    = 5;       // consecutive 401s → needs-re-pair state
 // Some commands can legitimately take longer than the default; override here.
 const COMMAND_TIMEOUT_OVERRIDES = {
   screenshot_tab: 55000,  // full-page CDP capture + lazy-load wait
 };
+// Auto re-pair (owner decree 2026-08-04): the extension must NEVER send the
+// user hunting for a bridge secret. A 401 kicks a silent re-pair ladder that
+// mints a fresh agents:bridge key through the user's OWN Tofu session (an
+// open Tofu tab's page context — already authenticated, the same grant the
+// panel's mint button makes). With no Tofu tab open a hidden background tab
+// is tried at most once per REPAIR_TAB_COOLDOWN; a FOREGROUND tab only ever
+// opens from the popup's re-pair button (a real user gesture).
+const REPAIR_TAB_COOLDOWN = 30 * 60 * 1000;  // hidden-tab repair, twice/hour cap
 
 // ══════════════════════════════════════════
 //  State
@@ -33,6 +49,11 @@ let BRIDGE_SECRET = '';           // Optional: matches server TOFU_BRIDGE_SECRET
 let pollActive = false;
 let connected = false;
 let lastError = '';
+let authFailures = 0;             // consecutive 401s (reset on any success)
+let needsRepair = false;          // parked: auto re-pair keeps running (see attemptAutoRepair)
+let _retryTimer = null;           // pending setTimeout(poll) handle (cancelable)
+let _repairInFlight = false;      // one repair ladder at a time
+let _lastRepairTabAt = 0;         // last repair that had to OPEN a tab
 
 // Chromium major version (parsed once at load). Reported to the server on every
 // poll so the Tofu UI can surface Chrome 142+ "Local Network Access" prompt
@@ -43,6 +64,16 @@ try {
   const _cm = (navigator.userAgent || '').match(/Chrom(?:e|ium)\/(\d+)/);
   if (_cm) CHROME_MAJOR = parseInt(_cm[1], 10);
 } catch (e) { /* navigator.userAgent unavailable in this context */ }
+
+// Our OWN version, reported on every poll. The server compares it against
+// the version it would serve in a fresh zip, which is what lets the panel
+// tell "installed and healthy" from "installed but outdated" — and, when a
+// poll dies at the bridge gate, "installed but locked out" from "never
+// installed" (the stranded-fleet fix, 2026-08-04). Side-loaded extensions
+// have no update channel, so this telemetry is the only way the panel can
+// point a stale install at its one-click cure.
+let EXT_VERSION = '';
+try { EXT_VERSION = (chrome.runtime.getManifest() || {}).version || ''; } catch (e) { /* */ }
 
 // Result-nudge: track the in-flight poll so a freshly-completed command can
 // abort the idle long-poll and be delivered immediately (see executeAndReport).
@@ -80,11 +111,38 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   }
 });
 
+// Zero-input pairing: a zip downloaded from the server carries
+// bridge_preseed.json with a freshly-minted agents:bridge key + the server
+// URL the browser used to reach it. Adopt it ONLY into empty slots — a
+// user-configured value always wins, so re-downloading never clobbers a
+// working setup. An absent file (dev-loaded from the repo) is normal: skip.
+function adoptBridgePreseed(storageData) {
+  if (storageData.bridgeSecret && storageData.serverUrl) {
+    return Promise.resolve();
+  }
+  return fetch(chrome.runtime.getURL('bridge_preseed.json'))
+    .then((r) => (r && r.ok ? r.json() : null))
+    .then((pre) => {
+      if (!pre || typeof pre !== 'object') return;
+      if (!storageData.bridgeSecret &&
+          typeof pre.bridgeSecret === 'string' && pre.bridgeSecret) {
+        console.log('[Bridge] Adopting pre-paired bridge secret from the downloaded package');
+        setBridgeSecret(pre.bridgeSecret);
+      }
+      if (!storageData.serverUrl &&
+          typeof pre.serverUrl === 'string' && pre.serverUrl) {
+        console.log('[Bridge] Adopting pre-paired server URL:', pre.serverUrl);
+        chrome.storage.local.set({ serverUrl: pre.serverUrl });
+      }
+    })
+    .catch(() => { /* no preseed in this package — manual pairing still works */ });
+}
+
 function init() {
   // Generate or restore a stable client ID for per-device command routing.
-  // Also load the optional bridge secret (only needed when the server has
-  // TOFU_BRIDGE_SECRET configured for tunnel exposure).
-  chrome.storage.local.get(['clientId', 'bridgeSecret'], (data) => {
+  // Then adopt the download-time preseed (if any) BEFORE server detection,
+  // so a freshly-installed package pairs with zero user input.
+  chrome.storage.local.get(['clientId', 'bridgeSecret', 'serverUrl'], (data) => {
     if (data.clientId) {
       CLIENT_ID = data.clientId;
     } else {
@@ -94,7 +152,7 @@ function init() {
     BRIDGE_SECRET = data.bridgeSecret || '';
     console.log('[Bridge] Client ID:', CLIENT_ID,
                 BRIDGE_SECRET ? '(bridge secret configured)' : '');
-    autoDetectServer();
+    adoptBridgePreseed(data).then(autoDetectServer);
   });
 }
 
@@ -102,6 +160,13 @@ function setBridgeSecret(secret) {
   BRIDGE_SECRET = (secret || '').trim();
   chrome.storage.local.set({ bridgeSecret: BRIDGE_SECRET });
   console.log('[Bridge] Bridge secret', BRIDGE_SECRET ? 'set' : 'cleared');
+  // The user may have just fixed a wrong secret: drop the backoff and cancel
+  // a parked 5-minute probe so the new credentials are tried NOW.
+  _resetAuthBackoff();
+  if (pollActive) {
+    if (_activePollController) { try { _activePollController.abort(); } catch (_) {} }
+    _scheduleNextPoll(0);
+  }
 }
 
 function buildHeaders() {
@@ -142,13 +207,139 @@ function setServer(url) {
   SERVER_URL = url;
   console.log('[Bridge] Server:', SERVER_URL);
   chrome.storage.local.set({ serverUrl: url });
+  _resetAuthBackoff();
   stopPolling();
   startPolling();
 }
 
 // ══════════════════════════════════════════
+//  Auto re-pair — ZERO user input (owner decree 2026-08-04)
+// ══════════════════════════════════════════
+//
+// The credential this bridge needs is an agents:bridge key, and minting one
+// requires the user's OWN authenticated Tofu session — which this browser
+// already has whenever a Tofu tab is open. So a stale key heals itself:
+// run the panel's OWN mint call in the Tofu tab's page context and adopt
+// what comes back. The user never sees a secret, never pastes anything,
+// never opens a tunnel by hand.
+
+/* Runs INSIDE the Tofu app tab (MAIN world). Uses the page's own API
+ * client, so whatever auth the app carries (cookie session / SSO /
+ * bearer) applies exactly as it does for the panel's mint button.
+ * Returns {token} or {error}. */
+function _tofuMintBridgeKey() {
+  try {
+    const api = window.Api;
+    if (!api || !api.desktop || typeof api.desktop.mintToken !== 'function') {
+      return Promise.resolve({ error: 'tofu-api-unavailable' });
+    }
+    return Promise.resolve(api.desktop.mintToken('browser-ext-autorepair'))
+      .then((r) => ((r && r.token) ? { token: r.token } : { error: 'mint-refused' }))
+      .catch((e) => ({ error: String(e) }));
+  } catch (e) {
+    return Promise.resolve({ error: String(e) });
+  }
+}
+
+async function _mintKeyViaTab(tabId) {
+  const results = await chrome.scripting.executeScript({
+    target: { tabId },
+    world: 'MAIN',
+    func: _tofuMintBridgeKey,
+  });
+  const r = results && results[0] && results[0].result;
+  if (r && r.token) {
+    console.log('[Bridge] Auto re-pair: fresh bridge key minted via a Tofu tab');
+    setBridgeSecret(r.token);   // resets the auth backoff + polls immediately
+    return true;
+  }
+  console.warn('[Bridge] Auto re-pair: mint via tab failed:', r && r.error);
+  return false;
+}
+
+/* The repair ladder. Silent by design; the only visible surface is the
+ * popup's repair row, whose button calls this with {forceTab:true}.
+ *
+ *   1. An already-open Tofu tab on OUR server → mint in its page context.
+ *      Invisible, costs nothing, safe to run on every backed-off 401.
+ *   2. No Tofu tab → open one ourselves (hidden in the background; a
+ *      FOREGROUND tab only from the popup button's user gesture), mint,
+ *      close it. Cooldown-bound so a permanently-dead server never flashes
+ *      a tab every 5 minutes. A tab that lands on an SSO login wall fails
+ *      the mint and is closed (hidden) or left open (foreground — the user
+ *      signs in there and the next ladder run completes the re-pair). */
+async function attemptAutoRepair(opts) {
+  opts = opts || {};
+  if (_repairInFlight || !SERVER_URL) return false;
+  _repairInFlight = true;
+  try {
+    let tabs = [];
+    try { tabs = await chrome.tabs.query({}); } catch (e) { /* tabs unavailable */ }
+    const mine = tabs.filter((t) => t.id != null && t.url &&
+                              t.url.startsWith(SERVER_URL));
+    for (const t of mine) {
+      try {
+        if (await _mintKeyViaTab(t.id)) return true;
+      } catch (e) {
+        console.warn('[Bridge] Auto re-pair: tab', t.id,
+                     'not usable:', e && e.message);
+      }
+    }
+    // A Tofu tab exists but refused the mint — opening another copy changes
+    // nothing; the next backed-off probe retries this same ladder.
+    if (mine.length) return false;
+    const now = Date.now();
+    if (!opts.forceTab && now - _lastRepairTabAt < REPAIR_TAB_COOLDOWN) {
+      return false;
+    }
+    let tab = null;
+    try {
+      tab = await chrome.tabs.create({ url: SERVER_URL,
+                                       active: !!opts.forceTab });
+    } catch (e) {
+      console.warn('[Bridge] Auto re-pair: could not open a Tofu tab:',
+                   e && e.message);
+      return false;
+    }
+    _lastRepairTabAt = now;
+    try {
+      await waitForTabLoad(tab.id, 20000);
+      const ok = await _mintKeyViaTab(tab.id).catch(() => false);
+      if (ok || !opts.forceTab) {
+        try { await chrome.tabs.remove(tab.id); } catch (_) {}
+      }
+      // Foreground + failed: leave the tab open — the user completes the
+      // sign-in there, and the next ladder run finishes the re-pair.
+      return ok;
+    } catch (e) {
+      if (!opts.forceTab) {
+        try { await chrome.tabs.remove(tab.id); } catch (_) {}
+      }
+      return false;
+    }
+  } finally {
+    _repairInFlight = false;
+  }
+}
+// ══════════════════════════════════════════
 //  Polling — Single Endpoint
 // ══════════════════════════════════════════
+
+// Single pending-timer invariant: every path that schedules the next poll
+// goes through here, so two timers can never coexist (a pre-existing double-
+// loop hazard) and a user action (new secret / new server) can cancel a parked
+// 5-minute probe and reconnect instantly.
+function _scheduleNextPoll(delay) {
+  if (_retryTimer) { clearTimeout(_retryTimer); _retryTimer = null; }
+  if (pollActive) {
+    _retryTimer = setTimeout(() => { _retryTimer = null; poll(); }, delay);
+  }
+}
+
+function _resetAuthBackoff() {
+  authFailures = 0;
+  needsRepair = false;
+}
 
 function startPolling() {
   if (pollActive) return;
@@ -161,6 +352,7 @@ function startPolling() {
 function stopPolling() {
   if (!pollActive) return;
   pollActive = false;
+  if (_retryTimer) { clearTimeout(_retryTimer); _retryTimer = null; }
   console.log('[Bridge] Polling stopped');
 }
 
@@ -183,21 +375,49 @@ async function poll() {
       method: 'POST',
       signal: controller.signal,
       headers: buildHeaders(),
-      body: JSON.stringify({ results: resultsToSend, clientId: CLIENT_ID, chromeMajor: CHROME_MAJOR }),
+      // Carry the browser's OWN cookies for the server host: behind an
+      // SSO-fronted gateway (cloud-IDE preview proxy) the bridge secret
+      // alone can never pass the edge — the user's live SSO session can.
+      // The <all_urls> host permission makes Chrome attach them on this
+      // cross-origin extension fetch. This is what lets the bridge work
+      // through such proxies with zero configuration.
+      credentials: 'include',
+      body: JSON.stringify({ results: resultsToSend, clientId: CLIENT_ID, chromeMajor: CHROME_MAJOR, extVersion: EXT_VERSION }),
     });
     clearTimeout(timeoutId);
     _activePollController = null;
 
     if (!resp.ok) {
       if (resp.status === 401) {
-        // Bridge auth misconfigured — no point hammering the server.
-        // Hold the results so they're not lost when the user fixes the secret.
+        // Hold the results so they survive the re-pair.
+        // Two DIFFERENT 401s land here and they are not fixed the same way:
+        //   * Tofu's own bridge gate ({error:'bridge_auth_required'}) — the
+        //     stored key is stale/revoked ⇒ silently mint a fresh one
+        //     through the user's Tofu tab (attemptAutoRepair);
+        //   * an SSO/proxy edge intercepting BEFORE Tofu — the poll now
+        //     carries the browser's cookies, so a live SSO session passes on
+        //     its own; a dead one recovers the next time a Tofu tab exists.
+        // Neither is EVER fixed by the user pasting a secret by hand.
         _resultQueue.unshift(...resultsToSend);
+        authFailures += 1;
         connected = false;
-        lastError = 'Bridge auth failed (401) — set the Bridge Secret in the popup';
-        updateBadge('error');
+        needsRepair = authFailures >= AUTH_GIVE_UP_AFTER;
+        const errBody = await resp.json().catch(() => null);
+        const isBridgeAuth = !!(errBody && errBody.error === 'bridge_auth_required');
+        lastError = isBridgeAuth
+          ? (needsRepair
+              ? `Bridge auth failed (401) ×${authFailures} — re-pairing automatically; an open Tofu tab finishes it instantly`
+              : 'Bridge auth failed (401) — re-pairing automatically…')
+          : (needsRepair
+              ? `Bridge blocked by a proxy/SSO edge (401 ×${authFailures}) — it clears by itself once your Tofu panel is open in a tab`
+              : 'Bridge blocked by a proxy/SSO edge (401) — retrying with your browser session…');
+        updateBadge(needsRepair ? 'repair' : 'error');
         console.warn(`[Bridge] ${lastError}`);
-        if (pollActive) setTimeout(poll, POLL_RETRY_DELAY * 3);
+        attemptAutoRepair().catch(() => {});
+        const delay = Math.min(
+          AUTH_RETRY_BASE_DELAY * (2 ** (authFailures - 1)),
+          AUTH_RETRY_MAX_DELAY);
+        _scheduleNextPoll(delay);
         return;
       }
       if (resp.status >= 500) {
@@ -205,7 +425,7 @@ async function poll() {
         _resultQueue.unshift(...resultsToSend);
         console.warn(`[Bridge] Server/proxy returned ${resp.status}, retrying...`);
         connected = true;
-        if (pollActive) setTimeout(poll, POLL_RETRY_DELAY);
+        _scheduleNextPoll(POLL_RETRY_DELAY);
         return;
       }
       throw new Error(`HTTP ${resp.status}`);
@@ -214,6 +434,7 @@ async function poll() {
     const data = await resp.json();
     connected = true;
     lastError = '';
+    _resetAuthBackoff();
     updateBadge('on');
 
     // Fire-and-forget: do NOT await command execution
@@ -227,7 +448,7 @@ async function poll() {
       }
     }
 
-    if (pollActive) setTimeout(poll, POLL_INTERVAL);
+    _scheduleNextPoll(POLL_INTERVAL);
 
   } catch (err) {
     if (timeoutId) clearTimeout(timeoutId);
@@ -240,12 +461,12 @@ async function poll() {
         // Restore the in-flight poll's drained results so none are lost.
         _flushPending = false;
         if (resultsToSend.length) _resultQueue.unshift(...resultsToSend);
-        if (pollActive) setTimeout(poll, 0);
+        _scheduleNextPoll(0);
         return;
       }
       // Fetch timeout — normal (server long-poll returned nothing), just reconnect
       connected = true;
-      if (pollActive) setTimeout(poll, POLL_INTERVAL);
+      _scheduleNextPoll(POLL_INTERVAL);
       return;
     }
 
@@ -253,7 +474,7 @@ async function poll() {
     lastError = err.message || 'Connection failed';
     updateBadge('error');
     console.warn(`[Bridge] Poll error: ${lastError}`);
-    if (pollActive) setTimeout(poll, POLL_RETRY_DELAY);
+    _scheduleNextPoll(POLL_RETRY_DELAY);
   }
 }
 
@@ -1254,6 +1475,190 @@ function _getAppState(深度) {
 }
 
 // ══════════════════════════════════════════
+//  Trusted Input (CDP)
+// ══════════════════════════════════════════
+// Synthetic JS events (el.dispatchEvent) carry isTrusted=false — some sites
+// ignore them, and CSS :hover never fires at all. chrome.debugger's
+// Input.dispatch* events are REAL input as far as the page is concerned.
+// Same attach/detach pattern as the screenshot path: the "debugging" banner
+// flashes only for the duration of the command, and every failure falls
+// back to the synthetic path (e.g. DevTools already attached to the tab).
+
+async function _cdpRun(tabId, fn) {
+  const target = { tabId };
+  let attached = false;
+  try {
+    await chrome.debugger.attach(target, '1.3');
+    attached = true;
+    return await fn(target);
+  } finally {
+    if (attached) {
+      try { await chrome.debugger.detach(target); } catch (_) {}
+    }
+  }
+}
+
+// MAIN-world locator: scroll + element-center viewport coords + label bits.
+// Shared by the CDP click/hover paths. An {error} result means the element
+// is absent — the synthetic path would fail identically, so callers return
+// it directly instead of falling back.
+function _locateElement(selector, scrollTo) {
+  const el = document.querySelector(selector);
+  if (!el) return { error: `Element not found: ${selector}` };
+  if (scrollTo) {
+    el.scrollIntoView({ behavior: 'instant', block: 'center' });
+  }
+  const rect = el.getBoundingClientRect();
+  return {
+    x: rect.left + rect.width / 2,
+    y: rect.top + rect.height / 2,
+    tag: el.tagName.toLowerCase(),
+    text: (el.innerText || '').trim().substring(0, 100),
+  };
+}
+
+async function _cdpLocate(tabId, selector, scrollTo) {
+  const results = await chrome.scripting.executeScript({
+    target: { tabId },
+    world: 'MAIN',
+    func: _locateElement,
+    args: [selector, scrollTo],
+  });
+  const loc = results && results[0] && results[0].result;
+  if (!loc) throw new Error('No result from locator script');
+  return loc;
+}
+
+async function _cdpClick(tabId, selector, rightClick, scrollTo) {
+  const loc = await _cdpLocate(tabId, selector, scrollTo);
+  if (loc.error) return { clicked: false, error: loc.error };
+  const button = rightClick ? 'right' : 'left';
+  const buttons = rightClick ? 2 : 1;
+  await _cdpRun(tabId, async (target) => {
+    await chrome.debugger.sendCommand(target, 'Input.dispatchMouseEvent',
+      { type: 'mouseMoved', x: loc.x, y: loc.y });
+    await chrome.debugger.sendCommand(target, 'Input.dispatchMouseEvent',
+      { type: 'mousePressed', x: loc.x, y: loc.y, button, buttons, clickCount: 1 });
+    await new Promise(r => setTimeout(r, 40));
+    await chrome.debugger.sendCommand(target, 'Input.dispatchMouseEvent',
+      { type: 'mouseReleased', x: loc.x, y: loc.y, button, buttons, clickCount: 1 });
+  });
+  return {
+    clicked: true, rightClick: !!rightClick, trusted: true,
+    tag: loc.tag, text: loc.text,
+    position: { x: Math.round(loc.x), y: Math.round(loc.y) },
+  };
+}
+
+async function _cdpHover(tabId, selector) {
+  const loc = await _cdpLocate(tabId, selector, true);
+  if (loc.error) return { hovered: false, error: loc.error };
+  // A trusted mouseMoved sets CSS :hover — the synthetic event sequence
+  // (mouseenter/mouseover/mousemove) provably cannot.
+  await _cdpRun(tabId, (target) =>
+    chrome.debugger.sendCommand(target, 'Input.dispatchMouseEvent',
+      { type: 'mouseMoved', x: loc.x, y: loc.y }));
+  return {
+    hovered: true, trusted: true,
+    tag: loc.tag, text: loc.text,
+    position: { x: Math.round(loc.x), y: Math.round(loc.y) },
+  };
+}
+
+// CDP modifier bitmask: Alt=1, Ctrl=2, Meta=4, Shift=8.
+const _CDP_MODIFIER_BITS = { Alt: 1, Control: 2, Meta: 4, Shift: 8 };
+
+// Named (non-printable) keys → [code, windowsVirtualKeyCode, text?].
+const _CDP_NAMED_KEYS = {
+  Enter: ['Enter', 13, '\r'], Escape: ['Escape', 27], Tab: ['Tab', 9],
+  Backspace: ['Backspace', 8], Delete: ['Delete', 46],
+  ArrowUp: ['ArrowUp', 38], ArrowDown: ['ArrowDown', 40],
+  ArrowLeft: ['ArrowLeft', 37], ArrowRight: ['ArrowRight', 39],
+  Home: ['Home', 36], End: ['End', 35],
+  PageUp: ['PageUp', 33], PageDown: ['PageDown', 34],
+  F1: ['F1', 112], F2: ['F2', 113], F3: ['F3', 114], F4: ['F4', 115],
+  F5: ['F5', 116], F6: ['F6', 117], F7: ['F7', 118], F8: ['F8', 119],
+  F9: ['F9', 120], F10: ['F10', 121], F11: ['F11', 122], F12: ['F12', 123],
+  ' ': ['Space', 32, ' '],
+};
+
+// Parse "Ctrl+Shift+P" / "Enter" / "a" into a CDP key descriptor + bitmask.
+function _cdpKeyDescriptor(keys) {
+  const parts = String(keys).split('+');
+  let mainKey = parts.pop();
+  const aliases = { Return: 'Enter', Esc: 'Escape', Space: ' ' };
+  mainKey = aliases[mainKey] || mainKey;
+
+  let modifiers = 0;
+  for (const part of parts) {
+    if (/^(ctrl|control)$/i.test(part)) modifiers |= _CDP_MODIFIER_BITS.Control;
+    else if (/^alt$/i.test(part)) modifiers |= _CDP_MODIFIER_BITS.Alt;
+    else if (/^shift$/i.test(part)) modifiers |= _CDP_MODIFIER_BITS.Shift;
+    else if (/^(meta|cmd|command)$/i.test(part)) modifiers |= _CDP_MODIFIER_BITS.Meta;
+  }
+
+  let descriptor;
+  if (mainKey.length === 1) {
+    const upper = mainKey.toUpperCase();
+    const isLetter = upper >= 'A' && upper <= 'Z';
+    const isDigit = mainKey >= '0' && mainKey <= '9';
+    descriptor = {
+      key: mainKey,
+      code: isLetter ? 'Key' + upper : (isDigit ? 'Digit' + mainKey : ''),
+      vk: (isLetter || isDigit) ? upper.charCodeAt(0) : 0,
+      text: (modifiers & _CDP_MODIFIER_BITS.Shift) && isLetter ? upper : mainKey,
+    };
+  } else if (_CDP_NAMED_KEYS[mainKey]) {
+    const [code, vk, text] = _CDP_NAMED_KEYS[mainKey];
+    descriptor = { key: mainKey, code, vk, text };
+  } else {
+    descriptor = { key: mainKey, code: '', vk: 0, text: undefined };
+  }
+  // A text payload is only a character when no command modifier rides along —
+  // Ctrl+S must NOT type "s" into the page.
+  if (modifiers & (_CDP_MODIFIER_BITS.Alt | _CDP_MODIFIER_BITS.Control | _CDP_MODIFIER_BITS.Meta)) {
+    descriptor.text = undefined;
+  }
+  return { descriptor, modifiers };
+}
+
+async function _cdpKeyboard(tabId, keys, selector) {
+  if (selector) {
+    // Trusted key events go to the focused element — focus the target first.
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      world: 'MAIN',
+      func: (sel) => {
+        const el = document.querySelector(sel);
+        if (!el) return { error: `Element not found: ${sel}` };
+        el.focus();
+        return { ok: true, tag: el.tagName.toLowerCase() };
+      },
+      args: [selector],
+    });
+    const r = results && results[0] && results[0].result;
+    if (!r) throw new Error('No result from focus script');
+    if (r.error) return { success: false, error: r.error };
+  }
+  const { descriptor, modifiers } = _cdpKeyDescriptor(keys);
+  await _cdpRun(tabId, async (target) => {
+    const base = {
+      key: descriptor.key,
+      code: descriptor.code,
+      windowsVirtualKeyCode: descriptor.vk,
+      modifiers,
+    };
+    await chrome.debugger.sendCommand(target, 'Input.dispatchKeyEvent',
+      descriptor.text !== undefined
+        ? { type: 'keyDown', text: descriptor.text, ...base }
+        : { type: 'rawKeyDown', ...base });
+    await chrome.debugger.sendCommand(target, 'Input.dispatchKeyEvent',
+      { type: 'keyUp', ...base });
+  });
+  return { success: true, keys, trusted: true, target: selector || 'activeElement' };
+}
+
+// ══════════════════════════════════════════
 //  Click Element
 // ══════════════════════════════════════════
 
@@ -1273,6 +1678,14 @@ async function cmdClickElement(params) {
     throw new Error(`Cannot interact with protected page: ${tab.url}`);
   }
 
+  try {
+    return await _cdpClick(tabId, params.selector,
+                           params.rightClick || false, params.scrollTo !== false);
+  } catch (err) {
+    console.warn('[Bridge] CDP click failed, falling back to synthetic events:',
+                 err && err.message);
+  }
+
   const results = await chrome.scripting.executeScript({
     target: { tabId },
     world: 'MAIN',
@@ -1281,7 +1694,12 @@ async function cmdClickElement(params) {
   });
 
   if (results && results[0] && results[0].result) {
-    return results[0].result;
+    const r = results[0].result;
+    if (r.clicked) {
+      r.trusted = false;
+      r.fallbackReason = 'CDP attach/dispatch failed — synthetic events';
+    }
+    return r;
   }
   return { clicked: false, error: 'No result from script' };
 }
@@ -1354,6 +1772,13 @@ async function cmdHoverElement(params) {
     throw new Error(`Cannot interact with protected page: ${tab.url}`);
   }
 
+  try {
+    return await _cdpHover(tabId, params.selector);
+  } catch (err) {
+    console.warn('[Bridge] CDP hover failed, falling back to synthetic events:',
+                 err && err.message);
+  }
+
   const results = await chrome.scripting.executeScript({
     target: { tabId },
     world: 'MAIN',
@@ -1362,7 +1787,12 @@ async function cmdHoverElement(params) {
   });
 
   if (results && results[0] && results[0].result) {
-    return results[0].result;
+    const r = results[0].result;
+    if (r.hovered) {
+      r.trusted = false;
+      r.fallbackReason = 'CDP attach/dispatch failed — synthetic events (CSS :hover NOT set)';
+    }
+    return r;
   }
   return { hovered: false, error: 'No result from script' };
 }
@@ -1413,6 +1843,13 @@ async function cmdKeyboardInput(params) {
     throw new Error(`Cannot interact with protected page: ${tab.url}`);
   }
 
+  try {
+    return await _cdpKeyboard(tabId, params.keys, params.selector || null);
+  } catch (err) {
+    console.warn('[Bridge] CDP keyboard failed, falling back to synthetic events:',
+                 err && err.message);
+  }
+
   const results = await chrome.scripting.executeScript({
     target: { tabId },
     world: 'MAIN',
@@ -1421,7 +1858,12 @@ async function cmdKeyboardInput(params) {
   });
 
   if (results && results[0] && results[0].result) {
-    return results[0].result;
+    const r = results[0].result;
+    if (r.success) {
+      r.trusted = false;
+      r.fallbackReason = 'CDP attach/dispatch failed — synthetic events';
+    }
+    return r;
   }
   return { success: false, error: 'No result from script' };
 }
@@ -1998,8 +2440,8 @@ function isBinaryAssetUrl(url) {
 }
 
 function updateBadge(state) {
-  const colors = { on: '#4CAF50', error: '#f44336', off: '#9E9E9E' };
-  const texts = { on: 'ON', error: 'ERR', off: 'OFF' };
+  const colors = { on: '#4CAF50', error: '#f44336', off: '#9E9E9E', repair: '#FF9800' };
+  const texts = { on: 'ON', error: 'ERR', off: 'OFF', repair: 'KEY' };
   try {
     chrome.action.setBadgeBackgroundColor({ color: colors[state] || '#9E9E9E' });
     chrome.action.setBadgeText({ text: texts[state] || '' });
@@ -2019,8 +2461,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       hasBridgeSecret: !!BRIDGE_SECRET,
       pollActive,
       lastError,
+      authFailures,
+      needsRepair,
       inflight: _inflight.size,
       resultQueue: _resultQueue.length,
+      repairBusy: _repairInFlight,
       commandsExecuted,
       commandsFailed,
     });
@@ -2036,6 +2481,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     // Trigger a poll attempt soon so the user sees the new auth state.
     sendResponse({ ok: true, hasBridgeSecret: !!BRIDGE_SECRET });
     return true;
+  }
+  if (msg.type === 'repairNow') {
+    // The popup's one-click repair — a real user gesture, so the ladder may
+    // open a FOREGROUND Tofu tab (a dead SSO session is re-signed-in there;
+    // the mint then completes on the next run).
+    attemptAutoRepair({ forceTab: true })
+      .then((ok) => sendResponse({ ok }));
+    return true;   // async sendResponse
   }
   if (msg.type === 'toggle') {
     if (pollActive) { stopPolling(); updateBadge('off'); }

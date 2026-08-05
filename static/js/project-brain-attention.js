@@ -25,8 +25,6 @@
    Resolving controls are the SAME calls the owning tabs make
    (Api.project.boardAnswer / commitCharter / dismissProposal), so there is one
    backend contract per action, not a second implementation that can drift.
-   Items that cannot be resolved in two clicks (a file conflict) render a
-   deep-link INTO the owning tab instead of a copy of it.
 
    Bundled by lib/js_bundler.py (_DEFERRED_FILES, after project-brain.js —
    reads window.ProjectBrain._state at runtime). Strings live under
@@ -134,12 +132,25 @@
       '<span>' + _esc(label) + '</span></span>';
   }
 
-  /** A "go to the tab that owns this" link (used when the item is not
-   *  resolvable inline — we deep-link rather than duplicate the surface). */
-  function _openTabBtn(tab, labelKey, fallback) {
-    return '<button type="button" class="pb-attn-goto" data-goto-tab="' + _esc(tab) + '">' +
-      ((typeof Icon === 'function') ? Icon('arrowRight', 12) : '') +
-      '<span>' + _esc(_t(labelKey, fallback)) + '</span></button>';
+  /**
+   * The provenance chip — "which conversation raised this?". ONE builder
+   * shared by every decision card (halted epic, charter proposal): two
+   * hand-copies would drift, and the chip is meaningless if only SOME
+   * decisions carry it. The backend resolves the title (askedByTitle); the
+   * chip deep-links INTO that chat via the 'openConv' action.
+   */
+  function _fromChip(item) {
+    var fromId = item.askedByConvId || item.convId || '';
+    if (!fromId) return '';
+    var fromName = item.askedByTitle || fromId;
+    return '<button type="button" class="pb-conv-chip pb-attn-from pb-attn-act"' +
+      ' data-act="openConv" data-conv-id="' + _esc(fromId) + '" title="' +
+      _esc(_t('projectBrain.attnOpenConv',
+              'Open the conversation that raised this')) + '">' +
+      ((typeof Icon === 'function') ? Icon('messageSquare', 11) : '') +
+      '<span class="pb-attn-from-name">' +
+      _esc(_t('projectBrain.attnFrom', 'from')) + ' ' + _esc(fromName) +
+      '</span></button>';
   }
 
   /**
@@ -150,20 +161,43 @@
    */
   function _questionCard(item) {
     var opts = Array.isArray(item.options) ? item.options : [];
+    // An option's description is the consequence the operator is choosing
+    // BETWEEN — it must be READABLE ON THE CARD, not hidden behind a hover
+    // tooltip (the 2026-08 owner complaint: the card asked for a decision
+    // without showing what each choice meant).
     var chips = opts.map(function (o, i) {
       var label = (o && o.label) ? String(o.label) : '';
       if (!label) return '';
       var desc = (o && o.description) ? String(o.description) : '';
-      return '<button type="button" class="pb-chip pb-attn-act" data-act="answerOpt"' +
-        ' data-idx="' + i + '"' + (desc ? ' title="' + _esc(desc) + '"' : '') +
-        ' data-pb-src="' + _esc(label) + '">' + _esc(label) + '</button>';
+      return '<button type="button" class="pb-chip pb-attn-act pb-attn-opt" data-act="answerOpt"' +
+        ' data-idx="' + i + '" data-pb-src="' + _esc(label) + '">' +
+        '<span class="pb-attn-opt-label">' + _esc(label) + '</span>' +
+        (desc ? '<span class="pb-attn-opt-desc">' + _esc(desc) + '</span>' : '') +
+        '</button>';
     }).join('');
     var meta = [];
     if (item.blockCount) {
       meta.push(_t('projectBrain.blockedCount', 'blocked %d×')
         .replace('%d', item.blockCount));
     }
-    if (item.reason) meta.push(item.reason);
+    // When it stopped — the same relative-time grammar the feed uses.
+    var rel = '';
+    try {
+      if (window.ProjectBrain &&
+          typeof window.ProjectBrain._relTime === 'function') {
+        rel = window.ProjectBrain._relTime(item.ts);
+      }
+    } catch (_e) { rel = ''; }
+    if (rel) meta.push(rel);
+    // The reason is the card's BACKGROUND section ("why did this stop?") —
+    // promoted out of the one-line meta tail into its own labeled,
+    // clamp-rendered block so the operator gets the context the decision
+    // needs instead of a dense escaped footnote.
+    var reasonHtml = item.reason
+      ? '<div class="pb-attn-label">' +
+        _esc(_t('projectBrain.attnWhyStopped', 'Why it stopped')) + '</div>' +
+        '<div class="pb-attn-reason">' + _rich(item.reason) + '</div>'
+      : '';
     // "Create conversation" — open a fresh chat about this epic (delegates to
     // project-brain.js's launcher). Rendered ONLY when that shared launcher
     // is actually loaded: a button whose handler is absent is a dead button.
@@ -179,8 +213,12 @@
     return _card(item,
       '<div class="pb-attn-head">' + _sevPill(item.severity) +
         '<span class="pb-attn-kind">' +
-        _esc(_t('projectBrain.attnKindEpic', 'Epic halted')) + '</span></div>' +
+        _esc(_t('projectBrain.attnKindEpic', 'Epic halted')) + '</span>' +
+        _fromChip(item) + '</div>' +
       '<div class="pb-attn-title">' + _rich(item.title) + '</div>' +
+      reasonHtml +
+      '<div class="pb-attn-label">' +
+        _esc(_t('projectBrain.attnYourCall', 'Your call')) + '</div>' +
       '<div class="pb-attn-q" data-pb-src="' + _esc(item.question) + '">' +
         _esc(item.question) + '</div>' +
       (chips ? '<div class="pb-chip-row">' + chips + '</div>' : '') +
@@ -211,7 +249,8 @@
     return _card(item,
       '<div class="pb-attn-head">' + _sevPill(item.severity) +
         '<span class="pb-attn-kind">' +
-        _esc(_t('projectBrain.attnKindProposal', 'Proposed decision')) + '</span></div>' +
+        _esc(_t('projectBrain.attnKindProposal', 'Proposed decision')) + '</span>' +
+        _fromChip(item) + '</div>' +
       '<div class="pb-attn-body">' + _rich(item.text) + '</div>' +
       '<div class="pb-proposal-summary-row">' +
         '<input type="text" class="pb-proposal-summary" maxlength="240" placeholder="' +
@@ -227,24 +266,9 @@
       '</div>');
   }
 
-  /** A live file-overlap. Not resolvable by a button — the operator decides
-   *  whether to intervene — so this deep-links into Team rather than cloning
-   *  the peer controls. */
-  function _conflictCard(item) {
-    return _card(item,
-      '<div class="pb-attn-head">' + _sevPill(item.severity) +
-        '<span class="pb-attn-kind">' +
-        _esc(_t('projectBrain.attnKindConflict', 'File conflict')) + '</span></div>' +
-      '<div class="pb-attn-body">' + _esc(item.text) + '</div>' +
-      '<div class="pb-attn-actions">' +
-        _openTabBtn('peers', 'projectBrain.attnOpenTeam', 'Open Team') +
-      '</div>');
-  }
-
   var _RENDERERS = {
     board_question: _questionCard,
     charter_proposal: _proposalCard,
-    conflict: _conflictCard,
   };
 
   /**
@@ -386,17 +410,6 @@
   }
 
   function _wireActions(el) {
-    // Deep-links into an owning tab.
-    var gotos = el.querySelectorAll('.pb-attn-goto');
-    for (var g = 0; g < gotos.length; g++) {
-      gotos[g].addEventListener('click', function (ev) {
-        var tab = ev.currentTarget.getAttribute('data-goto-tab');
-        if (tab && window.ProjectBrain &&
-            typeof window.ProjectBrain._selectTab === 'function') {
-          window.ProjectBrain._selectTab(tab);
-        }
-      });
-    }
     // Enter in an answer input submits (mirrors the Board lane).
     var inputs = el.querySelectorAll('.pb-attn-answer');
     for (var n = 0; n < inputs.length; n++) {
@@ -454,6 +467,13 @@
       var input = card.querySelector('.pb-attn-answer');
       var text = input ? (input.value || '').trim() : '';
       if (text) _submitAnswer(api, path, id, convId, text, btn);
+      return;
+    }
+    if (act === 'openConv') {
+      // The provenance chip — jump into the conversation that raised the
+      // question so the operator can read the full backstory there.
+      var cid = btn.getAttribute('data-conv-id') || '';
+      if (cid && typeof loadConversation === 'function') loadConversation(cid);
       return;
     }
     if (act === 'createConv') {

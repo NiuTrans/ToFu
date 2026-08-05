@@ -1,3 +1,5 @@
+# Incident anchor: born in commit 374a13e3 — feat(toolbar): three-tier capability dial (Air/Pro/Studio) replacing ...
+# (funeral audit pt_c565a36b3e8f42e6, docs/RATCHET_AUDIT.md)
 """tests/test_chat_mode_parity.py — FE↔BE chat-mode table parity.
 
 The three-tier dial has TWO derivation tables that MUST stay byte-equal:

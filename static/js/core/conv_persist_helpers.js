@@ -2,8 +2,8 @@
    core/conv_persist_helpers.js — pure persist / freshness / rebase helpers.
 
    Extracted from core/conversations.js (pt_3879f00e sub-part 2, slice 3):
-   the 6-function pure-helper cluster covering PUT-payload cleansing,
-   the two segments/translation freshness signals, and the 409 CAS
+   the pure-helper cluster covering PUT-payload cleansing, the
+   segments/translation/image freshness signals, and the 409 CAS
    rebase. Zero runtime state, zero IIFE-load side effects — every read
    of an external symbol happens at CALL time via bundle-level `window`
    scope.
@@ -13,6 +13,7 @@
      _trimMsgForPersist(m)                          — cleanse segments/toolRounds/apiRounds/live-usage for PUT
      _serverHasSegmentsLocalLacks(server, local)    — segments-freshness signal
      _serverHasTranslationLocalLacks(server, local) — translation-freshness signal
+     _serverHasImagesLocalLacks(server, local)      — image-strip freshness signal
      _isErrorOnlyAssistant(m)                       — error-only-tail probe (rebase drop)
      _rebaseUnackedTail(serverMsgs, localMsgs)      — 409 CAS append-missing-tail rebase
 
@@ -185,6 +186,59 @@ function _serverHasTranslationLocalLacks(serverMsgs, localMsgs) {
   return false;
 }
 if (typeof window !== 'undefined') window._serverHasTranslationLocalLacks = _serverHasTranslationLocalLacks;
+
+/* ★ Image-strip recovery freshness signal (symmetric to
+ * _serverHasSegmentsLocalLacks / _serverHasTranslationLocalLacks).
+ *
+ * The IndexedDB cache write (_stripToolRound in idb-cache.js) deliberately
+ * drops toolRounds[].results[].imageDataUris[].uri — the multi-MB inline
+ * base64 that IS the render source for read_files / inspect_image /
+ * browser_screenshot / browser_preview_page inline thumbnails — keeping only
+ * format/filename so a fat conversation can't OOM the tab. The PUT/DB copy
+ * KEEPS the uris (_trimMsgForPersist above, and the server-side
+ * manager/_persist.py twin, both exempt them). But the Phase-2 cacheIsStale
+ * disjuncts (count / updatedAt / segments / translation) see NO difference
+ * between that stripped cache and the server copy, so a cache-fresh reload
+ * kept the stripped copy and every image round silently degraded to its
+ * badge-only line — the inline thumbnail (and click-to-fullscreen) vanished
+ * until some unrelated mutation happened to bump the conversation. (The
+ * idb-cache comment's "a cache read that needs them re-fetches from server"
+ * described exactly this missing signal.)
+ *
+ * This predicate makes "server carries an image uri the aligned local copy
+ * lacks" an explicit staleness signal: the cache is judged stale, the server
+ * copy is adopted, and image thumbnails survive reloads. Positional compare
+ * within equal-length arrays (the length-mismatch case is already handled by
+ * the caller's count check). Identity guard: only compare rounds of the SAME
+ * turn (content equality) so a locally regenerated/edited turn aligned
+ * positionally is never misread as an images gap. Cheap early-out on the
+ * first gap. */
+function _serverHasImagesLocalLacks(serverMsgs, localMsgs) {
+  if (!Array.isArray(serverMsgs) || !Array.isArray(localMsgs)) return false;
+  const n = Math.min(serverMsgs.length, localMsgs.length);
+  for (let i = 0; i < n; i++) {
+    const sm = serverMsgs[i], lm = localMsgs[i];
+    if (!sm || !lm || sm.role !== 'assistant') continue;
+    // Identity guard: only compare image rounds of the SAME turn.
+    if ((sm.content || '') !== (lm.content || '')) continue;
+    const sRounds = sm.toolRounds, lRounds = lm.toolRounds;
+    if (!Array.isArray(sRounds) || !Array.isArray(lRounds)) continue;
+    const k = Math.min(sRounds.length, lRounds.length);
+    for (let j = 0; j < k; j++) {
+      const sRes = sRounds[j] && sRounds[j].results;
+      const lRes = lRounds[j] && lRounds[j].results;
+      if (!Array.isArray(sRes) || !Array.isArray(lRes)) continue;
+      const sHas = sRes.some((r) => r && Array.isArray(r.imageDataUris)
+        && r.imageDataUris.some((d) => d && d.uri));
+      if (!sHas) continue;
+      const lHas = lRes.some((r) => r && Array.isArray(r.imageDataUris)
+        && r.imageDataUris.some((d) => d && d.uri));
+      if (!lHas) return true;
+    }
+  }
+  return false;
+}
+if (typeof window !== 'undefined') window._serverHasImagesLocalLacks = _serverHasImagesLocalLacks;
 
 /* ═══════════════════════════════════════════════════════════════════
    rev-based CAS rebase (append-missing-tail, keyed on _msgId)
@@ -359,6 +413,7 @@ if (typeof window !== 'undefined') {
   window._lightMessageForSync = _lightMessageForSync;
   window._isErrorOnlyAssistant = _isErrorOnlyAssistant;
   window._rebaseUnackedTail = _rebaseUnackedTail;
-  // _serverHasSegmentsLocalLacks and _serverHasTranslationLocalLacks are
-  // already exposed inline within their function definitions above.
+  // _serverHasSegmentsLocalLacks / _serverHasTranslationLocalLacks /
+  // _serverHasImagesLocalLacks are already exposed inline within their
+  // function definitions above.
 }

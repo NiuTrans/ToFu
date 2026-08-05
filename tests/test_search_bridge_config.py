@@ -47,7 +47,8 @@ def _capture_configure_kwargs(monkeypatch, env=None):
 
     for var in ('PREFETCH_GATE_ENABLED', 'PREFETCH_GATE_MIN_QUERY_TERMS',
                 'PREFETCH_GATE_MIN_FETCH', 'TOFU_SEARCH_PROXY_DUAL_ATTEMPT',
-                'FETCH_FILTER_MIN_CHARS', 'FETCH_FILTER_TIMEOUT'):
+                'FETCH_FILTER_MIN_CHARS', 'FETCH_FILTER_TIMEOUT',
+                'FETCH_FILTER_MODE'):
         monkeypatch.delenv(var, raising=False)
     for k, v in (env or {}).items():
         monkeypatch.setenv(k, v)
@@ -78,16 +79,24 @@ class TestSyncSearchConfigKnobs:
         # sanity: the pre-existing knobs still flow
         assert cap['fetch_top_n'] == 6
         assert cap['filter_enabled'] is True
+        # 0.6.0 content-filter rework: gate mode is the bridge default, and
+        # the timeout default follows the library's 300 → 45 tightening.
+        assert cap['filter_mode'] == 'gate'
+        assert cap['filter_timeout'] == 45
 
     def test_env_overrides_are_honoured(self, monkeypatch):
         cap = _capture_configure_kwargs(monkeypatch, env={
             'PREFETCH_GATE_MIN_QUERY_TERMS': '4',
             'PREFETCH_GATE_MIN_FETCH': '1',
             'TOFU_SEARCH_PROXY_DUAL_ATTEMPT': 'no',
+            'FETCH_FILTER_MODE': 'rewrite',
+            'FETCH_FILTER_TIMEOUT': '120',
         })
         assert cap['prefetch_gate_min_query_terms'] == 4
         assert cap['prefetch_gate_min_fetch'] == 1
         assert cap['proxy_dual_attempt'] is False
+        assert cap['filter_mode'] == 'rewrite'
+        assert cap['filter_timeout'] == 120
 
     def test_prefetch_gate_disabled_via_lib_flag(self, monkeypatch):
         # PREFETCH_GATE_ENABLED env absent → falls back to _lib attribute.

@@ -8,7 +8,7 @@ import socket
 import time
 from urllib.parse import urlparse
 
-from flask import Blueprint, jsonify, request, send_file
+from flask import Blueprint, request, send_file
 
 # ── Magic-bytes image-type detector (imghdr replacement, Py 3.13+ safe) ──
 # Returns one of {'png','jpeg','gif','webp','bmp'} or None.
@@ -29,7 +29,10 @@ def _detect_image_format(head: bytes) -> str | None:
 
 from lib.env_compat import getenv_compat
 from lib.log import get_logger
-from lib.api_response import api_bad_request, api_error, api_internal_error, api_not_found
+from lib.api_response import (
+    api_bad_request, api_error, api_internal_error, api_not_found, api_ok,
+    api_payload,
+)
 from lib.request_parser import parse_body
 
 logger = get_logger(__name__)
@@ -412,7 +415,7 @@ def upload_image():
         else:
             logger.info('[upload_image] Saved %s (%d bytes) from base64 (detected=%s, shrink_skipped=%s)',
                         filename, len(img_bytes), detected, shrink_info.get('reason', '?'))
-        return jsonify({'ok': True, 'url': f'/api/images/{filename}', 'filename': filename})
+        return api_ok({'url': f'/api/images/{filename}', 'filename': filename})
 
     # ── Multipart form upload (traditional file upload) ──
     if 'file' not in request.files:
@@ -469,7 +472,7 @@ def upload_image():
     else:
         logger.info('[upload_image] Saved %s (%d bytes) detected=%s shrink_skipped=%s',
                     filename, len(new_bytes), detected, shrink_info.get('reason', '?'))
-    return jsonify({'ok': True, 'url': f'/api/images/{filename}', 'filename': filename})
+    return api_ok({'url': f'/api/images/{filename}', 'filename': filename})
 
 
 @upload_bp.route('/api/images/<filename>')
@@ -574,7 +577,7 @@ def generate_image_route():
             status_code = 503
         else:
             status_code = 500
-        return jsonify({
+        return api_payload({
             'ok': False,
             'error': result.get('error', 'Unknown error'),
             'error_type': error_type,
@@ -583,7 +586,7 @@ def generate_image_route():
             'text': result.get('text', ''),
             'history_resolved': len(history) if history else 0,
             'provider_status_code': result.get('status_code'),
-        }), status_code
+        }, status_code)
 
     image_b64 = result.get('image_b64', '')
     image_url = result.get('image_url', '')
@@ -629,7 +632,7 @@ def generate_image_route():
         response_data['image_url'] = image_url
         logger.info('[ImageGen] Route success: using direct URL (%.1fs)', elapsed)
 
-    return jsonify(response_data)
+    return api_ok(response_data)
 
 
 def _resolve_history_images(history: list) -> list:
@@ -749,7 +752,7 @@ def list_image_models():
     except Exception as e:
         logger.warning('[ImageGen] Failed to list models: %s', e)
 
-    return jsonify({'models': models})
+    return api_ok({'models': models})
 
 
 # ══════════════════════════════════════════════════════
@@ -824,7 +827,7 @@ def parse_pdf():
                 file.filename, len(pdf_bytes), len(pdf_bytes) / 1048576,
                 result.get('totalPages', '?'), result.get('textLength', '?'),
                 result.get('method', '?'), result.get('isScanned', '?'), elapsed)
-    return jsonify({'success': True, 'filename': file.filename, 'fileSize': len(pdf_bytes), **result})
+    return api_ok({'success': True, 'filename': file.filename, 'fileSize': len(pdf_bytes), **result})
 
 
 @upload_bp.route('/api/pdf/vlm-parse', methods=['POST'])
@@ -861,7 +864,7 @@ def pdf_vlm_parse():
                      filename, len(pdf_bytes), e, exc_info=True)
         return api_internal_error(f'VLM parse failed to start: {str(e)}')
     logger.info('[VLM-Parse] Started task %s for %s (%d bytes)', task_id, filename, len(pdf_bytes))
-    return jsonify({'taskId': task_id})
+    return api_ok({'taskId': task_id})
 
 
 @api_v1_uploads_bp.route('/api/v1/pdf/vlm-parse/<task_id>', methods=['GET'])
@@ -882,7 +885,7 @@ def pdf_vlm_status(task_id):
         resp['textLength'] = len(task['result'] or '')
     if task['status'] == 'error':
         resp['error'] = task['error']
-    return jsonify(resp)
+    return api_ok(resp)
 
 
 @api_v1_uploads_bp.route('/api/v1/pdf/vlm-tasks', methods=['GET'])
@@ -894,7 +897,7 @@ def pdf_vlm_find_tasks():
     if not filename:
         return api_bad_request('filename parameter required')
     tasks = find_vlm_tasks_by_filename(filename)
-    return jsonify({'tasks': tasks})
+    return api_ok({'tasks': tasks})
 
 
 # ══════════════════════════════════════════════════════
@@ -944,7 +947,7 @@ def parse_document():
     logger.info('[parse_doc] Parsed %s (%d bytes), %s chars, method=%s',
                 filename, len(file_bytes),
                 f'{result.get("textLength", 0):,}', result.get('method', '?'))
-    return jsonify({
+    return api_ok({
         'success': True,
         'filename': filename,
         'fileSize': len(file_bytes),

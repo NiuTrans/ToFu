@@ -442,8 +442,10 @@ def describe_chromium_env(env_prefix=None):
             'no directory carrying Chromium GUI libs (libatk/libnss/libgbm) '
             'was found under sys.prefix or $CONDA_PREFIX — on a rootless host '
             'install them with: conda install -c conda-forge atk-1.0 '
-            'at-spi2-atk nss nspr libxkbcommon mesa-libgbm-cos7-x86_64, or '
-            'with root: python -m playwright install-deps chromium')
+            'at-spi2-atk at-spi2-core alsa-lib xorg-libxcomposite '
+            'xorg-libxdamage xorg-libxfixes xorg-libxrandr libxkbcommon nspr '
+            'nss mesa-libgbm-cos7-x86_64 fontconfig font-ttf-dejavu-sans-mono, '
+            'or with root: python -m playwright install-deps chromium')
     if not system_fc and not conf_file:
         issues.append(
             'no /etc/fonts and no fontconfig config in the env prefix — '

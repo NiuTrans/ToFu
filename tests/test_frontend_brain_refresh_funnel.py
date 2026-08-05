@@ -43,6 +43,11 @@ pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
+# Epic-E sub-7 (2026-08-01) split project.js: the STATE subset
+# (_updateProjectUI / _clearProjectStateLocal / …) lives in
+# project_state.js (core); the PANEL stayed in project.js (deferred).
+# Extract state-first with a panel fallback — loud when in neither.
+PROJECT_STATE_JS = os.path.join(ROOT, 'static', 'js', 'project_state.js')
 PROJECT_JS = os.path.join(ROOT, 'static', 'js', 'project.js')
 LIFECYCLE_JS = os.path.join(ROOT, 'static', 'js', 'main', 'main_conv_lifecycle.js')
 
@@ -72,8 +77,15 @@ def _slice_fn(src: str, signature: str) -> str:
 
 
 def _project_fn(name: str) -> str:
-    with open(PROJECT_JS, encoding='utf-8') as f:
-        return _slice_fn(f.read(), f'function {name}() {{')
+    header = f'function {name}() {{'
+    for path in (PROJECT_STATE_JS, PROJECT_JS):
+        with open(path, encoding='utf-8') as f:
+            src = f.read()
+        if header in src:
+            return _slice_fn(src, header)
+    raise AssertionError(
+        f'{name} not found in project_state.js or project.js — the sub-7 '
+        'split moved it somewhere new; update this harness')
 
 
 def _newchat_fn() -> str:

@@ -50,7 +50,19 @@ import pytest
 
 from tests._source_scan import strip_comments
 
+from lib.mcp.registry import is_opensource_build
+
 pytestmark = [pytest.mark.auth_mode('open'), pytest.mark.unit]
+
+# A faceless card is only REFUSED when its host is a KNOWN dual-face gateway,
+# a set derived from the shipped provider templates. The internal gateway's
+# template is not shipped in opensource builds, so there the same card
+# resolves normally — by design.
+_NEEDS_INTERNAL_DUAL_FACE_HOST = pytest.mark.skipif(
+    is_opensource_build(),
+    reason='the dual-face host set is derived from the internal gateway '
+           'template, which opensource builds do not ship',
+)
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _FACES_JS = os.path.join(_ROOT, 'static', 'js', 'settings', 'provider_faces.js')
@@ -79,7 +91,7 @@ MERGED = {
 }
 
 FACELESS = {
-    'id': 'example-corp_old',
+    'id': 'example_corp_old',
     'base_url': OPENAI_URL,
     'api_keys': ['k1'],
     'models': [{'model_id': 'claude-opus-5'}],
@@ -137,6 +149,7 @@ def test_endpoint_flags_a_pin_as_forced():
     assert by['kimi-k3']['forced'] is False
 
 
+@_NEEDS_INTERNAL_DUAL_FACE_HOST
 def test_endpoint_surfaces_the_refusal_with_its_reason():
     """A refused model must carry a non-empty error — the chip's tooltip is
     the only place a user learns WHY the model vanished from the picker."""
@@ -216,6 +229,7 @@ def test_keyless_LOCAL_provider_is_NOT_skipped():
     assert rec['ok'] is True
 
 
+@_NEEDS_INTERNAL_DUAL_FACE_HOST
 def test_a_genuinely_refused_model_is_still_reported():
     """NEUTER-complement: the skip logic must not swallow the REAL refusal
     it was built alongside. An ENABLED Claude entry on a faceless dual-face

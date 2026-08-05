@@ -207,7 +207,8 @@ def _design_index() -> str:
         try:
             with open(path, encoding='utf-8') as f:
                 head = f.read(1200)
-        except OSError:
+        except OSError as e:
+            logger.debug('[Craft] cannot read %s: %s', path, e)
             continue
         # Frontmatter `description:` may be a folded (">") multi-line block.
         desc, capturing = '', False

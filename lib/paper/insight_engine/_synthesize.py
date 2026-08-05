@@ -132,6 +132,27 @@ def _research_and_synthesize(paper_text, report_md, reader_context, ui_lang, *,
 
     _round = {'content': ''}
     _last = {'msg': None}
+    # Cost visibility (design §3.3): accumulate EVERY dispatch round's usage
+    # (tool rounds + the terminal JSON round) so the caller can fold the
+    # synthesis cost into the report meta's secondPasses breakdown.
+    _usage_acc = {'prompt_tokens': 0, 'completion_tokens': 0,
+                  'cache_read_tokens': 0, 'cache_write_tokens': 0,
+                  'reasoning_tokens': 0}
+
+    def _acc_usage(usage):
+        if not isinstance(usage, dict):
+            return
+        try:
+            from lib.cost import normalize_usage as _nu
+            _n = _nu(usage)
+            _usage_acc['prompt_tokens'] += _n['input']
+            _usage_acc['completion_tokens'] += _n['output']
+            _usage_acc['cache_read_tokens'] += _n['cache_read']
+            _usage_acc['cache_write_tokens'] += _n['cache_write']
+            _usage_acc['reasoning_tokens'] += _n['thinking']
+        except Exception as e:
+            logger.debug('[Paper:Insight] usage accumulate failed (non-fatal): %s', e)
+
     model_name = model or None
 
     def _dispatch(rnd, tools):
@@ -158,6 +179,7 @@ def _research_and_synthesize(paper_text, report_md, reader_context, ui_lang, *,
 
     def _on_round_result(rnd, msg, finish, usage):
         _last['msg'] = msg
+        _acc_usage(usage)
 
     def _begin_tool_round(rnd, msg):
         # This round issued tool calls → its prose is interim scaffolding, not
@@ -189,11 +211,18 @@ def _research_and_synthesize(paper_text, report_md, reader_context, ui_lang, *,
 
     parsed = _parse_llm_json(content)
     if isinstance(parsed, dict):
+        # Private key (popped by generate_insight before grounding/render) —
+        # tests monkeypatching this seam return plain dicts without it, which
+        # the caller treats as unknown usage.
+        parsed['_usage'] = dict(_usage_acc)
         return parsed
 
     # The final content wasn't parseable JSON (prose-wrapped / truncated / fenced
     # in a way the extractor missed). Recover with one deterministic re-ask
     # rather than silently returning nothing.
     logger.info('[Paper:Insight] Final content unparseable — attempting one-shot JSON repair')
-    return _repair_json_reask(messages, content, model=model_name if model else None,
-                              abort_signal=abort_signal)
+    repaired = _repair_json_reask(messages, content, model=model_name if model else None,
+                                  abort_signal=abort_signal)
+    if isinstance(repaired, dict):
+        repaired['_usage'] = dict(_usage_acc)
+    return repaired

@@ -1,3 +1,5 @@
+# Incident anchor: born in commit e604a4dc — refactor(orchestrator): pt_03f4cdf1 slice 15 — extract pre-flight mes...
+# (funeral audit pt_c565a36b3e8f42e6, docs/RATCHET_AUDIT.md)
 """Wire-parity guards for pt_03f4cdf1 slice 15 — extract the
 Request-Inspector messages-snapshot emission block from _run.py's
 stream loop into

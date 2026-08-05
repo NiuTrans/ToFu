@@ -40,7 +40,10 @@ LIB = os.path.join(ROOT, 'lib')
 # Frozen emission-site table (docs/DEBUG_PANEL_REDESIGN.md §3.1). Adding a
 # fifth site must update this table deliberately; removing one likewise.
 EXPECTED_SITES = {
-    os.path.join('lib', 'tasks_pkg', 'orchestrator', '_run.py'): 'request',
+    # The request site moved out of _run.py into its own HOT_PATH helper
+    # module (pt_03f4cdf1 slice 15, 2026-07-31).
+    os.path.join('lib', 'tasks_pkg', 'orchestrator',
+                 '_messages_snapshot.py'): 'request',
     os.path.join('lib', 'tasks_pkg', 'tool_dispatch', '_pipeline.py'): 'state',
     os.path.join('lib', 'tasks_pkg', 'orchestrator', '_post_loop.py'): 'state',
     os.path.join('lib', 'tasks_pkg', 'orchestrator', '_finalize.py'): 'state',
@@ -48,7 +51,8 @@ EXPECTED_SITES = {
     # (persisted directly under '{parent}#agent:{id}' — see agent.py).
     os.path.join('lib', 'swarm', 'agent.py'): 'request',
 }
-REQUEST_SITE = os.path.join('lib', 'tasks_pkg', 'orchestrator', '_run.py')
+REQUEST_SITE = os.path.join('lib', 'tasks_pkg', 'orchestrator',
+                            '_messages_snapshot.py')
 
 # Frozen request-params schema (design doc §3.3). Additive renames forbidden —
 # the frontend request row reads exactly these keys.

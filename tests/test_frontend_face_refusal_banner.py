@@ -115,10 +115,12 @@ _OTHER = {
     'api_keys': ['k1'], 'enabled': True,
     'models': [{'model_id': 'gpt-4.1-mini', 'capabilities': ['text']}],
 }
+# provider_id is derived from the card, not spelled out: export.py rewrites
+# the card's id, and a refusal only renders when it names the SAME provider.
 _REFUSALS = [
-    {'provider_id': 'example-corp', 'model_id': 'claude-opus-5',
+    {'provider_id': _MERGED['id'], 'model_id': 'claude-opus-5',
      'error': 'declares no anthropic face'},
-    {'provider_id': 'example-corp', 'model_id': 'claude-fable-5',
+    {'provider_id': _MERGED['id'], 'model_id': 'claude-fable-5',
      'error': 'declares no anthropic face'},
 ]
 

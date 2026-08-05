@@ -333,7 +333,6 @@ def collect() -> dict:
     registry, specs = _load_registry()
     t = _facet_tables()
     schemas = _tool_schemas()
-    all_names = {n for s in specs for n in s.provides}
     label_fn = t.get('label')
     parts = t.get('partitions') or {}
     write_set = parts.get('write') or set()

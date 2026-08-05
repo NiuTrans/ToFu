@@ -31,6 +31,15 @@ What is deliberately NOT an attention item:
     gates"), never as a task.
   • **Watch items** — the human's own standing concerns (their outbox, not
     their inbox). They live in the Status tab.
+  • **A live file conflict** (two active peers touching the same file).
+    Notify-only and SELF-CLEARING — it is recomputed from the presence
+    registry and vanishes when a peer goes idle — and it has no resolving
+    control: the system deliberately never locks, the operator decides
+    whether to intervene. Owner directive 2026-08-01: an item that needs
+    nothing from the human must not occupy this surface. The overlap stays
+    visible where LIVE STATUS belongs — the collab bar's detail lines
+    (``summary.conflictMessages``) and the Team tab, both fed by
+    ``lib.presence.conflict.detect_overlaps`` directly.
   • **A peer hard-abort approval** — a LIVE, synchronous
     ``request_human_guidance`` prompt, not durable state; there is nothing to
     enumerate after the fact.
@@ -62,14 +71,19 @@ _SEVERITY_RANK = {'blocking': 0, 'advisory': 1}
 # rather than dependent on which sub-read finished first.
 _TYPE_RANK = {
     'board_question': 0,
-    'conflict': 1,
-    'charter_proposal': 2,
+    'charter_proposal': 1,
 }
 
-# A conflict message is a fully-formed backend string; cap it so one pathological
-# advisory can't dominate the panel. DISPLAY-ONLY fields: never apply it to a
-# field a resolving control submits back (see _charter_proposals).
+# Cap for DISPLAY-ONLY short fields (e.g. an epic title) so one pathological
+# value can't dominate the panel. Never apply it to a field a resolving
+# control submits back (see _charter_proposals).
 _TEXT_MAX = 600
+
+# The block REASON is the card's background section ("why did this stop?") —
+# the operator's whole complaint when it is missing context. It renders
+# through the clamp (collapsible), so a longer allowance costs no screen
+# space; cap only against pathological payloads.
+_REASON_MAX = 2000
 
 
 def _empty_attention(project_path: str = '') -> dict:
@@ -83,6 +97,34 @@ def _empty_attention(project_path: str = '') -> dict:
     }
 
 
+def _conv_titles(conv_ids: list) -> dict:
+    """Map ``convId -> title`` for the attention items' provenance chips.
+
+    The operator's first question on a halted-epic card is "which chat asked
+    me this?" — a bare conv id answers nothing. One bounded IN query over the
+    conversations table; best-effort (a failure degrades to id-only chips,
+    never blanks the surface).
+    """
+    ids = []
+    for c in conv_ids or []:
+        c = str(c or '').strip()
+        if c and c not in ids:
+            ids.append(c)
+    if not ids:
+        return {}
+    try:
+        from lib.database import DOMAIN_CHAT, get_thread_db
+        db = get_thread_db(DOMAIN_CHAT)
+        marks = ','.join('?' * len(ids))
+        rows = db.execute(
+            f'SELECT id, title FROM conversations WHERE id IN ({marks})',
+            tuple(ids)).fetchall()
+        return {r['id']: (r['title'] or '') for r in rows}
+    except Exception as e:
+        logger.debug('[Attention] conv title lookup failed: %s', e)
+        return {}
+
+
 def _board_questions(project_path: str) -> list[dict]:
     """Epics halted on a structured human question — the ONLY item type that
     stops a workstream indefinitely.
@@ -92,9 +134,15 @@ def _board_questions(project_path: str) -> list[dict]:
     block this never resolves on its own. Uses the same partition predicate as
     ``render_board_block``'s pending-question lane and the frontend's awaiting
     lane, so the three can never drift.
+
+    Provenance: ``blocked_by`` (who raised the block) is projected as
+    ``askedByConvId`` (+ resolved ``askedByTitle``), falling back to
+    ``created_by_conv`` for rows blocked before the column existed. The same
+    id also fills ``convId`` so ``build_attention_items``' ``mine`` marking
+    works for board questions exactly as it does for proposals.
     """
     from lib.conversations.project_board import read_board
-    out = []
+    rows = []
     board = read_board(project_path)
     for t in board.get('tasks', []) or []:
         if t.get('kind') == 'lease':
@@ -104,6 +152,13 @@ def _board_questions(project_path: str) -> list[dict]:
         q = t.get('block_question')
         if not q or (t.get('human_answer') or '').strip():
             continue
+        rows.append((t, q))
+    titles = _conv_titles([
+        (t.get('blocked_by') or t.get('created_by_conv') or '')
+        for t, _q in rows])
+    out = []
+    for t, q in rows:
+        asked_by = (t.get('blocked_by') or t.get('created_by_conv') or '')
         out.append({
             'type': 'board_question',
             'severity': 'blocking',
@@ -111,9 +166,12 @@ def _board_questions(project_path: str) -> list[dict]:
             'title': (t.get('title') or '')[:_TEXT_MAX],
             'question': str(q.get('q') or '')[:_TEXT_MAX],
             'options': q.get('options') if isinstance(q.get('options'), list) else [],
-            'reason': (t.get('block_reason') or '')[:_TEXT_MAX],
+            'reason': (t.get('block_reason') or '')[:_REASON_MAX],
             'blockCount': int(t.get('block_count') or 0),
             'ownerConvId': t.get('owner_conv_id') or '',
+            'convId': asked_by,
+            'askedByConvId': asked_by,
+            'askedByTitle': titles.get(asked_by, ''),
             'ts': int(t.get('updated_at') or 0),
             # Where the resolving control lives, for the panel's deep-link.
             'tab': 'board',
@@ -137,6 +195,11 @@ def _charter_proposals(project_path: str) -> list[dict]:
     ``_DECISION_MAX_CHARS`` — the same bound the commit route applies.
     """
     from lib.conversations.project_charter import pending_proposals
+    props = pending_proposals(project_path)
+    # The author is the card's provenance ("which conversation proposed
+    # this?") — the same askedBy* shape the board-question card carries, so
+    # every decision the panel shows wears ONE provenance chip.
+    titles = _conv_titles([p.get('conv_id', '') for p in props])
     return [{
         'type': 'charter_proposal',
         'severity': 'advisory',
@@ -144,55 +207,11 @@ def _charter_proposals(project_path: str) -> list[dict]:
         'title': (p.get('title') or '')[:_TEXT_MAX],
         'text': p.get('summary') or '',
         'convId': p.get('conv_id', ''),
+        'askedByConvId': p.get('conv_id', ''),
+        'askedByTitle': titles.get(p.get('conv_id', ''), ''),
         'ts': int(p.get('ts') or 0),
         'tab': 'charter',
-    } for p in pending_proposals(project_path)]
-
-
-def _conflicts(project_path: str) -> list[dict]:
-    """Live file-set overlaps between two active conversations.
-
-    Recomputed from the SAME ``detect_overlaps`` judgment the live conflict
-    broadcast uses — no second mirror, no stored state. Advisory: both
-    conversations keep running; the human decides whether to intervene.
-    """
-    from lib.presence.conflict import detect_overlaps
-    from lib.presence.registry import snapshot
-    peers = snapshot(project_path).get('peers', []) or []
-    if not peers:
-        return []
-    out = []
-    # detect_overlaps returns {'path', 'peers': [composite keys], 'message'} —
-    # the message is backend-formed and rendered VERBATIM (the frontend never
-    # composes conflict text). The contended path is the natural stable id.
-    for a in detect_overlaps(peers):
-        msg = (a.get('message') or '').strip()
-        path = a.get('path') or ''
-        if not msg:
-            continue
-        # A peer key is 'convId' or 'convId#agentId' — project the conversation
-        # half so a caller can mark "this involves the conv I'm looking at".
-        keys = a.get('peers', []) or []
-        conv_ids = []
-        for k in keys:
-            cid = str(k).split('#', 1)[0]
-            if cid and cid not in conv_ids:
-                conv_ids.append(cid)
-        out.append({
-            'type': 'conflict',
-            'severity': 'advisory',
-            'id': path or msg[:64],
-            'path': path,
-            'text': msg[:_TEXT_MAX],
-            'convIds': conv_ids,
-            'peers': keys,
-            # detect_overlaps carries no timestamp (it is recomputed live, not
-            # stored) — 0 sorts it last within its type, which is right: a
-            # conflict is defined by its path, not its age.
-            'ts': 0,
-            'tab': 'peers',
-        })
-    return out
+    } for p in props]
 
 
 def _waiting_count(project_path: str) -> int:
@@ -233,8 +252,7 @@ def build_attention_items(project_path: str, conv_id: str = '') -> dict:
 
     items: list[dict] = []
     for label, source in (('board', _board_questions),
-                          ('charter', _charter_proposals),
-                          ('conflict', _conflicts)):
+                          ('charter', _charter_proposals)):
         try:
             items.extend(source(project_path))
         except Exception as e:
@@ -246,8 +264,6 @@ def build_attention_items(project_path: str, conv_id: str = '') -> dict:
             owner = it.get('ownerConvId') or it.get('convId') or ''
             if owner:
                 it['mine'] = owner == conv_id
-            elif it.get('convIds'):
-                it['mine'] = conv_id in it['convIds']
 
     items.sort(key=lambda it: (
         _SEVERITY_RANK.get(it.get('severity'), 9),

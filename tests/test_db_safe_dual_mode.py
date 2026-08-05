@@ -70,3 +70,29 @@ class TestDbSafeDualMode:
 
         assert _db_safe(my_async_view).__name__ == 'my_async_view'
         assert _db_safe(my_sync_view).__name__ == 'my_sync_view'
+
+    def test_db_locked_returns_503_envelope(self):
+        """The 503 'database_busy' path must return the envelope — with
+        ``api_error`` unimported (migration-era missing import, epic
+        pt_551fc875f3034f38) this NameError'd into a 500."""
+        import sqlite3
+
+        from quart import Quart
+
+        from routes.common import _db_safe
+
+        def handler():
+            raise sqlite3.OperationalError('database is locked')
+
+        app = Quart(__name__)
+
+        async def go():
+            async with app.test_request_context('/api/v1/conversations',
+                                                method='PUT'):
+                resp, status = _db_safe(handler)()
+                return status, await resp.get_json()
+
+        status, body = asyncio.new_event_loop().run_until_complete(go())
+        assert status == 503
+        assert body['ok'] is False
+        assert body['error'] == 'database_busy'

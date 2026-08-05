@@ -6,7 +6,7 @@ the engine module.
 
 from datetime import datetime, timezone
 
-from lib.tools.search import FETCH_URL_TOOL, build_search_tool
+from lib.tools.search import build_fetch_url_tool, build_search_tool
 
 
 def date_anchor_clause(ui_lang: str) -> str:
@@ -114,10 +114,12 @@ A table of 6-10 key terms/abbreviations that the paper introduces or relies on h
 - **Each definition must be SELF-CONTAINED.** Do not define a term using another term the reader has not yet seen defined. If your definition leans on a sub-concept (e.g. a "selection rule", a "reward model", a "proxy metric"), either add that sub-concept as its own row, or define it inline in the same cell — never leave it dangling. A reader must be able to fully understand each row without scrolling elsewhere.
 - **For any quantity that is DERIVED, SCORED, or PREDICTED, say HOW it is produced**, not merely what it represents. Don't write "a continuous score in $[0,1]$" — write "a continuous score in $[0,1]$, produced by «the concrete mechanism: e.g. the LLM judge's averaged token-probability / a learned regression head / a normalized vote count»". The reader must know where every number comes from.
 
-| Term | Definition | Why it matters |
-|------|-----------|---------------|
-| (term) | (crisp 1-sentence def) | (the role/reason — why the method needs this) |
-| ... | ... | ... |
+| Term | Definition | Why it matters | Analogy |
+|------|-----------|---------------|---------|
+| (term) | (crisp 1-sentence def) | (the role/reason — why the method needs this) | (one everyday comparison) |
+| ... | ... | ... | ... |
+
+The **Analogy** column: ONE concrete everyday comparison for the concept (≤12 words — "a KV cache is like leaving the first half of the meeting's notes on the table"). The reader remembers the analogy before the definition, so make it vivid and honest; if no honest analogy exists for a term, write `—`. Keep the analogy cell plain text (no math, no pipes).
 
 Do NOT defer this to the end. The report is unreadable if the reader hits unknown acronyms in the Method section.
 
@@ -326,10 +328,12 @@ _REPORT_PROMPT_ZH = """\
 - **每条定义必须自包含。** 不要用另一个读者还没见过的术语来定义当前术语。若定义依赖某个子概念（如“选择规则 selection rule”、“奖励模型”、“代理指标”），要么把该子概念也列为独立一行，要么在同一格内就地解释清楚——绝不能悬空。读者应能在不翻阅别处的情况下完全看懂每一行。
 - **凡是被推导、打分或预测出来的量，必须说清它是怎么算出来的**，而不只是它代表什么。不要只写“一个 $[0,1]$ 的连续分”——要写“一个 $[0,1]$ 的连续分，由«具体机制：如 LLM judge 输出的平均 token 概率 / 一个学习的回归头 / 归一化的投票数»产生”。读者必须知道每个数字从哪里来。
 
-| 术语 | 定义 | 为什么重要 |
-|------|------|-----------|
-| （术语） | （清晰一句话） | （它在方法中的作用/存在理由） |
-| ... | ... | ... |
+| 术语 | 定义 | 为什么重要 | 类比 |
+|------|------|-----------|------|
+| （术语） | （清晰一句话） | （它在方法中的作用/存在理由） | （一个生活化类比） |
+| ... | ... | ... | ... |
+
+**类比**列：给这个概念**一个**具体的生活化类比（≤15 字——「KV cache 就像开会时把前半场笔记留在桌上」）。读者总是先记住类比再理解定义，要生动且诚实；实在没有恰当类比的术语填 `—`。类比格保持纯文本（不含公式和竖线）。
 
 **不要**把术语解释延后到报告末尾。如果读者在方法章节碰到不懂的缩写，报告就失败了。
 
@@ -479,7 +483,7 @@ class _ReportTools(list):
     """
 
     def _resolve(self):
-        return [build_search_tool(), FETCH_URL_TOOL]
+        return [build_search_tool(), build_fetch_url_tool()]
 
     def __iter__(self):
         return iter(self._resolve())

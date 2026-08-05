@@ -58,6 +58,7 @@ We monkeypatch push_event (the outbound seam) — same pattern as
 test_conv_changed_notify.py + test_conv_state_ssot_payload.py — so we
 inspect the payload directly without ASGI wiring.
 """
+import asyncio
 import os
 import sys
 import time
@@ -66,6 +67,10 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 pytestmark = pytest.mark.unit
+
+# Route handlers import ``flask`` — the project runs them on the Quart shim.
+import quart as _quart
+sys.modules.setdefault('flask', _quart)
 
 
 @pytest.fixture
@@ -226,6 +231,137 @@ def test_notify_failure_does_not_break_abort(monkeypatch, isolated_registry):
     _seed_task('tid-new', 'conv-X')
     n = abort_running_tasks_for_conv('conv-X', exclude_task_id='tid-new')
     assert n == 1, 'abort must still complete even when notify raises'
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Faces 7-10: the USER-STOP route (chat_abort) must broadcast too
+#
+# The three existing emit sites — create/entry-point frames, the supersede
+# sweep (Face 1), and the terminal seam (notify_terminal_busy_state) — all
+# miss ONE path: the composer's own Stop button (POST
+# /api/v1/chat/abort/<task_id> → routes.chat_poll_abort.chat_abort).
+# chat_abort flips task['aborted']=True (so the projection excludes the tid
+# from that instant — conv_has_work_in_flight: "aborted always wins") but
+# never EMITS a frame, so the originating tab's
+# conv._authoritativeActiveTaskIds keeps the tid after finishStream cleared
+# the local handles (activeStreams + conv.activeTaskId). convIsBusy then
+# keeps the composer in Stop shape while Priority-3 of the stop cascade has
+# no handle left — every further click is a silent no-op until the task
+# fully unwinds and the TERMINAL frame lands (up to a whole tool call
+# later). User report: "暂停按钮要点击多次才生效".
+# ─────────────────────────────────────────────────────────────────────
+def _make_abort_app():
+    """Minimal Quart app for test_request_context (PROVIDE_AUTOMATIC_OPTIONS
+    patch replicated from tests/test_api_response.py — bare Quart() raises
+    KeyError on the installed sansio without it)."""
+    from quart import Quart
+    if 'PROVIDE_AUTOMATIC_OPTIONS' not in Quart.default_config:
+        Quart.default_config = {**Quart.default_config,
+                                'PROVIDE_AUTOMATIC_OPTIONS': True}
+    return Quart(__name__)
+
+
+def _call_chat_abort(tid):
+    """Drive the REAL route handler (decorators included) inside a request
+    context with an authenticated admin ctx — the same shape the cookie-
+    authenticated UI arrives with."""
+    from quart import g
+    from lib.api_keys import AuthContext
+    app = _make_abort_app()
+
+    async def _t():
+        async with app.test_request_context(
+                f'/api/v1/chat/abort/{tid}', method='POST'):
+            g.auth_ctx = AuthContext(key_id='k-test', name='t',
+                                     scopes=frozenset({'admin'}))
+            from routes.chat_poll_abort import chat_abort
+            resp = chat_abort(tid)
+            # api_ok() → (Response, 200); read the status off the tuple.
+            return resp[1] if isinstance(resp, tuple) else 200
+    return asyncio.run(_t())
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Face 7: user-Stop emits a notify frame for the task's conv
+# ─────────────────────────────────────────────────────────────────────
+def test_user_stop_route_emits_notify_frame(captured, isolated_registry):
+    """POST /api/v1/chat/abort/<tid> must push a notify frame for the
+    aborted task's conv — the same completion-side extinguish the
+    supersede sweep got in P3. Without it the composer's Stop button
+    stays lit (authoritative busy Set never cleared) until the task
+    finishes unwinding."""
+    _seed_task('tid-stop', 'conv-Y')
+    status = _call_chat_abort('tid-stop')
+    assert status == 200
+    notify_frames = [f for f in captured
+                     if f['channel'] == 'notify' and f['taskId'] == 'conv-Y']
+    assert len(notify_frames) >= 1, (
+        'user-Stop (chat_abort) must emit at least one notify frame for '
+        'conv-Y; got %r' % [f['payload'].get('type') for f in captured])
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Face 8: the frame carries the CURRENT projection (aborted tid excluded)
+# ─────────────────────────────────────────────────────────────────────
+def test_user_stop_notify_carries_current_projection(captured, isolated_registry):
+    """runningTaskIds on the user-Stop frame must be the fresh registry
+    projection: the just-aborted tid filtered out (conv_has_work_in_flight
+    → aborted wins), a sibling live task still present."""
+    _seed_task('tid-stop', 'conv-Y')
+    _seed_task('tid-live', 'conv-Y')
+    _call_chat_abort('tid-stop')
+    notify_frames = [f for f in captured if f['channel'] == 'notify']
+    assert notify_frames
+    p = notify_frames[-1]['payload']
+    assert 'runningTaskIds' in p, (
+        'user-Stop frame must carry runningTaskIds: %r' % p)
+    assert 'tid-stop' not in p['runningTaskIds'], (
+        'the just-aborted task must NOT appear in the projection: %r' %
+        p['runningTaskIds'])
+    assert 'tid-live' in p['runningTaskIds'], (
+        'the surviving sibling task must still appear: %r' %
+        p['runningTaskIds'])
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Face 9: a DUPLICATE abort re-emits the frame (corrective re-broadcast)
+# ─────────────────────────────────────────────────────────────────────
+def test_user_stop_duplicate_abort_reemits(captured, isolated_registry):
+    """A second click on Stop (task already aborted) must STILL emit the
+    frame: the client clicking again is precisely the one whose local busy
+    Set never cleared (it missed the first frame), so the duplicate abort
+    doubles as a corrective re-broadcast of the idle projection."""
+    _seed_task('tid-stop', 'conv-Y')
+    _call_chat_abort('tid-stop')
+    first = len([f for f in captured
+                 if f['channel'] == 'notify' and f['taskId'] == 'conv-Y'])
+    assert first >= 1
+    _call_chat_abort('tid-stop')  # duplicate — was_already_aborted branch
+    second = len([f for f in captured
+                  if f['channel'] == 'notify' and f['taskId'] == 'conv-Y'])
+    assert second > first, (
+        'a duplicate user-Stop must re-emit the busy projection '
+        '(got %d frame(s) before, %d after)' % (first, second))
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Face 10: notify failure never breaks the user-Stop route (fail-open)
+# ─────────────────────────────────────────────────────────────────────
+def test_user_stop_notify_failure_does_not_break_abort(monkeypatch, captured,
+                                                       isolated_registry):
+    """A push-transport failure must never turn the user's Stop click into
+    a 500 — the abort flag + subprocess kill are the load-bearing halves;
+    the broadcast is best-effort (notify_conv_changed itself is fail-open
+    too, this guards the route's own import/call seam)."""
+    import lib.agent_core.push as push_mod
+
+    def _boom(*a, **k):
+        raise RuntimeError('push transport down')
+    monkeypatch.setattr(push_mod, 'push_event', _boom)
+    t = _seed_task('tid-stop', 'conv-Y')
+    status = _call_chat_abort('tid-stop')
+    assert status == 200, 'abort route must still complete when notify raises'
+    assert t.get('aborted') is True, 'the abort flag must still be set'
 
 
 if __name__ == '__main__':

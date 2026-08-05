@@ -42,6 +42,8 @@ from pathlib import Path
 
 import pytest
 
+from lib.mcp.registry import is_opensource_build
+
 pytestmark = pytest.mark.unit
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -221,6 +223,9 @@ def test_the_shipped_mascot_exists_on_disk():
     assert p.is_file() and p.stat().st_size > 0, f"missing mascot asset: {p}"
 
 
+@pytest.mark.skipif(is_opensource_build(),
+                    reason='export.py is not shipped in opensource builds — '
+                           'export-tier guards only run in the source tree')
 def test_the_mascot_survives_every_export_level():
     """charter #13/#14: what must arrive alive needs an export survival guard."""
     import importlib.util

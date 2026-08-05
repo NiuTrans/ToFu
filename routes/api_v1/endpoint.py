@@ -14,9 +14,9 @@ from __future__ import annotations
 
 import threading
 
-from flask import Blueprint, jsonify
+from flask import Blueprint
 
-from lib.api_response import api_bad_request, api_not_found
+from lib.api_response import api_bad_request, api_not_found, api_ok
 from lib.log import get_logger
 from lib.openapi import api_meta
 from lib.rate_limiter import rate_limit
@@ -106,9 +106,10 @@ def endpoint_start():
     threading.Thread(target=run_endpoint_task,
                      args=(task,), daemon=True).start()
 
-    # Bare {taskId, convId} shape preserved from the legacy route — the
-    # frontend reads data.taskId directly.
-    return jsonify({'taskId': task['id'], 'convId': task['convId']})
+    # Top-level {taskId, convId} fields preserved from the legacy route
+    # (now under the standard envelope) — the frontend reads data.taskId
+    # directly.
+    return api_ok({'taskId': task['id'], 'convId': task['convId']})
 
 
 @api_v1_endpoint_bp.route('/api/v1/endpoint/status/<task_id>',
@@ -145,8 +146,8 @@ def endpoint_status(task_id):
                 total_iterations = ev.get('totalIterations', 0)
                 reason = ev.get('reason')
 
-    # Preserve the bare-dict legacy shape for the UI panel.
-    return jsonify({
+    # Top-level fields preserved for the UI panel (envelope adds ok).
+    return api_ok({
         'id': task['id'],
         'status': task['status'],
         'endpointMode': True,

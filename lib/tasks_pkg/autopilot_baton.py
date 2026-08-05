@@ -108,6 +108,17 @@ def _successor_already_running(task: dict, conv_id: str) -> bool:
     would (a) abort the queued task via ``abort_running_tasks_for_conv``
     and (b) clobber the user's actual question.  Detect this by looking
     at the latest-task registry.
+
+    A pointer is not an owner. The index is a raw conv→task_id pointer that
+    can legitimately name a DEAD task at recheck time — most notably the
+    run's OWN VU carrier, which claims the index for the HB-1 handoff
+    window and is discarded before this gate re-reads it (msb6ohqi
+    2026-08-02: the gate read the corpse, concluded "superseded", and
+    stranded a delivered VU turn with no follow-up). The conv-sync
+    freshness guard has encoded the matching "own VU carrier = by-design
+    handoff" exception since HB-1 landed (manager/_sync.py); this gate
+    must apply the same judgement: only a task that is still LIVE in the
+    registry is a real successor.
     """
     if not conv_id:
         return False
@@ -115,10 +126,26 @@ def _successor_already_running(task: dict, conv_id: str) -> bool:
         from lib.tasks_pkg.manager import (
             _conv_latest_task,
             _conv_latest_task_lock,
+            tasks,
+            tasks_lock,
         )
         with _conv_latest_task_lock:
             latest = _conv_latest_task.get(conv_id)
-        return bool(latest) and latest != task.get('id')
+        if not latest or latest == task.get('id'):
+            return False
+        with tasks_lock:
+            succ = tasks.get(latest)
+        if succ is None or succ.get('status') in ('done', 'error', 'aborted'):
+            logger.info('[Autopilot] latest-task pointer for conv=%s names a '
+                        'dead task %s (own VU carrier=%s, in-registry=%s) — '
+                        'a pointer is not an owner; NOT superseded',
+                        conv_id[:8], latest[:8],
+                        (task.get('_vu_carrier_id') or '')[:8],
+                        succ is not None)
+            return False
+        logger.info('[Autopilot] conv=%s is owned by live successor task=%s — '
+                    'standing down is correct', conv_id[:8], latest[:8])
+        return True
     except Exception as e:
         logger.debug('[Autopilot] latest-task probe failed (non-fatal): %s', e)
         return False
@@ -388,6 +415,37 @@ def _start_followup_task(task: dict, conv_id: str) -> str | None:
         'assistantMsgId', 'msgId',
     ):
         cfg.pop(stale_key, None)
+
+    # ★ pt_a21cd6eb bug#2: the model is the CONVERSATION'S LIVE choice, not
+    #   the run's launch-time pin. cfg is inherited from the task that
+    #   STARTED the run, so an owner switching models mid-run (or the quota
+    #   fallback persisting a working model into settings) never reached the
+    #   follow-ups — measured 2026-08-01: conv switched to kimi-k3 at 16:58,
+    #   the 18:20 follow-up still launched on the parent's claude-opus-5 and
+    #   walked straight back into the same 429 wall. Re-resolve ONLY
+    #   model/preset from the conv's current settings; every other key stays
+    #   inherited (turn-scoped state).
+    try:
+        from lib.database import DOMAIN_CHAT, get_thread_db
+        _db = get_thread_db(DOMAIN_CHAT)
+        _row = _db.execute(
+            'SELECT settings FROM conversations WHERE id=? AND user_id=1',
+            (conv_id,)).fetchone()
+        if _row:
+            _live = json.loads(_row['settings'] or '{}')
+            _lm = (_live.get('model') or '').strip()
+            _lp = (_live.get('preset') or '').strip()
+            if _lm and _lm != cfg.get('model'):
+                logger.info('[Autopilot] follow-up model re-resolved from '
+                            'conv settings: %s → %s (the run inherited the '
+                            'launch-time pin; the live choice wins)',
+                            cfg.get('model'), _lm)
+                cfg['model'] = _lm
+                if _lp:
+                    cfg['preset'] = _lp
+    except Exception as _me:
+        logger.debug('[Autopilot] conv model re-resolve failed — inheriting '
+                     'parent model: %s', _me)
 
     api_messages = build_api_messages_from_db(conv_id, cfg)
     if not api_messages:

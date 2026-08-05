@@ -132,15 +132,20 @@ class TestConvertedOrchestratorSites(unittest.TestCase):
         am = {'tool_calls': [{'function': {'name': 'web_search'}}]}
         orch._emit_tool_round_phase(task, am, 2)
         got = {k: v for k, v in task['events'][-1].items() if k != 'seq'}
-        # Order matters: detail, detailKey, detailArgs, toolContext, roundNum
+        # Order matters: detail, detailKey, detailArgs, toolContext,
+        # toolContextTools, roundNum
         # (see _emit_tool_round_phase in lib/tasks_pkg/orchestrator/_finalize.py).
         self.assertEqual(list(got.keys()),
                          ['type', 'phase', 'detail', 'detailKey', 'detailArgs',
-                          'toolContext', 'roundNum'])
+                          'toolContext', 'toolContextTools', 'roundNum'])
         self.assertEqual(got['type'], 'phase')
         self.assertEqual(got['roundNum'], 3)
         self.assertEqual(got['detailKey'], 'stream.phase.analyzingRound')
         self.assertEqual(got['detailArgs'], {'round': 3})
+        # Structured raw names for the i18n client; toolContext stays the
+        # (emoji-free, owner directive 2026-08-03) English fallback.
+        self.assertEqual(got['toolContextTools'], ['web_search'])
+        self.assertEqual(got['toolContext'], 'Searching the web')
 
 
 class TestUnregisteredTypeAllowed(unittest.TestCase):

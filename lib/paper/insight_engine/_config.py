@@ -61,15 +61,57 @@ def insight_gate_fires(baseline_overall) -> bool:
     return baseline_overall <= INSIGHT_GATE_THRESHOLD + 1e-9
 
 
-def insight_enabled() -> bool:
-    """Is the insight second-pass turned on?
+def _reading_experience_cfg() -> dict:
+    """The ``paper.reading_experience`` section of server_config (hot-reload safe).
 
-    Flag-gated OFF by default so the prototype is fully non-destructive — the
-    ordinary report path is byte-identical unless an operator opts in via
-    ``TOFU_PAPER_INSIGHT=1``.
+    Reads ``lib._SAVED_CONFIG`` at CALL time — ``lib.reload_config()`` rebinds
+    that name when the Settings panel saves, so this never serves a stale
+    value. Returns {} on any anomaly (missing section, malformed file) — the
+    caller's chain then falls through to the env / default levels.
     """
-    return (os.environ.get('TOFU_PAPER_INSIGHT', '') or '').strip().lower() in (
-        '1', 'true', 'yes', 'on')
+    try:
+        import lib as _lib
+        saved = getattr(_lib, '_SAVED_CONFIG', None) or {}
+        paper = saved.get('paper') if isinstance(saved, dict) else None
+        if isinstance(paper, dict):
+            rx = paper.get('reading_experience')
+            if isinstance(rx, dict):
+                return rx
+    except Exception as e:
+        logger.debug('[Paper:Insight] reading_experience cfg read failed: %s', e)
+    return {}
+
+
+def insight_enabled(cfg=None) -> bool:
+    """Is the insight second-pass turned on for this report? Four-level chain:
+
+      1. **explicit per-request cfg** ``paperInsightEnabled`` — a headless
+         cfg-builder stamps it fail-closed via
+         ``personal_scope.apply_headless_personal_defaults``; an opt-in caller
+         sets it True. Always wins.
+      2. **server_config** ``paper.reading_experience.insight`` — the user-level
+         Settings toggle (Settings → General → 功能模块). The owner's explicit
+         choice beats the fleet seed.
+      3. **env** ``TOFU_PAPER_INSIGHT`` — the fleet default seed / kill switch
+         (back-compat with the prototype flag).
+      4. **default ON** — the interactive reader gets the insight pass unless
+         someone above said no (owner decision 2026-08-02, design
+         docs/PAPER_READING_EXPERIENCE_DESIGN.md §3.4). The headless surface
+         never reaches this level — level 1 is always stamped there.
+
+    The rubric headroom gate (``insight_gate_fires``) is INDEPENDENT of this
+    switch and always applies after it: this switch decides "do we want the
+    feature", the gate decides "does THIS report need it".
+    """
+    if isinstance(cfg, dict) and 'paperInsightEnabled' in cfg:
+        return bool(cfg['paperInsightEnabled'])
+    rx = _reading_experience_cfg()
+    if 'insight' in rx:
+        return bool(rx['insight'])
+    env = (os.environ.get('TOFU_PAPER_INSIGHT', '') or '').strip().lower()
+    if env:
+        return env in ('1', 'true', 'yes', 'on')
+    return True
 
 
 def insight_lang_key(ui_lang: str) -> str:

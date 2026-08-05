@@ -25,8 +25,6 @@ from __future__ import annotations
 import json
 import time
 
-from flask import jsonify
-
 from lib.api_response import api_not_found, api_ok
 from lib.database import DOMAIN_CHAT, get_db
 from lib.log import audit_log, get_logger
@@ -90,11 +88,20 @@ def chat_abort_conv(conv_id):
     from lib.tasks_pkg import abort_running_tasks_for_conv
     _mark_conv_aborted(conv_id)
     aborted = abort_running_tasks_for_conv(conv_id)
-    if aborted:
-        logger.info('[Chat] Abort-by-conv conv=%s — aborted %d task(s)', conv_id[:8], aborted)
+    # ★ ③-3 (pt_a21cd6eb): also tombstone running DB rows the registry has
+    #   LOST — the in-registry sweep above structurally cannot reach them
+    #   (measured 2026-08-01: abort-conv returned 0 while a live task spun).
+    from lib.tasks_pkg.manager import (
+        plant_abort_tombstones_for_conv as _plant_conv,
+    )
+    tombstoned = _plant_conv(conv_id, source='api_chat_abort_conv')
+    if aborted or tombstoned:
+        logger.info('[Chat] Abort-by-conv conv=%s — aborted %d task(s), '
+                    'tombstoned %d registry-lost',
+                    conv_id[:8], aborted, tombstoned)
     else:
         logger.debug('[Chat] Abort-by-conv conv=%s — no running tasks found', conv_id[:8])
-    return api_ok({'aborted': aborted})
+    return api_ok({'aborted': aborted, 'tombstoned': tombstoned})
 @api_v1_chat_bp.route('/api/v1/chat/abort/<task_id>', methods=['POST'], endpoint='ui_chat_abort')
 @require_scope('chat')
 def chat_abort(task_id):
@@ -112,6 +119,17 @@ def chat_abort(task_id):
     with tasks_lock:
         task = tasks.get(task_id)
     if not task:
+        # ★ ③-3 (pt_a21cd6eb): a registry miss no longer means “no such
+        #   task” — the 2026-08-01 evaporation family proved a LIVE task can
+        #   be missing here (abort 404'd while the worker kept cycling).
+        #   When a running DB row exists, plant an abort tombstone: the
+        #   worker's abort_check consumes it at its next retry poll.
+        from lib.tasks_pkg.manager import plant_abort_tombstone as _plant
+        if _plant(task_id, source='api_chat_abort'):
+            return api_ok(taskId=task_id, status='abort_signaled',
+                          note='task absent from registry; abort tombstone '
+                               'planted — the live worker consumes it at its '
+                               'next abort poll')
         return api_not_found('Not found')
     was_already_aborted = task.get('aborted', False)
     task['aborted'] = True
@@ -151,7 +169,95 @@ def chat_abort(task_id):
         except (OSError, ProcessLookupError) as e:
             logger.debug('[Chat] Task %s — subprocess kill skipped: %s', task_id[:8], e)
 
+    # ── User-Stop busy-projection broadcast ──
+    # The busy projection (snapshot_running_by_conv → conv_has_work_in_flight)
+    # already EXCLUDES an aborted task by design ("aborted always wins: the
+    # instant the user presses Stop the conversation must read idle"), but a
+    # frame only leaves the server when someone EMITS it — and this seam
+    # never did. Without it the originating tab's authoritative busy Set
+    # still holds this tid after finishStream cleared the local handles
+    # (activeStreams + conv.activeTaskId): convIsBusy keeps the composer in
+    # Stop shape while Priority-3 of the stop cascade has no handle left, so
+    # every further click is a silent no-op until the task fully unwinds and
+    # the TERMINAL frame lands (up to a whole tool call later) — the "Stop
+    # takes several clicks" report. This is the third emit site of the SAME
+    # broadcast: the supersede sweep (manager/_registry.py P3) and
+    # notify_terminal_busy_state already carry the other two.
+    # Unconditional: a duplicate abort re-asserts the idle projection for a
+    # client that missed the first frame. Fail-open: a notify/import error
+    # must never break the abort path (notify_conv_changed is fail-open too).
+    if _conv_id and _conv_id != '?':
+        try:
+            from lib.conversations.meta_cache import notify_conv_changed
+            from lib.tasks_pkg.manager._registry import task_user_id
+            notify_conv_changed(_conv_id, rev=None, user_id=task_user_id(task))
+        except Exception as _ne:
+            logger.warning('[Chat] Task %s abort busy-notify failed: %s',
+                           task_id[:8], _ne)
+
     return api_ok()
+
+
+@api_v1_chat_bp.route('/api/v1/chat/interrupt-command/<task_id>', methods=['POST'],
+                      endpoint='ui_chat_interrupt_command')
+@require_scope('chat')
+def chat_interrupt_command(task_id):
+    """Interrupt the task's CURRENTLY-RUNNING run_command — WITHOUT aborting
+    the task (owner directive 2026-08-01, pt_232244fb).
+
+    Sets ``task['_cmd_interrupt']``; the run_command read loop (which polls
+    every ~0.2s) consumes it, kills the process tree, and returns the
+    PARTIAL output plus the interruption marker as an ordinary tool result —
+    so the model sees what the command produced before being stopped and the
+    turn continues. This is the per-command counterpart of
+    ``/api/v1/chat/abort/<task_id>`` (which stops the WHOLE turn).
+
+    Response shapes (all 200 except a missing task):
+      * ``{'interrupted': True, 'pid': N}``                  — flag planted
+      * ``{'interrupted': False, 'reason': 'task_not_running'}``
+      * ``{'interrupted': False, 'reason': 'no_active_command'}`` — the task
+        is not inside a run_command right now (nothing to interrupt)
+    """
+    with tasks_lock:
+        task = tasks.get(task_id)
+    if not task:
+        return api_not_found('Not found')
+    if task.get('status') != 'running' or task.get('aborted'):
+        return api_ok({'interrupted': False, 'reason': 'task_not_running'})
+    pid = task.get('_subprocess_pid')
+    if not pid:
+        return api_ok({'interrupted': False, 'reason': 'no_active_command'})
+    task['_cmd_interrupt'] = {'source': 'user', 'ts': time.time(), 'note': '',
+                              'pid': pid}
+    audit_log('api_chat_interrupt_command',
+              key_id=(current_auth().key_id if current_auth() else ''),
+              task_id=task_id)
+    logger.info('[Chat] Task %s — user interrupt requested for run_command pid=%s',
+                task_id[:8], pid)
+    return api_ok({'interrupted': True, 'pid': pid})
+
+
+def _live_unregistered_gate(task_id) -> bool:
+    """③-2 (pt_a21cd6eb): positive proof-of-life for a registry-missing task.
+
+    The stale-checkpoint flip assumes “not in THIS replica's memory ⇒
+    crashed”, but the 2026-08-01 evaporation family proved a task can be
+    ALIVE while unregistered — and each flip then corrupts a live turn's row
+    to 'interrupted' (measured 2× in one afternoon). A still-growing event
+    log (latest row < 120s old) is positive proof of life. Probe failure
+    fails SAFE to the legacy verdict (gate False), preserving Epic C
+    crash-recovery semantics when the oracle is unavailable.
+    """
+    try:
+        from lib.tasks_pkg.event_log import latest_event_ts as _let
+        _mx = _let(task_id)
+        return bool(_mx) and (int(time.time() * 1000) - _mx) < 120_000
+    except Exception as _fe:
+        logger.debug('[Chat] Poll %s — freshness probe failed: %s',
+                     task_id[:8], _fe)
+        return False
+
+
 @api_v1_chat_bp.route('/api/v1/chat/poll/<task_id>', methods=['GET'], endpoint='ui_chat_poll')
 @require_scope('chat')
 def chat_poll(task_id):
@@ -257,7 +363,7 @@ def chat_poll(task_id):
             r['endpointIteration'] = task.get('_endpoint_iteration', 0)
             if task.get('_endpoint_stop_reason'):
                 r['endpointStopReason'] = task['_endpoint_stop_reason']
-        return jsonify(r)
+        return api_ok(r)
 
     logger.debug('[Chat] Poll %s — not in memory, checking DB', task_id[:8])
     db = get_db(DOMAIN_CHAT)
@@ -294,29 +400,45 @@ def chat_poll(task_id):
                 _sharded = (_ge('TOFU_RUNTIME_STATE_BACKEND') or 'inproc').strip().lower() == 'redis'
             except Exception as _e_be:
                 logger.debug('[Chat] backend probe failed: %s', _e_be)
-            _verdict_status, _reconnect_hint = _running_checkpoint_verdict(_sharded)
-            effective_status = _verdict_status
-            if _reconnect_hint:
-                logger.info('[Chat] Poll %s — running checkpoint absent locally under sharded backend; '
-                            'reporting running+reconnect (task likely on another replica — affinity re-route). '
-                            '%dchars content, %dchars thinking.',
-                            task_id[:8], _db_content_len, _db_thinking_len)
-                # Do NOT flip the DB to interrupted — the task is (probably)
-                # alive on its owning replica; flipping would corrupt its state.
+            # ★ ③-2 (pt_a21cd6eb): liveness gate BEFORE the absent=crashed
+            #   flip. The flip assumes “not in THIS replica's memory ⇒ crashed”,
+            #   but the 2026-08-01 evaporation family proved a task can be
+            #   ALIVE while unregistered — and each flip then corrupts a live
+            #   turn's row to 'interrupted' (measured 2× in one afternoon).
+            #   A still-growing event log is positive proof of life: report
+            #   running+reconnect (same shape as the sharded verdict) instead.
+            _fresh_gate = _live_unregistered_gate(task_id)
+            if _fresh_gate and not _sharded:
+                logger.warning('[Chat] Poll %s — absent from memory but event '
+                               'log is FRESH (<120s old) — live-but-unregistered; '
+                               'reporting running+reconnect, NOT flipping to '
+                               'interrupted', task_id[:8])
+                effective_status = 'running'
+                _reconnect_hint = True
             else:
-                logger.warning('[Chat] Poll %s — found stale checkpoint (status=running) in DB but task is NOT in memory. '
-                               'Server likely crashed mid-task. Returning status=interrupted with %dchars content, %dchars thinking.',
-                               task_id[:8], _db_content_len, _db_thinking_len)
-                # effective_status already 'interrupted' from the verdict.
-                # ★ Update DB so future polls don't re-trigger this warning
-                try:
-                    db.execute("UPDATE task_results SET status='interrupted' WHERE task_id=?", (task_id,))
-                    db.commit()
-                except Exception as e:
-                    logger.warning('[Chat] Failed to update stale task %s to interrupted: %s', task_id[:8], e)
-                # ★ P0 observability: surface the activeTaskId ↔ msg _taskId
-                #   desync behind an empty finish-bar (no persisted metadata).
-                _log_poll_task_id_mismatch(db, row['conv_id'], task_id, _db_meta)
+                _verdict_status, _reconnect_hint = _running_checkpoint_verdict(_sharded)
+                effective_status = _verdict_status
+                if _reconnect_hint:
+                    logger.info('[Chat] Poll %s — running checkpoint absent locally under sharded backend; '
+                                'reporting running+reconnect (task likely on another replica — affinity re-route). '
+                                '%dchars content, %dchars thinking.',
+                                task_id[:8], _db_content_len, _db_thinking_len)
+                    # Do NOT flip the DB to interrupted — the task is (probably)
+                    # alive on its owning replica; flipping would corrupt its state.
+                else:
+                    logger.warning('[Chat] Poll %s — found stale checkpoint (status=running) in DB but task is NOT in memory. '
+                                   'Server likely crashed mid-task. Returning status=interrupted with %dchars content, %dchars thinking.',
+                                   task_id[:8], _db_content_len, _db_thinking_len)
+                    # effective_status already 'interrupted' from the verdict.
+                    # ★ Update DB so future polls don't re-trigger this warning
+                    try:
+                        db.execute("UPDATE task_results SET status='interrupted' WHERE task_id=?", (task_id,))
+                        db.commit()
+                    except Exception as e:
+                        logger.warning('[Chat] Failed to update stale task %s to interrupted: %s', task_id[:8], e)
+                    # ★ P0 observability: surface the activeTaskId ↔ msg _taskId
+                    #   desync behind an empty finish-bar (no persisted metadata).
+                    _log_poll_task_id_mismatch(db, row['conv_id'], task_id, _db_meta)
         else:
             logger.debug('[Chat] Poll %s from DB — status=%s content=%dchars thinking=%dchars '
                          'finishReason=%s model=%s error=%s',
@@ -396,7 +518,7 @@ def chat_poll(task_id):
                 r['fallbackReason'] = _db_meta['fallbackReason']
             if _db_meta.get('fallbackKind'):
                 r['fallbackKind'] = _db_meta['fallbackKind']
-        return jsonify(r)
+        return api_ok(r)
 
     logger.warning('[Chat] Poll %s — NOT FOUND in memory or DB! Task may have been cleaned up. '
                    'Client will receive 404 and may lose accumulated content.',

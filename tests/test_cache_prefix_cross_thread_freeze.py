@@ -112,21 +112,230 @@ def test_other_conv_never_leaks():
             st._cache_states.clear()
 
 
-def test_cold_sibling_not_used():
-    """A sibling entry that was itself cold (no read/write >1000) contributes
-    0 — we only protect against a genuinely-cached prior prefix."""
+def test_single_zero_round_does_not_open_guard():
+    """★ THE 2026-08-01 INCIDENT INVARIANT. A sibling whose LAST round read
+    AND wrote zero tokens must STILL contribute its boundary: one zero round
+    does NOT prove the prefix is uncached (Anthropic write-visibility race,
+    gateway stochastic miss, namespace flip, kimi's never-reported
+    cache_write). The old gate (read>1000 or write>1000) collapsed here,
+    letting micro_compact rewrite the just-sent prefix → the next round
+    missed → the guard stayed down → a self-feeding re-bill loop (measured:
+    conv ms9ow2tt calls 3→6). Only COLD_STREAK_GUARD_OPEN CONSECUTIVE cold
+    rounds may open it (see test_cold_streak_opens_guard)."""
     st = _fresh_state_module()
     from lib.tasks_pkg.cache_tracking._prefix import get_cache_prefix_count
     conv = 'conv-xthread-4'
     with st._cache_lock:
         st._cache_states.clear()
-        st._cache_states[(conv, 333333)] = _make_state(400, read=0, write=0)
+        # One zero-token round (streak=1) against a previously-sent prefix of
+        # 400 messages: the guard must stay UP.
+        _s = _make_state(400, read=0, write=0)
+        _s.cold_streak = 1
+        st._cache_states[(conv, 333333)] = _s
     try:
         got = get_cache_prefix_count(conv)
-        assert got == 0, f'cold sibling contributes 0, got {got}'
+        assert got == 398, (
+            f'one cold round must NOT open the guard (398), got {got}')
     finally:
         with st._cache_lock:
             st._cache_states.clear()
+
+
+def test_cold_streak_opens_guard():
+    """After COLD_STREAK_GUARD_OPEN consecutive verifiably-cold rounds the
+    guard legitimately OPENS — a genuinely dead cache makes prefix compaction
+    free again (L1's purpose). Below the threshold it stays up."""
+    st = _fresh_state_module()
+    from lib.tasks_pkg.cache_tracking._prefix import get_cache_prefix_count
+    from lib.tasks_pkg.cache_tracking._state import COLD_STREAK_GUARD_OPEN
+    conv = 'conv-xthread-5'
+    with st._cache_lock:
+        st._cache_states.clear()
+        _s = _make_state(400, read=0, write=0)
+        _s.cold_streak = COLD_STREAK_GUARD_OPEN
+        st._cache_states[(conv, 444444)] = _s
+        _s2 = _make_state(500, read=0, write=0)
+        _s2.cold_streak = COLD_STREAK_GUARD_OPEN - 1
+        st._cache_states[(conv, 555555)] = _s2
+    try:
+        # The streak-cold sibling contributes 0, but the below-threshold one
+        # still holds its floor — max() semantics.
+        got = get_cache_prefix_count(conv)
+        assert got == 498, (
+            f'below-threshold sibling must hold the floor (498), got {got}')
+        # With ONLY streak-cold entries the boundary collapses to 0.
+        with st._cache_lock:
+            del st._cache_states[(conv, 555555)]
+        got_cold = get_cache_prefix_count(conv)
+        assert got_cold == 0, (
+            f'streak-cold guard must open (0), got {got_cold}')
+    finally:
+        with st._cache_lock:
+            st._cache_states.clear()
+
+
+def _usage(read=0, write=0):
+    return {'cache_read_input_tokens': read,
+            'cache_creation_input_tokens': write}
+
+
+def test_streak_bookkeeping_in_detect():
+    """detect_cache_break drives the streak: cold rounds increment (capped at
+    COLD_STREAK_GUARD_OPEN), any warm round (read OR write over the floor)
+    resets, and a usage-less round leaves it unchanged (a failed call carries
+    no cache signal and must not open the guard)."""
+    st = _fresh_state_module()
+    from lib.tasks_pkg.cache_tracking import detect_cache_break
+    from lib.tasks_pkg.cache_tracking._state import (
+        COLD_STREAK_GUARD_OPEN, _state_key)
+    conv = 'conv-streak-1'
+    msgs = [{'role': 'system', 'content': 'S' * 200},
+            {'role': 'user', 'content': 'u'}]
+    with st._cache_lock:
+        st._cache_states.clear()
+    try:
+        for i in range(1, COLD_STREAK_GUARD_OPEN + 2):
+            detect_cache_break(conv, msgs, None, 'claude-opus-4',
+                               usage=_usage(0, 0))
+            got = st._cache_states[_state_key(conv)].cold_streak
+            assert got == min(i, COLD_STREAK_GUARD_OPEN), (
+                f'round {i}: streak should be {min(i, COLD_STREAK_GUARD_OPEN)}, '
+                f'got {got}')
+        # A warm round (write only — the Anthropic miss+rewrite shape) resets.
+        detect_cache_break(conv, msgs, None, 'claude-opus-4',
+                           usage=_usage(0, 50000))
+        assert st._cache_states[_state_key(conv)].cold_streak == 0, (
+            'a fresh cache_write must reset the streak (entry just re-created)')
+        # A usage-less round does not move it.
+        detect_cache_break(conv, msgs, None, 'claude-opus-4', usage=None)
+        detect_cache_break(conv, msgs, None, 'claude-opus-4',
+                           usage=_usage(0, 0))
+        got = st._cache_states[_state_key(conv)].cold_streak
+        assert got == 1, (
+            f'usage-less round must not increment (only the zero-usage round '
+            f'after it counts), got {got}')
+    finally:
+        with st._cache_lock:
+            st._cache_states.clear()
+
+
+def test_e2e_single_miss_keeps_prefix_frozen_then_recovers():
+    """★ THE INCIDENT REPLAYED. Sequence measured on conv ms9ow2tt
+    (2026-08-01, calls 3→6): a warm prefix, then one zero-token round
+    (gateway miss), then L1's guard check, then recovery. With the hysteresis
+    the guard stays UP through the transient miss — the prefix bytes the NEXT
+    round sends are identical, so the entry is read back and the streak
+    resets instead of looping."""
+    st = _fresh_state_module()
+    from lib.tasks_pkg.cache_tracking import (
+        detect_cache_break, get_cache_prefix_count)
+    conv = 'conv-streak-e2e'
+    # 9 messages → a sent prefix of 7 (EDITABLE_TAIL_COUNT=2).
+    msgs = [{'role': 'system', 'content': 'S' * 200}]
+    for i in range(4):
+        msgs.append({'role': 'user', 'content': f'u{i}'})
+        msgs.append({'role': 'assistant', 'content': f'a{i}'})
+    with st._cache_lock:
+        st._cache_states.clear()
+    try:
+        # Round 1: warm (a big write establishes the entry).
+        detect_cache_break(conv, msgs, None, 'claude-opus-4',
+                           usage=_usage(0, 90000))
+        assert get_cache_prefix_count(conv) == 7
+        # Round 2: the transient gateway miss (read=0, write=0). Guard must
+        # stay UP — this is exactly where the old gate collapsed and let L1
+        # rewrite msg[35]/msg[42].
+        detect_cache_break(conv, msgs, None, 'claude-opus-4',
+                           usage=_usage(0, 0))
+        assert get_cache_prefix_count(conv) == 7, (
+            'one transient miss opened the guard — the 2026-08-01 loop')
+        # Round 3: still zero (write-visibility race). Guard STILL up.
+        detect_cache_break(conv, msgs, None, 'claude-opus-4',
+                           usage=_usage(0, 0))
+        assert get_cache_prefix_count(conv) == 7
+        # Round 4: the entry is read back (bytes never mutated) → streak
+        # resets, guard remains.
+        detect_cache_break(conv, msgs, None, 'claude-opus-4',
+                           usage=_usage(85000, 0))
+        assert get_cache_prefix_count(conv) == 7
+        assert st._cache_states[(conv, __import__('threading').get_ident())].cold_streak == 0
+    finally:
+        with st._cache_lock:
+            st._cache_states.clear()
+
+
+def test_hwm_write_failure_warns_throttled():
+    """FIX B-lite observability: a durable-floor WRITE failure must surface as
+    a WARNING (degraded protection — it was DEBUG-silent when two production
+    convs lost cachePrefixHWM), throttled to once per conv per window so a
+    strained DB cannot spam error.log."""
+    import logging
+    from lib.tasks_pkg.cache_tracking import _persist
+    records: list[str] = []
+    logger = logging.getLogger('lib.tasks_pkg.cache_tracking._persist')
+    h = logging.Handler()
+    h.emit = lambda rec: records.append(rec.getMessage())
+    prev_level = logger.level
+    logger.setLevel(logging.WARNING)
+    logger.addHandler(h)
+    _persist._warn_last.clear()
+    try:
+        _persist._warn_throttled('convX', '[CacheHWM] advance failed conv=%s: %s',
+                                 'convX', 'boom')
+        _persist._warn_throttled('convX', '[CacheHWM] advance failed conv=%s: %s',
+                                 'convX', 'boom-again')
+        _persist._warn_throttled('convY', '[CacheHWM] advance failed conv=%s: %s',
+                                 'convY', 'boom')
+    finally:
+        logger.removeHandler(h)
+        logger.setLevel(prev_level)
+        _persist._warn_last.clear()
+    assert len(records) == 2, (
+        f'first-per-conv must warn once each (throttled), got {records}')
+    assert 'boom' in records[0] and 'convY' in records[1]
+
+
+def test_gap_s_falls_back_to_sibling_timestamp():
+    """BUG C (44/44 broken records 2026-08-01): a fresh-thread round-1 must
+    report the TRUE cross-turn gap, not 0.0. Seed a sibling state for the same
+    conv with a timestamp 100s in the past; the fresh thread's first record
+    must carry gap_s ≈ 100."""
+    import io
+    import json as _json
+    import logging
+    import time as _time
+    st = _fresh_state_module()
+    from lib.tasks_pkg.cache_tracking import detect_cache_break
+    conv = 'conv-gap-1'
+    msgs = [{'role': 'system', 'content': 'S' * 200},
+            {'role': 'user', 'content': 'u'}]
+    with st._cache_lock:
+        st._cache_states.clear()
+        _sib = _make_state(50, read=80000)
+        _sib.last_update_time = _time.time() - 100.0
+        st._cache_states[(conv, 999999)] = _sib
+    _logger = logging.getLogger('lib.tasks_pkg.cache_tracking._detect')
+    _buf = io.StringIO()
+    _h = logging.StreamHandler(_buf)
+    _prev = _logger.level
+    _logger.setLevel(logging.INFO)
+    _logger.addHandler(_h)
+    try:
+        detect_cache_break(conv, msgs, None, 'claude-opus-4',
+                           usage=_usage(0, 50000))
+    finally:
+        _logger.removeHandler(_h)
+        _logger.setLevel(_prev)
+        with st._cache_lock:
+            st._cache_states.clear()
+    rec = None
+    for line in _buf.getvalue().splitlines():
+        if '[CacheRoundRecord]' in line:
+            rec = _json.loads(line.split('[CacheRoundRecord]', 1)[1].strip())
+    assert rec is not None, 'no CacheRoundRecord emitted'
+    assert rec['gap_s'] > 50.0, (
+        f"fresh-thread round-1 must inherit the sibling's true gap (~100s), "
+        f"got gap_s={rec['gap_s']} (the broken-0.0 bug)")
 
 
 # ── END-TO-END freeze + NEUTER ──────────────────────────────────────────────

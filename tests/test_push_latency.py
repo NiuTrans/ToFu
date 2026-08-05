@@ -50,16 +50,51 @@ class TestPushLatencyPingPong:
         _handle_client_frame(client, None)
         assert client._queue.empty()
 
-    def test_pong_shares_the_single_writer_queue_ordering(self):
-        # A frame already queued by the (single) writer path, then a ping:
-        # the pong is appended AFTER it — same FIFO queue, one writer, no
-        # out-of-band interleaving.
+    def test_pong_jumps_the_data_backlog_single_writer(self):
+        # pt_afbaf3d7: the pong travels the SAME single-writer path (the queue
+        # _sender drains — never a second direct socket write), but via the
+        # CONTROL LANE: it is drained BEFORE an already-queued data backlog.
+        # Under loop congestion a FIFO pong would arrive past the client's 8s
+        # watchdog, which then force-closes a HEALTHY socket. Nothing is lost:
+        # the data frame is delivered right after.
         client = PushClient()
         client.enqueue({'channel': 'chat', 'taskId': 't', 'type': 'content_delta',
                         'delta': 'hello'})
+        client.enqueue({'channel': 'chat', 'taskId': 't', 'type': 'content_delta',
+                        'delta': 'world'})
         _handle_client_frame(client, {'action': 'ping', 't': 42})
 
         first = asyncio.run(client.drain())
         second = asyncio.run(client.drain())
-        assert first['type'] == 'content_delta'
-        assert second == {'channel': 'system', 'type': 'pong', 't': 42}
+        third = asyncio.run(client.drain())
+        assert first == {'channel': 'system', 'type': 'pong', 't': 42}
+        assert second['type'] == 'content_delta' and second['delta'] == 'hello'
+        assert third['type'] == 'content_delta' and third['delta'] == 'world'
+
+    def test_pong_wakes_a_drain_sleeping_on_an_empty_queue(self):
+        # An IDLE socket has no data traffic: drain() is asleep in queue.get().
+        # A control frame must wake it PROMPTLY (not after the 30s keepalive
+        # timeout), or every idle ping would outlive the client watchdog.
+        async def scenario():
+            client = PushClient()
+            task = asyncio.ensure_future(client.drain())
+            await asyncio.sleep(0)  # let drain() arm its waiters
+            await asyncio.sleep(0)
+            _handle_client_frame(client, {'action': 'ping', 't': 7})
+            return await asyncio.wait_for(task, timeout=2)
+
+        frame = asyncio.run(scenario())
+        assert frame == {'channel': 'system', 'type': 'pong', 't': 7}
+
+    def test_data_lane_stays_fifo_without_control_frames(self):
+        # The priority lane must not reorder ordinary traffic: two data frames
+        # with no interleaved pong drain in their original order.
+        client = PushClient()
+        client.enqueue({'channel': 'chat', 'taskId': 't', 'type': 'content_delta',
+                        'delta': 'a'})
+        client.enqueue({'channel': 'chat', 'taskId': 't', 'type': 'content_delta',
+                        'delta': 'b'})
+        first = asyncio.run(client.drain())
+        second = asyncio.run(client.drain())
+        assert first['delta'] == 'a'
+        assert second['delta'] == 'b'

@@ -21,6 +21,8 @@ from lib.tasks_pkg.compaction._constants import (
     _SUMMARY_COOLDOWN,
     _SUMMARY_TRIGGER_RATIO,
     _summary_cooldowns,
+    heuristic_floor_max_ratio,
+    real_anchor_slack,
 )
 
 logger = get_logger(__name__)
@@ -78,12 +80,6 @@ def _count_tokens_authoritative(messages: list, task: dict | None = None) -> tup
     Returns ``(tokens, method)`` where method is the backend that
     produced the count (``'usage_cache' | 'anthropic_api' | 'tiktoken' | …``).
     """
-    try:
-        from lib.token_counter import count_tokens as _ct_count_tokens
-    except Exception as e:
-        logger.debug('[Compact] token_counter unavailable, using heuristic: %s', e)
-        return _estimate_total_tokens(messages), 'heuristic_fallback'
-
     cfg = (task or {}).get('config', {}) or {}
     model = cfg.get('model', '') or ''
     context_limit = _get_context_limit(task)
@@ -95,19 +91,35 @@ def _count_tokens_authoritative(messages: list, task: dict | None = None) -> tup
     tools = (task or {}).get('_tool_schema') or None
 
     try:
-        result = _ct_count_tokens(
-            messages,
-            model=model,
-            tools=tools,
-            conv_id=conv_id or None,
-            context_limit=context_limit,
-        )
-        auth_tokens = int(result.get('tokens', 0))
-        method = str(result.get('method', 'unknown'))
+        from lib.token_counter import count_tokens as _ct_count_tokens
     except Exception as e:
-        logger.warning('[Compact] count_tokens call failed, falling back to '
-                       'heuristic: %s', e)
-        return _estimate_total_tokens(messages), 'heuristic_fallback'
+        logger.debug('[Compact] token_counter unavailable, using heuristic: %s', e)
+        _ct_count_tokens = None
+
+    if _ct_count_tokens is None:
+        auth_tokens, method = _estimate_total_tokens(messages), 'heuristic_fallback'
+    else:
+        try:
+            result = _ct_count_tokens(
+                messages,
+                model=model,
+                tools=tools,
+                conv_id=conv_id or None,
+                context_limit=context_limit,
+            )
+            auth_tokens = int(result.get('tokens', 0))
+            method = str(result.get('method', 'unknown'))
+        except Exception as e:
+            logger.warning('[Compact] count_tokens call failed, falling back to '
+                           'heuristic: %s', e)
+            auth_tokens, method = _estimate_total_tokens(messages), 'heuristic_fallback'
+
+    # Exact tiers are provider/usage-MEASURED — they outrank any estimate or
+    # anchor. Everything else (tiktoken / offline tokenizers / heuristic)
+    # is an estimate and gets both guards below.
+    _base_method = method.split('+', 1)[0]
+    _is_estimate = _base_method not in (
+        'usage_cache', 'anthropic_api', 'gemini_api')
 
     # Safety floor for the COMPACTION GATE only (not the UI counter): never
     # let the gate report FEWER tokens than the conservative entropy
@@ -118,11 +130,57 @@ def _count_tokens_authoritative(messages: list, task: dict | None = None) -> tup
     # prompt slip past the trigger into the fatal reactive path. Taking the
     # max keeps the gate on the safe side regardless of which backend wins,
     # while the UI still gets the accuracy-optimized count from count_tokens.
+    #
+    # ★ BOUNDED (2026-08-01, epic pt_18e9f7a6): the floor exists ONLY to
+    #   cover tiktoken's proven 0.66x under-count. Left unbounded it inverts
+    #   into a systematic OVER-count on CJK-heavy content (1 token per CJK
+    #   char + accumulated reasoning_content) — measured ~10x on
+    #   conv=mrxinirv0t6n6v (gate 2,198,193 vs real prompt 215,552 →
+    #   force-compact fired at ~22% real window usage). Cap the floor at
+    #   heuristic_floor_max_ratio() × the estimate-tier count.
     heuristic_tokens = _estimate_total_tokens(messages)
     if heuristic_tokens > auth_tokens:
+        if _is_estimate and auth_tokens > 0:
+            _ratio = heuristic_floor_max_ratio()
+            _floor_cap = int(auth_tokens * _ratio)
+            if heuristic_tokens > _floor_cap:
+                logger.info('[Compact] heuristic floor %d capped at %.2f×%d=%d '
+                            '(via %s) — CJK over-count guard',
+                            heuristic_tokens, _ratio, auth_tokens,
+                            _floor_cap, method)
+                heuristic_tokens = _floor_cap
         logger.debug('[Compact] heuristic floor %d > authoritative %d (via %s) '
                      '— using floor for gate', heuristic_tokens, auth_tokens, method)
-        return heuristic_tokens, f'{method}+heuristic_floor'
+        auth_tokens = heuristic_tokens
+        method = f'{method}+heuristic_floor'
+
+    # ★ REAL-anchor clamp (estimate tiers only; 2026-08-01, epic pt_18e9f7a6).
+    #   When no exact tier could validate (task cold start / the message list
+    #   was just REWRITTEN by a compaction — the usage_cache signature never
+    #   matches again), estimates are the only input, and on CJK-heavy
+    #   content BOTH can sit an order of magnitude above reality. Clamp the
+    #   count DOWN to the conversation's last provider-MEASURED prompt ×
+    #   (1 + slack). Down-only: over-triggering destroys context lossily and
+    #   irreversibly, while under-triggering is bounded by the next round's
+    #   fresh usage recording and the L3 reactive net.
+    if _is_estimate:
+        _anchor, _anchor_src = 0, 'none'
+        try:
+            from lib.tasks_pkg.compaction._real_anchor import real_prompt_anchor
+            _anchor, _anchor_src = real_prompt_anchor(conv_id, task)
+        except Exception as _ae:
+            logger.debug('[Compact] real anchor lookup failed: %s', _ae)
+        if _anchor > 0:
+            _slack = real_anchor_slack()
+            _anchor_cap = int(_anchor * (1.0 + _slack))
+            if auth_tokens > _anchor_cap:
+                logger.info('[Compact] estimate count %d (via %s) clamped to '
+                            'real anchor %d × (1+%.2f) = %d (src=%s) conv=%s '
+                            '— provider-measured yardstick wins over estimate',
+                            auth_tokens, method, _anchor, _slack, _anchor_cap,
+                            _anchor_src, conv_id[:8] if conv_id else '?')
+                auth_tokens = _anchor_cap
+                method = f'{method}+anchor:{_anchor_src}'
     return auth_tokens, method
 
 

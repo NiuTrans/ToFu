@@ -8,6 +8,7 @@ tool execution.
 
 import random
 
+from lib.agent_core.events import EventType, build_event
 from lib.log import get_logger
 from lib.tasks_pkg.manager import append_event
 
@@ -443,6 +444,20 @@ def analyse_stream_result(
                 _premature_retry_count, _CANNED_GREETING_RETRY_MAX,
                 _backoff_s,
             )
+            # ★ Drop the poisoned text BEFORE re-streaming. This is the ONLY
+            #   retry bucket whose discarded round HAS content (zero-byte /
+            #   classic / empty-stop all require empty content), so it is also
+            #   the only one that must reset the accumulators — otherwise each
+            #   attempt's greeting concatenates onto the last (2026-08-02
+            #   triple-greeting bug). ``discard=True`` tells the client
+            #   reducer to clear WITHOUT the tool-round prose-capture guard:
+            #   this round issued no tool calls, so there is no batch to
+            #   stamp onto and the freeze guard would keep the text forever.
+            with task['content_lock']:
+                task['content'] = ''
+                task['thinking'] = ''
+            append_event(task, build_event(
+                EventType.DELTA_RESET, roundNum=round_num, discard=True))
             append_event(task, {
                 'type': 'phase',
                 'phase': 'retrying',

@@ -71,8 +71,10 @@ class TestOnOpenNarrationBackfillWiring:
             'reconcile-fail). A merge or refactor likely dropped a call site.')
 
     def test_drainer_symbols_still_exported(self):
-        from lib.translate.segment_backfill import (  # noqa: F401
+        from lib.translate.segment_backfill import (
             backfill_conv_narration_segments, conv_has_backfill_candidates)
+        assert callable(backfill_conv_narration_segments)
+        assert callable(conv_has_backfill_candidates)
 
 
 @pytest.mark.api
@@ -110,8 +112,11 @@ class TestAsyncConversationCrud:
         resp = flask_client.get('/api/v1/conversations')
         assert resp.status_code == 200
         data = resp.get_json()
-        assert isinstance(data, list)
-        assert a_conv in [c['id'] for c in data]
+        # charter#0 envelope (api-contract migration — the deliberate
+        # contract; direction-aligned from the old bare-array pin)
+        assert data.get('ok') is True and isinstance(data.get('items'), list), (
+            f'list envelope drifted: {data!r}')
+        assert a_conv in [c['id'] for c in data['items']]
 
     def test_list_convs_default_is_metadata_only(self, flask_client, a_conv):
         """The default list must NOT ship message BODIES (over-fetch fix) — it
@@ -119,7 +124,7 @@ class TestAsyncConversationCrud:
         ?full=1."""
         resp = flask_client.get('/api/v1/conversations')
         assert resp.status_code == 200
-        row = next(c for c in resp.get_json() if c['id'] == a_conv)
+        row = next(c for c in resp.get_json()['items'] if c['id'] == a_conv)
         assert 'messages' not in row, (
             'default list leaked message bodies — should be metadata-only')
         assert row.get('msgCount') == 2, f'msgCount wrong: {row.get("msgCount")}'
@@ -128,7 +133,7 @@ class TestAsyncConversationCrud:
         """?full=1 restores the legacy shape WITH message bodies."""
         resp = flask_client.get('/api/v1/conversations?full=1')
         assert resp.status_code == 200
-        row = next(c for c in resp.get_json() if c['id'] == a_conv)
+        row = next(c for c in resp.get_json()['items'] if c['id'] == a_conv)
         assert isinstance(row.get('messages'), list)
         assert len(row['messages']) == 2
         assert row['messages'][0]['content'] == 'hello async'

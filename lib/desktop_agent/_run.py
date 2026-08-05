@@ -107,6 +107,7 @@ def _start_egress_stream_streamed(cmd_id, cmd_params, permissions,
     try:
         start_egress_stream(cmd_params, on_chunk, on_exit)
     except Exception as e:
+        logger.warning('[Agent] egress stream failed: %s', e)
         err = f'{type(e).__name__}: {e}'
     if err:
         logger.warning('     ❌ egress_http_stream failed to start: %s', err)
@@ -136,12 +137,30 @@ def _ensure_agent_id():
     return agent_id
 
 
+def _agent_version() -> str:
+    """The agent's own version string ('' when unreadable).
+
+    Carried in every poll's registration frame so the server can see
+    agent↔server drift (the command protocol evolves WITH the server —
+    a release-line agent against a HEAD server can silently
+    mis-dispatch). Never raises: a version read failure must not stop
+    the agent from polling.
+    """
+    try:
+        from lib.version import __version__ as v
+        return (v or '').strip()
+    except Exception as e:
+        logger.debug('[Agent] version unreadable: %s', e)
+        return ''
+
+
 def _build_agent_frame(agent_id, permissions, share_roots=None):
     """Build the v2 registration frame sent with every poll."""
     return {
         'agent_id': agent_id,
         'name': socket.gethostname(),
         'platform': sys.platform,
+        'version': _agent_version(),
         'capabilities': {
             'write': bool(permissions.get('allow_write')),
             'exec': bool(permissions.get('allow_exec')),
@@ -158,7 +177,7 @@ def _build_agent_frame(agent_id, permissions, share_roots=None):
 # ══════════════════════════════════════════════════════════
 
 def run_agent(server_url, permissions, poll_interval=1.0, bridge_secret='',
-              stop_event=None):
+              stop_event=None, on_status=None):
     """Main agent loop — polls server for commands, executes locally, returns results.
 
     Args:
@@ -171,6 +190,14 @@ def run_agent(server_url, permissions, poll_interval=1.0, bridge_secret='',
         stop_event: optional ``threading.Event``; when set, the loop exits
             cleanly at the next poll boundary. Lets the desktop tray toggle the
             agent off without killing the process.
+        on_status: optional callable receiving a small dict on every LINK
+            transition — ``{'state': 'ok'}`` / ``'auth'`` (Tofu refused the
+            secret) / ``'proxy'`` (a gateway, NOT Tofu, answered — the URL is
+            wrong) / ``'http'`` (+code) / ``'unreachable'`` / ``'error'``.
+            Fires ONLY on transitions, never per-poll, so a tray menu can
+            refresh from it without a 1 Hz storm. The desktop tray renders
+            this as its link line: a silently-failing poll was exactly how a
+            proxy-URL attachment hid for hours (owner incident 2026-08-03).
     """
 
     endpoint = f'{server_url.rstrip("/")}/api/desktop/poll'
@@ -181,9 +208,28 @@ def run_agent(server_url, permissions, poll_interval=1.0, bridge_secret='',
     if bridge_secret:
         headers['X-Bridge-Secret'] = bridge_secret
 
+    _last_status = {'state': None}
+
+    def _emit(state, **extra):
+        if state == _last_status['state']:
+            return
+        _last_status['state'] = state
+        if on_status is None:
+            return
+        try:
+            on_status(dict({'state': state}, **extra))
+        except Exception as e:
+            logger.debug('[Agent] on_status callback failed: %s', e)
+
     agent_id = _ensure_agent_id()
     agent_frame = _build_agent_frame(
         agent_id, permissions, load_config().get('share_roots'))
+
+    if permissions.get('allow_egress'):
+        # E4: a previously-ensured CLIProxyAPI sidecar resumes with the
+        # agent — the subscription path must survive an agent reboot.
+        from lib.desktop_agent._adapter import maybe_resume_adapter
+        maybe_resume_adapter()
 
     logger.info('Desktop Agent starting...')
     logger.info('   Server: %s', server_url)
@@ -223,16 +269,40 @@ def run_agent(server_url, permissions, poll_interval=1.0, bridge_secret='',
             consecutive_errors = 0
 
             if resp.status_code == 401:
-                logger.error('Server returned 401 — bridge auth failed. '
-                             'Set --bridge-secret (or TOFU_BRIDGE_SECRET env var) '
-                             'to match the server.')
+                # Two utterly different refusals share this status. Tofu's
+                # own 401 (api_error envelope) means the bridge secret is
+                # wrong — a fresh connect line fixes it. A GATEWAY's 401
+                # (SSO proxy edge answering before Tofu ever sees the
+                # request) means the URL is wrong — no secret will ever
+                # pass, and the old log line sent the owner hunting the
+                # wrong half of the line (measured 2026-08-03).
+                from lib.desktop_agent._probe import is_tofu_error_envelope
+                try:
+                    tofu_refusal = is_tofu_error_envelope(resp.json())
+                except ValueError as e:
+                    logger.debug('[Agent] poll response not JSON: %s', e)
+                    tofu_refusal = False
+                if tofu_refusal:
+                    _emit('auth')
+                    logger.error('Server returned 401 — bridge auth failed. '
+                                 'Set --bridge-secret (or TOFU_BRIDGE_SECRET env var) '
+                                 'to match the server.')
+                else:
+                    _emit('proxy')
+                    logger.error(
+                        '401 answered by a GATEWAY, not Tofu — the server '
+                        'address is intercepted (SSO proxy?). Re-check the '
+                        'connect line\'s URL half (ssh tunnel: '
+                        'http://127.0.0.1:<port>).')
                 time.sleep(poll_interval * 10)
                 continue
             if resp.status_code != 200:
+                _emit('http', code=resp.status_code)
                 logger.info('Server returned %s', resp.status_code)
                 time.sleep(poll_interval * 3)
                 continue
 
+            _emit('ok')
             data = resp.json()
             commands = data.get('commands', [])
 
@@ -288,6 +358,7 @@ def run_agent(server_url, permissions, poll_interval=1.0, bridge_secret='',
 
         except requests.ConnectionError:
             consecutive_errors += 1
+            _emit('unreachable')
             if consecutive_errors == 1:
                 logger.info('Cannot reach server at %s, retrying...', server_url, exc_info=True)
             wait = min(poll_interval * (2 ** min(consecutive_errors, 5)), 60)
@@ -299,6 +370,7 @@ def run_agent(server_url, permissions, poll_interval=1.0, bridge_secret='',
             break
 
         except Exception as e:
+            _emit('error', detail=str(e)[:120])
             logger.error('Error: %s', e, exc_info=True)
             time.sleep(poll_interval * 2)
 

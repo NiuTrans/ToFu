@@ -12,7 +12,6 @@ from lib.log import get_logger
 from lib.request_parser import async_parse_body
 from routes._bridge_caller import (
     bridge_unauthorized as _bridge_unauthorized,
-    check_bridge_auth as _check_bridge_auth,
     resolve_bridge_caller as _resolve_bridge_caller,
 )
 

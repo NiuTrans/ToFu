@@ -50,6 +50,87 @@ api_v1_update_bp = Blueprint('api_v1_update', __name__)
 # 'paper' pattern). Frontend subscribes via pushSubscribe('update', taskId).
 UPDATE_CHANNEL = 'update'
 
+# ── Apply-state persistence (survives page reloads AND process restarts) ──
+# A download can take 5-15 minutes; the user will close or reload the page.
+# Push frames are transient and in-memory frontend state dies with the page,
+# so the terminal result is ALSO persisted here: /update/check projects
+# ``pending_restart`` (code landed, process still runs the old version) and
+# ``apply_in_progress`` (a live download, re-attachable via its task_id).
+_APPLY_STATE_NAME = 'update_apply_state.json'
+_ACTIVE_APPLIES: dict = {}  # task_id → Thread; in-process liveness truth
+
+
+def _apply_state_path() -> str:
+    return os.path.join(data_root(), _APPLY_STATE_NAME)
+
+
+def _write_apply_state(state: dict) -> None:
+    try:
+        from lib.json_store import write_json_atomic
+        write_json_atomic(_apply_state_path(), state)
+    except Exception as e:
+        logger.warning('[Update] apply-state write failed: %s', e)
+
+
+def _read_apply_state():
+    try:
+        from lib.json_store import read_json
+        st = read_json(_apply_state_path(), default=None)
+        return st if isinstance(st, dict) else None
+    except Exception as e:
+        logger.debug('[Update] apply-state read failed: %s', e)
+        return None
+
+
+def _enrich_with_apply_state(payload):
+    """Project the persisted apply state onto the /update/check payload.
+
+    * ``pending_restart`` — a finished apply landed code for
+      ``new_version`` while the running process still serves an older one
+      (clears itself the moment the restarted process reports the new
+      version, so no explicit ack endpoint is needed).
+    * ``apply_in_progress`` — a download whose worker thread is verifiably
+      alive in THIS process; the frontend can re-attach its push
+      subscription after a page reload. A 'running' marker whose thread is
+      gone (the owning process died mid-apply) is rewritten to
+      ``interrupted`` once so it stops resurfacing.
+    """
+    if not isinstance(payload, dict):
+        return payload
+    st = _read_apply_state()
+    if not st:
+        return payload
+    status = st.get('status')
+    if status == 'running':
+        tid = st.get('task_id') or ''
+        th = _ACTIVE_APPLIES.get(tid)
+        if th is not None and th.is_alive():
+            payload['apply_in_progress'] = {
+                'task_id': tid,
+                'started_at': st.get('started_at'),
+                'old_version': st.get('old_version'),
+            }
+        else:
+            _write_apply_state({**st, 'status': 'interrupted',
+                                'finished_at': time.time()})
+        return payload
+    if status == 'done' and st.get('needs_restart'):
+        from lib.self_update._version import current_version
+        new_ver = st.get('new_version') or ''
+        if new_ver and new_ver != current_version():
+            payload['pending_restart'] = {
+                'new_version': new_ver,
+                'old_version': st.get('old_version'),
+                'method': st.get('method'),
+                'finished_at': st.get('finished_at'),
+                'changed': True,
+                'deps_changed': bool(st.get('deps_changed')),
+                'deps_installed': bool(st.get('deps_installed')),
+                'error': st.get('error') or '',
+                'detail': st.get('detail') or '',
+            }
+    return payload
+
 
 @api_v1_update_bp.route('/api/v1/update/check', methods=['GET'])
 @require_auth
@@ -60,7 +141,11 @@ UPDATE_CHANNEL = 'update'
         'the official GitHub repository. Also reports whether this is a git '
         'checkout and whether the working tree is safe to fast-forward '
         '(runtime-state churn under .tofu/ is tolerated; tracked-source '
-        'edits block the update). Read-only.'
+        'edits block the update). Read-only. The payload also projects the '
+        'persisted apply state: ``pending_restart`` when a finished apply '
+        'landed a newer version than the running process serves, and '
+        '``apply_in_progress`` (with the re-attachable task_id) while a '
+        'download is verifiably alive in this process.'
     ),
     tags=['system'],
 )
@@ -72,6 +157,10 @@ def update_check():
         logger.error('[Update] check failed: %s', e, exc_info=True)
         return api_internal_error(e, context='update_check',
                                   source='api_v1.update.check')
+    try:
+        payload = _enrich_with_apply_state(payload)
+    except Exception as e:
+        logger.warning('[Update] apply-state enrichment failed: %s', e)
     return api_ok(payload)
 
 
@@ -124,20 +213,37 @@ def update_apply():
 
     def _worker():
         from lib.self_update import apply_update
+        from lib.self_update._version import current_version
+        _write_apply_state({'status': 'running', 'task_id': task_id,
+                            'started_at': time.time(),
+                            'old_version': current_version()})
         try:
             result = apply_update(progress=_progress)
         except Exception as e:
             logger.error('[Update] apply failed: %s', e, exc_info=True)
+            _write_apply_state({'status': 'failed', 'task_id': task_id,
+                                'finished_at': time.time(), 'ok': False,
+                                'error': 'Update failed unexpectedly.',
+                                'detail': str(e)[:300]})
             push_event(UPDATE_CHANNEL, task_id, {
                 'type': 'done', 'ok': False,
                 'error': 'Update failed unexpectedly. Check the server log.',
                 'detail': str(e)[:300],
             })
+            _ACTIVE_APPLIES.pop(task_id, None)
             return
+        # Terminal state is written BEFORE the registry pop: a concurrent
+        # /update/check between the two must never see a 'running' marker
+        # with no live thread and rewrite it to 'interrupted'.
+        _write_apply_state({'status': 'done', 'task_id': task_id,
+                            'finished_at': time.time(), **result})
         push_event(UPDATE_CHANNEL, task_id, {'type': 'done', **result})
+        _ACTIVE_APPLIES.pop(task_id, None)
 
-    threading.Thread(target=_worker, name=f'tofu-update-{task_id[:8]}',
-                     daemon=True).start()
+    t = threading.Thread(target=_worker, name=f'tofu-update-{task_id[:8]}',
+                         daemon=True)
+    _ACTIVE_APPLIES[task_id] = t
+    t.start()
     logger.info('[Update] apply started in background (task=%s)', task_id[:8])
     return api_ok({'taskId': task_id, 'started': True})
 

@@ -1,3 +1,5 @@
+# Incident anchor: born in commit f3725aa7 — docs(remote-worktree): RWA 设计稿落地 + ①号 desktop wire 前缀错配契约守卫
+# (funeral audit pt_c565a36b3e8f42e6, docs/RATCHET_AUDIT.md)
 """tests/test_desktop_cmdtype_parity.py — desktop 工具 wire 契约守卫(永久).
 
 wire 契约(docs/REMOTE_WORKTREE_DESIGN.md §3.1):命令 ``type`` = **完整**

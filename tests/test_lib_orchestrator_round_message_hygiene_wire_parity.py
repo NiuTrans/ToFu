@@ -1,3 +1,5 @@
+# Incident anchor: born in commit 99b1cc1e — refactor(orchestrator): pt_03f4cdf1 slice 18 — extract per-round mess...
+# (funeral audit pt_c565a36b3e8f42e6, docs/RATCHET_AUDIT.md)
 """Slice 18 wire-parity: _round_message_hygiene.py extraction from _run.py."""
 
 import inspect

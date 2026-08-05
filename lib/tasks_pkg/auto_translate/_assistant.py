@@ -234,6 +234,55 @@ def _maybe_auto_translate_assistant(conv_id, content, msg_idx, db=None, task=Non
             logger.info('%s conv=%s msg=%d content already in target language '
                         '(target=%s/%s) — skipping auto-translate (no-op)',
                         pfx, conv_id[:8], msg_idx, target_lang, target_code)
+            # ★ pt_3ea0e045: the no-op verdict must be a FIRST-CLASS terminal
+            #   state, not a silent log line. Before this, an already-target
+            #   deliverable committed NOTHING and said NOTHING — the client
+            #   auto-translate watchdog (armed by finishStream on every
+            #   frozen-ON settle) then polled the FULL conversation every ~6s
+            #   × 90s per arm waiting for a translatedContent that would
+            #   never exist (measured conv ms91b45tva0sym: 3 arms × 13 GETs
+            #   × 24 MB ≈ 5 minutes of storm after one finished turn).
+            #   Persisting ``_translateDone: true`` (no translatedContent —
+            #   the canonical "settled, show original" tri-state) makes every
+            #   downstream consumer settle for good: the watchdog's own
+            #   DB-recovery probe adopts it, finishStream's translatable-tail
+            #   finder skips the message, and a reload reads a clean row.
+            if isinstance(eff_idx, int) and 0 <= eff_idx < len(messages):
+                try:
+                    messages[eff_idx]['_translateDone'] = True
+                    _ua_row = db.execute(
+                        'SELECT rev FROM conversations WHERE id=? AND user_id=1',
+                        (conv_id,)
+                    ).fetchone()
+                    if _ua_row:
+                        _now_ms = int(time.time() * 1000)
+                        db_execute_with_retry(
+                            db,
+                            'UPDATE conversations SET messages=?, updated_at=? WHERE id=? AND user_id=1 AND rev=?',
+                            (json_dumps_pg(messages), _now_ms, conv_id, _ua_row[0])
+                        )
+                        # Phase 5 dual-write (flag-gated, inert when off):
+                        # the settle marker edits ONE message.
+                        from lib.database.messages_rows import mirror_write_and_commit
+                        mirror_write_and_commit(db, conv_id, messages,
+                                                now_ms=_now_ms,
+                                                changed_seqs=[eff_idx])
+                except Exception as ne:
+                    logger.warning('%s conv=%s Failed to persist no-op '
+                                   '_translateDone marker: %s', pfx, conv_id[:8], ne)
+                # Live clients settle NOW (a dropped frame still self-heals
+                # via the persisted marker + the watchdog's DB probe).
+                try:
+                    from lib.push import push_event
+                    push_event('translate', f'atnoop-{uuid.uuid4().hex[:12]}', {
+                        'type': 'done', 'status': 'done', 'noop': True,
+                        'reason': 'already_target', 'model': 'skipped',
+                        'convId': conv_id or '', 'msgIdx': eff_idx,
+                        'msgId': _msg_id or '', 'field': 'translatedContent',
+                    })
+                except Exception as pe:
+                    logger.debug('%s conv=%s no-op terminal frame failed: %s',
+                                 pfx, conv_id[:8], pe)
             # ★ FIX #1 (don't discard already-translated narration): when an
             #   incremental accumulator is active, it already translated the
             #   inter-round narration LIVE. The deliverable needs no

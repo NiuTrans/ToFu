@@ -153,8 +153,10 @@ interface Navigator { userAgentData?: any; }
 interface ResizeObserverSize { inlineSize: any; blockSize: any; }
 // app-specific expando stashed on toast <div>s + finish-info anchor ref + paper-reader tracking
 interface HTMLDivElement { _dismissed: any; _anchor: any; _readWords: any; _readTotalMin: any; }
-// app-specific expando stashed on a thrown Error (oauth upstream status passthrough)
-interface Error { _upstreamStatus: any; }
+// app-specific expandos stashed on thrown Errors (oauth: browser-exchange
+// upstream status + server-exchange status_code passthrough, both read by
+// _completeLogin's retry classifier in settings/oauth.js)
+interface Error { _upstreamStatus: any; _statusCode: any; }
 // app-specific expando properties assigned to `window` inside IIFEs. tsc can't
 // see a `window.foo = …` assignment as a declared property of the lib.dom
 // `Window` type, so reads of `window.foo` elsewhere are TS2339. These mirror
@@ -207,6 +209,13 @@ interface Window {
   // feature-loader.js — deferred-bundle plumbing (all window.* assigned).
   __FEATURE_BUNDLE_SRC__: any; _DEFERRED_ENTRY_POINTS: any;
   _onReady: any; _loadFeatureBundle: any;
+  // ui/stall_watch.js — test-seam override for the stall threshold, read
+  // ONCE at module init and never assigned in-tree (optional on purpose:
+  // absence is the production case — same precedent as Navigator.userAgentData).
+  _STALL_WATCH_THRESHOLD_S?: any;
+  // ui/stall_watch.js — test-seam override for the heartbeat-flow window
+  // (0 neuters the tick-flow gate, so the banner fires during tool execution).
+  _STALL_WATCH_TICK_WINDOW_S?: any;
 }
 // (FileReader.result stays string|ArrayBuffer — call sites coerce via String()
 //  since merging can't override an existing property's declared type.)

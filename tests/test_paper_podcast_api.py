@@ -347,6 +347,50 @@ def test_cache_identity_includes_model(flask_client, podcast_env, phash):
     assert body5.get('model') == 'm-beta'
 
 
+def test_lookup_reattach_ignores_model_and_voice(flask_client, podcast_env,
+                                                 phash, monkeypatch):
+    """Re-attach regression: the panel's lookup sends only (paper_hash, mode,
+    lang) — never the model/voice the RUNNING task was started with (that is
+    what re-attach is supposed to DISCOVER). An exact dedup-key miss must
+    fall back to the newest live task for (paper_hash, mode, lang); without
+    it a podcast started with any concrete model is invisible to the lookup
+    and the tab regresses to the idle/generate card mid-run."""
+    import lib.paper.podcast_engine as PE
+
+    _insert_report(phash)
+    gate = {}
+
+    def _slow_script(**kw):
+        gate['ready'] = True
+        deadline = time.time() + 10
+        while not gate.get('released') and time.time() < deadline:
+            time.sleep(0.02)
+        return dict(SCRIPT), dict(META)
+
+    monkeypatch.setattr(PE, 'generate_script', _slow_script)
+    r = flask_client.post('/api/v1/paper/podcast/start',
+                          json={'paper_hash': phash, 'mode': 'short',
+                                'lang': 'zh', 'model': 'm-alpha',
+                                'voice': 'alloy'})
+    body = r.get_json()
+    assert body['ok'] and body['task_id']
+    deadline = time.time() + 5
+    while not gate.get('ready') and time.time() < deadline:
+        time.sleep(0.02)
+    try:
+        # The panel's real lookup shape: no model, no voice.
+        r2 = flask_client.post('/api/v1/paper/podcast/lookup',
+                               json={'paper_hash': phash, 'mode': 'short',
+                                     'lang': 'zh'})
+        body2 = r2.get_json()
+        assert body2.get('found') is True and body2.get('running') is True
+        assert body2.get('task_id') == body['task_id']
+        assert body2.get('model') == 'm-alpha'
+        assert body2.get('createdAt')
+    finally:
+        gate['released'] = True
+
+
 def test_dedup_index_separates_models():
     """A request for model B must never JOIN an in-flight task made with
     model A — the join would silently hand back A's audio."""

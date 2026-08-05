@@ -136,20 +136,22 @@ def test_sse_handler_files_registered():
 
 def test_streaming_swarm_panel_registered():
     """The swarm-panel cluster split out of ui/streaming_ui.js (2026-06-27)
-    must be in _BUNDLE_FILES AND index.html, loaded BEFORE streaming_ui.js
-    (whose _syncToolRoundsDOM/updateStreamingUI call _buildSwarmPanelHTML /
-    _buildSwarmInboxChipsHTML at runtime).
-
-    The generic ``test_bundle_audit_parity`` regex does NOT match ``ui/``
-    subdir paths, so this explicit check guards the split."""
-    from lib.js_bundler import _BUNDLE_FILES
+    was DEFERRED 2026-08-01 (Epic-E pt_3879f00e sub-5B): it renders only for
+    convs with swarm activity, and its seven call sites (streaming_ui.js ×5,
+    chat_render.js, tool_rounds.js) are typeof-guarded with a generic-line
+    fallback. The registration invariant is now: in _DEFERRED_FILES, NOT in
+    _BUNDLE_FILES (double-load would double its two tickers), index.html
+    dev-fallback tag kept. See tests/test_frontend_swarm_panel_deferred.py
+    for the guard pins."""
+    from lib.js_bundler import _BUNDLE_FILES, _DEFERRED_FILES
 
     sib = 'ui/streaming_swarm_panel.js'
-    assert sib in _BUNDLE_FILES, (
-        f'{sib} (split from ui/streaming_ui.js) must be in _BUNDLE_FILES.'
+    assert sib in _DEFERRED_FILES, (
+        f'{sib} must be in _DEFERRED_FILES (deferred, Epic-E sub-5B).'
     )
-    assert _BUNDLE_FILES.index(sib) < _BUNDLE_FILES.index('ui/streaming_ui.js'), (
-        f'{sib} must load BEFORE ui/streaming_ui.js.'
+    assert sib not in _BUNDLE_FILES, (
+        f'{sib} must NOT remain in _BUNDLE_FILES — double-load would '
+        'duplicate its tickers/reconciler.'
     )
 
     with open(os.path.join(PROJECT_ROOT, 'index.html'), encoding='utf-8') as f:

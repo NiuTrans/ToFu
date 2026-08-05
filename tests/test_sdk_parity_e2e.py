@@ -1,3 +1,5 @@
+# Incident anchor: born in commit 9ded44f5 — Baseline before agent_core leaf relocation
+# (funeral audit pt_c565a36b3e8f42e6, docs/RATCHET_AUDIT.md)
 """tests/test_sdk_parity_e2e.py — Server-backed integration tests
 for the SDK-parity additions made in this round:
 

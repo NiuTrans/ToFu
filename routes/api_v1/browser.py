@@ -19,10 +19,10 @@ import subprocess
 import sys
 import time
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, request
 
 from lib.api_response import (
-    api_forbidden, api_internal_error, api_not_found, api_ok,
+    api_forbidden, api_internal_error, api_not_found, api_ok, api_payload,
 )
 from lib.log import audit_log, get_logger
 from lib.openapi import api_meta
@@ -62,6 +62,8 @@ def browser_status():
     )
     connected = is_extension_connected()
     clients = get_connected_clients()
+    from lib.browser import get_locked_out_clients
+    locked_out = get_locked_out_clients()
     # Highest Chromium major across connected clients. Chrome 142+ enforces the
     # "Local Network Access" permission prompt by default; the UI uses this to
     # surface guidance for the browser actually running the bridge.
@@ -103,7 +105,7 @@ def browser_status():
                          'this UI from it')
         else:
             extension_path = ext_dir
-    return jsonify({
+    return api_ok({
         'connected': connected,
         'lastPoll': _last_poll_time,
         'secondsAgo': round(time.time() - _last_poll_time, 1) if _last_poll_time else None,
@@ -112,6 +114,12 @@ def browser_status():
         'totalCommands': total_count,
         'extensionPath': extension_path,
         'chromeMajor': chrome_major,
+        # Fleet tri-state inputs (2026-08-04): the version a fresh download
+        # would carry, and the clients whose polls died at the bridge gate
+        # (stale credential — installed but locked out, never to be shown
+        # as "not installed").
+        'servedExtVersion': _served_ext_version(),
+        'lockedOutClients': locked_out,
         # Only what the UI renders. The binary's absolute path is server
         # filesystem detail the browser has no use for.
         'localBrowser': ({'family': local_browser['family'],
@@ -134,7 +142,7 @@ def browser_status():
 )
 def browser_clients():
     from lib.browser import get_connected_clients
-    return jsonify({'clients': get_connected_clients()})
+    return api_ok({'clients': get_connected_clients()})
 
 
 @api_v1_browser_bp.route('/api/v1/browser/test', methods=['GET'])
@@ -165,11 +173,14 @@ def browser_test():
         status['pendingCommands'] = len(_commands)
         status['commandIds'] = list(_commands.keys())[:5]
     if not is_extension_connected(client_id):
-        return jsonify({'status': status, 'error': 'Extension not connected'}), 503
+        return api_payload({'status': status,
+                            'error': 'Extension not connected'}, 503)
     result, error = send_browser_command('list_tabs', timeout=10, client_id=client_id)
     if error:
-        return jsonify({'status': status, 'result': result, 'error': error}), 502
-    return jsonify({'status': status, 'result': result, 'error': error})
+        return api_payload({'status': status, 'result': result,
+                            'error': error}, 502)
+    return api_ok({'status': status, 'result': result,
+                   'error': error})
 
 
 # ── Guided extension install: open the extensions page (loopback only) ──
@@ -286,6 +297,28 @@ def _probe_local_browser() -> dict | None:
 # relief sweep (lib.ttl_cache.clear_all_caches).
 _BROWSER_PROBE_CACHE = TTLCache(ttl=60, max_size=1, name='browser_probe')
 _BROWSER_PROBE_KEY = 'local'
+
+# The extension version THIS server would serve in a fresh download zip —
+# read from the on-disk manifest, TTL-cached (the status endpoint is polled
+# every 3s while the Local Control modal is open; the version changes only
+# when the deployed source changes). The panel diffs each client's reported
+# ext_version against this to tell "installed but outdated" from "current".
+_SERVED_EXT_CACHE = TTLCache(ttl=60, max_size=1, name='served_ext_version')
+
+
+def _served_ext_version() -> str:
+    def _read() -> str:
+        try:
+            import json
+            base_dir = os.path.dirname(os.path.dirname(os.path.dirname(
+                os.path.abspath(__file__))))
+            with open(os.path.join(base_dir, 'browser_extension',
+                                   'manifest.json'), encoding='utf-8') as f:
+                return str(json.load(f).get('version') or '')
+        except Exception as e:
+            logger.debug('[Browser] served ext version unreadable: %s', e)
+            return ''
+    return _SERVED_EXT_CACHE.get_or_compute('v', _read)
 
 
 def _detect_local_browser() -> dict | None:

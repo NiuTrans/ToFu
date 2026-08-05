@@ -379,11 +379,22 @@ html[data-rail] .folder-quickadd{display:none}
   margin:0 auto;
   padding:24px 24px 120px;
 }
-/* The rail column exists only when it fits: 820px measure + 52px row furniture
- * (40px avatar + 12px gap) + 24px gap + 232px rail + 48px padding = 1176px, so
- * a 1368px pane clears it with room to spare; below that the rail folds inline
- * under each message (see .turn-ctx rules) rather than being clipped. */
-@container chatpane (min-width: 1368px){
+/* The rail column exists only when it fits — and the grant threshold is
+ * DERIVED, not tuned. The geometry guard pins a 700px floor on the running
+ * text column (tests/test_turn_ctx_rail_geometry.py::_MIN_MEASURE_PX), so the
+ * smallest pane that can host the rail without starving the prose is
+ *   700 text + 52 row furniture (40px avatar + 12px gap) + 12 text→rail gap
+ *   + 232 rail + 48 padding = 1044px.
+ * The grant is set at 1056px (floor + 12px of rounding slack). At full
+ * comfort the same sum with the 820px measure cap is 1176px — the max-width
+ * above — so panes 1056–1175 get the rail with a 700–820px measure and no
+ * outer margin, and wider panes get the margin back. Below 1056px the rail
+ * folds inline under each message (see .turn-ctx rules) rather than being
+ * clipped. The previous 1368px threshold was full-comfort PLUS a 192px
+ * luxury buffer, which disenfranchised every pane in 1056–1367 — e.g. a
+ * ~1365px pane at 100% zoom lost the rail entirely and only re-gained it at
+ * 80% zoom (the 2026-08-03 report). */
+@container chatpane (min-width: 1056px){
   .chat-inner{ --rail-w:232px; --rail-gap:24px; }
 }
 
@@ -397,11 +408,20 @@ html[data-rail] .folder-quickadd{display:none}
  * below a viewport media query. Both now live in-flow in this strip directly
  * above the composer — they cannot overlap prose by construction, and narrow
  * panes compress (the dots scroll horizontally) instead of disappearing.
- * The strip is a child of .input-area so --input-area-h (main.js:1105,
+ * The strip is a child of .input-inner so --input-area-h (main.js:1105,
  * measured from inputArea.offsetHeight) automatically includes it and the
  * scroll-to-bottom button keeps anchoring above the whole band.
+ *
+ * WIDTH TRACK: the strip carries NO max-width of its own — as a block child
+ * of .input-inner it spans exactly the composer's --toolbar-w track, so the
+ * gauge's left edge IS the input box's left edge and the dots' right edge
+ * IS its right edge, at every viewport and toolbar content. It previously
+ * had its own max-width (--msg-measure + 52px = 872px): a second width
+ * source beside the composer's dynamic --toolbar-w, which could only agree
+ * by coincidence — measured live: a 26px/side overhang at the 820px floor,
+ * and arbitrary mismatch as the toolbar grows (2026-08-03 owner report).
  * Guard: tests/test_turn_ctx_rail_geometry.py (strip invariants). */
-.conv-status-strip{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;max-width:calc(var(--msg-measure) + 52px);margin:0 auto;padding:0 0 8px;min-height:0}
+.conv-status-strip{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;padding:0 0 8px;min-height:0}
 /* When both cells are empty (fresh conversation, <2 turns) the strip takes
  * no vertical space at all — the composer band looks exactly as before. */
 .conv-status-strip:has(.turn-nav:empty):not(:has(.ctx-health-bar)){display:none}
@@ -635,6 +655,17 @@ html[data-rail] .folder-quickadd{display:none}
 .message-role{font-size:13px;font-weight:600}.message-time{font-size:11px;color:var(--text-tertiary)}.stream-elapsed-timer{font-size:11px;font-family:'JetBrains Mono',monospace;margin-left:6px;display:inline-flex;align-items:center;gap:4px}.stream-elapsed{color:var(--text-tertiary);font-weight:400}.stream-stuck-warn{color:var(--thinking-text);font-weight:600;animation:stuckPulse 2s ease-in-out infinite}.stream-stuck-severe{color:var(--error-text);font-weight:700;animation:stuckPulse 1s ease-in-out infinite}.stream-stuck-activity{color:var(--text-secondary);font-weight:500;font-style:italic;animation:stuckPulse 2.4s ease-in-out infinite}@keyframes stuckPulse{0%,100%{opacity:0.6}50%{opacity:1}}.stream-liveness-wrap{margin-top:6px}.stream-liveness{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:600;padding:2px 8px;border-radius:6px;line-height:1.5}.stream-liveness-icon{flex-shrink:0}.stream-liveness-ok{color:var(--text-secondary);background:rgba(120,170,120,.12)}.stream-liveness-warn{color:var(--thinking-text);background:rgba(200,170,90,.12);animation:stuckPulse 2s ease-in-out infinite}.stream-force-finish-btn{font-size:10px;font-family:'JetBrains Mono',monospace;background:var(--error-text);color:white;border:none;border-radius:4px;padding:1px 8px;margin-left:6px;cursor:pointer;font-weight:600;opacity:0.9;transition:opacity .2s}.stream-force-finish-btn:hover{opacity:1}.message-body{padding-left:0;overflow:hidden;max-width:100%}
 /* ── Message image thumbnail grid ── */
 .msg-image-grid{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px}
+.msg-video-list{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px}
+.msg-video-card{display:flex;align-items:center;gap:10px;padding:6px 12px 6px 6px;border:1px solid var(--border);border-radius:var(--radius-sm);cursor:pointer;max-width:300px;transition:border-color .2s}
+.msg-video-card:hover{border-color:var(--accent)}
+.msg-video-thumb{position:relative;width:72px;height:44px;border-radius:6px;overflow:hidden;background:#000;flex:none;display:flex;align-items:center;justify-content:center}
+.msg-video-thumb img{width:100%;height:100%;object-fit:cover;display:block}
+.msg-video-play{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#fff;font-size:15px;text-shadow:0 1px 3px rgba(0,0,0,.75)}
+.msg-video-info{min-width:0}
+.msg-video-name{font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:200px}
+.msg-video-meta{font-size:11px;color:var(--text-tertiary);white-space:nowrap}
+.video-chip img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+.video-chip.video-failed{opacity:.75;border-color:var(--error-text)}
 .msg-img-thumb{position:relative;width:80px;height:80px;border-radius:var(--radius-sm);overflow:hidden;border:1px solid var(--border);cursor:pointer;transition:border-color .2s,transform .15s;flex-shrink:0}
 .msg-img-thumb:hover{border-color:var(--accent);transform:scale(1.04)}
 .msg-img-thumb img{width:100%;height:100%;object-fit:cover;display:block}
@@ -944,13 +975,64 @@ html[data-rail] .folder-quickadd{display:none}
 .ri-state-body .debug-msg-header{font-size:11.5px;padding:5px 9px}
 .ri-state-body .debug-msg-summary{font-size:10.5px}
 .ri-state-body .debug-msg-body pre{font-size:11.5px;line-height:1.55}
-body.ri-open .chat-container{margin-right:min(780px,94vw);transition:margin-right .22s ease}
+/* .input-area takes the SAME margin: the drawer is position:fixed and
+ * shrinks only .chat-container — without this the composer band stayed
+ * wrapper-wide, so its right half (send button included) slid UNDER the
+ * fixed drawer, and its centering math disagreed with .chat-inner's. */
+body.ri-open .chat-container,
+body.ri-open .input-area{margin-right:min(780px,94vw);transition:margin-right .22s ease}
 @media (max-width:900px){
-  body.ri-open .chat-container{margin-right:0}
+  body.ri-open .chat-container,
+  body.ri-open .input-area{margin-right:0}
   .ri-drawer{width:100vw;border-left:none}
   .ri-side{width:208px}
 }
-.input-area{flex-shrink:0;background:var(--bg-primary);padding:12px 24px 20px;border-top:1px solid var(--border)}.input-inner{max-width:var(--toolbar-w,820px);margin:0 auto;transition:max-width .4s ease}.image-previews{display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap}.img-preview{position:relative;width:64px;height:64px;border-radius:var(--radius-sm);overflow:hidden;border:1px solid var(--border);cursor:pointer;transition:border-color .2s,box-shadow .2s,transform .12s}.img-preview:hover{border-color:var(--accent)}.img-preview[data-img-idx]{cursor:pointer}.img-preview[data-img-idx]:active{cursor:pointer}.img-preview img{width:100%;height:100%;object-fit:cover}.img-preview .remove-img{position:absolute;top:2px;right:2px;width:18px;height:18px;background:rgba(0,0,0,0.7);color:white;border:none;border-radius:50%;font-size:10px;cursor:pointer;display:flex;align-items:center;justify-content:center}.img-preview .img-size{position:absolute;bottom:0;left:0;right:0;background:rgba(0,0,0,0.7);color:#aaa;font-size:9px;text-align:center;padding:1px 0;font-family:'JetBrains Mono',monospace}.img-preview.pdf-page{border-color:rgba(207,167,56,0.35)}.img-preview .pdf-badge{position:absolute;top:2px;left:2px;background:rgba(207,167,56,0.9);color:#fff;font-size:7px;font-weight:700;padding:1px 4px;border-radius:3px;font-family:'JetBrains Mono',monospace}.img-preview.img-dragging{opacity:.4;cursor:move}.img-preview[data-img-idx].img-drop-target{border-color:var(--accent);box-shadow:0 0 0 2px var(--accent);transform:translateY(-2px) scale(1.04)}
+/* ── COMPOSER LEFT-EDGE LOCK (2026-08-03 owner report) ──────────────────
+ * The composer used to be centred in the pane (margin:0 auto), ~(band−820)/2
+ * RIGHT of the avatar column in every roomy state — the input box "swam"
+ * under the conversation, and the rail zone beside it could never host
+ * anything. The composer now sits ON the message column: its LEFT edge is
+ * the avatar line and its right edge is the text column's right edge, in
+ * every pane state.
+ *
+ * margin-left REPLAYS .chat-inner's own centering math (same max-width
+ * formula: measure + 52 avatar track + rail furniture + 48 padding; the
+ * same 24px inset), so the two can never drift. The rail grant
+ * (--rail-w/--rail-gap) is mirrored from .chat-inner by main.js
+ * (_mirrorRailGeometry): the chatpane container query cannot reach this
+ * subtree, and cannot be extended to it — container-type's layout
+ * containment would re-parent the mobile bottom-sheet dropdowns'
+ * position:fixed from the viewport to this band. Zero-grant defaults
+ * degrade to the no-rail geometry, i.e. exactly the old centering.
+ *
+ * Width: 52px + --toolbar-w (avatar track + reading track) so BOTH edges
+ * align; the middle term keeps the composer on the reading track
+ * (min(52 + measure, pane − 48 − furniture)) even when --toolbar-w's floor
+ * shrinks; the outer min(…, 100% − 48px) is the viewport cap (a genuinely
+ * fat toolbar may still outgrow the track — it grows RIGHT, into the empty
+ * rail zone, never past the viewport).
+ * .input-area carries NO horizontal padding so 100% here IS the pane width.
+ *
+ * min-width:300px is the HOPELESS-PANE floor: with the inspector drawer
+ * open beside a wide sidebar the pane can drop below 100px, where the
+ * track math would squeeze the composer to a useless sliver (and the
+ * status strip's gauge/dots would spill out of it). The floor keeps the
+ * textarea usable; the right side simply continues under the fixed
+ * drawer — exactly what the whole composer did before the margin-right,
+ * now bounded to one small overrun. Mobile (≤768px) resets it to 0 — the
+ * drawer is a full-width overlay there and every px counts.
+ * Guarded by the composer_left_off / composer_off assertions in
+ * tests/test_turn_ctx_rail_geometry.py. */
+.input-area{flex-shrink:0;background:var(--bg-primary);padding:12px 0 20px;border-top:1px solid var(--border)}
+.input-inner{
+  --rail-w:0px;
+  --rail-gap:0px;
+  min-width:300px;
+  max-width:min(max(calc(52px + var(--toolbar-w,820px)), min(calc(52px + var(--msg-measure,820px)), calc(100% - 48px - var(--rail-w) - var(--rail-gap)))), calc(100% - 48px));
+  margin-left:max(24px, calc((100% - var(--msg-measure,820px) - 52px - var(--rail-gap) - var(--rail-w) - 48px) / 2 + 24px));
+  margin-right:24px;
+  transition:max-width .4s ease;
+}.image-previews{display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap}.img-preview{position:relative;width:64px;height:64px;border-radius:var(--radius-sm);overflow:hidden;border:1px solid var(--border);cursor:pointer;transition:border-color .2s,box-shadow .2s,transform .12s}.img-preview:hover{border-color:var(--accent)}.img-preview[data-img-idx]{cursor:pointer}.img-preview[data-img-idx]:active{cursor:pointer}.img-preview img{width:100%;height:100%;object-fit:cover}.img-preview .remove-img{position:absolute;top:2px;right:2px;width:18px;height:18px;background:rgba(0,0,0,0.7);color:white;border:none;border-radius:50%;font-size:10px;cursor:pointer;display:flex;align-items:center;justify-content:center}.img-preview .img-size{position:absolute;bottom:0;left:0;right:0;background:rgba(0,0,0,0.7);color:#aaa;font-size:9px;text-align:center;padding:1px 0;font-family:'JetBrains Mono',monospace}.img-preview.pdf-page{border-color:rgba(207,167,56,0.35)}.img-preview .pdf-badge{position:absolute;top:2px;left:2px;background:rgba(207,167,56,0.9);color:#fff;font-size:7px;font-weight:700;padding:1px 4px;border-radius:3px;font-family:'JetBrains Mono',monospace}.img-preview.img-dragging{opacity:.4;cursor:move}.img-preview[data-img-idx].img-drop-target{border-color:var(--accent);box-shadow:0 0 0 2px var(--accent);transform:translateY(-2px) scale(1.04)}
 .img-preview.img-processing{cursor:default}.img-preview .img-processing-overlay{position:absolute;inset:0;background:rgba(0,0,0,0.45);display:flex;align-items:center;justify-content:center;backdrop-filter:blur(1px)}.img-preview .img-processing-spinner{width:20px;height:20px;border:2px solid rgba(255,255,255,0.35);border-top-color:#fff;border-radius:50%;animation:spin .7s linear infinite}
 
 /* Drag-reorder follow indicator — a small dashed square trailing the cursor
@@ -1821,6 +1903,73 @@ textarea::placeholder{color:var(--text-tertiary)}
 .paper-report-content th,.paper-report-body th{background:var(--bg-secondary);font-weight:600}
 .paper-report-content tbody tr:nth-child(even),.paper-report-body tbody tr:nth-child(even){background:color-mix(in srgb,var(--text-primary) 3%,transparent)}
 
+/* ── Reading-experience rail (paper/reading_xp.js) ──
+ * Anchored insight cards (distributed after section headings), the rebuilt
+ * end insight section, and the 📦 recap card. Cards share one surface; the
+ * left border color distinguishes connections (accent) from provocations
+ * (amber) — quiet, inline, never a modal. */
+.paper-xp-card{border:1px solid var(--border);border-left:3px solid var(--accent);border-radius:10px;background:var(--bg-secondary);margin:10px 0 14px;padding:10px 14px;font-size:13.5px;line-height:1.65}
+.paper-xp-card.xp-prov{border-left-color:#d29922;background:color-mix(in srgb,#d29922 6%,var(--bg-secondary))}
+.paper-xp-card-head{display:flex;align-items:center;gap:6px;margin-bottom:4px}
+.paper-xp-card-title{font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--text-tertiary)}
+.paper-xp-card-body{color:var(--text-secondary)}
+.paper-xp-card-body a{color:var(--accent);text-decoration:none;border-bottom:1px solid color-mix(in srgb,var(--accent) 35%,transparent)}
+.paper-xp-card-body a:hover{border-bottom-color:var(--accent)}
+.paper-xp-section{margin-top:8px}
+.paper-xp-recap{border:1px solid color-mix(in srgb,var(--accent) 40%,var(--border));border-radius:12px;background:linear-gradient(180deg,color-mix(in srgb,var(--accent) 8%,var(--bg-secondary)),var(--bg-secondary));margin:22px 0 10px;padding:14px 16px}
+.paper-xp-recap-head{font-size:13px;font-weight:700;color:var(--text-primary);margin-bottom:8px;letter-spacing:.02em}
+.paper-xp-recap-row{font-size:13px;line-height:1.65;color:var(--text-secondary);margin:5px 0}
+.paper-xp-recap-row b{color:var(--text-primary)}
+.paper-xp-actions{margin-top:8px;display:flex;gap:8px}
+.paper-xp-act{padding:4px 12px;border:1px solid color-mix(in srgb,var(--accent) 35%,var(--border));border-radius:8px;background:transparent;color:var(--accent);font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;transition:background .12s,border-color .12s}
+.paper-xp-act:hover{background:color-mix(in srgb,var(--accent) 12%,transparent);border-color:var(--accent)}
+/* Checkpoint flip cards (P2): one box, two faces; .is-flipped swaps them. */
+.paper-xp-flip{border:1px solid var(--border);border-left:3px solid var(--success-color,#22c55e);border-radius:10px;background:var(--bg-secondary);margin:12px 0;padding:10px 14px;cursor:pointer;user-select:none;transition:border-color .15s}
+.paper-xp-flip:hover{border-color:color-mix(in srgb,var(--success-color,#22c55e) 60%,var(--border))}
+.paper-xp-flip-hint{margin-left:auto;font-size:11px;color:var(--text-quaternary);font-weight:400;text-transform:none;letter-spacing:0}
+.paper-xp-flip-q{font-size:13.5px;line-height:1.65;color:var(--text-primary);font-weight:600}
+.paper-xp-flip-a{font-size:13.5px;line-height:1.65;color:var(--text-secondary)}
+.paper-xp-flip .paper-xp-flip-back{display:none}
+.paper-xp-flip.is-flipped .paper-xp-flip-front{display:none}
+.paper-xp-flip.is-flipped .paper-xp-flip-back{display:block}
+/* Skim mode (P2): deterministic collapse — sections reduce to first
+ * paragraph + callouts + the xp tutor cards. */
+.xp-skim-hidden{display:none!important}
+.paper-skim-btn.is-on{color:var(--accent);border-color:color-mix(in srgb,var(--accent) 40%,var(--border));background:color-mix(in srgb,var(--accent) 10%,transparent)}
+/* Deepen (P3): heading ghost buttons + the drawer. */
+.paper-deepen-btn{display:inline-block;margin-left:6px;padding:1px 8px;border:1px solid transparent;border-radius:7px;background:transparent;color:var(--text-quaternary);font-size:11px;font-weight:600;cursor:pointer;font-family:inherit;vertical-align:middle;opacity:0;transition:opacity .15s,color .12s,border-color .12s}
+.paper-deepen-btn::after{content:attr(data-label);margin-left:3px}
+.paper-deepen-btn svg{vertical-align:-1px}
+h2:hover .paper-deepen-btn,h3:hover .paper-deepen-btn,.paper-deepen-btn:focus{opacity:1}
+.paper-deepen-btn:hover{color:var(--accent);border-color:color-mix(in srgb,var(--accent) 35%,var(--border))}
+.katex-display + .paper-deepen-btn{opacity:.6}
+.paper-deepen-drawer{border:1px solid var(--border);border-left:3px solid var(--accent);border-radius:10px;background:var(--bg-secondary);margin:8px 0 14px;padding:12px 16px;font-size:14px;line-height:1.7}
+.paper-deepen-status{color:var(--text-tertiary);font-size:13px}
+.paper-deepen-error{color:#ef4444}
+.paper-deepen-meta{margin-top:10px;font-size:11px;color:var(--text-quaternary)}
+.paper-deepen-stop{margin-top:8px;padding:3px 10px;border:1px solid var(--border);border-radius:7px;background:transparent;color:var(--text-tertiary);font-size:12px;cursor:pointer;font-family:inherit}
+.paper-deepen-stop:hover{color:#ef4444;border-color:#ef4444}
+/* Margin notes (P4) */
+.paper-note-mark{background:color-mix(in srgb,var(--accent) 18%,transparent);border-bottom:2px solid var(--accent);border-radius:2px;cursor:pointer}
+.paper-note-mark:hover{background:color-mix(in srgb,var(--accent) 28%,transparent)}
+.paper-note-chip{margin-left:6px;padding:0 4px;border:none;background:transparent;cursor:pointer;font-size:12px;opacity:.55;transition:opacity .12s}
+.paper-note-chip:hover{opacity:1}
+.paper-note-tray{border:1px dashed var(--border);border-radius:10px;margin:16px 0 6px;padding:10px 14px}
+.paper-note-tray-head{font-size:12px;font-weight:700;color:var(--text-tertiary);margin-bottom:6px}
+.paper-note-tray-row{font-size:13px;color:var(--text-secondary);padding:5px 0;border-top:1px solid var(--border);cursor:pointer}
+.paper-note-tray-row:hover{color:var(--text-primary)}
+.paper-note-editor{position:fixed;z-index:10000;width:288px;background:var(--bg-primary);border:1px solid var(--border-light);border-radius:12px;box-shadow:0 12px 32px rgba(0,0,0,.35);padding:10px}
+.paper-note-editor-quote{font-size:11.5px;color:var(--text-quaternary);border-left:3px solid var(--border);padding-left:8px;margin-bottom:8px;max-height:52px;overflow:hidden}
+.paper-note-editor-input{width:100%;box-sizing:border-box;background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px;color:var(--text-primary);font-family:inherit;font-size:13px;padding:8px;resize:vertical}
+.paper-note-editor-input:focus{outline:none;border-color:var(--accent)}
+.paper-note-editor-actions{display:flex;gap:8px;margin-top:8px}
+.paper-note-editor-actions button{padding:4px 12px;border-radius:7px;border:1px solid var(--border);background:transparent;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;color:var(--text-secondary)}
+.paper-note-editor-actions .paper-note-save{background:var(--accent);border-color:var(--accent);color:#fff}
+.paper-note-editor-actions .paper-note-del:hover{color:#ef4444;border-color:#ef4444}
+/* Focus mode (P4): one block in the spotlight, the rest dims away. */
+.paper-focus-on .paper-report-article > *{opacity:.22;transition:opacity .25s}
+.paper-focus-on .paper-report-article > *.paper-focus-current{opacity:1}
+.paper-focus-btn.is-on{color:var(--accent);border-color:color-mix(in srgb,var(--accent) 40%,var(--border));background:color-mix(in srgb,var(--accent) 10%,transparent)}
 .paper-report-content img,.paper-report-body img{display:block;max-width:100%;height:auto;margin:14px auto;border:1px solid var(--border);border-radius:6px;background:#fff;padding:4px;box-shadow:0 2px 8px rgba(0,0,0,.15);cursor:zoom-in}
 .paper-report-content p:has(> img:only-child),.paper-report-body p:has(> img:only-child){text-align:center;margin:14px 0}
 .paper-report-content p > img + em,.paper-report-body p > img + em{display:block;text-align:center;font-size:12px;color:var(--text-tertiary);margin-top:4px}
@@ -3872,8 +4021,8 @@ html:not([data-theme="light"]):not([data-theme="tofu"]) .paper-qa-send-btn:activ
 .settings-panel {
   width: 860px;
   max-width: 96vw;
-  max-height: 88vh;
-  max-height: calc(var(--vh100,100vh)*0.88);
+  max-height: 90vh;
+  max-height: calc(var(--vh100,100vh)*0.90);
   padding: 0 !important;
   display: flex;
   flex-direction: column;
@@ -3961,95 +4110,101 @@ html:not([data-theme="light"]):not([data-theme="tofu"]) .paper-qa-send-btn:activ
 }
 
 /* ══════════════════════════════════════
-   Tab Navigation — the cutting board sidebar
+   Tab Navigation — tofu index sidebar
+   (cream chrome frame around the white content;
+    stamped group labels + hard-shadow active block)
    ══════════════════════════════════════ */
 .settings-tabs {
   display: flex;
   flex-direction: column;
-  gap: 3px;
-  padding: 14px 10px;
-  width: 170px;
-  min-width: 170px;
-  background: linear-gradient(175deg, #38332c 0%, #2b2620 100%);
+  gap: 2px;
+  padding: 14px 12px 16px 10px;
+  width: 178px;
+  min-width: 178px;
+  background: var(--s-cream);
   border-right: 3px solid var(--s-ink);
-  box-shadow: inset -1px 0 0 rgba(201,153,63,0.06);
   overflow-y: auto;
   scrollbar-width: thin;
   scrollbar-color: var(--s-skin) transparent;
-  position: relative;
 }
-/* Subtle wood-grain texture overlay */
-.settings-tabs::before {
+/* Group labels — stamped dividers, echo .settings-section-title */
+.settings-tab-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 11px 12px 5px;
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: rgba(26, 24, 20, 0.42);
+  user-select: none;
+}
+.settings-tab-group::after {
   content: '';
-  position: absolute;
-  inset: 0;
-  background: repeating-linear-gradient(
-    180deg,
-    transparent 0px,
-    rgba(255,240,210,0.018) 1px,
-    transparent 2px,
-    transparent 6px
-  );
-  pointer-events: none;
+  flex: 1;
+  height: 1.5px;
+  background: rgba(26, 24, 20, 0.14);
 }
 .settings-tab {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 10px 12px;
-  border: 1.5px solid transparent;
-  border-left: 3px solid transparent;
+  gap: 9px;
+  padding: 8px 12px;
+  border: 2px solid transparent;
   background: transparent;
-  color: #c0b5a4;
+  color: var(--s-ink-soft);
   font-family: inherit;
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 700;
-  letter-spacing: 0.03em;
+  letter-spacing: 0.02em;
   text-transform: uppercase;
   border-radius: var(--s-radius);
   cursor: pointer;
-  transition: background 0.18s ease, border-color 0.18s ease, color 0.18s ease,
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease,
               transform 0.1s ease, box-shadow 0.1s ease;
   text-align: left;
   white-space: nowrap;
   position: relative;
 }
 .settings-tab:hover {
-  background: rgba(232,220,200,0.08);
-  border-left-color: var(--s-gold-dim);
-  color: var(--s-gold);
-}
-.settings-tab.active {
-  background: linear-gradient(135deg, var(--s-cream) 0%, #f5eedd 100%);
-  border: 1.5px solid var(--s-ink);
-  border-left: 3px solid var(--s-gold);
+  background: var(--s-skin);
   color: var(--s-ink);
-  box-shadow: 2px 2px 0 var(--s-ink), inset 0 1px 0 rgba(255,255,255,0.5);
+}
+.settings-tab:focus-visible {
+  outline: 2px solid var(--s-gold-dim);
+  outline-offset: 1px;
+}
+/* Active = white block that merges with the content surface,
+   gold kintsugi strip inlaid on the left edge */
+.settings-tab.active {
+  background: var(--s-white);
+  border: 2px solid var(--s-ink);
+  color: var(--s-ink);
+  box-shadow: inset 4px 0 0 var(--s-gold), 2px 2px 0 var(--s-ink);
   font-weight: 800;
 }
-/* Kintsugi gold shimmer on active tab */
-.settings-tab.active::after {
-  content: '';
-  position: absolute;
-  left: -3px;
-  top: 20%;
-  bottom: 20%;
-  width: 3px;
-  background: linear-gradient(180deg, var(--s-gold) 0%, var(--s-gold-dim) 50%, var(--s-gold) 100%);
-  border-radius: 0 1px 1px 0;
+.settings-tab.active:active {
+  transform: translate(1px, 1px);
+  box-shadow: inset 4px 0 0 var(--s-gold), 1px 1px 0 var(--s-ink);
 }
 .settings-tab svg {
   flex-shrink: 0;
-  opacity: 0.45;
+  opacity: 0.7;
   stroke: currentColor;
-  transition: opacity 0.18s ease;
+  transition: opacity 0.15s ease, stroke 0.15s ease;
+}
+/* Brand logos (Feishu) are fill-based — never stroke them */
+.settings-tab svg.tab-logo,
+.settings-tab.active svg.tab-logo {
+  stroke: none;
 }
 .settings-tab:hover svg {
-  opacity: 0.75;
+  opacity: 1;
 }
 .settings-tab.active svg {
   opacity: 1;
-  stroke: var(--s-ink);
+  stroke: var(--s-gold-dim);
 }
 
 /* ══════════════════════════════════════
@@ -5391,6 +5546,18 @@ input.settings-mono {
   border: 1px solid #c2410c;
   border-radius: var(--s-radius);
 }
+.stg-keystat-gateway {
+  color: #475569;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  padding: 1px 6px;
+  background: rgba(100, 116, 139, 0.12);
+  border: 1px solid #64748b;
+  border-radius: var(--s-radius);
+}
 .stg-keystat-err {
   color: #c0392b;
   font-size: 10px;
@@ -5713,6 +5880,87 @@ input.settings-mono {
   background: rgba(239, 68, 68, 0.08);
   color: var(--s-blocked);
   border: 1.5px solid rgba(239, 68, 68, 0.25);
+}
+
+/* ══════════════════════════════════════
+   Onboarding wizard (first-run)
+   ── The overlay element is .modal-overlay (the e2e dismiss contract —
+      tests/conftest.py strips `.open` from exactly that selector), NOT
+      .stg-modal-overlay, so the .stg-* design tokens are re-declared on
+      .ob-modal itself: var(--s-*) would otherwise resolve to nothing and
+      the reused .stg-modal shell would render unstyled. ──
+   ══════════════════════════════════════ */
+.ob-modal {
+  --s-white:     #faf8f3;
+  --s-cream:     #f2ecda;
+  --s-skin:      #e4d6bf;
+  --s-board:     #35302a;
+  --s-board-lit: #443c32;
+  --s-gold:      #c9993f;
+  --s-gold-dim:  #a87d2e;
+  --s-gold-glow: rgba(201,153,63,0.18);
+  --s-ink:       #1a1814;
+  --s-ink-soft:  #3d362c;
+  --s-done:      #4ade80;
+  --s-blocked:   #f87171;
+  --s-accent:    #6366f1;
+  --s-shadow:    5px 5px 0 var(--s-ink);
+  --s-shadow-sm: 3px 3px 0 var(--s-ink);
+  --s-shadow-xs: 2px 2px 0 var(--s-ink);
+  --s-border:    2px solid var(--s-ink);
+  --s-border-sm: 1.5px solid var(--s-ink);
+  --s-radius:    0px;
+  width: 560px;
+  font-family: 'Inter', 'SF Pro', -apple-system, system-ui, sans-serif;
+}
+.ob-step-line {
+  display: block;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--s-gold-dim);
+  margin-bottom: 8px;
+}
+.ob-cards { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 14px 0 4px; }
+.ob-card {
+  border: var(--s-border-sm);
+  border-radius: var(--s-radius);
+  background: var(--s-white);
+  padding: 14px 14px 12px;
+  cursor: pointer;
+  transition: transform 0.12s ease, box-shadow 0.12s ease, border-color 0.12s ease;
+}
+.ob-card:hover, .ob-card:focus-visible {
+  border-color: var(--s-gold);
+  box-shadow: var(--s-shadow-sm);
+  transform: translate(-2px, -2px);
+  outline: none;
+}
+.ob-card-icon { color: var(--s-gold-dim); margin-bottom: 8px; }
+.ob-card-icon > svg { display: block; }
+.ob-card-title { font-size: 13.5px; font-weight: 800; color: var(--s-ink); margin-bottom: 4px; }
+.ob-card-desc { font-size: 11.5px; line-height: 1.55; color: var(--s-ink-soft); }
+.ob-note {
+  margin: 10px 0 0;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--s-gold-dim);
+}
+.ob-done { text-align: center; padding: 18px 6px 8px; }
+.ob-done-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 52px; height: 52px;
+  border: var(--s-border);
+  border-radius: 50%;
+  color: #16a34a;
+  margin-bottom: 12px;
+}
+.ob-done-title { font-size: 16px; font-weight: 900; color: var(--s-ink); margin-bottom: 6px; }
+@media (max-width: 560px) {
+  .ob-cards { grid-template-columns: 1fr; }
 }
 
 /* ── Icon / secondary / primary buttons ── */
@@ -6046,13 +6294,26 @@ input.settings-mono {
   margin-bottom: 4px;
   box-shadow: var(--s-shadow-xs);
 }
+/* Uniform 2-column grid (redesign 2026-08-01): the old 1fr/auto/auto made
+ * every row a different width — the price section looked misaligned because
+ * it WAS. Model ID spans the full first row; the four numeric fields share
+ * two equal columns below it. */
 .stg-edit-grid {
   display: grid;
-  grid-template-columns: 1fr auto auto;
+  grid-template-columns: 1fr 1fr;
   gap: 10px;
   margin-bottom: 10px;
 }
 .stg-edit-grid .stg-field { margin-bottom: 0; }
+.stg-edit-grid .stg-field-wide { grid-column: 1 / -1; }
+/* The Model ID is an identifier, not prose — monospace + slightly larger
+ * so a long id (aws.claude-opus-4.6…) reads at a glance. */
+.stg-edit-mid {
+  font-family: 'JetBrains Mono', monospace;
+  font-weight: 600;
+  font-size: 13px;
+  letter-spacing: 0.01em;
+}
 .stg-cap-toggles { display: flex; gap: 5px; flex-wrap: wrap; }
 .stg-cap-btn {
   padding: 4px 10px;
@@ -6072,6 +6333,73 @@ input.settings-mono {
   color: var(--s-ink);
   box-shadow: var(--s-shadow-xs);
 }
+/* ── Tag editor (wire pool / aliases in the model edit form) ──
+ * One id = one chip; the border box IS the input (click anywhere to type).
+ * The inner input must defeat the .stg-field input chrome (border, shadow,
+ * focus transform) — it borrows the editor's frame instead. */
+.stg-tag-editor {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  align-items: center;
+  padding: 6px 8px;
+  background: #fff;
+  border: var(--s-border);
+  border-radius: var(--s-radius);
+  box-shadow: var(--s-shadow-xs);
+  cursor: text;
+  transition: transform 0.1s, box-shadow 0.1s, background 0.1s;
+}
+.stg-tag-editor:focus-within {
+  transform: translate(1px, 1px);
+  box-shadow: 1px 1px 0 var(--s-ink);
+  background: #fffef5;
+}
+.stg-tag-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  padding: 3px 8px;
+  border: 1px solid var(--s-ink);
+  background: var(--s-cream);
+  color: var(--s-ink);
+  font-family: 'JetBrains Mono', monospace;
+  font-weight: 600;
+  border-radius: var(--s-radius);
+  white-space: nowrap;
+}
+.stg-tag-x { cursor: pointer; opacity: 0.4; font-size: 12px; line-height: 1; }
+.stg-tag-x:hover { opacity: 1; color: var(--s-blocked); }
+.stg-field .stg-tag-editor .stg-tag-input {
+  flex: 1;
+  min-width: 150px;
+  width: auto;
+  padding: 4px 2px;
+  border: none;
+  background: transparent;
+  box-shadow: none;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+}
+.stg-field .stg-tag-editor .stg-tag-input:focus {
+  transform: none;
+  box-shadow: none;
+  background: transparent;
+  outline: none;
+}
+
+/* ── Face auto-note: which wire the family rule ACTUALLY picked ── */
+.stg-face-auto-note { margin-top: 6px; font-size: 11px; line-height: 1.5; }
+.stg-face-auto-note:empty { display: none; }
+.stg-face-auto-pick { color: #15803d; font-weight: 700; }
+.stg-face-auto-pending { color: var(--s-ink-soft); opacity: 0.75; }
+.stg-face-auto-refused { color: #dc2626; font-weight: 600; }
+[data-theme="dark"] .stg-face-auto-pick,
+html:not([data-theme="light"]):not([data-theme="tofu"]) .stg-face-auto-pick { color: #4ade80; }
+[data-theme="dark"] .stg-face-auto-refused,
+html:not([data-theme="light"]):not([data-theme="tofu"]) .stg-face-auto-refused { color: #f87171; }
+
 .stg-edit-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }
 
 /* ══════════════════════════════════════
@@ -6450,16 +6778,24 @@ input.settings-mono {
 .sw-inbox-row>.sw-inbox-row-header .ptool-text::after{content:" ▸";font-size:10px;opacity:0.5}
 .sw-inbox-row[open]>.sw-inbox-row-header .ptool-text::after{content:" ▾"}
 /* "Who sent this" bubble — a conversation TITLE (via convTitleById), not a raw
-   id. Reads like the peer-msg provenance banner so the sender is legible. */
+   id. Reads like the peer-msg provenance banner so the sender is legible. It is
+   a <button>: clicking jumps to the source conversation (delegated handler in
+   tool_rounds.js). */
 .sw-peer-from-group{display:inline-flex;align-items:center;gap:4px;flex-wrap:wrap;min-width:0}
-.sw-peer-from-bubble{display:inline-flex;align-items:center;gap:5px;flex-shrink:1;max-width:220px;padding:1px 9px;border:1px solid rgba(130,170,255,.35);background:rgba(130,170,255,.09);border-radius:9px;font-size:11px;line-height:1.4;color:#82aaff;font-weight:600}
+.sw-peer-from-bubble{display:inline-flex;align-items:center;gap:5px;flex-shrink:1;min-width:0;max-width:420px;padding:1px 9px;border:1px solid rgba(130,170,255,.35);background:rgba(130,170,255,.09);border-radius:9px;font-size:11px;line-height:1.4;color:#82aaff;font-weight:600;font-family:inherit;cursor:pointer;transition:background .15s,border-color .15s}
+.sw-peer-from-bubble:hover{background:rgba(130,170,255,.2);border-color:rgba(130,170,255,.65)}
 .sw-peer-from-bubble svg{display:block;flex-shrink:0}
 .sw-peer-from-bubble>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sw-peer-from-bubble .sw-peer-jump{opacity:.45;margin-left:1px}
+.sw-peer-from-bubble:hover .sw-peer-jump{opacity:1}
+/* Inside an expanded body card the bubble gets the full card width — the title
+   must be readable end-to-end there, not ellipsized like the cramped header. */
+.sw-peer-card-item .sw-peer-from-bubble{max-width:100%}
 .sw-peer-from-more{flex-shrink:0;padding:1px 7px;border-radius:9px;font-size:10px;font-weight:700;color:var(--text-tertiary);background:rgba(130,170,255,.12)}
 /* Inbox/peer/steer rows: the right-hand control group owns the right
    end of the header — exactly ONE owner, same as every other row. */
 .sw-inbox-row>.sw-inbox-row-header .ptool-row-ctl{margin-left:auto}
-.sw-inbox-row .sw-inbox-row-body{padding:6px 10px 8px 30px;display:flex;flex-direction:column;gap:8px}
+.sw-inbox-row .sw-inbox-row-body{padding:6px 10px 8px 16px;display:flex;flex-direction:column;gap:8px}
 .sw-inbox-row-empty{color:var(--text-tertiary);font-size:12px;font-style:italic}
 /* ── Beautified sub-agent / peer update cards (human view) ──
    Replaces the old raw-<pre> XML dump. Clean field header + Markdown body. */
@@ -6479,9 +6815,15 @@ input.settings-mono {
 .sw-card-rawonly .sw-card-raw-pre,.sw-peer-card-item{}
 .sw-peer-card-item{border-left-color:var(--accent)}
 [data-theme="light"] .sw-card-raw-pre{background:rgba(0,0,0,0.03)}
+[data-theme="light"] .sw-peer-from-bubble{color:#3b5bdb;border-color:rgba(59,91,219,.35);background:rgba(59,91,219,.08)}
+[data-theme="light"] .sw-peer-from-bubble:hover{background:rgba(59,91,219,.16);border-color:rgba(59,91,219,.55)}
+[data-theme="light"] .sw-peer-from-more{background:rgba(59,91,219,.12)}
 [data-theme="tofu"] .sw-card{background:#faf8f3;border-color:#e0d9c8;border-left-color:#d98c3f}
 [data-theme="tofu"] .sw-card-agent{color:#b06d28}
 [data-theme="tofu"] .sw-card-raw-pre{background:rgba(0,0,0,0.04);color:#3a342c}
+[data-theme="tofu"] .sw-peer-from-bubble{color:#5b54c7;border-color:rgba(91,84,199,.35);background:rgba(91,84,199,.08)}
+[data-theme="tofu"] .sw-peer-from-bubble:hover{background:rgba(91,84,199,.16);border-color:rgba(91,84,199,.55)}
+[data-theme="tofu"] .sw-peer-from-more{background:rgba(91,84,199,.12)}
 /* ── Async-only tool rounds: await_agents / get_agent_result mini-cards ───── */
 /*    These are NOT swarm panels — they're regular tool rounds, but rendered   */
 /*    with the swarm vocabulary (amber, monospace) so the user instantly       */
@@ -6746,7 +7088,8 @@ html:not([data-theme="tofu"]) .scene-switch-btn{display:none}
    ★ Code Execution Block (inline in chat)
    ═══════════════════════════════════════════ */
 .code-exec-block {
-  margin: 6px 8px 6px 12px;
+  /* Flat content inside the .ptool-turn card — see .ptool-cmd-block. */
+  margin: 0;
   border-radius: 0;
   border: none;
   background: none;
@@ -6758,7 +7101,8 @@ html:not([data-theme="tofu"]) .scene-switch-btn{display:none}
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 2px 0 4px;
+  /* Same horizontal inset as .ptool-line — see .ptool-cmd-header. */
+  padding: 2px 12px 4px 16px;
   border-bottom: none;
   background: none;
 }
@@ -7691,7 +8035,10 @@ html:not([data-theme="tofu"]) .scene-switch-btn{display:none}
    ★ run_command inline terminal block
    ═══════════════════════════════════════════ */
 .ptool-cmd-block {
-  margin: 6px 8px 6px 12px;
+  /* Flat content inside the .ptool-turn card — the old 12px/8px side margins
+   * date from the retired nested-card model and pushed the header icon ~12px
+   * right of the .ptool-line icon column above it. */
+  margin: 0;
   border-radius: 0;
   border: none;
   background: none;
@@ -7703,7 +8050,9 @@ html:not([data-theme="tofu"]) .scene-switch-btn{display:none}
   display: flex;
   align-items: center;
   gap: 7px;
-  padding: 2px 0 4px;
+  /* Same horizontal inset as .ptool-line so the icon column aligns with
+   * plain tool rows in the same card. */
+  padding: 2px 12px 4px 16px;
   border-bottom: none;
   background: none;
 }
@@ -7760,6 +8109,37 @@ html:not([data-theme="tofu"]) .scene-switch-btn{display:none}
 }
 .ptool-cmd-running .ptool-cmd-icon { color: var(--accent); }
 .ptool-cmd-running .ptool-cmd-label { color: var(--accent-hover); }
+
+/* ── Per-command interrupt button (pt_232244fb) ──
+ * Sits in the running header next to the timer chip. Amber outline (a
+ * deliberate, reversible stop), never the red of an error frame. */
+.ptool-cmd-interrupt {
+  flex-shrink: 0;
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 1;
+  padding: 3px 8px;
+  border-radius: 4px;
+  border: 1px solid rgba(251,191,36,0.45);
+  background: rgba(251,191,36,0.08);
+  color: #fbbf24;
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+.ptool-cmd-interrupt:hover:not(:disabled) {
+  background: rgba(251,191,36,0.18);
+  border-color: rgba(251,191,36,0.7);
+}
+.ptool-cmd-interrupt:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+/* Terminal frame of an interrupted command: amber neutral stop (like
+ * not-run), never the red of an error — the task CONTINUED. */
+.ptool-cmd-interrupted .ptool-cmd-status {
+  color: #fbbf24;
+  background: rgba(251,191,36,0.1);
+}
 
 /* ── Interactive stdin: waiting for user input ── */
 .ptool-cmd-stdin .ptool-cmd-header {
@@ -8044,11 +8424,26 @@ html:not([data-theme="tofu"]) .scene-switch-btn{display:none}
   display: block;
 }
 
-/* ── Collapsible command line (done state) ──
- * When a description conveys intent, the `$ command` string is collapsed by
- * default behind a toggle — the user cares about the result, not the exact
- * shell string. Mirrors the output toggle; the code <pre> is hidden until
- * expanded. */
+/* ── Collapsible command body (done + running states) ──
+ * When a description conveys intent AND the command is long enough to be
+ * noise (multi-line or > 100 chars — see _cmdCollapsible in tool_rounds.js),
+ * the `$ command` <pre> starts COLLAPSED and the header description itself
+ * is the toggle (click to expand in place — no chevron glyph, owner call
+ * 2026-08-02). The user cares about what the command DID, not the exact
+ * shell string. Short one-liners and description-less commands never get
+ * the class and stay visible. */
+.ptool-cmd-block .ptool-cmd-collapsible {
+  display: none;
+}
+.ptool-cmd-block.cmd-open .ptool-cmd-collapsible {
+  display: block;
+}
+.ptool-cmd-desc-toggle {
+  cursor: pointer;
+}
+.ptool-cmd-desc-toggle:hover {
+  color: var(--accent-hover);
+}
 
 /* ── Running: elapsed / timeout-budget readout in the header ── */
 /* When both the elapsed readout and the spinner are present, the elapsed
@@ -15258,11 +15653,24 @@ html:not([data-theme="tofu"]) .tofu-pet{display:none}
    beside it. One rule is what stops that recurring; .lc-substep differs in
    MARGIN only, so only margin is overridden below. */
 .lc-step,.lc-substep{font-size:12.5px;line-height:1.6;color:var(--text-secondary,#9898a8);margin:0 0 8px}
+.lc-warn{color:#e8a13c;border:1px solid rgba(232,161,60,0.35);border-radius:6px;padding:6px 9px;background:rgba(232,161,60,0.07)}
+.lc-await{color:var(--text-secondary,#9898a8);border-left:2px solid rgba(168,85,247,0.4);padding-left:9px}
+.lc-role{border:1px solid var(--border,rgba(148,148,168,0.18));border-radius:8px;padding:10px 12px;margin:0 0 10px}
+.lc-role-primary{border-color:rgba(168,85,247,0.45);background:rgba(168,85,247,0.05)}
+.lc-role-head{font-size:13px;font-weight:600;color:var(--text-primary,#e6e6ea);margin:0 0 7px}
+.lc-role-note{font-weight:400;font-size:12.5px;color:var(--text-secondary,#9898a8);line-height:1.6}
 .lc-copy{position:relative;display:block;padding:8px 10px;border-radius:6px;word-break:break-all;font-size:12px;font-family:'JetBrains Mono',monospace;color:#a855f7;cursor:pointer;border:1px dashed rgba(168,85,247,0.4);background:rgba(168,85,247,0.06);transition:background-color .2s ease,box-shadow .2s ease}
 .lc-copy:hover{background:rgba(168,85,247,0.14);box-shadow:0 0 0 2px rgba(168,85,247,0.18)}
 .lc-copy::after{content:attr(data-tooltip);position:absolute;bottom:calc(100% + 6px);left:8px;font-size:11px;padding:3px 8px;border-radius:5px;background:#1e293b;color:#e2e8f0;white-space:nowrap;pointer-events:none;opacity:0;transition:opacity .15s}
 .lc-copy:hover::after{opacity:1}
 .lc-copy.copied{background:rgba(34,197,94,0.16);color:#22c55e;border-color:rgba(34,197,94,0.4)}
+/* ── Pairing code display (P2) ──
+   The 6-digit code is the panel's primary action, so it gets the biggest
+   type in the dialog: wide-tracked JetBrains Mono digits next to a copy
+   button, inside a purple-tinted card that matches .lc-copy's family. */
+.lc-pair-code{display:flex;align-items:center;gap:12px;margin:2px 0 6px;padding:10px 14px;border-radius:8px;border:1px solid rgba(168,85,247,0.4);background:rgba(168,85,247,0.07)}
+.lc-pair-digits{font-family:'JetBrains Mono',monospace;font-size:26px;font-weight:700;letter-spacing:.18em;color:#c084fc;user-select:all}
+[data-theme="light"] .lc-pair-digits{color:#7e22ce}
 .lc-perm-note{font-size:11.5px;line-height:1.55;color:var(--text-tertiary,#6a6a7a);margin:10px 0 0}
 .lc-substep{margin:0 0 10px}
 .lc-dl-link{font-size:12.5px;color:#a855f7;text-decoration:none;border-bottom:1px solid rgba(168,85,247,0.35);padding-bottom:1px;transition:color .15s ease,border-color .15s ease}
@@ -15288,6 +15696,17 @@ html:not([data-theme="tofu"]) .tofu-pet{display:none}
    fast/reliable path, so it gets the success hue, not the accent one. */
 .lc-dl-hosted{display:inline-flex;align-items:center;padding:3px 8px;font-size:10.5px;font-weight:600;border-radius:999px;white-space:nowrap;color:#15803d;border:1px solid rgba(22,163,74,0.35);background:rgba(22,163,74,0.08)}
 [data-theme="light"] .lc-dl-hosted{color:#166534;border-color:rgba(21,128,61,0.4);background:rgba(21,128,61,0.10)}
+/* ── Collapsed secondary download (the full desktop app in the remote
+   branch). The agent is the primary action there; the full installer must
+   stay one line away WITHOUT competing for attention — a zero-JS <details>
+   keeps it discoverable but out of the numbered flow. */
+.lc-details{margin:0 0 8px;font-size:12.5px;color:var(--text-secondary,#9898a8)}
+.lc-details>summary{cursor:pointer;list-style:none;outline:none}
+.lc-details>summary::-webkit-details-marker{display:none}
+.lc-details>summary::before{content:'▸\00a0';color:#a855f7}
+.lc-details[open]>summary::before{content:'▾\00a0'}
+.lc-details>summary:hover{color:var(--text-primary,#e8e8f0)}
+.lc-details[open]>summary{margin-bottom:6px}
 
 [data-theme="light"] .lc-cap{border-color:rgba(0,0,0,0.09);background:rgba(0,0,0,0.012)}
 [data-theme="light"] .lc-cap-icon{background:rgba(126,34,206,0.1);color:#7e22ce}
@@ -16175,6 +16594,63 @@ html:not([data-theme="tofu"]) .tofu-pet{display:none}
 .peer-msg-banner.peer-msg-banner-operator{border-color:rgba(126,231,135,.4);background:rgba(126,231,135,.09)}
 .peer-msg-banner.peer-msg-banner-operator .peer-msg-icon,
 .peer-msg-banner.peer-msg-banner-operator .peer-msg-from{color:#7ee787}
+
+/* ── Brain-dispatch provenance card (chat_render.js _renderBrainDispatchCard)
+   A Project-Brain kickoff turn: the card carries WHICH epic / WHO posted it /
+   HOW+WHY it was routed here, so the raw English instruction wall can stay
+   collapsed behind .brain-kickoff-raw. Brain-purple accent (same family as
+   the conv-ref badge) — distinct from the peer banner's blue. */
+.brain-dispatch-card{
+  margin:0 0 10px 0;padding:10px 14px 11px;
+  border:1px solid rgba(199,146,234,.35);
+  background:linear-gradient(135deg, rgba(199,146,234,.10), rgba(130,170,255,.05));
+  border-radius:10px;font-size:12.5px;line-height:1.5;
+  color:var(--text-secondary, #9aa4b2);
+}
+.brain-dispatch-card .bdc-head{
+  display:flex;align-items:center;gap:6px;margin-bottom:4px;
+  font-size:11.5px;font-weight:600;letter-spacing:.03em;color:#c792ea;
+}
+.brain-dispatch-card .bdc-icon{display:inline-flex}
+.brain-dispatch-card .bdc-epic-id{
+  margin-left:auto;font-family:var(--font-mono, ui-monospace, monospace);
+  font-size:11px;font-weight:400;color:var(--text-tertiary, #6b7280);
+}
+.brain-dispatch-card .bdc-answered{
+  display:inline-flex;align-items:center;padding:1px 8px;border-radius:999px;
+  background:rgba(126,231,135,.12);border:1px solid rgba(126,231,135,.35);
+  color:#7ee787;font-size:11px;font-weight:600;letter-spacing:0;
+}
+.brain-dispatch-card .bdc-epic-title{
+  font-size:13px;font-weight:600;color:var(--text-primary, #e6e9ee);
+  cursor:pointer;line-height:1.4;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;
+}
+.brain-dispatch-card .bdc-epic-title:hover{color:#c792ea;text-decoration:underline}
+.brain-dispatch-card .bdc-meta{
+  display:flex;flex-wrap:wrap;gap:3px 16px;margin-top:7px;font-size:12px;
+}
+.brain-dispatch-card .bdc-meta-label{
+  color:var(--text-tertiary, #6b7280);margin-right:5px;
+}
+.brain-dispatch-card .bdc-conv-link{
+  color:#82aaff;font-weight:600;text-decoration:none;
+}
+.brain-dispatch-card .bdc-conv-link:hover{text-decoration:underline}
+.brain-dispatch-card .bdc-this{font-weight:600;color:var(--text-primary, #e6e9ee)}
+/* The raw engine kickoff text — collapsed by default; the card above is the
+   human-facing summary. Dashed frame reads as "machinery, not prose". */
+.brain-kickoff-raw{
+  margin:0 0 8px 0;padding:5px 12px;
+  border:1px dashed var(--border, #333);border-radius:8px;
+}
+.brain-kickoff-raw>summary{
+  cursor:pointer;padding:2px 0;user-select:none;
+  font-size:12px;color:var(--text-tertiary, #6b7280);
+}
+.brain-kickoff-raw>summary:hover{color:var(--text-secondary, #9aa4b2)}
+.brain-kickoff-raw[open]>summary{margin-bottom:6px}
+.brain-kickoff-raw .user-content{font-size:12px;opacity:.85;white-space:pre-wrap}
 
 /* ── Conversation Reference Picker Popover ── */
 .conv-ref-picker{
@@ -17442,7 +17918,7 @@ html:not([data-theme="tofu"]) .tofu-pet{display:none}
    * are hidden behind a "more" (···) button that opens a bottom sheet.
    * This keeps the toolbar to ~4 items on a 360px screen. */
   .input-area{padding:6px 8px calc(8px + env(safe-area-inset-bottom,0px));max-width:100%!important;overflow:hidden!important;border-top:1px solid var(--border)}
-  .input-inner{max-width:100%!important;overflow:hidden!important;padding-left:env(safe-area-inset-left,0px);padding-right:env(safe-area-inset-right,0px)}
+  .input-inner{max-width:100%!important;overflow:hidden!important;padding-left:env(safe-area-inset-left,0px);padding-right:env(safe-area-inset-right,0px);margin-left:0;margin-right:0;min-width:0}
   .input-box{border-radius:16px;margin-top:8px}
   textarea{font-size:16px;padding:12px 14px 10px;min-height:44px;max-height:140px}
   /* All toolbar controls share a single 40px touch-target height so the row
@@ -17588,11 +18064,10 @@ html:not([data-theme="tofu"]) .tofu-pet{display:none}
   .settings-panel{width:100%;max-width:100%;max-height:var(--vh100,100dvh);height:var(--vh100,100dvh);box-shadow:none;border-width:0;padding-bottom:env(safe-area-inset-bottom,0px)}
   .settings-body{flex-direction:column}
   .settings-tabs{flex-direction:row;width:100%;min-width:0;border-right:none;border-bottom:3px solid #1a1814;padding:8px;overflow-x:auto;overflow-y:hidden}
-  .settings-tabs::before{display:none}
-  .settings-tab{padding:7px 10px;font-size:11px;border-left:none;border-bottom:2px solid transparent}
-  .settings-tab:hover{border-left-color:transparent;border-bottom-color:var(--s-gold-dim)}
-  .settings-tab.active{border-left:none;border-bottom:2px solid var(--s-gold);box-shadow:2px 2px 0 var(--s-ink)}
-  .settings-tab.active::after{display:none}
+  .settings-tab-group{display:none}
+  .settings-tab{padding:7px 10px;font-size:11px}
+  .settings-tab.active{box-shadow:2px 2px 0 var(--s-ink)}
+  .settings-tab.active:active{box-shadow:1px 1px 0 var(--s-ink)}
   .settings-tab span{display:none}
   .settings-tab svg{margin:0}
   .settings-content{padding:16px}
@@ -20184,7 +20659,7 @@ html:not([data-theme="light"]):not([data-theme="tofu"]) .ctx-health-bar[data-zon
  * grid item in a zero-width track, so leaving it visible would smear it. */
 .chat-inner{ --rail-shown:0; }
 .turn-ctx{ display:none; }
-@container chatpane (min-width: 1368px){
+@container chatpane (min-width: 1056px){
   .turn-ctx{
     display:flex;
     flex-direction:column;
@@ -20328,7 +20803,13 @@ html:not([data-theme="light"]):not([data-theme="tofu"]) .ctx-health-bar[data-zon
 /* ── Fold: the rail's content as ONE line under the message header ──
  * Shown exactly when the rail track is absent (narrow pane, or the
  * inspector drawer is open). Guarantees the turn's context is never lost,
- * only compacted. */
+ * only compacted.
+ * DOM HOME: inside `.message-content`, between header and body — in-flow,
+ * the only place this rule's `margin-bottom` means anything. It used to
+ * ship as a direct `.message` grid child, where it auto-placed into the
+ * ZERO-WIDTH rail track and painted nothing (display:flex, width:0)
+ * whenever the rail was hidden — the exact state it exists for. Guarded by
+ * the width-aware fold assertion in tests/test_turn_ctx_rail_geometry.py. */
 .tctx-fold{
   display:flex;
   align-items:center;
@@ -20342,7 +20823,7 @@ html:not([data-theme="light"]):not([data-theme="tofu"]) .ctx-health-bar[data-zon
   text-overflow:ellipsis;
 }
 .tctx-fold .tctx-fold-dot{ width:5px; height:5px; border-radius:50%; background:var(--accent); flex:0 0 auto; opacity:.7; }
-@container chatpane (min-width: 1368px){
+@container chatpane (min-width: 1056px){
   .tctx-fold{ display:none; }
 }
 
@@ -21841,6 +22322,21 @@ html:not([data-theme="light"]):not([data-theme="tofu"]) .pb-watch-diverged{color
 /* The question IS the content on a halted epic — and after the 2026-07-31
    consolidation this is the ONLY place it renders (the Board deep-links here). */
 .pb-attn-q{margin-top:9px;padding:10px 12px;border:1px solid color-mix(in srgb,var(--pb-red) 26%,transparent);border-radius:var(--pb-radius-sm);background:color-mix(in srgb,var(--pb-red) 6%,transparent);font-size:12.5px;line-height:1.6;color:var(--text-primary);overflow-wrap:anywhere;word-break:break-word}
+/* Section label — names the block that follows (Why it stopped / Your call),
+   so a decision card reads as labelled parts, not one dense wall. */
+.pb-attn-label{margin-top:10px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.06em;color:var(--text-tertiary)}
+/* The background block: the block reason promoted out of the meta tail into
+   its own quiet panel (clamp-rendered, so a long reason collapses). */
+.pb-attn-reason{margin-top:4px;padding:8px 10px;border:1px solid var(--border);border-radius:var(--pb-radius-sm);background:color-mix(in srgb,var(--bg-tertiary) 30%,transparent);font-size:12px;line-height:1.6;color:var(--text-secondary);overflow-wrap:anywhere;word-break:break-word}
+/* Provenance chip in the card head — pushed right so the severity/kind pills
+   keep their lead position; reuses the panel-wide pb-conv-chip look. */
+.pb-attn-from{margin-left:auto;max-width:55%}
+.pb-attn-from-name{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* Option chip with its description ON the card (was hover-only): the choice
+   and what it means read together, stacked. */
+.pb-attn-opt{flex-direction:column;align-items:flex-start;gap:2px}
+.pb-attn-opt-label{font-weight:600}
+.pb-attn-opt-desc{font-size:10.5px;font-weight:400;color:var(--text-tertiary);line-height:1.45;white-space:normal;text-align:left}
 .pb-attn-input-row{display:flex;gap:7px;margin-top:9px}
 .pb-attn-answer{flex:1;min-width:0;background:var(--bg-primary);border:1px solid var(--border);border-radius:var(--pb-radius-sm);padding:6px 10px;font-size:12px;color:var(--text-primary);font-family:inherit}
 .pb-attn-answer:focus{outline:none;border-color:var(--accent)}
@@ -21856,9 +22352,6 @@ html:not([data-theme="light"]):not([data-theme="tofu"]) .pb-watch-diverged{color
    the Board's createConv/goto forward actions (one vocabulary panel-wide). */
 .pb-attn-act.pb-attn-act-conv{color:var(--accent);border-color:color-mix(in srgb,var(--accent) 34%,transparent);background:transparent}
 .pb-attn-act.pb-attn-act-conv:hover{color:var(--accent-hover);border-color:color-mix(in srgb,var(--accent) 50%,transparent);background:var(--accent-subtle)}
-.pb-attn-goto{display:inline-flex;align-items:center;gap:5px;background:transparent;color:var(--accent);border:1px solid color-mix(in srgb,var(--accent) 30%,transparent);border-radius:var(--pb-radius-sm);padding:5px 10px;font-size:11.5px;font-weight:600;font-family:inherit;cursor:pointer;transition:background var(--transition)}
-.pb-attn-goto:hover{background:var(--accent-subtle)}
-.pb-attn-goto svg{display:block}
 /* The reassurance line: epics on a self-expiring cooldown need NOTHING from
    the human, so they are deliberately not cards — a muted footnote instead. */
 .pb-attn-waiting{display:flex;align-items:center;gap:6px;margin-top:6px;padding:9px 11px;font-size:11.5px;color:var(--text-tertiary);border:1px dashed var(--border);border-radius:var(--pb-radius-sm);background:color-mix(in srgb,var(--bg-tertiary) 25%,transparent)}

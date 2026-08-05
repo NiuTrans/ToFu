@@ -138,15 +138,15 @@ CASES: dict[str, tuple[dict, str]] = {
                           '4111111111111111'),
     'browser_click': ({'tab_id': '7', 'selector': '#confirm-purchase'},
                       '#confirm-purchase'),
-    'browser_hover_and_click': ({'tab_id': '7', 'hover_selector': '#menu',
-                                 'click_selector': '#delete-account'},
-                                '#delete-account'),
-    'browser_right_click_menu': ({'tab_id': '7', 'target_selector': '#file',
-                                  'menu_item_text': 'Delete Forever'},
-                                 'Delete Forever'),
-    'browser_keyboard': ({'tab_id': '7', 'keys': 'Control+Shift+Delete'},
-                         'Control+Shift+Delete'),
-    'browser_create_tab': ({'url': 'https://evil.example/x'}, 'evil.example'),
+    # v2 surface (pt_869e5648403e4745) — the retired names (keyboard,
+    # create_tab, hover_and_click, right_click_menu) left the write partition
+    # with the consolidation, so they left this table with it.
+    'browser_type': ({'tab_id': '7', 'text': 'Card number',
+                      'value': '4111111111111111'}, '4111111111111111'),
+    'browser_press_key': ({'tab_id': '7', 'keys': 'Control+Shift+Delete'},
+                          'Control+Shift+Delete'),
+    'browser_menu_click': ({'tab_id': '7', 'target_text': 'File',
+                            'item_text': 'Delete Forever'}, 'Delete Forever'),
     'browser_close_tab': ({'tab_ids': ['7', '8']}, '7'),
     'desktop_run_command': ({'command': 'rm -rf ~/Documents'}, 'rm -rf ~/Documents'),
     'desktop_write_file': ({'path': '~/.bashrc', 'content': 'EVIL_PAYLOAD'},
@@ -175,6 +175,9 @@ CASES: dict[str, tuple[dict, str]] = {
                       'continuation_message': 'CONT_X'}, 'CONT_X'),
     'timer_manage': ({'action': 'cancel', 'timer_id': 'timer-X'}, 'timer-X'),
     'project_charter_commit': ({'decision': 'DECISION_X'}, 'DECISION_X'),
+    'update_search_settings': ({'fetch_top_n': 5, 'llm_content_filter': False,
+                                'block_domain': 'pinterest.com'},
+                               'pinterest.com'),
 }
 
 

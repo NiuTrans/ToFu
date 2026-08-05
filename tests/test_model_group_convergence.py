@@ -6,7 +6,7 @@ wire protocol).
 WHY
 ---
 The toolbar model dropdown grouped by ``provider_id`` / ``provider_name``.
-When Claude moved to the Anthropic-native face (``example-corp_anthropic``,
+When Claude moved to the Anthropic-native face (``example_corp_anthropic``,
 2026-07-28) — same gateway, same API keys, only a different wire protocol —
 the picker split into TWO "YourProvider" sections. That is a backend
 implementation detail (which protocol a socket speaks) leaking straight into
@@ -97,7 +97,7 @@ const PROVIDERS = [
   { id: 'example-corp', name: 'YourProvider', base_url: 'https://api.openai.com/v1',
     protocol: '', enabled: true,
     models: [ { model_id: 'kimi-k3' }, { model_id: 'deepseek-v3.2' } ] },
-  { id: 'example-corp_anthropic', name: 'YourProvider (Anthropic native)',
+  { id: 'example_corp_anthropic', name: 'YourProvider (Anthropic native)',
     base_url: 'https://api.openai.com/v1/anthropic', protocol: 'anthropic', enabled: true,
     models: [ { model_id: 'claude-opus-4.7' }, { model_id: 'claude-opus-5' } ] },
   { id: 'oauth_claude', name: 'Claude (Pro/Max subscription)', brand: 'oauth',

@@ -200,44 +200,47 @@ class TestLeakedSyntheticRowStillNeutral:
 # ═══════════════════════════════════════════════════════════
 
 class TestNeuterWirePurityGuard:
-    """Prove the invariant is load-bearing: with the ``is_synthetic_inbox_round``
-    guard DISABLED (the pre-fix behaviour), a synthetic inject row in toolRounds
-    collapses the WHOLE assistant turn to a lossy summary — breaking tool-turn
-    continuation AND shifting the wire prefix (cache miss). This is exactly the
-    regression the sidecar + guard prevent."""
+    """Prove the FILTER CHAIN is load-bearing.
 
-    def _disable_guard(self, monkeypatch):
-        # The reconstructors import is_synthetic_inbox_round from _types at call
-        # time, so patching the source attribute neuters both call sites.
+    A synthetic inbox row lacks every field a replayable round needs, so it is
+    caught by BOTH predicates in the reconstructor —
+    ``not is_synthetic_inbox_round(r)`` AND ``_is_reconstructable_round(r)``.
+    The ORIGINAL NCs disabled only the first and died confused: the structural
+    predicate still filtered the row, so "without the guard" nothing diverged
+    (the guard looked redundant). Disabling the whole CHAIN lets the row
+    through, and reconstruction DETONATES on it (measured: ``KeyError:
+    'toolCallId'`` — a display-only row reaches the tool_calls builder, which
+    reads fields it never had). The wire-purity filter as a whole is what
+    keeps a display-only row from destroying tool-turn continuation."""
+
+    def _disable_filter_chain(self, monkeypatch):
         import lib.tasks_pkg.segments._types as _seg_types
+        import lib.tasks_pkg.conv_message_builder._toolcalls as _tc
         monkeypatch.setattr(_seg_types, 'is_synthetic_inbox_round',
                             lambda _r: False)
+        monkeypatch.setattr(_tc, '_is_reconstructable_round', lambda _r: True)
 
-    def test_NC_without_guard_synthetic_row_collapses_reconstruction(self, monkeypatch):
-        self._disable_guard(monkeypatch)
+    def test_NC_without_filter_chain_synthetic_row_detonates_reconstruction(self, monkeypatch):
+        self._disable_filter_chain(monkeypatch)
         poisoned = _base_msg()
         poisoned['toolRounds'].insert(1, _synthetic_inbox_round(1))
-        assert _reconstruct_tool_call_messages(poisoned['toolRounds']) is None, (
-            'with the wire-purity guard disabled, a synthetic inject row in '
-            'toolRounds MUST collapse reconstruction — if it does not, the guard '
-            'is not actually what protects tool-turn continuation'
-        )
+        with pytest.raises(KeyError):
+            _reconstruct_tool_call_messages(poisoned['toolRounds'])
 
-    def test_NC_without_guard_synthetic_row_diverges_the_wire(self, monkeypatch):
+    def test_NC_without_filter_chain_synthetic_row_diverges_the_wire(self, monkeypatch):
         clean = _build_assistant_messages(_base_msg())
-        self._disable_guard(monkeypatch)
+        self._disable_filter_chain(monkeypatch)
         poisoned_msg = _base_msg()
         poisoned_msg['toolRounds'].insert(1, _synthetic_inbox_round(1))
-        poisoned = _build_assistant_messages(poisoned_msg)
+        try:
+            poisoned = _build_assistant_messages(poisoned_msg)
+        except KeyError:
+            poisoned = 'DETONATED'
         assert clean != poisoned, (
-            'with the guard disabled, folding a synthetic inject row into '
-            'toolRounds should change the wire replay — proving keeping it OUT '
-            '(sidecar) + filtering it (guard) is what preserves the prefix cache'
-        )
-        # The clean replay has genuine tool-role messages; the poisoned one has
-        # none (collapsed to a lossy assistant summary).
-        assert any(m.get('role') == 'tool' for m in clean)
-        assert not any(m.get('role') == 'tool' for m in poisoned)
+            'with the filter chain disabled, folding a synthetic inject row '
+            'into toolRounds must change (or destroy) the wire replay — proving '
+            'keeping it OUT (sidecar) + filtering it (chain) is what preserves '
+            'tool-turn continuation and the prefix cache')
 
 
 if __name__ == '__main__':

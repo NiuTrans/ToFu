@@ -397,6 +397,47 @@ def _approval_meta_browser_keyboard(approval_meta, fn_args):
     )
 
 
+def _approval_meta_browser_type(approval_meta, fn_args):
+    """``browser_type`` — the VALUE typed into the user's page is the risk."""
+    target = fn_args.get('text') or fn_args.get('selector', '') or ''
+    approval_meta['path'] = target
+    _risk(
+        approval_meta,
+        ('Text to type', fn_args.get('value') or None),
+        ('Into field', target or None),
+        ('Tab', fn_args.get('tab_id') or None),
+        note='Type text into a field in your browser page',
+    )
+
+
+def _approval_meta_browser_press_key(approval_meta, fn_args):
+    """``browser_press_key`` — keystrokes can submit forms / fire shortcuts."""
+    keys = fn_args.get('keys', '') or ''
+    _risk(
+        approval_meta,
+        ('Keys to send', keys),
+        ('Focus element', fn_args.get('selector') or None),
+        ('Tab', fn_args.get('tab_id') or None),
+        note='Send synthetic keystrokes to your browser page',
+    )
+
+
+def _approval_meta_browser_menu_click(approval_meta, fn_args):
+    """``browser_menu_click`` — which menu item gets activated."""
+    item = fn_args.get('item_text', '') or ''
+    target = fn_args.get('target_text') or fn_args.get('target_selector', '') or ''
+    approval_meta['path'] = item
+    _risk(
+        approval_meta,
+        ('Menu item to activate', item),
+        ('Menu opened on', target or None),
+        ('Via', fn_args.get('via') or None),
+        ('Submenu item', fn_args.get('submenu_text') or None),
+        ('Tab', fn_args.get('tab_id') or None),
+        note='Open a menu and activate an item in your browser',
+    )
+
+
 def _approval_meta_browser_create_tab(approval_meta, fn_args):
     """``browser_create_tab`` — the URL that will be opened."""
     url = fn_args.get('url', '') or ''
@@ -628,6 +669,46 @@ def _approval_meta_motion_video_narrate(approval_meta, fn_args):
     )
 
 
+#: The adjustable knobs of ``update_search_settings`` (schema order). Every
+#: one is optional and any subset may change in one call, so the dialog must
+#: name each knob being touched — a bare "update settings" row is the blind
+#: approval this enricher exists to prevent.
+_SEARCH_SETTINGS_KNOBS = (
+    'fetch_top_n', 'fetch_timeout', 'max_chars_search', 'max_chars_direct',
+    'max_chars_pdf', 'max_download_mb', 'llm_content_filter',
+    'block_domain', 'unblock_domain',
+)
+
+
+def _approval_meta_update_search_settings(approval_meta, fn_args):
+    """``update_search_settings`` — mutates SERVER-WIDE search/fetch config.
+
+    Changes are global, persist across restarts, and hit every conversation,
+    so each knob being changed is listed with its new value. A no-arg call
+    is a pure READ (the model inspecting current values before proposing a
+    change) — say so instead of rendering an empty table.
+    """
+    changes = [
+        (f'Setting: {k}', str(fn_args[k]))
+        for k in _SEARCH_SETTINGS_KNOBS
+        if fn_args.get(k) is not None
+    ]
+    if not changes:
+        _risk(
+            approval_meta,
+            ('Change set', 'none — read-only inspection of current values'),
+            note='Read the current search/fetch pipeline settings (no change)',
+        )
+        return
+    approval_meta['path'] = ', '.join(k for k, _v in changes)
+    _risk(
+        approval_meta,
+        *changes,
+        note=('Change SERVER-WIDE search/fetch settings — applies globally, '
+              'persists across restarts, affects every conversation'),
+    )
+
+
 # Module-level dispatch table — maps tool name → approval meta enricher.
 # Only tools that need special approval metadata are listed; tools not in
 # this dict get the base metadata only (path + description).
@@ -657,6 +738,10 @@ _APPROVAL_META_ENRICHERS = {
     'browser_keyboard':         _approval_meta_browser_keyboard,
     'browser_create_tab':       _approval_meta_browser_create_tab,
     'browser_close_tab':        _approval_meta_browser_close_tab,
+    # ── v2 surface (pt_869e5648403e4745) ──
+    'browser_type':             _approval_meta_browser_type,
+    'browser_press_key':        _approval_meta_browser_press_key,
+    'browser_menu_click':       _approval_meta_browser_menu_click,
     # ── desktop: runs on the user's own machine ──
     'desktop_run_command':      _approval_meta_desktop_run_command,
     'desktop_write_file':       _approval_meta_desktop_write_file,
@@ -672,6 +757,8 @@ _APPROVAL_META_ENRICHERS = {
     'motion_video_concat':      _approval_meta_motion_video_concat,
     'motion_video_mux':         _approval_meta_motion_video_mux,
     'motion_video_narrate':     _approval_meta_motion_video_narrate,
+    # ── search settings: server-wide config mutation ──
+    'update_search_settings':   _approval_meta_update_search_settings,
 }
 
 

@@ -361,6 +361,11 @@ def execute_compact_tool(messages: list, task: dict | None = None, **kwargs) -> 
 
     def _project_tokens() -> tuple[int, str]:
         try:
+            # Local import (same pattern as the _allow_ht block below): the
+            # bare name was never bound in this module, so EVERY projection
+            # raised NameError into the except and silently ran 'heuristic'.
+            from lib.tasks_pkg.compaction._tokens import (
+                _count_tokens_authoritative)
             return _count_tokens_authoritative(list(messages) + _summary_pair, task)
         except Exception as _pe:
             logger.debug('%s [Compact] convergence projection count failed '

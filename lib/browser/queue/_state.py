@@ -90,6 +90,18 @@ except (ValueError, TypeError) as _e:
 _clients = {}           # client_id → metadata dict
 _clients_lock = threading.Lock()
 
+# ── Locked-out fleet registry (2026-08-04, stranded-extension fix) ──
+# A poll that dies at the bridge-auth gate carries a stale/revoked
+# credential — an INSTALLED extension that can never heal itself (a
+# side-loaded extension has no update channel and a 401-parked one cannot
+# poll). Recording who knocked here lets the panel tell "installed but
+# locked out" from "never installed" and offer the one-click re-download.
+# Entries carry last_seen + ext_version + fail_count; reads filter by TTL
+# (the parked 5-min probe keeps a live stranded client fresh), writes are
+# capacity-capped.
+_locked_out = {}        # client_id → {first_seen, last_seen, ext_version, fail_count}
+_locked_out_lock = threading.Lock()
+
 # Legacy global poll time (kept for backward compat with is_extension_connected).
 # REBOUND by mark_poll / wait_for_commands via ``_state._last_poll_time = ...``.
 _last_poll_time = 0

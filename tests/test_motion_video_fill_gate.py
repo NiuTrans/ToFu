@@ -229,6 +229,11 @@ def test_fill_findings_reach_the_quality_verdict():
 
     class _MV:
         @staticmethod
+        def is_infra_category(category):
+            from lib.motion_video import is_infra_category
+            return is_infra_category(category)
+
+        @staticmethod
         def check_composition_fill(html):
             from lib.motion_video import check_composition_fill
             return check_composition_fill(html)
@@ -241,11 +246,10 @@ def test_fill_findings_reach_the_quality_verdict():
         def check_project(_d, **_k):
             return {'ok': True, 'errors': []}
 
-    if _fill_or_skip(_UNDERFILLED) is None:  # pragma: no cover
-        pytest.skip('unmeasurable')
+    fill = _fill_or_skip(_UNDERFILLED)
     findings = engine._scene_gate_findings(
         _MV(), '/tmp/x', 'scene-005',
-        scene={'id': 'scene-005', 'text': 'x'}, html=_UNDERFILLED)
+        scene={'id': 'scene-005', 'text': 'x'}, html=_UNDERFILLED, fill=fill)
     assert findings, (
         'an under-filled composition passes the engine gate untouched — the '
         'CLI gates cannot see it, so nothing would')
@@ -267,6 +271,11 @@ def test_fill_survives_an_infrastructure_skip_of_the_cli_gates():
 
     class _MV:
         @staticmethod
+        def is_infra_category(category):
+            from lib.motion_video import is_infra_category
+            return is_infra_category(category)
+
+        @staticmethod
         def check_composition_fill(html):
             from lib.motion_video import check_composition_fill
             return check_composition_fill(html)
@@ -279,10 +288,10 @@ def test_fill_survives_an_infrastructure_skip_of_the_cli_gates():
         def check_project(_d, **_k):
             return {'ok': False, 'category': 'env_missing', 'errors': []}
 
-    _fill_or_skip(_UNDERFILLED)
+    fill = _fill_or_skip(_UNDERFILLED)
     findings = engine._scene_gate_findings(
         _MV(), '/tmp/x', 'scene-005',
-        scene={'id': 'scene-005', 'text': 'x'}, html=_UNDERFILLED)
+        scene={'id': 'scene-005', 'text': 'x'}, html=_UNDERFILLED, fill=fill)
     assert findings, (
         'fill was dropped along with the CLI gates on env_missing; it needs '
         'no toolchain and must still be reported')

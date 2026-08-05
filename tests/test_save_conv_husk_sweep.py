@@ -131,8 +131,19 @@ def _cleanup(db, *ids):
 
 
 def _defer_status(defer):
-    from lib.api_response import api_ok
+    from lib.api_response import api_ok, api_payload
+    # Mirror `_finish`: the helper MUST be callable — a missing import (the
+    # 2026-08-03 jsonify production 500) leaves it unbound/None and the real
+    # materialization would crash into a 500. Unpacking args without this
+    # check lets exactly that bug sail through the harness.
+    if not callable(defer.helper):
+        raise TypeError(f'_Defer helper {defer.helper!r} is not callable '
+                        '(missing import? — the real _finish would 500 here)')
     status = getattr(defer, 'status', None)
+    if defer.helper is api_payload and len(defer.args) > 1:
+        # api_payload carries its HTTP status positionally (the _Defer status
+        # kwarg is bookkeeping-only and must stay None for these).
+        status = defer.args[1]
     if defer.helper is api_ok:
         payload = {'ok': True}
         payload.update(defer.kwargs)
@@ -217,8 +228,9 @@ def test_live_task_placeholder_not_swept():
         try:
             from lib.runtime_state_store import get_store
             get_store().set_value('latest', conv_id, None, 1)
-        except Exception:
-            pass
+        except Exception as _e:
+            # teardown best-effort — visible, never a bare pass
+            print(f'  (runtime-state cleanup best-effort failed: {_e})')
         _cleanup(db, conv_id)
     _ok('★ live-task empty placeholder is NOT swept by the PUT (gate 1)')
 
@@ -251,9 +263,74 @@ def test_clean_shorter_put_vs_bloated_row_not_regression_rejected():
         'guard does not preserve husks')
 
 
+def test_stale_baserev_put_returns_409_not_500():
+    """PRODUCTION BUG GUARD (2026-08-03 13:05:01 — 'name jsonify is not
+    defined' on PUT /api/v1/conversations): every save_conv 409 returns via
+    ``_Defer(jsonify, …)``; with ``jsonify`` unimported the rejection was a
+    500 and the client's rebase-and-retry contract broke. Pin: stale baseRev
+    → 409 + error=blocked_rev_conflict + serverRev, row untouched."""
+    from lib.database import DOMAIN_CHAT, get_thread_db
+    conv_id = 'cv-409-rev'
+    db = get_thread_db(DOMAIN_CHAT)
+    _seed(db, conv_id, _clean_body(4))
+    try:
+        row = db.execute('SELECT rev FROM conversations WHERE id=? AND user_id=1',
+                         (conv_id,)).fetchone()
+        server_rev = row[0] if not isinstance(row, dict) else row['rev']
+        st, pl = _put(db, conv_id, _clean_body(5), baseRev=int(server_rev) + 999)
+        assert st == 409, f'rev-conflict PUT must 409 (not 500), got {st}: {pl}'
+        assert pl.get('error') == 'blocked_rev_conflict', pl
+        assert pl.get('serverRev') == server_rev
+        msgs, mc, _ = _read(db, conv_id)
+        assert mc == 4 and len(msgs) == 4, 'rejected PUT must not mutate the row'
+    finally:
+        _cleanup(db, conv_id)
+    _ok('stale baseRev PUT → 409 blocked_rev_conflict (not 500)')
+
+
+def test_empty_overwrite_put_returns_409_not_500():
+    """Same jsonify-import guard on the blocked_empty_overwrite path: a 0-msg
+    PUT against a non-empty row → 409, not 500."""
+    from lib.database import DOMAIN_CHAT, get_thread_db
+    conv_id = 'cv-409-empty'
+    db = get_thread_db(DOMAIN_CHAT)
+    _seed(db, conv_id, _clean_body(4))
+    try:
+        st, pl = _put(db, conv_id, [])
+        assert st == 409, f'empty-overwrite PUT must 409 (not 500), got {st}: {pl}'
+        assert pl.get('error') == 'blocked_empty_overwrite', pl
+        msgs, mc, _ = _read(db, conv_id)
+        assert mc == 4 and len(msgs) == 4
+    finally:
+        _cleanup(db, conv_id)
+    _ok('empty-overwrite PUT → 409 blocked_empty_overwrite (not 500)')
+
+
+def test_msg_regression_put_returns_409_not_500():
+    """Same guard on the blocked_msg_regression path: a shorter PUT without
+    allowTruncate → 409, not 500."""
+    from lib.database import DOMAIN_CHAT, get_thread_db
+    conv_id = 'cv-409-regress'
+    db = get_thread_db(DOMAIN_CHAT)
+    _seed(db, conv_id, _clean_body(6))
+    try:
+        st, pl = _put(db, conv_id, _clean_body(4))
+        assert st == 409, f'regression PUT must 409 (not 500), got {st}: {pl}'
+        assert pl.get('error') == 'blocked_msg_regression', pl
+        assert pl.get('serverMsgCount') == 6
+        msgs, mc, _ = _read(db, conv_id)
+        assert mc == 6 and len(msgs) == 6
+    finally:
+        _cleanup(db, conv_id)
+    _ok('msg-regression PUT → 409 blocked_msg_regression (not 500)')
+
+
 _POSITIVE = [test_idle_husk_bloated_put_persists_swept,
              test_live_task_placeholder_not_swept,
-             test_clean_shorter_put_vs_bloated_row_not_regression_rejected]
+             test_clean_shorter_put_vs_bloated_row_not_regression_rejected,
+             test_stale_baserev_put_returns_409_not_500,
+             test_empty_overwrite_put_returns_409_not_500,
+             test_msg_regression_put_returns_409_not_500]
 
 
 def _run(fn):
@@ -318,6 +395,26 @@ def main():
     # clean PUT is still accepted); we only require it not to crash.
     _ok(f'NC: idle husk test FAILS with sweep off (persists 202); '
         f'live control still passes (clean_ctrl_pass={clean_ok})')
+
+    # NC-2 (production-bug class): break the ``_json`` passthrough helper →
+    # every 409 path materializes via a non-callable → the three 409 guards
+    # FAIL (harness mirrors _finish), while the 200 paths (which never route
+    # through it) keep passing.
+    _NC2_FIND = '    return _Defer(api_payload, payload, status or 200)\n'
+    _NC2_REPL = ('    return _Defer(None, payload, status or 200)  # NC: break '
+                 'the 409 passthrough materialization\n')
+    print()
+    print(_color('NC-2 — _json passthrough is load-bearing (all 409 paths):', '36'))
+    with _neuter_ctx(_NC2_FIND, _NC2_REPL):
+        rev_ok, _ = _subrun(test_stale_baserev_put_returns_409_not_500)
+        empty_ok, _ = _subrun(test_empty_overwrite_put_returns_409_not_500)
+        regress_ok, _ = _subrun(test_msg_regression_put_returns_409_not_500)
+        idle_ok2, _ = _subrun(test_idle_husk_bloated_put_persists_swept)
+    if rev_ok or empty_ok or regress_ok:
+        _fail('NC-2: a 409 test PASSED without the jsonify import — not load-bearing!')
+    if not idle_ok2:
+        _fail('NC-2: 200-path control failed — neuter had unintended blast radius')
+    _ok('NC-2: all three 409 guards FAIL without the import; 200-path control passes')
 
     print()
     print(_color('Post-restore baseline:', '36'))

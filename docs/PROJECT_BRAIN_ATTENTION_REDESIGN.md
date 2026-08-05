@@ -108,7 +108,10 @@ Two severities only:
 | Severity | Meaning | Members |
 |---|---|---|
 | `blocking` | Work is **stopped** and only a human can restart it | board `block_question` unanswered; peer hard-abort awaiting approval |
-| `advisory` | Progress continues; a human *may* improve the outcome | charter proposals; conflict advisories; stuck claims; expiring cooldowns |
+| `advisory` | Progress continues; a human *may* improve the outcome | charter proposals |
+
+(Conflict advisories were advisory members at launch; removed 2026-08-01 —
+see §D7. Stuck claims and expiring cooldowns were never implemented as items.)
 
 The collab bar's emphasis class is driven by whether any **blocking** item
 exists — not by the pending-proposal count. This directly fixes §1.2.
@@ -154,9 +157,22 @@ when `project_board_block` is being considered.
 
 The attention tab renders each item with **its own resolving control inline**
 (answer chips + free text; commit/reject) — the *same* controls the owning tab
-has, from the same code path, not a reimplementation. Items that cannot be
-resolved in two clicks (e.g. a conflict) render a **link into** the owning tab
-rather than a copy of it. Nothing is duplicated; the sources stay authoritative.
+has, from the same code path, not a reimplementation. Nothing is duplicated;
+the sources stay authoritative.
+
+### D7 — A live file conflict is NOT an attention item (2026-08-01 owner directive)
+
+A conflict advisory fails the surface's own admission test on three counts:
+it is **notify-only** (the system deliberately never locks), **self-clearing**
+(recomputed from the presence registry; vanishes when a peer goes idle), and
+has **no resolving control** (the card could only deep-link elsewhere —
+*"the operator decides whether to intervene"*). The owner's verdict: *"since
+you don't need me to handle it, don't display it here."* So `_conflicts` was
+removed from `build_attention_items`, which also drops overlaps from the
+`needsYou` count on the collab bar. Detection itself is untouched — the
+overlap stays visible as LIVE STATUS in the bar's detail lines
+(`summary.conflictMessages`) and the Team tab, both fed by
+`lib.presence.conflict.detect_overlaps` directly.
 
 ---
 

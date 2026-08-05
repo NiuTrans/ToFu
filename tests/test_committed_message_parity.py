@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Incident anchor: born in commit ab99ef8b — checkpoint: accumulated work since last commit
+# (funeral audit pt_c565a36b3e8f42e6, docs/RATCHET_AUDIT.md)
 """Phase-1 (parity-gap closure): the terminal `done` event must ship the EXACT
 assistant dict committed to ``conversations.messages`` — no parallel
 reconstruction, no keep-longer/snapshot papering-over.

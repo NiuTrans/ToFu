@@ -98,22 +98,15 @@ def _slice_predicate(src: str) -> str:
 
 
 def _slice_merge(src: str) -> str:
-    """Slice the _mergeServerTranslations arrow-const closure verbatim.
+    """Slice the top-level ``function _mergeServerTranslations(...)`` verbatim.
 
-    It is a local `const _mergeServerTranslations = (sourceMsgs, destMsgs) => {
-    ... };` — extract it and eval as a standalone const so the test bites the
-    real shipped merge logic.
+    It USED to be a local `const _mergeServerTranslations = (sourceMsgs,
+    destMsgs) => { ... };` closure inside loadConversationMessages; it was
+    promoted to a plain top-level function in core/conv_reducers.js (Epic-E
+    slice 12). Locate it by its ``function <name>`` DEFINITION — the old
+    arrow-const locator only matched call-site comments in conversations.js.
     """
-    m = re.search(
-        r'const _mergeServerTranslations = \(sourceMsgs, destMsgs\) => \{.*?\n    \};',
-        src, re.DOTALL,
-    )
-    if not m:
-        raise AssertionError(
-            '_mergeServerTranslations not found in the bundled file that '
-            'declares loadConversationMessages — removed or reshaped; '
-            're-point this slice.')
-    return m.group(0)
+    return _fn_span(src, '_mergeServerTranslations')
 
 
 def _fn_span(src: str, name: str) -> str:

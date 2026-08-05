@@ -721,6 +721,16 @@ function dispatchSSEEvent(line, ctx) {
       if (ev.createdAt && typeof _seedStreamTimerStart === 'function') {
         _seedStreamTimerStart(convId, ev.createdAt);
       }
+      /* ★ Model-fallback sidecar adoption: the backend stamps these AT THE
+       *   DECISION MOMENT (llm_fallback/_call.py) and folds them into every
+       *   state snapshot — a cold reload DURING the fallback generation must
+       *   re-stamp them so the banner repaints instead of waiting for done. */
+      if (ev.fallbackModel && assistantMsg) {
+        assistantMsg.fallbackModel = ev.fallbackModel;
+        assistantMsg.fallbackFrom = ev.fallbackFrom || '';
+        assistantMsg.fallbackReason = ev.fallbackReason || '';
+        assistantMsg.fallbackKind = ev.fallbackKind || '';
+      }
       /* ★ Endpoint mode reconnection: rebuild conv.messages from endpointTurns
        *   and set the correct phase (working/reviewing) so streaming goes to
        *   the right target (assistantMsg vs _epCriticMsg). */
@@ -1062,7 +1072,10 @@ function dispatchSSEEvent(line, ctx) {
        * assistantMsg.content += ev.content). Clear the accumulated
        * content/thinking so the narration isn't concatenated in front of the
        * terminal round's real answer. UNLIKE retry_reset, KEEP toolRounds —
-       * the tool calls from this turn are legitimate and keep rendering. */
+       * the tool calls from this turn are legitimate and keep rendering.
+       * With ev.discard === true (the canned-greeting retry — a discarded
+       * round that issued NO tool calls) the reducer clears unconditionally:
+       * there is no batch to stamp the prose onto. */
       _roundThinkingLen = 0;
       const _drTarget = (_epCriticPhase && _epCriticMsg) ? _epCriticMsg : assistantMsg;
       if (_drTarget) {
@@ -1169,9 +1182,15 @@ function dispatchSSEEvent(line, ctx) {
         attempt: ev.attempt || 0,
         tools: ev.tools || [],
         toolContext: ev.toolContext || "",
+        /* Structured raw tool names behind toolContext — the renderer
+         * composes the localized suffix from THESE when present (the
+         * English toolContext string stays the headless fallback). */
+        toolContextTools: ev.toolContextTools || null,
         round: ev.roundNum || 0,
       });
       if (typeof twUpdate === 'function') twUpdate(convId);
+    } else if (ev.type === "model_fallback") {
+      _handleModelFallback(ev, _hctx());
     } else if (ev.type === "tool_start") {
       _handleToolStart(ev, _hctx());
     } else if (ev.type === "human_guidance_request") {
@@ -1346,11 +1365,17 @@ function dispatchSSEEvent(line, ctx) {
           }
 
           if (!existingSm) {
-            /* ★ Dedup: remove any stale DB-loaded worker for this iteration */
+            /* ★ Dedup: remove any stale DB-loaded worker for this iteration.
+             *   ONE row only — a one-arg splice would drop everything AFTER it
+             *   too, including a persisted user follow-up queued behind the
+             *   stale worker (reload + reconnect with a queued send). The
+             *   to-end truncation contract belongs to endpoint_new_turn below
+             *   (which re-streams the whole iteration); here only the stale
+             *   worker twin is stale. */
             const staleIdx = conv.messages.findIndex(m =>
               m.role === "assistant" && m._epIteration === ev.iteration);
             if (staleIdx >= 0) {
-              conv.messages.splice(staleIdx);
+              conv.messages.splice(staleIdx, 1);
             }
 
             const newAssistant = {
@@ -2077,7 +2102,7 @@ async function _trySSE(convId, taskId, stream, assistantMsg) {
       onChunk() {
         gotData = true;
         clearTimeout(sseTimeout);
-        _streamTimerTouch(convId); // ★ Any bytes (including keepalives) prove server is alive
+        if (typeof _streamTimerTouch === 'function') _streamTimerTouch(convId); // ★ Any bytes (including keepalives) prove server is alive
       },
       onLine(line) {
         return _processSSELine(line);

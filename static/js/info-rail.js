@@ -24,7 +24,8 @@
 
    ── Public API ──
      window.buildTurnCtxSnapshot()               — capture current context (or null).
-     window.renderTurnCtxNote(snapshot)          — snapshot → note HTML.
+     window.renderTurnCtxNote(snapshot)          — snapshot → { fold, rail } HTML
+        strings (two surfaces with DIFFERENT DOM homes — see renderTurnCtxNote).
      window.reconcileTurnCtxCapsule(snap, fact)  — overwrite snap in place
         with facts from the done event; `fact` fields are ALL optional:
           { added?, removed?, toolsetDiff?, actualModel?, actualDepth?,
@@ -221,21 +222,32 @@
   const _MAX_VISIBLE_PATHS = 3;
 
   /**
-   * Render a captured snapshot into the per-turn rail HTML.
+   * Render a captured snapshot into the per-turn context surfaces.
    *
-   * Two surfaces, both in normal flow — there is NO hover overlay:
-   *   • `.turn-ctx` — the RAIL. Lives in the third grid track that
-   *     `.chat-inner` owns, so it can never overflow the viewport. Shows
-   *     model + depth + mode badges + tool chips + workspace paths
-   *     permanently. Visible only when the container query grants the track.
-   *   • `.tctx-fold` — the same facts compressed to ONE line under the
-   *     message header, shown exactly when the rail track is absent (narrow
-   *     pane, or the request-inspector drawer is open and the pane has as
-   *     little as 74px to give). The context is compacted, never lost.
+   * Two surfaces, both in normal flow — there is NO hover overlay. They have
+   * DIFFERENT DOM homes, which is why this returns them separately:
+   *   • `rail` (`.turn-ctx`) — lives in the third grid track that
+   *     `.chat-inner` owns, a DIRECT CHILD of `.message`, so it can never
+   *     overflow the viewport. Shows model + depth + mode badges + tool
+   *     chips + workspace paths permanently. Visible only when the container
+   *     query grants the track.
+   *   • `fold` (`.tctx-fold`) — the same facts compressed to ONE line,
+   *     spliced INSIDE `.message-content` between the header and the body
+   *     (in-flow — its `margin-bottom` is meaningless anywhere else). Shown
+   *     exactly when the rail track is absent (narrow pane, or the
+   *     request-inspector drawer is open and the pane has as little as 74px
+   *     to give). The context is compacted, never lost.
+   *
+   * ⚠️ The two used to ship as ONE concatenated string spliced as a direct
+   * `.message` child: below the rail threshold the fold auto-placed into the
+   * ZERO-WIDTH rail track and rendered at width 0 — `display:flex`, correct
+   * text, invisible element (the 2026-08-03 "context completely disappears
+   * at 100% zoom" report). Keep the surfaces separate.
    *
    * @param {object|null} snap — output of buildTurnCtxSnapshot (or a
    *   persisted copy loaded from the DB).
-   * @returns {string} HTML, or '' when there's nothing to show.
+   * @returns {{fold: string, rail: string}|string} the two HTML fragments,
+   *   or '' when there's nothing to show.
    */
   function renderTurnCtxNote(snap) {
     if (!snap || typeof snap !== 'object') return '';
@@ -313,7 +325,10 @@
     const fold = '<div class="tctx-fold"><span class="tctx-fold-dot"></span>' +
       '<span>' + _esc(foldBits.join(' · ')) + '</span></div>';
 
-    return fold + '<div class="turn-ctx">' + head.join('') + rows.join('') + '</div>';
+    return {
+      fold: fold,
+      rail: '<div class="turn-ctx">' + head.join('') + rows.join('') + '</div>',
+    };
   }
 
   /* "+N" toggle + rail click guard. Delegated at document level so it

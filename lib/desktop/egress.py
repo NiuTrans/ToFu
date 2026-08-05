@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import base64
 import json
+import threading
 import time
 import uuid
 from urllib.parse import urlparse
@@ -50,6 +51,7 @@ __all__ = [
 ALLOWED_EGRESS_HOSTS = frozenset({
     'api.anthropic.com',
     'console.anthropic.com',
+    'platform.claude.com',
     'claude.ai',
     'auth.openai.com',
     'auth0.openai.com',
@@ -97,6 +99,37 @@ def host_allowed(url: str) -> bool:
         logger.debug('[Egress] url parse failed for %r: %s', url, e)
         return False
     return host in ALLOWED_EGRESS_HOSTS
+
+
+#: Loopback target class (E4 subscription adapter): the relay may aim at
+#: the AGENT's own loopback only, on the declared adapter port — never at
+#: arbitrary local services. The agent re-checks against ITS OWN policy
+#: port (lib/desktop_agent/_egress.py), so a spoofed loopback_port here
+#: just fails closed on the far side.
+_LOOPBACK_HOSTS = frozenset({'127.0.0.1', 'localhost', '::1'})
+
+
+def _loopback_allowed(url: str, port: int) -> bool:
+    try:
+        parsed = urlparse(url)
+        host = (parsed.hostname or '').lower()
+    except Exception as e:
+        logger.debug('[Egress] loopback url parse failed for %r: %s', url, e)
+        return False
+    return (host in _LOOPBACK_HOSTS and int(port or 0) > 0
+            and (parsed.port or 0) == int(port))
+
+
+def _check_target(url: str, target: str, loopback_port: int) -> None:
+    """Raise EgressUnavailable when *url* fails its target-class whitelist."""
+    if target == 'loopback':
+        if not _loopback_allowed(url, loopback_port):
+            raise EgressUnavailable(
+                f'loopback relay target not allowed: {url!r} '
+                f'(declared adapter port {loopback_port})')
+    elif not host_allowed(url):
+        raise EgressUnavailable(
+            f'egress host not in whitelist: {urlparse(url).hostname or url!r}')
 
 
 def _probe_host(url: str) -> str:
@@ -153,38 +186,60 @@ def _pinned_agent(user_id: str) -> str:
         return ''
 
 
-def route_request(url: str, *, user_id: str = '') -> str:
-    """Decide how a request to *url* should leave this server.
+#: agent_id → monotonic ts of the last TRANSPORT-level egress success
+#: (any delivered HTTP answer counts — a 429 still proves the path works).
+#: Drives the multi-agent fallback order (G1, SUBSCRIPTION_RELAY_SCENARIOS
+#: §4.2): pinned first, then most-recently-successful, then last_seen.
+_last_success: dict = {}
+_success_lock = threading.Lock()
 
-    Returns ``'direct'`` when the server's own egress reaches the provider,
-    else the agent_id to route through.
 
-    Raises:
-        EgressUnavailable: direct is blocked AND no suitable agent is
-            online (or several are and none is pinned).
+def _note_success(agent_id: str) -> None:
+    with _success_lock:
+        _last_success[agent_id] = time.monotonic()
+
+
+def _order_agents(agents: list, user_id: str) -> list:
+    """pinned → recent egress success → most-recently-seen."""
+    pinned = _pinned_agent(user_id)
+    with _success_lock:
+        snap = dict(_last_success)
+    return sorted(
+        agents,
+        key=lambda a: (0 if a['agent_id'] == pinned else 1,
+                       -snap.get(a['agent_id'], 0.0),
+                       -(a.get('last_seen') or 0.0)))
+
+
+def route_candidates(url: str, *, user_id: str = '') -> list:
+    """Ordered egress candidate list for *url*.
+
+    ``['direct']`` when the server's own egress reaches the provider;
+    otherwise the online egress-capable agents in fallback order. Raises
+    only when direct is blocked AND no suitable agent is online — a
+    multi-agent deployment no longer REQUIRES a pin (the pin just leads
+    the chain).
     """
     # Only subscription-provider hosts are egress-eligible at all. Probing
     # (let alone rerouting) arbitrary gateways would waste a request per
     # host and could bend internal traffic to an agent that whitelists only
-    # these seven domains — everything else is direct, always, unprobed.
+    # these domains — everything else is direct, always, unprobed.
     if not host_allowed(url):
-        return 'direct'
+        return ['direct']
     if _probe_host(url) == 'ok':
-        return 'direct'
+        return ['direct']
     agents = _online_egress_agents(user_id)
     if not agents:
         raise EgressUnavailable(
             'server egress to this provider is blocked and no egress-capable '
             'desktop agent is online — start the desktop agent with '
             '--allow-egress on a machine whose network can reach the provider')
-    if len(agents) == 1:
-        return agents[0]['agent_id']
-    pinned = _pinned_agent(user_id)
-    if pinned and any(a['agent_id'] == pinned for a in agents):
-        return pinned
-    raise EgressUnavailable(
-        f'{len(agents)} egress-capable agents are online; pin one in Settings '
-        '(oauth_egress_agent_id) instead of letting the server guess')
+    return [a['agent_id'] for a in _order_agents(agents, user_id)]
+
+
+def route_request(url: str, *, user_id: str = '') -> str:
+    """First (best) egress route for *url* — see :func:`route_candidates`."""
+    return route_candidates(url, user_id=user_id)[0]
 
 
 # ══════════════════════════════════════════════════════════
@@ -345,7 +400,8 @@ class EgressStreamReader:
 
 def open_stream(url: str, *, method: str = 'POST', headers: dict = None,
                 body: bytes = b'', agent_id: str = None, user_id: str = '',
-                log_prefix: str = '') -> EgressStreamReader:
+                log_prefix: str = '', target: str = 'subscription',
+                loopback_port: int = 0) -> EgressStreamReader:
     """Open a streamed request through the caller's desktop agent.
 
     Enqueues ``egress_http_stream`` (TTL 1800s) and waits for the agent's
@@ -356,34 +412,55 @@ def open_stream(url: str, *, method: str = 'POST', headers: dict = None,
         EgressUnavailable: host not whitelisted / no agent / no meta frame
             within the connect window.
     """
-    if not host_allowed(url):
-        raise EgressUnavailable(
-            f'egress host not in whitelist: {urlparse(url).hostname or url!r}')
-    if agent_id is None:
-        agent_id = route_request(url, user_id=user_id)
-    cmd_id = uuid.uuid4().hex
-    params = {
-        'url': url,
-        'method': (method or 'POST').upper(),
-        'headers': dict(headers or {}),
-        'body_b64': base64.b64encode(body or b'').decode('ascii'),
-        'timeout_ms': _EGRESS_STREAM_TTL_S * 1000,
-        'proxy_mode': 'env',
-        'stream_id': cmd_id,
-    }
+    _check_target(url, target, loopback_port)
+    candidates = ([agent_id] if agent_id is not None
+                  else route_candidates(url, user_id=user_id))
     from lib.desktop import enqueue_desktop_command
-    enq_id, err = enqueue_desktop_command(
-        'egress_http_stream', params,
-        target_agent_id=agent_id, user_id=user_id,
-        cmd_id=cmd_id, ttl=_EGRESS_STREAM_TTL_S)
-    if err:
-        raise EgressUnavailable(f'failed to enqueue egress stream: {err}')
-    logger.info('%s[Egress] stream %s %s via agent %s (cmd=%s)',
-                log_prefix, params['method'], urlparse(url).hostname,
-                agent_id[:8], cmd_id[:8])
-    reader = EgressStreamReader(cmd_id, agent_id, user_id)
-    reader.wait_headers()
-    return reader
+    last_err = None
+    for cand in candidates:
+        if cand == 'direct':
+            break  # caller handles the direct path; never stream-wrap it
+        cmd_id = uuid.uuid4().hex
+        params = {
+            'url': url,
+            'method': (method or 'POST').upper(),
+            'headers': dict(headers or {}),
+            'body_b64': base64.b64encode(body or b'').decode('ascii'),
+            'timeout_ms': _EGRESS_STREAM_TTL_S * 1000,
+            'proxy_mode': 'env',
+            'stream_id': cmd_id,
+            'target': target,
+        }
+        enq_id, err = enqueue_desktop_command(
+            'egress_http_stream', params,
+            target_agent_id=cand, user_id=user_id,
+            cmd_id=cmd_id, ttl=_EGRESS_STREAM_TTL_S)
+        if err:
+            last_err = err
+            logger.info('[Egress] stream enqueue to agent %s failed: %s '
+                        '— trying next candidate', cand[:8], err)
+            continue
+        reader = EgressStreamReader(cmd_id, cand, user_id)
+        try:
+            reader.wait_headers()
+        except EgressUnavailable as e:
+            # Pre-meta failure is safe to fail over ONLY when zero frames
+            # arrived: the upstream was never reached. Once any frame
+            # landed, retrying could double-bill the subscription — raise.
+            if reader._seq != 0:
+                raise
+            last_err = e
+            logger.info('[Egress] stream via agent %s produced no frames '
+                        '(%s) — trying next candidate', cand[:8], e)
+            cancel_stream(cmd_id, cand, user_id)
+            continue
+        _note_success(cand)
+        logger.info('%s[Egress] stream %s %s via agent %s (cmd=%s)',
+                    log_prefix, params['method'], urlparse(url).hostname,
+                    cand[:8], cmd_id[:8])
+        return reader
+    raise EgressUnavailable(
+        f'all egress candidates failed (last: {last_err})')
 
 
 def cancel_stream(cmd_id: str, agent_id: str, user_id: str = ''):
@@ -399,8 +476,6 @@ def cancel_stream(cmd_id: str, agent_id: str, user_id: str = ''):
 # ══════════════════════════════════════════════════════════
 #  Status surface (S4): page-load-safe egress state per host
 # ══════════════════════════════════════════════════════════
-
-import threading
 
 _probe_bg_lock = threading.Lock()
 _probe_bg_fired: set = set()
@@ -472,21 +547,24 @@ def egress_status(host: str, *, user_id: str = '') -> dict:
 
 def egress_http(url: str, *, method: str = 'POST', headers: dict = None,
                 body: bytes = b'', timeout: float = 30,
-                user_id: str = '') -> EgressResponse:
+                user_id: str = '', agent_id: str = None,
+                target: str = 'subscription',
+                loopback_port: int = 0) -> EgressResponse:
     """Execute one HTTP request through the caller's desktop agent.
 
     Whitelist → agent selection → bridge command (TTL 120s) → adapt the
-    agent result into :class:`EgressResponse`.
+    agent result into :class:`EgressResponse`. ``agent_id`` pins a single
+    candidate (loopback adapter relays MUST pin — a different machine
+    hosts a different adapter with different credentials). ``target``
+    selects the whitelist class (``subscription`` public hosts vs
+    ``loopback`` agent-local adapter port); the agent re-enforces it.
 
     Raises:
         EgressUnavailable: host not whitelisted, no agent, agent offline /
             timed out, or the agent hit a network error.
     """
-    if not host_allowed(url):
-        raise EgressUnavailable(
-            f'egress host not in whitelist: {urlparse(url).hostname or url!r}')
+    _check_target(url, target, loopback_port)
     from lib.desktop import send_desktop_command
-    agent_id = route_request(url, user_id=user_id)  # raises when unavailable
     params = {
         'url': url,
         'method': (method or 'POST').upper(),
@@ -494,29 +572,47 @@ def egress_http(url: str, *, method: str = 'POST', headers: dict = None,
         'body_b64': base64.b64encode(body or b'').decode('ascii'),
         'timeout_ms': int(min(max(timeout, 1), 60) * 1000),
         'proxy_mode': 'env',
+        'target': target,
     }
-    logger.info('[Egress] routing %s %s via agent %s (user=%s)',
-                params['method'], urlparse(url).hostname, agent_id[:8],
-                user_id or '(legacy)')
-    result, error = send_desktop_command(
-        'egress_http', params,
-        timeout=min(timeout + 15, _EGRESS_HTTP_TTL_S),
-        target_agent_id=agent_id, user_id=user_id,
-        ttl=_EGRESS_HTTP_TTL_S)
-    if error or result is None:
-        raise EgressUnavailable(
-            f'desktop agent failed to execute egress request: {error or "no result"}')
-    status = int(result.get('status') or 0)
-    if status == 0:
-        raise EgressUnavailable(
-            f'agent network error: {result.get("error") or "unknown"}')
-    try:
-        content = base64.b64decode(result.get('body_b64') or '')
-    except Exception as e:
-        raise EgressUnavailable(f'agent returned undecodable body: {e}') from e
-    return EgressResponse(
-        status=status,
-        headers=result.get('headers') or {},
-        content=content,
-        elapsed_ms=int(result.get('elapsed_ms') or 0),
-    )
+    last_err = None
+    candidates = ([agent_id] if agent_id is not None
+                  else route_candidates(url, user_id=user_id))
+    for agent_id in candidates:
+        if agent_id == 'direct':
+            break  # caller's transport handles direct; egress_http is the detour
+        logger.info('[Egress] routing %s %s via agent %s (user=%s)',
+                    params['method'], urlparse(url).hostname, agent_id[:8],
+                    user_id or '(legacy)')
+        result, error = send_desktop_command(
+            'egress_http', params,
+            timeout=min(timeout + 15, _EGRESS_HTTP_TTL_S),
+            target_agent_id=agent_id, user_id=user_id,
+            ttl=_EGRESS_HTTP_TTL_S)
+        if error or result is None:
+            last_err = error or 'no result'
+            logger.info('[Egress] agent %s bridge failure (%s) — trying '
+                        'next candidate', agent_id[:8], last_err)
+            continue
+        status = int(result.get('status') or 0)
+        if status == 0:
+            # The agent's own network failed — another machine's may not.
+            last_err = result.get('error') or 'unknown'
+            logger.info('[Egress] agent %s network failure (%s) — trying '
+                        'next candidate', agent_id[:8], last_err)
+            continue
+        try:
+            content = base64.b64decode(result.get('body_b64') or '')
+        except Exception as e:
+            last_err = f'undecodable body: {e}'
+            logger.info('[Egress] agent %s undecodable body (%s) — trying '
+                        'next candidate', agent_id[:8], e)
+            continue
+        _note_success(agent_id)
+        return EgressResponse(
+            status=status,
+            headers=result.get('headers') or {},
+            content=content,
+            elapsed_ms=int(result.get('elapsed_ms') or 0),
+        )
+    raise EgressUnavailable(
+        f'all egress candidates failed (last: {last_err})')

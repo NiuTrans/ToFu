@@ -127,11 +127,14 @@ def test_builtin_timeouts_still_classify():
     assert _is_call_timeout_error(asyncio.TimeoutError()) is True
 
 
+@pytest.mark.skipif(sys.version_info < (3, 11),
+                    reason='BaseExceptionGroup is builtin only on 3.11+ '
+                           '(CI unit matrix includes 3.10)')
 def test_exception_group_is_unwrapped_before_classifying():
     """anyio/mcp wrap failures in nested groups; classification must see the
     leaf, not the group."""
     inner = _make('MCPError', _TIMEOUT_TEXT)
-    group = BaseExceptionGroup('unhandled errors in a TaskGroup', [inner])
+    group = BaseExceptionGroup('unhandled errors in a TaskGroup', [inner])  # noqa: F821 — builtin on 3.11+; the skipif above keeps 3.10 from ever reaching this line
     assert _is_call_timeout_error(group) is True
 
 

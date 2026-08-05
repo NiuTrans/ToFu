@@ -105,10 +105,15 @@ function _editModel(provIdx, modelIdx) {
   var _ovrIn = (m.pricing && m.pricing.input != null) ? m.pricing.input : '';
   var _ovrOut = (m.pricing && m.pricing.output != null) ? m.pricing.output : '';
   var _hasOvr = (_ovrIn !== '' && _ovrOut !== '');
-  var html = '<div class="stg-edit-form">';
+  /* Layout contract (redesign 2026-08-01): the Model ID is the identity of
+   * the whole form — it gets the full first row in monospace (a truncated,
+   * half-width input is how "claude-opus" used to hide the real id). The
+   * four numeric fields sit in a UNIFORM 2-column grid below it, so the
+   * price section is aligned instead of the old 1fr/auto/auto jumble. */
+  var html = '<div class="stg-edit-form" data-prov="' + provIdx + '" data-model="' + modelIdx + '">';
   html += '<div class="stg-edit-grid">' +
-    '<div class="stg-field"><label>' + escapeHtml(t('settings.meModelId')) + '</label>' +
-      '<input type="text" class="stg-edit-mid" value="' + escapeHtml(m.model_id || '') + '" placeholder="' + escapeHtml(t('settings.meModelIdPlaceholder')) + '"></div>' +
+    '<div class="stg-field stg-field-wide"><label>' + escapeHtml(t('settings.meModelId')) + '</label>' +
+      '<input type="text" class="stg-edit-mid" value="' + escapeHtml(m.model_id || '') + '" placeholder="' + escapeHtml(t('settings.meModelIdPlaceholder')) + '" spellcheck="false" autocomplete="off" oninput="_onModelIdDraftInput(this)"></div>' +
     '<div class="stg-field"><label>' + escapeHtml(t('settings.meRpm')) + '</label>' +
       '<input type="number" class="stg-edit-rpm" value="' + (m.rpm || 30) + '" min="1"></div>' +
     '<div class="stg-field"><label>' + escapeHtml(t('settings.meCost')) + ' <span class="stg-hint">' + escapeHtml(t('settings.meCostHint')) + '</span>' +
@@ -128,17 +133,31 @@ function _editModel(provIdx, modelIdx) {
   }
   html += '</div></div>';
 
+  /* Wire pool / aliases as a TAG EDITOR (redesign 2026-08-01). The old
+   * comma-separated text input made a typo silently MERGE two ids into one
+   * garbage id ("aws.opus,vertex.opus" typed without the space was fine,
+   * but "aws.opus vertex.opus" became one unroutable name). Chips make one
+   * id = one visual unit: Enter commits, × removes, pasted commas still
+   * split as a convenience — but commas are never the storage format. */
   var _field = _poolField(m);
   var _isPool = (_field === 'request_ids');
+  var _poolVals = m[_field] || [];
   html += '<div class="stg-field"><label>' +
     escapeHtml(t(_isPool ? 'settings.meRequestIds' : 'settings.meAliases')) +
     ' <span class="stg-hint">' +
     escapeHtml(t(_isPool ? 'settings.meRequestIdsHint' : 'settings.meAliasesHint')) +
     '</span></label>' +
-    '<input type="text" class="stg-edit-aliases" data-pool-field="' + _field + '"' +
-    ' value="' + escapeHtml((m[_field] || []).join(', ')) + '"' +
+    '<div class="stg-tag-editor" data-pool-field="' + _field + '">';
+  for (var _ti = 0; _ti < _poolVals.length; _ti++) {
+    html += _poolTagChipHTML(_poolVals[_ti]);
+  }
+  html += '<input type="text" class="stg-tag-input"' +
     ' placeholder="' + escapeHtml(t(_isPool
-      ? 'settings.meRequestIdsPlaceholder' : 'settings.meAliasesPlaceholder')) + '"></div>';
+      ? 'settings.meRequestIdsPlaceholder' : 'settings.meAliasesPlaceholder')) + '"' +
+    ' spellcheck="false" autocomplete="off"' +
+    ' onkeydown="_poolTagKey(this, event)" oninput="_poolTagSplit(this)"' +
+    ' onblur="_poolTagCommit(this)">' +
+  '</div></div>';
 
   html += '<div class="stg-toggle-row"><span>' + escapeHtml(t('settings.meThinkingDefault')) + '</span>' +
     '<label class="stg-toggle"><input type="checkbox" class="stg-edit-think"' + (m.thinking_default ? ' checked' : '') + '>' +
@@ -165,8 +184,24 @@ function _editModel(provIdx, modelIdx) {
           (_cur === _names[fi] ? ' selected' : '') + '>' + escapeHtml(_names[fi]) + '</option>';
       }
       html += '</select>' +
+        /* The auto-verdict line: with the pin on 'automatic' the user must
+         * still see WHICH face the family rule actually picked — the whole
+         * point of automatic is trust, and trust needs the answer visible.
+         * Rendered from the resolution cache; _repaintFaceAutoNote patches
+         * it in place when a cold cache lands (never a guess). */
+        '<div class="stg-face-auto-note"' + (_cur ? ' style="display:none"' : '') + '>' +
+          _faceAutoNoteHTML(provIdx, m) + '</div>' +
         '<div class="stg-face-warn"' + (_cur ? '' : ' style="display:none"') + '>' +
         escapeHtml(t('settings.meFacePinWarn')) + '</div></div>';
+      /* Cache miss on a fresh form: ask the backend, the note patches
+       * itself when the resolution lands. Guarded so a single-face card
+       * (no select rendered) never triggers a redundant round-trip. */
+      if (!_cur && m.model_id &&
+          typeof _faceResolutionFor === 'function' &&
+          !_faceResolutionFor(provIdx, m.model_id) &&
+          typeof _refreshFaceResolutions === 'function') {
+        _refreshFaceResolutions(provIdx);
+      }
     }
   }
 
@@ -231,6 +266,97 @@ function _onFacePinChange(el) {
   if (!form) return;
   var warn = form.querySelector('.stg-face-warn');
   if (warn) warn.style.display = String(el.value || '').trim() ? '' : 'none';
+  /* The auto-verdict line is the mirror image of the warning: visible
+   * exactly when the pin is 'automatic'. Re-rendered from the cache (the
+   * model may have been re-resolved since the form opened); on a cold
+   * cache this also kicks off the resolution round-trip. */
+  var note = form.querySelector('.stg-face-auto-note');
+  if (note) {
+    note.style.display = String(el.value || '').trim() ? 'none' : '';
+    if (!String(el.value || '').trim()) {
+      var provIdx = parseInt(form.getAttribute('data-prov'), 10);
+      if (!isNaN(provIdx)) _repaintFaceAutoNote(provIdx);
+    }
+  }
+}
+
+/** The 'automatically selected: X' line for the open edit form.
+ *
+ *  Renders ONLY from a landed backend resolution (same rule as the card
+ *  pill: an absent line is honest, a guessed one is not). Four states:
+ *  pending (cache miss), skipped (not routed — no face to report),
+ *  refused (the rule could not register the model), and the verdict. */
+function _faceAutoNoteHTML(provIdx, m) {
+  if (!m || !m.model_id) return '';
+  var r = (typeof _faceResolutionFor === 'function')
+    ? _faceResolutionFor(provIdx, m.model_id) : null;
+  if (!r) {
+    return '<span class="stg-face-auto-pending">' +
+      escapeHtml(t('settings.meFaceAutoPending')) + '</span>';
+  }
+  if (r.skipped) {
+    return '<span class="stg-face-auto-pending">' +
+      escapeHtml(t('settings.meFaceAutoSkipped')) + '</span>';
+  }
+  if (!r.ok) {
+    return '<span class="stg-face-auto-refused">' +
+      escapeHtml(t('settings.meFaceAutoRefused', { error: r.error || '' })) +
+      '</span>';
+  }
+  /* 'default' is the resolver's name for the provider's own face —
+   * localize it; raw 'default 面' is jargon in a zh UI. */
+  var _faceLabel = (r.face === 'default')
+    ? t('settings.meFaceDefaultFace') : r.face;
+  return '<span class="stg-face-auto-pick" title="' +
+    escapeHtml(r.base_url || '') + '">' +
+    escapeHtml(t('settings.meFaceAutoResolved', {
+      protocol: r.protocol || 'openai', face: _faceLabel })) + '</span>';
+}
+
+/** Patch the auto-note of the OPEN edit form for one provider, in place.
+ *
+ *  THE single channel every path goes through: the resolution landing
+ *  (provider_faces.js hook), the pin flipping back to 'automatic', and
+ *  Model ID draft edits. DRAFT-AWARE: the cached verdict was resolved for
+ *  the SAVED id, so while the mid input names a different id that verdict
+ *  is a wrong claim — a renamed kimi→claude draft must NOT keep showing
+ *  'openai'. A mismatch flips the note to an honest 'resolves on save'
+ *  pending line; matching again restores the cached verdict. Never fires
+ *  a backend request itself — _refreshFaceResolutions calls this. */
+function _repaintFaceAutoNote(provIdx) {
+  var form = document.querySelector(
+    '.stg-edit-form[data-prov="' + provIdx + '"]');
+  if (!form) return;
+  var note = form.querySelector('.stg-face-auto-note');
+  if (!note) return;
+  var sel = form.querySelector('.stg-edit-face');
+  if (sel && String(sel.value || '').trim()) {
+    note.style.display = 'none';
+    return;
+  }
+  var mi = parseInt(form.getAttribute('data-model'), 10);
+  var p = _stgProviders[provIdx];
+  var m = (p && p.models) ? p.models[mi] : null;
+  var _midEl = form.querySelector('.stg-edit-mid');
+  var _draft = _midEl ? String(_midEl.value || '').trim()
+                      : ((m && m.model_id) || '');
+  if (_draft !== ((m && m.model_id) || '')) {
+    note.innerHTML = '<span class="stg-face-auto-pending">' +
+      escapeHtml(t('settings.meFaceAutoDraft')) + '</span>';
+  } else {
+    note.innerHTML = _faceAutoNoteHTML(provIdx, m);
+  }
+  note.style.display = '';
+}
+
+/** Live: editing the Model ID invalidates the auto-note's verdict. All
+ *  the logic lives in _repaintFaceAutoNote (the single channel); this is
+ *  just the trigger. */
+function _onModelIdDraftInput(el) {
+  var form = el && el.closest ? el.closest('.stg-edit-form') : null;
+  if (!form) return;
+  var provIdx = parseInt(form.getAttribute('data-prov'), 10);
+  if (!isNaN(provIdx)) _repaintFaceAutoNote(provIdx);
 }
 
 function _saveModelEdit(provIdx, modelIdx) {
@@ -298,12 +424,9 @@ function _saveModelEdit(provIdx, modelIdx) {
     else delete m.face;
   }
 
-  var _aliasEl = form.querySelector('.stg-edit-aliases');
-  var _saveField = (_aliasEl && _aliasEl.dataset.poolField) || 'aliases';
-  var aliasStr = (_aliasEl ? _aliasEl.value || '' : '').trim();
-  var _parsed = aliasStr
-    ? aliasStr.split(',').map(function(s) { return s.trim(); }).filter(Boolean)
-    : [];
+  var _poolEl = form.querySelector('.stg-tag-editor');
+  var _saveField = (_poolEl && _poolEl.dataset.poolField) || 'aliases';
+  var _parsed = _poolTagValues(form);
   // Never let an edit empty a wire pool — that resolves to zero slots and the
   // model disappears from routing while still rendering in the card.
   if (_saveField === 'request_ids' && !_parsed.length) {
@@ -341,6 +464,79 @@ function _saveModelEdit(provIdx, modelIdx) {
 /** Name of the field backing the chips for this entry. */
 function _poolField(m) {
   return (m && m.request_ids && m.request_ids.length) ? 'request_ids' : 'aliases';
+}
+
+/* ══ Tag editor (wire pool / aliases) ═══════════════════════════════
+ * One id = one chip. The input box is only an entry device: Enter or
+ * blur commits, a pasted comma/semicolon/newline SPLITS into several
+ * chips (so pasting the old comma format still works), Backspace on an
+ * empty box pops the last chip. Save reads the chips, never the box. */
+
+function _poolTagChipHTML(val) {
+  return '<span class="stg-tag-chip" data-value="' + escapeHtml(val) + '">' +
+    escapeHtml(val) +
+    '<span class="stg-tag-x" onclick="_poolTagRemove(this)">×</span></span>';
+}
+
+/** Add one chip; returns false for blanks and exact duplicates. */
+function _poolTagAdd(editor, val) {
+  val = String(val == null ? '' : val).trim();
+  if (!val) return false;
+  var chips = editor.querySelectorAll('.stg-tag-chip');
+  for (var i = 0; i < chips.length; i++) {
+    if (chips[i].getAttribute('data-value') === val) return false;
+  }
+  var input = editor.querySelector('.stg-tag-input');
+  input.insertAdjacentHTML('beforebegin', _poolTagChipHTML(val));
+  return true;
+}
+
+function _poolTagRemove(xEl) {
+  var chip = xEl && xEl.closest ? xEl.closest('.stg-tag-chip') : null;
+  if (chip) chip.remove();
+}
+
+function _poolTagKey(input, ev) {
+  if (!ev) return;
+  if (ev.key === 'Enter') {
+    ev.preventDefault();
+    _poolTagCommit(input);
+  } else if (ev.key === 'Backspace' && !input.value) {
+    var chips = input.closest('.stg-tag-editor')
+      .querySelectorAll('.stg-tag-chip');
+    if (chips.length) chips[chips.length - 1].remove();
+  }
+}
+
+/* Live delimiter split: typing/pasting a comma commits what came before
+ * it — commas are accepted as a convenience, never stored. */
+function _poolTagSplit(input) {
+  if (!/[,，\n;；]/.test(input.value)) return;
+  _poolTagCommit(input);
+}
+
+function _poolTagCommit(input) {
+  var editor = input && input.closest ? input.closest('.stg-tag-editor') : null;
+  if (!editor) return;
+  var parts = input.value.split(/[,，\n;；]/);
+  for (var i = 0; i < parts.length; i++) _poolTagAdd(editor, parts[i]);
+  input.value = '';
+}
+
+/** The chips' values, in order. Anything half-typed in the box is
+ *  committed first — clicking 应用 with text still in the box must not
+ *  silently drop it. */
+function _poolTagValues(form) {
+  var editor = form ? form.querySelector('.stg-tag-editor') : null;
+  if (!editor) return [];
+  var input = editor.querySelector('.stg-tag-input');
+  if (input && String(input.value || '').trim()) _poolTagCommit(input);
+  var out = [];
+  editor.querySelectorAll('.stg-tag-chip').forEach(function (c) {
+    var v = c.getAttribute('data-value');
+    if (v) out.push(v);
+  });
+  return out;
 }
 
 async function _addAlias(provIdx, modelIdx) {

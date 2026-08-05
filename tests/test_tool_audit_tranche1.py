@@ -166,8 +166,9 @@ def test_run_command_timeout_prose_matches_backend():
     desc = PROJECT_TOOL_RUN_COMMAND['function']['description']
     # The false "without a timeout by default" claim must be gone.
     assert 'without a timeout by default' not in desc
-    # And the accurate default must be described.
-    assert 'A default timeout applies' in desc
+    # And the accurate default must be described (timeout semantics are
+    # deliberately UNLIMITED now — a bound is opt-in only).
+    assert 'NO default timeout' in desc
 
 
 def test_run_command_prefers_absolute_paths_no_persistent_shell():

@@ -26,10 +26,10 @@ Why this checkpoint exists:
 
 from __future__ import annotations
 
-import logging
+from lib.log import get_logger
 
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 def release_db_conn_checkpoint(*, round_num, tid):

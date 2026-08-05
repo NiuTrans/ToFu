@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Incident anchor: born in commit 4a69fd9a — refactor(orchestrator): pt_03f4cdf1 slice 7 - extract Section 3 (Cont...
+# (funeral audit pt_c565a36b3e8f42e6, docs/RATCHET_AUDIT.md)
 """Wire-parity for pt_03f4cdf1 slice 7 — Section 3 context injection extracted
 to ``lib/tasks_pkg/orchestrator/_context_inject.py``.
 

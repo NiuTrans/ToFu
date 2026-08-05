@@ -388,6 +388,27 @@ def test_dom_order_matches_messages_after_send_edit_regen():
 # ════════════════════════════════════════════════════════════════════
 
 _RETIRED_TOKEN = 'stream-seg-narration'
+_RETIRED_TOKEN = 'stream-seg-narration'
+
+
+def _is_scan_exempt_artifact(base: str) -> bool:
+    """Files every production-JS scan must skip (not sources):
+
+    * ``*.nc_copy.js`` — NEUTER scratch copies;
+    * ``bundle-*`` — the concatenated runtime bundle (regenerated at server
+      start from the real sources);
+    * ``feature-<8hex>.js`` — the deferred-feature content-hashed runtime
+      artifacts (Epic-E deferral bundles), gitignored build outputs in the
+      SAME class as bundle-* (.gitignore:163-167). Anchored to the exact
+      8-hex shape so the tracked SOURCE ``feature-loader.js`` never matches.
+    """
+    if base.endswith('.nc_copy.js') or base.startswith('bundle-'):
+        return True
+    if (base.startswith('feature-') and base.endswith('.js')
+            and len(base) == len('feature-') + 8 + len('.js')
+            and all(c in '0123456789abcdef' for c in base[len('feature-'):-3])):
+        return True
+    return False
 
 
 def _strip_js_comments(src: str) -> str:
@@ -459,7 +480,7 @@ def test_stream_seg_narration_gone_from_production_js():
     offenders = []
     for path in glob.glob(os.path.join(JS_DIR, '**', '*.js'), recursive=True):
         base = os.path.basename(path)
-        if base.endswith('.nc_copy.js') or base.startswith('bundle-'):
+        if _is_scan_exempt_artifact(base):
             continue
         with open(path, encoding='utf-8') as f:
             code = _strip_js_comments(f.read())
@@ -553,7 +574,7 @@ def test_full_repaints_route_through_replaceAll():
     offenders = []
     for path in glob.glob(os.path.join(JS_DIR, '**', '*.js'), recursive=True):
         base = os.path.basename(path)
-        if base.endswith('.nc_copy.js') or base.startswith('bundle-'):
+        if _is_scan_exempt_artifact(base):
             continue
         rel = os.path.relpath(path, ROOT)
         if rel in _SEAM_FILES:
@@ -696,7 +717,7 @@ def test_streambufs_fully_retired():
     offenders = []
     for path in glob.glob(os.path.join(JS_DIR, '**', '*.js'), recursive=True):
         base = os.path.basename(path)
-        if base.endswith('.nc_copy.js') or base.startswith('bundle-'):
+        if _is_scan_exempt_artifact(base):
             continue
         with open(path, encoding='utf-8') as f:
             code = _strip_js_comments(f.read())
@@ -787,7 +808,7 @@ def test_stream_session_keys_are_phase_only():
     )
     for path in glob.glob(os.path.join(JS_DIR, '**', '*.js'), recursive=True):
         base = os.path.basename(path)
-        if base.endswith('.nc_copy.js') or base.startswith('bundle-'):
+        if _is_scan_exempt_artifact(base):
             continue
         rel = os.path.relpath(path, ROOT)
         with open(path, encoding='utf-8') as f:
@@ -826,7 +847,7 @@ def test_stream_session_reader_surface_pinned():
     readers = set()
     for path in glob.glob(os.path.join(JS_DIR, '**', '*.js'), recursive=True):
         base = os.path.basename(path)
-        if base.endswith('.nc_copy.js') or base.startswith('bundle-'):
+        if _is_scan_exempt_artifact(base):
             continue
         rel = os.path.relpath(path, ROOT)
         if rel == 'static/js/ui/stream_session.js':
@@ -898,7 +919,7 @@ def test_stream_session_module_contract():
     writers = []
     for path in glob.glob(os.path.join(JS_DIR, '**', '*.js'), recursive=True):
         base = os.path.basename(path)
-        if base.endswith('.nc_copy.js') or base.startswith('bundle-'):
+        if _is_scan_exempt_artifact(base):
             continue
         with open(path, encoding='utf-8') as f:
             code = _strip_js_comments(f.read())

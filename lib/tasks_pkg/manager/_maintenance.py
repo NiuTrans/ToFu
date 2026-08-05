@@ -11,6 +11,7 @@ from lib.log import get_logger
 
 from lib.tasks_pkg.manager._state import (
     _chat_runtime,
+    _clear_latest_task,
     _conv_latest_task,
     _conv_latest_task_lock,
     tasks,
@@ -50,12 +51,13 @@ def cleanup_old_tasks():
                     finished_ids.add(tid)
     n = _chat_runtime.cleanup_stale()
     # Clean up _conv_latest_task entries whose tasks were just removed
+    # (mirror-inclusive: a local-only prune strands the store mirror corpse)
     if finished_ids:
         with _conv_latest_task_lock:
             stale_convs = [cid for cid, tid in _conv_latest_task.items()
                            if tid in finished_ids]
-            for cid in stale_convs:
-                del _conv_latest_task[cid]
+        for cid in stale_convs:
+            _clear_latest_task(cid)
     if n:
         logger.debug('[Manager] cleanup_old_tasks removed %d tasks', n)
     # ★ Stuck-task backstop (rides the same tick). cleanup_stale only evicts
@@ -134,9 +136,10 @@ def shed_memory_under_pressure() -> dict:
         evicted = _chat_runtime.cleanup_stale(max_age=0)
         if finished_ids:
             with _conv_latest_task_lock:
-                for cid in [c for c, tid in _conv_latest_task.items()
-                            if tid in finished_ids]:
-                    del _conv_latest_task[cid]
+                stale_convs = [c for c, tid in _conv_latest_task.items()
+                               if tid in finished_ids]
+            for cid in stale_convs:
+                _clear_latest_task(cid)
     except Exception as e:
         logger.warning('[Manager] shed: terminal-task eviction failed: %s', e,
                        exc_info=True)
@@ -162,6 +165,19 @@ def _stuck_task_max_silent_secs() -> int:
     except (ValueError, TypeError) as e:
         logger.debug('[Manager] TOFU_STUCK_TASK_MAX_SILENT_SECS parse failed, using fallback: %s', e)
         return 1800
+
+
+# Grace (seconds) the reaper gives a JUST-ISSUED command interrupt to be
+# consumed by the run_command read loop (which polls every ~0.2s). Only when
+# the flag sits UNCONSUMED past this window is the loop itself considered
+# wedged, escalating back to a full task reap. Env-tunable; default 120s.
+def _cmd_interrupt_grace_secs() -> int:
+    import os
+    try:
+        return int(os.environ.get('TOFU_CMD_INTERRUPT_GRACE_SECS', '') or '120')
+    except (ValueError, TypeError) as e:
+        logger.debug('[Manager] TOFU_CMD_INTERRUPT_GRACE_SECS parse failed, using fallback: %s', e)
+        return 120
 
 
 def reap_stuck_running_tasks() -> int:
@@ -197,8 +213,16 @@ def reap_stuck_running_tasks() -> int:
                                  2026-07-25 exemption). A turn stuck in a live
                                  socket read emits no delta but IS heartbeating
                                  → never reaped; a hung ordinary tool (silent
-                                 >30min, e.g. run_command producing nothing)
-                                 gets NO such refresh → reaped.
+                                 >30min) gets NO such refresh → reaped.
+
+    One exception refines the second clock (2026-08-01, pt_232244fb): a task
+    blocked INSIDE a run_command subprocess (``_subprocess_pid`` set) is not
+    force-failed — the reaper issues a per-command interrupt instead
+    (``_cmd_interrupt``, consumed by the run_command read loop within ~0.2s),
+    which kills the process tree and returns the PARTIAL output to the model
+    so the turn continues. Only if the interrupt sits unconsumed past
+    :func:`_cmd_interrupt_grace_secs` — i.e. the read loop itself, not merely
+    the subprocess, is wedged — does the full task reap below fire.
 
     Requiring BOTH stale is exactly the signal a client-side poll CANNOT recover
     (poll only sees ``status='running'``, indistinguishable from a slow turn),
@@ -232,6 +256,45 @@ def reap_stuck_running_tasks() -> int:
             # or a human-input wait keeping the heartbeat warm).
             if event_silent < max_silent or dispatch_silent < max_silent:
                 continue
+            # ★ run_command-blocked: INTERRUPT the command, don't kill the
+            #   task (owner directive 2026-08-01, pt_232244fb). A silent
+            #   long-running subprocess (measured: a `find` over the FUSE
+            #   workspace ran 1h12m with zero output) is indistinguishable
+            #   from a wedge from here, but it is RECOVERABLE — killing the
+            #   process tree hands the partial output back to the model and
+            #   the turn CONTINUES. Force-failing the whole task threw the
+            #   work away and pushed the recovery onto the user.
+            if t.get('_subprocess_pid'):
+                pending = t.get('_cmd_interrupt')
+                if isinstance(pending, dict):
+                    issued_at = pending.get('ts', now)
+                    try:
+                        issued_at = float(issued_at)
+                    except (ValueError, TypeError) as e:
+                        logger.debug('[Manager] bad _cmd_interrupt ts (%s) — treating as fresh', e)
+                        issued_at = now
+                    if now - issued_at < _cmd_interrupt_grace_secs():
+                        # Interrupt already issued; the read loop polls every
+                        # ~0.2s — give it the grace window to consume.
+                        continue
+                    # Flag sat UNCONSUMED past the grace → the read loop
+                    # itself is wedged (not just the subprocess) → fall
+                    # through to the full task reap below.
+                else:
+                    t['_cmd_interrupt'] = {
+                        'source': 'watchdog',
+                        'ts': now,
+                        'note': ('no output for %ds'
+                                 % int(min(event_silent, dispatch_silent))),
+                        'pid': t.get('_subprocess_pid'),
+                    }
+                    logger.warning(
+                        '[Task %s] conv=%s ⚠️ silent in run_command for %.0fs — '
+                        'interrupting the COMMAND (task spared, partial output '
+                        'returns to the model)',
+                        t['id'][:8], (t.get('convId') or '')[:8],
+                        min(event_silent, dispatch_silent))
+                    continue
             had_output = bool((t.get('content') or '') or (t.get('thinking') or ''))
             if not had_output:
                 try:

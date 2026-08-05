@@ -76,11 +76,19 @@ const _STREAM_PHASE_EN = {
   'stream.phase.waitingModel': 'Sent to the model, waiting for it to start replying…',
   'stream.phase.retrying': 'Retrying…',
   'stream.phase.waiting': 'Waiting…',
+  // New keys for the tool-exec phase contract (mirror static/js/i18n.js EN):
+  'stream.phase.analyzingRound': 'Analyzing results and planning next step… (round {round})',
+  'stream.phase.toolExec': '{tool}…',
+  'stream.phase.toolExecMulti': 'Running {n} tools: {tools}…',
+  'stream.phase.toolContext': 'prev: {tools}',
+  'tool.label.read_files': 'Reading files',
+  'tool.label.apply_diff': 'Patching files',
+  'tool.label.join': ', ',
 };
 win.t = global.t = (k, o) => {
   let v = _STREAM_PHASE_EN[k];
   if (v === undefined) return k + (o && o.n != null ? (':' + o.n) : '');
-  if (o && o.n != null) v = v.replace('{n}', o.n);
+  if (o) for (const kk in o) v = v.split('{' + kk + '}').join(o[kk]);
   return v;
 };
 // Hot-path no-ops / stubs (function-body refs, resolved at call time).
@@ -162,12 +170,19 @@ updateStreamingUI({
   content: 'Hello world body text',
   thinking: 'some reasoning here',
   toolRounds: [],
-  phase: { phase: 'tool_exec', detail: 'Running a tool' },
+  phase: { phase: 'tool_exec', detail: 'Patching files', tools: ['apply_diff'] },
 });
 check('zones_built', !!body.querySelector('[data-zone="content"]') && !!body.querySelector('[data-zone="thinking"]') && !!body.querySelector('[data-zone="status"]'));
 check('content_rendered', body.querySelector('[data-zone="content"]').innerHTML.includes('Hello world body text'));
 check('thinking_rendered', body.querySelector('[data-zone="thinking"]').textContent.includes('some reasoning here'));
-check('phase_rendered', body.querySelector('[data-zone="status"]').innerHTML.includes('Running a tool'));
+/* ★ STALE-PHASE GUARD (owner report 2026-08-03): a tool_exec phase with NO
+ * in-flight tool round is a LIE — every tool already settled (or the tool
+ * cards were never announced on this lane), yet the row claims a tool is
+ * running RIGHT NOW ("✏️ Applying changes…" while only settled cards sit
+ * above). The phase row must NOT render in that window; the tool cards are
+ * the live record. FAILING-FIRST: pre-fix this rendered the raw detail. */
+check('phase_tool_exec_stale_suppressed',
+  !body.querySelector('[data-zone="status"]').innerHTML.includes('Patching files'));
 
 // Waiting phase when no content/thinking yet
 const body2host = document.getElementById('chatInner');
@@ -200,6 +215,83 @@ updateStreamingUI({ content: '', thinking: '', toolRounds: [], phase: null });
 global.getSelection = win.getSelection = () => ({ isCollapsed: true, rangeCount: 0 });
 check('blank_bubble_guard', body3.querySelector('.stream-status') !== null
   && body3.querySelector('.pulse') !== null);
+
+/* ── 1c. tool_exec phase-row contract (gate + localization) ──
+ * The row renders ONLY while a round is genuinely in-flight (here:
+ * pending_approval — in-flight but NOT 'searching', the case the old
+ * hasActiveSearch gate under-covered), and composes its label from the
+ * structured phase.tools list through i18n — never the raw English detail. */
+function _freshBody() {
+  const old = document.getElementById('streaming-body');
+  if (old) old.remove();
+  const b = document.createElement('div');
+  b.id = 'streaming-body';
+  document.getElementById('chatInner').appendChild(b);
+  return b;
+}
+const bodyExec = _freshBody();
+updateStreamingUI({
+  content: '', thinking: '',
+  toolRounds: [{ roundNum: 1, status: 'pending_approval', toolName: 'apply_diff', query: 'apply_diff a.py' }],
+  phase: { phase: 'tool_exec', detail: 'LEGACY-ENGLISH-DETAIL', tools: ['apply_diff'] },
+});
+const _execHtml = bodyExec.querySelector('[data-zone="status"]').innerHTML;
+check('phase_tool_exec_inflight_localized',
+  _execHtml.includes('Patching files') && !_execHtml.includes('LEGACY-ENGLISH-DETAIL'));
+
+/* Multi-tool dispatch: N counted over the calls, labels deduped + localized. */
+const bodyMulti = _freshBody();
+updateStreamingUI({
+  content: '', thinking: '',
+  toolRounds: [{ roundNum: 1, status: 'executing', toolName: 'read_files', query: 'a.py' }],
+  phase: { phase: 'tool_exec', detail: 'Executing 3 tools: Reading files, Patching files', tools: ['read_files', 'apply_diff', 'apply_diff'] },
+});
+const _multiHtml = bodyMulti.querySelector('[data-zone="status"]').innerHTML;
+check('phase_tool_exec_multi_localized',
+  _multiHtml.includes('Running 3 tools') && _multiHtml.includes('Reading files')
+  && _multiHtml.includes('Patching files') && !_multiHtml.includes('Executing'));
+
+/* Round-open llm_thinking suffix: compose from toolContextTools (structured)
+ * — the raw English toolContext string is the headless fallback only. */
+const bodyCtx = _freshBody();
+updateStreamingUI({
+  content: '', thinking: '',
+  toolRounds: [],
+  phase: { phase: 'llm_thinking', detailKey: 'stream.phase.analyzingRound', detailArgs: { round: 2 }, toolContext: 'RAW-ENGLISH-CTX', toolContextTools: ['read_files', 'apply_diff'] },
+});
+const _ctxHtml = bodyCtx.querySelector('[data-zone="status"]').innerHTML;
+check('phase_tool_context_localized',
+  _ctxHtml.includes('Reading files') && _ctxHtml.includes('Patching files')
+  && !_ctxHtml.includes('RAW-ENGLISH-CTX'));
+
+/* Legacy phase (no toolContextTools — older backend / headless replay):
+ * the raw toolContext string still renders (fallback preserved). */
+const bodyLegacy = _freshBody();
+updateStreamingUI({
+  content: '', thinking: '',
+  toolRounds: [],
+  phase: { phase: 'llm_thinking', detail: 'Analyzing…', toolContext: 'legacy ctx string' },
+});
+check('phase_tool_context_legacy_fallback',
+  bodyLegacy.querySelector('[data-zone="status"]').innerHTML.includes('legacy ctx string'));
+bodyLegacy.remove();
+
+/* VU-forwarded tool_exec (detail-only, NO tools list) + an in-flight round:
+ * renders the raw English detail — and must NOT crash. This pins the
+ * self-contained fallback: the i18n-resolving _phaseDetailText is nested
+ * inside updateStreamingUI and is NOT reachable from the module-level
+ * helper (a blind call there is a ReferenceError on exactly this frame —
+ * caught by the N4 neuter pass, 2026-08-03). */
+const bodyVu = _freshBody();
+updateStreamingUI({
+  content: '', thinking: '',
+  toolRounds: [{ roundNum: 1, status: 'submitted', toolName: 'apply_diff', query: 'apply_diff a.py' }],
+  phase: { phase: 'tool_exec', detail: 'apply_diff a.py' },
+});
+const _vuHtml = bodyVu.querySelector('[data-zone="status"]').innerHTML;
+check('phase_tool_exec_no_tools_fallback',
+  _vuHtml.includes('apply_diff a.py'));
+bodyVu.remove();
 
 // ── 2. finishStream clears orphaned awaiting_human / submitted rounds to done ──
 const conv = {

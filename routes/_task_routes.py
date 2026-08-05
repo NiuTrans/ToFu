@@ -26,9 +26,9 @@ Example usage:
     #   POST /api/paper/report/abort/<task_id>
 """
 
-from flask import jsonify, request
+from flask import request
 
-from lib.api_response import api_not_found, api_ok
+from lib.api_response import api_not_found, api_ok, api_payload
 from lib.log import get_logger
 
 logger = get_logger(__name__)
@@ -73,7 +73,7 @@ def register_task_routes(bp, runtime, *, url_prefix: str,
             # (ok / events / next_cursor / status / done / error). Preserve
             # it verbatim — only the HTTP status varies.
             status_code = 404 if resp.get('error') == 'not_found' else 200
-            return jsonify(resp), status_code
+            return api_payload(resp, status_code)
 
     if enable_abort:
         @bp.route(f'{url_prefix}{abort_path}', methods=['POST'],

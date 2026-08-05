@@ -275,6 +275,40 @@ def _node_syntax_ok(bundle_path):
     return False, detail
 
 
+def _find_syntax_broken_sources(names):
+    """Per-file ``node --check`` over the given bundle-relative source files.
+
+    This is the ATTRIBUTION pass for a failure class ``_scan_source_corruption``
+    structurally cannot see: a file that is scanner-clean (no conflict markers,
+    no NUL bytes) yet does not parse — the 2026-08-04 sidebar incident, where an
+    interrupted agent edit left a duplicated ``function renderMessage(`` line in
+    chat_render.js (brace imbalance → EOF mid-construct). It runs ONLY after the
+    whole-bundle gate failed, so healthy builds pay nothing for it.
+
+    Best-effort, mirroring ``_node_syntax_ok``: no node → ``[]`` (the gate that
+    would have triggered this pass is equally vacuous then). Returns the ordered
+    list of names that fail to parse; ``[]`` means the failure is a cross-file
+    gluing bug, not attributable to any single source.
+    """
+    node = shutil.which('node')
+    if not node:
+        return []
+    broken = []
+    for name in names:
+        path = os.path.join(JS_DIR, name)
+        try:
+            proc = subprocess.run(
+                [node, '--check', path],
+                capture_output=True, text=True, timeout=30,
+            )
+        except Exception as e:
+            logger.debug('[Bundle] node --check unavailable for %s: %s', name, e)
+            continue
+        if proc.returncode != 0:
+            broken.append(name)
+    return broken
+
+
 def _resolve_esbuild():
     """Locate an ``esbuild`` binary, preferring the project's local install.
 
@@ -705,7 +739,18 @@ _BUNDLE_FILES = [
     # chat_render.js; consumed by translation.js, so load BEFORE it.
     'ui/translation_render.js',
     'ui/popups.js',
+    # ui/finish_info.js — SLIMMED 2026-08-01 (Epic-E sub-8): the
+    # cost-popover family (_buildCostPopover + interaction cluster,
+    # ~24KB) moved to DEFERRED ui/finish_info_rich.js and builds LAZILY
+    # on first open from the _costCtxByMsg stash (renderFinishInfo no
+    # longer embeds pre-built popover HTML per message). The cache-break
+    # phrase family stays (the collapsed bar's warn tooltip renders at
+    # paint). _toggleCostPopover is a feature-loader entry point.
     'ui/finish_info.js',
+    # ui/tool_rounds.js — SLIMMED 2026-08-01 (Epic-E sub-4): the conv-meta
+    # rich-render family + Timer Watcher block + ticker moved to DEFERRED
+    # ui/tool_rounds_rich.js. The core remainder is boot-critical (first
+    # paint restore goes through chat_render.js → renderToolRoundsHTML).
     'ui/tool_rounds.js',
     'ui/message_actions.js',
     'ui/edit_message.js',
@@ -714,7 +759,14 @@ _BUNDLE_FILES = [
     # extracted from ui/streaming_ui.js (2026-06-27). Leaf cluster; its
     # builders are called from streaming_ui.js + tool_rounds.js via shared
     # window scope. Load BEFORE streaming_ui.js for clear intent.
-    'ui/streaming_swarm_panel.js',
+    # ui/streaming_swarm_panel.js — MOVED to _DEFERRED_FILES 2026-08-01
+    # (Epic-E pt_3879f00e sub-5B, 55KB out of the core). The seven call
+    # sites (streaming_ui.js ×5, chat_render.js, tool_rounds.js) are all
+    # typeof-guarded in the same commit: absence degrades swarm rounds to
+    # _renderUnifiedToolLine's generic line and drops the inbox chips;
+    # the panel self-heals on the next SSE event once the idle prefetch
+    # lands. Its two tickers only touch DOM the module itself rendered.
+    # Suite: tests/test_frontend_swarm_panel_deferred.py.
     'ui/streaming_ui.js',
     # RENDER_CONTRACT Phase 3.5 §7 live stream session — the phase home
     # (convId-keyed runtime slice; replaces streamBufs). Zero deps; load
@@ -781,28 +833,56 @@ _BUNDLE_FILES = [
     # See feature-loader.js.
     # paper-reader.js — MOVED to _DEFERRED_FILES (lazy-loaded on first Paper
     # Reader open; ~54KB gzip). See feature-loader.js.
-    'project.js',
-    'memory.js',
+    # project.js — SPLIT 2026-08-01 (Epic-E pt_3879f00e sub-7): the STATE
+    # subset (conv-project path helpers, _applyProjectData SSE entry,
+    # loadProjectStatus boot restore, project-bar render + bar
+    # interactions) lives in project_state.js BELOW (core); the PANEL
+    # (folder modal, browser, recent, apply-code, drop zones,
+    # approval/stdin/HG submit handlers) moved to _DEFERRED_FILES as
+    # project.js with 13 feature-loader stubs (openProjectModal and the
+    # chat-rendered approval/stdin/HG/undo/apply handlers).
+    'project_state.js',
+    # memory.js — MOVED to _DEFERRED_FILES 2026-08-01 (Epic-E sub-9,
+    # settings-panel six-pack ~123KB; full census note below at timer.js).
     # Skill-package (.zip) drag/drop install (extracted from memory.js 2026-07).
     'memory_skill_install.js',
-    'skills.js',
+    # skills.js — MOVED to _DEFERRED_FILES 2026-08-01 (Epic-E sub-9).
     # Skills-tab zip drag/drop + upload transport (extracted from skills.js 2026-07).
     'skills_install.js',
-    'preferences.js',
+    # preferences.js — MOVED to _DEFERRED_FILES 2026-08-01 (Epic-E sub-9).
     # orchestration.js + task-mode.js — MOVED to _DEFERRED_FILES (lazy-loaded
     # on first Orchestration Studio / Task Mode open; ~48KB gzip combined).
     # task-mode.js reads _ORCH_ICONS from orchestration.js only at RUNTIME
     # (typeof-guarded), and both load together in the feature bundle, so the
     # ordering constraint is preserved within _DEFERRED_FILES. See
     # feature-loader.js.
-    'optimizer.js',
-    'update.js',
-    'timer.js',
-    'myday.js',
-    # My Day TODO/stream mutation handlers (extracted from myday.js 2026-07).
-    # Window-scope siblings; invoked at runtime from onclick in myday.js render
-    # fns, share the _myday state object → load order free (after myday.js).
-    'myday_tasks.js',
+    # optimizer.js + update.js + timer.js (+ memory.js / skills.js /
+    # preferences.js above) — MOVED to _DEFERRED_FILES 2026-08-01 (Epic-E
+    # pt_3879f00e sub-9, ~123KB of user-triggered settings panels out of
+    # the render-blocking core). Census: every panel opens via topbar
+    # badge / settings tab / mobile sheet; ZERO boot-path bare calls —
+    # settings/core_panel.js typeof-gates the three tab populates, and
+    # with stubs installed the gates DISPATCH (gate+stub composition).
+    # Boot-wiring hazards fixed in the same slice: update.js's version
+    # check rides _onReady (a deferred module lands AFTER window 'load',
+    # so the old listener would never fire); timer/optimizer polling
+    # self-arms at bundle land; mobile_panels.js's toggle wraps are
+    # re-runnable + identity-tracked and re-wrap on
+    # 'tofu:feature-bundle-loaded' (the real toggle clobbers the wrapper
+    # installed over the stub); skills_install.js's post-install
+    # _populateSkillsTab is typeof-gated. Suite:
+    # tests/test_frontend_settings_panels_deferred.py.
+    # myday.js + myday_tasks.js — MOVED to _DEFERRED_FILES 2026-08-01
+    # (Epic-E pt_3879f00e sub-6, 65KB out of the core). Census: ZERO
+    # external JS callers (openDailyReport/closeDailyReport/
+    # _mydayTriggerGenerate are referenced only from index.html inline
+    # onclicks — they become feature-loader stubs); the _myday state is
+    # private to the two modules (they move together, order preserved);
+    # both load-time boot blocks branch on document.readyState so they
+    # fire directly when the feature bundle lands after DOMContentLoaded
+    # (the digest boot is setTimeout(2500) by design — deferral aligns
+    # with the module's own 'never competes with first paint' intent).
+    # Suite: tests/test_frontend_myday_deferred.py.
     # settings.js is now a slim head (var _serverConfig = null;
     # var _keyStatsCache = {...}; var _keyStatsLoading = false;) followed
     # by a pointer comment. It MUST come BEFORE the settings/ subpackage
@@ -813,39 +893,43 @@ _BUNDLE_FILES = [
     # The 15 files below were extracted from settings.js (4755 LOC).
     # Concatenated in load order; symbols share window scope.
     # See `.tofu/memories/frontend-settings-decomposition.md`.
+    # settings/branding.js — STAYS IN CORE 2026-08-02 (Epic-E sub-10
+    # boundary fix): it is NOT settings-only. main.js:88 + main.js:349
+    # call _modelShortName() BARE on the boot/model-switch path
+    # (_applyModelUI) — deferring branding breaks the boot model paint
+    # with ReferenceError. Its brand helpers (_detectBrand/_brandSvg/
+    # _providerDisplayName/…) are also consumed by the deferred family
+    # (visibility_defaults ×12, local_endpoints, template_actions) —
+    # deferred→core is the safe direction. finish_info.js's cold
+    # finish-bar calls are typeof-gated but hot-path; keeping branding
+    # core keeps them always-satisfied.
     'settings/branding.js',
-    'settings/provider_templates.js',
-    'settings/auto_setup.js',
-    'settings/local_endpoints.js',
-    # Degraded-section contract (2026-07-29): a settings block that depends on a
-    # JS symbol declares it via data-requires; when the symbol is absent (stale
-    # bundle after adding a module) the controls are hidden and a "needs
-    # restart" notice is shown, so a feature that cannot work never presents
-    # itself as usable. Must load BEFORE core_panel.js, which calls it.
-    'settings/section_requires.js',
-    'settings/core_panel.js',
-    'settings/provider_render.js',
-    # Wire-face visibility + editing (2026-07-29). Must load BEFORE
-    # provider_render.js consumers run, but AFTER core_panel.js declares
-    # _stgProviders. Placed here so _faceChipHTML / _renderFacesSection
-    # exist by the time a provider card renders.
-    'settings/provider_faces.js',
-    'settings/key_stats.js',
-    'settings/balance.js',
-    'settings/template_actions.js',
-    'settings/model_edit.js',
-    'settings/providers/access_matrix.js',
-    'settings/visibility_defaults.js',
-    'widgets/chip_input.js',
-    'settings/other_tabs.js',
-    'settings/speech.js',
-    'settings/auth_sources.js',
-    'settings/private_hosts.js',
-    'settings/save_export.js',
-    'settings/system_prompt_editor.js',
-    'settings/oauth.js',
-    'settings/mcp.js',
-    'settings/devices.js',
+    # ── ENTIRE settings/ subpackage + widgets/chip_input.js — MOVED to
+    # _DEFERRED_FILES 2026-08-01 (Epic-E pt_3879f00e sub-10, ~455KB out
+    # of the core, the line-closer slice). Census: the whole family
+    # renders ONLY inside the user-triggered Settings modal; boot config
+    # load (_loadServerConfigAndPopulate, main_toolbar_ui.js:391) calls
+    # ZERO settings/ functions (one-way dependency);
+    # visibility_defaults.js has no load-time side effects and no boot
+    # callers (branding.js DOES — main.js:88/349 bare — so it STAYS);
+    # oauth/key_stats have no boot readers; every programmatic
+    # openSettings/switchSettingsTab caller is typeof-guarded
+    # (onboarding.js:271, main_toolbar_ui.js:382/537,
+    # skills_install.js:70) — gate+stub composition (sub-9 pattern).
+    # settings.js (the head above) STAYS: var _serverConfig /
+    # _keyStatsCache / _keyStatsLoading are read by
+    # main_input_handling.js. 4 stubs (openSettings/closeSettings/
+    # saveSettings/switchSettingsTab); local_endpoints.js's metrics
+    # setInterval self-arms on land. Suite:
+    # tests/test_frontend_settings_family_deferred.py.
+    # settings/providers/access_matrix.js — MOVED to _DEFERRED_FILES
+    # 2026-08-01 (Epic-E pt_3879f00e sub-5A, 55KB out of the core). All
+    # three external call sites are already typeof-guarded
+    # (core_panel.js / provider_render.js ×2; the matrix toggle button
+    # itself only renders when the module is present), _stgMatrixOpen
+    # moves with it (read guarded), and its only load-time side effect
+    # is a self-contained window-resize IIFE — zero new guards, zero
+    # stubs. Suite: tests/test_frontend_access_matrix_deferred.py.
     # relay-admin.js intentionally NOT bundled — it loads only on the
     # standalone /admin page (static/admin.html), not in index.html.
     # ── main/ subpackage (split 2026-05-28 from monolithic main.js) ──
@@ -897,17 +981,19 @@ _BUNDLE_FILES = [
     # globals declared in core.js + main.js, so they MUST come after main.js).
     'compaction-viewer.js',
     'context-bar.js',
-    # The Tofu pet — a self-driven mascot mounted into #projectBar (tofu theme
-    # only via CSS). Queries the DOM + reads localStorage at RUNTIME only, so
-    # it can load anytime after main.js. No app-pipeline dependency; exposes
-    # window.TofuPet + listens on the 'tofu:activity'/'tofu:react' event seam.
-    'tofu-pet.js',
-    # The procedural Impressionist canvas backdrop for the project bar (tofu
-    # theme only via CSS). Asset-free brush-dab painter; reads the bar's
-    # [data-decor] (set by tofu-pet.js) + the app theme at RUNTIME only, no
-    # pipeline dependency, so it can load anytime after main.js. Exposes
-    # window.TofuScene; listens on the same 'tofu:decor' event seam.
-    'tofu-scene.js',
+    # tofu-pet.js + tofu-scene.js — MOVED to _DEFERRED_FILES 2026-08-01
+    # (Epic-E pt_3879f00e sub-part 3 slice C, the ~160KB decorative
+    # family out of the render-blocking core; see docs/EPIC_E_SIZE_LEDGER.md).
+    # Zero gates needed: the pair has ZERO external JS callers (the only
+    # cross-references are between the two and all window-guarded), the
+    # sole external reference (index.html sceneSwitchBtn onclick) is
+    # natively absence-safe (window.TofuPet&&…), the app→pet signal seam
+    # is fire-and-forget dispatchEvent (absent listeners = no-op), and
+    # both IIFEs self-boot through the readyState guard whenever the
+    # feature bundle lands. NO feature-loader stub by design (same
+    # no-one-time-wiring argument as health_stream_timer). The idle
+    # prefetch lands the pair ~2s after boot; the mount target
+    # #projectBar starts display:none, so no layout shift.
     # Cross-conversation live-presence strip — pure render subscriber on the
     # 'presence' push channel. Reads activeConvId / conversations /
     # getActiveConv (main.js) + _getConvProjectPath (project.js) + t (i18n.js)
@@ -933,6 +1019,12 @@ _BUNDLE_FILES = [
     # _applyDesktopUI / _saveConvToolState, so it MUST come after main.js and
     # main/main_toolbar_ui.js.
     'local-control.js',
+    # First-run setup wizard (API key vs subscription chooser + API probe
+    # path). Drives openSettings / switchSettingsTab / _oauthLogin /
+    # Api.providers.probe / Api.serverConfig.update and is entered from
+    # _maybeAutoOpenSettings — all runtime calls, so it only needs to come
+    # after the settings modules and main/main_toolbar_ui.js.
+    'onboarding.js',
     # Real-time network-latency signal indicator in the topbar. Pure runtime
     # subscriber on push.js's RTT probe (pushOnLatency) + reads t() at render
     # time, so it MUST come after main.js (and after push.js, loaded far above).
@@ -997,6 +1089,10 @@ _DEFERRED_FILES = [
     'paper/pdf_viewer.js',  # pdf.js load/render/zoom pipeline; owns _paperResizeObserver/_paperZoomDebounce → BEFORE pdf_responsive.js (calls paperFitWidth) + paper-reader.js
     'paper/pdf_responsive.js',  # draggable divider + foldable/tablet responsive-crossing IIFE (self-contained; self-inits on DOMContentLoaded)
     'paper/report.js',    # Report + Review Mode (task/poll/render/export + 7 load-time listeners); report/review STATE stays in core → load before paper-reader.js
+    'paper/reading_xp.js',  # Reading-experience rail (anchored insight cards / recap / cost breakdown); seams INTO report.js via window._paperXp* → load AFTER report.js, before paper-reader.js
+    'paper/deepen.js',      # On-demand section depth (P3): heading/formula deepen buttons + drawer; hooked from reading_xp's after-render seam → load AFTER reading_xp.js
+    'paper/notes.js',       # Reader margin notes (P4): selection → popover → paper_notes CRUD + highlight/chip/orphan-tray decoration; hooked from reading_xp's seam → AFTER deepen.js
+    'paper/focus_mode.js',  # Focus mode (P4): one-paragraph spotlight + j/k nav; hooked from reading_xp's seam → AFTER notes.js
     'paper/babel.js',     # Babel PDF-translation tab; owns _babelTranslatedPages (read by core library-persist at runtime) → load before paper-reader.js
     'paper/library.js',   # Paper Library (bookshelf) cache+CRUD+render; owns _paperLibrary state (extracted from paper-reader.js 2026-07) → runtime cross-refs, order free; before paper-reader.js
     'paper/podcast.js',   # Paper Podcast tab (player + transcript + sleep timer); reads _paperHash/Api.paper.podcast* at RUNTIME only → before paper-reader.js
@@ -1044,6 +1140,92 @@ _DEFERRED_FILES = [
     # exposes) touch only browser globals; every core symbol it reads is
     # in the core bundle which always loads first.
     'core/health_stream_timer.js',
+    # The decorative pet family (~160KB) — deferred 2026-08-01 (Epic-E
+    # sub-part 3 slice C). Zero gates + zero stubs (see the _BUNDLE_FILES
+    # moved-note for the census); tofu-pet.js first to preserve the
+    # core-bundle relative order, though every cross-reference between
+    # the two is window-guarded so the order is free.
+    'tofu-pet.js',
+    'tofu-scene.js',
+    # Rich tool-round renderers (~58KB) — deferred 2026-08-01 (Epic-E
+    # sub-4, split OUT of ui/tool_rounds.js which STAYS in core for the
+    # first-paint restore path). The conv-meta family (Project Brain
+    # board/charter/feed/peer/digest/commit cards) + the Timer Watcher
+    # block + its countdown ticker render rounds that only exist in convs
+    # which used Project Brain / scheduler tools. Core dispatch in
+    # _renderUnifiedToolLine is typeof-guarded (generic ptool-line until
+    # this lands via idle prefetch) and the module's load-time upgrade
+    # pass re-renders the active conv once if it holds such rounds.
+    'ui/tool_rounds_rich.js',
+    # Access matrix (55KB) — deferred 2026-08-01 (Epic-E sub-5A). The
+    # per-provider model×key health grid renders only inside Settings →
+    # Providers after a user toggle; every external call site was already
+    # typeof-guarded (see the _BUNDLE_FILES moved-note).
+    'settings/providers/access_matrix.js',
+    # Swarm panel (55KB) — deferred 2026-08-01 (Epic-E sub-5B). Renders
+    # only for convs with swarm activity; guarded generic-line fallback
+    # until it lands (see the _BUNDLE_FILES moved-note).
+    'ui/streaming_swarm_panel.js',
+    # My Day report modal (65KB) — deferred 2026-08-01 (Epic-E sub-6).
+    # Opens only via the topbar button (stub: openDailyReport); zero
+    # external JS callers, _myday state private to the pair, boot blocks
+    # late-load-safe (see the _BUNDLE_FILES moved-note). myday.js FIRST
+    # — myday_tasks.js shares its state object.
+    'myday.js',
+    'myday_tasks.js',
+    # Project PANEL (67KB after the sub-7 split) — deferred 2026-08-01.
+    # The state subset stays in core as project_state.js (loaded at the
+    # panel's old position, far above). The panel calls the state subset
+    # at RUNTIME via window scope; the two reverse bare calls from the
+    # state subset (saveRecentProject / closeProjectModal / _mpFolders
+    # reset) are typeof-guarded. Entry-point stubs cover the bar's
+    # openProjectModal and every chat-rendered submit handler.
+    'project.js',
+    # Cost popover (24KB) — deferred 2026-08-01 (Epic-E sub-8). Builds
+    # lazily on first open from the _costCtxByMsg stash (see the
+    # _BUNDLE_FILES moved-note); legacy embedded content wins when
+    # present (mixed-shape bundles safe).
+    'ui/finish_info_rich.js',
+    # Settings-panel six-pack (123KB) — deferred 2026-08-01 (Epic-E
+    # sub-9). All user-triggered (topbar badge / settings tab / mobile
+    # sheet); see the _BUNDLE_FILES moved-note for the boot-wiring fixes
+    # (_onReady conversion / mobile re-wrap / install gate).
+    'memory.js',
+    'skills.js',
+    'preferences.js',
+    'optimizer.js',
+    'update.js',
+    'timer.js',
+    # ENTIRE settings/ subpackage (~455KB) — deferred 2026-08-01 (Epic-E
+    # sub-10, the line-closer). Renders only inside the user-triggered
+    # Settings modal (see the _BUNDLE_FILES moved-note for the census);
+    # settings.js head + settings/branding.js STAY in core (see the
+    # _BUNDLE_FILES boundary note: main.js:88/349 boot callers).
+    # Order preserved from the core manifest (section_requires before
+    # core_panel; provider_faces before provider_render; chip_input
+    # before its two consumers).
+    'settings/provider_templates.js',
+    'settings/auto_setup.js',
+    'settings/local_endpoints.js',
+    'settings/section_requires.js',
+    'settings/core_panel.js',
+    'settings/provider_faces.js',
+    'settings/provider_render.js',
+    'settings/key_stats.js',
+    'settings/balance.js',
+    'settings/template_actions.js',
+    'settings/model_edit.js',
+    'settings/visibility_defaults.js',
+    'widgets/chip_input.js',
+    'settings/other_tabs.js',
+    'settings/speech.js',
+    'settings/auth_sources.js',
+    'settings/private_hosts.js',
+    'settings/save_export.js',
+    'settings/system_prompt_editor.js',
+    'settings/oauth.js',
+    'settings/mcp.js',
+    'settings/devices.js',
 ]
 
 # The entry-point functions the feature bundle DEFINES. feature-loader.js
@@ -1072,6 +1254,51 @@ _DEFERRED_ENTRY_POINTS = (
     # the conv-sync push subscription wires right after boot instead of
     # never. Keep in sync with feature-loader.js's _DEFERRED_ENTRY_POINTS.
     '_wireConvSyncPush',
+    # My Day modal (deferred 2026-08-01, Epic-E sub-6). openDailyReport is
+    # the genuine entry (topbar button = always-visible static HTML);
+    # closeDailyReport + _mydayTriggerGenerate are only reachable inside
+    # the open modal, stubbed for defense-in-depth (image-gen precedent).
+    'openDailyReport', 'closeDailyReport', '_mydayTriggerGenerate',
+    # Project panel (deferred 2026-08-01, Epic-E sub-7). openProjectModal
+    # is the always-visible project-bar opener; the rest are
+    # chat-rendered interactive handlers (write-approval buttons, stdin
+    # input/EoF, human-guidance choice/free-text, undo/redo modification
+    # cards, apply-code modal) — a click while the panel is in flight
+    # must load the bundle and dispatch, never ReferenceError.
+    'openProjectModal', 'closeProjectModal',
+    'resolveWriteApproval', 'submitStdinInput', 'submitStdinEof',
+    'submitHumanGuidanceChoice', 'submitHumanGuidanceFreeText',
+    'undoConvModifications', 'undoAllModifications', 'redoConvModifications',
+    'openApplyModal', 'closeApplyModal', 'confirmApplyCode',
+    # Cost popover (deferred 2026-08-01, Epic-E sub-8) — the cost tag is
+    # chat-rendered on every assistant message, so its onclick must load
+    # the feature bundle and build+show the popover, never ReferenceError.
+    '_toggleCostPopover',
+    # Settings modal (deferred 2026-08-01, Epic-E sub-10) — openSettings is
+    # the genuine early entry (sidebar gear / mobile sheet / onboarding /
+    # toolbar flows); switchSettingsTab follows it in every flow (same
+    # window); closeSettings + saveSettings are defense-in-depth
+    # (image-gen precedent). Modal-internal handlers (system-prompt
+    # editor, _mcp*) deliberately NOT stubbed (Project Brain precedent).
+    'openSettings', 'closeSettings', 'saveSettings', 'switchSettingsTab',
+    # Settings-panel six-pack (deferred 2026-08-01, Epic-E sub-9).
+    # Badge/tab/mobile-sheet entries + the three settings-core-panel tab
+    # populates (gate+stub: the typeof gate passes on the stub, which
+    # loads the bundle and dispatches instead of silently skipping the
+    # tab fill). The memory-modal pair is defense-in-depth (reachable
+    # only inside the open modal, myday precedent).
+    'openUpdateDialog', 'toggleTimerPanel', 'toggleOptimizerPanel',
+    'toggleMemory', 'openMemoryModal', 'closeMemoryModal',
+    'toggleMemoryAddForm', 'toggleMemoryFromModal',
+    '_populateSkillsTab', '_populatePreferencesTab',
+    '_renderSettingsUpdatePill',
+    # Defense-in-depth close-out (same slice): static panel onclicks
+    # clickable in the settings-open → bundle-land window — updateModal
+    # overlay closer, skills scope tabs + search, memory create form,
+    # preferences reload/save (image-gen precedent: stub every control
+    # reachable from server-spliced static panel HTML).
+    'closeUpdateModal', '_skillsSetScope', '_skillsFilter',
+    'openMemoryCreateForm', 'refreshPreferences', 'savePreferences',
 )
 
 # ── Bundle-manifest freshness (2026-07-24 / 2026-07-31 incident class) ──
@@ -1131,7 +1358,9 @@ def _extract_manifest_from_source(path):
 
 try:
     _manifest_source_mtime = os.path.getmtime(__file__)
-except OSError:  # module file unreadable at import — refresh keeps retrying
+except OSError as e:  # module file unreadable at import — refresh keeps retrying
+    logger.debug('[Bundle] cannot stat %s at import (%s) — refresh will retry',
+                 __file__, e)
     _manifest_source_mtime = 0.0
 
 
@@ -1241,7 +1470,8 @@ def _clean_old_bundles(keep_core, keep_feature, keep_packs=()):
             try:
                 if now - os.path.getmtime(path) < _BUILT_ARTIFACT_GRACE_S:
                     continue  # another process may have just published + be serving this
-            except OSError:
+            except OSError as e:
+                logger.debug('[Bundle] cannot stat %s during reap (%s) — skipping', f, e)
                 continue
             try:
                 os.remove(path)
@@ -1266,9 +1496,14 @@ def _assemble_bundle(files, prefix, critical):
     Returns:
         ``(filename, total_minified_bytes)`` on success, or ``(None, 0)`` on
         failure / empty. A syntactically-broken result is deleted + None so a
-        broken bundle is never served.
+        broken bundle is never served — with ONE refinement: when the
+        whole-bundle gate fails, ``_find_syntax_broken_sources`` attributes
+        the breakage per-file and the bundle is re-assembled WITHOUT the
+        broken NON-critical sources (degrade to "module absent", the same
+        contract as the corruption scan). None is returned only when a
+        CRITICAL file is broken or the re-assembled bundle still fails.
     """
-    parts = []
+    chunks = []
     total_size = 0
     missing = []
     corrupt = []
@@ -1315,15 +1550,15 @@ def _assemble_bundle(files, prefix, critical):
             logger.warning('[Bundle] minify failed for %s, using raw: %s', name, e)
             emit = content
 
-        # Wrap each file in a comment header + newline separator
-        # This helps with debugging stack traces.
-        parts.append(f'// ═══ {name} ═══\n')
-        parts.append(emit)
+        # Wrap each file in a comment header + newline separator (helps
+        # debugging stack traces). Kept as (name, chunk) pairs — NOT a flat
+        # string list — so the syntax-bisect retry below can re-assemble the
+        # bundle WITHOUT the broken file(s) at file granularity.
         # Boundary guard: a leading newline ensures a trailing line-comment
         # in `content` can't swallow the next file's header, and the `;`
         # terminates any statement whose file forgot a trailing semicolon so
         # adjacent files can never glue into one broken expression.
-        parts.append('\n;\n')
+        chunks.append((name, f'// ═══ {name} ═══\n' + emit + '\n;\n'))
         total_size += len(emit)
         included += 1
 
@@ -1348,90 +1583,130 @@ def _assemble_bundle(files, prefix, critical):
             logger.info('[Bundle] Deferred bundle is empty — nothing to defer')
         return None, 0
 
-    bundle_content = ''.join(parts)
+    # ── Publish loop: at most ONE syntax-bisect retry ──
+    # Round 1 assembles every scanner-clean file. If the whole-bundle node gate
+    # STILL fails, the breakage is a class _scan_source_corruption cannot see —
+    # e.g. a brace-unbalanced file left by an interrupted agent edit (2026-08-04:
+    # a duplicated `function renderMessage(` line in chat_render.js killed every
+    # user's conversation-opening because the whole-bundle refusal pushed ALL
+    # traffic onto the dev-fallback, where the same broken file was served raw).
+    # The bisect (node --check per source) attributes the failure to its file(s);
+    # round 2 re-assembles WITHOUT them so one broken module degrades to "module
+    # absent" — the same contract the corruption scanner already keeps for
+    # conflict markers / NUL bytes. A broken CRITICAL file stays fatal (the
+    # dev-fallback's load guard surfaces it); a gate that still fails after
+    # exclusion means a cross-file gluing bug and also refuses.
+    for _attempt in (1, 2):
+        bundle_content = ''.join(chunk for _, chunk in chunks)
 
-    # Optional stronger minification via esbuild (mangle locals + shrink syntax)
-    # when a node toolchain is present. Fail-open: absent/broken → keep the
-    # dependency-free _minify_js output. Hashing the RESULT below means the
-    # content-hash (cache-buster) always reflects the bytes actually served.
-    enhanced = _esbuild_minify(bundle_content)
-    if enhanced is not None:
-        bundle_content = enhanced
+        # Optional stronger minification via esbuild (mangle locals + shrink
+        # syntax) when a node toolchain is present. Fail-open: absent/broken →
+        # keep the dependency-free _minify_js output. Hashing the RESULT below
+        # means the content-hash (cache-buster) always reflects the bytes
+        # actually served.
+        enhanced = _esbuild_minify(bundle_content)
+        if enhanced is not None:
+            bundle_content = enhanced
 
-    content_hash = hashlib.sha256(bundle_content.encode('utf-8')).hexdigest()[:8]
-    filename = f'{prefix}{content_hash}.js'
-    bundle_path = os.path.join(JS_DIR, filename)
+        content_hash = hashlib.sha256(bundle_content.encode('utf-8')).hexdigest()[:8]
+        filename = f'{prefix}{content_hash}.js'
+        bundle_path = os.path.join(JS_DIR, filename)
 
-    # Short-circuit: a bundle of THIS content-hash already sits on disk (built
-    # by us earlier or by a concurrent builder that won the flock). The hash is
-    # over the exact bytes served, so an existing file is byte-identical — no
-    # rebuild, no node-gate, no write. This makes concurrent builders converge
-    # on the same artifact instead of racing to (re)create it.
-    if os.path.exists(bundle_path):
-        return filename, total_size
-
-    # Atomic publish: write to a UNIQUE temp file in the SAME dir, gate THAT,
-    # and only os.rename() it into the hash path on success. os.rename within a
-    # dir is atomic, so a reader (node --check on a sibling worker, or a browser
-    # fetch) never observes a partial write, and a failed gate deletes only the
-    # private temp — never a hash path another process may be using. This kills
-    # both the truncated-read SyntaxError and the MODULE_NOT_FOUND deletion race.
-    tmp_fd = None
-    tmp_path = None
-    try:
-        # Suffix MUST be .js: the node --check gate infers the module type from
-        # the extension and hard-errors (ERR_UNKNOWN_FILE_EXTENSION) on .tmp.
-        # The leading dot + random stem keep it private and out of the served
-        # bundle set (_BUILT_BUNDLE_RE only matches bundle-/feature-<hash>.js).
-        tmp_fd, tmp_path = tempfile.mkstemp(
-            prefix=f'.{prefix}{content_hash}.', suffix='.js', dir=JS_DIR)
-        with os.fdopen(tmp_fd, 'w', encoding='utf-8') as f:
-            tmp_fd = None  # fdopen took ownership; don't double-close below
-            f.write(bundle_content)
-    except OSError as e:
-        logger.error('[Bundle] Failed to write temp bundle for %s: %s', filename, e)
-        if tmp_fd is not None:
-            with contextlib.suppress(OSError):
-                os.close(tmp_fd)
-        if tmp_path:
-            with contextlib.suppress(OSError):
-                os.remove(tmp_path)
-        return None, 0
-
-    # Final syntax gate on the TEMP file (best-effort — no-op when node is
-    # absent). A broken bundle white-screens (core) / breaks the feature
-    # (deferred) with no recovery, so DON'T publish it: drop the temp + None.
-    ok, detail = _node_syntax_ok(tmp_path)
-    if not ok:
-        logger.critical('[Bundle] Built bundle %s FAILED syntax check — refusing to '
-                        'serve it. Detail: %.500s', filename, detail)
-        with contextlib.suppress(OSError):
-            os.remove(tmp_path)
-        return None, 0
-
-    # Another builder may have published the identical hash between our
-    # existence check and now (they'd have written byte-identical content).
-    # If so, adopt theirs and drop our temp — never rename over a file a peer
-    # may already be serving.
-    if os.path.exists(bundle_path):
-        with contextlib.suppress(OSError):
-            os.remove(tmp_path)
-        return filename, total_size
-
-    try:
-        os.rename(tmp_path, bundle_path)
-    except OSError as e:
-        # Lost the publish race (peer renamed first) → their file is identical.
+        # Short-circuit: a bundle of THIS content-hash already sits on disk
+        # (built by us earlier or by a concurrent builder that won the flock).
+        # The hash is over the exact bytes served, so an existing file is
+        # byte-identical — no rebuild, no node-gate, no write. This makes
+        # concurrent builders converge on the same artifact instead of racing
+        # to (re)create it.
         if os.path.exists(bundle_path):
-            with contextlib.suppress(OSError):
-                os.remove(tmp_path)
             return filename, total_size
-        logger.error('[Bundle] Failed to publish bundle %s: %s', filename, e)
+
+        # Atomic publish: write to a UNIQUE temp file in the SAME dir, gate
+        # THAT, and only os.rename() it into the hash path on success.
+        # os.rename within a dir is atomic, so a reader (node --check on a
+        # sibling worker, or a browser fetch) never observes a partial write,
+        # and a failed gate deletes only the private temp — never a hash path
+        # another process may be using. This kills both the truncated-read
+        # SyntaxError and the MODULE_NOT_FOUND deletion race.
+        tmp_fd = None
+        tmp_path = None
+        try:
+            # Suffix MUST be .js: the node --check gate infers the module type
+            # from the extension and hard-errors (ERR_UNKNOWN_FILE_EXTENSION)
+            # on .tmp. The leading dot + random stem keep it private and out
+            # of the served bundle set (_BUILT_BUNDLE_RE only matches
+            # bundle-/feature-<hash>.js).
+            tmp_fd, tmp_path = tempfile.mkstemp(
+                prefix=f'.{prefix}{content_hash}.', suffix='.js', dir=JS_DIR)
+            with os.fdopen(tmp_fd, 'w', encoding='utf-8') as f:
+                tmp_fd = None  # fdopen took ownership; don't double-close below
+                f.write(bundle_content)
+        except OSError as e:
+            logger.error('[Bundle] Failed to write temp bundle for %s: %s', filename, e)
+            if tmp_fd is not None:
+                with contextlib.suppress(OSError):
+                    os.close(tmp_fd)
+            if tmp_path:
+                with contextlib.suppress(OSError):
+                    os.remove(tmp_path)
+            return None, 0
+
+        # Final syntax gate on the TEMP file (best-effort — no-op when node is
+        # absent). A broken bundle white-screens (core) / breaks the feature
+        # (deferred) with no recovery, so DON'T publish it: drop the temp.
+        ok, detail = _node_syntax_ok(tmp_path)
+        if ok:
+            # Another builder may have published the identical hash between our
+            # existence check and now (byte-identical content). If so, adopt
+            # theirs and drop our temp — never rename over a file a peer may
+            # already be serving.
+            if os.path.exists(bundle_path):
+                with contextlib.suppress(OSError):
+                    os.remove(tmp_path)
+                return filename, total_size
+            try:
+                os.rename(tmp_path, bundle_path)
+            except OSError as e:
+                # Lost the publish race (peer renamed first) → identical.
+                if os.path.exists(bundle_path):
+                    with contextlib.suppress(OSError):
+                        os.remove(tmp_path)
+                    return filename, total_size
+                logger.error('[Bundle] Failed to publish bundle %s: %s', filename, e)
+                with contextlib.suppress(OSError):
+                    os.remove(tmp_path)
+                return None, 0
+            return filename, total_size
+
+        # ── Gate FAILED — the concatenation does not parse. ──
         with contextlib.suppress(OSError):
             os.remove(tmp_path)
-        return None, 0
+        logger.critical('[Bundle] Built bundle %s FAILED syntax check. Detail: %.500s',
+                        filename, detail)
+        if _attempt == 2:
+            logger.critical('[Bundle] %s still fails after excluding the broken '
+                            'source(s) — a cross-file gluing bug, not a bad module; '
+                            'refusing to serve it', filename)
+            return None, 0
+        broken = _find_syntax_broken_sources([name for name, _ in chunks])
+        if not broken:
+            logger.critical('[Bundle] %s fails as a bundle but every source parses '
+                            'individually — a cross-file gluing bug; refusing to '
+                            'serve it', filename)
+            return None, 0
+        crit_bad = [b for b in broken if critical and b in _CRITICAL_FILES]
+        if crit_bad:
+            logger.critical('[Bundle] CRITICAL source file(s) %s are syntactically '
+                            'broken — refusing to ship a crippled bundle; falling '
+                            'back to individual <script> tags', crit_bad)
+            return None, 0
+        logger.critical('[Bundle] Excluding %d syntactically-broken source file(s) '
+                        'from %s and rebuilding WITHOUT them: %s — those modules '
+                        'will be absent, the rest of the app stays bundled',
+                        len(broken), prefix.rstrip('-'), ', '.join(broken))
+        chunks = [(n, c) for n, c in chunks if n not in set(broken)]
 
-    return filename, total_size
+    return None, 0  # unreachable: every attempt path above returns explicitly
 
 
 # Cross-process build lock. Serializes concurrent `build_bundle()` calls (many

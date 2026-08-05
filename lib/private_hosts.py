@@ -120,7 +120,8 @@ def normalize_host(value: str) -> str:
     try:
         ipaddress.ip_address(raw)
     except ValueError:
-        pass  # Not an IP literal — a hostname, which is what we want.
+        # Not an IP literal — a hostname, which is what we want.
+        logger.debug('[PrivHosts] %r is not an IP literal — treating as hostname', raw)
     else:
         raise ValueError(
             'bare IP addresses are not accepted — allowlist the HOSTNAME '

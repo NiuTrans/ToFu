@@ -7,6 +7,7 @@ Provides high-level compound operations for multi-step, deep interactions.
 import time
 from typing import Any
 
+from lib.browser._resolve import resolve_element
 from lib.browser.queue import send_browser_command
 from lib.log import get_logger
 
@@ -14,11 +15,12 @@ logger = get_logger(__name__)
 
 __all__ = [
     'right_click_menu_select', 'hover_and_click', 'wait_and_find_element',
-    'fill_form_sequential',
+    'fill_form_sequential', 'menu_click',
     'ADVANCED_BROWSER_TOOLS', 'ADVANCED_BROWSER_TOOL_NAMES',
     'ADVANCED_BROWSER_TOOL_RIGHT_CLICK_MENU',
     'ADVANCED_BROWSER_TOOL_HOVER_CLICK',
     'ADVANCED_BROWSER_TOOL_FILL_FORM',
+    'ADVANCED_BROWSER_TOOL_MENU_CLICK',
 ]
 
 
@@ -190,10 +192,117 @@ def wait_and_find_element(
             'error': f"Element not found within {timeout_ms}ms"}
 
 
+def menu_click(
+    tab_id: int,
+    item_text: str,
+    target_selector: str | None = None,
+    target_text: str | None = None,
+    via: str = 'hover',
+    submenu_item_text: str | None = None,
+    menu_wait: float = 0.5,
+    timeout: float = 5.0,
+) -> dict[str, Any]:
+    """Open a menu and click an item, in ONE call (v2, pt_869e5648403e4745).
+
+    via='right_click' delegates to the battle-tested right_click_menu_select;
+    via='hover' (default) opens the menu with a hover, then runs the same
+    text-match-and-click flow. The target may be named by target_text
+    (fuzzy-resolved server-side) so the model never needs a selector for the
+    common "open the File menu, click Export" case.
+    """
+    start_time = time.time()
+    if not target_selector:
+        if not target_text:
+            return {'success': False,
+                    'error': 'target_selector or target_text is required'}
+        el, note, candidates = resolve_element(
+            tab_id, target_text, 'clickable', send=send_browser_command)
+        if el is None:
+            return {'success': False,
+                    'error': f'menu target "{target_text}": {note}',
+                    'available_items': [c.strip() for c in candidates]}
+        target_selector = el.get('selector', '')
+    if via == 'right_click':
+        return right_click_menu_select(
+            tab_id, target_selector, item_text, submenu_item_text,
+            menu_wait, timeout)
+    # ── hover-open, then text-match the revealed item ──
+    try:
+        result, error = send_browser_command('hover_element', {
+            'tabId': tab_id, 'selector': target_selector,
+        }, timeout=min(timeout, 3))
+        hovered = isinstance(result, dict) and (
+            result.get('hovered') or result.get('success'))
+        if error or not hovered:
+            return {'success': False,
+                    'error': f'Hover failed: {error or (result or {}).get("error", "unknown")}'}
+        time.sleep(menu_wait)
+        result, error = send_browser_command('get_interactive_elements', {
+            'tabId': tab_id, 'viewport': True, 'maxElements': 100,
+        }, timeout=min(timeout - (time.time() - start_time), 3))
+        if error:
+            return {'success': False,
+                    'error': f'Failed to enumerate revealed menu: {error}'}
+        elements = (result or {}).get('elements', []) if isinstance(result, dict) else []
+        menu_item = None
+        for el in elements:
+            if item_text.lower() in el.get('text', '').strip().lower():
+                menu_item = el
+                break
+        if not menu_item:
+            return {
+                'success': False,
+                'error': f"Menu item '{item_text}' not found",
+                'available_items': [e.get('text', '') for e in elements[:20]],
+            }
+        result, error = send_browser_command('click_element', {
+            'tabId': tab_id, 'selector': menu_item['selector'], 'scrollTo': False,
+        }, timeout=min(timeout - (time.time() - start_time), 3))
+        if error or not (isinstance(result, dict) and result.get('clicked')):
+            return {'success': False,
+                    'error': f"Click menu item failed: {error or 'unknown'}"}
+        if submenu_item_text:
+            time.sleep(0.3)
+            result, error = send_browser_command('get_interactive_elements', {
+                'tabId': tab_id, 'viewport': True, 'maxElements': 100,
+            }, timeout=min(timeout - (time.time() - start_time), 3))
+            elements = (result or {}).get('elements', []) if isinstance(result, dict) else []
+            submenu = None
+            for el in elements:
+                if submenu_item_text.lower() in el.get('text', '').strip().lower():
+                    submenu = el
+                    break
+            if not submenu:
+                return {
+                    'success': False,
+                    'error': f"Submenu item '{submenu_item_text}' not found",
+                    'available_items': [e.get('text', '') for e in elements[:20]],
+                }
+            result, error = send_browser_command('click_element', {
+                'tabId': tab_id, 'selector': submenu['selector'], 'scrollTo': False,
+            }, timeout=min(timeout - (time.time() - start_time), 3))
+            if error or not (isinstance(result, dict) and result.get('clicked')):
+                return {'success': False,
+                        'error': f"Click submenu item failed: {error or 'unknown'}"}
+        return {
+            'success': True,
+            'elapsed_ms': round((time.time() - start_time) * 1000, 2),
+            'details': {'via': 'hover', 'target': target_selector,
+                        'menu_item': item_text,
+                        'submenu_item': submenu_item_text},
+        }
+    except Exception as e:
+        logger.warning('menu_click failed for target=%s item=%s: %s',
+                       target_selector, item_text, e, exc_info=True)
+        return {'success': False, 'error': f'Exception: {e}',
+                'elapsed_ms': round((time.time() - start_time) * 1000, 2)}
+
+
 def fill_form_sequential(
     tab_id: int, fields: list[dict[str, str]],
     submit_selector: str | None = None,
-    field_delay: float = 0.2, timeout: float = 10.0
+    field_delay: float = 0.2, timeout: float = 10.0,
+    submit_text: str | None = None,
 ) -> dict[str, Any]:
     """Fill form fields sequentially and optionally submit."""
     start_time = time.time()
@@ -210,6 +319,20 @@ def fill_form_sequential(
             selector = field.get('selector')
             value = field.get('value')
             field_type = field.get('type', 'type')
+
+            # v2: a field may name itself by text= (placeholder/label fuzzy
+            # match) instead of a raw selector — resolved here, in code.
+            if not selector and field.get('text'):
+                el, note, _cand = resolve_element(
+                    tab_id, field['text'], 'input', send=send_browser_command)
+                if el is None:
+                    field_results.append({
+                        'index': i, 'text': field.get('text'), 'ok': False,
+                        'error': f'field "{field["text"]}" not matched: {note}',
+                    })
+                    time.sleep(field_delay)
+                    continue
+                selector = el.get('selector', '')
 
             if field_type == 'type':
                 # Use type_text (not keyboard_input): it clears the field FIRST
@@ -293,6 +416,15 @@ def fill_form_sequential(
         all_ok = fields_failed == 0
 
         submitted = False
+        # v2: the submit button may also be named by text (submit_text).
+        if not submit_selector and submit_text and all_ok:
+            el, note, _cand = resolve_element(
+                tab_id, submit_text, 'clickable', send=send_browser_command)
+            if el is not None:
+                submit_selector = el.get('selector', '')
+            else:
+                logger.warning('fill_form_sequential: submit_text %r not matched: %s',
+                               submit_text, note)
         if submit_selector and all_ok:
             # Never submit a form with failed/missing fields — that would post a
             # half-filled booking. Skip submit and report the failures instead.
@@ -373,6 +505,36 @@ ADVANCED_BROWSER_TOOL_HOVER_CLICK = {
     }
 }
 
+ADVANCED_BROWSER_TOOL_MENU_CLICK = {
+    "type": "function",
+    "function": {
+        "name": "browser_menu_click",
+        "description": (
+            "Open a menu and click an item, in ONE call. via='hover' (default) "
+            "opens dropdown/nav menus; via='right_click' opens context menus. "
+            "Name the target by target_text (fuzzy-matched, e.g. 'File') or "
+            "target_selector; the item is clicked by visible-text match "
+            "(item_text, case-insensitive substring). submenu_text handles "
+            "nested menus. If the item is not found, the available menu items "
+            "are returned so you can retry with the right text."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "tab_id": {"type": "integer", "description": "Tab ID (omit to use the current working tab)"},
+                "target_text": {"type": "string", "description": "Visible text of the element that opens the menu (preferred over target_selector)"},
+                "target_selector": {"type": "string", "description": "CSS selector of the element that opens the menu"},
+                "item_text": {"type": "string", "description": "Text of the menu item to click (case-insensitive substring match)"},
+                "via": {"type": "string", "enum": ["hover", "right_click"], "description": "How the menu opens (default: hover)"},
+                "submenu_text": {"type": "string", "description": "(Optional) Text of a nested submenu item to click after item_text"},
+                "menu_wait": {"type": "number", "description": "Seconds to wait for the menu to appear (default: 0.5)"},
+                "timeout": {"type": "number", "description": "Total timeout in seconds (default: 5.0)"},
+            },
+            "required": ["item_text"]
+        }
+    }
+}
+
 ADVANCED_BROWSER_TOOL_FILL_FORM = {
     "type": "function",
     "function": {
@@ -387,42 +549,47 @@ ADVANCED_BROWSER_TOOL_FILL_FORM = {
             "For type='type' fields the existing value is CLEARED first, so "
             "changing a pre-filled field (origin A→B) replaces it cleanly "
             "instead of concatenating.\n"
-            "Fields format: [{selector, value, type}, ...] where type is 'type', 'click', or 'select'.\n"
+            "Fields format: [{selector|text, value, type}, ...] where type is 'type', 'click', or 'select'. "
+            "A field may be targeted by text (its placeholder/label, fuzzy-matched) instead of selector.\n"
             "Automatically handles focusing, typing delays, and dropdown interactions."
         ),
         "parameters": {
             "type": "object",
             "properties": {
-                "tab_id": {"type": "integer", "description": "Tab ID from browser_list_tabs"},
+                "tab_id": {"type": "integer", "description": "Tab ID (omit to use the current working tab)"},
                 "fields": {
                     "type": "array",
                     "items": {
                         "type": "object",
                         "properties": {
                             "selector": {"type": "string", "description": "CSS selector of the field"},
+                            "text": {"type": "string", "description": "Field label/placeholder to fuzzy-match (alternative to selector)"},
                             "value": {"type": "string", "description": "Value to enter"},
                             "type": {"type": "string", "enum": ["type", "click", "select"], "description": "Input type"}
                         },
-                        "required": ["selector", "value"]
+                        "required": ["value"]
                     },
                     "description": "List of fields to fill"
                 },
                 "submit_selector": {"type": "string", "description": "(Optional) CSS selector of submit button"},
+                "submit_text": {"type": "string", "description": "(Optional) Visible text of the submit button (alternative to submit_selector)"},
                 "field_delay": {"type": "number", "description": "Delay between fields in seconds (default: 0.2)"},
             },
-            "required": ["tab_id", "fields"]
+            "required": ["fields"]
         }
     }
 }
 
+# v2 (pt_869e5648403e4745): hover_and_click + right_click_menu merged
+# into browser_menu_click. The two legacy schema constants above stay
+# exported (facade compat + their dispatch handlers remain for direct
+# execute_browser_tool callers) but are no longer SHIPPED to the model.
 ADVANCED_BROWSER_TOOLS = [
-    ADVANCED_BROWSER_TOOL_RIGHT_CLICK_MENU,
-    ADVANCED_BROWSER_TOOL_HOVER_CLICK,
+    ADVANCED_BROWSER_TOOL_MENU_CLICK,
     ADVANCED_BROWSER_TOOL_FILL_FORM,
 ]
 
 ADVANCED_BROWSER_TOOL_NAMES = {
-    'browser_right_click_menu',
-    'browser_hover_and_click',
+    'browser_menu_click',
     'browser_fill_form',
 }

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from flask import Blueprint
 
+import asyncio
 import json
 import secrets
 import time
@@ -176,6 +177,17 @@ def _load_branches_module():
         return None
 
 
+def _branch_persist_payload(messages):
+    """Serialize the full messages blob for persist + build its search text.
+
+    Pure CPU over the whole conversation — run via ``asyncio.to_thread``.
+    Returns ``(messages_json, search_text)``.
+    """
+    from lib.database import json_dumps_pg
+    from routes.conversations import build_search_text
+    return json_dumps_pg(messages), build_search_text(messages)
+
+
 def _generate_branch_id() -> str:
     """Stable, URL-safe branch id. Same shape the JS used to mint
     locally — base36 timestamp + random suffix — but server-generated
@@ -205,7 +217,9 @@ async def list_branches(conv_id, msg_idx):
     if not row:
         return api_not_found('Conversation not found')
     try:
-        messages = json.loads(row['messages'] or '[]')
+        # Off-loop: the messages column is the FULL conversation blob (tens of
+        # MB on long convs) — parsing it here would stall the event loop.
+        messages = await asyncio.to_thread(json.loads, row['messages'] or '[]')
     except (json.JSONDecodeError, TypeError) as e:
         logger.warning('[api_v1.branches] conv=%s parse failed: %s',
                        conv_id[:8], e)
@@ -267,7 +281,7 @@ async def create_branch(conv_id, msg_idx):
     parent_selection = optional_str(body, 'parent_selection',
                                       default='', max_len=4000) or ''
 
-    from lib.database import DOMAIN_CHAT, async_execute, async_fetchone, json_dumps_pg
+    from lib.database import DOMAIN_CHAT, async_execute, async_fetchone
     from routes.common import DEFAULT_USER_ID
 
     row = await async_fetchone(
@@ -277,7 +291,8 @@ async def create_branch(conv_id, msg_idx):
     if not row:
         return api_not_found('Conversation not found')
     try:
-        messages = json.loads(row['messages'] or '[]')
+        # Off-loop: full conversation blob parse (see list_branches).
+        messages = await asyncio.to_thread(json.loads, row['messages'] or '[]')
     except (json.JSONDecodeError, TypeError) as e:
         logger.warning('[api_v1.branches] conv=%s parse failed: %s',
                        conv_id[:8], e)
@@ -329,9 +344,10 @@ async def create_branch(conv_id, msg_idx):
         logger.debug('[conversations] create_branch caught %s: %s', type(_e_audit).__name__, _e_audit)
         settings = {}
     settings_json = json.dumps(settings, ensure_ascii=False)
-    messages_json = json_dumps_pg(messages)
-    from routes.conversations import build_search_text  # noqa: E402
-    search_text = build_search_text(messages)
+    # Off-loop: serializing + search-indexing the full messages blob is CPU
+    # proportional to conversation size — one thread hop for both.
+    messages_json, search_text = await asyncio.to_thread(
+        _branch_persist_payload, messages)
     title_db = row['title']
     created_at = row['created_at'] if 'created_at' in row.keys() else now_ms
 

@@ -284,12 +284,21 @@ def _run_async(coro):
 
 
 def test_sync_route_runs_under_quart(client):
-    """A long-standing sync Flask route must still be served by Quart."""
+    """A long-standing sync Flask route must still be served by Quart.
+
+    Response shape: api-contract batch 11 (2026-08-01) deliberately migrated
+    ``/api/v1/chat/active`` from a bare array to the ``api_ok`` envelope —
+    the task array now lives under ``items`` (``Api.chat.active`` unwraps it,
+    null-preserving; see routes/chat.py's migration note). The old
+    ``isinstance(data, list)`` assertion pinned the pre-migration shape and
+    went stale; this pins BOTH the thread-pool dispatch AND the envelope.
+    """
     async def go():
         resp = await client.get('/api/v1/chat/active', headers=_auth_headers())
         assert resp.status_code == 200
         data = await resp.get_json()
-        assert isinstance(data, list)
+        assert data.get('ok') is True
+        assert isinstance(data.get('items'), list)
     _run_async(go())
 
 

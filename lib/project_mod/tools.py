@@ -927,15 +927,25 @@ def execute_tool(fn_name, fn_args, base_path, conv_id=None, task_id=None, **kwar
 
 
 def execute_standalone_command(fn_name, fn_args, working_dir=None, stdin_callback=None,
-                               on_chunk=None, on_spawn=None):
-    """Execute run_command without requiring a project path."""
+                               on_chunk=None, on_spawn=None, task=None):
+    """Execute run_command without requiring a project path.
+
+    ``task`` is the SAME cooperative-control seam the project path already
+    had (pt_0bde0fd8): when provided, the runner registers
+    ``_subprocess_pid`` on it (so the stuck-task reaper can INTERRUPT the
+    command instead of force-failing the whole turn, and the interrupt
+    endpoint can target it) and polls ``task['aborted']`` (so Stop kills
+    the process tree). Callers without a live task (headless sandbox)
+    simply omit it — behaviour is then identical to before.
+    """
     if fn_name == 'run_command':
         return tool_run_command(working_dir,
                                 fn_args.get('command', ''),
                                 fn_args.get('timeout', None),
                                 stdin_callback=stdin_callback,
                                 on_chunk=on_chunk,
-                                on_spawn=on_spawn)
+                                on_spawn=on_spawn,
+                                task=task)
     return f'Unknown tool: {fn_name}'
 
 

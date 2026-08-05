@@ -1,4 +1,4 @@
-# Prompt-cache not reused on byte-identical prefixes — `example-corp_anthropic` gateway
+# Prompt-cache not reused on byte-identical prefixes — `example_corp_anthropic` gateway
 
 **Reporter:** Tofu (chatui) · **Date:** 2026-07-29 · **Model:** `claude-opus-5`
 **Endpoint:** `https://api.openai.com/v1/anthropic` (`protocol: anthropic`)
@@ -7,7 +7,7 @@
 
 ## Summary
 
-On the `example-corp_anthropic` Anthropic-native face, a large fraction of our
+On the `example_corp_anthropic` Anthropic-native face, a large fraction of our
 requests re-send a prefix that is **byte-identical** to the immediately
 preceding request on the same conversation, with **identical routing** (same
 upstream key, same `anthropic-beta` header, same endpoint), after a gap that is

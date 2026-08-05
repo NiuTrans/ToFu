@@ -153,6 +153,16 @@ from .qa_runtime import (
 )
 from .qa_engine import _MAX_QA_TOOL_ROUNDS, _run_qa_task
 
+# Deepen (on-demand section depth, reading-xp P3)
+from .deepen_engine import (
+    DEEPEN_MODES,
+    _deepen_runtime,
+    deepen_lang_key,
+    extract_report_section,
+    read_deepen_cache,
+    start_deepen,
+)
+
 # Translate runtime + engine
 from .translate_runtime import (
     _LANG_NAMES,
@@ -238,4 +248,7 @@ __all__ = [
     '_qa_latest_index', '_qa_latest_for', '_qa_register_latest',
     '_new_qa_task', '_append_qa_event', '_cleanup_stale_qa_tasks',
     '_run_qa_task', '_MAX_QA_TOOL_ROUNDS',
+    # deepen (reading-xp P3)
+    'DEEPEN_MODES', '_deepen_runtime', 'deepen_lang_key',
+    'extract_report_section', 'read_deepen_cache', 'start_deepen',
 ]

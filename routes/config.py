@@ -8,7 +8,7 @@ import json
 import os
 import sys
 
-from flask import jsonify, request
+from flask import request
 
 from lib.config_dir import config_path as _config_path
 from lib.log import get_logger
@@ -175,6 +175,16 @@ def get_server_config():
             _lib.LLM_CONTENT_FILTER_ENABLED = bool(saved['search']['llm_content_filter'])
             from lib.search_bridge import sync_search_config
             sync_search_config()
+
+    # Live backend search status (tofu-search version / engines / extension
+    # reachability / filter model+mode) — the piece that lets the Settings UI
+    # show what the backend will ACTUALLY do, not just the saved knobs.
+    try:
+        from lib.search_settings import status_payload as _ss_status
+        search_status = _ss_status()
+    except Exception as _e:
+        logger.warning('[ServerConfig] search status unavailable: %s', _e)
+        search_status = {'ok': False, 'error': str(_e)}
 
     total_keys = sum(len(p.get('api_keys', [])) for p in providers)
     total_models = sum(len(p.get('models', [])) for p in providers)
@@ -397,9 +407,23 @@ def get_server_config():
     except Exception as e:
         logger.debug('[ServerConfig] face_refusals unavailable: %s', e)
 
-    return jsonify({
+    # Paper reading-experience toggles (design §3.4). The GET returns the
+    # EFFECTIVE value (server_config section → env seed → default ON), so the
+    # Settings checkbox reflects what the reader will actually do; saving
+    # writes the explicit section (level 2 of the chain).
+    paper_info = {'reading_experience': {}}
+    try:
+        from lib.paper.insight_engine import insight_enabled as _ie_enabled
+        paper_info['reading_experience']['insight'] = _ie_enabled()
+        from lib.paper.checkpoint_engine import checkpoints_enabled as _cp_enabled
+        paper_info['reading_experience']['checkpoints'] = _cp_enabled()
+    except Exception as e:
+        logger.warning('[ServerConfig] paper reading_experience resolve failed: %s', e)
+
+    return api_ok({
         'providers': providers, 'presets': presets,
         'models': models, 'search': search_info,
+        'search_status': search_status,
         'server_info': server_info,
         'feishu': feishu_info,
         'face_refusals': face_refusals,
@@ -413,6 +437,7 @@ def get_server_config():
         'model_defaults': model_defaults,
         'network': network_info,
         'mt_provider': mt_provider_info,
+        'paper': paper_info,
         'upload': upload_policy,
         'context': context_policy,
         'translation': translation_policy,
@@ -441,8 +466,7 @@ def feishu_status():
         _conversations,
     )
     active_users = len(_conversations)
-    return jsonify({
-        'ok': True,
+    return api_ok({
         'enabled': ENABLED,
         'connected': _feishu_is_connected(),
         'app_id_masked': ('***' + APP_ID[-4:]) if len(APP_ID) > 4 else '',
@@ -670,8 +694,7 @@ def update_provider_template():
     if not updated_files:
         return api_error("Template key '%s' not found in any JS file" % tpl_key, status=404)
 
-    return jsonify({
-        'ok': True,
+    return api_ok({
         'updated_files': updated_files,
         'model_count': len(clean_models),
     })
@@ -838,7 +861,7 @@ def probe_provider_endpoint():
         else:
             logger.warning('[Probe] Failed for %s: %s', base_url, result.get('error', '?'))
 
-        return jsonify(result)
+        return api_ok(result)
     except Exception as e:
         logger.error('[Probe] Endpoint failed: %s', e, exc_info=True)
         return api_error('探测出错: %s' % e, status=500)
@@ -889,10 +912,9 @@ def probe_provider_bulk():
 
     # Hard cap — keeps the UI snappy even when a user pastes 200 lines.
     if len(base_urls) > 50:
-        return jsonify({
-            'ok': False,
-            'error': '单次最多探测 50 个端点（收到 %d 个）' % len(base_urls),
-        }), 400
+        return api_error(
+            '单次最多探测 50 个端点（收到 %d 个）' % len(base_urls),
+            status=400)
 
     logger.info('[Probe-Bulk] Probing %d endpoint(s)', len(base_urls))
 
@@ -925,8 +947,7 @@ def probe_provider_bulk():
     n_ok = sum(1 for r in results if r and r.get('ok'))
     logger.info('[Probe-Bulk] Done: %d/%d ok', n_ok, len(base_urls))
 
-    return jsonify({
-        'ok': True,
+    return api_ok({
         'count': len(base_urls),
         'ok_count': n_ok,
         'results': results,
@@ -1145,7 +1166,9 @@ def get_provider_templates():
     )
     result = []
     if not os.path.isdir(templates_dir):
-        return jsonify(result)
+        # Coordinated bare-array migration (batch 10): array moves under
+        # ``items``; Api.providers.templates unwraps (with fallback).
+        return api_ok({'items': result})
     for fname in sorted(os.listdir(templates_dir)):
         if not fname.endswith('.json'):
             continue
@@ -1174,7 +1197,7 @@ def get_provider_templates():
                         fname, len(tpl.get('models', [])))
         except Exception as e:
             logger.warning('[ProviderTemplates] Failed to load %s: %s', fname, e)
-    return jsonify(result)
+    return api_ok({'items': result})
 
 
 def _hot_reload_feishu(feishu_data: dict):
@@ -1322,6 +1345,19 @@ def save_server_config():
             logger.info('[Config] MT provider updated: provider=%s, enabled=%s',
                         existing['mt_provider']['provider'],
                         existing['mt_provider']['enabled'])
+
+        if 'paper' in data and isinstance(data['paper'], dict):
+            # Reading-experience toggles — MERGE known bool keys (never
+            # wholesale-replace the section: sibling keys written by other
+            # panels survive).
+            rx_in = data['paper'].get('reading_experience')
+            if isinstance(rx_in, dict):
+                rx = existing.setdefault('paper', {}).setdefault('reading_experience', {})
+                for key in ('insight', 'checkpoints'):
+                    if key in rx_in:
+                        rx[key] = bool(rx_in[key])
+                changes.append('paper.reading_experience')
+                logger.info('[Config] paper.reading_experience → %s', rx)
 
         return existing
 

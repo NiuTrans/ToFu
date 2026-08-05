@@ -3,59 +3,204 @@
 <head>
   <meta charset="UTF-8">
   <style>
+    /* Self-contained (extension CSP: script-src 'self', no external assets).
+       Tokens mirror the app's neo-brutalist tofu block (static/styles.css
+       .settings-panel) so the extension speaks the same design language as
+       the panel — cream chrome, ink borders, gold accents, square corners. */
+    :root {
+      --white: #faf8f3;
+      --cream: #f2ecda;
+      --skin:  #e4d6bf;
+      --ink:   #1a1814;
+      --ink-soft: #3d362c;
+      --gold:  #c9993f;
+      --gold-dim: #a87d2e;
+      --gold-glow: rgba(201,153,63,0.18);
+      --done:  #3d9a5f;
+      --err:   #b3261e;
+      --muted: #9b9284;
+      --border: 2px solid var(--ink);
+      --border-sm: 1.5px solid var(--ink);
+      --shadow-sm: 3px 3px 0 var(--ink);
+      --shadow-xs: 2px 2px 0 var(--ink);
+    }
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { width: 300px; padding: 16px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #1a1a2e; color: #e0e0e0; }
-    h1 { font-size: 14px; margin-bottom: 12px; color: #a78bfa; display: flex; align-items: center; gap: 8px; }
-    h1 .version { font-size: 10px; background: #333; padding: 2px 6px; border-radius: 8px; color: #888; }
-    .status-row { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; padding: 8px; background: #16213e; border-radius: 8px; }
-    .status-dot { width: 10px; height: 10px; border-radius: 50%; }
-    .status-dot.connected { background: #4ade80; }
-    .status-dot.disconnected { background: #888; }
-    .status-text { font-size: 13px; }
-    label { font-size: 11px; color: #888; display: block; margin-bottom: 4px; }
+    body {
+      width: 320px;
+      font-family: 'Inter', 'SF Pro', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: var(--white);
+      color: var(--ink);
+    }
+
+    /* ── Header — cream chrome + gold kintsugi line ── */
+    .head {
+      display: flex; align-items: center; gap: 8px;
+      padding: 12px 14px 10px;
+      background: var(--cream);
+      border-bottom: 3px solid var(--ink);
+      position: relative;
+    }
+    .head::after {
+      content: ''; position: absolute; left: 0; right: 0; bottom: -2px; height: 2px;
+      background: linear-gradient(90deg, transparent 0%, var(--gold) 15%, var(--gold) 50%, var(--gold-dim) 85%, transparent 100%);
+      opacity: 0.55;
+    }
+    .brand { width: 20px; height: 20px; }
+    .head h1 { font-size: 15px; font-weight: 900; letter-spacing: -0.01em; }
+    .version {
+      margin-left: auto; font-size: 10px; font-weight: 700;
+      background: var(--ink); color: var(--gold);
+      padding: 2px 7px; border-radius: 999px;
+    }
+
+    .body { padding: 12px 14px 10px; }
+
+    /* ── Hero: the one question — is it working? ── */
+    .status {
+      display: flex; align-items: center; gap: 10px;
+      padding: 10px 12px; margin-bottom: 12px;
+      background: var(--white);
+      border: var(--border);
+      box-shadow: inset 4px 0 0 var(--gold), var(--shadow-sm);
+    }
+    .status-dot {
+      width: 12px; height: 12px; border-radius: 50%;
+      border: 1.5px solid var(--ink); flex-shrink: 0;
+    }
+    .status-dot.connected { background: var(--done); animation: dotPulse 2s ease-out infinite; }
+    .status-dot.paused { background: var(--gold); }
+    .status-dot.disconnected { background: var(--muted); }
+    @keyframes dotPulse {
+      0%   { box-shadow: 0 0 0 0 rgba(61,154,95,0.45); }
+      70%  { box-shadow: 0 0 0 7px rgba(61,154,95,0); }
+      100% { box-shadow: 0 0 0 0 rgba(61,154,95,0); }
+    }
+    .status-word { font-size: 14px; font-weight: 800; line-height: 1.2; }
+    .status-reason { font-size: 11px; color: var(--ink-soft); line-height: 1.35; margin-top: 2px; }
+
+    /* ── Repair callout — the ONE visible remedy when the credential dies ── */
+    .repair {
+      margin-bottom: 12px; padding: 10px 12px;
+      background: var(--gold-glow);
+      border: var(--border-sm); border-color: var(--gold-dim);
+    }
+    .repair p { font-size: 12px; line-height: 1.4; color: var(--ink-soft); margin-bottom: 8px; }
+
+    /* ── Fields ── */
+    label {
+      display: block; font-size: 10px; font-weight: 800;
+      text-transform: uppercase; letter-spacing: 0.08em;
+      color: var(--ink-soft); margin-bottom: 5px;
+    }
     .input-row { display: flex; gap: 6px; margin-bottom: 12px; }
-    input { flex: 1; padding: 6px 8px; border: 1px solid #333; border-radius: 6px; background: #0f0f23; color: #e0e0e0; font-size: 12px; }
-    input:focus { outline: none; border-color: #a78bfa; }
-    button { padding: 6px 12px; border: none; border-radius: 6px; cursor: pointer; font-size: 12px; }
-    .btn-save { background: #a78bfa; color: white; }
-    .btn-save:hover { background: #8b5cf6; }
-    .btn-toggle { background: #333; color: #e0e0e0; width: 100%; margin-bottom: 8px; }
-    .btn-toggle:hover { background: #444; }
-    #stats { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; font-size: 11px; color: #888; padding: 8px; background: #16213e; border-radius: 8px; }
-    #stats div { padding: 2px 0; }
-    .footer { margin-top: 12px; font-size: 10px; color: #555; text-align: center; }
+    input {
+      flex: 1; min-width: 0; padding: 7px 9px;
+      border: var(--border-sm); background: var(--white); color: var(--ink);
+      font-size: 12px; font-family: inherit;
+    }
+    input:focus { outline: none; border-color: var(--gold-dim); box-shadow: inset 2px 2px 0 var(--gold-glow); }
+
+    .btn {
+      padding: 7px 12px; border: var(--border-sm); cursor: pointer;
+      font-size: 12px; font-weight: 700; font-family: inherit;
+      background: var(--white); color: var(--ink);
+      box-shadow: var(--shadow-xs);
+    }
+    .btn:active { transform: translate(2px, 2px); box-shadow: none; }
+    .btn:disabled { opacity: 0.6; cursor: default; transform: none; box-shadow: var(--shadow-xs); }
+    .btn-gold { background: var(--gold); }
+    .btn-gold:hover { background: var(--gold-dim); }
+    .btn-block { width: 100%; }
+
+    /* ── Advanced — collapsed by decree, never the visible remedy ── */
+    .advanced { margin-bottom: 12px; border-top: 1.5px dashed var(--skin); padding-top: 10px; }
+    .advanced summary {
+      font-size: 11px; color: var(--ink-soft); cursor: pointer;
+      list-style: none; display: flex; align-items: center; gap: 6px;
+    }
+    .advanced summary::-webkit-details-marker { display: none; }
+    .advanced summary::before {
+      content: ''; width: 7px; height: 7px; flex-shrink: 0;
+      border-right: 1.5px solid var(--ink-soft); border-bottom: 1.5px solid var(--ink-soft);
+      transform: rotate(-45deg); transition: transform 0.15s;
+    }
+    .advanced[open] summary::before { transform: rotate(45deg); }
+    .advanced .input-row { margin-top: 8px; margin-bottom: 0; }
+
+    /* ── Stats — numbers first, labels quiet, no icons ── */
+    .stats {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 12px;
+    }
+    .stat {
+      padding: 7px 10px; background: var(--cream);
+      border: var(--border-sm);
+    }
+    .stat-num { display: block; font-size: 17px; font-weight: 900; line-height: 1.1; }
+    .stat.stat-bad .stat-num { color: var(--err); }
+    .stat-label {
+      display: block; font-size: 9px; font-weight: 800;
+      text-transform: uppercase; letter-spacing: 0.08em;
+      color: var(--ink-soft); margin-top: 2px;
+    }
+
+    /* ── Footer — rare controls + diagnostics ── */
+    .foot { display: flex; align-items: center; gap: 8px; }
+    .client-id {
+      margin-left: auto; padding: 4px 8px; cursor: copy;
+      font-family: ui-monospace, 'SF Mono', Menlo, monospace; font-size: 11px;
+      background: var(--white); color: var(--ink-soft);
+      border: 1.5px dashed var(--skin);
+    }
+    .client-id:hover { border-color: var(--gold-dim); color: var(--ink); }
+    .tagline {
+      margin-top: 10px; text-align: center;
+      font-size: 10px; color: var(--muted);
+    }
   </style>
 </head>
 <body>
-  <h1>✦ Tofu Browser Bridge <span class="version">v4.3</span></h1>
+  <header class="head">
+    <img class="brand" src="icon48.png" alt="">
+    <h1>Tofu Bridge</h1>
+    <span class="version" id="versionBadge"></span>
+  </header>
 
-  <div class="status-row">
-    <div id="statusDot" class="status-dot disconnected"></div>
-    <span id="statusText" class="status-text">Checking...</span>
-  </div>
+  <main class="body">
+    <section class="status">
+      <span id="statusDot" class="status-dot disconnected"></span>
+      <div>
+        <div id="statusText" class="status-word">Checking…</div>
+        <div id="statusReason" class="status-reason"></div>
+      </div>
+    </section>
 
-  <div id="clientIdRow" style="margin-bottom: 8px; padding: 4px 8px; background: #16213e; border-radius: 6px; font-size: 11px; color: #888; display: flex; align-items: center; gap: 6px;">
-    <span>🆔</span>
-    <span id="clientIdText" style="font-family: monospace; color: #a78bfa; user-select: all;">—</span>
-  </div>
+    <section id="repairRow" class="repair" style="display:none;">
+      <p>The bridge re-pairs itself — no secret to paste. Keep any Tofu tab open and it finishes on its own.</p>
+      <button id="repairBtn" class="btn btn-gold btn-block">Re-pair now</button>
+    </section>
 
-  <label>Server URL</label>
-  <div class="input-row">
-    <input id="serverUrl" type="text" placeholder="http://localhost:15000">
-    <button id="saveBtn" class="btn-save">Save</button>
-  </div>
+    <label for="serverUrl">Server</label>
+    <div class="input-row">
+      <input id="serverUrl" type="text" placeholder="http://localhost:15000" spellcheck="false">
+      <button id="saveBtn" class="btn btn-gold">Save</button>
+    </div>
 
-  <label>Bridge Secret <span style="color:#555">(optional, set if server requires it)</span></label>
-  <div class="input-row">
-    <input id="bridgeSecret" type="password" placeholder="leave blank if not configured" autocomplete="off">
-    <button id="saveSecretBtn" class="btn-save">Save</button>
-  </div>
+    <details class="advanced">
+      <summary>Advanced — set a bridge key by hand (never needed in normal use)</summary>
+      <div class="input-row">
+        <input id="bridgeSecret" type="password" placeholder="paste an agents:bridge key (tofu_live_…)" autocomplete="off">
+        <button id="saveSecretBtn" class="btn">Save</button>
+      </div>
+    </details>
 
-  <button id="toggleBtn" class="btn-toggle">⏸ Pause</button>
+    <div id="stats" class="stats" aria-label="Command statistics"></div>
 
-  <div id="stats"></div>
-
-  <div class="footer">Per-client routing • Proxy-safe</div>
+    <div class="foot">
+      <button id="toggleBtn" class="btn">Pause</button>
+      <button id="clientIdText" class="client-id" title="Copy full client ID">—</button>
+    </div>
+    <div class="tagline">Per-client routing · Proxy-safe</div>
+  </main>
 
   <script src="popup.js"></script>
 </body>

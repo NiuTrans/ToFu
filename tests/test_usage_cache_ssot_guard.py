@@ -54,6 +54,11 @@ _ALLOW = {
     'lib/llm/anthropic_outbound/_from_anthropic.py':
         'Anthropic→OpenAI protocol translator — only Anthropic spellings '
         'exist on that wire by construction',
+    'lib/llm/responses_outbound/_sse.py':
+        'Responses→OpenAI protocol translator — input_tokens_details.'
+        'cached_tokens is the Responses wire\'s OWN canonical spelling; this '
+        'translator is the boundary whose job is spelling conversion, and its '
+        'output is normalised downstream (same sanction as the Anthropic twin)',
     'lib/paper/report_engine/_meta.py':
         "reads the engine's OWN normalised accumulator (usage_total is fed "
         'exclusively from normalize_usage in report_engine/__init__'

@@ -18,9 +18,11 @@ import them from ``routes.translate``. New code should import from the
 import os
 import uuid
 
-from flask import Blueprint, jsonify, request, send_file
+from flask import Blueprint, request, send_file
 
-from lib.api_response import api_bad_request, api_error, api_internal_error, api_not_found
+from lib.api_response import (
+    api_bad_request, api_error, api_internal_error, api_not_found, api_ok,
+)
 from lib.log import get_logger
 from lib.translate import (  # noqa: F401  — back-compat re-exports
     DEFAULT_USER_ID,
@@ -142,7 +144,7 @@ def translate_pptx_upload():
 
     logger.info('[PPTX-Translate] Started task %s: %s (%d KB) → %s',
                 task_id, filename, len(file_bytes) // 1024, target)
-    return jsonify({'taskId': task_id})
+    return api_ok({'taskId': task_id})
 
 
 @translate_bp.route('/api/translate/pptx/download/<filename>')

@@ -1,16 +1,15 @@
 """routes/chat.py — Chat start, streaming, polling, abort."""
 
 import json
-import threading
 import time
 
-import orjson
+import orjson  # noqa: F401  (module attribute — tests/test_chat_stream_snapshot_offload.py NC asserts chat_mod.orjson.dumps is what _dumps_yielding uses)
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, request
 
 from lib.agent_core.events import EventType, build_event
-from lib.database import DOMAIN_CHAT, get_db
-from lib.log import audit_log, get_logger
+from lib.database import DOMAIN_CHAT
+from lib.log import get_logger
 from lib.api_response import api_bad_request, api_error, api_internal_error, api_not_found, api_ok, sse_response
 from lib.request_parser import parse_body
 from routes.api_v1.auth import current_auth, require_scope
@@ -95,7 +94,10 @@ def chat_active():
                    'aborted': bool(t.get('aborted'))}
                   for t in tasks.values()
                   if not is_carrier_task(t)]
-    return jsonify(result)
+    # Coordinated bare-array migration (batch 11): the array moves under
+    # ``items``; Api.chat.active unwraps (null-preserving — probe semantics)
+    # and activeResponse's caller unwraps with an Array.isArray fallback.
+    return api_ok({'items': result})
 
 
 @api_v1_chat_bp.route('/api/v1/chat/start', methods=['POST'], endpoint='ui_chat_start')
@@ -182,7 +184,7 @@ def chat_start():
                             'assistant stub — resumed in place via the continue '
                             'contract instead of appending a twin turn',
                             conv_id[:8])
-                return jsonify(_ct_outcome.payload)
+                return api_ok(_ct_outcome.payload)
             if _ct_outcome.kind == 'error':
                 return _ct_outcome.err_resp
             # fallback: nothing recoverable (empty husk, or no checkpoint and
@@ -237,12 +239,9 @@ def chat_start():
         logger.warning('[Chat] /chat/start refused for conv=%s — at inflight '
                        'capacity (%d/%d)', conv_id[:8],
                        _stats['in_flight'], _stats['capacity'])
-        return jsonify({
-            'ok': False,
-            'error': {'kind': 'capacity',
-                      'detail': 'Server is at task capacity. Retry shortly.',
-                      'retry_after_s': 3},
-        }), 503
+        return api_error({'kind': 'capacity',
+                          'detail': 'Server is at task capacity. Retry shortly.',
+                          'retry_after_s': 3}, status=503)
     on_terminal(task['id'], lambda _tid: _admission.release())
 
     from lib.tasks_pkg import spawn_task
@@ -271,7 +270,7 @@ def chat_start():
         )
         return api_internal_error('Failed to start task')
 
-    return jsonify({'taskId': task['id']})
+    return api_ok({'taskId': task['id']})
 
 
 # ══════════════════════════════════════════════════════════
@@ -313,7 +312,7 @@ def chat_send_translate_status(conv_id):
     Returns ``{statusMessage, statusKind, updatedAt}`` or ``{}`` if no
     translate is currently in flight (or hasn't yet hit its first retry).
     """
-    return jsonify(get_send_translate_status(conv_id) or {})
+    return api_ok(get_send_translate_status(conv_id) or {})
 
 
 # ─── _truncate_conv_history moved to routes/chat_side_effects.py (pt_04686ac6 slice 3) ───
@@ -418,7 +417,7 @@ def chat_send():
             text=text, send_started_at=_send_started_at,
         )
         if _intent is not None:
-            return jsonify(_intent.response)
+            return api_ok(_intent.response)
 
         # 4. Append user message and persist (only for immediate start).
         #    Idempotent: if a racing sync already planted the optimistic copy
@@ -468,7 +467,7 @@ def chat_send():
         #   the message invisible until the assistant reply lands.
         _notify_conv_changed(conv_id, rev=_send_rev, user_id=_request_user_id())
 
-        return jsonify({
+        return api_ok({
             'taskId': task_id,
             'convId': conv_id,
             'title': title,
@@ -553,7 +552,7 @@ def chat_branch_start():
             )
             return api_internal_error('Failed to start task')
 
-        return jsonify({'taskId': task_id})
+        return api_ok({'taskId': task_id})
 
     except Exception as e:
         logger.error('[Branch] Failed for conv=%s msg=%d branch=%d: %s',
@@ -788,7 +787,7 @@ def chat_regenerate():
 
         _notify_conv_changed(conv_id, rev=None, user_id=_request_user_id())
 
-        return jsonify({
+        return api_ok({
             'taskId': task_id,
             'convId': conv_id,
             'title': title,
@@ -874,7 +873,7 @@ def chat_continue():
             _audit_log=_al)
         if outcome.kind == 'error':
             return outcome.err_resp
-        return jsonify(outcome.payload)
+        return api_ok(outcome.payload)
     except Exception as e:
         logger.error('[Continue] Failed for conv=%s: %s', conv_id[:8], e, exc_info=True)
         return api_internal_error('internal_error')
@@ -1188,16 +1187,14 @@ async def chat_stream(task_id):
         logger.warning('[Chat] SSE stream refused for principal=%s task=%s — '
                        'at concurrent-stream cap (%d active, cap=%d)',
                        _sse_principal, task_id[:8], _active, _sse_limiter.cap)
-        resp = jsonify({
-            'ok': False,
-            'error': {'kind': 'rate_limited',
-                      'detail': 'Too many concurrent streams for this '
-                                'principal. Close an existing stream or '
-                                'retry shortly.',
-                      'retry_after_s': 5},
-        })
+        resp, _st429 = api_error({
+            'kind': 'rate_limited',
+            'detail': 'Too many concurrent streams for this '
+                      'principal. Close an existing stream or '
+                      'retry shortly.',
+            'retry_after_s': 5}, status=429)
         resp.headers['Retry-After'] = '5'
-        return resp, 429
+        return resp, _st429
 
     return sse_response(generate_with_disconnect_log(), timeout_none=True)
 

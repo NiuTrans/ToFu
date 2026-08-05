@@ -55,6 +55,7 @@ from lib.project_mod.command_analysis import (  # noqa: F401
     _extract_write_targets,
     _filter_changes_by_targets,
     _format_cuda_device_range,
+    _grep_filesystem_segment,
     _has_unquoted_shell_metachars,
     _is_catastrophic_delete,
     _is_dangerous_command,
@@ -484,8 +485,14 @@ def _record_run_command_changes(base_path, changes, conv_id=None, task_id=None):
 # Checked each iteration of the select() loop (~every 0.2s). No timing heuristics.
 
 
-def _format_run_output(command, stdout, stderr, exit_code, timed_out=False, aborted=False):
-    """Format command output into the standard result text."""
+def _format_run_output(command, stdout, stderr, exit_code, timed_out=False,
+                       aborted=False, interrupted_by=''):
+    """Format command output into the standard result text.
+
+    ``interrupted_by`` marks a PER-COMMAND interrupt (user button / stall
+    watchdog) — distinct from ``aborted`` (whole-task Stop): the partial
+    output is preserved and the task CONTINUES with this result fed back to
+    the model."""
     output_parts = []
     if stdout.strip():
         output_parts.append(stdout)
@@ -508,7 +515,10 @@ def _format_run_output(command, stdout, stderr, exit_code, timed_out=False, abor
     result_text = f'$ {command}\n'
     if output:
         result_text += f'{output}\n'
-    if aborted:
+    if interrupted_by:
+        result_text += (f'\n[Command interrupted by {interrupted_by}]'
+                        f'\n[exit code: -1]')
+    elif aborted:
         result_text += '\n[Command aborted by user]\n[exit code: -1]'
     elif timed_out:
         result_text += '\n[Command timed out]\n[exit code: -1]'
@@ -631,6 +641,40 @@ def tool_run_command(base, command, timeout=None, stdin_callback=None, task=None
                     f"`timeout` to run_command; or (3) wrap the scan with "
                     f"coreutils `timeout <secs>`.")
 
+    # ★ Filesystem-grep redirect guard (2026-08-04). The tool description has
+    #   advised grep_search-over-grep for months, yet grep-via-run_command
+    #   kept recurring — measured: a two-grep pipeline sat RUNNING 17m04s in
+    #   a FUSE bad window with zero output and no timeout to end it. Advice
+    #   is not enforcement: refuse grep-family segments that read the
+    #   FILESYSTEM (file/dir operands or -r) and translate the call to
+    #   grep_search. Stream filters (`pytest 2>&1 | grep PASS`,
+    #   `ps aux | grep python`), rg, git grep and timeout-wrapped shapes all
+    #   stay legal. TOFU_RUN_GREP_GUARD=0 opts out.
+    if os.environ.get('TOFU_RUN_GREP_GUARD', '1') != '0':
+        _gseg = _grep_filesystem_segment(command)
+        if _gseg is not None:
+            logger.error('[run_command] BLOCKED filesystem grep (cwd=%s): %.200s',
+                         base, command)
+            return (
+                'Error: Command intercepted: this `grep` reads the filesystem, '
+                'which belongs to the dedicated `grep_search` tool, not '
+                f'run_command. Refused segment: `{_gseg[:150]}`\n'
+                'Translate:\n'
+                "  - `grep -rn 'X' lib/`   -> grep_search(pattern='X', path='lib')\n"
+                "  - `grep -n 'X' f.py`    -> grep_search(pattern='X', path='f.py')\n"
+                "  - `grep -c 'X' dir/`    -> grep_search(pattern='X', path='dir', count_only=True)\n"
+                "  - `... | head -20`      -> grep_search(..., max_results=20) "
+                '(never pipe to head)\n'
+                'grep_search is 5x+ faster on this network filesystem '
+                '(ripgrep; .gitignore- and junk-dir-aware), caps runaway '
+                "output via max_results, and won't wedge for minutes in a "
+                'FUSE bad window (measured: a `grep -rn ... | head` pipeline '
+                'ran 17m+ with zero output). Filtering ANOTHER command\'s '
+                'output through grep stays allowed '
+                '(`pytest 2>&1 | grep PASS`, `ps aux | grep python`) — only '
+                'grep with file/dir operands or `-r` is intercepted. '
+                'Escape hatch: TOFU_RUN_GREP_GUARD=0.')
+
     # ★ Cross-DC timeout adjustment — multiply timeout for remote DolphinFS clusters
     try:
         from lib.cross_dc import get_timeout_multiplier
@@ -734,6 +778,52 @@ def tool_run_command(base, command, timeout=None, stdin_callback=None, task=None
                                         on_chunk=on_chunk, task=task, on_spawn=on_spawn)
     finally:
         _flush_cwd_capture()
+
+
+def _pop_cmd_interrupt(task, proc_pid=None):
+    """Consume a pending PER-COMMAND interrupt request, if any.
+
+    ``task['_cmd_interrupt']`` is set by the interrupt-command endpoint
+    (``source='user'``, routes/chat_poll_abort.py) or by the stuck-task
+    reaper (``source='watchdog'`` with a ``note`` like "no output for
+    1818s" — lib/tasks_pkg/manager/_maintenance.py). Returns the
+    ``interrupted_by`` label for the result marker, or None when no
+    interrupt was requested. POPPED on read so a LATER command in the same
+    task never sees a stale request. Unlike ``task['aborted']`` this never
+    stops the task — the partial result goes back to the model and the
+    turn continues.
+
+    ``proc_pid`` guards a microsecond race: the flag can be planted AFTER
+    this runner's final check but BEFORE ``_subprocess_pid`` is popped —
+    without a pid match the NEXT command in the same task would consume a
+    request meant for an already-finished one and die at spawn. Planters
+    stamp the pid they saw; a flag stamped for a DIFFERENT pid is stale
+    (its command already exited) and is voided, never honoured.
+    """
+    if not task:
+        return None
+    intr = task.get('_cmd_interrupt')
+    if not intr:
+        return None
+    if isinstance(intr, dict):
+        flag_pid = intr.get('pid')
+        if flag_pid is not None and proc_pid is not None and flag_pid != proc_pid:
+            task.pop('_cmd_interrupt', None)   # stale — void, never honour
+            logger.debug('[run_command] voided stale _cmd_interrupt for pid=%s '
+                         '(current=%s)', flag_pid, proc_pid)
+            return None
+        src = intr.get('source') or 'user'
+        note = intr.get('note') or ''
+    else:
+        src, note = 'user', ''
+    task.pop('_cmd_interrupt', None)
+    if src == 'watchdog':
+        base = 'stall-watchdog'
+        if note:
+            base += f': {note}'
+        return (f'{base} — partial output above; the task was NOT stopped. '
+                f'Retry with a narrower scope or an explicit timeout.')
+    return 'user'
 
 
 def _safe_on_spawn(on_spawn, timeout):
@@ -851,6 +941,7 @@ def _run_command_simple(command, full_command, timeout, base, task=None, on_chun
     start_time = time.monotonic()
     timed_out = False
     aborted = False
+    interrupted_by = ''
 
     def _drain_after_kill():
         """Best-effort tail drain after a kill — grab whatever was already
@@ -890,6 +981,18 @@ def _run_command_simple(command, full_command, timeout, base, task=None, on_chun
                 aborted = True
                 break
 
+            # ── per-command interrupt (user button / stall watchdog) ──
+            #   Unlike abort this does NOT touch task['aborted']: the partial
+            #   result goes back to the model and the turn CONTINUES.
+            _intr_by = _pop_cmd_interrupt(task, proc.pid)
+            if _intr_by:
+                logger.info('[run_command] Command interrupted (%s) — killing '
+                            'subprocess PID %d: %s',
+                            _intr_by[:60], proc.pid, command[:80])
+                _kill_process_tree(proc)
+                _drain_after_kill()
+                interrupted_by = _intr_by
+                break
 
             retcode = proc.poll()
 
@@ -965,6 +1068,9 @@ def _run_command_simple(command, full_command, timeout, base, task=None, on_chun
     stdout = b''.join(stdout_chunks).decode('utf-8', errors='replace')
     stderr = b''.join(stderr_chunks).decode('utf-8', errors='replace')
 
+    if interrupted_by:
+        return _format_run_output(command, stdout, stderr, -1,
+                                  interrupted_by=interrupted_by)
     if timed_out:
         return _format_run_output(command, stdout, stderr, -1, timed_out=True)
     if aborted:
@@ -1338,6 +1444,7 @@ def _run_command_interactive(command, full_command, timeout, base, stdin_callbac
     stdin_closed = False
     timed_out = False
     aborted = False
+    interrupted_by = ''
 
     try:
         while True:
@@ -1347,6 +1454,16 @@ def _run_command_interactive(command, full_command, timeout, base, stdin_callbac
                             'PID %d: %s', proc.pid, command[:80])
                 _kill_process_tree(proc)
                 aborted = True
+                break
+
+            # ── per-command interrupt (user button / stall watchdog) ──
+            _intr_by = _pop_cmd_interrupt(task, proc.pid)
+            if _intr_by:
+                logger.info('[run_command] Interactive command interrupted (%s) — '
+                            'killing subprocess PID %d: %s',
+                            _intr_by[:60], proc.pid, command[:80])
+                _kill_process_tree(proc)
+                interrupted_by = _intr_by
                 break
 
             # Check timeout
@@ -1500,6 +1617,9 @@ def _run_command_interactive(command, full_command, timeout, base, stdin_callbac
     stdout = b''.join(stdout_chunks).decode('utf-8', errors='replace')
     stderr = b''.join(stderr_chunks).decode('utf-8', errors='replace')
 
+    if interrupted_by:
+        return _format_run_output(command, stdout, stderr, -1,
+                                  interrupted_by=interrupted_by)
     if aborted:
         return _format_run_output(command, stdout, stderr, -1,
                                   timed_out=False, aborted=True)

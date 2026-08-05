@@ -4,12 +4,12 @@
 WHY A MIGRATION AND NOT A HAND-EDIT
 ===================================
 The YourProvider gateway ships as TWO provider cards (``example-corp`` +
-``example-corp_anthropic``) in every install that predates the account/face
+``example_corp_anthropic``) in every install that predates the account/face
 separation. Hand-editing one machine's ``server_config.json`` would fix that
 machine and leave every other install with:
 
   * two cards for one account (the thing this epic removes), and
-  * an ORPHANED ``example-corp_anthropic`` card — once the second template file is
+  * an ORPHANED ``example_corp_anthropic`` card — once the second template file is
     gone, ``_findMatchingTemplate`` (which matches on exact base_url) can
     never match it again, so "sync from template" silently stops working for
     it.
@@ -59,7 +59,7 @@ def _legacy_pair():
          'extra_headers': dict(HDRS), 'api_keys': list(KEYS), 'enabled': True,
          'models': [{'model_id': 'kimi-k3', 'capabilities': ['text']},
                     {'model_id': 'gemini-3.5-flash', 'capabilities': ['text']}]},
-        {'id': 'example-corp_anthropic', 'name': 'YourProvider (Anthropic native)',
+        {'id': 'example_corp_anthropic', 'name': 'YourProvider (Anthropic native)',
          'base_url': ANTHROPIC_URL, 'protocol': 'anthropic',
          'extra_headers': dict(HDRS), 'api_keys': list(KEYS), 'enabled': True,
          'models': [
@@ -80,11 +80,14 @@ def _migrate(providers):
 
 def test_two_faces_of_one_account_become_one_card():
     provs = _legacy_pair()
+    # Derived, not a literal: export.py rewrites the card's id, so the
+    # expectation must come from the same source to hold in both builds.
+    anchor_id = provs[0]['id']
     changed = _migrate(provs)
     assert changed is True
     assert len(provs) == 1, [p.get('id') for p in provs]
     card = provs[0]
-    assert card['id'] == 'example-corp', 'the default-face card keeps its identity'
+    assert card['id'] == anchor_id, 'the default-face card keeps its identity'
     assert card['base_url'] == OPENAI_URL
     assert card['faces']['anthropic']['base_url'] == ANTHROPIC_URL
     assert card['faces']['anthropic']['protocol'] == 'anthropic'

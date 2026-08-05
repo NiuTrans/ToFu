@@ -1,3 +1,5 @@
+# Incident anchor: born in commit 825a914b — FlowExecutor consistency step 3: VU-only diminishing-returns guard
+# (funeral audit pt_c565a36b3e8f42e6, docs/RATCHET_AUDIT.md)
 """tests/test_flow_vu_progress_guard.py — FlowExecutor VU-only progress guard.
 
 Mirrors ``tests/test_autopilot_budget_guard.py`` for the ENGINE path. The

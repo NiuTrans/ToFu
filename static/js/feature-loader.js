@@ -64,6 +64,12 @@ function _loadFeatureBundle() {
       s.async = false;   // preserve execution order relative to any sibling injected scripts
       s.onload = () => {
         if (typeof debugLog === 'function') debugLog('[feature-loader] feature bundle loaded', 'success');
+        /* Notify wrappers that captured a STUB while the bundle was in
+         * flight (mobile_panels.js's identity-tracked _wrapOne listens for
+         * this to re-wrap the REAL functions — without the event the
+         * wrapper would hold the dead stub forever). */
+        try { document.dispatchEvent(new CustomEvent('tofu:feature-bundle-loaded')); }
+        catch (e) { if (typeof debugLog === 'function') debugLog('[feature-loader] loaded-event dispatch failed: ' + (e && e.message), 'warn'); }
         resolve(true);
       };
       s.onerror = () => {
@@ -142,6 +148,45 @@ const _DEFERRED_ENTRY_POINTS = [
   // this stub loads the feature bundle and dispatches to the real fn, so
   // the conv-sync push subscription still wires right after boot.
   '_wireConvSyncPush',
+  // My Day modal (deferred 2026-08-01, Epic-E sub-6). openDailyReport is
+  // the real entry (always-visible topbar button); the other two are
+  // defense-in-depth (only clickable inside the open modal).
+  'openDailyReport', 'closeDailyReport', '_mydayTriggerGenerate',
+  // Project panel (deferred 2026-08-01, Epic-E sub-7). openProjectModal is
+  // the always-visible project-bar opener; the rest are chat-rendered
+  // interactive handlers (write-approval, stdin, human-guidance, undo/redo
+  // modification cards, apply-code modal) — a click while the panel is in
+  // flight must load the bundle and dispatch, never ReferenceError.
+  'openProjectModal', 'closeProjectModal',
+  'resolveWriteApproval', 'submitStdinInput', 'submitStdinEof',
+  'submitHumanGuidanceChoice', 'submitHumanGuidanceFreeText',
+  'undoConvModifications', 'undoAllModifications', 'redoConvModifications',
+  'openApplyModal', 'closeApplyModal', 'confirmApplyCode',
+  // Cost popover (deferred 2026-08-01, Epic-E sub-8) — chat-rendered on
+  // every assistant message with cost info; click loads the bundle, then
+  // builds + shows the popover from the _costCtxByMsg stash.
+  '_toggleCostPopover',
+  // Settings-panel six-pack (deferred 2026-08-01, Epic-E sub-9).
+  // Badge/tab/mobile-sheet entries + the three settings-core-panel tab
+  // populates (gate+stub: the typeof gate passes on the stub, which
+  // loads the bundle and dispatches). The memory-modal pair is
+  // defense-in-depth (reachable only inside the open modal).
+  'openUpdateDialog', 'toggleTimerPanel', 'toggleOptimizerPanel',
+  'toggleMemory', 'openMemoryModal', 'closeMemoryModal',
+  'toggleMemoryAddForm', 'toggleMemoryFromModal',
+  '_populateSkillsTab', '_populatePreferencesTab',
+  '_renderSettingsUpdatePill',
+  // Defense-in-depth close-out (same slice): static panel onclicks
+  // clickable in the settings-open → bundle-land window — updateModal
+  // overlay closer, skills scope tabs + search, memory create form,
+  // preferences reload/save (image-gen precedent: stub every control
+  // reachable from server-spliced static panel HTML).
+  'closeUpdateModal', '_skillsSetScope', '_skillsFilter',
+  'openMemoryCreateForm', 'refreshPreferences', 'savePreferences',
+  // Settings modal (deferred 2026-08-01, Epic-E sub-10) — openSettings is
+  // the real entry (sidebar gear / mobile sheet / onboarding); the rest
+  // are defense-in-depth (only clickable inside the open modal).
+  'openSettings', 'closeSettings', 'saveSettings', 'switchSettingsTab',
 ];
 _DEFERRED_ENTRY_POINTS.forEach(_installFeatureStub);
 window._DEFERRED_ENTRY_POINTS = _DEFERRED_ENTRY_POINTS;

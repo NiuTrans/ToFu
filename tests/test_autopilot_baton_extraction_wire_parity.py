@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Incident anchor: born in commit e274bc41 — refactor(autopilot): pt_00459503 slice 4 — extract baton-handoff clus...
+# (funeral audit pt_c565a36b3e8f42e6, docs/RATCHET_AUDIT.md)
 """Wire-parity for pt_00459503 slice 4 — extract baton-handoff cluster.
 
 Post-cutover extraction (pt_8dc03017 step-3 complete at 6286913d):

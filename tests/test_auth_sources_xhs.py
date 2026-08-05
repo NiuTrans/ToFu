@@ -43,13 +43,17 @@ def _clean_xhs_source():
     """Ensure xiaohongshu.com is reset (disabled, no cookies) around each test,
     and the tofu_search auth-source provider is registered for the duration."""
     import tofu_search
+    from tofu_search.search.engines import xhs as _xhs_engine
 
     A.delete_source('xiaohongshu.com')
+    # The engine's risk guard (pacing / cache / backoff) is process-global —
+    # reset it too, or one test's page load paces the NEXT test's call into a
+    # throttle-skip and the suite turns order-dependent.
+    _xhs_engine._GUARD.reset()
     tofu_search.register_auth_source_provider(_AuthSourceProviderForTests())
     yield
     tofu_search.register_auth_source_provider(None)
     A.delete_source('xiaohongshu.com')
-
 
 # ═══════════════════════════════════════════════════════════
 #  auth_sources — parsing + normalisation
@@ -118,8 +122,16 @@ class TestAuthSourceStore:
         assert rows['xiaohongshu.com']['has_cookies'] is False
 
     def test_match_requires_enabled_and_cookies(self):
-        # No cookies yet → never matches even if we enable it.
+        # browser_first rows match with ZERO cookies — the user's LIVE
+        # browser session is the credential (deliberate design,
+        # docs/SITE_KNOWLEDGE_LAYER_DESIGN.md:120), so enabling is enough.
         A.set_enabled('xiaohongshu.com', True)
+        assert A.match_source('https://www.xiaohongshu.com/explore/1') is not None
+
+        # No-match only for cookies_replay without cookies: replay has
+        # nothing to fire.
+        A.upsert_source('xiaohongshu.com', access_strategy='cookies_replay',
+                        enabled=True)
         assert A.match_source('https://www.xiaohongshu.com/explore/1') is None
 
         # Add cookies + enable → matches, including alias + subdomain.
@@ -188,6 +200,10 @@ class TestStructuredCookieFields:
         imp = {f['name']: f['importance'] for f in A.source_fields('xiaohongshu.com')}
         assert imp['web_session'] == 'required'
         assert imp['a1'] == 'recommended'
+        # XHS polices automated access — the catalog must carry the
+        # account-risk note's i18n key so the UI can warn "use a spare
+        # account" BEFORE the user connects their main one.
+        assert spec['risk_note_key'] == 'settings.authSrcRiskXhs'
         # Unknown domain → empty spec, never a crash.
         assert A.source_spec('nope.example') == {}
         assert A.source_fields('nope.example') == []
@@ -262,6 +278,8 @@ class TestStructuredCookieFields:
         row = {r['domain']: r for r in A.list_sources()}['xiaohongshu.com']
         assert row['login_url'].startswith('https://')
         assert [f['name'] for f in row['fields']][:2] == ['web_session', 'a1']
+        # The risk note travels with the row too — same single-source rule.
+        assert row['risk_note_key'] == 'settings.authSrcRiskXhs'
 
 
 # ═══════════════════════════════════════════════════════════

@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Incident anchor: born in commit ab99ef8b — checkpoint: accumulated work since last commit
+# (funeral audit pt_c565a36b3e8f42e6, docs/RATCHET_AUDIT.md)
 """Prompt-injection hardening tests for Paper Review / Report Mode.
 
 A submitted PDF is UNTRUSTED input. Attackers embed directives aimed at the LLM

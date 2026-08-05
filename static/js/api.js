@@ -346,7 +346,13 @@
 
   // folders ---------------------------------------------------------
   const folders = {
-    list:   async ()           => (await get('/api/v1/folders', { onError: 'null' })) || [],
+    // Coordinated bare-array migration (batch 19): backend wraps {ok,
+    // items}; unwrap with fallback (list-UI || [] semantics).
+    list:   async ()           => {
+      const d = await get('/api/v1/folders', { onError: 'null' });
+      if (d && Array.isArray(d.items)) return d.items;
+      return Array.isArray(d) ? d : [];
+    },
     create: (name, color)      => post('/api/v1/folders', { name, color: color || '' }, { onError: 'null' }),
     update: (id, updates)      => put(`/api/v1/folders/${encodeURIComponent(id)}`, updates, { onError: 'null' }),
     remove: async (id)         => {
@@ -369,7 +375,12 @@
 
   // paper-folders (Reading-mode library folders — same shape as `folders`) ---
   const paperFolders = {
-    list:   async ()           => (await get('/api/v1/paper-folders', { onError: 'null' })) || [],
+    // Same bare-array coordination as folders.list above.
+    list:   async ()           => {
+      const d = await get('/api/v1/paper-folders', { onError: 'null' });
+      if (d && Array.isArray(d.items)) return d.items;
+      return Array.isArray(d) ? d : [];
+    },
     create: (name, color)      => post('/api/v1/paper-folders', { name, color: color || '' }, { onError: 'null' }),
     update: (id, updates)      => put(`/api/v1/paper-folders/${encodeURIComponent(id)}`, updates, { onError: 'null' }),
     remove: async (id)         => {
@@ -380,7 +391,14 @@
 
   // orchestrations --------------------------------------------------
   const orchestrations = {
-    list:     async ()        => (await get('/api/v1/orchestrations', { onError: 'null' })) || [],
+    // Coordinated bare-array migration (docs/API_CONTRACT.md §4): the
+    // backend now wraps the array as {ok, items}; unwrap here with an
+    // Array.isArray fallback so a pre-migration server still works.
+    list:     async ()        => {
+      const d = await get('/api/v1/orchestrations', { onError: 'null' });
+      if (d && Array.isArray(d.items)) return d.items;
+      return Array.isArray(d) ? d : [];
+    },
     get:      (id)            => get(`/api/v1/orchestrations/${encodeURIComponent(id)}`, { onError: 'null' }),
     create:   (def)           => post('/api/v1/orchestrations', def, { parse: 'response' }),
     update:   (id, def)       => put(`/api/v1/orchestrations/${encodeURIComponent(id)}`, def, { parse: 'response' }),
@@ -561,6 +579,45 @@
   // get: parsed JSON or null on 4xx/network error. Pass {signal} to abort.
   // getResponse: raw Response — for callers that need to inspect status
   //   codes (e.g. distinguish 503 retryable from 404 ghost).
+  /* ── Per-conv in-flight merge (pt_afbaf3d7 ③, hand-off from
+   *   pt_ef42c2a1e9f946f3). The 2026-08-01 hard-refresh congestion collapse
+   *   served the SAME 176.8 MB conversation 6× in 25s because the boot load,
+   *   the notify verify, the push-reconnect catch-up and the Case-F recovery
+   *   each issued their OWN full GET — runWithConcurrency caps parallelism
+   *   but does not dedupe. Identical in-flight GETs now share ONE Promise;
+   *   the acceptance invariant is: concurrent same-shape GETs for the same
+   *   conv ≤ 1 on the wire.
+   *
+   *   Scoped to SIGNAL-LESS callers: a caller that passes an AbortSignal owns
+   *   an explicit probe budget (recover worker 10s, translation verify 15s),
+   *   and sharing the underlying fetch would let one caller's abort cancel
+   *   everyone else's read. Those stay one-request-per-call — the storm
+   *   sources above are all signal-less.
+   *
+   *   Keyed by conv + the windowing shape (?window / ?before_seq), so a
+   *   full read, a tail-window read and a scroll-up page never collide.
+   *   getResponse (raw Response) is NOT deduped — a parsed-JSON Promise
+   *   cannot be shared with a caller that needs the raw stream. */
+  const _convGetInflight = new Map(); // key → Promise
+  function _convGetDeduped(convId, opts) {
+    if (opts && opts.signal) {
+      return get(`/api/v1/conversations/${encodeURIComponent(convId)}`,
+                 Object.assign({ onError: 'null' }, opts));
+    }
+    const q = (opts && opts.query) || {};
+    const key = convId + '|' + (q.window || '') + '|' + (q.before_seq || '');
+    const hit = _convGetInflight.get(key);
+    if (hit) return hit;
+    const p = get(`/api/v1/conversations/${encodeURIComponent(convId)}`,
+                  Object.assign({ onError: 'null' }, opts || {}));
+    _convGetInflight.set(key, p);
+    const clear = () => {
+      if (_convGetInflight.get(key) === p) _convGetInflight.delete(key);
+    };
+    p.then(clear, clear);
+    return p;
+  }
+
   // patchSettings: targeted settings PATCH — fire-and-forget; returns
   //   Response for callers who care, but typically chained as a fire-
   //   and-forget promise.
@@ -568,9 +625,7 @@
   //   read status (200 / 409 stale-checkpoint / etc.) and parse the body.
   // getDebugMessages: server-side rendered message list with system prompt.
   const conversations = {
-    get: (convId, opts) =>
-      get(`/api/v1/conversations/${encodeURIComponent(convId)}`,
-          Object.assign({ onError: 'null' }, opts || {})),
+    get: (convId, opts) => _convGetDeduped(convId, opts),
     getResponse: (convId, opts) =>
       request(`/api/v1/conversations/${encodeURIComponent(convId)}`,
               Object.assign({ method: 'GET', parse: 'response', onError: 'null' }, opts || {})),
@@ -660,9 +715,14 @@
     // Full-text + title search across the user's conversations. Returns
     // an array of {id, matchField, matchSnippet, matchRole} or [] on
     // error/timeout. Pass {signal} for cancellation.
-    search: (query, opts) =>
-      get('/api/v1/conversations/search',
-          Object.assign({ query: { q: query } }, opts || {})),
+    // Coordinated bare-array migration (batch 20): backend wraps {ok,
+    // items}; unwrap with fallback (list-UI || [] semantics).
+    search: async (query, opts) => {
+      const d = await get('/api/v1/conversations/search',
+          Object.assign({ query: { q: query } }, opts || {}));
+      if (d && Array.isArray(d.items)) return d.items;
+      return Array.isArray(d) ? d : [];
+    },
     // Targeted message PATCH. by-id is preferred (id-stable across rebuilds);
     // falls back to index addressing on 404. Returns parsed JSON or null on
     // error. Caller passes {msgId, msgIdx} (msgIdx required for fallback).
@@ -781,7 +841,16 @@
       if (!resp.ok) return { status: 'error', error: `HTTP ${resp.status}` };
       try { return await resp.json(); } catch (e) { return { status: 'error', error: e.message }; }
     },
-    pollBatch: (taskIds)      => post('/api/v1/translate/poll-batch', { taskIds }, { onError: 'null' }),
+    // Coordinated bare-array migration (batch 14): backend wraps {ok,
+    // items}; unwrap null-preservingly — translation.js's
+    // !Array.isArray(data) branch synthesizes per-id error rows and must
+    // keep firing on a failed (null) probe.
+    pollBatch: async (taskIds)  => {
+      const d = await post('/api/v1/translate/poll-batch', { taskIds }, { onError: 'null' });
+      if (d == null) return null;
+      if (Array.isArray(d.items)) return d.items;
+      return Array.isArray(d) ? d : null;
+    },
     // Settings → MT-config probe. Backend returns {ok, translated, error?}.
     mtTest:    (mtConfig, text) => post('/api/v1/translate/mt-test', { mt_config: mtConfig, text }, { onError: 'null' }),
   };
@@ -818,7 +887,18 @@
     // Abort + queue management — fire-and-forget, swallow errors.
     abortTask:    (taskId)      => post(`/api/v1/chat/abort/${encodeURIComponent(taskId)}`, undefined, { onError: 'null', parse: 'none' }),
     abortConv:    (convId)      => post(`/api/v1/chat/abort-conv/${encodeURIComponent(convId)}`, undefined, { onError: 'null', parse: 'none' }),
-    queueGet:     (convId)      => get(`/api/v1/chat/queue/${encodeURIComponent(convId)}`),
+    // Per-command interrupt (pt_232244fb): kill ONLY the task's running
+    // run_command subprocess — the turn CONTINUES with the partial output fed
+    // back to the model. NOT fire-and-forget: the caller needs the verdict
+    // ({interrupted:true} or {interrupted:false, reason}) to paint the button.
+    interruptCommand: (taskId)  => post(`/api/v1/chat/interrupt-command/${encodeURIComponent(taskId)}`, undefined, { onError: 'null' }),
+    // Coordinated bare-array migration (batch 21): backend wraps {ok,
+    // items}; unwrap with fallback (list-UI || [] semantics).
+    queueGet:     async (convId) => {
+      const d = await get(`/api/v1/chat/queue/${encodeURIComponent(convId)}`);
+      if (d && Array.isArray(d.items)) return d.items;
+      return Array.isArray(d) ? d : [];
+    },
     queueRemove:  (convId, qId) => del(`/api/v1/chat/queue/${encodeURIComponent(convId)}/${encodeURIComponent(qId)}`,
                                        { parse: 'response', onError: 'null' }),
     queueClear:   (convId)      => del(`/api/v1/chat/queue/${encodeURIComponent(convId)}`,
@@ -838,7 +918,16 @@
     kickAutopilot: (convId, config) => post('/api/v1/chat/autopilot/kick',
                                             { convId, config }),
     // Active-tasks listing — used on init to reconnect SSE streams.
-    active:       (opts)        => get('/api/v1/chat/active', Object.assign({ onError: 'null' }, opts || {})),
+    // Coordinated bare-array migration (batch 11): backend wraps {ok,
+    // items}; unwrap with fallback — PRESERVING null: callers distinguish
+    // "server says zero tasks" ([]) from "probe failed" (null), and
+    // null→[] would fake the former into static-adopt decisions.
+    active:       async (opts)  => {
+      const d = await get('/api/v1/chat/active', Object.assign({ onError: 'null' }, opts || {}));
+      if (d == null) return null;
+      if (Array.isArray(d.items)) return d.items;
+      return Array.isArray(d) ? d : null;
+    },
     activeResponse: (opts)      => request('/api/v1/chat/active', Object.assign({ method: 'GET', parse: 'response', onError: 'null' }, opts || {})),
     // Per-conversation running-task PROJECTION — the poll transport's copy of
     // the `conv_state_snapshot` push frame, same wire shape (`{convs:{id:
@@ -957,6 +1046,11 @@
                               { onError: 'null', query: arch ? { arch: arch } : {} }),
     devices:     () => get('/api/v1/desktop/devices', { onError: 'null' }),
     mintToken:   (name) => post('/api/v1/desktop/token', { name: name || '' }),
+    /* Pairing-code mint (P2, docs/DESKTOP_AGENT_DIST_DESIGN.md §11): a
+     * 6-digit one-time code (300 s TTL, one-shot) the agent exchanges for
+     * a bridge token. The agent needs NO bearer — the code IS the
+     * credential. */
+    mintPairCode: () => post('/api/v1/desktop/pair-code'),
     revokeToken: (keyId) => del(`/api/v1/desktop/token/${encodeURIComponent(keyId)}`),
   };
 
@@ -1009,9 +1103,13 @@
 
   // providers (config-side: probes + templates + balance) -----------
   const providers = {
-    templates:        ()                                =>
-      request('/api/v1/providers/templates',
-              { method: 'GET', parse: 'response', onError: 'null' }),
+    // Coordinated bare-array migration (batch 10): the backend now wraps
+    // as {ok, items}; unwrap with an Array.isArray fallback for skew.
+    templates:        async ()                          => {
+      const d = await get('/api/v1/providers/templates', { onError: 'null' });
+      if (d && Array.isArray(d.items)) return d.items;
+      return Array.isArray(d) ? d : [];
+    },
     probe:            (baseUrl, apiKey, modelsPath)     =>
       post('/api/v1/providers/probe',
            { base_url: baseUrl, api_key: apiKey, models_path: modelsPath },
@@ -1058,10 +1156,15 @@
   // try POST first and let the caller fall back.
   const oauth = {
     status:      ()                 => get('/api/v1/oauth/status', { onError: 'null' }),
-    loginPost:   (provider)         => post('/api/oauth/login', { provider }, { onError: 'null', parse: 'response' }),
-    loginGet:    (provider)         =>
+    loginPost:   (provider, preferConsole) =>
+      post('/api/oauth/login',
+           preferConsole ? { provider, prefer_console: true } : { provider },
+           { onError: 'null', parse: 'response' }),
+    loginGet:    (provider, preferConsole) =>
       request('/api/oauth/login',
-              { method: 'GET', query: { provider }, parse: 'response', onError: 'null' }),
+              { method: 'GET',
+                query: preferConsole ? { provider, prefer_console: '1' } : { provider },
+                parse: 'response', onError: 'null' }),
     logoutPost:  (provider)         => post('/api/oauth/logout', { provider }, { onError: 'null', parse: 'response' }),
     logoutGet:   (provider)         =>
       request('/api/oauth/logout',
@@ -1090,6 +1193,16 @@
     toolsList:        ()                           =>
       request('/api/v1/mcp/tools',
               { method: 'GET', parse: 'response', onError: 'null' }),
+    // Per-server tool list (with per-tool `enabled` flags) — backs the
+    // Settings → MCP card's per-tool toggle list.
+    toolsListForServer: (server)                   =>
+      request('/api/v1/mcp/tools',
+              { method: 'GET', query: { server }, parse: 'response', onError: 'null' }),
+    // Replace a server's disabled_tools list (full-replacement semantics).
+    serverToolsSet: (server, disabledTools)        =>
+      request(`/api/v1/mcp/servers/${encodeURIComponent(server)}/tools`,
+              { method: 'PUT', json: { disabled_tools: disabledTools || [] },
+                parse: 'response', onError: 'null' }),
     // NOTE: no onError:'null' here — a failed connect returns HTTP 500
     // with a rich {error, stderr_tail} body; we want that to throw an
     // ApiError (carrying .body) so the UI can show the real reason
@@ -1133,6 +1246,9 @@
     remove: (domain)        => del(`/api/v1/auth-sources/${encodeURIComponent(domain)}`, { parse: 'response', onError: 'null' }),
     // Interactive headful login — long-running; no client timeout.
     login:  (domain, timeout) => post(`/api/v1/auth-sources/${encodeURIComponent(domain)}/login`, { timeout: timeout || 180 }, { timeout: 0 }),
+    // Live-session probe: is the user logged into the site in THEIR browser
+    // right now (bridge get_cookies; jar never leaves the browser)?
+    liveSession: (domain, refresh) => get(`/api/v1/auth-sources/${encodeURIComponent(domain)}/live-session${refresh ? '?refresh=1' : ''}`, { onError: 'null' }),
     // Login-wall cookie-capture consent (cookie_capture_consent.js banner).
     cookieConsentPending: () => get('/api/v1/auth-sources/cookie-consent/pending', { onError: 'null' }),
     cookieConsentResolve: (id, approved) => post('/api/v1/auth-sources/cookie-consent/resolve', { id, approved: !!approved }),
@@ -1449,6 +1565,22 @@
       post('/api/v1/paper/report/lookup', { paper_hash: paperHash, lang }, Object.assign({ onError: 'null' }, opts || {})),
     reportCache:    (cacheBody)           => post('/api/v1/paper/report/cache', cacheBody, { onError: 'null' }),
     reportAbort:    (taskId)              => post(`/api/v1/paper/report/abort/${encodeURIComponent(taskId)}`, {}, { onError: 'null', parse: 'none' }),
+    // Deepen (on-demand section depth, reading-xp P3). Start has no client
+    // deadline (same reasoning as reportStart); poll rides the GENERIC
+    // task-routes factory shape ({ok, events, next_cursor, status}).
+    deepenStart:    (body, opts)          => post('/api/v1/paper/deepen/start', body, Object.assign({ timeout: 0 }, opts || {})),
+    deepenPoll:     (taskId, cursor)      =>
+      request(`/api/v1/paper/deepen/poll/${encodeURIComponent(taskId)}`,
+              { method: 'GET', query: { cursor }, parse: 'response', onError: 'null' }),
+    deepenAbort:    (taskId)              => post(`/api/v1/paper/deepen/abort/${encodeURIComponent(taskId)}`, {}, { onError: 'null', parse: 'none' }),
+    // Reader margin notes (reading-xp P4)
+    notesList:      (paperHash, lang)     =>
+      request('/api/v1/paper/notes', { method: 'GET', query: { paper_hash: paperHash, lang }, onError: 'null' }),
+    notesCreate:    (body)                => post('/api/v1/paper/notes', body),
+    notesUpdate:    (noteId, note)        =>
+      request(`/api/v1/paper/notes/${encodeURIComponent(noteId)}`, { method: 'PATCH', body: JSON.stringify({ note }), headers: { 'Content-Type': 'application/json' }, onError: 'null' }),
+    notesDelete:    (noteId)              =>
+      request(`/api/v1/paper/notes/${encodeURIComponent(noteId)}`, { method: 'DELETE', onError: 'null' }),
     // Review Mode reuses ALL the report endpoints above — the report `lang`
     // arg carries the composite cache key ``review:<venue>:<uilang>`` opaquely.
     // Only the venue list needs its own (read-only) endpoint.
@@ -1622,6 +1754,16 @@
     capabilities: ()         => get('/api/v1/audio/capabilities', { onError: 'null' }),
   };
 
+  // videos (upload + upload-time analysis status) ----------------------
+  // upload: multipart video → { ok, video_id, status:'processing', poll }.
+  //   timeout:0 because a 512MB upload over a slow link is slow.
+  // status: poll the processing record; when 'ready' it carries the full
+  //   self-contained payload (durable frame URLs + transcript + metadata).
+  const videos = {
+    upload: (formData) => request('/api/v1/videos/upload', { method: 'POST', body: formData, timeout: 0 }),
+    status: (videoId)  => get(`/api/v1/videos/${encodeURIComponent(videoId)}`, { onError: 'null' }),
+  };
+
   // artifacts (panel + library + version chain) ---------------------
   // v1 metadata routes are JSON; raw / view / export are intentional
   // carve-outs that ship typed binary or sandboxed HTML — we expose
@@ -1669,7 +1811,7 @@
     pageRequestId,    // the correlation prefix every request of this page shares
     // domains
     folders, paperFolders, orchestrations, memory, skills, profile, timer, scheduler, optimizer, compactions,
-    conversations, text, translate, chat, images, pdf, doc, audio, artifacts,
+    conversations, text, translate, chat, images, pdf, doc, audio, videos, artifacts,
     health, pricing, clientError, serverConfig, browser, project, daily, paper,
     desktop,
     features, providers, dispatch, oauth, mcp, update, trading, authSources,

@@ -120,8 +120,20 @@ class TestPhaseSemantics(unittest.TestCase):
         names = _names(tl_proj)
         self.assertIn('project_charter_read', names)
         self.assertIn('project_charter_propose', names)
-        # Agent self-commit tool (owner-directed 2026-07-12) rides the same gate.
-        self.assertIn('project_charter_commit', names)
+        # Drift note: this test used to assert project_charter_commit WAS in
+        # the list (the 2026-07-12 self-commit de-gating). That contract was
+        # deliberately REVERSED 2026-07-30 (owner-directed): a charter always
+        # requires human review, so the model-facing set is read + propose
+        # ONLY (lib/tools/conversation.py::CHARTER_TOOLS). The commit schema
+        # is kept as a module symbol so execute_charter_tool can REFUSE a
+        # legacy/hallucinated call with an explanation rather than an opaque
+        # unknown-tool error — pin both halves of that contract.
+        self.assertNotIn('project_charter_commit', names)
+        from lib.tools import conversation as _conv_tools
+        self.assertIn('project_charter_commit', _conv_tools.CHARTER_TOOL_NAMES)
+        self.assertEqual(
+            _conv_tools.CHARTER_COMMIT_TOOL['function']['name'],
+            'project_charter_commit')
         # No project → no charter tools (a charter is per-project).
         tl_none, _ = assemble_tool_list(_ctx())
         self.assertNotIn('project_charter_read', _names(tl_none))

@@ -556,8 +556,13 @@ class TaskRuntime:
                         expired.append(tid)
                         del self._tasks[tid]
         if expired:
-            logger.debug('[TaskRuntime:%s] cleaned %d stale tasks',
-                         self.kind, len(expired))
+            # INFO (was debug) + the evicted id prefixes: cleanup_stale is one
+            # of only TWO registry-eviction paths (with discard_task), and a
+            # task evaporating from the registry while alive was invisible
+            # when this logged at debug (pt_a21cd6eb ③-1).
+            logger.info('[TaskRuntime:%s] cleaned %d stale tasks: %s',
+                        self.kind, len(expired),
+                        [t[:8] for t in expired[:8]])
         return len(expired)
 
     # ── Stats ──────────────────────────────────────────────────

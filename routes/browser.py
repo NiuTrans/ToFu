@@ -1,8 +1,11 @@
 """routes/browser.py — Browser Extension Bridge API."""
 
 import io
+import json
 import os
+import time
 import zipfile
+from urllib.parse import urlparse
 
 from flask import Blueprint, jsonify, request, send_file
 
@@ -35,6 +38,19 @@ async def browser_poll():
         return '', 204
     _auth_ok, _bridge_user, _bridge_key = _resolve_bridge_caller('browser')
     if not _auth_ok:
+        # A 401 answered BY THIS GATE (a proxy's 401 never reaches this
+        # process) means an installed extension holding a stale/revoked
+        # credential — the stranded fleet, which cannot heal itself (no
+        # update channel, and a parked 401 client cannot poll). Record who
+        # knocked so the panel can tell "installed but locked out" from
+        # "never installed" and offer the one-click preseeded re-download.
+        try:
+            from lib.browser import mark_locked_out
+            _rej = await async_parse_body()
+            mark_locked_out((_rej or {}).get('clientId') or None,
+                            ext_version=str((_rej or {}).get('extVersion') or '')[:32])
+        except Exception as e:
+            logger.debug('[Browser] locked-out mark failed: %s', e)
         return _bridge_unauthorized()
     from lib.browser import mark_poll, resolve_batch, wait_for_commands_async
     data = await async_parse_body()
@@ -45,7 +61,8 @@ async def browser_poll():
         logger.debug('[Browser] non-numeric chromeMajor from client=%s: %s',
                      (client_id or 'anon')[:12], e)
         chrome_major = 0
-    mark_poll(client_id, chrome_major=chrome_major, user_id=_bridge_user)
+    mark_poll(client_id, chrome_major=chrome_major, user_id=_bridge_user,
+              ext_version=str(data.get('extVersion') or '')[:32])
     results = data.get('results', [])
     if results:
         logger.info('[Browser] poll received %d result(s) from client=%s: cmd_ids=%s',
@@ -108,12 +125,111 @@ def browser_post_result():
 # here since they're not JSON REST verbs.
 
 
+def _external_base_url():
+    """The address the DOWNLOADING browser can poll us on again later.
+
+    ``request.host_url`` alone is NOT that address under a path-prefixed,
+    TLS-terminating cloud-IDE gateway (e.g. ``…/proxy/15000/``): the scheme
+    downgrades to http (TLS ends at the edge; ProxyFix deliberately
+    unwired) and the prefix is stripped before forwarding, so a preseed
+    baked from it points the extension at the gateway's DEFAULT route —
+    whose app answers ``POST /api/browser/poll`` with 405 and never
+    forwards (owner incident 2026-08-04: extension parked on "HTTP 405",
+    zero polls in access.log).
+
+    Priority:
+      1. ``?base=`` — the panel's own ``location.origin + BASE_PATH``, the
+         address this browser demonstrably reaches us on. Pinned to the
+         request's Host so a crafted link can never steer a freshly-minted
+         bridge key toward a foreign host.
+      2. ``VSCODE_PROXY_URI`` with ``{{port}}`` filled from the socket the
+         request arrived on — the platform's canonical external-URL
+         template, covering downloads that bypass the panel.
+      3. ``request.host_url`` — correct on direct (unproxied) connections.
+    """
+    base = (request.args.get('base') or '').strip().rstrip('/')
+    if base:
+        try:
+            parsed = urlparse(base)
+        except ValueError as e:
+            logger.debug('[Browser] unparseable base= rejected: %r (%s)',
+                         base[:120], e)
+            parsed = None
+        if (parsed is not None
+                and parsed.scheme in ('http', 'https')
+                and parsed.netloc.lower() == (request.host or '').lower()
+                and not parsed.query and not parsed.fragment):
+            return base
+        logger.warning('[Browser] download base= rejected (want host %r): %r',
+                       request.host, base[:120])
+    tmpl = os.environ.get('VSCODE_PROXY_URI', '')
+    if '{{port}}' in tmpl:
+        # The internal listen port the proxy maps its /proxy/<port>/ to.
+        # Host header first (direct connections carry it); the ASGI
+        # scope's server tuple behind a gateway (whose Host is external
+        # and portless). urlparse().port raises ValueError on garbage.
+        port = ''
+        try:
+            _p = urlparse('//' + (request.host or '')).port
+            port = str(_p) if _p else ''
+        except ValueError as e:
+            logger.debug('[Browser] host port parse failed: %s', e)
+            port = ''
+        if not port:
+            server = getattr(request, 'scope', {}).get('server') or ()
+            port = str(server[1]) if len(server) == 2 and server[1] else ''
+        if port:
+            return tmpl.replace('{{port}}', port).rstrip('/')
+    return request.host_url.rstrip('/')
+
+
+def _build_bridge_preseed():
+    """Mint a fresh bridge credential for THIS download and return the
+    preseed payload, or ``None`` when minting is impossible.
+
+    Owner directive 2026-08-03: the downloaded extension must pair with ZERO
+    user input — nobody should have to paste a key that only the backend can
+    mint. Same shape as the desktop agent's connection-line preseed: the zip
+    inherits the caller's download-time auth, so baking the credential in is
+    no wider a grant than the download itself.
+
+    A NEW key is minted per download (secrets are stored hashed, so an
+    existing key can never be re-materialised for packaging). Fail-open:
+    any mint failure degrades to a zip WITHOUT the preseed file — the
+    extension stays installable, the popup field remains as the repair path.
+    """
+    try:
+        from routes.api_v1.auth import current_auth
+        from lib.api_keys import create_key
+        from lib.log import audit_log
+        ctx = current_auth()
+        uid = (ctx.user_id if ctx and getattr(ctx, 'user_id', '') else '') or ''
+        row, token = create_key(
+            'browser-ext-preseed-%s' % time.strftime('%Y%m%d'),
+            scopes=['agents:bridge'], user_id=uid)
+        audit_log('browser_extension_preseed_minted',
+                  key_id=row.get('id'), user_id=uid)
+        return {
+            # The URL the user's browser just used to reach us — by
+            # definition the one the extension (same browser) can poll.
+            # NOT bare request.host_url: that loses the external scheme +
+            # proxy path prefix behind a cloud-IDE gateway (405 incident).
+            'serverUrl': _external_base_url(),
+            'bridgeSecret': token,
+        }
+    except Exception as e:
+        logger.warning('[Browser] bridge preseed mint failed (serving zip '
+                       'without it): %s', e)
+        return None
+
+
 @browser_bp.route('/api/browser/download', methods=['GET'])
 def browser_download():
     ext_dir = os.path.join(BASE_DIR, 'browser_extension')
     if not os.path.isdir(ext_dir):
         logger.warning('[Browser] download requested but extension directory not found: %s', ext_dir)
         return api_not_found('Extension directory not found')
+    preseed = _build_bridge_preseed()
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zf:
         for root, dirs, files in os.walk(ext_dir):
@@ -121,7 +237,11 @@ def browser_download():
                 fp = os.path.join(root, f)
                 arcname = os.path.join('browser_extension', os.path.relpath(fp, ext_dir))
                 zf.write(fp, arcname)
+        if preseed:
+            zf.writestr('browser_extension/bridge_preseed.json',
+                        json.dumps(preseed))
     buf.seek(0)
-    logger.info('[Browser] extension zip downloaded (%d bytes)', buf.getbuffer().nbytes)
+    logger.info('[Browser] extension zip downloaded (%d bytes, preseed=%s)',
+                buf.getbuffer().nbytes, bool(preseed))
     return send_file(buf, mimetype='application/zip', as_attachment=True,
                      download_name='browser_extension.zip')

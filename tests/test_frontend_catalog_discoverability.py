@@ -51,6 +51,17 @@ def _node_available() -> bool:
 
 # ── Locate + splice the shipped renderers ────────────────────────────
 
+# Runtime-BUILT bundle outputs (bundle-<8hex>.js / feature-<8hex>.js /
+# i18n-<lang>-<8hex>.js), anchored to the 8-hex hash exactly like
+# lib/js_bundler.py::_BUILT_BUNDLE_RE — NEVER a bare 'feature-*' glob, which
+# would also match the tracked SOURCE feature-loader.js. Built artifacts are
+# concatenations of the shipped sources: scanning them double-counts every
+# definition and false-trips the "single source of truth" assertion below in
+# any tree where the app has actually RUN (a built bundle is left on disk).
+_BUILT_BUNDLE_RE = re.compile(
+    r'^(?:(?:bundle|feature)-[0-9a-f]{8}|i18n-(?:zh|en)-[0-9a-f]{8})\.js$')
+
+
 def _find_defining_file(sig: str, *search_dirs: str) -> str:
     """Return the single .js file DEFINING ``sig``.
 
@@ -62,7 +73,7 @@ def _find_defining_file(sig: str, *search_dirs: str) -> str:
     hits = []
     for d in search_dirs:
         for name in sorted(os.listdir(d)):
-            if not name.endswith('.js'):
+            if not name.endswith('.js') or _BUILT_BUNDLE_RE.match(name):
                 continue
             p = os.path.join(d, name)
             with open(p, encoding='utf-8') as fh:

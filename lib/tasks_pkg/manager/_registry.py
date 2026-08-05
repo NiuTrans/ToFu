@@ -15,9 +15,11 @@ from lib.error_envelope import to_json as _err_to_json
 from lib.log import get_logger
 
 from lib.tasks_pkg.manager._state import (
+    _abort_tombstones,
+    _abort_tombstones_lock,
+    _ABORT_TOMBSTONES_CAP,
     _chat_runtime,
-    _conv_latest_task,
-    _conv_latest_task_lock,
+    _clear_latest_task,
     _record_latest_task,
     tasks,
     tasks_lock,
@@ -408,12 +410,198 @@ def discard_task(task_id: str, conv_id: str | None = None) -> None:
     entry it claimed, so the carrier is invisible to every reconnect path. Safe
     to call unconditionally (idempotent, best-effort).
     """
+    # Observability (pt_a21cd6eb ③-1): this is the ONLY registry pop for
+    # non-terminal chat tasks. A live task that vanished from the registry
+    # while its worker thread kept running (fb6d1f8d / 7ddbc751, 2026-08-01)
+    # left zero fingerprints — log every pop with the caller so the next
+    # evaporation leaves a trail. Rare path; the frame read is cheap enough.
+    try:
+        import sys as _sys
+        _caller = _sys._getframe(1).f_code.co_name
+    except Exception as e:
+        logger.debug('[Manager] discard_task: caller-frame read failed: %s', e)
+        _caller = '?'
     with tasks_lock:
-        tasks.pop(task_id, None)
+        _popped = tasks.pop(task_id, None)
+    logger.info('[Manager] discard_task: task=%s conv=%s popped=%s caller=%s',
+                (task_id or '?')[:8], (conv_id or '')[:8],
+                bool(_popped), _caller)
     if conv_id:
-        with _conv_latest_task_lock:
-            if _conv_latest_task.get(conv_id) == task_id:
-                del _conv_latest_task[conv_id]
+        # Clears the store mirror too — a local-only delete leaves the
+        # store-backed _latest_task_for_conv returning this corpse for up to
+        # 1h (TTL), which is the msb6ohqi 2026-08-02 stall class.
+        _clear_latest_task(conv_id, expect_task_id=task_id)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Abort tombstone channel (pt_a21cd6eb ③-3)
+# ═══════════════════════════════════════════════════════════════════════════
+
+_DB_TOMBSTONE_POLL_S = 5.0  # abort_check 回读 DB tombstone 的最小间隔
+
+
+def _db_abort_tombstoned(task_id: str) -> bool:
+    """True when the task_results row carries an ``_abort_requested`` mark."""
+    if not task_id:
+        return False
+    try:
+        from lib.database import DOMAIN_CHAT, get_thread_db
+        db = get_thread_db(DOMAIN_CHAT)
+        row = db.execute(
+            'SELECT metadata FROM task_results WHERE task_id=?',
+            (task_id,)).fetchone()
+        if not row:
+            return False
+        meta = json.loads(row['metadata'] or '{}')
+        return bool(meta.get('_abort_requested'))
+    except Exception as e:
+        logger.debug('[Manager] db tombstone probe failed task=%s: %s',
+                     task_id[:8], e)
+        return False
+
+
+def _write_abort_tombstone_row(task_id: str, source: str) -> bool:
+    """Best-effort DB half of the tombstone (cross-process visibility).
+
+    RACES (accepted): the running checkpoint upsert is last-writer-wins on the
+    whole row, so a concurrent checkpoint can drop this metadata mark — the
+    in-memory set is the authoritative same-process channel; this write exists
+    so a SECOND process / future replica can see the request too. Content is
+    never touched (metadata-only UPDATE), so a lost race costs the mark, not
+    data.
+    """
+    try:
+        from lib.database import DOMAIN_CHAT, get_thread_db
+        db = get_thread_db(DOMAIN_CHAT)
+        row = db.execute(
+            'SELECT metadata, status FROM task_results WHERE task_id=?',
+            (task_id,)).fetchone()
+        if not row:
+            return False
+        if row['status'] != 'running':
+            return False
+        try:
+            meta = json.loads(row['metadata'] or '{}')
+        except (json.JSONDecodeError, TypeError) as e:
+            logger.debug('[Manager] abort tombstone: unreadable metadata (%s) — starting fresh', e)
+            meta = {}
+        meta['_abort_requested'] = int(time.time() * 1000)
+        meta['_abort_source'] = source
+        db.execute('UPDATE task_results SET metadata=? WHERE task_id=?',
+                   (json.dumps(meta, ensure_ascii=False), task_id))
+        db.commit()
+        return True
+    except Exception as e:
+        logger.debug('[Manager] abort tombstone row write failed task=%s: %s',
+                     task_id[:8], e)
+        return False
+
+
+def plant_abort_tombstone(task_id: str, *, source: str) -> bool:
+    """Record an abort request for a task the registry has lost.
+
+    Returns True only when a LIVE (status='running') task_results row exists
+    — the endpoint uses that to distinguish “signal planted” from a genuine
+    404 (no such task / already terminal).
+    """
+    if not task_id:
+        return False
+    live = _write_abort_tombstone_row(task_id, source)
+    if not live:
+        return False
+    with _abort_tombstones_lock:
+        if len(_abort_tombstones) >= _ABORT_TOMBSTONES_CAP:
+            logger.warning('[Manager] abort tombstone set at cap %d — clearing '
+                           'before insert (pathological volume)',
+                           _ABORT_TOMBSTONES_CAP)
+            _abort_tombstones.clear()
+        _abort_tombstones.add(task_id)
+    logger.info('[Manager] ⚠️ abort tombstone planted for task=%s (source=%s) — '
+                'registry lost this task; the live worker consumes the mark '
+                'at its next abort poll', task_id[:8], source)
+    try:
+        from lib.log import audit_log as _audit
+        _audit('task_abort_tombstone', task_id=task_id, source=source)
+    except Exception as _ae:
+        logger.debug('[Manager] tombstone audit failed: %s', _ae)
+    return True
+
+
+def plant_abort_tombstones_for_conv(conv_id: str, *, source: str) -> int:
+    """Tombstone every running DB row for ``conv_id`` the registry has lost.
+
+    Rows still IN the registry are skipped — the plain supersede/abort sweep
+    already flags them cooperatively.
+    """
+    if not conv_id:
+        return 0
+    try:
+        from lib.database import DOMAIN_CHAT, get_thread_db
+        db = get_thread_db(DOMAIN_CHAT)
+        rows = db.execute(
+            "SELECT task_id FROM task_results WHERE conv_id=? AND status='running'",
+            (conv_id,)).fetchall()
+    except Exception as e:
+        logger.warning('[Manager] conv tombstone scan failed conv=%s: %s',
+                       conv_id[:8], e)
+        return 0
+    n = 0
+    with tasks_lock:
+        live_ids = set(tasks.keys())
+    for r in rows:
+        tid = r['task_id'] if hasattr(r, 'keys') else r[0]
+        if tid and tid not in live_ids:
+            if plant_abort_tombstone(tid, source=source):
+                n += 1
+    if n:
+        logger.info('[Manager] conv=%s tombstoned %d registry-lost running '
+                    'task(s)', conv_id[:8], n)
+    return n
+
+
+def has_abort_tombstone(task_id: str) -> bool:
+    with _abort_tombstones_lock:
+        return task_id in _abort_tombstones
+
+
+def make_task_abort_check(task: dict):
+    """Build the abort_check closure for dispatch/stream retry loops.
+
+    ANDs three channels (pt_a21cd6eb ③-3):
+      1. the cooperative in-memory flag ``task['aborted']`` — the normal path;
+      2. the in-process tombstone set — an abort that arrived while the task
+         was MISSING from the registry (the 2026-08-01 evaporation family);
+      3. a throttled (>= ``_DB_TOMBSTONE_POLL_S``) read-back of the
+         task_results metadata tombstone — the cross-process leg.
+    The dispatch loop polls this every 429/retry cycle, so a tombstoned ghost
+    dies at its next cycle with the normal AbortedError unwind.
+    """
+    task_id = (task or {}).get('id', '')
+    _st = {'hit': False, 'last_db': 0.0}
+
+    def _check() -> bool:
+        if _st['hit']:
+            return True
+        if task.get('aborted'):
+            return True
+        with _abort_tombstones_lock:
+            if task_id in _abort_tombstones:
+                _st['hit'] = True
+                logger.info('[Task %s] abort tombstone consumed (in-memory '
+                            'channel) — aborting', task_id[:8])
+                return True
+        now = time.monotonic()
+        if now - _st['last_db'] >= _DB_TOMBSTONE_POLL_S:
+            _st['last_db'] = now
+            if _db_abort_tombstoned(task_id):
+                _st['hit'] = True
+                logger.info('[Task %s] abort tombstone consumed (db channel) '
+                            '— aborting', task_id[:8])
+                return True
+        return False
+
+    return _check
+
 
 def write_carrier_terminal_row(task, status: str) -> None:
     """Persist a terminal ``task_results`` row for a synchronous CARRIER task.
@@ -654,6 +842,42 @@ def snapshot_running_by_conv(user_id: str = '') -> dict[str, list[str]]:
             else:
                 ids.append(tid)
     return out
+
+
+def notify_terminal_busy_state(task) -> None:
+    """Push the authoritative busy projection for ``task``'s conversation AT
+    the task's terminal seam (epic pt_3ea0e045).
+
+    Before this, the busy channel's CLEAR signal rode only the NEXT incidental
+    conversation write (a checkpoint sync / a client PUT), and for the ~30s
+    the ``_finalize_started_at`` latch was held even those frames were forced
+    to say busy. Measured on conv ms91b45tva0sym (2026-08-01): the turn
+    settled at 09:20:43 (message fr=stop, footer painted) yet the sidebar
+    showed 回答中 and the composer showed Stop for 103s+, and every
+    click-open attached to the DEAD task and replayed its done — the exact
+    "finish tag vs generating" contradiction the owner reported. On a tab
+    busy with other conversations the designed fallback (the
+    ``_crossDeviceReconcile`` conv-state poll, gated on
+    ``activeStreams.size === 0``) starves, so without a frame the stale
+    badge survived until F5.
+
+    Called from the orchestrator's ``_finalize_and_emit_done`` (after the
+    latch pop — the autopilot hook has concluded by then, so a spawned VU
+    carrier is registered and projects itself as ``<tid>#vu``, and an
+    ordinary settle projects as IDLE) and from the endpoint loop's
+    ``_finalize`` (which holds no latch). ``rev=None`` deliberately: the
+    client applies the reducer half of a rev-less frame (busy update only)
+    without triggering a body refetch.
+    """
+    try:
+        conv_id = (task or {}).get('convId') or ''
+        if not conv_id:
+            return
+        from lib.conversations import notify_conv_changed
+        notify_conv_changed(conv_id, rev=None, user_id=task_user_id(task))
+    except Exception as e:
+        logger.debug('[Manager] terminal busy notify failed task=%s: %s',
+                     ((task or {}).get('id') or '?')[:8], e)
 
 
 def abort_running_tasks_for_conv(conv_id: str, exclude_task_id: str | None = None) -> int:

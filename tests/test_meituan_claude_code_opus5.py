@@ -43,6 +43,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 
+from lib.mcp.registry import is_opensource_build
+
 pytestmark = [pytest.mark.auth_mode('open'), pytest.mark.unit]
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -115,6 +117,9 @@ def _template_violations(models: list[dict]) -> list[str]:
 #  1. Template registration
 # ═══════════════════════════════════════════════════════════
 
+@pytest.mark.skipif(is_opensource_build(),
+                    reason='meituan.json is an internal provider template, '
+                           'not shipped in opensource builds')
 def test_template_carries_opus5_with_sibling_parity():
     tpl = _load_claude_code_template()
     violations = _template_violations(tpl.get('models') or [])

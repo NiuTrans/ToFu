@@ -76,6 +76,26 @@ _hwm_read_cache: dict[str, tuple[int, float]] = {}
 _last_turn_read_cache: dict[str, tuple[int, float]] = {}
 _hwm_lock = threading.Lock()
 
+# Per-conv throttle for write-failure warnings: the advance path is
+# best-effort and its failures were DEBUG-silent until 2026-08-01, which let
+# the durable floor die unnoticed on at least two production conversations
+# (cachePrefixHWM absent despite daily warm rounds — L1's guard then had no
+# durable backstop). A failure here DEGRADES protection (§2.2: degraded →
+# warning) but must not spam error.log on a strained DB — once per conv per
+# window.
+_WARN_THROTTLE_S = 600.0
+_warn_last: dict[str, float] = {}
+
+
+def _warn_throttled(conv_id: str, msg: str, *args) -> None:
+    now = time.time()
+    with _hwm_lock:
+        last = _warn_last.get(conv_id, 0.0)
+        if now - last < _WARN_THROTTLE_S:
+            return
+        _warn_last[conv_id] = now
+    logger.warning(msg, *args)
+
 
 def read_persisted_boundary(conv_id: str) -> int:
     """Return the durable high-water prefix boundary for ``conv_id`` (0 if
@@ -158,7 +178,9 @@ def advance_persisted_boundary(conv_id: str, boundary: int) -> None:
                     max(boundary, (_hwm_read_cache.get(conv_id) or (0, 0))[0]),
                     time.time() + _HWM_TTL_S)
     except Exception as e:
-        logger.debug('[CacheHWM] advance failed conv=%s: %s', conv_id[:8], e)
+        _warn_throttled(conv_id, '[CacheHWM] advance failed conv=%s: %s — '
+                        'durable prefix floor not written (in-memory guard '
+                        'still active)', conv_id[:8], e)
 
 
 def read_last_turn_cache_read(conv_id: str) -> int:
@@ -251,7 +273,9 @@ def write_last_turn_cache_read(conv_id: str, cache_read: int) -> None:
                 _last_turn_read_cache[conv_id] = (
                     cache_read, time.time() + _HWM_TTL_S)
     except Exception as e:
-        logger.debug('[CacheLastRead] write failed conv=%s: %s', conv_id[:8], e)
+        _warn_throttled(conv_id, '[CacheLastRead] write failed conv=%s: %s — '
+                        'durable round-1 baseline not written',
+                        conv_id[:8], e)
 
 
 def _reset_read_cache_for_tests() -> None:

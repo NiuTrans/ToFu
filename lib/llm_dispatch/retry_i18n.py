@@ -56,7 +56,7 @@ def cooldown_wait_label(causes: set) -> tuple:
 
     Precedence: shared-project contention > per-key rate-limit > generic
     backoff. Contention wins because it is the most actionable truth (the
-    whole (provider, model) family is parked by EXTERNAL saturation, not by
+    saturation is EXTERNAL — other tenants filled the shared pipe, not
     anything this key did). The contention token rides status_code 0 so
     retry_phase_fields takes the reason branch — a 429 status would swallow
     it into the generic rate-limited detailKey.

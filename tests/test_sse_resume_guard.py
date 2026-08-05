@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Incident anchor: born in commit ab99ef8b — checkpoint: accumulated work since last commit
+# (funeral audit pt_c565a36b3e8f42e6, docs/RATCHET_AUDIT.md)
 """Unit tests for the SSE warm-resume serviceability guard (routes/chat.py).
 
 Fix #1 of the sync-robustness pass (2026-06-25): a Last-Event-ID resume whose

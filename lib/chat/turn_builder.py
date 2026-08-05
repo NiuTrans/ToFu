@@ -387,6 +387,8 @@ def build_user_msg_from_payload(payload, config, conv_id=None):
         user_msg['images'] = payload['images']
     if payload.get('pdfTexts'):
         user_msg['pdfTexts'] = payload['pdfTexts']
+    if payload.get('videos'):
+        user_msg['videos'] = _sanitize_video_attachments(payload['videos'])
     if payload.get('replyQuotes'):
         user_msg['replyQuotes'] = payload['replyQuotes']
     if payload.get('convRefs'):
@@ -404,6 +406,46 @@ def build_user_msg_from_payload(payload, config, conv_id=None):
         user_msg['convRefTexts'] = conv_ref_texts
 
     return user_msg
+
+
+# Known keys of a video attachment (see lib/video_analysis). Anything else the
+# client sends is dropped — this payload is persisted and later expanded into
+# prompts, so it is treated as untrusted input.
+_VIDEO_ATTACHMENT_KEYS = (
+    'video_id', 'name', 'video_url', 'poster', 'duration_s', 'width', 'height',
+    'fps', 'frame_count', 'avg_frame_bytes',
+    'transcript', 'transcript_status', 'transcript_model',
+    'storyboard', 'storyboard_model',
+)
+
+
+def _sanitize_video_attachments(videos):
+    """Whitelist a client-supplied videos[] payload down to the known shape.
+
+    Frame URLs must be LOCAL durable ``/api/images/`` URLs — a frame is by
+    construction a server-side extraction, so a remote URL here is never
+    legitimate (and would let a client smuggle arbitrary remote images into
+    the prompt).
+    """
+    out = []
+    if not isinstance(videos, list):
+        return out
+    for v in videos:
+        if not isinstance(v, dict):
+            continue
+        entry = {k: v[k] for k in _VIDEO_ATTACHMENT_KEYS if k in v}
+        frames = v.get('frames')
+        if isinstance(frames, list):
+            entry['frames'] = [
+                {'url': f['url'], 't': f.get('t', 0),
+                 'bytes': int(f.get('bytes') or 0)}
+                for f in frames
+                if isinstance(f, dict)
+                and isinstance(f.get('url'), str)
+                and f['url'].startswith('/api/images/')
+            ]
+        out.append(entry)
+    return out
 
 
 def build_tool_history_round(batch):

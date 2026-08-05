@@ -30,7 +30,18 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from lib.mcp.registry import is_opensource_build
+
 _ZWSP = '​'
+
+# The provider-gate tests below pin the INTERNAL corp gateway (its provider
+# ids and host are sanitized to example-corp placeholders on opensource
+# export, and the exported gate literal + provider ids diverge by
+# construction). They stay live in the source tree; opensource CI skips them.
+_REQUIRES_INTERNAL_GATEWAY = pytest.mark.skipif(
+    is_opensource_build(),
+    reason='pins the internal corp gateway provider gate — the internal '
+           'gateway host/provider ids are not shipped in opensource builds')
 
 
 @pytest.mark.unit
@@ -78,7 +89,7 @@ class TestShippedZwspMap:
 class TestBuildBodyProviderGate:
     """The ``_pid == 'example-corp'`` gate in build_body decided which providers
     get the gateway keyword sanitizer. The 2026-07-28 Claude → Anthropic-
-    native migration created provider ``example-corp_anthropic`` (same aigc.example-corp
+    native migration created provider ``example_corp_anthropic`` (same aigc.example-corp
     .com gateway, different surface) — under exact-equality it silently LOST
     sanitization, re-exposing blocked-term conversations to intermittent
     HTTP 450. The gate must key on the gateway, not the provider id's exact
@@ -90,18 +101,20 @@ class TestBuildBodyProviderGate:
         k = next(iter(_GATEWAY_BLOCKED_TERMS))
         return k, _GATEWAY_BLOCKED_TERMS[k]
 
-    def test_example-corp_anthropic_provider_gets_sanitized(self):
+    @_REQUIRES_INTERNAL_GATEWAY
+    def test_example_corp_anthropic_provider_gets_sanitized(self):
         from lib.llm.body import build_body
         term, broken = self._term_and_broken()
         body = build_body('claude-opus-5',
                           [{'role': 'user', 'content': f'报道 {term} 的新闻'}],
-                          provider_id='example-corp_anthropic')
+                          provider_id='example_corp_anthropic')
         text = body['messages'][0]['content']
         assert term not in text and broken in text, (
-            'provider example-corp_anthropic rides the same your-llm-gateway.example.com '
+            'provider example_corp_anthropic rides the same your-llm-gateway.example.com '
             'gateway — its requests must get the ZWSP sanitizer')
 
-    def test_example-corp_provider_still_sanitized(self):
+    @_REQUIRES_INTERNAL_GATEWAY
+    def test_example_corp_provider_still_sanitized(self):
         from lib.llm.body import build_body
         term, broken = self._term_and_broken()
         body = build_body('claude-opus-5',

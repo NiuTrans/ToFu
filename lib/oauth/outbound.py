@@ -17,7 +17,7 @@ holds that spec in one place; the request pre-flight
   (Responses API; the body translation lives in
   ``lib/llm/responses_outbound`` and is gated on the provider's
   ``protocol='responses'`` — this spec writes exactly that). Token rides ``Authorization: Bearer``. The backend whitelists
-  first-party ``originator`` values, so ``originator: codex_cli_rs`` AND a
+  first-party ``originator`` values, so ``originator: codex-tui`` AND a
   matching ``User-Agent`` are BOTH required or it answers 403. The
   ChatGPT account id (parsed from the id_token JWT at login) goes in
   ``chatgpt-account-id``.
@@ -53,30 +53,50 @@ CLAUDE_CODE_IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude
 #: Claude Code version the whole cloaking spec is pinned to. The UA string
 #: and the cc_version billing field MUST move together — a mixed fingerprint
 #: (UA says one release, billing header another) is exactly what Anthropic's
-#: third-party detection looks for. Aligned with CLIProxyAPI
-#: ``DefaultClaudeVersion`` ("Values below match Claude Code 2.1.63 /
-#: @anthropic-ai/sdk 0.74.0").
-CLAUDE_CODE_VERSION = '2.1.63'
+#: third-party detection looks for. Sync source: CLIProxyAPI
+#: ``helps/claude_device_profile.go`` ("Values below match Claude Code
+#: 2.1.220 / @anthropic-ai/sdk 0.94.0"), last synced 2026-08-04 — drift is
+#: alarmed by tests/test_oauth_cloaking_drift.py, sync here deliberately.
+CLAUDE_CODE_VERSION = '2.1.220'
 
-#: Mandatory beta flags for the subscription-OAuth path, in Claude Code's
-#: own order (ported from CLIProxyAPI ``applyClaudeHeaders`` — the two
-#: Claude-Code betas lead; caller betas are appended after).
+#: X-Stainless device-profile kit (CLIProxyAPI ``ApplyClaudeDeviceProfileHeaders``
+#: — real 2.1.220 traffic carries all four; missing ones are a tell).
+_CLAUDE_STAINLESS_PACKAGE_VERSION = '0.94.0'
+_CLAUDE_STAINLESS_RUNTIME_VERSION = 'v26.3.0'
+_CLAUDE_STAINLESS_OS = 'MacOS'
+_CLAUDE_STAINLESS_ARCH = 'arm64'
+
+#: Mandatory beta flags for the subscription-OAuth path, in Claude Code
+#: 2.1.220's wire order (ported from CLIProxyAPI ``claudeCodeCLIBetas`` —
+#: OAuth/cli entrypoint, non-legacy system, no 1m variant, no fast mode,
+#: no diagnostics; caller betas are appended after). Dropped vs the 2.1.63
+#: port: structured-outputs / fast-mode moved to on-request-only upstream,
+#: token-efficient-tools no longer exists.
 _CLAUDE_OAUTH_BETAS = (
     'claude-code-20250219',
     'oauth-2025-04-20',
     'interleaved-thinking-2025-05-14',
+    'redact-thinking-2026-02-12',
+    'thinking-token-count-2026-05-13',
     'context-management-2025-06-27',
     'prompt-caching-scope-2026-01-05',
-    'structured-outputs-2025-12-15',
-    'fast-mode-2026-02-01',
-    'redact-thinking-2026-02-12',
-    'token-efficient-tools-2026-03-28',
+    'mid-conversation-system-2026-04-07',
+    'effort-2025-11-24',
+    'fallback-credit-2026-06-01',
+    'extended-cache-ttl-2025-04-11',
 )
 
+#: Emitted only when the request carries tools, inserted after
+#: mid-conversation-system at its captured wire position.
+_CLAUDE_TOOLS_BETA = 'advanced-tool-use-2025-11-20'
+
 #: ``originator`` is whitelisted by the Codex backend; the User-Agent must
-#: match (start with ``codex_cli_rs``) or the request is rejected with 403.
-_CODEX_ORIGINATOR = 'codex_cli_rs'
-_CODEX_USER_AGENT = 'codex_cli_rs/0.20.0 (external; Tofu)'
+#: match or the request is rejected with 403. Synced 2026-08-04: upstream
+#: moved from codex_cli_rs to codex-tui (CLIProxyAPI
+#: ``codex_executor_request.go`` — drift alarm in test_oauth_cloaking_drift).
+_CODEX_ORIGINATOR = 'codex-tui'
+_CODEX_USER_AGENT = ('codex-tui/0.146.0 (Mac OS 26.5.0; arm64) '
+                     'iTerm.app/3.6.10 (codex-tui; 0.146.0)')
 _CLAUDE_USER_AGENT = f'claude-cli/{CLAUDE_CODE_VERSION} (external, cli)'
 
 #: Provider-config ``oauth`` values this module knows how to bridge.
@@ -465,7 +485,8 @@ def resolve_oauth_request(oauth: str, body: dict, extra_headers: dict | None,
         if not token:
             raise RuntimeError('Claude subscription not logged in '
                                '(no valid OAuth token)')
-        hdrs['anthropic-beta'] = _merge_betas(hdrs.get('anthropic-beta', ''))
+        hdrs['anthropic-beta'] = _merge_betas(
+            hdrs.get('anthropic-beta', ''), has_tools=bool(body.get('tools')))
         hdrs['x-app'] = 'cli'
         hdrs['User-Agent'] = _CLAUDE_USER_AGENT
         # X-Stainless suite — Claude Code's official JS SDK markers.
@@ -473,12 +494,20 @@ def resolve_oauth_request(oauth: str, body: dict, extra_headers: dict | None,
         hdrs['X-Stainless-Runtime'] = 'node'
         hdrs['X-Stainless-Lang'] = 'js'
         hdrs['X-Stainless-Timeout'] = '600'
+        # Device-profile kit — real 2.1.220 traffic carries all four
+        # (CLIProxyAPI ApplyClaudeDeviceProfileHeaders; absence is a tell).
+        hdrs['X-Stainless-Package-Version'] = _CLAUDE_STAINLESS_PACKAGE_VERSION
+        hdrs['X-Stainless-Runtime-Version'] = _CLAUDE_STAINLESS_RUNTIME_VERSION
+        hdrs['X-Stainless-Os'] = _CLAUDE_STAINLESS_OS
+        hdrs['X-Stainless-Arch'] = _CLAUDE_STAINLESS_ARCH
         # Stable per-token session id + per-request id (CLIProxyAPI header kit).
         hdrs['X-Claude-Code-Session-Id'] = _session_id_for_token(token)
         hdrs['x-client-request-id'] = str(uuid.uuid4())
-        # NOTE: anthropic-dangerous-direct-browser-access is deliberately
-        # NOT sent — real Claude Code doesn't send it (API-key browser apps
-        # do; sending it here is a third-party tell).
+        # Flipped 2026-08-04 on CLIProxyAPI's live-capture evidence: its
+        # 2.1.220-verified kit SETS this header for third-party callers
+        # (identityHeader fallback 'true'), so real Claude Code sends it —
+        # our earlier "don't send" comment was the untested assumption.
+        hdrs['Anthropic-Dangerous-Direct-Browser-Access'] = 'true'
         return token, hdrs, body
 
     return None, hdrs, body
@@ -492,9 +521,17 @@ def claude_oauth_url(url: str) -> str:
     return f'{url}{sep}beta=true'
 
 
-def _merge_betas(existing: str) -> str:
-    """Lead with the full Claude-Code beta set, then any caller betas."""
+def _merge_betas(existing: str, has_tools: bool = False) -> str:
+    """Assemble the Claude Code 2.1.220 beta baseline in wire order, then
+    append caller betas. ``has_tools`` inserts ``advanced-tool-use`` at its
+    captured position (after mid-conversation-system). Deliberate divergence
+    from CLIProxyAPI: unknown caller betas are APPENDED (its executor drops
+    them on the Anthropic base) — Tofu features ride custom betas, dropping
+    would silently break them."""
     out = list(_CLAUDE_OAUTH_BETAS)
+    if has_tools:
+        out.insert(out.index('mid-conversation-system-2026-04-07') + 1,
+                   _CLAUDE_TOOLS_BETA)
     for b in (existing or '').split(','):
         b = b.strip()
         if b and b not in out:

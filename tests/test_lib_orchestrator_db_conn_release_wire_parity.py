@@ -1,3 +1,5 @@
+# Incident anchor: born in commit 8aa75140 — refactor(orchestrator): pt_03f4cdf1 slice 27 — extract per-round DB-c...
+# (funeral audit pt_c565a36b3e8f42e6, docs/RATCHET_AUDIT.md)
 """Wire-parity guards for pt_03f4cdf1 slice 27 — extract the per-round
 DB-connection checkpoint release from _run.py's stream loop into
 lib.tasks_pkg.orchestrator._db_conn_release.release_db_conn_checkpoint().

@@ -71,6 +71,8 @@ class Slot:
         # Defensive copy — prevent shared-reference bugs when
         # multiple Slots are built from the same caps set.
         self.capabilities = set(self.capabilities)
+        # Defensive copy — the marker is per-provider config state.
+        self.adapter = dict(self.adapter or {})
         # Reject typos at construction. We deliberately do NOT silently
         # coerce — a typo'd dialect would otherwise degrade to
         # auto-detect with zero feedback (the bug that motivated this
@@ -106,6 +108,15 @@ class Slot:
                                     # 'claude' / 'codex' = resolve a live token +
                                     # client-identity headers at request time
                                     # (see lib/oauth/outbound.py)
+    adapter: dict = field(default_factory=dict)
+                                    # subscription-ADAPTER marker for this slot:
+                                    # {} = normal provider reached directly (default)
+                                    # {'agent_id': …, 'port': …} = a CLIProxyAPI
+                                    # sidecar on the user's desktop agent — its
+                                    # base_url is loopback-ON-THE-AGENT, so the
+                                    # transport must ride lib.desktop.adapter's
+                                    # bridge relay (never route_request, never
+                                    # direct).
     stream_only: bool = False       # True if model only supports stream=True (e.g. qwq-plus, deepseek-reasoner)
 
     # ── Rate limiting ──
@@ -142,6 +153,13 @@ class Slot:
     # contention 429s crushed the card's success rate to 24% while the
     # genuine failure rate was ~1%).
     contention_errors: int = 0
+    # Gateway-class outages (HTTP 502/503/504, upstream-vendor transients
+    # wrapped in 4xx, mid-stream SSE errors). Counted separately for the
+    # same reason: a gateway storm hits EVERY key on the provider
+    # uniformly, so it says nothing about key health (2026-08-03 sankuai
+    # 502 storm: 813 such failures crushed the daily key-card success
+    # rates to 40%/77%/10% and auto-disabled 2 of 3 healthy keys).
+    gateway_errors: int = 0
     last_error_time: float = 0.0
     last_error_msg: str = ''
 
@@ -156,10 +174,10 @@ class Slot:
     # for EVERY cooldown wait, so a hard-error 300s backoff masqueraded as
     # 限流排队). One of: '' (none) / 'rate_limit' (per-key 429, 0.5s) /
     # 'upstream' (gateway 5xx, upstream-vendor transient, endpoint
-    # unreachable) / 'error' (consecutive-error backoff) / 'quota' (billing)
-    # / 'contention' (shared project-level TPM saturation by other tenants,
-    # escalated 2s→60s family window — see
-    # LLMDispatcher.note_shared_contention).
+    # unreachable) / 'error' (consecutive-error backoff) / 'quota' (billing).
+    # ('contention' retired 2026-08-03: shared-project 429s no longer park
+    # the family — LLMDispatcher.note_shared_contention is telemetry-only,
+    # owner directive: retry immediately with no backoff.)
     cooldown_reason: str = ''
 
     # ── Cost ──
@@ -327,10 +345,18 @@ class Slot:
     def record_error(self, is_rate_limit=False, error: str = '',
                      is_quota_exhausted: bool = False, is_gateway: bool = False,
                      is_shared_contention: bool = False,
-                     is_account_quota: bool = False):
+                     is_account_quota: bool = False,
+                     cooldown_s: float = None):
         """Call after a failed request.
 
         Args:
+            cooldown_s: Explicit cooldown duration (seconds) for rate-limit
+                class errors — used when the upstream TOLD us when the
+                window resets (OAuth-subscription quota:
+                ``RateLimitError.retry_after_s`` parsed from
+                ``resets_at``/``resets_in_seconds``). Overrides the generic
+                0.5s 429 steering nudge; None keeps the generic policy
+                (the 80431312 transient-429 behavior is untouched).
             is_rate_limit: True for HTTP 429/gateway-throttled errors — these
                 typically reflect contention, not key health, so they don't
                 count as failures in the daily success-rate tracker UNLESS
@@ -352,11 +378,14 @@ class Slot:
                 (2026-07-28 aggregating-gateway contract).
             is_gateway: True when the failure is an UPSTREAM outage class
                 (gateway 502/503/504, or an upstream-vendor transient wrapped
-                in a 4xx) rather than per-key contention. Such errors do not
-                feed the consecutive-429 telemetry streak in key_stats; they
-                are still recorded as ordinary failures via
-                record_outcome so the dead-key safety net (daily failure
-                stats) keeps working.
+                in a 4xx) rather than per-key contention. Such errors feed
+                NEITHER the consecutive-429 telemetry streak NOR the daily
+                failure stats — a gateway storm hits every key uniformly
+                and must never trip the auto-disable gate (2026-08-03
+                incident); they are counted on the separate
+                ``gateway_errors`` channel. The dead-key safety net lives
+                on the unchanged genuine-failure classes (401/403 auth
+                death, endpoint-unreachable).
             is_shared_contention: True when the 429 names a PROJECT-LEVEL
                 limit shared with other tenants of the gateway account
                 (RateLimitError.is_shared_contention). Counted into
@@ -374,6 +403,14 @@ class Slot:
                 # total_requests (record_request already added it) so the
                 # success-rate column reflects genuine outcomes only.
                 self.contention_errors += 1
+                self.total_requests = max(0, self.total_requests - 1)
+            elif is_gateway and not is_quota_exhausted:
+                # Gateway-class outage: the UPSTREAM is sick, not this key.
+                # Same accounting as contention — own counter + compensate
+                # the attempt out of total_requests — so an upstream storm
+                # never crushes the success-rate columns. A quota death
+                # keeps counting as a genuine error (billing is key health).
+                self.gateway_errors += 1
                 self.total_requests = max(0, self.total_requests - 1)
             else:
                 self.total_errors += 1
@@ -395,10 +432,23 @@ class Slot:
                 # then has to recover from at 1.1x.
                 if not is_shared_contention:
                     self.rpm_limit = max(5, self.rpm_limit * 0.8)
-                # Very brief cooldown — just enough to steer picker to
-                # another slot; the caller will keep cycling rapidly.
-                self.cooldown_until = time.time() + 0.5
-                self.cooldown_reason = 'upstream' if is_gateway else 'rate_limit'
+                if cooldown_s and cooldown_s > 0:
+                    # ★ Subscription-quota timed hold — the upstream named
+                    #   the reset time, so park the slot for exactly that
+                    #   long instead of the generic 0.5s steering nudge.
+                    #   Reason 'quota' (long hold — NOT worth a sticky-key
+                    #   wait), NOT 'rate_limit'.
+                    self.cooldown_until = time.time() + min(float(cooldown_s), 86400.0)
+                    self.cooldown_reason = 'quota'
+                    logger.warning('  ⏳ Slot %s:%s cooled down %.0fs '
+                                   '(subscription quota reset)',
+                                   self.key_name, self.model,
+                                   min(float(cooldown_s), 86400.0))
+                else:
+                    # Very brief cooldown — just enough to steer picker to
+                    # another slot; the caller will keep cycling rapidly.
+                    self.cooldown_until = time.time() + 0.5
+                    self.cooldown_reason = 'upstream' if is_gateway else 'rate_limit'
             elif self.consecutive_errors >= 3:
                 # Exponential backoff cooldown after repeated failures.
                 # Cap at 300s (5min) for sustained failures (e.g. DNS unreachable).
@@ -434,6 +484,18 @@ class Slot:
             # contention_errors counter above keeps the volume visible on
             # the model card.
             pass
+        elif is_gateway:
+            # Gateway-class outage — own daily counter ONLY. Feeding the
+            # failure stats here is what crushed all three sankuai key
+            # cards and auto-disabled two of them during the 2026-08-03
+            # 502 storm; feeding the 429 streak would equally misattribute
+            # an upstream outage to per-key contention.
+            try:
+                from lib.key_stats import record_gateway_error
+                record_gateway_error(self.provider_id, self.key_name,
+                                     reason=error or 'gateway 5xx')
+            except Exception as e:
+                logger.debug('[Slot] key_stats record_gateway_error failed: %s', e)
         elif is_rate_limit and not is_gateway:
             try:
                 from lib.key_stats import record_rate_limit
@@ -442,11 +504,12 @@ class Slot:
             except Exception as e:
                 logger.debug('[Slot] key_stats record_rate_limit failed: %s', e)
         else:
-            # Generic failure — and, since is_gateway=True also lands here,
-            # UPSTREAM outages too. record_outcome feeds the daily success-rate
-            # column (no auto-exhaust threshold), so the dead-key safety net
-            # keeps working while the consecutive-429 auto-exhaust streak is
-            # reserved for genuine per-key contention.
+            # Generic failure (auth death, endpoint-unreachable, hard 5xx
+            # that is not gateway-class). record_outcome feeds the daily
+            # success-rate column (no auto-exhaust threshold), so the
+            # dead-key safety net keeps working while the consecutive-429
+            # auto-exhaust streak is reserved for genuine per-key
+            # contention.
             try:
                 from lib.key_stats import record_outcome
                 record_outcome(self.provider_id, self.key_name,

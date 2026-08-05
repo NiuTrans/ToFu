@@ -59,10 +59,10 @@ nscd       60694  0.0  0.0 1235084 1428 ?        Ssl  Jul26   0:50 /usr/sbin/nsc
 root       60737  0.0  0.0  28800  2404 ?        Ss   Jul26   0:00 /usr/sbin/crond -n
 example-corp    61905  0.0  0.0 2879268 19568 ?       Sl   Jul26   0:07 /opt/yourprovider/apps/kms_agent/kms_agent
 root       63182  0.0  0.0   4168    60 ?        S    Jul26   0:00 supervise log_agent
-example-corp    63241  0.1  0.0 1944000 8404 ?        Sl   Jul26   3:10 ./bin/log_agent --conf=conf/log_agent_example-corp.conf --log_conf=conf/log4c.conf
+example-corp    63241  0.1  0.0 1944000 8404 ?        Sl   Jul26   3:10 ./bin/log_agent --conf=conf/log_agent_example_corp.conf --log_conf=conf/log4c.conf
 root       64205  0.0  0.0 737180 17948 ?        Ssl  Jul26   1:58 /opt/yourprovider/apps/direwolf/plugin/1002/dw_1002 -N2
 root       65063  0.0  0.0   4168    64 ?        S    Jul26   0:00 supervise log_agent_file
-example-corp    65181  0.1  0.0 670720  4624 ?        Sl   Jul26   2:56 ./bin/log_agent_file --log_conf=./conf/logconf.conf --conf=./conf/log_agent_file_example-corp.conf
+example-corp    65181  0.1  0.0 670720  4624 ?        Sl   Jul26   2:56 ./bin/log_agent_file --log_conf=./conf/logconf.conf --conf=./conf/log_agent_file_example_corp.conf
 example-corp    66884  0.0  0.0 716752  6376 ?        Sl   Jul26   0:03 /opt/yourprovider/apps/deploy/agent -cpu 1 -port 5087 -apiserverNameService prod-plus-apiserver -log-path /opt/logs/logs/plus_agent/agent.log
 example-corp    67887  0.1  0.0 113460  5524 ?        Sl   Jul26   2:38 /opt/yourprovider/apps/cplugin/cplugin
 example-corp    67911  0.0  0.0 178012 18352 ?        Sl   Jul26   0:28 octo_proxy_real -c /opt/yourprovider/apps/octo_proxy/bootstrap.yaml -l info --shm-dir /opt/yourprovider/apps/octo_proxy/socket --concurrency 2 --log-path /var/example-corp/logs/octo_proxy/proxy.log --restart-epoch 1

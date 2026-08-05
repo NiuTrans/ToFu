@@ -1,3 +1,5 @@
+# Incident anchor: born in commit 0d3f59bb — refactor(orchestrator): pt_03f4cdf1 slice 16 — extract live-tail tool...
+# (funeral audit pt_c565a36b3e8f42e6, docs/RATCHET_AUDIT.md)
 """Wire-parity guards for pt_03f4cdf1 slice 16 — extract the live-tail
 assistant/tool_call assembly + inter-round narration discard +
 incremental auto-translate submit cluster from _run.py's stream loop

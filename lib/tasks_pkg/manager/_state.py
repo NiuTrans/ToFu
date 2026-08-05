@@ -52,6 +52,19 @@ tasks_lock = _chat_runtime._lock  # type: ignore[attr-defined]
 _conv_latest_task = {}   # conv_id → task_id
 _conv_latest_task_lock = threading.Lock()
 
+# ── Abort tombstones (pt_a21cd6eb ③-3) ──
+# An abort that arrives while the target task is MISSING from ``tasks`` (the
+# 2026-08-01 evaporation: live carrier/worker unreachable by every abort
+# endpoint — 404 / aborted:0 while the thread kept cycling) is recorded here
+# instead of being dropped. The running task's abort_check
+# (``make_task_abort_check``) consults this set every retry cycle, so the
+# abort signal reaches the worker even when the registry lost it. Ids are
+# uuids — no reuse — and tombstones are only minted on registry-miss aborts,
+# so the set stays tiny; a hard cap guards the pathological case.
+_abort_tombstones = set()   # task_id
+_abort_tombstones_lock = threading.Lock()
+_ABORT_TOMBSTONES_CAP = 1024
+
 # ── Cross-replica supersede index (Epic C §4.3) ──
 # The freshness guard's "newest task for this conv" must be authoritative
 # ACROSS replicas so a stale task on replica A recognises that replica B
@@ -96,6 +109,37 @@ def _record_latest_task(conv_id: str, task_id: str) -> None:
     except Exception as e:
         logger.debug('[Task] supersede index mirror failed conv=%s: %s',
                      conv_id[:8], e)
+
+
+def _clear_latest_task(conv_id: str, *, expect_task_id: str | None = None) -> bool:
+    """Clear a conv's latest-task pointer in BOTH the local dict and the
+    store mirror. Returns True when the local entry was removed.
+
+    Every deletion of the local entry MUST go through here:
+    ``_record_latest_task`` dual-writes the store mirror (TTL 1h), so a
+    local-only delete leaves the store-backed ``_latest_task_for_conv``
+    returning the corpse for up to an hour — a discarded VU carrier keeps
+    "owning" the conv on every store-backed freshness read (the msb6ohqi
+    2026-08-02 stall class). With ``expect_task_id`` the local entry is
+    cleared only when it still names that task (the compare-and-delete
+    discipline discard_task already had); the mirror is invalidated
+    unconditionally — the store offers no compare-and-delete, and a
+    wrong-mirror delete only costs one read falling back to the local dict.
+    """
+    removed = False
+    with _conv_latest_task_lock:
+        if expect_task_id is None:
+            removed = _conv_latest_task.pop(conv_id, None) is not None
+        elif _conv_latest_task.get(conv_id) == expect_task_id:
+            del _conv_latest_task[conv_id]
+            removed = True
+    try:
+        from lib.runtime_state_store import get_store
+        get_store().delete_value(_LATEST_KIND, conv_id)
+    except Exception as e:
+        logger.debug('[Task] supersede index mirror clear failed conv=%s: %s',
+                     conv_id[:8], e)
+    return removed
 
 
 def _latest_task_for_conv(conv_id: str):

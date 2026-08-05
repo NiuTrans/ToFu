@@ -30,11 +30,13 @@ from lib.browser.queue import send_browser_command  # noqa: F401
 
 # ── Re-export every handler from its sub-module (facade) ────────────────────
 from lib.browser.handlers._tabs import (  # noqa: E402,F401
+    _extract_best_text,
     _handle_list_tabs,
     _handle_read_tab,
     _handle_create_tab,
     _handle_close_tab,
     _handle_navigate,
+    _render_read_result,
 )
 from lib.browser.handlers._interact import (  # noqa: E402,F401
     _handle_get_interactive_elements,
@@ -42,6 +44,8 @@ from lib.browser.handlers._interact import (  # noqa: E402,F401
     _handle_keyboard,
     _handle_hover,
     _handle_wait,
+    _handle_type,
+    _handle_press_key,
 )
 from lib.browser.handlers._capture import (  # noqa: E402,F401
     _handle_execute_js,
@@ -52,6 +56,10 @@ from lib.browser.handlers._capture import (  # noqa: E402,F401
 from lib.browser.handlers._page import (  # noqa: E402,F401
     _handle_summarize_page,
     _handle_get_app_state,
+    _handle_read_page,
+)
+from lib.browser.handlers._preview import (  # noqa: E402,F401
+    _handle_preview_page,
 )
 
 __all__ = [
@@ -60,5 +68,7 @@ __all__ = [
     '_handle_create_tab', '_handle_close_tab', '_handle_navigate',
     '_handle_get_interactive_elements', '_handle_click', '_handle_keyboard',
     '_handle_hover', '_handle_wait', '_handle_summarize_page',
-    '_handle_get_app_state',
+    '_handle_get_app_state', '_handle_preview_page',
+    '_handle_read_page', '_handle_type', '_handle_press_key',
+    '_extract_best_text', '_render_read_result',
 ]

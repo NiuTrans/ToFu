@@ -10,11 +10,12 @@ Split from the original monolithic common.py:
 import json
 import os
 import re
+import threading
 import time
 from functools import wraps
 
 import sqlite3
-from flask import Blueprint, Response, jsonify, make_response, request, send_from_directory
+from flask import Blueprint, Response, make_response, request, send_from_directory
 
 import lib as _lib  # module ref for hot-reload
 from lib.css_bundler import (
@@ -29,7 +30,9 @@ from lib.js_bundler import (
     get_i18n_pack_urls as _get_i18n_pack_urls,
 )
 from lib.log import get_logger
-from lib.api_response import api_bad_request, api_internal_error, api_ok
+from lib.api_response import (
+    api_bad_request, api_error, api_internal_error, api_ok,
+)
 from lib.request_parser import parse_body
 
 logger = get_logger(__name__)
@@ -57,11 +60,10 @@ def _db_safe(fn):
         if 'database is locked' in err_msg:
             logger.warning('[%s] DB locked during %s %s — returning 503: %s',
                            fn.__name__, request.method, request.path, e)
-            return jsonify({
-                'error': 'database_busy',
-                'message': 'Database temporarily busy, please retry.',
-                'retryAfter': 2,
-            }), 503
+            return api_error(
+                'database_busy', status=503,
+                message='Database temporarily busy, please retry.',
+                retryAfter=2)
         logger.error('[%s] DB error during %s %s: %s',
                      fn.__name__, request.method, request.path, e, exc_info=True)
         raise e
@@ -219,7 +221,7 @@ def log_compress():
             content = re.sub(r'^```[^\n]*\n', '', content)
             content = re.sub(r'\n```\s*$', '', content)
             content = content.strip()
-        return jsonify({'compressed': content, 'usage': usage})
+        return api_ok({'compressed': content, 'usage': usage})
     except Exception as e:
         logger.error('[LogCompress] Error: %s', e, exc_info=True)
         return api_internal_error('internal_error')
@@ -233,14 +235,14 @@ def log_compress():
 @api_v1_common_bp.route('/api/v1/pricing/data', methods=['GET'])
 def pricing_data():
     from lib.pricing import get_pricing_data
-    return jsonify(get_pricing_data())
+    return api_ok(get_pricing_data())
 
 @api_v1_common_bp.route('/api/v1/pricing/refresh', methods=['POST'])
 def pricing_refresh():
     from lib.pricing import get_pricing_data, refresh_pricing_async
     logger.info('[pricing_refresh] Triggered pricing data refresh')
     refresh_pricing_async()
-    return jsonify(get_pricing_data())
+    return api_ok(get_pricing_data())
 
 
 # ══════════════════════════════════════════════════════
@@ -267,10 +269,10 @@ def dispatch_quota():
         slots = d.get_slots_info()
     except Exception as e:
         logger.warning('[dispatch/quota] Failed to get dispatcher info: %s', e)
-        return jsonify({'models': {}, 'total_requests_5h': 0, 'total_requests_all': 0})
+        return api_ok({'models': {}, 'total_requests_5h': 0, 'total_requests_all': 0})
 
     from lib.dispatch_stats import aggregate_quota_by_model
-    return jsonify(aggregate_quota_by_model(slots))
+    return api_ok(aggregate_quota_by_model(slots))
 
 
 # ══════════════════════════════════════════════════════
@@ -316,10 +318,10 @@ def dispatch_endpoint_metrics():
         slots = d.get_slots_info()
     except Exception as e:
         logger.warning('[dispatch/endpoint-metrics] Failed: %s', e, exc_info=True)
-        return jsonify({'endpoints': {}, 'ts': time.time()})
+        return api_ok({'endpoints': {}, 'ts': time.time()})
 
     from lib.dispatch_stats import aggregate_endpoint_metrics
-    return jsonify(aggregate_endpoint_metrics(slots))
+    return api_ok(aggregate_endpoint_metrics(slots))
 
 
 @api_v1_common_bp.route('/api/v1/dispatch/model-health', methods=['GET'])
@@ -338,10 +340,10 @@ def dispatch_model_health():
         slots = d.get_slots_info()
     except Exception as e:
         logger.warning('[dispatch/model-health] Failed: %s', e, exc_info=True)
-        return jsonify({'providers': {}, 'ts': time.time()})
+        return api_ok({'providers': {}, 'ts': time.time()})
 
     from lib.dispatch_stats import aggregate_model_health
-    return jsonify(aggregate_model_health(slots))
+    return api_ok(aggregate_model_health(slots))
 
 
 @api_v1_common_bp.route('/api/v1/dispatch/key-stats', methods=['GET'])
@@ -370,11 +372,11 @@ def dispatch_key_stats():
         snapshot = get_all_stats()
     except Exception as e:
         logger.warning('[dispatch/key-stats] Failed: %s', e, exc_info=True)
-        return jsonify({'day': '', 'providers': {},
+        return api_ok({'day': '', 'providers': {},
                         'min_attempts': 5, 'min_success_rate': 0.5})
 
     from lib.dispatch_stats import group_key_stats_by_provider
-    return jsonify(group_key_stats_by_provider(snapshot))
+    return api_ok(group_key_stats_by_provider(snapshot))
 
 
 @api_v1_common_bp.route('/api/v1/dispatch/key-override', methods=['POST'])
@@ -719,7 +721,7 @@ def features():
             out[f.json_key] = bool(getattr(_lib, f.env_key, f.default))
     except Exception as e:
         logger.debug('[features] plugin flags unavailable: %s', e)
-    return jsonify(out)
+    return api_ok(out)
 
 
 @api_v1_common_bp.route('/api/v1/features', methods=['POST'])
@@ -754,6 +756,58 @@ def client_error():
     else:
         logger.error('%s', ' | '.join(log_parts))
     return api_ok()
+# ── DB liveness probe, DECOUPLED from /api/health (pt_afbaf3d7 ②) ─────────
+# /api/health is the frontend's offline ARBITER (backend_offline_monitor: two
+# failed probes → the red "backend offline" banner). It used to run
+# ``SELECT 1`` INLINE, so a PG-on-FUSE stall (measured 4–7s Slow queries in
+# error.log) pushed the health answer past the frontend's 3–4s probe budget —
+# the banner went up while the process was perfectly alive. Liveness must
+# never wait on disk I/O: ``db_responsive`` is refreshed by a daemon thread on
+# a TTL and served from cache. The ONE bounded wait is the cold-start join, so
+# the install-time runtime probe (healthcheck.py --runtime) still gets a real
+# verdict on a healthy box without re-opening the stall window (2s ≪ 3s/4s).
+_db_probe_cache = {'at': 0.0, 'responsive': None, 'error': '', 'ever': False}
+_db_probe_lock = threading.Lock()
+_DB_PROBE_TTL_S = 10.0
+_DB_PROBE_COLD_JOIN_S = 2.0
+
+
+def _refresh_db_probe():
+    """Daemon-thread body: the ONE place a health-driven SELECT 1 runs."""
+    try:
+        from lib.database import get_thread_db
+        get_thread_db().execute('SELECT 1').fetchone()
+        _db_probe_cache['responsive'] = True
+        _db_probe_cache['error'] = ''
+    except Exception as e:
+        _db_probe_cache['responsive'] = False
+        _db_probe_cache['error'] = str(e)[:200]
+        logger.warning('[Health] background DB probe failed: %s', e)
+    finally:
+        _db_probe_cache['ever'] = True
+        _db_probe_cache['at'] = time.time()
+
+
+def _db_responsive_for_health():
+    """Kick a background refresh when the cache is stale; never blocks beyond
+    the one-time cold-start join."""
+    spawn = False
+    with _db_probe_lock:
+        if time.time() - _db_probe_cache['at'] >= _DB_PROBE_TTL_S:
+            # Mark refresh-in-progress BEFORE spawning so a concurrent health
+            # request doesn't spawn a second probe thread.
+            _db_probe_cache['at'] = time.time()
+            spawn = True
+    if not spawn:
+        return
+    t = threading.Thread(target=_refresh_db_probe, daemon=True,
+                         name='health-db-probe')
+    t.start()
+    if not _db_probe_cache['ever']:
+        # Cold start only: bound the wait so the very first verdict is REAL.
+        t.join(timeout=_DB_PROBE_COLD_JOIN_S)
+
+
 @common_bp.route('/api/health')
 def health_check():
     from lib.database import _BACKEND, db_available
@@ -793,18 +847,16 @@ def health_check():
     # which previously mislabeled every PostgreSQL deployment as sqlite.
     result['db_engine'] = 'postgresql' if _BACKEND == 'pg' else 'sqlite'
 
-    # Quick DB connectivity check
+    # DB connectivity — served from the background-probe cache (see above).
+    # Deliberately does NOT flip result['ok']: `ok` reports PROCESS liveness
+    # (what the offline arbiter consumes); a stalled DB degrades
+    # db_responsive, never the liveness verdict.
     if db_available:
-        try:
-            from lib.database import get_db
-            db = get_db()
-            db.execute('SELECT 1').fetchone()
-            result['db_responsive'] = True
-        except Exception as e:
-            result['db_responsive'] = False
-            result['db_error'] = str(e)[:200]
-            result['ok'] = False
-            logger.warning('[Health] DB connectivity check failed: %s', e)
+        _db_responsive_for_health()
+        if _db_probe_cache['responsive'] is not None:
+            result['db_responsive'] = _db_probe_cache['responsive']
+            if _db_probe_cache['error']:
+                result['db_error'] = _db_probe_cache['error']
 
     try:
         from lib.cross_dc import get_status
@@ -813,7 +865,7 @@ def health_check():
             result['cross_dc'] = cross_dc
     except Exception as e:
         logger.debug('[Health] cross_dc status unavailable: %s', e)
-    return jsonify(result)
+    return api_ok(result)
 
 @common_bp.route('/favicon.ico')
 @common_bp.route('/favicon.svg')

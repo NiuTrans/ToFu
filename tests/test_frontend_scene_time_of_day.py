@@ -28,18 +28,20 @@ The scene now washes its palette toward a per-bucket tint. What these tests pin:
 """
 import json
 import re
-import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
 
+from tests._jsdom import frontend_module_guard
+
 REPO = Path(__file__).resolve().parent.parent
 SCENE_JS = REPO / "static" / "js" / "tofu-scene.js"
 PET_JS = REPO / "static" / "js" / "tofu-pet.js"
 
-if shutil.which("node") is None:  # pragma: no cover - env gate
-    pytest.skip("node not on PATH", allow_module_level=True)
+# P0-1: node absent → clean skip normally, collection-red under
+# TOFU_REQUIRE_FRONTEND=1 (docs/TESTING_STRATEGY.md §4).
+frontend_module_guard()
 
 pytestmark = pytest.mark.unit
 

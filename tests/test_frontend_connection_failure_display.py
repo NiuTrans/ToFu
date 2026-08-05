@@ -4,7 +4,7 @@ STALE / WRONG state after the server or DB recovers.
 Two accuracy defects fixed 2026-07-06 (audited by a 3-way parallel sweep):
 
 1. DB-UNAVAILABLE BANNER LINGERED FOREVER.
-   ``_checkDbHealth`` (static/js/core/health_stream_timer.js) only ever ADDED
+   ``_checkDbHealth`` (now static/js/core/backend_offline_monitor.js) only ever ADDED
    the red "Database Unavailable" banner — there was no clear-on-recovery and
    no re-poll. Once PostgreSQL came back (documented recovery = server restart
    with PG up) the banner stayed until the user manually dismissed or reloaded,
@@ -136,6 +136,7 @@ global.twStop = win.twStop = () => {};
 global.finishStream = win.finishStream = () => {};
 global._startOfflineRecoveryPolling = win._startOfflineRecoveryPolling = () => {};
 
+eval(fs.readFileSync(process.argv[5], 'utf8'));  // core/backend_offline_monitor.js (real — _checkDbHealth + _checkServerHealth live here since 2026-08-01)
 eval(fs.readFileSync(process.argv[2], 'utf8'));  // core/health_stream_timer.js (real)
 
 if (typeof _checkDbHealth !== 'function') { console.log('FAIL fn_checkDbHealth missing'); process.exit(0); }
@@ -293,9 +294,17 @@ global.escapeHtml = win.escapeHtml = (s) => String(s == null ? '' : s)
 eval(fs.readFileSync(process.argv[4], 'utf8'));  // i18n.js
 if (typeof t !== 'function' && typeof win.t === 'function') { global.t = win.t; }
 
+// The monitor defines _checkServerHealth + the health-cache state the timer
+// file touches (its self-registered pageshow/visibilitychange listeners fire
+// in jsdom, and the still-working branch reads _HEALTH_CHECK_INTERVAL).
+// eval BOTH files in ONE scope: `let`/`const` declared in a direct eval stay
+// in that eval's own declarative record, so separate evals would hide the
+// monitor's consts from the timer file — the bundle shares ONE lexical scope
+// across concatenated scripts, and this mirrors it.
 // _streamTimers is a file-scoped `const` (not reachable from here). Append a
 // bridge in the SAME eval scope that exposes a seeder onto globalThis.
-eval(fs.readFileSync(process.argv[2], 'utf8') +
+eval(fs.readFileSync(process.argv[5], 'utf8') + '\n;\n' +
+     fs.readFileSync(process.argv[2], 'utf8') +
      '\n;globalThis.__seedTimer = (cid, o) => _streamTimers.set(cid, o);');
 
 if (typeof _updateStreamTimerUI !== 'function') { console.log('FAIL fn missing'); process.exit(0); }
@@ -353,10 +362,11 @@ def test_db_banner_clears_on_recovery():
     with open(harness, 'w') as f:
         f.write(_DB_HARNESS)
     src = os.path.join(JS_DIR, 'core', 'health_stream_timer.js')
+    monitor = os.path.join(JS_DIR, 'core', 'backend_offline_monitor.js')
     i18n = os.path.join(JS_DIR, 'i18n.js')
     try:
         proc = subprocess.run(
-            ['node', harness, src, ROOT, i18n],
+            ['node', harness, src, ROOT, i18n, monitor],
             capture_output=True, text=True, timeout=60,
         )
     finally:
@@ -408,10 +418,11 @@ def test_stream_hud_renders_zh_on_dead_server():
     with open(harness, 'w') as f:
         f.write(_HUD_HARNESS)
     src = os.path.join(JS_DIR, 'core', 'health_stream_timer.js')
+    monitor = os.path.join(JS_DIR, 'core', 'backend_offline_monitor.js')
     i18n = os.path.join(JS_DIR, 'i18n.js')
     try:
         proc = subprocess.run(
-            ['node', harness, src, ROOT, i18n],
+            ['node', harness, src, ROOT, i18n, monitor],
             capture_output=True, text=True, timeout=60,
         )
     finally:

@@ -59,7 +59,7 @@ def _call_podcast_poll(app, task_id, cursor=0):
     async def _run():
         async with app.test_request_context(
                 f'/api/v1/paper/podcast/poll?task_id={task_id}&cursor={cursor}'):
-            resp = poll_podcast_task()
+            resp = await poll_podcast_task()  # async since the Quart migration
             body = resp[0] if isinstance(resp, tuple) else resp
             return await body.get_json()
 
@@ -186,7 +186,7 @@ def test_video_lookup_running_branch_carries_clock():
         async def _run():
             async with app.test_request_context(
                     f'/api/v1/paper/video/lookup?paper_hash={phash}'):
-                resp = lookup_video_abstract()
+                resp = await lookup_video_abstract()  # async (Quart migration)
                 body = resp[0] if isinstance(resp, tuple) else resp
                 return await body.get_json()
 
@@ -253,7 +253,7 @@ def _call_video_lookup(phash):
     async def _run():
         async with app.test_request_context(
                 f'/api/v1/paper/video/lookup?paper_hash={phash}'):
-            resp = lookup_video_abstract()
+            resp = await lookup_video_abstract()  # async (Quart migration)
             body = resp[0] if isinstance(resp, tuple) else resp
             return await body.get_json()
 

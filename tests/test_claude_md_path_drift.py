@@ -1,3 +1,5 @@
+# Incident anchor: born in commit 4ae62fe4 — test(docs): guard CLAUDE.md against path drift; fix 8 stale references
+# (funeral audit pt_c565a36b3e8f42e6, docs/RATCHET_AUDIT.md)
 """CLAUDE.md path-drift guard.
 
 Why this exists
@@ -44,6 +46,17 @@ import re
 import subprocess
 
 import pytest
+
+from lib.mcp.registry import is_opensource_build
+
+# CLAUDE.md is an internal working doc and is deliberately NOT shipped in
+# opensource exports — every test in this file guards its path references,
+# so the whole module self-skips there.
+pytestmark = [
+    pytest.mark.unit,
+    pytest.mark.skipif(is_opensource_build(),
+                       reason='CLAUDE.md is not shipped in opensource builds'),
+]
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))

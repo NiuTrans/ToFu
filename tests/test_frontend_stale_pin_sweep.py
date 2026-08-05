@@ -169,7 +169,10 @@ function reset() {
   check('A_before_viewed_idle', convIsBusy(viewed) === false);
 
   // /active reports NOTHING running (the task was reaped + dropped).
-  const cleared = _reconcileStuckActiveTaskPins([]);
+  // 2nd arg: the conv-state projection — REQUIRED fail-safe since the
+  // carrier-aware fix; `{}` + no _authoritativeActiveTaskIds = no carrier
+  // alibi, so a genuinely dead pin is still reclaimed.
+  const cleared = _reconcileStuckActiveTaskPins([], {});
 
   if (process.env.NEUTER === '1') {
     // Neutered: the sweep is a no-op → the stale pin persists → still busy.
@@ -200,7 +203,7 @@ function reset() {
   global.activeConvId = null;
   const cleared = _reconcileStuckActiveTaskPins([
     { id: 'task-alive-1', status: 'running', aborted: false },
-  ]);
+  ], {});
   check('B_alive_not_swept', cleared === 0);
   check('B_alive_pin_kept', bg.activeTaskId === 'task-alive-1');
   check('B_alive_still_busy', convIsBusy(bg) === true);
@@ -212,7 +215,7 @@ function reset() {
   const bg = { id: 'conv-bg-failsafe', activeTaskId: 'task-x',
                messages: [{ role: 'assistant', content: 'partial' }] };
   conversations.push(bg);
-  const cleared = _reconcileStuckActiveTaskPins(null);
+  const cleared = _reconcileStuckActiveTaskPins(null, {});
   check('C_failsafe_no_clear', cleared === 0 && bg.activeTaskId === 'task-x');
 }
 
@@ -223,7 +226,7 @@ function reset() {
                messages: [{ role: 'assistant', content: '' }] };
   conversations.push(bg);
   activeStreams.set('conv-live-stream', { controller: { abort: () => {} } });
-  const cleared = _reconcileStuckActiveTaskPins([]);  // task not in running set…
+  const cleared = _reconcileStuckActiveTaskPins([], {});  // task not in running set…
   check('D_livestream_not_swept', cleared === 0 && bg.activeTaskId === 'task-live-stream');
 }
 

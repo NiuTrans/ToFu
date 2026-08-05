@@ -227,8 +227,9 @@ def handle_task_fatal(task: dict[str, Any], e: Exception) -> bool:
 
     NOTE: the caller is responsible for calling this from INSIDE an
     ``except Exception:`` block so ``e`` is bound. This helper does
-    NOT re-raise — the caller does not need to either; the
-    non-Exception ``BaseException`` handler stays inline in run_task.
+    NOT re-raise — the caller does not need to either. The
+    non-Exception ``BaseException`` handler lives in
+    :func:`handle_task_base_exception` below (slice 34).
     """
     _tid8 = (task.get('id', '?') or '?')[:8]
     logger.error('[Orchestrator] run_task FATAL error task=%s', _tid8, exc_info=True)
@@ -329,4 +330,47 @@ def handle_task_fatal(task: dict[str, Any], e: Exception) -> bool:
     return False
 
 
+def handle_task_base_exception(task: dict[str, Any], be: BaseException) -> None:
+    """Non-Exception fatal handler (KeyboardInterrupt / SystemExit /
+    asyncio.CancelledError — all derive from BaseException, NOT
+    Exception, so they slip past :func:`handle_task_fatal`).
+
+    Extracted 2026-08-01 (pt_03f4cdf1 slice 34) from run_task's
+    ``except BaseException as be:`` branch. Without this path the task
+    would stay NON-TERMINAL forever — stranding its admission slot AND
+    (on the headless API) its billing reservation until the slot TTL /
+    janitor reclaims them. Emits the terminal DONE(error) so the
+    terminal-callback chain (release slot + settle billing via
+    on_terminal) still fires, then the CALLER re-raises to preserve the
+    cancel/shutdown semantics.
+
+    Contract: ERROR log first; stamp the internal envelope
+    ('Task terminated: <Type>'); DONE event + persist ONLY when NOT
+    endpoint-managed; every finalize step wrapped so a failure there
+    logs but never masks the original BaseException. This function
+    never returns normally — it always raises ``be`` after the
+    best-effort finalize.
+    """
+    logger.error('[Orchestrator] run_task FATAL BaseException task=%s: %s',
+                 task.get('id', '?')[:8], type(be).__name__, exc_info=True)
+    try:
+        from lib.error_envelope import make_envelope as _make_env
+        task['error'] = _make_env(
+            'internal', detail=f'Task terminated: {type(be).__name__}',
+            model=task.get('config', {}).get('model', ''),
+            context='task-fatal-base', source='orchestrator', raw=str(be))
+        task['status'] = 'error'
+        task['finishReason'] = 'error'
+        if not task.get('_endpoint_managed'):
+            append_event(task, build_event(
+                EventType.DONE, error=task['error'], finishReason='error'))
+            persist_task_result(task)
+    except Exception as _fin_err:
+        logger.error('[Orchestrator] BaseException terminal-finalize failed '
+                     'task=%s: %s', task.get('id', '?')[:8], _fin_err,
+                     exc_info=True)
+    raise be
+
+
+__all__ = ['finalize_after_loop', 'handle_task_fatal', 'handle_task_base_exception']
 __all__ = ['finalize_after_loop', 'handle_task_fatal']

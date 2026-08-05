@@ -70,7 +70,6 @@ already wired through ``task['aborted']`` and the freshness guard in
 from __future__ import annotations
 
 import hashlib
-import json
 import threading
 import time
 import uuid
@@ -127,16 +126,16 @@ logger.info('[Autopilot] VU prompt v%s loaded', VU_PROMPT_VERSION)
 # steering, verified by
 # tests/test_autopilot_state_extraction_wire_parity.py.
 from lib.tasks_pkg.autopilot_state import (  # noqa: E402
-    _VU_HISTORY_CAP,
-    _PROGRESS_LEDGER_CAP,
-    _extract_objective,
-    _extract_objective_from_db,
+    _VU_HISTORY_CAP,  # noqa: F401  (re-export facade attr)
+    _PROGRESS_LEDGER_CAP,  # noqa: F401  (re-export facade attr)
+    _extract_objective,  # noqa: F401  (re-export facade attr)
+    _extract_objective_from_db,  # noqa: F401  (re-export facade attr)
     _get_or_persist_objective,
     _get_or_persist_run_id,
     _record_vu_turn_and_check_budget,
     _clear_run_id,
-    _resolve_recent_run_id,
-    _resolve_run_anchor_msgid,
+    _resolve_recent_run_id,  # noqa: F401  (re-export facade attr)
+    _resolve_run_anchor_msgid,  # noqa: F401  (re-export facade attr)
 )
 # ── pt_00459503 slice 3 — extracted run close-out cluster ────────────
 #
@@ -154,8 +153,8 @@ from lib.tasks_pkg.autopilot_state import (  # noqa: E402
 # ``conclude_run`` at MODULE TOP and no cycle exists.
 from lib.tasks_pkg.autopilot_run_lifecycle import (  # noqa: E402
     _store_run_record,
-    _emit_run_concluded,
-    conclude_run,
+    _emit_run_concluded,  # noqa: F401  (re-export facade attr)
+    conclude_run,  # noqa: F401  (re-export facade attr)
     _emit_run_concluded_event,
 )
 
@@ -212,8 +211,8 @@ def is_autopilot_enabled(task: dict) -> bool:
 # ``make_vu_event_transform`` — the carrier's own stream now carries the
 # full VU contract, see the leaf docstring.)
 from lib.tasks_pkg.autopilot_event_forwarding import (  # noqa: E402
-    _VU_FORWARD_TYPES,
-    _VU_LIFECYCLE_TYPES,
+    _VU_FORWARD_TYPES,  # noqa: F401  (re-export facade attr)
+    _VU_LIFECYCLE_TYPES,  # noqa: F401  (re-export facade attr)
     make_vu_event_transform,
     _emit_vu_setup_phase,
 )
@@ -582,6 +581,19 @@ def run_virtual_user(task: dict, vu_msg_id: str | None = None) -> dict | None:
         logger.info('[Autopilot %s] VU sub-task %s preempted by a real queued '
                     'message — deferring immediately (queue dispatch takes over)',
                     tid, sub_task.get('id', '?')[:8])
+        return None
+
+    # A PLAIN user Stop lands on the CARRIER, not the parent: while the VU
+    # thinks, the client is attached to the carrier stream, so the stop
+    # button aborts the sub-task itself. Falling through here reads the
+    # corpse's empty content as a valid "keep going" reply — an EMPTY VU
+    # row got appended and a follow-up spawned on top of it, forcing the
+    # user to stop THAT task too (ms9ow2tt 2026-08-01, 19 convs affected).
+    # An aborted sub-task is a failed sub-task: stop the run. The marker
+    # stays armed, same semantics as the parent-abort branch below.
+    if sub_task.get('aborted'):
+        logger.info('[Autopilot %s] VU sub-task %s aborted (user stop) — '
+                    'stopping the run', tid, sub_task.get('id', '?')[:8])
         return None
 
     if task.get('aborted'):
@@ -991,6 +1003,18 @@ def _maybe_run_autopilot_inner(task: dict) -> dict | None:
         _preserve_unsent_vu_and_conclude(
             task, conv_id, run_id, vu_msg_id, vu_text_clean,
             reason='aborted_mid_vu')
+        _emit_vu_lifecycle_frame(task, build_event(
+            EventType.AUTOPILOT_VU_CANCEL, vuMsgId=vu_msg_id))
+        return None
+
+    # An empty cleaned text must never become a turn: appending it persists
+    # a ghost empty VU row (the visible "empty Autopilot bubble" — there is
+    # NO cleanup path for it) and the follow-up it spawns carries an empty
+    # user query, which strict providers hard-400. The marker stays armed —
+    # an empty reply is a transient degenerate, not a disarm signal.
+    if not vu_text_clean.strip():
+        logger.info('[Autopilot %s] VU reply is empty after token strip — '
+                    'standing down instead of appending a ghost row', tid)
         _emit_vu_lifecycle_frame(task, build_event(
             EventType.AUTOPILOT_VU_CANCEL, vuMsgId=vu_msg_id))
         return None

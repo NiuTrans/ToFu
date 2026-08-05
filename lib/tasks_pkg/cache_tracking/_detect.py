@@ -18,6 +18,8 @@ from lib.tasks_pkg.wire_fingerprint import (
     mid_anchor_out_of_window,
 )
 from lib.tasks_pkg.cache_tracking._state import (
+    COLD_ROUND_TOKEN_FLOOR,
+    COLD_STREAK_GUARD_OPEN,
     CacheState,
     _cache_lock,
     _cache_states,
@@ -659,7 +661,22 @@ def detect_cache_break(
         # ★ FIX: compute elapsed BEFORE updating state so TTL detection works.
         # Previously, elapsed was computed AFTER setting last_update_time = now,
         # which meant it was always 0, making the >5min TTL check dead code.
-        elapsed = now - prev.last_update_time if prev.last_update_time else 0
+        if prev.last_update_time:
+            elapsed = now - prev.last_update_time
+        else:
+            # Fresh per-thread state (a new task's round-1 on a fresh run_task
+            # thread): the thread's own clock starts at 0, which made gap_s a
+            # broken 0.0 on EXACTLY the records where the TTL-window question
+            # matters (turn_boundary_rebill — measured 44/44 records 2026-08-01
+            # reporting gap_s=0.0). Fall back to the NEWEST sibling thread's
+            # timestamp for the same conv — the previous turn's true send time.
+            # Runs under _cache_lock, so the sibling scan is race-free.
+            _latest_sib = 0.0
+            for _sk, _sst in _cache_states.items():
+                if _sk[0] == conv_id and _sk != _key \
+                        and _sst.last_update_time > _latest_sib:
+                    _latest_sib = _sst.last_update_time
+            elapsed = now - _latest_sib if _latest_sib else 0
 
         # Handle compaction: if compaction happened, a drop in cache_read
         # is expected — don't flag it as a break. Capture the flag BEFORE
@@ -1035,9 +1052,22 @@ def detect_cache_break(
         prev.last_cache_write_tokens = cache_write
         prev.last_update_time = now
         prev.call_count += 1
+        # ── Compaction-guard hysteresis bookkeeping (2026-08-01) ──
+        # A round counts as verifiably COLD only when neither direction moved
+        # tokens; any read-back or fresh write means a server-side entry
+        # exists and the just-sent prefix must stay frozen for next round.
+        # Skipped on usage-less rounds (a failed call carries no cache signal
+        # and must not open the guard). get_cache_prefix_count's _boundary
+        # reads this streak — see COLD_STREAK_GUARD_OPEN in _state.py.
+        if usage:
+            if (cache_read > COLD_ROUND_TOKEN_FLOOR
+                    or cache_write > COLD_ROUND_TOKEN_FLOOR):
+                prev.cold_streak = 0
+            elif prev.cold_streak < COLD_STREAK_GUARD_OPEN:
+                prev.cold_streak += 1
         # ── Advance the DURABLE prefix boundary (survives restart / replica
-        #    switch). When THIS round confirms a warm cached prefix (read or
-        #    write > 1000, mirroring get_cache_prefix_count's _boundary gate),
+        #    switch). When THIS round confirms real cache activity (read or
+        #    write > 1000 — the same floor the cold-streak bookkeeping uses),
         #    the prefix [0, msg_count - EDITABLE_TAIL_COUNT) is a cached
         #    conversation fact. Persist it as a monotonic high-water mark so a
         #    future turn on a fresh thread/process/replica restores the guard

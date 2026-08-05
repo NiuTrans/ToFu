@@ -1,3 +1,5 @@
+# Incident anchor: born in commit ab99ef8b — checkpoint: accumulated work since last commit
+# (funeral audit pt_c565a36b3e8f42e6, docs/RATCHET_AUDIT.md)
 """Guard: the browser-bridge provider must REFUSE binary/PDF URLs.
 
 Background — real bug: when Browser Bridge mode is on, a server-side fetch

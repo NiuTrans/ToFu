@@ -462,6 +462,57 @@ def test_the_release_publishes_under_the_version_tag():
     assert with_.get('draft') is False, 'a draft release is invisible to users'
 
 
+def test_agent_legs_build_all_three_platforms():
+    """The agent component ships from the SAME three platform jobs (one
+    change, legs+gates atomically — docs/DESKTOP_AGENT_DIST_DESIGN.md A2b)."""
+    wf_text = _WORKFLOW.read_text(encoding='utf-8')
+    # One PyInstaller agent build per platform job (windows/macos/linux).
+    assert wf_text.count('pyinstaller tofu-agent.spec') == 3, (
+        'each platform job must also build the agent component')
+    # The upload artifact names the release job merges.
+    for artifact in ('windows-agent-installer',
+                     'macos-agent-dmg-${{ matrix.arch }}',
+                     'linux-agent-archive'):
+        assert artifact in wf_text, f'agent artifact {artifact} not uploaded'
+    # Smoke on the two platforms where the full leg smokes (macOS smokes
+    # neither component — same discipline as the full DMG leg).
+    assert wf_text.count('TOFU_AGENT_SMOKE_OK') >= 2, (
+        'windows and linux agent builds must run the smoke gate')
+
+
+def test_agent_windows_inno_carries_the_autostart_contract():
+    """Owner amendment ①, CI side: offered, default ON, HKCU (UAC-free),
+    removed at uninstall — and the SAME value name the tray writes."""
+    wf_text = _WORKFLOW.read_text(encoding='utf-8')
+    assert 'AppName=Tofu Agent' in wf_text
+    assert ('OutputBaseFilename=TofuAgent-Setup-${APP_VERSION}-win64'
+            in wf_text)
+    assert r'{localappdata}\\Programs\\TofuAgent' in wf_text
+    assert r'Software\\Microsoft\\Windows\\CurrentVersion\\Run' in wf_text
+    assert 'ValueName: "TofuAgent"' in wf_text, (
+        'the Run value name must equal agent_launcher._RUN_VALUE')
+    assert 'uninsdeletevalue' in wf_text, (
+        'a removed agent must not leave a dead autorun behind')
+    # Default-ON: the task exists and is never flagged unchecked.
+    assert 'Name: autostart; Description: "Start Tofu Agent with Windows"' \
+        in wf_text
+    import re as _re
+    assert not _re.search(r'autostart[^\n]*unchecked', wf_text, _re.I), (
+        'the autostart task must default to CHECKED — an unattended relay '
+        'that has to be ticked by hand is not unattended')
+
+
+def test_required_assets_cover_both_components():
+    """The gates' required set spans BOTH tables, derived — a release
+    missing an agent asset is as INCOMPLETE as one missing a platform."""
+    mod = _asset_mod()
+    total = len(mod.PLATFORM_ASSETS) + len(mod.AGENT_PLATFORM_ASSETS)
+    assert len(mod.REQUIRED_PLATFORM_ASSETS) == total
+    labels = [l for l, _p in mod.REQUIRED_PLATFORM_ASSETS]
+    assert any('agent' in l.lower() for l in labels), (
+        'the agent component is not in the release gates')
+
+
 def test_release_still_requires_every_platform_leg():
     """The completeness gate must not have been loosened to route around this.
 
@@ -954,7 +1005,7 @@ def test_a_full_release_is_complete():
     assert gaps == [], f'a full asset set must be complete, got missing {gaps!r}'
 
 
-@pytest.mark.parametrize('drop', [0, 1, 2, 3])
+@pytest.mark.parametrize('drop', range(len(_complete_names())))
 def test_dropping_any_single_platform_is_detected(drop):
     """Every platform is load-bearing, not just the one someone tested."""
     mod = _asset_mod()
@@ -1275,7 +1326,7 @@ def test_the_shared_script_survives_export_and_is_tracked():
     membership in the keep-list — ``_should_exclude`` returning a verdict there
     is expected and is NOT evidence of a problem.
     """
-    import export as _export
+    _export = pytest.importorskip('export', reason='export.py not shipped in opensource')
     rel = 'scripts/release_assets.py'
     for mode in ('personal', 'internal'):
         verdict = _export._should_exclude('scripts', 'release_assets.py', mode)
@@ -1296,4 +1347,520 @@ def test_the_shared_script_survives_export_and_is_tracked():
         'scripts/release_assets.py is not git-tracked — /scripts/* is '
         'gitignored, so it needs an explicit ! exception or it will be absent '
         'from a clean clone while both gates try to call it'
+    )
+
+
+# ══════════════════════════════════════════════════════════════════
+#  Inno Setup wizard branding
+# ══════════════════════════════════════════════════════════════════
+#
+# The installer's welcome/finish pages are the FIRST screens a Windows user
+# ever sees of the product, and they shipped with Inno's DEFAULT blank art —
+# the only unbranded surface left in the install flow (the web UI and the
+# tk dialogs are fully branded). The fix lives in three places that must
+# agree with each other, which is exactly what these pins enforce:
+#
+#   scripts/gen_desktop_icons.py  — PRODUCES wizard-large.bmp (164×314) and
+#                                   wizard-small.bmp (55×58), the two sizes
+#                                   Inno's `modern` style hard-requires.
+#   .github/workflows/build-desktop.yml — the .iss heredoc REFERENCES them
+#                                   (WizardImageFile / WizardSmallImageFile)
+#                                   and the preflight REQUIRES them (the
+#                                   same fail-early contract as the icon).
+#
+# A drift between any pair (generator stops emitting, .iss points elsewhere,
+# preflight stops checking) turns the branded installer back into a default
+# one — or worse, aborts the compile in ISCC with a cryptic error — with no
+# test noticing. The parity test below runs the REAL generator and compares
+# its output set against the paths the .iss references, so neither side can
+# move without this suite going red.
+
+_WIZARD_REFS = (
+    ('WizardImageFile', 'wizard-large.bmp', (164, 314)),
+    ('WizardSmallImageFile', 'wizard-small.bmp', (55, 58)),
+)
+
+
+def _icons_mod():
+    """Import scripts/gen_desktop_icons.py (not a package, so load by path)."""
+    spec = _ilu.spec_from_file_location(
+        '_tofu_gen_desktop_icons', _ROOT / 'scripts' / 'gen_desktop_icons.py')
+    assert spec and spec.loader, 'cannot load scripts/gen_desktop_icons.py'
+    mod = _ilu.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_inno_script_references_brand_wizard_images():
+    """Ratchet: the .iss heredoc must carry BOTH Wizard*File directives
+    pointing into static\\icons\\installer\\ (neuter either line → red)."""
+    text = _WORKFLOW.read_text(encoding='utf-8')
+    for directive, bmp, _size in _WIZARD_REFS:
+        ref = f'{directive}=static\\\\icons\\\\installer\\\\{bmp}'
+        assert ref in text, (
+            f'{ref} missing from the installer.iss heredoc — the wizard '
+            f'falls back to Inno default blank art'
+        )
+
+
+def test_preflight_requires_wizard_bitmaps():
+    """Ratchet: the Verify-build-inputs step must require both BMPs with a
+    fail-early message (neuter the loop → red), mirroring the SetupIconFile
+    contract that turns a cryptic ISCC abort into a readable CI error.
+
+    Anchored to text that exists ONLY in the preflight — a bare `bmp in
+    text` is also satisfied by the .iss WizardImageFile line, which let a
+    neutered preflight pass (measured NEUTER-miss 2026-08-01)."""
+    text = _WORKFLOW.read_text(encoding='utf-8')
+    assert 'wizard-large.bmp wizard-small.bmp' in text, (
+        'the preflight for-loop no longer names both bitmaps'
+    )
+    assert 'icons/installer/$bmp' in text, (
+        'the preflight no longer tests static/icons/installer/$bmp — a '
+        'missing bitmap surfaces as an ISCC abort instead of a clear message'
+    )
+
+
+def test_generator_emits_exactly_the_referenced_bitmaps(tmp_path):
+    """Parity, the strong pin: run the REAL generator into a temp icons dir
+    and require that (a) every bitmap the .iss references is produced, and
+    (b) each carries Inno's exact contract dimensions and BMP format. This
+    bites in BOTH drift directions — a renamed output and a resized canvas
+    are equally red."""
+    Image = pytest.importorskip('PIL.Image', reason='Pillow required')
+    mod = _icons_mod()
+    mod.ICONS_DIR = str(tmp_path)  # redirect outputs; SOURCE_PNG stays real
+    mod.main()
+    for directive, bmp, size in _WIZARD_REFS:
+        out = tmp_path / 'installer' / bmp
+        assert out.is_file(), (
+            f'generator did not produce installer/{bmp}, but the .iss '
+            f'references it as {directive} — ISCC would abort on the missing '
+            f'file'
+        )
+        with Image.open(str(out)) as im:
+            assert im.format == 'BMP', f'{bmp}: ISCC needs BMP, got {im.format}'
+            assert im.size == size, (
+                f'{bmp}: Inno modern style requires {size}, got {im.size}'
+            )
+
+
+def test_wizard_logo_has_real_transparency_cutout():
+    """The brand cube must FLOAT on the wizard gradient, not sit in a white
+    square: logo.png is RGBA but fully opaque (alpha 255 everywhere), so the
+    generator must cut out the exterior background. NEUTER target: removing
+    _cut_out_background turns the large bitmap's border pixels white — this
+    test reads the actual generated BMP and goes red."""
+    Image = pytest.importorskip('PIL.Image', reason='Pillow required')
+    mod = _icons_mod()
+    src = Image.open(mod.SOURCE_PNG).convert('RGBA')
+    cut = mod._cut_out_background(src)
+    alpha = cut.getchannel('A')
+    # Corners are exterior background → must be transparent after the cutout.
+    for xy in ((0, 0), (src.width - 1, 0), (0, src.height - 1),
+               (src.width - 1, src.height - 1)):
+        assert alpha.getpixel(xy) == 0, (
+            f'corner {xy} is still opaque — the flood-fill cutout is broken '
+            f'(or removed), and the wizard logo renders as a white square'
+        )
+    # The cube's centre must stay opaque (the cutout removes ONLY the
+    # exterior; an over-eager global threshold would punch the interior).
+    assert alpha.getpixel((src.width // 2, src.height // 2)) == 255, (
+        'cube centre went transparent — the cutout leaks into the interior'
+    )
+
+
+# ══════════════════════════════════════════════════════════════════
+#  App icon (.ico / .icns) — no baked-in white plate
+# ══════════════════════════════════════════════════════════════════
+#
+# The wizard BMPs and the DMG art cut the white canvas out so the cube
+# FLOATS on their gradients — but main() fed the RAW opaque source to
+# gen_ico / gen_icns, so every icon frame shipped the white canvas as an
+# opaque background. Result (owner screenshot 2026-08-03): the desktop
+# icon rendered as a white plate with a tofu on it — measured 100% opaque,
+# corners (254,255,255,255), on the shipped static/icons/tofu.ico. The fix:
+# ico/icns are generated from the same flood-fill cutout, cropped to the
+# cube's bbox with a small margin so the icon fills the frame instead of
+# shrinking into its whitespace. These pins read the REAL generator output
+# into a temp dir, so reverting to the opaque source (or dropping the
+# crop) goes red.
+
+
+def test_app_icon_frames_have_transparent_corners(tmp_path):
+    """The .ico frames must have REAL transparency around the cube —
+    neuter target: gen_ico(src) on the raw opaque canvas makes every
+    corner pixel opaque white (the exact defect the owner reported)."""
+    Image = pytest.importorskip('PIL.Image', reason='Pillow required')
+    mod = _icons_mod()
+    mod.ICONS_DIR = str(tmp_path)  # redirect outputs; SOURCE_PNG stays real
+    mod.main()
+    ico = Image.open(str(tmp_path / 'tofu.ico'))
+    ico.size = max(ico.ico.sizes())
+    ico.load()
+    alpha = ico.convert('RGBA').getchannel('A')
+    w, h = alpha.size
+    for xy in ((0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)):
+        assert alpha.getpixel(xy) == 0, (
+            f'corner {xy} is opaque — the white canvas is baked into the '
+            f'icon again (gen_ico must receive the cutout, not raw source)'
+        )
+    # The cube's centre must stay opaque (the cutout removes ONLY the
+    # exterior; an over-eager global threshold would punch the interior).
+    assert alpha.getpixel((w // 2, h // 2)) == 255, (
+        'cube centre went transparent — the cutout leaks into the interior'
+    )
+
+
+def test_app_icon_cube_fills_the_frame(tmp_path):
+    """With the plate removed the cube must still FILL the frame: the
+    generator crops to the artwork bbox with a small margin. A bare
+    cutout-without-crop leaves ~35% empty margin — the tofu renders tiny
+    on the desktop and illegible in the 16px tray."""
+    Image = pytest.importorskip('PIL.Image', reason='Pillow required')
+    mod = _icons_mod()
+    mod.ICONS_DIR = str(tmp_path)
+    mod.main()
+    ico = Image.open(str(tmp_path / 'tofu.ico'))
+    ico.size = max(ico.ico.sizes())
+    ico.load()
+    alpha = ico.convert('RGBA').getchannel('A')
+    w, h = alpha.size
+    hist = alpha.histogram()
+    opaque = sum(hist[129:]) / (w * h)
+    assert opaque > 0.45, (
+        f'cube covers only {opaque:.0%} of the frame — the bbox crop is '
+        f'gone and the icon shrank back into its margins'
+    )
+
+
+def test_app_icns_also_has_transparent_corners(tmp_path):
+    """The macOS .icns shares the same defect path (same raw source in
+    main()) — pin its corners too so a future split of the two generators
+    cannot quietly reintroduce the plate on one platform."""
+    Image = pytest.importorskip('PIL.Image', reason='Pillow required')
+    mod = _icons_mod()
+    mod.ICONS_DIR = str(tmp_path)
+    mod.main()
+    icns = Image.open(str(tmp_path / 'tofu.icns'))
+    rgba = icns.convert('RGBA')
+    alpha = rgba.getchannel('A')
+    w, h = alpha.size
+    for xy in ((0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)):
+        assert alpha.getpixel(xy) == 0, (
+            f'icns corner {xy} is opaque — white canvas baked into the '
+            f'macOS icon again'
+        )
+
+
+# ══════════════════════════════════════════════════════════════════
+#  DMG window branding
+# ══════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════
+#  DMG window branding
+# ══════════════════════════════════════════════════════════════════
+#
+# The macOS installer shipped as a DEFAULT WHITE FINDER WINDOW: no
+# --background at all, so nothing told the user the one thing a DMG window
+# exists to say — drag the app onto Applications. The artwork (warm paper
+# gradient + brand cube + a drag arrow) is drawn BETWEEN the two icon
+# positions, which makes the arrow's coordinates and create-dmg's --icon /
+# --app-drop-link coordinates ONE fact stored in two places: move an icon
+# on only one side and the arrow points at empty space. The alignment test
+# below compares the workflow's parsed coordinates against the generator's
+# constants, so neither side can drift alone.
+
+_DMG_BG_REF = '--background "static/icons/installer/dmg-background.png"'
+
+
+def test_dmg_step_uses_brand_background():
+    """Ratchet: create-dmg must carry --background with the generated art
+    (neuter the flag → red; the default white Finder window comes back)."""
+    text = _WORKFLOW.read_text(encoding='utf-8')
+    assert _DMG_BG_REF in text, (
+        'create-dmg lost its --background — the DMG renders as an unbranded '
+        'white Finder window again'
+    )
+
+
+def test_dmg_step_preflights_the_background():
+    """Ratchet: a missing artwork file is a BUILD error (icon step broke),
+    and must fail loudly BEFORE create-dmg — not fall through to the zip
+    fallback with an unbranded window (neuter the check → red)."""
+    text = _WORKFLOW.read_text(encoding='utf-8')
+    assert 'icons/installer/dmg-background.png not generated' in text, (
+        'no fail-early check on the DMG artwork — a missing file degrades '
+        'silently into the zip fallback'
+    )
+
+
+def test_generator_emits_dmg_backgrounds(tmp_path):
+    """Parity: the generator must produce BOTH the 1x artwork the workflow
+    references and the @2x retina sibling create-dmg picks up automatically,
+    at exactly window size ×1/×2."""
+    Image = pytest.importorskip('PIL.Image', reason='Pillow required')
+    mod = _icons_mod()
+    mod.ICONS_DIR = str(tmp_path)
+    mod.main()
+    for name, size in (('dmg-background.png', mod.DMG_BG_SIZE),
+                       ('dmg-background@2x.png',
+                        (mod.DMG_BG_SIZE[0] * 2, mod.DMG_BG_SIZE[1] * 2))):
+        out = tmp_path / 'installer' / name
+        assert out.is_file(), f'generator did not produce installer/{name}'
+        with Image.open(str(out)) as im:
+            assert im.format == 'PNG', f'{name}: create-dmg needs PNG'
+            assert im.size == size, f'{name}: expected {size}, got {im.size}'
+
+
+def test_dmg_artwork_arrow_matches_icon_coordinates():
+    """Alignment pin: the workflow's --icon / --app-drop-link coordinates
+    must equal the generator's DMG_APP_ICON_POS / DMG_DROP_ICON_POS — the
+    arrow in the artwork is drawn between those two points, so a one-sided
+    edit makes the art point at empty space (and only this test notices)."""
+    text = _WORKFLOW.read_text(encoding='utf-8')
+    app = re.search(r'--icon "Tofu\.app" (\d+) (\d+)', text)
+    drop = re.search(r'--app-drop-link (\d+) (\d+)', text)
+    assert app and drop, 'create-dmg icon coordinates not found in workflow'
+    mod = _icons_mod()
+    assert (int(app.group(1)), int(app.group(2))) == mod.DMG_APP_ICON_POS, (
+        f'--icon says {app.groups()} but the artwork is drawn for '
+        f'{mod.DMG_APP_ICON_POS}'
+    )
+    assert (int(drop.group(1)), int(drop.group(2))) == mod.DMG_DROP_ICON_POS, (
+        f'--app-drop-link says {drop.groups()} but the artwork is drawn for '
+        f'{mod.DMG_DROP_ICON_POS}'
+    )
+
+
+# ══════════════════════════════════════════════════════════════════
+#  Linux desktop integration
+# ══════════════════════════════════════════════════════════════════
+#
+# The Linux artifact was a BARE tar.gz: extract, find the binary, run it
+# from a terminal. No application-menu entry, no icon — the only platform
+# with zero install UX. The tarball now ships install.sh (per-user, no
+# sudo, idempotent) + a .desktop template, and the workflow copies both
+# into the bundle BEFORE archiving. The pins below cover the three places
+# that must agree: the source files, the copy step, and the template the
+# script renders.
+
+_DESKTOP_ENTRY = _ROOT / 'desktop' / 'tofu.desktop'
+_INSTALL_LINUX = _ROOT / 'desktop' / 'install-linux.sh'
+
+
+def test_linux_leg_ships_integration_before_archiving():
+    """Ratchet: the workflow must copy install.sh + tofu.desktop into the
+    bundle, and BEFORE `tar` runs — a tarball without them is a silent UX
+    regression (neuter the step → red)."""
+    text = _WORKFLOW.read_text(encoding='utf-8')
+    assert 'desktop/install-linux.sh dist/Tofu/install.sh' in text, (
+        'install.sh is not copied into the Linux bundle'
+    )
+    assert 'desktop/tofu.desktop dist/Tofu/tofu.desktop' in text, (
+        'tofu.desktop is not copied into the Linux bundle'
+    )
+    copy_at = text.index('desktop/install-linux.sh')
+    tar_at = text.index('tar czf')
+    assert copy_at < tar_at, (
+        'the integration files are copied AFTER the archive step — the '
+        'tarball would not contain them'
+    )
+
+
+def test_desktop_entry_template_valid():
+    """The .desktop template must carry the freedesktop-required keys and
+    the __INSTALL_DIR__ placeholder install.sh substitutes."""
+    text = _DESKTOP_ENTRY.read_text(encoding='utf-8')
+    assert text.startswith('[Desktop Entry]'), 'missing the section header'
+    for needle in ('Type=Application', 'Name=Tofu',
+                   'Exec=__INSTALL_DIR__/Tofu', 'Icon=tofu',
+                   'Terminal=false'):
+        assert needle in text, f'tofu.desktop is missing {needle}'
+
+
+def test_install_linux_script_contract():
+    """install.sh: syntax-clean bash, per-user paths ONLY (a sudo anywhere
+    breaks the no-root contract that matches the Windows per-user install),
+    renders __INSTALL_DIR__, registers icon + menu entry."""
+    text = _INSTALL_LINUX.read_text(encoding='utf-8')
+    # Scan CODE only: the comments legitimately say "no sudo", and a naive
+    # substring check bites them (measured 2026-08-01).
+    code = '\n'.join(ln for ln in text.splitlines()
+                     if not ln.lstrip().startswith('#'))
+    assert 'sudo' not in code, (
+        'install-linux.sh uses sudo — the Linux install is supposed to be '
+        'per-user like the Windows one'
+    )
+    for needle in ('.local/share/applications', 'hicolor',
+                   '__INSTALL_DIR__', 'update-desktop-database'):
+        assert needle in text, f'install-linux.sh is missing {needle}'
+    bash = subprocess.run(['bash', '-n', str(_INSTALL_LINUX)],
+                          capture_output=True, text=True)
+    assert bash.returncode == 0, f'bash syntax check failed: {bash.stderr}'
+
+
+def test_install_linux_script_end_to_end(tmp_path):
+    """Behaviour, not just contract: lay out a SIMULATED bundle (binary +
+    icon + template + install.sh), run the script with HOME redirected to a
+    temp dir, and require the two real outputs — a rendered menu entry whose
+    Exec points at the bundle's absolute path, and the themed icon. This is
+    the test that would catch a broken sed substitution or a wrong relative
+    path even though every content pin above still passes."""
+    pytest.importorskip('PIL.Image', reason='Pillow required')
+    bundle = tmp_path / 'Tofu'
+    (bundle / '_internal' / 'static' / 'icons').mkdir(parents=True)
+    home = tmp_path / 'home'
+    home.mkdir()
+    (bundle / 'Tofu').write_text('#!/bin/sh\n', encoding='utf-8')
+    (bundle / 'Tofu').chmod(0o755)
+    # A real (tiny) PNG stands in for the logo — the script only copies it.
+    import shutil
+    shutil.copy(_ROOT / 'static' / 'icons' / 'logo.png',
+                bundle / '_internal' / 'static' / 'icons' / 'logo.png')
+    shutil.copy(_DESKTOP_ENTRY, bundle / 'tofu.desktop')
+    shutil.copy(_INSTALL_LINUX, bundle / 'install.sh')
+
+    env = dict(os.environ, HOME=str(home))
+    r = subprocess.run(['bash', str(bundle / 'install.sh')],
+                       capture_output=True, text=True, env=env)
+    assert r.returncode == 0, f'install.sh failed: {r.stderr}'
+
+    entry = home / '.local' / 'share' / 'applications' / 'tofu.desktop'
+    assert entry.is_file(), 'no application-menu entry was written'
+    body = entry.read_text(encoding='utf-8')
+    assert f'Exec={bundle}/Tofu' in body, (
+        f'__INSTALL_DIR__ was not rendered to the bundle path: {body!r}'
+    )
+    assert '__INSTALL_DIR__' not in body, 'unrendered placeholder survived'
+    icon = (home / '.local' / 'share' / 'icons' / 'hicolor' / '512x512'
+            / 'apps' / 'tofu.png')
+    assert icon.is_file(), 'no themed icon was installed'
+    # Nothing may escape the fake HOME (the per-user contract, enforced).
+    assert not (tmp_path / 'Tofu' / '.local').exists()
+
+
+# ══════════════════════════════════════════════════════════════════
+#  Linux .deb installer (pt_a64216b959694605)
+# ══════════════════════════════════════════════════════════════════
+#
+# Evaluated .deb vs AppImage for the "double-click install" Linux format;
+# .deb won on every axis that survives contact with a real machine:
+# dpkg-deb ships in the CI base image (zero downloaded tooling — appimagetool
+# would be a third-party binary fetched every build), no FUSE at build time
+# (mksquashfs is absent on the dev host, measured 2026-08-01), and — the
+# decisive one — no FUSE at RUN time: type-2 AppImages need libfuse2, which
+# Ubuntu 22.04+ no longer installs by default, turning "double-click" into
+# "sudo apt install libfuse2 first". The tarball stays as the no-sudo /
+# non-Debian fallback; the two formats are complements.
+#
+# The .deb is a REQUIRED release asset (scripts/release_assets.py owns the
+# list), so it flows into BOTH completeness gates and the in-app download
+# surface from one row — these pins cover the build step, the pipeline
+# plumbing, the shared-list row, and the script's real output.
+
+_BUILD_DEB = _ROOT / 'desktop' / 'build-deb.sh'
+
+
+def test_linux_leg_builds_and_uploads_deb():
+    """Ratchet: the Linux leg must run build-deb.sh and upload the .deb
+    alongside the tarball (neuter either → red)."""
+    text = _WORKFLOW.read_text(encoding='utf-8')
+    assert 'desktop/build-deb.sh dist/Tofu' in text, (
+        'no build-deb step — the Linux leg ships no .deb'
+    )
+    assert 'Tofu-*.deb' in text, 'the .deb is not uploaded as an artifact'
+
+
+def test_release_pipeline_ships_deb():
+    """Ratchet: the .deb must be checksummed AND attached to the release —
+    an asset that is built but not shipped is invisible to users."""
+    text = _WORKFLOW.read_text(encoding='utf-8')
+    assert '*.deb' in text.split('SHA256SUMS')[0] or 'files=( *.exe *.dmg *.zip *.tar.gz *.deb )' in text, (
+        'SHA256SUMS does not cover *.deb'
+    )
+    assert 'release-assets/**/*.deb' in text, (
+        'the release action does not attach *.deb'
+    )
+
+
+def test_deb_is_a_required_release_asset():
+    """Behavioural: the shared completeness list must (a) contain the deb
+    row, and (b) judge an old-style 4-asset release INCOMPLETE — that is
+    what makes the next build repair-ship the deb through BOTH gates."""
+    mod = _asset_mod()
+    deb_rows = [a for a in mod.PLATFORM_ASSETS
+                if a[0] == 'linux' and a[3].endswith('.deb')]
+    assert deb_rows, 'no linux .deb row in PLATFORM_ASSETS'
+    old_style = ['Tofu-0.15.2-macos-arm64.dmg',
+                 'Tofu-0.15.2-macos-x86_64.dmg',
+                 'Tofu-Setup-0.15.2-win64.exe',
+                 'Tofu-0.15.2-linux-x86_64.tar.gz',
+                 'SHA256SUMS']
+    gaps = mod.missing_assets(old_style, require_checksums=True)
+    assert any('.deb' in g for g in gaps), (
+        f'an asset set without the deb was judged COMPLETE: {gaps}'
+    )
+    undersized = mod.undersized_assets(
+        {'Tofu-0.15.2-linux-x86_64.deb': 49_000_000})
+    assert undersized, 'a hollow 49 MB deb was not flagged'
+
+
+def test_build_deb_script_contract():
+    """build-deb.sh: syntax-clean, dpkg-deb-driven, /opt layout, postinst
+    hook, no sudo (code lines only — comments legitimately discuss it)."""
+    text = _BUILD_DEB.read_text(encoding='utf-8')
+    code = '\n'.join(ln for ln in text.splitlines()
+                     if not ln.lstrip().startswith('#'))
+    assert 'sudo' not in code, 'build-deb.sh must not need root'
+    for needle in ('dpkg-deb --build', '/opt/Tofu', 'postinst',
+                   'usr/share/applications', '__INSTALL_DIR__'):
+        assert needle in text, f'build-deb.sh is missing {needle}'
+    bash = subprocess.run(['bash', '-n', str(_BUILD_DEB)],
+                          capture_output=True, text=True)
+    assert bash.returncode == 0, f'bash syntax check failed: {bash.stderr}'
+
+
+def test_build_deb_end_to_end(tmp_path):
+    """Run the REAL script on a simulated bundle and inspect the package
+    with dpkg-deb itself: metadata, payload paths, and the rendered menu
+    entry. Skipped where dpkg-deb is unavailable (non-Debian hosts) — the
+    CI runners always have it."""
+    import shutil
+    if shutil.which('dpkg-deb') is None:
+        pytest.skip('dpkg-deb not available on this host')
+    bundle = tmp_path / 'Tofu'
+    (bundle / '_internal' / 'static' / 'icons').mkdir(parents=True)
+    (bundle / 'Tofu').write_text('#!/bin/sh\n', encoding='utf-8')
+    (bundle / 'Tofu').chmod(0o755)
+    shutil.copy(_ROOT / 'static' / 'icons' / 'logo.png',
+                bundle / '_internal' / 'static' / 'icons' / 'logo.png')
+
+    r = subprocess.run(
+        ['bash', str(_BUILD_DEB), str(bundle), '9.9.9', str(tmp_path)],
+        capture_output=True, text=True)
+    assert r.returncode == 0, f'build-deb.sh failed: {r.stderr}'
+
+    deb = tmp_path / 'Tofu-9.9.9-linux-x86_64.deb'
+    assert deb.is_file(), f'no .deb produced: {r.stdout} {r.stderr}'
+
+    info = subprocess.run(['dpkg-deb', '--info', str(deb)],
+                          capture_output=True, text=True)
+    assert info.returncode == 0, info.stderr
+    for field in ('Package: tofu', 'Version: 9.9.9', 'Architecture: amd64'):
+        assert field in info.stdout, f'{field} missing from control:\n{info.stdout}'
+
+    contents = subprocess.run(['dpkg-deb', '--contents', str(deb)],
+                              capture_output=True, text=True)
+    assert contents.returncode == 0, contents.stderr
+    for path in ('./opt/Tofu/Tofu',
+                 './usr/share/applications/tofu.desktop',
+                 './usr/share/icons/hicolor/512x512/apps/tofu.png'):
+        assert path in contents.stdout, f'{path} missing from payload'
+
+    fsys = subprocess.run(
+        f"dpkg-deb --fsys-tarfile '{deb}' | tar -xO ./usr/share/applications/tofu.desktop",
+        shell=True, capture_output=True, text=True)
+    assert fsys.returncode == 0, fsys.stderr
+    assert 'Exec=/opt/Tofu/Tofu' in fsys.stdout, (
+        f'__INSTALL_DIR__ not rendered to /opt/Tofu:\n{fsys.stdout}'
     )

@@ -103,7 +103,8 @@ def _reconcile_npx_cache(npm_cache: str, cutoff: str) -> int:
         try:
             with open(marker, encoding='utf-8') as f:
                 stamped = f.read().strip()
-        except OSError:
+        except OSError as e:
+            logger.debug('[MCP] npx cutoff marker unreadable (%s) — treating slot as stale', e)
             stamped = ''
         if stamped == cutoff:
             continue  # already reconciled under the active cutoff

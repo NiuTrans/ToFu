@@ -47,16 +47,20 @@ def _node_deps_available() -> bool:
     return os.path.isdir(os.path.join(ROOT, 'node_modules', 'jsdom'))
 
 
-# argv[2] = i18n.js, argv[3] = finish_info.js, argv[4] = ROOT,
-# argv[5] = '1' to NEUTER (strip the batch-ref annotation from finish_info.js
-# source before eval, proving the guard fails without the fix).
+# argv[2] = i18n.js, argv[3] = finish_info.js, argv[4] = finish_info_rich.js,
+# argv[5] = ROOT, argv[6] = '1' to NEUTER (strip the batch-ref annotation from
+# finish_info_rich.js source before eval, proving the guard fails without the fix).
+# _buildCostPopover moved to the DEFERRED finish_info_rich.js (Epic-E split
+# 2026-08-01); it closes over finish_info.js's top-level consts (_CP_*_SVG),
+# so both files are concatenated in ONE eval.
 _HARNESS = r"""
 const fs = require('fs');
 const path = require('path');
 const I18N = process.argv[2];
 const FINISH = process.argv[3];
-const ROOT = process.argv[4];
-const NEUTER = process.argv[5] === '1';
+const RICH = process.argv[4];
+const ROOT = process.argv[5];
+const NEUTER = process.argv[6] === '1';
 
 const { JSDOM } = require(path.join(ROOT, 'node_modules', 'jsdom'));
 const dom = new JSDOM('<!DOCTYPE html><body></body>', { url: 'http://localhost/' });
@@ -79,13 +83,14 @@ eval(fs.readFileSync(I18N, 'utf8'));
 win.t = global.t = t;
 
 let finishSrc = fs.readFileSync(FINISH, 'utf8');
+let richSrc = fs.readFileSync(RICH, 'utf8');
 if (NEUTER) {
   // Remove the batch-ref annotation line — the exact fix under test.
-  finishSrc = finishSrc.replace(
+  richSrc = richSrc.replace(
     /if \(i > 0\) _tr \+= t\('finishInfo\.wbBatchRef', \{ n: i \}\);/,
     '/* NEUTERED */');
 }
-eval(finishSrc);
+eval(finishSrc + '\n' + richSrc);
 
 const out = [];
 function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
@@ -155,10 +160,11 @@ def _run(neuter: bool) -> str:
     try:
         proc = subprocess.run(
             ['node', harness,
-             os.path.join(JS_DIR, 'i18n.js'),               # argv[2]
-             os.path.join(JS_DIR, 'ui', 'finish_info.js'),  # argv[3]
-             ROOT,                                          # argv[4]
-             '1' if neuter else '0'],                       # argv[5]
+             os.path.join(JS_DIR, 'i18n.js'),                    # argv[2]
+             os.path.join(JS_DIR, 'ui', 'finish_info.js'),      # argv[3]
+             os.path.join(JS_DIR, 'ui', 'finish_info_rich.js'), # argv[4]
+             ROOT,                                              # argv[5]
+             '1' if neuter else '0'],                           # argv[6]
             capture_output=True, text=True, timeout=60,
         )
     finally:

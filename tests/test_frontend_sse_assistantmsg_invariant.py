@@ -65,10 +65,14 @@ def test_connecttask_guarantees_non_null_assistantmsg_before_dispatch():
         'NPE on the Phase-2 reconcile race. Restore the guard, or add explicit '
         'null guards to the three handlers (see board epic pt_909102262244497a).')
     # The guard must actually push a fresh assistant message (not merely log),
-    # else "non-null before dispatch" is not truly guaranteed.
+    # else "non-null before dispatch" is not truly guaranteed. Scope the pin
+    # to the guard's OWN BLOCK (its 2-space closing brace — inner blocks all
+    # close at 4+), NOT a fixed char window: a 1200-char window broke the
+    # first time the block grew (the _ensureMsgId hardening pushed
+    # conv.messages.push past the cutoff while the invariant stood intact).
     idx = src.index(guard)
-    window = src[idx:idx + 1200]
-    assert 'role: "assistant"' in window and 'conv.messages.push(assistantMsg)' in window, (
+    block = src[idx:src.index('\n  }\n', idx)]
+    assert 'role: "assistant"' in block and 'conv.messages.push(assistantMsg)' in block, (
         'the guard no longer establishes a fresh assistant message — the '
         'non-null-before-dispatch guarantee is broken')
 

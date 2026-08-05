@@ -29,9 +29,11 @@ from __future__ import annotations
 import secrets
 import time
 
-from flask import Blueprint, jsonify
+from flask import Blueprint
 
-from lib.api_response import api_bad_request, api_not_found, api_ok
+from lib.api_response import (
+    api_bad_request, api_created, api_not_found, api_ok,
+)
 from lib.config_dir import config_path as _config_path
 from lib.json_store import read_json, update_json_atomic
 from lib.log import get_logger
@@ -98,7 +100,10 @@ _DEF_SCHEMA = {
     tags=['orchestrations'],
 )
 def list_orchestrations():
-    return jsonify(_read_all())
+    # Coordinated bare-array migration (docs/API_CONTRACT.md §4): the array
+    # moves under ``items``; Api.orchestrations.list unwraps it (with an
+    # Array.isArray fallback for rolling-deploy skew).
+    return api_ok({'items': _read_all()})
 
 
 @api_v1_orchestrations_bp.route('/api/v1/orchestrations/<orch_id>', methods=['GET'])
@@ -107,7 +112,7 @@ def list_orchestrations():
 def get_orchestration(orch_id):
     for entry in _read_all():
         if entry.get('id') == orch_id:
-            return jsonify(entry)
+            return api_ok(entry)
     return api_not_found('Orchestration not found')
 
 
@@ -124,7 +129,7 @@ def get_orchestration(orch_id):
 def validate_orchestration():
     body = parse_body()
     verdict = validate_definition(body)
-    return jsonify(verdict)
+    return api_ok(verdict)
 
 
 @api_v1_orchestrations_bp.route('/api/v1/orchestrations/compose', methods=['POST'])
@@ -155,7 +160,7 @@ def compose_orchestration():
     logger.info('[Orchestrations] compose ok=%s nodes=%s',
                 result.get('ok'),
                 len((result.get('definition') or {}).get('nodes') or []))
-    return jsonify(result)
+    return api_ok(result)
 
 
 @api_v1_orchestrations_bp.route('/api/v1/orchestrations', methods=['POST'])
@@ -195,7 +200,7 @@ def create_orchestration():
                 new_entry['id'], new_entry.get('name'))
     resp = dict(new_entry)
     resp['warnings'] = verdict['warnings']
-    return jsonify(resp), 201
+    return api_created(resp)
 
 
 @api_v1_orchestrations_bp.route('/api/v1/orchestrations/<orch_id>', methods=['PUT'])
@@ -235,7 +240,7 @@ def update_orchestration(orch_id):
                 orch_id, found[0].get('name'))
     resp = dict(found[0])
     resp['warnings'] = verdict['warnings']
-    return jsonify(resp)
+    return api_ok(resp)
 
 
 @api_v1_orchestrations_bp.route('/api/v1/orchestrations/<orch_id>', methods=['DELETE'])
@@ -292,7 +297,7 @@ def builtin_orchestration(name):
     builder = builders.get(name)
     if builder is None:
         return api_not_found(f'Unknown built-in flow {name!r}')
-    return jsonify({'ok': True, 'definition': builder()})
+    return api_ok(definition=builder())
 
 
 @api_v1_orchestrations_bp.route('/api/v1/orchestrations/role-schema', methods=['GET'])
@@ -319,11 +324,10 @@ def role_schema_orchestration():
 
     role = (request.args.get('role') or '').strip()
     if role:
-        return jsonify({'ok': True, 'role': role,
-                        'fields': role_param_schema(role),
-                        'persona': role_persona(role)})
-    return jsonify({
-        'ok': True,
+        return api_ok(role=role,
+                      fields=role_param_schema(role),
+                      persona=role_persona(role))
+    return api_ok({
         'roles': {r: spec for r, spec in ROLE_PARAM_SCHEMA.items()},
         'generic': role_param_schema('__generic__'),
         # Read-only persona (the fixed system-prompt design) per role. The
@@ -357,7 +361,7 @@ def layout_orchestration():
     if not isinstance(defn, dict):
         return api_bad_request('definition or id is required')
     layout_definition(defn)
-    return jsonify({'ok': True, 'definition': defn})
+    return api_ok(definition=defn)
 
 
 @api_v1_orchestrations_bp.route('/api/v1/orchestrations/plan', methods=['POST'])
@@ -375,7 +379,7 @@ def plan_orchestration():
     defn = _resolve_definition(body)
     if not isinstance(defn, dict):
         return api_bad_request('definition or id is required')
-    return jsonify(compile_plan(defn))
+    return api_ok(compile_plan(defn))
 
 
 @api_v1_orchestrations_bp.route('/api/v1/orchestrations/run', methods=['POST'])
@@ -422,7 +426,7 @@ def run_orchestration():
     orchestration_run_runtime.spawn(tid, _worker)
     logger.info('[Orchestrations] run START task=%s name=%r',
                 tid, defn.get('name'))
-    return jsonify({'ok': True, 'task_id': tid})
+    return api_ok(task_id=tid)
 
 
 @api_v1_orchestrations_bp.route('/api/v1/orchestrations/run/human-approve',
@@ -581,7 +585,7 @@ def create_run_task():
     orchestration_run_runtime.spawn(tid, _worker)
     logger.info('[Orchestrations] task run START run=%s name=%r',
                 run_id, defn.get('name'))
-    return jsonify({'ok': True, 'run_id': run_id}), 201
+    return api_created(run_id=run_id)
 
 
 @api_v1_orchestrations_bp.route('/api/v1/orchestrations/tasks', methods=['GET'])
@@ -598,8 +602,7 @@ def list_run_tasks():
 
     status = (request.args.get('status') or '').strip()
     orch_id = (request.args.get('orch_id') or '').strip()
-    return jsonify({'ok': True,
-                    'runs': runs.list_runs(status=status, orch_id=orch_id)})
+    return api_ok(runs=runs.list_runs(status=status, orch_id=orch_id))
 
 
 @api_v1_orchestrations_bp.route('/api/v1/orchestrations/tasks/<run_id>',
@@ -613,7 +616,7 @@ def get_run_task(run_id):
     run = runs.get_run(run_id)
     if run is None:
         return api_not_found('Run not found')
-    return jsonify({'ok': True, 'run': run})
+    return api_ok(run=run)
 
 
 @api_v1_orchestrations_bp.route('/api/v1/orchestrations/tasks/<run_id>/events',
@@ -641,8 +644,7 @@ def get_run_task_events(run_id):
     events = runs.get_events(run_id, cursor)
     next_cursor = (events[-1]['seq'] + 1) if events else cursor
     status = run['status']
-    return jsonify({
-        'ok': True,
+    return api_ok({
         'events': events,
         'next_cursor': next_cursor,
         'status': status,

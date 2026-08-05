@@ -64,6 +64,141 @@ def _emit_round_usage(*args, **kwargs):
     return _facade()._emit_round_usage(*args, **kwargs)
 
 
+def _attempt_pool_rescue(task, body, round_num, max_tokens, tool_list,
+                         max_tool_rounds, accumulated_usage, api_rounds,
+                         *, failed_models, original_model, cause_exc,
+                         preset, thinking_enabled, on_tool_call_ready=None):
+    """Last-resort pool-wide dispatch before a turn is allowed to die.
+
+    Owner directive 2026-08-03: an error envelope may surface ONLY when every
+    key in the pool is unavailable. The fallback chain (primary → configured
+    fallback model) covers two models; when both fail — e.g. the fallback
+    model's only key got a durable 401 while the rest of the pool is healthy
+    (task 7ea8c25f, kimi-k3 pinned to one key_access cell whose AppId the
+    vendor rejected) — the turn used to die with a "check your API keys"
+    envelope even though other models could have completed it. This helper
+    makes ONE more dispatch attempt across every remaining (key, model)
+    slot: ``pool_wide=True`` (non-strict, no preferred model) and
+    ``exclude_models`` skips the models already proven dead in this chain,
+    so the rescue cannot re-enter their failure / 429 wall.
+
+    Returns the standard OK result dict on rescue success, else ``None``
+    (the caller then surfaces the original error envelope unchanged).
+    """
+    tid = task['id'][:8]
+    failed_models = {m for m in (failed_models or set()) if m}
+
+    # ── Gate: is there anything healthy BEYOND the failed models? ──
+    # A probe failure must not suppress the rescue attempt (the attempt is
+    # bounded by dispatch_stream's own max_retries either way).
+    try:
+        from lib.llm_dispatch.factory import get_dispatcher
+        _disp = get_dispatcher()
+        _has = _disp.has_capable_slots('text', exclude_models=failed_models)
+    except Exception as _ge:
+        logger.debug('[%s] pool-rescue gate probe failed: %s', tid, _ge)
+        _has = True
+    if not _has:
+        logger.warning('[%s] pool-rescue skipped — no capable slot beyond '
+                       'failed models %s', tid, sorted(failed_models))
+        return None
+
+    # Classify the cause so the badge names WHY the rescue fired (the same
+    # typed kind the normal fallback badge uses — 'permission', …).
+    try:
+        from lib.error_envelope import from_exception as _from_exc
+        _rk_env = _from_exc(cause_exc, model=original_model,
+                            context='pool-rescue', source='llm-stream')
+        _rk_kind = _rk_env.get('kind', 'generic')
+        _rk_detail = (_rk_env.get('detail') or str(cause_exc)).strip()
+    except Exception as _ce:
+        logger.debug('[%s] pool-rescue cause classify failed: %s', tid, _ce)
+        _rk_kind, _rk_detail = 'generic', str(cause_exc)[:200]
+
+    append_event(task, {
+        'type': 'phase',
+        'phase': 'retrying',
+        'detail': (f'⚠️ {original_model} 及其回退模型均不可用（{_rk_kind}）— '
+                   f'正在尝试池中其它可用模型…'),
+    })
+
+    _tools_this = tool_list if (tool_list and round_num < max_tool_rounds) else None
+    _rescue_body = dict(body)
+    if _tools_this is not None:
+        _rescue_body['tools'] = _tools_this
+    # Same session-stable TTL latch rule as every rebuild path.
+    _rescue_body['_task_id'] = task.get('id', '')
+
+    try:
+        assistant_msg, finish_reason, usage = stream_llm_response(
+            task, _rescue_body, tag=f'R{round_num+1}-RESCUE',
+            on_tool_call_ready=on_tool_call_ready,
+            pool_wide=True, exclude_models=failed_models)
+    except Exception as e3:
+        logger.warning('[%s] pool-rescue dispatch also failed: %s', tid, e3)
+        return None
+
+    _rescue_model = ((usage or {}).get('_dispatch') or {}).get('model') \
+        or _rescue_body.get('model') or original_model
+
+    if usage is not None and _flag_empty_stop_for_retry(
+            assistant_msg, finish_reason, task, round_num, usage):
+        logger.warning('[%s] ⚠️ Round-0 EMPTY STOP (pool-rescue model=%s) — '
+                       'flagging for empty_stop retry', tid, _rescue_model)
+
+    # Badge: keep the ORIGINAL primary as _fallback_from when an earlier hop
+    # already recorded it (the rescue is the tail of the same chain).
+    if not task.get('_fallback_from'):
+        task['_fallback_from'] = original_model
+    task['_fallback_model'] = _rescue_model
+    task['_fallback_reason'] = (
+        f'{_rk_kind}: {_rk_detail}' if _rk_detail else _rk_kind)[:300]
+    task['_fallback_kind'] = _rk_kind
+
+    # Honest accounting — identical to the primary/fallback success paths.
+    if usage:
+        for k, v in usage.items():
+            if isinstance(v, (int, float)):
+                accumulated_usage[k] = accumulated_usage.get(k, 0) + v
+        api_rounds.append({'round': round_num + 1, 'model': _rescue_model,
+                           'usage': dict(usage), 'tag': f'R{round_num+1}-RESCUE'})
+        _emit_round_usage(task, round_num + 1, _rescue_model, usage,
+                          tag=f'R{round_num+1}-RESCUE')
+        for _bill in (usage.get('_extra_billing_rounds') or []):
+            _bu = _bill.get('usage') or {}
+            for k, v in _bu.items():
+                if isinstance(v, (int, float)):
+                    accumulated_usage[k] = accumulated_usage.get(k, 0) + v
+            api_rounds.append({
+                'round': round_num + 1,
+                'model': _bill.get('model') or _rescue_model,
+                'usage': dict(_bu),
+                'tag': _bill.get('tag') or f'R{round_num+1}-RESCUE-DISCARDED',
+            })
+            _emit_round_usage(task, round_num + 1,
+                              _bill.get('model') or _rescue_model, _bu,
+                              tag=_bill.get('tag') or f'R{round_num+1}-RESCUE-DISCARDED')
+
+    audit_log('model_fallback', old=original_model, new=_rescue_model,
+              reason=f'pool-rescue: {_rk_kind}: {_rk_detail[:160]}',
+              kind=_rk_kind, tid=tid, conv=task.get('convId', ''))
+    logger.warning('[%s] ✓ POOL-RESCUE round %d OK: finish_reason=%s '
+                   'model=%s (rescued from %s; failed chain: %s)',
+                   tid, round_num + 1, finish_reason, _rescue_model,
+                   original_model, sorted(failed_models))
+
+    return {
+        'assistant_msg': assistant_msg,
+        'finish_reason': finish_reason,
+        'usage': usage,
+        'model': _rescue_model,
+        'preset': preset,
+        'thinking_enabled': thinking_enabled,
+        '_loop_action': None,
+        '_loop_exit_reason': None,
+    }
+
+
 def _llm_call_with_fallback(task, body, model, round_num, max_tokens,
                              tool_call_happened, tool_list, max_tool_rounds,
                              messages, preset, thinking_enabled,
@@ -438,8 +573,21 @@ def _llm_call_with_fallback(task, body, model, round_num, max_tokens,
                      '(check M-TraceId in preceding debug logs for gateway coordination)',
                      tid, task.get('convId', ''), round_num + 1, model, err_str, exc_info=True)
 
-        # If already on the fallback model, or no fallback configured — give up
+        # If already on the fallback model, or no fallback configured —
+        # try the pool-wide last resort before giving up (owner directive
+        # 2026-08-03: an error surfaces ONLY when every key is unavailable).
+        # An explicit per-request opt-out (disableModelFallback) skips it.
         if not _FALLBACK_MODEL or model == _FALLBACK_MODEL:
+            if not _fb_disabled_by_request:
+                _rescue = _attempt_pool_rescue(
+                    task, body, round_num, max_tokens, tool_list,
+                    max_tool_rounds, accumulated_usage, api_rounds,
+                    failed_models={model}, original_model=original_model,
+                    cause_exc=e, preset=preset,
+                    thinking_enabled=thinking_enabled,
+                    on_tool_call_ready=on_tool_call_ready)
+                if _rescue is not None:
+                    return _rescue
             if tool_call_happened:
                 _user_err = format_llm_error_for_user(
                     e, model=model,
@@ -494,6 +642,25 @@ def _llm_call_with_fallback(task, body, model, round_num, max_tokens,
             'detail': (f'⚠️ 模型 {original_model} 请求失败（{_fb_kind}）：'
                        f'{_fb_detail[:120]} — 已自动回退到 {_FALLBACK_MODEL} 继续生成…'),
         })
+        # ★ EARLY notification, at the DECISION MOMENT — before the fallback
+        #   stream starts. A fallback generation can run for minutes; the
+        #   transient phase line is cleared the moment fallback content
+        #   starts streaming, so without a STRUCTURED event + early task
+        #   stamps the user has no indication the model changed for the
+        #   whole generation, and a cold reload mid-fallback cannot repaint
+        #   the banner (build_fresh_state_snapshot reads these fields).
+        #   Cleared again below if the fallback itself fails.
+        append_event(task, {
+            'type': 'model_fallback',
+            'fallbackModel': _FALLBACK_MODEL,
+            'fallbackFrom': original_model,
+            'fallbackKind': _fb_kind,
+            'fallbackReason': _fb_reason[:300],
+        })
+        task['_fallback_model'] = _FALLBACK_MODEL
+        task['_fallback_from'] = original_model
+        task['_fallback_reason'] = _fb_reason[:300]
+        task['_fallback_kind'] = _fb_kind
         # A model fallback is a significant state change — record it in the
         # audit trail so the optimizer/operator can see WHICH model failed,
         # how often, and why (the analyzer already mines 'model_fallback').
@@ -545,10 +712,8 @@ def _llm_call_with_fallback(task, body, model, round_num, max_tokens,
                                tid, round_num, _FALLBACK_MODEL, finish_reason,
                                _fb_trace, _fb_elapsed / 1000)
 
-            task['_fallback_model'] = _FALLBACK_MODEL
-            task['_fallback_from'] = original_model
-            task['_fallback_reason'] = _fb_reason[:300]
-            task['_fallback_kind'] = _fb_kind
+            # (fallback fields were stamped at the DECISION moment, before
+            # the stream started — see above; nothing to re-stamp here.)
             if usage:
                 for k, v in usage.items():
                     if isinstance(v, (int, float)):
@@ -599,6 +764,27 @@ def _llm_call_with_fallback(task, body, model, round_num, max_tokens,
 
         except Exception as e2:
             logger.error('[%s] Opus fallback also failed: %s', tid, e2, exc_info=True)
+            # ★ Pool-wide last resort (owner directive 2026-08-03) — the
+            #   configured fallback dying must not kill the turn while the
+            #   pool still has healthy (key, model) slots.
+            if not _fb_disabled_by_request:
+                _rescue = _attempt_pool_rescue(
+                    task, fallback_body, round_num, max_tokens, tool_list,
+                    max_tool_rounds, accumulated_usage, api_rounds,
+                    failed_models={original_model, _FALLBACK_MODEL},
+                    original_model=original_model,
+                    cause_exc=e2, preset='medium',
+                    thinking_enabled=True,
+                    on_tool_call_ready=on_tool_call_ready)
+                if _rescue is not None:
+                    return _rescue
+            # The configured fallback produced NOTHING — clear the
+            # decision-time stamp. done/persist read these fields to claim a
+            # fallback happened; claiming one that failed is a lie. (A
+            # successful pool-rescue above re-stamps with its own values.)
+            for _fk in ('_fallback_model', '_fallback_from',
+                        '_fallback_reason', '_fallback_kind'):
+                task.pop(_fk, None)
             if tool_call_happened:
                 _user_err = format_llm_error_for_user(
                     e2, model=_FALLBACK_MODEL,

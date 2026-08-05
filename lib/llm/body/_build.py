@@ -102,7 +102,7 @@ def build_body(model, messages, *, max_tokens=128000, temperature=1.0,
 
     _pid = provider_id.lower() if provider_id else ''
     # Keyed on the GATEWAY, not one provider id's exact spelling: every
-    # example-corp* provider (example-corp, example-corp_anthropic, …) terminates at
+    # example-corp* provider (example-corp, example_corp_anthropic, …) terminates at
     # your-llm-gateway.example.com, whose keyword filter is surface-agnostic — the
     # 2026-07-28 Claude → Anthropic-native migration proved exact-equality
     # silently strips the ZWSP sanitizer from the new surface (HTTP 450

@@ -80,6 +80,10 @@ hidden_imports += [
     # Desktop-control agent (lib/desktop_agent): local machine automation.
     # pyautogui pulls in platform-specific backends dynamically.
     'pyautogui', 'pyperclip', 'pygetwindow', 'pyscreeze', 'pytweening', 'mouseinfo',
+    # Desktop package seams the launcher uses (function-level imports —
+    # listed explicitly so a future analyzer regression can't drop them).
+    'desktop.connect_ui', 'desktop._tk_theme', 'desktop.role_window',
+    'desktop.post_install', 'desktop._tk_host',
 ]
 
 # ── Data files to bundle ──

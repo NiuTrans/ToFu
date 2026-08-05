@@ -121,6 +121,21 @@ class TestAgentRegistry:
         _register('agent-A')
         assert db.is_desktop_agent_connected()
 
+    def test_register_stores_version_and_projects_it(self):
+        """The drift signal (owner amendment ②): the frame's version must
+        survive registration and reach the status projection."""
+        db.register_agent('agent-A', {'name': 'mac', 'version': '0.16.0'})
+        a = db.online_agents()[0]
+        assert a['version'] == '0.16.0'
+        assert db.list_agents()[0]['version'] == '0.16.0'
+
+    def test_a_versionless_frame_keeps_the_previous_version(self):
+        """An older agent (frame without version) must not erase what a
+        newer registration recorded — heartbeat fallback, same as name."""
+        db.register_agent('agent-A', {'name': 'mac', 'version': '0.16.0'})
+        db.register_agent('agent-A', {'name': 'mac2'})
+        assert db.online_agents()[0]['version'] == '0.16.0'
+
 
 # ═══════════════════════════════════════════════════════════
 #  寻址投递

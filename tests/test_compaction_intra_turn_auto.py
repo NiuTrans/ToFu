@@ -26,6 +26,8 @@ Run:  python -B -m pytest -p no:napari tests/test_compaction_intra_turn_auto.py
 from __future__ import annotations
 
 import os
+import random
+import string
 import sys
 
 import pytest
@@ -45,25 +47,36 @@ def _user(text):
     return {'role': 'user', 'content': text}
 
 
-def _round(i, chars=4000):
+def _dense_chars(seed, n):
+    """Deterministic high-entropy filler. Repetitive filler ('x'*n) BPE-merges
+    into far fewer tokens than the char-based heuristic assumes, so the
+    authoritative (tiktoken) and heuristic yardsticks disagree — the
+    convergence tests need both to agree that the hot tail is over the
+    ceiling. Random alnum keeps them aligned."""
+    rng = random.Random(seed)
+    return ''.join(rng.choices(string.ascii_letters + string.digits, k=n))
+
+
+def _round(i, chars=4000, dense=False):
     """One api-form tool-call ROUND: assistant(tool_calls) + its tool result."""
     tcid = f'tc_{i}'
+    payload = _dense_chars(i, chars) if dense else ('x' * chars)
     return [
         {'role': 'assistant', 'content': None,
          'tool_calls': [{'id': tcid, 'type': 'function',
                          'function': {'name': 'read_files',
                                       'arguments': '{"path": "x"}'}}]},
         {'role': 'tool', 'tool_call_id': tcid, 'name': 'read_files',
-         'content': 'RESULT ' + ('x' * chars)},
+         'content': 'RESULT ' + payload},
     ]
 
 
-def _giant_turn_api(n_rounds=40, chars=4000):
+def _giant_turn_api(n_rounds=40, chars=4000, dense=False):
     """system + user(objective) + ONE turn of n_rounds tool-call rounds (no
     intervening user), i.e. a single agentic turn that fills the window."""
     msgs = [_sys(), _user('修复登录 bug，尽可能彻底')]
     for i in range(n_rounds):
-        msgs += _round(i, chars=chars)
+        msgs += _round(i, chars=chars, dense=dense)
     return msgs
 
 
@@ -209,11 +222,14 @@ def test_auto_compact_converges_when_hot_tail_still_overflows(stub_summary):
     from lib.tasks_pkg.compaction import (
         _estimate_total_tokens, execute_compact_tool)
 
-    # gpt-4 → 128k window; each hot round ~45k chars so 8 hot rounds alone
-    # blow past the ~80.6k-token ceiling even after the cold body is folded.
+    # gpt-4 → 128k window; each hot round ~45k DENSE chars so 8 hot rounds
+    # alone blow past the ~80.6k-token ceiling even after the cold body is
+    # folded. Dense matters: the convergence projection counts tokens
+    # AUTHORITATIVELY (tiktoken), and repetitive filler would BPE-merge to
+    # under the ceiling, skipping the very path under test.
     task = {'convId': 'conv_conv', 'id': 't', 'config': {'model': 'gpt-4'}}
     ceiling = _ceiling_for(task)
-    msgs = _giant_turn_api(n_rounds=40, chars=45_000)
+    msgs = _giant_turn_api(n_rounds=40, chars=45_000, dense=True)
 
     meta: dict = {}
     execute_compact_tool(msgs, task=task, _result_meta=meta,
@@ -247,7 +263,7 @@ def test_NC_no_convergence_leaves_projected_over_ceiling(stub_summary, monkeypat
 
     task = {'convId': 'conv_nc', 'id': 't', 'config': {'model': 'gpt-4'}}
     ceiling = _ceiling_for(task)
-    msgs = _giant_turn_api(n_rounds=40, chars=45_000)
+    msgs = _giant_turn_api(n_rounds=40, chars=45_000, dense=True)
 
     meta: dict = {}
     execute_compact_tool(msgs, task=task, _result_meta=meta,

@@ -327,6 +327,40 @@ if (document.fonts && document.fonts.ready) {
     }
   });
 }
+/* ★ _mirrorRailGeometry: copy the rail grant (--rail-w/--rail-gap) from
+ * .chat-inner onto .input-inner, so the composer's left-edge lock
+ * (styles.css `.input-inner` margin-left) replays .chat-inner's centering
+ * math with the SAME furniture values. The chatpane container query that
+ * decides the grant only reaches .chat-inner's subtree and CANNOT be
+ * extended to a composer ancestor: container-type:inline-size carries
+ * layout containment, which would re-parent the mobile bottom-sheet
+ * dropdowns' position:fixed (≤768px .preset-dropdown) from the viewport to
+ * the band. The ResizeObserver covers every grant flip (sidebar toggle,
+ * drawer open/close, window resize): a flip only happens when
+ * .chat-container's inline size crosses the threshold, which IS a resize. */
+function _mirrorRailGeometry() {
+  const chatInner = document.querySelector('.chat-inner');
+  const inputInner = document.querySelector('.input-inner');
+  if (!chatInner || !inputInner) return;
+  const cs = getComputedStyle(chatInner);
+  const rw = (cs.getPropertyValue('--rail-w') || '').trim() || '0px';
+  const rg = (cs.getPropertyValue('--rail-gap') || '').trim() || '0px';
+  /* Skip the write when unchanged — a no-op setProperty still invalidates
+   * style, and the RO fires per frame during the drawer/sidebar animation. */
+  if (inputInner.style.getPropertyValue('--rail-w') !== rw)
+    inputInner.style.setProperty('--rail-w', rw);
+  if (inputInner.style.getPropertyValue('--rail-gap') !== rg)
+    inputInner.style.setProperty('--rail-gap', rg);
+}
+function _installRailGeometryMirror() {
+  _mirrorRailGeometry();
+  const cont = document.querySelector('.chat-container');
+  if (cont && typeof ResizeObserver === 'function') {
+    try { new ResizeObserver(_mirrorRailGeometry).observe(cont); }
+    catch (err) { console.warn('rail-geometry mirror ResizeObserver failed:', err); }
+  }
+}
+
 /* --chat-w is NOT synced — chat area uses its own fixed max-width (820px default)
  * independent of toolbar width, per §4.2 decoupled layout. */
 
@@ -450,7 +484,10 @@ function _applyMemoryUI(enabled) {
   document
     .getElementById("memoryBadge")
     ?.classList.toggle("visible", memoryEnabled);
-  _updateMemoryModalBtn();
+  /* memory.js is DEFERRED (Epic-E sub-9): the modal button painter is
+   * absent until the feature bundle lands — gate, or the tool-state
+   * application path throws ReferenceError. */
+  if (typeof _updateMemoryModalBtn === 'function') _updateMemoryModalBtn();
 }
 function _applyImageGenToolUI(enabled) {
   imageGenEnabled = !!enabled;
@@ -860,6 +897,11 @@ function _installViewportHeightGuard() {
   })();
   // Apply stored input-send-mode hint text on load
   try { refreshInputSendHint(); } catch (_) {}
+  /* Composer left-edge lock: mirror the rail grant onto .input-inner now
+   * (first paint) and on every .chat-container resize (sidebar/drawer/
+   * window). Without the boot call the composer renders one frame with the
+   * no-rail defaults and then snaps. */
+  try { _installRailGeometryMirror(); } catch (e) { console.warn('rail mirror install failed:', e); }
   // fetchToggle / fetchBadge removed — fetch is always on
   document
     .getElementById("codeExecToggle")
@@ -1196,7 +1238,15 @@ function _installViewportHeightGuard() {
     if (convList) convList.innerHTML = '<div style="text-align:center;padding:18px 0;color:#999;font-size:13px">Loading…</div>';
   }
   // ── Startup DB health check — show persistent banner if PG is down ──
-  _checkDbHealth();
+  /* typeof-guarded: _checkDbHealth lives in core/backend_offline_monitor.js.
+   *   An UNGUARDED call here once hit the Epic-E sub-3B deferral window (the
+   *   module was briefly deferred) and the ReferenceError killed the whole
+   *   boot IIFE — initActiveTasks never ran, so neither conversations nor
+   *   folders loaded (the "sidebar folder rail gone" incident, 2026-08-01).
+   *   The guard also keeps boot alive if the file is ever corruption-skipped
+   *   by the bundler (it is not a _CRITICAL_FILES member): losing the DB
+   *   banner degrades, crashing boot destroys. */
+  if (typeof _checkDbHealth === 'function') _checkDbHealth();
 
   // ── Restore PDF/VLM state from sessionStorage (survives page refresh) ──
   if (typeof _vlmRestoreState === 'function') {

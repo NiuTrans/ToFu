@@ -286,7 +286,7 @@ def test_display_wiring(isolated):
     assert 'activate_skill' in _TOOL_DISPLAY_DISPATCH
     assert tool_round_label('activate_skill', {'skill': 'mypkg'}) == \
         'Activating skill: mypkg'
-    assert tool_label('activate_skill') == '📦 Loading skill'
+    assert tool_label('activate_skill') == 'Loading skill'  # no emoji (owner directive 2026-08-03)
 
 
 @pytest.mark.unit

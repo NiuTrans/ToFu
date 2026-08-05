@@ -3,13 +3,13 @@ to SATISFY the tofu-search floor, not merely declare it.
 
 WHY THIS EXISTS (pt_84e6828ee5f44a7c)
 -------------------------------------
-``requirements.txt`` pins ``tofu-search>=0.5.3`` — a HARD floor: the bridge
-passes ``allow_private_hosts`` to ``configure()`` unconditionally, so an older
-library crashes the server AT BOOT (same shape as the 0.5.0 deadline kwargs).
-But 0.5.3 is on NO pip index: public PyPI tops at 0.5.1 (measured
-2026-07-31, pinned by tests/test_requirements_public_resolvable.py — RED
-until the publish), and the internal mirror carries none. The only verified
-0.5.3 artifacts live in the sibling repo's ``dist/``.
+``requirements.txt`` pins a moving ``tofu-search>=X.Y.Z`` floor (0.5.3 when
+this suite landed, since bumped 0.6.0 → 0.7.3 — each bump's rationale lives
+in the comment block above the pin). Recent floors are on NO pip index:
+public PyPI topped at 0.5.1 (measured 2026-07-31, pinned by
+tests/test_requirements_public_resolvable.py — RED until the publish), and
+the internal mirror carries none. The only verified artifacts live in the
+sibling repo's ``dist/``.
 
 So the chain must carry the floor itself, at all three of its points:
 
@@ -52,7 +52,7 @@ _REQUIREMENTS = _ROOT / 'requirements.txt'
 def _fake_tree(tmp_path, monkeypatch, wheels=('tofu_search-0.5.3-py3-none-any.whl',),
                floor='0.5.3', src_version='0.5.3'):
     """A minimal ROOT/sibling/dest tree around the REAL bundling function."""
-    import export as ex
+    ex = pytest.importorskip('export', reason='export.py not shipped in opensource')
     root = tmp_path / 'chatui'
     sibling = tmp_path / 'tofu-search'
     (sibling / 'dist').mkdir(parents=True)
@@ -104,7 +104,7 @@ def test_the_newest_wheel_wins(tmp_path, monkeypatch):
 def test_a_missing_dist_dir_is_a_clean_skip(tmp_path, monkeypatch):
     """A host without the sibling repo must not crash the export — it just
     gets no wheel (and install.sh then reports the gap loudly)."""
-    import export as ex
+    ex = pytest.importorskip('export', reason='export.py not shipped in opensource')
     root = tmp_path / 'chatui'
     root.mkdir()
     (root / 'requirements.txt').write_text('tofu-search>=0.5.3\n',
@@ -172,22 +172,39 @@ def test_the_wheel_install_is_guarded_not_fatal_when_absent():
 
 
 # ═══════════════════════════════════════════════════════════════════
-#  3. the 0.5.3 floor is documented, and marked HARD
+#  3. the floor pin is documented, and marked HARD/SOFT
 # ═══════════════════════════════════════════════════════════════════
 
 
-def test_the_053_floor_carries_its_rationale():
-    """The pin landed with the comment block ending at 0.5.2 — an
-    undocumented floor that invites "just lower it" as a fix. Lowering is
-    never the fix here (the bridge crashes at boot without the new kwarg),
-    so the rationale must be written where the pin lives."""
+def test_the_floor_pin_carries_its_rationale():
+    """Every tofu-search floor must be documented where the pin lives.
+
+    Drift note: this guard used to pin the LITERAL ``>=0.5.3`` line (and was
+    named ``test_the_053_floor_carries_its_rationale``). The floor has moved
+    twice since (0.6.0 filter_mode HARD, then 0.7.3 replay no-op SOFT) and
+    each bump broke the literal pin even though the rationale discipline was
+    upheld — the version was over-pinned, the INTENT was not. The guard now
+    reads whatever floor is pinned and pins the discipline itself: a
+    ``# >=<floor>:`` paragraph that marks the floor HARD or SOFT and names
+    the capability that requires it. Lowering is never the fix for an
+    unsatisfiable floor (the bridge crashes at boot without the new kwarg on
+    HARD floors), so "just lower it" must never read as a safe fix.
+    """
     text = _REQUIREMENTS.read_text(encoding='utf-8')
-    pin = re.search(r'(?m)^tofu-search>=0\.5\.3\s*$', text)
-    assert pin, 'the tofu-search>=0.5.3 pin itself is gone — re-aim this guard'
-    block = text[max(0, pin.start() - 2000):pin.start()]
-    assert 'allow_private_hosts' in block, (
-        'the 0.5.3 floor no longer names the capability that requires it')
-    assert re.search(r'HARD floor', block), (
-        'the 0.5.3 floor is not marked HARD — without that, "lower the '
-        'floor" reads as a safe fix for an unsatisfiable pin, and it is '
-        'anything but (boot-time TypeError in configure())')
+    pin = re.search(r'(?m)^tofu-search>=(\d+\.\d+\.\d+)\s*$', text)
+    assert pin, 'the tofu-search floor pin itself is gone — re-aim this guard'
+    floor = pin.group(1)
+    para = re.search(
+        rf'(?ms)^# >={re.escape(floor)}:(.*?)^tofu-search>=', text)
+    assert para, (
+        f'the {floor} floor has no rationale paragraph — an undocumented '
+        'floor invites "just lower it" as a fix, which is never safe here')
+    body = para.group(1).strip()
+    assert re.search(r'(HARD|SOFT) floor', body), (
+        f'the {floor} floor is not marked HARD/SOFT — without that, '
+        '"lower the floor" reads as a safe fix for an unsatisfiable pin, '
+        'and on HARD floors it is anything but (boot-time TypeError in '
+        'configure())')
+    assert len(body) >= 80, (
+        f'the {floor} rationale is a stub ({len(body)} chars) — name the '
+        'capability that requires the floor')

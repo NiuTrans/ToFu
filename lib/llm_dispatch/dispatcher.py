@@ -7,7 +7,6 @@ best-for-model, etc.).
 
 import json
 import os
-import random
 import threading
 import time
 
@@ -354,6 +353,11 @@ class LLMDispatcher:
             prov_extra_headers = provider.get('extra_headers') or {}
             prov_thinking_format = provider.get('thinking_format', '')
             prov_oauth = provider.get('oauth', '')
+            # Subscription-adapter marker (CLIProxyAPI sidecar on the user's
+            # desktop agent). Mirrors lib.desktop.adapter.is_adapter_provider
+            # without importing the desktop layer here.
+            _raw_adapter = provider.get('adapter')
+            prov_adapter = dict(_raw_adapter) if isinstance(_raw_adapter, dict) else {}
 
             # A subscription backend's wire protocol is a fact of the
             # backend, not a user setting: the Codex backend speaks ONLY
@@ -609,6 +613,7 @@ class LLMDispatcher:
                                 thinking_format=prov_thinking_format,
                                 protocol=face.protocol,
                                 oauth=prov_oauth,
+                                adapter=dict(prov_adapter),
                                 rpm_limit=slot_rpm,
                                 latency_ema=slot_lat,
                                 cost_per_1k_tokens=slot_cost,
@@ -1243,7 +1248,7 @@ class LLMDispatcher:
 
     def has_capable_slots(self, capability: str = 'text',
                           exclude_models=None, exclude_keys=None,
-                          exclude_pairs=None) -> bool:
+                          exclude_pairs=None, prefer_model=None) -> bool:
         """True if at least one slot CAN serve ``capability`` ignoring
         transient cooldown / rpm state.
 
@@ -1258,11 +1263,21 @@ class LLMDispatcher:
 
         Only the durable disqualifiers (capability, hard exclusions,
         chat-compatibility) are checked here; cooldown / inflight / rpm
-        are deliberately ignored."""
+        are deliberately ignored.
+
+        ``prefer_model`` (passed by the dispatch loops ONLY under
+        ``strict_model``) narrows the answer to the preferred model's
+        alias group: a strict-pinned loop can never pick outside that
+        group, so healthy slots of OTHER models must not keep it cycling
+        (2026-08-03 incident: kimi-k3's sole key permission-excluded →
+        the pool's healthy opus/glm slots answered True here, the loop
+        spun ~2min resurrecting the dead pair every 60s instead of
+        failing over to the pool rescue immediately)."""
         self.initialize()
         ex_models = exclude_models or set()
         ex_keys = exclude_keys or set()
         ex_pairs = exclude_pairs or set()
+        alias_set = self._alias_set(prefer_model) if prefer_model else None
         # Respect the thread's hard provider pin (same isolation rule as
         # _pick): a pinned task only "has capable slots" among its own
         # provider's slots, so the retry loop waits for THAT provider to
@@ -1281,52 +1296,49 @@ class LLMDispatcher:
                     continue
                 if _pinned_provider and s.provider_id != _pinned_provider:
                     continue
+                if alias_set is not None and s.model not in alias_set:
+                    continue
                 return True
         return False
 
 
     # ── Shared-project contention (external saturation) ──
     # A 429 naming a PROJECT-level limit (RateLimitError.is_shared_contention)
-    # means the gateway account's shared pipe is saturated by OTHER tenants —
-    # rotating our own keys is futile (they all terminate at the same
-    # upstream project; measured 2026-07-28: 3 example-corp keys → 1 Moonshot ak).
-    # Instead of the 0.5s-per-slot spin (one task hit 429 cycle #19 in the
-    # incident), the whole (provider, model) family steps back together for
-    # a jittered, escalating window while OTHER models/providers take over.
-    _CONTENTION_BASE_S = 2.0
-    _CONTENTION_CAP_S = 60.0         # never park a model longer than this
-    _CONTENTION_RESET_GRACE_S = 30.0  # quiet window+grace → strikes reset
+    # means the gateway account's shared pipe is saturated by OTHER tenants.
+    # Owner directive 2026-08-03: a 429 gets NO backoff — the dispatch loop
+    # retries IMMEDIATELY. The escalating 2s→60s family parking introduced
+    # 2026-07-28 (pt_1a72b708098d446f) is RETIRED: it idled requests up to a
+    # minute per strike while the window doubled, and grabbing the rate-limit
+    # window the instant it resets favours aggressive polling. The slot's own
+    # 0.5s steering cooldown (Slot.record_error) is the whole answer. This
+    # hook is now PURE TELEMETRY: a per-(provider, model) streak counter plus
+    # a throttled log line, so a contention storm stays visible in app.log
+    # without per-cycle flooding.
+    _CONTENTION_RESET_GRACE_S = 30.0  # quiet window → streak resets
 
     def note_shared_contention(self, slot) -> float:
-        """Cool ALL slots of *slot*'s (provider_id, model) for a jittered,
-        escalating window (2s → doubling → 60s cap, ±25% jitter). Returns
-        the window seconds.
+        """Record one shared-project contention strike; NEVER parks slots.
 
-        Jitter is the thundering-herd guard: without it every worker parked
-        on the same window wakes in the same second and re-saturates the
-        pipe. Strikes reset after a full quiet window + grace — a healed
-        project must not inherit yesterday's escalation.
+        Always returns 0.0 (no backoff — owner directive 2026-08-03: retry
+        immediately). The streak resets after a quiet window + grace. Log
+        throttle: strikes 1-3 + every 100th at INFO, the rest at DEBUG —
+        a sustained storm costs ~1 line/30s instead of ~3 lines/s.
         """
         key = (slot.provider_id, slot.model)
         now = time.time()
         with self._lock:
-            strikes, until = self._contention_strikes.get(key, (0, 0.0))
+            strikes, last = self._contention_strikes.get(key, (0, 0.0))
             strikes = (strikes + 1
-                       if now < until + self._CONTENTION_RESET_GRACE_S else 1)
-            window = min(self._CONTENTION_CAP_S,
-                         self._CONTENTION_BASE_S * (2 ** (strikes - 1))
-                         * random.uniform(0.75, 1.25))
-            until = now + window
-            self._contention_strikes[key] = (strikes, until)
-            for s in self.slots:
-                if (s.provider_id, s.model) == key:
-                    with s._lock:
-                        s.cooldown_until = until
-                        s.cooldown_reason = 'contention'
-        logger.info('[Dispatch] shared-project contention on %s:%s — family '
-                    'cooled %.1fs (strike %d)',
-                    slot.provider_id, slot.model, window, strikes)
-        return window
+                       if now < last + self._CONTENTION_RESET_GRACE_S else 1)
+            self._contention_strikes[key] = (strikes, now)
+        if strikes <= 3 or strikes % 100 == 0:
+            logger.info('[Dispatch] shared-project contention on %s:%s — '
+                        'retrying immediately, no family backoff (streak %d)',
+                        slot.provider_id, slot.model, strikes)
+        else:
+            logger.debug('[Dispatch] shared-project contention on %s:%s '
+                         '(streak %d)', slot.provider_id, slot.model, strikes)
+        return 0.0
 
     def cooling_cause_summary(self, capability: str = 'text',
                               exclude_models=None, exclude_keys=None,
@@ -1462,6 +1474,7 @@ class LLMDispatcher:
                 'total_requests': s.total_requests,
                 'total_errors': s.total_errors,
                 'contention_errors': s.contention_errors,
+                'gateway_errors': s.gateway_errors,
                 'requests_5h': s.requests_5h,
                 'provider_id': s.provider_id,
                 'base_url': s.base_url,

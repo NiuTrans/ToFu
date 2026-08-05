@@ -24,10 +24,10 @@ from __future__ import annotations
 
 import os
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, request
 
 from lib.api_response import (
-    api_bad_request, api_not_found,
+    api_bad_request, api_created, api_not_found, api_ok,
 )
 from lib.log import get_logger
 from lib.openapi import api_meta
@@ -85,7 +85,7 @@ def list_memories_v1():
                 if not m.get('is_package')]
     for m in memories:
         m.pop('filepath', None)
-    return jsonify({'memories': memories})
+    return api_ok({'memories': memories})
 
 
 @api_v1_memory_bp.route('/api/v1/memory/<memory_id>', methods=['GET'])
@@ -97,7 +97,7 @@ def get_memory_v1(memory_id):
     if not mem:
         return api_not_found('Memory not found')
     mem.pop('filepath', None)
-    return jsonify(mem)
+    return api_ok(mem)
 
 
 @api_v1_memory_bp.route('/api/v1/memory', methods=['POST'])
@@ -129,7 +129,7 @@ def create_memory_v1():
     )
     logger.info('[Memory.v1] created %s', mem.get('id', '?'))
     mem.pop('filepath', None)
-    return jsonify(mem), 201
+    return api_created(mem)
 
 
 @api_v1_memory_bp.route('/api/v1/memory/<memory_id>', methods=['PUT'])
@@ -146,7 +146,7 @@ def update_memory_v1(memory_id):
     if not mem:
         return api_not_found('Memory not found')
     mem.pop('filepath', None)
-    return jsonify(mem)
+    return api_ok(mem)
 
 
 @api_v1_memory_bp.route('/api/v1/memory/<memory_id>', methods=['DELETE'])
@@ -162,7 +162,8 @@ def delete_memory_v1(memory_id):
         return api_bad_request(e)
     if not ok:
         logger.warning('[Memory.v1] %s not found for deletion', memory_id)
-    return jsonify({'deleted': ok}), (200 if ok else 404)
+        return api_not_found('Memory not found', deleted=False)
+    return api_ok(deleted=True)
 
 
 @api_v1_memory_bp.route('/api/v1/memory/merge', methods=['POST'])
@@ -191,7 +192,7 @@ def merge_memories_v1():
         logger.debug('[Memory.v1] merge validation error: %s', e)
         return api_bad_request(e)
     result['merged_memory'].pop('filepath', None)
-    return jsonify(result), 201
+    return api_created(result)
 
 
 @api_v1_memory_bp.route('/api/v1/memory/<memory_id>/toggle',
@@ -206,7 +207,7 @@ def toggle_memory_v1(memory_id):
     if not mem:
         return api_not_found('Memory not found')
     mem.pop('filepath', None)
-    return jsonify(mem)
+    return api_ok(mem)
 
 
 # ── Personal-preference profile ──────────────────────────────────────
@@ -228,7 +229,7 @@ def get_user_profile_v1():
     from .auth import current_auth
     scope = up.resolve_profile_scope(current_auth())
     body = up.load_profile(scope)
-    return jsonify({
+    return api_ok({
         'body': body,
         'items': up.parse_items(body),
         'chars': len(body),
@@ -258,7 +259,7 @@ def put_user_profile_v1():
     else:
         res = up.save_profile(data.get('body', ''), scope)
     res['items'] = up.parse_items(scope=scope)
-    return jsonify(res)
+    return api_ok(res)
 
 
 @api_v1_memory_bp.route('/api/v1/profile/pending/<pending_id>',
@@ -280,7 +281,7 @@ def resolve_profile_pending_v1(pending_id):
                              edited_text=data.get('text'))
     if not res.get('resolved'):
         return api_not_found('Pending proposal not found')
-    return jsonify(res)
+    return api_ok(res)
 
 
 __all__ = ['api_v1_memory_bp']

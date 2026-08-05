@@ -193,9 +193,9 @@ def _build_poll_tools(tools_config: dict) -> list | None:
     try:
         from lib.tools import (
             CODE_EXEC_TOOL,
-            FETCH_URL_TOOL,
             PROJECT_TOOLS,
             READ_FILES_TOOL,
+            build_fetch_url_tool,
             build_search_tool,
         )
 
@@ -213,7 +213,7 @@ def _build_poll_tools(tools_config: dict) -> list | None:
         if search_mode:
             tool_list.append(build_search_tool())
         if tools_config.get('fetchEnabled', False) or search_mode:
-            tool_list.append(FETCH_URL_TOOL)
+            tool_list.append(build_fetch_url_tool())
 
         # ★ read_files — always on (handles relative + absolute paths)
         tool_list.append(READ_FILES_TOOL)

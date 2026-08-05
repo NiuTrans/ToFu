@@ -28,6 +28,7 @@ Predicates
 
 import json
 import re
+import time
 
 from requests.exceptions import ChunkedEncodingError, ConnectionError
 
@@ -58,11 +59,46 @@ class RateLimitError(Exception):
             the entire KEY as exhausted for the day instead of cycling to it
             again after a brief cooldown.
         reason: Short human-readable reason (first ~200 chars of the error body).
+
+        is_saturation: True when the dispatch layer gave up after EVERY
+            candidate slot stayed 429-saturated past the bounded escalation
+            budget (TOFU_429_SATURATION_SECS). Deliberately separate from
+            ``is_quota``: the keys are HEALTHY (merely contended), so this
+            flag must never feed the key-exhausted-for-today channel — it
+            exists so callers (llm_fallback) can tell "swap models" apart
+            from "top up the key".
+
+        is_subscription_quota: True when the signal is SUBSCRIPTION-quota
+            exhaustion from an OAuth subscription backend (Codex
+            ``usage_limit_reached`` / "selected model is at capacity") —
+            distinct from BOTH transient per-key 429 contention (the key
+            frees in seconds) and billing ``is_quota`` (the key is dead
+            until topped up): the subscription window resets at a known
+            time, so the dispatcher parks the slot for exactly that long.
+        retry_after_s: Explicit cooldown duration (seconds) parsed from the
+            upstream body's ``resets_in_seconds`` / ``resets_at`` fields.
+            None → the dispatcher uses the generic 429 policy (0.5s steering
+            cooldown). Auto-parsed from the message text when the
+            subscription-quota signal is detected, so raise sites outside
+            this module (e.g. the SSE error classifier) get the timed
+            cooldown for free whenever the raw body is in the message.
     """
     def __init__(self, msg='', *, is_quota=False, is_gateway=False, reason='',
-                 status_code=0, is_shared_contention=False):
+                 status_code=0, is_shared_contention=False, is_saturation=False,
+                 is_subscription_quota=False, retry_after_s=None):
         super().__init__(msg)
         self.is_quota = bool(is_quota)
+        self.is_saturation = bool(is_saturation)
+        # Auto-detect the subscription-quota signal from the message text —
+        # SSE raise sites only carry the raw body, never the structured
+        # fields, so detection must not depend on the raise site's flags.
+        if not is_subscription_quota and msg and is_subscription_quota_error(str(msg)):
+            is_subscription_quota = True
+        if is_subscription_quota and retry_after_s is None:
+            retry_after_s = parse_subscription_retry_after(str(msg))
+        self.is_subscription_quota = bool(is_subscription_quota)
+        self.retry_after_s = (float(retry_after_s)
+                              if retry_after_s is not None else None)
         # True when this is NOT a real per-key 429 but a gateway 5xx
         # (502/503/504) — or an upstream-vendor transient wrapped in a 4xx —
         # mapped onto the slot-rotation path. Real 429s reflect
@@ -141,6 +177,23 @@ class StreamOnlyError(Exception):
     def __init__(self, message, model):
         super().__init__(message)
         self.model = model
+
+
+class RequestScopedError(Exception):
+    """HTTP 404/422 — request-scoped semantic rejection.
+
+    CLIProxyAPI's ``isRequestScopedResultError``: the failure says something
+    about THIS request (unknown route/model on the wire, unprocessable
+    entity), NOT about slot or model health. The dispatch layer must
+    surface it to the caller WITHOUT marking the slot/model down, feeding
+    key_stats, or consuming fallback attempts as if the model were
+    unhealthy. HTTP 400 has its own typed taxonomy (BadRequestError &
+    friends — already request-scoped in dispatch) and 401/403/413/429/450
+    have dedicated classes, so this bucket is deliberately narrow.
+    """
+    def __init__(self, msg='', *, status_code=0):
+        super().__init__(msg)
+        self.status_code = int(status_code or 0)
 
 
 class BadRequestError(Exception):
@@ -384,6 +437,13 @@ _GATEWAY_THROTTLE_STATUS = {502, 503, 504}
 # Permission error status codes — escape immediately to dispatch layer
 _PERMISSION_STATUS_CODES = {401, 403}
 
+# Request-scoped 4xx (CLIProxyAPI ``isRequestScopedResultError``): a
+# deterministic rejection of THIS request's semantics — not slot/model
+# health. Raised as RequestScopedError so the dispatch layer surfaces it
+# without cooldowns, key_stats, or fallback consumption. 400 is absent on
+# purpose: it has its own typed taxonomy (BadRequestError & friends).
+_REQUEST_SCOPED_STATUS_CODES = {404, 422}
+
 # Regex to detect embedded overload/rate-limit status codes in gateway error bodies.
 # Matches patterns like: "No matching constant for [529]", "status_code: 429"
 _WRAPPED_OVERLOAD_RE = re.compile(
@@ -555,6 +615,60 @@ def _is_quota_exhausted(err_msg: str) -> bool:
     return any(p in lower for p in _QUOTA_EXHAUSTED_PATTERNS)
 
 
+# Phrases that signal SUBSCRIPTION-quota exhaustion / capacity pressure
+# from an OAuth subscription backend (ChatGPT Codex:
+# ``error.type == "usage_limit_reached"`` carrying ``resets_at`` /
+# ``resets_in_seconds``; "selected model is at capacity"). Distinct from
+# billing exhaustion (``_QUOTA_EXHAUSTED_PATTERNS`` — the key is dead
+# until topped up) and from transient per-key 429 contention: the
+# subscription window resets at a known time, so the dispatcher parks the
+# slot for exactly that duration instead of the generic 0.5s cooldown.
+_SUBSCRIPTION_QUOTA_PATTERNS = [
+    'usage_limit_reached',
+    'selected model is at capacity',
+]
+
+# Tolerate both JSON ("resets_at": 123) and Python-repr ('resets_at': 123)
+# spellings — the raw body may arrive already repr'd through an SSE wrap.
+_RESETS_IN_SECONDS_RE = re.compile(
+    r'["\']resets_in_seconds["\']\s*:\s*(\d+(?:\.\d+)?)')
+_RESETS_AT_RE = re.compile(
+    r'["\']resets_at["\']\s*:\s*(\d+(?:\.\d+)?)')
+
+# Upper bound on a parsed subscription-quota cooldown (24h) — a corrupt or
+# far-future ``resets_at`` must not park a slot forever.
+_SUBSCRIPTION_COOLDOWN_CAP_S = 86400.0
+
+
+def is_subscription_quota_error(err_msg: str) -> bool:
+    """True if the error body signals OAuth-subscription quota exhaustion."""
+    if not err_msg:
+        return False
+    lower = err_msg.lower()
+    return any(p in lower for p in _SUBSCRIPTION_QUOTA_PATTERNS)
+
+
+def parse_subscription_retry_after(err_msg: str, *, now: float = None):
+    """Parse the subscription-quota reset duration (seconds) from a body.
+
+    Prefers ``resets_in_seconds`` (relative, clock-skew-immune); falls back
+    to ``resets_at`` (unix timestamp). Returns None when neither is present
+    or ``resets_at`` lies in the past — the caller then applies the generic
+    429 policy. Clamped to [1, 86400] seconds.
+    """
+    if not err_msg:
+        return None
+    m = _RESETS_IN_SECONDS_RE.search(err_msg)
+    if m:
+        return min(_SUBSCRIPTION_COOLDOWN_CAP_S, max(1.0, float(m.group(1))))
+    m = _RESETS_AT_RE.search(err_msg)
+    if m:
+        delta = float(m.group(1)) - (time.time() if now is None else now)
+        if delta > 0:
+            return min(_SUBSCRIPTION_COOLDOWN_CAP_S, max(1.0, delta))
+    return None
+
+
 # Phrases naming a PROJECT-LEVEL limit shared with other tenants of the
 # gateway account. BOTH must appear (narrow on purpose — owner 2026-07-28):
 # a per-key/per-account throttle must NEVER match, or a genuinely sick key
@@ -633,6 +747,23 @@ def _classify_http_error(status_code: int, err_msg: str, model: str,
     display_msg = summarize_error_body(err_msg)
 
     if status_code == 429:
+        # ★ OAuth-SUBSCRIPTION quota exhaustion (Codex usage_limit_reached /
+        #   "selected model is at capacity") — rate-limit class, but the
+        #   cooldown duration comes from resets_at/resets_in_seconds, not
+        #   the generic 0.5s steering nudge. Checked BEFORE billing quota
+        #   and shared-project contention: the signal is unambiguous and
+        #   neither of those channels carries a reset time.
+        if is_subscription_quota_error(err_msg):
+            _retry_after = parse_subscription_retry_after(err_msg)
+            logger.warning('%s Subscription quota reached (HTTP 429, '
+                           'resets in %ss): %s',
+                           log_prefix,
+                           f'{_retry_after:.0f}' if _retry_after else '?',
+                           err_msg[:_ERR_BODY_LIMIT])
+            raise RateLimitError(display_msg, status_code=429,
+                                 is_subscription_quota=True,
+                                 retry_after_s=_retry_after,
+                                 reason=display_msg[:200])
         # ★ Distinguish fatal billing 429s from transient rate-limit 429s.
         #   OpenAI returns HTTP 429 with code="insufficient_quota" for
         #   expired-balance keys — retrying on the same key is futile.
@@ -713,6 +844,18 @@ def _classify_http_error(status_code: int, err_msg: str, model: str,
             raise RateLimitError(display_msg, is_gateway=True,
                                  reason=f'HTTP 400: {display_msg[:180]}',
                                  status_code=400)
+        # ★ Codex capacity pressure can also arrive as a 400-class body —
+        #   "selected model is at capacity" is rate-limit class, NOT a
+        #   payload rejection; route it to the timed-cooldown channel.
+        if is_subscription_quota_error(err_msg):
+            _retry_after = parse_subscription_retry_after(err_msg)
+            logger.warning('%s Subscription capacity signal wrapped in HTTP '
+                           '400 — escalating as rate-limit class: %s',
+                           log_prefix, err_msg[:_ERR_BODY_LIMIT])
+            raise RateLimitError(display_msg, status_code=400,
+                                 is_subscription_quota=True,
+                                 retry_after_s=_retry_after,
+                                 reason=f'HTTP 400: {display_msg[:180]}')
         # Every specific 400 shape claimed above failed → deterministic
         # payload rejection. Log the FULL envelope (the ext.error tail is
         # the diagnostic payload), then raise the typed error the dispatch
@@ -736,6 +879,27 @@ def _classify_http_error(status_code: int, err_msg: str, model: str,
         raise RateLimitError(display_msg, is_gateway=True,
                              reason=f'HTTP {status_code}: {display_msg[:180]}',
                              status_code=status_code)
+    if status_code in _REQUEST_SCOPED_STATUS_CODES:
+        # ★ 404/422 — request-scoped semantic rejection. Must NOT enter
+        #   slot/model cooldown (a 404 "model not found" on one wire says
+        #   nothing about the key's health, and a 422 says the payload is
+        #   unprocessable). Surface to the caller untouched.
+        logger.warning('%s Request-scoped error (HTTP %d) — surfacing '
+                       'without slot cooldown: %s',
+                       log_prefix, status_code, err_msg[:_ERR_BODY_LIMIT])
+        raise RequestScopedError(display_msg, status_code=status_code)
+    if is_subscription_quota_error(err_msg):
+        # ★ The subscription signal on any other status (a 5xx costume, an
+        #   odd gateway mapping) is still rate-limit class with its reset
+        #   time — never a generic non-retryable Exception.
+        _retry_after = parse_subscription_retry_after(err_msg)
+        logger.warning('%s Subscription quota signal on HTTP %d — '
+                       'escalating as rate-limit class: %s',
+                       log_prefix, status_code, err_msg[:_ERR_BODY_LIMIT])
+        raise RateLimitError(display_msg, status_code=status_code,
+                             is_subscription_quota=True,
+                             retry_after_s=_retry_after,
+                             reason=f'HTTP {status_code}: {display_msg[:180]}')
     if status_code in _RETRYABLE_STATUS_CODES:
         # ★ Detect wrapped overload / rate-limit inside a generic 500.
         #   Some gateways receive 429 or 529 from the model server but

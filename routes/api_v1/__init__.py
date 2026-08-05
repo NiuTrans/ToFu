@@ -51,6 +51,7 @@ from .skills import api_v1_skills_bp
 from .mcp import api_v1_mcp_bp
 from .daily_report import api_v1_daily_report_bp
 from .oauth import api_v1_oauth_bp
+from .adapter import api_v1_adapter_bp
 from .project import api_v1_project_bp
 from .translate import api_v1_translate_bp
 from .artifacts import api_v1_artifacts_bp
@@ -59,6 +60,7 @@ from .research import api_v1_research_bp
 from .paper_folders import api_v1_paper_folders_bp
 from .motion import api_v1_motion_bp
 from .uploads import api_v1_uploads_bp
+from .videos import api_v1_videos_bp
 from .audio import api_v1_audio_bp
 from .common import api_v1_common_bp
 from .config import api_v1_config_bp
@@ -97,6 +99,7 @@ ALL_V1_BLUEPRINTS = [
     api_v1_mcp_bp,
     api_v1_daily_report_bp,
     api_v1_oauth_bp,
+    api_v1_adapter_bp,
     api_v1_project_bp,
     api_v1_translate_bp,
     api_v1_artifacts_bp,
@@ -104,6 +107,7 @@ ALL_V1_BLUEPRINTS = [
     api_v1_paper_folders_bp,
     api_v1_motion_bp,
     api_v1_uploads_bp,
+    api_v1_videos_bp,
     api_v1_audio_bp,
     api_v1_common_bp,
     api_v1_config_bp,

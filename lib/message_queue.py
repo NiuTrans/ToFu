@@ -1361,6 +1361,15 @@ def dispatch_next_queued(conv_id: str, *, _wait: float | None = None) -> str | N
             #   client agree on one turn identity.
             if payload.get('_msgId'):
                 user_msg['_msgId'] = payload['_msgId']
+            else:
+                # Engine-built turns (brain kickoff / peer inject) arrive with
+                # no client-minted id — stamp one here so the persisted turn
+                # carries the SAME stable identity every reader keys on
+                # (_msgId anchors the windowed-tail verify anchor and the
+                # frontend's injected-turn dedup). Without it the turn was
+                # invisible to the id-keyed reconciliation lanes (conv
+                # msebjymx5b4a25, 2026-08-05).
+                user_msg['_msgId'] = str(uuid.uuid4())
             if auto_translate and has_chinese and translated_text != text:
                 user_msg['originalContent'] = text
                 user_msg['_translateDone'] = True
@@ -1419,6 +1428,10 @@ def dispatch_next_queued(conv_id: str, *, _wait: float | None = None) -> str | N
                 stamp_initiator(user_msg, INITIATOR_BRAIN)
                 if payload.get('boardTaskId'):
                     user_msg['_boardTaskId'] = payload.get('boardTaskId')
+                # Provenance card data (creator conv/title, dispatch seam,
+                # routing reason) — display-only, stamped by dispatch_epic.
+                if payload.get('_brainEpic'):
+                    user_msg['_brainEpic'] = payload['_brainEpic']
             conv_ref_texts = payload.get('convRefTexts')
             if not conv_ref_texts and payload.get('convRefs'):
                 try:
@@ -1512,12 +1525,23 @@ def dispatch_next_queued(conv_id: str, *, _wait: float | None = None) -> str | N
             logger.warning('[Queue] deferred delete failed for %s: %s',
                            item['queueId'][:8], e)
 
-        # Notify clients so the sidebar reflects the newly-dispatched task
-        # without a manual refresh (metadata-scope: rev unchanged by dispatch).
+        # Notify clients so open tabs reflect the newly-dispatched turn
+        # without a manual refresh. The append above changed the messages
+        # column, so the DB trigger already bumped the content rev — carry it.
+        # rev=None (metadata-only) was the old choice, and it is why an
+        # engine-injected turn stayed INVISIBLE on an open tab for the whole
+        # task: the rev-gate never saw a content change, so no body verify
+        # ever ran (the push frame has no replay) — only the busy-signal
+        # attach fired, painting "an Agent generating out of nowhere" (conv
+        # msebjymx5b4a25, 2026-08-05). The stream-active adoption lane on the
+        # client makes carrying the real rev safe during a live stream.
         try:
             from lib.conversations import notify_conv_changed
             from lib.tasks_pkg.manager._registry import task_user_id
-            notify_conv_changed(conv_id, rev=None, user_id=task_user_id(task))
+            _rev_row = db.execute(
+                'SELECT rev FROM conversations WHERE id=?', (conv_id,)).fetchone()
+            _new_rev = _rev_row['rev'] if _rev_row else None
+            notify_conv_changed(conv_id, rev=_new_rev, user_id=task_user_id(task))
         except Exception as e:
             logger.debug('[Queue] conv-changed notify failed: %s', e)
 

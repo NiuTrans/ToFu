@@ -17,7 +17,14 @@ import os
 
 import pytest
 
+from lib.mcp.registry import is_opensource_build
+
 pytestmark = pytest.mark.unit
+
+# The opensource export SANITIZES the deployment conf to placeholders
+# (``/path/to/your/project``, ``your-user``) — the box-specific pins below are
+# internal-only by design, so their guards self-skip on a public build.
+_OPENSOURCE = is_opensource_build()
 
 _PROJ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _CONF = os.path.join(_PROJ, 'deploy', 'supervisor', 'tofu.conf')
@@ -36,6 +43,7 @@ def test_conf_exists():
     assert os.path.isfile(_CONF), f'{_CONF} must exist'
 
 
+@pytest.mark.skipif(_OPENSOURCE, reason='export sanitizes the conf command to a placeholder')
 def test_command_uses_env_interpreter_directly():
     """command= must invoke the conda env's python directly on server.py, so
     server.py's _tofu_maybe_reexec_into_env sees same-interpreter and does NOT
@@ -49,6 +57,7 @@ def test_command_uses_env_interpreter_directly():
         f'(avoids the env re-exec hop): {cmd!r}')
 
 
+@pytest.mark.skipif(_OPENSOURCE, reason='export sanitizes the conf directory to a placeholder')
 def test_directory_is_project_root():
     """``directory`` must be an ABSOLUTE path to a real Tofu checkout.
 
@@ -99,6 +108,7 @@ def test_env_pins_port_deterministically():
     assert 'HOME=' in env, f'HOME must be set: {env!r}'
 
 
+@pytest.mark.skipif(_OPENSOURCE, reason='export sanitizes the conf paths to placeholders')
 def test_supervisor_log_path_under_project_logs():
     """The log must live under the SAME checkout's ``logs/``.
 

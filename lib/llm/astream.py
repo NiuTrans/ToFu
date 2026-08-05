@@ -64,7 +64,7 @@ async def async_stream_chat(body, *, on_thinking=None, on_content=None,
                             abort_check=None, log_prefix='', api_key=None,
                             base_url=None, extra_headers=None,
                             api_protocol='openai', oauth='',
-                            on_first_byte_wait=None):
+                            adapter=None, on_first_byte_wait=None):
     """Async streaming chat completion with callbacks.
 
     Same signature and semantics as stream_chat() but fully async.
@@ -83,7 +83,7 @@ async def async_stream_chat(body, *, on_thinking=None, on_content=None,
                 abort_check=abort_check, log_prefix=log_prefix,
                 attempt=attempt, api_key=api_key, base_url=base_url,
                 extra_headers=extra_headers, api_protocol=api_protocol,
-                oauth=oauth, on_first_byte_wait=on_first_byte_wait)
+                oauth=oauth, adapter=adapter, on_first_byte_wait=on_first_byte_wait)
             usage = attach_limit_learned(usage, _limit_learned)
             return msg, finish_reason, usage
         except (RateLimitError, PermissionError_, AbortedError,
@@ -109,8 +109,25 @@ async def _async_stream_chat_once(body, *, on_thinking=None, on_content=None,
                                   abort_check=None, log_prefix='', attempt=0,
                                   api_key=None, base_url=None,
                                   extra_headers=None, api_protocol='openai',
-                                  oauth='', on_first_byte_wait=None):
+                                  oauth='', adapter=None, on_first_byte_wait=None):
     """Single async attempt at a streaming chat completion (httpx transport)."""
+    if adapter:
+        # ── Subscription-adapter branch (E4) ──
+        # The relay helpers are BLOCKING bridge calls — a loopback RTT to
+        # the desktop agent. Running them on the Quart event loop would
+        # freeze every concurrent request (design law: no blocking bridge
+        # RTT on the loop), so delegate the whole attempt to the sync
+        # transport in a worker thread via asyncio.to_thread. The sync
+        # transport's adapter branch owns relay_stream / error mapping.
+        from lib.llm.stream import _stream_chat_once as _sync_stream_once
+        return await asyncio.to_thread(
+            _sync_stream_once, body,
+            on_thinking=on_thinking, on_content=on_content,
+            on_tool_call_ready=on_tool_call_ready,
+            abort_check=abort_check, log_prefix=log_prefix, attempt=attempt,
+            api_key=api_key, base_url=base_url, extra_headers=extra_headers,
+            api_protocol=api_protocol, oauth=oauth, adapter=adapter,
+            on_first_byte_wait=on_first_byte_wait)
     # prepare_request is sync and CAN block for seconds: a subscription
     # OAuth slot may refresh its token inside resolve_oauth_request, and
     # under desktop-egress routing that refresh waits an agent RTT (design

@@ -265,7 +265,9 @@ def _scan_abort_timers():
         for fn in filenames:
             if not fn.endswith('.js'):
                 continue
-            if fn.startswith(('bundle-', 'feature-')):
+            # Dotfiles too: `.bundle-<hash>.<rand>.js` is the bundler's
+            # atomic-rename temp — a half-written bundle copy mid-build.
+            if fn.startswith(('.', 'bundle-', 'feature-')):
                 continue
             full = os.path.join(dirpath, fn)
             rel = os.path.relpath(full, JS).replace(os.sep, '/')

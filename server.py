@@ -235,6 +235,31 @@ def _heartbeat_stale_threshold():
     return max(30.0, bump * 3.0)
 
 
+_SERVE_MODE_FILE = '.last_serve_mode'
+
+def _serve_mode_path():
+    """Absolute path of the serve-mode sidecar (data/.last_serve_mode)."""
+    return os.path.join(_tofu_data_root(), _SERVE_MODE_FILE)
+
+
+def _record_serve_mode(mode, path=None):
+    """Persist the protocol we are ACTUALLY serving ('http'|'https') so the
+    watchdog (deploy/tofu_guard.sh) can (a) probe /api/health with the right
+    scheme and (b) replay the same TLS decision on auto-relaunch — a
+    cron-env relaunch re-runs _detect_reverse_proxy blind and came up TLS
+    behind a plain-HTTP proxy (the 2026-08-03 'socket hang up' incident).
+    Best-effort: a write failure must never block startup."""
+    if mode not in ('http', 'https'):
+        raise ValueError('serve mode must be http|https, got %r' % (mode,))
+    path = path or _serve_mode_path()
+    try:
+        from lib.json_store import write_text_atomic
+        write_text_atomic(path, mode + '\n')
+    except Exception as e:
+        logging.getLogger('server').warning(
+            '[TLS] could not record serve mode to %s: %s', path, e)
+
+
 def _holder_wedge_age(pid, now=None, path=None):
     """Return the heartbeat AGE (seconds) iff the sidecar PROVES *pid*'s event
     loop is wedged, else None.
@@ -426,6 +451,36 @@ def _loop_stall_decide(age, threshold, already_dumped):
     if already_dumped:
         return (False, True)             # still stalled, already captured
     return (True, True)                  # stalled and not yet captured → dump
+
+
+def _port_bound(port, host='127.0.0.1', timeout=0.5):
+    """True iff a TCP connection to host:port succeeds (listener present).
+    Scheme-agnostic: works for TLS and plain-HTTP listeners alike."""
+    import socket as _s
+    try:
+        with _s.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def _listener_death_decide(was_bound, bound, misses, k):
+    """Pure decision for the serve-listener watch (second layer after the
+    loop heartbeat). Returns ``(was_bound, misses, should_exit)``.
+
+    Arms only after the listener was seen bound at least once (the pre-serve
+    startup window is not our watch); counts CONSECUTIVE misses from there;
+    a single recovery resets the streak. The serve task dying while the
+    loop stays alive (the 2026-08-03 11:14 state: no listener, live lock,
+    FRESH heartbeat) is invisible to every external probe — the watchdog
+    sees a live pid and yields forever — so the process must die loudly
+    itself and hand the watchdog a clean, handleable death."""
+    if bound:
+        return (True, 0, False)
+    if not was_bound:
+        return (False, 0, False)
+    misses += 1
+    return (True, misses, misses >= k)
 
 
 def _extract_loop_top_frame(frame, project_root=None):
@@ -1498,7 +1553,37 @@ def _load_or_create_flask_secret_key():
 
 
 app.secret_key = _load_or_create_flask_secret_key()
-app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024
+# MAX_CONTENT_LENGTH is APP-GLOBAL, so it must fit the LARGEST legitimate
+# body any route accepts — the video upload cap (512 MiB, TOFU_VIDEO_MAX_BYTES)
+# plus multipart slack. Every OTHER route keeps the legacy 50 MiB ceiling via
+# the per-route guard below — raising the global must not silently open
+# big-body uploads on the whole API surface (owner ruling 2026-08-04).
+app.config['MAX_CONTENT_LENGTH'] = 520 * 1024 * 1024
+
+# Per-route request-body caps: first matching path prefix wins.
+_ROUTE_BODY_CAPS = (
+    ('/api/v1/videos/upload', 512 * 1024 * 1024),
+)
+_DEFAULT_BODY_CAP = 50 * 1024 * 1024
+
+
+@app.before_request
+async def _enforce_route_body_caps():
+    cl = request.content_length or 0
+    if cl <= 0:
+        return None
+    cap = _DEFAULT_BODY_CAP
+    for _prefix, _cap in _ROUTE_BODY_CAPS:
+        if request.path.startswith(_prefix):
+            cap = _cap
+            break
+    if cl > cap:
+        from lib.api_response import api_payload_too_large
+        logging.getLogger('server').warning(
+            '[BodyCap] %s %s rejected: Content-Length=%d > cap=%d',
+            request.method, request.path, cl, cap)
+        return api_payload_too_large(cap)
+    return None
 # ── Disable response/body timeouts for long-lived SSE streams ──
 # Quart's defaults (60s) silently kill /api/chat/stream connections during
 # long LLM responses, causing the UI to "stop updating without refresh".
@@ -1526,7 +1611,12 @@ try:
     import brotli as _brotli
 except ImportError as _e:
     _brotli = None
-    _lifecycle_log.info('[Compress] brotli unavailable (%s) — gzip only', _e)
+    # _lifecycle_log is only bound further down this module (line ~1755); on a
+    # brotli-less box this except fires DURING import, before that binding —
+    # a bare reference here was a startup NameError. Import the logger locally.
+    from lib.log import get_logger as _get_logger
+    _get_logger('server.lifecycle').info(
+        '[Compress] brotli unavailable (%s) — gzip only', _e)
 
 # Compressed-artifact cache for CONTENT-ADDRESSED immutable assets.
 #
@@ -1665,7 +1755,6 @@ async def method_override():
 # ── Request lifecycle logging ──
 from lib.log import (get_logger, set_req_id, req_id as _get_req_id,
                      resolve_inbound_rid as _resolve_inbound_rid)
-import uuid as _uuid
 
 _lifecycle_log = get_logger('server.lifecycle')
 _QUIET_PREFIXES = ('/api/browser/', '/api/desktop/', '/static/', '/api/task/')
@@ -2418,6 +2507,22 @@ def _start_background_workers():
         mark_interrupted_podcasts()
     except Exception as e:
         _server_log.warning('[Server] podcast interrupted sweep failed: %s', e)
+    # Desktop-agent LAN discovery responder (design §11.2.1 rung B): ON by
+    # default since 2026-08-04 (TOFU_DESKTOP_LAN_DISCOVERY=0 disables), and
+    # skipped when the effective bind is loopback-only (advertising a LAN
+    # url the server cannot be reached at would be a lie). Without THIS
+    # call the responder class was dead code — only tests ever instantiated
+    # it (owner review 2026-08-03).
+    try:
+        from lib.desktop.pairing import maybe_start_responder
+        _lan_responder = maybe_start_responder(
+            int(os.environ.get('_TOFU_RUNTIME_PORT') or '15000'),
+            bind_host=os.environ.get('_TOFU_RUNTIME_HOST') or '')
+        if _lan_responder is not None:
+            _server_log.info('[Server] LAN discovery responder up on UDP '
+                             '15001 (%s)', _lan_responder.url)
+    except Exception as e:
+        _server_log.warning('[Server] LAN discovery responder failed: %s', e)
     return
 
 
@@ -2656,10 +2761,14 @@ if __name__ == '__main__':
     import argparse
 
     parser = argparse.ArgumentParser(description='Tofu Async Server')
-    # Default to loopback. Networked exposure is an explicit choice via
-    # --host 0.0.0.0 / BIND_HOST=0.0.0.0. Personal use stays effortless;
-    # accidental LAN exposure stops being the default.
-    parser.add_argument('--host', default=os.environ.get('BIND_HOST', '127.0.0.1'))
+    # Default to all interfaces (owner 2026-08-04): bootstrap.py / Docker /
+    # install.sh already defaulted to 0.0.0.0, so direct `python server.py`
+    # was the only outlier — and the desktop-agent LAN flow NEEDS the
+    # server reachable off-loopback. Loopback is now the explicit choice
+    # via --host 127.0.0.1 / BIND_HOST=127.0.0.1 (the packaged desktop app
+    # pins that itself). The boot banner already warns loudly on open-auth
+    # + non-loopback binds.
+    parser.add_argument('--host', default=os.environ.get('BIND_HOST', '0.0.0.0'))
     parser.add_argument('--port', type=int, default=int(os.environ.get('PORT', 15000)))
     parser.add_argument('--certfile', default=os.environ.get('TLS_CERTFILE', ''))
     parser.add_argument('--keyfile', default=os.environ.get('TLS_KEYFILE', ''))
@@ -2796,6 +2905,10 @@ if __name__ == '__main__':
     # can reclaim it instead of re-probing. Read by _deferred_reexec in
     # routes/api_v1/update.py.
     os.environ['_TOFU_RUNTIME_PORT'] = str(port)
+    # The effective bind host, for the LAN-discovery responder's honesty
+    # guard: advertising http://<lan-ip> while bound loopback-only would
+    # send every discovering agent to a dead address.
+    os.environ['_TOFU_RUNTIME_HOST'] = host
 
     # ── TLS / HTTP/2 setup ──
     from lib.env_compat import getenv_compat
@@ -2818,6 +2931,10 @@ if __name__ == '__main__':
               'Force with TOFU_TLS=1.', _proxy_name or 'cloud IDE')
     else:
         _tls_cert, _tls_key = _ensure_tls_certs(args.certfile, args.keyfile)
+
+    # Persist the protocol we are ACTUALLY serving (after the certs are
+    # settled, so a cert-generation failure records 'http' correctly).
+    _record_serve_mode('https' if (_tls_cert and _tls_key) else 'http')
 
     # ── Init DB + validate imports in app context ──
     async def _startup():
@@ -3367,6 +3484,10 @@ if __name__ == '__main__':
         _arm_ctimer = _should_arm_ctimer(_stall_threshold, _fault_shm_log)
 
         _loop_heartbeat = {'ts': time.monotonic()}
+        _listen_state = {'was_bound': False, 'misses': 0}
+        _LISTENER_LOSS_K = 5   # consecutive 1s-bump misses ⇒ serve death
+        # Probe the bind host; a wildcard bind answers on loopback too.
+        _listen_probe_host = host if host not in ('0.0.0.0', '::', '') else '127.0.0.1'
 
         async def _loop_heartbeat_task():
             # Pet path (A): re-arm the GIL-independent C-timer on every bump.
@@ -3377,6 +3498,33 @@ if __name__ == '__main__':
                 # wedge (FUSE syscall) stops these bumps → the file ages → the
                 # lock-reclaim path treats us as wedged and can take over.
                 _write_heartbeat()
+                # Serve-listener liveness (second layer): a Hypercorn
+                # serve-task death with a LIVE loop is invisible to every
+                # external probe — the watchdog sees a live pid + fresh
+                # heartbeat and yields forever (the 2026-08-03 11:14 state).
+                # Die loudly instead so the watchdog gets a clean death it
+                # can relaunch from. A broken probe never kills the server.
+                try:
+                    _bound = await asyncio.to_thread(
+                        _port_bound, port, _listen_probe_host)
+                except Exception:
+                    _bound = True
+                _was, _miss, _serve_dead = _listener_death_decide(
+                    _listen_state['was_bound'], _bound,
+                    _listen_state['misses'], _LISTENER_LOSS_K)
+                _listen_state['was_bound'], _listen_state['misses'] = _was, _miss
+                if _serve_dead:
+                    _server_log.critical(
+                        '[LoopWatch] serve listener on :%d lost for %d consecutive '
+                        'checks while the loop is alive — serve task is dead; '
+                        'exiting so the watchdog relaunches', port, _miss)
+                    try:
+                        from lib.log import audit_log as _audit
+                        _audit('serve_listener_death', port=port, misses=_miss,
+                               pid=os.getpid())
+                    except Exception:
+                        pass
+                    os._exit(1)
                 if _arm_ctimer:
                     try:
                         faulthandler.cancel_dump_traceback_later()

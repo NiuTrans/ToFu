@@ -37,7 +37,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 _PERSIST_SRC = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    'lib', 'tasks_pkg', 'compaction', '_persist.py',
+    # _persist became a PACKAGE; the Authority-carry line the neuter strips
+    # lives in its _splitters submodule.
+    'lib', 'tasks_pkg', 'compaction', '_persist', '_splitters.py',
 )
 
 _SEP = '════════════════════'

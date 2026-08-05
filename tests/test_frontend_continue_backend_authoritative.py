@@ -199,7 +199,12 @@ def test_empty_guard_includes_toolrounds():
     # comment pushed it to offset ~1146, so the 66-char match ran off the end)
     # — a guard that goes red for a reason unrelated to what it asserts.
     g = fn_body.index('if (!assistantMsg.content')
-    guard_region = fn_body[max(0, g - 600):g + 400]
+    # Anchor the region on the _hasRounds DEFINITION, not on a fixed byte
+    # window before the guard — a comment block added between the two (the
+    # 2026-08-03 trimmed-window guard note) pushed the probe line past 600
+    # chars and reddened this pin without changing what it asserts.
+    h = fn_body.rindex('_hasRounds', 0, g)
+    guard_region = fn_body[h:g + 400]
     # The guard must consult tool rounds, not just content/thinking.
     assert 'getToolRoundsFromMsg(assistantMsg)' in guard_region, (
         'continueAssistant empty-guard does not consult toolRounds — a '

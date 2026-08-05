@@ -363,7 +363,8 @@ PROJECT_TOOL_RUN_COMMAND = {
             "  • Finding files by name → use **find_files** (max_results, ignored-dir filter)\n"
             "  • Editing files → use **apply_diff / insert_content / write_file**\n"
             "Reaching for `cat` / `grep` / `find` / `sed` / `awk` is almost always a smell — there is a dedicated tool that's faster, safer, and easier for the user to review.\n"
-            "**Pipelines do NOT excuse this** — `grep -rn 'foo' lib/ | head -20` is the WORST case: on a FUSE-mounted or large tree, the recursive `grep -rn` walks every untracked dir (caches, .project_sessions, vendor) and can take >120s, while `grep_search(pattern='foo', path='lib', max_results=20)` finishes in <1s. Use grep_search and pass `max_results` instead of piping to `head`."
+            "**Pipelines do NOT excuse this** — `grep -rn 'foo' lib/ | head -20` is the WORST case: on a FUSE-mounted or large tree, the recursive `grep -rn` walks every untracked dir (caches, .project_sessions, vendor) and can take >120s, while `grep_search(pattern='foo', path='lib', max_results=20)` finishes in <1s. Use grep_search and pass `max_results` instead of piping to `head`.\n\n"
+            "**Enforced:** `grep`/`egrep`/`fgrep` with file/dir operands (or `-r`) is REFUSED by a guard — the error shows the exact grep_search translation. Grepping another command's STREAM stays allowed (`make 2>&1 | grep error`, `ps aux | grep python`)."
         ),
         "parameters": {
             "type": "object",

@@ -27,6 +27,12 @@ var _mcpBreakerTickTimer = null;     // 1s interval that ticks the live "retry i
  *   (the breaker-refresh timer fires _populateMcpTab mid-operation) — a
  *   one-off DOM patch would be silently reverted by that re-render. */
 var _mcpPending = {};
+/* Per-tool toggle state (pt_53065dbe86bb4286): which cards have their tool
+ * list expanded, and the fetched per-server tool rows. Both survive the
+ * full-grid re-render that every populate/breaker-refresh triggers, for the
+ * same reason _mcpPending does. */
+var _mcpToolsOpen = {};
+var _mcpToolsCache = {};
 
 function _mcpSetPending(serverId, kind) {
   _mcpPending[serverId] = kind;
@@ -66,8 +72,11 @@ async function _populateMcpTab() {
 function _mcpUpdateToolCount() {
   var badge = document.getElementById('mcpToolCount');
   if (!badge) return;
+  // Count what the MODEL actually gets: discovered minus per-tool-disabled.
   var total = 0;
-  _mcpCatalog.forEach(function(e) { total += (e.tools_count || 0); });
+  _mcpCatalog.forEach(function(e) {
+    total += Math.max(0, (e.tools_count || 0) - (e.disabled_tools || []).length);
+  });
   badge.textContent = t('mcp.toolsCount', { n: total });
 }
 
@@ -325,7 +334,12 @@ function _renderMcpCatalog() {
         html += '<span class="mcp-app-version" title="' + escapeHtml((e.server_impl_name || e.id) + ' v' + e.server_version) + '">v' + escapeHtml(e.server_version) + '</span>';
       }
       if (e.tools_count) {
-        html += '<span class="mcp-app-tools-count">' + escapeHtml(t('mcp.toolsCount', { n: (e.tools_count || 0) })) + '</span>';
+        var _disabledCount = (e.disabled_tools || []).length;
+        var _countLabel = _disabledCount > 0
+          ? t('mcp.toolsCountOf', { a: (e.tools_count - _disabledCount), b: e.tools_count })
+          : t('mcp.toolsCount', { n: (e.tools_count || 0) });
+        html += '<button class="mcp-app-tools-count mcp-tools-toggle" onclick="_mcpToggleToolsPanel(\'' + escapeHtml(e.id) + '\')" title="' + escapeHtml(t('mcp.toolsToggleTitle')) + '">' +
+          (_mcpToolsOpen[e.id] ? '▾ ' : '▸ ') + escapeHtml(_countLabel) + '</button>';
       }
       html += '<button class="btn btn-secondary btn-xs" onclick="_mcpUninstall(\'' + escapeHtml(e.id) + '\')" title="' + escapeHtml(t('mcp.uninstallTitle')) + '">' + escapeHtml(t('mcp.uninstall')) + '</button>';
     } else if (installed) {
@@ -357,10 +371,88 @@ function _renderMcpCatalog() {
       }
     }
     html += '</div></div>';  // action + footer
+    if (connected && !pending && _mcpToolsOpen[e.id]) {
+      html += _renderMcpToolPanel(e);
+    }
     html += '</div>';  // card
   });
   grid.innerHTML = html;
   _mcpScheduleBreakerRefresh();
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   Per-tool toggles (pt_53065dbe86bb4286)
+   A connected card's tools badge expands into a checkbox list — one row
+   per upstream tool, checked = offered to the model. Toggling saves the
+   FULL disabled list immediately (full-replacement PUT semantics), with
+   optimistic UI and revert-on-failure.
+   ═══════════════════════════════════════════════════════════════════ */
+
+function _mcpToggleToolsPanel(serverId) {
+  if (_mcpToolsOpen[serverId]) {
+    delete _mcpToolsOpen[serverId];
+  } else {
+    _mcpToolsOpen[serverId] = true;
+    if (!_mcpToolsCache[serverId]) _mcpLoadTools(serverId);
+  }
+  _renderMcpCatalog();
+}
+
+async function _mcpLoadTools(serverId) {
+  try {
+    var r = await Api.mcp.toolsListForServer(serverId);
+    if (!r || !r.ok) throw new Error('HTTP ' + (r ? r.status : 'no response'));
+    var data = await r.json();
+    _mcpToolsCache[serverId] = data.tools || [];
+  } catch (e) {
+    debugLog('[MCP] Failed to load tools for ' + serverId + ': ' + e.message, 'error');
+    _mcpToolsCache[serverId] = [];
+  }
+  if (_mcpToolsOpen[serverId]) _renderMcpCatalog();
+}
+
+function _renderMcpToolPanel(e) {
+  var rows = _mcpToolsCache[e.id];
+  var html = '<div class="mcp-tool-panel">';
+  if (!rows) {
+    html += '<div class="mcp-tool-loading">' + escapeHtml(t('mcp.loading')) + '</div>';
+  } else if (rows.length === 0) {
+    html += '<div class="mcp-tool-loading">—</div>';
+  } else {
+    var enabledCount = rows.filter(function(x) { return x.enabled; }).length;
+    html += '<div class="mcp-tool-panel-head">' +
+      escapeHtml(t('mcp.toolsEnabledOf', { a: enabledCount, b: rows.length })) + '</div>';
+    rows.forEach(function(x) {
+      html += '<label class="mcp-tool-row" title="' + escapeHtml(x.description || '') + '">' +
+        '<input type="checkbox" ' + (x.enabled ? 'checked ' : '') +
+        'onchange="_mcpToggleTool(\'' + escapeHtml(e.id) + '\',\'' + escapeHtml(x.name) + '\',this.checked)">' +
+        '<span class="mcp-tool-name">' + escapeHtml(x.name) + '</span></label>';
+    });
+  }
+  html += '</div>';
+  return html;
+}
+
+async function _mcpToggleTool(serverId, toolName, enabled) {
+  var rows = _mcpToolsCache[serverId];
+  if (!rows) return;
+  // Optimistic update; revert on failure.
+  rows.forEach(function(x) { if (x.name === toolName) x.enabled = enabled; });
+  var disabled = rows.filter(function(x) { return !x.enabled; })
+    .map(function(x) { return x.name; });
+  try {
+    var r = await Api.mcp.serverToolsSet(serverId, disabled);
+    if (!r || !r.ok) throw new Error('HTTP ' + (r ? r.status : 'no response'));
+    var entry = _mcpCatalog.filter(function(x) { return x.id === serverId; })[0];
+    if (entry) entry.disabled_tools = disabled;
+    debugLog('[MCP] ' + serverId + ': ' + (enabled ? 'enabled' : 'disabled') + ' tool ' + toolName, 'success');
+    _renderMcpCatalog();
+    _mcpUpdateToolCount();
+  } catch (err) {
+    rows.forEach(function(x) { if (x.name === toolName) x.enabled = !enabled; });
+    showAlert(t('mcp.toolsToggleFailed', { err: err.message }));
+    _renderMcpCatalog();
+  }
 }
 
 /**

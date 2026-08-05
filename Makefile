@@ -82,13 +82,20 @@ suite-health: ## Gate: test-suite health must not regress (one-way ratchet)
 JOBS ?= auto
 PYTEST_PARALLEL = $(if $(filter 0,$(JOBS)),,-n $(JOBS) --dist worksteal)
 
-# PYTEST_BASE — flags every Python test target needs in THIS env. `-p no:napari`
-# disables the stray napari pytest plugin whose import chain
-# (napari→vispy→OpenGL) crashes collection at pytest_cmdline_parse with
-# `OSError: GL ES 2.0 library not found` on a headless box. Surgical (kills only
-# the one broken plugin) rather than PYTEST_DISABLE_PLUGIN_AUTOLOAD=1, which
-# would also drop xdist/timeout/anyio and force us to re-add each by hand.
-PYTEST_BASE = -p no:napari
+# PYTEST_BASE — flags every Python test target needs in THIS env. TWO entrypoint
+# landmines, both empirically reproduced 2026-08-04:
+#   `-p no:napari`  — the stray napari plugin whose import chain
+#                     (napari→vispy→OpenGL) crashes collection with
+#                     `OSError: GL ES 2.0 library not found` on a headless box.
+#   `-p no:timeout` — pytest-timeout's entrypoint registers under the name
+#                     'timeout', then pyproject addopts `-p pytest_timeout`
+#                     registers the same module under its module name →
+#                     `ValueError: Plugin already registered under a different
+#                     name: timeout`. Blocking the ENTRYPOINT leaves addopts'
+#                     explicit load as the single registration.
+# Surgical rather than PYTEST_DISABLE_PLUGIN_AUTOLOAD=1, which would also drop
+# xdist/anyio and force us to re-add each by hand.
+PYTEST_BASE = -p no:napari -p no:timeout
 
 test-unit: ## Run unit tests (parallel; override JOBS=N, JOBS=0 for serial)
 	python -m pytest $(PYTEST_BASE) -m unit $(PYTEST_PARALLEL) --timeout=300 --tb=short -q
@@ -99,12 +106,12 @@ test-api: ## Run API integration tests (Flask test client + mock LLM)
 test-visual: ## Run Playwright visual E2E tests (needs chromium)
 	python -m pytest $(PYTEST_BASE) -m visual --tb=short -q
 
-test-e2e: ## Run the hermetic E2E smoke test (real app + real browser + stub LLM, no API key)
-	python -m pytest $(PYTEST_BASE) tests/test_e2e_smoke.py -m visual -ra --tb=short -q
+test-e2e: ## Run hermetic E2E journeys — real app + real browser + stub LLM (P0-3 主干道巡检)
+	python -m pytest $(PYTEST_BASE) tests/test_e2e_smoke.py tests/test_e2e_journeys.py -m visual -ra --tb=short -q
 
 test-frontend: ## Run frontend tests (jsdom harnesses + tsc ratchet — needs `npm install`)
 	@if [ ! -d node_modules/jsdom ]; then echo '⚠️  Run `npm install` first (installs jsdom + typescript dev-deps)'; exit 1; fi
-	python -m pytest $(PYTEST_BASE) tests/test_frontend_*.py $(PYTEST_PARALLEL) --timeout=180 -ra --tb=short -q
+	TOFU_REQUIRE_FRONTEND=1 python -m pytest $(PYTEST_BASE) tests/test_frontend_*.py $(PYTEST_PARALLEL) --timeout=180 -ra --tb=short -q
 
 test-all: ## Run all tests (unit + api + visual)
 	python -m pytest $(PYTEST_BASE) --tb=short -q
@@ -114,6 +121,9 @@ test-coverage: ## Run unit + api tests with coverage report
 
 smoke: ## Run smoke tests only (import validation, cross-platform, syntax)
 	python -m pytest $(PYTEST_BASE) tests/test_smoke.py -m unit --tb=short -v
+
+test-affected: ## Iteration loop: run only tests that can see your changes (static reverse index — full tier stays the gate, P2-3)
+	python scripts/test_select.py --run
 
 # ── Diagnostics ────────────────────────────────────────────────
 

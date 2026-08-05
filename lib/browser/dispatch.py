@@ -15,12 +15,16 @@ from lib.browser.handlers import (
     _handle_keyboard,
     _handle_list_tabs,
     _handle_navigate,
+    _handle_press_key,
+    _handle_preview_page,
+    _handle_read_page,
     _handle_read_tab,
     _handle_screenshot,
     _handle_summarize_page,
+    _handle_type,
     _handle_wait,
 )
-from lib.browser.queue import _set_active_client
+from lib.browser.queue import _set_active_client, send_browser_command
 from lib.log import get_logger
 
 logger = get_logger(__name__)
@@ -44,6 +48,9 @@ _SNAKE_TO_CAMEL = {
     'right_click': 'rightClick',
     'scroll_to': 'scrollTo',
     'wait_for_load': 'waitForLoad',
+    'wait_ms': 'waitMs',
+    'new_tab': 'newTab',
+    'clear_first': 'clearFirst',
 }
 
 
@@ -65,12 +72,37 @@ def normalize_browser_args(fn_args):
 
 
 def _handle_advanced_tool(fn_name, fn_args):
-    """Handler for advanced browser tools (right-click menu, hover+click, fill form)."""
-    from lib.browser.advanced import fill_form_sequential, hover_and_click, right_click_menu_select
+    """Handler for advanced browser tools (menu click, fill form + legacies)."""
+    from lib.browser.advanced import (
+        fill_form_sequential, hover_and_click, menu_click,
+        right_click_menu_select,
+    )
+    from lib.browser._resolve import resolve_work_tab
     try:
-        if fn_name == 'browser_right_click_menu':
+        # v2: tab_id optional on the shipped advanced tools — resolve the
+        # working tab once here. Legacy names keep their explicit-id contract
+        # (they only serve direct execute_browser_tool callers now).
+        if fn_name in ('browser_menu_click', 'browser_fill_form'):
+            tab_id = resolve_work_tab(fn_args, send_browser_command)
+            if tab_id is None:
+                return ('Error: no tab to act on. Pass tab_id, or call '
+                        'browser_list_tabs / browser_navigate first.')
+        else:
+            tab_id = fn_args.get('tabId')
+        if fn_name == 'browser_menu_click':
+            result = menu_click(
+                tab_id=tab_id,
+                item_text=fn_args.get('item_text', ''),
+                target_selector=fn_args.get('target_selector'),
+                target_text=fn_args.get('target_text'),
+                via=fn_args.get('via', 'hover'),
+                submenu_item_text=fn_args.get('submenu_text'),
+                menu_wait=fn_args.get('menu_wait', 0.5),
+                timeout=fn_args.get('timeout', 5.0),
+            )
+        elif fn_name == 'browser_right_click_menu':
             result = right_click_menu_select(
-                tab_id=fn_args.get('tabId'),
+                tab_id=tab_id,
                 target_selector=fn_args.get('target_selector', ''),
                 menu_item_text=fn_args.get('menu_item_text', ''),
                 submenu_item_text=fn_args.get('submenu_item_text'),
@@ -79,7 +111,7 @@ def _handle_advanced_tool(fn_name, fn_args):
             )
         elif fn_name == 'browser_hover_and_click':
             result = hover_and_click(
-                tab_id=fn_args.get('tabId'),
+                tab_id=tab_id,
                 hover_selector=fn_args.get('hover_selector', ''),
                 click_selector=fn_args.get('click_selector', ''),
                 hover_wait=fn_args.get('hover_wait', 0.3),
@@ -87,10 +119,11 @@ def _handle_advanced_tool(fn_name, fn_args):
             )
         elif fn_name == 'browser_fill_form':
             result = fill_form_sequential(
-                tab_id=fn_args.get('tabId'),
+                tab_id=tab_id,
                 fields=fn_args.get('fields', []),
                 submit_selector=fn_args.get('submit_selector'),
                 field_delay=fn_args.get('field_delay', 0.2),
+                submit_text=fn_args.get('submit_text'),
             )
         else:
             return f'Error: Unknown advanced browser tool: {fn_name}'
@@ -113,6 +146,12 @@ def _handle_advanced_tool(fn_name, fn_args):
 
 # Maps browser tool fn_name → handler(fn_args).
 BROWSER_HANDLERS = {
+    # ── v2 surface (shipped to the model) ──
+    'browser_read_page':              _handle_read_page,
+    'browser_type':                   _handle_type,
+    'browser_press_key':              _handle_press_key,
+    # ── v2 + legacy (legacy names keep working for direct callers; they are
+    #    simply no longer in the model's schema list) ──
     'browser_list_tabs':              _handle_list_tabs,
     'browser_read_tab':               _handle_read_tab,
     'browser_execute_js':             _handle_execute_js,
@@ -129,7 +168,11 @@ BROWSER_HANDLERS = {
     'browser_wait':                   _handle_wait,
     'browser_summarize_page':         _handle_summarize_page,
     'browser_get_app_state':          _handle_get_app_state,
+    # Server-side render — does NOT go through the extension queue
+    # (lib/browser/preview.py, shared Playwright pool).
+    'browser_preview_page':           _handle_preview_page,
     # Advanced browser tools use a lambda wrapper to pass fn_name through
+    'browser_menu_click':             lambda fn_args: _handle_advanced_tool('browser_menu_click', fn_args),
     'browser_right_click_menu':       lambda fn_args: _handle_advanced_tool('browser_right_click_menu', fn_args),
     'browser_hover_and_click':        lambda fn_args: _handle_advanced_tool('browser_hover_and_click', fn_args),
     'browser_fill_form':              lambda fn_args: _handle_advanced_tool('browser_fill_form', fn_args),

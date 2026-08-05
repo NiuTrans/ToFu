@@ -19,6 +19,12 @@ FIX (static/js/ui/tool_rounds.js ``_renderPeerInjectRow``)
   3. (2026-07-28) The header ``[data-tc-preview-text]`` model-view button is
      gone with the rest of the mechanism; this suite now PINS ITS ABSENCE so
      the affordance is not re-introduced row-by-row.
+  4. (2026-08-04) The bubble is a ``<button data-conv-jump>`` — clicking jumps
+     to the source conversation (delegated handler → ``convFullIdById`` →
+     ``loadConversation``); the tooltip carries the FULL title + raw id + jump
+     hint since the visible label ellipsizes. A single-sender injection no
+     longer repeats the header's bubble inside the body card (the "来源重复"
+     screenshot); per-card attribution is kept only for multi-sender rows.
 
 This test EXTRACTS the real shipped helpers + ``_renderPeerInjectRow`` and evals
 them in node, asserting the title bubble, the absence of the raw id from the
@@ -85,6 +91,8 @@ eval(pull('_renderPeerInjectRow'));
 function nOcc(hay, needle){ return hay.split(needle).length - 1; }
 // Header = the <summary> only (attribution lives there, body cards excluded).
 function headerOf(html){ const i=html.indexOf('<summary'); const j=html.indexOf('</summary>'); return html.slice(i, j); }
+// Body = everything after the </summary> (the collapsible card region).
+function bodyOf(html){ const j=html.indexOf('</summary>'); return html.slice(j); }
 // Raw-id-as-visible-label detector: `>sibX<` or `>mrnaj25i<` between tags.
 function hasRawIdLabel(html){ return /(>|\[)(sib[a-z0-9]+|mrnaj25i)(<|,|\s|\])/.test(html.replace(/title="[^"]*"/g,'')); }
 
@@ -99,9 +107,15 @@ const html = _renderPeerInjectRow({
 if (!NEUTER) {
   check('title_bubble_present', html.includes('修复显示层 Bug'));
   check('title_bubble_class', html.includes('sw-peer-from-bubble'));
-  // The raw id must NOT be a visible label — only inside the title= tooltip.
+  // The raw id must NOT be a visible label — only inside attributes.
   check('raw_id_not_a_label', !html.includes('>mrnaj25i<'));
-  check('raw_id_in_tooltip', html.includes('title="conv mrnaj25i"'));
+  // Jump affordance: the bubble is a <button> carrying data-conv-jump, and its
+  // tooltip carries the FULL title + the raw id + the jump hint (the visible
+  // label ellipsizes — the tooltip is where the full title lives).
+  check('bubble_is_jump_button',
+    html.includes('<button') && html.includes('data-conv-jump="mrnaj25i"'));
+  check('tooltip_full_title_and_hint',
+    /title="[^"]*修复显示层 Bug[^"]*mrnaj25i[^"]*Open conversation"/.test(html));
   // The model-view affordance is GONE (removed 2026-07-28 per owner) and must
   // not creep back — neither the toolContent-backed nor the registry-backed
   // variant, in the header or the body.
@@ -111,6 +125,9 @@ if (!NEUTER) {
   check('no_chevron_span', !html.includes('sw-inbox-row-chev'));
   // No per-card raw toggle inside the body anymore.
   check('no_percard_raw_toggle', !html.includes('sw-card-raw'));
+  // Single-sender dedup: the header already carries the sender bubble, so the
+  // body card must NOT repeat the identical bubble (the reported "来源重复").
+  check('single_body_no_dup_bubble', !bodyOf(html).includes('sw-peer-from-bubble'));
 
   // ── MULTI-SENDER: header must show a title bubble PER distinct sender,
   //    never a raw id list. 5 senders → cap 3 bubbles + a "+2" overflow. ──
@@ -134,6 +151,9 @@ if (!NEUTER) {
   // The first 3 senders render as real titles (mrnaj25i is 5th → in +2 overflow).
   check('multi_titles_shown',
     mhead.includes('队列注入') && mhead.includes('inbox 重建') && mhead.includes('前缀缓存'));
+  // Multi-sender: per-card attribution is KEPT in the body (only the
+  // single-sender case dedups against the header bubble).
+  check('multi_body_keeps_percard_bubbles', nOcc(bodyOf(multi), 'sw-peer-from-bubble') >= 2);
 } else {
   // NEUTER: convTitleById always falls back → the specific title is gone,
   // proving the title lookup (not a hardcoded string) produced the bubble.
@@ -167,7 +187,7 @@ def test_peer_inject_row_title_bubble_and_no_modelview():
     out = _run(neuter=False)
     fails = [ln for ln in out.splitlines() if ln.startswith('FAIL')]
     assert not fails, 'peer-inject row layout failures:\n' + out
-    assert out.count('PASS') >= 13, f'expected >=13 PASS, got:\n{out}'
+    assert out.count('PASS') >= 15, f'expected >=15 PASS, got:\n{out}'
 
 
 @pytest.mark.skipif(not shutil.which('node'), reason='node not installed')
@@ -198,6 +218,13 @@ def test_source_uses_title_bubble_and_no_modelview():
     src = open(TR_JS, encoding='utf-8').read()
     peer = _pull_fn(src, '_renderPeerInjectRow')
     assert '_peerFromBubbleGroup' in peer, 'peer row header no longer uses the title-bubble group'
+    assert '_perCardAttribution' in peer, (
+        'the single-sender body dedup was removed — the duplicate sender bubble regression is back')
+    bubble = _pull_fn(src, '_peerFromBubble')
+    assert 'data-conv-jump' in bubble and '<button' in bubble, (
+        'the sender bubble lost its click-to-jump affordance')
+    assert 'convFullIdById' in src and 'loadConversation(' in src, (
+        'the delegated jump handler (bubble → loadConversation) is gone')
     assert '_tcModelViewBtnForText' not in peer, (
         'the model-view button crept back into the peer row header')
     assert 'sw-inbox-row-chev' not in peer, 'the dead chevron span was re-introduced'

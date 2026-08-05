@@ -13,7 +13,7 @@ import os
 INK = '#221E2A'
 CREAM_HAND = '#FDF2DA'
 
-DEFS = f"""<defs>
+DEFS = """<defs>
     <linearGradient id="sTop" x1="0" y1="0" x2="0.55" y2="1">
       <stop offset="0" stop-color="#FFFAEE"/><stop offset="1" stop-color="#FBEFD4"/>
     </linearGradient>
@@ -57,7 +57,7 @@ BROW_RAISED_L = f"""<path d="M4.2 3.6 L8.4 4.8" stroke="{INK}" stroke-width="1.2
 BLUSH = """<ellipse cx="3.6" cy="17.4" rx="2.3" ry="1.35" fill="#FB9E96" opacity="0.7"/>
     <ellipse cx="20.4" cy="17.4" rx="2.3" ry="1.35" fill="#FB9E96" opacity="0.7"/>"""
 
-MONOCLE = f"""<circle cx="16.95" cy="10.3" r="5" fill="#BFE3EA" opacity="0.55"/>
+MONOCLE = """<circle cx="16.95" cy="10.3" r="5" fill="#BFE3EA" opacity="0.55"/>
     <circle cx="16.95" cy="10.3" r="5" fill="none" stroke="#C9A227" stroke-width="1.7"/>
     <path d="M21.4 13.2 L23.5 21" stroke="#C9A227" stroke-width="1.2" stroke-linecap="round"/>"""
 

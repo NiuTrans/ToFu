@@ -41,12 +41,24 @@ const _push = (() => {
   // opening a second connection: the server echoes {type:'pong', t} for
   // every {action:'ping', t} we send, and RTT = now - t.
   const PING_INTERVAL_MS = 4000;   // how often to probe while connected
-  const PING_TIMEOUT_MS = 8000;    // no pong within this ⇒ treat as timed out
+  const PING_TIMEOUT_MS = 8000;    // no pong within this ⇒ treat as timed out (FLOOR)
+  const PING_TIMEOUT_MAX_MS = 30000; // adaptive ceiling under a slow proxy/tunnel
+  /* Adaptive timeout (pt_afbaf3d7 ①c). Under a buffering proxy + a congested
+   * server, a pong can legitimately take longer than 8s — the server is
+   * alive, just busy. Scale the half-open verdict with the OBSERVED RTT so a
+   * slow-but-alive link is not force-closed into the reconnect → full-refetch
+   * → stall → timeout self-feeding loop (the 2026-08-01 hard-refresh
+   * congestion collapse). */
+  function _pingTimeoutMs() {
+    const rtt = _latencyMs || 0;
+    return Math.min(PING_TIMEOUT_MAX_MS, Math.max(PING_TIMEOUT_MS, rtt * 4));
+  }
   let _pingTimer = null;
   let _pingTimeoutTimer = null;    // per-ping watchdog: fires PING_TIMEOUT_MS after a probe so the
                                    // timeout state is EMITTED promptly (~timeout window), not only on
                                    // the next 4s interval tick (which delayed the badge ~12s).
   let _lastPingSentAt = 0;         // client timestamp of the outstanding ping
+  let _lastInboundAt = 0;          // last time ANY frame arrived (proof-of-life ledger)
   let _latencyMs = null;           // last measured RTT; null = unknown
   let _latencyState = 'unknown';   // unknown | good | ok | poor | timeout | offline
   let _latencyListeners = new Set();
@@ -84,11 +96,13 @@ const _push = (() => {
   function _sendPing() {
     if (!_connected || !_ws) return;
     // A still-outstanding ping older than the timeout means the pong never
-    // came back: the socket is HALF-OPEN — TCP-dead but readyState still OPEN,
-    // so _ws.send() won't throw and no onclose fires on its own. Push frames
-    // would silently stop forever with no reconnect. Surface the timeout AND
-    // force-close so onclose → _scheduleReconnect re-establishes the socket.
-    if (_lastPingSentAt && Date.now() - _lastPingSentAt > PING_TIMEOUT_MS) {
+    // came back AND no other frame arrived either (any inbound frame resets
+    // the outstanding probe — see onmessage): the socket is HALF-OPEN —
+    // TCP-dead but readyState still OPEN, so _ws.send() won't throw and no
+    // onclose fires on its own. Push frames would silently stop forever with
+    // no reconnect. Surface the timeout AND force-close so onclose →
+    // _scheduleReconnect re-establishes the socket.
+    if (_lastPingSentAt && Date.now() - _lastPingSentAt > _pingTimeoutMs()) {
       _latencyMs = null;
       _latencyState = 'timeout';
       _emitLatency();
@@ -110,7 +124,7 @@ const _push = (() => {
     // Arm a dedicated watchdog so the timeout is surfaced right at the window
     // edge instead of waiting for a later interval tick to notice the age.
     if (_pingTimeoutTimer) clearTimeout(_pingTimeoutTimer);
-    _pingTimeoutTimer = setTimeout(_firePingTimeout, PING_TIMEOUT_MS);
+    _pingTimeoutTimer = setTimeout(_firePingTimeout, _pingTimeoutMs());
   }
 
   // Fired by the per-ping watchdog when a pong has not returned within
@@ -120,7 +134,10 @@ const _push = (() => {
   // backstop branch in _sendPing but fires seconds sooner.
   function _firePingTimeout() {
     _pingTimeoutTimer = null;
-    if (!_lastPingSentAt) return;   // a pong already cleared the outstanding ping
+    /* Any inbound frame (data OR pong) disarms this watchdog by clearing
+     * _lastPingSentAt — so reaching the verdict below means total inbound
+     * silence for the whole window: a genuinely half-open socket. */
+    if (!_lastPingSentAt) return;   // a frame already cleared the outstanding ping
     _latencyMs = null;
     _latencyState = 'timeout';
     _emitLatency();
@@ -250,6 +267,11 @@ const _push = (() => {
     };
 
     _ws.onmessage = (event) => {
+      /* ★ Proof-of-life (pt_afbaf3d7 ①b): ANY inbound frame — data, pong,
+       * even an unparseable one — is bytes arriving on the wire, the very
+       * definition of a NOT-half-open socket. Stamp the ledger BEFORE parsing
+       * so even a malformed frame counts. */
+      _lastInboundAt = Date.now();
       let frame;
       try { frame = JSON.parse(event.data); }
       catch (e) { console.debug('[Push] dropped malformed frame:', e && e.message); return; }
@@ -259,6 +281,19 @@ const _push = (() => {
 
       if (frame.type === 'pong') { _onPong(frame.t); return; }
       if (frame.type === 'ping') return;
+
+      /* A DATA frame restarts the probe cycle: a server busy streaming large
+       * event frames can have its pong queued behind the data (the pong has
+       * a server-side priority lane, but the client verdict must not depend
+       * on it), and the watchdog used to only clear on a matching pong — so
+       * heavy server→client traffic (the sign of a HEALTHY socket) could end
+       * in a force-close. Clear the outstanding ping + watchdog on any frame;
+       * the next interval tick re-arms a fresh probe. The skipped RTT sample
+       * is acceptable (a late pong is ignored by _onPong's t-match). */
+      if (_lastPingSentAt) {
+        _lastPingSentAt = 0;
+        if (_pingTimeoutTimer) { clearTimeout(_pingTimeoutTimer); _pingTimeoutTimer = null; }
+      }
 
       // Route to specific task handlers
       const key = _key(channel, taskId);
@@ -296,6 +331,7 @@ const _push = (() => {
       _connectedAt = 0;
       _ws = null;
       _stopPinging();
+      _lastInboundAt = 0;
       _latencyMs = null;
       _latencyState = 'offline';
       _emitLatency();
@@ -376,7 +412,9 @@ const _push = (() => {
   function isConnected() { return _connected; }
 
   function getLatency() {
-    return { ms: _latencyMs, state: _latencyState, connected: _connected, at: Date.now() };
+    // lastInboundAt doubles as the proof-of-life ledger's public readout —
+    // diagnostics can tell "socket silent for N ms" apart from "closed".
+    return { ms: _latencyMs, state: _latencyState, connected: _connected, at: Date.now(), lastInboundAt: _lastInboundAt };
   }
 
   function onLatency(fn) {

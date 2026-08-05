@@ -154,13 +154,15 @@ def test_fill_form_description_steers_multi_field():
 
 
 def test_click_and_keyboard_point_back_to_fill_form():
-    from lib.tools.browser import BROWSER_TOOL_CLICK, BROWSER_TOOL_KEYBOARD
+    # v2 (pt_869e5648403e4745): browser_keyboard split into browser_type +
+    # browser_press_key; the reverse-pointer contract moved with it.
+    from lib.tools.browser import BROWSER_TOOL_CLICK, BROWSER_TOOL_PRESS_KEY
     click_desc = BROWSER_TOOL_CLICK['function']['description']
-    kbd_desc = BROWSER_TOOL_KEYBOARD['function']['description']
+    key_desc = BROWSER_TOOL_PRESS_KEY['function']['description']
     assert 'browser_fill_form' in click_desc, (
         'click must reverse-point to fill_form for multi-field forms')
-    assert 'browser_fill_form' in kbd_desc, (
-        'keyboard must reverse-point to fill_form (it appends)')
+    assert 'browser_fill_form' in key_desc, (
+        'press_key must reverse-point to fill_form (keystrokes append)')
 
 
 # ── 2b. screenshot waits for layout stability (no fixed sleep) ──────
@@ -293,13 +295,18 @@ def test_fill_form_select_silent_success_neuter_bites(monkeypatch):
 # ── 3. search-first URL guidance ────────────────────────────────────
 
 def test_create_tab_and_navigate_tell_model_to_search_first():
-    from lib.tools.browser import BROWSER_TOOL_CREATE_TAB, BROWSER_TOOL_NAVIGATE
-    for tool in (BROWSER_TOOL_CREATE_TAB, BROWSER_TOOL_NAVIGATE):
-        desc = tool['function']['description']
-        assert 'web_search' in desc, (
-            f"{tool['function']['name']} must instruct web_search when unsure")
-        assert 'guess' in desc.lower() or 'memory' in desc.lower(), (
-            'must explicitly forbid guessing the URL from memory')
+    # v2 (pt_869e5648403e4745): browser_create_tab was absorbed into
+    # browser_navigate(new_tab=true) — the search-first contract now lives
+    # on navigate alone, and the new_tab param must exist as the merge point.
+    from lib.tools.browser import BROWSER_TOOL_NAVIGATE
+    tool = BROWSER_TOOL_NAVIGATE
+    desc = tool['function']['description']
+    assert 'web_search' in desc, (
+        f"{tool['function']['name']} must instruct web_search when unsure")
+    assert 'guess' in desc.lower() or 'memory' in desc.lower(), (
+        'must explicitly forbid guessing the URL from memory')
+    assert 'new_tab' in tool['function']['parameters']['properties'], (
+        'navigate must carry new_tab (the create_tab merge point)')
 
 
 if __name__ == '__main__':

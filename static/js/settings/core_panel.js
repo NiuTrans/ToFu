@@ -36,12 +36,15 @@ function _setVal(id, value, prop) {
 //  Model list ordering — cold sort + insertion sort
 // ══════════════════════════════════════════════════════
 //
-// Each provider's model list is kept ordered by the DISPLAY name the user
-// actually reads (_modelShortName), NOT the raw model_id — sorting by id put
-// `yuju-claude-opus-5-evaDaily` (label "Claude Opus 5") under 'y', far from the
-// other Claude entries. The comparator itself lives in settings/branding.js
-// (_compareModelsByDisplayName) and is shared with the toolbar model picker so
-// the two lists can never disagree about order.
+// Each provider's model list is kept ordered by the string the CARD actually
+// renders — the raw model_id (_renderModelCard shows `m.model_id` verbatim).
+// It must NOT use the friendly pricing-registry label: that label comes from
+// MODEL_PRICING (claude-fable-5 → "Fable 5", yuju-claude-opus-5-evaDaily →
+// "Claude Opus 5") and is the correct sort key ONLY for lists that render it
+// (toolbar picker, preset tab, default-model selects — see branding.js).
+// Sorting the settings cards by an invisible name made claude-fable-5 land
+// between Doubao and gemini — alphabetical to the machine, scrambled to the
+// reader (2026-08-04 incident).
 //
 // To avoid re-sorting on every render (which would make rows jump around
 // while editing), the full sort runs only ONCE per editor session — a
@@ -50,16 +53,19 @@ function _setVal(id, value, prop) {
 // add / rename) keep the order via _insertModelSorted (binary-search
 // insertion). The next settings-open cold-sorts again from scratch.
 
-/** Order two model entries by display name. Delegates to the shared
- *  comparator; falls back to a raw model_id compare only if branding.js is
- *  absent (stale bundle) so the list still renders in a stable order. */
+/** Order two model entries by the raw model_id shown on the card. Uses the
+ *  shared numeric-aware collator from settings/branding.js (so
+ *  "claude-opus-4.10" sorts after "claude-opus-4.6" and case is folded);
+ *  falls back to a lowercase compare if branding.js is absent (stale bundle)
+ *  so the list still renders in a stable order. */
 function _compareModelEntries(a, b) {
-  if (typeof _compareModelsByDisplayName === 'function') {
-    return _compareModelsByDisplayName(a, b);
+  var ka = String((a && a.model_id) || '');
+  var kb = String((b && b.model_id) || '');
+  if (typeof _MODEL_NAME_COLLATOR !== 'undefined' && _MODEL_NAME_COLLATOR) {
+    return _MODEL_NAME_COLLATOR.compare(ka, kb);
   }
-  var ka = ((a && a.model_id) || '').toLowerCase();
-  var kb = ((b && b.model_id) || '').toLowerCase();
-  return ka < kb ? -1 : (ka > kb ? 1 : 0);
+  var la = ka.toLowerCase(), lb = kb.toLowerCase();
+  return la < lb ? -1 : (la > lb ? 1 : 0);
 }
 
 /** One-time full sort of a provider's model list (in place, by display name). */
@@ -275,10 +281,11 @@ function openSettings() {
     _stgFaceRefusals = Array.isArray(cfg.face_refusals) ? cfg.face_refusals : [];
     _stgPresets = JSON.parse(JSON.stringify(cfg.presets || {}));
 
-    // One-time cold sort: order every provider's model list by the DISPLAY
-    // name (shared comparator, same one the toolbar picker uses). In-session
-    // additions stay ordered via _insertModelSorted, and the next
-    // settings-open cold-sorts again from scratch.
+    // One-time cold sort: order every provider's model list by the raw
+    // model_id the card renders (deliberately NOT the picker's friendly-name
+    // comparator; see the ordering block above). In-session additions stay
+    // ordered via _insertModelSorted, and the next settings-open cold-sorts
+    // again from scratch.
     _coldSortAllProviderModels();
 
     // Pre-load external templates so sync buttons appear on first render
@@ -305,6 +312,7 @@ function openSettings() {
     _populateAdvancedTab(cfg);
     _populateFeishuTab(cfg);
     _populateMtProviderSection(cfg);
+    if (typeof _populatePaperXpTab === 'function') _populatePaperXpTab(cfg);
     if (typeof _populateSpeechTab === 'function') _populateSpeechTab(cfg);
     _populateMcpTab();
     if (typeof _populateSkillsTab === 'function') _populateSkillsTab();

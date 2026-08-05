@@ -201,6 +201,11 @@ class InProcRuntimeStateStore:
                 return None
             return v[0]
 
+    def delete_value(self, kind: str, key: str) -> None:
+        """Eagerly drop a value (mirror of the redis DEL). Idempotent."""
+        with self._lock:
+            self._values.pop((kind, key), None)
+
     def live_keys(self, kind: str, key_prefix: str = '') -> List[str]:
         """Live keys under a prefix — used by the push subscription registry
         to enumerate which replicas/streams are currently subscribed."""
@@ -443,6 +448,15 @@ class RedisRuntimeStateStore:
         except Exception as e:
             logger.warning('[RuntimeStateStore] get_value failed (%s) - None', e)
             return None
+
+    def delete_value(self, kind: str, key: str) -> None:
+        r = self._redis()
+        if r is None:
+            return
+        try:
+            r.delete(self._k(kind, key))
+        except Exception as e:
+            logger.debug('[RuntimeStateStore] delete_value non-fatal: %s', e)
 
     def live_keys(self, kind: str, key_prefix: str = '') -> List[str]:
         keys = self._scan(kind, key_prefix)

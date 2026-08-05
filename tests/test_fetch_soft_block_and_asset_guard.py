@@ -1,3 +1,5 @@
+# Incident anchor: born in commit 3e2c444b — fetch_url: stop laundering soft-blocked HTML into bogus "file asset" ...
+# (funeral audit pt_c565a36b3e8f42e6, docs/RATCHET_AUDIT.md)
 """Guards for the fetch_url soft-failure → bogus-"file asset" retry loop.
 
 Symptom this pins (2026-07-25): a geo-blocked doc host answers **HTTP 200,

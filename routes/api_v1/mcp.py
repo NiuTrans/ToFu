@@ -18,9 +18,12 @@ UI users have admin scope locally so the settings panel keeps working.
 
 from __future__ import annotations
 
-from flask import Blueprint, jsonify
+from flask import Blueprint
 
-from lib.api_response import api_bad_request, api_error, api_internal_error, api_ok
+from lib.api_response import (
+    api_bad_request, api_error, api_internal_error, api_not_found, api_ok,
+    api_payload,
+)
 from lib.log import get_logger
 from lib.openapi import api_meta
 from lib.request_parser import parse_body
@@ -104,6 +107,8 @@ def list_servers_v1():
         # stored session cookie/token no longer authenticates (a second health
         # axis the transport ping cannot see). None when never probed.
         cred_health = bridge.get_cred_health(name)
+        disabled_tools = [t for t in (srv_cfg.get('disabled_tools') or [])
+                          if isinstance(t, str)]
         servers.append({
             'name': name,
             'config': redact_config(srv_cfg),
@@ -113,6 +118,8 @@ def list_servers_v1():
             'connected': is_connected,
             'tools_count': tools_count,
             'tool_names': tool_names,
+            'disabled_tools': disabled_tools,
+            'enabled_tools_count': max(0, tools_count - len(disabled_tools)),
             'server_version': server_version,
             'server_impl_name': server_impl_name,
             'breaker': breaker,
@@ -161,7 +168,7 @@ def upsert_server_v1():
     cfg_upsert(name, data)
     logger.info('[MCP.v1] config upserted: %s (transport=%s)', name, transport)
     _invalidate_tool_latches(f'server upsert {name}')
-    return jsonify({'ok': True, 'message': f'Server "{name}" configured'})
+    return api_ok(message=f'Server "{name}" configured')
 
 
 @api_v1_mcp_bp.route('/api/v1/mcp/servers/<name>', methods=['DELETE'])
@@ -183,7 +190,7 @@ def delete_server_v1(name):
     cfg_remove(name)
     logger.info('[MCP.v1] config removed: %s', name)
     _invalidate_tool_latches(f'server removal {name}')
-    return jsonify({'ok': True, 'message': f'Server "{name}" removed'})
+    return api_ok(message=f'Server "{name}" removed')
 
 
 # ── Lifecycle ────────────────────────────────────────────────────────
@@ -207,8 +214,7 @@ def connect_servers_v1():
     if target:
         config = load_mcp_config()
         if target not in config:
-            return jsonify({'ok': False,
-                            'error': f'Server "{target}" not in config'}), 404
+            return api_not_found(f'Server "{target}" not in config')
         try:
             tools = bridge.connect_server(target, config[target])
             if not config[target].get('enabled', True):
@@ -218,18 +224,15 @@ def connect_servers_v1():
                 cfg_upsert(target, updated)
                 logger.info('[MCP.v1] re-enabled %s on connect', target)
             _invalidate_tool_latches(f'connect {target}')
-            return jsonify({
-                'ok': True,
+            return api_ok({
                 'server': target,
                 'tools_count': len(tools),
                 'tool_names': [t.name for t in tools],
             })
         except MCPConnectError as e:
             logger.error('[MCP.v1] connect %s failed: %s', target, e)
-            return jsonify({
-                'ok': False, 'error': str(e),
-                'stderr_tail': e.stderr_tail or '',
-            }), 500
+            return api_error(str(e), status=500,
+                               stderr_tail=e.stderr_tail or '')
         except Exception as e:
             logger.error('[MCP.v1] connect %s crashed: %s', target, e,
                          exc_info=True)
@@ -239,8 +242,7 @@ def connect_servers_v1():
         result = bridge.connect_all()
         total_tools = sum(len(v) for v in result.values())
         _invalidate_tool_latches('connect_all')
-        return jsonify({
-            'ok': True,
+        return api_ok({
             'servers': {k: {'tools': v} for k, v in result.items()},
             'total_tools': total_tools,
         })
@@ -266,8 +268,7 @@ def disconnect_servers_v1():
             bridge._disconnect_one(target, forget=True)
             logger.info('[MCP.v1] disconnected %s', target)
             _invalidate_tool_latches(f'disconnect {target}')
-            return jsonify({'ok': True,
-                            'message': f'Disconnected from "{target}"'})
+            return api_ok(message=f'Disconnected from "{target}"')
         except Exception as e:
             logger.error('[MCP.v1] disconnect %s failed: %s', target, e,
                          exc_info=True)
@@ -292,12 +293,21 @@ def disconnect_servers_v1():
     tags=['mcp'],
 )
 def list_tools_v1():
+    from flask import request
+
     from lib.mcp import get_bridge
+    from lib.mcp.config import load_mcp_config
     from lib.mcp.types import make_namespaced_name
 
     bridge = get_bridge()
+    only_server = (request.args.get('server') or '').strip()
+    config = load_mcp_config()
     tools = []
     for server_info in bridge.list_servers():
+        if only_server and server_info['name'] != only_server:
+            continue
+        disabled = set((config.get(server_info['name'], {}) or {})
+                       .get('disabled_tools') or [])
         for tool_name in server_info['tool_names']:
             ns_name = make_namespaced_name(server_info['name'], tool_name)
             info = bridge.get_tool_info(ns_name)
@@ -307,13 +317,50 @@ def list_tools_v1():
                 'namespaced_name': ns_name,
                 'description': info['description'] if info else '',
                 'input_schema': info['input_schema'] if info else {},
+                'enabled': tool_name not in disabled,
             })
-    return jsonify({
-        'ok': True,
+    return api_ok({
         'tools': tools,
         'total': len(tools),
         'servers_connected': bridge.server_count,
     })
+
+
+@api_v1_mcp_bp.route('/api/v1/mcp/servers/<name>/tools', methods=['PUT'])
+@require_auth
+@api_meta(
+    summary='Set per-tool enable/disable on a server',
+    description=(
+        'Body: ``{disabled_tools: [tool_name, ...]}`` — the FULL replacement '
+        'list of disabled (upstream, non-namespaced) tool names for this '
+        'server. Disabled tools are hidden from the model\'s tool list and '
+        'refused at call time. Persists into the server config row and '
+        'hot-applies to the running bridge (no reconnect).'
+    ),
+    tags=['mcp'],
+)
+def set_server_tools_v1(name):
+    from lib.mcp import get_bridge
+    from lib.mcp.config import load_mcp_config, upsert_server as cfg_upsert
+
+    data = parse_body()
+    disabled = data.get('disabled_tools', [])
+    if not isinstance(disabled, list) or not all(
+            isinstance(t, str) and t.strip() for t in disabled):
+        return api_bad_request(
+            'disabled_tools must be a list of tool names',
+            field='disabled_tools')
+    config = load_mcp_config()
+    if name not in config:
+        return api_not_found(f'Server "{name}" not in config')
+    srv_cfg = dict(config[name])
+    srv_cfg['disabled_tools'] = sorted(set(disabled))
+    cfg_upsert(name, srv_cfg)
+    get_bridge().set_disabled_tools(name, srv_cfg['disabled_tools'])
+    logger.info('[MCP.v1] tool filter set: %s → %d disabled tool(s)',
+                name, len(srv_cfg['disabled_tools']))
+    _invalidate_tool_latches(f'tool filter {name}')
+    return api_ok({'server': name, 'disabled_tools': srv_cfg['disabled_tools']})
 
 
 # ── Catalog (App-Store) ─────────────────────────────────────────────
@@ -368,6 +415,8 @@ def get_catalog_v1():
             'installed': installed,
             'connected': connected,
             'tools_count': tools_count,
+            'disabled_tools': [t for t in ((config.get(sid, {}) or {}).get('disabled_tools') or [])
+                               if isinstance(t, str)],
             'server_version': server_version,
             'server_impl_name': server_impl_name,
             'stored_env_keys': stored_env_keys,
@@ -411,6 +460,8 @@ def get_catalog_v1():
             'installed': True,
             'connected': connected,
             'tools_count': tools_count,
+            'disabled_tools': [t for t in (srv_cfg.get('disabled_tools') or [])
+                               if isinstance(t, str)],
             'server_version': server_version,
             'server_impl_name': server_impl_name,
             'stored_env_keys': stored_env_keys,
@@ -450,8 +501,7 @@ def install_from_catalog_v1():
         return api_bad_request('server id is required', field='id')
     entry = get_catalog_entry(server_id)
     if entry is None:
-        return jsonify({'ok': False,
-                        'error': f'Unknown server: {server_id}'}), 404
+        return api_not_found(f'Unknown server: {server_id}')
 
     existing_cfg = load_mcp_config().get(server_id, {})
     existing_env = existing_cfg.get('env', {}) or {}
@@ -462,10 +512,8 @@ def install_from_catalog_v1():
 
     for spec in entry.get('env_specs', []):
         if spec.get('required') and not str(merged_env.get(spec['key'], '')).strip():
-            return jsonify({
-                'ok': False,
-                'error': f'Required: {spec.get("label", spec["key"])}',
-            }), 400
+            return api_bad_request(
+                f'Required: {spec.get("label", spec["key"])}')
 
     server_cfg = build_server_config(server_id, merged_env)
     if server_cfg is None:
@@ -491,22 +539,19 @@ def install_from_catalog_v1():
         if is_vendored_launcher(command):
             job = start_install_job(command)
             if job.get('state') == 'installing':
-                return jsonify({
-                    'ok': True,
+                return api_payload({
                     'status': 'installing',
                     'id': server_id,
                     'message': f'{entry["name"]} 正在安装依赖…',
-                }), 202
+                }, 202)
             if job.get('state') == 'error':
                 from lib.mcp.client import _launcher_install_hint
                 logger.error('[MCP.v1] catalog install: install of %s failed: %s',
                              server_id, job.get('detail'))
-                return jsonify({
-                    'ok': False,
-                    'error': _launcher_install_hint(command),
-                    'config_saved': True,
-                    'stderr_tail': job.get('detail') or '',
-                }), 500
+                return api_error(
+                    _launcher_install_hint(command), status=500,
+                    config_saved=True,
+                    stderr_tail=job.get('detail') or '')
             # state == 'ready' → fall through to the fast connect below.
 
     return _connect_after_install(server_id, server_cfg, entry['name'])
@@ -525,8 +570,7 @@ def _connect_after_install(server_id, server_cfg, display_name):
     try:
         tools = bridge.connect_server(server_id, server_cfg)
         _invalidate_tool_latches(f'catalog install {server_id}')
-        return jsonify({
-            'ok': True,
+        return api_ok({
             'status': 'ready',
             'message': f'{display_name} installed and connected',
             'tools_count': len(tools),
@@ -535,20 +579,15 @@ def _connect_after_install(server_id, server_cfg, display_name):
     except MCPConnectError as e:
         logger.error('[MCP.v1] catalog install connect %s failed: %s',
                      server_id, e)
-        return jsonify({
-            'ok': False,
-            'error': f'Config saved but connection failed.\n\n{e}',
-            'config_saved': True,
-            'stderr_tail': e.stderr_tail or '',
-        }), 500
+        return api_error(
+            f'Config saved but connection failed.\n\n{e}', status=500,
+            config_saved=True, stderr_tail=e.stderr_tail or '')
     except Exception as e:
         logger.error('[MCP.v1] catalog install crashed for %s: %s',
                      server_id, e, exc_info=True)
-        return jsonify({
-            'ok': False,
-            'error': f'Config saved but connection failed: {e}',
-            'config_saved': True,
-        }), 500
+        return api_error(
+            f'Config saved but connection failed: {e}', status=500,
+            config_saved=True)
 
 
 @api_v1_mcp_bp.route('/api/v1/mcp/catalog/install/status', methods=['GET'])
@@ -587,19 +626,18 @@ def install_status_v1():
     # No job recorded (e.g. server restarted mid-install) — treat as unknown
     # and let the client re-POST install to restart cleanly.
     if job is None:
-        return jsonify({'ok': True, 'status': 'unknown', 'id': server_id})
+        return api_ok({'status': 'unknown', 'id': server_id})
 
     state = job.get('state')
     if state == 'installing':
-        return jsonify({'ok': True, 'status': 'installing', 'id': server_id}), 202
+        return api_payload({'status': 'installing', 'id': server_id}, 202)
     if state == 'error':
-        return jsonify({
-            'ok': False,
+        return api_payload({
             'status': 'error',
             'error': _launcher_install_hint(command),
             'config_saved': True,
             'stderr_tail': job.get('detail') or '',
-        }), 500
+        }, 500)
 
     # state == 'ready' → perform the fast handshake now.
     entry = get_catalog_entry(server_id)
@@ -647,9 +685,7 @@ def uninstall_from_catalog_v1():
         audit_log('mcp_uninstall', server=server_id, mode='purge')
         logger.info('[MCP.v1] catalog uninstall (purge): %s', server_id)
         _invalidate_tool_latches(f'catalog uninstall/purge {server_id}')
-        return jsonify({'ok': True,
-                        'message': f'Uninstalled {server_id}',
-                        'purged': True})
+        return api_ok(message=f'Uninstalled {server_id}', purged=True)
 
     config = load_mcp_config()
     if server_id in config:
@@ -660,17 +696,14 @@ def uninstall_from_catalog_v1():
         logger.info('[MCP.v1] catalog uninstall (soft, env kept): %s',
                     server_id)
         _invalidate_tool_latches(f'catalog uninstall/soft {server_id}')
-        return jsonify({
-            'ok': True,
+        return api_ok({
             'message': f'{server_id} disabled (credentials kept for re-enable)',
             'purged': False,
         })
 
     logger.warning('[MCP.v1] uninstall requested but not in config: %s',
                    server_id)
-    return jsonify({'ok': True,
-                    'message': f'{server_id} was not installed',
-                    'purged': False})
+    return api_ok(message=f'{server_id} was not installed', purged=False)
 
 
 __all__ = ['api_v1_mcp_bp']

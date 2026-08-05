@@ -28,6 +28,7 @@ by ``routes/conversations.py``; the symbol is re-exported here so that
 keeps working unchanged. New code should import from ``lib.daily_report``.
 """
 
+import asyncio
 import datetime as _dt
 import os
 import random
@@ -35,7 +36,7 @@ import re
 import threading
 import time
 
-from flask import Blueprint, jsonify
+from flask import Blueprint
 
 from lib.api_response import api_bad_request, api_error, api_not_found, api_ok
 from lib.daily_report import (  # noqa: F401  — back-compat re-exports
@@ -126,8 +127,10 @@ async def generate_daily_report():
             logger.info('[DailyReport] POST %s: returning cached (%d items)',
                         target_date, n)
             return api_ok({**existing})
-    # Extract conversations from DB
-    convs = _extract_convs_for_date(target_date)
+    # Extract conversations from DB. Off-loop: the scan fetches + json.loads-es
+    # every in-window conversation's messages blob (hundreds of MB on an active
+    # day) — synchronous here it stalls the event loop (LoopWatch 5s trips).
+    convs = await asyncio.to_thread(_extract_convs_for_date, target_date)
     if not convs:
         # Still create an empty report so manual tasks can be added
         empty_result = {
@@ -136,12 +139,13 @@ async def generate_daily_report():
             'persona': _pick_persona({}),
             'stats': {'totalConversations': 0},
         }
-        return jsonify(empty_result)
+        return api_ok(empty_result)
 
     # Manual-state preservation (status overrides, TODO check-offs, manual
     # TODOs, legacy _todo tasks) is centralized in _analyse_conversations →
     # _merge_manual_state, so POST / backfill / async generator all inherit it.
-    result = _analyse_conversations(convs, target_date)
+    # Off-loop: _run_llm_analysis inside is a synchronous LLM call.
+    result = await asyncio.to_thread(_analyse_conversations, convs, target_date)
 
     # Persist if analysis succeeded
     if (result.get('streams') or result.get('tomorrow')) and not result.get('error'):
@@ -154,7 +158,7 @@ async def generate_daily_report():
                 '(%d done, %d open), error=%s',
                 target_date, elapsed, len(convs), stream_count, done_count,
                 stream_count - done_count, result.get('error', 'none'))
-    return jsonify(result)
+    return api_ok(result)
 
 
 @api_v1_daily_report_bp.route('/api/v1/daily-report/<date_str>')
@@ -172,9 +176,10 @@ async def get_cached_report(date_str):
         if today_todos:
             logger.debug('[DailyReport] GET %s: no report, inheriting %d todos from prev day',
                          date_str, len(today_todos))
-            conv_count = _count_convs_for_date(date_str)
-            return jsonify({
-                'ok': True, 'streams': [], 'tomorrow': [],
+            # Off-loop: full-day messages scan + json.loads (see get_conv_count).
+            conv_count = await asyncio.to_thread(_count_convs_for_date, date_str)
+            return api_ok({
+                'streams': [], 'tomorrow': [],
                 'today_todos': today_todos,
                 'tasks': [],
                 'stats': {'totalConversations': conv_count},
@@ -209,14 +214,15 @@ async def backfill_report(date_str):
                      date_str, n)
         return api_ok({**existing})
     t0 = time.monotonic()
-    convs = _extract_convs_for_date(date_str)
+    # Off-loop: heavy messages scan/parse + synchronous LLM analysis (see POST).
+    convs = await asyncio.to_thread(_extract_convs_for_date, date_str)
     if not convs:
-        return jsonify({'ok': True, 'tasks': [],
-                        'quote': random.choice(_QUOTES),
-                        'persona': _pick_persona({}),
-                        'stats': {'totalConversations': 0}})
+        return api_ok({'tasks': [],
+                       'quote': random.choice(_QUOTES),
+                       'persona': _pick_persona({}),
+                       'stats': {'totalConversations': 0}})
 
-    result = _analyse_conversations(convs, date_str)
+    result = await asyncio.to_thread(_analyse_conversations, convs, date_str)
 
     if result.get('streams') and not result.get('error'):
         _save_report(date_str, result)
@@ -226,7 +232,31 @@ async def backfill_report(date_str):
     logger.info('[DailyReport] Backfill %s completed in %.1fs: %d convs → %d streams, error=%s',
                 date_str, elapsed, len(convs), stream_count,
                 result.get('error', 'none'))
-    return jsonify(result)
+    return api_ok(result)
+
+
+def _conv_days_from_rows(rows, ms_start, ms_end):
+    """Count conversations with activity per day-of-month, from fetched rows.
+
+    Pure CPU (json.loads + timestamp scan) — no DB access — so it is safe to
+    run in a worker thread via ``asyncio.to_thread``.
+    """
+    from lib.utils import safe_json
+
+    conv_days = {}
+    for r in rows:
+        msgs = safe_json(r['messages'], default=[], label='cal-conv-days')
+        if not isinstance(msgs, list) or not msgs:
+            continue
+        for msg in msgs:
+            ts = _safe_int_ts(msg.get('timestamp', 0))
+            if not ts:
+                ts = _safe_int_ts(r['updated_at'] or r['created_at'] or 0)
+            if ms_start <= ts < ms_end:
+                day_num = _dt.datetime.fromtimestamp(ts / 1000).day
+                conv_days[day_num] = conv_days.get(day_num, 0) + 1
+                break
+    return conv_days
 
 
 @api_v1_daily_report_bp.route('/api/v1/daily-report/calendar/<int:year>/<int:month>')
@@ -296,7 +326,6 @@ async def get_calendar_month(year, month):
         conv_days = {}
         try:
             from lib.database import DOMAIN_CHAT, async_fetchall
-            from lib.utils import safe_json
 
             month_start = _dt.date(year, month, 1)
             if month < 12:
@@ -318,18 +347,10 @@ async def get_calendar_month(year, month):
                 (DEFAULT_USER_ID, ms_start, ms_end),
                 domain=DOMAIN_CHAT,
             )
-            for r in rows:
-                msgs = safe_json(r['messages'], default=[], label='cal-conv-days')
-                if not isinstance(msgs, list) or not msgs:
-                    continue
-                for msg in msgs:
-                    ts = _safe_int_ts(msg.get('timestamp', 0))
-                    if not ts:
-                        ts = _safe_int_ts(r['updated_at'] or r['created_at'] or 0)
-                    if ms_start <= ts < ms_end:
-                        day_num = _dt.datetime.fromtimestamp(ts / 1000).day
-                        conv_days[day_num] = conv_days.get(day_num, 0) + 1
-                        break
+            # Off-loop: json.loads of a whole month's messages blobs is the
+            # CPU-heavy part — same stall class as get_conv_count.
+            conv_days = await asyncio.to_thread(
+                _conv_days_from_rows, rows, ms_start, ms_end)
         except Exception as e:
             logger.warning('[DailyReport] Calendar conv-days %d-%02d: %s', year, month, e)
 
@@ -339,7 +360,6 @@ async def get_calendar_month(year, month):
         # NOT block the event loop (and every other in-flight request).
         cost_days = {}
         try:
-            import asyncio
             raw_costs = await asyncio.to_thread(_get_monthly_costs, year, month)
             for day_num, day_data in raw_costs.items():
                 cost_days[day_num] = {
@@ -578,7 +598,11 @@ async def get_conv_count(date_str):
     if not re.match(r'^\d{4}-\d{2}-\d{2}$', date_str):
         return api_bad_request('Invalid date format')
 
-    count = _count_convs_for_date(date_str)
+    # Off-loop: _count_convs_for_date fetches + json.loads-es EVERY in-window
+    # conversation's full messages blob just to count (measured ~300 MB on an
+    # active day) — synchronous here it stalls the event loop past the 5s
+    # LoopWatch threshold (real stalls on 2026-08-01 traced to this call).
+    count = await asyncio.to_thread(_count_convs_for_date, date_str)
     logger.debug('[DailyReport] conv-count %s: %d conversations', date_str, count)
     return api_ok({'count': count, 'date': date_str})
 
@@ -675,8 +699,8 @@ async def start_generation():
     job = _get_job(target_date)
     if job and job.get('status') == 'generating':
         logger.debug('[DailyReport] Generate %s: already running', target_date)
-        return jsonify({'ok': True, 'status': 'generating',
-                        'progress': job.get('progress', {})})
+        return api_ok({'status': 'generating',
+                       'progress': job.get('progress', {})})
 
     # Check cache (unless forced)
     if not force:
@@ -696,8 +720,8 @@ async def start_generation():
     logger.info('[DailyReport] Background generation launched for %s (force=%s)',
                 target_date, force)
 
-    return jsonify({'ok': True, 'status': 'generating',
-                    'progress': {'stage': 'starting', 'message': '正在启动…'}})
+    return api_ok({'status': 'generating',
+                   'progress': {'stage': 'starting', 'message': '正在启动…'}})
 
 
 @api_v1_daily_report_bp.route('/api/v1/daily-report/status/<date_str>')
@@ -726,9 +750,10 @@ async def get_generation_status(date_str):
             return api_ok({'status': 'done', 'report': existing})
         # Check if previous day has inherited todos
         if today_todos:
-            conv_count = _count_convs_for_date(date_str)
-            return jsonify({
-                'ok': True, 'status': 'done',
+            # Off-loop: full-day messages scan + json.loads (see get_conv_count).
+            conv_count = await asyncio.to_thread(_count_convs_for_date, date_str)
+            return api_ok({
+                'status': 'done',
                 'report': {
                     'streams': [], 'tomorrow': [], 'tasks': [],
                     'today_todos': today_todos,
@@ -750,8 +775,8 @@ async def get_generation_status(date_str):
         _clear_job(date_str)
         return api_ok({'status': 'error', 'error': error_msg})
     # Still generating
-    return jsonify({'ok': True, 'status': 'generating',
-                    'progress': job.get('progress', {})})
+    return api_ok({'status': 'generating',
+                   'progress': job.get('progress', {})})
 
 
 __all__ = ['api_v1_daily_report_bp']

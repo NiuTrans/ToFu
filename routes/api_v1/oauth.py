@@ -17,9 +17,9 @@ JSON contract:
 
 from __future__ import annotations
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, request
 
-from lib.api_response import api_bad_request, api_internal_error
+from lib.api_response import api_bad_request, api_internal_error, api_ok
 from lib.log import get_logger
 from lib.openapi import api_meta
 
@@ -79,11 +79,11 @@ def oauth_status():
         if provider:
             if provider not in ('claude', 'codex'):
                 return api_bad_request('Invalid provider', field='provider')
-            return jsonify(_with_egress_state(
+            return api_ok(_with_egress_state(
                 get_oauth_status(provider), provider, _uid))
         all_status = get_all_oauth_status()
-        return jsonify({p: _with_egress_state(s, p, _uid)
-                        for p, s in all_status.items()})
+        return api_ok({p: _with_egress_state(s, p, _uid)
+                       for p, s in all_status.items()})
     except Exception as e:
         logger.error('[OAuth.v1] status check failed: %s', e, exc_info=True)
         return api_internal_error(e, source='api_v1.oauth.status')
@@ -108,7 +108,7 @@ def oauth_test():
     from lib.proxy import proxies_for
 
     endpoints = {
-        'claude_token': 'https://console.anthropic.com/v1/oauth/token',
+        'claude_token': 'https://platform.claude.com/v1/oauth/token',
         'claude_auth':  'https://claude.ai/',
         'codex_token':  'https://auth.openai.com/oauth/token',
         'codex_auth':   'https://auth.openai.com/',
@@ -139,7 +139,7 @@ def oauth_test():
                 'url': url, 'status': 0, 'reachable': False,
                 'blocked': True, 'detail': str(e)[:200],
             }
-    return jsonify(results)
+    return api_ok(results)
 
 
 # ── Egress agent pin selector (multi-agent deployments) ─────────────
@@ -165,7 +165,6 @@ def oauth_egress_agent_get():
     try:
         from lib.desktop import list_agents
         from lib.desktop.egress import _pinned_agent
-        from lib.json_store import read_json
         from .auth import current_auth
         auth = current_auth()
         uid = (auth.user_id if auth and getattr(auth, 'user_id', '') else '')
@@ -177,7 +176,7 @@ def oauth_egress_agent_get():
              'online': a.get('online', False)}
             for a in list_agents(user_id=uid or None)
         ]
-        return jsonify({'pinned': pinned, 'agents': agents})
+        return api_ok({'pinned': pinned, 'agents': agents})
     except Exception as e:
         logger.error('[OAuth.v1] egress-agent GET failed: %s', e, exc_info=True)
         return api_internal_error(e, source='api_v1.oauth.egress_agent')
@@ -221,7 +220,7 @@ def oauth_egress_agent_set():
         from lib.log import audit_log
         audit_log('oauth_egress_agent_pinned', user_id=uid,
                   agent_id=agent_id or '(cleared)')
-        return jsonify({'ok': True, 'pinned': agent_id})
+        return api_ok({'pinned': agent_id})
     except Exception as e:
         logger.error('[OAuth.v1] egress-agent POST failed: %s', e, exc_info=True)
         return api_internal_error(e, source='api_v1.oauth.egress_agent')

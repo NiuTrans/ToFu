@@ -51,7 +51,8 @@ def chat(messages, model=None, *, max_tokens=4096, temperature=0,
          thinking_enabled=False, preset='low', effort=None, extra=None,
          timeout=None, log_prefix='', api_key=None, base_url=None,
          extra_headers=None, max_retries=None, _limit_retry=False,
-         thinking_format='', provider_id='', api_protocol='openai', oauth=''):
+         thinking_format='', provider_id='', api_protocol='openai', oauth='',
+         adapter=None):
     """Non-streaming chat completion.
 
     Args:
@@ -150,12 +151,17 @@ def chat(messages, model=None, *, max_tokens=4096, temperature=0,
 
     # Desktop-egress routing (S3): whitelisted hosts go through the user's
     # desktop agent when the server's own egress is blocked (cached probe).
+    # SKIPPED for adapter providers (E4): the marker pins the request to the
+    # bridge loopback relay — the server can never reach agent loopback
+    # directly, so there is no route to probe.
+    _adapter = adapter if isinstance(adapter, dict) and adapter else None
     _egress_route = None
-    from lib.desktop import egress as _eg
-    try:
-        _egress_route = _eg.route_request(url, user_id='')
-    except _eg.EgressUnavailable as e:
-        raise EndpointUnreachableError(str(e), base_url=url) from e
+    if not _adapter:
+        from lib.desktop import egress as _eg
+        try:
+            _egress_route = _eg.route_request(url, user_id='')
+        except _eg.EgressUnavailable as e:
+            raise EndpointUnreachableError(str(e), base_url=url) from e
 
     retries = MAX_STREAM_RETRIES if max_retries is None else max_retries
     resp = None
@@ -179,7 +185,24 @@ def chat(messages, model=None, *, max_tokens=4096, temperature=0,
             if log_prefix:
                 logger.debug('%s M-TraceId=%s', log_prefix, trace_id)
             try:
-                if _egress_route and _egress_route != 'direct':
+                if _adapter:
+                    from urllib.parse import urlparse as _urlparse
+                    from lib.desktop import adapter as _ad
+                    from lib.desktop.egress import EgressUnavailable as _EU
+                    _pu = _urlparse(url)
+                    _relay_path = _pu.path + (
+                        ('?' + _pu.query) if _pu.query else '')
+                    try:
+                        resp = _ad.relay_http(
+                            _adapter.get('agent_id', ''),
+                            int(_adapter.get('port') or 0),
+                            _relay_path, method='POST', headers=hdrs,
+                            body=json.dumps(body).encode(),
+                            timeout=min(timeout or 60, 60), user_id='')
+                    except _EU as e:
+                        raise EndpointUnreachableError(
+                            str(e), base_url=url) from e
+                elif _egress_route and _egress_route != 'direct':
                     try:
                         resp = _eg.egress_http(
                             url, method='POST', headers=hdrs,
@@ -222,7 +245,8 @@ def chat(messages, model=None, *, max_tokens=4096, temperature=0,
                             extra_headers=extra_headers,
                             max_retries=max_retries, _limit_retry=True,
                             thinking_format=thinking_format,
-                            provider_id=provider_id, api_protocol=api_protocol)
+                            provider_id=provider_id, api_protocol=api_protocol,
+                            adapter=adapter)
                         usage_r['_model_limit_learned'] = {
                             'model': model,
                             'old_limit': max_tokens,

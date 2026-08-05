@@ -41,6 +41,11 @@ def exchange_code(provider: str, code: str, state: str = '') -> dict:
     pkce = flow.get('pkce', {})
     pkce_verifier = pkce.get('code_verifier', '')
     flow_state = flow.get('state', '')
+    # The redirect advertised at authorize time. OAuth requires the exchange
+    # to echo it byte-for-byte, and for Claude it now varies per flow
+    # (loopback on the desktop build, console elsewhere), so it is READ from
+    # the flow instead of recomputed.
+    flow_redirect_uri = flow.get('redirect_uri', '')
 
     if not pkce_verifier:
         return {'error': 'No active OAuth flow found. Please start a new login first.'}
@@ -76,7 +81,8 @@ def exchange_code(provider: str, code: str, state: str = '') -> dict:
     try:
         if provider == 'claude':
             from lib.oauth.claude import claude_exchange_code
-            token = claude_exchange_code(code, pkce_verifier, state=state)
+            token = claude_exchange_code(code, pkce_verifier, state=state,
+                                         redirect_uri=flow_redirect_uri)
         elif provider == 'codex':
             from lib.oauth.codex import codex_exchange_code
             token = codex_exchange_code(code, pkce_verifier)

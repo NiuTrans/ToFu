@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Incident anchor: born in commit 433e836a — refactor(orchestrator): pt_03f4cdf1 slice 11 — extract per-round swar...
+# (funeral audit pt_c565a36b3e8f42e6, docs/RATCHET_AUDIT.md)
 """Wire-parity for pt_03f4cdf1 slice 11 — per-round swarm/peer/steer
 inbox drain.
 

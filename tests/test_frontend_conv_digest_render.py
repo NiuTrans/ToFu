@@ -2,7 +2,7 @@
 
 WHY
 ---
-``_renderConvDigest`` in ``static/js/ui/tool_rounds.js`` is the HUMAN view of
+``_renderConvDigest`` in ``static/js/ui/tool_rounds_rich.js`` is the HUMAN view of
 the View-Conversation tool — the primary deliverable a user sees when the agent
 opens a past conversation. It was previously a thin card (bare tool NAMES, a
 short preview, no timestamps, first-40-messages only). This harness loads the
@@ -174,8 +174,10 @@ report();
 
 
 def test_conv_digest_render():
+    # _renderConvDigest moved to the DEFERRED tool_rounds_rich.js (Epic-E
+    # split 2026-08-01) — drive it there.
     run_harness(
-        target_js=os.path.join(JS_DIR, "ui", "tool_rounds.js"),
+        target_js=os.path.join(JS_DIR, "ui", "tool_rounds_rich.js"),
         body_js=_BODY,
         extra_targets=[os.path.join(JS_DIR, "ui", "streaming_swarm_panel.js")],
         min_pass=25,
@@ -207,12 +209,12 @@ report();
 def test_NC_tool_arg_is_load_bearing(tmp_path):
     """NEUTER: drop the tool descriptor `arg` from the chip → the primary-arg
     text vanishes (arg-absent PASSes) while the name stays. Shipped
-    tool_rounds.js is byte-identical afterwards."""
-    src = os.path.join(JS_DIR, "ui", "tool_rounds.js")
+    tool_rounds_rich.js is byte-identical afterwards."""
+    src = os.path.join(JS_DIR, "ui", "tool_rounds_rich.js")
     with open(src, encoding="utf-8") as f:
         original = f.read()
     anchor = 'const arg = isObj ? (tl.arg || "") : "";'
-    assert anchor in original, "tool-arg anchor not found in tool_rounds.js"
+    assert anchor in original, "tool-arg anchor not found in tool_rounds_rich.js"
     patched = original.replace(anchor, 'const arg = "";  // NC', 1)
     assert patched != original, "NC patch did not apply"
     nc_path = tmp_path / "tool_rounds_nc.js"
@@ -229,7 +231,7 @@ def test_NC_tool_arg_is_load_bearing(tmp_path):
         assert "PASS NC_name_kept" in out, out
     finally:
         with open(src, encoding="utf-8") as f:
-            assert f.read() == original, "shipped tool_rounds.js must be byte-identical"
+            assert f.read() == original, "shipped tool_rounds_rich.js must be byte-identical"
 
 
 # NEUTER for the RAW branch: force `isRaw` off → the RAW badge + all metadata
@@ -258,12 +260,12 @@ report();
 def test_NC_raw_branch_is_load_bearing(tmp_path):
     """NEUTER: force `isRaw` off in _renderConvDigest → the RAW badge and every
     metadata chip disappear even for a raw:true digest, proving the cd.raw gate
-    is load-bearing. Shipped tool_rounds.js is byte-identical afterwards."""
-    src = os.path.join(JS_DIR, "ui", "tool_rounds.js")
+    is load-bearing. Shipped tool_rounds_rich.js is byte-identical afterwards."""
+    src = os.path.join(JS_DIR, "ui", "tool_rounds_rich.js")
     with open(src, encoding="utf-8") as f:
         original = f.read()
     anchor = "const isRaw = !!cd.raw;"
-    assert anchor in original, "isRaw anchor not found in tool_rounds.js"
+    assert anchor in original, "isRaw anchor not found in tool_rounds_rich.js"
     patched = original.replace(anchor, "const isRaw = false;  // NC", 1)
     assert patched != original, "NC patch did not apply"
     nc_path = tmp_path / "tool_rounds_nc_raw.js"
@@ -280,7 +282,7 @@ def test_NC_raw_branch_is_load_bearing(tmp_path):
         assert "PASS NC_no_metachip" in out, out
     finally:
         with open(src, encoding="utf-8") as f:
-            assert f.read() == original, "shipped tool_rounds.js must be byte-identical"
+            assert f.read() == original, "shipped tool_rounds_rich.js must be byte-identical"
 
 
 if __name__ == "__main__":

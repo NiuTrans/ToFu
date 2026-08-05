@@ -1,3 +1,5 @@
+# Incident anchor: born in commit 96d24277 — tool-registry SSOT: close the last provides gap + ratchet it shut; pi...
+# (funeral audit pt_c565a36b3e8f42e6, docs/RATCHET_AUDIT.md)
 """conv_ref's window semantics must match the row store's, exactly.
 
 Charter decision (2026-07-26): ``lib/database/messages_rows.load_message_window``

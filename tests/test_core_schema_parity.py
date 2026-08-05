@@ -1,3 +1,5 @@
+# Incident anchor: born in commit 11205270 — Remove trading subsystem from core (extracted to tofu-trading plugin)
+# (funeral audit pt_c565a36b3e8f42e6, docs/RATCHET_AUDIT.md)
 """tests/test_core_schema_parity.py — READ-ONLY parity gate for Core migration.
 
 This ships NOTHING live. It never opens a DB connection and never touches
@@ -1256,6 +1258,7 @@ LIVE_PG_PROJECT_TASKS = """
         write_set TEXT NOT NULL DEFAULT '[]',
         block_question TEXT NOT NULL DEFAULT '',
         human_answer TEXT NOT NULL DEFAULT '',
+        blocked_by TEXT NOT NULL DEFAULT '',
         created_at BIGINT NOT NULL DEFAULT 0,
         updated_at BIGINT NOT NULL DEFAULT 0,
         PRIMARY KEY (id)
@@ -1281,6 +1284,7 @@ LIVE_SQLITE_PROJECT_TASKS = """
         write_set TEXT NOT NULL DEFAULT '[]',
         block_question TEXT NOT NULL DEFAULT '',
         human_answer TEXT NOT NULL DEFAULT '',
+        blocked_by TEXT NOT NULL DEFAULT '',
         created_at INTEGER NOT NULL DEFAULT 0,
         updated_at INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (id)

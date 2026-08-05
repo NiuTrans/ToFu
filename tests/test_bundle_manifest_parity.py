@@ -1,3 +1,5 @@
+# Incident anchor: born in commit ab99ef8b — checkpoint: accumulated work since last commit
+# (funeral audit pt_c565a36b3e8f42e6, docs/RATCHET_AUDIT.md)
 """Closed-system parity test for the JS-bundler allowlist trap (CLAUDE.md §3.2.1).
 
 The bundler's "which file is an app script" decision is declared in FIVE

@@ -31,7 +31,6 @@ from __future__ import annotations
 
 import ast
 import importlib
-import sys
 from pathlib import Path
 
 import pytest
@@ -48,14 +47,13 @@ _LEAF_SYMBOLS = ('_VU_FORWARD_TYPES', '_VU_LIFECYCLE_TYPES',
 
 @pytest.fixture
 def reload_modules():
-    """Force a fresh import so any monkeypatched sys.modules state is dropped."""
-    for name in list(sys.modules):
-        if name.startswith('lib.tasks_pkg.autopilot'):
-            del sys.modules[name]
-    yield
-    for name in list(sys.modules):
-        if name.startswith('lib.tasks_pkg.autopilot'):
-            del sys.modules[name]
+    """Force a fresh import so any monkeypatched sys.modules state is dropped —
+    then RESTORE the original module objects. The delete-and-leave version of
+    this fixture broke the session-wide single-module-instance invariant every
+    monkeypatch-steering suite relies on (pt_788b25a5 batch pollution)."""
+    from tests._hermetic_import import hermetic_import_surface
+    with hermetic_import_surface('lib.tasks_pkg.autopilot'):
+        yield
 
 
 def test_event_forwarding_leaf_module_exists_and_defines_all_symbols(reload_modules):

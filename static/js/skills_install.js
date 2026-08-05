@@ -50,7 +50,9 @@ async function _skillsUploadZip(file) {
     var msg = t('skills.installedToast', { name: d.memory.name });
     if (hints.length) msg += t('skills.installHintSuffixUpload', { files: hints.map(function (h) { return h.file; }).join(', ') });
     _skillsToast(msg, 'success');
-    await _populateSkillsTab();
+    // skills.js is DEFERRED (Epic-E sub-9): absent pre-land, the install
+    // still succeeded — the tab list simply refreshes on next open.
+    if (typeof _populateSkillsTab === 'function') await _populateSkillsTab();
   } catch (e) {
     _skillsToast(t('skills.installError', { err: e.message }), 'error');
   }

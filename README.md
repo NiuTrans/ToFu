@@ -58,8 +58,24 @@ Pick the row that matches your OS. Each one ends with a running server on **http
 > **Adding another machine to an existing server?** You don't have to go back to GitHub at all: a running
 > Tofu server hosts the installers itself. Open **Local Control** in the app (the desktop row) and the
 > download button serves the right installer for that machine straight from your server — mirrored from the
-> latest release in the background (Windows/macOS) or built on the server itself (Linux, from the committed
-> tree via `POST /api/v1/desktop/build`). Same file, no dependence on the public GitHub network.
+> latest release in the background (Windows/macOS) or built on the server itself (Linux/Windows, from the
+> committed tree via `POST /api/v1/desktop/build`). Same file, no dependence on the public GitHub network.
+>
+> There are two components — pick by the machine's role:
+>
+> | Component | For | Size | Contents |
+> |---|---|---|---|
+> | **Agent (TofuAgent)** | The server should act on this machine (incl. subscription-traffic egress) | ~53 MB | Role window + control panel (bilingual zh/en); tray mirrors it; optional start-with-Windows |
+> | **Full desktop (Tofu)** | This machine also runs Tofu itself (server + client in one) | ~153 MB | Full server + browser UI + role window + tray |
+>
+> Local Control puts the right one first for your situation; the Releases page carries both
+> (`TofuAgent-Setup-*` / `Tofu-Setup-*`).
+>
+> Both components open a small **role window** at launch — the full app says "this computer runs your Tofu
+> server", the agent says "this computer is controlled by a Tofu server" — which doubles as the control
+> panel (permissions, connect line, start-with-Windows), so nothing important hides in the tray anymore.
+> Uncheck "Show this window at startup" to go straight to the tray; the tray keeps a **Control panel…**
+> item to reopen it.
 
 That's it. Each path handles the runtime, dependencies, the database,
 the browser engine, and starts the server — no flags, no follow-up
@@ -195,6 +211,22 @@ When typing is slower than talking — dictate straight into the message box.
 | **Omni chat models** | Gemini / LongCat and similar, via `audio_chat` |
 
 Optional env tuning: `TOFU_AUDIO_MAX_BYTES` (default 25 MB), `TOFU_AUDIO_MAX_DURATION_S` (default 600 s). There's no separate voice tab — availability is driven entirely by the configured model.
+
+---
+
+### 🎬 Video Upload & Analysis
+
+Drop a video into the input box (or pick one via 📎) and ask questions about it — “what does the presenter say about X?”, “summarize this clip”, “find the moment the graph appears”.
+
+**How it works:** the moment you attach a video, Tofu processes it in the background — it samples the video into a strip of timestamped frames (uniform coverage plus scene-cut detection) and, if the video has an audio track, transcribes it through your configured speech-to-text model (the same chain as voice input). When you hit send, the frames + transcript ride the message to any vision-capable model — no special video model required. The processing chip on the attachment shows progress; sending waits for it automatically.
+
+- **Formats** — mp4 / mov / webm / mkv / avi, up to **512 MB / 15 minutes**
+- **Model-aware frame budget** — the number of frames sent adapts to the selected model's vision capability, context window and per-request image limits (e.g. Claude's 100-images cap is accounted across the whole conversation)
+- **No transcription model configured?** The video still works — the model analyzes the frames alone
+- **Chat model has no vision?** If ANY vision-capable model is configured, Tofu narrates the frames into a text storyboard at upload time, so even a text-only model can answer questions about the video
+- Click the video card on a sent message to replay the original file
+
+Optional env tuning: `TOFU_VIDEO_MAX_BYTES` (default 512 MB), `TOFU_VIDEO_MAX_DURATION_S` (default 900 s), `TOFU_VIDEO_ANALYSIS=0` to disable the feature entirely. Frames are extracted with the built-in ffmpeg (auto-installed via `imageio-ffmpeg` if absent).
 
 ---
 
@@ -668,7 +700,7 @@ The `.env.example` file documents all supported variables. Key ones:
 | `LLM_BASE_URL` | API endpoint | `https://api.openai.com/v1` |
 | `LLM_MODEL` | Default model | `gpt-4o` |
 | `PORT` | Server port | `15000` |
-| `BIND_HOST` | Bind address | `127.0.0.1` (loopback) |
+| `BIND_HOST` | Bind address | `0.0.0.0` (all interfaces) |
 | `TOFU_AUTH_MODE` | Force auth mode and lock the UI: `open` / `private` / `multi-user` | *(file-driven)* |
 | `TOFU_AUTO_KEY` | Set to `0` to skip first-boot admin-key bootstrap | `1` |
 | `TUNNEL_TOKEN` | **DEPRECATED** back-compat shim — use the API-keys system instead | *(disabled)* |
@@ -781,7 +813,7 @@ Tofu has a tri-state auth model, persisted at `data/config/auth.json` and switch
 | `private` | Bearer / `x-api-key` / cookie / `?token=` required; HTML hint page on `/` | Single multi-device operator |
 | `multi-user` | Same gate as `private`, plus per-user wallets + signup pages | Paid relay station serving many users |
 
-**Default bind is `127.0.0.1`** — the API is not reachable from the LAN unless you pass `--host 0.0.0.0` or `BIND_HOST=0.0.0.0`. Combined with open-by-default mode, personal use just works locally without exposure.
+**Default bind is `0.0.0.0`** — the API is reachable from the LAN out of the box (the desktop-agent pairing flow depends on it). Pass `--host 127.0.0.1` or `BIND_HOST=127.0.0.1` to bind loopback only; the packaged desktop app does this for itself. With open-by-default auth mode that means LAN reachability without a token — the boot banner warns loudly in that combination, so switch to `private` mode (Settings → API Keys) on untrusted networks.
 
 **First-boot bootstrap** (private/multi-user only) — when the api_keys store is empty and `TUNNEL_TOKEN` is unset, Tofu mints one `tofu_admin_<hex>` key on startup, prints the plaintext + a one-shot `?token=<...>` URL to stderr, and writes the plaintext to `data/config/.first_run_token` (chmod 0600). Disable with `TOFU_AUTO_KEY=0`.
 

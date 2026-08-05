@@ -119,43 +119,54 @@
     }
   }
 
-  // ── Timer: wrap toggleTimerPanel for mobile ─────────────────────────
-  if (typeof window.toggleTimerPanel === "function") {
-    var _origToggleTimer = window.toggleTimerPanel;
-    window.toggleTimerPanel = function (e) {
-      if (!_isMobileView()) return _origToggleTimer.call(this, e);
+  // ── Timer/Optimizer: wrap the panel toggles for mobile ─────────────
+  /* The wrap is RE-RUNNABLE and identity-tracked (Epic-E sub-9): timer.js /
+   * optimizer.js are DEFERRED, so at our load window.toggleTimerPanel is the
+   * feature-loader STUB. When the feature bundle lands, the real function
+   * clobbers our wrapper — the 'tofu:feature-bundle-loaded' event (dispatched
+   * by feature-loader.js) re-runs this wrap to re-capture the real impl. */
+  var _capturedImpl = {};
+  var _installedWrap = {};
+
+  function _wrapOne(name, panelId, refreshName, setOpenName) {
+    var cur = window[name];
+    if (typeof cur !== "function") return;
+    if (_capturedImpl[name] === cur || _installedWrap[name] === cur) return;
+    _capturedImpl[name] = cur;
+    var wrapped = function (e) {
+      if (!_isMobileView()) return _capturedImpl[name].call(this, e);
       if (e && e.stopPropagation) e.stopPropagation();
-      var panel = document.getElementById("timerPanel");
+      var panel = document.getElementById(panelId);
       if (!panel) return;
       var isOpen = panel.classList.contains("visible") && panel.classList.contains("mobile-panel-portaled");
       if (isOpen) {
         _closeAllMobilePanels();
       } else {
-        _openPortaledPanel("timerPanel",
-          typeof _refreshTimerPanel === "function" ? _refreshTimerPanel : null);
-        if (typeof window._setTimerPanelOpen === "function") window._setTimerPanelOpen(true);
+        _openPortaledPanel(panelId,
+          typeof window[refreshName] === "function" ? window[refreshName] : null);
+        // @ts-expect-error -- string-keyed dynamic window wrap (typeof-guarded above)
+        if (typeof window[setOpenName] === "function") window[setOpenName](true);
+        // Pre-land: the panel module is still deferred — kick the load and
+        // fill the open sheet once it lands (never an empty dead-end).
+        if (typeof window[refreshName] !== "function" && typeof _loadFeatureBundle === "function") {
+          _loadFeatureBundle().then(function () {
+            // @ts-expect-error -- string-keyed dynamic window wrap (typeof-guarded)
+            if (typeof window[refreshName] === "function") window[refreshName]();
+          });
+        }
       }
     };
+    _installedWrap[name] = wrapped;
+    // @ts-expect-error -- intentional string-keyed window global install
+    window[name] = wrapped;
   }
 
-  // ── Optimizer: wrap toggleOptimizerPanel for mobile ─────────────────
-  if (typeof window.toggleOptimizerPanel === "function") {
-    var _origToggleOpt = window.toggleOptimizerPanel;
-    window.toggleOptimizerPanel = function (e) {
-      if (!_isMobileView()) return _origToggleOpt.call(this, e);
-      if (e && e.stopPropagation) e.stopPropagation();
-      var panel = document.getElementById("optimizerPanel");
-      if (!panel) return;
-      var isOpen = panel.classList.contains("visible") && panel.classList.contains("mobile-panel-portaled");
-      if (isOpen) {
-        _closeAllMobilePanels();
-      } else {
-        _openPortaledPanel("optimizerPanel",
-          typeof _refreshOptimizerPanel === "function" ? _refreshOptimizerPanel : null);
-        if (typeof window._setOptimizerPanelOpen === "function") window._setOptimizerPanelOpen(true);
-      }
-    };
+  function _wrapPanelToggles() {
+    _wrapOne("toggleTimerPanel", "timerPanel", "_refreshTimerPanel", "_setTimerPanelOpen");
+    _wrapOne("toggleOptimizerPanel", "optimizerPanel", "_refreshOptimizerPanel", "_setOptimizerPanelOpen");
   }
+  _wrapPanelToggles();
+  document.addEventListener("tofu:feature-bundle-loaded", _wrapPanelToggles);
 
   // ── Mobile entry points (called from the #mobileSheet items) ────────
   window.openMobileTimer = function () {

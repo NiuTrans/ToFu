@@ -23,6 +23,11 @@ from tests._jsdom import JS_DIR, ROOT, run_harness
 pytestmark = pytest.mark.unit
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# Epic-E sub-7 split (2026-08-01): the STATE seam (_restoreConvProject /
+# _isRemotePath / _applyRemoteProjectState) lives in project_state.js (core);
+# the PANEL renderer (_renderRemoteDevicesSection / browseDirectory) stays in
+# project.js (deferred). The jsdom harness evals BOTH, in bundle order.
+_PROJECT_STATE_JS = os.path.join(JS_DIR, 'project_state.js')
 _PROJECT_JS = os.path.join(JS_DIR, 'project.js')
 
 
@@ -42,12 +47,13 @@ def test_browse_modal_has_remote_section_container():
 
 
 def test_project_js_has_remote_seams():
-    src = _read(_PROJECT_JS)
-    assert 'function _isRemotePath(' in src, 'project.js 缺 _isRemotePath'
-    assert '_applyRemoteProjectState' in src, '缺 bar 合成态函数'
-    assert '_renderRemoteDevicesSection' in src, '缺远程分组渲染函数'
+    state_src = _read(_PROJECT_STATE_JS)
+    assert 'function _isRemotePath(' in state_src, 'project_state.js 缺 _isRemotePath'
+    assert '_applyRemoteProjectState' in state_src, '缺 bar 合成态函数'
+    panel_src = _read(_PROJECT_JS)
+    assert '_renderRemoteDevicesSection' in panel_src, '缺远程分组渲染函数'
     # browseDirectory 必须触发分组渲染(弹窗每次打开/换目录都新鲜)
-    assert '_renderRemoteDevicesSection()' in src
+    assert '_renderRemoteDevicesSection()' in panel_src
 
 
 def test_i18n_remote_group_key():
@@ -82,7 +88,7 @@ const { check, report } = setup({
     '<div id="projectBarStats"></div><div id="projectBarFolders"></div>' +
     '<div id="remoteDevicesSection"></div>' +
     '</body>',
-  targets: [process.argv[2]],
+  targets: [process.argv[2], process.argv[4]],  // project_state.js + project.js (bundle order)
   globals: {
     debugLog: () => {},
     saveConversations: () => {},
@@ -157,8 +163,9 @@ process.exit(0);
 
 def test_remote_picker_behaviour_jsdom():
     run_harness(
-        target_js=_PROJECT_JS,
+        target_js=_PROJECT_STATE_JS,
         body_js=_PICKER_BODY,
+        extra_targets=[_PROJECT_JS],
         min_pass=13,
         label='remote picker',
     )
@@ -169,7 +176,7 @@ def test_NEUTER_strip_shortcircuit_calls_setPaths():
     'remote:…' 直奔服务器(400/误清的真实 bug 形态)= 短路承重。"""
     import subprocess
     import tempfile
-    src = _read(_PROJECT_JS)
+    src = _read(_PROJECT_STATE_JS)
     anchor = 'if (_isRemotePath(savedPath)) {'
     assert anchor in src, 'neuter 锚点不在 —— 短路形态变了?'
     neutered = src.replace(anchor, 'if (false) {', 1)
@@ -180,7 +187,7 @@ def test_NEUTER_strip_shortcircuit_calls_setPaths():
     tmp = []
     try:
         with tempfile.NamedTemporaryFile(
-            'w', suffix='.js', dir=os.path.dirname(_PROJECT_JS),
+            'w', suffix='.js', dir=os.path.dirname(_PROJECT_STATE_JS),
             delete=False, encoding='utf-8') as fh:
             npath = fh.name
             fh.write(neutered)
@@ -192,7 +199,7 @@ def test_NEUTER_strip_shortcircuit_calls_setPaths():
             hf.write(body)
         tmp.append(harness)
         proc = subprocess.run(
-            ['node', harness, npath, ROOT],
+            ['node', harness, npath, ROOT, _PROJECT_JS],
             capture_output=True, text=True, timeout=60,
             env={**os.environ,
                  'JSDOM_HARNESS': os.path.join(

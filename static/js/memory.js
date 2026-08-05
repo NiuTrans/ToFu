@@ -265,9 +265,9 @@ function _updateMemoryStats(memories) {
     <div class="memory-stat"><span class="memory-stat-num">${global}</span><span class="memory-stat-label">${_esc(t('memory.statGlobal'))}</span></div>`;
 }
 
-function _esc(s) {
-  return escapeHtml(s);
-}
+// _esc was promoted to core/escape_html.js (Epic-E sub-9, 2026-08-01) —
+// it is the single top-level definition every module resolves through
+// window scope; memory.js defers, the alias must not.
 function _renderMemoryBody(md) {
   if (typeof marked !== "undefined") {
     try { return marked.parse(md); } catch (e) { console.warn("[Memory] marked.parse error:", e); }

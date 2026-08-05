@@ -189,50 +189,16 @@ def invalidate_meta_cache(user_id: int = DEFAULT_USER_ID):
 # the DB a hard dependency of the one signal that most needs to survive
 # degraded conditions. This scheme needs no storage at all.
 
-#: Wall-clock anchor for this process, sampled ONCE at import.
-#:
-#: ``time.time_ns() - time.monotonic_ns()`` is this process's estimate of the
-#: wall-clock instant its monotonic clock read zero. Adding a later
-#: ``monotonic_ns()`` to it therefore yields "wall time now" WITHOUT re-reading
-#: the wall clock — which is what makes the result simultaneously:
-#:
-#:   * strictly increasing within the process (only the monotonic delta moves);
-#:   * immune to a wall-clock STEP during the process (NTP slew/rewind cannot
-#:     move an anchor that is never re-read) — the property raw monotonic_ns
-#:     was chosen for, and which is preserved here;
-#:   * comparable across restarts and across replicas (every process anchors
-#:     to the same wall-clock timeline, to within NTP skew).
-#:
-#: Module-level and rebindable by name so tests can simulate a restart / a
-#: second replica by re-anchoring; production never writes it.
-_BOOT_EPOCH_NS = time.time_ns() - time.monotonic_ns()
-
-
-def _replica_id() -> str:
-    """Resolve THIS replica's stable id — same rule PushHub uses."""
-    rid = os.environ.get('TOFU_REPLICA_ID')
-    if rid:
-        return rid
-    return str(os.getpid())
-
-
-def _running_task_ids_rev() -> list:
-    """Return a fresh ``[boot_anchored_ns, replica_id_str]`` tuple.
-
-    THE SINGLE MINT for every ``runningTaskIdsRev`` / frame-level ``rev`` on
-    the wire (notify frames, the push connect snapshot, and the poll
-    projection all call this). Keeping one mint is what makes the domain
-    guarantee checkable in one place — see
-    ``tests/test_conv_state_rev_clock_domain.py``, which asserts the returned
-    ns is within seconds of ``time.time_ns()`` so a future edit cannot
-    silently reintroduce a process-relative clock.
-
-    Each call yields a strictly-later ns than the previous call in the same
-    process (guaranteed by ``time.monotonic_ns()``; measured 0 non-increasing
-    pairs in 200k consecutive mints at 1 ns clock resolution). Two callers on
-    different replicas break ties by replica_id lex compare.
-    """
-    return [_BOOT_EPOCH_NS + time.monotonic_ns(), _replica_id()]
+# The mint itself lives in lib.agent_core.rev_clock (2026-08-05) — it is a
+# pure clock utility with no persistence dependency, and CORE modules
+# (lib.agent_core.push) must not import lib.conversations.* (core/persistence
+# boundary ratchet). Re-exported here so existing callers and the clock-domain
+# test keep working unchanged.
+from lib.agent_core.rev_clock import (  # noqa: F401  (re-export)
+    _BOOT_EPOCH_NS,
+    _replica_id,
+    _running_task_ids_rev,
+)
 
 
 def notify_conv_changed(conv_id, *, rev=None, deleted: bool = False,

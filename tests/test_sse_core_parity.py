@@ -1,3 +1,5 @@
+# Incident anchor: born in commit e794681c — Snapshot chatui for MAPS in-container runtime: any-language→English a...
+# (funeral audit pt_c565a36b3e8f42e6, docs/RATCHET_AUDIT.md)
 """Parity + characterization tests for the unified SSE streaming core.
 
 Background

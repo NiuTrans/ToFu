@@ -1,3 +1,5 @@
+# Incident anchor: born in commit 03421771 — refactor(orchestrator): pt_03f4cdf1 slice 21 — extract consecutive-to...
+# (funeral audit pt_c565a36b3e8f42e6, docs/RATCHET_AUDIT.md)
 """Slice 21 wire-parity: _tool_timeout_breaker.py extraction from _run.py."""
 
 import inspect

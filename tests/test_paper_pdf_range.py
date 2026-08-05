@@ -13,9 +13,10 @@ Fix: ``conditional=True`` → Quart calls ``make_conditional(accept_ranges=True,
 complete_length=...)`` → a proper ``206`` with ``Content-Range`` for ranged
 requests, while a plain GET still returns ``200`` + the full file.
 
-BITING NEGATIVE CONTROL: monkeypatch the module's ``send_file`` binding to drop
-``conditional`` → the Range request falls back to ``200`` + full length,
-reproducing the pre-fix behaviour and proving ``conditional=True`` is
+BITING NEGATIVE CONTROL: monkeypatch the seam (``lib.file_serving.
+send_file_conditional``, the one call path since 2026-08-03) to serve
+WITHOUT conditional → the Range request falls back to ``200`` + full length,
+reproducing the pre-fix behaviour and proving the conditional path is
 load-bearing.
 
 Run standalone: ``python tests/test_paper_pdf_range.py``
@@ -133,23 +134,26 @@ def test_initial_200_advertises_accept_ranges():
 
 
 def test_neuter_without_conditional_falls_back_to_200():
-    """NC: strip ``conditional`` from the module's send_file → the Range request
-    degrades to 200 + full length (the reproduced pre-fix bug)."""
+    """NC: bypass the seam's conditional path → the Range request degrades
+    to 200 + full length (the reproduced pre-fix bug)."""
     import server  # noqa: F401
     import routes.paper as rp
+    import lib.file_serving as fs
     tmp = tempfile.mkdtemp(prefix='tofu-pdfrange-nc-')
     fn = 'arxiv_range_nc.pdf'
     _seed(tmp, fn)
     app, _rp = _build_app(tmp)
     total = len(_PDF_BYTES)
 
-    orig_send_file = rp.send_file
+    orig_seam = fs.send_file_conditional
 
     def _no_conditional(filepath, **kw):
-        kw.pop('conditional', None)  # simulate the pre-fix call
-        return orig_send_file(filepath, **kw)
+        # Simulate the pre-fix call: no conditional machinery at all.
+        import quart
+        kw['conditional'] = False
+        return quart.send_file(filepath, **kw)
 
-    rp.send_file = _no_conditional
+    fs.send_file_conditional = _no_conditional
     try:
         async def _t():
             c = app.test_client()
@@ -160,7 +164,7 @@ def test_neuter_without_conditional_falls_back_to_200():
                 'NC should return the full file length'
         asyncio.run(_t())
     finally:
-        rp.send_file = orig_send_file
+        fs.send_file_conditional = orig_seam
         import shutil
         shutil.rmtree(tmp, ignore_errors=True)
     _ok('NC: without conditional the Range request degrades to 200 (fix bites)')

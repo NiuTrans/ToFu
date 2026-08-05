@@ -280,10 +280,16 @@ def _handle_code_exec(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, p
     progress_cb = _make_run_command_progress_cb(task, rn, round_entry, cmd)
     spawn_cb = _make_run_command_spawn_cb(task, rn, round_entry)
     try:
+        # ★ task= (pt_0bde0fd8): without it the runner got task=None — the
+        #   subprocess was NEVER registered (_subprocess_pid), so a silent
+        #   >30min code_exec was still whole-task-reaped (the reaper could
+        #   not interrupt it) and even Stop could not kill the process
+        #   (the aborted poll was dead code under task=None).
         tool_content = execute_standalone_command(fn_name, fn_args,
                                                   stdin_callback=cb,
                                                   on_chunk=progress_cb,
-                                                  on_spawn=spawn_cb)
+                                                  on_spawn=spawn_cb,
+                                                  task=task)
     finally:
         # Flush any buffered tail that didn't reach the coalescing threshold.
         try:
@@ -294,6 +300,10 @@ def _handle_code_exec(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, p
     m_exit = re.search(r'\[exit code: (-?\d+)\]\s*$', tool_content)
     exit_code = m_exit.group(1) if m_exit else '?'
     timed_out = '[Command timed out]' in tool_content
+    # ★ Per-command interrupt (user button / stall watchdog) — same contract
+    #   as lib/tools/meta.py::_build_run_command: an amber neutral stop, the
+    #   task CONTINUED, never the red `exit -1` error frame.
+    interrupted = '[Command interrupted by' in tool_content
     # No marker + not a timeout = the command was REFUSED/BLOCKED before it
     # ran (read-only root, dangerous pattern, no project path, pre-hook block,
     # abort, or a start error). Classify it as not-run with the full message
@@ -307,6 +317,7 @@ def _handle_code_exec(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, p
         output_text = output_lines[1] if len(output_lines) > 1 else ''
     output_text = re.sub(r'\n?\[exit code: -?\d+\]\s*$', '', output_text).strip()
     output_text = re.sub(r'\n?\[Command timed out\].*$', '', output_text).strip()
+    output_text = re.sub(r'\n?\[Command interrupted by[^\n]*\].*$', '', output_text).strip()
     if not_run:
         from lib.tools.meta import _classify_not_run_badge
         reason = (tool_content or '').strip()
@@ -323,5 +334,8 @@ def _handle_code_exec(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, p
             'toolName': 'code_exec', 'command': cmd, 'output': output_text,
             'exitCode': 'timeout' if timed_out else exit_code, 'timedOut': timed_out,
         }
+        if interrupted:
+            meta['interrupted'] = True
+            meta['badge'] = 'interrupted'
     _finalize_tool_round(task, rn, round_entry, [meta])
     return tc_id, tool_content, False

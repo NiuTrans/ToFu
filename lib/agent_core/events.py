@@ -121,6 +121,7 @@ class EventType:
     DONE = 'done'
     ERROR = 'error'
     RETRY_RESET = 'retry_reset'
+    MODEL_FALLBACK = 'model_fallback' 
     # ── content ──
     DELTA = 'delta'
     DELTA_RESET = 'delta_reset'
@@ -233,7 +234,18 @@ _SPECS: tuple[EventSpec, ...] = (
                                    'absent',
                       'detailArgs': '(optional) interpolation args for `detailKey` '
                                     '(e.g. {"round": 3, "model": "claude-4"})',
-                      'roundNum': 'round number'}),
+                      'roundNum': 'round number',
+                      'tools': '(optional, tool_exec phase) raw tool-name list '
+                               'of this dispatch — the i18n client composes '
+                               'its localized label from these; `detail` is '
+                               'the English fallback',
+                      'toolContext': '(optional, llm_thinking round-open phase) '
+                                     'pre-joined English label string of the '
+                                     'PREVIOUS round\'s tools (headless fallback)',
+                      'toolContextTools': '(optional) the structured raw tool '
+                                          'names behind `toolContext` — compose '
+                                          'the suffix in the UI language from '
+                                          'THESE when present'}),
     EventSpec(EventType.ROUND_START, _C.LIFECYCLE,
               'Explicit start boundary of an LLM round (the orchestrator loop '
               'index). Emitted at the TOP of every round the model actually '
@@ -281,6 +293,19 @@ _SPECS: tuple[EventSpec, ...] = (
               fields={'attempt': 'whole-turn retry number (1-based)',
                       'max': 'retry budget',
                       'kind': 'error kind that triggered the re-run'}),
+    EventSpec(EventType.MODEL_FALLBACK, _C.LIFECYCLE,
+              'The primary model failed and the turn is being re-streamed on '
+              'the configured fallback model. Emitted EARLY, at the decision '
+              'moment — BEFORE the fallback stream starts — so the client can '
+              'paint an in-bubble fallback banner for the whole (potentially '
+              'minutes-long) fallback generation and a cold reload can '
+              'repaint it from the task stamps. Non-terminal; the terminal '
+              '`done` still follows.',
+              fields={'fallbackModel': 'the model the turn fell back TO',
+                      'fallbackFrom': 'the original model that failed',
+                      'fallbackKind': 'error kind that triggered the fallback',
+                      'fallbackReason': 'human-readable reason (kind: detail, '
+                                        'capped at 300 chars)'}),
     # ───────────────────────── content ─────────────────────────
     EventSpec(EventType.DELTA, _C.CONTENT,
               'Incremental assistant output — append to the live bubble.',
@@ -294,8 +319,14 @@ _SPECS: tuple[EventSpec, ...] = (
               'content / thinking so this narration does not get concatenated '
               'in front of the terminal round\'s real answer. Unlike '
               '`retry_reset`, it MUST NOT touch tool rounds — the tool calls '
-              'from this turn are legitimate and keep rendering. Non-terminal.',
-              fields={'roundNum': 'the tool-call round number whose prose is dropped'}),
+              'from this turn are legitimate and keep rendering. Non-terminal. '
+              'With `discard: true` (the canned-greeting upstream-artifact '
+              'retry — the ONLY retry bucket whose discarded round HAS '
+              'content) the round issued NO tool calls, so there is no batch '
+              'to stamp the prose onto: the client clears UNCONDITIONALLY '
+              '(still keeping tool rounds).',
+              fields={'roundNum': 'the tool-call round number whose prose is dropped',
+                      'discard': 'optional; true = unconditional clear, no prose-capture'}),
     # ───────────────────────── tool ─────────────────────────
     EventSpec(EventType.TOOL_START, _C.TOOL,
               'A tool call began executing.',

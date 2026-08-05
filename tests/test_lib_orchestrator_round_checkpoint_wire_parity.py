@@ -1,3 +1,5 @@
+# Incident anchor: born in commit ca59f5f7 — refactor(orchestrator): pt_03f4cdf1 slice 20 — extract crash-recovery...
+# (funeral audit pt_c565a36b3e8f42e6, docs/RATCHET_AUDIT.md)
 """Slice 20 wire-parity: _round_checkpoint.py extraction from _run.py."""
 
 import inspect

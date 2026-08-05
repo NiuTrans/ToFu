@@ -1,29 +1,32 @@
 #!/usr/bin/env python3
-"""tests/test_shared_contention_backoff.py — unified family backoff for
-shared-project 429 contention (epic pt_1a72b708098d446f).
+"""tests/test_shared_contention_backoff.py — shared-project 429 contention:
+IMMEDIATE RETRY, no family backoff (owner directive 2026-08-03).
 
-The incident (2026-07-28): every sankuai key terminates at the SAME
-upstream Moonshot project, so the 0.5s-per-slot "rotate to the next key"
-spin was futile against a project-level TPM limit — one task logged 429
-retry cycle #19. The fix: a contention 429 parks the WHOLE (provider,
-model) family for a jittered, escalating window (2s → 60s cap) while
-other models/providers take over, and the HUD wait label tells the truth
-("shared project limit", not fake 限流排队).
+History: 2026-07-28 (pt_1a72b708098d446f) introduced a jittered, escalating
+family parking (2s → doubling → 60s cap) for contention 429s, on the theory
+that rotating our own keys is futile when the whole upstream project is
+saturated by other tenants. 2026-08-03 the owner reversed the policy: a 429
+gets NO backoff — the loop retries immediately and grabs the rate-limit
+window the instant it resets (the bounded saturation escalation default was
+retired the same day). ``note_shared_contention`` is now PURE TELEMETRY:
+a per-(provider, model) streak counter plus a throttled log line.
 
 Pinned here:
 
-  1. note_shared_contention cools EVERY slot of the (provider, model)
-     family with reason 'contention' — and no other model's slots.
-  2. The window escalates with consecutive strikes (2s → 4s → …),
-     never exceeds the 60s cap, and resets after a quiet window+grace.
-  3. Fallback works: with the kimi family parked, the picker lands on
-     another model's slot (non-strict) instead of spinning on cooled keys.
-  4. cooldown_wait_label: contention > rate-limit > backoff; contention
-     rides status 0 so the reasonKey survives retry_phase_fields.
-  5. The new token is registered in RETRY_REASON_KEYS and has i18n
-     strings (the missing-translation tripwire must not fire in prod).
-  6. Contention does NOT decay rpm_limit (external saturation teaches
-     the scorer nothing about this key's capacity) — plain 429s still do.
+  1. note_shared_contention NEVER cools any slot and always returns 0.0 —
+     repeated strikes can never resurrect the retired 2s→60s escalation
+     (NEUTER: re-adding parking flips these red).
+  2. The streak counter accumulates within the grace window and resets
+     after a quiet window (30s).
+  3. Log throttle: strikes 1-3 + every 100th at INFO, the rest DEBUG —
+     a sustained storm costs ~1 line/30s, not ~3 lines/s.
+  4. End-to-end through dispatch_stream: a contention 429 leaves the
+     family unparked (the only cooldown is the slot's own 0.5s
+     'rate_limit' steering) and the loop retries immediately.
+  5. The per-cycle 429 loop log is DEBUG after the first 3 cycles
+     (log-bloat guard for the immediate-retry era).
+  6. Wait-label precedence + rpm-decay contracts UNCHANGED (the label
+     function and the slot accounting are isolation-tested as before).
 
 Run:  pytest tests/test_shared_contention_backoff.py -m unit
 """
@@ -60,75 +63,77 @@ def _dispatcher(slots):
 
 
 @pytest.mark.unit
-class TestFamilyBackoff:
+class TestNoFamilyBackoff:
 
-    def test_cools_whole_family_not_other_models(self):
+    def test_no_parking_and_zero_window(self):
         s1, s2, other = (_slot('kimi-k3', 'k0'), _slot('kimi-k3', 'k1'),
                          _slot('qwen3.5-plus', 'k2'))
         disp = _dispatcher([s1, s2, other])
         window = disp.note_shared_contention(s1)
-        assert 1.5 <= window <= 2.5, f'first strike ≈ 2s (jittered), got {window}'
-        for s in (s1, s2):
-            assert s.cooldown_until > time.time() + 1.0
-            assert s.cooldown_reason == 'contention'
-        assert other.cooldown_until == 0.0, (
-            'a contention window must never park OTHER models — that is '
-            'the fallback path working')
+        assert window == 0.0, 'owner directive 2026-08-03: NO backoff'
+        for s in (s1, s2, other):
+            assert s.cooldown_until == 0.0, (
+                'a contention note must never park ANY slot — immediate '
+                'retry is the policy')
+            assert s.cooldown_reason == ''
 
-    def test_window_escalates_and_caps(self, monkeypatch):
-        # Pin jitter to 1.0 so the escalation band is deterministic —
-        # comparing two jittered draws is a coin flip by construction.
-        monkeypatch.setattr(
-            'lib.llm_dispatch.dispatcher.random.uniform', lambda a, b: 1.0)
+    def test_repeated_strikes_never_escalate(self):
+        """NEUTER pin: the retired 2s→60s doubling cannot sneak back —
+        25 consecutive strikes must park nothing, ever."""
         s = _slot('kimi-k3', 'k0')
         disp = _dispatcher([s])
-        w1 = disp.note_shared_contention(s)
-        w2 = disp.note_shared_contention(s)
-        assert w1 == 2.0
-        assert w2 == 4.0, 'consecutive strikes double the window'
-        for _ in range(20):
-            w = disp.note_shared_contention(s)
-        assert w == 60.0, 'the window NEVER exceeds the 60s cap'
-
-    def test_window_is_jittered_within_band(self):
-        s = _slot('kimi-k3', 'k0')
-        disp = _dispatcher([s])
-        seen = set()
-        for _ in range(30):
-            disp._contention_strikes.clear()   # force strike 1 every draw
-            seen.add(round(disp.note_shared_contention(s), 3))
-        assert all(1.5 <= w <= 2.5 for w in seen), (
-            'first-strike window stays inside the ±25% jitter band')
-        assert len(seen) > 1, 'the window is actually jittered (thundering-herd guard)'
+        for _ in range(25):
+            assert disp.note_shared_contention(s) == 0.0
+            assert s.cooldown_until == 0.0
+            assert s.cooldown_reason == ''
+        assert disp._contention_strikes[(PROV, 'kimi-k3')][0] == 25
 
     def test_strikes_reset_after_quiet_window(self):
         s = _slot('kimi-k3', 'k0')
         disp = _dispatcher([s])
-        disp.note_shared_contention(s)
-        disp.note_shared_contention(s)
-        # Simulate a healed project: window + grace elapsed.
+        for _ in range(3):
+            disp.note_shared_contention(s)
         key = (PROV, 'kimi-k3')
-        strikes, until = disp._contention_strikes[key]
-        disp._contention_strikes[key] = (strikes, time.time() - 31.0)
-        w = disp.note_shared_contention(s)
-        assert w <= 2.5, 'a quiet window+grace resets escalation to strike 1'
+        assert disp._contention_strikes[key][0] == 3
+        # Simulate a healed project: quiet window + grace elapsed.
+        disp._contention_strikes[key] = (3, time.time() - 31.0)
+        disp.note_shared_contention(s)
         assert disp._contention_strikes[key][0] == 1
 
-    def test_cooling_cause_summary_reports_contention(self):
+    def test_log_is_throttled(self, monkeypatch):
+        """First 3 strikes + every 100th at INFO; the other 96 DEBUG."""
+        s = _slot('kimi-k3', 'k0')
+        disp = _dispatcher([s])
+        infos, debugs = [], []
+        monkeypatch.setattr('lib.llm_dispatch.dispatcher.logger.info',
+                            lambda *a, **k: infos.append(a))
+        monkeypatch.setattr('lib.llm_dispatch.dispatcher.logger.debug',
+                            lambda *a, **k: debugs.append(a))
+        for _ in range(100):
+            disp.note_shared_contention(s)
+        assert len(infos) == 4, (
+            f'strikes 1-3 + strike 100 at INFO, got {len(infos)}')
+        assert len(debugs) == 96
+
+    def test_cooling_summary_has_no_contention_cause(self):
+        """Nothing parks → the wait-label summary never sees 'contention'."""
         s = _slot('kimi-k3', 'k0')
         disp = _dispatcher([s])
         disp.note_shared_contention(s)
-        assert 'contention' in disp.cooling_cause_summary('text')
+        assert 'contention' not in disp.cooling_cause_summary('text')
 
-    def test_fallback_to_other_model(self):
+    def test_picker_not_steered_away_from_family(self):
+        """Immediate retry: the picker keeps landing on the contended
+        family — no parking means no fallback steering."""
         s1, other = _slot('kimi-k3', 'k0'), _slot('qwen3.5-plus', 'k1')
+        other.latency_ema = 99999.0  # kimi wins on score deterministically
         disp = _dispatcher([s1, other])
         disp.note_shared_contention(s1)
         picked = disp._pick('text', None, None, None)
         assert picked is not None
-        assert picked.model == 'qwen3.5-plus', (
-            'with the contended family parked, the picker must land on a '
-            'healthy OTHER model — not spin on cooled keys')
+        assert picked.model == 'kimi-k3', (
+            'no family parking → the picker must NOT be steered away from '
+            'the contended model')
 
 
 @pytest.mark.unit
@@ -202,10 +207,11 @@ class TestRpmLimitNotDecayed:
 @pytest.mark.unit
 class TestDispatchIntegration:
 
-    def test_contention_429_parks_family_via_loop(self, monkeypatch):
-        """End-to-end through dispatch_stream: one contention 429 → the
-        whole (provider, model) family is parked, next pick gets the
-        OTHER model."""
+    def test_contention_429_retries_immediately_without_parking(
+            self, monkeypatch):
+        """End-to-end through dispatch_stream: one contention 429 → NO
+        family parking (only the slot's own 0.5s 'rate_limit' steering) →
+        the loop retries immediately and succeeds."""
         from lib.llm_dispatch import api
         from lib.llm_errors import RateLimitError
         from tests.test_vendor_transient_dispatch import _FakeDispatcher
@@ -242,9 +248,54 @@ class TestDispatchIntegration:
             [{'role': 'user', 'content': 'hi'}], log_prefix='[t]')
 
         assert msg == 'ok'
-        assert s1.cooldown_reason == 'contention'
-        assert s1.cooldown_until > time.time(), (
-            'the family backoff must replace the 0.5s spin cycle')
+        assert s1.cooldown_reason != 'contention', (
+            'immediate-retry policy: contention must NOT park the family')
+        assert s1.cooldown_until <= time.time() + 0.6, (
+            'the only cooldown left is the 0.5s per-slot steering from '
+            'record_error — never a family window')
+
+    def test_per_cycle_429_log_throttled_after_first_three(
+            self, monkeypatch):
+        """Log-bloat guard for the immediate-retry era: cycles 1-3 log at
+        INFO, cycles 4+ at DEBUG (every 100th still surfaces at INFO)."""
+        from lib.llm_dispatch import api
+        from lib.llm_errors import RateLimitError
+        from tests.test_429_saturation_escalation import (
+            _FakeClock, _FakeDispatcher, _FakeSlot)
+
+        slot = _FakeSlot()
+        clock = _FakeClock()
+        disp = _FakeDispatcher(slot)
+        monkeypatch.setattr(api, 'get_dispatcher', lambda: disp)
+        monkeypatch.setattr(api, 'time', clock)
+        monkeypatch.setenv('TOFU_429_SATURATION_SECS', '0')
+
+        calls = {'n': 0}
+
+        def _chat(*a, **kw):
+            calls['n'] += 1
+            if calls['n'] <= 6:
+                raise RateLimitError('slow down', status_code=429)
+            return ('ok-text', {'completion_tokens': 2})
+
+        monkeypatch.setattr('lib.llm.chat', _chat)
+        infos, debugs = [], []
+        monkeypatch.setattr(api.logger, 'info',
+                            lambda *a, **k: infos.append(a))
+        monkeypatch.setattr(api.logger, 'debug',
+                            lambda *a, **k: debugs.append(a))
+
+        content, usage = api.dispatch_chat(
+            [{'role': 'user', 'content': 'hi'}],
+            prefer_model='m1', strict_model=True, log_prefix='[T]')
+
+        assert content == 'ok-text'
+        rate_infos = [a for a in infos if '429 rate-limited on' in str(a[0])]
+        rate_debugs = [a for a in debugs if '429 rate-limited on' in str(a[0])]
+        assert len(rate_infos) == 3, (
+            f'cycles 1-3 at INFO, got {len(rate_infos)}')
+        assert len(rate_debugs) == 3, (
+            f'cycles 4-6 at DEBUG, got {len(rate_debugs)}')
 
 
 if __name__ == '__main__':

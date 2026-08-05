@@ -187,6 +187,63 @@ def test_unknown_task_honest_empty():
     assert fold['requestCount'] == 0
 
 
+def test_streaming_noise_never_hides_recent_rounds():
+    """2026-08-04 incident: every SSE delta is persisted as its own
+    task_events row (exact-cursor cold replay), so a long task's log is
+    dominated by streaming noise — measured on a real 51,754-row task, the
+    inspector's first-10000-rows read cut EVERY snapshot past round 6 and
+    rounds 7+ all reported 'mirror expired'. The read must filter to the
+    structural slice it renders (snapshots / round_usage / endpoint_*);
+    with the filter, the same cap spans thousands of rounds.
+
+    Seeds 10,300 noise rows BEFORE the structural rows of a late round
+    (their event_ids sit beyond the first-10000 window): unfiltered, the
+    round vanishes; filtered, both axes resolve."""
+    from lib.database import DOMAIN_CHAT, get_thread_db
+    from lib.tasks_pkg.event_log import append_persistent_event
+    from lib.tasks_pkg.request_inspector import (
+        _read_events, fold_request_log, get_request_payload)
+    tid = f'ri-n-{uuid.uuid4().hex[:8]}'
+    db = get_thread_db(DOMAIN_CHAT)
+    noise = [(tid, i, 1, 'delta', '{}') for i in range(10300)]
+    db.executemany(
+        'INSERT INTO task_events (task_id, event_id, ts_ms, type, payload) '
+        'VALUES (?, ?, ?, ?, ?)', noise)
+    db.commit()
+    base = 10300
+    append_persistent_event(
+        tid, base,
+        _snap('request', 88, n_msgs=3) | {'type': 'messages_snapshot'})
+    append_persistent_event(
+        tid, base + 1,
+        _snap('state', 88, label='Round 88 工具结果后 · 5条', n_msgs=5,
+              tools=0) | {'type': 'messages_snapshot'})
+    append_persistent_event(
+        tid, base + 2,
+        _usage_event(88, 'R88')[1] | {'type': 'round_usage'})
+    try:
+        rows = _read_events(tid)
+        assert rows, 'no rows returned'
+        leaked = sorted({r['type'] for r in rows} -
+                        {'messages_snapshot', 'round_usage', 'round_start',
+                         'round_end'} - {r['type'] for r in rows
+                                         if r['type'].startswith('endpoint_')})
+        assert not leaked, (
+            f'streaming noise leaked into the inspector read: {leaked}')
+        fold = fold_request_log(tid)
+        assert fold['requestCount'] == 1
+        assert fold['requests'][0]['roundNum'] == 88
+        assert [a['tag'] for a in fold['requests'][0]['attempts']] == ['R88']
+        assert len(fold['states']) == 1
+        assert fold['states'][0]['roundNum'] == 88
+        p_req = get_request_payload(tid, 88)
+        assert p_req is not None and len(p_req['messages']) == 3
+        p_state = get_request_payload(tid, 88, kind='state')
+        assert p_state is not None and len(p_state['messages']) == 5
+    finally:
+        _cleanup(tid)
+
+
 def test_payload_on_demand_last_wins(task_a):
     from lib.tasks_pkg.request_inspector import get_request_payload
     p2 = get_request_payload(task_a, 2)
@@ -469,6 +526,37 @@ def test_neuter_state_split_is_load_bearing(task_a):
     assert len(fold['states']) == 1 and fold['requestCount'] == 2
     with open(_TARGET, encoding='utf-8') as f:
         assert 'NC-RI-SPLIT' not in f.read(), (
+            'shipped request_inspector.py must be byte-identical')
+
+
+def test_neuter_structural_filter_is_load_bearing():
+    """NC: make the WHERE clause always-true (keep the parameter list valid)
+    → the seeded streaming-noise rows leak back into the inspector read and
+    the no-leak assertion flips red, proving the structural filter — not
+    the fold's type routing — is what keeps delta noise out."""
+    from tests._nc_harness import neutered_source
+    fixed = "f'WHERE task_id=? AND (type IN ({_struct_ph}) '"
+    broken = "f'WHERE task_id=? AND (type=type OR type IN ({_struct_ph}) '"
+    with open(_TARGET, encoding='utf-8') as f:
+        src = f.read()
+    assert fixed in src, 'NC anchor drifted — update the neuter'
+    tid = f'ri-nc-{uuid.uuid4().hex[:8]}'
+    _seed(tid, [
+        ('delta', {'text': 'chunk'}),
+        ('messages_snapshot', _snap('request', 1, n_msgs=2)),
+    ])
+    try:
+        with neutered_source(_TARGET, fixed, broken) as mod:
+            rows = mod._read_events(tid)
+            assert any(r['type'] == 'delta' for r in rows), (
+                'expected delta noise to leak into the read under NC')
+        # Post-restore: the canonical module filters again.
+        from lib.tasks_pkg.request_inspector import _read_events
+        assert all(r['type'] != 'delta' for r in _read_events(tid))
+    finally:
+        _cleanup(tid)
+    with open(_TARGET, encoding='utf-8') as f:
+        assert 'type=type' not in f.read(), (
             'shipped request_inspector.py must be byte-identical')
 
 

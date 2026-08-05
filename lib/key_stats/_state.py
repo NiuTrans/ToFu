@@ -225,7 +225,8 @@ def _fold_namespaces_unlocked() -> bool:
             if dst_entry is None:
                 _cache['stats'][dst_pk] = src_entry
             else:
-                for field in ('success', 'failure', 'rate_limited'):
+                for field in ('success', 'failure', 'rate_limited',
+                              'gateway_errors'):
                     dst_entry[field] = (int(dst_entry.get(field) or 0)
                                         + int(src_entry.get(field) or 0))
                 dst_entry['consecutive_429'] = max(
@@ -359,6 +360,12 @@ def _new_entry() -> dict:
         'failure': 0,
         'rate_limited': 0,       # count of 429s today (informational)
         'consecutive_429': 0,    # current streak of 429s with no success
+        # Gateway-class failures (502/503/504, upstream-vendor transients,
+        # mid-stream SSE errors): counted on their OWN counter so a gateway
+        # outage never enters the success-rate denominator nor the
+        # auto-disable gate (2026-08-03 sankuai 502 storm auto-disabled 2 of
+        # 3 healthy keys for the day).
+        'gateway_errors': 0,
         'last_error': '',
         'exhausted': False,
         # Per-model billing-stops: {model: reason}. A quota error carries a

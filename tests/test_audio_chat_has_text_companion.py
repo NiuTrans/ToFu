@@ -42,6 +42,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 
+from lib.mcp.registry import is_opensource_build
+
 pytestmark = [pytest.mark.auth_mode('open'), pytest.mark.unit]
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -78,11 +80,15 @@ def test_shipped_provider_templates_have_audio_chat_with_text():
     )
     # Sanity: the audit isn't vacuously green — some audio_chat models
     # MUST exist in shipped templates. (2026-07 baseline: gemini-3-flash-preview
-    # + LongCat-Flash-Omni-2603 in meituan.json.)
-    assert scanned > 0, (
-        'No audio_chat models found in static/provider_templates/ — did '
-        'the audit path change? If audio_chat was removed everywhere this '
-        'test can be deleted; otherwise it means the scan is broken.')
+    # + LongCat-Flash-Omni-2603 in meituan.json.) Scoped to the internal
+    # tree: opensource exports do NOT ship the internal provider template,
+    # so their shipped set legitimately contains zero audio_chat models —
+    # the violations audit above still covers every template that IS there.
+    if not is_opensource_build():
+        assert scanned > 0, (
+            'No audio_chat models found in static/provider_templates/ — did '
+            'the audit path change? If audio_chat was removed everywhere this '
+            'test can be deleted; otherwise it means the scan is broken.')
 
 
 def test_default_slot_configs_have_audio_chat_with_text():

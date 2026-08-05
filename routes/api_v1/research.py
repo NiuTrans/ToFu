@@ -96,7 +96,8 @@ def research_list():
     """Serve the index of researched directions."""
     try:
         limit = max(1, min(int(request.args.get('limit') or 50), 200))
-    except (ValueError, TypeError):
+    except (ValueError, TypeError) as e:
+        logger.debug('[Research] bad limit arg, using default 50: %s', e)
         limit = 50
     try:
         from lib.research.persistence import list_research_directions

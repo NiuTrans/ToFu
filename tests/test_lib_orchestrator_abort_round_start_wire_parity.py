@@ -1,3 +1,5 @@
+# Incident anchor: born in commit d219d8ea — refactor(orchestrator): pt_03f4cdf1 slice 23 — extract abort-at-round...
+# (funeral audit pt_c565a36b3e8f42e6, docs/RATCHET_AUDIT.md)
 """Slice 23 wire-parity: _abort_round_start.py extraction from _run.py."""
 
 import inspect

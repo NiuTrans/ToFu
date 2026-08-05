@@ -85,9 +85,10 @@ _ALLOWED_VARIABLE_FETCHES = {
     # fetch() calls — so the entry was removed, tightening the ratchet.)
 }
 
-# Bundle output is generated; never count it.
+# Bundle output is generated; never count it. feature-*.js is the deferred
+# bundle family (same generator, same rule).
 def _is_generated(name: str) -> bool:
-    return name.startswith('bundle-') and name.endswith('.js')
+    return name.startswith(('bundle-', 'feature-')) and name.endswith('.js')
 
 
 # ── Per-file ratchet baseline ───────────────────────────────────────

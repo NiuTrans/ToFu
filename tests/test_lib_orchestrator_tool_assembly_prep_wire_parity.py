@@ -1,3 +1,5 @@
+# Incident anchor: born in commit 53f33659 — refactor(orchestrator): pt_03f4cdf1 slice 29 — extract Section 2 tool...
+# (funeral audit pt_c565a36b3e8f42e6, docs/RATCHET_AUDIT.md)
 """Wire-parity guards for pt_03f4cdf1 slice 29 — extract Section 2
 (tool assembly + pending-swarm force-enable + tool-schema stash) from
 _run.py's pre-stream prep into

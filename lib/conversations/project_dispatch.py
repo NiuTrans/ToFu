@@ -143,6 +143,75 @@ def _drain_idle_target(target_conv_id: str) -> str | None:
 # turn is recognisable as engine-injected (NOT a human turn) downstream.
 BRAIN_DISPATCH_MARKER = '_brainDispatch'
 
+# Which dispatch SEAM fired the kickoff — stamped by each event seam on the
+# epic dict it hands to dispatch_epic (``_via``), surfaced verbatim in the
+# message's ``_brainEpic`` provenance card so the frontend can say HOW this
+# conversation was picked. 'heartbeat' is the default (the 30 s sweep, the
+# most common path — sweep_dispatch deliberately does not stamp).
+DISPATCH_VIAS = frozenset({
+    'heartbeat',         # 30 s sweep_dispatch picked a genuinely-pickable epic
+    'dependency_done',   # on_epic_completed — a dependency just finished
+    'answered',          # on_epic_answered — the human answered the gate
+    'posted',            # on_epic_posted — startable at post time
+    'conv_idle',         # on_conv_idle — the conv just went idle
+})
+
+
+def _resolve_conv_title(conv_id: str) -> str:
+    """The conversation's human title for the provenance card (the card shows
+    a clickable TITLE, not a bare conv id). One bounded SELECT, best-effort —
+    a lookup failure degrades to '' (the card falls back to a generic
+    "untitled" label), never blocks the dispatch."""
+    conv_id = (conv_id or '').strip()
+    if not conv_id:
+        return ''
+    try:
+        from lib.database import DOMAIN_CHAT, get_thread_db
+        db = get_thread_db(DOMAIN_CHAT)
+        row = db.execute(
+            'SELECT title FROM conversations WHERE id=? LIMIT 1',
+            (conv_id,)).fetchone()
+        return (row['title'] or '') if row else ''
+    except Exception as e:
+        logger.debug('[Dispatch] conv-title resolve failed conv=%s: %s',
+                     conv_id[:8], e)
+        return ''
+
+
+def _brain_meta(epic: dict, target_conv_id: str) -> dict:
+    """The display-only provenance record stamped onto the kickoff payload as
+    ``_brainEpic`` — WHO created the epic (title + conv id, for a clickable
+    chip), HOW it was dispatched (which seam fired), and WHY this conversation
+    was picked (its creator / migrated from an idle-stranded target / the
+    completing-conv fallback). Display-only: conv_message_builder reads only
+    ``content`` for the wire, so this never reaches the model.
+
+    ``route`` derivation keys on the board's OWN provenance fields, not the
+    seam: ``dispatch_target`` is the mutable routing override (idle-sibling
+    migration sets it), ``created_by_conv`` the immutable authorship."""
+    origin = (epic.get('created_by_conv') or '').strip()
+    override = (epic.get('dispatch_target') or '').strip()
+    target = (target_conv_id or '').strip()
+    if override and target == override and origin and target != origin:
+        route = 'migrated'
+    elif origin and target == origin:
+        route = 'creator'
+    else:
+        route = 'fallback'
+    via = str(epic.get('_via') or 'heartbeat')
+    if via not in DISPATCH_VIAS:
+        via = 'heartbeat'
+    return {
+        'epicId': epic.get('id') or '',
+        # Display cap only — the kickoff text carries the full title.
+        'epicTitle': (epic.get('title') or '')[:300],
+        'originatorConv': origin,
+        'originatorTitle': _resolve_conv_title(origin),
+        'method': via,
+        'route': route,
+        'answered': bool((epic.get('human_answer') or '').strip()),
+    }
+
 
 def select_dispatchable(project_path: str) -> list[dict]:
     """Return board epics that are GENUINELY pickable right now.
@@ -339,7 +408,8 @@ def dispatch_epic(project_path: str, epic: dict, target_conv_id: str, *,
         res = enqueue_message(
             target_conv_id,
             {'text': kickoff, BRAIN_DISPATCH_MARKER: True,
-             'boardTaskId': task_id},
+             'boardTaskId': task_id,
+             '_brainEpic': _brain_meta(epic, target_conv_id)},
             dispatch_config,
             kind=KIND_WORKFLOW)
     except Exception as e:
@@ -447,7 +517,9 @@ def _convs_holding_undrained_kickoffs(project_path: str, board: dict) -> set:
                 continue
             try:
                 cfg = _json.loads(r['config'] or '{}')
-            except (TypeError, ValueError):
+            except (TypeError, ValueError) as e:
+                logger.debug('[Dispatch] skipping queue row with unparsable '
+                             'config conv=%s: %s', cid, e)
                 continue
             row_proj = cfg.get('projectPath') or ''
             if row_proj and normalize_project_path(row_proj) == want:
@@ -1004,7 +1076,8 @@ def on_epic_completed(project_path: str, completed_conv_id: str = '') -> int:
             # misreported its depth to the user, so it does not replace this.
             if _epic_already_queued(target, epic.get('id', '')):
                 continue
-            res = dispatch_epic(project_path, epic, target)
+            res = dispatch_epic(project_path, {**epic, '_via': 'dependency_done'},
+                                target)
             if res.get('ok'):
                 dispatched += 1
                 # Drain a dependent kicked into an IDLE conv (which may differ
@@ -1050,7 +1123,7 @@ def on_epic_answered(project_path: str, task_id: str) -> int:
                         'busy/already-queued — kickoff left to the sweep',
                         task_id, target[:8])
             return 0
-        res = dispatch_epic(project_path, epic, target)
+        res = dispatch_epic(project_path, {**epic, '_via': 'answered'}, target)
         if res.get('ok'):
             _drain_idle_target(target)
             logger.info('[Dispatch] answer → immediate re-dispatch epic=%s '
@@ -1106,7 +1179,7 @@ def on_epic_posted(project_path: str, task_id: str) -> int:
             (target,)).fetchone()
         if not row:
             return 0  # dead/missing target — the sweep's migration owns it
-        res = dispatch_epic(project_path, epic, target)
+        res = dispatch_epic(project_path, {**epic, '_via': 'posted'}, target)
         if not res.get('ok'):
             return 0
         _drain_idle_target(target)
@@ -1139,7 +1212,8 @@ def on_conv_idle(project_path: str, conv_id: str) -> int:
         for epic in select_dispatchable(project_path):
             if _dispatch_target(epic) != conv_id:
                 continue
-            res = dispatch_epic(project_path, epic, conv_id)
+            res = dispatch_epic(project_path, {**epic, '_via': 'conv_idle'},
+                                conv_id)
             if not res.get('ok'):
                 return 0
             _drain_idle_target(conv_id)

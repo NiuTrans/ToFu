@@ -111,9 +111,15 @@ class _Recorder:
         with self._lock:
             self.events.append(dict(event))
         # Mirror the REAL append_event side effect the reaper depends on:
-        # every emitted event bumps liveness clock #1. Without this the
-        # fixture would under-report what production actually does.
-        task['_t_last_event'] = time.time()
+        # every emitted event bumps liveness clock #1 — EXCEPT events marked
+        # ``_selfTick`` (the tool-heartbeat pinging itself, pt_8524e0ec),
+        # which lib/tasks_pkg/manager/_events.py deliberately skips: a
+        # self-tick proves the dispatcher is alive, NOT that the tool is
+        # producing. Mirroring the bump for self-ticks here (the pre-
+        # 2026-08-01 behaviour) made silent ordinary tools look alive in
+        # this harness while production would grade them reap-eligible.
+        if not event.get('_selfTick'):
+            task['_t_last_event'] = time.time()
 
     def of_type(self, etype: str):
         return [e for e in self.events if e.get('type') == etype]
@@ -205,12 +211,19 @@ def _reap_verdict(task) -> bool:
 # ═══════════════════════════════════════════════════════════════════
 
 def test_serial_write_lane_beats_while_the_tool_blocks(rec, slow_tools):
-    """``run_command`` blocking past a heartbeat interval MUST refresh the
-    positive-liveness clock while it is still running.
+    """``run_command`` blocking past a heartbeat interval MUST still beat on
+    the WIRE — but the beat is GRADED and must never feed the reaper clocks.
 
-    Pre-fix this is RED: the serial write loop calls ``_execute_tool_one``
-    bare, so ``_dispatch_heartbeat`` is still 0.0 when the tool returns —
-    which is precisely the state that got task 38562f78 killed at 1846s.
+    ★ SEMANTICS CORRECTION (2026-08-01, drift repair): the original version
+    of this test asserted ``_dispatch_heartbeat`` refreshes while run_command
+    blocks. That was the pt_9f5a51ba semantics, DELIBERATELY reversed the
+    same day by pt_8524e0ec (evidence grading, owner-ratified): for ordinary
+    tools the tick is marked ``_selfTick: True`` — transport keepalive only,
+    NOT evidence the tool is producing — so ``_dispatch_heartbeat`` stays
+    untouched and ``append_event`` skips the ``_t_last_event`` bump. A silent
+    command IS reap-eligible; since pt_232244fb the reaper's answer is to
+    INTERRUPT the command (task spared), pinned in
+    tests/test_run_command_interrupt.py. Name kept as a historical handle.
     """
     script, observed = slow_tools
     script['run_command'] = 5.0          # > 2s interval → at least 2 ticks
@@ -219,15 +232,23 @@ def test_serial_write_lane_beats_while_the_tool_blocks(rec, slow_tools):
     _run(task, [_mk_tc('tc-rc', 'run_command', 0)])
 
     seen = observed['run_command']
-    assert seen['dispatch'] > 0.0, (
-        'the serial WRITE lane never refreshed _dispatch_heartbeat while '
-        'run_command blocked for 5s — both reaper clocks stay at epoch, so a '
-        'command running past TOFU_STUCK_TASK_MAX_SILENT_SECS is force-failed '
-        'and its whole task aborted (measured: task 38562f78, 1846s, ¥22.95 '
-        'discarded)')
-    assert time.time() - seen['dispatch'] < 4.0, (
-        'the clock was set but is already stale mid-tool — the ticker is not '
-        'running for the DURATION of the blocking call')
+    # (1) The transport beat exists: tool_progress ticks reached the wire
+    #     while the tool was still blocking.
+    ticks = [e for e in rec.of_type('tool_progress')
+             if e.get('toolCallId') == 'tc-rc']
+    assert ticks, (
+        'no tool_progress emitted for a 5s serial-write run_command — the '
+        'SSE stream is silent for the whole command')
+    # (2) The beat is GRADED: every tick for an ordinary tool carries the
+    #     _selfTick marker ("dispatcher alive", not "tool producing").
+    assert all(e.get('_selfTick') is True for e in ticks), (
+        'ordinary-tool ticks lost their _selfTick grading: %r' % (ticks,))
+    # (3) Evidence grading holds: the reaper's positive-liveness clock is
+    #     NEVER fed by a self-tick.
+    assert seen['dispatch'] == 0.0, (
+        '_dispatch_heartbeat moved for an ordinary tool — a self-tick is '
+        'impersonating real progress, the exact pt_8524e0ec defect class '
+        '(a hung grep looked alive for 2.5h)')
 
 
 def test_serial_write_lane_emits_tool_progress_while_blocking(rec, slow_tools):
@@ -256,30 +277,37 @@ def test_serial_write_lane_emits_tool_progress_while_blocking(rec, slow_tools):
 
 
 def test_a_long_serial_write_is_not_reaped(rec, slow_tools):
-    """End-to-end on the REAL predicate: with the threshold squeezed below the
-    tool's runtime, a beating tool must still be judged ALIVE.
+    """★ NAME KEPT AS A HISTORICAL HANDLE — the contract was corrected twice.
 
-    This is the property the two production casualties violated. Driving the
-    real ``reap_stuck_running_tasks`` discriminator (not a restatement) means
-    a change to the discriminator cannot silently un-protect this lane.
+    Original (pt_9f5a51ba): a beating tool is judged ALIVE by the reaper
+    predicate. Reversed same-day (pt_8524e0ec, evidence grading): a SILENT
+    ordinary tool is deliberately reap-ELIGIBLE — self-ticks are transport
+    keepalive, not evidence of production. Current (pt_232244fb): when the
+    predicate fires on a task blocked inside a real run_command, the
+    reaper's ACTION is to INTERRUPT the command (partial output returns to
+    the model, task spared) instead of force-failing the turn — that half
+    is pinned end-to-end in tests/test_run_command_interrupt.py.
 
-    The verdict is sampled INSIDE the blocking window (see ``slow_tools``) —
-    sampling it after the pipeline returns would pass even unfixed, because
-    the tool's own completion events refresh the clocks on the way out.
+    What THIS test pins is the middle contract, sampled INSIDE the blocking
+    window (a post-hoc sample passes even unfixed, because completion
+    events refresh the clocks on the way out): a 5s silent run_command
+    under a 3s threshold trips the REAL predicate. That is the input the
+    interrupt path consumes.
     """
     script, observed = slow_tools
     script['run_command'] = 5.0
     task = _mk_task(created_at=time.time())
     # Squeeze the reap threshold to 3s: shorter than the 5s tool, so a lane
-    # that does not beat is unambiguously reap-eligible.
+    # whose ticks are graded _selfTick (no real output) is unambiguously
+    # reap-eligible mid-flight.
     os.environ['TOFU_STUCK_TASK_MAX_SILENT_SECS'] = '3'
     try:
         _run(task, [_mk_tc('tc-rc', 'run_command', 0)])
-        assert not observed['run_command']['reap_now'], (
-            'MID-FLIGHT the reaper would force-fail this task: a 5s '
-            'run_command under a 3s silence threshold left both clocks '
-            'stale. In production the numbers are 1846s under 1800s — same '
-            'inequality, same outcome (task 38562f78 / 31d08c82)')
+        assert observed['run_command']['reap_now'], (
+            'evidence grading regressed: a 5s SILENT run_command under a 3s '
+            'threshold is NOT reap-eligible — something is feeding a liveness '
+            'clock without real output (the pt_8524e0ec defect class: a hung '
+            'grep looked alive for 2.5h)')
     finally:
         os.environ.pop('TOFU_STUCK_TASK_MAX_SILENT_SECS', None)
 

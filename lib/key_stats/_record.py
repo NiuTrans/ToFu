@@ -1,8 +1,9 @@
 """lib/key_stats/_record.py — Hot-path outcome recording.
 
-``record_outcome`` / ``record_rate_limit`` / ``mark_key_exhausted`` mutate
-the shared in-memory cache under ``_lock`` and persist on write.  All state
-lives in ``lib.key_stats._state`` and is imported here BY REFERENCE.
+``record_outcome`` / ``record_rate_limit`` / ``record_gateway_error`` /
+``mark_key_exhausted`` mutate the shared in-memory cache under ``_lock``
+and persist on write.  All state lives in ``lib.key_stats._state`` and is
+imported here BY REFERENCE.
 """
 
 from lib.log import get_logger
@@ -81,6 +82,44 @@ def record_rate_limit(provider_id: str, key_name: str,
             _cache['stats'][pk] = entry
         entry['rate_limited'] = int(entry.get('rate_limited') or 0) + 1
         entry['consecutive_429'] = int(entry.get('consecutive_429') or 0) + 1
+        _save_unlocked()
+
+
+def record_gateway_error(provider_id: str, key_name: str,
+                         reason: str = '') -> None:
+    """Record a GATEWAY-class failure for *key_name* — own counter only.
+
+    Gateway-class = HTTP 502/503/504 from the gateway's LB layer,
+    upstream-vendor transients wrapped in 4xx, and mid-stream SSE errors.
+    These say "the upstream behind the gateway is sick", never "this key is
+    sick" — and they hit every key on the provider uniformly, so feeding
+    them into the daily success-rate column both wrecks the card's honesty
+    and TRIPS the auto-disable gate (2026-08-03 sankuai 502 storm: 813
+    failures in ~2h auto-disabled 2 of 3 healthy keys for the day; only the
+    third key's success volume plus the last-resort guard kept service up).
+
+    So a gateway error feeds ONLY the ``gateway_errors`` daily counter
+    (pure UI telemetry, like ``rate_limited``):
+      * NOT ``failure`` — the success-rate denominator and the
+        auto-disable gate must never see a gateway storm. The dead-key
+        safety net lives on the unchanged classes instead: auth death
+        (401/403) and endpoint-unreachable still record genuine failures.
+      * NOT ``consecutive_429`` — the 429 streak is per-key contention
+        telemetry.
+      * NOT ``last_error`` — a bare ``<html>`` 502 body is diagnostic
+        garbage that would hide the last real failure from the UI (the
+        :func:`record_rate_limit` precedent).
+    """
+    if not key_name:
+        return
+    pk = _pair_key(provider_id, key_name)
+    with _lock:
+        _ensure_fresh_unlocked()
+        entry = _cache['stats'].get(pk)
+        if entry is None:
+            entry = _new_entry()
+            _cache['stats'][pk] = entry
+        entry['gateway_errors'] = int(entry.get('gateway_errors') or 0) + 1
         _save_unlocked()
 
 

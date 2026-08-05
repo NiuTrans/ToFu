@@ -11,7 +11,9 @@ So these tests pin the decision rule into the tool schema itself:
   • ask a human ONLY when the decision is irreversible, a matter of
     taste/policy, or unverifiable from inside the repo;
   • otherwise decide, take the more robust long-term option, and record it
-    with ``project_charter_commit`` (which agents may self-commit);
+    with ``project_charter_propose`` (the ONLY agent path into the charter
+    since 2026-07-30 — commit is human-only; see the reversal note on
+    test_propose_tool_is_the_only_agent_path_and_never_blocks_work);
   • uncertainty alone is explicitly NOT a reason to block.
 
 They are deliberately assertions about MEANING-BEARING PHRASES, not exact
@@ -49,8 +51,11 @@ def test_block_tool_tells_the_agent_to_decide_otherwise():
     d = _block_desc().lower()
     assert 'decide yourself' in d, \
         'the tool must tell the agent to decide non-gated questions itself'
-    assert 'project_charter_commit' in d, \
-        'the tool must point at the durable, reversible way to RECORD that decision'
+    # 2026-08-01 (pt_c31cd8f3): was 'project_charter_commit' — pointing at a
+    # WITHDRAWN tool taught the model to emit a call that is always refused.
+    # propose is the only agent path into the charter now.
+    assert 'project_charter_propose' in d, \
+        'the tool must point at the durable, human-ratified way to RECORD that decision'
     assert 'robust' in d or 'long term' in d or 'long-term' in d, \
         'the tool must say WHICH option to take when deciding alone'
 
@@ -89,21 +94,25 @@ def test_block_tool_asks_for_one_word_answerable_questions():
         'the tool must require the question be cheap for a human to answer'
 
 
-def test_propose_tool_no_longer_claims_a_human_must_commit():
-    """Agents have self-committed charter decisions since the 2026-07-12
-    de-gating. The propose description still said it 'records your proposal for
-    a human to review and commit' — which actively taught the model to route
-    decisions through a human queue that nothing waits on. That stale framing
-    is exactly what made pending proposals the loudest signal on the collab
-    bar despite blocking nothing."""
+def test_propose_tool_is_the_only_agent_path_and_never_blocks_work():
+    """REVERSED IN PLACE 2026-08-01 (pt_c31cd8f3 — same withdrawal wave).
+
+    v1 (autonomy-rule epic) pinned the 2026-07-12 de-gating: agents
+    SELF-COMMIT, so propose must not say 'a human must commit' and must point
+    AT commit as the preferred path. The 2026-07-30 withdrawal (6c28925c,
+    owner-ratified) reversed exactly that: the charter is human-reviewed, so
+    propose IS the only agent path — and the description now correctly says
+    so. What the autonomy rule still requires: propose must not TEACH a queue
+    mental model — it says the work does not wait on the review.
+    """
     from lib.tools.conversation import CHARTER_PROPOSE_TOOL
     d = CHARTER_PROPOSE_TOOL['function']['description']
-    assert 'for a human to review and commit' not in d, \
-        'stale human-gate framing must be gone'
-    assert 'project_charter_commit' in d, \
-        'propose must point at commit as the preferred path for real decisions'
-    assert 'nothing waits on it' in d.lower() or 'work continues' in d.lower(), \
-        'propose must say it does not block progress'
+    assert 'project_charter_commit' not in d, \
+        'pointing at the WITHDRAWN commit tool teaches a refused call'
+    assert 'human approves' in d.lower() or 'human-reviewed' in d.lower(), \
+        'propose must say the charter is human-ratified (the current design)'
+    assert 'does not wait' in d.lower(), \
+        'propose must say the work does not block on the human review'
 
 
 def test_block_result_text_suggests_continuing_other_work():
@@ -117,6 +126,9 @@ def test_block_result_text_suggests_continuing_other_work():
     assert 'this epic is parked, but YOU are not' in src or \
            'Pick up another open epic' in src, \
         'the block result must redirect the agent to other work'
-    assert 'project_charter_commit instead' in src, \
+    # 2026-08-01 (pt_c31cd8f3): was 'project_charter_commit instead' — the
+    # result text sent agents to a tool that always refuses. propose is the
+    # recorded-decision path now.
+    assert 'project_charter_propose instead' in src, \
         ('the bare-cooldown result must offer deciding-and-recording as the '
          'alternative to leaving the epic parked')

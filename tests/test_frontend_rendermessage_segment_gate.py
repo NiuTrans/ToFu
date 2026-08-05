@@ -23,15 +23,32 @@ this turn carry segments?". This harness evals the REAL shipped escape_html.js
 chat_render.js, and drives the REAL `renderMessage(msg)`. It asserts:
 
   SEGMENTS PRESENT → the interleaved timeline is the render:
-    • the interleaved `seg-timeline` panel IS emitted, AND
-    • the standalone `thinking-block` (msg.thinking) is NOT ALSO rendered
-      (no duplicate thinking — the _segTimelineRendered suppression fired).
+    • the interleaved `seg-timeline` panel IS emitted (with the per-batch
+      thinking inline), AND
+    • the standalone `thinking-block` (msg.thinking) is rendered EXACTLY ONCE.
+      msg.thinking is the TERMINAL round's reasoning; the timeline
+      DELIBERATELY skips every terminal segment (tool_rounds.js:
+      `if (s.terminal) continue`), so the standalone block is its ONLY render
+      path. Zero occurrences = the 752927bd drop regression ("reasoning_content
+      missing"); two+ = a real duplicate. The block hydrates its text LAZILY
+      on toggle (`.thinking-text` is emitted empty), so its identity is
+      pinned via the label's char-meta (= msg.thinking.length) and the
+      per-batch string via a single inline occurrence — the precise modern
+      form of this suite's original "no duplicate thinking" intent.
   SEGMENTS ABSENT (control / the sole remaining fallback):
     • the legacy grouped tool panel is emitted (via renderToolRoundsHTML),
       NOT the seg-timeline panel, AND
     • the standalone `thinking-block` IS present (legacy path).
       This proves `msg.segments` presence is what drives the timeline — the
       grouped renderer survives only as the automatic segment-less fallback.
+
+HISTORY (test-drift lesson): the pre-752927bd version of this suite asserted
+the standalone block count was ZERO when the timeline rendered — the old
+`!_segTimelineRendered` suppression contract. 752927bd removed that gate as a
+root fix (terminal reasoning was silently dropped on every multi-tool turn)
+and left this suite red. The suppression contract's guard is
+test_frontend_terminal_thinking_render.py (NC: re-adding the gate drops the
+block); this suite now pins the same contract from the renderMessage side.
 
 Skips cleanly when node / jsdom aren't installed.
 """
@@ -163,16 +180,30 @@ if (typeof renderMessage !== 'function') {
 check('fn_exposed', true);
 check('real_timeline_fn_present', typeof renderSegmentTimelineHTML === 'function');
 
-// ══ 1. SEGMENTS PRESENT → interleaved seg-timeline + NO duplicate thinking ══
+// ══ 1. SEGMENTS PRESENT → interleaved seg-timeline + terminal thinking ONCE ══
 {
   const html = renderMessage(mkMsg(), 0);
   check('on_emits_seg_timeline', html.indexOf('seg-timeline') !== -1);
   check('on_has_batch_narration', html.indexOf('<md>Let me search.</md>') !== -1);
-  // The standalone msg.thinking block must be SUPPRESSED (per-batch thinking
-  // already shown inside the timeline). Zero legacy _toggleThinking blocks.
-  check('on_no_duplicate_standalone_thinking', standaloneThinkingCount(html) === 0);
-  // The per-batch thinking IS present (pure-CSS toggle variant).
+  // 752927bd contract: msg.thinking is the TERMINAL reasoning — the timeline
+  // deliberately skips terminal segments, so the standalone block is its ONLY
+  // render path. EXACTLY ONCE: zero = dropped (the 752927bd "reasoning_content
+  // missing" regression), two+ = a real duplicate. (The pre-752927bd version
+  // of this check demanded ZERO — the suppression contract that root-fix
+  // removed; see the module docstring.)
+  check('on_terminal_thinking_exactly_once', standaloneThinkingCount(html) === 1);
+  // The block's identity: the label's char-meta is msg.thinking.length, so the
+  // block is provably the TERMINAL field's lazy surface (its text hydrates on
+  // toggle — chat_render.js emits `.thinking-text` EMPTY by design — never
+  // inline; test_frontend_terminal_thinking_render.py pins the same hook).
+  check('on_terminal_block_is_msg_thinking',
+        html.indexOf('stream.thinking.done (24 chars)') !== -1);
+  // The per-batch thinking IS present (pure-CSS toggle variant)…
   check('on_has_per_batch_thinking', html.indexOf("this.classList.toggle('expanded')") !== -1);
+  // …and it is NOT duplicated: the per-batch reasoning lives only inside the
+  // timeline, exactly once. "No duplicate thinking" in its precise modern
+  // form (the terminal string has no inline occurrence to count — see above).
+  check('on_per_batch_text_once', html.split('batch reasoning').length - 1 === 1);
 }
 
 // ══ 2. SEGMENTS ABSENT (the sole remaining fallback) → legacy grouped path +

@@ -30,7 +30,6 @@ from lib.log import get_logger
 from lib.tools.registry._latch import (
     clear_tool_list_latch,
     is_multiroot_sticky,
-    is_project_ready_sticky,
     mark_multiroot_sticky,
     mark_project_ready_sticky,
     mark_project_remote_sticky,

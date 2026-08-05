@@ -1,3 +1,5 @@
+# Incident anchor: born in commit 52eb3266 — refactor(orchestrator): pt_03f4cdf1 slice 24 — extract streaming-accu...
+# (funeral audit pt_c565a36b3e8f42e6, docs/RATCHET_AUDIT.md)
 """Slice 24 wire-parity: _stream_acc_settle.py extraction from _run.py."""
 
 import inspect

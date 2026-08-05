@@ -123,7 +123,12 @@ class TestBasicRoutes:
             resp = await client.get('/api/v1/chat/active')
             assert resp.status_code == 200
             data = await resp.get_json()
-            assert isinstance(data, list)
+            # Charter #0 (docs/API_CONTRACT.md): array payloads ride the
+            # {ok, items} envelope — a bare top-level array is the OLD
+            # contract this assertion used to pin (direction-alignment,
+            # same drift family as test_restart_smoke).
+            assert data['ok'] is True
+            assert isinstance(data.get('items'), list)
         _run_async(go())
 
     def test_404_json(self, client):
@@ -335,7 +340,8 @@ if __name__ == '__main__':
             resp = await client.get('/api/v1/chat/active')
             assert resp.status_code == 200, f'Expected 200, got {resp.status_code}'
             data = await resp.get_json()
-            assert isinstance(data, list)
+            # Charter #0 envelope: {ok, items} (see the pytest body above).
+            assert data['ok'] is True and isinstance(data.get('items'), list)
             print('  ✓ GET /api/v1/chat/active → 200 (sync route in thread pool)')
 
             # 404

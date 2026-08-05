@@ -12,6 +12,7 @@ Run:
 """
 
 import os
+import re
 import sys
 from unittest import mock
 
@@ -530,15 +531,37 @@ def _spec_hidden_imports(text):
     return names
 
 
-def _ci_pip_install_lines(text):
-    """Every `pip install <pkgs>` line in the workflow that is NOT `-r
-    requirements.txt` (those are the explicit build-dep lists — one per job)."""
-    lines = []
-    for raw in text.splitlines():
-        s = raw.strip()
-        if s.startswith('pip install') and '-r ' not in s:
-            lines.append(s)
-    return lines
+_STEP_HEADER_RE = re.compile(r'^      - name: ', re.M)
+
+
+def _ci_install_step_pip_pkgs(text):
+    """One package-token set per 'Install dependencies' step: the union of
+    every `pip install` line in that step (excluding `-r requirements.txt`).
+
+    Semantics correction (2026-08-01, pt_0720694046c042e6): the guard used to
+    assert EVERY pip install LINE carried the runtime deps. That assumed all
+    install lines are the same KIND — broken by the vendor-wheel line
+    (`pip install --no-deps vendor/tofu_search-*.whl`), which is deliberately
+    dep-less: its deps come from the requirements.txt solve right after, and
+    giving pip deps there would let it pull versions from the index AHEAD of
+    the frozen solve. What a platform leg actually needs is: after ALL of the
+    step's install lines, the env contains the runtime deps. Aggregate per
+    step, never per line.
+    """
+    heads = [m.start() for m in _STEP_HEADER_RE.finditer(text)]
+    steps = []
+    for i, start in enumerate(heads):
+        header_end = text.index('\n', start) + 1
+        end = heads[i + 1] if i + 1 < len(heads) else len(text)
+        if 'Install dependencies' not in text[start:header_end]:
+            continue
+        pkgs = set()
+        for raw in text[header_end:end].splitlines():
+            s = raw.strip()
+            if s.startswith('pip install') and '-r ' not in s:
+                pkgs.update(w.lower() for w in s.split())
+        steps.append(pkgs)
+    return steps
 
 
 def test_desktop_runtime_deps_present_in_requirements_file():
@@ -560,36 +583,83 @@ def test_desktop_runtime_deps_present_in_pyinstaller_spec():
 
 
 def test_desktop_runtime_deps_present_in_every_ci_pip_install():
+    """Every CI install STEP's aggregated packages cover the runtime deps.
+
+    (Name kept as the historical handle; the unit of assertion is the STEP,
+    not the line — see _ci_install_step_pip_pkgs for why.)
+    """
     text = _read('.github/workflows/build-desktop.yml')
-    pip_lines = _ci_pip_install_lines(text)
-    # Sanity: the workflow really has explicit build-dep pip lines (one per
-    # platform job). If this drops to 0 the parse broke — fail loudly.
-    assert len(pip_lines) >= 3, (
-        f'expected >=3 explicit `pip install` lines in build-desktop.yml '
-        f'(one per platform job), found {len(pip_lines)}: {pip_lines}'
+    steps = _ci_install_step_pip_pkgs(text)
+    # Sanity: the workflow really has install steps (one per platform job).
+    # If this drops the parse broke — fail loudly, never vacuously green.
+    assert len(steps) == 3, (
+        f'expected exactly 3 "Install dependencies" steps in build-desktop.yml '
+        f'(one per platform job), found {len(steps)}: {steps}'
     )
-    for i, line in enumerate(pip_lines):
-        low = line.lower()
-        missing = [d for d in _DESKTOP_RUNTIME_DEPS if d not in low]
+    for i, pkgs in enumerate(steps):
+        missing = [d for d in _DESKTOP_RUNTIME_DEPS if d not in pkgs]
         assert not missing, (
-            f'build-desktop.yml pip install line #{i + 1} is missing runtime '
-            f'dep(s): {missing}. That platform build would ship broken.\n  line: {line}'
+            f'build-desktop.yml install step #{i + 1} is missing runtime '
+            f'dep(s): {missing}. That platform build would ship broken.\n'
+            f'  aggregated packages: {sorted(pkgs)}'
         )
+
+
+_SYNTH_STEP_DEPS = (
+    '      - name: Install dependencies\n'
+    '        run: |\n'
+    '          if ls vendor/tofu_search-*.whl >/dev/null 2>&1; then\n'
+    '            pip install --no-deps vendor/tofu_search-*.whl\n'
+    '          fi\n'
+    '          pip install -r requirements.txt\n'
+    '          pip install pyinstaller pystray pyautogui pyperclip psutil\n'
+    '\n'
+    '      - name: Generate icons\n'
+    '        run: python scripts/gen_desktop_icons.py\n'
+)
+
+
+def test_step_aggregate_tolerates_a_dep_less_pip_line():
+    """The semantics correction, pinned against regression: the vendor-wheel
+    `--no-deps` line in a step whose OTHER line carries the deps must NOT
+    trip the guard. (This is exactly the workflow shape that went red.)
+    """
+    steps = _ci_install_step_pip_pkgs(_SYNTH_STEP_DEPS)
+    assert len(steps) == 1
+    missing = [d for d in _DESKTOP_RUNTIME_DEPS if d not in steps[0]]
+    assert not missing, (
+        f'the aggregate must see the deps through the dep-less line: {missing}')
+
+
+def test_step_aggregate_catches_a_leg_that_lost_its_deps():
+    """Complement: a leg whose explicit deps line vanished must still go
+    red — the vendor line alone can never satisfy the runtime deps."""
+    text = _SYNTH_STEP_DEPS.replace(
+        '          pip install pyinstaller pystray pyautogui pyperclip psutil\n',
+        '')
+    steps = _ci_install_step_pip_pkgs(text)
+    assert len(steps) == 1
+    missing = [d for d in _DESKTOP_RUNTIME_DEPS if d not in steps[0]]
+    assert missing == list(_DESKTOP_RUNTIME_DEPS), (
+        f'a leg with only the vendor line must be flagged: missing={missing}')
 
 
 def test_all_three_dep_lists_agree_on_runtime_deps():
     """Single assertion over all three sources — the drift guard proper. If any
-    ONE list drops a dep, this names which source and which dep."""
+    ONE list drops a dep, this names which source and which dep.
+
+    The CI side contributes one entry per install STEP (aggregated — see
+    _ci_install_step_pip_pkgs); a single dep-less line inside a step is fine
+    as long as the step as a whole installs the deps.
+    """
     sources = {
         'desktop/requirements-desktop.txt': _requirements_pkgs(
             _read('desktop/requirements-desktop.txt')),
         'tofu.spec:hidden_imports': _spec_hidden_imports(_read('tofu.spec')),
     }
     ci_text = _read('.github/workflows/build-desktop.yml')
-    for i, line in enumerate(_ci_pip_install_lines(ci_text)):
-        sources[f'build-desktop.yml:pip#{i + 1}'] = {
-            w.lower() for w in line.split()
-        }
+    for i, pkgs in enumerate(_ci_install_step_pip_pkgs(ci_text)):
+        sources[f'build-desktop.yml:step#{i + 1}'] = pkgs
 
     drift = {}
     for src, pkgs in sources.items():

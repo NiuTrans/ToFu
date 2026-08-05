@@ -68,6 +68,12 @@ data/
 !/scripts/gen_frontend_globals.py
 !/scripts/gen_tool_inventory.py
 !/scripts/audit_tests.py
+# P2 test tooling (docs/TESTING_STRATEGY.md): test_select.py is loaded by
+# tests/test_test_select.py and driven by `make test-affected`; ratchet_audit.py
+# is loaded by tests/test_ratchet_incident_link.py and regenerates
+# docs/RATCHET_AUDIT.md. A clean clone without them breaks both consumers.
+!/scripts/test_select.py
+!/scripts/ratchet_audit.py
 !/scripts/package_extension.sh
 !/scripts/install_on_server.sh
 # Shared "is this release complete?" predicate. BOTH gates in
@@ -103,6 +109,17 @@ data/
 # Raw AI-gen asset candidates + proof strips (review-only, multi-MB) under the
 # pet-icon dir. Anchored to that subtree, not a bare _candidates glob.
 static/icons/pet/_candidates/
+# Unreferenced marketing assets (~12.4MB) — stripped from the opensource export
+# (export.py OPENSOURCE_EXTRA_EXCLUDE_FILES, zero-reference verdict 2026-08-01);
+# gitignore is the second defense line so they can't be re-tracked silently.
+static/images/tofu-cache-article-cover.png
+static/images/tofu-cache-article-cover-zh.png
+static/images/tofu-poster-core-strength.png
+static/images/tofu-poster-v2.png
+static/images/attach-icon.png
+static/images/attach-icon.svg
+static/images/onigiri-icon.png
+static/images/onigiri-icon.svg
 # setuptools egg metadata (regenerable build artifact)
 /tofu.egg-info/
 # Per-host helper scripts (hardcoded internal proxy IP / mount paths)
@@ -251,6 +268,7 @@ dist/
 installer_output/
 static/icons/tofu.ico
 static/icons/tofu.icns
+static/icons/installer/
 .icon-backups/
 # AI assistant evolution journal (per-developer, not source)
 JOURNAL.md

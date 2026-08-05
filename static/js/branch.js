@@ -282,18 +282,29 @@ function _renderBranchPanel(msg, msgIdx, bi) {
   const isStreaming = _branchStreams.has(bk);
   const hasPersistentTask = !isStreaming && !!branch.activeTaskId;
 
-  // Render finished messages (skip last assistant if it's currently streaming)
+  /* ★ The persisted pin (`branch.activeTaskId`) can be STALE: the task may
+   * have finished while this tab was closed/crashed. Slicing the tail purely
+   * on the pin then hides a SETTLED message and paints a fake "Generating…"
+   * zone forever (same absence-of-settled-marker class as the mse9r2ir7ql0v4
+   * live-view incident). `finishReason` IS persisted, so consult the tail's
+   * own record: only an unfinished assistant tail is the stream owner. */
+  const _lastBranchMsg = msgs[msgs.length - 1];
+  const _tailUnfinished = !!_lastBranchMsg && _lastBranchMsg.role === 'assistant'
+    && !_lastBranchMsg.finishReason && !_lastBranchMsg.error;
+  const _tailIsLive = isStreaming || (hasPersistentTask && _tailUnfinished);
+
+  // Render finished messages (skip last assistant only if it's genuinely in-flight)
   let msgsHtml = "";
-  const renderMsgs = (isStreaming || hasPersistentTask)
+  const renderMsgs = _tailIsLive
     ? msgs.slice(0, -1)  // exclude the last assistant msg being streamed
     : msgs;
   for (let i = 0; i < renderMsgs.length; i++) {
     msgsHtml += _renderBranchMsg(renderMsgs[i], msgIdx, bi, i);
   }
 
-  // Streaming zone
+  // Streaming zone — shown only while the tail is genuinely in-flight (see above)
   let streamingHtml = "";
-  if (isStreaming || hasPersistentTask) {
+  if (_tailIsLive) {
     const lastMsg = msgs[msgs.length - 1];
     const existingContent = lastMsg?.content || "";
     const existingThinking = lastMsg?.thinking || "";

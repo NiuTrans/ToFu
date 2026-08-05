@@ -59,8 +59,9 @@ def test_abort_route_registered_exactly_once():
     assert len(abort_rules) == 1, (
         f'Expected exactly one abort route, found {len(abort_rules)}: '
         f'{[r.endpoint for r in abort_rules]}')
-    # The surviving handler must be the rich one in routes/chat.py
-    # (subprocess + external-backend kill), not the deleted stub.
+    # The surviving handler must be the rich one — moved to
+    # routes/chat_poll_abort.py in the module split, not the deleted stub.
     view = _APP.view_functions[abort_rules[0].endpoint]
-    assert view.__module__ == 'routes.chat', (
-        f'abort handler resolved to {view.__module__}, expected routes.chat')
+    assert view.__module__ == 'routes.chat_poll_abort', (
+        f'abort handler resolved to {view.__module__}, '
+        'expected routes.chat_poll_abort')

@@ -258,7 +258,28 @@ def setup_project_context(
                        task['id'][:8], e)
 
 
+def make_vu_phase(task: dict[str, Any]):
+    """Bind the VU-startup flag + task into the closure-style phase emitter.
+
+    Extracted 2026-08-01 (pt_03f4cdf1 slice 37) from ``run_task``'s inline
+    attribution + closure block. The captured ``task`` + ``_vu_startup``
+    are stable across the whole invocation (no rebind), so binding them
+    once at factory time is semantically identical to the inline
+    closure — and the loop's closure-style call sites (``_vu_phase(x)``)
+    are preserved unchanged. The returned closure is internally named
+    ``_bound`` so the module-level ``_vu_phase`` stays resolvable through
+    the module namespace at call time (an inner ``def _vu_phase`` would
+    shadow it across the whole factory scope — def is an assignment).
+    """
+    _vu_startup = bool(task.get('_vu_subtask'))
+
+    def _bound(detail):
+        _vu_phase(task, detail, vu_startup=_vu_startup)
+
+    return _bound
+
+
 __all__ = [
     '_vu_phase', '_probe_external_edits',
-    'start_external_edit_probe', 'setup_project_context',
+    'start_external_edit_probe', 'setup_project_context', 'make_vu_phase',
 ]

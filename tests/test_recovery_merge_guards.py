@@ -213,6 +213,131 @@ class TestRecoveryMergeGuards(unittest.TestCase):
         self.assertTrue(am.get('toolRounds'),
                         'tail-home merge must still restore rounds from segments')
 
+    # ── G1-home identity: the adopted tail must be STAMPED with _taskId ──
+    def test_tail_merge_stamps_task_id(self):
+        """pt_75889ea7 crash-edge of the 54aa57a5 twin-fold fix: a tail adopted
+        by the G1 merge (assistant, NO _taskId — GATE 4 lets it through) must
+        be stamped with the merging task's id, exactly like the appended-shell
+        branch already does. Without the stamp the adopted tail never becomes
+        the task's durable home: the NEXT sweep cannot find it via
+        _merge_home_index, and a later same-task reconnect placeholder (the
+        frontend twin carrying the typed error envelope + this _taskId) can
+        never fold into it — the permanent two-bubble pair for any turn that
+        never reaches a terminal settle."""
+        from lib.tasks_pkg.manager import recover_stale_tasks_on_startup
+
+        live_rounds = _rounds_live(3)
+        messages = [
+            {'role': 'user', 'content': 'investigate', 'timestamp': 1},
+            {'role': 'assistant', 'content': 'PID 谜团解开了', 'thinking': 'r',
+             'toolRounds': live_rounds, 'timestamp': 2},   # NO _taskId
+        ]
+        _seed_conv(self.conv_id, messages, active_task_id=self.task_id)
+        _seed_task(self.task_id, self.conv_id,
+                   content='PID 谜团解开了', thinking='r', rounds=live_rounds)
+
+        recover_stale_tasks_on_startup()
+
+        _, out = _read_conv(self.conv_id)
+        self.assertEqual(len(out), 2)
+        tail = out[-1]
+        self.assertEqual(tail.get('_taskId'), self.task_id,
+                         'the G1-adopted tail was not stamped with the merging '
+                         "task's id — it never becomes the task's durable home "
+                         '(no by-id lookup next sweep, no same-task twin fold)')
+        self.assertEqual(tail.get('finishReason'), 'interrupted')
+        self.assertEqual(tail.get('content'), 'PID 谜团解开了')
+
+    def test_stamped_tail_lets_the_reconnect_twin_fold(self):
+        """End-to-end for the epic: after the recovery merge stamps the tail,
+        the frontend's pushed-back reconnect placeholder (same _taskId, the
+        typed 429 envelope, byte-equal rounds echo — the msg2 of conv
+        mscns5i0fcofgl) folds into it via the GET/PUT seam's
+        fold_duplicate_task_twins: ONE row survives, carrying the content AND
+        the explanation. finishReason stays 'interrupted' (keeper wins — the
+        crash-interrupt is the terminal truth; the envelope documents the
+        last failure cause)."""
+        from lib.tasks_pkg.manager import recover_stale_tasks_on_startup
+        from lib.conversations.reconcile import reconcile_conversation_messages
+
+        live_rounds = _rounds_live(3)
+        messages = [
+            {'role': 'user', 'content': 'investigate', 'timestamp': 1},
+            {'role': 'assistant', 'content': 'PID 谜团解开了', 'thinking': 'r',
+             'toolRounds': live_rounds, 'timestamp': 2},
+        ]
+        _seed_conv(self.conv_id, messages, active_task_id=self.task_id)
+        _seed_task(self.task_id, self.conv_id,
+                   content='PID 谜团解开了', thinking='r', rounds=live_rounds)
+        recover_stale_tasks_on_startup()
+
+        _, out = _read_conv(self.conv_id)
+        # The keep-local pushback lands the reconnect placeholder BELOW the
+        # merged tail (same _taskId, error envelope, byte-equal rounds echo).
+        twin = {'role': 'assistant', 'content': '', 'thinking': '',
+                'toolRounds': live_rounds, '_taskId': self.task_id,
+                '_msgId': 'tmp_twin', 'finishReason': 'error',
+                'error': {'kind': 'ratelimit',
+                          'message': '⚠️ API 请求已达限频（429）'},
+                'timestamp': 3}
+        pushed_back = out + [twin]
+        cleaned, changed = reconcile_conversation_messages(pushed_back, 0)
+        self.assertTrue(changed, 'the reconnect twin was not folded')
+        asst = [m for m in cleaned if m.get('role') == 'assistant']
+        self.assertEqual(len(asst), 1,
+                         'the crash-adopted tail + reconnect placeholder did '
+                         'not converge to one row — the permanent two-bubble '
+                         'pair is back')
+        kept = asst[0]
+        self.assertEqual(kept.get('error'), twin['error'],
+                         "the twin's error envelope must fold onto the "
+                         'surviving row (never dropped with the twin)')
+        self.assertEqual(kept.get('finishReason'), 'interrupted',
+                         'keeper wins: the crash-interrupt verdict stays')
+        self.assertEqual(kept.get('content'), 'PID 谜团解开了')
+
+    def test_neuter_without_stamp_the_twin_never_folds(self):
+        """NEUTER: bypass _stamp_merge_home (the pre-fix world) — the merged
+        tail keeps NO _taskId, and the same pushed-back pair survives the GET
+        reconcile untouched (two assistant rows): the fold cannot pair an
+        id-less keeper with the id-bearing twin. Proves the stamp is
+        load-bearing, not decorative."""
+        import lib.tasks_pkg.manager._recovery as rec
+        from lib.tasks_pkg.manager import recover_stale_tasks_on_startup
+        from lib.conversations.reconcile import reconcile_conversation_messages
+
+        live_rounds = _rounds_live(3)
+        messages = [
+            {'role': 'user', 'content': 'investigate', 'timestamp': 1},
+            {'role': 'assistant', 'content': 'PID 谜团解开了', 'thinking': 'r',
+             'toolRounds': live_rounds, 'timestamp': 2},
+        ]
+        _seed_conv(self.conv_id, messages, active_task_id=self.task_id)
+        _seed_task(self.task_id, self.conv_id,
+                   content='PID 谜团解开了', thinking='r', rounds=live_rounds)
+
+        orig = rec._stamp_merge_home
+        rec._stamp_merge_home = lambda msg, tid: False   # NEUTER
+        try:
+            recover_stale_tasks_on_startup()
+        finally:
+            rec._stamp_merge_home = orig
+
+        _, out = _read_conv(self.conv_id)
+        self.assertFalse(out[-1].get('_taskId'),
+                         'NEUTER setup broken: the tail got stamped anyway')
+        twin = {'role': 'assistant', 'content': '', 'thinking': '',
+                'toolRounds': live_rounds, '_taskId': self.task_id,
+                '_msgId': 'tmp_twin', 'finishReason': 'error',
+                'error': {'kind': 'ratelimit',
+                          'message': '⚠️ API 请求已达限频（429）'},
+                'timestamp': 3}
+        cleaned, _ = reconcile_conversation_messages(out + [twin], 0)
+        asst = [m for m in cleaned if m.get('role') == 'assistant']
+        self.assertEqual(len(asst), 2,
+                         'NEUTER failed: without the stamp the pair still '
+                         'converged — the fold is not gated on the stamp')
+
     # ── G2: a LIVE task (in-memory registry) blocks the merge ──
     def test_live_task_in_registry_blocks_merge(self):
         """No home anywhere, tail is user — the legitimate-append shape, EXCEPT

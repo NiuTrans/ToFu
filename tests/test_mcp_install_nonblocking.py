@@ -66,7 +66,7 @@ def test_server_owner_performs_no_blocking_subprocess_before_spawn():
     """
     import inspect
 
-    from lib.mcp.client._bridge import MCPBridge
+    from lib.mcp.client._bridge import MCPBridge  # noqa: F811
 
     src = inspect.getsource(MCPBridge._server_owner)
     assert 'subprocess.run' not in src, (

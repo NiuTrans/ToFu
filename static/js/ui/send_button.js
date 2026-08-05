@@ -192,6 +192,32 @@ function updateSendButton() {
         conv.activeTaskId = null;
         conv._activeTaskClearedAt = Date.now();
         finishStream(activeConvId);
+      } else if (conv && conv._authoritativeActiveTaskIds && conv._authoritativeActiveTaskIds.size > 0) {
+        /* ★ Server-authoritative busy with NO local handle (pt_stop_deadclick):
+         *   a sibling device is generating on this conv, or this tab lost its
+         *   stream handle while the server still runs the task. The busy
+         *   predicate (convIsBusy) renders Stop for this state, so the click
+         *   must NEVER be a no-op — before this branch the handler fell
+         *   through both arms above and literally nothing left the browser
+         *   (the "Stop takes several clicks" report's second half).
+         *   Fire a per-tid abort for every authoritative id: idempotent
+         *   server-side, and since chat_abort emits the busy-projection frame
+         *   unconditionally (92055d60), a duplicate abort doubles as the
+         *   corrective re-broadcast for a client that missed the first frame.
+         *   The busy Set is NOT purged locally — it is server-owned state;
+         *   the inbound frame flips the composer. */
+        const _authTids = [...conv._authoritativeActiveTaskIds];
+        console.info(`[stopBtn] Aborting server-authoritative task(s) — conv=${conv.id.slice(0,8)} tids=[${_authTids.map(t => String(t).slice(0,8)).join(',')}]`);
+        for (const _tid of _authTids) {
+          conv._lastAbortedTaskId = _tid;
+          Api.chat.abortTask(_tid);
+        }
+      } else {
+        /* ★ Nothing is busy by ANY predicate (a terminal frame landed between
+         *   render and click): reconcile the stale Stop shape NOW rather than
+         *   leaving it lit until the next external updateSendButton trigger. */
+        console.info(`[stopBtn] Stop click with no busy handle anywhere — reconciling composer (conv=${conv ? conv.id.slice(0,8) : 'none'})`);
+        updateSendButton();
       }
     };
   } else {

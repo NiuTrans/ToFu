@@ -25,10 +25,11 @@ import io
 import os
 
 import requests
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, request
 
 from lib.api_response import (
-    api_bad_request, api_error, api_internal_error, api_not_found,
+    api_bad_request, api_created, api_error, api_internal_error,
+    api_not_found, api_ok,
 )
 from lib.http_client import http_get
 from lib.log import get_logger
@@ -70,7 +71,7 @@ def list_skills_v1():
     for s in skills:
         s.pop('filepath', None)
         s.pop('package_dir', None)
-    return jsonify({'skills': skills})
+    return api_ok({'skills': skills})
 
 
 @api_v1_skills_bp.route('/api/v1/skills/<skill_id>', methods=['DELETE'])
@@ -87,7 +88,8 @@ def uninstall_skill_v1(skill_id):
     ok = uninstall_skill(skill_id, project_path=_project_path())
     if not ok:
         logger.warning('[Skills.v1] %s not found for uninstall', skill_id)
-    return jsonify({'deleted': ok}), (200 if ok else 404)
+        return api_not_found('Skill package not found', deleted=False)
+    return api_ok(deleted=True)
 
 
 @api_v1_skills_bp.route('/api/v1/skills/<skill_id>/toggle', methods=['POST'])
@@ -108,7 +110,7 @@ def toggle_skill_v1(skill_id):
                         project_path=_project_path())
     mem.pop('filepath', None)
     mem.pop('package_dir', None)
-    return jsonify(mem)
+    return api_ok(mem)
 
 
 @api_v1_skills_bp.route('/api/v1/skills/<skill_id>/files', methods=['GET'])
@@ -130,7 +132,7 @@ def skill_files_v1(skill_id):
 
     files = list_skill_files(root)
     files.sort(key=lambda f: (f['kind'] != 'skill', f['path']))
-    return jsonify({
+    return api_ok({
         'skill_id': skill_id,
         'root': root,
         'files': files,
@@ -169,9 +171,9 @@ def install_skill_package_v1():
         overwrite = request.form.get('overwrite', '').lower() in ('1', 'true', 'yes')
         data = f.read(_INSTALL_MAX_BYTES + 1)
         if len(data) > _INSTALL_MAX_BYTES:
-            return jsonify({
-                'error': f'File exceeds {_INSTALL_MAX_BYTES // (1024 * 1024)} MB limit'
-            }), 413
+            return api_error(
+                f'File exceeds {_INSTALL_MAX_BYTES // (1024 * 1024)} MB limit',
+                status=413)
         source = bytes(data)
     else:
         body = parse_body()
@@ -203,11 +205,11 @@ def install_skill_package_v1():
     mem = result['memory']
     mem.pop('filepath', None)
     mem.pop('package_dir', None)
-    return jsonify({
+    return api_created({
         'memory': mem,
         'replaced': result['replaced'],
         'install_hints': result['install_hints'],
-    }), 201
+    })
 
 
 # ── Curated Catalog (App-Store style) ────────────────────────────────
@@ -237,8 +239,8 @@ def skill_catalog_v1():
                                             else None)
         entry['installed'] = mem_id is not None
         entry['installed_memory_id'] = mem_id or ''
-    return jsonify({'catalog': catalog,
-                    'installed_ids': sorted(installed_ids)})
+    return api_ok({'catalog': catalog,
+                   'installed_ids': sorted(installed_ids)})
 
 
 @api_v1_skills_bp.route('/api/v1/skills/catalog/install', methods=['POST'])
@@ -291,9 +293,9 @@ def skill_catalog_install_v1():
             if total > _CATALOG_DL_CAP:
                 logger.warning('[Skills.v1] Catalog zip %s exceeds cap',
                                skill_id)
-                return jsonify({
-                    'error': f'Archive exceeds {_CATALOG_DL_CAP // (1024 * 1024)} MB'
-                }), 413
+                return api_error(
+                    f'Archive exceeds {_CATALOG_DL_CAP // (1024 * 1024)} MB',
+                    status=413)
             buf.write(chunk)
     except requests.RequestException as e:
         logger.warning('[Skills.v1] Catalog stream error %s: %s', skill_id, e)
@@ -318,12 +320,12 @@ def skill_catalog_install_v1():
     mem = result['memory']
     mem.pop('filepath', None)
     mem.pop('package_dir', None)
-    return jsonify({
+    return api_created({
         'memory': mem,
         'replaced': result['replaced'],
         'install_hints': result['install_hints'],
         'catalog_id': skill_id,
-    }), 201
+    })
 
 
 __all__ = ['api_v1_skills_bp']

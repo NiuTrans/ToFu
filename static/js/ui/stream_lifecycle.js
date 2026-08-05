@@ -54,9 +54,31 @@ function showStreamingUIForConv(convId) {
    * will still create a dot for it, so we MUST render it statically — otherwise
    * msg-{last} is missing from the DOM and the turn-dot click is a no-op. */
   const _last = conv.messages[conv.messages.length - 1];
+  /* ★ Bubble-owner IDENTITY binding (root fix for the mse9r2ir7ql0v4 incident,
+   *   2026-08-05): the old positional heuristic treated ANY trailing assistant
+   *   without an explicit `.done` as the live bubble's owner — but NO persisted
+   *   message ever carries `.done` (it is a client-only streaming marker), so
+   *   any transient that registered a stream while a SETTLED turn sat at the
+   *   tail hid that whole turn behind the bubble (slice(0,-1) drops it): with
+   *   the list at [m0, settled-m1] the screen showed exactly "first user turn
+   *   glued to the streaming bubble" — the reported corruption, unreachable by
+   *   every data-layer guard because it is a RENDER-layer verdict. Placement
+   *   decisions must use server-assigned stable identity, never transient
+   *   client state (RENDER_CONTRACT): the bubble owner is the message the live
+   *   stream entry accumulates into — object identity with the bound
+   *   assistantMsg, or the _taskId stamped at bind time. Endpoint planner /
+   *   critic and the autopilot VU tail keep their explicit flags. */
+  const _liveEntry = (typeof activeStreams !== 'undefined')
+    ? activeStreams.get(convId) : null;
   const _lastIsStreamingBubble =
     !!_last && (
-      (_last.role === "assistant" && !_last.done) ||
+      (!!_liveEntry && (
+        _last === _liveEntry.assistantMsg ||
+        (_last.role === "assistant" && !!_last._taskId
+          && _last._taskId === _liveEntry.taskId)
+      )) ||
+      (_last._isEndpointPlanner && !_last.done) ||
+      (_last._swarmAutoContinue && !_last.done) ||
       (_last._isEndpointReview && !_last.done) ||
       /* ★ Autopilot VU tail: the streaming bubble is owned by a role=user
        *   VU placeholder (`_isVirtualUser` + `_streamingVu`), NOT an assistant.
@@ -89,27 +111,35 @@ function showStreamingUIForConv(convId) {
   }
 
   const lastMsg = _last;
-  const _smTime = formatClockTime(lastMsg?.timestamp);
-  if (_lastIsStreamingBubble) {
+  /* ★ The live bubble is re-created whenever a stream is registered for this
+   *   conv — INDEPENDENT of whether the array tail currently owns it. The old
+   *   coupling re-created the bubble only when the tail was the bubble owner,
+   *   so a stream whose bound message was not (or not yet) the tail lost its
+   *   live UI on the next rebuild. Kind + data-msg-id come from the stream's
+   *   BOUND message (identity), falling back to the tail's lane flags. */
+  const _boundMsg = (_liveEntry && _liveEntry.assistantMsg) || null;
+  const _smSrc = _boundMsg || lastMsg;
+  const _smTime = formatClockTime(_smSrc && _smSrc.timestamp);
+  if (_liveEntry || _lastIsStreamingBubble) {
     /* ★ Carry the message's stable _msgId onto the rebuilt bubble's
      *   data-msg-id. Without it, the live per-round translation preview
      *   (_renderStreamingTranslatePreview, routed by data-msg-id) can no
      *   longer target this bubble after any mid-stream full re-render, so
      *   the Chinese stops filling in until the task ends. */
-    const _smMsgId = lastMsg._msgId || null;
-    if (lastMsg.role === "assistant" && lastMsg._isEndpointPlanner) {
+    const _smMsgId = (_smSrc && _smSrc._msgId) || null;
+    if (_smSrc.role === "assistant" && _smSrc._isEndpointPlanner) {
       html += _streamingBubbleHTML('planner', 'Planning…', _smTime, _smMsgId);
-    } else if (lastMsg.role === "assistant" && lastMsg._swarmAutoContinue) {
+    } else if (_smSrc.role === "assistant" && _smSrc._swarmAutoContinue) {
       html += _streamingBubbleHTML('swarm', 'Continuing…', _smTime, _smMsgId);
-    } else if (lastMsg.role === "assistant") {
+    } else if (_smSrc.role === "assistant") {
       html += _streamingBubbleHTML('worker', 'Streaming…', _smTime, _smMsgId);
-    } else if (lastMsg._isVirtualUser) {
+    } else if (_smSrc._isVirtualUser) {
       /* Autopilot VU (role=user, machine-authored) — stream in the USER lane
        * through the SAME substrate as the worker so its reply + tool rounds
        * render identically. `null` status → the `autopilot.warming` default,
        * which the first forwarded phase / delta immediately replaces. */
       html += _streamingBubbleHTML('autopilot', null, _smTime, _smMsgId);
-    } else if (lastMsg._isEndpointReview) {
+    } else if (_smSrc._isEndpointReview) {
       html += _streamingBubbleHTML('critic', 'Reviewing…', _smTime, _smMsgId);
     }
   }
@@ -134,21 +164,21 @@ function showStreamingUIForConv(convId) {
     _forceScrollToBottom(null, true);
   }
   updateSendButton();
-  if (_lastIsStreamingBubble) {
+  if ((_liveEntry || _lastIsStreamingBubble) && _smSrc) {
     /* §7: project straight from the message document; phase from the live
      * session slice. */
     const _sess = (typeof streamSessions !== 'undefined') ? streamSessions.get(convId) : null;
     updateStreamingUI({
-      thinking: lastMsg.thinking || "",
-      content: lastMsg.content || "",
-      toolRounds: getToolRoundsFromMsg(lastMsg),
+      thinking: _smSrc.thinking || "",
+      content: _smSrc.content || "",
+      toolRounds: getToolRoundsFromMsg(_smSrc),
       phase: (_sess && _sess.phase) || null,
-      _memoryPrefetch: lastMsg._memoryPrefetch,
-      _mcpLoginHint: lastMsg._mcpLoginHint,
-      fallbackModel: lastMsg.fallbackModel,
-      fallbackFrom: lastMsg.fallbackFrom,
-      fallbackReason: lastMsg.fallbackReason,
-      fallbackKind: lastMsg.fallbackKind,
+      _memoryPrefetch: _smSrc._memoryPrefetch,
+      _mcpLoginHint: _smSrc._mcpLoginHint,
+      fallbackModel: _smSrc.fallbackModel,
+      fallbackFrom: _smSrc.fallbackFrom,
+      fallbackReason: _smSrc.fallbackReason,
+      fallbackKind: _smSrc.fallbackKind,
     });
     /* ★ Repaint the live translation preview immediately after the bubble is
      *   rebuilt. The body's innerHTML was just replaced, destroying any
@@ -157,16 +187,16 @@ function showStreamingUIForConv(convId) {
      *   the message so the Chinese-so-far survives the rebuild instead of
      *   blanking until the next round closes. No-op when nothing was
      *   translated yet or this isn't the streaming bubble. */
-    if (lastMsg._translatePartial && lastMsg._msgId
+    if (_smSrc._translatePartial && _smSrc._msgId
         && typeof _renderStreamingTranslatePreview === 'function') {
-      _renderStreamingTranslatePreview(convId, lastMsg._msgId, lastMsg._translatePartial, lastMsg._translatePartialByRound);
+      _renderStreamingTranslatePreview(convId, _smSrc._msgId, _smSrc._translatePartial, _smSrc._translatePartialByRound);
     }
     /* ★ FIX: After page refresh, SSE data may arrive AFTER this initial render.
      *   Schedule a deferred re-render (300ms) so that any SSE state event that
      *   arrives during the connection setup window gets rendered — without this,
      *   the user sees "Waiting…" until the NEXT SSE event triggers twUpdate. */
     const _deferConvId = convId;
-    const _deferLastMsg = lastMsg;
+    const _deferLastMsg = _smSrc;
     setTimeout(() => {
       if (activeConvId !== _deferConvId) return;           // user switched away
       if (!activeStreams.has(_deferConvId)) return;         // stream finished

@@ -28,11 +28,11 @@
 >
 > **Kit readiness, measured 2026-07-31** — so a future submitter starts from
 > facts rather than re-deriving them:
-> - `manifest.store.json` = 10 permissions, version 4.5.0, matching the
+> - `manifest.store.json` = 10 permissions, version 4.7.0, matching the
 >   shipped manifest; `downloads` present, `activeTab` absent.
 > - `bash scripts/package_extension.sh --store` produces a valid
->   `tofu-browser-bridge-4.5.0-store.zip` (7 files, `<all_urls>`).
-> - `tests/test_chrome_store_manifest_parity.py` — 20/20, and it DERIVES the
+>   `tofu-browser-bridge-4.7.0-store.zip` (7 files, `<all_urls>`).
+> - `tests/test_chrome_store_manifest_parity.py` — 25/25, and it DERIVES the
 >   required permissions from the extension's real `chrome.*` calls, so it
 >   keeps this kit honest while it sits idle.
 >

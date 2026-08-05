@@ -59,7 +59,7 @@ def _node_deps_available() -> bool:
 _HARNESS = r"""
 const fs = require('fs');
 const path = require('path');
-const ROOT = process.argv[4];
+const ROOT = process.argv[5];
 const { JSDOM } = require(path.join(ROOT, 'node_modules', 'jsdom'));
 const dom = new JSDOM('<!DOCTYPE html><body></body>', { url: 'http://localhost/' });
 const win = dom.window;
@@ -77,11 +77,16 @@ win.Icon = global.Icon = (name, size) => '<svg data-icon="' + name + '"></svg>';
 win.renderMarkdown = global.renderMarkdown = (s) => '<p>' + global.escapeHtml(s) + '</p>';
 win._isRoundSwarm = global._isRoundSwarm = (r) => false;
 
-// Load REAL shipped modules. tool_rounds.js first (defines _renderTimerWatcherBlock,
-// _timerNextPollText, _tickTimerCountdowns, and installs window._timerCountdownTicker),
-// then streaming_ui.js (defines _syncToolRoundsDOM which calls into tool_rounds).
-eval(fs.readFileSync(process.argv[2], 'utf8'));  // ui/tool_rounds.js
-eval(fs.readFileSync(process.argv[3], 'utf8'));  // ui/streaming_ui.js
+// Load REAL shipped modules. tool_rounds.js first (the _renderUnifiedToolLine
+// dispatcher), then tool_rounds_rich.js (the timer watcher block —
+// _renderTimerWatcherBlock / _timerNextPollText / _tickTimerCountdowns /
+// window._timerCountdownTicker — moved there in the Epic-E split 2026-08-01),
+// then streaming_ui.js (defines _syncToolRoundsDOM which calls into both).
+// tool_rounds + rich in ONE eval so the rich block's top-level consts stay
+// in scope for it.
+eval(fs.readFileSync(process.argv[2], 'utf8') + '\n' +
+     fs.readFileSync(process.argv[3], 'utf8'));  // ui/tool_rounds.js + ui/tool_rounds_rich.js
+eval(fs.readFileSync(process.argv[4], 'utf8'));  // ui/streaming_ui.js
 
 const out = [];
 function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
@@ -227,9 +232,10 @@ def test_timer_countdown_is_live_and_rolls_over():
     try:
         proc = subprocess.run(
             ['node', harness,
-             os.path.join(JS_DIR, 'ui', 'tool_rounds.js'),    # argv[2]
-             os.path.join(JS_DIR, 'ui', 'streaming_ui.js'),   # argv[3]
-             ROOT,                                            # argv[4]
+             os.path.join(JS_DIR, 'ui', 'tool_rounds.js'),      # argv[2]
+             os.path.join(JS_DIR, 'ui', 'tool_rounds_rich.js'), # argv[3]
+             os.path.join(JS_DIR, 'ui', 'streaming_ui.js'),     # argv[4]
+             ROOT,                                              # argv[5]
              ],
             capture_output=True, text=True, timeout=60,
         )

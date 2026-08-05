@@ -13,7 +13,8 @@ import pytest
 
 from lib.tools.search import build_search_tool
 from tofu_search import configure
-from tofu_search.search.vertical import describe_domains, list_domains
+from tofu_search.search.vertical import (describe_domains, list_domains,
+                                         travel_flyai, travel_hotel)
 
 
 @pytest.fixture(autouse=True)
@@ -63,14 +64,27 @@ def test_travel_is_advertised_and_names_both_capabilities():
 
 
 @pytest.mark.unit
-def test_partial_availability_is_spelled_out_for_the_model():
-    """No key: flight still works, so travel stays listed — but must warn."""
+def test_full_keyless_availability_carries_no_warning():
+    """Keyless: FlyAI's bundled trial credential covers BOTH travel types, so
+    the travel line must NOT carry an availability warning."""
     configure(rollinggo_api_key='')
     description = build_search_tool()['function']['description']
     travel_line = next(line for line in description.splitlines()
                        if line.startswith('- ``travel``'))
+    assert 'do NOT use' not in travel_line
+    assert 'only flight' not in travel_line
+
+
+@pytest.mark.unit
+def test_partial_availability_warning_still_rendered(monkeypatch):
+    """The gap-note mechanism itself stays load-bearing: if exactly one type
+    loses its provider, the model must be told which queries to avoid."""
+    configure(rollinggo_api_key='')
+    monkeypatch.setattr(travel_hotel, 'is_available', lambda cfg=None: False)
+    description = build_search_tool()['function']['description']
+    travel_line = next(line for line in description.splitlines()
+                       if line.startswith('- ``travel``'))
     assert 'only flight is available' in travel_line
-    assert 'ROLLINGGO_API_KEY' in travel_line
     assert 'do NOT use this domain for hotel' in travel_line
 
 
@@ -84,10 +98,15 @@ def test_no_availability_warning_once_the_key_is_present():
 
 
 @pytest.mark.unit
-def test_schema_is_rebuilt_per_call_not_frozen_at_import():
-    """The credential is set in Settings at runtime, so caching would lie."""
+def test_schema_is_rebuilt_per_call_not_frozen_at_import(monkeypatch):
+    """Availability is PROCESS state — a rejected credential latches off
+    mid-process — so caching the schema at import would lie."""
     configure(rollinggo_api_key='')
     before = build_search_tool()['function']['description']
-    configure(rollinggo_api_key='mcp_test')
+    assert '``travel``' in before
+    # Both travel types ride the FlyAI latch: once it flips, the whole domain
+    # drops out of the schema.
+    monkeypatch.setattr(travel_flyai, 'is_available', lambda cfg=None: False)
     after = build_search_tool()['function']['description']
+    assert '``travel``' not in after
     assert before != after

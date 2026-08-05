@@ -88,6 +88,11 @@ jobs:
   # surfaces any residual skips so a missing dep can't hide a whole suite again.
   frontend:
     runs-on: ubuntu-latest
+    # P0-1 (docs/TESTING_STRATEGY.md §4): this lane PROMISES to run the
+    # frontend suites — a missing node/jsdom must turn the lane red, never
+    # silently skip 467 suites to green.
+    env:
+      TOFU_REQUIRE_FRONTEND: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -137,5 +142,5 @@ jobs:
           pip install playwright
       - name: Install Chromium + system deps
         run: python -m playwright install --with-deps chromium
-      - name: Run E2E smoke test
-        run: pytest tests/test_e2e_smoke.py -m visual -ra
+      - name: Run E2E smoke + critical journeys
+        run: pytest tests/test_e2e_smoke.py tests/test_e2e_journeys.py -m visual -ra

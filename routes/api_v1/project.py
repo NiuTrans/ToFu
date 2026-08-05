@@ -50,10 +50,11 @@ from __future__ import annotations
 
 import os
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, request
 
 from lib.api_response import (
     api_bad_request, api_error, api_internal_error, api_not_found, api_ok,
+    api_payload,
 )
 from lib.log import get_logger
 from lib.openapi import api_meta
@@ -152,9 +153,9 @@ def project_status():
     conv_id = (request.args.get('conv_id') or '').strip()
     if conv_id:
         from lib.project_mod import get_state_for_conv
-        return jsonify(get_state_for_conv(conv_id))
+        return api_ok(get_state_for_conv(conv_id))
     from lib.project_mod import get_state
-    return jsonify(get_state())
+    return api_ok(get_state())
 
 
 @api_v1_project_bp.route('/api/v1/project', methods=['DELETE'])
@@ -180,8 +181,8 @@ def project_browse():
     from lib.project_mod import browse_directory
     result = browse_directory(path, show_hidden=show_hidden)
     if result.get('error'):
-        return jsonify(result), 400
-    return jsonify(result)
+        return api_payload(result, 400)
+    return api_ok(result)
 
 
 @api_v1_project_bp.route('/api/v1/project/mkdir', methods=['POST'])
@@ -205,8 +206,8 @@ def project_mkdir():
     from lib.project_mod import create_directory
     result = create_directory(parent, name)
     if result.get('error'):
-        return jsonify(result), 400
-    return jsonify(result)
+        return api_payload(result, 400)
+    return api_ok(result)
 
 
 @api_v1_project_bp.route('/api/v1/project/rmdir', methods=['POST'])
@@ -228,8 +229,8 @@ def project_rmdir():
     from lib.project_mod import delete_directory
     result = delete_directory(path)
     if result.get('error'):
-        return jsonify(result), 400
-    return jsonify(result)
+        return api_payload(result, 400)
+    return api_ok(result)
 
 
 # ── Recent projects ──────────────────────────────────────────────────
@@ -255,7 +256,7 @@ def project_recent():
     if request.method == 'DELETE':
         clear_recent_projects()
         return api_ok()
-    return jsonify({'projects': get_recent_projects()})
+    return api_ok({'projects': get_recent_projects()})
 
 
 # ── Approval / undo / redo / rescan ─────────────────────────────────
@@ -321,7 +322,7 @@ def project_undo():
                         result.get('failed', 0))
         else:
             return api_bad_request('Provide taskId or convId')
-        return jsonify(result)
+        return api_ok(result)
     except Exception as e:
         logger.error('[Project.v1] undo failed: %s', e, exc_info=True)
         return api_internal_error(e, source='api_v1.project.undo')
@@ -348,7 +349,7 @@ def project_undo_all():
         result = undo_all_modifications(project_path)
         logger.info('[Project.v1] undo_all: undone=%s failed=%s',
                     result.get('undone', 0), result.get('failed', 0))
-        return jsonify(result)
+        return api_ok(result)
     except Exception as e:
         logger.error('[Project.v1] undo_all failed: %s', e, exc_info=True)
         return api_internal_error(e, source='api_v1.project.undo_all')
@@ -384,7 +385,7 @@ def project_redo():
         result = redo_task_modifications(project_path, task_id)
         logger.info('[Project.v1] redo task=%s: redone=%s ok=%s',
                     task_id[:8], result.get('redone', 0), result.get('ok'))
-        return jsonify(result)
+        return api_ok(result)
     except Exception as e:
         logger.error('[Project.v1] redo failed: %s', e, exc_info=True)
         return api_internal_error(e, source='api_v1.project.redo')
@@ -397,7 +398,7 @@ def project_redo():
 def project_rescan():
     try:
         from lib.project_mod import rescan
-        return jsonify({'ok': True, **(rescan() or {})})
+        return api_ok(rescan() or {})
     except Exception as e:
         logger.error('[Project.v1] rescan failed: %s', e, exc_info=True)
         return api_internal_error(e, source='api_v1.project.rescan')
@@ -453,7 +454,7 @@ def project_gitignore_accept():
         from lib.project_mod.gitignore_suggest import accept_suggestions
         result = accept_suggestions(project_path, dirs)
         if 'error' in result:
-            return jsonify(result), 400
+            return api_payload(result, 400)
         logger.info('[Project.v1] gitignore/accept %s: added=%s skipped=%s '
                     'unknown=%s', project_path, result.get('added'),
                     result.get('skipped_existing'), result.get('unknown'))
@@ -639,8 +640,8 @@ def project_charter_commit():
         if not result.get('ok'):
             # version_conflict is a real, recoverable client outcome → 409.
             if result.get('error') == 'version_conflict':
-                return jsonify(result), 409
-            return jsonify(result), 400
+                return api_payload(result, 409)
+            return api_payload(result, 400)
         return api_ok(result)
     except Exception as e:
         logger.error('[Project.v1] charter commit failed for %s: %s',
@@ -737,7 +738,7 @@ def project_board_post():
         from lib.conversations.project_board import post_task
         result = post_task(project_path, conv_id, title, depends_on=depends_on)
         if not result.get('ok'):
-            return jsonify(result), 400
+            return api_payload(result, 400)
         logger.info('[Project.v1] board/post proj=%.40r conv=%s id=%s',
                     project_path, conv_id[:8], result.get('id'))
         return api_ok(result)
@@ -771,7 +772,7 @@ def project_board_complete():
         from lib.conversations.project_board import complete_task
         result = complete_task(project_path, conv_id, task_id)
         if not result.get('ok'):
-            return jsonify(result), 400
+            return api_payload(result, 400)
         logger.info('[Project.v1] board/complete proj=%.40r task=%s',
                     project_path, task_id)
         return api_ok(result)
@@ -818,7 +819,7 @@ def project_board_block():
         result = block_task(project_path, conv_id, task_id, reason,
                             question=question, options=options)
         if not result.get('ok'):
-            return jsonify(result), 400
+            return api_payload(result, 400)
         logger.info('[Project.v1] board/block proj=%.40r task=%s',
                     project_path, task_id)
         return api_ok(result)
@@ -855,7 +856,7 @@ def project_board_reopen():
         from lib.conversations.project_board import reopen_task
         result = reopen_task(project_path, conv_id, task_id)
         if not result.get('ok'):
-            return jsonify(result), 400
+            return api_payload(result, 400)
         logger.info('[Project.v1] board/reopen proj=%.40r task=%s from=%s',
                     project_path, task_id, result.get('from'))
         return api_ok(result)
@@ -895,7 +896,7 @@ def project_board_answer():
         from lib.conversations.project_board import answer_task
         result = answer_task(project_path, conv_id, task_id, answer)
         if not result.get('ok'):
-            return jsonify(result), 400
+            return api_payload(result, 400)
         logger.info('[Project.v1] board/answer proj=%.40r task=%s',
                     project_path, task_id)
         return api_ok(result)
@@ -956,7 +957,7 @@ def project_charter_dismiss():
             project_path, (data.get('updated_by_conv') or '').strip(),
             proposal_id, summary=(data.get('summary') or '').strip())
         if not result.get('ok'):
-            return jsonify(result), 400
+            return api_payload(result, 400)
         return api_ok(result)
     except Exception as e:
         logger.error('[Project.v1] charter dismiss failed for %s: %s',
@@ -1023,8 +1024,8 @@ def project_charter_decision_update():
             updated_by_conv=(data.get('updated_by_conv') or '').strip())
         if not result.get('ok'):
             if result.get('error') == 'version_conflict':
-                return jsonify(result), 409
-            return jsonify(result), 400
+                return api_payload(result, 409)
+            return api_payload(result, 400)
         return api_ok(result)
     except Exception as e:
         logger.error('[Project.v1] charter decision update failed for %s: %s',
@@ -1063,8 +1064,8 @@ def project_charter_decision_delete():
             updated_by_conv=(data.get('updated_by_conv') or '').strip())
         if not result.get('ok'):
             if result.get('error') == 'version_conflict':
-                return jsonify(result), 409
-            return jsonify(result), 400
+                return api_payload(result, 409)
+            return api_payload(result, 400)
         return api_ok(result)
     except Exception as e:
         logger.error('[Project.v1] charter decision delete failed for %s: %s',
@@ -1099,8 +1100,8 @@ def project_charter_delete():
             updated_by_conv=(data.get('updated_by_conv') or '').strip())
         if not result.get('ok'):
             if result.get('error') == 'version_conflict':
-                return jsonify(result), 409
-            return jsonify(result), 400
+                return api_payload(result, 409)
+            return api_payload(result, 400)
         return api_ok(result)
     except Exception as e:
         logger.error('[Project.v1] charter delete failed for %s: %s',
@@ -1274,7 +1275,7 @@ def project_brain_status_ask():
         from lib.conversations.project_status import answer_status_question
         res = answer_status_question(project_path, question)
         if not res.get('ok'):
-            return jsonify(res), 400
+            return api_payload(res, 400)
         return api_ok(res)
     except Exception as e:
         logger.error('[Project.v1] brain status ask failed for %s: %s',
@@ -1355,7 +1356,7 @@ def project_brain_watch_add():
                              (data.get('text') or ''),
                              created_by_conv=(data.get('convId') or '').strip())
         if not res.get('ok'):
-            return jsonify(res), 400
+            return api_payload(res, 400)
         return api_ok(res)
     except Exception as e:
         logger.error('[Project.v1] watch add failed for %s: %s',
@@ -1393,7 +1394,7 @@ def project_brain_watch_update():
         else:
             return api_bad_request('unknown action', field='action')
         if not res.get('ok'):
-            return jsonify(res), 400
+            return api_payload(res, 400)
         return api_ok(res)
     except Exception as e:
         logger.error('[Project.v1] watch update failed item=%s: %s',
@@ -1463,7 +1464,7 @@ def project_brain_watch_promote():
                                  expected_version=expected_version)
         if not res.get('ok'):
             code = 409 if res.get('error') == 'version_conflict' else 400
-            return jsonify(res), code
+            return api_payload(res, code)
         return api_ok(res)
     except Exception as e:
         logger.error('[Project.v1] watch promote failed item=%s: %s',
@@ -1537,6 +1538,9 @@ def project_brain_influence():
     except Exception as e:
         logger.error('[Project.v1] brain influence failed for %s conv=%s: %s',
                      project_path, (conv_id or '')[:8], e, exc_info=True)
+        return api_internal_error(e, source='api_v1.project.brain_influence')
+
+
 @api_v1_project_bp.route('/api/v1/project/brain/peer-message', methods=['POST'])
 @require_auth
 @rate_limit(limit=20, per=60)
@@ -1578,7 +1582,7 @@ def project_brain_peer_message():
         if not res.get('ok'):
             logger.info('[Project.v1] peer-message refused %s→%s: %s',
                         from_conv[:8], to_conv[:8], res.get('error'))
-            return jsonify(res), 400
+            return api_payload(res, 400)
         logger.info('[Project.v1] operator peer-message %s→%s (%d chars)',
                     from_conv[:8], to_conv[:8], len(text))
         return api_ok(res)
@@ -1631,7 +1635,7 @@ def project_brain_peer_abort():
         if not res.get('ok'):
             logger.info('[Project.v1] peer-abort refused %s→%s: %s',
                         from_conv[:8], to_conv[:8], res.get('error'))
-            return jsonify(res), 400
+            return api_payload(res, 400)
         logger.info('[Project.v1] operator peer-abort %s→%s aborted=%d '
                     'approved_by=%s', from_conv[:8], to_conv[:8],
                     res.get('aborted', 0), approver)
@@ -1640,9 +1644,6 @@ def project_brain_peer_abort():
         logger.error('[Project.v1] peer-abort failed for %s: %s',
                      project_path, e, exc_info=True)
         return api_internal_error(e, source='api_v1.project.brain_peer_abort')
-
-
-        return api_internal_error(e, source='api_v1.project.brain_influence')
 
 
 # ── Direct file write (Apply Code button) ────────────────────────────
@@ -1681,8 +1682,8 @@ def project_write():
     if not result.get('ok'):
         logger.warning('[Project.v1] write failed for %s: %s',
                        path, result.get('error'))
-        return jsonify(result), 400
-    return jsonify(result)
+        return api_payload(result, 400)
+    return api_ok(result)
 
 
 @api_v1_project_bp.route('/api/v1/project/upload', methods=['POST'])
@@ -1738,10 +1739,10 @@ def project_upload():
     if not result.get('ok'):
         logger.warning('[Project.v1] upload failed for %s: %s',
                        target_path, result.get('error'))
-        return jsonify(result), 400
+        return api_payload(result, 400)
     logger.info('[Project.v1] upload saved %s (%d bytes, renamed=%s)',
                 result.get('path'), result.get('bytesWritten', 0),
                 result.get('renamed'))
-    return jsonify(result)
+    return api_ok(result)
 
 __all__ = ['api_v1_project_bp']

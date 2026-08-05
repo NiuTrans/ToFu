@@ -24,6 +24,15 @@
  *     which includes PHASE events — docs/RENDER_CONTRACT_PHASE3_5_PLAN.md §7.4).
  *   - the poll fallback (sse_poll_fallback.js) — server truth for phase.
  *   - VU streaming deltas (streaming_render.js) — phase clear/set mirror.
+ *
+ * CONDITIONAL FOLD (module-owned, NOT a raw writer): foldStreamPhaseIf()
+ * below is the ONLY sanctioned out-of-band fold — today used solely by the
+ * compaction_done SSE handler (sse_handlers_misc.js) to retire a live
+ * 'compacting' phase the moment the compaction's own terminal lands
+ * (pt_f222e9ed: the phase has no later lifecycle event of its own, so
+ * without the fold it outlives the compaction for hours). The session READ
+ * stays inside this module, so neither the reader- nor writer-surface guard
+ * grows for that caller.
  * READERS (the full pinned surface — pinned by the read-surface guard):
  *   - health_stream_timer.js :824  _updateStreamTimerUI (the liveness banner)
  *   - health_stream_timer.js :943  _streamFrameArg (the updateStreamingUI frame)
@@ -186,4 +195,21 @@ function clearStreamSession(convId) {
   /* Turn ended → the rate-limit verdict flips back off; repaint once so the
    * sidebar dot/tag clears even if no further PHASE event arrives. */
   _mirrorRateLimitFlip(_wasRl, null);
+}
+
+/** Fold the live phase IFF it is exactly `phaseName` (no-op otherwise).
+ *
+ * The out-of-band terminal fold: some phases own a lifecycle that ENDS on a
+ * non-PHASE event — 'compacting' ends on compaction_done, which is not a
+ * phase event and therefore never retired the HUD on its own (pt_f222e9ed:
+ * the pill then outlived the compaction for hours). Keeping the read +
+ * conditional clear INSIDE this module means the caller is neither a raw
+ * session reader nor a raw writer, so the RENDER_CONTRACT pinned surfaces
+ * (test_frontend_convview_apply_guards.py) do not grow. Never folds an
+ * unrelated live phase; never creates a session entry for a conv without
+ * one (Map-leak guard, probe-pinned). */
+function foldStreamPhaseIf(convId, phaseName) {
+  const _s = streamSessions.get(convId);
+  if (!_s || !_s.phase || _s.phase.phase !== phaseName) return;
+  setStreamPhase(convId, null);
 }

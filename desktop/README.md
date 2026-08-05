@@ -2,6 +2,13 @@
 
 Standalone installers for Windows, macOS, and Linux — no Python, no conda, no terminal needed.
 
+**Two components (2026-08-02, docs/DESKTOP_AGENT_DIST_DESIGN.md):** this
+directory builds BOTH the full desktop app (`tofu.spec` → `Tofu-Setup-*`,
+server + client + tray, ~153 MB) and the agent-only controlled endpoint
+(`tofu-agent.spec` → `TofuAgent-Setup-*`, no server, no UI, ~53 MB).
+`agent_launcher.py` is the agent's entry; `connect_ui.py` is the shared
+connect-line dialog + preseed import both launchers use.
+
 ## Quick Build (local)
 
 ```bash
@@ -29,17 +36,63 @@ The installer bundles:
 - SQLite as automatic fallback when PG is unavailable
 - Playwright Python package (browser binary downloaded separately)
 - Frontend (HTML/CSS/JS — no build step)
-- System tray icon with Open/Quit/Install Components controls
+- Startup **role window** (bilingual zh/en): declares "this computer runs your Tofu
+  server" — and doubles as the computer-control panel (enable toggle, permission
+  tiers, connect-to-remote), the controls that used to be tray-only
+- Bilingual system tray with Open/Control panel/Computer Control/Quit controls
 - Auto-opens browser on startup
 
 ## First-Launch Experience
+
+Every launch (full app and agent alike) opens the **role window**
+(`desktop/role_window.py`, themed by `_tk_theme`, bilingual zh/en): the full
+app declares "this computer runs your Tofu server" — and admits it when the
+machine is ALSO attached to a remote Tofu as a controlled endpoint — while the
+agent declares "this computer is controlled by a Tofu server" with the server
+address it answers to. The window IS the control panel: computer-control
+toggle, permission tiers, connect-to-remote, start-with-Windows, all the
+controls that used to be tray-only. Unchecking "Show this window at startup"
+sends future launches straight to the tray, which keeps a **Control panel…**
+item as the way back. Design: `docs/DESKTOP_STARTUP_ROLE_UX_DESIGN.md`.
+
+**Tray-first (2026-08-04).** On Windows the tray icon starts BEFORE the role
+window can ever hide: pystray's `icon.run()` owns the main thread from second
+zero, while a dedicated tk host thread (`desktop/_tk_host.py`) owns every
+window and dialog (tray callbacks marshal window work to it). Both the
+in-window "Minimize to tray" button and the title-bar minimize hide the window
+to the already-running tray — an earlier window-then-tray sequence made
+"minimize to tray" structurally impossible (the tray did not exist yet) and
+the window vanished. Off Windows (macOS demands the main thread for both
+frameworks) the legacy window-then-tray sequence stands. The native surface
+resolves an explicit per-platform font stack (the tk default fell through to
+SimSun serif on Chinese-locale Windows) and `detect_lang()` understands
+Windows display-name locales (`Chinese (Simplified)_China` → zh).
 
 The **installer only ships files and launches the app** — it never shells out to
 download components (a PyInstaller `--onedir` bundle has no standalone
 `python.exe`, so the old installer `[Run]` step that called
 `_internal\python.exe -m playwright install` was dead code that also silently
 downloaded nothing). Instead, on first launch the **app itself** shows a dialog
-asking which optional components to download:
+asking which optional components to download.
+
+The dialog is the branded **component manager** (`desktop/post_install.py` on
+`desktop/_tk_theme.py`): it follows the OS light/dark mode, speaks English or
+Chinese by OS locale (`TOFU_THEME` / `TOFU_LANG` override), and — critically —
+**stays open during installation with a live per-component status row and an
+overall progress bar**. (The original flow closed the window and downloaded
+~165 MB invisibly on a background thread; failures were only written to a log
+file.) Success and failure messages are shown in the window, and the same
+manager is reachable later from the tray menu. The Windows wizard itself
+(2026-08-04 redesign, `desktop/installer.nsi.tmpl`) is a fully custom
+nsDialogs wizard — flat brand-purple band with the tofu cube and version,
+one #F0F0F0 card per step, Segoe UI / Microsoft YaHei labels, a marquee
+progress bar (no 3316-line log pane), `/SOLID lzma` (agent 53→45 MB, full
+~153→120 MB), DPI-aware chrome, bilingual en/zh, `/S` silent installs, and
+Add/Remove-Programs registration. Its page art is rendered at wrap time by
+`lib/desktop_dist/installer_art.py`; the CI's Inno authoring keeps the
+classic wizard with the branded sidebar bitmap, and the macOS DMG window
+is branded as well (`scripts/gen_desktop_icons.py` emits the wizard
+bitmaps and the DMG window art alongside the icons).
 
 | Component | Size | Default | Purpose |
 |---|---|---|---|
@@ -103,9 +156,24 @@ git push origin v0.10.0
 
 This runs `.github/workflows/build-desktop.yml` which produces:
 - `Tofu-Setup-<ver>-win64.exe` — Windows installer (Inno Setup)
-- `Tofu-<ver>-macos-arm64.dmg` — macOS disk image, Apple Silicon (built on `macos-14`)
-- `Tofu-<ver>-macos-x86_64.dmg` — macOS disk image, Intel (built on `macos-13`)
-- `Tofu-<ver>-linux-x86_64.tar.gz` — Linux portable archive
+- `TofuAgent-Setup-<ver>-win64.exe` — Windows **agent** installer (Inno Setup,
+  default-on start-with-Windows task; HKCU, removed at uninstall)
+- `Tofu-<ver>-macos-arm64.dmg` — macOS disk image, Apple Silicon
+- `Tofu-<ver>-macos-x86_64.dmg` — macOS disk image, Intel
+- `TofuAgent-<ver>-macos-{arm64,x86_64}.dmg` — macOS agent disk images
+- `TofuAgent-<ver>-linux-x86_64.tar.gz` — Linux agent archive (tar.gz only;
+  .deb stays full-only)
+- `Tofu-<ver>-linux-x86_64.deb` — **primary Linux installer** (Debian/Ubuntu):
+  installs to `/opt/Tofu` with a system-wide menu entry and icon; user data
+  lives in `~/.local/share/Tofu` (the app never writes into `/opt`).
+  Install with `sudo apt install ./Tofu-<ver>-linux-x86_64.deb`.
+  (Evaluated against AppImage, which lost on three axes: dpkg-deb ships in
+  the CI base image — no downloaded tooling; no FUSE at build time; and no
+  FUSE at RUN time, whereas type-2 AppImages need `libfuse2`, which
+  Ubuntu 22.04+ no longer installs by default.)
+- `Tofu-<ver>-linux-x86_64.tar.gz` — Linux portable archive, the no-sudo /
+  non-Debian fallback (includes `install.sh` — per-user — which registers an
+  application-menu entry and themed icon; run it once after extracting)
 - `SHA256SUMS` — checksums covering all of the above
 
 The release is **published immediately and promoted to Latest** (`draft: false` +

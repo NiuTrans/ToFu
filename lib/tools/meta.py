@@ -259,6 +259,11 @@ def _build_run_command(meta, fn_name, fn_args, tool_content, path):
     m = re.search(r'\[exit code: (-?\d+)\]\s*$', tool_content)
     exit_code = m.group(1) if m else '?'
     timed_out = '[Command timed out]' in tool_content
+    # ★ Per-command interrupt (user button / stall watchdog, pt_232244fb):
+    #   `[Command interrupted by user]` / `[Command interrupted by stall-
+    #   watchdog: …]`. Distinct from a whole-task abort — the turn CONTINUED
+    #   with the partial output, so the round settles done, not aborted.
+    interrupted = '[Command interrupted by' in tool_content
     prefix = f'$ {cmd}\n'
     if tool_content.startswith(prefix):
         output_text = tool_content[len(prefix):]
@@ -267,9 +272,11 @@ def _build_run_command(meta, fn_name, fn_args, tool_content, path):
         output_text = output_lines[1] if len(output_lines) > 1 else ''
     output_text = re.sub(r'\n?\[exit code: -?\d+\]\s*$', '', output_text).strip()
     output_text = re.sub(r'\n?\[Command timed out\].*$', '', output_text).strip()
+    output_text = re.sub(r'\n?\[Command interrupted by[^\n]*\].*$', '', output_text).strip()
     meta['command'] = cmd
     meta['description'] = fn_args.get('description', '')
     meta['timedOut'] = timed_out
+    meta['interrupted'] = interrupted
     # ★ "Never ran" classification. When there is NO [exit code] marker and it
     #   isn't a timeout, the command was REFUSED/BLOCKED before execution
     #   (read-only root, dangerous pattern, empty command, no project path, a
@@ -277,7 +284,7 @@ def _build_run_command(meta, fn_name, fn_args, tool_content, path):
     #   old `exit ?` badge is useless to users — the actual reason was the whole
     #   message. So when the contract marker is missing, treat the FULL
     #   tool_content as the reason and flag the round as not-run.
-    not_run = (m is None) and (not timed_out)
+    not_run = (m is None) and (not timed_out) and (not interrupted)
     if not_run:
         reason = (tool_content or '').strip()
         meta['exitCode'] = 'not-run'
@@ -289,7 +296,10 @@ def _build_run_command(meta, fn_name, fn_args, tool_content, path):
         return
     meta['output'] = output_text
     meta['exitCode'] = 'timeout' if timed_out else exit_code
-    if timed_out:
+    if interrupted:
+        meta['snippet'] = f'$ {cmd[:120]}'
+        meta['badge'] = 'interrupted'
+    elif timed_out:
         meta['snippet'] = f'$ {cmd[:120]}'
         meta['badge'] = 'timeout'
     elif exit_code == '0':

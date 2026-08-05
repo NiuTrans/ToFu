@@ -29,6 +29,24 @@ from routes.conversations import build_search_text
 from routes.conversations_search import _head_cap_sql
 
 
+def _search_items(resp):
+    """Unwrap the charter#0 ``{ok, items}`` envelope.
+
+    api-contract batch 20 (0aa0b6ff) migrated /api/v1/conversations/search
+    from a bare array to the envelope — coordinated with the frontend
+    (api.js:723 unwraps the same way). This suite pinned the old bare-array
+    shape; direction-aligned to the envelope (same drift family as
+    test_api_integration batch 9/11). Asserting the envelope here also kills
+    the vacuous passers: iterating a dict yields KEYS, so ``for r in data``
+    used to "pass" on 'ok'/'items' without ever seeing a result row.
+    """
+    data = resp.get_json()
+    assert isinstance(data, dict) and data.get('ok') is True, (
+        f'search envelope drifted: {data!r}')
+    assert isinstance(data.get('items'), list)
+    return data['items']
+
+
 # ═══════════════════════════════════════════════════════════
 #  Unit Tests: build_search_text
 # ═══════════════════════════════════════════════════════════
@@ -269,7 +287,7 @@ class TestSearchEndpoint:
         """Search returns conversations matching the query."""
         resp = flask_client.get("/api/v1/conversations/search?q=decorators")
         assert resp.status_code == 200
-        data = resp.get_json()
+        data = _search_items(resp)
         assert len(data) >= 1
         matched_ids = [r["id"] for r in data]
         alpha_id = [cid for cid in self.conv_ids if "alpha" in cid][0]
@@ -279,7 +297,7 @@ class TestSearchEndpoint:
         """Search results include content snippets."""
         resp = flask_client.get("/api/v1/conversations/search?q=gradient")
         assert resp.status_code == 200
-        data = resp.get_json()
+        data = _search_items(resp)
         assert len(data) >= 1
         # At least one result should have a non-empty snippet
         snippets = [r.get("matchSnippet", "") for r in data]
@@ -289,7 +307,7 @@ class TestSearchEndpoint:
         """Snippet should contain (or be near) the search query."""
         resp = flask_client.get("/api/v1/conversations/search?q=gradient")
         assert resp.status_code == 200
-        data = resp.get_json()
+        data = _search_items(resp)
         assert len(data) >= 1
         # The snippet should contain the query term (case-insensitive)
         for r in data:
@@ -301,7 +319,7 @@ class TestSearchEndpoint:
         """Search with non-matching query returns empty list."""
         resp = flask_client.get("/api/v1/conversations/search?q=zzznonexistentxxx999")
         assert resp.status_code == 200
-        data = resp.get_json()
+        data = _search_items(resp)
         assert data == []
 
     def test_search_empty_query_rejected(self, flask_client):
@@ -309,19 +327,19 @@ class TestSearchEndpoint:
         for q in ["", " ", "a"]:
             resp = flask_client.get(f"/api/v1/conversations/search?q={q}")
             assert resp.status_code == 200
-            assert resp.get_json() == []
+            assert _search_items(resp) == []
 
     def test_search_no_query_param(self, flask_client):
         """Missing q parameter returns empty results."""
         resp = flask_client.get("/api/v1/conversations/search")
         assert resp.status_code == 200
-        assert resp.get_json() == []
+        assert _search_items(resp) == []
 
     def test_search_unicode_chinese(self, flask_client):
         """Chinese text search works correctly."""
         resp = flask_client.get("/api/v1/conversations/search?q=搜索引擎")
         assert resp.status_code == 200
-        data = resp.get_json()
+        data = _search_items(resp)
         assert len(data) >= 1
         unicode_id = [cid for cid in self.conv_ids if "unicode" in cid][0]
         matched_ids = [r["id"] for r in data]
@@ -331,7 +349,7 @@ class TestSearchEndpoint:
         """Unique/rare terms are found correctly."""
         resp = flask_client.get("/api/v1/conversations/search?q=xylophone_zebra_quantum")
         assert resp.status_code == 200
-        data = resp.get_json()
+        data = _search_items(resp)
         assert len(data) >= 1
         unique_id = [cid for cid in self.conv_ids if "unique" in cid][0]
         matched_ids = [r["id"] for r in data]
@@ -343,8 +361,8 @@ class TestSearchEndpoint:
         resp_upper = flask_client.get("/api/v1/conversations/search?q=PYTHON")
         assert resp_lower.status_code == 200
         assert resp_upper.status_code == 200
-        ids_lower = {r["id"] for r in resp_lower.get_json()}
-        ids_upper = {r["id"] for r in resp_upper.get_json()}
+        ids_lower = {r["id"] for r in _search_items(resp_lower)}
+        ids_upper = {r["id"] for r in _search_items(resp_upper)}
         # Both should find the same test conversation
         alpha_id = [cid for cid in self.conv_ids if "alpha" in cid][0]
         assert alpha_id in ids_lower
@@ -354,7 +372,7 @@ class TestSearchEndpoint:
         """Each search result has the expected fields."""
         resp = flask_client.get("/api/v1/conversations/search?q=python")
         assert resp.status_code == 200
-        data = resp.get_json()
+        data = _search_items(resp)
         assert len(data) >= 1
         for result in data:
             assert "id" in result
@@ -377,7 +395,7 @@ class TestSearchEndpoint:
         for q in special_queries:
             resp = flask_client.get("/api/v1/conversations/search", query_string={"q": q})
             assert resp.status_code == 200, f"Crashed on query: {q}"
-            data = resp.get_json()
+            data = _search_items(resp)
             assert isinstance(data, list), f"Non-list response for query: {q}"
 
     def test_search_max_results_capped(self, flask_client):
@@ -385,7 +403,7 @@ class TestSearchEndpoint:
         # "the" should match many conversations
         resp = flask_client.get("/api/v1/conversations/search?q=the")
         assert resp.status_code == 200
-        data = resp.get_json()
+        data = _search_items(resp)
         assert len(data) <= 50
 
     def test_search_performance(self, flask_client):
@@ -406,7 +424,7 @@ class TestSearchEndpoint:
         """Search results should NOT include full messages (performance)."""
         resp = flask_client.get("/api/v1/conversations/search?q=decorators")
         assert resp.status_code == 200
-        data = resp.get_json()
+        data = _search_items(resp)
         for result in data:
             assert "messages" not in result, "Search should not return full messages"
 
@@ -427,7 +445,7 @@ class TestSearchEndpoint:
         # Should find original content
         resp = flask_client.get("/api/v1/conversations/search?q=original_platypus_content")
         assert resp.status_code == 200
-        ids = [r["id"] for r in resp.get_json()]
+        ids = [r["id"] for r in _search_items(resp)]
         assert conv_id in ids
 
         # Update with new content
@@ -441,13 +459,13 @@ class TestSearchEndpoint:
         # Should find new content
         resp = flask_client.get("/api/v1/conversations/search?q=updated_narwhal_content")
         assert resp.status_code == 200
-        ids = [r["id"] for r in resp.get_json()]
+        ids = [r["id"] for r in _search_items(resp)]
         assert conv_id in ids
 
         # Old content should no longer match
         resp = flask_client.get("/api/v1/conversations/search?q=original_platypus_content")
         assert resp.status_code == 200
-        ids = [r["id"] for r in resp.get_json()]
+        ids = [r["id"] for r in _search_items(resp)]
         assert conv_id not in ids
 
     def test_search_after_delete(self, flask_client):
@@ -466,7 +484,7 @@ class TestSearchEndpoint:
         # Verify it's findable
         resp = flask_client.get("/api/v1/conversations/search?q=ephemeral_flamingo_search")
         assert resp.status_code == 200
-        assert any(r["id"] == conv_id for r in resp.get_json())
+        assert any(r["id"] == conv_id for r in _search_items(resp))
 
         # Delete
         flask_client.delete(f"/api/v1/conversations/{conv_id}")
@@ -474,7 +492,7 @@ class TestSearchEndpoint:
         # Should no longer appear
         resp = flask_client.get("/api/v1/conversations/search?q=ephemeral_flamingo_search")
         assert resp.status_code == 200
-        assert not any(r["id"] == conv_id for r in resp.get_json())
+        assert not any(r["id"] == conv_id for r in _search_items(resp))
 
     def test_search_pg_phase1_uses_tsvector_index(self, flask_client):
         """On PG, a whole-word query must be served by the index-backed
@@ -605,7 +623,7 @@ class TestSearchEndpoint:
         # tsvector won't match "backtest" inside "superbacktesting", but ILIKE will
         resp = flask_client.get("/api/v1/conversations/search?q=superbacktest")
         assert resp.status_code == 200
-        data = resp.get_json()
+        data = _search_items(resp)
         ids = [r["id"] for r in data]
         assert conv_id in ids, f"Substring match not found. Results: {data}"
 

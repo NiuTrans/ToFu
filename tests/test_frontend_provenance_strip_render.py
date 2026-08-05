@@ -175,6 +175,9 @@ check('fn_exposed', true);
 }
 
 console.log(out.join('\n'));
+// tool_rounds.js:3730 installs a load-time 1Hz _cmdTimerTicker that keeps the
+// node event loop alive — force a clean exit after the synchronous checks.
+process.exit(0);
 """
 
 

@@ -15,8 +15,11 @@ import pytest
 @pytest.mark.unit
 class TestSearchFacade:
     def test_package_import(self):
-        import tofu_search  # noqa: F401
-        import tofu_search.search  # noqa: F401
+        import tofu_search
+        import tofu_search.search
+        assert tofu_search.__name__ == 'tofu_search'
+        assert callable(getattr(tofu_search, 'perform_web_search', None)), (
+            'facade must export perform_web_search')
 
     def test_public_api(self):
         from tofu_search import perform_web_search
@@ -102,7 +105,9 @@ class TestBrowserFacade:
     def test_advanced(self):
         from lib.browser import ADVANCED_BROWSER_TOOL_NAMES, ADVANCED_BROWSER_TOOLS
         assert isinstance(ADVANCED_BROWSER_TOOLS, list)
-        assert len(ADVANCED_BROWSER_TOOLS) == 3
+        # v2 (pt_869e5648403e4745): hover_and_click + right_click_menu merged
+        # into browser_menu_click → shipped set is menu_click + fill_form.
+        assert len(ADVANCED_BROWSER_TOOLS) == 2
         assert isinstance(ADVANCED_BROWSER_TOOL_NAMES, set)
 
     def test_all_completeness(self):

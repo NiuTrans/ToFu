@@ -48,7 +48,10 @@ def _unit(fn):
 
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_RUN_PY = os.path.join(_ROOT, 'lib/tasks_pkg/orchestrator/_run.py')
+# The ROUND_END sites moved out of _run.py into the orchestrator package
+# (5+ sites, incl. _tool_timeout_breaker.py) — scan the whole package.
+_ORCH_PKG = os.path.join(_ROOT, 'lib/tasks_pkg/orchestrator')
+_BREAKER_PY = os.path.join(_ORCH_PKG, '_tool_timeout_breaker.py')
 _EVENTS_PY = os.path.join(_ROOT, 'lib/agent_core/events.py')
 _REDUCER_JS = os.path.join(_ROOT, 'static/js/ui/stream_reducer.js')
 
@@ -66,14 +69,14 @@ def _read(path):
 def test_breaker_branch_emits_round_end_before_break():
     """Pin 1 (failing-first): the FORCE STOP branch must append_event a
     ROUND_END reason='tool_timeout' before its break."""
-    src = _read(_RUN_PY)
+    src = _read(_BREAKER_PY)
     i = src.index('FORCE STOP')
-    # The breaker branch spans from FORCE STOP to its `break`.
+    # The breaker branch spans from FORCE STOP to its `return True`.
     branch = src[i:i + 2200]
-    j = branch.index('\n                    break')
+    j = branch.index('return True')
     segment = branch[:j]
     assert "EventType.ROUND_END" in segment, (
-        'FORCE STOP branch must emit ROUND_END before break — the '
+        'FORCE STOP branch must emit ROUND_END before returning — the '
         'ROUND_START at this round\'s top is otherwise unpaired')
     assert "reason='tool_timeout'" in segment, (
         "breaker ROUND_END must carry reason='tool_timeout'")
@@ -81,9 +84,12 @@ def test_breaker_branch_emits_round_end_before_break():
 
 @_unit
 def test_all_round_end_sites_use_sanctioned_reasons():
-    """Pin 2: every ROUND_END emit site in _run.py uses a reason from the
-    closed sanctioned set (no typo'd / undocumented reasons)."""
-    src = _read(_RUN_PY)
+    """Pin 2: every ROUND_END emit site in the orchestrator package uses a
+    reason from the closed sanctioned set (no typo'd / undocumented
+    reasons)."""
+    src = '\n'.join(_read(os.path.join(_ORCH_PKG, name))
+                    for name in sorted(os.listdir(_ORCH_PKG))
+                    if name.endswith('.py'))
     hits = re.findall(
         r"EventType\.ROUND_END,\s*\n?\s*roundNum=round_num,\s*reason='([^']+)'",
         src)

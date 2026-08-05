@@ -286,8 +286,6 @@ def test_adoption_asks_for_the_advisory_verdict_not_the_plain_one():
     Adoption is the one place a composition reaches the film WITHOUT the
     author ever seeing feedback, so the looser bar is the wrong one.
     """
-    import inspect
-
     from tests._source_scan import strip_comments
     from lib.motion_video import _scene_author
 
@@ -474,8 +472,6 @@ def test_resumed_authored_composition_counts_as_authored():
     incremented on the fresh-authoring path. A fully-resumed film then read
     as "every scene fell back" in both the verdict and the panel.
     """
-    import inspect
-
     from lib.motion_video import engine
     from tests._source_scan import python_block
 

@@ -17,6 +17,7 @@ import lib as _lib
 from lib.config_dir import config_path as _config_path
 from lib.json_store import read_json, write_json_atomic
 from lib.log import audit_log, get_logger
+from lib.search_settings import normalise_domain as _ss_normalise_domain
 
 logger = get_logger(__name__)
 
@@ -40,16 +41,10 @@ def _atomic_write(data: dict) -> None:
 
 
 def _normalise_domain(domain: str) -> str:
-    dom = (domain or '').strip().lower()
-    if dom.startswith('http://') or dom.startswith('https://'):
-        dom = dom.split('://', 1)[1]
-    if dom.startswith('www.'):
-        dom = dom[4:]
-    if '/' in dom:
-        dom = dom.split('/', 1)[0]
-    if ':' in dom:
-        dom = dom.split(':', 1)[0]
-    return dom
+    # Canonical implementation lives in lib.search_settings.normalise_domain
+    # (shared with the update_search_settings agent tool); the alias name is
+    # kept because tests patch/assert it here.
+    return _ss_normalise_domain(domain)
 
 
 # ══════════════════════════════════════════════════════════

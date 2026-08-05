@@ -58,8 +58,26 @@ _V0142_SIZES = {
     'Tofu-0.14.2-macos-arm64.dmg': 170_577_117,
     'Tofu-0.14.2-macos-x86_64.dmg': 173_626_347,
     'Tofu-0.14.2-linux-x86_64.tar.gz': 193_972_205,
+    # .deb is NOT in v0.14.2 (the format shipped after the release line
+    # stalled). Measured 2026-08-01 by running desktop/build-deb.sh on the
+    # REAL 0.16.0 PyInstaller payload from the local store (the same
+    # payload the next release packs) — 175,975,798 bytes. Anchors the
+    # headroom band for the floor ac1e598c added at 130 MB (73.9% — in
+    # band), observed reality rather than an estimate.
+    'Tofu-0.16.0-linux-x86_64.deb': 175_975_798,
 }
 _HOLLOW_WINDOWS_BYTES = 48_960_018
+
+# The AGENT component's assets (deliberately added 2026-08-02, slice A2b):
+# REQUIRED_PLATFORM_ASSETS now spans BOTH tables, so a name-completeness
+# fixture must carry these too. Sizes are above the script's floors
+# (windows agent measured 53.2 MB on the first server-built leg).
+_AGENT_ASSET_SIZES = {
+    'TofuAgent-0.16.0-macos-arm64.dmg': 20_000_000,
+    'TofuAgent-0.16.0-macos-x86_64.dmg': 20_000_000,
+    'TofuAgent-Setup-0.16.0-win64.exe': 53_200_000,
+    'TofuAgent-0.16.0-linux-x86_64.tar.gz': 20_000_000,
+}
 
 
 def _load():
@@ -73,6 +91,7 @@ def test_hollow_windows_installer_is_rejected():
     """The measured 49 MB artifact must be reported as implausibly small."""
     m = _load()
     sizes = dict(_V0142_SIZES)
+    sizes.update(_AGENT_ASSET_SIZES)  # name-complete across BOTH tables
     sizes['Tofu-Setup-0.15.2-win64.exe'] = _HOLLOW_WINDOWS_BYTES
     del sizes['Tofu-Setup-0.14.2-win64.exe']
 
@@ -125,7 +144,7 @@ def test_every_consumer_agrees_on_the_row_shape():
     "direct download links quietly stopped appearing".
     """
     m = _load()
-    for row in m.PLATFORM_ASSETS:
+    for row in m.PLATFORM_ASSETS + m.AGENT_PLATFORM_ASSETS:
         assert len(row) == 5, (
             f'PLATFORM_ASSETS row {row!r} has {len(row)} fields, expected 5 '
             '(os, arch, label, glob, min_bytes). Widening this row breaks '
@@ -165,7 +184,8 @@ def test_derived_label_glob_view_still_matches_the_table():
     """REQUIRED_PLATFORM_ASSETS is derived; it must not drift from the source."""
     m = _load()
     assert m.REQUIRED_PLATFORM_ASSETS == tuple(
-        (label, pattern) for _os, _arch, label, pattern, _min in m.PLATFORM_ASSETS)
+        (label, pattern) for _os, _arch, label, pattern, _min in (
+            m.PLATFORM_ASSETS + m.AGENT_PLATFORM_ASSETS))
 
 
 def test_undetermined_contract_survives_a_non_release_body():

@@ -34,6 +34,7 @@ Public API
   api_ok(data=None, **extras)              → 200
   api_created(data=None, **extras)         → 201
   api_no_content()                         → 204
+  api_payload(payload, status=200)         → result-dict passthrough + explicit status
   api_error(error, status=400, **extras)   → 400 / custom
   api_bad_request(error, **extras)         → 400
   api_unauthorized(error='Unauthorized')   → 401
@@ -203,6 +204,31 @@ def api_no_content():
     return ('', 204)
 
 
+def api_payload(payload: dict, status: int = 200, **extras):
+    """Return a lib-layer result dict top-level with an explicit HTTP status.
+
+    The primitive for the **result-passthrough idiom**: the lib function
+    already returned ``{ok, error?, ...}`` and the route only chooses the
+    HTTP status (e.g. the Project Brain routes' ``if not result.get('ok'):
+    return ... , 409|400``). ``api_error`` is the WRONG tool here — it would
+    nest the result under a single ``error`` key instead of preserving its
+    top-level shape.
+
+    Wire contract (additive only):
+      * ``ok`` — kept from the payload when present; otherwise defaults to
+        ``status < 400``.
+      * ``request_id`` — attached on 4xx/5xx, same as ``api_error``.
+      * every payload key survives top-level, byte-identical.
+    """
+    body = dict(payload) if isinstance(payload, dict) else {'data': payload}
+    body.setdefault('ok', status < 400)
+    if extras:
+        body.update(extras)
+    if status >= 400:
+        _attach_request_id(body)
+    return jsonify(body), status
+
+
 # ── Error helpers ─────────────────────────────────────────────────────
 
 def api_error(error: Any, *, status: int = 400, kind: str = '',
@@ -369,7 +395,7 @@ def safe_route(fn):
 
 
 __all__ = [
-    'api_ok', 'api_created', 'api_no_content',
+    'api_ok', 'api_created', 'api_no_content', 'api_payload',
     'api_error', 'api_bad_request', 'api_unauthorized', 'api_forbidden',
     'api_not_found', 'api_conflict', 'api_payload_too_large',
     'api_method_not_allowed', 'api_internal_error', 'api_service_unavailable',

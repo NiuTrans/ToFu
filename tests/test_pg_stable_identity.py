@@ -35,7 +35,7 @@ def _write_pidfile(pgdata, pid, port=15432):
 # ── #1: stable host identity ────────────────────────────────────────────
 
 def test_host_identity_env_override(monkeypatch):
-    from lib.database import _bootstrap as b
+    from lib.database import _pg_ownership as b  # facade: canonical home of _HOST_IDENTITY_CACHE (_hostid.py)
     b._HOST_IDENTITY_CACHE = None
     monkeypatch.setenv('TOFU_HOST_ID', 'my-stable-host')
     assert b._get_host_identity() == 'my-stable-host'
@@ -44,7 +44,7 @@ def test_host_identity_env_override(monkeypatch):
 
 def test_host_identity_is_stable_across_ip_flap(monkeypatch):
     """Identity must not change when _get_local_ip() returns a new value."""
-    from lib.database import _bootstrap as b
+    from lib.database import _pg_ownership as b  # facade: canonical home of _HOST_IDENTITY_CACHE (_hostid.py)
     b._HOST_IDENTITY_CACHE = None
     monkeypatch.setenv('TOFU_HOST_ID', 'host-X')
     monkeypatch.setattr(b, '_get_local_ip', lambda: '10.0.0.1')
@@ -56,7 +56,7 @@ def test_host_identity_is_stable_across_ip_flap(monkeypatch):
 
 
 def test_owner_is_self_true_when_id_matches(tmp_path, monkeypatch):
-    from lib.database import _bootstrap as b
+    from lib.database import _pg_ownership as b  # facade: canonical home of _HOST_IDENTITY_CACHE (_hostid.py)
     b._HOST_IDENTITY_CACHE = None
     monkeypatch.setenv('TOFU_HOST_ID', 'host-A')
     pgdata = str(tmp_path)
@@ -67,7 +67,7 @@ def test_owner_is_self_true_when_id_matches(tmp_path, monkeypatch):
 
 
 def test_owner_is_self_false_when_id_differs(tmp_path, monkeypatch):
-    from lib.database import _bootstrap as b
+    from lib.database import _pg_ownership as b  # facade: canonical home of _HOST_IDENTITY_CACHE (_hostid.py)
     b._HOST_IDENTITY_CACHE = None
     with open(os.path.join(tmp_path, '.pg_owner_id'), 'w') as f:
         f.write('some-other-host')
@@ -77,7 +77,7 @@ def test_owner_is_self_false_when_id_differs(tmp_path, monkeypatch):
 
 
 def test_owner_is_self_none_when_marker_absent(tmp_path, monkeypatch):
-    from lib.database import _bootstrap as b
+    from lib.database import _pg_ownership as b  # facade: canonical home of _HOST_IDENTITY_CACHE (_hostid.py)
     b._HOST_IDENTITY_CACHE = None
     monkeypatch.setenv('TOFU_HOST_ID', 'host-A')
     assert b._owner_is_self(str(tmp_path)) is None
@@ -87,7 +87,7 @@ def test_owner_is_self_none_when_marker_absent(tmp_path, monkeypatch):
 def test_step3_not_remote_when_identity_matches_despite_ip_flap(tmp_path, monkeypatch):
     """The core fix: stable id says OURS → not remote, even though the IP
     flapped AND the live-PID probe would say 'not postgres'."""
-    from lib.database import _bootstrap as b
+    from lib.database import _pg_ownership as b  # facade: canonical home of _HOST_IDENTITY_CACHE (_hostid.py)
     b._HOST_IDENTITY_CACHE = None
     monkeypatch.setenv('TOFU_HOST_ID', 'host-A')
     pgdata = str(tmp_path)
@@ -109,7 +109,7 @@ def test_step3_not_remote_when_identity_matches_despite_ip_flap(tmp_path, monkey
 def test_step3_remote_when_identity_differs(tmp_path, monkeypatch):
     """A genuinely different-host identity marker → defer to remote, even if
     the flapping IPs happen to coincide with ours."""
-    from lib.database import _bootstrap as b
+    from lib.database import _pg_ownership as b  # facade: canonical home of _HOST_IDENTITY_CACHE (_hostid.py)
     b._HOST_IDENTITY_CACHE = None
     monkeypatch.setenv('TOFU_HOST_ID', 'host-B')  # we are B
     pgdata = str(tmp_path)
@@ -132,7 +132,7 @@ def test_step3_remote_when_identity_differs(tmp_path, monkeypatch):
 def test_standalone_heal_skipped_when_identity_is_self(tmp_path, monkeypatch):
     """Standalone heal must NOT clear markers when .pg_owner_id is ours
     (an IP flap is not an inherited remote marker)."""
-    from lib.database import _bootstrap as b
+    from lib.database import _pg_ownership as b  # facade: canonical home of _HOST_IDENTITY_CACHE (_hostid.py)
     b._HOST_IDENTITY_CACHE = None
     monkeypatch.setenv('TOFU_PG_STANDALONE', '1')
     monkeypatch.setenv('TOFU_HOST_ID', 'host-A')
@@ -149,7 +149,7 @@ def test_standalone_heal_skipped_when_identity_is_self(tmp_path, monkeypatch):
 
 
 def test_clear_ownership_markers_removes_owner_id(tmp_path):
-    from lib.database import _bootstrap as b
+    from lib.database import _pg_ownership as b  # facade: canonical home of _HOST_IDENTITY_CACHE (_hostid.py)
     pgdata = str(tmp_path)
     for name in ('.pg_owner_host', '.pg_owner_id', b._HEARTBEAT_FILE):
         with open(os.path.join(pgdata, name), 'w') as f:

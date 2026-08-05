@@ -6,7 +6,7 @@ OAuth flow (console callback):
   3. User authenticates on claude.ai
   4. Redirect to console.anthropic.com/oauth/code/callback which shows code#state
   5. User copies code#state and pastes into Tofu input box
-  6. Exchange code for access_token / refresh_token via console.anthropic.com/v1/oauth/token
+  6. Exchange code for access_token / refresh_token via platform.claude.com/v1/oauth/token
   7. Token is a standard Anthropic API key (sk-ant-oat01-...)
      → use with Authorization: Bearer header on api.anthropic.com/v1/messages
 
@@ -38,17 +38,21 @@ __all__ = [
 
 # ══════════════════════════════════════════════════════════
 #  OAuth Configuration Constants
-#  (from CLIProxyAPI v6.9.10 / Claude Code official client)
+#  (from CLIProxyAPI v7 / Claude Code 2.1.220, synced 2026-08-04 —
+#   drift alarmed by tests/test_oauth_cloaking_drift.py)
 # ══════════════════════════════════════════════════════════
 
 CLAUDE_OAUTH_CONFIG = {
     'auth_url': 'https://claude.ai/oauth/authorize',
-    'token_url': 'https://console.anthropic.com/v1/oauth/token',
+    # Claude Code 2.1.220 posts exchange+refresh to platform.claude.com,
+    # not console.anthropic.com (CLIProxyAPI anthropic_auth.go TokenURL).
+    'token_url': 'https://platform.claude.com/v1/oauth/token',
     'client_id': '9d1c250a-e61b-44d9-88ed-5944d1962f5e',
     'callback_port': 54545,  # kept for relay server (auto-callback)
     'redirect_uri': 'https://console.anthropic.com/oauth/code/callback',
     'redirect_uri_local': 'http://localhost:54545/callback',  # for relay server auto-callback
-    'scope': 'org:create_api_key user:profile user:inference',
+    'scope': ('user:profile user:inference user:sessions:claude_code '
+              'user:mcp_servers user:file_upload'),
     'provider': 'claude',
 }
 
@@ -80,21 +84,41 @@ def _oauth_http_post(url: str, payload: dict, *, timeout: float = 30,
         timeout=timeout, user_id=user_id)
 
 
-def claude_build_auth_url() -> dict:
+def claude_build_auth_url(use_loopback: bool = False) -> dict:
     """Build the Claude OAuth authorization URL with PKCE.
+
+    Args:
+        use_loopback: Advertise the loopback callback
+            (``http://localhost:54545/callback``) instead of the console
+            page, so the relay can capture the code automatically and the
+            user never copy-pastes ``code#state``. The CALLER must have
+            already bound that port (see ``manager._bind_relay``) — this
+            function does not probe, because a probe would be a
+            time-of-check/time-of-use race against the real bind.
 
     Returns:
         dict with 'auth_url', 'state', 'pkce' (verifier/challenge),
-        and 'callback_port'.
+        'callback_port', and 'redirect_uri' (the one actually advertised).
+
+    The returned ``redirect_uri`` is load-bearing: OAuth requires the value
+    sent at authorize time and the value sent at exchange time to be
+    IDENTICAL, so the caller must carry this exact string into
+    :func:`claude_exchange_code` rather than re-deriving it. Re-deriving
+    would silently produce ``invalid_grant`` whenever the two computations
+    disagree — which is precisely what happens if the port was free at
+    authorize time and taken at exchange time.
     """
     pkce = generate_pkce_codes()
     state = uuid.uuid4().hex
+
+    redirect_uri = (CLAUDE_OAUTH_CONFIG['redirect_uri_local'] if use_loopback
+                    else CLAUDE_OAUTH_CONFIG['redirect_uri'])
 
     params = {
         'code': 'true',  # tell Anthropic to return code on the callback page
         'response_type': 'code',
         'client_id': CLAUDE_OAUTH_CONFIG['client_id'],
-        'redirect_uri': CLAUDE_OAUTH_CONFIG['redirect_uri'],
+        'redirect_uri': redirect_uri,
         'scope': CLAUDE_OAUTH_CONFIG['scope'],
         'state': state,
         'code_challenge': pkce['code_challenge'],
@@ -105,13 +129,15 @@ def claude_build_auth_url() -> dict:
     query = '&'.join(f'{k}={requests.utils.quote(str(v), safe="")}' for k, v in params.items())
     auth_url = f"{CLAUDE_OAUTH_CONFIG['auth_url']}?{query}"
 
-    logger.info('[Claude OAuth] Built auth URL (state=%s)', state[:8])
+    logger.info('[Claude OAuth] Built auth URL (state=%s, redirect=%s)',
+                state[:8], 'loopback' if use_loopback else 'console')
     return {
         'auth_url': auth_url,
         'state': state,
         'pkce': pkce,
         'callback_port': CLAUDE_OAUTH_CONFIG['callback_port'],
         'provider': 'claude',
+        'redirect_uri': redirect_uri,
         # Params for browser-side token exchange (B1 flow): the browser POSTs
         # to token_url itself, using ITS network (VPN/proxy), then sends the
         # resulting tokens to /api/oauth/store-token. code_verifier is the
@@ -119,7 +145,7 @@ def claude_build_auth_url() -> dict:
         'exchange': {
             'token_url': CLAUDE_OAUTH_CONFIG['token_url'],
             'client_id': CLAUDE_OAUTH_CONFIG['client_id'],
-            'redirect_uri': CLAUDE_OAUTH_CONFIG['redirect_uri'],
+            'redirect_uri': redirect_uri,
             'code_verifier': pkce['code_verifier'],
             'state': state,
             'style': 'json',  # Anthropic token endpoint expects JSON
@@ -128,13 +154,20 @@ def claude_build_auth_url() -> dict:
 
 
 def claude_exchange_code(code: str, pkce_verifier: str, state: str = '',
-                          user_id: str = '') -> dict | None:
+                          user_id: str = '', redirect_uri: str = '') -> dict | None:
     """Exchange authorization code for tokens.
 
     Args:
         code: Authorization code from OAuth callback.
         pkce_verifier: The PKCE code verifier used in the auth request.
         state: The OAuth state parameter (for CSRF validation).
+        redirect_uri: The EXACT redirect_uri advertised at authorize time.
+            OAuth requires the two to match byte-for-byte, so this is
+            threaded through from the flow rather than recomputed — a
+            recomputation can disagree with what was actually advertised
+            (e.g. the loopback port was free then and busy now) and the
+            token endpoint would answer ``invalid_grant``. Defaults to the
+            console callback, which is what every pre-loopback caller used.
 
     Returns:
         Token dict with access_token, refresh_token, email, expire, etc.
@@ -144,7 +177,7 @@ def claude_exchange_code(code: str, pkce_verifier: str, state: str = '',
         'grant_type': 'authorization_code',
         'code': code,
         'state': state,
-        'redirect_uri': CLAUDE_OAUTH_CONFIG['redirect_uri'],
+        'redirect_uri': redirect_uri or CLAUDE_OAUTH_CONFIG['redirect_uri'],
         'client_id': CLAUDE_OAUTH_CONFIG['client_id'],
         'code_verifier': pkce_verifier,
     }

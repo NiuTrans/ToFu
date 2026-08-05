@@ -62,7 +62,12 @@ async function initActiveTasks() {
       _ensureNewest();
       return;
     }
-    const serverTasks = await activeResp.json();
+    // Backend wraps the array as {ok, items} (batch-11 coordination);
+    // unwrap with an Array.isArray fallback for a pre-migration server.
+    const _activeBody = await activeResp.json();
+    const serverTasks = (_activeBody && Array.isArray(_activeBody.items))
+      ? _activeBody.items
+      : (Array.isArray(_activeBody) ? _activeBody : []);
     // ★ Exclude aborted tasks — they are winding down and should not be reconnected to
     const runIds = new Set(
       serverTasks.filter((t) => t.status === "running" && !t.aborted).map((t) => t.id),
@@ -466,8 +471,14 @@ async function initActiveTasks() {
           const localContentLen = am.content?.length || 0;
           let _cleared = false;
           try {
-            // Try to get server's version — it may have the completed result
-            const data = await Api.conversations.get(conv.id);
+            // Try to get server's version — it may have the completed result.
+            // Tail-window read (pt_afbaf3d7 ③): only the LAST message is
+            // inspected below, so a full-blob fetch is pure waste on long
+            // conversations (one 176.8MB conv was served 6× in 25s in the
+            // 2026-08-01 congestion collapse). When windowing is disabled
+            // (TOFU_CONV_WINDOW=0) this degrades to the legacy full GET.
+            const _wpF = (typeof convWindowParam === 'function') ? convWindowParam() : '';
+            const data = await Api.conversations.get(conv.id, _wpF ? { query: { window: _wpF } } : undefined);
             if (data) {
               const serverMsgs = data.messages || [];
               if (serverMsgs.length > 0) {

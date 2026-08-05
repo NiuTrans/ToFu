@@ -239,14 +239,14 @@ class TestPrivateAgentLoopRatchet(unittest.TestCase):
 
     def test_heuristic_actually_finds_a_loop(self):
         """Guard against a silently empty scan (AST heuristic drift): the
-        orchestrator DIRECT loop and the endpoint DELEGATED loop MUST both
-        be detected."""
+        endpoint DELEGATED loop MUST be detected."""
         found = set(rel for rel, _ in _iter_agent_loops())
-        self.assertIn(
-            'lib/tasks_pkg/orchestrator/_run.py', found,
-            'orchestrator private loop no longer detected — the DIRECT '
-            'heuristic may be scanning nothing (or it was migrated: then '
-            'relax this pin deliberately)')
+        # NOTE: the orchestrator's while loop survived the deliberate slice
+        # refactors only as a SHELL — the LLM turn and tool handling moved
+        # into helpers, so the DIRECT heuristic can no longer see it (its
+        # grandfather pin in _GRANDFATHERED still guards the shell token).
+        # The endpoint driver loop is the only heuristic-detectable private
+        # loop left; losing it means the scan silently sees nothing.
         self.assertIn(
             'lib/tasks_pkg/endpoint/_run.py', found,
             'endpoint driver loop no longer detected — the DELEGATED '

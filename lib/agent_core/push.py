@@ -27,7 +27,7 @@ Channels in use:
 
 import asyncio
 import threading
-from collections import defaultdict
+from collections import defaultdict, deque
 from weakref import WeakSet
 
 from lib.log import get_logger
@@ -341,6 +341,16 @@ class PushClient:
 
     def __init__(self, user_id: str = '', req_id: str = ''):
         self._queue: asyncio.Queue = asyncio.Queue(maxsize=1000)
+        # ── Control lane (pt_afbaf3d7) ──────────────────────────────────
+        # Pongs (and future control frames) must JUMP the data backlog: under
+        # event-loop congestion (e.g. a 176 MB HTTP response being serialized
+        # on the same loop) a pong queued behind MBs of event frames arrives
+        # past the client's 8s watchdog, which then force-closes a HEALTHY
+        # socket into the reconnect→refetch→stall loop. Bounded — pongs are
+        # redundant by design, so silently discarding the oldest past the cap
+        # is the correct degradation.
+        self._ctl: deque = deque(maxlen=64)
+        self._ctl_waiter: asyncio.Future | None = None
         self._connected = True
         self.user_id: str = str(user_id or '')
         self.req_id: str = str(req_id or '')
@@ -358,17 +368,55 @@ class PushClient:
             except Exception as e:
                 logger.debug('[Push] drop-and-replace failed (frame lost): %s', e)
 
+    def enqueue_control(self, frame: dict):
+        """Enqueue a control frame (pong) that jumps the data backlog.
+
+        LOOP-THREAD ONLY: called from the ``_receiver`` coroutine in
+        routes/push.py. Wakes a ``drain()`` that is currently sleeping on an
+        empty data queue, so an idle socket's pong is answered promptly too.
+        """
+        if not self._connected:
+            return
+        self._ctl.append(frame)
+        waiter = self._ctl_waiter
+        if waiter is not None and not waiter.done():
+            waiter.set_result(None)
+
     async def drain(self) -> dict | None:
-        """Wait for and return the next frame, or None if disconnected."""
+        """Wait for and return the next frame, or None if disconnected.
+
+        The control lane is checked FIRST: a pending pong goes out before any
+        queued data frame. A data frame already dequeued by the await below
+        when a control frame lands is returned first (one-frame delay — the
+        ``_sender`` loop calls drain again immediately and picks up the
+        control frame next).
+        """
         if not self._connected:
             return None
-        try:
-            return await asyncio.wait_for(self._queue.get(), timeout=30)
-        except asyncio.TimeoutError:
-            return {'channel': 'system', 'type': 'ping'}
-        except Exception as e:
-            logger.debug('[Push] drain failed (signaling disconnect): %s', e)
-            return None
+        while True:
+            if self._ctl:
+                return self._ctl.popleft()
+            get_fut = asyncio.ensure_future(self._queue.get())
+            waiter = asyncio.get_running_loop().create_future()
+            self._ctl_waiter = waiter
+            try:
+                done, _pending = await asyncio.wait(
+                    (get_fut, waiter), timeout=30,
+                    return_when=asyncio.FIRST_COMPLETED)
+            except Exception as e:
+                get_fut.cancel()
+                logger.debug('[Push] drain failed (signaling disconnect): %s', e)
+                return None
+            finally:
+                self._ctl_waiter = None
+            if not done:
+                get_fut.cancel()
+                return {'channel': 'system', 'type': 'ping'}
+            if get_fut in done:
+                return get_fut.result()
+            get_fut.cancel()
+            # Only the control waiter fired — loop back; the ctl check at the
+            # top returns the control frame.
 
     def disconnect(self):
         self._connected = False
@@ -423,7 +471,7 @@ def build_conv_state_snapshot(user_id='') -> dict:
                      'sending empty snapshot', _e)
         raw = {}
     try:
-        from lib.conversations.meta_cache import _running_task_ids_rev
+        from lib.agent_core.rev_clock import _running_task_ids_rev
     except Exception as _ie:
         logger.debug('[Push] _running_task_ids_rev import failed (%s); '
                      'sending snapshot without per-conv rev', _ie)

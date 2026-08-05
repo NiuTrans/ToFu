@@ -34,7 +34,8 @@ class ProbePersistenceTest(unittest.TestCase):
         self.cfg.probe_cache_path = self._orig_cache_path
         self._tmp.cleanup()
 
-    def _fake_probe(self, base_url, api_key, model_id, extra_headers, timeout, protocol='openai'):
+    def _fake_probe(self, base_url, api_key, model_id, extra_headers, timeout,
+                    protocol='openai', oauth='', adapter=None):
         # mx-dead is unreachable for everyone; everything else is ok.
         if model_id == 'mx-dead':
             return 'not_found', 'HTTP 404'

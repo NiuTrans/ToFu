@@ -4,7 +4,7 @@ import json
 import time
 
 import sqlite3
-from flask import Response, jsonify, request
+from flask import Response, request
 
 from lib.database import (
     DOMAIN_CHAT,
@@ -15,7 +15,10 @@ from lib.database import (
     run_pooled,
 )
 from lib.log import audit_log, get_logger
-from lib.api_response import api_bad_request, api_error, api_internal_error, api_not_found, api_ok
+from lib.api_response import (
+    api_bad_request, api_error, api_internal_error, api_not_found, api_ok,
+    api_payload,
+)
 from lib.openapi import api_meta
 from lib.request_parser import async_parse_body, parse_body  # noqa: F401
 from lib.utils import safe_json as _safe_json
@@ -96,7 +99,11 @@ def _ie(*a, **k):
 
 
 def _json(payload, status=None):
-    return _Defer(jsonify, payload, status=status)
+    # api_payload = the passthrough primitive (contract-clean superset:
+    # payload keys byte-identical top-level, additive request_id on 4xx).
+    # Positional status arg — _Defer swallows a status= kwarg for its own
+    # bookkeeping, which would break the tuple _finish returns.
+    return _Defer(api_payload, payload, status or 200)
 
 
 def _prefetch_reconciled_dict(db, conv_id, r):
@@ -207,28 +214,37 @@ def _conv_row_to_meta_dict(r):
     ],
     responses={
         '200': {'description': (
-            'A JSON array of conversations. By default each element is '
-            'metadata-only (no `messages`); with `?full=1` each element also '
-            'carries its `messages` array.'),
+            'Envelope ``{ok, items}`` — ``items`` is the array of '
+            'conversations (api-contract §4 batch 9: the bare top-level array '
+            'moved under ``items``). By default each element is metadata-only '
+            '(no `messages`); with `?full=1` each element also carries its '
+            '`messages` array.'),
             'content': {'application/json': {'schema': {
-                'type': 'array',
-                'items': {
-                    'type': 'object',
-                    'properties': {
-                        'id': {'type': 'string'},
-                        'title': {'type': 'string'},
-                        'msgCount': {'type': 'integer',
-                                     'description': 'Message count (metadata default).'},
-                        'createdAt': {'type': 'integer'},
-                        'updatedAt': {'type': 'integer'},
-                        'settings': {'type': 'object', 'nullable': True,
-                                     'additionalProperties': True},
-                        'messages': {'type': 'array',
-                                     'description': 'Present only with ?full=1.',
-                                     'items': {'$ref': '#/components/schemas/ChatMessage'}},
-                    },
-                    'required': ['id', 'title'],
-                }}}}},
+                'type': 'object',
+                'properties': {
+                    'ok': {'type': 'boolean'},
+                    'items': {
+                        'type': 'array',
+                        'items': {
+                            'type': 'object',
+                            'properties': {
+                                'id': {'type': 'string'},
+                                'title': {'type': 'string'},
+                                'msgCount': {'type': 'integer',
+                                             'description': 'Message count (metadata default).'},
+                                'createdAt': {'type': 'integer'},
+                                'updatedAt': {'type': 'integer'},
+                                'settings': {'type': 'object', 'nullable': True,
+                                             'additionalProperties': True},
+                                'messages': {'type': 'array',
+                                             'description': 'Present only with ?full=1.',
+                                             'items': {'$ref': '#/components/schemas/ChatMessage'}},
+                            },
+                            'required': ['id', 'title'],
+                        }},
+                },
+                'required': ['ok', 'items'],
+            }}}},
     },
 )
 async def list_convs():
@@ -306,7 +322,7 @@ async def list_convs():
                 "WHERE user_id=? AND json_extract(settings,'$.folderId')=?",
                 (DEFAULT_USER_ID, folder_id), domain=DOMAIN_CHAT)
             envelope['totalCount'] = (cnt['c'] if cnt else 0)
-        return jsonify(envelope)
+        return api_ok(envelope)
 
     meta_only = request.args.get('meta') == '1'
     prefetch_id = request.args.get('prefetch', '').strip()
@@ -371,7 +387,10 @@ async def list_convs():
             'SELECT id, title, messages, created_at, updated_at, settings, rev FROM conversations WHERE user_id=? ORDER BY updated_at DESC',
             (DEFAULT_USER_ID,), domain=DOMAIN_CHAT)
         convs = [_conv_row_to_dict(r) for r in rows]
-        return jsonify(convs)
+        # Coordinated bare-array migration (contract §4, batch 9): the
+        # array moves under ``items``. No first-party consumer (the UI
+        # lists via ?meta=1 / ?before envelope); documented shape change.
+        return api_ok({'items': convs})
 
     # Metadata-only: skip the messages column entirely (msg_count is a stored
     # column, so we still report message counts without deserializing bodies).
@@ -379,7 +398,8 @@ async def list_convs():
         'SELECT id, title, msg_count, created_at, updated_at, settings, rev FROM conversations WHERE user_id=? ORDER BY updated_at DESC',
         (DEFAULT_USER_ID,), domain=DOMAIN_CHAT)
     convs = [_conv_row_to_meta_dict(r) for r in rows]
-    return jsonify(convs)
+    # Same bare-array migration as the ?full=1 branch above.
+    return api_ok({'items': convs})
 
 
 def _conv_has_live_task(conv_id):
@@ -1078,7 +1098,7 @@ async def get_conv(conv_id):
                     _schedule_reconcile_persist(conv_id, cleaned_full, sd,
                                                 expected_rev=_row_rev(r))
                 _maybe_backfill_narration_on_open(conv_id, served)
-                return jsonify(served)
+                return api_ok(served)
             except Exception as e:
                 logger.warning('[get_conv] windowed read failed conv=%s: %s — '
                                'failing open to full-blob path', conv_id[:8], e)
@@ -1093,7 +1113,7 @@ async def get_conv(conv_id):
     if _conv_has_live_task(conv_id):
         _served = _conv_row_to_dict(r)
         _maybe_backfill_narration_on_open(conv_id, _served)
-        return jsonify(_served)
+        return api_ok(_served)
 
     try:
         served, changed, cleaned, settings_dict = await run_pooled(
@@ -1106,13 +1126,13 @@ async def get_conv(conv_id):
             _schedule_reconcile_persist(conv_id, cleaned, settings_dict,
                                         expected_rev=_row_rev(r))
         _maybe_backfill_narration_on_open(conv_id, served)
-        return jsonify(served)
+        return api_ok(served)
     except Exception as e:
         logger.warning('[get_conv] GET-path reconcile failed for conv=%s: %s — '
                        'serving unreconciled row', conv_id[:8], e, exc_info=True)
         _served = _conv_row_to_dict(r)
         _maybe_backfill_narration_on_open(conv_id, _served)
-        return jsonify(_served)
+        return api_ok(_served)
 
 
 @conversations_bp.route('/api/v1/conversations/<conv_id>/preview', methods=['GET'])
@@ -1217,7 +1237,7 @@ async def debug_messages(conv_id):
         except Exception as e:
             logger.warning('[debug_messages] strip_base64 failed for conv=%s: %s — '
                            'returning raw messages', conv_id[:8], e)
-        return jsonify({'messages': messages, 'count': len(messages), 'approx': True})
+        return api_ok({'messages': messages, 'count': len(messages), 'approx': True})
     except Exception as e:
         logger.error('[debug_messages] Failed for conv=%s: %s', conv_id[:8], e, exc_info=True)
         return api_internal_error('internal_error')
@@ -1268,6 +1288,27 @@ async def save_conv(conv_id):
 def _save_conv_blocking(db, conv_id, data):
     title = data.get('title', 'Untitled')
     raw_messages = data.get('messages', [])
+    # Durable one-time heal for send-race duplicate user rows (consecutive
+    # user rows sharing one ``timestamp`` → keep the LAST, the server-built
+    # copy). The send route guards via ``append_user_msg_idempotent``, but
+    # THIS full-conv PUT is the bypass seam that can re-plant the pair —
+    # heal here (mirroring the ghost-husk sweep precedent below) so the DB
+    # never holds it and the rebuild-side dedup stays a no-op. Never raises:
+    # a heal failure must not break the write path.
+    try:
+        from lib.tasks_pkg.conv_message_builder._dedup import _dedup_duplicate_user_messages
+        _healed = _dedup_duplicate_user_messages(raw_messages)
+        if len(_healed) != len(raw_messages):
+            logger.warning('[save_conv] Healed %d duplicate same-timestamp '
+                           'user row(s) on incoming PUT conv=%s — durable '
+                           'one-time fix (race-planted copies)',
+                           len(raw_messages) - len(_healed), conv_id[:12])
+            audit_log('conv_user_dup_healed', conv_id=conv_id,
+                      dropped=len(raw_messages) - len(_healed), seam='save_conv_put')
+        raw_messages = _healed
+    except Exception as _de:
+        logger.warning('[save_conv] user-dup heal failed conv=%s: %s '
+                       '(continuing unhealed)', conv_id[:12], _de)
     msg_count = len(raw_messages)
     # Backfill stable per-message IDs.  Once present, _msgId carries
     # forward in subsequent loads/syncs.  Index-free addressing depends
@@ -1412,9 +1453,9 @@ def _save_conv_blocking(db, conv_id, data):
                         'client baseRev=%d but server rev=%d (concurrent write '
                         'from another tab/device/server). Client must rebase + retry.',
                         conv_id[:12], base_rev_int, server_rev)
-            return _Defer(jsonify, {'ok': False, 'error': 'blocked_rev_conflict',
-                            'serverRev': server_rev,
-                            'serverMsgCount': existing_count}, status=409)
+            return _json({'ok': False, 'error': 'blocked_rev_conflict',
+                          'serverRev': server_rev,
+                          'serverMsgCount': existing_count}, status=409)
 
     if msg_count == 0 and existing_count > 0:
         # 2026-05-05: this guard fires during NORMAL concurrent syncs
@@ -1424,8 +1465,8 @@ def _save_conv_blocking(db, conv_id, data):
                     'server has %d msgs but client sent 0 '
                     '(benign: stale concurrent sync).',
                     conv_id[:12], existing_count)
-        return _Defer(jsonify, {'ok': False, 'error': 'blocked_empty_overwrite',
-                        'serverMsgCount': existing_count}, status=409)
+        return _json({'ok': False, 'error': 'blocked_empty_overwrite',
+                      'serverMsgCount': existing_count}, status=409)
 
     if msg_count > 0 and msg_count < _existing_effective_count and not allow_truncate:
         # 2026-05-05: this guard fires during NORMAL concurrent syncs
@@ -1438,9 +1479,9 @@ def _save_conv_blocking(db, conv_id, data):
                     'intentional truncation (regen/edit).',
                     conv_id[:12], existing_count, msg_count,
                     existing_count - msg_count)
-        return _Defer(jsonify, {'ok': False, 'error': 'blocked_msg_regression',
-                        'serverMsgCount': existing_count,
-                        'clientMsgCount': msg_count}, status=409)
+        return _json({'ok': False, 'error': 'blocked_msg_regression',
+                      'serverMsgCount': existing_count,
+                      'clientMsgCount': msg_count}, status=409)
 
     # ── Guard: prevent stale streaming checkpoint from overwriting completed result ──
     # Root cause: VS Code port forwarding can reload the page at the exact moment
@@ -1478,7 +1519,7 @@ def _save_conv_blocking(db, conv_id, data):
                                 conv_id[:12], existing_fr,
                                 len(existing_last.get('content') or ''),
                                 len(incoming_last.get('content') or ''))
-                            return _Defer(jsonify, {
+                            return _json({
                                 'ok': False,
                                 'error': 'blocked_stale_checkpoint',
                                 'serverMsgCount': existing_count,
@@ -2074,7 +2115,7 @@ async def patch_message(conv_id, msg_idx):
     if unknown:
         logger.warning('[patch_msg] conv=%s idx=%d REJECTED non-whitelisted keys: %s',
                        conv_id[:8], msg_idx, unknown)
-        return jsonify({'error': 'unsupported_keys', 'keys': unknown}), 400
+        return api_error('unsupported_keys', status=400, keys=unknown)
 
     return _finish(await run_pooled(lambda db: _patch_message_blocking(db, conv_id, msg_idx, data)))
 
@@ -2221,7 +2262,7 @@ async def patch_message_by_id(conv_id, msg_id):
     if unknown:
         logger.warning('[patch_msg_id] conv=%s id=%s REJECTED non-whitelisted keys: %s',
                        conv_id[:8], msg_id[:8], unknown)
-        return jsonify({'error': 'unsupported_keys', 'keys': unknown}), 400
+        return api_error('unsupported_keys', status=400, keys=unknown)
 
     return _finish(await run_pooled(lambda db: _patch_message_by_id_blocking(db, conv_id, msg_id, data)))
 

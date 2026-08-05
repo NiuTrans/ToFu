@@ -83,8 +83,11 @@ def _find_defining_file(symbol: str) -> Path:
     """
     needle = f"function {symbol}("
     hits = [p for p in sorted(JS_DIR.rglob("*.js"))
-            if not p.name.startswith("bundle-")
-            and not p.name.startswith("feature-")
+            # Dotfiles too: the bundler's atomic-rename temp files are
+            # `.bundle-<hash>.<rand>.js` — visible mid-build, and scanning
+            # one reads a HALF-WRITTEN copy of every symbol (false red,
+            # measured 2026-08-04 on a live bundle rebuild).
+            if not p.name.startswith((".", "bundle-", "feature-"))
             and needle in p.read_text(encoding="utf-8")]
     if not hits:
         raise AssertionError(
@@ -131,6 +134,25 @@ _SHIPPED_SYMBOLS = (
     # splice drifted when the helper was extracted and the whole suite went
     # red on ReferenceError, which is exactly the drift it exists to catch.
     "_lcDownloadLinks", "_lcFmtSize",
+    # Re-bases the backend's absolute download URL onto the live BASE_PATH
+    # (cloud-IDE proxy prefix) — _lcDownloadLinks calls it, so the splice
+    # needs it or every test here goes red on ReferenceError.
+    "_lcResolveDlUrl",
+    # The poll-signature gate (2026-08-03): _lcRenderDesktop calls it to
+    # decide whether a repaint is warranted at all.
+    "_lcDesktopSignature",
+    # The awaiting-agent hint is prepended in both attach branches, and
+    # the pair block / connect-line details / wiring are authored once and
+    # reached from both — the splice needs all of them or every test goes
+    # ReferenceError. (2026-08-04 owner decree: the proxy-SSH warning was
+    # DELETED — pairing codes are address-free, so no branch may send the
+    # user to open a tunnel by hand.)
+    "_lcAwaitingAgentHtml", "_lcPairBlockHtml", "_lcConnectDetailsHtml",
+    "_lcWireAttach", "_lcPairCode",
+    # The download button is authored once and shared by the install /
+    # upgrade-nudge / stranded-rescue branches (2026-08-04 fleet tri-state);
+    # the browser renderer calls both, so the splice needs them.
+    "_lcExtDownloadAction", "_lcWireExtDownload",
 )
 
 
@@ -238,14 +260,27 @@ HARNESS = textwrap.dedent("""
                          download_url: DL, server_url: SRV, downloads: DLS }});
       const el = document.getElementById('lcDesktopSetup');
       const dlA = el.querySelector('a[href]');
+      const pageA = el.querySelector('a#lcDesktopDownload');
       const dsw = document.getElementById('lcDesktopSwitch');
       const hostedEl = el.querySelector('.lc-dl-hosted');
       desktop[st] = {{
         steps: el.querySelectorAll('.lc-step').length,
         text: el.textContent.trim(),
         hasMintButton: !!el.querySelector('#lcMintBtn'),
+        // The connect line survives ONLY inside the collapsed advanced
+        // details — never as a top-level action (2026-08-04 decree).
+        mintInsideDetails: !!el.querySelector('.lc-details #lcMintBtn'),
+        // Pairing is the ONE primary attach action in every branch that
+        // attaches anything; the ids are branch-unique (lcPairBtn).
+        hasPairButton: !!el.querySelector('#lcPairBtn'),
+        pairInAgentRole: !!el.querySelector('.lc-role #lcPairBtn'),
+        // Owner decree 2026-08-04: no surface may send the user to open an
+        // ssh tunnel by hand.
+        mentionsManualTunnel: /隧道地址|ssh 隧道|ssh-tunnel/i.test(el.textContent),
         // A real, clickable link the user can follow — not prose.
         downloadHref: dlA ? dlA.getAttribute('href') : '',
+        // The releases-page escape hatch — external, must never be re-based.
+        pageHref: pageA ? pageA.getAttribute('href') : '',
         // The per-platform direct links (vs the releases-page escape hatch).
         directCount: el.querySelectorAll('a.lc-dl-direct').length,
         hostedText: hostedEl ? hostedEl.textContent.trim() : '',
@@ -283,6 +318,15 @@ HARNESS = textwrap.dedent("""
                         localBrowser: {{ family:'chrome', name:'Chrome',
                                         extensionsUrl:'chrome://extensions' }} }},
       download:      {{ connected: false, localBrowser: null }},
+      // Fleet tri-state (2026-08-04): a stale-but-working install gets the
+      // upgrade nudge; a locked-out install (dead credential, cannot poll)
+      // must never render as 'not installed'.
+      outdated:      {{ connected: true, secondsAgo: 2,
+                        clients: [{{client_id:'abcdef123', ext_version:'4.6.0'}}],
+                        servedExtVersion: '4.7.0' }},
+      stranded:      {{ connected: false, localBrowser: null,
+                        lockedOutClients: [{{client_id:'dead1',
+                          ext_version:'4.3.0', seconds_ago: 42}}] }},
     }};
     for (const k of Object.keys(bcases)) {{
       document.getElementById('lcBrowserSetup').innerHTML = '';
@@ -297,6 +341,9 @@ HARNESS = textwrap.dedent("""
         hasOpenBtn: !!el.querySelector('#lcExtOpenBtn'),
         switchUsable: !bsw.disabled,
         about: document.getElementById('lcBrowserAbout').textContent.trim(),
+        statusText: (document.querySelector(
+          '#lcBrowserStatus .lc-status-text') || {{textContent: ''}})
+          .textContent.trim(),
       }};
     }}
 
@@ -324,6 +371,22 @@ HARNESS = textwrap.dedent("""
 def _run(shipped: str) -> dict:
     script = HARNESS.format(shipped=shipped,
                             html=MODAL_HTML.replace("`", "\\`"))
+    proc = subprocess.run([_node(), "-e", script], cwd=ROOT,
+                          capture_output=True, text=True)
+    assert proc.returncode == 0, f"node failed: {proc.stderr}"
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+def _run_proxied(shipped: str) -> dict:
+    """``_run`` with a live base path: ``apiUrl()`` rebases onto
+    ``/proxy/15000``, simulating a path-prefixed cloud-IDE proxy deployment
+    (``BASE_PATH`` = the page's own prefix, exactly what core.js computes)."""
+    script = HARNESS.format(shipped=shipped,
+                            html=MODAL_HTML.replace("`", "\\`"))
+    anchor = "global.window = dom.window;"
+    assert script.count(anchor) == 1, "harness window-anchor drifted"
+    script = script.replace(
+        anchor, anchor + "\nglobal.apiUrl = (p) => '/proxy/15000' + p;")
     proc = subprocess.run([_node(), "-e", script], cwd=ROOT,
                           capture_output=True, text=True)
     assert proc.returncode == 0, f"node failed: {proc.stderr}"
@@ -405,14 +468,33 @@ def test_the_three_states_give_three_different_instructions():
 
 
 @pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
-def test_only_the_remote_state_offers_a_token():
-    """A token is meaningless unless the user's machine is not this machine."""
+def test_pairing_is_the_primary_attach_in_every_branch():
+    """2026-08-04 owner decree: the pairing code is the ONE primary attach
+    action wherever a machine can be attached — it carries NO address, so
+    it works from every reachability class (the agent discovers the route
+    itself, building its own tunnel when needed). The minted connect line
+    is demoted to the collapsed advanced details, and NO branch may send
+    the user to open an ssh tunnel by hand."""
     out = _run(_shipped())["desktop"]
-    assert out["remote"]["hasMintButton"] is True, (
-        "the remote case is the only one needing a token — it must offer one")
-    for st in ("connected", "tray", "local_source"):
-        assert out[st]["hasMintButton"] is False, (
-            f"setup_state={st} must NOT ask for a token")
+    for st in ("local_source", "remote"):
+        assert out[st]["hasPairButton"] is True, (
+            f"setup_state={st} lost its pairing button — the only "
+            f"address-free attach path")
+        assert out[st]["mintInsideDetails"] is True, (
+            f"setup_state={st}: the connect line must live inside the "
+            f"collapsed advanced details, never as a top-level action")
+    for st in ("connected", "tray"):
+        assert out[st]["hasPairButton"] is False, (
+            f"setup_state={st} attaches nothing — no pair button allowed")
+    # The documented tunnel blind spot (ssh -L presents as loopback):
+    # local_source's AGENT role block carries the pair action visibly.
+    assert out["local_source"]["pairInAgentRole"] is True, (
+        "the agent role block lost its pairing button — the office-machine "
+        "case has no connect flow again")
+    for st in ("tray", "local_source", "remote"):
+        assert out[st]["mentionsManualTunnel"] is False, (
+            f"setup_state={st} still instructs a manual ssh tunnel — the "
+            f"2026-08-04 decree forbids it on every surface")
 
 
 @pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
@@ -458,6 +540,35 @@ def test_browser_row_picks_the_actionable_instruction():
     assert out["download"]["steps"] == 1
     assert out["download"]["hasDownloadBtn"] is True
     assert out["download"]["hasPath"] is False
+
+
+@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
+def test_browser_row_distinguishes_the_install_states():
+    """2026-08-04 stranded-fleet fix: 'never installed' / 'installed &
+    current' / 'installed but outdated' / 'installed but LOCKED OUT' are
+    four different situations and the row must say which. The locked-out
+    case is load-bearing: a side-loaded extension with a dead credential
+    cannot heal itself (no update channel, cannot poll), so the ONLY cure
+    is the preseeded re-download — rendering it as 尚未安装 sends the user
+    down an entirely wrong path."""
+    out = _run(_shipped())["browser"]
+    # Healthy + current: no nudge, no setup content.
+    assert out["connected"]["steps"] == 0
+    assert out["connected"]["hasDownloadBtn"] is False
+    # Outdated but working: dot stays green, setup carries the upgrade.
+    assert out["outdated"]["hasDownloadBtn"] is True, (
+        "an outdated-but-working extension must get the one-click upgrade")
+    assert "4.6.0" in out["outdated"]["text"] and "4.7.0" in out["outdated"]["text"], (
+        "the nudge must name BOTH versions so the user can see what changes")
+    # Locked out: the status must not claim 'not installed'.
+    assert "失效" in out["stranded"]["statusText"], (
+        f"a locked-out extension rendered as "
+        f"{out['stranded']['statusText']!r} — the lie of omission this fix "
+        f"exists to kill")
+    assert out["stranded"]["hasDownloadBtn"] is True, (
+        "the stranded state must offer the preseeded re-download")
+    # Plain never-installed keeps the honest 'not installed'.
+    assert "尚未安装" in out["download"]["statusText"]
 
 
 @pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
@@ -623,11 +734,43 @@ def test_a_server_hosted_entry_shows_where_the_file_comes_from():
 
 
 @pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
+def test_the_direct_link_is_rebased_onto_the_live_proxy_prefix():
+    """The reported 404: the backend builds downloads[].url from
+    request.host_url, which under a path-prefixed cloud-IDE proxy
+    (…/proxy/15000/) LACKS the prefix — the click died on the gateway's
+    default route and never reached Tofu (zero /desktop/download hits in
+    access.log). With a live base path the rendered href must carry it; the
+    releases-page escape hatch (no /api/ marker) must pass through
+    untouched."""
+    out = _run_proxied(_shipped())["desktop"]
+    href = out["remote"]["downloadHref"]
+    assert href == ('/proxy/15000/api/v1/desktop/download/'
+                    'Tofu-Setup-0.15.2-win64.exe'), href
+    assert out["remote"]["pageHref"] == (
+        'https://github.com/rangehow/ToFu/releases/latest'), (
+        'the escape hatch is external — rebasing it would break it')
+
+
+@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
+def test_NEUTER_rendering_the_server_url_verbatim_is_caught():
+    """Strip the rebase (render p.url verbatim) → the prefix-less absolute
+    URL goes straight into the href: the exact reported 404 shape."""
+    out = _run_proxied(_shipped(
+        lambda s: s.replace("_lcResolveDlUrl(p.url)", "p.url")
+    ))["desktop"]
+    href = out["remote"]["downloadHref"]
+    assert not href.startswith('/proxy/15000/'), (
+        'NEUTER did not remove the rebase — the href still carries the '
+        'live prefix')
+
+
+@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
 def test_NEUTER_stripping_the_download_link_is_caught():
     """No links helper output → told to install with no way to get the app."""
     out = _run(_shipped(
-        lambda s: s.replace("function _lcDownloadLinks(d) {\n  var page",
-                            "function _lcDownloadLinks(d) {\n  return '';\n  var page")
+        lambda s: s.replace(
+            "function _lcDownloadLinks(d, kind, suppressPage) {\n  kind = kind || 'full';",
+            "function _lcDownloadLinks(d, kind, suppressPage) {\n  return '';\n  kind = kind || 'full';")
     ))["desktop"]
     assert out["remote"]["downloadHref"] == "", (
         "NEUTER did not remove the followable link")
@@ -1034,7 +1177,8 @@ def test_no_orphaned_local_control_strings():
     html = INDEX_HTML.read_text(encoding="utf-8")
     js_sources = "\n".join(
         p.read_text(encoding="utf-8") for p in sorted(JS_DIR.rglob("*.js"))
-        if "i18n" not in p.name and not p.name.startswith(("bundle-", "feature-")))
+        if "i18n" not in p.name
+        and not p.name.startswith((".", "bundle-", "feature-")))
     declared = set(re.findall(r"^\s*'((?:local|browser)\.[A-Za-z0-9_]+)':",
                               i18n, re.M))
     assert declared, "scan surface empty — the regex stopped matching"

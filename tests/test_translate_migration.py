@@ -265,7 +265,7 @@ def test_poll_batch_shape():
             r = await client.post('/api/v1/translate/poll-batch',
                                    json={'taskIds': [t1['id'], t2['id'], 'missing-id']})
             assert r.status_code == 200
-            results = await r.get_json()
+            results = (await r.get_json())['items']  # {ok, items} envelope
             assert isinstance(results, list)
             assert len(results) == 3
 

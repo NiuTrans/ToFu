@@ -87,14 +87,21 @@ def _cleanup(db, *ids):
 
 
 def _defer_status(defer):
-    """(status, payload_dict) from a _Defer(jsonify/api_ok, ...)."""
-    from lib.api_response import api_ok
+    """(status, payload_dict) from a _Defer(jsonify/api_ok/api_payload, ...)."""
+    from lib.api_response import api_ok, api_payload
     status = getattr(defer, 'status', None)
     if defer.helper is api_ok:
         payload = {'ok': True}
         payload.update(defer.kwargs)
         if defer.args and isinstance(defer.args[0], dict):
             payload.update(defer.args[0])
+        return status or 200, payload
+    if defer.helper is api_payload:
+        # routes.conversations._json passes the status POSITIONALLY:
+        # _Defer(api_payload, payload, 409) — args[0]=payload, args[1]=status.
+        payload = defer.args[0] if defer.args else {}
+        if len(defer.args) > 1 and isinstance(defer.args[1], int):
+            status = defer.args[1]
         return status or 200, payload
     # jsonify(dict) branch — the dict is args[0]
     payload = defer.args[0] if defer.args else {}

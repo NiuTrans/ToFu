@@ -24,6 +24,8 @@ from lib.tools import (
     CONV_REF_TOOL_NAMES,
     IMAGE_EDIT_TOOL_NAMES,
     IMAGE_GEN_TOOL_NAMES,
+    LEGACY_BROWSER_TOOL_NAMES,
+    PAGE_PREVIEW_TOOL_NAMES,
     PEER_TOOL_NAMES,
     PROJECT_TOOL_NAMES,
 )
@@ -85,10 +87,17 @@ def _build_display_dispatch_table():
     #   frontend SVG, no emoji prefix).
     table.setdefault('read_files', _tool_display_project)
 
-    # Browser tools (basic + advanced)
-    for name in BROWSER_TOOL_NAMES:
+    # Browser tools (basic + advanced). LEGACY_BROWSER_TOOL_NAMES keeps the
+    # names retired by the v2 consolidation (pt_869e5648403e4745) on the
+    # browser-family renderer — old conversations must keep rendering their
+    # tool cards with hostname labels, not the generic fallback.
+    for name in BROWSER_TOOL_NAMES | LEGACY_BROWSER_TOOL_NAMES:
         table[name] = _tool_display_browser
     for name in ADVANCED_BROWSER_TOOL_NAMES:
+        table[name] = _tool_display_browser
+    # Server-side page preview — not in BROWSER_TOOL_NAMES (not an extension
+    # tool) but shares the browser-family display.
+    for name in PAGE_PREVIEW_TOOL_NAMES:
         table[name] = _tool_display_browser
 
     # Memory tools

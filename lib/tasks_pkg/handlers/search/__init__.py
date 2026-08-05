@@ -56,6 +56,11 @@ from lib.tasks_pkg.handlers.search._handlers import (  # noqa: E402,F401
     _handle_fetch_url_batch,
 )
 
+# ── Settings tool (update_search_settings) — registers on import ────────────
+from lib.tasks_pkg.handlers.search._settings import (  # noqa: E402,F401
+    _handle_update_search_settings,
+)
+
 __all__ = [
     'perform_web_search',
     'fetch_page_content',
@@ -73,4 +78,5 @@ __all__ = [
     '_handle_web_search_batch',
     '_handle_fetch_url',
     '_handle_fetch_url_batch',
+    '_handle_update_search_settings',
 ]

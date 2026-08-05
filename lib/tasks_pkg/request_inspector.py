@@ -120,17 +120,30 @@ def invalidate_task_cache(task_id: str) -> None:
 
 
 def _read_events_uncached(task_id: str) -> list:
-    """Uncached read + rebuild (see :func:`_read_events`)."""
+    """Uncached read + rebuild (see :func:`_read_events`).
+
+    Reads ONLY the structural slice the inspector renders (snapshots, round
+    usage, endpoint markers) — NEVER the streaming noise (delta / phase /
+    tool_progress / …). Every SSE delta is persisted as its own row, so an
+    unfiltered read is dominated by noise: measured on a real 51,754-row
+    task, the FIRST-10000-rows cap below cut every snapshot past round 6,
+    and rounds 7+ all rendered "mirror expired". Structural rows are a few
+    per round, so the same cap now spans thousands of rounds.
+    """
     try:
         db = get_thread_db(DOMAIN_CHAT)
     except Exception as e:
         logger.debug('[RequestInspector] thread db unavailable: %s', e)
         return []
+    from lib.tasks_pkg.event_log import STRUCTURAL_EVENT_TYPES
+    _struct_ph = ','.join(['?'] * len(STRUCTURAL_EVENT_TYPES))
     try:
         rows = db.execute(
             'SELECT event_id, type, payload, ts_ms FROM task_events '
-            'WHERE task_id=? ORDER BY event_id ASC LIMIT 10000',
-            (task_id,)).fetchall()
+            f'WHERE task_id=? AND (type IN ({_struct_ph}) '
+            "OR type LIKE 'endpoint\\_%' ESCAPE '\\') "
+            'ORDER BY event_id ASC LIMIT 10000',
+            (task_id, *STRUCTURAL_EVENT_TYPES)).fetchall()
     except Exception as e:
         logger.warning('[RequestInspector] read failed for task=%s: %s',
                        task_id[:8], e)

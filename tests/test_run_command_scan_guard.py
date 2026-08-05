@@ -144,12 +144,17 @@ class TestScanGuardEndToEnd:
         # The error is ACTIONABLE: it must teach the three escape hatches.
         assert 'timeout' in result
 
-    def test_in_workspace_scan_actually_runs(self, ws):
+    def test_in_workspace_scan_actually_runs(self, ws, monkeypatch):
+        # TOFU_RUN_GREP_GUARD=0: the newer filesystem-grep redirect guard
+        # (2026-08-04) refuses in-workspace greps outright; these tests
+        # exercise the SCAN guard in isolation.
+        monkeypatch.setenv('TOFU_RUN_GREP_GUARD', '0')
         result = tool_run_command(ws, 'grep -rn "x = 1" lib/')
         assert 'blocked for safety' not in result
         assert 'a.py' in result
 
-    def test_sibling_scan_actually_runs(self, ws):
+    def test_sibling_scan_actually_runs(self, ws, monkeypatch):
+        monkeypatch.setenv('TOFU_RUN_GREP_GUARD', '0')  # see above
         result = tool_run_command(ws, 'grep -rn "x = 1" ../sibling-repo/')
         assert 'blocked for safety' not in result
         assert 'pyproject.toml' in result
@@ -157,9 +162,10 @@ class TestScanGuardEndToEnd:
 
 @pytest.mark.unit
 class TestScanGuardEscapeHatches:
-    def test_explicit_timeout_bypasses_guard(self, ws):
+    def test_explicit_timeout_bypasses_guard(self, ws, monkeypatch):
         """Owner's contract: passing an explicit budget makes the scan legal
         (a bounded crawl cannot wedge the task forever)."""
+        monkeypatch.setenv('TOFU_RUN_GREP_GUARD', '0')  # scan guard in isolation
         result = tool_run_command(ws, 'grep -rn "x = 1" ../', timeout=30)
         assert 'blocked for safety' not in result
         assert 'sibling-repo' in result or 'a.py' in result
@@ -170,6 +176,7 @@ class TestScanGuardEscapeHatches:
 
     def test_kill_switch_disables_guard(self, ws, monkeypatch):
         monkeypatch.setenv('TOFU_RUN_SCAN_GUARD', '0')
+        monkeypatch.setenv('TOFU_RUN_GREP_GUARD', '0')  # scan guard in isolation
         # Guard off: the incident shape falls through to execution. Run it in
         # the tiny tmp parent so it completes instantly.
         result = tool_run_command(ws, 'grep -rn "x = 1" ../ --include=pyproject.toml')

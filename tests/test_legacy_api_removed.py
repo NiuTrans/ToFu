@@ -81,6 +81,14 @@ ALLOWED_NON_V1 = frozenset({
     '/api/browser/result',
     '/api/browser/download',
     '/api/desktop/poll',
+    # Pairing-code exchange for the desktop agent (RWA P4a): the 6-digit
+    # one-time code IS the credential (code + audit, no bearer), and the
+    # SHIPPED TofuAgent-Setup-0.16.0 installer embeds this exact path —
+    # moving it to /api/v1/* would break in-field agents.
+    '/api/desktop/pair',
+    # Static video-bytes serving (frontend playback / re-download) — same
+    # static-asset carve-out family as /api/images/<filename>.
+    '/api/videos/<filename>',
     # 308 redirect shim for stale browser tabs still on the pre-migration
     # /api/optimizer/* polling URL — see routes/legacy_redirects.py.
     '/api/optimizer/<path:rest>',

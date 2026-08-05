@@ -43,10 +43,26 @@ def _build_search(ctx: ToolContext) -> list[dict]:
     return []
 
 
+def _build_search_settings(ctx: ToolContext) -> list[dict]:
+    # update_search_settings tunes the pipeline web_search/fetch_url run on,
+    # so it rides the SAME gate — a conversation with search OFF has no use
+    # for it. Registered as its own spec appended at the END of the base
+    # phase: inserting it into the search spec put it mid-list (position 2),
+    # which broke the cache-stable tool-order ratchet
+    # (tests/test_tool_registry.py::TestOrdering).
+    if ctx.search_mode in ('single', 'multi'):
+        from lib.tools import build_update_search_settings_tool
+        return [build_update_search_settings_tool()]
+    return []
+
+
 def _build_fetch(ctx: ToolContext) -> list[dict]:
-    from lib.tools import FETCH_URL_TOOL
+    # Built per call: the schema's ``reason`` param follows the runtime
+    # LLM_CONTENT_FILTER_ENABLED flag — a module-level constant would freeze
+    # whatever the import-time snapshot saw (same rationale as build_search_tool).
+    from lib.tools import build_fetch_url_tool
     if ctx.fetch_enabled or ctx.search_enabled:
-        return [FETCH_URL_TOOL]
+        return [build_fetch_url_tool()]
     return []
 
 
@@ -162,6 +178,21 @@ def _build_produce(ctx: ToolContext) -> list[dict]:
     # Appended LAST so the existing video/report prefix stays byte-stable for
     # the prompt cache (the ordering contract in this module's docstring).
     return [PRODUCE_VIDEO_TOOL, PRODUCE_REPORT_TOOL, PRODUCE_RESEARCH_TOOL]
+
+
+def _build_page_preview(ctx: ToolContext) -> list[dict]:
+    # Server-side rendered page preview (browser_preview_page). Gated on a
+    # project being attached — the primary mode renders a project file —
+    # and deliberately NOT on browser_enabled / the extension: the render
+    # runs in the shared server-side Playwright pool. Pool unavailability
+    # is reported by the handler at call time, never here (schema build
+    # must not launch Chromium).
+    if not ctx.project_ready:
+        return []
+    from lib.tools import BROWSER_TOOL_PREVIEW_PAGE
+    logger.debug('[Task %s] Page-preview tool enabled (server-side render)',
+                 ctx.tid)
+    return [BROWSER_TOOL_PREVIEW_PAGE]
 
 
 def _build_conv_ref(ctx: ToolContext) -> list[dict]:
@@ -358,21 +389,18 @@ def _register_builtins() -> None:
                  }),
                  category='project', description='Project file tools / code exec'),
         ToolSpec('browser', _build_browser, phase='base',
-                 # 19 names = BROWSER_TOOLS (16) + ADVANCED_BROWSER_TOOLS (3).
-                 # Declared so the registry stays the single source of truth
-                 # for "what tools exist" — an undeclared handler is invisible
-                 # to the partition tables and to the custom-tool collision
-                 # check in lib/tools/tool_env.py.
+                 # 13 names = BROWSER_TOOLS (11) + ADVANCED_BROWSER_TOOLS (2).
+                 # v2 (pt_869e5648403e4745): the ten retired names are NOT
+                 # declared — their tool_registry registration shrank with
+                 # BROWSER_TOOL_NAMES, so there is no handler left to declare
+                 # (their display formatters remain for history rendering).
                  provides=frozenset({
-                     'browser_navigate', 'browser_read_tab', 'browser_list_tabs',
-                     'browser_create_tab', 'browser_close_tab',
-                     'browser_click', 'browser_hover', 'browser_keyboard',
-                     'browser_execute_js', 'browser_screenshot',
-                     'browser_get_cookies', 'browser_get_history',
-                     'browser_get_app_state', 'browser_summarize_page',
-                     'browser_get_interactive_elements', 'browser_wait',
-                     'browser_fill_form', 'browser_hover_and_click',
-                     'browser_right_click_menu',
+                     'browser_navigate', 'browser_read_page', 'browser_list_tabs',
+                     'browser_close_tab', 'browser_click', 'browser_type',
+                     'browser_press_key', 'browser_execute_js',
+                     'browser_screenshot', 'browser_get_cookies',
+                     'browser_get_history', 'browser_fill_form',
+                     'browser_menu_click',
                  }),
                  # These DRIVE the user's real browser session, so they belong
                  # in the serial write partition + behind the Manual approval
@@ -382,16 +410,16 @@ def _register_builtins() -> None:
                  # NOTE: this makes them SERIAL — a deliberate behaviour change;
                  # concurrent clicks on one page were never actually safe.
                  write_tools=frozenset({
-                     'browser_navigate', 'browser_click', 'browser_keyboard',
-                     'browser_execute_js', 'browser_fill_form',
-                     'browser_hover_and_click', 'browser_right_click_menu',
-                     'browser_create_tab', 'browser_close_tab',
+                     'browser_navigate', 'browser_click', 'browser_type',
+                     'browser_press_key', 'browser_execute_js',
+                     'browser_fill_form', 'browser_menu_click',
+                     'browser_close_tab',
                  }),
                  # Read-only observers stay parallel-safe AND cacheable within
-                 # a task. browser_read_tab/screenshot are deliberately NOT
+                 # a task. browser_read_page/screenshot are deliberately NOT
                  # idempotent — the page changes under us between calls.
                  idempotent_tools=frozenset({
-                     'browser_list_tabs', 'browser_get_app_state',
+                     'browser_list_tabs',
                  }),
                  category='browser', description='Browser automation tools'),
         ToolSpec('desktop', _build_desktop, phase='base',
@@ -440,6 +468,12 @@ def _register_builtins() -> None:
                                      'produce_research'}),
                  category='video',
                  description='High-level topic → finished video / report / research'),
+        # End of base phase: appending HERE keeps every earlier prefix
+        # byte-stable for the prompt cache (the produce note above).
+        ToolSpec('page_preview', _build_page_preview, phase='base',
+                 provides=frozenset({'browser_preview_page'}),
+                 category='browser',
+                 description='Server-side rendered page preview'),
         ToolSpec('conv_ref', _build_conv_ref, phase='base',
                  provides=frozenset({'list_conversations', 'get_conversation',
                                      'project_charter_read', 'project_charter_propose',
@@ -461,6 +495,15 @@ def _register_builtins() -> None:
         ToolSpec('human_guidance', _build_human_guidance, phase='base',
                  provides=frozenset({'ask_human'}),
                  category='human', description='Ask the human for guidance'),
+        # update_search_settings — appended at the END of the base phase so
+        # every earlier tool's position stays byte-stable for the prompt
+        # cache (the "appending HERE" rule this module's header documents).
+        # It mutates server-GLOBAL config every conversation feels, so it is
+        # approval-gated + serial like the other state-changing tools.
+        ToolSpec('search_settings', _build_search_settings, phase='base',
+                 provides=frozenset({'update_search_settings'}),
+                 write_tools=frozenset({'update_search_settings'}),
+                 category='search', description='Search/fetch pipeline settings'),
         # ── capability phase ──
         ToolSpec('memory', _build_memory, phase='capability',
                  provides=frozenset({

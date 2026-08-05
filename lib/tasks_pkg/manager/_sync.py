@@ -106,7 +106,7 @@ _TERMINAL_OWNED_FIELDS = (
     'apiRounds', 'modifiedFiles', 'modifiedFileList', 'cost',
     '_memoryPrefetch', '_preferencesApplied', '_relatedConversations',
     '_preferencesLearned', '_gitSha',
-    '_inboxInjects', '_peerInjects', '_userSteerInjects',
+    '_inboxInjects', '_peerInjects', '_userSteerInjects', '_stallNudges',
 )
 
 # Terminal-path fields that the terminal sync writes but which are DELIBERATELY
@@ -866,6 +866,18 @@ def _sync_result_to_conversation(task, meta):
                 last_msg['model'] = meta['model']
             if meta.get('provider_id') and not last_msg.get('provider_id'):
                 last_msg['provider_id'] = meta['provider_id']
+            # ★ The terminal error envelope is VERDICT metadata, not content —
+            #   the guard protects the fuller body, never the verdict. Without
+            #   this a turn that streamed partial prose and then FAILED settles
+            #   its own row with finishReason='error' but NO envelope: the
+            #   typed explanation (429 / quota / timeout) then lives only on
+            #   whatever row the frontend happened to stamp — measured live as
+            #   the duplicate-twin bubble (conv mscns5i0fcofgl, task 48ee5c90).
+            #   Mirrors the normal path's set/pop exactly.
+            if error:
+                last_msg['error'] = error
+            else:
+                last_msg.pop('error', None)
             # ★ _taskId MUST be copied on this path too. It is pure PROVENANCE
             #   (which task produced this turn), never content, so writing it
             #   can never clobber the fuller content this branch is protecting.
@@ -1062,6 +1074,43 @@ def _sync_result_to_conversation(task, meta):
         if task.get('gitSha'):
             last_msg['_gitSha'] = task['gitSha']
 
+        # ── Same-task twin FOLD at settle time (one task = one row) ──
+        # A frontend reconnect placeholder pushed back mid-task (same _taskId,
+        # the typed error envelope — the conv mscns5i0fcofgl two-bubble bug)
+        # must converge into this task's OWN row in the SAME write, not on
+        # the next GET heal. Runs BEFORE the settings block below so the
+        # sidebar tail facts come from the CONVERGED tail, and before the
+        # CAS loop's fragment mark (a folded keeper's fresh finishReason
+        # must not be mislabelled 'aborted'). Cache-prefix-honouring like
+        # the GET/PUT seams (same-task rows are tail rows by construction,
+        # so the guard never bites here in practice). Idempotent — the
+        # per-attempt call inside the CAS loop covers graft-introduced
+        # twins after a CAS miss.
+        if len(messages) >= 2:
+            from lib.conversations.reconcile import fold_duplicate_task_twins
+            _fold_prefix_n = 0
+            try:
+                from lib.tasks_pkg.cache_tracking import get_cache_prefix_count
+                _fold_prefix_n = get_cache_prefix_count(conv_id)
+            except Exception as _fp_e:
+                logger.debug('%s conv=%s get_cache_prefix_count failed: %s',
+                             pfx, conv_id[:8], _fp_e)
+            messages, _twins_folded = fold_duplicate_task_twins(messages, _fold_prefix_n)
+            if _twins_folded:
+                # The fold replaces a filled keeper with a dict COPY —
+                # re-resolve our slot so every later consumer (settings
+                # tail facts, the CAS-miss graft, task['_committedMsg'])
+                # sees the row that is actually committed.
+                if last_msg.get('_msgId'):
+                    from lib.tasks_pkg.manager._events import find_message_by_id as _fmid_fold
+                    _fi, _fm = _fmid_fold(messages, last_msg['_msgId'])
+                    if _fm is not None:
+                        last_msg = _fm
+                logger.info('%s conv=%s Folded %d same-task twin assistant row(s) '
+                            'at terminal sync (one task = one row; terminal '
+                            'verdict moved onto the surviving row)',
+                            pfx, conv_id, _twins_folded)
+
         # Serialize and write back — json_dumps_pg strips null bytes from
         # raw data AND removes \u0000 escapes from the JSON text.
         messages_json = json_dumps_pg(messages)
@@ -1132,6 +1181,32 @@ def _sync_result_to_conversation(task, meta):
         _cas_succeeded = False
         search_text = build_search_text(messages)
         for _cas_attempt in range(MAX_TERMINAL_CAS):
+            # Same-task twin fold, per attempt (idempotent), BEFORE the
+            # fragment mark — mirrors reconcile_conversation_messages' pass
+            # order: a folded keeper's freshly-gained finishReason must not
+            # be mislabelled 'aborted' by the mark. A CAS-miss graft REPLACES
+            # `messages` with the fresh row, which can carry the twin again —
+            # the pre-loop call above already folded the common case, so this
+            # usually no-ops.
+            if len(messages) >= 2:
+                from lib.conversations.reconcile import fold_duplicate_task_twins
+                try:
+                    from lib.tasks_pkg.cache_tracking import get_cache_prefix_count
+                    _fold_prefix_n = get_cache_prefix_count(conv_id)
+                except Exception as _fp_e2:
+                    logger.debug('%s conv=%s get_cache_prefix_count failed (CAS loop): %s',
+                                 pfx, conv_id[:8], _fp_e2)
+                    _fold_prefix_n = 0
+                messages, _twins_folded = fold_duplicate_task_twins(messages, _fold_prefix_n)
+                if _twins_folded:
+                    if last_msg.get('_msgId'):
+                        from lib.tasks_pkg.manager._events import find_message_by_id as _fmid_fold2
+                        _fi2, _fm2 = _fmid_fold2(messages, last_msg['_msgId'])
+                        if _fm2 is not None:
+                            last_msg = _fm2
+                    logger.info('%s conv=%s Folded %d same-task twin row(s) on CAS '
+                                'attempt %d', pfx, conv_id, _twins_folded,
+                                _cas_attempt + 1)
             # Stop→Regenerate self-heal: a superseded content-bearing fragment
             # (no terminal reason) adjacent to this settle's answer must be
             # stamped finishReason='aborted' here — not only on the next GET —

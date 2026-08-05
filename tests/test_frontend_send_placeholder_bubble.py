@@ -106,6 +106,10 @@ global._pendingLogClean = win._pendingLogClean = null;
 global.imageGenMode = win.imageGenMode = false;
 global.pendingImages = win.pendingImages = [];
 global.pendingPdfTexts = win.pendingPdfTexts = [];
+// sendMessage now awaits the VIDEO pipeline too (upload.js: pendingVideos /
+// _waitForPendingVideos) — stub both so the harness has no videos in flight.
+global.pendingVideos = win.pendingVideos = [];
+global._waitForPendingVideos = win._waitForPendingVideos = async () => {};
 global.pdfProcessing = win.pdfProcessing = 0;
 global._sendGeneration = win._sendGeneration = 0;
 global.activeStreams = win.activeStreams = new Map();

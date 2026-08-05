@@ -148,6 +148,87 @@ before the 0.90 trigger (~778K)."""
 _COMPACTION_RESERVE = 8_000
 """Tokens reserved for the compaction LLM call itself."""
 
+_HEURISTIC_FLOOR_MAX_RATIO = 1.7
+"""Upper bound for the compaction gate's heuristic floor, as a multiple of
+the estimate-tier count (§10.1).
+
+The floor (``max(tiktoken, heuristic)``) exists for exactly one measured
+fact: tiktoken's cl100k under-counts Claude's tokenizer to 0.66x on
+high-entropy content (conv mq7y3irly1r4hu), so 1/0.66 ≈ 1.52 — 1.7 covers
+that with margin. Left UNBOUNDED, the floor inverts into a systematic
+OVER-count on CJK-heavy content (the heuristic's 1-token-per-CJK-char rule
+plus accumulated reasoning_content), measured 2026-08-01 at ~10x on
+conv=mrxinirv0t6n6v (gate 2,198,193 vs real prompt 215,552 → force-compact
+fired at ~22% real window usage, epic pt_18e9f7a6).
+
+Introduced 2026-08-01 (epic pt_18e9f7a6, brain-dispatched; owner ratification
+noted in JOURNAL). Env-overridable FAIL-OPEN via
+``TOFU_COMPACT_FLOOR_MAX_RATIO`` (unset/garbage→1.7; clamped [1.0, 5.0] so a
+typo can neither disable the floor nor re-open the unbounded over-count)."""
+
+
+def heuristic_floor_max_ratio() -> float:
+    """Resolve the heuristic-floor cap multiplier (§10.1 hyperparameter).
+
+    FAIL-OPEN: unset/non-float → :data:`_HEURISTIC_FLOOR_MAX_RATIO`; clamped
+    to [1.0, 5.0] — below 1.0 would delete the floor (re-exposing tiktoken's
+    0.66x under-count), above 5.0 re-opens the CJK over-count it guards. Read
+    at call time so an operator can retune without a restart."""
+    raw = (os.environ.get('TOFU_COMPACT_FLOOR_MAX_RATIO') or '').strip()
+    if not raw:
+        return _HEURISTIC_FLOOR_MAX_RATIO
+    try:
+        val = float(raw)
+    except (ValueError, TypeError) as e:
+        logger.debug('[Compact] TOFU_COMPACT_FLOOR_MAX_RATIO=%r not a float '
+                     '(%s) — using default %.2f', raw, e,
+                     _HEURISTIC_FLOOR_MAX_RATIO)
+        return _HEURISTIC_FLOOR_MAX_RATIO
+    return max(1.0, min(5.0, val))
+
+
+_REAL_ANCHOR_SLACK = 0.5
+"""Growth slack above the REAL prompt anchor when it clamps an estimate-tier
+gate count (§10.1).
+
+``_count_tokens_authoritative`` clamps estimate-tier counts to
+``anchor × (1 + slack)``, where the anchor is the conversation's last
+provider-MEASURED prompt size (``_real_anchor.real_prompt_anchor``). The
+slack covers legitimate growth between that measurement and the gate check —
+bounded by the Layer-0 per-round aggregate tool budget
+(MAX_ROUND_TOOL_RESULTS_CHARS) plus one user turn, so 0.5 (50%) is generous
+for any anchor ≥ ~150K while remaining tight enough to kill the 10x
+over-count class (2026-08-01, conv=mrxinirv0t6n6v: clamp 2.19M → 215K×1.5).
+
+The clamp is DOWN-ONLY by design: over-triggering destroys context lossily
+and irreversibly, while under-triggering is bounded by the next round's
+fresh usage recording and the L3 reactive net.
+
+Introduced 2026-08-01 (epic pt_18e9f7a6, brain-dispatched; owner ratification
+noted in JOURNAL). Env-overridable FAIL-OPEN via
+``TOFU_COMPACT_ANCHOR_SLACK`` (unset/garbage→0.5; clamped [0.0, 3.0])."""
+
+
+def real_anchor_slack() -> float:
+    """Resolve the real-anchor growth slack (§10.1 hyperparameter).
+
+    FAIL-OPEN: unset/non-float → :data:`_REAL_ANCHOR_SLACK`; clamped to
+    [0.0, 3.0] so a bad override can neither make the clamp tighter than the
+    anchor itself (0.0 = clamp exactly at the last real reading) nor loose
+    enough to be meaningless. Read at call time."""
+    raw = (os.environ.get('TOFU_COMPACT_ANCHOR_SLACK') or '').strip()
+    if not raw:
+        return _REAL_ANCHOR_SLACK
+    try:
+        val = float(raw)
+    except (ValueError, TypeError) as e:
+        logger.debug('[Compact] TOFU_COMPACT_ANCHOR_SLACK=%r not a float (%s) '
+                     '— using default %.2f', raw, e, _REAL_ANCHOR_SLACK)
+        return _REAL_ANCHOR_SLACK
+    return max(0.0, min(3.0, val))
+
+_COMPACT_TOOL_NAME = 'context_compact'
+"""Tool name for the synthetic compact tool pair."""
 _COMPACT_TOOL_NAME = 'context_compact'
 """Tool name for the synthetic compact tool pair."""
 

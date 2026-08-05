@@ -1,3 +1,5 @@
+# Incident anchor: born in commit a9507023 — refactor(orchestrator): pt_03f4cdf1 slice 12 — extract post-LLM defer...
+# (funeral audit pt_c565a36b3e8f42e6, docs/RATCHET_AUDIT.md)
 """Wire-parity guards for pt_03f4cdf1 slice 12 — extract post-LLM
 DEFERRED peer + steer inbox flush from _run.py's stream loop into
 lib.tasks_pkg.orchestrator._deferred_inbox_flush.flush_deferred_peer_and_steer().

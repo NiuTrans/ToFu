@@ -20,9 +20,11 @@ from __future__ import annotations
 import secrets
 import time
 
-from flask import Blueprint, jsonify
+from flask import Blueprint
 
-from lib.api_response import api_bad_request, api_not_found, api_ok
+from lib.api_response import (
+    api_bad_request, api_created, api_not_found, api_ok,
+)
 from lib.config_dir import config_path as _config_path
 from lib.json_store import read_json, update_json_atomic
 from lib.log import get_logger
@@ -70,11 +72,14 @@ _FOLDER_SCHEMA = {
     tags=['paper'],
     responses={
         '200': {'description': 'OK', 'content': {'application/json': {
-            'schema': {'type': 'array', 'items': _FOLDER_SCHEMA}}}},
+            'schema': {'type': 'object', 'properties': {
+                'ok': {'type': 'boolean'},
+                'items': {'type': 'array', 'items': _FOLDER_SCHEMA}}}}}},
     },
 )
 def list_paper_folders():
-    return jsonify(_read_folders())
+    # Same coordinated bare-array migration as api_v1/folders.py.
+    return api_ok({'items': _read_folders()})
 
 
 @api_v1_paper_folders_bp.route('/api/v1/paper-folders', methods=['POST'])
@@ -112,7 +117,7 @@ def create_paper_folder():
 
     update_json_atomic(_PAPER_FOLDERS_PATH, _mutate, default=[])
     logger.info('[PaperFolders] created id=%s name=%r', new_folder['id'], name)
-    return jsonify(new_folder), 201
+    return api_created(new_folder)
 
 
 @api_v1_paper_folders_bp.route('/api/v1/paper-folders/<folder_id>', methods=['PUT'])
@@ -162,7 +167,7 @@ def update_paper_folder(folder_id):
         return api_not_found('Folder not found')
     logger.info('[PaperFolders] updated id=%s name=%r', folder_id,
                 found[0].get('name'))
-    return jsonify(found[0])
+    return api_ok(found[0])
 
 
 @api_v1_paper_folders_bp.route('/api/v1/paper-folders/<folder_id>', methods=['DELETE'])

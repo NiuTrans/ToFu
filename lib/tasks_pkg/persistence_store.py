@@ -114,7 +114,6 @@ class DefaultConversationStore:
         OLD messages with the NEW rev, and the CAS then passes while destroying
         the append.  A single-row read is atomic on both backends.
         """
-        import json
         from lib.database import DOMAIN_CHAT, get_thread_db
         db = get_thread_db(DOMAIN_CHAT)
         return self._load_with_rev(db, conv_id)

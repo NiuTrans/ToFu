@@ -1,3 +1,5 @@
+# Incident anchor: born in commit ab99ef8b — checkpoint: accumulated work since last commit
+# (funeral audit pt_c565a36b3e8f42e6, docs/RATCHET_AUDIT.md)
 """Phase-3 regression: the FRONTEND translate path is id-anchored + dedup-safe,
 mirroring the backend contract.
 

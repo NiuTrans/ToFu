@@ -78,6 +78,27 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _MARKER_SYMBOLS = ('arm_autopilot', 'disarm_autopilot', '_marker_exists')
 
 
+if pytest is not None:
+    @pytest.fixture()
+    def fresh_import():
+        """Force a fresh import of the autopilot module cluster.
+
+        An earlier suite in a ring may have reload()ed one of these
+        modules without restoring (test_autopilot_markers_functional did —
+        breaking facade↔markers identity for THIS check). Same hermetic
+        pattern as test_autopilot_event_forwarding_wire_parity's
+        reload_modules fixture: drop the cluster from sys.modules so the
+        identity assertion reads a coherent import surface — then RESTORE
+        the original module objects (tests/_hermetic_import.py). The old
+        delete-and-leave teardown made later suites re-import fresh
+        DUPLICATES, which broke importlib.reload (ImportError) and
+        string-target monkeypatch steering downstream (pt_788b25a5).
+        """
+        from tests._hermetic_import import hermetic_import_surface
+        with hermetic_import_surface('lib.tasks_pkg.autopilot'):
+            yield
+
+
 @_unit
 def test_markers_module_exists_and_exposes_symbols():
     """Slice 2 (pt_00459503): lib.tasks_pkg.autopilot_markers exists and
@@ -110,11 +131,13 @@ def test_autopilot_facade_reexports_marker_symbols():
 
 
 @_unit
-def test_facade_and_markers_module_resolve_to_same_object():
+def test_facade_and_markers_module_resolve_to_same_object(fresh_import):
     """Slice 2: the facade attribute and the autopilot_markers module
     attribute MUST be IDENTICAL objects (``is`` comparison). This is
     the load-bearing invariant for monkeypatches to steer the live
-    code path (matches slice-1's identity contract).
+    code path (matches slice-1's identity contract). Hermetic: the
+    fresh_import fixture drops any state a prior suite's un-restored
+    reload() left in sys.modules.
     """
     import importlib
     ap = importlib.import_module('lib.tasks_pkg.autopilot')
@@ -199,6 +222,14 @@ if __name__ == '__main__':
         test_autopilot_py_no_longer_defines_marker_symbols,
         test_autopilot_markers_isolated_from_pt_8dc03017_tokens,
     ]:
-        fn()
+        if fn is test_facade_and_markers_module_resolve_to_same_object:
+            # Emulate the fresh_import fixture (its value is unused — only
+            # the sys.modules cleanup side effect matters).
+            for name in list(sys.modules):
+                if name.startswith('lib.tasks_pkg.autopilot'):
+                    del sys.modules[name]
+            fn(None)
+        else:
+            fn()
         print('ok', fn.__name__)
     print('ALL PASSED')

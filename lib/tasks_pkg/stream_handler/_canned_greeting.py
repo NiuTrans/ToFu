@@ -52,6 +52,16 @@ _CANNED_GREETING_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 
+# System-injected <system-reminder> blocks are NOT the user's own words:
+# the per-turn context assembly appends them to the LAST user message
+# (date / digest / charter / board — see
+# ``system_context/_reminders._refresh_tail_block``), so the raw flattened
+# text always exceeds ``_SMALLTALK_MAX_CHARS`` and the complement below
+# could never fire in production (2026-08-02 deepseek-v4-flash incident:
+# a legitimate laconic greeting retried twice and triple-displayed).
+_SYSTEM_REMINDER_RE = re.compile(
+    r'<system-reminder>.*?</system-reminder>', re.DOTALL)
+
 # The complement: a last-user-message that is PURE small-talk makes a
 # greeting reply legitimate. Kept tight — salutations and bare thanks only,
 # so "继续" / "?" / a brain kickoff never read as an invitation to greet.
@@ -83,11 +93,16 @@ def _message_text(content) -> str:
     return ''
 
 
+def _user_own_text(content) -> str:
+    """The user's own words: flattened text minus system-injected reminders."""
+    return _SYSTEM_REMINDER_RE.sub('', _message_text(content)).strip()
+
+
 def last_user_is_smalltalk(messages: list) -> bool:
     """True iff the last user-role message is pure greeting/thanks small-talk."""
     for m in reversed(messages or []):
         if isinstance(m, dict) and m.get('role') == 'user':
-            text = _message_text(m.get('content')).strip()
+            text = _user_own_text(m.get('content'))
             if not text or len(text) > _SMALLTALK_MAX_CHARS:
                 return False
             return bool(_SMALLTALK_RE.match(text))

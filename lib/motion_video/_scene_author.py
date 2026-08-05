@@ -35,7 +35,6 @@ one agent loop per scene).
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 
@@ -706,7 +705,7 @@ def author_scene(scene: dict, scene_dir: str, *, width: int, height: int,
     """
     import time as _time
 
-    from lib.agent_loop import AbortSignal, run_agent_loop
+    from lib.agent_loop import AbortSignal
     from lib.motion_video._template import render_scene_html
 
     max_rounds = _DEFAULT_MAX_ROUNDS if not max_rounds else int(max_rounds)
@@ -983,7 +982,8 @@ def _author_once(scene: dict, scene_dir: str, *, width: int, height: int,
             try:
                 w = int(args.get('width') or 1024)
                 h = int(args.get('height') or 1024)
-            except (TypeError, ValueError):
+            except (TypeError, ValueError) as e:
+                logger.debug('[SceneAuthor] bad width/height (%s) — using 1024x1024', e)
                 w = h = 1024
             try:
                 rel = _generate_scene_asset(prompt, scene_dir, width=w, height=h)

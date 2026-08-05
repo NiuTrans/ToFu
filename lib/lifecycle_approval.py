@@ -423,7 +423,8 @@ def detect_lifecycle_calls(toolrounds: list | None) -> list:
     for rnd in toolrounds:
         try:
             hay = json.dumps(rnd, ensure_ascii=False)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError) as e:
+            logger.debug('[Lifecycle] toolround not JSON-serializable (%s) — skipped', e)
             continue
         for pat in _LIFECYCLE_PATTERNS:
             if pat in hay:

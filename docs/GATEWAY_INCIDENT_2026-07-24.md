@@ -39,12 +39,12 @@ SSE 响应已经开始返回、迭代途中连接被对端掐断。HTTPS 连接�
 
 ```
 2026-07-24 17:01:28 [WARNING] lib.llm._transport [run_task-4c989273]:
-  [Task 4c989273][R16][D:example-corp_key_0:aws.claude-opus-4.7] ⚠ Transient error (attempt 1):
+  [Task 4c989273][R16][D:example_corp_key_0:aws.claude-opus-4.7] ⚠ Transient error (attempt 1):
   ChunkedEncodingError: ("Connection broken: BrokenPipeError(32, 'Broken pipe')",
   BrokenPipeError(32, 'Broken pipe')) — retrying in 3.1s …
 ```
 
-- 16:46–17:04 共 9 次，**8 次集中在 example-corp_key_0:aws.claude-opus-4.7**，
+- 16:46–17:04 共 9 次，**8 次集中在 example_corp_key_0:aws.claude-opus-4.7**，
   但 17:01 前后 kimi-k3 / opus-4.8 也各出现。
 - 客户端读超时是 300s，断连不是客户端超时（那会是 `ReadTimeout`）。
 - 可疑模式：长 thinking 间隙（几十秒无字节流出）后连接被杀 —— 请优先核对
@@ -54,21 +54,21 @@ SSE 响应已经开始返回、迭代途中连接被对端掐断。HTTPS 连接�
 
 ```
 2026-07-24 17:04:52 [WARNING] lib.llm.stream [run_task-4c989273]:
-  [Task 4c989273][R16][D:example-corp_key_0:aws.claude-opus-4.7] ✖ Endpoint unreachable (connect phase)
+  [Task 4c989273][R16][D:example_corp_key_0:aws.claude-opus-4.7] ✖ Endpoint unreachable (connect phase)
   https://api.openai.com/v1/chat/completions:
   HTTPSConnectionPool(host='your-llm-gateway.example.com', port=443): Max retries exceeded ...
   (Caused by ProxyError('Unable to connect to proxy', BrokenPipeError(32, 'Broken pipe')))
 ```
 
 ```
-2026-07-24 17:05:17 ... [D:example-corp_key_0:yuju-claude-opus-4.7-evaDaily] ✖ Endpoint unreachable
+2026-07-24 17:05:17 ... [D:example_corp_key_0:yuju-claude-opus-4.7-evaDaily] ✖ Endpoint unreachable
   (connect phase): ('Connection aborted.', TimeoutError('The write operation timed out'))
 ```
 
 ### 3.3 429 限流混战（窗口背景，可能是故障诱因之一）
 
 ```
-2026-07-24 17:05:04 [INFO] ... 429 rate-limited on example-corp_key_0:yuju-claude-opus-4.7-evaDaily
+2026-07-24 17:05:04 [INFO] ... 429 rate-limited on example_corp_key_0:yuju-claude-opus-4.7-evaDaily
   — body: API HTTP 429: {"status":429,"message":"App:**8427在模型:yuju-claude-opus-4.7-evaDaily
   每分钟请求次数超过限制","ext":{"error":{"source":"AIGC","service":"aigc","stage":"validation"}}}
 ```
@@ -133,7 +133,7 @@ commit `64356c9a`；断连自愈后的内容收敛潜伏问题已立项 `pt_6e12
 | 项 | 第一波（16:42–17:33） | 第二波（22:01–22:48） |
 |---|---|---|
 | 写请求体超时（`write operation timed out`） | 95 次 | 26 次（另有同事件的 dispatcher failover 随行记录） |
-| 受影响 key | 双 key 同模式 | **完全对称**：example-corp_key_0 ×13 / example-corp_key_1 ×13 |
+| 受影响 key | 双 key 同模式 | **完全对称**：example_corp_key_0 ×13 / example_corp_key_1 ×13 |
 | 受影响任务 | 单会话为主 | **7 个并发任务**（244a8b46 / 89016f44 / fc8ff0d6 / ca427ed1 / b7360769 / 3de85d5a / be3ca45a） |
 | 命中轮次 | 高轮次大 prompt | R7–R101，集中高轮次大 prompt（R21 / R40 / R45 / R63 / R72 / R101） |
 | 伴随 429 | 窗口内 752 次 | 仅背景量级（约 67 次/小时） |
@@ -249,7 +249,7 @@ RST —— 与 §3.1 的 EPIPE 断连签名不同，请网关侧按"请求已受
    无时间重叠 —— 两者可能是独立问题，建议分开定位。
 3. **间隔规律被打破**：昨日两波间隔 4.5h；今日全天背景 + 晚高峰连续 3.5h ——
    劣化在加重而非收敛。
-4. **429 配额**：kimi-k3 当日 429 达 469 次（example-corp_key_0:430 / key_2:39），
+4. **429 配额**：kimi-k3 当日 429 达 469 次（example_corp_key_0:430 / key_2:39），
    每分钟配额在正常使用强度下频繁触顶，请一并评估。
 
 ---

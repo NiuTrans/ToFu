@@ -232,7 +232,9 @@ async function sendMessage() {
   // ── Branch mode intercept: redirect to branch if active ──
   if (typeof isBranchModeActive === "function" && isBranchModeActive()) {
     const branchCtx = getActiveBranchContext();
-    if (branchCtx) {
+    // Video attachments ride the normal send path (branch messages carry
+    // text/images only) — don't divert when a video is pending.
+    if (branchCtx && pendingVideos.length === 0) {
       const input = document.getElementById("userInput");
       const text = (input?.value || "").trim();
       if (!text && pendingImages.length === 0) return;
@@ -248,7 +250,7 @@ async function sendMessage() {
   }
   const input = document.getElementById("userInput");
   const text = input.value.trim();
-  if (!text && pendingImages.length === 0 && pendingPdfTexts.length === 0)
+  if (!text && pendingImages.length === 0 && pendingPdfTexts.length === 0 && pendingVideos.length === 0)
     return;
   // 2026-05-06 (Option C): `pdfProcessing` is now a COUNTER (# of in-flight
   // text-extract calls), not a single-flight mutex. Don't silently drop the
@@ -283,13 +285,21 @@ async function sendMessage() {
       if (
         !newText &&
         pendingImages.length === 0 &&
-        pendingPdfTexts.length === 0
+        pendingPdfTexts.length === 0 &&
+        pendingVideos.length === 0
       )
         return;
     }
   }
+  // ── Video readiness gate: the analysis payload (frames + transcript)
+  //    ships INSIDE the message, so a still-processing video must finish (or
+  //    be dropped with a toast) before the payload is built. Processing
+  //    started at upload time, so this wait is usually already over.
+  if (pendingVideos.length > 0 && typeof _waitForPendingVideos === 'function') {
+    await _waitForPendingVideos();
+  }
   const finalText = input.value.trim();
-  if (!finalText && pendingImages.length === 0 && pendingPdfTexts.length === 0)
+  if (!finalText && pendingImages.length === 0 && pendingPdfTexts.length === 0 && pendingVideos.length === 0)
     return;
   const sendGen = ++_sendGeneration;   // ★ capture generation for staleness checks
   let conv = getActiveConv();
@@ -336,6 +346,7 @@ async function sendMessage() {
   const convId = conv.id;
 
   // ── Build message payload for backend ──
+  const _readyVideos = pendingVideos.filter(v => v && !v._status);
   const msgPayload = {
     text: finalText,
     images: [...pendingImages],
@@ -359,6 +370,10 @@ async function sendMessage() {
   //    reload. See static/js/info-rail.js.
   const _turnCtx = (typeof buildTurnCtxSnapshot === 'function') ? buildTurnCtxSnapshot() : null;
   if (_turnCtx) msgPayload.ctx = _turnCtx;
+  if (_readyVideos.length > 0) {
+    msgPayload.videos = _readyVideos.map(v =>
+      (typeof _videoPayloadForSend === 'function') ? _videoPayloadForSend(v) : v);
+  }
   // Reply quotes
   if (typeof getPendingReplyQuotes === "function") {
     const rqs = getPendingReplyQuotes();
@@ -394,6 +409,7 @@ async function sendMessage() {
   };
   if (msgPayload.replyQuotes) userMsg.replyQuotes = msgPayload.replyQuotes;
   if (msgPayload.convRefs) userMsg.convRefs = msgPayload.convRefs;
+  if (msgPayload.videos) userMsg.videos = msgPayload.videos;
   if (_turnCtx) userMsg._ctx = _turnCtx;
   _ensureMsgId(userMsg);  // no-op — _msgId already set from msgPayload
 
@@ -430,6 +446,7 @@ async function sendMessage() {
   input.style.height = "auto";
   pendingImages = [];
   pendingPdfTexts = [];
+  pendingVideos = [];
   if (typeof _vlmClearState === 'function') _vlmClearState();
   renderImagePreviews();
   document.getElementById("pdfProgress").style.display = "none";

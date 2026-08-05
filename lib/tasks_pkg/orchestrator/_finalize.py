@@ -302,6 +302,10 @@ def _emit_tool_round_phase(task, assistant_msg, round_num):
             detailKey='stream.phase.analyzingRound',
             detailArgs={'round': round_num + 1},
             toolContext=summary,
+            # Structured raw tool NAMES so an i18n client composes the
+            # suffix in the UI language (toolContext stays the English
+            # fallback for headless / non-i18n clients).
+            toolContextTools=unique_names,
             roundNum=round_num + 1,
         ))
 
@@ -1494,6 +1498,13 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
     # synthesis. Clearing is safe even if a reader missed every event (the
     # task is terminal and the latch is gone → LATE done resumes its role).
     task.pop('_finalize_started_at', None)
+    # Terminal busy-state broadcast (pt_3ea0e045): the CLEAR half of the busy
+    # channel must be event-driven like the SET half is, not ride the next
+    # incidental write. At this point the hook has concluded (a spawned VU
+    # carrier projects itself as <tid>#vu; an ordinary settle projects IDLE),
+    # the status is terminal and the latch is gone — this frame is the truth.
+    from lib.tasks_pkg.manager._registry import notify_terminal_busy_state
+    notify_terminal_busy_state(task)
     # persist_task_result already ran BEFORE the autopilot hook (see above);
     # the heavy-state release was deferred because the VU inherits
     # task['messages'] — release it here, at the same point the old trailing

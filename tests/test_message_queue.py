@@ -74,7 +74,7 @@ class TestMessageQueueAPI:
 
         resp = flask_client.get(f'/api/v1/chat/queue/{conv_id}')
         assert resp.status_code == 200
-        queue = resp.get_json()
+        queue = resp.get_json()['items']  # {ok, items} envelope
         assert len(queue) == 2
         assert queue[0]['text'] == 'First'
         assert queue[1]['text'] == 'Second'
@@ -90,7 +90,7 @@ class TestMessageQueueAPI:
         resp = flask_client.delete(f'/api/v1/chat/queue/{conv_id}/{removed_id}')
         assert resp.status_code == 200
 
-        queue = flask_client.get(f'/api/v1/chat/queue/{conv_id}').get_json()
+        queue = flask_client.get(f'/api/v1/chat/queue/{conv_id}').get_json()['items']
         assert len(queue) == 1
         assert queue[0]['text'] == 'Keep me'
 
@@ -111,14 +111,14 @@ class TestMessageQueueAPI:
         assert resp.status_code == 200
         assert resp.get_json()['cleared'] == 2
 
-        queue = flask_client.get(f'/api/v1/chat/queue/{conv_id}').get_json()
+        queue = flask_client.get(f'/api/v1/chat/queue/{conv_id}').get_json()['items']
         assert len(queue) == 0
 
     def test_get_empty_queue(self, flask_client):
         """GET for an unknown conv returns an empty list."""
         resp = flask_client.get('/api/v1/chat/queue/nonexistent')
         assert resp.status_code == 200
-        assert resp.get_json() == []
+        assert resp.get_json()['items'] == []
 
 
 class TestPeerMessageQueueEntry:
@@ -144,7 +144,8 @@ class TestPeerMessageQueueEntry:
         from_conv = 'mradmzmdxyz123'  # full 14-char id; short form is mradmzmd
         _seed_peer(conv_id, self.LONG, from_conv)
 
-        entry = flask_client.get(f'/api/v1/chat/queue/{conv_id}').get_json()[0]
+        entry = flask_client.get(
+            f'/api/v1/chat/queue/{conv_id}').get_json()['items'][0]
 
         # (a) clean, unframed text — the ORIGINAL message, not the [Peer …] body
         assert entry['text'] == self.LONG
@@ -160,7 +161,8 @@ class TestPeerMessageQueueEntry:
         """The 100→2000 cap: the full message survives (no mid-word cut)."""
         conv_id = _qid()
         _seed_peer(conv_id, self.LONG, 'mradmzmdxyz123')
-        entry = flask_client.get(f'/api/v1/chat/queue/{conv_id}').get_json()[0]
+        entry = flask_client.get(
+            f'/api/v1/chat/queue/{conv_id}').get_json()['items'][0]
         assert len(entry['text']) == len(self.LONG) > 100
         # The specific tail the owner saw cut off ("...shipped the ren") is present.
         assert entry['text'].endswith('when you get a chance.')
@@ -170,7 +172,8 @@ class TestPeerMessageQueueEntry:
         conv_id = _qid()
         _seed_peer(conv_id, 'Please pause and re-check the board.',
                    'operatorc0nv99', human=True)
-        entry = flask_client.get(f'/api/v1/chat/queue/{conv_id}').get_json()[0]
+        entry = flask_client.get(
+            f'/api/v1/chat/queue/{conv_id}').get_json()['items'][0]
         assert entry['isPeerMessage'] is True
         assert entry['isPeerHuman'] is True
         assert entry['text'] == 'Please pause and re-check the board.'
@@ -179,7 +182,8 @@ class TestPeerMessageQueueEntry:
         """A normal human turn is unaffected — no peer attribution keys leak."""
         conv_id = _qid()
         _seed(conv_id, 'just a normal message', 1000)
-        entry = flask_client.get(f'/api/v1/chat/queue/{conv_id}').get_json()[0]
+        entry = flask_client.get(
+            f'/api/v1/chat/queue/{conv_id}').get_json()['items'][0]
         assert 'isPeerMessage' not in entry
         assert 'fromConv' not in entry
         assert 'isPeerHuman' not in entry

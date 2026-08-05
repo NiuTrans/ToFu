@@ -63,6 +63,7 @@ class CacheState:
         'total_breaks', 'total_input_tokens',
         'first_call_time',
         'pending_l2_roi',
+        'cold_streak',
     )
 
     def __init__(self):
@@ -84,6 +85,11 @@ class CacheState:
         # at compaction time and completed with the FOLLOWING round's re-billed
         # cache_write in detect_cache_break. None when no L2 event is pending.
         self.pending_l2_roi: dict | None = None
+        # Consecutive verifiably-cold rounds (read ≤ floor AND write ≤ floor),
+        # updated per round in detect_cache_break. The compaction prefix guard
+        # stays UP until this reaches COLD_STREAK_GUARD_OPEN — one transient
+        # miss must never unleash a rewrite of the just-sent prefix.
+        self.cold_streak: int = 0
         # v2 fields
         self.per_tool_hashes: dict[str, str] = {}  # tool_name → hash
         self.prefix_content_hash: str = ''
@@ -152,6 +158,25 @@ class CacheState:
         self.total_breaks: int = 0
         self.total_input_tokens: int = 0
         self.first_call_time: float = 0.0
+
+
+# ── Compaction-guard hysteresis (the 2026-08-01 self-feeding re-bill fix) ──
+# How many CONSECUTIVE verifiably-cold rounds (cache_read ≤ 1000 AND
+# cache_write ≤ 1000) a thread must see before ``get_cache_prefix_count``
+# opens the micro_compact prefix guard. A single zero round does NOT prove
+# the prefix is uncached — Anthropic's ~15–20s write-visibility race, a
+# gateway stochastic miss, a cache-namespace flip, and kimi's never-reported
+# cache_write all produce a zero round against a LIVE server-side entry.
+# Measured 2026-08-01 (conv ms9ow2tt calls 3→6): one miss dropped the guard,
+# L1 strip_thinking rewrote two already-sent assistant turns, the next round
+# missed again, the guard stayed down and stripped again — three extra
+# full-prefix re-bills from ONE transient miss. K=3 covers the re-warm
+# window observed in that incident (read recovered on round 3).
+COLD_STREAK_GUARD_OPEN = 3
+
+# Read/write token floor below which a round counts as "cold" for the
+# streak — mirrors the historical ``_boundary`` gate in ``_prefix.py``.
+COLD_ROUND_TOKEN_FLOOR = 1000
 
 
 _cache_states: dict[tuple, CacheState] = {}

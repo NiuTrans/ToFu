@@ -42,21 +42,40 @@ def _handle_list_tabs(fn_args):
             update_tab_title(t.get('id'), title, url=url)
             lines.append(f'  Tab {t["id"]}: {title}{active_mark}')
             lines.append(f'    URL: {url}')
+        # Seed the working tab on first contact so later calls can omit tab_id.
+        from lib.browser._resolve import resolve_work_tab
+        resolve_work_tab({}, send_browser_command)
         return '\n'.join(lines)
     return json.dumps(result, ensure_ascii=False, indent=2)
 
 
-def _handle_read_tab(fn_args):
-    tab_id = fn_args.get('tabId')
-    if tab_id is None:
-        return 'Error: tabId is required. Use browser_list_tabs first to get tab IDs.'
-    result, error = send_browser_command('read_tab', {
-        'tabId': int(tab_id),
-        'selector': fn_args.get('selector'),
-        'maxChars': fn_args.get('maxChars', 50000),
-    }, timeout=30)
-    if error:
-        return f'Error reading tab {tab_id}: {error}'
+def _extract_best_text(result):
+    """(text, method) from a read_tab payload — server-side HTML extraction
+    preferred, innerText fallback. Shared by _handle_read_tab and the
+    read_page auto mode (which measures sparsity on the SAME text)."""
+    url = result.get('url', '')
+    raw_html = result.get('html', '')
+    text = None
+    extract_method = 'innerText'
+    if raw_html and len(raw_html) > 200:
+        try:
+            from tofu_search.fetch.html_extract import extract_html_text
+            text = extract_html_text(raw_html, 80000, url=url)
+            if text and len(text) > 50:
+                extract_method = 'html→extract'
+            else:
+                text = None
+        except Exception as e:
+            logger.warning('read_tab HTML extraction failed, falling back to innerText: %s', e)
+    if not text:
+        text = result.get('text', '')
+    return text, extract_method
+
+
+def _render_read_result(result, tab_id):
+    """Format a read_tab payload for the model (the original _handle_read_tab
+    body, minus the send). Shared by browser_read_tab (legacy) and
+    browser_read_page."""
     if isinstance(result, dict):
         if result.get('error'):
             return f'Error: {result["error"]}'
@@ -74,30 +93,28 @@ def _handle_read_tab(fn_args):
                 if text:
                     lines.append(f'[{i+1}] <{el.get("tag", "?")}> {text[:2000]}')
             return '\n'.join(lines)
-        else:
-            # ── Prefer server-side extraction from HTML (same pipeline as fetch) ──
-            raw_html = result.get('html', '')
-            text = None
-            extract_method = 'innerText'
-            if raw_html and len(raw_html) > 200:
-                try:
-                    from tofu_search.fetch.html_extract import extract_html_text
-                    text = extract_html_text(raw_html, 80000, url=url)
-                    if text and len(text) > 50:
-                        extract_method = 'html→extract'
-                    else:
-                        text = None
-                except Exception as e:
-                    logger.warning('read_tab HTML extraction failed, falling back to innerText: %s', e)
-            if not text:
-                text = result.get('text', '')
-            truncated = result.get('truncated', False)
-            header = f'Tab: {title}\nURL: {url}\nContent ({len(text):,} chars, {extract_method}'
-            if truncated and extract_method == 'innerText':
-                header += f', truncated from {result.get("textLength", "?"):,}'
-            header += '):\n\n'
-            return header + text
+        text, extract_method = _extract_best_text(result)
+        truncated = result.get('truncated', False)
+        header = f'Tab: {title}\nURL: {url}\nContent ({len(text):,} chars, {extract_method}'
+        if truncated and extract_method == 'innerText':
+            header += f', truncated from {result.get("textLength", "?"):,}'
+        header += '):\n\n'
+        return header + text
     return str(result)
+
+
+def _handle_read_tab(fn_args):
+    tab_id = fn_args.get('tabId')
+    if tab_id is None:
+        return 'Error: tabId is required. Use browser_list_tabs first to get tab IDs.'
+    result, error = send_browser_command('read_tab', {
+        'tabId': int(tab_id),
+        'selector': fn_args.get('selector'),
+        'maxChars': fn_args.get('maxChars', 50000),
+    }, timeout=30)
+    if error:
+        return f'Error reading tab {tab_id}: {error}'
+    return _render_read_result(result, tab_id)
 
 
 def _handle_create_tab(fn_args):
@@ -127,21 +144,43 @@ def _handle_close_tab(fn_args):
     if error:
         return f'Error closing tab(s): {error}'
     if isinstance(result, dict) and result.get('closed'):
-        return f'Closed tab(s): {result["closed"]}'
+        from lib.browser._resolve import forget_work_tab
+        closed = result['closed']
+        for cid in (closed if isinstance(closed, list) else [closed]):
+            forget_work_tab(cid)
+        return f'Closed tab(s): {closed}'
     return json.dumps(result, ensure_ascii=False, indent=2)
 
 
 def _handle_navigate(fn_args):
-    tab_id = fn_args.get('tabId')
+    # v2 (pt_869e5648403e4745): absorbs browser_create_tab (new_tab=true),
+    # defaults the working tab, and waits for load by default — the classic
+    # "read too early" failure was the old fire-and-forget default.
+    from lib.browser._resolve import remember_work_tab, resolve_work_tab
     url = fn_args.get('url')
-    if tab_id is None:
-        return 'Error: tabId is required.'
     if not url:
         return 'Error: url is required.'
+    if fn_args.get('newTab'):
+        params = {'url': url}
+        params['active'] = fn_args.get('active', False)
+        result, error = send_browser_command('create_tab', params, timeout=10)
+        if error:
+            return f'Error opening new tab: {error}'
+        if isinstance(result, dict):
+            new_id = result.get('id')
+            update_tab_title(new_id, result.get('title'), url=result.get('url') or url)
+            remember_work_tab(new_id)
+            return (f'Opened new tab #{new_id} -> {url} '
+                    f'(now the working tab)')
+        return json.dumps(result, ensure_ascii=False, indent=2)
+    tab_id = resolve_work_tab(fn_args, send_browser_command)
+    if tab_id is None:
+        return ('Error: no tab to navigate. Pass tab_id, use new_tab=true, '
+                'or call browser_list_tabs first.')
     params = {
         'tabId': int(tab_id),
         'url': url,
-        'waitForLoad': fn_args.get('waitForLoad', False),
+        'waitForLoad': fn_args.get('waitForLoad', True),
     }
     result, error = send_browser_command('navigate', params, timeout=35)
     if error:

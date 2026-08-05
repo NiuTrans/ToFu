@@ -58,20 +58,25 @@ When your research is done, respond with STRICT JSON ONLY (no prose, no code fen
   "connections": [
     {"kind": "prior_paper" | "transfer" | "analogy",
      "text": "<the concrete bridge, 1-3 sentences; name the shared mechanism>",
-     "paper": {"title": "<exact title>", "arxiv_id": "<id or null>"} | null}
+     "paper": {"title": "<exact title>", "arxiv_id": "<id or null>"} | null,
+     "anchor": "<the EXACT heading text of THE REPORT's section this bridge relates to — copy it verbatim from the report, e.g. \"Method — How It Works\" — or null when the point is general>"}
   ],
   "opinion": "<2-4 sentences: your grounded position on how this ages / what is over- or under-claimed. Cite the specific evidence.>",
   "open_problems": [
     {"text": "<a concrete next experiment tied to a real current gap>",
      "grounded_by": {"title": "<paper that establishes the gap>", "arxiv_id": "<id or null>"} | null}
   ],
-  "provocations": ["<sharp question 1>", "<sharp question 2>"]
+  "provocations": [
+    {"text": "<sharp question 1>",
+     "anchor": "<the EXACT heading text of the report section the reader should pause at for this question, or null>"}
+  ]
 }
 
 Rules:
 - Write all prose fields in English.
 - ``connections`` MUST come first in your thinking and be the strongest part. 2-4 items.
 - Only set a ``paper``/``grounded_by`` object when you actually mean that specific paper; use null when the point is general. Never invent an arXiv id — give the title and leave arxiv_id null if unsure; the app resolves it.
+- ``anchor`` is a NOMINATION, not free text: copy the heading EXACTLY as it appears in the explainer report (without the leading ``##``). If you are not sure which section it belongs to, use null — a wrong anchor is worse than none.
 - Your FINAL message must be the JSON object and nothing else."""
 
 
@@ -104,20 +109,25 @@ Grounding 规则（不可妥协）：只要你点名了某篇具体论文——�
   "connections": [
     {"kind": "prior_paper" | "transfer" | "analogy",
      "text": "<具体的那座桥，1-3 句；点名共同机制>",
-     "paper": {"title": "<确切标题>", "arxiv_id": "<id 或 null>"} | null}
+     "paper": {"title": "<确切标题>", "arxiv_id": "<id 或 null>"} | null,
+     "anchor": "<这座桥关联的报告小节标题——从报告里逐字照抄，例如「方法——它如何工作」；泛指时填 null>"}
   ],
   "opinion": "<2-4 句：你对它能否经得起时间、哪里过度/不足声称的有依据的立场。引用具体证据。>",
   "open_problems": [
     {"text": "<一个挂在真实当前空白上的具体下一步实验>",
      "grounded_by": {"title": "<确立该空白的论文>", "arxiv_id": "<id 或 null>"} | null}
   ],
-  "provocations": ["<尖锐追问 1>", "<尖锐追问 2>"]
+  "provocations": [
+    {"text": "<尖锐追问 1>",
+     "anchor": "<读者应在哪个报告小节停下来想这个问题——逐字照抄该小节标题，或 null>"}
+  ]
 }
 
 规则：
 - 所有散文字段用中文（专有名词、模型名、基准名保留英文）。
 - ``connections`` 在你的思考里必须**排第一**，也应是最强的部分。2-4 条。
 - 只有当你确实是指某篇具体论文时才填 ``paper``/``grounded_by`` 对象；泛指时用 null。绝不臆造 arXiv id——不确定就给标题、arxiv_id 留 null，由 app 去解析。
+- ``anchor`` 是**提名**而非自由文本：必须逐字照抄讲解报告里的小节标题（不带前导 ``##``）。拿不准属于哪节就填 null——锚错比不锚更糟。
 - 你的**最后一条消息**必须就是那个 JSON 对象，别的什么都没有。"""
 
 

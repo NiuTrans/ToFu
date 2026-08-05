@@ -175,7 +175,8 @@ def remove_not_in(keep_names, *, sources=('mirrored',)) -> list:
     return removed
 
 
-def find_for_platform(os_key: str, arch: str = '') -> list:
+def find_for_platform(os_key: str, arch: str = '',
+                      kind: str = 'full') -> list:
     """The servable artifacts for one visitor, best-first per platform row.
 
     Shares the narrowing rule with the old GitHub-URL matcher
@@ -185,14 +186,23 @@ def find_for_platform(os_key: str, arch: str = '') -> list:
     NEWER version wins — a stale local build must not pin the user below
     the mirrored release; ties go to the built artifact (it matches this
     server's own code).
+
+    ``kind`` separates the two components (docs/DESKTOP_AGENT_DIST_DESIGN
+    .md): entries carry ``kind: 'full' | 'agent'`` (absent ⇒ 'full').
+    The default 'full' keeps every pre-kind caller byte-identical — and
+    an agent artifact can NEVER shadow the full installer just for being
+    newer (both are 'built' at the same version, so without the filter
+    the fresher wrap wins the same row).
     """
     from lib.desktop_dist.platforms import _platform_rows_for
 
     arts = artifacts()
     out = []
-    for _os, _arch, _label, _pat, _min in _platform_rows_for(os_key, arch):
+    for _os, _arch, _label, _pat, _min in _platform_rows_for(os_key, arch,
+                                                             kind):
         cands = [a for a in arts.values()
                  if isinstance(a, dict)
+                 and a.get('kind', 'full') == kind
                  and a.get('os') == _os and a.get('arch') == _arch
                  and a.get('filename')
                  and os.path.isfile(
@@ -206,6 +216,26 @@ def find_for_platform(os_key: str, arch: str = '') -> list:
         ), reverse=True)
         out.append(cands[0])
     return out
+
+
+def is_loopback_url(url: str) -> bool:
+    """True when the URL can only ever mean 'this same machine'.
+
+    Used to judge preseed URLs: a loopback preseed works only when the
+    installer lands on the SERVER's own machine — offered to a remote
+    controlled machine it attaches the agent to a void. Unparseable or
+    empty input is NOT loopback (callers treat empty separately).
+    """
+    from urllib.parse import urlparse
+    try:
+        host = (urlparse((url or '').strip()).hostname or '').lower()
+    except Exception as e:
+        logger.debug('[DesktopDist] preseed url %r unparseable: %s', url, e)
+        return False
+    if not host:
+        return False
+    return (host == 'localhost' or host == '0.0.0.0' or host == '::1'
+            or host.startswith('127.'))
 
 
 def _version_key(version) -> tuple:
@@ -252,6 +282,7 @@ def last_error_age_s() -> float | None:
 
 __all__ = [
     '_store_dir', 'load_manifest', 'save_manifest', 'artifacts',
+    'is_loopback_url',
     'resolve_file', 'record_artifact', 'remove_not_in', 'find_for_platform',
     'mark_refresh', 'manifest_age_s', 'last_error_age_s',
 ]

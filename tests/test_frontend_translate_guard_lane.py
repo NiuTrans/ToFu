@@ -14,6 +14,13 @@ guards are hot:
   * ``_editingMsgIdx !== null``        → frame dropped
   * ``_localWriteAt`` within 6000 ms   → frame dropped (self-echo)
 
+(2026-08-05, conv msebjymx5b4a25: the live-stream guard now diverts to the
+WIDER ``_streamActiveVerify`` lane — translations plus the server-injected
+settled-prefix adoption for brain/peer/queue kickoffs; the editing and
+self-echo guards still divert to ``_translationOnlyVerify``. All lanes run
+the same byte-equality-guarded translation reducer, so the guard-integrity
+property pinned here is unchanged.)
+
 Auto-translate commits right after a turn settles, which is precisely when this
 device just PUT the conv (``conversations.js`` sets ``_localWriteAt`` in
 ``syncConversationToServer``) and when the stream may not yet be removed from
@@ -300,14 +307,17 @@ def test_NEUTER_lane_dispatch_is_load_bearing(tmp_path):
     with open(CTS, encoding='utf-8') as f:
         src = f.read()
 
-    # Every guard diverts through this one call — remove all dispatches.
-    dispatches = re.findall(r'^\s*_scheduleTranslationOnlyVerify\(convId\);\s*$',
-                            src, flags=re.M)
+    # Every guard diverts through one of the two lane calls — remove ALL
+    # dispatches (translation-only ×2 guards + the stream-active lane).
+    dispatches = re.findall(
+        r'^\s*(?:_scheduleTranslationOnlyVerify|_scheduleStreamActiveVerify)'
+        r'\(convId\);\s*$', src, flags=re.M)
     assert len(dispatches) >= 3, (
         f'expected >=3 lane dispatches (one per guard), found {len(dispatches)} '
         '— update the neuter target')
-    neutered = re.sub(r'^\s*_scheduleTranslationOnlyVerify\(convId\);\s*$', '',
-                      src, flags=re.M)
+    neutered = re.sub(
+        r'^\s*(?:_scheduleTranslationOnlyVerify|_scheduleStreamActiveVerify)'
+        r'\(convId\);\s*$', '', src, flags=re.M)
     assert neutered != src
 
     copy = tmp_path / 'cross_tab_sync_neutered.js'
@@ -342,8 +352,11 @@ def test_reopen_path_merges_translations_through_shared_reducer():
         f'expected >=3 reopen-branch translation merges, found {merges} — a '
         'reconcile branch may have lost its merge, which would resurrect '
         '"switch conversations to see the 译文"')
-    assert '_mergeTranslationFields(destMsgs[i], sourceMsgs[i])' in src, (
-        'reopen merge no longer routes through the shared reducer')
+    # The per-index literal call moved inside the array-level reducer
+    # (conversations.js:1060) — assert the reopen path routes through IT.
+    assert '_mergeServerTranslations(' in src, (
+        'reopen merge no longer routes through the shared array-level reducer '
+        '(_mergeServerTranslations internally calls _mergeTranslationFields)')
     # And the wholesale-overwrite branches take the server array (translations
     # included by construction).
     assert src.count('conv.messages = serverMsgs') >= 2, src[:0] or (

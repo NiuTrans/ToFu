@@ -13,7 +13,7 @@ import time
 
 from lib.database import db_execute_with_retry, json_dumps_pg
 from lib.database._core_schema import CONVERSATIONS, upsert
-from lib.log import get_logger
+from lib.log import audit_log, get_logger
 
 logger = get_logger(__name__)
 
@@ -158,6 +158,28 @@ def persist_conv_messages(db, conv_id, messages, title, settings_patch=None):
         Callers that emit ``notify_conv_changed`` should pass this rev so a
         sibling device does a body refetch rather than a sidebar-only refresh.
     """
+    # Durable one-time heal for send-race duplicate user rows (optimistic
+    # frontend copy + server-built copy sharing one ``timestamp``). The
+    # send route guards via ``append_user_msg_idempotent``, but historical
+    # rows and writers that bypass the helper still land here; healing ONCE
+    # at this write chokepoint means the rebuild-side
+    # ``_dedup_duplicate_user_messages`` stays a no-op instead of re-healing
+    # the same pair in memory on every context rebuild, forever.
+    from lib.tasks_pkg.conv_message_builder._dedup import _dedup_duplicate_user_messages
+    _healed = _dedup_duplicate_user_messages(messages)
+    if len(_healed) != len(messages):
+        logger.warning('[chat] persist_conv_messages healed %d duplicate '
+                       'same-timestamp user row(s) conv=%s — durable one-time '
+                       'fix (race-planted optimistic/server copies)',
+                       len(messages) - len(_healed), (conv_id or '?')[:8])
+        try:
+            audit_log('conv_user_dup_healed', conv_id=conv_id,
+                      dropped=len(messages) - len(_healed),
+                      seam='persist_conv_messages')
+        except Exception as _ae:
+            logger.debug('[chat] audit_log for dup heal failed: %s', _ae)
+    messages = _healed
+
     # Lazy import to avoid the lib.chat → lib.tasks_pkg.manager import cycle.
     from lib.tasks_pkg.manager import _assign_message_ids
     _assign_message_ids(messages)

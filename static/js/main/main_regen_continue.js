@@ -445,7 +445,17 @@ async function continueAssistant() {
   //   turn cut off mid-tool-loop (tool rounds present, no prose yet) is NOT
   //   empty — it has a recoverable checkpoint the server can resume from — so
   //   it must go through the POST, not this pop-and-regenerate shortcut.
-  const _hasRounds = !!(getToolRoundsFromMsg(assistantMsg) || []).length;
+  const _hasRounds = !!(getToolRoundsFromMsg(assistantMsg) || []).length
+    /* ★ Trimmed-window guard: a windowed first-open strips toolRounds for
+     * transport (msg._trimmed + the SERVER-stamped _trimmedToolRoundCount),
+     * so the LOCAL copy looks round-less. Taking the shortcut here would pop
+     * the message and sync allowTruncate:true — which SKIPS the PUT
+     * heavy-field preservation guard (routes/conversations.py) — permanently
+     * destroying the recoverable checkpoint in the DB before the server was
+     * ever asked. The count is a server FACT: fall through to the POST and
+     * let scan_continue_checkpoint rescan the full blob; a turn the server
+     * finds truly empty still comes back as fallback:'regenerate' below. */
+    || !!(assistantMsg._trimmed && (assistantMsg._trimmedToolRoundCount || 0) > 0);
   if (!assistantMsg.content && !assistantMsg.thinking && !_hasRounds) {
     // Nothing to continue — message is empty, just regenerate
     conv.messages.pop();

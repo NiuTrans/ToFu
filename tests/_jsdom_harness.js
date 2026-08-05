@@ -118,8 +118,19 @@ function setup(opts) {
   }
 
   const out = [];
-  const check = (name, cond) => out.push((cond ? 'PASS ' : 'FAIL ') + name);
-  const report = () => console.log(out.join('\n'));
+  // Authoritative assertion counts — tests/_jsdom.py parse_harness_result()
+  // reads the trailer as the source of truth (PASS/FAIL lines are for humans;
+  // a body that forgets report() leaves no trailer and falls back to
+  // line-anchored counting on the Python side).
+  const counts = { pass: 0, fail: 0 };
+  const check = (name, cond) => {
+    counts[cond ? 'pass' : 'fail'] += 1;
+    out.push((cond ? 'PASS ' : 'FAIL ') + name);
+  };
+  const report = () => {
+    console.log(out.join('\n'));
+    console.log('__JSDOM_RESULT__ ' + JSON.stringify(counts));
+  };
   return { window: win, document: win.document, check, report, out };
 }
 

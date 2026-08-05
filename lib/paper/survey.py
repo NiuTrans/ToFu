@@ -44,7 +44,6 @@ bites the whole chain — no network, no real LLM needed to test the gates.
 
 from __future__ import annotations
 
-import json
 from typing import Callable, Optional
 
 from lib.log import get_logger

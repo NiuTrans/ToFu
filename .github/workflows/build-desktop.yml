@@ -347,14 +347,21 @@ jobs:
       - name: Verify build inputs
         shell: bash
         run: |
-          # The Inno SetupIconFile is a HARD requirement — a missing icon aborts
-          # the compile. Fail here with a clear message instead of a cryptic
-          # ISCC error later.
+          # The Inno SetupIconFile + WizardImageFile / WizardSmallImageFile
+          # are HARD requirements — a missing asset aborts the compile. Fail
+          # here with a clear message instead of a cryptic ISCC error later.
           test -f static/icons/tofu.ico || {
             echo "::error::static/icons/tofu.ico not generated — gen_desktop_icons.py failed."
             exit 1
           }
           echo "Icon present: $(ls -l static/icons/tofu.ico)"
+          for bmp in wizard-large.bmp wizard-small.bmp; do
+            test -f "static/icons/installer/$bmp" || {
+              echo "::error::static/icons/installer/$bmp not generated — gen_desktop_icons.py failed."
+              exit 1
+            }
+          done
+          echo "Wizard bitmaps present: $(ls -l static/icons/installer/)"
 
       - name: Build with PyInstaller
         run: pyinstaller tofu.spec
@@ -459,7 +466,16 @@ jobs:
           ArchitecturesInstallIn64BitMode=x64compatible
           SetupIconFile=static\\icons\\tofu.ico
           PrivilegesRequired=lowest
+          ; Running-app guard (parity with the NSIS authoring's
+          ; TOFU_CLOSE_RUNNING_APP): upgrading over a running Tofu must
+          ; offer to close it, never die on a file-in-use error. These
+          ; ARE Inno's defaults — pinned explicitly because the contract
+          ; test binds them and a default flip would ship silently.
+          CloseApplications=yes
+          RestartApplications=no
           WizardStyle=modern
+          WizardImageFile=static\\icons\\installer\\wizard-large.bmp
+          WizardSmallImageFile=static\\icons\\installer\\wizard-small.bmp
 
           [Files]
           Source: "dist\\Tofu\\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs
@@ -514,6 +530,143 @@ jobs:
         with:
           name: windows-installer
           path: installer_output/*.exe
+          retention-days: 30
+
+      # ── The AGENT component (docs/DESKTOP_AGENT_DIST_DESIGN.md §5.3) ──
+      # Same leg, smaller spec: the agent closure is a strict subset of the
+      # full payload's deps EXCEPT curl_cffi (the egress TLS fingerprint),
+      # which the full venv does not carry. Inno is native here — the wine
+      # 32-bit trap that forced NSIS on the server build does not exist on a
+      # real runner. The two authorings (this Inno, the server's NSIS) are
+      # bound by tests/test_installer_parity.py: 2 components × 2 tools, one
+      # contract — including the autostart semantics below.
+      - name: Install agent dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          pip install curl_cffi
+
+      - name: Build agent with PyInstaller
+        run: pyinstaller tofu-agent.spec
+
+      - name: Verify agent PyInstaller output
+        shell: bash
+        run: |
+          test -f "dist/TofuAgent/TofuAgent.exe" || {
+            echo "::error::PyInstaller did not produce dist/TofuAgent/TofuAgent.exe."
+            exit 1
+          }
+          echo "Built: $(ls -l dist/TofuAgent/TofuAgent.exe)"
+
+      # Same verdict discipline as the full smoke above: exit code + no
+      # traceback + the marker — never liveness (console=False lingers by
+      # construction), and the agent's own gate additionally asserts the
+      # server stack is ABSENT from the frozen bundle (the size claim of
+      # this component, proven at build time rather than on a user's PC).
+      - name: Smoke test the built agent
+        shell: bash
+        env:
+          TOFU_AGENT_SMOKE: '1'
+        run: |
+          set -uo pipefail
+          rc=0
+          ./dist/TofuAgent/TofuAgent.exe > /tmp/agent_smoke.out 2> /tmp/agent_smoke.err || rc=$?
+          echo "── stdout ──"; cat /tmp/agent_smoke.out || true
+          echo "── stderr ──"; cat /tmp/agent_smoke.err || true
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::The built TofuAgent.exe failed to start (exit $rc)."
+            exit 1
+          fi
+          if grep -qE 'Traceback \(most recent call last\)|ModuleNotFoundError|ImportError' /tmp/agent_smoke.err; then
+            echo "::error::TofuAgent.exe exited 0 but its stderr carries a traceback."
+            exit 1
+          fi
+          grep -q 'TOFU_AGENT_SMOKE_OK' /tmp/agent_smoke.out || {
+            echo "::error::TofuAgent.exe exited 0 without emitting TOFU_AGENT_SMOKE_OK — the smoke branch did not run, so this proved nothing."
+            exit 1
+          }
+
+      - name: Create agent Inno Setup script
+        shell: bash
+        env:
+          APP_VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          # The autostart contract (owner amendment ①): offered, DEFAULT ON
+          # (an unattended relay machine must survive a Windows Update
+          # reboot — without it the bridge silently dies until someone
+          # notices failed traffic), HKCU ⇒ UAC-free under
+          # PrivilegesRequired=lowest, removed at uninstall
+          # (uninsdeletevalue — a removed app must not leave a dead autorun
+          # pointing at a missing exe). ValueName must equal
+          # desktop/agent_launcher.py's _RUN_VALUE: the installer's task,
+          # the tray toggle and the reconcile logic all write ONE key.
+          cat > agent_installer.iss << INNO_EOF
+          [Setup]
+          AppName=Tofu Agent
+          AppVersion=${APP_VERSION}
+          AppPublisher=Tofu Project
+          AppPublisherURL=https://github.com/rangehow/ToFu
+          DefaultDirName={localappdata}\\Programs\\TofuAgent
+          DefaultGroupName=Tofu Agent
+          DisableProgramGroupPage=yes
+          UninstallDisplayIcon={app}\\TofuAgent.exe
+          OutputDir=agent_installer_output
+          OutputBaseFilename=TofuAgent-Setup-${APP_VERSION}-win64
+          Compression=lzma2/ultra64
+          SolidCompression=yes
+          ArchitecturesAllowed=x64compatible
+          ArchitecturesInstallIn64BitMode=x64compatible
+          SetupIconFile=static\\icons\\tofu.ico
+          PrivilegesRequired=lowest
+          ; Running-app guard — same contract as the full app above and
+          ; the NSIS authoring's TOFU_CLOSE_RUNNING_APP macro.
+          CloseApplications=yes
+          RestartApplications=no
+          WizardStyle=modern
+          WizardImageFile=static\\icons\\installer\\wizard-large.bmp
+          WizardSmallImageFile=static\\icons\\installer\\wizard-small.bmp
+
+          [Files]
+          Source: "dist\\TofuAgent\\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs
+
+          [Tasks]
+          Name: desktopicon; Description: "Create a desktop shortcut"; GroupDescription: "Additional shortcuts:"
+          Name: autostart; Description: "Start Tofu Agent with Windows"; GroupDescription: "Additional shortcuts:"
+
+          [Icons]
+          Name: "{autoprograms}\\Tofu Agent"; Filename: "{app}\\TofuAgent.exe"
+          Name: "{autodesktop}\\Tofu Agent"; Filename: "{app}\\TofuAgent.exe"; Tasks: desktopicon
+
+          [Registry]
+          Root: HKCU; Subkey: "Software\\Microsoft\\Windows\\CurrentVersion\\Run"; ValueType: string; ValueName: "TofuAgent"; ValueData: """{app}\\TofuAgent.exe"""; Flags: uninsdeletevalue; Tasks: autostart
+
+          [Run]
+          Filename: "{app}\\TofuAgent.exe"; Description: "Launch Tofu Agent"; Flags: nowait postinstall skipifsilent
+          INNO_EOF
+
+          echo "── Generated agent_installer.iss ──"
+          cat agent_installer.iss
+
+      - name: Build agent installer with Inno Setup
+        uses: Minionguyjpro/Inno-Setup-Action@v1.2.4
+        with:
+          path: agent_installer.iss
+
+      - name: Verify agent installer output
+        shell: bash
+        run: |
+          ls -l agent_installer_output/ || true
+          test -n "$(ls agent_installer_output/*.exe 2>/dev/null)" || {
+            echo "::error::Inno Setup did not produce an agent installer .exe."
+            exit 1
+          }
+
+      - name: Upload Windows agent installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-agent-installer
+          path: agent_installer_output/*.exe
           retention-days: 30
 
   # ── macOS ────────────────────────────────────────────────────
@@ -629,10 +782,20 @@ jobs:
           # No `set -e` here on purpose: the create-dmg invocation below is
           # deliberately paired with a `|| { ... }` zip fallback, and the whole
           # point is that its failure is HANDLED rather than fatal.
+          #
+          # The window art is a GENERATED input (gen_desktop_icons.py), so a
+          # missing file means the icon step broke — that is a build error,
+          # not a create-dmg failure, and must fail loudly here rather than
+          # fall through to the zip fallback with an unbranded window.
+          test -f static/icons/installer/dmg-background.png || {
+            echo "::error::static/icons/installer/dmg-background.png not generated — gen_desktop_icons.py failed."
+            exit 1
+          }
           brew install create-dmg || true
           create-dmg \
             --volname "Tofu" \
             --volicon "static/icons/tofu.icns" \
+            --background "static/icons/installer/dmg-background.png" \
             --window-pos 200 120 \
             --window-size 600 400 \
             --icon-size 100 \
@@ -660,6 +823,60 @@ jobs:
         with:
           name: macos-zip-${{ matrix.arch }}
           path: Tofu-*.zip
+          if-no-files-found: ignore
+          retention-days: 30
+
+      # ── The AGENT component — the ONLY macOS agent supply that can ever
+      # exist (server-side macOS builds are structurally impossible; every
+      # server's mirror picks these DMGs up from here). Same single-arch
+      # native discipline as the full DMG above.
+      - name: Install agent dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          pip install curl_cffi
+
+      - name: Build agent with PyInstaller
+        run: pyinstaller tofu-agent.spec
+
+      - name: Create agent DMG
+        shell: bash
+        env:
+          APP_VERSION: ${{ needs.version.outputs.version }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          # Same no-set-e rationale and zip fallback as the full DMG step.
+          brew install create-dmg || true
+          create-dmg \
+            --volname "Tofu Agent" \
+            --volicon "static/icons/tofu.icns" \
+            --background "static/icons/installer/dmg-background.png" \
+            --window-pos 200 120 \
+            --window-size 600 400 \
+            --icon-size 100 \
+            --icon "TofuAgent.app" 150 190 \
+            --app-drop-link 450 190 \
+            --hide-extension "TofuAgent.app" \
+            "TofuAgent-${APP_VERSION}-macos-${ARCH}.dmg" \
+            "dist/TofuAgent.app/" \
+          || {
+            cd dist && zip -r "../TofuAgent-${APP_VERSION}-macos-${ARCH}.zip" TofuAgent.app/
+          }
+
+      - name: Upload macOS agent DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-agent-dmg-${{ matrix.arch }}
+          path: TofuAgent-*.dmg
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Upload macOS agent ZIP (fallback)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-agent-zip-${{ matrix.arch }}
+          path: TofuAgent-*.zip
           if-no-files-found: ignore
           retention-days: 30
 
@@ -725,6 +942,20 @@ jobs:
             exit 1
           }
 
+      - name: Add Linux desktop integration
+        # The tarball is the WHOLE Linux install UX (no .deb/.AppImage yet —
+        # tracked separately), so it must carry the pieces that register the
+        # app with the desktop environment: install.sh (per-user, no sudo)
+        # and the .desktop template it renders. Verified present before
+        # archiving — a tarball without them is a silent UX regression.
+        run: |
+          set -euo pipefail
+          cp desktop/install-linux.sh dist/Tofu/install.sh
+          chmod +x dist/Tofu/install.sh
+          cp desktop/tofu.desktop dist/Tofu/tofu.desktop
+          test -x dist/Tofu/install.sh
+          test -f dist/Tofu/tofu.desktop
+
       - name: Create archive
         env:
           APP_VERSION: ${{ needs.version.outputs.version }}
@@ -732,11 +963,71 @@ jobs:
           cd dist
           tar czf "../Tofu-${APP_VERSION}-linux-x86_64.tar.gz" Tofu/
 
+      - name: Build .deb package
+        env:
+          APP_VERSION: ${{ needs.version.outputs.version }}
+        # The PRIMARY Linux installer (pt_a64216b959694605): dpkg-deb ships
+        # in the runner base image, no FUSE at build or run time, native apt
+        # lifecycle. The tarball stays as the no-sudo / non-Debian fallback.
+        run: bash desktop/build-deb.sh dist/Tofu "$APP_VERSION" .
+
       - name: Upload Linux archive
         uses: actions/upload-artifact@v4
         with:
           name: linux-archive
-          path: Tofu-*.tar.gz
+          path: |
+            Tofu-*.tar.gz
+            Tofu-*.deb
+          retention-days: 30
+
+      # ── The AGENT component — tar.gz ONLY (.deb stays full-only: a relay
+      # machine is an ops user's machine, and this keeps the releases page
+      # from doubling; design doc §5.3).
+      - name: Install agent dependencies
+        run: |
+          pip install curl_cffi
+
+      - name: Build agent with PyInstaller
+        run: pyinstaller tofu-agent.spec
+
+      # Same contract as the full smoke above (exit code + no traceback +
+      # marker). The agent's gate additionally asserts no server-stack
+      # module is importable in the frozen bundle.
+      - name: Smoke test the built agent
+        shell: bash
+        env:
+          TOFU_AGENT_SMOKE: '1'
+        run: |
+          set -uo pipefail
+          rc=0
+          ./dist/TofuAgent/TofuAgent > /tmp/agent_smoke.out 2> /tmp/agent_smoke.err || rc=$?
+          echo "── stdout ──"; cat /tmp/agent_smoke.out || true
+          echo "── stderr ──"; cat /tmp/agent_smoke.err || true
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::The built TofuAgent binary failed to start (exit $rc)."
+            exit 1
+          fi
+          if grep -qE 'Traceback \(most recent call last\)|ModuleNotFoundError|ImportError' /tmp/agent_smoke.err; then
+            echo "::error::TofuAgent exited 0 but its stderr carries a traceback."
+            exit 1
+          fi
+          grep -q 'TOFU_AGENT_SMOKE_OK' /tmp/agent_smoke.out || {
+            echo "::error::TofuAgent exited 0 without emitting TOFU_AGENT_SMOKE_OK."
+            exit 1
+          }
+
+      - name: Create agent archive
+        env:
+          APP_VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          cd dist
+          tar czf "../TofuAgent-${APP_VERSION}-linux-x86_64.tar.gz" TofuAgent/
+
+      - name: Upload Linux agent archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-agent-archive
+          path: TofuAgent-*.tar.gz
           retention-days: 30
 
   # ── Release ──────────────────────────────────────────────────
@@ -788,7 +1079,7 @@ jobs:
           set -euo pipefail
           cd release-assets
           shopt -s nullglob
-          files=( *.exe *.dmg *.zip *.tar.gz )
+          files=( *.exe *.dmg *.zip *.tar.gz *.deb )
           if [ ${#files[@]} -eq 0 ]; then
             echo "::error::No release assets found to checksum — build jobs produced nothing."
             exit 1
@@ -951,4 +1242,5 @@ jobs:
             release-assets/**/*.dmg
             release-assets/**/*.zip
             release-assets/**/*.tar.gz
+            release-assets/**/*.deb
             release-assets/SHA256SUMS

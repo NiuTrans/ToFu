@@ -34,7 +34,6 @@ from __future__ import annotations
 
 import os
 import re
-import subprocess
 import tempfile
 
 from lib.log import get_logger

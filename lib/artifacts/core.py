@@ -430,6 +430,19 @@ def delete_artifact(artifact_id: str) -> bool:
     if not artifact_id:
         return False
     db = get_thread_db(DOMAIN_CHAT)
+    # Idempotency is decided by a PRE-READ, not by comparing the stamped
+    # timestamp afterwards: two calls inside the same millisecond made the
+    # old post-verify (deleted_at == just-minted-now) match the FIRST call's
+    # stamp, so a no-op second delete reported success and double-audited.
+    row = db.execute(
+        'SELECT deleted_at FROM chat_artifacts WHERE id=?',
+        (artifact_id,),
+    ).fetchone()
+    if row is None:
+        return False
+    prev_deleted = row['deleted_at'] if hasattr(row, 'keys') else row[0]
+    if prev_deleted:
+        return False
     now_ms = _now_ms()
     try:
         db_execute_with_retry(
@@ -441,19 +454,12 @@ def delete_artifact(artifact_id: str) -> bool:
         logger.error('[Artifacts] delete failed id=%s: %s',
                      artifact_id[:8], e, exc_info=True)
         return False
-    # Verify it actually flipped (cheap re-read; SELECT changes() is dialect-specific)
-    row = db.execute(
-        'SELECT 1 FROM chat_artifacts WHERE id=? AND deleted_at=?',
-        (artifact_id, now_ms),
-    ).fetchone()
-    deleted = row is not None
-    if deleted:
-        logger.info('[Artifacts] deleted id=%s', artifact_id[:8])
-        try:
-            audit_log('artifact_delete', artifact_id=artifact_id)
-        except Exception as e:
-            logger.debug('[Artifacts] audit_log artifact_delete failed: %s', e)
-    return deleted
+    logger.info('[Artifacts] deleted id=%s', artifact_id[:8])
+    try:
+        audit_log('artifact_delete', artifact_id=artifact_id)
+    except Exception as e:
+        logger.debug('[Artifacts] audit_log artifact_delete failed: %s', e)
+    return True
 
 
 def list_versions(artifact_id: str) -> list[dict]:

@@ -348,16 +348,54 @@ function _handleOAuthCode(provider, code, state) {
   _completeLogin(provider, code, state);
 }
 
-function _loadOAuthStatus() {
+function _loadOAuthStatus(fromRepoll) {
+  if (!fromRepoll) {
+    _egressRepollAttempts = 0;  // fresh load → fresh budget
+    _adapterStartPolling();     // settings just opened — start the adapter card chain
+  }
   Api.oauth.status()
     .then(function(data) {
       if (!data) return;
       _updateOAuthCard('claude', data.claude);
       _updateOAuthCard('codex', data.codex);
+      // Resolved verdicts free the re-poll budget for the next cold cache.
+      var probing = [data.claude, data.codex].some(function(s) {
+        return s && s.egress && s.egress.state === 'unknown';
+      });
+      if (!probing) _egressRepollAttempts = 0;
     })
     .catch(function(e) {
       console.warn('[OAuth] Failed to load status:', e);
     });
+}
+
+// ── 'unknown' re-poll ──
+// The status endpoint NEVER probes inline: a cold probe cache answers
+// 'unknown' and warms the verdict on a background thread (~1s observed;
+// the cache TTL is 300s and probes are fired only BY status polls, so
+// virtually every settings-open starts cold). Without a re-poll the
+// 出口检测中 label is TERMINAL — the verdict lands in the server cache a
+// second later but the open panel never re-fetches it. Re-poll on a short
+// cadence, bounded, and only while the settings modal is open; each poll
+// is a cache read server-side, so the cadence costs nothing.
+var _egressRepollTimer = null;
+var _egressRepollAttempts = 0;
+var _EGRESS_REPOLL_MS = 2000;
+var _EGRESS_REPOLL_MAX = 5;   // probe worst case: 5s connect timeout + slack
+
+function _scheduleEgressRepoll() {
+  if (_egressRepollTimer) return;  // one chain at a time
+  if (_egressRepollAttempts >= _EGRESS_REPOLL_MAX) return;
+  _egressRepollAttempts++;
+  _egressRepollTimer = setTimeout(function() {
+    _egressRepollTimer = null;
+    var modal = document.getElementById('settingsModal');
+    if (!modal || !modal.classList.contains('open')) {
+      _egressRepollAttempts = 0;  // modal closed mid-chain — drop it
+      return;
+    }
+    _loadOAuthStatus(true);
+  }, _EGRESS_REPOLL_MS);
 }
 
 // ── Desktop-egress status line + pin selector (S4) ──
@@ -385,10 +423,25 @@ function _renderEgressLine(provider, egress) {
       break;
     case 'unavailable':
       cls += ' oauth-egress-bad';
-      html = '<span class="oauth-egress-bad">' + t('settings.egressUnavailable') + '</span>';
+      /* The ONLY way out of this state is installing the desktop agent — so
+       * the prompt LEADS with that action (diagnosis demoted to the sub-line)
+       * and renders the ONE next step as a prominent button deep-linking to
+       * the Local Control modal (the single install surface: backend-chosen
+       * download links + bridge-token connect line) instead of growing a
+       * second install guide here. */
+      html = '<div class="oauth-egress-callout">' +
+               '<div class="oauth-egress-callout-text">' +
+                 '<span class="oauth-egress-callout-title">' + t('settings.egressUnavailable') + '</span>' +
+                 '<span class="oauth-egress-callout-sub">' + t('settings.egressUnavailSub') + '</span>' +
+               '</div>' +
+               '<button type="button" class="btn-small oauth-egress-agent-btn" id="oauth' + capProvider + 'EgressAgentBtn"' +
+               ' title="' + escapeHtml(t('settings.egressGetAgentTitle')) + '">' +
+               escapeHtml(t('settings.egressGetAgent')) + '</button>' +
+             '</div>';
       break;
     default: // unknown — 探测已在后台触发
       html = '<span class="oauth-egress-pending">' + t('settings.egressProbing') + '</span>';
+      _scheduleEgressRepoll();
   }
   // Pin selector when several egress-capable agents are online.
   if (agents.length > 1 && egress.state === 'agent') {
@@ -401,6 +454,10 @@ function _renderEgressLine(provider, egress) {
   }
   el.className = cls;
   el.innerHTML = html;
+  var agentBtn = document.getElementById('oauth' + capProvider + 'EgressAgentBtn');
+  if (agentBtn) {
+    agentBtn.onclick = function() { _oauthOpenAgentSetup(); };
+  }
   var sel = document.getElementById('oauth' + capProvider + 'EgressPin');
   if (sel) {
     sel.onchange = function() {
@@ -413,6 +470,29 @@ function _renderEgressLine(provider, egress) {
       if (d && d.pinned) sel.value = d.pinned;
     });
   }
+}
+
+// ── Egress unavailable → hand the user the desktop-agent installer ──
+// The Local Control modal is the ONE install surface (its download links are
+// chosen by the backend's setup_state, and it mints the bridge-token connect
+// line) — the egress line deep-links to it rather than re-authoring any of
+// that guidance. While the modal is open we re-poll the (cached) OAuth status
+// so this line flips to "via agent" the moment the agent connects, with one
+// final refresh on close. The status endpoint NEVER probes inline, so the
+// 3 s cadence costs a cache read only.
+var _oauthAgentSetupPoll = null;
+
+function _oauthOpenAgentSetup() {
+  if (typeof openLocalControlModal === 'function') openLocalControlModal();
+  if (_oauthAgentSetupPoll) { clearInterval(_oauthAgentSetupPoll); _oauthAgentSetupPoll = null; }
+  _oauthAgentSetupPoll = setInterval(function() {
+    var m = document.getElementById('localControlModal');
+    if (!m || !m.classList.contains('open')) {
+      clearInterval(_oauthAgentSetupPoll);
+      _oauthAgentSetupPoll = null;
+    }
+    _loadOAuthStatus();
+  }, 3000);
 }
 
 function _updateOAuthCard(provider, status) {
@@ -445,6 +525,31 @@ function _updateOAuthCard(provider, status) {
       loginBtn.onclick = function() { _oauthCancelAndRetry(provider); };
     }
     if (logoutBtn) { logoutBtn.style.display = 'none'; }
+    // A page reload mid-flow lands HERE — not in _oauthLogin's callback —
+    // re-rendered from the status projection alone. Restore the manual box,
+    // its truthful instructions, and the escape hatch from that projection,
+    // or the reloaded page silently offers nothing but a retry that re-runs
+    // the same (possibly broken) callback decision — the exact loop the
+    // hatch exists to break. Synthetic waiting states (exchange in flight,
+    // curl helper) carry no redirect_mode and are left untouched.
+    if (status.redirect_mode && status.status !== 'exchanging') {
+      var flowManual = document.getElementById('oauth' + capProvider + 'Manual');
+      if (flowManual) {
+        flowManual.style.display = '';
+        var flowUrl = document.getElementById('oauth' + capProvider + 'AuthUrl');
+        if (flowUrl && status.auth_url) flowUrl.value = status.auth_url;
+      }
+      _oauthApplyRedirectMode(provider, status.redirect_mode);
+    }
+    // Exchange params are the OTHER piece of login-response state a reload
+    // destroys. On the desktop build the SERVER is the user's machine, so a
+    // geo-blocked server exchange leaves the BROWSER exchange as the only
+    // path — and without these params it rejects with no-exchange-params
+    // while the curl helper cannot even build its command. Restoring them
+    // from the status projection keeps both backstops alive after a reload.
+    if (status.exchange) {
+      _oauthExchangeParams[provider] = status.exchange;
+    }
   } else if (status.status === 'error') {
     badge.textContent = t('settings.oauthError');
     badge.className = 'oauth-status-badge error';
@@ -476,7 +581,48 @@ function _oauthCancelAndRetry(provider) {
   if (manualDiv) manualDiv.style.display = 'none';
 }
 
-function _oauthLogin(provider) {
+// ── Which callback is this flow actually walking, and how to get out ──
+// Whether Anthropic accepts the loopback redirect for our client is an
+// EXTERNAL fact we cannot verify locally. If it ever refuses, a desktop user
+// lands on an authorization error with NOTHING to paste (the console page is
+// what renders the code, and a loopback flow never reaches it) — and the
+// cancel/retry button re-runs the SAME decision, so the user would loop
+// through the identical broken flow forever. The way out therefore has to be
+// a first-class control in the product, not the TOFU_OAUTH_LOOPBACK env var:
+// a packaged .exe user has nowhere to set one.
+function _oauthApplyRedirectMode(provider, mode) {
+  if (provider !== 'claude') return;   // codex has exactly one registered redirect
+  var loopback = mode === 'loopback';
+  var pasteHint = document.getElementById('oauthClaudeCodeHint');
+  var pasteRow = document.getElementById('oauthClaudePasteRow');
+  var lbNote = document.getElementById('oauthClaudeLoopbackNote');
+  var fbRow = document.getElementById('oauthClaudeConsoleFallbackRow');
+  // The paste instructions are only TRUE on the console flow.
+  if (pasteHint) pasteHint.style.display = loopback ? 'none' : '';
+  if (pasteRow) pasteRow.style.display = loopback ? 'none' : '';
+  // The note + escape hatch are only MEANINGFUL on the loopback flow.
+  if (lbNote) lbNote.style.display = loopback ? '' : 'none';
+  if (fbRow) fbRow.style.display = loopback ? '' : 'none';
+  var btn = document.getElementById('oauthClaudeConsoleFallbackBtn');
+  if (btn) btn.onclick = function() { _oauthUseConsoleFallback('claude'); };
+}
+
+// Restart the flow pinned to the console callback (manual code paste).
+// A fresh flow is required rather than reusing the pending one: the
+// redirect_uri is baked into the authorize URL AND must be echoed at
+// exchange time, so the old flow's PKCE/state pair cannot be reused with a
+// different redirect.
+function _oauthUseConsoleFallback(provider) {
+  var capP = provider === 'codex' ? 'Codex' : 'Claude';
+  // Drop the pending flow so its relay releases the port and its state is
+  // not mistaken for the new one.
+  Api.oauth.logoutPost(provider).catch(function() {});
+  var input = document.getElementById('oauth' + capP + 'ManualUrl');
+  if (input) input.value = '';
+  _oauthLogin(provider, true);
+}
+
+function _oauthLogin(provider, preferConsole) {
   var capProvider = provider === 'codex' ? 'Codex' : 'Claude';
   var loginBtn = document.getElementById('oauth' + capProvider + 'LoginBtn');
   if (loginBtn) { loginBtn.disabled = true; loginBtn.textContent = t('settings.oauthPreparing'); }
@@ -487,9 +633,9 @@ function _oauthLogin(provider) {
   function _doLoginRequest(useGet) {
     if (useGet) {
       console.warn('[OAuth] POST failed, retrying as GET for /api/oauth/login');
-      return Api.oauth.loginGet(provider);
+      return Api.oauth.loginGet(provider, preferConsole);
     }
-    return Api.oauth.loginPost(provider);
+    return Api.oauth.loginPost(provider, preferConsole);
   }
   _doLoginRequest(false)
     .then(function(r) {
@@ -544,6 +690,12 @@ function _oauthLogin(provider) {
         var authUrlInput = document.getElementById('oauth' + capProvider + 'AuthUrl');
         if (authUrlInput && data.auth_url) authUrlInput.value = data.auth_url;
       }
+      // Describe the flow the user is ACTUALLY about to walk, and expose the
+      // way out of it. During a loopback flow the paste instructions are
+      // FALSE (the provider redirects to localhost and never renders a
+      // code), so showing them unchanged would hand the user a task that
+      // cannot be completed.
+      _oauthApplyRedirectMode(provider, data.redirect_mode);
 
       // ── Detect popup closed → auto-reset ONLY if manual box not used ──
       if (popup) {
@@ -692,6 +844,194 @@ function _autoConfigureOAuthProvider(provider, status) {
   if (typeof _loadServerConfig === 'function') {
     try { _loadServerConfig(); } catch (e) { /* best-effort UI refresh */ }
   }
+}
+
+
+// ══════════════════════════════════════════════════════
+//  订阅适配器 (CLIProxyAPI) — subscription-adapter card
+//
+//  The backend manages a CLIProxyAPI sidecar on the user's desktop agent
+//  and projects it as a provider (`订阅适配器 · <agent name>`, id
+//  `adapter_<agent8>`) once bring-up reaches 'ready'. This card is the
+//  settings-surface for that lifecycle: it renders BELOW the OAuth cards
+//  (built in JS because the oauth.html panel ships before the bundler —
+//  touching the panel file is outside this module's ownership).
+//
+//  Polling follows the same contract as the egress re-poll above: a
+//  single setTimeout chain, alive ONLY while the settings modal is open
+//  AND the OAuth tab is active; the cadence tightens while any agent is
+//  mid-bring-up (first run downloads ~20MB, minutes) and relaxes once
+//  every task is settled. Stop = the chain simply never re-arms.
+// ══════════════════════════════════════════════════════
+
+var _adapterPollTimer = null;
+var _adapterCardBuilt = false;
+var _ADAPTER_POLL_IDLE_MS = 5000;   // steady state
+var _ADAPTER_POLL_BUSY_MS = 2000;   // while any ensure task is in flight
+var _adapterLastBusy = false;       // exposed for tests / diagnostics
+
+function _adapterPanelVisible() {
+  var modal = document.getElementById('settingsModal');
+  var panel = document.getElementById('settingsTab_oauth');
+  return !!(modal && modal.classList.contains('open') &&
+            panel && panel.classList.contains('active'));
+}
+
+// Build the card DOM once, appended after the OAuth provider cards.
+function _adapterEnsureCard() {
+  if (_adapterCardBuilt) return;
+  var panel = document.getElementById('settingsTab_oauth');
+  if (!panel) return;
+  if (document.getElementById('adapterCard')) { _adapterCardBuilt = true; return; }
+  var card = document.createElement('div');
+  card.className = 'oauth-provider-card';
+  card.id = 'adapterCard';
+  card.innerHTML =
+    '<div class="oauth-provider-header">' +
+      '<span class="oauth-provider-name">' + escapeHtml(t('settings.adapterTitle')) + '</span>' +
+    '</div>' +
+    '<p class="oauth-provider-desc">' + escapeHtml(t('settings.adapterDesc')) + '</p>' +
+    '<div id="adapterRows"></div>' +
+    '<div class="adapter-empty" id="adapterEmpty" style="display:none">' +
+      escapeHtml(t('settings.adapterEmpty')) +
+    '</div>' +
+    '<p class="adapter-info-line">' + escapeHtml(t('settings.adapterInfoLine')) + '</p>';
+  panel.appendChild(card);
+  _adapterCardBuilt = true;
+}
+
+// One status payload → full re-render of the per-agent rows.
+function _renderAdapterRows(data) {
+  _adapterEnsureCard();
+  var rows = document.getElementById('adapterRows');
+  var empty = document.getElementById('adapterEmpty');
+  if (!rows || !empty) return;
+  var agents = (data && Array.isArray(data.agents)) ? data.agents : [];
+  var tasks = (data && data.ensure_tasks) || {};
+  var online = [];
+  for (var i = 0; i < agents.length; i++) {
+    if (agents[i] && agents[i].online) online.push(agents[i]);
+  }
+  if (!online.length) {
+    rows.innerHTML = '';
+    empty.style.display = '';
+    _adapterLastBusy = false;
+    return;
+  }
+  empty.style.display = 'none';
+  var html = '';
+  var busy = false;
+  for (var j = 0; j < online.length; j++) {
+    var a = online[j];
+    var task = tasks[a.agent_id] || null;
+    var ad = a.adapter || {};
+    var state;   // 'ensuring' | 'running' | 'error' | 'installed' | 'not_installed'
+    if (task && task.state === 'ensuring') state = 'ensuring';
+    else if ((task && task.state === 'error') || ad.error) state = 'error';
+    else if (ad.running) state = 'running';
+    else if (ad.installed) state = 'installed';
+    else state = 'not_installed';
+    if (state === 'ensuring') busy = true;
+
+    var badgeCls = 'oauth-status-badge';
+    var badgeTxt;
+    if (state === 'ensuring') {
+      badgeCls += ' pending'; badgeTxt = t('settings.adapterBadgeInstalling');
+    } else if (state === 'running') {
+      badgeCls += ' authenticated';
+      badgeTxt = t('settings.adapterBadgeRunning', {
+        version: ad.version || '?', port: ad.port || (a.policy && a.policy.port) || 8317 });
+    } else if (state === 'error') {
+      badgeCls += ' error'; badgeTxt = t('settings.adapterBadgeError');
+    } else if (state === 'installed') {
+      badgeTxt = t('settings.adapterBadgeInstalled');
+    } else {
+      badgeTxt = t('settings.adapterBadgeNotInstalled');
+    }
+
+    html += '<div class="adapter-agent-row" data-agent="' + escapeHtml(a.agent_id) + '">' +
+      '<div class="adapter-agent-head">' +
+        '<span class="adapter-agent-name">' + escapeHtml(a.name || a.agent_id) + '</span>' +
+        '<span class="' + badgeCls + '">' + escapeHtml(badgeTxt) + '</span>' +
+      '</div>';
+
+    var n = Array.isArray(ad.accounts) ? ad.accounts.length
+          : (typeof ad.accounts === 'number' ? ad.accounts : 0);
+    html += '<div class="adapter-agent-meta">' +
+      escapeHtml(t('settings.adapterAccounts', { n: n })) + '</div>';
+
+    if (state === 'ensuring') {
+      html += '<div class="adapter-progress">' +
+        '<span class="adapter-spinner"></span>' +
+        escapeHtml(t('settings.adapterEnsuring')) + '</div>';
+    } else if (task && task.state === 'ready') {
+      html += '<div class="adapter-ready-line">' +
+        escapeHtml(t('settings.adapterReady', { name: a.name || a.agent_id })) + '</div>';
+    } else if (state === 'error') {
+      var detail = (task && task.detail) || ad.error || '';
+      html += '<div class="adapter-error-line">' + escapeHtml(detail) + '</div>';
+    }
+
+    html += '<div class="oauth-provider-actions">';
+    if (state === 'running') {
+      html += '<button class="btn-small btn-danger adapter-stop-btn" data-agent="' +
+        escapeHtml(a.agent_id) + '">' + escapeHtml(t('settings.adapterStop')) + '</button>';
+    } else if (state === 'ensuring') {
+      html += '<button class="btn-small btn-primary" disabled>' +
+        escapeHtml(t('settings.adapterStart')) + '</button>';
+    } else if (state === 'error') {
+      html += '<button class="btn-small btn-primary adapter-start-btn" data-agent="' +
+        escapeHtml(a.agent_id) + '">' + escapeHtml(t('settings.adapterRetry')) + '</button>';
+    } else {
+      html += '<button class="btn-small btn-primary adapter-start-btn" data-agent="' +
+        escapeHtml(a.agent_id) + '">' + escapeHtml(t('settings.adapterStart')) + '</button>';
+    }
+    html += '</div></div>';
+  }
+  rows.innerHTML = html;
+  _adapterLastBusy = busy;
+
+  rows.querySelectorAll('.adapter-start-btn').forEach(function(btn) {
+    btn.onclick = function() { _adapterEnsure(this.getAttribute('data-agent')); };
+  });
+  rows.querySelectorAll('.adapter-stop-btn').forEach(function(btn) {
+    btn.onclick = function() { _adapterStop(this.getAttribute('data-agent')); };
+  });
+}
+
+function _adapterEnsure(agentId) {
+  if (!agentId) return;
+  Api.post('/api/v1/adapter/ensure', { agent_id: agentId }, { onError: 'null' })
+    .then(function() { _adapterTick(true); });
+}
+
+function _adapterStop(agentId) {
+  if (!agentId) return;
+  Api.post('/api/v1/adapter/stop', { agent_id: agentId }, { onError: 'null' })
+    .then(function() { _adapterTick(true); });
+}
+
+function _adapterTick(force) {
+  if (_adapterPollTimer) { clearTimeout(_adapterPollTimer); _adapterPollTimer = null; }
+  if (!force && !_adapterPanelVisible()) return;
+  Api.get('/api/v1/adapter/status', { onError: 'null' })
+    .then(function(data) { if (data) _renderAdapterRows(data); })
+    .catch(function() {})
+    .then(function() {
+      if (!_adapterPanelVisible()) return;   // hidden → chain dies here
+      _adapterPollTimer = setTimeout(function() {
+        _adapterPollTimer = null;
+        _adapterTick(false);
+      }, _adapterLastBusy ? _ADAPTER_POLL_BUSY_MS : _ADAPTER_POLL_IDLE_MS);
+    });
+}
+
+// Kick the chain (idempotent). Wired into _loadOAuthStatus, which
+// openSettings() calls on every settings open.
+function _adapterStartPolling() {
+  _adapterEnsureCard();
+  if (_adapterPollTimer) return;
+  _adapterTick(false);
 }
 
 

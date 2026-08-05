@@ -110,6 +110,11 @@ def test_recipe_uses_the_new_home_not_the_shim():
     assert 'from lib.motion_video._stages import' not in src
 
 
+@pytest.mark.skipif(
+    not os.path.isfile(os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        'CLAUDE.md')),
+    reason='CLAUDE.md not shipped in opensource (agent-rules doc, export-excluded)')
 def test_claude_md_documents_the_new_packages():
     """CLAUDE.md's directory map is the agent-facing source of truth and its
     own rule says to re-scan it when a sub-package is added. Both packages

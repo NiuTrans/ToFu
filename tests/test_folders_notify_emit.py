@@ -136,7 +136,7 @@ def test_NEUTER_no_emit_no_frame(flask_client, folder_store, captured, monkeypat
     assert r.status_code == 201
     assert _folder_frames(captured) == [], 'neutered route must emit no frame'
     # ...and the folder was still persisted (write path intact).
-    listing = flask_client.get('/api/v1/folders').get_json()
+    listing = flask_client.get('/api/v1/folders').get_json()['items']  # envelope
     assert any(f.get('name') == 'Silent' for f in listing)
 
 

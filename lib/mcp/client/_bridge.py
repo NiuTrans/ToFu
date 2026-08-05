@@ -1072,6 +1072,41 @@ class MCPBridge:
             },
         }
 
+    # ── Per-tool enable/disable (pt_53065dbe86bb4286) ─────────
+    # The user disables individual tools of a server in Settings → MCP; the
+    # list lives in the server config row (``disabled_tools``) so it survives
+    # restarts and rides the existing config plumbing (migrations preserve
+    # unknown keys). A disabled tool is BOTH hidden from the model's tool
+    # list (schema diet) and refused at call time (stale-history / in-flight
+    # protection).
+
+    def _disabled_tools_for(self, server_name: str) -> frozenset:
+        """Tool names the user disabled on this server.
+
+        Read from the last-known-good config row, which the PUT endpoint
+        keeps current via :meth:`set_disabled_tools`. getattr-tolerant:
+        minimal fake bridges in tests skip ``__init__``.
+        """
+        configs = getattr(self, '_configs', None) or {}
+        row = configs.get(server_name) or {}
+        return frozenset(t for t in (row.get('disabled_tools') or [])
+                         if isinstance(t, str))
+
+    def set_disabled_tools(self, server_name: str, tool_names) -> None:
+        """Hot-update the live per-server tool filter.
+
+        Persistence is the caller's job (routes/api_v1/mcp.py writes the
+        config row first); this makes the running bridge honour the change
+        without a reconnect.
+        """
+        names = sorted({t for t in (tool_names or []) if isinstance(t, str)})
+        with self._lock:
+            row = self._configs.setdefault(server_name, {})
+            row['disabled_tools'] = names
+            handle = self._servers.get(server_name)
+            if handle is not None and isinstance(getattr(handle, 'config', None), dict):
+                handle.config['disabled_tools'] = names
+
     # ── Tool discovery (for LLM) ──────────────────────────
 
     def get_openai_tool_defs(self) -> list[dict[str, Any]]:
@@ -1088,8 +1123,10 @@ class MCPBridge:
         identical across rounds.
         """
         with self._lock:
-            return [self._tool_index[ns]['openai_def']
-                    for ns in sorted(self._tool_index)]
+            return [info['openai_def']
+                    for ns, info in sorted(self._tool_index.items())
+                    if info['tool_name']
+                    not in self._disabled_tools_for(info['server_name'])]
 
     def get_tool_safety(self) -> dict[str, bool]:
         """Map every discovered MCP tool's namespaced name → read-only flag.
@@ -1101,7 +1138,9 @@ class MCPBridge:
         """
         with self._lock:
             return {ns: bool(info.get('read_only_hint'))
-                    for ns, info in self._tool_index.items()}
+                    for ns, info in self._tool_index.items()
+                    if info['tool_name']
+                    not in self._disabled_tools_for(info['server_name'])}
 
     def get_tool_info(self, namespaced_name: str) -> MCPToolInfo | None:
         """Look up tool info by namespaced name."""
@@ -1172,6 +1211,10 @@ class MCPBridge:
             handle = self._servers.get(server_name)
             if handle is None:
                 raise ValueError(f'MCP server not connected: {server_name}')
+            if tool_name in self._disabled_tools_for(server_name):
+                raise ValueError(
+                    f'MCP tool disabled by user: {namespaced_name} '
+                    f'(re-enable it in Settings → MCP)')
 
         # Coerce LLM-provided strings to the schema's declared types.
         # LLMs that don't strictly honor the JSON schema (esp. weaker models)
@@ -1382,7 +1425,9 @@ class MCPBridge:
             return False
         try:
             sig = inspect.signature(fn)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError) as e:
+            logger.debug('[MCP] cannot introspect %s.%s (%s) — accepting callable',
+                         type(session).__name__, meth, e)
             return True
         for p in sig.parameters.values():
             if p.name == 'self':

@@ -56,7 +56,18 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 
+from lib.mcp.registry import is_opensource_build
+
 pytestmark = [pytest.mark.auth_mode('open'), pytest.mark.unit]
+
+# The YourProvider gateway template (yourprovider.json) is internal-only and is NOT
+# shipped in opensource exports, so any test that reads it (or audits a
+# synthetic payload keyed to its host) can only run in the source tree.
+_INTERNAL_TEMPLATE = pytest.mark.skipif(
+    is_opensource_build(),
+    reason='yourprovider.json is an internal provider template, not shipped in '
+           'opensource builds',
+)
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _TPL_DIR = os.path.join(_ROOT, 'static', 'provider_templates')
@@ -153,6 +164,7 @@ def test_every_claude_model_resolves_to_the_anthropic_wire():
         'resolved-wire violations:\n' + '\n'.join('  ' + v for v in violations))
 
 
+@_INTERNAL_TEMPLATE
 def test_the_yourprovider_gateway_ships_exactly_one_template():
     """The merge's user-visible outcome: one account, one card, one template.
 
@@ -165,6 +177,7 @@ def test_the_yourprovider_gateway_ships_exactly_one_template():
         % (GATEWAY_HOST, same_host))
 
 
+@_INTERNAL_TEMPLATE
 def test_the_single_template_declares_both_wire_faces():
     tpl = _load(MEITUAN_TEMPLATE)
     faces = tpl.get('faces') or {}
@@ -178,6 +191,7 @@ def test_the_single_template_declares_both_wire_faces():
         'models depend on it')
 
 
+@_INTERNAL_TEMPLATE
 def test_brand_is_the_gateway_not_a_model_family():
     """The template brands the ACCOUNT. Branding it 'claude' would drop the
     whole card into the Claude group in the picker (core/model_group.js keys
@@ -189,6 +203,7 @@ def test_brand_is_the_gateway_not_a_model_family():
 #  2. The roster must be complete and dispatchable
 # ═══════════════════════════════════════════════════════════
 
+@_INTERNAL_TEMPLATE
 def test_template_carries_the_whole_claude_roster():
     have = {(m.get('model_id') or '')
             for m in (_load(MEITUAN_TEMPLATE).get('models') or [])}
@@ -196,6 +211,7 @@ def test_template_carries_the_whole_claude_roster():
     assert not missing, 'yourprovider.json is missing %r' % sorted(missing)
 
 
+@_INTERNAL_TEMPLATE
 def test_gateway_accepted_wire_ids_are_preserved():
     """The wire pool is what actually goes out as body['model']."""
     from lib.llm_dispatch.model_entry import resolve_request_ids, routing_group
@@ -210,6 +226,7 @@ def test_gateway_accepted_wire_ids_are_preserved():
             % (logical, wire_id, pool))
 
 
+@_INTERNAL_TEMPLATE
 def test_claude_entries_keep_thinking_capability():
     models = _load(MEITUAN_TEMPLATE).get('models') or []
     by_id = {(m.get('model_id') or ''): m for m in models}
@@ -222,6 +239,7 @@ def test_claude_entries_keep_thinking_capability():
         assert entry.get('cost') is not None, logical
 
 
+@_INTERNAL_TEMPLATE
 def test_the_non_claude_roster_survived_the_merge():
     """The merge must not have cost the OpenAI face any model."""
     have = {(m.get('model_id') or '')
@@ -235,6 +253,7 @@ def test_the_non_claude_roster_survived_the_merge():
 #  3. NEUTER faces — prove the predicate discriminates
 # ═══════════════════════════════════════════════════════════
 
+@_INTERNAL_TEMPLATE
 def test_neuter_audit_flags_a_claude_entry_pinned_to_the_openai_face():
     """The drift shape under the new model: an explicit face pin dragging a
     Claude entry back onto the signature-dropping wire."""
@@ -250,6 +269,7 @@ def test_neuter_audit_flags_a_claude_entry_pinned_to_the_openai_face():
     assert any('claude-opus-5' in v for v in violations), violations
 
 
+@_INTERNAL_TEMPLATE
 def test_neuter_audit_flags_a_dropped_anthropic_face():
     """Deleting faces.anthropic while keeping the Claude roster must be
     caught — that is the exact shape a careless template edit produces."""

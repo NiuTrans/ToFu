@@ -30,9 +30,9 @@ from __future__ import annotations
 import hashlib
 import os
 
-from flask import Blueprint, jsonify, send_file
+from flask import Blueprint
 
-from lib.api_response import api_bad_request, api_not_found
+from lib.api_response import api_bad_request, api_not_found, api_ok
 from lib.log import get_logger
 from lib.motion_video.runtime import _motion_runtime
 from lib.openapi import api_meta
@@ -71,7 +71,7 @@ async def motion_status():
     except Exception as e:
         logger.debug('[Motion.v1] tts probe failed: %s', e)
         env['tts_available'] = False
-    return jsonify(env)
+    return api_ok(env)
 
 
 @api_v1_motion_bp.route('/api/v1/motion/videos', methods=['POST'])
@@ -171,7 +171,7 @@ async def start_motion_task():
     existing = _motion_index_get(key)
     if existing:
         logger.info('[Motion.v1] dedup join: %s', existing)
-        return jsonify({'ok': True, 'task_id': existing, 'deduped': True})
+        return api_ok({'task_id': existing, 'deduped': True})
 
     task_id = _motion_task_id()
     workdir = os.path.join(motion_root(), 'jobs', task_id)
@@ -208,7 +208,7 @@ async def start_motion_task():
     _motion_runtime.spawn(task_id, run_motion_task, task)
     logger.info('[Motion.v1] started %s (aspect=%s narration=%s parallel=%d '
                 'topic=%s)', task_id, aspect, narration, parallel, bool(topic))
-    return jsonify({'ok': True, 'task_id': task_id, 'deduped': False})
+    return api_ok({'task_id': task_id, 'deduped': False})
 
 
 register_task_routes(api_v1_motion_bp, _motion_runtime,
@@ -242,7 +242,8 @@ def serve_motion_file(task_id):
     if not path or not os.path.isfile(path):
         return api_not_found('file_not_ready')
     mimetype = 'application/x-subrip' if part == 'srt' else 'video/mp4'
-    return send_file(path, mimetype=mimetype, conditional=True)
+    from lib.file_serving import send_file_conditional
+    return send_file_conditional(path, mimetype=mimetype)
 
 
 def _job_workdir(task) -> str:
@@ -311,8 +312,8 @@ async def list_motion_scenes(task_id):
             'has_narration': os.path.isfile(
                 os.path.join(workdir, 'audio', f'{sid}.wav')),
         })
-    return jsonify({'ok': True, 'task_id': task_id,
-                    'status': status, 'scenes': out})
+    return api_ok({'task_id': task_id,
+                   'status': status, 'scenes': out})
 
 
 @api_v1_motion_bp.route('/api/v1/motion/videos/<task_id>/scenes/<scene_id>/file',
@@ -335,7 +336,8 @@ def serve_scene_file(task_id, scene_id):
     path = os.path.join(workdir, 'scenes', scene_id, f'{scene_id}.mp4')
     if not workdir or not os.path.isfile(path):
         return api_not_found('file_not_ready')
-    return send_file(path, mimetype='video/mp4', conditional=True)
+    from lib.file_serving import send_file_conditional
+    return send_file_conditional(path, mimetype='video/mp4')
 
 
 @api_v1_motion_bp.route('/api/v1/motion/videos/<task_id>/scenes/<scene_id>/regen',
@@ -383,8 +385,8 @@ async def regen_scene(task_id, scene_id):
     rt.spawn(regen_id, run_scene_regen_task, sub)
     logger.info('[Motion.v1] regen %s of job %s → task %s',
                 scene_id, task_id, regen_id)
-    return jsonify({'ok': True, 'task_id': regen_id, 'regen_of': task_id,
-                    'scene_id': scene_id})
+    return api_ok({'task_id': regen_id, 'regen_of': task_id,
+                   'scene_id': scene_id})
 
 
 __all__ = ['api_v1_motion_bp']

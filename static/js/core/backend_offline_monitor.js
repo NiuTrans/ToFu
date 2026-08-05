@@ -323,6 +323,150 @@ function _bomRestoreTitle() {
   } catch (e) { console.debug('[BackendMonitor] title restore failed:', e && e.message); }
 }
 
+/* ── Server-liveness probe + DB-health banner (boot/recovery primitives) ──
+ * Relocated from core/health_stream_timer.js (2026-08-01): that module was
+ * deferred to the feature bundle by Epic-E sub-3B, but these are BOOT-PATH
+ * and RECOVERY-PATH primitives — main.js's boot IIFE calls _checkDbHealth
+ * and sse_poll_fallback's circuit breaker calls _checkServerHealth — so they
+ * must live in the CORE bundle (an unguarded boot call to the deferred copy
+ * ReferenceError'd the whole boot IIFE: no loadFolders, no conversations —
+ * the "sidebar folder rail gone" incident). The deferred stream-timer keeps
+ * referencing this state cross-bundle (core loads first): _streamTimerTouch
+ * and twStart reset the cache optimistically on fresh bytes. */
+
+// _serverAlive: cached health state shared across all streams (avoid duplicate pings)
+let _serverAlive = true;
+let _lastHealthCheck = 0;
+let _consecutiveHealthFails = 0;       // require 2+ consecutive fails to confirm dead
+const _HEALTH_CHECK_INTERVAL = 10000;  // ms between health checks when silent
+
+/**
+ * Check if backend server is alive. Returns true/false.
+ * Result is cached for _HEALTH_CHECK_INTERVAL ms to avoid spamming.
+ */
+async function _checkServerHealth() {
+  const now = Date.now();
+  if (now - _lastHealthCheck < _HEALTH_CHECK_INTERVAL) return _serverAlive;
+  _lastHealthCheck = now;
+  try {
+    const resp = await Api.health.check({ signal: AbortSignal.timeout(3000) });
+    if (resp && resp.ok) {
+      _serverAlive = true;
+      _consecutiveHealthFails = 0;
+    } else {
+      _consecutiveHealthFails++;
+      _serverAlive = _consecutiveHealthFails < 2; // need 2+ failures to confirm dead
+    }
+  } catch (e) {
+    // Do NOT swallow the reason: a transient AbortSignal.timeout under load
+    // and a genuine outage both land here but mean very different things. The
+    // reason is the only trail distinguishing them when the 2nd consecutive
+    // fail flips the user-visible "server offline" verdict.
+    console.debug('[StreamTimer] health ping failed:', e && e.message);
+    _consecutiveHealthFails++;
+    _serverAlive = _consecutiveHealthFails < 2;
+  }
+  return _serverAlive;
+}
+
+/**
+ * Check if PostgreSQL database is available on startup.
+ * Shows a persistent warning banner if DB is down so users know
+ * immediately instead of seeing silent "Waiting…" on first message.
+ */
+async function _checkDbHealth() {
+  try {
+    const resp = await Api.health.check({ signal: AbortSignal.timeout(3000) });
+    if (!resp || !resp.ok) return;
+    const data = await resp.json();
+    if (data.db_ok === false) {
+      _showDbWarningBanner();
+      _startDbHealthPolling();
+    } else {
+      // DB is healthy — clear any stale banner left over from a prior outage
+      // (e.g. the server was restarted with PG back up). Without this the red
+      // "Database Unavailable" banner lingers forever once shown, falsely
+      // telling the user the DB is still down.
+      _clearDbWarningBanner();
+    }
+  } catch (e) {
+    // A network/tunnel drop means the server is unreachable — _checkServerHealth
+    // owns that verdict, so we don't show the DB banner here. But a .json()
+    // parse failure or a 200-with-garbage payload ALSO lands here; log it so a
+    // malformed health response isn't silently invisible (CLAUDE §2).
+    console.debug('[DbHealth] health probe failed (server unreachable or bad payload):', e && e.message);
+  }
+}
+
+/** Remove the DB-unavailable banner if present (DB recovered / false positive). */
+function _clearDbWarningBanner() {
+  const b = document.getElementById('db-warning-banner');
+  if (b) {
+    b.remove();
+    console.info('[DbHealth] Database available again — cleared the "unavailable" banner');
+  }
+}
+
+/* Self-stopping recovery poll: once the DB-warning banner is shown, re-probe
+ * /api/health every 15s and clear the banner the moment the DB reports healthy
+ * (the documented recovery path is a server restart with PG back up). Stops
+ * itself when the banner is gone (recovered OR user-dismissed) so it costs
+ * nothing in steady state. Mirrors _startOfflineRecoveryPolling's shape. */
+let _dbHealthPollInterval = null;
+function _startDbHealthPolling() {
+  if (_dbHealthPollInterval) return;
+  _dbHealthPollInterval = setInterval(async () => {
+    if (!document.getElementById('db-warning-banner')) {
+      clearInterval(_dbHealthPollInterval);
+      _dbHealthPollInterval = null;
+      return;
+    }
+    if (document.visibilityState !== 'visible') return;
+    try {
+      const resp = await Api.health.check({ signal: AbortSignal.timeout(3000) });
+      if (!resp || !resp.ok) return;
+      const data = await resp.json();
+      if (data.db_ok !== false) {
+        _clearDbWarningBanner();
+        clearInterval(_dbHealthPollInterval);
+        _dbHealthPollInterval = null;
+      }
+    } catch (e) {
+      console.debug('[DbHealth] recovery poll failed:', e && e.message);
+    }
+  }, 15000);
+}
+
+function _showDbWarningBanner() {
+  if (document.getElementById('db-warning-banner')) return;
+  const banner = document.createElement('div');
+  banner.id = 'db-warning-banner';
+  banner.style.cssText =
+    'position:fixed;top:0;left:0;right:0;z-index:10000;' +
+    'background:#dc2626;color:#fff;padding:10px 16px;font-size:14px;' +
+    'text-align:center;box-shadow:0 2px 8px rgba(0,0,0,.3);' +
+    'display:flex;align-items:center;justify-content:center;gap:8px;';
+  // Guarded t(): the jsdom test harnesses load this file WITHOUT i18n.js, so
+  // fall back to the zh literal when t() isn't present. zh is the primary UI.
+  const _tt = (typeof t === 'function')
+    ? t
+    : (k, p) => ({
+        'conn.dbUnavailableTitle': '数据库不可用',
+        'conn.dbUnavailableDesc': '未运行 PostgreSQL，对话与历史将无法使用。请安装 PostgreSQL（' + (p && p.cmd || '') + '）后重启服务器。',
+        'conn.dismiss': '关闭',
+      }[k] || k);
+  const _installCmd = '<code style="background:rgba(255,255,255,.2);padding:1px 5px;border-radius:3px">conda install -c conda-forge postgresql>=18</code>';
+  banner.innerHTML =
+    '<span style="display:inline-flex"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg></span>' +
+    '<span><b>' + _tt('conn.dbUnavailableTitle') + '</b> — ' +
+    _tt('conn.dbUnavailableDesc', { cmd: _installCmd }) + '</span>' +
+    '<button onclick="this.parentElement.remove()" style="' +
+    'background:rgba(255,255,255,.2);border:none;color:#fff;padding:4px 10px;' +
+    'border-radius:4px;cursor:pointer;font-size:13px;margin-left:12px;' +
+    'white-space:nowrap">' + _tt('conn.dismiss') + '</button>';
+  document.body.prepend(banner);
+}
+
 /* ── Public entry points (button onclick + boot + harness) ───────── */
 
 function BackendOfflineMonitorProbeNow() {

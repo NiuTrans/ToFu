@@ -217,6 +217,11 @@ def test_scene_gate_helper_treats_a_missing_toolchain_as_not_a_defect():
 
     class _MV:
         @staticmethod
+        def is_infra_category(category):
+            from lib.motion_video import is_infra_category
+            return is_infra_category(category)
+
+        @staticmethod
         def check_project(_d, **_k):
             return {'ok': False, 'category': 'env_missing', 'errors': []}
 
@@ -237,6 +242,11 @@ def test_infrastructure_failures_are_not_charged_to_the_composition(category):
 
     class _MV:
         @staticmethod
+        def is_infra_category(category):
+            from lib.motion_video import is_infra_category
+            return is_infra_category(category)
+
+        @staticmethod
         def check_project(_d, **_k):
             return {'ok': False, 'category': category,
                     'errors': ['check failed (exit 1): [SystemMemory] oom']}
@@ -252,6 +262,11 @@ def test_scene_gate_helper_surfaces_real_findings():
 
     class _MV:
         @staticmethod
+        def is_infra_category(category):
+            from lib.motion_video import is_infra_category
+            return is_infra_category(category)
+
+        @staticmethod
         def check_project(_d, **_k):
             return {'ok': False, 'category': 'unknown',
                     'errors': ['text overflows its container']}
@@ -265,6 +280,11 @@ def test_scene_gate_helper_never_raises():
     from lib.motion_video.engine import _scene_gate_findings
 
     class _MV:
+        @staticmethod
+        def is_infra_category(category):
+            from lib.motion_video import is_infra_category
+            return is_infra_category(category)
+
         @staticmethod
         def check_project(_d, **_k):
             raise RuntimeError('chrome died')
@@ -796,6 +816,11 @@ def test_fidelity_findings_reach_the_quality_verdict():
             return check_text_fidelity(html, scene)
 
         @staticmethod
+        def is_infra_category(category):
+            from lib.motion_video import is_infra_category
+            return is_infra_category(category)
+
+        @staticmethod
         def check_project(_d, **_k):
             return {'ok': True, 'errors': []}
 
@@ -829,6 +854,11 @@ def test_fidelity_survives_an_infrastructure_skip():
         def check_text_fidelity(html, scene):
             from lib.motion_video import check_text_fidelity
             return check_text_fidelity(html, scene)
+
+        @staticmethod
+        def is_infra_category(category):
+            from lib.motion_video import is_infra_category
+            return is_infra_category(category)
 
         @staticmethod
         def check_project(_d, **_k):

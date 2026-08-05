@@ -661,23 +661,33 @@ def _render_raw_conversation(row, conversation_id, limit=None, before=None):
     metadata columns and the raw ``settings``.
 
     The message list is WINDOWED (head + tail) BEFORE serialization rather
-    than the JSON text being cut afterwards. The old code serialized the whole
-    record and then sliced the string at :data:`MAX_CHARS`, which cut mid-token
-    inside the ```json fence — every oversized raw read came back as invalid
-    JSON (``json.loads`` raised on all of them) while the tool description
-    promised nothing was truncated. A windowed record is honest AND parseable;
-    ``truncated`` / ``messageCount`` / ``omitted`` state what was left out.
+    than the JSON text being cut afterwards. The window is FITTED TO THE
+    SERIALIZED BUDGET, not sized by the prose-tuned ``TRANSCRIPT_TAIL``
+    constant: a raw record carries every message's full ``toolRounds``, so an
+    unfitted ask of 60 was demolished by the over-budget guard (measured: 2 of
+    205 messages delivered, field-clamped, under a header claiming nothing was
+    summarized away). The fit is measured on the actual dump — pretty-print
+    cost depends on nesting depth, so an estimate drifts — and the recent
+    block is ALWAYS contiguous: when something has to give, the OLDEST tail
+    candidate is dropped, never a middle message (a middle eviction reads as
+    consecutive history with silent holes).
+
+    The header states what was delivered (``DELIVERED N of M``), how to reach
+    the rest (``before=`` / ``limit=``), and any clamping — a read that had to
+    shrink fields must not look like a faithful one.
     """
     messages = _coerce_json(row['messages'], default=[], label='conv-ref-raw-messages')
     settings = _coerce_json(row['settings'], default={}, label='conv-ref-raw-settings')
 
     all_msgs = messages if isinstance(messages, list) else []
-    _tail = TRANSCRIPT_TAIL if limit is None else max(1, int(limit))
-    _before = None if before is None else max(0, int(before) - 1)
-    kept, omitted, total = _select_message_window(
-        all_msgs, TRANSCRIPT_HEAD, _tail, before=_before)
+    total = len(all_msgs)
+    _before = None if before is None else max(0, min(int(before) - 1, total))
+    end = total if _before is None else _before
 
-    record = {
+    head_n = min(TRANSCRIPT_HEAD, end)
+    head_block = [(i, all_msgs[i]) for i in range(head_n)]
+
+    base = {
         'id': row['id'],
         'user_id': row['user_id'],
         'title': row['title'] or '(untitled)',
@@ -687,61 +697,77 @@ def _render_raw_conversation(row, conversation_id, limit=None, before=None):
         'rev': row['rev'],
         'settings': settings,
         'messageCount': total,
-        'truncated': bool(omitted),
-        'omitted': omitted,
-        'messageIndices': [i + 1 for i, _ in kept],
-        'messages': [m for _, m in kept],
     }
 
-    header = (
-        f"{'═' * 60}\n"
-        f"Raw Conversation Record: \"{record['title']}\"\n"
-        f"   ID: {conversation_id}\n"
-        f"   Messages: {len(record['messages'])} of {total}"
-        f"  (msg_count column: {row['msg_count']}, rev: {row['rev']})\n"
-        f"{'═' * 60}\n"
-    )
+    def _serialize(kept_pairs, omitted):
+        rec = dict(base)
+        rec.update({
+            'truncated': bool(omitted),
+            'omitted': omitted,
+            'messageIndices': [i + 1 for i, _ in kept_pairs],
+            'messages': [m for _, m in kept_pairs],
+        })
+        return rec, json.dumps(rec, ensure_ascii=False, indent=2, default=str)
 
-    try:
-        dump = json.dumps(record, ensure_ascii=False, indent=2, default=str)
-    except (TypeError, ValueError) as e:
-        logger.warning('[conv_ref] raw dump JSON serialization failed for %s: %s',
-                       conversation_id, e, exc_info=True)
-        dump = str(record)
+    # Fit the tail greedily backwards from `end`, stopping when the next
+    # (older) message would push the serialized record over the budget. The
+    # ending message is always kept — a debugging read is usually about how
+    # the conversation ENDED; if that one message alone overflows, the clamp
+    # path below handles it honestly.
+    budget = MAX_CHARS - 2048  # header + fence margin
+    tail_cap = end - head_n
+    if limit is not None:
+        tail_cap = min(tail_cap, max(1, int(limit)))
+    tail = []
+    record, dump = None, ''
+    for i in range(end - 1, head_n - 1, -1):
+        if len(tail) >= tail_cap:
+            break
+        cand = [(i, all_msgs[i])] + tail
+        rec, d = _serialize(head_block + cand,
+                            end - head_n - len(cand))
+        if len(d) > budget and tail:
+            break
+        tail, record, dump = cand, rec, d
+    if record is None:  # end == head_n: no tail slot at all
+        record, dump = _serialize(head_block, 0)
+        tail = []
+    omitted = end - head_n - len(tail)
 
-    # Last-resort guard, in two stages — both operate on the STRUCTURE and
-    # re-serialize, so the payload is never cut mid-token.
-    #   1. drop whole messages from the MIDDLE (keeps head + the ending)
-    #   2. if it still doesn't fit, the conversation has one or more enormous
-    #      individual messages — clamp their long string fields. Dropping
-    #      messages cannot shrink a single 800 KB message, so without this the
-    #      cap simply would not hold.
-    while len(dump) > MAX_CHARS and len(record['messages']) > 2:
-        mid = len(record['messages']) // 2
-        record['messages'].pop(mid)
-        record['messageIndices'].pop(mid)
-        record['omitted'] += 1
-        record['truncated'] = True
-        dump = json.dumps(record, ensure_ascii=False, indent=2, default=str)
+    header_lines = [
+        f"{'═' * 60}",
+        f"Raw Conversation Record: \"{record['title']}\"",
+        f"   ID: {conversation_id}",
+        f"   DELIVERED {len(record['messages'])} of {total} messages"
+        f"  (msg_count column: {row['msg_count']}, rev: {row['rev']})",
+    ]
+    if omitted:
+        oldest_tail_1based = (end - len(tail)) + 1
+        header_lines.append(
+            f"   … {omitted} earlier message(s) not delivered — page back with "
+            f"before={oldest_tail_1based}; widen the window with limit=N")
+    header_lines.append(f"{'═' * 60}")
+    header = '\n'.join(header_lines) + '\n'
 
-    # A message can hold MANY long fields (a big toolRounds array), so one
-    # clamp pass at a guessed budget does not necessarily fit. Halve the budget
-    # until it does — bounded, and it converges because each pass strictly
-    # shrinks every over-long field.
+    # Last-resort clamp: only reachable when the MINIMAL window itself
+    # overflows (one enormous message — measured 436 KB on production). The
+    # fitted path above never needs it. Everything here operates on the
+    # STRUCTURE and re-serializes, so the payload is never cut mid-token, and
+    # every degradation is disclosed in the header.
     if len(dump) > MAX_CHARS:
-        budget = max(1000, MAX_CHARS // max(1, len(record['messages'])) // 2)
+        clamp_budget = max(1000, MAX_CHARS // max(1, len(record['messages'])) // 2)
         items_cap = 12
         original = record['messages']
         for _ in range(8):
             record['messages'] = [
-                _clamp_message_fields(m, budget, max_items=items_cap)
+                _clamp_message_fields(m, clamp_budget, max_items=items_cap)
                 for m in original]
             record['truncated'] = True
             record['fieldsClamped'] = True
             dump = json.dumps(record, ensure_ascii=False, indent=2, default=str)
             if len(dump) <= MAX_CHARS:
                 break
-            budget = max(200, budget // 2)
+            clamp_budget = max(200, clamp_budget // 2)
             items_cap = max(2, items_cap // 2)
         else:
             # Pathological: many small strings (a huge toolRounds array) that
@@ -767,6 +793,13 @@ def _render_raw_conversation(row, conversation_id, limit=None, before=None):
                 record['messagesDropped'] = True
                 dump = json.dumps(record, ensure_ascii=False, indent=2,
                                   default=str)
+        if record.get('fieldsClamped') or record.get('reducedToFinalMessage'):
+            border = '═' * 60 + '\n'
+            note = ('   CLAMPED: fields were cut to fit the budget '
+                    '(see fieldsClamped/reducedToFinalMessage)\n')
+            idx = header.rfind(border)
+            header = (header[:idx] + note + header[idx:]) if idx >= 0 \
+                else header + note
 
     return f"{header}```json\n{dump}\n```"
 

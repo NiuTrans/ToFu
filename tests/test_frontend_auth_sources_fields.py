@@ -58,6 +58,8 @@ const { window, document, check, report } = setup({
         upsert: async (body) => { posted.push(body); return { source: {} }; },
         toggle: async () => ({}),
         remove: async () => ({}),
+        // auth_sources.js:43 probes live sessions at render time.
+        liveSession: async () => null,
       },
     },
   },
@@ -69,6 +71,7 @@ const XHS_ROW = {
   enabled: false, has_cookies: false, cookie_count: 0,
   has_proxy: false, proxy_hint: '',
   login_url: 'https://www.xiaohongshu.com/explore',
+  risk_note_key: 'settings.authSrcRiskXhs',
   fields: [
     { name: 'web_session', importance: 'required' },
     { name: 'a1', importance: 'recommended' },
@@ -110,6 +113,14 @@ const flush = () => new Promise((r) => process.nextTick(r));
     // Login button uses the SERVER's url (no per-site table in the JS).
     check('login_url_from_server',
       html.indexOf('https://www.xiaohongshu.com/explore') !== -1);
+
+    // Account-risk note: rendered BOTH on the card (always visible) and atop
+    // the connect panel (before the user logs in) — the harness t() echoes
+    // the key, so the key string itself is the assertion target.
+    const riskHits = html.split('settings.authSrcRiskXhs').length - 1;
+    check('risk_note_rendered_card_and_panel', riskHits === 2);
+    check('risk_note_in_connect_panel',
+      $('authSrcPanel_xiaohongshu_com').innerHTML.indexOf('settings.authSrcRiskXhs') !== -1);
 
     // ── 2. blank required field BLOCKS the request ──
     els[1].value = 'aaa';           // fill only the recommended one
@@ -156,6 +167,7 @@ const flush = () => new Promise((r) => process.nextTick(r));
     posted.length = 0;
     const bare = JSON.parse(JSON.stringify(XHS_ROW));
     delete bare.fields;
+    delete bare.risk_note_key;
     bare.domain = 'unknown.example';
     bare.login_url = '';
     window.__SOURCES = [bare];
@@ -166,6 +178,11 @@ const flush = () => new Promise((r) => process.nextTick(r));
     check('no_spec_one_generic_field', els3.length === 1);
     check('no_spec_not_hardcoded_xhs',
       els3[0].getAttribute('data-cookie-name') !== 'web_session');
+    // NEUTER for the risk note: a row WITHOUT risk_note_key renders none —
+    // proves the note is driven by the server row, not a hardcoded XHS
+    // string hidden in the JS.
+    check('no_spec_no_risk_note',
+      $('authSourcesList').innerHTML.indexOf('auth-src-risk-note') === -1);
 
     // ── 6. connected row shows cookie count (state text still honest) ──
     const conn = JSON.parse(JSON.stringify(XHS_ROW));
@@ -189,6 +206,6 @@ def test_auth_sources_fields_frontend():
         target_js=os.path.join(JS_DIR, 'settings', 'auth_sources.js'),
         extra_targets=[os.path.join(JS_DIR, 'core', 'safe_html.js')],
         body_js=_BODY,
-        min_pass=21,
+        min_pass=24,
         label='auth-sources-fields',
     )

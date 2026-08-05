@@ -197,6 +197,7 @@ class ProgressBeacon:
             return (f'agents={n} quiet_for={self.seconds_since_activity():.0f}s '
                     f'stall_at={self._stall_timeout:.0f}s')
         except Exception as e:
+            logger.debug('[Beacon] describe failed: %s', e)
             return f'(beacon describe failed: {e})'
 
 

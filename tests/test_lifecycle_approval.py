@@ -38,8 +38,14 @@ import unittest
 import pytest
 
 import lib.lifecycle_approval as la
+from lib.mcp.registry import is_opensource_build
 
 pytestmark = pytest.mark.unit
+
+# The opensource export ships restart_15000.sh with placeholder paths
+# (PROJ="/path/to/your/project"), so the live-script e2e tests below cannot
+# run there — they self-skip on a public build.
+_OPENSOURCE = is_opensource_build()
 
 ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 SCRIPT = os.path.join(ROOT, 'restart_15000.sh')
@@ -274,6 +280,7 @@ class TestRealScriptGate:
 
     @pytest.mark.skipif(not _port_listening(15000),
                         reason='no live server on :15000 — gate would not fire')
+    @pytest.mark.skipif(_OPENSOURCE, reason='opensource restart_15000.sh carries placeholder paths — live e2e is internal-only')
     def test_noninteractive_run_refuses_and_server_survives(self):
         """A detached non-interactive run (the watcher shape from the
         incident) MUST refuse without a human-approved token — and the live
@@ -287,6 +294,7 @@ class TestRealScriptGate:
         assert 'lifecycle-gate' in output
         assert _port_listening(15000), 'the live server was harmed by a refused run'
 
+    @pytest.mark.skipif(_OPENSOURCE, reason='opensource restart_15000.sh carries placeholder paths — live e2e is internal-only')
     def test_neutered_gate_kills_dummy_on_test_port(self):
         """NEUTER A/B: strip the [pre/5c] block and retarget to a test port —
         the SAME script now kills the dummy listener, proving the gate is
@@ -449,6 +457,7 @@ class TestRestartLockInheritance:
             except OSError:
                 pass
 
+    @pytest.mark.skipif(_OPENSOURCE, reason='opensource restart_15000.sh carries placeholder paths — live e2e is internal-only')
     def test_relaunched_child_does_not_hold_restart_lock(self):
         if _real_store_has_fireable_restart_token():
             pytest.skip('fireable approved restart token in the real store')

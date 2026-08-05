@@ -660,6 +660,56 @@ def pytest_collection_modifyitems(config, items):
         )
 
 
+# ─── Frontend skip sentinel (P0-1: skip 必须响亮) ─────────────────────────
+#
+# docs/TESTING_STRATEGY.md §4: lanes that promise to run the frontend suites
+# (CI frontend job, ``make test-frontend``) set TOFU_REQUIRE_FRONTEND=1, which
+# turns the per-suite dep guards in tests/_jsdom.py from skip into FAIL. This
+# sentinel is the NET for hand-written skip sites that bypass _jsdom.py — if
+# any test_frontend_* item STILL skips with a missing-dep reason
+# (node/jsdom/npm/tsc) under the flag, the whole session goes red. Skips for
+# data conditions (e.g. 'no unsent run records') are not counted — the
+# classifier lives in tests._jsdom.is_frontend_dep_skip (unit-tested).
+_FRONTEND_DEP_SKIPS = []
+
+
+def pytest_runtest_logreport(report):
+    if report.outcome != 'skipped' or report.when not in ('setup', 'call'):
+        return
+    try:
+        from tests._jsdom import is_frontend_dep_skip
+    except Exception:
+        try:
+            from _jsdom import is_frontend_dep_skip
+        except Exception:
+            # The sentinel must never break the session it guards.
+            return
+    if is_frontend_dep_skip(report.nodeid or '', str(report.longrepr or '')):
+        _FRONTEND_DEP_SKIPS.append(report.nodeid)
+
+
+def pytest_sessionfinish(session, exitstatus):
+    if not _FRONTEND_DEP_SKIPS:
+        return
+    try:
+        from tests._jsdom import frontend_required
+    except Exception:
+        try:
+            from _jsdom import frontend_required
+        except Exception:
+            return
+    if not frontend_required():
+        return
+    session.exitstatus = 1
+    shown = '\n'.join(f'  - {nid}' for nid in _FRONTEND_DEP_SKIPS[:50])
+    print(
+        f'\n[frontend-skip-sentinel] TOFU_REQUIRE_FRONTEND=1 but '
+        f'{len(_FRONTEND_DEP_SKIPS)} frontend test(s) silently skipped on '
+        f'missing deps (node/jsdom/npm/tsc):\n{shown}\n'
+        f'Fix the lane (install node + npm deps) — a skipped frontend suite '
+        f'protects NOTHING.\n')
+
+
 # Session baseline for TOFU_AUTH_MODE, captured ONCE after _configure_test_env
 # ran its setdefault('open'). Every test is forced back to THIS value on
 # teardown — not to a live snapshot — so a unittest class whose setUpClass

@@ -17,9 +17,11 @@ from __future__ import annotations
 import secrets
 import time
 
-from flask import Blueprint, jsonify
+from flask import Blueprint
 
-from lib.api_response import api_bad_request, api_not_found, api_ok
+from lib.api_response import (
+    api_bad_request, api_created, api_not_found, api_ok,
+)
 from lib.config_dir import config_path as _config_path
 from lib.json_store import read_json, update_json_atomic
 from lib.log import get_logger
@@ -105,11 +107,15 @@ _FOLDER_SCHEMA = {
     tags=['conversations'],
     responses={
         '200': {'description': 'OK', 'content': {'application/json': {
-            'schema': {'type': 'array', 'items': _FOLDER_SCHEMA}}}},
+            'schema': {'type': 'object', 'properties': {
+                'ok': {'type': 'boolean'},
+                'items': {'type': 'array', 'items': _FOLDER_SCHEMA}}}}}},
     },
 )
 def list_folders():
-    return jsonify(_read_folders())
+    # Coordinated bare-array migration (batch 19): array under ``items``;
+    # Api.folders.list unwraps with an Array.isArray fallback.
+    return api_ok({'items': _read_folders()})
 
 
 @api_v1_folders_bp.route('/api/v1/folders', methods=['POST'])
@@ -148,7 +154,7 @@ def create_folder():
     update_json_atomic(_FOLDERS_PATH, _mutate, default=[])
     logger.info('[Folders] created id=%s name=%r', new_folder['id'], name)
     _notify_folders_changed()
-    return jsonify(new_folder), 201
+    return api_created(new_folder)
 
 
 @api_v1_folders_bp.route('/api/v1/folders/<folder_id>', methods=['PUT'])
@@ -199,7 +205,7 @@ def update_folder(folder_id):
     logger.info('[Folders] updated id=%s name=%r', folder_id,
                 found[0].get('name'))
     _notify_folders_changed()
-    return jsonify(found[0])
+    return api_ok(found[0])
 
 
 @api_v1_folders_bp.route('/api/v1/folders/<folder_id>', methods=['DELETE'])

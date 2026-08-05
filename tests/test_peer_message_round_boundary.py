@@ -576,32 +576,40 @@ class PeerRoundBoundaryTest(unittest.TestCase):
         — this test fails on that."""
         import re
 
-        # The orchestrator was split into a package (2026-06): the run-loop code
-        # (peer-inject stash + deferred de-dup + the LLM unpack boundary) lives
-        # in the ``_run`` submodule, NOT the package facade ``__init__.py``.
-        # Reading ``orchestrator.__file__`` (the __init__) found none of the
-        # tokens → this guard silently read the wrong file after the split.
-        # Read the submodule that actually defines run_task's round loop.
-        import lib.tasks_pkg.orchestrator._run as orch_run
-        src = open(orch_run.__file__).read()
+        # The orchestrator was split into a package and the seams moved again:
+        # the inject-time STASH lives in ``_turn.py`` / ``_swarm_inbox.py``
+        # (``_peer_inject_pending``), and the deferred de-dup lives in
+        # ``_deferred_inbox_flush.py`` (the post-LLM flush). Scan the package
+        # submodules that actually own each seam, not the stale ``_run``.
+        import lib.tasks_pkg.orchestrator._swarm_inbox as orch_swarm
+        import lib.tasks_pkg.orchestrator._turn as orch_turn
+        inject_src = (open(orch_turn.__file__).read()
+                      + open(orch_swarm.__file__).read())
         # The deferral seam exists (exact token, not a substring of a rename).
         self.assertTrue(
-            re.search(r"_peer_inject_pending\b", src),
+            re.search(r"_peer_inject_pending\b", inject_src),
             'peer items must be stashed under _peer_inject_pending for the '
             'deferred flush')
+        # The inject path must NOT delete durable rows inline — that was the
+        # zero-delivery bug (delete-then-hope).
+        self.assertNotIn(
+            'dedup_peer_durable_rows(', inject_src,
+            'inject-time durable-row delete is the zero-delivery bug — the '
+            'de-dup belongs to the post-LLM deferred flush')
 
-        # The LLM-result unpack is the "delivery confirmed" boundary.
-        llm_pos = src.index("assistant_msg = llm_result[")
-        # EVERY dedup_peer_durable_rows CALL (an occurrence followed by "(",
-        # excluding the `import` line) must sit AFTER that boundary. A revert to
-        # inject-time delete would put a call before it → caught here.
+        # The deferred flush (runs RIGHT AFTER the LLM call returns — its
+        # module contract) pops the stash FIRST and de-dups ONLY inside the
+        # popped branch: pop position must precede every de-dup call.
+        import lib.tasks_pkg.orchestrator._deferred_inbox_flush as orch_flush
+        src = open(orch_flush.__file__).read()
+        pop_pos = src.index("task.pop('_peer_inject_pending'")
         call_positions = [m.start() for m in
                           re.finditer(r'dedup_peer_durable_rows\s*\(', src)]
         self.assertTrue(call_positions, 'the de-dup call must exist')
         self.assertTrue(
-            all(pos > llm_pos for pos in call_positions),
-            'durable-row de-dup must run ONLY AFTER the LLM call confirms the '
-            'model consumed the message (no inject-time delete)')
+            all(pos > pop_pos for pos in call_positions),
+            'durable-row de-dup must run ONLY inside the deferred post-LLM '
+            'flush (after the _peer_inject_pending pop), never at inject')
 
     # ── shared dispatch-driver used by the race tests (context-managed
     #    monkeypatching without pytest fixtures, since this is unittest) ──

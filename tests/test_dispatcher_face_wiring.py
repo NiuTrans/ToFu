@@ -30,7 +30,19 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 
+from lib.mcp.registry import is_opensource_build
+
 pytestmark = [pytest.mark.auth_mode('open'), pytest.mark.unit]
+
+# The fail-loud refusal is host-scoped to gateways DISCOVERED as dual-face
+# from the shipped provider templates. The internal gateway's template is
+# not shipped in opensource builds, so its host is legitimately unknown
+# there and a faceless card dispatches instead of refusing — by design.
+_NEEDS_INTERNAL_DUAL_FACE_HOST = pytest.mark.skipif(
+    is_opensource_build(),
+    reason='the dual-face host set is derived from the internal gateway '
+           'template, which opensource builds do not ship',
+)
 
 OPENAI_URL = 'https://api.openai.com/v1'
 ANTHROPIC_URL = 'https://api.openai.com/v1/anthropic'
@@ -95,7 +107,7 @@ def test_both_wires_coexist_under_one_provider_id():
     d = _build([MERGED_CARD])
     protos = {s.protocol for s in d.slots}
     assert protos == {'', 'anthropic'} or protos == {'openai', 'anthropic'}, protos
-    assert {s.provider_id for s in d.slots} == {'example-corp'}
+    assert {s.provider_id for s in d.slots} == {MERGED_CARD['id']}
 
 
 def test_the_whole_wire_pool_survives_the_merge():
@@ -125,7 +137,7 @@ def test_shared_account_fields_apply_to_both_faces():
 
 def _faceless_card():
     return {
-        'id': 'example-corp_old', 'base_url': OPENAI_URL, 'api_keys': ['sk-a'],
+        'id': 'example_corp_old', 'base_url': OPENAI_URL, 'api_keys': ['sk-a'],
         'enabled': True,
         'models': [
             {'model_id': 'claude-opus-5', 'capabilities': ['text']},
@@ -134,6 +146,7 @@ def _faceless_card():
     }
 
 
+@_NEEDS_INTERNAL_DUAL_FACE_HOST
 def test_claude_on_a_faceless_dual_face_card_builds_no_slots():
     """The sync-path defect, at the dispatcher: refuse rather than dispatch
     over the signature-dropping wire."""
@@ -148,6 +161,7 @@ def test_the_refusal_is_surgical():
     assert _slots_for(d, 'kimi-k3'), 'non-Claude on the same card must survive'
 
 
+@_NEEDS_INTERNAL_DUAL_FACE_HOST
 def test_refusals_are_recorded_for_the_ui():
     """A refusal the user cannot see is its own silent failure. The dispatcher
     must expose what it dropped and why."""
@@ -157,7 +171,7 @@ def test_refusals_are_recorded_for_the_ui():
     joined = ' '.join(r.get('error', '') for r in refusals)
     assert 'claude-opus-5' in joined
     assert 'anthropic' in joined.lower()
-    assert any(r.get('provider_id') == 'example-corp_old' for r in refusals)
+    assert any(r.get('provider_id') == 'example_corp_old' for r in refusals)
 
 
 def test_single_face_gateway_still_serves_claude():

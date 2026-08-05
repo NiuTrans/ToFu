@@ -482,9 +482,9 @@ class _ReportInsightPatched:
             rec.reader_context_called = True
             return '## READER CONTEXT\n- Some prior paper the operator read'
 
-        def _fake_persist(phash, ui_lang, markdown, model):
+        def _fake_persist(phash, ui_lang, markdown, model, **kw):
             rec.persisted = {'lang': ie.insight_lang_key(ui_lang),
-                             'report': markdown, 'phash': phash}
+                             'report': markdown, 'phash': phash, 'kw': kw}
             return True
 
         ie.dispatch_stream = _fake_dispatch
@@ -566,16 +566,30 @@ def test_neuter_gate_wiring_is_load_bearing():
     _ok('NEUTER: gate wiring is load-bearing (None→fail-open fires; high→withholds)')
 
 
-def test_flag_gate_default_off():
-    """The pass is opt-in — default OFF so the report path stays byte-identical."""
+def test_enable_chain_default_on_with_overrides():
+    """Owner-approved 2026-08-02 flip (design §3.4): the interactive default is
+    ON; env is the fleet seed; a per-request cfg stamp (headless fail-closed)
+    always wins. Direction-aligned rewrite of the old default-OFF flag test."""
+    import lib as _lib
     os.environ.pop('TOFU_PAPER_INSIGHT', None)
-    assert ie.insight_enabled() is False, 'insight must default OFF'
+    assert ie.insight_enabled() is True, 'interactive default must be ON'
+    # env seed still honoured as a fleet kill switch / back-compat opt-in.
+    os.environ['TOFU_PAPER_INSIGHT'] = '0'
+    try:
+        assert ie.insight_enabled() is False, 'TOFU_PAPER_INSIGHT=0 must disable'
+        # per-request cfg stamp beats the env seed (headless fail-closed).
+        assert ie.insight_enabled({'paperInsightEnabled': True}) is True, \
+            'explicit cfg opt-in must beat env=0'
+    finally:
+        os.environ.pop('TOFU_PAPER_INSIGHT', None)
     os.environ['TOFU_PAPER_INSIGHT'] = '1'
     try:
         assert ie.insight_enabled() is True, 'TOFU_PAPER_INSIGHT=1 did not enable'
+        assert ie.insight_enabled({'paperInsightEnabled': False}) is False, \
+            'headless cfg stamp False must beat env=1'
     finally:
         os.environ.pop('TOFU_PAPER_INSIGHT', None)
-    _ok('flag gate: default OFF, TOFU_PAPER_INSIGHT=1 enables')
+    _ok('enable chain: 默认 ON + env 种子 + cfg 戳最高优先(方向对齐新契约)')
 
 
 def main():
@@ -597,7 +611,7 @@ def main():
         test_report_insight_high_baseline_withheld,
         test_report_insight_headless_suppresses_personal_context,
         test_neuter_gate_wiring_is_load_bearing,
-        test_flag_gate_default_off,
+        test_enable_chain_default_on_with_overrides,
     ]
     for fn in tests:
         try:

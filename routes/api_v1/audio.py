@@ -18,7 +18,7 @@ caller holding the ``chat`` scope — same tier as the completion it feeds.
 
 from __future__ import annotations
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, request
 
 from lib.api_response import api_bad_request, api_error, api_ok
 from lib.log import get_logger
@@ -116,8 +116,7 @@ def transcribe_audio_v1():
                      filename, len(audio_bytes), e, exc_info=True)
         return api_error(f'Transcription failed: {e}', status=500)
 
-    return jsonify({
-        'ok': True,
+    return api_ok({
         'text': result.text,
         'model': result.model,
         'provider_id': result.provider_id,

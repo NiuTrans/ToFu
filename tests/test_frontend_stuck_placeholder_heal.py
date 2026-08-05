@@ -335,7 +335,12 @@ global.Api = win.Api = {
   chat: { poll: async () => { pollCalls++; return { ok: false, status: 404 }; } },
 };
 
-eval(fs.readFileSync(process.argv[2], 'utf8'));  // core/health_stream_timer.js (real)
+// ONE eval scope for both files — a direct eval keeps `let`/`const` in its
+// own declarative record, so separate evals would hide the monitor's
+// _serverAlive / _HEALTH_CHECK_INTERVAL from the timer file (the browser
+// bundle shares one lexical scope across concatenated scripts).
+eval(fs.readFileSync(process.argv[4], 'utf8') + '\n;\n' +
+     fs.readFileSync(process.argv[2], 'utf8'));  // monitor (argv[4]) + health_stream_timer.js (argv[2])
 
 if (typeof _updateStreamTimerUI !== 'function') {
   console.log('FAIL fn_exposed _updateStreamTimerUI missing'); process.exit(0);
@@ -433,7 +438,10 @@ global.connectToTask = (cid, tid) => { connectCalls.push([cid, tid]); };
 global.setInterval = () => 0;
 global.clearInterval = () => {};
 
-eval(fs.readFileSync(process.argv[2], 'utf8'));  // core/health_stream_timer.js (real)
+// ONE eval scope for both files — see the level-2 note (let/const do not
+// escape a direct eval; the bundle shares one lexical scope).
+eval(fs.readFileSync(process.argv[3], 'utf8') + '\n;\n' +
+     fs.readFileSync(process.argv[2], 'utf8'));  // monitor (argv[3]) + health_stream_timer.js (argv[2])
 
 check('wake_fn_exposed', typeof _probeAllStuckStreamsOnWake === 'function'
       && typeof _probeStuckStream === 'function');
@@ -494,7 +502,9 @@ def test_wake_probe_reconnects_stuck_stream():
         f.write(_WAKE_HARNESS)
     try:
         proc = subprocess.run(
-            ['node', harness, os.path.join(JS_DIR, 'core', 'health_stream_timer.js')],
+            ['node', harness,
+             os.path.join(JS_DIR, 'core', 'health_stream_timer.js'),
+             os.path.join(JS_DIR, 'core', 'backend_offline_monitor.js')],
             capture_output=True, text=True, timeout=60,
         )
     finally:
@@ -518,8 +528,9 @@ def test_probe_404_triggers_heal():
     try:
         proc = subprocess.run(
             ['node', harness,
-             os.path.join(JS_DIR, 'core', 'health_stream_timer.js'),  # argv[2]
-             ROOT,                                                     # argv[3]
+             os.path.join(JS_DIR, 'core', 'health_stream_timer.js'),   # argv[2]
+             ROOT,                                                      # argv[3]
+             os.path.join(JS_DIR, 'core', 'backend_offline_monitor.js'),# argv[4]
              ],
             capture_output=True, text=True, timeout=60,
         )

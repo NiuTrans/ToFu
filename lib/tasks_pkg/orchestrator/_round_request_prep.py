@@ -29,16 +29,15 @@ needed downstream by the round-checkpoint call (slice 20).
 
 from __future__ import annotations
 
-import logging
-
 import lib.tasks_pkg.orchestrator as _o
+from lib.log import get_logger
 from lib.tasks_pkg.cache_tracking import sort_tool_results
 from lib.tasks_pkg.orchestrator._messages_snapshot import (
     emit_messages_snapshot_event,
 )
 
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 def build_round_request(task, rs, messages, tool_list, *,

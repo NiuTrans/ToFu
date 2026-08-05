@@ -1,3 +1,5 @@
+# Incident anchor: born in commit e794681c — Snapshot chatui for MAPS in-container runtime: any-language→English a...
+# (funeral audit pt_c565a36b3e8f42e6, docs/RATCHET_AUDIT.md)
 """tests/test_endpoint_flow_parity_live.py — REAL-MODEL parity (manual only).
 
 The final validation gate before flipping ``TOFU_ENDPOINT_VIA_FLOW`` on by

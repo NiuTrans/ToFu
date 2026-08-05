@@ -293,7 +293,12 @@ async function syncConversationToServer(conv, { allowTruncate = false } = {}) {
           if (freshData) {
             const freshMsgs = freshData.messages || [];
             if (freshMsgs.length > 0) {
-              conv.messages = freshMsgs;
+              /* ★ Rebase, don't clobber: the wholesale replace used to drop a
+               * genuinely un-synced local tail (pending-sync poor-network
+               * message / failed-rescue rows) with no beacon. The rev-conflict
+               * path above already uses _rebaseUnackedTail — same primitive:
+               * server base + identity-filtered local-only tail. */
+              conv.messages = _rebaseUnackedTail(freshMsgs, conv.messages);
               conv.title = freshData.title || conv.title;
               conv._serverMsgCount = freshMsgs.length;
               ConvCache.put(conv);
@@ -987,8 +992,21 @@ async function loadConversationMessages(convId) {
      *   at :data.rev), never by comparing clocks that can skew or be inflated by
      *   an optimistic push. Genuine local work is still protected by the two
      *   real signals above; a merely newer-looking timestamp is not. */
+    /* ★ Send-window race (root cause class of the mse9r2ir7ql0v4 incident,
+     *   2026-08-05): a Phase-2 fetch that STARTED after the optimistic user
+     *   push (the VLM-parse / POST window — seconds long for an image send)
+     *   cannot see the fresh local activity: grew=false (preFetch already
+     *   counts the push), tsMoved can't fire (the newest local ts IS the
+     *   preFetch newest), taskAppeared=false (activeTaskId lands only after
+     *   the POST). All three real signals are blind in that window, so the
+     *   OVERWRITE branch would adopt the pre-send server list and wipe the
+     *   user's just-sent message — which only reappeared on manual refresh.
+     *   `conv._sendInFlight` is held from the optimistic push through
+     *   connectToTask (cleared in the send pipeline's finally), exactly
+     *   covering the blind window — treat it as un-synced local work. */
     const localHasUnsynced =
       _hasFreshLocalActivity ||
+      !!conv._sendInFlight ||
       _localHasPendingSync;
 
     /* ── One-line reconciliation snapshot ──
@@ -1074,6 +1092,7 @@ async function loadConversationMessages(convId) {
       conv._needsLoad = false;
       conv._serverMsgCount = Math.max(serverMsgs.length, conv.messages.length);
     } else if (conv.activeTaskId && hasLocalData
+               && !conv._sendInFlight
                && !activeStreams.has(convId) && serverMsgs.length < conv.messages.length
                && _openConvMayHoldOrphanGhost(conv, convId)) {
       /* ★ Adopt a SHORTER authoritative list FIRST — before the checkpoint
@@ -1161,7 +1180,32 @@ async function loadConversationMessages(convId) {
        *   Append them now, but ONLY when no stream is actually live for
        *   this conv (otherwise an orphaned assistantMsg ref held by
        *   connectToTask could be invalidated mid-stream). */
-      if (!activeStreams.has(convId) && serverMsgs.length > conv.messages.length) {
+      if (activeStreams.has(convId)) {
+        /* ★ Stream-live injected-turn adoption (conv msebjymx5b4a25,
+         *   2026-08-05): a brain/peer/queue kickoff persisted SERVER-side
+         *   while this tab was away was refused by EVERY Phase-2 path once a
+         *   stream was attached — the triggering user message stayed
+         *   invisible for the whole task ("an Agent generating out of
+         *   nowhere"; it surfaced only after completion + manual refresh).
+         *   Insert the missing settled messages immediately BEFORE the
+         *   stream's bound tail — identity-anchored, the bound object is
+         *   never touched — then rebuild through the streaming composer so
+         *   the new statics render above the live bubble. */
+        const _injN = (typeof _adoptInjectedSettledPrefix === 'function')
+          ? _adoptInjectedSettledPrefix(conv, serverMsgs, activeStreams.get(convId))
+          : 0;
+        if (_injN > 0) {
+          console.info(`[loadConvMsgs] 📥 MERGE_ACTIVE_TASK inserted ${_injN} ` +
+            `server-injected settled msg(s) before the live tail for ` +
+            `conv=${convId.slice(0,8)} (brain/peer/queue kickoff)`);
+          try { ConvCache.put(conv); } catch (_e) {
+            debugLog(`[conversations] ConvCache.put failed (MERGE_ACTIVE_TASK inject-adopt) conv=${convId.slice(0,8)}: ${_e && _e.message}`, 'warn');
+          }
+          if (convId === activeConvId && typeof showStreamingUIForConv === 'function') {
+            showStreamingUIForConv(convId);
+          }
+        }
+      } else if (serverMsgs.length > conv.messages.length) {
         const _appendStart = conv.messages.length;
         const _appended = serverMsgs.slice(_appendStart);
         conv.messages.push(..._appended);
@@ -1237,7 +1281,17 @@ async function loadConversationMessages(convId) {
          *   rendering stale English narration. (The cache-fresh else-branch
          *   ALSO merges translations in-place; this disjunct covers the case
          *   where a full server adopt is cleaner.) */
-        _serverHasTranslationLocalLacks(serverMsgs, conv.messages);
+        _serverHasTranslationLocalLacks(serverMsgs, conv.messages) ||
+        /* ★ Symmetric to the segments/translation backstops: the IndexedDB
+         *   cache write (_stripToolRound) strips imageDataUris[].uri (OOM
+         *   guard) while the PUT/DB copy keeps them — and no count/
+         *   updatedAt change marks the difference, so a cache-fresh reload
+         *   silently degraded every image round (read_files / inspect_image
+         *   / browser_screenshot / browser_preview_page) to its badge-only
+         *   line. Treat "server has image uris the local copy lacks" as
+         *   stale so the reopened conv adopts the server copy and the
+         *   inline thumbnails survive reloads. */
+        _serverHasImagesLocalLacks(serverMsgs, conv.messages);
 
       if (cacheIsStale) {
         /* ★ The server is NOT authoritative when it has FEWER messages than we

@@ -95,6 +95,15 @@ def _norm_path(p: str) -> str:
     """
     p = p.split('?')[0].split('#')[0]
     p = re.sub(r'\$\{[^}]*\}', '<>', p)   # JS template expression
+    # A '?' may live INSIDE a query-template interpolation (api.js:1251
+    # `…/live-session${refresh ? '?refresh=1' : ''}`), so the querystrip above
+    # can leave a dangling `${tail` the sub cannot match. The interpolation
+    # only ever yields a query string (or nothing), so the route ends before
+    # it: truncate at the unclosed `${` (mirrors
+    # test_frontend_backend_contract._normalise).
+    m = re.search(r'\$\{(?![^}]*\})', p)
+    if m:
+        p = p[:m.start()]
     p = re.sub(r'<[^>]+>', '<>', p)       # Flask/Quart converter
     p = re.sub(r'<>(?:<>)+', '<>', p)     # coalesce adjacent placeholders
     return p.rstrip('/') or '/'

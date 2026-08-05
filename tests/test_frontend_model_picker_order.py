@@ -30,8 +30,13 @@ WHAT IS GUARDED (results, not implementation — charter 2026-07-27)
   4. The comparator survives a ``_modelPricingCache`` MISS — models with no
      pricing entry (``oauth_claude``'s dated ids) sort by their stripped id
      instead of throwing, so the degraded order is stable rather than arbitrary.
-  5. The picker and the Settings cold sort agree, because both route through the
-     ONE shared comparator in settings/branding.js.
+  5. The Settings provider model list sorts by the RAW model_id — the string
+     ``_renderModelCard`` renders — NOT the friendly pricing name. (2026-08-04
+     incident: ``claude-fable-5`` is named "Fable 5" in lib/pricing/_tables.py,
+     and a display-name sort parked the card between Doubao and gemini —
+     alphabetical to the machine, scrambled to the reader. The friendly-name
+     comparator remains correct for lists that RENDER friendly names: this
+     picker, the preset tab, the default-model selects.)
 
 NEUTERS (source-level, on mutated copies — shipped files untouched):
   * strip the model sort out of _populateModelDropdown  → order goes red
@@ -219,15 +224,32 @@ try {
   check('comparator_handles_empty',
     typeof _compareModelsByDisplayName('', 'kimi-k3') === 'number');
 
-  // ══ 6. Picker and Settings cold sort AGREE (one shared comparator) ══
+  // ══ 6. Settings cold sort orders by the RAW model_id the card shows ══
+  // The settings card renders `m.model_id` verbatim, so the sort key must be
+  // that same string — not _modelShortName. The pricing cache below names
+  // claude-fable-5 "Fable 5" and yuju-claude-opus-5-evaDaily "Claude Opus 5";
+  // under the old (buggy) contract those friendly names moved the cards to
+  // 'f'/'c' positions the reader cannot see.
   indirectEval(CORE_SRC.match(/function _compareModelEntries[\s\S]*?\n}/)[0]);
   indirectEval(CORE_SRC.match(/function _coldSortModels[\s\S]*?\n}/)[0]);
   const settingsList = MODELS.filter((m) => m.provider_id === 'sankuai')
     .map((m) => ({ model_id: m.model_id }));
   _coldSortModels(settingsList);
-  const settingsLabels = settingsList.map((m) => _modelShortName(m.model_id));
-  check('settings_cold_sort_matches_picker',
-    settingsLabels.join('|') === wantMeituan.join('|'));
+  const settingsIds = settingsList.map((m) => m.model_id);
+  const wantIds = [
+    'aws.claude-opus-4.6', 'aws.claude-opus-4.8', 'claude-fable-5',
+    'gemini-3.5-flash', 'gemini-3.6-flash', 'hy3-preview', 'kimi-k3',
+    'yuju-claude-opus-5-evaDaily',
+  ];
+  check('settings_cold_sort_by_shown_model_id',
+    settingsIds.join('|') === wantIds.join('|'));
+  // The 2026-08-04 incident pins: 'Fable 5' (pricing name) must NOT pull the
+  // card to 'f' — it sorts under 'c', right after the other claude ids; and
+  // the yuju- id sorts under 'y', where the reader sees it.
+  check('settings_pricing_name_does_not_move_card',
+    settingsIds.indexOf('claude-fable-5') === 2);
+  check('settings_gateway_id_sorts_where_shown',
+    settingsIds.indexOf('yuju-claude-opus-5-evaDaily') === wantIds.length - 1);
 
   // ══ 7. Sort survives a _modelPricingCache MISS on EVERY model ══
   // (the .catch fallback in _loadServerConfigAndPopulate + a settings-close
@@ -521,10 +543,12 @@ def test_single_comparator_no_duplicate_sort_logic():
     """The comparator must live in exactly one place.
 
     A second hand-rolled model comparator anywhere else is how the picker and
-    the Settings list drift apart again. Every consumer must call the shared
-    ``_compareModelsByDisplayName`` (directly or via its thin
-    ``_sortModels*``/``_sortedBrandKeys`` wrappers); none may re-implement a
-    `<`/`>` compare on a model label of its own.
+    the Settings list drift apart again. Lists that render FRIENDLY names must
+    call the shared ``_compareModelsByDisplayName`` (directly or via its thin
+    ``_sortModels*``/``_sortedBrandKeys`` wrappers); the Settings card list
+    renders raw model_ids and must order them through the same shared
+    ``_MODEL_NAME_COLLATOR``. None may re-implement a `<`/`>` compare or build
+    a collator of its own.
     """
     brand = open(BRANDING_JS, encoding='utf-8').read()
     toolbar = open(TOOLBAR_JS, encoding='utf-8').read()
@@ -540,7 +564,9 @@ def test_single_comparator_no_duplicate_sort_logic():
 
     consumers = (
         ('main_toolbar_ui.js', toolbar, ['_compareModelsByDisplayName']),
-        ('core_panel.js', core, ['_compareModelsByDisplayName']),
+        # The settings card list sorts by the raw model_id it renders — via
+        # the shared collator, NOT the friendly-name comparator (2026-08-04).
+        ('core_panel.js', core, ['_MODEL_NAME_COLLATOR']),
         ('visibility_defaults.js', vis,
          ['_sortModelsByDisplayName', '_sortModelEntriesByDisplayName',
           '_sortedBrandKeys']),
@@ -548,9 +574,19 @@ def test_single_comparator_no_duplicate_sort_logic():
     for name, src, required in consumers:
         assert 'function _compareModelsByDisplayName' not in src, \
             f'{name} must NOT define its own copy of the comparator'
+        assert 'Intl.Collator' not in src, \
+            f'{name} must NOT build its own collator (share branding.js)'
         for sym in required:
             assert sym in src, \
                 f'{name} must route its sort through the shared {sym}'
+
+    # The settings cards show raw ids — sorting them by the invisible pricing
+    # name was the 2026-08-04 bug. core_panel must never key its list off
+    # _modelShortName/_compareModelsByDisplayName again.
+    assert '_compareModelsByDisplayName' not in core, \
+        'core_panel.js must not sort the card list by friendly display name'
+    assert '_modelShortName' not in core, \
+        'core_panel.js must not key its sort off the pricing display name'
 
     # No consumer may walk a brand/provider group map in insertion order —
     # that was the section-order half of the bug.

@@ -301,7 +301,7 @@ def account_namespace_map(providers: list) -> dict:
 
       1. the conventional ``f'{account_id}_{face_name}'`` shape the
          historical duplicate face cards used (the YourProvider gateway's
-         ``example-corp_anthropic`` = ``example-corp`` + the ``anthropic`` face) —
+         ``example_corp_anthropic`` = ``example-corp`` + the ``anthropic`` face) —
          covered whether or not the config merge already persisted;
       2. a duplicate card STILL present in config (the config merge has
          not run yet — e.g. first boot after the upgrade): the card's own

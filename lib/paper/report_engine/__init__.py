@@ -66,6 +66,7 @@ from lib.paper.tools import (
 #    ``__package__='lib.paper'``) resolves the real sub-modules too. ──────────
 from lib.paper.report_engine._meta import _build_report_meta  # noqa: E402
 from lib.paper.report_engine._hooks import (  # noqa: E402
+    _maybe_run_checkpoints,
     _maybe_run_insight,
     _maybe_run_termfill,
 )
@@ -603,6 +604,18 @@ def _run_report_task(task, messages, images):
                                 report_meta, model=report_model)
         except Exception as e:
             logger.warning('[Paper:TermFill] second-pass wrapper failed (non-fatal) '
+                           'hash=%s: %s', phash, e, exc_info=True)
+
+        # ── Checkpoint second-pass (gated, non-destructive) ──
+        # Per-section self-test flip cards (active recall), persisted under
+        # the SEPARATE ``checkpoints:<ui>`` key. Same wrapper discipline as
+        # the insight/termfill passes: a failure never taints the report.
+        try:
+            from lib.paper.report_engine._hooks import _maybe_run_checkpoints
+            _maybe_run_checkpoints(task, phash, inj_lang, enriched or full_content,
+                                   model=report_model)
+        except Exception as e:
+            logger.warning('[Paper:Checkpoints] second-pass wrapper failed (non-fatal) '
                            'hash=%s: %s', phash, e, exc_info=True)
 
     except AbortedError:

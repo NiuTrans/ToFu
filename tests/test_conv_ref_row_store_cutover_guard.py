@@ -1,3 +1,5 @@
+# Incident anchor: born in commit 28b5e520 — conv_ref: guard the row-store cutover — "pure swap" is data loss on a...
+# (funeral audit pt_c565a36b3e8f42e6, docs/RATCHET_AUDIT.md)
 """The row-store cutover must fail OPEN on a not-yet-backfilled conversation.
 
 Charter (2026-07-26) names ``load_message_window`` the one paging

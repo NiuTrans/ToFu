@@ -82,7 +82,6 @@ Output: static/icons/pet/tofu/tofu-<frame>.png (a PRODUCT asset dir).
 This workbench lives under _gen/; it is never served.
 """
 import argparse
-import math
 import sys
 from pathlib import Path
 

@@ -198,10 +198,23 @@ def _normalise(path: str) -> str:
     ``poll-${x}``) collapse the whole segment to ``<*>`` — acceptable because
     api.js never mixes a literal prefix with an interpolation inside one path
     segment for a route that also has a static sibling.
+
+    Dangling ``${``: the extractor stops at ``?`` even when the ``?`` lives
+    INSIDE a query-template interpolation — api.js:1251
+    ``…/live-session${refresh ? '?refresh=1' : ''}`` extracts as
+    ``…/live-session${refresh``. The interpolation only ever yields a query
+    string (or nothing), so the ROUTE segment ends before it: truncate at the
+    unclosed ``${`` (and drop the segment if that empties it). Without this,
+    the half-interpolation fails _DYNAMIC_SEG_RE and the path reports a
+    phantom MISS against a perfectly registered route.
     """
     segs = [s for s in path.split('/') if s != '']
     out = []
     for s in segs:
+        if '${' in s and '}' not in s[s.index('${'):]:
+            s = s[:s.index('${')]
+            if not s:
+                continue
         out.append('<*>' if _DYNAMIC_SEG_RE.search(s) else s)
     return '/' + '/'.join(out)
 
@@ -219,6 +232,24 @@ def _registered_templates(app) -> set[str]:
 # ── Tests ─────────────────────────────────────────────────────────────
 def test_api_js_exists():
     assert os.path.isfile(API_JS), 'static/js/api.js is missing'
+
+
+def test_normalise_truncates_dangling_query_interpolation():
+    """NEUTER-class pin for the api.js:1251 incident: a query-template
+    interpolation truncated mid-``${`` must not become a phantom dynamic
+    segment. Also pins the shapes that must NOT change."""
+    # 事故原形:截断在第二个插值内 → 段尾截断,route identity 精确还原
+    assert _normalise(
+        '/api/v1/auth-sources/${encodeURIComponent(domain)}/live-session${refresh'
+    ) == '/api/v1/auth-sources/<*>/live-session'
+    # 悬空插值占满整段 → 段消失
+    assert _normalise('/api/foo/${cond') == '/api/foo'
+    # 完整插值语义不动
+    assert _normalise('/api/x/${id}') == '/api/x/<*>'
+    # 混合字面+插值语义不动
+    assert _normalise('/api/poll-${id}') == '/api/<*>'
+    # Werkzeug 转换器语义不动
+    assert _normalise('/api/x/<int:y>') == '/api/x/<*>'
 
 
 def test_every_api_js_path_resolves_to_a_live_route():

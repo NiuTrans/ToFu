@@ -1,3 +1,5 @@
+# Incident anchor: born in commit 2dfb9943 — refactor(orchestrator): pt_03f4cdf1 slice 26 — extract per-round LLM ...
+# (funeral audit pt_c565a36b3e8f42e6, docs/RATCHET_AUDIT.md)
 """Slice 26 wire-parity: _llm_round_call.py extraction from _run.py."""
 
 import inspect

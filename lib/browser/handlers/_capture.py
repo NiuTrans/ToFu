@@ -24,12 +24,15 @@ def send_browser_command(*args, **kwargs):
 
 
 def _handle_execute_js(fn_args):
-    tab_id = fn_args.get('tabId')
     code = fn_args.get('code', '')
-    if tab_id is None:
-        return 'Error: tabId is required.'
     if not code:
         return 'Error: code is required.'
+    # v2: tab_id optional — defaults to the working tab (pt_869e5648403e4745)
+    from lib.browser._resolve import resolve_work_tab
+    tab_id = resolve_work_tab(fn_args, send_browser_command)
+    if tab_id is None:
+        return ('Error: no tab to run JS in. Pass tab_id, or call '
+                'browser_list_tabs / browser_navigate first.')
     result, error = send_browser_command('execute_js', {
         'tabId': int(tab_id),
         'code': code,

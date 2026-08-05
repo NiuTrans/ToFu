@@ -27,6 +27,7 @@ from lib.tasks_pkg.system_context._profile import (
     _append_user_profile_block,
     _refresh_detail_block,
 )
+from lib.tasks_pkg.system_context import _freeze as _ctx_freeze
 
 
 # Marker embedded in the Claude-Code static block. Used as the idempotency
@@ -109,6 +110,29 @@ def _inject_system_contexts(messages, project_path, project_enabled,
             keeps every block.
     """
     _cid = conv_id or ''
+
+    # ── Turn-boundary freeze (epic pt_62ed8cce25324eb2) ──
+    # 1) RESTORE last turn's volatile tail blocks onto historical user
+    #    messages so the rebuilt wire is byte-identical to what those
+    #    messages carried on the wire last turn (persistence strips the
+    #    blocks; without restore a tool-heavy prior turn's user message is a
+    #    prefix mutation at a deep position → whole-body re-bill).
+    # 2) CAPTURE the last user message's entry content (post-prefetch,
+    #    pre-system-context) — the key under which its final content is
+    #    recorded at the end of this assembly for the NEXT turn's restore.
+    # Skipped for snapshot/debug callers (conv_id empty → side-effect-free).
+    if _cid:
+        try:
+            _ctx_freeze.restore_tail_blocks(messages, _cid)
+        except Exception as _fre:
+            logger.debug('[CtxFreeze] restore failed conv=%s: %s',
+                         (_cid or '?')[:8], _fre)
+    _tail_entry_content = None
+    for _i in range(len(messages) - 1, -1, -1):
+        if messages[_i].get('role') == 'user':
+            _c = messages[_i].get('content')
+            _tail_entry_content = (list(_c) if isinstance(_c, list) else _c)
+            break
 
     # ── Context-assembly trace (STRICTLY LOCAL — no module-level state). ──
     #   One unified [Context] observability layer for prompt assembly: every
@@ -193,9 +217,25 @@ def _inject_system_contexts(messages, project_path, project_enabled,
                 logger.debug('[MemPrefetch] %s not done yet, falling back', key)
         return fallback_fn()
 
+    # ── Turn-boundary head freeze: while the previous turn's cache entry
+    #    is still alive, reuse the BYTE-FROZEN carrier body / memory-count
+    #    hint from last turn — the journal digest and memory count change
+    #    every turn in an active project, and both sit in the cached prefix
+    #    head, so a fresh render every turn re-keyed the whole prefix
+    #    (measured: 2026-08-01, the dominant turn_boundary_rebill driver).
+    _frozen_head = {}
+    if _cid:
+        try:
+            _frozen_head = _ctx_freeze.get_frozen_head(
+                _cid, project_path if project_enabled else '') or {}
+        except Exception as _fhe:
+            logger.debug('[CtxFreeze] head lookup failed conv=%s: %s',
+                         (_cid or '?')[:8], _fhe)
+    _frozen_carrier_body = _frozen_head.get('carrier_body')
+
     # ── Load project context (CLAUDE.md) once ──
     proj_ctx = ''
-    if project_enabled:
+    if project_enabled and not _frozen_carrier_body:
         def _load_project():
             from lib.project_mod import get_context_for_prompt
             return get_context_for_prompt(project_path, conv_id=_cid or None)
@@ -204,6 +244,8 @@ def _inject_system_contexts(messages, project_path, project_enabled,
         # _get_prefetched consumes it when ready, else falls back to a sync
         # load. No conv-scoped result cache — each task gets fresh messages and
         # ALWAYS injects, so a hash cache could not skip the compute anyway.
+        # A frozen carrier body makes the whole load unnecessary (the OTHER
+        # win: the FUSE read is skipped entirely on warm reuse).
         proj_ctx = _get_prefetched('_prefetch_project', _load_project) or ''
 
     logger.info('[Inject] conv=%s proj_enabled=%s proj_ctx_len=%d '
@@ -281,7 +323,17 @@ def _inject_system_contexts(messages, project_path, project_enabled,
         _ctx_injected('static', len(_static_block))
 
     # ★ 2. Project CLAUDE.md → prepended user _isMeta message (cache-friendly).
-    if proj_ctx and '[PROJECT CO-PILOT MODE]' not in _existing:
+    #    Warm-window reuse: the FROZEN body from last turn keeps the carrier
+    #    (index 1, inside the cached prefix) byte-identical across the turn
+    #    boundary; a fresh render only happens on a cold window (cache dead
+    #    anyway) or a project switch.
+    if _frozen_carrier_body and '[PROJECT CO-PILOT MODE]' not in _existing:
+        _insert_user_context_message(messages, _frozen_carrier_body)
+        logger.debug('[CtxFreeze] conv=%s CLAUDE.md carrier reused FROZEN '
+                     'body (%d chars)',
+                     (_cid or '?')[:8], len(_frozen_carrier_body))
+        _ctx_injected('claude_md', len(_frozen_carrier_body))
+    elif proj_ctx and '[PROJECT CO-PILOT MODE]' not in _existing:
         _reminder = system_prompt_cc.build_user_context_reminder(
             claude_md=proj_ctx, current_date=None,
         )
@@ -291,6 +343,14 @@ def _inject_system_contexts(messages, project_path, project_enabled,
                         '_isMeta msg (len=%d)',
                         (_cid or '?')[:8], len(_reminder))
             _ctx_injected('claude_md', len(_reminder))
+            if _cid:
+                try:
+                    _ctx_freeze.store_head(
+                        _cid, project_path if project_enabled else '',
+                        carrier_body=_reminder)
+                except Exception as _fse:
+                    logger.debug('[CtxFreeze] carrier store failed conv=%s: %s',
+                                 (_cid or '?')[:8], _fse)
     elif proj_ctx:
         # CLAUDE.md is already IN the system message — shouldn't happen under
         # the single-layout design.  Left as a warning so stale snapshots /
@@ -454,7 +514,21 @@ def _inject_system_contexts(messages, project_path, project_enabled,
                 from lib.memory import build_memory_context
                 return build_memory_context(project_path=_pp)
 
-            _mem_hint = _load_memory_hint() or ''
+            _mem_hint = _frozen_head.get('mem_hint')
+            if _mem_hint is None:
+                _mem_hint = _load_memory_hint() or ''
+                if _cid:
+                    try:
+                        _ctx_freeze.store_head(
+                            _cid, project_path if project_enabled else '',
+                            mem_hint=_mem_hint)
+                    except Exception as _fse:
+                        logger.debug('[CtxFreeze] mem-hint store failed '
+                                     'conv=%s: %s', (_cid or '?')[:8], _fse)
+            else:
+                logger.debug('[CtxFreeze] conv=%s memory-count hint reused '
+                             'FROZEN (%d chars)', (_cid or '?')[:8],
+                             len(_mem_hint or ''))
 
             _mem_block = MEMORY_ACCUMULATION_INSTRUCTIONS_COMPACT
             if _mem_hint:
@@ -816,6 +890,16 @@ Round N+3, a2's update lands. Synthesise the full picture for the user.
     _date_spliced = _wrap_system_reminder(system_prompt_cc.section_current_date())
     _refresh_tail_block(messages, _date_spliced, _DATE_MARKER)
     _ctx_injected('date', len(_date_spliced))
+
+    # ── Record the last user message's final content for the NEXT turn's
+    #    restore (see the entry hook). Runs AFTER every tail mutation in this
+    #    assembly so the snapshot is the exact wire form.
+    if _cid and _tail_entry_content is not None:
+        try:
+            _ctx_freeze.record_tail_block(_cid, _tail_entry_content, messages)
+        except Exception as _fre:
+            logger.debug('[CtxFreeze] tail record failed conv=%s: %s',
+                         (_cid or '?')[:8], _fre)
 
     # ── Per-assembly trace: ONE INFO line naming every block spliced this
     #   assembly + the total bytes. _inject_system_contexts runs ONCE per task

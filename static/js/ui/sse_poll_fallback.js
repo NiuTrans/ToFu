@@ -502,7 +502,13 @@ async function _pollFallback(convId, taskId, stream, assistantMsg) {
               'Backend server did not reconnect within 2 minutes. Your partial response has been saved. It will recover automatically when the server comes back.',
               12000);
             // ★ Start periodic recovery polling so the result is auto-recovered later
-            _startOfflineRecoveryPolling();
+            if (typeof _startOfflineRecoveryPolling === 'function') {
+              _startOfflineRecoveryPolling();
+            } else {
+              // cross_tab_sync.js is deferred — without it the offline-recovery
+              // poll simply doesn't run; say so instead of dying silently (§2).
+              console.warn('[_pollFallback] _startOfflineRecoveryPolling unavailable (feature bundle not loaded) — offline auto-recovery polling skipped');
+            }
             return;
           }
           // If recovered, fall through and continue the poll loop

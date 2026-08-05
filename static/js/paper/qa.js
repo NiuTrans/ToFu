@@ -261,6 +261,24 @@ function _applyQAEvent(asst, ev) {
   }
 }
 
+/** Public entry: ask the QA tab a fully-formed question (no selection
+ *  involved) — used by the reading-experience rail's "debate this" buttons.
+ *  Switches to the QA tab, seeds the input, sends. */
+function _paperAskQuestion(text) {
+  text = (text || '').trim();
+  if (!text) return;
+  if (typeof _paperActiveTab !== 'undefined' && _paperActiveTab !== 'qa'
+      && typeof _switchPaperTab === 'function') {
+    _switchPaperTab('qa');
+  }
+  if (typeof _setPaperMobileView === 'function') _setPaperMobileView('reader');
+  var input = document.getElementById('paperQAInput');
+  if (!input) return;
+  input.value = text;
+  input.focus();
+  setTimeout(function() { _sendPaperQuestion(); }, 100);
+}
+
 function _quotePaperSelection() {
   var sel = window.getSelection();
   var text = sel?.toString()?.trim();

@@ -207,6 +207,10 @@ def register_agent(agent_id, meta=None, user_id='', key_id='') -> None:
             'agent_id': agent_id,
             'name': str(meta.get('name') or prev.get('name') or ''),
             'platform': str(meta.get('platform') or prev.get('platform') or ''),
+            # The drift signal (owner amendment ②): which build the agent
+            # runs, so the server can flag a protocol-mismatched endpoint.
+            # A frame without it (older agent) keeps the previous value.
+            'version': str(meta.get('version') or prev.get('version') or ''),
             'capabilities': (dict(caps) if isinstance(caps, dict)
                              else prev.get('capabilities') or {}),
             'share_roots': (list(meta['share_roots'])

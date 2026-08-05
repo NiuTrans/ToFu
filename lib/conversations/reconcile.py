@@ -252,9 +252,332 @@ def _twin_subsumed_by(keeper: dict[str, Any], twin: dict[str, Any]) -> bool:
         tv = twin.get(field)
         if not tv:
             continue  # empty / absent — nothing to lose
-        if _twin_key(tv) != _twin_key(keeper.get(field)):
+        kv = keeper.get(field)
+        if _twin_key(tv) == _twin_key(kv):
+            continue
+        # Lossless-subset shape (the trimmed echo): list payload fields only;
+        # terminal fields stay strict byte-equality.
+        if field in ('toolRounds', 'apiRounds') \
+                and _twin_payload_list_subsumed(field, kv, tv):
+            continue
+        return False
+    return True
+
+
+# Terminal-verdict fields the fold may move onto the keeper. Payload fields
+# (content/thinking/toolRounds/segments/apiRounds) are NEVER folded — a
+# payload-divergent pair stays on disk (the measured data-loss guard).
+_TWIN_FOLD_FIELDS = ('finishReason', 'usage', 'error')
+
+# finishReasons meaning the task completed CLEANLY. An error envelope
+# contradicting one of these is a mid-stream transient, never the turn's
+# outcome — the normal sync path pops stale errors for exactly this reason.
+_TWIN_CLEAN_FINISH_REASONS = frozenset({'stop', 'end_turn', 'stop_sequence'})
+
+
+# Round-level additive/sidecar keys a frontend echo may carry that the
+# server-settled rounds legitimately lack (measured on conv mscns5i0fcofgl):
+# approvalId/approvalMeta/guidanceId are the reducer's settle-time NULL
+# scaffolding; _swarm:false is its default scaffolding; receivedAt is the
+# CLIENT-local ingress clock the server can never mint; emittedAt rides the
+# wire event, not the persisted round. Truthy values are GRAFTED onto the
+# keeper's matching round at fold time (never dropped).
+_TWIN_ROUND_SIDE_KEYS = ('approvalId', 'approvalMeta', 'guidanceId',
+                         '_swarm', 'receivedAt', 'emittedAt')
+
+# Message-level additive keys worth the same fill-absent graft (measured:
+# the settled sync never writes thinkingDepth, so only the frontend echo
+# carries it).
+_TWIN_MSG_ADDITIVE_FIELDS = ('thinkingDepth',)
+
+
+def _twin_round_canon(r: Any) -> Any:
+    """Normalize a tool/api round for twin comparison: transient diagnostics,
+    null scaffolding and the ``_swarm: false`` default stripped — exactly the
+    set the frontend's own ``_canonRound`` (stream_reducer.js) drops, so the
+    two sides compare on information, not on stream-layer residue."""
+    if not isinstance(r, dict):
+        return r
+    out = {}
+    for k, v in r.items():
+        if k in _TWIN_TRANSIENT_KEYS:
+            continue
+        if v is None:
+            continue
+        if k == '_swarm' and v is False:
+            continue
+        out[k] = _twin_normalize(v)
+    return out
+
+
+def _twin_rounds_subsumed(keeper_rounds: Any, twin_rounds: Any) -> bool:
+    """True when every twin tool round is LOSSLESSLY present in the keeper's.
+
+    The trimmed-echo shape (measured: 30 ⊃ 20, a frontend local-trim window):
+    the twin's rounds are a strict subset of the keeper's by ``toolCallId``,
+    common fields byte-equal after ``_twin_round_canon``, and any twin-side-
+    only field is one of the graftable side keys (``_TWIN_ROUND_SIDE_KEYS``).
+    Anything else — an id the keeper lacks, a common field that differs, an
+    unknown twin-side truthy field — is REAL divergence: keep both (the
+    measured 64-group data-loss guard).
+    """
+    if not isinstance(keeper_rounds, list) or not isinstance(twin_rounds, list):
+        return False
+    k_by_id = {r.get('toolCallId'): r for r in keeper_rounds
+               if isinstance(r, dict) and r.get('toolCallId')}
+    for tr in twin_rounds:
+        if not isinstance(tr, dict):
+            return False
+        kr = k_by_id.get(tr.get('toolCallId')) if tr.get('toolCallId') else None
+        if kr is None:
+            # id-less twin round: lossless only when it byte-matches SOME
+            # keeper round under the same normalization.
+            tkey = _twin_key(_twin_round_canon(tr))
+            if not any(tkey == _twin_key(_twin_round_canon(c))
+                       for c in keeper_rounds):
+                return False
+            continue
+        tn = _twin_round_canon(tr)
+        kn = _twin_round_canon(kr)
+        for k, v in tn.items():
+            if k not in kn:
+                if k in _TWIN_ROUND_SIDE_KEYS:
+                    continue
+                return False
+            elif _twin_key(v) != _twin_key(kn[k]):
+                return False
+    return True
+
+
+def _twin_api_rounds_subsumed(keeper_api: Any, twin_api: Any) -> bool:
+    """True when every twin apiRounds entry is losslessly present in keeper's.
+
+    apiRounds entries carry no ids, so match by field-wise inclusion: each
+    twin entry must have SOME keeper entry whose every shared key byte-equals
+    (the keeper's settle-time additions like ``cost`` are keeper-side and
+    fine). A twin entry carrying a truthy key no keeper entry has is REAL
+    divergence — keep both.
+    """
+    if not isinstance(keeper_api, list) or not isinstance(twin_api, list):
+        return False
+    kn_list = [_twin_round_canon(a) for a in keeper_api]
+    for ta in twin_api:
+        tn = _twin_round_canon(ta)
+        if not isinstance(tn, dict):
+            if not any(_twin_key(tn) == _twin_key(ka) for ka in kn_list):
+                return False
+            continue
+        found = False
+        for ka in kn_list:
+            if not isinstance(ka, dict):
+                continue
+            if all(k in ka and _twin_key(v) == _twin_key(ka[k])
+                   for k, v in tn.items()):
+                found = True
+                break
+        if not found:
             return False
     return True
+
+
+def _twin_payload_list_subsumed(field: str, keeper_val: Any, twin_val: Any) -> bool:
+    """Dispatch the lossless-subset comparison for list payload fields."""
+    if field == 'toolRounds':
+        return _twin_rounds_subsumed(keeper_val, twin_val)
+    if field == 'apiRounds':
+        return _twin_api_rounds_subsumed(keeper_val, twin_val)
+    return False
+
+
+def _twin_payload_subsumed_by(keeper: dict[str, Any], twin: dict[str, Any]) -> bool:
+    """True when dropping ``twin`` loses no PAYLOAD the keeper does not hold.
+
+    ``_twin_subsumed_by`` restricted to the payload fields — terminal-verdict
+    fields are the fold's domain, not subsumption's. List payload fields
+    (toolRounds / apiRounds) additionally accept the lossless-subset shape
+    (the trimmed echo) via ``_twin_payload_list_subsumed``.
+    """
+    for field in _TWIN_PAYLOAD_FIELDS:
+        tv = twin.get(field)
+        if not tv:
+            continue
+        kv = keeper.get(field)
+        if _twin_key(tv) == _twin_key(kv):
+            continue
+        if _twin_payload_list_subsumed(field, kv, tv):
+            continue
+        return False
+    return True
+
+
+def _twin_graft_payload(keeper: dict[str, Any], twin: dict[str, Any]) -> dict[str, Any]:
+    """Return a COPY of ``keeper`` with the twin's graftable data merged in.
+
+    Two fill-absent, never-overwrite enrichments applied right before a twin
+    is dropped, so the fold is provably lossless:
+
+      * round-level side keys (``_TWIN_ROUND_SIDE_KEYS``) — only TRUTHY twin
+        values, only onto the keeper's same-``toolCallId`` round, only when
+        the keeper's round lacks the key. Null/false scaffolding is never
+        grafted (it carries no information).
+      * message-level additive fields (``_TWIN_MSG_ADDITIVE_FIELDS``).
+    """
+    out = dict(keeper)
+    for field in _TWIN_MSG_ADDITIVE_FIELDS:
+        tv = twin.get(field)
+        if tv and not out.get(field):
+            out[field] = tv
+    k_rounds = out.get('toolRounds')
+    t_rounds = twin.get('toolRounds')
+    if isinstance(k_rounds, list) and isinstance(t_rounds, list):
+        t_by_id = {r.get('toolCallId'): r for r in t_rounds
+                   if isinstance(r, dict) and r.get('toolCallId')}
+        if t_by_id:
+            new_rounds = None
+            for i, kr in enumerate(k_rounds):
+                if not isinstance(kr, dict):
+                    continue
+                tr = t_by_id.get(kr.get('toolCallId'))
+                if not isinstance(tr, dict):
+                    continue
+                add = {k: tr[k] for k in _TWIN_ROUND_SIDE_KEYS
+                       if tr.get(k) and kr.get(k) is None}
+                if add:
+                    if new_rounds is None:
+                        new_rounds = list(k_rounds)
+                    new_rounds[i] = {**kr, **add}
+            if new_rounds is not None:
+                out['toolRounds'] = new_rounds
+    return out
+
+
+def _twin_terminal_diverges(keeper: dict[str, Any], twin: dict[str, Any]) -> bool:
+    """True when the twin carries a terminal-verdict field the keeper lacks
+    or holds differently (finishReason / usage / error)."""
+    for field in _TWIN_FOLD_FIELDS:
+        tv = twin.get(field)
+        if not tv:
+            continue
+        if _twin_key(tv) != _twin_key(keeper.get(field)):
+            return True
+    return False
+
+
+def _twin_fold_into(keeper: dict[str, Any], twin: dict[str, Any]) -> dict[str, Any]:
+    """Return a COPY of ``keeper`` with terminal-verdict fields the keeper
+    lacks filled from ``twin``. The keeper WINS every conflict — it is the
+    terminal authority.
+
+    An ``error`` folds ONLY onto a keeper without a clean finish: gluing an
+    envelope onto a 'stop' row would render a succeeded turn as failed, and
+    a mid-stream transient contradicting a clean finish is noise (mirrors
+    the normal sync path's stale-error pop).
+    """
+    filled = dict(keeper)
+    for field in _TWIN_FOLD_FIELDS:
+        tv = twin.get(field)
+        if not tv or filled.get(field):
+            continue
+        if field == 'error' and filled.get('finishReason') in _TWIN_CLEAN_FINISH_REASONS:
+            continue
+        filled[field] = tv
+    return filled
+
+
+def _twin_keeper_index(
+    messages: list[dict[str, Any]], idx: int, guard: int,
+) -> int | None:
+    """Return the index of the EARLIEST assistant row sharing ``messages[idx]``'s
+    ``_taskId`` (the fold's keeper), or None when ``idx`` is not a twin row.
+
+    Same guards as ``is_duplicate_task_twin``: both rows assistants, neither a
+    special turn, a non-empty ``_taskId``, no USER turn between them, and both
+    outside the immutable cache prefix. The keeper is the earliest (first,
+    usually server-committed) copy so the fold target is stable even when an
+    intermediate twin was itself already folded away.
+    """
+    twin = messages[idx]
+    if not isinstance(twin, dict) or twin.get('role') != 'assistant':
+        return None
+    if _is_special_turn(twin):
+        return None
+    task_id = twin.get('_taskId')
+    if not task_id or idx < guard:
+        return None
+    found = None
+    for j in range(idx - 1, -1, -1):
+        prev = messages[j]
+        if not isinstance(prev, dict):
+            continue
+        if prev.get('role') == 'user':
+            # The exchange boundary: stop walking. A keeper already found on
+            # THIS side of the boundary is valid — the user turn does not sit
+            # between it and the twin; a keeper NOT yet found means the only
+            # same-task row is across the boundary (a different exchange).
+            break
+        if prev.get('role') != 'assistant':
+            continue
+        if prev.get('_taskId') != task_id:
+            continue
+        if _is_special_turn(prev) or j < guard:
+            return None
+        found = j
+    return found
+
+
+def fold_duplicate_task_twins(
+    messages: list[dict[str, Any]],
+    cache_prefix_count: int = 0,
+) -> tuple[list[dict[str, Any]], int]:
+    """Fold same-``_taskId`` twins down to ONE row per task. Returns
+    ``(messages, folded_count)``.
+
+    Two drop cases per row:
+
+      * fully subsumed — payload AND terminal verdict already byte-equal
+        (``is_duplicate_task_twin``, the original collapse); nothing to move.
+      * payload-subsumed but terminal-DIVERGENT — FOLD the twin's terminal
+        verdict onto the keeper (``_twin_fold_into``: fill-absent, keeper
+        wins), then drop the twin. This is the error-twin artifact: a turn
+        that streamed partial prose and then FAILED persisted as a content
+        row (no envelope) + a frontend placeholder row (the typed envelope)
+        — two bubbles for one logical turn, and the error bubble computes
+        ``keptRounds=0`` so the turn offers only Regenerate, never Continue.
+        The old keep-both rule protected the envelope from being dropped;
+        the fold protects it by MOVING it onto the surviving row.
+
+    Payload-divergent pairs are LEFT ALONE (the measured 64-group data-loss
+    guard). The fold never mutates the caller's dicts: a filled keeper is
+    replaced by a copy.
+    """
+    if not isinstance(messages, list) or len(messages) < 2:
+        return messages, 0
+    guard = max(0, cache_prefix_count)
+    kept: list[dict[str, Any]] = []
+    kept_src: list[int] = []
+    folded = 0
+    for i, m in enumerate(messages):
+        if is_duplicate_task_twin(messages, i, cache_prefix_count=guard):
+            # Fully-subsumed echo: nothing terminal to move, but the twin's
+            # graftable round/message side data still merges into the keeper
+            # before the row goes away (provably lossless).
+            j = _twin_keeper_index(messages, i, guard)
+            if j is not None:
+                pos = kept_src.index(j)
+                kept[pos] = _twin_graft_payload(kept[pos], m)
+            folded += 1
+            continue
+        j = _twin_keeper_index(messages, i, guard)
+        if (j is not None
+                and _twin_payload_subsumed_by(messages[j], m)
+                and _twin_terminal_diverges(messages[j], m)):
+            pos = kept_src.index(j)
+            kept[pos] = _twin_graft_payload(_twin_fold_into(kept[pos], m), m)
+            folded += 1
+            continue
+        kept.append(m)
+        kept_src.append(i)
+    return kept, folded
 
 
 def is_duplicate_task_twin(
@@ -343,10 +666,13 @@ def is_superseded_incomplete_fragment(
     checkpoint writer omits terminal fields on purpose), while the regenerate's
     completed answer lands as a sibling assistant message. The fragment then
     renders in full completed chrome (action row, translate footer, branch
-    button) even though it is a truncated abort partial. The BACKEND source
-    stamp (``_stamp_aborted_fragment_finish_reason``) closes this at write time,
-    but this predicate is the reconcile safety net for fragments already in the
-    DB (or written by a path that had no stable ``_assistantMsgId`` to target).
+    button) even though it is a truncated abort partial. This predicate IS the
+    stamp — it runs inside the terminal sync write of the SUPERSEDING task
+    (``manager._sync_result_to_conversation``'s CAS loop) and on the
+    GET/startup reconcile. (An id-keyed write-time stamp keyed on
+    ``_assistantMsgId`` was drafted 2026-07-31 but never landed; this
+    structural predicate deliberately superseded it — it needs no stable id
+    and also covers fragments written by paths that never had one.)
 
     The verdict is a MARK, not a delete: the caller stamps
     ``finishReason='aborted'`` so the content is PRESERVED but renders as the
@@ -545,13 +871,38 @@ def reconcile_conversation_messages(
                         '(late-recovery user\u2192error\u2192agent duplicate). '
                         'Remaining=%d', collapsed, len(out))
 
-    # ── 0b. Superseded-incomplete-fragment MARK (two answers, one turn) ──
+    # ── 0b. Duplicate-task-twin FOLD (one reply committed twice) ──
+    #    Collapse a redundant SECOND assistant row that shares a ``_taskId``
+    #    with an earlier row — the client ``tmp_`` echo that rode a normal
+    #    full PUT (``_rebaseUnackedTail``'s dedup only covers the 409-CAS
+    #    rescue path). When the twin carries a terminal verdict the keeper
+    #    lacks (the error-twin artifact: content row + error row for ONE
+    #    turn), the verdict is FOLDED onto the keeper first — never dropped
+    #    with the twin. Runs BEFORE the fragment mark so the folded keeper's
+    #    freshly-gained finishReason is not mislabelled 'aborted'. Runs on
+    #    BOTH conv seams through this one predicate: ``_save_conv_blocking``
+    #    sweeps the incoming payload, so a new twin can never land, and
+    #    ``get_conv`` heals the rows already on disk. Honours the same
+    #    cache-prefix guard as the sweeps below, and stays deliberately
+    #    partial — a payload-DIVERGENT pair is LEFT ALONE rather than
+    #    silently losing content (see ``fold_duplicate_task_twins``).
+    if len(out) >= 2:
+        out, _twins = fold_duplicate_task_twins(out, cache_prefix_count)
+        if _twins:
+            changed = True
+            logger.info('[Reconcile] Folded %d duplicate task-twin '
+                        'assistant row(s) (one reply committed twice under the '
+                        'same _taskId; terminal verdict moved onto the '
+                        'surviving row). Remaining=%d', _twins, len(out))
+
+    # ── 0c. Superseded-incomplete-fragment MARK (two answers, one turn) ──
     #    Stamp finishReason='aborted' on a content-bearing assistant fragment
     #    that has NO terminal reason but is directly adjacent to a settled
     #    assistant sibling for the same user turn. This is the render-side
     #    safety net for the "truncated abort fragment shown as a finished turn"
-    #    bug (the backend source stamp closes it at write time; this catches
-    #    fragments already in the DB). It is a MARK, never a delete — content is
+    #    bug (the same mark also runs at write time inside the SUPERSEDING
+    #    task's terminal sync CAS loop; this catches fragments already in the
+    #    DB). It is a MARK, never a delete — content is
     #    preserved and now renders as the aborted partial it truthfully is.
     #    No cache-prefix concern: this MUTATES a field in place (no reindex),
     #    so it never shifts prefix bytes.
@@ -562,32 +913,6 @@ def reconcile_conversation_messages(
             logger.info('[Reconcile] Marked %d superseded incomplete fragment(s) '
                         'finishReason=aborted (truncated partial adjacent to a '
                         'settled answer for the same turn).', _marked)
-
-    # ── 0c. Duplicate-task-twin COLLAPSE (one reply committed twice) ──
-    #    Remove a redundant SECOND assistant row that shares a ``_taskId`` with
-    #    an earlier row already holding its full payload — the client ``tmp_``
-    #    echo that rode a normal full PUT (``_rebaseUnackedTail``'s dedup only
-    #    covers the 409-CAS rescue path). Runs on BOTH conv seams through this
-    #    one predicate: ``_save_conv_blocking`` sweeps the incoming payload, so
-    #    a new twin can never land, and ``get_conv`` heals the rows already on
-    #    disk. Honours the same cache-prefix guard as the sweeps below, and is
-    #    deliberately partial — a divergent pair is LEFT ALONE rather than
-    #    silently losing content (see ``is_duplicate_task_twin``).
-    if len(out) >= 2:
-        _guard = max(0, cache_prefix_count)
-        kept = []
-        twins = 0
-        for i, m in enumerate(out):
-            if is_duplicate_task_twin(out, i, cache_prefix_count=_guard):
-                twins += 1
-                continue
-            kept.append(m)
-        if twins:
-            out = kept
-            changed = True
-            logger.info('[Reconcile] Collapsed %d duplicate task-twin '
-                        'assistant row(s) (one reply committed twice under the '
-                        'same _taskId). Remaining=%d', twins, len(out))
 
     # ── 1. Buried-ghost sweep (all but the tail) ──
     if len(out) >= 2:
@@ -671,6 +996,7 @@ __all__ = [
     'is_error_husk',
     'is_superseded_error_husk',
     'is_duplicate_task_twin',
+    'fold_duplicate_task_twins',
     'is_superseded_incomplete_fragment',
     'mark_superseded_incomplete_fragments',
     'reconcile_conversation_messages',

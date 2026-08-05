@@ -258,7 +258,7 @@ class CrudTest(unittest.TestCase):
             # List
             r = await cli.get('/api/v1/orchestrations', headers=self._hdr())
             self.assertEqual(r.status_code, 200)
-            lst = await r.get_json()
+            lst = (await r.get_json())['items']  # {items} envelope
             self.assertTrue(any(e['id'] == oid for e in lst))
 
             # Get

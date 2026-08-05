@@ -25,6 +25,22 @@ def send_browser_command(*args, **kwargs):
     return _facade().send_browser_command(*args, **kwargs)
 
 
+def _trusted_suffix(result):
+    """Annotate how an input was delivered (extension >= 4.6.0 reports it).
+
+    Trusted CDP events pass isTrusted checks (and real CSS :hover); the
+    synthetic fallback does not — the model needs to know which happened
+    when a click "did nothing".
+    """
+    trusted = result.get('trusted')
+    if trusted is True:
+        return ' [trusted CDP input]'
+    if trusted is False:
+        reason = result.get('fallbackReason') or 'CDP unavailable'
+        return f' [synthetic fallback: {reason}]'
+    return ''  # pre-4.6.0 extension — no annotation on the wire
+
+
 def _handle_get_interactive_elements(fn_args):
     tab_id = fn_args.get('tabId')
     if tab_id is None:
@@ -69,12 +85,41 @@ def _handle_get_interactive_elements(fn_args):
 
 
 def _handle_click(fn_args):
-    tab_id = fn_args.get('tabId')
-    selector = fn_args.get('selector', '')
+    # v2 (pt_869e5648403e4745): text= intent resolution, advisory auto-wait,
+    # working-tab default, and a post-action page-state receipt — the model
+    # says WHAT to click; the mechanics are owned here.
+    from lib.browser._resolve import (
+        action_receipt, auto_wait, resolve_element, resolve_work_tab,
+        tab_snapshot,
+    )
+    tab_id = resolve_work_tab(fn_args, send_browser_command)
     if tab_id is None:
-        return 'Error: tabId is required.'
+        return ('Error: no tab to act on. Pass tab_id, or call '
+                'browser_list_tabs / browser_navigate first.')
+    selector = fn_args.get('selector', '')
+    text_query = fn_args.get('text', '')
+    if not selector and not text_query:
+        return ("Error: say WHAT to click — text='登录' (fuzzy-matched) or "
+                "selector='#id' (explicit).")
+    matched_note = ''
     if not selector:
-        return 'Error: selector is required. Use browser_get_interactive_elements to discover selectors.'
+        el, note, candidates = resolve_element(
+            tab_id, text_query, 'clickable', send=send_browser_command)
+        if el is None:
+            lines = [f'No clear match for text="{text_query}" ({note}).']
+            if candidates:
+                lines.append('Closest elements:')
+                lines.extend(candidates)
+            lines.append('Retry with a more specific text=, or take a selector '
+                         'from browser_read_page(mode="elements").')
+            return '\n'.join(lines)
+        selector = el.get('selector', '')
+        matched_note = f' [matched "{text_query}"]'
+    # Model-supplied selectors get an advisory presence wait; resolver-derived
+    # ones came from a live enumeration milliseconds ago.
+    wait_note = '' if text_query else auto_wait(
+        tab_id, selector, send_browser_command)
+    before = tab_snapshot(tab_id)
     params = {
         'tabId': int(tab_id),
         'selector': selector,
@@ -91,7 +136,95 @@ def _handle_click(fn_args):
         tag = result.get('tag', '?')
         text = result.get('text', '')
         text_display = f' "{text[:60]}"' if text else ''
-        return f'{click_type} <{tag}>{text_display} (selector: {selector})'
+        receipt = action_receipt(tab_id, before, send_browser_command)
+        return (f'{click_type} <{tag}>{text_display} (selector: {selector})'
+                f'{matched_note}{_trusted_suffix(result)}{wait_note}{receipt}')
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+def _handle_type(fn_args):
+    """browser_type — clear-first text entry (the type_text bridge command).
+
+    Target by text= (placeholder/label fuzzy match) or selector=. Replaces
+    the field content by default (clearFirst=True) — the lesson fill_form
+    learned the hard way (keyboard_input appends).
+    """
+    from lib.browser._resolve import (
+        action_receipt, resolve_element, resolve_work_tab, tab_snapshot,
+    )
+    tab_id = resolve_work_tab(fn_args, send_browser_command)
+    if tab_id is None:
+        return ('Error: no tab to act on. Pass tab_id, or call '
+                'browser_list_tabs / browser_navigate first.')
+    value = fn_args.get('value')
+    if value is None:
+        return 'Error: value is required (the text to type into the field).'
+    selector = fn_args.get('selector', '')
+    text_query = fn_args.get('text', '')
+    if not selector and not text_query:
+        return ("Error: say WHICH field — text='搜索' (matches placeholder/"
+                "label) or selector='#input'.")
+    matched_note = ''
+    if not selector:
+        el, note, candidates = resolve_element(
+            tab_id, text_query, 'input', send=send_browser_command)
+        if el is None:
+            lines = [f'No input field matches text="{text_query}" ({note}).']
+            if candidates:
+                lines.append('Closest fields:')
+                lines.extend(candidates)
+            return '\n'.join(lines)
+        selector = el.get('selector', '')
+        matched_note = f' [matched "{text_query}"]'
+    before = tab_snapshot(tab_id)
+    clear_first = fn_args.get('clearFirst', True)
+    result, error = send_browser_command('type_text', {
+        'tabId': int(tab_id),
+        'selector': selector,
+        'text': str(value),
+        'clearFirst': clear_first,
+    }, timeout=10)
+    if error:
+        return f'Error typing into tab {tab_id}: {error}'
+    if isinstance(result, dict) and result.get('error'):
+        return f'Type failed: {result.get("error")}'
+    receipt = action_receipt(tab_id, before, send_browser_command)
+    mode = 'replaced' if clear_first else 'appended to'
+    return (f'Typed {len(str(value))} chars into {selector} ({mode} existing '
+            f'content){matched_note}{receipt}')
+
+
+def _handle_press_key(fn_args):
+    """browser_press_key — special keys / shortcuts (v2 successor of
+    browser_keyboard): working-tab default + action receipt."""
+    from lib.browser._resolve import (
+        action_receipt, resolve_work_tab, tab_snapshot,
+    )
+    tab_id = resolve_work_tab(fn_args, send_browser_command)
+    if tab_id is None:
+        return ('Error: no tab to act on. Pass tab_id, or call '
+                'browser_list_tabs / browser_navigate first.')
+    keys = fn_args.get('keys', '')
+    if not keys:
+        return 'Error: keys is required.'
+    before = tab_snapshot(tab_id)
+    params = {
+        'tabId': int(tab_id),
+        'keys': keys,
+    }
+    if fn_args.get('selector'):
+        params['selector'] = fn_args['selector']
+    result, error = send_browser_command('keyboard_input', params, timeout=10)
+    if error:
+        return f'Error sending keyboard input in tab {tab_id}: {error}'
+    if isinstance(result, dict):
+        if result.get('success'):
+            target = result.get('target', '')
+            target_display = f' on <{target}>' if target else ''
+            receipt = action_receipt(tab_id, before, send_browser_command)
+            return (f'Sent keys "{keys}"{target_display}'
+                    f'{_trusted_suffix(result)}{receipt}')
+        return f'Keyboard input failed: {result.get("error", "unknown error")}'
     return json.dumps(result, ensure_ascii=False, indent=2)
 
 
@@ -115,7 +248,7 @@ def _handle_keyboard(fn_args):
         if result.get('success'):
             target = result.get('target', '')
             target_display = f' on <{target}>' if target else ''
-            return f'Sent keys "{keys}"{target_display}'
+            return f'Sent keys "{keys}"{target_display}{_trusted_suffix(result)}'
         return f'Keyboard input failed: {result.get("error", "unknown error")}'
     return json.dumps(result, ensure_ascii=False, indent=2)
 
@@ -139,7 +272,8 @@ def _handle_hover(fn_args):
             tag = result.get('tag', '?')
             text = result.get('text', '')
             text_display = f' "{text[:60]}"' if text else ''
-            return f'Hovered <{tag}>{text_display} (selector: {selector})'
+            return (f'Hovered <{tag}>{text_display} (selector: {selector})'
+                    f'{_trusted_suffix(result)}')
         return f'Hover failed: {result.get("error", "unknown error")}'
     return json.dumps(result, ensure_ascii=False, indent=2)
 

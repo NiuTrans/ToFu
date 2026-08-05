@@ -25,9 +25,19 @@ Covered:
      producing round, and flashes it.
   6. Endpoint tasks: when several phases share a round number, the anchor
      prefers the WORKER phase (that is where tool calls happen).
+  7. Autopilot VU rows (the role:'user' _isVirtualUser bubble) render NO
+     anchor even when their (roundNum, llmRound) numerically COLLIDES with
+     the worker's — the VU sub-task persists no snapshots, so the round is
+     owned-but-not-inspectable and must resolve to '' rather than to the
+     WRONG task's mirror (the 2026-08-03 incident: a VU verification round
+     opened the WORKER task's state mirror and read as data corruption).
 
-NEUTER: make the anchor use roundNum instead of llmRound+1 → the mapping
-probe flips red, proving the anchor resolves to the right request.
+NEUTER×2: (a) make the anchor use roundNum instead of llmRound+1 → the
+mapping probe flips red, proving the anchor resolves to the right request;
+(b) skip non-assistant messages BEFORE the identity check (the pre-fix
+behaviour) → a VU-owned round falls through to the numeric fallback and
+resolves to the WORKER task → the VU probe flips red, proving the
+role-aware identity gate is load-bearing.
 """
 
 from __future__ import annotations
@@ -101,12 +111,20 @@ const ROUND_A = { roundNum: 1, llmRound: 0, toolName: 'grep_search', status: 'do
 const ROUND_B = { roundNum: 2, llmRound: 2, toolName: 'read_files', status: 'done' };
 const ORPHAN  = { roundNum: 9, llmRound: 1, toolName: 'web_search', status: 'done' };
 const INJECT  = { roundNum: 9000001, llmRound: 1, _inboxInject: true, status: 'done' };
+/* Autopilot VU bubble (role:'user' + _isVirtualUser) at the TAIL, exactly
+ * where autopilot places it. Its sub-task re-numbers rounds from 1/0, so
+ * VU_ROUND is a deliberate numeric TWIN of ROUND_A — the 2026-08-03
+ * collision, where a click on the VU's row opened the WORKER task's
+ * same-numbered state mirror. */
+const VU_ROUND = { roundNum: 1, llmRound: 0, toolName: 'run_command', status: 'done' };
 
 global.conversations = win.conversations = [{
   id: 'conv-1',
   messages: [
     { _msgId: 'm1', role: 'assistant', content: 'x', _taskId: 'task-T1',
       toolRounds: [ROUND_A, ROUND_B, INJECT] },
+    { _msgId: 'vu1', role: 'user', _isVirtualUser: true, _streamingVu: true,
+      content: '', toolRounds: [VU_ROUND] },
   ],
 }];
 
@@ -217,6 +235,18 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
   /* ── 6. Endpoint: worker phase wins over a same-numbered critic row ── */
   check('prefers_worker_phase_on_tie', !!sel && sel.dataset.turn !== 'reviewing');
 
+  /* ── 7. Autopilot VU round: owned-but-not-inspectable → NO anchor ──
+   * The VU bubble is role:'user' and its sub-task persists NO request/state
+   * snapshots, so its rounds are unresolvable BY NATURE. The numeric twin
+   * trap must not resolve them to the worker task — no anchor beats a wrong
+   * one (the documented contract). */
+  check('vu_owned_round_renders_no_anchor', win.__anchor(VU_ROUND) === '');
+  check('vu_round_resolves_to_empty_task', _riTaskIdForRound(VU_ROUND) === '');
+  /* …and the refusal must NOT over-suppress: the worker's own numerically
+   * identical round (identity-owned by the assistant msg) keeps its anchor. */
+  check('worker_twin_still_resolves',
+    win.__anchor(ROUND_A).indexOf("openToolDebugPanel('task-T1',1") !== -1);
+
   console.log(out.join('\n'));
 })().catch(e => { console.log('FAIL harness_exception ' + (e && e.stack || e)); });
 """
@@ -244,7 +274,7 @@ def _run(tool_src_path=None, expect_fail=None):
         return output
     fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
     assert not fails, 'P6 tool-anchor failures:\n' + output
-    assert output.count('PASS') >= 12, f'expected >=12 PASS, got:\n{output}'
+    assert output.count('PASS') >= 18, f'expected >=18 PASS, got:\n{output}'
     return output
 
 
@@ -291,6 +321,51 @@ def test_neuter_wrong_round_mapping_flips_red():
         os.remove(tmp)
     with open(shipped, encoding='utf-8') as f:
         assert f.read() == src, 'shipped tool_rounds.js must be byte-identical'
+
+
+@pytest.mark.skipif(not _node_deps_available(),
+                    reason='node + jsdom dev-deps not installed')
+def test_neuter_vu_role_guard_flips_red():
+    """NC: skip non-assistant messages BEFORE the identity check (the pre-fix
+    behaviour) → a VU-owned round falls through to the numeric fallback and
+    resolves to the WORKER task → `vu_owned_round_renders_no_anchor` MUST
+    flip red. Proves the role-aware identity gate is load-bearing (without
+    it the VU round opens the worker's same-numbered state mirror — the
+    2026-08-03 incident)."""
+    shipped = os.path.join(JS_DIR, 'core', 'request_inspector.js')
+    with open(shipped, encoding='utf-8') as f:
+        src = f.read()
+    anchor = ("      if (!m || !Array.isArray(m.toolRounds)) continue;\n"
+              "      if (m.toolRounds.indexOf(round) !== -1) {")
+    assert anchor in src, 'NC anchor drifted — update the neuter'
+    neutered = src.replace(
+        anchor,
+        ("      if (!m || m.role !== 'assistant' || !Array.isArray(m.toolRounds)) continue;\n"
+         "      if (m.toolRounds.indexOf(round) !== -1) {"), 1)
+    assert neutered != src
+    tmp = os.path.join(HERE, '_request_inspector_p6_vu_neutered.js')
+    with open(tmp, 'w', encoding='utf-8') as f:
+        f.write(neutered)
+    try:
+        # The harness extracts request_inspector.js from the path it is given.
+        harness = _HARNESS.replace(
+            "path.join(ROOT,'static','js','core','request_inspector.js')",
+            "process.argv[2]")
+        hpath = os.path.join(HERE, '_ri_p6_vu_nc_harness.js')
+        with open(hpath, 'w') as f:
+            f.write(harness)
+        try:
+            proc = subprocess.run(['node', hpath, tmp, ROOT],
+                                  capture_output=True, text=True, timeout=60)
+            out = proc.stdout.strip()
+            assert 'FAIL vu_owned_round_renders_no_anchor' in out, (
+                f'neutered VU role guard was NOT caught:\n{out}')
+        finally:
+            os.remove(hpath)
+    finally:
+        os.remove(tmp)
+    with open(shipped, encoding='utf-8') as f:
+        assert f.read() == src, 'shipped request_inspector.js must be byte-identical'
 
 
 def test_anchor_is_wired_at_the_single_render_chokepoint():

@@ -1,3 +1,5 @@
+# Incident anchor: born in commit c9b75f98 — settings decouple pilot: extract translate panel to HTML fragment + s...
+# (funeral audit pt_c565a36b3e8f42e6, docs/RATCHET_AUDIT.md)
 """Closed-system guard for the settings-panel HTML-fragment injection.
 
 Panels were decoupled out of ``index.html`` into ``static/settings_panels/<tab>.html``

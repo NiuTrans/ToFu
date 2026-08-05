@@ -158,22 +158,26 @@ def test_server_rev_survives_restart():
     would, then minting through the REAL function's arithmetic. Pre-fix, a
     restarted process starts near 0 and loses to the old process forever.
     """
+    from lib.agent_core import rev_clock
     from lib.conversations import meta_cache
 
     before = meta_cache._running_task_ids_rev()[0]
 
     # A fresh process re-samples the wall anchor and restarts monotonic at ~0.
     # Rebind the module's anchor to what a brand-new process would compute.
+    # The anchor lives in lib.agent_core.rev_clock (the mint's canonical home
+    # since 2026-08-05; meta_cache re-exports the mint) — rebind THERE:
+    # rebinding meta_cache's re-exported name cannot move the mint's global.
     anchor_name = '_BOOT_EPOCH_NS'
-    assert hasattr(meta_cache, anchor_name), (
-        'meta_cache must expose %s — the once-per-process wall anchor that '
+    assert hasattr(rev_clock, anchor_name), (
+        'rev_clock must expose %s — the once-per-process wall anchor that '
         'makes the rev comparable across restarts' % anchor_name)
-    saved = getattr(meta_cache, anchor_name)
+    saved = getattr(rev_clock, anchor_name)
     try:
-        setattr(meta_cache, anchor_name, time.time_ns() - time.monotonic_ns())
+        setattr(rev_clock, anchor_name, time.time_ns() - time.monotonic_ns())
         after = meta_cache._running_task_ids_rev()[0]
     finally:
-        setattr(meta_cache, anchor_name, saved)
+        setattr(rev_clock, anchor_name, saved)
 
     assert after > before, (
         'a rev minted after a restart (%r) must be strictly greater than one '
@@ -190,22 +194,23 @@ def test_server_rev_orders_across_replicas_by_real_time():
     than uptime. Pre-fix, the replica with the longest uptime won every
     comparison permanently.
     """
+    from lib.agent_core import rev_clock
     from lib.conversations import meta_cache
 
     anchor_name = '_BOOT_EPOCH_NS'
-    saved = getattr(meta_cache, anchor_name)
+    saved = getattr(rev_clock, anchor_name)
     try:
         # Replica A: booted 10 days ago. Its anchor is 10 days in the past,
         # but its monotonic reading is correspondingly large — the sum is
         # still ~wall-now, which is the whole point.
-        setattr(meta_cache, anchor_name, time.time_ns() - time.monotonic_ns())
+        setattr(rev_clock, anchor_name, time.time_ns() - time.monotonic_ns())
         rev_old_replica = meta_cache._running_task_ids_rev()[0]
         time.sleep(0.002)
         # Replica B: booted an hour ago, mints 2ms LATER in real time.
-        setattr(meta_cache, anchor_name, time.time_ns() - time.monotonic_ns())
+        setattr(rev_clock, anchor_name, time.time_ns() - time.monotonic_ns())
         rev_new_replica = meta_cache._running_task_ids_rev()[0]
     finally:
-        setattr(meta_cache, anchor_name, saved)
+        setattr(rev_clock, anchor_name, saved)
 
     assert rev_new_replica > rev_old_replica, (
         'the frame minted LATER in real time must win regardless of which '

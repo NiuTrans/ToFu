@@ -18,9 +18,11 @@ from __future__ import annotations
 
 import uuid
 
-from flask import Blueprint, jsonify
+from flask import Blueprint
 
-from lib.api_response import api_bad_request, api_error, api_internal_error, api_ok
+from lib.api_response import (
+    api_bad_request, api_error, api_internal_error, api_ok, api_payload,
+)
 from lib.error_envelope import from_exception
 from lib.log import get_logger
 from lib.openapi import api_meta
@@ -96,11 +98,10 @@ def translate_text_v1():
     if not text:
         return api_bad_request('No text')
     if len(text) > _SYNC_TRANSLATE_MAX_CHARS:
-        return jsonify({
-            'error': f'Text too long for sync ({len(text)} > {_SYNC_TRANSLATE_MAX_CHARS}). '
-                     f'Use /api/v1/translate/start.',
-            'useAsync': True,
-        }), 413
+        return api_error(
+            f'Text too long for sync ({len(text)} > {_SYNC_TRANSLATE_MAX_CHARS}). '
+            f'Use /api/v1/translate/start.',
+            status=413, useAsync=True)
     target, source = _lang_params(data)
     system_prompt = _build_translate_prompt(target, source)
     input_len = len(text)
@@ -110,7 +111,7 @@ def translate_text_v1():
         if nt_blocks:
             logger.info('[Translate.v1] sync: %d notranslate blocks', len(nt_blocks))
             if not text.strip():
-                return jsonify({
+                return api_ok({
                     'translated': _strip_notranslate_tags(
                         data.get('text', '').strip())
                 })
@@ -137,8 +138,8 @@ def translate_text_v1():
             # replace a COMPLETE original with a known-incomplete translation.
             _truncated = ((_usage.get('_translate_trace') or {}).get('verdict')
                           == 'truncated')
-        return jsonify({'translated': content, 'model': _model,
-                        'truncated': _truncated})
+        return api_ok({'translated': content, 'model': _model,
+                       'truncated': _truncated})
     except TranslationContentRefused as e:
         # Content guards exhausted their retry budget — NOT a server crash.
         # 502 + typed envelope so the frontend shows the real reason
@@ -197,7 +198,7 @@ def translate_start_v1():
     logger.info('[Translate.v1] started %s: %d chars → %s, conv=%s field=%s',
                 task['id'], len(text), target,
                 conv_id[:8] if conv_id else '?', field)
-    return jsonify({'taskId': task['id']})
+    return api_ok({'taskId': task['id']})
 
 
 @api_v1_translate_bp.route('/api/v1/translate/poll/<task_id>', methods=['GET'])
@@ -207,8 +208,9 @@ def translate_poll_v1(task_id):
     with _translate_tasks_lock:
         task = _translate_tasks.get(task_id)
     if not task:
-        return jsonify({'error': 'Task not found', 'status': 'not_found'}), 404
-    return jsonify(_build_poll_payload(task))
+        return api_payload({'error': 'Task not found',
+                            'status': 'not_found'}, 404)
+    return api_ok(_build_poll_payload(task))
 
 
 @api_v1_translate_bp.route('/api/v1/translate/poll-batch', methods=['POST'])
@@ -229,7 +231,10 @@ def translate_poll_batch_v1():
                 results.append({'taskId': tid, 'status': 'not_found'})
             else:
                 results.append(_build_poll_payload(task))
-    return jsonify(results)
+    # Coordinated bare-array migration (batch 14): the array moves under
+    # ``items``; Api.translate.pollBatch unwraps null-preservingly (the
+    # caller's !Array.isArray(data) branch is the probe-failure fallback).
+    return api_ok({'items': results})
 
 
 @api_v1_translate_bp.route('/api/v1/translate/mt-test', methods=['POST'])

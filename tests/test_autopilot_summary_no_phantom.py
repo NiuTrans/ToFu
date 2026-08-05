@@ -72,7 +72,7 @@ def test_active_excludes_inline_carrier(flask_client, put_task):
 
     resp = flask_client.get('/api/v1/chat/active')
     assert resp.status_code == 200
-    ids = {t['id'] for t in resp.get_json()}
+    ids = {t['id'] for t in (resp.get_json() or {}).get('items') or []}
     assert 'real-stream-1' in ids, 'real streaming task must remain reconnectable'
     assert 'carrier-inline-1' not in ids, 'inline-messages carrier leaked into /active'
     assert 'vu-sub-1' not in ids, 'VU sub-task leaked into /active'
@@ -86,7 +86,7 @@ def test_active_keeps_autopilot_kick_carrier(flask_client, put_task):
               'status': 'running', '_autopilot_kick': True})
     resp = flask_client.get('/api/v1/chat/active')
     assert resp.status_code == 200
-    ids = {t['id'] for t in resp.get_json()}
+    ids = {t['id'] for t in (resp.get_json() or {}).get('items') or []}
     assert 'kick-carrier-1' in ids, 'autopilot-kick carrier must stay reconnectable'
 
 

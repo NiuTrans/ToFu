@@ -102,10 +102,25 @@ def score_report_rubric(report_md, *, model=None, abort=None):
     justifs = parsed.get('justifications') if isinstance(parsed.get('justifications'), dict) else {}
     verdict = (parsed.get('one_line_verdict') or '').strip()
     logger.info('[Paper:Insight:Rubric] scores=%s overall=%.2f', scores, overall)
+    # Cost visibility (design §3.3): the scoring call is a REAL per-report
+    # cost once insight defaults ON — surface its usage so the report meta's
+    # secondPasses breakdown can count it.
+    _usage = None
+    try:
+        if isinstance(usage, dict):
+            from lib.cost import normalize_usage as _nu
+            _n = _nu(usage)
+            _usage = {'prompt_tokens': _n['input'], 'completion_tokens': _n['output'],
+                      'cache_read_tokens': _n['cache_read'],
+                      'cache_write_tokens': _n['cache_write'],
+                      'reasoning_tokens': _n['thinking']}
+    except Exception as e:
+        logger.debug('[Paper:Insight:Rubric] usage normalize failed (non-fatal): %s', e)
     return {
         'scores': scores,
         'overall': overall,
         'justifications': {k: str(v) for k, v in justifs.items()},
         'one_line_verdict': verdict,
         'raw': parsed,
+        'usage': _usage,
     }

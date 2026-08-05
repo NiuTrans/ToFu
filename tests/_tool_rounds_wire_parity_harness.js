@@ -4,7 +4,12 @@
  * rounds battery (tests/_tool_rounds_wire_parity_rounds.json) through
  * _renderUnifiedToolLine, and prints JSON [{i, name, html, err}] on stdout.
  *
- * Usage: node tests/_tool_rounds_wire_parity_harness.js <tool_rounds.js> <rounds.json>
+ * Usage: node tests/_tool_rounds_wire_parity_harness.js <tool_rounds.js> <rounds.json> [tool_rounds_rich.js]
+ *
+ * The optional third argument evals the DEFERRED rich-render module
+ * (ui/tool_rounds_rich.js, Epic-E sub-4) after the core file — the gate
+ * runs in RICH mode (core + deferred landed), byte-identical to the
+ * pre-split monolith for every branch.
  *
  * The pytest wrapper (test_frontend_tool_rounds_wire_parity.py) compares
  * this output byte-for-byte against tests/_tool_rounds_wire_parity_baseline.json.
@@ -33,6 +38,9 @@ global.document = {
 };
 
 eval(src);
+if (process.argv[4]) {
+  eval(fs.readFileSync(process.argv[4], 'utf8'));
+}
 
 const out = rounds.map((r, i) => {
   const { _isSearching, ...round } = r;

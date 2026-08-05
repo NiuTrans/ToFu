@@ -227,6 +227,11 @@ def _init_system_schema(conn):
         cur.execute("ALTER TABLE project_tasks ADD COLUMN block_question TEXT NOT NULL DEFAULT ''")
     if not _column_exists(conn, 'project_tasks', 'human_answer'):
         cur.execute("ALTER TABLE project_tasks ADD COLUMN human_answer TEXT NOT NULL DEFAULT ''")
+    # Migration: block PROVENANCE column (which conversation raised the block).
+    # Pre-existing rows default to '' → the attention surface falls back to
+    # created_by_conv for display. Added 2026-08.
+    if not _column_exists(conn, 'project_tasks', 'blocked_by'):
+        cur.execute("ALTER TABLE project_tasks ADD COLUMN blocked_by TEXT NOT NULL DEFAULT ''")
     # Migration: the shelving/park mechanism was removed (the project pushes
     # every open epic forward at full speed). Any epic left in the retired
     # 'deferred' status is revived to 'open' so it dispatches again. Idempotent.

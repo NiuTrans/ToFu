@@ -2,6 +2,7 @@
    upload.js — File Upload, Preview & VLM
    ═══════════════════════════════════════════ */
 var pendingPdfTexts = [];  // shared with main.js — must be var for cross-script access
+var pendingVideos = [];    // video attachments (analysis pipeline) — same window-scope rule
 
 // ── VLM sessionStorage persistence ──
 // Key: 'tofu_vlm_pending' → JSON array of {name, text, pages, textLength, isScanned, method, vlmStatus, vlmTaskId, vlmProgress}
@@ -390,6 +391,8 @@ async function handleFileUpload(e) {
       return handlePDFUpload(f);
     if (f.type.startsWith("image/"))
       return _handleImageDrop(f);
+    if (_looksLikeVideo(f))
+      return _handleVideoDrop(f);
     if (_looksLikeDoc(f))
       return handleDocUpload(f);
     return Promise.resolve();
@@ -548,6 +551,142 @@ async function _processPendingImage(f, imgObj) {
   }
 }
 
+// ── Video upload + analysis (P1: frames + transcript) ─────────────
+// The video is processed ENTIRELY at upload time (owner ruling 2026-08-04):
+// POST → video_id → poll /api/v1/videos/<id> until the server has extracted
+// durable frames + transcript. The ready entry's full payload is embedded in
+// the conversation message at send time (self-contained, like images[]), so
+// reload / resume / multi-turn all keep working.
+var _VIDEO_EXTS = new Set(['.mp4', '.m4v', '.mov', '.webm', '.mkv', '.avi']);
+var _VIDEO_MAX_BYTES = 512 * 1024 * 1024;  // mirrors TOFU_VIDEO_MAX_BYTES default
+
+function _looksLikeVideo(f) {
+  const mt = (f.type || '').toLowerCase();
+  if (mt.startsWith('video/')) return true;
+  // Some pickers (notably .mkv) hand an empty/odd MIME — extension fallback.
+  return _VIDEO_EXTS.has(_getFileExt(f.name || ''));
+}
+
+function _fmtVideoDur(s) {
+  s = Math.max(0, Math.round(s || 0));
+  const m = Math.floor(s / 60), ss = s % 60;
+  return (m < 10 ? '0' + m : m) + ':' + (ss < 10 ? '0' + ss : ss);
+}
+
+async function _handleVideoDrop(f) {
+  if (f.size > _VIDEO_MAX_BYTES) {
+    debugLog(t('upload.videoTooLarge') + ' — ' + (f.name || ''), 'error');
+    return;
+  }
+  const vObj = { name: f.name || 'video', sizeKB: Math.round((f.size || 0) / 1024), _status: 'uploading' };
+  pendingVideos.push(vObj);
+  renderImagePreviews();
+  try {
+    const fd = new FormData();
+    fd.append('file', f);
+    const up = await Api.videos.upload(fd);
+    if (!up || up.ok === false || !up.video_id)
+      throw new Error((up && up.error) || 'upload failed');
+    vObj.video_id = up.video_id;
+    vObj._status = 'processing';
+    renderImagePreviews();
+    await _pollVideoReady(vObj);
+  } catch (e) {
+    if (!pendingVideos.includes(vObj)) return;  // chip removed mid-flight
+    vObj._status = 'failed';
+    vObj._error = String((e && e.message) || e);
+    renderImagePreviews();
+    debugLog(t('upload.videoFailed') + ': ' + vObj.name + ' — ' + vObj._error, 'error');
+  }
+}
+
+async function _pollVideoReady(vObj) {
+  for (let i = 0; i < 180; i++) {  // 180 × 4s = 12min ceiling (15-min video + transcript)
+    await new Promise(r => setTimeout(r, 4000));
+    if (!pendingVideos.includes(vObj)) throw new Error('removed');
+    let rec = null;
+    try { rec = await Api.videos.status(vObj.video_id); } catch (_e) { rec = null; }
+    if (!rec) continue;  // transient network — keep polling
+    if (rec.status === 'ready') {
+      vObj.video_url = rec.video_url || '';
+      vObj.poster = rec.poster || '';
+      vObj.duration_s = rec.duration_s || 0;
+      vObj.width = rec.width || 0;
+      vObj.height = rec.height || 0;
+      vObj.frames = rec.frames || [];
+      vObj.frame_count = rec.frame_count || vObj.frames.length;
+      vObj.avg_frame_bytes = rec.avg_frame_bytes || 0;
+      vObj.transcript = rec.transcript || '';
+      vObj.transcript_status = rec.transcript_status || 'none';
+      vObj.transcript_model = rec.transcript_model || '';
+      vObj.storyboard = rec.storyboard || '';
+      vObj.storyboard_model = rec.storyboard_model || '';
+      delete vObj._status;
+      delete vObj._phase;
+      renderImagePreviews();
+      debugLog('Video ready: ' + vObj.name + ' — ' + vObj.frame_count + ' frames, transcript=' + vObj.transcript_status, 'success');
+      return;
+    }
+    if (rec.status === 'failed') throw new Error(rec.error || 'analysis failed');
+    if (rec.phase && rec.phase !== vObj._phase) {
+      vObj._phase = rec.phase;  // probe → persist → frames → audio
+      renderImagePreviews();
+    }
+  }
+  throw new Error('timeout');
+}
+
+function removeVideo(i) {
+  pendingVideos.splice(i, 1);
+  renderImagePreviews();
+}
+
+function openVideoUrl(url) {
+  if (!url) return;
+  window.open(apiUrl(url), '_blank', 'noopener');
+}
+
+// The payload embedded into the conversation message at send time — runtime
+// fields (_status/_phase/_error) stripped, everything needed for durability
+// + server-side model-aware frame clamping kept.
+function _videoPayloadForSend(v) {
+  return {
+    video_id: v.video_id || '',
+    name: v.name || 'video',
+    video_url: v.video_url || '',
+    poster: v.poster || '',
+    duration_s: v.duration_s || 0,
+    width: v.width || 0,
+    height: v.height || 0,
+    frames: v.frames || [],
+    frame_count: v.frame_count || (v.frames || []).length,
+    avg_frame_bytes: v.avg_frame_bytes || 0,
+    transcript: v.transcript || '',
+    transcript_status: v.transcript_status || 'none',
+    transcript_model: v.transcript_model || '',
+    storyboard: v.storyboard || '',
+    storyboard_model: v.storyboard_model || '',
+  };
+}
+
+// Send gate: wait for in-flight analyses, then drop any entry that is not
+// ready so a half-processed video never rides the turn.
+async function _waitForPendingVideos() {
+  const deadline = Date.now() + 12 * 60 * 1000;
+  while (pendingVideos.some(v => v && (v._status === 'uploading' || v._status === 'processing'))) {
+    if (Date.now() > deadline) break;
+    await new Promise(r => setTimeout(r, 1000));
+  }
+  const before = pendingVideos.length;
+  pendingVideos = pendingVideos.filter(v => v && !v._status);
+  if (pendingVideos.length < before) {
+    const msg = t('upload.videoSkipped');
+    if (typeof showToast === 'function') showToast(msg, 'warning');
+    else debugLog(msg, 'warn');
+    renderImagePreviews();
+  }
+}
+
 // ── Document upload (Word, Excel, PPT, plain text) → server-side parse ──
 async function handleDocUpload(file) {
   const pEl = document.getElementById("pdfProgress"),
@@ -654,6 +793,29 @@ function renderImagePreviews() {
         : "";
       const dragAttr = processing ? "" : ' draggable="true"';
       return `<div class="img-preview${isPdf ? " pdf-page" : ""}${processing ? " img-processing" : ""}"${dragAttr} data-img-idx="${i}" ${tip ? `title="${tip}"` : ""}  onclick="previewPendingImage(${i})"><img src="${img.preview}" alt="preview" draggable="false">${overlay}${srcLabel ? `<div class="pdf-badge">${srcLabel}</div>` : ""}<button class="remove-img" onclick="event.stopPropagation();removeImage(${i})">✕</button><div class="img-size">${processing ? t('upload.processing') || '…' : label}</div></div>`;
+    })
+    .join("");
+  html += pendingVideos
+    .map((v, i) => {
+      const busy = v._status === 'uploading' || v._status === 'processing';
+      const failed = v._status === 'failed';
+      const statusLabel = v._status === 'uploading'
+        ? t('upload.videoUploading')
+        : v._status === 'processing'
+          ? t('upload.videoProcessing') + (v._phase ? ' · ' + v._phase : '')
+          : failed ? t('upload.videoFailed') : '';
+      const meta = failed ? (v._error || statusLabel)
+        : busy ? statusLabel
+        : (_fmtVideoDur(v.duration_s) + ' · ' + (v.frame_count || 0) + ' ' + t('upload.videoFrames')
+           + (v.transcript ? ' · ' + t('upload.videoTranscript') : ''));
+      const thumb = v.poster
+        ? `<img src="${apiUrl(v.poster)}" alt="video" draggable="false">`
+        : '';
+      const click = (!busy && !failed && v.video_url)
+        ? ` onclick="openVideoUrl('${String(v.video_url).replace(/'/g, "\\'")}')"` : '';
+      const overlay = busy
+        ? `<div class="img-processing-overlay"><div class="img-processing-spinner"></div></div>` : '';
+      return `<div class="img-preview video-chip${failed ? ' video-failed' : ''}"${click} title="${escapeHtml(v.name)}">${thumb}${overlay}<div class="pdf-badge">VIDEO</div><button class="remove-img" onclick="event.stopPropagation();removeVideo(${i})">✕</button><div class="img-size">${escapeHtml(meta)}</div></div>`;
     })
     .join("");
   // ★ Target-aware: render into edit area when editing, main input otherwise

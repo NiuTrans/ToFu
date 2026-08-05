@@ -20,6 +20,12 @@ Two bugs are pinned here (both surfaced by "can't enlarge the thumbnail /
    render time. This test drives it through the REAL _renderUnifiedToolLine with
    a zh ``t`` stub and asserts the translated tokens appear.
 
+3. PREVIEW (missing whitelist entry). browser_preview_page (server-side rendered
+   page screenshot) attaches meta.imageDataUris exactly like browser_screenshot,
+   but the inline-image whitelist in _renderReadImagesBlock omitted it — the
+   round degraded to the generic badge-only line with no clickable thumbnail.
+   Pinned by driving a browser_preview_page round through the same renderer.
+
 Loads the REAL shipped ui/tool_rounds.js + ui/image_fullscreen.js under jsdom.
 Double-neuters prove each fix is load-bearing. Skips cleanly without node/jsdom.
 """
@@ -107,6 +113,24 @@ check('chip_localized_zoom', html.includes('放大 2×'));
 check('chip_title_localized', html.includes('已应用的图像变换'));
 check('chip_no_hardcoded_title', !html.includes('title="Applied transform"'));
 
+// (3) browser_preview_page — server-side rendered page screenshot. The backend
+// attaches imageDataUris exactly like browser_screenshot; the inline-image
+// whitelist must include it or the round degrades to the badge-only generic
+// line (no clickable thumbnail).
+const previewRound = {
+  status: 'done', toolName: 'browser_preview_page',
+  query: 'Render page preview: debug/_preview.html',
+  toolContent: 'Page preview rendered (jpeg)', toolRounds: [],
+  results: [{
+    source: 'Browser', badge: 'captured',
+    imageDataUris: [{ uri: 'data:image/jpeg;base64,BBBB', format: 'jpeg', filename: 'screenshot.jpeg' }],
+  }],
+};
+const previewHtml = _renderUnifiedToolLine(previewRound, false);
+check('preview_thumb_rendered', previewHtml.includes('data:image/jpeg;base64,BBBB'));
+check('preview_onclick_fullscreen', previewHtml.includes('_openImageFullscreen(this.src)'));
+check('preview_badge_captured', previewHtml.includes('captured'));
+
 console.log(out.join('\n'));
 // jsdom keeps the event loop alive (its fake timers/raF handles are never
 // released) — without an explicit exit node hangs past the subprocess
@@ -144,6 +168,8 @@ def test_inspect_image_render_and_localize():
         'PASS onclick_wires_fullscreen', 'PASS thumb_rendered',
         'PASS chip_localized_cropped', 'PASS chip_localized_zoom',
         'PASS chip_title_localized', 'PASS chip_no_hardcoded_title',
+        'PASS preview_thumb_rendered', 'PASS preview_onclick_fullscreen',
+        'PASS preview_badge_captured',
     ):
         assert must in output, output
 
@@ -191,6 +217,21 @@ def test_NC_localize_ops_is_load_bearing():
         must_fail=['chip_localized_cropped', 'chip_localized_zoom',
                    'chip_title_localized', 'chip_no_hardcoded_title'],
         must_still_pass=['onclick_wires_fullscreen', 'helper_defined'],
+    )
+
+
+@pytest.mark.skipif(not _node_deps_available(),
+                    reason='node + jsdom dev-deps not installed (run npm install)')
+def test_NC_preview_whitelist_is_load_bearing():
+    """Drop browser_preview_page from the inline-image whitelist → the preview
+    round degrades to the badge-only generic line (the reported bug), while the
+    inspect_image entry (separate concern) still renders its thumbnail."""
+    _nc(
+        _TR_SRC,
+        anchor='round.toolName === "browser_screenshot" || round.toolName === "browser_preview_page") &&',
+        replacement='round.toolName === "browser_screenshot") &&',
+        must_fail=['preview_thumb_rendered', 'preview_onclick_fullscreen'],
+        must_still_pass=['thumb_rendered', 'chip_localized_cropped'],
     )
 
 

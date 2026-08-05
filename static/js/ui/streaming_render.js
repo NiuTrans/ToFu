@@ -469,13 +469,23 @@ function _handleAutopilotVuEvent(convId, ev) {
 
   if (itype === "delta") {
     if (inner.content) vuMsg.content = _maskVuMachineTokens((vuMsg.content || "") + inner.content);
-    if (inner.thinking) vuMsg.thinking = (vuMsg.thinking || "") + inner.thinking;
+    if (inner.thinking) {
+      vuMsg.thinking = (vuMsg.thinking || "") + inner.thinking;
+      /* Round-scoped reasoning counter (worker parity: _roundThinkingLen in
+       * sse_pipeline.js, reset on every phase event below). The
+       * thinking_active phase MUST carry the count — the phase row paints
+       * `phase._thinkingLen || 0`, so omitting it freezes the bubble at
+       *「推理中 0 字符」for the entire round no matter how much reasoning
+       * streamed (owner screenshot 2026-08-03: a 63s / 6415-char round
+       * rendered as 0 字符 throughout). */
+      vuMsg._roundThinkingLen = (vuMsg._roundThinkingLen || 0) + inner.thinking.length;
+    }
     /* §7: content/thinking live on the document (vuMsg); only phase needs
      * the session slice — mirror the worker's phase handling: content delta
      * clears the phase; thinking-only delta shows the reasoning indicator. */
     if (typeof setStreamPhase === 'function') {
       if (inner.content) setStreamPhase(convId, null);
-      else if (inner.thinking) setStreamPhase(convId, { phase: "thinking_active" });
+      else if (inner.thinking) setStreamPhase(convId, { phase: "thinking_active", _thinkingLen: vuMsg._roundThinkingLen });
     }
   } else if (itype === "tool_start") {
     vuMsg.toolRounds.push({
@@ -529,6 +539,9 @@ function _handleAutopilotVuEvent(convId, ev) {
   } else if (itype === "phase") {
     /* Drive the same phase indicator the worker uses (tool_exec /
      * llm_thinking / retrying / working show in the elapsed bar). */
+    /* Worker parity (sse_pipeline.js phase branch): any new phase event
+     * restarts the round-scoped reasoning counter. */
+    vuMsg._roundThinkingLen = 0;
     if (typeof setStreamPhase === 'function') {
       setStreamPhase(convId, {
         phase: inner.phase,
@@ -542,6 +555,7 @@ function _handleAutopilotVuEvent(convId, ev) {
         detailArgs: inner.detailArgs || null,
         tools: inner.tools || [],
         toolContext: inner.toolContext || "",
+        toolContextTools: inner.toolContextTools || null,
         round: inner.round || 0,
         attempt: inner.attempt || 0,
         statusCode: inner.statusCode || 0,

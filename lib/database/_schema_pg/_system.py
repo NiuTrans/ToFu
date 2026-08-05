@@ -200,6 +200,10 @@ def _init_system_schema(conn):
     # Added 2026-07. See project_board.py::answer_task.
     cur.execute("ALTER TABLE project_tasks ADD COLUMN IF NOT EXISTS block_question TEXT NOT NULL DEFAULT ''")
     cur.execute("ALTER TABLE project_tasks ADD COLUMN IF NOT EXISTS human_answer TEXT NOT NULL DEFAULT ''")
+    # Migration: block PROVENANCE column (which conversation raised the block).
+    # Pre-existing rows default to '' → display falls back to created_by_conv.
+    # Added 2026-08.
+    cur.execute("ALTER TABLE project_tasks ADD COLUMN IF NOT EXISTS blocked_by TEXT NOT NULL DEFAULT ''")
     # Migration: the shelving/park mechanism was removed (the project pushes
     # every open epic forward at full speed). Revive any retired 'deferred'
     # epic to 'open' so it dispatches again. Idempotent.

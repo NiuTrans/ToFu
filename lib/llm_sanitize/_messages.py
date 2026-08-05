@@ -225,6 +225,64 @@ def _drop_empty_assistant_messages(messages: list) -> list:
     return kept
 
 
+# Synthetic-context seams that DELIBERATELY place a user message adjacent to
+# another user message — for these, the merge below IS the designated final
+# assembly step, not a fault (measured 2026-08-03: ~2,000 merge log lines/day,
+# 99.9% from these seams):
+#   * the CLAUDE.md ``_isMeta`` carrier at index 1
+#     (``system_context._insert_user_context_message`` — A/B-measured cache win,
+#     see ``build_user_context_reminder``);
+#   * the preference-profile blocks riding that carrier;
+#   * the per-turn "Recently Modified Files" attachment
+#     (``attachments.inject_attachments``);
+#   * the coalesced swarm/peer/steer inbox user message
+#     (``orchestrator._swarm_inbox.drain_and_inject_inbox``).
+# Logging those at INFO was pure noise that also LOOKED like a bug being
+# re-patched forever. Any OTHER pair is an unexpected producer (send-race
+# duplicate user rows, error-ghost adjacency, endpoint leaks) and alarms at
+# WARNING with a location + preview, so the source is one grep away.
+_SYNTHETIC_PAIR_PREFIXES = ('<system-reminder>', '<swarm-update>')
+_SYNTHETIC_PAIR_MARKERS = (
+    '[PROJECT CO-PILOT MODE]',
+    '[USER PREFERENCE PROFILE]',
+    '## Recently Modified Files',
+    '[Peer message from',
+)
+
+
+def _is_synthetic_context_msg(msg) -> bool:
+    """True when a message is a synthetic-context injection whose same-role
+    adjacency is BY DESIGN (see the seam list above)."""
+    content = msg.get('content')
+    head = ''
+    if isinstance(content, str):
+        head = content[:400]
+    elif isinstance(content, list):
+        for blk in content[:4]:
+            if isinstance(blk, dict) and blk.get('type') == 'text':
+                head = (blk.get('text') or '')[:400]
+                if head:
+                    break
+    if not head:
+        return False
+    if head.startswith(_SYNTHETIC_PAIR_PREFIXES):
+        return True
+    return any(marker in head for marker in _SYNTHETIC_PAIR_MARKERS)
+
+
+def _pair_preview(msg, limit: int = 60) -> str:
+    content = msg.get('content')
+    if isinstance(content, list):
+        parts = []
+        for blk in content:
+            if isinstance(blk, dict) and blk.get('type') == 'text':
+                parts.append(blk.get('text', '') or '')
+        content = ' '.join(p for p in parts if p)
+    if not isinstance(content, str):
+        content = str(content or '')
+    return content.replace('\n', ' ')[:limit]
+
+
 def _merge_consecutive_same_role(messages: list) -> list:
     """Merge consecutive messages with the same role (except system/tool).
 
@@ -238,14 +296,25 @@ def _merge_consecutive_same_role(messages: list) -> list:
       - user/assistant: consecutive same-role messages are merged with \\n\\n separator
       - Messages with tool_calls are never merged (they are function-call requests)
 
+    Observability (epic pt_99eeedbd): merges involving a synthetic-context
+    seam (``_is_synthetic_context_msg`` on either side) are BY DESIGN and go
+    to DEBUG; anything else is an unexpected producer and fires ONE WARNING
+    carrying each merged-away ``#index/role`` + a content preview. The merge
+    accumulator is deliberately NOT a laundering channel: once a designed
+    pair has fused, the accumulator counts as real content, so a genuine
+    duplicate following it still alarms.
+
     Mutates nothing — returns a new list.
     """
     if not messages or len(messages) < 2:
         return list(messages)
 
     merged = [messages[0]]
+    merged_synthetic = _is_synthetic_context_msg(messages[0])
     merge_count = 0
-    for msg in messages[1:]:
+    expected = 0
+    unexpected = []
+    for idx, msg in enumerate(messages[1:], start=1):
         role = msg.get('role', '')
         prev_role = merged[-1].get('role', '')
 
@@ -271,10 +340,30 @@ def _merge_consecutive_same_role(messages: list) -> list:
                 merged[-1] = dict(merged[-1])
                 merged[-1]['content'] = prev_content + separator + new_content
             merge_count += 1
+            curr_synthetic = _is_synthetic_context_msg(msg)
+            if merged_synthetic or curr_synthetic:
+                expected += 1
+            else:
+                if len(unexpected) < 6:
+                    unexpected.append(f"#{idx}/{role} '{_pair_preview(msg)}'")
+            # The accumulator now fuses with real content unless BOTH sides
+            # were synthetic — a fused accumulator must not launder a genuine
+            # duplicate into the silent path on the next iteration.
+            merged_synthetic = merged_synthetic and curr_synthetic
         else:
             merged.append(msg)
+            merged_synthetic = _is_synthetic_context_msg(msg)
 
     if merge_count:
-        logger.info('[build_body] Merged %d consecutive same-role message(s) '
-                    '(%d → %d messages)', merge_count, len(messages), len(merged))
+        if unexpected:
+            logger.warning('[build_body] Merged %d consecutive same-role message(s) '
+                           '(%d → %d messages); %d UNEXPECTED pair(s) at %s — a '
+                           'producer is generating same-role adjacency; fix the '
+                           'source, not the symptom',
+                           merge_count, len(messages), len(merged),
+                           len(unexpected), ', '.join(unexpected))
+        if expected:
+            logger.debug('[build_body] Merged %d designed synthetic-context pair(s) '
+                         '(carrier/attachment/inbox seams — silent by design)',
+                         expected)
     return merged

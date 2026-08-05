@@ -103,12 +103,13 @@ const apiState = {
   lookupResp: { ok: true, found: false, report_available: true },
   startResp: { ok: true, task_id: 'podcast_x1' },
   startBodies: [],
+  lookupBodies: [],
   pollQueue: [],
   reportTabCalls: 0,
 };
 global.Api = win.Api = { paper: {
   podcastStatus: async () => apiState.statusResp,
-  podcastLookup: async () => apiState.lookupResp,
+  podcastLookup: async (body) => { apiState.lookupBodies.push(body); return apiState.lookupResp; },
   podcastStart: async (body) => { apiState.startBodies.push(body); return apiState.startResp; },
   podcastPoll: async () => apiState.pollQueue.length
     ? apiState.pollQueue.shift()
@@ -196,6 +197,9 @@ async function settle(n) { for (let i = 0; i < n; i++) await new Promise(r => se
   check('start_body_carries_model', apiState.startBodies.length === 1
     && apiState.startBodies[0].model === 'm-beta');
   check('model_pick_persisted', win.localStorage.getItem('paperPodcastModel') === 'm-beta');
+  check('generate_persists_options',
+    win.localStorage.getItem('paperPodcastMode') === 'short'
+    && win.localStorage.getItem('paperPodcastLang') === 'zh');
   await settle(6);
   const progLine = host().innerHTML;
   check('done_renders_player', !!host().querySelector('#podcastAudio'));
@@ -260,6 +264,49 @@ async function settle(n) { for (let i = 0; i < n; i++) await new Promise(r => se
   try { _podcastExportScript(); } catch (e) { exportThrew = true; }
   check('script_export_runs', !exportThrew);  // URL/Blob stubbed above
 
+  // ── Case F: reload-grade persistence — (mode, lang) survive a page reload ──
+  // The family: the backend re-attach scan matches (paper_hash, mode, lang)
+  // exactly, so a reload that reset the panel to 'short'/'zh' made a 'full'
+  // run invisible (the tab-switch half is the route fix in routes/paper.py).
+  // The picks persist exactly like the model (paperPodcastModel).
+  // F1: picking an option card syncs the hidden select AND persists.
+  apiState.statusResp = { ok: true, tts_available: true, default_voice: 'alloy' };
+  apiState.lookupResp = { ok: true, found: false, report_available: true };
+  win.localStorage.removeItem('paperPodcastMode');
+  win.localStorage.removeItem('paperPodcastLang');
+  _podcast.status = 'idle'; _podcast.mode = 'short'; _podcast.lang = 'zh';
+  await _initPodcastTab();
+  const fullBtn = host().querySelector('[data-sel="podcastModeSel"][data-value="full"]');
+  check('reload_opt_card_present', !!fullBtn);
+  _pmPick(fullBtn);
+  check('pick_syncs_hidden_select',
+    host().querySelector('#podcastModeSel').value === 'full');
+  check('mode_pick_persisted',
+    win.localStorage.getItem('paperPodcastMode') === 'full');
+  const enBtn = host().querySelector('[data-sel="podcastLangSel"][data-value="en"]');
+  _pmPick(enBtn);
+  check('lang_pick_persisted',
+    win.localStorage.getItem('paperPodcastLang') === 'en');
+  // F2: SIMULATED RELOAD — fresh module state (factory defaults), same
+  // localStorage. The lookup must go out with the PERSISTED (full, en),
+  // and a live task must re-attach with the server's clocks.
+  _podcast.mode = 'short'; _podcast.lang = 'zh';
+  _podcast.status = 'idle'; _podcast.taskId = '';
+  const created = Date.now() - 60000, updated = Date.now() - 5000;
+  apiState.lookupResp = { ok: true, found: true, running: true,
+    task_id: 'podcast_reload1', model: 'm-alpha',
+    createdAt: created, updatedAt: updated };
+  apiState.lookupBodies = [];
+  await _initPodcastTab();
+  check('reload_lookup_body_options', apiState.lookupBodies.length === 1
+    && apiState.lookupBodies[0].mode === 'full'
+    && apiState.lookupBodies[0].lang === 'en');
+  check('reload_reattaches', _podcast.status === 'generating'
+    && _podcast.taskId === 'podcast_reload1');
+  check('reload_renders_console', !!host().querySelector('.pm-console'));
+  check('reload_server_clock_adopted', _podcast.genStartedAt === created);
+  _pcStopPolling();  // keep the exit deterministic (poll cadence is 1ms here)
+
   console.log(out.join('\n'));
   process.exit(0);
 })().catch((e) => { console.error(e); process.exit(1); });
@@ -290,7 +337,7 @@ def test_podcast_tab_state_machine():
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{out}'
     fails = [ln for ln in out.splitlines() if ln.startswith('FAIL')]
     assert not fails, 'podcast tab failures:\n' + out
-    assert out.count('PASS') >= 25, f'expected >=25 PASS lines, got:\n{out}'
+    assert out.count('PASS') >= 40, f'expected >=40 PASS lines, got:\n{out}'
 
 
 @pytest.mark.skipif(not _node_deps_available(),
@@ -403,6 +450,40 @@ def test_NEUTER_model_in_start_body_loadbearing():
     assert open(PODCAST_JS, encoding='utf-8').read() == src, 'shipped file modified!'
 
 
+@pytest.mark.skipif(not _node_deps_available(),
+                    reason='node + jsdom dev-deps not installed (run npm install)')
+def test_NEUTER_seed_options_loadbearing():
+    """Amputate the ``_pcSeedOptions();`` call from a COPY of the module and
+    prove the reload lookup-body probe flips to FAIL — the seed is what makes
+    a page reload re-issue the SAME (mode, lang) the run was started with;
+    without it a 'full' run is invisible to the reset-to-'short' panel."""
+    src = open(PODCAST_JS, encoding='utf-8').read()
+    marker = "  _pcSeedOptions();\n"
+    assert marker in src, 'seed marker not found — test is stale'
+    broken = src.replace(marker, '', 1)
+    assert broken != src
+
+    tmp = os.path.join(HERE, '_paper_podcast_no_seed.js')
+    with open(tmp, 'w', encoding='utf-8') as f:
+        f.write(broken)
+    try:
+        chk = subprocess.run(['node', '--check', tmp], capture_output=True,
+                             text=True, timeout=30)
+        assert chk.returncode == 0, f'patched JS invalid: {chk.stderr}'
+        proc = _run_harness(tmp)
+        out = proc.stdout.strip()
+        assert proc.returncode == 0, f'node crashed: {proc.stderr}\n{out}'
+        assert 'FAIL reload_lookup_body_options' in out, \
+            'amputating the seed did NOT flip the probe — seed non-load-bearing:\n' + out
+    finally:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+
+    assert open(PODCAST_JS, encoding='utf-8').read() == src, 'shipped file modified!'
+
+
 # ═══ Static guards (no node required) ═══
 
 def test_static_api_surface():
@@ -441,6 +522,23 @@ def test_static_i18n_keys():
     for m in re.finditer(r"'(paper\.podcast[^']*|paper\.tabPodcast)':\s*\{\s*zh:\s*'((?:[^'\\]|\\.)*)',\s*en:\s*'((?:[^'\\]|\\.)*)'\s*\}", src):
         assert m.group(2).strip() and m.group(3).strip(), \
             f'i18n key {m.group(1)} has an empty zh or en'
+
+
+def test_static_option_persistence():
+    """Reload-grade re-attach contract (static half):
+      1. podcast.js persists (mode, lang) under paperPodcastMode/Lang and
+         seeds them inside tab init BEFORE the lookup call;
+      2. the video panel is pinned CLEAN on this axis — its lookup body is
+         paper_hash-only, so a stale lang pick can never hide a live task."""
+    src = open(PODCAST_JS, encoding='utf-8').read()
+    assert "'paperPodcastMode'" in src and "'paperPodcastLang'" in src
+    seed_call = src.index('  _pcSeedOptions();')
+    lookup_call = src.index('podcastLookup({')
+    assert seed_call < lookup_call, 'seed must run before the lookup'
+    vsrc = open(os.path.join(ROOT, 'static', 'js', 'paper', 'video.js'),
+                encoding='utf-8').read()
+    assert 'videoLookup({ paper_hash: _pvideo.paperHash })' in vsrc, \
+        'video lookup must stay paper_hash-only (reload-safe by construction)'
 
 
 def test_static_js_syntax():

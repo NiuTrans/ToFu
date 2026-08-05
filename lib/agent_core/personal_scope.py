@@ -159,6 +159,41 @@ PERSONAL_CAPABILITIES: dict[str, PersonalCapability] = {
             'in. Not a prompt-assembly block (its own engine gates it), so '
             'prompt_block is empty.'),
         prompt_block=''),
+    'paperInsightEnabled': PersonalCapability(
+        cfg_key='paperInsightEnabled',
+        headless_default=False,
+        ui_default=True,
+        summary=(
+            'The Paper Reading-Mode insight second pass itself (rubric '
+            'scoring +, when the headroom gate fires, an agentic '
+            'synthesis with web_search tool rounds). Injects no operator '
+            'state on its own (that half is gated separately by '
+            'paperInsightPersonalContext), but it SILENTLY BILLS extra LLM '
+            'calls per generated report, so it must fail closed on '
+            'headless / BYO surfaces unless the caller opts in. ON by '
+            'default for the interactive reader (owner decision '
+            '2026-08-02, docs/PAPER_READING_EXPERIENCE_DESIGN.md §3.4); '
+            'the full interactive resolution chain (server_config → env → '
+            'default ON) lives in insight_engine._config.insight_enabled — '
+            'this registry entry only guarantees the headless fail-closed '
+            'stamp. Its own engine gates it, so prompt_block is empty.'),
+        prompt_block=''),
+    'paperCheckpointsEnabled': PersonalCapability(
+        cfg_key='paperCheckpointsEnabled',
+        headless_default=False,
+        ui_default=True,
+        summary=(
+            'The Paper Reading-Mode checkpoint second pass: one bounded '
+            'no-tool LLM call per generated report that writes per-section '
+            'self-test flip cards (active recall). Injects no operator '
+            'state, but SILENTLY BILLS an LLM call per report, so it must '
+            'fail closed on headless / BYO surfaces unless the caller opts '
+            'in. ON by default for the interactive reader (owner decision '
+            '2026-08-02, docs/PAPER_READING_EXPERIENCE_DESIGN.md P2); the '
+            'interactive chain lives in '
+            'checkpoint_engine.checkpoints_enabled. Its own engine gates '
+            'it, so prompt_block is empty.'),
+        prompt_block=''),
     'paperTermfillEnabled': PersonalCapability(
         cfg_key='paperTermfillEnabled',
         headless_default=False,

@@ -273,61 +273,125 @@ def _bundler_list(name):
     return re.findall(r"'([^']+\.js)'", src[start:i])
 
 
+def _build_order_violations(bundle, deferred):
+    """Pure build-order invariant check (list of violation strings).
+
+    Factored out of the test so the reverse-NEUTER below can drive it with
+    SYNTHETIC bundle/deferred lists — proving the check distinguishes the
+    safe direction from the dangerous one instead of merely keying on
+    "consumer is deferred".
+    """
+    violations = []
+    predicate = 'core/conv_state_reducer.js'
+    consumers = ['core/cross_tab_sync.js', 'conv_sync_push.js']
+
+    # THE DANGEROUS DIRECTION: predicate missing from the eager bundle (or
+    # outright deferred). Every gate fails OPEN when _frameIsOurs is absent,
+    # so any eager consumer whose intake is already wired can then receive a
+    # frame it cannot scope → silent accept-all.
+    if predicate not in bundle:
+        violations.append(
+            f'{predicate} is not in _BUNDLE_FILES — it defines _frameIsOurs, '
+            'which every multi-user gate delegates to (fail-open when absent)')
+    elif predicate in deferred:
+        violations.append(
+            f'{predicate} was moved into _DEFERRED_FILES. Deferring the '
+            'PREDICATE is the dangerous direction: an eager consumer receives '
+            'frames while _frameIsOurs is still undefined → gate degrades to '
+            'accept-all with zero test signal.')
+
+    if predicate in bundle:
+        p_idx = bundle.index(predicate)
+        for consumer in consumers:
+            if consumer in deferred:
+                # THE SAFE DIRECTION (Epic-E sub-3A, verified 2026-08-01):
+                # deferring a CONSUMER while the predicate stays eager cannot
+                # open an accept-all window, because the consumer's frame
+                # intake is wired BY the deferred module itself — main.js's
+                # boot call hits the feature-loader stub, which loads the
+                # feature bundle and only then dispatches to the real
+                # _wireConvSyncPush, whose pushSubscribe/BroadcastChannel
+                # wiring is what lets frames in. Before that: zero frames
+                # reachable. And the core bundle (predicate inside) executes
+                # synchronously at boot, strictly before main.js runs — so
+                # the predicate always exists before the first frame can
+                # arrive. Deferring the consumer is therefore fine; deferring
+                # the PREDICATE (checked above) is not.
+                continue
+            if consumer not in bundle:
+                violations.append(
+                    f'{consumer} is neither in _BUNDLE_FILES nor '
+                    '_DEFERRED_FILES — the build-order invariant can no '
+                    'longer be verified')
+                continue
+            c_idx = bundle.index(consumer)
+            if p_idx >= c_idx:
+                violations.append(
+                    f'ORDER VIOLATION: {predicate} (idx {p_idx}) must load '
+                    f'BEFORE {consumer} (idx {c_idx}). The consumer delegates '
+                    'to _frameIsOurs and fails OPEN when it is undefined.')
+    return violations
+
+
 def test_predicate_loads_before_every_delegating_consumer():
     """BUILD-ORDER INVARIANT — the delegation's silent failure mode.
 
     ``window._frameIsOurs`` is a cross-file runtime lookup and the consumer
-    gates fail OPEN when it is absent. So if ``core/conv_state_reducer.js``
-    is moved into ``_DEFERRED_FILES``, or ordered AFTER a consumer whose
-    subscriber can fire before the deferred chunk lands, every gate silently
-    reverts to accept-all: no error, no failing test, cross-tenant frames
-    flow. That is the same invisible-failure shape as the original int/str
-    skew, relocated from "wrong comparator" to "missing comparator".
+    gates fail OPEN when it is absent. The invariant is DIRECTIONAL:
 
-    This is not hypothetical: Epic-E (pt_3879f00e2d2f4bc4) sub-part 3
-    explicitly proposes moving ``core/cross_tab_sync.js`` into
-    ``_DEFERRED_FILES``.
-
-    THE RULE, for whoever trips this test:
-        core/conv_state_reducer.js defines the ONE identity predicate every
-        gate delegates to. It must ship in the SAME eagerly-loaded bundle as
-        its consumers and be ordered BEFORE them. If you defer a consumer,
-        the predicate must move with it (or stay ahead of it) — otherwise the
-        multi-user gate degrades to accept-all in production, and the only
-        runtime signal is a single console warning.
+      * predicate deferred / missing while a consumer is eager  → DANGEROUS:
+        frames arrive with no predicate → silent accept-all (guarded here).
+      * consumer deferred while the predicate stays eager        → SAFE: the
+        deferred module wires its own intake (pushSubscribe / BroadcastChannel
+        inside cross_tab_sync.js, reached only via the feature-loader stub
+        loading the bundle first), so no frame can arrive before the module
+        — and the predicate — exist. Epic-E sub-3A (8aa9a1c6) defers
+        core/cross_tab_sync.js on exactly this argument; the pre-2026-08-01
+        version of this test failed that SAFE direction by keying on
+        "consumer in deferred" alone (drift, not a product bug — see
+        pt_5f25b1d17c9048f1).
     """
     bundle = _bundler_list('_BUNDLE_FILES')
     deferred = _bundler_list('_DEFERRED_FILES') or []
     assert bundle, 'could not parse _BUNDLE_FILES from lib/js_bundler.py'
+    violations = _build_order_violations(bundle, deferred)
+    assert violations == [], '\n'.join(violations)
 
+
+def test_build_order_direction_neuter():
+    """Reverse NEUTER (by data): the invariant must distinguish directions.
+
+    Drives _build_order_violations with synthetic lists. The first case is
+    the EXACT production shape the old test wrongly failed — if someone
+    "fixes" the check by keying on consumer-in-deferred again, this case
+    goes red. The other two are the genuinely dangerous shapes the guard
+    exists to catch.
+    """
     predicate = 'core/conv_state_reducer.js'
-    consumers = ['core/cross_tab_sync.js', 'conv_sync_push.js']
+    xts = 'core/cross_tab_sync.js'
 
-    assert predicate in bundle, (
-        f'{predicate} must be in _BUNDLE_FILES — it defines _frameIsOurs, '
-        'which every multi-user gate delegates to. See the rule in this '
-        "test's docstring.")
-    assert predicate not in deferred, (
-        f'{predicate} was moved into _DEFERRED_FILES. Its consumers fail OPEN '
-        'when the predicate is missing, so deferring it silently disables the '
-        'multi-user gate for every frame that arrives before the chunk loads.')
+    # SAFE direction: predicate eager, consumer deferred → NO violation.
+    safe = _build_order_violations(
+        ['core/identity_gate_tripwire.js', predicate, 'conv_sync_push.js'],
+        [xts])
+    assert safe == [], (
+        f'the safe direction (consumer deferred, predicate eager) must pass: '
+        f'{safe}')
 
-    p_idx = bundle.index(predicate)
-    for consumer in consumers:
-        if consumer in deferred:
-            pytest.fail(
-                f'{consumer} was deferred while {predicate} stayed eager. '
-                'A deferred consumer can receive a frame before the predicate '
-                'is reachable → gate degrades to accept-all. Move the '
-                'predicate with it, or keep both eager.')
-        assert consumer in bundle, (
-            f'{consumer} is neither in _BUNDLE_FILES nor _DEFERRED_FILES — '
-            'the build-order invariant can no longer be verified')
-        c_idx = bundle.index(consumer)
-        assert p_idx < c_idx, (
-            f'ORDER VIOLATION: {predicate} (idx {p_idx}) must load BEFORE '
-            f'{consumer} (idx {c_idx}). The consumer delegates to '
-            '_frameIsOurs and fails OPEN when it is undefined.')
+    # DANGEROUS direction: predicate deferred, consumer eager → violation.
+    dangerous = _build_order_violations(
+        ['core/identity_gate_tripwire.js', xts, 'conv_sync_push.js'],
+        [predicate])
+    assert dangerous and predicate in dangerous[0], (
+        'a deferred predicate with eager consumers must be flagged — that is '
+        'the accept-all window this guard exists for')
+
+    # ORDER violation: both eager but predicate AFTER the consumer.
+    order = _build_order_violations(
+        ['core/identity_gate_tripwire.js', xts, predicate,
+         'conv_sync_push.js'], [])
+    assert order and 'ORDER VIOLATION' in order[0], (
+        'an eager predicate ordered after an eager consumer must be flagged')
 
 
 def test_tripwire_loads_before_everything_it_watches():

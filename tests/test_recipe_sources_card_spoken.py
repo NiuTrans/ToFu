@@ -43,31 +43,34 @@ def test_produce_video_result_carries_quality_hint(monkeypatch):
     rn = 0
     round_entry = {'tool_calls': [], 'query': ''}
     tc = {'id': 'tc1', 'function': {'name': 'produce_video'}}
+    # 默认精品 (owner 2026-07-27, lib/tools/motion_video.py): the DEFAULT is
+    # now 'authored' — the template path cannot pass the renderer's own lint,
+    # so it must not be what a user gets by default.
     _, content, _ = hdl._handle_produce_video(
         task, tc, 'produce_video', 'tc1',
         {'topic': '核聚变净能量增益'}, rn, round_entry, cfg=None,
         project_path='', project_enabled=False)
     result = json.loads(content)
     assert result['ok'], result
-    assert result['visual_quality'] == 'template'
+    assert result['visual_quality'] == 'authored'
     hint = result['note']
-    assert '标准画质' in hint and '精品' in hint, hint
+    assert '精品画质' in hint, hint
     assert '耗时' in hint, 'the cost trade-off must be stated'
     # The hint PROMISES a switch path — pin that the job actually wires it:
     # if scene_author stops following visual_quality, the hint keeps
     # promising while the switch silently dies and this test stays green.
-    assert captured['job']['scene_author'] is False
+    assert captured['job']['scene_author'] is True
 
-    # boutique tier states itself plainly, with no switch offer
+    # the template tier stays reachable for explicit speed-over-looks
     _, content2, _ = hdl._handle_produce_video(
         task, tc, 'produce_video', 'tc1',
-        {'topic': 't', 'visual_quality': 'authored'}, rn, round_entry,
+        {'topic': 't', 'visual_quality': 'template'}, rn, round_entry,
         cfg=None, project_path='', project_enabled=False)
     result2 = json.loads(content2)
-    assert result2['visual_quality'] == 'authored'
-    assert '精品画质' in result2['note']
-    assert '重制' not in result2['note']
-    assert captured['job']['scene_author'] is True
+    assert result2['visual_quality'] == 'template'
+    assert '标准画质' in result2['note']
+    assert '提速' in result2['note']
+    assert captured['job']['scene_author'] is False
 
 from lib.motion_video import _recipe as rec
 

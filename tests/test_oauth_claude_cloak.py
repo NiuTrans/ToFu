@@ -72,14 +72,16 @@ class TestBillingHeader(unittest.TestCase):
 
     def test_fingerprint_frozen_vectors(self):
         # Frozen against the CLIProxyAPI Go algorithm:
-        #   sha256("59cf53e54c78" + t[4] + t[7] + t[20] + "2.1.63")[:3]
-        # (rune-wise indexing, '0' padding for short texts).
+        #   sha256("59cf53e54c78" + t[4] + t[7] + t[20] + "2.1.220")[:3]
+        # (rune-wise indexing, '0' padding for short texts). The '' vector
+        # cross-validates against CLIProxyAPI's own Go test ("x" → 04c,
+        # claude_executor_test.go:1036).
         f = outbound._compute_billing_fingerprint
-        self.assertEqual(f('You are a helpful assistant.'), '2ca')
-        self.assertEqual(f('You are Tofu, a self-hosted AI assistant.'), '0b1')
-        self.assertEqual(f(''), '257')
-        self.assertEqual(f('短'), '257')          # <4 runes → all padded
-        self.assertEqual(f('hello world, this is a longer system prompt text'), 'fda')
+        self.assertEqual(f('You are a helpful assistant.'), '304')
+        self.assertEqual(f('You are Tofu, a self-hosted AI assistant.'), '48b')
+        self.assertEqual(f(''), '04c')
+        self.assertEqual(f('短'), '04c')          # <4 runes → all padded
+        self.assertEqual(f('hello world, this is a longer system prompt text'), '55f')
 
     def test_system0_is_billing_header_oauth_branch(self):
         body, _rev = apply_claude_cloak(_anthropic_body())
@@ -87,7 +89,7 @@ class TestBillingHeader(unittest.TestCase):
         self.assertEqual(sys0['type'], 'text')
         self.assertTrue(sys0['text'].startswith('x-anthropic-billing-header: '))
         # OAuth tokens take the SIGNING branch: fixed cch=00000 (not a payload hash).
-        self.assertIn('cc_version=2.1.63.0b1;', sys0['text'])  # fp of first sys text
+        self.assertIn('cc_version=2.1.220.48b;', sys0['text'])  # fp of first sys text
         self.assertIn('cc_entrypoint=cli;', sys0['text'])
         self.assertIn('cch=00000;', sys0['text'])
 
@@ -223,15 +225,27 @@ class TestResolveHeaders(unittest.TestCase):
     def test_full_beta_set_in_order(self):
         _key, hdrs, _out = self._resolve()
         betas = hdrs['anthropic-beta'].split(',')
+        # Claude Code 2.1.220 wire order (no tools in this body →
+        # advanced-tool-use absent; drift guard: test_oauth_cloaking_drift).
         expected_head = ['claude-code-20250219', 'oauth-2025-04-20',
                          'interleaved-thinking-2025-05-14',
+                         'redact-thinking-2026-02-12',
+                         'thinking-token-count-2026-05-13',
                          'context-management-2025-06-27',
                          'prompt-caching-scope-2026-01-05',
-                         'structured-outputs-2025-12-15',
-                         'fast-mode-2026-02-01',
-                         'redact-thinking-2026-02-12',
-                         'token-efficient-tools-2026-03-28']
-        self.assertEqual(betas[:9], expected_head)
+                         'mid-conversation-system-2026-04-07',
+                         'effort-2025-11-24',
+                         'fallback-credit-2026-06-01',
+                         'extended-cache-ttl-2025-04-11']
+        self.assertEqual(betas[:11], expected_head)
+
+    def test_tools_request_inserts_advanced_tool_use(self):
+        _key, hdrs, _out = self._resolve(body={'messages': [], 'tools': [
+            {'name': 'bash', 'description': 'x', 'input_schema': {}}]})
+        betas = hdrs['anthropic-beta'].split(',')
+        i = betas.index('mid-conversation-system-2026-04-07')
+        self.assertEqual(betas[i + 1], 'advanced-tool-use-2025-11-20')
+        self.assertEqual(betas[i + 2], 'effort-2025-11-24')
 
     def test_caller_betas_appended_not_duplicated(self):
         _key, hdrs, _out = self._resolve(
@@ -243,14 +257,21 @@ class TestResolveHeaders(unittest.TestCase):
     def test_claude_code_header_suite(self):
         _key, hdrs, _out = self._resolve()
         self.assertEqual(hdrs['x-app'], 'cli')
-        self.assertEqual(hdrs['User-Agent'], 'claude-cli/2.1.63 (external, cli)')
+        self.assertEqual(hdrs['User-Agent'], 'claude-cli/2.1.220 (external, cli)')
         self.assertEqual(hdrs['X-Stainless-Retry-Count'], '0')
         self.assertEqual(hdrs['X-Stainless-Runtime'], 'node')
         self.assertEqual(hdrs['X-Stainless-Lang'], 'js')
         self.assertEqual(hdrs['X-Stainless-Timeout'], '600')
-        # Real Claude Code does NOT send the direct-browser-access header —
-        # that one is for API-key browser apps.
-        self.assertNotIn('anthropic-dangerous-direct-browser-access', hdrs)
+        # Device-profile kit (2.1.220 capture, CLIProxyAPI device_profile).
+        self.assertEqual(hdrs['X-Stainless-Package-Version'], '0.94.0')
+        self.assertEqual(hdrs['X-Stainless-Runtime-Version'], 'v26.3.0')
+        self.assertEqual(hdrs['X-Stainless-Os'], 'MacOS')
+        self.assertEqual(hdrs['X-Stainless-Arch'], 'arm64')
+        # Sent since 2026-08-04: CLIProxyAPI's live-captured 2.1.220 kit
+        # carries it (our earlier "real Claude Code doesn't" comment was
+        # the untested assumption — see outbound.py).
+        self.assertEqual(hdrs['Anthropic-Dangerous-Direct-Browser-Access'],
+                         'true')
         # Session id present + stable per token; request id unique per call.
         self.assertTrue(hdrs['X-Claude-Code-Session-Id'])
         self.assertTrue(hdrs['x-client-request-id'])

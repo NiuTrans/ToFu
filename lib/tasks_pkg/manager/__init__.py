@@ -54,6 +54,7 @@ from lib.tasks_pkg.manager._state import (  # noqa: E402,F401
     _LATEST_TTL,
     CHECKPOINT_MIN_DELTA_CHARS,
     _record_latest_task,
+    _clear_latest_task,
     _latest_task_for_conv,
     _live_successor_task_id,
     _live_successor_info,
@@ -140,6 +141,10 @@ from lib.tasks_pkg.manager._registry import (  # noqa: E402,F401
     is_carrier_task,
     list_running_tasks,
     abort_running_tasks_for_conv,
+    make_task_abort_check,
+    plant_abort_tombstone,
+    plant_abort_tombstones_for_conv,
+    has_abort_tombstone,
     quiesce_running_tasks,
     _write_aborted_terminal_floor,
     write_carrier_terminal_row,
@@ -191,6 +196,8 @@ __all__ = [
     # registry
     'create_task', 'discard_task', 'is_carrier_task', 'list_running_tasks',
     'abort_running_tasks_for_conv', 'quiesce_running_tasks',
+    'make_task_abort_check', 'plant_abort_tombstone',
+    'plant_abort_tombstones_for_conv', 'has_abort_tombstone',
     'write_carrier_terminal_row',
     # events
     'append_event', 'find_message_by_id',

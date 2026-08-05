@@ -105,19 +105,23 @@ def refresh_now() -> bool:
     assets = rel.get('assets') or []
 
     wanted: dict = {}
-    for row in platforms._platform_assets():
-        _os, _arch, label, pattern, _min = row
-        hit = next((a for a in assets
-                    if fnmatch.fnmatch(a.get('name', ''), pattern)), None)
-        if hit:
-            wanted[hit['name']] = (row, hit)
+    # Both component tables (docs/DESKTOP_AGENT_DIST_DESIGN.md §5.2):
+    # releases that carry agent assets get them mirrored with kind='agent'
+    # recorded; releases without them simply produce no agent rows.
+    for kind in ('full', 'agent'):
+        for row in platforms._platform_assets(kind):
+            _os, _arch, label, pattern, _min = row
+            hit = next((a for a in assets
+                        if fnmatch.fnmatch(a.get('name', ''), pattern)), None)
+            if hit:
+                wanted[hit['name']] = (row, hit, kind)
     if not wanted:
         store.mark_refresh(tag, error='release carried no matching assets')
         return False
 
     existing = store.artifacts()
     ok = True
-    for name, (row, asset) in wanted.items():
+    for name, (row, asset, kind) in wanted.items():
         _os, _arch, label, _pattern, _min = row
         dest = os.path.join(store._store_dir(), name)
         cur = existing.get(name)
@@ -141,7 +145,8 @@ def refresh_now() -> bool:
         store.record_artifact({
             'os': _os, 'arch': _arch, 'label': label, 'filename': name,
             'size': size, 'sha256': sha, 'source': 'mirrored',
-            'version': tag.lstrip('v'), 'fetched_at': time.time(),
+            'version': tag.lstrip('v'), 'kind': kind,
+            'fetched_at': time.time(),
         })
         logger.info('[DesktopDist] mirrored %s (%d bytes, sha256 %.12s)',
                     name, size, sha)
@@ -158,6 +163,8 @@ def refresh_now() -> bool:
         served = any(
             n != name and (e or {}).get('os') == (entry or {}).get('os')
             and (e or {}).get('arch') == (entry or {}).get('arch')
+            and (e or {}).get('kind', 'full') == (entry or {}).get(
+                'kind', 'full')
             and os.path.isfile(os.path.join(store._store_dir(), n))
             for n, e in arts.items())
         if not served:

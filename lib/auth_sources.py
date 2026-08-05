@@ -93,6 +93,7 @@ __all__ = [
     'missing_required_fields',
     'normalize_domain',
     'invalidate_cache',
+    'live_session_status',
     'DEFAULT_SOURCES',
 ]
 
@@ -125,7 +126,15 @@ _cache_mtime = 0.0
 DEFAULT_SOURCES: list[dict] = [
     {'domain': 'xiaohongshu.com', 'label': 'Xiaohongshu / RED',
      'aliases': ['xhslink.com'],
+     'access_strategy': 'browser_first',
      'login_url': 'https://www.xiaohongshu.com/explore',
+     # Account-risk note shown in the Settings connect flow. XHS polices
+     # automated access aggressively (限流/滑块/封号), and every web search
+     # replays this logged-in session — the user MUST connect with a spare
+     # account, not their main one. Carried as an i18n KEY (not text) so the
+     # wording lives with the other UI strings in static/js/i18n.js while the
+     # per-site fact ("this site is risky") stays server-side.
+     'risk_note_key': 'settings.authSrcRiskXhs',
      'fields': [
          {'name': 'web_session', 'importance': 'required'},
          {'name': 'a1', 'importance': 'recommended'},
@@ -140,6 +149,7 @@ DEFAULT_SOURCES: list[dict] = [
     # connecting an account must never silently grant an SSRF exemption.
     {'domain': 'example-corp.com', 'label': 'YourProvider internal (SSO)',
      'aliases': [],
+     'access_strategy': 'browser_first',
      'login_url': 'https://api.openai.com/ml/modelPlaza/modelInfo',
      # Cookie names below are from a MEASURED anonymous run of the SSO chain
      # (Playwright, networkidle) — NOT guessed. What that run proves and what
@@ -163,13 +173,22 @@ DEFAULT_SOURCES: list[dict] = [
      # ``allow_private_hosts`` — the two gates stay separate on purpose.
      'fields': [
          {'name': 'ssoid', 'importance': 'recommended'},
-         {'name': 'ssoid_example-corp', 'importance': 'optional'},
+         {'name': 'ssoid_example_corp', 'importance': 'optional'},
          {'name': 'ssousername', 'importance': 'optional'},
          {'name': 'ssosession', 'importance': 'optional'},
      ]},
 ]
 
 _VALID_IMPORTANCE = ('required', 'recommended', 'optional')
+
+#: Registry field (Site Knowledge Layer P2): WHO opens the door for this
+#: site's identity paths. Consumed by tofu-search's engines + fetch core
+#: (unknown keys pass through the provider row untouched):
+#:   browser_first  — live browser primary, pool replay fallback (default)
+#:   cookies_replay — pool replay primary, browser fallback (risk-tolerant
+#:                    sites / a browser that is usually offline)
+#:   public         — no identity needed; engines/fetch skip identity paths
+_VALID_STRATEGIES = ('browser_first', 'cookies_replay', 'public')
 
 
 def normalize_domain(value: str) -> str:
@@ -348,7 +367,10 @@ def _store_mtime() -> float:
     """Store file mtime, or 0.0 when it does not exist / cannot be stat'ed."""
     try:
         return os.path.getmtime(_STORE_PATH)
-    except OSError:
+    except OSError as e:
+        # Expected on first run (store not yet written) — debug, not warning.
+        logger.debug('[AuthSrc] store mtime stat failed for %s: %s',
+                     _STORE_PATH, e)
         return 0.0
 
 
@@ -429,13 +451,27 @@ def _persist() -> None:
     _cache_mtime = _store_mtime()
 
 
-def _redact(row: dict) -> dict:
-    """Public view: replace cookie list with a count, drop raw values."""
+def _redact(row: dict, knowledge: Optional[dict] = None) -> dict:
+    """Public view: replace cookie list with a count, drop raw values.
+
+    ``knowledge`` is the site_knowledge entry for this domain (or None),
+    injected by list_sources so a 64-row listing costs ONE store read —
+    projected to a small badge ``{pinned, version, verified_at}``.
+    """
     out = dict(row)
     cookies = out.get('cookies') or []
     out['cookie_count'] = len(cookies)
     out['has_cookies'] = bool(cookies)
     out.pop('cookies', None)
+    spec = source_spec(out.get('domain', ''))
+    if not out.get('access_strategy'):
+        out['access_strategy'] = spec.get('access_strategy') or 'browser_first'
+    if knowledge and knowledge.get('extractor_js'):
+        out['knowledge'] = {'pinned': True,
+                            'version': knowledge.get('version'),
+                            'verified_at': knowledge.get('verified_at')}
+    else:
+        out['knowledge'] = {'pinned': False}
     proxy = out.get('proxy') or ''
     out['has_proxy'] = bool(proxy)
     # Show only the proxy host, never embedded credentials.
@@ -450,9 +486,9 @@ def _redact(row: dict) -> dict:
     out.pop('proxy', None)
     # Catalog spec (login URL + the individual cookies that make up the
     # session) travels with the row so the UI never hardcodes a second copy.
-    spec = source_spec(out.get('domain', ''))
     out['login_url'] = spec.get('login_url', '')
     out['fields'] = [dict(f) for f in (spec.get('fields') or [])]
+    out['risk_note_key'] = spec.get('risk_note_key', '')
     return out
 
 
@@ -462,11 +498,43 @@ def list_sources() -> list[dict]:
     with _lock:
         rows = [dict(r) for r in _cache]
     rows.sort(key=lambda r: (not r.get('enabled'), r.get('label', r.get('domain', ''))))
-    return [_redact(r) for r in rows]
+    try:
+        from lib.site_knowledge import list_knowledge
+        knowledge_map = list_knowledge()
+    except Exception as e:
+        logger.debug('[AuthSrc] site-knowledge map unavailable: %s', e)
+        knowledge_map = {}
+    return [_redact(r, knowledge=knowledge_map.get(r.get('domain', '')))
+            for r in rows]
+
+
+def _with_spec(row: dict) -> dict:
+    """Merge catalog spec fields into a FULL row copy (consumer chain).
+
+    tofu-search receives rows via the provider seam — per the registry
+    design (docs/SITE_KNOWLEDGE_LAYER_DESIGN.md §3.1) the row must carry the
+    new registry fields with it: access_strategy (path ORDER is data),
+    login_url, cookie ``fields`` (the login flow's hint source). The stored
+    row's own value wins when present; spec fills the rest;
+    ``browser_first`` is the schema default.
+    """
+    out = dict(row)
+    spec = source_spec(out.get('domain', ''))
+    out.setdefault('aliases', list(spec.get('aliases', [])))
+    if not out.get('access_strategy'):
+        out['access_strategy'] = spec.get('access_strategy') or 'browser_first'
+    if not out.get('login_url'):
+        out['login_url'] = spec.get('login_url', '')
+    if not out.get('fields'):
+        out['fields'] = [dict(f) for f in (spec.get('fields') or [])]
+    if not out.get('risk_note_key'):
+        out['risk_note_key'] = spec.get('risk_note_key', '')
+    return out
 
 
 def get_source(domain: str) -> Optional[dict]:
-    """Internal lookup by exact domain — returns the FULL row (incl. cookies)."""
+    """Internal lookup by exact domain — returns the FULL row (incl. cookies)
+    with catalog spec fields merged in."""
     dom = normalize_domain(domain)
     if not dom:
         return None
@@ -474,17 +542,23 @@ def get_source(domain: str) -> Optional[dict]:
     with _lock:
         for r in _cache:
             if r.get('domain') == dom:
-                return dict(r)
+                return _with_spec(r)
     return None
 
 
 def match_source(url: str) -> Optional[dict]:
-    """Return the enabled, cookie-bearing source governing ``url``'s host.
+    """Return the enabled source governing ``url``'s host.
 
     Matches the host against each source's ``domain`` and ``aliases``
-    (sub-domains included). A source with no cookies is treated as
-    not-configured and never matched, so enabling a site without
-    supplying credentials cannot break its fetch.
+    (sub-domains included). Credential rule (P2 后修订——live session is
+    a first-class credential):
+
+      * stored cookies present → match (any strategy: replay can fire);
+      * no cookies but ``access_strategy == 'browser_first'`` → match:
+        the credential is the user's LIVE browser session, not anything
+        stored here. Requiring a cookie paste for such rows forced users
+        through a devtools copy-paste the browser path never needed.
+      * otherwise (cookies_replay without cookies / public) → no match.
     """
     try:
         host = urlparse(url).netloc.lower().split(':')[0]
@@ -496,11 +570,18 @@ def match_source(url: str) -> Optional[dict]:
     _ensure_loaded()
     with _lock:
         for r in _cache:
-            if not r.get('enabled') or not r.get('cookies'):
+            if not r.get('enabled'):
+                continue
+            strategy = (r.get('access_strategy')
+                        or source_spec(r.get('domain', '')).get('access_strategy')
+                        or 'browser_first')
+            if strategy == 'public':
+                continue          # no identity needed — never matches
+            if not r.get('cookies') and strategy != 'browser_first':
                 continue
             domains = [r.get('domain', '')] + list(r.get('aliases', []))
             if any(d and _host_matches(host, d) for d in domains):
-                return dict(r)
+                return _with_spec(r)
     return None
 
 
@@ -510,7 +591,8 @@ def upsert_source(domain: str, *, label: Optional[str] = None,
                   cookie_header: Optional[str] = None,
                   cookie_fields: Optional[dict] = None,
                   proxy: Optional[str] = None,
-                  aliases: Optional[list] = None) -> dict:
+                  aliases: Optional[list] = None,
+                  access_strategy: Optional[str] = None) -> dict:
     """Create or update a source. Returns the redacted row.
 
     Only the fields you pass are touched (None = leave unchanged), except that
@@ -526,6 +608,11 @@ def upsert_source(domain: str, *, label: Optional[str] = None,
     dom = normalize_domain(domain)
     if not dom:
         raise ValueError('domain is required')
+
+    if access_strategy is not None \
+            and access_strategy not in _VALID_STRATEGIES:
+        raise ValueError(
+            f'access_strategy must be one of {_VALID_STRATEGIES}')
 
     if cookie_fields is not None:
         cookies = cookies_from_fields(cookie_fields, dom)
@@ -559,6 +646,8 @@ def upsert_source(domain: str, *, label: Optional[str] = None,
             row['cookies'] = list(cookies)[:_MAX_COOKIES_PER_SOURCE]
         if proxy is not None:
             row['proxy'] = str(proxy).strip()
+        if access_strategy is not None:
+            row['access_strategy'] = access_strategy
         if enabled is not None:
             row['enabled'] = bool(enabled)
         row['updated_at'] = time.time()
@@ -589,6 +678,68 @@ def set_enabled(domain: str, enabled: bool) -> bool:
                 logger.info('[AuthSrc] toggle domain=%s enabled=%s', dom, bool(enabled))
                 return True
     return False
+
+
+#: Live-session probe cache — asking the bridge costs a command round-trip,
+#: and the Settings panel re-renders on every toggle.
+_LIVE_SESSION_TTL_S = 20.0
+_live_session_cache: dict = {}
+_live_session_lock = threading.Lock()
+
+
+def live_session_status(domain: str, *, refresh: bool = False) -> dict:
+    """Probe the user's REAL browser for a live login on ``domain``.
+
+    The bridge's ``get_cookies`` reads the browser's own jar (never stored
+    here) and we match cookie NAMES against the catalog's declared fields:
+    any ``required``/``recommended`` name present = the user is logged in.
+    Returns ``{extension, live_session, matched, missing_required}``:
+
+      * ``extension`` False — the bridge is offline; detection impossible
+        (the browser-first path is unavailable too);
+      * ``live_session`` True — the user is logged into the site in their
+        browser RIGHT NOW; a browser_first entry works with zero stored
+        cookies (OpenCLI-parity: login once in the daily browser, done).
+    """
+    dom = normalize_domain(domain)
+    if not dom:
+        return {'extension': False, 'live_session': False,
+                'matched': [], 'missing_required': []}
+    now = time.time()
+    with _live_session_lock:
+        hit = _live_session_cache.get(dom)
+        if hit and not refresh and now - hit[0] < _LIVE_SESSION_TTL_S:
+            return dict(hit[1])
+    out = {'extension': False, 'live_session': False,
+           'matched': [], 'missing_required': []}
+    try:
+        from lib.browser import is_extension_connected, send_browser_command
+        if is_extension_connected():
+            out['extension'] = True
+            res, err = send_browser_command('get_cookies', {'domain': dom},
+                                            timeout=10)
+            if err:
+                logger.info('[AuthSrc] live-session probe failed for %s: %s',
+                            dom, str(err)[:120])
+            names = {str(c.get('name', '')) for c in (res or [])
+                     if isinstance(c, dict)}
+            fields = source_fields(dom)
+            wanted = [f['name'] for f in fields
+                      if f.get('importance') in ('required', 'recommended')]
+            matched = [n for n in wanted if n in names]
+            out['matched'] = matched
+            out['missing_required'] = [
+                f['name'] for f in fields
+                if f.get('importance') == 'required' and f['name'] not in names]
+            # Logged-in verdict: any declared session cookie present. For an
+            # unknown domain (no declared fields) ANY cookie on the domain is
+            # the best available signal.
+            out['live_session'] = bool(matched) if wanted else bool(names)
+    except Exception as e:
+        logger.debug('[AuthSrc] live-session probe crashed for %s: %s', dom, e)
+    with _live_session_lock:
+        _live_session_cache[dom] = (now, dict(out))
+    return out
 
 
 def delete_source(domain: str) -> bool:

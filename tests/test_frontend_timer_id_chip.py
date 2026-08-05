@@ -64,8 +64,8 @@ def _node_deps_available() -> bool:
 _HARNESS = r"""
 const fs = require('fs');
 const path = require('path');
-const ROOT = process.argv[4];
-const NEUTER = process.argv[5] === 'neuter';
+const ROOT = process.argv[5];
+const NEUTER = process.argv[6] === 'neuter';
 const { JSDOM } = require(path.join(ROOT, 'node_modules', 'jsdom'));
 // runScripts:'dangerously' so the header's INLINE onclick attribute (set via
 // innerHTML) actually executes — that inline handler is exactly what the
@@ -100,21 +100,23 @@ win.getActiveConv = global.getActiveConv = () => _conv;
 // debug_mode on so _renderDebugEntry emits the entry.
 win._featureFlags = global._featureFlags = { debug_mode: true };
 
-let trSrc = fs.readFileSync(process.argv[2], 'utf8');
+let trSrc = fs.readFileSync(process.argv[2], 'utf8');   // ui/tool_rounds.js (dispatcher)
+let richSrc = fs.readFileSync(process.argv[3], 'utf8'); // ui/tool_rounds_rich.js (timer watcher block)
 if (NEUTER) {
   // Drop the debug-entry selector from the bubble-through guard — the click
   // then falls through to the toggle, proving the guard is load-bearing.
-  const before = trSrc;
-  trSrc = trSrc.replace(
+  const before = richSrc;
+  richSrc = richSrc.replace(
     "onclick=\"if(event.target.closest('.timer-id-chip,.ri-tool-anchor'))return;event.stopPropagation();var w=document.getElementById('${uid}-wrap');",
     "onclick=\"event.stopPropagation();var w=document.getElementById('${uid}-wrap');");
-  if (trSrc === before) { console.log('FAIL neuter_no_op_regex_drift'); }
+  if (richSrc === before) { console.log('FAIL neuter_no_op_regex_drift'); }
 }
-eval(trSrc);                                   // ui/tool_rounds.js
-// tool_rounds.js installs a real 1Hz setInterval (the countdown ticker) that
+// ONE eval so the rich block's top-level consts stay in scope for it.
+eval(trSrc + '\n' + richSrc);
+// tool_rounds_rich.js installs a real 1Hz setInterval (the countdown ticker) that
 // keeps node's event loop alive forever — cancel it so the harness can exit.
 if (win._timerCountdownTicker) { clearInterval(win._timerCountdownTicker); }
-eval(fs.readFileSync(process.argv[3], 'utf8')); // upload_preview.js (installs click delegation)
+eval(fs.readFileSync(process.argv[4], 'utf8')); // upload_preview.js (installs click delegation)
 
 const out = [];
 function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
@@ -189,10 +191,11 @@ def _run(neuter: bool):
     try:
         proc = subprocess.run(
             ['node', harness,
-             os.path.join(JS_DIR, 'ui', 'tool_rounds.js'),   # argv[2]
-             os.path.join(JS_DIR, 'upload_preview.js'),       # argv[3]
-             ROOT,                                            # argv[4]
-             'neuter' if neuter else 'live',                  # argv[5]
+             os.path.join(JS_DIR, 'ui', 'tool_rounds.js'),      # argv[2]
+             os.path.join(JS_DIR, 'ui', 'tool_rounds_rich.js'), # argv[3]
+             os.path.join(JS_DIR, 'upload_preview.js'),         # argv[4]
+             ROOT,                                              # argv[5]
+             'neuter' if neuter else 'live',                    # argv[6]
              ],
             capture_output=True, text=True, timeout=60,
         )

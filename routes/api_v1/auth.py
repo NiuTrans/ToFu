@@ -74,13 +74,13 @@ import os
 import secrets
 from typing import Optional
 
-from flask import jsonify, redirect, request
+from flask import redirect, request
 from quart import Response, g
 
 from lib.api_keys import (
     AuthContext, local_admin_context, touch_key, validate_token,
 )
-from lib.api_response import api_forbidden, api_unauthorized
+from lib.api_response import api_error, api_forbidden, api_unauthorized
 from lib.auth_mode import requires_credential as _mode_requires_credential
 from lib.log import audit_log, get_logger
 from lib.rate_limit_api import RateDecision, apply_headers, check_request
@@ -131,6 +131,7 @@ _PUBLIC_EXACT = frozenset({
     '/api/v1/users/login',     # public login
     '/api/v1/users/logout',    # public; idempotent on missing session
     '/api/v1/users/me',        # public probe; returns {user: null} unauthed
+    '/api/desktop/pair',          # pairing exchange: the 6-digit code IS the credential (RWA P4a — code + audit, no bearer)
     '/dashboard',         # customer dashboard HTML; data fetches go through the gate
     '/dashboard/',
     '/login',             # signup/login HTML page
@@ -395,11 +396,10 @@ async def auth_before_request():
             logger.debug('[Auth] bridge audit_log failed: %s', _aerr)
         _auth_log.warning('Auth: bridge credential required on %s (peer=%s)',
                           path, request.remote_addr)
-        return jsonify({
-            'error': 'bridge_auth_required',
-            'hint': 'set X-Bridge-Secret to TOFU_BRIDGE_SECRET or an '
-                    'agents:bridge-scoped API key',
-        }), 401
+        return api_unauthorized(
+            'bridge_auth_required',
+            hint='set X-Bridge-Secret to TOFU_BRIDGE_SECRET or an '
+                 'agents:bridge-scoped API key')
 
     # ── Open mode short-circuit ─────────────────────────────────────
     # No credential required. Tokens are still honoured if presented
@@ -467,15 +467,13 @@ async def auth_before_request():
                               '(path=%s remote=%s)', token,
                               _token_source(token), path,
                               request.remote_addr)
-            return jsonify({
-                'ok': False,
-                'error': {'kind': 'unauthorized',
-                          'detail': 'Invalid or expired API key. If you '
-                                    'copied it from '
-                                    'data/config/.first_run_token, that '
-                                    'token may have been rotated — restart '
-                                    'the server to mint a fresh one.'},
-            }), 401
+            return api_error({
+                'kind': 'unauthorized',
+                'detail': 'Invalid or expired API key. If you '
+                          'copied it from '
+                          'data/config/.first_run_token, that '
+                          'token may have been rotated — restart '
+                          'the server to mint a fresh one.'}, status=401)
 
     # 2. Back-compat: legacy TUNNEL_TOKEN flow.
     if ctx is None and _legacy_tunnel_token_passes():
@@ -516,12 +514,10 @@ async def auth_before_request():
     # 5. Reject when no credential resolved on a private path.
     if ctx is None:
         if path.startswith(('/api/', '/v1/', '/metrics')):
-            return jsonify({
-                'ok': False,
-                'error': {'kind': 'unauthorized',
-                          'detail': 'Authentication required. Send '
-                                    'Authorization: Bearer tofu_live_\u2026'},
-            }), 401
+            return api_error({
+                'kind': 'unauthorized',
+                'detail': 'Authentication required. Send '
+                          'Authorization: Bearer tofu_live_…'}, status=401)
         return Response(
             '<!doctype html><meta charset="utf-8">'
             '<title>Sign in required \u2014 Tofu</title>'
@@ -544,14 +540,12 @@ async def auth_before_request():
     decision: RateDecision = check_request(ctx)
     g.rate_decision = decision
     if not decision.allowed:
-        resp = jsonify({
-            'ok': False,
-            'error': {'kind': 'rate_limited',
-                      'detail': f'Rate limit exceeded ({decision.reason})',
-                      'retry_after_s': round(decision.retry_after_s, 2)},
-        })
+        resp, _st429 = api_error({
+            'kind': 'rate_limited',
+            'detail': f'Rate limit exceeded ({decision.reason})',
+            'retry_after_s': round(decision.retry_after_s, 2)}, status=429)
         apply_headers(resp, decision)
-        return resp, 429
+        return resp, _st429
 
     # 7. Per-key request counter (tokens recorded post-hoc by routes).
     if ctx.key_id:

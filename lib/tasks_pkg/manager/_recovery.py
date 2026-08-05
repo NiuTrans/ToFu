@@ -79,6 +79,35 @@ def _merge_home_index(messages, merge_task_id):
     return None
 
 
+def _stamp_merge_home(last_msg, merge_task_id):
+    """Stamp the recovery-adopted tail with the merging task's durable identity.
+
+    The G1 tail-merge adopts an assistant tail that passed GATE 4 — i.e. it
+    carries NO ``_taskId`` or already THIS task's — so this is fill-absent by
+    construction and can never overwrite a foreign id. Why the stamp is
+    load-bearing (epic pt_75889ea726b84929, the crash edge of the 54aa57a5
+    twin-fold fix):
+
+      * the NEXT recovery sweep finds this home by id via ``_merge_home_index``
+        instead of re-deriving it positionally — the ms1auj3n cross-turn
+        stitch guard then covers crash-adopted tails too;
+      * the settle path's ``_find_own_assistant_slot`` / provenance guard can
+        attribute the row to this task;
+      * a later same-task reconnect placeholder (the frontend's pushed-back
+        ``tmp_`` bubble carrying the typed error envelope AND this ``_taskId``)
+        becomes foldable by ``fold_duplicate_task_twins`` on the GET/PUT seams
+        — without the stamp the pair (id-less adopted tail + id-bearing twin)
+        can never pair, and the two-bubble artifact is PERMANENT for any turn
+        that never reaches a terminal settle.
+
+    Returns True when the stamp was written (never overwrites an existing id).
+    """
+    if merge_task_id and isinstance(last_msg, dict) and not last_msg.get('_taskId'):
+        last_msg['_taskId'] = merge_task_id
+        return True
+    return False
+
+
 def _task_superseded_by_newer_reply(db, conv_id, task_created_at) -> bool:
     """True when ANOTHER task of this conv reached a TERMINAL state
     (done / error / aborted) AFTER this stale task STARTED — i.e. the
@@ -458,6 +487,13 @@ def recover_stale_tasks_on_startup(prev_shutdown=None, dispatch=True):
                                 # OS kill but leave a deliberate stop alone.
                                 if _interrupt_reason and not last_msg.get('interruptedReason'):
                                     last_msg['interruptedReason'] = _interrupt_reason
+                                # Durable home identity, written WITH the
+                                # finishReason (same terminal-fact family):
+                                # the adopted tail IS this task's home from
+                                # now on. See _stamp_merge_home for why the
+                                # stamp is load-bearing (next-sweep G1 by-id
+                                # lookup + the same-task twin fold).
+                                _stamp_merge_home(last_msg, merge_task_id)
                                 # Merge toolRounds from task — tool_rounds
                                 # column OR (for normal chats where it is NULL)
                                 # rebuilt from the segments column. Without the

@@ -30,10 +30,11 @@ continue-checkpoint keys carried on ``cfg``:
 
 from __future__ import annotations
 
-import logging
 from typing import Any
 
-logger = logging.getLogger('tofu.orchestrator')
+from lib.log import get_logger
+
+logger = get_logger('tofu.orchestrator')
 
 
 def apply_resume_state(

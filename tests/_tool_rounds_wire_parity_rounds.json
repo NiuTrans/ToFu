@@ -1,1 +1,693 @@
-[{"_name": "generic-done", "status": "done", "toolName": "list_dir", "query": "list_dir .", "results": [{}], "roundNum": 1}, {"_name": "generic-searching", "_isSearching": true, "status": "searching", "toolName": "grep_search", "query": "grep foo", "results": [], "roundNum": 2}, {"_name": "cmd-running", "_isSearching": true, "status": "searching", "toolName": "run_command", "query": "npm test", "toolArgs": "{\"description\":\"run tests\"}", "_partialOutput": "line1\nline2", "results": [], "roundNum": 3}, {"_name": "cmd-done-ok", "status": "done", "toolName": "run_command", "query": "npm test", "results": [{"command": "npm test", "output": "ok output", "exitCode": "0", "description": "run tests"}], "roundNum": 4}, {"_name": "cmd-done-err", "status": "done", "toolName": "run_command", "query": "npm test", "results": [{"command": "npm test", "output": "boom", "exitCode": "1"}], "roundNum": 5}, {"_name": "cmd-notrun", "status": "done", "toolName": "run_command", "query": "rm -rf /", "results": [{"command": "rm -rf /", "notRun": true, "reason": "dangerous pattern", "badge": "blocked"}], "roundNum": 6}, {"_name": "cmd-timeout", "status": "done", "toolName": "run_command", "query": "sleep", "results": [{"command": "sleep 99", "output": "partial", "exitCode": "?", "timedOut": true}], "roundNum": 7}, {"_name": "exec-js", "status": "done", "toolName": "browser_execute_js", "query": "Execute JS", "toolArgs": "{\"code\":\"1+1\",\"description\":\"math\"}", "toolContent": "2", "results": [{}], "roundNum": 8}, {"_name": "exec-js-err", "status": "done", "toolName": "browser_execute_js", "query": "Execute JS", "toolArgs": "{\"code\":\"x()\"}", "toolContent": "ReferenceError", "results": [{"badge": "error"}], "roundNum": 9}, {"_name": "search-empty", "status": "done", "toolName": "web_search", "query": "cats", "results": [], "roundNum": 10}, {"_name": "search-empty-diag", "status": "done", "toolName": "web_search", "query": "cats", "results": [], "searchDiag": {"reason": "network_error"}, "roundNum": 11}, {"_name": "search-results", "status": "done", "toolName": "web_search", "query": "cats", "results": [{"title": "A", "url": "https://a.com", "source": "google", "snippet": "sa", "fetched": true, "fetchedChars": 1500}, {"title": "B", "url": "https://b.com", "source": "bing", "_q": "dogs"}], "roundNum": 12}, {"_name": "search-multiq-vertical", "status": "done", "toolName": "web_search", "query": "q1\nq2", "results": [{"title": "A", "url": "https://a.com", "source": "google", "_q": "q1"}, {"title": "B", "url": "https://b.com", "source": "bing", "_q": "q2"}], "verticals": [{"domain": "academic", "sources": [{"source": "hf", "identifier": "x"}], "items": [{"title": "P1", "url": "https://p1", "upvotes": 5}]}, {"domain": "academic", "sources": [{"source": "hf", "identifier": "x"}], "items": [{"title": "P1", "url": "https://p1", "upvotes": 9}, {"title": "P2", "url": "https://p2", "citations": 3}]}], "engineBreakdown": {"google": [{"title": "A", "url": "https://a.com"}]}, "roundNum": 13}, {"_name": "readimg", "status": "done", "toolName": "read_files", "query": "read x.png", "results": [{"imageDataUris": [{"uri": "data:image/png;base64,AA", "filename": "x.png"}, {"uri": "data:image/png;base64,BB", "filename": "y.png"}]}], "roundNum": 14}, {"_name": "inspectimg", "status": "done", "toolName": "inspect_image", "query": "crop x.png", "results": [{"imageDataUris": [{"uri": "data:image/png;base64,AA", "filename": "x.png"}], "inspectOps": "crop, 2x"}], "roundNum": 15}, {"_name": "imagegen", "status": "done", "toolName": "generate_image", "query": "a cat", "results": [{"imageMode": "generate", "imageDataUri": "data:image/png;base64,AA", "imagePrompt": "a cat", "badge": "\u2713 done", "imageAspectRatio": "1:1", "imageResolution": "1024"}], "roundNum": 16}, {"_name": "imagegen-edit", "status": "done", "toolName": "edit_image", "query": "make it blue", "results": [{"imageMode": "edit", "imageDataUri": "data:image/png;base64,BB", "imageSourceUrl": "https://src/img.png", "imagePrompt": "make it blue"}], "roundNum": 17}, {"_name": "imagegen-err", "status": "done", "toolName": "generate_image", "query": "a cat", "results": [{"imageMode": "generate", "imageError": "rate limited"}], "roundNum": 18}, {"_name": "imagegen-loading", "status": "searching", "toolName": "generate_image", "query": "a cat", "results": [{"imageMode": "generate", "badge": "generating\u2026"}], "roundNum": 19}, {"_name": "approval-cmd", "status": "pending_approval", "approvalId": "ap1", "toolName": "run_command", "query": "run_command", "approvalMeta": {"toolName": "run_command", "command": "rm foo", "description": "delete"}, "results": [], "roundNum": 20}, {"_name": "approval-single-diff", "status": "pending_approval", "approvalId": "ap2", "toolName": "apply_diff", "query": "apply_diff", "approvalMeta": {"toolName": "apply_diff", "search": "old\nolder", "replace": "new"}, "results": [], "roundNum": 21}, {"_name": "approval-batch", "status": "pending_approval", "approvalId": "ap3", "toolName": "apply_diffs", "query": "apply_diffs", "approvalMeta": {"toolName": "apply_diffs", "batchMode": true, "path": "x.py", "editCount": 2, "editSummaries": [{"path": "x.py", "search": "a", "replace": "b", "searchLines": 1, "replaceLines": 1, "description": "e1"}, {"path": "y.py", "search": "c", "replace": "d", "searchLines": 1, "replaceLines": 1}]}, "results": [], "roundNum": 22}, {"_name": "approval-write", "status": "pending_approval", "approvalId": "ap4", "toolName": "write_file", "query": "write_file", "approvalMeta": {"toolName": "write_file", "path": "x.py", "contentPreview": "print(1)\nprint(2)", "contentLines": 2, "contentChars": 17}, "results": [], "roundNum": 23}, {"_name": "aborted", "status": "aborted", "toolName": "run_command", "query": "npm test", "results": [], "roundNum": 24}, {"_name": "aborted-with-results", "status": "done", "toolName": "run_command", "query": "npm test", "results": [{"command": "npm test", "output": "ok", "exitCode": "0"}], "roundNum": 25}, {"_name": "stdin", "status": "awaiting_stdin", "stdinId": "s1", "toolName": "run_command", "query": "read x", "stdinPrompt": "enter x:", "results": [], "roundNum": 26}, {"_name": "timer-waiting", "status": "searching", "toolName": "timer_create", "query": "watch build", "results": [], "roundNum": 27}, {"_name": "hg-skipped", "status": "done", "toolName": "ask_human", "_hgSkipped": true, "guidanceQuestion": "Pick A or B?", "results": [{}], "roundNum": 28}, {"_name": "hg-submitted", "status": "submitted", "toolName": "ask_human", "_hgUserResponse": "A", "results": [{}], "roundNum": 29}, {"_name": "badge-tokens", "status": "done", "toolName": "fetch_url", "query": "fetch x", "toolTokens": 1530, "results": [{}], "roundNum": 30}, {"_name": "badge-fetchedchars", "status": "done", "toolName": "fetch_url", "query": "fetch x", "results": [{"fetchedChars": 2500}], "roundNum": 31}, {"_name": "badge-meta-badge", "status": "done", "toolName": "apply_diff", "query": "patch x", "results": [{"badge": "+3/-1", "writeOk": true}], "roundNum": 32}, {"_name": "badge-memory-ok", "status": "done", "toolName": "create_memory", "query": "save note", "results": [{"badge": "saved", "memoryOk": true}], "roundNum": 33}, {"_name": "badge-await-timeout", "status": "done", "toolName": "await_agents", "query": "wait", "results": [{"badge": "partial", "awaitTimedOut": true}], "roundNum": 34}, {"_name": "compaction-L1", "status": "done", "toolName": "fetch_url", "query": "fetch x", "compactionLayer": "L1", "compactedFromChars": 112000, "compactedToChars": 800, "results": [{}], "roundNum": 35}, {"_name": "write-file-done", "status": "done", "toolName": "write_file", "query": "Write x.py", "toolArgs": "{\"content\":\"line1\\nline2\"}", "results": [{"badge": "2 lines"}], "roundNum": 36}, {"_name": "single-diff-done", "status": "done", "toolName": "apply_diff", "query": "Patch x.py", "toolArgs": "{\"search\":\"old\",\"replace\":\"new\\nnewer\"}", "results": [{"badge": "+2/-1"}], "roundNum": 37}, {"_name": "insert-content-done", "status": "done", "toolName": "insert_content", "query": "Insert x.py", "toolArgs": "{\"anchor\":\"abc\",\"content\":\"NEW\",\"position\":\"after\"}", "results": [{"badge": "+1"}], "roundNum": 38}, {"_name": "batch-diffs-done", "status": "done", "toolName": "apply_diffs", "query": "Patch x.py (2 edits)", "toolArgs": "{\"edits\":[{\"search\":\"a\",\"replace\":\"b\"},{\"search\":\"c\",\"replace\":\"d\"}]}", "results": [{"badge": "2 edits", "editSummaries": [{"path": "x.py", "status": "ok", "description": "first"}, {"path": "y.py", "status": "fail", "description": "second"}]}], "roundNum": 39}, {"_name": "elapsed-done", "status": "done", "toolName": "list_dir", "query": "ls", "_elapsed": "1.2s", "results": [], "roundNum": 40}, {"_name": "search-orbit", "_isSearching": true, "status": "searching", "toolName": "web_search", "query": "cats", "results": [], "roundNum": 41}]
+[
+ {
+  "_name": "generic-done",
+  "status": "done",
+  "toolName": "list_dir",
+  "query": "list_dir .",
+  "results": [
+   {}
+  ],
+  "roundNum": 1
+ },
+ {
+  "_name": "generic-searching",
+  "_isSearching": true,
+  "status": "searching",
+  "toolName": "grep_search",
+  "query": "grep foo",
+  "results": [],
+  "roundNum": 2
+ },
+ {
+  "_name": "cmd-running",
+  "_isSearching": true,
+  "status": "searching",
+  "toolName": "run_command",
+  "query": "npm test",
+  "toolArgs": "{\"description\":\"run tests\"}",
+  "_partialOutput": "line1\nline2",
+  "results": [],
+  "roundNum": 3
+ },
+ {
+  "_name": "cmd-done-ok",
+  "status": "done",
+  "toolName": "run_command",
+  "query": "npm test",
+  "results": [
+   {
+    "command": "npm test",
+    "output": "ok output",
+    "exitCode": "0",
+    "description": "run tests"
+   }
+  ],
+  "roundNum": 4
+ },
+ {
+  "_name": "cmd-done-err",
+  "status": "done",
+  "toolName": "run_command",
+  "query": "npm test",
+  "results": [
+   {
+    "command": "npm test",
+    "output": "boom",
+    "exitCode": "1"
+   }
+  ],
+  "roundNum": 5
+ },
+ {
+  "_name": "cmd-notrun",
+  "status": "done",
+  "toolName": "run_command",
+  "query": "rm -rf /",
+  "results": [
+   {
+    "command": "rm -rf /",
+    "notRun": true,
+    "reason": "dangerous pattern",
+    "badge": "blocked"
+   }
+  ],
+  "roundNum": 6
+ },
+ {
+  "_name": "cmd-timeout",
+  "status": "done",
+  "toolName": "run_command",
+  "query": "sleep",
+  "results": [
+   {
+    "command": "sleep 99",
+    "output": "partial",
+    "exitCode": "?",
+    "timedOut": true
+   }
+  ],
+  "roundNum": 7
+ },
+ {
+  "_name": "exec-js",
+  "status": "done",
+  "toolName": "browser_execute_js",
+  "query": "Execute JS",
+  "toolArgs": "{\"code\":\"1+1\",\"description\":\"math\"}",
+  "toolContent": "2",
+  "results": [
+   {}
+  ],
+  "roundNum": 8
+ },
+ {
+  "_name": "exec-js-err",
+  "status": "done",
+  "toolName": "browser_execute_js",
+  "query": "Execute JS",
+  "toolArgs": "{\"code\":\"x()\"}",
+  "toolContent": "ReferenceError",
+  "results": [
+   {
+    "badge": "error"
+   }
+  ],
+  "roundNum": 9
+ },
+ {
+  "_name": "search-empty",
+  "status": "done",
+  "toolName": "web_search",
+  "query": "cats",
+  "results": [],
+  "roundNum": 10
+ },
+ {
+  "_name": "search-empty-diag",
+  "status": "done",
+  "toolName": "web_search",
+  "query": "cats",
+  "results": [],
+  "searchDiag": {
+   "reason": "network_error"
+  },
+  "roundNum": 11
+ },
+ {
+  "_name": "search-results",
+  "status": "done",
+  "toolName": "web_search",
+  "query": "cats",
+  "results": [
+   {
+    "title": "A",
+    "url": "https://a.com",
+    "source": "google",
+    "snippet": "sa",
+    "fetched": true,
+    "fetchedChars": 1500
+   },
+   {
+    "title": "B",
+    "url": "https://b.com",
+    "source": "bing",
+    "_q": "dogs"
+   }
+  ],
+  "roundNum": 12
+ },
+ {
+  "_name": "search-multiq-vertical",
+  "status": "done",
+  "toolName": "web_search",
+  "query": "q1\nq2",
+  "results": [
+   {
+    "title": "A",
+    "url": "https://a.com",
+    "source": "google",
+    "_q": "q1"
+   },
+   {
+    "title": "B",
+    "url": "https://b.com",
+    "source": "bing",
+    "_q": "q2"
+   }
+  ],
+  "verticals": [
+   {
+    "domain": "academic",
+    "sources": [
+     {
+      "source": "hf",
+      "identifier": "x"
+     }
+    ],
+    "items": [
+     {
+      "title": "P1",
+      "url": "https://p1",
+      "upvotes": 5
+     }
+    ]
+   },
+   {
+    "domain": "academic",
+    "sources": [
+     {
+      "source": "hf",
+      "identifier": "x"
+     }
+    ],
+    "items": [
+     {
+      "title": "P1",
+      "url": "https://p1",
+      "upvotes": 9
+     },
+     {
+      "title": "P2",
+      "url": "https://p2",
+      "citations": 3
+     }
+    ]
+   }
+  ],
+  "engineBreakdown": {
+   "google": [
+    {
+     "title": "A",
+     "url": "https://a.com"
+    }
+   ]
+  },
+  "roundNum": 13
+ },
+ {
+  "_name": "readimg",
+  "status": "done",
+  "toolName": "read_files",
+  "query": "read x.png",
+  "results": [
+   {
+    "imageDataUris": [
+     {
+      "uri": "data:image/png;base64,AA",
+      "filename": "x.png"
+     },
+     {
+      "uri": "data:image/png;base64,BB",
+      "filename": "y.png"
+     }
+    ]
+   }
+  ],
+  "roundNum": 14
+ },
+ {
+  "_name": "inspectimg",
+  "status": "done",
+  "toolName": "inspect_image",
+  "query": "crop x.png",
+  "results": [
+   {
+    "imageDataUris": [
+     {
+      "uri": "data:image/png;base64,AA",
+      "filename": "x.png"
+     }
+    ],
+    "inspectOps": "crop, 2x"
+   }
+  ],
+  "roundNum": 15
+ },
+ {
+  "_name": "imagegen",
+  "status": "done",
+  "toolName": "generate_image",
+  "query": "a cat",
+  "results": [
+   {
+    "imageMode": "generate",
+    "imageDataUri": "data:image/png;base64,AA",
+    "imagePrompt": "a cat",
+    "badge": "✓ done",
+    "imageAspectRatio": "1:1",
+    "imageResolution": "1024"
+   }
+  ],
+  "roundNum": 16
+ },
+ {
+  "_name": "imagegen-edit",
+  "status": "done",
+  "toolName": "edit_image",
+  "query": "make it blue",
+  "results": [
+   {
+    "imageMode": "edit",
+    "imageDataUri": "data:image/png;base64,BB",
+    "imageSourceUrl": "https://src/img.png",
+    "imagePrompt": "make it blue"
+   }
+  ],
+  "roundNum": 17
+ },
+ {
+  "_name": "imagegen-err",
+  "status": "done",
+  "toolName": "generate_image",
+  "query": "a cat",
+  "results": [
+   {
+    "imageMode": "generate",
+    "imageError": "rate limited"
+   }
+  ],
+  "roundNum": 18
+ },
+ {
+  "_name": "imagegen-loading",
+  "status": "searching",
+  "toolName": "generate_image",
+  "query": "a cat",
+  "results": [
+   {
+    "imageMode": "generate",
+    "badge": "generating…"
+   }
+  ],
+  "roundNum": 19
+ },
+ {
+  "_name": "approval-cmd",
+  "status": "pending_approval",
+  "approvalId": "ap1",
+  "toolName": "run_command",
+  "query": "run_command",
+  "approvalMeta": {
+   "toolName": "run_command",
+   "command": "rm foo",
+   "description": "delete"
+  },
+  "results": [],
+  "roundNum": 20
+ },
+ {
+  "_name": "approval-single-diff",
+  "status": "pending_approval",
+  "approvalId": "ap2",
+  "toolName": "apply_diff",
+  "query": "apply_diff",
+  "approvalMeta": {
+   "toolName": "apply_diff",
+   "search": "old\nolder",
+   "replace": "new"
+  },
+  "results": [],
+  "roundNum": 21
+ },
+ {
+  "_name": "approval-batch",
+  "status": "pending_approval",
+  "approvalId": "ap3",
+  "toolName": "apply_diffs",
+  "query": "apply_diffs",
+  "approvalMeta": {
+   "toolName": "apply_diffs",
+   "batchMode": true,
+   "path": "x.py",
+   "editCount": 2,
+   "editSummaries": [
+    {
+     "path": "x.py",
+     "search": "a",
+     "replace": "b",
+     "searchLines": 1,
+     "replaceLines": 1,
+     "description": "e1"
+    },
+    {
+     "path": "y.py",
+     "search": "c",
+     "replace": "d",
+     "searchLines": 1,
+     "replaceLines": 1
+    }
+   ]
+  },
+  "results": [],
+  "roundNum": 22
+ },
+ {
+  "_name": "approval-write",
+  "status": "pending_approval",
+  "approvalId": "ap4",
+  "toolName": "write_file",
+  "query": "write_file",
+  "approvalMeta": {
+   "toolName": "write_file",
+   "path": "x.py",
+   "contentPreview": "print(1)\nprint(2)",
+   "contentLines": 2,
+   "contentChars": 17
+  },
+  "results": [],
+  "roundNum": 23
+ },
+ {
+  "_name": "aborted",
+  "status": "aborted",
+  "toolName": "run_command",
+  "query": "npm test",
+  "results": [],
+  "roundNum": 24
+ },
+ {
+  "_name": "aborted-with-results",
+  "status": "done",
+  "toolName": "run_command",
+  "query": "npm test",
+  "results": [
+   {
+    "command": "npm test",
+    "output": "ok",
+    "exitCode": "0"
+   }
+  ],
+  "roundNum": 25
+ },
+ {
+  "_name": "stdin",
+  "status": "awaiting_stdin",
+  "stdinId": "s1",
+  "toolName": "run_command",
+  "query": "read x",
+  "stdinPrompt": "enter x:",
+  "results": [],
+  "roundNum": 26
+ },
+ {
+  "_name": "timer-waiting",
+  "status": "searching",
+  "toolName": "timer_create",
+  "query": "watch build",
+  "results": [],
+  "roundNum": 27
+ },
+ {
+  "_name": "hg-skipped",
+  "status": "done",
+  "toolName": "ask_human",
+  "_hgSkipped": true,
+  "guidanceQuestion": "Pick A or B?",
+  "results": [
+   {}
+  ],
+  "roundNum": 28
+ },
+ {
+  "_name": "hg-submitted",
+  "status": "submitted",
+  "toolName": "ask_human",
+  "_hgUserResponse": "A",
+  "results": [
+   {}
+  ],
+  "roundNum": 29
+ },
+ {
+  "_name": "badge-tokens",
+  "status": "done",
+  "toolName": "fetch_url",
+  "query": "fetch x",
+  "toolTokens": 1530,
+  "results": [
+   {}
+  ],
+  "roundNum": 30
+ },
+ {
+  "_name": "badge-fetchedchars",
+  "status": "done",
+  "toolName": "fetch_url",
+  "query": "fetch x",
+  "results": [
+   {
+    "fetchedChars": 2500
+   }
+  ],
+  "roundNum": 31
+ },
+ {
+  "_name": "badge-meta-badge",
+  "status": "done",
+  "toolName": "apply_diff",
+  "query": "patch x",
+  "results": [
+   {
+    "badge": "+3/-1",
+    "writeOk": true
+   }
+  ],
+  "roundNum": 32
+ },
+ {
+  "_name": "badge-memory-ok",
+  "status": "done",
+  "toolName": "create_memory",
+  "query": "save note",
+  "results": [
+   {
+    "badge": "saved",
+    "memoryOk": true
+   }
+  ],
+  "roundNum": 33
+ },
+ {
+  "_name": "badge-await-timeout",
+  "status": "done",
+  "toolName": "await_agents",
+  "query": "wait",
+  "results": [
+   {
+    "badge": "partial",
+    "awaitTimedOut": true
+   }
+  ],
+  "roundNum": 34
+ },
+ {
+  "_name": "compaction-L1",
+  "status": "done",
+  "toolName": "fetch_url",
+  "query": "fetch x",
+  "compactionLayer": "L1",
+  "compactedFromChars": 112000,
+  "compactedToChars": 800,
+  "results": [
+   {}
+  ],
+  "roundNum": 35
+ },
+ {
+  "_name": "write-file-done",
+  "status": "done",
+  "toolName": "write_file",
+  "query": "Write x.py",
+  "toolArgs": "{\"content\":\"line1\\nline2\"}",
+  "results": [
+   {
+    "badge": "2 lines"
+   }
+  ],
+  "roundNum": 36
+ },
+ {
+  "_name": "single-diff-done",
+  "status": "done",
+  "toolName": "apply_diff",
+  "query": "Patch x.py",
+  "toolArgs": "{\"search\":\"old\",\"replace\":\"new\\nnewer\"}",
+  "results": [
+   {
+    "badge": "+2/-1"
+   }
+  ],
+  "roundNum": 37
+ },
+ {
+  "_name": "insert-content-done",
+  "status": "done",
+  "toolName": "insert_content",
+  "query": "Insert x.py",
+  "toolArgs": "{\"anchor\":\"abc\",\"content\":\"NEW\",\"position\":\"after\"}",
+  "results": [
+   {
+    "badge": "+1"
+   }
+  ],
+  "roundNum": 38
+ },
+ {
+  "_name": "batch-diffs-done",
+  "status": "done",
+  "toolName": "apply_diffs",
+  "query": "Patch x.py (2 edits)",
+  "toolArgs": "{\"edits\":[{\"search\":\"a\",\"replace\":\"b\"},{\"search\":\"c\",\"replace\":\"d\"}]}",
+  "results": [
+   {
+    "badge": "2 edits",
+    "editSummaries": [
+     {
+      "path": "x.py",
+      "status": "ok",
+      "description": "first"
+     },
+     {
+      "path": "y.py",
+      "status": "fail",
+      "description": "second"
+     }
+    ]
+   }
+  ],
+  "roundNum": 39
+ },
+ {
+  "_name": "elapsed-done",
+  "status": "done",
+  "toolName": "list_dir",
+  "query": "ls",
+  "_elapsed": "1.2s",
+  "results": [],
+  "roundNum": 40
+ },
+ {
+  "_name": "search-orbit",
+  "_isSearching": true,
+  "status": "searching",
+  "toolName": "web_search",
+  "query": "cats",
+  "results": [],
+  "roundNum": 41
+ },
+ {
+  "_name": "conv-meta-board-read",
+  "roundNum": 42,
+  "toolName": "project_board_read",
+  "status": "done",
+  "query": "Read the project board",
+  "toolContent": "# Team board\n\n- epic alpha\n- epic beta",
+  "results": [
+   {
+    "source": "Board",
+    "action": "read",
+    "items": [
+     {
+      "id": "pt_1",
+      "title": "alpha"
+     }
+    ]
+   }
+  ],
+  "toolArgs": {}
+ },
+ {
+  "_name": "timer-watcher-triggered",
+  "roundNum": 43,
+  "toolName": "timer_create",
+  "status": "done",
+  "query": "Watch the training log",
+  "toolArgs": {},
+  "_timerPolls": [
+   {
+    "decision": "started",
+    "at": 1700000000000
+   },
+   {
+    "decision": "wait",
+    "at": 1700000001000,
+    "reason": "no DONE marker yet"
+   },
+   {
+    "decision": "ready",
+    "at": 1700000002000,
+    "reason": "DONE marker found"
+   }
+  ],
+  "_timerTriggered": true,
+  "_timerTimerId": "timer-abcdef1234567890"
+ },
+ {
+  "_name": "cmd-done-long-collapsed",
+  "status": "done",
+  "toolName": "run_command",
+  "query": "grep -c 'jsonify(' routes/api_v1/browser.py && python3 - <<'EOF'\nimport pathlib\nprint('baseline tightened')\nEOF",
+  "toolCallId": "call-long-done-1",
+  "results": [
+   {
+    "command": "grep -c 'jsonify(' routes/api_v1/browser.py && python3 - <<'EOF'\nimport pathlib\nprint('baseline tightened')\nEOF",
+    "output": "3\nbaseline tightened",
+    "exitCode": "0",
+    "description": "count sites and run heredoc"
+   }
+  ],
+  "roundNum": 44
+ },
+ {
+  "_name": "cmd-running-long-collapsed",
+  "_isSearching": true,
+  "status": "searching",
+  "toolName": "run_command",
+  "query": "python3 - <<'EOF'\nimport time\ntime.sleep(9)\nEOF",
+  "toolCallId": "call-long-run-1",
+  "toolArgs": "{\"description\":\"sleep via heredoc\"}",
+  "_partialOutput": "line1\nline2",
+  "results": [],
+  "roundNum": 45
+ }
+]

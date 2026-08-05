@@ -127,6 +127,33 @@ function _apRunNoticeHTML(rec) {
     data-ap-reason="${reason}"><span class="ap-run-notice-label">${label}</span>${raw(body)}</div>`);
 }
 
+/* A run ends at the next REAL human turn (user-msg without the VU marker);
+ * VU turns are stamped participants of the run, not boundaries. */
+function _apIsHumanTurn(el) {
+  return !!(el && el.classList && el.classList.contains('user-msg')
+            && !el.classList.contains('vu-user-msg'));
+}
+
+/* The element a run-tail notice must actually follow. data-ap-run is stamped
+ * ONLY on persisted VU turns (renderMessage reads msg._autopilotRunId, which
+ * only _append_vu_message_to_conv sets), so the last STAMPED element can be
+ * followed by the run's trailing agent turns — anchoring there put the notice
+ * ABOVE the agent's closing message, explaining a message that had not
+ * rendered yet. Walk forward across the run's trailing un-stamped turns,
+ * stopping at a human turn (the run's boundary), another run's stamped turn,
+ * or an existing notice. */
+function _apRunLastTurn(anchor) {
+  let node = anchor;
+  while (node && node.nextElementSibling) {
+    const sib = node.nextElementSibling;
+    if (_apIsHumanTurn(sib)) break;
+    if (sib.hasAttribute && sib.hasAttribute('data-ap-notice')) break;
+    if (sib.hasAttribute && sib.hasAttribute('data-ap-run')) break;
+    node = sib;
+  }
+  return node;
+}
+
 /* Append the run-tail notice after the LAST stamped turn of each concluded run
  * that ended without answering. Idempotent: an existing notice for the run is
  * replaced, so repeated render passes never stack duplicates. */
@@ -153,7 +180,8 @@ function _applyAutopilotRunNotices(inner, conv) {
       const node = holder.firstElementChild;
       if (!node) return;
       node.setAttribute('data-ap-run-id', runId);
-      anchor.parentNode.insertBefore(node, anchor.nextSibling);
+      const runTail = _apRunLastTurn(anchor);
+      runTail.parentNode.insertBefore(node, runTail.nextSibling);
     });
   } catch (e) {
     console.warn('[Autopilot notice] render failed (non-fatal):', e && e.message);
@@ -456,6 +484,7 @@ function _msgFingerprint(msg) {
     (_cmFp ? "cm" + _cmFp : "") + ":" +
     (msg.images ? msg.images.length : 0) + ":" +
     (msg.pdfTexts ? msg.pdfTexts.length : 0) + ":" +
+    (msg.videos ? msg.videos.length : 0) + ":" +
     (msg._autopilotRunId || "") + ":" +
     (msg._isAutopilotSummary ? "S" : "") + ":" +
     /* Queued-pending token: a cross-device queued user message lands in the
@@ -1287,6 +1316,64 @@ function buildCompactionCardHtml(msg) {
   </div>`;
 }
 
+/* Build the Project-Brain dispatch provenance card (owner ask 2026-08-04).
+ * A brain kickoff arrives as a role=user turn whose content is a wall of
+ * English engine instructions; the human's actual questions — WHICH epic,
+ * WHO posted it, HOW/WHY it landed here — were nowhere on screen. The
+ * backend stamps the display-only `_brainEpic` record (creator conv + title,
+ * dispatch seam, routing reason) in project_dispatch._brain_meta; this pure
+ * render turns it into a compact card. Returns '' for legacy messages (no
+ * `_brainEpic`), which keep the old plain-bubble look. Standalone fn so the
+ * jsdom-less harness can drive it without the whole renderMessage graph. */
+function _renderBrainDispatchCard(msg) {
+  const meta = msg && msg._brainEpic;
+  if (!meta || typeof meta !== 'object') return '';
+  const _tOr = (k, fb) => (typeof t === 'function' && t(k) !== k) ? t(k) : fb;
+  const _glyph = (typeof _INIT_GLYPH_BRAIN !== 'undefined') ? _INIT_GLYPH_BRAIN : '';
+  const epicTitle = String(meta.epicTitle || '');
+  const epicId = String(meta.epicId || '');
+  const originConv = String(meta.originatorConv || '');
+  const originTitle = String(meta.originatorTitle || '').trim();
+  // Creator chip: "本对话" (plain text) when the epic was posted HERE; else a
+  // clickable title that opens the originator conversation.
+  const _isSelf = !!originConv && (typeof activeConvId !== 'undefined')
+                  && originConv === activeConvId;
+  let fromHtml = '';
+  if (originConv) {
+    fromHtml = _isSelf
+      ? `<span class="bdc-this">${escapeHtml(_tOr('brain.thisConv', 'this conversation'))}</span>`
+      : `<a class="bdc-conv-link" href="#" title="${escapeHtml(originConv)}" onclick="event.stopPropagation();try{loadConversation('${originConv.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}')}catch(e){};return false;">${escapeHtml(originTitle || _tOr('brain.untitledConv', 'Untitled conversation'))}</a>`;
+  }
+  const methodLbl = meta.method
+    ? _tOr('brain.method.' + meta.method, String(meta.method)) : '';
+  const routeLbl = meta.route
+    ? _tOr('brain.reason.' + meta.route, String(meta.route)) : '';
+  const answeredChip = meta.answered
+    ? `<span class="bdc-answered">${escapeHtml(_tOr('brain.answeredChip', 'carries a human answer'))}</span>` : '';
+  const metaItems = [];
+  if (fromHtml) {
+    metaItems.push(`<span class="bdc-meta-item"><span class="bdc-meta-label">${escapeHtml(_tOr('brain.fromLabel', 'From'))}</span>${fromHtml}</span>`);
+  }
+  if (methodLbl) {
+    metaItems.push(`<span class="bdc-meta-item"><span class="bdc-meta-label">${escapeHtml(_tOr('brain.methodLabel', 'Method'))}</span>${escapeHtml(methodLbl)}</span>`);
+  }
+  if (routeLbl) {
+    metaItems.push(`<span class="bdc-meta-item"><span class="bdc-meta-label">${escapeHtml(_tOr('brain.reasonLabel', 'Why me'))}</span>${escapeHtml(routeLbl)}</span>`);
+  }
+  const openTip = _tOr('brain.openBoard', 'View in the Project Brain panel');
+  return `<div class="brain-dispatch-card">`
+    + `<div class="bdc-head"><span class="bdc-icon">${_glyph}</span>`
+    + `<span class="bdc-title-label">${escapeHtml(_tOr('brain.dispatchTitle', 'Brain dispatch'))}</span>`
+    + answeredChip
+    + (epicId ? `<span class="bdc-epic-id">${escapeHtml(epicId)}</span>` : '')
+    + `</div>`
+    + (epicTitle
+       ? `<div class="bdc-epic-title" title="${escapeHtml(openTip)}" onclick="event.stopPropagation();if(window.openProjectBrain)openProjectBrain();">${escapeHtml(epicTitle)}</div>`
+       : '')
+    + (metaItems.length ? `<div class="bdc-meta">${metaItems.join('')}</div>` : '')
+    + `</div>`;
+}
+
 function renderMessage(msg, idx) {
   /* Belt: drop an orphaned empty-assistant placeholder (see
    * _isOrphanEmptyAssistant). Returning '' produces no DOM node — the surgical
@@ -1329,6 +1416,23 @@ function renderMessage(msg, idx) {
         return `<div class="msg-img-thumb${isPdf ? " pdf-page" : ""}" ${tip ? `title="${tip}"` : ""} onclick="openImagePreview('${src.replace(/'/g, "\\'")}')"><img src="${src}" alt="uploaded">${srcLabel ? `<div class="msg-img-badge">${srcLabel}</div>` : ""}<div class="msg-img-size">${label}</div></div>`;
       return `<div class="msg-img-thumb placeholder"><span class="msg-img-placeholder-icon"></span><div class="msg-img-size">${img.sizeKB || "?"}KB</div></div>`;
     }).join("");
+    body += '</div>';
+  }
+  // ── Video attachments (analysis pipeline): poster card → opens the stored
+  //    original in a new tab. Frames/transcript went to the model server-side;
+  //    the bubble shows the compact provenance card.
+  if (isUser && msg.videos?.length > 0) {
+    body += '<div class="msg-video-list">';
+    body += msg.videos.map((v) => {
+      const dur = v.duration_s ? _fmtVideoDur(v.duration_s) : '';
+      const nFrames = v.frame_count || (v.frames ? v.frames.length : 0) || 0;
+      const meta = `${dur} · ${nFrames} ${t('upload.videoFrames')}${v.transcript ? ' · ' + t('upload.videoTranscript') : ''}`;
+      const thumb = v.poster
+        ? `<img src="${apiUrl(v.poster)}" alt="video" loading="lazy">` : '';
+      const url = String(v.video_url || '').replace(/'/g, "\\'");
+      const name = escapeHtml(v.name || 'video');
+      return `<div class="msg-video-card" title="${name}" onclick="openVideoUrl('${url}')"><div class="msg-video-thumb">${thumb}<span class="msg-video-play">▶</span></div><div class="msg-video-info"><div class="msg-video-name">${name}</div><div class="msg-video-meta">${escapeHtml(meta)}</div></div></div>`;
+    }).join('');
     body += '</div>';
   }
   if (isUser && msg.pdfTexts?.length > 0) {
@@ -1407,6 +1511,14 @@ function renderMessage(msg, idx) {
       body += `<div class="peer-msg-banner${_isHuman ? " peer-msg-banner-operator" : ""}" title="${escapeHtml(msg._fromConv || "")}">`
             + `<span class="peer-msg-icon"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></span>`
             + `<span class="peer-msg-text">${_pmLabel} <span class="peer-msg-from">conv ${_fromShort}</span></span></div>`;
+    }
+    // ── Brain-dispatch provenance card ──
+    // A Project-Brain kickoff turn: show WHICH epic, WHO posted it (clickable
+    // title) and HOW/WHY it was routed here — the human-facing facts the raw
+    // English instruction wall never carried. Legacy kickoffs (no _brainEpic)
+    // render nothing extra and keep the old look.
+    if (msg._brainDispatch) {
+      body += _renderBrainDispatchCard(msg);
     }
   }
   // NOTE: the autopilot run summary is NO LONGER a message — it's a human-only
@@ -1490,7 +1602,8 @@ function renderMessage(msg, idx) {
        so historical messages still tell the user "this turn received
        async sub-agent updates before the model's reply".               */
     if (msg._inboxInjects && msg._inboxInjects.length) {
-      body += _buildSwarmInboxChipsHTML(msg._inboxInjects);
+      body += (typeof _buildSwarmInboxChipsHTML === 'function')
+        ? _buildSwarmInboxChipsHTML(msg._inboxInjects) : '';  // module DEFERRED (Epic-E sub-5B)
     }
     /* Pass segments so the grouped panel renders per-round narration
      * (translated-in-place) adjacent to each round's tools — the toggle-OFF /
@@ -1728,11 +1841,22 @@ function renderMessage(msg, idx) {
         mdHtml = r.html;
         _inlinedBranches = r.inlinedSet;
       }
-      /* ★ FLATTENED (owner directive 2026-07-07): the VU reply renders as a
+      /* ★ FLATTENED (owner directive 2026-07-07): the VU reply renders as
        * plain md-content body, identical to an agent turn — no "Sent to the
        * agent" green handoff zone. DATA-layer provenance is unchanged (only
        * `content` reaches the next agent; see conv_message_builder). */
-      body += `<div class="md-content${isUser ? " user-content" : ""}">${mdHtml}</div>`;
+      /* ★ Brain-dispatch kickoff: the raw engine instructions are for the
+       * AGENT; the provenance card above already answers the human's questions.
+       * Collapse the wall of text behind a <details> so the card dominates —
+       * full fidelity stays one click away, and the model's copy (msg.content)
+       * is untouched. */
+      if (isUser && msg._brainDispatch) {
+        const _rawLbl = (typeof t === 'function' && t('brain.rawKickoff') !== 'brain.rawKickoff')
+          ? t('brain.rawKickoff') : 'Dispatch instructions';
+        body += `<details class="brain-kickoff-raw"><summary>${escapeHtml(_rawLbl)}</summary><div class="md-content${isUser ? " user-content" : ""}">${mdHtml}</div></details>`;
+      } else {
+        body += `<div class="md-content${isUser ? " user-content" : ""}">${mdHtml}</div>`;
+      }
     } catch (e) {
   // ── Compaction markers — render inline chips for each archived snapshot ──
   // Each marker becomes a clickable chip that opens the Compaction Viewer
@@ -1921,9 +2045,29 @@ function renderMessage(msg, idx) {
     const _tsVerdict = (typeof computeTurnSettlement === 'function')
       ? computeTurnSettlement(msg, msg.model || (typeof serverModel !== 'undefined' ? serverModel : null))
       : null;
-    const _tsBtn = (typeof continueButtonForSettlement === 'function')
+    let _tsBtn = (typeof continueButtonForSettlement === 'function')
       ? continueButtonForSettlement(_tsVerdict)
       : { show: false };
+    /* ★ Trimmed-window upgrade: a windowed first-open strips toolRounds for
+     * transport (msg._trimmed + the SERVER-stamped _trimmedToolRoundCount),
+     * so the verdict scans the LOCAL copy, sees 0 rounds, and fail-closes to
+     * 'regenerate' — the "only Regenerate, no Continue" lie for a turn whose
+     * checkpoint provably exists in the DB. The count is a server fact, not
+     * uncertainty (fail-closed philosophy intact), and the click re-verifies
+     * via /api/chat/continue's authoritative rescan (scan_continue_checkpoint)
+     * — so the checkpoint Continue is the honest label. Kept HERE at the gate
+     * (never inside computeTurnSettlement, which is byte-locked to the Python
+     * port by the equivalence suite). A clean finish (show:false) is never
+     * touched; hydrateFullConversation clears _trimmed on refill, after which
+     * the verdict computes the real keptRounds itself. */
+    if (_tsBtn.show && _tsBtn.kind === 'regenerate'
+        && msg._trimmed && (msg._trimmedToolRoundCount || 0) > 0) {
+      _tsBtn = {
+        show: true, kind: 'continue', lossless: false,
+        keptRounds: msg._trimmedToolRoundCount,
+        labelKey: 'msgAction.continue', titleKey: 'msgAction.continueFromRoundTitle',
+      };
+    }
     let continueH = "";
     if (isLastAssistant && _tsBtn.show) {
       if (_tsBtn.kind === 'regenerate') {
@@ -2070,15 +2214,25 @@ function renderMessage(msg, idx) {
   const epWorkerCls = (!isUser && !msg._isEndpointPlanner && !msg._isEndpointReview) ? ' ep-worker-msg' : '';
   const epPlannerCls = msg._isEndpointPlanner ? ' ep-planner-msg' : '';
   const vuCls = msg._isVirtualUser ? ' vu-user-msg' : '';
-  // ── Per-turn context capsule (floats in the RIGHT GUTTER beside the turn) ──
+  // ── Per-turn context note — TWO surfaces with different DOM homes ──
   // Frozen snapshot of the workspace/tools/model active when this turn was
-  // sent (msg._ctx, captured in the send pipeline). Rendered as a direct
-  // child of `.message` — NOT inside `.message-content` (which clips via
-  // overflow:hidden) — so CSS can place it at left:100% out in the gutter,
-  // clear of both the bubble and the hover action-bar. See info-rail.js.
-  let turnCtxHtml = "";
+  // sent (msg._ctx, captured in the send pipeline). The RAIL (`.turn-ctx`)
+  // is a direct child of `.message` — it occupies the third grid track the
+  // pane owns (see info-rail.js / styles.css `.chat-inner`). The FOLD
+  // (`.tctx-fold`, the one-line fallback shown when the pane grants no rail
+  // track) goes INSIDE `.message-content` between header and body: as a
+  // direct `.message` child it auto-placed into the ZERO-WIDTH rail track
+  // and rendered at width 0 (the 2026-08-03 "disappears at 100%" report).
+  let turnCtxFoldHtml = "";
+  let turnCtxRailHtml = "";
   if (msg._ctx && typeof renderTurnCtxNote === "function") {
-    try { turnCtxHtml = renderTurnCtxNote(msg._ctx); }
+    try {
+      const _tctx = renderTurnCtxNote(msg._ctx);
+      if (_tctx && typeof _tctx === "object") {
+        turnCtxFoldHtml = _tctx.fold || "";
+        turnCtxRailHtml = _tctx.rail || "";
+      }
+    }
     catch (e) { console.debug("[turnCtx] renderTurnCtxNote failed:", e); }
   }
   const badgeHtml = plannerBadge || criticBadge || _initBadge;
@@ -2131,5 +2285,5 @@ function renderMessage(msg, idx) {
    * SVG, badgeHtml, body, branchHtml, actionBtns, the class/attr
    * fragments) is already-trusted HTML, marked raw(). */
   const _classAttr = `${isUser ? ' user-msg' : ''}${_pendingQueuedCls}${msg._isEndpointReview ? ' ep-critic-msg' : ''}${epPlannerCls}${epWorkerCls}${vuCls}${_failedCls}`;
-  return String(safeHtml`<div class="message${raw(_classAttr)}"${raw(idAttr)}${raw(msgIdAttr)}${raw(apRunAttr)}${raw(apSummaryAttr)}${raw(mfpAttr)}><div class="message-avatar">${raw(isUser ? userAvatar : avatarContent)}</div><div class="message-content"><div class="message-header"><span class="message-role">${isUser ? userLabel : roleName}</span>${raw(badgeHtml)}${_queuedIndicator}${raw(messageTimeHtml)}</div><div class="message-body">${raw(body)}</div>${raw(branchHtml)}${raw(actionBtns)}</div>${raw(turnCtxHtml)}</div>`);
+  return String(safeHtml`<div class="message${raw(_classAttr)}"${raw(idAttr)}${raw(msgIdAttr)}${raw(apRunAttr)}${raw(apSummaryAttr)}${raw(mfpAttr)}><div class="message-avatar">${raw(isUser ? userAvatar : avatarContent)}</div><div class="message-content"><div class="message-header"><span class="message-role">${isUser ? userLabel : roleName}</span>${raw(badgeHtml)}${_queuedIndicator}${raw(messageTimeHtml)}</div>${raw(turnCtxFoldHtml)}<div class="message-body">${raw(body)}</div>${raw(branchHtml)}${raw(actionBtns)}</div>${raw(turnCtxRailHtml)}</div>`);
 }

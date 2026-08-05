@@ -274,6 +274,13 @@ def _row_to_task(r, now_ms: int) -> dict:
     except (KeyError, IndexError, TypeError) as e:
         logger.debug('[Board] human_answer field parse failed, defaulting: %s', e)
         human_answer = ''
+    # blocked_by is nullable-safe: a pre-migration row (no column) reads as ''
+    # → the attention surface falls back to created_by_conv for display.
+    try:
+        blocked_by = r['blocked_by'] or ''
+    except (KeyError, IndexError, TypeError) as e:
+        logger.debug('[Board] blocked_by field parse failed, defaulting: %s', e)
+        blocked_by = ''
     # dispatch_target is nullable-safe: a pre-migration row (no column) reads as
     # '' -> dispatch routes to created_by_conv (unchanged).
     try:
@@ -322,6 +329,10 @@ def _row_to_task(r, now_ms: int) -> dict:
         # human's answer ('' while unanswered). See block_task / answer_task.
         'block_question': block_question,
         'human_answer': human_answer,
+        # Provenance of the LAST block (who asked the human). NOT cleared by
+        # answer/complete/reopen — nothing reads it once the block state is
+        # gone, and a fresh block overwrites it.
+        'blocked_by': blocked_by,
         # dispatch_target: mutable routing override (idle-sibling migration).
         # created_by_conv is immutable authorship; this is who runs it NEXT.
         'dispatch_target': dispatch_target,
@@ -387,7 +398,7 @@ def read_board(project_path: str) -> dict:
             'SELECT id, title, status, owner_conv_id, lease_expires_at, '
             '       created_by_conv, depends_on, dispatched, kind, '
             '       blocked_until, block_count, block_reason, block_question, '
-            '       human_answer, wait_paths, '
+            '       human_answer, blocked_by, wait_paths, '
             '       dispatch_target, write_set, created_at, updated_at '
             'FROM project_tasks WHERE project_path=? '
             'ORDER BY created_at ASC', (project_path,)).fetchall()
@@ -737,10 +748,11 @@ def block_task(project_path: str, conv_id: str, task_id: str, reason: str,
         question_json = _clean_block_question(question, options)
         db.execute(
             'UPDATE project_tasks SET blocked_until=?, block_count=?, '
-            'block_reason=?, block_question=?, human_answer=?, updated_at=? '
+            'block_reason=?, block_question=?, human_answer=?, blocked_by=?, '
+            'updated_at=? '
             'WHERE id=? AND project_path=?',
-            (blocked_until, new_count, reason, question_json, '', now,
-             task_id, project_path))
+            (blocked_until, new_count, reason, question_json, '', conv_id,
+             now, task_id, project_path))
         db.commit()
     except Exception as e:
         logger.error('[Board] block failed proj=%.40r task=%s: %s',
@@ -1162,8 +1174,9 @@ def execute_board_tool(fn_name: str, fn_args: dict, *,
                         'yourself — reversible, and a matter of engineering '
                         'judgement rather than taste, policy or credentials — '
                         'reopen it, pick the most robust long-term option, and '
-                        'record the choice with project_charter_commit instead '
-                        'of leaving the epic parked.')
+                        'record the choice with project_charter_propose instead '
+                        'of leaving the epic parked (a proposal is the ONLY '
+                        'agent path into the charter — commit is human-only).')
             return f'Error reporting block: {res.get("error", "unknown")}.'
         return f"Error: Unknown board tool '{fn_name}'"
     except Exception as e:

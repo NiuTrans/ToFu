@@ -14,6 +14,11 @@ import threading
 import time
 from collections import defaultdict
 
+from lib.llm_errors import (
+    RateLimitError,
+    is_subscription_quota_error,
+    parse_subscription_retry_after,
+)
 from lib.log import get_logger
 
 from .factory import get_dispatcher
@@ -51,6 +56,89 @@ except (ValueError, TypeError) as e:
     logger.debug('[Dispatch] TOFU_GATEWAY_OUTAGE_BUDGET_S parse failed, '
                  'using default: %s', e)
     _GATEWAY_OUTAGE_BUDGET_S = 120.0
+
+
+def _saturation_budget_secs() -> float:
+    """Bounded-escalation budget (seconds) for continuous all-slot 429
+    saturation (pt_a21cd6eb 交付①).
+
+    ``TOFU_429_SATURATION_SECS`` (default 0 = disabled). Owner directive
+    2026-08-03: a 429 wall must NEVER interrupt the turn — keep rotating
+    (retrying is free); the legacy infinite-rotation behaviour is the
+    default. Set a positive budget to re-enable the bounded escalation
+    (RateLimitError(is_saturation=True) → llm_fallback model swap).
+    Read per call so tests / ops can toggle without a restart.
+    """
+    try:
+        return float(os.environ.get('TOFU_429_SATURATION_SECS', '') or '0')
+    except (ValueError, TypeError) as e:
+        logger.debug('[Dispatch] TOFU_429_SATURATION_SECS parse failed, '
+                     'using default: %s', e)
+        return 0.0
+
+
+def _force_oauth_token_refresh(oauth: str, log_prefix: str = '') -> bool:
+    """Force an OAuth-subscription token refresh after a mid-flight 401.
+
+    ``resolve_oauth_request`` only refreshes near expiry, so a token
+    revoked/refreshed ELSEWHERE yields a 401 with a locally-"valid" token.
+    Bypass the near-expiry check by calling the provider's refresh function
+    directly. Returns True when a fresh token was stored (caller retries
+    the request ONCE with it). Scoped to subscription slots — plain API-key
+    slots never reach here.
+    """
+    try:
+        if oauth == 'claude':
+            from lib.oauth.claude import claude_refresh_token
+            refreshed = claude_refresh_token()
+        elif oauth == 'codex':
+            from lib.oauth.codex import codex_refresh_token
+            refreshed = codex_refresh_token()
+        else:
+            logger.warning('%s _force_oauth_token_refresh: unknown oauth '
+                           'provider %r', log_prefix, oauth)
+            return False
+    except Exception as e:
+        logger.warning('%s Forced %s token refresh raised: %s',
+                       log_prefix, oauth, e, exc_info=True)
+        return False
+    if refreshed:
+        logger.info('%s Forced %s token refresh succeeded — retrying '
+                    'request once with the new token', log_prefix, oauth)
+        return True
+    logger.warning('%s Forced %s token refresh returned no token',
+                   log_prefix, oauth)
+    return False
+
+
+def _saturation_escalate(log_prefix, label, *, elapsed_s, budget_s, cycles,
+                         model):
+    """Raise the bounded 429-saturation escalation (pt_a21cd6eb 交付①).
+
+    Fires once per dispatch call when EVERY candidate slot has been
+    continuously rate-limited past the budget — the caller (llm_fallback)
+    treats it as a model-swap trigger. ``is_saturation`` keeps it OUT of
+    the key-exhausted-for-today channel: the keys are healthy, merely
+    contended (2026-08-01 incident: a VU carrier spun 3900+ cycles / 75min
+    on a saturated shared-key model while a fallback model sat idle).
+    """
+    logger.warning(
+        '%s %s: 429 saturation — every candidate slot continuously '
+        'rate-limited for %.0fs (budget %.0fs, %d cycles, model=%s) — '
+        'escalating to caller for model fallback',
+        log_prefix, label, elapsed_s, budget_s, cycles, model or '?')
+    try:
+        from lib.log import audit_log as _audit
+        _audit('llm_429_saturation', model=model or '',
+               elapsed_s=round(elapsed_s, 1), cycles=cycles,
+               budget_s=budget_s)
+    except Exception as _ae:
+        logger.debug('%s saturation audit_log failed: %s', log_prefix, _ae)
+    raise RateLimitError(
+        f'429 saturation: all candidate slots continuously rate-limited for '
+        f'{elapsed_s:.0f}s (budget {budget_s:.0f}s, {cycles} cycles)',
+        is_saturation=True, status_code=429,
+        reason=f'saturation:{elapsed_s:.0f}s')
 
 
 def _raise_dispatch_exhausted(last_err, *, max_retries, capability,
@@ -237,7 +325,7 @@ def dispatch_chat(messages, *, max_tokens=4096, temperature=0,
         (content_text: str, usage_dict: dict)
     """
     from lib.llm import BadRequestError, ContentFilterError, InvalidImageError, PermissionError_, PromptTooLongError, RateLimitError, StreamOnlyError, chat
-    from lib.llm_errors import EndpointUnreachableError
+    from lib.llm_errors import EndpointUnreachableError, RequestScopedError
 
     # 2026-05-05 config-surface change (CLAUDE.md §10): per-cycle 429
     # severity downgraded from WARNING → INFO (routine backpressure; the
@@ -251,9 +339,18 @@ def dispatch_chat(messages, *, max_tokens=4096, temperature=0,
     # remember them so the periodic exclusion-reset during 429 cycling doesn't
     # silently re-introduce a model the caller explicitly banned.
     _initial_exclude_models = set(exclude)
-    exclude_keys = set()      # keys to exclude entirely
-    exclude_pairs = set()     # (key_name, model) pairs to exclude (permission errors)
+    exclude_keys = set()      # keys to exclude entirely (transient classes)
+    exclude_pairs = set()     # (key_name, model) pairs to exclude (transient classes)
+    # Durable counterparts (permission/quota) — survive the 60s reset;
+    # see _StreamRetryState.exclude_*_durable for the rationale.
+    exclude_keys_durable = set()
+    exclude_pairs_durable = set()
     last_err = None
+    # Fruit 2 (E2): at most ONE forced OAuth token refresh-retry per
+    # request — a 401 on a subscription slot whose token was revoked/
+    # refreshed elsewhere gets one refresh + one retry before normal
+    # failover applies.
+    _oauth_refresh_used = False
 
     # ★ Pre-exclude stream-only models from non-streaming dispatch.
     #   Models like qwq-plus only support stream=True and will reject
@@ -278,9 +375,24 @@ def dispatch_chat(messages, *, max_tokens=4096, temperature=0,
     _429_count = 0
     _last_exclusion_reset = time.monotonic()  # ★ track when we last reset hard-error exclusions
     _EXCLUSION_RESET_INTERVAL = 60  # reset exclude_pairs every 60s during 429 cycling
+    # 429-saturation clock (pt_a21cd6eb) — set on the first genuine-429
+    # starvation signal. The bounded escalation is DISABLED by default
+    # (owner directive 2026-08-03: 429 walls retry forever); it only fires
+    # when TOFU_429_SATURATION_SECS > 0.
+    _sat_start = None
 
     while hard_attempts < max_retries:
         total_attempts = hard_attempts + _429_count
+
+        # ★ Bounded 429-saturation escalation (mirror of dispatch_stream).
+        _sat_budget = _saturation_budget_secs()
+        if _sat_budget > 0 and _sat_start is not None \
+                and (time.monotonic() - _sat_start) > _sat_budget:
+            _saturation_escalate(
+                log_prefix, 'dispatch_chat',
+                elapsed_s=time.monotonic() - _sat_start,
+                budget_s=_sat_budget, cycles=_429_count,
+                model=prefer_model)
 
         # ★ Periodically reset hard-error exclusions during 429 cycling.
         #   502/timeout errors may be transient (gateway restart), but
@@ -310,8 +422,10 @@ def dispatch_chat(messages, *, max_tokens=4096, temperature=0,
             capability=capability,
             prefer_model=prefer_model,
             exclude_models=_eff_exclude,
-            exclude_keys=exclude_keys if total_attempts > 0 else None,
-            exclude_pairs=exclude_pairs if total_attempts > 0 else None,
+            exclude_keys=(exclude_keys | exclude_keys_durable
+                          if total_attempts > 0 else None),
+            exclude_pairs=(exclude_pairs | exclude_pairs_durable
+                           if total_attempts > 0 else None),
             strict_model=strict_model)
         if slot is None:
             # All slots in cooldown / excluded — wait briefly and retry.
@@ -322,10 +436,14 @@ def dispatch_chat(messages, *, max_tokens=4096, temperature=0,
             #   capable slot exists at all. (Mirror of dispatch_stream.)
             _slots_exist = dispatcher.has_capable_slots(
                 capability, exclude_models=exclude,
-                exclude_keys=exclude_keys, exclude_pairs=exclude_pairs)
+                exclude_keys=exclude_keys | exclude_keys_durable,
+                exclude_pairs=exclude_pairs | exclude_pairs_durable,
+                prefer_model=prefer_model if strict_model else None)
             if _429_count > 0 or _slots_exist:
                 time.sleep(0.3)
                 _429_count += 1
+                if _sat_start is None:
+                    _sat_start = time.monotonic()
                 if _429_count % 20 == 0:
                     logger.info(
                         '%s dispatch_chat: still cycling (slots cooling, %d times), '
@@ -363,6 +481,7 @@ def dispatch_chat(messages, *, max_tokens=4096, temperature=0,
                 provider_id=slot.provider_id or '',
                 api_protocol=slot.protocol or 'openai',
                 oauth=slot.oauth or '',
+                adapter=slot.adapter or None,
             )
             latency = (time.time() - t0) * 1000
             _out_tokens = 0
@@ -397,11 +516,15 @@ def dispatch_chat(messages, *, max_tokens=4096, temperature=0,
                 _is_quota
                 and int(getattr(e, 'status_code', 0) or 0) == 402)
             _err_str = str(e)[:200]
+            # ★ Subscription-quota timed hold: the upstream named the reset
+            #   time (resets_at/resets_in_seconds) — park the slot for that
+            #   explicit duration instead of the 0.5s steering nudge.
             slot.record_error(is_rate_limit=True,
                               is_quota_exhausted=_is_quota,
                               is_account_quota=_is_account_quota,
                               is_gateway=_is_gateway,
                               is_shared_contention=_is_contention,
+                              cooldown_s=getattr(e, 'retry_after_s', None),
                               error=_err_str if _is_quota else '')
             last_err = e
             if _is_contention:
@@ -414,7 +537,8 @@ def dispatch_chat(messages, *, max_tokens=4096, temperature=0,
                 # ★ Persistent billing/quota exhaustion (HTTP 402 or
                 #   429+insufficient_quota). Retrying on this key all day
                 #   is pointless — exclude the entire key and move on.
-                exclude_keys.add(slot.key_name)
+                #   Durable: must survive the 60s 429-cycling reset.
+                exclude_keys_durable.add(slot.key_name)
                 hard_attempts += 1
                 logger.warning(
                     '%s Quota exhausted on %s:%s — disabling key for '
@@ -422,6 +546,8 @@ def dispatch_chat(messages, *, max_tokens=4096, temperature=0,
                     log_prefix, slot.key_name, slot.model, _err_str)
                 continue
             _429_count += 1
+            if _sat_start is None and not _is_gateway:
+                _sat_start = time.monotonic()
             # ★ Don't exclude anything — slot.record_error() sets a 0.5s
             #   cooldown which naturally steers pick_and_reserve to another
             #   slot.  After cooldown the slot is eligible again.
@@ -432,12 +558,15 @@ def dispatch_chat(messages, *, max_tokens=4096, temperature=0,
               # WARNING — only the final exhaustion path (all keys excluded)
               # remains WARNING/ERROR. See CLAUDE.md §10 / audit_log below.
             if _429_count <= 3 or _429_count % 100 == 0:
-                # First few + every 100th kept informative (include body)
+                # First few + every 100th kept informative (include body).
+                # Everything between is DEBUG (2026-08-03 log-bloat guard:
+                # immediate 429 retry = ~3 cycles/s — per-cycle INFO would
+                # write ~11k lines/hour into app.log for one starving task).
                 logger.info(
                     '%s 429 rate-limited on %s:%s (cycle #%d) — body: %s',
                     log_prefix, slot.key_name, slot.model, _429_count, _err_body)
             else:
-                logger.info(
+                logger.debug(
                     '%s 429 rate-limited on %s:%s (cycle #%d)',
                     log_prefix, slot.key_name, slot.model, _429_count)
             time.sleep(0.3)
@@ -445,19 +574,38 @@ def dispatch_chat(messages, *, max_tokens=4096, temperature=0,
             continue
 
         except PermissionError_ as e:
+            # ★ OAuth-subscription slot 401: the stored token was revoked/
+            #   refreshed elsewhere (resolve_oauth_request only refreshes
+            #   near expiry). Force ONE refresh + ONE retry before the
+            #   normal failover below applies. Scoped to oauth slots —
+            #   plain API-key slots keep the pair-exclusion path.
+            if slot.oauth and not _oauth_refresh_used:
+                _oauth_refresh_used = True
+                if _force_oauth_token_refresh(slot.oauth, log_prefix):
+                    slot.release()  # refresh-retry — not a slot-health signal
+                    logger.warning('%s Auth rejected on OAuth slot %s:%s (%s) '
+                                   '— token refreshed, retrying once',
+                                   log_prefix, slot.key_name, slot.model,
+                                   slot.oauth)
+                    continue
+                logger.warning('%s Auth rejected on OAuth slot %s:%s (%s) — '
+                               'forced refresh failed; normal failover',
+                               log_prefix, slot.key_name, slot.model, slot.oauth)
             latency = (time.time() - t0) * 1000
             slot.record_error(is_rate_limit=False, error=str(e)[:200])
             last_err = e
-            exclude_pairs.add((slot.key_name, slot.model))
+            # Durable — an auth rejection cannot heal inside this call.
+            exclude_pairs_durable.add((slot.key_name, slot.model))
             hard_attempts += 1
             # ★ If ALL models for this key have been excluded (all got 401),
             #   exclude the entire key to avoid further wasted attempts.
-            _key_pairs = {(kn, m) for kn, m in exclude_pairs if kn == slot.key_name}
+            _key_pairs = {(kn, m) for kn, m in exclude_pairs_durable
+                          if kn == slot.key_name}
             _key_models = {s.model for s in dispatcher.slots
                            if s.key_name == slot.key_name
                            and (not capability or capability in s.capabilities)}
             if _key_models and _key_models <= {m for _, m in _key_pairs}:
-                exclude_keys.add(slot.key_name)
+                exclude_keys_durable.add(slot.key_name)
                 logger.warning(
                     '%s Permission denied on ALL models for key %s — '
                     'excluding entire key',
@@ -518,6 +666,18 @@ def dispatch_chat(messages, *, max_tokens=4096, temperature=0,
                           'from non-streaming dispatch, trying next model',
                           log_prefix, slot.model)
 
+        except RequestScopedError as e:
+            # Request-scoped 4xx (404/422) — THIS request's semantics, not
+            # slot/model health (CLIProxyAPI isRequestScopedResultError).
+            # Surface untouched: release the inflight reservation, NO
+            # cooldown, NO key_stats feed, NO fallback consumption.
+            slot.release()
+            logger.warning('%s Request-scoped error (HTTP %s) on %s:%s — '
+                           'surfacing to caller: %.300s',
+                           log_prefix, getattr(e, 'status_code', 0) or '?',
+                           slot.key_name, slot.model, str(e))
+            raise
+
         except BadRequestError as e:
             # Deterministic HTTP 400 — a PAYLOAD-level rejection, not slot
             # health. Release the slot (no consecutive_errors → no 300s
@@ -534,6 +694,23 @@ def dispatch_chat(messages, *, max_tokens=4096, temperature=0,
                            log_prefix, slot.key_name, slot.model, str(e))
 
         except Exception as e:
+            # ★ Subscription-quota/capacity signal arriving via a non-429
+            #   wrapper (SSE RetryableAPIError for "selected model is at
+            #   capacity", generic SSE error for usage_limit_reached).
+            #   Treat as rate-limit class with its parsed reset duration —
+            #   never as slot-health damage.
+            if is_subscription_quota_error(str(e)):
+                _ra = parse_subscription_retry_after(str(e))
+                slot.record_error(is_rate_limit=True, cooldown_s=_ra,
+                                  error=str(e)[:200])
+                last_err = e
+                _429_count += 1
+                logger.warning('%s Subscription quota/capacity signal on %s:%s '
+                               '(cooldown %ss) — rotating slot: %s',
+                               log_prefix, slot.key_name, slot.model,
+                               f'{_ra:.0f}' if _ra else '0.5', str(e)[:160])
+                time.sleep(0.3)
+                continue
             latency = (time.time() - t0) * 1000
             slot.record_error(is_rate_limit=False)
             last_err = e
@@ -908,6 +1085,17 @@ class _StreamRetryState:
         self._initial_exclude_models = set(self.exclude)
         self.exclude_keys = set()
         self.exclude_pairs = set()
+        # DURABLE exclusions — permission (401/403) pairs/keys and quota-dead
+        # keys. The transient sets above are cleared every 60s of 429 cycling
+        # (a 502/timeout may be a gateway restart that recovered);
+        # rejection classes cannot heal inside one dispatch call, so
+        # resurrecting them only re-burns a hard attempt on a guaranteed
+        # failure (2026-08-03: a dead kimi-k3 key was re-tried every 60s,
+        # consuming all 3 hard attempts over ~2min). They survive
+        # maybe_reset_exclusions; the NEXT dispatch call still starts fresh,
+        # so a fixed key self-heals between calls.
+        self.exclude_keys_durable = set()
+        self.exclude_pairs_durable = set()
         # Caller-provided avoid set seeds exclude_pairs so the first pick
         # already steers around it; tracked separately so it can be relaxed
         # as a last resort when every other slot is cooled/excluded.
@@ -923,6 +1111,12 @@ class _StreamRetryState:
         # cleared by any real per-key 429 or a success. Used to bound a
         # whole-upstream outage without capping genuine per-key contention.
         self._gateway_streak_start = None
+        # Monotonic timestamp of the FIRST genuine-429 starvation signal in
+        # this dispatch call (None = not starving). Feeds the bounded
+        # saturation escalation (pt_a21cd6eb): real per-key/contention 429s
+        # and 429-equivalent cooldown cycles start the clock; gateway 5xx
+        # has its own streak budget above and never starts this one.
+        self._saturation_start = None
 
     @property
     def total_attempts(self):
@@ -962,6 +1156,12 @@ class _StreamRetryState:
                 self.exclude |= self._initial_exclude_models
                 self.exclude_keys.clear()
                 self.exclude_pairs.clear()
+            if self.exclude_keys_durable or self.exclude_pairs_durable:
+                logger.debug(
+                    '%s %s: durable exclusions survive the reset '
+                    '(permission/quota cannot heal mid-call): keys=%s pairs=%s',
+                    log_prefix, label, self.exclude_keys_durable,
+                    self.exclude_pairs_durable)
             self._last_exclusion_reset = time.monotonic()
 
     def eff_exclude_models(self):
@@ -974,10 +1174,14 @@ class _StreamRetryState:
                                 or self._initial_exclude_models) else None
 
     def eff_exclude_keys(self):
-        return self.exclude_keys if self.total_attempts > 0 else None
+        if self.total_attempts <= 0:
+            return None
+        return self.exclude_keys | self.exclude_keys_durable
 
     def eff_exclude_pairs(self):
-        return self.exclude_pairs if self.total_attempts > 0 else None
+        if self.total_attempts <= 0:
+            return None
+        return self.exclude_pairs | self.exclude_pairs_durable
 
     def relax_avoid_if_exhausted(self):
         """Drop the caller-provided avoid set when every other slot is gone.
@@ -1007,31 +1211,54 @@ class _StreamRetryState:
                 self._gateway_streak_start = time.monotonic()
         else:
             self._gateway_streak_start = None
+            if self._saturation_start is None:
+                self._saturation_start = time.monotonic()
 
     def note_success(self):
         """A slot answered — clear any active gateway-outage streak."""
         self._gateway_streak_start = None
+        self._saturation_start = None
+
+    def saturation_exceeded(self, budget_s):
+        """True when every slot has been 429-starved for > ``budget_s``.
+
+        ``budget_s <= 0`` disables the cap (legacy infinite-rotation
+        behaviour). Requires an active starvation clock — a dispatch that
+        never saw a genuine 429 (e.g. hard-error churn) is not 'saturated'.
+        """
+        if budget_s <= 0 or self._saturation_start is None:
+            return False
+        return (time.monotonic() - self._saturation_start) > budget_s
 
     def note_cooldown_cycle(self):
         """All slots in transient cooldown (slot is None, 429-equivalent)."""
         self._429_count += 1
+        if self._saturation_start is None:
+            self._saturation_start = time.monotonic()
 
     def note_quota_key(self, slot):
-        """Quota-exhausted 429 — disable the key for this dispatch; hard attempt."""
-        self.exclude_keys.add(slot.key_name)
+        """Quota-exhausted 429 — disable the key for this dispatch; hard attempt.
+
+        Durable: a dead balance cannot recover inside one dispatch call, so
+        the periodic 429-cycling reset must not resurrect it."""
+        self.exclude_keys_durable.add(slot.key_name)
         self.hard_attempts += 1
 
     def note_permission_pair(self, slot, dispatcher, capability, log_prefix):
         """Permission denied — exclude the (key, model) PAIR; escalate to a
-        whole-key exclusion only if EVERY model for this key is now excluded."""
-        self.exclude_pairs.add((slot.key_name, slot.model))
+        whole-key exclusion only if EVERY model for this key is now excluded.
+
+        Durable: an auth rejection cannot heal inside one dispatch call (see
+        ``exclude_pairs_durable``)."""
+        self.exclude_pairs_durable.add((slot.key_name, slot.model))
         self.hard_attempts += 1
-        _key_pairs = {(kn, m) for kn, m in self.exclude_pairs if kn == slot.key_name}
+        _key_pairs = {(kn, m) for kn, m in self.exclude_pairs_durable
+                      if kn == slot.key_name}
         _key_models = {s.model for s in dispatcher.slots
                        if s.key_name == slot.key_name
                        and (not capability or capability in s.capabilities)}
         if _key_models and _key_models <= {m for _, m in _key_pairs}:
-            self.exclude_keys.add(slot.key_name)
+            self.exclude_keys_durable.add(slot.key_name)
             logger.warning('%s Permission denied on ALL models for key %s — '
                            'excluding entire key', log_prefix, slot.key_name)
             return True
@@ -1126,7 +1353,7 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
         RateLimitError,
         stream_chat,
     )
-    from lib.llm_errors import EndpointUnreachableError
+    from lib.llm_errors import EndpointUnreachableError, RequestScopedError
 
     def _fire_attempt_restart(reason: str) -> None:
         """Notify the callee an in-flight attempt is being discarded and the
@@ -1142,6 +1369,9 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
 
     dispatcher = get_dispatcher()
     state = _StreamRetryState(exclude_models=exclude_models, avoid_pairs=avoid_pairs)
+    # Fruit 2 (E2): at most ONE forced OAuth token refresh-retry per
+    # request (see dispatch_chat).
+    _oauth_refresh_used = False
 
     # Detect if it's a pre-built body or raw messages
     is_body = isinstance(body_or_messages, dict) and 'messages' in body_or_messages
@@ -1190,6 +1420,19 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
             raise state.last_err or RuntimeError(
                 'Gateway outage: no slot reachable for %.0fs'
                 % _GATEWAY_OUTAGE_BUDGET_S)
+
+        # ★ 429-saturation escalation (pt_a21cd6eb 交付①) — DISABLED by
+        #   default (budget 0, owner directive 2026-08-03: a 429 wall keeps
+        #   rotating, retrying is free, never interrupt the turn). When
+        #   TOFU_429_SATURATION_SECS > 0, every-slot saturation past the
+        #   budget escalates to the caller (llm_fallback swaps models).
+        _sat_budget = _saturation_budget_secs()
+        if state.saturation_exceeded(_sat_budget):
+            _saturation_escalate(
+                log_prefix, 'dispatch_stream',
+                elapsed_s=time.monotonic() - state._saturation_start,
+                budget_s=_sat_budget, cycles=state._429_count,
+                model=prefer_model)
 
         # Log available slots at start of each attempt for debugging
         logger.debug(
@@ -1302,7 +1545,9 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
             #   (b) no capable slot exists at all → genuinely unservable.
             _slots_exist = dispatcher.has_capable_slots(
                 capability, exclude_models=state.exclude,
-                exclude_keys=state.exclude_keys, exclude_pairs=state.exclude_pairs)
+                exclude_keys=state.exclude_keys | state.exclude_keys_durable,
+                exclude_pairs=state.exclude_pairs | state.exclude_pairs_durable,
+                prefer_model=prefer_model if strict_model else None)
             if state._429_count > 0 or _slots_exist:
                 time.sleep(0.3)
                 state.note_cooldown_cycle()
@@ -1325,8 +1570,10 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
                         _causes = dispatcher.cooling_cause_summary(
                             capability,
                             exclude_models=state.exclude,
-                            exclude_keys=state.exclude_keys,
-                            exclude_pairs=state.exclude_pairs)
+                            exclude_keys=(state.exclude_keys |
+                                          state.exclude_keys_durable),
+                            exclude_pairs=(state.exclude_pairs |
+                                           state.exclude_pairs_durable))
                         from lib.llm_dispatch.retry_i18n import (
                             cooldown_wait_label)
                         _reason, _status = cooldown_wait_label(_causes)
@@ -1443,6 +1690,7 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
                 base_url=slot.base_url or None,
                 extra_headers=slot.extra_headers or None,
                 oauth=slot.oauth or '',
+                adapter=slot.adapter or None,
                 on_thinking=on_thinking,
                 on_content=_on_content_wrapper,
                 on_tool_call_ready=on_tool_call_ready,
@@ -1479,11 +1727,14 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
                 _is_quota
                 and int(getattr(e, 'status_code', 0) or 0) == 402)
             _err_str = str(e)[:200]
+            # ★ Subscription-quota timed hold (resets_at/resets_in_seconds)
+            #   — explicit cooldown instead of the 0.5s steering nudge.
             slot.record_error(is_rate_limit=True,
                               is_quota_exhausted=_is_quota,
                               is_account_quota=_is_account_quota,
                               is_gateway=_is_gateway,
                               is_shared_contention=_is_contention,
+                              cooldown_s=getattr(e, 'retry_after_s', None),
                               error=_err_str if _is_quota else '')
             state.last_err = e
             if _is_contention:
@@ -1527,7 +1778,9 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
                     log_prefix, slot.key_name, slot.model, state._429_count,
                     _err_body)
             else:
-                logger.info(
+                # DEBUG between the sparse INFO beats — same log-bloat
+                # guard as dispatch_chat (immediate 429 retry, 2026-08-03).
+                logger.debug(
                     '%s 429 rate-limited on %s:%s (cycle #%d)',
                     log_prefix, slot.key_name, slot.model, state._429_count)
             if on_retry:
@@ -1546,6 +1799,22 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
             continue
 
         except PermissionError_ as e:
+            # ★ OAuth-subscription slot 401: force ONE token refresh + ONE
+            #   retry before the normal failover below (see dispatch_chat).
+            #   Scoped to oauth slots — API-key slots keep pair exclusion.
+            if slot.oauth and not _oauth_refresh_used:
+                _oauth_refresh_used = True
+                if _force_oauth_token_refresh(slot.oauth, log_prefix):
+                    slot.release()  # refresh-retry — not a slot-health signal
+                    logger.warning('%s Auth rejected on OAuth slot %s:%s (%s) '
+                                   '— token refreshed, retrying once',
+                                   log_prefix, slot.key_name, slot.model,
+                                   slot.oauth)
+                    _fire_attempt_restart('oauth token refreshed — retrying')
+                    continue
+                logger.warning('%s Auth rejected on OAuth slot %s:%s (%s) — '
+                               'forced refresh failed; normal failover',
+                               log_prefix, slot.key_name, slot.model, slot.oauth)
             slot.record_error(is_rate_limit=False)
             state.last_err = e
             # ★ Exclude the (key, model) PAIR; escalate to a whole-key
@@ -1602,6 +1871,17 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
                            '(same image = same rejection)', tag)
             raise   # ★ Same payload = same rejection on all keys
 
+        except RequestScopedError as e:
+            # Request-scoped 4xx (404/422) — THIS request's semantics, not
+            # slot/model health (CLIProxyAPI isRequestScopedResultError).
+            # Surface untouched: no cooldown, no key_stats, no fallback.
+            slot.release()
+            logger.warning('%s Request-scoped error (HTTP %s) on %s:%s — '
+                           'surfacing to caller: %.300s',
+                           log_prefix, getattr(e, 'status_code', 0) or '?',
+                           slot.key_name, slot.model, str(e))
+            raise
+
         except BadRequestError as e:
             # Deterministic HTTP 400 — PAYLOAD-level, not slot health (see
             # the sync dispatch_chat branch). Release + pair-exclude only.
@@ -1617,6 +1897,26 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
                          reason='Upstream error', status_code=400)
 
         except Exception as e:
+            # ★ Subscription-quota/capacity signal via a non-429 wrapper
+            #   (SSE RetryableAPIError / generic SSE error) — rate-limit
+            #   class with parsed reset duration, NOT slot-health damage.
+            if is_subscription_quota_error(str(e)):
+                _ra = parse_subscription_retry_after(str(e))
+                slot.record_error(is_rate_limit=True, cooldown_s=_ra,
+                                  error=str(e)[:200])
+                state.last_err = e
+                state.note_free_429()
+                logger.warning('%s Subscription quota/capacity signal on %s:%s '
+                               '(cooldown %ss) — rotating slot: %s',
+                               log_prefix, slot.key_name, slot.model,
+                               f'{_ra:.0f}' if _ra else '0.5', str(e)[:160])
+                if on_retry:
+                    on_retry(attempt=state._429_count,
+                             reason='Subscription quota reached',
+                             status_code=429)
+                _fire_attempt_restart('subscription quota reached — rotating slot')
+                time.sleep(0.3)
+                continue
             latency = (time.time() - t0) * 1000
             slot.record_error(is_rate_limit=False)
             state.last_err = e
@@ -1706,10 +2006,13 @@ async def async_dispatch_stream(body_or_messages, *, on_thinking=None,
     )
     from lib.llm._transport import async_abortable_sleep
     from lib.llm.astream import async_stream_chat
-    from lib.llm_errors import EndpointUnreachableError
+    from lib.llm_errors import EndpointUnreachableError, RequestScopedError
 
     dispatcher = get_dispatcher()
     state = _StreamRetryState(exclude_models=exclude_models, avoid_pairs=avoid_pairs)
+    # Fruit 2 (E2): at most ONE forced OAuth token refresh-retry per
+    # request (see dispatch_chat).
+    _oauth_refresh_used = False
     is_body = isinstance(body_or_messages, dict) and 'messages' in body_or_messages
 
     while state.hard_attempts < max_retries:
@@ -1729,6 +2032,16 @@ async def async_dispatch_stream(body_or_messages, *, on_thinking=None,
 
         state.maybe_reset_exclusions(log_prefix, 'async_dispatch_stream')
 
+        # ★ 429-saturation escalation (lockstep with sync dispatch_stream
+        #   — pt_a21cd6eb 交付①; disabled by default since 2026-08-03).
+        _sat_budget = _saturation_budget_secs()
+        if state.saturation_exceeded(_sat_budget):
+            _saturation_escalate(
+                log_prefix, 'async_dispatch_stream',
+                elapsed_s=time.monotonic() - state._saturation_start,
+                budget_s=_sat_budget, cycles=state._429_count,
+                model=prefer_model)
+
         slot = dispatcher.pick_and_reserve(
             capability=capability, prefer_model=prefer_model,
             exclude_models=state.eff_exclude_models(),
@@ -1740,7 +2053,9 @@ async def async_dispatch_stream(body_or_messages, *, on_thinking=None,
                 continue
             _slots_exist = dispatcher.has_capable_slots(
                 capability, exclude_models=state.exclude,
-                exclude_keys=state.exclude_keys, exclude_pairs=state.exclude_pairs)
+                exclude_keys=state.exclude_keys | state.exclude_keys_durable,
+                exclude_pairs=state.exclude_pairs | state.exclude_pairs_durable,
+                prefer_model=prefer_model if strict_model else None)
             if state._429_count > 0 or _slots_exist:
                 await async_abortable_sleep(0.3, abort_check)
                 state.note_cooldown_cycle()
@@ -1797,6 +2112,7 @@ async def async_dispatch_stream(body_or_messages, *, on_thinking=None,
                 base_url=slot.base_url or None,
                 extra_headers=slot.extra_headers or None,
                 oauth=slot.oauth or '',
+                adapter=slot.adapter or None,
                 on_thinking=on_thinking,
                 on_content=_on_content_wrapper,
                 on_tool_call_ready=on_tool_call_ready,
@@ -1820,10 +2136,13 @@ async def async_dispatch_stream(body_or_messages, *, on_thinking=None,
             _is_account_quota = bool(
                 _is_quota
                 and int(getattr(e, 'status_code', 0) or 0) == 402)
+            # ★ Subscription-quota timed hold (resets_at/resets_in_seconds)
+            #   — explicit cooldown instead of the 0.5s steering nudge.
             slot.record_error(is_rate_limit=True, is_quota_exhausted=_is_quota,
                               is_account_quota=_is_account_quota,
                               is_gateway=_is_gateway,
                               is_shared_contention=_is_contention,
+                              cooldown_s=getattr(e, 'retry_after_s', None),
                               error=str(e)[:200] if _is_quota else '')
             state.last_err = e
             if _is_contention:
@@ -1850,6 +2169,20 @@ async def async_dispatch_stream(body_or_messages, *, on_thinking=None,
             continue
 
         except PermissionError_ as e:
+            # ★ OAuth-subscription slot 401: force ONE token refresh + ONE
+            #   retry before normal failover (see dispatch_chat).
+            if slot.oauth and not _oauth_refresh_used:
+                _oauth_refresh_used = True
+                if _force_oauth_token_refresh(slot.oauth, log_prefix):
+                    slot.release()  # refresh-retry — not a slot-health signal
+                    logger.warning('%s Auth rejected on OAuth slot %s:%s (%s) '
+                                   '— token refreshed, retrying once',
+                                   log_prefix, slot.key_name, slot.model,
+                                   slot.oauth)
+                    continue
+                logger.warning('%s Auth rejected on OAuth slot %s:%s (%s) — '
+                               'forced refresh failed; normal failover',
+                               log_prefix, slot.key_name, slot.model, slot.oauth)
             slot.record_error(is_rate_limit=False)
             state.last_err = e
             if not state.note_permission_pair(slot, dispatcher, capability, log_prefix):
@@ -1893,6 +2226,16 @@ async def async_dispatch_stream(body_or_messages, *, on_thinking=None,
             logger.warning('%s Image content error — not retrying', tag)
             raise
 
+        except RequestScopedError as e:
+            # Request-scoped 4xx (404/422) — THIS request's semantics, not
+            # slot/model health (CLIProxyAPI isRequestScopedResultError).
+            slot.release()
+            logger.warning('%s Request-scoped error (HTTP %s) on %s:%s — '
+                           'surfacing to caller: %.300s',
+                           log_prefix, getattr(e, 'status_code', 0) or '?',
+                           slot.key_name, slot.model, str(e))
+            raise
+
         except BadRequestError as e:
             # Deterministic HTTP 400 — PAYLOAD-level, not slot health (see
             # the sync dispatch_chat branch). Release + pair-exclude only.
@@ -1908,6 +2251,24 @@ async def async_dispatch_stream(body_or_messages, *, on_thinking=None,
                          reason='Upstream error', status_code=400)
 
         except Exception as e:
+            # ★ Subscription-quota/capacity signal via a non-429 wrapper —
+            #   rate-limit class with parsed reset duration.
+            if is_subscription_quota_error(str(e)):
+                _ra = parse_subscription_retry_after(str(e))
+                slot.record_error(is_rate_limit=True, cooldown_s=_ra,
+                                  error=str(e)[:200])
+                state.last_err = e
+                state.note_free_429()
+                logger.warning('%s Subscription quota/capacity signal on %s:%s '
+                               '(cooldown %ss) — rotating slot: %s',
+                               log_prefix, slot.key_name, slot.model,
+                               f'{_ra:.0f}' if _ra else '0.5', str(e)[:160])
+                if on_retry:
+                    on_retry(attempt=state._429_count,
+                             reason='Subscription quota reached',
+                             status_code=429)
+                await async_abortable_sleep(0.3, abort_check)
+                continue
             slot.record_error(is_rate_limit=False)
             state.last_err = e
             _is_timeout = 'timed out' in str(e).lower() or 'timeout' in type(e).__name__.lower()
@@ -1993,6 +2354,7 @@ def dispatch_fastest(messages, *, max_tokens=4096, temperature=0,
                 provider_id=slot.provider_id or '',
                 api_protocol=slot.protocol or 'openai',
                 oauth=slot.oauth or '',
+                adapter=slot.adapter or None,
             )
             latency = (time.time() - t0) * 1000
             _out_tokens = 0

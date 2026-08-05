@@ -603,16 +603,20 @@ def test_cross_tab_case2_fills_terminal_fields_without_growth():
 @pytest.mark.skipif(not _node_available(), reason='node not installed')
 def test_NC_helper_call_is_load_bearing_in_cross_tab(tmp_path):
     """NEUTER: strip the ``_mergeTerminalTurnFields(...)`` CALL in
-    cross_tab_sync.js Case 2 on a COPY → with equal content length nothing
-    lands and no repaint fires → red. Real file untouched."""
+    cross_tab_sync.js on a COPY → with equal content length nothing
+    lands and no repaint fires → red. Real file untouched.
+
+    The call lives in ``_adoptTailGrowthFromServer`` — d3f9078e extracted the
+    trailing-turn adoption out of the legacy Case 2 so the windowed anchor
+    pair shares it; the neuter target follows the helper, not the call site."""
     js = os.path.join(JS_DIR, 'core', 'cross_tab_sync.js')
     with open(js, encoding='utf-8') as f:
         src = f.read()
 
-    needle = """      if (_mergeTerminalTurnFields(am, serverLast) > 0) {
-        conv.updatedAt = data.updatedAt || data.updated_at || conv.updatedAt;
-        changed = true;
-      }"""
+    needle = """  if (_mergeTerminalTurnFields(am, serverLast) > 0) {
+    conv.updatedAt = data.updatedAt || data.updated_at || conv.updatedAt;
+    changed = true;
+  }"""
     assert src.count(needle) == 1, (
         'cross-tab helper-call fragment drifted — update the neuter target')
     neutered = src.replace(needle, '', 1)

@@ -23,6 +23,12 @@ The panel mounted by the `</> R{n}` entry next to a tool row.
      conversation-history dump.
   2. NO cross-round chip strip.
 
+2026-08-04 owner directive — pinned in §7:
+  When NO exact increment exists (round 1, previous payload missing,
+  diverged prefix), a state mirror degrades to its TAIL slice — the
+  assistant tool_call message + its results — never the full payload with
+  the system prompt ("just the tool call and the result").
+
 Kept contract (the P7 baseline):
   • The panel mounts INLINE right after the tool slot, fetches payloads with
     kind='state', and renders through the SHARED debug renderer
@@ -77,6 +83,7 @@ const dom = new JSDOM(
   '  <div data-prn="1"><div class="ri-tool-anchor-row" data-ri-state="task-T1:2"></div></div>' +
   '  <div data-prn="2"><div class="ri-tool-anchor-row" data-ri-state="task-T1:3"></div></div>' +
   '  <div data-prn="3"><div class="ri-tool-anchor-row" data-ri-state="task-T1:5"></div></div>' +
+  '  <div data-prn="4"><div class="ri-tool-anchor-row" data-ri-state="task-T1:9"></div></div>' +
   '</div></body>',
   { url: 'http://localhost/' });
 const win = dom.window;
@@ -98,7 +105,7 @@ const _I18N = {
   'ri.prefixFold': 'prefix {k} vs {base}',
   'ri.toolAnchorTip': 'View request that generated this tool (Round {round})',
   'ri.stateRowTip': 'jump to the tool call',
-  'ri.stateEmpty': 'State mirror expired or missing',
+  'ri.stateEmpty': 'No state mirror for this round',
   'ri.stateClose': 'Close state inspector',
   'ri.tabRequest': 'Request', 'ri.tabState': 'Result state',
   'ri.stateKindTip': 'state after the tools ran',
@@ -124,7 +131,10 @@ const HIST = [
   { role: 'system', content: 'SYS' },
   { role: 'user', content: 'HIST-u1' },
 ];
-const NO_STATE_ROUNDS = new Set(['5']);
+/* '8' has NO state mirror either: it is the MISSING PREVIOUS round for the
+ * degraded-scoping scenario (§7) — round 9's state exists, round 8's does
+ * not, so no exact increment can be computed. */
+const NO_STATE_ROUNDS = new Set(['5', '8']);
 function reqMsgs(roundNum) {
   const base = HIST.slice();
   if (Number(roundNum) >= 2)
@@ -163,6 +173,22 @@ win.Api = global.Api = {
     getRequestPayload: async (taskId, roundNum, turn, kind) => {
       CALLS.payloads.push({ roundNum: String(roundNum), turn: turn || '', kind: kind || '' });
       if (kind === 'state' && NO_STATE_ROUNDS.has(String(roundNum))) return null;
+      /* Round 9 state: a REAL post-tool mirror shape — history + system
+       * prompt, then the assistant tool_call + its result at the tail. Its
+       * previous round (8) has no mirror, so the panel must fall back to
+       * slicing this tail, never dump SYS9/HIST9 (owner, 2026-08-04). */
+      if (kind === 'state' && String(roundNum) === '9') {
+        return { taskId, roundNum, turn: '', kind: 'state', model: 'm',
+          params: {}, label: 'R9', tools: [],
+          messages: [
+            { role: 'system', content: 'SYS9-marker' },
+            { role: 'user', content: 'HIST9-marker' },
+            { role: 'assistant', content: 'A9-text',
+              tool_calls: [{ id: 'c9', type: 'function',
+                function: { name: 'run_command', arguments: '{"cmd":"t9"}' } }] },
+            { role: 'tool', tool_call_id: 'c9', content: 'RESULT9-marker' },
+          ] };
+      }
       const msgs = (kind === 'state') ? stateMsgs(roundNum) : reqMsgs(roundNum);
       return { taskId, roundNum, turn: turn || '', kind: kind || 'request',
         model: 'm', params: {}, label: 'R' + roundNum, tools: [],
@@ -271,7 +297,7 @@ function expandAll(root) {
     !!panel5 && panel5.dataset.riKind === 'request' &&
     t5.indexOf('NEW-t5') !== -1);
   check('mirrorless_round_is_not_empty',
-    t5.indexOf('State mirror expired') === -1);
+    t5.indexOf('No state mirror') === -1);
   const kind5 = panel5 && panel5.querySelector('.ri-state-panel-kind');
   check('fallback_axis_labelled_as_request',
     !!kind5 && kind5.textContent === 'Request' &&
@@ -288,6 +314,23 @@ function expandAll(root) {
   const dbg = document.getElementById('debugContent');
   check('fallback_renders_in_drawer',
     expandAll(dbg) > 0 && dbg.innerHTML.indexOf('STATE-t7') !== -1);
+
+  /* ── 7. Degraded scoping (previous round's payload missing) → the TAIL
+   *      slice: the tool call + its result, NEVER the system prompt or
+   *      history dump (owner, 2026-08-04: "just the tool call and the
+   *      result"). Round 9's state exists; round 8's does not. ── */
+  await openStateInspector('task-T1', 9);
+  await sleep(30);
+  const panel9 = document.querySelector('.ri-state-panel');
+  const body9 = panel9 && panel9.querySelector('.ri-state-body');
+  if (body9) expandAll(body9);
+  const t9 = body9 ? body9.textContent : '';
+  check('degraded_still_state_axis',
+    !!panel9 && panel9.dataset.riKind === 'state');
+  check('degraded_shows_tool_call', t9.indexOf('run_command') !== -1);
+  check('degraded_shows_tool_result', t9.indexOf('RESULT9-marker') !== -1);
+  check('degraded_hides_system_prompt', t9.indexOf('SYS9-marker') === -1);
+  check('degraded_hides_history', t9.indexOf('HIST9-marker') === -1);
 
   console.log(out.join('\n'));
 })().catch(e => { console.log('FAIL harness_exception ' + (e && e.stack || e)); });

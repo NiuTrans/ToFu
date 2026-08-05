@@ -12,6 +12,11 @@
 //  Streaming UI
 // ══════════════════════════════════════════════
 function _ensureStreamZones(body) {
+  /* ★ Model-fallback zone sits at the TOP of the bubble (first child) —
+   * retrofit it into bodies seeded before it existed. */
+  if (!body.querySelector('[data-zone="fallback"]')) {
+    body.insertAdjacentHTML('afterbegin', '<div data-zone="fallback"></div>');
+  }
   if (body.querySelector('[data-zone="tool"]')) return;
   /* ★ FIX (blank streaming bubble on tablet): this innerHTML assignment WIPES
    *   the "Preparing…/等待中…" pulse that _streamingBubbleHTML seeded into
@@ -29,6 +34,7 @@ function _ensureStreamZones(body) {
     escapeHtml(typeof t === 'function' ? t('stream.phase.waiting') : 'Waiting…') +
     '</div>';
   body.innerHTML =
+    '<div data-zone="fallback"></div>' +
     '<div data-zone="memprefetch"></div>' +
     '<div data-zone="swarmInbox"></div>' +  /* async swarm-update chips */
     '<div data-zone="tool"></div>' +
@@ -90,10 +96,132 @@ function _getStreamZones() {
   }
   return _streamZoneCache;
 }
+
+/* ── Tool-label composition for the phase rows (owner directive 2026-08-03) ──
+ * The backend ships STRUCTURED raw tool names on the phase events
+ * (`phase.tools` for tool_exec, `phase.toolContextTools` for the round-open
+ * llm_thinking suffix) so the client composes the label in the UI language;
+ * the pre-joined English `detail` / `toolContext` strings remain the
+ * headless / legacy fallback. No emoji anywhere — this row renders its own
+ * SVG iconography, an emoji in the label is a second inconsistent source. */
+function _toolLabelText(name) {
+  if (!name) return '';
+  /* MCP namespaced tool: mcp__server__tool → server/tool (mirrors the
+   * backend tool_label fallback, minus the retired 🔌 prefix). */
+  if (name.slice(0, 5) === 'mcp__') {
+    const parts = name.split('__');
+    if (parts.length >= 3) return parts[1] + '/' + parts.slice(2).join('__');
+  }
+  if (typeof t === 'function') {
+    /* Inline literal prefix (NEVER an intermediate variable): the boot-key
+     * static scan (lib/i18n_boot_keys.py T_CALL_DYNAMIC_PREFIX_RE) only
+     * discovers a dynamic call written INLINE like the one below —
+     * t(identifier) is invisible and would drop the whole tool.label.*
+     * namespace from the boot pack. */
+    const v = t('tool.label.' + name);
+    /* t() falls back to the key itself for an unmapped tool — then the raw
+     * tool name is the honest label (future / custom tools). */
+    if (v && v !== 'tool.label.' + name) return v;
+  }
+  return name;
+}
+function _toolLabelJoin() {
+  return (typeof t === 'function') ? t('tool.label.join') : ', ';
+}
+/* The tool_exec phase row text: N counted over the CALLS (phase.tools keeps
+ * duplicates), labels deduped + localized. Falls back to the legacy English
+ * `detail` when no structured list is present (VU forward / old replay).
+ * NOTE: the fallback is deliberately SELF-CONTAINED (p.detail) — the
+ * i18n-resolving _phaseDetailText is nested inside updateStreamingUI and
+ * is NOT reachable from this module-level helper (a blind call here is a
+ * ReferenceError on exactly the rare VU-forwarded frame it meant to serve). */
+function _toolExecPhaseText(p) {
+  const names = (p && Array.isArray(p.tools)) ? p.tools.filter(Boolean) : [];
+  if (!names.length || typeof t !== 'function') return (p && p.detail) || '';
+  const seen = {};
+  const labels = [];
+  for (const nm of names) {
+    if (seen[nm]) continue;
+    seen[nm] = 1;
+    labels.push(_toolLabelText(nm));
+  }
+  if (names.length === 1) return t('stream.phase.toolExec', { tool: labels[0] });
+  return t('stream.phase.toolExecMulti', { n: names.length, tools: labels.join(_toolLabelJoin()) });
+}
+/* The round-open llm_thinking suffix: the PREVIOUS round's tools, composed
+ * from toolContextTools when the backend shipped them (localized), else the
+ * raw English toolContext string verbatim (legacy fallback). */
+function _toolContextPhaseText(p) {
+  const names = (p && Array.isArray(p.toolContextTools)) ? p.toolContextTools.filter(Boolean) : [];
+  if (!names.length || typeof t !== 'function') return (p && p.toolContext) || '';
+  const seen = {};
+  const labels = [];
+  for (const nm of names) {
+    if (seen[nm]) continue;
+    seen[nm] = 1;
+    labels.push(_toolLabelText(nm));
+  }
+  return t('stream.phase.toolContext', { tools: labels.join(_toolLabelJoin()) });
+}
+/* ★ Model-fallback banner builder — '' unless fallbackModel is set.
+ * The banner names BOTH models (from → to) and carries the typed reason in
+ * the tooltip (and, when present, inline). Cause formatting comes from the
+ * SINGLE source — fallbackCauseParts(msg) in core/error_envelope.js — so
+ * this live banner and the settled finish-tag can never name one failure
+ * two ways (tests/test_frontend_finish_tag_fallback_cause.py). Everything
+ * interpolated goes through escapeHtml; i18n keys stream.fallback.banner /
+ * .bannerTip. */
+function renderModelFallbackBannerHtml(msg) {
+  if (!msg || !msg.fallbackModel) return '';
+  const _esc = (typeof escapeHtml === 'function') ? escapeHtml : (s) => String(s == null ? '' : s);
+  const from = msg.fallbackFrom || '', to = msg.fallbackModel || '';
+  const _fb = (typeof fallbackCauseParts === 'function')
+    ? fallbackCauseParts(msg)
+    /* Isolated eval contexts (JSDOM harnesses loading this file alone) have
+     * no core/error_envelope.js — degrade to the verbatim cause, mirroring
+     * finish_info.js's own fallback. */
+    : { kindLabel: '', detail: String(msg.fallbackReason || msg.fallbackKind || ''),
+        shown: String(msg.fallbackReason || ''),
+        hasCause: !!(msg.fallbackReason || msg.fallbackKind) };
+  const label = (typeof t === 'function'
+    ? t('stream.fallback.banner') : '') || 'Primary model failed — auto-switched';
+  let tip = (typeof t === 'function'
+    ? t('stream.fallback.bannerTip', { from, to, reason: _fb.detail }) : '') || '';
+  /* The tooltip MUST carry the cause verbatim — a renderer/i18n table whose
+   * template drops {reason} cannot hide it (guarded by the banner suite). */
+  if (_fb.detail && tip.indexOf(_fb.detail) === -1) {
+    tip = (tip ? tip + '\n' : '') + _fb.detail;
+  }
+  const icon = (typeof Icon === 'function') ? Icon('alert', 12) : '';
+  return '<div class="fallback-banner" title="' + _esc(tip) + '">'
+    + '<span class="fb-icon">' + icon + '</span>'
+    + '<span class="fb-text">'
+    + (_fb.kindLabel ? '<span class="fb-kind">' + _esc(_fb.kindLabel) + '</span>' : '')
+    + _esc(label) + ' '
+    + '<span class="fb-models">' + _esc(from) + ' → ' + _esc(to) + '</span>'
+    + (_fb.shown ? '<span class="fb-reason"><span class="fb-reason-label"></span>' + _esc(_fb.shown) + '</span>' : '')
+    + '</span></div>';
+}
+
 function updateStreamingUI(msg) {
   const zones = _getStreamZones();
   if (!zones) return;
   const { body, memprefetch: memprefetchZone, tool: toolZone, think: thinkZone, content: contentZone, fc: fcZone } = zones;
+  /* ★ Model-fallback banner: painted into the TOP zone, fingerprint-gated
+   * (data-fb-key) so an unchanged frame never rewrites the DOM, and CLEARED
+   * the moment a frame arrives without fallbackModel (e.g. the final frame
+   * after the fallback produced its answer — the settled finish-tag takes
+   * over from there). */
+  const fbZone = body.querySelector('[data-zone="fallback"]');
+  if (fbZone) {
+    const fbKey = (msg && msg.fallbackModel)
+      ? [msg.fallbackModel, msg.fallbackFrom, msg.fallbackReason, msg.fallbackKind].join('|')
+      : '';
+    if (fbZone.getAttribute('data-fb-key') !== fbKey) {
+      fbZone.setAttribute('data-fb-key', fbKey);
+      fbZone.innerHTML = renderModelFallbackBannerHtml(msg);
+    }
+  }
   let statusZone = zones.status;
   if (!statusZone) {
     /* ★ Lazy-create the status zone: a bubble template may omit it (the
@@ -117,13 +245,30 @@ function updateStreamingUI(msg) {
   }
   const rounds = msg.toolRounds || [];
   const hasActiveSearch = rounds.some((r) => r.status === "searching");
+  /* ★ In-flight tool verdict for the tool_exec phase row (owner report
+   *   2026-08-03 — the "✏️ Applying changes…" stale-phase desync). The row
+   *   is only truthful while a round is genuinely IN-FLIGHT; the moment
+   *   every round settles, the phase is a stale leftover of the dispatch
+   *   announcement (it is retired only by the NEXT phase/content event),
+   *   and rendering it claims a tool is running when none is — the user
+   *   then hunts for a tool card that isn't there. 'searching' alone
+   *   under-covers: an approval / human-input / stdin wait is still
+   *   in-flight (and is exactly when no OTHER UI announces the tool at the
+   *   phase-row position), so those count too. Terminal verdicts mirror
+   *   stream_reducer.js _TERMINAL_ROUND_STATUS — kept as a local literal
+   *   because the deferred-bundle load order can't guarantee that const
+   *   is visible here. */
+  const _TOOL_INFLIGHT_STATUS = { searching: 1, executing: 1, submitted: 1,
+    pending_approval: 1, awaiting_human: 1, awaiting_stdin: 1 };
+  const hasInFlightTool = rounds.some((r) => _TOOL_INFLIGHT_STATUS[r.status] === 1);
   _syncToolRoundsDOM(toolZone, rounds);
   /* ★ Async swarm: render inbox-inject chips above the tool zone so the
    *   user sees "received N async swarm updates" the moment they land. */
   const _swarmInboxZone = zones.swarmInbox;
   if (_swarmInboxZone) {
     const injects = msg._inboxInjects || [];
-    const html = _buildSwarmInboxChipsHTML(injects);
+    const html = (typeof _buildSwarmInboxChipsHTML === 'function')
+      ? _buildSwarmInboxChipsHTML(injects) : '';  // module DEFERRED (Epic-E sub-5B)
     /* Use a fingerprint to avoid pointless DOM rewrites */
     let fp = 0;
     for (const inj of injects) {
@@ -454,8 +599,9 @@ function updateStreamingUI(msg) {
     const icon = _phaseIcons[phase.phase];
     const _txt = _phaseDetailText(phase);
     _phaseKey = "think:" + (phase.detailKey || phase.detail) + (phase.toolContext || "");
-    const ctx = phase.toolContext
-      ? `<span class="stream-phase-ctx">${escapeHtml(phase.toolContext)}</span>`
+    const _ctxTxt = _toolContextPhaseText(phase);
+    const ctx = _ctxTxt
+      ? `<span class="stream-phase-ctx">${escapeHtml(_ctxTxt)}</span>`
       : "";
     _phaseHtml = `<div class="stream-phase"><span class="stream-phase-icon">${icon}</span><span class="stream-phase-text">${escapeHtml(_txt)}${ctx}</span><span class="stream-phase-dots"><span>.</span><span>.</span><span>.</span></span></div>`;
   } else if (phase && phase.phase === "waiting_model" && !hasActiveSearch) {
@@ -490,9 +636,23 @@ function updateStreamingUI(msg) {
      *   keep distinct identity. */
     _phaseKey = "retry:" + (phase.attempt || 0) + ":" + _txt;
     _phaseHtml = `<div class="stream-phase stream-phase-retrying"><span class="stream-phase-icon">${Icon('refresh', 14)}</span><span class="stream-phase-text">${escapeHtml(_txt)}</span><span class="stream-phase-dots"><span>.</span><span>.</span><span>.</span></span></div>`;
-  } else if (phase && phase.phase === "tool_exec" && !hasActiveSearch) {
-    const _txt = _phaseDetailText(phase);
-    _phaseKey = "exec:" + (phase.detailKey || phase.detail);
+  } else if (phase && phase.phase === "tool_exec" && !hasActiveSearch && hasInFlightTool) {
+    /* ★ Gate (owner report 2026-08-03): render ONLY while a tool round is
+     *   genuinely in-flight — a settled-everything tool_exec phase is the
+     *   stale window between the last tool_result and the next round's
+     *   phase, where the row claims a tool is running when none is (the
+     *   "phase says Applying changes but only settled cards are visible"
+     *   desync). With no in-flight tool we fall THROUGH to the content-
+     *   based branches, which honestly show waiting / reasoning / none.
+     *   `hasActiveSearch` stays in the gate: while a round is searching
+     *   the tool CARDS own the running display (the 'search' branch
+     *   blanks this row) — the phase row's unique value is the
+     *   approval / human-wait window the cards can't headline. */
+    const _txt = _toolExecPhaseText(phase);
+    /* Key on the RESOLVED text (same ruling as the retrying branch): the
+     *   status zone repaints only when the key changes, and the resolved
+     *   label is what the user can actually perceive. */
+    _phaseKey = "exec:" + _txt;
     _phaseHtml = `<div class="stream-phase"><span class="stream-phase-text">${escapeHtml(_txt)}</span><span class="stream-phase-dots"><span>.</span><span>.</span><span>.</span></span></div>`;
   } else if (phase && phase.phase === "working" && (phase.detailKey || phase.detail)) {
     /* Generic "working" phase from external backends (e.g. "Initializing Claude Code...") */
@@ -515,13 +675,17 @@ function updateStreamingUI(msg) {
     _phaseKey = "none";
     _phaseHtml = "";
   }
-  /* ★ Stall banner (pt_e0ea29f2 — the "no unannounced freeze" watch). When
-   *   the ONLY frames arriving are heartbeat self-ticks past the threshold,
-   *   stall_watch.js flags the task and THIS seam paints the announcement —
-   *   it takes precedence over every other phase (a frozen tool's phase row
-   *   is blank by design, which is exactly the dead zone the user reported).
-   *   Read on EVERY repaint so a late real event flips it back off
-   *   (self-healing, same as the swarm stalled-card). */
+  /* ★ Stall banner (pt_e0ea29f2 — the "no unannounced freeze" watch;
+   *   regime split, owner ruling 2026-08-04). stall_watch.js flags the task
+   *   only when NOTHING has arrived past the threshold — not even a
+   *   heartbeat self-tick — and THIS seam paints the announcement (it takes
+   *   precedence over every other phase: a frozen stream's phase row is
+   *   blank by design, exactly the dead zone the user reported). A tool
+   *   merely EXECUTING silently (heartbeats flowing) is normal and never
+   *   raises this card — the tool row already counts the seconds, and the
+   *   backend reaper owns the genuinely-wedged case. Read on EVERY repaint
+   *   so a late real event flips it back off (self-healing, same as the
+   *   swarm stalled-card). */
   const _swTaskId = (function () {
     if (typeof conversations === 'undefined' || typeof activeConvId === 'undefined') return null;
     const _c = conversations.find(x => x.id === activeConvId);
@@ -923,9 +1087,9 @@ function _syncToolRoundsDOM(container, rounds) {
          *   Swarm panels are also tall and re-render frequently — same treatment. */
         const _isInteractive = round.status === "awaiting_human" || round.status === "awaiting_stdin"
           || round.status === "pending_approval";
-        const _renderRow = (r, active) => _isRoundSwarm(r)
+        const _renderRow = (r, active) => (_isRoundSwarm(r) && typeof _buildSwarmPanelHTML === 'function')
           ? _buildSwarmPanelHTML(r, toolRounds)
-          : _renderUnifiedToolLine(r, active);
+          : _renderUnifiedToolLine(r, active);  // panel DEFERRED: generic line until it lands (Epic-E sub-5B)
         /* ★ Data-driven completion: the slot remembers the status it was
          *   last rendered at (`data-rendered-status`). The "settle this
          *   slot to done" decision below keys off a status MISMATCH, not
@@ -953,7 +1117,11 @@ function _syncToolRoundsDOM(container, rounds) {
           groupEl.appendChild(slot);
           if (_isSwarm) {
             slot.style.contentVisibility = "visible";
-            _morphSwarmSlot(slot, _buildSwarmPanelHTML(round, toolRounds));
+            if (typeof _morphSwarmSlot === 'function' && typeof _buildSwarmPanelHTML === 'function') {
+              _morphSwarmSlot(slot, _buildSwarmPanelHTML(round, toolRounds));
+            } else {
+              slot.innerHTML = _renderRow(round, isActive);  // panel DEFERRED: generic line
+            }
           }
         } else if (_isSwarm) {
           /* Swarm rounds change frequently (per-agent phase / preview / tool-call
@@ -963,7 +1131,11 @@ function _syncToolRoundsDOM(container, rounds) {
            * `swarmBorderPulse` animation from 0% every event → visible flicker,
            * and collapsed any agent card the user had expanded. */
           slot.style.contentVisibility = "visible";
-          _morphSwarmSlot(slot, _buildSwarmPanelHTML(round, toolRounds));
+          if (typeof _morphSwarmSlot === 'function' && typeof _buildSwarmPanelHTML === 'function') {
+            _morphSwarmSlot(slot, _buildSwarmPanelHTML(round, toolRounds));
+          } else {
+            slot.innerHTML = _renderRow(round, isActive);  // panel DEFERRED: generic line
+          }
         } else if (isActive || round.status === "pending_approval") {
           if (_isInteractive) slot.style.contentVisibility = "visible";
           slot.innerHTML = _renderUnifiedToolLine(round, isActive);

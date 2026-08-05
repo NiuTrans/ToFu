@@ -175,15 +175,27 @@ def _compile():
         _FACE_FAMILY_RE = re.compile(
             r'@font-face\s*\{[^}]*?font-family\s*:\s*([^;}"\']*(?:'
             r'"[^"]*"|\'[^\']*\')?[^;}"\']*)', re.IGNORECASE)
-        # The value stops at ; } " ' or > — NOT just ; and }. Measured
-        # 2026-07-29: an inline `style="font-family: Inter, sans-serif"` with
-        # no trailing semicolon let `[^;}]+` run past the closing quote and
-        # swallow the rest of the document, so the whole tail was reported as
-        # one bogus "family" (`sans-serif">扩散语言模型</h1></div><script>…`).
-        # An attribute is a perfectly ordinary way to set a font, so the
-        # scanner has to terminate on the attribute delimiter too.
+        # The value is a comma list of ATOMS, each either a quoted span or a
+        # run of non-delimiter chars. Two measured traps, one per direction:
+        #
+        #  * 2026-07-29: `[^;}]+` ran PAST an inline attribute's closing
+        #    quote (`style="font-family: Inter, sans-serif">…`) and
+        #    swallowed the document tail as one bogus "family".
+        #  * 2026-08-02 (the fix above introduced this): excluding quote
+        #    chars entirely made a value STARTING with a quote —
+        #    `font-family:'PingFang SC'` — capture NOTHING, so the most
+        #    common CSS quoting style became invisible to the
+        #    ghost-family check (measured: test_undeclared_family_is_
+        #    reported red; the check failed OPEN).
+        #
+        # Atoms may be quoted (paired quotes only — an unclosed quote can
+        # never swallow the tail), and the list joins on commas; the
+        # attribute delimiter `>` and `;`/`}` still terminate the value.
+        _atom = r"(?:'[^']*'|\"[^\"]*\"|[^;}\"'>,]+)"
         _USE_FAMILY_RE = re.compile(
-            r'(?<!-)\bfont-family\s*:\s*([^;}"\'>]+)', re.IGNORECASE)
+            rf"(?<!-)\bfont-family\s*:\s*"
+            rf"((?:{_atom}\s*,\s*)*{_atom})",
+            re.IGNORECASE)
 
 
 def _split_families(blob: str) -> list[str]:

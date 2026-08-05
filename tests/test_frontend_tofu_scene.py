@@ -1065,12 +1065,17 @@ def test_NEUTER_no_springback_persistence_is_caught():
 
 
 def test_registered_in_bundler_after_pet():
-    """Must be in _BUNDLE_FILES (else it's a silent no-op) and load after the
-    pet (which owns the data-decor attribute it mirrors)."""
+    """Must be registered in the bundler (else it's a silent no-op) and load
+    after the pet (which owns the data-decor attribute it mirrors). Both moved
+    from _BUNDLE_FILES to _DEFERRED_FILES 2026-08-01 (the ~160KB decorative
+    family out of the render-blocking core), so the ordering is asserted
+    inside _DEFERRED_FILES."""
     b = BUNDLER.read_text()
-    assert "'tofu-scene.js'" in b, "tofu-scene.js missing from _BUNDLE_FILES"
-    from lib.js_bundler import _BUNDLE_FILES
-    assert _BUNDLE_FILES.index("tofu-scene.js") > _BUNDLE_FILES.index("tofu-pet.js"), \
+    assert "'tofu-scene.js'" in b, "tofu-scene.js missing from the bundler manifests"
+    from lib.js_bundler import _DEFERRED_FILES
+    assert "tofu-pet.js" in _DEFERRED_FILES and "tofu-scene.js" in _DEFERRED_FILES, \
+        "the decorative pet family must ride the deferred pack"
+    assert _DEFERRED_FILES.index("tofu-scene.js") > _DEFERRED_FILES.index("tofu-pet.js"), \
         "tofu-scene.js must load after tofu-pet.js"
 
 

@@ -23,7 +23,7 @@ logger = get_logger(__name__)
 _CRITICAL_COLUMNS = {
     'project_tasks': (
         'blocked_until', 'block_count', 'block_reason',
-        'wait_paths', 'dispatch_target', 'write_set',
+        'wait_paths', 'dispatch_target', 'write_set', 'blocked_by',
     ),
     # Scheduler predicate-condition paradigm: these columns are named directly
     # in the create_timer / create_task / _record_poll INSERTs, so an existing

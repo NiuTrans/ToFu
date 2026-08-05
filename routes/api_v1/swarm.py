@@ -14,7 +14,7 @@ the UI-shaped duplicates (bare-dict status response) and add the
 
 from __future__ import annotations
 
-from flask import Blueprint, jsonify
+from flask import Blueprint
 
 from lib.api_response import api_internal_error, api_ok
 from lib.log import get_logger
@@ -32,11 +32,11 @@ api_v1_swarm_bp = Blueprint('api_v1_swarm', __name__)
 @api_meta(
     summary='Get swarm status for a task (UI shape)',
     description=(
-        'Returns the swarm state dict (active flag, agent list, master '
-        'progress, etc.) directly at the top level \u2014 the UI debug '
-        'panel reads ``data.active`` / ``data.agents`` directly. The '
-        'headless SDK alias at ``/api/v1/agents/swarm/status/<id>`` '
-        'wraps the same payload in ``api_ok(...)``.'
+        'Returns the swarm state (active flag, agent list, master '
+        'progress, etc.) under the standard ``api_ok`` envelope \u2014 the '
+        'UI debug panel reads ``data.active`` / ``data.agents`` by name, '
+        'identical to the headless SDK alias at '
+        '``/api/v1/agents/swarm/status/<id>``.'
     ),
     tags=['agents'],
 )
@@ -56,8 +56,9 @@ def swarm_status(task_id):
         return api_internal_error(e, context='swarm_status',
                                   source='api_v1.swarm.status')
     if status is None:
-        return jsonify({'active': False, 'message': 'No swarm for this task'})
-    return jsonify(status)
+        return api_ok({'active': False,
+                       'message': 'No swarm for this task'})
+    return api_ok(status)
 
 
 @api_v1_swarm_bp.route('/api/v1/swarm/abort/<task_id>', methods=['POST'])
@@ -92,7 +93,7 @@ def swarm_abort(task_id):
 )
 def swarm_config():
     from lib.swarm.registry import AGENT_ROLES
-    return jsonify({
+    return api_ok({
         'available': True,
         'version': '1.0.0',
         'roles': list(AGENT_ROLES.keys()),

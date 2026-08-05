@@ -16,6 +16,13 @@
 #  This script is intentionally narrow: it only kills the server
 #  registered in THIS project's lock file. It will not kill an
 #  unrelated server.py running elsewhere on the host.
+#
+#  WATCHDOG INTERLOCK (2026-08-03): deploy/tofu_guard.sh relaunches a
+#  dead :15000 within ~15s. Measured: it won the race 9s after our
+#  SIGKILL and the fresh instance took the instance lock, so the
+#  operator's very next `python server.py` refused to start. We touch
+#  data/.tofu_guard_disabled BEFORE the kill so the server STAYS down;
+#  re-enable with `bash deploy/tofu_guard.sh --start`.
 
 set -u
 
@@ -65,11 +72,31 @@ if ! echo "$cmdline" | grep -q 'server\.py'; then
     exit 1
 fi
 
+# Disable the watchdog's auto-relaunch BEFORE the kill, or it
+# relaunches between our SIGKILL and the operator's next manual start.
+GUARD_FLAG="$BASE_DIR/data/.tofu_guard_disabled"
+touch "$GUARD_FLAG"
+echo "Watchdog auto-relaunch DISABLED ($GUARD_FLAG) — the server will stay down."
+echo "  Re-enable it after your next start: bash deploy/tofu_guard.sh --start"
+
+# A zombie is already dead (its flock is released with the process) —
+# only a LIVE process should keep us waiting. `kill -0` alone reports a
+# zombie as alive forever when the parent never reaps it (the exact
+# 'Failed to kill even with SIGKILL' false alarm); same lesson as
+# restart_15000.sh's [2b/5].
+_pid_gone() {
+    kill -0 "$1" 2>/dev/null || return 0
+    local st
+    st="$(ps -o stat= -p "$1" 2>/dev/null | tr -d ' ')"
+    case "${st}" in Z*) return 0 ;; esac
+    return 1
+}
+
 echo "Sending SIGTERM to server.py (PID=$pid)…"
 kill "$pid"
 
 for _ in $(seq 1 "$GRACEFUL_SECS"); do
-    if ! kill -0 "$pid" 2>/dev/null; then
+    if _pid_gone "$pid"; then
         echo "Server stopped cleanly."
         exit 0
     fi
@@ -79,7 +106,7 @@ done
 echo "Still alive after ${GRACEFUL_SECS}s — escalating to SIGKILL." >&2
 kill -9 "$pid" 2>/dev/null || true
 sleep 1
-if kill -0 "$pid" 2>/dev/null; then
+if ! _pid_gone "$pid"; then
     echo "Failed to kill PID $pid even with SIGKILL." >&2
     exit 1
 fi

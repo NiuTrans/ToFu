@@ -54,7 +54,10 @@ class TestConversations:
         resp = flask_client.get("/api/v1/conversations")
         assert resp.status_code == 200
         data = resp.get_json()
-        assert isinstance(data, list)
+        # api-contract §4 (batch 9): the bare array moved under the api_ok
+        # envelope's ``items`` key — a documented, coordinated shape change.
+        assert data["ok"] is True
+        assert isinstance(data["items"], list)
 
     def test_save_and_load_conversation(self, flask_client):
         conv_id = f"test-conv-{int(time.time()*1000)}"
@@ -79,7 +82,9 @@ class TestConversations:
 
         list_resp = flask_client.get("/api/v1/conversations")
         assert list_resp.status_code == 200
-        conv_ids = [c["id"] for c in list_resp.get_json()]
+        # api-contract §4 (batch 9): the list array rides the envelope's
+        # ``items`` key.
+        conv_ids = [c["id"] for c in list_resp.get_json()["items"]]
         assert conv_id in conv_ids
 
         del_resp = flask_client.delete(f"/api/v1/conversations/{conv_id}")
@@ -533,7 +538,10 @@ class TestChatAPI:
         resp = flask_client.get("/api/v1/chat/active")
         assert resp.status_code == 200
         data = resp.get_json()
-        assert isinstance(data, list)
+        # api-contract §4 (batch 11): the bare array moved under ``items``;
+        # every other consumer of this endpoint already unwraps it.
+        assert data["ok"] is True
+        assert isinstance(data["items"], list)
 
 
 # ═══════════════════════════════════════════════════════════

@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Incident anchor: born in commit 800691ce — refactor(orchestrator): pt_03f4cdf1 slice 8 - extract Section 2.5 (To...
+# (funeral audit pt_c565a36b3e8f42e6, docs/RATCHET_AUDIT.md)
 """Wire-parity for pt_03f4cdf1 slice 8 — Section 2.5 tool-history restoration.
 
 Scope: run_task's Section 2.5 block (~35 lines) — the gated

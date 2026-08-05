@@ -64,6 +64,7 @@ def get_today_stats(provider_id: str, key_name: str) -> dict:
         f = int(entry.get('failure') or 0)
         rl = int(entry.get('rate_limited') or 0)
         cons429 = int(entry.get('consecutive_429') or 0)
+        gw = int(entry.get('gateway_errors') or 0)
         last_err = str(entry.get('last_error') or '')
         exhausted = bool(entry.get('exhausted'))
         total = s + f
@@ -82,6 +83,7 @@ def get_today_stats(provider_id: str, key_name: str) -> dict:
             'failure': f,
             'rate_limited': rl,
             'consecutive_429': cons429,
+            'gateway_errors': gw,
             'total': total,
             'success_rate': sr,
             'auto_disabled': auto_disabled,
@@ -130,6 +132,7 @@ def get_all_stats() -> dict:
             f = int(entry.get('failure') or 0)
             rl = int(entry.get('rate_limited') or 0)
             cons429 = int(entry.get('consecutive_429') or 0)
+            gw = int(entry.get('gateway_errors') or 0)
             exhausted = bool(entry.get('exhausted'))
             total = s + f
             sr = (s / total) if total else None
@@ -149,6 +152,7 @@ def get_all_stats() -> dict:
                 'failure': f,
                 'rate_limited': rl,
                 'consecutive_429': cons429,
+                'gateway_errors': gw,
                 'total': total,
                 'success_rate': sr,
                 'auto_disabled': auto_disabled,

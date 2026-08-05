@@ -1,50 +1,72 @@
         <div class="settings-tab-panel" id="settingsTab_search">
           <div class="settings-section-title" data-i18n="settings.searchFetch">搜索与抓取</div>
-          <div class="settings-divider"></div>
-          <div class="settings-toggle-row">
-            <div>
-              <span class="settings-toggle-label" data-i18n="settings.llmContentFilter">LLM 内容过滤</span>
-              <div class="settings-toggle-desc" data-i18n="settings.llmContentFilterDesc">抓取网页后用模型过滤无关内容（导航栏、广告等）。关闭可显著提升抓取速度并节省 token，但搜索质量会下降</div>
-            </div>
-            <label class="stg-toggle">
-              <input type="checkbox" id="settingLlmContentFilter" checked>
-              <span class="stg-toggle-track"><span class="stg-toggle-thumb"></span></span>
-            </label>
+
+          <!-- ── 后端实况：这些参数控制的是服务器上的搜索管线，不是界面装饰 ── -->
+          <div class="search-status-strip" id="searchBackendStatus"></div>
+
+          <!-- ── 管线预览：用当前数值说人话——一次搜索实际发生什么 ── -->
+          <div class="search-pipeline-card">
+            <div class="search-pipeline-title" data-i18n="settings.searchPipelineTitle">一次搜索实际发生什么</div>
+            <div class="search-pipeline-flow" id="searchPipelinePreview"></div>
+            <div class="search-pipeline-hint" data-i18n="settings.searchHotReloadHint">本页参数保存后立即热生效于后端搜索管线，无需重启。</div>
           </div>
-          <div class="settings-divider"></div>
-          <div class="settings-section-title" data-i18n="settings.searchFetchParams">搜索与抓取参数</div>
-          <div class="settings-group">
-            <div class="settings-row two-col">
-              <div class="settings-field">
-                <label data-i18n-html="settings.fetchTopNFull">抓取前 N 条 <span style="color:var(--text-tertiary);font-weight:normal">（搜索后自动抓取排名靠前的网页）</span></label>
+
+          <!-- ── 主旋钮：95% 的用户只需要这两个 ── -->
+          <div class="settings-group search-primary-knobs">
+            <div class="settings-field">
+              <label data-i18n="settings.fetchTopNSimple">每次搜索抓取的网页数</label>
+              <div class="search-knob-row">
                 <input type="number" id="settingFetchTopN" value="6" min="1" max="20">
-              </div>
-              <div class="settings-field">
-                <label data-i18n-html="settings.fetchTimeoutFull">抓取超时 <span style="color:var(--text-tertiary);font-weight:normal">（秒）</span></label>
-                <input type="number" id="settingFetchTimeout" value="15" min="5" max="60">
+                <span class="settings-field-hint" data-i18n="settings.fetchTopNSimpleHint">调大更全面但更慢、更费 token；调小更快但可能漏掉关键页面</span>
               </div>
             </div>
-            <div class="settings-row two-col">
-              <div class="settings-field">
-                <label data-i18n-html="settings.maxCharsSearchFull">最大字符数 <span style="color:var(--text-tertiary);font-weight:normal">（搜索结果页面）</span></label>
-                <input type="number" id="settingMaxCharsSearch" value="60000">
+            <div class="settings-toggle-row">
+              <div>
+                <span class="settings-toggle-label" data-i18n="settings.llmContentFilter">LLM 内容过滤</span>
+                <div class="settings-toggle-desc" data-i18n="settings.llmContentFilterDesc">抓到网页后先让小模型删掉导航栏、广告等杂质，再把干净内容送给大模型。开启=更干净但更慢；关闭=更快更省 token，但会混入网页噪音</div>
               </div>
-              <div class="settings-field">
-                <label data-i18n-html="settings.maxCharsDirectFull">最大字符数 <span style="color:var(--text-tertiary);font-weight:normal">（直接抓取 URL）</span></label>
-                <input type="number" id="settingMaxCharsDirect" value="200000">
-              </div>
-            </div>
-            <div class="settings-row two-col">
-              <div class="settings-field">
-                <label data-i18n-html="settings.maxCharsPdfFull">最大字符数 <span style="color:var(--text-tertiary);font-weight:normal">（PDF 文件，0=不限制）</span></label>
-                <input type="number" id="settingMaxCharsPdf" value="0" placeholder="0=不限制" data-i18n-placeholder="settings.maxCharsPdfPh">
-              </div>
-              <div class="settings-field">
-                <label data-i18n-html="settings.maxBytesFull">最大下载大小 <span style="color:var(--text-tertiary);font-weight:normal">（字节，默认 20MB）</span></label>
-                <input type="number" id="settingMaxBytes" value="20971520">
-              </div>
+              <label class="stg-toggle">
+                <input type="checkbox" id="settingLlmContentFilter" checked>
+                <span class="stg-toggle-track"><span class="stg-toggle-thumb"></span></span>
+              </label>
             </div>
           </div>
+
+          <!-- ── 高级参数：默认折叠，一般无需改动 ── -->
+          <details class="search-advanced" id="searchAdvancedDetails">
+            <summary>
+              <span data-i18n="settings.searchAdvanced">高级参数</span>
+              <span class="search-advanced-sub" data-i18n="settings.searchAdvancedSub">超时与内容上限，一般无需改动</span>
+            </summary>
+            <div class="settings-group">
+              <div class="settings-row two-col">
+                <div class="settings-field">
+                  <label data-i18n-html="settings.fetchTimeoutFull">抓取超时 <span style="color:var(--text-tertiary);font-weight:normal">（秒）</span></label>
+                  <input type="number" id="settingFetchTimeout" value="15" min="5" max="120">
+                </div>
+                <div class="settings-field">
+                  <label data-i18n-html="settings.maxBytesMBFull">最大下载大小 <span style="color:var(--text-tertiary);font-weight:normal">（MB，超过则拒绝下载）</span></label>
+                  <input type="number" id="settingMaxBytesMB" value="20" min="1" max="500">
+                </div>
+              </div>
+              <div class="settings-row two-col">
+                <div class="settings-field">
+                  <label data-i18n-html="settings.maxCharsSearchFull">最大字符数 <span style="color:var(--text-tertiary);font-weight:normal">（搜索结果页面）</span></label>
+                  <input type="number" id="settingMaxCharsSearch" value="60000">
+                </div>
+                <div class="settings-field">
+                  <label data-i18n-html="settings.maxCharsDirectFull">最大字符数 <span style="color:var(--text-tertiary);font-weight:normal">（直接抓取 URL）</span></label>
+                  <input type="number" id="settingMaxCharsDirect" value="200000">
+                </div>
+              </div>
+              <div class="settings-row two-col">
+                <div class="settings-field">
+                  <label data-i18n-html="settings.maxCharsPdfFull">最大字符数 <span style="color:var(--text-tertiary);font-weight:normal">（PDF 文件，0=不限制）</span></label>
+                  <input type="number" id="settingMaxCharsPdf" value="0" placeholder="0=不限制" data-i18n-placeholder="settings.maxCharsPdfPh">
+                </div>
+              </div>
+            </div>
+          </details>
 
           <div class="settings-divider"></div>
           <div class="settings-section-title" data-i18n="settings.blockedDomains">屏蔽域名</div>
@@ -52,12 +74,12 @@
           <div id="settingSkipDomains" class="chip-input" data-placeholder="youtube.com"></div>
 
           <div class="settings-divider"></div>
-          <div class="settings-section-title" data-i18n="settings.authSources">需要登录的来源</div>
-          <p class="settings-desc" data-i18n="settings.authSourcesDesc">小红书等需要登录的站点。在你自己的浏览器中登录后粘贴 Cookie 即可连接；之后搜索与抓取链接将使用该会话读取内容。Cookie 仅保存在本地服务器，不会上传。</p>
+          <div class="settings-section-title" data-i18n="settings.authSources">站点接入</div>
+          <p class="settings-desc" data-i18n="settings.authSourcesDesc">接入需要登录的网站：在你自己的浏览器里登录该站后点「连接」，之后搜索与抓取会优先走你的浏览器会话。Cookie 只保存在本地服务器，不会上传。</p>
           <div id="authSourcesList" class="auth-sources-list"></div>
 
           <div class="settings-divider"></div>
           <div class="settings-section-title" data-i18n="settings.privateHosts">内网主机放行</div>
-          <p class="settings-desc" data-i18n="settings.privateHostsDesc">默认不允许抓取解析到内网地址的网址（防止 SSRF）。在此填写你确实需要访问的内网主机名，例如 your-llm-gateway.example.com。填父域名可覆盖其子域。此处只开放“能否访问”，不提供登录凭证；需要登录的站点请在上方“需要登录的来源”连接。</p>
+          <p class="settings-desc" data-i18n="settings.privateHostsDesc">默认禁止抓取内网地址（防 SSRF）。确需访问的内网主机名加到这里，填父域名可覆盖其子域。只放行“能否访问”，不含登录凭证；需要登录的站点请在上方“站点接入”连接。</p>
           <div id="privateHostsList" class="private-hosts-list"></div>
         </div>

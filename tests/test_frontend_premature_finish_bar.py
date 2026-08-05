@@ -37,9 +37,12 @@ cost/format helpers stubbed, and drives it with each message shape:
   • nothing at all             → "" (unchanged)
 
 SOURCE-LEVEL DOUBLE-NEUTER (on a MUTATED copy; the shipped file is untouched):
-  • Remove the `if (!_terminal && isLiveTail) return "";` guard → the
-    model-only-on-live-tail case now EMITS a bar (the premature-bar bug
-    reproduces), proving the guard is load-bearing.
+  • Remove the `if (!_terminal && (isLiveTail || msg.interruptedReason)) return "";`
+    guard → the model-only-on-live-tail case now EMITS a bar (the
+    premature-bar bug reproduces), proving the guard is load-bearing.
+    (Needle updated 2026-08-02: c6989082 widened the guard to also cover
+    `interruptedReason` stubs — the ms43foj3 frozen-bar incident, pinned
+    separately by tests/test_frontend_finish_info_interrupted.py.)
 """
 
 from __future__ import annotations
@@ -165,7 +168,7 @@ function isEmptyBar(html) { return html === '' || html == null; }
 
   // ══ 6. DOUBLE-NEUTER: strip the live-tail guard → the bug reproduces ══
   {
-    const GUARD = 'if (!_terminal && isLiveTail) return "";';
+    const GUARD = 'if (!_terminal && (isLiveTail || msg.interruptedReason)) return "";';
     const neutered = FN.replace(GUARD, '/* NEUTERED live-tail guard */');
     check('neuter_patch_applied', neutered !== FN);
     loadFn(neutered);
@@ -187,7 +190,8 @@ def test_premature_finish_bar_guard():
     src = open(FINISH_INFO, encoding='utf-8').read()
     fn_src = _extract_fn(src, 'renderFinishInfo')
     # Sanity: the guard we neuter must be present in the extracted body.
-    assert 'if (!_terminal && isLiveTail) return "";' in fn_src, \
+    # (Widened by c6989082 to also cover interruptedReason stubs.)
+    assert 'if (!_terminal && (isLiveTail || msg.interruptedReason)) return "";' in fn_src, \
         'live-tail guard missing from renderFinishInfo — test is stale'
 
     harness = os.path.join(HERE, '_premature_finish_bar_harness.js')

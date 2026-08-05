@@ -53,8 +53,9 @@ const fs = require('fs');
 const path = require('path');
 const I18N = process.argv[2];
 const FINISH = process.argv[3];
-const ROOT = process.argv[4];
-const NEUTER = process.argv[5] === '1';
+const RICH = process.argv[4];   // _buildCostPopover lives here now (Epic-E split)
+const ROOT = process.argv[5];
+const NEUTER = process.argv[6] === '1';
 
 const { JSDOM } = require(path.join(ROOT, 'node_modules', 'jsdom'));
 const dom = new JSDOM('<!DOCTYPE html><body></body>', { url: 'http://localhost/' });
@@ -74,13 +75,15 @@ eval(fs.readFileSync(I18N, 'utf8'));
 win.t = global.t = t;
 
 let finishSrc = fs.readFileSync(FINISH, 'utf8');
+let richSrc = fs.readFileSync(RICH, 'utf8');
 if (NEUTER) {
   // Remove the waste-line emission — the exact fix under test.
-  finishSrc = finishSrc.replace(
+  richSrc = richSrc.replace(
     /html \+= `<div class="cp-round-waste"[^\n]*\n/,
     '/* NEUTERED waste line */\n');
 }
-eval(finishSrc);
+// ONE eval: the rich module closes over finish_info.js's top-level consts.
+eval(finishSrc + '\n' + richSrc);
 
 const out = [];
 function check(name, cond) { out.push((cond ? 'PASS ' : 'FAIL ') + name); }
@@ -159,6 +162,7 @@ def _run(neuter: bool) -> str:
             ['node', harness,
              os.path.join(JS_DIR, 'i18n.js'),
              os.path.join(JS_DIR, 'ui', 'finish_info.js'),
+             os.path.join(JS_DIR, 'ui', 'finish_info_rich.js'),
              ROOT,
              '1' if neuter else '0'],
             capture_output=True, text=True, timeout=60,

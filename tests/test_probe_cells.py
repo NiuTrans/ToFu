@@ -32,6 +32,20 @@ class ProbeCellClassificationTest(unittest.TestCase):
         # the tiny payload shape — the pair is reachable.
         self.assertEqual(self._probe(400, 'bad request')[0], 'ok')
 
+    def test_400_chinese_route_missing_is_not_found(self):
+        # 2026-08-04 incident: the AIGC gateway answers a nonexistent route
+        # (vertex.claude-opus-5) with HTTP 400 + Chinese validation body —
+        # it MUST NOT read as reachable (it did → false-green matrix).
+        body = ('{"status":400,"message":"不支持的模型类型'
+                '(model=vertex.claude-opus-5)","data":null,"ext":{"error":'
+                '{"source":"AIGC","service":"aigc","stage":"validation"}}}')
+        self.assertEqual(self._probe(400, body)[0], 'not_found')
+
+    def test_400_english_unsupported_model_is_not_found(self):
+        self.assertEqual(
+            self._probe(400, '{"error": "unsupported model type"}')[0],
+            'not_found')
+
     def test_429_is_rate_limited(self):
         self.assertEqual(self._probe(429, 'too many requests')[0], 'rate_limited')
 

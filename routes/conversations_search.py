@@ -8,8 +8,9 @@ Extracted from ``routes/conversations.py``. Registers on the same
 import re
 import time
 
-from flask import jsonify, request
+from flask import request
 
+from lib.api_response import api_ok
 from lib.database import DOMAIN_CHAT, async_fetchall
 from lib.log import get_logger
 from routes.common import DEFAULT_USER_ID
@@ -68,7 +69,7 @@ async def search_convs():
     """
     query = (request.args.get('q') or '').strip().lower()
     if not query or len(query) < 2:
-        return jsonify([])
+        return api_ok({'items': []})
 
     t0 = time.monotonic()
 
@@ -148,7 +149,7 @@ async def search_convs():
     if not result_ids:
         elapsed = time.monotonic() - t0
         _log_search_timing(query, 0, elapsed)
-        return jsonify([])
+        return api_ok({'items': []})
 
     # ── Extract snippets in Python (portable — no PG substring/position) ──
     placeholders = ','.join(['?'] * len(result_ids))
@@ -182,4 +183,6 @@ async def search_convs():
 
     elapsed = time.monotonic() - t0
     _log_search_timing(query, len(results), elapsed)
-    return jsonify(results)
+    # Coordinated bare-array migration (batch 20): array under ``items``;
+    # Api.conversations.search unwraps with an Array.isArray fallback.
+    return api_ok({'items': results})

@@ -72,10 +72,22 @@ _KEY_DEF_RE = re.compile(r"""['"](projectBrain\.[A-Za-z0-9_.]+)['"]\s*:""")
 # `t('key', { count: 5 })` as a phantom reference to an undefined key.
 _BUILT_PACK_RE = re.compile(r'^i18n-(?:zh|en)-[0-9a-f]{8}\.js$')
 
+# The deferred FEATURE bundle (Epic-E), same derived-artifact class as
+# bundle-*.js — anchored to the 8-hex hash exactly like
+# lib/js_bundler.py::_BUILT_BUNDLE_RE (and .gitignore): NEVER a bare
+# `feature-*` glob, which would also match the tracked SOURCE
+# feature-loader.js. The bundler's youth-grace deliberately RETAINS stale
+# feature-<hash>.js artifacts beside the current one; their frozen key
+# references (built from older sources) are not a signal — the sources they
+# were minified from are scanned directly. First exposed 2026-08-01 when a
+# key REMOVAL (projectBrain.attnKindConflict/attnOpenTeam) left dangling
+# references in three retained stale artifacts.
+_BUILT_FEATURE_RE = re.compile(r'^feature-[0-9a-f]{8}\.js$')
+
 
 def _is_generated(name: str) -> bool:
     return (name.startswith('bundle-') and name.endswith('.js')) or bool(
-        _BUILT_PACK_RE.match(name))
+        _BUILT_PACK_RE.match(name)) or bool(_BUILT_FEATURE_RE.match(name))
 
 
 def _is_dynamic_prefix(key: str, next_char: str) -> bool:
@@ -220,6 +232,17 @@ def _scan_all_refs() -> dict[str, set[str]]:
 # ── Tests ────────────────────────────────────────────────────────────
 def test_i18n_file_exists():
     assert os.path.isfile(I18N_FILE), 'static/js/i18n.js is missing.'
+
+
+def test_feature_artifacts_are_excluded_but_not_the_loader_source():
+    """The derived deferred bundle is skipped; the tracked feature-loader.js
+    SOURCE is not — a bare `feature-*` glob would blind the scanner to the
+    loader's own key references (the same anchor discipline as .gitignore)."""
+    assert _is_generated('feature-2cb7e8ea.js')
+    assert _is_generated('feature-00000000.js')
+    assert not _is_generated('feature-loader.js')
+    assert not _is_generated('feature-new.js'), \
+        'only the 8-hex content-hash shape is an artifact'
 
 
 def test_every_referenced_projectbrain_key_is_defined():

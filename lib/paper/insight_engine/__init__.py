@@ -111,6 +111,14 @@ from lib.paper.insight_engine._synthesize import (  # noqa: E402,F401
     _research_and_synthesize,
 )
 
+# ── Deterministic anchor resolution (model nominates, code decides) ─────
+from lib.paper.insight_engine._anchors import (  # noqa: E402,F401
+    _FUZZY_THRESHOLD,
+    extract_report_headings,
+    resolve_anchor,
+    resolve_insight_anchors,
+)
+
 # ── Rendering ─────────────────────────────────────────────────────────────
 from lib.paper.insight_engine._render import (  # noqa: E402,F401
     _HEADINGS,
@@ -162,4 +170,7 @@ __all__ = [
     '_is_self_reference',
     '_coerce_score',
     '_ref_md',
+    'extract_report_headings',
+    'resolve_anchor',
+    'resolve_insight_anchors',
 ]

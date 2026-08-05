@@ -49,6 +49,8 @@ from pathlib import Path
 
 import pytest
 
+from lib.mcp.registry import is_opensource_build
+
 REPO = Path(__file__).resolve().parent.parent
 PET_JS = REPO / "static" / "js" / "tofu-pet.js"
 PET_DIR = REPO / "static" / "icons" / "pet" / "tofu"
@@ -215,6 +217,9 @@ def test_no_fill_colour_reaches_the_canvas_edge():
     )
 
 
+@pytest.mark.skipif(is_opensource_build(),
+                    reason='export.py is not shipped in opensource builds — '
+                           'export-tier guards only run in the source tree')
 def test_pet_art_survives_every_export_level():
     """The art must actually REACH the user (charter: export is a first-class
     acceptance target).
@@ -262,6 +267,9 @@ def test_pet_art_is_git_tracked():
     )
 
 
+@pytest.mark.skipif(is_opensource_build(),
+                    reason='the frame pipeline (static/icons/_gen/) is not '
+                           'shipped in opensource builds')
 def test_pipeline_is_the_single_source_of_the_frames():
     """NO SECOND COPY: the on-disk frames must match the pipeline exactly.
 
@@ -302,20 +310,32 @@ def test_no_mascot_switcher_grows_back():
 
 # ── NEUTER: each guard above must be shown to BITE, on a COPY, never on disk ──
 def _pet_i18n_keys():
-    """Every ``pet.*`` key the boot-key scanner can reach, prefixes expanded.
+    """Every ``pet.*`` key the scanner can reach IN THE DEFERRED pet module.
 
-    Drives the REAL ``lib.i18n_boot_keys.discover_boot_keys`` — the same scanner
-    that builds the shipped boot pack — so this measures what actually gets sent
-    to the browser, not a re-derived guess.
+    tofu-pet.js + tofu-scene.js moved to ``lib.js_bundler._DEFERRED_FILES``
+    2026-08-01, so ``discover_boot_keys`` (which walks only the core
+    ``_BUNDLE_FILES``) no longer sees ``pet.*`` — by design: the pet executes
+    after the deferred bundle lands, so its keys ride the deferred rest-pack,
+    never the boot pack. This helper scans the deferred module with the SAME
+    regexes the boot scanner uses (``T_CALL_KEY_RE`` /
+    ``T_CALL_DYNAMIC_PREFIX_RE`` + ``expand_dynamic_prefixes``) and returns
+    ``(pet_keys, source_keys, boot_union)`` so the guards assert both
+    "discoverable where the module lives" AND "absent from the boot pack".
     """
     import sys
     sys.path.insert(0, str(REPO))
-    from lib.i18n_boot_keys import discover_boot_keys
+    from lib.i18n_boot_keys import (T_CALL_KEY_RE, T_CALL_DYNAMIC_PREFIX_RE,
+                                    discover_boot_keys, expand_dynamic_prefixes)
     dict_src = (REPO / "static" / "js" / "i18n.js").read_text(encoding="utf-8")
     source_keys = set(re.findall(r"^\s*'([A-Za-z][A-Za-z0-9_.]*)':\s*\{",
                                  dict_src, re.M))
-    found = discover_boot_keys(str(REPO), source_keys=source_keys)
-    return {k for k in found["union"] if k.startswith("pet.")}, source_keys
+    pet_src = PET_JS.read_text(encoding="utf-8")
+    keys = {k for k in T_CALL_KEY_RE.findall(pet_src) if k.startswith("pet.")}
+    keys |= {k for k in expand_dynamic_prefixes(
+        T_CALL_DYNAMIC_PREFIX_RE.findall(pet_src), source_keys)
+             if k.startswith("pet.")}
+    boot = set(discover_boot_keys(str(REPO), source_keys=source_keys)["union"])
+    return keys, source_keys, boot
 
 
 def test_pet_strings_are_localised_not_hardcoded_english():
@@ -342,8 +362,8 @@ def test_pet_strings_are_localised_not_hardcoded_english():
 def test_every_pet_string_key_exists_in_the_dictionary():
     """Each key the pet asks for must be DEFINED — t() renders the raw key name
     otherwise, so a typo shows the user ``pet.scene.meadow`` verbatim."""
-    keys, source_keys = _pet_i18n_keys()
-    assert keys, "the boot-key scanner found no pet.* keys at all"
+    keys, source_keys, _ = _pet_i18n_keys()
+    assert keys, "the scanner found no pet.* keys in the deferred tofu-pet.js"
     missing = sorted(k for k in keys if k not in source_keys)
     assert not missing, f"pet keys referenced but never defined: {missing}"
 
@@ -358,7 +378,7 @@ def test_pet_keys_are_bilingual():
     ``en``. That false positive was observed while writing this guard — the
     instrument was wrong, not the dictionary.
     """
-    keys, _ = _pet_i18n_keys()
+    keys, _, _ = _pet_i18n_keys()
     dict_src = (REPO / "static" / "js" / "i18n.js").read_text(encoding="utf-8")
     incomplete = []
     for k in sorted(keys):
@@ -368,28 +388,40 @@ def test_pet_keys_are_bilingual():
     assert not incomplete, f"pet keys missing a zh or en translation: {incomplete}"
 
 
-def test_pet_keys_are_discoverable_by_the_boot_scanner():
-    """CHARTER #18: the boot pack is DERIVED by ``discover_boot_keys``, never
-    hand-copied — so a pet key it cannot see is a key the browser never gets,
-    and the pet renders raw key names on first paint.
+def test_pet_keys_ride_the_rest_pack_not_the_boot_pack():
+    """CHARTER #18, updated for the 2026-08-01 deferral: the pet module is in
+    ``_DEFERRED_FILES`` now, so its keys must NOT be in the boot pack (dead
+    weight on first paint) — they ride the deferred rest-pack, which lands
+    before the deferred bundle can execute. Two assertions, both load-bearing:
+    every pet key stays DISCOVERABLE by the scanner's own regexes where the
+    module lives (a key it cannot see is a key the rest-pack never carries,
+    and the pet renders raw key names), and NO pet key leaks into the boot
+    union (which would mean the module crept back into the core bundle).
 
-    This is a real measured failure, not a hypothetical: the day-report strings
-    were read through a local ``_k()`` wrapper, and because
-    ``T_CALL_KEY_RE`` only matches a literal string as ``t()``'s FIRST argument,
-    the scanner discovered **zero** ``pet.*`` keys while four sat in the dict.
-    Dynamic families must therefore be reached via ``t('prefix.' + x)`` so
-    ``T_CALL_DYNAMIC_PREFIX_RE`` can expand the whole namespace.
+    The discoverability half is a real measured failure mode, not a
+    hypothetical: the day-report strings were read through a local ``_k()``
+    wrapper, and because ``T_CALL_KEY_RE`` only matches a literal string as
+    ``t()``'s FIRST argument, the scanner discovered **zero** ``pet.*`` keys
+    while four sat in the dict. Dynamic families must therefore be reached via
+    ``t('prefix.' + x)`` so ``T_CALL_DYNAMIC_PREFIX_RE`` can expand the whole
+    namespace.
     """
-    keys, _ = _pet_i18n_keys()
+    keys, _, boot = _pet_i18n_keys()
     # The three dynamic families + the composed tooltip must all be reachable.
     for expect in ("pet.scene.meadow", "pet.scene.off",
                    "pet.greet.deepNight", "pet.feel.great",
                    "pet.title", "pet.sceneTooltip",
                    "pet.dayGreeting"):
         assert expect in keys, (
-            f"{expect!r} is invisible to the boot-key scanner — it would be "
-            "absent from the boot pack and render as a raw key on first paint"
+            f"{expect!r} is invisible to the scanner in the deferred pet "
+            "module — it would be absent from the rest-pack and render as a "
+            "raw key when the pet runs"
         )
+    leaked = sorted(k for k in boot if k.startswith("pet."))
+    assert not leaked, (
+        "pet.* keys are back in the BOOT pack — the pet module is deferred, "
+        f"so these belong to the rest-pack only: {leaked}"
+    )
 
 
 def test_pet_never_aliases_t_behind_a_local_wrapper():
@@ -462,6 +494,9 @@ def test_NEUTER_edge_touched_art_is_caught(tmp_path):
         "the clipping check did not flag bright fill at the edge — it is blind"
 
 
+@pytest.mark.skipif(is_opensource_build(),
+                    reason='the frame pipeline (static/icons/_gen/) is not '
+                           'shipped in opensource builds')
 def test_NEUTER_pipeline_drift_is_caught():
     """A hand-edited frame must make the --check gate red.
 

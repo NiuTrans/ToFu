@@ -9,11 +9,16 @@
 
 /* ── Stream timing: elapsed display + health-check-based stuck detection ── */
 const _streamTimers = new Map(); // convId → { startTime, lastDataTime, intervalId, healthState }
-// _serverAlive: cached health state shared across all streams (avoid duplicate pings)
-let _serverAlive = true;
-let _lastHealthCheck = 0;
-let _consecutiveHealthFails = 0;       // require 2+ consecutive fails to confirm dead
-const _HEALTH_CHECK_INTERVAL = 10000;  // ms between health checks when silent
+/* The server-liveness probe (_checkServerHealth + _serverAlive / _lastHealthCheck /
+ * _consecutiveHealthFails) and the DB-health banner cluster (_checkDbHealth /
+ * _showDbWarningBanner / _clearDbWarningBanner / _startDbHealthPolling) live in
+ * core/backend_offline_monitor.js (CORE bundle) — they are boot-path / recovery-path
+ * primitives, so the Epic-E sub-3B deferral of THIS module must not take them out
+ * of core (main.js's boot IIFE called _checkDbHealth unguarded → ReferenceError
+ * killed boot: no loadFolders, no loadConversationsFromServer — the "sidebar
+ * folder rail gone" incident, 2026-08-01). This module is DEFERRED and may freely
+ * reference them: core always loads first, and _streamTimerTouch / twStart keep
+ * resetting the shared cache optimistically on fresh bytes. */
 const _SILENCE_THRESHOLD = 20;         // seconds of silence before first health check (reduced from 30s for VS Code port forwarding)
 const _SILENCE_SEVERE = 45;            // seconds before showing severe warning
 
@@ -123,8 +128,26 @@ function _streamPhaseLabel(buf) {
     return p.detail ? String(p.detail) : '';
   })();
   switch (p.phase) {
-    case 'tool_exec':
+    case 'tool_exec': {
+      /* Localize from the structured tools list when the backend shipped
+       * it (phase.tools) — same source the phase row composes from. The
+       * raw `detail` stays the English fallback for headless events.
+       * typeof-guarded: the helper lives in ui/streaming_ui.js (main
+       * bundle), this module is deferred — a degenerate load order falls
+       * back to the detail string rather than throwing. */
+      const _tnames = (p && Array.isArray(p.tools)) ? p.tools.filter(Boolean) : [];
+      if (_tnames.length && typeof _toolLabelText === 'function' && typeof t === 'function') {
+        const _seen = {};
+        const _labels = [];
+        for (const _nm of _tnames) {
+          if (_seen[_nm]) continue;
+          _seen[_nm] = 1;
+          _labels.push(_toolLabelText(_nm));
+        }
+        return _labels.join(t('tool.label.join'));
+      }
       return _resolvedDetail || _connT('conn.phaseTools');
+    }
     case 'llm_thinking':
       return _resolvedDetail || _connT('conn.phaseThinking');
     case 'thinking_active':
@@ -140,133 +163,6 @@ function _streamPhaseLabel(buf) {
     default:
       return '';
   }
-}
-
-/**
- * Check if backend server is alive. Returns true/false.
- * Result is cached for _HEALTH_CHECK_INTERVAL ms to avoid spamming.
- */
-async function _checkServerHealth() {
-  const now = Date.now();
-  if (now - _lastHealthCheck < _HEALTH_CHECK_INTERVAL) return _serverAlive;
-  _lastHealthCheck = now;
-  try {
-    const resp = await Api.health.check({ signal: AbortSignal.timeout(3000) });
-    if (resp && resp.ok) {
-      _serverAlive = true;
-      _consecutiveHealthFails = 0;
-    } else {
-      _consecutiveHealthFails++;
-      _serverAlive = _consecutiveHealthFails < 2; // need 2+ failures to confirm dead
-    }
-  } catch (e) {
-    // Do NOT swallow the reason: a transient AbortSignal.timeout under load
-    // and a genuine outage both land here but mean very different things. The
-    // reason is the only trail distinguishing them when the 2nd consecutive
-    // fail flips the user-visible "server offline" verdict.
-    console.debug('[StreamTimer] health ping failed:', e && e.message);
-    _consecutiveHealthFails++;
-    _serverAlive = _consecutiveHealthFails < 2;
-  }
-  return _serverAlive;
-}
-
-/**
- * Check if PostgreSQL database is available on startup.
- * Shows a persistent warning banner if DB is down so users know
- * immediately instead of seeing silent "Waiting…" on first message.
- */
-async function _checkDbHealth() {
-  try {
-    const resp = await Api.health.check({ signal: AbortSignal.timeout(3000) });
-    if (!resp || !resp.ok) return;
-    const data = await resp.json();
-    if (data.db_ok === false) {
-      _showDbWarningBanner();
-      _startDbHealthPolling();
-    } else {
-      // DB is healthy — clear any stale banner left over from a prior outage
-      // (e.g. the server was restarted with PG back up). Without this the red
-      // "Database Unavailable" banner lingers forever once shown, falsely
-      // telling the user the DB is still down.
-      _clearDbWarningBanner();
-    }
-  } catch (e) {
-    // A network/tunnel drop means the server is unreachable — _checkServerHealth
-    // owns that verdict, so we don't show the DB banner here. But a .json()
-    // parse failure or a 200-with-garbage payload ALSO lands here; log it so a
-    // malformed health response isn't silently invisible (CLAUDE §2).
-    console.debug('[DbHealth] health probe failed (server unreachable or bad payload):', e && e.message);
-  }
-}
-
-/** Remove the DB-unavailable banner if present (DB recovered / false positive). */
-function _clearDbWarningBanner() {
-  const b = document.getElementById('db-warning-banner');
-  if (b) {
-    b.remove();
-    console.info('[DbHealth] Database available again — cleared the "unavailable" banner');
-  }
-}
-
-/* Self-stopping recovery poll: once the DB-warning banner is shown, re-probe
- * /api/health every 15s and clear the banner the moment the DB reports healthy
- * (the documented recovery path is a server restart with PG back up). Stops
- * itself when the banner is gone (recovered OR user-dismissed) so it costs
- * nothing in steady state. Mirrors _startOfflineRecoveryPolling's shape. */
-let _dbHealthPollInterval = null;
-function _startDbHealthPolling() {
-  if (_dbHealthPollInterval) return;
-  _dbHealthPollInterval = setInterval(async () => {
-    if (!document.getElementById('db-warning-banner')) {
-      clearInterval(_dbHealthPollInterval);
-      _dbHealthPollInterval = null;
-      return;
-    }
-    if (document.visibilityState !== 'visible') return;
-    try {
-      const resp = await Api.health.check({ signal: AbortSignal.timeout(3000) });
-      if (!resp || !resp.ok) return;
-      const data = await resp.json();
-      if (data.db_ok !== false) {
-        _clearDbWarningBanner();
-        clearInterval(_dbHealthPollInterval);
-        _dbHealthPollInterval = null;
-      }
-    } catch (e) {
-      console.debug('[DbHealth] recovery poll failed:', e && e.message);
-    }
-  }, 15000);
-}
-
-function _showDbWarningBanner() {
-  if (document.getElementById('db-warning-banner')) return;
-  const banner = document.createElement('div');
-  banner.id = 'db-warning-banner';
-  banner.style.cssText =
-    'position:fixed;top:0;left:0;right:0;z-index:10000;' +
-    'background:#dc2626;color:#fff;padding:10px 16px;font-size:14px;' +
-    'text-align:center;box-shadow:0 2px 8px rgba(0,0,0,.3);' +
-    'display:flex;align-items:center;justify-content:center;gap:8px;';
-  // Guarded t(): the jsdom test harnesses load this file WITHOUT i18n.js, so
-  // fall back to the zh literal when t() isn't present. zh is the primary UI.
-  const _tt = (typeof t === 'function')
-    ? t
-    : (k, p) => ({
-        'conn.dbUnavailableTitle': '数据库不可用',
-        'conn.dbUnavailableDesc': '未运行 PostgreSQL，对话与历史将无法使用。请安装 PostgreSQL（' + (p && p.cmd || '') + '）后重启服务器。',
-        'conn.dismiss': '关闭',
-      }[k] || k);
-  const _installCmd = '<code style="background:rgba(255,255,255,.2);padding:1px 5px;border-radius:3px">conda install -c conda-forge postgresql>=18</code>';
-  banner.innerHTML =
-    '<span style="display:inline-flex"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg></span>' +
-    '<span><b>' + _tt('conn.dbUnavailableTitle') + '</b> — ' +
-    _tt('conn.dbUnavailableDesc', { cmd: _installCmd }) + '</span>' +
-    '<button onclick="this.parentElement.remove()" style="' +
-    'background:rgba(255,255,255,.2);border:none;color:#fff;padding:4px 10px;' +
-    'border-radius:4px;cursor:pointer;font-size:13px;margin-left:12px;' +
-    'white-space:nowrap">' + _tt('conn.dismiss') + '</button>';
-  document.body.prepend(banner);
 }
 
 /**
@@ -514,7 +410,11 @@ function _healStuckPlaceholder(convId, probe) {
       `${_cleanDone ? 'finished cleanly server-side — adopting authoritative result (no stamp)' : 'gone/interrupted server-side — clearing stale busy pin'}.`
     );
     if (_cleanDone && typeof Api !== 'undefined' && Api.conversations) {
-      Promise.resolve(Api.conversations.get(convId)).then((data) => {
+      /* Tail-window read (pt_afbaf3d7 ③): only the trailing assistant turn
+       *   is adopted below — a full-blob fetch is pure waste on long convs.
+       *   Degrades to the legacy full GET when windowing is disabled. */
+      const _wpA = (typeof convWindowParam === 'function') ? convWindowParam() : '';
+      Promise.resolve(Api.conversations.get(convId, _wpA ? { query: { window: _wpA } } : undefined)).then((data) => {
         if (!data || !Array.isArray(data.messages) || data.messages.length === 0) return;
         const sl = data.messages[data.messages.length - 1];
         const cur = conv.messages[conv.messages.length - 1];
@@ -1029,6 +929,12 @@ function _streamFrameArg(convId) {
     phase: _sess.phase,
     _memoryPrefetch: ckpt && ckpt._memoryPrefetch,
     _mcpLoginHint: ckpt && ckpt._mcpLoginHint,
+    /* Model-fallback banner survival across the coalesced-timer repaint path
+     * (same forward set as stream_lifecycle.js's synthetic payloads). */
+    fallbackModel: ckpt && ckpt.fallbackModel,
+    fallbackFrom: ckpt && ckpt.fallbackFrom,
+    fallbackReason: ckpt && ckpt.fallbackReason,
+    fallbackKind: ckpt && ckpt.fallbackKind,
   };
 }
 
