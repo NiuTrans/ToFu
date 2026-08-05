@@ -306,7 +306,11 @@ def test_report_engine_full_loop_executes_read_files(tmp_path):
     re_mod.dispatch_stream = _fake_dispatch
     try:
         task = _new_report_task('rpt_full_tools_e2e', 'phashfulltools0000000000000000e2e',
-                                'en', None, client_title='Staged Paper')
+                                'en', None, client_title='Staged Paper',
+                                # offline suite — the insight second pass must
+                                # not dispatch a real LLM (CI 401 → endless
+                                # cooldown cycle → 600s timeout, 233daa6)
+                                config={'paperInsightEnabled': False})
         re_mod._run_report_task(task, [
             {'role': 'system', 'content': 'sys'},
             {'role': 'user', 'content': 'paper text'},

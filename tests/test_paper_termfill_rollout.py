@@ -114,9 +114,12 @@ def test_engine_resolves_interactive_on_headless_off():
     orig_disp = re_mod.dispatch_stream
     re_mod.dispatch_stream = _fake
     try:
-        # Interactive: config=None → resolver True → hook fires.
+        # Interactive: no termfill cfg key → resolver True → hook fires.
+        # (paperInsightEnabled=False keeps the UNRELATED insight second pass
+        # offline — its real LLM dispatch 401-cycles forever on CI. The
+        # termfill scenario only needs paperTermfillEnabled to stay absent.)
         t1 = _new_report_task('rpt_int', 'phashint0000000000000000000000', 'en', None,
-                              client_title='T', config=None)
+                              client_title='T', config={'paperInsightEnabled': False})
         re_mod._run_report_task(t1, [{'role': 'system', 'content': 's'},
                                      {'role': 'user', 'content': 'p'}], [])
         assert calls, 'interactive task (no cfg) must fire the backfill by default'
@@ -124,7 +127,8 @@ def test_engine_resolves_interactive_on_headless_off():
         calls.clear()
         # Headless: config stamped fail-closed → resolver False → hook skips.
         t2 = _new_report_task('rpt_hl', 'phashhl00000000000000000000000', 'en', None,
-                              client_title='T', config={'paperTermfillEnabled': False})
+                              client_title='T', config={'paperTermfillEnabled': False,
+                                                        'paperInsightEnabled': False})
         re_mod._run_report_task(t2, [{'role': 'system', 'content': 's'},
                                      {'role': 'user', 'content': 'p'}], [])
         assert not calls, 'headless task (termfill stamped False) must NOT fire the backfill'
