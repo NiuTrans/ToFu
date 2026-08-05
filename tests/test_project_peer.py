@@ -37,6 +37,8 @@ import os
 
 import pytest
 
+from tests._nc_harness import patch_restore as _patch_restore
+
 pytestmark = pytest.mark.unit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -548,13 +550,12 @@ def test_NC_dispatch_drops_peer_markers(monkeypatch):
     """NC-OBSERVE: no-op the marker-propagation block in dispatch_next_queued →
     the persisted turn loses its peer markers → the observability test FAILS
     (the arrival becomes indistinguishable from user input)."""
-    import importlib
-
     captured = {}
 
     def run():
+        # The harness already swapped the NEUTERED module into sys.modules —
+        # this import resolves to it (no reload; a reload would un-neuter).
         import lib.message_queue as mq
-        importlib.reload(mq)
         monkeypatch.setattr(mq, 'dequeue_next', lambda c: {
             'queueId': 'q1', 'config': {},
             'payload': {'text': 'hi', '_peerMessage': True, '_fromConv': 'cS'}})
@@ -578,41 +579,24 @@ def test_NC_dispatch_drops_peer_markers(monkeypatch):
         "            pass  # NC-OBSERVE (marker propagation disabled)",
         run,
     )
-    import lib.message_queue as mq
-    importlib.reload(mq)
 
 
 # ════════════════════════════════════════════════════════════════════
-#  Source-level NEGATIVE CONTROLS (byte-reverting)
+#  Source-level NEGATIVE CONTROLS (in-memory harness: the neutered module is
+#  compiled into a throwaway sys.modules entry — the shipped file is READ-ONLY)
 # ════════════════════════════════════════════════════════════════════
-
-def _patch_restore(path, old, new, run):
-    with open(path, encoding='utf-8') as f:
-        original = f.read()
-    assert old in original, f'anchor not found in {path}'
-    try:
-        with open(path, 'w', encoding='utf-8') as f:
-            f.write(original.replace(old, new, 1))
-        run()
-    finally:
-        with open(path, 'w', encoding='utf-8') as f:
-            f.write(original)
-    with open(path, encoding='utf-8') as f:
-        assert f.read() == original, 'source not restored byte-identical'
-
 
 def test_NC_storm_guard_noop_breaks_rate_limit(_stub_io):
     """NC-STORM: disable the rate cap in _prune_and_check → the 4th message is
     no longer refused → the storm guard test FAILS."""
-    import importlib
-
     def run():
+        # The harness already swapped the NEUTERED module into sys.modules —
+        # this import resolves to it (no reload; a reload would un-neuter).
         import lib.conversations.project_peer as pp
-        importlib.reload(pp)
-        # Reload re-binds _resolve_target_conv_id to the real (DB-reading) fn;
-        # re-stub to identity so this DB-free NC uses synthetic ids.
+        # The neutered module binds the real (DB-reading) resolver; re-stub to
+        # identity on the swapped module so this DB-free NC uses synthetic ids.
         pp._resolve_target_conv_id = lambda t: ((t or '').strip(), '')
-        # Re-stub via module attrs the reloaded code reads at call time.
+        # Re-stub via module attrs the neutered code reads at call time.
         for i in range(3):
             pp.send_peer_message('/p', 'cA', 'cB', f'm{i}')
         blocked = pp.send_peer_message('/p', 'cA', 'cB', 'm4')
@@ -628,15 +612,11 @@ def test_NC_storm_guard_noop_breaks_rate_limit(_stub_io):
         "    return True, kept + [now], 0.0  # NC-STORM (rate cap disabled)",
         run,
     )
-    import lib.conversations.project_peer as pp
-    importlib.reload(pp)
 
 
 def test_NC_audit_gate_noop_allows_unapproved_abort(monkeypatch):
     """NC-GATE: no-op the approval check in _authorize_hard_abort → an
     unapproved hard abort now proceeds → the gate test FAILS."""
-    import importlib
-
     aborted = []
     monkeypatch.setattr('lib.tasks_pkg.manager.abort_running_tasks_for_conv',
                         lambda c, **k: aborted.append(c) or 1)
@@ -644,8 +624,8 @@ def test_NC_audit_gate_noop_allows_unapproved_abort(monkeypatch):
                         lambda *a, **k: None)
 
     def run():
+        # Harness already swapped the NEUTERED module into sys.modules.
         import lib.conversations.project_peer as pp
-        importlib.reload(pp)
         pp._resolve_target_conv_id = lambda t: ((t or '').strip(), '')
         monkeypatch.setattr('lib.conversations.project_peer.audit_log',
                             lambda *a, **k: None)
@@ -662,16 +642,12 @@ def test_NC_audit_gate_noop_allows_unapproved_abort(monkeypatch):
         "    return True, 'approved'  # NC-GATE (approval check disabled)",
         run,
     )
-    import lib.conversations.project_peer as pp
-    importlib.reload(pp)
 
 
 def test_NC_deny_branch_noop_runs_abort_despite_denial(_stub_io, monkeypatch):
     """NC-DENY: no-op the deny branch (treat a falsy approval as approved) → a
     DENIED hard abort now runs the abort anyway → the deny-path test FAILS.
     This proves the deny branch is what actually stops an unapproved kill."""
-    import importlib
-
     aborted = []
     monkeypatch.setattr('lib.tasks_pkg.manager.abort_running_tasks_for_conv',
                         lambda c, **k: aborted.append(c) or 1)
@@ -679,8 +655,8 @@ def test_NC_deny_branch_noop_runs_abort_despite_denial(_stub_io, monkeypatch):
                         lambda *a, **k: None)
 
     def run():
+        # Harness already swapped the NEUTERED module into sys.modules.
         import lib.conversations.project_peer as pp
-        importlib.reload(pp)
         pp._resolve_target_conv_id = lambda t: ((t or '').strip(), '')
         monkeypatch.setattr('lib.conversations.project_peer.audit_log',
                             lambda *a, **k: None)
@@ -698,18 +674,14 @@ def test_NC_deny_branch_noop_runs_abort_despite_denial(_stub_io, monkeypatch):
         "        approved_by = str(approver).strip() if approver else 'nc-deny-forced'  # NC-DENY",
         run,
     )
-    import lib.conversations.project_peer as pp
-    importlib.reload(pp)
 
 
 def test_NC_join_exclude_noop_leaks_self():
     """NC-JOIN: no-op the exclude_conv filter → a conversation sees ITSELF in
     its own peer list → the self-exclusion test FAILS."""
-    import importlib
-
     def run():
+        # Harness already swapped the NEUTERED module into sys.modules.
         import lib.conversations.project_peer as pp
-        importlib.reload(pp)
         view = pp._join_peers(_peers(), {}, {}, exclude_conv='cA')
         # With the exclusion disabled, cA leaks into its own peer view.
         assert any(v['convId'] == 'cA' for v in view), \
@@ -721,5 +693,3 @@ def test_NC_join_exclude_noop_leaks_self():
         "        if not conv_id:\n            continue  # NC-JOIN (self-exclude disabled)",
         run,
     )
-    import lib.conversations.project_peer as pp
-    importlib.reload(pp)

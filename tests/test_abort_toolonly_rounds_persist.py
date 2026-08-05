@@ -70,7 +70,11 @@ os.environ.setdefault('TOFU_DB_PATH', '/tmp/abort_toolonly_unittest.db')
 
 import pytest
 
-pytestmark = pytest.mark.unit
+# ci_serial: real create_task + persist_task_result write through the shared
+# sqlite pool; under the CI parallel lane's contention the seed write exceeded
+# the 30s busy timeout ('database is locked', de81786 3.12 leg) while passing
+# in seconds uncontended.
+pytestmark = [pytest.mark.unit, pytest.mark.ci_serial]
 
 
 def _seed_conv(conv_id):

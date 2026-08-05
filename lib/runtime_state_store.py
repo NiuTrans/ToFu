@@ -288,23 +288,29 @@ class RedisRuntimeStateStore:
     def acquire_slot(self, kind: str, slot_key: str, limit: int, ttl: float,
                      count_prefix: str) -> bool:
         """Bounded acquire via a Redis SORTED SET (score = expiry deadline) —
-        the single source of truth for the cap. Uses only ``ZADD`` / ``ZRANK``
-        / ``ZREM`` / ``ZREMRANGEBYSCORE`` / ``ZCOUNT`` — all guaranteed by
-        fakeredis AND managed/cluster Redis (NOT Lua EVAL / SCAN-in-Lua).
+        the single source of truth for the cap. Uses only WATCH/MULTI/EXEC +
+        ``ZADD`` / ``ZSCORE`` / ``ZCOUNT`` / ``ZREMRANGEBYSCORE`` — guaranteed
+        by fakeredis AND managed/cluster Redis (NO Lua EVAL / SCAN-in-Lua).
 
-        Algorithm (lock-free, total-order rank — correct under BOTH sequential
-        admits AND a concurrent burst):
+        Algorithm (optimistic-transaction admission — WATCH on the cap key,
+        count-check and claim commit ATOMICALLY via MULTI/EXEC; a concurrent
+        writer aborts the txn with WatchError and we retry against the fresh
+        count):
           1. ``ZREMRANGEBYSCORE cap 0 now`` — evict members whose expiry
              deadline passed (crash-reclaim, no per-member TTL needed).
-          2. ``ZADD cap {slot: now+ttl}`` — insert/refresh our member with its
-             deadline as score. Re-acquiring an existing member just updates
-             its score (no double-count).
-          3. ``ZRANK cap slot`` — our position in the score-ordered set. The
-             ZSET gives ALL racers the SAME total order, so they independently
-             agree on the lowest-``limit`` winners. Keep iff ``rank < limit``;
-             otherwise ``ZREM`` our OWN member and refuse. This admits EXACTLY
-             ``limit`` under a burst (no livelock, no overshoot) and is stable
-             sequentially (an over-cap claim is rolled back).
+          2. ``ZSCORE`` hit = a live re-acquire → refresh in one txn (never
+             a second count).
+          3. ``ZCOUNT`` of live members ≥ limit → refuse WITHOUT inserting;
+             else ZADD+EXPIRE in the same txn. Because the check and the
+             insert commit atomically, two racers can never both observe
+             ``count == limit-1`` and both admit.
+
+        Why not ZADD-then-ZRANK (the previous design): the score was captured
+        from the wall clock BEFORE the insert, so a racer descheduled between
+        capture and ZADD could land an EARLIER-scored member after another
+        racer's rank check — both then passed the gate. Measured 11 admits on
+        a 10-cap (CI 3.12 leg, de81786): a starved box widens the
+        capture→insert gap until the overshoot is deterministic.
 
         Consistency: ``count`` is ``ZCOUNT`` over the SAME set, so the
         admission gate and the reported count can never drift. A crash leaves
@@ -318,16 +324,36 @@ class RedisRuntimeStateStore:
             return True  # fail-open
         zk = self._zcap_k(kind, count_prefix)
         ttl_i = max(1, int(ttl))
-        now = time.time()
         try:
-            r.zremrangebyscore(zk, 0, now)          # 1. evict expired members
-            r.zadd(zk, {slot_key: now + ttl_i})     # 2. claim/refresh
-            r.expire(zk, ttl_i * 2)                 # whole-key idle backstop
-            rank = r.zrank(zk, slot_key)            # 3. total-order position
-            if rank is not None and rank < limit:
-                return True
-            r.zrem(zk, slot_key)                    # over capacity → self-evict
-            return False
+            from redis.exceptions import WatchError
+            for _attempt in range(64):
+                now = time.time()
+                try:
+                    with r.pipeline() as p:
+                        p.watch(zk)
+                        p.zremrangebyscore(zk, 0, now)  # evict expired members
+                        if p.zscore(zk, slot_key) is not None:
+                            # Live re-acquire → refresh only, never a count.
+                            p.multi()
+                            p.zadd(zk, {slot_key: now + ttl_i})
+                            p.expire(zk, ttl_i * 2)
+                            p.execute()
+                            return True
+                        if p.zcount(zk, now, '+inf') >= limit:
+                            p.unwatch()
+                            return False
+                        p.multi()
+                        p.zadd(zk, {slot_key: now + ttl_i})
+                        p.expire(zk, ttl_i * 2)  # whole-key idle backstop
+                        p.execute()
+                        return True
+                except WatchError:
+                    continue  # a concurrent racer touched the set — re-read
+            # Far past any real burst; fail-open like a backend error rather
+            # than refuse a legitimate caller forever.
+            logger.warning('[RuntimeStateStore] acquire_slot watch retries '
+                           'exhausted for %s — fail-open', slot_key)
+            return True
         except Exception as e:
             logger.warning('[RuntimeStateStore] acquire_slot failed (%s) — '
                            'fail-open', e)
