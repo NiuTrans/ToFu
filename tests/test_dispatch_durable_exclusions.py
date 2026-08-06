@@ -272,5 +272,80 @@ class TestStrictBranchPassesPreferModel:
         assert spy.kw.get('prefer_model') is None
 
 
+# ── D: a durable-dead pool must EXIT the cooldown cycle, not spin ──────
+
+@pytest.mark.unit
+class TestDurableDeadPoolCycleTerminates:
+    def test_all_keys_permission_dead_exits_not_spins(self, monkeypatch):
+        """The cooldown cycle must TERMINATE when every capable slot is dead
+        on a non-healable class (permission/quota). The old exit condition
+        ``_429_count > 0 or _slots_exist`` was self-sustaining:
+        note_cooldown_cycle() increments _429_count, so after ANY single
+        cooldown cycle the disjunct stayed true forever and the loop spun on
+        a durable-excluded pool — the 2026-08-05 CI hang (233daa6 serial
+        lane, insight second-pass burned 600s at the test timeout).
+
+        Shape: one transient cooldown cycle (slots exist → keep cycling),
+        then the only key goes 401 → durable exclusion → the next pick finds
+        nothing AND the healable pool is empty → the loop must raise, not
+        sleep again."""
+        from lib.llm import PermissionError_
+        from lib.llm_dispatch import api
+
+        ka = _make_slot(model='gpt-4o', key='kA')
+
+        class _OneKeyRouter:
+            def __init__(self):
+                self.slots = [ka]
+                self.picks = 0
+                self._cool_once = True
+
+            def pick_and_reserve(self, **kw):
+                self.picks += 1
+                if self.picks > 60:
+                    raise RuntimeError('cycle did not terminate')
+                keys = set(kw.get('exclude_keys') or set())
+                pairs = set(kw.get('exclude_pairs') or set())
+                if ka.key_name in keys or (ka.key_name, ka.model) in pairs:
+                    return None
+                if self._cool_once:
+                    # 'Cooling from another request's 429': pick finds nothing
+                    # even though a capable slot exists — the first cycle.
+                    self._cool_once = False
+                    return None
+                ka.record_request()
+                return ka
+
+            def has_capable_slots(self, *a, **kw):
+                keys = set(kw.get('exclude_keys') or set())
+                pairs = set(kw.get('exclude_pairs') or set())
+                return not (ka.key_name in keys
+                            or (ka.key_name, ka.model) in pairs)
+
+            def summarize_slots(self, *a, **kw):
+                return 'one-key'
+
+        router = _OneKeyRouter()
+        monkeypatch.setattr(api, 'get_dispatcher', lambda: router)
+        clock = _FakeClock()
+        monkeypatch.setattr(api, 'time', clock)
+
+        def _fake_stream(body, api_key=None, **kwargs):
+            raise PermissionError_('401 invalid appid')
+
+        import lib.llm as llm_mod
+        monkeypatch.setattr(llm_mod, 'stream_chat', _fake_stream)
+
+        with pytest.raises(Exception) as exc_info:
+            api.dispatch_stream([{'role': 'user', 'content': 'hi'}],
+                                log_prefix='[t]')
+        assert 'cycle did not terminate' not in str(exc_info.value), (
+            'dispatch_stream spun on a durable-dead pool — the cooldown '
+            'cycle never exits (the CI-hang regression)')
+        assert router.picks < 60, (
+            f'loop did not exit promptly after the durable exclusion '
+            f'(picks={router.picks})')
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])

@@ -439,7 +439,12 @@ def dispatch_chat(messages, *, max_tokens=4096, temperature=0,
                 exclude_keys=exclude_keys | exclude_keys_durable,
                 exclude_pairs=exclude_pairs | exclude_pairs_durable,
                 prefer_model=prefer_model if strict_model else None)
-            if _429_count > 0 or _slots_exist:
+            if _slots_exist or _cycling_can_ever_serve(
+                    dispatcher, capability,
+                    initial_exclude_models=_initial_exclude_models,
+                    durable_keys=exclude_keys_durable,
+                    durable_pairs=exclude_pairs_durable,
+                    strict_model=strict_model, prefer_model=prefer_model):
                 time.sleep(0.3)
                 _429_count += 1
                 if _sat_start is None:
@@ -1050,6 +1055,34 @@ def _finalize_stream_success(slot, usage, *, latency, ttft, state,
             logger.debug('%s cache-settle record unavailable: %s', tag, _cs_err)
 
 
+def _cycling_can_ever_serve(dispatcher, capability, *, initial_exclude_models,
+                            durable_keys, durable_pairs, strict_model,
+                            prefer_model):
+    """True iff the slot-cooldown cycle can EVER yield a slot again.
+
+    Applies ONLY the caller's own model bans + the durable (permission/quota)
+    exclusions — the classes that cannot heal inside one dispatch call. An
+    empty answer means every capable slot is dead on a non-healable class, so
+    sleeping-and-retrying would cycle forever: the 2026-08-05 CI hang
+    (233daa6 serial lane, insight second-pass) spun on
+    ``_429_count > 0 or _slots_exist`` — self-sustaining, because
+    ``note_cooldown_cycle()`` increments ``_429_count``, so after ANY single
+    cooldown cycle the condition stayed true even with every key durably
+    excluded by 401.
+
+    Transient exclusions (unreachable / timeout / 502 / rate-limit cooldown)
+    are deliberately IGNORED here: the 60s exclusion reset resurrects them
+    and each resurrection burns a bounded hard attempt, so that cycling
+    terminates on its own.
+    """
+    return dispatcher.has_capable_slots(
+        capability,
+        exclude_models=initial_exclude_models,
+        exclude_keys=durable_keys,
+        exclude_pairs=durable_pairs,
+        prefer_model=prefer_model if strict_model else None)
+
+
 class _StreamRetryState:
     """Shared retry/exclusion bookkeeping for the streaming dispatch loops.
 
@@ -1548,7 +1581,16 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
                 exclude_keys=state.exclude_keys | state.exclude_keys_durable,
                 exclude_pairs=state.exclude_pairs | state.exclude_pairs_durable,
                 prefer_model=prefer_model if strict_model else None)
-            if state._429_count > 0 or _slots_exist:
+            # Exit iff even the HEALABLE pool is empty (caller bans + durable
+            # exclusions only). `_429_count > 0` used to keep this alive
+            # forever — note_cooldown_cycle() increments it, so the condition
+            # was self-sustaining once any cycle ran (233daa6 CI hang).
+            if _slots_exist or _cycling_can_ever_serve(
+                    dispatcher, capability,
+                    initial_exclude_models=state._initial_exclude_models,
+                    durable_keys=state.exclude_keys_durable,
+                    durable_pairs=state.exclude_pairs_durable,
+                    strict_model=strict_model, prefer_model=prefer_model):
                 time.sleep(0.3)
                 state.note_cooldown_cycle()
                 # ★ Notify the caller the FIRST time we enter the cooldown
@@ -2056,7 +2098,12 @@ async def async_dispatch_stream(body_or_messages, *, on_thinking=None,
                 exclude_keys=state.exclude_keys | state.exclude_keys_durable,
                 exclude_pairs=state.exclude_pairs | state.exclude_pairs_durable,
                 prefer_model=prefer_model if strict_model else None)
-            if state._429_count > 0 or _slots_exist:
+            if _slots_exist or _cycling_can_ever_serve(
+                    dispatcher, capability,
+                    initial_exclude_models=state._initial_exclude_models,
+                    durable_keys=state.exclude_keys_durable,
+                    durable_pairs=state.exclude_pairs_durable,
+                    strict_model=strict_model, prefer_model=prefer_model):
                 await async_abortable_sleep(0.3, abort_check)
                 state.note_cooldown_cycle()
                 continue

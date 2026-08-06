@@ -32,7 +32,9 @@ from tests.test_e2e_smoke import (  # noqa: F401  (fixture import is load-bearin
     _wait_app_ready,
 )
 
-pytestmark = [pytest.mark.visual, pytest.mark.slow]
+# visual ONLY — see test_e2e_smoke.py for why 'slow' was removed (session
+# stub leak into the slow leg's endpoint suites).
+pytestmark = [pytest.mark.visual]
 
 _TINY_PNG = base64.b64decode(
     'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=='

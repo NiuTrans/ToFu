@@ -48,7 +48,13 @@ import time
 
 import pytest
 
-pytestmark = [pytest.mark.visual, pytest.mark.slow]
+# visual ONLY: the slow leg has no chromium, so these tests always skip
+# there — but the session-scoped autouse _install_llm_stubs fixture still
+# installs its LLM stubs for the WHOLE session, and worksteal then lands
+# suites that need their OWN LLM mock (test_endpoint_messages) on the
+# polluted worker: their calls hit this stub and the recorder sees 0
+# (d0d473d slow leg). The e2e leg selects -m visual, unchanged.
+pytestmark = [pytest.mark.visual]
 
 _STREAM_TEXT = "Hello from the stubbed model. This is a deterministic reply."
 
