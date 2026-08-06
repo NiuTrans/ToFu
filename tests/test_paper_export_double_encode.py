@@ -162,6 +162,28 @@ def _diag(paper_hash):
             getattr(c, '_pool_path', None) for c in list(core._sqlite_pool)])
     except Exception as e:
         out.append(f'pool-stamp read failed: {e}')
+    # Live-connection inventory (TOFU_DB_CONN_TRACE on in test sessions): a
+    # pooled/leased conn with an OPEN txn reads a frozen WAL snapshot — the
+    # prime suspect for 'row committed but handler sees nothing'. Name its
+    # creation stack so the leaker is identified, not inferred.
+    try:
+        import time as _t
+        _now = _t.monotonic()
+        inv = []
+        for w in list(getattr(core, '_LIVE_SQLITE_CONNS', ())):
+            if getattr(w, '_closed', True):
+                continue
+            stk = getattr(w, '_created_stack', '') or ''
+            frames = [ln.strip() for ln in stk.splitlines()
+                      if '/tests/' in ln or '/lib/' in ln or '/routes/' in ln]
+            inv.append('%s in_txn=%s idle=%.1fs %s' % (
+                getattr(w, '_pool_path', '?'),
+                getattr(w._conn, 'in_transaction', '?'),
+                _now - getattr(w, '_last_used', _now),
+                frames[-1] if frames else '?'))
+        out.append('live-conns=%r' % (inv,))
+    except Exception as e:
+        out.append(f'live-conn inventory failed: {e}')
     return '; '.join(out)
 
 

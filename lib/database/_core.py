@@ -23,6 +23,7 @@ import os
 import sqlite3
 import threading
 import time
+import traceback
 import weakref
 
 from lib.log import get_logger
@@ -1026,6 +1027,11 @@ _SQLITE_POOL_MAX = int(getenv_compat('TOFU_SQLITE_POOL_MAX', default='20'))
 # Weak refs: zero production cost, no lifetime interference.
 _LIVE_SQLITE_CONNS: 'weakref.WeakSet' = weakref.WeakSet()
 
+#: Capture each connection's creation stack (tests set this via conftest;
+#: off in production). Read once at import — test sessions set the env
+#: before lib.database is imported.
+_CONN_TRACE = getenv_compat('TOFU_DB_CONN_TRACE', default='').strip() not in ('', '0', 'false', 'no')
+
 
 def reap_idle_write_transactions(idle_s: float = 1.0) -> int:
     """Roll back sqlite write txns idle past ``idle_s``; return the count.
@@ -1084,6 +1090,11 @@ def _new_sqlite_connection():
     # connection to a DIFFERENT file and the caller writes/reads the wrong
     # database (CI-only 404 on a committed row, 2026-08-05).
     w._pool_path = os.path.abspath(DB_PATH)
+    if _CONN_TRACE:
+        # Forensics: which code path opened this connection (the CI-only
+        # stale-read/lock hunts). Connects are rare (pool reuse), so a
+        # bounded stack capture is affordable even in busy test sessions.
+        w._created_stack = ''.join(traceback.format_stack(limit=16)[:-1])
     _LIVE_SQLITE_CONNS.add(w)
     return w
 

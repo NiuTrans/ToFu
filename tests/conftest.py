@@ -31,7 +31,6 @@ import logging
 import os
 import re
 import tempfile
-import time
 
 import pytest
 
@@ -130,6 +129,10 @@ def _install_shim_for_collection():
     # the full production 8s (see lib/browser/queue.POLL_WAIT_TIMEOUT).
     _os.environ.setdefault('TOFU_BROWSER_POLL_WAIT', '0.2')
     _os.environ.setdefault('TOFU_DESKTOP_POLL_WAIT', '0.2')
+    # Capture each sqlite connection's creation stack (lib.database._core
+    # _CONN_TRACE) so the leaked-txn / stale-read forensics can NAME the
+    # code path that opened a zombie connection.
+    _os.environ.setdefault('TOFU_DB_CONN_TRACE', '1')
     # Never start the real background scheduler / timer-resume threads in the
     # test process — they run live LLM polls + web searches against the
     # shared DB, stealing CPU/IO and making timing-sensitive tests flaky.
