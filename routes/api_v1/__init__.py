@@ -49,6 +49,7 @@ from .private_hosts import api_v1_private_hosts_bp
 from .credentials import api_v1_credentials_bp
 from .memory import api_v1_memory_bp
 from .skills import api_v1_skills_bp
+from .tools import api_v1_tools_bp
 from .mcp import api_v1_mcp_bp
 from .daily_report import api_v1_daily_report_bp
 from .oauth import api_v1_oauth_bp
@@ -60,6 +61,7 @@ from .paper import api_v1_paper_bp
 from .research import api_v1_research_bp
 from .paper_folders import api_v1_paper_folders_bp
 from .motion import api_v1_motion_bp
+from .slides import api_v1_slides_bp
 from .uploads import api_v1_uploads_bp
 from .videos import api_v1_videos_bp
 from .audio import api_v1_audio_bp
@@ -98,6 +100,7 @@ ALL_V1_BLUEPRINTS = [
     api_v1_credentials_bp,
     api_v1_memory_bp,
     api_v1_skills_bp,
+    api_v1_tools_bp,
     api_v1_mcp_bp,
     api_v1_daily_report_bp,
     api_v1_oauth_bp,
@@ -108,6 +111,7 @@ ALL_V1_BLUEPRINTS = [
     api_v1_paper_bp,
     api_v1_paper_folders_bp,
     api_v1_motion_bp,
+    api_v1_slides_bp,
     api_v1_uploads_bp,
     api_v1_videos_bp,
     api_v1_audio_bp,

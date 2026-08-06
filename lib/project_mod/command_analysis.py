@@ -520,8 +520,18 @@ _SED_INPLACE = _re.compile(r'\bsed\b.*\s-i')
 def _split_pipeline(cmd):
     """Split a shell command into pipeline/chain segments, respecting quotes.
 
-    Splits on |, ;, &&, || but NOT inside single or double quotes.
-    This prevents splitting patterns like ``grep -i "foo|bar"`` on the pipe.
+    Splits on |, ;, &&, ||, newlines, and subshell parentheses but NOT
+    inside single or double quotes. This prevents splitting patterns like
+    ``grep -i "foo|bar"`` on the pipe.
+
+    Newlines and bare ``(`` / ``)`` are ALWAYS command structure in shell
+    grammar (a newline is a command separator; an unquoted paren is a
+    subshell / function / case / expansion delimiter, never part of a
+    word — escaped ``\\(`` stays glued via the backslash branch). Leaving
+    them attached glues phantom tokens onto segments: the subshell closer
+    in ``( producer | grep -E 'pat' )`` tokenizes as a fake grep OPERAND
+    (a stream filter misread as a filesystem read), and the opener in
+    ``( grep -rn x lib/ )`` masks the command word entirely (evasion).
     """
     segments = []
     current = []
@@ -546,8 +556,8 @@ def _split_pipeline(cmd):
             current.append(cmd[i + 1])
             i += 2
         elif not in_single and not in_double:
-            # Check for ;, &&, ||, | (pipeline/chain separators)
-            if c == ';':
+            # Check for ;, &&, ||, |, newline, ( ) (pipeline/chain separators)
+            if c in ';\n()':
                 segments.append(''.join(current).strip())
                 current = []
                 i += 1
@@ -1156,9 +1166,11 @@ def _unbounded_recursive_scan_target(command, cwd=None):
 # grep python``) stays legal — grep_search cannot replace it. ``rg`` and
 # ``git grep`` are already the fast path and stay legal; a coreutils
 # ``timeout`` wrapper is not unwrapped (bounded scans stay legal, matching
-# the scan guard's philosophy above). Best-effort: exotic shapes (heredocs,
-# xargs, command substitution) fail OPEN, consistent with every other guard
-# in this module. Kill switch: TOFU_RUN_GREP_GUARD=0.
+# the scan guard's philosophy above). Subshells, command substitution and
+# multi-line scripts are seen THROUGH (the splitter treats bare parens and
+# newlines as command boundaries). Best-effort: exotic shapes (heredocs,
+# xargs) fail OPEN, consistent with every other guard in this module.
+# Kill switch: TOFU_RUN_GREP_GUARD=0.
 
 _GREP_REDIRECT_BINARIES = frozenset({'grep', 'egrep', 'fgrep'})
 

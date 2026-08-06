@@ -82,7 +82,7 @@ _TOOL_TOKENS = ('tool_calls', 'execute_tool', 'tool_call_id')
 # the import appears and the pin goes red — remove the entry then.
 _GRANDFATHERED = {
     'lib/tasks_pkg/orchestrator/_run.py':
-        'while round_num + 1 <= max_tool_rounds + _premature_retry_count',
+        'round_num + 1 <= max_tool_rounds + _premature_retry_count',
     'lib/tasks_pkg/endpoint/_run.py':
         '_run_single_turn(task,',
 }

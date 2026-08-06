@@ -445,9 +445,42 @@ def show_role_window(kind, state_fn, actions, log=_noop_log) -> None:
                     text=theme.t('desktop.role.showAtStartup', lang),
                     style='Bg.TCheckbutton',
                     variable=show_var).grid(row=0, column=0, sticky='w')
+    next_col = 1
+    # Agent only: one click copies the dead-link evidence pack (saved
+    # route / candidates / link verdict / log tail) so the user can paste
+    # it back — debugging a remote controlled machine without shell
+    # access was the 2026-08-06 incident's blind spot. The action only
+    # BUILDS the text; the clipboard write stays here on the tk thread.
+    if state['kind'] == 'agent' and actions.get('copy_diag'):
+        diag_btn = ttk.Button(bottom,
+                              text=theme.t('desktop.role.copyDiag', lang),
+                              style='Tofu.TButton')
+
+        def _copy_diag():
+            try:
+                text = actions['copy_diag']()
+            except Exception as e:
+                log('Diagnostics report failed: %s' % e)
+                return
+            try:
+                root.clipboard_clear()
+                root.clipboard_append(text)
+            except tk.TclError as e:
+                log('Clipboard set failed: %s' % e)
+                return
+            diag_btn.config(text=theme.t('desktop.role.copyDiagDone', lang))
+            try:
+                root.after(2000, lambda: diag_btn.config(
+                    text=theme.t('desktop.role.copyDiag', lang)))
+            except tk.TclError:
+                pass
+
+        diag_btn.config(command=_copy_diag)
+        diag_btn.grid(row=0, column=next_col, sticky='e', padx=(0, 8))
+        next_col += 1
     ttk.Button(bottom, text=theme.t('desktop.role.minimize', lang),
                style='Tofu.Accent.TButton',
-               command=_close).grid(row=0, column=1, sticky='e')
+               command=_close).grid(row=0, column=next_col, sticky='e')
     bottom.columnconfigure(0, weight=1)
 
     _OPEN['refresh'] = _refresh

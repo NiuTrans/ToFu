@@ -172,12 +172,13 @@ def _build_produce(ctx: ToolContext) -> list[dict]:
     if not (ctx.search_mode in ('single', 'multi') or ctx.search_enabled):
         return []
     from lib.tools.produce import (PRODUCE_REPORT_TOOL, PRODUCE_RESEARCH_TOOL,
-                                   PRODUCE_VIDEO_TOOL)
-    logger.debug('[Task %s] produce_video/produce_report/produce_research '
-                 'tools enabled', ctx.tid)
+                                   PRODUCE_SLIDES_TOOL, PRODUCE_VIDEO_TOOL)
+    logger.debug('[Task %s] produce_video/produce_report/produce_research/'
+                 'produce_slides tools enabled', ctx.tid)
     # Appended LAST so the existing video/report prefix stays byte-stable for
     # the prompt cache (the ordering contract in this module's docstring).
-    return [PRODUCE_VIDEO_TOOL, PRODUCE_REPORT_TOOL, PRODUCE_RESEARCH_TOOL]
+    return [PRODUCE_VIDEO_TOOL, PRODUCE_REPORT_TOOL, PRODUCE_RESEARCH_TOOL,
+            PRODUCE_SLIDES_TOOL]
 
 
 def _build_page_preview(ctx: ToolContext) -> list[dict]:
@@ -359,19 +360,23 @@ def _register_builtins() -> None:
         ToolSpec('search', _build_search, phase='base',
                  provides=frozenset({'web_search'}),
                  idempotent_tools=frozenset({'web_search'}),
-                 category='search', description='Web search'),
+                 category='search', description='Web search',
+                 gate='输入框 → 搜索模式（联网/multi）'),
         ToolSpec('fetch', _build_fetch, phase='base',
                  provides=frozenset({'fetch_url'}),
                  idempotent_tools=frozenset({'fetch_url'}),
-                 category='search', description='Fetch a URL'),
+                 category='search', description='Fetch a URL',
+                 gate='搜索开启或抓取开关（默认开）'),
         ToolSpec('read_files', _build_read_files, phase='base',
                  provides=frozenset({'read_files'}),
                  idempotent_tools=frozenset({'read_files'}),
-                 category='project', description='Read local files'),
+                 category='project', description='Read local files',
+                 gate='常开（无需项目）'),
         ToolSpec('inspect_image', _build_inspect_image, phase='base',
                  provides=frozenset({'inspect_image'}),
                  idempotent_tools=frozenset({'inspect_image'}),
-                 category='project', description='Zoom/rotate/crop image viewer'),
+                 category='project', description='Zoom/rotate/crop image viewer',
+                 gate='常开（无需项目）'),
         ToolSpec('project', _build_project_or_code_exec, phase='base',
                  provides=frozenset({
                      'list_dir', 'grep_search', 'find_files',
@@ -387,7 +392,8 @@ def _register_builtins() -> None:
                  idempotent_tools=frozenset({
                      'list_dir', 'grep_search', 'find_files',
                  }),
-                 category='project', description='Project file tools / code exec'),
+                 category='project', description='Project file tools / code exec',
+                 gate='挂载项目（输入框 → 项目）或开启代码执行'),
         ToolSpec('browser', _build_browser, phase='base',
                  # 13 names = BROWSER_TOOLS (11) + ADVANCED_BROWSER_TOOLS (2).
                  # v2 (pt_869e5648403e4745): the ten retired names are NOT
@@ -421,7 +427,8 @@ def _register_builtins() -> None:
                  idempotent_tools=frozenset({
                      'browser_list_tabs',
                  }),
-                 category='browser', description='Browser automation tools'),
+                 category='browser', description='Browser automation tools',
+                 gate='安装并连接浏览器扩展（设置 → 网络）'),
         ToolSpec('desktop', _build_desktop, phase='base',
                  # provides = LLM 可见的 10 个(desktop_move_file 刻意不
                  # 暴露,见 lib/desktop_tools.py;它仍列在 write_tools 里)。
@@ -442,10 +449,12 @@ def _register_builtins() -> None:
                      'desktop_run_command', 'desktop_open_app',
                      'desktop_open_file',
                  }),
-                 category='desktop', description='Desktop agent tools'),
+                 category='desktop', description='Desktop agent tools',
+                 gate='连接桌面 agent（设置 → 设备）'),
         ToolSpec('image_gen', _build_image_gen, phase='base',
                  provides=frozenset({'generate_image'}),
-                 category='image', description='Image generation'),
+                 category='image', description='Image generation',
+                 gate='设置 → 显示 → 图像生成开关'),
         ToolSpec('motion_video', _build_motion_video, phase='base',
                  provides=frozenset({
                      'motion_video_env_check', 'motion_video_storyboard_check',
@@ -462,18 +471,21 @@ def _register_builtins() -> None:
                      'motion_video_check', 'motion_video_probe',
                  }),
                  category='video',
-                 description='Motion video (MG animation) generation'),
+                 description='Motion video (MG animation) generation',
+                 gate='挂载项目后可用'),
         ToolSpec('produce', _build_produce, phase='base',
                  provides=frozenset({'produce_video', 'produce_report',
-                                     'produce_research'}),
+                                     'produce_research', 'produce_slides'}),
                  category='video',
-                 description='High-level topic → finished video / report / research'),
+                 description='High-level topic → finished video / report / research',
+                 gate='搜索开启后可用'),
         # End of base phase: appending HERE keeps every earlier prefix
         # byte-stable for the prompt cache (the produce note above).
         ToolSpec('page_preview', _build_page_preview, phase='base',
                  provides=frozenset({'browser_preview_page'}),
                  category='browser',
-                 description='Server-side rendered page preview'),
+                 description='Server-side rendered page preview',
+                 gate='挂载项目后可用'),
         ToolSpec('conv_ref', _build_conv_ref, phase='base',
                  provides=frozenset({'list_conversations', 'get_conversation',
                                      'project_charter_read', 'project_charter_propose',
@@ -491,10 +503,12 @@ def _register_builtins() -> None:
                  idempotent_tools=frozenset({'list_conversations', 'get_conversation',
                                              'project_charter_read', 'project_board_read',
                                              'project_peer_status', 'project_feed_read'}),
-                 category='conversation', description='Conversation reference tools'),
+                 category='conversation', description='Conversation reference tools',
+                 gate='项目模式 或 @ 提及一个会话'),
         ToolSpec('human_guidance', _build_human_guidance, phase='base',
                  provides=frozenset({'ask_human'}),
-                 category='human', description='Ask the human for guidance'),
+                 category='human', description='Ask the human for guidance',
+                 gate='输入框 → 人类指导开关'),
         # update_search_settings — appended at the END of the base phase so
         # every earlier tool's position stays byte-stable for the prompt
         # cache (the "appending HERE" rule this module's header documents).
@@ -503,7 +517,8 @@ def _register_builtins() -> None:
         ToolSpec('search_settings', _build_search_settings, phase='base',
                  provides=frozenset({'update_search_settings'}),
                  write_tools=frozenset({'update_search_settings'}),
-                 category='search', description='Search/fetch pipeline settings'),
+                 category='search', description='Search/fetch pipeline settings',
+                 gate='输入框 → 搜索模式（联网/multi）'),
         # ── capability phase ──
         ToolSpec('memory', _build_memory, phase='capability',
                  provides=frozenset({
@@ -515,15 +530,18 @@ def _register_builtins() -> None:
                      'delete_memory', 'merge_memories',
                  }),
                  idempotent_tools=frozenset({'search_memories'}),
-                 category='memory', description='Memory CRUD tools'),
+                 category='memory', description='Memory CRUD tools',
+                 gate='常开（有任意基础工具即挂载）'),
         ToolSpec('skills', _build_skills, phase='capability',
                  provides=frozenset({'activate_skill'}),
                  idempotent_tools=frozenset({'activate_skill'}),
                  category='skills',
-                 description='Skill activation (progressive disclosure)'),
+                 description='Skill activation (progressive disclosure)',
+                 gate='常开（有任意基础工具即挂载）'),
         ToolSpec('todo', _build_todo, phase='capability',
                  provides=frozenset({'todo_write'}),
-                 category='task', description='Structured task checklist'),
+                 category='task', description='Structured task checklist',
+                 gate='常开（有任意基础工具即挂载）'),
         ToolSpec('scheduler', _build_scheduler, phase='capability',
                  provides=frozenset({
                      'schedule_create', 'schedule_list', 'schedule_manage',
@@ -538,7 +556,8 @@ def _register_builtins() -> None:
                      'timer_create', 'timer_manage',
                  }),
                  idempotent_tools=frozenset({'schedule_list'}),
-                 category='scheduler', description='Scheduler / proactive agent tools'),
+                 category='scheduler', description='Scheduler / proactive agent tools',
+                 gate='常开（有任意基础工具即挂载）'),
         ToolSpec('swarm', _build_swarm, phase='capability',
                  # provides lists every name this family has a handler for on
                  # the MAIN dispatch registry (@tool_registry.tool_set over
@@ -566,13 +585,16 @@ def _register_builtins() -> None:
                  # "every state-changing tool is partitioned" rule, recorded
                  # here so it reads as a decision rather than an omission.
                  idempotent_tools=frozenset({'list_artifacts'}),
-                 category='swarm', description='Async multi-agent swarm'),
+                 category='swarm', description='Async multi-agent swarm',
+                 gate='输入框 → 多智能体开关'),
         ToolSpec('mcp', _build_mcp, phase='capability',
-                 category='mcp', description='External MCP-server tools'),
+                 category='mcp', description='External MCP-server tools',
+                 gate='设置 → MCP（默认开，需已连接服务器）'),
         # ── per-request custom tools (always last; handlers are task-local) ──
         ToolSpec('custom', _build_custom, phase='capability',
                  category='custom',
-                 description='Per-request custom tools (handlers via task[_tool_env])'),
+                 description='Per-request custom tools (handlers via task[_tool_env])',
+                 gate='API /api/v1/agent/run 请求自带 tools 时出现'),
     ]
     for spec in builtins:
         register_tool_spec(spec)

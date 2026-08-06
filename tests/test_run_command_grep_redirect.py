@@ -20,9 +20,14 @@ Pinned here:
   1. classifier matrix — filesystem greps refused; stream filters / rg /
      git grep / timeout-wrapped / heredoc shapes allowed;
   2. redirection stripping — ``2>/dev/null`` must not fake a file operand;
-  3. end-to-end through ``tool_run_command`` — refused BEFORE any
+  3. shell structure (2026-08-06 incident): subshell parens, command
+     substitution and newlines are command BOUNDARIES, not word chars —
+     the closer in ``( producer | grep -E 'pat' )`` must not become a
+     phantom file operand (stream filter misrefused), and the opener in
+     ``( grep -rn x lib/ )`` must not mask the command word (evasion);
+  4. end-to-end through ``tool_run_command`` — refused BEFORE any
      subprocess (Popen tripwire); allowed shapes actually execute;
-  4. the kill switch TOFU_RUN_GREP_GUARD=0.
+  5. the kill switch TOFU_RUN_GREP_GUARD=0.
 
 Run: PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest tests/test_run_command_grep_redirect.py -v
 """
@@ -75,6 +80,9 @@ class TestGrepRedirectBlockedShapes:
         'grep -q x config.yaml && echo found',  # control-flow grep → adapt
         'grep -m 5 x lib/a.py',                 # arg-flag consumed, operand caught
         'grep --include=*.py -rn x lib/',
+        '( grep -rn x lib/ )',                  # subshell framing is no evasion
+        'echo $(grep -rn x lib/)',              # command substitution seen through
+        'echo start\ngrep -rn x lib/',          # newline is a command separator
     ])
     def test_filesystem_greps_blocked(self, command):
         assert _grep_filesystem_segment(command) is not None, (
@@ -101,6 +109,12 @@ class TestGrepRedirectAllowedShapes:
         'timeout 30 grep -rn x lib/',           # bounded wrapper — see scan guard
         'cat f.log | grep x',                   # grep filters cat's stream
         'find . -name "*.py" | xargs grep x',   # xargs not unwrapped (fail open)
+        # 2026-08-06 false positive: subshell framing must not glue the
+        # closer ``)`` onto the grep segment as a phantom file operand.
+        "( tls_env='TOFU_TLS=0'; PORT=15000 env x | grep -E '^(TOFU_TLS|PORT)=' )",
+        '( ps aux | grep python )',
+        'out=$(ps aux | grep python)',          # command substitution, stream
+        'ps aux | grep python\necho done',      # newline-separated commands
     ])
     def test_stream_filters_and_fast_paths_allowed(self, command):
         assert _grep_filesystem_segment(command) is None, (
@@ -136,6 +150,13 @@ class TestGrepRedirectEndToEnd:
 
     def test_stream_filter_actually_runs(self, ws):
         result = tool_run_command(ws, "printf 'a\\nb\\n' | grep a")
+        assert 'Command intercepted' not in result
+        assert 'a' in result
+
+    def test_subshell_stream_filter_actually_runs(self, ws):
+        """The 2026-08-06 incident shape: a stream filter inside a subshell
+        was refused because the closer ``)`` tokenized as a file operand."""
+        result = tool_run_command(ws, "( printf 'a\\nb\\n' | grep a )")
         assert 'Command intercepted' not in result
         assert 'a' in result
 

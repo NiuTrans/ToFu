@@ -1,6 +1,6 @@
 # Server-Built AGENT-ONLY Installers — Design
 
-> Status: DRAFT v5 (2026-08-05), epic `pt_59b62951aad2463e`.
+> Status: DRAFT v6 (2026-08-06), epic `pt_59b62951aad2463e`.
 > v2 folds in the three distribution-surface decisions (§5): the Local
 > Control display matrix, the full-client direction policy, and the
 > GitHub Releases contents. v3 folds in the owner's three review
@@ -767,3 +767,47 @@ auto-reconnects (resume walks `attach_candidates` → ladder, token kept).
 The run-from-inside-the-zip trap (Windows extracts only the exe to a
 temp dir) degrades honestly: no bundle file → discovery ladder →
 unattached role window with the link line, never a silent lie.
+
+## 13. v6 — repair-aware import, self-healing poll loop, diagnostics return channel (2026-08-06)
+
+The day-2 field failure of v5, measured end to end: the owner reinstalled
+from a fresh bundle and the agent STILL never polled — the window said
+「地址被代理/SSO 拦截——正在自动重找通路」 forever. Three root causes, all
+fixed in the agent + one server-side seam:
+
+1. **A dead saved route vetoed the repair material.**
+   `import_attach_bundle` skipped the bundle whenever ANY attachment
+   existed — including a DEAD one — and the one-shot delete then
+   destroyed the bundle unused. The v5 "never override" discipline was
+   written to protect the user's own LIVE connect; it was never meant to
+   let a stale dead URL block the very download that existed to fix it.
+   Now the existing attachment is PROBED first: alive → bundle ignored
+   (unchanged); dead → the bundle re-points the attachment (candidates →
+   ladder → fallbacks), the bundle's fresh token wins (an empty bundle
+   token keeps the old secret), and the dead address is demoted to a
+   TRAILING attach candidate rather than trusted again.
+2. **The link line promised re-discovery the loop never performed.**
+   The `proxy` / `unreachable` branches slept and retried the same URL
+   forever. `run_agent` now takes `route_repair`: after
+   `_ROUTE_REPAIR_THRESHOLD` (6) consecutive route-dead polls — `ok` and
+   `auth` reset the streak, since both prove the address reached Tofu —
+   the launcher-supplied hook re-walks `resume_attachment` (persisted
+   candidates → ladder) and a live replacement rebinds the loop's
+   endpoint + credential IN PLACE; `_ROUTE_REPAIR_COOLDOWN_S` (300s)
+   bounds how often the (up-to ~30s) ladder walk may run.
+3. **Probe and poll measured different networks.** `requests` honors
+   system/env proxies (Windows registry included) while the poll loop
+   pins `no_proxy: '*'`; a probe verdict on the proxied transport says
+   nothing about the poll's direct one. `probe_server` now pins the same
+   `no_proxy: '*'`.
+
+**The diagnostics return channel.** A controlled machine that cannot
+reach the server cannot push its logs anywhere — debugging it was blind.
+The agent window (and tray) now carry「复制诊断信息」: one click copies
+the evidence pack (saved route, persisted candidates, live link verdict,
+last 120 log lines; secret reported as presence+length only). The Local
+Control panel gained the collapsed「受控端连不上？把它的诊断信息粘贴到
+这里」inbox: the paste POSTs to `/api/v1/desktop/client-diag` and lands
+in `logs/desktop_client_diag.log` (JSONL, 200k cap), GET replays the
+recent submissions so the panel confirms arrival. No shell access, no
+screenshots, no retelling.

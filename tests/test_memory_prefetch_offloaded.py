@@ -301,7 +301,7 @@ def test_spawn_precedes_context_inject_so_it_overlaps_real_io():
     spawn = src.find('maybe_run_memory_prefetch(')
     inject = src.find('inject_context_and_emit_chips(')
     join = src.find('await_memory_prefetch(task)')
-    loop = re.search(r'^\s*while round_num \+ 1 <=', src, re.M)
+    loop = re.search(r'^\s*while \(not _prep_aborted', src, re.M)
 
     assert -1 not in (spawn, inject, join), 'a required call site vanished'
     assert loop is not None, 'stream loop not found — update this guard'
@@ -356,7 +356,7 @@ def test_run_task_joins_the_prefetch_before_the_stream_loop():
 
     spawn = src.find('maybe_run_memory_prefetch(')
     join = src.find('await_memory_prefetch(task)')
-    loop = re.search(r'^\s*while round_num \+ 1 <=', src, re.M)
+    loop = re.search(r'^\s*while \(not _prep_aborted', src, re.M)
 
     assert spawn != -1, 'the memory-prefetch spawn vanished from run_task'
     assert join != -1, (

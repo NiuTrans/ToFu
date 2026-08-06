@@ -551,7 +551,7 @@ def test_every_new_i18n_key_has_both_languages():
         'settings.meFace', 'settings.meFaceHint', 'settings.meFaceAuto',
         'settings.meFacePinWarn', 'settings.wireFaces', 'settings.wireFacesHint',
         'settings.addFace', 'settings.addFaceTitle', 'settings.noFaces',
-        'settings.faceNamePlaceholder', 'settings.deleteFaceTitle',
+        'settings.faceProtoTitle', 'settings.deleteFaceTitle',
         'settings.faceDeleteConfirm',
     ]
     missing = []
@@ -744,6 +744,137 @@ def test_chip_and_warning_styles_exist():
     for sel in ('.stg-face-chip', '.stg-face-chip.anthropic',
                 '.stg-face-chip.refused', '.stg-face-warn', '.stg-face-row'):
         assert sel in css, 'missing CSS for %s' % sel
+
+
+# ═══════════════════════════════════════════════════════════
+#  6. ★ 2026-08-06 row redesign: the face NAME is not a question
+#
+#  Owner review (screenshot): the visible '面名' input was clipped at
+#  118px, the concept was unanswerable without knowing the data model,
+#  and asking for a name next to URL+protocol read as redundancy. The
+#  row is now protocol select + URL; the name is a hidden, auto-derived
+#  handle (protocol, '-2' on collision) that only the pin dropdown and
+#  chip tooltips ever reference. Backend contract is UNCHANGED —
+#  faces{} stays {name: {base_url, protocol}} and _anthropic_face
+#  matches on the protocol field, never on the name.
+# ═══════════════════════════════════════════════════════════
+
+def test_face_row_has_no_visible_name_input():
+    """The row must not ASK for a name — it derives one. A visible name
+    box is the exact UI shape the owner rejected."""
+    out = _node_eval_faces('''
+console.log(JSON.stringify({
+  fresh: _renderFaceRow(0, 0, '', '', 'anthropic'),
+  custom: _renderFaceRow(0, 1, 'my-line', 'https://x/v1', 'anthropic'),
+}));
+''')
+    got = json.loads(out.strip().splitlines()[-1])
+    assert 'stg-face-name' not in got['fresh'], (
+        'the visible name input is gone — the name is auto-derived')
+    assert 'type="hidden"' in got['fresh'] and 'data-face-field="name"' in got['fresh'], (
+        'the name must still ride the row as a hidden field so '
+        '_collectFacesFromDom can carry it into faces{}')
+    assert 'data-auto-name="1"' in got['fresh'], (
+        'a nameless (fresh) row is auto-named: it follows the protocol select')
+    assert '/v1/anthropic' in got['fresh'], (
+        'the URL placeholder must follow the selected protocol — that is '
+        'where the UI teaches that URL and protocol are two questions')
+    assert 'data-auto-name="0"' in got['custom'], (
+        'a stored CUSTOM name is not auto: protocol switches must not '
+        'rename it (model pins reference the name)')
+    src = _src(_FACES_JS, lang='js')
+    assert 'settings.faceNamePlaceholder' not in src, (
+        'the name-placeholder i18n key is dead — the input it labeled is gone')
+
+
+def test_collect_derives_names_from_protocol_and_never_collides():
+    """Two nameless same-protocol rows must become 'anthropic' +
+    'anthropic-2' — never a silent dict-key overwrite that drops a face.
+    A stored custom name is preserved verbatim; a row named 'default' is
+    re-derived (the provider's own face owns that name)."""
+    out = _node_eval_faces('''
+function _el(v) { return { value: v }; }
+function _row(name, url, proto) {
+  return { querySelector: function(sel) {
+    if (sel.indexOf('"name"]') >= 0) return _el(name);
+    if (sel.indexOf('"base_url"]') >= 0) return _el(url);
+    if (sel.indexOf('"protocol"]') >= 0) return _el(proto);
+    return null;
+  }, getAttribute: function(n) {
+    return n === 'data-orig-protocol' ? proto : null;
+  } };
+}
+var _rows = [
+  _row('', 'https://gw/v1/anthropic', 'anthropic'),
+  _row('', 'https://gw2/v1/anthropic', 'anthropic'),
+  _row('my-line', 'https://gw3/v1', 'openai'),
+  _row('default', 'https://gw4/v1/responses', 'responses'),
+];
+document = {
+  querySelector: function(sel) {
+    if (sel.indexOf('stg-provider-card') >= 0) return {
+      querySelector: function(s2) {
+        if (s2.indexOf('stg-faces-field') >= 0) return {
+          querySelectorAll: function() { return _rows; } };
+        return null;
+      } };
+    return null;
+  },
+  querySelectorAll: function() { return []; }
+};
+console.log(JSON.stringify(_collectFacesFromDom(0)));
+''')
+    got = json.loads(out.strip().splitlines()[-1])
+    assert got['anthropic']['base_url'] == 'https://gw/v1/anthropic'
+    assert got['anthropic-2']['base_url'] == 'https://gw2/v1/anthropic', (
+        'the second same-protocol row must get a suffixed name — a silent '
+        'overwrite would drop one of two user-declared faces')
+    assert got['my-line']['protocol'] == 'openai', (
+        'a custom stored name survives collection unchanged')
+    assert 'default' not in got and got['responses']['protocol'] == 'responses', (
+        "a row named 'default' must never shadow the provider's own face")
+
+
+def test_proto_change_rederives_auto_name_but_keeps_pinned():
+    """_onFaceProtoChange: an auto name follows the select (and the URL
+    placeholder follows with it); a name a model PIN references must NOT
+    move — renaming it would dangle the pin and drop the model off routing."""
+    out = _node_eval_faces('''
+function _mkRow(name, auto) {
+  var attrs = { 'data-auto-name': auto };
+  var nameEl = { value: name };
+  var urlEl = { value: '', placeholder: '' };
+  return { row: {
+    querySelector: function(s) {
+      if (s.indexOf('"name"]') >= 0) return nameEl;
+      if (s.indexOf('"base_url"]') >= 0) return urlEl;
+      return null;
+    },
+    getAttribute: function(k) { return attrs[k] === undefined ? null : attrs[k]; },
+    setAttribute: function(k, v) { attrs[k] = v; },
+    _attrs: attrs,
+  }, nameEl: nameEl, urlEl: urlEl };
+}
+var a = _mkRow('anthropic', '1');
+_onFaceProtoChange(0, { value: 'responses', closest: function() { return a.row; } });
+_stgProviders = [{ id: 'p', models: [{ model_id: 'm', face: 'anthropic' }] }];
+var b = _mkRow('anthropic', '1');
+_onFaceProtoChange(0, { value: 'openai', closest: function() { return b.row; } });
+console.log(JSON.stringify({
+  freeName: a.nameEl.value,
+  freePlaceholder: a.urlEl.placeholder,
+  pinnedName: b.nameEl.value,
+  pinnedAuto: b.row.getAttribute('data-auto-name'),
+}));
+''')
+    got = json.loads(out.strip().splitlines()[-1])
+    assert got['freeName'] == 'responses', (
+        'an auto-derived name must follow the protocol select')
+    assert '/v1/responses' in got['freePlaceholder'], (
+        'the URL placeholder must re-hint on protocol change')
+    assert got['pinnedName'] == 'anthropic' and got['pinnedAuto'] == '0', (
+        'a name referenced by a model pin must NOT be renamed — the pin '
+        'would dangle and the model would fall off routing')
 
 
 if __name__ == '__main__':

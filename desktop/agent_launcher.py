@@ -261,11 +261,35 @@ def _start_agent(state: dict, perms: dict) -> None:
         state['last_status'] = st
         _log('Link status: %s' % st)
 
+    def _route_repair():
+        """The poll loop's self-heal hook (owner incident 2026-08-06): a
+        route that stays dead (proxy-intercepted / unreachable) re-walks
+        the persisted attach candidates + the discovery ladder THROUGH
+        resume_attachment — which persists the re-point itself — and a
+        live replacement is handed back so the loop rebinds in place.
+        Returns None when nothing better answered (the loop keeps the
+        honest dead-state line and retries after the cooldown)."""
+        cur_url = state.get('url') or ''
+        if not cur_url:
+            return None
+        try:
+            from lib.desktop_agent._pair import resume_attachment
+            new_url, new_secret = resume_attachment(
+                cur_url, state.get('secret') or '', log=_log)
+        except Exception as e:
+            _log('Route repair walk failed: %s' % e)
+            logger.warning('Route repair walk failed: %s', e)
+            return None
+        if new_url and new_url != cur_url:
+            state['url'], state['secret'] = new_url, new_secret
+            return new_url, new_secret
+        return None
+
     def _loop():
         try:
             run_agent(url, perms, poll_interval=1.0,
                       bridge_secret=secret, stop_event=stop,
-                      on_status=_on_status)
+                      on_status=_on_status, route_repair=_route_repair)
         except Exception as e:
             _log('Agent loop crashed: %s' % e)
             logger.error('Agent loop crashed: %s', e, exc_info=True)
@@ -319,6 +343,66 @@ def _link_status_text(state: dict) -> str:
         return theme.t('desktop.tray.stError', lang).replace(
             '{detail}', str(st.get('detail') or '?')[:80])
     return str(st.get('detail') or code)[:80]
+
+
+def _diag_report(state: dict) -> str:
+    """The copyable diagnostics bundle (owner ask 2026-08-06): everything
+    needed to debug a dead link WITHOUT shell access to the machine — the
+    saved route, the persisted attach candidates, the live link verdict and
+    the recent agent log tail. The secret is reported as presence+length
+    only; the report is meant to be pasted into a chat.
+    """
+    lines = ['Tofu Agent diagnostics — %s'
+             % time.strftime('%Y-%m-%d %H:%M:%S')]
+    lines.append('version: %s' % (_agent_version() or '?'))
+    lines.append('platform: %s' % sys.platform)
+    lines.append('server: %s' % (state.get('url') or '(not attached)'))
+    lines.append('link: %s' % (state.get('last_status') or '(no status yet)'))
+    try:
+        from lib.desktop_agent.config import config_path, load_config
+        cfg = load_config()
+        rs = cfg.get('remote_server') or {}
+        secret = rs.get('secret') or ''
+        lines.append('config: %s' % config_path())
+        lines.append('saved_url: %s' % (rs.get('url') or ''))
+        lines.append('secret: %s' % ('set (%d chars)' % len(secret)
+                                     if secret else 'none'))
+        lines.append('attach_candidates: %s'
+                     % (cfg.get('attach_candidates') or []))
+    except Exception as e:
+        lines.append('config unreadable: %s' % e)
+    lines.append('log file: %s' % _LOG_PATH)
+    try:
+        with open(_LOG_PATH, encoding='utf-8', errors='replace') as f:
+            tail = f.readlines()[-120:]
+    except OSError as e:
+        lines.append('(log unreadable: %s)' % e)
+    else:
+        lines.append('--- last %d log lines ---' % len(tail))
+        lines.extend(ln.rstrip('\n') for ln in tail)
+    return '\n'.join(lines)
+
+
+def _copy_diag_to_clipboard(text: str, log=_log) -> bool:
+    """Set the clipboard through the tk host (the ONLY thread allowed to
+    touch tk). Falls back to logging the report so it is never lost."""
+    try:
+        from desktop import _tk_host
+
+        def _set():
+            root = _tk_host.parent_or_none()
+            if root is None:
+                return False
+            root.clipboard_clear()
+            root.clipboard_append(text)
+            return True
+
+        if _tk_host.call(_set):
+            return True
+    except Exception as e:
+        log('Copy-diag clipboard failed: %s' % e)
+    log('Diagnostics report (clipboard unavailable):\n%s' % text)
+    return False
 
 
 def _run_tray(state: dict, perms: dict) -> None:
@@ -436,7 +520,15 @@ def _run_tray(state: dict, perms: dict) -> None:
         'toggle_perm': lambda key: _toggle_perm(key)(_NULL_ICON, None),
         'connect': lambda: on_connect(_NULL_ICON, None),
         'toggle_autostart': lambda: on_toggle_autostart(_NULL_ICON, None),
+        # The window's「复制诊断信息」button: the action only BUILDS the
+        # report — the clipboard write happens window-side (tk thread).
+        'copy_diag': lambda: _diag_report(state),
     }
+
+    def on_copy_diag(icon, item):
+        # Tray-thread callback: the clipboard hop rides the tk host.
+        _copy_diag_to_clipboard(_diag_report(state))
+
 
     def on_control_panel(icon, item):
         from desktop import _tk_host, role_window
@@ -461,6 +553,10 @@ def _run_tray(state: dict, perms: dict) -> None:
         MenuItem(lambda item: _tt('desktop.tray.linkState',
                                   status=_link_status_text(state)),
                  None, enabled=False),
+        # One click hands the user the whole dead-link evidence pack
+        # (saved route / candidates / link verdict / log tail) for a
+        # paste back to the server side — no shell access needed.
+        MenuItem(_tt('desktop.tray.copyDiag'), on_copy_diag),
         MenuItem(_tt('desktop.tray.connectDifferent'), on_connect),
         pystray.Menu.SEPARATOR,
         MenuItem(_tt('desktop.tray.permissions'), pystray.Menu(

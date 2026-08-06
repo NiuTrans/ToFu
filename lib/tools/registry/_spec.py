@@ -304,6 +304,13 @@ class ToolSpec:
         partitions in sync without a second hand-maintained list.
     category / description:
         Human-readable metadata for tooling and docs.
+    gate:
+        One short human-readable sentence naming the switch that turns this
+        family on (e.g. ``'设置 → 搜索 → 联网搜索'`` or ``'连接浏览器扩展'``).
+        Purely presentational — consumed by the Settings → 工具 inventory
+        panel (``_introspect.build_tool_inventory``) so a gated-off family
+        can tell the user WHERE to turn it on. Never consulted by gating
+        logic; the ``build`` callable remains the only authority.
     handler:
         Optional :data:`ToolHandlerFn` that executes this tool's calls.  When
         set, it is auto-synced into the dispatch ``tool_registry`` for every
@@ -345,6 +352,7 @@ class ToolSpec:
     idempotent_tools: frozenset[str] = field(default_factory=frozenset)
     category: str = ''
     description: str = ''
+    gate: str = ''
     handler: ToolHandlerFn | None = None
     handler_names: frozenset[str] = field(default_factory=frozenset)
     handler_special: str = ''

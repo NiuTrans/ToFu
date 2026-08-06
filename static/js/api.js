@@ -474,6 +474,11 @@
     setScope:       (id, scope) => post(`/api/v1/skills/${encodeURIComponent(id)}/scope`, { scope }, { parse: 'response' }),
   };
 
+  // tools (live tool-registry inventory — Settings → 工具 panel) ----
+  const tools = {
+    inventory:      ()          => get('/api/v1/tools'),
+  };
+
   // profile (personal-preference profile) ---------------------------
   const profile = {
     get:           ()         => get('/api/v1/profile'),
@@ -1061,6 +1066,10 @@
     devices:     () => get('/api/v1/desktop/devices', { onError: 'null' }),
     mintToken:   (name) => post('/api/v1/desktop/token', { name: name || '' }),
     revokeToken: (keyId) => del(`/api/v1/desktop/token/${encodeURIComponent(keyId)}`),
+    /* The diagnostics inbox (2026-08-06): the agent's「复制诊断信息」bundle,
+     * pasted in the Local Control panel, stored server-side for debugging. */
+    submitDiag:  (text) => post('/api/v1/desktop/client-diag', { text: text }),
+    listDiags:   () => get('/api/v1/desktop/client-diag', { onError: 'null' }),
   };
 
   // health / status -------------------------------------------------
@@ -1842,7 +1851,7 @@
     desktop,
     features, providers, dispatch, oauth, mcp, update, trading, authSources,
     privateHosts, credentials,
-    swarm, endpoint, logs, motion, tasks, users, research,
+    swarm, endpoint, logs, motion, tasks, users, research, tools,
   };
 
   global.Api = Api;

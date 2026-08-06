@@ -727,3 +727,48 @@ def test_scanner_ignores_commented_and_unrelated_names():
     live = strip_comments(sample, lang='shell')
     specs = [m.group('spec').strip().rstrip(',').strip()
              for m in _MCP_SPEC_RE.finditer(live)]
+    live = strip_comments(sample, lang='shell')
+    specs = [m.group('spec').strip().rstrip(',').strip()
+             for m in _MCP_SPEC_RE.finditer(live)]
+
+
+def test_tool_schema_accessor_accepts_both_sdk_spellings():
+    """2026-08-06 outage pin: a boot-time auto-install resolved **mcp 1.29.0**
+    into the shared env (below the ``>=2,<3`` client floor this guard
+    enforces), whose ``Tool`` carries the SPEC spelling ``inputSchema``
+    while the bridge only read the v2 snake_case ``input_schema`` — all 8
+    MCP servers died on connect with ``AttributeError: 'Tool' object has no
+    attribute 'input_schema'``. ``_tool_input_schema`` (and the OpenAI
+    translation riding it) must accept BOTH spellings, so a wrong-line
+    resolve degrades to working tools instead of a dead fleet.
+
+    Load-bearing by construction: reverting the accessor to a direct
+    ``tool.input_schema`` read makes the 1.29-shaped fake raise
+    AttributeError here — the pin goes red with no separate neuter test.
+    """
+    from lib.mcp.client._bridge import MCPBridge, _tool_input_schema
+
+    payload = {'type': 'object', 'properties': {'q': {'type': 'string'}}}
+
+    class _V2Tool:   # mcp 2.x snake_case — the line the bridge targets
+        name = 'search'
+        description = 'd'
+        input_schema = payload
+
+    class _V129Tool:  # mcp 1.29 spec spelling — the 2026-08-06 incident shape
+        name = 'search'
+        description = 'd'
+        inputSchema = payload
+
+    class _BareTool:  # no schema attribute at all → open-object fallback
+        name = 'search'
+        description = 'd'
+
+    assert _tool_input_schema(_V2Tool()) == payload
+    assert _tool_input_schema(_V129Tool()) == payload
+    assert _tool_input_schema(_BareTool()) == {'type': 'object', 'properties': {}}
+
+    # The production call path: the OpenAI translation must carry the schema
+    # for the 1.29 shape too (it rides the same accessor).
+    spec = MCPBridge._tool_to_openai('github', _V129Tool())
+    assert spec['function']['parameters'] == payload

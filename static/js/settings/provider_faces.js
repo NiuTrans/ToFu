@@ -255,7 +255,44 @@ function _renderFacesSection(provIdx, facesObj) {
   return html;
 }
 
-/** One face row: name + base_url + protocol select + delete. */
+/* Per-protocol URL placeholders: the address and the protocol answer TWO
+ * different questions (where to send vs. how to speak), and the placeholder
+ * is where that distinction is taught — picking 'anthropic' rewrites the
+ * hint to an Anthropic-shaped path. */
+var _FACE_PROTO_URL_HINTS = {
+  openai: 'https://gateway.example.com/v1/openai',
+  anthropic: 'https://gateway.example.com/v1/anthropic',
+  responses: 'https://gateway.example.com/v1/responses',
+};
+
+function _faceUrlPlaceholder(protocol) {
+  return _FACE_PROTO_URL_HINTS[protocol] || 'https://gateway.example.com/v1/...';
+}
+
+/** A face name the user never typed is derived from the protocol.
+ *
+ *  The name is an INTERNAL handle — the model pin dropdown and the chip
+ *  tooltips reference it — not a question worth a text box (owner review
+ *  2026-08-06: the visible '面名' input was both unreadable at 118px and
+ *  unanswerable for anyone who didn't already know the data model).
+ *  Auto-derivation convention: the protocol itself, '-2'/'-3'… on collision
+ *  (resolved at collect time). Matches what template sync writes
+ *  (faces.anthropic), so UI-created and template-created faces read alike. */
+function _deriveFaceName(protocol, used) {
+  var base = String(protocol || '').trim();
+  if (!base || base === 'default') base = 'face';
+  if (used.indexOf(base) < 0) return base;
+  var i = 2;
+  while (used.indexOf(base + '-' + i) >= 0) i++;
+  return base + '-' + i;
+}
+
+/** One face row: protocol select + base_url + delete.
+ *
+ *  The name rides along as a HIDDEN field. A stored name the user (or an old
+ *  build) chose by hand is preserved verbatim — renaming a face would dangle
+ *  every model pin that references it. Only auto-derived names follow the
+ *  protocol select (data-auto-name), and only while no model pins them. */
 function _renderFaceRow(provIdx, idx, name, baseUrl, protocol) {
   var protoOpts = ['openai', 'anthropic', 'responses'];
   /* PRESERVE a stored value this build doesn't know (a future protocol):
@@ -265,26 +302,28 @@ function _renderFaceRow(provIdx, idx, name, baseUrl, protocol) {
    * and the provider was flipped onto /messages (epic pt_b7a29ea7 S3). */
   if (protocol && protoOpts.indexOf(protocol) < 0) protoOpts.push(protocol);
   var sel = '<select class="stg-face-proto" data-face-field="protocol" ' +
-    'onchange="_onFaceRowEdit(' + provIdx + ')">';
+    'title="' + escapeHtml(t('settings.faceProtoTitle')) + '" ' +
+    'onchange="_onFaceProtoChange(' + provIdx + ', this)">';
   for (var i = 0; i < protoOpts.length; i++) {
     sel += '<option value="' + protoOpts[i] + '"' +
       (protocol === protoOpts[i] ? ' selected' : '') + '>' + protoOpts[i] + '</option>';
   }
   sel += '</select>';
 
+  var autoName = !name || name === protocol ||
+    name.indexOf(protocol + '-') === 0;
+
   return '<div class="stg-face-row" data-face-idx="' + idx + '" ' +
-    'data-orig-protocol="' + escapeHtml(protocol || '') + '">' +
-    '<input type="text" class="stg-face-name" data-face-field="name" ' +
-      'placeholder="' + escapeHtml(t('settings.faceNamePlaceholder')) + '" ' +
-      'spellcheck="false" autocomplete="off" ' +
-      'value="' + escapeHtml(name || '') + '" ' +
-      'onchange="_onFaceRowEdit(' + provIdx + ')">' +
+    'data-orig-protocol="' + escapeHtml(protocol || '') + '" ' +
+    'data-auto-name="' + (autoName ? '1' : '0') + '">' +
+    '<input type="hidden" data-face-field="name" ' +
+      'value="' + escapeHtml(name || '') + '">' +
+    sel +
     '<input type="text" class="stg-face-url" data-face-field="base_url" ' +
-      'placeholder="https://gateway.example.com/v1/anthropic" ' +
+      'placeholder="' + escapeHtml(_faceUrlPlaceholder(protocol)) + '" ' +
       'spellcheck="false" autocomplete="off" ' +
       'value="' + escapeHtml(baseUrl || '') + '" ' +
       'onchange="_onFaceRowEdit(' + provIdx + ')">' +
-    sel +
     '<button type="button" class="stg-faces-btn danger" ' +
       'onclick="_deleteFace(' + provIdx + ',' + idx + ')" ' +
       'title="' + escapeHtml(t('settings.deleteFaceTitle')) + '">✕</button>' +
@@ -299,25 +338,63 @@ function _collectFacesFromDom(provIdx) {
   if (!field) return {};
   var rows = field.querySelectorAll('.stg-face-row');
   var out = {};
+  /* 'default' is taken by the provider's own base_url/protocol — a face
+   * under that name would be a second, contradictory source for it. */
+  var used = ['default'];
   for (var i = 0; i < rows.length; i++) {
     var nameEl = rows[i].querySelector('[data-face-field="name"]');
     var urlEl = rows[i].querySelector('[data-face-field="base_url"]');
     var protoEl = rows[i].querySelector('[data-face-field="protocol"]');
     var n = (nameEl && nameEl.value || '').trim();
-    // 'default' is the provider's own base_url/protocol, not an alternate —
-    // accepting it here would create a second, contradictory source for the
-    // same face.
-    if (!n || n === 'default') continue;
+    var proto = (protoEl && protoEl.value) ||
+      rows[i].getAttribute('data-orig-protocol') || 'openai';
+    /* A nameless row (fresh from "+ 协议面") or a name already taken gets
+     * its handle derived from the protocol — two anthropic rows become
+     * 'anthropic' + 'anthropic-2', never a silent dict-key overwrite. */
+    if (!n || n === 'default' || used.indexOf(n) >= 0) {
+      n = _deriveFaceName(proto, used);
+    }
+    used.push(n);
     out[n] = {
       base_url: (urlEl && urlEl.value || '').trim(),
       /* Never collapse an unreadable select to a hard-coded protocol: keep
        * the value the row was RENDERED with (data-orig-protocol). 'openai'
        * is only the no-information default for a brand-new row. */
-      protocol: (protoEl && protoEl.value) ||
-        rows[i].getAttribute('data-orig-protocol') || 'openai',
+      protocol: proto,
     };
   }
   return out;
+}
+
+/** Protocol select changed: re-hint the URL box, and re-derive an
+ *  AUTO name so it keeps reading like the protocol it speaks.
+ *
+ *  The one case the name must NOT follow: a model pin references it
+ *  (m.face === name) — renaming would dangle the pin, and the pinned model
+ *  would fall off routing entirely. A pinned name stays, and the row stops
+ *  counting as auto (data-auto-name flips off). */
+function _onFaceProtoChange(provIdx, sel) {
+  var row = sel && sel.closest ? sel.closest('.stg-face-row') : null;
+  if (row) {
+    var urlEl = row.querySelector('[data-face-field="base_url"]');
+    if (urlEl) urlEl.placeholder = _faceUrlPlaceholder(sel.value);
+    var nameEl = row.querySelector('[data-face-field="name"]');
+    if (nameEl && row.getAttribute('data-auto-name') === '1') {
+      var cur = (nameEl.value || '').trim();
+      var pinned = false;
+      var p = _stgProviders[provIdx] || {};
+      var models = p.models || [];
+      for (var i = 0; i < models.length; i++) {
+        if (cur && models[i] && (models[i].face || '') === cur) {
+          pinned = true;
+          break;
+        }
+      }
+      if (pinned) row.setAttribute('data-auto-name', '0');
+      else nameEl.value = sel.value || '';
+    }
+  }
+  _onFaceRowEdit(provIdx);
 }
 
 /** Live-edit handler for a face row. Re-resolves so the pills follow. */
@@ -352,8 +429,8 @@ function _addFace(provIdx) {
   list.insertAdjacentHTML('beforeend',
     _renderFaceRow(provIdx, nextIdx, '', '', 'anthropic'));
   var rows = list.querySelectorAll('.stg-face-row');
-  var nameInput = rows[rows.length - 1].querySelector('[data-face-field="name"]');
-  if (nameInput) nameInput.focus();
+  var urlInput = rows[rows.length - 1].querySelector('[data-face-field="base_url"]');
+  if (urlInput) urlInput.focus();
 }
 
 /** Remove one face row.

@@ -86,9 +86,69 @@ PRODUCE_VIDEO_TOOL = {
     },
 }
 
+PRODUCE_SLIDES_TOOL_NAME = 'produce_slides'
+
+PRODUCE_SLIDES_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "produce_slides",
+        "description": (
+            "Produce a polished, DESIGNER-QUALITY slide deck (PPTX) from a "
+            "single topic — fully automatic. The pipeline classifies the "
+            "scenario (tech / business / academic / education / brand / "
+            "report / analysis), binds ONE curated theme (palette + licensed "
+            "CJK/Latin typefaces + the scenario's design bible), authors "
+            "every page in the PPTD layout language, renders per-page "
+            "previews, runs a multimodal visual-QA pass, and exports a "
+            "NATIVE, fully editable .pptx (real text boxes, shapes, tables "
+            "— not page images) with fade transitions. Returns immediately "
+            "with a task_id; the deck generates in the background and the "
+            "user watches progress. Use this whenever the user asks for a "
+            "PPT / slide deck / presentation / 幻灯片 / 课件 / 路演. Does "
+            "NOT require an attached project."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "topic": {
+                    "type": "string",
+                    "description": "The subject of the deck, e.g. '小米 YU7 "
+                                   "产品发布' or '固态电池技术路线评审'."
+                },
+                "style": {
+                    "type": "string",
+                    "description": "Optional style direction, e.g. '深色科技风' "
+                                   "or 'editorial luxury'. The scenario/theme "
+                                   "defaults are already curated; use this to "
+                                   "steer (or to name a brand to anchor to)."
+                },
+                "lang": {
+                    "type": "string",
+                    "enum": ["zh", "en"],
+                    "description": "Deck language (default zh)."
+                },
+                "max_pages": {
+                    "type": "integer",
+                    "description": "Upper bound on page count / cost (3..20, "
+                                   "default 12)."
+                },
+                "size": {
+                    "type": "string",
+                    "enum": ["1280x720", "960x540", "720x540"],
+                    "description": "Page geometry: 1280x720 (16:9, default), "
+                                   "960x540 (16:9 compact), 720x540 (4:3)."
+                }
+            },
+            "required": ["topic"],
+        },
+    },
+}
+
 __all__ = ['PRODUCE_VIDEO_TOOL', 'PRODUCE_VIDEO_TOOL_NAME',
            'PRODUCE_REPORT_TOOL', 'PRODUCE_REPORT_TOOL_NAME',
-           'PRODUCE_RESEARCH_TOOL', 'PRODUCE_RESEARCH_TOOL_NAME']
+           'PRODUCE_RESEARCH_TOOL', 'PRODUCE_RESEARCH_TOOL_NAME',
+           'PRODUCE_SLIDES_TOOL', 'PRODUCE_SLIDES_TOOL_NAME',
+           'PRODUCE_TOOL_NAMES']
 
 PRODUCE_REPORT_TOOL_NAME = 'produce_report'
 
@@ -183,3 +243,13 @@ PRODUCE_RESEARCH_TOOL = {
         },
     },
 }
+
+#: Every name in the high-level produce_* family (one sentence → finished
+#: product). Single source of truth for the display-dispatch table and the
+#: frontend tool-card family parity guard.
+PRODUCE_TOOL_NAMES = frozenset({
+    PRODUCE_VIDEO_TOOL_NAME,
+    PRODUCE_REPORT_TOOL_NAME,
+    PRODUCE_RESEARCH_TOOL_NAME,
+    PRODUCE_SLIDES_TOOL_NAME,
+})

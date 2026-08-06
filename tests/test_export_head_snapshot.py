@@ -57,19 +57,19 @@ def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
 def repo(tmp_path):
     """Committed base, then: dirty a tracked file + add an untracked module
     the dirty file imports (the torn-snapshot incident shape)."""
-    r = tmp_path / 'repo'
-    (r / 'lib').mkdir(parents=True)
-    (r / 'lib' / '__init__.py').write_text('', encoding='utf-8')
-    (r / 'lib' / 'core.py').write_text('VALUE = "committed"\n',
-                                       encoding='utf-8')
-    _git(r, 'init', '-q')
-    _git(r, 'add', '.')
-    _git(r, 'commit', '-qm', 'init')
+    tmp_dir = tmp_path / 'repo'
+    (tmp_dir / 'lib').mkdir(parents=True)
+    (tmp_dir / 'lib' / '__init__.py').write_text('', encoding='utf-8')
+    (tmp_dir / 'lib' / 'core.py').write_text('VALUE = "committed"\n',
+                                             encoding='utf-8')
+    _git(tmp_dir, 'init', '-q')
+    _git(tmp_dir, 'add', '.')
+    _git(tmp_dir, 'commit', '-qm', 'init')
     # Incident shape: dirty tracked edit references an untracked new module.
-    (r / 'lib' / 'core.py').write_text(
+    (tmp_dir / 'lib' / 'core.py').write_text(
         'VALUE = "wip"\nimport lib.wip_module\n', encoding='utf-8')
-    (r / 'lib' / 'wip_module.py').write_text('X = 1\n', encoding='utf-8')
-    return r
+    (tmp_dir / 'lib' / 'wip_module.py').write_text('X = 1\n', encoding='utf-8')
+    return tmp_dir
 
 
 def test_snapshot_contains_committed_not_worktree(repo):

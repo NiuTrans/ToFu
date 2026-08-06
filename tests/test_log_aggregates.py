@@ -281,6 +281,10 @@ class TestFlush(_DbBase):
         from lib.database import DOMAIN_SYSTEM, get_thread_db
         db = get_thread_db(DOMAIN_SYSTEM)
         new_ms = 9_000_000_000_000
+        # 结构性解耦模块态:setup 两次 flush 若撞上 _last_sweep_at=0
+        # (隔离运行/新 worker)会当场把 stale 行扫掉,assert 2 变 1——
+        # 本测试的语义只在「强制那一扫」,setup 期必须钉住不扫。
+        monkeypatch.setattr(la, '_last_sweep_at', time.monotonic())
         la.flush_once(store=self._store_with('stale thing', n=1, ts_sec=1000.0))
         la.flush_once(store=self._store_with('fresh thing', n=1,
                                              ts_sec=new_ms / 1000))

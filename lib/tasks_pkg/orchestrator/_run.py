@@ -236,15 +236,9 @@ def run_task(task: dict[str, Any]) -> None:
                         thinking_enabled=thinking_enabled)
         all_search_results_text = []
 
-        # ★ Abort-during-prep gates (2026-08-06, conv msftgnt3  incident):
-        #   aborts used to be consulted only INSIDE the round loop, so a Stop
-        #   landing during prep waited out the whole phase (measured 88s on
-        #   FUSE-slow storage) while the UI showed the turn as alive — the
-        #   "pause needs several clicks" report. One sticky-flag check per
-        #   expensive stage boundary collapses the kill latency to the
-        #   current stage; on a trip the loop below is skipped entirely and
-        #   finalize_after_loop settles the turn exactly like the round-0
-        #   abort gate does. The FIRST tripped stage owns the exit_reason.
+        # ★ Abort-during-prep gates (2026-08-06 conv msftgnt3 incident →
+        #   _abort_prep): one sticky-flag check per expensive stage boundary —
+        #   the FIRST tripped stage owns exit_reason and skips the loop below.
         _prep_aborted = handle_abort_during_prep(task, rs, stage='startup',
                                                  tid=tid)
 

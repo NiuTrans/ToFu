@@ -1975,10 +1975,6 @@ textarea::placeholder{color:var(--text-tertiary)}
 .paper-xp-flip .paper-xp-flip-back{display:none}
 .paper-xp-flip.is-flipped .paper-xp-flip-front{display:none}
 .paper-xp-flip.is-flipped .paper-xp-flip-back{display:block}
-/* Skim mode (P2): deterministic collapse — sections reduce to first
- * paragraph + callouts + the xp tutor cards. */
-.xp-skim-hidden{display:none!important}
-.paper-skim-btn.is-on{color:var(--accent);border-color:color-mix(in srgb,var(--accent) 40%,var(--border));background:color-mix(in srgb,var(--accent) 10%,transparent)}
 /* Deepen (P3): heading ghost buttons + the drawer. */
 .paper-deepen-btn{display:inline-block;margin-left:6px;padding:1px 8px;border:1px solid transparent;border-radius:7px;background:transparent;color:var(--text-quaternary);font-size:11px;font-weight:600;cursor:pointer;font-family:inherit;vertical-align:middle;opacity:0;transition:opacity .15s,color .12s,border-color .12s}
 .paper-deepen-btn::after{content:attr(data-label);margin-left:3px}
@@ -2009,13 +2005,6 @@ h2:hover .paper-deepen-btn,h3:hover .paper-deepen-btn,.paper-deepen-btn:focus{op
 .paper-note-editor-actions button{padding:4px 12px;border-radius:7px;border:1px solid var(--border);background:transparent;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;color:var(--text-secondary)}
 .paper-note-editor-actions .paper-note-save{background:var(--accent);border-color:var(--accent);color:#fff}
 .paper-note-editor-actions .paper-note-del:hover{color:#ef4444;border-color:#ef4444}
-/* Focus mode (P4): one block in the spotlight, the rest dims away. The
- * spotlight must be VISIBLE — a pure opacity contrast (1 vs .22) read as
- * "everything went gray" (owner report 2026-08-06); the current block gets a
- * soft accent wash + a left accent bar via box-shadow (no layout shift). */
-.paper-focus-on .paper-report-article > *{opacity:.22;transition:opacity .25s}
-.paper-focus-on .paper-report-article > *.paper-focus-current{opacity:1;background:color-mix(in srgb,var(--accent) 8%,transparent);box-shadow:-4px 0 0 0 var(--accent);border-radius:4px}
-.paper-focus-btn.is-on{color:var(--accent);border-color:color-mix(in srgb,var(--accent) 40%,var(--border));background:color-mix(in srgb,var(--accent) 10%,transparent)}
 .paper-report-content img,.paper-report-body img{display:block;max-width:100%;height:auto;margin:14px auto;border:1px solid var(--border);border-radius:6px;background:#fff;padding:4px;box-shadow:0 2px 8px rgba(0,0,0,.15);cursor:zoom-in}
 .paper-report-content p:has(> img:only-child),.paper-report-body p:has(> img:only-child){text-align:center;margin:14px 0}
 .paper-report-content p > img + em,.paper-report-body p > img + em{display:block;text-align:center;font-size:12px;color:var(--text-tertiary);margin-top:4px}
@@ -6335,10 +6324,39 @@ input.settings-mono {
   background: var(--s-cream);
   border: var(--s-border);
   border-radius: var(--s-radius);
-  padding: 14px;
+  padding: 16px 16px 12px;
   margin-top: 8px;
   margin-bottom: 4px;
-  box-shadow: var(--s-shadow-xs);
+  box-shadow: var(--s-shadow-sm);
+}
+/* Section rhythm (redesign 2026-08-06): the form reads as labeled blocks —
+ * identity → wire → quota → capabilities → aliases — instead of one flat
+ * wall. The label is a small gold-ticked stamp; the ::before tick carries
+ * the accent so the text can stay ink-soft and quiet. */
+.stg-edit-sec { margin-bottom: 14px; }
+.stg-edit-sec:last-child { margin-bottom: 0; }
+.stg-edit-sec-label {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 10.5px;
+  font-weight: 800;
+  letter-spacing: 0.09em;
+  color: var(--s-ink-soft);
+  margin-bottom: 7px;
+  user-select: none;
+}
+.stg-edit-sec-label::before {
+  content: '';
+  width: 3px;
+  height: 11px;
+  background: var(--s-gold);
+  flex-shrink: 0;
+}
+.stg-edit-sec-label .stg-hint {
+  font-weight: 500;
+  letter-spacing: 0;
+  opacity: 0.65;
 }
 /* Uniform 2-column grid (redesign 2026-08-01): the old 1fr/auto/auto made
  * every row a different width — the price section looked misaligned because
@@ -6362,6 +6380,9 @@ input.settings-mono {
 }
 .stg-cap-toggles { display: flex; gap: 5px; flex-wrap: wrap; }
 .stg-cap-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   padding: 4px 10px;
   border: 1.5px solid var(--s-ink-soft);
   background: none;
@@ -6373,6 +6394,8 @@ input.settings-mono {
   transition: all 0.12s;
   user-select: none;
 }
+.stg-cap-ico { display: inline-flex; }
+.stg-cap-ico svg { display: block; }
 .stg-cap-btn.active {
   border-color: var(--s-ink);
   background: var(--s-gold);
@@ -6447,6 +6470,24 @@ html:not([data-theme="light"]):not([data-theme="tofu"]) .stg-face-auto-pick { co
 html:not([data-theme="light"]):not([data-theme="tofu"]) .stg-face-auto-refused { color: #f87171; }
 
 .stg-edit-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }
+/* Footer bar (redesign 2026-08-06): the thinking-default toggle used to
+ * float as an orphaned row; it now shares a ruled footer with the actions,
+ * so the form ends on one deliberate line. */
+.stg-edit-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  border-top: 1.5px dashed rgba(26, 24, 20, 0.18);
+  padding-top: 12px;
+}
+.stg-edit-foot .stg-edit-actions { margin-top: 0; }
+.stg-edit-proto {
+  font-family: 'JetBrains Mono', monospace;
+  font-weight: 600;
+  font-size: 12px;
+}
 
 /* ══════════════════════════════════════
    Preset Mapping Table — tofu grid
@@ -9109,6 +9150,55 @@ html:not([data-theme="tofu"]) .scene-switch-btn{display:none}
 .ptool-board-mini-open { border-left-color: var(--pb-amber, #eab308); }
 .ptool-board-mini-claimed { border-left-color: var(--accent); }
 .ptool-board-mini-deferred { border-left-color: var(--text-tertiary); opacity: 0.85; border-left-style: dashed; }
+
+/* ── Motion-video / produce tool cards ──
+   The body reuses .ptool-convmeta-block / summary / src-chip styles; these
+   are the motion-specific internals (detail rows, dep list, scene table). */
+.ptool-motion-block > summary .ptool-convmeta-src {
+  color: #f472b6;
+  background: color-mix(in srgb, #f472b6 15%, transparent);
+}
+.ptool-motion-body {
+  margin: 4px 0 6px 11px;
+  padding: 12px 14px;
+  border-left: 2px solid color-mix(in srgb, #f472b6 55%, transparent);
+  background: var(--accent-subtle);
+  border-radius: 0 8px 8px 0;
+  font-size: 12.5px;
+}
+.ptool-motion-row { display: flex; align-items: baseline; gap: 8px; padding: 2px 0; }
+.ptool-motion-k {
+  flex: none; min-width: 96px;
+  font-size: 10px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: 0.05em; color: var(--text-tertiary);
+}
+.ptool-motion-v { color: var(--text-primary); overflow-wrap: anywhere; }
+.ptool-motion-mono { font-family: var(--font-mono, monospace); font-size: 11.5px; }
+.ptool-motion-section { margin-top: 9px; }
+.ptool-motion-section-title {
+  font-size: 10px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: 0.05em; color: var(--text-tertiary); margin-bottom: 4px;
+}
+.ptool-motion-li { padding: 1.5px 0; color: var(--text-primary); overflow-wrap: anywhere; }
+.ptool-motion-err { color: var(--danger, #f87171); }
+.ptool-motion-warn { color: var(--warning, #fbbf24); }
+.ptool-motion-hint { color: var(--text-secondary); }
+.ptool-motion-more { color: var(--text-tertiary); font-style: italic; }
+.ptool-motion-dep {
+  display: flex; align-items: center; gap: 8px; padding: 2px 0;
+}
+.ptool-motion-dep-name { flex: none; min-width: 96px; font-family: var(--font-mono, monospace); font-size: 11.5px; }
+.ptool-motion-dep-ok .ptool-motion-dep-val { color: var(--text-secondary); overflow-wrap: anywhere; }
+.ptool-motion-dep-miss .ptool-motion-dep-val { color: var(--danger, #f87171); }
+.ptool-motion-scene {
+  display: flex; align-items: baseline; gap: 8px; padding: 2.5px 0;
+  border-bottom: 1px dashed color-mix(in srgb, var(--border) 60%, transparent);
+}
+.ptool-motion-scene:last-child { border-bottom: none; }
+.ptool-motion-scene-id { flex: none; min-width: 96px; font-family: var(--font-mono, monospace); font-size: 11.5px; color: var(--text-secondary); }
+.ptool-motion-scene-dur { color: var(--text-primary); }
+.ptool-motion-scene-grew .ptool-motion-scene-dur { color: var(--warning, #fbbf24); }
+.ptool-motion-scene-overflow { color: var(--danger, #f87171); font-size: 11px; }
 .ptool-board-mini-done { border-left-color: var(--pb-green, #22c55e); opacity: 0.75; }
 .ptool-board-mini-title { flex: 1; overflow-wrap: anywhere; }
 .ptool-board-mini-owner { font-size: 10px; color: var(--accent); font-family: var(--mono, monospace); }
@@ -15610,7 +15700,7 @@ html:not([data-theme="tofu"]) .tofu-pet{display:none}
 .browser-local-shortcut code.copyable-url:hover::after{opacity:1}
 .browser-local-shortcut code.copyable-url.copied{background:rgba(34,197,94,0.18);color:#22c55e;box-shadow:0 0 0 2px rgba(34,197,94,0.25)}
 
-.browser-lna-warning{padding:12px 16px;border-radius:10px;margin-bottom:16px;background:rgba(245,158,11,0.07);border:1px solid rgba(245,158,11,0.25)}
+.browser-lna-warning{padding:12px 16px;border-radius:10px;margin:12px 0 0;background:rgba(245,158,11,0.07);border:1px solid rgba(245,158,11,0.25)}
 .browser-lna-warning strong{display:block;font-size:13px;color:#f59e0b;margin-bottom:4px}
 .browser-lna-warning p{font-size:12px;line-height:1.5;color:var(--text-secondary,#888);margin:0 0 8px}
 .browser-lna-warning code{background:rgba(255,255,255,0.06);padding:1px 5px;border-radius:4px;font-size:12px;font-family:'JetBrains Mono',monospace}
@@ -15651,8 +15741,24 @@ html:not([data-theme="tofu"]) .tofu-pet{display:none}
 #localControlToggle.active{background:rgba(168,85,247,0.15);color:#a855f7;border-color:rgba(168,85,247,0.3)}
 [data-theme="light"] #localControlToggle.active{background:rgba(126,34,206,0.1);color:#7e22ce;border-color:rgba(126,34,206,0.25)}
 
-.local-modal{max-width:560px}
+/* Wide layout: the two capabilities are peers, so they sit SIDE BY SIDE
+   (browser left / computer right) instead of forcing a vertical scan past
+   one card to reach the other. The base .modal cap (92vw) still bounds small
+   windows; the grid collapses to one column before the cards get cramped. */
+.local-modal{width:940px}
 .local-modal .modal-desc{color:var(--text-secondary,#888);font-size:13px;margin:0 0 18px}
+.lc-cols{display:grid;grid-template-columns:1fr 1fr;gap:12px;align-items:start}
+.lc-cols .lc-cap{margin-bottom:0}
+@media(max-width:860px){.lc-cols{grid-template-columns:1fr}.lc-cols .lc-cap{margin-bottom:12px}}
+
+/* An <a class="btn …"> is still display:inline by default — and an inline
+   box's VERTICAL padding/border does not grow its line box, it PAINTS OVER
+   the lines above and below. Measured 2026-08-06: the agent-bundle CTA (an
+   anchor, unlike every <button> sibling, which is inline-block per UA style)
+   rendered its gold block straight across its own note paragraph. Any anchor
+   styled as a modal button gets the same box geometry a <button> would. */
+.modal a.btn{display:inline-flex;align-items:center;justify-content:center}
+.lc-cap-setup a.btn{margin:2px 0 10px}
 
 .lc-cap{border:1px solid var(--border,#2a2a35);border-radius:12px;padding:14px 16px;margin-bottom:12px;background:rgba(255,255,255,0.015)}
 .lc-cap-head{display:flex;align-items:center;gap:12px}
@@ -15753,6 +15859,16 @@ html:not([data-theme="tofu"]) .tofu-pet{display:none}
 .lc-details[open]>summary::before{content:'▾\00a0'}
 .lc-details>summary:hover{color:var(--text-primary,#e8e8f0)}
 .lc-details[open]>summary{margin-bottom:6px}
+
+/* ── Agent diagnostics inbox (2026-08-06) — the paste box for the
+   agent's「复制诊断信息」bundle; monospace because it is log text. */
+.lc-diag-text{width:100%;box-sizing:border-box;font-family:'JetBrains Mono',monospace;font-size:11.5px;line-height:1.5;color:var(--text-primary,#e6e6ea);background:rgba(0,0,0,0.18);border:1px solid var(--border,rgba(148,148,168,0.18));border-radius:8px;padding:8px 10px;margin:2px 0 8px;resize:vertical}
+[data-theme="light"] .lc-diag-text{background:rgba(0,0,0,0.03)}
+.lc-diag-actions{display:flex;align-items:center;gap:10px}
+.lc-diag-hint{font-size:12px;color:var(--text-secondary,#9898a8)}
+.lc-diag-recent{margin:8px 0 0}
+.lc-diag-recent-head{font-size:11px;font-weight:600;color:var(--text-tertiary,#6a6a7a);margin:0 0 3px}
+.lc-diag-row{font-size:11.5px;color:var(--text-secondary,#9898a8);line-height:1.6}
 
 [data-theme="light"] .lc-cap{border-color:rgba(0,0,0,0.09);background:rgba(0,0,0,0.012)}
 [data-theme="light"] .lc-cap-icon{background:rgba(126,34,206,0.1);color:#7e22ce}
@@ -23082,10 +23198,10 @@ html:not([data-theme="light"]):not([data-theme="tofu"]) .stg-face-warn{
 }
 
 /* ══ Provider card — alternate wire-faces editor ════════════════════════════
-   Mirrors the Custom Headers row editor: one row per declared face
-   (name + base_url + protocol). Until this existed the only writer of
-   faces{} was "sync from template", so a self-built dual-face gateway could
-   not be configured through the UI at all. */
+   One row per declared face: protocol select + base_url + delete. The face
+   NAME is a hidden auto-derived handle (protocol + collision suffix), never
+   a text box — owner review 2026-08-06: a 118px '面名' input was both
+   unreadable and unanswerable. */
 .stg-faces-header{
   display:flex;
   align-items:center;
@@ -23095,9 +23211,8 @@ html:not([data-theme="light"]):not([data-theme="tofu"]) .stg-face-warn{
 }
 .stg-faces-list{display:flex;flex-direction:column;gap:6px}
 .stg-face-row{display:flex;align-items:center;gap:6px}
-.stg-face-row .stg-face-name{flex:0 0 118px;min-width:0}
+.stg-face-row .stg-face-proto{flex:0 0 124px}
 .stg-face-row .stg-face-url{flex:1 1 auto;min-width:0}
-.stg-face-row .stg-face-proto{flex:0 0 104px}
 .stg-faces-btn{
   flex:0 0 auto;
   padding:4px 8px;

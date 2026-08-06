@@ -237,7 +237,6 @@ def log_round_cache_stats(
     _nu = normalize_usage(usage)
     cache_write = _nu['cache_write']
     cache_read = _nu['cache_read']
-    _nu['input']
 
     # ★ A round with NO cache activity used to return here — which silenced
     #   exactly the most expensive rounds in the system (a full miss on a

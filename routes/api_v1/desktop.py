@@ -684,6 +684,114 @@ def desktop_agent_bundle():
                      download_name=zip_name)
 
 
+# ── Client-diagnostics inbox (owner ask 2026-08-06) ──────────────────
+# A controlled machine that cannot reach this server cannot push its own
+# logs anywhere — so the agent's tray / role-window carries a「复制诊断
+# 信息」button (desktop/agent_launcher._diag_report), and the user pastes
+# the bundle HERE. The server appends it to a JSONL file the operator (or
+# the assistant) reads straight from disk; the GET lets the panel confirm
+# the paste landed. Texts are stored verbatim (the agent already redacts
+# secrets to presence+length) and capped at _DIAG_MAX_CHARS.
+_DIAG_LOG = os.path.join(_REPO_ROOT, 'logs', 'desktop_client_diag.log')
+_DIAG_MAX_CHARS = 200_000
+_DIAG_LIST_LIMIT = 20
+
+
+@api_v1_desktop_bp.route('/api/v1/desktop/client-diag', methods=['POST'])
+@require_auth
+@api_meta(
+    summary='Store a pasted agent-diagnostics bundle',
+    description=(
+        'The counterpart of the agent\'s copy-diagnostics button: the user '
+        'pastes the clipboard bundle into the Local Control panel and it '
+        'lands in logs/desktop_client_diag.log as one JSON line '
+        '(ts/user_id/text). 400 on an empty paste; the text is capped at '
+        '200k chars.'
+    ),
+    tags=['capabilities'],
+)
+async def desktop_client_diag_submit():
+    import json as _json
+
+    from lib.request_parser import async_parse_body
+    from .auth import current_auth
+    auth = current_auth()
+    uid = (auth.user_id if auth and getattr(auth, 'user_id', '') else '')
+    body = await async_parse_body()
+    # Manual validation (not optional_str): the refusal must ride the
+    # api_error envelope, not the global BadRequest handler.
+    text = body.get('text')
+    if not isinstance(text, str):
+        return api_error('bad_diag', status=400,
+                         message='text must be a string')
+    text = text.strip()
+    if len(text) > _DIAG_MAX_CHARS:
+        return api_error('diag_too_large', status=400,
+                         message='diagnostics too large (max %d chars)'
+                                 % _DIAG_MAX_CHARS)
+    if not text:
+        return api_error('empty_diag', status=400,
+                         message='nothing to store — paste the copied '
+                                 'diagnostics first')
+    entry = {'ts': time.time(), 'user_id': uid, 'text': text}
+    try:
+        os.makedirs(os.path.dirname(_DIAG_LOG), exist_ok=True)
+        with open(_DIAG_LOG, 'a', encoding='utf-8') as f:
+            f.write(_json.dumps(entry, ensure_ascii=False) + '\n')
+    except OSError as e:
+        logger.error('[Desktop] client-diag store failed: %s', e,
+                     exc_info=True)
+        return api_error('diag_store_failed', status=500,
+                         message='could not store the diagnostics — '
+                                 'see logs/error.log')
+    logger.info('[Desktop] client diagnostics received (%d chars, user=%s)',
+                len(text), uid)
+    return api_ok({'received': len(text)})
+
+
+@api_v1_desktop_bp.route('/api/v1/desktop/client-diag', methods=['GET'])
+@require_auth
+@api_meta(
+    summary='List recent pasted agent-diagnostics bundles',
+    description=(
+        'Newest-first metadata + preview of the last 20 submissions '
+        '(the full text stays on disk in logs/desktop_client_diag.log). '
+        'Lets the panel confirm a paste landed.'
+    ),
+    tags=['capabilities'],
+)
+async def desktop_client_diag_list():
+    import json as _json
+
+    entries = []
+    try:
+        size = os.path.getsize(_DIAG_LOG)
+        with open(_DIAG_LOG, encoding='utf-8', errors='replace') as f:
+            if size > 2_000_000:
+                f.seek(size - 1_000_000)
+                f.readline()  # drop the partial line the seek landed in
+                lines = f.readlines()
+            else:
+                lines = f.readlines()
+        for ln in lines[-_DIAG_LIST_LIMIT:]:
+            try:
+                e = _json.loads(ln)
+            except ValueError as e2:
+                logger.debug('[Desktop] diag line undecodable: %s', e2)
+                continue
+            if not isinstance(e, dict):
+                continue
+            entries.append({'ts': e.get('ts'), 'user_id': e.get('user_id'),
+                            'chars': len(e.get('text') or ''),
+                            'preview': (e.get('text') or '')[:200]})
+    except FileNotFoundError:
+        logger.debug('[Desktop] client-diag file absent — nothing to list')
+    except OSError as e:
+        logger.warning('[Desktop] client-diag list failed: %s', e)
+    entries.reverse()
+    return api_ok({'entries': entries})
+
+
 @api_v1_desktop_bp.route('/api/v1/desktop/streams/<cmd_id>', methods=['GET'])
 @require_auth
 async def desktop_stream(cmd_id):

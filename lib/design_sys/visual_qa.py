@@ -74,6 +74,7 @@ def visual_qa_available() -> tuple:
     try:
         import playwright.sync_api  # noqa: F401
     except Exception as e:
+        logger.debug('[VisualQA] playwright unavailable: %s', e)
         return False, f'playwright unavailable: {e}'
     if not _vision_model():
         return False, 'no vision-capable model slot in the dispatcher'
@@ -89,7 +90,8 @@ def _vision_model() -> str:
             try:
                 if 'vision' in (getattr(slot, 'capabilities', None) or ()):
                     return getattr(slot, 'model', '') or ''
-            except Exception:
+            except Exception as e:
+                logger.debug('[VisualQA] slot capability probe failed: %s', e)
                 continue
     except Exception as e:
         logger.debug('[VisualQA] dispatcher probe failed: %s', e)
@@ -189,6 +191,7 @@ def qa_frame(image_path: str, *, theme=None, label: str = '',
             data_uri = ('data:image/png;base64,'
                         + base64.b64encode(fh.read()).decode('ascii'))
     except OSError as e:
+        logger.debug('[VisualQA] frame unreadable %s: %s', image_path, e)
         out['skipped'] = True
         out['reason'] = f'frame unreadable: {e}'
         return out
@@ -232,7 +235,8 @@ def _parse_findings(content: str) -> list | None:
         return None
     try:
         raw = json.loads(m.group(0))
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as e:
+        logger.debug('[VisualQA] QA reply JSON parse failed: %s', e)
         return None
     items = raw.get('findings')
     if not isinstance(items, list):

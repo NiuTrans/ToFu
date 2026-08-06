@@ -206,3 +206,73 @@ def test_page_du_matches_the_art_space():
                 x, y, w, h = (int(g) for g in m.groups())
                 assert x + w <= installer_art.PAGE_DU[0]
                 assert y + h <= installer_art.PAGE_DU[1]
+
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  The opacity contract: labels are OPAQUE statics (2026-08-06 round 2)
+# ═══════════════════════════════════════════════════════════════════
+# Stock ${NSD_CreateLabel} inherits __NSD_Label_EXSTYLE =
+# WS_EX_TRANSPARENT from nsDialogs.nsh — the documented "label invisible
+# until a forced redraw" failure class: a transparent static's first
+# paint is deferred behind its siblings and can simply never arrive.
+# This design never needs transparency — every label sits on a #F0F0F0
+# card baked into the page art, exactly the COLOR_3DFACE an opaque
+# static paints behind its text — so the transparent style only carries
+# risk. TOFU_LABEL must create the STATIC directly, exstyle 0 (the
+# official nsDialogs welcome.nsi shape).
+
+def test_labels_are_opaque_statics_not_nsd_transparent():
+    tmpl = (_ROOT / 'desktop' / 'installer.nsi.tmpl').read_text(
+        encoding='utf-8')
+    raw = tmpl.split('!macro TOFU_LABEL')[1].split('!macroend')[0]
+    # Comments may NAME the forbidden things (they document why); only
+    # code lines count.
+    macro = '\n'.join(line for line in raw.splitlines()
+                      if not line.lstrip().startswith(';'))
+    assert '${NSD_CreateLabel}' not in macro, (
+        'TOFU_LABEL rides NSD_CreateLabel again — it carries '
+        'WS_EX_TRANSPARENT (the invisible-label class)')
+    assert 'WS_EX_TRANSPARENT' not in macro
+    assert re.search(r'nsDialogs::CreateControl STATIC ', macro), (
+        'TOFU_LABEL must create the STATIC directly (official-example '
+        'shape) so the exstyle is explicit')
+    assert ' 0 ${x} ${y} ${w} ${h} ' in macro, (
+        'the exstyle operand just before the placement quad must stay 0')
+
+
+def test_progress_status_label_handle_is_captured_from_r0():
+    """A second `Pop $StatusCtl` after TOFU_LABEL underflows the stack:
+    the macro already popped the HWND into $0, so the extra Pop left
+    $StatusCtl empty and every (un.)DoInstall status update hit its
+    `<> ""` guard as a no-op — the progress text could never change."""
+    for script, target in ((_FULL, 'full'), (_AGENT, 'agent')):
+        for page in ('ProgressPageCreate', 'un.ProgressPageCreate'):
+            body = script.split(f'Function {page}')[1] \
+                         .split('FunctionEnd')[0]
+            assert 'StrCpy $StatusCtl $0' in body, (target, page)
+            assert 'Pop $StatusCtl' not in body, (target, page)
+
+
+
+def test_diag_seam_is_wired_into_the_shared_macros():
+    """The TOFU_DIAG measurement seam (2026-08-06): the log calls live
+    INSIDE the shared macros so every page (install + uninstall) is
+    covered, production compiles expand them to nothing, and the seam
+    cannot be dropped without this pin going red."""
+    tmpl = (_ROOT / 'desktop' / 'installer.nsi.tmpl').read_text(
+        encoding='utf-8')
+    art_macro = tmpl.split('!macro TOFU_PAGE_ART')[1].split('!macroend')[0]
+    label_macro = tmpl.split('!macro TOFU_LABEL')[1].split('!macroend')[0]
+    assert '!insertmacro TOFU_DIAG_PAGE' in art_macro, (
+        'page-level diag (dialog/art/image-handle) fell out of '
+        'TOFU_PAGE_ART')
+    assert '!insertmacro TOFU_DIAG_HW "label" $0' in label_macro, (
+        'label-level diag fell out of TOFU_LABEL')
+    assert '!ifdef TOFU_DIAG' in tmpl and 'OnTofuDiagProbe' in tmpl, (
+        'the diag block / live-page probe timer went missing')
+    # The empty-expansion else branch is what keeps production builds
+    # byte-clean of the seam.
+    assert tmpl.count('!macro TOFU_DIAG_WRITE') == 2, (
+        'TOFU_DIAG_* macros must exist in BOTH an ifdef and an '
+        'empty-else form')

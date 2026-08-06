@@ -57,9 +57,13 @@ class LLMDispatcher:
         self.slots: list[Slot] = []
         self._initialized = False
         self._lock = threading.Lock()
-        # id → frozenset routing group, merged from config aliases + static
-        # MODEL_ALIAS_GROUPS. Rebuilt by _build_alias_index during slot build.
-        self._alias_index: dict[str, frozenset] = {}
+        # name → logical model_id, built ONLY from each entry's own
+        # {model_id} ∪ wire ids — never merged across entries/providers.
+        # Owner directive 2026-08-06: routing keys on model_id alone; config
+        # aliases are wire spellings, NOT routing widenings. Rebuilt by
+        # _build_logical_index during slot build.
+        self._logical_index: dict[str, str] = {}
+        self._direct_models: set = set()
         # (provider_id, model) → (strikes, cooled_until) for shared-project
         # contention (see note_shared_contention).
         self._contention_strikes: dict = {}
@@ -333,7 +337,7 @@ class LLMDispatcher:
         key combination so the dispatcher load-balances across the fleet.
         """
         self._direct_models = set()
-        config_alias_groups: list[set] = []
+        entry_groups: list[tuple[str, set]] = []
         # Derived ONCE per build: gateway hosts known to offer an
         # Anthropic-native face (read from the shipped templates). Passed
         # explicitly into resolve_face so the per-model call is a pure
@@ -369,7 +373,6 @@ class LLMDispatcher:
             _forced_proto = _oauth_wire_protocol(provider)
             if _forced_proto and (provider.get('protocol') or '') != _forced_proto:
                 provider = dict(provider, protocol=_forced_proto)
-            provider.get('protocol', '')
 
             # ── Multi-endpoint expansion for local providers ──
             # Backwards-compatible: when 'endpoints' is absent we fall back
@@ -533,10 +536,11 @@ class LLMDispatcher:
                 # leaving the model active for the other keys.
                 key_access = model_entry.get('key_access') or {}
 
-                # Publish the interchangeable set (computed above) so the picker
-                # can route any member to any other member's slot.
-                if len(entry_group) > 1:
-                    config_alias_groups.append(entry_group)
+                # Publish this entry's identity set (logical model_id + its
+                # wire ids) so a stored/wire name resolves back to THIS
+                # entry's model_id. Intra-entry only — the index builder
+                # never unions across entries (owner directive 2026-08-06).
+                entry_groups.append((model_id, entry_group))
 
                 for key_idx, (key_name, api_key) in enumerate(keys):
                     cell = key_access.get(str(key_idx)) or {}
@@ -606,6 +610,7 @@ class LLMDispatcher:
                                 key_name=key_name + ep_suffix,
                                 api_key=api_key,
                                 model=mid,
+                                logical_model=model_id,
                                 capabilities=slot_caps,
                                 base_url=ep_url,
                                 provider_id=prov_id,
@@ -621,7 +626,7 @@ class LLMDispatcher:
                             )
                             self.slots.append(slot)
 
-        self._build_alias_index(config_alias_groups)
+        self._build_logical_index(entry_groups)
 
         logger.info('[Dispatch] Built %d slots from %d saved providers '
                     '(%d direct models)',
@@ -689,9 +694,15 @@ class LLMDispatcher:
         # also include aws.claude-opus-4.6-b and vertex.claude-opus-4.6
         self._direct_models = set(configured_models)  # save before expansion
         expanded = set()
+        logical_of = {}
         for m in configured_models:
             expanded.add(m)
+            logical_of.setdefault(m, m)
             if m in MODEL_ALIASES:
+                # Static-group variants of a CONFIGURED name are that name's
+                # wire spellings: they slot under its logical model_id.
+                for _v in MODEL_ALIASES[m]:
+                    logical_of.setdefault(_v, m)
                 expanded |= MODEL_ALIASES[m]
         configured_models = expanded
 
@@ -722,6 +733,7 @@ class LLMDispatcher:
                     key_name=key_name,
                     api_key=api_key,
                     model=model,
+                    logical_model=logical_of.get(model, model),
                     capabilities=slot_caps,
                     base_url=base_url,
                     provider_id='default',
@@ -732,7 +744,9 @@ class LLMDispatcher:
                 )
                 self.slots.append(slot)
 
-        self._build_alias_index([])
+        env_groups = [(m, {mm for mm, lg in logical_of.items() if lg == m})
+                      for m in self._direct_models]
+        self._build_logical_index(env_groups)
 
     def _load_benchmark_data(self):
         """Load benchmark_results.json to seed slot parameters and prune dead slots."""
@@ -832,59 +846,93 @@ class LLMDispatcher:
         logger.info('Loaded benchmark data: %d slots updated, %d dead removed',
                     updated, len(dead_slots))
 
-    def _build_alias_index(self, config_groups: list[set]):
-        """Merge per-provider config alias groups with the static groups.
+    def _build_logical_index(self, entry_groups: list):
+        """Build name → logical model_id from each entry's OWN identity set.
 
-        Each model entry's ``{model_id} \u222a aliases`` declares a set of ids
-        that route to the same logical model on a gateway. The hand-maintained
-        :data:`MODEL_ALIAS_GROUPS` adds cross-provider / cross-naming links
-        (e.g. a direct-API id, a gateway-prefixed id, and a Bedrock id that may
-        live in different provider entries). Both are merged by connected
-        components so the links compose transitively — declaring an alias in
-        config is enough; no static-table edit required.
+        Owner directive 2026-08-06: routing keys on ``model_id`` ALONE.
+        ``entry_groups`` is a list of ``(model_id, {model_id} ∪ wire ids)``
+        pairs — one per configured model entry. A name resolves back to the
+        entry that owns it, but two entries are NEVER unioned into one
+        routing group. The old union-find over ``{model_id} ∪ aliases`` ×
+        static ``MODEL_ALIAS_GROUPS`` let one provider's alias hijack
+        another provider's model (2026-08-06 incident: the official-DeepSeek
+        entry ``deepseek-v4-flash1`` carried alias ``deepseek-v4-flash`` →
+        connected-component merging glued it to the gateway's same-named
+        deployment, and every «official» request silently routed to the
+        gateway mirror).
 
-        Builds ``self._alias_index``: id \u2192 frozenset of every interchangeable id.
+        Conflict rule: an exact ``model_id`` always owns its own name; a
+        wire id claimed by two entries resolves to the FIRST claim and is
+        logged — an ambiguous config must be loud, not silently widen.
         """
-        from .config import MODEL_ALIAS_GROUPS
+        index: dict[str, str] = {}
+        direct = {mid for mid, _ in entry_groups if mid}
+        for model_id, _ in entry_groups:
+            if model_id:
+                index[model_id] = model_id
+        claimed_by: dict[str, str] = {}
+        conflicts: dict[str, set] = {}
+        for model_id, names in entry_groups:
+            for name in (names or ()):
+                if not name or name == model_id:
+                    continue
+                if name in direct:
+                    # Another entry's model_id owns this name outright.
+                    conflicts.setdefault(name, set()).update({name, model_id})
+                    continue
+                prior = claimed_by.get(name)
+                if prior is not None and prior != model_id:
+                    conflicts.setdefault(name, set()).update({prior, model_id})
+                    continue  # first claim wins
+                claimed_by[name] = model_id
+                index[name] = model_id
+        for name, claimants in sorted(conflicts.items()):
+            logger.warning('[Dispatch] model id %r is claimed by multiple '
+                           'entries %s — routing it by exact model_id only; '
+                           'rename or drop the duplicate alias to silence '
+                           'this', name, sorted(claimants))
+        self._logical_index = index
 
-        # Union-find over all ids appearing in any group.
-        parent: dict[str, str] = {}
+    def _route_logical(self, model: str) -> str | None:
+        """Resolve a picker/preset/stored-conv name to its logical model_id.
 
-        def _find(x: str) -> str:
-            parent.setdefault(x, x)
-            root = x
-            while parent[root] != root:
-                root = parent[root]
-            while parent[x] != root:
-                parent[x], x = root, parent[x]
-            return root
+        Returns None when nothing configured owns the name. Order:
+        the name→entry index (covers every entry's own wire spellings),
+        exact configured model_id, then a static ``MODEL_ALIAS_GROUPS``
+        group with EXACTLY ONE configured member (lets a conversation
+        persisted against a legacy cross-naming spelling — e.g. a
+        Bedrock-native id — keep routing to its one configured home).
+        """
+        if not model:
+            return None
+        hit = self._logical_index.get(model)
+        if hit:
+            return hit
+        if model in self._direct_models:
+            return model
+        group = MODEL_ALIASES.get(model)
+        if group:
+            configured = [m for m in group if m in self._direct_models]
+            if len(configured) == 1:
+                return configured[0]
+        return None
 
-        def _union(ids):
-            ids = [i for i in ids if i]
-            if not ids:
-                return
-            r0 = _find(ids[0])
-            for other in ids[1:]:
-                parent[_find(other)] = r0
+    def _prefer_matcher(self, prefer_model):
+        """Return a slot predicate for ``prefer_model`` (None → no preference).
 
-        for group in list(MODEL_ALIAS_GROUPS) + list(config_groups):
-            _union(list(group))
-
-        components: dict[str, set] = {}
-        for node in list(parent):
-            components.setdefault(_find(node), set()).add(node)
-
-        index: dict[str, frozenset] = {}
-        for members in components.values():
-            frozen = frozenset(members)
-            for member in members:
-                index[member] = frozen
-        self._alias_index = index
-
-    def _alias_set(self, model: str) -> set:
-        """Return the routing group for *model* (itself if it has no aliases)."""
-        group = self._alias_index.get(model)
-        return set(group) if group else {model}
+        model_id-only routing: a slot serves the preference iff its
+        ``logical_model`` equals the resolved logical id. When the name
+        resolves to nothing configured (unknown / removed entry), the
+        predicate falls back to exact wire-id equality so a conversation
+        persisted against such a spelling still lands on a slot literally
+        serving it — and never on a stranger.
+        """
+        if not prefer_model:
+            return None
+        logical = self._route_logical(prefer_model)
+        if logical is not None:
+            return lambda s: s.logical_model == logical
+        return lambda s: s.model == prefer_model
 
     def pick_slot(self, capability='text', prefer_model=None,
                   exclude_models=None, exclude_keys=None,
@@ -955,8 +1003,8 @@ class LLMDispatcher:
 
         Args:
             strict_model: When True AND prefer_model is set, the picker will
-                NEVER fall back to a different model.  If no slot for the
-                preferred model (or its alias group) is available, returns
+                NEVER fall back to a different model.  If no slot serving
+                the preferred model's logical id is available, returns
                 None so the retry loop can wait for cooldown to expire.
                 Use this for **user-facing requests** where the frontend
                 explicitly chose a model (e.g. "opus" preset).
@@ -1077,14 +1125,15 @@ class LLMDispatcher:
                 return min(pool, key=lambda s: s.score())
 
             if prefer_model:
-                # Use alias group so interchangeable deployments are all "preferred"
-                alias_set = self._alias_set(prefer_model)
-                preferred = [s for s in candidates if s.model in alias_set]
+                # model_id-only routing (owner directive 2026-08-06): a slot
+                # is preferred iff it serves the resolved logical model_id.
+                matcher = self._prefer_matcher(prefer_model)
+                preferred = [s for s in candidates if matcher(s)]
                 if preferred:
                     chosen = _select(preferred)
                 elif strict_model:
                     # ★ User explicitly chose this model — all its slots are
-                    #   in candidates but none match the alias group (shouldn't
+                    #   in candidates but none match the logical id (shouldn't
                     #   happen normally, but guard against it).  Return None.
                     return None
                 else:
@@ -1171,11 +1220,11 @@ class LLMDispatcher:
             # Sort by score (lower = better)
             candidates.sort(key=lambda s: s.score())
 
-            # If prefer_model, ensure it (or alias group members) are in the list
+            # If prefer_model, ensure its logical-model slots lead the list
             if prefer_model:
-                alias_set = self._alias_set(prefer_model)
-                preferred = [s for s in candidates if s.model in alias_set]
-                others = [s for s in candidates if s.model not in alias_set]
+                matcher = self._prefer_matcher(prefer_model)
+                preferred = [s for s in candidates if matcher(s)]
+                others = [s for s in candidates if not matcher(s)]
                 result = preferred[:n]
                 for s in others:
                     if len(result) >= n:
@@ -1267,8 +1316,8 @@ class LLMDispatcher:
 
         ``prefer_model`` (passed by the dispatch loops ONLY under
         ``strict_model``) narrows the answer to the preferred model's
-        alias group: a strict-pinned loop can never pick outside that
-        group, so healthy slots of OTHER models must not keep it cycling
+        logical id: a strict-pinned loop can never pick outside that
+        model, so healthy slots of OTHER models must not keep it cycling
         (2026-08-03 incident: kimi-k3's sole key permission-excluded →
         the pool's healthy opus/glm slots answered True here, the loop
         spun ~2min resurrecting the dead pair every 60s instead of
@@ -1277,7 +1326,7 @@ class LLMDispatcher:
         ex_models = exclude_models or set()
         ex_keys = exclude_keys or set()
         ex_pairs = exclude_pairs or set()
-        alias_set = self._alias_set(prefer_model) if prefer_model else None
+        matcher = self._prefer_matcher(prefer_model) if prefer_model else None
         # Respect the thread's hard provider pin (same isolation rule as
         # _pick): a pinned task only "has capable slots" among its own
         # provider's slots, so the retry loop waits for THAT provider to
@@ -1296,7 +1345,7 @@ class LLMDispatcher:
                     continue
                 if _pinned_provider and s.provider_id != _pinned_provider:
                     continue
-                if alias_set is not None and s.model not in alias_set:
+                if matcher is not None and not matcher(s):
                     continue
                 return True
         return False
@@ -1389,8 +1438,8 @@ class LLMDispatcher:
         """Seconds until ``conv_id``'s warm sticky key becomes pickable again.
 
         Returns ``(remaining_seconds, key_name)`` when the conversation has a
-        recorded sticky key, that key has a slot in ``prefer_model``'s alias
-        group, the slot is NOT hard-excluded, and its ONLY disqualifier is a
+        recorded sticky key, that key has a slot serving ``prefer_model``'s
+        logical id, the slot is NOT hard-excluded, and its ONLY disqualifier is a
         live cooldown (``now < cooldown_until``). Returns ``None`` when there is
         no warm key worth waiting for (no affinity, key excluded, or the slot is
         already eligible — in which case the normal picker will land on it).
@@ -1410,14 +1459,14 @@ class LLMDispatcher:
         ex_pairs = exclude_pairs or set()
         if sticky_key in ex_keys:
             return None
-        alias_set = self._alias_set(prefer_model) if prefer_model else None
+        matcher = self._prefer_matcher(prefer_model) if prefer_model else None
         now = time.time()
         best_remaining = None
         with self._lock:
             for s in self.slots:
                 if s.key_name != sticky_key:
                     continue
-                if alias_set is not None and s.model not in alias_set:
+                if matcher is not None and not matcher(s):
                     continue
                 if (s.key_name, s.model) in ex_pairs:
                     continue

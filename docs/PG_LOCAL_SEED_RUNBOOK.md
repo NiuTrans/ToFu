@@ -1,4 +1,12 @@
 # PG 本地盘播种迁移 Runbook（legacy FUSE pgdata → /tmp/tofu/pgdata）
+# PG 本地盘播种迁移 Runbook（legacy FUSE pgdata → /tmp/tofu/pgdata）
+
+> **⛔ 已撤回 2026-08-06（owner 终裁，epic pt_4d321fb8f1c2400c 永久关票）：**
+> 「不要使用除了项目以外的路径来解决这个问题，/tmp这些路径不准用来部署db，会丢的。
+> 以后都不许想这个。」——**本 runbook 的每一步都禁止执行**。DB 永远留在项目目录
+> （legacy FUSE pgdata）。代码机制保留但惰性化（opt-in、默认关，见
+> `lib/database/_pg_seed.py`）。本文仅作为「探索过并被否决」的存档。
+
 
 > 触发背景（2026-08-01 error.log 审计）：PG 数据目录 21GB 跑在 DolphinFS FUSE
 > 上（`data/pgdata`），是当日 118 次慢 DELETE（2.5–3.6s）、171 条慢查询、

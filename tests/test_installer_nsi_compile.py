@@ -75,3 +75,33 @@ def test_rendered_template_compiles(makensis, tmp_path, target):
         f'{target} rendering failed to compile:\n'
         f'{proc.stdout[-2000:]}\n{proc.stderr[-2000:]}')
     assert out_exe.is_file() and out_exe.stat().st_size > 0
+
+
+
+def test_diag_variant_compiles(makensis, tmp_path):
+    """The TOFU_DIAG seam (2026-08-06 measurement build) is dead text to
+    the production compile gate above — without compiling WITH the
+    define, a syntax error inside the ifdef branches would only surface
+    when someone builds the diagnostic installer mid-incident. The agent
+    target is the fullest path (AUTOSTART_PAGE injection)."""
+    tgt = wb._TARGETS['agent']
+    payload = tmp_path / 'payload'
+    (payload / '_internal').mkdir(parents=True)
+    (payload / tgt['exe']).write_bytes(b'MZ stub')
+    (payload / '_internal' / 'x.txt').write_text('x')
+    art_dir = tmp_path / 'art'
+    installer_art.render(str(art_dir),
+                         wb._NSI_TARGETS['agent']['app_name'], '0.16.0',
+                         autostart=True)
+    out_exe = tmp_path / 'setup-diag.exe'
+    nsi = wb._render_nsi('0.16.0', str(payload), str(out_exe), 'agent',
+                         art_dir=str(art_dir))
+    script = tmp_path / 'installer.nsi'
+    script.write_text(nsi, encoding='utf-8')
+    proc = subprocess.run(
+        [makensis, '-V2', '-DTOFU_DIAG=1', str(script)],
+        capture_output=True, text=True, timeout=600)
+    assert proc.returncode == 0, (
+        'agent DIAG rendering failed to compile:\n'
+        f'{proc.stdout[-2000:]}\n{proc.stderr[-2000:]}')
+    assert out_exe.is_file() and out_exe.stat().st_size > 0

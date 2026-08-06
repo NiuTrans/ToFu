@@ -107,6 +107,29 @@ const _CONV_META_TOOLS = new Set([
 function _isRoundConvMeta(round) {
   return _CONV_META_TOOLS.has(round.toolName);
 }
+/* ★ Motion-video / produce tool FAMILY — the single frontend list, kept in
+ * exact parity with the backend sets (MOTION_VIDEO_TOOL_NAMES |
+ * PRODUCE_TOOL_NAMES; guard: tests/test_motion_video_display.py). Registered
+ * 2026-08-06 after the owner screenshot: unregistered rounds degraded to the
+ * generic fallback — a bare fn-name title + badge and NO result body, so a
+ * 60-round storyboard→render session read as an opaque list of names. */
+const _MOTION_TOOL_FAMILY = [
+  "motion_video_env_check",
+  "motion_video_storyboard_check",
+  "motion_video_check",
+  "motion_video_render",
+  "motion_video_probe",
+  "motion_video_concat",
+  "motion_video_narrate",
+  "motion_video_mux",
+  "produce_video",
+  "produce_report",
+  "produce_research",
+  "produce_slides",
+];
+function _isRoundMotion(round) {
+  return _MOTION_TOOL_FAMILY.includes(round.toolName);
+}
 function _isRoundSwarm(round) {
   /* Only treat as swarm if the backend flagged it AND there's real swarm content */
   if (!round._swarm) return false;
@@ -139,6 +162,10 @@ const _TOOL_DISPLAY = {
   desktop_screenshot: { icon: "", label: "Desktop", color: "#94a3b8" },
   generate_image: { icon: "", label: "Image", color: "#e879f9" },
   ask_human: { icon: "", label: "Guidance", color: "#a5b4fc" },
+  produce_video:    { icon: "", label: "Video",   color: "#f472b6" },
+  produce_report:   { icon: "", label: "Report",  color: "#f472b6" },
+  produce_research: { icon: "", label: "Research", color: "#f472b6" },
+  produce_slides:   { icon: "", label: "Slides",   color: "#38bdf8" },
   todo_write: { icon: "", label: "Checklist", color: "#34d399" },
 };
 function _getToolDisplay(round) {
@@ -148,6 +175,7 @@ function _getToolDisplay(round) {
   if (_isRoundSwarm(round))   return { icon: "", label: "Swarm",     color: "#f59e0b" };
   if (_isRoundProject(round)) return { icon: "", label: "Project",   color: "#60a5fa" };
   if (_isRoundBrowser(round)) return { icon: "", label: "Browser",   color: "#38bdf8" };
+  if (_isRoundMotion(round))  return { icon: "", label: "Video",     color: "#f472b6" };
   // Generic fallback — use the tool name itself
   const name = (round.toolName || "tool").replace(/_/g, " ");
   return { icon: _TD_SVG('<path d="M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z"/>'), label: name.charAt(0).toUpperCase() + name.slice(1), color: "#94a3b8" };
@@ -204,6 +232,23 @@ function _getRoundIcon(round) {
     };
     return m[round.toolName] || "tabs";
   }
+  if (_isRoundMotion(round)) {
+    const m = {
+      motion_video_env_check: "mv_env",
+      motion_video_storyboard_check: "mv_storyboard",
+      motion_video_check: "mv_check",
+      motion_video_render: "mv_render",
+      motion_video_probe: "mv_probe",
+      motion_video_concat: "mv_concat",
+      motion_video_narrate: "mv_narrate",
+      motion_video_mux: "mv_mux",
+      produce_video: "mv_render",
+      produce_report: "mv_report",
+      produce_research: "mv_research",
+      produce_slides: "mv_report",
+    };
+    return m[round.toolName] || "mv_render";
+  }
   // Web search / fetch / generic
   if (_isRoundSearch(round)) return "web_search";
   if (_isRoundFetch(round)) return "fetch";
@@ -214,6 +259,7 @@ function _getRoundColor(round) {
   if (_isRoundImageGen(round)) return _imageGenMode(round) === "edit" ? "#22d3ee" : "#e879f9";
   if (_isRoundProject(round)) return "#f59e0b";
   if (_isRoundBrowser(round)) return "#a78bfa";
+  if (_isRoundMotion(round)) return "#f472b6";
   if (_isRoundFetch(round)) return "#34d399";
   if (_isRoundSearch(round)) return "#60a5fa";
   if (_isRoundCodeExec(round)) return "#f472b6";
@@ -344,6 +390,29 @@ const _webToolSvg = {
   generic: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>',
 };
 
+// ── Motion-video / produce tools — SVG icons ──
+const _motionToolSvg = {
+  // clapperboard — a scene being staged/checked/rendered
+  mv_render: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.2 6 3 11l-.9-2.4c-.3-1.1.3-2.2 1.3-2.5l13.5-4c1.1-.3 2.2.3 2.5 1.3Z"/><path d="m6.2 5.3 3.1 3.9"/><path d="m12.4 3.4 3.1 4"/><path d="M3 11h18v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg>',
+  // wrench — environment probe
+  mv_env: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>',
+  // shield-check — static gates
+  mv_check: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>',
+  // list-checks — storyboard validated against its SRT
+  mv_storyboard: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3 17 2 2 4-4"/><path d="m3 7 2 2 4-4"/><path d="M13 6h8"/><path d="M13 12h8"/><path d="M13 18h8"/></svg>',
+  // gauge — probe
+  mv_probe: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 14 4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/></svg>',
+  // merge — concat scene MP4s
+  mv_concat: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m8 6 4-4 4 4"/><path d="M12 2v10.3a4 4 0 0 1-1.172 2.872L4 22"/><path d="m20 22-5-5"/></svg>',
+  // mic — TTS narration
+  mv_narrate: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" x2="12" y1="19" y2="22"/></svg>',
+  // audio waveform — mux narration onto the film
+  mv_mux: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 13a2 2 0 0 0 2-2V7a2 2 0 0 1 4 0v13a2 2 0 0 0 4 0V4a2 2 0 0 1 4 0v13a2 2 0 0 0 4 0v-4a2 2 0 0 1 2-2"/></svg>',
+  // document — report
+  mv_report: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M10 9H8"/><path d="M16 13H8"/><path d="M16 17H8"/></svg>',
+  // bulb — research ideas
+  mv_research: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 14c.2-1 .7-1.7 1.5-2.5 1-.9 1.5-2.2 1.5-3.5A6 6 0 0 0 6 8c0 1 .2 2.2 1.5 3.5.7.7 1.3 1.5 1.5 2.5"/><path d="M9 18h6"/><path d="M10 22h4"/></svg>',
+};
 const _imageGenSvg = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>';
 /* Image EDITING icon — a wand/sparkle to visually separate "edit an existing
  * image" from "generate from scratch" (the framed-photo icon above). */
@@ -364,6 +433,7 @@ function _getToolSvg(round) {
   if (_isRoundImageGen(round)) return _imageGenMode(round) === "edit" ? _imageEditSvg : _imageGenSvg;
   if (_isRoundProject(round)) return _projToolSvg[icon] || _projToolSvg.file;
   if (_isRoundBrowser(round)) return _browserToolSvg[icon] || _browserToolSvg.tabs;
+  if (_isRoundMotion(round)) return _motionToolSvg[icon] || _motionToolSvg.mv_render;
   // MCP bridge tools are named ``mcp__server__tool`` — collapse to the plug icon.
   if ((round.toolName || "").startsWith("mcp__")) return _webToolSvg.mcp;
   // Project-brain sibling tools share their family icon (post/claim/complete/
@@ -1366,6 +1436,17 @@ function _renderUnifiedToolLine(round, isSearching) {
   // ★ Batch edit tools (apply_diffs / insert_contents) — collapsible per-edit list
   const batchEditsHtml = _renderBatchEditsBlock(round, ctx, badgeHtml, compactionLabelHtml);
   if (batchEditsHtml) return batchEditsHtml;
+
+  // ★ Motion-video / produce tools — structured result card (per-scene
+  //   narration table, probe specs, gate errors, mux duration, …) instead of
+  //   the bare name+badge line that hid everything the pipeline reported.
+  //   The rich renderer is DEFERRED (ui/tool_rounds_rich.js); while it is in
+  //   flight the typeof-guard degrades to the generic line.
+  if (_isRoundMotion(round) && round.status === "done") {
+    const motionHtml = (typeof _renderMotionVideoBlock === 'function')
+      ? _renderMotionVideoBlock(round, svg, q, badgeHtml) : "";
+    if (motionHtml) return motionHtml;
+  }
 
   // ★ Project-brain / conversation-meta tools — render their full prose
   //   output in a collapsible Markdown card instead of the bare generic line

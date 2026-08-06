@@ -1,4 +1,14 @@
 # DB Durability Rollout Runbook (local-primary PG + Tier B PITR)
+# DB Durability Rollout Runbook (local-primary PG + Tier B PITR)
+
+> **⛔ WITHDRAWN 2026-08-06 (owner final ruling, epic pt_4d321fb8f1c2400c permanently closed):**
+> "不要使用除了项目以外的路径来解决这个问题，/tmp这些路径不准用来部署db，会丢的。以后都不许想这个。"
+> The `/tmp`-based local-primary migration below is **dead — do NOT execute any step of it**.
+> The DB stays on the project's own directory (the legacy FUSE pgdata). The code
+> machinery is preserved but INERT (opt-in only, default OFF; see
+> `lib/database/_pg_seed.py`). This document is kept only as the record of an
+> explored-and-rejected design.
+
 
 > **Audience:** the operator rolling out the FUSE→local-disk database migration on a
 > real cluster. Design rationale lives in `JOURNAL.md` §§7a–7i; this file is the

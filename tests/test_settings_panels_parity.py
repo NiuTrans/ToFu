@@ -33,7 +33,8 @@ PANELS_DIR = os.path.join(PROJECT_ROOT, 'static', 'settings_panels')
 # new tab can't be added without appearing here.
 _EXPECTED_TABS = frozenset({
     'general', 'api', 'preset', 'search', 'translate', 'speech', 'network',
-    'devices', 'feishu', 'oauth', 'mcp', 'skills', 'preferences', 'advanced',
+    'devices', 'feishu', 'oauth', 'mcp', 'skills', 'tools', 'preferences',
+    'advanced',
 })
 
 
@@ -243,6 +244,8 @@ _SETTINGS_ONLY_CSS_PREFIXES = (
     # The shared chrome it sits on (.stg-table / .stg-row / .stg-desc /
     # .stg-dim / bare .stg-btn) stays in styles.css and is NOT listed here.
     r'\.devices-', r'\.remote-agent', r'\.remote-root', r'\.remote-devices',
+    # tools inventory panel (Settings → 工具, 2026-08-06)
+    r'\.tools-inv',
 )
 
 # Documented cascade-safety exceptions: rules that MUST stay in styles.css even

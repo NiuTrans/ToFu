@@ -488,7 +488,9 @@ def replay_log_lines(lines):
             try:
                 ts_ms = int(datetime.strptime(
                     ts_str, '%Y-%m-%d %H:%M:%S').timestamp() * 1000)
-            except ValueError:
+            except ValueError as e:
+                logger.debug('[LogAgg] unparsable log timestamp %r, ts=0: %s',
+                             ts_str, e)
                 ts_ms = 0
             cur = [level, name, ts_ms, [msg]]
         elif cur is not None:

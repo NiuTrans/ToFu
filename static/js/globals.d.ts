@@ -216,6 +216,9 @@ interface Window {
   // ui/stall_watch.js — test-seam override for the heartbeat-flow window
   // (0 neuters the tick-flow gate, so the banner fires during tool execution).
   _STALL_WATCH_TICK_WINDOW_S?: any;
+  // ui/sse_poll_fallback.js — test-seam override for the degraded-mode SSE
+  // re-probe cadence (read once at module init; absent in production).
+  _SSE_REPROBE_INTERVAL_MS?: any;
 }
 // (FileReader.result stays string|ArrayBuffer — call sites coerce via String()
 //  since merging can't override an existing property's declared type.)

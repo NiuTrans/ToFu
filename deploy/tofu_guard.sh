@@ -284,7 +284,13 @@ relaunch() {
     echo ""
     echo "════════════════ $(date '+%F %T') — launched by tofu_guard (serve-mode=${mode:-auto}) ════════════════"
   } >> "${SLOG}" 2>/dev/null
-  PORT="${PORT}" BIND_HOST="${BIND_HOST:-0.0.0.0}" ${tls_env} \
+  # ${tls_env} must NOT sit in the assignment-prefix slot: bash only
+  # recognises LITERAL name=value words there, so an expanded "TOFU_TLS=0"
+  # became the COMMAND NAME ("command not found") and every relaunch died
+  # instantly (2026-08-06 outage: 11 dead relaunches during an OOM crash).
+  # env(1) applies the optional VAR=VAL instead; empty stays absent.
+  PORT="${PORT}" BIND_HOST="${BIND_HOST:-0.0.0.0}" \
+    env ${tls_env:+"${tls_env}"} \
     setsid nohup "${PY}" server.py >> "${SLOG}" 2>&1 &
   local newpid=$!
   # persist launch epoch (state line 3) for check_once's boot grace

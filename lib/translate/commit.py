@@ -130,7 +130,6 @@ def _commit_translation_inner(conv_id, msg_idx, field, translated_text,
                 return
 
             messages = json.loads(row['messages'] or '[]')
-            row['updated_at']
             # CAS token: rev (RENDER_CONTRACT Phase 4 W6). The trigger bumps rev
             # on every messages change, so the terminal sync / a sibling
             # translate thread advancing rev between our SELECT and UPDATE makes

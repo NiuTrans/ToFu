@@ -420,17 +420,6 @@
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="7 8 3 12 7 16"/><polyline points="17 8 21 12 17 16"/><line x1="3" y1="12" x2="21" y2="12"/></svg>
                 <span class="paper-reader-width-label" data-i18n="paper.readerWidthComfortable">Comfortable</span>
               </button>
-              <!-- Skim mode (reading-xp P2): collapse each section to its first
-                   paragraph + callouts; the xp tutor cards stay visible. -->
-              <button type="button" class="paper-reader-set-btn paper-skim-btn" onclick="_paperXpSkimToggle()" data-i18n-title="paper.xpSkimTitle" title="Skim read" aria-pressed="false">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M3 12h12"/><path d="M3 18h7"/></svg>
-                <span class="paper-skim-label" data-i18n="paper.xpSkim">Skim</span>
-              </button>
-              <!-- Focus mode (reading-xp P4): one-paragraph spotlight, j/k nav. -->
-              <button type="button" class="paper-reader-set-btn paper-focus-btn" onclick="_paperFocusModeToggle()" data-i18n-title="paper.focusTitle" title="Focus mode" aria-pressed="false">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></svg>
-                <span data-i18n="paper.focusBtn">Focus</span>
-              </button>
             </div>
             <div class="paper-report-lang-toggle" id="reportLangToggle" data-i18n-title="paper.reportLangTitle" title="Report language">
               <button type="button" class="paper-report-lang-opt" data-lang="en" onclick="_setReportLang('en','report')">EN</button>
@@ -1154,6 +1143,10 @@
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>
           <span data-i18n="settings.tabSkills">Skills</span>
         </button>
+        <button class="settings-tab" data-tab="tools" onclick="switchSettingsTab('tools')">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
+          <span data-i18n="settings.tabTools">工具</span>
+        </button>
         <div class="settings-tab-group" data-i18n="settings.groupSystem">系统</div>
         <button class="settings-tab" data-tab="preferences" onclick="switchSettingsTab('preferences')">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
@@ -1316,6 +1309,11 @@
              static/settings_panels/skills.html; spliced in at render time
              by routes/common.py via lib/settings_panels.inject_panels) -->
         <!-- SETTINGS_PANEL:skills -->
+
+        <!-- ═══ Tools Tab — live tool-registry inventory ═══ (panel markup
+             extracted to static/settings_panels/tools.html; spliced in at
+             render time by routes/common.py via lib/settings_panels.inject_panels) -->
+        <!-- SETTINGS_PANEL:tools -->
 
         <!-- Skills file browser modal (per package) -->
         <div class="mcp-install-modal-overlay" id="skillsFilesOverlay" style="display:none;" onclick="_skillsCloseFiles(event)">
@@ -1587,19 +1585,22 @@
      machine". Replaces the former standalone #browserModal and the desktop
      toggle that had no setup surface at all.
 
-     Structure: two capability rows (browser tabs / this computer), each with
-     its OWN live status dot and its OWN enable switch, because the two backing
-     flags stay separate on the wire. Under each row sits ONE install
-     instruction chosen by detected state — never a menu of every possible
-     path. The desktop row's choice comes from the backend
-     (`setup_state` on /api/v1/desktop/status), which is the only side that can
-     see `sys.frozen`. -->
+     Structure: two capability cards (browser tabs / this computer) side by
+     side in `.lc-cols` — browser LEFT, computer RIGHT — each with its OWN
+     live status dot and its OWN enable switch, because the two backing flags
+     stay separate on the wire. Under each card sits ONE install instruction
+     chosen by detected state — never a menu of every possible path. The
+     desktop card's choice comes from the backend (`setup_state` on
+     /api/v1/desktop/status), which is the only side that can see
+     `sys.frozen`. The Chrome LNA warning lives INSIDE the browser card — it
+     is a browser-capability note, not a third block between the two. -->
 <div class="modal-overlay" id="localControlModal" onclick="if(event.target===this)closeLocalControlModal()">
   <div class="modal local-modal">
     <h3 data-i18n="local.title">本机控制</h3>
     <p class="modal-desc" data-i18n="local.modalDesc">让 AI 读取并操作你自己的设备。两项能力互相独立，可分别开启。</p>
 
-    <!-- ══ Capability 1: browser tabs ══ -->
+    <div class="lc-cols">
+    <!-- ══ Capability 1: browser tabs (LEFT column) ══ -->
     <div class="lc-cap" id="lcBrowserCap">
       <div class="lc-cap-head">
         <span class="lc-cap-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg></span>
@@ -1628,9 +1629,21 @@
         <p class="lc-step" data-i18n="local.browserDownload">下载扩展并解压，然后在 Chrome / Edge 里打开扩展管理页 → 开启「开发者模式」→「加载已解压的扩展程序」→ 选择解压出的文件夹。</p>
         <button type="button" class="btn btn-primary btn-sm" id="lcExtDownloadBtn" data-i18n="browser.stepDownloadBtn">下载扩展 ZIP</button>
       </div>
+      <!-- Chrome 142+ Local Network Access guidance. Shown only when the
+           CONNECTED extension reports Chromium >= 142. A BROWSER-capability
+           note, so it lives inside this card. -->
+      <div class="browser-lna-warning" id="browserLnaWarning" style="display:none">
+        <strong data-i18n="browser.lnaTitle">Chrome 142+ 可能反复弹出「访问本地网络设备」</strong>
+        <p data-i18n="browser.lnaDesc">从 Chrome 142 起，访问本地网络的网页会逐站弹出权限请求，多标签搜索时需反复点击。扩展无法代为授权，请用以下任一方式关闭提示：</p>
+        <p data-i18n-html="browser.lnaFlag"><strong>方式一（最快）</strong>：打开 <code class="copyable-url" style="cursor:pointer;border-bottom:1px dashed var(--accent-color)">chrome://flags/#local-network-access-check</code> → 设为 <strong>Disabled</strong> → 重启 Chrome。</p>
+        <p data-i18n-html="browser.lnaPolicy"><strong>方式二（持久）</strong>：放置一个 Chrome 托管策略文件，内容为：</p>
+        <code class="copyable-url" id="browserLnaPolicy" data-tooltip="点击复制" data-i18n-title="browser.clickToCopy"
+              style="cursor:pointer;display:block;padding:8px 10px;border-radius:6px;word-break:break-all;border:1px dashed var(--accent-color)">{ "LocalNetworkAccessAllowedForUrls": ["*"] }</code>
+        <p class="browser-lna-path" id="browserLnaPath" style="display:none"></p>
+      </div>
     </div>
 
-    <!-- ══ Capability 2: this computer ══ -->
+    <!-- ══ Capability 2: this computer (RIGHT column) ══ -->
     <div class="lc-cap" id="lcDesktopCap">
       <div class="lc-cap-head">
         <span class="lc-cap-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg></span>
@@ -1662,18 +1675,7 @@
            cognitive load this merge exists to remove. -->
       <p class="lc-perm-note" id="lcPermNote" style="display:none" data-i18n="local.permNote">写文件、运行命令、控制鼠标键盘默认全部关闭；需要时在托盘菜单的「Permissions」里单独授予。</p>
     </div>
-
-    <!-- Chrome 142+ Local Network Access guidance. Shown only when the
-         CONNECTED extension reports Chromium >= 142. -->
-    <div class="browser-lna-warning" id="browserLnaWarning" style="display:none">
-      <strong data-i18n="browser.lnaTitle">Chrome 142+ 可能反复弹出「访问本地网络设备」</strong>
-      <p data-i18n="browser.lnaDesc">从 Chrome 142 起，访问本地网络的网页会逐站弹出权限请求，多标签搜索时需反复点击。扩展无法代为授权，请用以下任一方式关闭提示：</p>
-      <p data-i18n-html="browser.lnaFlag"><strong>方式一（最快）</strong>：打开 <code class="copyable-url" style="cursor:pointer;border-bottom:1px dashed var(--accent-color)">chrome://flags/#local-network-access-check</code> → 设为 <strong>Disabled</strong> → 重启 Chrome。</p>
-      <p data-i18n-html="browser.lnaPolicy"><strong>方式二（持久）</strong>：放置一个 Chrome 托管策略文件，内容为：</p>
-      <code class="copyable-url" id="browserLnaPolicy" data-tooltip="点击复制" data-i18n-title="browser.clickToCopy"
-            style="cursor:pointer;display:block;padding:8px 10px;border-radius:6px;word-break:break-all;border:1px dashed var(--accent-color)">{ "LocalNetworkAccessAllowedForUrls": ["*"] }</code>
-      <p class="browser-lna-path" id="browserLnaPath" style="display:none"></p>
-    </div>
+    </div><!-- /lc-cols -->
 
     <div class="modal-actions">
       <button class="btn btn-primary" onclick="closeLocalControlModal()" data-i18n="browser.close">关闭</button>
@@ -2132,7 +2134,6 @@
 <script defer src="static/js/paper/reading_xp.js?v=0.16.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <script defer src="static/js/paper/deepen.js?v=0.16.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <script defer src="static/js/paper/notes.js?v=0.16.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
-<script defer src="static/js/paper/focus_mode.js?v=0.16.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <script defer src="static/js/paper/babel.js?v=0.16.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <script defer src="static/js/paper/library.js?v=0.16.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <script defer src="static/js/paper/podcast.js?v=0.16.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
@@ -2146,6 +2147,7 @@
 <script defer src="static/js/memory_skill_install.js?v=0.16.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <script defer src="static/js/skills.js?v=0.16.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <script defer src="static/js/skills_install.js?v=0.16.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
+<script defer src="static/js/tools_panel.js?v=0.16.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <script defer src="static/js/preferences.js?v=0.16.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <script defer src="static/js/orchestration-catalog.js?v=0.16.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>
 <script defer src="static/js/orchestration.js?v=0.16.0" onload="_onScriptLoad()" onerror="_onScriptError(event)"></script>

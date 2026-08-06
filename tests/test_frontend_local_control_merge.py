@@ -149,6 +149,10 @@ _SHIPPED_SYMBOLS = (
     # no branch may ask the user to type anything.)
     "_lcAwaitingAgentHtml", "_lcAgentAttachBlockHtml", "_lcAgentBundleUrl",
     "_lcBindWarnHtml", "_lcConnectDetailsHtml", "_lcWireAttach",
+    # The diagnostics inbox (2026-08-06): the renderers call
+    # _lcDiagInboxHtml/_lcWireDiag in both attach branches, and the wire
+    # calls _lcDiagRefreshRecent — unspliced they ReferenceError every test.
+    "_lcDiagInboxHtml", "_lcWireDiag", "_lcDiagRefreshRecent",
     # The download button is authored once and shared by the install /
     # upgrade-nudge / stranded-rescue branches (2026-08-04 fleet tri-state);
     # the browser renderer calls both, so the splice needs them.
@@ -222,7 +226,9 @@ HARNESS = textwrap.dedent("""
       .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
     global._rec = {{ openExt: 0, clip: null }};
     global.Api = {{
-      desktop: {{ mintToken: () => Promise.resolve({{token:'T'}}) }},
+      desktop: {{ mintToken: () => Promise.resolve({{token:'T'}}),
+                 listDiags: () => Promise.resolve({{entries: []}}),
+                 submitDiag: (t) => Promise.resolve({{received: (t||'').length}}) }},
       browser: {{ openExtensions: () => {{
         global._rec.openExt++;
         return Promise.resolve({{ok: true}});
@@ -296,6 +302,10 @@ HARNESS = textwrap.dedent("""
         about: document.getElementById('lcDesktopAbout').textContent.trim(),
         permNoteShown:
           document.getElementById('lcPermNote').style.display !== 'none',
+        // The diagnostics inbox (2026-08-06): collapsed paste box for the
+        // agent's copy-diagnostics bundle — present wherever an attach
+        // flow is shown, gone once connected (nothing left to debug).
+        hasDiagInbox: !!el.querySelector('.lc-diag #lcDiagSubmit'),
       }};
     }}
 
@@ -325,6 +335,7 @@ HARNESS = textwrap.dedent("""
         bundleHref: bundleA ? bundleA.getAttribute('href') : '',
         mintInsideDetails: !!el.querySelector('.lc-details #lcMintBtn'),
         hasPairButton: !!el.querySelector('#lcPairBtn'),
+        hasDiagInbox: !!el.querySelector('.lc-diag #lcDiagSubmit'),
         mentionsManualTunnel: /隧道地址|ssh 隧道|ssh-tunnel/i.test(el.textContent),
       }};
     }}

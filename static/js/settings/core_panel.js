@@ -315,6 +315,7 @@ function openSettings() {
     if (typeof _populateSpeechTab === 'function') _populateSpeechTab(cfg);
     _populateMcpTab();
     if (typeof _populateSkillsTab === 'function') _populateSkillsTab();
+    if (typeof _populateToolsTab === 'function') _populateToolsTab();
     if (typeof _populatePreferencesTab === 'function') _populatePreferencesTab();
   });
 }

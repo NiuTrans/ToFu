@@ -129,24 +129,26 @@ def _dispatcher(providers):
 
 
 class AliasRoutingTest(unittest.TestCase):
-    """Config-declared aliases are first-class routing targets.
+    """model_id-only routing (owner directive 2026-08-06).
 
-    Requesting any member of an alias group must be able to pick a slot
-    belonging to any other member — even when only one key serves the root
-    id and another key serves only an alias.
+    An entry's aliases are WIRE spellings of THAT entry: they resolve a
+    stored name back to the entry's model_id, and an alias slot still
+    serves requests for its own root — but two entries (still less two
+    providers) are NEVER unioned into one routing group.
     """
 
-    def test_config_alias_routes_to_root_request(self):
+    def test_config_alias_slot_still_serves_own_root(self):
         # Root disabled on key#1, alias kept → requesting the ROOT id must be
-        # able to land on key#1's alias slot.
+        # able to land on key#1's alias slot (intra-entry rotation lives).
         d = _dispatcher(_provider([
             {'model_id': 'modelX', 'capabilities': ['text'], 'rpm': 40,
              'aliases': ['mx-mirror'],
              'key_access': {'1': {'disabled_ids': ['modelX']}}},
         ]))
-        alias_set = d._alias_set('modelX')
-        self.assertIn('mx-mirror', alias_set)
-        self.assertIn('modelX', alias_set)
+        self.assertEqual(d._route_logical('modelX'), 'modelX')
+        self.assertEqual(d._route_logical('mx-mirror'), 'modelX')
+        mirror = [s for s in d.slots if s.model == 'mx-mirror']
+        self.assertTrue(all(s.logical_model == 'modelX' for s in mirror))
         # Force key#0's root slot into cooldown so the only pick left is the
         # key#1 alias slot; strict_model must still find it.
         for s in d.slots:
@@ -158,25 +160,62 @@ class AliasRoutingTest(unittest.TestCase):
         self.assertEqual(chosen.model, 'mx-mirror')
         self.assertEqual(chosen.key_name, 'mt_key_1')
 
-    def test_alias_index_merges_with_static_groups(self):
-        # A config entry that names the gateway id 'aws.claude-opus-4.8' must
-        # transitively pull in the static-group members (claude-opus-4-8, the
-        # Bedrock id) AND the config-only alias.
+    def test_alias_never_hijacks_another_providers_model(self):
+        # The 2026-08-06 incident repro: provider B's entry carries an alias
+        # that IS provider A's model_id. Old union-find merged them into one
+        # routing group, so requesting B's logical id silently landed on A.
+        providers = [
+            {'id': 'gw', 'base_url': 'https://gw.example.com/v1',
+             'api_keys': ['sk-gw'], 'enabled': True,
+             'models': [{'model_id': 'shared-name', 'capabilities': ['text'],
+                         'rpm': 40}]},
+            {'id': 'official', 'base_url': 'https://api.example.com/v1',
+             'api_keys': ['sk-off'], 'enabled': True,
+             'models': [{'model_id': 'official-only',
+                         'capabilities': ['text'], 'rpm': 40,
+                         'aliases': ['shared-name']}]},
+        ]
+        d = _dispatcher(providers)
+        d._initialized = True
+        # The exact model_id owns its name; the alias claim loses.
+        self.assertEqual(d._route_logical('shared-name'), 'shared-name')
+        self.assertEqual(d._route_logical('official-only'), 'official-only')
+        # Requesting B's logical id must NEVER route to provider A.
+        for _ in range(5):
+            chosen = d.pick_slot(prefer_model='official-only', strict_model=True)
+            self.assertIsNotNone(chosen)
+            self.assertEqual(chosen.provider_id, 'official')
+            chosen.release()
+        # Requesting the shared name routes ONLY to its exact owner.
+        for _ in range(5):
+            chosen = d.pick_slot(prefer_model='shared-name', strict_model=True)
+            self.assertIsNotNone(chosen)
+            self.assertEqual(chosen.provider_id, 'gw')
+            chosen.release()
+
+    def test_static_group_member_resolves_only_to_unique_configured_home(self):
+        # A stored conv naming a static-group spelling (Bedrock id) keeps
+        # routing when EXACTLY ONE group member is configured — but the
+        # static group never widens live routing beyond that one model_id.
         d = _dispatcher(_provider([
             {'model_id': 'aws.claude-opus-4.8', 'capabilities': ['text'],
              'aliases': ['yuju-claude-opus-4.8-evaDaily']},
         ]))
-        group = d._alias_set('aws.claude-opus-4.8')
-        self.assertIn('yuju-claude-opus-4.8-evaDaily', group)
-        self.assertIn('claude-opus-4-8', group)          # from static group
-        # And the reverse lookup from the config-only alias resolves the same.
-        self.assertEqual(d._alias_set('yuju-claude-opus-4.8-evaDaily'), group)
+        self.assertEqual(d._route_logical('aws.claude-opus-4.8'),
+                         'aws.claude-opus-4.8')
+        self.assertEqual(d._route_logical('yuju-claude-opus-4.8-evaDaily'),
+                         'aws.claude-opus-4.8')
+        # Static-only member (not in the entry's own wire pool) resolves to
+        # the one configured group member.
+        self.assertEqual(d._route_logical('claude-opus-4-8'),
+                         'aws.claude-opus-4.8')
 
     def test_model_without_aliases_resolves_to_itself(self):
         d = _dispatcher(_provider([
             {'model_id': 'soloModel', 'capabilities': ['text']},
         ]))
-        self.assertEqual(d._alias_set('soloModel'), {'soloModel'})
+        self.assertEqual(d._route_logical('soloModel'), 'soloModel')
+        self.assertIsNone(d._route_logical('never-configured'))
 
 
 if __name__ == '__main__':

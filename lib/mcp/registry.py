@@ -1188,7 +1188,6 @@ def build_server_config(server_id: str, env_values: dict[str, str] | None = None
 
     from lib.mcp.transport import is_stdio, normalize_transport
 
-    entry.get('transport', 'stdio')
     config: dict = {
         'transport': normalize_transport(entry),
         'enabled': True,

@@ -203,7 +203,6 @@ def persist_snapshot_to_conversation(conv_id: str, agent_ids,
             ).fetchone()
             if not row or not row[0]:
                 return False
-            row[1]
             cur_rev = row[2]  # Phase 4 W5: CAS on rev (loop re-reads each attempt)
             try:
                 messages = json.loads(row[0] or '[]')

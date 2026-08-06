@@ -362,6 +362,159 @@ def test_run_agent_stop_event_terminates_loop():
 
 
 # ══════════════════════════════════════════════════════════
+#  6b. INTEGRATION: run_agent route self-repair (the route_repair hook)
+# ══════════════════════════════════════════════════════════
+#
+# 2026-08-06 incident: a gateway-intercepted attachment polled the SAME dead
+# URL forever while the tray text claimed「正在自动重找通路」— nothing ever
+# re-walked the candidates. The route_repair hook makes the text true.
+
+
+class _Gateway401:
+    """A proxy/SSO edge answering EVERYTHING (never Tofu's envelope)."""
+    status_code = 401
+
+    def json(self):
+        return {'error': 'Unauthorized'}
+
+
+class _Tofu401:
+    """Tofu's OWN refusal — the api_error envelope (address fine, secret wrong)."""
+    status_code = 401
+
+    def json(self):
+        return {'ok': False, 'error': {'code': 'unauthorized'}}
+
+
+class _Ok200:
+    status_code = 200
+
+    def json(self):
+        return {'commands': []}
+
+
+def _drive_run_agent(fake_post, repair, stop_after):
+    """Run the real loop in a thread against a fake transport; returns the
+    (url, secret-header) pairs the polls actually used."""
+    import threading
+    from lib.desktop_agent import _run
+
+    stop_event = threading.Event()
+    seen = []
+
+    def _post(url, **kwargs):
+        seen.append((url, (kwargs.get('headers') or {}).get('X-Bridge-Secret')))
+        if len(seen) >= stop_after:
+            stop_event.set()
+        if len(seen) > 400:
+            raise AssertionError('loop never settled')
+        return fake_post(url, **kwargs)
+
+    with mock.patch.object(_run.requests, 'post', _post), \
+         mock.patch.object(_run.time, 'sleep', lambda *_a, **_k: None):
+        t = threading.Thread(
+            target=_run.run_agent,
+            args=('http://dead-proxy:15000', dict(_NO_PERMS)),
+            kwargs={'poll_interval': 0.001, 'stop_event': stop_event,
+                    'bridge_secret': 'tok-OLD', 'route_repair': repair},
+            daemon=True)
+        t.start()
+        t.join(timeout=5)
+    assert not t.is_alive(), 'run_agent did not stop in time'
+    return seen
+
+
+def test_route_repair_rebinds_at_the_dead_threshold():
+    """NEUTER target: delete the _route_dead_hit() call in the proxy branch
+    and the repair is never walked — the 2026-08-06 frozen-link incident."""
+    from lib.desktop_agent import _run
+    repairs = {'n': 0}
+
+    def _repair():
+        repairs['n'] += 1
+        return 'http://new-host:15000', 'tok-NEW'
+
+    seen = _drive_run_agent(lambda *a, **kw: _Gateway401(), _repair,
+                            stop_after=_run._ROUTE_REPAIR_THRESHOLD + 2)
+    old = [s for s in seen if 'dead-proxy' in s[0]]
+    new = [s for s in seen if 'new-host' in s[0]]
+    assert repairs['n'] == 1, f'repair walked {repairs["n"]} times'
+    assert len(old) == _run._ROUTE_REPAIR_THRESHOLD, (
+        f'repair must fire exactly at the '
+        f'{_run._ROUTE_REPAIR_THRESHOLD}-poll threshold, saw {len(old)}')
+    assert new, 'the loop never re-pointed to the repaired route'
+    assert all(s[1] == 'tok-NEW' for s in new), (
+        'the repaired secret must rebind with the URL')
+
+
+def test_route_repair_cooldown_bounds_the_walk():
+    """A walk that finds nothing must not re-run on every dead poll — the
+    ladder can cost ~30s (ssh attempts), so the cooldown spaces it."""
+    from lib.desktop_agent import _run
+    repairs = {'n': 0}
+
+    def _repair():
+        repairs['n'] += 1
+        return None  # nothing answered
+
+    _drive_run_agent(lambda *a, **kw: _Gateway401(), _repair,
+                     stop_after=_run._ROUTE_REPAIR_THRESHOLD + 5)
+    assert repairs['n'] == 1, (
+        f'cooldown failed: {repairs["n"]} walks in one dead window')
+
+
+def test_route_repair_ignores_brief_blips():
+    """Five dead polls then a healthy one, repeatedly: the streak resets on
+    ANY reached-Tofu response, so a transient flap never re-points."""
+    from lib.desktop_agent import _run
+    repairs = {'n': 0}
+    calls = {'n': 0}
+
+    def _flappy(*a, **kw):
+        calls['n'] += 1
+        # 5 dead then 1 alive — forever below the threshold of 6.
+        return _Gateway401() if calls['n'] % 6 else _Ok200()
+
+    _drive_run_agent(_flappy, lambda: repairs.__setitem__('n', 1) or None,
+                     stop_after=18)
+    assert repairs['n'] == 0, 'a brief blip must never trigger the walk'
+
+
+def test_route_repair_ignores_tofu_auth_refusals():
+    """Tofu's own 401 means the ADDRESS works (the credential is wrong) —
+    counting it as route-dead would re-point a healthy route."""
+    repairs = {'n': 0}
+
+    def _repair():
+        repairs['n'] += 1
+        return 'http://new-host:15000', 'tok-NEW'
+
+    _drive_run_agent(lambda *a, **kw: _Tofu401(), _repair, stop_after=12)
+    assert repairs['n'] == 0, 'auth refusals must never trigger the walk'
+
+
+def test_route_repair_also_fires_on_unreachable():
+    """The second dead-route branch (ConnectionError) is a separate call
+    site — pin it too or a refactor can orphan it silently."""
+    import requests as _rq
+    from lib.desktop_agent import _run
+    repairs = {'n': 0}
+
+    def _repair():
+        repairs['n'] += 1
+        return 'http://new-host:15000', 'tok-NEW'
+
+    def _down(*a, **kw):
+        raise _rq.ConnectionError('refused')
+
+    seen = _drive_run_agent(_down, _repair,
+                            stop_after=_run._ROUTE_REPAIR_THRESHOLD + 2)
+    assert repairs['n'] == 1
+    assert any('new-host' in s[0] for s in seen), (
+        'unreachable-branch repair never re-pointed the loop')
+
+
+# ══════════════════════════════════════════════════════════
 #  7. Permission policy — deny-by-default + build_permissions
 # ══════════════════════════════════════════════════════════
 

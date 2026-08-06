@@ -139,12 +139,11 @@ def resolve_pgdata_dir(data_dir: str) -> str:
             _LOGGED_RESOLUTIONS.add(_key)
             logger.warning('[db_paths] Split engaged but local pgdata=%s not yet '
                            'populated while recoverable history exists (legacy=%s, '
-                           'backups=%s) — staying on legacy FUSE pgdata until the '
-                           'seed migration populates local. The seed runs '
-                           'AUTOMATICALLY at the next bootstrap (default-on since '
-                           '2026-08-05); set TOFU_DB_SEED_LOCAL=0 to defer. '
-                           '(Logged once per process.)', pgdata, legacy,
-                           resolve_backup_root(data_dir))
+                           'backups=%s) — staying on legacy FUSE pgdata. The /tmp '
+                           'local-primary seed was WITHDRAWN 2026-08-06 (owner: DB '
+                           'never deploys outside the project dir); this state is '
+                           'the steady state. (Logged once per process.)', pgdata,
+                           legacy, resolve_backup_root(data_dir))
         return legacy
 
     _key = ('engaged', pgdata, legacy)

@@ -240,6 +240,28 @@ class WiringRatchetTest(unittest.TestCase):
             self.assertIn('show_role_window(', src,
                           '%s never calls show_role_window' % rel)
 
+    def test_agent_window_wires_the_copy_diag_button(self):
+        """2026-08-06: debugging a dead link on a machine with no shell
+        access was blind — the agent window/tray carry「复制诊断信息」so
+        the evidence pack (route / candidates / verdict / log tail) is one
+        click away. NEUTER: drop the action or the button and this goes red.
+        """
+        launcher = _src('desktop/agent_launcher.py')
+        self.assertIn("'copy_diag'", launcher,
+                      'the agent window lost its diagnostics action')
+        self.assertIn('_diag_report', launcher,
+                      'the diagnostics report builder is gone')
+        window = _src('desktop/role_window.py')
+        self.assertIn('desktop.role.copyDiag', window,
+                      'the agent role window lost the copy-diag button')
+        import desktop._tk_theme as theme
+        for key in ('desktop.role.copyDiag', 'desktop.role.copyDiagDone',
+                    'desktop.tray.copyDiag'):
+            pair = theme.STRINGS.get(key)
+            self.assertIsNotNone(pair, '%s missing from STRINGS' % key)
+            self.assertIn('en', pair, '%s missing en' % key)
+            self.assertIn('zh', pair, '%s missing zh' % key)
+
     def test_tray_gains_control_panel_reentry(self):
         for rel in ('desktop/launcher.py', 'desktop/agent_launcher.py'):
             self.assertIn('desktop.tray.controlPanel', _src(rel),

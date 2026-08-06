@@ -460,6 +460,120 @@ def _tool_display_inspect_image(fn_name, fn_args, tc_id, tc_args_str):
     return f'{base}{suffix}', {'toolName': 'inspect_image'}
 
 
+def _mv_base(path):
+    """Basename of a tool path arg, '' when absent (never '?')."""
+    return os.path.basename((path or '').rstrip('/')) if path else ''
+
+
+def _tool_display_motion_video(fn_name, fn_args, tc_id, tc_args_str):
+    """Build display info for the ``motion_video_*`` pipeline tools.
+
+    Without a dedicated handler these fall through to the generic catch-all,
+    which shows the raw fn_name (``motion_video_render``) and logs a spurious
+    WARNING on EVERY call — the 2026-08-06 owner screenshot: a card carrying
+    only a name and a badge, with no idea what ran. Each label names the
+    salient file(s) so a 60-round storyboard→render session stays scannable.
+    No emoji prefix — the frontend renders a per-tool SVG icon (§3.4).
+    """
+    args = fn_args if isinstance(fn_args, dict) else {}
+    if fn_name == 'motion_video_env_check':
+        install = args.get('install', True)
+        display = ('Check the render environment' if install
+                   else 'Check the render environment (no install)')
+    elif fn_name == 'motion_video_storyboard_check':
+        scenes = _mv_base(args.get('scenes_path', ''))
+        srt = _mv_base(args.get('srt_path', ''))
+        display = 'Validate storyboard'
+        if scenes:
+            display += f': {scenes}'
+        if srt:
+            display += f' vs {srt}'
+    elif fn_name == 'motion_video_check':
+        scene = _mv_base(args.get('project_dir', ''))
+        display = f'Static gates: {scene}' if scene else 'Run static gates'
+    elif fn_name == 'motion_video_render':
+        scene = _mv_base(args.get('project_dir', ''))
+        out = _mv_base(args.get('output', ''))
+        quality = (args.get('quality') or 'standard').strip()
+        display = 'Render'
+        if scene:
+            display += f' {scene}'
+        if out:
+            display += f' → {out}'
+        display += f' ({quality})'
+    elif fn_name == 'motion_video_probe':
+        target = _mv_base(args.get('path', ''))
+        display = f'Probe {target}' if target else 'Probe media file'
+    elif fn_name == 'motion_video_concat':
+        inputs = args.get('inputs') or []
+        n = len(inputs) if isinstance(inputs, list) else 0
+        out = _mv_base(args.get('output', ''))
+        display = f'Concat {n} scene{"s" if n != 1 else ""}'
+        if out:
+            display += f' → {out}'
+    elif fn_name == 'motion_video_narrate':
+        out = _mv_base(args.get('out_dir', ''))
+        alignment = (args.get('alignment') or 'loose').strip()
+        display = 'Narrate scenes'
+        if out:
+            display += f' → {out}/'
+        if alignment != 'loose':
+            display += f' ({alignment})'
+    elif fn_name == 'motion_video_mux':
+        out = _mv_base(args.get('output', ''))
+        display = f'Mux narration → {out}' if out else 'Mux narration + video'
+    else:
+        display = fn_name
+    return display, {'toolName': fn_name}
+
+
+def _tool_display_produce(fn_name, fn_args, tc_id, tc_args_str):
+    """Build display info for the high-level ``produce_*`` tools.
+
+    The salient arg is the topic/direction the user asked about — that is
+    what makes the card recognizable in the transcript.
+    """
+    args = fn_args if isinstance(fn_args, dict) else {}
+    if fn_name == 'produce_video':
+        topic = (args.get('topic') or '').strip()
+        display = f'Produce video: {topic[:80]}' if topic else 'Produce video'
+    elif fn_name == 'produce_report':
+        topic = (args.get('topic') or '').strip()
+        depth = (args.get('depth') or 'standard').strip()
+        display = f'Research report: {topic[:80]}' if topic else 'Research report'
+        if depth != 'standard':
+            display += f' ({depth})'
+    elif fn_name == 'produce_slides':
+        topic = (args.get('topic') or '').strip()
+        style = (args.get('style') or '').strip()
+        display = f'Produce slides: {topic[:80]}' if topic else 'Produce slides'
+        if style:
+            display += f' ({style[:30]})'
+    elif fn_name == 'produce_research':
+        direction = (args.get('direction') or '').strip()
+        display = (f'Research ideas: {direction[:80]}' if direction
+                   else 'Research ideas')
+    else:
+        display = fn_name
+    return display, {'toolName': fn_name}
+
+
+def _tool_display_search_settings(fn_name, fn_args, tc_id, tc_args_str):
+    """Build display info for ``update_search_settings`` calls.
+
+    No-arg call is a pure READ of the current values; a call with kwargs is
+    a write — the label names the knobs being tuned.
+    """
+    args = fn_args if isinstance(fn_args, dict) else {}
+    keys = sorted(k for k, v in args.items() if v is not None)
+    if not keys:
+        return 'Read search/fetch settings', {'toolName': fn_name}
+    shown = ', '.join(keys[:4])
+    if len(keys) > 4:
+        shown += f' +{len(keys) - 4} more'
+    return f'Tune search/fetch settings: {shown}', {'toolName': fn_name}
+
+
 def _tool_display_human_guidance(fn_name, fn_args, tc_id, tc_args_str):
     """Build display info for ask_human tool calls.
 

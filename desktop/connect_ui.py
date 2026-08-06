@@ -180,7 +180,13 @@ def import_attach_bundle(exe_dir: str, log=_noop_log) -> bool:
     Discipline (mirrors import_preseed):
       * ONE-SHOT — the file carries a bearer token, so it is deleted
         after ANY attempt, success or failure;
-      * NEVER overrides an existing attachment;
+      * NEVER overrides a LIVE existing attachment — but a DEAD one does
+        not veto the bundle: re-downloading the installer IS the repair
+        path (owner incident 2026-08-06 — an old dead proxy URL silently
+        vetoed the fresh bundle's working direct-LAN candidate, and the
+        one-shot delete destroyed the repair material unused), so a dead
+        saved route is re-pointed from the bundle, the dead address kept
+        as a trailing candidate in case the outage was transient;
       * the whole route set persists as ``attach_candidates`` so
         resume_attachment can re-point a dead saved route by itself.
 
@@ -211,14 +217,20 @@ def import_attach_bundle(exe_dir: str, log=_noop_log) -> bool:
         from lib.desktop_agent.config import (load_config, remote_server,
                                               save_config,
                                               save_remote_server)
-        existing, _secret = remote_server()
+        from lib.desktop_agent._probe import probe_server
+        existing, existing_secret = remote_server()
         if existing:
-            log('Attach bundle ignored (already attached to %s)' % existing)
-            return False
+            alive, dead_reason = probe_server(existing, timeout=2.5)
+            if alive:
+                log('Attach bundle ignored (already attached to %s)'
+                    % existing)
+                return False
+            log('Saved attachment %s is dead (%s) — treating the fresh '
+                'bundle as a re-point, not an override'
+                % (existing, dead_reason))
         if not candidates and not fallbacks:
             log('Attach bundle carried no addresses — ignored')
             return False
-        from lib.desktop_agent._probe import probe_server
         winner = ''
         for url in candidates:
             ok, reason = probe_server(url, timeout=2.5)
@@ -237,10 +249,16 @@ def import_attach_bundle(exe_dir: str, log=_noop_log) -> bool:
                     break
                 log('Attach fallback %s not reachable: %s' % (url, reason))
         chosen = winner or (candidates[0] if candidates else fallbacks[0])
-        save_remote_server(chosen, token)
+        # The bundle's token is the freshest credential; when it is absent
+        # (open-bridge download) keep whatever secret the attachment had.
+        save_remote_server(chosen, token or existing_secret)
         try:
             cfg = load_config()
-            cfg['attach_candidates'] = candidates + fallbacks
+            route_set = list(candidates) + list(fallbacks)
+            if (existing and existing != chosen
+                    and existing not in route_set):
+                route_set.append(existing)  # may recover — keep as backup
+            cfg['attach_candidates'] = route_set
             save_config(cfg)
         except Exception as e:
             log('Could not persist attach candidates: %s' % e)

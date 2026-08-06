@@ -183,6 +183,8 @@ const _DEFERRED_ENTRY_POINTS = [
   // reachable from server-spliced static panel HTML).
   'closeUpdateModal', '_skillsSetScope', '_skillsFilter',
   'openMemoryCreateForm', 'refreshPreferences', 'savePreferences',
+  // Tools-inventory panel (2026-08-06): filter pills / search / refresh.
+  '_populateToolsTab', '_toolsInvSetFilter', '_toolsInvSearch',
   // Settings modal (deferred 2026-08-01, Epic-E sub-10) — openSettings is
   // the real entry (sidebar gear / mobile sheet / onboarding); the rest
   // are defense-in-depth (only clickable inside the open modal).

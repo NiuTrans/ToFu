@@ -408,6 +408,18 @@ STRINGS = {
         'en': 'Connect to a different Tofu…',
         'zh': '连接到另一个 Tofu…',
     },
+    'desktop.tray.copyDiag': {
+        'en': 'Copy diagnostics',
+        'zh': '复制诊断信息',
+    },
+    'desktop.role.copyDiag': {
+        'en': 'Copy diagnostics',
+        'zh': '复制诊断信息',
+    },
+    'desktop.role.copyDiagDone': {
+        'en': 'Copied — paste it into the Tofu chat',
+        'zh': '已复制——粘贴到 Tofu 对话框即可',
+    },
     'desktop.tray.installComponents': {
         'en': 'Install Components...',
         'zh': '安装组件...',

@@ -52,6 +52,14 @@ from lib.mcp.client._install import _prepend_interpreter_bin_to_path
 logger = get_logger(__name__)
 
 
+def _tool_input_schema(tool) -> dict:
+    """The MCP SDK renamed ``Tool.input_schema`` to the spec spelling
+    ``inputSchema`` (observed in 1.29.0, installed 2026-08-06 — every server
+    connect died on the AttributeError). Accept either; empty → open object."""
+    return (getattr(tool, 'input_schema', None) or getattr(tool, 'inputSchema', None)
+            or {'type': 'object', 'properties': {}})
+
+
 # ══════════════════════════════════════════════════════════
 #  Async core — runs on a dedicated event loop thread
 # ══════════════════════════════════════════════════════════
@@ -319,7 +327,7 @@ class MCPBridge:
                     tool_name=tool.name,
                     namespaced_name=ns_name,
                     description=tool.description or '',
-                    input_schema=tool.input_schema or {'type': 'object', 'properties': {}},
+                    input_schema=_tool_input_schema(tool),
                     openai_def=self._tool_to_openai(name, tool),
                     read_only_hint=_extract_read_only_hint(tool),
                 )
@@ -1059,7 +1067,7 @@ class MCPBridge:
         # Prefix description with server name for disambiguation
         tagged_desc = f'[MCP:{server_name}] {desc}'
         # Clean up the input schema: ensure it has required fields
-        schema = dict(tool.input_schema) if tool.input_schema else {'type': 'object', 'properties': {}}
+        schema = dict(_tool_input_schema(tool))
         if 'type' not in schema:
             schema['type'] = 'object'
 

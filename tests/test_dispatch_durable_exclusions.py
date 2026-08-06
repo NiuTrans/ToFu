@@ -196,7 +196,8 @@ def _real_dispatcher(slots):
     d.slots = list(slots)
     d._initialized = True
     d._lock = threading.Lock()
-    d._alias_index = {}
+    d._logical_index = {}
+    d._direct_models = set()
     d._contention_strikes = {}
     d.face_refusals = []
     return d

@@ -83,6 +83,8 @@ class Slot:
         # Defensive copy — prevent shared-reference bugs when
         # multiple Slots are built from the same caps set.
         self.capabilities = set(self.capabilities)
+        if not self.logical_model:
+            self.logical_model = self.model
         # Defensive copy — the marker is per-provider config state.
         self.adapter = dict(self.adapter or {})
         # Reject typos at construction. We deliberately do NOT silently
@@ -102,6 +104,13 @@ class Slot:
             self.rpm_limit_max = self.rpm_limit
 
     # ── Provider routing ──
+    logical_model: str = ''         # the model entry's LOGICAL model_id this slot
+                                    # serves (model = the wire id actually sent).
+                                    # Routing (prefer_model) keys on THIS — owner
+                                    # directive 2026-08-06: model_id is the only
+                                    # routing key; aliases are wire spellings,
+                                    # never routing widenings. '' → __post_init__
+                                    # defaults it to `model` (env/ephemeral slots).
     base_url: str = ''              # provider-specific base URL (empty = use global default)
     provider_id: str = 'default'    # which provider this slot belongs to
     extra_headers: dict = field(default_factory=dict)  # provider-specific custom HTTP headers

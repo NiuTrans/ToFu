@@ -344,7 +344,6 @@ def append_pending_user_msg(db, conv_id, user_msg, valid_assistant_ids=None):
             logger.warning('[Send] pending-user append: bad messages JSON conv=%s: %s',
                            conv_id[:8], e)
             return False, None
-        row['updated_at']
         cur_rev = row['rev']  # Phase 4 W2: CAS token is rev (trigger-bumped); the
         # loop re-reads the row at the top of every attempt, so cur_rev is
         # refreshed each retry. updated_at is still stamped in SET, not the token.

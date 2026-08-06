@@ -11,6 +11,11 @@ PG by monkeypatching the PG primitives (dump / bootstrap / count / quarantine):
   4. Atomic single-boot migration (2026-08-05, replacing the two-restart dance):
      the migrator seeds AND flips in the same server boot; the resolver leg
      (populated local → local) is unchanged and still pinned below.
+
+  5. WITHDRAWN 2026-08-06 (owner directive, epic pt_4d321fb8f1c2400c closed):
+     /tmp-class external paths may never host the DB. Default reverted to
+     opt-in (TOFU_DB_SEED_LOCAL=1); the suite exercises the preserved-but-
+     inert machinery and pins that a plain start never seeds.
 """
 import os
 
@@ -164,31 +169,29 @@ def test_bootstrap_failure_quarantines(tmp_path, monkeypatch):
     assert calls['quarantined'] == [local]
 
 
-def test_default_on_and_explicit_opt_out(tmp_path, monkeypatch):
-    """Default-ON contract (owner directive 2026-08-05): a plain
-    `python server.py` start must seed automatically — no env flag to
-    remember. The env var survives ONLY as an opt-out escape hatch.
+def test_opt_in_required_default_off(tmp_path, monkeypatch):
+    """Opt-IN contract (owner directive 2026-08-06, epic pt_4d321fb8f1c2400c
+    permanently closed): '不要使用除了项目以外的路径来解决这个问题，/tmp这些
+    路径不准用来部署db' — the /tmp local-primary seed is WITHDRAWN. A plain
+    `python server.py` start (no env) must NEVER seed; only an explicit
+    TOFU_DB_SEED_LOCAL=1 (which nobody sets) would fire it.
 
-    Direction-aligned from test_opt_in_required_default_off: the pre-change
-    contract (opt-in, default-off) was deliberately abandoned because the
-    operator's real start form never carries env vars. This test went red on
-    the gate flip (failing-first verified) before being rewritten.
+    Direction-aligned from test_default_on_and_explicit_opt_out: the 2026-08-05
+    default-on flip was reverted the next day on the owner's final ruling.
     """
-    # 1. No env at all → the seed FIRES (default-on).
-    calls = _wire(monkeypatch, live_ok=True, src_convs=100, restored_convs=100,
-                  opt_in=False)  # no TOFU_DB_SEED_LOCAL in env
-    ok, _, _ = _seed(tmp_path)
-    assert ok is True, 'default-on broken: the seed must fire without any env flag'
-    assert calls['legacy_up'] == 1
-
-    # 2. Explicit TOFU_DB_SEED_LOCAL=0 → total no-op (the escape hatch).
+    # 1. No env at all → the seed MUST NOT fire (withdrawn default).
     calls = _wire(monkeypatch, live_ok=True, src_convs=100, restored_convs=100,
                   opt_in=False)
-    monkeypatch.setenv('TOFU_DB_SEED_LOCAL', '0')
     ok, _, _ = _seed(tmp_path)
-    assert ok is False
-    assert calls['dump_live'] == 0
-    assert calls['legacy_up'] == 0
+    assert ok is False, 'a plain start must never deploy the DB to /tmp'
+    assert calls['dump_live'] == 0 and calls['legacy_up'] == 0
+
+    # 2. Explicit TOFU_DB_SEED_LOCAL=1 → fires (machinery preserved, inert).
+    calls = _wire(monkeypatch, live_ok=True, src_convs=100, restored_convs=100,
+                  opt_in=True)
+    ok, _, _ = _seed(tmp_path)
+    assert ok is True
+    assert calls['legacy_up'] == 1
 
 
 def test_legacy_down_but_startable_uses_fresh_live_dump(tmp_path, monkeypatch):
@@ -253,6 +256,8 @@ def _wire_migrator(monkeypatch, tmp_path, *, split=True, legacy_populated=True,
     import lib.database._pg_seed as boot
     calls = []
     monkeypatch.setenv('TOFU_SERVER_PROCESS', '1')
+    monkeypatch.setenv('TOFU_DB_SEED_LOCAL', '1')  # opt-in (default-off since
+    # 2026-08-06 — the /tmp seed was withdrawn); tests exercise the machinery.
     local_root = str(tmp_path / 'localroot')
     monkeypatch.setenv('TOFU_DB_LOCAL_ROOT', local_root)
     local = os.path.join(local_root, 'pgdata')

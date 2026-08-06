@@ -54,11 +54,17 @@ def _port_listening(port: int) -> bool:
         return s.connect_ex(('127.0.0.1', port)) == 0
 
 
-def _make_guard_copy(tmpdir: str, *, neuter: str | None = None) -> str:
+def _make_guard_copy(tmpdir: str, *, neuter: str | None = None,
+                     py: str = '/bin/true') -> str:
     """Copy the guard into <tmp>/deploy/ so PROJ auto-resolves to <tmp>.
 
     ``neuter`` strips a yield layer to prove it is load-bearing:
-    'b1' → the re-exec marker check; 'b2' → the instance-lock check.
+    'b1' → the re-exec marker check; 'b2' → the instance-lock check;
+    'tls_env_inline' → restores the pre-5a5a37ce relaunch form (the
+    ``${tls_env}`` variable sitting in the assignment-prefix slot, which
+    bash does NOT re-parse as an assignment).
+    ``py`` overrides the .tofu_env.json python (default /bin/true so a
+    relaunch "dies during startup" instantly and never boots a server).
     """
     with open(GUARD_SRC, encoding='utf-8') as f:
         text = f.read()
@@ -74,16 +80,22 @@ def _make_guard_copy(tmpdir: str, *, neuter: str | None = None) -> str:
         start = text.index('  # (b2) boot-in-progress via the instance lock')
         end = text.index('  # (d) mid-boot:')
         text = text[:start] + text[end:]
+    elif neuter == 'tls_env_inline':
+        anchor = '    env ${tls_env:+"${tls_env}"} \\\n'
+        assert anchor in text, (
+            'neuter anchor drifted — the guard no longer carries the env(1) '
+            'relaunch form this pin protects')
+        text = text.replace(anchor, '    ${tls_env} \\\n')
     gdir = os.path.join(tmpdir, 'deploy')
     os.makedirs(gdir, exist_ok=True)
     gpath = os.path.join(gdir, 'tofu_guard.sh')
     with open(gpath, 'w', encoding='utf-8') as f:
         f.write(text)
     os.chmod(gpath, 0o755)
-    # PY → /bin/true: a relaunch "dies during startup" instantly (rc 1) and
-    # NEVER boots a real second server.
+    # PY → /bin/true (or the caller's stub): a relaunch "dies during
+    # startup" instantly (rc 1) and NEVER boots a real second server.
     with open(os.path.join(tmpdir, '.tofu_env.json'), 'w') as f:
-        f.write('{"python": "/bin/true"}\n')
+        f.write('{"python": "%s"}\n' % py)
     os.makedirs(os.path.join(tmpdir, 'data'), exist_ok=True)
     os.makedirs(os.path.join(tmpdir, 'logs'), exist_ok=True)
     return gpath
@@ -248,6 +260,81 @@ class TestReexecRace(unittest.TestCase):
             self.assertIn('relaunching', log)
         finally:
             stub.kill()
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def _tls_env_setup(self, tmp, neuter=None):
+        """Guard copy whose launched 'python' is a stub recording TOFU_TLS.
+
+        Returns (marker_path, slog_path). The stub writes the env var it
+        ACTUALLY received — the only honest proof the optional VAR=VAL rode
+        the launch line instead of dying as a would-be command name.
+        """
+        marker = os.path.join(tmp, 'launch_marker')
+        fakepy = os.path.join(tmp, 'fakepy.sh')
+        with open(fakepy, 'w') as f:
+            f.write('#!/bin/bash\n'
+                    'echo "TOFU_TLS=[${TOFU_TLS:-unset}]" >> "%s"\n' % marker)
+        os.chmod(fakepy, 0o755)
+        g = _make_guard_copy(tmp, neuter=neuter, py=fakepy)
+        with open(os.path.join(tmp, 'data', '.last_serve_mode'), 'w') as f:
+            f.write('http\n')
+        return g, marker, os.path.join(tmp, 'server_%d.log' % _TEST_PORT)
+
+    def _read(self, path):
+        try:
+            with open(path, errors='replace') as f:
+                return f.read()
+        except OSError:
+            return ''
+
+    def test_relaunch_serve_mode_http_tls_env_reaches_child(self):
+        """2026-08-06 outage pin: with .last_serve_mode=http the relaunch must
+        deliver TOFU_TLS=0 to the child — via env(1), NOT the assignment-
+        prefix slot. A variable expanded there is not re-parsed as an
+        assignment: bash executed 'TOFU_TLS=0' as the COMMAND NAME, and 11
+        guard relaunches died during a real OOM crash, leaving the server
+        down for 22 minutes."""
+        tmp = tempfile.mkdtemp()
+        try:
+            g, marker, slog_path = self._tls_env_setup(tmp)
+            rc, log = _run_once(g, tmp)
+            self.assertEqual(rc, 1, f'expected relaunch-attempt (rc 1):\n{log}')
+            self.assertIn('serve-mode=http TOFU_TLS=0', log)
+            slog = self._read(slog_path)
+            self.assertNotIn('command not found', slog)
+            # the stub child may write a beat after relaunch() gives up on it
+            deadline = time.time() + 5
+            while not os.path.exists(marker) and time.time() < deadline:
+                time.sleep(0.1)
+            self.assertIn('TOFU_TLS=[0]', self._read(marker),
+                          'the launched child never received TOFU_TLS=0 — '
+                          'the optional env var did not ride the launch line')
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_neuter_inline_tls_env_relaunch_dies(self):
+        """NEUTER: restore the pre-fix inline form — the identical relaunch
+        must die with 'command not found' and the child must never run,
+        proving the pin above is load-bearing and not vacuously green."""
+        tmp = tempfile.mkdtemp()
+        try:
+            g, marker, slog_path = self._tls_env_setup(tmp,
+                                                       neuter='tls_env_inline')
+            rc, log = _run_once(g, tmp)
+            self.assertEqual(rc, 1, f'neutered copy must still attempt (rc 1):\n{log}')
+            deadline = time.time() + 2
+            while time.time() < deadline:
+                if 'command not found' in self._read(slog_path):
+                    break
+                time.sleep(0.1)
+            slog = self._read(slog_path)
+            self.assertIn('command not found', slog,
+                          'the inline ${tls_env} form did NOT die — either '
+                          'bash changed its assignment-prefix rules, or the '
+                          'neuter anchor silently stopped matching')
+            self.assertFalse(os.path.exists(marker),
+                             'the neutered launch line still exec\'d the child')
+        finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
     def test_static_anchors(self):

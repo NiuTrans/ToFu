@@ -262,9 +262,9 @@ def _seed_local_pgdata_from_legacy(local_pgdata, legacy_pgdata, base_dir,
          this runs at Step -1 (before the normal start path), the legacy cluster
          is first STARTED if it is down (via _ensure_legacy_up_for_seed); the
          nightly dump is used ONLY when legacy genuinely cannot be started — NOT
-         merely because it wasn't up yet. Default-on since 2026-08-05 (owner
-         directive — plain `python server.py` must Just Work);
-         TOFU_DB_SEED_LOCAL=0 defers.
+         merely because it wasn't up yet. Opt-in only (TOFU_DB_SEED_LOCAL=1);
+         the default-on /tmp seed was withdrawn 2026-08-06 (owner: no DB
+         deployment outside the project directory).
       2. Idempotent on ``pgdata_is_populated(local)`` — if local already looks
          initialized, skip entirely (never re-restore over newer local data).
       3. Verify-before-canonical — after restoring into local, confirm the
@@ -278,18 +278,18 @@ def _seed_local_pgdata_from_legacy(local_pgdata, legacy_pgdata, base_dir,
     """
     from lib.database.db_paths import pgdata_is_populated
 
-    # DEFAULT-ON (owner directive 2026-08-05): the seed fires automatically on
-    # any plain `python server.py` start when local is unpopulated — operators
-    # must NOT need to remember an env flag for a migration that is idempotent,
-    # verify-gated and quarantine-on-failure. The env var survives only as an
-    # opt-OUT escape hatch (TOFU_DB_SEED_LOCAL=0) for deliberately deferring
-    # the heavy event (full dump+restore before serving). On failure the local
-    # half-restore is quarantined and legacy stays canonical, so the next boot
-    # simply retries — self-healing once the transient cause (disk full, FUSE
-    # wobble) clears; the failure is loud (CRITICAL + audit_log) every boot.
-    if getenv_compat('TOFU_DB_SEED_LOCAL', default='1').lower() in ('0', 'false', 'no'):
-        logger.warning('[DB-Seed] opted out (TOFU_DB_SEED_LOCAL=0) — deferring '
-                       'one-time local seed; staying on legacy FUSE pgdata')
+    # WITHDRAWN (owner directive 2026-08-06, epic pt_4d321fb8f1c2400c closed):
+    # "不要使用除了项目以外的路径来解决这个问题，/tmp这些路径不准用来部署db，
+    # 会丢的。以后都不许想这个。" The local-primary seed targets /tmp — exactly
+    # the forbidden class. The 2026-08-05 default-on flip is REVERTED: the seed
+    # is inert unless TOFU_DB_SEED_LOCAL=1 is set explicitly (nobody will), so
+    # a plain `python server.py` NEVER deploys the DB outside the project dir.
+    # The machinery stays only as documentation of the explored-and-rejected
+    # path; do not re-enable without an owner decision on a project-local root.
+    if getenv_compat('TOFU_DB_SEED_LOCAL', default='0').lower() not in ('1', 'true', 'yes'):
+        logger.debug('[DB-Seed] not opted in (TOFU_DB_SEED_LOCAL!=1) — skipping '
+                     'local seed; staying on legacy FUSE pgdata (the /tmp-local '
+                     'seed was withdrawn 2026-08-06)')
         return False
 
     # ── Property 2: idempotent — never touch an already-populated local ──
@@ -543,7 +543,9 @@ def _migrate_local_primary_if_due(pgdata, base_dir, pg_port, pg_user,
         set in-process by server.py at its top; it is NOT a user-facing knob.
       * split engaged AND legacy populated (a fresh install has nothing to
         migrate) AND (local unpopulated OR stale vs legacy).
-      * ``TOFU_DB_SEED_LOCAL=0`` defers (the opt-out escape hatch).
+      * ``TOFU_DB_SEED_LOCAL=1`` must be set explicitly — the migration was
+        withdrawn as default-on on 2026-08-06 (owner directive: /tmp-class
+        external paths are forbidden for the DB).
 
     Atomicity: the flip happens in the SAME boot as a verified seed. The old
     two-restart dance left an unbounded staleness window (writes between the
@@ -568,9 +570,10 @@ def _migrate_local_primary_if_due(pgdata, base_dir, pg_port, pg_user,
     local_root = getenv_compat('TOFU_DB_LOCAL_ROOT', default='').strip() \
         or '/tmp/tofu'
     local = os.path.join(os.path.abspath(local_root), 'pgdata')
-    if getenv_compat('TOFU_DB_SEED_LOCAL', default='1').lower() in ('0', 'false', 'no'):
-        logger.warning('[DB-Migrate] deferred by TOFU_DB_SEED_LOCAL=0 — '
-                       'staying on the resolved pgdata')
+    if getenv_compat('TOFU_DB_SEED_LOCAL', default='0').lower() not in ('1', 'true', 'yes'):
+        # Default path — the /tmp-local migration was withdrawn 2026-08-06
+        # (owner: DB never leaves the project dir). Debug level: nothing wrong.
+        logger.debug('[DB-Migrate] not opted in — staying on the resolved pgdata')
         return pgdata
     if pgdata_is_populated(local) and not _local_seed_is_stale(local, legacy):
         return pgdata  # already migrated and fresh — normal post-flip boot

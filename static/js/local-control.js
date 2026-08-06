@@ -98,6 +98,79 @@ function _lcAwaitingAgentHtml(d) {
     '受控端凭证已随安装包内置，等待它首次连入……它会自己寻找服务器并自动重试（直连内网 → 局域网广播 → 自动隧道），一般一分钟内变绿；迟迟未变绿时，看受控端托盘菜单的「链路」一行——它会明说：连不上 / 被代理拦截 / 鉴权失败。')) + '</p>';
 }
 
+/* ── The diagnostics inbox (owner ask 2026-08-06) ──
+ * A controlled machine that cannot reach this server cannot push its logs
+ * anywhere — debugging it blind was the 2026-08-06 incident's blind spot.
+ * The agent's window/tray has「复制诊断信息」; the user pastes the bundle
+ * HERE and it lands in logs/desktop_client_diag.log on the server, where
+ * the operator/assistant reads it directly. Collapsed by default so it
+ * never competes with the ONE primary install action. */
+function _lcDiagInboxHtml() {
+  return '<details class="lc-details lc-diag"><summary>' +
+    _lcEsc(_lcT('local.diagTitle', '受控端连不上？把它的诊断信息粘贴到这里')) +
+    '</summary>' +
+    '<p class="lc-substep">' + _lcEsc(_lcT('local.diagDesc',
+      '在受控端窗口点「复制诊断信息」（或托盘菜单同名项），回到这里粘贴提交——服务器会直接存盘，排查时立刻能读到，不用截图不用转述。')) + '</p>' +
+    '<textarea id="lcDiagText" class="lc-diag-text" rows="6" spellcheck="false" placeholder="' +
+    _lcEsc(_lcT('local.diagPlaceholder', 'Ctrl+V 粘贴诊断信息……')) + '"></textarea>' +
+    '<div class="lc-diag-actions">' +
+    '<button type="button" id="lcDiagSubmit" class="btn btn-primary btn-sm">' +
+    _lcEsc(_lcT('local.diagSubmit', '提交诊断')) + '</button>' +
+    '<span id="lcDiagHint" class="lc-diag-hint"></span></div>' +
+    '<div id="lcDiagRecent" class="lc-diag-recent"></div>' +
+    '</details>';
+}
+
+function _lcDiagRefreshRecent() {
+  var box = document.getElementById('lcDiagRecent');
+  if (!box) return;
+  // jsdom harnesses splice the renderers without an Api stub — the
+  // refresh is best-effort, never a render-time throw.
+  if (typeof Api === 'undefined' || !Api.desktop ||
+      typeof Api.desktop.listDiags !== 'function') return;
+  Promise.resolve(Api.desktop.listDiags()).then(function (r) {
+    var boxNow = document.getElementById('lcDiagRecent');
+    if (!boxNow) return;
+    if (!r || !Array.isArray(r.entries) || !r.entries.length) {
+      boxNow.innerHTML = '';
+      return;
+    }
+    var rows = r.entries.slice(0, 5).map(function (e) {
+      var when = e.ts ? new Date(e.ts * 1000).toLocaleString() : '?';
+      return '<div class="lc-diag-row">' + _lcEsc(when) + ' · ' +
+        _lcEsc(String(e.chars || 0)) + ' chars</div>';
+    }).join('');
+    boxNow.innerHTML = '<div class="lc-diag-recent-head">' +
+      _lcEsc(_lcT('local.diagRecent', '最近提交')) + '</div>' + rows;
+  });
+}
+
+function _lcWireDiag() {
+  var btn = document.getElementById('lcDiagSubmit');
+  if (!btn) return;
+  btn.addEventListener('click', function () {
+    var ta = document.getElementById('lcDiagText');
+    var hint = document.getElementById('lcDiagHint');
+    var text = ta ? ta.value.trim() : '';
+    if (!text) {
+      if (hint) hint.textContent = _lcT('local.diagEmpty', '先粘贴诊断信息再提交');
+      return;
+    }
+    btn.disabled = true;
+    Promise.resolve(Api.desktop.submitDiag(text)).then(function (r) {
+      btn.disabled = false;
+      if (!r) {
+        if (hint) hint.textContent = _lcT('local.diagFailed', '提交失败——稍后再试');
+        return;
+      }
+      if (ta) ta.value = '';
+      if (hint) hint.textContent = _lcT('local.diagDone', '已收到——服务器已存盘，可以去排查了');
+      _lcDiagRefreshRecent();
+    });
+  });
+  _lcDiagRefreshRecent();
+}
+
 /* The ONE primary attach action (owner decree 2026-08-05 — no pairing
  * codes, zero configuration burden): the per-download bundle ZIP. The
  * server mints a fresh agents:bridge token AT THE CLICK and packs it with
@@ -206,12 +279,22 @@ function _lcPaintFloor() {
   _lcBrowserDownload();
   var d = document.getElementById('lcDesktopSetup');
   if (d) {
-    // No download link yet: the URL comes from the backend's UPDATE_REPO and
-    // must not be re-derived here (a fork's build would get the wrong link).
-    // _lcRenderDesktop adds it a beat later. A named step with no shortcut is
-    // still actionable; a shortcut pointing at the wrong repo would not be.
-    d.innerHTML = '<p class="lc-step">' + _lcEsc(_lcT('local.desktopFloor',
-      '安装桌面版后，即可在系统托盘一键开启「Enable Computer Control」，让 AI 操作这台电脑。')) + '</p>';
+    /* The ONE primary attach action needs ZERO backend knowledge, so it is
+     * on screen in the first frame (owner-measured 2026-08-06: the desktop
+     * half of this modal used to pop its install block one status round-trip
+     * late, next to a browser half that never waits). The FULL-desktop link
+     * still waits for the backend — its URL derives from UPDATE_REPO and a
+     * hardcoded one would point a fork at the wrong releases page — but the
+     * agent-bundle URL is a pure frontend derivation (_lcAgentBundleUrl),
+     * and the endpoint answers honestly when the bundle is not built yet
+     * (404/409 JSON with the next step + a rebuild kick), never a silent
+     * dead end. Detection replaces this a beat later with the state-specific
+     * instruction (rebuilding note / tray toggle / cleared when connected).
+     * Reuse the detected branch's own authoring for the button — two copies
+     * of one button drift, and a drifted button is a dead one. */
+    d.innerHTML = '<p class="lc-step">' + _lcEsc(_lcT('local.desktopFloorLead',
+        '让 AI 操作这台电脑 —— 安装轻量受控端（内置配对凭证与通路，装完启动即自动连上）：')) + '</p>' +
+      _lcAgentAttachBlockHtml({ agent_bundle_ready: true });
   }
 }
 
@@ -677,8 +760,10 @@ function _lcRenderDesktop(d, err) {
             attachSrc +
           '</div>';
       }
-      setup.innerHTML = _lcBindWarnHtml(d) + _lcAwaitingAgentHtml(d) + htmlSrc;
+      setup.innerHTML = _lcBindWarnHtml(d) + _lcAwaitingAgentHtml(d) + htmlSrc +
+        _lcDiagInboxHtml();
       _lcWireAttach(srvSrc);
+      _lcWireDiag();
       return;
     }
 
@@ -728,8 +813,10 @@ function _lcRenderDesktop(d, err) {
           _lcDownloadLinks(d) +
           _lcConnectDetailsHtml(d.server_url_reachability);
       }
-      setup.innerHTML = _lcBindWarnHtml(d) + _lcAwaitingAgentHtml(d) + html;
+      setup.innerHTML = _lcBindWarnHtml(d) + _lcAwaitingAgentHtml(d) + html +
+        _lcDiagInboxHtml();
       _lcWireAttach(srv);
+      _lcWireDiag();
       return;
     }
   }

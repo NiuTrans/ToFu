@@ -106,31 +106,39 @@ def _models_summary() -> list[dict]:
 
 
 def _tools_summary() -> list[dict]:
-    """Describe registered native tools (server-side only)."""
+    """Describe registered native tools (server-side only).
+
+    Derived from the live registry inventory (``_introspect``) since
+    2026-08-06 — the previous hand-maintained 5-group list had silently
+    drifted from the real registry (memory/scheduler/swarm/motion/conv-ref
+    families all missing). Shape kept: ``{name, group, description}`` flat
+    rows; ``group`` is the spec category.
+    """
     out = []
     try:
-        from lib.tools import (
-            BROWSER_TOOLS, CODE_EXEC_TOOL, FETCH_URL_TOOL,
-            PROJECT_TOOLS, READ_FILES_TOOL,
-            build_search_tool,
-        )
-        groups = {
-            'search': [build_search_tool()],
-            'fetch': [FETCH_URL_TOOL],
-            'project': [READ_FILES_TOOL] + list(PROJECT_TOOLS),
-            'code_exec': [CODE_EXEC_TOOL],
-            'browser': list(BROWSER_TOOLS),
-        }
-        for group, tools in groups.items():
-            for t in tools:
-                if not isinstance(t, dict):
-                    continue
-                fn = t.get('function') or {}
-                out.append({
-                    'name': fn.get('name') or t.get('name') or '',
-                    'group': group,
-                    'description': fn.get('description', '')[:300],
-                })
+        from lib.tools.registry._introspect import build_tool_inventory
+        inv = build_tool_inventory()
+        for group in inv.get('groups', []):
+            gid = group.get('id') or 'other'
+            for fam in group.get('families', []):
+                for t in fam.get('tools', []):
+                    name = t.get('name') or ''
+                    if not name:
+                        continue
+                    out.append({
+                        'name': name,
+                        'group': gid,
+                        'description': (t.get('description') or '')[:300],
+                    })
+                for t in fam.get('mcp_tools', []):
+                    name = t.get('name') or ''
+                    if not name:
+                        continue
+                    out.append({
+                        'name': name,
+                        'group': 'mcp',
+                        'description': (t.get('description') or '')[:300],
+                    })
     except Exception as e:
         logger.debug('[capabilities] tools enumeration failed: %s', e)
     return out

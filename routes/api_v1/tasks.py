@@ -69,6 +69,7 @@ def _registries() -> dict:
         ('lib.paper.podcast_runtime', '_podcast_runtime'),
         ('lib.longform.runtime', '_longform_runtime'),
         ('lib.research.runtime', '_research_runtime'),
+        ('lib.slides.runtime', '_slides_runtime'),
     ):
         try:
             mod = __import__(mod_path, fromlist=[attr])
@@ -130,6 +131,8 @@ def _starters() -> dict:
          ('lang', 'n_ideas', 'seed_arxiv_ids')),
         ('lib.longform.engine', 'start_report_job', 'longform-report', 'topic',
          ('lang', 'depth')),
+        ('lib.slides.engine', 'start_slides_job', 'slides-deck', 'topic',
+         ('lang', 'style', 'max_pages', 'size')),
     ):
         try:
             mod = __import__(mod_path, fromlist=[attr])

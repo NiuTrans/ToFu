@@ -1075,7 +1075,8 @@ if (typeof window !== 'undefined' && !window._timerCountdownTicker) {
     if (typeof activeStreams !== 'undefined' && activeStreams && activeStreams.has(conv.id)) return;
     const hasRich = conv.messages.some((m) => m && Array.isArray(m.toolRounds) && m.toolRounds.some((r) =>
       r && ((r._timerPolls && r._timerPolls.length) || r._timerSkipCount ||
-        (typeof _isRoundConvMeta === 'function' && _isRoundConvMeta(r)))));
+        (typeof _isRoundConvMeta === 'function' && _isRoundConvMeta(r)) ||
+        (typeof _isRoundMotion === 'function' && _isRoundMotion(r)))));
     /* Full-tree contract (test_full_repaints_route_through_replaceAll): every
      * whole-conv repaint routes through the ConvView seam — bare renderChat(
      * is globally zero outside conv_view.js / chat_render.js. forceScroll:
@@ -1084,3 +1085,278 @@ if (typeof window !== 'undefined' && !window._timerCountdownTicker) {
     if (hasRich) window.ConvView.replaceAll(conv.id, { forceScroll: false });
   } catch (e) { /* best-effort upgrade — the next natural render fixes it */ }
 })();
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * Motion-video / produce tool cards
+ *
+ * The owner screenshot (2026-08-06): a motion_video_check / motion_video_render
+ * round rendered as a bare fn-name + a badge — no idea WHAT the call did or
+ * what came back. These tools return rich structured JSON envelopes
+ * (probe specs, per-gate findings, per-scene narration durations, mux
+ * verification, background-job handles); this block renders them as a
+ * collapsible card instead of hiding everything behind the badge.
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+/* Per-tool localized header + one-line plain-language purpose caption.
+ * The backend `round.query` ("Render scene-001 → scene-001.mp4 (draft)") is
+ * kept as a detail row in the body; the header is the user-facing verb. */
+const _MOTION_HEAD_I18N = {
+  motion_video_env_check:        ["motionHead.envCheck", "Checked the video toolchain"],
+  motion_video_storyboard_check: ["motionHead.storyboard", "Validated the storyboard against its transcript"],
+  motion_video_check:            ["motionHead.check", "Ran the static quality gates on a scene"],
+  motion_video_render:           ["motionHead.render", "Rendered a scene to video"],
+  motion_video_probe:            ["motionHead.probe", "Inspected a media file"],
+  motion_video_concat:           ["motionHead.concat", "Assembled the scenes into the final video"],
+  motion_video_narrate:          ["motionHead.narrate", "Synthesized the narration track"],
+  motion_video_mux:              ["motionHead.mux", "Merged narration into the video"],
+  produce_video:                 ["motionHead.produceVideo", "Started a video job"],
+  produce_report:                ["motionHead.produceReport", "Started a research report"],
+  produce_research:              ["motionHead.produceResearch", "Started a research survey"],
+  produce_slides:                ["motionHead.produceSlides", "Started a slide-deck job"],
+};
+const _MOTION_PURPOSE_I18N = {
+  motion_video_env_check:        ["motionWhy.envCheck", "Confirms Node / HyperFrames / ffmpeg / headless Chrome are all present before any render work starts."],
+  motion_video_storyboard_check: ["motionWhy.storyboard", "Zero-LLM gate: the storyboard must cover the narration transcript end-to-end before any scene may render."],
+  motion_video_check:            ["motionWhy.check", "Lint + headless-Chrome runtime check + layout inspection. A scene must pass before it is allowed to render."],
+  motion_video_render:           ["motionWhy.render", "Renders one scene composition to MP4 via headless Chrome (deterministic)."],
+  motion_video_probe:            ["motionWhy.probe", "Reads codec / resolution / fps / duration / audio-track from a media file — the post-render spec check."],
+  motion_video_concat:           ["motionWhy.concat", "Joins the per-scene MP4s into one final video; mismatched scenes are normalized to the first scene's spec."],
+  motion_video_narrate:          ["motionWhy.narrate", "Synthesizes one narration WAV per scene and reports the duration each scene must become (alignment manifest)."],
+  motion_video_mux:              ["motionWhy.mux", "Copies the video stream and merges the narration track as normalized AAC — the deliverable file."],
+  produce_video:                 ["motionWhy.produceVideo", "One sentence → finished narrated video. The job runs in the background; progress shows in the video panel."],
+  produce_report:                ["motionWhy.produceReport", "One sentence → a cited long-form report, published as a markdown artifact when it finishes."],
+  produce_research:              ["motionWhy.produceResearch", "Harvests the recent literature, then proposes and scores genuinely-novel research ideas against it."],
+  produce_slides:                ["motionWhy.produceSlides", "One sentence → a designer-quality editable PPTX: scenario theme + bound palette/typefaces + per-page layout + visual QA. Downloads when done."],
+};
+
+/* The motion handler's meta.title is the bare stage name ("check" / "render")
+ * — noisy inside the card, so the motion body never renders a snippet. The
+ * produce handlers' note / quality_hint DO carry user-meaningful text. */
+function _motionMetaSnippet(round, meta) {
+  const tn = round.toolName || "";
+  if (tn.startsWith("motion_video_")) return "";
+  return (typeof meta.snippet === "string") ? meta.snippet : "";
+}
+
+function _motionEsc(s) {
+  return escapeHtml(String(s == null ? "" : s));
+}
+
+function _motionDetailRow(label, value, mono) {
+  if (value == null || value === "") return "";
+  const cls = mono ? "ptool-motion-v ptool-motion-mono" : "ptool-motion-v";
+  return `<div class="ptool-motion-row"><span class="ptool-motion-k">${_motionEsc(label)}</span><span class="${cls}">${_motionEsc(value)}</span></div>`;
+}
+
+function _motionSection(title, innerHtml) {
+  if (!innerHtml) return "";
+  return `<div class="ptool-motion-section"><div class="ptool-motion-section-title">${_motionEsc(title)}</div>${innerHtml}</div>`;
+}
+
+function _motionList(items, cls, max) {
+  if (!Array.isArray(items) || !items.length) return "";
+  const cap = max || 12;
+  const shown = items.slice(0, cap);
+  const rows = shown.map((it) => `<div class="ptool-motion-li ${cls || ""}">${_motionEsc(it)}</div>`).join("");
+  const more = items.length > cap
+    ? `<div class="ptool-motion-li ptool-motion-more">… +${items.length - cap} more</div>` : "";
+  return rows + more;
+}
+
+/* Parse the handler's JSON envelope out of round.toolContent (a pretty-printed
+ * JSON string). Returns {} on any non-JSON shape — the card then falls back
+ * to the meta snippet. */
+function _motionPayload(round) {
+  const raw = round.toolContent;
+  if (typeof raw !== "string" || !raw.trim()) return {};
+  try { const d = JSON.parse(raw); return (d && typeof d === "object") ? d : {}; }
+  catch (e) { return {}; }
+}
+
+/* ── Per-tool structured bodies ─────────────────────────────────────── */
+
+function _motionBodyEnvCheck(p, _t) {
+  const ok = !!p.ok;
+  const statusLine = _motionDetailRow(
+    _t("motionRow.status", "Status"),
+    ok ? _t("motionRow.envReady", "ready — every dependency resolved") : _t("motionRow.envMissing", "missing dependencies"),
+  );
+  const deps = [];
+  const depRow = (name, val) => {
+    const present = typeof val === "string" ? !!val : !!val;
+    deps.push(`<div class="ptool-motion-dep ${present ? "ptool-motion-dep-ok" : "ptool-motion-dep-miss"}">`
+      + `<span class="ptool-motion-dep-name">${_motionEsc(name)}</span>`
+      + `<span class="ptool-motion-dep-val">${present ? _motionEsc(typeof val === "string" ? val : "ok") : _t("motionRow.absent", "not found")}</span></div>`);
+  };
+  depRow("node", p.node);
+  depRow("hyperframes", p.hyperframes);
+  depRow("ffmpeg", p.ffmpeg);
+  depRow("ffprobe", p.ffprobe);
+  depRow("chrome", p.chrome);
+  const issues = _motionList(p.issues, "ptool-motion-warn");
+  return statusLine + _motionSection(_t("motionSec.deps", "Dependencies"), deps.join(""))
+       + _motionSection(_t("motionSec.issues", "Issues"), issues);
+}
+
+function _motionBodyStoryboard(p, _t) {
+  const span = Array.isArray(p.span_s) && p.span_s.length === 2
+    ? `${p.span_s[0]}s → ${p.span_s[1]}s` : "";
+  const rows = _motionDetailRow(_t("motionRow.transcriptSpan", "Transcript span"), span, true)
+    + _motionDetailRow(_t("motionRow.errors", "Errors"), Array.isArray(p.errors) ? String(p.errors.length) : "0");
+  const errs = _motionList(p.errors, "ptool-motion-err");
+  return rows + _motionSection(_t("motionSec.problems", "Problems to fix"), errs);
+}
+
+function _motionBodyCheck(p, _t) {
+  const ok = !!p.ok;
+  const gates = p.gates && typeof p.gates === "object" ? Object.keys(p.gates) : [];
+  let rows = _motionDetailRow(_t("motionRow.verdict", "Verdict"),
+    ok ? _t("motionRow.gatesPass", "all gates passed") : _t("motionRow.gatesFail", "gate failed"), false);
+  if (!ok && p.category) rows += _motionDetailRow(_t("motionRow.category", "Failure kind"), p.category, true);
+  if (p.elapsed != null) rows += _motionDetailRow(_t("motionRow.elapsed", "Elapsed"), `${p.elapsed}s`, true);
+  if (gates.length) rows += _motionDetailRow(_t("motionRow.gates", "Gates run"), gates.join(", "));
+  const errs = _motionList(p.errors, "ptool-motion-err");
+  const warns = _motionList(p.warnings, "ptool-motion-warn");
+  const hints = _motionList(p.fix_hints, "ptool-motion-hint");
+  return rows
+    + _motionSection(_t("motionSec.errors", "Errors"), errs)
+    + _motionSection(_t("motionSec.warnings", "Warnings"), warns)
+    + _motionSection(_t("motionSec.fixHints", "How to fix"), hints);
+}
+
+function _motionBodyRender(p, _t) {
+  const ok = !!p.ok;
+  let rows = "";
+  if (ok) {
+    rows += _motionDetailRow(_t("motionRow.output", "Output"), p.output, true);
+    if (p.render_time_s != null) rows += _motionDetailRow(_t("motionRow.renderTime", "Render time"), `${p.render_time_s}s`, true);
+    if (p.elapsed != null) rows += _motionDetailRow(_t("motionRow.wall", "Wall clock"), `${p.elapsed}s`, true);
+  } else {
+    rows += _motionDetailRow(_t("motionRow.category", "Failure kind"), p.category || "failed");
+    if (p.detail) rows += `<div class="ptool-motion-li ptool-motion-err">${_motionEsc(String(p.detail).slice(0, 600))}</div>`;
+  }
+  return rows;
+}
+
+function _motionBodyProbe(p, _t) {
+  const pr = p.probe;
+  if (!pr || typeof pr !== "object" || !Object.keys(pr).length) {
+    return `<div class="ptool-motion-li ptool-motion-err">${_motionEsc(_t("motionRow.probeFailed", "probe failed — not a readable media file"))}</div>`;
+  }
+  const res = (pr.width && pr.height) ? `${pr.width}×${pr.height}` : "";
+  let rows = _motionDetailRow(_t("motionRow.codec", "Codec"), pr.codec, true)
+    + _motionDetailRow(_t("motionRow.resolution", "Resolution"), res, true)
+    + _motionDetailRow(_t("motionRow.fps", "Frame rate"), pr.fps != null ? `${pr.fps} fps` : "", true)
+    + _motionDetailRow(_t("motionRow.duration", "Duration"), pr.duration != null ? `${Number(pr.duration).toFixed(2)}s` : "", true)
+    + _motionDetailRow(_t("motionRow.audioTrack", "Audio track"),
+        pr.has_audio ? _t("motionRow.audioYes", "present") : _t("motionRow.audioNo", "silent"));
+  return rows;
+}
+
+function _motionBodyConcat(p, _t) {
+  if (!p.ok) {
+    return _motionDetailRow(_t("motionRow.category", "Failure kind"), p.category || "failed")
+      + (p.detail ? `<div class="ptool-motion-li ptool-motion-err">${_motionEsc(String(p.detail).slice(0, 600))}</div>` : "");
+  }
+  return _motionDetailRow(_t("motionRow.output", "Output"), p.output, true)
+    + _motionDetailRow(_t("motionRow.duration", "Duration"), p.duration != null ? `${p.duration}s` : "", true);
+}
+
+function _motionBodyNarrate(p, _t) {
+  if (p.degraded) {
+    return `<div class="ptool-motion-li ptool-motion-warn">${_motionEsc(
+      _t("motionRow.narrateDegraded", "No TTS slot configured — the video ships silent."))}</div>`
+      + (p.detail ? `<div class="ptool-motion-li">${_motionEsc(p.detail)}</div>` : "");
+  }
+  const scenes = Array.isArray(p.scenes) ? p.scenes : [];
+  const head = _motionDetailRow(_t("motionRow.scenes", "Scenes"), String(scenes.length))
+    + _motionDetailRow(_t("motionRow.alignment", "Alignment"), p.alignment, true)
+    + (p.overflow_total ? _motionDetailRow(_t("motionRow.overflow", "Overflow"), `${p.overflow_total}s`, true) : "");
+  if (!scenes.length) return head;
+  const rows = scenes.map((s) => {
+    const audio = s.audio_duration != null ? `${Number(s.audio_duration).toFixed(2)}s` : "—";
+    const target = s.target_duration != null ? `${Number(s.target_duration).toFixed(2)}s` : "—";
+    const grew = (s.target_duration != null && s.srt_duration != null
+      && Number(s.target_duration) > Number(s.srt_duration) + 0.001);
+    return `<div class="ptool-motion-scene${grew ? " ptool-motion-scene-grew" : ""}">`
+      + `<span class="ptool-motion-scene-id">${_motionEsc(s.scene_id)}</span>`
+      + `<span class="ptool-motion-scene-dur">${_t("motionRow.sceneDur", "audio {a} → scene {t}").replace("{a}", audio).replace("{t}", target)}</span>`
+      + (s.overflow ? `<span class="ptool-motion-scene-overflow">+${s.overflow}s</span>` : "")
+      + `</div>`;
+  }).join("");
+  return head + _motionSection(_t("motionSec.sceneDurations", "Per-scene durations"), rows);
+}
+
+function _motionBodyMux(p, _t) {
+  if (!p.ok) {
+    return _motionDetailRow(_t("motionRow.category", "Failure kind"), p.category || "failed")
+      + (p.detail ? `<div class="ptool-motion-li ptool-motion-err">${_motionEsc(String(p.detail).slice(0, 600))}</div>` : "");
+  }
+  return _motionDetailRow(_t("motionRow.deliverable", "Deliverable"), p.output, true)
+    + _motionDetailRow(_t("motionRow.duration", "Duration"), p.duration != null ? `${p.duration}s` : "", true)
+    + _motionDetailRow(_t("motionRow.audioTrack", "Audio track"), _t("motionRow.audioVerified", "verified present"));
+}
+
+function _motionBodyProduce(p, _t) {
+  if (!p.ok) {
+    return `<div class="ptool-motion-li ptool-motion-err">${_motionEsc(p.detail || _t("motionRow.jobFailed", "job failed to start"))}</div>`;
+  }
+  let rows = "";
+  if (p.task_id) rows += _motionDetailRow(_t("motionRow.taskId", "Task"), String(p.task_id).slice(0, 20), true);
+  if (p.topic) rows += _motionDetailRow(_t("motionRow.topic", "Topic"), p.topic);
+  if (p.direction) rows += _motionDetailRow(_t("motionRow.direction", "Direction"), p.direction);
+  if (p.visual_quality) rows += _motionDetailRow(_t("motionRow.quality", "Quality"), p.visual_quality, true);
+  if (p.depth) rows += _motionDetailRow(_t("motionRow.depth", "Depth"), p.depth, true);
+  if (p.deduped) rows += _motionDetailRow(_t("motionRow.deduped", "Note"), _t("motionRow.dedupedText", "joined the already-running job"));
+  if (p.quality_hint) rows += `<div class="ptool-motion-li">${_motionEsc(p.quality_hint)}</div>`;
+  return rows;
+}
+
+const _MOTION_BODY = {
+  motion_video_env_check: _motionBodyEnvCheck,
+  motion_video_storyboard_check: _motionBodyStoryboard,
+  motion_video_check: _motionBodyCheck,
+  motion_video_render: _motionBodyRender,
+  motion_video_probe: _motionBodyProbe,
+  motion_video_concat: _motionBodyConcat,
+  motion_video_narrate: _motionBodyNarrate,
+  motion_video_mux: _motionBodyMux,
+  produce_video: _motionBodyProduce,
+  produce_report: _motionBodyProduce,
+  produce_research: _motionBodyProduce,
+};
+
+function _renderMotionVideoBlock(round, svg, q, badgeHtml) {
+  const meta = (round.results || [])[0] || {};
+  const _t = (typeof t === "function") ? t : (k, d) => d;
+  const tn = round.toolName || "";
+  const headEntry = _MOTION_HEAD_I18N[tn];
+  const headLabel = headEntry ? _t(headEntry[0], headEntry[1]) : (round.query || tn);
+  const purposeEntry = _MOTION_PURPOSE_I18N[tn];
+  const purpose = purposeEntry ? _t(purposeEntry[0], purposeEntry[1]) : "";
+  const purposeHtml = purpose
+    ? `<div class="ptool-convmeta-why">${escapeHtml(purpose)}</div>` : "";
+  const p = _motionPayload(round);
+  const bodyFn = _MOTION_BODY[tn];
+  let bodyInner = bodyFn ? bodyFn(p, _t) : "";
+  /* The call line ("Render scene-001 → scene-001.mp4 (draft)") is kept as the
+   * last detail row — it's the model-facing label, still useful verbatim. */
+  const callLine = (typeof round.query === "string" && round.query && round.query !== tn)
+    ? _motionDetailRow(_t("motionRow.call", "Call"), round.query, true) : "";
+  const snippet = _motionMetaSnippet(round, meta);
+  const snippetHtml = (!bodyInner && snippet)
+    ? `<div class="ptool-motion-li">${_motionEsc(snippet)}</div>` : "";
+  if (!bodyInner && !snippetHtml && !callLine) return "";
+  const emptyNote = (!bodyInner && !snippetHtml)
+    ? `<div class="ptool-convmeta-empty">${escapeHtml(_t("tool.noContent", "No content returned."))}</div>` : "";
+  const bodyHtml = `<div class="ptool-motion-body">${purposeHtml}${bodyInner}${snippetHtml}${emptyNote}${callLine}</div>`;
+  return `<details class="ptool-convmeta-block ptool-motion-block" data-rn="${round.roundNum}">
+       <summary class="ptool-line ptool-convmeta-header">
+         <span class="ptool-icon">${svg}</span>
+         <span class="ptool-text">${escapeHtml(headLabel)}</span>
+         <span class="ptool-convmeta-src">${escapeHtml(_t("motionSrc", "Video"))}</span>
+         ${badgeHtml}
+       </summary>
+       ${bodyHtml}
+     </details>`;
+}

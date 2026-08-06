@@ -227,12 +227,136 @@ Var FontBody
   ; class (band+cards render, every label/edit/button silently dead).
   System::Call 'user32::SetWindowPos(p $BmpCtl, i 1, i 0, i 0, i 0, i 0, i 0x13)'
   ${NSD_SetStretchedImage} $BmpCtl "$PLUGINSDIR\${bitmap}" $R0
+  !insertmacro TOFU_DIAG_PAGE "${bitmap}"
 !macroend
 !macro TOFU_LABEL x y w h text font
-  ${NSD_CreateLabel} ${x} ${y} ${w} ${h} "${text}"
+  ; Opaque STATIC at exstyle 0 — the official nsDialogs example's shape.
+  ; Stock ${NSD_CreateLabel} inherits __NSD_Label_EXSTYLE =
+  ; WS_EX_TRANSPARENT from nsDialogs.nsh: a transparent static's first
+  ; paint is deferred behind its siblings and can simply never arrive
+  ; (the documented "label invisible until a forced redraw" failure
+  ; class — prime suspect in the 2026-08-06 still-blank wizard after
+  ; the HWND_BOTTOM pin shipped). Transparency buys this design
+  ; NOTHING: every label sits on a #F0F0F0 card baked into the page
+  ; art, exactly the COLOR_3DFACE an opaque static paints anyway.
+  ; Leaves the control's HWND in $0.
+  nsDialogs::CreateControl STATIC ${WS_VISIBLE}|${WS_CHILD}|${WS_CLIPSIBLINGS}|${SS_NOTIFY} 0 ${x} ${y} ${w} ${h} "${text}"
   Pop $0
   SendMessage $0 ${WM_SETFONT} ${font} 1
+  !insertmacro TOFU_DIAG_HW "label" $0
 !macroend
+
+; ── Diagnostic build seam (compile with -DTOFU_DIAG=1) ────────────
+; The SAME wizard with a fact log at $TEMP\tofu-setup-diag.log: per
+; page — the inner dialog + art control + image handle + LoadImage's
+; GetLastError at CREATE time, every label's rect/visibility, and a
+; one-shot probe 400 ms into nsDialogs::Show that walks EVERY child
+; window while the page is live. Production compiles expand every
+; insertion to nothing. Added 2026-08-06 for the real-machine
+; blank-wizard hunt: two hypothesis fixes (Z-order pin, opaque labels)
+; shipped without pixel verification — the next fix is measured.
+!ifndef STM_GETIMAGE
+  !define STM_GETIMAGE 0x0173
+!endif
+!ifndef IMAGE_BITMAP
+  !define IMAGE_BITMAP 0
+!endif
+!ifdef TOFU_DIAG
+; Append one line to the diag log. Clobbers $9.
+!macro TOFU_DIAG_WRITE line
+  FileOpen $9 "$TEMP\tofu-setup-diag.log" a
+  FileWrite $9 "${line}$\r$\n"
+  FileClose $9
+!macroend
+; Rect + visibility of a window. Clobbers $8, $r3-$r7; preserves $0.
+!macro TOFU_DIAG_HW tag hwnd
+  Push $0
+  System::Alloc 16
+  Pop $0
+  System::Call 'user32::GetWindowRect(p ${hwnd}, p $0)'
+  System::Call '*$0(i .r3, i .r4, i .r5, i .r6)'
+  System::Free $0
+  System::Call 'user32::IsWindowVisible(p ${hwnd}) i .r7'
+  IntOp $r5 $r5 - $r3
+  IntOp $r6 $r6 - $r4
+  StrCpy $8 "${tag}: hwnd=${hwnd} visible=$r7 pos=$r3,$r4 w=$r5 h=$r6"
+  !insertmacro TOFU_DIAG_WRITE "$8"
+  Pop $0
+!macroend
+; Page banner: GetLastError is captured FIRST so it still describes the
+; LoadImage inside NSD_SetStretchedImage (every later call clobbers it).
+!macro TOFU_DIAG_PAGE name
+  System::Call 'kernel32::GetLastError() i .r9'
+  SendMessage $BmpCtl ${STM_GETIMAGE} ${IMAGE_BITMAP} 0 $r7
+  StrCpy $8 "page ${name}: dialog=$Dialog bmpctl=$BmpCtl image_handle=$R0 stm_getimage=$r7 loadimage_lasterror=$r9"
+  !insertmacro TOFU_DIAG_WRITE "$8"
+  !insertmacro TOFU_DIAG_HW "page ${name} dialog" $Dialog
+  !insertmacro TOFU_DIAG_HW "page ${name} art" $BmpCtl
+  ; The uninstaller pass may only reference un.* functions (and the
+  ; installer pass vice versa) — pick the context's own probe.
+  !ifdef __UNINSTALL__
+    ${NSD_CreateTimer} un.OnTofuDiagProbe 400
+  !else
+    ${NSD_CreateTimer} OnTofuDiagProbe 400
+  !endif
+!macroend
+!macro TOFU_DIAG_HEADER
+  StrCpy $8 "=== tofu-setup-diag ${APP_NAME} ${APP_VERSION} compiled ${__DATE__} ${__TIME__} ==="
+  !insertmacro TOFU_DIAG_WRITE "$8"
+  System::Call 'user32::GetDC(i 0) p .r6'
+  System::Call 'gdi32::GetDeviceCaps(p r6, i 90) i .r7'
+  System::Call 'user32::ReleaseDC(i 0, p r6)'
+  StrCpy $8 "env: language=$LANGUAGE dpi=$r7 temp=$TEMP"
+  !insertmacro TOFU_DIAG_WRITE "$8"
+  StrCpy $8 "env: pluginsdir=$PLUGINSDIR exedir=$EXEDIR"
+  !insertmacro TOFU_DIAG_WRITE "$8"
+!macroend
+!macro TOFU_DIAG_ART_CHECK file
+  ${If} ${FileExists} "$PLUGINSDIR\${file}"
+    StrCpy $8 "art: ${file} present"
+  ${Else}
+    StrCpy $8 "art: ${file} MISSING"
+  ${EndIf}
+  !insertmacro TOFU_DIAG_WRITE "$8"
+!macroend
+; The live-page probe body: 400 ms into nsDialogs::Show, log the
+; dialog, the art control's image, then EVERY child window (class +
+; rect + visibility) — the discriminating snapshot for "created but
+; invisible" vs "never created" vs "wrong geometry". Instantiated
+; twice because install functions cannot reference un.* and vice versa.
+!macro _TOFU_DIAG_PROBE_LINES selffunc
+  ${NSD_KillTimer} ${selffunc}
+  !insertmacro TOFU_DIAG_HW "probe dialog-live" $Dialog
+  SendMessage $BmpCtl ${STM_GETIMAGE} ${IMAGE_BITMAP} 0 $r7
+  StrCpy $8 "probe art-live: bmpctl=$BmpCtl stm_getimage=$r7 image_handle=$R0"
+  !insertmacro TOFU_DIAG_WRITE "$8"
+  System::Call 'user32::GetWindow(p $Dialog, i 5) p .r1'
+  ${While} $r1 P<> 0
+    System::Call 'user32::GetClassName(p r1, t .r8, i 64)'
+    StrCpy $8 "probe child class=$r8"
+    !insertmacro TOFU_DIAG_WRITE "$8"
+    !insertmacro TOFU_DIAG_HW "probe child" $r1
+    System::Call 'user32::GetWindow(p r1, i 2) p .r1'
+  ${EndWhile}
+!macroend
+Function OnTofuDiagProbe
+  !insertmacro _TOFU_DIAG_PROBE_LINES OnTofuDiagProbe
+FunctionEnd
+Function un.OnTofuDiagProbe
+  !insertmacro _TOFU_DIAG_PROBE_LINES un.OnTofuDiagProbe
+FunctionEnd
+!else
+!macro TOFU_DIAG_WRITE line
+!macroend
+!macro TOFU_DIAG_HW tag hwnd
+!macroend
+!macro TOFU_DIAG_PAGE name
+!macroend
+!macro TOFU_DIAG_HEADER
+!macroend
+!macro TOFU_DIAG_ART_CHECK file
+!macroend
+!endif
 
 ; ══════════════════════════════════════════════════════════════════
 ;  Install body — callable from the progress page AND from silent mode
@@ -310,6 +434,11 @@ Function .onInit
   File "@ART_DIR@/directory.bmp"
   File "@ART_DIR@/progress.bmp"
   File "@ART_DIR@/finish.bmp"
+  !insertmacro TOFU_DIAG_HEADER
+  !insertmacro TOFU_DIAG_ART_CHECK "welcome.bmp"
+  !insertmacro TOFU_DIAG_ART_CHECK "directory.bmp"
+  !insertmacro TOFU_DIAG_ART_CHECK "progress.bmp"
+  !insertmacro TOFU_DIAG_ART_CHECK "finish.bmp"
 FunctionEnd
 
 Function .onGUIInit
@@ -388,8 +517,10 @@ Function ProgressPageCreate
   ${EndIf}
   !insertmacro TOFU_PAGE_ART "progress.bmp"
   !insertmacro TOFU_LABEL 20u 62u 236u 10u "$(TOFU_PROG_COPYING)" $FontBody
-  Pop $StatusCtl
-  SendMessage $StatusCtl ${WM_SETFONT} $FontBody 1
+  ; TOFU_LABEL already popped the HWND into $0 — copying it; a second
+  ; Pop would underflow the stack and leave $StatusCtl empty, turning
+  ; every DoInstall status update into its guarded no-op.
+  StrCpy $StatusCtl $0
   ${NSD_CreateProgressBar} 20u 96u 226u 8u ""
   Pop $ProgressCtl
   ${NSD_AddStyle} $ProgressCtl ${PBS_MARQUEE}
@@ -488,6 +619,7 @@ Function un.onInit
   File "@ART_DIR@/welcome.bmp"
   File "@ART_DIR@/progress.bmp"
   File "@ART_DIR@/finish.bmp"
+  !insertmacro TOFU_DIAG_HEADER
 FunctionEnd
 
 Function un.onGUIInit
@@ -517,8 +649,7 @@ Function un.ProgressPageCreate
   ${EndIf}
   !insertmacro TOFU_PAGE_ART "progress.bmp"
   !insertmacro TOFU_LABEL 20u 62u 236u 10u "$(TOFU_UN_PROGRESS)" $FontBody
-  Pop $StatusCtl
-  SendMessage $StatusCtl ${WM_SETFONT} $FontBody 1
+  StrCpy $StatusCtl $0
   ${NSD_CreateProgressBar} 20u 96u 226u 8u ""
   Pop $ProgressCtl
   ${NSD_AddStyle} $ProgressCtl ${PBS_MARQUEE}

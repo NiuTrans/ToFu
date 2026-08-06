@@ -20,6 +20,7 @@ from lib.tasks_pkg.executor import tool_registry
 from lib.tools.motion_video import MOTION_VIDEO_TOOL_NAMES
 from lib.tools.produce import (PRODUCE_REPORT_TOOL_NAME,
                                PRODUCE_RESEARCH_TOOL_NAME,
+                               PRODUCE_SLIDES_TOOL_NAME,
                                PRODUCE_VIDEO_TOOL_NAME)
 
 
@@ -326,6 +327,73 @@ def _handle_produce_report(task, tc, fn_name, tc_id, fn_args, rn,
     tool_content = _fmt(result)
     meta = _build_simple_meta(
         fn_name, tool_content, source='Produce', title='report',
+        snippet=tool_content.split('\n', 1)[0][:120] if tool_content else '',
+        badge=badge)
+    _finalize_tool_round(task, rn, round_entry, [meta])
+    return tc_id, tool_content, False
+
+
+@tool_registry.tool_set(
+    {PRODUCE_SLIDES_TOOL_NAME},
+    category='video',
+    description='High-level topic → designer-quality editable PPTX')
+def _handle_produce_slides(task, tc, fn_name, tc_id, fn_args, rn,
+                           round_entry, cfg, project_path,
+                           project_enabled, all_tools=None):
+    """Handle produce_slides: kick off a background topic→deck job.
+
+    Same substrate posture as produce_report: the recipe owns outline →
+    design → author → assets → render → visual QA → export,
+    lib.production.stages owns the checkpointed resume, and the generic
+    /api/v1/tasks/* endpoints own poll / stream / abort. Files are served
+    by routes/api_v1/slides.py.
+    """
+    topic = str(fn_args.get('topic') or '').strip()
+    if not topic:
+        result = {'ok': False, 'detail': 'topic is required'}
+        badge = 'failed'
+    else:
+        try:
+            from lib.slides.engine import start_slides_job
+
+            lang = 'en' if str(fn_args.get('lang') or 'zh').strip() == 'en' \
+                else 'zh'
+            style = str(fn_args.get('style') or '').strip()
+            try:
+                max_pages = int(fn_args.get('max_pages') or 12)
+            except (TypeError, ValueError) as _e:
+                logger.debug('handle produce slides: bad max_pages (%s)', _e)
+                max_pages = 12
+            max_pages = max(3, min(max_pages, 20))
+            _SIZES = {'1280x720': (1280, 720), '960x540': (960, 540),
+                      '720x540': (720, 540)}
+            size = _SIZES.get(str(fn_args.get('size') or '1280x720'),
+                              (1280, 720))
+            conv_id = ''
+            if isinstance(task, dict):
+                conv_id = task.get('conv_id') or task.get('convId') or ''
+            started = start_slides_job(topic, lang=lang, style=style,
+                                       max_pages=max_pages, size=size,
+                                       conv_id=conv_id)
+            tid = started['task_id']
+            result = {'ok': True, 'task_id': tid, 'topic': topic,
+                      'lang': lang, 'style': style, 'max_pages': max_pages,
+                      'deduped': started.get('deduped', False),
+                      'poll': f'/api/v1/tasks/{tid}',
+                      'download': f'/api/v1/slides/{tid}/file',
+                      'note': 'The deck is generating in the background; '
+                              'poll for progress, then download the PPTX '
+                              'from the download URL.'}
+            badge = 'joined' if started.get('deduped') else 'started'
+        except Exception as e:
+            logger.error('[Produce] failed to start slides job: %s', e,
+                         exc_info=True)
+            result = {'ok': False, 'detail': str(e)}
+            badge = 'failed'
+
+    tool_content = _fmt(result)
+    meta = _build_simple_meta(
+        fn_name, tool_content, source='Produce', title='slides',
         snippet=tool_content.split('\n', 1)[0][:120] if tool_content else '',
         badge=badge)
     _finalize_tool_round(task, rn, round_entry, [meta])

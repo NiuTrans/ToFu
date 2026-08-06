@@ -1637,7 +1637,6 @@ def _sync_partial_to_conversation(task):
             if not messages:
                 return
 
-            row[1]
             cur_rev = row[2]  # Phase 4 W-partial: CAS on rev (loop re-reads each attempt)
 
             # ── ID-FIRST location (mirrors the terminal sync) ──

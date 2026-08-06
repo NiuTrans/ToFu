@@ -1132,7 +1132,6 @@ def _append_user_msg_with_cas(db, conv_id: str, user_msg: dict) -> bool:
         except (json.JSONDecodeError, TypeError) as e:
             logger.warning('[Queue] Failed to parse messages for conv=%s: %s', conv_id[:8], e)
             messages = []
-        row['updated_at']
         cur_rev = row['rev']  # Phase 4 W3: CAS on rev (loop re-reads each attempt)
 
         # Idempotent append (dedupes if a prior attempt already wrote it).

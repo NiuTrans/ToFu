@@ -266,8 +266,9 @@ def _incr_poll_fps(task: dict) -> dict:
         try:
             return zlib.crc32(
                 json.dumps(rows[-1], ensure_ascii=False, default=str).encode('utf-8'))
-        except Exception:
+        except Exception as e:
             # Unserialisable tail → never matches an echo → always full.
+            logger.debug('[Chat] incr poll fp crc failed: %s', e)
             return -1
 
     _rounds = task.get('toolRounds') or []

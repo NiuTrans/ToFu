@@ -2577,6 +2577,15 @@ def _start_background_workers():
             _server_log.info('[Server] resumed %d interrupted research job(s)', n)
     except Exception as e:
         _server_log.warning('[Server] research job resume failed: %s', e)
+    # Slide-deck counterpart: same checkpointed stage-graph contract — an
+    # authored page set is never re-authored on the re-run.
+    try:
+        from lib.slides.engine import resume_interrupted_decks
+        n = resume_interrupted_decks()
+        if n:
+            _server_log.info('[Server] resumed %d interrupted slides job(s)', n)
+    except Exception as e:
+        _server_log.warning('[Server] slides job resume failed: %s', e)
     # Podcast counterpart (P-UX4): a 'generating' cache row can only belong
     # to the process that just died — flip them to 'interrupted' so the tab
     # says "被重启打断" instead of pretending nothing happened.
